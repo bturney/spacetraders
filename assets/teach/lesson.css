@@ -1,0 +1,190 @@
+/* Shared lesson stylesheet — SpaceTraders + Elixir course.
+   Tufte-inspired: serif body, generous margins, quiet ink, prints well.
+   Link from every lesson: <link rel="stylesheet" href="../assets/teach/lesson.css"> */
+
+:root {
+  --ink: #1a1a1a;
+  --paper: #fffff8;
+  --muted: #6a6a6a;
+  --rule: #d8d5cd;
+  --accent: #8a2be2;
+  --accent-soft: #f4edfd;
+  --code-bg: #f6f5f1;
+  --correct: #2e7d32;
+  --wrong: #c62828;
+  --warm: #fff7e6;
+}
+
+* { box-sizing: border-box; }
+
+html {
+  font-size: 18px;
+  background: var(--paper);
+  color: var(--ink);
+}
+
+body {
+  font-family: Georgia, "Iowan Old Style", "Palatino Linotype", Charter, serif;
+  line-height: 1.62;
+  max-width: 46rem;
+  margin: 0 auto;
+  padding: 3rem 1.5rem 5rem;
+}
+
+/* Headings: clean sans for structure, serif feel retained for body */
+h1, h2, h3, h4 {
+  font-family: "Helvetica Neue", Helvetica, Arial, system-ui, sans-serif;
+  line-height: 1.2;
+  letter-spacing: -0.01em;
+}
+
+h1 { font-size: 1.9rem; margin: 0 0 0.25rem; }
+h2 { font-size: 1.35rem; margin: 2.6rem 0 0.6rem; }
+h3 { font-size: 1.05rem; margin: 1.8rem 0 0.4rem; }
+
+a { color: var(--accent); text-decoration: none; border-bottom: 1px solid rgba(138, 43, 226, 0.35); }
+a:hover { border-bottom-color: var(--accent); }
+
+/* Lesson masthead */
+.lesson-meta {
+  font-family: "Helvetica Neue", Helvetica, Arial, system-ui, sans-serif;
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--muted);
+  margin-bottom: 1.2rem;
+  border-bottom: 1px solid var(--rule);
+  padding-bottom: 0.9rem;
+}
+
+.lesson-meta .num { color: var(--accent); font-weight: 600; }
+
+.standfirst {
+  font-size: 1.15rem;
+  color: #333;
+  font-style: italic;
+  margin: 1.2rem 0 2rem;
+}
+
+/* Block structure */
+section { margin-bottom: 1.5rem; }
+
+p { margin: 0.8rem 0; }
+
+ul, ol { padding-left: 1.4rem; }
+li { margin: 0.35rem 0; }
+
+code {
+  font-family: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  font-size: 0.85em;
+  background: var(--code-bg);
+  padding: 0.12em 0.35em;
+  border-radius: 3px;
+}
+
+pre {
+  background: var(--code-bg);
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  padding: 1rem 1.2rem;
+  overflow-x: auto;
+  font-size: 0.85rem;
+  line-height: 1.5;
+}
+
+pre code { background: none; padding: 0; font-size: 1em; }
+
+kbd {
+  font-family: "SF Mono", Menlo, Consolas, monospace;
+  font-size: 0.8em;
+  border: 1px solid var(--rule);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  padding: 0.1em 0.4em;
+}
+
+/* Callout boxes */
+.callout {
+  border-left: 3px solid var(--accent);
+  background: var(--accent-soft);
+  padding: 0.8rem 1.1rem;
+  border-radius: 0 6px 6px 0;
+  margin: 1.2rem 0;
+}
+.callout.tryit { border-color: var(--accent); background: var(--accent-soft); }
+.callout.warn { border-color: var(--wrong); background: #fdecea; }
+.callout.ask { border-color: var(--accent); background: var(--accent-soft); font-size: 0.95rem; }
+.callout p { margin: 0.4rem 0; }
+.callout .callout-label {
+  font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--accent);
+  margin-bottom: 0.3rem;
+}
+.callout.warn .callout-label { color: var(--wrong); }
+
+/* Quiz */
+.quiz {
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  padding: 1.2rem 1.4rem 1.4rem;
+  margin: 1.5rem 0;
+}
+.quiz .q { font-weight: 600; margin: 0 0 0.7rem; }
+.quiz .opt {
+  display: block;
+  width: 100%;
+  text-align: left;
+  font-family: inherit;
+  font-size: 0.95rem;
+  background: var(--paper);
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  padding: 0.55rem 0.8rem;
+  margin: 0.4rem 0;
+  cursor: pointer;
+}
+.quiz .opt:hover { border-color: var(--accent); }
+.quiz .opt.is-correct { border-color: var(--correct); background: #e8f5e9; color: var(--correct); }
+.quiz .opt.is-wrong { border-color: var(--wrong); background: #fdecea; color: var(--wrong); }
+.quiz .opt:disabled { cursor: default; }
+.quiz .explain { display: none; margin: 0.7rem 0 0; font-size: 0.92rem; }
+.quiz .explain.show { display: block; }
+.quiz .score {
+  font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
+  font-size: 0.8rem;
+  color: var(--muted);
+  margin-top: 0.7rem;
+  border-top: 1px dashed var(--rule);
+  padding-top: 0.6rem;
+}
+
+/* Source citation line */
+.cite {
+  font-size: 0.82rem;
+  color: var(--muted);
+  margin: 1.4rem 0 0;
+}
+.cite a { color: var(--muted); }
+
+/* Footer nav between lessons */
+.lesson-nav {
+  margin-top: 3rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--rule);
+  font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
+  font-size: 0.85rem;
+  display: flex;
+  justify-content: space-between;
+}
+
+@media print {
+  html { font-size: 12pt; }
+  body { max-width: none; padding: 0; }
+  .quiz .opt, .opt:hover { border-color: #ccc; }
+  a { color: var(--ink); border-bottom: none; }
+  .lesson-nav { display: none; }
+}

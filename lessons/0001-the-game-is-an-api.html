@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Lesson 1 — The game is an API</title>
+  <link rel="stylesheet" href="../assets/teach/lesson.css">
+</head>
+<body>
+  <div class="lesson-meta"><span class="num">LESSON 1</span> · SpaceTraders + Elixir · ~15 minutes</div>
+  <h1>The game is an API</h1>
+  <p class="standfirst">Your first round-trip — a request leaves your terminal, the game answers, Elixir hands you the reply. And your first real bug.</p>
+
+  <section>
+    <h2>The whole trick</h2>
+    <p>You're learning two things at once: the <strong>Elixir/Phoenix stack</strong> and the <strong>game SpaceTraders</strong>. Here's the secret — they're the same activity.</p>
+    <p>SpaceTraders is a <em>headless</em> game: every action you can take — navigate, mine, trade, buy a ship — is an HTTP endpoint on the game's servers. This repo is an Elixir program whose entire job is to make those requests for you. So every line of code you read teaches you the game, and every game concept teaches you why the code is shaped that way.</p>
+  </section>
+
+  <section>
+    <h2>The game in 90 seconds</h2>
+    <ul>
+      <li>All game state lives on the <strong>game's servers</strong> — systems, waypoints, ships, credits. Your code is only a remote control.</li>
+      <li>You are an <strong>Agent</strong>. You own <strong>ships</strong>. Ships move between <strong>waypoints</strong> inside <strong>systems</strong>.</li>
+      <li>The loop: accept a <strong>Contract</strong> → navigate → extract or trade → sell → buy a better ship.</li>
+      <li>The universe resets every few weeks (<code>resetDate</code> — you'll see it today).</li>
+    </ul>
+    <p class="cite">Full rules: <a href="https://docs.spacetraders.io">docs.spacetraders.io</a> → Getting started → Game concepts.</p>
+  </section>
+
+  <section>
+    <h2>The stack in 90 seconds</h2>
+    <ul>
+      <li><strong>Elixir</strong> is a functional language on the Erlang VM. Functions over values — no classes, no mutation-by-default.</li>
+      <li>This repo is a <strong>Phoenix</strong> app (web framework + LiveView). But today you only need <strong>one file</strong>: <code>lib/spacetraders/api.ex</code>, the thin client that talks to the game.</li>
+      <li><strong>mix</strong> is Elixir's project tool. <code>mix run</code> executes code inside the project's world.</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>The five Elixir ideas you need to read the client</h2>
+    <ol>
+      <li><strong>A module is a drawer of functions.</strong> <code>defmodule SpaceTraders.API do … end</code></li>
+      <li><strong>A function returns its last expression.</strong> <code>def get_status do request(:get, "/", nil, as: :raw) end</code></li>
+      <li><strong>Tuples are little ordered groups:</strong> <code>{:ok, value}</code>, <code>{:error, reason}</code>.</li>
+      <li><strong>Pattern matching assigns by shape.</strong> <code>{:ok, data} = result</code> only succeeds if <code>result</code> is a 2-tuple starting with <code>:ok</code>. This is also how functions choose which clause runs.</li>
+      <li><strong><code>{:ok, _}</code> / <code>{:error, _}</code> is Elixir's "worked / didn't" convention.</strong> Every API function returns one of these.</li>
+    </ol>
+  </section>
+
+  <section>
+    <h2>Run it — and break it</h2>
+    <p>Fire up the project's shell (puts the pinned Elixir on your PATH), then call the client's simplest function — the one that asks the game "are you up?":</p>
+    <pre><code>source scripts/_toolchain.sh
+mix run -e 'IO.inspect(SpaceTraders.API.get_status())'</code></pre>
+    <div class="callout warn">
+      <div class="callout-label">Expected: it fails</div>
+      <p>You should see <code>{:error, %SpaceTraders.API.Error{message: "undecodable response: missing `data`"}}</code>.</p>
+    </div>
+    <p>The game is clearly online — we checked. So your program is misreading the reply. This is normal. Real software is a series of "why did that fail?" moments, and reading the code is how you win them.</p>
+  </section>
+
+  <section>
+    <h2>Read the code — find the cause</h2>
+    <p>Open <code>lib/spacetraders/api.ex</code> and follow the breadcrumb trail:</p>
+    <ol>
+      <li><code>get_status/0</code> (line <a href="../lib/spacetraders/api.ex#L50">50</a>) asks for the path <code>"/"</code> with <code>as: :raw</code> — "hand me the whole reply".</li>
+      <li>It falls into <code>request/4</code> (line <a href="../lib/spacetraders/api.ex#L259">259</a>): build the request, send it, then <code>decode</code> the body.</li>
+      <li><code>decode/2</code> for <code>:raw</code> (lines <a href="../lib/spacetraders/api.ex#L353">353–357</a>) is picky:
+        <pre><code>defp decode(%{"data" => data}, :raw), do: data
+
+defp decode(_body, :raw) do
+  {:error, SpaceTraders.API.Error.new(200, "undecodable response: missing `data`")}
+end</code></pre>
+        The first clause only matches when the reply has a <code>"data"</code> key. If it doesn't, the second clause fires — your error.</li>
+      <li><strong>Now the game's side of the story.</strong> Ask the game directly:
+        <pre><code>curl https://api.spacetraders.io/v2/</code></pre>
+        The root reply is <em>flat</em>: <code>status</code>, <code>version</code>, <code>resetDate</code> — no <code>data</code> wrapper. The <a href="../priv/spec/SpaceTraders.json">bundled OpenAPI spec</a> confirms it (path <code>/</code>). This endpoint is the one exception to the game's usual <code>{"data": …}</code> envelope.</li>
+      <li><strong>The lie.</strong> The test at <a href="../test/spacetraders/api/client_test.exs#L15">client_test.exs:15</a> stubs the game to reply with a <code>"data"</code> wrapper — which the real game never sends. The test passes; production fails. A mock that believes a lie about the API.</li>
+    </ol>
+  </section>
+
+  <section>
+    <h2>Fix it — the win</h2>
+    <p>Two changes, both small:</p>
+    <ol>
+      <li>In <code>api.ex</code>, make <code>:raw</code> accept the whole body instead of demanding a <code>"data"</code> key:
+        <pre><code>defp decode(body, :raw) when is_map(body), do: body</code></pre>
+      </li>
+      <li>In <code>client_test.exs:15</code>, make the stub honest — return the real flat shape (drop the <code>"data"</code> wrapper, keep <code>status</code>/<code>version</code>/<code>resetDate</code>).</li>
+    </ol>
+    <div class="callout tryit">
+      <div class="callout-label">Now show that it works</div>
+      <pre style="margin:0"><code>mix run -e 'IO.inspect(SpaceTraders.API.get_status())'
+mix test test/spacetraders/api/client_test.exs</code></pre>
+      <p>First command: <code>{:ok, %{"status" => "SpaceTraders is currently online…", "version" => "v2.3.0", …}}</code> — the live game answering your Elixir. Second: green.</p>
+    </div>
+    <p>You just fixed a real bug in this repo. That's the round-trip, end to end: your terminal → Req → <code>https://api.spacetraders.io/v2/</code> → the game's servers → JSON → an Elixir tuple.</p>
+  </section>
+
+  <section>
+    <h2>Check yourself</h2>
+    <div class="quiz">
+      <p class="q">1. Where is the game state kept?</p>
+      <button class="opt" data-correct>On the game's server</button>
+      <button class="opt">Inside the Elixir app</button>
+      <button class="opt">On your computer, locally</button>
+      <p class="explain">SpaceTraders is headless: every system, waypoint, ship and credit balance lives on the game's servers. Your app is only a remote control.</p>
+    </div>
+    <div class="quiz">
+      <p class="q">2. Every SpaceTraders game action is…</p>
+      <button class="opt" data-correct>an outgoing HTTP request</button>
+      <button class="opt">a plain local function</button>
+      <button class="opt">a database record locally</button>
+      <p class="explain">Navigate, extract, sell, buy — each is an HTTP endpoint on api.spacetraders.io. The Elixir functions in api.ex are just wrappers around those requests.</p>
+    </div>
+    <div class="quiz">
+      <p class="q">3. SpaceTraders.API.get_status/0 returns…</p>
+      <button class="opt" data-correct>a tuple: success or error</button>
+      <button class="opt">a raw JSON string directly</button>
+      <button class="opt">a printed HTML web page</button>
+      <p class="explain">Every API function returns {:ok, decoded} or {:error, reason} — Elixir's worked/didn't convention. The decoding already happened inside.</p>
+    </div>
+  </section>
+
+  <section>
+    <h2>Where to go next</h2>
+    <p><strong>Read the primary source:</strong> <a href="https://docs.spacetraders.io">docs.spacetraders.io</a> → Getting started → Game concepts → <em>Systems and waypoints</em> and <em>Navigation</em> (10 minutes). For the language, start <a href="https://joyofelixir.com">Joy of Elixir</a>, chapters 1–2 (20 minutes).</p>
+    <p><strong>Next lesson:</strong> navigate a real ship — your Agent's token, <code>ShipNav</code>, and why the game makes you wait.</p>
+    <div class="callout ask">
+      <div class="callout-label">Stuck or curious?</div>
+      <p>Anything unclear — the bug, a line of Elixir, the game rules — ask the agent (me). I'm your teacher. I can also walk you through committing this fix.</p>
+    </div>
+  </section>
+
+  <div class="lesson-nav">
+    <span>← <a href="../reference/glossary.html">Glossary</a></span>
+    <span>Lesson 1 of a course · <a href="../RESOURCES.md">Resources</a></span>
+  </div>
+
+  <script src="../assets/teach/quiz.js"></script>
+</body>
+</html>
