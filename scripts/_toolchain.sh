@@ -26,3 +26,14 @@ OTP_URL="https://builds.hex.pm/builds/otp/ubuntu-24.04/OTP-$OTP_VERSION.tar.gz"
 ELIXIR_URL="https://github.com/elixir-lang/elixir/releases/download/v$ELIXIR_VERSION/elixir-otp-27.zip"
 
 export OTP_VERSION ELIXIR_VERSION TOOLCHAIN_DIR OTP_DIR ELIXIR_DIR OTP_URL ELIXIR_URL
+
+# Once installed, prepend the pinned toolchain to PATH so `source scripts/_toolchain.sh`
+# is the whole dev-shell setup. On a cold machine the binaries below do not exist yet,
+# PATH is left alone, and scripts/bootstrap performs the install.
+if [ -x "$ELIXIR_DIR/bin/mix" ] && [ -x "$OTP_DIR/bin/erl" ]; then
+  export PATH="$ELIXIR_DIR/bin:$OTP_DIR/bin:$PATH"
+fi
+
+# Share deps across checkouts (per-checkout _build stays local). Override with
+# MIX_DEPS_PATH to fall back to a checkout-local deps/.
+export MIX_DEPS_PATH="${MIX_DEPS_PATH:-$TOOLCHAIN_DIR/deps}"

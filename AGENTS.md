@@ -20,9 +20,25 @@ Phoenix 1.8 (Bandit + LiveView), SQLite via `ecto_sqlite3`. Toolchain versions o
 
 - `scripts/bootstrap` — from a clean checkout: installs the pinned OTP/Elixir toolchain without sudo, fetches deps.
 - The gate: `scripts/verify` — format, warnings-as-errors compile, tests, real boot + `/health` 200. Run it before pushing; CI runs it on every PR.
-- `scripts/teardown` — stops a server rooted here, removes `_build`/`deps`/`*.db`.
+- `scripts/teardown` — stops a server rooted here, removes `_build` and `*.db`. Deps are shared across checkouts (below) and left in place.
 - Run/test commands live in README → Development.
 
+### Agent dev shell
+
+The pinned toolchain is **not** on PATH. In every fresh shell, source it first:
+
+```sh
+source scripts/_toolchain.sh   # puts pinned mix/elixir on PATH, sets MIX_DEPS_PATH
+```
+
+Deps are shared across checkouts at `$MIX_DEPS_PATH`; `_build` is per-checkout, so a fresh worktree pays one first compile. Don't run concurrent `mix deps.get` from branches with different lockfiles.
+
+### Ticket loop (worktree per ticket)
+
+1. `git worktree add ../spacetraders-<NN> -b feature/<NN>-<slug>` off `main`.
+2. `source scripts/_toolchain.sh`, then `mix deps.get`.
+3. Iterate `mix test <file>` — the test DB is dropped and re-migrated every run, so edited migrations always apply.
+4. Gate with `scripts/verify`, then `/code-review`, commit, PR.
 
 <!-- phoenix-gen-auth-start -->
 ## Authentication
