@@ -9,7 +9,12 @@
 <body>
   <div class="lesson-meta"><span class="num">LESSON 1</span> · SpaceTraders + Elixir · ~15 minutes</div>
   <h1>The game is an API</h1>
-  <p class="standfirst">Your first round-trip — a request leaves your terminal, the game answers, Elixir hands you the reply. And your first real bug.</p>
+  <p class="standfirst">Your first round-trip — a request leaves your terminal, the game answers, Elixir hands you the reply. And a real bug story: how one got found, fixed, and locked down so it can't come back.</p>
+
+  <div class="callout note">
+    <div class="callout-label">The bug is real — and already fixed</div>
+    <p>This lesson is built around a bug that actually shipped in this repo: <code>get_status/0</code> failed against the live game because the client demanded a <code>"data"</code> wrapper the root endpoint never sends. It's fixed now, and three tests guard it. You won't break anything today — you'll run the round-trip, read the code to see why it used to fail, and meet the guard rails that would catch it if it tried to come back.</p>
+  </div>
 
   <section>
     <h2>The whole trick</h2>
@@ -49,53 +54,49 @@
   </section>
 
   <section>
-    <h2>Run it — and break it</h2>
+    <h2>Run it — the round-trip</h2>
     <p>Fire up the project's shell (puts the pinned Elixir on your PATH), then call the client's simplest function — the one that asks the game "are you up?":</p>
     <pre><code>source scripts/_toolchain.sh
 mix run -e 'IO.inspect(SpaceTraders.API.get_status())'</code></pre>
-    <div class="callout warn">
-      <div class="callout-label">Expected: it fails</div>
-      <p>You should see <code>{:error, %SpaceTraders.API.Error{message: "undecodable response: missing `data`"}}</code>.</p>
+    <div class="callout note">
+      <div class="callout-label">Expected: it works</div>
+      <p>You should see <code>{:ok, %{"status" => "SpaceTraders is currently online…", "version" => "v2.3.0", …}}</code> — the live game answering your Elixir.</p>
     </div>
-    <p>The game is clearly online — we checked. So your program is misreading the reply. This is normal. Real software is a series of "why did that fail?" moments, and reading the code is how you win them.</p>
+    <p>That <code>{:ok, …}</code> is the whole trick: your terminal → Req → <code>https://api.spacetraders.io/v2/</code> → the game's servers → JSON → an Elixir tuple. It didn't always work — read the code below to see why it used to fail, and how the tests now keep that bug from coming back.</p>
   </section>
 
   <section>
-    <h2>Read the code — find the cause</h2>
+    <h2>Read the code — how the round-trip is shaped</h2>
     <p>Open <code>lib/spacetraders/api.ex</code> and follow the breadcrumb trail:</p>
     <ol>
-      <li><code>get_status/0</code> (line <a href="../lib/spacetraders/api.ex#L50">50</a>) asks for the path <code>"/"</code> with <code>as: :raw</code> — "hand me the whole reply".</li>
-      <li>It falls into <code>request/4</code> (line <a href="../lib/spacetraders/api.ex#L259">259</a>): build the request, send it, then <code>decode</code> the body.</li>
-      <li><code>decode/2</code> for <code>:raw</code> (lines <a href="../lib/spacetraders/api.ex#L353">353–357</a>) is picky:
-        <pre><code>defp decode(%{"data" => data}, :raw), do: data
-
-defp decode(_body, :raw) do
-  {:error, SpaceTraders.API.Error.new(200, "undecodable response: missing `data`")}
-end</code></pre>
-        The first clause only matches when the reply has a <code>"data"</code> key. If it doesn't, the second clause fires — your error.</li>
+      <li><code>get_status/0</code> (line <a href="../lib/spacetraders/api.ex#L50">50</a>) asks for the path <code>"/"</code> with <code>as: :raw</code> — "hand me the whole reply, don't try to understand it".</li>
+      <li>It falls into <code>request/4</code> (line <a href="../lib/spacetraders/api.ex#L259">259</a>): build the request, send it, then <code>decode</code> the body into whatever <code>as:</code> asked for.</li>
+      <li><code>decode/2</code> for <code>:raw</code> (line <a href="../lib/spacetraders/api.ex#L353">353</a>) is now one honest clause:
+        <pre><code>defp decode(body, :raw) when is_map(body), do: body</code></pre>
+        "Any JSON object is fine — pass it through untouched." The <code>when is_map(body)</code> guard just says: only if it's actually a map.</li>
+      <li><strong>Most endpoints are different.</strong> Everything else the client speaks comes wrapped in <code>"data"</code> — see <code>decode_data/2</code> (lines <a href="../lib/spacetraders/api.ex#L355">355–358</a>), which unwraps <code>{"data": …}</code> before handing the payload to a model's <code>from_json/1</code>.</li>
       <li><strong>Now the game's side of the story.</strong> Ask the game directly:
         <pre><code>curl https://api.spacetraders.io/v2/</code></pre>
         The root reply is <em>flat</em>: <code>status</code>, <code>version</code>, <code>resetDate</code> — no <code>data</code> wrapper. The <a href="../priv/spec/SpaceTraders.json">bundled OpenAPI spec</a> confirms it (path <code>/</code>). This endpoint is the one exception to the game's usual <code>{"data": …}</code> envelope.</li>
-      <li><strong>The lie.</strong> The test at <a href="../test/spacetraders/api/client_test.exs#L15">client_test.exs:15</a> stubs the game to reply with a <code>"data"</code> wrapper — which the real game never sends. The test passes; production fails. A mock that believes a lie about the API.</li>
+      <li><strong>Where the bug hid.</strong> The old <code>:raw</code> clause demanded a <code>"data"</code> key — it copied the envelope logic from the other endpoints without checking whether <code>/</code> actually uses one. It never did. So the client misread a perfectly good reply and returned <code>{:error, "undecodable response: missing `data`"}</code>.</li>
     </ol>
   </section>
 
   <section>
-    <h2>Fix it — the win</h2>
-    <p>Two changes, both small:</p>
+    <h2>The fix — and the guards that stop a repeat</h2>
+    <p>The fix itself was two small changes. First, make <code>:raw</code> accept the whole body instead of demanding a <code>"data"</code> key — the one-liner you saw at line 353. Second, make the test stub honest.</p>
+    <p><strong>Here's the interesting part: the original tests were green.</strong> The test at <a href="../test/spacetraders/api/client_test.exs#L9">client_test.exs</a> stubbed the game to reply with a <code>"data"</code> wrapper — the very lie the buggy code expected. The test passed; production failed. A mock that believes a lie about the API lets the code keep believing it too. That's the bug class, and today it's guarded three ways:</p>
     <ol>
-      <li>In <code>api.ex</code>, make <code>:raw</code> accept the whole body instead of demanding a <code>"data"</code> key:
-        <pre><code>defp decode(body, :raw) when is_map(body), do: body</code></pre>
-      </li>
-      <li>In <code>client_test.exs:15</code>, make the stub honest — return the real flat shape (drop the <code>"data"</code> wrapper, keep <code>status</code>/<code>version</code>/<code>resetDate</code>).</li>
+      <li><strong>A regression test that speaks the truth.</strong> <a href="../test/spacetraders/api/client_test.exs#L10">client_test.exs</a> now stubs the real flat shape and asserts <code>get_status/0</code> decodes it. Break the fix, and this test goes red.</li>
+      <li><strong>A spec-conformance test.</strong> <a href="../test/spacetraders/api/spec_conformance_test.exs">spec_conformance_test.exs</a> loads the bundled OpenAPI spec and checks every endpoint the client speaks against it: root <code>/</code> must stay flat, and all 23 other endpoints must keep their <code>"data"</code> envelope. It runs in every <code>scripts/verify</code>, so a mismatch fails CI.</li>
+      <li><strong>A live smoke script.</strong> <a href="../scripts/verify_live.exs">scripts/verify-live</a> hits the real game and asserts the client decodes its actual reply. The hermetic test suite never touches the network, so this is the one check that proves it against reality, not against a stub.</li>
     </ol>
     <div class="callout tryit">
       <div class="callout-label">Now show that it works</div>
-      <pre style="margin:0"><code>mix run -e 'IO.inspect(SpaceTraders.API.get_status())'
-mix test test/spacetraders/api/client_test.exs</code></pre>
-      <p>First command: <code>{:ok, %{"status" => "SpaceTraders is currently online…", "version" => "v2.3.0", …}}</code> — the live game answering your Elixir. Second: green.</p>
+      <pre style="margin:0"><code>mix test test/spacetraders/api/client_test.exs</code></pre>
+      <p>Green — and it only stays green because the stub tells the truth. If someone re-adds the old <code>"data"</code> demand, this test and <code>verify-live</code> both fail. That's a guard rail: the bug can't come back silently.</p>
     </div>
-    <p>You just fixed a real bug in this repo. That's the round-trip, end to end: your terminal → Req → <code>https://api.spacetraders.io/v2/</code> → the game's servers → JSON → an Elixir tuple.</p>
+    <p>That's the round-trip, end to end: your terminal → Req → <code>https://api.spacetraders.io/v2/</code> → the game's servers → JSON → an Elixir tuple — plus a lesson in why tests must believe reality, not a convenient story.</p>
   </section>
 
   <section>
@@ -121,6 +122,13 @@ mix test test/spacetraders/api/client_test.exs</code></pre>
       <button class="opt">a printed HTML web page</button>
       <p class="explain">Every API function returns {:ok, decoded} or {:error, reason} — Elixir's worked/didn't convention. The decoding already happened inside.</p>
     </div>
+    <div class="quiz">
+      <p class="q">4. The root endpoint <code>GET /</code> is special because…</p>
+      <button class="opt" data-correct>it's the one flat reply — no <code>data</code> wrapper</button>
+      <button class="opt">it's the only endpoint that needs your token</button>
+      <button class="opt">it returns an empty body</button>
+      <p class="explain">The game wraps almost every reply in {"data": …} — but the root status endpoint is the exception: flat. The bug was a decoder that assumed the wrapper everywhere.</p>
+    </div>
   </section>
 
   <section>
@@ -129,7 +137,7 @@ mix test test/spacetraders/api/client_test.exs</code></pre>
     <p><strong>Next lesson:</strong> navigate a real ship — your Agent's token, <code>ShipNav</code>, and why the game makes you wait.</p>
     <div class="callout ask">
       <div class="callout-label">Stuck or curious?</div>
-      <p>Anything unclear — the bug, a line of Elixir, the game rules — ask the agent (me). I'm your teacher. I can also walk you through committing this fix.</p>
+      <p>Anything unclear — the round-trip, a line of Elixir, the guard rails — ask the agent (me). I'm your teacher. I can also walk you through re-triggering the bug on a branch and watching the guard rails catch it.</p>
     </div>
   </section>
 
