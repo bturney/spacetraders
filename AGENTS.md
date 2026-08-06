@@ -22,6 +22,7 @@ Phoenix 1.8 (Bandit + LiveView), SQLite via `ecto_sqlite3`. Toolchain versions o
 - The gate: `scripts/verify` — format, warnings-as-errors compile, tests, real boot + `/health` 200. Run it before pushing; CI runs it on every PR.
 - `scripts/teardown` — stops a server rooted here, removes `_build` and `*.db`. Deps are shared across checkouts (below) and left in place.
 - Run/test commands live in README → Development.
+- API-client contract: the bundled OpenAPI spec (`priv/spec/SpaceTraders.json`) is ground truth; `test/spacetraders/api/spec_conformance_test.exs` ties the client's `data`-envelope assumptions to it (root `/` is the lone flat response). After touching `lib/spacetraders/api.ex` or the spec, run `scripts/verify-live` (hits the live game; needs network) in addition to the hermetic gate.
 
 ### Agent dev shell
 

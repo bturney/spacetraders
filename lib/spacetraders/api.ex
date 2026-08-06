@@ -350,11 +350,7 @@ defmodule SpaceTraders.API do
     end)
   end
 
-  defp decode(%{"data" => data}, :raw), do: data
-
-  defp decode(_body, :raw) do
-    {:error, SpaceTraders.API.Error.new(200, "undecodable response: missing `data`")}
-  end
+  defp decode(body, :raw) when is_map(body), do: body
 
   defp decode_data(%{"data" => data}, decode_fun) when is_map(data), do: decode_fun.(data)
   defp decode_data(%{"data" => data}, decode_fun) when is_list(data), do: decode_fun.(data)
