@@ -7,23 +7,31 @@ defmodule SpaceTraders.Application do
 
   @impl true
   def start(_type, _args) do
-    children = [
-      SpaceTradersWeb.Telemetry,
-      SpaceTraders.Repo,
-      {Ecto.Migrator,
-       repos: Application.fetch_env!(:spacetraders, :ecto_repos), skip: skip_migrations?()},
-      {DNSCluster, query: Application.get_env(:spacetraders, :dns_cluster_query) || :ignore},
-      {Phoenix.PubSub, name: SpaceTraders.PubSub},
-      # Start a worker by calling: SpaceTraders.Worker.start_link(arg)
-      # {SpaceTraders.Worker, arg},
-      # Start to serve requests, typically the last entry
-      SpaceTradersWeb.Endpoint
-    ]
+    children =
+      [
+        SpaceTradersWeb.Telemetry,
+        SpaceTraders.Repo,
+        {Ecto.Migrator,
+         repos: Application.fetch_env!(:spacetraders, :ecto_repos), skip: skip_migrations?()},
+        {DNSCluster, query: Application.get_env(:spacetraders, :dns_cluster_query) || :ignore},
+        {Phoenix.PubSub, name: SpaceTraders.PubSub}
+      ] ++ rate_limiter_children() ++ [SpaceTradersWeb.Endpoint]
 
     # See https://elixir.hexdocs.pm/Supervisor.html
     # for other strategies and supported options
     opts = [strategy: :one_for_one, name: SpaceTraders.Supervisor]
     Supervisor.start_link(children, opts)
+  end
+
+  # The API rate limiter is a child of the app in dev/prod but disabled in test
+  # (its own tests start a dedicated instance under a custom name).
+  defp rate_limiter_children do
+    if Application.get_env(:spacetraders, SpaceTraders.API.RateLimiter, [])
+       |> Keyword.get(:enabled, true) do
+      [SpaceTraders.API.RateLimiter]
+    else
+      []
+    end
   end
 
   # Tell Phoenix to update the endpoint configuration

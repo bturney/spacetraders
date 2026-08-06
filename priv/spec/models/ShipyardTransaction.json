@@ -1,0 +1,33 @@
+{
+  "type": "object",
+  "description": "Results of a transaction with a shipyard.",
+  "properties": {
+    "waypointSymbol": {
+      "$ref": "./WaypointSymbol.json"
+    },
+    "shipSymbol": {
+      "type": "string",
+      "deprecated": true,
+      "description": "The symbol of the ship type (e.g. SHIP_MINING_DRONE) that was the subject of the transaction. Contrary to what the name implies, this is NOT the symbol of the ship that was purchased."
+    },
+    "shipType": {
+      "type": "string",
+      "description": "The symbol of the ship type (e.g. SHIP_MINING_DRONE) that was the subject of the transaction."
+    },
+    "price": {
+      "type": "integer",
+      "description": "The price of the transaction.",
+      "minimum": 0
+    },
+    "agentSymbol": {
+      "type": "string",
+      "description": "The symbol of the agent that made the transaction."
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "description": "The timestamp of the transaction."
+    }
+  },
+  "required": ["waypointSymbol", "shipSymbol", "shipType", "price", "agentSymbol", "timestamp"]
+}

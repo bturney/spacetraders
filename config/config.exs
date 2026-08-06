@@ -64,6 +64,16 @@ config :logger, :default_formatter,
   format: "$time $metadata[$level] $message\n",
   metadata: [:request_id]
 
+# SpaceTraders API client: base URL for the v2 API. The rate limiter budget is
+# the game's sustainable ceiling (3 req/s sustained, burst 10). Req 429 retry
+# with Retry-After acts as a safety net on top of the client-side limiter.
+config :spacetraders, SpaceTraders.API, base_url: "https://api.spacetraders.io/v2"
+
+config :spacetraders, SpaceTraders.API.RateLimiter,
+  rate: 3.0,
+  burst: 10,
+  enabled: true
+
 # Use Jason for JSON parsing in Phoenix
 config :phoenix, :json_library, Jason
 

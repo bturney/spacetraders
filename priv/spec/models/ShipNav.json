@@ -1,0 +1,22 @@
+{
+  "type": "object",
+  "description": "The navigation information of the ship.",
+  "properties": {
+    "systemSymbol": {
+      "$ref": "./SystemSymbol.json"
+    },
+    "waypointSymbol": {
+      "$ref": "./WaypointSymbol.json"
+    },
+    "route": {
+      "$ref": "./ShipNavRoute.json"
+    },
+    "status": {
+      "$ref": "./ShipNavStatus.json"
+    },
+    "flightMode": {
+      "$ref": "./ShipNavFlightMode.json"
+    }
+  },
+  "required": ["systemSymbol", "waypointSymbol", "route", "status", "flightMode"]
+}

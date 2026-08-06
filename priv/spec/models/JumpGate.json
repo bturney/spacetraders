@@ -1,0 +1,18 @@
+{
+  "type": "object",
+  "description": "",
+  "properties": {
+    "symbol": {
+      "$ref": "./WaypointSymbol.json"
+    },
+    "connections": {
+      "type": "array",
+      "description": "All the gates that are connected to this waypoint.",
+      "items": {
+        "type": "string",
+        "description": "The symbol of the waypoint that has a corresponding gate."
+      }
+    }
+  },
+  "required": ["symbol", "connections"]
+}

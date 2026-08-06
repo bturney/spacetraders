@@ -26,6 +26,12 @@ config :swoosh, :api_client, false
 # Print only warnings and errors during test
 config :logger, level: :warning
 
+# Game API client: stub the HTTP transport with Req.Test in test env, and
+# disable the token-bucket rate limiter so API tests are not throttled.
+config :spacetraders, SpaceTraders.API, plug: {Req.Test, SpaceTraders.API}
+
+config :spacetraders, SpaceTraders.API.RateLimiter, enabled: false
+
 # Initialize plugs at runtime for faster test compilation
 config :phoenix, :plug_init_mode, :runtime
 

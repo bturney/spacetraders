@@ -1,0 +1,194 @@
+defmodule SpaceTraders.API.ClientTest do
+  use ExUnit.Case, async: true
+
+  alias SpaceTraders.API
+  alias SpaceTraders.API.Model
+
+  import Plug.Conn, only: [get_req_header: 2]
+
+  describe "get_status/0" do
+    test "returns raw server status" do
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        assert conn.method == "GET"
+        assert conn.request_path == "/v2/"
+
+        Req.Test.json(conn, %{
+          "data" => %{"status" => "ok", "version" => "v2.3.0", "resetDate" => "2026-01-01"}
+        })
+      end)
+
+      assert {:ok, %{"status" => "ok", "version" => "v2.3.0"}} = API.get_status()
+    end
+  end
+
+  describe "register/3" do
+    test "posts to /register with account token and decodes the full mint result" do
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        assert conn.method == "POST"
+        assert conn.request_path == "/v2/register"
+        assert get_req_header(conn, "authorization") == ["Bearer ACCOUNT_TOKEN"]
+        assert conn.body_params == %{"symbol" => "ORBITALIST", "faction" => "COSMIC"}
+
+        Req.Test.json(conn, %{
+          "data" => %{
+            "token" => "AGENT_TOKEN",
+            "agent" => %{"symbol" => "ORBITALIST", "credits" => 175_000},
+            "contract" => %{
+              "id" => "c1",
+              "type" => "PROCUREMENT",
+              "accepted" => false,
+              "fulfilled" => false
+            },
+            "faction" => %{"symbol" => "COSMIC", "name" => "Cosmic", "isRecruiting" => true},
+            "ships" => [%{"symbol" => "ORBITALIST-1", "registration" => %{"role" => "COMMAND"}}]
+          }
+        })
+      end)
+
+      assert {:ok,
+              %{
+                token: "AGENT_TOKEN",
+                agent: %Model.Agent{symbol: "ORBITALIST"},
+                contract: %Model.Contract{type: "PROCUREMENT"},
+                faction: %Model.Faction{symbol: "COSMIC"},
+                ships: [%Model.Ship{symbol: "ORBITALIST-1"}]
+              }} = API.register("ACCOUNT_TOKEN", "ORBITALIST", "COSMIC")
+    end
+  end
+
+  describe "agent and contracts" do
+    test "get_agent/1 decodes into an Agent struct" do
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        assert get_req_header(conn, "authorization") == ["Bearer TOKEN"]
+        Req.Test.json(conn, %{"data" => %{"symbol" => "ORBITALIST", "credits" => 42}})
+      end)
+
+      assert {:ok, %Model.Agent{symbol: "ORBITALIST", credits: 42}} = API.get_agent("TOKEN")
+    end
+
+    test "get_contracts/1 decodes a list of contracts" do
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        Req.Test.json(conn, %{
+          "data" => [
+            %{"id" => "c1", "type" => "PROCUREMENT", "accepted" => true, "fulfilled" => false},
+            %{"id" => "c2", "type" => "TRANSPORT", "accepted" => false, "fulfilled" => false}
+          ]
+        })
+      end)
+
+      assert {:ok, [%Model.Contract{id: "c1"}, %Model.Contract{id: "c2"}]} =
+               API.get_contracts("TOKEN")
+    end
+  end
+
+  describe "ship actions" do
+    test "navigate_ship/3 posts the waypoint and decodes fuel + nav" do
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        assert conn.request_path == "/v2/my/ships/ORBITALIST-1/navigate"
+        assert conn.body_params == %{"waypointSymbol" => "X1-UX81-A3"}
+
+        Req.Test.json(conn, %{
+          "data" => %{
+            "fuel" => %{
+              "capacity" => 200,
+              "current" => 150,
+              "consumed" => %{"amount" => 50, "timestamp" => "2026-01-01T00:00:00.000Z"}
+            },
+            "nav" => %{
+              "systemSymbol" => "X1-UX81",
+              "waypointSymbol" => "X1-UX81-A3",
+              "status" => "IN_TRANSIT",
+              "flightMode" => "CRUISE",
+              "route" => %{
+                "destination" => %{
+                  "symbol" => "X1-UX81-A3",
+                  "type" => "ENGINEERED_ASTEROID",
+                  "systemSymbol" => "X1-UX81",
+                  "x" => 1,
+                  "y" => 2
+                },
+                "origin" => %{
+                  "symbol" => "X1-UX81-A1",
+                  "type" => "PLANET",
+                  "systemSymbol" => "X1-UX81",
+                  "x" => 1,
+                  "y" => 2
+                },
+                "departureTime" => "2026-01-01T00:00:00.000Z",
+                "arrival" => "2026-01-01T01:00:00.000Z"
+              }
+            }
+          }
+        })
+      end)
+
+      assert {:ok,
+              %{fuel: %Model.ShipFuel{current: 150}, nav: %Model.ShipNav{status: "IN_TRANSIT"}}} =
+               API.navigate_ship("TOKEN", "ORBITALIST-1", "X1-UX81-A3")
+    end
+
+    test "extract_resources/2 decodes cooldown + extraction + cargo" do
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        Req.Test.json(conn, %{
+          "data" => %{
+            "cooldown" => %{
+              "shipSymbol" => "ORBITALIST-2",
+              "totalSeconds" => 60,
+              "remainingSeconds" => 60,
+              "expiration" => "2026-01-01T00:01:00.000Z"
+            },
+            "extraction" => %{
+              "shipSymbol" => "ORBITALIST-2",
+              "yield" => %{"symbol" => "IRON_ORE", "units" => 5}
+            },
+            "cargo" => %{
+              "capacity" => 40,
+              "units" => 5,
+              "inventory" => [%{"symbol" => "IRON_ORE", "units" => 5}]
+            }
+          }
+        })
+      end)
+
+      assert {:ok,
+              %{
+                cooldown: %Model.Cooldown{remaining_seconds: 60},
+                extraction: %Model.Extraction{yield: %Model.ExtractionYield{units: 5}},
+                cargo: %Model.ShipCargo{units: 5}
+              }} = API.extract_resources("TOKEN", "ORBITALIST-2")
+    end
+  end
+
+  describe "universe reads" do
+    test "get_market/3 decodes a market struct" do
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        assert conn.request_path == "/v2/systems/X1-UX81/waypoints/X1-UX81-A1/market"
+
+        Req.Test.json(conn, %{
+          "data" => %{
+            "symbol" => "X1-UX81-A1",
+            "exports" => [],
+            "imports" => [],
+            "exchange" => []
+          }
+        })
+      end)
+
+      assert {:ok, %Model.Market{symbol: "X1-UX81-A1"}} =
+               API.get_market("TOKEN", "X1-UX81", "X1-UX81-A1")
+    end
+
+    test "get_waypoints/3 forwards query params" do
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        assert conn.query_params == %{"limit" => "50", "type" => "ENGINEERED_ASTEROID"}
+        Req.Test.json(conn, %{"data" => []})
+      end)
+
+      assert {:ok, []} =
+               API.get_waypoints("TOKEN", "X1-UX81",
+                 type: "ENGINEERED_ASTEROID",
+                 limit: 50
+               )
+    end
+  end
+end

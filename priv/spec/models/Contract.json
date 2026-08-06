@@ -1,0 +1,46 @@
+{
+  "description": "Contract details.",
+  "type": "object",
+  "properties": {
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "ID of the contract."
+    },
+    "factionSymbol": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The symbol of the faction that this contract is for."
+    },
+    "type": {
+      "type": "string",
+      "enum": ["PROCUREMENT", "TRANSPORT", "SHUTTLE"],
+      "description": "Type of contract."
+    },
+    "terms": {
+      "$ref": "./ContractTerms.json"
+    },
+    "accepted": {
+      "type": "boolean",
+      "default": false,
+      "description": "Whether the contract has been accepted by the agent"
+    },
+    "fulfilled": {
+      "type": "boolean",
+      "default": false,
+      "description": "Whether the contract has been fulfilled"
+    },
+    "expiration": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Deprecated in favor of deadlineToAccept",
+      "deprecated": true
+    },
+    "deadlineToAccept": {
+      "type": "string",
+      "format": "date-time",
+      "description": "The time at which the contract is no longer available to be accepted"
+    }
+  },
+  "required": ["id", "factionSymbol", "type", "terms", "accepted", "fulfilled", "expiration"]
+}

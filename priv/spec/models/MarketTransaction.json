@@ -1,0 +1,52 @@
+{
+  "type": "object",
+  "properties": {
+    "waypointSymbol": {
+      "$ref": "./WaypointSymbol.json"
+    },
+    "shipSymbol": {
+      "type": "string",
+      "description": "The symbol of the ship that made the transaction."
+    },
+    "tradeSymbol": {
+      "type": "string",
+      "description": "The symbol of the trade good."
+    },
+    "type": {
+      "type": "string",
+      "description": "The type of transaction.",
+      "enum": ["PURCHASE", "SELL"]
+    },
+    "units": {
+      "type": "integer",
+      "description": "The number of units of the transaction.",
+      "minimum": 0
+    },
+    "pricePerUnit": {
+      "type": "integer",
+      "description": "The price per unit of the transaction.",
+      "minimum": 0
+    },
+    "totalPrice": {
+      "type": "integer",
+      "description": "The total price of the transaction.",
+      "minimum": 0
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "description": "The timestamp of the transaction."
+    }
+  },
+  "required": [
+    "waypointSymbol",
+    "shipSymbol",
+    "tradeSymbol",
+    "type",
+    "units",
+    "pricePerUnit",
+    "totalPrice",
+    "timestamp"
+  ],
+  "description": "Result of a transaction with a market."
+}

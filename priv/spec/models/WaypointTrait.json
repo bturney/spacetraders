@@ -1,0 +1,17 @@
+{
+  "type": "object",
+  "properties": {
+    "symbol": {
+      "$ref": "./WaypointTraitSymbol.json"
+    },
+    "name": {
+      "type": "string",
+      "description": "The name of the trait."
+    },
+    "description": {
+      "type": "string",
+      "description": "A description of the trait."
+    }
+  },
+  "required": ["symbol", "name", "description"]
+}

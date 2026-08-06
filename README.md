@@ -40,7 +40,23 @@ scripts/verify   # == mix verify
 1. `format --check-formatted` — formatting gate
 2. `compile --warnings-as-errors` — warnings gate
 3. `test` — the ExUnit suite
-4. `verify.boot` — starts the full app on a real HTTP server and asserts `GET /health` → 200
+4. `space_traders.gen.models --check` — fail if committed API structs are stale
+5. `verify.boot` — starts the full app on a real HTTP server and asserts `GET /health` → 200
+
+### Game API client & codegen
+
+The thin `SpaceTraders.API` Req client (structs in `SpaceTraders.API.Model.*`) is
+generated from the official OpenAPI spec bundled at `priv/spec/` (v2.3.0). On
+spec updates, regenerate and commit the output:
+
+```sh
+mix space_traders.gen.models        # rewrite lib/spacetraders/api/models/*.ex
+mix space_traders.gen.models --check  # fail if committed structs are stale
+```
+
+The regenerated structs are committed, so API drift shows up as a diff. The
+client is rate-limited (3 req/s, burst 10) and stubbed with `Req.Test` in test
+env; see `test/spacetraders/api/`.
 
 ### Run the app
 

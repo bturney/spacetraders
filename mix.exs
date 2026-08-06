@@ -100,6 +100,7 @@ defmodule SpaceTraders.MixProject do
         "format --check-formatted",
         "compile --warnings-as-errors",
         "test",
+        "space_traders.gen.models --check",
         "verify.boot"
       ]
     ]

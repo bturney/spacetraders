@@ -1,0 +1,9 @@
+{
+  "type": "object",
+  "properties": {
+    "symbol": {
+      "$ref": "./FactionSymbol.json"
+    }
+  },
+  "required": ["symbol"]
+}

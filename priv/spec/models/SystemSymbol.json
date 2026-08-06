@@ -1,0 +1,8 @@
+{
+  "type": "string",
+  "description": "The symbol of the system.",
+  "minLength": 1,
+  "x-faker": {
+    "fake": ["X1-{{random.alphaNumeric(5)}}"]
+  }
+}

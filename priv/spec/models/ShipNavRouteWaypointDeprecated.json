@@ -1,0 +1,27 @@
+{
+  "type": "object",
+  "deprecated": true,
+  "description": "Deprecated. Use origin instead.",
+  "properties": {
+    "symbol": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The symbol of the waypoint."
+    },
+    "type": {
+      "$ref": "./WaypointType.json"
+    },
+    "systemSymbol": {
+      "$ref": "./SystemSymbol.json"
+    },
+    "x": {
+      "type": "integer",
+      "description": "Position in the universe in the x axis."
+    },
+    "y": {
+      "type": "integer",
+      "description": "Position in the universe in the y axis."
+    }
+  },
+  "required": ["symbol", "type", "systemSymbol", "x", "y"]
+}

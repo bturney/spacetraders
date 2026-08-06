@@ -1,0 +1,44 @@
+{
+  "description": "A waypoint that was scanned by a ship.",
+  "type": "object",
+  "properties": {
+    "symbol": {
+      "$ref": "./WaypointSymbol.json"
+    },
+    "type": {
+      "$ref": "./WaypointType.json"
+    },
+    "systemSymbol": {
+      "$ref": "./SystemSymbol.json"
+    },
+    "x": {
+      "type": "integer",
+      "description": "Position in the universe in the x axis."
+    },
+    "y": {
+      "type": "integer",
+      "description": "Position in the universe in the y axis."
+    },
+    "orbitals": {
+      "type": "array",
+      "description": "List of waypoints that orbit this waypoint.",
+      "items": {
+        "$ref": "./WaypointOrbital.json"
+      }
+    },
+    "faction": {
+      "$ref": "./WaypointFaction.json"
+    },
+    "traits": {
+      "type": "array",
+      "description": "The traits of the waypoint.",
+      "items": {
+        "$ref": "./WaypointTrait.json"
+      }
+    },
+    "chart": {
+      "$ref": "./Chart.json"
+    }
+  },
+  "required": ["symbol", "type", "systemSymbol", "x", "y", "orbitals", "traits"]
+}

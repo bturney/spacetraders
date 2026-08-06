@@ -1,0 +1,50 @@
+{
+  "type": "object",
+  "description": "System details.",
+  "properties": {
+    "symbol": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The symbol of the system."
+    },
+    "sectorSymbol": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The symbol of the sector."
+    },
+    "constellation": {
+      "type": "string",
+      "description": "The constellation that the system is part of."
+    },
+    "name": {
+      "type": "string",
+      "description": "The name of the system."
+    },
+    "type": {
+      "$ref": "./SystemType.json"
+    },
+    "x": {
+      "type": "integer",
+      "description": "Relative position of the system in the sector in the x axis."
+    },
+    "y": {
+      "type": "integer",
+      "description": "Relative position of the system in the sector in the y axis."
+    },
+    "waypoints": {
+      "type": "array",
+      "description": "Waypoints in this system.",
+      "items": {
+        "$ref": "./SystemWaypoint.json"
+      }
+    },
+    "factions": {
+      "type": "array",
+      "description": "Factions that control this system.",
+      "items": {
+        "$ref": "./SystemFaction.json"
+      }
+    }
+  },
+  "required": ["symbol", "sectorSymbol", "type", "x", "y", "waypoints", "factions"]
+}
