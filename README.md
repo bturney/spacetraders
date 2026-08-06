@@ -64,6 +64,32 @@ env; see `test/spacetraders/api/`.
 mix phx.server   # http://localhost:4000, GET /health returns {"status":"ok"}
 ```
 
+First boot redirects to `/setup` — create the first operator (email + password,
+optionally linking your my.spacetraders.io AccountToken to mint agents).
+Log in at `/operators/log-in`; link or replace the AccountToken under Settings;
+mint agents at `/agents/new`.
+
+### Game secrets (AccountToken / AgentToken)
+
+Stored in the database, encrypted with AES-256-GCM (`SpaceTraders.Secret`),
+never in `.env` (ADR 0006). The key is a 32-byte binary from
+`ENCRYPTION_KEY` (base64) in production; dev/test use a committed development
+key. Generate a production key with:
+
+```sh
+mix run -e 'IO.puts(Base.encode64(:crypto.strong_rand_bytes(32)))'
+```
+
+### Seed data
+
+Seeds the existing agent ORBITALIST (COSMIC, HQ `X1-UX81-A1`) and its starter
+fleet (COMMAND_FRIGATE + PROBE), token-optional and idempotent:
+
+```sh
+mix run priv/repo/seeds.exs                 # placeholder token
+SPACETRADERS_AGENT_TOKEN=<token> mix run priv/repo/seeds.exs   # real token
+```
+
 ### Teardown
 
 Stops a running server rooted at this checkout and removes build artifacts,
