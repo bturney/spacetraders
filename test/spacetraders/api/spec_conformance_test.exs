@@ -1,0 +1,152 @@
+defmodule SpaceTraders.API.SpecConformanceTest do
+  use ExUnit.Case, async: true
+
+  @moduledoc """
+  Guards the client's response-envelope assumptions against the bundled
+  OpenAPI spec (`priv/spec/SpaceTraders.json`) — the ground truth for what
+  each endpoint actually returns.
+
+  Every endpoint the client speaks (`lib/spacetraders/api.ex`) declares an
+  envelope via its `as:` option: `:raw` means the body is flat, anything else
+  means the body is wrapped in `"data"`. If a declaration disagrees with the
+  spec — the root endpoint is the lone flat response; all others wrap in
+  `"data"` — the client will mis-decode production traffic while fixtures
+  stay green. This test makes that disagreement a test failure.
+
+  Update this table when the client learns a new endpoint. Keep the expected
+  envelope in lockstep with the `as:` option on the corresponding `request/4`
+  call; the assertions here are the safety net if one drifts.
+  """
+
+  alias SpaceTraders.API
+
+  @spec_path "priv/spec/SpaceTraders.json"
+
+  # {endpoint, method, spec path template, envelope the client expects}
+  @endpoints [
+    {:get_status, :get, "/", :flat},
+    {:register, :post, "/register", :data},
+    {:get_agent, :get, "/my/agent", :data},
+    {:get_contracts, :get, "/my/contracts", :data},
+    {:get_contract, :get, "/my/contracts/{contractId}", :data},
+    {:accept_contract, :post, "/my/contracts/{contractId}/accept", :data},
+    {:deliver_contract, :post, "/my/contracts/{contractId}/deliver", :data},
+    {:fulfill_contract, :post, "/my/contracts/{contractId}/fulfill", :data},
+    {:get_ships, :get, "/my/ships", :data},
+    {:get_ship, :get, "/my/ships/{shipSymbol}", :data},
+    {:navigate_ship, :post, "/my/ships/{shipSymbol}/navigate", :data},
+    {:dock_ship, :post, "/my/ships/{shipSymbol}/dock", :data},
+    {:orbit_ship, :post, "/my/ships/{shipSymbol}/orbit", :data},
+    {:extract_resources, :post, "/my/ships/{shipSymbol}/extract", :data},
+    {:refuel_ship, :post, "/my/ships/{shipSymbol}/refuel", :data},
+    {:sell_cargo, :post, "/my/ships/{shipSymbol}/sell", :data},
+    {:purchase_ship, :post, "/my/ships", :data},
+    {:get_system, :get, "/systems/{systemSymbol}", :data},
+    {:get_waypoints, :get, "/systems/{systemSymbol}/waypoints", :data},
+    {:get_waypoint, :get, "/systems/{systemSymbol}/waypoints/{waypointSymbol}", :data},
+    {:get_market, :get, "/systems/{systemSymbol}/waypoints/{waypointSymbol}/market", :data},
+    {:get_shipyard, :get, "/systems/{systemSymbol}/waypoints/{waypointSymbol}/shipyard", :data},
+    {:get_factions, :get, "/factions", :data},
+    {:get_faction, :get, "/factions/{factionSymbol}", :data}
+  ]
+
+  describe "client envelope declarations match the bundled spec" do
+    test "every endpoint the client speaks is present in the spec" do
+      for {endpoint, _method, path, _envelope} <- @endpoints do
+        assert spec_paths()[path], "client endpoint #{endpoint} (#{path}) missing from spec"
+      end
+    end
+
+    test "root GET / is the one flat response — no `data` wrapper" do
+      props = success_schema("/", :get)
+
+      refute Map.has_key?(props, "data"),
+             "spec says GET / is flat; client must decode :raw, not demand `data`"
+
+      for required <- ["status", "version", "resetDate"] do
+        assert Map.has_key?(props, required), "GET / schema missing required field #{required}"
+      end
+    end
+
+    test "data-wrapped endpoints carry a `data` property; flat endpoints do not" do
+      for {endpoint, method, path, envelope} <- @endpoints do
+        props = success_schema(path, method)
+
+        case envelope do
+          :data ->
+            assert Map.has_key?(props, "data"),
+                   "#{endpoint} (#{path}) declares a `data` envelope but the spec is flat"
+
+          :flat ->
+            refute Map.has_key?(props, "data"),
+                   "#{endpoint} (#{path}) declares a flat envelope but the spec wraps in `data`"
+        end
+      end
+    end
+
+    test "every declared endpoint has a success schema in the spec" do
+      for {endpoint, method, path, _envelope} <- @endpoints do
+        refute success_schema(path, method) == nil,
+               "no success response schema for #{endpoint} (#{path}) in spec"
+      end
+    end
+  end
+
+  describe "API client surface" do
+    test "public functions exist for every declared endpoint" do
+      Code.ensure_loaded!(API)
+
+      for {endpoint, _method, _path, _envelope} <- @endpoints do
+        assert function_exported?(API, endpoint, arity_of(endpoint)),
+               "expected SpaceTraders.API.#{endpoint}/#{arity_of(endpoint)} to exist"
+      end
+    end
+  end
+
+  defp arity_of(:get_status), do: 0
+  defp arity_of(:register), do: 3
+  defp arity_of(:get_agent), do: 1
+  defp arity_of(:get_contracts), do: 1
+  defp arity_of(:get_contract), do: 2
+  defp arity_of(:accept_contract), do: 2
+  defp arity_of(:deliver_contract), do: 5
+  defp arity_of(:fulfill_contract), do: 2
+  defp arity_of(:get_ships), do: 1
+  defp arity_of(:get_ship), do: 2
+  defp arity_of(:navigate_ship), do: 3
+  defp arity_of(:dock_ship), do: 2
+  defp arity_of(:orbit_ship), do: 2
+  defp arity_of(:extract_resources), do: 2
+  defp arity_of(:refuel_ship), do: 2
+  defp arity_of(:sell_cargo), do: 4
+  defp arity_of(:purchase_ship), do: 3
+  defp arity_of(:get_system), do: 2
+  defp arity_of(:get_waypoints), do: 3
+  defp arity_of(:get_waypoint), do: 3
+  defp arity_of(:get_market), do: 3
+  defp arity_of(:get_shipyard), do: 3
+  defp arity_of(:get_factions), do: 1
+  defp arity_of(:get_faction), do: 2
+
+  defp spec_paths do
+    @spec_path |> File.read!() |> Jason.decode!() |> Map.fetch!("paths")
+  end
+
+  defp success_schema(path, method) do
+    operation = spec_paths()[path][to_string(method)]
+
+    operation
+    |> Map.fetch!("responses")
+    |> then(fn responses ->
+      Enum.find_value(["200", "201"], fn code ->
+        responses
+        |> Map.get(code, %{})
+        |> get_in(["content", "application/json", "schema"])
+      end)
+    end)
+    |> case do
+      nil -> nil
+      schema -> schema |> Map.get("properties", %{})
+    end
+  end
+end

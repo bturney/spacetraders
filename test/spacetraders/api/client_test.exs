@@ -7,17 +7,24 @@ defmodule SpaceTraders.API.ClientTest do
   import Plug.Conn, only: [get_req_header: 2]
 
   describe "get_status/0" do
-    test "returns raw server status" do
+    test "returns raw server status from the flat root payload" do
       Req.Test.stub(SpaceTraders.API, fn conn ->
         assert conn.method == "GET"
         assert conn.request_path == "/v2/"
 
         Req.Test.json(conn, %{
-          "data" => %{"status" => "ok", "version" => "v2.3.0", "resetDate" => "2026-01-01"}
+          "status" => "SpaceTraders is currently online and available to play",
+          "version" => "v2.3.0",
+          "resetDate" => "2026-08-02"
         })
       end)
 
-      assert {:ok, %{"status" => "ok", "version" => "v2.3.0"}} = API.get_status()
+      assert {:ok,
+              %{
+                "status" => "SpaceTraders is currently online and available to play",
+                "version" => "v2.3.0",
+                "resetDate" => "2026-08-02"
+              }} = API.get_status()
     end
   end
 
