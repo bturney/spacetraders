@@ -23,6 +23,9 @@ Installs the pinned Erlang/Elixir toolchain (no sudo required) and fetches deps:
 scripts/bootstrap
 ```
 
+Deps are shared across checkouts under `$HOME/.local/opt/spacetraders-toolchain/deps`;
+`_build` stays per-checkout.
+
 If `mix`/`erl` are already on your PATH, they are used as-is. The installed
 toolchain lives in `$HOME/.local/opt/spacetraders-toolchain` (override with
 `SPACETRADERS_TOOLCHAIN_DIR`).
@@ -94,8 +97,8 @@ SPACETRADERS_AGENT_TOKEN=<token> mix run priv/repo/seeds.exs   # real token
 
 ### Teardown
 
-Stops a running server rooted at this checkout and removes build artifacts,
-deps, and local SQLite files:
+Stops a running server rooted at this checkout and removes build artifacts
+and local SQLite files (deps are shared across checkouts and left in place):
 
 ```sh
 scripts/teardown

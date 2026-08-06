@@ -2,8 +2,9 @@
 # Teardown for the spacetraders project.
 #
 # Stops any running BEAM server process rooted at this checkout and removes
-# build artifacts, dependencies, and local SQLite databases. Does not remove
-# the installed Erlang/Elixir toolchain (that lives outside the checkout).
+# build artifacts and local SQLite databases. Deps are shared across checkouts
+# under the toolchain dir (see _toolchain.sh) and are left in place.
+# Does not remove the installed Erlang/Elixir toolchain (that lives outside the checkout).
 #
 # Usage: scripts/teardown
 set -euo pipefail
