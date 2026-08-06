@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# Bootstrap the spacetraders project from a clean checkout.
+#
+# Installs a pinned Erlang/OTP + Elixir toolchain (no sudo required) and
+# fetches project dependencies. Idempotent: safe to re-run.
+#
+# Usage: scripts/bootstrap
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/_toolchain.sh"
+
+if command -v mix >/dev/null 2>&1 && command -v erl >/dev/null 2>&1; then
+  echo "Using Elixir/OTP already on PATH:"
+  mix --version
+  elixir --version
+else
+  if [ ! -x "$OTP_DIR/bin/erl" ]; then
+    echo "Installing Erlang/OTP $OTP_VERSION -> $OTP_DIR"
+    mkdir -p "$TOOLCHAIN_DIR" "$OTP_DIR"
+    curl -fsSL "$OTP_URL" -o "$TOOLCHAIN_DIR/otp.tar.gz"
+    tar -xzf "$TOOLCHAIN_DIR/otp.tar.gz" -C "$OTP_DIR" --strip-components=1
+    rm "$TOOLCHAIN_DIR/otp.tar.gz"
+    (cd "$OTP_DIR" && chmod +x Install && ./Install -sasl "$OTP_DIR")
+  fi
+
+  if [ ! -x "$ELIXIR_DIR/bin/mix" ]; then
+    echo "Installing Elixir $ELIXIR_VERSION -> $ELIXIR_DIR"
+    mkdir -p "$TOOLCHAIN_DIR" "$ELIXIR_DIR"
+    curl -fsSL "$ELIXIR_URL" -o "$TOOLCHAIN_DIR/elixir.zip"
+    unzip -q -o "$TOOLCHAIN_DIR/elixir.zip" -d "$ELIXIR_DIR"
+    rm "$TOOLCHAIN_DIR/elixir.zip"
+  fi
+
+  export PATH="$ELIXIR_DIR/bin:$OTP_DIR/bin:$PATH"
+  echo "Toolchain installed. OTP $OTP_VERSION + Elixir $ELIXIR_VERSION"
+fi
+
+mix local.hex --force
+mix local.rebar --force
+mix deps.get
+
+echo "Bootstrap complete. Next: scripts/verify"

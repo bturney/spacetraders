@@ -2,3 +2,26 @@ uploads/
 .env
 .env.*
 !*.env.example
+
+# Phoenix / Mix build artifacts
+/_build/
+/cover/
+/deps/
+/doc/
+/.fetch
+erl_crash.dump
+*.ez
+/tmp/
+spacetraders-*.tar
+
+# Produced assets
+/priv/static/assets/
+/priv/static/cache_manifest.json
+
+# Database files
+*.db
+*.db-*
+
+# Node / npm
+npm-debug.log
+/assets/node_modules/

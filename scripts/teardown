@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# Teardown for the spacetraders project.
+#
+# Stops any running BEAM server process rooted at this checkout and removes
+# build artifacts, dependencies, and local SQLite databases. Does not remove
+# the installed Erlang/Elixir toolchain (that lives outside the checkout).
+#
+# Usage: scripts/teardown
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+# Stop a running Phoenix/Bandit server (beam) whose CWD is this checkout.
+for pid in $(pgrep -f 'beam\.smp' 2>/dev/null || true); do
+  if [ -r "/proc/$pid/cwd" ] && [ "$(readlink "/proc/$pid/cwd" 2>/dev/null || true)" = "$PROJECT_ROOT" ]; then
+    echo "Stopping beam server pid $pid"
+    kill "$pid" 2>/dev/null || true
+  fi
+done
+
+# Wait briefly for the server to release the SQLite files.
+sleep 1
+
+rm -rf "$PROJECT_ROOT/_build" "$PROJECT_ROOT/deps"
+rm -rf "$PROJECT_ROOT/priv/static/assets"
+rm -f "$PROJECT_ROOT"/*.db "$PROJECT_ROOT"/*.db-*
+
+echo "Teardown complete."

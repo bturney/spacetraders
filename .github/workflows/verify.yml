@@ -1,0 +1,27 @@
+name: verify
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - name: Read toolchain versions from .tool-versions
+        id: versions
+        run: |
+          echo "otp=$(awk '/^erlang /{print $2}' .tool-versions)" >> "$GITHUB_OUTPUT"
+          echo "elixir=$(awk '/^elixir /{print $2}' .tool-versions | sed 's/-otp-.*//')" >> "$GITHUB_OUTPUT"
+      - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
+        with:
+          otp-version: ${{ steps.versions.outputs.otp }}
+          elixir-version: ${{ steps.versions.outputs.elixir }}
+      - name: Fetch dependencies
+        run: mix deps.get
+      - name: Run mix verify
+        run: ./scripts/verify
