@@ -158,9 +158,11 @@ defmodule SpaceTraders.Agent do
   Pulls an agent's live game record — credits, headquarters and faction — from
   the API.
 
-  The local `Agent` row is a cache; this read refreshes it from the server (the
-  source of truth). Returns `{:ok, %SpaceTraders.API.Model.Agent{}}` or an API
-  error. An agent without a stored AgentToken returns `{:error, :agent_token_missing}`.
+  The server is the source of truth for an agent's current state; the local
+  `Agent` row is the app's cached metadata and is used only as a fallback when
+  the live read fails. Returns `{:ok, %SpaceTraders.API.Model.Agent{}}` or an
+  API error. An agent without a stored AgentToken returns
+  `{:error, :agent_token_missing}`.
   """
   def agent_overview(%Agent{agent_token: agent_token})
       when is_binary(agent_token) and agent_token != "" do
