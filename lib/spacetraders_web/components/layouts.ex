@@ -31,6 +31,10 @@ defmodule SpaceTradersWeb.Layouts do
     default: nil,
     doc: "the current [scope](https://phoenix.hexdocs.pm/scopes.html)"
 
+  attr :wide, :boolean,
+    default: false,
+    doc: "use a wider content column (e.g. the fleet card grid dashboard)"
+
   slot :inner_block, required: true
 
   def app(assigns) do
@@ -63,7 +67,7 @@ defmodule SpaceTradersWeb.Layouts do
     </header>
 
     <main class="px-4 py-20 sm:px-6 lg:px-8">
-      <div class="mx-auto max-w-2xl space-y-4">
+      <div class={["mx-auto space-y-4", @wide && "max-w-5xl", !@wide && "max-w-2xl"]}>
         {render_slot(@inner_block)}
       </div>
     </main>

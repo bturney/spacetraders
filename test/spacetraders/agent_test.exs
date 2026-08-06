@@ -551,4 +551,48 @@ defmodule SpaceTraders.AgentTest do
                Agent.mint_agent(operator, %{symbol: "NEWSYM", faction: "COSMIC"})
     end
   end
+
+  describe "agent_overview/1" do
+    test "pulls the agent's live credits, HQ and faction from the game API" do
+      agent = agent_fixture(operator_fixture())
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        assert conn.request_path == "/v2/my/agent"
+
+        Req.Test.json(conn, %{
+          "data" => %{
+            "accountId" => "ACCOUNT",
+            "symbol" => agent.symbol,
+            "headquarters" => "X1-UX81-A1",
+            "credits" => 42_000,
+            "startingFaction" => "COSMIC",
+            "shipCount" => 2
+          }
+        })
+      end)
+
+      assert {:ok, %SpaceTraders.API.Model.Agent{} = overview} = Agent.agent_overview(agent)
+      assert overview.symbol == agent.symbol
+      assert overview.credits == 42_000
+      assert overview.headquarters == "X1-UX81-A1"
+      assert overview.starting_faction == "COSMIC"
+    end
+
+    test "authorizes the request with the agent's token" do
+      import Plug.Conn, only: [get_req_header: 2]
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        assert get_req_header(conn, "authorization") == ["Bearer test-agent-token"]
+        Req.Test.json(conn, %{"data" => %{"symbol" => "A", "credits" => 0}})
+      end)
+
+      assert {:ok, _} = Agent.agent_overview(agent_fixture(operator_fixture()))
+    end
+
+    test "returns an error when the agent has no stored token" do
+      agent = %SpaceTraders.Agent.Agent{agent_token: nil}
+
+      assert Agent.agent_overview(agent) == {:error, :agent_token_missing}
+    end
+  end
 end

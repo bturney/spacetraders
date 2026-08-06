@@ -11,12 +11,26 @@ defmodule SpaceTradersWeb.OperatorLive.MintTest do
 
   defp register_stub(body, status \\ 200) do
     Req.Test.stub(SpaceTraders.API, fn conn ->
-      assert conn.method == "POST"
-      assert conn.request_path == "/v2/register"
+      case {conn.method, conn.request_path} do
+        {"POST", "/v2/register"} ->
+          conn
+          |> Map.put(:status, status)
+          |> Req.Test.json(body)
 
-      conn
-      |> Map.put(:status, status)
-      |> Req.Test.json(body)
+        {"GET", "/v2/my/agent"} ->
+          Req.Test.json(conn, %{
+            "data" => %{
+              "symbol" => "MINER1",
+              "headquarters" => "X1-UX81-A2",
+              "credits" => 175_000,
+              "startingFaction" => "COSMIC",
+              "shipCount" => 0
+            }
+          })
+
+        {"GET", "/v2/my/ships"} ->
+          Req.Test.json(conn, %{"data" => []})
+      end
     end)
   end
 
@@ -69,9 +83,10 @@ defmodule SpaceTradersWeb.OperatorLive.MintTest do
       {:ok, operator} = Agent.link_account_token(operator, "ACCOUNT_TOKEN")
       register_stub(minted_agent_body("MINER1"))
 
-      {:ok, lv, _html} = conn |> log_in_operator(operator) |> live(~p"/agents/new")
+      conn = log_in_operator(conn, operator)
+      {:ok, lv, _html} = live(conn, ~p"/agents/new")
 
-      {:ok, _conn} =
+      {:ok, conn} =
         lv
         |> form("#mint_form", @mint_form)
         |> render_submit()
@@ -81,6 +96,9 @@ defmodule SpaceTradersWeb.OperatorLive.MintTest do
       assert agent.operator_id == operator.id
       assert agent.agent_token == "AGENT_TOKEN"
       assert agent.headquarters == "X1-UX81-A2"
+
+      assert conn.resp_body =~ "MINER1"
+      assert conn.resp_body =~ "Fleet command"
     end
 
     test "shows a flash error when the game rejects the mint", %{conn: conn} do
