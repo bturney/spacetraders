@@ -16,10 +16,9 @@ Single-context — one `CONTEXT.md` plus `docs/adr/` at the repo root. See `docs
 
 ## App
 
-Phoenix 1.8 (Bandit + LiveView), SQLite via `ecto_sqlite3`. Erlang/OTP 27.3.4 + Elixir 1.18.4 (owned by `.tool-versions`).
+Phoenix 1.8 (Bandit + LiveView), SQLite via `ecto_sqlite3`. Toolchain versions owned by `.tool-versions`.
 
-- Bootstrap a clean checkout: `scripts/bootstrap` — installs the pinned toolchain without sudo, fetches deps.
-- Canonical gate: `scripts/verify` (== `mix verify`) — format check, `compile --warnings-as-errors`, tests, real boot + `GET /health` → 200. Must pass before pushing; CI runs it on every PR.
-- Teardown: `scripts/teardown` — stops a server rooted at this checkout, removes `_build`/`deps`/`*.db`.
-- Serve the app: `mix phx.server` → http://localhost:4000.
-- One test file: `mix test test/.../file_test.exs`.
+- `scripts/bootstrap` — from a clean checkout: installs the pinned OTP/Elixir toolchain without sudo, fetches deps.
+- The gate: `scripts/verify` — format, warnings-as-errors compile, tests, real boot + `/health` 200. Run it before pushing; CI runs it on every PR.
+- `scripts/teardown` — stops a server rooted here, removes `_build`/`deps`/`*.db`.
+- Run/test commands live in README → Development.
