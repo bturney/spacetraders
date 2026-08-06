@@ -64,6 +64,18 @@ if config_env() == :prod do
       You can generate one by calling: mix phx.gen.secret
       """
 
+  # Encryption key for game secrets at rest (32 bytes, base64). Generate with:
+  #   mix run -e 'IO.puts(Base.encode64(:crypto.strong_rand_bytes(32)))'
+  encryption_key =
+    System.get_env("ENCRYPTION_KEY") ||
+      raise """
+      environment variable ENCRYPTION_KEY is missing.
+      You can generate one by calling:
+        mix run -e 'IO.puts(Base.encode64(:crypto.strong_rand_bytes(32)))'
+      """
+
+  config :spacetraders, SpaceTraders.Secret, key: Base.decode64!(encryption_key)
+
   host = System.get_env("PHX_HOST") || "example.com"
 
   config :spacetraders, :dns_cluster_query, System.get_env("DNS_CLUSTER_QUERY")

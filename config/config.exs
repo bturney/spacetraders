@@ -7,6 +7,19 @@
 # General application configuration
 import Config
 
+config :spacetraders, :scopes,
+  operator: [
+    default: true,
+    module: SpaceTraders.Agent.Scope,
+    assign_key: :current_scope,
+    access_path: [:operator, :id],
+    schema_key: :operator_id,
+    schema_type: :id,
+    schema_table: :operators,
+    test_data_fixture: SpaceTraders.AgentFixtures,
+    test_setup_helper: :register_and_log_in_operator
+  ]
+
 config :spacetraders,
   namespace: SpaceTraders,
   ecto_repos: [SpaceTraders.Repo],
@@ -73,6 +86,11 @@ config :spacetraders, SpaceTraders.API.RateLimiter,
   rate: 3.0,
   burst: 10,
   enabled: true
+
+# Game-secret encryption (ADR 0006). Dev/test use a committed development key;
+# production overrides it from `ENCRYPTION_KEY` in config/runtime.exs.
+config :spacetraders, SpaceTraders.Secret,
+  key: :crypto.hash(:sha256, "spacetraders-dev-encryption-key")
 
 # Use Jason for JSON parsing in Phoenix
 config :phoenix, :json_library, Jason
