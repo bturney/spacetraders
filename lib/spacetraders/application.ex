@@ -14,7 +14,10 @@ defmodule SpaceTraders.Application do
         {Ecto.Migrator,
          repos: Application.fetch_env!(:spacetraders, :ecto_repos), skip: skip_migrations?()},
         {DNSCluster, query: Application.get_env(:spacetraders, :dns_cluster_query) || :ignore},
-        {Phoenix.PubSub, name: SpaceTraders.PubSub}
+        {Phoenix.PubSub, name: SpaceTraders.PubSub},
+        {Registry, keys: :unique, name: SpaceTraders.Fleet.ShipRegistry},
+        {DynamicSupervisor, strategy: :one_for_one, name: SpaceTraders.Fleet.ShipSupervisor},
+        SpaceTraders.Fleet.ShipServerBoot
       ] ++ rate_limiter_children() ++ [SpaceTradersWeb.Endpoint]
 
     # See https://elixir.hexdocs.pm/Supervisor.html

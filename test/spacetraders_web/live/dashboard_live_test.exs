@@ -3,6 +3,9 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
 
   import Phoenix.LiveViewTest
   import SpaceTraders.AgentFixtures
+  import SpaceTraders.ShipBody
+
+  alias SpaceTraders.Timeline
 
   defp stub_live_game(agent_overview, ships) do
     Req.Test.stub(SpaceTraders.API, fn conn ->
@@ -24,92 +27,34 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
     }
   end
 
-  defp ship_body(symbol, overrides \\ %{}) do
-    Map.merge(
-      %{
-        "symbol" => symbol,
-        "registration" => %{
-          "name" => symbol,
-          "factionSymbol" => "COSMIC",
-          "role" => "COMMAND"
-        },
-        "nav" => %{
-          "systemSymbol" => "X1-UX81",
-          "waypointSymbol" => "X1-UX81-A1",
-          "status" => "DOCKED",
-          "flightMode" => "CRUISE",
-          "route" => %{
-            "destination" => %{
-              "symbol" => "X1-UX81-A1",
-              "type" => "PLANET",
-              "systemSymbol" => "X1-UX81",
-              "x" => 1,
-              "y" => 2
-            },
-            "origin" => %{
-              "symbol" => "X1-UX81-A1",
-              "type" => "PLANET",
-              "systemSymbol" => "X1-UX81",
-              "x" => 1,
-              "y" => 2
-            },
-            "departureTime" => "2026-01-01T00:00:00.000Z",
-            "arrival" => "2026-01-01T00:00:00.000Z"
-          }
-        },
-        "crew" => %{"current" => 1, "required" => 1, "capacity" => 1, "rotation" => "STRICT"},
-        "frame" => %{
-          "symbol" => "FRAME_FRIGATE",
-          "name" => "Frigate",
-          "description" => "A frigate",
-          "moduleSlots" => 2,
-          "mountingPoints" => 1,
-          "fuelCapacity" => 200,
-          "condition" => 100,
-          "integrity" => 100,
-          "requirements" => %{"power" => 1, "crew" => 1}
-        },
-        "reactor" => %{
-          "symbol" => "REACTOR_SOLAR_I",
-          "name" => "Solar I",
-          "description" => "A reactor",
-          "condition" => 100,
-          "integrity" => 100,
-          "powerOutput" => 1,
-          "requirements" => %{"crew" => 1}
-        },
-        "engine" => %{
-          "symbol" => "ENGINE_IMPULSE_DRIVE_I",
-          "name" => "Impulse Drive I",
-          "description" => "An engine",
-          "condition" => 100,
-          "integrity" => 100,
-          "speed" => 1,
-          "requirements" => %{"power" => 1, "crew" => 1}
-        },
-        "modules" => [],
-        "mounts" => [],
-        "fuel" => %{
-          "capacity" => 200,
-          "current" => 150,
-          "consumed" => %{"amount" => 50, "timestamp" => "2026-01-01T00:00:00.000Z"}
-        },
-        "cargo" => %{
-          "capacity" => 40,
-          "units" => 12,
-          "inventory" => [
-            %{"symbol" => "IRON_ORE", "name" => "Iron Ore", "description" => "Ore", "units" => 12}
-          ]
-        },
-        "cooldown" => %{
-          "shipSymbol" => symbol,
-          "totalSeconds" => 0,
-          "remainingSeconds" => 0,
-          "expiration" => "2026-01-01T00:00:00.000Z"
-        }
-      },
-      overrides
-    )
+  defp future_iso(seconds \\ 3600) do
+    DateTime.utc_now() |> DateTime.add(seconds, :second) |> DateTime.to_iso8601()
+  end
+
+  defp arrival_label_for(arrival) do
+    {:ok, due_at, _offset} = DateTime.from_iso8601(arrival)
+    "arrives #{Calendar.strftime(due_at, "%m-%d %H:%M")} UTC"
+  end
+
+  # Polls a LiveView render until the predicate holds (the view re-fetches after
+  # a broadcast, which is asynchronous).
+  defp eventually(render_fun, predicate, timeout \\ 2_000) do
+    deadline = System.monotonic_time(:millisecond) + timeout
+    do_eventually(render_fun, predicate, deadline)
+  end
+
+  defp do_eventually(render_fun, predicate, deadline) do
+    cond do
+      predicate.(render_fun.()) ->
+        :ok
+
+      System.monotonic_time(:millisecond) > deadline ->
+        flunk("condition was not met within the deadline")
+
+      true ->
+        Process.sleep(20)
+        do_eventually(render_fun, predicate, deadline)
+    end
   end
 
   describe "anonymous visitors" do
@@ -133,6 +78,7 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
 
   describe "signed-in operator" do
     setup %{conn: conn} do
+      on_exit(fn -> SpaceTraders.Fleet.ShipServer.stop_all() end)
       operator = operator_fixture()
       %{conn: log_in_operator(conn, operator), operator: operator}
     end
@@ -164,12 +110,7 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
             "factionSymbol" => "COSMIC",
             "role" => "SATELLITE"
           },
-          "nav" => %{
-            "systemSymbol" => "X1-UX81",
-            "waypointSymbol" => "X1-UX81-A3",
-            "status" => "IN_ORBIT",
-            "flightMode" => "CRUISE"
-          },
+          "nav" => nav_body("IN_ORBIT", destination: "X1-UX81-A3"),
           "fuel" => %{"capacity" => 200, "current" => 80},
           "cargo" => %{"capacity" => 40, "units" => 2, "inventory" => []}
         })
@@ -214,7 +155,30 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       assert html =~ "Cooldown 42s"
     end
 
-    test "renders ship action affordances, disabled until their tickets land", %{
+    test "shows an in-transit ship with its arrival time and no actions", %{
+      conn: conn,
+      operator: operator
+    } do
+      agent = agent_fixture(operator)
+      arrival = future_iso()
+
+      ships = [
+        ship_body("ORBITALIST-1", %{
+          "nav" => nav_body("IN_TRANSIT", arrival: arrival)
+        })
+      ]
+
+      stub_live_game(agent_overview_body(agent.symbol), ships)
+
+      {:ok, _lv, html} = live(conn, ~p"/")
+
+      assert html =~ "In transit"
+      assert html =~ arrival_label_for(arrival)
+      assert html =~ "Actions resume when the ship arrives."
+      refute html =~ "Waypoint symbol"
+    end
+
+    test "renders ship action affordances: navigate enabled, later actions disabled", %{
       conn: conn,
       operator: operator
     } do
@@ -223,10 +187,157 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
 
       {:ok, _lv, html} = live(conn, ~p"/")
 
-      for action <- ["Navigate", "Dock", "Orbit", "Extract"] do
+      assert html =~ "Waypoint symbol"
+      assert html =~ "Navigate"
+
+      for action <- ["Dock", "Orbit", "Extract"] do
         assert html =~ action
         assert html =~ ~s(<button type="button" disabled)
       end
+    end
+
+    test "navigates a ship and the card shows IN_TRANSIT with its arrival time", %{
+      conn: conn,
+      operator: operator
+    } do
+      agent = agent_fixture(operator)
+      arrival = future_iso()
+
+      {:ok, state} = Agent.start_link(fn -> %{arrival: nil} end)
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case {conn.request_path, conn.method} do
+          {"/v2/my/agent", "GET"} ->
+            Req.Test.json(conn, %{"data" => agent_overview_body(agent.symbol)})
+
+          {"/v2/my/ships", "GET"} ->
+            nav =
+              case Agent.get(state, & &1.arrival) do
+                nil -> nav_body("DOCKED")
+                arrival -> nav_body("IN_TRANSIT", arrival: arrival, destination: "X1-UX81-A2")
+              end
+
+            Req.Test.json(conn, %{"data" => [ship_body("ORBITALIST-1", %{"nav" => nav})]})
+
+          {"/v2/my/ships/ORBITALIST-1/navigate", "POST"} ->
+            Agent.update(state, &%{&1 | arrival: arrival})
+
+            Req.Test.json(conn, %{
+              "data" => %{
+                "fuel" => %{"capacity" => 200, "current" => 80},
+                "nav" => nav_body("IN_TRANSIT", arrival: arrival, destination: "X1-UX81-A2")
+              }
+            })
+        end
+      end)
+
+      {:ok, lv, html} = live(conn, ~p"/")
+      assert html =~ "Waypoint symbol"
+
+      html =
+        lv
+        |> element("form[phx-submit=\"navigate\"]")
+        |> render_submit(%{symbol: "ORBITALIST-1", waypoint_symbol: "X1-UX81-A2"})
+
+      assert html =~ "ORBITALIST-1 is in transit to X1-UX81-A2."
+      assert html =~ "In transit"
+      assert html =~ arrival_label_for(arrival)
+      refute html =~ "Waypoint symbol"
+    end
+
+    test "disables navigate while the ship is on a live cooldown", %{
+      conn: conn,
+      operator: operator
+    } do
+      agent = agent_fixture(operator)
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case {conn.request_path, conn.method} do
+          {"/v2/my/agent", "GET"} ->
+            Req.Test.json(conn, %{"data" => agent_overview_body(agent.symbol)})
+
+          {"/v2/my/ships", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => [
+                ship_body("ORBITALIST-1", %{
+                  "cooldown" => %{
+                    "shipSymbol" => "ORBITALIST-1",
+                    "totalSeconds" => 60,
+                    "remainingSeconds" => 42,
+                    "expiration" => "2026-01-01T00:00:00.000Z"
+                  }
+                })
+              ]
+            })
+        end
+      end)
+
+      {:ok, _lv, html} = live(conn, ~p"/")
+
+      assert html =~ "Cooldown 42s"
+      assert html =~ ~s(<button type="submit" disabled)
+    end
+
+    test "unblocks the card when the ship arrives", %{conn: conn, operator: operator} do
+      agent = agent_fixture(operator)
+      agent_id = agent.id
+      arrival = future_iso(300)
+
+      {:ok, state} = Agent.start_link(fn -> %{arrived: false} end)
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case {conn.request_path, conn.method} do
+          {"/v2/my/agent", "GET"} ->
+            Req.Test.json(conn, %{"data" => agent_overview_body(agent.symbol)})
+
+          {"/v2/my/ships", "GET"} ->
+            nav =
+              if Agent.get(state, & &1.arrived) do
+                nav_body("DOCKED")
+              else
+                nav_body("IN_TRANSIT", arrival: arrival)
+              end
+
+            Req.Test.json(conn, %{"data" => [ship_body("ORBITALIST-1", %{"nav" => nav})]})
+
+          {"/v2/my/ships/ORBITALIST-1", "GET"} ->
+            Agent.update(state, &%{&1 | arrived: true})
+
+            Req.Test.json(conn, %{
+              "data" => ship_body("ORBITALIST-1", %{"nav" => nav_body("DOCKED")})
+            })
+        end
+      end)
+
+      {:ok, event} =
+        Timeline.schedule_event(
+          :ship,
+          "ORBITALIST-1",
+          :arrival,
+          DateTime.add(DateTime.utc_now(), 200, :millisecond)
+        )
+
+      Phoenix.PubSub.subscribe(SpaceTraders.PubSub, "fleet:#{agent_id}")
+
+      {:ok, lv, html} = live(conn, ~p"/")
+      assert html =~ "In transit"
+
+      # The ship's server owns the arrival timer; starting it fires the event
+      # shortly, re-pulls the real state and broadcasts so the card unblocks.
+      start_supervised!(
+        {SpaceTraders.Fleet.ShipServer,
+         symbol: "ORBITALIST-1", agent_id: agent_id, agent_token: agent.agent_token}
+      )
+
+      assert_receive {:ship_updated, ^agent_id, "ORBITALIST-1"}, 1_000
+      eventually(fn -> render(lv) end, &(&1 =~ "Waypoint symbol"))
+
+      html = render(lv)
+
+      refute html =~ "In transit"
+      refute html =~ "Actions resume when the ship arrives."
+      assert html =~ "Waypoint symbol"
+      assert SpaceTraders.Repo.get(SpaceTraders.Timeline.Event, event.id).status == "done"
     end
 
     test "shows a readable per-agent error when the game API is unavailable", %{
