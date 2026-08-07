@@ -1,96 +1,47 @@
 defmodule SpaceTraders.FleetTest do
-  use SpaceTraders.DataCase, async: true
+  # navigate_ship and boot re-arm start ship GenServers, which read and write the
+  # timeline as separate processes, so the sandbox must be shared (not async).
+  use SpaceTraders.DataCase, async: false
 
   alias SpaceTraders.Agent.Agent, as: AgentRecord
   alias SpaceTraders.API.Model
   alias SpaceTraders.Fleet
+  alias SpaceTraders.Fleet.Ship
+  alias SpaceTraders.Fleet.ShipServer
+  alias SpaceTraders.Timeline
+  alias SpaceTraders.Timeline.Event
 
-  defp ship_body(symbol, overrides \\ %{}) do
-    Map.merge(
-      %{
-        "symbol" => symbol,
-        "registration" => %{
-          "name" => symbol,
-          "factionSymbol" => "COSMIC",
-          "role" => "COMMAND"
-        },
-        "nav" => %{
-          "systemSymbol" => "X1-UX81",
-          "waypointSymbol" => "X1-UX81-A1",
-          "status" => "DOCKED",
-          "flightMode" => "CRUISE",
-          "route" => %{
-            "destination" => %{
-              "symbol" => "X1-UX81-A1",
-              "type" => "PLANET",
-              "systemSymbol" => "X1-UX81",
-              "x" => 1,
-              "y" => 2
-            },
-            "origin" => %{
-              "symbol" => "X1-UX81-A1",
-              "type" => "PLANET",
-              "systemSymbol" => "X1-UX81",
-              "x" => 1,
-              "y" => 2
-            },
-            "departureTime" => "2026-01-01T00:00:00.000Z",
-            "arrival" => "2026-01-01T00:00:00.000Z"
-          }
-        },
-        "crew" => %{"current" => 1, "required" => 1, "capacity" => 1, "rotation" => "STRICT"},
-        "frame" => %{
-          "symbol" => "FRAME_FRIGATE",
-          "name" => "Frigate",
-          "description" => "A frigate",
-          "moduleSlots" => 2,
-          "mountingPoints" => 1,
-          "fuelCapacity" => 200,
-          "condition" => 100,
-          "integrity" => 100,
-          "requirements" => %{"power" => 1, "crew" => 1}
-        },
-        "reactor" => %{
-          "symbol" => "REACTOR_SOLAR_I",
-          "name" => "Solar I",
-          "description" => "A reactor",
-          "condition" => 100,
-          "integrity" => 100,
-          "powerOutput" => 1,
-          "requirements" => %{"crew" => 1}
-        },
-        "engine" => %{
-          "symbol" => "ENGINE_IMPULSE_DRIVE_I",
-          "name" => "Impulse Drive I",
-          "description" => "An engine",
-          "condition" => 100,
-          "integrity" => 100,
-          "speed" => 1,
-          "requirements" => %{"power" => 1, "crew" => 1}
-        },
-        "modules" => [],
-        "mounts" => [],
-        "fuel" => %{
-          "capacity" => 200,
-          "current" => 150,
-          "consumed" => %{"amount" => 50, "timestamp" => "2026-01-01T00:00:00.000Z"}
-        },
-        "cargo" => %{
-          "capacity" => 40,
-          "units" => 12,
-          "inventory" => [
-            %{"symbol" => "IRON_ORE", "name" => "Iron Ore", "description" => "Ore", "units" => 12}
-          ]
-        },
-        "cooldown" => %{
-          "shipSymbol" => symbol,
-          "totalSeconds" => 0,
-          "remainingSeconds" => 0,
-          "expiration" => "2026-01-01T00:00:00.000Z"
-        }
-      },
-      overrides
-    )
+  import SpaceTraders.ShipBody
+
+  setup do
+    on_exit(fn -> ShipServer.stop_all() end)
+    :ok
+  end
+
+  defp agent_fixture(token \\ "AGENT_TOKEN") do
+    Repo.insert!(%AgentRecord{
+      symbol: "FLEET-#{System.unique_integer([:positive])}",
+      faction: "COSMIC",
+      headquarters: "X1-UX81-A1",
+      agent_token: token
+    })
+  end
+
+  defp ship_fixture(agent, symbol) do
+    Repo.insert!(%Ship{symbol: symbol, ship_type: "SHIP_COMMAND_FRIGATE", agent_id: agent.id})
+  end
+
+  defp future_iso(seconds \\ 3600) do
+    DateTime.utc_now() |> DateTime.add(seconds, :second) |> DateTime.to_iso8601()
+  end
+
+  defp navigate_response(status), do: navigate_response(status, future_iso())
+
+  defp navigate_response(status, arrival) do
+    %{
+      "fuel" => %{"capacity" => 200, "current" => 80},
+      "nav" => nav_body(status, arrival: arrival, destination: "X1-UX81-A2")
+    }
   end
 
   describe "list_ships/1" do
@@ -155,6 +106,181 @@ defmodule SpaceTraders.FleetTest do
 
       assert {:error, %SpaceTraders.API.GameplayError{}} =
                Fleet.list_ships(%AgentRecord{agent_token: "BAD"})
+    end
+  end
+
+  describe "navigate_ship/3" do
+    test "navigates a ship to a waypoint and returns the nav" do
+      agent = agent_fixture()
+      arrival = future_iso()
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        assert conn.request_path == "/v2/my/ships/FLEET-SHIP/navigate"
+        Req.Test.json(conn, %{"data" => navigate_response("IN_TRANSIT", arrival)})
+      end)
+
+      assert {:ok, %{nav: nav, fuel: fuel}} =
+               Fleet.navigate_ship(agent, "FLEET-SHIP", "X1-UX81-A2")
+
+      assert nav.status == "IN_TRANSIT"
+      assert nav.route.arrival == arrival
+      assert fuel.current == 80
+    end
+
+    test "persists an arrival event and arms the ship's server" do
+      agent = agent_fixture()
+      arrival = future_iso()
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        Req.Test.json(conn, %{"data" => navigate_response("IN_TRANSIT", arrival)})
+      end)
+
+      assert {:ok, _} = Fleet.navigate_ship(agent, "FLEET-SHIP", "X1-UX81-A2")
+
+      assert [%Event{} = event] = Timeline.pending_events(:ship, "FLEET-SHIP")
+      assert event.event_type == "arrival"
+      assert event.payload == %{"destination" => "X1-UX81-A2"}
+      assert {:ok, expected, _offset} = DateTime.from_iso8601(arrival)
+      assert event.due_at == expected
+
+      assert ShipServer.ensure_ready("FLEET-SHIP") == {:error, :ship_in_transit}
+    end
+
+    test "does not schedule an arrival when the ship is not in transit" do
+      agent = agent_fixture()
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        Req.Test.json(conn, %{"data" => navigate_response("DOCKED")})
+      end)
+
+      assert {:ok, %{nav: %{status: "DOCKED"}}} =
+               Fleet.navigate_ship(agent, "FLEET-SHIP", "X1-UX81-A1")
+
+      assert Timeline.pending_events(:ship, "FLEET-SHIP") == []
+    end
+
+    test "refuses while a local arrival is pending" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      {:ok, _event} =
+        Timeline.schedule_event(
+          :ship,
+          "FLEET-SHIP",
+          :arrival,
+          DateTime.add(DateTime.utc_now(), 60, :second)
+        )
+
+      {:ok, _pid} = ShipServer.ensure_started(agent, "FLEET-SHIP")
+
+      assert {:error, :ship_in_transit} =
+               Fleet.navigate_ship(agent, "FLEET-SHIP", "X1-UX81-A2")
+    end
+
+    test "refuses while a cooldown is pending" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      {:ok, _event} =
+        Timeline.schedule_event(
+          :ship,
+          "FLEET-SHIP",
+          :cooldown,
+          DateTime.add(DateTime.utc_now(), 60, :second)
+        )
+
+      {:ok, _pid} = ShipServer.ensure_started(agent, "FLEET-SHIP")
+
+      assert {:error, :cooldown_active} =
+               Fleet.navigate_ship(agent, "FLEET-SHIP", "X1-UX81-A2")
+    end
+
+    test "returns an error when the agent has no stored token" do
+      assert {:error, :agent_token_missing} =
+               Fleet.navigate_ship(%AgentRecord{agent_token: nil}, "FLEET-SHIP", "X1-UX81-A2")
+    end
+
+    test "propagates gameplay errors from the API" do
+      agent = agent_fixture()
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        conn
+        |> Map.put(:status, 409)
+        |> Req.Test.json(%{
+          "error" => %{"code" => 4000, "message" => "Ship is in transit to its destination"}
+        })
+      end)
+
+      assert {:error, %SpaceTraders.API.GameplayError{}} =
+               Fleet.navigate_ship(agent, "FLEET-SHIP", "X1-UX81-A2")
+    end
+  end
+
+  describe "rearm_ships_on_boot/0" do
+    test "starts ship servers for ships with pending events" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      {:ok, _event} =
+        Timeline.schedule_event(
+          :ship,
+          "FLEET-SHIP",
+          :arrival,
+          DateTime.add(DateTime.utc_now(), 60, :second)
+        )
+
+      assert :ok = Fleet.rearm_ships_on_boot()
+
+      assert ShipServer.ensure_ready("FLEET-SHIP") == {:error, :ship_in_transit}
+    end
+
+    test "catches up events that came due while the app was down" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      {:ok, event} =
+        Timeline.schedule_event(
+          :ship,
+          "FLEET-SHIP",
+          :arrival,
+          DateTime.add(DateTime.utc_now(), -60, :second)
+        )
+
+      agent_id = agent.id
+      Phoenix.PubSub.subscribe(SpaceTraders.PubSub, "fleet:#{agent_id}")
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        Req.Test.json(conn, %{"data" => ship_body("FLEET-SHIP")})
+      end)
+
+      # The re-armed server is a separate process; allow it to use the stub once
+      # it is running (resolved lazily at request time).
+      Req.Test.allow(SpaceTraders.API, self(), fn ->
+        case Registry.lookup(SpaceTraders.Fleet.ShipRegistry, "FLEET-SHIP") do
+          [{pid, _}] -> pid
+          [] -> self()
+        end
+      end)
+
+      assert :ok = Fleet.rearm_ships_on_boot()
+
+      assert_receive {:ship_updated, ^agent_id, "FLEET-SHIP"}, 1_000
+      assert Repo.get(Event, event.id).status == "done"
+      assert ShipServer.ensure_ready("FLEET-SHIP") == :ok
+    end
+
+    test "skips ships without stored credentials" do
+      {:ok, _event} =
+        Timeline.schedule_event(
+          :ship,
+          "GHOST-SHIP",
+          :arrival,
+          DateTime.add(DateTime.utc_now(), 60, :second)
+        )
+
+      assert :ok = Fleet.rearm_ships_on_boot()
+
+      assert ShipServer.ensure_ready("GHOST-SHIP") == :ok
     end
   end
 end

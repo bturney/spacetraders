@@ -81,14 +81,81 @@ defmodule SpaceTradersWeb.DashboardLive do
   end
 
   defp mount_operator(socket, operator) do
+    agents = Agent.list_agents(operator)
+
+    for %{id: agent_id} <- agents do
+      Phoenix.PubSub.subscribe(SpaceTraders.PubSub, "fleet:#{agent_id}")
+    end
+
     overviews =
-      operator
-      |> Agent.list_agents()
+      agents
       |> Enum.map(fn agent ->
         %{agent: agent, overview: Agent.agent_overview(agent), ships: Fleet.list_ships(agent)}
       end)
 
     {:ok, assign(socket, operator: operator, overviews: overviews)}
+  end
+
+  @impl true
+  def handle_event("navigate", %{"symbol" => ship_symbol, "waypoint_symbol" => waypoint}, socket) do
+    waypoint = String.trim(waypoint || "")
+
+    with {:ok, agent} <- agent_for_ship(socket, ship_symbol),
+         :ok <- validate_waypoint(waypoint) do
+      case Fleet.navigate_ship(agent, ship_symbol, waypoint) do
+        {:ok, %{nav: %{route: %{destination: %{symbol: destination}}}}} ->
+          socket = refresh_agent_fleet(socket, agent.id)
+          {:noreply, put_flash(socket, :info, "#{ship_symbol} is in transit to #{destination}.")}
+
+        {:ok, _result} ->
+          socket = refresh_agent_fleet(socket, agent.id)
+          {:noreply, put_flash(socket, :info, "#{ship_symbol} is in transit.")}
+
+        {:error, reason} ->
+          {:noreply, put_flash(socket, :error, live_error(reason))}
+      end
+    else
+      {:error, message} -> {:noreply, put_flash(socket, :error, message)}
+    end
+  end
+
+  @impl true
+  def handle_info({:ship_updated, agent_id, _ship_symbol}, socket) do
+    {:noreply, refresh_agent_fleet(socket, agent_id)}
+  end
+
+  defp agent_for_ship(socket, ship_symbol) do
+    Enum.find_value(
+      socket.assigns.overviews,
+      {:error, "That ship is not in this agent's fleet."},
+      fn overview ->
+        case overview.ships do
+          {:ok, ships} ->
+            if Enum.any?(ships, &(&1.symbol == ship_symbol)) do
+              {:ok, overview.agent}
+            end
+
+          _error ->
+            nil
+        end
+      end
+    )
+  end
+
+  defp validate_waypoint(""), do: {:error, "Enter a target waypoint."}
+  defp validate_waypoint(_waypoint), do: :ok
+
+  defp refresh_agent_fleet(socket, agent_id) do
+    overviews =
+      Enum.map(socket.assigns.overviews, fn overview ->
+        if overview.agent.id == agent_id do
+          %{overview | ships: Fleet.list_ships(overview.agent)}
+        else
+          overview
+        end
+      end)
+
+    assign(socket, :overviews, overviews)
   end
 
   ## Components
@@ -235,39 +302,58 @@ defmodule SpaceTradersWeb.DashboardLive do
         />
       </div>
 
-      <div class="mt-4 flex flex-wrap gap-2">
-        <button
-          type="button"
-          disabled
-          title="Navigate arrives in a later milestone"
-          class="btn btn-ghost btn-xs"
-        >
-          Navigate
-        </button>
-        <button
-          type="button"
-          disabled
-          title="Dock arrives in a later milestone"
-          class="btn btn-ghost btn-xs"
-        >
-          Dock
-        </button>
-        <button
-          type="button"
-          disabled
-          title="Orbit arrives in a later milestone"
-          class="btn btn-ghost btn-xs"
-        >
-          Orbit
-        </button>
-        <button
-          type="button"
-          disabled
-          title="Extract arrives in a later milestone"
-          class="btn btn-ghost btn-xs"
-        >
-          Extract
-        </button>
+      <div class="mt-4">
+        <%= if in_transit?(@ship) do %>
+          <div class="flex flex-wrap items-center gap-2 text-xs">
+            <span class="badge badge-warning badge-sm">In transit</span>
+            <span class="font-mono">{arrival_label(@ship)}</span>
+          </div>
+          <p class="mt-1 text-xs opacity-60">Actions resume when the ship arrives.</p>
+        <% else %>
+          <form
+            phx-submit="navigate"
+            phx-value-symbol={@ship.symbol}
+            class="flex gap-2"
+          >
+            <input
+              type="text"
+              name="waypoint_symbol"
+              value=""
+              placeholder="Waypoint symbol"
+              autocomplete="off"
+              class="input input-sm input-bordered flex-1 font-mono"
+            />
+            <button type="submit" disabled={cooldown_active?(@ship)} class="btn btn-primary btn-sm">
+              Navigate
+            </button>
+          </form>
+          <div class="mt-2 flex flex-wrap gap-2">
+            <button
+              type="button"
+              disabled
+              title="Dock arrives in a later milestone"
+              class="btn btn-ghost btn-xs"
+            >
+              Dock
+            </button>
+            <button
+              type="button"
+              disabled
+              title="Orbit arrives in a later milestone"
+              class="btn btn-ghost btn-xs"
+            >
+              Orbit
+            </button>
+            <button
+              type="button"
+              disabled
+              title="Extract arrives in a later milestone"
+              class="btn btn-ghost btn-xs"
+            >
+              Extract
+            </button>
+          </div>
+        <% end %>
       </div>
     </div>
     """
@@ -293,6 +379,8 @@ defmodule SpaceTradersWeb.DashboardLive do
     thousands(prefix) <> "," <> suffix
   end
 
+  defp live_error(:ship_in_transit), do: "This ship is in transit; actions resume on arrival."
+  defp live_error(:cooldown_active), do: "This ship is on cooldown; wait for it to end."
   defp live_error(:agent_token_missing), do: "No AgentToken stored for this agent."
   defp live_error(%{message: message}) when is_binary(message), do: message
   defp live_error(_), do: "The game API could not be reached."
@@ -322,6 +410,24 @@ defmodule SpaceTradersWeb.DashboardLive do
 
   defp ship_location(%{nav: %{waypoint_symbol: waypoint}}) when is_binary(waypoint), do: waypoint
   defp ship_location(_), do: "—"
+
+  defp in_transit?(%{nav: %{status: "IN_TRANSIT"}}), do: true
+  defp in_transit?(_), do: false
+
+  defp cooldown_active?(%{cooldown: %{remaining_seconds: seconds}})
+       when is_integer(seconds) and seconds > 0,
+       do: true
+
+  defp cooldown_active?(_), do: false
+
+  defp arrival_label(%{nav: %{route: %{arrival: arrival}}}) when is_binary(arrival) do
+    case DateTime.from_iso8601(arrival) do
+      {:ok, due_at, _offset} -> "arrives #{Calendar.strftime(due_at, "%m-%d %H:%M")} UTC"
+      _ -> "arrives soon"
+    end
+  end
+
+  defp arrival_label(_), do: "arrives soon"
 
   defp cooldown_label(%{cooldown: %{remaining_seconds: seconds}})
        when is_integer(seconds) and seconds > 0 do
