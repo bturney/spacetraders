@@ -18,12 +18,6 @@ defmodule SpaceTradersWeb.Router do
   end
 
   scope "/", SpaceTradersWeb do
-    pipe_through :browser
-
-    get "/", PageController, :home
-  end
-
-  scope "/", SpaceTradersWeb do
     pipe_through :api
 
     get "/health", HealthController, :show
@@ -69,6 +63,7 @@ defmodule SpaceTradersWeb.Router do
 
     live_session :current_operator,
       on_mount: [{SpaceTradersWeb.OperatorAuth, :mount_current_scope}] do
+      live "/", DashboardLive, :show
       live "/operators/register", OperatorLive.Registration, :new
       live "/operators/log-in", OperatorLive.Login, :new
     end
