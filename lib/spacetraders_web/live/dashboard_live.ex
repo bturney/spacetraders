@@ -23,17 +23,18 @@ defmodule SpaceTradersWeb.DashboardLive do
     ~H"""
     <Layouts.app flash={@flash} current_scope={@current_scope} wide>
       <%= if @operator do %>
-        <div class="space-y-8">
-          <div class="flex items-center justify-between">
-            <div>
+        <div class="space-y-6">
+          <div class="flex flex-col gap-5 sm:flex-row sm:items-end sm:justify-between">
+            <div class="space-y-2">
+              <p class="eyebrow">Operator command deck</p>
               <.header>
                 Fleet command
                 <:subtitle>
-                  {@operator.email} — agents, credits and ships at a glance.
+                  Learn the loop: choose a Mission, move a Ship, and watch your Fleet grow.
                 </:subtitle>
               </.header>
             </div>
-            <.link navigate={~p"/agents/new"} class="btn btn-primary">Mint an agent</.link>
+            <.link navigate={~p"/agents/new"} class="btn btn-primary min-h-12 shrink-0">Mint an agent</.link>
           </div>
 
           <.contract_hero overviews={@overviews} />
@@ -329,19 +330,23 @@ defmodule SpaceTradersWeb.DashboardLive do
 
   defp contract_hero(assigns) do
     ~H"""
-    <div class="card border border-primary/30 bg-base-200 p-6">
-      <div class="flex items-start justify-between gap-4">
+    <div class="mission-hero card border border-primary/30 bg-base-200 p-5 sm:p-7">
+      <div class="flex flex-col gap-5 sm:flex-row sm:items-start sm:justify-between">
         <div>
-          <p class="text-xs uppercase tracking-wider opacity-60">Active mission</p>
+          <p class="eyebrow">What should I do next?</p>
           <%= if Enum.any?(@overviews, &active_contract?/1) do %>
-            <h2 class="mt-1 text-xl font-bold">Contract in progress</h2>
-            <p class="mt-1 text-sm opacity-70">Deliver the required goods before the deadline.</p>
+            <h2 class="mt-2 text-2xl font-bold tracking-tight">Continue your Mission</h2>
+            <p class="mt-2 max-w-2xl text-sm leading-6 opacity-70">
+              A Contract is active. Check each Ship's location and cargo, then deliver the required goods before the Deadline.
+            </p>
           <% else %>
-            <h2 class="mt-1 text-xl font-bold">No active mission</h2>
-            <p class="mt-1 text-sm opacity-70">Accept a contract to start your first mission.</p>
+            <h2 class="mt-2 text-2xl font-bold tracking-tight">Start your first Mission</h2>
+            <p class="mt-2 max-w-2xl text-sm leading-6 opacity-70">
+              Accept a Contract below, then use a Ship to complete its first Leg. Your dashboard will keep the Fleet state visible as you learn.
+            </p>
           <% end %>
         </div>
-        <span class="badge badge-outline">Missions</span>
+        <span class="badge badge-primary badge-outline self-start">Mission briefing</span>
       </div>
     </div>
     """
@@ -352,16 +357,20 @@ defmodule SpaceTradersWeb.DashboardLive do
 
   defp agent_section(assigns) do
     ~H"""
-    <section class="space-y-4">
+    <section class="space-y-5 border-t border-base-300/70 pt-6">
       <.agent_overview_card agent={@overview.agent} live={@overview.overview} />
-      <.contract_panel contracts={@overview.contracts} agent_id={@overview.agent.id} />
-      <.shipyard_panel listings={@overview.shipyards} agent_id={@overview.agent.id} />
-      <.market_panel listings={@overview.markets} />
       <.fleet_grid
         agent={@overview.agent}
         ships={@overview.ships}
         cooldown_tick={@cooldown_tick}
       />
+      <div class="grid gap-5 lg:grid-cols-2">
+        <.contract_panel contracts={@overview.contracts} agent_id={@overview.agent.id} />
+        <div class="space-y-5">
+          <.shipyard_panel listings={@overview.shipyards} agent_id={@overview.agent.id} />
+          <.market_panel listings={@overview.markets} />
+        </div>
+      </div>
     </section>
     """
   end
@@ -377,10 +386,13 @@ defmodule SpaceTradersWeb.DashboardLive do
       <% {:ok, []} -> %>
         <div class="alert alert-outline">No contracts available.</div>
       <% {:ok, contracts} -> %>
-        <div :for={contract <- contracts} class="card border border-primary/30 bg-base-200 p-4">
+        <div :for={contract <- contracts} class="card border border-primary/30 bg-base-200 p-4 sm:p-5">
           <div class="flex flex-wrap items-start justify-between gap-3">
             <div>
-              <h3 class="font-semibold">{contract.type} · {contract.id}</h3>
+              <p class="eyebrow">Contract</p>
+              <h3 class="mt-1 font-semibold">
+                {contract.type} <span class="font-mono text-xs opacity-60">{contract.id}</span>
+              </h3>
               <p class="text-sm opacity-70">Deadline: {deadline_label(contract)}</p>
             </div>
             <span class="badge badge-outline">{contract_status(contract)}</span>
@@ -393,7 +405,7 @@ defmodule SpaceTradersWeb.DashboardLive do
             <form
               :if={contract.accepted && not contract.fulfilled}
               phx-submit="deliver_contract"
-              class="flex flex-wrap gap-2"
+              class="grid grid-cols-[minmax(0,1fr)_5rem_auto] gap-2 sm:flex"
             >
               <input type="hidden" name="agent_id" value={@agent_id} />
               <input type="hidden" name="contract_id" value={contract.id} />
@@ -401,7 +413,7 @@ defmodule SpaceTradersWeb.DashboardLive do
               <input
                 name="ship_symbol"
                 placeholder="Ship symbol"
-                class="input input-bordered input-xs font-mono"
+                class="input input-bordered input-sm min-w-0 font-mono"
                 required
               />
               <input
@@ -410,9 +422,9 @@ defmodule SpaceTradersWeb.DashboardLive do
                 min="1"
                 max={good.units_required - good.units_fulfilled}
                 value={good.units_required - good.units_fulfilled}
-                class="input input-bordered input-xs w-20"
+                class="input input-bordered input-sm w-full sm:w-20"
               />
-              <button type="submit" class="btn btn-secondary btn-xs">Deliver</button>
+              <button type="submit" class="btn btn-secondary btn-sm">Deliver</button>
             </form>
           </div>
           <form
@@ -422,7 +434,7 @@ defmodule SpaceTradersWeb.DashboardLive do
           >
             <input type="hidden" name="agent_id" value={@agent_id} />
             <input type="hidden" name="contract_id" value={contract.id} />
-            <button type="submit" class="btn btn-primary btn-sm">Accept contract</button>
+            <button type="submit" class="btn btn-primary min-h-11 btn-sm">Accept contract</button>
           </form>
           <form
             :if={contract.accepted && not contract.fulfilled && contract_ready?(contract)}
@@ -431,7 +443,7 @@ defmodule SpaceTradersWeb.DashboardLive do
           >
             <input type="hidden" name="agent_id" value={@agent_id} />
             <input type="hidden" name="contract_id" value={contract.id} />
-            <button type="submit" class="btn btn-primary btn-sm">Fulfill contract</button>
+            <button type="submit" class="btn btn-primary min-h-11 btn-sm">Fulfill contract</button>
           </form>
         </div>
     <% end %>
@@ -447,8 +459,9 @@ defmodule SpaceTradersWeb.DashboardLive do
       <% {:ok, []} -> %>
         <div class="alert alert-outline">No shipyard is currently on-site.</div>
       <% {:ok, listings} -> %>
-        <div class="card border border-primary/30 bg-base-200 p-4">
-          <h3 class="font-semibold">Shipyard</h3>
+        <div class="card border border-primary/30 bg-base-200 p-4 sm:p-5">
+          <p class="eyebrow">Fleet expansion</p>
+          <h3 class="mt-1 font-semibold">Shipyard</h3>
           <div :for={listing <- listings} class="mt-3 space-y-3">
             <div class="font-mono text-sm">{listing.waypoint}</div>
             <div
@@ -480,8 +493,9 @@ defmodule SpaceTradersWeb.DashboardLive do
       <% {:ok, []} -> %>
         <div class="alert alert-outline">No market is available for an on-site ship.</div>
       <% {:ok, listings} -> %>
-        <div class="card border border-secondary/30 bg-base-200 p-4">
-          <h3 class="font-semibold">Market</h3>
+        <div class="card border border-secondary/30 bg-base-200 p-4 sm:p-5">
+          <p class="eyebrow">Trade and cargo</p>
+          <h3 class="mt-1 font-semibold">Market</h3>
           <div :for={listing <- listings} class="mt-4 space-y-4">
             <div class="font-mono text-sm">{listing.waypoint}</div>
             <div :for={good <- listing.market.trade_goods || []} class="space-y-2">
@@ -524,7 +538,7 @@ defmodule SpaceTradersWeb.DashboardLive do
 
   defp agent_overview_card(assigns) do
     ~H"""
-    <div class="card bg-base-200 p-4 sm:p-5">
+    <div class="card border border-base-300/70 bg-base-200 p-4 sm:p-5">
       <%= case @live do %>
         <% {:ok, live} -> %>
           <div class="flex flex-wrap items-center justify-between gap-4">
@@ -532,7 +546,7 @@ defmodule SpaceTradersWeb.DashboardLive do
               <span class="font-mono text-lg font-bold">{live.symbol}</span>
               <span class="badge badge-outline">{faction_label(@agent, live)}</span>
             </div>
-            <div class="flex gap-8 text-sm">
+            <div class="grid grid-cols-2 gap-5 text-sm sm:gap-8">
               <div>
                 <div class="text-xs opacity-60">Credits</div>
                 <div class="font-mono font-semibold">{credits_label(live.credits)}</div>
@@ -563,8 +577,11 @@ defmodule SpaceTradersWeb.DashboardLive do
   defp fleet_grid(assigns) do
     ~H"""
     <div>
-      <div class="mb-3 flex items-center justify-between">
-        <h3 class="text-sm font-semibold uppercase tracking-wider opacity-60">Fleet</h3>
+      <div class="mb-3 flex items-end justify-between">
+        <div>
+          <p class="eyebrow">Ship status</p>
+          <h3 class="mt-1 text-lg font-semibold">Fleet</h3>
+        </div>
         <span class="text-xs opacity-60">{fleet_count_label(@ships)}</span>
       </div>
 
@@ -573,7 +590,7 @@ defmodule SpaceTradersWeb.DashboardLive do
           <div :if={ships == []} class="alert alert-outline">
             This agent has no ships.
           </div>
-          <div :if={ships != []} class="grid grid-cols-1 gap-4 sm:grid-cols-2">
+          <div :if={ships != []} class="grid grid-cols-1 gap-4 xl:grid-cols-2">
             <.ship_card :for={ship <- ships} ship={ship} cooldown_tick={@cooldown_tick} />
           </div>
         <% {:error, reason} -> %>
@@ -588,7 +605,7 @@ defmodule SpaceTradersWeb.DashboardLive do
 
   defp ship_card(assigns) do
     ~H"""
-    <div class="card bg-base-200 p-4">
+    <div class="card border border-base-300/70 bg-base-200 p-4 sm:p-5">
       <div class="flex items-center justify-between gap-2">
         <div class="flex items-center gap-2">
           <span class="font-mono font-semibold">{@ship.symbol}</span>
@@ -597,7 +614,7 @@ defmodule SpaceTradersWeb.DashboardLive do
         <span class={status_badge_class(@ship)}>{ship_status(@ship)}</span>
       </div>
 
-      <div class="mt-4 grid grid-cols-2 gap-4 text-sm">
+      <div class="mt-4 grid grid-cols-2 gap-4 border-y border-base-300/60 py-4 text-sm">
         <div>
           <div class="text-xs opacity-60">Location</div>
           <div class="font-mono">{ship_location(@ship)}</div>
@@ -653,9 +670,13 @@ defmodule SpaceTradersWeb.DashboardLive do
               value=""
               placeholder="Waypoint symbol"
               autocomplete="off"
-              class="input input-sm input-bordered flex-1 font-mono"
+              class="input input-sm input-bordered min-h-11 flex-1 font-mono"
             />
-            <button type="submit" disabled={cooldown_active?(@ship)} class="btn btn-primary btn-sm">
+            <button
+              type="submit"
+              disabled={cooldown_active?(@ship)}
+              class="btn btn-primary min-h-11 btn-sm"
+            >
               Navigate
             </button>
           </form>
@@ -665,7 +686,7 @@ defmodule SpaceTradersWeb.DashboardLive do
               phx-click="dock"
               phx-value-symbol={@ship.symbol}
               disabled={not dockable?(@ship)}
-              class="btn btn-ghost btn-xs"
+              class="btn btn-ghost min-h-10 btn-sm"
             >
               Dock
             </button>
@@ -674,7 +695,7 @@ defmodule SpaceTradersWeb.DashboardLive do
               phx-click="orbit"
               phx-value-symbol={@ship.symbol}
               disabled={not orbitable?(@ship)}
-              class="btn btn-ghost btn-xs"
+              class="btn btn-ghost min-h-10 btn-sm"
             >
               Orbit
             </button>
@@ -683,7 +704,7 @@ defmodule SpaceTradersWeb.DashboardLive do
               phx-click="extract"
               phx-value-symbol={@ship.symbol}
               disabled={not extractable?(@ship)}
-              class="btn btn-ghost btn-xs"
+              class="btn btn-ghost min-h-10 btn-sm"
             >
               Extract
             </button>

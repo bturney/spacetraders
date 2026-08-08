@@ -7,12 +7,13 @@ defmodule SpaceTradersWeb.OperatorLive.Registration do
   def render(assigns) do
     ~H"""
     <Layouts.app flash={@flash} current_scope={@current_scope}>
-      <div class="mx-auto max-w-sm">
-        <div class="text-center">
+      <div class="mx-auto max-w-sm rounded-2xl border border-base-300/70 bg-base-100/80 p-5 shadow-xl sm:p-8">
+        <div class="mb-8 text-center">
+          <p class="eyebrow">Operator onboarding</p>
           <.header>
-            Register for an account
+            Create your operations center
             <:subtitle>
-              Already registered?
+              Already an Operator?
               <.link navigate={~p"/operators/log-in"} class="font-semibold text-brand hover:underline">
                 Log in
               </.link>
@@ -58,8 +59,8 @@ defmodule SpaceTradersWeb.OperatorLive.Registration do
             You can link it later from Settings.
           </p>
 
-          <.button phx-disable-with="Creating account..." class="btn btn-primary w-full">
-            Create an account
+          <.button phx-disable-with="Creating account..." class="btn btn-primary min-h-12 w-full">
+            Create Operator account
           </.button>
         </.form>
       </div>

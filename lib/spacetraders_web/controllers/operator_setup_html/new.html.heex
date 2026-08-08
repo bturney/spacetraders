@@ -1,10 +1,11 @@
 <Layouts.app flash={@flash} current_scope={@current_scope}>
-  <div class="mx-auto max-w-sm">
-    <div class="text-center">
+  <div class="mx-auto max-w-lg rounded-2xl border border-base-300/70 bg-base-100/80 p-5 shadow-xl sm:p-8">
+    <div class="mb-8 text-center">
+      <p class="eyebrow">First-run setup</p>
       <.header>
-        Set up your SpaceTraders dashboard
+        Set up mission control <span class="sr-only">Set up your SpaceTraders dashboard</span>
         <:subtitle>
-          Create the first operator account. You can link your
+          Create the first Operator account. You can link your
           my.spacetraders.io AccountToken below to start minting agents.
         </:subtitle>
       </.header>
@@ -45,8 +46,8 @@
           You can link it later from Settings.
         </p>
 
-        <button type="submit" class="btn btn-primary w-full">
-          Create operator account
+        <button type="submit" class="btn btn-primary min-h-12 w-full">
+          Create Operator account
         </button>
       </div>
     </.form>

@@ -5,15 +5,16 @@ defmodule SpaceTradersWeb.OperatorLive.Login do
   def render(assigns) do
     ~H"""
     <Layouts.app flash={@flash} current_scope={@current_scope}>
-      <div class="mx-auto max-w-sm space-y-4">
-        <div class="text-center">
+      <div class="mx-auto max-w-sm rounded-2xl border border-base-300/70 bg-base-100/80 p-5 shadow-xl sm:p-8">
+        <div class="mb-8 text-center">
+          <p class="eyebrow">Operator access</p>
           <.header>
-            <p>Log in</p>
+            <p class="mt-2">Return to mission control</p>
             <:subtitle>
               <%= if @current_scope do %>
                 You need to reauthenticate to perform sensitive actions on your account.
               <% else %>
-                Don't have an account? <.link
+                New to SpaceTraders? <.link
                   navigate={~p"/operators/register"}
                   class="font-semibold text-brand hover:underline"
                   phx-no-format
@@ -48,10 +49,14 @@ defmodule SpaceTradersWeb.OperatorLive.Login do
             autocomplete="current-password"
             spellcheck="false"
           />
-          <.button class="btn btn-primary w-full" name={@form[:remember_me].name} value="true">
+          <.button
+            class="btn btn-primary min-h-12 w-full"
+            name={@form[:remember_me].name}
+            value="true"
+          >
             Log in and stay logged in <span aria-hidden="true">→</span>
           </.button>
-          <.button class="btn btn-primary btn-soft w-full mt-2">
+          <.button class="btn btn-primary btn-soft mt-2 min-h-12 w-full">
             Log in only this time
           </.button>
         </.form>

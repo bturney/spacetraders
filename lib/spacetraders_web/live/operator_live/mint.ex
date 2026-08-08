@@ -13,8 +13,9 @@ defmodule SpaceTradersWeb.OperatorLive.Mint do
   def render(assigns) do
     ~H"""
     <Layouts.app flash={@flash} current_scope={@current_scope}>
-      <div class="mx-auto max-w-sm">
-        <div class="text-center">
+      <div class="mx-auto max-w-lg rounded-2xl border border-base-300/70 bg-base-100/80 p-5 shadow-xl sm:p-8">
+        <div class="mb-8 text-center">
+          <p class="eyebrow">Agent fabrication</p>
           <.header>
             Mint an agent
             <:subtitle>
@@ -36,6 +37,10 @@ defmodule SpaceTradersWeb.OperatorLive.Mint do
 
         <%= if @account_token_linked? do %>
           <.form for={@form} id="mint_form" phx-submit="mint" phx-change="validate">
+            <div class="mb-5 rounded-xl border border-info/30 bg-info/10 p-4 text-sm leading-6">
+              <strong class="block">A quick start</strong>
+              Choose a unique Agent symbol and a starting Faction. You can begin learning with the starter Ship immediately after minting.
+            </div>
             <.input
               field={@form[:symbol]}
               type="text"
@@ -53,8 +58,8 @@ defmodule SpaceTradersWeb.OperatorLive.Mint do
               required
             />
 
-            <.button phx-disable-with="Minting..." class="btn btn-primary w-full">
-              Mint agent
+            <.button phx-disable-with="Minting..." class="btn btn-primary min-h-12 w-full">
+              Mint Agent
             </.button>
           </.form>
         <% else %>

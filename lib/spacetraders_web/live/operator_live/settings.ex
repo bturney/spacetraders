@@ -9,10 +9,13 @@ defmodule SpaceTradersWeb.OperatorLive.Settings do
   def render(assigns) do
     ~H"""
     <Layouts.app flash={@flash} current_scope={@current_scope}>
-      <div class="text-center">
+      <div class="mb-8 text-center">
+        <p class="eyebrow">Operator profile</p>
         <.header>
-          Account Settings
-          <:subtitle>Manage your account email address and password settings</:subtitle>
+          Settings
+          <:subtitle>
+            Keep your Operator access and AccountToken ready for the next Mission.
+          </:subtitle>
         </.header>
       </div>
 
@@ -22,29 +25,39 @@ defmodule SpaceTradersWeb.OperatorLive.Settings do
         phx-submit="update_account_token"
         phx-change="validate_account_token"
       >
-        <div class="flex items-center justify-between">
-          <.input
-            field={@account_token_form[:account_token]}
-            type="password"
-            label="AccountToken"
-            autocomplete="off"
-            placeholder={@account_token_linked? && "Linked — enter a new token to replace it"}
-          />
-          <.button variant="primary" class="mt-6" phx-disable-with="Saving...">
-            Link AccountToken
-          </.button>
+        <div class="rounded-2xl border border-primary/25 bg-base-100/70 p-4 sm:p-5">
+          <p class="eyebrow mb-3">Minting access</p>
+          <div class="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
+            <.input
+              field={@account_token_form[:account_token]}
+              type="password"
+              label="AccountToken"
+              autocomplete="off"
+              placeholder={@account_token_linked? && "Linked — enter a new token to replace it"}
+            />
+            <.button variant="primary" class="min-h-11" phx-disable-with="Saving...">
+              Link AccountToken
+            </.button>
+          </div>
+          <p :if={@account_token_linked?} class="text-sm text-success">
+            An AccountToken is linked. It is used only to mint agents and stored encrypted.
+          </p>
+          <p :if={!@account_token_linked?} class="text-sm opacity-60">
+            Link your my.spacetraders.io AccountToken to mint agents in-app.
+          </p>
         </div>
-        <p :if={@account_token_linked?} class="text-sm text-success">
-          An AccountToken is linked. It is used only to mint agents and stored encrypted.
-        </p>
-        <p :if={!@account_token_linked?} class="text-sm opacity-60">
-          Link your my.spacetraders.io AccountToken to mint agents in-app.
-        </p>
       </.form>
 
       <div class="divider" />
 
-      <.form for={@email_form} id="email_form" phx-submit="update_email" phx-change="validate_email">
+      <.form
+        for={@email_form}
+        id="email_form"
+        class="rounded-2xl border border-base-300/70 bg-base-100/70 p-4 sm:p-5"
+        phx-submit="update_email"
+        phx-change="validate_email"
+      >
+        <p class="eyebrow mb-3">Contact channel</p>
         <.input
           field={@email_form[:email]}
           type="email"
@@ -61,12 +74,14 @@ defmodule SpaceTradersWeb.OperatorLive.Settings do
       <.form
         for={@password_form}
         id="password_form"
+        class="rounded-2xl border border-base-300/70 bg-base-100/70 p-4 sm:p-5"
         action={~p"/operators/update-password"}
         method="post"
         phx-change="validate_password"
         phx-submit="update_password"
         phx-trigger-action={@trigger_submit}
       >
+        <p class="eyebrow mb-3">Security</p>
         <input
           name={@password_form[:email].name}
           type="hidden"

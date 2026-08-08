@@ -30,9 +30,9 @@
   --color-base-200: oklch(25.26% 0.014 253.1);
   --color-base-300: oklch(20.15% 0.012 254.09);
   --color-base-content: oklch(97.807% 0.029 256.847);
-  --color-primary: oklch(58% 0.233 277.117);
+  --color-primary: oklch(72% 0.16 190);
   --color-primary-content: oklch(96% 0.018 272.314);
-  --color-secondary: oklch(58% 0.233 277.117);
+  --color-secondary: oklch(74% 0.16 75);
   --color-secondary-content: oklch(96% 0.018 272.314);
   --color-accent: oklch(60% 0.25 292.717);
   --color-accent-content: oklch(96% 0.016 293.756);
@@ -65,9 +65,9 @@
   --color-base-200: oklch(96% 0.001 286.375);
   --color-base-300: oklch(92% 0.004 286.32);
   --color-base-content: oklch(21% 0.006 285.885);
-  --color-primary: oklch(70% 0.213 47.604);
+  --color-primary: oklch(58% 0.16 194);
   --color-primary-content: oklch(98% 0.016 73.684);
-  --color-secondary: oklch(55% 0.027 264.364);
+  --color-secondary: oklch(55% 0.08 220);
   --color-secondary-content: oklch(98% 0.002 247.839);
   --color-accent: oklch(0% 0 0);
   --color-accent-content: oklch(100% 0 0);
@@ -103,3 +103,45 @@
 [data-phx-session], [data-phx-teleported-src] { display: contents }
 
 /* This file is for your main application CSS */
+
+:root {
+  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+}
+
+body { min-width: 320px; }
+
+.bg-grid {
+  background-image: linear-gradient(to right, color-mix(in oklab, currentColor 4%, transparent) 1px, transparent 1px),
+    linear-gradient(to bottom, color-mix(in oklab, currentColor 4%, transparent) 1px, transparent 1px);
+  background-size: 32px 32px;
+}
+
+.brand-mark {
+  display: grid;
+  place-items: center;
+  width: 2.5rem;
+  height: 2.5rem;
+  border: 1px solid color-mix(in oklab, var(--color-primary) 45%, transparent);
+  border-radius: 0.75rem;
+  background: color-mix(in oklab, var(--color-primary) 12%, transparent);
+  color: var(--color-primary);
+}
+
+.theme-switcher button { min-height: 2.25rem; min-width: 2.25rem; align-items: center; justify-content: center; }
+
+.eyebrow {
+  color: color-mix(in oklab, var(--color-primary) 80%, currentColor);
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+  line-height: 1.2;
+  text-transform: uppercase;
+}
+
+.mission-hero { box-shadow: 0 16px 40px color-mix(in oklab, var(--color-primary) 8%, transparent); }
+
+@media (max-width: 640px) {
+  .theme-switcher button:first-of-type { display: none; }
+  .theme-switcher { gap: 0; }
+  .theme-switcher button { padding: 0.45rem; }
+}
