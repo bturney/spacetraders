@@ -216,6 +216,81 @@ defmodule SpaceTraders.FleetTest do
     end
   end
 
+  describe "ship actions" do
+    test "docks and orbits a ship" do
+      agent = agent_fixture()
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case conn.request_path do
+          "/v2/my/ships/FLEET-SHIP/dock" ->
+            Req.Test.json(conn, %{"data" => %{"nav" => nav_body("DOCKED")}})
+
+          "/v2/my/ships/FLEET-SHIP/orbit" ->
+            Req.Test.json(conn, %{"data" => %{"nav" => nav_body("IN_ORBIT")}})
+        end
+      end)
+
+      assert {:ok, %{nav: %{status: "DOCKED"}}} = Fleet.dock_ship(agent, "FLEET-SHIP")
+      assert {:ok, %{nav: %{status: "IN_ORBIT"}}} = Fleet.orbit_ship(agent, "FLEET-SHIP")
+    end
+
+    test "extracts resources and persists the cooldown" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+      expiration = future_iso(60)
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        assert conn.request_path == "/v2/my/ships/FLEET-SHIP/extract"
+
+        Req.Test.json(conn, %{
+          "data" => %{
+            "cooldown" => %{
+              "shipSymbol" => "FLEET-SHIP",
+              "totalSeconds" => 60,
+              "remainingSeconds" => 60,
+              "expiration" => expiration
+            },
+            "extraction" => %{
+              "shipSymbol" => "FLEET-SHIP",
+              "yield" => %{"symbol" => "IRON_ORE", "units" => 5}
+            },
+            "cargo" => %{
+              "capacity" => 40,
+              "units" => 17,
+              "inventory" => [%{"symbol" => "IRON_ORE", "units" => 17}]
+            }
+          }
+        })
+      end)
+
+      assert {:ok, %{cargo: %{units: 17}}} = Fleet.extract_resources(agent, "FLEET-SHIP")
+
+      assert [%Event{event_type: "cooldown", payload: %{}}] =
+               Timeline.pending_events(:ship, "FLEET-SHIP")
+
+      assert ShipServer.ensure_ready("FLEET-SHIP") == {:error, :cooldown_active}
+    end
+
+    test "refuses actions while a cooldown is pending" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      {:ok, _event} =
+        Timeline.schedule_event(
+          :ship,
+          "FLEET-SHIP",
+          :cooldown,
+          DateTime.add(DateTime.utc_now(), 60, :second)
+        )
+
+      {:ok, _pid} = ShipServer.ensure_started(agent, "FLEET-SHIP")
+
+      assert {:error, :cooldown_active} = Fleet.dock_ship(agent, "FLEET-SHIP")
+      assert {:error, :cooldown_active} = Fleet.orbit_ship(agent, "FLEET-SHIP")
+      assert {:error, :cooldown_active} = Fleet.extract_resources(agent, "FLEET-SHIP")
+    end
+  end
+
   describe "rearm_ships_on_boot/0" do
     test "starts ship servers for ships with pending events" do
       agent = agent_fixture()

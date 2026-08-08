@@ -146,7 +146,7 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
             "shipSymbol" => "ORBITALIST-2",
             "totalSeconds" => 60,
             "remainingSeconds" => 42,
-            "expiration" => "2026-01-01T00:00:00.000Z"
+            "expiration" => future_iso(42)
           }
         })
       ]
@@ -181,7 +181,7 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       refute html =~ "Waypoint symbol"
     end
 
-    test "renders ship action affordances: navigate enabled, later actions disabled", %{
+    test "renders ship action affordances for a docked ship", %{
       conn: conn,
       operator: operator
     } do
@@ -193,10 +193,12 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       assert html =~ "Waypoint symbol"
       assert html =~ "Navigate"
 
-      for action <- ["Dock", "Orbit", "Extract"] do
-        assert html =~ action
-        assert html =~ ~s(<button type="button" disabled)
-      end
+      assert html =~ "Dock"
+      assert html =~ "Orbit"
+      assert html =~ "Extract"
+      assert html =~ ~s(phx-click="orbit")
+      assert html =~ ~s(phx-click="dock")
+      assert html =~ ~s(<button type="button" phx-click="extract")
     end
 
     test "navigates a ship and the card shows IN_TRANSIT with its arrival time", %{
@@ -270,7 +272,7 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
                     "shipSymbol" => "ORBITALIST-1",
                     "totalSeconds" => 60,
                     "remainingSeconds" => 42,
-                    "expiration" => "2026-01-01T00:00:00.000Z"
+                    "expiration" => future_iso(42)
                   }
                 })
               ]
