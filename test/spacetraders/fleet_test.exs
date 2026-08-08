@@ -109,6 +109,160 @@ defmodule SpaceTraders.FleetTest do
     end
   end
 
+  describe "command_snapshot/1" do
+    test "assembles the agent overview, live fleet and on-site shipyard listings" do
+      agent = agent_fixture()
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case conn.request_path do
+          "/v2/my/agent" ->
+            Req.Test.json(conn, %{"data" => %{"symbol" => agent.symbol, "credits" => 42_000}})
+
+          "/v2/my/ships" ->
+            Req.Test.json(conn, %{"data" => [ship_body("FLEET-SHIP")]})
+
+          "/v2/systems/X1-UX81/waypoints" ->
+            Req.Test.json(conn, %{
+              "data" => [
+                %{
+                  "symbol" => "X1-UX81-A1",
+                  "systemSymbol" => "X1-UX81",
+                  "type" => "ORBITAL_STATION",
+                  "x" => 1,
+                  "y" => 2,
+                  "traits" => [
+                    %{"symbol" => "SHIPYARD", "name" => "Shipyard", "description" => ""}
+                  ]
+                }
+              ]
+            })
+
+          "/v2/systems/X1-UX81/waypoints/X1-UX81-A1/shipyard" ->
+            Req.Test.json(conn, %{
+              "data" => %{
+                "symbol" => "X1-UX81-A1",
+                "modificationsFee" => 100,
+                "shipTypes" => [%{"type" => "SHIP_MINING_DRONE"}],
+                "ships" => [
+                  %{
+                    "type" => "SHIP_MINING_DRONE",
+                    "name" => "Mining Drone",
+                    "purchasePrice" => 50
+                  }
+                ]
+              }
+            })
+        end
+      end)
+
+      snapshot = Fleet.command_snapshot(agent)
+      assert snapshot.agent == agent
+      assert {:ok, %{symbol: symbol, credits: 42_000}} = snapshot.overview
+      assert symbol == agent.symbol
+      assert {:ok, [%{symbol: "FLEET-SHIP"}]} = snapshot.ships
+
+      assert {:ok, [%{waypoint: "X1-UX81-A1", shipyard: %{symbol: "X1-UX81-A1"}}]} =
+               snapshot.shipyards
+    end
+
+    test "keeps the agent overview when the live fleet is unavailable" do
+      agent = agent_fixture()
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case conn.request_path do
+          "/v2/my/agent" ->
+            Req.Test.json(conn, %{"data" => %{"symbol" => agent.symbol, "credits" => 42_000}})
+
+          "/v2/my/ships" ->
+            conn
+            |> Map.put(:status, 500)
+            |> Req.Test.json(%{})
+        end
+      end)
+
+      snapshot = Fleet.command_snapshot(agent)
+      assert {:ok, %{symbol: symbol, credits: 42_000}} = snapshot.overview
+      assert symbol == agent.symbol
+      assert {:error, _reason} = snapshot.ships
+      assert snapshot.shipyards == {:ok, []}
+    end
+  end
+
+  describe "purchase_ship/3" do
+    test "purchases a listed ship and records it for restart recovery" do
+      agent = agent_fixture()
+
+      snapshot = %{
+        agent: agent,
+        shipyards:
+          {:ok,
+           [
+             %{
+               waypoint: "X1-UX81-A1",
+               shipyard: %{ships: [%{type: "SHIP_MINING_DRONE"}]}
+             }
+           ]}
+      }
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        assert conn.request_path == "/v2/my/ships"
+
+        Req.Test.json(conn, %{
+          "data" => %{
+            "agent" => %{},
+            "ship" => ship_body("FLEET-2"),
+            "transaction" => %{}
+          }
+        })
+      end)
+
+      assert {:ok, %{ship: %{symbol: "FLEET-2"}, warning: nil}} =
+               Fleet.purchase_ship(snapshot, "SHIP_MINING_DRONE", "X1-UX81-A1")
+
+      assert %Ship{agent_id: agent_id, ship_type: "SHIP_MINING_DRONE"} =
+               Repo.get_by(Ship, symbol: "FLEET-2")
+
+      assert agent_id == agent.id
+    end
+
+    test "refuses a ship that is not in the snapshot listing" do
+      agent = agent_fixture()
+
+      snapshot = %{
+        agent: agent,
+        shipyards: {:ok, [%{waypoint: "X1-UX81-A1", shipyard: %{ships: []}}]}
+      }
+
+      assert {:error, :shipyard_unavailable} =
+               Fleet.purchase_ship(snapshot, "SHIP_MINING_DRONE", "X1-UX81-A1")
+    end
+
+    test "reports a local record warning after a successful game purchase" do
+      agent = agent_fixture()
+
+      snapshot = %{
+        agent: agent,
+        shipyards:
+          {:ok,
+           [
+             %{
+               waypoint: "X1-UX81-A1",
+               shipyard: %{ships: [%{type: "SHIP_MINING_DRONE"}]}
+             }
+           ]}
+      }
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        Req.Test.json(conn, %{
+          "data" => %{"agent" => %{}, "ship" => %{}, "transaction" => %{}}
+        })
+      end)
+
+      assert {:ok, %{warning: {:ship_record_failed, _reason}}} =
+               Fleet.purchase_ship(snapshot, "SHIP_MINING_DRONE", "X1-UX81-A1")
+    end
+  end
+
   describe "navigate_ship/3" do
     test "navigates a ship to a waypoint and returns the nav" do
       agent = agent_fixture()

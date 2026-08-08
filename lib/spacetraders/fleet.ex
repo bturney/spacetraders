@@ -22,6 +22,7 @@ defmodule SpaceTraders.Fleet do
   alias SpaceTraders.Fleet.Ship
   alias SpaceTraders.Fleet.ShipServer
   alias SpaceTraders.Repo
+  alias SpaceTraders.{Agent, Shipyard}
   alias SpaceTraders.Timeline
 
   @doc """
@@ -40,10 +41,44 @@ defmodule SpaceTraders.Fleet do
 
   def list_ships(%AgentRecord{}), do: {:error, :agent_token_missing}
 
+  @doc """
+  Reads everything the Fleet command panel displays for an Agent.
+
+  Each live read remains independent: an unavailable Agent overview or Shipyard
+  does not hide the rest of the Agent's Fleet. The game remains the source of
+  truth, so every call assembles fresh data.
+  """
+  def command_snapshot(%AgentRecord{} = agent) do
+    ships = list_ships(agent)
+
+    %{
+      agent: agent,
+      overview: Agent.agent_overview(agent),
+      ships: ships,
+      shipyards: shipyard_listings(agent, ships)
+    }
+  end
+
+  @doc """
+  Purchases a Ship offered by an on-site Shipyard in a Fleet command snapshot.
+
+  The snapshot determines local purchase eligibility; the game remains the
+  authoritative backstop if its listing changed after the snapshot was read.
+  A successful purchase is returned even if its local restart-recovery record
+  cannot be stored, with the persistence error in `:warning`.
+  """
+  def purchase_ship(%{agent: %AgentRecord{} = agent, shipyards: shipyards}, ship_type, waypoint) do
+    with :ok <- offered_at?(shipyards, ship_type, waypoint),
+         {:ok, result} <- Shipyard.purchase(agent, ship_type, waypoint) do
+      {:ok, Map.put(result, :warning, record_purchase(agent, result.ship, ship_type))}
+    end
+  end
+
   @doc "Records a newly purchased ship so it can be re-armed after a restart."
   def record_ship(%AgentRecord{} = agent, ship_symbol, ship_type) do
     %Ship{}
     |> Ecto.Changeset.change(symbol: ship_symbol, ship_type: ship_type, agent_id: agent.id)
+    |> Ecto.Changeset.validate_required([:symbol, :ship_type, :agent_id])
     |> Repo.insert(on_conflict: :nothing, conflict_target: :symbol)
   end
 
@@ -189,6 +224,32 @@ defmodule SpaceTraders.Fleet do
        do: %{destination: destination}
 
   defp arrival_payload(_nav), do: %{}
+
+  defp shipyard_listings(agent, {:ok, ships}), do: Shipyard.listings(agent, ships)
+  defp shipyard_listings(_agent, _ships), do: {:ok, []}
+
+  defp offered_at?({:ok, listings}, ship_type, waypoint) do
+    if Enum.any?(listings, &offered_in_listing?(&1, ship_type, waypoint)) do
+      :ok
+    else
+      {:error, :shipyard_unavailable}
+    end
+  end
+
+  defp offered_at?(_, _ship_type, _waypoint), do: {:error, :shipyard_unavailable}
+
+  defp offered_in_listing?(%{waypoint: waypoint, shipyard: %{ships: ships}}, ship_type, waypoint) do
+    Enum.any?(ships || [], &(&1.type == ship_type))
+  end
+
+  defp offered_in_listing?(_, _ship_type, _waypoint), do: false
+
+  defp record_purchase(agent, ship, ship_type) do
+    case record_ship(agent, ship.symbol, ship_type) do
+      {:ok, _ship} -> nil
+      {:error, reason} -> {:ship_record_failed, reason}
+    end
+  end
 
   defp ship_credentials(ship_symbol) do
     query =
