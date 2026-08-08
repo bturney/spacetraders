@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="csrf-token" content={get_csrf_token()} />
-    <.live_title default="SpaceTraders" suffix=" · Phoenix Framework" phx-no-format>{assigns[:page_title]}</.live_title>
+    <.live_title default="SpaceTraders" suffix=" · Operations Center" phx-no-format>{assigns[:page_title]}</.live_title>
     <link phx-track-static rel="stylesheet" href={~p"/assets/css/app.css"} />
     <script defer phx-track-static type="text/javascript" src={~p"/assets/js/app.js"}>
     </script>
@@ -37,30 +37,7 @@
       })();
     </script>
   </head>
-  <body>
-    <ul class="menu menu-horizontal w-full relative z-10 flex items-center gap-4 px-4 sm:px-6 lg:px-8 justify-end">
-      <%= if @current_scope do %>
-        <li>
-          {@current_scope.operator.email}
-        </li>
-        <li>
-          <.link href={~p"/agents/new"}>Mint agent</.link>
-        </li>
-        <li>
-          <.link href={~p"/operators/settings"}>Settings</.link>
-        </li>
-        <li>
-          <.link href={~p"/operators/log-out"} method="delete">Log out</.link>
-        </li>
-      <% else %>
-        <li>
-          <.link href={~p"/operators/register"}>Register</.link>
-        </li>
-        <li>
-          <.link href={~p"/operators/log-in"}>Log in</.link>
-        </li>
-      <% end %>
-    </ul>
+  <body class="min-h-screen bg-base-200 text-base-content antialiased">
     {@inner_content}
   </body>
 </html>

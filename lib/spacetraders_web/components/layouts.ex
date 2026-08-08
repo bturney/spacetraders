@@ -39,38 +39,40 @@ defmodule SpaceTradersWeb.Layouts do
 
   def app(assigns) do
     ~H"""
-    <header class="navbar px-4 sm:px-6 lg:px-8">
-      <div class="flex-1">
-        <a href="/" class="flex-1 flex w-fit items-center gap-2">
-          <img src={~p"/images/logo.svg"} width="36" />
-          <span class="text-sm font-semibold">v{Application.spec(:phoenix, :vsn)}</span>
-        </a>
-      </div>
-      <div class="flex-none">
-        <ul class="flex flex-column px-1 space-x-4 items-center">
-          <li>
-            <a href="https://phoenixframework.org/" class="btn btn-ghost">Website</a>
-          </li>
-          <li>
-            <a href="https://github.com/phoenixframework/phoenix" class="btn btn-ghost">GitHub</a>
-          </li>
-          <li>
+    <div class="min-h-screen bg-grid">
+      <header class="border-b border-base-300/70 bg-base-100/90 backdrop-blur">
+        <div class="mx-auto flex min-h-16 max-w-[1440px] items-center justify-between gap-4 px-4 sm:px-6 lg:px-8">
+          <.link navigate={~p"/"} class="flex min-w-0 items-center gap-3">
+            <span class="brand-mark"><img src={~p"/images/logo.svg"} width="28" height="20" /></span>
+            <span class="min-w-0">
+              <span class="block truncate text-sm font-bold tracking-[0.18em] text-primary">SPACETRADERS</span>
+              <span class="hidden text-[10px] uppercase tracking-[0.24em] opacity-50 sm:block">Operator operations center</span>
+            </span>
+          </.link>
+          <nav class="flex items-center gap-1 sm:gap-2" aria-label="Operator navigation">
+            <%= if @current_scope do %>
+              <span class="hidden max-w-44 truncate px-2 text-xs opacity-60 md:block">{@current_scope.operator.email}</span>
+              <.link navigate={~p"/agents/new"} class="btn btn-sm btn-primary">Mint agent</.link>
+              <.link navigate={~p"/operators/settings"} class="btn btn-sm btn-ghost">Settings</.link>
+              <.link href={~p"/operators/log-out"} method="delete" class="btn btn-sm btn-ghost">Log out</.link>
+            <% else %>
+              <.link navigate={~p"/operators/register"} class="btn btn-sm btn-ghost">Register</.link>
+              <.link navigate={~p"/operators/log-in"} class="btn btn-sm btn-primary">Log in</.link>
+            <% end %>
             <.theme_toggle />
-          </li>
-          <li>
-            <a href="https://phoenix.hexdocs.pm/overview.html" class="btn btn-primary">
-              Get Started <span aria-hidden="true">&rarr;</span>
-            </a>
-          </li>
-        </ul>
-      </div>
-    </header>
+          </nav>
+        </div>
+      </header>
 
-    <main class="px-4 py-20 sm:px-6 lg:px-8">
-      <div class={["mx-auto space-y-4", @wide && "max-w-5xl", !@wide && "max-w-2xl"]}>
-        {render_slot(@inner_block)}
-      </div>
-    </main>
+      <main class="mx-auto w-full max-w-[1440px] px-4 py-8 sm:px-6 sm:py-10 lg:px-8">
+        <div class={[@wide && "space-y-6", !@wide && "mx-auto max-w-2xl space-y-6"]}>
+          {render_slot(@inner_block)}
+        </div>
+      </main>
+      <footer class="mx-auto max-w-[1440px] px-4 pb-8 text-xs uppercase tracking-[0.18em] opacity-40 sm:px-6 lg:px-8">
+        SpaceTraders operations center <span class="mx-2">/</span> keep learning, keep exploring
+      </footer>
+    </div>
 
     <.flash_group flash={@flash} />
     """
@@ -132,7 +134,7 @@ defmodule SpaceTradersWeb.Layouts do
   """
   def theme_toggle(assigns) do
     ~H"""
-    <div class="card relative flex flex-row items-center border-2 border-base-300 bg-base-300 rounded-full">
+    <div class="theme-switcher card relative flex flex-row items-center border border-base-300 bg-base-200 rounded-full">
       <div class="absolute w-1/3 h-full rounded-full border-1 border-base-200 bg-base-100 brightness-200 left-0 [[data-theme=light]_&]:left-1/3 [[data-theme=dark]_&]:left-2/3 [[data-theme-source=system]_&]:!left-0 transition-[left]" />
 
       <button
