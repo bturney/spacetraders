@@ -17,7 +17,6 @@ defmodule SpaceTradersWeb.DashboardLive do
 
   alias SpaceTraders.Agent
   alias SpaceTraders.Fleet
-  alias SpaceTraders.Shipyard
 
   @impl true
   def render(assigns) do
@@ -92,18 +91,7 @@ defmodule SpaceTradersWeb.DashboardLive do
       Phoenix.PubSub.subscribe(SpaceTraders.PubSub, "fleet:#{agent_id}")
     end
 
-    overviews =
-      agents
-      |> Enum.map(fn agent ->
-        ships = Fleet.list_ships(agent)
-
-        %{
-          agent: agent,
-          overview: Agent.agent_overview(agent),
-          ships: ships,
-          shipyards: shipyard_listings(agent, ships)
-        }
-      end)
+    overviews = Enum.map(agents, &Fleet.command_snapshot/1)
 
     Process.send_after(self(), :cooldown_tick, 1_000)
     {:ok, assign(socket, operator: operator, overviews: overviews, cooldown_tick: 0)}
@@ -149,11 +137,11 @@ defmodule SpaceTradersWeb.DashboardLive do
         %{"agent_id" => agent_id, "ship_type" => ship_type, "waypoint" => waypoint},
         socket
       ) do
-    with {:ok, overview} <- agent_for_purchase(socket, agent_id, ship_type, waypoint),
-         {:ok, %{ship: ship}} <- Shipyard.purchase(overview.agent, ship_type, waypoint) do
-      record_purchased_ship(overview.agent, ship, ship_type)
-      socket = refresh_agent(socket, overview.agent)
-      {:noreply, put_flash(socket, :info, "#{ship_type} purchased at #{waypoint}.")}
+    with {:ok, snapshot} <- snapshot_for_purchase(socket, agent_id),
+         {:ok, purchase} <- Fleet.purchase_ship(snapshot, ship_type, waypoint) do
+      socket = refresh_agent(socket, snapshot.agent)
+      socket = put_flash(socket, :info, "#{ship_type} purchased at #{waypoint}.")
+      {:noreply, purchase_flash(socket, purchase.warning)}
     else
       {:error, reason} -> {:noreply, put_flash(socket, :error, live_error(reason))}
     end
@@ -188,36 +176,14 @@ defmodule SpaceTradersWeb.DashboardLive do
     )
   end
 
-  defp agent_for_purchase(socket, agent_id, ship_type, waypoint) do
+  defp snapshot_for_purchase(socket, agent_id) do
     Enum.find_value(
       socket.assigns.overviews,
       {:error, "That shipyard is not available."},
-      fn overview ->
-        if to_string(overview.agent.id) == agent_id and
-             listing_has_ship?(overview.shipyards, ship_type, waypoint),
-           do: {:ok, overview}
+      fn snapshot ->
+        if to_string(snapshot.agent.id) == agent_id, do: {:ok, snapshot}
       end
     )
-  end
-
-  defp listing_has_ship?({:ok, listings}, ship_type, waypoint) do
-    Enum.any?(listings, fn listing ->
-      listing.waypoint == waypoint and
-        Enum.any?(listing.shipyard.ships || [], &(&1.type == ship_type))
-    end)
-  end
-
-  defp listing_has_ship?(_, _ship_type, _waypoint), do: false
-
-  defp record_purchased_ship(agent, ship, ship_type) do
-    case Fleet.record_ship(agent, ship.symbol, ship_type) do
-      {:ok, _} ->
-        :ok
-
-      {:error, reason} ->
-        require Logger
-        Logger.warning("purchased ship #{ship.symbol} was not recorded: #{inspect(reason)}")
-    end
   end
 
   defp validate_waypoint(""), do: {:error, "Enter a target waypoint."}
@@ -236,14 +202,7 @@ defmodule SpaceTradersWeb.DashboardLive do
     overviews =
       Enum.map(socket.assigns.overviews, fn overview ->
         if overview.agent.id == agent.id do
-          ships = Fleet.list_ships(agent)
-
-          %{
-            overview
-            | overview: Agent.agent_overview(agent),
-              ships: ships,
-              shipyards: shipyard_listings(agent, ships)
-          }
+          Fleet.command_snapshot(agent)
         else
           overview
         end
@@ -252,8 +211,11 @@ defmodule SpaceTradersWeb.DashboardLive do
     assign(socket, :overviews, overviews)
   end
 
-  defp shipyard_listings(agent, {:ok, ships}), do: Shipyard.listings(agent, ships)
-  defp shipyard_listings(_agent, _ships), do: {:ok, []}
+  defp purchase_flash(socket, nil), do: socket
+
+  defp purchase_flash(socket, {:ship_record_failed, _reason}) do
+    put_flash(socket, :info, "Ship purchased, but local restart recovery could not be recorded.")
+  end
 
   ## Components
 
@@ -527,6 +489,8 @@ defmodule SpaceTradersWeb.DashboardLive do
 
   defp live_error(:insufficient_credits),
     do: "The agent does not have enough credits for that ship."
+
+  defp live_error(:shipyard_unavailable), do: "That shipyard is not available."
 
   defp live_error(%{type: :insufficient_credits}),
     do: "The agent does not have enough credits for that ship."
