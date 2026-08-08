@@ -41,6 +41,7 @@ defmodule SpaceTraders.API.SpecConformanceTest do
     {:extract_resources, :post, "/my/ships/{shipSymbol}/extract", :data},
     {:refuel_ship, :post, "/my/ships/{shipSymbol}/refuel", :data},
     {:sell_cargo, :post, "/my/ships/{shipSymbol}/sell", :data},
+    {:purchase_cargo, :post, "/my/ships/{shipSymbol}/purchase", :data},
     {:jettison_cargo, :post, "/my/ships/{shipSymbol}/jettison", :data},
     {:purchase_ship, :post, "/my/ships", :data},
     {:get_system, :get, "/systems/{systemSymbol}", :data},
@@ -122,6 +123,7 @@ defmodule SpaceTraders.API.SpecConformanceTest do
   defp arity_of(:extract_resources), do: 2
   defp arity_of(:refuel_ship), do: 2
   defp arity_of(:sell_cargo), do: 4
+  defp arity_of(:purchase_cargo), do: 4
   defp arity_of(:jettison_cargo), do: 4
   defp arity_of(:purchase_ship), do: 3
   defp arity_of(:get_system), do: 2
