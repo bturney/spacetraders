@@ -112,19 +112,20 @@ Its `.env` stays on the host and contains
 `PHX_HOST`, `SECRET_KEY_BASE`, and `ENCRYPTION_KEY`; never copy those values
 into the repository. The named `spacetraders-data` volume holds the SQLite DB.
 
-Every push to `main` publishes `ghcr.io/bturney/spacetraders:latest`. After the
-publish workflow succeeds, redeploy the host with:
+Every push to `main` publishes both `latest` and an immutable `sha-<commit>`
+image tag. After the publish workflow succeeds, redeploy the host with the
+merged commit's immutable tag:
 
 ```sh
-tailscale ssh project-host
-cd /srv/projects/spacetraders
-docker compose -f compose.yaml -f compose.production.yaml pull
-docker compose -f compose.yaml -f compose.production.yaml up -d
-docker compose -f compose.yaml -f compose.production.yaml ps
-curl -fsS http://127.0.0.1:4000/health
+git fetch origin main
+SHA=$(git rev-parse origin/main)
+IMAGE="ghcr.io/bturney/spacetraders:sha-$SHA"
+tailscale ssh project-host "cd /srv/projects/spacetraders && test \"\$(SPACETRADERS_IMAGE=$IMAGE docker compose -f compose.yaml -f compose.production.yaml config --images | sort -u)\" = \"$IMAGE\" && SPACETRADERS_IMAGE=$IMAGE docker compose -f compose.yaml -f compose.production.yaml pull && SPACETRADERS_IMAGE=$IMAGE docker compose -f compose.yaml -f compose.production.yaml up -d && SPACETRADERS_IMAGE=$IMAGE docker compose -f compose.yaml -f compose.production.yaml ps && curl -fsS --retry 10 --retry-connrefused --retry-delay 1 http://127.0.0.1:4000/health"
 ```
 
 The one-shot `migrate` service completes before `web` starts. A successful
-health check returns `{"status":"ok"}`. To roll back, set
-`SPACETRADERS_IMAGE` to a known image digest or tag in the host `.env`, then
-repeat the `pull` and `up -d` commands.
+health check returns `{"status":"ok"}`. The production overlay accepts
+`SPACETRADERS_IMAGE` so deploys can pin an immutable tag or digest. For a
+rollback, first pull and validate the reference with `SPACETRADERS_IMAGE` as a
+command-level override, then persist it in the host `.env` only after that
+validation succeeds.

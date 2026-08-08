@@ -1,9 +1,9 @@
 services:
   migrate:
-    image: ${SPACETRADERS_IMAGE:-ghcr.io/bturney/spacetraders}:latest
+    image: ${SPACETRADERS_IMAGE:-ghcr.io/bturney/spacetraders:latest}
     build: !reset null
 
   web:
-    image: ${SPACETRADERS_IMAGE:-ghcr.io/bturney/spacetraders}:latest
+    image: ${SPACETRADERS_IMAGE:-ghcr.io/bturney/spacetraders:latest}
     build: !reset null
     restart: unless-stopped
