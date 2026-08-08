@@ -10,6 +10,7 @@ defmodule SpaceTraders.Application do
     children =
       [
         SpaceTradersWeb.Telemetry,
+        SpaceTraders.PromEx,
         SpaceTraders.Repo,
         {Ecto.Migrator,
          repos: Application.fetch_env!(:spacetraders, :ecto_repos), skip: skip_migrations?()},

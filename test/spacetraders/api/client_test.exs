@@ -26,6 +26,48 @@ defmodule SpaceTraders.API.ClientTest do
                 "resetDate" => "2026-08-02"
               }} = API.get_status()
     end
+
+    test "emits an API request metric with endpoint and response status" do
+      event = [:spacetraders, :api, :request]
+      handler_id = "api-metric-#{System.unique_integer()}"
+      :telemetry.attach(handler_id, event, &__MODULE__.handle_event/4, self())
+
+      on_exit(fn -> :telemetry.detach(handler_id) end)
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        Req.Test.json(conn, %{"data" => %{}})
+      end)
+
+      assert {:ok, %Model.Agent{}} = API.get_agent("TOKEN")
+      assert_receive {:telemetry, ^event, %{count: 1}, %{endpoint: "/my/agent", status: 200}}
+    end
+
+    test "emits a 429 API request metric after rate-limit retries" do
+      event = [:spacetraders, :api, :request]
+      handler_id = "api-rate-limit-metric-#{System.unique_integer()}"
+      :telemetry.attach(handler_id, event, &__MODULE__.handle_event/4, self())
+
+      on_exit(fn -> :telemetry.detach(handler_id) end)
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.put_resp_header("retry-after", "0")
+        |> Plug.Conn.send_resp(
+          429,
+          Jason.encode!(%{"error" => %{"code" => 1000, "message" => "slow down"}})
+        )
+      end)
+
+      assert {:error, %SpaceTraders.API.GameplayError{code: 1000}} = API.get_agent("TOKEN")
+
+      assert_receive {:telemetry, ^event, %{count: 1}, %{endpoint: "/my/agent", status: 429}},
+                     5_000
+    end
+  end
+
+  def handle_event(event, measurements, metadata, test_pid) do
+    send(test_pid, {:telemetry, event, measurements, metadata})
   end
 
   describe "register/3" do

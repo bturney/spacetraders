@@ -77,6 +77,13 @@ config :logger, :default_formatter,
   format: "$time $metadata[$level] $message\n",
   metadata: [:request_id]
 
+config :logger, :default_handler, formatter: {LoggerJSON.Formatters.Basic, metadata: :all}
+
+config :spacetraders, SpaceTraders.PromEx,
+  disabled: false,
+  manual_metrics_start_delay: :no_delay,
+  drop_metrics_groups: []
+
 # SpaceTraders API client: base URL for the v2 API. The rate limiter budget is
 # the game's sustainable ceiling (3 req/s sustained, burst 10). Req 429 retry
 # with Retry-After acts as a safety net on top of the client-side limiter.

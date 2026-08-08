@@ -269,6 +269,8 @@ defmodule SpaceTraders.API do
 
     case Req.request(req) do
       {:ok, %{status: status, body: body}} when status in 200..299 ->
+        emit_request_metric(path, status)
+
         case decode(body, opts[:as]) do
           {:error, %SpaceTraders.API.Error{} = error} ->
             {:error, error}
@@ -278,14 +280,24 @@ defmodule SpaceTraders.API do
         end
 
       {:ok, %{status: status, body: body}} when status in 400..499 ->
+        emit_request_metric(path, status)
         {:error, gameplay_error(status, body)}
 
       {:ok, %{status: status}} ->
+        emit_request_metric(path, status)
         {:error, SpaceTraders.API.Error.new(status, "unexpected response")}
 
       {:error, reason} ->
+        emit_request_metric(path, 0)
         {:error, SpaceTraders.API.Error.transport(reason)}
     end
+  end
+
+  defp emit_request_metric(path, status) do
+    :telemetry.execute([:spacetraders, :api, :request], %{count: 1}, %{
+      endpoint: path,
+      status: status
+    })
   end
 
   defp build_options(method, path, token) do
@@ -293,7 +305,7 @@ defmodule SpaceTraders.API do
       base_url: base_url(),
       method: method,
       url: path,
-      retry: &retry/2,
+      retry: fn request, response -> retry(request, response, path) end,
       retry_log_level: :warning
     ] ++ maybe_auth(token)
   end
@@ -316,8 +328,13 @@ defmodule SpaceTraders.API do
   # Safety net on top of the client-side rate limiter: retry only rate-limit
   # responses (429/503), honoring Retry-After. Transport errors are NOT retried —
   # the client is additive and retrying a state-changing POST could double-apply it.
-  defp retry(_request, %Req.Response{status: status}) when status in [429, 503], do: true
-  defp retry(_request, _), do: false
+  defp retry(_request, %Req.Response{status: 429}, path) do
+    emit_request_metric(path, 429)
+    true
+  end
+
+  defp retry(_request, %Req.Response{status: 503}, _path), do: true
+  defp retry(_request, _, _path), do: false
 
   defp base_url do
     Application.get_env(:spacetraders, __MODULE__, [])
