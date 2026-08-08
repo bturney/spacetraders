@@ -17,6 +17,7 @@ defmodule SpaceTradersWeb.DashboardLive do
 
   alias SpaceTraders.Agent
   alias SpaceTraders.Fleet
+  alias SpaceTraders.Shipyard
 
   @impl true
   def render(assigns) do
@@ -90,7 +91,14 @@ defmodule SpaceTradersWeb.DashboardLive do
     overviews =
       agents
       |> Enum.map(fn agent ->
-        %{agent: agent, overview: Agent.agent_overview(agent), ships: Fleet.list_ships(agent)}
+        ships = Fleet.list_ships(agent)
+
+        %{
+          agent: agent,
+          overview: Agent.agent_overview(agent),
+          ships: ships,
+          shipyards: shipyard_listings(agent, ships)
+        }
       end)
 
     {:ok, assign(socket, operator: operator, overviews: overviews)}
@@ -120,6 +128,22 @@ defmodule SpaceTradersWeb.DashboardLive do
   end
 
   @impl true
+  def handle_event(
+        "buy_ship",
+        %{"agent_id" => agent_id, "ship_type" => ship_type, "waypoint" => waypoint},
+        socket
+      ) do
+    with {:ok, overview} <- agent_for_purchase(socket, agent_id, ship_type, waypoint),
+         {:ok, %{ship: ship}} <- Shipyard.purchase(overview.agent, ship_type, waypoint) do
+      record_purchased_ship(overview.agent, ship, ship_type)
+      socket = refresh_agent(socket, overview.agent)
+      {:noreply, put_flash(socket, :info, "#{ship_type} purchased at #{waypoint}.")}
+    else
+      {:error, reason} -> {:noreply, put_flash(socket, :error, live_error(reason))}
+    end
+  end
+
+  @impl true
   def handle_info({:ship_updated, agent_id, _ship_symbol}, socket) do
     {:noreply, refresh_agent_fleet(socket, agent_id)}
   end
@@ -142,14 +166,58 @@ defmodule SpaceTradersWeb.DashboardLive do
     )
   end
 
+  defp agent_for_purchase(socket, agent_id, ship_type, waypoint) do
+    Enum.find_value(
+      socket.assigns.overviews,
+      {:error, "That shipyard is not available."},
+      fn overview ->
+        if to_string(overview.agent.id) == agent_id and
+             listing_has_ship?(overview.shipyards, ship_type, waypoint),
+           do: {:ok, overview}
+      end
+    )
+  end
+
+  defp listing_has_ship?({:ok, listings}, ship_type, waypoint) do
+    Enum.any?(listings, fn listing ->
+      listing.waypoint == waypoint and
+        Enum.any?(listing.shipyard.ships || [], &(&1.type == ship_type))
+    end)
+  end
+
+  defp listing_has_ship?(_, _ship_type, _waypoint), do: false
+
+  defp record_purchased_ship(agent, ship, ship_type) do
+    case Fleet.record_ship(agent, ship.symbol, ship_type) do
+      {:ok, _} ->
+        :ok
+
+      {:error, reason} ->
+        require Logger
+        Logger.warning("purchased ship #{ship.symbol} was not recorded: #{inspect(reason)}")
+    end
+  end
+
   defp validate_waypoint(""), do: {:error, "Enter a target waypoint."}
   defp validate_waypoint(_waypoint), do: :ok
 
   defp refresh_agent_fleet(socket, agent_id) do
+    overview = Enum.find(socket.assigns.overviews, &(&1.agent.id == agent_id))
+    if overview, do: refresh_agent(socket, overview.agent), else: socket
+  end
+
+  defp refresh_agent(socket, agent) do
     overviews =
       Enum.map(socket.assigns.overviews, fn overview ->
-        if overview.agent.id == agent_id do
-          %{overview | ships: Fleet.list_ships(overview.agent)}
+        if overview.agent.id == agent.id do
+          ships = Fleet.list_ships(agent)
+
+          %{
+            overview
+            | overview: Agent.agent_overview(agent),
+              ships: ships,
+              shipyards: shipyard_listings(agent, ships)
+          }
         else
           overview
         end
@@ -157,6 +225,9 @@ defmodule SpaceTradersWeb.DashboardLive do
 
     assign(socket, :overviews, overviews)
   end
+
+  defp shipyard_listings(agent, {:ok, ships}), do: Shipyard.listings(agent, ships)
+  defp shipyard_listings(_agent, _ships), do: {:ok, []}
 
   ## Components
 
@@ -184,8 +255,43 @@ defmodule SpaceTradersWeb.DashboardLive do
     ~H"""
     <section class="space-y-4">
       <.agent_overview_card agent={@overview.agent} live={@overview.overview} />
+      <.shipyard_panel listings={@overview.shipyards} agent_id={@overview.agent.id} />
       <.fleet_grid agent={@overview.agent} ships={@overview.ships} />
     </section>
+    """
+  end
+
+  attr :listings, :any, required: true
+  attr :agent_id, :integer, required: true
+
+  defp shipyard_panel(assigns) do
+    ~H"""
+    <%= case @listings do %>
+      <% {:ok, []} -> %>
+        <div class="alert alert-outline">No shipyard is currently on-site.</div>
+      <% {:ok, listings} -> %>
+        <div class="card border border-primary/30 bg-base-200 p-4">
+          <h3 class="font-semibold">Shipyard</h3>
+          <div :for={listing <- listings} class="mt-3 space-y-3">
+            <div class="font-mono text-sm">{listing.waypoint}</div>
+            <div
+              :for={ship <- listing.shipyard.ships || []}
+              class="flex items-center justify-between gap-3 text-sm"
+            >
+              <span>{ship.name || ship.type}</span>
+              <form phx-submit="buy_ship" class="flex items-center gap-2">
+                <input type="hidden" name="agent_id" value={@agent_id} />
+                <input type="hidden" name="ship_type" value={ship.type} />
+                <input type="hidden" name="waypoint" value={listing.waypoint} />
+                <span class="font-mono">{credits_label(ship.purchase_price)} cr</span>
+                <button type="submit" class="btn btn-primary btn-xs">Buy</button>
+              </form>
+            </div>
+          </div>
+        </div>
+      <% {:error, reason} -> %>
+        <div class="alert alert-warning">{live_error(reason)}</div>
+    <% end %>
     """
   end
 
@@ -382,7 +488,16 @@ defmodule SpaceTradersWeb.DashboardLive do
   defp live_error(:ship_in_transit), do: "This ship is in transit; actions resume on arrival."
   defp live_error(:cooldown_active), do: "This ship is on cooldown; wait for it to end."
   defp live_error(:agent_token_missing), do: "No AgentToken stored for this agent."
+
+  defp live_error(:insufficient_credits),
+    do: "The agent does not have enough credits for that ship."
+
+  defp live_error(%{type: :insufficient_credits}),
+    do: "The agent does not have enough credits for that ship."
+
   defp live_error(%{message: message}) when is_binary(message), do: message
+  defp live_error(message) when is_binary(message), do: message
+
   defp live_error(_), do: "The game API could not be reached."
 
   defp fleet_count_label({:ok, ships}), do: pluralize(length(ships), "ship")
