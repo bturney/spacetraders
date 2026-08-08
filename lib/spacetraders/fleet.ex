@@ -22,7 +22,7 @@ defmodule SpaceTraders.Fleet do
   alias SpaceTraders.Fleet.Ship
   alias SpaceTraders.Fleet.ShipServer
   alias SpaceTraders.Repo
-  alias SpaceTraders.{Agent, Market, Shipyard}
+  alias SpaceTraders.{Agent, Contracts, Market, Shipyard}
   alias SpaceTraders.Timeline
 
   @doc """
@@ -55,6 +55,7 @@ defmodule SpaceTraders.Fleet do
       agent: agent,
       overview: Agent.agent_overview(agent),
       ships: ships,
+      contracts: Contracts.list_contracts(agent),
       shipyards: shipyard_listings(agent, ships),
       markets: market_listings(agent, ships)
     }

@@ -31,6 +31,9 @@ defmodule SpaceTradersWeb.OperatorLive.MintTest do
         {"GET", "/v2/my/ships"} ->
           Req.Test.json(conn, %{"data" => []})
 
+        {"GET", "/v2/my/contracts"} ->
+          Req.Test.json(conn, %{"data" => []})
+
         {"GET", "/v2/systems/X1-UX81/waypoints"} ->
           Req.Test.json(conn, %{"data" => []})
       end

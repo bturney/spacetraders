@@ -118,6 +118,9 @@ defmodule SpaceTraders.FleetTest do
           "/v2/my/agent" ->
             Req.Test.json(conn, %{"data" => %{"symbol" => agent.symbol, "credits" => 42_000}})
 
+          "/v2/my/contracts" ->
+            Req.Test.json(conn, %{"data" => []})
+
           "/v2/my/ships" ->
             Req.Test.json(conn, %{"data" => [ship_body("FLEET-SHIP")]})
 
@@ -172,6 +175,9 @@ defmodule SpaceTraders.FleetTest do
         case conn.request_path do
           "/v2/my/agent" ->
             Req.Test.json(conn, %{"data" => %{"symbol" => agent.symbol, "credits" => 42_000}})
+
+          "/v2/my/contracts" ->
+            Req.Test.json(conn, %{"data" => []})
 
           "/v2/my/ships" ->
             conn

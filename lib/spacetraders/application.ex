@@ -15,6 +15,9 @@ defmodule SpaceTraders.Application do
          repos: Application.fetch_env!(:spacetraders, :ecto_repos), skip: skip_migrations?()},
         {DNSCluster, query: Application.get_env(:spacetraders, :dns_cluster_query) || :ignore},
         {Phoenix.PubSub, name: SpaceTraders.PubSub},
+        {Registry, keys: :unique, name: SpaceTraders.Contracts.Registry},
+        {DynamicSupervisor, strategy: :one_for_one, name: SpaceTraders.Contracts.Supervisor},
+        SpaceTraders.Contracts.DeadlineServerBoot,
         {Registry, keys: :unique, name: SpaceTraders.Fleet.ShipRegistry},
         {DynamicSupervisor, strategy: :one_for_one, name: SpaceTraders.Fleet.ShipSupervisor},
         SpaceTraders.Fleet.ShipServerBoot

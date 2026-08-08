@@ -36,7 +36,7 @@ defmodule SpaceTradersWeb.DashboardLive do
             <.link navigate={~p"/agents/new"} class="btn btn-primary">Mint an agent</.link>
           </div>
 
-          <.contract_hero />
+          <.contract_hero overviews={@overviews} />
 
           <div :if={@overviews == []} class="alert alert-outline">
             You haven't minted any agents yet.
@@ -171,6 +171,64 @@ defmodule SpaceTradersWeb.DashboardLive do
   end
 
   @impl true
+  def handle_event(
+        "accept_contract",
+        %{"agent_id" => agent_id, "contract_id" => contract_id},
+        socket
+      ) do
+    with {:ok, agent} <- agent_for_contract(socket, agent_id, contract_id),
+         {:ok, _result} <- SpaceTraders.Contracts.accept_contract(agent, contract_id) do
+      {:noreply, put_flash(refresh_agent(socket, agent), :info, "Contract accepted.")}
+    else
+      {:error, reason} -> {:noreply, put_flash(socket, :error, live_error(reason))}
+    end
+  end
+
+  @impl true
+  def handle_event(
+        "deliver_contract",
+        %{
+          "agent_id" => agent_id,
+          "contract_id" => contract_id,
+          "ship_symbol" => ship_symbol,
+          "trade_symbol" => trade_symbol,
+          "units" => units
+        },
+        socket
+      ) do
+    with {:ok, agent} <- agent_for_contract(socket, agent_id, contract_id),
+         {:ok, units} <- parse_units(units),
+         {:ok, _result} <-
+           SpaceTraders.Contracts.deliver_goods(
+             agent,
+             contract_id,
+             ship_symbol,
+             trade_symbol,
+             units
+           ) do
+      {:noreply,
+       put_flash(refresh_agent(socket, agent), :info, "Delivered #{units} #{trade_symbol}.")}
+    else
+      {:error, reason} -> {:noreply, put_flash(socket, :error, live_error(reason))}
+    end
+  end
+
+  @impl true
+  def handle_event(
+        "fulfill_contract",
+        %{"agent_id" => agent_id, "contract_id" => contract_id},
+        socket
+      ) do
+    with {:ok, agent} <- agent_for_contract(socket, agent_id, contract_id),
+         {:ok, _result} <- SpaceTraders.Contracts.fulfill_contract(agent, contract_id) do
+      {:noreply,
+       put_flash(refresh_agent(socket, agent), :info, "Contract fulfilled. Payment collected.")}
+    else
+      {:error, reason} -> {:noreply, put_flash(socket, :error, live_error(reason))}
+    end
+  end
+
+  @impl true
   def handle_info({:ship_updated, agent_id, _ship_symbol}, socket) do
     {:noreply, refresh_agent_fleet(socket, agent_id)}
   end
@@ -194,6 +252,20 @@ defmodule SpaceTradersWeb.DashboardLive do
 
           _error ->
             nil
+        end
+      end
+    )
+  end
+
+  defp agent_for_contract(socket, agent_id, contract_id) do
+    Enum.find_value(
+      socket.assigns.overviews,
+      {:error, "That contract is not available."},
+      fn overview ->
+        if to_string(overview.agent.id) == agent_id and
+             match?({:ok, contracts} when is_list(contracts), overview.contracts) and
+             Enum.any?(elem(overview.contracts, 1), &(&1.id == contract_id)) do
+          {:ok, overview.agent}
         end
       end
     )
@@ -253,17 +325,21 @@ defmodule SpaceTradersWeb.DashboardLive do
 
   ## Components
 
+  attr :overviews, :list, required: true
+
   defp contract_hero(assigns) do
     ~H"""
     <div class="card border border-primary/30 bg-base-200 p-6">
       <div class="flex items-start justify-between gap-4">
         <div>
           <p class="text-xs uppercase tracking-wider opacity-60">Active mission</p>
-          <h2 class="mt-1 text-xl font-bold">No active mission</h2>
-          <p class="mt-1 text-sm opacity-70">
-            The contract hero lands with the contract lifecycle milestone and will surface
-            your current mission, its deliverables and deadline at a glance.
-          </p>
+          <%= if Enum.any?(@overviews, &active_contract?/1) do %>
+            <h2 class="mt-1 text-xl font-bold">Contract in progress</h2>
+            <p class="mt-1 text-sm opacity-70">Deliver the required goods before the deadline.</p>
+          <% else %>
+            <h2 class="mt-1 text-xl font-bold">No active mission</h2>
+            <p class="mt-1 text-sm opacity-70">Accept a contract to start your first mission.</p>
+          <% end %>
         </div>
         <span class="badge badge-outline">Missions</span>
       </div>
@@ -278,6 +354,7 @@ defmodule SpaceTradersWeb.DashboardLive do
     ~H"""
     <section class="space-y-4">
       <.agent_overview_card agent={@overview.agent} live={@overview.overview} />
+      <.contract_panel contracts={@overview.contracts} agent_id={@overview.agent.id} />
       <.shipyard_panel listings={@overview.shipyards} agent_id={@overview.agent.id} />
       <.market_panel listings={@overview.markets} />
       <.fleet_grid
@@ -286,6 +363,78 @@ defmodule SpaceTradersWeb.DashboardLive do
         cooldown_tick={@cooldown_tick}
       />
     </section>
+    """
+  end
+
+  attr :contracts, :any, required: true
+  attr :agent_id, :integer, required: true
+
+  defp contract_panel(assigns) do
+    ~H"""
+    <%= case @contracts do %>
+      <% {:error, reason} -> %>
+        <div class="alert alert-warning">Contracts unavailable: {live_error(reason)}</div>
+      <% {:ok, []} -> %>
+        <div class="alert alert-outline">No contracts available.</div>
+      <% {:ok, contracts} -> %>
+        <div :for={contract <- contracts} class="card border border-primary/30 bg-base-200 p-4">
+          <div class="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <h3 class="font-semibold">{contract.type} · {contract.id}</h3>
+              <p class="text-sm opacity-70">Deadline: {deadline_label(contract)}</p>
+            </div>
+            <span class="badge badge-outline">{contract_status(contract)}</span>
+          </div>
+          <div :for={good <- contract.terms.deliver || []} class="mt-4 space-y-2 text-sm">
+            <div class="flex items-center justify-between">
+              <span>{good.trade_symbol} to <span class="font-mono">{good.destination_symbol}</span></span>
+              <span class="font-mono">{good.units_fulfilled} / {good.units_required}</span>
+            </div>
+            <form
+              :if={contract.accepted && not contract.fulfilled}
+              phx-submit="deliver_contract"
+              class="flex flex-wrap gap-2"
+            >
+              <input type="hidden" name="agent_id" value={@agent_id} />
+              <input type="hidden" name="contract_id" value={contract.id} />
+              <input type="hidden" name="trade_symbol" value={good.trade_symbol} />
+              <input
+                name="ship_symbol"
+                placeholder="Ship symbol"
+                class="input input-bordered input-xs font-mono"
+                required
+              />
+              <input
+                name="units"
+                type="number"
+                min="1"
+                max={good.units_required - good.units_fulfilled}
+                value={good.units_required - good.units_fulfilled}
+                class="input input-bordered input-xs w-20"
+              />
+              <button type="submit" class="btn btn-secondary btn-xs">Deliver</button>
+            </form>
+          </div>
+          <form
+            :if={not contract.accepted && not contract.fulfilled}
+            phx-submit="accept_contract"
+            class="mt-4"
+          >
+            <input type="hidden" name="agent_id" value={@agent_id} />
+            <input type="hidden" name="contract_id" value={contract.id} />
+            <button type="submit" class="btn btn-primary btn-sm">Accept contract</button>
+          </form>
+          <form
+            :if={contract.accepted && not contract.fulfilled && contract_ready?(contract)}
+            phx-submit="fulfill_contract"
+            class="mt-4"
+          >
+            <input type="hidden" name="agent_id" value={@agent_id} />
+            <input type="hidden" name="contract_id" value={contract.id} />
+            <button type="submit" class="btn btn-primary btn-sm">Fulfill contract</button>
+          </form>
+        </div>
+    <% end %>
     """
   end
 
@@ -547,6 +696,30 @@ defmodule SpaceTradersWeb.DashboardLive do
 
   ## Display helpers
 
+  defp active_contract?(%{contracts: {:ok, contracts}}),
+    do: Enum.any?(contracts, &(&1.accepted and not &1.fulfilled))
+
+  defp active_contract?(_), do: false
+
+  defp contract_status(%{fulfilled: true}), do: "FULFILLED"
+  defp contract_status(%{accepted: true}), do: "ACCEPTED"
+  defp contract_status(_), do: "PENDING"
+
+  defp deadline_label(%{terms: %{deadline: deadline}}) when is_binary(deadline) do
+    case DateTime.from_iso8601(deadline) do
+      {:ok, date_time, _offset} -> Calendar.strftime(date_time, "%m-%d %H:%M UTC")
+      _ -> "unknown"
+    end
+  end
+
+  defp deadline_label(_), do: "unknown"
+
+  defp contract_ready?(%{terms: %{deliver: deliver}}) when is_list(deliver) do
+    Enum.all?(deliver, &(&1.units_fulfilled >= &1.units_required))
+  end
+
+  defp contract_ready?(_), do: false
+
   defp faction_label(_agent, %{starting_faction: faction}) when is_binary(faction), do: faction
   defp faction_label(agent, _), do: agent.faction
 
@@ -574,6 +747,15 @@ defmodule SpaceTradersWeb.DashboardLive do
 
   defp live_error(:shipyard_unavailable), do: "That shipyard is not available."
   defp live_error(:market_unavailable), do: "That market is not available."
+  defp live_error(:invalid_units), do: "Enter a positive number of units."
+  defp live_error(:invalid_contract_deadline), do: "The contract deadline could not be read."
+
+  defp live_error(%{type: :contract_expired}), do: "This contract has expired."
+
+  defp live_error(%{type: :contract_not_accepted}),
+    do: "Accept this contract before delivering goods."
+
+  defp live_error(%{type: :contract_fulfilled}), do: "This contract has already been fulfilled."
 
   defp live_error(%{type: :insufficient_credits}),
     do: "The agent does not have enough credits for that ship."

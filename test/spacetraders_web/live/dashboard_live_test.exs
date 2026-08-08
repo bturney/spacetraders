@@ -14,6 +14,7 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       case conn.request_path do
         "/v2/my/agent" -> Req.Test.json(conn, %{"data" => agent_overview})
         "/v2/my/ships" -> Req.Test.json(conn, %{"data" => ships})
+        "/v2/my/contracts" -> Req.Test.json(conn, %{"data" => []})
         "/v2/systems/X1-UX81/waypoints" -> Req.Test.json(conn, %{"data" => []})
       end
     end)
@@ -119,6 +120,9 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
                   Agent.get(state, & &1.credits)
                 )
             })
+
+          "/v2/my/contracts" ->
+            Req.Test.json(conn, %{"data" => []})
 
           "/v2/my/ships" ->
             Req.Test.json(conn, %{
@@ -344,6 +348,9 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
           {"/v2/my/agent", "GET"} ->
             Req.Test.json(conn, %{"data" => agent_overview_body(agent.symbol)})
 
+          {"/v2/my/contracts", "GET"} ->
+            Req.Test.json(conn, %{"data" => []})
+
           {"/v2/my/ships", "GET"} ->
             nav =
               case Agent.get(state, & &1.arrival) do
@@ -393,6 +400,9 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
           {"/v2/my/agent", "GET"} ->
             Req.Test.json(conn, %{"data" => agent_overview_body(agent.symbol)})
 
+          {"/v2/my/contracts", "GET"} ->
+            Req.Test.json(conn, %{"data" => []})
+
           {"/v2/my/ships", "GET"} ->
             Req.Test.json(conn, %{
               "data" => [
@@ -426,6 +436,9 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
         case {conn.request_path, conn.method} do
           {"/v2/my/agent", "GET"} ->
             Req.Test.json(conn, %{"data" => agent_overview_body(agent.symbol)})
+
+          {"/v2/my/contracts", "GET"} ->
+            Req.Test.json(conn, %{"data" => []})
 
           {"/v2/my/ships", "GET"} ->
             ships =
@@ -504,6 +517,9 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
         case {conn.request_path, conn.method} do
           {"/v2/my/agent", "GET"} ->
             Req.Test.json(conn, %{"data" => agent_overview_body(agent.symbol)})
+
+          {"/v2/my/contracts", "GET"} ->
+            Req.Test.json(conn, %{"data" => []})
 
           {"/v2/my/ships", "GET"} ->
             nav =
