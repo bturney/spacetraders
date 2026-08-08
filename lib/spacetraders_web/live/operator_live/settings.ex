@@ -50,6 +50,34 @@ defmodule SpaceTradersWeb.OperatorLive.Settings do
 
       <div class="divider" />
 
+      <.form for={@import_agent_form} id="import_agent_form" phx-submit="import_agent">
+        <.header>
+          Import an existing agent
+          <:subtitle>
+            An AccountToken can mint new agents but cannot recover an existing AgentToken.
+            Paste the AgentToken from my.spacetraders.io to import that agent safely.
+          </:subtitle>
+        </.header>
+        <.input
+          field={@import_agent_form[:agent_token]}
+          type="password"
+          label="AgentToken"
+          autocomplete="off"
+          spellcheck="false"
+          required
+        />
+        <.input
+          field={@import_agent_form[:confirmed]}
+          type="checkbox"
+          label="I confirm this AgentToken belongs to my agent and I want to import it."
+        />
+        <.button variant="primary" phx-disable-with="Importing...">
+          Import agent
+        </.button>
+      </.form>
+
+      <div class="divider" />
+
       <.form
         for={@email_form}
         id="email_form"
@@ -138,6 +166,7 @@ defmodule SpaceTradersWeb.OperatorLive.Settings do
       |> assign(:password_form, to_form(password_changeset))
       |> assign(:trigger_submit, false)
       |> assign(:account_token_linked?, not is_nil(operator.account_token))
+      |> assign(:import_agent_form, import_agent_form())
       |> assign_account_token_form()
 
     {:ok, socket}
@@ -169,6 +198,51 @@ defmodule SpaceTradersWeb.OperatorLive.Settings do
 
       {:error, %Ecto.Changeset{} = changeset} ->
         {:noreply, assign_account_token_form(socket, changeset)}
+    end
+  end
+
+  def handle_event("import_agent", %{"import" => params}, socket) do
+    confirmed = params["confirmed"] == "true"
+
+    case Agent.import_agent(socket.assigns.current_scope, params["agent_token"], confirmed) do
+      {:ok, agent} ->
+        {:noreply,
+         socket
+         |> put_flash(:info, "Agent #{agent.symbol} imported.")
+         |> assign(:import_agent_form, import_agent_form())}
+
+      {:error, :confirmation_required} ->
+        {:noreply,
+         socket
+         |> put_flash(
+           :error,
+           "Confirm that the AgentToken belongs to your agent before importing."
+         )
+         |> assign(:import_agent_form, import_agent_form())}
+
+      {:error, :agent_token_required} ->
+        {:noreply,
+         socket
+         |> put_flash(:error, "Enter an AgentToken before importing.")
+         |> assign(:import_agent_form, import_agent_form())}
+
+      {:error, :agent_already_imported} ->
+        {:noreply,
+         socket
+         |> put_flash(:error, "That agent is already imported.")
+         |> assign(:import_agent_form, import_agent_form())}
+
+      {:error, %Ecto.Changeset{}} ->
+        {:noreply,
+         socket
+         |> put_flash(:error, "The game returned incomplete agent details.")
+         |> assign(:import_agent_form, import_agent_form())}
+
+      {:error, %{message: message}} ->
+        {:noreply,
+         socket
+         |> put_flash(:error, "Agent import failed: #{message}")
+         |> assign(:import_agent_form, import_agent_form())}
     end
   end
 
@@ -234,5 +308,9 @@ defmodule SpaceTradersWeb.OperatorLive.Settings do
 
   defp assign_account_token_form(socket, changeset \\ Agent.change_account_token()) do
     assign(socket, :account_token_form, to_form(changeset, as: "operator"))
+  end
+
+  defp import_agent_form do
+    to_form(%{"agent_token" => "", "confirmed" => false}, as: "import")
   end
 end

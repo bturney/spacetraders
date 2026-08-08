@@ -4,7 +4,7 @@ defmodule SpaceTraders.AgentTest do
   alias SpaceTraders.Agent
 
   import SpaceTraders.AgentFixtures
-  alias SpaceTraders.Agent.{Operator, OperatorToken}
+  alias SpaceTraders.Agent.{Operator, OperatorToken, Scope}
 
   describe "get_operator_by_email/1" do
     test "does not return the operator if the email does not exist" do
@@ -549,6 +549,90 @@ defmodule SpaceTraders.AgentTest do
 
       assert {:error, %SpaceTraders.API.Error{status: 500}} =
                Agent.mint_agent(operator, %{symbol: "NEWSYM", faction: "COSMIC"})
+    end
+  end
+
+  describe "import_agent/3" do
+    test "validates the AgentToken with the API and stores it encrypted" do
+      operator = operator_fixture()
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        assert conn.request_path == "/v2/my/agent"
+        assert Plug.Conn.get_req_header(conn, "authorization") == ["Bearer AGENT_TOKEN"]
+
+        Req.Test.json(conn, %{
+          "data" => %{
+            "accountId" => "ACCOUNT",
+            "symbol" => "ORBITALIST",
+            "credits" => 42_000,
+            "headquarters" => "X1-UX81-A1",
+            "startingFaction" => "COSMIC",
+            "shipCount" => 1
+          }
+        })
+      end)
+
+      assert {:ok, imported} =
+               Agent.import_agent(Scope.for_operator(operator), "AGENT_TOKEN", true)
+
+      assert imported.symbol == "ORBITALIST"
+      assert imported.faction == "COSMIC"
+      assert imported.headquarters == "X1-UX81-A1"
+      assert imported.operator_id == operator.id
+
+      stored = Repo.get!(SpaceTraders.Agent.Agent, imported.id)
+      assert stored.agent_token == "AGENT_TOKEN"
+
+      ciphertext =
+        from(a in SpaceTraders.Agent.Agent, select: fragment("agent_token_ciphertext"))
+        |> Repo.one()
+
+      refute ciphertext =~ "AGENT_TOKEN"
+      assert {:ok, "AGENT_TOKEN"} = SpaceTraders.Secret.load(ciphertext)
+    end
+
+    test "requires explicit confirmation" do
+      operator = operator_fixture()
+
+      assert Agent.import_agent(Scope.for_operator(operator), "AGENT_TOKEN", false) ==
+               {:error, :confirmation_required}
+
+      assert Repo.aggregate(SpaceTraders.Agent.Agent, :count, :id) == 0
+    end
+
+    test "does not import a duplicate symbol" do
+      operator = operator_fixture()
+      agent_fixture(operator, %{symbol: "ORBITALIST"})
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        Req.Test.json(conn, %{
+          "data" => %{
+            "symbol" => "ORBITALIST",
+            "credits" => 0,
+            "headquarters" => "X1-UX81-A1",
+            "startingFaction" => "COSMIC",
+            "shipCount" => 1
+          }
+        })
+      end)
+
+      assert Agent.import_agent(Scope.for_operator(operator), "AGENT_TOKEN", true) ==
+               {:error, :agent_already_imported}
+    end
+
+    test "does not persist an invalid AgentToken" do
+      operator = operator_fixture()
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        conn
+        |> Map.put(:status, 401)
+        |> Req.Test.json(%{"error" => %{"code" => 4011, "message" => "Invalid token"}})
+      end)
+
+      assert {:error, %SpaceTraders.API.GameplayError{message: "Invalid token"}} =
+               Agent.import_agent(Scope.for_operator(operator), "AGENT_TOKEN", true)
+
+      assert Repo.aggregate(SpaceTraders.Agent.Agent, :count, :id) == 0
     end
   end
 

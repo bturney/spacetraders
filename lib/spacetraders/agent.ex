@@ -14,7 +14,7 @@ defmodule SpaceTraders.Agent do
   alias SpaceTraders.Repo
 
   alias SpaceTraders.API.Model.Agent, as: GameAgent
-  alias SpaceTraders.Agent.{Agent, Operator, OperatorToken, OperatorNotifier}
+  alias SpaceTraders.Agent.{Agent, Operator, OperatorToken, OperatorNotifier, Scope}
 
   ## Database getters
 
@@ -203,6 +203,40 @@ defmodule SpaceTraders.Agent do
     end
   end
 
+  @doc """
+  Imports an existing game agent after explicitly validating its AgentToken.
+
+  The AccountToken cannot recover AgentTokens, so this flow never calls the
+  registration endpoint. It reads the agent through the authenticated game API
+  and stores the supplied token encrypted with the resulting metadata.
+  """
+  def import_agent(%Scope{operator: %Operator{} = operator}, agent_token, true)
+      when is_binary(agent_token) and agent_token != "" do
+    with {:ok, %GameAgent{} = game_agent} <- SpaceTraders.API.get_agent(agent_token),
+         :ok <- ensure_agent_is_new(game_agent.symbol) do
+      create_imported_agent(operator, game_agent, agent_token)
+    end
+  end
+
+  def import_agent(_scope, _agent_token, false), do: {:error, :confirmation_required}
+  def import_agent(_scope, _agent_token, _confirmed), do: {:error, :agent_token_required}
+
+  defp ensure_agent_is_new(symbol) do
+    if Repo.get_by(Agent, symbol: symbol), do: {:error, :agent_already_imported}, else: :ok
+  end
+
+  defp create_imported_agent(operator, game_agent, agent_token) do
+    case create_agent(operator, game_agent, agent_token, game_agent.starting_faction) do
+      {:error, %Ecto.Changeset{} = changeset} ->
+        if Keyword.has_key?(changeset.errors, :symbol),
+          do: {:error, :agent_already_imported},
+          else: {:error, changeset}
+
+      result ->
+        result
+    end
+  end
+
   defp validate_mint_attrs(%{valid?: true}), do: :ok
   defp validate_mint_attrs(%{valid?: false} = changeset), do: {:error, changeset}
 
@@ -214,13 +248,14 @@ defmodule SpaceTraders.Agent do
   defp require_account_token(_operator), do: {:error, :account_token_not_linked}
 
   defp create_agent(operator, %GameAgent{} = game_agent, agent_token, requested_faction) do
-    %Agent{
+    %Agent{}
+    |> Agent.changeset(%{
       symbol: game_agent.symbol,
-      faction: game_agent.starting_faction || requested_faction,
-      headquarters: game_agent.headquarters,
-      agent_token: agent_token,
-      operator_id: operator.id
-    }
+      faction: game_agent.starting_faction || requested_faction
+    })
+    |> Ecto.Changeset.put_change(:headquarters, game_agent.headquarters)
+    |> Ecto.Changeset.put_change(:agent_token, agent_token)
+    |> Ecto.Changeset.put_change(:operator_id, operator.id)
     |> Repo.insert()
   end
 

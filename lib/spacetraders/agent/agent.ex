@@ -40,5 +40,6 @@ defmodule SpaceTraders.Agent.Agent do
     |> validate_format(:symbol, @symbol_regex,
       message: "must be 1-20 uppercase letters, digits, dashes or underscores"
     )
+    |> unique_constraint(:symbol)
   end
 end

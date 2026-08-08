@@ -281,4 +281,61 @@ defmodule SpaceTradersWeb.OperatorLive.SettingsTest do
       assert result =~ "can&#39;t be blank"
     end
   end
+
+  describe "existing agent import" do
+    setup %{conn: conn} do
+      operator = operator_fixture()
+      %{conn: log_in_operator(conn, operator), operator: operator}
+    end
+
+    test "requires explicit confirmation", %{conn: conn} do
+      {:ok, lv, html} = live(conn, ~p"/operators/settings")
+
+      assert html =~ "Import an existing agent"
+      assert html =~ "I confirm this AgentToken belongs to my agent"
+
+      result =
+        lv
+        |> form("#import_agent_form", %{
+          "import" => %{"agent_token" => "AGENT_TOKEN", "confirmed" => "false"}
+        })
+        |> render_submit()
+
+      assert result =~ "Confirm that the AgentToken belongs to your agent"
+      refute result =~ "AGENT_TOKEN"
+    end
+
+    test "validates and imports an existing agent without exposing its token", %{
+      conn: conn,
+      operator: operator
+    } do
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        assert conn.request_path == "/v2/my/agent"
+
+        Req.Test.json(conn, %{
+          "data" => %{
+            "symbol" => "ORBITALIST",
+            "credits" => 42_000,
+            "headquarters" => "X1-UX81-A1",
+            "startingFaction" => "COSMIC",
+            "shipCount" => 1
+          }
+        })
+      end)
+
+      {:ok, lv, _html} = live(conn, ~p"/operators/settings")
+
+      result =
+        lv
+        |> form("#import_agent_form", %{
+          "import" => %{"agent_token" => "AGENT_TOKEN", "confirmed" => "true"}
+        })
+        |> render_submit()
+
+      assert result =~ "Agent ORBITALIST imported."
+      refute result =~ "AGENT_TOKEN"
+      assert [agent] = Agent.list_agents(Agent.get_operator!(operator.id))
+      assert agent.symbol == "ORBITALIST"
+    end
+  end
 end
