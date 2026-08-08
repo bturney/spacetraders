@@ -103,17 +103,28 @@ and local SQLite files (deps are shared across checkouts and left in place):
 scripts/teardown
 ```
 
-### LAN deployment
+### Project-host deployment
 
-The project-host deployment uses Docker Compose with a named SQLite volume. Copy
-`.env.example` to `.env`, set `PHX_HOST` to the public hostname (without the
-scheme), and set `SECRET_KEY_BASE` and `ENCRYPTION_KEY`, then run:
+The production deployment runs on the Tailscale machine `project-host`, reached
+with `tailscale ssh`. The deployment checkout is `/srv/projects/spacetraders`.
+Its `.env` stays on the host and contains
+`PHX_HOST`, `SECRET_KEY_BASE`, and `ENCRYPTION_KEY`; never copy those values
+into the repository. The named `spacetraders-data` volume holds the SQLite DB.
+
+Every push to `main` publishes both `latest` and an immutable `sha-<commit>`
+image tag. After the publish workflow succeeds, redeploy the host with the
+merged commit's immutable tag:
 
 ```sh
-docker compose -f compose.yaml -f compose.production.yaml up -d
+git fetch origin main
+SHA=$(git rev-parse origin/main)
+IMAGE="ghcr.io/bturney/spacetraders:sha-$SHA"
+tailscale ssh project-host "cd /srv/projects/spacetraders && test \"\$(SPACETRADERS_IMAGE=$IMAGE docker compose -f compose.yaml -f compose.production.yaml config --images | sort -u)\" = \"$IMAGE\" && SPACETRADERS_IMAGE=$IMAGE docker compose -f compose.yaml -f compose.production.yaml pull && SPACETRADERS_IMAGE=$IMAGE docker compose -f compose.yaml -f compose.production.yaml up -d && SPACETRADERS_IMAGE=$IMAGE docker compose -f compose.yaml -f compose.production.yaml ps && curl -fsS --retry 10 --retry-connrefused --retry-delay 1 http://127.0.0.1:4000/health"
 ```
 
-The one-shot `migrate` service completes before `web` starts. The dashboard is
-available on port 4000 and `GET /health` returns `{"status":"ok"}`. The
-production overlay pulls `ghcr.io/bturney/spacetraders:latest`, which is
-published automatically from `main`.
+The one-shot `migrate` service completes before `web` starts. A successful
+health check returns `{"status":"ok"}`. The production overlay accepts
+`SPACETRADERS_IMAGE` so deploys can pin an immutable tag or digest. For a
+rollback, first pull and validate the reference with `SPACETRADERS_IMAGE` as a
+command-level override, then persist it in the host `.env` only after that
+validation succeeds.
