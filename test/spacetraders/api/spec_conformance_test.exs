@@ -32,6 +32,7 @@ defmodule SpaceTraders.API.SpecConformanceTest do
     {:accept_contract, :post, "/my/contracts/{contractId}/accept", :data},
     {:deliver_contract, :post, "/my/contracts/{contractId}/deliver", :data},
     {:fulfill_contract, :post, "/my/contracts/{contractId}/fulfill", :data},
+    {:negotiate_contract, :post, "/my/ships/{shipSymbol}/negotiate/contract", :data},
     {:get_ships, :get, "/my/ships", :data},
     {:get_ship, :get, "/my/ships/{shipSymbol}", :data},
     {:navigate_ship, :post, "/my/ships/{shipSymbol}/navigate", :data},
@@ -40,6 +41,7 @@ defmodule SpaceTraders.API.SpecConformanceTest do
     {:extract_resources, :post, "/my/ships/{shipSymbol}/extract", :data},
     {:refuel_ship, :post, "/my/ships/{shipSymbol}/refuel", :data},
     {:sell_cargo, :post, "/my/ships/{shipSymbol}/sell", :data},
+    {:jettison_cargo, :post, "/my/ships/{shipSymbol}/jettison", :data},
     {:purchase_ship, :post, "/my/ships", :data},
     {:get_system, :get, "/systems/{systemSymbol}", :data},
     {:get_waypoints, :get, "/systems/{systemSymbol}/waypoints", :data},
@@ -111,6 +113,7 @@ defmodule SpaceTraders.API.SpecConformanceTest do
   defp arity_of(:accept_contract), do: 2
   defp arity_of(:deliver_contract), do: 5
   defp arity_of(:fulfill_contract), do: 2
+  defp arity_of(:negotiate_contract), do: 2
   defp arity_of(:get_ships), do: 1
   defp arity_of(:get_ship), do: 2
   defp arity_of(:navigate_ship), do: 3
@@ -119,6 +122,7 @@ defmodule SpaceTraders.API.SpecConformanceTest do
   defp arity_of(:extract_resources), do: 2
   defp arity_of(:refuel_ship), do: 2
   defp arity_of(:sell_cargo), do: 4
+  defp arity_of(:jettison_cargo), do: 4
   defp arity_of(:purchase_ship), do: 3
   defp arity_of(:get_system), do: 2
   defp arity_of(:get_waypoints), do: 3

@@ -111,6 +111,14 @@ defmodule SpaceTraders.API do
     )
   end
 
+  @doc "POST /my/ships/{symbol}/negotiate/contract — offers a new contract from a faction waypoint."
+  @spec negotiate_contract(token(), String.t()) :: result()
+  def negotiate_contract(token, ship_symbol) do
+    request(:post, "/my/ships/#{ship_symbol}/negotiate/contract", token,
+      as: {:map, %{contract: {:model, Contract}}}
+    )
+  end
+
   @doc "GET /my/ships"
   @spec get_ships(token()) :: result()
   def get_ships(token) do
@@ -185,6 +193,15 @@ defmodule SpaceTraders.API do
            cargo: {:model, ShipCargo},
            transaction: {:model, MarketTransaction}
          }}
+    )
+  end
+
+  @doc "POST /my/ships/{symbol}/jettison — discards cargo from a ship's hold."
+  @spec jettison_cargo(token(), String.t(), String.t(), pos_integer()) :: result()
+  def jettison_cargo(token, ship_symbol, trade_symbol, units) do
+    request(:post, "/my/ships/#{ship_symbol}/jettison", token,
+      json: %{symbol: trade_symbol, units: units},
+      as: {:map, %{cargo: {:model, ShipCargo}}}
     )
   end
 
