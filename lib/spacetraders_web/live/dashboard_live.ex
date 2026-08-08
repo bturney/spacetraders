@@ -47,7 +47,11 @@ defmodule SpaceTradersWeb.DashboardLive do
             .
           </div>
 
-          <.agent_section :for={overview <- @overviews} overview={overview} />
+          <.agent_section
+            :for={overview <- @overviews}
+            overview={overview}
+            cooldown_tick={@cooldown_tick}
+          />
         </div>
       <% else %>
         <div class="mx-auto max-w-lg py-16 text-center">
@@ -101,7 +105,8 @@ defmodule SpaceTradersWeb.DashboardLive do
         }
       end)
 
-    {:ok, assign(socket, operator: operator, overviews: overviews)}
+    Process.send_after(self(), :cooldown_tick, 1_000)
+    {:ok, assign(socket, operator: operator, overviews: overviews, cooldown_tick: 0)}
   end
 
   @impl true
@@ -128,6 +133,17 @@ defmodule SpaceTradersWeb.DashboardLive do
   end
 
   @impl true
+  def handle_event(action, %{"symbol" => ship_symbol}, socket)
+      when action in ["dock", "orbit", "extract"] do
+    with {:ok, agent} <- agent_for_ship(socket, ship_symbol),
+         {:ok, _result} <- ship_action(action, agent, ship_symbol) do
+      {:noreply, refresh_agent_fleet(socket, agent.id)}
+    else
+      {:error, reason} -> {:noreply, put_flash(socket, :error, live_error(reason))}
+    end
+  end
+
+  @impl true
   def handle_event(
         "buy_ship",
         %{"agent_id" => agent_id, "ship_type" => ship_type, "waypoint" => waypoint},
@@ -146,6 +162,12 @@ defmodule SpaceTradersWeb.DashboardLive do
   @impl true
   def handle_info({:ship_updated, agent_id, _ship_symbol}, socket) do
     {:noreply, refresh_agent_fleet(socket, agent_id)}
+  end
+
+  @impl true
+  def handle_info(:cooldown_tick, socket) do
+    Process.send_after(self(), :cooldown_tick, 1_000)
+    {:noreply, update(socket, :cooldown_tick, &(&1 + 1))}
   end
 
   defp agent_for_ship(socket, ship_symbol) do
@@ -201,6 +223,10 @@ defmodule SpaceTradersWeb.DashboardLive do
   defp validate_waypoint(""), do: {:error, "Enter a target waypoint."}
   defp validate_waypoint(_waypoint), do: :ok
 
+  defp ship_action("dock", agent, ship_symbol), do: Fleet.dock_ship(agent, ship_symbol)
+  defp ship_action("orbit", agent, ship_symbol), do: Fleet.orbit_ship(agent, ship_symbol)
+  defp ship_action("extract", agent, ship_symbol), do: Fleet.extract_resources(agent, ship_symbol)
+
   defp refresh_agent_fleet(socket, agent_id) do
     overview = Enum.find(socket.assigns.overviews, &(&1.agent.id == agent_id))
     if overview, do: refresh_agent(socket, overview.agent), else: socket
@@ -250,13 +276,18 @@ defmodule SpaceTradersWeb.DashboardLive do
   end
 
   attr :overview, :map, required: true
+  attr :cooldown_tick, :integer, required: true
 
   defp agent_section(assigns) do
     ~H"""
     <section class="space-y-4">
       <.agent_overview_card agent={@overview.agent} live={@overview.overview} />
       <.shipyard_panel listings={@overview.shipyards} agent_id={@overview.agent.id} />
-      <.fleet_grid agent={@overview.agent} ships={@overview.ships} />
+      <.fleet_grid
+        agent={@overview.agent}
+        ships={@overview.ships}
+        cooldown_tick={@cooldown_tick}
+      />
     </section>
     """
   end
@@ -334,6 +365,7 @@ defmodule SpaceTradersWeb.DashboardLive do
 
   attr :agent, :map, required: true
   attr :ships, :any, required: true
+  attr :cooldown_tick, :integer, required: true
 
   defp fleet_grid(assigns) do
     ~H"""
@@ -349,7 +381,7 @@ defmodule SpaceTradersWeb.DashboardLive do
             This agent has no ships.
           </div>
           <div :if={ships != []} class="grid grid-cols-1 gap-4 sm:grid-cols-2">
-            <.ship_card :for={ship <- ships} ship={ship} />
+            <.ship_card :for={ship <- ships} ship={ship} cooldown_tick={@cooldown_tick} />
           </div>
         <% {:error, reason} -> %>
           <div class="alert alert-warning">{live_error(reason)}</div>
@@ -359,6 +391,7 @@ defmodule SpaceTradersWeb.DashboardLive do
   end
 
   attr :ship, :map, required: true
+  attr :cooldown_tick, :integer, default: 0
 
   defp ship_card(assigns) do
     ~H"""
@@ -378,7 +411,7 @@ defmodule SpaceTradersWeb.DashboardLive do
         </div>
         <div>
           <div class="text-xs opacity-60">Cooldown</div>
-          <div>{cooldown_label(@ship)}</div>
+          <div>{cooldown_label(@ship, @cooldown_tick)}</div>
         </div>
       </div>
 
@@ -436,24 +469,27 @@ defmodule SpaceTradersWeb.DashboardLive do
           <div class="mt-2 flex flex-wrap gap-2">
             <button
               type="button"
-              disabled
-              title="Dock arrives in a later milestone"
+              phx-click="dock"
+              phx-value-symbol={@ship.symbol}
+              disabled={not dockable?(@ship)}
               class="btn btn-ghost btn-xs"
             >
               Dock
             </button>
             <button
               type="button"
-              disabled
-              title="Orbit arrives in a later milestone"
+              phx-click="orbit"
+              phx-value-symbol={@ship.symbol}
+              disabled={not orbitable?(@ship)}
               class="btn btn-ghost btn-xs"
             >
               Orbit
             </button>
             <button
               type="button"
-              disabled
-              title="Extract arrives in a later milestone"
+              phx-click="extract"
+              phx-value-symbol={@ship.symbol}
+              disabled={not extractable?(@ship)}
               class="btn btn-ghost btn-xs"
             >
               Extract
@@ -535,6 +571,10 @@ defmodule SpaceTradersWeb.DashboardLive do
 
   defp cooldown_active?(_), do: false
 
+  defp dockable?(ship), do: not cooldown_active?(ship) and ship_status(ship) == "IN_ORBIT"
+  defp orbitable?(ship), do: not cooldown_active?(ship) and ship_status(ship) == "DOCKED"
+  defp extractable?(ship), do: not cooldown_active?(ship) and ship_status(ship) == "IN_ORBIT"
+
   defp arrival_label(%{nav: %{route: %{arrival: arrival}}}) when is_binary(arrival) do
     case DateTime.from_iso8601(arrival) do
       {:ok, due_at, _offset} -> "arrives #{Calendar.strftime(due_at, "%m-%d %H:%M")} UTC"
@@ -544,12 +584,22 @@ defmodule SpaceTradersWeb.DashboardLive do
 
   defp arrival_label(_), do: "arrives soon"
 
-  defp cooldown_label(%{cooldown: %{remaining_seconds: seconds}})
+  defp cooldown_label(%{cooldown: %{remaining_seconds: seconds, expiration: expiration}}, _tick)
        when is_integer(seconds) and seconds > 0 do
-    "Cooldown #{seconds}s"
+    remaining = countdown_seconds(seconds, expiration)
+    if remaining > 0, do: "Cooldown #{remaining}s", else: "Ready"
   end
 
-  defp cooldown_label(_), do: "Ready"
+  defp cooldown_label(_, _tick), do: "Ready"
+
+  defp countdown_seconds(fallback, expiration) when is_binary(expiration) do
+    case DateTime.from_iso8601(expiration) do
+      {:ok, due_at, _offset} -> max(DateTime.diff(due_at, DateTime.utc_now(), :second), 0)
+      _ -> fallback
+    end
+  end
+
+  defp countdown_seconds(fallback, _expiration), do: fallback
 
   defp fuel_label(%{fuel: fuel}) do
     "#{current(fuel)} / #{capacity(fuel)}"

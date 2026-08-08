@@ -78,6 +78,38 @@ defmodule SpaceTraders.Fleet do
     {:error, :agent_token_missing}
   end
 
+  @doc "Docks a ship at its current waypoint."
+  def dock_ship(%AgentRecord{agent_token: agent_token}, ship_symbol)
+      when is_binary(agent_token) and agent_token != "" do
+    with :ok <- ShipServer.ensure_ready(ship_symbol) do
+      SpaceTraders.API.dock_ship(agent_token, ship_symbol)
+    end
+  end
+
+  def dock_ship(%AgentRecord{}, _ship_symbol), do: {:error, :agent_token_missing}
+
+  @doc "Puts a ship into orbit at its current waypoint."
+  def orbit_ship(%AgentRecord{agent_token: agent_token}, ship_symbol)
+      when is_binary(agent_token) and agent_token != "" do
+    with :ok <- ShipServer.ensure_ready(ship_symbol) do
+      SpaceTraders.API.orbit_ship(agent_token, ship_symbol)
+    end
+  end
+
+  def orbit_ship(%AgentRecord{}, _ship_symbol), do: {:error, :agent_token_missing}
+
+  @doc "Extracts resources and persists the returned cooldown on the timeline."
+  def extract_resources(%AgentRecord{agent_token: agent_token} = agent, ship_symbol)
+      when is_binary(agent_token) and agent_token != "" do
+    with :ok <- ShipServer.ensure_ready(ship_symbol),
+         {:ok, result} <- SpaceTraders.API.extract_resources(agent_token, ship_symbol),
+         :ok <- schedule_cooldown(agent, ship_symbol, result) do
+      {:ok, result}
+    end
+  end
+
+  def extract_resources(%AgentRecord{}, _ship_symbol), do: {:error, :agent_token_missing}
+
   @doc """
   Re-arms ship servers for every ship with a pending timeline event.
 
@@ -113,6 +145,31 @@ defmodule SpaceTraders.Fleet do
   end
 
   defp maybe_schedule_arrival(_agent, _ship_symbol, _result), do: :ok
+
+  defp schedule_cooldown(agent, ship_symbol, %{
+         cooldown: %{remaining_seconds: seconds, expiration: expiration}
+       })
+       when is_integer(seconds) and seconds > 0 do
+    due_at = parse_expiration(expiration, seconds)
+    schedule_cooldown_event(agent, ship_symbol, due_at)
+  end
+
+  defp schedule_cooldown(_agent, _ship_symbol, _result), do: :ok
+
+  defp parse_expiration(expiration, seconds) when is_binary(expiration) do
+    case DateTime.from_iso8601(expiration) do
+      {:ok, due_at, _offset} -> due_at
+      _ -> DateTime.add(DateTime.utc_now(), seconds, :second)
+    end
+  end
+
+  defp parse_expiration(_expiration, seconds),
+    do: DateTime.add(DateTime.utc_now(), seconds, :second)
+
+  defp schedule_cooldown_event(agent, ship_symbol, due_at) do
+    {:ok, event} = Timeline.schedule_event(:ship, ship_symbol, :cooldown, due_at)
+    ShipServer.arm(agent, ship_symbol, event)
+  end
 
   defp parse_arrival(%ShipNavRoute{arrival: arrival}) when is_binary(arrival) do
     case DateTime.from_iso8601(arrival) do
