@@ -194,6 +194,21 @@ defmodule SpaceTraders.Fleet do
   def sell_cargo(%AgentRecord{}, _ship_symbol, _trade_symbol, _units),
     do: {:error, :agent_token_missing}
 
+  @doc "Purchases cargo from a market the ship is docked at."
+  def purchase_cargo(%AgentRecord{agent_token: agent_token}, ship_symbol, trade_symbol, units)
+      when is_binary(agent_token) and agent_token != "" and is_integer(units) and units > 0 do
+    with :ok <- ShipServer.ensure_ready(ship_symbol) do
+      SpaceTraders.API.purchase_cargo(agent_token, ship_symbol, trade_symbol, units)
+    end
+  end
+
+  def purchase_cargo(%AgentRecord{agent_token: token}, _ship_symbol, _trade_symbol, _units)
+      when not is_binary(token) or token == "",
+      do: {:error, :agent_token_missing}
+
+  def purchase_cargo(%AgentRecord{}, _ship_symbol, _trade_symbol, _units),
+    do: {:error, :invalid_units}
+
   @doc "Refuels a ship at a marketplace that sells fuel."
   def refuel_ship(%AgentRecord{agent_token: agent_token}, ship_symbol)
       when is_binary(agent_token) and agent_token != "" do

@@ -220,6 +220,41 @@ defmodule SpaceTraders.API.ClientTest do
       assert {:ok, %{cargo: %Model.ShipCargo{units: 0}}} =
                API.jettison_cargo("TOKEN", "ORBITALIST-1", "IRON_ORE", 3)
     end
+
+    test "purchase_cargo/4 posts the good and units and decodes the transaction" do
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        assert conn.request_path == "/v2/my/ships/ORBITALIST-1/purchase"
+        assert conn.body_params == %{"symbol" => "SHIP_PLATING", "units" => 5}
+
+        Req.Test.json(conn, %{
+          "data" => %{
+            "agent" => %{"symbol" => "ORBITALIST", "credits" => 121_819},
+            "cargo" => %{
+              "capacity" => 40,
+              "units" => 5,
+              "inventory" => [%{"symbol" => "SHIP_PLATING", "units" => 5}]
+            },
+            "transaction" => %{
+              "shipSymbol" => "ORBITALIST-1",
+              "tradeSymbol" => "SHIP_PLATING",
+              "type" => "PURCHASE",
+              "units" => 5,
+              "pricePerUnit" => 14_384,
+              "totalPrice" => 71_920,
+              "waypointSymbol" => "X1-UX81-C42",
+              "timestamp" => "2026-01-01T00:00:00.000Z"
+            }
+          }
+        })
+      end)
+
+      assert {:ok,
+              %{
+                cargo: %Model.ShipCargo{units: 5},
+                transaction: %Model.MarketTransaction{total_price: 71_920}
+              }} =
+               API.purchase_cargo("TOKEN", "ORBITALIST-1", "SHIP_PLATING", 5)
+    end
   end
 
   describe "universe reads" do

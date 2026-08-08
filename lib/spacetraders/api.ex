@@ -196,6 +196,21 @@ defmodule SpaceTraders.API do
     )
   end
 
+  @doc "POST /my/ships/{symbol}/purchase — buys cargo from a market the ship is docked at."
+  @spec purchase_cargo(token(), String.t(), String.t(), pos_integer()) :: result()
+  def purchase_cargo(token, ship_symbol, trade_symbol, units) do
+    request(:post, "/my/ships/#{ship_symbol}/purchase", token,
+      json: %{symbol: trade_symbol, units: units},
+      as:
+        {:map,
+         %{
+           agent: {:model, Agent},
+           cargo: {:model, ShipCargo},
+           transaction: {:model, MarketTransaction}
+         }}
+    )
+  end
+
   @doc "POST /my/ships/{symbol}/jettison — discards cargo from a ship's hold."
   @spec jettison_cargo(token(), String.t(), String.t(), pos_integer()) :: result()
   def jettison_cargo(token, ship_symbol, trade_symbol, units) do

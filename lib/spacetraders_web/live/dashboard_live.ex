@@ -186,6 +186,29 @@ defmodule SpaceTradersWeb.DashboardLive do
 
   @impl true
   def handle_event(
+        "purchase_cargo",
+        %{"symbol" => ship_symbol, "trade_symbol" => trade_symbol, "units" => units},
+        socket
+      ) do
+    with {:ok, agent} <- agent_for_ship(socket, ship_symbol),
+         {:ok, units} <- parse_units(units),
+         {:ok, %{transaction: transaction}} <-
+           Fleet.purchase_cargo(agent, ship_symbol, trade_symbol, units) do
+      socket = refresh_agent(socket, agent)
+
+      {:noreply,
+       put_flash(
+         socket,
+         :info,
+         "Bought #{transaction.units} #{trade_symbol} for #{transaction.total_price} credits."
+       )}
+    else
+      {:error, reason} -> {:noreply, put_flash(socket, :error, live_error(reason))}
+    end
+  end
+
+  @impl true
+  def handle_event(
         "jettison_cargo",
         %{"symbol" => ship_symbol, "trade_symbol" => trade_symbol, "units" => units},
         socket
@@ -635,11 +658,14 @@ defmodule SpaceTradersWeb.DashboardLive do
             <div :for={good <- listing.market.trade_goods || []} class="space-y-2">
               <div class="flex items-center justify-between gap-3 text-sm">
                 <span>{good.symbol}</span>
-                <span class="font-mono">Sell {credits_label(good.sell_price)} cr</span>
+                <span class="font-mono">
+                  Buy {credits_label(good.purchase_price)} cr <span class="opacity-50">·</span>
+                  Sell {credits_label(good.sell_price)} cr
+                </span>
               </div>
               <form
                 :for={ship <- listing.ships}
-                :if={cargo_item(ship, good.symbol)}
+                :if={sellable?(ship, good)}
                 phx-submit="sell_cargo"
                 class="flex items-center gap-2"
               >
@@ -657,6 +683,25 @@ defmodule SpaceTradersWeb.DashboardLive do
                   class="input input-bordered input-xs w-20"
                 />
                 <button type="submit" class="btn btn-secondary btn-xs">Sell</button>
+              </form>
+              <form
+                :for={ship <- listing.ships}
+                :if={buyable?(ship, good)}
+                phx-submit="purchase_cargo"
+                class="flex items-center gap-2"
+              >
+                <input type="hidden" name="symbol" value={ship.symbol} />
+                <input type="hidden" name="trade_symbol" value={good.symbol} />
+                <span class="flex-1 text-xs opacity-70">{ship.symbol}</span>
+                <input
+                  type="number"
+                  name="units"
+                  min="1"
+                  max={cargo_space(ship, good)}
+                  value="1"
+                  class="input input-bordered input-xs w-20"
+                />
+                <button type="submit" class="btn btn-primary btn-xs">Buy</button>
               </form>
             </div>
           </div>
@@ -1115,6 +1160,21 @@ defmodule SpaceTradersWeb.DashboardLive do
 
   defp cargo_inventory(%{cargo: %{inventory: inventory}}) when is_list(inventory), do: inventory
   defp cargo_inventory(_), do: []
+
+  defp sellable?(ship, good), do: cargo_item(ship, good.symbol) != nil
+
+  defp buyable?(ship, good) do
+    (good.purchase_price || 0) > 0 and cargo_space(ship, good) > 0
+  end
+
+  defp cargo_space(ship, good) do
+    space = capacity(ship.cargo) - cargo_units(ship.cargo)
+
+    case good.trade_volume do
+      volume when is_integer(volume) and volume > 0 -> min(space, volume)
+      _ -> space
+    end
+  end
 
   defp browser_ships({:ok, ships}) when is_list(ships), do: ships
   defp browser_ships(_), do: []
