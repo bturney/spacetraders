@@ -106,8 +106,9 @@ scripts/teardown
 
 ### Project-host deployment
 
-The production deployment runs on the `project-host` SSH alias from
-`/srv/projects/spacetraders`. Its `.env` stays on the host and contains
+The production deployment runs on the Tailscale machine `project-host`, reached
+with `tailscale ssh`. The deployment checkout is `/srv/projects/spacetraders`.
+Its `.env` stays on the host and contains
 `PHX_HOST`, `SECRET_KEY_BASE`, and `ENCRYPTION_KEY`; never copy those values
 into the repository. The named `spacetraders-data` volume holds the SQLite DB.
 
@@ -115,7 +116,7 @@ Every push to `main` publishes `ghcr.io/bturney/spacetraders:latest`. After the
 publish workflow succeeds, redeploy the host with:
 
 ```sh
-ssh project-host
+tailscale ssh project-host
 cd /srv/projects/spacetraders
 docker compose -f compose.yaml -f compose.production.yaml pull
 docker compose -f compose.yaml -f compose.production.yaml up -d
