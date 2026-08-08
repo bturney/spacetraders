@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+# Execute the complete unattended lifecycle for one runner-assigned task.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+if [[ -z "${AGENT_TASK_ID:-}" || -z "${AGENT_ATTEMPT:-}" ]]; then
+  artifact_dir="$PROJECT_ROOT/artifacts/invalid-task/attempt-unknown"
+  mkdir -p "$artifact_dir"
+  printf '{"task_class":"qa","scenario":"missing-runner-identity","result":"expected_failure","human_interventions":0,"retries":0,"failure_class":"runner/missing_task_identity","artifacts":"%s"}\n' \
+    "$artifact_dir" > "$artifact_dir/result.json"
+  echo "AGENT_TASK_ID and AGENT_ATTEMPT are required runner inputs." >&2
+  exit 64
+fi
+
+source "$SCRIPT_DIR/_agent_context.sh"
+agent_context_require
+
+if [ -e "$AGENT_ARTIFACT_DIR/input.json" ]; then
+  echo "Attempt $AGENT_TASK_ID/$AGENT_ATTEMPT already has evidence; allocate a new attempt." >&2
+  exit 73
+fi
+
+run_status=1
+failure_class="execution/unclassified"
+export AGENT_STARTED_EPOCH="$(date +%s)"
+
+# A task owns mutable Mix dependencies and uses an ephemeral HTTP port, so two
+# isolated worktrees can verify concurrently without sharing either resource.
+export MIX_DEPS_PATH="$AGENT_DEPS_DIR"
+export MIX_HOME="$PROJECT_ROOT/.agent-mix/$AGENT_TASK_ID/attempt-$AGENT_ATTEMPT"
+export PORT="${AGENT_PORT:-0}"
+
+cleanup() {
+  local status=$?
+  if [ "$status" -eq 0 ]; then
+    run_status=0
+    failure_class=""
+  fi
+
+  set +e
+  AGENT_RUN_STATUS="$run_status" AGENT_FAILURE_CLASS="$failure_class" "$SCRIPT_DIR/agent-teardown.sh"
+  local teardown_status=$?
+  set -e
+  if [ "$status" -eq 0 ] && [ "$teardown_status" -ne 0 ]; then
+    exit "$teardown_status"
+  fi
+
+  exit "$status"
+}
+
+trap cleanup EXIT
+"$SCRIPT_DIR/agent-bootstrap.sh" || {
+  run_status=$?
+  failure_class="provision/bootstrap_failed"
+  exit "$run_status"
+}
+"$SCRIPT_DIR/agent-verify.sh" || {
+  run_status=$?
+  failure_class="prove/verification_failed"
+  exit "$run_status"
+}

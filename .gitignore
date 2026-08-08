@@ -14,6 +14,11 @@ erl_crash.dump
 /tmp/
 spacetraders-*.tar
 
+# Task-scoped proof transcripts from scripts/agent-run.
+/artifacts/
+/.agent-deps/
+/.agent-mix/
+
 # Produced assets
 /priv/static/assets/
 /priv/static/cache_manifest.json
