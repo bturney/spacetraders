@@ -51,6 +51,7 @@ defmodule SpaceTradersWeb.DashboardLive do
             :for={overview <- @overviews}
             overview={overview}
             cooldown_tick={@cooldown_tick}
+            waypoint_filters={@waypoint_filters}
           />
         </div>
       <% else %>
@@ -95,11 +96,23 @@ defmodule SpaceTradersWeb.DashboardLive do
     overviews = Enum.map(agents, &Fleet.command_snapshot/1)
 
     Process.send_after(self(), :cooldown_tick, 1_000)
-    {:ok, assign(socket, operator: operator, overviews: overviews, cooldown_tick: 0)}
+
+    {:ok,
+     assign(socket,
+       operator: operator,
+       overviews: overviews,
+       cooldown_tick: 0,
+       waypoint_filters: %{}
+     )}
   end
 
   @impl true
-  def handle_event("navigate", %{"symbol" => ship_symbol, "waypoint_symbol" => waypoint}, socket) do
+  def handle_event(
+        action,
+        %{"symbol" => ship_symbol, "waypoint_symbol" => waypoint},
+        socket
+      )
+      when action in ["navigate", "browser_navigate"] do
     waypoint = String.trim(waypoint || "")
 
     with {:ok, agent} <- agent_for_ship(socket, ship_symbol),
@@ -123,7 +136,7 @@ defmodule SpaceTradersWeb.DashboardLive do
 
   @impl true
   def handle_event(action, %{"symbol" => ship_symbol}, socket)
-      when action in ["dock", "orbit", "extract"] do
+      when action in ["dock", "orbit", "extract", "refuel"] do
     with {:ok, agent} <- agent_for_ship(socket, ship_symbol),
          {:ok, _result} <- ship_action(action, agent, ship_symbol) do
       {:noreply, refresh_agent_fleet(socket, agent.id)}
@@ -169,6 +182,36 @@ defmodule SpaceTradersWeb.DashboardLive do
     else
       {:error, reason} -> {:noreply, put_flash(socket, :error, live_error(reason))}
     end
+  end
+
+  @impl true
+  def handle_event(
+        "jettison_cargo",
+        %{"symbol" => ship_symbol, "trade_symbol" => trade_symbol, "units" => units},
+        socket
+      ) do
+    with {:ok, agent} <- agent_for_ship(socket, ship_symbol),
+         {:ok, units} <- parse_units(units),
+         {:ok, _result} <- Fleet.jettison_cargo(agent, ship_symbol, trade_symbol, units) do
+      {:noreply,
+       put_flash(
+         refresh_agent_fleet(socket, agent.id),
+         :info,
+         "Jettisoned #{units} #{trade_symbol}."
+       )}
+    else
+      {:error, reason} -> {:noreply, put_flash(socket, :error, live_error(reason))}
+    end
+  end
+
+  @impl true
+  def handle_event(
+        "waypoint_filter",
+        %{"agent_id" => agent_id, "waypoint_type" => type},
+        socket
+      ) do
+    filters = Map.put(socket.assigns.waypoint_filters, agent_id, type || "ALL")
+    {:noreply, assign(socket, waypoint_filters: filters)}
   end
 
   @impl true
@@ -230,6 +273,20 @@ defmodule SpaceTradersWeb.DashboardLive do
   end
 
   @impl true
+  def handle_event(
+        "negotiate_contract",
+        %{"agent_id" => agent_id, "ship_symbol" => ship_symbol},
+        socket
+      ) do
+    with {:ok, agent} <- agent_for_negotiate(socket, agent_id, ship_symbol),
+         {:ok, _result} <- SpaceTraders.Contracts.negotiate_contract(agent, ship_symbol) do
+      {:noreply, put_flash(refresh_agent(socket, agent), :info, "New contract negotiated.")}
+    else
+      {:error, reason} -> {:noreply, put_flash(socket, :error, live_error(reason))}
+    end
+  end
+
+  @impl true
   def handle_info({:ship_updated, agent_id, _ship_symbol}, socket) do
     {:noreply, refresh_agent_fleet(socket, agent_id)}
   end
@@ -272,6 +329,20 @@ defmodule SpaceTradersWeb.DashboardLive do
     )
   end
 
+  defp agent_for_negotiate(socket, agent_id, ship_symbol) do
+    Enum.find_value(
+      socket.assigns.overviews,
+      {:error, "That ship is not in this agent's fleet."},
+      fn overview ->
+        if to_string(overview.agent.id) == agent_id and
+             match?({:ok, ships} when is_list(ships), overview.ships) and
+             Enum.any?(elem(overview.ships, 1), &(&1.symbol == ship_symbol)) do
+          {:ok, overview.agent}
+        end
+      end
+    )
+  end
+
   defp snapshot_for_purchase(socket, agent_id) do
     Enum.find_value(
       socket.assigns.overviews,
@@ -299,6 +370,7 @@ defmodule SpaceTradersWeb.DashboardLive do
   defp ship_action("dock", agent, ship_symbol), do: Fleet.dock_ship(agent, ship_symbol)
   defp ship_action("orbit", agent, ship_symbol), do: Fleet.orbit_ship(agent, ship_symbol)
   defp ship_action("extract", agent, ship_symbol), do: Fleet.extract_resources(agent, ship_symbol)
+  defp ship_action("refuel", agent, ship_symbol), do: Fleet.refuel_ship(agent, ship_symbol)
 
   defp refresh_agent_fleet(socket, agent_id) do
     overview = Enum.find(socket.assigns.overviews, &(&1.agent.id == agent_id))
@@ -342,7 +414,7 @@ defmodule SpaceTradersWeb.DashboardLive do
           <% else %>
             <h2 class="mt-2 text-2xl font-bold tracking-tight">Start your first Mission</h2>
             <p class="mt-2 max-w-2xl text-sm leading-6 opacity-70">
-              Accept a Contract below, then use a Ship to complete its first Leg. Your dashboard will keep the Fleet state visible as you learn.
+              Negotiate a new Contract with a faction waypoint your Ship is at, then accept it below and use a Ship to complete its first Leg.
             </p>
           <% end %>
         </div>
@@ -354,6 +426,7 @@ defmodule SpaceTradersWeb.DashboardLive do
 
   attr :overview, :map, required: true
   attr :cooldown_tick, :integer, required: true
+  attr :waypoint_filters, :map, default: %{}
 
   defp agent_section(assigns) do
     ~H"""
@@ -365,17 +438,28 @@ defmodule SpaceTradersWeb.DashboardLive do
         cooldown_tick={@cooldown_tick}
       />
       <div class="grid gap-5 lg:grid-cols-2">
-        <.contract_panel contracts={@overview.contracts} agent_id={@overview.agent.id} />
+        <.contract_panel
+          contracts={@overview.contracts}
+          ships={@overview.ships}
+          agent_id={@overview.agent.id}
+        />
         <div class="space-y-5">
           <.shipyard_panel listings={@overview.shipyards} agent_id={@overview.agent.id} />
           <.market_panel listings={@overview.markets} />
         </div>
       </div>
+      <.waypoint_browser
+        waypoints={@overview.waypoints}
+        ships={@overview.ships}
+        agent_id={@overview.agent.id}
+        filter={Map.get(@waypoint_filters, to_string(@overview.agent.id), "ALL")}
+      />
     </section>
     """
   end
 
   attr :contracts, :any, required: true
+  attr :ships, :any, required: true
   attr :agent_id, :integer, required: true
 
   defp contract_panel(assigns) do
@@ -384,7 +468,14 @@ defmodule SpaceTradersWeb.DashboardLive do
       <% {:error, reason} -> %>
         <div class="alert alert-warning">Contracts unavailable: {live_error(reason)}</div>
       <% {:ok, []} -> %>
-        <div class="alert alert-outline">No contracts available.</div>
+        <div class="card border border-primary/30 bg-base-200 p-4 sm:p-5">
+          <p class="eyebrow">Mission briefing</p>
+          <h3 class="mt-1 font-semibold">No contracts available</h3>
+          <p class="mt-1 text-sm opacity-70">
+            Negotiate a new contract with a faction waypoint your Ship is at.
+          </p>
+          <.negotiate_form ships={@ships} agent_id={@agent_id} />
+        </div>
       <% {:ok, contracts} -> %>
         <div :for={contract <- contracts} class="card border border-primary/30 bg-base-200 p-4 sm:p-5">
           <div class="flex flex-wrap items-start justify-between gap-3">
@@ -446,7 +537,50 @@ defmodule SpaceTradersWeb.DashboardLive do
             <button type="submit" class="btn btn-primary min-h-11 btn-sm">Fulfill contract</button>
           </form>
         </div>
+        <%= if negotiable?(@contracts) do %>
+          <div class="card border border-primary/30 bg-base-200 p-4 sm:p-5">
+            <p class="eyebrow">Mission briefing</p>
+            <h3 class="mt-1 font-semibold">Negotiate a new contract</h3>
+            <.negotiate_form ships={@ships} agent_id={@agent_id} />
+          </div>
+        <% end %>
     <% end %>
+    """
+  end
+
+  attr :ships, :any, required: true
+  attr :agent_id, :integer, required: true
+
+  defp negotiate_form(assigns) do
+    ~H"""
+    <form phx-submit="negotiate_contract" class="mt-4">
+      <input type="hidden" name="agent_id" value={@agent_id} />
+      <%= case @ships do %>
+        <% {:ok, ships} when ships != [] -> %>
+          <label class="label">
+            <span class="label-text">Ship at a faction waypoint</span>
+          </label>
+          <select
+            name="ship_symbol"
+            class="select select-bordered select-sm w-full font-mono"
+            required
+          >
+            <option :for={ship <- ships} value={ship.symbol}>
+              {ship.symbol} @ {ship_location(ship)}
+            </option>
+          </select>
+        <% _ -> %>
+          <input
+            name="ship_symbol"
+            placeholder="Ship symbol at a faction waypoint"
+            class="input input-bordered input-sm w-full font-mono"
+            required
+          />
+      <% end %>
+      <button type="submit" class="btn btn-primary min-h-11 btn-sm mt-3">
+        Negotiate contract
+      </button>
+    </form>
     """
   end
 
@@ -530,6 +664,69 @@ defmodule SpaceTradersWeb.DashboardLive do
       <% {:error, reason} -> %>
         <div class="alert alert-warning">{live_error(reason)}</div>
     <% end %>
+    """
+  end
+
+  attr :waypoints, :any, required: true
+  attr :ships, :any, required: true
+  attr :agent_id, :integer, required: true
+  attr :filter, :string, default: "ALL"
+
+  defp waypoint_browser(assigns) do
+    ~H"""
+    <div class="card border border-base-300/70 bg-base-200 p-4 sm:p-5">
+      <div class="flex flex-wrap items-end justify-between gap-3">
+        <div>
+          <p class="eyebrow">Waypoint browser</p>
+          <h3 class="mt-1 font-semibold">Waypoints in this system</h3>
+        </div>
+        <form phx-change="waypoint_filter" id="waypoint-filter" class="flex items-center gap-2">
+          <input type="hidden" name="agent_id" value={@agent_id} />
+          <select name="waypoint_type" class="select select-bordered select-sm">
+            <option value="ALL" selected={@filter == "ALL"}>All types</option>
+            <option value="ENGINEERED_ASTEROID" selected={@filter == "ENGINEERED_ASTEROID"}>
+              Engineered asteroids
+            </option>
+            <option value="SHIPYARD" selected={@filter == "SHIPYARD"}>Shipyards</option>
+            <option value="MARKETPLACE" selected={@filter == "MARKETPLACE"}>Marketplaces</option>
+          </select>
+        </form>
+      </div>
+
+      <%= case filtered_waypoints(@waypoints, @filter) do %>
+        <% {:ok, []} -> %>
+          <div class="alert alert-outline mt-3">No waypoints match this filter.</div>
+        <% {:ok, waypoints} -> %>
+          <div class="mt-3 space-y-2">
+            <div
+              :for={waypoint <- waypoints}
+              class="flex flex-wrap items-center justify-between gap-2 rounded border border-base-300/50 px-3 py-2 text-sm"
+            >
+              <div class="flex flex-wrap items-center gap-2">
+                <span class="font-mono font-semibold">{waypoint.symbol}</span>
+                <span class="badge badge-ghost badge-sm">{waypoint.type}</span>
+                <span
+                  :for={trait <- waypoint.traits || []}
+                  class="badge badge-outline badge-sm"
+                >
+                  {trait.symbol}
+                </span>
+              </div>
+              <form phx-submit="browser_navigate" class="flex items-center gap-2">
+                <input type="hidden" name="waypoint_symbol" value={waypoint.symbol} />
+                <select name="symbol" class="select select-bordered select-xs font-mono" required>
+                  <option :for={ship <- browser_ships(@ships)} value={ship.symbol}>
+                    {ship.symbol}
+                  </option>
+                </select>
+                <button type="submit" class="btn btn-primary btn-xs">Navigate</button>
+              </form>
+            </div>
+          </div>
+        <% {:error, reason} -> %>
+          <div class="alert alert-warning mt-3">Waypoints unavailable: {live_error(reason)}</div>
+      <% end %>
+    </div>
     """
   end
 
@@ -649,6 +846,28 @@ defmodule SpaceTradersWeb.DashboardLive do
           value={current(@ship.cargo)}
           max={capacity(@ship.cargo)}
         />
+        <div
+          :for={item <- cargo_inventory(@ship)}
+          class="mt-2 flex items-center justify-between gap-2 rounded border border-base-300/50 px-3 py-2 text-sm"
+        >
+          <div>
+            <span class="font-mono font-semibold">{item.symbol}</span>
+            <span class="ml-2 opacity-60">{item.units} units</span>
+          </div>
+          <form phx-submit="jettison_cargo" class="flex items-center gap-2">
+            <input type="hidden" name="symbol" value={@ship.symbol} />
+            <input type="hidden" name="trade_symbol" value={item.symbol} />
+            <input
+              type="number"
+              name="units"
+              min="1"
+              max={item.units}
+              value={item.units}
+              class="input input-bordered input-xs w-16"
+            />
+            <button type="submit" class="btn btn-ghost btn-xs">Jettison</button>
+          </form>
+        </div>
       </div>
 
       <div class="mt-4">
@@ -708,6 +927,15 @@ defmodule SpaceTradersWeb.DashboardLive do
             >
               Extract
             </button>
+            <button
+              type="button"
+              phx-click="refuel"
+              phx-value-symbol={@ship.symbol}
+              disabled={not refuelable?(@ship)}
+              class="btn btn-ghost min-h-10 btn-sm"
+            >
+              Refuel
+            </button>
           </div>
         <% end %>
       </div>
@@ -740,6 +968,13 @@ defmodule SpaceTradersWeb.DashboardLive do
   end
 
   defp contract_ready?(_), do: false
+
+  defp negotiable?({:ok, contracts}) when is_list(contracts) do
+    not Enum.any?(contracts, &(not &1.accepted and not &1.fulfilled)) and
+      not Enum.any?(contracts, &(&1.accepted and not &1.fulfilled))
+  end
+
+  defp negotiable?(_), do: false
 
   defp faction_label(_agent, %{starting_faction: faction}) when is_binary(faction), do: faction
   defp faction_label(agent, _), do: agent.faction
@@ -824,6 +1059,7 @@ defmodule SpaceTradersWeb.DashboardLive do
   defp dockable?(ship), do: not cooldown_active?(ship) and ship_status(ship) == "IN_ORBIT"
   defp orbitable?(ship), do: not cooldown_active?(ship) and ship_status(ship) == "DOCKED"
   defp extractable?(ship), do: not cooldown_active?(ship) and ship_status(ship) == "IN_ORBIT"
+  defp refuelable?(ship), do: not cooldown_active?(ship) and ship_status(ship) == "DOCKED"
 
   defp arrival_label(%{nav: %{route: %{arrival: arrival}}}) when is_binary(arrival) do
     case DateTime.from_iso8601(arrival) do
@@ -876,6 +1112,30 @@ defmodule SpaceTradersWeb.DashboardLive do
   end
 
   defp cargo_item(_, _), do: nil
+
+  defp cargo_inventory(%{cargo: %{inventory: inventory}}) when is_list(inventory), do: inventory
+  defp cargo_inventory(_), do: []
+
+  defp browser_ships({:ok, ships}) when is_list(ships), do: ships
+  defp browser_ships(_), do: []
+
+  defp filtered_waypoints({:ok, waypoints}, filter) when is_list(waypoints) do
+    {:ok,
+     Enum.filter(waypoints, fn waypoint ->
+       case waypoint_type_filter(filter) do
+         :all -> true
+         {:type, type} -> waypoint.type == type
+         {:trait, trait} -> Enum.any?(waypoint.traits || [], &(&1.symbol == trait))
+       end
+     end)}
+  end
+
+  defp filtered_waypoints(other, _filter), do: other
+
+  defp waypoint_type_filter("ENGINEERED_ASTEROID"), do: {:type, "ENGINEERED_ASTEROID"}
+  defp waypoint_type_filter("SHIPYARD"), do: {:trait, "SHIPYARD"}
+  defp waypoint_type_filter("MARKETPLACE"), do: {:trait, "MARKETPLACE"}
+  defp waypoint_type_filter(_), do: :all
 
   defp capacity(nil), do: 0
   defp capacity(%{capacity: capacity}) when is_integer(capacity), do: capacity

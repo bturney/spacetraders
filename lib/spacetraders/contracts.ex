@@ -75,6 +75,14 @@ defmodule SpaceTraders.Contracts do
 
   def fulfill_contract(%AgentRecord{}, _contract_id), do: {:error, :agent_token_missing}
 
+  @doc "Negotiates a new contract with the faction at a Ship's current waypoint."
+  def negotiate_contract(%AgentRecord{agent_token: token}, ship_symbol)
+      when is_binary(token) and token != "" do
+    SpaceTraders.API.negotiate_contract(token, ship_symbol)
+  end
+
+  def negotiate_contract(%AgentRecord{}, _ship_symbol), do: {:error, :agent_token_missing}
+
   defp parse_deadline(%Contract{terms: %{deadline: deadline}}) when is_binary(deadline) do
     case DateTime.from_iso8601(deadline) do
       {:ok, date_time, _offset} -> {:ok, date_time}

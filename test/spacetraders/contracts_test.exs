@@ -74,6 +74,16 @@ defmodule SpaceTraders.ContractsTest do
     assert {:ok, %{contract: _}} = Contracts.fulfill_contract(agent(), "ctr-1")
   end
 
+  test "negotiating a contract delegates to the API" do
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      assert conn.request_path == "/v2/my/ships/SHIP-1/negotiate/contract"
+      Req.Test.json(conn, %{"data" => %{"contract" => contract_body()}})
+    end)
+
+    assert {:ok, %{contract: %{id: "ctr-1"}}} = Contracts.negotiate_contract(agent(), "SHIP-1")
+    assert {:error, :agent_token_missing} = Contracts.negotiate_contract(agent(nil), "SHIP-1")
+  end
+
   test "returns readable local errors for missing credentials and invalid units" do
     assert {:error, :agent_token_missing} = Contracts.list_contracts(agent(nil))
 

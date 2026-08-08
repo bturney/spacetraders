@@ -125,20 +125,26 @@ defmodule SpaceTraders.FleetTest do
             Req.Test.json(conn, %{"data" => [ship_body("FLEET-SHIP")]})
 
           "/v2/systems/X1-UX81/waypoints" ->
-            Req.Test.json(conn, %{
-              "data" => [
-                %{
-                  "symbol" => "X1-UX81-A1",
-                  "systemSymbol" => "X1-UX81",
-                  "type" => "ORBITAL_STATION",
-                  "x" => 1,
-                  "y" => 2,
-                  "traits" => [
-                    %{"symbol" => "SHIPYARD", "name" => "Shipyard", "description" => ""}
+            case conn.query_params["page"] do
+              page when page in [nil, "1"] ->
+                Req.Test.json(conn, %{
+                  "data" => [
+                    %{
+                      "symbol" => "X1-UX81-A1",
+                      "systemSymbol" => "X1-UX81",
+                      "type" => "ORBITAL_STATION",
+                      "x" => 1,
+                      "y" => 2,
+                      "traits" => [
+                        %{"symbol" => "SHIPYARD", "name" => "Shipyard", "description" => ""}
+                      ]
+                    }
                   ]
-                }
-              ]
-            })
+                })
+
+              _ ->
+                Req.Test.json(conn, %{"data" => []})
+            end
 
           "/v2/systems/X1-UX81/waypoints/X1-UX81-A1/shipyard" ->
             Req.Test.json(conn, %{
@@ -183,6 +189,9 @@ defmodule SpaceTraders.FleetTest do
             conn
             |> Map.put(:status, 500)
             |> Req.Test.json(%{})
+
+          "/v2/systems/X1-UX81/waypoints" ->
+            Req.Test.json(conn, %{"data" => []})
         end
       end)
 
@@ -405,6 +414,57 @@ defmodule SpaceTraders.FleetTest do
                Fleet.sell_cargo(agent, "FLEET-SHIP", "IRON_ORE", 5)
     end
 
+    test "refuels a ship through the game API" do
+      agent = agent_fixture()
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        assert conn.request_path == "/v2/my/ships/FLEET-SHIP/refuel"
+
+        Req.Test.json(conn, %{
+          "data" => %{
+            "agent" => %{"symbol" => agent.symbol, "credits" => 41_800},
+            "cargo" => %{"capacity" => 40, "units" => 0, "inventory" => []},
+            "fuel" => %{
+              "capacity" => 200,
+              "current" => 200,
+              "consumed" => %{"amount" => 100, "timestamp" => "2026-01-01T00:00:00.000Z"}
+            },
+            "transaction" => %{
+              "waypointSymbol" => "X1-UX81-A1",
+              "shipSymbol" => "FLEET-SHIP",
+              "tradeSymbol" => "FUEL",
+              "type" => "PURCHASE",
+              "totalPrice" => 200,
+              "units" => 100,
+              "pricePerUnit" => 2,
+              "timestamp" => "2026-01-01T00:00:00.000Z"
+            }
+          }
+        })
+      end)
+
+      assert {:ok, %{fuel: %{current: 200}}} = Fleet.refuel_ship(agent, "FLEET-SHIP")
+    end
+
+    test "jettisons cargo through the game API" do
+      agent = agent_fixture()
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        assert conn.request_path == "/v2/my/ships/FLEET-SHIP/jettison"
+        assert conn.body_params == %{"symbol" => "COPPER_ORE", "units" => 5}
+
+        Req.Test.json(conn, %{
+          "data" => %{"cargo" => %{"capacity" => 40, "units" => 0, "inventory" => []}}
+        })
+      end)
+
+      assert {:ok, %{cargo: %{units: 0}}} =
+               Fleet.jettison_cargo(agent, "FLEET-SHIP", "COPPER_ORE", 5)
+
+      assert {:error, :invalid_units} =
+               Fleet.jettison_cargo(agent, "FLEET-SHIP", "COPPER_ORE", 0)
+    end
+
     test "docks and orbits a ship" do
       agent = agent_fixture()
 
@@ -476,6 +536,36 @@ defmodule SpaceTraders.FleetTest do
       assert {:error, :cooldown_active} = Fleet.dock_ship(agent, "FLEET-SHIP")
       assert {:error, :cooldown_active} = Fleet.orbit_ship(agent, "FLEET-SHIP")
       assert {:error, :cooldown_active} = Fleet.extract_resources(agent, "FLEET-SHIP")
+    end
+  end
+
+  describe "list_waypoints/1" do
+    test "collects every page of the agent's headquarters system" do
+      agent = agent_fixture()
+
+      waypoint = %{
+        "symbol" => "X1-UX81-A1",
+        "systemSymbol" => "X1-UX81",
+        "type" => "ORBITAL_STATION",
+        "traits" => [%{"symbol" => "SHIPYARD"}]
+      }
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        assert conn.request_path == "/v2/systems/X1-UX81/waypoints"
+
+        case conn.query_params["page"] do
+          "1" -> Req.Test.json(conn, %{"data" => List.duplicate(waypoint, 20)})
+          "2" -> Req.Test.json(conn, %{"data" => [waypoint]})
+          _ -> Req.Test.json(conn, %{"data" => []})
+        end
+      end)
+
+      assert {:ok, waypoints} = Fleet.list_waypoints(agent)
+      assert length(waypoints) == 21
+    end
+
+    test "returns a readable error for an agent without stored credentials" do
+      assert {:error, :agent_token_missing} = Fleet.list_waypoints(agent_fixture(nil))
     end
   end
 

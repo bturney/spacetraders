@@ -206,6 +206,20 @@ defmodule SpaceTraders.API.ClientTest do
                 cargo: %Model.ShipCargo{units: 5}
               }} = API.extract_resources("TOKEN", "ORBITALIST-2")
     end
+
+    test "jettison_cargo/4 posts the good and units and decodes cargo" do
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        assert conn.request_path == "/v2/my/ships/ORBITALIST-1/jettison"
+        assert conn.body_params == %{"symbol" => "IRON_ORE", "units" => 3}
+
+        Req.Test.json(conn, %{
+          "data" => %{"cargo" => %{"capacity" => 40, "units" => 0, "inventory" => []}}
+        })
+      end)
+
+      assert {:ok, %{cargo: %Model.ShipCargo{units: 0}}} =
+               API.jettison_cargo("TOKEN", "ORBITALIST-1", "IRON_ORE", 3)
+    end
   end
 
   describe "universe reads" do

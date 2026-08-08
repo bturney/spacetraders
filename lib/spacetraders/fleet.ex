@@ -57,8 +57,44 @@ defmodule SpaceTraders.Fleet do
       ships: ships,
       contracts: Contracts.list_contracts(agent),
       shipyards: shipyard_listings(agent, ships),
-      markets: market_listings(agent, ships)
+      markets: market_listings(agent, ships),
+      waypoints: list_waypoints(agent)
     }
+  end
+
+  @doc """
+  Lists the waypoints of the Agent's headquarters system.
+
+  The game paginates waypoint responses, so pages are fetched until the system
+  is fully collected (capped at `@max_waypoint_pages`). Returns
+  `{:ok, [%SpaceTraders.API.Model.Waypoint{}]}` or an API error.
+  """
+  def list_waypoints(%AgentRecord{agent_token: agent_token, headquarters: headquarters})
+      when is_binary(agent_token) and agent_token != "" and is_binary(headquarters) do
+    with {:ok, system} <- system_from_headquarters(headquarters) do
+      fetch_waypoint_pages(agent_token, system)
+    end
+  end
+
+  def list_waypoints(%AgentRecord{}), do: {:error, :agent_token_missing}
+
+  @max_waypoint_pages 5
+
+  defp fetch_waypoint_pages(agent_token, system) do
+    Enum.reduce_while(1..@max_waypoint_pages, {:ok, []}, fn page, {:ok, acc} ->
+      case SpaceTraders.API.get_waypoints(agent_token, system, limit: 20, page: page) do
+        {:ok, []} -> {:halt, {:ok, acc}}
+        {:ok, waypoints} -> {:cont, {:ok, acc ++ waypoints}}
+        error -> {:halt, error}
+      end
+    end)
+  end
+
+  defp system_from_headquarters(headquarters) do
+    case Regex.run(~r/^(.+)-[^-]+$/, headquarters, capture: :all) do
+      [_, system] -> {:ok, system}
+      _ -> {:error, :invalid_headquarters}
+    end
   end
 
   @doc """
@@ -157,6 +193,31 @@ defmodule SpaceTraders.Fleet do
 
   def sell_cargo(%AgentRecord{}, _ship_symbol, _trade_symbol, _units),
     do: {:error, :agent_token_missing}
+
+  @doc "Refuels a ship at a marketplace that sells fuel."
+  def refuel_ship(%AgentRecord{agent_token: agent_token}, ship_symbol)
+      when is_binary(agent_token) and agent_token != "" do
+    with :ok <- ShipServer.ensure_ready(ship_symbol) do
+      SpaceTraders.API.refuel_ship(agent_token, ship_symbol)
+    end
+  end
+
+  def refuel_ship(%AgentRecord{}, _ship_symbol), do: {:error, :agent_token_missing}
+
+  @doc "Jettisons cargo from a ship's hold and returns the updated cargo."
+  def jettison_cargo(%AgentRecord{agent_token: agent_token}, ship_symbol, trade_symbol, units)
+      when is_binary(agent_token) and agent_token != "" and is_integer(units) and units > 0 do
+    with :ok <- ShipServer.ensure_ready(ship_symbol) do
+      SpaceTraders.API.jettison_cargo(agent_token, ship_symbol, trade_symbol, units)
+    end
+  end
+
+  def jettison_cargo(%AgentRecord{agent_token: token}, _ship_symbol, _trade_symbol, _units)
+      when not is_binary(token) or token == "",
+      do: {:error, :agent_token_missing}
+
+  def jettison_cargo(%AgentRecord{}, _ship_symbol, _trade_symbol, _units),
+    do: {:error, :invalid_units}
 
   @doc """
   Re-arms ship servers for every ship with a pending timeline event.
