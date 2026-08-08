@@ -7,6 +7,7 @@ defmodule SpaceTradersWeb.OperatorLive.Mint do
   use SpaceTradersWeb, :live_view
 
   alias SpaceTraders.Agent
+  alias SpaceTraders.Agent.Scope
   alias SpaceTraders.API.Model.FactionSymbol
 
   @impl true
@@ -76,10 +77,11 @@ defmodule SpaceTradersWeb.OperatorLive.Mint do
 
   @impl true
   def mount(_params, _session, socket) do
-    operator = socket.assigns.current_scope.operator
+    operator = Agent.get_operator!(socket.assigns.current_scope.operator.id)
 
     socket =
       socket
+      |> assign(:current_scope, Scope.for_operator(operator))
       |> assign(:factions, FactionSymbol.values())
       |> assign(:account_token_linked?, not is_nil(operator.account_token))
       |> assign_form(Agent.change_mint())
@@ -108,7 +110,7 @@ defmodule SpaceTradersWeb.OperatorLive.Mint do
         {:noreply, assign_form(socket, Map.put(changeset, :action, :insert))}
 
       {:error, %{message: message}} ->
-        {:noreply, socket |> put_flash(:error, message)}
+        {:noreply, socket |> put_flash(:error, mint_error_message(message))}
     end
   end
 
@@ -120,5 +122,13 @@ defmodule SpaceTradersWeb.OperatorLive.Mint do
   defp assign_form(socket, %Ecto.Changeset{} = changeset) do
     form = to_form(changeset, as: "agent")
     assign(socket, form: form)
+  end
+
+  defp mint_error_message(message) do
+    if String.contains?(message, "Expected \"account-token\" but received agent-token") do
+      "Use an AccountToken to mint agents. An AgentToken belongs in the existing-agent import form."
+    else
+      message
+    end
   end
 end

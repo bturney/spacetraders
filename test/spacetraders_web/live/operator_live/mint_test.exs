@@ -122,6 +122,33 @@ defmodule SpaceTradersWeb.OperatorLive.MintTest do
       assert result =~ "Symbol is already in use"
     end
 
+    test "explains when an AgentToken is linked instead of an AccountToken", %{conn: conn} do
+      operator = operator_fixture()
+      {:ok, operator} = Agent.link_account_token(operator, "AGENT_TOKEN")
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        conn
+        |> Map.put(:status, 401)
+        |> Req.Test.json(%{
+          "error" => %{
+            "code" => 4101,
+            "message" =>
+              "Token has an invalid subject claim. Expected \"account-token\" but received agent-token."
+          }
+        })
+      end)
+
+      {:ok, lv, _html} = conn |> log_in_operator(operator) |> live(~p"/agents/new")
+
+      result =
+        lv
+        |> form("#mint_form", @mint_form)
+        |> render_submit()
+
+      assert result =~ "Use an AccountToken to mint agents"
+      assert result =~ "AgentToken belongs in the existing-agent import form"
+    end
+
     test "renders validation errors for an invalid symbol", %{conn: conn} do
       operator = operator_fixture()
       {:ok, operator} = Agent.link_account_token(operator, "ACCOUNT_TOKEN")

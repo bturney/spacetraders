@@ -4,6 +4,7 @@ defmodule SpaceTradersWeb.OperatorLive.Settings do
   on_mount {SpaceTradersWeb.OperatorAuth, :require_sudo_mode}
 
   alias SpaceTraders.Agent
+  alias SpaceTraders.Agent.Scope
 
   @impl true
   def render(assigns) do
@@ -187,11 +188,12 @@ defmodule SpaceTradersWeb.OperatorLive.Settings do
     true = Agent.sudo_mode?(operator)
 
     case Agent.link_account_token(operator, operator_params["account_token"]) do
-      {:ok, %{account_token: account_token}} ->
+      {:ok, updated_operator} ->
         socket =
           socket
           |> put_flash(:info, "AccountToken linked.")
-          |> assign(:account_token_linked?, not is_nil(account_token))
+          |> assign(:current_scope, Scope.for_operator(updated_operator))
+          |> assign(:account_token_linked?, not is_nil(updated_operator.account_token))
           |> assign_account_token_form()
 
         {:noreply, socket}

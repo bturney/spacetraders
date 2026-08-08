@@ -268,6 +268,14 @@ defmodule SpaceTradersWeb.OperatorLive.SettingsTest do
 
       assert result =~ "AccountToken linked."
       assert Agent.get_operator!(operator.id).account_token == "ACCOUNT_TOKEN"
+
+      {:ok, _mint_lv, mint_html} =
+        lv
+        |> element("nav a", "Mint agent")
+        |> render_click()
+        |> follow_redirect(conn, ~p"/agents/new")
+
+      assert mint_html =~ ~s(<input type="text" name="agent[symbol]")
     end
 
     test "rejects a blank AccountToken", %{conn: conn} do
