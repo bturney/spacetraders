@@ -26,9 +26,8 @@ scripts/bootstrap
 Deps are shared across checkouts under `$HOME/.local/opt/spacetraders-toolchain/deps`;
 `_build` stays per-checkout.
 
-If `mix`/`erl` are already on your PATH, they are used as-is. The installed
-toolchain lives in `$HOME/.local/opt/spacetraders-toolchain` (override with
-`SPACETRADERS_TOOLCHAIN_DIR`).
+Scripts use the pinned installation at `$HOME/.local/opt/spacetraders-toolchain`
+(override with `SPACETRADERS_TOOLCHAIN_DIR`).
 
 ### Verify
 

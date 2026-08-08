@@ -10,10 +10,18 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/_toolchain.sh"
 
-if command -v mix >/dev/null 2>&1 && command -v erl >/dev/null 2>&1; then
-  echo "Using Elixir/OTP already on PATH:"
-  mix --version
-  elixir --version
+mkdir -p "$TOOLCHAIN_DIR"
+if ! command -v flock >/dev/null 2>&1; then
+  echo "Missing runner prerequisite: flock (util-linux) is required to serialize toolchain installation." >&2
+  exit 1
+fi
+
+exec 9>"$TOOLCHAIN_DIR/.install.lock"
+flock 9
+
+if [ -x "$ELIXIR_DIR/bin/mix" ] && [ -x "$OTP_DIR/bin/erl" ]; then
+  export PATH="$ELIXIR_DIR/bin:$OTP_DIR/bin:$PATH"
+  echo "Using pinned OTP $OTP_VERSION + Elixir $ELIXIR_VERSION"
 else
   if [ ! -x "$OTP_DIR/bin/erl" ]; then
     echo "Installing Erlang/OTP $OTP_VERSION -> $OTP_DIR"
@@ -32,9 +40,10 @@ else
     rm "$TOOLCHAIN_DIR/elixir.zip"
   fi
 
-  export PATH="$ELIXIR_DIR/bin:$OTP_DIR/bin:$PATH"
-  echo "Toolchain installed. OTP $OTP_VERSION + Elixir $ELIXIR_VERSION"
 fi
+
+export PATH="$ELIXIR_DIR/bin:$OTP_DIR/bin:$PATH"
+flock -u 9
 
 mix local.hex --force
 mix local.rebar --force
