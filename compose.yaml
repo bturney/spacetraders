@@ -6,6 +6,7 @@ services:
       DATABASE_PATH: /data/spacetraders.db
       SECRET_KEY_BASE: ${SECRET_KEY_BASE:?set SECRET_KEY_BASE in the host .env}
       ENCRYPTION_KEY: ${ENCRYPTION_KEY:?set ENCRYPTION_KEY in the host .env}
+      PHX_HOST: ${PHX_HOST:?set PHX_HOST in the host .env}
     volumes:
       - spacetraders-data:/data
 
@@ -15,7 +16,7 @@ services:
       DATABASE_PATH: /data/spacetraders.db
       SECRET_KEY_BASE: ${SECRET_KEY_BASE:?set SECRET_KEY_BASE in the host .env}
       ENCRYPTION_KEY: ${ENCRYPTION_KEY:?set ENCRYPTION_KEY in the host .env}
-      PHX_HOST: ${PHX_HOST:-localhost}
+      PHX_HOST: ${PHX_HOST:?set PHX_HOST in the host .env}
       PORT: 4000
     ports:
       - "${WEB_PORT:-4000}:4000"

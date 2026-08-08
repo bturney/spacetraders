@@ -107,7 +107,8 @@ scripts/teardown
 ### LAN deployment
 
 The project-host deployment uses Docker Compose with a named SQLite volume. Copy
-`.env.example` to `.env`, set `SECRET_KEY_BASE` and `ENCRYPTION_KEY`, then run:
+`.env.example` to `.env`, set `PHX_HOST` to the public hostname (without the
+scheme), and set `SECRET_KEY_BASE` and `ENCRYPTION_KEY`, then run:
 
 ```sh
 docker compose -f compose.yaml -f compose.production.yaml up -d

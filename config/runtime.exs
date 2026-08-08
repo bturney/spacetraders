@@ -76,7 +76,12 @@ if config_env() == :prod do
 
   config :spacetraders, SpaceTraders.Secret, key: Base.decode64!(encryption_key)
 
-  host = System.get_env("PHX_HOST") || "example.com"
+  host =
+    System.get_env("PHX_HOST") ||
+      raise """
+      environment variable PHX_HOST is missing.
+      Set it to the public hostname used to access the dashboard.
+      """
 
   config :spacetraders, :dns_cluster_query, System.get_env("DNS_CLUSTER_QUERY")
 
