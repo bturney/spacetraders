@@ -103,3 +103,17 @@ and local SQLite files (deps are shared across checkouts and left in place):
 ```sh
 scripts/teardown
 ```
+
+### LAN deployment
+
+The project-host deployment uses Docker Compose with a named SQLite volume. Copy
+`.env.example` to `.env`, set `SECRET_KEY_BASE` and `ENCRYPTION_KEY`, then run:
+
+```sh
+docker compose -f compose.yaml -f compose.production.yaml up -d
+```
+
+The one-shot `migrate` service completes before `web` starts. The dashboard is
+available on port 4000 and `GET /health` returns `{"status":"ok"}`. The
+production overlay pulls `ghcr.io/bturney/spacetraders:latest`, which is
+published automatically from `main`.

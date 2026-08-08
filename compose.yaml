@@ -1,0 +1,29 @@
+services:
+  migrate:
+    build: .
+    command: ["bin/spacetraders", "eval", "SpaceTraders.Release.migrate()"]
+    environment:
+      DATABASE_PATH: /data/spacetraders.db
+      SECRET_KEY_BASE: ${SECRET_KEY_BASE:?set SECRET_KEY_BASE in the host .env}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:?set ENCRYPTION_KEY in the host .env}
+    volumes:
+      - spacetraders-data:/data
+
+  web:
+    build: .
+    environment:
+      DATABASE_PATH: /data/spacetraders.db
+      SECRET_KEY_BASE: ${SECRET_KEY_BASE:?set SECRET_KEY_BASE in the host .env}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:?set ENCRYPTION_KEY in the host .env}
+      PHX_HOST: ${PHX_HOST:-localhost}
+      PORT: 4000
+    ports:
+      - "${WEB_PORT:-4000}:4000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    volumes:
+      - spacetraders-data:/data
+
+volumes:
+  spacetraders-data:

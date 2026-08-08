@@ -1,0 +1,14 @@
+/.git
+/.github
+/_build
+/deps
+/cover
+/tmp
+*.db
+*.db-*
+.env
+.env.*
+!.env.example
+node_modules
+priv/static/assets
+priv/static/cache_manifest.json
