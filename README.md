@@ -104,17 +104,26 @@ and local SQLite files (deps are shared across checkouts and left in place):
 scripts/teardown
 ```
 
-### LAN deployment
+### Project-host deployment
 
-The project-host deployment uses Docker Compose with a named SQLite volume. Copy
-`.env.example` to `.env`, set `PHX_HOST` to the public hostname (without the
-scheme), and set `SECRET_KEY_BASE` and `ENCRYPTION_KEY`, then run:
+The production deployment runs on the `project-host` SSH alias from
+`/srv/projects/spacetraders`. Its `.env` stays on the host and contains
+`PHX_HOST`, `SECRET_KEY_BASE`, and `ENCRYPTION_KEY`; never copy those values
+into the repository. The named `spacetraders-data` volume holds the SQLite DB.
+
+Every push to `main` publishes `ghcr.io/bturney/spacetraders:latest`. After the
+publish workflow succeeds, redeploy the host with:
 
 ```sh
+ssh project-host
+cd /srv/projects/spacetraders
+docker compose -f compose.yaml -f compose.production.yaml pull
 docker compose -f compose.yaml -f compose.production.yaml up -d
+docker compose -f compose.yaml -f compose.production.yaml ps
+curl -fsS http://127.0.0.1:4000/health
 ```
 
-The one-shot `migrate` service completes before `web` starts. The dashboard is
-available on port 4000 and `GET /health` returns `{"status":"ok"}`. The
-production overlay pulls `ghcr.io/bturney/spacetraders:latest`, which is
-published automatically from `main`.
+The one-shot `migrate` service completes before `web` starts. A successful
+health check returns `{"status":"ok"}`. To roll back, set
+`SPACETRADERS_IMAGE` to a known image digest or tag in the host `.env`, then
+repeat the `pull` and `up -d` commands.
