@@ -22,7 +22,7 @@ defmodule SpaceTraders.Fleet do
   alias SpaceTraders.Fleet.Ship
   alias SpaceTraders.Fleet.ShipServer
   alias SpaceTraders.Repo
-  alias SpaceTraders.{Agent, Shipyard}
+  alias SpaceTraders.{Agent, Market, Shipyard}
   alias SpaceTraders.Timeline
 
   @doc """
@@ -55,7 +55,8 @@ defmodule SpaceTraders.Fleet do
       agent: agent,
       overview: Agent.agent_overview(agent),
       ships: ships,
-      shipyards: shipyard_listings(agent, ships)
+      shipyards: shipyard_listings(agent, ships),
+      markets: market_listings(agent, ships)
     }
   end
 
@@ -145,6 +146,17 @@ defmodule SpaceTraders.Fleet do
 
   def extract_resources(%AgentRecord{}, _ship_symbol), do: {:error, :agent_token_missing}
 
+  @doc "Sells cargo from a ship and returns the updated cargo and transaction."
+  def sell_cargo(%AgentRecord{agent_token: agent_token}, ship_symbol, trade_symbol, units)
+      when is_binary(agent_token) and agent_token != "" do
+    with :ok <- ShipServer.ensure_ready(ship_symbol) do
+      SpaceTraders.API.sell_cargo(agent_token, ship_symbol, trade_symbol, units)
+    end
+  end
+
+  def sell_cargo(%AgentRecord{}, _ship_symbol, _trade_symbol, _units),
+    do: {:error, :agent_token_missing}
+
   @doc """
   Re-arms ship servers for every ship with a pending timeline event.
 
@@ -227,6 +239,9 @@ defmodule SpaceTraders.Fleet do
 
   defp shipyard_listings(agent, {:ok, ships}), do: Shipyard.listings(agent, ships)
   defp shipyard_listings(_agent, _ships), do: {:ok, []}
+
+  defp market_listings(agent, {:ok, ships}), do: Market.listings(agent, ships)
+  defp market_listings(_agent, _ships), do: {:ok, []}
 
   defp offered_at?({:ok, listings}, ship_type, waypoint) do
     if Enum.any?(listings, &offered_in_listing?(&1, ship_type, waypoint)) do

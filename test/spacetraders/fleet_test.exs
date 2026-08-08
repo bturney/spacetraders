@@ -371,6 +371,34 @@ defmodule SpaceTraders.FleetTest do
   end
 
   describe "ship actions" do
+    test "sells cargo through the game API" do
+      agent = agent_fixture()
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        assert conn.request_path == "/v2/my/ships/FLEET-SHIP/sell"
+
+        Req.Test.json(conn, %{
+          "data" => %{
+            "agent" => %{"symbol" => agent.symbol, "credits" => 42_400},
+            "cargo" => %{"capacity" => 40, "units" => 7, "inventory" => []},
+            "transaction" => %{
+              "shipSymbol" => "FLEET-SHIP",
+              "tradeSymbol" => "IRON_ORE",
+              "type" => "SELL",
+              "units" => 5,
+              "pricePerUnit" => 80,
+              "totalPrice" => 400,
+              "waypointSymbol" => "X1-UX81-A1",
+              "timestamp" => "2026-01-01T00:00:00.000Z"
+            }
+          }
+        })
+      end)
+
+      assert {:ok, %{cargo: %{units: 7}, transaction: %{total_price: 400}}} =
+               Fleet.sell_cargo(agent, "FLEET-SHIP", "IRON_ORE", 5)
+    end
+
     test "docks and orbits a ship" do
       agent = agent_fixture()
 

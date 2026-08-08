@@ -99,6 +99,135 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       assert html =~ "COSMIC"
     end
 
+    test "shows an on-site market and selling cargo refreshes credits", %{
+      conn: conn,
+      operator: operator
+    } do
+      agent = agent_fixture(operator)
+
+      {:ok, state} =
+        Agent.start_link(fn -> %{credits: 42_000, cargo_units: 12, sale_attempts: 0} end)
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case conn.request_path do
+          "/v2/my/agent" ->
+            Req.Test.json(conn, %{
+              "data" =>
+                Map.put(
+                  agent_overview_body(agent.symbol),
+                  "credits",
+                  Agent.get(state, & &1.credits)
+                )
+            })
+
+          "/v2/my/ships" ->
+            Req.Test.json(conn, %{
+              "data" => [
+                ship_body("ORBITALIST-1", %{
+                  "cargo" => %{
+                    "capacity" => 40,
+                    "units" => Agent.get(state, & &1.cargo_units),
+                    "inventory" => [
+                      %{
+                        "symbol" => "IRON_ORE",
+                        "name" => "Iron Ore",
+                        "units" => Agent.get(state, & &1.cargo_units)
+                      }
+                    ]
+                  }
+                })
+              ]
+            })
+
+          "/v2/systems/X1-UX81/waypoints" ->
+            Req.Test.json(conn, %{
+              "data" => [
+                %{
+                  "symbol" => "X1-UX81-A1",
+                  "systemSymbol" => "X1-UX81",
+                  "type" => "ORBITAL_STATION",
+                  "traits" => [
+                    %{"symbol" => "MARKETPLACE"},
+                    %{"symbol" => "SHIPYARD"}
+                  ]
+                }
+              ]
+            })
+
+          "/v2/systems/X1-UX81/waypoints/X1-UX81-A1/shipyard" ->
+            Req.Test.json(conn, %{"data" => %{"symbol" => "X1-UX81-A1", "ships" => []}})
+
+          "/v2/systems/X1-UX81/waypoints/X1-UX81-A1/market" ->
+            Req.Test.json(conn, %{
+              "data" => %{
+                "symbol" => "X1-UX81-A1",
+                "tradeGoods" => [
+                  %{
+                    "symbol" => "IRON_ORE",
+                    "type" => "EXPORT",
+                    "sellPrice" => 80,
+                    "purchasePrice" => 100,
+                    "supply" => "HIGH",
+                    "tradeVolume" => 20
+                  }
+                ]
+              }
+            })
+
+          "/v2/my/ships/ORBITALIST-1/sell" ->
+            if Agent.get(state, &(&1.sale_attempts == 0)) do
+              Agent.update(state, &%{&1 | credits: 42_400, cargo_units: 7, sale_attempts: 1})
+
+              Req.Test.json(conn, %{
+                "data" => %{
+                  "agent" => %{},
+                  "cargo" => %{"capacity" => 40, "units" => 7, "inventory" => []},
+                  "transaction" => %{
+                    "shipSymbol" => "ORBITALIST-1",
+                    "tradeSymbol" => "IRON_ORE",
+                    "type" => "SELL",
+                    "units" => 5,
+                    "pricePerUnit" => 80,
+                    "totalPrice" => 400,
+                    "waypointSymbol" => "X1-UX81-A1",
+                    "timestamp" => "2026-01-01T00:00:00.000Z"
+                  }
+                }
+              })
+            else
+              conn
+              |> Map.put(:status, 422)
+              |> Req.Test.json(%{
+                "error" => %{
+                  "code" => 4218,
+                  "message" => "You do not have enough cargo."
+                }
+              })
+            end
+        end
+      end)
+
+      {:ok, lv, html} = live(conn, ~p"/")
+      assert html =~ "Market"
+      assert html =~ "IRON_ORE"
+      assert html =~ "Sell 80 cr"
+
+      html =
+        lv
+        |> element("form[phx-submit=\"sell_cargo\"]")
+        |> render_submit(%{symbol: "ORBITALIST-1", trade_symbol: "IRON_ORE", units: "5"})
+
+      assert html =~ "Sold 5 IRON_ORE for 400 credits."
+      assert html =~ "42,400"
+
+      html =
+        lv
+        |> element("form[phx-submit=\"sell_cargo\"]")
+        |> render_submit(%{symbol: "ORBITALIST-1", trade_symbol: "IRON_ORE", units: "5"})
+
+      assert html =~ "You do not have enough cargo."
+    end
+
     test "renders a fleet card grid with location, fuel, cargo and nav state", %{
       conn: conn,
       operator: operator

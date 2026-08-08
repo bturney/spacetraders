@@ -148,6 +148,29 @@ defmodule SpaceTradersWeb.DashboardLive do
   end
 
   @impl true
+  def handle_event(
+        "sell_cargo",
+        %{"symbol" => ship_symbol, "trade_symbol" => trade_symbol, "units" => units},
+        socket
+      ) do
+    with {:ok, agent} <- agent_for_ship(socket, ship_symbol),
+         {:ok, units} <- parse_units(units),
+         {:ok, %{transaction: transaction}} <-
+           Fleet.sell_cargo(agent, ship_symbol, trade_symbol, units) do
+      socket = refresh_agent(socket, agent)
+
+      {:noreply,
+       put_flash(
+         socket,
+         :info,
+         "Sold #{transaction.units} #{trade_symbol} for #{transaction.total_price} credits."
+       )}
+    else
+      {:error, reason} -> {:noreply, put_flash(socket, :error, live_error(reason))}
+    end
+  end
+
+  @impl true
   def handle_info({:ship_updated, agent_id, _ship_symbol}, socket) do
     {:noreply, refresh_agent_fleet(socket, agent_id)}
   end
@@ -188,6 +211,17 @@ defmodule SpaceTradersWeb.DashboardLive do
 
   defp validate_waypoint(""), do: {:error, "Enter a target waypoint."}
   defp validate_waypoint(_waypoint), do: :ok
+
+  defp parse_units(units) when is_integer(units) and units > 0, do: {:ok, units}
+
+  defp parse_units(units) when is_binary(units) do
+    case Integer.parse(units) do
+      {units, ""} when units > 0 -> {:ok, units}
+      _ -> {:error, "Enter a positive number of units."}
+    end
+  end
+
+  defp parse_units(_), do: {:error, "Enter a positive number of units."}
 
   defp ship_action("dock", agent, ship_symbol), do: Fleet.dock_ship(agent, ship_symbol)
   defp ship_action("orbit", agent, ship_symbol), do: Fleet.orbit_ship(agent, ship_symbol)
@@ -245,6 +279,7 @@ defmodule SpaceTradersWeb.DashboardLive do
     <section class="space-y-4">
       <.agent_overview_card agent={@overview.agent} live={@overview.overview} />
       <.shipyard_panel listings={@overview.shipyards} agent_id={@overview.agent.id} />
+      <.market_panel listings={@overview.markets} />
       <.fleet_grid
         agent={@overview.agent}
         ships={@overview.ships}
@@ -278,6 +313,53 @@ defmodule SpaceTradersWeb.DashboardLive do
                 <input type="hidden" name="waypoint" value={listing.waypoint} />
                 <span class="font-mono">{credits_label(ship.purchase_price)} cr</span>
                 <button type="submit" class="btn btn-primary btn-xs">Buy</button>
+              </form>
+            </div>
+          </div>
+        </div>
+      <% {:error, reason} -> %>
+        <div class="alert alert-warning">{live_error(reason)}</div>
+    <% end %>
+    """
+  end
+
+  attr :listings, :any, required: true
+
+  defp market_panel(assigns) do
+    ~H"""
+    <%= case @listings do %>
+      <% {:ok, []} -> %>
+        <div class="alert alert-outline">No market is available for an on-site ship.</div>
+      <% {:ok, listings} -> %>
+        <div class="card border border-secondary/30 bg-base-200 p-4">
+          <h3 class="font-semibold">Market</h3>
+          <div :for={listing <- listings} class="mt-4 space-y-4">
+            <div class="font-mono text-sm">{listing.waypoint}</div>
+            <div :for={good <- listing.market.trade_goods || []} class="space-y-2">
+              <div class="flex items-center justify-between gap-3 text-sm">
+                <span>{good.symbol}</span>
+                <span class="font-mono">Sell {credits_label(good.sell_price)} cr</span>
+              </div>
+              <form
+                :for={ship <- listing.ships}
+                :if={cargo_item(ship, good.symbol)}
+                phx-submit="sell_cargo"
+                class="flex items-center gap-2"
+              >
+                <input type="hidden" name="symbol" value={ship.symbol} />
+                <input type="hidden" name="trade_symbol" value={good.symbol} />
+                <span class="flex-1 text-xs opacity-70">
+                  {ship.symbol}: {cargo_units(cargo_item(ship, good.symbol))} units
+                </span>
+                <input
+                  type="number"
+                  name="units"
+                  min="1"
+                  max={cargo_units(cargo_item(ship, good.symbol))}
+                  value={cargo_units(cargo_item(ship, good.symbol))}
+                  class="input input-bordered input-xs w-20"
+                />
+                <button type="submit" class="btn btn-secondary btn-xs">Sell</button>
               </form>
             </div>
           </div>
@@ -491,6 +573,7 @@ defmodule SpaceTradersWeb.DashboardLive do
     do: "The agent does not have enough credits for that ship."
 
   defp live_error(:shipyard_unavailable), do: "That shipyard is not available."
+  defp live_error(:market_unavailable), do: "That market is not available."
 
   defp live_error(%{type: :insufficient_credits}),
     do: "The agent does not have enough credits for that ship."
@@ -584,6 +667,12 @@ defmodule SpaceTradersWeb.DashboardLive do
   defp cargo_units(nil), do: 0
   defp cargo_units(%{units: units}) when is_integer(units), do: units
   defp cargo_units(_), do: 0
+
+  defp cargo_item(%{cargo: %{inventory: inventory}}, symbol) when is_list(inventory) do
+    Enum.find(inventory, &(&1.symbol == symbol))
+  end
+
+  defp cargo_item(_, _), do: nil
 
   defp capacity(nil), do: 0
   defp capacity(%{capacity: capacity}) when is_integer(capacity), do: capacity
