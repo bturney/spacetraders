@@ -40,6 +40,13 @@ defmodule SpaceTraders.Fleet do
 
   def list_ships(%AgentRecord{}), do: {:error, :agent_token_missing}
 
+  @doc "Records a newly purchased ship so it can be re-armed after a restart."
+  def record_ship(%AgentRecord{} = agent, ship_symbol, ship_type) do
+    %Ship{}
+    |> Ecto.Changeset.change(symbol: ship_symbol, ship_type: ship_type, agent_id: agent.id)
+    |> Repo.insert(on_conflict: :nothing, conflict_target: :symbol)
+  end
+
   @doc """
   Navigates a ship to a waypoint.
 

@@ -6,12 +6,15 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
   import SpaceTraders.ShipBody
 
   alias SpaceTraders.Timeline
+  alias SpaceTraders.Fleet.Ship
+  alias SpaceTraders.Repo
 
   defp stub_live_game(agent_overview, ships) do
     Req.Test.stub(SpaceTraders.API, fn conn ->
       case conn.request_path do
         "/v2/my/agent" -> Req.Test.json(conn, %{"data" => agent_overview})
         "/v2/my/ships" -> Req.Test.json(conn, %{"data" => ships})
+        "/v2/systems/X1-UX81/waypoints" -> Req.Test.json(conn, %{"data" => []})
       end
     end)
   end
@@ -228,6 +231,9 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
                 "nav" => nav_body("IN_TRANSIT", arrival: arrival, destination: "X1-UX81-A2")
               }
             })
+
+          {"/v2/systems/X1-UX81/waypoints", "GET"} ->
+            Req.Test.json(conn, %{"data" => []})
         end
       end)
 
@@ -269,6 +275,9 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
                 })
               ]
             })
+
+          {"/v2/systems/X1-UX81/waypoints", "GET"} ->
+            Req.Test.json(conn, %{"data" => []})
         end
       end)
 
@@ -276,6 +285,81 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
 
       assert html =~ "Cooldown 42s"
       assert html =~ ~s(<button type="submit" disabled)
+    end
+
+    test "shows an on-site shipyard and buys a mining drone", %{conn: conn, operator: operator} do
+      agent = agent_fixture(operator)
+      {:ok, state} = Agent.start_link(fn -> %{bought: false} end)
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case {conn.request_path, conn.method} do
+          {"/v2/my/agent", "GET"} ->
+            Req.Test.json(conn, %{"data" => agent_overview_body(agent.symbol)})
+
+          {"/v2/my/ships", "GET"} ->
+            ships =
+              if Agent.get(state, & &1.bought),
+                do: [ship_body("ORBITALIST-1"), ship_body("ORBITALIST-2")],
+                else: [ship_body("ORBITALIST-1")]
+
+            Req.Test.json(conn, %{"data" => ships})
+
+          {"/v2/systems/X1-UX81/waypoints", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => [
+                %{
+                  "symbol" => "X1-UX81-A1",
+                  "systemSymbol" => "X1-UX81",
+                  "type" => "ORBITAL_STATION",
+                  "x" => 1,
+                  "y" => 2,
+                  "traits" => [
+                    %{"symbol" => "SHIPYARD", "name" => "Shipyard", "description" => ""}
+                  ]
+                }
+              ]
+            })
+
+          {"/v2/systems/X1-UX81/waypoints/X1-UX81-A1/shipyard", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => %{
+                "symbol" => "X1-UX81-A1",
+                "modificationsFee" => 100,
+                "shipTypes" => [%{"type" => "SHIP_MINING_DRONE"}],
+                "ships" => [
+                  %{
+                    "type" => "SHIP_MINING_DRONE",
+                    "name" => "Mining Drone",
+                    "purchasePrice" => 50
+                  }
+                ]
+              }
+            })
+
+          {"/v2/my/ships", "POST"} ->
+            Agent.update(state, &%{&1 | bought: true})
+
+            Req.Test.json(conn, %{
+              "data" => %{
+                "agent" => %{},
+                "ship" => ship_body("ORBITALIST-2"),
+                "transaction" => %{}
+              }
+            })
+        end
+      end)
+
+      {:ok, lv, html} = live(conn, ~p"/")
+      assert html =~ "Mining Drone"
+
+      html = lv |> element("form[phx-submit=\"buy_ship\"]") |> render_submit()
+      assert html =~ "SHIP_MINING_DRONE purchased"
+      assert html =~ "ORBITALIST-2"
+
+      assert %Ship{ship_type: "SHIP_MINING_DRONE", agent_id: agent_id} =
+               Repo.get_by(Ship, symbol: "ORBITALIST-2")
+
+      assert agent_id == agent.id
     end
 
     test "unblocks the card when the ship arrives", %{conn: conn, operator: operator} do
@@ -306,6 +390,9 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
             Req.Test.json(conn, %{
               "data" => ship_body("ORBITALIST-1", %{"nav" => nav_body("DOCKED")})
             })
+
+          {"/v2/systems/X1-UX81/waypoints", "GET"} ->
+            Req.Test.json(conn, %{"data" => []})
         end
       end)
 
