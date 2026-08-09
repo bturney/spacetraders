@@ -2,7 +2,7 @@ defmodule SpaceTraders.Shipyard do
   @moduledoc "Shipyard discovery, listings and ship purchases for an Agent."
 
   alias SpaceTraders.Agent.Agent, as: AgentRecord
-  alias SpaceTraders.API.Model.Ship
+  alias SpaceTraders.Listing
 
   @shipyard_trait "SHIPYARD"
 
@@ -16,29 +16,41 @@ defmodule SpaceTraders.Shipyard do
 
   def discover(%AgentRecord{}), do: {:error, :agent_token_missing}
 
-  @doc "Returns shipyard data for shipyards where at least one supplied ship is on-site."
-  def listings(%AgentRecord{} = agent, ships) when is_list(ships) do
-    with {:ok, waypoints} <- discover(agent) do
-      on_site =
-        waypoints
-        |> Enum.filter(fn waypoint -> Enum.any?(ships, &on_site?(&1, waypoint.symbol)) end)
-        |> Enum.uniq_by(& &1.symbol)
+  @doc "Returns shipyard data for shipyards where at least one supplied ship is docked."
+  def listings(%AgentRecord{agent_token: token}, ships)
+      when is_binary(token) and token != "" and is_list(ships) do
+    ships_by_system =
+      Listing.docked_by_system(ships)
 
-      Enum.reduce_while(on_site, {:ok, []}, fn waypoint, {:ok, listings} ->
-        case shipyard(agent, waypoint.symbol) do
+    {waypoints, unavailable?} =
+      Listing.discover_waypoints(token, Map.keys(ships_by_system), @shipyard_trait)
+
+    on_site =
+      waypoints
+      |> Enum.filter(fn waypoint ->
+        Enum.any?(
+          Map.get(ships_by_system, waypoint.system_symbol, []),
+          &at?(&1, waypoint.symbol)
+        )
+      end)
+      |> Enum.uniq_by(& &1.symbol)
+      |> Enum.sort_by(& &1.symbol)
+
+    {listings, unavailable?} =
+      Enum.reduce(on_site, {[], unavailable?}, fn waypoint, {listings, unavailable?} ->
+        case shipyard(token, waypoint.system_symbol, waypoint.symbol) do
           {:ok, shipyard} ->
-            {:cont, {:ok, [%{waypoint: waypoint.symbol, shipyard: shipyard} | listings]}}
+            {[%{waypoint: waypoint.symbol, shipyard: shipyard} | listings], unavailable?}
 
-          {:error, reason} ->
-            {:halt, {:error, reason}}
+          {:error, _reason} ->
+            {listings, true}
         end
       end)
-      |> case do
-        {:ok, listings} -> {:ok, Enum.reverse(listings)}
-        error -> error
-      end
-    end
+
+    Listing.result(Enum.reverse(listings), unavailable?)
   end
+
+  def listings(%AgentRecord{}, _ships), do: {:error, :agent_token_missing}
 
   @doc "Reads a shipyard's listings at a waypoint."
   def shipyard(%AgentRecord{agent_token: token}, _waypoint)
@@ -65,15 +77,12 @@ defmodule SpaceTraders.Shipyard do
     end
   end
 
-  defp on_site?(%Ship{nav: %{status: status, waypoint_symbol: symbol}}, symbol)
-       when status != "IN_TRANSIT",
-       do: true
+  defp shipyard(token, system, waypoint) do
+    SpaceTraders.API.get_shipyard(token, system, waypoint)
+  end
 
-  defp on_site?(%{nav: %{status: status, waypoint_symbol: symbol}}, symbol)
-       when status != "IN_TRANSIT",
-       do: true
-
-  defp on_site?(_, _), do: false
+  defp at?(%{nav: %{waypoint_symbol: waypoint}}, waypoint), do: true
+  defp at?(_, _), do: false
 
   defp system_from_headquarters(headquarters) do
     case Regex.run(~r/^(.+)-[^-]+$/, headquarters, capture: :all) do

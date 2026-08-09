@@ -62,4 +62,92 @@ defmodule SpaceTraders.MarketTest do
     assert ship.symbol == "FLEET-SHIP"
     assert market.symbol == "X1-UX81-A1"
   end
+
+  test "lists docked markets across systems in waypoint order" do
+    agent = %AgentRecord{agent_token: "AGENT_TOKEN"}
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      case conn.request_path do
+        "/v2/systems/X1-UX81/waypoints" ->
+          Req.Test.json(conn, %{
+            "data" => [
+              %{
+                "symbol" => "X1-UX81-A2",
+                "systemSymbol" => "X1-UX81",
+                "type" => "ORBITAL_STATION",
+                "traits" => [%{"symbol" => "MARKETPLACE"}]
+              }
+            ]
+          })
+
+        "/v2/systems/X1-UX82/waypoints" ->
+          Req.Test.json(conn, %{
+            "data" => [
+              %{
+                "symbol" => "X1-UX82-A1",
+                "systemSymbol" => "X1-UX82",
+                "type" => "ORBITAL_STATION",
+                "traits" => [%{"symbol" => "MARKETPLACE"}]
+              }
+            ]
+          })
+
+        "/v2/systems/X1-UX81/waypoints/X1-UX81-A2/market" ->
+          Req.Test.json(conn, %{"data" => %{"symbol" => "X1-UX81-A2"}})
+
+        "/v2/systems/X1-UX82/waypoints/X1-UX82-A1/market" ->
+          conn
+          |> Plug.Conn.put_status(400)
+          |> Req.Test.json(%{"error" => %{"message" => "unavailable"}})
+      end
+    end)
+
+    ships =
+      [
+        ship_body("ORBITING", %{"nav" => nav_body("IN_ORBIT", destination: "X1-UX81-A2")}),
+        ship_body(
+          "SECOND",
+          %{
+            "nav" =>
+              nav_body("DOCKED", destination: "X1-UX82-A1")
+              |> Map.put("systemSymbol", "X1-UX82")
+          }
+        ),
+        ship_body("FIRST", %{"nav" => nav_body("DOCKED", destination: "X1-UX81-A2")})
+      ]
+      |> Enum.map(&Model.Ship.from_json/1)
+
+    assert {:partial, listings} = Market.listings(agent, ships)
+    assert Enum.map(listings, & &1.waypoint) == ["X1-UX81-A2"]
+    assert Enum.map(Enum.flat_map(listings, & &1.ships), & &1.symbol) == ["FIRST"]
+  end
+
+  test "reports a generic error when a market listing is unavailable" do
+    agent = %AgentRecord{agent_token: "AGENT_TOKEN"}
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      case conn.request_path do
+        "/v2/systems/X1-UX81/waypoints" ->
+          Req.Test.json(conn, %{
+            "data" => [
+              %{
+                "symbol" => "X1-UX81-A1",
+                "systemSymbol" => "X1-UX81",
+                "type" => "ORBITAL_STATION",
+                "traits" => [%{"symbol" => "MARKETPLACE"}]
+              }
+            ]
+          })
+
+        "/v2/systems/X1-UX81/waypoints/X1-UX81-A1/market" ->
+          conn
+          |> Plug.Conn.put_status(503)
+          |> Req.Test.json(%{"error" => %{"message" => "unavailable"}})
+      end
+    end)
+
+    ship = ship_body("FLEET-SHIP", %{"nav" => nav_body("DOCKED", destination: "X1-UX81-A1")})
+
+    assert {:partial, []} = Market.listings(agent, [Model.Ship.from_json(ship)])
+  end
 end

@@ -38,7 +38,11 @@ defmodule SpaceTraders.ShipyardTest do
   test "loads listings only for a ship currently on a discovered shipyard" do
     ship = %Model.Ship{
       symbol: "ORBITALIST-1",
-      nav: %Model.ShipNav{status: "DOCKED", waypoint_symbol: "X1-UX81-A2"}
+      nav: %Model.ShipNav{
+        status: "DOCKED",
+        system_symbol: "X1-UX81",
+        waypoint_symbol: "X1-UX81-A2"
+      }
     }
 
     Req.Test.stub(SpaceTraders.API, fn conn ->
@@ -62,6 +66,73 @@ defmodule SpaceTraders.ShipyardTest do
 
     assert {:ok, [%{waypoint: "X1-UX81-A2", shipyard: %Model.Shipyard{symbol: "X1-UX81-A2"}}]} =
              Shipyard.listings(agent_fixture(), [ship])
+  end
+
+  test "loads docked shipyard listings across systems in waypoint order" do
+    ships = [
+      %Model.Ship{
+        symbol: "SECOND",
+        nav: %Model.ShipNav{
+          status: "DOCKED",
+          system_symbol: "X1-UX82",
+          waypoint_symbol: "X1-UX82-A1"
+        }
+      },
+      %Model.Ship{
+        symbol: "FIRST",
+        nav: %Model.ShipNav{
+          status: "DOCKED",
+          system_symbol: "X1-UX81",
+          waypoint_symbol: "X1-UX81-A2"
+        }
+      }
+    ]
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      case conn.request_path do
+        "/v2/systems/X1-UX81/waypoints" ->
+          Req.Test.json(conn, %{"data" => [waypoint_body("X1-UX81-A2")]})
+
+        "/v2/systems/X1-UX82/waypoints" ->
+          Req.Test.json(conn, %{
+            "data" => [Map.put(waypoint_body("X1-UX82-A1"), "systemSymbol", "X1-UX82")]
+          })
+
+        "/v2/systems/X1-UX81/waypoints/X1-UX81-A2/shipyard" ->
+          Req.Test.json(conn, %{"data" => %{"symbol" => "X1-UX81-A2"}})
+
+        "/v2/systems/X1-UX82/waypoints/X1-UX82-A1/shipyard" ->
+          Req.Test.json(conn, %{"data" => %{"symbol" => "X1-UX82-A1"}})
+      end
+    end)
+
+    assert {:ok, listings} = Shipyard.listings(agent_fixture(), ships)
+    assert Enum.map(listings, & &1.waypoint) == ["X1-UX81-A2", "X1-UX82-A1"]
+  end
+
+  test "reports a generic error when a shipyard listing is unavailable" do
+    ship = %Model.Ship{
+      symbol: "ORBITALIST-1",
+      nav: %Model.ShipNav{
+        status: "DOCKED",
+        system_symbol: "X1-UX81",
+        waypoint_symbol: "X1-UX81-A2"
+      }
+    }
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      case conn.request_path do
+        "/v2/systems/X1-UX81/waypoints" ->
+          Req.Test.json(conn, %{"data" => [waypoint_body("X1-UX81-A2")]})
+
+        "/v2/systems/X1-UX81/waypoints/X1-UX81-A2/shipyard" ->
+          conn
+          |> Plug.Conn.put_status(503)
+          |> Req.Test.json(%{"error" => %{"message" => "unavailable"}})
+      end
+    end)
+
+    assert {:partial, []} = Shipyard.listings(agent_fixture(), [ship])
   end
 
   test "purchases a ship through the agent token" do
