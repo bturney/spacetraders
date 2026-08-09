@@ -68,7 +68,7 @@ defmodule SpaceTraders.Fleet do
   Lists the waypoints of the Agent's headquarters system.
 
   The game paginates waypoint responses, so pages are fetched until the system
-  is fully collected (capped at `@max_waypoint_pages`). Returns
+  is fully collected. Returns
   `{:ok, [%SpaceTraders.API.Model.Waypoint{}]}` or an API error.
   """
   def list_waypoints(%AgentRecord{agent_token: agent_token, headquarters: headquarters})
@@ -80,10 +80,9 @@ defmodule SpaceTraders.Fleet do
 
   def list_waypoints(%AgentRecord{}), do: {:error, :agent_token_missing}
 
-  @max_waypoint_pages 5
-
   defp fetch_waypoint_pages(agent_token, system) do
-    Enum.reduce_while(1..@max_waypoint_pages, {:ok, []}, fn page, {:ok, acc} ->
+    Stream.iterate(1, &(&1 + 1))
+    |> Enum.reduce_while({:ok, []}, fn page, {:ok, acc} ->
       case SpaceTraders.API.get_waypoints(agent_token, system, limit: 20, page: page) do
         {:ok, []} -> {:halt, {:ok, acc}}
         {:ok, waypoints} when length(waypoints) < 20 -> {:halt, {:ok, acc ++ waypoints}}

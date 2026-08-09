@@ -34,16 +34,16 @@ defmodule SpaceTraders.Listing do
     |> Enum.group_by(& &1.nav.system_symbol)
   end
 
-  def discover_waypoints(token, systems, trait) do
+  defp discover_waypoints(token, systems, trait) do
     Enum.reduce(Enum.sort(systems), {[], false}, fn system, {waypoints, unavailable?} ->
       case fetch_waypoint_pages(token, system, trait) do
         {:ok, found} -> {waypoints ++ Enum.filter(found, &has_trait?(&1, trait)), unavailable?}
-        {:error, _reason} -> {waypoints, true}
+        {:partial, found} -> {waypoints ++ Enum.filter(found, &has_trait?(&1, trait)), true}
       end
     end)
   end
 
-  def result(listings, unavailable?) do
+  defp result(listings, unavailable?) do
     if unavailable?, do: {:partial, listings}, else: {:ok, listings}
   end
 
@@ -137,12 +137,12 @@ defmodule SpaceTraders.Listing do
 
   defp fetch_waypoint_pages(token, system, trait) do
     Stream.iterate(1, &(&1 + 1))
-    |> Enum.reduce_while({:ok, []}, fn page, {:ok, waypoints} ->
+    |> Enum.reduce_while([], fn page, waypoints ->
       case SpaceTraders.API.get_waypoints(token, system, traits: trait, limit: 20, page: page) do
         {:ok, []} -> {:halt, {:ok, waypoints}}
         {:ok, found} when length(found) < 20 -> {:halt, {:ok, waypoints ++ found}}
-        {:ok, found} -> {:cont, {:ok, waypoints ++ found}}
-        error -> {:halt, error}
+        {:ok, found} -> {:cont, waypoints ++ found}
+        {:error, _reason} -> {:halt, {:partial, waypoints}}
       end
     end)
   end
