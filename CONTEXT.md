@@ -48,6 +48,9 @@ The goods a Ship holds, bounded by its capacity.
 
 ### The game loop
 
+**Listing**:
+The live Market or Shipyard data available to a Ship at an on-site Waypoint.
+
 **Contract**:
 The in-game mission object returned by the SpaceTraders API (types PROCUREMENT, TRANSPORT, SHUTTLE), with a deadline and payment terms.
 

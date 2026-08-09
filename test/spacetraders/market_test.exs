@@ -7,7 +7,7 @@ defmodule SpaceTraders.MarketTest do
 
   import SpaceTraders.ShipBody
 
-  test "lists market prices only for marketplaces where a ship is on-site" do
+  test "lists market prices only for marketplaces where a ship is docked" do
     agent = %AgentRecord{agent_token: "AGENT_TOKEN"}
 
     Req.Test.stub(SpaceTraders.API, fn conn ->
@@ -51,7 +51,7 @@ defmodule SpaceTraders.MarketTest do
 
     ships = [
       ship_body("FLEET-SHIP", %{"nav" => nav_body("DOCKED", destination: "X1-UX81-A1")}),
-      ship_body("TRANSIT-SHIP", %{"nav" => nav_body("IN_TRANSIT", destination: "X1-UX81-A2")})
+      ship_body("ORBIT-SHIP", %{"nav" => nav_body("IN_ORBIT", destination: "X1-UX81-A2")})
     ]
 
     ships = Enum.map(ships, &Model.Ship.from_json/1)
