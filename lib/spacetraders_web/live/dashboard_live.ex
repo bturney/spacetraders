@@ -615,10 +615,13 @@ defmodule SpaceTradersWeb.DashboardLive do
     <%= case @listings do %>
       <% {:ok, []} -> %>
         <div class="alert alert-outline">No shipyard is currently on-site.</div>
-      <% {:ok, listings} -> %>
+      <% {status, listings} when status in [:ok, :partial] -> %>
         <div class="card border border-primary/30 bg-base-200 p-4 sm:p-5">
           <p class="eyebrow">Fleet expansion</p>
           <h3 class="mt-1 font-semibold">Shipyard</h3>
+          <div :if={status == :partial} class="alert alert-warning mt-3">
+            Some shipyards are unavailable.
+          </div>
           <div :for={listing <- listings} class="mt-3 space-y-3">
             <div class="font-mono text-sm">{listing.waypoint}</div>
             <div
@@ -649,10 +652,13 @@ defmodule SpaceTradersWeb.DashboardLive do
     <%= case @listings do %>
       <% {:ok, []} -> %>
         <div class="alert alert-outline">No market is available for an on-site ship.</div>
-      <% {:ok, listings} -> %>
+      <% {status, listings} when status in [:ok, :partial] -> %>
         <div class="card border border-secondary/30 bg-base-200 p-4 sm:p-5">
           <p class="eyebrow">Trade and cargo</p>
           <h3 class="mt-1 font-semibold">Market</h3>
+          <div :if={status == :partial} class="alert alert-warning mt-3">
+            Some markets are unavailable.
+          </div>
           <div :for={listing <- listings} class="mt-4 space-y-4">
             <div class="font-mono text-sm">{listing.waypoint}</div>
             <div :for={good <- listing.market.trade_goods || []} class="space-y-2">

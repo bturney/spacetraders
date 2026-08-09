@@ -44,7 +44,7 @@ defmodule SpaceTraders.Listing do
   end
 
   def result(listings, unavailable?) do
-    if unavailable?, do: {:error, :listing_unavailable}, else: {:ok, listings}
+    if unavailable?, do: {:partial, listings}, else: {:ok, listings}
   end
 
   defp market_listings(token, ships_by_system, headquarters_system, headquarters_waypoints) do
@@ -147,8 +147,8 @@ defmodule SpaceTraders.Listing do
     end)
   end
 
-  defp on_site?(%{nav: %{status: status, system_symbol: system}})
-       when status != "IN_TRANSIT" and is_binary(system),
+  defp on_site?(%{nav: %{status: "DOCKED", system_symbol: system}})
+       when is_binary(system),
        do: true
 
   defp on_site?(_), do: false

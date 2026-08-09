@@ -323,7 +323,7 @@ defmodule SpaceTraders.Fleet do
   defp snapshot_listings(_agent, _ships, _waypoints),
     do: %{shipyards: {:ok, []}, markets: {:ok, []}}
 
-  defp offered_at?({:ok, listings}, ship_type, waypoint) do
+  defp offered_at?({status, listings}, ship_type, waypoint) when status in [:ok, :partial] do
     if Enum.any?(listings, &offered_in_listing?(&1, ship_type, waypoint)) do
       :ok
     else

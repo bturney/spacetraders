@@ -269,7 +269,7 @@ defmodule SpaceTraders.FleetTest do
       assert {:ok, [%{waypoint: "X1-UX82-A1"}]} = snapshot.shipyards
     end
 
-    test "keeps the shipyard result when the market listing is unavailable" do
+    test "keeps the shipyard result when a market listing is partially unavailable" do
       agent = agent_fixture()
 
       Req.Test.stub(SpaceTraders.API, fn conn ->
@@ -307,7 +307,7 @@ defmodule SpaceTraders.FleetTest do
 
       snapshot = Fleet.command_snapshot(agent)
 
-      assert {:error, :listing_unavailable} = snapshot.markets
+      assert {:partial, []} = snapshot.markets
       assert {:ok, [%{waypoint: "X1-UX81-A1"}]} = snapshot.shipyards
     end
 
