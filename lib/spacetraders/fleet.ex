@@ -22,7 +22,7 @@ defmodule SpaceTraders.Fleet do
   alias SpaceTraders.Fleet.Ship
   alias SpaceTraders.Fleet.ShipServer
   alias SpaceTraders.Repo
-  alias SpaceTraders.{Agent, Contracts, Market, Shipyard}
+  alias SpaceTraders.{Agent, Contracts, Listing, Shipyard}
   alias SpaceTraders.Timeline
 
   @doc """
@@ -50,15 +50,17 @@ defmodule SpaceTraders.Fleet do
   """
   def command_snapshot(%AgentRecord{} = agent) do
     ships = list_ships(agent)
+    waypoints = list_waypoints(agent)
+    listings = snapshot_listings(agent, ships, waypoints)
 
     %{
       agent: agent,
       overview: Agent.agent_overview(agent),
       ships: ships,
       contracts: Contracts.list_contracts(agent),
-      shipyards: shipyard_listings(agent, ships),
-      markets: market_listings(agent, ships),
-      waypoints: list_waypoints(agent)
+      shipyards: listings.shipyards,
+      markets: listings.markets,
+      waypoints: waypoints
     }
   end
 
@@ -84,6 +86,7 @@ defmodule SpaceTraders.Fleet do
     Enum.reduce_while(1..@max_waypoint_pages, {:ok, []}, fn page, {:ok, acc} ->
       case SpaceTraders.API.get_waypoints(agent_token, system, limit: 20, page: page) do
         {:ok, []} -> {:halt, {:ok, acc}}
+        {:ok, waypoints} when length(waypoints) < 20 -> {:halt, {:ok, acc ++ waypoints}}
         {:ok, waypoints} -> {:cont, {:ok, acc ++ waypoints}}
         error -> {:halt, error}
       end
@@ -314,11 +317,11 @@ defmodule SpaceTraders.Fleet do
 
   defp arrival_payload(_nav), do: %{}
 
-  defp shipyard_listings(agent, {:ok, ships}), do: Shipyard.listings(agent, ships)
-  defp shipyard_listings(_agent, _ships), do: {:ok, []}
+  defp snapshot_listings(agent, {:ok, ships}, waypoints),
+    do: Listing.for_ships(agent, ships, waypoints)
 
-  defp market_listings(agent, {:ok, ships}), do: Market.listings(agent, ships)
-  defp market_listings(_agent, _ships), do: {:ok, []}
+  defp snapshot_listings(_agent, _ships, _waypoints),
+    do: %{shipyards: {:ok, []}, markets: {:ok, []}}
 
   defp offered_at?({:ok, listings}, ship_type, waypoint) do
     if Enum.any?(listings, &offered_in_listing?(&1, ship_type, waypoint)) do

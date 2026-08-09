@@ -110,6 +110,207 @@ defmodule SpaceTraders.FleetTest do
   end
 
   describe "command_snapshot/1" do
+    test "reuses fresh headquarters waypoints for the browser and listings" do
+      agent = agent_fixture()
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case {conn.request_path, conn.query_params["traits"]} do
+          {"/v2/my/agent", _} ->
+            Req.Test.json(conn, %{"data" => %{"symbol" => agent.symbol, "credits" => 42_000}})
+
+          {"/v2/my/contracts", _} ->
+            Req.Test.json(conn, %{"data" => []})
+
+          {"/v2/my/ships", _} ->
+            Req.Test.json(conn, %{"data" => [ship_body("FLEET-SHIP")]})
+
+          {"/v2/systems/X1-UX81/waypoints", nil} ->
+            case conn.query_params["page"] do
+              "1" ->
+                Req.Test.json(conn, %{
+                  "data" => [
+                    %{
+                      "symbol" => "X1-UX81-A1",
+                      "systemSymbol" => "X1-UX81",
+                      "type" => "ORBITAL_STATION",
+                      "traits" => [
+                        %{"symbol" => "MARKETPLACE"},
+                        %{"symbol" => "SHIPYARD"}
+                      ]
+                    }
+                  ]
+                })
+
+              _ ->
+                Req.Test.json(conn, %{"data" => []})
+            end
+
+          {"/v2/systems/X1-UX81/waypoints", trait} when trait in ["MARKETPLACE", "SHIPYARD"] ->
+            flunk(
+              "expected command snapshot to reuse the full headquarters read, not rediscover #{trait}"
+            )
+
+          {"/v2/systems/X1-UX81/waypoints/X1-UX81-A1/market", _} ->
+            Req.Test.json(conn, %{"data" => %{"symbol" => "X1-UX81-A1", "tradeGoods" => []}})
+
+          {"/v2/systems/X1-UX81/waypoints/X1-UX81-A1/shipyard", _} ->
+            Req.Test.json(conn, %{"data" => %{"symbol" => "X1-UX81-A1", "ships" => []}})
+        end
+      end)
+
+      snapshot = Fleet.command_snapshot(agent)
+
+      assert {:ok, [%{symbol: "X1-UX81-A1"}]} = snapshot.waypoints
+
+      assert {:ok, [%{waypoint: "X1-UX81-A1", market: %{symbol: "X1-UX81-A1"}, ships: [_]}]} =
+               snapshot.markets
+
+      assert {:ok, [%{waypoint: "X1-UX81-A1", shipyard: %{symbol: "X1-UX81-A1"}}]} =
+               snapshot.shipyards
+    end
+
+    test "falls back to independent listing discovery when headquarters waypoints are unavailable" do
+      agent = agent_fixture()
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case {conn.request_path, conn.query_params["traits"]} do
+          {"/v2/my/agent", _} ->
+            Req.Test.json(conn, %{"data" => %{"symbol" => agent.symbol, "credits" => 42_000}})
+
+          {"/v2/my/contracts", _} ->
+            Req.Test.json(conn, %{"data" => []})
+
+          {"/v2/my/ships", _} ->
+            Req.Test.json(conn, %{"data" => [ship_body("FLEET-SHIP")]})
+
+          {"/v2/systems/X1-UX81/waypoints", nil} ->
+            conn
+            |> Map.put(:status, 400)
+            |> Req.Test.json(%{"error" => %{"message" => "unavailable"}})
+
+          {"/v2/systems/X1-UX81/waypoints", trait} when trait in ["MARKETPLACE", "SHIPYARD"] ->
+            Req.Test.json(conn, %{
+              "data" => [
+                %{
+                  "symbol" => "X1-UX81-A1",
+                  "systemSymbol" => "X1-UX81",
+                  "type" => "ORBITAL_STATION",
+                  "traits" => [%{"symbol" => trait}]
+                }
+              ]
+            })
+
+          {"/v2/systems/X1-UX81/waypoints/X1-UX81-A1/market", _} ->
+            Req.Test.json(conn, %{"data" => %{"symbol" => "X1-UX81-A1", "tradeGoods" => []}})
+
+          {"/v2/systems/X1-UX81/waypoints/X1-UX81-A1/shipyard", _} ->
+            Req.Test.json(conn, %{"data" => %{"symbol" => "X1-UX81-A1", "ships" => []}})
+        end
+      end)
+
+      snapshot = Fleet.command_snapshot(agent)
+
+      assert {:error, _reason} = snapshot.waypoints
+      assert {:ok, [%{waypoint: "X1-UX81-A1"}]} = snapshot.markets
+      assert {:ok, [%{waypoint: "X1-UX81-A1"}]} = snapshot.shipyards
+    end
+
+    test "uses trait-filtered discovery for listings outside headquarters" do
+      agent = agent_fixture()
+
+      ship =
+        ship_body("FLEET-SHIP", %{
+          "nav" => %{
+            "systemSymbol" => "X1-UX82",
+            "waypointSymbol" => "X1-UX82-A1",
+            "status" => "DOCKED",
+            "flightMode" => "CRUISE"
+          }
+        })
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case {conn.request_path, conn.query_params["traits"]} do
+          {"/v2/my/agent", _} ->
+            Req.Test.json(conn, %{"data" => %{"symbol" => agent.symbol, "credits" => 42_000}})
+
+          {"/v2/my/contracts", _} ->
+            Req.Test.json(conn, %{"data" => []})
+
+          {"/v2/my/ships", _} ->
+            Req.Test.json(conn, %{"data" => [ship]})
+
+          {"/v2/systems/X1-UX81/waypoints", nil} ->
+            Req.Test.json(conn, %{"data" => []})
+
+          {"/v2/systems/X1-UX82/waypoints", trait} when trait in ["MARKETPLACE", "SHIPYARD"] ->
+            Req.Test.json(conn, %{
+              "data" => [
+                %{
+                  "symbol" => "X1-UX82-A1",
+                  "systemSymbol" => "X1-UX82",
+                  "type" => "ORBITAL_STATION",
+                  "traits" => [%{"symbol" => trait}]
+                }
+              ]
+            })
+
+          {"/v2/systems/X1-UX82/waypoints/X1-UX82-A1/market", _} ->
+            Req.Test.json(conn, %{"data" => %{"symbol" => "X1-UX82-A1", "tradeGoods" => []}})
+
+          {"/v2/systems/X1-UX82/waypoints/X1-UX82-A1/shipyard", _} ->
+            Req.Test.json(conn, %{"data" => %{"symbol" => "X1-UX82-A1", "ships" => []}})
+        end
+      end)
+
+      snapshot = Fleet.command_snapshot(agent)
+
+      assert {:ok, []} = snapshot.waypoints
+      assert {:ok, [%{waypoint: "X1-UX82-A1"}]} = snapshot.markets
+      assert {:ok, [%{waypoint: "X1-UX82-A1"}]} = snapshot.shipyards
+    end
+
+    test "keeps the shipyard result when the market listing is unavailable" do
+      agent = agent_fixture()
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case {conn.request_path, conn.query_params["traits"]} do
+          {"/v2/my/agent", _} ->
+            Req.Test.json(conn, %{"data" => %{"symbol" => agent.symbol, "credits" => 42_000}})
+
+          {"/v2/my/contracts", _} ->
+            Req.Test.json(conn, %{"data" => []})
+
+          {"/v2/my/ships", _} ->
+            Req.Test.json(conn, %{"data" => [ship_body("FLEET-SHIP")]})
+
+          {"/v2/systems/X1-UX81/waypoints", nil} ->
+            Req.Test.json(conn, %{
+              "data" => [
+                %{
+                  "symbol" => "X1-UX81-A1",
+                  "systemSymbol" => "X1-UX81",
+                  "type" => "ORBITAL_STATION",
+                  "traits" => [%{"symbol" => "MARKETPLACE"}, %{"symbol" => "SHIPYARD"}]
+                }
+              ]
+            })
+
+          {"/v2/systems/X1-UX81/waypoints/X1-UX81-A1/market", _} ->
+            conn
+            |> Map.put(:status, 400)
+            |> Req.Test.json(%{"error" => %{"message" => "unavailable"}})
+
+          {"/v2/systems/X1-UX81/waypoints/X1-UX81-A1/shipyard", _} ->
+            Req.Test.json(conn, %{"data" => %{"symbol" => "X1-UX81-A1", "ships" => []}})
+        end
+      end)
+
+      snapshot = Fleet.command_snapshot(agent)
+
+      assert {:error, :listing_unavailable} = snapshot.markets
+      assert {:ok, [%{waypoint: "X1-UX81-A1"}]} = snapshot.shipyards
+    end
+
     test "assembles the agent overview, live fleet and on-site shipyard listings" do
       agent = agent_fixture()
 
