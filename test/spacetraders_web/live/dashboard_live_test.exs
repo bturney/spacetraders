@@ -411,6 +411,23 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       assert html =~ "SATELLITE"
     end
 
+    test "fills cargo meter from cargo units", %{conn: conn, operator: operator} do
+      agent = agent_fixture(operator)
+
+      ships = [
+        ship_body("ORBITALIST-1", %{
+          "cargo" => %{"capacity" => 15, "units" => 7, "inventory" => []}
+        })
+      ]
+
+      stub_live_game(agent_overview_body(agent.symbol), ships)
+
+      {:ok, lv, html} = live(conn, ~p"/")
+
+      assert html =~ "7 / 15"
+      assert has_element?(lv, "progress.progress-secondary[value='7'][max='15']")
+    end
+
     test "shows an active cooldown on a ship card", %{conn: conn, operator: operator} do
       agent = agent_fixture(operator)
 

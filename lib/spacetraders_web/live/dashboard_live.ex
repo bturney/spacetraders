@@ -894,7 +894,7 @@ defmodule SpaceTradersWeb.DashboardLive do
         <progress
           :if={capacity(@ship.cargo) > 0}
           class="progress progress-secondary mt-1 h-2"
-          value={current(@ship.cargo)}
+          value={cargo_units(@ship.cargo)}
           max={capacity(@ship.cargo)}
         />
         <div
