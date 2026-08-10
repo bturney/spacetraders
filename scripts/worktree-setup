@@ -111,7 +111,7 @@ if clean_worktree; then
   else
     echo "Populating warm cache $cache_key."
     "$SCRIPT_DIR/bootstrap"
-    mix compile
+    "$ELIXIR_DIR/bin/mix" compile
 
     temporary_entry="$cache_root/entries/.${cache_key}.partial-$$"
     rm -rf "$temporary_entry"
@@ -124,7 +124,7 @@ if clean_worktree; then
 else
   echo "Dirty worktree: compiling privately."
   "$SCRIPT_DIR/bootstrap"
-  mix compile
+  "$ELIXIR_DIR/bin/mix" compile
 fi
 
 {

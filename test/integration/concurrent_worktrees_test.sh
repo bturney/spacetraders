@@ -55,13 +55,13 @@ PIDS+=("$!")
 
 for pid in "${PIDS[@]}"; do
   if ! wait "$pid"; then
-    rg . "$TEMP_ROOT"/one.log "$TEMP_ROOT"/two.log >&2 || true
+    grep -H . "$TEMP_ROOT"/one.log "$TEMP_ROOT"/two.log >&2 || true
     exit 1
   fi
 done
 PIDS=()
 
-if [ "$(rg --no-filename '^Populating warm cache ' "$TEMP_ROOT"/*.log | wc -l)" -ne 1 ]; then
+if [ "$(grep -h '^Populating warm cache ' "$TEMP_ROOT"/*.log | wc -l)" -ne 1 ]; then
   echo "Expected exactly one concurrent cache population." >&2
   exit 1
 fi
@@ -85,13 +85,13 @@ if [ "$port_one" = "$port_two" ]; then
 fi
 
 setup_worktree "$WORKTREE_THREE" integration-three >"$TEMP_ROOT/three.log" 2>&1
-rg -q '^Restored warm cache ' "$TEMP_ROOT/three.log"
+grep -q '^Restored warm cache ' "$TEMP_ROOT/three.log"
 
 (cd "$WORKTREE_THREE" && scripts/teardown)
 
 printf '\n# dirty cache bypass\n' >> "$WORKTREE_DIRTY/README.md"
 setup_worktree "$WORKTREE_DIRTY" integration-dirty >"$TEMP_ROOT/dirty.log" 2>&1
-rg -q '^Dirty worktree: compiling privately\.' "$TEMP_ROOT/dirty.log"
+grep -q '^Dirty worktree: compiling privately\.' "$TEMP_ROOT/dirty.log"
 
 if setup_worktree "$WORKTREE_THREE" integration-one >"$TEMP_ROOT/duplicate.log" 2>&1; then
   echo "Duplicate task ID unexpectedly received an allocated port." >&2
@@ -118,15 +118,15 @@ PIDS+=("$!")
 
 for pid in "${PIDS[@]}"; do
   if ! wait "$pid"; then
-    rg . "$TEMP_ROOT"/server-*.log >&2 || true
+    grep -H . "$TEMP_ROOT"/server-*.log >&2 || true
     exit 1
   fi
 done
 PIDS=()
 
 for port in "$port_one" "$port_two"; do
-  if ! rg -q "boot verify: GET http://127.0.0.1:$port/health -> 200 ok" "$TEMP_ROOT"/server-*.log; then
-    rg 'boot verify:' "$TEMP_ROOT"/server-*.log >&2 || true
+  if ! grep -q "boot verify: GET http://127.0.0.1:$port/health -> 200 ok" "$TEMP_ROOT"/server-*.log; then
+    grep -H 'boot verify:' "$TEMP_ROOT"/server-*.log >&2 || true
     exit 1
   fi
 done
