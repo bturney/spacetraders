@@ -503,6 +503,63 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       assert html =~ ~s(<button type="button" phx-click="extract")
     end
 
+    test "updates cargo from a successful extraction response", %{conn: conn, operator: operator} do
+      agent = agent_fixture(operator)
+      expiration = future_iso()
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case {conn.request_path, conn.method} do
+          {"/v2/my/agent", "GET"} ->
+            Req.Test.json(conn, %{"data" => agent_overview_body(agent.symbol)})
+
+          {"/v2/my/contracts", "GET"} ->
+            Req.Test.json(conn, %{"data" => []})
+
+          {"/v2/my/ships", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => [
+                ship_body("ORBITALIST-1", %{
+                  "nav" => nav_body("IN_ORBIT"),
+                  "cargo" => %{"capacity" => 40, "units" => 0, "inventory" => []}
+                })
+              ]
+            })
+
+          {"/v2/my/ships/ORBITALIST-1/extract", "POST"} ->
+            Req.Test.json(conn, %{
+              "data" => %{
+                "cooldown" => %{
+                  "shipSymbol" => "ORBITALIST-1",
+                  "totalSeconds" => 60,
+                  "remainingSeconds" => 60,
+                  "expiration" => expiration
+                },
+                "extraction" => %{
+                  "shipSymbol" => "ORBITALIST-1",
+                  "yield" => %{"symbol" => "IRON_ORE", "units" => 5}
+                },
+                "cargo" => %{
+                  "capacity" => 40,
+                  "units" => 5,
+                  "inventory" => [%{"symbol" => "IRON_ORE", "units" => 5}]
+                }
+              }
+            })
+
+          {"/v2/systems/X1-UX81/waypoints", "GET"} ->
+            Req.Test.json(conn, %{"data" => []})
+        end
+      end)
+
+      {:ok, lv, html} = live(conn, ~p"/")
+      assert html =~ "0 / 40"
+
+      html = lv |> element("button[phx-click=\"extract\"]") |> render_click()
+
+      assert html =~ "5 / 40"
+      assert html =~ "IRON_ORE"
+    end
+
     test "navigates a ship and the card shows IN_TRANSIT with its arrival time", %{
       conn: conn,
       operator: operator

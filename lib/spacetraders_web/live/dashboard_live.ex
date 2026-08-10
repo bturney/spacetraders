@@ -135,8 +135,23 @@ defmodule SpaceTradersWeb.DashboardLive do
   end
 
   @impl true
+  def handle_event("extract", %{"symbol" => ship_symbol}, socket) do
+    with {:ok, agent} <- agent_for_ship(socket, ship_symbol),
+         {:ok, result} <- Fleet.extract_resources(agent, ship_symbol) do
+      socket =
+        socket
+        |> refresh_agent_fleet(agent.id)
+        |> apply_ship_result(agent.id, ship_symbol, result)
+
+      {:noreply, socket}
+    else
+      {:error, reason} -> {:noreply, put_flash(socket, :error, live_error(reason))}
+    end
+  end
+
+  @impl true
   def handle_event(action, %{"symbol" => ship_symbol}, socket)
-      when action in ["dock", "orbit", "extract", "refuel"] do
+      when action in ["dock", "orbit", "refuel"] do
     with {:ok, agent} <- agent_for_ship(socket, ship_symbol),
          {:ok, _result} <- ship_action(action, agent, ship_symbol) do
       {:noreply, refresh_agent_fleet(socket, agent.id)}
@@ -411,6 +426,26 @@ defmodule SpaceTradersWeb.DashboardLive do
       end)
 
     assign(socket, :overviews, overviews)
+  end
+
+  defp apply_ship_result(socket, agent_id, ship_symbol, result) do
+    ship_fields = Map.take(result, [:cargo, :cooldown])
+
+    update(socket, :overviews, fn overviews ->
+      Enum.map(overviews, fn
+        %{agent: %{id: ^agent_id}, ships: {:ok, ships}} = overview ->
+          ships =
+            Enum.map(ships, fn
+              %{symbol: ^ship_symbol} = ship -> Map.merge(ship, ship_fields)
+              ship -> ship
+            end)
+
+          %{overview | ships: {:ok, ships}}
+
+        overview ->
+          overview
+      end)
+    end)
   end
 
   defp purchase_flash(socket, nil), do: socket
