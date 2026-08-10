@@ -25,11 +25,207 @@ import {LiveSocket} from "phoenix_live_view"
 import {hooks as colocatedHooks} from "phoenix-colocated/spacetraders"
 import topbar from "../vendor/topbar"
 
+const SystemMap = {
+  mounted() {
+    this.svg = this.el
+    this.viewBox = this.svg.viewBox.baseVal
+    this.pointers = new Map()
+    this.lastPan = null
+    this.initialViewBox = {
+      x: this.viewBox.x,
+      y: this.viewBox.y,
+      width: this.viewBox.width,
+      height: this.viewBox.height,
+    }
+    this.lastPinch = null
+    this.viewport = null
+
+    this.onWheel = event => {
+      event.preventDefault()
+      const point = this.pointAt(event.clientX, event.clientY)
+      const factor = event.deltaY < 0 ? 0.85 : 1.18
+      this.zoomAt(point, factor)
+    }
+
+    this.onPointerDown = event => {
+      this.svg.setPointerCapture(event.pointerId)
+      this.pointers.set(event.pointerId, {x: event.clientX, y: event.clientY})
+      this.lastPan = this.pointAt(event.clientX, event.clientY)
+      this.lastPinch = this.pinchState()
+    }
+
+    this.onPointerMove = event => {
+      if (!this.pointers.has(event.pointerId)) return
+
+      this.pointers.set(event.pointerId, {x: event.clientX, y: event.clientY})
+      const points = [...this.pointers.values()]
+
+      if (points.length === 1 && this.lastPan) {
+        const point = this.pointAt(event.clientX, event.clientY)
+        this.viewBox.x -= point.x - this.lastPan.x
+        this.viewBox.y -= point.y - this.lastPan.y
+        this.lastPan = this.pointAt(event.clientX, event.clientY)
+      } else if (points.length === 2) {
+        const pinch = this.pinchState()
+
+        if (this.lastPinch) {
+          this.zoomAt(pinch.center, this.lastPinch.distance / Math.max(pinch.distance, 1))
+        }
+
+        this.lastPinch = this.pinchState()
+      }
+    }
+
+    this.onPointerUp = event => {
+      this.pointers.delete(event.pointerId)
+      const [pointer] = this.pointers.values()
+      this.lastPan = pointer ? this.pointAt(pointer.x, pointer.y) : null
+      this.lastPinch = this.pinchState()
+    }
+
+    this.onKeyDown = event => {
+      if (event.target.classList.contains("system-map-waypoint") && ["Enter", " "].includes(event.key)) {
+        event.preventDefault()
+        event.target.dispatchEvent(new MouseEvent("click", {bubbles: true}))
+        return
+      }
+
+      if (event.target !== this.svg) return
+
+      const center = {
+        x: this.viewBox.x + this.viewBox.width / 2,
+        y: this.viewBox.y + this.viewBox.height / 2,
+      }
+      const pan = {ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1]}[event.key]
+
+      if (pan) {
+        event.preventDefault()
+        this.viewBox.x += pan[0] * this.viewBox.width / 10
+        this.viewBox.y += pan[1] * this.viewBox.height / 10
+      } else if (["+", "="].includes(event.key)) {
+        event.preventDefault()
+        this.zoomAt(center, 0.85)
+      } else if (event.key === "-") {
+        event.preventDefault()
+        this.zoomAt(center, 1.18)
+      } else if (event.key === "Home") {
+        event.preventDefault()
+        this.resetView()
+      }
+    }
+
+    this.svg.addEventListener("wheel", this.onWheel, {passive: false})
+    this.svg.addEventListener("pointerdown", this.onPointerDown)
+    this.svg.addEventListener("pointermove", this.onPointerMove)
+    this.svg.addEventListener("pointerup", this.onPointerUp)
+    this.svg.addEventListener("pointercancel", this.onPointerUp)
+    this.svg.addEventListener("keydown", this.onKeyDown)
+  },
+
+  beforeUpdate() {
+    this.viewport = {
+      signature: this.waypointSignature(),
+      viewBox: {
+        x: this.viewBox.x,
+        y: this.viewBox.y,
+        width: this.viewBox.width,
+        height: this.viewBox.height,
+      },
+    }
+  },
+
+  updated() {
+    this.svg = this.el
+    this.viewBox = this.svg.viewBox.baseVal
+
+    if (this.viewport?.signature === this.waypointSignature()) {
+      Object.assign(this.viewBox, this.viewport.viewBox)
+      this.resizeMarkers()
+    } else {
+      this.initialViewBox = {
+        x: this.viewBox.x,
+        y: this.viewBox.y,
+        width: this.viewBox.width,
+        height: this.viewBox.height,
+      }
+    }
+  },
+
+  destroyed() {
+    this.svg.removeEventListener("wheel", this.onWheel)
+    this.svg.removeEventListener("pointerdown", this.onPointerDown)
+    this.svg.removeEventListener("pointermove", this.onPointerMove)
+    this.svg.removeEventListener("pointerup", this.onPointerUp)
+    this.svg.removeEventListener("pointercancel", this.onPointerUp)
+    this.svg.removeEventListener("keydown", this.onKeyDown)
+  },
+
+  pointAt(clientX, clientY) {
+    const point = this.svg.createSVGPoint()
+    point.x = clientX
+    point.y = clientY
+    const mapPoint = point.matrixTransform(this.svg.getScreenCTM().inverse())
+    return {x: mapPoint.x, y: mapPoint.y}
+  },
+
+  pinchState() {
+    const [first, second] = [...this.pointers.values()]
+    if (!first || !second) return null
+
+    return {
+      center: this.pointAt((first.x + second.x) / 2, (first.y + second.y) / 2),
+      distance: Math.hypot(first.x - second.x, first.y - second.y),
+    }
+  },
+
+  zoomAt(point, factor) {
+    const width = Math.min(
+      Math.max(this.viewBox.width * factor, this.initialViewBox.width / 20),
+      this.initialViewBox.width * 8,
+    )
+    const height = Math.min(
+      Math.max(this.viewBox.height * factor, this.initialViewBox.height / 20),
+      this.initialViewBox.height * 8,
+    )
+    this.viewBox.x = point.x - (point.x - this.viewBox.x) * width / this.viewBox.width
+    this.viewBox.y = point.y - (point.y - this.viewBox.y) * height / this.viewBox.height
+    this.viewBox.width = width
+    this.viewBox.height = height
+    this.resizeMarkers()
+  },
+
+  resizeMarkers() {
+    const scale = Math.sqrt(
+      (this.viewBox.width / this.initialViewBox.width) *
+      (this.viewBox.height / this.initialViewBox.height),
+    )
+
+    this.svg.querySelectorAll(".system-map-waypoint").forEach(marker => {
+      const {x, y} = marker.dataset
+      marker.setAttribute(
+        "transform",
+        `translate(${x} ${y}) scale(${scale}) translate(${-x} ${-y})`,
+      )
+    })
+  },
+
+  resetView() {
+    Object.assign(this.viewBox, this.initialViewBox)
+    this.resizeMarkers()
+  },
+
+  waypointSignature() {
+    return [...this.svg.querySelectorAll(".system-map-waypoint")]
+      .map(waypoint => `${waypoint.dataset.waypointSymbol}:${waypoint.dataset.x}:${waypoint.dataset.y}`)
+      .join("|")
+  },
+}
+
 const csrfToken = document.querySelector("meta[name='csrf-token']").getAttribute("content")
 const liveSocket = new LiveSocket("/live", Socket, {
   longPollFallbackMs: 2500,
   params: {_csrf_token: csrfToken},
-  hooks: {...colocatedHooks},
+  hooks: {...colocatedHooks, SystemMap},
 })
 
 // Show progress bar on live navigation and form submits
@@ -80,4 +276,3 @@ if (process.env.NODE_ENV === "development") {
     window.liveReloader = reloader
   })
 }
-

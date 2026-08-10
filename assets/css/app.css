@@ -140,6 +140,29 @@ body { min-width: 320px; }
 
 .mission-hero { box-shadow: 0 16px 40px color-mix(in oklab, var(--color-primary) 8%, transparent); }
 
+.system-map-canvas {
+  min-height: 22rem;
+  overflow: hidden;
+  border: 1px solid color-mix(in oklab, var(--color-base-content) 12%, transparent);
+  border-radius: 0.5rem;
+  background-color: color-mix(in oklab, var(--color-base-300) 60%, transparent);
+}
+
+.system-map-canvas svg { width: 100%; height: 100%; min-height: 22rem; touch-action: none; cursor: grab; }
+.system-map-canvas svg:active { cursor: grabbing; }
+.system-map-axis { stroke: color-mix(in oklab, var(--color-base-content) 12%, transparent); stroke-width: 0.35; }
+.system-map-waypoint { cursor: pointer; fill: var(--color-info); stroke: var(--color-info-content); stroke-width: 0.4; vector-effect: non-scaling-stroke; }
+.system-map-waypoint.station { fill: var(--color-primary); }
+.system-map-waypoint.asteroid { fill: var(--color-secondary); }
+.system-map-waypoint.other { fill: var(--color-accent); }
+.system-map-waypoint:hover, .system-map-waypoint.selected { stroke: var(--color-base-content); stroke-width: 1.5; }
+.system-map-waypoint:focus-visible { outline: none; stroke: var(--color-base-content); stroke-width: 2; }
+.system-map-key { display: inline-block; width: 0.6rem; height: 0.6rem; margin-right: 0.25rem; background: var(--color-info); vertical-align: -0.05rem; }
+.system-map-key.planet { border-radius: 999px; }
+.system-map-key.station { background: var(--color-primary); }
+.system-map-key.asteroid { background: var(--color-secondary); transform: rotate(45deg); }
+.system-map-key.other { background: var(--color-accent); clip-path: polygon(25% 0, 75% 0, 100% 50%, 75% 100%, 25% 100%, 0 50%); }
+
 @media (max-width: 640px) {
   .theme-switcher button:first-of-type { display: none; }
   .theme-switcher { gap: 0; }
