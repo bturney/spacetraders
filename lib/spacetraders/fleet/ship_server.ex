@@ -60,6 +60,15 @@ defmodule SpaceTraders.Fleet.ShipServer do
     end
   end
 
+  @doc "Stops the running server for one ship, if any."
+  @spec stop(String.t()) :: :ok
+  def stop(ship_symbol) do
+    case Registry.lookup(SpaceTraders.Fleet.ShipRegistry, ship_symbol) do
+      [{pid, _}] -> DynamicSupervisor.terminate_child(SpaceTraders.Fleet.ShipSupervisor, pid)
+      [] -> :ok
+    end
+  end
+
   @doc """
   Returns `:ok` when the ship is ready to act, or an error while it is busy.
 

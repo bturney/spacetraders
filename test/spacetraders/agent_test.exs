@@ -5,6 +5,9 @@ defmodule SpaceTraders.AgentTest do
 
   import SpaceTraders.AgentFixtures
   alias SpaceTraders.Agent.{Operator, OperatorToken, Scope}
+  alias SpaceTraders.Fleet.{Ship, ShipServer}
+  alias SpaceTraders.Timeline
+  alias SpaceTraders.Timeline.Event
 
   describe "get_operator_by_email/1" do
     test "does not return the operator if the email does not exist" do
@@ -512,6 +515,56 @@ defmodule SpaceTraders.AgentTest do
         refute ciphertext =~ "AGENT_TOKEN"
         assert {:ok, "AGENT_TOKEN"} = SpaceTraders.Secret.load(ciphertext)
       end)
+    end
+
+    test "replaces a stale local agent after a server reset", %{operator: operator} do
+      stale_agent = agent_fixture(operator, %{symbol: "RESETME", agent_token: "STALE_TOKEN"})
+
+      ship =
+        Repo.insert!(%Ship{
+          symbol: "RESETME-1",
+          ship_type: "SHIP_COMMAND_FRIGATE",
+          agent_id: stale_agent.id
+        })
+
+      {:ok, event} =
+        Timeline.schedule_event(
+          :ship,
+          ship.symbol,
+          :arrival,
+          DateTime.add(DateTime.utc_now(), 1, :hour)
+        )
+
+      {:ok, _pid} = ShipServer.ensure_started(stale_agent, ship.symbol)
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        assert conn.method == "POST"
+        assert conn.request_path == "/v2/register"
+        assert conn.body_params == %{"symbol" => "RESETME", "faction" => "COSMIC"}
+
+        Req.Test.json(conn, %{
+          "data" => %{
+            "token" => "FRESH_TOKEN",
+            "agent" => %{
+              "symbol" => "RESETME",
+              "credits" => 175_000,
+              "headquarters" => "X1-UX81-A2",
+              "startingFaction" => "COSMIC"
+            },
+            "contract" => %{"id" => "c1", "type" => "PROCUREMENT"},
+            "faction" => %{"symbol" => "COSMIC", "name" => "Cosmic", "isRecruiting" => true},
+            "ships" => []
+          }
+        })
+      end)
+
+      assert {:ok, agent} = Agent.mint_agent(operator, %{symbol: "RESETME", faction: "COSMIC"})
+      refute agent.id == stale_agent.id
+      assert agent.agent_token == "FRESH_TOKEN"
+      refute Repo.get(SpaceTraders.Agent.Agent, stale_agent.id)
+      refute Repo.get(Ship, ship.id)
+      assert Repo.get(Event, event.id).status == "cancelled"
+      assert Registry.lookup(SpaceTraders.Fleet.ShipRegistry, ship.symbol) == []
     end
 
     test "rejects an invalid symbol before calling the API", %{operator: operator} do
