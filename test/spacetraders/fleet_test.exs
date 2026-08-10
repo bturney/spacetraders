@@ -592,6 +592,7 @@ defmodule SpaceTraders.FleetTest do
 
       Req.Test.stub(SpaceTraders.API, fn conn ->
         assert conn.request_path == "/v2/my/ships/FLEET-SHIP/sell"
+        assert conn.body_params == %{"symbol" => "IRON_ORE", "units" => 5}
 
         Req.Test.json(conn, %{
           "data" => %{
