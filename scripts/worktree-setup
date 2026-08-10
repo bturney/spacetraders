@@ -111,6 +111,7 @@ if clean_worktree; then
   else
     echo "Populating warm cache $cache_key."
     "$SCRIPT_DIR/bootstrap"
+    export PATH="$ELIXIR_DIR/bin:$OTP_DIR/bin:$PATH"
     "$ELIXIR_DIR/bin/mix" compile
 
     temporary_entry="$cache_root/entries/.${cache_key}.partial-$$"
@@ -124,6 +125,7 @@ if clean_worktree; then
 else
   echo "Dirty worktree: compiling privately."
   "$SCRIPT_DIR/bootstrap"
+  export PATH="$ELIXIR_DIR/bin:$OTP_DIR/bin:$PATH"
   "$ELIXIR_DIR/bin/mix" compile
 fi
 
