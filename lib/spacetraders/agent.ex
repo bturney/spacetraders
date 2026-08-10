@@ -15,6 +15,8 @@ defmodule SpaceTraders.Agent do
 
   alias SpaceTraders.API.Model.Agent, as: GameAgent
   alias SpaceTraders.Agent.{Agent, Operator, OperatorToken, OperatorNotifier, Scope}
+  alias SpaceTraders.Fleet.{Ship, ShipServer}
+  alias SpaceTraders.Timeline
 
   ## Database getters
 
@@ -189,13 +191,21 @@ defmodule SpaceTraders.Agent do
 
     with :ok <- validate_mint_attrs(changeset),
          {:ok, account_token} <- require_account_token(operator) do
+      stale_agent_id = stale_agent_id(get_field(changeset, :symbol))
+
       case SpaceTraders.API.register(
              account_token,
              get_field(changeset, :symbol),
              get_field(changeset, :faction)
            ) do
         {:ok, %{token: agent_token, agent: %GameAgent{} = game_agent}} ->
-          create_agent(operator, game_agent, agent_token, get_field(changeset, :faction))
+          replace_stale_agent_and_create(
+            stale_agent_id,
+            operator,
+            game_agent,
+            agent_token,
+            get_field(changeset, :faction)
+          )
 
         {:error, _reason} = error ->
           error
@@ -247,6 +257,13 @@ defmodule SpaceTraders.Agent do
 
   defp require_account_token(_operator), do: {:error, :account_token_not_linked}
 
+  defp stale_agent_id(symbol) do
+    case Repo.get_by(Agent, symbol: symbol) do
+      nil -> nil
+      agent -> agent.id
+    end
+  end
+
   defp create_agent(operator, %GameAgent{} = game_agent, agent_token, requested_faction) do
     %Agent{}
     |> Agent.changeset(%{
@@ -257,6 +274,47 @@ defmodule SpaceTraders.Agent do
     |> Ecto.Changeset.put_change(:agent_token, agent_token)
     |> Ecto.Changeset.put_change(:operator_id, operator.id)
     |> Repo.insert()
+  end
+
+  # The server's successful registration proves this captured cache row is stale.
+  defp replace_stale_agent_and_create(
+         stale_agent_id,
+         operator,
+         %GameAgent{} = game_agent,
+         agent_token,
+         faction
+       ) do
+    with {:ok, {agent, ship_symbols}} <-
+           Repo.transaction(fn ->
+             ship_symbols = remove_stale_agent(stale_agent_id, game_agent.symbol)
+
+             case create_agent(operator, game_agent, agent_token, faction) do
+               {:ok, agent} -> {agent, ship_symbols}
+               {:error, changeset} -> Repo.rollback(changeset)
+             end
+           end) do
+      Enum.each(ship_symbols, &ShipServer.stop/1)
+      {:ok, agent}
+    end
+  end
+
+  defp remove_stale_agent(nil, _symbol), do: []
+
+  defp remove_stale_agent(stale_agent_id, symbol) do
+    case Repo.get(Agent, stale_agent_id) do
+      %Agent{symbol: ^symbol} = stale_agent ->
+        ship_symbols =
+          Repo.all(
+            from(ship in Ship, where: ship.agent_id == ^stale_agent.id, select: ship.symbol)
+          )
+
+        Enum.each(ship_symbols, &Timeline.cancel_events(:ship, &1))
+        Repo.delete!(stale_agent)
+        ship_symbols
+
+      _ ->
+        []
+    end
   end
 
   @doc """
