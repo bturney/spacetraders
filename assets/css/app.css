@@ -156,6 +156,12 @@ body { min-width: 320px; }
 .system-map-waypoint.asteroid { fill: var(--color-secondary); }
 .system-map-waypoint.other { fill: var(--color-accent); }
 .system-map-waypoint:hover, .system-map-waypoint.selected { stroke: var(--color-base-content); stroke-width: 1.5; }
+.system-map-waypoint.selected { filter: drop-shadow(0 0 3px var(--color-primary)); }
+.system-map-waypoint.muted { opacity: 0.22; }
+.system-map-hit-area { fill: transparent; stroke: none; pointer-events: all; }
+.system-map-waypoint { pointer-events: bounding-box; }
+.table tr[role="button"].selected { background: color-mix(in oklab, var(--color-primary) 16%, transparent); outline: 2px solid color-mix(in oklab, var(--color-primary) 75%, transparent); outline-offset: -2px; }
+.table tr[role="button"]:focus-visible { outline: 2px solid var(--color-primary); outline-offset: -2px; }
 .system-map-waypoint:focus-visible { outline: none; stroke: var(--color-base-content); stroke-width: 2; }
 .system-map-key { display: inline-block; width: 0.6rem; height: 0.6rem; margin-right: 0.25rem; background: var(--color-info); vertical-align: -0.05rem; }
 .system-map-key.planet { border-radius: 999px; }
