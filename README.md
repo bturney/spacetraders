@@ -108,8 +108,12 @@ scripts/teardown
 The production deployment runs on the Tailscale machine `project-host`, reached
 with `tailscale ssh`. The deployment checkout is `/srv/projects/spacetraders`.
 Its `.env` stays on the host and contains
-`PHX_HOST`, `SECRET_KEY_BASE`, and `ENCRYPTION_KEY`; never copy those values
-into the repository. The named `spacetraders-data` volume holds the SQLite DB.
+`PHX_HOST`, `PHX_CHECK_ORIGINS`, `SECRET_KEY_BASE`, and `ENCRYPTION_KEY`; never
+copy those values into the repository. `PHX_CHECK_ORIGINS` is optional: when
+set, it is a comma-separated Phoenix origin allowlist, for example
+`//short-host:4000,//full-host.tailnet.ts.net:4000`. For access through both
+Tailscale names, configure both origins, including their non-default port. The
+named `spacetraders-data` volume holds the SQLite DB.
 
 Every push to `main` publishes both `latest` and an immutable `sha-<commit>`
 image tag. After the publish workflow succeeds, redeploy the host with the
