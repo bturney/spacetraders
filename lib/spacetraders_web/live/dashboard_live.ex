@@ -251,6 +251,12 @@ defmodule SpaceTradersWeb.DashboardLive do
   end
 
   @impl true
+  def handle_event("clear_waypoint", %{"agent_id" => agent_id}, socket) do
+    {:noreply,
+     assign(socket, selected_waypoints: Map.delete(socket.assigns.selected_waypoints, agent_id))}
+  end
+
+  @impl true
   def handle_event("filter_waypoints", %{"agent_id" => agent_id, "filter" => filter}, socket) do
     waypoint_filters = Map.put(socket.assigns.waypoint_filters, agent_id, filter)
     {:noreply, assign(socket, waypoint_filters: waypoint_filters)}
@@ -843,37 +849,39 @@ defmodule SpaceTradersWeb.DashboardLive do
                       data-waypoint-symbol={waypoint.symbol}
                       data-x={waypoint.x}
                       data-y={waypoint.y}
+                      data-orbital-index={waypoint.orbital_index}
+                      data-orbital-count={waypoint.orbital_count}
                       class={"system-map-waypoint #{waypoint_marker(waypoint.type)} #{selected_waypoint_class(waypoint, @selected_symbol)} #{filtered_waypoint_class(waypoint, @filter)}"}
                       phx-click="select_waypoint"
                       phx-value-agent_id={@agent_id}
                       phx-value-symbol={waypoint.symbol}
                       role="button"
                       tabindex="0"
-                      aria-label={"Select #{waypoint.symbol}"}
+                      aria-label={waypoint_aria_label(waypoint)}
                       aria-pressed={to_string(waypoint.symbol == @selected_symbol)}
                     >
-                      <title>{waypoint.symbol}</title>
-                      <circle class="system-map-hit-area" cx={waypoint.x} cy={waypoint.y} r="8" />
+                      <title>{waypoint_aria_label(waypoint)}</title>
+                      <circle class="system-map-hit-area" cx={waypoint.x} cy={waypoint.y} r="12" />
                       <circle
                         :if={waypoint_marker(waypoint.type) == "planet"}
                         cx={waypoint.x}
                         cy={waypoint.y}
-                        r="2.5"
+                        r="6"
                       />
                       <rect
                         :if={waypoint_marker(waypoint.type) == "station"}
-                        x={waypoint.x - 2}
-                        y={waypoint.y - 2}
-                        width="4"
-                        height="4"
+                        x={waypoint.x - 5}
+                        y={waypoint.y - 5}
+                        width="10"
+                        height="10"
                       />
                       <path
                         :if={waypoint_marker(waypoint.type) == "asteroid"}
-                        d={"M #{waypoint.x} #{waypoint.y - 3} L #{waypoint.x + 3} #{waypoint.y} L #{waypoint.x} #{waypoint.y + 3} L #{waypoint.x - 3} #{waypoint.y} Z"}
+                        d={"M #{waypoint.x} #{waypoint.y - 6} L #{waypoint.x + 6} #{waypoint.y} L #{waypoint.x} #{waypoint.y + 6} L #{waypoint.x - 6} #{waypoint.y} Z"}
                       />
                       <path
                         :if={waypoint_marker(waypoint.type) == "other"}
-                        d={"M #{waypoint.x} #{waypoint.y - 3} L #{waypoint.x + 2.6} #{waypoint.y - 1.5} L #{waypoint.x + 2.6} #{waypoint.y + 1.5} L #{waypoint.x} #{waypoint.y + 3} L #{waypoint.x - 2.6} #{waypoint.y + 1.5} L #{waypoint.x - 2.6} #{waypoint.y - 1.5} Z"}
+                        d={"M #{waypoint.x} #{waypoint.y - 6} L #{waypoint.x + 5.2} #{waypoint.y - 3} L #{waypoint.x + 5.2} #{waypoint.y + 3} L #{waypoint.x} #{waypoint.y + 6} L #{waypoint.x - 5.2} #{waypoint.y + 3} L #{waypoint.x - 5.2} #{waypoint.y - 3} Z"}
                       />
                       <%= if @ship_counts[waypoint.symbol] > 0 do %>
                         <circle
@@ -892,8 +900,46 @@ defmodule SpaceTradersWeb.DashboardLive do
                           {@ship_counts[waypoint.symbol]}
                         </text>
                       <% end %>
+                      <text
+                        :if={waypoint.symbol == @selected_symbol}
+                        class="system-map-waypoint-label"
+                        x={waypoint.x}
+                        y={waypoint.y + 12}
+                      >
+                        {waypoint.symbol}
+                      </text>
                     </g>
                   </svg>
+                  <div class="system-map-controls" aria-label="Map controls">
+                    <button
+                      type="button"
+                      class="btn btn-circle btn-sm"
+                      data-map-control="zoom-in"
+                      aria-label="Zoom in"
+                    >+</button>
+                    <button
+                      type="button"
+                      class="btn btn-circle btn-sm"
+                      data-map-control="zoom-out"
+                      aria-label="Zoom out"
+                    >-</button>
+                    <button type="button" class="btn btn-sm" data-map-control="reset">Reset</button>
+                  </div>
+                  <div
+                    :if={@selected_symbol}
+                    data-map-inspector
+                    data-inspector-symbol={@selected_symbol}
+                    class="system-map-inspector"
+                    role="region"
+                    aria-live="polite"
+                    aria-labelledby={"waypoint-inspector-#{@agent_id}"}
+                  >
+                    <.waypoint_details
+                      waypoint={selected_waypoint(@all_waypoints, @selected_symbol)}
+                      ships={@ships}
+                      agent_id={@agent_id}
+                    />
+                  </div>
                 </div>
               <% end %>
               <p class="eyebrow">Type markers</p>
@@ -913,8 +959,10 @@ defmodule SpaceTradersWeb.DashboardLive do
             />
           </div>
           <.waypoint_details
+            :if={@map_waypoints == [] and @selected_symbol}
             waypoint={selected_waypoint(@all_waypoints, @selected_symbol)}
             ships={@ships}
+            agent_id={@agent_id}
           />
           <.fleet_location_summary ships={@ships} system_symbol={@system_symbol} />
         </div>
@@ -991,6 +1039,7 @@ defmodule SpaceTradersWeb.DashboardLive do
 
   attr :waypoint, :any, default: nil
   attr :ships, :any, required: true
+  attr :agent_id, :integer, required: true
 
   defp waypoint_details(assigns) do
     ~H"""
@@ -1001,12 +1050,22 @@ defmodule SpaceTradersWeb.DashboardLive do
         <% waypoint -> %>
           <div class="flex flex-wrap items-start justify-between gap-4">
             <div>
-              <p class="font-mono text-sm font-semibold">{waypoint.symbol}</p><p class="mt-1 text-sm opacity-70">
+              <h4 id={"waypoint-inspector-#{@agent_id}"} class="font-mono text-sm font-semibold">
+                {waypoint.symbol}
+              </h4><p class="mt-1 text-sm opacity-70">
                 {waypoint.type}
               </p>
-            </div><span class="badge badge-outline">{ship_count_label(
-              ships_at_waypoint(@ships, waypoint.symbol, waypoint.system_symbol)
-            )}</span>
+            </div><div class="flex items-center gap-2">
+              <span class="badge badge-outline">{ship_count_label(
+                ships_at_waypoint(@ships, waypoint.symbol, waypoint.system_symbol)
+              )}</span><button
+                type="button"
+                class="btn btn-ghost btn-circle btn-xs"
+                phx-click="clear_waypoint"
+                phx-value-agent_id={@agent_id}
+                aria-label="Close waypoint inspector"
+              >x</button>
+            </div>
           </div>
           <div class="mt-4">
             <p class="text-xs font-semibold uppercase tracking-wider opacity-60">Traits</p><div class="mt-2 flex flex-wrap gap-1">
@@ -1029,6 +1088,20 @@ defmodule SpaceTradersWeb.DashboardLive do
                 <span class="opacity-70">{ship_status(ship)}</span>
               </li>
             </ul>
+          </div>
+          <div :if={waypoint.orbits || (waypoint.orbitals || []) != []} class="mt-4">
+            <p class="text-xs font-semibold uppercase tracking-wider opacity-60">
+              Orbital relationship
+            </p>
+            <p :if={waypoint.orbits} class="mt-2 text-sm">
+              Orbits <span class="font-mono">{waypoint.orbits}</span>
+            </p>
+            <div :if={(waypoint.orbitals || []) != []} class="mt-2 flex flex-wrap gap-1">
+              <span class="text-sm">Orbitals</span><span
+                :for={orbital <- waypoint.orbitals}
+                class="badge badge-outline badge-sm font-mono"
+              >{orbital.symbol}</span>
+            </div>
           </div>
           <p
             :if={is_integer(waypoint.x) and is_integer(waypoint.y)}
@@ -1515,7 +1588,37 @@ defmodule SpaceTradersWeb.DashboardLive do
   end
 
   defp positioned_waypoints({:ok, waypoints}) when is_list(waypoints) do
-    Enum.filter(waypoints, &(is_integer(&1.x) and is_integer(&1.y)))
+    waypoints = Enum.filter(waypoints, &(is_integer(&1.x) and is_integer(&1.y)))
+    waypoint_symbols = MapSet.new(waypoints, & &1.symbol)
+
+    orbital_groups =
+      Enum.group_by(waypoints, fn waypoint ->
+        if MapSet.member?(waypoint_symbols, waypoint.orbits),
+          do: waypoint.orbits,
+          else: waypoint.symbol
+      end)
+
+    Enum.map(waypoints, fn waypoint ->
+      parent_symbol =
+        if MapSet.member?(waypoint_symbols, waypoint.orbits),
+          do: waypoint.orbits,
+          else: waypoint.symbol
+
+      orbitals =
+        orbital_groups
+        |> Map.get(parent_symbol, [])
+        |> Enum.filter(&(&1.orbits == parent_symbol))
+
+      orbital_index =
+        if parent_symbol == waypoint.symbol,
+          do: nil,
+          else: Enum.find_index(orbitals, &(&1.symbol == waypoint.symbol))
+
+      Map.merge(waypoint, %{
+        orbital_count: length(orbitals),
+        orbital_index: orbital_index
+      })
+    end)
   end
 
   defp positioned_waypoints(_), do: []
@@ -1644,7 +1747,7 @@ defmodule SpaceTradersWeb.DashboardLive do
   defp system_map_view_box(waypoints) do
     xs = Enum.map(waypoints, & &1.x)
     ys = Enum.map(waypoints, & &1.y)
-    padding = 10
+    padding = max(20, ceil(max(Enum.max(xs) - Enum.min(xs), Enum.max(ys) - Enum.min(ys)) * 0.25))
     min_x = Enum.min(xs) - padding
     min_y = Enum.min(ys) - padding
     width = max(Enum.max(xs) - Enum.min(xs) + padding * 2, 20)
@@ -1663,6 +1766,11 @@ defmodule SpaceTradersWeb.DashboardLive do
   defp waypoint_marker(_), do: "other"
 
   defp selected_waypoint(waypoints, symbol), do: Enum.find(waypoints, &(&1.symbol == symbol))
+
+  defp waypoint_aria_label(%{orbits: parent, symbol: symbol}) when is_binary(parent),
+    do: "Select #{symbol}, orbiting #{parent}"
+
+  defp waypoint_aria_label(%{symbol: symbol}), do: "Select #{symbol}"
 
   defp selected_waypoint_class(%{symbol: symbol}, symbol), do: "selected"
   defp selected_waypoint_class(_, _), do: ""

@@ -28,9 +28,13 @@ import topbar from "../vendor/topbar"
 const SystemMap = {
   mounted() {
     this.svg = this.el
+    this.container = this.svg.closest(".system-map-canvas")
     this.viewBox = this.svg.viewBox.baseVal
     this.pointers = new Map()
     this.lastPan = null
+    this.dragStart = null
+    this.dragged = false
+    this.suppressClick = false
     this.initialViewBox = {
       x: this.viewBox.x,
       y: this.viewBox.y,
@@ -48,10 +52,11 @@ const SystemMap = {
     }
 
     this.onPointerDown = event => {
-      this.svg.setPointerCapture(event.pointerId)
       this.pointers.set(event.pointerId, {x: event.clientX, y: event.clientY})
       this.lastPan = this.pointAt(event.clientX, event.clientY)
       this.lastPinch = this.pinchState()
+      this.dragStart = {pointerId: event.pointerId, x: event.clientX, y: event.clientY}
+      this.dragged = false
     }
 
     this.onPointerMove = event => {
@@ -61,11 +66,25 @@ const SystemMap = {
       const points = [...this.pointers.values()]
 
       if (points.length === 1 && this.lastPan) {
+        if (!this.dragged && this.dragStart && Math.hypot(
+          event.clientX - this.dragStart.x,
+          event.clientY - this.dragStart.y,
+        ) < 8) return
+
+        this.dragged = true
+        this.suppressClick = true
+        this.svg.setPointerCapture(event.pointerId)
+        event.preventDefault()
         const point = this.pointAt(event.clientX, event.clientY)
         this.viewBox.x -= point.x - this.lastPan.x
         this.viewBox.y -= point.y - this.lastPan.y
         this.lastPan = this.pointAt(event.clientX, event.clientY)
+        this.positionInspector()
       } else if (points.length === 2) {
+        this.dragged = true
+        this.suppressClick = true
+        if (!this.svg.hasPointerCapture(event.pointerId)) this.svg.setPointerCapture(event.pointerId)
+        event.preventDefault()
         const pinch = this.pinchState()
 
         if (this.lastPinch) {
@@ -76,11 +95,46 @@ const SystemMap = {
       }
     }
 
+    // Safari can still page-zoom inside an SVG despite touch-action: none.
+    this.onTouchMove = event => event.preventDefault()
+    this.onGesture = event => event.preventDefault()
+
     this.onPointerUp = event => {
       this.pointers.delete(event.pointerId)
+      if (this.svg.hasPointerCapture(event.pointerId)) this.svg.releasePointerCapture(event.pointerId)
       const [pointer] = this.pointers.values()
       this.lastPan = pointer ? this.pointAt(pointer.x, pointer.y) : null
       this.lastPinch = this.pinchState()
+
+      if (!pointer && this.dragged) {
+        window.setTimeout(() => this.suppressClick = false, 0)
+      }
+    }
+
+    this.onClick = event => {
+      if (!this.suppressClick) return
+      event.preventDefault()
+      event.stopImmediatePropagation()
+    }
+
+    this.onControlClick = event => {
+      const control = event.target.closest("[data-map-control]")
+      if (!control) return
+
+      event.preventDefault()
+      const center = {
+        x: this.viewBox.x + this.viewBox.width / 2,
+        y: this.viewBox.y + this.viewBox.height / 2,
+      }
+
+      if (control.dataset.mapControl === "zoom-in") this.zoomAt(center, 0.85)
+      if (control.dataset.mapControl === "zoom-out") this.zoomAt(center, 1.18)
+      if (control.dataset.mapControl === "reset") this.resetView()
+    }
+
+    this.onResize = () => {
+      this.resizeMarkers()
+      this.positionInspector()
     }
 
     this.onKeyDown = event => {
@@ -102,6 +156,7 @@ const SystemMap = {
         event.preventDefault()
         this.viewBox.x += pan[0] * this.viewBox.width / 10
         this.viewBox.y += pan[1] * this.viewBox.height / 10
+        this.positionInspector()
       } else if (["+", "="].includes(event.key)) {
         event.preventDefault()
         this.zoomAt(center, 0.85)
@@ -116,10 +171,18 @@ const SystemMap = {
 
     this.svg.addEventListener("wheel", this.onWheel, {passive: false})
     this.svg.addEventListener("pointerdown", this.onPointerDown)
-    this.svg.addEventListener("pointermove", this.onPointerMove)
+    this.svg.addEventListener("pointermove", this.onPointerMove, {passive: false})
     this.svg.addEventListener("pointerup", this.onPointerUp)
     this.svg.addEventListener("pointercancel", this.onPointerUp)
+    this.svg.addEventListener("touchmove", this.onTouchMove, {passive: false})
+    this.svg.addEventListener("gesturestart", this.onGesture, {passive: false})
+    this.svg.addEventListener("gesturechange", this.onGesture, {passive: false})
+    this.svg.addEventListener("click", this.onClick, true)
     this.svg.addEventListener("keydown", this.onKeyDown)
+    this.container.addEventListener("click", this.onControlClick)
+    window.addEventListener("resize", this.onResize)
+    this.resizeMarkers()
+    this.positionInspector()
   },
 
   beforeUpdate() {
@@ -148,7 +211,10 @@ const SystemMap = {
         width: this.viewBox.width,
         height: this.viewBox.height,
       }
+      this.resizeMarkers()
     }
+
+    window.requestAnimationFrame(() => this.positionInspector())
   },
 
   destroyed() {
@@ -157,7 +223,13 @@ const SystemMap = {
     this.svg.removeEventListener("pointermove", this.onPointerMove)
     this.svg.removeEventListener("pointerup", this.onPointerUp)
     this.svg.removeEventListener("pointercancel", this.onPointerUp)
+    this.svg.removeEventListener("touchmove", this.onTouchMove)
+    this.svg.removeEventListener("gesturestart", this.onGesture)
+    this.svg.removeEventListener("gesturechange", this.onGesture)
+    this.svg.removeEventListener("click", this.onClick, true)
     this.svg.removeEventListener("keydown", this.onKeyDown)
+    this.container.removeEventListener("click", this.onControlClick)
+    window.removeEventListener("resize", this.onResize)
   },
 
   pointAt(clientX, clientY) {
@@ -192,26 +264,68 @@ const SystemMap = {
     this.viewBox.width = width
     this.viewBox.height = height
     this.resizeMarkers()
+    this.positionInspector()
   },
 
   resizeMarkers() {
-    const scale = Math.sqrt(
-      (this.viewBox.width / this.initialViewBox.width) *
-      (this.viewBox.height / this.initialViewBox.height),
-    )
+    const matrix = this.svg.getScreenCTM()
+    if (!matrix) return
+
+    const pixelsPerUnit = Math.hypot(matrix.a, matrix.b)
+    if (!pixelsPerUnit) return
+
+    const markerScale = 16 / (6 * pixelsPerUnit)
+    const orbitalDistance = 38 / pixelsPerUnit
 
     this.svg.querySelectorAll(".system-map-waypoint").forEach(marker => {
       const {x, y} = marker.dataset
+      const orbitalIndex = marker.dataset.orbitalIndex
+      const orbitalCount = Number(marker.dataset.orbitalCount)
+      const isOrbital = orbitalIndex !== undefined && orbitalIndex !== "" && orbitalCount > 0
+      const angle = isOrbital ? (Math.PI * 2 * Number(orbitalIndex) / orbitalCount) - Math.PI / 2 : 0
+      const displayX = Number(x) + (isOrbital ? Math.cos(angle) * orbitalDistance : 0)
+      const displayY = Number(y) + (isOrbital ? Math.sin(angle) * orbitalDistance : 0)
+      const selectedScale = marker.classList.contains("selected") ? 1.15 : 1
+
       marker.setAttribute(
         "transform",
-        `translate(${x} ${y}) scale(${scale}) translate(${-x} ${-y})`,
+        `translate(${displayX} ${displayY}) scale(${markerScale * selectedScale}) translate(${-x} ${-y})`,
       )
     })
+  },
+
+  positionInspector() {
+    const inspector = this.container.querySelector("[data-map-inspector]")
+    const marker = this.svg.querySelector(".system-map-waypoint.selected")
+    if (!inspector) return
+
+    if (window.matchMedia("(max-width: 640px)").matches) {
+      inspector.style.removeProperty("left")
+      inspector.style.removeProperty("top")
+      return
+    }
+
+    const map = this.container.getBoundingClientRect()
+
+    if (!marker) {
+      inspector.style.left = "12px"
+      inspector.style.top = "3.5rem"
+      return
+    }
+
+    const target = marker.getBoundingClientRect()
+    const panel = inspector.getBoundingClientRect()
+    const left = Math.min(Math.max(target.left - map.left + target.width / 2 + 12, 12), map.width - panel.width - 12)
+    const top = Math.min(Math.max(target.top - map.top + target.height / 2 + 12, 12), map.height - panel.height - 12)
+
+    inspector.style.left = `${left}px`
+    inspector.style.top = `${top}px`
   },
 
   resetView() {
     Object.assign(this.viewBox, this.initialViewBox)
     this.resizeMarkers()
+    this.positionInspector()
   },
 
   waypointSignature() {

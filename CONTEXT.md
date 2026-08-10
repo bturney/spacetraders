@@ -31,6 +31,12 @@ A named region of space containing waypoints (e.g., X1-UX81).
 A specific location in a system (e.g., X1-UX81-A1), the atomic unit of movement. May carry traits such as MARKETPLACE, SHIPYARD, or ENGINEERED_ASTEROID.
 _Avoid_: planet, station, location
 
+**Parent Waypoint**:
+A Waypoint at a coordinate that one or more Orbital Waypoints orbit. The API exposes its children through `orbitals`.
+
+**Orbital Waypoint**:
+A Waypoint located at the exact coordinates of its Parent Waypoint, such as a moon or orbital station. The API identifies its parent through `orbits`.
+
 **System Map**:
 A visual, interactive representation of every Waypoint in one System, positioned by its game-supplied coordinates and showing the Fleet's current state.
 _Avoid_: galaxy map, sector map

@@ -1120,7 +1120,23 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
           "type" => "PLANET",
           "x" => 4,
           "y" => 19,
-          "traits" => [%{"symbol" => "MARKETPLACE"}]
+          "traits" => [%{"symbol" => "MARKETPLACE"}],
+          "orbitals" => [%{"symbol" => "X1-UX81-B2"}]
+        },
+        %{
+          "symbol" => "X1-UX81-B2",
+          "systemSymbol" => "X1-UX81",
+          "type" => "MOON",
+          "x" => 4,
+          "y" => 19,
+          "orbits" => "X1-UX81-B1",
+          "traits" => []
+        },
+        %{
+          "symbol" => "X1-UX81-C1",
+          "systemSymbol" => "X1-UX81",
+          "type" => "JUMP_GATE",
+          "traits" => []
         }
       ]
 
@@ -1180,8 +1196,14 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
                "[data-waypoint-symbol=\"X1-UX81-A3\"][data-x=\"14\"][data-y=\"-6\"]"
              )
 
+      assert has_element?(
+               lv,
+               "[data-waypoint-symbol=\"X1-UX81-B2\"][data-orbital-index=\"0\"][data-orbital-count=\"1\"]"
+             )
+
       assert html =~ "Type markers"
-      assert html =~ "Select a waypoint to inspect its type, traits, and ships."
+      assert has_element?(lv, "[data-map-control=\"zoom-in\"]")
+      refute has_element?(lv, "[data-map-inspector]")
 
       html =
         lv
@@ -1193,6 +1215,29 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       assert html =~ "MINERAL_DEPOSITS"
       assert has_element?(lv, "[data-waypoint-row=\"X1-UX81-A3\"].selected")
       assert has_element?(lv, "form[phx-submit=\"browser_navigate\"]")
+      assert has_element?(lv, "[data-map-inspector]")
+
+      html =
+        lv
+        |> element("[data-waypoint-symbol=\"X1-UX81-B1\"]")
+        |> render_click()
+
+      assert html =~ "Orbital relationship"
+      assert html =~ "X1-UX81-B2"
+
+      html =
+        lv
+        |> element("[data-waypoint-row=\"X1-UX81-C1\"]")
+        |> render_click()
+
+      assert html =~ "X1-UX81-C1"
+      assert has_element?(lv, "[data-map-inspector]")
+
+      lv
+      |> element("button[aria-label=\"Close waypoint inspector\"]")
+      |> render_click()
+
+      refute has_element?(lv, "[data-map-inspector]")
     end
 
     test "links the waypoint grid and system map, including filters and ship counts", %{
