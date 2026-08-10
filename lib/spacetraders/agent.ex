@@ -196,7 +196,8 @@ defmodule SpaceTraders.Agent do
       case SpaceTraders.API.register(
              account_token,
              get_field(changeset, :symbol),
-             get_field(changeset, :faction)
+             get_field(changeset, :faction),
+             operator.email
            ) do
         {:ok, %{token: agent_token, agent: %GameAgent{} = game_agent}} ->
           replace_stale_agent_and_create(

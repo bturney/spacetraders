@@ -76,7 +76,12 @@ defmodule SpaceTraders.API.ClientTest do
         assert conn.method == "POST"
         assert conn.request_path == "/v2/register"
         assert get_req_header(conn, "authorization") == ["Bearer ACCOUNT_TOKEN"]
-        assert conn.body_params == %{"symbol" => "ORBITALIST", "faction" => "COSMIC"}
+
+        assert conn.body_params == %{
+                 "symbol" => "ORBITALIST",
+                 "faction" => "COSMIC",
+                 "email" => "operator@example.com"
+               }
 
         Req.Test.json(conn, %{
           "data" => %{
@@ -101,7 +106,7 @@ defmodule SpaceTraders.API.ClientTest do
                 contract: %Model.Contract{type: "PROCUREMENT"},
                 faction: %Model.Faction{symbol: "COSMIC"},
                 ships: [%Model.Ship{symbol: "ORBITALIST-1"}]
-              }} = API.register("ACCOUNT_TOKEN", "ORBITALIST", "COSMIC")
+              }} = API.register("ACCOUNT_TOKEN", "ORBITALIST", "COSMIC", "operator@example.com")
     end
   end
 

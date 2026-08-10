@@ -52,10 +52,10 @@ defmodule SpaceTraders.API do
   end
 
   @doc "POST /register — mint a new agent under the given account token."
-  @spec register(token(), String.t(), String.t()) :: result()
-  def register(account_token, symbol, faction) do
+  @spec register(token(), String.t(), String.t(), String.t()) :: result()
+  def register(account_token, symbol, faction, email) do
     request(:post, "/register", account_token,
-      json: %{symbol: symbol, faction: faction},
+      json: %{symbol: symbol, faction: faction, email: email},
       as:
         {:map,
          %{
