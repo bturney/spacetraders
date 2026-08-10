@@ -1279,6 +1279,176 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       assert has_element?(lv, "[data-waypoint-symbol=\"X1-UX81-A3\"].muted")
     end
 
+    test "shows local fleet state without plotting off-system ships", %{
+      conn: conn,
+      operator: operator
+    } do
+      agent = agent_fixture(operator)
+
+      waypoints = [
+        %{
+          "symbol" => "X1-UX81-A1",
+          "systemSymbol" => "X1-UX81",
+          "type" => "ORBITAL_STATION",
+          "x" => -12,
+          "y" => 8,
+          "traits" => []
+        },
+        %{
+          "symbol" => "X1-UX81-A3",
+          "systemSymbol" => "X1-UX81",
+          "type" => "ENGINEERED_ASTEROID",
+          "x" => 14,
+          "y" => -6,
+          "traits" => []
+        }
+      ]
+
+      transit_nav =
+        nav_body("IN_TRANSIT", destination: "X1-UX81-A3")
+        |> Map.put("route", %{
+          "origin" => %{
+            "symbol" => "X1-UX81-A1",
+            "systemSymbol" => "X1-UX81",
+            "type" => "ORBITAL_STATION",
+            "x" => -12,
+            "y" => 8
+          },
+          "destination" => %{
+            "symbol" => "X1-UX81-A3",
+            "systemSymbol" => "X1-UX81",
+            "type" => "ENGINEERED_ASTEROID",
+            "x" => 14,
+            "y" => -6
+          },
+          "departureTime" => "2026-01-01T00:00:00.000Z",
+          "arrival" => future_iso(300)
+        })
+
+      inter_system_nav =
+        nav_body("IN_TRANSIT", destination: "X1-OTHER-A2")
+        |> Map.put("systemSymbol", "X1-OTHER")
+        |> Map.put("route", %{
+          "origin" => %{"symbol" => "X1-OTHER-A1", "systemSymbol" => "X1-OTHER"},
+          "destination" => %{"symbol" => "X1-UX81-A1", "systemSymbol" => "X1-UX81"},
+          "departureTime" => "2026-01-01T00:00:00.000Z",
+          "arrival" => future_iso(300)
+        })
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case {conn.request_path, conn.method} do
+          {"/v2/my/agent", "GET"} ->
+            Req.Test.json(conn, %{"data" => agent_overview_body(agent.symbol)})
+
+          {"/v2/my/contracts", "GET"} ->
+            Req.Test.json(conn, %{"data" => []})
+
+          {"/v2/my/ships", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => [
+                ship_body("ORBITALIST-1"),
+                ship_body("ORBITALIST-2", %{
+                  "nav" => nav_body("IN_ORBIT", destination: "X1-UX81-A1")
+                }),
+                ship_body("ORBITALIST-3", %{"nav" => transit_nav}),
+                ship_body("ORBITALIST-4", %{
+                  "nav" => Map.put(nav_body("DOCKED"), "systemSymbol", "X1-OTHER")
+                }),
+                ship_body("ORBITALIST-5", %{"nav" => inter_system_nav})
+              ]
+            })
+
+          {"/v2/systems/X1-UX81/waypoints", "GET"} ->
+            case conn.query_params["page"] do
+              "1" -> Req.Test.json(conn, %{"data" => waypoints})
+              _ -> Req.Test.json(conn, %{"data" => []})
+            end
+
+          {"/v2/systems/X1-OTHER/waypoints", "GET"} ->
+            Req.Test.json(conn, %{"data" => []})
+        end
+      end)
+
+      {:ok, lv, _html} = live(conn, ~p"/")
+
+      assert has_element?(lv, "[data-waypoint-row=\"X1-UX81-A1\"]", "2")
+      assert has_element?(lv, "[data-ship-count=\"X1-UX81-A1\"]", "2")
+      assert has_element?(lv, "[data-ship-count-badge=\"X1-UX81-A1\"]")
+      assert has_element?(lv, "[data-transit-route=\"ORBITALIST-3\"]")
+
+      assert has_element?(
+               lv,
+               "[data-fleet-summary=\"off-system\"]",
+               "1 off-system ship at another system"
+             )
+
+      assert has_element?(
+               lv,
+               "[data-fleet-summary=\"inter-system-transit\"]",
+               "1 ship in inter-system transit"
+             )
+
+      _html = lv |> element("[data-waypoint-row=\"X1-UX81-A1\"]") |> render_click()
+
+      assert has_element?(lv, "[data-waypoint-ships]", "ORBITALIST-1")
+      assert has_element?(lv, "[data-waypoint-ships]", "DOCKED")
+      assert has_element?(lv, "[data-waypoint-ships]", "ORBITALIST-2")
+      assert has_element?(lv, "[data-waypoint-ships]", "IN_ORBIT")
+    end
+
+    test "keeps fleet counts unavailable when the fleet refresh fails", %{
+      conn: conn,
+      operator: operator
+    } do
+      agent = agent_fixture(operator)
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case conn.request_path do
+          "/v2/my/agent" ->
+            Req.Test.json(conn, %{"data" => agent_overview_body(agent.symbol)})
+
+          "/v2/my/ships" ->
+            conn
+            |> Map.put(:status, 503)
+            |> Req.Test.json(%{"error" => %{"message" => "Fleet unavailable"}})
+
+          "/v2/my/contracts" ->
+            Req.Test.json(conn, %{"data" => []})
+
+          "/v2/systems/X1-UX81/waypoints" ->
+            Req.Test.json(conn, %{
+              "data" => [
+                %{
+                  "symbol" => "X1-UX81-A1",
+                  "systemSymbol" => "X1-UX81",
+                  "type" => "ORBITAL_STATION",
+                  "x" => -12,
+                  "y" => 8,
+                  "traits" => []
+                }
+              ]
+            })
+        end
+      end)
+
+      {:ok, lv, _html} = live(conn, ~p"/")
+
+      assert has_element?(lv, "[data-waypoint-row=\"X1-UX81-A1\"]", "Unavailable")
+      refute has_element?(lv, "[data-ship-count=\"X1-UX81-A1\"]")
+    end
+
+    test "does not mark local ships off-system when waypoint data is empty", %{
+      conn: conn,
+      operator: operator
+    } do
+      agent = agent_fixture(operator)
+      stub_live_game(agent_overview_body(agent.symbol), [ship_body("ORBITALIST-1")])
+
+      {:ok, lv, _html} = live(conn, ~p"/")
+
+      refute has_element?(lv, "[data-fleet-summary=\"off-system\"]")
+    end
+
     test "navigates an orbiting local ship from shared waypoint details and preserves selection",
          %{
            conn: conn,
@@ -1388,6 +1558,7 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       assert html =~ "ORBITALIST-1 is in transit to X1-UX81-A3."
       assert has_element?(lv, "[data-waypoint-symbol=\"X1-UX81-A3\"].selected")
       assert has_element?(lv, "[data-waypoint-row=\"X1-UX81-A3\"].selected")
+      assert has_element?(lv, "[data-transit-route=\"ORBITALIST-1\"]")
       refute has_element?(lv, "form[phx-submit=\"browser_navigate\"]")
     end
 
