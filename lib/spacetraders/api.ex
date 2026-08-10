@@ -185,7 +185,7 @@ defmodule SpaceTraders.API do
   @spec sell_cargo(token(), String.t(), String.t(), pos_integer()) :: result()
   def sell_cargo(token, ship_symbol, trade_symbol, units) do
     request(:post, "/my/ships/#{ship_symbol}/sell", token,
-      json: %{tradeSymbol: trade_symbol, units: units},
+      json: %{symbol: trade_symbol, units: units},
       as:
         {:map,
          %{

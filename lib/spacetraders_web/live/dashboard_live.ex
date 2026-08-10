@@ -51,7 +51,7 @@ defmodule SpaceTradersWeb.DashboardLive do
             :for={overview <- @overviews}
             overview={overview}
             cooldown_tick={@cooldown_tick}
-            waypoint_filters={@waypoint_filters}
+            selected_waypoints={@selected_waypoints}
           />
         </div>
       <% else %>
@@ -102,7 +102,7 @@ defmodule SpaceTradersWeb.DashboardLive do
        operator: operator,
        overviews: overviews,
        cooldown_tick: 0,
-       waypoint_filters: %{}
+       selected_waypoints: %{}
      )}
   end
 
@@ -243,13 +243,9 @@ defmodule SpaceTradersWeb.DashboardLive do
   end
 
   @impl true
-  def handle_event(
-        "waypoint_filter",
-        %{"agent_id" => agent_id, "waypoint_type" => type},
-        socket
-      ) do
-    filters = Map.put(socket.assigns.waypoint_filters, agent_id, type || "ALL")
-    {:noreply, assign(socket, waypoint_filters: filters)}
+  def handle_event("select_waypoint", %{"agent_id" => agent_id, "symbol" => symbol}, socket) do
+    selected_waypoints = Map.put(socket.assigns.selected_waypoints, agent_id, symbol)
+    {:noreply, assign(socket, selected_waypoints: selected_waypoints)}
   end
 
   @impl true
@@ -484,7 +480,7 @@ defmodule SpaceTradersWeb.DashboardLive do
 
   attr :overview, :map, required: true
   attr :cooldown_tick, :integer, required: true
-  attr :waypoint_filters, :map, default: %{}
+  attr :selected_waypoints, :map, default: %{}
 
   defp agent_section(assigns) do
     ~H"""
@@ -506,11 +502,11 @@ defmodule SpaceTradersWeb.DashboardLive do
           <.market_panel listings={@overview.markets} />
         </div>
       </div>
-      <.waypoint_browser
+      <.system_map
         waypoints={@overview.waypoints}
         ships={@overview.ships}
         agent_id={@overview.agent.id}
-        filter={Map.get(@waypoint_filters, to_string(@overview.agent.id), "ALL")}
+        selected_symbol={Map.get(@selected_waypoints, to_string(@overview.agent.id))}
       />
     </section>
     """
@@ -547,11 +543,13 @@ defmodule SpaceTradersWeb.DashboardLive do
             <span class="badge badge-outline">{contract_status(contract)}</span>
           </div>
           <div :for={good <- contract.terms.deliver || []} class="mt-4 space-y-2 text-sm">
+            <% delivery_ships = delivery_ships(@ships, good.destination_symbol, good.trade_symbol) %>
             <div class="flex items-center justify-between">
               <span>{good.trade_symbol} to <span class="font-mono">{good.destination_symbol}</span></span>
               <span class="font-mono">{good.units_fulfilled} / {good.units_required}</span>
             </div>
             <form
+              :for={ship <- delivery_ships}
               :if={contract.accepted && not contract.fulfilled}
               phx-submit="deliver_contract"
               class="grid grid-cols-[minmax(0,1fr)_5rem_auto] gap-2 sm:flex"
@@ -559,22 +557,27 @@ defmodule SpaceTradersWeb.DashboardLive do
               <input type="hidden" name="agent_id" value={@agent_id} />
               <input type="hidden" name="contract_id" value={contract.id} />
               <input type="hidden" name="trade_symbol" value={good.trade_symbol} />
-              <input
-                name="ship_symbol"
-                placeholder="Ship symbol"
-                class="input input-bordered input-sm min-w-0 font-mono"
-                required
-              />
+              <input type="hidden" name="ship_symbol" value={ship.symbol} />
+              <span class="self-center font-mono text-xs">
+                {ship.symbol} ({delivery_units(ship, good.trade_symbol)} available)
+              </span>
               <input
                 name="units"
                 type="number"
                 min="1"
-                max={good.units_required - good.units_fulfilled}
-                value={good.units_required - good.units_fulfilled}
+                max={delivery_limit(ship, good)}
+                value={delivery_limit(ship, good)}
                 class="input input-bordered input-sm w-full sm:w-20"
+                required
               />
               <button type="submit" class="btn btn-secondary btn-sm">Deliver</button>
             </form>
+            <p
+              :if={contract.accepted && not contract.fulfilled && delivery_ships == []}
+              class="text-xs opacity-70"
+            >
+              No ship at this waypoint has {good.trade_symbol} to deliver.
+            </p>
           </div>
           <form
             :if={not contract.accepted && not contract.fulfilled}
@@ -760,61 +763,136 @@ defmodule SpaceTradersWeb.DashboardLive do
   attr :waypoints, :any, required: true
   attr :ships, :any, required: true
   attr :agent_id, :integer, required: true
-  attr :filter, :string, default: "ALL"
+  attr :selected_symbol, :string, default: nil
 
-  defp waypoint_browser(assigns) do
+  defp system_map(assigns) do
+    assigns = assign(assigns, :map_waypoints, positioned_waypoints(assigns.waypoints))
+
     ~H"""
     <div class="card border border-base-300/70 bg-base-200 p-4 sm:p-5">
       <div class="flex flex-wrap items-end justify-between gap-3">
         <div>
-          <p class="eyebrow">Waypoint browser</p>
-          <h3 class="mt-1 font-semibold">Waypoints in this system</h3>
+          <p class="eyebrow">System map</p>
+          <h3 class="mt-1 font-semibold">Headquarters system</h3>
         </div>
-        <form phx-change="waypoint_filter" id="waypoint-filter" class="flex items-center gap-2">
-          <input type="hidden" name="agent_id" value={@agent_id} />
-          <select name="waypoint_type" class="select select-bordered select-sm">
-            <option value="ALL" selected={@filter == "ALL"}>All types</option>
-            <option value="ENGINEERED_ASTEROID" selected={@filter == "ENGINEERED_ASTEROID"}>
-              Engineered asteroids
-            </option>
-            <option value="SHIPYARD" selected={@filter == "SHIPYARD"}>Shipyards</option>
-            <option value="MARKETPLACE" selected={@filter == "MARKETPLACE"}>Marketplaces</option>
-          </select>
-        </form>
+        <p class="text-xs opacity-60">Scroll or pinch to zoom. Drag to pan.</p>
       </div>
 
-      <%= case filtered_waypoints(@waypoints, @filter) do %>
-        <% {:ok, []} -> %>
-          <div class="alert alert-outline mt-3">No waypoints match this filter.</div>
-        <% {:ok, waypoints} -> %>
-          <div class="mt-3 space-y-2">
-            <div
-              :for={waypoint <- waypoints}
-              class="flex flex-wrap items-center justify-between gap-2 rounded border border-base-300/50 px-3 py-2 text-sm"
-            >
-              <div class="flex flex-wrap items-center gap-2">
-                <span class="font-mono font-semibold">{waypoint.symbol}</span>
-                <span class="badge badge-ghost badge-sm">{waypoint.type}</span>
-                <span
-                  :for={trait <- waypoint.traits || []}
-                  class="badge badge-outline badge-sm"
+      <%= case @waypoints do %>
+        <% {:error, reason} -> %>
+          <div class="alert alert-warning mt-3">
+            System map unavailable: {live_error(reason)}
+          </div>
+        <% {:ok, _waypoints} when @map_waypoints == [] -> %>
+          <div class="alert alert-outline mt-3">No coordinate data is available for this system.</div>
+        <% {:ok, _waypoints} -> %>
+          <div class="system-map mt-4 grid gap-4 xl:grid-cols-[minmax(0,1fr)_18rem]">
+            <div class="system-map-canvas bg-grid">
+              <svg
+                id={"system-map-#{@agent_id}"}
+                data-system-map
+                phx-hook="SystemMap"
+                viewBox={system_map_view_box(@map_waypoints)}
+                aria-label="Interactive system map. Use arrow keys to pan, plus and minus to zoom, and Home to reset."
+                tabindex="0"
+              >
+                <g class="system-map-axis">
+                  <line x1="-10000" y1="0" x2="10000" y2="0" />
+                  <line x1="0" y1="-10000" x2="0" y2="10000" />
+                </g>
+                <g
+                  :for={waypoint <- @map_waypoints}
+                  data-waypoint-symbol={waypoint.symbol}
+                  data-x={waypoint.x}
+                  data-y={waypoint.y}
+                  class={"system-map-waypoint #{waypoint_marker(waypoint.type)} #{selected_waypoint_class(waypoint, @selected_symbol)}"}
+                  phx-click="select_waypoint"
+                  phx-value-agent_id={@agent_id}
+                  phx-value-symbol={waypoint.symbol}
+                  role="button"
+                  tabindex="0"
+                  aria-label={"Select #{waypoint.symbol}"}
+                  aria-pressed={to_string(waypoint.symbol == @selected_symbol)}
                 >
-                  {trait.symbol}
-                </span>
+                  <title>{waypoint.symbol}</title>
+                  <circle
+                    :if={waypoint_marker(waypoint.type) == "planet"}
+                    cx={waypoint.x}
+                    cy={waypoint.y}
+                    r="2.5"
+                  />
+                  <rect
+                    :if={waypoint_marker(waypoint.type) == "station"}
+                    x={waypoint.x - 2}
+                    y={waypoint.y - 2}
+                    width="4"
+                    height="4"
+                  />
+                  <path
+                    :if={waypoint_marker(waypoint.type) == "asteroid"}
+                    d={"M #{waypoint.x} #{waypoint.y - 3} L #{waypoint.x + 3} #{waypoint.y} L #{waypoint.x} #{waypoint.y + 3} L #{waypoint.x - 3} #{waypoint.y} Z"}
+                  />
+                  <path
+                    :if={waypoint_marker(waypoint.type) == "other"}
+                    d={"M #{waypoint.x} #{waypoint.y - 3} L #{waypoint.x + 2.6} #{waypoint.y - 1.5} L #{waypoint.x + 2.6} #{waypoint.y + 1.5} L #{waypoint.x} #{waypoint.y + 3} L #{waypoint.x - 2.6} #{waypoint.y + 1.5} L #{waypoint.x - 2.6} #{waypoint.y - 1.5} Z"}
+                  />
+                </g>
+              </svg>
+            </div>
+            <div class="rounded border border-base-300/70 bg-base-100 p-3">
+              <p class="eyebrow">Type markers</p>
+              <div class="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-xs opacity-75">
+                <span><i class="system-map-key planet"></i> Planet</span>
+                <span><i class="system-map-key station"></i> Station</span>
+                <span><i class="system-map-key asteroid"></i> Asteroid</span>
+                <span><i class="system-map-key other"></i> Other</span>
               </div>
-              <form phx-submit="browser_navigate" class="flex items-center gap-2">
-                <input type="hidden" name="waypoint_symbol" value={waypoint.symbol} />
-                <select name="symbol" class="select select-bordered select-xs font-mono" required>
-                  <option :for={ship <- browser_ships(@ships)} value={ship.symbol}>
-                    {ship.symbol}
-                  </option>
-                </select>
-                <button type="submit" class="btn btn-primary btn-xs">Navigate</button>
-              </form>
+              <%= case selected_waypoint(@map_waypoints, @selected_symbol) do %>
+                <% nil -> %>
+                  <p class="mt-6 text-sm opacity-60">
+                    Select a waypoint to inspect its type and traits.
+                  </p>
+                <% waypoint -> %>
+                  <div class="mt-6 space-y-3">
+                    <div>
+                      <p class="font-mono text-sm font-semibold">{waypoint.symbol}</p>
+                      <p class="mt-1 text-sm opacity-70">{waypoint.type}</p>
+                    </div>
+                    <div>
+                      <p class="text-xs font-semibold uppercase tracking-wider opacity-60">Traits</p>
+                      <div class="mt-2 flex flex-wrap gap-1">
+                        <span
+                          :for={trait <- waypoint.traits || []}
+                          class="badge badge-outline badge-sm"
+                        >
+                          {trait.symbol}
+                        </span>
+                        <span :if={(waypoint.traits || []) == []} class="text-sm opacity-60">None</span>
+                      </div>
+                    </div>
+                    <p class="font-mono text-xs opacity-60">{waypoint.x}, {waypoint.y}</p>
+                    <form :if={browser_ships(@ships) != []} phx-submit="browser_navigate" class="pt-1">
+                      <input type="hidden" name="waypoint_symbol" value={waypoint.symbol} />
+                      <label class="label py-1">
+                        <span class="label-text text-xs">Navigate a ship here</span>
+                      </label>
+                      <div class="flex gap-2">
+                        <select
+                          name="symbol"
+                          class="select select-bordered select-xs min-w-0 flex-1 font-mono"
+                          required
+                        >
+                          <option :for={ship <- browser_ships(@ships)} value={ship.symbol}>
+                            {ship.symbol}
+                          </option>
+                        </select>
+                        <button type="submit" class="btn btn-primary btn-xs">Navigate</button>
+                      </div>
+                    </form>
+                  </div>
+              <% end %>
             </div>
           </div>
-        <% {:error, reason} -> %>
-          <div class="alert alert-warning mt-3">Waypoints unavailable: {live_error(reason)}</div>
       <% end %>
     </div>
     """
@@ -1203,6 +1281,26 @@ defmodule SpaceTradersWeb.DashboardLive do
 
   defp cargo_item(_, _), do: nil
 
+  defp delivery_ships({:ok, ships}, destination, trade_symbol) when is_list(ships) do
+    Enum.filter(ships, fn ship ->
+      not in_transit?(ship) and ship_location(ship) == destination and
+        delivery_units(ship, trade_symbol) > 0
+    end)
+  end
+
+  defp delivery_ships(_, _, _), do: []
+
+  defp delivery_limit(ship, good) do
+    min(delivery_units(ship, good.trade_symbol), good.units_required - good.units_fulfilled)
+  end
+
+  defp delivery_units(ship, trade_symbol) do
+    case cargo_item(ship, trade_symbol) do
+      %{units: units} when is_integer(units) -> units
+      _ -> 0
+    end
+  end
+
   defp cargo_inventory(%{cargo: %{inventory: inventory}}) when is_list(inventory), do: inventory
   defp cargo_inventory(_), do: []
 
@@ -1221,26 +1319,40 @@ defmodule SpaceTradersWeb.DashboardLive do
     end
   end
 
+  defp positioned_waypoints({:ok, waypoints}) when is_list(waypoints) do
+    Enum.filter(waypoints, &(is_integer(&1.x) and is_integer(&1.y)))
+  end
+
+  defp positioned_waypoints(_), do: []
+
   defp browser_ships({:ok, ships}) when is_list(ships), do: ships
   defp browser_ships(_), do: []
 
-  defp filtered_waypoints({:ok, waypoints}, filter) when is_list(waypoints) do
-    {:ok,
-     Enum.filter(waypoints, fn waypoint ->
-       case waypoint_type_filter(filter) do
-         :all -> true
-         {:type, type} -> waypoint.type == type
-         {:trait, trait} -> Enum.any?(waypoint.traits || [], &(&1.symbol == trait))
-       end
-     end)}
+  defp system_map_view_box(waypoints) do
+    xs = Enum.map(waypoints, & &1.x)
+    ys = Enum.map(waypoints, & &1.y)
+    padding = 10
+    min_x = Enum.min(xs) - padding
+    min_y = Enum.min(ys) - padding
+    width = max(Enum.max(xs) - Enum.min(xs) + padding * 2, 20)
+    height = max(Enum.max(ys) - Enum.min(ys) + padding * 2, 20)
+
+    "#{min_x} #{min_y} #{width} #{height}"
   end
 
-  defp filtered_waypoints(other, _filter), do: other
+  defp waypoint_marker(type) when type in ["PLANET", "MOON", "GAS_GIANT"], do: "planet"
+  defp waypoint_marker(type) when type in ["ORBITAL_STATION", "JUMP_GATE"], do: "station"
 
-  defp waypoint_type_filter("ENGINEERED_ASTEROID"), do: {:type, "ENGINEERED_ASTEROID"}
-  defp waypoint_type_filter("SHIPYARD"), do: {:trait, "SHIPYARD"}
-  defp waypoint_type_filter("MARKETPLACE"), do: {:trait, "MARKETPLACE"}
-  defp waypoint_type_filter(_), do: :all
+  defp waypoint_marker(type) when is_binary(type) do
+    if String.contains?(type, "ASTEROID"), do: "asteroid", else: "other"
+  end
+
+  defp waypoint_marker(_), do: "other"
+
+  defp selected_waypoint(waypoints, symbol), do: Enum.find(waypoints, &(&1.symbol == symbol))
+
+  defp selected_waypoint_class(%{symbol: symbol}, symbol), do: "selected"
+  defp selected_waypoint_class(_, _), do: ""
 
   defp capacity(nil), do: 0
   defp capacity(%{capacity: capacity}) when is_integer(capacity), do: capacity
