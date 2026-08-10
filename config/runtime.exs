@@ -83,10 +83,13 @@ if config_env() == :prod do
       Set it to the public hostname used to access the dashboard.
       """
 
+  check_origin = SpaceTradersWeb.OriginCheck.parse(System.get_env("PHX_CHECK_ORIGINS"))
+
   config :spacetraders, :dns_cluster_query, System.get_env("DNS_CLUSTER_QUERY")
 
   config :spacetraders, SpaceTradersWeb.Endpoint,
     url: [host: host, port: 443, scheme: "https"],
+    check_origin: check_origin,
     http: [
       # Enable IPv6 and bind on all interfaces.
       # Set it to  {0, 0, 0, 0, 0, 0, 0, 1} for local network only access.
