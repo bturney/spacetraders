@@ -985,13 +985,22 @@ defmodule SpaceTradersWeb.DashboardLive do
           >
             {waypoint.x}, {waypoint.y}
           </p>
-          <form :if={browser_ships(@ships) != []} phx-submit="browser_navigate" class="mt-4">
+          <form
+            :if={browser_ships(@ships, waypoint.system_symbol) != []}
+            phx-submit="browser_navigate"
+            class="mt-4"
+          >
             <input type="hidden" name="waypoint_symbol" value={waypoint.symbol} /><label class="label py-1"><span class="label-text text-xs">Navigate a ship here</span></label><div class="flex gap-2">
               <select
                 name="symbol"
                 class="select select-bordered select-xs min-w-0 flex-1 font-mono"
                 required
-              ><option :for={ship <- browser_ships(@ships)} value={ship.symbol}>{ship.symbol}</option></select><button
+              ><option
+                :for={ship <- browser_ships(@ships, waypoint.system_symbol)}
+                value={ship.symbol}
+              >
+                {ship.symbol}
+              </option></select><button
                 type="submit"
                 class="btn btn-primary btn-xs"
               >Navigate</button>
@@ -1463,8 +1472,11 @@ defmodule SpaceTradersWeb.DashboardLive do
   defp ship_count_label(:unavailable), do: "Unavailable"
   defp ship_count_label(count), do: pluralize(count, "ship")
 
-  defp browser_ships({:ok, ships}) when is_list(ships), do: ships
-  defp browser_ships(_), do: []
+  defp browser_ships({:ok, ships}, system_symbol) when is_list(ships) do
+    Enum.filter(ships, &(&1.nav.status == "IN_ORBIT" and &1.nav.system_symbol == system_symbol))
+  end
+
+  defp browser_ships(_, _), do: []
 
   defp system_map_view_box(waypoints) do
     xs = Enum.map(waypoints, & &1.x)
