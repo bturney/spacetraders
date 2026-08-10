@@ -33,15 +33,12 @@ The pinned toolchain is **not** on PATH. In every fresh shell, source it first:
 source scripts/_toolchain.sh   # puts pinned mix/elixir on PATH
 ```
 
-For ordinary single-checkout work, this uses the installed dependency directory. Concurrent ticket work must use `scripts/worktree-setup`, which restores private writable dependencies and build output from an immutable warm cache.
+### Task workspaces
 
-### Ticket loop (worktree per ticket)
-
-1. `git worktree add ../spacetraders-<NN> -b feature/<NN>-<slug> main`.
-2. `cd ../spacetraders-<NN>` and run `scripts/worktree-setup <NN>` with a stable unique ticket ID. The command populates or restores a private build cache, allocates a port, and writes ignored `.worktree-env`.
-3. For direct Mix commands, run `source .worktree-env`; project scripts load it automatically. Iterate `mix test <file>` — the test DB is dropped and re-migrated every run, so edited migrations always apply.
-4. Run `scripts/teardown` when the task is finished to release its port. Prune old cache entries explicitly with `scripts/worktree-cache-prune` (30 days and 10 GiB by default).
-5. Gate with `scripts/verify`, then `/code-review`, commit, PR.
+1. Start concurrent ticket or ad-hoc work with `scripts/task-start <issue-number|slug>`. It creates `feature/<task-id>` in a sibling worktree and invokes `scripts/worktree-setup`. Use `--base <ref>` for dependent work and `--resume` to continue a known task.
+2. Append a runner command after `--`; it receives the workspace as its current directory with `.worktree-env` loaded. For direct Mix commands, work from the printed workspace and run `source .worktree-env`; project scripts load it automatically. Iterate `mix test <file>` — the test DB is dropped and re-migrated every run.
+3. After committing or removing changes, run `scripts/task-stop <issue-number|slug>`. It releases the port, removes only a clean worktree, and preserves its branch. Prune old cache entries with `scripts/worktree-cache-prune` (30 days and 10 GiB by default).
+4. Gate with `scripts/verify`, then `/code-review`, commit, PR.
 
 <!-- phoenix-gen-auth-start -->
 ## Authentication

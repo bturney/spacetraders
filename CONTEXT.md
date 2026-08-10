@@ -35,6 +35,10 @@ _Avoid_: planet, station, location
 A visual, interactive representation of every Waypoint in one System, positioned by its game-supplied coordinates and showing the Fleet's current state.
 _Avoid_: galaxy map, sector map
 
+**Waypoint Grid**:
+A structured, actionable view of Waypoints in one System. It is linked to the System Map: selecting a Waypoint in either view selects and highlights it in both.
+_Avoid_: waypoint browser, waypoint list
+
 **Galaxy Map**:
 A future representation of multiple Systems. It requires a deliberate System discovery model and is distinct from the System Map.
 _Avoid_: system map

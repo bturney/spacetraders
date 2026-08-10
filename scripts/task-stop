@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+# Release a task workspace without deleting its review branch.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+PROJECT_PARENT="$(dirname "$PROJECT_ROOT")"
+PROJECT_NAME="$(basename "$PROJECT_ROOT")"
+
+usage() {
+  echo "Usage: scripts/task-stop <issue-number|slug>" >&2
+  exit 64
+}
+
+task_id="${1:-}"
+[ -n "$task_id" ] || usage
+[ "$#" -eq 1 ] || usage
+
+if [[ ! "$task_id" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+  echo "Task ID must begin with a letter or digit and may then contain periods, underscores, or hyphens." >&2
+  exit 64
+fi
+
+workspace="$PROJECT_PARENT/$PROJECT_NAME-$task_id"
+branch="feature/$task_id"
+
+registered_workspace() {
+  git -C "$PROJECT_ROOT" worktree list --porcelain | grep -Fx "worktree $workspace" >/dev/null
+}
+
+if [ ! -d "$workspace" ] || ! registered_workspace || [ "$(git -C "$workspace" branch --show-current)" != "$branch" ]; then
+  echo "Task workspace does not exist: $workspace" >&2
+  exit 66
+fi
+
+metadata_id="$(git -C "$workspace" rev-parse --git-path task-workspace-id)"
+metadata_env="$(git -C "$workspace" rev-parse --git-path task-workspace-env)"
+if ! grep -Fx "$task_id" "$metadata_id" >/dev/null 2>&1; then
+  echo "Task workspace metadata does not match $task_id: $workspace" >&2
+  exit 73
+fi
+
+if ! git -C "$workspace" diff --quiet ||
+  ! git -C "$workspace" diff --cached --quiet ||
+  [ -n "$(git -C "$workspace" ls-files --others --exclude-standard)" ]; then
+  echo "Task workspace has uncommitted changes and will not be removed: $workspace" >&2
+  exit 73
+fi
+
+while IFS= read -r ignored; do
+  path="${ignored#Would remove }"
+  case "$path" in
+    .worktree-env|.worktree-mix/|_build/|deps/|priv/static/assets/|priv/static/cache_manifest.json)
+      ;;
+    *.db|*.db-*)
+      if [[ "$path" == */* ]]; then
+        echo "Task workspace has ignored files and will not be removed: $path" >&2
+        exit 73
+      fi
+      ;;
+    *)
+      echo "Task workspace has ignored files and will not be removed: $path" >&2
+      exit 73
+      ;;
+  esac
+done < <(git -C "$workspace" clean -ndX)
+
+(
+  cd "$workspace"
+  if [ -f .worktree-env ]; then
+    source .worktree-env
+  else
+    source "$metadata_env"
+  fi
+  ./scripts/teardown
+)
+
+git -C "$PROJECT_ROOT" worktree remove "$workspace"
+printf 'Task workspace stopped: %s\n' "$workspace"
