@@ -1181,7 +1181,7 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
              )
 
       assert html =~ "Type markers"
-      refute html =~ "MINERAL_DEPOSITS"
+      assert html =~ "Select a waypoint to inspect its type, traits, and ships."
 
       html =
         lv
@@ -1191,7 +1191,92 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       assert html =~ "X1-UX81-A3"
       assert html =~ "ENGINEERED_ASTEROID"
       assert html =~ "MINERAL_DEPOSITS"
+      assert has_element?(lv, "[data-waypoint-row=\"X1-UX81-A3\"].selected")
       assert has_element?(lv, "form[phx-submit=\"browser_navigate\"]")
+    end
+
+    test "links the waypoint grid and system map, including filters and ship counts", %{
+      conn: conn,
+      operator: operator
+    } do
+      agent = agent_fixture(operator)
+
+      waypoints = [
+        %{
+          "symbol" => "X1-UX81-A1",
+          "systemSymbol" => "X1-UX81",
+          "type" => "ORBITAL_STATION",
+          "x" => -12,
+          "y" => 8,
+          "traits" => [%{"symbol" => "MARKETPLACE"}, %{"symbol" => "SHIPYARD"}]
+        },
+        %{
+          "symbol" => "X1-UX81-A3",
+          "systemSymbol" => "X1-UX81",
+          "type" => "ENGINEERED_ASTEROID",
+          "x" => 14,
+          "y" => -6,
+          "traits" => [%{"symbol" => "MINERAL_DEPOSITS"}]
+        }
+      ]
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case {conn.request_path, conn.method} do
+          {"/v2/my/agent", "GET"} ->
+            Req.Test.json(conn, %{"data" => agent_overview_body(agent.symbol)})
+
+          {"/v2/my/contracts", "GET"} ->
+            Req.Test.json(conn, %{"data" => []})
+
+          {"/v2/my/ships", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => [
+                ship_body("ORBITALIST-1"),
+                ship_body("ORBITALIST-2", %{
+                  "nav" => nav_body("DOCKED", destination: "X1-UX81-A3")
+                })
+              ]
+            })
+
+          {"/v2/systems/X1-UX81/waypoints", "GET"} ->
+            case conn.query_params["page"] do
+              "1" -> Req.Test.json(conn, %{"data" => waypoints})
+              _ -> Req.Test.json(conn, %{"data" => []})
+            end
+
+          {"/v2/systems/X1-UX81/waypoints/X1-UX81-A1/shipyard", "GET"} ->
+            Req.Test.json(conn, %{"data" => %{"symbol" => "X1-UX81-A1", "ships" => []}})
+
+          {"/v2/systems/X1-UX81/waypoints/X1-UX81-A1/market", "GET"} ->
+            Req.Test.json(conn, %{"data" => %{"symbol" => "X1-UX81-A1", "tradeGoods" => []}})
+        end
+      end)
+
+      {:ok, lv, html} = live(conn, ~p"/")
+
+      assert html =~ "Waypoint grid"
+      assert html =~ "Waypoint"
+      assert html =~ "Traits"
+      assert html =~ "Ships"
+      assert has_element?(lv, "[data-waypoint-row=\"X1-UX81-A1\"]", "1")
+      assert has_element?(lv, "[data-waypoint-row=\"X1-UX81-A3\"]", "1")
+
+      _html =
+        lv
+        |> element("[data-waypoint-row=\"X1-UX81-A1\"]")
+        |> render_keydown(%{"key" => "Enter"})
+
+      assert has_element?(lv, "[data-waypoint-symbol=\"X1-UX81-A1\"].selected")
+
+      html = lv |> element("[data-waypoint-row=\"X1-UX81-A3\"]") |> render_click()
+      assert html =~ "MINERAL_DEPOSITS"
+      assert has_element?(lv, "[data-waypoint-symbol=\"X1-UX81-A3\"].selected")
+      assert has_element?(lv, "[data-waypoint-row=\"X1-UX81-A3\"].selected")
+
+      html = lv |> element("button[phx-value-filter=\"marketplace\"]") |> render_click()
+      assert html =~ "X1-UX81-A1"
+      refute has_element?(lv, "[data-waypoint-row=\"X1-UX81-A3\"]")
+      assert has_element?(lv, "[data-waypoint-symbol=\"X1-UX81-A3\"].muted")
     end
 
     test "keeps the dashboard usable when a system map is unavailable", %{

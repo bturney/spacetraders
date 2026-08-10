@@ -52,6 +52,7 @@ defmodule SpaceTradersWeb.DashboardLive do
             overview={overview}
             cooldown_tick={@cooldown_tick}
             selected_waypoints={@selected_waypoints}
+            waypoint_filters={@waypoint_filters}
           />
         </div>
       <% else %>
@@ -102,7 +103,8 @@ defmodule SpaceTradersWeb.DashboardLive do
        operator: operator,
        overviews: overviews,
        cooldown_tick: 0,
-       selected_waypoints: %{}
+       selected_waypoints: %{},
+       waypoint_filters: %{}
      )}
   end
 
@@ -246,6 +248,12 @@ defmodule SpaceTradersWeb.DashboardLive do
   def handle_event("select_waypoint", %{"agent_id" => agent_id, "symbol" => symbol}, socket) do
     selected_waypoints = Map.put(socket.assigns.selected_waypoints, agent_id, symbol)
     {:noreply, assign(socket, selected_waypoints: selected_waypoints)}
+  end
+
+  @impl true
+  def handle_event("filter_waypoints", %{"agent_id" => agent_id, "filter" => filter}, socket) do
+    waypoint_filters = Map.put(socket.assigns.waypoint_filters, agent_id, filter)
+    {:noreply, assign(socket, waypoint_filters: waypoint_filters)}
   end
 
   @impl true
@@ -481,6 +489,7 @@ defmodule SpaceTradersWeb.DashboardLive do
   attr :overview, :map, required: true
   attr :cooldown_tick, :integer, required: true
   attr :selected_waypoints, :map, default: %{}
+  attr :waypoint_filters, :map, default: %{}
 
   defp agent_section(assigns) do
     ~H"""
@@ -507,6 +516,7 @@ defmodule SpaceTradersWeb.DashboardLive do
         ships={@overview.ships}
         agent_id={@overview.agent.id}
         selected_symbol={Map.get(@selected_waypoints, to_string(@overview.agent.id))}
+        filter={Map.get(@waypoint_filters, to_string(@overview.agent.id), "all")}
       />
     </section>
     """
@@ -764,82 +774,94 @@ defmodule SpaceTradersWeb.DashboardLive do
   attr :ships, :any, required: true
   attr :agent_id, :integer, required: true
   attr :selected_symbol, :string, default: nil
+  attr :filter, :string, default: "all"
 
   defp system_map(assigns) do
-    assigns = assign(assigns, :map_waypoints, positioned_waypoints(assigns.waypoints))
+    assigns =
+      assigns
+      |> assign(:all_waypoints, available_waypoints(assigns.waypoints))
+      |> assign(:map_waypoints, positioned_waypoints(assigns.waypoints))
+      |> assign(
+        :filtered_waypoints,
+        filtered_waypoints(available_waypoints(assigns.waypoints), assigns.filter)
+      )
 
     ~H"""
-    <div class="card border border-base-300/70 bg-base-200 p-4 sm:p-5">
-      <div class="flex flex-wrap items-end justify-between gap-3">
-        <div>
-          <p class="eyebrow">System map</p>
-          <h3 class="mt-1 font-semibold">Headquarters system</h3>
+    <%= case @waypoints do %>
+      <% {:error, reason} -> %>
+        <div class="card border border-base-300/70 bg-base-200 p-4 sm:p-5">
+          <div class="alert alert-warning">System map unavailable: {live_error(reason)}</div>
         </div>
-        <p class="text-xs opacity-60">Scroll or pinch to zoom. Drag to pan.</p>
-      </div>
-
-      <%= case @waypoints do %>
-        <% {:error, reason} -> %>
-          <div class="alert alert-warning mt-3">
-            System map unavailable: {live_error(reason)}
-          </div>
-        <% {:ok, _waypoints} when @map_waypoints == [] -> %>
-          <div class="alert alert-outline mt-3">No coordinate data is available for this system.</div>
-        <% {:ok, _waypoints} -> %>
-          <div class="system-map mt-4 grid gap-4 xl:grid-cols-[minmax(0,1fr)_18rem]">
-            <div class="system-map-canvas bg-grid">
-              <svg
-                id={"system-map-#{@agent_id}"}
-                data-system-map
-                phx-hook="SystemMap"
-                viewBox={system_map_view_box(@map_waypoints)}
-                aria-label="Interactive system map. Use arrow keys to pan, plus and minus to zoom, and Home to reset."
-                tabindex="0"
-              >
-                <g class="system-map-axis">
-                  <line x1="-10000" y1="0" x2="10000" y2="0" />
-                  <line x1="0" y1="-10000" x2="0" y2="10000" />
-                </g>
-                <g
-                  :for={waypoint <- @map_waypoints}
-                  data-waypoint-symbol={waypoint.symbol}
-                  data-x={waypoint.x}
-                  data-y={waypoint.y}
-                  class={"system-map-waypoint #{waypoint_marker(waypoint.type)} #{selected_waypoint_class(waypoint, @selected_symbol)}"}
-                  phx-click="select_waypoint"
-                  phx-value-agent_id={@agent_id}
-                  phx-value-symbol={waypoint.symbol}
-                  role="button"
-                  tabindex="0"
-                  aria-label={"Select #{waypoint.symbol}"}
-                  aria-pressed={to_string(waypoint.symbol == @selected_symbol)}
-                >
-                  <title>{waypoint.symbol}</title>
-                  <circle
-                    :if={waypoint_marker(waypoint.type) == "planet"}
-                    cx={waypoint.x}
-                    cy={waypoint.y}
-                    r="2.5"
-                  />
-                  <rect
-                    :if={waypoint_marker(waypoint.type) == "station"}
-                    x={waypoint.x - 2}
-                    y={waypoint.y - 2}
-                    width="4"
-                    height="4"
-                  />
-                  <path
-                    :if={waypoint_marker(waypoint.type) == "asteroid"}
-                    d={"M #{waypoint.x} #{waypoint.y - 3} L #{waypoint.x + 3} #{waypoint.y} L #{waypoint.x} #{waypoint.y + 3} L #{waypoint.x - 3} #{waypoint.y} Z"}
-                  />
-                  <path
-                    :if={waypoint_marker(waypoint.type) == "other"}
-                    d={"M #{waypoint.x} #{waypoint.y - 3} L #{waypoint.x + 2.6} #{waypoint.y - 1.5} L #{waypoint.x + 2.6} #{waypoint.y + 1.5} L #{waypoint.x} #{waypoint.y + 3} L #{waypoint.x - 2.6} #{waypoint.y + 1.5} L #{waypoint.x - 2.6} #{waypoint.y - 1.5} Z"}
-                  />
-                </g>
-              </svg>
-            </div>
-            <div class="rounded border border-base-300/70 bg-base-100 p-3">
+      <% {:ok, _waypoints} -> %>
+        <div class="space-y-4">
+          <div class="grid gap-4 lg:grid-cols-[minmax(18rem,0.8fr)_minmax(0,1.2fr)]">
+            <div class="card border border-base-300/70 bg-base-200 p-4 sm:p-5">
+              <div class="flex flex-wrap items-end justify-between gap-3">
+                <div>
+                  <p class="eyebrow">System map</p>
+                  <h3 class="mt-1 font-semibold">Headquarters system</h3>
+                </div>
+                <p class="text-xs opacity-60">Scroll or pinch to zoom. Drag to pan.</p>
+              </div>
+              <%= if @map_waypoints == [] do %>
+                <div class="alert alert-outline mt-3">
+                  No coordinate data is available for this system.
+                </div>
+              <% else %>
+                <div class="system-map-canvas bg-grid mt-4">
+                  <svg
+                    id={"system-map-#{@agent_id}"}
+                    data-system-map
+                    phx-hook="SystemMap"
+                    viewBox={system_map_view_box(@map_waypoints)}
+                    aria-label="Interactive system map. Use arrow keys to pan, plus and minus to zoom, and Home to reset."
+                    tabindex="0"
+                  >
+                    <g class="system-map-axis">
+                      <line x1="-10000" y1="0" x2="10000" y2="0" />
+                      <line x1="0" y1="-10000" x2="0" y2="10000" />
+                    </g>
+                    <g
+                      :for={waypoint <- @map_waypoints}
+                      data-waypoint-symbol={waypoint.symbol}
+                      data-x={waypoint.x}
+                      data-y={waypoint.y}
+                      class={"system-map-waypoint #{waypoint_marker(waypoint.type)} #{selected_waypoint_class(waypoint, @selected_symbol)} #{filtered_waypoint_class(waypoint, @filter)}"}
+                      phx-click="select_waypoint"
+                      phx-value-agent_id={@agent_id}
+                      phx-value-symbol={waypoint.symbol}
+                      role="button"
+                      tabindex="0"
+                      aria-label={"Select #{waypoint.symbol}"}
+                      aria-pressed={to_string(waypoint.symbol == @selected_symbol)}
+                    >
+                      <title>{waypoint.symbol}</title>
+                      <circle class="system-map-hit-area" cx={waypoint.x} cy={waypoint.y} r="8" />
+                      <circle
+                        :if={waypoint_marker(waypoint.type) == "planet"}
+                        cx={waypoint.x}
+                        cy={waypoint.y}
+                        r="2.5"
+                      />
+                      <rect
+                        :if={waypoint_marker(waypoint.type) == "station"}
+                        x={waypoint.x - 2}
+                        y={waypoint.y - 2}
+                        width="4"
+                        height="4"
+                      />
+                      <path
+                        :if={waypoint_marker(waypoint.type) == "asteroid"}
+                        d={"M #{waypoint.x} #{waypoint.y - 3} L #{waypoint.x + 3} #{waypoint.y} L #{waypoint.x} #{waypoint.y + 3} L #{waypoint.x - 3} #{waypoint.y} Z"}
+                      />
+                      <path
+                        :if={waypoint_marker(waypoint.type) == "other"}
+                        d={"M #{waypoint.x} #{waypoint.y - 3} L #{waypoint.x + 2.6} #{waypoint.y - 1.5} L #{waypoint.x + 2.6} #{waypoint.y + 1.5} L #{waypoint.x} #{waypoint.y + 3} L #{waypoint.x - 2.6} #{waypoint.y + 1.5} L #{waypoint.x - 2.6} #{waypoint.y - 1.5} Z"}
+                      />
+                    </g>
+                  </svg>
+                </div>
+              <% end %>
               <p class="eyebrow">Type markers</p>
               <div class="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-xs opacity-75">
                 <span><i class="system-map-key planet"></i> Planet</span>
@@ -847,52 +869,134 @@ defmodule SpaceTradersWeb.DashboardLive do
                 <span><i class="system-map-key asteroid"></i> Asteroid</span>
                 <span><i class="system-map-key other"></i> Other</span>
               </div>
-              <%= case selected_waypoint(@map_waypoints, @selected_symbol) do %>
-                <% nil -> %>
-                  <p class="mt-6 text-sm opacity-60">
-                    Select a waypoint to inspect its type and traits.
-                  </p>
-                <% waypoint -> %>
-                  <div class="mt-6 space-y-3">
-                    <div>
-                      <p class="font-mono text-sm font-semibold">{waypoint.symbol}</p>
-                      <p class="mt-1 text-sm opacity-70">{waypoint.type}</p>
-                    </div>
-                    <div>
-                      <p class="text-xs font-semibold uppercase tracking-wider opacity-60">Traits</p>
-                      <div class="mt-2 flex flex-wrap gap-1">
-                        <span
-                          :for={trait <- waypoint.traits || []}
-                          class="badge badge-outline badge-sm"
-                        >
-                          {trait.symbol}
-                        </span>
-                        <span :if={(waypoint.traits || []) == []} class="text-sm opacity-60">None</span>
-                      </div>
-                    </div>
-                    <p class="font-mono text-xs opacity-60">{waypoint.x}, {waypoint.y}</p>
-                    <form :if={browser_ships(@ships) != []} phx-submit="browser_navigate" class="pt-1">
-                      <input type="hidden" name="waypoint_symbol" value={waypoint.symbol} />
-                      <label class="label py-1">
-                        <span class="label-text text-xs">Navigate a ship here</span>
-                      </label>
-                      <div class="flex gap-2">
-                        <select
-                          name="symbol"
-                          class="select select-bordered select-xs min-w-0 flex-1 font-mono"
-                          required
-                        >
-                          <option :for={ship <- browser_ships(@ships)} value={ship.symbol}>
-                            {ship.symbol}
-                          </option>
-                        </select>
-                        <button type="submit" class="btn btn-primary btn-xs">Navigate</button>
-                      </div>
-                    </form>
-                  </div>
-              <% end %>
+            </div>
+            <.waypoint_grid
+              waypoints={@filtered_waypoints}
+              ships={@ships}
+              agent_id={@agent_id}
+              selected_symbol={@selected_symbol}
+              filter={@filter}
+            />
+          </div>
+          <.waypoint_details
+            waypoint={selected_waypoint(@all_waypoints, @selected_symbol)}
+            ships={@ships}
+          />
+        </div>
+    <% end %>
+    """
+  end
+
+  attr :waypoints, :list, required: true
+  attr :ships, :any, required: true
+  attr :agent_id, :integer, required: true
+  attr :selected_symbol, :string, default: nil
+  attr :filter, :string, required: true
+
+  defp waypoint_grid(assigns) do
+    ~H"""
+    <div class="card min-w-0 border border-base-300/70 bg-base-200 p-4 sm:p-5">
+      <div class="flex flex-wrap items-end justify-between gap-3">
+        <div>
+          <p class="eyebrow">Waypoint grid</p>
+          <h3 class="mt-1 font-semibold">Operational waypoints</h3>
+        </div>
+        <div class="flex flex-wrap gap-1" role="group" aria-label="Waypoint filters">
+          <button
+            :for={{label, value} <- waypoint_filters()}
+            type="button"
+            phx-click="filter_waypoints"
+            phx-value-agent_id={@agent_id}
+            phx-value-filter={value}
+            class={"btn btn-xs #{if @filter == value, do: "btn-primary", else: "btn-ghost"}"}
+          >{label}</button>
+        </div>
+      </div>
+      <div class="mt-4 overflow-x-auto">
+        <table class="table table-sm">
+          <thead>
+            <tr>
+              <th>Waypoint</th><th>Type</th><th>Traits</th><th>Ships</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr
+              :for={waypoint <- @waypoints}
+              data-waypoint-row={waypoint.symbol}
+              phx-click="select_waypoint"
+              phx-value-agent_id={@agent_id}
+              phx-value-symbol={waypoint.symbol}
+              phx-keydown="select_waypoint"
+              phx-key="Enter"
+              tabindex="0"
+              role="button"
+              aria-pressed={to_string(waypoint.symbol == @selected_symbol)}
+              class={"cursor-pointer #{selected_waypoint_class(waypoint, @selected_symbol)}"}
+            >
+              <td class="font-mono text-xs font-semibold">{waypoint.symbol}</td><td>
+                {waypoint.type}
+              </td><td>
+                <span :for={trait <- waypoint.traits || []} class="badge badge-outline badge-xs mr-1">{trait.symbol}</span><span
+                  :if={(waypoint.traits || []) == []}
+                  class="opacity-60"
+                >None</span>
+              </td><td>{ship_count_label(ships_at_waypoint(@ships, waypoint.symbol))}</td>
+            </tr>
+            <tr :if={@waypoints == []}>
+              <td colspan="4" class="opacity-60">No waypoints match this filter.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+    """
+  end
+
+  attr :waypoint, :any, default: nil
+  attr :ships, :any, required: true
+
+  defp waypoint_details(assigns) do
+    ~H"""
+    <div class="card border border-base-300/70 bg-base-100 p-4 sm:p-5">
+      <%= case @waypoint do %>
+        <% nil -> %>
+          <p class="text-sm opacity-60">Select a waypoint to inspect its type, traits, and ships.</p>
+        <% waypoint -> %>
+          <div class="flex flex-wrap items-start justify-between gap-4">
+            <div>
+              <p class="font-mono text-sm font-semibold">{waypoint.symbol}</p><p class="mt-1 text-sm opacity-70">
+                {waypoint.type}
+              </p>
+            </div><span class="badge badge-outline">{ship_count_label(
+              ships_at_waypoint(@ships, waypoint.symbol)
+            )}</span>
+          </div>
+          <div class="mt-4">
+            <p class="text-xs font-semibold uppercase tracking-wider opacity-60">Traits</p><div class="mt-2 flex flex-wrap gap-1">
+              <span :for={trait <- waypoint.traits || []} class="badge badge-outline badge-sm">{trait.symbol}</span><span
+                :if={(waypoint.traits || []) == []}
+                class="text-sm opacity-60"
+              >None</span>
             </div>
           </div>
+          <p
+            :if={is_integer(waypoint.x) and is_integer(waypoint.y)}
+            class="mt-4 font-mono text-xs opacity-60"
+          >
+            {waypoint.x}, {waypoint.y}
+          </p>
+          <form :if={browser_ships(@ships) != []} phx-submit="browser_navigate" class="mt-4">
+            <input type="hidden" name="waypoint_symbol" value={waypoint.symbol} /><label class="label py-1"><span class="label-text text-xs">Navigate a ship here</span></label><div class="flex gap-2">
+              <select
+                name="symbol"
+                class="select select-bordered select-xs min-w-0 flex-1 font-mono"
+                required
+              ><option :for={ship <- browser_ships(@ships)} value={ship.symbol}>{ship.symbol}</option></select><button
+                type="submit"
+                class="btn btn-primary btn-xs"
+              >Navigate</button>
+            </div>
+          </form>
       <% end %>
     </div>
     """
@@ -1325,6 +1429,40 @@ defmodule SpaceTradersWeb.DashboardLive do
 
   defp positioned_waypoints(_), do: []
 
+  defp available_waypoints({:ok, waypoints}) when is_list(waypoints), do: waypoints
+  defp available_waypoints(_), do: []
+
+  defp waypoint_filters do
+    [
+      {"All types", "all"},
+      {"Engineered asteroids", "engineered_asteroid"},
+      {"Shipyards", "shipyard"},
+      {"Marketplaces", "marketplace"}
+    ]
+  end
+
+  defp filtered_waypoints(waypoints, "engineered_asteroid"),
+    do: Enum.filter(waypoints, &(&1.type == "ENGINEERED_ASTEROID"))
+
+  defp filtered_waypoints(waypoints, "shipyard"),
+    do: Enum.filter(waypoints, &has_trait?(&1, "SHIPYARD"))
+
+  defp filtered_waypoints(waypoints, "marketplace"),
+    do: Enum.filter(waypoints, &has_trait?(&1, "MARKETPLACE"))
+
+  defp filtered_waypoints(waypoints, _), do: waypoints
+
+  defp has_trait?(waypoint, trait), do: Enum.any?(waypoint.traits || [], &(&1.symbol == trait))
+
+  defp ships_at_waypoint({:ok, ships}, waypoint_symbol) do
+    Enum.count(ships, &(not in_transit?(&1) and ship_location(&1) == waypoint_symbol))
+  end
+
+  defp ships_at_waypoint(_, _), do: :unavailable
+
+  defp ship_count_label(:unavailable), do: "Unavailable"
+  defp ship_count_label(count), do: pluralize(count, "ship")
+
   defp browser_ships({:ok, ships}) when is_list(ships), do: ships
   defp browser_ships(_), do: []
 
@@ -1353,6 +1491,12 @@ defmodule SpaceTradersWeb.DashboardLive do
 
   defp selected_waypoint_class(%{symbol: symbol}, symbol), do: "selected"
   defp selected_waypoint_class(_, _), do: ""
+
+  defp filtered_waypoint_class(_waypoint, "all"), do: ""
+
+  defp filtered_waypoint_class(waypoint, filter) do
+    if waypoint in filtered_waypoints([waypoint], filter), do: "", else: "muted"
+  end
 
   defp capacity(nil), do: 0
   defp capacity(%{capacity: capacity}) when is_integer(capacity), do: capacity
