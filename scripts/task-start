@@ -1,0 +1,143 @@
+#!/usr/bin/env bash
+# Create and configure an isolated worktree for a ticket or ad-hoc task.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+PROJECT_PARENT="$(dirname "$PROJECT_ROOT")"
+PROJECT_NAME="$(basename "$PROJECT_ROOT")"
+
+usage() {
+  echo "Usage: scripts/task-start <issue-number|slug> [--base <ref>] [--resume] [-- <command...>]" >&2
+  exit 64
+}
+
+task_id="${1:-}"
+[ -n "$task_id" ] || usage
+shift
+
+if [[ ! "$task_id" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+  echo "Task ID must begin with a letter or digit and may then contain periods, underscores, or hyphens." >&2
+  exit 64
+fi
+
+base_ref="main"
+resume=0
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --base)
+      [ "$#" -ge 2 ] || usage
+      base_ref="$2"
+      shift 2
+      ;;
+    --resume)
+      resume=1
+      shift
+      ;;
+    --)
+      shift
+      break
+      ;;
+    *)
+      usage
+      ;;
+  esac
+done
+
+workspace="$PROJECT_PARENT/$PROJECT_NAME-$task_id"
+branch="feature/$task_id"
+created_workspace=0
+created_branch=0
+setup_complete=0
+configured=0
+
+rollback() {
+  status=$?
+
+  if [ "$created_workspace" -eq 1 ] && [ "$configured" -eq 0 ]; then
+    if [ "$setup_complete" -eq 1 ]; then
+      (cd "$workspace" && ./scripts/teardown) || true
+    fi
+    git -C "$PROJECT_ROOT" worktree remove --force "$workspace" 2>/dev/null || true
+  fi
+
+  if [ "$created_branch" -eq 1 ] && [ "$configured" -eq 0 ]; then
+    git -C "$PROJECT_ROOT" branch -D "$branch" 2>/dev/null || true
+  fi
+
+  exit "$status"
+}
+
+trap rollback EXIT
+
+registered_workspace() {
+  git -C "$PROJECT_ROOT" worktree list --porcelain | grep -Fx "worktree $workspace" >/dev/null
+}
+
+configured_workspace() {
+  (
+    cd "$workspace"
+    ./scripts/worktree-setup "$task_id"
+  )
+  setup_complete=1
+  metadata_id="$(git -C "$workspace" rev-parse --git-path task-workspace-id)"
+  metadata_env="$(git -C "$workspace" rev-parse --git-path task-workspace-env)"
+  printf '%s\n' "$task_id" > "$metadata_id"
+  cp "$workspace/.worktree-env" "$metadata_env"
+  configured=1
+}
+
+if [ -e "$workspace" ]; then
+  if [ "$resume" -ne 1 ]; then
+    echo "Task workspace already exists at $workspace. Re-run with --resume to use it." >&2
+    exit 73
+  fi
+
+  if ! registered_workspace || [ "$(git -C "$workspace" branch --show-current)" != "$branch" ]; then
+    echo "Task workspace is not the registered $branch worktree: $workspace" >&2
+    exit 73
+  fi
+
+  metadata_id="$(git -C "$workspace" rev-parse --git-path task-workspace-id)"
+  if ! grep -Fx "$task_id" "$metadata_id" >/dev/null 2>&1; then
+    echo "Task workspace metadata does not match $task_id: $workspace" >&2
+    exit 73
+  fi
+
+  if [ ! -f "$workspace/.worktree-env" ]; then
+    configured_workspace
+  fi
+elif git -C "$PROJECT_ROOT" show-ref --verify --quiet "refs/heads/$branch"; then
+  if [ "$resume" -ne 1 ]; then
+    echo "Task branch $branch already exists. Re-run with --resume to recreate its workspace." >&2
+    exit 73
+  fi
+
+  git -C "$PROJECT_ROOT" worktree add "$workspace" "$branch"
+  created_workspace=1
+  configured_workspace
+else
+  if ! git -C "$PROJECT_ROOT" rev-parse --verify --quiet "$base_ref^{commit}" >/dev/null; then
+    echo "Base ref does not name a commit: $base_ref" >&2
+    exit 64
+  fi
+
+  git -C "$PROJECT_ROOT" branch "$branch" "$base_ref"
+  created_branch=1
+  git -C "$PROJECT_ROOT" worktree add "$workspace" "$branch"
+  created_workspace=1
+  configured_workspace
+fi
+
+trap - EXIT
+
+if [ "$#" -eq 0 ]; then
+  printf 'Task workspace ready: %s\n' "$workspace"
+  exit 0
+fi
+
+(
+  cd "$workspace"
+  source .worktree-env
+  "$@"
+)
