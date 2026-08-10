@@ -481,7 +481,12 @@ defmodule SpaceTraders.AgentTest do
       Req.Test.stub(SpaceTraders.API, fn conn ->
         assert conn.method == "POST"
         assert conn.request_path == "/v2/register"
-        assert conn.body_params == %{"symbol" => "NEWSYM", "faction" => "COSMIC"}
+
+        assert conn.body_params == %{
+                 "symbol" => "NEWSYM",
+                 "faction" => "COSMIC",
+                 "email" => operator.email
+               }
 
         Req.Test.json(conn, %{
           "data" => %{
@@ -540,7 +545,12 @@ defmodule SpaceTraders.AgentTest do
       Req.Test.stub(SpaceTraders.API, fn conn ->
         assert conn.method == "POST"
         assert conn.request_path == "/v2/register"
-        assert conn.body_params == %{"symbol" => "RESETME", "faction" => "COSMIC"}
+
+        assert conn.body_params == %{
+                 "symbol" => "RESETME",
+                 "faction" => "COSMIC",
+                 "email" => operator.email
+               }
 
         Req.Test.json(conn, %{
           "data" => %{
