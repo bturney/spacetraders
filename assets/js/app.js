@@ -274,8 +274,8 @@ const SystemMap = {
     const pixelsPerUnit = Math.hypot(matrix.a, matrix.b)
     if (!pixelsPerUnit) return
 
-    const markerScale = 16 / (6 * pixelsPerUnit)
-    const orbitalDistance = 38 / pixelsPerUnit
+    const markerScale = 12 / (6 * pixelsPerUnit)
+    const orbitalDistance = 32 / pixelsPerUnit
 
     this.svg.querySelectorAll(".system-map-waypoint").forEach(marker => {
       const {x, y} = marker.dataset
