@@ -84,7 +84,7 @@ different starting point. It refuses existing task branches or worktrees unless
 the command after `--`; the command runs there with `.worktree-env` loaded:
 
 ```sh
-scripts/task-start diagnose-navigation-timeout -- your-runner --task diagnose-navigation-timeout
+scripts/task-start diagnose-navigation-timeout -- your-runner
 ```
 
 Stop a completed task only after committing or removing its changes. This

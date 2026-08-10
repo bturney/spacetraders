@@ -10,15 +10,12 @@ The cache is pruned explicitly, retaining entries for at most 30 days and 10 GiB
 
 ## Task workspace lifecycle
 
-A repository-owned, runner-neutral task workspace workflow creates the Git
-worktree before any agent or other runner starts. A task is identified by either
-an issue number or an explicit ad-hoc slug; its worktree is configured with the
-same stable identifier used for port allocation and artifacts. The workflow may
-run an arbitrary command from the prepared worktree, but it does not depend on
-Kimaki or any other runner.
+The repository creates a Task Workspace before any runner starts. A task uses an
+issue number or ad-hoc slug as its stable identifier for its worktree, port, and
+artifacts. The runner starts in that prepared workspace; no runner-specific
+integration is required.
 
-Creation refuses an existing task workspace unless resumption is explicit. A
-failed first-time setup rolls back only resources it created. Stopping a task
-releases its port and removes only a clean worktree, while preserving the branch
-for review or a pull request. Runner completion alone does not stop the task,
-so the workspace can be inspected or resumed deliberately.
+Creation requires explicit resumption of an existing Task Workspace and rolls
+back only resources it creates. Stopping releases the port and removes a clean
+worktree while preserving its branch. Runner completion leaves the workspace
+available for inspection or resumption.
