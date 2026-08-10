@@ -23,8 +23,9 @@ Installs the pinned Erlang/Elixir toolchain (no sudo required) and fetches deps:
 scripts/bootstrap
 ```
 
-Deps are shared across checkouts under `$HOME/.local/opt/spacetraders-toolchain/deps`;
-`_build` stays per-checkout.
+Single-checkout development uses the installed dependency directory. Parallel
+ticket work uses a private writable dependency/build copy restored from an
+immutable cache instead.
 
 Scripts use the pinned installation at `$HOME/.local/opt/spacetraders-toolchain`
 (override with `SPACETRADERS_TOOLCHAIN_DIR`).
@@ -64,6 +65,26 @@ env; see `test/spacetraders/api/`.
 
 ```sh
 mix phx.server   # http://localhost:4000, GET /health returns {"status":"ok"}
+```
+
+### Parallel worktrees
+
+Set up every concurrent ticket worktree with a stable unique task ID:
+
+```sh
+scripts/worktree-setup 28
+source .worktree-env
+mix phx.server   # uses this task's allocated port
+```
+
+The setup command serializes immutable warm-cache population and gives each task
+a unique port in `41000-50999`. A dirty starting worktree compiles privately.
+Run `scripts/teardown` to release the port. Cache entries are never mutated;
+prune them explicitly when needed:
+
+```sh
+scripts/worktree-cache-prune                         # 30 days, 10 GiB
+scripts/worktree-cache-prune --max-age-days 7 --max-size-gib 2
 ```
 
 First boot redirects to `/setup` — create the first operator (email + password,

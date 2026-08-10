@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+# Prune immutable worktree cache entries by age, then total size.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/_toolchain.sh"
+
+max_age_days=30
+max_size_gib=10
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --max-age-days)
+      max_age_days="${2:?--max-age-days requires a value}"
+      shift 2
+      ;;
+    --max-size-gib)
+      max_size_gib="${2:?--max-size-gib requires a value}"
+      shift 2
+      ;;
+    *)
+      echo "Usage: scripts/worktree-cache-prune [--max-age-days DAYS] [--max-size-gib GIB]" >&2
+      exit 64
+      ;;
+  esac
+done
+
+if [[ ! "$max_age_days" =~ ^[0-9]+$ ]] || [[ ! "$max_size_gib" =~ ^[0-9]+$ ]]; then
+  echo "Cache retention limits must be non-negative integers." >&2
+  exit 64
+fi
+
+cache_root="${SPACETRADERS_WORKTREE_CACHE_DIR:-$TOOLCHAIN_DIR/worktree-cache}"
+entries_dir="$cache_root/entries"
+[ -d "$entries_dir" ] || exit 0
+
+exec 7>"$cache_root/prune.lock"
+flock 7
+
+now="$(date +%s)"
+max_age_seconds=$((max_age_days * 86400))
+
+for entry in "$entries_dir"/*; do
+  [ -d "$entry" ] || continue
+  if [ $((now - $(stat -c %Y "$entry"))) -gt "$max_age_seconds" ]; then
+    rm -rf "$entry"
+  fi
+done
+
+max_size_bytes=$((max_size_gib * 1024 * 1024 * 1024))
+records="$(mktemp)"
+trap 'rm -f "$records"' EXIT
+
+for entry in "$entries_dir"/*; do
+  [ -d "$entry" ] || continue
+  printf '%s\t%s\n' "$(stat -c %Y "$entry")" "$entry" >> "$records"
+done
+
+while IFS=$'\t' read -r _ entry; do
+  total_size=0
+  for remaining_entry in "$entries_dir"/*; do
+    [ -d "$remaining_entry" ] || continue
+    total_size=$((total_size + $(du -sb "$remaining_entry" | cut -f 1)))
+  done
+
+  [ "$total_size" -le "$max_size_bytes" ] && break
+  rm -rf "$entry"
+done < <(sort -n "$records")

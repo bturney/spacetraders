@@ -31,6 +31,14 @@ A named region of space containing waypoints (e.g., X1-UX81).
 A specific location in a system (e.g., X1-UX81-A1), the atomic unit of movement. May carry traits such as MARKETPLACE, SHIPYARD, or ENGINEERED_ASTEROID.
 _Avoid_: planet, station, location
 
+**System Map**:
+A visual, interactive representation of every Waypoint in one System, positioned by its game-supplied coordinates and showing the Fleet's current state.
+_Avoid_: galaxy map, sector map
+
+**Galaxy Map**:
+A future representation of multiple Systems. It requires a deliberate System discovery model and is distinct from the System Map.
+_Avoid_: system map
+
 **Headquarters**:
 The Agent's home waypoint, where the Agent starts.
 
@@ -66,6 +74,13 @@ A forced wait after certain Ship actions (extract, survey, refine) before the ac
 
 **Arrival**:
 The scheduled time a navigating Ship reaches its destination; until then the Ship is IN_TRANSIT and cannot act.
+
+**Transit Route**:
+The active journey of an IN_TRANSIT Ship between its origin and destination Waypoints. A System Map represents it as a dotted line rather than placing the Ship at either endpoint.
+_Avoid_: ship position, current waypoint
+
+**Off-System Ship**:
+A Ship belonging to an Agent that is neither at a Waypoint in the Agent's headquarters System nor in an inter-System Transit Route. A System Map reports it separately rather than placing it in the wrong coordinate system.
 
 **Deadline**:
 A time limit imposed by the game (Contract acceptance/fulfillment). Must be persisted so the app honors it across restarts.

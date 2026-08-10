@@ -107,7 +107,7 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       agent = agent_fixture(operator)
 
       {:ok, state} =
-        Agent.start_link(fn -> %{credits: 42_000, cargo_units: 12, sale_attempts: 0} end)
+        Agent.start_link(fn -> %{credits: 42_000, cargo_units: 15, sale_attempts: 0} end)
 
       Req.Test.stub(SpaceTraders.API, fn conn ->
         case conn.request_path do
@@ -135,7 +135,12 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
                       %{
                         "symbol" => "IRON_ORE",
                         "name" => "Iron Ore",
-                        "units" => Agent.get(state, & &1.cargo_units)
+                        "units" => Agent.get(state, &(&1.cargo_units - 3))
+                      },
+                      %{
+                        "symbol" => "COPPER_ORE",
+                        "name" => "Copper Ore",
+                        "units" => 3
                       }
                     ]
                   }
@@ -180,12 +185,12 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
 
           "/v2/my/ships/ORBITALIST-1/sell" ->
             if Agent.get(state, &(&1.sale_attempts == 0)) do
-              Agent.update(state, &%{&1 | credits: 42_400, cargo_units: 7, sale_attempts: 1})
+              Agent.update(state, &%{&1 | credits: 42_400, cargo_units: 10, sale_attempts: 1})
 
               Req.Test.json(conn, %{
                 "data" => %{
                   "agent" => %{},
-                  "cargo" => %{"capacity" => 40, "units" => 7, "inventory" => []},
+                  "cargo" => %{"capacity" => 40, "units" => 10, "inventory" => []},
                   "transaction" => %{
                     "shipSymbol" => "ORBITALIST-1",
                     "tradeSymbol" => "IRON_ORE",
@@ -215,6 +220,12 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       assert html =~ "Market"
       assert html =~ "IRON_ORE"
       assert html =~ "Sell 80 cr"
+      assert html =~ "A ship can sell only cargo listed at its current market."
+
+      refute has_element?(
+               lv,
+               "form[phx-submit=\"sell_cargo\"] input[name=\"trade_symbol\"][value=\"COPPER_ORE\"]"
+             )
 
       html =
         lv

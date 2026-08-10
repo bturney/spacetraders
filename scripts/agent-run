@@ -26,12 +26,6 @@ run_status=1
 failure_class="execution/unclassified"
 export AGENT_STARTED_EPOCH="$(date +%s)"
 
-# A task owns mutable Mix dependencies and uses an ephemeral HTTP port, so two
-# isolated worktrees can verify concurrently without sharing either resource.
-export MIX_DEPS_PATH="$AGENT_DEPS_DIR"
-export MIX_HOME="$PROJECT_ROOT/.agent-mix/$AGENT_TASK_ID/attempt-$AGENT_ATTEMPT"
-export PORT="${AGENT_PORT:-0}"
-
 cleanup() {
   local status=$?
   if [ "$status" -eq 0 ]; then

@@ -34,6 +34,13 @@ if [ -x "$ELIXIR_DIR/bin/mix" ] && [ -x "$OTP_DIR/bin/erl" ]; then
   export PATH="$ELIXIR_DIR/bin:$OTP_DIR/bin:$PATH"
 fi
 
-# Share deps across checkouts (per-checkout _build stays local). Override with
-# MIX_DEPS_PATH to fall back to a checkout-local deps/.
+# Ordinary checkouts use the installed dependency directory. `worktree-setup`
+# writes a local override so concurrent ticket work never mutates it.
 export MIX_DEPS_PATH="${MIX_DEPS_PATH:-$TOOLCHAIN_DIR/deps}"
+
+WORKTREE_ENV_FILE="$TC_DIR/../.worktree-env"
+if [ -f "$WORKTREE_ENV_FILE" ]; then
+  # This file is generated only by scripts/worktree-setup and keeps ordinary
+  # project commands on the task's private build, deps, and HTTP port.
+  source "$WORKTREE_ENV_FILE"
+fi

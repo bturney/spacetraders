@@ -20,7 +20,7 @@ Phoenix 1.8 (Bandit + LiveView), SQLite via `ecto_sqlite3`. Toolchain versions o
 
 - `scripts/bootstrap` — from a clean checkout: installs the pinned OTP/Elixir toolchain without sudo, fetches deps.
 - The gate: `scripts/verify` — format, warnings-as-errors compile, tests, real boot + `/health` 200. Run it before pushing; CI runs it on every PR.
-- `scripts/teardown` — stops a server rooted here, removes `_build` and `*.db`. Deps are shared across checkouts (below) and left in place.
+- `scripts/teardown` — stops a server rooted here, removes `_build` and `*.db`, and releases this task's allocated port.
 - Unattended tasks: `scripts/agent-run`; runner inputs, artifacts, and automation path: `docs/agents/readiness.md`.
 - Run/test commands live in README → Development.
 - API-client contract: the bundled OpenAPI spec (`priv/spec/SpaceTraders.json`) is ground truth; `test/spacetraders/api/spec_conformance_test.exs` ties the client's `data`-envelope assumptions to it (root `/` is the lone flat response). After touching `lib/spacetraders/api.ex` or the spec, run `scripts/verify-live` (hits the live game; needs network) in addition to the hermetic gate.
@@ -30,17 +30,18 @@ Phoenix 1.8 (Bandit + LiveView), SQLite via `ecto_sqlite3`. Toolchain versions o
 The pinned toolchain is **not** on PATH. In every fresh shell, source it first:
 
 ```sh
-source scripts/_toolchain.sh   # puts pinned mix/elixir on PATH, sets MIX_DEPS_PATH
+source scripts/_toolchain.sh   # puts pinned mix/elixir on PATH
 ```
 
-Deps are shared across checkouts at `$MIX_DEPS_PATH`; `_build` is per-checkout, so a fresh worktree pays one first compile. Don't run concurrent `mix deps.get` from branches with different lockfiles.
+For ordinary single-checkout work, this uses the installed dependency directory. Concurrent ticket work must use `scripts/worktree-setup`, which restores private writable dependencies and build output from an immutable warm cache.
 
 ### Ticket loop (worktree per ticket)
 
-1. `git worktree add ../spacetraders-<NN> -b feature/<NN>-<slug>` off `main`.
-2. `source scripts/_toolchain.sh`, then `mix deps.get`.
-3. Iterate `mix test <file>` — the test DB is dropped and re-migrated every run, so edited migrations always apply.
-4. Gate with `scripts/verify`, then `/code-review`, commit, PR.
+1. `git worktree add ../spacetraders-<NN> -b feature/<NN>-<slug> main`.
+2. `cd ../spacetraders-<NN>` and run `scripts/worktree-setup <NN>` with a stable unique ticket ID. The command populates or restores a private build cache, allocates a port, and writes ignored `.worktree-env`.
+3. For direct Mix commands, run `source .worktree-env`; project scripts load it automatically. Iterate `mix test <file>` — the test DB is dropped and re-migrated every run, so edited migrations always apply.
+4. Run `scripts/teardown` when the task is finished to release its port. Prune old cache entries explicitly with `scripts/worktree-cache-prune` (30 days and 10 GiB by default).
+5. Gate with `scripts/verify`, then `/code-review`, commit, PR.
 
 <!-- phoenix-gen-auth-start -->
 ## Authentication
