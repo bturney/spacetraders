@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# Release an automatically allocated task port after its checkout is torn down.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/_toolchain.sh"
+
+task_id="${1:-${AGENT_TASK_ID:-}}"
+if [[ -z "$task_id" ]]; then
+  echo "Usage: scripts/worktree-release-port <task-id>" >&2
+  exit 64
+fi
+
+port_root="${SPACETRADERS_PORT_REGISTRY_DIR:-$TOOLCHAIN_DIR/worktree-ports}"
+registry="$port_root/registry.tsv"
+[ -f "$registry" ] || exit 0
+
+exec 8>"$port_root/registry.lock"
+flock 8
+temporary_registry="$port_root/.registry.tsv.$$"
+awk -F '\t' -v task="$task_id" '$1 != task' "$registry" > "$temporary_registry"
+mv "$temporary_registry" "$registry"

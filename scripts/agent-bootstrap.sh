@@ -11,6 +11,8 @@ if [ -e "$AGENT_ARTIFACT_DIR/input.json" ]; then
   exit 73
 fi
 
+"$SCRIPT_DIR/worktree-setup" "$AGENT_TASK_ID" 2>&1 | tee "$AGENT_ARTIFACT_DIR/bootstrap.log"
+
 revision="$(git -C "$AGENT_PROJECT_ROOT" rev-parse HEAD)"
 started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 workspace_digest="$(
@@ -26,5 +28,3 @@ workspace_digest="$(
 
 printf '{"task_id":"%s","attempt":%s,"source_revision":"%s","workspace_digest":"%s","started_at":"%s","producer":"scripts/agent-bootstrap.sh"}\n' \
   "$AGENT_TASK_ID" "$AGENT_ATTEMPT" "$revision" "$workspace_digest" "$started_at" > "$AGENT_ARTIFACT_DIR/input.json"
-
-"$SCRIPT_DIR/bootstrap" 2>&1 | tee "$AGENT_ARTIFACT_DIR/bootstrap.log"

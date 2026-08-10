@@ -1,0 +1,142 @@
+#!/usr/bin/env bash
+# Prepare one checkout for concurrent ticket work.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+requested_port="${PORT:-}"
+if [ -f "$PROJECT_ROOT/.worktree-env" ]; then
+  echo "This worktree already has task configuration. Run scripts/teardown before configuring it again." >&2
+  exit 73
+fi
+source "$SCRIPT_DIR/_toolchain.sh"
+cd "$PROJECT_ROOT"
+
+task_id="${1:-${AGENT_TASK_ID:-}}"
+if [[ -z "$task_id" ]]; then
+  echo "Usage: scripts/worktree-setup <stable-task-id>" >&2
+  exit 64
+fi
+
+if [[ ! "$task_id" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+  echo "Task ID must begin with a letter or digit and may then contain periods, underscores, or hyphens." >&2
+  exit 64
+fi
+
+if ! command -v flock >/dev/null 2>&1; then
+  echo "Missing runner prerequisite: flock (util-linux) is required for worktree setup." >&2
+  exit 1
+fi
+
+export MIX_DEPS_PATH="$PROJECT_ROOT/deps"
+export MIX_BUILD_PATH="$PROJECT_ROOT/_build"
+export MIX_HOME="$PROJECT_ROOT/.worktree-mix"
+
+cache_root="${SPACETRADERS_WORKTREE_CACHE_DIR:-$TOOLCHAIN_DIR/worktree-cache}"
+port_root="${SPACETRADERS_PORT_REGISTRY_DIR:-$TOOLCHAIN_DIR/worktree-ports}"
+mkdir -p "$cache_root/entries" "$cache_root/locks" "$port_root"
+exec 7>"$cache_root/prune.lock"
+flock -s 7
+
+allocate_port() {
+  local registry="$port_root/registry.tsv"
+  local port hash candidate offset
+
+  if [ -n "$requested_port" ]; then
+    if [[ ! "$requested_port" =~ ^[1-9][0-9]{0,4}$ ]] || [ "$requested_port" -gt 65535 ]; then
+      echo "PORT must be an integer from 1 through 65535." >&2
+      exit 64
+    fi
+    printf '%s\n' "$requested_port"
+    return
+  fi
+
+  exec 8>"$port_root/registry.lock"
+  flock 8
+
+  if awk -F '\t' -v task="$task_id" '$1 == task { found = 1 } END { exit !found }' "$registry" 2>/dev/null; then
+    echo "Task ID $task_id already owns a port. Set PORT explicitly to override it." >&2
+    exit 73
+  fi
+
+  hash="$(printf '%s' "$task_id" | cksum | cut -d ' ' -f 1)"
+  candidate=$((41000 + hash % 10000))
+
+  for offset in $(seq 0 9999); do
+    port=$((41000 + (candidate - 41000 + offset) % 10000))
+    if ! awk -F '\t' -v port="$port" '$2 == port { found = 1 } END { exit !found }' "$registry" 2>/dev/null; then
+      printf '%s\t%s\n' "$task_id" "$port" >> "$registry"
+      printf '%s\n' "$port"
+      return
+    fi
+  done
+
+  echo "No worktree ports remain in the 41000-50999 allocation range." >&2
+  exit 75
+}
+
+port="$(allocate_port)"
+port_lease=1
+if [ -n "$requested_port" ]; then port_lease=0; fi
+setup_complete=0
+cleanup_failed_setup() {
+  if [ "$setup_complete" -eq 0 ] && [ "$port_lease" -eq 1 ]; then
+    "$SCRIPT_DIR/worktree-release-port" "$task_id"
+  fi
+}
+trap cleanup_failed_setup EXIT
+
+clean_worktree() {
+  git -C "$PROJECT_ROOT" diff --quiet &&
+    git -C "$PROJECT_ROOT" diff --cached --quiet &&
+    [ -z "$(git -C "$PROJECT_ROOT" ls-files --others --exclude-standard)" ]
+}
+
+if clean_worktree; then
+  revision="$(git -C "$PROJECT_ROOT" rev-parse HEAD)"
+  lockfile_digest="$(sha256sum "$PROJECT_ROOT/mix.lock" | cut -d ' ' -f 1)"
+  cache_key="$(printf '%s\n%s\n%s\n%s\n' "$revision" "$lockfile_digest" "$OTP_VERSION" "$ELIXIR_VERSION" | sha256sum | cut -d ' ' -f 1)"
+  cache_entry="$cache_root/entries/$cache_key"
+
+  exec 9>"$cache_root/locks/$cache_key.lock"
+  flock 9
+
+  if [ -f "$cache_entry/complete" ]; then
+    rm -rf "$PROJECT_ROOT/deps" "$PROJECT_ROOT/_build"
+    mkdir -p "$PROJECT_ROOT/deps" "$PROJECT_ROOT/_build"
+    cp -a "$cache_entry/deps/." "$PROJECT_ROOT/deps/"
+    cp -a "$cache_entry/_build/." "$PROJECT_ROOT/_build/"
+    touch "$cache_entry/complete"
+    echo "Restored warm cache $cache_key."
+  else
+    echo "Populating warm cache $cache_key."
+    "$SCRIPT_DIR/bootstrap"
+    mix compile
+
+    temporary_entry="$cache_root/entries/.${cache_key}.partial-$$"
+    rm -rf "$temporary_entry"
+    mkdir -p "$temporary_entry/deps" "$temporary_entry/_build"
+    cp -a "$PROJECT_ROOT/deps/." "$temporary_entry/deps/"
+    cp -a "$PROJECT_ROOT/_build/." "$temporary_entry/_build/"
+    touch "$temporary_entry/complete"
+    mv "$temporary_entry" "$cache_entry"
+  fi
+else
+  echo "Dirty worktree: compiling privately."
+  "$SCRIPT_DIR/bootstrap"
+  mix compile
+fi
+
+{
+  printf 'export AGENT_TASK_ID=%q\n' "$task_id"
+  printf 'export MIX_DEPS_PATH=%q\n' "$PROJECT_ROOT/deps"
+  printf 'export MIX_BUILD_PATH=%q\n' "$PROJECT_ROOT/_build"
+  printf 'export MIX_HOME=%q\n' "$PROJECT_ROOT/.worktree-mix"
+  printf 'export PORT=%q\n' "$port"
+  printf 'export WORKTREE_PORT_LEASE=%q\n' "$port_lease"
+  printf 'export SPACETRADERS_WORKTREE_CACHE_DIR=%q\n' "$cache_root"
+  printf 'export SPACETRADERS_PORT_REGISTRY_DIR=%q\n' "$port_root"
+} > "$PROJECT_ROOT/.worktree-env"
+
+echo "Task $task_id is ready on port $port."
+setup_complete=1

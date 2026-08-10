@@ -18,9 +18,6 @@ set +e
 teardown_status="${PIPESTATUS[0]}"
 set -e
 
-rm -rf "$AGENT_DEPS_DIR"
-rm -rf "$AGENT_PROJECT_ROOT/.agent-mix/$AGENT_TASK_ID/attempt-$AGENT_ATTEMPT"
-
 if [ "$run_status" -eq 0 ] && [ "$teardown_status" -eq 0 ]; then
   result="success"
   failure_class=""

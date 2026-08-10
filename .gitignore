@@ -18,6 +18,8 @@ spacetraders-*.tar
 /artifacts/
 /.agent-deps/
 /.agent-mix/
+/.worktree-env
+/.worktree-mix/
 
 # Produced assets
 /priv/static/assets/
