@@ -1,0 +1,3 @@
+# Total beginner to Elixir/Phoenix and to SpaceTraders (stated)
+
+User stated they have never used the Elixir/Phoenix stack and never played SpaceTraders. Zero prior exposure to either; do not assume any functional-programming background. **Evidence:** session 1 statement ("I have never used this text stack before and I have never played this game"). **Open question:** prior experience with other programming languages — affects whether even "what is a function" needs teaching. **Implications:** the ZPD floor is zero on both axes; first lessons must pair the game's basic concepts (agent, waypoint, navigation) with the stack's basics (module, function, tuple, pattern matching) in the same activity.
