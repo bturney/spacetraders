@@ -656,6 +656,10 @@ defmodule SpaceTradersWeb.DashboardLive do
         <div class="card border border-secondary/30 bg-base-200 p-4 sm:p-5">
           <p class="eyebrow">Trade and cargo</p>
           <h3 class="mt-1 font-semibold">Market</h3>
+          <p class="mt-1 text-sm opacity-70">
+            A ship can sell only cargo listed at its current market. Navigate that ship to a market that
+            trades its other cargo.
+          </p>
           <div :if={status == :partial} class="alert alert-warning mt-3">
             Some markets are unavailable.
           </div>
