@@ -869,6 +869,135 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       refute html =~ "Negotiate a new contract"
     end
 
+    test "prefills a partial contract delivery from an eligible ship", %{
+      conn: conn,
+      operator: operator
+    } do
+      agent = agent_fixture(operator)
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case {conn.request_path, conn.method} do
+          {"/v2/my/agent", "GET"} ->
+            Req.Test.json(conn, %{"data" => agent_overview_body(agent.symbol)})
+
+          {"/v2/my/contracts", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => [
+                %{
+                  "id" => "ctr-partial-delivery",
+                  "accepted" => true,
+                  "fulfilled" => false,
+                  "factionSymbol" => "COSMIC",
+                  "type" => "PROCUREMENT",
+                  "terms" => %{
+                    "deadline" => future_iso(),
+                    "deliver" => [
+                      %{
+                        "tradeSymbol" => "COPPER_ORE",
+                        "destinationSymbol" => "X1-UX81-A2",
+                        "unitsRequired" => 53,
+                        "unitsFulfilled" => 0
+                      }
+                    ],
+                    "payment" => %{"onAccepted" => 1000, "onFulfilled" => 5000}
+                  }
+                }
+              ]
+            })
+
+          {"/v2/my/ships", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => [
+                ship_body("ORBITALIST-3", %{
+                  "nav" => nav_body("DOCKED", destination: "X1-UX81-A2"),
+                  "cargo" => %{
+                    "capacity" => 40,
+                    "units" => 9,
+                    "inventory" => [
+                      %{
+                        "symbol" => "COPPER_ORE",
+                        "name" => "Copper Ore",
+                        "description" => "Ore",
+                        "units" => 9
+                      }
+                    ]
+                  }
+                }),
+                ship_body("ORBITALIST-4", %{
+                  "nav" => nav_body("DOCKED", destination: "X1-UX81-A1"),
+                  "cargo" => %{
+                    "capacity" => 40,
+                    "units" => 9,
+                    "inventory" => [
+                      %{
+                        "symbol" => "COPPER_ORE",
+                        "name" => "Copper Ore",
+                        "description" => "Ore",
+                        "units" => 9
+                      }
+                    ]
+                  }
+                }),
+                ship_body("ORBITALIST-5", %{
+                  "nav" => nav_body("DOCKED", destination: "X1-UX81-A2")
+                }),
+                ship_body("ORBITALIST-6", %{
+                  "nav" => nav_body("IN_TRANSIT", destination: "X1-UX81-A2"),
+                  "cargo" => %{
+                    "capacity" => 40,
+                    "units" => 9,
+                    "inventory" => [
+                      %{
+                        "symbol" => "COPPER_ORE",
+                        "name" => "Copper Ore",
+                        "description" => "Ore",
+                        "units" => 9
+                      }
+                    ]
+                  }
+                })
+              ]
+            })
+
+          {"/v2/my/contracts/ctr-partial-delivery/deliver", "POST"} ->
+            Req.Test.json(conn, %{"data" => %{"contract" => %{}, "cargo" => %{}}})
+
+          {"/v2/systems/X1-UX81/waypoints", "GET"} ->
+            Req.Test.json(conn, %{"data" => []})
+        end
+      end)
+
+      {:ok, lv, _html} = live(conn, ~p"/")
+
+      assert has_element?(
+               lv,
+               "form[phx-submit=\"deliver_contract\"] input[type=\"hidden\"][name=\"ship_symbol\"][value=\"ORBITALIST-3\"]"
+             )
+
+      assert has_element?(lv, "form[phx-submit=\"deliver_contract\"]", "ORBITALIST-3")
+      refute has_element?(lv, "form[phx-submit=\"deliver_contract\"]", "ORBITALIST-4")
+      refute has_element?(lv, "form[phx-submit=\"deliver_contract\"]", "ORBITALIST-5")
+      refute has_element?(lv, "form[phx-submit=\"deliver_contract\"]", "ORBITALIST-6")
+
+      assert has_element?(
+               lv,
+               "form[phx-submit=\"deliver_contract\"] input[name=\"units\"][value=\"9\"][max=\"9\"][required]"
+             )
+
+      html =
+        lv
+        |> element("form[phx-submit=\"deliver_contract\"]")
+        |> render_submit(%{
+          agent_id: agent.id,
+          contract_id: "ctr-partial-delivery",
+          ship_symbol: "ORBITALIST-3",
+          trade_symbol: "COPPER_ORE",
+          units: "9"
+        })
+
+      assert html =~ "Delivered 9 COPPER_ORE."
+    end
+
     test "refuels a docked ship", %{conn: conn, operator: operator} do
       agent = agent_fixture(operator)
       {:ok, state} = Agent.start_link(fn -> %{refueled: false} end)

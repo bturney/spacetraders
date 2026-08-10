@@ -543,11 +543,13 @@ defmodule SpaceTradersWeb.DashboardLive do
             <span class="badge badge-outline">{contract_status(contract)}</span>
           </div>
           <div :for={good <- contract.terms.deliver || []} class="mt-4 space-y-2 text-sm">
+            <% delivery_ships = delivery_ships(@ships, good.destination_symbol, good.trade_symbol) %>
             <div class="flex items-center justify-between">
               <span>{good.trade_symbol} to <span class="font-mono">{good.destination_symbol}</span></span>
               <span class="font-mono">{good.units_fulfilled} / {good.units_required}</span>
             </div>
             <form
+              :for={ship <- delivery_ships}
               :if={contract.accepted && not contract.fulfilled}
               phx-submit="deliver_contract"
               class="grid grid-cols-[minmax(0,1fr)_5rem_auto] gap-2 sm:flex"
@@ -555,22 +557,27 @@ defmodule SpaceTradersWeb.DashboardLive do
               <input type="hidden" name="agent_id" value={@agent_id} />
               <input type="hidden" name="contract_id" value={contract.id} />
               <input type="hidden" name="trade_symbol" value={good.trade_symbol} />
-              <input
-                name="ship_symbol"
-                placeholder="Ship symbol"
-                class="input input-bordered input-sm min-w-0 font-mono"
-                required
-              />
+              <input type="hidden" name="ship_symbol" value={ship.symbol} />
+              <span class="self-center font-mono text-xs">
+                {ship.symbol} ({delivery_units(ship, good.trade_symbol)} available)
+              </span>
               <input
                 name="units"
                 type="number"
                 min="1"
-                max={good.units_required - good.units_fulfilled}
-                value={good.units_required - good.units_fulfilled}
+                max={delivery_limit(ship, good)}
+                value={delivery_limit(ship, good)}
                 class="input input-bordered input-sm w-full sm:w-20"
+                required
               />
               <button type="submit" class="btn btn-secondary btn-sm">Deliver</button>
             </form>
+            <p
+              :if={contract.accepted && not contract.fulfilled && delivery_ships == []}
+              class="text-xs opacity-70"
+            >
+              No ship at this waypoint has {good.trade_symbol} to deliver.
+            </p>
           </div>
           <form
             :if={not contract.accepted && not contract.fulfilled}
@@ -1273,6 +1280,26 @@ defmodule SpaceTradersWeb.DashboardLive do
   end
 
   defp cargo_item(_, _), do: nil
+
+  defp delivery_ships({:ok, ships}, destination, trade_symbol) when is_list(ships) do
+    Enum.filter(ships, fn ship ->
+      not in_transit?(ship) and ship_location(ship) == destination and
+        delivery_units(ship, trade_symbol) > 0
+    end)
+  end
+
+  defp delivery_ships(_, _, _), do: []
+
+  defp delivery_limit(ship, good) do
+    min(delivery_units(ship, good.trade_symbol), good.units_required - good.units_fulfilled)
+  end
+
+  defp delivery_units(ship, trade_symbol) do
+    case cargo_item(ship, trade_symbol) do
+      %{units: units} when is_integer(units) -> units
+      _ -> 0
+    end
+  end
 
   defp cargo_inventory(%{cargo: %{inventory: inventory}}) when is_list(inventory), do: inventory
   defp cargo_inventory(_), do: []
