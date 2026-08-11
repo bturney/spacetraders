@@ -17,6 +17,7 @@ defmodule SpaceTradersWeb.DashboardLive do
 
   alias SpaceTraders.Agent
   alias SpaceTraders.Fleet
+  alias SpaceTraders.SystemWaypointProjection
 
   @impl true
   def render(assigns) do
@@ -785,22 +786,30 @@ defmodule SpaceTradersWeb.DashboardLive do
   attr :filter, :string, default: "all"
 
   defp system_map(assigns) do
-    all_waypoints = available_waypoints(assigns.waypoints)
+    projection =
+      SystemWaypointProjection.project(
+        assigns.waypoints,
+        assigns.ships,
+        assigns.headquarters_system,
+        assigns.selected_symbol,
+        assigns.filter
+      )
 
     assigns =
       assigns
-      |> assign(:all_waypoints, all_waypoints)
-      |> assign(:map_waypoints, positioned_waypoints(assigns.waypoints))
+      |> assign(:projection, projection)
+      |> assign(:all_waypoints, projection.available)
+      |> assign(:map_waypoints, projection.positioned)
       |> assign(:system_symbol, assigns.headquarters_system)
-      |> assign(:filtered_waypoints, filtered_waypoints(all_waypoints, assigns.filter))
-      |> assign(:ship_counts, ship_counts(assigns.ships, all_waypoints))
-      |> assign(
-        :transit_routes,
-        transit_routes(assigns.ships, all_waypoints, assigns.headquarters_system)
-      )
+      |> assign(:filtered_waypoints, projection.filtered)
+      |> assign(:ships_at, projection.ships_at)
+      |> assign(:filtered_set, MapSet.new(projection.filtered, & &1.symbol))
+      |> assign(:transit_routes, projection.transit_routes)
+      |> assign(:off_system_ships, projection.off_system)
+      |> assign(:inter_system_transit_ships, projection.inter_system_transit)
 
     ~H"""
-    <%= case @waypoints do %>
+    <%= case @projection.waypoints do %>
       <% {:error, reason} -> %>
         <div class="card border border-base-300/70 bg-base-200 p-4 sm:p-5">
           <div class="alert alert-warning">System map unavailable: {live_error(reason)}</div>
@@ -851,7 +860,7 @@ defmodule SpaceTradersWeb.DashboardLive do
                       data-y={waypoint.y}
                       data-orbital-index={waypoint.orbital_index}
                       data-orbital-count={waypoint.orbital_count}
-                      class={"system-map-waypoint #{waypoint_marker(waypoint.type)} #{selected_waypoint_class(waypoint, @selected_symbol)} #{filtered_waypoint_class(waypoint, @filter)}"}
+                      class={"system-map-waypoint #{waypoint_marker(waypoint.type)} #{selected_waypoint_class(waypoint, @selected_symbol)} #{filtered_waypoint_class(waypoint, @filtered_set)}"}
                       phx-click="select_waypoint"
                       phx-value-agent_id={@agent_id}
                       phx-value-symbol={waypoint.symbol}
@@ -883,7 +892,7 @@ defmodule SpaceTradersWeb.DashboardLive do
                         :if={waypoint_marker(waypoint.type) == "other"}
                         d={"M #{waypoint.x} #{waypoint.y - 6} L #{waypoint.x + 5.2} #{waypoint.y - 3} L #{waypoint.x + 5.2} #{waypoint.y + 3} L #{waypoint.x} #{waypoint.y + 6} L #{waypoint.x - 5.2} #{waypoint.y + 3} L #{waypoint.x - 5.2} #{waypoint.y - 3} Z"}
                       />
-                      <%= if @ship_counts[waypoint.symbol] > 0 do %>
+                      <%= if ship_count_at(@ships_at, waypoint.symbol) > 0 do %>
                         <circle
                           class="system-map-ship-count-badge"
                           data-ship-count-badge={waypoint.symbol}
@@ -897,7 +906,7 @@ defmodule SpaceTradersWeb.DashboardLive do
                           x={waypoint.x + 5}
                           y={waypoint.y - 5}
                         >
-                          {@ship_counts[waypoint.symbol]}
+                          {ship_count_at(@ships_at, waypoint.symbol)}
                         </text>
                       <% end %>
                       <text
@@ -935,8 +944,9 @@ defmodule SpaceTradersWeb.DashboardLive do
                     aria-labelledby={"waypoint-inspector-#{@agent_id}"}
                   >
                     <.waypoint_details
-                      waypoint={selected_waypoint(@all_waypoints, @selected_symbol)}
+                      waypoint={@projection.selected}
                       ships={@ships}
+                      ships_at={@ships_at}
                       agent_id={@agent_id}
                     />
                   </div>
@@ -952,7 +962,7 @@ defmodule SpaceTradersWeb.DashboardLive do
             </div>
             <.waypoint_grid
               waypoints={@filtered_waypoints}
-              ships={@ships}
+              ships_at={@ships_at}
               agent_id={@agent_id}
               selected_symbol={@selected_symbol}
               filter={@filter}
@@ -960,18 +970,22 @@ defmodule SpaceTradersWeb.DashboardLive do
           </div>
           <.waypoint_details
             :if={@map_waypoints == [] and @selected_symbol}
-            waypoint={selected_waypoint(@all_waypoints, @selected_symbol)}
+            waypoint={@projection.selected}
             ships={@ships}
+            ships_at={@ships_at}
             agent_id={@agent_id}
           />
-          <.fleet_location_summary ships={@ships} system_symbol={@system_symbol} />
+          <.fleet_location_summary
+            off_system_ships={@off_system_ships}
+            inter_system_transit_ships={@inter_system_transit_ships}
+          />
         </div>
     <% end %>
     """
   end
 
   attr :waypoints, :list, required: true
-  attr :ships, :any, required: true
+  attr :ships_at, :any, required: true
   attr :agent_id, :integer, required: true
   attr :selected_symbol, :string, default: nil
   attr :filter, :string, required: true
@@ -986,7 +1000,7 @@ defmodule SpaceTradersWeb.DashboardLive do
         </div>
         <div class="flex flex-wrap gap-1" role="group" aria-label="Waypoint filters">
           <button
-            :for={{label, value} <- waypoint_filters()}
+            :for={{label, value} <- SystemWaypointProjection.filter_options()}
             type="button"
             phx-click="filter_waypoints"
             phx-value-agent_id={@agent_id}
@@ -1024,7 +1038,7 @@ defmodule SpaceTradersWeb.DashboardLive do
                   class="opacity-60"
                 >None</span>
               </td><td>
-                {ship_count_label(ships_at_waypoint(@ships, waypoint.symbol, waypoint.system_symbol))}
+                {ship_count_label(ships_at_waypoint(@ships_at, waypoint.symbol))}
               </td>
             </tr>
             <tr :if={@waypoints == []}>
@@ -1039,6 +1053,7 @@ defmodule SpaceTradersWeb.DashboardLive do
 
   attr :waypoint, :any, default: nil
   attr :ships, :any, required: true
+  attr :ships_at, :any, required: true
   attr :agent_id, :integer, required: true
 
   defp waypoint_details(assigns) do
@@ -1057,7 +1072,7 @@ defmodule SpaceTradersWeb.DashboardLive do
               </p>
             </div><div class="flex items-center gap-2">
               <span class="badge badge-outline">{ship_count_label(
-                ships_at_waypoint(@ships, waypoint.symbol, waypoint.system_symbol)
+                ships_at_waypoint(@ships_at, waypoint.symbol)
               )}</span><button
                 type="button"
                 class="btn btn-ghost btn-circle btn-xs"
@@ -1076,14 +1091,12 @@ defmodule SpaceTradersWeb.DashboardLive do
             </div>
           </div>
           <div
-            :if={local_ships_at_waypoint(@ships, waypoint.symbol, waypoint.system_symbol) != []}
+            :if={local_ships_at_waypoint(@ships_at, waypoint.symbol) != []}
             class="mt-4"
           >
             <p class="text-xs font-semibold uppercase tracking-wider opacity-60">Ships</p>
             <ul data-waypoint-ships class="mt-2 space-y-1 text-sm">
-              <li :for={
-                ship <- local_ships_at_waypoint(@ships, waypoint.symbol, waypoint.system_symbol)
-              }>
+              <li :for={ship <- local_ships_at_waypoint(@ships_at, waypoint.symbol)}>
                 <span class="font-mono">{ship.symbol}</span>
                 <span class="opacity-70">{ship_status(ship)}</span>
               </li>
@@ -1135,18 +1148,10 @@ defmodule SpaceTradersWeb.DashboardLive do
     """
   end
 
-  attr :ships, :any, required: true
-  attr :system_symbol, :string, default: nil
+  attr :off_system_ships, :list, required: true
+  attr :inter_system_transit_ships, :list, required: true
 
   defp fleet_location_summary(assigns) do
-    assigns =
-      assigns
-      |> assign(:off_system_ships, off_system_ships(assigns.ships, assigns.system_symbol))
-      |> assign(
-        :inter_system_transit_ships,
-        inter_system_transit_ships(assigns.ships, assigns.system_symbol)
-      )
-
     ~H"""
     <div
       :if={@off_system_ships != [] or @inter_system_transit_ships != []}
@@ -1587,147 +1592,21 @@ defmodule SpaceTradersWeb.DashboardLive do
     end
   end
 
-  defp positioned_waypoints({:ok, waypoints}) when is_list(waypoints) do
-    waypoints = Enum.filter(waypoints, &(is_integer(&1.x) and is_integer(&1.y)))
-    waypoint_symbols = MapSet.new(waypoints, & &1.symbol)
+  defp ships_at_waypoint(:unavailable, _symbol), do: :unavailable
+  defp ships_at_waypoint(ships_at, symbol), do: length(Map.get(ships_at, symbol, []))
 
-    orbital_groups =
-      Enum.group_by(waypoints, fn waypoint ->
-        if MapSet.member?(waypoint_symbols, waypoint.orbits),
-          do: waypoint.orbits,
-          else: waypoint.symbol
-      end)
+  defp local_ships_at_waypoint(:unavailable, _symbol), do: []
+  defp local_ships_at_waypoint(ships_at, symbol), do: Map.get(ships_at, symbol, [])
 
-    Enum.map(waypoints, fn waypoint ->
-      parent_symbol =
-        if MapSet.member?(waypoint_symbols, waypoint.orbits),
-          do: waypoint.orbits,
-          else: waypoint.symbol
-
-      orbitals =
-        orbital_groups
-        |> Map.get(parent_symbol, [])
-        |> Enum.filter(&(&1.orbits == parent_symbol))
-
-      orbital_index =
-        if parent_symbol == waypoint.symbol,
-          do: nil,
-          else: Enum.find_index(orbitals, &(&1.symbol == waypoint.symbol))
-
-      Map.merge(waypoint, %{
-        orbital_count: length(orbitals),
-        orbital_index: orbital_index
-      })
-    end)
-  end
-
-  defp positioned_waypoints(_), do: []
-
-  defp available_waypoints({:ok, waypoints}) when is_list(waypoints), do: waypoints
-  defp available_waypoints(_), do: []
-
-  defp waypoint_filters do
-    [
-      {"All types", "all"},
-      {"Engineered asteroids", "engineered_asteroid"},
-      {"Shipyards", "shipyard"},
-      {"Marketplaces", "marketplace"}
-    ]
-  end
-
-  defp filtered_waypoints(waypoints, "engineered_asteroid"),
-    do: Enum.filter(waypoints, &(&1.type == "ENGINEERED_ASTEROID"))
-
-  defp filtered_waypoints(waypoints, "shipyard"),
-    do: Enum.filter(waypoints, &has_trait?(&1, "SHIPYARD"))
-
-  defp filtered_waypoints(waypoints, "marketplace"),
-    do: Enum.filter(waypoints, &has_trait?(&1, "MARKETPLACE"))
-
-  defp filtered_waypoints(waypoints, _), do: waypoints
-
-  defp has_trait?(waypoint, trait), do: Enum.any?(waypoint.traits || [], &(&1.symbol == trait))
-
-  defp ships_at_waypoint(ships, waypoint_symbol, system_symbol) do
-    case ships do
-      {:ok, _ships} ->
-        ships |> local_ships_at_waypoint(waypoint_symbol, system_symbol) |> length()
-
-      _ ->
-        :unavailable
+  defp ship_count_at(ships_at, symbol) do
+    case ships_at_waypoint(ships_at, symbol) do
+      :unavailable -> 0
+      count -> count
     end
   end
-
-  defp local_ships_at_waypoint({:ok, ships}, waypoint_symbol, system_symbol) do
-    Enum.filter(ships, fn ship ->
-      not in_transit?(ship) and ship_location(ship) == waypoint_symbol and
-        ship_system(ship) == system_symbol
-    end)
-  end
-
-  defp local_ships_at_waypoint(_, _, _), do: []
-
-  defp ship_counts({:ok, _ships} = ships, waypoints) do
-    Map.new(waypoints, fn waypoint ->
-      {waypoint.symbol, ships_at_waypoint(ships, waypoint.symbol, waypoint.system_symbol)}
-    end)
-  end
-
-  defp ship_counts(_, waypoints), do: Map.new(waypoints, &{&1.symbol, 0})
 
   defp ship_count_label(:unavailable), do: "Unavailable"
   defp ship_count_label(count), do: pluralize(count, "ship")
-
-  defp transit_routes({:ok, ships}, waypoints, system_symbol) do
-    waypoint_by_symbol = Map.new(waypoints, &{&1.symbol, &1})
-
-    for ship <- ships,
-        %{origin: origin, destination: destination} <- [ship.nav.route],
-        origin.system_symbol == system_symbol,
-        destination.system_symbol == system_symbol,
-        origin_waypoint = Map.get(waypoint_by_symbol, origin.symbol),
-        destination_waypoint = Map.get(waypoint_by_symbol, destination.symbol),
-        is_integer(origin_waypoint.x) and is_integer(origin_waypoint.y),
-        is_integer(destination_waypoint.x) and is_integer(destination_waypoint.y),
-        in_transit?(ship) do
-      %{ship: ship, origin: origin_waypoint, destination: destination_waypoint}
-    end
-  end
-
-  defp transit_routes(_, _, _), do: []
-
-  defp off_system_ships({:ok, ships}, system_symbol) do
-    Enum.filter(ships, fn ship ->
-      (not in_transit?(ship) and ship_system(ship) != system_symbol) or
-        (in_transit?(ship) and remote_local_transit?(ship, system_symbol))
-    end)
-  end
-
-  defp off_system_ships(_, _), do: []
-
-  defp inter_system_transit_ships({:ok, ships}, _system_symbol) do
-    Enum.filter(ships, &(in_transit?(&1) and inter_system_transit?(&1)))
-  end
-
-  defp inter_system_transit_ships(_, _), do: []
-
-  defp remote_local_transit?(
-         %{nav: %{route: %{origin: origin, destination: destination}}},
-         system_symbol
-       ) do
-    origin.system_symbol == destination.system_symbol and origin.system_symbol != system_symbol
-  end
-
-  defp remote_local_transit?(_, _), do: false
-
-  defp inter_system_transit?(%{nav: %{route: %{origin: origin, destination: destination}}}) do
-    origin.system_symbol != destination.system_symbol
-  end
-
-  defp inter_system_transit?(_), do: true
-
-  defp ship_system(%{nav: %{system_symbol: system_symbol}}), do: system_symbol
-  defp ship_system(_), do: nil
 
   defp headquarters_system(headquarters) when is_binary(headquarters) do
     case Regex.run(~r/^(.+)-[^-]+$/, headquarters, capture: :all) do
@@ -1765,8 +1644,6 @@ defmodule SpaceTradersWeb.DashboardLive do
 
   defp waypoint_marker(_), do: "other"
 
-  defp selected_waypoint(waypoints, symbol), do: Enum.find(waypoints, &(&1.symbol == symbol))
-
   defp waypoint_aria_label(%{orbits: parent, symbol: symbol}) when is_binary(parent),
     do: "Select #{symbol}, orbiting #{parent}"
 
@@ -1775,10 +1652,8 @@ defmodule SpaceTradersWeb.DashboardLive do
   defp selected_waypoint_class(%{symbol: symbol}, symbol), do: "selected"
   defp selected_waypoint_class(_, _), do: ""
 
-  defp filtered_waypoint_class(_waypoint, "all"), do: ""
-
-  defp filtered_waypoint_class(waypoint, filter) do
-    if waypoint in filtered_waypoints([waypoint], filter), do: "", else: "muted"
+  defp filtered_waypoint_class(waypoint, filtered_set) do
+    if MapSet.member?(filtered_set, waypoint.symbol), do: "", else: "muted"
   end
 
   defp capacity(nil), do: 0

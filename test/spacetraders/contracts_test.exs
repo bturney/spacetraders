@@ -14,6 +14,8 @@ defmodule SpaceTraders.ContractsTest do
   end
 
   defp contract_body(overrides \\ %{}) do
+    deadline = Map.get(overrides, "deadline", future_iso(3_600))
+
     Map.merge(
       %{
         "id" => "ctr-1",
@@ -24,7 +26,7 @@ defmodule SpaceTraders.ContractsTest do
         "factionSymbol" => "COSMIC",
         "type" => "PROCUREMENT",
         "terms" => %{
-          "deadline" => "2026-08-11T00:00:00.000Z",
+          "deadline" => deadline,
           "deliver" => [
             %{
               "tradeSymbol" => "IRON_ORE",
@@ -36,23 +38,32 @@ defmodule SpaceTraders.ContractsTest do
           "payment" => %{"onAccepted" => 1000, "onFulfilled" => 5000}
         }
       },
-      overrides
+      Map.delete(overrides, "deadline")
     )
   end
 
+  defp future_iso(seconds) do
+    DateTime.utc_now() |> DateTime.add(seconds, :second) |> DateTime.to_iso8601()
+  end
+
   test "accepting a contract schedules its persisted fulfillment deadline" do
+    deadline = future_iso(3_600)
+
     Req.Test.stub(SpaceTraders.API, fn conn ->
       assert conn.request_path == "/v2/my/contracts/ctr-1/accept"
 
       Req.Test.json(conn, %{
-        "data" => %{"agent" => %{}, "contract" => contract_body(%{"accepted" => true})}
+        "data" => %{
+          "agent" => %{},
+          "contract" => contract_body(%{"accepted" => true, "deadline" => deadline})
+        }
       })
     end)
 
     assert {:ok, %{contract: %{id: "ctr-1"}}} = Contracts.accept_contract(agent(), "ctr-1")
     assert [%{owner_type: "contract", owner_id: "ctr-1"}] = Timeline.pending_owners(:contract)
     assert [%{due_at: due_at}] = Timeline.pending_events(:contract, "ctr-1")
-    assert DateTime.compare(due_at, ~U[2026-08-11 00:00:00Z]) == :eq
+    assert DateTime.compare(due_at, DateTime.from_iso8601(deadline) |> elem(1)) == :eq
   end
 
   test "delivering goods and fulfilling a contract delegate to the API" do
