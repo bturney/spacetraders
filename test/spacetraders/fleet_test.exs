@@ -7,6 +7,7 @@ defmodule SpaceTraders.FleetTest do
   alias SpaceTraders.API.Model
   alias SpaceTraders.Fleet
   alias SpaceTraders.Fleet.Ship
+  alias SpaceTraders.Fleet.AutopilotConfig
   alias SpaceTraders.Fleet.ShipServer
   alias SpaceTraders.Timeline
   alias SpaceTraders.Timeline.Event
@@ -106,6 +107,104 @@ defmodule SpaceTraders.FleetTest do
 
       assert {:error, %SpaceTraders.API.GameplayError{}} =
                Fleet.list_ships(%AgentRecord{agent_token: "BAD"})
+    end
+  end
+
+  describe "autopilot configuration" do
+    test "persists a loop without starting it" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      assert {:ok, %AutopilotConfig{} = config} =
+               Fleet.configure_autopilot(agent, "FLEET-SHIP", %{
+                 extraction_waypoint: "X1-UX81-A2",
+                 market_waypoint: "X1-UX81-A1",
+                 cargo_threshold: 30
+               })
+
+      assert config.desired_mode == "manual"
+      assert config.status == "ready"
+      assert Fleet.autopilot_config(agent, "FLEET-SHIP").cargo_threshold == 30
+    end
+
+    test "starts only after validating authoritative ship, waypoints and market" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      Fleet.configure_autopilot(agent, "FLEET-SHIP", %{
+        extraction_waypoint: "X1-UX81-A2",
+        market_waypoint: "X1-UX81-A1",
+        cargo_threshold: 30
+      })
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case conn.request_path do
+          "/v2/my/ships/FLEET-SHIP" ->
+            Req.Test.json(conn, %{
+              "data" =>
+                ship_body("FLEET-SHIP", %{
+                  "mounts" => [%{"symbol" => "MOUNT_MINING_LASER_I"}]
+                })
+            })
+
+          "/v2/systems/X1-UX81/waypoints/X1-UX81-A2" ->
+            Req.Test.json(conn, %{
+              "data" => %{"symbol" => "X1-UX81-A2", "type" => "ASTEROID_FIELD", "traits" => []}
+            })
+
+          "/v2/systems/X1-UX81/waypoints/X1-UX81-A1" ->
+            Req.Test.json(conn, %{
+              "data" => %{
+                "symbol" => "X1-UX81-A1",
+                "type" => "ORBITAL_STATION",
+                "traits" => [%{"symbol" => "MARKETPLACE"}]
+              }
+            })
+
+          "/v2/systems/X1-UX81/waypoints/X1-UX81-A1/market" ->
+            Req.Test.json(conn, %{"data" => %{"symbol" => "X1-UX81-A1", "tradeGoods" => []}})
+        end
+      end)
+
+      assert {:ok,
+              %AutopilotConfig{
+                desired_mode: "autopilot",
+                status: "ready",
+                last_validated_at: %DateTime{}
+              }} =
+               Fleet.start_autopilot(agent, "FLEET-SHIP")
+    end
+
+    test "blocks an invalid extraction waypoint without a game action" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      Fleet.configure_autopilot(agent, "FLEET-SHIP", %{
+        extraction_waypoint: "X1-UX81-A1",
+        market_waypoint: "X1-UX81-A1",
+        cargo_threshold: 30
+      })
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case conn.request_path do
+          "/v2/my/ships/FLEET-SHIP" ->
+            Req.Test.json(conn, %{"data" => ship_body("FLEET-SHIP")})
+
+          "/v2/systems/X1-UX81/waypoints/X1-UX81-A1" ->
+            Req.Test.json(conn, %{
+              "data" => %{
+                "symbol" => "X1-UX81-A1",
+                "type" => "ORBITAL_STATION",
+                "traits" => [%{"symbol" => "MARKETPLACE"}]
+              }
+            })
+        end
+      end)
+
+      assert {:error, {:autopilot_blocked, :invalid_extraction_waypoint}} =
+               Fleet.start_autopilot(agent, "FLEET-SHIP")
+
+      assert Fleet.autopilot_config(agent, "FLEET-SHIP").status == "blocked"
     end
   end
 

@@ -179,6 +179,40 @@ defmodule SpaceTradersWeb.DashboardLive do
   end
 
   @impl true
+  def handle_event("configure_autopilot", params, socket) do
+    with {:ok, agent} <- agent_for_ship(socket, params["ship_symbol"]),
+         {:ok, threshold} <- parse_units(params["cargo_threshold"]),
+         {:ok, _config} <-
+           Fleet.configure_autopilot(agent, params["ship_symbol"], %{
+             extraction_waypoint: String.trim(params["extraction_waypoint"] || ""),
+             market_waypoint: String.trim(params["market_waypoint"] || ""),
+             cargo_threshold: threshold
+           }) do
+      {:noreply,
+       put_flash(
+         refresh_agent(socket, agent),
+         :info,
+         "Autopilot configuration saved. Start remains manual."
+       )}
+    else
+      {:error, reason} -> {:noreply, put_flash(socket, :error, live_error(reason))}
+    end
+  end
+
+  @impl true
+  def handle_event("start_autopilot", %{"symbol" => ship_symbol}, socket) do
+    with {:ok, agent} <- agent_for_ship(socket, ship_symbol),
+         {:ok, _config} <- Fleet.start_autopilot(agent, ship_symbol) do
+      {:noreply,
+       put_flash(refresh_agent(socket, agent), :info, "#{ship_symbol} Autopilot is ready.")}
+    else
+      {:error, reason} ->
+        {:noreply,
+         put_flash(refresh_agent_for_ship(socket, ship_symbol), :error, live_error(reason))}
+    end
+  end
+
+  @impl true
   def handle_event(action, %{"symbol" => ship_symbol}, socket)
       when action in ["dock", "orbit", "refuel"] do
     with {:ok, agent} <- agent_for_ship(socket, ship_symbol),
@@ -482,6 +516,13 @@ defmodule SpaceTradersWeb.DashboardLive do
   defp refresh_agent_fleet(socket, agent_id) do
     overview = Enum.find(socket.assigns.overviews, &(&1.agent.id == agent_id))
     if overview, do: refresh_agent(socket, overview.agent), else: socket
+  end
+
+  defp refresh_agent_for_ship(socket, ship_symbol) do
+    case agent_for_ship(socket, ship_symbol) do
+      {:ok, agent} -> refresh_agent(socket, agent)
+      _ -> socket
+    end
   end
 
   defp refresh_agent(socket, agent) do
@@ -1602,6 +1643,8 @@ defmodule SpaceTradersWeb.DashboardLive do
       </div>
 
       <div class="mt-4">
+        <.autopilot_panel ship={@ship} />
+
         <%= if in_transit?(@ship) do %>
           <div class="flex flex-wrap items-center gap-2 text-xs">
             <span class="badge badge-warning badge-sm">In transit</span>
@@ -1816,6 +1859,66 @@ defmodule SpaceTradersWeb.DashboardLive do
     """
   end
 
+  attr :ship, :map, required: true
+
+  defp autopilot_panel(assigns) do
+    config = Map.get(assigns.ship, :autopilot)
+    assigns = assign(assigns, :autopilot, config)
+
+    ~H"""
+    <div class="mt-4 rounded border border-primary/20 p-3" data-autopilot-panel>
+      <div class="flex items-center justify-between gap-2">
+        <span class="text-xs font-semibold uppercase tracking-wider opacity-60">Autopilot</span>
+        <span class="badge badge-outline badge-sm">{autopilot_status(@autopilot)}</span>
+      </div>
+      <p :if={@autopilot && @autopilot.blocked_reason} class="mt-2 text-xs text-error">
+        Blocked: {@autopilot.blocked_reason}
+      </p>
+      <form phx-submit="configure_autopilot" class="mt-3 grid gap-2 sm:grid-cols-3">
+        <input type="hidden" name="ship_symbol" value={@ship.symbol} />
+        <input
+          name="extraction_waypoint"
+          value={@autopilot && @autopilot.extraction_waypoint}
+          placeholder="Extraction waypoint"
+          class="input input-bordered input-sm font-mono"
+          required
+        />
+        <input
+          name="market_waypoint"
+          value={@autopilot && @autopilot.market_waypoint}
+          placeholder="Market waypoint"
+          class="input input-bordered input-sm font-mono"
+          required
+        />
+        <input
+          name="cargo_threshold"
+          value={@autopilot && @autopilot.cargo_threshold}
+          type="number"
+          min="1"
+          placeholder="Cargo threshold"
+          class="input input-bordered input-sm"
+          required
+        />
+        <button type="submit" class="btn btn-ghost btn-sm sm:col-span-3">Save loop configuration</button>
+      </form>
+      <button
+        type="button"
+        phx-click="start_autopilot"
+        phx-value-symbol={@ship.symbol}
+        data-confirm="Start Autopilot for this Ship?"
+        class="btn btn-primary btn-sm mt-2"
+      >
+        Start Autopilot
+      </button>
+    </div>
+    """
+  end
+
+  defp autopilot_status(%{status: "blocked"}), do: "Blocked"
+  defp autopilot_status(nil), do: "Manual"
+  defp autopilot_status(%{desired_mode: "autopilot", status: status}), do: "Autopilot · #{status}"
+  defp autopilot_status(_), do: "Manual"
+
   ## Display helpers
 
   defp active_contract?(%{contracts: {:ok, contracts}}),
@@ -1961,6 +2064,20 @@ defmodule SpaceTradersWeb.DashboardLive do
 
   defp live_error(:shipyard_unavailable), do: "That shipyard is not available."
   defp live_error(:market_unavailable), do: "That market is not available."
+
+  defp live_error(:invalid_extraction_waypoint),
+    do: "Choose an ASTEROID_FIELD or ENGINEERED_ASTEROID extraction waypoint."
+
+  defp live_error(:invalid_market_waypoint), do: "Choose a waypoint with a MARKETPLACE trait."
+
+  defp live_error(:cargo_threshold_exceeds_capacity),
+    do: "Cargo threshold exceeds this Ship's capacity."
+
+  defp live_error(:mining_capability_missing), do: "This Ship has no mining laser installed."
+
+  defp live_error(:ship_not_owned), do: "That Ship is not in this agent's Fleet."
+  defp live_error(:autopilot_not_configured), do: "Save an Autopilot configuration first."
+  defp live_error({:autopilot_blocked, reason}), do: "Autopilot blocked: #{live_error(reason)}"
   defp live_error(:invalid_units), do: "Enter a positive number of units."
   defp live_error(:invalid_contract_deadline), do: "The contract deadline could not be read."
 

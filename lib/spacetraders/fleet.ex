@@ -19,7 +19,7 @@ defmodule SpaceTraders.Fleet do
 
   alias SpaceTraders.Agent.Agent, as: AgentRecord
   alias SpaceTraders.API.Model.{ShipNav, ShipNavRoute}
-  alias SpaceTraders.Fleet.Ship
+  alias SpaceTraders.Fleet.{AutopilotConfig, Ship}
   alias SpaceTraders.Fleet.ShipServer
   alias SpaceTraders.Repo
   alias SpaceTraders.{Agent, Contracts, Listing, Shipyard}
@@ -49,7 +49,7 @@ defmodule SpaceTraders.Fleet do
   truth, so every call assembles fresh data.
   """
   def command_snapshot(%AgentRecord{} = agent) do
-    ships = list_ships(agent)
+    ships = list_ships(agent) |> annotate_autopilot(agent)
     waypoints = list_waypoints(agent)
     listings = snapshot_listings(agent, ships, waypoints)
 
@@ -62,6 +62,153 @@ defmodule SpaceTraders.Fleet do
       markets: listings.markets,
       waypoints: waypoints
     }
+  end
+
+  defp annotate_autopilot({:ok, ships}, agent) do
+    {:ok,
+     Enum.map(ships, fn ship ->
+       ensure_ship_record(agent, ship)
+       Map.put(ship, :autopilot, autopilot_config(agent, ship.symbol))
+     end)}
+  end
+
+  defp annotate_autopilot(result, _agent), do: result
+
+  defp ensure_ship_record(agent, %{symbol: symbol}) do
+    if is_nil(Repo.get_by(Ship, agent_id: agent.id, symbol: symbol)) do
+      record_ship(agent, symbol, "UNKNOWN")
+    end
+
+    :ok
+  end
+
+  @doc "Saves a Ship's loop configuration without enabling Autopilot."
+  def configure_autopilot(%AgentRecord{} = agent, ship_symbol, attrs) when is_map(attrs) do
+    with {:ok, ship} <- owned_ship(agent, ship_symbol),
+         {:ok, config} <- upsert_autopilot(ship, attrs) do
+      {:ok, config}
+    end
+  end
+
+  @doc "Returns the persisted Autopilot configuration for a Ship, or nil."
+  def autopilot_config(%AgentRecord{} = agent, ship_symbol) do
+    case owned_ship(agent, ship_symbol) do
+      {:ok, ship} -> Repo.get_by(AutopilotConfig, ship_id: ship.id)
+      _ -> nil
+    end
+  end
+
+  @doc "Explicitly starts a configured Autopilot after authoritative validation."
+  def start_autopilot(%AgentRecord{} = agent, ship_symbol) do
+    with {:ok, ship} <- owned_ship(agent, ship_symbol),
+         %AutopilotConfig{} = config <- Repo.get_by(AutopilotConfig, ship_id: ship.id),
+         {:ok, config} <- validate_autopilot(agent, ship, config) do
+      Repo.update!(
+        Ecto.Changeset.change(config,
+          desired_mode: "autopilot",
+          status: "ready",
+          blocked_reason: nil,
+          last_validated_at: DateTime.utc_now() |> DateTime.truncate(:second)
+        )
+      )
+
+      {:ok, Repo.get!(AutopilotConfig, config.id)}
+    else
+      nil -> {:error, :autopilot_not_configured}
+      {:error, reason} -> block_autopilot(agent, ship_symbol, reason)
+    end
+  end
+
+  defp owned_ship(agent, symbol) do
+    case Repo.get_by(Ship, agent_id: agent.id, symbol: symbol) do
+      nil -> {:error, :ship_not_owned}
+      ship -> {:ok, ship}
+    end
+  end
+
+  defp upsert_autopilot(ship, attrs) do
+    config = Repo.get_by(AutopilotConfig, ship_id: ship.id) || %AutopilotConfig{ship_id: ship.id}
+
+    config
+    |> AutopilotConfig.changeset(attrs)
+    |> Ecto.Changeset.put_change(:desired_mode, "manual")
+    |> Ecto.Changeset.put_change(:status, "ready")
+    |> Ecto.Changeset.put_change(:blocked_reason, nil)
+    |> Repo.insert_or_update()
+  end
+
+  defp validate_autopilot(%AgentRecord{agent_token: token}, ship, config)
+       when is_binary(token) and token != "" do
+    with {:ok, live_ship} <- SpaceTraders.API.get_ship(token, ship.symbol),
+         {:ok, extraction} <-
+           waypoint(token, live_ship.nav.system_symbol, config.extraction_waypoint),
+         :ok <- extraction_waypoint?(extraction),
+         {:ok, market_waypoint} <-
+           waypoint(token, live_ship.nav.system_symbol, config.market_waypoint),
+         :ok <- market_waypoint?(market_waypoint),
+         {:ok, market} <-
+           SpaceTraders.API.get_market(token, live_ship.nav.system_symbol, config.market_waypoint),
+         :ok <- market_available?(market),
+         :ok <- cargo_policy?(live_ship, config.cargo_threshold),
+         :ok <- mining_capability?(live_ship) do
+      {:ok, config}
+    end
+  end
+
+  defp validate_autopilot(_, _, _), do: {:error, :agent_token_missing}
+
+  defp waypoint(token, system, symbol), do: SpaceTraders.API.get_waypoint(token, system, symbol)
+
+  defp extraction_waypoint?(%{type: type}) when type in ["ASTEROID_FIELD", "ENGINEERED_ASTEROID"],
+    do: :ok
+
+  defp extraction_waypoint?(_), do: {:error, :invalid_extraction_waypoint}
+
+  defp market_waypoint?(%{traits: traits}) do
+    if Enum.any?(traits || [], &(&1.symbol == "MARKETPLACE")),
+      do: :ok,
+      else: {:error, :invalid_market_waypoint}
+  end
+
+  defp market_waypoint?(_), do: {:error, :invalid_market_waypoint}
+  defp market_available?(%{symbol: symbol}) when is_binary(symbol), do: :ok
+  defp market_available?(_), do: {:error, :market_unavailable}
+
+  defp cargo_policy?(%{cargo: %{capacity: capacity}}, threshold) when threshold <= capacity,
+    do: :ok
+
+  defp cargo_policy?(_, _), do: {:error, :cargo_threshold_exceeds_capacity}
+
+  defp mining_capability?(%{mounts: mounts}) do
+    if Enum.any?(mounts || [], &String.starts_with?(&1.symbol || "", "MOUNT_MINING_LASER")),
+      do: :ok,
+      else: {:error, :mining_capability_missing}
+  end
+
+  defp mining_capability?(_), do: {:error, :mining_capability_missing}
+
+  defp block_autopilot(agent, ship_symbol, reason) do
+    case owned_ship(agent, ship_symbol) do
+      {:ok, ship} ->
+        case Repo.get_by(AutopilotConfig, ship_id: ship.id) do
+          %AutopilotConfig{} = config ->
+            Repo.update!(
+              Ecto.Changeset.change(config,
+                desired_mode: "autopilot",
+                status: "blocked",
+                blocked_reason: inspect(reason)
+              )
+            )
+
+            {:error, {:autopilot_blocked, reason}}
+
+          nil ->
+            {:error, :autopilot_not_configured}
+        end
+
+      error ->
+        error
+    end
   end
 
   @doc """
