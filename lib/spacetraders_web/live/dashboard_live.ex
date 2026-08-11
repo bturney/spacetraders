@@ -1167,6 +1167,29 @@ defmodule SpaceTradersWeb.DashboardLive do
               >x</button>
             </div>
           </div>
+          <div :if={waypoint_intelligence?(waypoint)} class="mt-4" data-waypoint-intelligence>
+            <p class="text-xs font-semibold uppercase tracking-wider opacity-60">
+              Waypoint Intelligence
+            </p>
+            <span
+              :if={waypoint.is_under_construction == true}
+              class="badge badge-warning badge-sm mt-2"
+              data-construction-status
+            >Under construction</span>
+            <ul :if={(waypoint.modifiers || []) != []} class="mt-2 space-y-1">
+              <li :for={modifier <- waypoint.modifiers || []}>
+                <details data-modifier={modifier.symbol}>
+                  <summary class="cursor-pointer text-sm">
+                    <span class="badge badge-warning badge-outline badge-sm font-mono">
+                      {modifier.symbol}
+                    </span>
+                    <span class="ml-2 opacity-70">{modifier.name}</span>
+                  </summary>
+                  <p class="mt-1 text-sm opacity-70">{modifier.description}</p>
+                </details>
+              </li>
+            </ul>
+          </div>
           <div class="mt-4">
             <p class="text-xs font-semibold uppercase tracking-wider opacity-60">Traits</p><div class="mt-2 flex flex-wrap gap-1">
               <span :for={trait <- waypoint.traits || []} class="badge badge-outline badge-sm">{trait.symbol}</span><span
@@ -1207,6 +1230,25 @@ defmodule SpaceTradersWeb.DashboardLive do
           >
             {waypoint.x}, {waypoint.y}
           </p>
+          <details :if={waypoint_context?(waypoint)} class="mt-4" data-waypoint-context>
+            <summary class="cursor-pointer text-xs font-semibold uppercase tracking-wider opacity-60">
+              Context
+            </summary>
+            <dl class="mt-2 space-y-1 text-sm">
+              <div :if={faction_symbol(waypoint)}>
+                <dt class="text-xs opacity-60">Controlling faction</dt>
+                <dd class="font-mono">{faction_symbol(waypoint)}</dd>
+              </div>
+              <div :if={chart_submitter(waypoint)}>
+                <dt class="text-xs opacity-60">Chart submitter</dt>
+                <dd class="font-mono">{chart_submitter(waypoint)}</dd>
+              </div>
+              <div :if={chart_submitted_label(waypoint)}>
+                <dt class="text-xs opacity-60">Charted</dt>
+                <dd class="font-mono">{chart_submitted_label(waypoint)}</dd>
+              </div>
+            </dl>
+          </details>
           <form
             :if={browser_ships(@ships, waypoint.system_symbol) != []}
             phx-submit="browser_navigate"
@@ -1784,6 +1826,37 @@ defmodule SpaceTradersWeb.DashboardLive do
     do: "Select #{symbol}, orbiting #{parent}"
 
   defp waypoint_aria_label(%{symbol: symbol}), do: "Select #{symbol}"
+
+  defp waypoint_intelligence?(%{is_under_construction: true}), do: true
+
+  defp waypoint_intelligence?(%{modifiers: modifiers})
+       when is_list(modifiers) and modifiers != [],
+       do: true
+
+  defp waypoint_intelligence?(_waypoint), do: false
+
+  defp waypoint_context?(waypoint) do
+    faction_symbol(waypoint) != nil or chart_submitter(waypoint) != nil or
+      chart_submitted_label(waypoint) != nil
+  end
+
+  defp faction_symbol(%{faction: %{symbol: symbol}}) when is_binary(symbol), do: symbol
+  defp faction_symbol(_waypoint), do: nil
+
+  defp chart_submitter(%{chart: %{submitted_by: submitted_by}}) when is_binary(submitted_by),
+    do: submitted_by
+
+  defp chart_submitter(_waypoint), do: nil
+
+  defp chart_submitted_label(%{chart: %{submitted_on: submitted_on}})
+       when is_binary(submitted_on) do
+    case DateTime.from_iso8601(submitted_on) do
+      {:ok, date_time, _offset} -> Calendar.strftime(date_time, "%m-%d %H:%M UTC")
+      _ -> nil
+    end
+  end
+
+  defp chart_submitted_label(_waypoint), do: nil
 
   defp selected_waypoint_class(%{symbol: symbol}, symbol), do: "selected"
   defp selected_waypoint_class(_, _), do: ""

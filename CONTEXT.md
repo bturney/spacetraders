@@ -52,6 +52,18 @@ _Avoid_: system map
 **Headquarters**:
 The Agent's home waypoint, where the Agent starts.
 
+**Waypoint Intelligence**:
+The operational state of a Waypoint that the inspector surfaces before any secondary context: construction status and Waypoint Modifiers.
+_Avoid_: waypoint stats, waypoint info
+
+**Waypoint Modifier**:
+An API-supplied caution flag on a Waypoint (e.g., STRIPPED, UNSTABLE), carrying a symbol, name, and description. Shown with caution styling; the game does not rank modifiers, so the app invents no severity order.
+_Avoid_: debuff, penalty, severity
+
+**Chart Provenance**:
+The chart facts the API returns for a Waypoint: the submitter and the charted absolute time. Shown only when returned; partial provenance never uses placeholders.
+_Avoid_: chart history, discovered-by
+
 ### Fleet
 
 **Fleet**:

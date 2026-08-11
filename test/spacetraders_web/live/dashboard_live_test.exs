@@ -156,6 +156,18 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
     end
   end
 
+  defp assert_before(html, first, second) do
+    [first_index, second_index] =
+      Enum.map([first, second], fn text ->
+        case :binary.match(html, text) do
+          {index, _} -> index
+          :nomatch -> flunk("expected #{inspect(text)} in rendered html")
+        end
+      end)
+
+    assert first_index < second_index
+  end
+
   describe "anonymous visitors" do
     test "redirects to first-run setup when no operators exist" do
       conn = build_conn()
@@ -1517,6 +1529,142 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       |> render_click()
 
       refute has_element?(lv, "[data-map-inspector]")
+    end
+
+    test "exposes Waypoint Intelligence and Chart Provenance in the waypoint inspector", %{
+      conn: conn,
+      operator: operator
+    } do
+      agent = agent_fixture(operator)
+
+      submitted_on = "2026-08-10T12:34:56Z"
+      {:ok, charted_at, _offset} = DateTime.from_iso8601(submitted_on)
+      charted_label = Calendar.strftime(charted_at, "%m-%d %H:%M UTC")
+
+      waypoints = [
+        %{
+          "symbol" => "X1-UX81-A1",
+          "systemSymbol" => "X1-UX81",
+          "type" => "ORBITAL_STATION",
+          "x" => -12,
+          "y" => 8,
+          "isUnderConstruction" => true,
+          "modifiers" => [
+            %{
+              "symbol" => "STRIPPED",
+              "name" => "Stripped",
+              "description" => "The waypoint's resources have been stripped."
+            },
+            %{
+              "symbol" => "UNSTABLE",
+              "name" => "Unstable",
+              "description" => "The waypoint's structure is unstable."
+            }
+          ],
+          "faction" => %{"symbol" => "COSMIC"},
+          "chart" => %{"submittedBy" => "ORBITALIST", "submittedOn" => submitted_on},
+          "traits" => [%{"symbol" => "MARKETPLACE"}]
+        },
+        %{
+          "symbol" => "X1-UX81-A3",
+          "systemSymbol" => "X1-UX81",
+          "type" => "ENGINEERED_ASTEROID",
+          "x" => 14,
+          "y" => -6,
+          "traits" => [%{"symbol" => "MINERAL_DEPOSITS"}]
+        },
+        %{
+          "symbol" => "X1-UX81-B1",
+          "systemSymbol" => "X1-UX81",
+          "type" => "PLANET",
+          "x" => 4,
+          "y" => 19,
+          "chart" => %{"submittedOn" => submitted_on},
+          "traits" => []
+        }
+      ]
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case {conn.request_path, conn.method} do
+          {"/v2/my/agent", "GET"} ->
+            Req.Test.json(conn, %{"data" => agent_overview_body(agent.symbol)})
+
+          {"/v2/my/contracts", "GET"} ->
+            Req.Test.json(conn, %{"data" => []})
+
+          {"/v2/my/ships", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => [ship_body("ORBITALIST-1", %{"nav" => nav_body("IN_ORBIT")})]
+            })
+
+          {"/v2/systems/X1-UX81/waypoints", "GET"} ->
+            case conn.query_params["page"] do
+              "1" -> Req.Test.json(conn, %{"data" => waypoints})
+              _ -> Req.Test.json(conn, %{"data" => []})
+            end
+
+          {"/v2/systems/X1-UX81/waypoints/X1-UX81-A1/shipyard", "GET"} ->
+            Req.Test.json(conn, %{"data" => %{"symbol" => "X1-UX81-A1", "ships" => []}})
+
+          {"/v2/systems/X1-UX81/waypoints/X1-UX81-A1/market", "GET"} ->
+            Req.Test.json(conn, %{"data" => %{"symbol" => "X1-UX81-A1", "tradeGoods" => []}})
+        end
+      end)
+
+      {:ok, lv, _html} = live(conn, ~p"/")
+
+      lv
+      |> element("[data-waypoint-symbol=\"X1-UX81-A1\"]")
+      |> render_click()
+
+      inspector_html = lv |> element("[data-map-inspector]") |> render()
+
+      assert inspector_html =~ "Waypoint Intelligence"
+      assert inspector_html =~ "Under construction"
+      assert inspector_html =~ "STRIPPED"
+      assert inspector_html =~ "UNSTABLE"
+      assert has_element?(lv, "[data-waypoint-intelligence]")
+      assert has_element?(lv, "[data-construction-status]", "Under construction")
+      assert has_element?(lv, "details[data-modifier=\"STRIPPED\"] summary", "Stripped")
+
+      assert has_element?(
+               lv,
+               "details[data-modifier=\"STRIPPED\"]",
+               "The waypoint's resources have been stripped."
+             )
+
+      assert has_element?(
+               lv,
+               "details[data-modifier=\"UNSTABLE\"]",
+               "The waypoint's structure is unstable."
+             )
+
+      assert has_element?(lv, "[data-waypoint-context]")
+      assert has_element?(lv, "[data-waypoint-context]", "COSMIC")
+      assert has_element?(lv, "[data-waypoint-context]", "ORBITALIST")
+      assert has_element?(lv, "[data-waypoint-context]", charted_label)
+
+      assert_before(inspector_html, "Waypoint Intelligence", "Traits")
+      assert_before(inspector_html, "Under construction", "STRIPPED")
+      assert_before(inspector_html, "Traits", "Context")
+
+      lv
+      |> element("[data-waypoint-symbol=\"X1-UX81-A3\"]")
+      |> render_click()
+
+      refute has_element?(lv, "[data-waypoint-intelligence]")
+      refute has_element?(lv, "[data-waypoint-context]")
+      refute render(lv) =~ "Waypoint Intelligence"
+
+      lv
+      |> element("[data-waypoint-symbol=\"X1-UX81-B1\"]")
+      |> render_click()
+
+      assert has_element?(lv, "[data-waypoint-context]")
+      assert has_element?(lv, "[data-waypoint-context]", charted_label)
+      refute has_element?(lv, "[data-waypoint-context]", "Controlling faction")
+      refute has_element?(lv, "[data-waypoint-context]", "Chart submitter")
+      refute has_element?(lv, "[data-waypoint-context]", "Unknown")
     end
 
     test "links the waypoint grid and system map, including filters and ship counts", %{
