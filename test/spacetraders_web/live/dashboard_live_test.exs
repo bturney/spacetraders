@@ -2019,7 +2019,7 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
 
       assert has_element?(
                lv,
-               "[data-waypoint-symbol=\"X1-UX81-B2\"][data-orbital-index=\"0\"][data-orbital-count=\"1\"]"
+               "[data-waypoint-symbol=\"X1-UX81-B2\"][data-orbital-offset-x=\"0.0\"][data-orbital-offset-y=\"-1.0\"][data-orbital-distance=\"32\"]"
              )
 
       assert html =~ "Type markers"
@@ -2303,11 +2303,28 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
           "x" => 14,
           "y" => -6,
           "traits" => []
+        },
+        %{
+          "symbol" => "X1-UX81-B1",
+          "systemSymbol" => "X1-UX81",
+          "type" => "PLANET",
+          "x" => 4,
+          "y" => 19,
+          "traits" => []
+        },
+        %{
+          "symbol" => "X1-UX81-B2",
+          "systemSymbol" => "X1-UX81",
+          "type" => "MOON",
+          "x" => 4,
+          "y" => 19,
+          "orbits" => "X1-UX81-B1",
+          "traits" => []
         }
       ]
 
       transit_nav =
-        nav_body("IN_TRANSIT", destination: "X1-UX81-A3")
+        nav_body("IN_TRANSIT", destination: "X1-UX81-B2")
         |> Map.put("route", %{
           "origin" => %{
             "symbol" => "X1-UX81-A1",
@@ -2317,11 +2334,11 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
             "y" => 8
           },
           "destination" => %{
-            "symbol" => "X1-UX81-A3",
+            "symbol" => "X1-UX81-B2",
             "systemSymbol" => "X1-UX81",
-            "type" => "ENGINEERED_ASTEROID",
-            "x" => 14,
-            "y" => -6
+            "type" => "MOON",
+            "x" => 4,
+            "y" => 19
           },
           "departureTime" => "2026-01-01T00:00:00.000Z",
           "arrival" => future_iso(300)
@@ -2353,6 +2370,18 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
                   "nav" => nav_body("IN_ORBIT", destination: "X1-UX81-A1")
                 }),
                 ship_body("ORBITALIST-3", %{"nav" => transit_nav}),
+                ship_body("ORBITALIST-6", %{
+                  "nav" =>
+                    Map.put(nav_body("IN_TRANSIT", destination: "X1-UX81-MISSING"), "route", %{
+                      "origin" => %{"symbol" => "X1-UX81-A1", "systemSymbol" => "X1-UX81"},
+                      "destination" => %{
+                        "symbol" => "X1-UX81-MISSING",
+                        "systemSymbol" => "X1-UX81"
+                      },
+                      "departureTime" => "2026-01-01T00:00:00.000Z",
+                      "arrival" => future_iso(300)
+                    })
+                }),
                 ship_body("ORBITALIST-4", %{
                   "nav" => Map.put(nav_body("DOCKED"), "systemSymbol", "X1-OTHER")
                 }),
@@ -2377,6 +2406,13 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       assert has_element?(lv, "[data-ship-count=\"X1-UX81-A1\"]", "2")
       assert has_element?(lv, "[data-ship-count-badge=\"X1-UX81-A1\"]")
       assert has_element?(lv, "[data-transit-route=\"ORBITALIST-3\"]")
+
+      assert has_element?(
+               lv,
+               "[data-transit-route=\"ORBITALIST-3\"][data-transit-destination=\"X1-UX81-B2\"]"
+             )
+
+      refute has_element?(lv, "[data-transit-route=\"ORBITALIST-6\"]")
 
       assert has_element?(
                lv,
