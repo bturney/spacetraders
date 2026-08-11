@@ -1945,6 +1945,12 @@ defmodule SpaceTradersWeb.DashboardLive do
   defp autopilot_current_action(%{desired_mode: "autopilot"}, _ship), do: "Evaluating cargo"
   defp autopilot_current_action(_, _ship), do: "Manual"
 
+  defp autopilot_next_action(
+         %{status: "waiting", in_flight_action: %{"kind" => "navigate", "waypoint" => waypoint}},
+         _ship
+       ),
+       do: "Extract at #{waypoint}"
+
   defp autopilot_next_action(%{status: "waiting"}, ship) do
     case cooldown_label(ship, 0) do
       "Ready" -> "Reconcile ship"

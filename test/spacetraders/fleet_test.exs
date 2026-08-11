@@ -342,6 +342,33 @@ defmodule SpaceTraders.FleetTest do
       assert Timeline.pending_events(:ship, "FLEET-SHIP") == []
     end
 
+    test "waits for an authoritative cooldown before extracting" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      {:ok, config} =
+        Fleet.configure_autopilot(agent, "FLEET-SHIP", %{
+          extraction_waypoint: "X1-UX81-A2",
+          market_waypoint: "X1-UX81-A1",
+          cargo_threshold: 30
+        })
+
+      live_ship = %Model.Ship{
+        symbol: "FLEET-SHIP",
+        nav: %Model.ShipNav{status: "IN_ORBIT", waypoint_symbol: "X1-UX81-A2"},
+        cargo: %Model.ShipCargo{capacity: 40, units: 0, inventory: []},
+        cooldown: %Model.Cooldown{
+          remaining_seconds: 20,
+          expiration: DateTime.add(DateTime.utc_now(), 20, :second) |> DateTime.to_iso8601()
+        }
+      }
+
+      assert {:ok, %AutopilotConfig{status: "waiting", in_flight_action: %{"kind" => "cooldown"}}} =
+               Fleet.advance_autopilot(agent, %{config | desired_mode: "autopilot"}, live_ship)
+
+      assert [%Event{event_type: "cooldown"}] = Timeline.pending_events(:ship, "FLEET-SHIP")
+    end
+
     test "cooldown wakeup records extraction completion before another action" do
       agent = agent_fixture()
       ship_fixture(agent, "FLEET-SHIP")
@@ -406,7 +433,10 @@ defmodule SpaceTraders.FleetTest do
 
         Req.Test.json(conn, %{
           "data" =>
-            ship_body("FLEET-SHIP", %{"nav" => nav_body("DOCKED", destination: "X1-UX81-A2")})
+            ship_body("FLEET-SHIP", %{
+              "nav" => nav_body("DOCKED", destination: "X1-UX81-A2"),
+              "cargo" => %{"capacity" => 40, "units" => 30, "inventory" => []}
+            })
         })
       end)
 

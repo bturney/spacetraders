@@ -275,15 +275,28 @@ defmodule SpaceTraders.Fleet do
     with %Ship{} = ship <- Repo.get_by(Ship, agent_id: agent_id, symbol: ship_symbol),
          %AutopilotConfig{} = config <- Repo.get_by(AutopilotConfig, ship_id: ship.id),
          true <- config.desired_mode == "autopilot",
-         true <- cooldown_ready?(live_ship) do
-      {:ok,
-       Repo.update!(
-         Ecto.Changeset.change(config,
-           status: "ready",
-           in_flight_action: nil,
-           progress: Map.merge(config.progress || %{}, %{"last_completed" => "extract"})
-         )
-       )}
+         true <- cooldown_ready?(live_ship),
+         %AgentRecord{} = agent <- Repo.get(AgentRecord, agent_id) do
+      case config.in_flight_action do
+        %{"kind" => "extract"} ->
+          {:ok,
+           Repo.update!(
+             Ecto.Changeset.change(config,
+               status: "ready",
+               in_flight_action: nil,
+               progress: Map.merge(config.progress || %{}, %{"last_completed" => "extract"})
+             )
+           )}
+
+        %{"kind" => "cooldown"} ->
+          config =
+            Repo.update!(Ecto.Changeset.change(config, status: "ready", in_flight_action: nil))
+
+          advance_autopilot(agent, config, live_ship)
+
+        _ ->
+          :ok
+      end
     else
       _ -> :ok
     end
@@ -295,17 +308,21 @@ defmodule SpaceTraders.Fleet do
          %AutopilotConfig{} = config <- Repo.get_by(AutopilotConfig, ship_id: ship.id),
          true <- config.desired_mode == "autopilot",
          true <- at_extraction_waypoint?(live_ship, config.extraction_waypoint) do
-      {:ok,
-       Repo.update!(
-         Ecto.Changeset.change(config,
-           status: "ready",
-           in_flight_action: nil,
-           progress: %{
-             "waypoint" => config.extraction_waypoint,
-             "last_completed" => "navigate"
-           }
-         )
-       )}
+      agent = Repo.get!(AgentRecord, agent_id)
+
+      config =
+        Repo.update!(
+          Ecto.Changeset.change(config,
+            status: "ready",
+            in_flight_action: nil,
+            progress: %{
+              "waypoint" => config.extraction_waypoint,
+              "last_completed" => "navigate"
+            }
+          )
+        )
+
+      advance_autopilot(agent, config, live_ship)
     else
       _ -> :ok
     end
@@ -321,40 +338,64 @@ defmodule SpaceTraders.Fleet do
   defp at_extraction_waypoint?(_, _), do: false
 
   defp extract_if_below_threshold(agent, config, live_ship) do
-    if cargo_units(live_ship) < config.cargo_threshold do
-      action = %{"kind" => "extract", "waypoint" => config.extraction_waypoint}
+    cond do
+      cooldown_active?(live_ship) ->
+        maybe_schedule_live_cooldown(agent, live_ship)
 
-      config =
-        Repo.update!(
-          Ecto.Changeset.change(config, status: "revalidating", in_flight_action: action)
-        )
+        {:ok,
+         Repo.update!(
+           Ecto.Changeset.change(config,
+             status: "waiting",
+             in_flight_action: %{"kind" => "cooldown", "waypoint" => config.extraction_waypoint}
+           )
+         )}
 
-      case extract_resources(agent, live_ship.symbol) do
-        {:ok, result} ->
-          result_snapshot = %{
-            "kind" => "extract",
-            "yield" => extraction_yield(result)
-          }
+      cargo_units(live_ship) < config.cargo_threshold ->
+        action = %{"kind" => "extract", "waypoint" => config.extraction_waypoint}
 
-          {:ok,
-           Repo.update!(
-             Ecto.Changeset.change(config,
-               status: "waiting",
-               last_action_result: result_snapshot
-             )
-           )}
-
-        {:error, reason} ->
+        config =
           Repo.update!(
-            Ecto.Changeset.change(config, status: "blocked", blocked_reason: inspect(reason))
+            Ecto.Changeset.change(config, status: "revalidating", in_flight_action: action)
           )
 
-          {:error, reason}
-      end
-    else
-      {:ok, config}
+        case extract_resources(agent, live_ship.symbol) do
+          {:ok, result} ->
+            result_snapshot = %{
+              "kind" => "extract",
+              "yield" => extraction_yield(result)
+            }
+
+            {:ok,
+             Repo.update!(
+               Ecto.Changeset.change(config,
+                 status: "waiting",
+                 last_action_result: result_snapshot
+               )
+             )}
+
+          {:error, reason} ->
+            Repo.update!(
+              Ecto.Changeset.change(config, status: "blocked", blocked_reason: inspect(reason))
+            )
+
+            {:error, reason}
+        end
+
+      true ->
+        {:ok, config}
     end
   end
+
+  defp maybe_schedule_live_cooldown(agent, %{symbol: ship_symbol, cooldown: cooldown}) do
+    due_at = parse_expiration(cooldown.expiration, cooldown.remaining_seconds)
+    schedule_cooldown_event(agent, ship_symbol, due_at)
+  end
+
+  defp cooldown_active?(%{cooldown: %{remaining_seconds: seconds}})
+       when is_integer(seconds),
+       do: seconds > 0
+
+  defp cooldown_active?(_), do: false
 
   defp cargo_units(%{cargo: %{units: units}}) when is_integer(units), do: units
   defp cargo_units(_), do: 0
