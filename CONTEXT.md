@@ -41,6 +41,15 @@ A Waypoint located at the exact coordinates of its Parent Waypoint, such as a mo
 A visual, interactive representation of every Waypoint in one System, positioned by its game-supplied coordinates and showing the Fleet's current state.
 _Avoid_: galaxy map, sector map
 
+**Waypoint Intelligence**:
+Operational and contextual metadata returned for a Waypoint beyond its location and immediate navigability: construction status, modifiers, controlling faction, and chart provenance. Construction status and modifiers are operational state; faction and chart provenance are secondary context. Display it when present without a per-selection API request.
+
+**Waypoint Modifier**:
+An API-supplied condition affecting a Waypoint (e.g., RADIATION_LEAK or CIVIL_UNREST). It signals caution but has no API-supplied severity ranking; do not infer one.
+
+**Chart Provenance**:
+The Agent and time recorded by the game when a Waypoint was charted. It is secondary context, not an operational condition. Its absence is unknown optional data, not a claim that a Waypoint is uncharted.
+
 **Waypoint Grid**:
 A structured, actionable view of Waypoints in one System. It is linked to the System Map: selecting a Waypoint in either view selects and highlights it in both.
 _Avoid_: waypoint browser, waypoint list
@@ -73,16 +82,43 @@ The collection of ships owned by exactly one Agent. Ships never span Agents.
 A vessel the Agent owns (e.g., ORBITALIST-1, class COMMAND). Travels between waypoints, carries cargo, consumes fuel, and is subject to cooldowns.
 _Avoid_: vessel
 
+**Ship Readiness**:
+The capability and condition information that determines what a Ship can do: flight mode, crew, frame, reactor, engine, modules, and mounts. It supplements, but does not replace, the Ship's immediate operational status, location, fuel, cargo, and actions.
+
+**Ship Offer**:
+A Ship configuration currently available at a Shipyard. It is evaluated before purchase using the same capability vocabulary as an owned Ship, alongside its price and availability signals.
+
+**Ship Component Health**:
+Two distinct measures of a Ship component. Condition is repairable current state; integrity is permanent, non-repairable wear. Condition is an operational signal, while integrity and quality are lifecycle context.
+
+**Flight Mode**:
+The speed posture a Ship uses while travelling (DRIFT, STEALTH, CRUISE, or BURN). It is a Ship Readiness fact, distinct from its current navigation status.
+
+**Extraction Yield**:
+The commodity and quantity returned by a successful extraction action. It is immediate action feedback; Cargo remains the persistent record of goods carried by a Ship.
+
 **Cargo**:
 The goods a Ship holds, bounded by its capacity.
+
+**Trade Good**:
+A commodity that can be held as Cargo and bought or sold at a Market. Its symbol is the operational identifier; its name and description are human-facing context when returned.
 
 ### The game loop
 
 **Listing**:
 The live Market or Shipyard data available to a Ship at an on-site Waypoint.
 
+**Market Signal**:
+API-provided context for a trade good: its market role, supply, activity, and trade volume. It informs a trade decision alongside buy and sell prices. Only API-defined constrained states, such as scarce supply or restricted activity, imply caution.
+
 **Contract**:
 The in-game mission object returned by the SpaceTraders API (types PROCUREMENT, TRANSPORT, SHUTTLE), with a deadline and payment terms.
+
+**Acceptance Deadline**:
+The time a pending Contract stops being available for acceptance. It is distinct from the completion deadline and is the authoritative replacement for the deprecated Contract expiration field.
+
+**Contract Reward**:
+The staged payment terms of a Contract: credits paid on acceptance and credits paid on fulfillment. Both stages inform the decision to accept.
 
 **Mission**:
 Our term for a human-steered flow through the game: accept a Contract, gather and deliver its goods, fulfill it. Distinct from the API's Contract.

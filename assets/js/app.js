@@ -275,22 +275,46 @@ const SystemMap = {
     if (!pixelsPerUnit) return
 
     const markerScale = 12 / (6 * pixelsPerUnit)
-    const orbitalDistance = 32 / pixelsPerUnit
-
     this.svg.querySelectorAll(".system-map-waypoint").forEach(marker => {
-      const {x, y} = marker.dataset
-      const orbitalIndex = marker.dataset.orbitalIndex
-      const orbitalCount = Number(marker.dataset.orbitalCount)
-      const isOrbital = orbitalIndex !== undefined && orbitalIndex !== "" && orbitalCount > 0
-      const angle = isOrbital ? (Math.PI * 2 * Number(orbitalIndex) / orbitalCount) - Math.PI / 2 : 0
-      const displayX = Number(x) + (isOrbital ? Math.cos(angle) * orbitalDistance : 0)
-      const displayY = Number(y) + (isOrbital ? Math.sin(angle) * orbitalDistance : 0)
+      const {x, y} = this.displayPosition(marker, pixelsPerUnit)
       const selectedScale = marker.classList.contains("selected") ? 1.15 : 1
 
       marker.setAttribute(
         "transform",
-        `translate(${displayX} ${displayY}) scale(${markerScale * selectedScale}) translate(${-x} ${-y})`,
+        `translate(${x} ${y}) scale(${markerScale * selectedScale}) translate(${-x} ${-y})`,
       )
+    })
+
+    this.resizeTransitRoutes(pixelsPerUnit)
+  },
+
+  displayPosition(marker, pixelsPerUnit) {
+    const {x, y, orbitalOffsetX, orbitalOffsetY, orbitalDistance} = marker.dataset
+    const distance = Number(orbitalDistance || 0) / pixelsPerUnit
+
+    return {
+      x: Number(x) + Number(orbitalOffsetX || 0) * distance,
+      y: Number(y) + Number(orbitalOffsetY || 0) * distance,
+    }
+  },
+
+  resizeTransitRoutes(pixelsPerUnit) {
+    const markers = new Map(
+      [...this.svg.querySelectorAll(".system-map-waypoint")]
+        .map(marker => [marker.dataset.waypointSymbol, marker]),
+    )
+
+    this.svg.querySelectorAll(".system-map-transit-route").forEach(route => {
+      const origin = markers.get(route.dataset.transitOrigin)
+      const destination = markers.get(route.dataset.transitDestination)
+      if (!origin || !destination) return
+
+      const originPosition = this.displayPosition(origin, pixelsPerUnit)
+      const destinationPosition = this.displayPosition(destination, pixelsPerUnit)
+      route.setAttribute("x1", originPosition.x)
+      route.setAttribute("y1", originPosition.y)
+      route.setAttribute("x2", destinationPosition.x)
+      route.setAttribute("y2", destinationPosition.y)
     })
   },
 

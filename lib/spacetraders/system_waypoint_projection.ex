@@ -16,6 +16,7 @@ defmodule SpaceTraders.SystemWaypointProjection do
   """
 
   alias SpaceTraders.API.Model
+  alias SpaceTraders.SystemMap.Layout
 
   @typedoc "The read result of one System's Waypoints"
   @type waypoints :: {:ok, [Model.Waypoint.t()]} | {:error, term()}
@@ -121,37 +122,7 @@ defmodule SpaceTraders.SystemWaypointProjection do
   end
 
   defp positioned_waypoints(waypoints) do
-    waypoints = Enum.filter(waypoints, &(is_integer(&1.x) and is_integer(&1.y)))
-    waypoint_symbols = MapSet.new(waypoints, & &1.symbol)
-
-    orbital_groups =
-      Enum.group_by(waypoints, fn waypoint ->
-        if MapSet.member?(waypoint_symbols, waypoint.orbits),
-          do: waypoint.orbits,
-          else: waypoint.symbol
-      end)
-
-    Enum.map(waypoints, fn waypoint ->
-      parent_symbol =
-        if MapSet.member?(waypoint_symbols, waypoint.orbits),
-          do: waypoint.orbits,
-          else: waypoint.symbol
-
-      orbitals =
-        orbital_groups
-        |> Map.get(parent_symbol, [])
-        |> Enum.filter(&(&1.orbits == parent_symbol))
-
-      orbital_index =
-        if parent_symbol == waypoint.symbol,
-          do: nil,
-          else: Enum.find_index(orbitals, &(&1.symbol == waypoint.symbol))
-
-      Map.merge(waypoint, %{
-        orbital_count: length(orbitals),
-        orbital_index: orbital_index
-      })
-    end)
+    Layout.position(waypoints)
   end
 
   defp filtered_waypoints(waypoints, "engineered_asteroid"),
