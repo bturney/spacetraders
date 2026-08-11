@@ -1871,6 +1871,16 @@ defmodule SpaceTradersWeb.DashboardLive do
         <span class="text-xs font-semibold uppercase tracking-wider opacity-60">Autopilot</span>
         <span class="badge badge-outline badge-sm">{autopilot_status(@autopilot)}</span>
       </div>
+      <dl :if={@autopilot} class="mt-3 grid grid-cols-1 gap-1 text-xs sm:grid-cols-2">
+        <div>
+          <dt class="opacity-60">Current action</dt>
+          <dd data-autopilot-current-action>{autopilot_current_action(@autopilot, @ship)}</dd>
+        </div>
+        <div>
+          <dt class="opacity-60">Next action</dt>
+          <dd data-autopilot-next-action>{autopilot_next_action(@autopilot, @ship)}</dd>
+        </div>
+      </dl>
       <p :if={@autopilot && @autopilot.blocked_reason} class="mt-2 text-xs text-error">
         Blocked: {@autopilot.blocked_reason}
       </p>
@@ -1918,6 +1928,37 @@ defmodule SpaceTradersWeb.DashboardLive do
   defp autopilot_status(nil), do: "Manual"
   defp autopilot_status(%{desired_mode: "autopilot", status: status}), do: "Autopilot · #{status}"
   defp autopilot_status(_), do: "Manual"
+
+  defp autopilot_current_action(
+         %{status: "waiting", in_flight_action: %{"kind" => "extract"}},
+         _ship
+       ),
+       do: "Waiting for cooldown"
+
+  defp autopilot_current_action(
+         %{status: "waiting", in_flight_action: %{"kind" => "navigate"}},
+         _ship
+       ),
+       do: "Traveling to extraction"
+
+  defp autopilot_current_action(%{status: "blocked"}, _ship), do: "Blocked"
+  defp autopilot_current_action(%{desired_mode: "autopilot"}, _ship), do: "Evaluating cargo"
+  defp autopilot_current_action(_, _ship), do: "Manual"
+
+  defp autopilot_next_action(%{status: "waiting"}, ship) do
+    case cooldown_label(ship, 0) do
+      "Ready" -> "Reconcile ship"
+      label -> "Wait through #{label}"
+    end
+  end
+
+  defp autopilot_next_action(%{desired_mode: "autopilot", extraction_waypoint: waypoint}, ship) do
+    if cooldown_active?(ship),
+      do: "Wait through #{cooldown_label(ship, 0)}",
+      else: "Evaluate at #{waypoint}"
+  end
+
+  defp autopilot_next_action(_, _ship), do: "Start Autopilot"
 
   ## Display helpers
 

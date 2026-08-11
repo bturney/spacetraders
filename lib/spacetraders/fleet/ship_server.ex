@@ -141,8 +141,15 @@ defmodule SpaceTraders.Fleet.ShipServer do
         if still_busy?(type, ship) do
           retry(event, state, "ship is still #{busy_label(type)} after #{type}")
         else
-          if type == :arrival do
-            SpaceTraders.Fleet.revalidate_autopilot_arrival(state.agent_id, state.symbol, ship)
+          case type do
+            :arrival ->
+              SpaceTraders.Fleet.revalidate_autopilot_arrival(state.agent_id, state.symbol, ship)
+
+            :cooldown ->
+              SpaceTraders.Fleet.revalidate_autopilot_cooldown(state.agent_id, state.symbol, ship)
+
+            _ ->
+              :ok
           end
 
           Timeline.fire_event(event)

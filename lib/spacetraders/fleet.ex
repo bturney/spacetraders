@@ -219,7 +219,7 @@ defmodule SpaceTraders.Fleet do
   def advance_autopilot(%AgentRecord{} = agent, %AutopilotConfig{} = config, live_ship) do
     cond do
       at_extraction_waypoint?(live_ship, config.extraction_waypoint) ->
-        {:ok, config}
+        extract_if_below_threshold(agent, config, live_ship)
 
       in_flight_arrival?(config, live_ship) ->
         maybe_schedule_arrival(agent, live_ship.symbol, %{nav: live_ship.nav})
@@ -270,6 +270,25 @@ defmodule SpaceTraders.Fleet do
     end
   end
 
+  @doc "Marks an Autopilot extraction complete after authoritative cooldown revalidation."
+  def revalidate_autopilot_cooldown(agent_id, ship_symbol, live_ship) do
+    with %Ship{} = ship <- Repo.get_by(Ship, agent_id: agent_id, symbol: ship_symbol),
+         %AutopilotConfig{} = config <- Repo.get_by(AutopilotConfig, ship_id: ship.id),
+         true <- config.desired_mode == "autopilot",
+         true <- cooldown_ready?(live_ship) do
+      {:ok,
+       Repo.update!(
+         Ecto.Changeset.change(config,
+           status: "ready",
+           in_flight_action: nil,
+           progress: Map.merge(config.progress || %{}, %{"last_completed" => "extract"})
+         )
+       )}
+    else
+      _ -> :ok
+    end
+  end
+
   @doc "Marks an Autopilot navigation attempt complete after authoritative Arrival revalidation."
   def revalidate_autopilot_arrival(agent_id, ship_symbol, live_ship) do
     with %Ship{} = ship <- Repo.get_by(Ship, agent_id: agent_id, symbol: ship_symbol),
@@ -300,6 +319,57 @@ defmodule SpaceTraders.Fleet do
        do: waypoint == extraction_waypoint
 
   defp at_extraction_waypoint?(_, _), do: false
+
+  defp extract_if_below_threshold(agent, config, live_ship) do
+    if cargo_units(live_ship) < config.cargo_threshold do
+      action = %{"kind" => "extract", "waypoint" => config.extraction_waypoint}
+
+      config =
+        Repo.update!(
+          Ecto.Changeset.change(config, status: "revalidating", in_flight_action: action)
+        )
+
+      case extract_resources(agent, live_ship.symbol) do
+        {:ok, result} ->
+          result_snapshot = %{
+            "kind" => "extract",
+            "yield" => extraction_yield(result)
+          }
+
+          {:ok,
+           Repo.update!(
+             Ecto.Changeset.change(config,
+               status: "waiting",
+               last_action_result: result_snapshot
+             )
+           )}
+
+        {:error, reason} ->
+          Repo.update!(
+            Ecto.Changeset.change(config, status: "blocked", blocked_reason: inspect(reason))
+          )
+
+          {:error, reason}
+      end
+    else
+      {:ok, config}
+    end
+  end
+
+  defp cargo_units(%{cargo: %{units: units}}) when is_integer(units), do: units
+  defp cargo_units(_), do: 0
+
+  defp extraction_yield(%{extraction: %{yield: %{symbol: symbol, units: units}}}) do
+    %{"symbol" => symbol, "units" => units}
+  end
+
+  defp extraction_yield(_), do: nil
+
+  defp cooldown_ready?(%{cooldown: %{remaining_seconds: seconds}})
+       when is_integer(seconds),
+       do: seconds <= 0
+
+  defp cooldown_ready?(_), do: true
 
   defp in_flight_arrival?(
          %AutopilotConfig{in_flight_action: %{"expected" => %{"destination" => destination}}},
