@@ -764,7 +764,11 @@ defmodule SpaceTradersWeb.DashboardLive do
                   </button>
                 </form>
               </div>
-              <details data-ship-offer-specs class="text-xs">
+              <details
+                id={"ship-offer-specs-#{listing.waypoint}-#{ship.type}"}
+                data-ship-offer-specs
+                class="text-xs"
+              >
                 <summary class="cursor-pointer select-none font-semibold opacity-80">
                   Specifications
                 </summary>
@@ -1277,7 +1281,10 @@ defmodule SpaceTradersWeb.DashboardLive do
             >Under construction</span>
             <ul :if={(waypoint.modifiers || []) != []} class="mt-2 space-y-1">
               <li :for={modifier <- waypoint.modifiers || []}>
-                <details data-modifier={modifier.symbol}>
+                <details
+                  id={"modifier-#{@agent_id}-#{waypoint.symbol}-#{modifier.symbol}"}
+                  data-modifier={modifier.symbol}
+                >
                   <summary class="cursor-pointer text-sm">
                     <span class="badge badge-warning badge-outline badge-sm font-mono">
                       {modifier.symbol}
@@ -1329,7 +1336,12 @@ defmodule SpaceTradersWeb.DashboardLive do
           >
             {waypoint.x}, {waypoint.y}
           </p>
-          <details :if={waypoint_context?(waypoint)} class="mt-4" data-waypoint-context>
+          <details
+            :if={waypoint_context?(waypoint)}
+            id={"waypoint-context-#{@agent_id}-#{waypoint.symbol}"}
+            class="mt-4"
+            data-waypoint-context
+          >
             <summary class="cursor-pointer text-xs font-semibold uppercase tracking-wider opacity-60">
               Context
             </summary>
@@ -1526,6 +1538,7 @@ defmodule SpaceTradersWeb.DashboardLive do
             </div>
             <details
               :if={cargo_description(item)}
+              id={"cargo-description-#{@ship.symbol}-#{item.symbol}"}
               class="mt-1"
               data-cargo-description={item.symbol}
             >
@@ -1560,7 +1573,7 @@ defmodule SpaceTradersWeb.DashboardLive do
             to <span class="font-mono">{route_destination(@ship)}</span>.
             Actions resume when the ship arrives.
           </p>
-          <details class="mt-2" data-route-details>
+          <details id={"route-details-#{@ship.symbol}"} class="mt-2" data-route-details>
             <summary class="cursor-pointer text-xs opacity-70">Route details</summary>
             <dl class="mt-2 space-y-1 text-xs">
               <div class="flex items-center justify-between gap-3">
@@ -1640,7 +1653,11 @@ defmodule SpaceTradersWeb.DashboardLive do
         <% end %>
       </div>
 
-      <details class="mt-4 border-t border-base-300/60 pt-3" data-ship-readiness>
+      <details
+        id={"ship-readiness-#{@ship.symbol}"}
+        class="mt-4 border-t border-base-300/60 pt-3"
+        data-ship-readiness
+      >
         <summary class="cursor-pointer text-sm font-semibold">Ship Readiness</summary>
         <div class="mt-3 space-y-4 text-sm">
           <div class="grid grid-cols-1 gap-3 sm:grid-cols-3">
@@ -1676,7 +1693,11 @@ defmodule SpaceTradersWeb.DashboardLive do
                   <span class="font-semibold">{component_name(component)}</span>
                   <span class="font-mono">Condition {component_condition(component)}</span>
                 </div>
-                <details class="mt-1" data-component-detail={String.downcase(kind)}>
+                <details
+                  id={"component-detail-#{@ship.symbol}-#{String.downcase(kind)}"}
+                  class="mt-1"
+                  data-component-detail={String.downcase(kind)}
+                >
                   <summary class="cursor-pointer text-xs opacity-70">Detail</summary>
                   <dl class="mt-2 space-y-1 text-xs">
                     <div class="flex items-center justify-between gap-3">
@@ -1713,7 +1734,12 @@ defmodule SpaceTradersWeb.DashboardLive do
                     <span :if={module_range(module)}>range {module_range(module)}</span>
                   </span>
                 </div>
-                <details :if={equipment_description(module)} class="mt-1" data-equipment-description>
+                <details
+                  :if={equipment_description(module)}
+                  id={"module-description-#{@ship.symbol}-#{module.symbol}"}
+                  class="mt-1"
+                  data-equipment-description
+                >
                   <summary class="cursor-pointer text-xs opacity-70">Description</summary>
                   <p class="mt-1 text-xs opacity-70">{equipment_description(module)}</p>
                 </details>
@@ -1733,7 +1759,12 @@ defmodule SpaceTradersWeb.DashboardLive do
                     <span :if={mount_deposits(mount) != []}>{Enum.join(mount_deposits(mount), ", ")}</span>
                   </span>
                 </div>
-                <details :if={equipment_description(mount)} class="mt-1" data-equipment-description>
+                <details
+                  :if={equipment_description(mount)}
+                  id={"mount-description-#{@ship.symbol}-#{mount.symbol}"}
+                  class="mt-1"
+                  data-equipment-description
+                >
                   <summary class="cursor-pointer text-xs opacity-70">Description</summary>
                   <p class="mt-1 text-xs opacity-70">{equipment_description(mount)}</p>
                 </details>

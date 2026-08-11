@@ -739,7 +739,12 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       assert html =~ "150 / 200"
       assert html =~ "12 / 40"
 
-      assert has_element?(lv, "details[data-ship-readiness] summary", "Ship Readiness")
+      assert has_element?(
+               lv,
+               "details#ship-readiness-ORBITALIST-1[data-ship-readiness] summary",
+               "Ship Readiness"
+             )
+
       refute has_element?(lv, "details[data-ship-readiness][open]")
 
       assert html =~ "CRUISE"
