@@ -11,6 +11,9 @@ defmodule SpaceTraders.Repo.Migrations.CreateAutopilotConfigs do
       add :status, :string, null: false, default: "ready"
       add :blocked_reason, :string
       add :last_validated_at, :utc_datetime
+      add :in_flight_action, :map
+      add :last_action_result, :map
+      add :progress, :map
 
       timestamps(type: :utc_datetime)
     end
