@@ -49,8 +49,9 @@ fi
 
 while IFS= read -r ignored; do
   path="${ignored#Would remove }"
+  path="${path#Would skip repository }"
   case "$path" in
-    .worktree-env|.worktree-mix/|_build/|deps/|priv/static/assets/|priv/static/cache_manifest.json)
+    .worktree-env|.worktree-mix/|.worktree-mix/*|_build/|_build/*|deps/|deps/*|priv/static/assets/|priv/static/assets/*|priv/static/cache_manifest.json)
       ;;
     *.db|*.db-*)
       if [[ "$path" == */* ]]; then
