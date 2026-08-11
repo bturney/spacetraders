@@ -277,11 +277,13 @@ const SystemMap = {
     const markerScale = 12 / (6 * pixelsPerUnit)
     this.svg.querySelectorAll(".system-map-waypoint").forEach(marker => {
       const {x, y} = this.displayPosition(marker, pixelsPerUnit)
+      const baseX = Number(marker.dataset.x)
+      const baseY = Number(marker.dataset.y)
       const selectedScale = marker.classList.contains("selected") ? 1.15 : 1
 
       marker.setAttribute(
         "transform",
-        `translate(${x} ${y}) scale(${markerScale * selectedScale}) translate(${-x} ${-y})`,
+        `translate(${x} ${y}) scale(${markerScale * selectedScale}) translate(${-baseX} ${-baseY})`,
       )
     })
 
