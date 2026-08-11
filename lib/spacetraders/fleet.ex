@@ -283,14 +283,16 @@ defmodule SpaceTraders.Fleet do
          %AgentRecord{} = agent <- Repo.get(AgentRecord, agent_id) do
       case config.in_flight_action do
         %{"kind" => "extract"} ->
-          {:ok,
-           Repo.update!(
-             Ecto.Changeset.change(config,
-               status: "ready",
-               in_flight_action: nil,
-               progress: Map.merge(config.progress || %{}, %{"last_completed" => "extract"})
-             )
-           )}
+          config =
+            Repo.update!(
+              Ecto.Changeset.change(config,
+                status: "ready",
+                in_flight_action: nil,
+                progress: Map.merge(config.progress || %{}, %{"last_completed" => "extract"})
+              )
+            )
+
+          advance_autopilot(agent, config, live_ship, :timeline)
 
         %{"kind" => "cooldown"} ->
           config =

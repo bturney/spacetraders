@@ -221,7 +221,11 @@ defmodule SpaceTraders.Fleet.ShipServerTest do
         cargo_threshold: 30,
         desired_mode: "autopilot",
         status: "waiting",
-        in_flight_action: %{"kind" => "cooldown"}
+        in_flight_action: %{"kind" => "extract"},
+        last_action_result: %{
+          "kind" => "extract",
+          "yield" => %{"symbol" => "IRON_ORE", "units" => 5}
+        }
       })
 
       Req.Test.stub(SpaceTraders.API, fn conn ->

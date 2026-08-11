@@ -410,6 +410,8 @@ defmodule SpaceTraders.FleetTest do
                  "FLEET-SHIP",
                  %Model.Ship{
                    symbol: "FLEET-SHIP",
+                   nav: %Model.ShipNav{status: "IN_ORBIT", waypoint_symbol: "X1-UX81-A2"},
+                   cargo: %Model.ShipCargo{capacity: 40, units: 30, inventory: []},
                    cooldown: %Model.Cooldown{remaining_seconds: 0}
                  }
                )
