@@ -12,6 +12,9 @@ defmodule SpaceTraders.Fleet.AutopilotConfig do
     field :status, :string, default: "ready"
     field :blocked_reason, :string
     field :last_validated_at, :utc_datetime
+    field :in_flight_action, :map
+    field :last_action_result, :map
+    field :progress, :map, default: %{}
 
     belongs_to :ship, SpaceTraders.Fleet.Ship
 

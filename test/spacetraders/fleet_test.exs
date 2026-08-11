@@ -12,6 +12,7 @@ defmodule SpaceTraders.FleetTest do
   alias SpaceTraders.Timeline
   alias SpaceTraders.Timeline.Event
 
+  import Phoenix.PubSub
   import SpaceTraders.ShipBody
 
   setup do
@@ -163,16 +164,135 @@ defmodule SpaceTraders.FleetTest do
 
           "/v2/systems/X1-UX81/waypoints/X1-UX81-A1/market" ->
             Req.Test.json(conn, %{"data" => %{"symbol" => "X1-UX81-A1", "tradeGoods" => []}})
+
+          "/v2/my/ships/FLEET-SHIP/navigate" ->
+            Req.Test.json(conn, %{"data" => navigate_response("IN_TRANSIT")})
         end
       end)
 
       assert {:ok,
               %AutopilotConfig{
                 desired_mode: "autopilot",
-                status: "ready",
+                status: "waiting",
+                in_flight_action: %{"kind" => "navigate", "waypoint" => "X1-UX81-A2"},
+                last_action_result: %{"status" => "IN_TRANSIT"},
                 last_validated_at: %DateTime{}
               }} =
                Fleet.start_autopilot(agent, "FLEET-SHIP")
+
+      assert [%Event{event_type: "arrival"}] = Timeline.pending_events(:ship, "FLEET-SHIP")
+    end
+
+    test "arrival revalidation completes the attempt without replaying navigation" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      Fleet.configure_autopilot(agent, "FLEET-SHIP", %{
+        extraction_waypoint: "X1-UX81-A2",
+        market_waypoint: "X1-UX81-A1",
+        cargo_threshold: 30
+      })
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case conn.request_path do
+          "/v2/my/ships/FLEET-SHIP" ->
+            Req.Test.json(conn, %{
+              "data" =>
+                ship_body("FLEET-SHIP", %{
+                  "mounts" => [%{"symbol" => "MOUNT_MINING_LASER_I"}]
+                })
+            })
+
+          "/v2/systems/X1-UX81/waypoints/X1-UX81-A2" ->
+            Req.Test.json(conn, %{
+              "data" => %{"symbol" => "X1-UX81-A2", "type" => "ASTEROID_FIELD", "traits" => []}
+            })
+
+          "/v2/systems/X1-UX81/waypoints/X1-UX81-A1" ->
+            Req.Test.json(conn, %{
+              "data" => %{
+                "symbol" => "X1-UX81-A1",
+                "type" => "ORBITAL_STATION",
+                "traits" => [%{"symbol" => "MARKETPLACE"}]
+              }
+            })
+
+          "/v2/systems/X1-UX81/waypoints/X1-UX81-A1/market" ->
+            Req.Test.json(conn, %{"data" => %{"symbol" => "X1-UX81-A1", "tradeGoods" => []}})
+
+          "/v2/my/ships/FLEET-SHIP/navigate" ->
+            Req.Test.json(conn, %{"data" => navigate_response("IN_TRANSIT")})
+        end
+      end)
+
+      assert {:ok, %AutopilotConfig{status: "waiting"} = config} =
+               Fleet.start_autopilot(agent, "FLEET-SHIP")
+
+      arrived = %Model.Ship{
+        symbol: "FLEET-SHIP",
+        nav: %Model.ShipNav{status: "DOCKED", waypoint_symbol: "X1-UX81-A2"}
+      }
+
+      assert {:ok, %AutopilotConfig{status: "ready", in_flight_action: nil}} =
+               Fleet.revalidate_autopilot_arrival(agent.id, "FLEET-SHIP", arrived)
+
+      assert {:ok, %AutopilotConfig{status: "ready"}} =
+               Fleet.advance_autopilot(agent, Repo.get!(AutopilotConfig, config.id), arrived)
+    end
+
+    test "ShipServer arrival wakeup revalidates Autopilot progress" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      {:ok, config} =
+        Fleet.configure_autopilot(agent, "FLEET-SHIP", %{
+          extraction_waypoint: "X1-UX81-A2",
+          market_waypoint: "X1-UX81-A1",
+          cargo_threshold: 30
+        })
+
+      Repo.update!(
+        Ecto.Changeset.change(config,
+          desired_mode: "autopilot",
+          status: "waiting",
+          in_flight_action: %{
+            "kind" => "navigate",
+            "waypoint" => "X1-UX81-A2",
+            "expected" => %{"status" => "IN_TRANSIT", "destination" => "X1-UX81-A2"}
+          }
+        )
+      )
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        assert conn.request_path == "/v2/my/ships/FLEET-SHIP"
+
+        Req.Test.json(conn, %{
+          "data" =>
+            ship_body("FLEET-SHIP", %{"nav" => nav_body("DOCKED", destination: "X1-UX81-A2")})
+        })
+      end)
+
+      {:ok, event} =
+        Timeline.schedule_event(
+          :ship,
+          "FLEET-SHIP",
+          :arrival,
+          DateTime.add(DateTime.utc_now(), -1, :second)
+        )
+
+      subscribe(SpaceTraders.PubSub, "fleet:#{agent.id}")
+      agent_id = agent.id
+
+      start_supervised!(
+        {ShipServer, symbol: "FLEET-SHIP", agent_id: agent.id, agent_token: agent.agent_token}
+      )
+
+      assert_receive {:ship_updated, ^agent_id, "FLEET-SHIP"}, 1_000
+
+      assert Repo.get!(Event, event.id).status == "done"
+
+      assert %{status: "ready", in_flight_action: nil} =
+               Repo.get_by!(AutopilotConfig, ship_id: config.ship_id)
     end
 
     test "blocks an invalid extraction waypoint without a game action" do

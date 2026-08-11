@@ -102,17 +102,21 @@ defmodule SpaceTraders.Fleet do
   def start_autopilot(%AgentRecord{} = agent, ship_symbol) do
     with {:ok, ship} <- owned_ship(agent, ship_symbol),
          %AutopilotConfig{} = config <- Repo.get_by(AutopilotConfig, ship_id: ship.id),
-         {:ok, config} <- validate_autopilot(agent, ship, config) do
-      Repo.update!(
-        Ecto.Changeset.change(config,
-          desired_mode: "autopilot",
-          status: "ready",
-          blocked_reason: nil,
-          last_validated_at: DateTime.utc_now() |> DateTime.truncate(:second)
+         {:ok, live_ship} <- validate_autopilot(agent, ship, config) do
+      config =
+        Repo.update!(
+          Ecto.Changeset.change(config,
+            desired_mode: "autopilot",
+            status: "ready",
+            blocked_reason: nil,
+            last_validated_at: DateTime.utc_now() |> DateTime.truncate(:second)
+          )
         )
-      )
 
-      {:ok, Repo.get!(AutopilotConfig, config.id)}
+      case advance_autopilot(agent, config, live_ship) do
+        {:ok, config} -> {:ok, config}
+        {:error, reason} -> {:error, {:autopilot_blocked, reason}}
+      end
     else
       nil -> {:error, :autopilot_not_configured}
       {:error, reason} -> block_autopilot(agent, ship_symbol, reason)
@@ -151,7 +155,7 @@ defmodule SpaceTraders.Fleet do
          :ok <- market_available?(market),
          :ok <- cargo_policy?(live_ship, config.cargo_threshold),
          :ok <- mining_capability?(live_ship) do
-      {:ok, config}
+      {:ok, live_ship}
     end
   end
 
@@ -210,6 +214,100 @@ defmodule SpaceTraders.Fleet do
         error
     end
   end
+
+  @doc "Reconciles a ready Autopilot and dispatches only its extraction navigation leg."
+  def advance_autopilot(%AgentRecord{} = agent, %AutopilotConfig{} = config, live_ship) do
+    cond do
+      at_extraction_waypoint?(live_ship, config.extraction_waypoint) ->
+        {:ok, config}
+
+      in_flight_arrival?(config, live_ship) ->
+        maybe_schedule_arrival(agent, live_ship.symbol, %{nav: live_ship.nav})
+        {:ok, Repo.update!(Ecto.Changeset.change(config, status: "waiting"))}
+
+      true ->
+        action = %{
+          "kind" => "navigate",
+          "waypoint" => config.extraction_waypoint,
+          "expected" => %{"status" => "IN_TRANSIT", "destination" => config.extraction_waypoint}
+        }
+
+        config =
+          Repo.update!(
+            Ecto.Changeset.change(config, status: "revalidating", in_flight_action: action)
+          )
+
+        case SpaceTraders.API.navigate_ship(
+               agent.agent_token,
+               live_ship.symbol,
+               config.extraction_waypoint
+             ) do
+          {:ok, result} ->
+            maybe_schedule_arrival(agent, live_ship.symbol, result)
+
+            result_snapshot = %{
+              "kind" => "navigate",
+              "waypoint" => config.extraction_waypoint,
+              "status" => result.nav.status,
+              "destination" => result.nav.route.destination.symbol
+            }
+
+            {:ok,
+             Repo.update!(
+               Ecto.Changeset.change(config,
+                 status: "waiting",
+                 last_action_result: result_snapshot
+               )
+             )}
+
+          {:error, reason} ->
+            Repo.update!(
+              Ecto.Changeset.change(config, status: "blocked", blocked_reason: inspect(reason))
+            )
+
+            {:error, reason}
+        end
+    end
+  end
+
+  @doc "Marks an Autopilot navigation attempt complete after authoritative Arrival revalidation."
+  def revalidate_autopilot_arrival(agent_id, ship_symbol, live_ship) do
+    with %Ship{} = ship <- Repo.get_by(Ship, agent_id: agent_id, symbol: ship_symbol),
+         %AutopilotConfig{} = config <- Repo.get_by(AutopilotConfig, ship_id: ship.id),
+         true <- config.desired_mode == "autopilot",
+         true <- at_extraction_waypoint?(live_ship, config.extraction_waypoint) do
+      {:ok,
+       Repo.update!(
+         Ecto.Changeset.change(config,
+           status: "ready",
+           in_flight_action: nil,
+           progress: %{
+             "waypoint" => config.extraction_waypoint,
+             "last_completed" => "navigate"
+           }
+         )
+       )}
+    else
+      _ -> :ok
+    end
+  end
+
+  defp at_extraction_waypoint?(
+         %{nav: %{status: status, waypoint_symbol: waypoint}},
+         extraction_waypoint
+       )
+       when status in ["DOCKED", "IN_ORBIT"],
+       do: waypoint == extraction_waypoint
+
+  defp at_extraction_waypoint?(_, _), do: false
+
+  defp in_flight_arrival?(
+         %AutopilotConfig{in_flight_action: %{"expected" => %{"destination" => destination}}},
+         %{nav: %{status: "IN_TRANSIT", route: %{destination: %{symbol: destination}}}}
+       ),
+       do: true
+
+  defp in_flight_arrival?(_, _), do: false
 
   @doc """
   Lists the waypoints of the Agent's headquarters system.
