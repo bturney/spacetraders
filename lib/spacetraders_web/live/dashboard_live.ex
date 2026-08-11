@@ -146,7 +146,7 @@ defmodule SpaceTradersWeb.DashboardLive do
         |> refresh_agent_fleet(agent.id)
         |> apply_ship_result(agent.id, ship_symbol, result)
 
-      {:noreply, socket}
+      {:noreply, extraction_flash(socket, result)}
     else
       {:error, reason} -> {:noreply, put_flash(socket, :error, live_error(reason))}
     end
@@ -458,6 +458,12 @@ defmodule SpaceTradersWeb.DashboardLive do
       end)
     end)
   end
+
+  defp extraction_flash(socket, %{extraction: %{yield: %{symbol: symbol, units: units}}}) do
+    put_flash(socket, :info, "Extracted #{units} #{symbol}.")
+  end
+
+  defp extraction_flash(socket, _result), do: socket
 
   defp purchase_flash(socket, nil), do: socket
 

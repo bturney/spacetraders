@@ -503,9 +503,12 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       assert html =~ ~s(<button type="button" phx-click="extract")
     end
 
-    test "updates cargo from a successful extraction response", %{conn: conn, operator: operator} do
+    test "announces the extraction yield and refreshes cargo and cooldown", %{
+      conn: conn,
+      operator: operator
+    } do
       agent = agent_fixture(operator)
-      expiration = future_iso()
+      expiration = future_iso(60)
 
       Req.Test.stub(SpaceTraders.API, fn conn ->
         case {conn.request_path, conn.method} do
@@ -553,11 +556,14 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
 
       {:ok, lv, html} = live(conn, ~p"/")
       assert html =~ "0 / 40"
+      refute html =~ "Extracted 5 IRON_ORE."
 
       html = lv |> element("button[phx-click=\"extract\"]") |> render_click()
 
+      assert html =~ "Extracted 5 IRON_ORE."
       assert html =~ "5 / 40"
       assert html =~ "IRON_ORE"
+      assert html =~ "Cooldown 60s"
     end
 
     test "navigates a ship and the card shows IN_TRANSIT with its arrival time", %{
