@@ -37,6 +37,18 @@ defmodule SpaceTraders.FleetTest do
     DateTime.utc_now() |> DateTime.add(seconds, :second) |> DateTime.to_iso8601()
   end
 
+  defp eventually(fun, attempts \\ 30)
+  defp eventually(_fun, 0), do: false
+
+  defp eventually(fun, attempts) do
+    if fun.() do
+      true
+    else
+      Process.sleep(10)
+      eventually(fun, attempts - 1)
+    end
+  end
+
   defp navigate_response(status), do: navigate_response(status, future_iso())
 
   defp navigate_response(status, arrival) do
@@ -230,7 +242,8 @@ defmodule SpaceTraders.FleetTest do
 
       arrived = %Model.Ship{
         symbol: "FLEET-SHIP",
-        nav: %Model.ShipNav{status: "DOCKED", waypoint_symbol: "X1-UX81-A2"}
+        nav: %Model.ShipNav{status: "DOCKED", waypoint_symbol: "X1-UX81-A2"},
+        cargo: %Model.ShipCargo{capacity: 40, units: 30, inventory: []}
       }
 
       assert {:ok, %AutopilotConfig{status: "ready", in_flight_action: nil}} =
@@ -238,6 +251,172 @@ defmodule SpaceTraders.FleetTest do
 
       assert {:ok, %AutopilotConfig{status: "ready"}} =
                Fleet.advance_autopilot(agent, Repo.get!(AutopilotConfig, config.id), arrived)
+    end
+
+    test "extracts once below the cargo threshold at the configured waypoint" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      Fleet.configure_autopilot(agent, "FLEET-SHIP", %{
+        extraction_waypoint: "X1-UX81-A2",
+        market_waypoint: "X1-UX81-A1",
+        cargo_threshold: 30
+      })
+
+      expiration = future_iso(60)
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case conn.request_path do
+          "/v2/my/ships/FLEET-SHIP" ->
+            Req.Test.json(conn, %{
+              "data" =>
+                ship_body("FLEET-SHIP", %{
+                  "nav" => nav_body("IN_ORBIT", destination: "X1-UX81-A2"),
+                  "cargo" => %{"capacity" => 40, "units" => 0, "inventory" => []},
+                  "mounts" => [%{"symbol" => "MOUNT_MINING_LASER_I"}]
+                })
+            })
+
+          "/v2/systems/X1-UX81/waypoints/X1-UX81-A2" ->
+            Req.Test.json(conn, %{
+              "data" => %{"symbol" => "X1-UX81-A2", "type" => "ASTEROID_FIELD", "traits" => []}
+            })
+
+          "/v2/systems/X1-UX81/waypoints/X1-UX81-A1" ->
+            Req.Test.json(conn, %{
+              "data" => %{
+                "symbol" => "X1-UX81-A1",
+                "type" => "ORBITAL_STATION",
+                "traits" => [%{"symbol" => "MARKETPLACE"}]
+              }
+            })
+
+          "/v2/systems/X1-UX81/waypoints/X1-UX81-A1/market" ->
+            Req.Test.json(conn, %{"data" => %{"symbol" => "X1-UX81-A1", "tradeGoods" => []}})
+
+          "/v2/my/ships/FLEET-SHIP/extract" ->
+            Req.Test.json(conn, %{
+              "data" => %{
+                "cooldown" => %{
+                  "shipSymbol" => "FLEET-SHIP",
+                  "totalSeconds" => 60,
+                  "remainingSeconds" => 60,
+                  "expiration" => expiration
+                },
+                "extraction" => %{
+                  "shipSymbol" => "FLEET-SHIP",
+                  "yield" => %{"symbol" => "IRON_ORE", "units" => 5}
+                },
+                "cargo" => %{
+                  "capacity" => 40,
+                  "units" => 5,
+                  "inventory" => [%{"symbol" => "IRON_ORE", "units" => 5}]
+                }
+              }
+            })
+        end
+      end)
+
+      assert {:ok,
+              %AutopilotConfig{
+                status: "waiting",
+                in_flight_action: %{"kind" => "extract"},
+                last_action_result: %{
+                  "kind" => "extract",
+                  "yield" => %{"symbol" => "IRON_ORE", "units" => 5}
+                }
+              }} = Fleet.start_autopilot(agent, "FLEET-SHIP")
+
+      assert [%Event{event_type: "cooldown"}] = Timeline.pending_events(:ship, "FLEET-SHIP")
+    end
+
+    test "does not extract when cargo is at the configured threshold" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      {:ok, config} =
+        Fleet.configure_autopilot(agent, "FLEET-SHIP", %{
+          extraction_waypoint: "X1-UX81-A2",
+          market_waypoint: "X1-UX81-A1",
+          cargo_threshold: 30
+        })
+
+      live_ship = %Model.Ship{
+        symbol: "FLEET-SHIP",
+        nav: %Model.ShipNav{status: "IN_ORBIT", waypoint_symbol: "X1-UX81-A2"},
+        cargo: %Model.ShipCargo{capacity: 40, units: 30, inventory: []}
+      }
+
+      assert {:ok, %AutopilotConfig{status: "ready"}} =
+               Fleet.advance_autopilot(agent, %{config | desired_mode: "autopilot"}, live_ship)
+
+      refute_received _
+      assert Timeline.pending_events(:ship, "FLEET-SHIP") == []
+    end
+
+    test "waits for an authoritative cooldown before extracting" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      {:ok, config} =
+        Fleet.configure_autopilot(agent, "FLEET-SHIP", %{
+          extraction_waypoint: "X1-UX81-A2",
+          market_waypoint: "X1-UX81-A1",
+          cargo_threshold: 30
+        })
+
+      live_ship = %Model.Ship{
+        symbol: "FLEET-SHIP",
+        nav: %Model.ShipNav{status: "IN_ORBIT", waypoint_symbol: "X1-UX81-A2"},
+        cargo: %Model.ShipCargo{capacity: 40, units: 0, inventory: []},
+        cooldown: %Model.Cooldown{
+          remaining_seconds: 20,
+          expiration: DateTime.add(DateTime.utc_now(), 20, :second) |> DateTime.to_iso8601()
+        }
+      }
+
+      assert {:ok, %AutopilotConfig{status: "waiting", in_flight_action: %{"kind" => "cooldown"}}} =
+               Fleet.advance_autopilot(agent, %{config | desired_mode: "autopilot"}, live_ship)
+
+      assert [%Event{event_type: "cooldown"}] = Timeline.pending_events(:ship, "FLEET-SHIP")
+    end
+
+    test "cooldown wakeup records extraction completion before another action" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      {:ok, config} =
+        Fleet.configure_autopilot(agent, "FLEET-SHIP", %{
+          extraction_waypoint: "X1-UX81-A2",
+          market_waypoint: "X1-UX81-A1",
+          cargo_threshold: 30
+        })
+
+      Repo.update!(
+        Ecto.Changeset.change(config,
+          desired_mode: "autopilot",
+          status: "waiting",
+          in_flight_action: %{"kind" => "extract"},
+          last_action_result: %{
+            "kind" => "extract",
+            "yield" => %{"symbol" => "IRON_ORE", "units" => 5}
+          }
+        )
+      )
+
+      assert {:ok, %AutopilotConfig{status: "ready", in_flight_action: nil, progress: progress}} =
+               Fleet.revalidate_autopilot_cooldown(
+                 agent.id,
+                 "FLEET-SHIP",
+                 %Model.Ship{
+                   symbol: "FLEET-SHIP",
+                   nav: %Model.ShipNav{status: "IN_ORBIT", waypoint_symbol: "X1-UX81-A2"},
+                   cargo: %Model.ShipCargo{capacity: 40, units: 30, inventory: []},
+                   cooldown: %Model.Cooldown{remaining_seconds: 0}
+                 }
+               )
+
+      assert progress == %{"last_completed" => "extract"}
     end
 
     test "ShipServer arrival wakeup revalidates Autopilot progress" do
@@ -268,7 +447,10 @@ defmodule SpaceTraders.FleetTest do
 
         Req.Test.json(conn, %{
           "data" =>
-            ship_body("FLEET-SHIP", %{"nav" => nav_body("DOCKED", destination: "X1-UX81-A2")})
+            ship_body("FLEET-SHIP", %{
+              "nav" => nav_body("DOCKED", destination: "X1-UX81-A2"),
+              "cargo" => %{"capacity" => 40, "units" => 30, "inventory" => []}
+            })
         })
       end)
 
@@ -291,8 +473,10 @@ defmodule SpaceTraders.FleetTest do
 
       assert Repo.get!(Event, event.id).status == "done"
 
-      assert %{status: "ready", in_flight_action: nil} =
-               Repo.get_by!(AutopilotConfig, ship_id: config.ship_id)
+      assert eventually(fn ->
+               current = Repo.get_by!(AutopilotConfig, ship_id: config.ship_id)
+               current.status == "ready" and is_nil(current.in_flight_action)
+             end)
     end
 
     test "blocks an invalid extraction waypoint without a game action" do

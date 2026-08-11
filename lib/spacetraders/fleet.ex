@@ -217,9 +217,13 @@ defmodule SpaceTraders.Fleet do
 
   @doc "Reconciles a ready Autopilot and dispatches only its extraction navigation leg."
   def advance_autopilot(%AgentRecord{} = agent, %AutopilotConfig{} = config, live_ship) do
+    advance_autopilot(agent, config, live_ship, :normal)
+  end
+
+  defp advance_autopilot(%AgentRecord{} = agent, %AutopilotConfig{} = config, live_ship, mode) do
     cond do
       at_extraction_waypoint?(live_ship, config.extraction_waypoint) ->
-        {:ok, config}
+        extract_if_below_threshold(agent, config, live_ship, mode)
 
       in_flight_arrival?(config, live_ship) ->
         maybe_schedule_arrival(agent, live_ship.symbol, %{nav: live_ship.nav})
@@ -270,23 +274,61 @@ defmodule SpaceTraders.Fleet do
     end
   end
 
+  @doc "Marks an Autopilot extraction complete after authoritative cooldown revalidation."
+  def revalidate_autopilot_cooldown(agent_id, ship_symbol, live_ship) do
+    with %Ship{} = ship <- Repo.get_by(Ship, agent_id: agent_id, symbol: ship_symbol),
+         %AutopilotConfig{} = config <- Repo.get_by(AutopilotConfig, ship_id: ship.id),
+         true <- config.desired_mode == "autopilot",
+         true <- cooldown_ready?(live_ship),
+         %AgentRecord{} = agent <- Repo.get(AgentRecord, agent_id) do
+      case config.in_flight_action do
+        %{"kind" => "extract"} ->
+          config =
+            Repo.update!(
+              Ecto.Changeset.change(config,
+                status: "ready",
+                in_flight_action: nil,
+                progress: Map.merge(config.progress || %{}, %{"last_completed" => "extract"})
+              )
+            )
+
+          advance_autopilot(agent, config, live_ship, :timeline)
+
+        %{"kind" => "cooldown"} ->
+          config =
+            Repo.update!(Ecto.Changeset.change(config, status: "ready", in_flight_action: nil))
+
+          advance_autopilot(agent, config, live_ship, :timeline)
+
+        _ ->
+          :ok
+      end
+    else
+      _ -> :ok
+    end
+  end
+
   @doc "Marks an Autopilot navigation attempt complete after authoritative Arrival revalidation."
   def revalidate_autopilot_arrival(agent_id, ship_symbol, live_ship) do
     with %Ship{} = ship <- Repo.get_by(Ship, agent_id: agent_id, symbol: ship_symbol),
          %AutopilotConfig{} = config <- Repo.get_by(AutopilotConfig, ship_id: ship.id),
          true <- config.desired_mode == "autopilot",
          true <- at_extraction_waypoint?(live_ship, config.extraction_waypoint) do
-      {:ok,
-       Repo.update!(
-         Ecto.Changeset.change(config,
-           status: "ready",
-           in_flight_action: nil,
-           progress: %{
-             "waypoint" => config.extraction_waypoint,
-             "last_completed" => "navigate"
-           }
-         )
-       )}
+      agent = Repo.get!(AgentRecord, agent_id)
+
+      config =
+        Repo.update!(
+          Ecto.Changeset.change(config,
+            status: "ready",
+            in_flight_action: nil,
+            progress: %{
+              "waypoint" => config.extraction_waypoint,
+              "last_completed" => "navigate"
+            }
+          )
+        )
+
+      advance_autopilot(agent, config, live_ship, :timeline)
     else
       _ -> :ok
     end
@@ -300,6 +342,95 @@ defmodule SpaceTraders.Fleet do
        do: waypoint == extraction_waypoint
 
   defp at_extraction_waypoint?(_, _), do: false
+
+  defp extract_if_below_threshold(agent, config, live_ship, mode) do
+    cond do
+      cooldown_active?(live_ship) ->
+        maybe_schedule_live_cooldown(agent, live_ship)
+
+        {:ok,
+         Repo.update!(
+           Ecto.Changeset.change(config,
+             status: "waiting",
+             in_flight_action: %{"kind" => "cooldown", "waypoint" => config.extraction_waypoint}
+           )
+         )}
+
+      cargo_units(live_ship) < config.cargo_threshold ->
+        action = %{"kind" => "extract", "waypoint" => config.extraction_waypoint}
+
+        config =
+          Repo.update!(
+            Ecto.Changeset.change(config, status: "revalidating", in_flight_action: action)
+          )
+
+        extract =
+          case mode do
+            :timeline -> &extract_resources_for_autopilot/2
+            :normal -> &extract_resources/2
+          end
+
+        case extract.(agent, live_ship.symbol) do
+          {:ok, result} ->
+            result_snapshot = %{
+              "kind" => "extract",
+              "yield" => extraction_yield(result)
+            }
+
+            {:ok,
+             Repo.update!(
+               Ecto.Changeset.change(config,
+                 status: "waiting",
+                 last_action_result: result_snapshot
+               )
+             )}
+
+          {:error, reason} ->
+            Repo.update!(
+              Ecto.Changeset.change(config, status: "blocked", blocked_reason: inspect(reason))
+            )
+
+            {:error, reason}
+        end
+
+      true ->
+        {:ok, config}
+    end
+  end
+
+  defp extract_resources_for_autopilot(%AgentRecord{agent_token: token} = agent, ship_symbol)
+       when is_binary(token) and token != "" do
+    with {:ok, result} <- SpaceTraders.API.extract_resources(token, ship_symbol),
+         :ok <- schedule_cooldown(agent, ship_symbol, result) do
+      {:ok, result}
+    end
+  end
+
+  defp maybe_schedule_live_cooldown(agent, %{symbol: ship_symbol, cooldown: cooldown}) do
+    due_at = parse_expiration(cooldown.expiration, cooldown.remaining_seconds)
+    schedule_cooldown_event(agent, ship_symbol, due_at)
+  end
+
+  defp cooldown_active?(%{cooldown: %{remaining_seconds: seconds}})
+       when is_integer(seconds),
+       do: seconds > 0
+
+  defp cooldown_active?(_), do: false
+
+  defp cargo_units(%{cargo: %{units: units}}) when is_integer(units), do: units
+  defp cargo_units(_), do: 0
+
+  defp extraction_yield(%{extraction: %{yield: %{symbol: symbol, units: units}}}) do
+    %{"symbol" => symbol, "units" => units}
+  end
+
+  defp extraction_yield(_), do: nil
+
+  defp cooldown_ready?(%{cooldown: %{remaining_seconds: seconds}})
+       when is_integer(seconds),
+       do: seconds <= 0
+
+  defp cooldown_ready?(_), do: true
 
   defp in_flight_arrival?(
          %AutopilotConfig{in_flight_action: %{"expected" => %{"destination" => destination}}},

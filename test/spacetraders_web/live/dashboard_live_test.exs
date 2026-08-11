@@ -7,6 +7,7 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
 
   alias SpaceTraders.Timeline
   alias SpaceTraders.Fleet.Ship
+  alias SpaceTraders.Fleet.AutopilotConfig
   alias SpaceTraders.Repo
 
   defp stub_live_game(agent_overview, ships) do
@@ -947,6 +948,23 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
     test "shows an active cooldown on a ship card", %{conn: conn, operator: operator} do
       agent = agent_fixture(operator)
 
+      ship =
+        Repo.insert!(%Ship{
+          symbol: "ORBITALIST-2",
+          ship_type: "SHIP_COMMAND_FRIGATE",
+          agent_id: agent.id
+        })
+
+      Repo.insert!(%AutopilotConfig{
+        ship_id: ship.id,
+        extraction_waypoint: "X1-UX81-A2",
+        market_waypoint: "X1-UX81-A1",
+        cargo_threshold: 30,
+        desired_mode: "autopilot",
+        status: "waiting",
+        in_flight_action: %{"kind" => "extract"}
+      })
+
       ships = [
         ship_body("ORBITALIST-2", %{
           "cooldown" => %{
@@ -963,6 +981,8 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       {:ok, _lv, html} = live(conn, ~p"/")
 
       assert html =~ "Cooldown 42s"
+      assert html =~ "Waiting for cooldown"
+      assert html =~ "Wait through Cooldown 42s"
     end
 
     test "shows an in-transit ship with its arrival time and no actions", %{
