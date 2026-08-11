@@ -130,6 +130,38 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
     end)
   end
 
+  defp past_iso(seconds \\ 3600) do
+    DateTime.utc_now() |> DateTime.add(-seconds, :second) |> DateTime.to_iso8601()
+  end
+
+  defp deadline_label_for(deadline) do
+    {:ok, date_time, _offset} = DateTime.from_iso8601(deadline)
+    Calendar.strftime(date_time, "%m-%d %H:%M UTC")
+  end
+
+  defp pending_contract_body(deadline_to_accept) do
+    %{
+      "id" => "ctr-pending",
+      "accepted" => false,
+      "fulfilled" => false,
+      "factionSymbol" => "COSMIC",
+      "type" => "PROCUREMENT",
+      "deadlineToAccept" => deadline_to_accept,
+      "terms" => %{
+        "deadline" => future_iso(),
+        "deliver" => [
+          %{
+            "tradeSymbol" => "IRON_ORE",
+            "destinationSymbol" => "X1-UX81-A2",
+            "unitsRequired" => 10,
+            "unitsFulfilled" => 0
+          }
+        ],
+        "payment" => %{"onAccepted" => 1000, "onFulfilled" => 5000}
+      }
+    }
+  end
+
   defp arrival_label_for(arrival) do
     {:ok, due_at, _offset} = DateTime.from_iso8601(arrival)
     "arrives #{Calendar.strftime(due_at, "%m-%d %H:%M")} UTC"
@@ -1158,6 +1190,143 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       assert html =~ "New contract negotiated."
       assert html =~ "Accept contract"
       refute html =~ "Negotiate a new contract"
+    end
+
+    test "shows reward, faction and acceptance deadline on a pending contract", %{
+      conn: conn,
+      operator: operator
+    } do
+      agent = agent_fixture(operator)
+      accept_by = future_iso()
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case {conn.request_path, conn.method} do
+          {"/v2/my/agent", "GET"} ->
+            Req.Test.json(conn, %{"data" => agent_overview_body(agent.symbol)})
+
+          {"/v2/my/contracts", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => [
+                pending_contract_body(accept_by)
+              ]
+            })
+
+          {"/v2/my/ships", "GET"} ->
+            Req.Test.json(conn, %{"data" => []})
+
+          {"/v2/systems/X1-UX81/waypoints", "GET"} ->
+            Req.Test.json(conn, %{"data" => []})
+        end
+      end)
+
+      {:ok, lv, html} = live(conn, ~p"/")
+
+      assert html =~ "Reward: 1,000 cr on acceptance, 5,000 cr on fulfillment"
+      assert html =~ ~s(Issued by <span class="font-mono">COSMIC</span>)
+      assert html =~ "Accept by #{deadline_label_for(accept_by)}"
+      refute html =~ "Complete by"
+
+      assert has_element?(
+               lv,
+               "form[phx-submit=\"accept_contract\"] button:not([disabled])",
+               "Accept contract"
+             )
+    end
+
+    test "disables acceptance when the acceptance deadline has elapsed", %{
+      conn: conn,
+      operator: operator
+    } do
+      agent = agent_fixture(operator)
+      accept_by = past_iso()
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case {conn.request_path, conn.method} do
+          {"/v2/my/agent", "GET"} ->
+            Req.Test.json(conn, %{"data" => agent_overview_body(agent.symbol)})
+
+          {"/v2/my/contracts", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => [
+                pending_contract_body(accept_by)
+              ]
+            })
+
+          {"/v2/my/ships", "GET"} ->
+            Req.Test.json(conn, %{"data" => []})
+
+          {"/v2/systems/X1-UX81/waypoints", "GET"} ->
+            Req.Test.json(conn, %{"data" => []})
+        end
+      end)
+
+      {:ok, lv, html} = live(conn, ~p"/")
+
+      assert html =~ "Accept by #{deadline_label_for(accept_by)}"
+      assert html =~ "The Acceptance Deadline has passed; late acceptance is not possible."
+
+      assert has_element?(
+               lv,
+               "form[phx-submit=\"accept_contract\"] button[disabled]",
+               "Accept contract"
+             )
+    end
+
+    test "shows the completion deadline on an accepted contract and hides expiration", %{
+      conn: conn,
+      operator: operator
+    } do
+      agent = agent_fixture(operator)
+      complete_by = future_iso()
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case {conn.request_path, conn.method} do
+          {"/v2/my/agent", "GET"} ->
+            Req.Test.json(conn, %{"data" => agent_overview_body(agent.symbol)})
+
+          {"/v2/my/contracts", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => [
+                %{
+                  "id" => "ctr-accepted",
+                  "accepted" => true,
+                  "fulfilled" => false,
+                  "factionSymbol" => "COSMIC",
+                  "type" => "PROCUREMENT",
+                  "expiration" => "2025-01-01T00:00:00.000Z",
+                  "terms" => %{
+                    "deadline" => complete_by,
+                    "deliver" => [
+                      %{
+                        "tradeSymbol" => "IRON_ORE",
+                        "destinationSymbol" => "X1-UX81-A2",
+                        "unitsRequired" => 10,
+                        "unitsFulfilled" => 0
+                      }
+                    ],
+                    "payment" => %{"onAccepted" => 1000, "onFulfilled" => 5000}
+                  }
+                }
+              ]
+            })
+
+          {"/v2/my/ships", "GET"} ->
+            Req.Test.json(conn, %{"data" => []})
+
+          {"/v2/systems/X1-UX81/waypoints", "GET"} ->
+            Req.Test.json(conn, %{"data" => []})
+        end
+      end)
+
+      {:ok, lv, html} = live(conn, ~p"/")
+
+      assert html =~ "Reward: 1,000 cr on acceptance, 5,000 cr on fulfillment"
+      assert html =~ ~s(Issued by <span class="font-mono">COSMIC</span>)
+      assert html =~ "Complete by #{deadline_label_for(complete_by)}"
+      refute html =~ "Accept by"
+      refute html =~ "expiration"
+      refute html =~ "2025-01-01"
+      refute has_element?(lv, "form[phx-submit=\"accept_contract\"]")
     end
 
     test "prefills a partial contract delivery from an eligible ship", %{
