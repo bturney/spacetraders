@@ -3,7 +3,8 @@ const fs = require("fs")
 const path = require("path")
 
 module.exports = plugin(function({matchComponents, theme}) {
-  let iconsDir = path.join(__dirname, "../../deps/heroicons/optimized")
+  let depsPath = process.env.MIX_DEPS_PATH || path.join(__dirname, "../../deps")
+  let iconsDir = path.join(depsPath, "heroicons/optimized")
   let values = {}
   let icons = [
     ["", "/24/outline"],
