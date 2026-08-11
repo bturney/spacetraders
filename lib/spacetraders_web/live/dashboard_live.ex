@@ -566,7 +566,15 @@ defmodule SpaceTradersWeb.DashboardLive do
               <h3 class="mt-1 font-semibold">
                 {contract.type} <span class="font-mono text-xs opacity-60">{contract.id}</span>
               </h3>
-              <p class="text-sm opacity-70">Deadline: {deadline_label(contract)}</p>
+              <%= if reward = contract_reward_label(contract) do %>
+                <p class="text-sm opacity-70">{reward}</p>
+              <% end %>
+              <p class="text-sm opacity-70">
+                Issued by <span class="font-mono">{contract.faction_symbol}</span>
+                <%= if deadline = contract_deadline_label(contract) do %>
+                  <span class="opacity-50">·</span> {deadline}
+                <% end %>
+              </p>
             </div>
             <span class="badge badge-outline">{contract_status(contract)}</span>
           </div>
@@ -614,7 +622,16 @@ defmodule SpaceTradersWeb.DashboardLive do
           >
             <input type="hidden" name="agent_id" value={@agent_id} />
             <input type="hidden" name="contract_id" value={contract.id} />
-            <button type="submit" class="btn btn-primary min-h-11 btn-sm">Accept contract</button>
+            <button
+              type="submit"
+              class="btn btn-primary min-h-11 btn-sm"
+              disabled={acceptance_elapsed?(contract)}
+            >
+              Accept contract
+            </button>
+            <p :if={acceptance_elapsed?(contract)} class="mt-2 text-xs opacity-70">
+              The Acceptance Deadline has passed; late acceptance is not possible.
+            </p>
           </form>
           <form
             :if={contract.accepted && not contract.fulfilled && contract_ready?(contract)}
@@ -1522,14 +1539,48 @@ defmodule SpaceTradersWeb.DashboardLive do
   defp contract_status(%{accepted: true}), do: "ACCEPTED"
   defp contract_status(_), do: "PENDING"
 
-  defp deadline_label(%{terms: %{deadline: deadline}}) when is_binary(deadline) do
+  defp contract_reward_label(%{
+         terms: %{payment: %{on_accepted: on_accepted, on_fulfilled: on_fulfilled}}
+       })
+       when is_integer(on_accepted) and is_integer(on_fulfilled) do
+    "Reward: #{credits_label(on_accepted)} cr on acceptance, " <>
+      "#{credits_label(on_fulfilled)} cr on fulfillment"
+  end
+
+  defp contract_reward_label(_), do: nil
+
+  defp contract_deadline_label(%{accepted: true, fulfilled: true}), do: nil
+  defp contract_deadline_label(%{fulfilled: true}), do: nil
+
+  defp contract_deadline_label(%{accepted: true, terms: %{deadline: deadline}})
+       when is_binary(deadline),
+       do: format_contract_deadline(deadline, "Complete by")
+
+  defp contract_deadline_label(%{deadline_to_accept: deadline})
+       when is_binary(deadline),
+       do: format_contract_deadline(deadline, "Accept by")
+
+  defp contract_deadline_label(_), do: nil
+
+  defp format_contract_deadline(deadline, prefix) do
     case DateTime.from_iso8601(deadline) do
-      {:ok, date_time, _offset} -> Calendar.strftime(date_time, "%m-%d %H:%M UTC")
-      _ -> "unknown"
+      {:ok, date_time, _offset} ->
+        "#{prefix} #{Calendar.strftime(date_time, "%m-%d %H:%M UTC")}"
+
+      _ ->
+        nil
     end
   end
 
-  defp deadline_label(_), do: "unknown"
+  defp acceptance_elapsed?(%{accepted: false, deadline_to_accept: deadline})
+       when is_binary(deadline) do
+    case DateTime.from_iso8601(deadline) do
+      {:ok, date_time, _offset} -> DateTime.compare(date_time, DateTime.utc_now()) == :lt
+      _ -> false
+    end
+  end
+
+  defp acceptance_elapsed?(_), do: false
 
   defp contract_ready?(%{terms: %{deliver: deliver}}) when is_list(deliver) do
     Enum.all?(deliver, &(&1.units_fulfilled >= &1.units_required))
