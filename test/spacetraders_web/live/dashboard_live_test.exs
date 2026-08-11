@@ -716,6 +716,212 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       assert html =~ "SATELLITE"
     end
 
+    test "keeps the fleet card compact and reveals Ship Readiness on demand", %{
+      conn: conn,
+      operator: operator
+    } do
+      agent = agent_fixture(operator)
+
+      ships = [
+        ship_body("ORBITALIST-1", %{
+          "crew" => %{"current" => 2, "required" => 1, "capacity" => 6, "morale" => 70},
+          "engine" => %{"name" => "Impulse Drive II", "speed" => 3}
+        })
+      ]
+
+      stub_live_game(agent_overview_body(agent.symbol), ships)
+
+      {:ok, lv, html} = live(conn, ~p"/")
+
+      assert html =~ "ORBITALIST-1"
+      assert html =~ "DOCKED"
+      assert html =~ "X1-UX81-A1"
+      assert html =~ "150 / 200"
+      assert html =~ "12 / 40"
+
+      assert has_element?(lv, "details[data-ship-readiness] summary", "Ship Readiness")
+      refute has_element?(lv, "details[data-ship-readiness][open]")
+
+      assert html =~ "CRUISE"
+      assert html =~ "2 / 1 / 6"
+      assert html =~ "speed 3"
+      assert html =~ "Morale 70"
+      assert html =~ "current / required / capacity"
+      assert html =~ "No modules installed."
+      assert html =~ "No mounts installed."
+    end
+
+    test "reveals component condition before integrity and equipment capabilities on demand", %{
+      conn: conn,
+      operator: operator
+    } do
+      agent = agent_fixture(operator)
+
+      ships = [
+        ship_body("ORBITALIST-1", %{
+          "frame" => %{
+            "symbol" => "FRAME_FRIGATE",
+            "name" => "Frigate",
+            "condition" => 55,
+            "integrity" => 100,
+            "quality" => 75,
+            "description" => "A medium frigate."
+          },
+          "reactor" => %{
+            "symbol" => "REACTOR_SOLAR_I",
+            "name" => "Solar I",
+            "condition" => 60,
+            "integrity" => 95,
+            "description" => "A reactor"
+          },
+          "engine" => %{
+            "symbol" => "ENGINE_IMPULSE_DRIVE_I",
+            "name" => "Impulse Drive I",
+            "condition" => 70,
+            "integrity" => 90,
+            "speed" => 1,
+            "description" => "An engine"
+          },
+          "modules" => [
+            %{
+              "symbol" => "MODULE_CARGO_HOLD_I",
+              "name" => "Cargo Hold I",
+              "capacity" => 10,
+              "description" => "Expands the ship's cargo capacity."
+            },
+            %{
+              "symbol" => "MODULE_CREW_QUARTERS_I",
+              "name" => "Crew Quarters I",
+              "capacity" => 6
+            }
+          ],
+          "mounts" => [
+            %{
+              "symbol" => "MOUNT_MINING_LASER_I",
+              "name" => "Mining Laser I",
+              "strength" => 5,
+              "deposits" => ["QUARTZ_SAND", "IRON_ORE"],
+              "description" => "A mining laser."
+            }
+          ]
+        })
+      ]
+
+      stub_live_game(agent_overview_body(agent.symbol), ships)
+
+      {:ok, lv, html} = live(conn, ~p"/")
+
+      assert html =~ "Condition 55"
+      assert html =~ "Condition 60"
+      assert html =~ "Condition 70"
+      assert has_element?(lv, "[data-component=\"frame\"]", "Condition 55")
+
+      assert has_element?(lv, "details[data-component-detail=\"frame\"]", "Integrity 100")
+      assert has_element?(lv, "details[data-component-detail=\"frame\"]", "Quality 75")
+      assert has_element?(lv, "details[data-component-detail=\"frame\"]", "A medium frigate.")
+      refute has_element?(lv, "details[data-component-detail=\"frame\"][open]")
+      assert has_element?(lv, "details[data-component-detail=\"engine\"]", "Integrity 90")
+
+      assert has_element?(lv, "[data-module=\"MODULE_CARGO_HOLD_I\"]", "Cargo Hold I capacity 10")
+
+      assert has_element?(
+               lv,
+               "[data-module=\"MODULE_CREW_QUARTERS_I\"]",
+               "Crew Quarters I capacity 6"
+             )
+
+      assert has_element?(
+               lv,
+               "[data-mount=\"MOUNT_MINING_LASER_I\"]",
+               "Mining Laser I strength 5"
+             )
+
+      assert has_element?(lv, "[data-mount=\"MOUNT_MINING_LASER_I\"]", "QUARTZ_SAND, IRON_ORE")
+
+      assert has_element?(lv, "details[data-equipment-description]", "A mining laser.")
+
+      assert has_element?(
+               lv,
+               "details[data-equipment-description]",
+               "Expands the ship's cargo capacity."
+             )
+    end
+
+    test "shows an in-transit ship's origin and destination with departure in Route details", %{
+      conn: conn,
+      operator: operator
+    } do
+      agent = agent_fixture(operator)
+      arrival = future_iso()
+
+      ships = [
+        ship_body("ORBITALIST-1", %{
+          "nav" => nav_body("IN_TRANSIT", arrival: arrival, destination: "X1-UX81-A2")
+        })
+      ]
+
+      stub_live_game(agent_overview_body(agent.symbol), ships)
+
+      {:ok, lv, html} = live(conn, ~p"/")
+
+      assert html =~ "In transit"
+      assert has_element?(lv, "[data-transit-arrival]", arrival_label_for(arrival))
+      assert has_element?(lv, "[data-transit-route-summary]", "X1-UX81-A1")
+      assert has_element?(lv, "[data-transit-route-summary]", "X1-UX81-A2")
+
+      assert has_element?(lv, "details[data-route-details] summary", "Route details")
+      refute has_element?(lv, "details[data-route-details][open]")
+      assert has_element?(lv, "details[data-route-details] dd", "01-01 00:00 UTC")
+      refute has_element?(lv, "details[data-route-details]", arrival_label_for(arrival))
+    end
+
+    test "shows cargo symbol-first with name and description on demand", %{
+      conn: conn,
+      operator: operator
+    } do
+      agent = agent_fixture(operator)
+
+      ships = [
+        ship_body("ORBITALIST-1", %{
+          "cargo" => %{
+            "capacity" => 40,
+            "units" => 15,
+            "inventory" => [
+              %{
+                "symbol" => "IRON_ORE",
+                "name" => "Iron Ore",
+                "description" => "Iron ore used in smelting.",
+                "units" => 12
+              },
+              %{"symbol" => "COPPER_ORE", "units" => 3}
+            ]
+          }
+        })
+      ]
+
+      stub_live_game(agent_overview_body(agent.symbol), ships)
+
+      {:ok, lv, html} = live(conn, ~p"/")
+
+      assert html =~ "15 / 40"
+      assert has_element?(lv, "[data-cargo-item=\"IRON_ORE\"]", "IRON_ORE")
+      assert has_element?(lv, "[data-cargo-item=\"IRON_ORE\"]", "Iron Ore")
+      assert has_element?(lv, "[data-cargo-item=\"IRON_ORE\"]", "12 units")
+
+      assert has_element?(
+               lv,
+               "details[data-cargo-description=\"IRON_ORE\"]",
+               "Iron ore used in smelting."
+             )
+
+      refute has_element?(lv, "details[data-cargo-description=\"IRON_ORE\"][open]")
+
+      assert has_element?(lv, "[data-cargo-item=\"COPPER_ORE\"]", "COPPER_ORE")
+      assert has_element?(lv, "[data-cargo-item=\"COPPER_ORE\"]", "3 units")
+      refute has_element?(lv, "[data-cargo-item=\"COPPER_ORE\"]", "Copper Ore")
+      refute has_element?(lv, "details[data-cargo-description=\"COPPER_ORE\"]")
+    end
+
     test "fills cargo meter from cargo units", %{conn: conn, operator: operator} do
       agent = agent_fixture(operator)
 

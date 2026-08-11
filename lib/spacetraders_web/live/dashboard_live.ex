@@ -1512,11 +1512,23 @@ defmodule SpaceTradersWeb.DashboardLive do
         />
         <div
           :for={item <- cargo_inventory(@ship)}
+          data-cargo-item={item.symbol}
           class="mt-2 flex items-center justify-between gap-2 rounded border border-base-300/50 px-3 py-2 text-sm"
         >
           <div>
-            <span class="font-mono font-semibold">{item.symbol}</span>
-            <span class="ml-2 opacity-60">{item.units} units</span>
+            <div class="flex flex-wrap items-baseline gap-2">
+              <span class="font-mono font-semibold">{item.symbol}</span>
+              <span :if={cargo_name(item)} class="opacity-70">{cargo_name(item)}</span>
+              <span class="opacity-60">{item.units} units</span>
+            </div>
+            <details
+              :if={cargo_description(item)}
+              class="mt-1"
+              data-cargo-description={item.symbol}
+            >
+              <summary class="cursor-pointer text-xs opacity-70">Description</summary>
+              <p class="mt-1 text-xs opacity-70">{cargo_description(item)}</p>
+            </details>
           </div>
           <form phx-submit="jettison_cargo" class="flex items-center gap-2">
             <input type="hidden" name="symbol" value={@ship.symbol} />
@@ -1538,9 +1550,30 @@ defmodule SpaceTradersWeb.DashboardLive do
         <%= if in_transit?(@ship) do %>
           <div class="flex flex-wrap items-center gap-2 text-xs">
             <span class="badge badge-warning badge-sm">In transit</span>
-            <span class="font-mono">{arrival_label(@ship)}</span>
+            <span class="font-mono" data-transit-arrival>{arrival_label(@ship)}</span>
           </div>
-          <p class="mt-1 text-xs opacity-60">Actions resume when the ship arrives.</p>
+          <p class="mt-1 text-xs opacity-60" data-transit-route-summary>
+            From <span class="font-mono">{route_origin(@ship)}</span>
+            to <span class="font-mono">{route_destination(@ship)}</span>.
+            Actions resume when the ship arrives.
+          </p>
+          <details class="mt-2" data-route-details>
+            <summary class="cursor-pointer text-xs opacity-70">Route details</summary>
+            <dl class="mt-2 space-y-1 text-xs">
+              <div class="flex items-center justify-between gap-3">
+                <dt class="opacity-60">Departure</dt>
+                <dd class="font-mono">{departure_label(@ship)}</dd>
+              </div>
+              <div class="flex items-center justify-between gap-3">
+                <dt class="opacity-60">Origin</dt>
+                <dd class="font-mono">{route_origin(@ship)}</dd>
+              </div>
+              <div class="flex items-center justify-between gap-3">
+                <dt class="opacity-60">Destination</dt>
+                <dd class="font-mono">{route_destination(@ship)}</dd>
+              </div>
+            </dl>
+          </details>
         <% else %>
           <form
             phx-submit="navigate"
@@ -1603,6 +1636,109 @@ defmodule SpaceTradersWeb.DashboardLive do
           </div>
         <% end %>
       </div>
+
+      <details class="mt-4 border-t border-base-300/60 pt-3" data-ship-readiness>
+        <summary class="cursor-pointer text-sm font-semibold">Ship Readiness</summary>
+        <div class="mt-3 space-y-4 text-sm">
+          <div class="grid grid-cols-1 gap-3 sm:grid-cols-3">
+            <div>
+              <div class="text-xs opacity-60">Flight Mode</div>
+              <div class="font-mono">{flight_mode(@ship)}</div>
+            </div>
+            <div>
+              <div class="text-xs opacity-60">Crew</div>
+              <div class="font-mono">{crew_label(@ship)}</div>
+              <div class="text-xs opacity-60">current / required / capacity</div>
+              <div :if={crew_morale(@ship)} class="text-xs opacity-60">
+                Morale {crew_morale(@ship)}
+              </div>
+            </div>
+            <div>
+              <div class="text-xs opacity-60">Engine</div>
+              <div class="font-semibold">{component_name(@ship.engine)}</div>
+              <div class="font-mono">{engine_speed_label(@ship)}</div>
+            </div>
+          </div>
+
+          <div>
+            <p class="text-xs font-semibold uppercase tracking-wider opacity-60">Components</p>
+            <div class="mt-2 space-y-2">
+              <div
+                :for={{kind, component} <- ship_components(@ship)}
+                data-component={String.downcase(kind)}
+                class="rounded border border-base-300/50 px-3 py-2"
+              >
+                <div class="flex flex-wrap items-center justify-between gap-2">
+                  <span class="text-xs uppercase tracking-wider opacity-60">{kind}</span>
+                  <span class="font-semibold">{component_name(component)}</span>
+                  <span class="font-mono">Condition {component_condition(component)}</span>
+                </div>
+                <details class="mt-1" data-component-detail={String.downcase(kind)}>
+                  <summary class="cursor-pointer text-xs opacity-70">Detail</summary>
+                  <dl class="mt-2 space-y-1 text-xs">
+                    <div class="flex items-center justify-between gap-3">
+                      <dt class="opacity-60">Integrity</dt>
+                      <dd class="font-mono">{component_integrity(component)}</dd>
+                    </div>
+                    <div
+                      :if={component_quality(component)}
+                      class="flex items-center justify-between gap-3"
+                    >
+                      <dt class="opacity-60">Quality</dt>
+                      <dd class="font-mono">{component_quality(component)}</dd>
+                    </div>
+                    <p :if={component_description(component)} class="pt-1 opacity-70">
+                      {component_description(component)}
+                    </p>
+                  </dl>
+                </details>
+              </div>
+            </div>
+          </div>
+
+          <div>
+            <p class="text-xs font-semibold uppercase tracking-wider opacity-60">Modules</p>
+            <div :if={@ship.modules == []} class="mt-1 text-xs opacity-60">
+              No modules installed.
+            </div>
+            <div :for={module <- @ship.modules || []} class="mt-1 space-y-2">
+              <div data-module={module.symbol} class="rounded border border-base-300/50 px-3 py-2">
+                <div class="flex flex-wrap items-center justify-between gap-2">
+                  <span class="font-semibold">{module.name}</span>
+                  <span class="flex flex-wrap gap-3 font-mono text-xs opacity-70">
+                    <span :if={module_capacity(module)}>capacity {module_capacity(module)}</span>
+                    <span :if={module_range(module)}>range {module_range(module)}</span>
+                  </span>
+                </div>
+                <details :if={equipment_description(module)} class="mt-1" data-equipment-description>
+                  <summary class="cursor-pointer text-xs opacity-70">Description</summary>
+                  <p class="mt-1 text-xs opacity-70">{equipment_description(module)}</p>
+                </details>
+              </div>
+            </div>
+          </div>
+
+          <div>
+            <p class="text-xs font-semibold uppercase tracking-wider opacity-60">Mounts</p>
+            <div :if={@ship.mounts == []} class="mt-1 text-xs opacity-60">No mounts installed.</div>
+            <div :for={mount <- @ship.mounts || []} class="mt-1 space-y-2">
+              <div data-mount={mount.symbol} class="rounded border border-base-300/50 px-3 py-2">
+                <div class="flex flex-wrap items-center justify-between gap-2">
+                  <span class="font-semibold">{mount.name}</span>
+                  <span class="flex flex-wrap gap-3 font-mono text-xs opacity-70">
+                    <span :if={mount_strength(mount)}>strength {mount_strength(mount)}</span>
+                    <span :if={mount_deposits(mount) != []}>{Enum.join(mount_deposits(mount), ", ")}</span>
+                  </span>
+                </div>
+                <details :if={equipment_description(mount)} class="mt-1" data-equipment-description>
+                  <summary class="cursor-pointer text-xs opacity-70">Description</summary>
+                  <p class="mt-1 text-xs opacity-70">{equipment_description(mount)}</p>
+                </details>
+              </div>
+            </div>
+          </div>
+        </div>
+      </details>
     </div>
     """
   end
@@ -1819,6 +1955,84 @@ defmodule SpaceTradersWeb.DashboardLive do
 
   defp arrival_label(_), do: "arrives soon"
 
+  defp flight_mode(%{nav: %{flight_mode: mode}}) when is_binary(mode), do: mode
+  defp flight_mode(_), do: "—"
+
+  defp crew_label(%{crew: %{current: current, required: required, capacity: capacity}})
+       when is_integer(current) and is_integer(required) and is_integer(capacity),
+       do: "#{current} / #{required} / #{capacity}"
+
+  defp crew_label(_), do: "—"
+
+  defp crew_morale(%{crew: %{morale: morale}}) when is_integer(morale), do: morale
+  defp crew_morale(_), do: nil
+
+  defp engine_speed_label(%{engine: %{speed: speed}}) when is_integer(speed), do: "speed #{speed}"
+  defp engine_speed_label(_), do: "speed —"
+
+  defp ship_components(ship) do
+    [{"Frame", ship.frame}, {"Reactor", ship.reactor}, {"Engine", ship.engine}]
+    |> Enum.filter(fn {_kind, component} -> not is_nil(component) end)
+  end
+
+  defp component_name(%{name: name}) when is_binary(name) and name != "", do: name
+  defp component_name(%{symbol: symbol}) when is_binary(symbol), do: symbol
+  defp component_name(_), do: "—"
+
+  defp component_condition(%{condition: condition}) when is_number(condition), do: condition
+  defp component_condition(_), do: "—"
+
+  defp component_integrity(%{integrity: integrity}) when is_number(integrity), do: integrity
+  defp component_integrity(_), do: "—"
+
+  defp component_quality(%{quality: quality}) when is_number(quality), do: quality
+  defp component_quality(_), do: nil
+
+  defp component_description(%{description: description})
+       when is_binary(description) and description != "",
+       do: description
+
+  defp component_description(_), do: nil
+
+  defp module_capacity(%{capacity: capacity}) when is_integer(capacity), do: capacity
+  defp module_capacity(_), do: nil
+
+  defp module_range(%{range: range}) when is_integer(range), do: range
+  defp module_range(_), do: nil
+
+  defp mount_strength(%{strength: strength}) when is_integer(strength), do: strength
+  defp mount_strength(_), do: nil
+
+  defp mount_deposits(%{deposits: deposits}) when is_list(deposits), do: deposits
+  defp mount_deposits(_), do: []
+
+  defp equipment_description(%{description: description})
+       when is_binary(description) and description != "",
+       do: description
+
+  defp equipment_description(_), do: nil
+
+  defp route_origin(%{nav: %{route: %{origin: %{symbol: origin}}}}) when is_binary(origin),
+    do: origin
+
+  defp route_origin(_), do: "—"
+
+  defp route_destination(%{nav: %{route: %{destination: %{symbol: destination}}}})
+       when is_binary(destination),
+       do: destination
+
+  defp route_destination(_), do: "—"
+
+  defp departure_label(%{nav: %{route: %{departure_time: departure}}})
+       when is_binary(departure) do
+    case DateTime.from_iso8601(departure) do
+      {:ok, date_time, _offset} -> Calendar.strftime(date_time, "%m-%d %H:%M") <> " UTC"
+      _ -> "unknown"
+    end
+  end
+
+  defp departure_label(_), do: "unknown"
+
   defp cooldown_label(%{cooldown: %{remaining_seconds: seconds, expiration: expiration}}, _tick)
        when is_integer(seconds) and seconds > 0 do
     remaining = countdown_seconds(seconds, expiration)
@@ -1884,6 +2098,15 @@ defmodule SpaceTradersWeb.DashboardLive do
 
   defp cargo_inventory(%{cargo: %{inventory: inventory}}) when is_list(inventory), do: inventory
   defp cargo_inventory(_), do: []
+
+  defp cargo_name(%{name: name}) when is_binary(name) and name != "", do: name
+  defp cargo_name(_), do: nil
+
+  defp cargo_description(%{description: description})
+       when is_binary(description) and description != "",
+       do: description
+
+  defp cargo_description(_), do: nil
 
   defp sellable?(ship, good), do: cargo_item(ship, good.symbol) != nil
 
