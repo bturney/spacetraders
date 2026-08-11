@@ -134,44 +134,50 @@ defmodule SpaceTradersWeb.DashboardPrototype do
 
   defp attention_layout(assigns) do
     ~H"""
-    <section class="space-y-5">
-      <div class="grid gap-5 lg:grid-cols-[minmax(0,1fr)_20rem]">
-        <div class="card border border-warning/50 bg-base-200 p-5 sm:p-7">
+    <section class="grid gap-5 xl:grid-cols-[15rem_minmax(0,1fr)_18rem]">
+      <.attention_roster />
+      <main class="min-w-0 space-y-5">
+        <div class="card border border-warning/50 bg-base-200 p-5 shadow-lg shadow-warning/5 sm:p-7">
           <div class="flex flex-wrap items-start justify-between gap-4">
             <div>
-              <p class="eyebrow text-warning">Needs operator attention</p><h2 class="mt-1 text-2xl font-bold">
-                ORBITALIST-3 is waiting to resume
-              </h2>
-            </div><span class="badge badge-warning badge-lg">BLOCKED</span>
+              <p class="eyebrow text-warning">Selected ship · needs operator attention</p>
+              <h2 class="mt-1 font-mono text-2xl font-bold">ORBITALIST-3</h2>
+              <p class="mt-2 text-sm opacity-70">
+                At X1-UX81-A1 · cargo 32 / 40 · loop paused safely
+              </p>
+            </div>
+            <span class="badge badge-warning badge-lg">BLOCKED</span>
           </div>
-          <p class="mt-4 max-w-2xl text-sm leading-6 opacity-80">
-            The Market changed while the Ship was offline. Revalidate its cargo, location, and configured waypoints before letting the loop continue.
-          </p>
-          <div class="mt-5 grid gap-3 border-y border-base-300 py-5 text-sm sm:grid-cols-3">
-            <div>
-              <p class="opacity-60">Last attempt</p><p class="mt-1 font-semibold">Navigate to A2</p>
-            </div><div>
-              <p class="opacity-60">Known cargo</p><p class="mt-1 font-mono font-semibold">
-                32 / 40 IRON_ORE
-              </p>
-            </div><div>
-              <p class="opacity-60">Recorded</p><p class="mt-1 font-mono font-semibold">
-                14:50:12 UTC
-              </p>
+          <div class="mt-6 border-y border-warning/30 bg-warning/5 py-5">
+            <p class="text-xs font-bold uppercase tracking-[0.18em] text-warning">Recovery needed</p>
+            <p class="mt-1 text-xl font-semibold">Market refresh required before navigation</p>
+            <p class="mt-3 max-w-2xl text-sm leading-6 opacity-80">
+              The Market changed while the Ship was offline. Revalidate its cargo, location, and configured Waypoints before letting the loop continue.
+            </p>
+            <div class="mt-4 grid gap-3 text-sm sm:grid-cols-3">
+              <div>
+                <p class="opacity-60">Last attempt</p><p class="mt-1 font-semibold">Navigate to A2</p>
+              </div>
+              <div>
+                <p class="opacity-60">Known cargo</p><p class="mt-1 font-mono font-semibold">
+                  32 / 40 IRON_ORE
+                </p>
+              </div>
+              <div>
+                <p class="opacity-60">Recorded</p><p class="mt-1 font-mono font-semibold">
+                  14:50:12 UTC
+                </p>
+              </div>
             </div>
           </div>
           <div class="mt-5 flex flex-wrap gap-3">
-            <button type="button" class="btn btn-primary">Resume after revalidation</button><button
-              type="button"
-              class="btn btn-ghost"
-            >Stop to Manual</button>
+            <button type="button" class="btn btn-primary">Resume after revalidation</button>
+            <button type="button" class="btn btn-ghost">Stop to Manual</button>
           </div>
         </div>
-        <.fleet_attention />
-      </div>
-      <div class="grid gap-5 xl:grid-cols-[15rem_minmax(0,1fr)_18rem]">
-        <.fleet_roster /><.activity /><.loop_summary />
-      </div>
+        <.activity />
+      </main>
+      <.loop_summary />
     </section>
     """
   end
@@ -199,14 +205,33 @@ defmodule SpaceTradersWeb.DashboardPrototype do
     """
   end
 
-  defp fleet_attention(assigns) do
+  defp attention_roster(assigns) do
     ~H"""
-    <aside class="card border border-base-300 bg-base-200 p-5">
-      <p class="eyebrow">Fleet attention</p><p class="mt-1 text-2xl font-bold">1</p><div class="mt-4 rounded border border-warning/40 bg-warning/10 p-3">
-        <p class="font-mono text-sm font-bold">ORBITALIST-3</p><p class="mt-1 text-xs opacity-70">
-          Loop blocked · market refresh needed
-        </p>
-      </div><p class="mt-4 text-xs opacity-60">Healthy loops stay quiet here.</p>
+    <aside class="card h-fit border border-base-300 bg-base-200 p-4">
+      <div class="flex items-center justify-between">
+        <div>
+          <p class="eyebrow">Fleet</p><h2 class="mt-1 font-semibold">3 ships</h2>
+        </div>
+        <span class="badge badge-warning badge-sm">1 needs attention</span>
+      </div>
+      <div class="mt-4 space-y-2">
+        <button
+          type="button"
+          class="w-full rounded border-l-4 border-warning bg-warning/10 p-3 text-left ring-1 ring-warning/40"
+        >
+          <div class="flex items-center justify-between gap-2">
+            <p class="font-mono text-sm font-bold">ORBITALIST-3</p><span class="badge badge-warning badge-xs">Blocked</span>
+          </div>
+          <p class="mt-1 text-xs opacity-70">Market refresh required</p>
+        </button>
+        <button type="button" class="w-full rounded border border-base-300 p-3 text-left"><p class="font-mono text-sm font-bold">
+          ORBITALIST-1
+        </p><p class="mt-1 text-xs opacity-60">Manual · docked at A2</p></button>
+        <button type="button" class="w-full rounded border border-base-300 p-3 text-left"><p class="font-mono text-sm font-bold">
+          ORBITALIST-2
+        </p><p class="mt-1 text-xs opacity-60">Manual · in transit</p></button>
+      </div>
+      <p class="mt-4 text-xs opacity-60">Healthy Autopilot Ships stay quiet.</p>
     </aside>
     """
   end
@@ -262,7 +287,7 @@ defmodule SpaceTradersWeb.DashboardPrototype do
   end
 
   defp switcher(assigns) do
-    names = %{"a" => "Timeline command", "b" => "Map-first workspace", "c" => "Attention-first"}
+    names = %{"a" => "Timeline command", "b" => "Map-first workspace", "c" => "Inline recovery"}
     previous = %{"a" => "c", "b" => "a", "c" => "b"}
     next = %{"a" => "b", "b" => "c", "c" => "a"}
     assigns = assign(assigns, names: names, previous: previous, next: next)
