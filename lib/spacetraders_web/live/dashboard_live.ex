@@ -1941,6 +1941,12 @@ defmodule SpaceTradersWeb.DashboardLive do
        ),
        do: "Traveling to extraction"
 
+  defp autopilot_current_action(
+         %{status: "waiting", in_flight_action: %{"kind" => "cooldown"}},
+         _ship
+       ),
+       do: "Waiting for cooldown"
+
   defp autopilot_current_action(%{status: "blocked"}, _ship), do: "Blocked"
   defp autopilot_current_action(%{desired_mode: "autopilot"}, _ship), do: "Evaluating cargo"
   defp autopilot_current_action(_, _ship), do: "Manual"

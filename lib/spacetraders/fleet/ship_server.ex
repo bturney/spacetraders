@@ -141,6 +141,15 @@ defmodule SpaceTraders.Fleet.ShipServer do
         if still_busy?(type, ship) do
           retry(event, state, "ship is still #{busy_label(type)} after #{type}")
         else
+          Timeline.fire_event(event)
+          state = %{state | pending: Map.delete(state.pending, type)}
+
+          Phoenix.PubSub.broadcast(
+            SpaceTraders.PubSub,
+            "fleet:#{state.agent_id}",
+            {:ship_updated, state.agent_id, state.symbol}
+          )
+
           case type do
             :arrival ->
               SpaceTraders.Fleet.revalidate_autopilot_arrival(state.agent_id, state.symbol, ship)
@@ -151,15 +160,6 @@ defmodule SpaceTraders.Fleet.ShipServer do
             _ ->
               :ok
           end
-
-          Timeline.fire_event(event)
-          state = %{state | pending: Map.delete(state.pending, type)}
-
-          Phoenix.PubSub.broadcast(
-            SpaceTraders.PubSub,
-            "fleet:#{state.agent_id}",
-            {:ship_updated, state.agent_id, state.symbol}
-          )
 
           {:noreply, state}
         end

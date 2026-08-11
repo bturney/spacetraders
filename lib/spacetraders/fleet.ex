@@ -217,9 +217,13 @@ defmodule SpaceTraders.Fleet do
 
   @doc "Reconciles a ready Autopilot and dispatches only its extraction navigation leg."
   def advance_autopilot(%AgentRecord{} = agent, %AutopilotConfig{} = config, live_ship) do
+    advance_autopilot(agent, config, live_ship, :normal)
+  end
+
+  defp advance_autopilot(%AgentRecord{} = agent, %AutopilotConfig{} = config, live_ship, mode) do
     cond do
       at_extraction_waypoint?(live_ship, config.extraction_waypoint) ->
-        extract_if_below_threshold(agent, config, live_ship)
+        extract_if_below_threshold(agent, config, live_ship, mode)
 
       in_flight_arrival?(config, live_ship) ->
         maybe_schedule_arrival(agent, live_ship.symbol, %{nav: live_ship.nav})
@@ -292,7 +296,7 @@ defmodule SpaceTraders.Fleet do
           config =
             Repo.update!(Ecto.Changeset.change(config, status: "ready", in_flight_action: nil))
 
-          advance_autopilot(agent, config, live_ship)
+          advance_autopilot(agent, config, live_ship, :timeline)
 
         _ ->
           :ok
@@ -322,7 +326,7 @@ defmodule SpaceTraders.Fleet do
           )
         )
 
-      advance_autopilot(agent, config, live_ship)
+      advance_autopilot(agent, config, live_ship, :timeline)
     else
       _ -> :ok
     end
@@ -337,7 +341,7 @@ defmodule SpaceTraders.Fleet do
 
   defp at_extraction_waypoint?(_, _), do: false
 
-  defp extract_if_below_threshold(agent, config, live_ship) do
+  defp extract_if_below_threshold(agent, config, live_ship, mode) do
     cond do
       cooldown_active?(live_ship) ->
         maybe_schedule_live_cooldown(agent, live_ship)
@@ -358,7 +362,13 @@ defmodule SpaceTraders.Fleet do
             Ecto.Changeset.change(config, status: "revalidating", in_flight_action: action)
           )
 
-        case extract_resources(agent, live_ship.symbol) do
+        extract =
+          case mode do
+            :timeline -> &extract_resources_for_autopilot/2
+            :normal -> &extract_resources/2
+          end
+
+        case extract.(agent, live_ship.symbol) do
           {:ok, result} ->
             result_snapshot = %{
               "kind" => "extract",
@@ -383,6 +393,14 @@ defmodule SpaceTraders.Fleet do
 
       true ->
         {:ok, config}
+    end
+  end
+
+  defp extract_resources_for_autopilot(%AgentRecord{agent_token: token} = agent, ship_symbol)
+       when is_binary(token) and token != "" do
+    with {:ok, result} <- SpaceTraders.API.extract_resources(token, ship_symbol),
+         :ok <- schedule_cooldown(agent, ship_symbol, result) do
+      {:ok, result}
     end
   end
 

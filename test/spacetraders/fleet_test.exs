@@ -37,6 +37,18 @@ defmodule SpaceTraders.FleetTest do
     DateTime.utc_now() |> DateTime.add(seconds, :second) |> DateTime.to_iso8601()
   end
 
+  defp eventually(fun, attempts \\ 30)
+  defp eventually(_fun, 0), do: false
+
+  defp eventually(fun, attempts) do
+    if fun.() do
+      true
+    else
+      Process.sleep(10)
+      eventually(fun, attempts - 1)
+    end
+  end
+
   defp navigate_response(status), do: navigate_response(status, future_iso())
 
   defp navigate_response(status, arrival) do
@@ -459,8 +471,10 @@ defmodule SpaceTraders.FleetTest do
 
       assert Repo.get!(Event, event.id).status == "done"
 
-      assert %{status: "ready", in_flight_action: nil} =
-               Repo.get_by!(AutopilotConfig, ship_id: config.ship_id)
+      assert eventually(fn ->
+               current = Repo.get_by!(AutopilotConfig, ship_id: config.ship_id)
+               current.status == "ready" and is_nil(current.in_flight_action)
+             end)
     end
 
     test "blocks an invalid extraction waypoint without a game action" do

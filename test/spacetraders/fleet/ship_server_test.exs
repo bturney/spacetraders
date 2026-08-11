@@ -7,6 +7,8 @@ defmodule SpaceTraders.Fleet.ShipServerTest do
   import SpaceTraders.ShipBody
 
   alias SpaceTraders.Fleet.ShipServer
+  alias SpaceTraders.Fleet.{AutopilotConfig, Ship}
+  alias SpaceTraders.Agent.Agent
   alias SpaceTraders.Timeline
   alias SpaceTraders.Timeline.Event
 
@@ -25,6 +27,18 @@ defmodule SpaceTraders.Fleet.ShipServerTest do
 
   defp subscribe_fleet do
     subscribe(SpaceTraders.PubSub, "fleet:#{@agent_id}")
+  end
+
+  defp eventually(fun, attempts \\ 30)
+  defp eventually(_fun, 0), do: false
+
+  defp eventually(fun, attempts) do
+    if fun.() do
+      true
+    else
+      Process.sleep(10)
+      eventually(fun, attempts - 1)
+    end
   end
 
   defp stub_refresh(symbol, status \\ :ok) do
@@ -179,6 +193,85 @@ defmodule SpaceTraders.Fleet.ShipServerTest do
       assert ShipServer.ensure_ready(symbol) == {:error, :ship_in_transit}
       assert_receive {:ship_updated, @agent_id, ^symbol}, 1_000
       assert Repo.get(Event, event.id).status == "done"
+    end
+  end
+
+  describe "autopilot continuation" do
+    test "continues extraction after a cooldown wakeup without crashing the server" do
+      agent =
+        Repo.insert!(%Agent{
+          id: @agent_id,
+          symbol: "SHIP-SERVER-AGENT",
+          faction: "COSMIC",
+          headquarters: "X1-UX81-A1",
+          agent_token: "AGENT_TOKEN"
+        })
+
+      ship =
+        Repo.insert!(%Ship{
+          symbol: "AUTOPILOT-SHIP",
+          ship_type: "SHIP_COMMAND_FRIGATE",
+          agent_id: agent.id
+        })
+
+      Repo.insert!(%AutopilotConfig{
+        ship_id: ship.id,
+        extraction_waypoint: "X1-UX81-A2",
+        market_waypoint: "X1-UX81-A1",
+        cargo_threshold: 30,
+        desired_mode: "autopilot",
+        status: "waiting",
+        in_flight_action: %{"kind" => "cooldown"}
+      })
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case {conn.request_path, conn.method} do
+          {"/v2/my/ships/AUTOPILOT-SHIP", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" =>
+                ship_body("AUTOPILOT-SHIP", %{
+                  "nav" => nav_body("IN_ORBIT", destination: "X1-UX81-A2"),
+                  "cargo" => %{"capacity" => 40, "units" => 0, "inventory" => []},
+                  "mounts" => [%{"symbol" => "MOUNT_MINING_LASER_I"}]
+                })
+            })
+
+          {"/v2/my/ships/AUTOPILOT-SHIP/extract", "POST"} ->
+            Req.Test.json(conn, %{
+              "data" => %{
+                "cooldown" => %{
+                  "shipSymbol" => "AUTOPILOT-SHIP",
+                  "totalSeconds" => 60,
+                  "remainingSeconds" => 60,
+                  "expiration" => future_iso(60)
+                },
+                "extraction" => %{
+                  "shipSymbol" => "AUTOPILOT-SHIP",
+                  "yield" => %{"symbol" => "IRON_ORE", "units" => 5}
+                },
+                "cargo" => %{
+                  "capacity" => 40,
+                  "units" => 5,
+                  "inventory" => [%{"symbol" => "IRON_ORE", "units" => 5}]
+                }
+              }
+            })
+        end
+      end)
+
+      event = schedule("AUTOPILOT-SHIP", :cooldown, DateTime.add(DateTime.utc_now(), -1, :second))
+      start_server("AUTOPILOT-SHIP")
+
+      assert eventually(fn -> Repo.get(Event, event.id).status == "done" end)
+
+      assert eventually(fn ->
+               config = Repo.get_by!(AutopilotConfig, ship_id: ship.id)
+               config.status == "waiting" and config.last_action_result["kind"] == "extract"
+             end)
+
+      assert [{pid, _}] = Registry.lookup(SpaceTraders.Fleet.ShipRegistry, "AUTOPILOT-SHIP")
+      assert Process.alive?(pid)
+      assert [%Event{event_type: "cooldown"}] = Timeline.pending_events(:ship, "AUTOPILOT-SHIP")
     end
   end
 end
