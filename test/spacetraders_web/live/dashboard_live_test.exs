@@ -35,6 +35,101 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
     DateTime.utc_now() |> DateTime.add(seconds, :second) |> DateTime.to_iso8601()
   end
 
+  defp ship_offer_body(overrides \\ %{}) do
+    Map.merge(
+      %{
+        "type" => "SHIP_LIGHT_FREIGHTER",
+        "name" => "Light Freighter",
+        "description" => "A small freighter for light trading runs.",
+        "supply" => "SCARCE",
+        "activity" => "STRONG",
+        "purchasePrice" => 70_000,
+        "frame" => %{
+          "symbol" => "FRAME_FREIGHTER",
+          "name" => "Freighter",
+          "description" => "A freighter frame",
+          "moduleSlots" => 4,
+          "mountingPoints" => 2,
+          "fuelCapacity" => 300,
+          "condition" => 100,
+          "integrity" => 100,
+          "requirements" => %{"power" => 1, "crew" => 1}
+        },
+        "reactor" => %{
+          "symbol" => "REACTOR_FISSION_I",
+          "name" => "Fission I",
+          "description" => "A fission reactor",
+          "condition" => 100,
+          "integrity" => 100,
+          "powerOutput" => 5,
+          "requirements" => %{"crew" => 1}
+        },
+        "engine" => %{
+          "symbol" => "ENGINE_ION_DRIVE_I",
+          "name" => "Ion Drive I",
+          "description" => "An ion engine",
+          "condition" => 100,
+          "integrity" => 100,
+          "speed" => 2,
+          "requirements" => %{"power" => 1, "crew" => 1}
+        },
+        "modules" => [
+          %{
+            "symbol" => "MODULE_CARGO_HOLD_I",
+            "name" => "Cargo Hold I",
+            "description" => "A cargo hold",
+            "capacity" => 20,
+            "requirements" => %{"crew" => 1}
+          }
+        ],
+        "mounts" => [
+          %{
+            "symbol" => "MOUNT_MINING_LASER_I",
+            "name" => "Mining Laser I",
+            "description" => "A mining laser",
+            "strength" => 10,
+            "deposits" => ["QUARTZ_SAND"],
+            "requirements" => %{"power" => 1, "crew" => 1}
+          }
+        ],
+        "crew" => %{"required" => 4, "capacity" => 8}
+      },
+      overrides
+    )
+  end
+
+  defp stub_shipyard_offers(agent, ships) do
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      case {conn.request_path, conn.method} do
+        {"/v2/my/agent", "GET"} ->
+          Req.Test.json(conn, %{"data" => agent_overview_body(agent.symbol)})
+
+        {"/v2/my/contracts", "GET"} ->
+          Req.Test.json(conn, %{"data" => []})
+
+        {"/v2/my/ships", "GET"} ->
+          Req.Test.json(conn, %{"data" => [ship_body("ORBITALIST-1")]})
+
+        {"/v2/systems/X1-UX81/waypoints", "GET"} ->
+          Req.Test.json(conn, %{
+            "data" => [
+              %{
+                "symbol" => "X1-UX81-A1",
+                "systemSymbol" => "X1-UX81",
+                "type" => "ORBITAL_STATION",
+                "x" => 1,
+                "y" => 2,
+                "traits" => [%{"symbol" => "SHIPYARD", "name" => "Shipyard", "description" => ""}]
+              }
+            ]
+          })
+
+        {"/v2/systems/X1-UX81/waypoints/X1-UX81-A1/shipyard", "GET"} ->
+          Req.Test.json(conn, %{"data" => %{"symbol" => "X1-UX81-A1", "ships" => ships}})
+      end
+    end)
+  end
+
   defp arrival_label_for(arrival) do
     {:ok, due_at, _offset} = DateTime.from_iso8601(arrival)
     "arrives #{Calendar.strftime(due_at, "%m-%d %H:%M")} UTC"
@@ -736,6 +831,184 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
                Repo.get_by(Ship, symbol: "ORBITALIST-2")
 
       assert agent_id == agent.id
+    end
+
+    test "compares ship offers by price, availability, engine speed, fuel and crew", %{
+      conn: conn,
+      operator: operator
+    } do
+      agent = agent_fixture(operator)
+      stub_shipyard_offers(agent, [ship_offer_body()])
+
+      {:ok, _lv, html} = live(conn, ~p"/")
+
+      assert html =~ "Light Freighter"
+      assert html =~ "70,000 cr"
+      assert html =~ "Supply SCARCE"
+      assert html =~ "Speed 2"
+      assert html =~ "Fuel 300"
+      assert html =~ "Crew 4"
+    end
+
+    test "discloses a ship offer's Specifications with description, components, modules and mounts",
+         %{conn: conn, operator: operator} do
+      agent = agent_fixture(operator)
+      stub_shipyard_offers(agent, [ship_offer_body()])
+
+      {:ok, lv, html} = live(conn, ~p"/")
+
+      assert html =~ "A small freighter for light trading runs."
+      assert html =~ "Freighter"
+      assert html =~ "300 fuel, 4 slots, 2 mounts"
+      assert html =~ "Fission I"
+      assert html =~ "5 power"
+      assert html =~ "Ion Drive I"
+      assert html =~ "speed 2"
+      assert html =~ "Modules"
+      assert html =~ "Cargo Hold I"
+      assert html =~ "capacity 20"
+      assert html =~ "Mounts"
+      assert html =~ "Mining Laser I"
+      assert html =~ "strength 10"
+      assert has_element?(lv, "details[data-ship-offer-specs] summary", "Specifications")
+    end
+
+    test "disables Buy for a known unaffordable ship offer and keeps an affordable one available",
+         %{conn: conn, operator: operator} do
+      agent = agent_fixture(operator)
+      {:ok, state} = Agent.start_link(fn -> %{bought: false} end)
+
+      ships = [
+        ship_offer_body(),
+        ship_offer_body(%{
+          "type" => "SHIP_MINING_DRONE",
+          "name" => "Mining Drone",
+          "purchasePrice" => 50
+        })
+      ]
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case {conn.request_path, conn.method} do
+          {"/v2/my/agent", "GET"} ->
+            Req.Test.json(conn, %{"data" => agent_overview_body(agent.symbol)})
+
+          {"/v2/my/contracts", "GET"} ->
+            Req.Test.json(conn, %{"data" => []})
+
+          {"/v2/my/ships", "GET"} ->
+            ships =
+              if Agent.get(state, & &1.bought),
+                do: [ship_body("ORBITALIST-1"), ship_body("ORBITALIST-2")],
+                else: [ship_body("ORBITALIST-1")]
+
+            Req.Test.json(conn, %{"data" => ships})
+
+          {"/v2/systems/X1-UX81/waypoints", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => [
+                %{
+                  "symbol" => "X1-UX81-A1",
+                  "systemSymbol" => "X1-UX81",
+                  "type" => "ORBITAL_STATION",
+                  "x" => 1,
+                  "y" => 2,
+                  "traits" => [
+                    %{"symbol" => "SHIPYARD", "name" => "Shipyard", "description" => ""}
+                  ]
+                }
+              ]
+            })
+
+          {"/v2/systems/X1-UX81/waypoints/X1-UX81-A1/shipyard", "GET"} ->
+            Req.Test.json(conn, %{"data" => %{"symbol" => "X1-UX81-A1", "ships" => ships}})
+
+          {"/v2/my/ships", "POST"} ->
+            Agent.update(state, &%{&1 | bought: true})
+
+            Req.Test.json(conn, %{
+              "data" => %{
+                "agent" => %{},
+                "ship" => ship_body("ORBITALIST-2"),
+                "transaction" => %{}
+              }
+            })
+        end
+      end)
+
+      {:ok, lv, html} = live(conn, ~p"/")
+
+      assert html =~ "42,000"
+      assert html =~ "Light Freighter"
+      assert html =~ "Mining Drone"
+
+      assert has_element?(
+               lv,
+               "[data-ship-offer=\"SHIP_LIGHT_FREIGHTER\"] button[type=\"submit\"][disabled]"
+             )
+
+      refute has_element?(
+               lv,
+               "[data-ship-offer=\"SHIP_MINING_DRONE\"] button[type=\"submit\"][disabled]"
+             )
+
+      html =
+        lv
+        |> element("[data-ship-offer=\"SHIP_MINING_DRONE\"] form[phx-submit=\"buy_ship\"]")
+        |> render_submit()
+
+      assert html =~ "SHIP_MINING_DRONE purchased"
+      assert html =~ "ORBITALIST-2"
+    end
+
+    test "keeps Buy available when the agent credits are unknown", %{
+      conn: conn,
+      operator: operator
+    } do
+      _agent = agent_fixture(operator)
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case {conn.request_path, conn.method} do
+          {"/v2/my/agent", "GET"} ->
+            conn
+            |> Map.put(:status, 400)
+            |> Req.Test.json(%{
+              "error" => %{"code" => 4000, "message" => "Agent overview unavailable"}
+            })
+
+          {"/v2/my/contracts", "GET"} ->
+            Req.Test.json(conn, %{"data" => []})
+
+          {"/v2/my/ships", "GET"} ->
+            Req.Test.json(conn, %{"data" => [ship_body("ORBITALIST-1")]})
+
+          {"/v2/systems/X1-UX81/waypoints", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => [
+                %{
+                  "symbol" => "X1-UX81-A1",
+                  "systemSymbol" => "X1-UX81",
+                  "type" => "ORBITAL_STATION",
+                  "x" => 1,
+                  "y" => 2,
+                  "traits" => [
+                    %{"symbol" => "SHIPYARD", "name" => "Shipyard", "description" => ""}
+                  ]
+                }
+              ]
+            })
+
+          {"/v2/systems/X1-UX81/waypoints/X1-UX81-A1/shipyard", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => %{"symbol" => "X1-UX81-A1", "ships" => [ship_offer_body()]}
+            })
+        end
+      end)
+
+      {:ok, lv, html} = live(conn, ~p"/")
+
+      assert html =~ "Agent overview unavailable"
+      assert html =~ "Light Freighter"
+      refute has_element?(lv, "[data-ship-offer=\"SHIP_LIGHT_FREIGHTER\"] button[disabled]")
     end
 
     test "unblocks the card when the ship arrives", %{conn: conn, operator: operator} do
