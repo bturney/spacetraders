@@ -18,66 +18,77 @@ defmodule SpaceTradersWeb.DashboardLive do
   alias SpaceTraders.Agent
   alias SpaceTraders.Fleet
   alias SpaceTraders.SystemWaypointProjection
+  alias SpaceTradersWeb.DashboardPrototype
 
   @impl true
   def render(assigns) do
     ~H"""
     <Layouts.app flash={@flash} current_scope={@current_scope} wide>
-      <%= if @operator do %>
-        <div class="space-y-6">
-          <div class="flex flex-col gap-5 sm:flex-row sm:items-end sm:justify-between">
-            <div class="space-y-2">
-              <p class="eyebrow">Operator command deck</p>
-              <.header>
-                Fleet command
-                <:subtitle>
-                  Learn the loop: choose a Mission, move a Ship, and watch your Fleet grow.
-                </:subtitle>
-              </.header>
-            </div>
-            <.link navigate={~p"/agents/new"} class="btn btn-primary min-h-12 shrink-0">Mint an agent</.link>
-          </div>
-
-          <.contract_hero overviews={@overviews} />
-
-          <div :if={@overviews == []} class="alert alert-outline">
-            You haven't minted any agents yet.
-            <.link navigate={~p"/agents/new"} class="font-semibold underline">
-              Mint your first agent
-            </.link>
-            .
-          </div>
-
-          <.agent_section
-            :for={overview <- @overviews}
-            overview={overview}
-            cooldown_tick={@cooldown_tick}
-            selected_waypoints={@selected_waypoints}
-            waypoint_filters={@waypoint_filters}
-            expanded_market_descriptions={@expanded_market_descriptions}
-          />
-        </div>
+      <%= if @prototype_variant do %>
+        <DashboardPrototype.render variant={@prototype_variant} />
       <% else %>
-        <div class="mx-auto max-w-lg py-16 text-center">
-          <h1 class="text-4xl font-bold tracking-tight">SpaceTraders dashboard</h1>
-          <p class="mt-4 text-lg opacity-80">
-            Drive your fleet and missions from the browser. Log in or register to get started.
-          </p>
-          <div class="mt-10 flex justify-center gap-4">
-            <.link href={~p"/operators/log-in"} class="btn btn-primary">Log in</.link>
-            <.link href={~p"/operators/register"} class="btn btn-soft">Register</.link>
+        <%= if @operator do %>
+          <div class="space-y-6">
+            <div class="flex flex-col gap-5 sm:flex-row sm:items-end sm:justify-between">
+              <div class="space-y-2">
+                <p class="eyebrow">Operator command deck</p>
+                <.header>
+                  Fleet command
+                  <:subtitle>
+                    Learn the loop: choose a Mission, move a Ship, and watch your Fleet grow.
+                  </:subtitle>
+                </.header>
+              </div>
+              <.link navigate={~p"/agents/new"} class="btn btn-primary min-h-12 shrink-0">Mint an agent</.link>
+            </div>
+
+            <.contract_hero overviews={@overviews} />
+
+            <div :if={@overviews == []} class="alert alert-outline">
+              You haven't minted any agents yet.
+              <.link navigate={~p"/agents/new"} class="font-semibold underline">
+                Mint your first agent
+              </.link>
+              .
+            </div>
+
+            <.agent_section
+              :for={overview <- @overviews}
+              overview={overview}
+              cooldown_tick={@cooldown_tick}
+              selected_waypoints={@selected_waypoints}
+              waypoint_filters={@waypoint_filters}
+              expanded_market_descriptions={@expanded_market_descriptions}
+            />
           </div>
-        </div>
+        <% else %>
+          <div class="mx-auto max-w-lg py-16 text-center">
+            <h1 class="text-4xl font-bold tracking-tight">SpaceTraders dashboard</h1>
+            <p class="mt-4 text-lg opacity-80">
+              Drive your fleet and missions from the browser. Log in or register to get started.
+            </p>
+            <div class="mt-10 flex justify-center gap-4">
+              <.link href={~p"/operators/log-in"} class="btn btn-primary">Log in</.link>
+              <.link href={~p"/operators/register"} class="btn btn-soft">Register</.link>
+            </div>
+          </div>
+        <% end %>
       <% end %>
     </Layouts.app>
     """
   end
 
   @impl true
-  def mount(_params, _session, socket) do
-    case socket.assigns.current_scope do
-      nil -> mount_anonymous(socket)
-      %{operator: operator} -> mount_operator(socket, operator)
+  def mount(params, _session, socket) do
+    socket = assign(socket, :prototype_variant, prototype_variant(params["prototype"]))
+
+    if socket.assigns.prototype_variant do
+      {:ok, socket}
+    else
+      case socket.assigns.current_scope do
+        nil -> mount_anonymous(socket)
+        %{operator: operator} -> mount_operator(socket, operator)
+      end
     end
   end
 
@@ -88,6 +99,19 @@ defmodule SpaceTradersWeb.DashboardLive do
       {:ok, redirect(socket, to: ~p"/setup")}
     end
   end
+
+  defp prototype_variant(variant) when variant in ["a", "b", "c"], do: variant
+  defp prototype_variant(_variant), do: nil
+
+  defp previous_prototype("a"), do: "c"
+  defp previous_prototype("b"), do: "a"
+  defp previous_prototype("c"), do: "b"
+  defp previous_prototype(_variant), do: "a"
+
+  defp next_prototype("a"), do: "b"
+  defp next_prototype("b"), do: "c"
+  defp next_prototype("c"), do: "a"
+  defp next_prototype(_variant), do: "a"
 
   defp mount_operator(socket, operator) do
     agents = Agent.list_agents(operator)
@@ -352,6 +376,21 @@ defmodule SpaceTradersWeb.DashboardLive do
     else
       {:error, reason} -> {:noreply, put_flash(socket, :error, live_error(reason))}
     end
+  end
+
+  @impl true
+  def handle_event("prototype_variant", %{"variant" => variant}, socket) do
+    {:noreply, push_patch(socket, to: "/?prototype=#{prototype_variant(variant)}")}
+  end
+
+  def handle_event("prototype_variant", %{"key" => "ArrowLeft"}, socket) do
+    {:noreply,
+     push_patch(socket, to: "/?prototype=#{previous_prototype(socket.assigns.prototype_variant)}")}
+  end
+
+  def handle_event("prototype_variant", %{"key" => "ArrowRight"}, socket) do
+    {:noreply,
+     push_patch(socket, to: "/?prototype=#{next_prototype(socket.assigns.prototype_variant)}")}
   end
 
   @impl true
