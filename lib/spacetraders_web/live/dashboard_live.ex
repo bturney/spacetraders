@@ -847,6 +847,8 @@ defmodule SpaceTradersWeb.DashboardLive do
                       :for={route <- @transit_routes}
                       class="system-map-transit-route"
                       data-transit-route={route.ship.symbol}
+                      data-transit-origin={route.origin.symbol}
+                      data-transit-destination={route.destination.symbol}
                       x1={route.origin.x}
                       y1={route.origin.y}
                       x2={route.destination.x}
@@ -858,8 +860,9 @@ defmodule SpaceTradersWeb.DashboardLive do
                       data-waypoint-symbol={waypoint.symbol}
                       data-x={waypoint.x}
                       data-y={waypoint.y}
-                      data-orbital-index={waypoint.orbital_index}
-                      data-orbital-count={waypoint.orbital_count}
+                      data-orbital-offset-x={waypoint.orbital_offset_x}
+                      data-orbital-offset-y={waypoint.orbital_offset_y}
+                      data-orbital-distance={waypoint.orbital_distance}
                       class={"system-map-waypoint #{waypoint_marker(waypoint.type)} #{selected_waypoint_class(waypoint, @selected_symbol)} #{filtered_waypoint_class(waypoint, @filtered_set)}"}
                       phx-click="select_waypoint"
                       phx-value-agent_id={@agent_id}
