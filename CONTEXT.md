@@ -83,9 +83,11 @@ A vessel the Agent owns (e.g., ORBITALIST-1, class COMMAND). Travels between way
 _Avoid_: vessel
 
 **Autopilot**:
-An Operator-started, per-Ship intent to execute one configured local extract/sell loop. Its persisted configuration and execution status are Fleet state; it never resumes an action without reconciling authoritative game state.
+An Operator-started, per-Ship intent to execute one configured local extract/sell loop. Its persisted configuration and execution status are Fleet state; it never resumes an action without reconciling authoritative game state. It may act only within its configured extraction Waypoint, Market, and Cargo threshold.
 _Avoid_: bot, automatic mode
 
+**Manual Mode**:
+A Ship operating mode in which the Operator issues direct commands. Any direct command pauses Autopilot before it runs; resuming automation requires revalidation against game truth.
 **Ship Readiness**:
 The capability and condition information that determines what a Ship can do: flight mode, crew, frame, reactor, engine, modules, and mounts. It supplements, but does not replace, the Ship's immediate operational status, location, fuel, cargo, and actions.
 

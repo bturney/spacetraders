@@ -40,6 +40,7 @@ cat > "$PROJECT_ROOT/scripts/teardown" <<'EOF'
 set -euo pipefail
 rm -f "$TEST_LEASES/$AGENT_TASK_ID"
 rm -f .worktree-env
+rm -rf deps
 EOF
 
 cat > "$RUNNER" <<'EOF'
@@ -48,7 +49,7 @@ pwd > "$1"
 printf '%s\n' "${AGENT_TASK_ID:-}" > "$2"
 EOF
 
-printf '.worktree-env\nignored-proof\nnested/keep.db\n' > "$PROJECT_ROOT/.gitignore"
+printf '.worktree-env\nignored-proof\nnested/keep.db\ndeps/\n' > "$PROJECT_ROOT/.gitignore"
 
 chmod +x "$PROJECT_ROOT/scripts/"* "$RUNNER"
 
@@ -166,5 +167,11 @@ if "$PROJECT_ROOT/scripts/task-stop" nested-db-stop; then
 fi
 rm -rf "$TEMP_ROOT/project-nested-db-stop/nested"
 "$PROJECT_ROOT/scripts/task-stop" nested-db-stop
+
+"$PROJECT_ROOT/scripts/task-start" nested-dependency-stop
+mkdir -p "$TEMP_ROOT/project-nested-dependency-stop/deps/daisyui"
+git -C "$TEMP_ROOT/project-nested-dependency-stop/deps/daisyui" init --quiet
+"$PROJECT_ROOT/scripts/task-stop" nested-dependency-stop
+[ ! -e "$TEMP_ROOT/project-nested-dependency-stop" ]
 
 echo "Task workspace lifecycle passed."
