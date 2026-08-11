@@ -54,6 +54,7 @@ defmodule SpaceTradersWeb.DashboardLive do
             cooldown_tick={@cooldown_tick}
             selected_waypoints={@selected_waypoints}
             waypoint_filters={@waypoint_filters}
+            expanded_market_descriptions={@expanded_market_descriptions}
           />
         </div>
       <% else %>
@@ -104,6 +105,7 @@ defmodule SpaceTradersWeb.DashboardLive do
        operator: operator,
        overviews: overviews,
        cooldown_tick: 0,
+       expanded_market_descriptions: MapSet.new(),
        selected_waypoints: %{},
        waypoint_filters: %{}
      )}
@@ -261,6 +263,23 @@ defmodule SpaceTradersWeb.DashboardLive do
   def handle_event("filter_waypoints", %{"agent_id" => agent_id, "filter" => filter}, socket) do
     waypoint_filters = Map.put(socket.assigns.waypoint_filters, agent_id, filter)
     {:noreply, assign(socket, waypoint_filters: waypoint_filters)}
+  end
+
+  @impl true
+  def handle_event(
+        "toggle_market_description",
+        %{"agent_id" => agent_id, "waypoint" => waypoint, "symbol" => symbol},
+        socket
+      ) do
+    key = {agent_id, waypoint, symbol}
+    expanded = socket.assigns.expanded_market_descriptions
+
+    expanded =
+      if MapSet.member?(expanded, key),
+        do: MapSet.delete(expanded, key),
+        else: MapSet.put(expanded, key)
+
+    {:noreply, assign(socket, expanded_market_descriptions: expanded)}
   end
 
   @impl true
@@ -503,6 +522,7 @@ defmodule SpaceTradersWeb.DashboardLive do
   attr :cooldown_tick, :integer, required: true
   attr :selected_waypoints, :map, default: %{}
   attr :waypoint_filters, :map, default: %{}
+  attr :expanded_market_descriptions, :any, default: MapSet.new()
 
   defp agent_section(assigns) do
     ~H"""
@@ -525,7 +545,11 @@ defmodule SpaceTradersWeb.DashboardLive do
             agent_id={@overview.agent.id}
             credits={live_credits(@overview.overview)}
           />
-          <.market_panel listings={@overview.markets} />
+          <.market_panel
+            listings={@overview.markets}
+            agent_id={@overview.agent.id}
+            expanded_descriptions={@expanded_market_descriptions}
+          />
         </div>
       </div>
       <.system_map
@@ -804,6 +828,8 @@ defmodule SpaceTradersWeb.DashboardLive do
   end
 
   attr :listings, :any, required: true
+  attr :agent_id, :integer, required: true
+  attr :expanded_descriptions, :any, required: true
 
   defp market_panel(assigns) do
     ~H"""
@@ -824,13 +850,66 @@ defmodule SpaceTradersWeb.DashboardLive do
           <div :for={listing <- listings} class="mt-4 space-y-4">
             <div class="font-mono text-sm">{listing.waypoint}</div>
             <div :for={good <- listing.market.trade_goods || []} class="space-y-2">
+              <% meta = good_meta(listing.market, good.symbol) %>
               <div class="flex items-center justify-between gap-3 text-sm">
-                <span>{good.symbol}</span>
+                <div class="flex min-w-0 items-center gap-2">
+                  <span class="font-mono font-semibold">{good.symbol}</span>
+                  <span :if={meta.name} class="truncate opacity-70">{meta.name}</span>
+                </div>
                 <span class="font-mono">
                   Buy {credits_label(good.purchase_price)} cr <span class="opacity-50">·</span>
                   Sell {credits_label(good.sell_price)} cr
                 </span>
               </div>
+              <div class="flex flex-wrap items-center gap-1.5 text-xs">
+                <span class="badge badge-outline badge-xs">{trade_role_label(good.type)}</span>
+                <span class={supply_badge_class(good.supply)}>{good.supply}</span>
+                <span :if={good.activity} class={activity_badge_class(good.activity)}>{good.activity}</span>
+                <span class="opacity-70">Vol {good.trade_volume}</span>
+                <button
+                  :if={meta.description}
+                  type="button"
+                  phx-click="toggle_market_description"
+                  phx-value-agent_id={@agent_id}
+                  phx-value-waypoint={listing.waypoint}
+                  phx-value-symbol={good.symbol}
+                  aria-expanded={
+                    to_string(
+                      description_expanded?(
+                        @expanded_descriptions,
+                        @agent_id,
+                        listing.waypoint,
+                        good.symbol
+                      )
+                    )
+                  }
+                  aria-controls={"market-description-#{listing.waypoint}-#{good.symbol}"}
+                  class="btn btn-ghost btn-xs px-2"
+                >
+                  {if description_expanded?(
+                        @expanded_descriptions,
+                        @agent_id,
+                        listing.waypoint,
+                        good.symbol
+                      ),
+                      do: "Hide description",
+                      else: "Show description"}
+                </button>
+              </div>
+              <p
+                :if={
+                  description_expanded?(
+                    @expanded_descriptions,
+                    @agent_id,
+                    listing.waypoint,
+                    good.symbol
+                  )
+                }
+                id={"market-description-#{listing.waypoint}-#{good.symbol}"}
+                class="text-sm opacity-70"
+              >
+                {meta.description}
+              </p>
               <form
                 :for={ship <- listing.ships}
                 :if={sellable?(ship, good)}
@@ -1810,6 +1889,44 @@ defmodule SpaceTradersWeb.DashboardLive do
 
   defp buyable?(ship, good) do
     (good.purchase_price || 0) > 0 and cargo_space(ship, good) > 0
+  end
+
+  @caution_supply ["SCARCE", "LIMITED"]
+  @caution_activity ["RESTRICTED"]
+
+  defp good_meta(market, symbol) do
+    good_catalog(market) |> Map.get(symbol, %{name: nil, description: nil})
+  end
+
+  defp good_catalog(market) do
+    Enum.reduce([market.exports, market.imports, market.exchange], %{}, fn goods, catalog ->
+      Enum.reduce(goods || [], catalog, fn good, catalog ->
+        Map.put_new(catalog, good.symbol, %{
+          name: good.name,
+          description: good.description
+        })
+      end)
+    end)
+  end
+
+  defp trade_role_label(nil), do: "—"
+
+  defp trade_role_label(role) when is_binary(role) do
+    role |> String.downcase() |> String.capitalize()
+  end
+
+  defp supply_badge_class(supply) when supply in @caution_supply,
+    do: "badge badge-warning badge-xs"
+
+  defp supply_badge_class(_), do: "badge badge-outline badge-xs"
+
+  defp activity_badge_class(activity) when activity in @caution_activity,
+    do: "badge badge-warning badge-xs"
+
+  defp activity_badge_class(_), do: "badge badge-outline badge-xs"
+
+  defp description_expanded?(expanded, agent_id, waypoint, symbol) do
+    MapSet.member?(expanded, {to_string(agent_id), waypoint, symbol})
   end
 
   defp cargo_space(ship, good) do

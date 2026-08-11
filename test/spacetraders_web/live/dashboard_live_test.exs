@@ -523,6 +523,161 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       assert html =~ "You do not have enough credits to purchase this good."
     end
 
+    test "shows Market Signals on trade rows from a complete market response", %{
+      conn: conn,
+      operator: operator
+    } do
+      agent = agent_fixture(operator)
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case conn.request_path do
+          "/v2/my/agent" ->
+            Req.Test.json(conn, %{"data" => agent_overview_body(agent.symbol)})
+
+          "/v2/my/contracts" ->
+            Req.Test.json(conn, %{"data" => []})
+
+          "/v2/my/ships" ->
+            Req.Test.json(conn, %{"data" => [ship_body("ORBITALIST-1")]})
+
+          "/v2/systems/X1-UX81/waypoints" ->
+            Req.Test.json(conn, %{
+              "data" => [
+                %{
+                  "symbol" => "X1-UX81-A1",
+                  "systemSymbol" => "X1-UX81",
+                  "type" => "ORBITAL_STATION",
+                  "traits" => [%{"symbol" => "MARKETPLACE"}, %{"symbol" => "SHIPYARD"}]
+                }
+              ]
+            })
+
+          "/v2/systems/X1-UX81/waypoints/X1-UX81-A1/shipyard" ->
+            Req.Test.json(conn, %{"data" => %{"symbol" => "X1-UX81-A1", "ships" => []}})
+
+          "/v2/systems/X1-UX81/waypoints/X1-UX81-A1/market" ->
+            Req.Test.json(conn, %{
+              "data" => %{
+                "symbol" => "X1-UX81-A1",
+                "exports" => [
+                  %{
+                    "symbol" => "IRON_ORE",
+                    "name" => "Iron Ore",
+                    "description" => "Iron ore mined from asteroids and rocky planets."
+                  }
+                ],
+                "imports" => [
+                  %{
+                    "symbol" => "SHIP_PLATING",
+                    "name" => "Ship Plating",
+                    "description" => "A collection of ship plating for hull repairs."
+                  }
+                ],
+                "exchange" => [
+                  %{
+                    "symbol" => "FUEL",
+                    "name" => "Fuel",
+                    "description" => "Fuel for ship engines."
+                  }
+                ],
+                "transactions" => [
+                  %{
+                    "shipSymbol" => "ORBITALIST-1",
+                    "tradeSymbol" => "IRON_ORE",
+                    "type" => "SELL",
+                    "units" => 5,
+                    "pricePerUnit" => 80,
+                    "totalPrice" => 400,
+                    "waypointSymbol" => "X1-UX81-A1",
+                    "timestamp" => "2026-01-01T00:00:00.000Z"
+                  }
+                ],
+                "tradeGoods" => [
+                  %{
+                    "symbol" => "IRON_ORE",
+                    "type" => "EXPORT",
+                    "sellPrice" => 80,
+                    "purchasePrice" => 100,
+                    "supply" => "LIMITED",
+                    "activity" => "STRONG",
+                    "tradeVolume" => 20
+                  },
+                  %{
+                    "symbol" => "SHIP_PLATING",
+                    "type" => "IMPORT",
+                    "sellPrice" => 7920,
+                    "purchasePrice" => 14384,
+                    "supply" => "SCARCE",
+                    "activity" => "RESTRICTED",
+                    "tradeVolume" => 5
+                  },
+                  %{
+                    "symbol" => "FUEL",
+                    "type" => "EXCHANGE",
+                    "sellPrice" => 50,
+                    "purchasePrice" => 70,
+                    "supply" => "ABUNDANT",
+                    "tradeVolume" => 100
+                  }
+                ]
+              }
+            })
+        end
+      end)
+
+      {:ok, lv, html} = live(conn, ~p"/")
+      assert html =~ "Market"
+
+      assert html =~ "IRON_ORE"
+      assert html =~ "Iron Ore"
+      assert html =~ "Export"
+      assert html =~ "LIMITED"
+      assert html =~ "STRONG"
+      assert html =~ "Vol 20"
+
+      assert html =~ "SHIP_PLATING"
+      assert html =~ "Ship Plating"
+      assert html =~ "Import"
+      assert html =~ "SCARCE"
+      assert html =~ "RESTRICTED"
+      assert html =~ "Vol 5"
+
+      assert html =~ "FUEL"
+      assert html =~ "Exchange"
+      assert html =~ "ABUNDANT"
+      assert html =~ "Vol 100"
+
+      assert html =~ ~s(class="badge badge-warning badge-xs">LIMITED</span>)
+      assert html =~ ~s(class="badge badge-warning badge-xs">SCARCE</span>)
+      assert html =~ ~s(class="badge badge-warning badge-xs">RESTRICTED</span>)
+      refute html =~ ~s(class="badge badge-warning badge-xs">ABUNDANT</span>)
+      refute html =~ ~s(class="badge badge-warning badge-xs">STRONG</span>)
+
+      refute html =~ "Transactions"
+      refute html =~ "totalPrice"
+
+      refute html =~ "Iron ore mined from asteroids and rocky planets."
+      refute html =~ "Hide description"
+      assert html =~ ~s(aria-expanded="false")
+
+      html =
+        lv
+        |> element(~s{button[phx-click="toggle_market_description"][phx-value-symbol="IRON_ORE"]})
+        |> render_click()
+
+      assert html =~ "Iron ore mined from asteroids and rocky planets."
+      assert html =~ "Hide description"
+      assert html =~ ~s(aria-expanded="true")
+      assert html =~ ~s(id="market-description-X1-UX81-A1-IRON_ORE")
+
+      html =
+        lv
+        |> element(~s{button[phx-click="toggle_market_description"][phx-value-symbol="IRON_ORE"]})
+        |> render_click()
+
+      refute html =~ "Iron ore mined from asteroids and rocky planets."
+    end
+
     test "renders a fleet card grid with location, fuel, cargo and nav state", %{
       conn: conn,
       operator: operator
