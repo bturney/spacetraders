@@ -40,6 +40,16 @@ defmodule SpaceTraders.API do
     Waypoint
   }
 
+  alias SpaceTraders.API.Request.{
+    DeliverContractRequest,
+    JettisonCargoRequest,
+    NavigateRequest,
+    PurchaseCargoRequest,
+    PurchaseShipRequest,
+    RegisterRequest,
+    SellCargoRequest
+  }
+
   @type token() :: String.t()
   @type result() ::
           {:ok, term()}
@@ -55,7 +65,9 @@ defmodule SpaceTraders.API do
   @spec register(token(), String.t(), String.t(), String.t()) :: result()
   def register(account_token, symbol, faction, email) do
     request(:post, "/register", account_token,
-      json: %{symbol: symbol, faction: faction, email: email},
+      json:
+        RegisterRequest.new(%{symbol: symbol, faction: faction, email: email})
+        |> RegisterRequest.to_json(),
       as:
         {:map,
          %{
@@ -98,7 +110,13 @@ defmodule SpaceTraders.API do
   @spec deliver_contract(token(), String.t(), String.t(), String.t(), pos_integer()) :: result()
   def deliver_contract(token, contract_id, ship_symbol, trade_symbol, units) do
     request(:post, "/my/contracts/#{contract_id}/deliver", token,
-      json: %{shipSymbol: ship_symbol, tradeSymbol: trade_symbol, units: units},
+      json:
+        DeliverContractRequest.new(%{
+          ship_symbol: ship_symbol,
+          trade_symbol: trade_symbol,
+          units: units
+        })
+        |> DeliverContractRequest.to_json(),
       as: {:map, %{contract: {:model, Contract}, cargo: {:model, ShipCargo}}}
     )
   end
@@ -135,7 +153,7 @@ defmodule SpaceTraders.API do
   @spec navigate_ship(token(), String.t(), String.t()) :: result()
   def navigate_ship(token, ship_symbol, waypoint_symbol) do
     request(:post, "/my/ships/#{ship_symbol}/navigate", token,
-      json: %{waypointSymbol: waypoint_symbol},
+      json: NavigateRequest.new(%{waypoint_symbol: waypoint_symbol}) |> NavigateRequest.to_json(),
       as: {:map, %{fuel: {:model, ShipFuel}, nav: {:model, ShipNav}}}
     )
   end
@@ -185,7 +203,8 @@ defmodule SpaceTraders.API do
   @spec sell_cargo(token(), String.t(), String.t(), pos_integer()) :: result()
   def sell_cargo(token, ship_symbol, trade_symbol, units) do
     request(:post, "/my/ships/#{ship_symbol}/sell", token,
-      json: %{symbol: trade_symbol, units: units},
+      json:
+        SellCargoRequest.new(%{symbol: trade_symbol, units: units}) |> SellCargoRequest.to_json(),
       as:
         {:map,
          %{
@@ -200,7 +219,9 @@ defmodule SpaceTraders.API do
   @spec purchase_cargo(token(), String.t(), String.t(), pos_integer()) :: result()
   def purchase_cargo(token, ship_symbol, trade_symbol, units) do
     request(:post, "/my/ships/#{ship_symbol}/purchase", token,
-      json: %{symbol: trade_symbol, units: units},
+      json:
+        PurchaseCargoRequest.new(%{symbol: trade_symbol, units: units})
+        |> PurchaseCargoRequest.to_json(),
       as:
         {:map,
          %{
@@ -215,7 +236,9 @@ defmodule SpaceTraders.API do
   @spec jettison_cargo(token(), String.t(), String.t(), pos_integer()) :: result()
   def jettison_cargo(token, ship_symbol, trade_symbol, units) do
     request(:post, "/my/ships/#{ship_symbol}/jettison", token,
-      json: %{symbol: trade_symbol, units: units},
+      json:
+        JettisonCargoRequest.new(%{symbol: trade_symbol, units: units})
+        |> JettisonCargoRequest.to_json(),
       as: {:map, %{cargo: {:model, ShipCargo}}}
     )
   end
@@ -224,7 +247,9 @@ defmodule SpaceTraders.API do
   @spec purchase_ship(token(), String.t(), String.t()) :: result()
   def purchase_ship(token, ship_type, waypoint_symbol) do
     request(:post, "/my/ships", token,
-      json: %{shipType: ship_type, waypointSymbol: waypoint_symbol},
+      json:
+        PurchaseShipRequest.new(%{ship_type: ship_type, waypoint_symbol: waypoint_symbol})
+        |> PurchaseShipRequest.to_json(),
       as:
         {:map,
          %{

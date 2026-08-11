@@ -16,8 +16,18 @@ defmodule Mix.Tasks.SpaceTraders.Gen.Models do
   use Mix.Task
 
   @models_dir "priv/spec/models"
-  @out_dir "lib/spacetraders/api/models"
-  @ns "SpaceTraders.API.Model"
+  @spec_path "priv/spec/SpaceTraders.json"
+  @model_target {"lib/spacetraders/api/models", "SpaceTraders.API.Model"}
+  @request_target {"lib/spacetraders/api/request", "SpaceTraders.API.Request"}
+  @request_operations [
+    {"/register", "RegisterRequest"},
+    {"/my/contracts/{contractId}/deliver", "DeliverContractRequest"},
+    {"/my/ships/{shipSymbol}/navigate", "NavigateRequest"},
+    {"/my/ships/{shipSymbol}/sell", "SellCargoRequest"},
+    {"/my/ships/{shipSymbol}/purchase", "PurchaseCargoRequest"},
+    {"/my/ships/{shipSymbol}/jettison", "JettisonCargoRequest"},
+    {"/my/ships", "PurchaseShipRequest"}
+  ]
 
   @impl true
   def run(args) do
@@ -28,51 +38,35 @@ defmodule Mix.Tasks.SpaceTraders.Gen.Models do
     end
   end
 
-  # Re-write lib/spacetraders/api/models/*.ex from priv/spec/models/*.json.
+  # Re-write generated response models and request payloads from the bundled spec.
   defp regenerate do
-    out_dir = Path.expand(@out_dir)
-    File.mkdir_p!(out_dir)
-    File.rm(list_files(out_dir))
+    for {target, sources} <- generated_targets() do
+      {out_dir, _namespace} = target
+      out_dir = Path.expand(out_dir)
+      File.mkdir_p!(out_dir)
+      File.rm(list_files(out_dir))
 
-    for {name, source} <- generate_sources() do
-      File.write!(Path.join(out_dir, name), source)
+      for {name, source} <- sources do
+        File.write!(Path.join(out_dir, name), source)
+      end
     end
 
-    Mix.shell().info("Generated #{map_size(generate_sources())} structs into #{@out_dir}")
+    Mix.shell().info("Generated #{generated_count()} structs from the bundled spec")
   end
 
   # Fail if the committed structs are stale relative to the bundled spec.
   defp check_no_drift do
-    generated = generate_sources()
-    out_dir = Path.expand(@out_dir)
+    for {target, generated} <- generated_targets() do
+      {out_dir, _namespace} = target
 
-    committed =
-      list_files(out_dir) |> Map.new(fn path -> {Path.basename(path), File.read!(path)} end)
+      committed =
+        list_files(Path.expand(out_dir))
+        |> Map.new(fn path -> {Path.basename(path), File.read!(path)} end)
 
-    extra =
-      Map.keys(committed)
-      |> Kernel.--(Map.keys(generated))
-
-    if extra != [] do
-      Mix.raise(
-        "Stale generated files not produced by the current spec: #{Enum.join(extra, ", ")}. " <>
-          "Run `mix space_traders.gen.models`."
-      )
+      check_target_no_drift(out_dir, generated, committed)
     end
 
-    for {name, source} <- generated do
-      committed_source = Map.get(committed, name)
-
-      if committed_source != source do
-        Mix.raise("""
-        #{name} is stale — the bundled spec changed. Run `mix space_traders.gen.models`.
-        """)
-      end
-    end
-
-    Mix.shell().info(
-      "Structs are up to date with the bundled spec (#{map_size(generated)} files)"
-    )
+    Mix.shell().info("Structs are up to date with the bundled spec (#{generated_count()} files)")
   end
 
   @doc false
@@ -82,7 +76,7 @@ defmodule Mix.Tasks.SpaceTraders.Gen.Models do
 
     Map.new(models, fn {name, model} ->
       source =
-        generate(model, name, models)
+        generate_model(model, name, models, model_namespace())
         |> Code.format_string!()
         |> IO.iodata_to_binary()
         |> ensure_trailing_newline()
@@ -90,6 +84,56 @@ defmodule Mix.Tasks.SpaceTraders.Gen.Models do
       {Macro.underscore(name) <> ".ex", source}
     end)
   end
+
+  @doc false
+  @spec generate_request_sources() :: %{String.t() => String.t()}
+  def generate_request_sources do
+    models = load_models()
+
+    @request_operations
+    |> Map.new(fn {path, name} ->
+      schema = request_schema(path)
+
+      source =
+        generate_request(schema, name, models, request_namespace())
+        |> Code.format_string!()
+        |> IO.iodata_to_binary()
+        |> ensure_trailing_newline()
+
+      {Macro.underscore(name) <> ".ex", source}
+    end)
+  end
+
+  defp generated_targets do
+    %{
+      @model_target => generate_sources(),
+      @request_target => generate_request_sources()
+    }
+  end
+
+  defp generated_count do
+    generated_targets() |> Map.values() |> Enum.map(&map_size/1) |> Enum.sum()
+  end
+
+  defp check_target_no_drift(out_dir, generated, committed) do
+    extra = Map.keys(committed) -- Map.keys(generated)
+
+    if extra != [] do
+      Mix.raise(
+        "Stale generated files in #{out_dir}: #{Enum.join(extra, ", ")}. " <>
+          "Run `mix space_traders.gen.models`."
+      )
+    end
+
+    for {name, source} <- generated do
+      if committed[name] != source do
+        Mix.raise("#{Path.join(out_dir, name)} is stale — run `mix space_traders.gen.models`.")
+      end
+    end
+  end
+
+  defp model_namespace, do: elem(@model_target, 1)
+  defp request_namespace, do: elem(@request_target, 1)
 
   defp ensure_trailing_newline(source) do
     if String.ends_with?(source, "\n"), do: source, else: source <> "\n"
@@ -141,7 +185,7 @@ defmodule Mix.Tasks.SpaceTraders.Gen.Models do
     is_map(prop) and prop["type"] == "object" and is_map(prop["properties"])
   end
 
-  defp generate(%{"type" => "object"} = model, name, models) do
+  defp generate_model(%{"type" => "object"} = model, name, models, namespace) do
     fields = model["properties"] || %{}
     required = MapSet.new(model["required"] || [])
 
@@ -153,18 +197,18 @@ defmodule Mix.Tasks.SpaceTraders.Gen.Models do
 
     type_fields =
       Enum.map(fields, fn {field, prop} ->
-        "    #{Macro.underscore(field)}: #{field_type(prop, name, field, models, required)}"
+        "    #{Macro.underscore(field)}: #{field_type(prop, name, field, models, required, namespace)}"
       end)
 
     decode_fields =
       Enum.map(fields, fn {field, prop} ->
-        "    #{Macro.underscore(field)}: #{decode_expr(prop, name, field, models)}"
+        "    #{Macro.underscore(field)}: #{decode_expr(prop, name, field, models, namespace)}"
       end)
 
     moduledoc = (model["description"] || "") |> String.trim() |> inspect()
 
     """
-    defmodule #{@ns}.#{name} do
+    defmodule #{namespace}.#{name} do
       @moduledoc #{moduledoc}
 
       defstruct [
@@ -175,7 +219,7 @@ defmodule Mix.Tasks.SpaceTraders.Gen.Models do
     #{Enum.join(type_fields, ",\n")}
       }
 
-      @doc "Decodes an API payload map into `#{@ns}.#{name}`."
+      @doc "Decodes an API payload map into `#{namespace}.#{name}`."
       @spec from_json(map()) :: t()
       def from_json(json) when is_map(json) do
         %__MODULE__{
@@ -186,9 +230,9 @@ defmodule Mix.Tasks.SpaceTraders.Gen.Models do
     """
   end
 
-  defp generate(%{"enum" => enums} = model, name, _models) do
+  defp generate_model(%{"enum" => enums} = model, name, _models, namespace) do
     """
-    defmodule #{@ns}.#{name} do
+    defmodule #{namespace}.#{name} do
       @moduledoc #{(model["description"] || "") |> String.trim() |> inspect()}
 
       @type t :: String.t()
@@ -201,9 +245,9 @@ defmodule Mix.Tasks.SpaceTraders.Gen.Models do
     """
   end
 
-  defp generate(model, name, _models) do
+  defp generate_model(model, name, _models, namespace) do
     """
-    defmodule #{@ns}.#{name} do
+    defmodule #{namespace}.#{name} do
       @moduledoc #{(model["description"] || "") |> String.trim() |> inspect()}
 
       @type t :: #{primitive_type(model["type"])}
@@ -218,34 +262,40 @@ defmodule Mix.Tasks.SpaceTraders.Gen.Models do
   defp primitive_type(_), do: "term()"
 
   # Field type: optional fields get `| nil`, arrays of object refs become lists.
-  defp field_type(prop, parent, field, models, required) do
+  defp field_type(prop, parent, field, models, required, namespace) do
     optional = if MapSet.member?(required, field), do: "", else: " | nil"
-    base = field_type_base(prop, parent, field, models)
+    base = field_type_base(prop, parent, field, models, namespace)
     base <> optional
   end
 
-  defp field_type_base(%{"type" => "array", "items" => items}, parent, field, models) do
-    "[#{field_type_base(items, parent, field, models)}]"
+  defp field_type_base(%{"type" => "array", "items" => items}, parent, field, models, namespace) do
+    "[#{field_type_base(items, parent, field, models, namespace)}]"
   end
 
-  defp field_type_base(%{"$ref" => ref}, _parent, _field, models) do
+  defp field_type_base(%{"$ref" => ref}, _parent, _field, models, _namespace) do
     ref_type(ref, models)
   end
 
-  defp field_type_base(%{"type" => "object"}, parent, field, _models) do
-    "#{@ns}.#{parent}#{Macro.camelize(field)}.t()"
+  defp field_type_base(%{"type" => "object"}, parent, field, _models, namespace) do
+    "#{namespace}.#{parent}#{Macro.camelize(field)}.t()"
   end
 
-  defp field_type_base(%{"type" => "string"}, _parent, _field, _models), do: "String.t()"
-  defp field_type_base(%{"type" => "integer"}, _parent, _field, _models), do: "integer()"
-  defp field_type_base(%{"type" => "number"}, _parent, _field, _models), do: "float()"
-  defp field_type_base(%{"type" => "boolean"}, _parent, _field, _models), do: "boolean()"
+  defp field_type_base(%{"type" => "string"}, _parent, _field, _models, _namespace),
+    do: "String.t()"
+
+  defp field_type_base(%{"type" => "integer"}, _parent, _field, _models, _namespace),
+    do: "integer()"
+
+  defp field_type_base(%{"type" => "number"}, _parent, _field, _models, _namespace), do: "float()"
+
+  defp field_type_base(%{"type" => "boolean"}, _parent, _field, _models, _namespace),
+    do: "boolean()"
 
   defp ref_type(ref, models) do
     name = ref_name(ref)
 
     case Map.fetch(models, name) do
-      {:ok, %{"type" => "object"}} -> "#{@ns}.#{name}.t()"
+      {:ok, %{"type" => "object"}} -> "#{model_namespace()}.#{name}.t()"
       {:ok, %{"enum" => _}} -> "String.t()"
       {:ok, model} -> primitive_type(model["type"])
       :error -> "term()"
@@ -255,41 +305,112 @@ defmodule Mix.Tasks.SpaceTraders.Gen.Models do
   defp ref_name(ref), do: ref |> Path.basename(".json") |> String.trim_trailing(".json")
 
   # Decode expressions reference the exact struct module, including synthetic ones.
-  defp decode_expr(%{"type" => "array", "items" => %{"$ref" => ref}}, _parent, field, models) do
+  defp decode_expr(
+         %{"type" => "array", "items" => %{"$ref" => ref}},
+         _parent,
+         field,
+         models,
+         namespace
+       ) do
     target = ref_name(ref)
 
     if match?({:ok, %{"type" => "object"}}, Map.fetch(models, target)) do
-      "Enum.map(json[#{inspect(field)}] || [], &#{@ns}.#{target}.from_json/1)"
+      "Enum.map(json[#{inspect(field)}] || [], &#{namespace}.#{target}.from_json/1)"
     else
       "json[#{inspect(field)}] || []"
     end
   end
 
-  defp decode_expr(%{"type" => "array", "items" => items}, parent, field, _models) do
+  defp decode_expr(%{"type" => "array", "items" => items}, parent, field, _models, namespace) do
     if inline_object?(items) do
-      mod = "#{@ns}.#{parent}#{Macro.camelize(field)}"
+      mod = "#{namespace}.#{parent}#{Macro.camelize(field)}"
       "Enum.map(json[#{inspect(field)}] || [], &#{mod}.from_json/1)"
     else
       "json[#{inspect(field)}] || []"
     end
   end
 
-  defp decode_expr(%{"$ref" => ref}, _parent, field, models) do
+  defp decode_expr(%{"$ref" => ref}, _parent, field, models, namespace) do
     target = ref_name(ref)
 
     if match?({:ok, %{"type" => "object"}}, Map.fetch(models, target)) do
-      "json[#{inspect(field)}] && #{@ns}.#{target}.from_json(json[#{inspect(field)}])"
+      "json[#{inspect(field)}] && #{namespace}.#{target}.from_json(json[#{inspect(field)}])"
     else
       "json[#{inspect(field)}]"
     end
   end
 
-  defp decode_expr(%{"type" => "object"}, parent, field, _models) do
-    mod = "#{@ns}.#{parent}#{Macro.camelize(field)}"
+  defp decode_expr(%{"type" => "object"}, parent, field, _models, namespace) do
+    mod = "#{namespace}.#{parent}#{Macro.camelize(field)}"
     "json[#{inspect(field)}] && #{mod}.from_json(json[#{inspect(field)}])"
   end
 
-  defp decode_expr(_prop, _parent, field, _models) do
+  defp decode_expr(_prop, _parent, field, _models, _namespace) do
     "json[#{inspect(field)}]"
+  end
+
+  defp request_schema(path) do
+    @spec_path
+    |> File.read!()
+    |> Jason.decode!()
+    |> get_in(["paths", path, "post", "requestBody", "content", "application/json", "schema"])
+  end
+
+  defp generate_request(schema, name, models, namespace) do
+    fields = schema["properties"] |> Enum.sort_by(&elem(&1, 0))
+    required = MapSet.new(schema["required"] || [])
+
+    struct_fields =
+      Enum.map(fields, fn {field, _} ->
+        "    #{field |> Macro.underscore() |> String.to_atom() |> inspect()}"
+      end)
+
+    type_fields =
+      Enum.map(fields, fn {field, prop} ->
+        "    #{Macro.underscore(field)}: #{field_type(prop, name, field, models, required, namespace)}"
+      end)
+
+    required_checks =
+      for {field, _} <- fields, MapSet.member?(required, field) do
+        atom = Macro.underscore(field)
+
+        "    if is_nil(request.#{atom}), do: raise(ArgumentError, \"required field #{field} is nil\")"
+      end
+
+    json_fields =
+      Enum.map(fields, fn {field, _} ->
+        atom = Macro.underscore(field)
+
+        if MapSet.member?(required, field) do
+          "Map.put(#{inspect(field)}, request.#{atom})"
+        else
+          "then(fn json -> if is_nil(request.#{atom}), do: json, else: Map.put(json, #{inspect(field)}, request.#{atom}) end)"
+        end
+      end)
+
+    """
+    defmodule #{namespace}.#{name} do
+      @moduledoc #{(schema["description"] || "") |> String.trim() |> inspect()}
+
+      defstruct [
+    #{Enum.join(struct_fields, ",\n")}
+      ]
+
+      @type t :: %__MODULE__{
+    #{Enum.join(type_fields, ",\n")}
+      }
+
+      @spec new(map()) :: t()
+      def new(attrs) when is_map(attrs), do: struct!(__MODULE__, attrs)
+
+      @spec to_json(t()) :: map()
+      def to_json(%__MODULE__{} = request) do
+    #{Enum.join(required_checks, "\n")}
+
+        %{}
+        |> #{Enum.join(json_fields, "\n        |>")}
+      end
+    end
+    """
   end
 end

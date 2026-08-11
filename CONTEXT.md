@@ -82,6 +82,12 @@ The collection of ships owned by exactly one Agent. Ships never span Agents.
 A vessel the Agent owns (e.g., ORBITALIST-1, class COMMAND). Travels between waypoints, carries cargo, consumes fuel, and is subject to cooldowns.
 _Avoid_: vessel
 
+**Autopilot**:
+A per-Ship, Operator-configured local extract/sell loop. It is distinct from Manual Mode: Manual Mode permits direct Operator commands, while Autopilot may act only within its configured extraction Waypoint, Market, and Cargo threshold.
+
+**Manual Mode**:
+A Ship operating mode in which the Operator issues direct commands. Any direct command pauses Autopilot before it runs; resuming automation requires revalidation against game truth.
+
 **Ship Readiness**:
 The capability and condition information that determines what a Ship can do: flight mode, crew, frame, reactor, engine, modules, and mounts. It supplements, but does not replace, the Ship's immediate operational status, location, fuel, cargo, and actions.
 
