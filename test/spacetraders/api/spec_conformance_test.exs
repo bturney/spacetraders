@@ -19,6 +19,7 @@ defmodule SpaceTraders.API.SpecConformanceTest do
   """
 
   alias SpaceTraders.API
+  alias SpaceTraders.API.Request
 
   @spec_path "priv/spec/SpaceTraders.json"
 
@@ -51,6 +52,17 @@ defmodule SpaceTraders.API.SpecConformanceTest do
     {:get_shipyard, :get, "/systems/{systemSymbol}/waypoints/{waypointSymbol}/shipyard", :data},
     {:get_factions, :get, "/factions", :data},
     {:get_faction, :get, "/factions/{factionSymbol}", :data}
+  ]
+
+  # {client endpoint, spec path template, generated request struct}
+  @request_endpoints [
+    {:register, "/register", Request.RegisterRequest},
+    {:deliver_contract, "/my/contracts/{contractId}/deliver", Request.DeliverContractRequest},
+    {:navigate_ship, "/my/ships/{shipSymbol}/navigate", Request.NavigateRequest},
+    {:sell_cargo, "/my/ships/{shipSymbol}/sell", Request.SellCargoRequest},
+    {:purchase_cargo, "/my/ships/{shipSymbol}/purchase", Request.PurchaseCargoRequest},
+    {:jettison_cargo, "/my/ships/{shipSymbol}/jettison", Request.JettisonCargoRequest},
+    {:purchase_ship, "/my/ships", Request.PurchaseShipRequest}
   ]
 
   describe "client envelope declarations match the bundled spec" do
@@ -106,6 +118,17 @@ defmodule SpaceTraders.API.SpecConformanceTest do
     end
   end
 
+  describe "request payload declarations" do
+    test "every state-changing endpoint with a client payload has a request schema and encoder" do
+      for {endpoint, path, request_module} <- @request_endpoints do
+        assert request_schema(path), "#{endpoint} (#{path}) has no request schema in the spec"
+        Code.ensure_loaded!(request_module)
+        assert function_exported?(request_module, :new, 1)
+        assert function_exported?(request_module, :to_json, 1)
+      end
+    end
+  end
+
   defp arity_of(:get_status), do: 0
   defp arity_of(:register), do: 4
   defp arity_of(:get_agent), do: 1
@@ -154,5 +177,9 @@ defmodule SpaceTraders.API.SpecConformanceTest do
       nil -> nil
       schema -> schema |> Map.get("properties", %{})
     end
+  end
+
+  defp request_schema(path) do
+    get_in(spec_paths(), [path, "post", "requestBody", "content", "application/json", "schema"])
   end
 end
