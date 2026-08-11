@@ -520,7 +520,11 @@ defmodule SpaceTradersWeb.DashboardLive do
           agent_id={@overview.agent.id}
         />
         <div class="space-y-5">
-          <.shipyard_panel listings={@overview.shipyards} agent_id={@overview.agent.id} />
+          <.shipyard_panel
+            listings={@overview.shipyards}
+            agent_id={@overview.agent.id}
+            credits={live_credits(@overview.overview)}
+          />
           <.market_panel listings={@overview.markets} />
         </div>
       </div>
@@ -671,6 +675,7 @@ defmodule SpaceTradersWeb.DashboardLive do
 
   attr :listings, :any, required: true
   attr :agent_id, :integer, required: true
+  attr :credits, :integer, default: nil
 
   defp shipyard_panel(assigns) do
     ~H"""
@@ -688,22 +693,96 @@ defmodule SpaceTradersWeb.DashboardLive do
             <div class="font-mono text-sm">{listing.waypoint}</div>
             <div
               :for={ship <- listing.shipyard.ships || []}
-              class="flex items-center justify-between gap-3 text-sm"
+              data-ship-offer={ship.type}
+              class="space-y-2 rounded border border-base-300/50 px-3 py-2"
             >
-              <span>{ship.name || ship.type}</span>
-              <form phx-submit="buy_ship" class="flex items-center gap-2">
-                <input type="hidden" name="agent_id" value={@agent_id} />
-                <input type="hidden" name="ship_type" value={ship.type} />
-                <input type="hidden" name="waypoint" value={listing.waypoint} />
-                <span class="font-mono">{credits_label(ship.purchase_price)} cr</span>
-                <button type="submit" class="btn btn-primary btn-xs">Buy</button>
-              </form>
+              <div class="flex flex-wrap items-center justify-between gap-3 text-sm">
+                <div class="min-w-0">
+                  <p class="font-semibold">{ship.name || ship.type}</p>
+                  <p class="mt-1 text-xs opacity-70">
+                    <span>Supply {supply_label(ship.supply)}</span>
+                    <span class="mx-1 opacity-40">·</span>
+                    <span>Speed {engine_speed(ship)}</span>
+                    <span class="mx-1 opacity-40">·</span>
+                    <span>Fuel {fuel_capacity(ship)}</span>
+                    <span class="mx-1 opacity-40">·</span>
+                    <span>Crew {crew_required(ship)}</span>
+                  </p>
+                </div>
+                <form phx-submit="buy_ship" class="flex shrink-0 items-center gap-2">
+                  <input type="hidden" name="agent_id" value={@agent_id} />
+                  <input type="hidden" name="ship_type" value={ship.type} />
+                  <input type="hidden" name="waypoint" value={listing.waypoint} />
+                  <span class="font-mono">{credits_label(ship.purchase_price)} cr</span>
+                  <button
+                    type="submit"
+                    disabled={unaffordable?(@credits, ship.purchase_price)}
+                    class="btn btn-primary btn-xs"
+                  >
+                    Buy
+                  </button>
+                </form>
+              </div>
+              <details data-ship-offer-specs class="text-xs">
+                <summary class="cursor-pointer select-none font-semibold opacity-80">
+                  Specifications
+                </summary>
+                <p :if={ship.description} class="mt-2 opacity-70">{ship.description}</p>
+                <dl class="mt-2 space-y-1">
+                  <.component_row label="Frame" item={ship.frame} metric={frame_metric(ship.frame)} />
+                  <.component_row
+                    label="Reactor"
+                    item={ship.reactor}
+                    metric={reactor_metric(ship.reactor)}
+                  />
+                  <.component_row
+                    label="Engine"
+                    item={ship.engine}
+                    metric={engine_metric(ship.engine)}
+                  />
+                </dl>
+                <.equipment_list label="Modules" items={ship.modules || []} />
+                <.equipment_list label="Mounts" items={ship.mounts || []} />
+              </details>
             </div>
           </div>
         </div>
       <% {:error, reason} -> %>
         <div class="alert alert-warning">{live_error(reason)}</div>
     <% end %>
+    """
+  end
+
+  attr :label, :string, required: true
+  attr :item, :map, default: nil
+  attr :metric, :string, default: nil
+
+  defp component_row(assigns) do
+    ~H"""
+    <div :if={@item} class="flex items-center justify-between gap-3">
+      <dt class="opacity-60">{@label}</dt>
+      <dd class="text-right">
+        <span class="font-mono font-semibold">{@item.name}</span>
+        <span :if={@metric} class="ml-2 opacity-70">{@metric}</span>
+      </dd>
+    </div>
+    """
+  end
+
+  attr :label, :string, required: true
+  attr :items, :list, default: []
+
+  defp equipment_list(assigns) do
+    ~H"""
+    <div :if={@items != []} class="mt-2">
+      <p class="font-semibold uppercase tracking-wider opacity-60">{@label}</p>
+      <ul class="mt-1 space-y-1">
+        <li :for={item <- @items}>
+          <span class="font-mono font-semibold">{item.name || item.symbol}</span>
+          <span :if={equipment_metric(item)} class="ml-2 opacity-70">{equipment_metric(item)}</span>
+        </li>
+      </ul>
+    </div>
     """
   end
 
@@ -1440,6 +1519,57 @@ defmodule SpaceTradersWeb.DashboardLive do
     {prefix, suffix} = String.split_at(digits, byte_size(digits) - 3)
     thousands(prefix) <> "," <> suffix
   end
+
+  defp live_credits({:ok, live}) when is_map(live), do: Map.get(live, :credits)
+  defp live_credits(_), do: nil
+
+  defp unaffordable?(credits, price) when is_integer(credits) and is_integer(price),
+    do: credits < price
+
+  defp unaffordable?(_, _), do: false
+
+  defp supply_label(nil), do: "—"
+  defp supply_label(supply) when is_binary(supply), do: supply
+
+  defp engine_speed(%{engine: %{speed: speed}}) when is_integer(speed), do: speed
+  defp engine_speed(_), do: "—"
+
+  defp fuel_capacity(%{frame: %{fuel_capacity: fuel}}) when is_integer(fuel), do: fuel
+  defp fuel_capacity(_), do: "—"
+
+  defp crew_required(%{crew: %{required: required}}) when is_integer(required), do: required
+  defp crew_required(_), do: "—"
+
+  defp frame_metric(%{fuel_capacity: fuel, module_slots: slots, mounting_points: points})
+       when is_integer(fuel) and is_integer(slots) and is_integer(points),
+       do: "#{fuel} fuel, #{slots} slots, #{points} mounts"
+
+  defp frame_metric(%{fuel_capacity: fuel}) when is_integer(fuel), do: "#{fuel} fuel"
+
+  defp frame_metric(%{module_slots: slots, mounting_points: points})
+       when is_integer(slots) and is_integer(points),
+       do: "#{slots} slots, #{points} mounts"
+
+  defp frame_metric(_), do: nil
+
+  defp reactor_metric(%{power_output: power}) when is_integer(power), do: "#{power} power"
+  defp reactor_metric(_), do: nil
+
+  defp engine_metric(%{speed: speed}) when is_integer(speed), do: "speed #{speed}"
+  defp engine_metric(_), do: nil
+
+  defp equipment_metric(%{capacity: capacity}) when is_integer(capacity),
+    do: "capacity #{capacity}"
+
+  defp equipment_metric(%{range: range}) when is_integer(range), do: "range #{range}"
+
+  defp equipment_metric(%{strength: strength}) when is_integer(strength),
+    do: "strength #{strength}"
+
+  defp equipment_metric(%{deposits: deposits}) when is_list(deposits) and deposits != [],
+    do: Enum.join(deposits, ", ")
+
+  defp equipment_metric(_), do: nil
 
   defp live_error(:ship_in_transit), do: "This ship is in transit; actions resume on arrival."
   defp live_error(:cooldown_active), do: "This ship is on cooldown; wait for it to end."
