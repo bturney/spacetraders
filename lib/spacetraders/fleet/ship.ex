@@ -13,6 +13,7 @@ defmodule SpaceTraders.Fleet.Ship do
     field :ship_type, :string
 
     belongs_to :agent, SpaceTraders.Agent.Agent
+    has_one :autopilot_config, SpaceTraders.Fleet.AutopilotConfig
 
     timestamps(type: :utc_datetime)
   end

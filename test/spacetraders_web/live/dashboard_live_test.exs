@@ -1008,6 +1008,30 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       assert html =~ ~s(<button type="button" phx-click="extract")
     end
 
+    test "saves a loop configuration and keeps Start explicit", %{conn: conn, operator: operator} do
+      agent = agent_fixture(operator)
+
+      stub_live_game(agent_overview_body(agent.symbol), [ship_body("ORBITALIST-1")])
+
+      {:ok, lv, html} = live(conn, ~p"/")
+      assert html =~ "Save loop configuration"
+      assert html =~ "Start Autopilot"
+      assert html =~ "data-confirm=\"Start Autopilot for this Ship?\""
+
+      html =
+        lv
+        |> element("form[phx-submit=\"configure_autopilot\"]")
+        |> render_submit(%{
+          ship_symbol: "ORBITALIST-1",
+          extraction_waypoint: "X1-UX81-A2",
+          market_waypoint: "X1-UX81-A1",
+          cargo_threshold: "30"
+        })
+
+      assert html =~ "Autopilot configuration saved. Start remains manual."
+      assert html =~ "<span class=\"badge badge-outline badge-sm\">Manual</span>"
+    end
+
     test "announces the extraction yield and refreshes cargo and cooldown", %{
       conn: conn,
       operator: operator
