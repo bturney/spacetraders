@@ -215,62 +215,28 @@ defmodule SpaceTraders.Fleet do
     end
   end
 
-  @doc "Reconciles a ready Autopilot and dispatches only its extraction navigation leg."
+  @doc "Reconciles a ready Autopilot and dispatches its next loop leg."
   def advance_autopilot(%AgentRecord{} = agent, %AutopilotConfig{} = config, live_ship) do
     advance_autopilot(agent, config, live_ship, :normal)
   end
 
   defp advance_autopilot(%AgentRecord{} = agent, %AutopilotConfig{} = config, live_ship, mode) do
     cond do
-      at_extraction_waypoint?(live_ship, config.extraction_waypoint) ->
-        extract_if_below_threshold(agent, config, live_ship, mode)
-
       in_flight_arrival?(config, live_ship) ->
         maybe_schedule_arrival(agent, live_ship.symbol, %{nav: live_ship.nav})
         {:ok, Repo.update!(Ecto.Changeset.change(config, status: "waiting"))}
 
+      pending_navigation?(config) ->
+        {:ok, config}
+
+      at_extraction_waypoint?(live_ship, config.extraction_waypoint) ->
+        extract_if_below_threshold(agent, config, live_ship, mode)
+
+      at_market_waypoint?(live_ship, config.market_waypoint) and market_leg?(config) ->
+        sell_at_market(agent, config, live_ship)
+
       true ->
-        action = %{
-          "kind" => "navigate",
-          "waypoint" => config.extraction_waypoint,
-          "expected" => %{"status" => "IN_TRANSIT", "destination" => config.extraction_waypoint}
-        }
-
-        config =
-          Repo.update!(
-            Ecto.Changeset.change(config, status: "revalidating", in_flight_action: action)
-          )
-
-        case SpaceTraders.API.navigate_ship(
-               agent.agent_token,
-               live_ship.symbol,
-               config.extraction_waypoint
-             ) do
-          {:ok, result} ->
-            maybe_schedule_arrival(agent, live_ship.symbol, result)
-
-            result_snapshot = %{
-              "kind" => "navigate",
-              "waypoint" => config.extraction_waypoint,
-              "status" => result.nav.status,
-              "destination" => result.nav.route.destination.symbol
-            }
-
-            {:ok,
-             Repo.update!(
-               Ecto.Changeset.change(config,
-                 status: "waiting",
-                 last_action_result: result_snapshot
-               )
-             )}
-
-          {:error, reason} ->
-            Repo.update!(
-              Ecto.Changeset.change(config, status: "blocked", blocked_reason: inspect(reason))
-            )
-
-            {:error, reason}
-        end
+        navigate_autopilot(agent, config, live_ship, config.extraction_waypoint)
     end
   end
 
@@ -313,18 +279,16 @@ defmodule SpaceTraders.Fleet do
     with %Ship{} = ship <- Repo.get_by(Ship, agent_id: agent_id, symbol: ship_symbol),
          %AutopilotConfig{} = config <- Repo.get_by(AutopilotConfig, ship_id: ship.id),
          true <- config.desired_mode == "autopilot",
-         true <- at_extraction_waypoint?(live_ship, config.extraction_waypoint) do
+         true <- arrived_at_configured_waypoint?(live_ship, config) do
       agent = Repo.get!(AgentRecord, agent_id)
+      waypoint = get_in(config.in_flight_action, ["waypoint"])
 
       config =
         Repo.update!(
           Ecto.Changeset.change(config,
             status: "ready",
             in_flight_action: nil,
-            progress: %{
-              "waypoint" => config.extraction_waypoint,
-              "last_completed" => "navigate"
-            }
+            progress: %{"waypoint" => waypoint, "last_completed" => "navigate"}
           )
         )
 
@@ -343,8 +307,31 @@ defmodule SpaceTraders.Fleet do
 
   defp at_extraction_waypoint?(_, _), do: false
 
+  defp at_market_waypoint?(
+         %{nav: %{status: status, waypoint_symbol: waypoint}},
+         market_waypoint
+       )
+       when status in ["DOCKED", "IN_ORBIT"],
+       do: waypoint == market_waypoint
+
+  defp at_market_waypoint?(_, _), do: false
+
+  defp arrived_at_configured_waypoint?(live_ship, %AutopilotConfig{
+         in_flight_action: %{"waypoint" => waypoint}
+       }) do
+    at_extraction_waypoint?(live_ship, waypoint) or at_market_waypoint?(live_ship, waypoint)
+  end
+
+  defp arrived_at_configured_waypoint?(_, _), do: false
+
   defp extract_if_below_threshold(agent, config, live_ship, mode) do
     cond do
+      live_ship.nav.status == "DOCKED" ->
+        case SpaceTraders.API.orbit_ship(agent.agent_token, live_ship.symbol) do
+          {:ok, result} -> advance_autopilot(agent, config, %{live_ship | nav: result.nav}, mode)
+          {:error, reason} -> mark_autopilot_blocked(config, reason)
+        end
+
       cooldown_active?(live_ship) ->
         maybe_schedule_live_cooldown(agent, live_ship)
 
@@ -394,8 +381,148 @@ defmodule SpaceTraders.Fleet do
         end
 
       true ->
-        {:ok, config}
+        navigate_autopilot(agent, config, live_ship, config.market_waypoint)
     end
+  end
+
+  defp sell_at_market(%AgentRecord{agent_token: token} = agent, config, live_ship)
+       when is_binary(token) and token != "" do
+    with {:ok, live_ship} <- dock_for_market(agent, live_ship),
+         {:ok, market} <-
+           SpaceTraders.API.get_market(
+             token,
+             live_ship.nav.system_symbol,
+             config.market_waypoint
+           ),
+         {:ok, cargo} <- sell_accepted_cargo(agent, live_ship, market) do
+      if cargo == [] do
+        navigate_autopilot(agent, config, live_ship, config.extraction_waypoint)
+      else
+        mark_autopilot_blocked(
+          config,
+          {:unsellable_cargo, Enum.map(cargo, & &1.symbol)}
+        )
+      end
+    else
+      {:error, reason} -> mark_autopilot_blocked(config, reason)
+    end
+  end
+
+  defp sell_at_market(_agent, _config, _live_ship), do: {:error, :agent_token_missing}
+
+  defp dock_for_market(_agent, %{nav: %{status: "DOCKED"}} = live_ship), do: {:ok, live_ship}
+
+  defp dock_for_market(agent, live_ship) do
+    with {:ok, result} <- SpaceTraders.API.dock_ship(agent.agent_token, live_ship.symbol) do
+      {:ok, %{live_ship | nav: result.nav}}
+    end
+  end
+
+  defp sell_accepted_cargo(agent, live_ship, market) do
+    accepted = MapSet.new((market.imports || []) ++ (market.exchange || []), & &1.symbol)
+
+    Enum.reduce_while(live_ship.cargo.inventory || [], {:ok, []}, fn item, {:ok, remaining} ->
+      if MapSet.member?(accepted, item.symbol) do
+        case sell_cargo_for_autopilot(agent, live_ship.symbol, item.symbol, item.units) do
+          {:ok, _result} -> {:cont, {:ok, remaining}}
+          {:error, reason} -> {:halt, {:error, reason}}
+        end
+      else
+        {:cont, {:ok, [item | remaining]}}
+      end
+    end)
+  end
+
+  defp sell_cargo_for_autopilot(
+         %AgentRecord{agent_token: token},
+         ship_symbol,
+         trade_symbol,
+         units
+       ) do
+    SpaceTraders.API.sell_cargo(token, ship_symbol, trade_symbol, units)
+  end
+
+  defp navigate_autopilot(agent, config, live_ship, waypoint) do
+    if live_ship.nav.status == "DOCKED" do
+      case SpaceTraders.API.orbit_ship(agent.agent_token, live_ship.symbol) do
+        {:ok, result} ->
+          navigate_autopilot(agent, config, %{live_ship | nav: result.nav}, waypoint)
+
+        {:error, reason} ->
+          mark_autopilot_blocked(config, reason)
+      end
+    else
+      do_navigate_autopilot(agent, config, live_ship, waypoint)
+    end
+  end
+
+  defp do_navigate_autopilot(agent, config, live_ship, waypoint) do
+    action = %{
+      "kind" => "navigate",
+      "waypoint" => waypoint,
+      "expected" => %{"status" => "IN_TRANSIT", "destination" => waypoint}
+    }
+
+    config =
+      Repo.update!(
+        Ecto.Changeset.change(config, status: "revalidating", in_flight_action: action)
+      )
+
+    case SpaceTraders.API.navigate_ship(agent.agent_token, live_ship.symbol, waypoint) do
+      {:ok, result} ->
+        maybe_schedule_arrival(agent, live_ship.symbol, result)
+
+        {:ok,
+         Repo.update!(
+           Ecto.Changeset.change(config,
+             status: "waiting",
+             last_action_result: %{
+               "kind" => "navigate",
+               "waypoint" => waypoint,
+               "status" => result.nav.status,
+               "destination" => result.nav.route.destination.symbol
+             },
+             progress: Map.put(config.progress || %{}, "waypoint", waypoint)
+           )
+         )}
+
+      {:error, reason} ->
+        Repo.update!(
+          Ecto.Changeset.change(config, status: "blocked", blocked_reason: inspect(reason))
+        )
+
+        {:error, reason}
+    end
+  end
+
+  defp market_leg?(%AutopilotConfig{
+         in_flight_action: %{"waypoint" => waypoint},
+         market_waypoint: waypoint
+       }),
+       do: true
+
+  defp market_leg?(%AutopilotConfig{
+         progress: %{"waypoint" => waypoint},
+         market_waypoint: waypoint
+       }),
+       do: true
+
+  defp market_leg?(_), do: false
+
+  defp pending_navigation?(%AutopilotConfig{
+         status: "waiting",
+         in_flight_action: %{"kind" => "navigate"}
+       }),
+       do: true
+
+  defp pending_navigation?(_), do: false
+
+  defp mark_autopilot_blocked(config, reason) do
+    Repo.update!(
+      Ecto.Changeset.change(config, status: "blocked", blocked_reason: inspect(reason))
+    )
+
+    {:error, reason}
   end
 
   defp extract_resources_for_autopilot(%AgentRecord{agent_token: token} = agent, ship_symbol)

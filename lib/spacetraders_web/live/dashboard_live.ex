@@ -2263,7 +2263,7 @@ defmodule SpaceTradersWeb.DashboardLive do
          %{status: "waiting", in_flight_action: %{"kind" => "navigate"}},
          _ship
        ),
-       do: "Traveling to extraction"
+       do: "Traveling to configured waypoint"
 
   defp autopilot_current_action(
          %{status: "waiting", in_flight_action: %{"kind" => "cooldown"}},
@@ -2279,7 +2279,7 @@ defmodule SpaceTradersWeb.DashboardLive do
          %{status: "waiting", in_flight_action: %{"kind" => "navigate", "waypoint" => waypoint}},
          _ship
        ),
-       do: "Extract at #{waypoint}"
+       do: "Continue at #{waypoint}"
 
   defp autopilot_next_action(%{status: "waiting"}, ship) do
     case cooldown_label(ship, 0) do

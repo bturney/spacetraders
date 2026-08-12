@@ -179,6 +179,11 @@ defmodule SpaceTraders.FleetTest do
 
           "/v2/my/ships/FLEET-SHIP/navigate" ->
             Req.Test.json(conn, %{"data" => navigate_response("IN_TRANSIT")})
+
+          "/v2/my/ships/FLEET-SHIP/orbit" ->
+            Req.Test.json(conn, %{
+              "data" => %{"nav" => nav_body("IN_ORBIT", destination: "X1-UX81-A2")}
+            })
         end
       end)
 
@@ -234,6 +239,9 @@ defmodule SpaceTraders.FleetTest do
 
           "/v2/my/ships/FLEET-SHIP/navigate" ->
             Req.Test.json(conn, %{"data" => navigate_response("IN_TRANSIT")})
+
+          "/v2/my/ships/FLEET-SHIP/orbit" ->
+            Req.Test.json(conn, %{"data" => %{"nav" => nav_body("IN_ORBIT")}})
         end
       end)
 
@@ -242,14 +250,21 @@ defmodule SpaceTraders.FleetTest do
 
       arrived = %Model.Ship{
         symbol: "FLEET-SHIP",
-        nav: %Model.ShipNav{status: "DOCKED", waypoint_symbol: "X1-UX81-A2"},
+        nav: %Model.ShipNav{status: "IN_ORBIT", waypoint_symbol: "X1-UX81-A2"},
         cargo: %Model.ShipCargo{capacity: 40, units: 30, inventory: []}
       }
 
-      assert {:ok, %AutopilotConfig{status: "ready", in_flight_action: nil}} =
+      assert {:ok,
+              %AutopilotConfig{
+                status: "waiting",
+                in_flight_action: %{"kind" => "navigate", "waypoint" => "X1-UX81-A1"}
+              }} =
                Fleet.revalidate_autopilot_arrival(agent.id, "FLEET-SHIP", arrived)
 
-      assert {:ok, %AutopilotConfig{status: "ready"}} =
+      assert {:ok, %AutopilotConfig{status: "waiting"}} =
+               Fleet.advance_autopilot(agent, Repo.get!(AutopilotConfig, config.id), arrived)
+
+      assert {:ok, %AutopilotConfig{status: "waiting"}} =
                Fleet.advance_autopilot(agent, Repo.get!(AutopilotConfig, config.id), arrived)
     end
 
@@ -330,7 +345,7 @@ defmodule SpaceTraders.FleetTest do
       assert [%Event{event_type: "cooldown"}] = Timeline.pending_events(:ship, "FLEET-SHIP")
     end
 
-    test "does not extract when cargo is at the configured threshold" do
+    test "navigates to the configured market when cargo reaches the threshold" do
       agent = agent_fixture()
       ship_fixture(agent, "FLEET-SHIP")
 
@@ -347,11 +362,87 @@ defmodule SpaceTraders.FleetTest do
         cargo: %Model.ShipCargo{capacity: 40, units: 30, inventory: []}
       }
 
-      assert {:ok, %AutopilotConfig{status: "ready"}} =
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        assert conn.request_path == "/v2/my/ships/FLEET-SHIP/navigate"
+        Req.Test.json(conn, %{"data" => navigate_response("IN_TRANSIT")})
+      end)
+
+      assert {:ok,
+              %AutopilotConfig{
+                status: "waiting",
+                in_flight_action: %{"kind" => "navigate", "waypoint" => "X1-UX81-A1"}
+              }} =
                Fleet.advance_autopilot(agent, %{config | desired_mode: "autopilot"}, live_ship)
 
-      refute_received _
-      assert Timeline.pending_events(:ship, "FLEET-SHIP") == []
+      assert [%Event{event_type: "arrival"}] = Timeline.pending_events(:ship, "FLEET-SHIP")
+    end
+
+    test "sells accepted cargo at the configured market before returning to extraction" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      {:ok, config} =
+        Fleet.configure_autopilot(agent, "FLEET-SHIP", %{
+          extraction_waypoint: "X1-UX81-A2",
+          market_waypoint: "X1-UX81-A1",
+          cargo_threshold: 30
+        })
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case conn.request_path do
+          "/v2/systems/X1-UX81/waypoints/X1-UX81-A1/market" ->
+            Req.Test.json(conn, %{
+              "data" => %{
+                "symbol" => "X1-UX81-A1",
+                "imports" => [%{"symbol" => "IRON_ORE"}],
+                "tradeGoods" => []
+              }
+            })
+
+          "/v2/my/ships/FLEET-SHIP/sell" ->
+            Req.Test.json(conn, %{"data" => %{"cargo" => %{"inventory" => []}}})
+
+          "/v2/my/ships/FLEET-SHIP/navigate" ->
+            Req.Test.json(conn, %{"data" => navigate_response("IN_TRANSIT")})
+
+          "/v2/my/ships/FLEET-SHIP/orbit" ->
+            Req.Test.json(conn, %{
+              "data" => %{"nav" => nav_body("IN_ORBIT", destination: "X1-UX81-A2")}
+            })
+        end
+      end)
+
+      live_ship = %Model.Ship{
+        symbol: "FLEET-SHIP",
+        nav: %Model.ShipNav{
+          status: "DOCKED",
+          waypoint_symbol: "X1-UX81-A1",
+          system_symbol: "X1-UX81"
+        },
+        cargo: %Model.ShipCargo{
+          capacity: 40,
+          units: 15,
+          inventory: [
+            %Model.ShipCargoItem{symbol: "IRON_ORE", units: 10},
+            %Model.ShipCargoItem{symbol: "COPPER_ORE", units: 5}
+          ]
+        }
+      }
+
+      config = %{
+        config
+        | desired_mode: "autopilot",
+          progress: %{"waypoint" => "X1-UX81-A1"}
+      }
+
+      assert {:error, {:unsellable_cargo, ["COPPER_ORE"]}} =
+               Fleet.advance_autopilot(agent, config, live_ship)
+
+      assert %AutopilotConfig{status: "blocked", blocked_reason: reason} =
+               Repo.get!(AutopilotConfig, config.id)
+
+      assert reason =~ "unsellable_cargo"
+      assert reason =~ "COPPER_ORE"
     end
 
     test "waits for an authoritative cooldown before extracting" do
@@ -404,7 +495,17 @@ defmodule SpaceTraders.FleetTest do
         )
       )
 
-      assert {:ok, %AutopilotConfig{status: "ready", in_flight_action: nil, progress: progress}} =
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        assert conn.request_path == "/v2/my/ships/FLEET-SHIP/navigate"
+        Req.Test.json(conn, %{"data" => navigate_response("IN_TRANSIT")})
+      end)
+
+      assert {:ok,
+              %AutopilotConfig{
+                status: "waiting",
+                in_flight_action: %{"kind" => "navigate", "waypoint" => "X1-UX81-A1"},
+                progress: progress
+              }} =
                Fleet.revalidate_autopilot_cooldown(
                  agent.id,
                  "FLEET-SHIP",
@@ -416,7 +517,7 @@ defmodule SpaceTraders.FleetTest do
                  }
                )
 
-      assert progress == %{"last_completed" => "extract"}
+      assert progress == %{"last_completed" => "extract", "waypoint" => "X1-UX81-A1"}
     end
 
     test "ShipServer arrival wakeup revalidates Autopilot progress" do
@@ -443,15 +544,24 @@ defmodule SpaceTraders.FleetTest do
       )
 
       Req.Test.stub(SpaceTraders.API, fn conn ->
-        assert conn.request_path == "/v2/my/ships/FLEET-SHIP"
-
-        Req.Test.json(conn, %{
-          "data" =>
-            ship_body("FLEET-SHIP", %{
-              "nav" => nav_body("DOCKED", destination: "X1-UX81-A2"),
-              "cargo" => %{"capacity" => 40, "units" => 30, "inventory" => []}
+        case conn.request_path do
+          "/v2/my/ships/FLEET-SHIP" ->
+            Req.Test.json(conn, %{
+              "data" =>
+                ship_body("FLEET-SHIP", %{
+                  "nav" => nav_body("DOCKED", destination: "X1-UX81-A2"),
+                  "cargo" => %{"capacity" => 40, "units" => 30, "inventory" => []}
+                })
             })
-        })
+
+          "/v2/my/ships/FLEET-SHIP/navigate" ->
+            Req.Test.json(conn, %{"data" => navigate_response("IN_TRANSIT")})
+
+          "/v2/my/ships/FLEET-SHIP/orbit" ->
+            Req.Test.json(conn, %{
+              "data" => %{"nav" => nav_body("IN_ORBIT", destination: "X1-UX81-A2")}
+            })
+        end
       end)
 
       {:ok, event} =
@@ -475,7 +585,9 @@ defmodule SpaceTraders.FleetTest do
 
       assert eventually(fn ->
                current = Repo.get_by!(AutopilotConfig, ship_id: config.ship_id)
-               current.status == "ready" and is_nil(current.in_flight_action)
+
+               current.status == "waiting" and
+                 current.in_flight_action["waypoint"] == "X1-UX81-A1"
              end)
     end
 
