@@ -970,8 +970,7 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
           "cooldown" => %{
             "shipSymbol" => "ORBITALIST-2",
             "totalSeconds" => 60,
-            "remainingSeconds" => 42,
-            "expiration" => future_iso(42)
+            "remainingSeconds" => 42
           }
         })
       ]
@@ -1057,7 +1056,6 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       operator: operator
     } do
       agent = agent_fixture(operator)
-      expiration = future_iso(60)
 
       Req.Test.stub(SpaceTraders.API, fn conn ->
         case {conn.request_path, conn.method} do
@@ -1083,8 +1081,7 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
                 "cooldown" => %{
                   "shipSymbol" => "ORBITALIST-1",
                   "totalSeconds" => 60,
-                  "remainingSeconds" => 60,
-                  "expiration" => expiration
+                  "remainingSeconds" => 60
                 },
                 "extraction" => %{
                   "shipSymbol" => "ORBITALIST-1",
@@ -1191,8 +1188,7 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
                   "cooldown" => %{
                     "shipSymbol" => "ORBITALIST-1",
                     "totalSeconds" => 60,
-                    "remainingSeconds" => 42,
-                    "expiration" => future_iso(42)
+                    "remainingSeconds" => 42
                   }
                 })
               ]

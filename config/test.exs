@@ -12,7 +12,9 @@ test_partition = System.get_env("MIX_TEST_PARTITION") || System.pid()
 
 config :spacetraders, SpaceTraders.Repo,
   database: Path.expand("../spacetraders_test#{test_partition}.db", __DIR__),
-  pool_size: 5,
+  # SQLite permits one writer; one sandbox connection makes concurrent ExUnit
+  # cases wait instead of failing intermittently with "Database busy".
+  pool_size: 1,
   pool: Ecto.Adapters.SQL.Sandbox
 
 # We don't run a server during test. If one is required,

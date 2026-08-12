@@ -5,18 +5,30 @@ Runner contract and proof artifacts for `scripts/agent-run`.
 ## Runner Contract
 
 Runner inputs: isolated checkout, network access to Hex, GitHub, and the pinned
-Erlang distribution, `AGENT_TASK_ID`, and positive `AGENT_ATTEMPT`. The
-hermetic gate needs no game credentials; live-game verification needs
-runner-provided API credentials.
+Erlang distribution, `AGENT_TASK_ID`, positive `AGENT_ATTEMPT`, and optional
+`AGENT_TASK_CLASS` (`implementation` or `qa`; defaults to `qa`). The hermetic
+gate needs no game credentials; live-game verification needs runner-provided
+API credentials.
 
 The lifecycle validates identity, isolates Mix state and the HTTP port, runs the
 canonical real-server gate, then tears down. Missing identity writes an
-expected-failure record at `artifacts/invalid-task/attempt-unknown/`.
+expected-failure record in a unique directory below
+`artifacts/invalid-task/attempt-unknown/`.
 
 Evidence lives at `artifacts/<task-id>/attempt-<attempt>/`: inputs, lifecycle
 transcripts, manifest, and result. Inputs identify the source revision and exact
 workspace digest. CI uploads the directory. The runner supplies no secret-bearing
 environment variables to this unredacted lifecycle; live-game checks stay outside it.
+
+Each `result.json` is a machine-readable trial record. It names the task class,
+scenario, result type, verification target, allowed side effects, intervention and
+retry counts, terminal status, failure class, duration, and artifact directory. A
+no-diff lifecycle run produces `lifecycle-verification` for `checkout-health` and
+may create task-scoped builds, test databases, and artifacts plus shared pinned-toolchain
+cache and port-registry entries. Invalid or missing runner input produces an
+`expected_failure` record in a unique directory under
+`artifacts/invalid-task/attempt-unknown/`; its
+`task_class` is `null` unless the supplied value was valid.
 
 ## Automation Path
 
