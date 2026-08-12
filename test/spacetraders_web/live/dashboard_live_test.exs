@@ -2045,7 +2045,17 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
             Req.Test.json(conn, %{"data" => %{"symbol" => "X1-UX81-A1", "ships" => []}})
 
           {"/v2/systems/X1-UX81/waypoints/X1-UX81-A1/market", "GET"} ->
-            Req.Test.json(conn, %{"data" => %{"symbol" => "X1-UX81-A1", "tradeGoods" => []}})
+            Req.Test.json(conn, %{
+              "data" => %{
+                "symbol" => "X1-UX81-A1",
+                "exports" => [%{"symbol" => "FERTILIZERS", "name" => "Fertilizers"}],
+                "imports" => [%{"symbol" => "IRON_ORE", "name" => "Iron Ore"}],
+                "tradeGoods" => []
+              }
+            })
+
+          {"/v2/systems/X1-UX81/waypoints/X1-UX81-B1/market", "GET"} ->
+            Req.Test.json(conn, %{"data" => %{"symbol" => "X1-UX81-B1", "tradeGoods" => []}})
         end
       end)
 
@@ -2182,7 +2192,14 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
             Req.Test.json(conn, %{"data" => %{"symbol" => "X1-UX81-A1", "ships" => []}})
 
           {"/v2/systems/X1-UX81/waypoints/X1-UX81-A1/market", "GET"} ->
-            Req.Test.json(conn, %{"data" => %{"symbol" => "X1-UX81-A1", "tradeGoods" => []}})
+            Req.Test.json(conn, %{
+              "data" => %{
+                "symbol" => "X1-UX81-A1",
+                "exports" => [%{"symbol" => "FERTILIZERS", "name" => "Fertilizers"}],
+                "imports" => [%{"symbol" => "IRON_ORE", "name" => "Iron Ore"}],
+                "tradeGoods" => []
+              }
+            })
         end
       end)
 
@@ -2195,6 +2212,9 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       inspector_html = lv |> element("[data-map-inspector]") |> render()
 
       assert inspector_html =~ "Waypoint Intelligence"
+      assert has_element?(lv, "[data-waypoint-market]", "Market Signals")
+      assert has_element?(lv, "[data-waypoint-market]", "FERTILIZERS")
+      assert has_element?(lv, "[data-waypoint-market]", "IRON_ORE")
       assert inspector_html =~ "Under construction"
       assert inspector_html =~ "STRIPPED"
       assert inspector_html =~ "UNSTABLE"

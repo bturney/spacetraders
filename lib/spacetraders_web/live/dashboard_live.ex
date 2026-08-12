@@ -59,6 +59,7 @@ defmodule SpaceTradersWeb.DashboardLive do
               selected_waypoints={@selected_waypoints}
               waypoint_filters={@waypoint_filters}
               expanded_market_descriptions={@expanded_market_descriptions}
+              waypoint_markets={@waypoint_markets}
             />
           </div>
         <% else %>
@@ -131,7 +132,8 @@ defmodule SpaceTradersWeb.DashboardLive do
        cooldown_tick: 0,
        expanded_market_descriptions: MapSet.new(),
        selected_waypoints: %{},
-       waypoint_filters: %{}
+       waypoint_filters: %{},
+       waypoint_markets: %{}
      )}
   end
 
@@ -308,6 +310,16 @@ defmodule SpaceTradersWeb.DashboardLive do
   @impl true
   def handle_event("select_waypoint", %{"agent_id" => agent_id, "symbol" => symbol}, socket) do
     selected_waypoints = Map.put(socket.assigns.selected_waypoints, agent_id, symbol)
+    key = {agent_id, symbol}
+
+    socket =
+      case Map.get(socket.assigns.waypoint_markets, key) do
+        {:ok, _market} -> socket
+        :not_a_marketplace -> socket
+        {:error, _reason} -> load_waypoint_market(socket, agent_id, symbol, key)
+        nil -> load_waypoint_market(socket, agent_id, symbol, key)
+      end
+
     {:noreply, assign(socket, selected_waypoints: selected_waypoints)}
   end
 
@@ -518,6 +530,40 @@ defmodule SpaceTradersWeb.DashboardLive do
     if overview, do: refresh_agent(socket, overview.agent), else: socket
   end
 
+  defp load_waypoint_market(socket, agent_id, symbol, key) do
+    result =
+      case Enum.find(socket.assigns.overviews, &(to_string(&1.agent.id) == agent_id)) do
+        nil ->
+          {:error, :waypoint_unavailable}
+
+        %{waypoints: {:ok, waypoints}, agent: %{agent_token: token}} when is_list(waypoints) ->
+          case Enum.find(waypoints, &(&1.symbol == symbol)) do
+            nil -> {:error, :waypoint_unavailable}
+            waypoint -> fetch_waypoint_market(token, waypoint)
+          end
+
+        _ ->
+          {:error, :waypoint_unavailable}
+      end
+
+    case result do
+      {:ok, _market} -> update(socket, :waypoint_markets, &Map.put(&1, key, result))
+      :not_a_marketplace -> update(socket, :waypoint_markets, &Map.put(&1, key, result))
+      {:error, _reason} -> update(socket, :waypoint_markets, &Map.put(&1, key, result))
+    end
+  end
+
+  defp fetch_waypoint_market(token, waypoint) do
+    cond do
+      not marketplace_waypoint?(waypoint) -> :not_a_marketplace
+      not is_binary(token) or token == "" -> {:error, :agent_token_missing}
+      true -> SpaceTraders.API.get_market(token, waypoint.system_symbol, waypoint.symbol)
+    end
+  end
+
+  defp marketplace_waypoint?(waypoint),
+    do: Enum.any?(waypoint.traits || [], &(&1.symbol == "MARKETPLACE"))
+
   defp refresh_agent_for_ship(socket, ship_symbol) do
     case agent_for_ship(socket, ship_symbol) do
       {:ok, agent} -> refresh_agent(socket, agent)
@@ -603,6 +649,7 @@ defmodule SpaceTradersWeb.DashboardLive do
   attr :selected_waypoints, :map, default: %{}
   attr :waypoint_filters, :map, default: %{}
   attr :expanded_market_descriptions, :any, default: MapSet.new()
+  attr :waypoint_markets, :map, default: %{}
 
   defp agent_section(assigns) do
     ~H"""
@@ -639,6 +686,7 @@ defmodule SpaceTradersWeb.DashboardLive do
         headquarters_system={headquarters_system(@overview.agent.headquarters)}
         selected_symbol={Map.get(@selected_waypoints, to_string(@overview.agent.id))}
         filter={Map.get(@waypoint_filters, to_string(@overview.agent.id), "all")}
+        waypoint_markets={@waypoint_markets}
       />
     </section>
     """
@@ -1049,6 +1097,7 @@ defmodule SpaceTradersWeb.DashboardLive do
   attr :headquarters_system, :string, default: nil
   attr :selected_symbol, :string, default: nil
   attr :filter, :string, default: "all"
+  attr :waypoint_markets, :map, default: %{}
 
   defp system_map(assigns) do
     projection =
@@ -1216,6 +1265,7 @@ defmodule SpaceTradersWeb.DashboardLive do
                       ships={@ships}
                       ships_at={@ships_at}
                       agent_id={@agent_id}
+                      market={Map.get(@waypoint_markets, {to_string(@agent_id), @selected_symbol})}
                     />
                   </div>
                 </div>
@@ -1242,6 +1292,7 @@ defmodule SpaceTradersWeb.DashboardLive do
             ships={@ships}
             ships_at={@ships_at}
             agent_id={@agent_id}
+            market={Map.get(@waypoint_markets, {to_string(@agent_id), @selected_symbol})}
           />
           <.fleet_location_summary
             off_system_ships={@off_system_ships}
@@ -1323,6 +1374,7 @@ defmodule SpaceTradersWeb.DashboardLive do
   attr :ships, :any, required: true
   attr :ships_at, :any, required: true
   attr :agent_id, :integer, required: true
+  attr :market, :any, default: nil
 
   defp waypoint_details(assigns) do
     ~H"""
@@ -1376,6 +1428,24 @@ defmodule SpaceTradersWeb.DashboardLive do
               </li>
             </ul>
           </div>
+          <%= case @market do %>
+            <% {:ok, market} -> %>
+              <div class="mt-4" data-waypoint-market>
+                <p class="text-xs font-semibold uppercase tracking-wider opacity-60">
+                  Market Signals
+                </p>
+                <div class="mt-2 grid gap-3 sm:grid-cols-2">
+                  <.market_goods label="Exports" goods={market.exports} />
+                  <.market_goods label="Imports" goods={market.imports} />
+                </div>
+              </div>
+            <% {:error, reason} -> %>
+              <div class="alert alert-warning mt-4" data-waypoint-market>
+                Market data unavailable: {live_error(reason)}
+              </div>
+            <% :not_a_marketplace -> %>
+            <% _ -> %>
+          <% end %>
           <div class="mt-4">
             <p class="text-xs font-semibold uppercase tracking-wider opacity-60">Traits</p><div class="mt-2 flex flex-wrap gap-1">
               <span :for={trait <- waypoint.traits || []} class="badge badge-outline badge-sm">{trait.symbol}</span><span
@@ -1462,6 +1532,23 @@ defmodule SpaceTradersWeb.DashboardLive do
             </div>
           </form>
       <% end %>
+    </div>
+    """
+  end
+
+  attr :label, :string, required: true
+  attr :goods, :list, default: []
+
+  defp market_goods(assigns) do
+    ~H"""
+    <div>
+      <p class="text-xs font-semibold uppercase tracking-wider opacity-60">{@label}</p>
+      <div :if={@goods != []} class="mt-2 flex flex-wrap gap-1">
+        <span :for={good <- @goods} class="badge badge-outline badge-sm font-mono" title={good.name}>
+          {good.symbol}
+        </span>
+      </div>
+      <p :if={@goods == []} class="mt-2 text-sm opacity-60">None reported</p>
     </div>
     """
   end
