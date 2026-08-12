@@ -14,7 +14,9 @@ case "${1:-}" in
   deploy)
     [[ $# -eq 2 ]] || die "Usage: scripts/deploy deploy <sha|tag|digest>"
     ref=$2
-    if [[ "$ref" == *"/"* || "$ref" == *"@sha256:"* ]]; then
+    if [[ "$ref" == sha256:[0-9a-f]* ]]; then
+      image="$IMAGE_REPOSITORY@$ref"
+    elif [[ "$ref" == *"/"* || "$ref" == *"@sha256:"* ]]; then
       image=$ref
     elif [[ "$ref" == sha-* ]]; then
       image="$IMAGE_REPOSITORY:$ref"
