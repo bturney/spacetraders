@@ -428,7 +428,11 @@ defmodule SpaceTraders.Fleet do
          )}
 
       cargo_units(live_ship) < config.cargo_threshold ->
-        action = %{"kind" => "extract", "waypoint" => config.extraction_waypoint}
+        action = %{
+          "kind" => "extract",
+          "waypoint" => config.extraction_waypoint,
+          "expected" => %{"cargo_units_at_least" => cargo_units(live_ship) + 1}
+        }
 
         config =
           Repo.update!(
@@ -850,11 +854,25 @@ defmodule SpaceTraders.Fleet do
   skipped with a warning. Returns `:ok`.
   """
   def rearm_ships_on_boot do
-    Timeline.pending_owners(:ship)
-    |> Enum.each(fn %{owner_id: ship_symbol} ->
+    timeline_symbols = Timeline.pending_owners(:ship) |> Enum.map(& &1.owner_id)
+
+    autopilot_symbols =
+      AutopilotConfig
+      |> join(:inner, [c], s in Ship, on: c.ship_id == s.id)
+      |> where([c, _s], c.desired_mode == "autopilot")
+      |> select([_c, s], s.symbol)
+      |> Repo.all()
+
+    (timeline_symbols ++ autopilot_symbols)
+    |> Enum.uniq()
+    |> Enum.each(fn ship_symbol ->
       case ship_credentials(ship_symbol) do
         {:ok, agent_id, agent_token} ->
           ShipServer.ensure_started(ship_symbol, agent_id, agent_token)
+
+          unless ship_symbol in timeline_symbols do
+            recover_autopilot_on_boot(ship_symbol, agent_id, agent_token)
+          end
 
         :error ->
           Logger.warning(
@@ -864,6 +882,190 @@ defmodule SpaceTraders.Fleet do
     end)
 
     :ok
+  end
+
+  @doc "Reconciles a persisted in-flight Autopilot action after a process restart."
+  def recover_autopilot_on_boot(ship_symbol, agent_id, agent_token) do
+    with %Ship{} = ship <- Repo.get_by(Ship, symbol: ship_symbol, agent_id: agent_id),
+         %AutopilotConfig{} = config <- Repo.get_by(AutopilotConfig, ship_id: ship.id) do
+      if config.desired_mode == "autopilot" do
+        case SpaceTraders.API.get_ship(agent_token, ship_symbol) do
+          {:ok, live_ship} when config.status == "ready" and is_nil(config.in_flight_action) ->
+            advance_autopilot(Repo.get!(AgentRecord, agent_id), config, live_ship)
+
+          {:ok, live_ship}
+          when config.status in ["revalidating", "waiting"] and is_map(config.in_flight_action) ->
+            reconcile_in_flight(agent_id, ship, config, live_ship)
+
+          {:ok, _live_ship} ->
+            :ok
+
+          {:error, reason} ->
+            recovery_retry_or_block(agent_id, ship_symbol, reason, agent_token)
+        end
+      else
+        :ok
+      end
+    else
+      _ -> :ok
+    end
+  end
+
+  defp reconcile_in_flight(agent_id, ship, config, live_ship) do
+    case action_outcome(config.in_flight_action, live_ship) do
+      :confirmed ->
+        recovered_config = confirm_recovery(config, live_ship)
+
+        record_activity_by_id(
+          agent_id,
+          ship,
+          "autopilot_recovery",
+          "Autopilot action confirmed after restart",
+          "confirmed"
+        )
+
+        if live_ship.nav.status == "IN_TRANSIT" do
+          maybe_schedule_arrival(Repo.get!(AgentRecord, agent_id), live_ship.symbol, %{
+            nav: live_ship.nav
+          })
+
+          {:ok, recovered_config}
+        else
+          advance_autopilot(
+            Repo.get!(AgentRecord, agent_id),
+            recovered_config,
+            live_ship,
+            :timeline
+          )
+        end
+
+      :absent ->
+        if config.recovery_attempts < 3 do
+          retry_recovery(agent_id, ship, config, live_ship)
+        else
+          block_recovery(agent_id, ship, config, "retry_exhausted")
+        end
+
+      :ambiguous ->
+        block_recovery(agent_id, ship, config, "ambiguous")
+    end
+  end
+
+  defp action_outcome(%{"kind" => "navigate", "waypoint" => waypoint}, live_ship) do
+    cond do
+      live_ship.nav.status == "IN_TRANSIT" and live_ship.nav.route.destination.symbol == waypoint ->
+        :confirmed
+
+      at_extraction_waypoint?(live_ship, waypoint) or at_market_waypoint?(live_ship, waypoint) ->
+        :confirmed
+
+      true ->
+        :absent
+    end
+  end
+
+  defp action_outcome(
+         %{"kind" => "extract", "expected" => %{"cargo_units_at_least" => units}},
+         live_ship
+       ) do
+    if cargo_units(live_ship) >= units, do: :confirmed, else: :absent
+  end
+
+  defp action_outcome(_action, _live_ship), do: :ambiguous
+
+  defp confirm_recovery(config, live_ship) do
+    action = config.in_flight_action
+
+    progress =
+      if action["kind"] == "navigate" do
+        Map.put(config.progress || %{}, "waypoint", action["waypoint"])
+      else
+        config.progress || %{}
+      end
+
+    Repo.update!(
+      Ecto.Changeset.change(config,
+        status: if(live_ship.nav.status == "IN_TRANSIT", do: "waiting", else: "ready"),
+        blocked_reason: nil,
+        recovery_attempts: 0,
+        last_action_result: %{"kind" => "recovery", "outcome" => "confirmed"},
+        progress: progress,
+        in_flight_action:
+          if(live_ship.nav.status == "IN_TRANSIT", do: config.in_flight_action, else: nil)
+      )
+    )
+  end
+
+  defp retry_recovery(agent_id, ship, config, live_ship) do
+    attempts = config.recovery_attempts + 1
+
+    config = Repo.update!(Ecto.Changeset.change(config, recovery_attempts: attempts))
+
+    record_activity_by_id(
+      agent_id,
+      ship,
+      "autopilot_recovery",
+      "Autopilot action absent; retrying",
+      "absent"
+    )
+
+    case advance_autopilot(Repo.get!(AgentRecord, agent_id), config, live_ship, :timeline) do
+      {:ok, recovered_config} ->
+        {:ok, Repo.update!(Ecto.Changeset.change(recovered_config, recovery_attempts: 0))}
+
+      error ->
+        error
+    end
+  end
+
+  defp recovery_retry_or_block(agent_id, ship_symbol, reason, agent_token) do
+    with %Ship{} = ship <- Repo.get_by(Ship, symbol: ship_symbol, agent_id: agent_id),
+         %AutopilotConfig{desired_mode: "autopilot"} = config <-
+           Repo.get_by(AutopilotConfig, ship_id: ship.id) do
+      if config.recovery_attempts < 3 do
+        Repo.update!(
+          Ecto.Changeset.change(config, recovery_attempts: config.recovery_attempts + 1)
+        )
+
+        record_activity_by_id(
+          agent_id,
+          ship,
+          "autopilot_recovery",
+          "Authoritative recovery read failed; retrying",
+          "transport_error"
+        )
+
+        recover_autopilot_on_boot(ship_symbol, agent_id, agent_token)
+      else
+        block_recovery(agent_id, ship, config, "retry_exhausted: #{inspect(reason)}")
+      end
+    else
+      _ -> :ok
+    end
+  end
+
+  defp block_recovery(agent_id, ship, config, outcome) do
+    Repo.update!(
+      Ecto.Changeset.change(config,
+        status: "blocked",
+        blocked_reason: "Autopilot recovery #{outcome}; no game action was replayed",
+        last_action_result: %{"kind" => "recovery", "outcome" => outcome}
+      )
+    )
+
+    record_activity_by_id(
+      agent_id,
+      ship,
+      "autopilot_recovery",
+      "Autopilot recovery blocked: #{outcome}",
+      outcome
+    )
+
+    {:error, :autopilot_recovery_blocked}
+  end
+
+  defp record_activity_by_id(agent_id, ship, kind, message, outcome) do
+    record_activity(Repo.get!(AgentRecord, agent_id), ship, kind, message, %{"outcome" => outcome})
   end
 
   defp maybe_schedule_arrival(agent, ship_symbol, %{nav: %ShipNav{status: "IN_TRANSIT"} = nav}) do

@@ -15,6 +15,7 @@ defmodule SpaceTraders.Fleet.AutopilotConfig do
     field :in_flight_action, :map
     field :last_action_result, :map
     field :progress, :map, default: %{}
+    field :recovery_attempts, :integer, default: 0
 
     belongs_to :ship, SpaceTraders.Fleet.Ship
 

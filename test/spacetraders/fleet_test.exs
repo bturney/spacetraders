@@ -686,6 +686,85 @@ defmodule SpaceTraders.FleetTest do
 
       assert Fleet.autopilot_config(agent, "FLEET-SHIP").status == "blocked"
     end
+
+    test "boot recovery confirms an in-flight navigation without replaying it" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      {:ok, config} =
+        Fleet.configure_autopilot(agent, "FLEET-SHIP", %{
+          extraction_waypoint: "X1-UX81-A2",
+          market_waypoint: "X1-UX81-A1",
+          cargo_threshold: 30
+        })
+
+      Repo.update!(
+        Ecto.Changeset.change(config,
+          desired_mode: "autopilot",
+          status: "waiting",
+          in_flight_action: %{
+            "kind" => "navigate",
+            "waypoint" => "X1-UX81-A2",
+            "expected" => %{"status" => "IN_TRANSIT", "destination" => "X1-UX81-A2"}
+          }
+        )
+      )
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        assert conn.request_path == "/v2/my/ships/FLEET-SHIP"
+
+        Req.Test.json(conn, %{
+          "data" =>
+            ship_body("FLEET-SHIP", %{
+              "nav" =>
+                nav_body("IN_TRANSIT", destination: "X1-UX81-A2", arrival: "2030-01-01T00:00:00Z")
+            })
+        })
+      end)
+
+      assert {:ok, _} = Fleet.recover_autopilot_on_boot("FLEET-SHIP", agent.id, agent.agent_token)
+      recovered = Fleet.autopilot_config(agent, "FLEET-SHIP")
+      assert recovered.last_action_result == %{"kind" => "recovery", "outcome" => "confirmed"}
+      assert recovered.recovery_attempts == 0
+
+      assert [%{kind: "autopilot_recovery", metadata: %{"outcome" => "confirmed"}} | _] =
+               Fleet.recent_activity(agent)
+    end
+
+    test "ambiguous boot recovery blocks without replaying a game action" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      {:ok, config} =
+        Fleet.configure_autopilot(agent, "FLEET-SHIP", %{
+          extraction_waypoint: "X1-UX81-A2",
+          market_waypoint: "X1-UX81-A1",
+          cargo_threshold: 30
+        })
+
+      Repo.update!(
+        Ecto.Changeset.change(config,
+          desired_mode: "autopilot",
+          status: "revalidating",
+          in_flight_action: %{"kind" => "unknown_action"}
+        )
+      )
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        assert conn.request_path == "/v2/my/ships/FLEET-SHIP"
+        Req.Test.json(conn, %{"data" => ship_body("FLEET-SHIP")})
+      end)
+
+      assert {:error, :autopilot_recovery_blocked} =
+               Fleet.recover_autopilot_on_boot("FLEET-SHIP", agent.id, agent.agent_token)
+
+      recovered = Fleet.autopilot_config(agent, "FLEET-SHIP")
+      assert recovered.status == "blocked"
+      assert recovered.last_action_result["outcome"] == "ambiguous"
+
+      assert [%{kind: "autopilot_recovery", metadata: %{"outcome" => "ambiguous"}} | _] =
+               Fleet.recent_activity(agent)
+    end
   end
 
   describe "command_snapshot/1" do
