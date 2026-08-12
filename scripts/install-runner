@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# Run as root on project-host. The final registration command is intentionally
+# interactive because a GitHub registration token is short-lived.
+set -euo pipefail
+
+readonly RUNNER_USER=spacetraders-runner
+readonly RUNNER_DIR=/opt/actions-runner
+readonly DEPLOY_DIR=/srv/projects/spacetraders
+readonly REPOSITORY=https://github.com/bturney/spacetraders
+readonly RUNNER_VERSION=2.330.0
+readonly RUNNER_ARCH=x64
+
+[[ $EUID -eq 0 ]] || { printf '%s\n' 'Run this script as root.' >&2; exit 1; }
+[[ -d "$DEPLOY_DIR" ]] || { printf '%s\n' "$DEPLOY_DIR does not exist." >&2; exit 1; }
+
+id -u "$RUNNER_USER" >/dev/null 2>&1 || useradd --create-home --shell /bin/bash "$RUNNER_USER"
+usermod -aG docker "$RUNNER_USER"
+
+install -d -o "$RUNNER_USER" -g "$RUNNER_USER" "$RUNNER_DIR"
+install -o root -g docker -m 0750 scripts/deploy-host "$DEPLOY_DIR/deploy"
+chgrp -R docker "$DEPLOY_DIR"
+chmod 0750 "$DEPLOY_DIR" "$DEPLOY_DIR/deploy"
+chmod 0640 "$DEPLOY_DIR/.env"
+chgrp docker "$DEPLOY_DIR/.env"
+
+if [[ ! -x "$RUNNER_DIR/run.sh" ]]; then
+  archive="actions-runner-linux-${RUNNER_ARCH}-${RUNNER_VERSION}.tar.gz"
+  curl --fail --location --silent --show-error \
+    "https://github.com/actions/runner/releases/download/v${RUNNER_VERSION}/${archive}" \
+    --output "/tmp/${archive}"
+  tar --extract --gzip --file "/tmp/${archive}" --directory "$RUNNER_DIR"
+  rm "/tmp/${archive}"
+  chown -R "$RUNNER_USER:$RUNNER_USER" "$RUNNER_DIR"
+fi
+
+printf '%s\n' 'Runner files and host deploy routine are installed.'
+printf '%s\n' 'Run this single command as an authenticated GitHub operator to register and start the runner:'
+printf 'TOKEN=$(gh api --method POST repos/bturney/spacetraders/actions/runners/registration-token --jq .token) && sudo -u %s %s/config.sh --unattended --url %s --token "$TOKEN" --labels project-host --name project-host && %s/svc.sh install %s && %s/svc.sh start\n' \
+  "$RUNNER_USER" "$RUNNER_DIR" "$REPOSITORY" "$RUNNER_DIR" "$RUNNER_USER" "$RUNNER_DIR"

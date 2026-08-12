@@ -153,19 +153,29 @@ Tailscale names, configure both origins, including their non-default port. The
 named `spacetraders-data` volume holds the SQLite DB.
 
 Every push to `main` publishes both `latest` and an immutable `sha-<commit>`
-image tag. After the publish workflow succeeds, redeploy the host with the
-merged commit's immutable tag:
+image tag. A successful publish automatically queues a deployment on the
+`project-host` self-hosted GitHub Actions runner. Deployments run in order and
+use the immutable image tag. The host routine validates the resolved Compose
+image, pulls it, starts services, checks `GET /health`, and records the tag
+only after that check succeeds. A failed check rolls back to the previously
+recorded healthy image.
+
+Bootstrap the runner once on `project-host` as root, then run the printed
+one-command GitHub registration command as an authenticated operator:
 
 ```sh
-git fetch origin main
-SHA=$(git rev-parse origin/main)
-IMAGE="ghcr.io/bturney/spacetraders:sha-$SHA"
-tailscale ssh project-host "cd /srv/projects/spacetraders && test \"\$(SPACETRADERS_IMAGE=$IMAGE docker compose -f compose.yaml -f compose.production.yaml config --images | sort -u)\" = \"$IMAGE\" && SPACETRADERS_IMAGE=$IMAGE docker compose -f compose.yaml -f compose.production.yaml pull && SPACETRADERS_IMAGE=$IMAGE docker compose -f compose.yaml -f compose.production.yaml up -d && SPACETRADERS_IMAGE=$IMAGE docker compose -f compose.yaml -f compose.production.yaml ps && curl -fsS --retry 10 --retry-connrefused --retry-delay 1 http://127.0.0.1:4000/health"
+sudo scripts/install-runner
+```
+
+For a manual deployment or rollback from a Tailscale-connected machine, use
+the same host routine as the workflow:
+
+```sh
+scripts/deploy deploy <sha|tag|digest>
+scripts/deploy rollback
 ```
 
 The one-shot `migrate` service completes before `web` starts. A successful
 health check returns `{"status":"ok"}`. The production overlay accepts
-`SPACETRADERS_IMAGE` so deploys can pin an immutable tag or digest. For a
-rollback, first pull and validate the reference with `SPACETRADERS_IMAGE` as a
-command-level override, then persist it in the host `.env` only after that
-validation succeeds.
+`SPACETRADERS_IMAGE` so deploys can pin an immutable tag or digest. `.env`
+stays on the host and is never printed by the installer or deployment scripts.

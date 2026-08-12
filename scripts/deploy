@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+readonly HOST=project-host
+readonly HOST_DEPLOY=/srv/projects/spacetraders/deploy
+readonly IMAGE_REPOSITORY=ghcr.io/bturney/spacetraders
+
+die() {
+  printf '%s\n' "$*" >&2
+  exit 1
+}
+
+case "${1:-}" in
+  deploy)
+    [[ $# -eq 2 ]] || die "Usage: scripts/deploy deploy <sha|tag|digest>"
+    ref=$2
+    if [[ "$ref" == *"/"* || "$ref" == *"@sha256:"* ]]; then
+      image=$ref
+    elif [[ "$ref" == sha-* ]]; then
+      image="$IMAGE_REPOSITORY:$ref"
+    elif [[ "$ref" =~ ^[0-9a-f]{40}$ ]]; then
+      image="$IMAGE_REPOSITORY:sha-$ref"
+    else
+      image="$IMAGE_REPOSITORY:$ref"
+    fi
+    exec tailscale ssh "$HOST" "$HOST_DEPLOY deploy $(printf '%q' "$image")"
+    ;;
+  rollback)
+    [[ $# -eq 1 ]] || die "Usage: scripts/deploy rollback"
+    exec tailscale ssh "$HOST" "$HOST_DEPLOY rollback"
+    ;;
+  *)
+    die "Usage: scripts/deploy {deploy <sha|tag|digest>|rollback}"
+    ;;
+esac

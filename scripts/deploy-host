@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+# Installed on project-host as /srv/projects/spacetraders/deploy.
+set -euo pipefail
+
+readonly DEPLOY_DIR=/srv/projects/spacetraders
+readonly STATE_FILE="$DEPLOY_DIR/.current-image"
+readonly COMPOSE=(docker compose -f compose.yaml -f compose.production.yaml)
+readonly HEALTH_URL=http://127.0.0.1:4000/health
+
+cd "$DEPLOY_DIR"
+
+die() {
+  printf '%s\n' "$*" >&2
+  exit 1
+}
+
+compose() {
+  local image=$1
+  shift
+  SPACETRADERS_IMAGE="$image" "${COMPOSE[@]}" "$@"
+}
+
+validate_image() {
+  local image=$1
+  local resolved
+  resolved=$(compose "$image" config --images | sort -u)
+  [[ "$resolved" == "$image" ]] || die "Compose did not resolve the requested image."
+}
+
+health_check() {
+  local response
+  response=$(curl --fail --silent --show-error --retry 10 --retry-connrefused \
+    --retry-delay 1 --connect-timeout 5 --max-time 10 "$HEALTH_URL") || return 1
+  [[ "$response" == '{"status":"ok"}' ]]
+}
+
+running_image() {
+  docker inspect --format '{{.Config.Image}}' spacetraders-web-1 2>/dev/null
+}
+
+previous_image() {
+  if [[ -s "$STATE_FILE" ]]; then
+    <"$STATE_FILE"
+  else
+    running_image
+  fi
+}
+
+deploy_image() {
+  local image=$1
+  local previous=${2:-}
+
+  validate_image "$image"
+  compose "$image" pull
+  compose "$image" up -d
+
+  if health_check; then
+    printf '%s\n' "$image" >"$STATE_FILE"
+    return
+  fi
+
+  if [[ -z "$previous" || "$previous" == "$image" ]]; then
+    die "Deployment health check failed; no previous image is available for rollback."
+  fi
+
+  printf '%s\n' "Deployment health check failed; rolling back." >&2
+  deploy_image "$previous" ""
+  die "Deployment health check failed; rollback completed."
+}
+
+case "${1:-}" in
+  deploy)
+    [[ $# -eq 2 ]] || die "Usage: deploy deploy <image-ref>"
+    deploy_image "$2" "$(previous_image || true)"
+    ;;
+  rollback)
+    [[ $# -eq 1 ]] || die "Usage: deploy rollback"
+    previous=$(previous_image) || die "No previous image is available for rollback."
+    deploy_image "$previous" ""
+    ;;
+  *)
+    die "Usage: deploy {deploy <image-ref>|rollback}"
+    ;;
+esac

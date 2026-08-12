@@ -20,7 +20,8 @@ Single-context — one `CONTEXT.md` plus `docs/adr/` at the repo root. See `docs
 - `/implement <issue>` requires an accepted Issue labelled `ready-for-agent`. Start or explicitly resume its Task Workspace with `scripts/task-start <issue>`, then follow the Task Workspace lifecycle below. A current feature or prototype branch is not an implementation workspace unless the accepted Issue explicitly names it as `--base`.
 - `/code-review` reviews a committed Task Workspace branch or PR diff against its explicit fixed point.
 - Kimaki worktrees are for explicitly requested isolated ad-hoc sessions. Repository-dispatched implementation uses a Task Workspace, not a Kimaki worktree.
-- Merge, deploy, and Issue closure require an explicit Operator request.
+- Merge and Issue closure require an explicit Operator request. Deployments
+  from `main` are automatic after the image publish workflow succeeds.
 
 ## App
 
