@@ -36,6 +36,12 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
     DateTime.utc_now() |> DateTime.add(seconds, :second) |> DateTime.to_iso8601()
   end
 
+  defp input_value(lv, form_id, field) do
+    lv
+    |> element(~s(form##{form_id} input[name="#{field}"]))
+    |> render()
+  end
+
   defp ship_offer_body(overrides \\ %{}) do
     Map.merge(
       %{
@@ -374,6 +380,27 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
 
       assert html =~ "Sold 5 IRON_ORE for 400 credits."
       assert html =~ "42,400"
+
+      html =
+        lv
+        |> element(
+          "form[phx-change=\"track_draft\"][id=\"sell-form-X1-UX81-A1-ORBITALIST-1-IRON_ORE\"]"
+        )
+        |> render_change(%{
+          draft_key: "sell:ORBITALIST-1:IRON_ORE",
+          symbol: "ORBITALIST-1",
+          trade_symbol: "IRON_ORE",
+          units: "3"
+        })
+
+      assert input_value(lv, "sell-form-X1-UX81-A1-ORBITALIST-1-IRON_ORE", "units") =~
+               ~s(value="3")
+
+      send(lv.pid, :cooldown_tick)
+      render(lv)
+
+      assert input_value(lv, "sell-form-X1-UX81-A1-ORBITALIST-1-IRON_ORE", "units") =~
+               ~s(value="3")
 
       html =
         lv
@@ -1051,6 +1078,165 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       assert html =~ "<span class=\"badge badge-outline badge-sm\">Manual</span>"
     end
 
+    test "keeps an in-progress autopilot draft across live patches", %{
+      conn: conn,
+      operator: operator
+    } do
+      agent = agent_fixture(operator)
+      stub_live_game(agent_overview_body(agent.symbol), [ship_body("ORBITALIST-1")])
+
+      {:ok, lv, _html} = live(conn, ~p"/")
+
+      lv
+      |> element("form[phx-change=\"track_draft\"][id=\"autopilot-form-ORBITALIST-1\"]")
+      |> render_change(%{
+        draft_key: "autopilot:ORBITALIST-1",
+        ship_symbol: "ORBITALIST-1",
+        extraction_waypoint: "X1-UX81-A2",
+        market_waypoint: "X1-UX81-A1",
+        cargo_threshold: "55"
+      })
+
+      assert input_value(lv, "autopilot-form-ORBITALIST-1", "extraction_waypoint") =~
+               ~s(value="X1-UX81-A2")
+
+      assert input_value(lv, "autopilot-form-ORBITALIST-1", "market_waypoint") =~
+               ~s(value="X1-UX81-A1")
+
+      assert input_value(lv, "autopilot-form-ORBITALIST-1", "cargo_threshold") =~ ~s(value="55")
+
+      send(lv.pid, :cooldown_tick)
+      render(lv)
+
+      assert input_value(lv, "autopilot-form-ORBITALIST-1", "extraction_waypoint") =~
+               ~s(value="X1-UX81-A2")
+
+      assert input_value(lv, "autopilot-form-ORBITALIST-1", "market_waypoint") =~
+               ~s(value="X1-UX81-A1")
+
+      assert input_value(lv, "autopilot-form-ORBITALIST-1", "cargo_threshold") =~ ~s(value="55")
+
+      send(lv.pid, {:ship_updated, agent.id, "ORBITALIST-1"})
+      render(lv)
+
+      assert input_value(lv, "autopilot-form-ORBITALIST-1", "extraction_waypoint") =~
+               ~s(value="X1-UX81-A2")
+
+      assert input_value(lv, "autopilot-form-ORBITALIST-1", "market_waypoint") =~
+               ~s(value="X1-UX81-A1")
+
+      assert input_value(lv, "autopilot-form-ORBITALIST-1", "cargo_threshold") =~ ~s(value="55")
+    end
+
+    test "clears the autopilot draft once the configuration is saved", %{
+      conn: conn,
+      operator: operator
+    } do
+      agent = agent_fixture(operator)
+      stub_live_game(agent_overview_body(agent.symbol), [ship_body("ORBITALIST-1")])
+
+      {:ok, lv, _html} = live(conn, ~p"/")
+
+      lv
+      |> element("form[phx-change=\"track_draft\"][id=\"autopilot-form-ORBITALIST-1\"]")
+      |> render_change(%{
+        draft_key: "autopilot:ORBITALIST-1",
+        ship_symbol: "ORBITALIST-1",
+        extraction_waypoint: "X1-UX81-A2",
+        market_waypoint: "X1-UX81-A1",
+        cargo_threshold: "55"
+      })
+
+      lv
+      |> element("form[phx-submit=\"configure_autopilot\"]")
+      |> render_submit(%{
+        ship_symbol: "ORBITALIST-1",
+        extraction_waypoint: "X1-UX81-A9",
+        market_waypoint: "X1-UX81-A1",
+        cargo_threshold: "55"
+      })
+
+      assert input_value(lv, "autopilot-form-ORBITALIST-1", "extraction_waypoint") =~
+               ~s(value="X1-UX81-A9")
+
+      refute input_value(lv, "autopilot-form-ORBITALIST-1", "extraction_waypoint") =~
+               ~s(value="X1-UX81-A2")
+    end
+
+    test "keeps a navigation draft across live patches", %{conn: conn, operator: operator} do
+      agent = agent_fixture(operator)
+      stub_live_game(agent_overview_body(agent.symbol), [ship_body("ORBITALIST-1")])
+
+      {:ok, lv, _html} = live(conn, ~p"/")
+
+      lv
+      |> element("form[phx-change=\"track_draft\"][id=\"navigate-form-ORBITALIST-1\"]")
+      |> render_change(%{
+        draft_key: "navigate:ORBITALIST-1",
+        waypoint_symbol: "X1-UX81-A3"
+      })
+
+      assert input_value(lv, "navigate-form-ORBITALIST-1", "waypoint_symbol") =~
+               ~s(value="X1-UX81-A3")
+
+      send(lv.pid, :cooldown_tick)
+      render(lv)
+
+      assert input_value(lv, "navigate-form-ORBITALIST-1", "waypoint_symbol") =~
+               ~s(value="X1-UX81-A3")
+
+      send(lv.pid, {:ship_updated, agent.id, "ORBITALIST-1"})
+      render(lv)
+
+      assert input_value(lv, "navigate-form-ORBITALIST-1", "waypoint_symbol") =~
+               ~s(value="X1-UX81-A3")
+    end
+
+    test "keeps a jettison draft across live patches", %{conn: conn, operator: operator} do
+      agent = agent_fixture(operator)
+
+      ship =
+        ship_body("ORBITALIST-1", %{
+          "cargo" => %{
+            "capacity" => 40,
+            "units" => 12,
+            "inventory" => [
+              %{"symbol" => "PRECIOUS_STONES", "name" => "Precious Stones", "units" => 12}
+            ]
+          }
+        })
+
+      stub_live_game(agent_overview_body(agent.symbol), [ship])
+
+      {:ok, lv, _html} = live(conn, ~p"/")
+
+      lv
+      |> element(
+        "form[phx-change=\"track_draft\"][id=\"jettison-form-ORBITALIST-1-PRECIOUS_STONES\"]"
+      )
+      |> render_change(%{
+        draft_key: "jettison:ORBITALIST-1:PRECIOUS_STONES",
+        symbol: "ORBITALIST-1",
+        trade_symbol: "PRECIOUS_STONES",
+        units: "4"
+      })
+
+      assert input_value(lv, "jettison-form-ORBITALIST-1-PRECIOUS_STONES", "units") =~
+               ~s(value="4")
+
+      send(lv.pid, :cooldown_tick)
+      render(lv)
+
+      assert input_value(lv, "jettison-form-ORBITALIST-1-PRECIOUS_STONES", "units") =~
+               ~s(value="4")
+
+      send(lv.pid, {:ship_updated, agent.id, "ORBITALIST-1"})
+      render(lv)
+
+      assert input_value(lv, "jettison-form-ORBITALIST-1-PRECIOUS_STONES", "units") =~
+               ~s(value="4")
+    end
+
     test "announces the extraction yield and refreshes cargo and cooldown", %{
       conn: conn,
       operator: operator
@@ -1587,6 +1773,22 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
 
       {:ok, lv, html} = live(conn, ~p"/")
       assert html =~ "Negotiate contract"
+
+      lv
+      |> element("form[phx-change=\"track_draft\"][id=\"negotiate-form-#{agent.id}\"]")
+      |> render_change(%{
+        draft_key: "negotiate:#{agent.id}",
+        agent_id: agent.id,
+        ship_symbol: "ORBITALIST-1"
+      })
+
+      send(lv.pid, :cooldown_tick)
+      render(lv)
+
+      assert has_element?(
+               lv,
+               "form[phx-submit=\"negotiate_contract\"] option[value=\"ORBITALIST-1\"][selected]"
+             )
 
       html =
         lv
@@ -2651,6 +2853,22 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       refute has_element?(
                lv,
                "form[phx-submit=\"browser_navigate\"] option[value=\"ORBITALIST-3\"]"
+             )
+
+      lv
+      |> element("form[phx-change=\"track_draft\"][id=\"browser-navigate-X1-UX81-A3\"]")
+      |> render_change(%{
+        draft_key: "browser_navigate:X1-UX81-A3",
+        symbol: "ORBITALIST-1",
+        waypoint_symbol: "X1-UX81-A3"
+      })
+
+      send(lv.pid, :cooldown_tick)
+      render(lv)
+
+      assert has_element?(
+               lv,
+               "form[phx-submit=\"browser_navigate\"] option[value=\"ORBITALIST-1\"][selected]"
              )
 
       html =
