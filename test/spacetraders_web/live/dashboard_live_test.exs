@@ -970,8 +970,7 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
           "cooldown" => %{
             "shipSymbol" => "ORBITALIST-2",
             "totalSeconds" => 60,
-            "remainingSeconds" => 42,
-            "expiration" => future_iso(42)
+            "remainingSeconds" => 42
           }
         })
       ]

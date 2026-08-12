@@ -28,8 +28,8 @@ else
   fi
 fi
 
-printf '{"task_id":"%s","attempt":%s,"result":"%s","run_status":%s,"teardown_status":%s,"failure_class":"%s","duration_seconds":%s,"finished_at":"%s","artifacts":"%s"}\n' \
-  "$AGENT_TASK_ID" "$AGENT_ATTEMPT" "$result" "$run_status" "$teardown_status" "$failure_class" "$duration_seconds" "$finished_at" "$AGENT_ARTIFACT_DIR" > "$AGENT_ARTIFACT_DIR/result.json"
+printf '{"task_id":"%s","attempt":%s,"task_class":"%s","scenario":"canonical-lifecycle","result":"%s","result_type":"lifecycle-verification","target":"checkout-health","allowed_side_effects":"shared-toolchain-cache-port-registry-and-task-scoped-build-test-db-artifacts","human_interventions":0,"run_status":%s,"teardown_status":%s,"failure_class":"%s","duration_seconds":%s,"retries":0,"finished_at":"%s","artifacts":"%s"}\n' \
+  "$AGENT_TASK_ID" "$AGENT_ATTEMPT" "$AGENT_TASK_CLASS" "$result" "$run_status" "$teardown_status" "$failure_class" "$duration_seconds" "$finished_at" "$AGENT_ARTIFACT_DIR" > "$AGENT_ARTIFACT_DIR/result.json"
 
 files=()
 for file in input.json bootstrap.log verify.log teardown.log result.json; do

@@ -6,16 +6,17 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 if [[ -z "${AGENT_TASK_ID:-}" || -z "${AGENT_ATTEMPT:-}" ]]; then
-  artifact_dir="$PROJECT_ROOT/artifacts/invalid-task/attempt-unknown"
-  mkdir -p "$artifact_dir"
-  printf '{"task_class":"qa","scenario":"missing-runner-identity","result":"expected_failure","human_interventions":0,"retries":0,"failure_class":"runner/missing_task_identity","artifacts":"%s"}\n' \
-    "$artifact_dir" > "$artifact_dir/result.json"
+  source "$SCRIPT_DIR/_agent_context.sh"
+  agent_context_invalid_result "runner/missing_task_identity"
   echo "AGENT_TASK_ID and AGENT_ATTEMPT are required runner inputs." >&2
   exit 64
 fi
 
 source "$SCRIPT_DIR/_agent_context.sh"
-agent_context_require
+if ! agent_context_require; then
+  agent_context_invalid_result "$AGENT_CONTEXT_FAILURE_CLASS"
+  exit 64
+fi
 
 if [ -e "$AGENT_ARTIFACT_DIR/input.json" ]; then
   echo "Attempt $AGENT_TASK_ID/$AGENT_ATTEMPT already has evidence; allocate a new attempt." >&2
