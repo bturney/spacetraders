@@ -160,7 +160,7 @@ defmodule SpaceTradersWeb.DashboardLive do
       when action in ["navigate", "browser_navigate"] do
     waypoint = String.trim(waypoint || "")
 
-    drafted_form =
+    drafted_key =
       if action == "browser_navigate",
         do: draft_key("browser_navigate", [waypoint]),
         else: draft_key("navigate", [ship_symbol])
@@ -171,7 +171,7 @@ defmodule SpaceTradersWeb.DashboardLive do
         {:ok, %{nav: %{route: %{destination: %{symbol: destination}}}}} ->
           {:noreply,
            put_flash(
-             refresh_and_clear(socket, agent.id, drafted_form),
+             refresh_and_clear(socket, agent.id, drafted_key),
              :info,
              "#{ship_symbol} is in transit to #{destination}."
            )}
@@ -179,7 +179,7 @@ defmodule SpaceTradersWeb.DashboardLive do
         {:ok, _result} ->
           {:noreply,
            put_flash(
-             refresh_and_clear(socket, agent.id, drafted_form),
+             refresh_and_clear(socket, agent.id, drafted_key),
              :info,
              "#{ship_symbol} is in transit."
            )}
@@ -654,14 +654,16 @@ defmodule SpaceTradersWeb.DashboardLive do
   end
 
   defp draft_field(drafts, prefix, parts, field, fallback) do
-    draft_value(drafts, draft_key(prefix, parts), field, fallback)
-  end
+    key = draft_key(prefix, parts)
 
-  defp draft_value(drafts, key, field, fallback) do
     case drafts do
       %{^key => params} -> Map.get(params, field, fallback)
       _ -> fallback
     end
+  end
+
+  defp draft_option_selected?(drafts, prefix, parts, field, value) do
+    draft_field(drafts, prefix, parts, field, nil) == value
   end
 
   defp apply_ship_result(socket, agent_id, ship_symbol, result) do
@@ -935,8 +937,13 @@ defmodule SpaceTradersWeb.DashboardLive do
               :for={ship <- ships}
               value={ship.symbol}
               selected={
-                draft_field(@form_drafts, "negotiate", [@agent_id], "ship_symbol", nil) ==
+                draft_option_selected?(
+                  @form_drafts,
+                  "negotiate",
+                  [@agent_id],
+                  "ship_symbol",
                   ship.symbol
+                )
               }
             >
               {ship.symbol} @ {ship_location(ship)}
@@ -1682,13 +1689,13 @@ defmodule SpaceTradersWeb.DashboardLive do
                 :for={ship <- browser_ships(@ships, waypoint.system_symbol)}
                 value={ship.symbol}
                 selected={
-                  draft_field(
+                  draft_option_selected?(
                     @form_drafts,
                     "browser_navigate",
                     [waypoint.symbol],
                     "symbol",
-                    nil
-                  ) == ship.symbol
+                    ship.symbol
+                  )
                 }
               >
                 {ship.symbol}
