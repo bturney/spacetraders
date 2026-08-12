@@ -377,6 +377,24 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
 
       html =
         lv
+        |> element(
+          "form[phx-change=\"track_draft\"][id=\"sell-form-X1-UX81-A1-ORBITALIST-1-IRON_ORE\"]"
+        )
+        |> render_change(%{
+          draft_key: "sell:ORBITALIST-1:IRON_ORE",
+          symbol: "ORBITALIST-1",
+          trade_symbol: "IRON_ORE",
+          units: "3"
+        })
+
+      assert html =~ ~s(value="3")
+
+      send(lv.pid, :cooldown_tick)
+      html = render(lv)
+      assert html =~ ~s(value="3")
+
+      html =
+        lv
         |> element("form[phx-submit=\"sell_cargo\"]")
         |> render_submit(%{symbol: "ORBITALIST-1", trade_symbol: "IRON_ORE", units: "5"})
 
@@ -1049,6 +1067,111 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
 
       assert html =~ "Autopilot configuration saved. Start remains manual."
       assert html =~ "<span class=\"badge badge-outline badge-sm\">Manual</span>"
+    end
+
+    test "keeps an in-progress autopilot draft across live patches", %{
+      conn: conn,
+      operator: operator
+    } do
+      agent = agent_fixture(operator)
+      stub_live_game(agent_overview_body(agent.symbol), [ship_body("ORBITALIST-1")])
+
+      {:ok, lv, _html} = live(conn, ~p"/")
+
+      html =
+        lv
+        |> element("form[phx-change=\"track_draft\"][id=\"autopilot-form-ORBITALIST-1\"]")
+        |> render_change(%{
+          draft_key: "autopilot:ORBITALIST-1",
+          ship_symbol: "ORBITALIST-1",
+          extraction_waypoint: "X1-UX81-A2",
+          market_waypoint: "X1-UX81-A1",
+          cargo_threshold: "55"
+        })
+
+      assert html =~ ~s(value="X1-UX81-A2")
+      assert html =~ ~s(value="X1-UX81-A1")
+      assert html =~ ~s(value="55")
+
+      send(lv.pid, :cooldown_tick)
+      html = render(lv)
+
+      assert html =~ ~s(value="X1-UX81-A2")
+      assert html =~ ~s(value="X1-UX81-A1")
+      assert html =~ ~s(value="55")
+
+      send(lv.pid, {:ship_updated, agent.id, "ORBITALIST-1"})
+      html = render(lv)
+
+      assert html =~ ~s(value="X1-UX81-A2")
+      assert html =~ ~s(value="X1-UX81-A1")
+      assert html =~ ~s(value="55")
+    end
+
+    test "keeps a navigation draft across live patches", %{conn: conn, operator: operator} do
+      agent = agent_fixture(operator)
+      stub_live_game(agent_overview_body(agent.symbol), [ship_body("ORBITALIST-1")])
+
+      {:ok, lv, _html} = live(conn, ~p"/")
+
+      html =
+        lv
+        |> element("form[phx-change=\"track_draft\"][id=\"navigate-form-ORBITALIST-1\"]")
+        |> render_change(%{
+          draft_key: "navigate:ORBITALIST-1",
+          waypoint_symbol: "X1-UX81-A3"
+        })
+
+      assert html =~ ~s(value="X1-UX81-A3")
+
+      send(lv.pid, :cooldown_tick)
+      html = render(lv)
+      assert html =~ ~s(value="X1-UX81-A3")
+
+      send(lv.pid, {:ship_updated, agent.id, "ORBITALIST-1"})
+      html = render(lv)
+      assert html =~ ~s(value="X1-UX81-A3")
+    end
+
+    test "keeps a jettison draft across live patches", %{conn: conn, operator: operator} do
+      agent = agent_fixture(operator)
+
+      ship =
+        ship_body("ORBITALIST-1", %{
+          "cargo" => %{
+            "capacity" => 40,
+            "units" => 12,
+            "inventory" => [
+              %{"symbol" => "PRECIOUS_STONES", "name" => "Precious Stones", "units" => 12}
+            ]
+          }
+        })
+
+      stub_live_game(agent_overview_body(agent.symbol), [ship])
+
+      {:ok, lv, _html} = live(conn, ~p"/")
+
+      html =
+        lv
+        |> element(
+          "form[phx-change=\"track_draft\"][id=\"jettison-form-ORBITALIST-1-PRECIOUS_STONES\"]"
+        )
+        |> render_change(%{
+          draft_key: "jettison:ORBITALIST-1:PRECIOUS_STONES",
+          symbol: "ORBITALIST-1",
+          trade_symbol: "PRECIOUS_STONES",
+          units: "4"
+        })
+
+      assert html =~ ~s(value="4")
+
+      send(lv.pid, :cooldown_tick)
+      html = render(lv)
+      assert html =~ ~s(value="4")
+
+      send(lv.pid, {:ship_updated, agent.id, "ORBITALIST-1"})
+      html = render(lv)
+      assert html =~ ~s(value="4")
     end
 
     test "announces the extraction yield and refreshes cargo and cooldown", %{

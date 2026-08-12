@@ -11,6 +11,18 @@ defmodule SpaceTradersWeb.DashboardLive do
   Live data is pulled from the game API at mount time: the server is the source
   of truth and the local DB rows are a cache (ADR 0005). A per-agent fetch
   failure renders as a readable message instead of taking the dashboard down.
+
+  ## Form state across patches
+
+  This view patches roughly once a second (`:cooldown_tick`) and on every fleet
+  push (`{:ship_updated, ...}`). LiveView re-applies server-rendered `value`
+  attributes to non-focused inputs on each patch, so a user-typed draft wipes
+  itself out unless the server is the source of truth for the draft.
+
+  Rule: any user-editable input bound to server data must be tracked with
+  `phx-change` into a socket assign (see `@form_drafts`), never rendered
+  with a bare server `value`. Client-side preservation hooks (like the
+  `onBeforeElUpdated` details fix) only paper over one element kind at a time.
   """
 
   use SpaceTradersWeb, :live_view
@@ -56,6 +68,7 @@ defmodule SpaceTradersWeb.DashboardLive do
               :for={overview <- @overviews}
               overview={overview}
               cooldown_tick={@cooldown_tick}
+              form_drafts={@form_drafts}
               selected_waypoints={@selected_waypoints}
               waypoint_filters={@waypoint_filters}
               expanded_market_descriptions={@expanded_market_descriptions}
@@ -130,6 +143,7 @@ defmodule SpaceTradersWeb.DashboardLive do
        operator: operator,
        overviews: overviews,
        cooldown_tick: 0,
+       form_drafts: %{},
        expanded_market_descriptions: MapSet.new(),
        selected_waypoints: %{},
        waypoint_filters: %{},
@@ -150,11 +164,19 @@ defmodule SpaceTradersWeb.DashboardLive do
          :ok <- validate_waypoint(waypoint) do
       case Fleet.navigate_ship(agent, ship_symbol, waypoint) do
         {:ok, %{nav: %{route: %{destination: %{symbol: destination}}}}} ->
-          socket = refresh_agent_fleet(socket, agent.id)
+          socket =
+            socket
+            |> refresh_agent_fleet(agent.id)
+            |> clear_draft("navigate:#{ship_symbol}")
+
           {:noreply, put_flash(socket, :info, "#{ship_symbol} is in transit to #{destination}.")}
 
         {:ok, _result} ->
-          socket = refresh_agent_fleet(socket, agent.id)
+          socket =
+            socket
+            |> refresh_agent_fleet(agent.id)
+            |> clear_draft("navigate:#{ship_symbol}")
+
           {:noreply, put_flash(socket, :info, "#{ship_symbol} is in transit.")}
 
         {:error, reason} ->
@@ -181,6 +203,13 @@ defmodule SpaceTradersWeb.DashboardLive do
   end
 
   @impl true
+  def handle_event("track_draft", %{"draft_key" => key} = params, socket) do
+    draft = Map.drop(params, ["draft_key"])
+
+    {:noreply, update(socket, :form_drafts, &Map.put(&1, key, draft))}
+  end
+
+  @impl true
   def handle_event("configure_autopilot", params, socket) do
     with {:ok, agent} <- agent_for_ship(socket, params["ship_symbol"]),
          {:ok, threshold} <- parse_units(params["cargo_threshold"]),
@@ -190,9 +219,14 @@ defmodule SpaceTradersWeb.DashboardLive do
              market_waypoint: String.trim(params["market_waypoint"] || ""),
              cargo_threshold: threshold
            }) do
+      socket =
+        socket
+        |> refresh_agent(agent)
+        |> clear_draft("autopilot:#{params["ship_symbol"]}")
+
       {:noreply,
        put_flash(
-         refresh_agent(socket, agent),
+         socket,
          :info,
          "Autopilot configuration saved. Start remains manual."
        )}
@@ -251,7 +285,10 @@ defmodule SpaceTradersWeb.DashboardLive do
          {:ok, units} <- parse_units(units),
          {:ok, %{transaction: transaction}} <-
            Fleet.sell_cargo(agent, ship_symbol, trade_symbol, units) do
-      socket = refresh_agent(socket, agent)
+      socket =
+        socket
+        |> refresh_agent(agent)
+        |> clear_draft("sell:#{ship_symbol}:#{trade_symbol}")
 
       {:noreply,
        put_flash(
@@ -274,7 +311,10 @@ defmodule SpaceTradersWeb.DashboardLive do
          {:ok, units} <- parse_units(units),
          {:ok, %{transaction: transaction}} <-
            Fleet.purchase_cargo(agent, ship_symbol, trade_symbol, units) do
-      socket = refresh_agent(socket, agent)
+      socket =
+        socket
+        |> refresh_agent(agent)
+        |> clear_draft("purchase:#{ship_symbol}:#{trade_symbol}")
 
       {:noreply,
        put_flash(
@@ -298,7 +338,8 @@ defmodule SpaceTradersWeb.DashboardLive do
          {:ok, _result} <- Fleet.jettison_cargo(agent, ship_symbol, trade_symbol, units) do
       {:noreply,
        put_flash(
-         refresh_agent_fleet(socket, agent.id),
+         refresh_agent_fleet(socket, agent.id)
+         |> clear_draft("jettison:#{ship_symbol}:#{trade_symbol}"),
          :info,
          "Jettisoned #{units} #{trade_symbol}."
        )}
@@ -388,8 +429,11 @@ defmodule SpaceTradersWeb.DashboardLive do
              trade_symbol,
              units
            ) do
-      {:noreply,
-       put_flash(refresh_agent(socket, agent), :info, "Delivered #{units} #{trade_symbol}.")}
+      socket =
+        refresh_agent(socket, agent)
+        |> clear_draft("deliver:#{ship_symbol}:#{contract_id}:#{trade_symbol}")
+
+      {:noreply, put_flash(socket, :info, "Delivered #{units} #{trade_symbol}.")}
     else
       {:error, reason} -> {:noreply, put_flash(socket, :error, live_error(reason))}
     end
@@ -584,6 +628,17 @@ defmodule SpaceTradersWeb.DashboardLive do
     assign(socket, :overviews, overviews)
   end
 
+  defp clear_draft(socket, key) do
+    update(socket, :form_drafts, &Map.delete(&1, key))
+  end
+
+  defp draft_value(drafts, key, field, fallback) do
+    case drafts do
+      %{^key => params} -> Map.get(params, field, fallback)
+      _ -> fallback
+    end
+  end
+
   defp apply_ship_result(socket, agent_id, ship_symbol, result) do
     ship_fields = Map.take(result, [:cargo, :cooldown])
 
@@ -646,6 +701,7 @@ defmodule SpaceTradersWeb.DashboardLive do
 
   attr :overview, :map, required: true
   attr :cooldown_tick, :integer, required: true
+  attr :form_drafts, :map, default: %{}
   attr :selected_waypoints, :map, default: %{}
   attr :waypoint_filters, :map, default: %{}
   attr :expanded_market_descriptions, :any, default: MapSet.new()
@@ -659,12 +715,14 @@ defmodule SpaceTradersWeb.DashboardLive do
         agent={@overview.agent}
         ships={@overview.ships}
         cooldown_tick={@cooldown_tick}
+        form_drafts={@form_drafts}
       />
       <div class="grid gap-5 lg:grid-cols-2">
         <.contract_panel
           contracts={@overview.contracts}
           ships={@overview.ships}
           agent_id={@overview.agent.id}
+          form_drafts={@form_drafts}
         />
         <div class="space-y-5">
           <.shipyard_panel
@@ -676,6 +734,7 @@ defmodule SpaceTradersWeb.DashboardLive do
             listings={@overview.markets}
             agent_id={@overview.agent.id}
             expanded_descriptions={@expanded_market_descriptions}
+            form_drafts={@form_drafts}
           />
         </div>
       </div>
@@ -695,6 +754,7 @@ defmodule SpaceTradersWeb.DashboardLive do
   attr :contracts, :any, required: true
   attr :ships, :any, required: true
   attr :agent_id, :integer, required: true
+  attr :form_drafts, :map, default: %{}
 
   defp contract_panel(assigns) do
     ~H"""
@@ -739,6 +799,8 @@ defmodule SpaceTradersWeb.DashboardLive do
             <form
               :for={ship <- delivery_ships}
               :if={contract.accepted && not contract.fulfilled}
+              id={"deliver-form-#{contract.id}-#{ship.symbol}-#{good.trade_symbol}"}
+              phx-change="track_draft"
               phx-submit="deliver_contract"
               class="grid grid-cols-[minmax(0,1fr)_5rem_auto] gap-2 sm:flex"
             >
@@ -746,6 +808,11 @@ defmodule SpaceTradersWeb.DashboardLive do
               <input type="hidden" name="contract_id" value={contract.id} />
               <input type="hidden" name="trade_symbol" value={good.trade_symbol} />
               <input type="hidden" name="ship_symbol" value={ship.symbol} />
+              <input
+                type="hidden"
+                name="draft_key"
+                value={"deliver:#{ship.symbol}:#{contract.id}:#{good.trade_symbol}"}
+              />
               <span class="self-center font-mono text-xs">
                 {ship.symbol} ({delivery_units(ship, good.trade_symbol)} available)
               </span>
@@ -754,7 +821,14 @@ defmodule SpaceTradersWeb.DashboardLive do
                 type="number"
                 min="1"
                 max={delivery_limit(ship, good)}
-                value={delivery_limit(ship, good)}
+                value={
+                  draft_value(
+                    @form_drafts,
+                    "deliver:#{ship.symbol}:#{contract.id}:#{good.trade_symbol}",
+                    "units",
+                    delivery_limit(ship, good)
+                  )
+                }
                 class="input input-bordered input-sm w-full sm:w-20"
                 required
               />
@@ -962,6 +1036,7 @@ defmodule SpaceTradersWeb.DashboardLive do
   attr :listings, :any, required: true
   attr :agent_id, :integer, required: true
   attr :expanded_descriptions, :any, required: true
+  attr :form_drafts, :map, default: %{}
 
   defp market_panel(assigns) do
     ~H"""
@@ -1045,11 +1120,18 @@ defmodule SpaceTradersWeb.DashboardLive do
               <form
                 :for={ship <- listing.ships}
                 :if={sellable?(ship, good)}
+                id={"sell-form-#{listing.waypoint}-#{ship.symbol}-#{good.symbol}"}
+                phx-change="track_draft"
                 phx-submit="sell_cargo"
                 class="flex items-center gap-2"
               >
                 <input type="hidden" name="symbol" value={ship.symbol} />
                 <input type="hidden" name="trade_symbol" value={good.symbol} />
+                <input
+                  type="hidden"
+                  name="draft_key"
+                  value={"sell:#{ship.symbol}:#{good.symbol}"}
+                />
                 <span class="flex-1 text-xs opacity-70">
                   {ship.symbol}: {cargo_units(cargo_item(ship, good.symbol))} units
                 </span>
@@ -1058,7 +1140,14 @@ defmodule SpaceTradersWeb.DashboardLive do
                   name="units"
                   min="1"
                   max={cargo_units(cargo_item(ship, good.symbol))}
-                  value={cargo_units(cargo_item(ship, good.symbol))}
+                  value={
+                    draft_value(
+                      @form_drafts,
+                      "sell:#{ship.symbol}:#{good.symbol}",
+                      "units",
+                      cargo_units(cargo_item(ship, good.symbol))
+                    )
+                  }
                   class="input input-bordered input-xs w-20"
                 />
                 <button type="submit" class="btn btn-secondary btn-xs">Sell</button>
@@ -1066,18 +1155,27 @@ defmodule SpaceTradersWeb.DashboardLive do
               <form
                 :for={ship <- listing.ships}
                 :if={buyable?(ship, good)}
+                id={"buy-form-#{listing.waypoint}-#{ship.symbol}-#{good.symbol}"}
+                phx-change="track_draft"
                 phx-submit="purchase_cargo"
                 class="flex items-center gap-2"
               >
                 <input type="hidden" name="symbol" value={ship.symbol} />
                 <input type="hidden" name="trade_symbol" value={good.symbol} />
+                <input
+                  type="hidden"
+                  name="draft_key"
+                  value={"purchase:#{ship.symbol}:#{good.symbol}"}
+                />
                 <span class="flex-1 text-xs opacity-70">{ship.symbol}</span>
                 <input
                   type="number"
                   name="units"
                   min="1"
                   max={cargo_space(ship, good)}
-                  value="1"
+                  value={
+                    draft_value(@form_drafts, "purchase:#{ship.symbol}:#{good.symbol}", "units", "1")
+                  }
                   class="input input-bordered input-xs w-20"
                 />
                 <button type="submit" class="btn btn-primary btn-xs">Buy</button>
@@ -1616,6 +1714,7 @@ defmodule SpaceTradersWeb.DashboardLive do
   attr :agent, :map, required: true
   attr :ships, :any, required: true
   attr :cooldown_tick, :integer, required: true
+  attr :form_drafts, :map, default: %{}
 
   defp fleet_grid(assigns) do
     ~H"""
@@ -1634,7 +1733,12 @@ defmodule SpaceTradersWeb.DashboardLive do
             This agent has no ships.
           </div>
           <div :if={ships != []} class="grid grid-cols-1 gap-4 xl:grid-cols-2">
-            <.ship_card :for={ship <- ships} ship={ship} cooldown_tick={@cooldown_tick} />
+            <.ship_card
+              :for={ship <- ships}
+              ship={ship}
+              cooldown_tick={@cooldown_tick}
+              form_drafts={@form_drafts}
+            />
           </div>
         <% {:error, reason} -> %>
           <div class="alert alert-warning">{live_error(reason)}</div>
@@ -1645,6 +1749,7 @@ defmodule SpaceTradersWeb.DashboardLive do
 
   attr :ship, :map, required: true
   attr :cooldown_tick, :integer, default: 0
+  attr :form_drafts, :map, default: %{}
 
   defp ship_card(assigns) do
     ~H"""
@@ -1713,15 +1818,28 @@ defmodule SpaceTradersWeb.DashboardLive do
               <p class="mt-1 text-xs opacity-70">{cargo_description(item)}</p>
             </details>
           </div>
-          <form phx-submit="jettison_cargo" class="flex items-center gap-2">
+          <form
+            id={"jettison-form-#{@ship.symbol}-#{item.symbol}"}
+            phx-change="track_draft"
+            phx-submit="jettison_cargo"
+            class="flex items-center gap-2"
+          >
             <input type="hidden" name="symbol" value={@ship.symbol} />
             <input type="hidden" name="trade_symbol" value={item.symbol} />
+            <input type="hidden" name="draft_key" value={"jettison:#{@ship.symbol}:#{item.symbol}"} />
             <input
               type="number"
               name="units"
               min="1"
               max={item.units}
-              value={item.units}
+              value={
+                draft_value(
+                  @form_drafts,
+                  "jettison:#{@ship.symbol}:#{item.symbol}",
+                  "units",
+                  item.units
+                )
+              }
               class="input input-bordered input-xs w-16"
             />
             <button type="submit" class="btn btn-ghost btn-xs">Jettison</button>
@@ -1730,7 +1848,7 @@ defmodule SpaceTradersWeb.DashboardLive do
       </div>
 
       <div class="mt-4">
-        <.autopilot_panel ship={@ship} />
+        <.autopilot_panel ship={@ship} form_drafts={@form_drafts} />
 
         <%= if in_transit?(@ship) do %>
           <div class="flex flex-wrap items-center gap-2 text-xs">
@@ -1761,14 +1879,17 @@ defmodule SpaceTradersWeb.DashboardLive do
           </details>
         <% else %>
           <form
+            id={"navigate-form-#{@ship.symbol}"}
+            phx-change="track_draft"
             phx-submit="navigate"
             phx-value-symbol={@ship.symbol}
             class="flex gap-2"
           >
+            <input type="hidden" name="draft_key" value={"navigate:#{@ship.symbol}"} />
             <input
               type="text"
               name="waypoint_symbol"
-              value=""
+              value={draft_value(@form_drafts, "navigate:#{@ship.symbol}", "waypoint_symbol", "")}
               placeholder="Waypoint symbol"
               autocomplete="off"
               class="input input-sm input-bordered min-h-11 flex-1 font-mono"
@@ -1947,6 +2068,7 @@ defmodule SpaceTradersWeb.DashboardLive do
   end
 
   attr :ship, :map, required: true
+  attr :form_drafts, :map, default: %{}
 
   defp autopilot_panel(assigns) do
     config = Map.get(assigns.ship, :autopilot)
@@ -1971,25 +2093,52 @@ defmodule SpaceTradersWeb.DashboardLive do
       <p :if={@autopilot && @autopilot.blocked_reason} class="mt-2 text-xs text-error">
         Blocked: {@autopilot.blocked_reason}
       </p>
-      <form phx-submit="configure_autopilot" class="mt-3 grid gap-2 sm:grid-cols-3">
+      <form
+        id={"autopilot-form-#{@ship.symbol}"}
+        phx-change="track_draft"
+        phx-submit="configure_autopilot"
+        class="mt-3 grid gap-2 sm:grid-cols-3"
+      >
+        <input type="hidden" name="draft_key" value={"autopilot:#{@ship.symbol}"} />
         <input type="hidden" name="ship_symbol" value={@ship.symbol} />
         <input
           name="extraction_waypoint"
-          value={@autopilot && @autopilot.extraction_waypoint}
+          value={
+            draft_value(
+              @form_drafts,
+              "autopilot:#{@ship.symbol}",
+              "extraction_waypoint",
+              @autopilot && @autopilot.extraction_waypoint
+            )
+          }
           placeholder="Extraction waypoint"
           class="input input-bordered input-sm font-mono"
           required
         />
         <input
           name="market_waypoint"
-          value={@autopilot && @autopilot.market_waypoint}
+          value={
+            draft_value(
+              @form_drafts,
+              "autopilot:#{@ship.symbol}",
+              "market_waypoint",
+              @autopilot && @autopilot.market_waypoint
+            )
+          }
           placeholder="Market waypoint"
           class="input input-bordered input-sm font-mono"
           required
         />
         <input
           name="cargo_threshold"
-          value={@autopilot && @autopilot.cargo_threshold}
+          value={
+            draft_value(
+              @form_drafts,
+              "autopilot:#{@ship.symbol}",
+              "cargo_threshold",
+              @autopilot && @autopilot.cargo_threshold
+            )
+          }
           type="number"
           min="1"
           placeholder="Cargo threshold"

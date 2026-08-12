@@ -33,6 +33,7 @@ Phoenix 1.8 (Bandit + LiveView), SQLite via `ecto_sqlite3`. Toolchain versions o
 - Unattended tasks: `scripts/agent-run`; runner inputs, artifacts, and automation path: `docs/agents/readiness.md`.
 - Run/test commands live in README → Development.
 - API-client contract: the bundled OpenAPI spec (`priv/spec/SpaceTraders.json`) is ground truth; `test/spacetraders/api/spec_conformance_test.exs` ties the client's `data`-envelope assumptions to it (root `/` is the lone flat response). After touching `lib/spacetraders/api.ex` or the spec, request Operator authorization for `scripts/verify-live`; until approved, report that required live verification as blocked.
+- LiveView forms: the dashboard patches ~1s (`:cooldown_tick`) and on fleet pushes. Never render a user-editable input with a bare server `value` — LiveView re-applies it to non-focused inputs on every patch and wipes the draft. Track drafts with `phx-change` into a socket assign (`@autopilot_forms` is the reference pattern) and give every form a unique `id` for form recovery.
 
 ### Agent dev shell
 
