@@ -30,7 +30,7 @@ validate_image() {
 
 health_check() {
   local response
-  response=$(curl --fail --silent --show-error --retry 10 --retry-connrefused \
+  response=$(curl --fail --silent --show-error --retry 10 --retry-all-errors --retry-connrefused \
     --retry-delay 1 --connect-timeout 5 --max-time 10 "$HEALTH_URL") || return 1
   [[ "$response" == '{"status":"ok"}' ]]
 }
