@@ -14,6 +14,14 @@ Five canonical triage roles mapped to the labels `needs-triage`, `needs-info`, `
 
 Single-context — one `CONTEXT.md` plus `docs/adr/` at the repo root. See `docs/agents/domain.md`.
 
+### Matt skill bindings
+
+- `/triage <issue>` reads and labels the Issue. It does not create a Task Workspace.
+- `/implement <issue>` requires an accepted Issue labelled `ready-for-agent`. Start or explicitly resume its Task Workspace with `scripts/task-start <issue>`, then follow the Task Workspace lifecycle below. A current feature or prototype branch is not an implementation workspace unless the accepted Issue explicitly names it as `--base`.
+- `/code-review` reviews a committed Task Workspace branch or PR diff against its explicit fixed point.
+- Kimaki worktrees are for explicitly requested isolated ad-hoc sessions. Repository-dispatched implementation uses a Task Workspace, not a Kimaki worktree.
+- Merge, deploy, and Issue closure require an explicit Operator request.
+
 ## App
 
 Phoenix 1.8 (Bandit + LiveView), SQLite via `ecto_sqlite3`. Toolchain versions owned by `.tool-versions`.
@@ -23,7 +31,7 @@ Phoenix 1.8 (Bandit + LiveView), SQLite via `ecto_sqlite3`. Toolchain versions o
 - `scripts/teardown` — stops a server rooted here, removes `_build` and `*.db`, and releases this task's allocated port.
 - Unattended tasks: `scripts/agent-run`; runner inputs, artifacts, and automation path: `docs/agents/readiness.md`.
 - Run/test commands live in README → Development.
-- API-client contract: the bundled OpenAPI spec (`priv/spec/SpaceTraders.json`) is ground truth; `test/spacetraders/api/spec_conformance_test.exs` ties the client's `data`-envelope assumptions to it (root `/` is the lone flat response). After touching `lib/spacetraders/api.ex` or the spec, run `scripts/verify-live` (hits the live game; needs network) in addition to the hermetic gate.
+- API-client contract: the bundled OpenAPI spec (`priv/spec/SpaceTraders.json`) is ground truth; `test/spacetraders/api/spec_conformance_test.exs` ties the client's `data`-envelope assumptions to it (root `/` is the lone flat response). After touching `lib/spacetraders/api.ex` or the spec, request Operator authorization for `scripts/verify-live`; until approved, report that required live verification as blocked.
 
 ### Agent dev shell
 
@@ -37,8 +45,8 @@ source scripts/_toolchain.sh   # puts pinned mix/elixir on PATH
 
 1. Start concurrent ticket or ad-hoc work with `scripts/task-start <issue-number|slug>`. It creates `feature/<task-id>` in a sibling worktree and invokes `scripts/worktree-setup`. Use `--base <ref>` for dependent work and `--resume` to continue a known task.
 2. Append a runner command after `--`; it receives the workspace as its current directory with `.worktree-env` loaded. For direct Mix commands, work from the printed workspace and run `source .worktree-env`; project scripts load it automatically. Iterate `mix test <file>` — the test DB is dropped and re-migrated every run.
-3. After committing or removing changes, run `scripts/task-stop <issue-number|slug>`. It releases the port, removes only a clean worktree, and preserves its branch. Prune old cache entries with `scripts/worktree-cache-prune` (30 days and 10 GiB by default).
-4. Gate with `scripts/verify`, then `/code-review`, commit, PR.
+3. Gate with `scripts/verify`, commit, then run `/code-review <base>`. Address findings, gate, commit, and review again until clean; then push and open a PR.
+4. After PR creation, run `scripts/task-stop <issue-number|slug>`. It releases the port, removes only a clean worktree, and preserves its review branch. Prune old cache entries with `scripts/worktree-cache-prune` (30 days and 10 GiB by default).
 
 <!-- phoenix-gen-auth-start -->
 ## Authentication

@@ -11,7 +11,7 @@ The in-game player identity created via registration (e.g., ORBITALIST). Registe
 _Avoid_: player, user, account
 
 **Operator**:
-The human who drives the dashboard. Links their own AccountToken once and may mint (own) one or more Agents. Distinct from the in-game Agent.
+The human who drives the dashboard and authorizes external application and delivery actions. Links their own AccountToken once and may mint (own) one or more Agents. Distinct from the in-game Agent.
 _Avoid_: player, captain, user
 
 **Mint**:
@@ -148,3 +148,21 @@ A Ship belonging to an Agent that is neither at a Waypoint in the Agent's headqu
 
 **Deadline**:
 A time limit imposed by the game (Contract acceptance/fulfillment). Must be persisted so the app honors it across restarts.
+
+### Delivery
+
+**Coding Agent**:
+An automation participant that investigates, changes, tests, and reviews this repository. It is distinct from the in-game Agent.
+_Avoid_: Agent (when discussing repository automation)
+
+**Runner**:
+An execution process that performs repository work in a prepared Task Workspace.
+_Avoid_: Agent (when discussing task execution)
+
+**Task Workspace**:
+A repository-managed workspace dedicated to one task.
+_Avoid_: worktree (when the repository-managed lifecycle matters)
+
+**Kimaki Worktree**:
+A Kimaki-managed isolated checkout for ad-hoc work. It is distinct from a Task Workspace.
+_Avoid_: Task Workspace (when discussing Kimaki session isolation)
