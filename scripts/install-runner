@@ -20,6 +20,11 @@ readonly GITHUB_USER=${SUDO_USER:-root}
 id -u "$RUNNER_USER" >/dev/null 2>&1 || useradd --create-home --shell /bin/bash "$RUNNER_USER"
 usermod -aG docker "$RUNNER_USER"
 
+# The host operator's existing GitHub token has package-read scope. Store its
+# registry credential only in the dedicated runner account's Docker config.
+sudo -u "$GITHUB_USER" gh auth token | \
+  sudo -u "$RUNNER_USER" docker login ghcr.io --username "$GITHUB_USER" --password-stdin
+
 install -d -o "$RUNNER_USER" -g "$RUNNER_USER" "$RUNNER_DIR"
 sudo -u "$GITHUB_USER" gh api "repos/bturney/spacetraders/contents/scripts/deploy-host?ref=$DEPLOY_SCRIPT_REF" \
   -H 'Accept: application/vnd.github.raw' > /tmp/spacetraders-deploy
