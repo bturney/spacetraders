@@ -22,6 +22,9 @@ chgrp -R docker "$DEPLOY_DIR"
 chmod 0750 "$DEPLOY_DIR" "$DEPLOY_DIR/deploy"
 chmod 0640 "$DEPLOY_DIR/.env"
 chgrp docker "$DEPLOY_DIR/.env"
+touch "$DEPLOY_DIR/.current-image" "$DEPLOY_DIR/.previous-image"
+chown "$RUNNER_USER:docker" "$DEPLOY_DIR/.current-image" "$DEPLOY_DIR/.previous-image"
+chmod 0660 "$DEPLOY_DIR/.current-image" "$DEPLOY_DIR/.previous-image"
 
 if [[ ! -x "$RUNNER_DIR/run.sh" ]]; then
   archive="actions-runner-linux-${RUNNER_ARCH}-${RUNNER_VERSION}.tar.gz"
@@ -35,5 +38,5 @@ fi
 
 printf '%s\n' 'Runner files and host deploy routine are installed.'
 printf '%s\n' 'Run this single command as an authenticated GitHub operator to register and start the runner:'
-printf 'TOKEN=$(gh api --method POST repos/bturney/spacetraders/actions/runners/registration-token --jq .token) && sudo -u %s %s/config.sh --unattended --url %s --token "$TOKEN" --labels project-host --name project-host && %s/svc.sh install %s && %s/svc.sh start\n' \
+printf 'TOKEN=$(gh api --method POST repos/bturney/spacetraders/actions/runners/registration-token --jq .token) && sudo -u %s %s/config.sh --unattended --url %s --token "$TOKEN" --labels project-host --name project-host && sudo %s/svc.sh install %s && sudo %s/svc.sh start\n' \
   "$RUNNER_USER" "$RUNNER_DIR" "$REPOSITORY" "$RUNNER_DIR" "$RUNNER_USER" "$RUNNER_DIR"

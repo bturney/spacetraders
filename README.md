@@ -158,7 +158,8 @@ image tag. A successful publish automatically queues a deployment on the
 use the immutable image tag. The host routine validates the resolved Compose
 image, pulls it, starts services, checks `GET /health`, and records the tag
 only after that check succeeds. A failed check rolls back to the previously
-recorded healthy image.
+recorded healthy image. The host retains the preceding healthy image for
+`scripts/deploy rollback`.
 
 Bootstrap the runner once on `project-host` as root, then run the printed
 one-command GitHub registration command as an authenticated operator:

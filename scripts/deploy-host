@@ -4,6 +4,7 @@ set -euo pipefail
 
 readonly DEPLOY_DIR=/srv/projects/spacetraders
 readonly STATE_FILE="$DEPLOY_DIR/.current-image"
+readonly PREVIOUS_STATE_FILE="$DEPLOY_DIR/.previous-image"
 readonly COMPOSE=(docker compose -f compose.yaml -f compose.production.yaml)
 readonly HEALTH_URL=http://127.0.0.1:4000/health
 
@@ -46,16 +47,36 @@ previous_image() {
   fi
 }
 
+rollback_image() {
+  [[ -s "$PREVIOUS_STATE_FILE" ]] && <"$PREVIOUS_STATE_FILE"
+}
+
+record_success() {
+  local image=$1
+  if [[ -s "$STATE_FILE" ]]; then
+    cp "$STATE_FILE" "$PREVIOUS_STATE_FILE"
+  fi
+  printf '%s\n' "$image" >"$STATE_FILE"
+}
+
+restore() {
+  local image=$1
+  validate_image "$image"
+  compose "$image" pull
+  compose "$image" up -d
+  health_check || die "Rollback health check failed."
+  printf '%s\n' "$image" >"$STATE_FILE"
+}
+
 deploy_image() {
   local image=$1
   local previous=${2:-}
 
   validate_image "$image"
   compose "$image" pull
-  compose "$image" up -d
 
-  if health_check; then
-    printf '%s\n' "$image" >"$STATE_FILE"
+  if compose "$image" up -d && health_check; then
+    record_success "$image"
     return
   fi
 
@@ -64,8 +85,8 @@ deploy_image() {
   fi
 
   printf '%s\n' "Deployment health check failed; rolling back." >&2
-  deploy_image "$previous" ""
-  die "Deployment health check failed; rollback completed."
+  restore "$previous"
+  die "Deployment failed; rollback completed."
 }
 
 case "${1:-}" in
@@ -75,8 +96,8 @@ case "${1:-}" in
     ;;
   rollback)
     [[ $# -eq 1 ]] || die "Usage: deploy rollback"
-    previous=$(previous_image) || die "No previous image is available for rollback."
-    deploy_image "$previous" ""
+    previous=$(rollback_image) || die "No previous image is available for rollback."
+    restore "$previous"
     ;;
   *)
     die "Usage: deploy {deploy <image-ref>|rollback}"
