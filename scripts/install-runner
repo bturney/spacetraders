@@ -10,8 +10,8 @@ readonly REPOSITORY=https://github.com/bturney/spacetraders
 readonly RUNNER_VERSION=2.330.0
 readonly RUNNER_ARCH=x64
 readonly RUNNER_SHA256=af5c33fa94f3cc33b8e97937939136a6b04197e6dadfcfb3b6e33ae1bf41e79a
-readonly DEPLOY_SCRIPT_REF=2bdf4343602e6390ed780b9fe4f60551a271abef
-readonly DEPLOY_SCRIPT_SHA256=7c46dfbace25f1e8e1148acfb10ee6b7a5131952866f220e4d886bf0331c1302
+readonly DEPLOY_SCRIPT_REF=99f004805ffffd9df72058e707a9a78b012755e5
+readonly DEPLOY_SCRIPT_SHA256=824affa93d78b247f0be3a6272ad1c63dd3c070a9ff82b8c93f88981c161c36a
 
 [[ $EUID -eq 0 ]] || { printf '%s\n' 'Run this script as root.' >&2; exit 1; }
 [[ -d "$DEPLOY_DIR" ]] || { printf '%s\n' "$DEPLOY_DIR does not exist." >&2; exit 1; }
