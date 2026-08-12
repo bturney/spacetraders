@@ -9,6 +9,7 @@ readonly DEPLOY_DIR=/srv/projects/spacetraders
 readonly REPOSITORY=https://github.com/bturney/spacetraders
 readonly RUNNER_VERSION=2.330.0
 readonly RUNNER_ARCH=x64
+readonly RUNNER_SHA256=af5c33fa94f3cc33b8e97937939136a6b04197e6dadfcfb3b6e33ae1bf41e79a
 
 [[ $EUID -eq 0 ]] || { printf '%s\n' 'Run this script as root.' >&2; exit 1; }
 [[ -d "$DEPLOY_DIR" ]] || { printf '%s\n' "$DEPLOY_DIR does not exist." >&2; exit 1; }
@@ -31,6 +32,7 @@ if [[ ! -x "$RUNNER_DIR/run.sh" ]]; then
   curl --fail --location --silent --show-error \
     "https://github.com/actions/runner/releases/download/v${RUNNER_VERSION}/${archive}" \
     --output "/tmp/${archive}"
+  printf '%s  %s\n' "$RUNNER_SHA256" "/tmp/${archive}" | sha256sum --check --status
   tar --extract --gzip --file "/tmp/${archive}" --directory "$RUNNER_DIR"
   rm "/tmp/${archive}"
   chown -R "$RUNNER_USER:$RUNNER_USER" "$RUNNER_DIR"

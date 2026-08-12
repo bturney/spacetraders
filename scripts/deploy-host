@@ -39,7 +39,7 @@ running_image() {
   docker inspect --format '{{.Config.Image}}' spacetraders-web-1 2>/dev/null
 }
 
-previous_image() {
+rollback_candidate_before_deploy() {
   if [[ -s "$STATE_FILE" ]]; then
     <"$STATE_FILE"
   else
@@ -47,14 +47,15 @@ previous_image() {
   fi
 }
 
-rollback_image() {
+recorded_rollback_image() {
   [[ -s "$PREVIOUS_STATE_FILE" ]] && <"$PREVIOUS_STATE_FILE"
 }
 
 record_success() {
   local image=$1
-  if [[ -s "$STATE_FILE" ]]; then
-    cp "$STATE_FILE" "$PREVIOUS_STATE_FILE"
+  local previous=$2
+  if [[ -n "$previous" && "$previous" != "$image" ]]; then
+    printf '%s\n' "$previous" >"$PREVIOUS_STATE_FILE"
   fi
   printf '%s\n' "$image" >"$STATE_FILE"
 }
@@ -76,7 +77,7 @@ deploy_image() {
   compose "$image" pull
 
   if compose "$image" up -d && health_check; then
-    record_success "$image"
+    record_success "$image" "$previous"
     return
   fi
 
@@ -92,12 +93,15 @@ deploy_image() {
 case "${1:-}" in
   deploy)
     [[ $# -eq 2 ]] || die "Usage: deploy deploy <image-ref>"
-    deploy_image "$2" "$(previous_image || true)"
+    deploy_image "$2" "$(rollback_candidate_before_deploy || true)"
     ;;
   rollback)
     [[ $# -eq 1 ]] || die "Usage: deploy rollback"
-    previous=$(rollback_image) || die "No previous image is available for rollback."
+    [[ -s "$STATE_FILE" ]] || die "No current image is recorded."
+    current=$(<"$STATE_FILE")
+    previous=$(recorded_rollback_image) || die "No previous image is available for rollback."
     restore "$previous"
+    printf '%s\n' "$current" >"$PREVIOUS_STATE_FILE"
     ;;
   *)
     die "Usage: deploy {deploy <image-ref>|rollback}"
