@@ -74,6 +74,8 @@ defmodule SpaceTradersWeb.DashboardLive do
               expanded_market_descriptions={@expanded_market_descriptions}
               waypoint_markets={@waypoint_markets}
             />
+
+            <.activity_panel overviews={@overviews} />
           </div>
         <% else %>
           <div class="mx-auto max-w-lg py-16 text-center">
@@ -493,6 +495,36 @@ defmodule SpaceTradersWeb.DashboardLive do
     {:noreply,
      push_patch(socket, to: "/?prototype=#{next_prototype(socket.assigns.prototype_variant)}")}
   end
+
+  @impl true
+  def handle_event(action, %{"symbol" => ship_symbol}, socket)
+      when action in ["pause_autopilot", "resume_autopilot", "stop_autopilot"] do
+    with {:ok, agent} <- agent_for_ship(socket, ship_symbol),
+         :ok <- autopilot_action(action, agent, ship_symbol) do
+      message =
+        case action do
+          "pause_autopilot" -> "#{ship_symbol} Autopilot paused."
+          "resume_autopilot" -> "#{ship_symbol} Autopilot resumed after revalidation."
+          "stop_autopilot" -> "#{ship_symbol} Autopilot stopped; Ship is manual."
+        end
+
+      {:noreply, put_flash(refresh_agent(socket, agent), :info, message)}
+    else
+      {:error, reason} ->
+        {:noreply,
+         put_flash(refresh_agent_for_ship(socket, ship_symbol), :error, live_error(reason))}
+    end
+  end
+
+  defp autopilot_action("pause_autopilot", agent, ship),
+    do: unwrap_config(Fleet.pause_autopilot(agent, ship))
+
+  defp autopilot_action("resume_autopilot", agent, ship),
+    do: unwrap_config(Fleet.resume_autopilot(agent, ship))
+
+  defp autopilot_action("stop_autopilot", agent, ship), do: Fleet.stop_autopilot(agent, ship)
+  defp unwrap_config({:ok, _config}), do: :ok
+  defp unwrap_config(error), do: error
 
   @impl true
   def handle_info({:ship_updated, agent_id, _ship_symbol}, socket) do
@@ -2235,16 +2267,82 @@ defmodule SpaceTradersWeb.DashboardLive do
         />
         <button type="submit" class="btn btn-ghost btn-sm sm:col-span-3">Save loop configuration</button>
       </form>
-      <button
-        type="button"
-        phx-click="start_autopilot"
-        phx-value-symbol={@ship.symbol}
-        data-confirm="Start Autopilot for this Ship?"
-        class="btn btn-primary btn-sm mt-2"
-      >
-        Start Autopilot
-      </button>
+      <div class="mt-2 flex flex-wrap gap-2">
+        <button
+          :if={
+            is_nil(@autopilot) or
+              (@autopilot.desired_mode == "manual" and @autopilot.status not in ["paused", "blocked"])
+          }
+          type="button"
+          phx-click="start_autopilot"
+          phx-value-symbol={@ship.symbol}
+          data-confirm="Start Autopilot for this Ship?"
+          class="btn btn-primary btn-sm"
+        >
+          Start Autopilot
+        </button>
+        <button
+          :if={@autopilot && @autopilot.desired_mode == "autopilot"}
+          type="button"
+          phx-click="pause_autopilot"
+          phx-value-symbol={@ship.symbol}
+          class="btn btn-warning btn-sm"
+        >
+          Pause
+        </button>
+        <button
+          :if={@autopilot && @autopilot.status in ["paused", "blocked"]}
+          type="button"
+          phx-click="resume_autopilot"
+          phx-value-symbol={@ship.symbol}
+          class="btn btn-primary btn-sm"
+        >
+          Resume after revalidation
+        </button>
+        <button
+          :if={@autopilot}
+          type="button"
+          phx-click="stop_autopilot"
+          phx-value-symbol={@ship.symbol}
+          data-confirm="Stop Autopilot and clear this configuration?"
+          class="btn btn-ghost btn-sm"
+        >
+          Stop to Manual
+        </button>
+      </div>
     </div>
+    """
+  end
+
+  defp activity_panel(assigns) do
+    activities =
+      assigns.overviews
+      |> Enum.flat_map(fn %{activity: activity} -> activity end)
+      |> Enum.sort_by(& &1.inserted_at, {:desc, DateTime})
+      |> Enum.take(10)
+
+    assigns = assign(assigns, :activities, activities)
+
+    ~H"""
+    <section class="card border border-base-300/70 bg-base-200 p-4" data-activity>
+      <div class="flex items-center justify-between">
+        <div>
+          <p class="eyebrow">Activity</p>
+          <h3 class="mt-1 text-lg font-semibold">Recent Fleet events</h3>
+        </div>
+        <span class="text-xs opacity-60">Latest 10</span>
+      </div>
+      <div :if={@activities == []} class="mt-3 text-sm opacity-60">No local recovery events yet.</div>
+      <ol :if={@activities != []} class="mt-3 space-y-2 text-sm">
+        <li
+          :for={event <- @activities}
+          class="flex flex-wrap justify-between gap-2 border-t border-base-300/50 pt-2"
+        >
+          <span><strong>{event.kind}</strong> {event.message}</span>
+          <time class="text-xs opacity-60">{Calendar.strftime(event.inserted_at, "%Y-%m-%d %H:%M:%S")}</time>
+        </li>
+      </ol>
+    </section>
     """
   end
 

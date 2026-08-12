@@ -82,6 +82,14 @@ defmodule SpaceTraders.Fleet.ShipServer do
     end
   end
 
+  @doc "Clears locally pending timers after an Operator preempts Autopilot."
+  def cancel_pending(ship_symbol) do
+    case Registry.lookup(SpaceTraders.Fleet.ShipRegistry, ship_symbol) do
+      [{pid, _}] -> GenServer.call(pid, :cancel_pending, 5_000)
+      [] -> :ok
+    end
+  end
+
   @doc "Arms a timer for an already-persisted event on the ship's server."
   @spec arm(Agent.t(), String.t(), Event.t()) :: :ok | {:error, term()}
   def arm(%Agent{} = agent, ship_symbol, %Event{} = event) do
@@ -128,6 +136,11 @@ defmodule SpaceTraders.Fleet.ShipServer do
   end
 
   @impl true
+  def handle_call(:cancel_pending, _from, state) do
+    {:reply, :ok, %{state | pending: %{}}}
+  end
+
+  @impl true
   def handle_cast({:arm, %Event{} = event}, state) do
     {:noreply, rearm(event, state)}
   end
@@ -136,6 +149,14 @@ defmodule SpaceTraders.Fleet.ShipServer do
   def handle_info({:timeline, %Event{} = event}, state) do
     type = String.to_existing_atom(event.event_type)
 
+    if not Timeline.pending?(event) do
+      {:noreply, %{state | pending: Map.delete(state.pending, type)}}
+    else
+      handle_pending_event(type, event, state)
+    end
+  end
+
+  defp handle_pending_event(type, event, state) do
     case refresh(state) do
       {:ok, ship} ->
         if still_busy?(type, ship) do

@@ -1078,6 +1078,17 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       assert html =~ "<span class=\"badge badge-outline badge-sm\">Manual</span>"
     end
 
+    test "shows Operator recovery controls and Activity", %{conn: conn, operator: operator} do
+      agent = agent_fixture(operator)
+      stub_live_game(agent_overview_body(agent.symbol), [ship_body("ORBITALIST-1")])
+
+      {:ok, _lv, html} = live(conn, ~p"/")
+
+      assert html =~ "Start Autopilot"
+      assert html =~ "Activity"
+      assert html =~ "No local recovery events yet."
+    end
+
     test "keeps an in-progress autopilot draft across live patches", %{
       conn: conn,
       operator: operator

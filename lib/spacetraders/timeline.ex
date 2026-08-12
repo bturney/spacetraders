@@ -77,6 +77,11 @@ defmodule SpaceTraders.Timeline do
     |> Repo.all()
   end
 
+  @doc "Returns whether a persisted event is still pending."
+  def pending?(%Event{id: id}) do
+    Repo.exists?(from e in Event, where: e.id == ^id and e.status == "pending")
+  end
+
   @doc """
   Lists the distinct owners that have at least one pending event.
 

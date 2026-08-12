@@ -19,7 +19,7 @@ defmodule SpaceTraders.Fleet do
 
   alias SpaceTraders.Agent.Agent, as: AgentRecord
   alias SpaceTraders.API.Model.{ShipNav, ShipNavRoute}
-  alias SpaceTraders.Fleet.{AutopilotConfig, Ship}
+  alias SpaceTraders.Fleet.{Activity, AutopilotConfig, Ship}
   alias SpaceTraders.Fleet.ShipServer
   alias SpaceTraders.Repo
   alias SpaceTraders.{Agent, Contracts, Listing, Shipyard}
@@ -60,8 +60,18 @@ defmodule SpaceTraders.Fleet do
       contracts: Contracts.list_contracts(agent),
       shipyards: listings.shipyards,
       markets: listings.markets,
-      waypoints: waypoints
+      waypoints: waypoints,
+      activity: recent_activity(agent)
     }
+  end
+
+  @doc "Returns the ten most recent local events for an Agent, newest first."
+  def recent_activity(%AgentRecord{} = agent) do
+    Activity
+    |> where([a], a.agent_id == ^agent.id)
+    |> order_by([a], desc: a.inserted_at)
+    |> limit(10)
+    |> Repo.all()
   end
 
   defp annotate_autopilot({:ok, ships}, agent) do
@@ -85,8 +95,44 @@ defmodule SpaceTraders.Fleet do
   @doc "Saves a Ship's loop configuration without enabling Autopilot."
   def configure_autopilot(%AgentRecord{} = agent, ship_symbol, attrs) when is_map(attrs) do
     with {:ok, ship} <- owned_ship(agent, ship_symbol),
+         :ok <- preempt_autopilot(agent, ship, :configuration_changed),
          {:ok, config} <- upsert_autopilot(ship, attrs) do
+      record_activity(agent, ship, "configuration", "Autopilot configuration changed")
       {:ok, config}
+    end
+  end
+
+  @doc "Pauses an active Autopilot while retaining its configuration."
+  def pause_autopilot(%AgentRecord{} = agent, ship_symbol) do
+    with {:ok, ship} <- owned_ship(agent, ship_symbol),
+         %AutopilotConfig{} = config <- Repo.get_by(AutopilotConfig, ship_id: ship.id) do
+      config =
+        Repo.update!(
+          Ecto.Changeset.change(config,
+            desired_mode: "manual",
+            status: "paused",
+            in_flight_action: nil
+          )
+        )
+
+      record_activity(agent, ship, "pause", "Autopilot paused by Operator")
+      {:ok, config}
+    else
+      nil -> {:error, :autopilot_not_configured}
+      error -> error
+    end
+  end
+
+  @doc "Resumes an Autopilot only after a complete authoritative validation."
+  def resume_autopilot(%AgentRecord{} = agent, ship_symbol),
+    do: start_autopilot(agent, ship_symbol)
+
+  @doc "Stops Autopilot, cancels pending work, and removes its saved configuration."
+  def stop_autopilot(%AgentRecord{} = agent, ship_symbol) do
+    with {:ok, ship} <- owned_ship(agent, ship_symbol) do
+      Repo.delete_all(from c in AutopilotConfig, where: c.ship_id == ^ship.id)
+      record_activity(agent, ship, "stop", "Autopilot stopped; Ship returned to Manual")
+      :ok
     end
   end
 
@@ -139,6 +185,44 @@ defmodule SpaceTraders.Fleet do
     |> Ecto.Changeset.put_change(:status, "ready")
     |> Ecto.Changeset.put_change(:blocked_reason, nil)
     |> Repo.insert_or_update()
+  end
+
+  defp preempt_autopilot(agent, ship, reason) do
+    case Repo.get_by(AutopilotConfig, ship_id: ship.id) do
+      %AutopilotConfig{desired_mode: "autopilot"} = config ->
+        Repo.update!(
+          Ecto.Changeset.change(config,
+            desired_mode: "manual",
+            status: "paused",
+            in_flight_action: nil
+          )
+        )
+
+        record_activity(agent, ship, "manual_override", "Autopilot preempted: #{reason}")
+        :ok
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp preempt_autopilot_for(agent, ship_symbol, reason) do
+    case Repo.get_by(Ship, agent_id: agent.id, symbol: ship_symbol) do
+      %Ship{} = ship -> preempt_autopilot(agent, ship, reason)
+      nil -> :ok
+    end
+  end
+
+  defp record_activity(agent, ship, kind, message, metadata \\ %{}) do
+    Repo.insert!(%Activity{
+      agent_id: agent.id,
+      ship_id: ship.id,
+      kind: kind,
+      message: message,
+      metadata: metadata
+    })
+
+    :ok
   end
 
   defp validate_autopilot(%AgentRecord{agent_token: token}, ship, config)
@@ -644,7 +728,8 @@ defmodule SpaceTraders.Fleet do
   """
   def navigate_ship(%AgentRecord{agent_token: agent_token} = agent, ship_symbol, waypoint_symbol)
       when is_binary(agent_token) and agent_token != "" do
-    with :ok <- ShipServer.ensure_ready(ship_symbol),
+    with :ok <- preempt_autopilot_for(agent, ship_symbol, :manual_override),
+         :ok <- ShipServer.ensure_ready(ship_symbol),
          {:ok, result} <-
            SpaceTraders.API.navigate_ship(agent_token, ship_symbol, waypoint_symbol) do
       maybe_schedule_arrival(agent, ship_symbol, result)
@@ -657,9 +742,10 @@ defmodule SpaceTraders.Fleet do
   end
 
   @doc "Docks a ship at its current waypoint."
-  def dock_ship(%AgentRecord{agent_token: agent_token}, ship_symbol)
+  def dock_ship(%AgentRecord{agent_token: agent_token} = agent, ship_symbol)
       when is_binary(agent_token) and agent_token != "" do
-    with :ok <- ShipServer.ensure_ready(ship_symbol) do
+    with :ok <- preempt_autopilot_for(agent, ship_symbol, :manual_override),
+         :ok <- ShipServer.ensure_ready(ship_symbol) do
       SpaceTraders.API.dock_ship(agent_token, ship_symbol)
     end
   end
@@ -667,9 +753,10 @@ defmodule SpaceTraders.Fleet do
   def dock_ship(%AgentRecord{}, _ship_symbol), do: {:error, :agent_token_missing}
 
   @doc "Puts a ship into orbit at its current waypoint."
-  def orbit_ship(%AgentRecord{agent_token: agent_token}, ship_symbol)
+  def orbit_ship(%AgentRecord{agent_token: agent_token} = agent, ship_symbol)
       when is_binary(agent_token) and agent_token != "" do
-    with :ok <- ShipServer.ensure_ready(ship_symbol) do
+    with :ok <- preempt_autopilot_for(agent, ship_symbol, :manual_override),
+         :ok <- ShipServer.ensure_ready(ship_symbol) do
       SpaceTraders.API.orbit_ship(agent_token, ship_symbol)
     end
   end
@@ -679,7 +766,8 @@ defmodule SpaceTraders.Fleet do
   @doc "Extracts resources and persists the returned cooldown on the timeline."
   def extract_resources(%AgentRecord{agent_token: agent_token} = agent, ship_symbol)
       when is_binary(agent_token) and agent_token != "" do
-    with :ok <- ShipServer.ensure_ready(ship_symbol),
+    with :ok <- preempt_autopilot_for(agent, ship_symbol, :manual_override),
+         :ok <- ShipServer.ensure_ready(ship_symbol),
          {:ok, result} <- SpaceTraders.API.extract_resources(agent_token, ship_symbol),
          :ok <- schedule_cooldown(agent, ship_symbol, result) do
       {:ok, result}
@@ -689,9 +777,10 @@ defmodule SpaceTraders.Fleet do
   def extract_resources(%AgentRecord{}, _ship_symbol), do: {:error, :agent_token_missing}
 
   @doc "Sells cargo from a ship and returns the updated cargo and transaction."
-  def sell_cargo(%AgentRecord{agent_token: agent_token}, ship_symbol, trade_symbol, units)
+  def sell_cargo(%AgentRecord{agent_token: agent_token} = agent, ship_symbol, trade_symbol, units)
       when is_binary(agent_token) and agent_token != "" do
-    with :ok <- ShipServer.ensure_ready(ship_symbol) do
+    with :ok <- preempt_autopilot_for(agent, ship_symbol, :manual_override),
+         :ok <- ShipServer.ensure_ready(ship_symbol) do
       SpaceTraders.API.sell_cargo(agent_token, ship_symbol, trade_symbol, units)
     end
   end
@@ -700,9 +789,15 @@ defmodule SpaceTraders.Fleet do
     do: {:error, :agent_token_missing}
 
   @doc "Purchases cargo from a market the ship is docked at."
-  def purchase_cargo(%AgentRecord{agent_token: agent_token}, ship_symbol, trade_symbol, units)
+  def purchase_cargo(
+        %AgentRecord{agent_token: agent_token} = agent,
+        ship_symbol,
+        trade_symbol,
+        units
+      )
       when is_binary(agent_token) and agent_token != "" and is_integer(units) and units > 0 do
-    with :ok <- ShipServer.ensure_ready(ship_symbol) do
+    with :ok <- preempt_autopilot_for(agent, ship_symbol, :manual_override),
+         :ok <- ShipServer.ensure_ready(ship_symbol) do
       SpaceTraders.API.purchase_cargo(agent_token, ship_symbol, trade_symbol, units)
     end
   end
@@ -715,9 +810,10 @@ defmodule SpaceTraders.Fleet do
     do: {:error, :invalid_units}
 
   @doc "Refuels a ship at a marketplace that sells fuel."
-  def refuel_ship(%AgentRecord{agent_token: agent_token}, ship_symbol)
+  def refuel_ship(%AgentRecord{agent_token: agent_token} = agent, ship_symbol)
       when is_binary(agent_token) and agent_token != "" do
-    with :ok <- ShipServer.ensure_ready(ship_symbol) do
+    with :ok <- preempt_autopilot_for(agent, ship_symbol, :manual_override),
+         :ok <- ShipServer.ensure_ready(ship_symbol) do
       SpaceTraders.API.refuel_ship(agent_token, ship_symbol)
     end
   end
@@ -725,9 +821,15 @@ defmodule SpaceTraders.Fleet do
   def refuel_ship(%AgentRecord{}, _ship_symbol), do: {:error, :agent_token_missing}
 
   @doc "Jettisons cargo from a ship's hold and returns the updated cargo."
-  def jettison_cargo(%AgentRecord{agent_token: agent_token}, ship_symbol, trade_symbol, units)
+  def jettison_cargo(
+        %AgentRecord{agent_token: agent_token} = agent,
+        ship_symbol,
+        trade_symbol,
+        units
+      )
       when is_binary(agent_token) and agent_token != "" and is_integer(units) and units > 0 do
-    with :ok <- ShipServer.ensure_ready(ship_symbol) do
+    with :ok <- preempt_autopilot_for(agent, ship_symbol, :manual_override),
+         :ok <- ShipServer.ensure_ready(ship_symbol) do
       SpaceTraders.API.jettison_cargo(agent_token, ship_symbol, trade_symbol, units)
     end
   end

@@ -124,6 +124,70 @@ defmodule SpaceTraders.FleetTest do
   end
 
   describe "autopilot configuration" do
+    test "pauses and resumes without losing the configured loop" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      assert {:ok, _} =
+               Fleet.configure_autopilot(agent, "FLEET-SHIP", %{
+                 extraction_waypoint: "X1-UX81-A2",
+                 market_waypoint: "X1-UX81-A1",
+                 cargo_threshold: 30
+               })
+
+      assert {:ok, %{status: "paused", desired_mode: "manual"}} =
+               Fleet.pause_autopilot(agent, "FLEET-SHIP")
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        conn
+        |> Map.put(:status, 401)
+        |> Req.Test.json(%{"error" => %{"code" => 4011, "message" => "Invalid token"}})
+      end)
+
+      assert {:error, {:autopilot_blocked, _reason}} = Fleet.resume_autopilot(agent, "FLEET-SHIP")
+      assert Fleet.autopilot_config(agent, "FLEET-SHIP").extraction_waypoint == "X1-UX81-A2"
+    end
+
+    test "stops and clears the saved loop" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      Fleet.configure_autopilot(agent, "FLEET-SHIP", %{
+        extraction_waypoint: "X1-UX81-A2",
+        market_waypoint: "X1-UX81-A1",
+        cargo_threshold: 30
+      })
+
+      assert :ok = Fleet.stop_autopilot(agent, "FLEET-SHIP")
+      assert Fleet.autopilot_config(agent, "FLEET-SHIP") == nil
+      assert [%{kind: "stop"} | _] = Fleet.recent_activity(agent)
+    end
+
+    test "manual navigation pauses active Autopilot before dispatch" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      Fleet.configure_autopilot(agent, "FLEET-SHIP", %{
+        extraction_waypoint: "X1-UX81-A2",
+        market_waypoint: "X1-UX81-A1",
+        cargo_threshold: 30
+      })
+
+      config = Fleet.autopilot_config(agent, "FLEET-SHIP")
+      Repo.update!(Ecto.Changeset.change(config, desired_mode: "autopilot", status: "waiting"))
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        Req.Test.json(conn, %{"data" => navigate_response("DOCKED")})
+      end)
+
+      assert {:ok, _} = Fleet.navigate_ship(agent, "FLEET-SHIP", "X1-UX81-A1")
+
+      assert %{desired_mode: "manual", status: "paused"} =
+               Fleet.autopilot_config(agent, "FLEET-SHIP")
+
+      assert [%{kind: "manual_override"} | _] = Fleet.recent_activity(agent)
+    end
+
     test "persists a loop without starting it" do
       agent = agent_fixture()
       ship_fixture(agent, "FLEET-SHIP")
