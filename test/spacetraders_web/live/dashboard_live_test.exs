@@ -1774,6 +1774,22 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       {:ok, lv, html} = live(conn, ~p"/")
       assert html =~ "Negotiate contract"
 
+      lv
+      |> element("form[phx-change=\"track_draft\"][id=\"negotiate-form-#{agent.id}\"]")
+      |> render_change(%{
+        draft_key: "negotiate:#{agent.id}",
+        agent_id: agent.id,
+        ship_symbol: "ORBITALIST-1"
+      })
+
+      send(lv.pid, :cooldown_tick)
+      render(lv)
+
+      assert has_element?(
+               lv,
+               "form[phx-submit=\"negotiate_contract\"] option[value=\"ORBITALIST-1\"][selected]"
+             )
+
       html =
         lv
         |> element("form[phx-submit=\"negotiate_contract\"]")
@@ -2837,6 +2853,22 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       refute has_element?(
                lv,
                "form[phx-submit=\"browser_navigate\"] option[value=\"ORBITALIST-3\"]"
+             )
+
+      lv
+      |> element("form[phx-change=\"track_draft\"][id=\"browser-navigate-X1-UX81-A3\"]")
+      |> render_change(%{
+        draft_key: "browser_navigate:X1-UX81-A3",
+        symbol: "ORBITALIST-1",
+        waypoint_symbol: "X1-UX81-A3"
+      })
+
+      send(lv.pid, :cooldown_tick)
+      render(lv)
+
+      assert has_element?(
+               lv,
+               "form[phx-submit=\"browser_navigate\"] option[value=\"ORBITALIST-1\"][selected]"
              )
 
       html =

@@ -169,20 +169,20 @@ defmodule SpaceTradersWeb.DashboardLive do
          :ok <- validate_waypoint(waypoint) do
       case Fleet.navigate_ship(agent, ship_symbol, waypoint) do
         {:ok, %{nav: %{route: %{destination: %{symbol: destination}}}}} ->
-          socket =
-            socket
-            |> refresh_agent_fleet(agent.id)
-            |> clear_draft(drafted_form)
-
-          {:noreply, put_flash(socket, :info, "#{ship_symbol} is in transit to #{destination}.")}
+          {:noreply,
+           put_flash(
+             refresh_and_clear(socket, agent.id, drafted_form),
+             :info,
+             "#{ship_symbol} is in transit to #{destination}."
+           )}
 
         {:ok, _result} ->
-          socket =
-            socket
-            |> refresh_agent_fleet(agent.id)
-            |> clear_draft(drafted_form)
-
-          {:noreply, put_flash(socket, :info, "#{ship_symbol} is in transit.")}
+          {:noreply,
+           put_flash(
+             refresh_and_clear(socket, agent.id, drafted_form),
+             :info,
+             "#{ship_symbol} is in transit."
+           )}
 
         {:error, reason} ->
           {:noreply, put_flash(socket, :error, live_error(reason))}
@@ -643,8 +643,18 @@ defmodule SpaceTradersWeb.DashboardLive do
     update(socket, :form_drafts, &Map.delete(&1, key))
   end
 
+  defp refresh_and_clear(socket, agent_id, key) do
+    socket
+    |> refresh_agent_fleet(agent_id)
+    |> clear_draft(key)
+  end
+
   defp draft_key(prefix, parts) do
     Enum.join([prefix | parts], ":")
+  end
+
+  defp draft_field(drafts, prefix, parts, field, fallback) do
+    draft_value(drafts, draft_key(prefix, parts), field, fallback)
   end
 
   defp draft_value(drafts, key, field, fallback) do
@@ -784,7 +794,7 @@ defmodule SpaceTradersWeb.DashboardLive do
           <p class="mt-1 text-sm opacity-70">
             Negotiate a new contract with a faction waypoint your Ship is at.
           </p>
-          <.negotiate_form ships={@ships} agent_id={@agent_id} />
+          <.negotiate_form ships={@ships} agent_id={@agent_id} form_drafts={@form_drafts} />
         </div>
       <% {:ok, contracts} -> %>
         <div :for={contract <- contracts} class="card border border-primary/30 bg-base-200 p-4 sm:p-5">
@@ -838,9 +848,10 @@ defmodule SpaceTradersWeb.DashboardLive do
                 min="1"
                 max={delivery_limit(ship, good)}
                 value={
-                  draft_value(
+                  draft_field(
                     @form_drafts,
-                    draft_key("deliver", [ship.symbol, contract.id, good.trade_symbol]),
+                    "deliver",
+                    [ship.symbol, contract.id, good.trade_symbol],
                     "units",
                     delivery_limit(ship, good)
                   )
@@ -917,18 +928,24 @@ defmodule SpaceTradersWeb.DashboardLive do
           </label>
           <select
             name="ship_symbol"
-            value={draft_value(@form_drafts, draft_key("negotiate", [@agent_id]), "ship_symbol", nil)}
             class="select select-bordered select-sm w-full font-mono"
             required
           >
-            <option :for={ship <- ships} value={ship.symbol}>
+            <option
+              :for={ship <- ships}
+              value={ship.symbol}
+              selected={
+                draft_field(@form_drafts, "negotiate", [@agent_id], "ship_symbol", nil) ==
+                  ship.symbol
+              }
+            >
               {ship.symbol} @ {ship_location(ship)}
             </option>
           </select>
         <% _ -> %>
           <input
             name="ship_symbol"
-            value={draft_value(@form_drafts, draft_key("negotiate", [@agent_id]), "ship_symbol", "")}
+            value={draft_field(@form_drafts, "negotiate", [@agent_id], "ship_symbol", "")}
             placeholder="Ship symbol at a faction waypoint"
             class="input input-bordered input-sm w-full font-mono"
             required
@@ -1166,9 +1183,10 @@ defmodule SpaceTradersWeb.DashboardLive do
                   min="1"
                   max={cargo_units(cargo_item(ship, good.symbol))}
                   value={
-                    draft_value(
+                    draft_field(
                       @form_drafts,
-                      draft_key("sell", [ship.symbol, good.symbol]),
+                      "sell",
+                      [ship.symbol, good.symbol],
                       "units",
                       cargo_units(cargo_item(ship, good.symbol))
                     )
@@ -1199,9 +1217,10 @@ defmodule SpaceTradersWeb.DashboardLive do
                   min="1"
                   max={cargo_space(ship, good)}
                   value={
-                    draft_value(
+                    draft_field(
                       @form_drafts,
-                      draft_key("purchase", [ship.symbol, good.symbol]),
+                      "purchase",
+                      [ship.symbol, good.symbol],
                       "units",
                       "1"
                     )
@@ -1657,19 +1676,20 @@ defmodule SpaceTradersWeb.DashboardLive do
             /><label class="label py-1"><span class="label-text text-xs">Navigate a ship here</span></label><div class="flex gap-2">
               <select
                 name="symbol"
-                value={
-                  draft_value(
-                    @form_drafts,
-                    draft_key("browser_navigate", [waypoint.symbol]),
-                    "symbol",
-                    nil
-                  )
-                }
                 class="select select-bordered select-xs min-w-0 flex-1 font-mono"
                 required
               ><option
                 :for={ship <- browser_ships(@ships, waypoint.system_symbol)}
                 value={ship.symbol}
+                selected={
+                  draft_field(
+                    @form_drafts,
+                    "browser_navigate",
+                    [waypoint.symbol],
+                    "symbol",
+                    nil
+                  ) == ship.symbol
+                }
               >
                 {ship.symbol}
               </option></select><button
@@ -1886,9 +1906,10 @@ defmodule SpaceTradersWeb.DashboardLive do
               min="1"
               max={item.units}
               value={
-                draft_value(
+                draft_field(
                   @form_drafts,
-                  draft_key("jettison", [@ship.symbol, item.symbol]),
+                  "jettison",
+                  [@ship.symbol, item.symbol],
                   "units",
                   item.units
                 )
@@ -1938,18 +1959,15 @@ defmodule SpaceTradersWeb.DashboardLive do
             phx-value-symbol={@ship.symbol}
             class="flex gap-2"
           >
-            <input type="hidden" name="draft_key" value={draft_key("navigate", [@ship.symbol])} />
+            <input
+              type="hidden"
+              name="draft_key"
+              value={draft_key("navigate", [@ship.symbol])}
+            />
             <input
               type="text"
               name="waypoint_symbol"
-              value={
-                draft_value(
-                  @form_drafts,
-                  draft_key("navigate", [@ship.symbol]),
-                  "waypoint_symbol",
-                  ""
-                )
-              }
+              value={draft_field(@form_drafts, "navigate", [@ship.symbol], "waypoint_symbol", "")}
               placeholder="Waypoint symbol"
               autocomplete="off"
               class="input input-sm input-bordered min-h-11 flex-1 font-mono"
@@ -2164,9 +2182,10 @@ defmodule SpaceTradersWeb.DashboardLive do
         <input
           name="extraction_waypoint"
           value={
-            draft_value(
+            draft_field(
               @form_drafts,
-              draft_key("autopilot", [@ship.symbol]),
+              "autopilot",
+              [@ship.symbol],
               "extraction_waypoint",
               @autopilot && @autopilot.extraction_waypoint
             )
@@ -2178,9 +2197,10 @@ defmodule SpaceTradersWeb.DashboardLive do
         <input
           name="market_waypoint"
           value={
-            draft_value(
+            draft_field(
               @form_drafts,
-              draft_key("autopilot", [@ship.symbol]),
+              "autopilot",
+              [@ship.symbol],
               "market_waypoint",
               @autopilot && @autopilot.market_waypoint
             )
@@ -2192,9 +2212,10 @@ defmodule SpaceTradersWeb.DashboardLive do
         <input
           name="cargo_threshold"
           value={
-            draft_value(
+            draft_field(
               @form_drafts,
-              draft_key("autopilot", [@ship.symbol]),
+              "autopilot",
+              [@ship.symbol],
               "cargo_threshold",
               @autopilot && @autopilot.cargo_threshold
             )
