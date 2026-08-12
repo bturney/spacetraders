@@ -15,12 +15,13 @@ readonly DEPLOY_SCRIPT_SHA256=7c46dfbace25f1e8e1148acfb10ee6b7a5131952866f220e4d
 
 [[ $EUID -eq 0 ]] || { printf '%s\n' 'Run this script as root.' >&2; exit 1; }
 [[ -d "$DEPLOY_DIR" ]] || { printf '%s\n' "$DEPLOY_DIR does not exist." >&2; exit 1; }
+readonly GITHUB_USER=${SUDO_USER:-root}
 
 id -u "$RUNNER_USER" >/dev/null 2>&1 || useradd --create-home --shell /bin/bash "$RUNNER_USER"
 usermod -aG docker "$RUNNER_USER"
 
 install -d -o "$RUNNER_USER" -g "$RUNNER_USER" "$RUNNER_DIR"
-gh api "repos/bturney/spacetraders/contents/scripts/deploy-host?ref=$DEPLOY_SCRIPT_REF" \
+sudo -u "$GITHUB_USER" gh api "repos/bturney/spacetraders/contents/scripts/deploy-host?ref=$DEPLOY_SCRIPT_REF" \
   -H 'Accept: application/vnd.github.raw' > /tmp/spacetraders-deploy
 printf '%s  %s\n' "$DEPLOY_SCRIPT_SHA256" /tmp/spacetraders-deploy | sha256sum --check --status
 install -o root -g docker -m 0750 /tmp/spacetraders-deploy "$DEPLOY_DIR/deploy"
