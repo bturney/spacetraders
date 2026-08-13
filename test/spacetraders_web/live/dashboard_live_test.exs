@@ -1137,6 +1137,8 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       {:ok, lv, _html} = live(conn, ~p"/")
 
       assert has_element?(lv, "[data-select-ship=\"ORBITALIST-1\"]", "Open operations")
+      assert has_element?(lv, "[data-ship-operations=\"ORBITALIST-1\"].hidden.lg\\:block")
+      assert has_element?(lv, "[data-ship-readiness=\"\"].hidden.lg\\:block")
 
       html =
         lv
@@ -1146,6 +1148,8 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       assert has_element?(lv, "[data-ship-card=\"ORBITALIST-1\"][data-selected=\"true\"]")
       assert has_element?(lv, "[data-ship-card=\"ORBITALIST-1\"]")
       assert has_element?(lv, "[data-ship-card=\"ORBITALIST-1\"]:not(.hidden)")
+      refute has_element?(lv, "[data-ship-operations=\"ORBITALIST-1\"].hidden")
+      refute has_element?(lv, "[data-ship-readiness=\"\"].hidden")
       assert html =~ "Selected Ship operations"
       assert has_element?(lv, "[data-back-to-fleet]", "Back to Fleet")
 

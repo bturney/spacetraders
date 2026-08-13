@@ -1960,62 +1960,64 @@ defmodule SpaceTradersWeb.DashboardLive do
           value={cargo_units(@ship.cargo)}
           max={capacity(@ship.cargo)}
         />
-        <div
-          :for={item <- cargo_inventory(@ship)}
-          data-cargo-item={item.symbol}
-          class="mt-2 flex items-center justify-between gap-2 rounded border border-base-300/50 px-3 py-2 text-sm"
-        >
-          <div>
-            <div class="flex flex-wrap items-baseline gap-2">
-              <span class="font-mono font-semibold">{item.symbol}</span>
-              <span :if={cargo_name(item)} class="opacity-70">{cargo_name(item)}</span>
-              <span class="opacity-60">{item.units} units</span>
-            </div>
-            <details
-              :if={cargo_description(item)}
-              id={"cargo-description-#{@ship.symbol}-#{item.symbol}"}
-              class="mt-1"
-              data-cargo-description={item.symbol}
-            >
-              <summary class="cursor-pointer text-xs opacity-70">Description</summary>
-              <p class="mt-1 text-xs opacity-70">{cargo_description(item)}</p>
-            </details>
-          </div>
-          <form
-            id={"jettison-form-#{@ship.symbol}-#{item.symbol}"}
-            phx-change="track_draft"
-            phx-submit="jettison_cargo"
-            class="flex items-center gap-2"
+        <div class={operations_class(@selected)} data-ship-operations={@ship.symbol}>
+          <div
+            :for={item <- cargo_inventory(@ship)}
+            data-cargo-item={item.symbol}
+            class="mt-2 flex items-center justify-between gap-2 rounded border border-base-300/50 px-3 py-2 text-sm"
           >
-            <input type="hidden" name="symbol" value={@ship.symbol} />
-            <input type="hidden" name="trade_symbol" value={item.symbol} />
-            <input
-              type="hidden"
-              name="draft_key"
-              value={draft_key("jettison", [@ship.symbol, item.symbol])}
-            />
-            <input
-              type="number"
-              name="units"
-              min="1"
-              max={item.units}
-              value={
-                draft_field(
-                  @form_drafts,
-                  "jettison",
-                  [@ship.symbol, item.symbol],
-                  "units",
-                  item.units
-                )
-              }
-              class="input input-bordered input-xs w-16"
-            />
-            <button type="submit" class="btn btn-ghost btn-xs">Jettison</button>
-          </form>
+            <div>
+              <div class="flex flex-wrap items-baseline gap-2">
+                <span class="font-mono font-semibold">{item.symbol}</span>
+                <span :if={cargo_name(item)} class="opacity-70">{cargo_name(item)}</span>
+                <span class="opacity-60">{item.units} units</span>
+              </div>
+              <details
+                :if={cargo_description(item)}
+                id={"cargo-description-#{@ship.symbol}-#{item.symbol}"}
+                class="mt-1"
+                data-cargo-description={item.symbol}
+              >
+                <summary class="cursor-pointer text-xs opacity-70">Description</summary>
+                <p class="mt-1 text-xs opacity-70">{cargo_description(item)}</p>
+              </details>
+            </div>
+            <form
+              id={"jettison-form-#{@ship.symbol}-#{item.symbol}"}
+              phx-change="track_draft"
+              phx-submit="jettison_cargo"
+              class="flex items-center gap-2"
+            >
+              <input type="hidden" name="symbol" value={@ship.symbol} />
+              <input type="hidden" name="trade_symbol" value={item.symbol} />
+              <input
+                type="hidden"
+                name="draft_key"
+                value={draft_key("jettison", [@ship.symbol, item.symbol])}
+              />
+              <input
+                type="number"
+                name="units"
+                min="1"
+                max={item.units}
+                value={
+                  draft_field(
+                    @form_drafts,
+                    "jettison",
+                    [@ship.symbol, item.symbol],
+                    "units",
+                    item.units
+                  )
+                }
+                class="input input-bordered input-xs w-16"
+              />
+              <button type="submit" class="btn btn-ghost btn-xs">Jettison</button>
+            </form>
+          </div>
         </div>
       </div>
 
-      <div class="mt-4">
+      <div class={"mt-4 #{operations_class(@selected)}"} data-ship-operations={@ship.symbol}>
         <div
           :if={@selected}
           class="mb-3 flex items-center justify-between rounded bg-base-300/40 px-3 py-2 text-xs"
@@ -2130,7 +2132,7 @@ defmodule SpaceTradersWeb.DashboardLive do
 
       <details
         id={"ship-readiness-#{@ship.symbol}"}
-        class="mt-4 border-t border-base-300/60 pt-3"
+        class={"mt-4 border-t border-base-300/60 pt-3 #{operations_class(@selected)}"}
         data-ship-readiness
       >
         <summary class="cursor-pointer text-sm font-semibold">Ship Readiness</summary>
@@ -2478,6 +2480,9 @@ defmodule SpaceTradersWeb.DashboardLive do
 
   defp fleet_healthy?({:ok, ships}), do: ships != [] and attention_count({:ok, ships}) == 0
   defp fleet_healthy?(_), do: false
+
+  defp operations_class(true), do: ""
+  defp operations_class(false), do: "hidden lg:block"
 
   defp needs_attention?(%{autopilot: %{status: "blocked"}}), do: true
   defp needs_attention?(%{autopilot: %{status: "paused"}}), do: true
