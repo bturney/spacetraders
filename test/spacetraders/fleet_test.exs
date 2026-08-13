@@ -789,7 +789,7 @@ defmodule SpaceTraders.FleetTest do
       assert progress == %{"last_completed" => "extract", "waypoint" => "X1-UX81-A1"}
     end
 
-    test "ShipServer arrival wakeup revalidates Autopilot progress" do
+    test "ShipServer arrival wakeup resumes extraction after returning from market" do
       agent = agent_fixture()
       ship_fixture(agent, "FLEET-SHIP")
 
@@ -812,23 +812,45 @@ defmodule SpaceTraders.FleetTest do
         )
       )
 
+      test_pid = self()
+
       Req.Test.stub(SpaceTraders.API, fn conn ->
+        send(test_pid, {:api_request, conn.request_path})
+
         case conn.request_path do
           "/v2/my/ships/FLEET-SHIP" ->
             Req.Test.json(conn, %{
               "data" =>
                 ship_body("FLEET-SHIP", %{
                   "nav" => nav_body("DOCKED", destination: "X1-UX81-A2"),
-                  "cargo" => %{"capacity" => 40, "units" => 30, "inventory" => []}
+                  "cargo" => %{"capacity" => 40, "units" => 0, "inventory" => []}
                 })
             })
-
-          "/v2/my/ships/FLEET-SHIP/navigate" ->
-            Req.Test.json(conn, %{"data" => navigate_response("IN_TRANSIT")})
 
           "/v2/my/ships/FLEET-SHIP/orbit" ->
             Req.Test.json(conn, %{
               "data" => %{"nav" => nav_body("IN_ORBIT", destination: "X1-UX81-A2")}
+            })
+
+          "/v2/my/ships/FLEET-SHIP/extract" ->
+            Req.Test.json(conn, %{
+              "data" => %{
+                "cooldown" => %{
+                  "shipSymbol" => "FLEET-SHIP",
+                  "totalSeconds" => 60,
+                  "remainingSeconds" => 60,
+                  "expiration" => future_iso(60)
+                },
+                "extraction" => %{
+                  "shipSymbol" => "FLEET-SHIP",
+                  "yield" => %{"symbol" => "IRON_ORE", "units" => 5}
+                },
+                "cargo" => %{
+                  "capacity" => 40,
+                  "units" => 5,
+                  "inventory" => [%{"symbol" => "IRON_ORE", "units" => 5}]
+                }
+              }
             })
         end
       end)
@@ -852,11 +874,13 @@ defmodule SpaceTraders.FleetTest do
 
       assert Repo.get!(Event, event.id).status == "done"
 
+      assert_receive {:api_request, "/v2/my/ships/FLEET-SHIP/extract"}, 1_000
+
       assert eventually(fn ->
                current = Repo.get_by!(AutopilotConfig, ship_id: config.ship_id)
 
                current.status == "waiting" and
-                 current.in_flight_action["waypoint"] == "X1-UX81-A1"
+                 current.in_flight_action["kind"] == "extract"
              end)
     end
 
