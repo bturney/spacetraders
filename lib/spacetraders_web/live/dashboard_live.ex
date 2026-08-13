@@ -1909,18 +1909,21 @@ defmodule SpaceTradersWeb.DashboardLive do
     >
       <div class="flex items-center justify-between gap-2">
         <div class="flex items-center gap-2">
-          <button
-            type="button"
-            phx-click="select_ship"
-            phx-value-agent_id={@agent_id}
-            phx-value-symbol={@ship.symbol}
-            class="font-mono font-semibold underline-offset-2 hover:underline"
-            data-select-ship={@ship.symbol}
-          >{@ship.symbol}</button>
+          <span class="font-mono font-semibold">{@ship.symbol}</span>
           <span class="badge badge-ghost badge-sm">{ship_role(@ship)}</span>
         </div>
         <span class={status_badge_class(@ship)}>{ship_status(@ship)}</span>
       </div>
+
+      <button
+        :if={not @selected}
+        type="button"
+        phx-click="select_ship"
+        phx-value-agent_id={@agent_id}
+        phx-value-symbol={@ship.symbol}
+        class="btn btn-primary btn-sm mt-3 w-full"
+        data-select-ship={@ship.symbol}
+      >Open operations</button>
 
       <div class="mt-4 grid grid-cols-2 gap-4 border-y border-base-300/60 py-4 text-sm">
         <div>

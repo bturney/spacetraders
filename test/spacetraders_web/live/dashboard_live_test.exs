@@ -1136,6 +1136,8 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
 
       {:ok, lv, _html} = live(conn, ~p"/")
 
+      assert has_element?(lv, "[data-select-ship=\"ORBITALIST-1\"]", "Open operations")
+
       html =
         lv
         |> element("[data-select-ship=\"ORBITALIST-1\"]")
