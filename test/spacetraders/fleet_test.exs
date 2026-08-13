@@ -441,7 +441,7 @@ defmodule SpaceTraders.FleetTest do
       assert [%Event{event_type: "arrival"}] = Timeline.pending_events(:ship, "FLEET-SHIP")
     end
 
-    test "sells accepted cargo at the configured market before returning to extraction" do
+    test "sells accepted cargo, jettisons rejected cargo, and returns to extraction" do
       agent = agent_fixture()
       ship_fixture(agent, "FLEET-SHIP")
 
@@ -459,12 +459,38 @@ defmodule SpaceTraders.FleetTest do
               "data" => %{
                 "symbol" => "X1-UX81-A1",
                 "imports" => [%{"symbol" => "IRON_ORE"}],
-                "tradeGoods" => []
+                "tradeGoods" => [%{"symbol" => "FUEL"}]
               }
             })
 
+          "/v2/systems/X1-UX81/waypoints/X1-UX81-A1" ->
+            Req.Test.json(conn, %{"data" => %{"symbol" => "X1-UX81-A1", "x" => 0, "y" => 0}})
+
+          "/v2/systems/X1-UX81/waypoints/X1-UX81-A2" ->
+            Req.Test.json(conn, %{"data" => %{"symbol" => "X1-UX81-A2", "x" => 10, "y" => 0}})
+
           "/v2/my/ships/FLEET-SHIP/sell" ->
-            Req.Test.json(conn, %{"data" => %{"cargo" => %{"inventory" => []}}})
+            assert conn.body_params == %{"symbol" => "IRON_ORE", "units" => 10}
+
+            Req.Test.json(conn, %{
+              "data" => %{
+                "cargo" => %{
+                  "capacity" => 40,
+                  "units" => 5,
+                  "inventory" => [%{"symbol" => "COPPER_ORE", "units" => 5}]
+                }
+              }
+            })
+
+          "/v2/my/ships/FLEET-SHIP/jettison" ->
+            assert conn.body_params == %{"symbol" => "COPPER_ORE", "units" => 5}
+
+            Req.Test.json(conn, %{
+              "data" => %{"cargo" => %{"capacity" => 40, "units" => 0, "inventory" => []}}
+            })
+
+          "/v2/my/ships/FLEET-SHIP/refuel" ->
+            Req.Test.json(conn, %{"data" => %{"fuel" => %{"capacity" => 200, "current" => 200}}})
 
           "/v2/my/ships/FLEET-SHIP/navigate" ->
             Req.Test.json(conn, %{"data" => navigate_response("IN_TRANSIT")})
@@ -490,7 +516,8 @@ defmodule SpaceTraders.FleetTest do
             %Model.ShipCargoItem{symbol: "IRON_ORE", units: 10},
             %Model.ShipCargoItem{symbol: "COPPER_ORE", units: 5}
           ]
-        }
+        },
+        fuel: %Model.ShipFuel{capacity: 200, current: 5}
       }
 
       config = %{
@@ -499,14 +526,100 @@ defmodule SpaceTraders.FleetTest do
           progress: %{"waypoint" => "X1-UX81-A1"}
       }
 
-      assert {:error, {:unsellable_cargo, ["COPPER_ORE"]}} =
+      assert {:ok, %AutopilotConfig{status: "waiting", in_flight_action: %{"kind" => "navigate"}}} =
+               Fleet.advance_autopilot(agent, config, live_ship)
+    end
+
+    test "blocks at the configured market when it cannot provide fuel for the return leg" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      {:ok, config} =
+        Fleet.configure_autopilot(agent, "FLEET-SHIP", %{
+          extraction_waypoint: "X1-UX81-A2",
+          market_waypoint: "X1-UX81-A1",
+          cargo_threshold: 30
+        })
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case conn.request_path do
+          "/v2/systems/X1-UX81/waypoints/X1-UX81-A1/market" ->
+            Req.Test.json(conn, %{"data" => %{"symbol" => "X1-UX81-A1", "tradeGoods" => []}})
+
+          "/v2/systems/X1-UX81/waypoints/X1-UX81-A1" ->
+            Req.Test.json(conn, %{"data" => %{"symbol" => "X1-UX81-A1", "x" => 0, "y" => 0}})
+
+          "/v2/systems/X1-UX81/waypoints/X1-UX81-A2" ->
+            Req.Test.json(conn, %{"data" => %{"symbol" => "X1-UX81-A2", "x" => 10, "y" => 0}})
+        end
+      end)
+
+      live_ship = %Model.Ship{
+        symbol: "FLEET-SHIP",
+        nav: %Model.ShipNav{
+          status: "DOCKED",
+          waypoint_symbol: "X1-UX81-A1",
+          system_symbol: "X1-UX81"
+        },
+        cargo: %Model.ShipCargo{capacity: 40, units: 0, inventory: []},
+        fuel: %Model.ShipFuel{capacity: 200, current: 0}
+      }
+
+      config = %{config | desired_mode: "autopilot", progress: %{"waypoint" => "X1-UX81-A1"}}
+
+      assert {:error, {:market_fuel_unavailable, "X1-UX81-A1", 10}} =
                Fleet.advance_autopilot(agent, config, live_ship)
 
       assert %AutopilotConfig{status: "blocked", blocked_reason: reason} =
                Repo.get!(AutopilotConfig, config.id)
 
-      assert reason =~ "unsellable_cargo"
-      assert reason =~ "COPPER_ORE"
+      assert reason =~ "market_fuel_unavailable"
+    end
+
+    test "blocks when configured market refueling remains below return-leg fuel" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      {:ok, config} =
+        Fleet.configure_autopilot(agent, "FLEET-SHIP", %{
+          extraction_waypoint: "X1-UX81-A2",
+          market_waypoint: "X1-UX81-A1",
+          cargo_threshold: 30
+        })
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case conn.request_path do
+          "/v2/systems/X1-UX81/waypoints/X1-UX81-A1/market" ->
+            Req.Test.json(conn, %{
+              "data" => %{"symbol" => "X1-UX81-A1", "tradeGoods" => [%{"symbol" => "FUEL"}]}
+            })
+
+          "/v2/systems/X1-UX81/waypoints/X1-UX81-A1" ->
+            Req.Test.json(conn, %{"data" => %{"symbol" => "X1-UX81-A1", "x" => 0, "y" => 0}})
+
+          "/v2/systems/X1-UX81/waypoints/X1-UX81-A2" ->
+            Req.Test.json(conn, %{"data" => %{"symbol" => "X1-UX81-A2", "x" => 10, "y" => 0}})
+
+          "/v2/my/ships/FLEET-SHIP/refuel" ->
+            Req.Test.json(conn, %{"data" => %{"fuel" => %{"capacity" => 200, "current" => 8}}})
+        end
+      end)
+
+      live_ship = %Model.Ship{
+        symbol: "FLEET-SHIP",
+        nav: %Model.ShipNav{
+          status: "DOCKED",
+          waypoint_symbol: "X1-UX81-A1",
+          system_symbol: "X1-UX81"
+        },
+        cargo: %Model.ShipCargo{capacity: 40, units: 0, inventory: []},
+        fuel: %Model.ShipFuel{capacity: 200, current: 0}
+      }
+
+      config = %{config | desired_mode: "autopilot", progress: %{"waypoint" => "X1-UX81-A1"}}
+
+      assert {:error, {:market_fuel_insufficient, "X1-UX81-A1", 10, 8}} =
+               Fleet.advance_autopilot(agent, config, live_ship)
     end
 
     test "waits for an authoritative cooldown before extracting" do

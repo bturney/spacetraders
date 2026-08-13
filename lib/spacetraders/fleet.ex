@@ -483,15 +483,9 @@ defmodule SpaceTraders.Fleet do
              live_ship.nav.system_symbol,
              config.market_waypoint
            ),
-         {:ok, cargo} <- sell_accepted_cargo(agent, live_ship, market) do
-      if cargo == [] do
-        navigate_autopilot(agent, config, live_ship, config.extraction_waypoint)
-      else
-        mark_autopilot_blocked(
-          config,
-          {:unsellable_cargo, Enum.map(cargo, & &1.symbol)}
-        )
-      end
+         {:ok, live_ship} <- settle_market_cargo(agent, config, live_ship, market),
+         {:ok, live_ship} <- refuel_for_market_departure(agent, config, live_ship, market) do
+      navigate_autopilot(agent, config, live_ship, config.extraction_waypoint)
     else
       {:error, reason} -> mark_autopilot_blocked(config, reason)
     end
@@ -507,19 +501,54 @@ defmodule SpaceTraders.Fleet do
     end
   end
 
-  defp sell_accepted_cargo(agent, live_ship, market) do
+  defp settle_market_cargo(agent, config, live_ship, market) do
     accepted = MapSet.new((market.imports || []) ++ (market.exchange || []), & &1.symbol)
 
-    Enum.reduce_while(live_ship.cargo.inventory || [], {:ok, []}, fn item, {:ok, remaining} ->
-      if MapSet.member?(accepted, item.symbol) do
-        case sell_cargo_for_autopilot(agent, live_ship.symbol, item.symbol, item.units) do
-          {:ok, _result} -> {:cont, {:ok, remaining}}
-          {:error, reason} -> {:halt, {:error, reason}}
-        end
-      else
-        {:cont, {:ok, [item | remaining]}}
+    Enum.reduce_while(live_ship.cargo.inventory || [], {:ok, live_ship}, fn item, {:ok, ship} ->
+      action_kind = if MapSet.member?(accepted, item.symbol), do: "sell", else: "jettison"
+
+      case perform_market_cargo_action(agent, config, ship, item, action_kind) do
+        {:ok, ship} -> {:cont, {:ok, ship}}
+        {:error, reason} -> {:halt, {:error, reason}}
       end
     end)
+  end
+
+  defp perform_market_cargo_action(agent, config, live_ship, item, kind) do
+    action = %{
+      "kind" => kind,
+      "waypoint" => config.market_waypoint,
+      "trade_symbol" => item.symbol,
+      "expected" => %{"units_at_most" => item_units(live_ship, item.symbol) - item.units}
+    }
+
+    config =
+      Repo.update!(
+        Ecto.Changeset.change(config, status: "revalidating", in_flight_action: action)
+      )
+
+    request =
+      if kind == "sell" do
+        sell_cargo_for_autopilot(agent, live_ship.symbol, item.symbol, item.units)
+      else
+        jettison_cargo_for_autopilot(agent, live_ship.symbol, item.symbol, item.units)
+      end
+
+    case request do
+      {:ok, %{cargo: cargo}} ->
+        Repo.update!(
+          Ecto.Changeset.change(config,
+            status: "ready",
+            in_flight_action: nil,
+            last_action_result: %{"kind" => kind, "trade_symbol" => item.symbol}
+          )
+        )
+
+        {:ok, %{live_ship | cargo: cargo}}
+
+      {:error, reason} ->
+        mark_autopilot_blocked(config, {:market_cargo_action_failed, kind, item.symbol, reason})
+    end
   end
 
   defp sell_cargo_for_autopilot(
@@ -529,6 +558,102 @@ defmodule SpaceTraders.Fleet do
          units
        ) do
     SpaceTraders.API.sell_cargo(token, ship_symbol, trade_symbol, units)
+  end
+
+  defp jettison_cargo_for_autopilot(
+         %AgentRecord{agent_token: token},
+         ship_symbol,
+         trade_symbol,
+         units
+       ) do
+    SpaceTraders.API.jettison_cargo(token, ship_symbol, trade_symbol, units)
+  end
+
+  defp refuel_for_market_departure(agent, config, live_ship, market) do
+    with {:ok, required_fuel} <- fuel_needed_for_leg(agent, config, live_ship) do
+      if fuel_current(live_ship) >= required_fuel do
+        {:ok, live_ship}
+      else
+        with :ok <- fuel_available?(market, required_fuel),
+             {:ok, live_ship} <- refuel_if_needed(agent, config, live_ship, required_fuel) do
+          {:ok, live_ship}
+        else
+          {:error, reason} -> mark_autopilot_blocked(config, reason)
+        end
+      end
+    else
+      {:error, reason} -> mark_autopilot_blocked(config, reason)
+    end
+  end
+
+  defp fuel_needed_for_leg(agent, config, live_ship) do
+    with {:ok, origin} <-
+           waypoint(agent.agent_token, live_ship.nav.system_symbol, config.market_waypoint),
+         {:ok, destination} <-
+           waypoint(agent.agent_token, live_ship.nav.system_symbol, config.extraction_waypoint),
+         true <-
+           is_number(origin.x) and is_number(origin.y) and is_number(destination.x) and
+             is_number(destination.y) do
+      distance =
+        :math.sqrt(
+          :math.pow(origin.x - destination.x, 2) + :math.pow(origin.y - destination.y, 2)
+        )
+
+      {:ok, ceil(distance) * fuel_multiplier(live_ship.nav.flight_mode)}
+    else
+      false ->
+        {:error, {:market_fuel_route_unavailable, config.market_waypoint}}
+
+      {:error, reason} ->
+        {:error, {:market_fuel_route_unavailable, config.market_waypoint, reason}}
+    end
+  end
+
+  defp fuel_multiplier("BURN"), do: 2
+  defp fuel_multiplier("STEALTH"), do: 2
+  defp fuel_multiplier(_), do: 1
+
+  defp fuel_available?(market, required_fuel) do
+    if Enum.any?(market.trade_goods || [], &(&1.symbol == "FUEL")) do
+      :ok
+    else
+      {:error, {:market_fuel_unavailable, market.symbol, required_fuel}}
+    end
+  end
+
+  defp refuel_if_needed(agent, config, live_ship, required_fuel) do
+    action = %{
+      "kind" => "refuel",
+      "waypoint" => config.market_waypoint,
+      "expected" => %{"fuel_at_least" => required_fuel}
+    }
+
+    config =
+      Repo.update!(
+        Ecto.Changeset.change(config, status: "revalidating", in_flight_action: action)
+      )
+
+    case SpaceTraders.API.refuel_ship(agent.agent_token, live_ship.symbol) do
+      {:ok, %{fuel: fuel}} when fuel.current >= required_fuel ->
+        Repo.update!(
+          Ecto.Changeset.change(config,
+            status: "ready",
+            in_flight_action: nil,
+            last_action_result: %{"kind" => "refuel", "fuel" => fuel.current}
+          )
+        )
+
+        {:ok, %{live_ship | fuel: fuel}}
+
+      {:ok, %{fuel: fuel}} ->
+        mark_autopilot_blocked(
+          config,
+          {:market_fuel_insufficient, config.market_waypoint, required_fuel, fuel.current}
+        )
+
+      {:error, reason} ->
+        mark_autopilot_blocked(config, {:market_refuel_failed, config.market_waypoint, reason})
+    end
   end
 
   defp navigate_autopilot(agent, config, live_ship, waypoint) do
@@ -635,6 +760,16 @@ defmodule SpaceTraders.Fleet do
 
   defp cargo_units(%{cargo: %{units: units}}) when is_integer(units), do: units
   defp cargo_units(_), do: 0
+
+  defp item_units(%{cargo: %{inventory: inventory}}, symbol) do
+    case Enum.find(inventory || [], &(&1.symbol == symbol)) do
+      %{units: units} when is_integer(units) -> units
+      _ -> 0
+    end
+  end
+
+  defp fuel_current(%{fuel: %{current: current}}) when is_integer(current), do: current
+  defp fuel_current(_), do: 0
 
   defp extraction_yield(%{extraction: %{yield: %{symbol: symbol, units: units}}}) do
     %{"symbol" => symbol, "units" => units}
@@ -970,6 +1105,18 @@ defmodule SpaceTraders.Fleet do
          live_ship
        ) do
     if cargo_units(live_ship) >= units, do: :confirmed, else: :absent
+  end
+
+  defp action_outcome(
+         %{"kind" => kind, "trade_symbol" => symbol, "expected" => %{"units_at_most" => units}},
+         live_ship
+       )
+       when kind in ["sell", "jettison"] do
+    if item_units(live_ship, symbol) <= units, do: :confirmed, else: :absent
+  end
+
+  defp action_outcome(%{"kind" => "refuel", "expected" => %{"fuel_at_least" => fuel}}, live_ship) do
+    if fuel_current(live_ship) >= fuel, do: :confirmed, else: :absent
   end
 
   defp action_outcome(_action, _live_ship), do: :ambiguous
