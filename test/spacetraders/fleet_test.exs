@@ -1473,6 +1473,72 @@ defmodule SpaceTraders.FleetTest do
                Timeline.pending_events(:ship, "FLEET-SHIP")
     end
 
+    test "rejects siphoning away from a gas giant before posting the action" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case conn.request_path do
+          "/v2/my/ships/FLEET-SHIP" ->
+            Req.Test.json(conn, %{
+              "data" =>
+                ship_body("FLEET-SHIP", %{
+                  "nav" => nav_body("IN_ORBIT")
+                })
+            })
+
+          "/v2/systems/X1-UX81/waypoints/X1-UX81-A1" ->
+            Req.Test.json(conn, %{
+              "data" => %{
+                "symbol" => "X1-UX81-A1",
+                "systemSymbol" => "X1-UX81",
+                "type" => "PLANET",
+                "x" => 1,
+                "y" => 2
+              }
+            })
+
+          path ->
+            flunk("unexpected siphon request: #{path}")
+        end
+      end)
+
+      assert {:error, :invalid_siphon_waypoint} = Fleet.siphon_resources(agent, "FLEET-SHIP")
+    end
+
+    test "rejects siphoning without the required equipment before posting the action" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case conn.request_path do
+          "/v2/my/ships/FLEET-SHIP" ->
+            Req.Test.json(conn, %{
+              "data" =>
+                ship_body("FLEET-SHIP", %{
+                  "nav" => nav_body("IN_ORBIT")
+                })
+            })
+
+          "/v2/systems/X1-UX81/waypoints/X1-UX81-A1" ->
+            Req.Test.json(conn, %{
+              "data" => %{
+                "symbol" => "X1-UX81-A1",
+                "systemSymbol" => "X1-UX81",
+                "type" => "GAS_GIANT",
+                "x" => 1,
+                "y" => 2
+              }
+            })
+
+          path ->
+            flunk("unexpected siphon request: #{path}")
+        end
+      end)
+
+      assert {:error, :siphon_capability_missing} = Fleet.siphon_resources(agent, "FLEET-SHIP")
+    end
+
     test "refuses actions while a cooldown is pending" do
       agent = agent_fixture()
       ship_fixture(agent, "FLEET-SHIP")
