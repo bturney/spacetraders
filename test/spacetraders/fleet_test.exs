@@ -1676,6 +1676,130 @@ defmodule SpaceTraders.FleetTest do
       assert ShipServer.ensure_ready("FLEET-SHIP") == {:error, :cooldown_active}
     end
 
+    test "siphons resources and persists the cooldown" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+      expiration = future_iso(60)
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case conn.request_path do
+          "/v2/my/ships/FLEET-SHIP" ->
+            Req.Test.json(conn, %{
+              "data" =>
+                ship_body("FLEET-SHIP", %{
+                  "modules" => [%{"symbol" => "MODULE_GAS_PROCESSOR_I"}],
+                  "mounts" => [%{"symbol" => "MOUNT_GAS_SIPHON_I"}]
+                })
+            })
+
+          "/v2/systems/X1-UX81/waypoints/X1-UX81-A1" ->
+            Req.Test.json(conn, %{
+              "data" => %{
+                "symbol" => "X1-UX81-A1",
+                "systemSymbol" => "X1-UX81",
+                "type" => "GAS_GIANT",
+                "x" => 1,
+                "y" => 2
+              }
+            })
+
+          "/v2/my/ships/FLEET-SHIP/siphon" ->
+            Req.Test.json(conn, %{
+              "data" => %{
+                "cooldown" => %{
+                  "shipSymbol" => "FLEET-SHIP",
+                  "totalSeconds" => 60,
+                  "remainingSeconds" => 60,
+                  "expiration" => expiration
+                },
+                "siphon" => %{
+                  "shipSymbol" => "FLEET-SHIP",
+                  "yield" => %{"symbol" => "LIQUID_HYDROGEN", "units" => 5}
+                },
+                "cargo" => %{
+                  "capacity" => 40,
+                  "units" => 17,
+                  "inventory" => [%{"symbol" => "LIQUID_HYDROGEN", "units" => 17}]
+                },
+                "events" => []
+              }
+            })
+        end
+      end)
+
+      assert {:ok, %{cargo: %{units: 17}, siphon: %{yield: %{units: 5}}}} =
+               Fleet.siphon_resources(agent, "FLEET-SHIP")
+
+      assert [%Event{event_type: "cooldown", payload: %{}}] =
+               Timeline.pending_events(:ship, "FLEET-SHIP")
+    end
+
+    test "rejects siphoning away from a gas giant before posting the action" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case conn.request_path do
+          "/v2/my/ships/FLEET-SHIP" ->
+            Req.Test.json(conn, %{
+              "data" =>
+                ship_body("FLEET-SHIP", %{
+                  "nav" => nav_body("IN_ORBIT")
+                })
+            })
+
+          "/v2/systems/X1-UX81/waypoints/X1-UX81-A1" ->
+            Req.Test.json(conn, %{
+              "data" => %{
+                "symbol" => "X1-UX81-A1",
+                "systemSymbol" => "X1-UX81",
+                "type" => "PLANET",
+                "x" => 1,
+                "y" => 2
+              }
+            })
+
+          path ->
+            flunk("unexpected siphon request: #{path}")
+        end
+      end)
+
+      assert {:error, :invalid_siphon_waypoint} = Fleet.siphon_resources(agent, "FLEET-SHIP")
+    end
+
+    test "rejects siphoning without the required equipment before posting the action" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case conn.request_path do
+          "/v2/my/ships/FLEET-SHIP" ->
+            Req.Test.json(conn, %{
+              "data" =>
+                ship_body("FLEET-SHIP", %{
+                  "nav" => nav_body("IN_ORBIT")
+                })
+            })
+
+          "/v2/systems/X1-UX81/waypoints/X1-UX81-A1" ->
+            Req.Test.json(conn, %{
+              "data" => %{
+                "symbol" => "X1-UX81-A1",
+                "systemSymbol" => "X1-UX81",
+                "type" => "GAS_GIANT",
+                "x" => 1,
+                "y" => 2
+              }
+            })
+
+          path ->
+            flunk("unexpected siphon request: #{path}")
+        end
+      end)
+
+      assert {:error, :siphon_capability_missing} = Fleet.siphon_resources(agent, "FLEET-SHIP")
+    end
+
     test "refuses actions while a cooldown is pending" do
       agent = agent_fixture()
       ship_fixture(agent, "FLEET-SHIP")
@@ -1693,6 +1817,7 @@ defmodule SpaceTraders.FleetTest do
       assert {:error, :cooldown_active} = Fleet.dock_ship(agent, "FLEET-SHIP")
       assert {:error, :cooldown_active} = Fleet.orbit_ship(agent, "FLEET-SHIP")
       assert {:error, :cooldown_active} = Fleet.extract_resources(agent, "FLEET-SHIP")
+      assert {:error, :cooldown_active} = Fleet.siphon_resources(agent, "FLEET-SHIP")
     end
   end
 

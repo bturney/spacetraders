@@ -212,6 +212,21 @@ defmodule SpaceTradersWeb.DashboardLive do
   end
 
   @impl true
+  def handle_event("siphon", %{"symbol" => ship_symbol}, socket) do
+    with {:ok, agent} <- agent_for_ship(socket, ship_symbol),
+         {:ok, result} <- Fleet.siphon_resources(agent, ship_symbol) do
+      socket =
+        socket
+        |> refresh_agent_fleet(agent.id)
+        |> apply_ship_result(agent.id, ship_symbol, result)
+
+      {:noreply, siphon_flash(socket, result)}
+    else
+      {:error, reason} -> {:noreply, put_flash(socket, :error, live_error(reason))}
+    end
+  end
+
+  @impl true
   def handle_event("track_draft", %{"draft_key" => key} = params, socket) do
     draft = Map.drop(params, ["draft_key"])
 
@@ -735,6 +750,12 @@ defmodule SpaceTradersWeb.DashboardLive do
   end
 
   defp extraction_flash(socket, _result), do: socket
+
+  defp siphon_flash(socket, %{siphon: %{yield: %{symbol: symbol, units: units}}}) do
+    put_flash(socket, :info, "Siphoned #{units} #{symbol}.")
+  end
+
+  defp siphon_flash(socket, _result), do: socket
 
   defp purchase_flash(socket, nil), do: socket
 
@@ -1605,6 +1626,17 @@ defmodule SpaceTradersWeb.DashboardLive do
                 aria-label="Close waypoint inspector"
               >x</button>
             </div>
+            <div :if={waypoint.type == "GAS_GIANT"} class="alert alert-info mt-4" data-siphon-location>
+              <div>
+                <p class="font-semibold">Gas giant: siphon location</p>
+                <p class="text-sm">
+                  Siphoning requires a ship in orbit with a gas siphon mount and gas processor.
+                </p>
+                <p class="text-sm opacity-75">
+                  The waypoint API does not report which resource is available here.
+                </p>
+              </div>
+            </div>
           </div>
           <div :if={waypoint_intelligence?(waypoint)} class="mt-4" data-waypoint-intelligence>
             <p class="text-xs font-semibold uppercase tracking-wider opacity-60">
@@ -2119,6 +2151,15 @@ defmodule SpaceTradersWeb.DashboardLive do
             </button>
             <button
               type="button"
+              phx-click="siphon"
+              phx-value-symbol={@ship.symbol}
+              disabled={not siphonable?(@ship)}
+              class="btn btn-ghost min-h-10 btn-sm"
+            >
+              Siphon
+            </button>
+            <button
+              type="button"
               phx-click="refuel"
               phx-value-symbol={@ship.symbol}
               disabled={not refuelable?(@ship)}
@@ -2222,6 +2263,16 @@ defmodule SpaceTradersWeb.DashboardLive do
                 </details>
               </div>
             </div>
+          </div>
+
+          <div class="rounded border border-info/30 bg-info/5 px-3 py-2 text-xs" data-siphon-readiness>
+            <p class="font-semibold">Siphon readiness</p>
+            <p class="mt-1">
+              Requires orbit, a mount named <span class="font-mono">MOUNT_GAS_SIPHON_*</span>, and <span class="font-mono">MODULE_GAS_PROCESSOR_I</span>.
+            </p>
+            <p class="mt-1 opacity-70">
+              The dashboard does not currently purchase or outfit these components.
+            </p>
           </div>
 
           <div>
@@ -2658,6 +2709,12 @@ defmodule SpaceTradersWeb.DashboardLive do
 
   defp live_error(:mining_capability_missing), do: "This Ship has no mining laser installed."
 
+  defp live_error(:siphon_capability_missing),
+    do: "This Ship needs a gas siphon mount and gas processor."
+
+  defp live_error(:invalid_siphon_waypoint),
+    do: "Siphoning requires a Ship in orbit around a gas giant."
+
   defp live_error(:ship_not_owned), do: "That Ship is not in this agent's Fleet."
   defp live_error(:autopilot_not_configured), do: "Save an Autopilot configuration first."
   defp live_error({:autopilot_blocked, reason}), do: "Autopilot blocked: #{live_error(reason)}"
@@ -2717,7 +2774,16 @@ defmodule SpaceTradersWeb.DashboardLive do
   defp dockable?(ship), do: not cooldown_active?(ship) and ship_status(ship) == "IN_ORBIT"
   defp orbitable?(ship), do: not cooldown_active?(ship) and ship_status(ship) == "DOCKED"
   defp extractable?(ship), do: not cooldown_active?(ship) and ship_status(ship) == "IN_ORBIT"
+
+  defp siphonable?(ship),
+    do: not cooldown_active?(ship) and ship_status(ship) == "IN_ORBIT" and siphon_equipped?(ship)
+
   defp refuelable?(ship), do: not cooldown_active?(ship) and ship_status(ship) == "DOCKED"
+
+  defp siphon_equipped?(ship) do
+    Enum.any?(ship.mounts || [], &String.starts_with?(&1.symbol || "", "MOUNT_GAS_SIPHON_")) and
+      Enum.any?(ship.modules || [], &(&1.symbol == "MODULE_GAS_PROCESSOR_I"))
+  end
 
   defp arrival_label(%{nav: %{route: %{arrival: arrival}}}) when is_binary(arrival) do
     case DateTime.from_iso8601(arrival) do

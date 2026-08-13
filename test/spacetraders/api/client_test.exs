@@ -212,6 +212,52 @@ defmodule SpaceTraders.API.ClientTest do
               }} = API.extract_resources("TOKEN", "ORBITALIST-2")
     end
 
+    test "siphon_resources/2 posts to siphon and decodes cooldown + siphon + cargo" do
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        assert conn.method == "POST"
+        assert conn.request_path == "/v2/my/ships/ORBITALIST-2/siphon"
+        assert conn.body_params == %{}
+
+        Req.Test.json(conn, %{
+          "data" => %{
+            "cooldown" => %{
+              "shipSymbol" => "ORBITALIST-2",
+              "totalSeconds" => 60,
+              "remainingSeconds" => 60,
+              "expiration" => "2026-01-01T00:01:00.000Z"
+            },
+            "siphon" => %{
+              "shipSymbol" => "ORBITALIST-2",
+              "yield" => %{"symbol" => "LIQUID_HYDROGEN", "units" => 7}
+            },
+            "cargo" => %{
+              "capacity" => 40,
+              "units" => 7,
+              "inventory" => [%{"symbol" => "LIQUID_HYDROGEN", "units" => 7}]
+            },
+            "events" => [
+              %{
+                "component" => "ENGINE",
+                "description" => "Engine wear",
+                "name" => "Engine wear",
+                "symbol" => "WEAR"
+              }
+            ]
+          }
+        })
+      end)
+
+      assert {:ok,
+              %{
+                cooldown: %Model.Cooldown{remaining_seconds: 60},
+                siphon: %Model.Siphon{
+                  yield: %Model.SiphonYield{symbol: "LIQUID_HYDROGEN", units: 7}
+                },
+                cargo: %Model.ShipCargo{units: 7},
+                events: [%Model.ShipConditionEvent{component: "ENGINE", symbol: "WEAR"}]
+              }} = API.siphon_resources("TOKEN", "ORBITALIST-2")
+    end
+
     test "jettison_cargo/4 posts the good and units and decodes cargo" do
       Req.Test.stub(SpaceTraders.API, fn conn ->
         assert conn.request_path == "/v2/my/ships/ORBITALIST-1/jettison"

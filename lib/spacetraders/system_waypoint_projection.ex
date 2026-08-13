@@ -116,6 +116,7 @@ defmodule SpaceTraders.SystemWaypointProjection do
     [
       {"All types", "all"},
       {"Engineered asteroids", "engineered_asteroid"},
+      {"Gas giants", "gas_giant"},
       {"Shipyards", "shipyard"},
       {"Marketplaces", "marketplace"}
     ]
@@ -127,6 +128,9 @@ defmodule SpaceTraders.SystemWaypointProjection do
 
   defp filtered_waypoints(waypoints, "engineered_asteroid"),
     do: Enum.filter(waypoints, &(&1.type == "ENGINEERED_ASTEROID"))
+
+  defp filtered_waypoints(waypoints, "gas_giant"),
+    do: Enum.filter(waypoints, &(&1.type == "GAS_GIANT"))
 
   defp filtered_waypoints(waypoints, "shipyard"),
     do: Enum.filter(waypoints, &has_trait?(&1, "SHIPYARD"))

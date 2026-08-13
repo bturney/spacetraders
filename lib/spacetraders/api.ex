@@ -27,7 +27,18 @@ defmodule SpaceTraders.API do
   """
 
   alias SpaceTraders.API.RateLimiter
-  alias SpaceTraders.API.Model.{Agent, Contract, Cooldown, Extraction, Faction, Market, Ship}
+
+  alias SpaceTraders.API.Model.{
+    Agent,
+    Contract,
+    Cooldown,
+    Extraction,
+    Faction,
+    Market,
+    Ship,
+    ShipConditionEvent,
+    Siphon
+  }
 
   alias SpaceTraders.API.Model.{
     MarketTransaction,
@@ -180,6 +191,21 @@ defmodule SpaceTraders.API do
            cooldown: {:model, Cooldown},
            extraction: {:model, Extraction},
            cargo: {:model, ShipCargo}
+         }}
+    )
+  end
+
+  @doc "POST /my/ships/{symbol}/siphon"
+  @spec siphon_resources(token(), String.t()) :: result()
+  def siphon_resources(token, ship_symbol) do
+    request(:post, "/my/ships/#{ship_symbol}/siphon", token,
+      as:
+        {:map,
+         %{
+           cooldown: {:model, Cooldown},
+           siphon: {:model, Siphon},
+           cargo: {:model, ShipCargo},
+           events: {:list, ShipConditionEvent}
          }}
     )
   end
