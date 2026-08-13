@@ -73,6 +73,7 @@ defmodule SpaceTradersWeb.DashboardLive do
               waypoint_filters={@waypoint_filters}
               expanded_market_descriptions={@expanded_market_descriptions}
               waypoint_markets={@waypoint_markets}
+              selected_ships={@selected_ships}
             />
 
             <.activity_panel overviews={@overviews} />
@@ -148,6 +149,7 @@ defmodule SpaceTradersWeb.DashboardLive do
        form_drafts: %{},
        expanded_market_descriptions: MapSet.new(),
        selected_waypoints: %{},
+       selected_ships: %{},
        waypoint_filters: %{},
        waypoint_markets: %{}
      )}
@@ -214,6 +216,16 @@ defmodule SpaceTradersWeb.DashboardLive do
     draft = Map.drop(params, ["draft_key"])
 
     {:noreply, update(socket, :form_drafts, &Map.put(&1, key, draft))}
+  end
+
+  @impl true
+  def handle_event("select_ship", %{"agent_id" => agent_id, "symbol" => symbol}, socket) do
+    {:noreply, update(socket, :selected_ships, &Map.put(&1, agent_id, symbol))}
+  end
+
+  @impl true
+  def handle_event("clear_ship", %{"agent_id" => agent_id}, socket) do
+    {:noreply, update(socket, :selected_ships, &Map.delete(&1, agent_id))}
   end
 
   @impl true
@@ -765,6 +777,7 @@ defmodule SpaceTradersWeb.DashboardLive do
   attr :waypoint_filters, :map, default: %{}
   attr :expanded_market_descriptions, :any, default: MapSet.new()
   attr :waypoint_markets, :map, default: %{}
+  attr :selected_ships, :map, default: %{}
 
   defp agent_section(assigns) do
     ~H"""
@@ -775,6 +788,7 @@ defmodule SpaceTradersWeb.DashboardLive do
         ships={@overview.ships}
         cooldown_tick={@cooldown_tick}
         form_drafts={@form_drafts}
+        selected_ship={Map.get(@selected_ships, to_string(@overview.agent.id))}
       />
       <div class="grid gap-5 lg:grid-cols-2">
         <.contract_panel
@@ -1823,6 +1837,7 @@ defmodule SpaceTradersWeb.DashboardLive do
   attr :ships, :any, required: true
   attr :cooldown_tick, :integer, required: true
   attr :form_drafts, :map, default: %{}
+  attr :selected_ship, :string, default: nil
 
   defp fleet_grid(assigns) do
     ~H"""
@@ -1832,7 +1847,23 @@ defmodule SpaceTradersWeb.DashboardLive do
           <p class="eyebrow">Ship status</p>
           <h3 class="mt-1 text-lg font-semibold">Fleet</h3>
         </div>
-        <span class="text-xs opacity-60">{fleet_count_label(@ships)}</span>
+        <div class="flex items-center gap-2 text-xs">
+          <span data-fleet-roster>{fleet_count_label(@ships)}</span>
+          <span
+            :if={attention_count(@ships) > 0}
+            class="badge badge-warning badge-sm"
+            data-needs-attention-count
+          >
+            {attention_count(@ships)} needs attention
+          </span>
+          <span
+            :if={fleet_healthy?(@ships)}
+            class="badge badge-success badge-sm"
+            data-fleet-healthy
+          >
+            Fleet healthy
+          </span>
+        </div>
       </div>
 
       <%= case @ships do %>
@@ -1844,8 +1875,11 @@ defmodule SpaceTradersWeb.DashboardLive do
             <.ship_card
               :for={ship <- ships}
               ship={ship}
+              agent_id={@agent.id}
               cooldown_tick={@cooldown_tick}
               form_drafts={@form_drafts}
+              selected={@selected_ship == ship.symbol}
+              selected_mode={not is_nil(@selected_ship)}
             />
           </div>
         <% {:error, reason} -> %>
@@ -1856,15 +1890,33 @@ defmodule SpaceTradersWeb.DashboardLive do
   end
 
   attr :ship, :map, required: true
+  attr :agent_id, :integer, required: true
   attr :cooldown_tick, :integer, default: 0
   attr :form_drafts, :map, default: %{}
+  attr :selected, :boolean, default: false
+  attr :selected_mode, :boolean, default: false
 
   defp ship_card(assigns) do
     ~H"""
-    <div class="card border border-base-300/70 bg-base-200 p-4 sm:p-5">
+    <div
+      class={
+        "card border border-base-300/70 bg-base-200 p-4 sm:p-5 " <>
+          if(@selected, do: "ring-2 ring-primary ", else: "") <>
+          if(@selected_mode and not @selected, do: "hidden lg:block", else: "")
+      }
+      data-ship-card={@ship.symbol}
+      data-selected={to_string(@selected)}
+    >
       <div class="flex items-center justify-between gap-2">
         <div class="flex items-center gap-2">
-          <span class="font-mono font-semibold">{@ship.symbol}</span>
+          <button
+            type="button"
+            phx-click="select_ship"
+            phx-value-agent_id={@agent_id}
+            phx-value-symbol={@ship.symbol}
+            class="font-mono font-semibold underline-offset-2 hover:underline"
+            data-select-ship={@ship.symbol}
+          >{@ship.symbol}</button>
           <span class="badge badge-ghost badge-sm">{ship_role(@ship)}</span>
         </div>
         <span class={status_badge_class(@ship)}>{ship_status(@ship)}</span>
@@ -1961,6 +2013,19 @@ defmodule SpaceTradersWeb.DashboardLive do
       </div>
 
       <div class="mt-4">
+        <div
+          :if={@selected}
+          class="mb-3 flex items-center justify-between rounded bg-base-300/40 px-3 py-2 text-xs"
+        >
+          <span class="font-semibold">Selected Ship operations</span>
+          <button
+            type="button"
+            phx-click="clear_ship"
+            phx-value-agent_id={@agent_id}
+            class="btn btn-ghost btn-xs"
+            data-back-to-fleet
+          >Back to Fleet</button>
+        </div>
         <.autopilot_panel ship={@ship} form_drafts={@form_drafts} />
 
         <%= if in_transit?(@ship) do %>
@@ -2320,6 +2385,7 @@ defmodule SpaceTradersWeb.DashboardLive do
       |> Enum.flat_map(fn %{activity: activity} -> activity end)
       |> Enum.sort_by(& &1.inserted_at, {:desc, DateTime})
       |> Enum.take(10)
+      |> Enum.sort_by(& &1.inserted_at, DateTime)
 
     assigns = assign(assigns, :activities, activities)
 
@@ -2330,7 +2396,7 @@ defmodule SpaceTradersWeb.DashboardLive do
           <p class="eyebrow">Activity</p>
           <h3 class="mt-1 text-lg font-semibold">Recent Fleet events</h3>
         </div>
-        <span class="text-xs opacity-60">Latest 10</span>
+        <span class="text-xs opacity-60">Latest 10 · chronological</span>
       </div>
       <div :if={@activities == []} class="mt-3 text-sm opacity-60">No local recovery events yet.</div>
       <ol :if={@activities != []} class="mt-3 space-y-2 text-sm">
@@ -2338,7 +2404,17 @@ defmodule SpaceTradersWeb.DashboardLive do
           :for={event <- @activities}
           class="flex flex-wrap justify-between gap-2 border-t border-base-300/50 pt-2"
         >
-          <span><strong>{event.kind}</strong> {event.message}</span>
+          <span class="min-w-0">
+            <strong>{event.kind}</strong>
+            <span :if={event.ship}> · <span class="font-mono">{event.ship.symbol}</span></span>
+            <span>{event.message}</span>
+            <span
+              :for={{label, value} <- activity_facts(event)}
+              class="badge badge-outline badge-xs ml-1"
+            >
+              {label}: {value}
+            </span>
+          </span>
           <time class="text-xs opacity-60">{Calendar.strftime(event.inserted_at, "%Y-%m-%d %H:%M:%S")}</time>
         </li>
       </ol>
@@ -2393,6 +2469,30 @@ defmodule SpaceTradersWeb.DashboardLive do
   end
 
   defp autopilot_next_action(_, _ship), do: "Start Autopilot"
+
+  defp attention_count({:ok, ships}), do: Enum.count(ships, &needs_attention?/1)
+  defp attention_count(_), do: 0
+
+  defp fleet_healthy?({:ok, ships}), do: ships != [] and attention_count({:ok, ships}) == 0
+  defp fleet_healthy?(_), do: false
+
+  defp needs_attention?(%{autopilot: %{status: "blocked"}}), do: true
+  defp needs_attention?(%{autopilot: %{status: "paused"}}), do: true
+  defp needs_attention?(%{nav: %{status: "IN_TRANSIT"}}), do: false
+  defp needs_attention?(_), do: false
+
+  defp activity_facts(%{metadata: metadata}) when is_map(metadata) do
+    metadata
+    |> Enum.filter(fn {key, _value} ->
+      key in ["outcome", "delta", "wait", "retry", "block", "recovery"]
+    end)
+    |> Enum.map(fn {key, value} -> {key, format_activity_value(value)} end)
+  end
+
+  defp activity_facts(_), do: []
+
+  defp format_activity_value(value) when is_binary(value), do: value
+  defp format_activity_value(value), do: inspect(value)
 
   ## Display helpers
 

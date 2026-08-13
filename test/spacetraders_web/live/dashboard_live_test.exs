@@ -8,6 +8,7 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
   alias SpaceTraders.Timeline
   alias SpaceTraders.Fleet.Ship
   alias SpaceTraders.Fleet.AutopilotConfig
+  alias SpaceTraders.Fleet.Activity
   alias SpaceTraders.Repo
 
   defp stub_live_game(agent_overview, ships) do
@@ -1087,6 +1088,118 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       assert html =~ "Start Autopilot"
       assert html =~ "Activity"
       assert html =~ "No local recovery events yet."
+    end
+
+    test "marks blocked Ships for attention without flagging healthy Ships", %{
+      conn: conn,
+      operator: operator
+    } do
+      agent = agent_fixture(operator)
+
+      ship =
+        Repo.insert!(%Ship{
+          agent_id: agent.id,
+          symbol: "ORBITALIST-1",
+          ship_type: "SHIP_COMMAND_FRIGATE"
+        })
+
+      Repo.insert!(%AutopilotConfig{
+        ship_id: ship.id,
+        extraction_waypoint: "X1-UX81-A2",
+        market_waypoint: "X1-UX81-A1",
+        cargo_threshold: 30,
+        desired_mode: "autopilot",
+        status: "blocked",
+        blocked_reason: "ambiguous outcome"
+      })
+
+      stub_live_game(agent_overview_body(agent.symbol), [
+        ship_body("ORBITALIST-1"),
+        ship_body("ORBITALIST-2", %{"nav" => nav_body("IN_TRANSIT", arrival: future_iso())})
+      ])
+
+      {:ok, lv, html} = live(conn, ~p"/")
+
+      assert has_element?(lv, "[data-needs-attention-count]", "1 needs attention")
+      refute has_element?(lv, "[data-fleet-healthy]")
+      assert has_element?(lv, "[data-ship-card=\"ORBITALIST-1\"]", "Blocked")
+      assert has_element?(lv, "[data-ship-card=\"ORBITALIST-2\"]", "IN_TRANSIT")
+      assert html =~ "ambiguous outcome"
+    end
+
+    test "selects a Ship operation panel and returns to the Fleet roster on mobile", %{
+      conn: conn,
+      operator: operator
+    } do
+      agent = agent_fixture(operator)
+      stub_live_game(agent_overview_body(agent.symbol), [ship_body("ORBITALIST-1")])
+
+      {:ok, lv, _html} = live(conn, ~p"/")
+
+      html =
+        lv
+        |> element("[data-select-ship=\"ORBITALIST-1\"]")
+        |> render_click()
+
+      assert has_element?(lv, "[data-ship-card=\"ORBITALIST-1\"][data-selected=\"true\"]")
+      assert has_element?(lv, "[data-ship-card=\"ORBITALIST-1\"]")
+      assert has_element?(lv, "[data-ship-card=\"ORBITALIST-1\"]:not(.hidden)")
+      assert html =~ "Selected Ship operations"
+      assert has_element?(lv, "[data-back-to-fleet]", "Back to Fleet")
+
+      html = lv |> element("[data-back-to-fleet]") |> render_click()
+
+      refute has_element?(lv, "[data-ship-card=\"ORBITALIST-1\"][data-selected=\"true\"]")
+      refute html =~ "Selected Ship operations"
+    end
+
+    test "renders latest ten activity entries chronologically with recovery facts", %{
+      conn: conn,
+      operator: operator
+    } do
+      agent = agent_fixture(operator)
+
+      ship =
+        Repo.insert!(%Ship{
+          agent_id: agent.id,
+          symbol: "ORBITALIST-1",
+          ship_type: "SHIP_COMMAND_FRIGATE"
+        })
+
+      older = DateTime.add(DateTime.utc_now(), -20, :second) |> DateTime.truncate(:second)
+      newer = DateTime.add(DateTime.utc_now(), -10, :second) |> DateTime.truncate(:second)
+
+      Repo.insert!(%Activity{
+        agent_id: agent.id,
+        ship_id: ship.id,
+        kind: "retry",
+        message: "Retrying recovery",
+        metadata: %{"outcome" => "transport_error", "retry" => 2},
+        inserted_at: older,
+        updated_at: older
+      })
+
+      Repo.insert!(%Activity{
+        agent_id: agent.id,
+        ship_id: ship.id,
+        kind: "recovery",
+        message: "Recovery confirmed",
+        metadata: %{"outcome" => "confirmed", "delta" => "cargo +5"},
+        inserted_at: newer,
+        updated_at: newer
+      })
+
+      stub_live_game(agent_overview_body(agent.symbol), [ship_body("ORBITALIST-1")])
+
+      {:ok, lv, _html} = live(conn, ~p"/")
+      html = render(lv)
+
+      assert html =~ "Retrying recovery"
+      assert html =~ "Recovery confirmed"
+      assert html =~ "outcome: confirmed"
+      assert html =~ "delta: cargo +5"
+      assert html =~ "retry: 2"
+      assert :binary.match(html, "Retrying recovery") < :binary.match(html, "Recovery confirmed")
     end
 
     test "keeps an in-progress autopilot draft across live patches", %{

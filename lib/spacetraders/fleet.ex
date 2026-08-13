@@ -71,6 +71,7 @@ defmodule SpaceTraders.Fleet do
     |> where([a], a.agent_id == ^agent.id)
     |> order_by([a], desc: a.inserted_at)
     |> limit(10)
+    |> preload(:ship)
     |> Repo.all()
   end
 
