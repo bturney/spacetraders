@@ -570,63 +570,37 @@ defmodule SpaceTraders.Fleet do
   end
 
   defp refuel_for_market_departure(agent, config, live_ship, market) do
-    with {:ok, required_fuel} <- fuel_needed_for_loop(agent, config, live_ship) do
-      if fuel_current(live_ship) >= required_fuel do
+    if fuel_full?(live_ship) do
+      {:ok, live_ship}
+    else
+      with :ok <- fuel_available?(market),
+           {:ok, live_ship} <- refuel_for_autopilot(agent, config, live_ship) do
         {:ok, live_ship}
       else
-        with :ok <- fuel_available?(market, required_fuel),
-             {:ok, live_ship} <- refuel_if_needed(agent, config, live_ship, required_fuel) do
-          {:ok, live_ship}
-        else
-          {:error, reason} -> mark_autopilot_blocked(config, reason)
-        end
+        {:error, reason} -> mark_autopilot_blocked(config, reason)
       end
-    else
-      {:error, reason} -> mark_autopilot_blocked(config, reason)
     end
   end
 
-  defp fuel_needed_for_loop(agent, config, live_ship) do
-    with {:ok, origin} <-
-           waypoint(agent.agent_token, live_ship.nav.system_symbol, config.market_waypoint),
-         {:ok, destination} <-
-           waypoint(agent.agent_token, live_ship.nav.system_symbol, config.extraction_waypoint),
-         true <-
-           is_number(origin.x) and is_number(origin.y) and is_number(destination.x) and
-             is_number(destination.y) do
-      distance =
-        :math.sqrt(
-          :math.pow(origin.x - destination.x, 2) + :math.pow(origin.y - destination.y, 2)
-        )
-
-      leg_fuel = fuel_for_distance(distance, live_ship.nav.flight_mode)
-      {:ok, leg_fuel * 2}
-    else
-      false ->
-        {:error, {:market_fuel_route_unavailable, config.market_waypoint}}
-
-      {:error, reason} ->
-        {:error, {:market_fuel_route_unavailable, config.market_waypoint, reason}}
-    end
-  end
-
-  defp fuel_for_distance(_distance, "DRIFT"), do: 1
-  defp fuel_for_distance(distance, "BURN"), do: ceil(distance) * 2
-  defp fuel_for_distance(distance, _flight_mode), do: ceil(distance)
-
-  defp fuel_available?(market, required_fuel) do
+  defp fuel_available?(market) do
     if Enum.any?(market.trade_goods || [], &(&1.symbol == "FUEL")) do
       :ok
     else
-      {:error, {:market_fuel_unavailable, market.symbol, required_fuel}}
+      {:error, {:market_fuel_unavailable, market.symbol}}
     end
   end
 
-  defp refuel_if_needed(agent, config, live_ship, required_fuel) do
+  defp fuel_full?(%{fuel: %{current: current, capacity: capacity}})
+       when is_integer(current) and is_integer(capacity),
+       do: current >= capacity
+
+  defp fuel_full?(_), do: false
+
+  defp refuel_for_autopilot(agent, config, live_ship) do
     action = %{
       "kind" => "refuel",
       "waypoint" => config.market_waypoint,
-      "expected" => %{"fuel_at_least" => required_fuel}
+      "expected" => %{"fuel_full" => true}
     }
 
     config =
@@ -635,7 +609,7 @@ defmodule SpaceTraders.Fleet do
       )
 
     case SpaceTraders.API.refuel_ship(agent.agent_token, live_ship.symbol) do
-      {:ok, %{fuel: fuel}} when fuel.current >= required_fuel ->
+      {:ok, %{fuel: fuel}} when fuel.current >= fuel.capacity ->
         Repo.update!(
           Ecto.Changeset.change(config,
             status: "ready",
@@ -649,7 +623,7 @@ defmodule SpaceTraders.Fleet do
       {:ok, %{fuel: fuel}} ->
         mark_autopilot_blocked(
           config,
-          {:market_fuel_insufficient, config.market_waypoint, required_fuel, fuel.current}
+          {:market_fuel_insufficient, config.market_waypoint, fuel.current, fuel.capacity}
         )
 
       {:error, reason} ->
@@ -768,9 +742,6 @@ defmodule SpaceTraders.Fleet do
       _ -> 0
     end
   end
-
-  defp fuel_current(%{fuel: %{current: current}}) when is_integer(current), do: current
-  defp fuel_current(_), do: 0
 
   defp extraction_yield(%{extraction: %{yield: %{symbol: symbol, units: units}}}) do
     %{"symbol" => symbol, "units" => units}
@@ -1116,8 +1087,8 @@ defmodule SpaceTraders.Fleet do
     if item_units(live_ship, symbol) <= units, do: :confirmed, else: :absent
   end
 
-  defp action_outcome(%{"kind" => "refuel", "expected" => %{"fuel_at_least" => fuel}}, live_ship) do
-    if fuel_current(live_ship) >= fuel, do: :confirmed, else: :absent
+  defp action_outcome(%{"kind" => "refuel", "expected" => %{"fuel_full" => true}}, live_ship) do
+    if fuel_full?(live_ship), do: :confirmed, else: :absent
   end
 
   defp action_outcome(_action, _live_ship), do: :ambiguous

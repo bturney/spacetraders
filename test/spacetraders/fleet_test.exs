@@ -574,7 +574,7 @@ defmodule SpaceTraders.FleetTest do
                Fleet.advance_autopilot(agent, config, live_ship)
     end
 
-    test "blocks at the configured market when it cannot provide fuel for the return leg" do
+    test "blocks at the configured market when it cannot refill the Ship" do
       agent = agent_fixture()
       ship_fixture(agent, "FLEET-SHIP")
 
@@ -611,7 +611,7 @@ defmodule SpaceTraders.FleetTest do
 
       config = %{config | desired_mode: "autopilot", progress: %{"waypoint" => "X1-UX81-A1"}}
 
-      assert {:error, {:market_fuel_unavailable, "X1-UX81-A1", 20}} =
+      assert {:error, {:market_fuel_unavailable, "X1-UX81-A1"}} =
                Fleet.advance_autopilot(agent, config, live_ship)
 
       assert %AutopilotConfig{status: "blocked", blocked_reason: reason} =
@@ -645,7 +645,7 @@ defmodule SpaceTraders.FleetTest do
             Req.Test.json(conn, %{"data" => %{"symbol" => "X1-UX81-A2", "x" => 10, "y" => 0}})
 
           "/v2/my/ships/FLEET-SHIP/refuel" ->
-            Req.Test.json(conn, %{"data" => %{"fuel" => %{"capacity" => 200, "current" => 18}}})
+            Req.Test.json(conn, %{"data" => %{"fuel" => %{"capacity" => 200, "current" => 198}}})
         end
       end)
 
@@ -662,11 +662,11 @@ defmodule SpaceTraders.FleetTest do
 
       config = %{config | desired_mode: "autopilot", progress: %{"waypoint" => "X1-UX81-A1"}}
 
-      assert {:error, {:market_fuel_insufficient, "X1-UX81-A1", 20, 18}} =
+      assert {:error, {:market_fuel_insufficient, "X1-UX81-A1", 198, 200}} =
                Fleet.advance_autopilot(agent, config, live_ship)
     end
 
-    test "does not require market fuel when a Ship already has the full loop reserve" do
+    test "does not require market fuel when a Ship is already full" do
       agent = agent_fixture()
       ship_fixture(agent, "FLEET-SHIP")
 
@@ -705,7 +705,7 @@ defmodule SpaceTraders.FleetTest do
           flight_mode: "DRIFT"
         },
         cargo: %Model.ShipCargo{capacity: 40, units: 0, inventory: []},
-        fuel: %Model.ShipFuel{capacity: 200, current: 2}
+        fuel: %Model.ShipFuel{capacity: 200, current: 200}
       }
 
       config = %{config | desired_mode: "autopilot", progress: %{"waypoint" => "X1-UX81-A1"}}
@@ -984,7 +984,7 @@ defmodule SpaceTraders.FleetTest do
 
     test "boot recovery confirms an in-flight refuel without replaying it" do
       assert_confirmed_market_action_recovery(
-        %{"kind" => "refuel", "expected" => %{"fuel_at_least" => 200}},
+        %{"kind" => "refuel", "expected" => %{"fuel_full" => true}},
         %{
           "cargo" => %{"capacity" => 40, "units" => 0, "inventory" => []},
           "fuel" => %{"capacity" => 200, "current" => 200}
