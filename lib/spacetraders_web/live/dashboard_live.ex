@@ -637,7 +637,6 @@ defmodule SpaceTradersWeb.DashboardLive do
   defp ship_action("dock", agent, ship_symbol), do: Fleet.dock_ship(agent, ship_symbol)
   defp ship_action("orbit", agent, ship_symbol), do: Fleet.orbit_ship(agent, ship_symbol)
   defp ship_action("extract", agent, ship_symbol), do: Fleet.extract_resources(agent, ship_symbol)
-  defp ship_action("siphon", agent, ship_symbol), do: Fleet.siphon_resources(agent, ship_symbol)
   defp ship_action("refuel", agent, ship_symbol), do: Fleet.refuel_ship(agent, ship_symbol)
 
   defp refresh_agent_fleet(socket, agent_id) do
@@ -2712,6 +2711,9 @@ defmodule SpaceTradersWeb.DashboardLive do
 
   defp live_error(:siphon_capability_missing),
     do: "This Ship needs a gas siphon mount and gas processor."
+
+  defp live_error(:invalid_siphon_waypoint),
+    do: "Siphoning requires a Ship in orbit around a gas giant."
 
   defp live_error(:ship_not_owned), do: "That Ship is not in this agent's Fleet."
   defp live_error(:autopilot_not_configured), do: "Save an Autopilot configuration first."

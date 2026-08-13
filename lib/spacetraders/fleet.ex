@@ -787,6 +787,13 @@ defmodule SpaceTraders.Fleet do
     with :ok <- preempt_autopilot_for(agent, ship_symbol, :manual_override),
          :ok <- ShipServer.ensure_ready(ship_symbol),
          {:ok, live_ship} <- SpaceTraders.API.get_ship(agent_token, ship_symbol),
+         {:ok, waypoint} <-
+           SpaceTraders.API.get_waypoint(
+             agent_token,
+             live_ship.nav.system_symbol,
+             live_ship.nav.waypoint_symbol
+           ),
+         :ok <- siphon_location?(waypoint),
          :ok <- siphon_capability?(live_ship),
          {:ok, result} <- SpaceTraders.API.siphon_resources(agent_token, ship_symbol),
          :ok <- schedule_cooldown(agent, ship_symbol, result) do
@@ -804,6 +811,9 @@ defmodule SpaceTraders.Fleet do
   end
 
   defp siphon_capability?(_), do: {:error, :siphon_capability_missing}
+
+  defp siphon_location?(%{type: "GAS_GIANT"}), do: :ok
+  defp siphon_location?(_), do: {:error, :invalid_siphon_waypoint}
 
   @doc "Sells cargo from a ship and returns the updated cargo and transaction."
   def sell_cargo(%AgentRecord{agent_token: agent_token} = agent, ship_symbol, trade_symbol, units)

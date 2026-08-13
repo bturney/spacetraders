@@ -234,7 +234,8 @@ defmodule SpaceTraders.API.ClientTest do
               "capacity" => 40,
               "units" => 7,
               "inventory" => [%{"symbol" => "LIQUID_HYDROGEN", "units" => 7}]
-            }
+            },
+            "events" => []
           }
         })
       end)
@@ -245,7 +246,8 @@ defmodule SpaceTraders.API.ClientTest do
                 siphon: %Model.Siphon{
                   yield: %Model.SiphonYield{symbol: "LIQUID_HYDROGEN", units: 7}
                 },
-                cargo: %Model.ShipCargo{units: 7}
+                cargo: %Model.ShipCargo{units: 7},
+                events: []
               }} = API.siphon_resources("TOKEN", "ORBITALIST-2")
     end
 

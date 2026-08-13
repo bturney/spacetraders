@@ -1456,6 +1456,17 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
           {"/v2/my/ships/ORBITALIST-1", "GET"} ->
             Req.Test.json(conn, %{"data" => ship})
 
+          {"/v2/systems/X1-UX81/waypoints/X1-UX81-A1", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => %{
+                "symbol" => "X1-UX81-A1",
+                "systemSymbol" => "X1-UX81",
+                "type" => "GAS_GIANT",
+                "x" => 1,
+                "y" => 2
+              }
+            })
+
           {"/v2/my/ships/ORBITALIST-1/siphon", "POST"} ->
             Req.Test.json(conn, %{
               "data" => %{

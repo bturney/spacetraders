@@ -36,6 +36,7 @@ defmodule SpaceTraders.API do
     Faction,
     Market,
     Ship,
+    ShipConditionEvent,
     Siphon
   }
 
@@ -203,7 +204,8 @@ defmodule SpaceTraders.API do
          %{
            cooldown: {:model, Cooldown},
            siphon: {:model, Siphon},
-           cargo: {:model, ShipCargo}
+           cargo: {:model, ShipCargo},
+           events: {:list, ShipConditionEvent}
          }}
     )
   end

@@ -1431,6 +1431,17 @@ defmodule SpaceTraders.FleetTest do
                 })
             })
 
+          "/v2/systems/X1-UX81/waypoints/X1-UX81-A1" ->
+            Req.Test.json(conn, %{
+              "data" => %{
+                "symbol" => "X1-UX81-A1",
+                "systemSymbol" => "X1-UX81",
+                "type" => "GAS_GIANT",
+                "x" => 1,
+                "y" => 2
+              }
+            })
+
           "/v2/my/ships/FLEET-SHIP/siphon" ->
             Req.Test.json(conn, %{
               "data" => %{
@@ -1448,7 +1459,8 @@ defmodule SpaceTraders.FleetTest do
                   "capacity" => 40,
                   "units" => 17,
                   "inventory" => [%{"symbol" => "LIQUID_HYDROGEN", "units" => 17}]
-                }
+                },
+                "events" => []
               }
             })
         end
