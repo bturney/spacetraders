@@ -1902,7 +1902,7 @@ defmodule SpaceTradersWeb.DashboardLive do
       class={
         "card border border-base-300/70 bg-base-200 p-4 sm:p-5 " <>
           if(@selected, do: "ring-2 ring-primary ", else: "") <>
-          if(@selected_mode and not @selected, do: "hidden lg:block", else: "")
+          if(@selected_mode and not @selected, do: "hidden", else: "")
       }
       data-ship-card={@ship.symbol}
       data-selected={to_string(@selected)}
@@ -2482,7 +2482,7 @@ defmodule SpaceTradersWeb.DashboardLive do
   defp fleet_healthy?(_), do: false
 
   defp operations_class(true), do: ""
-  defp operations_class(false), do: "hidden lg:block"
+  defp operations_class(false), do: "hidden"
 
   defp needs_attention?(%{autopilot: %{status: "blocked"}}), do: true
   defp needs_attention?(%{autopilot: %{status: "paused"}}), do: true
