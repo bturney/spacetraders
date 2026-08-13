@@ -13,10 +13,17 @@ defmodule SpaceTraders.SystemWaypointProjectionTest do
       assert projection.waypoints == {:ok, Enum.map(waypoints(), &Waypoint.from_json/1)}
 
       assert Enum.map(projection.available, & &1.symbol) ==
-               ["X1-UX81-A1", "X1-UX81-A3", "X1-UX81-B1", "X1-UX81-B2", "X1-UX81-C1"]
+               [
+                 "X1-UX81-A1",
+                 "X1-UX81-A3",
+                 "X1-UX81-B1",
+                 "X1-UX81-B2",
+                 "X1-UX81-C1",
+                 "X1-UX81-G1"
+               ]
 
       assert Enum.map(projection.positioned, & &1.symbol) ==
-               ["X1-UX81-A1", "X1-UX81-A3", "X1-UX81-B1", "X1-UX81-B2"]
+               ["X1-UX81-A1", "X1-UX81-A3", "X1-UX81-B1", "X1-UX81-B2", "X1-UX81-G1"]
 
       assert Enum.all?(projection.positioned, &(is_integer(&1.x) and is_integer(&1.y)))
       refute Enum.any?(projection.positioned, &(&1.symbol == "X1-UX81-C1"))
@@ -56,13 +63,16 @@ defmodule SpaceTraders.SystemWaypointProjectionTest do
     test "filters grid waypoints by type and trait, leaving the map full" do
       projection = project(waypoints(), filter: "marketplace")
       assert Enum.map(projection.filtered, & &1.symbol) == ["X1-UX81-A1", "X1-UX81-B1"]
-      assert length(projection.positioned) == 4
+      assert length(projection.positioned) == 5
 
       projection = project(waypoints(), filter: "engineered_asteroid")
       assert Enum.map(projection.filtered, & &1.symbol) == ["X1-UX81-A3"]
 
+      projection = project(waypoints(), filter: "gas_giant")
+      assert Enum.map(projection.filtered, & &1.symbol) == ["X1-UX81-G1"]
+
       projection = project(waypoints(), filter: "all")
-      assert length(projection.filtered) == 5
+      assert length(projection.filtered) == 6
     end
 
     test "counts only local ships at each waypoint" do
@@ -155,6 +165,7 @@ defmodule SpaceTraders.SystemWaypointProjectionTest do
       assert Enum.map(SystemWaypointProjection.filter_options(), &elem(&1, 1)) == [
                "all",
                "engineered_asteroid",
+               "gas_giant",
                "shipyard",
                "marketplace"
              ]
@@ -206,7 +217,8 @@ defmodule SpaceTraders.SystemWaypointProjectionTest do
         "y" => 19,
         "orbits" => "X1-UX81-B1"
       }),
-      waypoint_json("X1-UX81-C1", %{"type" => "JUMP_GATE", "x" => nil, "y" => nil})
+      waypoint_json("X1-UX81-C1", %{"type" => "JUMP_GATE", "x" => nil, "y" => nil}),
+      waypoint_json("X1-UX81-G1", %{"type" => "GAS_GIANT", "x" => 25, "y" => 25})
     ]
   end
 

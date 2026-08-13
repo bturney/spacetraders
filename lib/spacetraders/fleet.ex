@@ -781,6 +781,30 @@ defmodule SpaceTraders.Fleet do
 
   def extract_resources(%AgentRecord{}, _ship_symbol), do: {:error, :agent_token_missing}
 
+  @doc "Siphons gas and persists the returned cooldown on the timeline."
+  def siphon_resources(%AgentRecord{agent_token: agent_token} = agent, ship_symbol)
+      when is_binary(agent_token) and agent_token != "" do
+    with :ok <- preempt_autopilot_for(agent, ship_symbol, :manual_override),
+         :ok <- ShipServer.ensure_ready(ship_symbol),
+         {:ok, live_ship} <- SpaceTraders.API.get_ship(agent_token, ship_symbol),
+         :ok <- siphon_capability?(live_ship),
+         {:ok, result} <- SpaceTraders.API.siphon_resources(agent_token, ship_symbol),
+         :ok <- schedule_cooldown(agent, ship_symbol, result) do
+      {:ok, result}
+    end
+  end
+
+  def siphon_resources(%AgentRecord{}, _ship_symbol), do: {:error, :agent_token_missing}
+
+  defp siphon_capability?(%{modules: modules, mounts: mounts}) do
+    if Enum.any?(mounts || [], &String.starts_with?(&1.symbol || "", "MOUNT_GAS_SIPHON_")) and
+         Enum.any?(modules || [], &(&1.symbol == "MODULE_GAS_PROCESSOR_I")),
+       do: :ok,
+       else: {:error, :siphon_capability_missing}
+  end
+
+  defp siphon_capability?(_), do: {:error, :siphon_capability_missing}
+
   @doc "Sells cargo from a ship and returns the updated cargo and transaction."
   def sell_cargo(%AgentRecord{agent_token: agent_token} = agent, ship_symbol, trade_symbol, units)
       when is_binary(agent_token) and agent_token != "" do

@@ -1428,6 +1428,82 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       assert html =~ "Cooldown 60s"
     end
 
+    test "announces the siphon yield and explains gas giant readiness", %{
+      conn: conn,
+      operator: operator
+    } do
+      agent = agent_fixture(operator)
+
+      ship =
+        ship_body("ORBITALIST-1", %{
+          "nav" => nav_body("IN_ORBIT"),
+          "modules" => [%{"symbol" => "MODULE_GAS_PROCESSOR_I", "name" => "Gas Processor I"}],
+          "mounts" => [%{"symbol" => "MOUNT_GAS_SIPHON_I", "name" => "Gas Siphon I"}],
+          "cargo" => %{"capacity" => 40, "units" => 0, "inventory" => []}
+        })
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case {conn.request_path, conn.method} do
+          {"/v2/my/agent", "GET"} ->
+            Req.Test.json(conn, %{"data" => agent_overview_body(agent.symbol)})
+
+          {"/v2/my/contracts", "GET"} ->
+            Req.Test.json(conn, %{"data" => []})
+
+          {"/v2/my/ships", "GET"} ->
+            Req.Test.json(conn, %{"data" => [ship]})
+
+          {"/v2/my/ships/ORBITALIST-1", "GET"} ->
+            Req.Test.json(conn, %{"data" => ship})
+
+          {"/v2/my/ships/ORBITALIST-1/siphon", "POST"} ->
+            Req.Test.json(conn, %{
+              "data" => %{
+                "cooldown" => %{
+                  "shipSymbol" => "ORBITALIST-1",
+                  "totalSeconds" => 60,
+                  "remainingSeconds" => 60
+                },
+                "siphon" => %{
+                  "shipSymbol" => "ORBITALIST-1",
+                  "yield" => %{"symbol" => "LIQUID_HYDROGEN", "units" => 7}
+                },
+                "cargo" => %{
+                  "capacity" => 40,
+                  "units" => 7,
+                  "inventory" => [%{"symbol" => "LIQUID_HYDROGEN", "units" => 7}]
+                }
+              }
+            })
+
+          {"/v2/systems/X1-UX81/waypoints", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => [
+                %{
+                  "symbol" => "X1-UX81-G1",
+                  "systemSymbol" => "X1-UX81",
+                  "type" => "GAS_GIANT",
+                  "x" => 1,
+                  "y" => 2
+                }
+              ]
+            })
+        end
+      end)
+
+      {:ok, lv, html} = live(conn, ~p"/")
+      assert html =~ "Gas Processor I"
+      assert html =~ "Gas Siphon I"
+      assert html =~ "The dashboard does not currently purchase or outfit"
+      refute html =~ "Siphoned 7 LIQUID_HYDROGEN."
+
+      html = lv |> element("button[phx-click=\"siphon\"]") |> render_click()
+
+      assert html =~ "Siphoned 7 LIQUID_HYDROGEN."
+      assert html =~ "7 / 40"
+      assert html =~ "LIQUID_HYDROGEN"
+    end
+
     test "navigates a ship and the card shows IN_TRANSIT with its arrival time", %{
       conn: conn,
       operator: operator
