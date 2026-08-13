@@ -58,6 +58,50 @@ defmodule SpaceTraders.FleetTest do
     }
   end
 
+  defp assert_confirmed_market_action_recovery(action, ship_overrides) do
+    agent = agent_fixture()
+    ship_fixture(agent, "FLEET-SHIP")
+
+    {:ok, config} =
+      Fleet.configure_autopilot(agent, "FLEET-SHIP", %{
+        extraction_waypoint: "X1-UX81-A2",
+        market_waypoint: "X1-UX81-A1",
+        cargo_threshold: 30
+      })
+
+    Repo.update!(
+      Ecto.Changeset.change(config,
+        desired_mode: "autopilot",
+        status: "revalidating",
+        in_flight_action: action
+      )
+    )
+
+    test_pid = self()
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      send(test_pid, {:api_request, conn.request_path})
+
+      case conn.request_path do
+        "/v2/my/ships/FLEET-SHIP" ->
+          Req.Test.json(conn, %{"data" => ship_body("FLEET-SHIP", ship_overrides)})
+
+        "/v2/my/ships/FLEET-SHIP/orbit" ->
+          Req.Test.json(conn, %{"data" => %{"nav" => nav_body("IN_ORBIT")}})
+
+        "/v2/my/ships/FLEET-SHIP/navigate" ->
+          Req.Test.json(conn, %{"data" => navigate_response("IN_TRANSIT")})
+      end
+    end)
+
+    assert {:ok, _} = Fleet.recover_autopilot_on_boot("FLEET-SHIP", agent.id, agent.agent_token)
+
+    assert_receive {:api_request, "/v2/my/ships/FLEET-SHIP"}
+    assert_receive {:api_request, "/v2/my/ships/FLEET-SHIP/orbit"}
+    assert_receive {:api_request, "/v2/my/ships/FLEET-SHIP/navigate"}
+    refute_receive {:api_request, _}
+  end
+
   describe "list_ships/1" do
     test "pulls the agent's live fleet from the game API" do
       Req.Test.stub(SpaceTraders.API, fn conn ->
@@ -567,7 +611,7 @@ defmodule SpaceTraders.FleetTest do
 
       config = %{config | desired_mode: "autopilot", progress: %{"waypoint" => "X1-UX81-A1"}}
 
-      assert {:error, {:market_fuel_unavailable, "X1-UX81-A1", 10}} =
+      assert {:error, {:market_fuel_unavailable, "X1-UX81-A1", 20}} =
                Fleet.advance_autopilot(agent, config, live_ship)
 
       assert %AutopilotConfig{status: "blocked", blocked_reason: reason} =
@@ -601,7 +645,7 @@ defmodule SpaceTraders.FleetTest do
             Req.Test.json(conn, %{"data" => %{"symbol" => "X1-UX81-A2", "x" => 10, "y" => 0}})
 
           "/v2/my/ships/FLEET-SHIP/refuel" ->
-            Req.Test.json(conn, %{"data" => %{"fuel" => %{"capacity" => 200, "current" => 8}}})
+            Req.Test.json(conn, %{"data" => %{"fuel" => %{"capacity" => 200, "current" => 18}}})
         end
       end)
 
@@ -618,7 +662,55 @@ defmodule SpaceTraders.FleetTest do
 
       config = %{config | desired_mode: "autopilot", progress: %{"waypoint" => "X1-UX81-A1"}}
 
-      assert {:error, {:market_fuel_insufficient, "X1-UX81-A1", 10, 8}} =
+      assert {:error, {:market_fuel_insufficient, "X1-UX81-A1", 20, 18}} =
+               Fleet.advance_autopilot(agent, config, live_ship)
+    end
+
+    test "does not require market fuel when a Ship already has the full loop reserve" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      {:ok, config} =
+        Fleet.configure_autopilot(agent, "FLEET-SHIP", %{
+          extraction_waypoint: "X1-UX81-A2",
+          market_waypoint: "X1-UX81-A1",
+          cargo_threshold: 30
+        })
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case conn.request_path do
+          "/v2/systems/X1-UX81/waypoints/X1-UX81-A1/market" ->
+            Req.Test.json(conn, %{"data" => %{"symbol" => "X1-UX81-A1", "tradeGoods" => []}})
+
+          "/v2/systems/X1-UX81/waypoints/X1-UX81-A1" ->
+            Req.Test.json(conn, %{"data" => %{"symbol" => "X1-UX81-A1", "x" => 0, "y" => 0}})
+
+          "/v2/systems/X1-UX81/waypoints/X1-UX81-A2" ->
+            Req.Test.json(conn, %{"data" => %{"symbol" => "X1-UX81-A2", "x" => 10, "y" => 0}})
+
+          "/v2/my/ships/FLEET-SHIP/orbit" ->
+            Req.Test.json(conn, %{"data" => %{"nav" => nav_body("IN_ORBIT")}})
+
+          "/v2/my/ships/FLEET-SHIP/navigate" ->
+            Req.Test.json(conn, %{"data" => navigate_response("IN_TRANSIT")})
+        end
+      end)
+
+      live_ship = %Model.Ship{
+        symbol: "FLEET-SHIP",
+        nav: %Model.ShipNav{
+          status: "DOCKED",
+          waypoint_symbol: "X1-UX81-A1",
+          system_symbol: "X1-UX81",
+          flight_mode: "DRIFT"
+        },
+        cargo: %Model.ShipCargo{capacity: 40, units: 0, inventory: []},
+        fuel: %Model.ShipFuel{capacity: 200, current: 2}
+      }
+
+      config = %{config | desired_mode: "autopilot", progress: %{"waypoint" => "X1-UX81-A1"}}
+
+      assert {:ok, %AutopilotConfig{status: "waiting", in_flight_action: %{"kind" => "navigate"}}} =
                Fleet.advance_autopilot(agent, config, live_ship)
     end
 
@@ -842,6 +934,38 @@ defmodule SpaceTraders.FleetTest do
 
       assert [%{kind: "autopilot_recovery", metadata: %{"outcome" => "confirmed"}} | _] =
                Fleet.recent_activity(agent)
+    end
+
+    test "boot recovery confirms an in-flight sell without replaying it" do
+      assert_confirmed_market_action_recovery(
+        %{
+          "kind" => "sell",
+          "trade_symbol" => "IRON_ORE",
+          "expected" => %{"units_at_most" => 0}
+        },
+        %{"cargo" => %{"capacity" => 40, "units" => 0, "inventory" => []}}
+      )
+    end
+
+    test "boot recovery confirms an in-flight jettison without replaying it" do
+      assert_confirmed_market_action_recovery(
+        %{
+          "kind" => "jettison",
+          "trade_symbol" => "COPPER_ORE",
+          "expected" => %{"units_at_most" => 0}
+        },
+        %{"cargo" => %{"capacity" => 40, "units" => 0, "inventory" => []}}
+      )
+    end
+
+    test "boot recovery confirms an in-flight refuel without replaying it" do
+      assert_confirmed_market_action_recovery(
+        %{"kind" => "refuel", "expected" => %{"fuel_at_least" => 200}},
+        %{
+          "cargo" => %{"capacity" => 40, "units" => 0, "inventory" => []},
+          "fuel" => %{"capacity" => 200, "current" => 200}
+        }
+      )
     end
 
     test "ambiguous boot recovery blocks without replaying a game action" do

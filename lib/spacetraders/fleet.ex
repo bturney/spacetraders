@@ -570,7 +570,7 @@ defmodule SpaceTraders.Fleet do
   end
 
   defp refuel_for_market_departure(agent, config, live_ship, market) do
-    with {:ok, required_fuel} <- fuel_needed_for_leg(agent, config, live_ship) do
+    with {:ok, required_fuel} <- fuel_needed_for_loop(agent, config, live_ship) do
       if fuel_current(live_ship) >= required_fuel do
         {:ok, live_ship}
       else
@@ -586,7 +586,7 @@ defmodule SpaceTraders.Fleet do
     end
   end
 
-  defp fuel_needed_for_leg(agent, config, live_ship) do
+  defp fuel_needed_for_loop(agent, config, live_ship) do
     with {:ok, origin} <-
            waypoint(agent.agent_token, live_ship.nav.system_symbol, config.market_waypoint),
          {:ok, destination} <-
@@ -599,7 +599,8 @@ defmodule SpaceTraders.Fleet do
           :math.pow(origin.x - destination.x, 2) + :math.pow(origin.y - destination.y, 2)
         )
 
-      {:ok, ceil(distance) * fuel_multiplier(live_ship.nav.flight_mode)}
+      leg_fuel = fuel_for_distance(distance, live_ship.nav.flight_mode)
+      {:ok, leg_fuel * 2}
     else
       false ->
         {:error, {:market_fuel_route_unavailable, config.market_waypoint}}
@@ -609,9 +610,9 @@ defmodule SpaceTraders.Fleet do
     end
   end
 
-  defp fuel_multiplier("BURN"), do: 2
-  defp fuel_multiplier("STEALTH"), do: 2
-  defp fuel_multiplier(_), do: 1
+  defp fuel_for_distance(_distance, "DRIFT"), do: 1
+  defp fuel_for_distance(distance, "BURN"), do: ceil(distance) * 2
+  defp fuel_for_distance(distance, _flight_mode), do: ceil(distance)
 
   defp fuel_available?(market, required_fuel) do
     if Enum.any?(market.trade_goods || [], &(&1.symbol == "FUEL")) do
