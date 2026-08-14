@@ -73,6 +73,7 @@ defmodule SpaceTradersWeb.DashboardLive do
               selected_waypoints={@selected_waypoints}
               waypoint_filters={@waypoint_filters}
               expanded_market_descriptions={@expanded_market_descriptions}
+              show_historical_contracts={@show_historical_contracts}
               waypoint_markets={@waypoint_markets}
               selected_ships={@selected_ships}
             />
@@ -149,6 +150,7 @@ defmodule SpaceTradersWeb.DashboardLive do
        cooldown_tick: 0,
        form_drafts: %{},
        expanded_market_descriptions: MapSet.new(),
+       show_historical_contracts: MapSet.new(),
        selected_waypoints: %{},
        selected_ships: %{},
        waypoint_filters: %{},
@@ -414,6 +416,18 @@ defmodule SpaceTradersWeb.DashboardLive do
   end
 
   @impl true
+  def handle_event("toggle_historical_contracts", %{"agent_id" => agent_id}, socket) do
+    shown = socket.assigns.show_historical_contracts
+
+    shown =
+      if MapSet.member?(shown, agent_id),
+        do: MapSet.delete(shown, agent_id),
+        else: MapSet.put(shown, agent_id)
+
+    {:noreply, assign(socket, show_historical_contracts: shown)}
+  end
+
+  @impl true
   def handle_event(
         "accept_contract",
         %{"agent_id" => agent_id, "contract_id" => contract_id},
@@ -607,6 +621,11 @@ defmodule SpaceTradersWeb.DashboardLive do
   defp contract_dom_id(contract),
     do: "contract-" <> Base.url_encode64(contract.id, padding: false)
 
+  defp visible_contracts(contracts, true), do: contracts
+
+  defp visible_contracts(contracts, false),
+    do: Enum.reject(contracts, &Contracts.historical?/1)
+
   defp snapshot_for_purchase(socket, agent_id) do
     Enum.find_value(
       socket.assigns.overviews,
@@ -788,6 +807,7 @@ defmodule SpaceTradersWeb.DashboardLive do
   attr :selected_waypoints, :map, default: %{}
   attr :waypoint_filters, :map, default: %{}
   attr :expanded_market_descriptions, :any, default: MapSet.new()
+  attr :show_historical_contracts, :any, default: MapSet.new()
   attr :waypoint_markets, :map, default: %{}
   attr :selected_ships, :map, default: %{}
 
@@ -808,6 +828,7 @@ defmodule SpaceTradersWeb.DashboardLive do
           ships={@overview.ships}
           agent_id={@overview.agent.id}
           form_drafts={@form_drafts}
+          show_historical={MapSet.member?(@show_historical_contracts, to_string(@overview.agent.id))}
         />
         <div class="space-y-5">
           <.shipyard_panel
@@ -841,6 +862,7 @@ defmodule SpaceTradersWeb.DashboardLive do
   attr :ships, :any, required: true
   attr :agent_id, :integer, required: true
   attr :form_drafts, :map, default: %{}
+  attr :show_historical, :boolean, default: false
 
   defp contract_panel(assigns) do
     ~H"""
@@ -857,8 +879,19 @@ defmodule SpaceTradersWeb.DashboardLive do
           <.negotiate_form ships={@ships} agent_id={@agent_id} form_drafts={@form_drafts} />
         </div>
       <% {:ok, contracts} -> %>
+        <% historical_count = Enum.count(contracts, &Contracts.historical?/1) %>
+        <button
+          :if={historical_count > 0}
+          id={"toggle-historical-contracts-#{@agent_id}"}
+          type="button"
+          phx-click="toggle_historical_contracts"
+          phx-value-agent_id={@agent_id}
+          class="btn btn-ghost btn-sm mb-3"
+        >
+          {if @show_historical, do: "Hide historical", else: "Show historical"} ({historical_count})
+        </button>
         <details
-          :for={contract <- contracts}
+          :for={contract <- visible_contracts(contracts, @show_historical)}
           id={contract_dom_id(contract)}
           data-contract-id={contract.id}
           data-contract-historical={Contracts.historical?(contract)}
