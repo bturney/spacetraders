@@ -15,6 +15,9 @@ config :spacetraders, SpaceTraders.Repo,
   # SQLite permits one writer; one sandbox connection makes concurrent ExUnit
   # cases wait instead of failing intermittently with "Database busy".
   pool_size: 1,
+  # Concurrent worktree verification can hold SQLite's write lock longer than
+  # the adapter's 2-second default while each suite creates and tears down its DB.
+  busy_timeout: 10_000,
   pool: Ecto.Adapters.SQL.Sandbox
 
 # We don't run a server during test. If one is required,
