@@ -58,6 +58,14 @@ defmodule SpaceTraders.Contracts do
   def negotiable?(contracts) when is_list(contracts), do: Enum.all?(contracts, &historical?/1)
   def negotiable?(_contracts), do: false
 
+  @doc "Returns whether a pending Contract can be accepted."
+  def acceptable?(%Contract{accepted: false} = contract), do: not historical?(contract)
+  def acceptable?(%Contract{}), do: false
+
+  @doc "Returns whether an accepted Contract can receive delivery or fulfillment actions."
+  def fulfillable?(%Contract{accepted: true} = contract), do: not historical?(contract)
+  def fulfillable?(%Contract{}), do: false
+
   @doc "Returns the authoritative deadline and its display kind for a Contract."
   def deadline(%Contract{accepted: true, terms: %{deadline: deadline}}),
     do: {:completion, deadline}

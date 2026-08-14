@@ -208,6 +208,7 @@ defmodule SpaceTradersWeb.DashboardLive do
 
       {:noreply, extraction_flash(socket, result)}
     else
+      false -> {:noreply, put_flash(socket, :error, "This contract is no longer actionable.")}
       {:error, reason} -> {:noreply, put_flash(socket, :error, live_error(reason))}
     end
   end
@@ -251,6 +252,7 @@ defmodule SpaceTradersWeb.DashboardLive do
          "Autopilot configuration saved. Start remains manual."
        )}
     else
+      false -> {:noreply, put_flash(socket, :error, "This contract is no longer actionable.")}
       {:error, reason} -> {:noreply, put_flash(socket, :error, live_error(reason))}
     end
   end
@@ -275,6 +277,7 @@ defmodule SpaceTradersWeb.DashboardLive do
          {:ok, _result} <- ship_action(action, agent, ship_symbol) do
       {:noreply, refresh_agent_fleet(socket, agent.id)}
     else
+      false -> {:noreply, put_flash(socket, :error, "This contract is no longer actionable.")}
       {:error, reason} -> {:noreply, put_flash(socket, :error, live_error(reason))}
     end
   end
@@ -419,7 +422,8 @@ defmodule SpaceTradersWeb.DashboardLive do
         %{"agent_id" => agent_id, "contract_id" => contract_id},
         socket
       ) do
-    with {:ok, agent} <- agent_for_contract(socket, agent_id, contract_id),
+    with {:ok, agent, contract} <- agent_for_contract(socket, agent_id, contract_id),
+         true <- Contracts.acceptable?(contract),
          {:ok, _result} <- SpaceTraders.Contracts.accept_contract(agent, contract_id) do
       {:noreply, put_flash(refresh_agent(socket, agent), :info, "Contract accepted.")}
     else
@@ -439,7 +443,8 @@ defmodule SpaceTradersWeb.DashboardLive do
         },
         socket
       ) do
-    with {:ok, agent} <- agent_for_contract(socket, agent_id, contract_id),
+    with {:ok, agent, contract} <- agent_for_contract(socket, agent_id, contract_id),
+         true <- Contracts.fulfillable?(contract),
          {:ok, units} <- parse_units(units),
          {:ok, _result} <-
            SpaceTraders.Contracts.deliver_goods(
@@ -465,7 +470,8 @@ defmodule SpaceTradersWeb.DashboardLive do
         %{"agent_id" => agent_id, "contract_id" => contract_id},
         socket
       ) do
-    with {:ok, agent} <- agent_for_contract(socket, agent_id, contract_id),
+    with {:ok, agent, contract} <- agent_for_contract(socket, agent_id, contract_id),
+         true <- Contracts.fulfillable?(contract),
          {:ok, _result} <- SpaceTraders.Contracts.fulfill_contract(agent, contract_id) do
       {:noreply,
        put_flash(refresh_agent(socket, agent), :info, "Contract fulfilled. Payment collected.")}
@@ -576,7 +582,7 @@ defmodule SpaceTradersWeb.DashboardLive do
         if to_string(overview.agent.id) == agent_id and
              match?({:ok, contracts} when is_list(contracts), overview.contracts) and
              Enum.any?(elem(overview.contracts, 1), &(&1.id == contract_id)) do
-          {:ok, overview.agent}
+          {:ok, overview.agent, Enum.find(elem(overview.contracts, 1), &(&1.id == contract_id))}
         end
       end
     )
@@ -589,12 +595,17 @@ defmodule SpaceTradersWeb.DashboardLive do
       fn overview ->
         if to_string(overview.agent.id) == agent_id and
              match?({:ok, ships} when is_list(ships), overview.ships) and
+             match?({:ok, contracts} when is_list(contracts), overview.contracts) and
+             Contracts.negotiable?(elem(overview.contracts, 1)) and
              Enum.any?(elem(overview.ships, 1), &(&1.symbol == ship_symbol)) do
           {:ok, overview.agent}
         end
       end
     )
   end
+
+  defp contract_dom_id(contract),
+    do: "contract-" <> Base.url_encode64(contract.id, padding: false)
 
   defp snapshot_for_purchase(socket, agent_id) do
     Enum.find_value(
@@ -848,7 +859,7 @@ defmodule SpaceTradersWeb.DashboardLive do
       <% {:ok, contracts} -> %>
         <details
           :for={contract <- contracts}
-          id={"contract-#{contract.id}"}
+          id={contract_dom_id(contract)}
           data-contract-id={contract.id}
           data-contract-historical={Contracts.historical?(contract)}
           open={not Contracts.historical?(contract)}
