@@ -208,7 +208,6 @@ defmodule SpaceTradersWeb.DashboardLive do
 
       {:noreply, extraction_flash(socket, result)}
     else
-      false -> {:noreply, put_flash(socket, :error, "This contract is no longer actionable.")}
       {:error, reason} -> {:noreply, put_flash(socket, :error, live_error(reason))}
     end
   end
@@ -252,7 +251,6 @@ defmodule SpaceTradersWeb.DashboardLive do
          "Autopilot configuration saved. Start remains manual."
        )}
     else
-      false -> {:noreply, put_flash(socket, :error, "This contract is no longer actionable.")}
       {:error, reason} -> {:noreply, put_flash(socket, :error, live_error(reason))}
     end
   end
@@ -277,7 +275,6 @@ defmodule SpaceTradersWeb.DashboardLive do
          {:ok, _result} <- ship_action(action, agent, ship_symbol) do
       {:noreply, refresh_agent_fleet(socket, agent.id)}
     else
-      false -> {:noreply, put_flash(socket, :error, "This contract is no longer actionable.")}
       {:error, reason} -> {:noreply, put_flash(socket, :error, live_error(reason))}
     end
   end
@@ -427,6 +424,7 @@ defmodule SpaceTradersWeb.DashboardLive do
          {:ok, _result} <- SpaceTraders.Contracts.accept_contract(agent, contract_id) do
       {:noreply, put_flash(refresh_agent(socket, agent), :info, "Contract accepted.")}
     else
+      false -> {:noreply, put_flash(socket, :error, "This contract is no longer actionable.")}
       {:error, reason} -> {:noreply, put_flash(socket, :error, live_error(reason))}
     end
   end
@@ -460,6 +458,7 @@ defmodule SpaceTradersWeb.DashboardLive do
 
       {:noreply, put_flash(socket, :info, "Delivered #{units} #{trade_symbol}.")}
     else
+      false -> {:noreply, put_flash(socket, :error, "This contract is no longer actionable.")}
       {:error, reason} -> {:noreply, put_flash(socket, :error, live_error(reason))}
     end
   end
@@ -476,6 +475,7 @@ defmodule SpaceTradersWeb.DashboardLive do
       {:noreply,
        put_flash(refresh_agent(socket, agent), :info, "Contract fulfilled. Payment collected.")}
     else
+      false -> {:noreply, put_flash(socket, :error, "This contract is no longer actionable.")}
       {:error, reason} -> {:noreply, put_flash(socket, :error, live_error(reason))}
     end
   end
