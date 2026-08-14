@@ -21,6 +21,60 @@ defmodule SpaceTraders.Contracts do
 
   def list_contracts(%AgentRecord{}), do: {:error, :agent_token_missing}
 
+  @doc "Returns whether a Contract's authoritative deadline has passed."
+  def expired?(%Contract{accepted: false, deadline_to_accept: deadline}),
+    do: deadline_passed?(deadline)
+
+  def expired?(%Contract{accepted: true, terms: %{deadline: deadline}}),
+    do: deadline_passed?(deadline)
+
+  def expired?(_contract), do: false
+
+  @doc "Returns whether a Contract is fulfilled or no longer actionable."
+  def historical?(%Contract{fulfilled: true}), do: true
+  def historical?(%Contract{} = contract), do: expired?(contract)
+
+  @doc "Returns the lifecycle status used to classify a Contract."
+  def status(%Contract{fulfilled: true}), do: :fulfilled
+
+  def status(%Contract{} = contract) do
+    if expired?(contract),
+      do: :expired,
+      else: if(contract.accepted, do: :accepted, else: :pending)
+  end
+
+  @doc "Returns whether an accepted Contract is still actionable."
+  def active?(%Contract{accepted: true} = contract), do: not historical?(contract)
+  def active?(%Contract{}), do: false
+
+  @doc "Returns whether all delivery terms for a Contract are complete."
+  def ready?(%Contract{terms: %{deliver: deliver}}) when is_list(deliver) do
+    Enum.all?(deliver, &(&1.units_fulfilled >= &1.units_required))
+  end
+
+  def ready?(%Contract{}), do: false
+
+  @doc "Returns whether a list of Contracts allows negotiating another Contract."
+  def negotiable?(contracts) when is_list(contracts), do: Enum.all?(contracts, &historical?/1)
+  def negotiable?(_contracts), do: false
+
+  @doc "Returns whether a pending Contract can be accepted."
+  def acceptable?(%Contract{accepted: false} = contract), do: not historical?(contract)
+  def acceptable?(%Contract{}), do: false
+
+  @doc "Returns whether an accepted Contract can receive delivery or fulfillment actions."
+  def fulfillable?(%Contract{accepted: true} = contract), do: not historical?(contract)
+  def fulfillable?(%Contract{}), do: false
+
+  @doc "Returns the authoritative deadline and its display kind for a Contract."
+  def deadline(%Contract{accepted: true, terms: %{deadline: deadline}}),
+    do: {:completion, deadline}
+
+  def deadline(%Contract{accepted: false, deadline_to_accept: deadline}),
+    do: {:acceptance, deadline}
+
+  def deadline(%Contract{}), do: nil
+
   @doc "Accepts a contract and persists its fulfillment deadline for restart recovery."
   def accept_contract(%AgentRecord{agent_token: token}, contract_id)
       when is_binary(token) and token != "" do
@@ -91,4 +145,13 @@ defmodule SpaceTraders.Contracts do
   end
 
   defp parse_deadline(_contract), do: {:error, :invalid_contract_deadline}
+
+  defp deadline_passed?(deadline) when is_binary(deadline) do
+    case DateTime.from_iso8601(deadline) do
+      {:ok, date_time, _offset} -> DateTime.compare(date_time, DateTime.utc_now()) == :lt
+      _ -> false
+    end
+  end
+
+  defp deadline_passed?(_deadline), do: false
 end

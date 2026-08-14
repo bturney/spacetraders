@@ -28,6 +28,7 @@ defmodule SpaceTradersWeb.DashboardLive do
   use SpaceTradersWeb, :live_view
 
   alias SpaceTraders.Agent
+  alias SpaceTraders.Contracts
   alias SpaceTraders.Fleet
   alias SpaceTraders.SystemWaypointProjection
   alias SpaceTradersWeb.DashboardPrototype
@@ -433,10 +434,12 @@ defmodule SpaceTradersWeb.DashboardLive do
         %{"agent_id" => agent_id, "contract_id" => contract_id},
         socket
       ) do
-    with {:ok, agent} <- agent_for_contract(socket, agent_id, contract_id),
+    with {:ok, agent, contract} <- agent_for_contract(socket, agent_id, contract_id),
+         true <- Contracts.acceptable?(contract),
          {:ok, _result} <- SpaceTraders.Contracts.accept_contract(agent, contract_id) do
       {:noreply, put_flash(refresh_agent(socket, agent), :info, "Contract accepted.")}
     else
+      false -> {:noreply, put_flash(socket, :error, "This contract is no longer actionable.")}
       {:error, reason} -> {:noreply, put_flash(socket, :error, live_error(reason))}
     end
   end
@@ -453,7 +456,8 @@ defmodule SpaceTradersWeb.DashboardLive do
         },
         socket
       ) do
-    with {:ok, agent} <- agent_for_contract(socket, agent_id, contract_id),
+    with {:ok, agent, contract} <- agent_for_contract(socket, agent_id, contract_id),
+         true <- Contracts.fulfillable?(contract),
          {:ok, units} <- parse_units(units),
          {:ok, _result} <-
            SpaceTraders.Contracts.deliver_goods(
@@ -469,6 +473,7 @@ defmodule SpaceTradersWeb.DashboardLive do
 
       {:noreply, put_flash(socket, :info, "Delivered #{units} #{trade_symbol}.")}
     else
+      false -> {:noreply, put_flash(socket, :error, "This contract is no longer actionable.")}
       {:error, reason} -> {:noreply, put_flash(socket, :error, live_error(reason))}
     end
   end
@@ -479,11 +484,13 @@ defmodule SpaceTradersWeb.DashboardLive do
         %{"agent_id" => agent_id, "contract_id" => contract_id},
         socket
       ) do
-    with {:ok, agent} <- agent_for_contract(socket, agent_id, contract_id),
+    with {:ok, agent, contract} <- agent_for_contract(socket, agent_id, contract_id),
+         true <- Contracts.fulfillable?(contract),
          {:ok, _result} <- SpaceTraders.Contracts.fulfill_contract(agent, contract_id) do
       {:noreply,
        put_flash(refresh_agent(socket, agent), :info, "Contract fulfilled. Payment collected.")}
     else
+      false -> {:noreply, put_flash(socket, :error, "This contract is no longer actionable.")}
       {:error, reason} -> {:noreply, put_flash(socket, :error, live_error(reason))}
     end
   end
@@ -590,7 +597,7 @@ defmodule SpaceTradersWeb.DashboardLive do
         if to_string(overview.agent.id) == agent_id and
              match?({:ok, contracts} when is_list(contracts), overview.contracts) and
              Enum.any?(elem(overview.contracts, 1), &(&1.id == contract_id)) do
-          {:ok, overview.agent}
+          {:ok, overview.agent, Enum.find(elem(overview.contracts, 1), &(&1.id == contract_id))}
         end
       end
     )
@@ -603,12 +610,17 @@ defmodule SpaceTradersWeb.DashboardLive do
       fn overview ->
         if to_string(overview.agent.id) == agent_id and
              match?({:ok, ships} when is_list(ships), overview.ships) and
+             match?({:ok, contracts} when is_list(contracts), overview.contracts) and
+             Contracts.negotiable?(elem(overview.contracts, 1)) and
              Enum.any?(elem(overview.ships, 1), &(&1.symbol == ship_symbol)) do
           {:ok, overview.agent}
         end
       end
     )
   end
+
+  defp contract_dom_id(contract),
+    do: "contract-" <> Base.url_encode64(contract.id, padding: false)
 
   defp snapshot_for_purchase(socket, agent_id) do
     Enum.find_value(
@@ -866,25 +878,34 @@ defmodule SpaceTradersWeb.DashboardLive do
           <.negotiate_form ships={@ships} agent_id={@agent_id} form_drafts={@form_drafts} />
         </div>
       <% {:ok, contracts} -> %>
-        <div :for={contract <- contracts} class="card border border-primary/30 bg-base-200 p-4 sm:p-5">
-          <div class="flex flex-wrap items-start justify-between gap-3">
-            <div>
-              <p class="eyebrow">Contract</p>
-              <h3 class="mt-1 font-semibold">
-                {contract.type} <span class="font-mono text-xs opacity-60">{contract.id}</span>
-              </h3>
-              <%= if reward = contract_reward_label(contract) do %>
-                <p class="text-sm opacity-70">{reward}</p>
-              <% end %>
-              <p class="text-sm opacity-70">
-                Issued by <span class="font-mono">{contract.faction_symbol}</span>
-                <%= if deadline = contract_deadline_label(contract) do %>
-                  <span class="opacity-50">·</span> {deadline}
+        <details
+          :for={contract <- contracts}
+          id={contract_dom_id(contract)}
+          data-contract-id={contract.id}
+          data-contract-historical={Contracts.historical?(contract)}
+          open={not Contracts.historical?(contract)}
+          class="card border border-primary/30 bg-base-200 p-4 sm:p-5"
+        >
+          <summary class="cursor-pointer list-none">
+            <div class="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <p class="eyebrow">Contract</p>
+                <h3 class="mt-1 font-semibold">
+                  {contract.type} <span class="font-mono text-xs opacity-60">{contract.id}</span>
+                </h3>
+                <%= if reward = contract_reward_label(contract) do %>
+                  <p class="text-sm opacity-70">{reward}</p>
                 <% end %>
-              </p>
+                <p class="text-sm opacity-70">
+                  Issued by <span class="font-mono">{contract.faction_symbol}</span>
+                  <%= if deadline = contract_deadline_label(contract) do %>
+                    <span class="opacity-50">·</span> {deadline}
+                  <% end %>
+                </p>
+              </div>
+              <span class="badge badge-outline">{contract_status(contract)}</span>
             </div>
-            <span class="badge badge-outline">{contract_status(contract)}</span>
-          </div>
+          </summary>
           <div :for={good <- contract.terms.deliver || []} class="mt-4 space-y-2 text-sm">
             <% delivery_ships = delivery_ships(@ships, good.destination_symbol, good.trade_symbol) %>
             <div class="flex items-center justify-between">
@@ -893,7 +914,7 @@ defmodule SpaceTradersWeb.DashboardLive do
             </div>
             <form
               :for={ship <- delivery_ships}
-              :if={contract.accepted && not contract.fulfilled}
+              :if={contract.accepted && not Contracts.historical?(contract)}
               id={"deliver-form-#{contract.id}-#{ship.symbol}-#{good.trade_symbol}"}
               phx-change="track_draft"
               phx-submit="deliver_contract"
@@ -931,14 +952,14 @@ defmodule SpaceTradersWeb.DashboardLive do
               <button type="submit" class="btn btn-secondary btn-sm">Deliver</button>
             </form>
             <p
-              :if={contract.accepted && not contract.fulfilled && delivery_ships == []}
+              :if={contract.accepted && not Contracts.historical?(contract) && delivery_ships == []}
               class="text-xs opacity-70"
             >
               No ship at this waypoint has {good.trade_symbol} to deliver.
             </p>
           </div>
           <form
-            :if={not contract.accepted && not contract.fulfilled}
+            :if={not contract.accepted && not Contracts.historical?(contract)}
             phx-submit="accept_contract"
             class="mt-4"
           >
@@ -947,16 +968,14 @@ defmodule SpaceTradersWeb.DashboardLive do
             <button
               type="submit"
               class="btn btn-primary min-h-11 btn-sm"
-              disabled={acceptance_elapsed?(contract)}
             >
               Accept contract
             </button>
-            <p :if={acceptance_elapsed?(contract)} class="mt-2 text-xs opacity-70">
-              The Acceptance Deadline has passed; late acceptance is not possible.
-            </p>
           </form>
           <form
-            :if={contract.accepted && not contract.fulfilled && contract_ready?(contract)}
+            :if={
+              contract.accepted && not Contracts.historical?(contract) && Contracts.ready?(contract)
+            }
             phx-submit="fulfill_contract"
             class="mt-4"
           >
@@ -964,8 +983,8 @@ defmodule SpaceTradersWeb.DashboardLive do
             <input type="hidden" name="contract_id" value={contract.id} />
             <button type="submit" class="btn btn-primary min-h-11 btn-sm">Fulfill contract</button>
           </form>
-        </div>
-        <%= if negotiable?(@contracts) do %>
+        </details>
+        <%= if Contracts.negotiable?(contracts) do %>
           <div class="card border border-primary/30 bg-base-200 p-4 sm:p-5">
             <p class="eyebrow">Mission briefing</p>
             <h3 class="mt-1 font-semibold">Negotiate a new contract</h3>
@@ -2556,13 +2575,16 @@ defmodule SpaceTradersWeb.DashboardLive do
   ## Display helpers
 
   defp active_contract?(%{contracts: {:ok, contracts}}),
-    do: Enum.any?(contracts, &(&1.accepted and not &1.fulfilled))
+    do: Enum.any?(contracts, &Contracts.active?/1)
 
   defp active_contract?(_), do: false
 
-  defp contract_status(%{fulfilled: true}), do: "FULFILLED"
-  defp contract_status(%{accepted: true}), do: "ACCEPTED"
-  defp contract_status(_), do: "PENDING"
+  defp contract_status(contract), do: contract_status_label(Contracts.status(contract))
+
+  defp contract_status_label(:fulfilled), do: "FULFILLED"
+  defp contract_status_label(:expired), do: "EXPIRED"
+  defp contract_status_label(:accepted), do: "ACCEPTED"
+  defp contract_status_label(:pending), do: "PENDING"
 
   defp contract_reward_label(%{
          terms: %{payment: %{on_accepted: on_accepted, on_fulfilled: on_fulfilled}}
@@ -2574,18 +2596,20 @@ defmodule SpaceTradersWeb.DashboardLive do
 
   defp contract_reward_label(_), do: nil
 
-  defp contract_deadline_label(%{accepted: true, fulfilled: true}), do: nil
   defp contract_deadline_label(%{fulfilled: true}), do: nil
 
-  defp contract_deadline_label(%{accepted: true, terms: %{deadline: deadline}})
-       when is_binary(deadline),
-       do: format_contract_deadline(deadline, "Complete by")
+  defp contract_deadline_label(contract) do
+    case Contracts.deadline(contract) do
+      {:completion, deadline} when is_binary(deadline) ->
+        format_contract_deadline(deadline, "Complete by")
 
-  defp contract_deadline_label(%{deadline_to_accept: deadline})
-       when is_binary(deadline),
-       do: format_contract_deadline(deadline, "Accept by")
+      {:acceptance, deadline} when is_binary(deadline) ->
+        format_contract_deadline(deadline, "Accept by")
 
-  defp contract_deadline_label(_), do: nil
+      _ ->
+        nil
+    end
+  end
 
   defp format_contract_deadline(deadline, prefix) do
     case DateTime.from_iso8601(deadline) do
@@ -2596,29 +2620,6 @@ defmodule SpaceTradersWeb.DashboardLive do
         nil
     end
   end
-
-  defp acceptance_elapsed?(%{accepted: false, deadline_to_accept: deadline})
-       when is_binary(deadline) do
-    case DateTime.from_iso8601(deadline) do
-      {:ok, date_time, _offset} -> DateTime.compare(date_time, DateTime.utc_now()) == :lt
-      _ -> false
-    end
-  end
-
-  defp acceptance_elapsed?(_), do: false
-
-  defp contract_ready?(%{terms: %{deliver: deliver}}) when is_list(deliver) do
-    Enum.all?(deliver, &(&1.units_fulfilled >= &1.units_required))
-  end
-
-  defp contract_ready?(_), do: false
-
-  defp negotiable?({:ok, contracts}) when is_list(contracts) do
-    not Enum.any?(contracts, &(not &1.accepted and not &1.fulfilled)) and
-      not Enum.any?(contracts, &(&1.accepted and not &1.fulfilled))
-  end
-
-  defp negotiable?(_), do: false
 
   defp faction_label(_agent, %{starting_faction: faction}) when is_binary(faction), do: faction
   defp faction_label(agent, _), do: agent.faction
