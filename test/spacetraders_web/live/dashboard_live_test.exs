@@ -2115,13 +2115,25 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
         end
       end)
 
-      {:ok, lv, html} = live(conn, ~p"/")
+      {:ok, lv, _html} = live(conn, ~p"/")
 
-      assert html =~ "Accept by #{deadline_label_for(accept_by)}"
-      assert html =~ "EXPIRED"
+      assert has_element?(
+               lv,
+               "button#toggle-historical-contracts-#{agent.id}",
+               "Show historical (1)"
+             )
+
+      refute has_element?(lv, "details[data-contract-id=\"ctr-pending\"]")
+      refute has_element?(lv, "form[phx-submit=\"accept_contract\"]")
+
+      lv
+      |> element("button#toggle-historical-contracts-#{agent.id}")
+      |> render_click()
+
       assert has_element?(lv, "details[data-contract-id=\"ctr-pending\"]")
       refute has_element?(lv, "details[data-contract-id=\"ctr-pending\"][open]")
-      refute has_element?(lv, "form[phx-submit=\"accept_contract\"]")
+      assert render(lv) =~ "Accept by #{deadline_label_for(accept_by)}"
+      assert render(lv) =~ "EXPIRED"
     end
 
     test "shows the completion deadline on an accepted contract and hides expiration", %{
@@ -2181,7 +2193,7 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       refute has_element?(lv, "form[phx-submit=\"accept_contract\"]")
     end
 
-    test "collapses fulfilled and expired contracts while keeping active contracts expanded", %{
+    test "hides historical contracts behind a filter while keeping active contracts visible", %{
       conn: conn,
       operator: operator
     } do
@@ -2208,17 +2220,38 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
 
       {:ok, lv, html} = live(conn, ~p"/")
 
+      assert has_element?(
+               lv,
+               "button#toggle-historical-contracts-#{agent.id}",
+               "Show historical (3)"
+             )
+
+      for contract_id <- ["ctr-fulfilled", "ctr-pending-expired", "ctr-accepted-expired"] do
+        refute has_element?(lv, "details[data-contract-id=\"#{contract_id}\"]")
+      end
+
+      assert has_element?(lv, "details[data-contract-id=\"ctr-active\"][open]")
+      assert has_element?(lv, "details[data-contract-id=\"ctr-unknown\"][open]")
+      assert html =~ "ctr-active"
+      assert html =~ "ctr-unknown"
+
+      lv
+      |> element("button#toggle-historical-contracts-#{agent.id}")
+      |> render_click()
+
       for contract_id <- ["ctr-fulfilled", "ctr-pending-expired", "ctr-accepted-expired"] do
         assert has_element?(lv, "details[data-contract-id=\"#{contract_id}\"]")
         refute has_element?(lv, "details[data-contract-id=\"#{contract_id}\"][open]")
       end
 
-      assert html =~ "FULFILLED"
-      assert html =~ "EXPIRED"
-      assert has_element?(lv, "details[data-contract-id=\"ctr-active\"][open]")
-      assert has_element?(lv, "details[data-contract-id=\"ctr-unknown\"][open]")
-      assert html =~ "ctr-active"
-      assert html =~ "ctr-unknown"
+      assert has_element?(
+               lv,
+               "button#toggle-historical-contracts-#{agent.id}",
+               "Hide historical (3)"
+             )
+
+      assert render(lv) =~ "FULFILLED"
+      assert render(lv) =~ "EXPIRED"
     end
 
     test "treats only historical contracts as non-actionable", %{conn: conn, operator: operator} do
