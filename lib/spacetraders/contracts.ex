@@ -21,6 +21,19 @@ defmodule SpaceTraders.Contracts do
 
   def list_contracts(%AgentRecord{}), do: {:error, :agent_token_missing}
 
+  @doc "Returns whether a Contract's authoritative deadline has passed."
+  def expired?(%Contract{accepted: false, deadline_to_accept: deadline}),
+    do: deadline_passed?(deadline)
+
+  def expired?(%Contract{accepted: true, terms: %{deadline: deadline}}),
+    do: deadline_passed?(deadline)
+
+  def expired?(_contract), do: false
+
+  @doc "Returns whether a Contract is fulfilled or no longer actionable."
+  def historical?(%Contract{fulfilled: true}), do: true
+  def historical?(%Contract{} = contract), do: expired?(contract)
+
   @doc "Accepts a contract and persists its fulfillment deadline for restart recovery."
   def accept_contract(%AgentRecord{agent_token: token}, contract_id)
       when is_binary(token) and token != "" do
@@ -91,4 +104,13 @@ defmodule SpaceTraders.Contracts do
   end
 
   defp parse_deadline(_contract), do: {:error, :invalid_contract_deadline}
+
+  defp deadline_passed?(deadline) when is_binary(deadline) do
+    case DateTime.from_iso8601(deadline) do
+      {:ok, date_time, _offset} -> DateTime.compare(date_time, DateTime.utc_now()) == :lt
+      _ -> false
+    end
+  end
+
+  defp deadline_passed?(_deadline), do: false
 end

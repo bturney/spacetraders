@@ -2001,7 +2001,7 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
              )
     end
 
-    test "disables acceptance when the acceptance deadline has elapsed", %{
+    test "collapses an unaccepted contract when the acceptance deadline has elapsed", %{
       conn: conn,
       operator: operator
     } do
@@ -2031,13 +2031,10 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       {:ok, lv, html} = live(conn, ~p"/")
 
       assert html =~ "Accept by #{deadline_label_for(accept_by)}"
-      assert html =~ "The Acceptance Deadline has passed; late acceptance is not possible."
-
-      assert has_element?(
-               lv,
-               "form[phx-submit=\"accept_contract\"] button[disabled]",
-               "Accept contract"
-             )
+      assert html =~ "EXPIRED"
+      assert has_element?(lv, "details[data-contract-id=\"ctr-pending\"]")
+      refute has_element?(lv, "details[data-contract-id=\"ctr-pending\"][open]")
+      refute has_element?(lv, "form[phx-submit=\"accept_contract\"]")
     end
 
     test "shows the completion deadline on an accepted contract and hides expiration", %{
@@ -2135,6 +2132,21 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       assert has_element?(lv, "details[data-contract-id=\"ctr-unknown\"][open]")
       assert html =~ "ctr-active"
       assert html =~ "ctr-unknown"
+    end
+
+    test "treats only historical contracts as non-actionable", %{conn: conn, operator: operator} do
+      agent = agent_fixture(operator)
+
+      stub_contract_game(agent, [
+        contract_body(%{"id" => "ctr-expired", "deadlineToAccept" => past_iso()})
+      ])
+
+      {:ok, lv, html} = live(conn, ~p"/")
+
+      assert html =~ "Negotiate a new contract"
+      refute has_element?(lv, "form[phx-submit=\"accept_contract\"]")
+      refute has_element?(lv, "form[phx-submit=\"deliver_contract\"]")
+      refute has_element?(lv, "form[phx-submit=\"fulfill_contract\"]")
     end
 
     test "prefills a partial contract delivery from an eligible ship", %{

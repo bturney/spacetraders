@@ -2,6 +2,7 @@ defmodule SpaceTraders.ContractsTest do
   use SpaceTraders.DataCase, async: false
 
   alias SpaceTraders.Agent.Agent, as: AgentRecord
+  alias SpaceTraders.API.Model.Contract
   alias SpaceTraders.Contracts
   alias SpaceTraders.Contracts.DeadlineServer
   alias SpaceTraders.Timeline
@@ -44,6 +45,42 @@ defmodule SpaceTraders.ContractsTest do
 
   defp future_iso(seconds) do
     DateTime.utc_now() |> DateTime.add(seconds, :second) |> DateTime.to_iso8601()
+  end
+
+  defp model_contract(overrides) do
+    Contract.from_json(
+      Map.merge(
+        %{
+          "id" => "ctr-1",
+          "accepted" => false,
+          "fulfilled" => false,
+          "deadlineToAccept" => future_iso(3_600),
+          "factionSymbol" => "COSMIC",
+          "type" => "PROCUREMENT",
+          "terms" => %{"deadline" => future_iso(3_600), "deliver" => [], "payment" => %{}}
+        },
+        overrides
+      )
+    )
+  end
+
+  test "classifies Contracts by authoritative lifecycle deadlines" do
+    assert Contracts.expired?(model_contract(%{"deadlineToAccept" => past_iso()}))
+
+    assert Contracts.expired?(
+             model_contract(%{
+               "accepted" => true,
+               "terms" => %{"deadline" => past_iso(), "deliver" => [], "payment" => %{}}
+             })
+           )
+
+    refute Contracts.expired?(model_contract(%{"deadlineToAccept" => "not-a-date"}))
+    refute Contracts.expired?(model_contract(%{"deadlineToAccept" => nil}))
+    assert Contracts.historical?(model_contract(%{"fulfilled" => true}))
+  end
+
+  defp past_iso(seconds \\ 3_600) do
+    DateTime.utc_now() |> DateTime.add(-seconds, :second) |> DateTime.to_iso8601()
   end
 
   test "accepting a contract schedules its persisted fulfillment deadline" do

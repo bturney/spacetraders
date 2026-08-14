@@ -372,7 +372,10 @@ const liveSocket = new LiveSocket("/live", Socket, {
         const isContract = from.dataset.contractId && to.dataset.contractId
         const stateChanged = from.dataset.contractHistorical !== to.dataset.contractHistorical
 
-        if (!isContract || !stateChanged) to.open = from.open
+        if (
+          !isContract ||
+          (!stateChanged && from.dataset.contractId === to.dataset.contractId)
+        ) to.open = from.open
       }
     },
   },

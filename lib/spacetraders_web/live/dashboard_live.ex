@@ -28,6 +28,7 @@ defmodule SpaceTradersWeb.DashboardLive do
   use SpaceTradersWeb, :live_view
 
   alias SpaceTraders.Agent
+  alias SpaceTraders.Contracts
   alias SpaceTraders.Fleet
   alias SpaceTraders.SystemWaypointProjection
   alias SpaceTradersWeb.DashboardPrototype
@@ -847,6 +848,7 @@ defmodule SpaceTradersWeb.DashboardLive do
       <% {:ok, contracts} -> %>
         <details
           :for={contract <- contracts}
+          id={"contract-#{contract.id}"}
           data-contract-id={contract.id}
           data-contract-historical={historical_contract?(contract)}
           open={not historical_contract?(contract)}
@@ -880,7 +882,7 @@ defmodule SpaceTradersWeb.DashboardLive do
             </div>
             <form
               :for={ship <- delivery_ships}
-              :if={contract.accepted && not contract.fulfilled}
+              :if={contract.accepted && not historical_contract?(contract)}
               id={"deliver-form-#{contract.id}-#{ship.symbol}-#{good.trade_symbol}"}
               phx-change="track_draft"
               phx-submit="deliver_contract"
@@ -918,14 +920,14 @@ defmodule SpaceTradersWeb.DashboardLive do
               <button type="submit" class="btn btn-secondary btn-sm">Deliver</button>
             </form>
             <p
-              :if={contract.accepted && not contract.fulfilled && delivery_ships == []}
+              :if={contract.accepted && not historical_contract?(contract) && delivery_ships == []}
               class="text-xs opacity-70"
             >
               No ship at this waypoint has {good.trade_symbol} to deliver.
             </p>
           </div>
           <form
-            :if={not contract.accepted && not contract.fulfilled}
+            :if={not contract.accepted && not historical_contract?(contract)}
             phx-submit="accept_contract"
             class="mt-4"
           >
@@ -943,7 +945,7 @@ defmodule SpaceTradersWeb.DashboardLive do
             </p>
           </form>
           <form
-            :if={contract.accepted && not contract.fulfilled && contract_ready?(contract)}
+            :if={contract.accepted && not historical_contract?(contract) && contract_ready?(contract)}
             phx-submit="fulfill_contract"
             class="mt-4"
           >
@@ -2513,38 +2515,20 @@ defmodule SpaceTradersWeb.DashboardLive do
   ## Display helpers
 
   defp active_contract?(%{contracts: {:ok, contracts}}),
-    do: Enum.any?(contracts, &(&1.accepted and not &1.fulfilled))
+    do: Enum.any?(contracts, &(&1.accepted and not Contracts.historical?(&1)))
 
   defp active_contract?(_), do: false
 
   defp contract_status(%{fulfilled: true}), do: "FULFILLED"
 
   defp contract_status(contract) do
-    if contract_expired?(contract), do: "EXPIRED", else: contract_active_status(contract)
+    if Contracts.expired?(contract), do: "EXPIRED", else: contract_active_status(contract)
   end
 
   defp contract_active_status(%{accepted: true}), do: "ACCEPTED"
   defp contract_active_status(_contract), do: "PENDING"
 
-  defp historical_contract?(%{fulfilled: true}), do: true
-  defp historical_contract?(contract), do: contract_expired?(contract)
-
-  defp contract_expired?(%{accepted: false, deadline_to_accept: deadline}),
-    do: deadline_passed?(deadline)
-
-  defp contract_expired?(%{accepted: true, terms: %{deadline: deadline}}),
-    do: deadline_passed?(deadline)
-
-  defp contract_expired?(_contract), do: false
-
-  defp deadline_passed?(deadline) when is_binary(deadline) do
-    case DateTime.from_iso8601(deadline) do
-      {:ok, date_time, _offset} -> DateTime.compare(date_time, DateTime.utc_now()) == :lt
-      _ -> false
-    end
-  end
-
-  defp deadline_passed?(_deadline), do: false
+  defp historical_contract?(contract), do: Contracts.historical?(contract)
 
   defp contract_reward_label(%{
          terms: %{payment: %{on_accepted: on_accepted, on_fulfilled: on_fulfilled}}
@@ -2579,15 +2563,8 @@ defmodule SpaceTradersWeb.DashboardLive do
     end
   end
 
-  defp acceptance_elapsed?(%{accepted: false, deadline_to_accept: deadline})
-       when is_binary(deadline) do
-    case DateTime.from_iso8601(deadline) do
-      {:ok, date_time, _offset} -> DateTime.compare(date_time, DateTime.utc_now()) == :lt
-      _ -> false
-    end
-  end
-
-  defp acceptance_elapsed?(_), do: false
+  defp acceptance_elapsed?(%{accepted: false} = contract), do: Contracts.expired?(contract)
+  defp acceptance_elapsed?(_contract), do: false
 
   defp contract_ready?(%{terms: %{deliver: deliver}}) when is_list(deliver) do
     Enum.all?(deliver, &(&1.units_fulfilled >= &1.units_required))
@@ -2596,8 +2573,7 @@ defmodule SpaceTradersWeb.DashboardLive do
   defp contract_ready?(_), do: false
 
   defp negotiable?({:ok, contracts}) when is_list(contracts) do
-    not Enum.any?(contracts, &(not &1.accepted and not &1.fulfilled)) and
-      not Enum.any?(contracts, &(&1.accepted and not &1.fulfilled))
+    not Enum.any?(contracts, &(not Contracts.historical?(&1)))
   end
 
   defp negotiable?(_), do: false
