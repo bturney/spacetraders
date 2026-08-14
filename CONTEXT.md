@@ -120,6 +120,9 @@ API-provided context for a trade good: its market role, supply, activity, and tr
 **Contract**:
 The in-game mission object returned by the SpaceTraders API (types PROCUREMENT, TRANSPORT, SHUTTLE), with a deadline and payment terms.
 
+**Historical Contract**:
+A Contract that is fulfilled or demonstrably expired and is no longer actionable. An unaccepted Contract expires after its acceptance deadline; an accepted Contract expires after its completion deadline. A missing or malformed deadline does not establish expiration.
+
 **Acceptance Deadline**:
 The time a pending Contract stops being available for acceptance. It is distinct from the completion deadline and is the authoritative replacement for the deprecated Contract expiration field.
 

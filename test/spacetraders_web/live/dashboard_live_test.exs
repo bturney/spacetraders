@@ -22,6 +22,17 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
     end)
   end
 
+  defp stub_contract_game(agent, contracts) do
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      case conn.request_path do
+        "/v2/my/agent" -> Req.Test.json(conn, %{"data" => agent_overview_body(agent.symbol)})
+        "/v2/my/ships" -> Req.Test.json(conn, %{"data" => []})
+        "/v2/my/contracts" -> Req.Test.json(conn, %{"data" => contracts})
+        "/v2/systems/X1-UX81/waypoints" -> Req.Test.json(conn, %{"data" => []})
+      end
+    end)
+  end
+
   defp agent_overview_body(symbol) do
     %{
       "accountId" => "ACC",
@@ -168,6 +179,25 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
         "payment" => %{"onAccepted" => 1000, "onFulfilled" => 5000}
       }
     }
+  end
+
+  defp contract_body(overrides) do
+    Map.merge(
+      %{
+        "id" => "ctr-1",
+        "accepted" => false,
+        "fulfilled" => false,
+        "factionSymbol" => "COSMIC",
+        "type" => "PROCUREMENT",
+        "deadlineToAccept" => future_iso(),
+        "terms" => %{
+          "deadline" => future_iso(),
+          "deliver" => [],
+          "payment" => %{"onAccepted" => 1000, "onFulfilled" => 5000}
+        }
+      },
+      overrides
+    )
   end
 
   defp arrival_label_for(arrival) do
@@ -2065,6 +2095,46 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       refute html =~ "expiration"
       refute html =~ "2025-01-01"
       refute has_element?(lv, "form[phx-submit=\"accept_contract\"]")
+    end
+
+    test "collapses fulfilled and expired contracts while keeping active contracts expanded", %{
+      conn: conn,
+      operator: operator
+    } do
+      agent = agent_fixture(operator)
+
+      contracts = [
+        contract_body(%{"id" => "ctr-fulfilled", "fulfilled" => true}),
+        contract_body(%{"id" => "ctr-pending-expired", "deadlineToAccept" => past_iso()}),
+        contract_body(%{
+          "id" => "ctr-accepted-expired",
+          "accepted" => true,
+          "deadlineToAccept" => past_iso(),
+          "terms" => %{
+            "deadline" => past_iso(),
+            "deliver" => [],
+            "payment" => %{"onAccepted" => 1000, "onFulfilled" => 5000}
+          }
+        }),
+        contract_body(%{"id" => "ctr-active", "accepted" => true}),
+        contract_body(%{"id" => "ctr-unknown", "deadlineToAccept" => nil})
+      ]
+
+      stub_contract_game(agent, contracts)
+
+      {:ok, lv, html} = live(conn, ~p"/")
+
+      for contract_id <- ["ctr-fulfilled", "ctr-pending-expired", "ctr-accepted-expired"] do
+        assert has_element?(lv, "details[data-contract-id=\"#{contract_id}\"]")
+        refute has_element?(lv, "details[data-contract-id=\"#{contract_id}\"][open]")
+      end
+
+      assert html =~ "FULFILLED"
+      assert html =~ "EXPIRED"
+      assert has_element?(lv, "details[data-contract-id=\"ctr-active\"][open]")
+      assert has_element?(lv, "details[data-contract-id=\"ctr-unknown\"][open]")
+      assert html =~ "ctr-active"
+      assert html =~ "ctr-unknown"
     end
 
     test "prefills a partial contract delivery from an eligible ship", %{

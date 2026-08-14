@@ -845,25 +845,33 @@ defmodule SpaceTradersWeb.DashboardLive do
           <.negotiate_form ships={@ships} agent_id={@agent_id} form_drafts={@form_drafts} />
         </div>
       <% {:ok, contracts} -> %>
-        <div :for={contract <- contracts} class="card border border-primary/30 bg-base-200 p-4 sm:p-5">
-          <div class="flex flex-wrap items-start justify-between gap-3">
-            <div>
-              <p class="eyebrow">Contract</p>
-              <h3 class="mt-1 font-semibold">
-                {contract.type} <span class="font-mono text-xs opacity-60">{contract.id}</span>
-              </h3>
-              <%= if reward = contract_reward_label(contract) do %>
-                <p class="text-sm opacity-70">{reward}</p>
-              <% end %>
-              <p class="text-sm opacity-70">
-                Issued by <span class="font-mono">{contract.faction_symbol}</span>
-                <%= if deadline = contract_deadline_label(contract) do %>
-                  <span class="opacity-50">·</span> {deadline}
+        <details
+          :for={contract <- contracts}
+          data-contract-id={contract.id}
+          data-contract-historical={historical_contract?(contract)}
+          open={not historical_contract?(contract)}
+          class="card border border-primary/30 bg-base-200 p-4 sm:p-5"
+        >
+          <summary class="cursor-pointer list-none">
+            <div class="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <p class="eyebrow">Contract</p>
+                <h3 class="mt-1 font-semibold">
+                  {contract.type} <span class="font-mono text-xs opacity-60">{contract.id}</span>
+                </h3>
+                <%= if reward = contract_reward_label(contract) do %>
+                  <p class="text-sm opacity-70">{reward}</p>
                 <% end %>
-              </p>
+                <p class="text-sm opacity-70">
+                  Issued by <span class="font-mono">{contract.faction_symbol}</span>
+                  <%= if deadline = contract_deadline_label(contract) do %>
+                    <span class="opacity-50">·</span> {deadline}
+                  <% end %>
+                </p>
+              </div>
+              <span class="badge badge-outline">{contract_status(contract)}</span>
             </div>
-            <span class="badge badge-outline">{contract_status(contract)}</span>
-          </div>
+          </summary>
           <div :for={good <- contract.terms.deliver || []} class="mt-4 space-y-2 text-sm">
             <% delivery_ships = delivery_ships(@ships, good.destination_symbol, good.trade_symbol) %>
             <div class="flex items-center justify-between">
@@ -943,7 +951,7 @@ defmodule SpaceTradersWeb.DashboardLive do
             <input type="hidden" name="contract_id" value={contract.id} />
             <button type="submit" class="btn btn-primary min-h-11 btn-sm">Fulfill contract</button>
           </form>
-        </div>
+        </details>
         <%= if negotiable?(@contracts) do %>
           <div class="card border border-primary/30 bg-base-200 p-4 sm:p-5">
             <p class="eyebrow">Mission briefing</p>
@@ -2510,8 +2518,33 @@ defmodule SpaceTradersWeb.DashboardLive do
   defp active_contract?(_), do: false
 
   defp contract_status(%{fulfilled: true}), do: "FULFILLED"
-  defp contract_status(%{accepted: true}), do: "ACCEPTED"
-  defp contract_status(_), do: "PENDING"
+
+  defp contract_status(contract) do
+    if contract_expired?(contract), do: "EXPIRED", else: contract_active_status(contract)
+  end
+
+  defp contract_active_status(%{accepted: true}), do: "ACCEPTED"
+  defp contract_active_status(_contract), do: "PENDING"
+
+  defp historical_contract?(%{fulfilled: true}), do: true
+  defp historical_contract?(contract), do: contract_expired?(contract)
+
+  defp contract_expired?(%{accepted: false, deadline_to_accept: deadline}),
+    do: deadline_passed?(deadline)
+
+  defp contract_expired?(%{accepted: true, terms: %{deadline: deadline}}),
+    do: deadline_passed?(deadline)
+
+  defp contract_expired?(_contract), do: false
+
+  defp deadline_passed?(deadline) when is_binary(deadline) do
+    case DateTime.from_iso8601(deadline) do
+      {:ok, date_time, _offset} -> DateTime.compare(date_time, DateTime.utc_now()) == :lt
+      _ -> false
+    end
+  end
+
+  defp deadline_passed?(_deadline), do: false
 
   defp contract_reward_label(%{
          terms: %{payment: %{on_accepted: on_accepted, on_fulfilled: on_fulfilled}}
