@@ -850,8 +850,8 @@ defmodule SpaceTradersWeb.DashboardLive do
           :for={contract <- contracts}
           id={"contract-#{contract.id}"}
           data-contract-id={contract.id}
-          data-contract-historical={historical_contract?(contract)}
-          open={not historical_contract?(contract)}
+          data-contract-historical={Contracts.historical?(contract)}
+          open={not Contracts.historical?(contract)}
           class="card border border-primary/30 bg-base-200 p-4 sm:p-5"
         >
           <summary class="cursor-pointer list-none">
@@ -882,7 +882,7 @@ defmodule SpaceTradersWeb.DashboardLive do
             </div>
             <form
               :for={ship <- delivery_ships}
-              :if={contract.accepted && not historical_contract?(contract)}
+              :if={contract.accepted && not Contracts.historical?(contract)}
               id={"deliver-form-#{contract.id}-#{ship.symbol}-#{good.trade_symbol}"}
               phx-change="track_draft"
               phx-submit="deliver_contract"
@@ -920,14 +920,14 @@ defmodule SpaceTradersWeb.DashboardLive do
               <button type="submit" class="btn btn-secondary btn-sm">Deliver</button>
             </form>
             <p
-              :if={contract.accepted && not historical_contract?(contract) && delivery_ships == []}
+              :if={contract.accepted && not Contracts.historical?(contract) && delivery_ships == []}
               class="text-xs opacity-70"
             >
               No ship at this waypoint has {good.trade_symbol} to deliver.
             </p>
           </div>
           <form
-            :if={not contract.accepted && not historical_contract?(contract)}
+            :if={not contract.accepted && not Contracts.historical?(contract)}
             phx-submit="accept_contract"
             class="mt-4"
           >
@@ -936,16 +936,14 @@ defmodule SpaceTradersWeb.DashboardLive do
             <button
               type="submit"
               class="btn btn-primary min-h-11 btn-sm"
-              disabled={acceptance_elapsed?(contract)}
             >
               Accept contract
             </button>
-            <p :if={acceptance_elapsed?(contract)} class="mt-2 text-xs opacity-70">
-              The Acceptance Deadline has passed; late acceptance is not possible.
-            </p>
           </form>
           <form
-            :if={contract.accepted && not historical_contract?(contract) && contract_ready?(contract)}
+            :if={
+              contract.accepted && not Contracts.historical?(contract) && Contracts.ready?(contract)
+            }
             phx-submit="fulfill_contract"
             class="mt-4"
           >
@@ -954,7 +952,7 @@ defmodule SpaceTradersWeb.DashboardLive do
             <button type="submit" class="btn btn-primary min-h-11 btn-sm">Fulfill contract</button>
           </form>
         </details>
-        <%= if negotiable?(@contracts) do %>
+        <%= if Contracts.negotiable?(contracts) do %>
           <div class="card border border-primary/30 bg-base-200 p-4 sm:p-5">
             <p class="eyebrow">Mission briefing</p>
             <h3 class="mt-1 font-semibold">Negotiate a new contract</h3>
@@ -2515,20 +2513,16 @@ defmodule SpaceTradersWeb.DashboardLive do
   ## Display helpers
 
   defp active_contract?(%{contracts: {:ok, contracts}}),
-    do: Enum.any?(contracts, &(&1.accepted and not Contracts.historical?(&1)))
+    do: Enum.any?(contracts, &Contracts.active?/1)
 
   defp active_contract?(_), do: false
 
-  defp contract_status(%{fulfilled: true}), do: "FULFILLED"
+  defp contract_status(contract), do: contract_status_label(Contracts.status(contract))
 
-  defp contract_status(contract) do
-    if Contracts.expired?(contract), do: "EXPIRED", else: contract_active_status(contract)
-  end
-
-  defp contract_active_status(%{accepted: true}), do: "ACCEPTED"
-  defp contract_active_status(_contract), do: "PENDING"
-
-  defp historical_contract?(contract), do: Contracts.historical?(contract)
+  defp contract_status_label(:fulfilled), do: "FULFILLED"
+  defp contract_status_label(:expired), do: "EXPIRED"
+  defp contract_status_label(:accepted), do: "ACCEPTED"
+  defp contract_status_label(:pending), do: "PENDING"
 
   defp contract_reward_label(%{
          terms: %{payment: %{on_accepted: on_accepted, on_fulfilled: on_fulfilled}}
@@ -2540,18 +2534,20 @@ defmodule SpaceTradersWeb.DashboardLive do
 
   defp contract_reward_label(_), do: nil
 
-  defp contract_deadline_label(%{accepted: true, fulfilled: true}), do: nil
   defp contract_deadline_label(%{fulfilled: true}), do: nil
 
-  defp contract_deadline_label(%{accepted: true, terms: %{deadline: deadline}})
-       when is_binary(deadline),
-       do: format_contract_deadline(deadline, "Complete by")
+  defp contract_deadline_label(contract) do
+    case Contracts.deadline(contract) do
+      {:completion, deadline} when is_binary(deadline) ->
+        format_contract_deadline(deadline, "Complete by")
 
-  defp contract_deadline_label(%{deadline_to_accept: deadline})
-       when is_binary(deadline),
-       do: format_contract_deadline(deadline, "Accept by")
+      {:acceptance, deadline} when is_binary(deadline) ->
+        format_contract_deadline(deadline, "Accept by")
 
-  defp contract_deadline_label(_), do: nil
+      _ ->
+        nil
+    end
+  end
 
   defp format_contract_deadline(deadline, prefix) do
     case DateTime.from_iso8601(deadline) do
@@ -2562,21 +2558,6 @@ defmodule SpaceTradersWeb.DashboardLive do
         nil
     end
   end
-
-  defp acceptance_elapsed?(%{accepted: false} = contract), do: Contracts.expired?(contract)
-  defp acceptance_elapsed?(_contract), do: false
-
-  defp contract_ready?(%{terms: %{deliver: deliver}}) when is_list(deliver) do
-    Enum.all?(deliver, &(&1.units_fulfilled >= &1.units_required))
-  end
-
-  defp contract_ready?(_), do: false
-
-  defp negotiable?({:ok, contracts}) when is_list(contracts) do
-    not Enum.any?(contracts, &(not Contracts.historical?(&1)))
-  end
-
-  defp negotiable?(_), do: false
 
   defp faction_label(_agent, %{starting_faction: faction}) when is_binary(faction), do: faction
   defp faction_label(agent, _), do: agent.faction
