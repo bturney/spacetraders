@@ -16,7 +16,12 @@ defmodule Mix.Tasks.Verify.Boot do
 
   @impl Mix.Task
   def run(_args) do
+    # The test suite's Repo may still be running (the alias chain keeps the app
+    # alive), holding the PID-named test DB file that test/test_helper.exs
+    # removed after the suite. Stop it first so Ecto creates and migrates a
+    # fresh DB instead of reusing the stale connection.
     stop_app_if_started()
+    ensure_migrated_db()
 
     endpoint_config =
       :spacetraders
@@ -25,12 +30,16 @@ defmodule Mix.Tasks.Verify.Boot do
 
     Application.put_env(:spacetraders, SpaceTradersWeb.Endpoint, endpoint_config)
 
-    case Application.ensure_all_started(:spacetraders) do
-      {:ok, _started} ->
-        check_health(health_url())
+    try do
+      case Application.ensure_all_started(:spacetraders) do
+        {:ok, _started} ->
+          check_health(health_url())
 
-      {:error, reason} ->
-        Mix.raise("boot verify failed: application did not start: #{inspect(reason)}")
+        {:error, reason} ->
+          Mix.raise("boot verify failed: application did not start: #{inspect(reason)}")
+      end
+    after
+      cleanup_test_db()
     end
   end
 
@@ -45,6 +54,36 @@ defmodule Mix.Tasks.Verify.Boot do
 
         {:error, reason} ->
           Mix.raise("boot verify failed: could not stop app: #{inspect(reason)}")
+      end
+    end
+  end
+
+  # In test env the DB file is named after this process's PID and is removed
+  # when the test suite finishes (see test/test_helper.exs), so the boot leg
+  # must not assume it survived the test run. These tasks may already have run
+  # in this process; Mix.Task.run/2 skips previously-run tasks, so force them.
+  defp ensure_migrated_db do
+    if Mix.env() == :test do
+      # The test leg already evaluated the migration modules in this process;
+      # silence Ecto's "redefining module" warnings when they are re-evaluated.
+      previous = Code.compiler_options()[:ignore_module_conflict]
+      Code.compiler_options(ignore_module_conflict: true)
+
+      Mix.Task.rerun("ecto.create", ["--quiet"])
+      Mix.Task.rerun("ecto.migrate", ["--quiet"])
+
+      Code.compiler_options(ignore_module_conflict: previous)
+    end
+  end
+
+  # The boot leg migrates its own PID-named test DB; remove it so verify runs
+  # leave nothing behind. The dev DB is the operator's own data and untouched.
+  defp cleanup_test_db do
+    if Mix.env() == :test do
+      db = Application.fetch_env!(:spacetraders, SpaceTraders.Repo)[:database]
+
+      for suffix <- ["", "-shm", "-wal"] do
+        File.rm(db <> suffix)
       end
     end
   end
