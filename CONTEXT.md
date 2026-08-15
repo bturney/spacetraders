@@ -82,6 +82,10 @@ The collection of ships owned by exactly one Agent. Ships never span Agents.
 A vessel the Agent owns (e.g., ORBITALIST-1, class COMMAND). Travels between waypoints, carries cargo, consumes fuel, and is subject to cooldowns.
 _Avoid_: vessel
 
+**Ship Destination History**:
+The five most recently used distinct Waypoints for one Ship, retained as persistent quick-select choices for future navigation.
+_Avoid_: route history (which implies completed journeys), saved route (which implies a multi-Waypoint plan)
+
 **Autopilot**:
 An Operator-started, per-Ship intent to execute one configured local extract/sell loop. Its persisted configuration and execution status are Fleet state; it never resumes an action without reconciling authoritative game state. It may act only within its configured extraction Waypoint, Market, and Cargo threshold.
 _Avoid_: bot, automatic mode
