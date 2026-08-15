@@ -1124,6 +1124,14 @@ defmodule SpaceTraders.FleetTest do
 
       assert {:ok, [%{symbol: "X1-UX81-A1"}]} = snapshot.waypoints
 
+      assert {:ok, [%{actions: actions}]} = snapshot.ships
+      assert actions.navigate == %{allowed?: true, reason: nil}
+      assert actions.dock == %{allowed?: false, reason: :ship_not_in_orbit}
+      assert actions.orbit == %{allowed?: true, reason: nil}
+      assert actions.extract == %{allowed?: false, reason: :ship_not_in_orbit}
+      assert actions.siphon == %{allowed?: false, reason: :ship_not_in_orbit}
+      assert actions.refuel == %{allowed?: true, reason: nil}
+
       assert {:ok, [%{waypoint: "X1-UX81-A1", market: %{symbol: "X1-UX81-A1"}, ships: [_]}]} =
                snapshot.markets
 
