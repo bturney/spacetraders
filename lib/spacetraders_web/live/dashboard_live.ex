@@ -681,10 +681,10 @@ defmodule SpaceTradersWeb.DashboardLive do
         nil ->
           {:error, :waypoint_unavailable}
 
-        %{waypoints: {:ok, waypoints}, agent: %{agent_token: token}} when is_list(waypoints) ->
+        %{waypoints: {:ok, waypoints}, agent: agent} when is_list(waypoints) ->
           case Enum.find(waypoints, &(&1.symbol == symbol)) do
             nil -> {:error, :waypoint_unavailable}
-            waypoint -> fetch_waypoint_market(token, waypoint)
+            waypoint -> Fleet.waypoint_market(agent, waypoint)
           end
 
         _ ->
@@ -697,17 +697,6 @@ defmodule SpaceTradersWeb.DashboardLive do
       {:error, _reason} -> update(socket, :waypoint_markets, &Map.put(&1, key, result))
     end
   end
-
-  defp fetch_waypoint_market(token, waypoint) do
-    cond do
-      not marketplace_waypoint?(waypoint) -> :not_a_marketplace
-      not is_binary(token) or token == "" -> {:error, :agent_token_missing}
-      true -> SpaceTraders.API.get_market(token, waypoint.system_symbol, waypoint.symbol)
-    end
-  end
-
-  defp marketplace_waypoint?(waypoint),
-    do: Enum.any?(waypoint.traits || [], &(&1.symbol == "MARKETPLACE"))
 
   defp refresh_agent_for_ship(socket, ship_symbol) do
     case agent_for_ship(socket, ship_symbol) do
@@ -1121,17 +1110,21 @@ defmodule SpaceTradersWeb.DashboardLive do
                   </p>
                 </div>
                 <form phx-submit="buy_ship" class="flex shrink-0 items-center gap-2">
+                  <% purchase_action = Map.get(Map.get(listing, :purchase_actions, %{}), ship.type) %>
                   <input type="hidden" name="agent_id" value={@agent_id} />
                   <input type="hidden" name="ship_type" value={ship.type} />
                   <input type="hidden" name="waypoint" value={listing.waypoint} />
                   <span class="font-mono">{credits_label(ship.purchase_price)} cr</span>
                   <button
                     type="submit"
-                    disabled={unaffordable?(@credits, ship.purchase_price)}
+                    disabled={not action_allowed?(purchase_action)}
                     class="btn btn-primary btn-xs"
                   >
                     Buy
                   </button>
+                  <span :if={action_reason(purchase_action)} class="text-xs text-warning">
+                    {action_reason(purchase_action)}
+                  </span>
                 </form>
               </div>
               <details
@@ -1287,12 +1280,12 @@ defmodule SpaceTradersWeb.DashboardLive do
               </p>
               <form
                 :for={ship <- listing.ships}
-                :if={sellable?(ship, good)}
                 id={"sell-form-#{listing.waypoint}-#{ship.symbol}-#{good.symbol}"}
                 phx-change="track_draft"
                 phx-submit="sell_cargo"
                 class="flex items-center gap-2"
               >
+                <% sell_action = trade_action(ship, good.symbol, :sell) %>
                 <input type="hidden" name="symbol" value={ship.symbol} />
                 <input type="hidden" name="trade_symbol" value={good.symbol} />
                 <input
@@ -1319,16 +1312,23 @@ defmodule SpaceTradersWeb.DashboardLive do
                   }
                   class="input input-bordered input-xs w-20"
                 />
-                <button type="submit" class="btn btn-secondary btn-xs">Sell</button>
+                <button
+                  type="submit"
+                  disabled={not action_allowed?(sell_action)}
+                  class="btn btn-secondary btn-xs"
+                >Sell</button>
+                <span :if={action_reason(sell_action)} class="text-xs text-warning">{action_reason(
+                  sell_action
+                )}</span>
               </form>
               <form
                 :for={ship <- listing.ships}
-                :if={buyable?(ship, good)}
                 id={"buy-form-#{listing.waypoint}-#{ship.symbol}-#{good.symbol}"}
                 phx-change="track_draft"
                 phx-submit="purchase_cargo"
                 class="flex items-center gap-2"
               >
+                <% buy_action = trade_action(ship, good.symbol, :buy) %>
                 <input type="hidden" name="symbol" value={ship.symbol} />
                 <input type="hidden" name="trade_symbol" value={good.symbol} />
                 <input
@@ -1353,7 +1353,14 @@ defmodule SpaceTradersWeb.DashboardLive do
                   }
                   class="input input-bordered input-xs w-20"
                 />
-                <button type="submit" class="btn btn-primary btn-xs">Buy</button>
+                <button
+                  type="submit"
+                  disabled={not action_allowed?(buy_action)}
+                  class="btn btn-primary btn-xs"
+                >Buy</button>
+                <span :if={action_reason(buy_action)} class="text-xs text-warning">{action_reason(
+                  buy_action
+                )}</span>
               </form>
             </div>
           </div>
@@ -2199,58 +2206,76 @@ defmodule SpaceTradersWeb.DashboardLive do
             </datalist>
             <button
               type="submit"
-              disabled={cooldown_active?(@ship)}
+              disabled={not action_allowed?(ship_action(@ship, :navigate))}
               class="btn btn-primary min-h-11 btn-sm"
             >
               Navigate
             </button>
+            <span :if={action_reason(ship_action(@ship, :navigate))} class="text-xs text-warning">
+              {action_reason(ship_action(@ship, :navigate))}
+            </span>
           </form>
           <div class="mt-2 flex flex-wrap gap-2">
             <button
               type="button"
               phx-click="dock"
               phx-value-symbol={@ship.symbol}
-              disabled={not dockable?(@ship)}
+              disabled={not action_allowed?(ship_action(@ship, :dock))}
               class="btn btn-ghost min-h-10 btn-sm"
             >
               Dock
             </button>
+            <span :if={action_reason(ship_action(@ship, :dock))} class="text-xs text-warning">
+              {action_reason(ship_action(@ship, :dock))}
+            </span>
             <button
               type="button"
               phx-click="orbit"
               phx-value-symbol={@ship.symbol}
-              disabled={not orbitable?(@ship)}
+              disabled={not action_allowed?(ship_action(@ship, :orbit))}
               class="btn btn-ghost min-h-10 btn-sm"
             >
               Orbit
             </button>
+            <span :if={action_reason(ship_action(@ship, :orbit))} class="text-xs text-warning">
+              {action_reason(ship_action(@ship, :orbit))}
+            </span>
             <button
               type="button"
               phx-click="extract"
               phx-value-symbol={@ship.symbol}
-              disabled={not extractable?(@ship)}
+              disabled={not action_allowed?(ship_action(@ship, :extract))}
               class="btn btn-ghost min-h-10 btn-sm"
             >
               Extract
             </button>
+            <span :if={action_reason(ship_action(@ship, :extract))} class="text-xs text-warning">
+              {action_reason(ship_action(@ship, :extract))}
+            </span>
             <button
               type="button"
               phx-click="siphon"
               phx-value-symbol={@ship.symbol}
-              disabled={not siphonable?(@ship)}
+              disabled={not action_allowed?(ship_action(@ship, :siphon))}
               class="btn btn-ghost min-h-10 btn-sm"
             >
               Siphon
             </button>
+            <span :if={action_reason(ship_action(@ship, :siphon))} class="text-xs text-warning">
+              {action_reason(ship_action(@ship, :siphon))}
+            </span>
             <button
               type="button"
               phx-click="refuel"
               phx-value-symbol={@ship.symbol}
-              disabled={not refuelable?(@ship)}
+              disabled={not action_allowed?(ship_action(@ship, :refuel))}
               class="btn btn-ghost min-h-10 btn-sm"
             >
               Refuel
             </button>
+            <span :if={action_reason(ship_action(@ship, :refuel))} class="text-xs text-warning">
+              {action_reason(ship_action(@ship, :refuel))}
+            </span>
           </div>
         <% end %>
       </div>
@@ -2603,7 +2628,7 @@ defmodule SpaceTradersWeb.DashboardLive do
   end
 
   defp autopilot_next_action(%{desired_mode: "autopilot", extraction_waypoint: waypoint}, ship) do
-    if cooldown_active?(ship),
+    if cooldown_display_active?(ship),
       do: "Wait through #{cooldown_label(ship, 0)}",
       else: "Evaluate at #{waypoint}"
   end
@@ -2707,11 +2732,6 @@ defmodule SpaceTradersWeb.DashboardLive do
   defp live_credits({:ok, live}) when is_map(live), do: Map.get(live, :credits)
   defp live_credits(_), do: nil
 
-  defp unaffordable?(credits, price) when is_integer(credits) and is_integer(price),
-    do: credits < price
-
-  defp unaffordable?(_, _), do: false
-
   defp supply_label(nil), do: "—"
   defp supply_label(supply) when is_binary(supply), do: supply
 
@@ -2757,6 +2777,11 @@ defmodule SpaceTradersWeb.DashboardLive do
 
   defp live_error(:ship_in_transit), do: "This ship is in transit; actions resume on arrival."
   defp live_error(:cooldown_active), do: "This ship is on cooldown; wait for it to end."
+  defp live_error(:ship_not_in_orbit), do: "This action requires the Ship to be in orbit."
+  defp live_error(:ship_not_docked), do: "This action requires the Ship to be docked."
+  defp live_error(:cargo_missing), do: "This Ship does not carry that trade good."
+  defp live_error(:cargo_full), do: "This Ship has no cargo space available."
+  defp live_error(:trade_unavailable), do: "This Market does not sell that trade good."
   defp live_error(:agent_token_missing), do: "No AgentToken stored for this agent."
 
   defp live_error(:insufficient_credits),
@@ -2831,25 +2856,27 @@ defmodule SpaceTradersWeb.DashboardLive do
   defp in_transit?(%{nav: %{status: "IN_TRANSIT"}}), do: true
   defp in_transit?(_), do: false
 
-  defp cooldown_active?(%{cooldown: %{remaining_seconds: seconds}})
+  defp ship_action(ship, action), do: Map.get(ship.actions || %{}, action)
+
+  defp cooldown_display_active?(%{cooldown: %{remaining_seconds: seconds}})
        when is_integer(seconds) and seconds > 0,
        do: true
 
-  defp cooldown_active?(_), do: false
+  defp cooldown_display_active?(_), do: false
 
-  defp dockable?(ship), do: not cooldown_active?(ship) and ship_status(ship) == "IN_ORBIT"
-  defp orbitable?(ship), do: not cooldown_active?(ship) and ship_status(ship) == "DOCKED"
-  defp extractable?(ship), do: not cooldown_active?(ship) and ship_status(ship) == "IN_ORBIT"
-
-  defp siphonable?(ship),
-    do: not cooldown_active?(ship) and ship_status(ship) == "IN_ORBIT" and siphon_equipped?(ship)
-
-  defp refuelable?(ship), do: not cooldown_active?(ship) and ship_status(ship) == "DOCKED"
-
-  defp siphon_equipped?(ship) do
-    Enum.any?(ship.mounts || [], &String.starts_with?(&1.symbol || "", "MOUNT_GAS_SIPHON_")) and
-      Enum.any?(ship.modules || [], &(&1.symbol == "MODULE_GAS_PROCESSOR_I"))
+  defp trade_action(ship, trade_symbol, action) do
+    ship
+    |> Map.get(:trade_actions, %{})
+    |> Map.get(trade_symbol, %{})
+    |> Map.get(action)
   end
+
+  defp action_allowed?(%{allowed?: allowed?}), do: allowed?
+  defp action_allowed?(_), do: false
+
+  defp action_reason(%{reason: nil}), do: nil
+  defp action_reason(%{reason: reason}), do: live_error(reason)
+  defp action_reason(_), do: nil
 
   defp arrival_label(%{nav: %{route: %{arrival: arrival}}}) when is_binary(arrival) do
     case DateTime.from_iso8601(arrival) do
@@ -3012,12 +3039,6 @@ defmodule SpaceTradersWeb.DashboardLive do
        do: description
 
   defp cargo_description(_), do: nil
-
-  defp sellable?(ship, good), do: cargo_item(ship, good.symbol) != nil
-
-  defp buyable?(ship, good) do
-    (good.purchase_price || 0) > 0 and cargo_space(ship, good) > 0
-  end
 
   @caution_supply ["SCARCE", "LIMITED"]
   @caution_activity ["RESTRICTED"]

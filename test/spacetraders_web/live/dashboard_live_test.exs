@@ -1081,6 +1081,7 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       assert html =~ "Dock"
       assert html =~ "Orbit"
       assert html =~ "Extract"
+      assert html =~ "This action requires the Ship to be in orbit."
       assert html =~ ~s(phx-click="orbit")
       assert html =~ ~s(phx-click="dock")
       assert html =~ ~s(<button type="button" phx-click="extract")
