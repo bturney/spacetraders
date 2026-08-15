@@ -136,7 +136,7 @@ defmodule SpaceTraders.Listing do
   end
 
   defp fetch_waypoint_pages(token, system, trait) do
-    case SpaceTraders.API.Pagination.waypoints(token, system, traits: trait) do
+    case SpaceTraders.API.get_waypoints_paginated(token, system, traits: trait) do
       {:ok, waypoints} -> {:ok, waypoints}
       {:error, _reason, waypoints} -> {:partial, waypoints}
     end

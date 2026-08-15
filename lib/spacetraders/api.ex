@@ -27,6 +27,7 @@ defmodule SpaceTraders.API do
   """
 
   alias SpaceTraders.API.RateLimiter
+  alias SpaceTraders.API.Pagination
 
   alias SpaceTraders.API.Model.{
     Agent,
@@ -299,6 +300,13 @@ defmodule SpaceTraders.API do
       params: params,
       as: {:list, Waypoint}
     )
+  end
+
+  @doc "GET /systems/{symbol}/waypoints across every page."
+  @spec get_waypoints_paginated(token(), String.t(), keyword()) ::
+          {:ok, list()} | {:error, term(), list()}
+  def get_waypoints_paginated(token, system_symbol, params \\ []) do
+    Pagination.waypoints(token, system_symbol, params)
   end
 
   @doc "GET /systems/{symbol}/waypoints/{waypoint}"

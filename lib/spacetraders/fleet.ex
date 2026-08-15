@@ -783,7 +783,7 @@ defmodule SpaceTraders.Fleet do
   def list_waypoints(%AgentRecord{}), do: {:error, :agent_token_missing}
 
   defp fetch_waypoint_pages(agent_token, system) do
-    case SpaceTraders.API.Pagination.waypoints(agent_token, system) do
+    case SpaceTraders.API.get_waypoints_paginated(agent_token, system) do
       {:ok, waypoints} -> {:ok, waypoints}
       {:error, reason, _collected} -> {:error, reason}
     end

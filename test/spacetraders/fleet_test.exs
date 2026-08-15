@@ -1896,6 +1896,31 @@ defmodule SpaceTraders.FleetTest do
       assert length(waypoints) == 21
     end
 
+    test "returns a page failure instead of partial headquarters data" do
+      agent = agent_fixture()
+
+      waypoint = %{
+        "symbol" => "X1-UX81-A1",
+        "systemSymbol" => "X1-UX81",
+        "type" => "ORBITAL_STATION",
+        "traits" => []
+      }
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case conn.query_params["page"] do
+          "1" ->
+            Req.Test.json(conn, %{"data" => List.duplicate(waypoint, 20)})
+
+          "2" ->
+            conn
+            |> Map.put(:status, 503)
+            |> Req.Test.json(%{"error" => %{"message" => "unavailable"}})
+        end
+      end)
+
+      assert {:error, %SpaceTraders.API.Error{status: 503}} = Fleet.list_waypoints(agent)
+    end
+
     test "returns a readable error for an agent without stored credentials" do
       assert {:error, :agent_token_missing} = Fleet.list_waypoints(agent_fixture(nil))
     end
