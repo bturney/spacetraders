@@ -783,15 +783,10 @@ defmodule SpaceTraders.Fleet do
   def list_waypoints(%AgentRecord{}), do: {:error, :agent_token_missing}
 
   defp fetch_waypoint_pages(agent_token, system) do
-    Stream.iterate(1, &(&1 + 1))
-    |> Enum.reduce_while({:ok, []}, fn page, {:ok, acc} ->
-      case SpaceTraders.API.get_waypoints(agent_token, system, limit: 20, page: page) do
-        {:ok, []} -> {:halt, {:ok, acc}}
-        {:ok, waypoints} when length(waypoints) < 20 -> {:halt, {:ok, acc ++ waypoints}}
-        {:ok, waypoints} -> {:cont, {:ok, acc ++ waypoints}}
-        error -> {:halt, error}
-      end
-    end)
+    case SpaceTraders.API.Pagination.waypoints(agent_token, system) do
+      {:ok, waypoints} -> {:ok, waypoints}
+      {:error, reason, _collected} -> {:error, reason}
+    end
   end
 
   defp system_from_headquarters(headquarters) do
