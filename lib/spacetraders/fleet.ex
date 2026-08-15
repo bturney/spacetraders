@@ -115,7 +115,8 @@ defmodule SpaceTraders.Fleet do
           Ecto.Changeset.change(config,
             desired_mode: "manual",
             status: "paused",
-            in_flight_action: nil
+            in_flight_action: nil,
+            blocked_reason: "Paused by Operator"
           )
         )
 
@@ -770,19 +771,23 @@ defmodule SpaceTraders.Fleet do
   defp pending_navigation?(_), do: false
 
   defp mark_autopilot_blocked(config, reason) do
+    already_blocked? = Repo.get!(AutopilotConfig, config.id).status == "blocked"
+
     Repo.update!(
       Ecto.Changeset.change(config, status: "blocked", blocked_reason: inspect(reason))
     )
 
-    record_activity_by_config(
-      config,
-      "autopilot_blocked",
-      "Autopilot blocked: #{inspect(reason)}",
-      %{
-        "block" => inspect(reason),
-        "recovery" => "resume"
-      }
-    )
+    unless already_blocked? do
+      record_activity_by_config(
+        config,
+        "autopilot_blocked",
+        "Autopilot blocked: #{inspect(reason)}",
+        %{
+          "block" => inspect(reason),
+          "recovery" => "resume"
+        }
+      )
+    end
 
     {:error, reason}
   end

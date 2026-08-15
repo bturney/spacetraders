@@ -1330,11 +1330,11 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       assert has_element?(lv, "[data-autopilot-status]", "Active Autopilot")
 
       lv |> element("button[phx-click=\"pause_autopilot\"]") |> render_click()
-      assert has_element?(lv, "[data-autopilot-status]", "Paused by manual action")
+      assert has_element?(lv, "[data-autopilot-status]", "Paused by Operator")
       assert has_element?(lv, "button[phx-click=\"resume_autopilot\"]")
 
       lv |> element("button[phx-click=\"resume_autopilot\"]") |> render_click()
-      refute has_element?(lv, "[data-autopilot-status]", "Paused by manual action")
+      refute has_element?(lv, "[data-autopilot-status]", "Paused by Operator")
     end
 
     test "selects a Ship operation panel and returns to the Fleet roster on mobile", %{

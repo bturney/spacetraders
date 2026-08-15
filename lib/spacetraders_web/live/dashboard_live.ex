@@ -2635,6 +2635,7 @@ defmodule SpaceTradersWeb.DashboardLive do
   defp autopilot_next_action(_, _ship), do: "Start Autopilot"
 
   defp paused_status("Paused by a direct Ship action"), do: "Paused by manual action"
+  defp paused_status("Paused by Operator"), do: "Paused by Operator"
   defp paused_status(nil), do: "Paused by manual action"
   defp paused_status(reason) when is_binary(reason), do: reason
   defp paused_status(_), do: "Paused"
