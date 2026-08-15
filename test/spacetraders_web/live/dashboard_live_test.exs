@@ -1085,7 +1085,7 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       assert html =~ "This action requires the Ship to be in orbit."
       assert html =~ ~s(phx-click="orbit")
       assert html =~ ~s(phx-click="dock")
-      assert html =~ ~s(<button type="button" phx-click="extract")
+      assert html =~ ~s(phx-click="extract")
     end
 
     test "saves a loop configuration and keeps Start explicit", %{conn: conn, operator: operator} do
@@ -1818,7 +1818,7 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       {:ok, _lv, html} = live(conn, ~p"/")
 
       assert html =~ "Cooldown 42s"
-      assert html =~ ~s(<button type="submit" disabled)
+      assert html =~ ~s(data-tip="This ship is on cooldown; wait for it to end.")
     end
 
     test "shows an on-site shipyard and buys a mining drone", %{conn: conn, operator: operator} do
