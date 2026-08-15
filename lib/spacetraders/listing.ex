@@ -136,15 +136,10 @@ defmodule SpaceTraders.Listing do
   end
 
   defp fetch_waypoint_pages(token, system, trait) do
-    Stream.iterate(1, &(&1 + 1))
-    |> Enum.reduce_while([], fn page, waypoints ->
-      case SpaceTraders.API.get_waypoints(token, system, traits: trait, limit: 20, page: page) do
-        {:ok, []} -> {:halt, {:ok, waypoints}}
-        {:ok, found} when length(found) < 20 -> {:halt, {:ok, waypoints ++ found}}
-        {:ok, found} -> {:cont, waypoints ++ found}
-        {:error, _reason} -> {:halt, {:partial, waypoints}}
-      end
-    end)
+    case SpaceTraders.API.get_waypoints_paginated(token, system, traits: trait) do
+      {:ok, waypoints} -> {:ok, waypoints}
+      {:error, _reason, waypoints} -> {:partial, waypoints}
+    end
   end
 
   defp on_site?(%{nav: %{status: "DOCKED", system_symbol: system}})
