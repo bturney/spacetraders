@@ -27,11 +27,20 @@ defmodule SpaceTraders.API.Pagination do
     Stream.iterate(1, &(&1 + 1))
     |> Enum.reduce_while({:ok, []}, fn page, {:ok, collected} ->
       case fetch_page.(page) do
-        {:ok, []} -> {:halt, {:ok, collected}}
-        {:ok, items} when length(items) < limit -> {:halt, {:ok, collected ++ items}}
-        {:ok, items} -> {:cont, {:ok, collected ++ items}}
-        {:error, reason} -> {:halt, {:error, reason, collected}}
+        {:ok, []} ->
+          {:halt, {:ok, flatten_pages(collected)}}
+
+        {:ok, items} when length(items) < limit ->
+          {:halt, {:ok, flatten_pages([items | collected])}}
+
+        {:ok, items} ->
+          {:cont, {:ok, [items | collected]}}
+
+        {:error, reason} ->
+          {:halt, {:error, reason, flatten_pages(collected)}}
       end
     end)
   end
+
+  defp flatten_pages(pages), do: pages |> Enum.reverse() |> List.flatten()
 end
