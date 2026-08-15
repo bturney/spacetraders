@@ -2172,115 +2172,114 @@ defmodule SpaceTradersWeb.DashboardLive do
               </div>
             </dl>
           </details>
-        <% else %>
-          <form
-            id={"navigate-form-#{@ship.symbol}"}
-            phx-change="track_draft"
-            phx-submit="navigate"
-            phx-value-symbol={@ship.symbol}
-            class="flex gap-2"
-          >
-            <input
-              type="hidden"
-              name="draft_key"
-              value={draft_key("navigate", [@ship.symbol])}
-            />
-            <input
-              type="text"
-              name="waypoint_symbol"
-              value={draft_field(@form_drafts, "navigate", [@ship.symbol], "waypoint_symbol", "")}
-              placeholder="Waypoint symbol"
-              autocomplete="off"
-              list={
-                if destination_history(@ship) == [],
-                  do: nil,
-                  else: "destination-history-#{@ship.symbol}"
-              }
-              class="input input-sm input-bordered min-h-11 flex-1 font-mono"
-            />
-            <datalist
-              :if={destination_history(@ship) != []}
-              id={"destination-history-#{@ship.symbol}"}
-            >
-              <option :for={destination <- destination_history(@ship)} value={destination} />
-            </datalist>
-            <button
-              type="submit"
-              disabled={not action_allowed?(ship_action_state(@ship, :navigate))}
-              class="btn btn-primary min-h-11 btn-sm"
-            >
-              Navigate
-            </button>
-            <span
-              :if={action_reason(ship_action_state(@ship, :navigate))}
-              class="text-xs text-warning"
-            >
-              {action_reason(ship_action_state(@ship, :navigate))}
-            </span>
-          </form>
-          <div class="mt-2 flex flex-wrap gap-2">
-            <button
-              type="button"
-              phx-click="dock"
-              phx-value-symbol={@ship.symbol}
-              disabled={not action_allowed?(ship_action_state(@ship, :dock))}
-              class="btn btn-ghost min-h-10 btn-sm"
-            >
-              Dock
-            </button>
-            <span :if={action_reason(ship_action_state(@ship, :dock))} class="text-xs text-warning">
-              {action_reason(ship_action_state(@ship, :dock))}
-            </span>
-            <button
-              type="button"
-              phx-click="orbit"
-              phx-value-symbol={@ship.symbol}
-              disabled={not action_allowed?(ship_action_state(@ship, :orbit))}
-              class="btn btn-ghost min-h-10 btn-sm"
-            >
-              Orbit
-            </button>
-            <span :if={action_reason(ship_action_state(@ship, :orbit))} class="text-xs text-warning">
-              {action_reason(ship_action_state(@ship, :orbit))}
-            </span>
-            <button
-              type="button"
-              phx-click="extract"
-              phx-value-symbol={@ship.symbol}
-              disabled={not action_allowed?(ship_action_state(@ship, :extract))}
-              class="btn btn-ghost min-h-10 btn-sm"
-            >
-              Extract
-            </button>
-            <span :if={action_reason(ship_action_state(@ship, :extract))} class="text-xs text-warning">
-              {action_reason(ship_action_state(@ship, :extract))}
-            </span>
-            <button
-              type="button"
-              phx-click="siphon"
-              phx-value-symbol={@ship.symbol}
-              disabled={not action_allowed?(ship_action_state(@ship, :siphon))}
-              class="btn btn-ghost min-h-10 btn-sm"
-            >
-              Siphon
-            </button>
-            <span :if={action_reason(ship_action_state(@ship, :siphon))} class="text-xs text-warning">
-              {action_reason(ship_action_state(@ship, :siphon))}
-            </span>
-            <button
-              type="button"
-              phx-click="refuel"
-              phx-value-symbol={@ship.symbol}
-              disabled={not action_allowed?(ship_action_state(@ship, :refuel))}
-              class="btn btn-ghost min-h-10 btn-sm"
-            >
-              Refuel
-            </button>
-            <span :if={action_reason(ship_action_state(@ship, :refuel))} class="text-xs text-warning">
-              {action_reason(ship_action_state(@ship, :refuel))}
-            </span>
-          </div>
         <% end %>
+        <form
+          id={"navigate-form-#{@ship.symbol}"}
+          phx-change="track_draft"
+          phx-submit="navigate"
+          phx-value-symbol={@ship.symbol}
+          class="flex gap-2"
+        >
+          <input
+            type="hidden"
+            name="draft_key"
+            value={draft_key("navigate", [@ship.symbol])}
+          />
+          <input
+            type="text"
+            name="waypoint_symbol"
+            value={draft_field(@form_drafts, "navigate", [@ship.symbol], "waypoint_symbol", "")}
+            placeholder="Waypoint symbol"
+            autocomplete="off"
+            list={
+              if destination_history(@ship) == [],
+                do: nil,
+                else: "destination-history-#{@ship.symbol}"
+            }
+            class="input input-sm input-bordered min-h-11 flex-1 font-mono"
+          />
+          <datalist
+            :if={destination_history(@ship) != []}
+            id={"destination-history-#{@ship.symbol}"}
+          >
+            <option :for={destination <- destination_history(@ship)} value={destination} />
+          </datalist>
+          <button
+            type="submit"
+            disabled={not action_allowed?(ship_action_state(@ship, :navigate))}
+            class="btn btn-primary min-h-11 btn-sm"
+          >
+            Navigate
+          </button>
+          <span
+            :if={action_reason(ship_action_state(@ship, :navigate))}
+            class="text-xs text-warning"
+          >
+            {action_reason(ship_action_state(@ship, :navigate))}
+          </span>
+        </form>
+        <div class="mt-2 flex flex-wrap gap-2">
+          <button
+            type="button"
+            phx-click="dock"
+            phx-value-symbol={@ship.symbol}
+            disabled={not action_allowed?(ship_action_state(@ship, :dock))}
+            class="btn btn-ghost min-h-10 btn-sm"
+          >
+            Dock
+          </button>
+          <span :if={action_reason(ship_action_state(@ship, :dock))} class="text-xs text-warning">
+            {action_reason(ship_action_state(@ship, :dock))}
+          </span>
+          <button
+            type="button"
+            phx-click="orbit"
+            phx-value-symbol={@ship.symbol}
+            disabled={not action_allowed?(ship_action_state(@ship, :orbit))}
+            class="btn btn-ghost min-h-10 btn-sm"
+          >
+            Orbit
+          </button>
+          <span :if={action_reason(ship_action_state(@ship, :orbit))} class="text-xs text-warning">
+            {action_reason(ship_action_state(@ship, :orbit))}
+          </span>
+          <button
+            type="button"
+            phx-click="extract"
+            phx-value-symbol={@ship.symbol}
+            disabled={not action_allowed?(ship_action_state(@ship, :extract))}
+            class="btn btn-ghost min-h-10 btn-sm"
+          >
+            Extract
+          </button>
+          <span :if={action_reason(ship_action_state(@ship, :extract))} class="text-xs text-warning">
+            {action_reason(ship_action_state(@ship, :extract))}
+          </span>
+          <button
+            type="button"
+            phx-click="siphon"
+            phx-value-symbol={@ship.symbol}
+            disabled={not action_allowed?(ship_action_state(@ship, :siphon))}
+            class="btn btn-ghost min-h-10 btn-sm"
+          >
+            Siphon
+          </button>
+          <span :if={action_reason(ship_action_state(@ship, :siphon))} class="text-xs text-warning">
+            {action_reason(ship_action_state(@ship, :siphon))}
+          </span>
+          <button
+            type="button"
+            phx-click="refuel"
+            phx-value-symbol={@ship.symbol}
+            disabled={not action_allowed?(ship_action_state(@ship, :refuel))}
+            class="btn btn-ghost min-h-10 btn-sm"
+          >
+            Refuel
+          </button>
+          <span :if={action_reason(ship_action_state(@ship, :refuel))} class="text-xs text-warning">
+            {action_reason(ship_action_state(@ship, :refuel))}
+          </span>
+        </div>
       </div>
 
       <details

@@ -1113,7 +1113,20 @@ defmodule SpaceTraders.FleetTest do
             )
 
           {"/v2/systems/X1-UX81/waypoints/X1-UX81-A1/market", _} ->
-            Req.Test.json(conn, %{"data" => %{"symbol" => "X1-UX81-A1", "tradeGoods" => []}})
+            Req.Test.json(conn, %{
+              "data" => %{
+                "symbol" => "X1-UX81-A1",
+                "tradeGoods" => [
+                  %{
+                    "symbol" => "IRON_ORE",
+                    "type" => "EXPORT",
+                    "purchasePrice" => 10,
+                    "sellPrice" => 8,
+                    "tradeVolume" => 10
+                  }
+                ]
+              }
+            })
 
           {"/v2/systems/X1-UX81/waypoints/X1-UX81-A1/shipyard", _} ->
             Req.Test.json(conn, %{"data" => %{"symbol" => "X1-UX81-A1", "ships" => []}})
@@ -1132,8 +1145,17 @@ defmodule SpaceTraders.FleetTest do
       assert actions.siphon == %{allowed?: false, reason: :ship_not_in_orbit}
       assert actions.refuel == %{allowed?: true, reason: nil}
 
-      assert {:ok, [%{waypoint: "X1-UX81-A1", market: %{symbol: "X1-UX81-A1"}, ships: [_]}]} =
-               snapshot.markets
+      assert {:ok,
+              [
+                %{
+                  waypoint: "X1-UX81-A1",
+                  market: %{symbol: "X1-UX81-A1"},
+                  ships: [%{trade_actions: trade_actions}]
+                }
+              ]} = snapshot.markets
+
+      assert trade_actions["IRON_ORE"].sell == %{allowed?: true, reason: nil}
+      assert trade_actions["IRON_ORE"].buy == %{allowed?: true, reason: nil}
 
       assert {:ok, [%{waypoint: "X1-UX81-A1", shipyard: %{symbol: "X1-UX81-A1"}}]} =
                snapshot.shipyards
