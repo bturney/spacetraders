@@ -228,7 +228,11 @@ defmodule SpaceTraders.FleetTest do
 
       assert {:ok, _} = Fleet.navigate_ship(agent, "FLEET-SHIP", "X1-UX81-A1")
 
-      assert %{desired_mode: "manual", status: "paused"} =
+      assert %{
+               desired_mode: "manual",
+               status: "paused",
+               blocked_reason: "Paused by direct navigation"
+             } =
                Fleet.autopilot_config(agent, "FLEET-SHIP")
 
       assert [%{kind: "manual_override"} | _] = Fleet.recent_activity(agent)

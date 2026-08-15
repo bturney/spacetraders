@@ -115,7 +115,8 @@ defmodule SpaceTraders.Fleet do
           Ecto.Changeset.change(config,
             desired_mode: "manual",
             status: "paused",
-            in_flight_action: nil
+            in_flight_action: nil,
+            blocked_reason: "Paused by Operator"
           )
         )
 
@@ -198,17 +199,24 @@ defmodule SpaceTraders.Fleet do
           Ecto.Changeset.change(config,
             desired_mode: "manual",
             status: "paused",
-            in_flight_action: nil
+            in_flight_action: nil,
+            blocked_reason: preemption_message(reason)
           )
         )
 
-        record_activity(agent, ship, "manual_override", "Autopilot preempted: #{reason}")
+        message = preemption_message(reason)
+        record_activity(agent, ship, "manual_override", message, %{"recovery" => "resume"})
         :ok
 
       _ ->
         :ok
     end
   end
+
+  defp preemption_message({:manual_override, action}), do: "Paused by direct #{action}"
+  defp preemption_message(:manual_override), do: "Paused by a direct Ship action"
+  defp preemption_message(:configuration_changed), do: "Paused because configuration changed"
+  defp preemption_message(reason), do: "Paused: #{inspect(reason)}"
 
   defp preempt_autopilot_for(agent, ship_symbol, reason) do
     case Repo.get_by(Ship, agent_id: agent.id, symbol: ship_symbol) do
@@ -227,6 +235,11 @@ defmodule SpaceTraders.Fleet do
     })
 
     :ok
+  end
+
+  defp record_autopilot_activity(agent, live_ship, kind, message, metadata) do
+    ship = Repo.get_by!(Ship, agent_id: agent.id, symbol: live_ship.symbol)
+    record_activity(agent, ship, kind, message, metadata)
   end
 
   defp validate_autopilot(%AgentRecord{agent_token: token}, ship, config)
@@ -292,6 +305,17 @@ defmodule SpaceTraders.Fleet do
               )
             )
 
+            record_activity(
+              agent,
+              ship,
+              "autopilot_blocked",
+              "Autopilot blocked: #{inspect(reason)}",
+              %{
+                "block" => inspect(reason),
+                "recovery" => "resume"
+              }
+            )
+
             {:error, {:autopilot_blocked, reason}}
 
           nil ->
@@ -312,6 +336,17 @@ defmodule SpaceTraders.Fleet do
     cond do
       in_flight_arrival?(config, live_ship) ->
         maybe_schedule_arrival(agent, live_ship.symbol, %{nav: live_ship.nav})
+
+        record_autopilot_activity(
+          agent,
+          live_ship,
+          "autopilot_waiting",
+          "Autopilot waiting for arrival",
+          %{
+            "wait" => "arrival"
+          }
+        )
+
         {:ok, Repo.update!(Ecto.Changeset.change(config, status: "waiting"))}
 
       pending_navigation?(config) ->
@@ -423,6 +458,14 @@ defmodule SpaceTraders.Fleet do
       cooldown_active?(live_ship) ->
         maybe_schedule_live_cooldown(agent, live_ship)
 
+        record_autopilot_activity(
+          agent,
+          live_ship,
+          "autopilot_waiting",
+          "Autopilot waiting for cooldown",
+          %{"wait" => "cooldown"}
+        )
+
         {:ok,
          Repo.update!(
            Ecto.Changeset.change(config,
@@ -467,6 +510,14 @@ defmodule SpaceTraders.Fleet do
           {:error, reason} ->
             Repo.update!(
               Ecto.Changeset.change(config, status: "blocked", blocked_reason: inspect(reason))
+            )
+
+            record_autopilot_activity(
+              agent,
+              live_ship,
+              "autopilot_blocked",
+              "Autopilot blocked: #{inspect(reason)}",
+              %{"block" => inspect(reason), "recovery" => "resume"}
             )
 
             {:error, reason}
@@ -683,6 +734,16 @@ defmodule SpaceTraders.Fleet do
           Ecto.Changeset.change(config, status: "blocked", blocked_reason: inspect(reason))
         )
 
+        record_activity_by_config(
+          config,
+          "autopilot_blocked",
+          "Autopilot blocked: #{inspect(reason)}",
+          %{
+            "block" => inspect(reason),
+            "recovery" => "resume"
+          }
+        )
+
         {:error, reason}
     end
   end
@@ -710,11 +771,30 @@ defmodule SpaceTraders.Fleet do
   defp pending_navigation?(_), do: false
 
   defp mark_autopilot_blocked(config, reason) do
+    already_blocked? = Repo.get!(AutopilotConfig, config.id).status == "blocked"
+
     Repo.update!(
       Ecto.Changeset.change(config, status: "blocked", blocked_reason: inspect(reason))
     )
 
+    unless already_blocked? do
+      record_activity_by_config(
+        config,
+        "autopilot_blocked",
+        "Autopilot blocked: #{inspect(reason)}",
+        %{
+          "block" => inspect(reason),
+          "recovery" => "resume"
+        }
+      )
+    end
+
     {:error, reason}
+  end
+
+  defp record_activity_by_config(config, kind, message, metadata) do
+    ship = Repo.get!(Ship, config.ship_id)
+    record_activity(Repo.get!(AgentRecord, ship.agent_id), ship, kind, message, metadata)
   end
 
   defp extract_resources_for_autopilot(%AgentRecord{agent_token: token} = agent, ship_symbol)
@@ -854,7 +934,7 @@ defmodule SpaceTraders.Fleet do
   """
   def navigate_ship(%AgentRecord{agent_token: agent_token} = agent, ship_symbol, waypoint_symbol)
       when is_binary(agent_token) and agent_token != "" do
-    with :ok <- preempt_autopilot_for(agent, ship_symbol, :manual_override),
+    with :ok <- preempt_autopilot_for(agent, ship_symbol, {:manual_override, "navigation"}),
          :ok <- ShipServer.ensure_ready(ship_symbol),
          {:ok, result} <-
            SpaceTraders.API.navigate_ship(agent_token, ship_symbol, waypoint_symbol) do
@@ -932,7 +1012,7 @@ defmodule SpaceTraders.Fleet do
   @doc "Docks a ship at its current waypoint."
   def dock_ship(%AgentRecord{agent_token: agent_token} = agent, ship_symbol)
       when is_binary(agent_token) and agent_token != "" do
-    with :ok <- preempt_autopilot_for(agent, ship_symbol, :manual_override),
+    with :ok <- preempt_autopilot_for(agent, ship_symbol, {:manual_override, "docking"}),
          :ok <- ShipServer.ensure_ready(ship_symbol) do
       SpaceTraders.API.dock_ship(agent_token, ship_symbol)
     end
@@ -943,7 +1023,7 @@ defmodule SpaceTraders.Fleet do
   @doc "Puts a ship into orbit at its current waypoint."
   def orbit_ship(%AgentRecord{agent_token: agent_token} = agent, ship_symbol)
       when is_binary(agent_token) and agent_token != "" do
-    with :ok <- preempt_autopilot_for(agent, ship_symbol, :manual_override),
+    with :ok <- preempt_autopilot_for(agent, ship_symbol, {:manual_override, "orbit"}),
          :ok <- ShipServer.ensure_ready(ship_symbol) do
       SpaceTraders.API.orbit_ship(agent_token, ship_symbol)
     end
@@ -954,7 +1034,7 @@ defmodule SpaceTraders.Fleet do
   @doc "Extracts resources and persists the returned cooldown on the timeline."
   def extract_resources(%AgentRecord{agent_token: agent_token} = agent, ship_symbol)
       when is_binary(agent_token) and agent_token != "" do
-    with :ok <- preempt_autopilot_for(agent, ship_symbol, :manual_override),
+    with :ok <- preempt_autopilot_for(agent, ship_symbol, {:manual_override, "extraction"}),
          :ok <- ShipServer.ensure_ready(ship_symbol),
          {:ok, result} <- SpaceTraders.API.extract_resources(agent_token, ship_symbol),
          :ok <- schedule_cooldown(agent, ship_symbol, result) do
@@ -967,7 +1047,7 @@ defmodule SpaceTraders.Fleet do
   @doc "Siphons gas and persists the returned cooldown on the timeline."
   def siphon_resources(%AgentRecord{agent_token: agent_token} = agent, ship_symbol)
       when is_binary(agent_token) and agent_token != "" do
-    with :ok <- preempt_autopilot_for(agent, ship_symbol, :manual_override),
+    with :ok <- preempt_autopilot_for(agent, ship_symbol, {:manual_override, "siphoning"}),
          :ok <- ShipServer.ensure_ready(ship_symbol),
          {:ok, live_ship} <- SpaceTraders.API.get_ship(agent_token, ship_symbol),
          {:ok, waypoint} <-
@@ -1001,7 +1081,7 @@ defmodule SpaceTraders.Fleet do
   @doc "Sells cargo from a ship and returns the updated cargo and transaction."
   def sell_cargo(%AgentRecord{agent_token: agent_token} = agent, ship_symbol, trade_symbol, units)
       when is_binary(agent_token) and agent_token != "" do
-    with :ok <- preempt_autopilot_for(agent, ship_symbol, :manual_override),
+    with :ok <- preempt_autopilot_for(agent, ship_symbol, {:manual_override, "selling cargo"}),
          :ok <- ShipServer.ensure_ready(ship_symbol) do
       SpaceTraders.API.sell_cargo(agent_token, ship_symbol, trade_symbol, units)
     end
@@ -1018,7 +1098,7 @@ defmodule SpaceTraders.Fleet do
         units
       )
       when is_binary(agent_token) and agent_token != "" and is_integer(units) and units > 0 do
-    with :ok <- preempt_autopilot_for(agent, ship_symbol, :manual_override),
+    with :ok <- preempt_autopilot_for(agent, ship_symbol, {:manual_override, "purchasing cargo"}),
          :ok <- ShipServer.ensure_ready(ship_symbol) do
       SpaceTraders.API.purchase_cargo(agent_token, ship_symbol, trade_symbol, units)
     end
@@ -1034,7 +1114,7 @@ defmodule SpaceTraders.Fleet do
   @doc "Refuels a ship at a marketplace that sells fuel."
   def refuel_ship(%AgentRecord{agent_token: agent_token} = agent, ship_symbol)
       when is_binary(agent_token) and agent_token != "" do
-    with :ok <- preempt_autopilot_for(agent, ship_symbol, :manual_override),
+    with :ok <- preempt_autopilot_for(agent, ship_symbol, {:manual_override, "refueling"}),
          :ok <- ShipServer.ensure_ready(ship_symbol) do
       SpaceTraders.API.refuel_ship(agent_token, ship_symbol)
     end
@@ -1050,7 +1130,8 @@ defmodule SpaceTraders.Fleet do
         units
       )
       when is_binary(agent_token) and agent_token != "" and is_integer(units) and units > 0 do
-    with :ok <- preempt_autopilot_for(agent, ship_symbol, :manual_override),
+    with :ok <-
+           preempt_autopilot_for(agent, ship_symbol, {:manual_override, "jettisoning cargo"}),
          :ok <- ShipServer.ensure_ready(ship_symbol) do
       SpaceTraders.API.jettison_cargo(agent_token, ship_symbol, trade_symbol, units)
     end
