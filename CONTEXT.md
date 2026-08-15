@@ -86,12 +86,24 @@ _Avoid_: vessel
 The five most recently used distinct Waypoints for one Ship, retained as persistent quick-select choices for future navigation.
 _Avoid_: route history (which implies completed journeys), saved route (which implies a multi-Waypoint plan)
 
+**Job**:
+A durable, Operator-selected outcome for exactly one Ship. Its Policy evaluates authoritative game state to choose an Intent; a Job is paused by a direct Ship action and must be revalidated before resuming.
+_Avoid_: automation, workflow
+
+**Policy**:
+The decision rule belonging to a Job that selects a viable Intent from authoritative state. It chooses among valid alternatives but does not prescribe game API calls.
+_Avoid_: script, action plan
+
+**Intent**:
+A state-aware request for a Ship to achieve an operational outcome, such as reaching a Waypoint. An Intent selects and performs the necessary game actions from authoritative Ship state; it is not a fixed sequence of API calls.
+_Avoid_: action, macro, script
+
 **Autopilot**:
-An Operator-started, per-Ship intent to execute one configured local extract/sell loop. Its persisted configuration and execution status are Fleet state; it never resumes an action without reconciling authoritative game state. It may act only within its configured extraction Waypoint, Market, and Cargo threshold.
+An Operator-started, per-Ship Job to execute one configured local extract/sell loop. Its persisted configuration and execution status are Fleet state; it never resumes an action without reconciling authoritative game state. It may act only within its configured extraction Waypoint, Market, and Cargo threshold.
 _Avoid_: bot, automatic mode
 
 **Manual Mode**:
-A Ship operating mode in which the Operator issues direct commands. Any direct command pauses Autopilot before it runs; resuming automation requires revalidation against game truth.
+A Ship operating mode in which the Operator issues direct commands. Any direct command pauses the active Job before it runs; resuming automation requires revalidation against game truth.
 **Ship Readiness**:
 The capability and condition information that determines what a Ship can do: flight mode, crew, frame, reactor, engine, modules, and mounts. It supplements, but does not replace, the Ship's immediate operational status, location, fuel, cargo, and actions.
 
