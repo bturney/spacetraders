@@ -1035,6 +1035,47 @@ defmodule SpaceTraders.FleetTest do
   end
 
   describe "command_snapshot/1" do
+    test "adds Ship command decisions with stable block reasons" do
+      agent = agent_fixture()
+
+      ship =
+        ship_body("FLEET-SHIP", %{
+          "nav" => %{
+            "systemSymbol" => "X1-UX81",
+            "waypointSymbol" => "X1-UX81-A1",
+            "status" => "DOCKED",
+            "flightMode" => "CRUISE"
+          },
+          "cooldown" => %{"remainingSeconds" => 12}
+        })
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case conn.request_path do
+          "/v2/my/agent" ->
+            Req.Test.json(conn, %{"data" => %{"symbol" => agent.symbol, "credits" => 42_000}})
+
+          "/v2/my/contracts" ->
+            Req.Test.json(conn, %{"data" => []})
+
+          "/v2/my/ships" ->
+            Req.Test.json(conn, %{"data" => [ship]})
+
+          "/v2/systems/X1-UX81/waypoints" ->
+            Req.Test.json(conn, %{"data" => []})
+        end
+      end)
+
+      snapshot = Fleet.command_snapshot(agent)
+
+      assert {:ok, [%{actions: actions}]} = snapshot.ships
+      assert actions.navigate == %{allowed?: false, reason: :cooldown_active}
+      assert actions.dock == %{allowed?: false, reason: :cooldown_active}
+      assert actions.orbit == %{allowed?: false, reason: :cooldown_active}
+      assert actions.extract == %{allowed?: false, reason: :cooldown_active}
+      assert actions.siphon == %{allowed?: false, reason: :cooldown_active}
+      assert actions.refuel == %{allowed?: false, reason: :cooldown_active}
+    end
+
     test "reuses fresh headquarters waypoints for the browser and listings" do
       agent = agent_fixture()
 
@@ -1076,7 +1117,20 @@ defmodule SpaceTraders.FleetTest do
             )
 
           {"/v2/systems/X1-UX81/waypoints/X1-UX81-A1/market", _} ->
-            Req.Test.json(conn, %{"data" => %{"symbol" => "X1-UX81-A1", "tradeGoods" => []}})
+            Req.Test.json(conn, %{
+              "data" => %{
+                "symbol" => "X1-UX81-A1",
+                "tradeGoods" => [
+                  %{
+                    "symbol" => "IRON_ORE",
+                    "type" => "EXPORT",
+                    "purchasePrice" => 10,
+                    "sellPrice" => 8,
+                    "tradeVolume" => 10
+                  }
+                ]
+              }
+            })
 
           {"/v2/systems/X1-UX81/waypoints/X1-UX81-A1/shipyard", _} ->
             Req.Test.json(conn, %{"data" => %{"symbol" => "X1-UX81-A1", "ships" => []}})
@@ -1087,8 +1141,25 @@ defmodule SpaceTraders.FleetTest do
 
       assert {:ok, [%{symbol: "X1-UX81-A1"}]} = snapshot.waypoints
 
-      assert {:ok, [%{waypoint: "X1-UX81-A1", market: %{symbol: "X1-UX81-A1"}, ships: [_]}]} =
-               snapshot.markets
+      assert {:ok, [%{actions: actions}]} = snapshot.ships
+      assert actions.navigate == %{allowed?: true, reason: nil}
+      assert actions.dock == %{allowed?: false, reason: :ship_not_in_orbit}
+      assert actions.orbit == %{allowed?: true, reason: nil}
+      assert actions.extract == %{allowed?: false, reason: :ship_not_in_orbit}
+      assert actions.siphon == %{allowed?: false, reason: :ship_not_in_orbit}
+      assert actions.refuel == %{allowed?: true, reason: nil}
+
+      assert {:ok,
+              [
+                %{
+                  waypoint: "X1-UX81-A1",
+                  market: %{symbol: "X1-UX81-A1"},
+                  ships: [%{trade_actions: trade_actions}]
+                }
+              ]} = snapshot.markets
+
+      assert trade_actions["IRON_ORE"].sell == %{allowed?: true, reason: nil}
+      assert trade_actions["IRON_ORE"].buy == %{allowed?: true, reason: nil}
 
       assert {:ok, [%{waypoint: "X1-UX81-A1", shipyard: %{symbol: "X1-UX81-A1"}}]} =
                snapshot.shipyards
@@ -1326,6 +1397,32 @@ defmodule SpaceTraders.FleetTest do
       assert symbol == agent.symbol
       assert {:error, _reason} = snapshot.ships
       assert snapshot.shipyards == {:ok, []}
+    end
+  end
+
+  describe "waypoint_market/2" do
+    test "reads a selected Marketplace Waypoint through Fleet" do
+      agent = agent_fixture()
+
+      waypoint = %{
+        symbol: "X1-UX81-A1",
+        system_symbol: "X1-UX81",
+        traits: [%{symbol: "MARKETPLACE"}]
+      }
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        assert conn.request_path == "/v2/systems/X1-UX81/waypoints/X1-UX81-A1/market"
+        Req.Test.json(conn, %{"data" => %{"symbol" => "X1-UX81-A1", "tradeGoods" => []}})
+      end)
+
+      assert {:ok, %{symbol: "X1-UX81-A1"}} = Fleet.waypoint_market(agent, waypoint)
+    end
+
+    test "does not read a selected non-Marketplace Waypoint" do
+      agent = agent_fixture()
+      waypoint = %{symbol: "X1-UX81-A1", system_symbol: "X1-UX81", traits: []}
+
+      assert :not_a_marketplace = Fleet.waypoint_market(agent, waypoint)
     end
   end
 

@@ -49,13 +49,15 @@ defmodule SpaceTraders.Fleet do
   truth, so every call assembles fresh data.
   """
   def command_snapshot(%AgentRecord{} = agent) do
+    overview = Agent.agent_overview(agent)
     ships = list_ships(agent) |> annotate_autopilot(agent)
+    ships = annotate_actions(ships)
     waypoints = list_waypoints(agent)
-    listings = snapshot_listings(agent, ships, waypoints)
+    listings = snapshot_listings(agent, ships, waypoints) |> annotate_listing_actions(overview)
 
     %{
       agent: agent,
-      overview: Agent.agent_overview(agent),
+      overview: overview,
       ships: ships,
       contracts: Contracts.list_contracts(agent),
       shipyards: listings.shipyards,
@@ -64,6 +66,21 @@ defmodule SpaceTraders.Fleet do
       activity: recent_activity(agent)
     }
   end
+
+  @doc "Reads Market data for a selected Waypoint when it is a Marketplace."
+  def waypoint_market(%AgentRecord{agent_token: token}, waypoint)
+      when is_binary(token) and token != "" do
+    with :ok <- market_waypoint?(waypoint),
+         %{system_symbol: system, symbol: symbol} when is_binary(system) and is_binary(symbol) <-
+           waypoint do
+      SpaceTraders.API.get_market(token, system, symbol)
+    else
+      {:error, :invalid_market_waypoint} -> :not_a_marketplace
+      _ -> {:error, :waypoint_unavailable}
+    end
+  end
+
+  def waypoint_market(%AgentRecord{}, _waypoint), do: {:error, :agent_token_missing}
 
   @doc "Returns the ten most recent local events for an Agent, newest first."
   def recent_activity(%AgentRecord{} = agent) do
@@ -87,6 +104,70 @@ defmodule SpaceTraders.Fleet do
   end
 
   defp annotate_autopilot(result, _agent), do: result
+
+  defp annotate_actions({:ok, ships}) do
+    {:ok, Enum.map(ships, &Map.put(&1, :actions, ship_actions(&1)))}
+  end
+
+  defp annotate_actions(result), do: result
+
+  defp ship_actions(ship) do
+    cooldown = cooldown_active?(ship)
+    status = ship_status(ship)
+
+    %{
+      navigate:
+        action_state(
+          not cooldown and status != "IN_TRANSIT",
+          cooldown_reason(cooldown, :ship_in_transit)
+        ),
+      dock:
+        action_state(
+          not cooldown and status == "IN_ORBIT",
+          cooldown_reason(cooldown, :ship_not_in_orbit)
+        ),
+      orbit:
+        action_state(
+          not cooldown and status == "DOCKED",
+          cooldown_reason(cooldown, :ship_not_docked)
+        ),
+      extract:
+        action_state(
+          not cooldown and status == "IN_ORBIT",
+          cooldown_reason(cooldown, :ship_not_in_orbit)
+        ),
+      siphon:
+        action_state(
+          not cooldown and status == "IN_ORBIT" and match?(:ok, siphon_capability?(ship)),
+          siphon_reason(cooldown, status, ship)
+        ),
+      refuel:
+        action_state(
+          not cooldown and status == "DOCKED",
+          cooldown_reason(cooldown, :ship_not_docked)
+        )
+    }
+  end
+
+  defp ship_status(%{nav: %{status: status}}) when is_binary(status), do: status
+  defp ship_status(_), do: "UNKNOWN"
+
+  defp cooldown_reason(true, _reason), do: :cooldown_active
+  defp cooldown_reason(false, reason), do: reason
+
+  defp siphon_reason(true, _status, _ship), do: :cooldown_active
+
+  defp siphon_reason(false, "IN_ORBIT", ship) do
+    case siphon_capability?(ship) do
+      :ok -> nil
+      {:error, reason} -> reason
+    end
+  end
+
+  defp siphon_reason(false, _status, _ship), do: :ship_not_in_orbit
+
+  defp action_state(true, _reason), do: %{allowed?: true, reason: nil}
+  defp action_state(false, reason), do: %{allowed?: false, reason: reason}
 
   defp ensure_ship_record(agent, %{symbol: symbol}) do
     if is_nil(Repo.get_by(Ship, agent_id: agent.id, symbol: symbol)) do
@@ -1439,6 +1520,65 @@ defmodule SpaceTraders.Fleet do
 
   defp snapshot_listings(_agent, _ships, _waypoints),
     do: %{shipyards: {:ok, []}, markets: {:ok, []}}
+
+  defp annotate_listing_actions(%{markets: markets, shipyards: shipyards}, overview) do
+    %{
+      markets: annotate_market_actions(markets),
+      shipyards: annotate_purchase_actions(shipyards, overview)
+    }
+  end
+
+  defp annotate_market_actions({status, listings}) when status in [:ok, :partial] do
+    {status,
+     Enum.map(listings, fn %{market: market, ships: ships} = listing ->
+       ships = Enum.map(ships, &Map.put(&1, :trade_actions, trade_actions(&1, market)))
+       %{listing | ships: ships}
+     end)}
+  end
+
+  defp annotate_market_actions(result), do: result
+
+  defp trade_actions(ship, %{trade_goods: goods}) do
+    Map.new(goods || [], fn good ->
+      {good.symbol,
+       %{
+         sell: action_state(item_units(ship, good.symbol) > 0, :cargo_missing),
+         buy: purchase_cargo_state(ship, good)
+       }}
+    end)
+  end
+
+  defp trade_actions(_ship, _market), do: %{}
+
+  defp purchase_cargo_state(ship, good) do
+    available_space = cargo_capacity(ship) - cargo_units(ship)
+    available? = (good.purchase_price || 0) > 0 and available_space > 0
+    reason = if (good.purchase_price || 0) > 0, do: :cargo_full, else: :trade_unavailable
+    action_state(available?, reason)
+  end
+
+  defp cargo_capacity(%{cargo: %{capacity: capacity}}) when is_integer(capacity), do: capacity
+  defp cargo_capacity(_), do: 0
+
+  defp annotate_purchase_actions({status, listings}, overview) when status in [:ok, :partial] do
+    {status,
+     Enum.map(listings, fn %{shipyard: %{ships: ships}} = listing ->
+       actions =
+         Map.new(ships || [], fn ship ->
+           {ship.type, purchase_ship_state(overview, ship.purchase_price)}
+         end)
+
+       Map.put(listing, :purchase_actions, actions)
+     end)}
+  end
+
+  defp annotate_purchase_actions(result, _overview), do: result
+
+  defp purchase_ship_state({:ok, %{credits: credits}}, price)
+       when is_integer(credits) and is_integer(price),
+       do: action_state(credits >= price, :insufficient_credits)
+
+  defp purchase_ship_state(_overview, _price), do: action_state(true, nil)
 
   defp offered_at?({status, listings}, ship_type, waypoint) when status in [:ok, :partial] do
     if Enum.any?(listings, &offered_in_listing?(&1, ship_type, waypoint)) do

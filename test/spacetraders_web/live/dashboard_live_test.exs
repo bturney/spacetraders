@@ -1063,7 +1063,8 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       assert html =~ "In transit"
       assert html =~ arrival_label_for(arrival)
       assert html =~ "Actions resume when the ship arrives."
-      refute html =~ "Waypoint symbol"
+      assert html =~ "Waypoint symbol"
+      assert html =~ "This ship is in transit; actions resume on arrival."
     end
 
     test "renders ship action affordances for a docked ship", %{
@@ -1081,6 +1082,7 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       assert html =~ "Dock"
       assert html =~ "Orbit"
       assert html =~ "Extract"
+      assert html =~ "This action requires the Ship to be in orbit."
       assert html =~ ~s(phx-click="orbit")
       assert html =~ ~s(phx-click="dock")
       assert html =~ ~s(<button type="button" phx-click="extract")
@@ -1777,7 +1779,8 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       assert html =~ "ORBITALIST-1 is in transit to X1-UX81-A2."
       assert html =~ "In transit"
       assert html =~ arrival_label_for(arrival)
-      refute html =~ "Waypoint symbol"
+      assert html =~ "Waypoint symbol"
+      assert html =~ "This ship is in transit; actions resume on arrival."
     end
 
     test "disables navigate while the ship is on a live cooldown", %{
@@ -2706,7 +2709,7 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
           "type" => "ENGINEERED_ASTEROID",
           "x" => 14,
           "y" => -6,
-          "traits" => [%{"symbol" => "MINERAL_DEPOSITS"}]
+          "traits" => [%{"symbol" => "MINERAL_DEPOSITS"}, %{"symbol" => "MARKETPLACE"}]
         },
         %{
           "symbol" => "X1-UX81-B1",
@@ -2781,6 +2784,11 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
                 "tradeGoods" => []
               }
             })
+
+          {"/v2/systems/X1-UX81/waypoints/X1-UX81-A3/market", "GET"} ->
+            conn
+            |> Map.put(:status, 400)
+            |> Req.Test.json(%{"error" => %{"message" => "Market data unavailable"}})
 
           {"/v2/systems/X1-UX81/waypoints/X1-UX81-B1/market", "GET"} ->
             Req.Test.json(conn, %{"data" => %{"symbol" => "X1-UX81-B1", "tradeGoods" => []}})
@@ -2896,7 +2904,7 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
           "type" => "ENGINEERED_ASTEROID",
           "x" => 14,
           "y" => -6,
-          "traits" => [%{"symbol" => "MINERAL_DEPOSITS"}]
+          "traits" => [%{"symbol" => "MINERAL_DEPOSITS"}, %{"symbol" => "MARKETPLACE"}]
         },
         %{
           "symbol" => "X1-UX81-B1",
@@ -2940,6 +2948,11 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
                 "tradeGoods" => []
               }
             })
+
+          {"/v2/systems/X1-UX81/waypoints/X1-UX81-A3/market", "GET"} ->
+            conn
+            |> Map.put(:status, 400)
+            |> Req.Test.json(%{"error" => %{"message" => "Market data unavailable"}})
         end
       end)
 
@@ -2990,6 +3003,7 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       refute has_element?(lv, "[data-waypoint-intelligence]")
       refute has_element?(lv, "[data-waypoint-context]")
       refute render(lv) =~ "Waypoint Intelligence"
+      assert has_element?(lv, "[data-map-inspector]", "Market data unavailable")
 
       lv
       |> element("[data-waypoint-symbol=\"X1-UX81-B1\"]")
