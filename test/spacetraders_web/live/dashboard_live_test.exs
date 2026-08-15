@@ -1107,7 +1107,7 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
         })
 
       assert html =~ "Autopilot configuration saved. Start remains manual."
-      assert html =~ "<span class=\"badge badge-outline badge-sm\">Manual</span>"
+      assert has_element?(lv, "[data-autopilot-status]", "Manual")
     end
 
     test "shows Operator recovery controls and Activity", %{conn: conn, operator: operator} do
@@ -1156,6 +1156,107 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       assert has_element?(lv, "[data-ship-card=\"ORBITALIST-1\"]", "Blocked")
       assert has_element?(lv, "[data-ship-card=\"ORBITALIST-2\"]", "IN_TRANSIT")
       assert html =~ "ambiguous outcome"
+    end
+
+    test "keeps autopilot mode, action, and recovery aligned", %{
+      conn: conn,
+      operator: operator
+    } do
+      agent = agent_fixture(operator)
+
+      paused_ship =
+        Repo.insert!(%Ship{
+          agent_id: agent.id,
+          symbol: "ORBITALIST-1",
+          ship_type: "SHIP_COMMAND_FRIGATE"
+        })
+
+      waiting_ship =
+        Repo.insert!(%Ship{
+          agent_id: agent.id,
+          symbol: "ORBITALIST-2",
+          ship_type: "SHIP_COMMAND_FRIGATE"
+        })
+
+      blocked_ship =
+        Repo.insert!(%Ship{
+          agent_id: agent.id,
+          symbol: "ORBITALIST-3",
+          ship_type: "SHIP_COMMAND_FRIGATE"
+        })
+
+      config_attrs = [
+        extraction_waypoint: "X1-UX81-A2",
+        market_waypoint: "X1-UX81-A1",
+        cargo_threshold: 30,
+        desired_mode: "manual"
+      ]
+
+      Repo.insert!(
+        struct(
+          AutopilotConfig,
+          Keyword.put(config_attrs, :ship_id, paused_ship.id) ++
+            [status: "paused", blocked_reason: "Paused by a direct Ship action"]
+        )
+      )
+
+      Repo.insert!(
+        struct(
+          AutopilotConfig,
+          Keyword.put(config_attrs, :ship_id, waiting_ship.id) ++
+            [
+              desired_mode: "autopilot",
+              status: "waiting",
+              in_flight_action: %{"kind" => "cooldown"}
+            ]
+        )
+      )
+
+      Repo.insert!(
+        struct(
+          AutopilotConfig,
+          Keyword.put(config_attrs, :ship_id, blocked_ship.id) ++
+            [desired_mode: "autopilot", status: "blocked", blocked_reason: "market unavailable"]
+        )
+      )
+
+      stub_live_game(agent_overview_body(agent.symbol), [
+        ship_body("ORBITALIST-1"),
+        ship_body("ORBITALIST-2"),
+        ship_body("ORBITALIST-3")
+      ])
+
+      {:ok, lv, _html} = live(conn, ~p"/")
+
+      assert has_element?(
+               lv,
+               "[data-ship-card=\"ORBITALIST-1\"] [data-autopilot-status]",
+               "Paused by manual action"
+             )
+
+      assert has_element?(
+               lv,
+               "[data-ship-card=\"ORBITALIST-1\"] [data-autopilot-next-action]",
+               "Resume after revalidation"
+             )
+
+      assert has_element?(
+               lv,
+               "[data-ship-card=\"ORBITALIST-2\"] [data-autopilot-status]",
+               "Waiting"
+             )
+
+      assert has_element?(
+               lv,
+               "[data-ship-card=\"ORBITALIST-3\"] [data-autopilot-status]",
+               "Blocked"
+             )
+
+      assert has_element?(
+               lv,
+               "[data-ship-card=\"ORBITALIST-3\"] [data-autopilot-next-action]",
+               "Resolve the issue, then Resume"
+             )
     end
 
     test "selects a Ship operation panel and returns to the Fleet roster on mobile", %{

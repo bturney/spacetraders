@@ -198,17 +198,23 @@ defmodule SpaceTraders.Fleet do
           Ecto.Changeset.change(config,
             desired_mode: "manual",
             status: "paused",
-            in_flight_action: nil
+            in_flight_action: nil,
+            blocked_reason: preemption_message(reason)
           )
         )
 
-        record_activity(agent, ship, "manual_override", "Autopilot preempted: #{reason}")
+        message = preemption_message(reason)
+        record_activity(agent, ship, "manual_override", message, %{"recovery" => "resume"})
         :ok
 
       _ ->
         :ok
     end
   end
+
+  defp preemption_message(:manual_override), do: "Paused by a direct Ship action"
+  defp preemption_message(:configuration_changed), do: "Paused because configuration changed"
+  defp preemption_message(reason), do: "Paused: #{inspect(reason)}"
 
   defp preempt_autopilot_for(agent, ship_symbol, reason) do
     case Repo.get_by(Ship, agent_id: agent.id, symbol: ship_symbol) do
@@ -227,6 +233,11 @@ defmodule SpaceTraders.Fleet do
     })
 
     :ok
+  end
+
+  defp record_autopilot_activity(agent, live_ship, kind, message, metadata) do
+    ship = Repo.get_by!(Ship, agent_id: agent.id, symbol: live_ship.symbol)
+    record_activity(agent, ship, kind, message, metadata)
   end
 
   defp validate_autopilot(%AgentRecord{agent_token: token}, ship, config)
@@ -312,6 +323,17 @@ defmodule SpaceTraders.Fleet do
     cond do
       in_flight_arrival?(config, live_ship) ->
         maybe_schedule_arrival(agent, live_ship.symbol, %{nav: live_ship.nav})
+
+        record_autopilot_activity(
+          agent,
+          live_ship,
+          "autopilot_waiting",
+          "Autopilot waiting for arrival",
+          %{
+            "wait" => "arrival"
+          }
+        )
+
         {:ok, Repo.update!(Ecto.Changeset.change(config, status: "waiting"))}
 
       pending_navigation?(config) ->
@@ -423,6 +445,14 @@ defmodule SpaceTraders.Fleet do
       cooldown_active?(live_ship) ->
         maybe_schedule_live_cooldown(agent, live_ship)
 
+        record_autopilot_activity(
+          agent,
+          live_ship,
+          "autopilot_waiting",
+          "Autopilot waiting for cooldown",
+          %{"wait" => "cooldown"}
+        )
+
         {:ok,
          Repo.update!(
            Ecto.Changeset.change(config,
@@ -467,6 +497,14 @@ defmodule SpaceTraders.Fleet do
           {:error, reason} ->
             Repo.update!(
               Ecto.Changeset.change(config, status: "blocked", blocked_reason: inspect(reason))
+            )
+
+            record_autopilot_activity(
+              agent,
+              live_ship,
+              "autopilot_blocked",
+              "Autopilot blocked: #{inspect(reason)}",
+              %{"block" => inspect(reason), "recovery" => "resume"}
             )
 
             {:error, reason}

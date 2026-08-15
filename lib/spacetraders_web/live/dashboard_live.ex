@@ -2400,9 +2400,11 @@ defmodule SpaceTradersWeb.DashboardLive do
     <div class="mt-4 rounded border border-primary/20 p-3" data-autopilot-panel>
       <div class="flex items-center justify-between gap-2">
         <span class="text-xs font-semibold uppercase tracking-wider opacity-60">Autopilot</span>
-        <span class="badge badge-outline badge-sm">{autopilot_status(@autopilot)}</span>
+        <span class="badge badge-outline badge-sm" data-autopilot-status>
+          {autopilot_status(@autopilot)}
+        </span>
       </div>
-      <dl :if={@autopilot} class="mt-3 grid grid-cols-1 gap-1 text-xs sm:grid-cols-2">
+      <dl class="mt-3 grid grid-cols-1 gap-1 text-xs sm:grid-cols-2">
         <div>
           <dt class="opacity-60">Current action</dt>
           <dd data-autopilot-current-action>{autopilot_current_action(@autopilot, @ship)}</dd>
@@ -2412,8 +2414,8 @@ defmodule SpaceTradersWeb.DashboardLive do
           <dd data-autopilot-next-action>{autopilot_next_action(@autopilot, @ship)}</dd>
         </div>
       </dl>
-      <p :if={@autopilot && @autopilot.blocked_reason} class="mt-2 text-xs text-error">
-        Blocked: {@autopilot.blocked_reason}
+      <p :if={autopilot_reason(@autopilot)} class="mt-2 text-xs text-error" data-autopilot-reason>
+        {autopilot_reason(@autopilot)}
       </p>
       <form
         id={"autopilot-form-#{@ship.symbol}"}
@@ -2563,9 +2565,19 @@ defmodule SpaceTradersWeb.DashboardLive do
   end
 
   defp autopilot_status(%{status: "blocked"}), do: "Blocked"
+  defp autopilot_status(%{status: "paused"}), do: "Paused by manual action"
   defp autopilot_status(nil), do: "Manual"
-  defp autopilot_status(%{desired_mode: "autopilot", status: status}), do: "Autopilot · #{status}"
+  defp autopilot_status(%{desired_mode: "autopilot", status: "waiting"}), do: "Waiting"
+  defp autopilot_status(%{desired_mode: "autopilot"}), do: "Active Autopilot"
   defp autopilot_status(_), do: "Manual"
+
+  defp autopilot_reason(%{status: "blocked", blocked_reason: reason}) when is_binary(reason),
+    do: "Blocked: #{reason}"
+
+  defp autopilot_reason(%{status: "paused", blocked_reason: reason}) when is_binary(reason),
+    do: reason
+
+  defp autopilot_reason(_), do: nil
 
   defp autopilot_current_action(
          %{status: "waiting", in_flight_action: %{"kind" => "extract"}},
@@ -2586,6 +2598,7 @@ defmodule SpaceTradersWeb.DashboardLive do
        do: "Waiting for cooldown"
 
   defp autopilot_current_action(%{status: "blocked"}, _ship), do: "Blocked"
+  defp autopilot_current_action(%{status: "paused"}, _ship), do: "Paused by manual action"
   defp autopilot_current_action(%{desired_mode: "autopilot"}, _ship), do: "Evaluating cargo"
   defp autopilot_current_action(_, _ship), do: "Manual"
 
@@ -2601,6 +2614,9 @@ defmodule SpaceTradersWeb.DashboardLive do
       label -> "Wait through #{label}"
     end
   end
+
+  defp autopilot_next_action(%{status: "blocked"}, _ship), do: "Resolve the issue, then Resume"
+  defp autopilot_next_action(%{status: "paused"}, _ship), do: "Resume after revalidation"
 
   defp autopilot_next_action(%{desired_mode: "autopilot", extraction_waypoint: waypoint}, ship) do
     if cooldown_active?(ship),
