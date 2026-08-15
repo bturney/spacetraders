@@ -59,7 +59,8 @@ defmodule SpaceTraders.API do
     PurchaseCargoRequest,
     PurchaseShipRequest,
     RegisterRequest,
-    SellCargoRequest
+    SellCargoRequest,
+    ShipNavRequest
   }
 
   @type token() :: String.t()
@@ -174,7 +175,7 @@ defmodule SpaceTraders.API do
   @spec set_ship_flight_mode(token(), String.t(), String.t()) :: result()
   def set_ship_flight_mode(token, ship_symbol, flight_mode) do
     request(:patch, "/my/ships/#{ship_symbol}/nav", token,
-      json: %{"flightMode" => flight_mode},
+      json: ShipNavRequest.new(%{flight_mode: flight_mode}) |> ShipNavRequest.to_json(),
       as:
         {:map,
          %{fuel: {:model, ShipFuel}, nav: {:model, ShipNav}, events: {:list, ShipConditionEvent}}}

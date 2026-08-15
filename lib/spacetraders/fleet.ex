@@ -123,8 +123,8 @@ defmodule SpaceTraders.Fleet do
         ),
       set_flight_mode:
         action_state(
-          not cooldown and status != "IN_TRANSIT",
-          cooldown_reason(cooldown, :ship_in_transit)
+          status != "IN_TRANSIT",
+          :ship_in_transit
         ),
       dock:
         action_state(

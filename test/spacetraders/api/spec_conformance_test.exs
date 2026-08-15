@@ -56,15 +56,17 @@ defmodule SpaceTraders.API.SpecConformanceTest do
     {:get_faction, :get, "/factions/{factionSymbol}", :data}
   ]
 
-  # {client endpoint, spec path template, generated request struct}
+  # {client endpoint, method, spec path template, generated request struct}
   @request_endpoints [
-    {:register, "/register", Request.RegisterRequest},
-    {:deliver_contract, "/my/contracts/{contractId}/deliver", Request.DeliverContractRequest},
-    {:navigate_ship, "/my/ships/{shipSymbol}/navigate", Request.NavigateRequest},
-    {:sell_cargo, "/my/ships/{shipSymbol}/sell", Request.SellCargoRequest},
-    {:purchase_cargo, "/my/ships/{shipSymbol}/purchase", Request.PurchaseCargoRequest},
-    {:jettison_cargo, "/my/ships/{shipSymbol}/jettison", Request.JettisonCargoRequest},
-    {:purchase_ship, "/my/ships", Request.PurchaseShipRequest}
+    {:register, :post, "/register", Request.RegisterRequest},
+    {:deliver_contract, :post, "/my/contracts/{contractId}/deliver",
+     Request.DeliverContractRequest},
+    {:navigate_ship, :post, "/my/ships/{shipSymbol}/navigate", Request.NavigateRequest},
+    {:set_ship_flight_mode, :patch, "/my/ships/{shipSymbol}/nav", Request.ShipNavRequest},
+    {:sell_cargo, :post, "/my/ships/{shipSymbol}/sell", Request.SellCargoRequest},
+    {:purchase_cargo, :post, "/my/ships/{shipSymbol}/purchase", Request.PurchaseCargoRequest},
+    {:jettison_cargo, :post, "/my/ships/{shipSymbol}/jettison", Request.JettisonCargoRequest},
+    {:purchase_ship, :post, "/my/ships", Request.PurchaseShipRequest}
   ]
 
   describe "client envelope declarations match the bundled spec" do
@@ -122,8 +124,10 @@ defmodule SpaceTraders.API.SpecConformanceTest do
 
   describe "request payload declarations" do
     test "every state-changing endpoint with a client payload has a request schema and encoder" do
-      for {endpoint, path, request_module} <- @request_endpoints do
-        assert request_schema(path), "#{endpoint} (#{path}) has no request schema in the spec"
+      for {endpoint, method, path, request_module} <- @request_endpoints do
+        assert request_schema(path, method),
+               "#{endpoint} (#{path}) has no request schema in the spec"
+
         Code.ensure_loaded!(request_module)
         assert function_exported?(request_module, :new, 1)
         assert function_exported?(request_module, :to_json, 1)
@@ -183,7 +187,14 @@ defmodule SpaceTraders.API.SpecConformanceTest do
     end
   end
 
-  defp request_schema(path) do
-    get_in(spec_paths(), [path, "post", "requestBody", "content", "application/json", "schema"])
+  defp request_schema(path, method) do
+    get_in(spec_paths(), [
+      path,
+      to_string(method),
+      "requestBody",
+      "content",
+      "application/json",
+      "schema"
+    ])
   end
 end

@@ -1759,6 +1759,16 @@ defmodule SpaceTradersWeb.DashboardLive do
                   <.market_goods label="Exports" goods={market.exports} />
                   <.market_goods label="Imports" goods={market.imports} />
                 </div>
+                <p :if={market_has_fuel?(market)} class="mt-3 text-sm text-success" data-market-fuel>
+                  Fuel available: dock here to refuel the Ship tank.
+                </p>
+                <p
+                  :if={not market_has_fuel?(market)}
+                  class="mt-3 text-sm text-warning"
+                  data-market-no-fuel
+                >
+                  No fuel listing reported. Choose another Marketplace for recovery.
+                </p>
               </div>
             <% {:error, reason} -> %>
               <div class="alert alert-warning mt-4" data-waypoint-market>
@@ -2244,6 +2254,14 @@ defmodule SpaceTradersWeb.DashboardLive do
             </button>
           </.action_tooltip>
         </form>
+        <p class="mt-2 text-xs opacity-60">
+          Recovery route: select <span class="font-semibold">Marketplaces</span>
+          in the Waypoint Grid,
+          inspect the fuel listing, then use its
+          <span class="font-semibold">Navigate a ship here</span>
+          control.
+          The game API remains authoritative for route fuel requirements.
+        </p>
         <div class="mt-2 flex flex-wrap gap-2">
           <.action_tooltip reason={action_reason(ship_action_state(@ship, :dock))}>
             <button
@@ -3008,6 +3026,12 @@ defmodule SpaceTradersWeb.DashboardLive do
     do: "#{amount} fuel"
 
   defp fuel_consumed_label(_), do: "—"
+
+  defp market_has_fuel?(market) do
+    Enum.any?([market.exports, market.imports, market.exchange], fn goods ->
+      Enum.any?(goods || [], &(&1.symbol == "FUEL"))
+    end)
+  end
 
   defp crew_label(%{crew: %{current: current, required: required, capacity: capacity}})
        when is_integer(current) and is_integer(required) and is_integer(capacity),
