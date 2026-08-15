@@ -175,21 +175,19 @@ defmodule SpaceTradersWeb.DashboardLive do
     with {:ok, agent} <- agent_for_ship(socket, ship_symbol),
          :ok <- validate_waypoint(waypoint) do
       case Fleet.navigate_ship(agent, ship_symbol, waypoint) do
-        {:ok, %{nav: %{route: %{destination: %{symbol: destination}}}}} ->
+        {:ok, %{nav: %{route: %{destination: %{symbol: destination}}}} = result} ->
           {:noreply,
            put_flash(
-             refresh_and_clear(socket, agent.id, drafted_key),
+             socket
+             |> refresh_agent_fleet(agent.id)
+             |> apply_ship_result(agent.id, ship_symbol, result)
+             |> clear_draft(drafted_key),
              :info,
              "#{ship_symbol} is in transit to #{destination}."
            )}
 
         {:ok, _result} ->
-          {:noreply,
-           put_flash(
-             refresh_and_clear(socket, agent.id, drafted_key),
-             :info,
-             "#{ship_symbol} is in transit."
-           )}
+          {:noreply, refresh_and_clear(socket, agent.id, drafted_key)}
 
         {:error, reason} ->
           {:noreply, put_flash(socket, :error, live_error(reason))}
@@ -775,7 +773,7 @@ defmodule SpaceTradersWeb.DashboardLive do
   end
 
   defp apply_ship_result(socket, agent_id, ship_symbol, result) do
-    ship_fields = Map.take(result, [:cargo, :cooldown])
+    ship_fields = Map.take(result, [:cargo, :cooldown, :fuel, :nav])
 
     update(socket, :overviews, fn overviews ->
       Enum.map(overviews, fn
@@ -3028,7 +3026,7 @@ defmodule SpaceTradersWeb.DashboardLive do
   defp fuel_consumed_label(_), do: "—"
 
   defp market_has_fuel?(market) do
-    Enum.any?([market.exports, market.imports, market.exchange], fn goods ->
+    Enum.any?([market.exports, market.exchange], fn goods ->
       Enum.any?(goods || [], &(&1.symbol == "FUEL"))
     end)
   end

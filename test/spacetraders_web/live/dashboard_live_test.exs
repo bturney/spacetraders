@@ -2739,8 +2739,13 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       |> element("form[phx-submit=\"navigate\"]")
       |> render_submit(%{symbol: "ORBITALIST-1", waypoint_symbol: "X1-UX81-C43"})
 
+      assert has_element?(lv, "[data-route-details]", "X1-UX81-C43")
+      assert has_element?(lv, "[data-route-details]", "1 fuel")
+
       Timeline.cancel_events(:ship, "ORBITALIST-1", :arrival)
       ShipServer.cancel_pending("ORBITALIST-1")
+      send(lv.pid, {:ship_updated, agent.id, "ORBITALIST-1"})
+      render(lv)
 
       lv |> element("button[phx-click=\"dock\"]") |> render_click()
       html = lv |> element("button[phx-click=\"refuel\"]") |> render_click()

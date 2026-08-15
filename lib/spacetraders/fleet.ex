@@ -1038,7 +1038,7 @@ defmodule SpaceTraders.Fleet do
       when is_binary(agent_token) and agent_token != "" and
              flight_mode in ["DRIFT", "STEALTH", "CRUISE", "BURN"] do
     with :ok <- preempt_autopilot_for(agent, ship_symbol, {:manual_override, "flight mode"}),
-         :ok <- ShipServer.ensure_ready(ship_symbol) do
+         :ok <- flight_mode_change_allowed?(ship_symbol) do
       SpaceTraders.API.set_ship_flight_mode(agent_token, ship_symbol, flight_mode)
     end
   end
@@ -1049,6 +1049,14 @@ defmodule SpaceTraders.Fleet do
 
   def set_ship_flight_mode(%AgentRecord{}, _ship_symbol, _flight_mode),
     do: {:error, :invalid_flight_mode}
+
+  defp flight_mode_change_allowed?(ship_symbol) do
+    case ShipServer.ensure_ready(ship_symbol) do
+      :ok -> :ok
+      {:error, :cooldown_active} -> :ok
+      {:error, reason} -> {:error, reason}
+    end
+  end
 
   defp record_destination(agent, ship_symbol, waypoint_symbol) do
     with {:ok, ship} <- ensure_ship_record_for_history(agent, ship_symbol) do
