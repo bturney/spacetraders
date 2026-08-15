@@ -1259,6 +1259,84 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
              )
     end
 
+    test "pauses and resumes Autopilot through the selected Ship panel", %{
+      conn: conn,
+      operator: operator
+    } do
+      agent = agent_fixture(operator)
+
+      ship =
+        Repo.insert!(%Ship{
+          agent_id: agent.id,
+          symbol: "ORBITALIST-1",
+          ship_type: "SHIP_COMMAND_FRIGATE"
+        })
+
+      Repo.insert!(%AutopilotConfig{
+        ship_id: ship.id,
+        extraction_waypoint: "X1-UX81-A2",
+        market_waypoint: "X1-UX81-A1",
+        cargo_threshold: 30,
+        desired_mode: "autopilot",
+        status: "ready"
+      })
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case {conn.request_path, conn.method} do
+          {"/v2/my/agent", "GET"} ->
+            Req.Test.json(conn, %{"data" => agent_overview_body(agent.symbol)})
+
+          {"/v2/my/ships", "GET"} ->
+            Req.Test.json(conn, %{"data" => [ship_body("ORBITALIST-1")]})
+
+          {"/v2/my/contracts", "GET"} ->
+            Req.Test.json(conn, %{"data" => []})
+
+          {"/v2/systems/X1-UX81/waypoints", "GET"} ->
+            Req.Test.json(conn, %{"data" => []})
+
+          {"/v2/my/ships/ORBITALIST-1", "GET"} ->
+            Req.Test.json(conn, %{"data" => ship_body("ORBITALIST-1")})
+
+          {"/v2/systems/X1-UX81/waypoints/X1-UX81-A2", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => %{"symbol" => "X1-UX81-A2", "type" => "ASTEROID_FIELD", "traits" => []}
+            })
+
+          {"/v2/systems/X1-UX81/waypoints/X1-UX81-A1", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => %{
+                "symbol" => "X1-UX81-A1",
+                "type" => "ORBITAL_STATION",
+                "traits" => [%{"symbol" => "MARKETPLACE"}]
+              }
+            })
+
+          {"/v2/systems/X1-UX81/waypoints/X1-UX81-A1/market", "GET"} ->
+            Req.Test.json(conn, %{"data" => %{"symbol" => "X1-UX81-A1", "tradeGoods" => []}})
+
+          {"/v2/my/ships/ORBITALIST-1/navigate", "POST"} ->
+            Req.Test.json(conn, %{
+              "data" =>
+                ship_body("ORBITALIST-1", %{
+                  "nav" =>
+                    nav_body("IN_TRANSIT", arrival: future_iso(), destination: "X1-UX81-A2")
+                })
+            })
+        end
+      end)
+
+      {:ok, lv, _html} = live(conn, ~p"/")
+      assert has_element?(lv, "[data-autopilot-status]", "Active Autopilot")
+
+      lv |> element("button[phx-click=\"pause_autopilot\"]") |> render_click()
+      assert has_element?(lv, "[data-autopilot-status]", "Paused by manual action")
+      assert has_element?(lv, "button[phx-click=\"resume_autopilot\"]")
+
+      lv |> element("button[phx-click=\"resume_autopilot\"]") |> render_click()
+      refute has_element?(lv, "[data-autopilot-status]", "Paused by manual action")
+    end
+
     test "selects a Ship operation panel and returns to the Fleet roster on mobile", %{
       conn: conn,
       operator: operator

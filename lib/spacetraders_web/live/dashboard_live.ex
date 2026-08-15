@@ -2569,7 +2569,7 @@ defmodule SpaceTradersWeb.DashboardLive do
   defp autopilot_status(%{status: "paused", blocked_reason: reason}),
     do: paused_status(reason)
 
-  defp autopilot_status(%{status: "paused"}), do: "Paused"
+  defp autopilot_status(%{status: "paused"}), do: "Paused by manual action"
   defp autopilot_status(nil), do: "Manual"
   defp autopilot_status(%{desired_mode: "autopilot", status: "waiting"}), do: "Waiting"
   defp autopilot_status(%{desired_mode: "autopilot"}), do: "Active Autopilot"
@@ -2606,7 +2606,7 @@ defmodule SpaceTradersWeb.DashboardLive do
   defp autopilot_current_action(%{status: "paused", blocked_reason: reason}, _ship),
     do: paused_status(reason)
 
-  defp autopilot_current_action(%{status: "paused"}, _ship), do: "Paused"
+  defp autopilot_current_action(%{status: "paused"}, _ship), do: "Paused by manual action"
   defp autopilot_current_action(%{desired_mode: "autopilot"}, _ship), do: "Evaluating cargo"
   defp autopilot_current_action(_, _ship), do: "Manual"
 
@@ -2635,6 +2635,7 @@ defmodule SpaceTradersWeb.DashboardLive do
   defp autopilot_next_action(_, _ship), do: "Start Autopilot"
 
   defp paused_status("Paused by a direct Ship action"), do: "Paused by manual action"
+  defp paused_status(nil), do: "Paused by manual action"
   defp paused_status(reason) when is_binary(reason), do: reason
   defp paused_status(_), do: "Paused"
 

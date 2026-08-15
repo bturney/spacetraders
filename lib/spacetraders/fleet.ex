@@ -733,6 +733,16 @@ defmodule SpaceTraders.Fleet do
           Ecto.Changeset.change(config, status: "blocked", blocked_reason: inspect(reason))
         )
 
+        record_activity_by_config(
+          config,
+          "autopilot_blocked",
+          "Autopilot blocked: #{inspect(reason)}",
+          %{
+            "block" => inspect(reason),
+            "recovery" => "resume"
+          }
+        )
+
         {:error, reason}
     end
   end
