@@ -19,7 +19,7 @@ defmodule SpaceTraders.Fleet do
 
   alias SpaceTraders.Agent.Agent, as: AgentRecord
   alias SpaceTraders.API.Model.{ShipNav, ShipNavRoute}
-  alias SpaceTraders.Fleet.{Activity, AutopilotConfig, Ship}
+  alias SpaceTraders.Fleet.{Activity, AutopilotConfig, Ship, ShipDestination}
   alias SpaceTraders.Fleet.ShipServer
   alias SpaceTraders.Repo
   alias SpaceTraders.{Agent, Contracts, Listing, Shipyard}
@@ -79,7 +79,10 @@ defmodule SpaceTraders.Fleet do
     {:ok,
      Enum.map(ships, fn ship ->
        ensure_ship_record(agent, ship)
-       Map.put(ship, :autopilot, autopilot_config(agent, ship.symbol))
+
+       ship
+       |> Map.put(:autopilot, autopilot_config(agent, ship.symbol))
+       |> Map.put(:destination_history, destination_history(agent, ship.symbol))
      end)}
   end
 
@@ -821,6 +824,17 @@ defmodule SpaceTraders.Fleet do
     |> Repo.insert(on_conflict: :nothing, conflict_target: :symbol)
   end
 
+  @doc "Returns a Ship's five most recent successful navigation destinations."
+  def destination_history(%AgentRecord{} = agent, ship_symbol) do
+    ShipDestination
+    |> join(:inner, [destination], ship in Ship, on: ship.id == destination.ship_id)
+    |> where([destination, ship], ship.agent_id == ^agent.id and ship.symbol == ^ship_symbol)
+    |> order_by([destination], asc: destination.position)
+    |> limit(5)
+    |> select([destination], destination.waypoint_symbol)
+    |> Repo.all()
+  end
+
   @doc """
   Navigates a ship to a waypoint.
 
@@ -845,12 +859,74 @@ defmodule SpaceTraders.Fleet do
          {:ok, result} <-
            SpaceTraders.API.navigate_ship(agent_token, ship_symbol, waypoint_symbol) do
       maybe_schedule_arrival(agent, ship_symbol, result)
+      persist_destination_history(agent, ship_symbol, result.nav.route.destination.symbol)
       {:ok, result}
     end
   end
 
   def navigate_ship(%AgentRecord{}, _ship_symbol, _waypoint_symbol) do
     {:error, :agent_token_missing}
+  end
+
+  defp record_destination(agent, ship_symbol, waypoint_symbol) do
+    with {:ok, ship} <- ensure_ship_record_for_history(agent, ship_symbol) do
+      Repo.transaction(fn ->
+        existing =
+          Repo.get_by(ShipDestination, ship_id: ship.id, waypoint_symbol: waypoint_symbol)
+
+        if existing do
+          Repo.delete!(existing)
+
+          Repo.update_all(
+            from(destination in ShipDestination,
+              where: destination.ship_id == ^ship.id and destination.position > ^existing.position
+            ),
+            inc: [position: -1]
+          )
+        end
+
+        Repo.update_all(
+          from(destination in ShipDestination, where: destination.ship_id == ^ship.id),
+          inc: [position: 1]
+        )
+
+        Repo.insert!(%ShipDestination{
+          ship_id: ship.id,
+          waypoint_symbol: waypoint_symbol,
+          position: 0
+        })
+
+        Repo.delete_all(
+          from destination in ShipDestination,
+            where: destination.ship_id == ^ship.id and destination.position > 4
+        )
+      end)
+    end
+  end
+
+  defp ensure_ship_record_for_history(agent, ship_symbol) do
+    case Repo.get_by(Ship, agent_id: agent.id, symbol: ship_symbol) do
+      %Ship{} = ship -> {:ok, ship}
+      nil -> record_ship(agent, ship_symbol, "UNKNOWN")
+    end
+  end
+
+  defp persist_destination_history(agent, ship_symbol, waypoint_symbol) do
+    try do
+      case record_destination(agent, ship_symbol, waypoint_symbol) do
+        {:ok, _} ->
+          :ok
+
+        {:error, reason} ->
+          Logger.warning("Could not persist destination history: #{inspect(reason)}")
+
+        other ->
+          Logger.warning("Could not persist destination history: #{inspect(other)}")
+      end
+    rescue
+      exception ->
+        Logger.warning("Could not persist destination history: #{Exception.message(exception)}")
+    end
   end
 
   @doc "Docks a ship at its current waypoint."

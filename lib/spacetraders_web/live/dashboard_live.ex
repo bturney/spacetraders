@@ -161,7 +161,7 @@ defmodule SpaceTradersWeb.DashboardLive do
   @impl true
   def handle_event(
         action,
-        %{"symbol" => ship_symbol, "waypoint_symbol" => waypoint},
+        %{"symbol" => ship_symbol, "waypoint_symbol" => waypoint} = params,
         socket
       )
       when action in ["navigate", "browser_navigate"] do
@@ -169,7 +169,7 @@ defmodule SpaceTradersWeb.DashboardLive do
 
     drafted_key =
       if action == "browser_navigate",
-        do: draft_key("browser_navigate", [waypoint]),
+        do: params["draft_key"] || draft_key("browser_navigate", [waypoint]),
         else: draft_key("navigate", [ship_symbol])
 
     with {:ok, agent} <- agent_for_ship(socket, ship_symbol),
@@ -1805,7 +1805,6 @@ defmodule SpaceTradersWeb.DashboardLive do
             phx-submit="browser_navigate"
             class="mt-4"
           >
-            <input type="hidden" name="waypoint_symbol" value={waypoint.symbol} />
             <input
               type="hidden"
               name="draft_key"
@@ -1829,7 +1828,29 @@ defmodule SpaceTradersWeb.DashboardLive do
                 }
               >
                 {ship.symbol}
-              </option></select><button
+              </option></select>
+              <select
+                name="waypoint_symbol"
+                class="select select-bordered select-xs min-w-0 flex-1 font-mono"
+              >
+                <option
+                  :for={
+                    destination <- browser_navigation_destinations(@ships, waypoint, @form_drafts)
+                  }
+                  value={destination}
+                  selected={
+                    draft_field(
+                      @form_drafts,
+                      "browser_navigate",
+                      [waypoint.symbol],
+                      "waypoint_symbol",
+                      waypoint.symbol
+                    ) == destination
+                  }
+                >
+                  {destination}
+                </option>
+              </select><button
                 type="submit"
                 class="btn btn-primary btn-xs"
               >Navigate</button>
@@ -2163,8 +2184,19 @@ defmodule SpaceTradersWeb.DashboardLive do
               value={draft_field(@form_drafts, "navigate", [@ship.symbol], "waypoint_symbol", "")}
               placeholder="Waypoint symbol"
               autocomplete="off"
+              list={
+                if destination_history(@ship) == [],
+                  do: nil,
+                  else: "destination-history-#{@ship.symbol}"
+              }
               class="input input-sm input-bordered min-h-11 flex-1 font-mono"
             />
+            <datalist
+              :if={destination_history(@ship) != []}
+              id={"destination-history-#{@ship.symbol}"}
+            >
+              <option :for={destination <- destination_history(@ship)} value={destination} />
+            </datalist>
             <button
               type="submit"
               disabled={cooldown_active?(@ship)}
@@ -3064,6 +3096,20 @@ defmodule SpaceTradersWeb.DashboardLive do
   end
 
   defp browser_ships(_, _), do: []
+
+  defp destination_history(%{destination_history: history}) when is_list(history), do: history
+  defp destination_history(_), do: []
+
+  defp browser_navigation_destinations(ships, waypoint, drafts) do
+    available_ships = browser_ships(ships, waypoint.system_symbol)
+    selected_ship = draft_field(drafts, "browser_navigate", [waypoint.symbol], "symbol", nil)
+
+    ship =
+      Enum.find(available_ships, &(&1.symbol == selected_ship)) || List.first(available_ships)
+
+    [waypoint.symbol | destination_history(ship)]
+    |> Enum.uniq()
+  end
 
   defp system_map_view_box(waypoints) do
     xs = Enum.map(waypoints, & &1.x)

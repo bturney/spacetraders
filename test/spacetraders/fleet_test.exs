@@ -51,10 +51,12 @@ defmodule SpaceTraders.FleetTest do
 
   defp navigate_response(status), do: navigate_response(status, future_iso())
 
-  defp navigate_response(status, arrival) do
+  defp navigate_response(status, arrival), do: navigate_response(status, arrival, "X1-UX81-A2")
+
+  defp navigate_response(status, arrival, destination) do
     %{
       "fuel" => %{"capacity" => 200, "current" => 80},
-      "nav" => nav_body(status, arrival: arrival, destination: "X1-UX81-A2")
+      "nav" => nav_body(status, arrival: arrival, destination: destination)
     }
   end
 
@@ -1502,6 +1504,54 @@ defmodule SpaceTraders.FleetTest do
 
       assert {:error, %SpaceTraders.API.GameplayError{}} =
                Fleet.navigate_ship(agent, "FLEET-SHIP", "X1-UX81-A2")
+    end
+
+    test "persists five recent distinct successful destinations in recency order" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+      destinations = ~w(A1 A2 A3 A4 A5 A6)
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        destination = List.last(String.split(conn.body_params["waypointSymbol"] || "A1", "-"))
+
+        Req.Test.json(conn, %{
+          "data" => navigate_response("DOCKED", future_iso(), "X1-UX81-#{destination}")
+        })
+      end)
+
+      Enum.each(destinations, fn suffix ->
+        assert {:ok, _} = Fleet.navigate_ship(agent, "FLEET-SHIP", "X1-UX81-#{suffix}")
+      end)
+
+      assert Fleet.destination_history(agent, "FLEET-SHIP") ==
+               ~w(X1-UX81-A6 X1-UX81-A5 X1-UX81-A4 X1-UX81-A3 X1-UX81-A2)
+
+      assert Fleet.navigate_ship(agent, "FLEET-SHIP", "X1-UX81-A3") |> elem(0) == :ok
+
+      assert Fleet.destination_history(agent, "FLEET-SHIP") ==
+               ~w(X1-UX81-A3 X1-UX81-A6 X1-UX81-A5 X1-UX81-A4 X1-UX81-A2)
+    end
+
+    test "does not mutate destination history when navigation fails" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        Req.Test.json(conn, %{"data" => navigate_response("DOCKED", future_iso(), "X1-UX81-A2")})
+      end)
+
+      assert {:ok, _} = Fleet.navigate_ship(agent, "FLEET-SHIP", "X1-UX81-A2")
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        conn
+        |> Map.put(:status, 409)
+        |> Req.Test.json(%{"error" => %{"code" => 4000, "message" => "Unavailable"}})
+      end)
+
+      assert {:error, %SpaceTraders.API.GameplayError{}} =
+               Fleet.navigate_ship(agent, "FLEET-SHIP", "X1-UX81-A3")
+
+      assert Fleet.destination_history(agent, "FLEET-SHIP") == ["X1-UX81-A2"]
     end
   end
 

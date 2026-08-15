@@ -7,6 +7,7 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
 
   alias SpaceTraders.Timeline
   alias SpaceTraders.Fleet.Ship
+  alias SpaceTraders.Fleet.ShipDestination
   alias SpaceTraders.Fleet.AutopilotConfig
   alias SpaceTraders.Fleet.Activity
   alias SpaceTraders.Repo
@@ -2495,6 +2496,20 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       operator: operator
     } do
       agent = agent_fixture(operator)
+
+      ship =
+        Repo.insert!(%Ship{
+          symbol: "ORBITALIST-1",
+          ship_type: "SHIP_COMMAND_FRIGATE",
+          agent_id: agent.id
+        })
+
+      Repo.insert!(%ShipDestination{
+        ship_id: ship.id,
+        waypoint_symbol: "X1-UX81-A99",
+        position: 0
+      })
+
       {:ok, state} = Agent.start_link(fn -> %{transit: false} end)
 
       waypoints = [
@@ -2612,6 +2627,12 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
              )
 
       assert html =~ "Type markers"
+
+      assert has_element?(
+               lv,
+               "datalist#destination-history-ORBITALIST-1 option[value=\"X1-UX81-A99\"]"
+             )
+
       assert has_element?(lv, "[data-map-control=\"zoom-in\"]")
       refute has_element?(lv, "[data-map-inspector]")
 
@@ -2625,6 +2646,12 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       assert html =~ "MINERAL_DEPOSITS"
       assert has_element?(lv, "[data-waypoint-row=\"X1-UX81-A3\"].selected")
       assert has_element?(lv, "form[phx-submit=\"browser_navigate\"]")
+
+      assert has_element?(
+               lv,
+               "form[phx-submit=\"browser_navigate\"] option[value=\"X1-UX81-A99\"]"
+             )
+
       assert has_element?(lv, "[data-map-inspector]")
 
       html =
