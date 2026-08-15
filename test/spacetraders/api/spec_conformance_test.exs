@@ -37,6 +37,7 @@ defmodule SpaceTraders.API.SpecConformanceTest do
     {:get_ships, :get, "/my/ships", :data},
     {:get_ship, :get, "/my/ships/{shipSymbol}", :data},
     {:navigate_ship, :post, "/my/ships/{shipSymbol}/navigate", :data},
+    {:set_ship_flight_mode, :patch, "/my/ships/{shipSymbol}/nav", :data},
     {:dock_ship, :post, "/my/ships/{shipSymbol}/dock", :data},
     {:orbit_ship, :post, "/my/ships/{shipSymbol}/orbit", :data},
     {:extract_resources, :post, "/my/ships/{shipSymbol}/extract", :data},
@@ -142,6 +143,7 @@ defmodule SpaceTraders.API.SpecConformanceTest do
   defp arity_of(:get_ships), do: 1
   defp arity_of(:get_ship), do: 2
   defp arity_of(:navigate_ship), do: 3
+  defp arity_of(:set_ship_flight_mode), do: 3
   defp arity_of(:dock_ship), do: 2
   defp arity_of(:orbit_ship), do: 2
   defp arity_of(:extract_resources), do: 2

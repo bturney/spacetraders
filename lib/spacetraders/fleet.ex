@@ -121,6 +121,11 @@ defmodule SpaceTraders.Fleet do
           not cooldown and status != "IN_TRANSIT",
           cooldown_reason(cooldown, :ship_in_transit)
         ),
+      set_flight_mode:
+        action_state(
+          not cooldown and status != "IN_TRANSIT",
+          cooldown_reason(cooldown, :ship_in_transit)
+        ),
       dock:
         action_state(
           not cooldown and status == "IN_ORBIT",
@@ -1023,6 +1028,27 @@ defmodule SpaceTraders.Fleet do
   def navigate_ship(%AgentRecord{}, _ship_symbol, _waypoint_symbol) do
     {:error, :agent_token_missing}
   end
+
+  @doc "Sets a ship's flight mode before navigation."
+  def set_ship_flight_mode(
+        %AgentRecord{agent_token: agent_token} = agent,
+        ship_symbol,
+        flight_mode
+      )
+      when is_binary(agent_token) and agent_token != "" and
+             flight_mode in ["DRIFT", "STEALTH", "CRUISE", "BURN"] do
+    with :ok <- preempt_autopilot_for(agent, ship_symbol, {:manual_override, "flight mode"}),
+         :ok <- ShipServer.ensure_ready(ship_symbol) do
+      SpaceTraders.API.set_ship_flight_mode(agent_token, ship_symbol, flight_mode)
+    end
+  end
+
+  def set_ship_flight_mode(%AgentRecord{agent_token: token}, _ship_symbol, _flight_mode)
+      when not is_binary(token) or token == "",
+      do: {:error, :agent_token_missing}
+
+  def set_ship_flight_mode(%AgentRecord{}, _ship_symbol, _flight_mode),
+    do: {:error, :invalid_flight_mode}
 
   defp record_destination(agent, ship_symbol, waypoint_symbol) do
     with {:ok, ship} <- ensure_ship_record_for_history(agent, ship_symbol) do

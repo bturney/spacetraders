@@ -170,6 +170,17 @@ defmodule SpaceTraders.API do
     )
   end
 
+  @doc "PATCH /my/ships/{symbol}/nav — updates a ship's flight mode."
+  @spec set_ship_flight_mode(token(), String.t(), String.t()) :: result()
+  def set_ship_flight_mode(token, ship_symbol, flight_mode) do
+    request(:patch, "/my/ships/#{ship_symbol}/nav", token,
+      json: %{"flightMode" => flight_mode},
+      as:
+        {:map,
+         %{fuel: {:model, ShipFuel}, nav: {:model, ShipNav}, events: {:list, ShipConditionEvent}}}
+    )
+  end
+
   @doc "POST /my/ships/{symbol}/dock"
   @spec dock_ship(token(), String.t()) :: result()
   def dock_ship(token, ship_symbol) do

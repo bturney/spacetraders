@@ -1790,6 +1790,30 @@ defmodule SpaceTraders.FleetTest do
       assert {:ok, %{nav: %{status: "IN_ORBIT"}}} = Fleet.orbit_ship(agent, "FLEET-SHIP")
     end
 
+    test "sets a ship flight mode through the game API" do
+      agent = agent_fixture()
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        assert conn.method == "PATCH"
+        assert conn.request_path == "/v2/my/ships/FLEET-SHIP/nav"
+        assert conn.body_params == %{"flightMode" => "DRIFT"}
+
+        Req.Test.json(conn, %{
+          "data" => %{
+            "fuel" => %{"capacity" => 200, "current" => 81},
+            "nav" => nav_body("IN_ORBIT") |> Map.put("flightMode", "DRIFT"),
+            "events" => []
+          }
+        })
+      end)
+
+      assert {:ok, %{fuel: %{current: 81}, nav: %{flight_mode: "DRIFT"}}} =
+               Fleet.set_ship_flight_mode(agent, "FLEET-SHIP", "DRIFT")
+
+      assert {:error, :invalid_flight_mode} =
+               Fleet.set_ship_flight_mode(agent, "FLEET-SHIP", "IMPOSSIBLE")
+    end
+
     test "extracts resources and persists the cooldown" do
       agent = agent_fixture()
       ship_fixture(agent, "FLEET-SHIP")

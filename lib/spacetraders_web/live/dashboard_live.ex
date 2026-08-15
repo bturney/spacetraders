@@ -286,6 +286,35 @@ defmodule SpaceTradersWeb.DashboardLive do
   end
 
   @impl true
+  def handle_event(
+        "set_flight_mode",
+        %{"symbol" => ship_symbol, "flight_mode" => flight_mode} = params,
+        socket
+      ) do
+    draft_key = params["draft_key"] || draft_key("flight_mode", [ship_symbol])
+
+    with {:ok, agent} <- agent_for_ship(socket, ship_symbol) do
+      case Fleet.set_ship_flight_mode(agent, ship_symbol, flight_mode) do
+        {:ok, %{nav: %{flight_mode: mode}}} ->
+          {:noreply,
+           put_flash(
+             refresh_and_clear(socket, agent.id, draft_key),
+             :info,
+             "#{ship_symbol} flight mode set to #{mode}."
+           )}
+
+        {:ok, _result} ->
+          {:noreply, refresh_and_clear(socket, agent.id, draft_key)}
+
+        {:error, reason} ->
+          {:noreply, put_flash(socket, :error, live_error(reason))}
+      end
+    else
+      {:error, reason} -> {:noreply, put_flash(socket, :error, live_error(reason))}
+    end
+  end
+
+  @impl true
   def handle_event(action, %{"symbol" => ship_symbol}, socket)
       when action in ["dock", "orbit", "refuel"] do
     with {:ok, agent} <- agent_for_ship(socket, ship_symbol),
@@ -2167,6 +2196,10 @@ defmodule SpaceTradersWeb.DashboardLive do
                 <dt class="opacity-60">Destination</dt>
                 <dd class="font-mono">{route_destination(@ship)}</dd>
               </div>
+              <div class="flex items-center justify-between gap-3">
+                <dt class="opacity-60">Fuel used</dt>
+                <dd class="font-mono">{fuel_consumed_label(@ship)}</dd>
+              </div>
             </dl>
           </details>
         <% end %>
@@ -2281,6 +2314,51 @@ defmodule SpaceTradersWeb.DashboardLive do
             <div>
               <div class="text-xs opacity-60">Flight Mode</div>
               <div class="font-mono">{flight_mode(@ship)}</div>
+              <form
+                id={"flight-mode-form-#{@ship.symbol}"}
+                phx-change="track_draft"
+                phx-submit="set_flight_mode"
+                phx-value-symbol={@ship.symbol}
+                class="mt-2 flex gap-2"
+              >
+                <input
+                  type="hidden"
+                  name="draft_key"
+                  value={draft_key("flight_mode", [@ship.symbol])}
+                />
+                <select
+                  name="flight_mode"
+                  class="select select-bordered select-xs min-w-0 flex-1 font-mono"
+                  disabled={not action_allowed?(ship_action_state(@ship, :set_flight_mode))}
+                >
+                  <option
+                    :for={mode <- ["DRIFT", "STEALTH", "CRUISE", "BURN"]}
+                    value={mode}
+                    selected={
+                      draft_field(
+                        @form_drafts,
+                        "flight_mode",
+                        [@ship.symbol],
+                        "flight_mode",
+                        flight_mode(@ship)
+                      ) ==
+                        mode
+                    }
+                  >
+                    {mode}
+                  </option>
+                </select>
+                <.action_tooltip reason={action_reason(ship_action_state(@ship, :set_flight_mode))}>
+                  <button
+                    type="submit"
+                    disabled={not action_allowed?(ship_action_state(@ship, :set_flight_mode))}
+                    class="btn btn-ghost btn-xs"
+                  >
+                    Set
+                  </button>
+                </.action_tooltip>
+              </form>
+              <p class="mt-1 text-xs opacity-60">DRIFT minimizes fuel use before a recovery route.</p>
             </div>
             <div>
               <div class="text-xs opacity-60">Crew</div>
@@ -2925,6 +3003,11 @@ defmodule SpaceTradersWeb.DashboardLive do
 
   defp flight_mode(%{nav: %{flight_mode: mode}}) when is_binary(mode), do: mode
   defp flight_mode(_), do: "—"
+
+  defp fuel_consumed_label(%{fuel: %{consumed: %{amount: amount}}}) when is_integer(amount),
+    do: "#{amount} fuel"
+
+  defp fuel_consumed_label(_), do: "—"
 
   defp crew_label(%{crew: %{current: current, required: required, capacity: capacity}})
        when is_integer(current) and is_integer(required) and is_integer(capacity),

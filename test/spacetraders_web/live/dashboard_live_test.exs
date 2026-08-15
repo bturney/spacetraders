@@ -7,6 +7,7 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
 
   alias SpaceTraders.Timeline
   alias SpaceTraders.Fleet.Ship
+  alias SpaceTraders.Fleet.ShipServer
   alias SpaceTraders.Fleet.ShipDestination
   alias SpaceTraders.Fleet.AutopilotConfig
   alias SpaceTraders.Fleet.Activity
@@ -2623,6 +2624,180 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
 
       html = lv |> element("button[phx-click=\"refuel\"]") |> render_click()
       assert html =~ "200 / 200"
+    end
+
+    test "recovers a fuel-starved ship through orbit, DRIFT, navigation, refueling, and CRUISE",
+         %{
+           conn: conn,
+           operator: operator
+         } do
+      agent = agent_fixture(operator)
+
+      {:ok, state} =
+        Agent.start_link(fn ->
+          %{status: "DOCKED", mode: "CRUISE", fuel: 81, destination: "X1-UX81-B21"}
+        end)
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case {conn.request_path, conn.method} do
+          {"/v2/my/agent", "GET"} ->
+            Req.Test.json(conn, %{"data" => agent_overview_body(agent.symbol)})
+
+          {"/v2/my/contracts", "GET"} ->
+            Req.Test.json(conn, %{"data" => []})
+
+          {"/v2/my/ships", "GET"} ->
+            %{status: status, mode: mode, fuel: fuel, destination: destination} =
+              Agent.get(state, & &1)
+
+            nav = nav_body(status, destination: destination) |> Map.put("flightMode", mode)
+
+            Req.Test.json(conn, %{
+              "data" => [
+                ship_body("ORBITALIST-1", %{
+                  "nav" => nav,
+                  "fuel" => %{"capacity" => 400, "current" => fuel}
+                })
+              ]
+            })
+
+          {"/v2/my/ships/ORBITALIST-1/orbit", "POST"} ->
+            Agent.update(state, &%{&1 | status: "IN_ORBIT"})
+            Req.Test.json(conn, %{"data" => %{"nav" => nav_body("IN_ORBIT")}})
+
+          {"/v2/my/ships/ORBITALIST-1/nav", "PATCH"} ->
+            %{"flightMode" => mode} = conn.body_params
+            Agent.update(state, &%{&1 | mode: mode})
+
+            %{status: status, fuel: fuel} = Agent.get(state, & &1)
+
+            Req.Test.json(conn, %{
+              "data" => %{
+                "fuel" => %{"capacity" => 400, "current" => fuel},
+                "nav" => nav_body(status) |> Map.put("flightMode", mode),
+                "events" => []
+              }
+            })
+
+          {"/v2/my/ships/ORBITALIST-1/navigate", "POST"} ->
+            assert conn.body_params == %{"waypointSymbol" => "X1-UX81-C43"}
+
+            Agent.update(
+              state,
+              &%{
+                &1
+                | status: "IN_ORBIT",
+                  fuel: 80,
+                  destination: "X1-UX81-C43"
+              }
+            )
+
+            Req.Test.json(conn, %{
+              "data" => %{
+                "fuel" => %{"capacity" => 400, "current" => 80, "consumed" => %{"amount" => 1}},
+                "nav" =>
+                  nav_body("IN_TRANSIT", arrival: future_iso(), destination: "X1-UX81-C43")
+                  |> Map.put("flightMode", "DRIFT")
+              }
+            })
+
+          {"/v2/my/ships/ORBITALIST-1/dock", "POST"} ->
+            Agent.update(state, &%{&1 | status: "DOCKED"})
+            Req.Test.json(conn, %{"data" => %{"nav" => nav_body("DOCKED")}})
+
+          {"/v2/my/ships/ORBITALIST-1/refuel", "POST"} ->
+            Agent.update(state, &%{&1 | fuel: 400})
+
+            Req.Test.json(conn, %{
+              "data" => %{
+                "agent" => %{},
+                "cargo" => %{"capacity" => 40, "units" => 0, "inventory" => []},
+                "fuel" => %{"capacity" => 400, "current" => 400},
+                "transaction" => %{}
+              }
+            })
+
+          {"/v2/systems/X1-UX81/waypoints", "GET"} ->
+            Req.Test.json(conn, %{"data" => []})
+        end
+      end)
+
+      {:ok, lv, html} = live(conn, ~p"/")
+      assert html =~ "81 / 400"
+
+      lv |> element("button[phx-click=\"orbit\"]") |> render_click()
+
+      html =
+        lv
+        |> element("form[phx-submit=\"set_flight_mode\"]")
+        |> render_submit(%{symbol: "ORBITALIST-1", flight_mode: "DRIFT"})
+
+      assert html =~ "ORBITALIST-1 flight mode set to DRIFT."
+      assert html =~ "DRIFT"
+
+      lv
+      |> element("form[phx-submit=\"navigate\"]")
+      |> render_submit(%{symbol: "ORBITALIST-1", waypoint_symbol: "X1-UX81-C43"})
+
+      Timeline.cancel_events(:ship, "ORBITALIST-1", :arrival)
+      ShipServer.cancel_pending("ORBITALIST-1")
+
+      lv |> element("button[phx-click=\"dock\"]") |> render_click()
+      html = lv |> element("button[phx-click=\"refuel\"]") |> render_click()
+      assert html =~ "400 / 400"
+
+      html =
+        lv
+        |> element("form[phx-submit=\"set_flight_mode\"]")
+        |> render_submit(%{symbol: "ORBITALIST-1", flight_mode: "CRUISE"})
+
+      assert html =~ "ORBITALIST-1 flight mode set to CRUISE."
+    end
+
+    test "keeps a flight-mode draft when the game rejects the change", %{
+      conn: conn,
+      operator: operator
+    } do
+      agent = agent_fixture(operator)
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case {conn.request_path, conn.method} do
+          {"/v2/my/agent", "GET"} ->
+            Req.Test.json(conn, %{"data" => agent_overview_body(agent.symbol)})
+
+          {"/v2/my/contracts", "GET"} ->
+            Req.Test.json(conn, %{"data" => []})
+
+          {"/v2/my/ships", "GET"} ->
+            Req.Test.json(conn, %{"data" => [ship_body("ORBITALIST-1")]})
+
+          {"/v2/my/ships/ORBITALIST-1/nav", "PATCH"} ->
+            conn
+            |> Map.put(:status, 400)
+            |> Req.Test.json(%{"error" => %{"code" => 4214, "message" => "Ship is in transit"}})
+
+          {"/v2/systems/X1-UX81/waypoints", "GET"} ->
+            Req.Test.json(conn, %{"data" => []})
+        end
+      end)
+
+      {:ok, lv, _html} = live(conn, ~p"/")
+
+      lv
+      |> element("form[phx-change=\"track_draft\"][id=\"flight-mode-form-ORBITALIST-1\"]")
+      |> render_change(%{draft_key: "flight_mode:ORBITALIST-1", flight_mode: "DRIFT"})
+
+      html =
+        lv
+        |> element("form[phx-submit=\"set_flight_mode\"]")
+        |> render_submit(%{symbol: "ORBITALIST-1", flight_mode: "DRIFT"})
+
+      assert html =~ "Ship is in transit"
+
+      assert has_element?(
+               lv,
+               "form#flight-mode-form-ORBITALIST-1 option[value=\"DRIFT\"][selected]"
+             )
     end
 
     test "jettisons cargo from a ship", %{conn: conn, operator: operator} do
