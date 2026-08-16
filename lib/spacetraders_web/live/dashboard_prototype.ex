@@ -48,7 +48,7 @@ defmodule SpaceTradersWeb.DashboardPrototype do
               <p class="mt-2 text-sm opacity-70">At X1-UX81-A1 · Ore asteroid · cargo 28 / 40</p>
             </div>
             <div class="text-right">
-              <span class="badge badge-primary badge-lg">AUTOPILOT · ACTIVE</span>
+              <span class="badge badge-primary badge-lg">MINER JOB · ACTIVE</span>
               <p class="mt-2 text-xs opacity-60">Loop 04 · started 14:32 UTC</p>
             </div>
           </div>
