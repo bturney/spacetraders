@@ -94,10 +94,17 @@ defmodule SpaceTradersWeb.OperatorLive.Mint do
     operator = socket.assigns.current_scope.operator
 
     case Agent.mint_agent(operator, mint_params) do
-      {:ok, agent} ->
+      {:ok, %{agent: agent, retired_symbols: retired_symbols}} ->
+        retired_message =
+          case retired_symbols do
+            [] -> ""
+            nil -> ""
+            symbols -> " Retired stale agents: #{Enum.join(symbols, ", ")}."
+          end
+
         {:noreply,
          socket
-         |> put_flash(:info, "Agent #{agent.symbol} minted.")
+         |> put_flash(:info, "Agent #{agent.symbol} minted.#{retired_message}")
          |> redirect(to: ~p"/")}
 
       {:error, :account_token_not_linked} ->
@@ -105,6 +112,14 @@ defmodule SpaceTradersWeb.OperatorLive.Mint do
          socket
          |> put_flash(:error, "Link your AccountToken in Settings before minting.")
          |> redirect(to: ~p"/operators/settings")}
+
+      {:error, :stale_symbol_owned_elsewhere} ->
+        {:noreply,
+         put_flash(
+           socket,
+           :error,
+           "That symbol is retained as a stale Agent by another Operator. Choose a different symbol."
+         )}
 
       {:error, %Ecto.Changeset{} = changeset} ->
         {:noreply, assign_form(socket, Map.put(changeset, :action, :insert))}

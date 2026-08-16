@@ -3484,6 +3484,56 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       assert html =~ "Invalid token"
     end
 
+    test "shows one recovery card when a server reset invalidates an agent", %{
+      conn: conn,
+      operator: operator
+    } do
+      agent = agent_fixture(operator)
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        conn
+        |> Map.put(:status, 401)
+        |> Req.Test.json(%{
+          "error" => %{
+            "code" => 4011,
+            "message" =>
+              "Failed to parse token. Token reset_date does not match the server. Server resets happen on a weekly to bi-weekly frequency during alpha. After a reset, you should re-register your agent. Expected: 2026-08-16, Actual: 2026-08-09"
+          }
+        })
+      end)
+
+      {:ok, _lv, html} = live(conn, ~p"/")
+
+      assert html =~ "Your stale Agents are no longer available"
+      assert html =~ agent.symbol
+      assert html =~ "Mint a replacement"
+      refute html =~ "Contracts unavailable"
+      assert %{stale_at: %DateTime{}} = Repo.get!(SpaceTraders.Agent.Agent, agent.id)
+    end
+
+    test "groups multiple stale agents in one recovery card", %{conn: conn, operator: operator} do
+      first = agent_fixture(operator, %{symbol: "ORBITALIST"})
+      second = agent_fixture(operator, %{symbol: "TURNEY"})
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        conn
+        |> Map.put(:status, 401)
+        |> Req.Test.json(%{
+          "error" => %{
+            "code" => 4011,
+            "message" =>
+              "Failed to parse token. Token reset_date does not match the server. Server resets happen on a weekly to bi-weekly frequency during alpha. After a reset, you should re-register your agent. Expected: 2026-08-16, Actual: 2026-08-09"
+          }
+        })
+      end)
+
+      {:ok, _lv, html} = live(conn, ~p"/")
+
+      assert html =~ first.symbol
+      assert html =~ second.symbol
+      assert length(String.split(html, "Server reset recovery")) == 2
+    end
+
     test "prompts to mint a first agent when the operator has none", %{conn: conn} do
       stub_live_game(agent_overview_body("UNUSED"), [])
 

@@ -20,6 +20,7 @@ defmodule SpaceTraders.Agent.Agent do
     field :faction, :string
     field :headquarters, :string
     field :agent_token, Secret, source: :agent_token_ciphertext, redact: true
+    field :stale_at, :utc_datetime
 
     belongs_to :operator, SpaceTraders.Agent.Operator
     has_many :ships, SpaceTraders.Fleet.Ship

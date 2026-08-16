@@ -10,6 +10,14 @@ A dashboard + bot for playing SpaceTraders, a programmable API game where every 
 The in-game player identity created via registration (e.g., ORBITALIST). Registered under an Account via its AccountToken; carries its own AgentToken. Owns its own credits, fleet, contracts, and headquarters.
 _Avoid_: player, user, account
 
+**Stale Agent**:
+A locally stored Agent whose AgentToken the game rejects with a server-reset mismatch, proving its in-game identity no longer exists. It remains marked until a successful replacement mint retires it, unless a same-symbol re-mint proves it can be replaced.
+_Avoid_: deleted agent, old agent, inactive agent
+
+**Retire a Stale Agent**:
+The app's local-only removal of a Stale Agent and all of its cached state, credentials, ships, jobs, and scheduled work after a successful replacement mint. It never calls the game API.
+_Avoid_: delete agent, abandon agent, deregister
+
 **Operator**:
 The human who drives the dashboard and authorizes external application and delivery actions. Links their own AccountToken once and may mint (own) one or more Agents. Distinct from the in-game Agent.
 _Avoid_: player, captain, user
@@ -21,6 +29,10 @@ _Avoid_: sign up, create account (for the in-app action)
 **Account**:
 The external my.spacetraders.io account holding the AccountToken, which mints new Agents. The app stores it encrypted per-Operator for in-app minting; it is never used for game actions.
 _Avoid_: agent account, signup
+
+**Server Reset**:
+The game's replacement of its world state, signalled to an AgentToken by a reset-date mismatch. It invalidates the affected Agent's in-game identity and local cached state.
+_Avoid_: app restart, connection failure, token expiry
 
 ### Space
 

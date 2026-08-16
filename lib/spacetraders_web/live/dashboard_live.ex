@@ -55,7 +55,7 @@ defmodule SpaceTradersWeb.DashboardLive do
               <.link navigate={~p"/agents/new"} class="btn btn-primary min-h-12 shrink-0">Mint an agent</.link>
             </div>
 
-            <.contract_hero overviews={@overviews} />
+            <.contract_hero overviews={non_stale_overviews(@overviews)} />
 
             <div :if={@overviews == []} class="alert alert-outline">
               You haven't minted any agents yet.
@@ -67,6 +67,7 @@ defmodule SpaceTradersWeb.DashboardLive do
 
             <.agent_section
               :for={overview <- @overviews}
+              :if={not overview.stale?}
               overview={overview}
               cooldown_tick={@cooldown_tick}
               form_drafts={@form_drafts}
@@ -78,7 +79,9 @@ defmodule SpaceTradersWeb.DashboardLive do
               selected_ships={@selected_ships}
             />
 
-            <.activity_panel overviews={@overviews} />
+            <.stale_agent_card stale_agents={stale_agents(@overviews)} />
+
+            <.activity_panel overviews={non_stale_overviews(@overviews)} />
           </div>
         <% else %>
           <div class="mx-auto max-w-lg py-16 text-center">
@@ -131,6 +134,12 @@ defmodule SpaceTradersWeb.DashboardLive do
   defp next_prototype("b"), do: "c"
   defp next_prototype("c"), do: "a"
   defp next_prototype(_variant), do: "a"
+
+  defp non_stale_overviews(overviews), do: Enum.reject(overviews, & &1.stale?)
+
+  defp stale_agents(overviews) do
+    for %{stale?: true, agent: agent} <- overviews, do: agent
+  end
 
   defp mount_operator(socket, operator) do
     agents = Agent.list_agents(operator)
@@ -864,6 +873,21 @@ defmodule SpaceTradersWeb.DashboardLive do
         waypoint_markets={@waypoint_markets}
         form_drafts={@form_drafts}
       />
+    </section>
+    """
+  end
+
+  attr :stale_agents, :list, required: true
+
+  defp stale_agent_card(assigns) do
+    ~H"""
+    <section :if={@stale_agents != []} class="rounded-2xl border border-warning/40 bg-warning/10 p-5">
+      <p class="eyebrow">Server reset recovery</p>
+      <h2 class="mt-1 text-xl font-bold">Your stale Agents are no longer available</h2>
+      <p class="mt-2 text-sm leading-6">
+        The game reset and invalidated {Enum.map_join(@stale_agents, ", ", & &1.symbol)}. Mint a replacement Agent to remove these stale local records.
+      </p>
+      <.link navigate={~p"/agents/new"} class="btn btn-warning mt-4">Mint a replacement</.link>
     </section>
     """
   end

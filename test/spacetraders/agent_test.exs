@@ -504,7 +504,8 @@ defmodule SpaceTraders.AgentTest do
         })
       end)
 
-      assert {:ok, agent} = Agent.mint_agent(operator, %{symbol: "NEWSYM", faction: "COSMIC"})
+      assert {:ok, %{agent: agent, retired_symbols: []}} =
+               Agent.mint_agent(operator, %{symbol: "NEWSYM", faction: "COSMIC"})
 
       assert agent.symbol == "NEWSYM"
       assert agent.faction == "COSMIC"
@@ -568,13 +569,82 @@ defmodule SpaceTraders.AgentTest do
         })
       end)
 
-      assert {:ok, agent} = Agent.mint_agent(operator, %{symbol: "RESETME", faction: "COSMIC"})
+      assert {:ok, %{agent: agent, retired_symbols: ["RESETME"]}} =
+               Agent.mint_agent(operator, %{symbol: "RESETME", faction: "COSMIC"})
+
       refute agent.id == stale_agent.id
       assert agent.agent_token == "FRESH_TOKEN"
       refute Repo.get(SpaceTraders.Agent.Agent, stale_agent.id)
       refute Repo.get(Ship, ship.id)
       assert Repo.get(Event, event.id).status == "cancelled"
       assert Registry.lookup(SpaceTraders.Fleet.ShipRegistry, ship.symbol) == []
+    end
+
+    test "retires detected stale agents when a replacement uses a new symbol", %{
+      operator: operator
+    } do
+      stale_agent =
+        agent_fixture(operator, %{
+          symbol: "ORBITALIST",
+          agent_token: "STALE_TOKEN",
+          stale_at: DateTime.utc_now() |> DateTime.truncate(:second)
+        })
+
+      ship =
+        Repo.insert!(%Ship{
+          symbol: "ORBITALIST-1",
+          ship_type: "SHIP_COMMAND_FRIGATE",
+          agent_id: stale_agent.id
+        })
+
+      {:ok, event} =
+        Timeline.schedule_event(
+          :ship,
+          ship.symbol,
+          :arrival,
+          DateTime.add(DateTime.utc_now(), 1, :hour)
+        )
+
+      {:ok, _pid} = ShipServer.ensure_started(stale_agent, ship.symbol)
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        assert {conn.method, conn.request_path} == {"POST", "/v2/register"}
+
+        Req.Test.json(conn, %{
+          "data" => %{
+            "token" => "FRESH_TOKEN",
+            "agent" => %{
+              "symbol" => "TURNEY",
+              "credits" => 175_000,
+              "headquarters" => "X1-UX81-A2",
+              "startingFaction" => "COSMIC"
+            },
+            "contract" => %{"id" => "c1", "type" => "PROCUREMENT"},
+            "faction" => %{"symbol" => "COSMIC", "name" => "Cosmic", "isRecruiting" => true},
+            "ships" => []
+          }
+        })
+      end)
+
+      assert {:ok, %{agent: %{symbol: "TURNEY"}, retired_symbols: ["ORBITALIST"]}} =
+               Agent.mint_agent(operator, %{symbol: "TURNEY", faction: "COSMIC"})
+
+      refute Repo.get(SpaceTraders.Agent.Agent, stale_agent.id)
+      refute Repo.get(Ship, ship.id)
+      assert Repo.get(Event, event.id).status == "cancelled"
+      assert Registry.lookup(SpaceTraders.Fleet.ShipRegistry, ship.symbol) == []
+    end
+
+    test "does not mint a symbol retained as stale by another operator", %{operator: operator} do
+      other_operator = operator_fixture()
+
+      agent_fixture(other_operator, %{
+        symbol: "ORBITALIST",
+        stale_at: DateTime.utc_now() |> DateTime.truncate(:second)
+      })
+
+      assert {:error, :stale_symbol_owned_elsewhere} =
+               Agent.mint_agent(operator, %{symbol: "ORBITALIST", faction: "COSMIC"})
     end
 
     test "rejects an invalid symbol before calling the API", %{operator: operator} do
@@ -612,6 +682,63 @@ defmodule SpaceTraders.AgentTest do
 
       assert {:error, %SpaceTraders.API.Error{status: 500}} =
                Agent.mint_agent(operator, %{symbol: "NEWSYM", faction: "COSMIC"})
+    end
+  end
+
+  describe "server reset detection" do
+    test "marks an agent stale only when the game reports a reset-date mismatch" do
+      operator = operator_fixture()
+      agent = agent_fixture(operator)
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        conn
+        |> Map.put(:status, 401)
+        |> Req.Test.json(%{
+          "error" => %{
+            "code" => 4011,
+            "message" =>
+              "Failed to parse token. Token reset_date does not match the server. Server resets happen on a weekly to bi-weekly frequency during alpha. After a reset, you should re-register your agent. Expected: 2026-08-16, Actual: 2026-08-09"
+          }
+        })
+      end)
+
+      assert {:error, :stale_agent} = Agent.agent_overview(agent)
+      assert %{stale_at: %DateTime{}} = Repo.get!(SpaceTraders.Agent.Agent, agent.id)
+    end
+
+    test "does not mark an agent stale for other token errors" do
+      operator = operator_fixture()
+      agent = agent_fixture(operator)
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        conn
+        |> Map.put(:status, 401)
+        |> Req.Test.json(%{"error" => %{"code" => 4011, "message" => "Invalid token"}})
+      end)
+
+      assert {:error, %{message: "Invalid token"}} = Agent.agent_overview(agent)
+      assert %{stale_at: nil} = Repo.get!(SpaceTraders.Agent.Agent, agent.id)
+    end
+
+    test "does not mark an agent stale for an incomplete reset-date message" do
+      operator = operator_fixture()
+      agent = agent_fixture(operator)
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        conn
+        |> Map.put(:status, 401)
+        |> Req.Test.json(%{
+          "error" => %{
+            "code" => 4011,
+            "message" => "Token reset_date does not match the server"
+          }
+        })
+      end)
+
+      assert {:error, %{message: "Token reset_date does not match the server"}} =
+               Agent.agent_overview(agent)
+
+      assert %{stale_at: nil} = Repo.get!(SpaceTraders.Agent.Agent, agent.id)
     end
   end
 
