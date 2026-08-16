@@ -10,6 +10,14 @@ A dashboard + bot for playing SpaceTraders, a programmable API game where every 
 The in-game player identity created via registration (e.g., ORBITALIST). Registered under an Account via its AccountToken; carries its own AgentToken. Owns its own credits, fleet, contracts, and headquarters.
 _Avoid_: player, user, account
 
+**Stale Agent**:
+A locally stored Agent whose AgentToken the game rejects with a server-reset mismatch, proving its in-game identity no longer exists. It remains marked until a successful replacement mint retires it, unless a same-symbol re-mint proves it can be replaced.
+_Avoid_: deleted agent, old agent, inactive agent
+
+**Retire a Stale Agent**:
+The app's local-only removal of a Stale Agent and all of its cached state, credentials, ships, jobs, and scheduled work after a successful replacement mint. It never calls the game API.
+_Avoid_: delete agent, abandon agent, deregister
+
 **Operator**:
 The human who drives the dashboard and authorizes external application and delivery actions. Links their own AccountToken once and may mint (own) one or more Agents. Distinct from the in-game Agent.
 _Avoid_: player, captain, user
@@ -21,6 +29,10 @@ _Avoid_: sign up, create account (for the in-app action)
 **Account**:
 The external my.spacetraders.io account holding the AccountToken, which mints new Agents. The app stores it encrypted per-Operator for in-app minting; it is never used for game actions.
 _Avoid_: agent account, signup
+
+**Server Reset**:
+The game's replacement of its world state, signalled to an AgentToken by a reset-date mismatch. It invalidates the affected Agent's in-game identity and local cached state.
+_Avoid_: app restart, connection failure, token expiry
 
 ### Space
 
@@ -86,12 +98,24 @@ _Avoid_: vessel
 The five most recently used distinct Waypoints for one Ship, retained as persistent quick-select choices for future navigation.
 _Avoid_: route history (which implies completed journeys), saved route (which implies a multi-Waypoint plan)
 
+**Job**:
+A durable, Operator-selected outcome for exactly one Ship. Its Policy evaluates authoritative game state to choose an Intent; a Job is paused by a direct Ship action and must be revalidated before resuming.
+_Avoid_: automation, workflow
+
+**Policy**:
+The decision rule belonging to a Job that selects a viable Intent from authoritative state. It chooses among valid alternatives but does not prescribe game API calls.
+_Avoid_: script, action plan
+
+**Intent**:
+A state-aware request for a Ship to achieve an operational outcome, such as reaching a Waypoint. An Intent selects and performs the necessary game actions from authoritative Ship state; it is not a fixed sequence of API calls.
+_Avoid_: action, macro, script
+
 **Autopilot**:
-An Operator-started, per-Ship intent to execute one configured local extract/sell loop. Its persisted configuration and execution status are Fleet state; it never resumes an action without reconciling authoritative game state. It may act only within its configured extraction Waypoint, Market, and Cargo threshold.
+An Operator-started, per-Ship Job to execute one configured local extract/sell loop. Its persisted configuration and execution status are Fleet state; it never resumes an action without reconciling authoritative game state. It may act only within its configured extraction Waypoint, Market, and Cargo threshold.
 _Avoid_: bot, automatic mode
 
 **Manual Mode**:
-A Ship operating mode in which the Operator issues direct commands. Any direct command pauses Autopilot before it runs; resuming automation requires revalidation against game truth.
+A Ship operating mode in which the Operator issues direct commands. Any direct command pauses the active Job before it runs; resuming automation requires revalidation against game truth.
 **Ship Readiness**:
 The capability and condition information that determines what a Ship can do: flight mode, crew, frame, reactor, engine, modules, and mounts. It supplements, but does not replace, the Ship's immediate operational status, location, fuel, cargo, and actions.
 

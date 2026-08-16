@@ -49,6 +49,7 @@ defmodule SpaceTraders.AgentFixtures do
       faction: Map.get(attrs, :faction, "COSMIC"),
       headquarters: Map.get(attrs, :headquarters, "X1-UX81-A1"),
       agent_token: Map.get(attrs, :agent_token, "test-agent-token"),
+      stale_at: Map.get(attrs, :stale_at),
       operator_id: operator.id
     })
   end

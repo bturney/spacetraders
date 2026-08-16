@@ -49,21 +49,47 @@ defmodule SpaceTraders.Fleet do
   truth, so every call assembles fresh data.
   """
   def command_snapshot(%AgentRecord{} = agent) do
-    overview = Agent.agent_overview(agent)
-    ships = list_ships(agent) |> annotate_autopilot(agent)
-    ships = annotate_actions(ships)
-    waypoints = list_waypoints(agent)
-    listings = snapshot_listings(agent, ships, waypoints) |> annotate_listing_actions(overview)
+    if Agent.stale?(agent) do
+      stale_snapshot(agent)
+    else
+      overview = Agent.agent_overview(agent)
 
+      if overview == {:error, :stale_agent} do
+        stale_snapshot(agent)
+      else
+        ships = list_ships(agent) |> annotate_autopilot(agent)
+        ships = annotate_actions(ships)
+        waypoints = list_waypoints(agent)
+
+        listings =
+          snapshot_listings(agent, ships, waypoints) |> annotate_listing_actions(overview)
+
+        %{
+          agent: agent,
+          stale?: false,
+          overview: overview,
+          ships: ships,
+          contracts: Contracts.list_contracts(agent),
+          shipyards: listings.shipyards,
+          markets: listings.markets,
+          waypoints: waypoints,
+          activity: recent_activity(agent)
+        }
+      end
+    end
+  end
+
+  defp stale_snapshot(agent) do
     %{
       agent: agent,
-      overview: overview,
-      ships: ships,
-      contracts: Contracts.list_contracts(agent),
-      shipyards: listings.shipyards,
-      markets: listings.markets,
-      waypoints: waypoints,
-      activity: recent_activity(agent)
+      stale?: true,
+      overview: {:error, :stale_agent},
+      ships: {:error, :stale_agent},
+      contracts: {:error, :stale_agent},
+      shipyards: {:error, :stale_agent},
+      markets: {:error, :stale_agent},
+      waypoints: {:error, :stale_agent},
+      activity: []
     }
   end
 

@@ -107,6 +107,31 @@ defmodule SpaceTradersWeb.OperatorLive.MintTest do
       assert conn.resp_body =~ "Fleet command"
     end
 
+    test "reports stale agents retired by a replacement mint", %{conn: conn} do
+      operator = operator_fixture()
+      {:ok, operator} = Agent.link_account_token(operator, "ACCOUNT_TOKEN")
+
+      _stale_agent =
+        agent_fixture(operator, %{
+          symbol: "ORBITALIST",
+          stale_at: DateTime.utc_now() |> DateTime.truncate(:second)
+        })
+
+      register_stub(minted_agent_body("MINER1"))
+
+      conn = log_in_operator(conn, operator)
+      {:ok, lv, _html} = live(conn, ~p"/agents/new")
+
+      {:ok, conn} =
+        lv
+        |> form("#mint_form", @mint_form)
+        |> render_submit()
+        |> follow_redirect(conn, ~p"/")
+
+      assert conn.resp_body =~ "Retired stale agents: ORBITALIST."
+      refute Repo.get_by(SpaceTraders.Agent.Agent, symbol: "ORBITALIST")
+    end
+
     test "shows a flash error when the game rejects the mint", %{conn: conn} do
       operator = operator_fixture()
       {:ok, operator} = Agent.link_account_token(operator, "ACCOUNT_TOKEN")
