@@ -38,7 +38,7 @@ defmodule SpaceTraders.Fleet.Job do
     |> validate_required([:type, :extraction_waypoint, :market_waypoint, :cargo_threshold])
     |> validate_inclusion(:type, ["miner"])
     |> validate_number(:cargo_threshold, greater_than: 0)
-    |> validate_inclusion(:desired_mode, ["manual", "autopilot"])
+    |> validate_inclusion(:desired_mode, ["manual", "active"])
     |> validate_inclusion(:status, ["revalidating", "ready", "waiting", "blocked", "paused"])
     |> unique_constraint(:ship_id)
   end

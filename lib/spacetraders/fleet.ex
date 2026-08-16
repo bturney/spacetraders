@@ -20,7 +20,6 @@ defmodule SpaceTraders.Fleet do
   alias SpaceTraders.Agent.Agent, as: AgentRecord
   alias SpaceTraders.API.Model.{ShipNav, ShipNavRoute}
   alias SpaceTraders.Fleet.{Activity, Job, Ship, ShipDestination}
-  alias SpaceTraders.Fleet.Job, as: AutopilotConfig
   alias SpaceTraders.Fleet.ShipServer
   alias SpaceTraders.Repo
   alias SpaceTraders.{Agent, Contracts, Listing, Shipyard}
@@ -58,7 +57,7 @@ defmodule SpaceTraders.Fleet do
       if overview == {:error, :stale_agent} do
         stale_snapshot(agent)
       else
-        ships = list_ships(agent) |> annotate_autopilot(agent)
+        ships = list_ships(agent) |> annotate_jobs(agent)
         ships = annotate_actions(ships)
         waypoints = list_waypoints(agent)
 
@@ -119,20 +118,19 @@ defmodule SpaceTraders.Fleet do
     |> Repo.all()
   end
 
-  defp annotate_autopilot({:ok, ships}, agent) do
+  defp annotate_jobs({:ok, ships}, agent) do
     {:ok,
      Enum.map(ships, fn ship ->
        ensure_ship_record(agent, ship)
-       autopilot = autopilot_config(agent, ship.symbol)
+       job = ship_job(agent, ship.symbol)
 
        ship
-       |> Map.put(:job, autopilot && struct(Job, Map.from_struct(autopilot)))
-       |> Map.put(:autopilot, autopilot)
+       |> Map.put(:job, job)
        |> Map.put(:destination_history, destination_history(agent, ship.symbol))
      end)}
   end
 
-  defp annotate_autopilot(result, _agent), do: result
+  defp annotate_jobs(result, _agent), do: result
 
   defp annotate_actions({:ok, ships}) do
     {:ok, Enum.map(ships, &Map.put(&1, :actions, ship_actions(&1)))}
@@ -211,23 +209,23 @@ defmodule SpaceTraders.Fleet do
     :ok
   end
 
-  @doc "Saves a Ship's loop configuration without enabling Autopilot."
-  def configure_autopilot(%AgentRecord{} = agent, ship_symbol, attrs) when is_map(attrs) do
+  @doc "Saves a Miner Job configuration without activating it."
+  def configure_miner_job(%AgentRecord{} = agent, ship_symbol, attrs) when is_map(attrs) do
     with {:ok, ship} <- owned_ship(agent, ship_symbol),
-         :ok <- preempt_autopilot(agent, ship, :configuration_changed),
-         {:ok, config} <- upsert_autopilot(ship, attrs) do
-      record_activity(agent, ship, "configuration", "Autopilot configuration changed")
-      {:ok, config}
+         :ok <- preempt_miner_job(agent, ship, :configuration_changed),
+         {:ok, job} <- upsert_miner_job(ship, attrs) do
+      record_activity(agent, ship, "configuration", "Miner Job configuration changed")
+      {:ok, job}
     end
   end
 
-  @doc "Pauses an active Autopilot while retaining its configuration."
-  def pause_autopilot(%AgentRecord{} = agent, ship_symbol) do
+  @doc "Pauses an active Miner Job while retaining its configuration."
+  def pause_miner_job(%AgentRecord{} = agent, ship_symbol) do
     with {:ok, ship} <- owned_ship(agent, ship_symbol),
-         %AutopilotConfig{} = config <- Repo.get_by(AutopilotConfig, ship_id: ship.id) do
-      config =
+         %Job{} = job <- Repo.get_by(Job, ship_id: ship.id) do
+      job =
         Repo.update!(
-          Ecto.Changeset.change(config,
+          Ecto.Changeset.change(job,
             desired_mode: "manual",
             status: "paused",
             in_flight_action: nil,
@@ -235,32 +233,24 @@ defmodule SpaceTraders.Fleet do
           )
         )
 
-      record_activity(agent, ship, "pause", "Autopilot paused by Operator")
-      {:ok, config}
+      record_activity(agent, ship, "pause", "Miner Job paused by Operator")
+      {:ok, job}
     else
-      nil -> {:error, :autopilot_not_configured}
+      nil -> {:error, :miner_job_not_configured}
       error -> error
     end
   end
 
-  @doc "Resumes an Autopilot only after a complete authoritative validation."
-  def resume_autopilot(%AgentRecord{} = agent, ship_symbol),
-    do: start_autopilot(agent, ship_symbol)
+  @doc "Resumes a Miner Job only after a complete authoritative validation."
+  def resume_miner_job(%AgentRecord{} = agent, ship_symbol),
+    do: start_miner_job(agent, ship_symbol)
 
-  @doc "Stops Autopilot, cancels pending work, and removes its saved configuration."
-  def stop_autopilot(%AgentRecord{} = agent, ship_symbol) do
+  @doc "Stops a Miner Job, cancels pending work, and removes its saved configuration."
+  def stop_miner_job(%AgentRecord{} = agent, ship_symbol) do
     with {:ok, ship} <- owned_ship(agent, ship_symbol) do
-      Repo.delete_all(from c in AutopilotConfig, where: c.ship_id == ^ship.id)
-      record_activity(agent, ship, "stop", "Autopilot stopped; Ship returned to Manual")
+      Repo.delete_all(from job in Job, where: job.ship_id == ^ship.id)
+      record_activity(agent, ship, "stop", "Miner Job stopped; Ship returned to Manual")
       :ok
-    end
-  end
-
-  @doc "Returns the persisted Autopilot configuration for a Ship, or nil."
-  def autopilot_config(%AgentRecord{} = agent, ship_symbol) do
-    case owned_ship(agent, ship_symbol) do
-      {:ok, ship} -> Repo.get_by(AutopilotConfig, ship_id: ship.id)
-      _ -> nil
     end
   end
 
@@ -272,56 +262,28 @@ defmodule SpaceTraders.Fleet do
     end
   end
 
-  @doc "Configures a Miner Job while preserving the Autopilot compatibility boundary."
-  def configure_miner_job(%AgentRecord{} = agent, ship_symbol, attrs) when is_map(attrs) do
-    with {:ok, %AutopilotConfig{id: id}} <- configure_autopilot(agent, ship_symbol, attrs) do
-      {:ok, Repo.get!(Job, id)}
-    end
-  end
-
   @doc "Starts a configured Miner Job after authoritative validation."
   def start_miner_job(%AgentRecord{} = agent, ship_symbol) do
-    with {:ok, %AutopilotConfig{id: id}} <- start_autopilot(agent, ship_symbol) do
-      {:ok, Repo.get!(Job, id)}
-    end
-  end
-
-  def pause_miner_job(%AgentRecord{} = agent, ship_symbol) do
-    with {:ok, %AutopilotConfig{id: id}} <- pause_autopilot(agent, ship_symbol) do
-      {:ok, Repo.get!(Job, id)}
-    end
-  end
-
-  def resume_miner_job(%AgentRecord{} = agent, ship_symbol) do
-    with {:ok, %AutopilotConfig{id: id}} <- resume_autopilot(agent, ship_symbol) do
-      {:ok, Repo.get!(Job, id)}
-    end
-  end
-
-  def stop_miner_job(%AgentRecord{} = agent, ship_symbol), do: stop_autopilot(agent, ship_symbol)
-
-  @doc "Explicitly starts a configured Autopilot after authoritative validation."
-  def start_autopilot(%AgentRecord{} = agent, ship_symbol) do
     with {:ok, ship} <- owned_ship(agent, ship_symbol),
-         %AutopilotConfig{} = config <- Repo.get_by(AutopilotConfig, ship_id: ship.id),
-         {:ok, live_ship} <- validate_autopilot(agent, ship, config) do
-      config =
+         %Job{} = job <- Repo.get_by(Job, ship_id: ship.id),
+         {:ok, live_ship} <- validate_miner_job(agent, ship, job) do
+      job =
         Repo.update!(
-          Ecto.Changeset.change(config,
-            desired_mode: "autopilot",
+          Ecto.Changeset.change(job,
+            desired_mode: "active",
             status: "ready",
             blocked_reason: nil,
             last_validated_at: DateTime.utc_now() |> DateTime.truncate(:second)
           )
         )
 
-      case advance_autopilot(agent, config, live_ship) do
-        {:ok, config} -> {:ok, config}
-        {:error, reason} -> {:error, {:autopilot_blocked, reason}}
+      case advance_miner_job(agent, job, live_ship) do
+        {:ok, job} -> {:ok, job}
+        {:error, reason} -> {:error, {:miner_job_blocked, reason}}
       end
     else
-      nil -> {:error, :autopilot_not_configured}
-      {:error, reason} -> block_autopilot(agent, ship_symbol, reason)
+      nil -> {:error, :miner_job_not_configured}
+      {:error, reason} -> block_miner_job(agent, ship_symbol, reason)
     end
   end
 
@@ -332,20 +294,20 @@ defmodule SpaceTraders.Fleet do
     end
   end
 
-  defp upsert_autopilot(ship, attrs) do
-    config = Repo.get_by(AutopilotConfig, ship_id: ship.id) || %AutopilotConfig{ship_id: ship.id}
+  defp upsert_miner_job(ship, attrs) do
+    job = Repo.get_by(Job, ship_id: ship.id) || %Job{ship_id: ship.id}
 
-    config
-    |> AutopilotConfig.changeset(attrs)
+    job
+    |> Job.changeset(attrs)
     |> Ecto.Changeset.put_change(:desired_mode, "manual")
     |> Ecto.Changeset.put_change(:status, "ready")
     |> Ecto.Changeset.put_change(:blocked_reason, nil)
     |> Repo.insert_or_update()
   end
 
-  defp preempt_autopilot(agent, ship, reason) do
-    case Repo.get_by(AutopilotConfig, ship_id: ship.id) do
-      %AutopilotConfig{desired_mode: "autopilot"} = config ->
+  defp preempt_miner_job(agent, ship, reason) do
+    case Repo.get_by(Job, ship_id: ship.id) do
+      %Job{desired_mode: "active"} = config ->
         Repo.update!(
           Ecto.Changeset.change(config,
             desired_mode: "manual",
@@ -369,9 +331,9 @@ defmodule SpaceTraders.Fleet do
   defp preemption_message(:configuration_changed), do: "Paused because configuration changed"
   defp preemption_message(reason), do: "Paused: #{inspect(reason)}"
 
-  defp preempt_autopilot_for(agent, ship_symbol, reason) do
+  defp preempt_miner_job_for(agent, ship_symbol, reason) do
     case Repo.get_by(Ship, agent_id: agent.id, symbol: ship_symbol) do
-      %Ship{} = ship -> preempt_autopilot(agent, ship, reason)
+      %Ship{} = ship -> preempt_miner_job(agent, ship, reason)
       nil -> :ok
     end
   end
@@ -388,12 +350,12 @@ defmodule SpaceTraders.Fleet do
     :ok
   end
 
-  defp record_autopilot_activity(agent, live_ship, kind, message, metadata) do
+  defp record_miner_job_activity(agent, live_ship, kind, message, metadata) do
     ship = Repo.get_by!(Ship, agent_id: agent.id, symbol: live_ship.symbol)
     record_activity(agent, ship, kind, message, metadata)
   end
 
-  defp validate_autopilot(%AgentRecord{agent_token: token}, ship, config)
+  defp validate_miner_job(%AgentRecord{agent_token: token}, ship, config)
        when is_binary(token) and token != "" do
     with {:ok, live_ship} <- SpaceTraders.API.get_ship(token, ship.symbol),
          {:ok, extraction} <-
@@ -411,7 +373,7 @@ defmodule SpaceTraders.Fleet do
     end
   end
 
-  defp validate_autopilot(_, _, _), do: {:error, :agent_token_missing}
+  defp validate_miner_job(_, _, _), do: {:error, :agent_token_missing}
 
   defp waypoint(token, system, symbol), do: SpaceTraders.API.get_waypoint(token, system, symbol)
 
@@ -443,14 +405,14 @@ defmodule SpaceTraders.Fleet do
 
   defp mining_capability?(_), do: {:error, :mining_capability_missing}
 
-  defp block_autopilot(agent, ship_symbol, reason) do
+  defp block_miner_job(agent, ship_symbol, reason) do
     case owned_ship(agent, ship_symbol) do
       {:ok, ship} ->
-        case Repo.get_by(AutopilotConfig, ship_id: ship.id) do
-          %AutopilotConfig{} = config ->
+        case Repo.get_by(Job, ship_id: ship.id) do
+          %Job{} = config ->
             Repo.update!(
               Ecto.Changeset.change(config,
-                desired_mode: "autopilot",
+                desired_mode: "active",
                 status: "blocked",
                 blocked_reason: inspect(reason)
               )
@@ -459,18 +421,18 @@ defmodule SpaceTraders.Fleet do
             record_activity(
               agent,
               ship,
-              "autopilot_blocked",
-              "Autopilot blocked: #{inspect(reason)}",
+              "miner_job_blocked",
+              "Miner Job blocked: #{inspect(reason)}",
               %{
                 "block" => inspect(reason),
                 "recovery" => "resume"
               }
             )
 
-            {:error, {:autopilot_blocked, reason}}
+            {:error, {:miner_job_blocked, reason}}
 
           nil ->
-            {:error, :autopilot_not_configured}
+            {:error, :miner_job_not_configured}
         end
 
       error ->
@@ -478,21 +440,21 @@ defmodule SpaceTraders.Fleet do
     end
   end
 
-  @doc "Reconciles a ready Autopilot and dispatches its next loop leg."
-  def advance_autopilot(%AgentRecord{} = agent, %AutopilotConfig{} = config, live_ship) do
-    advance_autopilot(agent, config, live_ship, :normal)
+  @doc "Reconciles a ready Miner Job and dispatches its next loop leg."
+  def advance_miner_job(%AgentRecord{} = agent, %Job{} = config, live_ship) do
+    advance_miner_job(agent, config, live_ship, :normal)
   end
 
-  defp advance_autopilot(%AgentRecord{} = agent, %AutopilotConfig{} = config, live_ship, mode) do
+  defp advance_miner_job(%AgentRecord{} = agent, %Job{} = config, live_ship, mode) do
     cond do
       in_flight_arrival?(config, live_ship) ->
         maybe_schedule_arrival(agent, live_ship.symbol, %{nav: live_ship.nav})
 
-        record_autopilot_activity(
+        record_miner_job_activity(
           agent,
           live_ship,
-          "autopilot_waiting",
-          "Autopilot waiting for arrival",
+          "miner_job_waiting",
+          "Miner Job waiting for arrival",
           %{
             "wait" => "arrival"
           }
@@ -510,15 +472,15 @@ defmodule SpaceTraders.Fleet do
         sell_at_market(agent, config, live_ship)
 
       true ->
-        navigate_autopilot(agent, config, live_ship, config.extraction_waypoint)
+        navigate_miner_job(agent, config, live_ship, config.extraction_waypoint)
     end
   end
 
-  @doc "Marks an Autopilot extraction complete after authoritative cooldown revalidation."
-  def revalidate_autopilot_cooldown(agent_id, ship_symbol, live_ship) do
+  @doc "Marks Miner Job extraction complete after authoritative cooldown revalidation."
+  def revalidate_miner_job_cooldown(agent_id, ship_symbol, live_ship) do
     with %Ship{} = ship <- Repo.get_by(Ship, agent_id: agent_id, symbol: ship_symbol),
-         %AutopilotConfig{} = config <- Repo.get_by(AutopilotConfig, ship_id: ship.id),
-         true <- config.desired_mode == "autopilot",
+         %Job{} = config <- Repo.get_by(Job, ship_id: ship.id),
+         true <- config.desired_mode == "active",
          true <- cooldown_ready?(live_ship),
          %AgentRecord{} = agent <- Repo.get(AgentRecord, agent_id) do
       case config.in_flight_action do
@@ -532,13 +494,13 @@ defmodule SpaceTraders.Fleet do
               )
             )
 
-          advance_autopilot(agent, config, live_ship, :timeline)
+          advance_miner_job(agent, config, live_ship, :timeline)
 
         %{"kind" => "cooldown"} ->
           config =
             Repo.update!(Ecto.Changeset.change(config, status: "ready", in_flight_action: nil))
 
-          advance_autopilot(agent, config, live_ship, :timeline)
+          advance_miner_job(agent, config, live_ship, :timeline)
 
         _ ->
           :ok
@@ -548,11 +510,11 @@ defmodule SpaceTraders.Fleet do
     end
   end
 
-  @doc "Marks an Autopilot navigation attempt complete after authoritative Arrival revalidation."
-  def revalidate_autopilot_arrival(agent_id, ship_symbol, live_ship) do
+  @doc "Marks Miner Job navigation complete after authoritative Arrival revalidation."
+  def revalidate_miner_job_arrival(agent_id, ship_symbol, live_ship) do
     with %Ship{} = ship <- Repo.get_by(Ship, agent_id: agent_id, symbol: ship_symbol),
-         %AutopilotConfig{} = config <- Repo.get_by(AutopilotConfig, ship_id: ship.id),
-         true <- config.desired_mode == "autopilot",
+         %Job{} = config <- Repo.get_by(Job, ship_id: ship.id),
+         true <- config.desired_mode == "active",
          true <- arrived_at_configured_waypoint?(live_ship, config) do
       agent = Repo.get!(AgentRecord, agent_id)
       waypoint = get_in(config.in_flight_action, ["waypoint"])
@@ -566,7 +528,7 @@ defmodule SpaceTraders.Fleet do
           )
         )
 
-      advance_autopilot(agent, config, live_ship, :timeline)
+      advance_miner_job(agent, config, live_ship, :timeline)
     else
       _ -> :ok
     end
@@ -590,7 +552,7 @@ defmodule SpaceTraders.Fleet do
 
   defp at_market_waypoint?(_, _), do: false
 
-  defp arrived_at_configured_waypoint?(live_ship, %AutopilotConfig{
+  defp arrived_at_configured_waypoint?(live_ship, %Job{
          in_flight_action: %{"waypoint" => waypoint}
        }) do
     at_extraction_waypoint?(live_ship, waypoint) or at_market_waypoint?(live_ship, waypoint)
@@ -602,18 +564,18 @@ defmodule SpaceTraders.Fleet do
     cond do
       live_ship.nav.status == "DOCKED" ->
         case SpaceTraders.API.orbit_ship(agent.agent_token, live_ship.symbol) do
-          {:ok, result} -> advance_autopilot(agent, config, %{live_ship | nav: result.nav}, mode)
-          {:error, reason} -> mark_autopilot_blocked(config, reason)
+          {:ok, result} -> advance_miner_job(agent, config, %{live_ship | nav: result.nav}, mode)
+          {:error, reason} -> mark_miner_job_blocked(config, reason)
         end
 
       cooldown_active?(live_ship) ->
         maybe_schedule_live_cooldown(agent, live_ship)
 
-        record_autopilot_activity(
+        record_miner_job_activity(
           agent,
           live_ship,
-          "autopilot_waiting",
-          "Autopilot waiting for cooldown",
+          "miner_job_waiting",
+          "Miner Job waiting for cooldown",
           %{"wait" => "cooldown"}
         )
 
@@ -639,7 +601,7 @@ defmodule SpaceTraders.Fleet do
 
         extract =
           case mode do
-            :timeline -> &extract_resources_for_autopilot/2
+            :timeline -> &extract_resources_for_miner_job/2
             :normal -> &extract_resources/2
           end
 
@@ -663,11 +625,11 @@ defmodule SpaceTraders.Fleet do
               Ecto.Changeset.change(config, status: "blocked", blocked_reason: inspect(reason))
             )
 
-            record_autopilot_activity(
+            record_miner_job_activity(
               agent,
               live_ship,
-              "autopilot_blocked",
-              "Autopilot blocked: #{inspect(reason)}",
+              "miner_job_blocked",
+              "Miner Job blocked: #{inspect(reason)}",
               %{"block" => inspect(reason), "recovery" => "resume"}
             )
 
@@ -675,7 +637,7 @@ defmodule SpaceTraders.Fleet do
         end
 
       true ->
-        navigate_autopilot(agent, config, live_ship, config.market_waypoint)
+        navigate_miner_job(agent, config, live_ship, config.market_waypoint)
     end
   end
 
@@ -690,9 +652,9 @@ defmodule SpaceTraders.Fleet do
            ),
          {:ok, live_ship} <- settle_market_cargo(agent, config, live_ship, market),
          {:ok, live_ship} <- refuel_for_market_departure(agent, config, live_ship, market) do
-      navigate_autopilot(agent, config, live_ship, config.extraction_waypoint)
+      navigate_miner_job(agent, config, live_ship, config.extraction_waypoint)
     else
-      {:error, reason} -> mark_autopilot_blocked(config, reason)
+      {:error, reason} -> mark_miner_job_blocked(config, reason)
     end
   end
 
@@ -734,9 +696,9 @@ defmodule SpaceTraders.Fleet do
 
     request =
       if kind == "sell" do
-        sell_cargo_for_autopilot(agent, live_ship.symbol, item.symbol, item.units)
+        sell_cargo_for_miner_job(agent, live_ship.symbol, item.symbol, item.units)
       else
-        jettison_cargo_for_autopilot(agent, live_ship.symbol, item.symbol, item.units)
+        jettison_cargo_for_miner_job(agent, live_ship.symbol, item.symbol, item.units)
       end
 
     case request do
@@ -752,11 +714,11 @@ defmodule SpaceTraders.Fleet do
         {:ok, %{live_ship | cargo: cargo}}
 
       {:error, reason} ->
-        mark_autopilot_blocked(config, {:market_cargo_action_failed, kind, item.symbol, reason})
+        mark_miner_job_blocked(config, {:market_cargo_action_failed, kind, item.symbol, reason})
     end
   end
 
-  defp sell_cargo_for_autopilot(
+  defp sell_cargo_for_miner_job(
          %AgentRecord{agent_token: token},
          ship_symbol,
          trade_symbol,
@@ -765,7 +727,7 @@ defmodule SpaceTraders.Fleet do
     SpaceTraders.API.sell_cargo(token, ship_symbol, trade_symbol, units)
   end
 
-  defp jettison_cargo_for_autopilot(
+  defp jettison_cargo_for_miner_job(
          %AgentRecord{agent_token: token},
          ship_symbol,
          trade_symbol,
@@ -779,10 +741,10 @@ defmodule SpaceTraders.Fleet do
       {:ok, live_ship}
     else
       with :ok <- fuel_available?(market),
-           {:ok, live_ship} <- refuel_for_autopilot(agent, config, live_ship) do
+           {:ok, live_ship} <- refuel_for_miner_job(agent, config, live_ship) do
         {:ok, live_ship}
       else
-        {:error, reason} -> mark_autopilot_blocked(config, reason)
+        {:error, reason} -> mark_miner_job_blocked(config, reason)
       end
     end
   end
@@ -801,7 +763,7 @@ defmodule SpaceTraders.Fleet do
 
   defp fuel_full?(_), do: false
 
-  defp refuel_for_autopilot(agent, config, live_ship) do
+  defp refuel_for_miner_job(agent, config, live_ship) do
     action = %{
       "kind" => "refuel",
       "waypoint" => config.market_waypoint,
@@ -826,31 +788,31 @@ defmodule SpaceTraders.Fleet do
         {:ok, %{live_ship | fuel: fuel}}
 
       {:ok, %{fuel: fuel}} ->
-        mark_autopilot_blocked(
+        mark_miner_job_blocked(
           config,
           {:market_fuel_insufficient, config.market_waypoint, fuel.current, fuel.capacity}
         )
 
       {:error, reason} ->
-        mark_autopilot_blocked(config, {:market_refuel_failed, config.market_waypoint, reason})
+        mark_miner_job_blocked(config, {:market_refuel_failed, config.market_waypoint, reason})
     end
   end
 
-  defp navigate_autopilot(agent, config, live_ship, waypoint) do
+  defp navigate_miner_job(agent, config, live_ship, waypoint) do
     if live_ship.nav.status == "DOCKED" do
       case SpaceTraders.API.orbit_ship(agent.agent_token, live_ship.symbol) do
         {:ok, result} ->
-          navigate_autopilot(agent, config, %{live_ship | nav: result.nav}, waypoint)
+          navigate_miner_job(agent, config, %{live_ship | nav: result.nav}, waypoint)
 
         {:error, reason} ->
-          mark_autopilot_blocked(config, reason)
+          mark_miner_job_blocked(config, reason)
       end
     else
-      do_navigate_autopilot(agent, config, live_ship, waypoint)
+      do_navigate_miner_job(agent, config, live_ship, waypoint)
     end
   end
 
-  defp do_navigate_autopilot(agent, config, live_ship, waypoint) do
+  defp do_navigate_miner_job(agent, config, live_ship, waypoint) do
     action = %{
       "kind" => "navigate",
       "waypoint" => waypoint,
@@ -887,8 +849,8 @@ defmodule SpaceTraders.Fleet do
 
         record_activity_by_config(
           config,
-          "autopilot_blocked",
-          "Autopilot blocked: #{inspect(reason)}",
+          "miner_job_blocked",
+          "Miner Job blocked: #{inspect(reason)}",
           %{
             "block" => inspect(reason),
             "recovery" => "resume"
@@ -899,13 +861,13 @@ defmodule SpaceTraders.Fleet do
     end
   end
 
-  defp market_leg?(%AutopilotConfig{
+  defp market_leg?(%Job{
          in_flight_action: %{"waypoint" => waypoint},
          market_waypoint: waypoint
        }),
        do: true
 
-  defp market_leg?(%AutopilotConfig{
+  defp market_leg?(%Job{
          progress: %{"waypoint" => waypoint},
          market_waypoint: waypoint
        }),
@@ -913,7 +875,7 @@ defmodule SpaceTraders.Fleet do
 
   defp market_leg?(_), do: false
 
-  defp pending_navigation?(%AutopilotConfig{
+  defp pending_navigation?(%Job{
          status: "waiting",
          in_flight_action: %{"kind" => "navigate"}
        }),
@@ -921,8 +883,8 @@ defmodule SpaceTraders.Fleet do
 
   defp pending_navigation?(_), do: false
 
-  defp mark_autopilot_blocked(config, reason) do
-    already_blocked? = Repo.get!(AutopilotConfig, config.id).status == "blocked"
+  defp mark_miner_job_blocked(config, reason) do
+    already_blocked? = Repo.get!(Job, config.id).status == "blocked"
 
     Repo.update!(
       Ecto.Changeset.change(config, status: "blocked", blocked_reason: inspect(reason))
@@ -931,8 +893,8 @@ defmodule SpaceTraders.Fleet do
     unless already_blocked? do
       record_activity_by_config(
         config,
-        "autopilot_blocked",
-        "Autopilot blocked: #{inspect(reason)}",
+        "miner_job_blocked",
+        "Miner Job blocked: #{inspect(reason)}",
         %{
           "block" => inspect(reason),
           "recovery" => "resume"
@@ -948,7 +910,7 @@ defmodule SpaceTraders.Fleet do
     record_activity(Repo.get!(AgentRecord, ship.agent_id), ship, kind, message, metadata)
   end
 
-  defp extract_resources_for_autopilot(%AgentRecord{agent_token: token} = agent, ship_symbol)
+  defp extract_resources_for_miner_job(%AgentRecord{agent_token: token} = agent, ship_symbol)
        when is_binary(token) and token != "" do
     with {:ok, result} <- SpaceTraders.API.extract_resources(token, ship_symbol),
          :ok <- schedule_cooldown(agent, ship_symbol, result) do
@@ -990,7 +952,7 @@ defmodule SpaceTraders.Fleet do
   defp cooldown_ready?(_), do: true
 
   defp in_flight_arrival?(
-         %AutopilotConfig{in_flight_action: %{"expected" => %{"destination" => destination}}},
+         %Job{in_flight_action: %{"expected" => %{"destination" => destination}}},
          %{nav: %{status: "IN_TRANSIT", route: %{destination: %{symbol: destination}}}}
        ),
        do: true
@@ -1080,7 +1042,7 @@ defmodule SpaceTraders.Fleet do
   """
   def navigate_ship(%AgentRecord{agent_token: agent_token} = agent, ship_symbol, waypoint_symbol)
       when is_binary(agent_token) and agent_token != "" do
-    with :ok <- preempt_autopilot_for(agent, ship_symbol, {:manual_override, "navigation"}),
+    with :ok <- preempt_miner_job_for(agent, ship_symbol, {:manual_override, "navigation"}),
          :ok <- ShipServer.ensure_ready(ship_symbol),
          {:ok, result} <-
            SpaceTraders.API.navigate_ship(agent_token, ship_symbol, waypoint_symbol) do
@@ -1102,7 +1064,7 @@ defmodule SpaceTraders.Fleet do
       )
       when is_binary(agent_token) and agent_token != "" and
              flight_mode in ["DRIFT", "STEALTH", "CRUISE", "BURN"] do
-    with :ok <- preempt_autopilot_for(agent, ship_symbol, {:manual_override, "flight mode"}),
+    with :ok <- preempt_miner_job_for(agent, ship_symbol, {:manual_override, "flight mode"}),
          :ok <- flight_mode_change_allowed?(ship_symbol) do
       SpaceTraders.API.set_ship_flight_mode(agent_token, ship_symbol, flight_mode)
     end
@@ -1187,7 +1149,7 @@ defmodule SpaceTraders.Fleet do
   @doc "Docks a ship at its current waypoint."
   def dock_ship(%AgentRecord{agent_token: agent_token} = agent, ship_symbol)
       when is_binary(agent_token) and agent_token != "" do
-    with :ok <- preempt_autopilot_for(agent, ship_symbol, {:manual_override, "docking"}),
+    with :ok <- preempt_miner_job_for(agent, ship_symbol, {:manual_override, "docking"}),
          :ok <- ShipServer.ensure_ready(ship_symbol) do
       SpaceTraders.API.dock_ship(agent_token, ship_symbol)
     end
@@ -1198,7 +1160,7 @@ defmodule SpaceTraders.Fleet do
   @doc "Puts a ship into orbit at its current waypoint."
   def orbit_ship(%AgentRecord{agent_token: agent_token} = agent, ship_symbol)
       when is_binary(agent_token) and agent_token != "" do
-    with :ok <- preempt_autopilot_for(agent, ship_symbol, {:manual_override, "orbit"}),
+    with :ok <- preempt_miner_job_for(agent, ship_symbol, {:manual_override, "orbit"}),
          :ok <- ShipServer.ensure_ready(ship_symbol) do
       SpaceTraders.API.orbit_ship(agent_token, ship_symbol)
     end
@@ -1209,7 +1171,7 @@ defmodule SpaceTraders.Fleet do
   @doc "Extracts resources and persists the returned cooldown on the timeline."
   def extract_resources(%AgentRecord{agent_token: agent_token} = agent, ship_symbol)
       when is_binary(agent_token) and agent_token != "" do
-    with :ok <- preempt_autopilot_for(agent, ship_symbol, {:manual_override, "extraction"}),
+    with :ok <- preempt_miner_job_for(agent, ship_symbol, {:manual_override, "extraction"}),
          :ok <- ShipServer.ensure_ready(ship_symbol),
          {:ok, result} <- SpaceTraders.API.extract_resources(agent_token, ship_symbol),
          :ok <- schedule_cooldown(agent, ship_symbol, result) do
@@ -1222,7 +1184,7 @@ defmodule SpaceTraders.Fleet do
   @doc "Siphons gas and persists the returned cooldown on the timeline."
   def siphon_resources(%AgentRecord{agent_token: agent_token} = agent, ship_symbol)
       when is_binary(agent_token) and agent_token != "" do
-    with :ok <- preempt_autopilot_for(agent, ship_symbol, {:manual_override, "siphoning"}),
+    with :ok <- preempt_miner_job_for(agent, ship_symbol, {:manual_override, "siphoning"}),
          :ok <- ShipServer.ensure_ready(ship_symbol),
          {:ok, live_ship} <- SpaceTraders.API.get_ship(agent_token, ship_symbol),
          {:ok, waypoint} <-
@@ -1256,7 +1218,7 @@ defmodule SpaceTraders.Fleet do
   @doc "Sells cargo from a ship and returns the updated cargo and transaction."
   def sell_cargo(%AgentRecord{agent_token: agent_token} = agent, ship_symbol, trade_symbol, units)
       when is_binary(agent_token) and agent_token != "" do
-    with :ok <- preempt_autopilot_for(agent, ship_symbol, {:manual_override, "selling cargo"}),
+    with :ok <- preempt_miner_job_for(agent, ship_symbol, {:manual_override, "selling cargo"}),
          :ok <- ShipServer.ensure_ready(ship_symbol) do
       SpaceTraders.API.sell_cargo(agent_token, ship_symbol, trade_symbol, units)
     end
@@ -1273,7 +1235,7 @@ defmodule SpaceTraders.Fleet do
         units
       )
       when is_binary(agent_token) and agent_token != "" and is_integer(units) and units > 0 do
-    with :ok <- preempt_autopilot_for(agent, ship_symbol, {:manual_override, "purchasing cargo"}),
+    with :ok <- preempt_miner_job_for(agent, ship_symbol, {:manual_override, "purchasing cargo"}),
          :ok <- ShipServer.ensure_ready(ship_symbol) do
       SpaceTraders.API.purchase_cargo(agent_token, ship_symbol, trade_symbol, units)
     end
@@ -1289,7 +1251,7 @@ defmodule SpaceTraders.Fleet do
   @doc "Refuels a ship at a marketplace that sells fuel."
   def refuel_ship(%AgentRecord{agent_token: agent_token} = agent, ship_symbol)
       when is_binary(agent_token) and agent_token != "" do
-    with :ok <- preempt_autopilot_for(agent, ship_symbol, {:manual_override, "refueling"}),
+    with :ok <- preempt_miner_job_for(agent, ship_symbol, {:manual_override, "refueling"}),
          :ok <- ShipServer.ensure_ready(ship_symbol) do
       SpaceTraders.API.refuel_ship(agent_token, ship_symbol)
     end
@@ -1306,7 +1268,7 @@ defmodule SpaceTraders.Fleet do
       )
       when is_binary(agent_token) and agent_token != "" and is_integer(units) and units > 0 do
     with :ok <-
-           preempt_autopilot_for(agent, ship_symbol, {:manual_override, "jettisoning cargo"}),
+           preempt_miner_job_for(agent, ship_symbol, {:manual_override, "jettisoning cargo"}),
          :ok <- ShipServer.ensure_ready(ship_symbol) do
       SpaceTraders.API.jettison_cargo(agent_token, ship_symbol, trade_symbol, units)
     end
@@ -1332,7 +1294,7 @@ defmodule SpaceTraders.Fleet do
          {:ok, source} <- SpaceTraders.API.get_ship(token, from_ship),
          {:ok, target} <- SpaceTraders.API.get_ship(token, to_ship),
          :ok <- transfer_preflight(source, target, trade_symbol, units),
-         :ok <- preempt_autopilot_for(agent, from_ship, {:manual_override, "cargo transfer"}),
+         :ok <- preempt_miner_job_for(agent, from_ship, {:manual_override, "cargo transfer"}),
          :ok <- ShipServer.ensure_ready(from_ship) do
       SpaceTraders.API.transfer_cargo(token, from_ship, trade_symbol, units, to_ship)
     end
@@ -1385,14 +1347,14 @@ defmodule SpaceTraders.Fleet do
   def rearm_ships_on_boot do
     timeline_symbols = Timeline.pending_owners(:ship) |> Enum.map(& &1.owner_id)
 
-    autopilot_symbols =
+    job_symbols =
       Job
       |> join(:inner, [c], s in Ship, on: c.ship_id == s.id)
-      |> where([c, _s], c.desired_mode == "autopilot")
+      |> where([c, _s], c.desired_mode == "active")
       |> select([_c, s], s.symbol)
       |> Repo.all()
 
-    (timeline_symbols ++ autopilot_symbols)
+    (timeline_symbols ++ job_symbols)
     |> Enum.uniq()
     |> Enum.each(fn ship_symbol ->
       case ship_credentials(ship_symbol) do
@@ -1413,19 +1375,14 @@ defmodule SpaceTraders.Fleet do
     :ok
   end
 
-  @doc "Reconciles a persisted in-flight Autopilot action after a process restart."
-  def recover_autopilot_on_boot(ship_symbol, agent_id, agent_token) do
-    recover_job_on_boot(ship_symbol, agent_id, agent_token)
-  end
-
   @doc "Reconciles a persisted Miner Job's in-flight action after a process restart."
   def recover_job_on_boot(ship_symbol, agent_id, agent_token) do
     with %Ship{} = ship <- Repo.get_by(Ship, symbol: ship_symbol, agent_id: agent_id),
          %Job{} = config <- Repo.get_by(Job, ship_id: ship.id) do
-      if config.desired_mode == "autopilot" do
+      if config.desired_mode == "active" do
         case SpaceTraders.API.get_ship(agent_token, ship_symbol) do
           {:ok, live_ship} when config.status == "ready" and is_nil(config.in_flight_action) ->
-            advance_autopilot(Repo.get!(AgentRecord, agent_id), config, live_ship)
+            advance_miner_job(Repo.get!(AgentRecord, agent_id), config, live_ship)
 
           {:ok, live_ship}
           when config.status in ["revalidating", "waiting"] and is_map(config.in_flight_action) ->
@@ -1453,8 +1410,8 @@ defmodule SpaceTraders.Fleet do
         record_activity_by_id(
           agent_id,
           ship,
-          "autopilot_recovery",
-          "Autopilot action confirmed after restart",
+          "miner_job_recovery",
+          "Miner Job action confirmed after restart",
           "confirmed"
         )
 
@@ -1465,7 +1422,7 @@ defmodule SpaceTraders.Fleet do
 
           {:ok, recovered_config}
         else
-          advance_autopilot(
+          advance_miner_job(
             Repo.get!(AgentRecord, agent_id),
             recovered_config,
             live_ship,
@@ -1550,12 +1507,12 @@ defmodule SpaceTraders.Fleet do
     record_activity_by_id(
       agent_id,
       ship,
-      "autopilot_recovery",
-      "Autopilot action absent; retrying",
+      "miner_job_recovery",
+      "Miner Job action absent; retrying",
       "absent"
     )
 
-    case advance_autopilot(Repo.get!(AgentRecord, agent_id), config, live_ship, :timeline) do
+    case advance_miner_job(Repo.get!(AgentRecord, agent_id), config, live_ship, :timeline) do
       {:ok, recovered_config} ->
         {:ok, Repo.update!(Ecto.Changeset.change(recovered_config, recovery_attempts: 0))}
 
@@ -1566,7 +1523,7 @@ defmodule SpaceTraders.Fleet do
 
   defp recovery_retry_or_block(agent_id, ship_symbol, reason, agent_token) do
     with %Ship{} = ship <- Repo.get_by(Ship, symbol: ship_symbol, agent_id: agent_id),
-         %Job{desired_mode: "autopilot"} = config <- Repo.get_by(Job, ship_id: ship.id) do
+         %Job{desired_mode: "active"} = config <- Repo.get_by(Job, ship_id: ship.id) do
       if config.recovery_attempts < 3 do
         Repo.update!(
           Ecto.Changeset.change(config, recovery_attempts: config.recovery_attempts + 1)
@@ -1575,7 +1532,7 @@ defmodule SpaceTraders.Fleet do
         record_activity_by_id(
           agent_id,
           ship,
-          "autopilot_recovery",
+          "miner_job_recovery",
           "Authoritative recovery read failed; retrying",
           "transport_error"
         )
@@ -1593,7 +1550,7 @@ defmodule SpaceTraders.Fleet do
     Repo.update!(
       Ecto.Changeset.change(config,
         status: "blocked",
-        blocked_reason: "Autopilot recovery #{outcome}; no game action was replayed",
+        blocked_reason: "Miner Job recovery #{outcome}; no game action was replayed",
         last_action_result: %{"kind" => "recovery", "outcome" => outcome}
       )
     )
@@ -1601,12 +1558,12 @@ defmodule SpaceTraders.Fleet do
     record_activity_by_id(
       agent_id,
       ship,
-      "autopilot_recovery",
-      "Autopilot recovery blocked: #{outcome}",
+      "miner_job_recovery",
+      "Miner Job recovery blocked: #{outcome}",
       outcome
     )
 
-    {:error, :autopilot_recovery_blocked}
+    {:error, :miner_job_recovery_blocked}
   end
 
   defp record_activity_by_id(agent_id, ship, kind, message, outcome) do

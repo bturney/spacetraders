@@ -107,15 +107,27 @@ The decision rule belonging to a Job that selects a viable Intent from authorita
 _Avoid_: script, action plan
 
 **Intent**:
-A state-aware request for a Ship to achieve an operational outcome, such as reaching a Waypoint. An Intent selects and performs the necessary game actions from authoritative Ship state; it is not a fixed sequence of API calls.
+A state-aware request for a Ship to achieve an operational outcome, such as reaching a Waypoint. A Job Policy or the Operator in Manual Mode can invoke an Intent. An Intent selects and performs the necessary game actions from authoritative Ship state; it is not a fixed sequence of API calls.
 _Avoid_: action, macro, script
+
+**Navigate Intent**:
+An Intent to reach a requested Waypoint. It makes required local posture and refueling work explicit as progress rather than requiring the Operator to issue each game action. It is reusable by a Job Policy and in Manual Mode.
+_Avoid_: Navigate Job, route script
+
+**Refuel Intent**:
+An Intent to restore a Ship's fuel where the game permits refueling. It is reusable independently in Manual Mode and as part of Navigate.
+_Avoid_: fuel action (when referring to the state-aware capability)
 
 **Autopilot**:
 An Operator-started, per-Ship Job to execute one configured local extract/sell loop. Its persisted configuration and execution status are Fleet state; it never resumes an action without reconciling authoritative game state. It may act only within its configured extraction Waypoint, Market, and Cargo threshold.
 _Avoid_: bot, automatic mode
 
+**Miner Job**:
+A durable Job that owns one configured local extract/sell loop for a Ship. It uses Policies and Intents to pursue the configured extraction Waypoint, Market, and Cargo threshold; it is the first concrete Job and absorbs the existing Autopilot capability.
+_Avoid_: autopilot (when referring to the Job type), mining bot
+
 **Manual Mode**:
-A Ship operating mode in which the Operator issues direct commands. Any direct command pauses the active Job before it runs; resuming automation requires revalidation against game truth.
+A Ship operating mode in which the Operator issues a direct game action or invokes a one-off Intent. Any manual command pauses the active Job before it runs; resuming automation requires revalidation against game truth. A completed one-off Intent leaves the Ship in Manual Mode.
 **Ship Readiness**:
 The capability and condition information that determines what a Ship can do: flight mode, crew, frame, reactor, engine, modules, and mounts. It supplements, but does not replace, the Ship's immediate operational status, location, fuel, cargo, and actions.
 

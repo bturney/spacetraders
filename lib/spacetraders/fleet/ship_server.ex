@@ -82,7 +82,7 @@ defmodule SpaceTraders.Fleet.ShipServer do
     end
   end
 
-  @doc "Clears locally pending timers after an Operator preempts Autopilot."
+  @doc "Clears locally pending timers after an Operator preempts a Miner Job."
   def cancel_pending(ship_symbol) do
     case Registry.lookup(SpaceTraders.Fleet.ShipRegistry, ship_symbol) do
       [{pid, _}] -> GenServer.call(pid, :cancel_pending, 5_000)
@@ -167,10 +167,10 @@ defmodule SpaceTraders.Fleet.ShipServer do
 
           case type do
             :arrival ->
-              SpaceTraders.Fleet.revalidate_autopilot_arrival(state.agent_id, state.symbol, ship)
+              SpaceTraders.Fleet.revalidate_miner_job_arrival(state.agent_id, state.symbol, ship)
 
             :cooldown ->
-              SpaceTraders.Fleet.revalidate_autopilot_cooldown(state.agent_id, state.symbol, ship)
+              SpaceTraders.Fleet.revalidate_miner_job_cooldown(state.agent_id, state.symbol, ship)
 
             _ ->
               :ok
