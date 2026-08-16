@@ -284,7 +284,7 @@ defmodule SpaceTradersWeb.DashboardLive do
     with {:ok, agent} <- agent_for_ship(socket, ship_symbol),
          {:ok, _job} <- Fleet.start_miner_job(agent, ship_symbol) do
       {:noreply,
-       put_flash(refresh_agent(socket, agent), :info, "#{ship_symbol} Miner Job is ready.")}
+       put_flash(refresh_agent(socket, agent), :info, "#{ship_symbol} Miner Job started.")}
     else
       {:error, reason} ->
         {:noreply,
@@ -2743,7 +2743,7 @@ defmodule SpaceTradersWeb.DashboardLive do
           Start Miner Job
         </button>
         <button
-          :if={@job && @job.desired_mode == "autopilot"}
+          :if={@job && @job.desired_mode == "autopilot" && @job.status != "blocked"}
           type="button"
           phx-click="pause_miner_job"
           phx-value-symbol={@ship.symbol}
@@ -2830,7 +2830,7 @@ defmodule SpaceTradersWeb.DashboardLive do
   defp job_status(_), do: "Manual"
 
   defp job_reason(%{status: "blocked", blocked_reason: reason}) when is_binary(reason),
-    do: "Blocked: #{reason}"
+    do: "Blocked: #{job_blocked_reason(reason)}"
 
   defp job_reason(%{status: "paused", blocked_reason: reason}) when is_binary(reason),
     do: reason
@@ -2877,7 +2877,9 @@ defmodule SpaceTradersWeb.DashboardLive do
     end
   end
 
-  defp job_next_transition(%{status: "blocked"}, _ship), do: "Resolve the issue, then Resume"
+  defp job_next_transition(%{status: "blocked", blocked_reason: reason}, _ship),
+    do: "#{job_correction(reason)}, then Resume"
+
   defp job_next_transition(%{status: "paused"}, _ship), do: "Resume after revalidation"
 
   defp job_next_transition(%{desired_mode: "autopilot", extraction_waypoint: waypoint}, ship) do
@@ -2887,6 +2889,28 @@ defmodule SpaceTradersWeb.DashboardLive do
   end
 
   defp job_next_transition(_, _ship), do: "Start Miner Job"
+
+  defp job_blocked_reason(":invalid_extraction_waypoint"),
+    do: "Choose an ASTEROID_FIELD or ENGINEERED_ASTEROID extraction waypoint."
+
+  defp job_blocked_reason(":invalid_market_waypoint"),
+    do: "Choose a waypoint with a MARKETPLACE trait."
+
+  defp job_blocked_reason(":cargo_threshold_exceeds_capacity"),
+    do: "Cargo threshold exceeds this Ship's capacity."
+
+  defp job_blocked_reason(":mining_capability_missing"),
+    do: "This Ship has no mining laser installed."
+
+  defp job_blocked_reason(reason), do: reason
+
+  defp job_correction(":invalid_extraction_waypoint"),
+    do: "Choose an asteroid extraction waypoint"
+
+  defp job_correction(":invalid_market_waypoint"), do: "Choose a marketplace waypoint"
+  defp job_correction(":cargo_threshold_exceeds_capacity"), do: "Lower the cargo threshold"
+  defp job_correction(":mining_capability_missing"), do: "Use a Ship with a mining laser"
+  defp job_correction(_reason), do: "Resolve the issue"
 
   defp paused_status("Paused by a direct Ship action"), do: "Paused by manual action"
   defp paused_status("Paused by Operator"), do: "Paused by Operator"

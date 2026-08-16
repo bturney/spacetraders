@@ -1206,7 +1206,7 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       assert html =~ "ambiguous outcome"
     end
 
-    test "keeps autopilot mode, action, and recovery aligned", %{
+    test "keeps Miner Job mode, action, and recovery aligned", %{
       conn: conn,
       operator: operator
     } do
@@ -1264,7 +1264,11 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
         struct(
           AutopilotConfig,
           Keyword.put(config_attrs, :ship_id, blocked_ship.id) ++
-            [desired_mode: "autopilot", status: "blocked", blocked_reason: "market unavailable"]
+            [
+              desired_mode: "autopilot",
+              status: "blocked",
+              blocked_reason: ":invalid_extraction_waypoint"
+            ]
         )
       )
 
@@ -1303,7 +1307,23 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       assert has_element?(
                lv,
                "[data-ship-card=\"ORBITALIST-3\"] [data-job-next-transition]",
-               "Resolve the issue, then Resume"
+               "Choose an asteroid extraction waypoint, then Resume"
+             )
+
+      assert has_element?(
+               lv,
+               "[data-ship-card=\"ORBITALIST-3\"] [data-job-reason]",
+               "Choose an ASTEROID_FIELD or ENGINEERED_ASTEROID extraction waypoint."
+             )
+
+      assert has_element?(
+               lv,
+               "[data-ship-card=\"ORBITALIST-3\"] button[phx-click=\"resume_miner_job\"]"
+             )
+
+      refute has_element?(
+               lv,
+               "[data-ship-card=\"ORBITALIST-3\"] button[phx-click=\"pause_miner_job\"]"
              )
     end
 
@@ -1344,7 +1364,12 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
             Req.Test.json(conn, %{"data" => []})
 
           {"/v2/my/ships/ORBITALIST-1", "GET"} ->
-            Req.Test.json(conn, %{"data" => ship_body("ORBITALIST-1")})
+            Req.Test.json(conn, %{
+              "data" =>
+                ship_body("ORBITALIST-1", %{
+                  "mounts" => [%{"symbol" => "MOUNT_MINING_LASER_I"}]
+                })
+            })
 
           {"/v2/systems/X1-UX81/waypoints/X1-UX81-A2", "GET"} ->
             Req.Test.json(conn, %{
@@ -1362,6 +1387,11 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
 
           {"/v2/systems/X1-UX81/waypoints/X1-UX81-A1/market", "GET"} ->
             Req.Test.json(conn, %{"data" => %{"symbol" => "X1-UX81-A1", "tradeGoods" => []}})
+
+          {"/v2/my/ships/ORBITALIST-1/orbit", "POST"} ->
+            Req.Test.json(conn, %{
+              "data" => %{"nav" => nav_body("IN_ORBIT", destination: "X1-UX81-A1")}
+            })
 
           {"/v2/my/ships/ORBITALIST-1/navigate", "POST"} ->
             Req.Test.json(conn, %{
