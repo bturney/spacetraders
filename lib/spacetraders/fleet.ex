@@ -19,7 +19,8 @@ defmodule SpaceTraders.Fleet do
 
   alias SpaceTraders.Agent.Agent, as: AgentRecord
   alias SpaceTraders.API.Model.{ShipNav, ShipNavRoute}
-  alias SpaceTraders.Fleet.{Activity, AutopilotConfig, Job, Ship, ShipDestination}
+  alias SpaceTraders.Fleet.{Activity, Job, Ship, ShipDestination}
+  alias SpaceTraders.Fleet.Job, as: AutopilotConfig
   alias SpaceTraders.Fleet.ShipServer
   alias SpaceTraders.Repo
   alias SpaceTraders.{Agent, Contracts, Listing, Shipyard}
@@ -480,14 +481,6 @@ defmodule SpaceTraders.Fleet do
   @doc "Reconciles a ready Autopilot and dispatches its next loop leg."
   def advance_autopilot(%AgentRecord{} = agent, %AutopilotConfig{} = config, live_ship) do
     advance_autopilot(agent, config, live_ship, :normal)
-  end
-
-  def advance_autopilot(%AgentRecord{} = agent, %Job{id: id}, live_ship) do
-    advance_autopilot(agent, Repo.get!(AutopilotConfig, id), live_ship, :normal)
-  end
-
-  defp advance_autopilot(%AgentRecord{} = agent, %Job{id: id}, live_ship, mode) do
-    advance_autopilot(agent, Repo.get!(AutopilotConfig, id), live_ship, mode)
   end
 
   defp advance_autopilot(%AgentRecord{} = agent, %AutopilotConfig{} = config, live_ship, mode) do

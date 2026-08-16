@@ -7,7 +7,8 @@ defmodule SpaceTraders.Fleet.ShipServerTest do
   import SpaceTraders.ShipBody
 
   alias SpaceTraders.Fleet.ShipServer
-  alias SpaceTraders.Fleet.{AutopilotConfig, Ship}
+  alias SpaceTraders.Fleet.Ship
+  alias SpaceTraders.Fleet.Job, as: AutopilotConfig
   alias SpaceTraders.Agent.Agent
   alias SpaceTraders.Timeline
   alias SpaceTraders.Timeline.Event

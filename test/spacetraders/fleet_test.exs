@@ -7,8 +7,8 @@ defmodule SpaceTraders.FleetTest do
   alias SpaceTraders.API.Model
   alias SpaceTraders.Fleet
   alias SpaceTraders.Fleet.Ship
-  alias SpaceTraders.Fleet.AutopilotConfig
   alias SpaceTraders.Fleet.Job
+  alias SpaceTraders.Fleet.Job, as: AutopilotConfig
   alias SpaceTraders.Fleet.ShipServer
   alias SpaceTraders.Timeline
   alias SpaceTraders.Timeline.Event
