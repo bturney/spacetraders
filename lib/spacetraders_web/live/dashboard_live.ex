@@ -2646,31 +2646,30 @@ defmodule SpaceTradersWeb.DashboardLive do
     <div class="mt-4 rounded border border-primary/20 p-3" data-job-panel="miner">
       <div class="flex items-center justify-between gap-2">
         <span class="text-xs font-semibold uppercase tracking-wider opacity-60">Miner Job</span>
-        <span class="badge badge-outline badge-sm" data-job-status data-autopilot-status>
-          {autopilot_status(@job)}
+        <span class="badge badge-outline badge-sm" data-job-status>
+          {job_status(@job)}
         </span>
       </div>
       <dl class="mt-3 grid grid-cols-1 gap-1 text-xs sm:grid-cols-2">
         <div>
           <dt class="opacity-60">Active work</dt>
-          <dd data-job-active-work data-autopilot-current-action>
-            {autopilot_current_action(@job, @ship)}
+          <dd data-job-active-work>
+            {job_active_work(@job, @ship)}
           </dd>
         </div>
         <div>
           <dt class="opacity-60">Next expected transition</dt>
-          <dd data-job-next-transition data-autopilot-next-action>
-            {autopilot_next_action(@job, @ship)}
+          <dd data-job-next-transition>
+            {job_next_transition(@job, @ship)}
           </dd>
         </div>
       </dl>
       <p
-        :if={autopilot_reason(@job)}
+        :if={job_reason(@job)}
         class="mt-2 text-xs text-error"
         data-job-reason
-        data-autopilot-reason
       >
-        {autopilot_reason(@job)}
+        {job_reason(@job)}
       </p>
       <form
         id={"miner-job-form-#{@ship.symbol}"}
@@ -2819,75 +2818,75 @@ defmodule SpaceTradersWeb.DashboardLive do
     """
   end
 
-  defp autopilot_status(%{status: "blocked"}), do: "Blocked"
+  defp job_status(%{status: "blocked"}), do: "Blocked"
 
-  defp autopilot_status(%{status: "paused", blocked_reason: reason}),
+  defp job_status(%{status: "paused", blocked_reason: reason}),
     do: paused_status(reason)
 
-  defp autopilot_status(%{status: "paused"}), do: "Paused by manual action"
-  defp autopilot_status(nil), do: "Manual"
-  defp autopilot_status(%{desired_mode: "autopilot", status: "waiting"}), do: "Waiting"
-  defp autopilot_status(%{desired_mode: "autopilot"}), do: "Active Autopilot"
-  defp autopilot_status(_), do: "Manual"
+  defp job_status(%{status: "paused"}), do: "Paused by manual action"
+  defp job_status(nil), do: "Manual"
+  defp job_status(%{desired_mode: "autopilot", status: "waiting"}), do: "Waiting"
+  defp job_status(%{desired_mode: "autopilot"}), do: "Active Miner Job"
+  defp job_status(_), do: "Manual"
 
-  defp autopilot_reason(%{status: "blocked", blocked_reason: reason}) when is_binary(reason),
+  defp job_reason(%{status: "blocked", blocked_reason: reason}) when is_binary(reason),
     do: "Blocked: #{reason}"
 
-  defp autopilot_reason(%{status: "paused", blocked_reason: reason}) when is_binary(reason),
+  defp job_reason(%{status: "paused", blocked_reason: reason}) when is_binary(reason),
     do: reason
 
-  defp autopilot_reason(_), do: nil
+  defp job_reason(_), do: nil
 
-  defp autopilot_current_action(
+  defp job_active_work(
          %{status: "waiting", in_flight_action: %{"kind" => "extract"}},
          _ship
        ),
        do: "Waiting for cooldown"
 
-  defp autopilot_current_action(
+  defp job_active_work(
          %{status: "waiting", in_flight_action: %{"kind" => "navigate"}},
          _ship
        ),
        do: "Traveling to configured waypoint"
 
-  defp autopilot_current_action(
+  defp job_active_work(
          %{status: "waiting", in_flight_action: %{"kind" => "cooldown"}},
          _ship
        ),
        do: "Waiting for cooldown"
 
-  defp autopilot_current_action(%{status: "blocked"}, _ship), do: "Blocked"
+  defp job_active_work(%{status: "blocked"}, _ship), do: "Blocked"
 
-  defp autopilot_current_action(%{status: "paused", blocked_reason: reason}, _ship),
+  defp job_active_work(%{status: "paused", blocked_reason: reason}, _ship),
     do: paused_status(reason)
 
-  defp autopilot_current_action(%{status: "paused"}, _ship), do: "Paused by manual action"
-  defp autopilot_current_action(%{desired_mode: "autopilot"}, _ship), do: "Evaluating cargo"
-  defp autopilot_current_action(_, _ship), do: "Manual"
+  defp job_active_work(%{status: "paused"}, _ship), do: "Paused by manual action"
+  defp job_active_work(%{desired_mode: "autopilot"}, _ship), do: "Evaluating cargo"
+  defp job_active_work(_, _ship), do: "Manual"
 
-  defp autopilot_next_action(
+  defp job_next_transition(
          %{status: "waiting", in_flight_action: %{"kind" => "navigate", "waypoint" => waypoint}},
          _ship
        ),
        do: "Continue at #{waypoint}"
 
-  defp autopilot_next_action(%{status: "waiting"}, ship) do
+  defp job_next_transition(%{status: "waiting"}, ship) do
     case cooldown_label(ship, 0) do
       "Ready" -> "Reconcile ship"
       label -> "Wait through #{label}"
     end
   end
 
-  defp autopilot_next_action(%{status: "blocked"}, _ship), do: "Resolve the issue, then Resume"
-  defp autopilot_next_action(%{status: "paused"}, _ship), do: "Resume after revalidation"
+  defp job_next_transition(%{status: "blocked"}, _ship), do: "Resolve the issue, then Resume"
+  defp job_next_transition(%{status: "paused"}, _ship), do: "Resume after revalidation"
 
-  defp autopilot_next_action(%{desired_mode: "autopilot", extraction_waypoint: waypoint}, ship) do
+  defp job_next_transition(%{desired_mode: "autopilot", extraction_waypoint: waypoint}, ship) do
     if cooldown_display_active?(ship),
       do: "Wait through #{cooldown_label(ship, 0)}",
       else: "Evaluate at #{waypoint}"
   end
 
-  defp autopilot_next_action(_, _ship), do: "Start Miner Job"
+  defp job_next_transition(_, _ship), do: "Start Miner Job"
 
   defp paused_status("Paused by a direct Ship action"), do: "Paused by manual action"
   defp paused_status("Paused by Operator"), do: "Paused by Operator"

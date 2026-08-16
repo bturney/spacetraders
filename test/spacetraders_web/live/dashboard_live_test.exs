@@ -1138,7 +1138,7 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
         })
 
       assert html =~ "Miner Job configuration saved. Start remains manual."
-      assert has_element?(lv, "[data-autopilot-status]", "Manual")
+      assert has_element?(lv, "[data-job-status]", "Manual")
     end
 
     test "presents the configured loop as a Miner Job", %{conn: conn, operator: operator} do
@@ -1278,36 +1278,36 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
 
       assert has_element?(
                lv,
-               "[data-ship-card=\"ORBITALIST-1\"] [data-autopilot-status]",
+               "[data-ship-card=\"ORBITALIST-1\"] [data-job-status]",
                "Paused by manual action"
              )
 
       assert has_element?(
                lv,
-               "[data-ship-card=\"ORBITALIST-1\"] [data-autopilot-next-action]",
+               "[data-ship-card=\"ORBITALIST-1\"] [data-job-next-transition]",
                "Resume after revalidation"
              )
 
       assert has_element?(
                lv,
-               "[data-ship-card=\"ORBITALIST-2\"] [data-autopilot-status]",
+               "[data-ship-card=\"ORBITALIST-2\"] [data-job-status]",
                "Waiting"
              )
 
       assert has_element?(
                lv,
-               "[data-ship-card=\"ORBITALIST-3\"] [data-autopilot-status]",
+               "[data-ship-card=\"ORBITALIST-3\"] [data-job-status]",
                "Blocked"
              )
 
       assert has_element?(
                lv,
-               "[data-ship-card=\"ORBITALIST-3\"] [data-autopilot-next-action]",
+               "[data-ship-card=\"ORBITALIST-3\"] [data-job-next-transition]",
                "Resolve the issue, then Resume"
              )
     end
 
-    test "pauses and resumes Autopilot through the selected Ship panel", %{
+    test "starts, pauses, resumes, and stops the Miner Job through the selected Ship panel", %{
       conn: conn,
       operator: operator
     } do
@@ -1325,7 +1325,7 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
         extraction_waypoint: "X1-UX81-A2",
         market_waypoint: "X1-UX81-A1",
         cargo_threshold: 30,
-        desired_mode: "autopilot",
+        desired_mode: "manual",
         status: "ready"
       })
 
@@ -1375,14 +1375,22 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       end)
 
       {:ok, lv, _html} = live(conn, ~p"/")
-      assert has_element?(lv, "[data-autopilot-status]", "Active Autopilot")
+      assert has_element?(lv, "[data-job-status]", "Manual")
+      assert has_element?(lv, "button[phx-click=\"start_miner_job\"]")
+
+      lv |> element("button[phx-click=\"start_miner_job\"]") |> render_click()
+      assert has_element?(lv, "button[phx-click=\"pause_miner_job\"]")
 
       lv |> element("button[phx-click=\"pause_miner_job\"]") |> render_click()
-      assert has_element?(lv, "[data-autopilot-status]", "Paused by Operator")
+      assert has_element?(lv, "[data-job-status]", "Paused by Operator")
       assert has_element?(lv, "button[phx-click=\"resume_miner_job\"]")
 
       lv |> element("button[phx-click=\"resume_miner_job\"]") |> render_click()
-      refute has_element?(lv, "[data-autopilot-status]", "Paused by Operator")
+      refute has_element?(lv, "[data-job-status]", "Paused by Operator")
+
+      lv |> element("button[phx-click=\"stop_miner_job\"]") |> render_click()
+      assert has_element?(lv, "[data-job-status]", "Manual")
+      refute has_element?(lv, "button[phx-click=\"stop_miner_job\"]")
     end
 
     test "selects a Ship operation panel and returns to the Fleet roster on mobile", %{
