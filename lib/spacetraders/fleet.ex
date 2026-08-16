@@ -122,10 +122,11 @@ defmodule SpaceTraders.Fleet do
     {:ok,
      Enum.map(ships, fn ship ->
        ensure_ship_record(agent, ship)
+       autopilot = autopilot_config(agent, ship.symbol)
 
        ship
-       |> Map.put(:job, ship_job(agent, ship.symbol))
-       |> Map.put(:autopilot, autopilot_config(agent, ship.symbol))
+       |> Map.put(:job, autopilot && struct(Job, Map.from_struct(autopilot)))
+       |> Map.put(:autopilot, autopilot)
        |> Map.put(:destination_history, destination_history(agent, ship.symbol))
      end)}
   end
