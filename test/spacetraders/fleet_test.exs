@@ -309,18 +309,19 @@ defmodule SpaceTraders.FleetTest do
       assert Fleet.autopilot_config(agent, "FLEET-SHIP").extraction_waypoint == "X1-UX81-A2"
     end
 
-    test "stops and clears the saved loop" do
+    test "stops the Miner Job, clears its durable record, and returns the Ship to Manual Mode" do
       agent = agent_fixture()
       ship_fixture(agent, "FLEET-SHIP")
 
-      Fleet.configure_autopilot(agent, "FLEET-SHIP", %{
-        extraction_waypoint: "X1-UX81-A2",
-        market_waypoint: "X1-UX81-A1",
-        cargo_threshold: 30
-      })
+      assert {:ok, %Job{}} =
+               Fleet.configure_miner_job(agent, "FLEET-SHIP", %{
+                 extraction_waypoint: "X1-UX81-A2",
+                 market_waypoint: "X1-UX81-A1",
+                 cargo_threshold: 30
+               })
 
-      assert :ok = Fleet.stop_autopilot(agent, "FLEET-SHIP")
-      assert Fleet.autopilot_config(agent, "FLEET-SHIP") == nil
+      assert :ok = Fleet.stop_miner_job(agent, "FLEET-SHIP")
+      assert Fleet.ship_job(agent, "FLEET-SHIP") == nil
       assert [%{kind: "stop"} | _] = Fleet.recent_activity(agent)
     end
 
