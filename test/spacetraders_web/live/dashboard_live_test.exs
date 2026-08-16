@@ -9,7 +9,7 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
   alias SpaceTraders.Fleet.Ship
   alias SpaceTraders.Fleet.ShipServer
   alias SpaceTraders.Fleet.ShipDestination
-  alias SpaceTraders.Fleet.AutopilotConfig
+  alias SpaceTraders.Fleet.Job, as: AutopilotConfig
   alias SpaceTraders.Fleet.Activity
   alias SpaceTraders.Repo
 

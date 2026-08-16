@@ -7,7 +7,8 @@ defmodule SpaceTraders.FleetTest do
   alias SpaceTraders.API.Model
   alias SpaceTraders.Fleet
   alias SpaceTraders.Fleet.Ship
-  alias SpaceTraders.Fleet.AutopilotConfig
+  alias SpaceTraders.Fleet.Job
+  alias SpaceTraders.Fleet.Job, as: AutopilotConfig
   alias SpaceTraders.Fleet.ShipServer
   alias SpaceTraders.Timeline
   alias SpaceTraders.Timeline.Event
@@ -238,6 +239,52 @@ defmodule SpaceTraders.FleetTest do
   end
 
   describe "autopilot configuration" do
+    test "projects a saved Autopilot loop as the Ship's Miner Job" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      assert {:ok, %Job{} = config} =
+               Fleet.configure_miner_job(agent, "FLEET-SHIP", %{
+                 extraction_waypoint: "X1-UX81-A2",
+                 market_waypoint: "X1-UX81-A1",
+                 cargo_threshold: 30
+               })
+
+      persisted =
+        Repo.update!(
+          Ecto.Changeset.change(Repo.get!(AutopilotConfig, config.id),
+            desired_mode: "autopilot",
+            status: "waiting",
+            in_flight_action: %{"kind" => "cooldown"},
+            last_action_result: %{"kind" => "extract", "units" => 4},
+            progress: %{"last_completed" => "extract"},
+            recovery_attempts: 2,
+            last_validated_at: ~U[2030-01-01 00:00:00Z],
+            blocked_reason: "Awaiting cooldown"
+          )
+        )
+
+      assert %Job{
+               type: "miner",
+               extraction_waypoint: "X1-UX81-A2",
+               market_waypoint: "X1-UX81-A1",
+               cargo_threshold: 30,
+               desired_mode: "autopilot",
+               status: "waiting",
+               in_flight_action: %{"kind" => "cooldown"},
+               last_action_result: %{"kind" => "extract", "units" => 4},
+               progress: %{"last_completed" => "extract"},
+               recovery_attempts: 2,
+               last_validated_at: ~U[2030-01-01 00:00:00Z],
+               blocked_reason: "Awaiting cooldown"
+             } = Fleet.ship_job(agent, "FLEET-SHIP")
+
+      assert Fleet.autopilot_config(agent, "FLEET-SHIP").id == persisted.id
+
+      assert {:ok, %Job{status: "paused", desired_mode: "manual"}} =
+               Fleet.pause_miner_job(agent, "FLEET-SHIP")
+    end
+
     test "pauses and resumes without losing the configured loop" do
       agent = agent_fixture()
       ship_fixture(agent, "FLEET-SHIP")
