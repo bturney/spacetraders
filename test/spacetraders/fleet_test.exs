@@ -169,6 +169,74 @@ defmodule SpaceTraders.FleetTest do
     end
   end
 
+  describe "transfer_cargo/5" do
+    test "validates both live ships before transferring cargo" do
+      agent = agent_fixture()
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case conn.request_path do
+          "/v2/my/ships/SOURCE" ->
+            Req.Test.json(conn, %{
+              "data" =>
+                ship_body("SOURCE", %{
+                  "cargo" => %{
+                    "capacity" => 40,
+                    "units" => 5,
+                    "inventory" => [%{"symbol" => "IRON_ORE", "units" => 5}]
+                  }
+                })
+            })
+
+          "/v2/my/ships/TARGET" ->
+            Req.Test.json(conn, %{
+              "data" =>
+                ship_body("TARGET", %{
+                  "cargo" => %{"capacity" => 40, "units" => 10, "inventory" => []}
+                })
+            })
+
+          "/v2/my/ships/SOURCE/transfer" ->
+            Req.Test.json(conn, %{
+              "data" => %{"cargo" => %{"capacity" => 40, "units" => 2, "inventory" => []}}
+            })
+        end
+      end)
+
+      assert {:ok, %{cargo: %Model.ShipCargo{units: 2}}} =
+               Fleet.transfer_cargo(agent, "SOURCE", "TARGET", "IRON_ORE", 3)
+    end
+
+    test "rejects ships at different waypoints before the transfer request" do
+      agent = agent_fixture()
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case conn.request_path do
+          "/v2/my/ships/SOURCE" ->
+            Req.Test.json(conn, %{"data" => ship_body("SOURCE")})
+
+          "/v2/my/ships/TARGET" ->
+            Req.Test.json(conn, %{
+              "data" =>
+                ship_body("TARGET", %{
+                  "nav" => %{
+                    "systemSymbol" => "X1-UX81",
+                    "waypointSymbol" => "X1-UX81-A2",
+                    "status" => "DOCKED",
+                    "flightMode" => "CRUISE"
+                  }
+                })
+            })
+
+          path ->
+            flunk("unexpected request #{path}")
+        end
+      end)
+
+      assert {:error, :transfer_waypoint_mismatch} =
+               Fleet.transfer_cargo(agent, "SOURCE", "TARGET", "IRON_ORE", 1)
+    end
+  end
+
   describe "autopilot configuration" do
     test "pauses and resumes without losing the configured loop" do
       agent = agent_fixture()

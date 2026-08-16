@@ -777,6 +777,34 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       assert html =~ "SATELLITE"
     end
 
+    test "shows transfer controls only for ships at the same waypoint and state", %{
+      conn: conn,
+      operator: operator
+    } do
+      agent = agent_fixture(operator)
+
+      ships = [
+        ship_body("ORBITALIST-1"),
+        ship_body("ORBITALIST-2", %{
+          "nav" => nav_body("DOCKED"),
+          "cargo" => %{"capacity" => 40, "units" => 2, "inventory" => []}
+        })
+      ]
+
+      stub_live_game(agent_overview_body(agent.symbol), ships)
+
+      {:ok, lv, _html} = live(conn, ~p"/")
+
+      html =
+        lv
+        |> element("button[data-select-ship=ORBITALIST-1]")
+        |> render_click()
+
+      assert html =~ ~s(id="transfer-form-ORBITALIST-1")
+      assert html =~ ~s(<option value="ORBITALIST-2")
+      assert html =~ "Transfer cargo"
+    end
+
     test "keeps the fleet card compact and reveals Ship Readiness on demand", %{
       conn: conn,
       operator: operator

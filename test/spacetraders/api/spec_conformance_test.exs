@@ -46,6 +46,7 @@ defmodule SpaceTraders.API.SpecConformanceTest do
     {:sell_cargo, :post, "/my/ships/{shipSymbol}/sell", :data},
     {:purchase_cargo, :post, "/my/ships/{shipSymbol}/purchase", :data},
     {:jettison_cargo, :post, "/my/ships/{shipSymbol}/jettison", :data},
+    {:transfer_cargo, :post, "/my/ships/{shipSymbol}/transfer", :data},
     {:purchase_ship, :post, "/my/ships", :data},
     {:get_system, :get, "/systems/{systemSymbol}", :data},
     {:get_waypoints, :get, "/systems/{systemSymbol}/waypoints", :data},
@@ -66,6 +67,7 @@ defmodule SpaceTraders.API.SpecConformanceTest do
     {:sell_cargo, :post, "/my/ships/{shipSymbol}/sell", Request.SellCargoRequest},
     {:purchase_cargo, :post, "/my/ships/{shipSymbol}/purchase", Request.PurchaseCargoRequest},
     {:jettison_cargo, :post, "/my/ships/{shipSymbol}/jettison", Request.JettisonCargoRequest},
+    {:transfer_cargo, :post, "/my/ships/{shipSymbol}/transfer", Request.TransferCargoRequest},
     {:purchase_ship, :post, "/my/ships", Request.PurchaseShipRequest}
   ]
 
@@ -156,6 +158,7 @@ defmodule SpaceTraders.API.SpecConformanceTest do
   defp arity_of(:sell_cargo), do: 4
   defp arity_of(:purchase_cargo), do: 4
   defp arity_of(:jettison_cargo), do: 4
+  defp arity_of(:transfer_cargo), do: 5
   defp arity_of(:purchase_ship), do: 3
   defp arity_of(:get_system), do: 2
   defp arity_of(:get_waypoints), do: 3
