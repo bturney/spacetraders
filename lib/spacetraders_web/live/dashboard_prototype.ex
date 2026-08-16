@@ -18,7 +18,7 @@ defmodule SpaceTradersWeb.DashboardPrototype do
             Read-only layout study. Select a Ship, inspect the next action, then take the one safe control.
           </p>
         </div>
-        <span class="badge badge-warning badge-outline">Not connected to Autopilot</span>
+        <span class="badge badge-warning badge-outline">No Miner Job configured</span>
       </div>
 
       <%= case @variant do %>
@@ -193,7 +193,7 @@ defmodule SpaceTradersWeb.DashboardPrototype do
       <div class="mt-4 space-y-2">
         <button type="button" class="w-full rounded border border-primary bg-primary/10 p-3 text-left"><p class="font-mono text-sm font-bold">
           ORBITALIST-3
-        </p><p class="mt-1 text-xs text-primary">Autopilot · cooldown 00:18</p></button>
+        </p><p class="mt-1 text-xs text-primary">Miner Job · cooldown 00:18</p></button>
         <button type="button" class="w-full rounded border border-base-300 p-3 text-left"><p class="font-mono text-sm font-bold">
           ORBITALIST-1
         </p><p class="mt-1 text-xs opacity-60">Manual · docked at A2</p></button>
@@ -231,7 +231,7 @@ defmodule SpaceTradersWeb.DashboardPrototype do
           ORBITALIST-2
         </p><p class="mt-1 text-xs opacity-60">Manual · in transit</p></button>
       </div>
-      <p class="mt-4 text-xs opacity-60">Healthy Autopilot Ships stay quiet.</p>
+      <p class="mt-4 text-xs opacity-60">Healthy Miner Job Ships stay quiet.</p>
     </aside>
     """
   end
@@ -252,7 +252,7 @@ defmodule SpaceTradersWeb.DashboardPrototype do
           </dd>
         </div>
       </dl><button type="button" class="btn btn-ghost btn-sm mt-5 w-full">Edit configuration</button><div class="mt-5 border-t border-base-300 pt-4">
-        <p class="text-xs font-bold uppercase tracking-wider opacity-50">Autopilot policy</p><p class="mt-2 text-xs opacity-60">
+        <p class="text-xs font-bold uppercase tracking-wider opacity-50">Miner Job policy</p><p class="mt-2 text-xs opacity-60">
           Reserved for a later phase. This loop has no route optimization or flight-mode policy.
         </p>
       </div>

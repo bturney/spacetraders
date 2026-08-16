@@ -2743,7 +2743,7 @@ defmodule SpaceTradersWeb.DashboardLive do
           Start Miner Job
         </button>
         <button
-          :if={@job && @job.desired_mode == "autopilot" && @job.status != "blocked"}
+          :if={@job && @job.desired_mode == "active" && @job.status != "blocked"}
           type="button"
           phx-click="pause_miner_job"
           phx-value-symbol={@ship.symbol}
@@ -2826,8 +2826,8 @@ defmodule SpaceTradersWeb.DashboardLive do
   defp job_status(%{status: "paused"}), do: "Paused by manual action"
   defp job_status(nil), do: "Manual"
   defp job_status(%{status: "revalidating"}), do: "Revalidating"
-  defp job_status(%{desired_mode: "autopilot", status: "waiting"}), do: "Waiting"
-  defp job_status(%{desired_mode: "autopilot"}), do: "Active Miner Job"
+  defp job_status(%{desired_mode: "active", status: "waiting"}), do: "Waiting"
+  defp job_status(%{desired_mode: "active"}), do: "Active Miner Job"
   defp job_status(_), do: "Manual"
 
   defp job_reason(%{status: "blocked", blocked_reason: reason}) when is_binary(reason),
@@ -2865,7 +2865,7 @@ defmodule SpaceTradersWeb.DashboardLive do
     do: paused_status(reason)
 
   defp job_active_work(%{status: "paused"}, _ship), do: "Paused by manual action"
-  defp job_active_work(%{desired_mode: "autopilot"}, _ship), do: "Evaluating cargo"
+  defp job_active_work(%{desired_mode: "active"}, _ship), do: "Evaluating cargo"
   defp job_active_work(_, _ship), do: "Manual"
 
   defp job_next_transition(
@@ -2889,7 +2889,7 @@ defmodule SpaceTradersWeb.DashboardLive do
 
   defp job_next_transition(%{status: "paused"}, _ship), do: "Resume after revalidation"
 
-  defp job_next_transition(%{desired_mode: "autopilot", extraction_waypoint: waypoint}, ship) do
+  defp job_next_transition(%{desired_mode: "active", extraction_waypoint: waypoint}, ship) do
     if cooldown_display_active?(ship),
       do: "Wait through #{cooldown_label(ship, 0)}",
       else: "Evaluate at #{waypoint}"
@@ -3120,8 +3120,8 @@ defmodule SpaceTradersWeb.DashboardLive do
     do: "Siphoning requires a Ship in orbit around a gas giant."
 
   defp live_error(:ship_not_owned), do: "That Ship is not in this agent's Fleet."
-  defp live_error(:autopilot_not_configured), do: "Save a Miner Job configuration first."
-  defp live_error({:autopilot_blocked, reason}), do: "Miner Job blocked: #{live_error(reason)}"
+  defp live_error(:miner_job_not_configured), do: "Save a Miner Job configuration first."
+  defp live_error({:miner_job_blocked, reason}), do: "Miner Job blocked: #{live_error(reason)}"
   defp live_error(:invalid_units), do: "Enter a positive number of units."
   defp live_error(:invalid_contract_deadline), do: "The contract deadline could not be read."
 

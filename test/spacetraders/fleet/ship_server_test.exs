@@ -8,7 +8,7 @@ defmodule SpaceTraders.Fleet.ShipServerTest do
 
   alias SpaceTraders.Fleet.ShipServer
   alias SpaceTraders.Fleet.Ship
-  alias SpaceTraders.Fleet.Job, as: AutopilotConfig
+  alias SpaceTraders.Fleet.Job
   alias SpaceTraders.Agent.Agent
   alias SpaceTraders.Timeline
   alias SpaceTraders.Timeline.Event
@@ -197,7 +197,7 @@ defmodule SpaceTraders.Fleet.ShipServerTest do
     end
   end
 
-  describe "autopilot continuation" do
+  describe "Miner Job continuation" do
     test "continues extraction after a cooldown wakeup without crashing the server" do
       agent =
         Repo.insert!(%Agent{
@@ -215,12 +215,12 @@ defmodule SpaceTraders.Fleet.ShipServerTest do
           agent_id: agent.id
         })
 
-      Repo.insert!(%AutopilotConfig{
+      Repo.insert!(%Job{
         ship_id: ship.id,
         extraction_waypoint: "X1-UX81-A2",
         market_waypoint: "X1-UX81-A1",
         cargo_threshold: 30,
-        desired_mode: "autopilot",
+        desired_mode: "active",
         status: "waiting",
         in_flight_action: %{"kind" => "extract"},
         last_action_result: %{
@@ -270,7 +270,7 @@ defmodule SpaceTraders.Fleet.ShipServerTest do
       assert eventually(fn -> Repo.get(Event, event.id).status == "done" end)
 
       assert eventually(fn ->
-               config = Repo.get_by!(AutopilotConfig, ship_id: ship.id)
+               config = Repo.get_by!(Job, ship_id: ship.id)
                config.status == "waiting" and config.last_action_result["kind"] == "extract"
              end)
 

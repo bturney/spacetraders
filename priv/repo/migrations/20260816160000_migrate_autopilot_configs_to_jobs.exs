@@ -6,6 +6,8 @@ defmodule SpaceTraders.Repo.Migrations.MigrateAutopilotConfigsToJobs do
     rename table(:autopilot_configs), to: table(:jobs)
     create unique_index(:jobs, [:ship_id])
 
+    execute("UPDATE jobs SET desired_mode = 'active' WHERE desired_mode = 'autopilot'")
+
     alter table(:jobs) do
       add :type, :string, null: false, default: "miner"
     end

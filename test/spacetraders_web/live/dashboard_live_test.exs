@@ -9,7 +9,7 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
   alias SpaceTraders.Fleet.Ship
   alias SpaceTraders.Fleet.ShipServer
   alias SpaceTraders.Fleet.ShipDestination
-  alias SpaceTraders.Fleet.Job, as: AutopilotConfig
+  alias SpaceTraders.Fleet.Job
   alias SpaceTraders.Fleet.Activity
   alias SpaceTraders.Repo
 
@@ -1043,12 +1043,12 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
           agent_id: agent.id
         })
 
-      Repo.insert!(%AutopilotConfig{
+      Repo.insert!(%Job{
         ship_id: ship.id,
         extraction_waypoint: "X1-UX81-A2",
         market_waypoint: "X1-UX81-A1",
         cargo_threshold: 30,
-        desired_mode: "autopilot",
+        desired_mode: "active",
         status: "waiting",
         in_flight_action: %{"kind" => "extract"}
       })
@@ -1182,12 +1182,12 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
           ship_type: "SHIP_COMMAND_FRIGATE"
         })
 
-      Repo.insert!(%AutopilotConfig{
+      Repo.insert!(%Job{
         ship_id: ship.id,
         extraction_waypoint: "X1-UX81-A2",
         market_waypoint: "X1-UX81-A1",
         cargo_threshold: 30,
-        desired_mode: "autopilot",
+        desired_mode: "active",
         status: "blocked",
         blocked_reason: "ambiguous outcome"
       })
@@ -1242,7 +1242,7 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
 
       Repo.insert!(
         struct(
-          AutopilotConfig,
+          Job,
           Keyword.put(config_attrs, :ship_id, paused_ship.id) ++
             [status: "paused", blocked_reason: "Paused by a direct Ship action"]
         )
@@ -1250,10 +1250,10 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
 
       Repo.insert!(
         struct(
-          AutopilotConfig,
+          Job,
           Keyword.put(config_attrs, :ship_id, waiting_ship.id) ++
             [
-              desired_mode: "autopilot",
+              desired_mode: "active",
               status: "revalidating",
               in_flight_action: %{"kind" => "navigate"}
             ]
@@ -1262,10 +1262,10 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
 
       Repo.insert!(
         struct(
-          AutopilotConfig,
+          Job,
           Keyword.put(config_attrs, :ship_id, blocked_ship.id) ++
             [
-              desired_mode: "autopilot",
+              desired_mode: "active",
               status: "blocked",
               blocked_reason: ":invalid_extraction_waypoint"
             ]
@@ -1352,7 +1352,7 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
           ship_type: "SHIP_COMMAND_FRIGATE"
         })
 
-      Repo.insert!(%AutopilotConfig{
+      Repo.insert!(%Job{
         ship_id: ship.id,
         extraction_waypoint: "X1-UX81-A2",
         market_waypoint: "X1-UX81-A1",
@@ -1516,7 +1516,7 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       assert :binary.match(html, "Retrying recovery") < :binary.match(html, "Recovery confirmed")
     end
 
-    test "keeps an in-progress autopilot draft across live patches", %{
+    test "keeps an in-progress Miner Job draft across live patches", %{
       conn: conn,
       operator: operator
     } do
@@ -1566,7 +1566,7 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       assert input_value(lv, "miner-job-form-ORBITALIST-1", "cargo_threshold") =~ ~s(value="55")
     end
 
-    test "clears the autopilot draft once the configuration is saved", %{
+    test "clears the Miner Job draft once the configuration is saved", %{
       conn: conn,
       operator: operator
     } do
