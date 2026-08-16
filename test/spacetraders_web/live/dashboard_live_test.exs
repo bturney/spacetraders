@@ -1254,8 +1254,8 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
           Keyword.put(config_attrs, :ship_id, waiting_ship.id) ++
             [
               desired_mode: "autopilot",
-              status: "waiting",
-              in_flight_action: %{"kind" => "cooldown"}
+              status: "revalidating",
+              in_flight_action: %{"kind" => "navigate"}
             ]
         )
       )
@@ -1295,7 +1295,19 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       assert has_element?(
                lv,
                "[data-ship-card=\"ORBITALIST-2\"] [data-job-status]",
-               "Waiting"
+               "Revalidating"
+             )
+
+      assert has_element?(
+               lv,
+               "[data-ship-card=\"ORBITALIST-2\"] [data-job-active-work]",
+               "Revalidating navigation"
+             )
+
+      assert has_element?(
+               lv,
+               "[data-ship-card=\"ORBITALIST-2\"] [data-job-next-transition]",
+               "Continue navigation recovery"
              )
 
       assert has_element?(

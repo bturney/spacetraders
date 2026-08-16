@@ -2825,6 +2825,7 @@ defmodule SpaceTradersWeb.DashboardLive do
 
   defp job_status(%{status: "paused"}), do: "Paused by manual action"
   defp job_status(nil), do: "Manual"
+  defp job_status(%{status: "revalidating"}), do: "Revalidating"
   defp job_status(%{desired_mode: "autopilot", status: "waiting"}), do: "Waiting"
   defp job_status(%{desired_mode: "autopilot"}), do: "Active Miner Job"
   defp job_status(_), do: "Manual"
@@ -2855,6 +2856,9 @@ defmodule SpaceTradersWeb.DashboardLive do
        ),
        do: "Waiting for cooldown"
 
+  defp job_active_work(%{status: "revalidating", in_flight_action: %{"kind" => kind}}, _ship),
+    do: "Revalidating #{job_action_label(kind)}"
+
   defp job_active_work(%{status: "blocked"}, _ship), do: "Blocked"
 
   defp job_active_work(%{status: "paused", blocked_reason: reason}, _ship),
@@ -2876,6 +2880,9 @@ defmodule SpaceTradersWeb.DashboardLive do
       label -> "Wait through #{label}"
     end
   end
+
+  defp job_next_transition(%{status: "revalidating", in_flight_action: %{"kind" => kind}}, _ship),
+    do: "Continue #{job_action_label(kind)} recovery"
 
   defp job_next_transition(%{status: "blocked", blocked_reason: reason}, _ship),
     do: "#{job_correction(reason)}, then Resume"
@@ -2917,6 +2924,13 @@ defmodule SpaceTradersWeb.DashboardLive do
   defp job_correction(":cargo_threshold_exceeds_capacity"), do: "Lower the cargo threshold"
   defp job_correction(":mining_capability_missing"), do: "Use a Ship with a mining laser"
   defp job_correction(_reason), do: "Check the Job Activity"
+
+  defp job_action_label("navigate"), do: "navigation"
+  defp job_action_label("extract"), do: "extraction"
+  defp job_action_label("sell"), do: "sale"
+  defp job_action_label("jettison"), do: "jettison"
+  defp job_action_label("refuel"), do: "refueling"
+  defp job_action_label(_kind), do: "Job work"
 
   defp paused_status("Paused by a direct Ship action"), do: "Paused by manual action"
   defp paused_status("Paused by Operator"), do: "Paused by Operator"
