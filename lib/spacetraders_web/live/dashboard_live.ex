@@ -2902,7 +2902,13 @@ defmodule SpaceTradersWeb.DashboardLive do
   defp job_blocked_reason(":mining_capability_missing"),
     do: "This Ship has no mining laser installed."
 
-  defp job_blocked_reason(reason), do: reason
+  defp job_blocked_reason(reason) when is_binary(reason) do
+    if String.starts_with?(reason, [":", "{", "%"]) do
+      "A Miner Job action could not be completed."
+    else
+      reason
+    end
+  end
 
   defp job_correction(":invalid_extraction_waypoint"),
     do: "Choose an asteroid extraction waypoint"
@@ -2910,7 +2916,7 @@ defmodule SpaceTradersWeb.DashboardLive do
   defp job_correction(":invalid_market_waypoint"), do: "Choose a marketplace waypoint"
   defp job_correction(":cargo_threshold_exceeds_capacity"), do: "Lower the cargo threshold"
   defp job_correction(":mining_capability_missing"), do: "Use a Ship with a mining laser"
-  defp job_correction(_reason), do: "Resolve the issue"
+  defp job_correction(_reason), do: "Check the Job Activity"
 
   defp paused_status("Paused by a direct Ship action"), do: "Paused by manual action"
   defp paused_status("Paused by Operator"), do: "Paused by Operator"
@@ -2927,8 +2933,8 @@ defmodule SpaceTradersWeb.DashboardLive do
   defp operations_class(true), do: ""
   defp operations_class(false), do: "hidden"
 
-  defp needs_attention?(%{autopilot: %{status: "blocked"}}), do: true
-  defp needs_attention?(%{autopilot: %{status: "paused"}}), do: true
+  defp needs_attention?(%{job: %{status: "blocked"}}), do: true
+  defp needs_attention?(%{job: %{status: "paused"}}), do: true
   defp needs_attention?(%{nav: %{status: "IN_TRANSIT"}}), do: false
   defp needs_attention?(_), do: false
 
@@ -3100,8 +3106,8 @@ defmodule SpaceTradersWeb.DashboardLive do
     do: "Siphoning requires a Ship in orbit around a gas giant."
 
   defp live_error(:ship_not_owned), do: "That Ship is not in this agent's Fleet."
-  defp live_error(:autopilot_not_configured), do: "Save an Autopilot configuration first."
-  defp live_error({:autopilot_blocked, reason}), do: "Autopilot blocked: #{live_error(reason)}"
+  defp live_error(:autopilot_not_configured), do: "Save a Miner Job configuration first."
+  defp live_error({:autopilot_blocked, reason}), do: "Miner Job blocked: #{live_error(reason)}"
   defp live_error(:invalid_units), do: "Enter a positive number of units."
   defp live_error(:invalid_contract_deadline), do: "The contract deadline could not be read."
 
