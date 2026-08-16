@@ -635,6 +635,50 @@ defmodule SpaceTraders.AgentTest do
       assert Registry.lookup(SpaceTraders.Fleet.ShipRegistry, ship.symbol) == []
     end
 
+    test "retires only this operator's stale agents and their local work", %{operator: operator} do
+      stale_agent =
+        agent_fixture(operator, %{
+          symbol: "ORBITALIST",
+          stale_at: DateTime.utc_now() |> DateTime.truncate(:second)
+        })
+
+      other_stale_agent =
+        operator_fixture()
+        |> agent_fixture(%{
+          symbol: "OTHER",
+          stale_at: DateTime.utc_now() |> DateTime.truncate(:second)
+        })
+
+      ship =
+        Repo.insert!(%Ship{
+          symbol: "ORBITALIST-1",
+          ship_type: "SHIP_COMMAND_FRIGATE",
+          agent_id: stale_agent.id
+        })
+
+      {:ok, event} =
+        Timeline.schedule_event(
+          :ship,
+          ship.symbol,
+          :arrival,
+          DateTime.add(DateTime.utc_now(), 1, :hour)
+        )
+
+      {:ok, _pid} = ShipServer.ensure_started(stale_agent, ship.symbol)
+
+      assert {:ok, ["ORBITALIST"]} = Agent.retire_stale_agents(operator)
+
+      refute Repo.get(SpaceTraders.Agent.Agent, stale_agent.id)
+      refute Repo.get(Ship, ship.id)
+      assert Repo.get(Event, event.id).status == "cancelled"
+      assert Registry.lookup(SpaceTraders.Fleet.ShipRegistry, ship.symbol) == []
+      assert Repo.get(SpaceTraders.Agent.Agent, other_stale_agent.id)
+    end
+
+    test "reports when an operator has no stale agents", %{operator: operator} do
+      assert {:ok, []} = Agent.retire_stale_agents(operator)
+    end
+
     test "does not mint a symbol retained as stale by another operator", %{operator: operator} do
       other_operator = operator_fixture()
 

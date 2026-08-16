@@ -3809,6 +3809,41 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       assert length(String.split(html, "Server reset recovery")) == 2
     end
 
+    test "retires stale Agents from the recovery card without affecting healthy Agents", %{
+      conn: conn,
+      operator: operator
+    } do
+      agent_fixture(operator, %{
+        symbol: "ORBITALIST",
+        stale_at: DateTime.utc_now() |> DateTime.truncate(:second)
+      })
+
+      healthy_agent = agent_fixture(operator, %{symbol: "TURNEY"})
+      stub_live_game(agent_overview_body(healthy_agent.symbol), [])
+
+      {:ok, lv, html} = live(conn, ~p"/")
+      assert html =~ "Your stale Agents are no longer available"
+      assert html =~ "Retire stale Agents"
+      assert html =~ healthy_agent.symbol
+
+      html = lv |> element("#retire-stale-agents") |> render_click()
+
+      refute html =~ "Your stale Agents are no longer available"
+      assert html =~ healthy_agent.symbol
+      assert html =~ "Retired stale Agents: ORBITALIST."
+    end
+
+    test "explains when stale Agents were already retired", %{conn: conn, operator: operator} do
+      healthy_agent = agent_fixture(operator, %{symbol: "TURNEY"})
+      stub_live_game(agent_overview_body(healthy_agent.symbol), [])
+
+      {:ok, lv, _html} = live(conn, ~p"/")
+
+      html = render_click(lv, "retire_stale_agents")
+
+      assert html =~ "There are no stale Agents to retire."
+    end
+
     test "prompts to mint a first agent when the operator has none", %{conn: conn} do
       stub_live_game(agent_overview_body("UNUSED"), [])
 

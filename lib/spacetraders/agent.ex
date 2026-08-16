@@ -231,6 +231,26 @@ defmodule SpaceTraders.Agent do
   end
 
   @doc """
+  Retires every Stale Agent owned by the Operator and returns their symbols.
+
+  Retirement is local-only: cached state is removed and running ShipServers are
+  stopped without contacting the game API.
+  """
+  def retire_stale_agents(%Operator{} = operator) do
+    with {:ok, {retired_symbols, ship_symbols}} <-
+           Repo.transaction(fn ->
+             operator
+             |> detected_stale_agent_ids()
+             |> Enum.map(&retire_stale_agent/1)
+             |> Enum.unzip()
+             |> then(fn {symbols, ships} -> {List.flatten(symbols), List.flatten(ships)} end)
+           end) do
+      Enum.each(ship_symbols, &ShipServer.stop/1)
+      {:ok, retired_symbols}
+    end
+  end
+
+  @doc """
   Imports an existing game agent after explicitly validating its AgentToken.
 
   The AccountToken cannot recover AgentTokens, so this flow never calls the
@@ -327,13 +347,7 @@ defmodule SpaceTraders.Agent do
   end
 
   defp stale_agent_ids(%Operator{id: operator_id}, symbol) do
-    detected_stale_ids =
-      Repo.all(
-        from(agent in Agent,
-          where: agent.operator_id == ^operator_id and not is_nil(agent.stale_at),
-          select: agent.id
-        )
-      )
+    detected_stale_ids = detected_stale_agent_ids(operator_id)
 
     same_symbol_id =
       Repo.one(
@@ -346,6 +360,18 @@ defmodule SpaceTraders.Agent do
     [same_symbol_id | detected_stale_ids]
     |> Enum.reject(&is_nil/1)
     |> Enum.uniq()
+  end
+
+  defp detected_stale_agent_ids(%Operator{id: operator_id}),
+    do: detected_stale_agent_ids(operator_id)
+
+  defp detected_stale_agent_ids(operator_id) do
+    Repo.all(
+      from(agent in Agent,
+        where: agent.operator_id == ^operator_id and not is_nil(agent.stale_at),
+        select: agent.id
+      )
+    )
   end
 
   defp retire_stale_agent(stale_agent_id) do
