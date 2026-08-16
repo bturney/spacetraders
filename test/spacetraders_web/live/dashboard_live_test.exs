@@ -1123,13 +1123,13 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       stub_live_game(agent_overview_body(agent.symbol), [ship_body("ORBITALIST-1")])
 
       {:ok, lv, html} = live(conn, ~p"/")
-      assert html =~ "Save loop configuration"
-      assert html =~ "Start Autopilot"
-      assert html =~ "data-confirm=\"Start Autopilot for this Ship?\""
+      assert html =~ "Save Miner Job configuration"
+      assert html =~ "Start Miner Job"
+      assert html =~ "data-confirm=\"Start Miner Job for this Ship?\""
 
       html =
         lv
-        |> element("form[phx-submit=\"configure_autopilot\"]")
+        |> element("form[phx-submit=\"configure_miner_job\"]")
         |> render_submit(%{
           ship_symbol: "ORBITALIST-1",
           extraction_waypoint: "X1-UX81-A2",
@@ -1137,8 +1137,25 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
           cargo_threshold: "30"
         })
 
-      assert html =~ "Autopilot configuration saved. Start remains manual."
-      assert has_element?(lv, "[data-autopilot-status]", "Manual")
+      assert html =~ "Miner Job configuration saved. Start remains manual."
+      assert has_element?(lv, "[data-job-status]", "Manual")
+    end
+
+    test "presents the configured loop as a Miner Job", %{conn: conn, operator: operator} do
+      agent = agent_fixture(operator)
+      stub_live_game(agent_overview_body(agent.symbol), [ship_body("ORBITALIST-1")])
+
+      {:ok, lv, _html} = live(conn, ~p"/")
+
+      assert has_element?(lv, "[data-job-panel=miner]", "Miner Job")
+
+      assert has_element?(
+               lv,
+               "form#miner-job-form-ORBITALIST-1[phx-submit=\"configure_miner_job\"]"
+             )
+
+      assert has_element?(lv, "[data-job-status]", "Manual")
+      assert has_element?(lv, "[data-job-next-transition]", "Start Miner Job")
     end
 
     test "shows Operator recovery controls and Activity", %{conn: conn, operator: operator} do
@@ -1147,7 +1164,7 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
 
       {:ok, _lv, html} = live(conn, ~p"/")
 
-      assert html =~ "Start Autopilot"
+      assert html =~ "Start Miner Job"
       assert html =~ "Activity"
       assert html =~ "No local recovery events yet."
     end
@@ -1189,7 +1206,7 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       assert html =~ "ambiguous outcome"
     end
 
-    test "keeps autopilot mode, action, and recovery aligned", %{
+    test "keeps Miner Job mode, action, and recovery aligned", %{
       conn: conn,
       operator: operator
     } do
@@ -1237,8 +1254,8 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
           Keyword.put(config_attrs, :ship_id, waiting_ship.id) ++
             [
               desired_mode: "autopilot",
-              status: "waiting",
-              in_flight_action: %{"kind" => "cooldown"}
+              status: "revalidating",
+              in_flight_action: %{"kind" => "navigate"}
             ]
         )
       )
@@ -1247,7 +1264,11 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
         struct(
           AutopilotConfig,
           Keyword.put(config_attrs, :ship_id, blocked_ship.id) ++
-            [desired_mode: "autopilot", status: "blocked", blocked_reason: "market unavailable"]
+            [
+              desired_mode: "autopilot",
+              status: "blocked",
+              blocked_reason: ":invalid_extraction_waypoint"
+            ]
         )
       )
 
@@ -1261,36 +1282,64 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
 
       assert has_element?(
                lv,
-               "[data-ship-card=\"ORBITALIST-1\"] [data-autopilot-status]",
+               "[data-ship-card=\"ORBITALIST-1\"] [data-job-status]",
                "Paused by manual action"
              )
 
       assert has_element?(
                lv,
-               "[data-ship-card=\"ORBITALIST-1\"] [data-autopilot-next-action]",
+               "[data-ship-card=\"ORBITALIST-1\"] [data-job-next-transition]",
                "Resume after revalidation"
              )
 
       assert has_element?(
                lv,
-               "[data-ship-card=\"ORBITALIST-2\"] [data-autopilot-status]",
-               "Waiting"
+               "[data-ship-card=\"ORBITALIST-2\"] [data-job-status]",
+               "Revalidating"
              )
 
       assert has_element?(
                lv,
-               "[data-ship-card=\"ORBITALIST-3\"] [data-autopilot-status]",
+               "[data-ship-card=\"ORBITALIST-2\"] [data-job-active-work]",
+               "Revalidating navigation"
+             )
+
+      assert has_element?(
+               lv,
+               "[data-ship-card=\"ORBITALIST-2\"] [data-job-next-transition]",
+               "Continue navigation recovery"
+             )
+
+      assert has_element?(
+               lv,
+               "[data-ship-card=\"ORBITALIST-3\"] [data-job-status]",
                "Blocked"
              )
 
       assert has_element?(
                lv,
-               "[data-ship-card=\"ORBITALIST-3\"] [data-autopilot-next-action]",
-               "Resolve the issue, then Resume"
+               "[data-ship-card=\"ORBITALIST-3\"] [data-job-next-transition]",
+               "Choose an asteroid extraction waypoint, then Resume"
+             )
+
+      assert has_element?(
+               lv,
+               "[data-ship-card=\"ORBITALIST-3\"] [data-job-reason]",
+               "Choose an ASTEROID_FIELD or ENGINEERED_ASTEROID extraction waypoint."
+             )
+
+      assert has_element?(
+               lv,
+               "[data-ship-card=\"ORBITALIST-3\"] button[phx-click=\"resume_miner_job\"]"
+             )
+
+      refute has_element?(
+               lv,
+               "[data-ship-card=\"ORBITALIST-3\"] button[phx-click=\"pause_miner_job\"]"
              )
     end
 
-    test "pauses and resumes Autopilot through the selected Ship panel", %{
+    test "starts, pauses, resumes, and stops the Miner Job through the selected Ship panel", %{
       conn: conn,
       operator: operator
     } do
@@ -1308,7 +1357,7 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
         extraction_waypoint: "X1-UX81-A2",
         market_waypoint: "X1-UX81-A1",
         cargo_threshold: 30,
-        desired_mode: "autopilot",
+        desired_mode: "manual",
         status: "ready"
       })
 
@@ -1327,7 +1376,12 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
             Req.Test.json(conn, %{"data" => []})
 
           {"/v2/my/ships/ORBITALIST-1", "GET"} ->
-            Req.Test.json(conn, %{"data" => ship_body("ORBITALIST-1")})
+            Req.Test.json(conn, %{
+              "data" =>
+                ship_body("ORBITALIST-1", %{
+                  "mounts" => [%{"symbol" => "MOUNT_MINING_LASER_I"}]
+                })
+            })
 
           {"/v2/systems/X1-UX81/waypoints/X1-UX81-A2", "GET"} ->
             Req.Test.json(conn, %{
@@ -1346,6 +1400,11 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
           {"/v2/systems/X1-UX81/waypoints/X1-UX81-A1/market", "GET"} ->
             Req.Test.json(conn, %{"data" => %{"symbol" => "X1-UX81-A1", "tradeGoods" => []}})
 
+          {"/v2/my/ships/ORBITALIST-1/orbit", "POST"} ->
+            Req.Test.json(conn, %{
+              "data" => %{"nav" => nav_body("IN_ORBIT", destination: "X1-UX81-A1")}
+            })
+
           {"/v2/my/ships/ORBITALIST-1/navigate", "POST"} ->
             Req.Test.json(conn, %{
               "data" =>
@@ -1358,14 +1417,22 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       end)
 
       {:ok, lv, _html} = live(conn, ~p"/")
-      assert has_element?(lv, "[data-autopilot-status]", "Active Autopilot")
+      assert has_element?(lv, "[data-job-status]", "Manual")
+      assert has_element?(lv, "button[phx-click=\"start_miner_job\"]")
 
-      lv |> element("button[phx-click=\"pause_autopilot\"]") |> render_click()
-      assert has_element?(lv, "[data-autopilot-status]", "Paused by Operator")
-      assert has_element?(lv, "button[phx-click=\"resume_autopilot\"]")
+      lv |> element("button[phx-click=\"start_miner_job\"]") |> render_click()
+      assert has_element?(lv, "button[phx-click=\"pause_miner_job\"]")
 
-      lv |> element("button[phx-click=\"resume_autopilot\"]") |> render_click()
-      refute has_element?(lv, "[data-autopilot-status]", "Paused by Operator")
+      lv |> element("button[phx-click=\"pause_miner_job\"]") |> render_click()
+      assert has_element?(lv, "[data-job-status]", "Paused by Operator")
+      assert has_element?(lv, "button[phx-click=\"resume_miner_job\"]")
+
+      lv |> element("button[phx-click=\"resume_miner_job\"]") |> render_click()
+      refute has_element?(lv, "[data-job-status]", "Paused by Operator")
+
+      lv |> element("button[phx-click=\"stop_miner_job\"]") |> render_click()
+      assert has_element?(lv, "[data-job-status]", "Manual")
+      refute has_element?(lv, "button[phx-click=\"stop_miner_job\"]")
     end
 
     test "selects a Ship operation panel and returns to the Fleet roster on mobile", %{
@@ -1459,44 +1526,44 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       {:ok, lv, _html} = live(conn, ~p"/")
 
       lv
-      |> element("form[phx-change=\"track_draft\"][id=\"autopilot-form-ORBITALIST-1\"]")
+      |> element("form[phx-change=\"track_draft\"][id=\"miner-job-form-ORBITALIST-1\"]")
       |> render_change(%{
-        draft_key: "autopilot:ORBITALIST-1",
+        draft_key: "miner_job:ORBITALIST-1",
         ship_symbol: "ORBITALIST-1",
         extraction_waypoint: "X1-UX81-A2",
         market_waypoint: "X1-UX81-A1",
         cargo_threshold: "55"
       })
 
-      assert input_value(lv, "autopilot-form-ORBITALIST-1", "extraction_waypoint") =~
+      assert input_value(lv, "miner-job-form-ORBITALIST-1", "extraction_waypoint") =~
                ~s(value="X1-UX81-A2")
 
-      assert input_value(lv, "autopilot-form-ORBITALIST-1", "market_waypoint") =~
+      assert input_value(lv, "miner-job-form-ORBITALIST-1", "market_waypoint") =~
                ~s(value="X1-UX81-A1")
 
-      assert input_value(lv, "autopilot-form-ORBITALIST-1", "cargo_threshold") =~ ~s(value="55")
+      assert input_value(lv, "miner-job-form-ORBITALIST-1", "cargo_threshold") =~ ~s(value="55")
 
       send(lv.pid, :cooldown_tick)
       render(lv)
 
-      assert input_value(lv, "autopilot-form-ORBITALIST-1", "extraction_waypoint") =~
+      assert input_value(lv, "miner-job-form-ORBITALIST-1", "extraction_waypoint") =~
                ~s(value="X1-UX81-A2")
 
-      assert input_value(lv, "autopilot-form-ORBITALIST-1", "market_waypoint") =~
+      assert input_value(lv, "miner-job-form-ORBITALIST-1", "market_waypoint") =~
                ~s(value="X1-UX81-A1")
 
-      assert input_value(lv, "autopilot-form-ORBITALIST-1", "cargo_threshold") =~ ~s(value="55")
+      assert input_value(lv, "miner-job-form-ORBITALIST-1", "cargo_threshold") =~ ~s(value="55")
 
       send(lv.pid, {:ship_updated, agent.id, "ORBITALIST-1"})
       render(lv)
 
-      assert input_value(lv, "autopilot-form-ORBITALIST-1", "extraction_waypoint") =~
+      assert input_value(lv, "miner-job-form-ORBITALIST-1", "extraction_waypoint") =~
                ~s(value="X1-UX81-A2")
 
-      assert input_value(lv, "autopilot-form-ORBITALIST-1", "market_waypoint") =~
+      assert input_value(lv, "miner-job-form-ORBITALIST-1", "market_waypoint") =~
                ~s(value="X1-UX81-A1")
 
-      assert input_value(lv, "autopilot-form-ORBITALIST-1", "cargo_threshold") =~ ~s(value="55")
+      assert input_value(lv, "miner-job-form-ORBITALIST-1", "cargo_threshold") =~ ~s(value="55")
     end
 
     test "clears the autopilot draft once the configuration is saved", %{
@@ -1509,9 +1576,9 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       {:ok, lv, _html} = live(conn, ~p"/")
 
       lv
-      |> element("form[phx-change=\"track_draft\"][id=\"autopilot-form-ORBITALIST-1\"]")
+      |> element("form[phx-change=\"track_draft\"][id=\"miner-job-form-ORBITALIST-1\"]")
       |> render_change(%{
-        draft_key: "autopilot:ORBITALIST-1",
+        draft_key: "miner_job:ORBITALIST-1",
         ship_symbol: "ORBITALIST-1",
         extraction_waypoint: "X1-UX81-A2",
         market_waypoint: "X1-UX81-A1",
@@ -1519,7 +1586,7 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       })
 
       lv
-      |> element("form[phx-submit=\"configure_autopilot\"]")
+      |> element("form[phx-submit=\"configure_miner_job\"]")
       |> render_submit(%{
         ship_symbol: "ORBITALIST-1",
         extraction_waypoint: "X1-UX81-A9",
@@ -1527,10 +1594,10 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
         cargo_threshold: "55"
       })
 
-      assert input_value(lv, "autopilot-form-ORBITALIST-1", "extraction_waypoint") =~
+      assert input_value(lv, "miner-job-form-ORBITALIST-1", "extraction_waypoint") =~
                ~s(value="X1-UX81-A9")
 
-      refute input_value(lv, "autopilot-form-ORBITALIST-1", "extraction_waypoint") =~
+      refute input_value(lv, "miner-job-form-ORBITALIST-1", "extraction_waypoint") =~
                ~s(value="X1-UX81-A2")
     end
 

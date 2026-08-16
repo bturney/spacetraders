@@ -285,19 +285,19 @@ defmodule SpaceTraders.FleetTest do
                Fleet.pause_miner_job(agent, "FLEET-SHIP")
     end
 
-    test "pauses and resumes without losing the configured loop" do
+    test "pauses and resumes the Miner Job without losing its configured loop" do
       agent = agent_fixture()
       ship_fixture(agent, "FLEET-SHIP")
 
-      assert {:ok, _} =
-               Fleet.configure_autopilot(agent, "FLEET-SHIP", %{
+      assert {:ok, %Job{}} =
+               Fleet.configure_miner_job(agent, "FLEET-SHIP", %{
                  extraction_waypoint: "X1-UX81-A2",
                  market_waypoint: "X1-UX81-A1",
                  cargo_threshold: 30
                })
 
-      assert {:ok, %{status: "paused", desired_mode: "manual"}} =
-               Fleet.pause_autopilot(agent, "FLEET-SHIP")
+      assert {:ok, %Job{status: "paused", desired_mode: "manual"}} =
+               Fleet.pause_miner_job(agent, "FLEET-SHIP")
 
       Req.Test.stub(SpaceTraders.API, fn conn ->
         conn
@@ -305,22 +305,25 @@ defmodule SpaceTraders.FleetTest do
         |> Req.Test.json(%{"error" => %{"code" => 4011, "message" => "Invalid token"}})
       end)
 
-      assert {:error, {:autopilot_blocked, _reason}} = Fleet.resume_autopilot(agent, "FLEET-SHIP")
-      assert Fleet.autopilot_config(agent, "FLEET-SHIP").extraction_waypoint == "X1-UX81-A2"
+      assert {:error, {:autopilot_blocked, _reason}} = Fleet.resume_miner_job(agent, "FLEET-SHIP")
+
+      assert %Job{extraction_waypoint: "X1-UX81-A2", status: "blocked"} =
+               Fleet.ship_job(agent, "FLEET-SHIP")
     end
 
-    test "stops and clears the saved loop" do
+    test "stops the Miner Job, clears its durable record, and returns the Ship to Manual Mode" do
       agent = agent_fixture()
       ship_fixture(agent, "FLEET-SHIP")
 
-      Fleet.configure_autopilot(agent, "FLEET-SHIP", %{
-        extraction_waypoint: "X1-UX81-A2",
-        market_waypoint: "X1-UX81-A1",
-        cargo_threshold: 30
-      })
+      assert {:ok, %Job{}} =
+               Fleet.configure_miner_job(agent, "FLEET-SHIP", %{
+                 extraction_waypoint: "X1-UX81-A2",
+                 market_waypoint: "X1-UX81-A1",
+                 cargo_threshold: 30
+               })
 
-      assert :ok = Fleet.stop_autopilot(agent, "FLEET-SHIP")
-      assert Fleet.autopilot_config(agent, "FLEET-SHIP") == nil
+      assert :ok = Fleet.stop_miner_job(agent, "FLEET-SHIP")
+      assert Fleet.ship_job(agent, "FLEET-SHIP") == nil
       assert [%{kind: "stop"} | _] = Fleet.recent_activity(agent)
     end
 
@@ -328,7 +331,7 @@ defmodule SpaceTraders.FleetTest do
       agent = agent_fixture()
       ship_fixture(agent, "FLEET-SHIP")
 
-      Fleet.configure_autopilot(agent, "FLEET-SHIP", %{
+      Fleet.configure_miner_job(agent, "FLEET-SHIP", %{
         extraction_waypoint: "X1-UX81-A2",
         market_waypoint: "X1-UX81-A1",
         cargo_threshold: 30
@@ -417,14 +420,14 @@ defmodule SpaceTraders.FleetTest do
       end)
 
       assert {:ok,
-              %AutopilotConfig{
+              %Job{
                 desired_mode: "autopilot",
                 status: "waiting",
                 in_flight_action: %{"kind" => "navigate", "waypoint" => "X1-UX81-A2"},
                 last_action_result: %{"status" => "IN_TRANSIT"},
                 last_validated_at: %DateTime{}
               }} =
-               Fleet.start_autopilot(agent, "FLEET-SHIP")
+               Fleet.start_miner_job(agent, "FLEET-SHIP")
 
       assert [%Event{event_type: "arrival"}] = Timeline.pending_events(:ship, "FLEET-SHIP")
     end

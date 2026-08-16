@@ -254,11 +254,11 @@ defmodule SpaceTradersWeb.DashboardLive do
   end
 
   @impl true
-  def handle_event("configure_autopilot", params, socket) do
+  def handle_event("configure_miner_job", params, socket) do
     with {:ok, agent} <- agent_for_ship(socket, params["ship_symbol"]),
          {:ok, threshold} <- parse_units(params["cargo_threshold"]),
          {:ok, _config} <-
-           Fleet.configure_autopilot(agent, params["ship_symbol"], %{
+           Fleet.configure_miner_job(agent, params["ship_symbol"], %{
              extraction_waypoint: String.trim(params["extraction_waypoint"] || ""),
              market_waypoint: String.trim(params["market_waypoint"] || ""),
              cargo_threshold: threshold
@@ -266,13 +266,13 @@ defmodule SpaceTradersWeb.DashboardLive do
       socket =
         socket
         |> refresh_agent(agent)
-        |> clear_draft(draft_key("autopilot", [params["ship_symbol"]]))
+        |> clear_draft(draft_key("miner_job", [params["ship_symbol"]]))
 
       {:noreply,
        put_flash(
          socket,
          :info,
-         "Autopilot configuration saved. Start remains manual."
+         "Miner Job configuration saved. Start remains manual."
        )}
     else
       {:error, reason} -> {:noreply, put_flash(socket, :error, live_error(reason))}
@@ -280,11 +280,11 @@ defmodule SpaceTradersWeb.DashboardLive do
   end
 
   @impl true
-  def handle_event("start_autopilot", %{"symbol" => ship_symbol}, socket) do
+  def handle_event("start_miner_job", %{"symbol" => ship_symbol}, socket) do
     with {:ok, agent} <- agent_for_ship(socket, ship_symbol),
-         {:ok, _config} <- Fleet.start_autopilot(agent, ship_symbol) do
+         {:ok, _job} <- Fleet.start_miner_job(agent, ship_symbol) do
       {:noreply,
-       put_flash(refresh_agent(socket, agent), :info, "#{ship_symbol} Autopilot is ready.")}
+       put_flash(refresh_agent(socket, agent), :info, "#{ship_symbol} Miner Job started.")}
     else
       {:error, reason} ->
         {:noreply,
@@ -608,14 +608,14 @@ defmodule SpaceTradersWeb.DashboardLive do
 
   @impl true
   def handle_event(action, %{"symbol" => ship_symbol}, socket)
-      when action in ["pause_autopilot", "resume_autopilot", "stop_autopilot"] do
+      when action in ["pause_miner_job", "resume_miner_job", "stop_miner_job"] do
     with {:ok, agent} <- agent_for_ship(socket, ship_symbol),
-         :ok <- autopilot_action(action, agent, ship_symbol) do
+         :ok <- miner_job_action(action, agent, ship_symbol) do
       message =
         case action do
-          "pause_autopilot" -> "#{ship_symbol} Autopilot paused."
-          "resume_autopilot" -> "#{ship_symbol} Autopilot resumed after revalidation."
-          "stop_autopilot" -> "#{ship_symbol} Autopilot stopped; Ship is manual."
+          "pause_miner_job" -> "#{ship_symbol} Miner Job paused."
+          "resume_miner_job" -> "#{ship_symbol} Miner Job resumed after revalidation."
+          "stop_miner_job" -> "#{ship_symbol} Miner Job stopped; Ship is manual."
         end
 
       {:noreply, put_flash(refresh_agent(socket, agent), :info, message)}
@@ -626,13 +626,13 @@ defmodule SpaceTradersWeb.DashboardLive do
     end
   end
 
-  defp autopilot_action("pause_autopilot", agent, ship),
-    do: unwrap_config(Fleet.pause_autopilot(agent, ship))
+  defp miner_job_action("pause_miner_job", agent, ship),
+    do: unwrap_config(Fleet.pause_miner_job(agent, ship))
 
-  defp autopilot_action("resume_autopilot", agent, ship),
-    do: unwrap_config(Fleet.resume_autopilot(agent, ship))
+  defp miner_job_action("resume_miner_job", agent, ship),
+    do: unwrap_config(Fleet.resume_miner_job(agent, ship))
 
-  defp autopilot_action("stop_autopilot", agent, ship), do: Fleet.stop_autopilot(agent, ship)
+  defp miner_job_action("stop_miner_job", agent, ship), do: Fleet.stop_miner_job(agent, ship)
   defp unwrap_config({:ok, _config}), do: :ok
   defp unwrap_config(error), do: error
 
@@ -2229,7 +2229,7 @@ defmodule SpaceTradersWeb.DashboardLive do
             data-back-to-fleet
           >Back to Fleet</button>
         </div>
-        <.autopilot_panel ship={@ship} form_drafts={@form_drafts} />
+        <.miner_job_panel ship={@ship} form_drafts={@form_drafts} />
 
         <.transfer_panel ship={@ship} ships={@ships} form_drafts={@form_drafts} />
 
@@ -2638,48 +2638,56 @@ defmodule SpaceTradersWeb.DashboardLive do
   attr :ship, :map, required: true
   attr :form_drafts, :map, default: %{}
 
-  defp autopilot_panel(assigns) do
-    config = Map.get(assigns.ship, :autopilot)
-    assigns = assign(assigns, :autopilot, config)
+  defp miner_job_panel(assigns) do
+    job = Map.get(assigns.ship, :job)
+    assigns = assign(assigns, :job, job)
 
     ~H"""
-    <div class="mt-4 rounded border border-primary/20 p-3" data-autopilot-panel>
+    <div class="mt-4 rounded border border-primary/20 p-3" data-job-panel="miner">
       <div class="flex items-center justify-between gap-2">
-        <span class="text-xs font-semibold uppercase tracking-wider opacity-60">Autopilot</span>
-        <span class="badge badge-outline badge-sm" data-autopilot-status>
-          {autopilot_status(@autopilot)}
+        <span class="text-xs font-semibold uppercase tracking-wider opacity-60">Miner Job</span>
+        <span class="badge badge-outline badge-sm" data-job-status>
+          {job_status(@job)}
         </span>
       </div>
       <dl class="mt-3 grid grid-cols-1 gap-1 text-xs sm:grid-cols-2">
         <div>
-          <dt class="opacity-60">Current action</dt>
-          <dd data-autopilot-current-action>{autopilot_current_action(@autopilot, @ship)}</dd>
+          <dt class="opacity-60">Active work</dt>
+          <dd data-job-active-work>
+            {job_active_work(@job, @ship)}
+          </dd>
         </div>
         <div>
-          <dt class="opacity-60">Next action</dt>
-          <dd data-autopilot-next-action>{autopilot_next_action(@autopilot, @ship)}</dd>
+          <dt class="opacity-60">Next expected transition</dt>
+          <dd data-job-next-transition>
+            {job_next_transition(@job, @ship)}
+          </dd>
         </div>
       </dl>
-      <p :if={autopilot_reason(@autopilot)} class="mt-2 text-xs text-error" data-autopilot-reason>
-        {autopilot_reason(@autopilot)}
+      <p
+        :if={job_reason(@job)}
+        class="mt-2 text-xs text-error"
+        data-job-reason
+      >
+        {job_reason(@job)}
       </p>
       <form
-        id={"autopilot-form-#{@ship.symbol}"}
+        id={"miner-job-form-#{@ship.symbol}"}
         phx-change="track_draft"
-        phx-submit="configure_autopilot"
+        phx-submit="configure_miner_job"
         class="mt-3 grid gap-2 sm:grid-cols-3"
       >
-        <input type="hidden" name="draft_key" value={draft_key("autopilot", [@ship.symbol])} />
+        <input type="hidden" name="draft_key" value={draft_key("miner_job", [@ship.symbol])} />
         <input type="hidden" name="ship_symbol" value={@ship.symbol} />
         <input
           name="extraction_waypoint"
           value={
             draft_field(
               @form_drafts,
-              "autopilot",
+              "miner_job",
               [@ship.symbol],
               "extraction_waypoint",
-              @autopilot && @autopilot.extraction_waypoint
+              @job && @job.extraction_waypoint
             )
           }
           placeholder="Extraction waypoint"
@@ -2691,10 +2699,10 @@ defmodule SpaceTradersWeb.DashboardLive do
           value={
             draft_field(
               @form_drafts,
-              "autopilot",
+              "miner_job",
               [@ship.symbol],
               "market_waypoint",
-              @autopilot && @autopilot.market_waypoint
+              @job && @job.market_waypoint
             )
           }
           placeholder="Market waypoint"
@@ -2706,10 +2714,10 @@ defmodule SpaceTradersWeb.DashboardLive do
           value={
             draft_field(
               @form_drafts,
-              "autopilot",
+              "miner_job",
               [@ship.symbol],
               "cargo_threshold",
-              @autopilot && @autopilot.cargo_threshold
+              @job && @job.cargo_threshold
             )
           }
           type="number"
@@ -2718,46 +2726,46 @@ defmodule SpaceTradersWeb.DashboardLive do
           class="input input-bordered input-sm"
           required
         />
-        <button type="submit" class="btn btn-ghost btn-sm sm:col-span-3">Save loop configuration</button>
+        <button type="submit" class="btn btn-ghost btn-sm sm:col-span-3">Save Miner Job configuration</button>
       </form>
       <div class="mt-2 flex flex-wrap gap-2">
         <button
           :if={
-            is_nil(@autopilot) or
-              (@autopilot.desired_mode == "manual" and @autopilot.status not in ["paused", "blocked"])
+            is_nil(@job) or
+              (@job.desired_mode == "manual" and @job.status not in ["paused", "blocked"])
           }
           type="button"
-          phx-click="start_autopilot"
+          phx-click="start_miner_job"
           phx-value-symbol={@ship.symbol}
-          data-confirm="Start Autopilot for this Ship?"
+          data-confirm="Start Miner Job for this Ship?"
           class="btn btn-primary btn-sm"
         >
-          Start Autopilot
+          Start Miner Job
         </button>
         <button
-          :if={@autopilot && @autopilot.desired_mode == "autopilot"}
+          :if={@job && @job.desired_mode == "autopilot" && @job.status != "blocked"}
           type="button"
-          phx-click="pause_autopilot"
+          phx-click="pause_miner_job"
           phx-value-symbol={@ship.symbol}
           class="btn btn-warning btn-sm"
         >
           Pause
         </button>
         <button
-          :if={@autopilot && @autopilot.status in ["paused", "blocked"]}
+          :if={@job && @job.status in ["paused", "blocked"]}
           type="button"
-          phx-click="resume_autopilot"
+          phx-click="resume_miner_job"
           phx-value-symbol={@ship.symbol}
           class="btn btn-primary btn-sm"
         >
           Resume after revalidation
         </button>
         <button
-          :if={@autopilot}
+          :if={@job}
           type="button"
-          phx-click="stop_autopilot"
+          phx-click="stop_miner_job"
           phx-value-symbol={@ship.symbol}
-          data-confirm="Stop Autopilot and clear this configuration?"
+          data-confirm="Stop Miner Job and clear this configuration?"
           class="btn btn-ghost btn-sm"
         >
           Stop to Manual
@@ -2810,75 +2818,119 @@ defmodule SpaceTradersWeb.DashboardLive do
     """
   end
 
-  defp autopilot_status(%{status: "blocked"}), do: "Blocked"
+  defp job_status(%{status: "blocked"}), do: "Blocked"
 
-  defp autopilot_status(%{status: "paused", blocked_reason: reason}),
+  defp job_status(%{status: "paused", blocked_reason: reason}),
     do: paused_status(reason)
 
-  defp autopilot_status(%{status: "paused"}), do: "Paused by manual action"
-  defp autopilot_status(nil), do: "Manual"
-  defp autopilot_status(%{desired_mode: "autopilot", status: "waiting"}), do: "Waiting"
-  defp autopilot_status(%{desired_mode: "autopilot"}), do: "Active Autopilot"
-  defp autopilot_status(_), do: "Manual"
+  defp job_status(%{status: "paused"}), do: "Paused by manual action"
+  defp job_status(nil), do: "Manual"
+  defp job_status(%{status: "revalidating"}), do: "Revalidating"
+  defp job_status(%{desired_mode: "autopilot", status: "waiting"}), do: "Waiting"
+  defp job_status(%{desired_mode: "autopilot"}), do: "Active Miner Job"
+  defp job_status(_), do: "Manual"
 
-  defp autopilot_reason(%{status: "blocked", blocked_reason: reason}) when is_binary(reason),
-    do: "Blocked: #{reason}"
+  defp job_reason(%{status: "blocked", blocked_reason: reason}) when is_binary(reason),
+    do: "Blocked: #{job_blocked_reason(reason)}"
 
-  defp autopilot_reason(%{status: "paused", blocked_reason: reason}) when is_binary(reason),
+  defp job_reason(%{status: "paused", blocked_reason: reason}) when is_binary(reason),
     do: reason
 
-  defp autopilot_reason(_), do: nil
+  defp job_reason(_), do: nil
 
-  defp autopilot_current_action(
+  defp job_active_work(
          %{status: "waiting", in_flight_action: %{"kind" => "extract"}},
          _ship
        ),
        do: "Waiting for cooldown"
 
-  defp autopilot_current_action(
+  defp job_active_work(
          %{status: "waiting", in_flight_action: %{"kind" => "navigate"}},
          _ship
        ),
        do: "Traveling to configured waypoint"
 
-  defp autopilot_current_action(
+  defp job_active_work(
          %{status: "waiting", in_flight_action: %{"kind" => "cooldown"}},
          _ship
        ),
        do: "Waiting for cooldown"
 
-  defp autopilot_current_action(%{status: "blocked"}, _ship), do: "Blocked"
+  defp job_active_work(%{status: "revalidating", in_flight_action: %{"kind" => kind}}, _ship),
+    do: "Revalidating #{job_action_label(kind)}"
 
-  defp autopilot_current_action(%{status: "paused", blocked_reason: reason}, _ship),
+  defp job_active_work(%{status: "blocked"}, _ship), do: "Blocked"
+
+  defp job_active_work(%{status: "paused", blocked_reason: reason}, _ship),
     do: paused_status(reason)
 
-  defp autopilot_current_action(%{status: "paused"}, _ship), do: "Paused by manual action"
-  defp autopilot_current_action(%{desired_mode: "autopilot"}, _ship), do: "Evaluating cargo"
-  defp autopilot_current_action(_, _ship), do: "Manual"
+  defp job_active_work(%{status: "paused"}, _ship), do: "Paused by manual action"
+  defp job_active_work(%{desired_mode: "autopilot"}, _ship), do: "Evaluating cargo"
+  defp job_active_work(_, _ship), do: "Manual"
 
-  defp autopilot_next_action(
+  defp job_next_transition(
          %{status: "waiting", in_flight_action: %{"kind" => "navigate", "waypoint" => waypoint}},
          _ship
        ),
        do: "Continue at #{waypoint}"
 
-  defp autopilot_next_action(%{status: "waiting"}, ship) do
+  defp job_next_transition(%{status: "waiting"}, ship) do
     case cooldown_label(ship, 0) do
       "Ready" -> "Reconcile ship"
       label -> "Wait through #{label}"
     end
   end
 
-  defp autopilot_next_action(%{status: "blocked"}, _ship), do: "Resolve the issue, then Resume"
-  defp autopilot_next_action(%{status: "paused"}, _ship), do: "Resume after revalidation"
+  defp job_next_transition(%{status: "revalidating", in_flight_action: %{"kind" => kind}}, _ship),
+    do: "Continue #{job_action_label(kind)} recovery"
 
-  defp autopilot_next_action(%{desired_mode: "autopilot", extraction_waypoint: waypoint}, ship) do
+  defp job_next_transition(%{status: "blocked", blocked_reason: reason}, _ship),
+    do: "#{job_correction(reason)}, then Resume"
+
+  defp job_next_transition(%{status: "paused"}, _ship), do: "Resume after revalidation"
+
+  defp job_next_transition(%{desired_mode: "autopilot", extraction_waypoint: waypoint}, ship) do
     if cooldown_display_active?(ship),
       do: "Wait through #{cooldown_label(ship, 0)}",
       else: "Evaluate at #{waypoint}"
   end
 
-  defp autopilot_next_action(_, _ship), do: "Start Autopilot"
+  defp job_next_transition(_, _ship), do: "Start Miner Job"
+
+  defp job_blocked_reason(":invalid_extraction_waypoint"),
+    do: "Choose an ASTEROID_FIELD or ENGINEERED_ASTEROID extraction waypoint."
+
+  defp job_blocked_reason(":invalid_market_waypoint"),
+    do: "Choose a waypoint with a MARKETPLACE trait."
+
+  defp job_blocked_reason(":cargo_threshold_exceeds_capacity"),
+    do: "Cargo threshold exceeds this Ship's capacity."
+
+  defp job_blocked_reason(":mining_capability_missing"),
+    do: "This Ship has no mining laser installed."
+
+  defp job_blocked_reason(reason) when is_binary(reason) do
+    if String.starts_with?(reason, [":", "{", "%"]) do
+      "A Miner Job action could not be completed."
+    else
+      reason
+    end
+  end
+
+  defp job_correction(":invalid_extraction_waypoint"),
+    do: "Choose an asteroid extraction waypoint"
+
+  defp job_correction(":invalid_market_waypoint"), do: "Choose a marketplace waypoint"
+  defp job_correction(":cargo_threshold_exceeds_capacity"), do: "Lower the cargo threshold"
+  defp job_correction(":mining_capability_missing"), do: "Use a Ship with a mining laser"
+  defp job_correction(_reason), do: "Check the Job Activity"
+
+  defp job_action_label("navigate"), do: "navigation"
+  defp job_action_label("extract"), do: "extraction"
+  defp job_action_label("sell"), do: "sale"
+  defp job_action_label("jettison"), do: "jettison"
+  defp job_action_label("refuel"), do: "refueling"
+  defp job_action_label(_kind), do: "Job work"
 
   defp paused_status("Paused by a direct Ship action"), do: "Paused by manual action"
   defp paused_status("Paused by Operator"), do: "Paused by Operator"
@@ -2895,8 +2947,8 @@ defmodule SpaceTradersWeb.DashboardLive do
   defp operations_class(true), do: ""
   defp operations_class(false), do: "hidden"
 
-  defp needs_attention?(%{autopilot: %{status: "blocked"}}), do: true
-  defp needs_attention?(%{autopilot: %{status: "paused"}}), do: true
+  defp needs_attention?(%{job: %{status: "blocked"}}), do: true
+  defp needs_attention?(%{job: %{status: "paused"}}), do: true
   defp needs_attention?(%{nav: %{status: "IN_TRANSIT"}}), do: false
   defp needs_attention?(_), do: false
 
@@ -3068,8 +3120,8 @@ defmodule SpaceTradersWeb.DashboardLive do
     do: "Siphoning requires a Ship in orbit around a gas giant."
 
   defp live_error(:ship_not_owned), do: "That Ship is not in this agent's Fleet."
-  defp live_error(:autopilot_not_configured), do: "Save an Autopilot configuration first."
-  defp live_error({:autopilot_blocked, reason}), do: "Autopilot blocked: #{live_error(reason)}"
+  defp live_error(:autopilot_not_configured), do: "Save a Miner Job configuration first."
+  defp live_error({:autopilot_blocked, reason}), do: "Miner Job blocked: #{live_error(reason)}"
   defp live_error(:invalid_units), do: "Enter a positive number of units."
   defp live_error(:invalid_contract_deadline), do: "The contract deadline could not be read."
 
