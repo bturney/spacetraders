@@ -1,5 +1,8 @@
 defmodule SpaceTraders.ListingTest do
-  use SpaceTraders.DataCase, async: true
+  # Async: this test deliberately plays out the API client's retry backoff
+  # (~13s of 503 stubs); running it async starves the single sandbox
+  # connection and makes concurrent async tests drop out of the checkout queue.
+  use SpaceTraders.DataCase, async: false
 
   alias SpaceTraders.Agent.Agent, as: AgentRecord
   alias SpaceTraders.API.Model

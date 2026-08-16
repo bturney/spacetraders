@@ -20,14 +20,15 @@ defmodule Mix.Tasks.SpaceTraders.Gen.Models do
   @model_target {"lib/spacetraders/api/models", "SpaceTraders.API.Model"}
   @request_target {"lib/spacetraders/api/request", "SpaceTraders.API.Request"}
   @request_operations [
-    {"/register", "RegisterRequest"},
-    {"/my/contracts/{contractId}/deliver", "DeliverContractRequest"},
-    {"/my/ships/{shipSymbol}/navigate", "NavigateRequest"},
-    {"/my/ships/{shipSymbol}/sell", "SellCargoRequest"},
-    {"/my/ships/{shipSymbol}/purchase", "PurchaseCargoRequest"},
-    {"/my/ships/{shipSymbol}/jettison", "JettisonCargoRequest"},
-    {"/my/ships/{shipSymbol}/transfer", "TransferCargoRequest"},
-    {"/my/ships", "PurchaseShipRequest"}
+    {:post, "/register", "RegisterRequest"},
+    {:post, "/my/contracts/{contractId}/deliver", "DeliverContractRequest"},
+    {:post, "/my/ships/{shipSymbol}/navigate", "NavigateRequest"},
+    {:patch, "/my/ships/{shipSymbol}/nav", "ShipNavRequest"},
+    {:post, "/my/ships/{shipSymbol}/sell", "SellCargoRequest"},
+    {:post, "/my/ships/{shipSymbol}/purchase", "PurchaseCargoRequest"},
+    {:post, "/my/ships/{shipSymbol}/jettison", "JettisonCargoRequest"},
+    {:post, "/my/ships/{shipSymbol}/transfer", "TransferCargoRequest"},
+    {:post, "/my/ships", "PurchaseShipRequest"}
   ]
 
   @impl true
@@ -92,8 +93,8 @@ defmodule Mix.Tasks.SpaceTraders.Gen.Models do
     models = load_models()
 
     @request_operations
-    |> Map.new(fn {path, name} ->
-      schema = request_schema(path)
+    |> Map.new(fn {method, path, name} ->
+      schema = request_schema(path, method)
 
       source =
         generate_request(schema, name, models, request_namespace())
@@ -350,11 +351,19 @@ defmodule Mix.Tasks.SpaceTraders.Gen.Models do
     "json[#{inspect(field)}]"
   end
 
-  defp request_schema(path) do
+  defp request_schema(path, method) do
     @spec_path
     |> File.read!()
     |> Jason.decode!()
-    |> get_in(["paths", path, "post", "requestBody", "content", "application/json", "schema"])
+    |> get_in([
+      "paths",
+      path,
+      to_string(method),
+      "requestBody",
+      "content",
+      "application/json",
+      "schema"
+    ])
   end
 
   defp generate_request(schema, name, models, namespace) do

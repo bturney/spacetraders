@@ -181,6 +181,31 @@ defmodule SpaceTraders.API.ClientTest do
                API.navigate_ship("TOKEN", "ORBITALIST-1", "X1-UX81-A3")
     end
 
+    test "set_ship_flight_mode/3 patches the flight mode and decodes fuel + nav" do
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        assert conn.method == "PATCH"
+        assert conn.request_path == "/v2/my/ships/ORBITALIST-1/nav"
+        assert conn.body_params == %{"flightMode" => "DRIFT"}
+
+        Req.Test.json(conn, %{
+          "data" => %{
+            "fuel" => %{"capacity" => 200, "current" => 81},
+            "nav" => %{
+              "systemSymbol" => "X1-UX81",
+              "waypointSymbol" => "X1-UX81-A1",
+              "status" => "IN_ORBIT",
+              "flightMode" => "DRIFT"
+            },
+            "events" => []
+          }
+        })
+      end)
+
+      assert {:ok,
+              %{fuel: %Model.ShipFuel{current: 81}, nav: %Model.ShipNav{flight_mode: "DRIFT"}}} =
+               API.set_ship_flight_mode("TOKEN", "ORBITALIST-1", "DRIFT")
+    end
+
     test "extract_resources/2 decodes cooldown + extraction + cargo" do
       Req.Test.stub(SpaceTraders.API, fn conn ->
         Req.Test.json(conn, %{

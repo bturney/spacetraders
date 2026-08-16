@@ -60,6 +60,7 @@ defmodule SpaceTraders.API do
     PurchaseShipRequest,
     RegisterRequest,
     SellCargoRequest,
+    ShipNavRequest,
     TransferCargoRequest
   }
 
@@ -168,6 +169,17 @@ defmodule SpaceTraders.API do
     request(:post, "/my/ships/#{ship_symbol}/navigate", token,
       json: NavigateRequest.new(%{waypoint_symbol: waypoint_symbol}) |> NavigateRequest.to_json(),
       as: {:map, %{fuel: {:model, ShipFuel}, nav: {:model, ShipNav}}}
+    )
+  end
+
+  @doc "PATCH /my/ships/{symbol}/nav — updates a ship's flight mode."
+  @spec set_ship_flight_mode(token(), String.t(), String.t()) :: result()
+  def set_ship_flight_mode(token, ship_symbol, flight_mode) do
+    request(:patch, "/my/ships/#{ship_symbol}/nav", token,
+      json: ShipNavRequest.new(%{flight_mode: flight_mode}) |> ShipNavRequest.to_json(),
+      as:
+        {:map,
+         %{fuel: {:model, ShipFuel}, nav: {:model, ShipNav}, events: {:list, ShipConditionEvent}}}
     )
   end
 

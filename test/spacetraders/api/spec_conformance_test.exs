@@ -37,6 +37,7 @@ defmodule SpaceTraders.API.SpecConformanceTest do
     {:get_ships, :get, "/my/ships", :data},
     {:get_ship, :get, "/my/ships/{shipSymbol}", :data},
     {:navigate_ship, :post, "/my/ships/{shipSymbol}/navigate", :data},
+    {:set_ship_flight_mode, :patch, "/my/ships/{shipSymbol}/nav", :data},
     {:dock_ship, :post, "/my/ships/{shipSymbol}/dock", :data},
     {:orbit_ship, :post, "/my/ships/{shipSymbol}/orbit", :data},
     {:extract_resources, :post, "/my/ships/{shipSymbol}/extract", :data},
@@ -56,16 +57,18 @@ defmodule SpaceTraders.API.SpecConformanceTest do
     {:get_faction, :get, "/factions/{factionSymbol}", :data}
   ]
 
-  # {client endpoint, spec path template, generated request struct}
+  # {client endpoint, method, spec path template, generated request struct}
   @request_endpoints [
-    {:register, "/register", Request.RegisterRequest},
-    {:deliver_contract, "/my/contracts/{contractId}/deliver", Request.DeliverContractRequest},
-    {:navigate_ship, "/my/ships/{shipSymbol}/navigate", Request.NavigateRequest},
-    {:sell_cargo, "/my/ships/{shipSymbol}/sell", Request.SellCargoRequest},
-    {:purchase_cargo, "/my/ships/{shipSymbol}/purchase", Request.PurchaseCargoRequest},
-    {:jettison_cargo, "/my/ships/{shipSymbol}/jettison", Request.JettisonCargoRequest},
-    {:transfer_cargo, "/my/ships/{shipSymbol}/transfer", Request.TransferCargoRequest},
-    {:purchase_ship, "/my/ships", Request.PurchaseShipRequest}
+    {:register, :post, "/register", Request.RegisterRequest},
+    {:deliver_contract, :post, "/my/contracts/{contractId}/deliver",
+     Request.DeliverContractRequest},
+    {:navigate_ship, :post, "/my/ships/{shipSymbol}/navigate", Request.NavigateRequest},
+    {:set_ship_flight_mode, :patch, "/my/ships/{shipSymbol}/nav", Request.ShipNavRequest},
+    {:sell_cargo, :post, "/my/ships/{shipSymbol}/sell", Request.SellCargoRequest},
+    {:purchase_cargo, :post, "/my/ships/{shipSymbol}/purchase", Request.PurchaseCargoRequest},
+    {:jettison_cargo, :post, "/my/ships/{shipSymbol}/jettison", Request.JettisonCargoRequest},
+    {:transfer_cargo, :post, "/my/ships/{shipSymbol}/transfer", Request.TransferCargoRequest},
+    {:purchase_ship, :post, "/my/ships", Request.PurchaseShipRequest}
   ]
 
   describe "client envelope declarations match the bundled spec" do
@@ -123,8 +126,10 @@ defmodule SpaceTraders.API.SpecConformanceTest do
 
   describe "request payload declarations" do
     test "every state-changing endpoint with a client payload has a request schema and encoder" do
-      for {endpoint, path, request_module} <- @request_endpoints do
-        assert request_schema(path), "#{endpoint} (#{path}) has no request schema in the spec"
+      for {endpoint, method, path, request_module} <- @request_endpoints do
+        assert request_schema(path, method),
+               "#{endpoint} (#{path}) has no request schema in the spec"
+
         Code.ensure_loaded!(request_module)
         assert function_exported?(request_module, :new, 1)
         assert function_exported?(request_module, :to_json, 1)
@@ -144,6 +149,7 @@ defmodule SpaceTraders.API.SpecConformanceTest do
   defp arity_of(:get_ships), do: 1
   defp arity_of(:get_ship), do: 2
   defp arity_of(:navigate_ship), do: 3
+  defp arity_of(:set_ship_flight_mode), do: 3
   defp arity_of(:dock_ship), do: 2
   defp arity_of(:orbit_ship), do: 2
   defp arity_of(:extract_resources), do: 2
@@ -184,7 +190,14 @@ defmodule SpaceTraders.API.SpecConformanceTest do
     end
   end
 
-  defp request_schema(path) do
-    get_in(spec_paths(), [path, "post", "requestBody", "content", "application/json", "schema"])
+  defp request_schema(path, method) do
+    get_in(spec_paths(), [
+      path,
+      to_string(method),
+      "requestBody",
+      "content",
+      "application/json",
+      "schema"
+    ])
   end
 end
