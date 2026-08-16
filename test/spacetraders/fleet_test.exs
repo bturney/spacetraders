@@ -243,8 +243,8 @@ defmodule SpaceTraders.FleetTest do
       agent = agent_fixture()
       ship_fixture(agent, "FLEET-SHIP")
 
-      assert {:ok, %AutopilotConfig{} = config} =
-               Fleet.configure_autopilot(agent, "FLEET-SHIP", %{
+      assert {:ok, %Job{} = config} =
+               Fleet.configure_miner_job(agent, "FLEET-SHIP", %{
                  extraction_waypoint: "X1-UX81-A2",
                  market_waypoint: "X1-UX81-A1",
                  cargo_threshold: 30
@@ -252,7 +252,7 @@ defmodule SpaceTraders.FleetTest do
 
       persisted =
         Repo.update!(
-          Ecto.Changeset.change(config,
+          Ecto.Changeset.change(Repo.get!(AutopilotConfig, config.id),
             desired_mode: "autopilot",
             status: "waiting",
             in_flight_action: %{"kind" => "cooldown"},
@@ -280,6 +280,9 @@ defmodule SpaceTraders.FleetTest do
              } = Fleet.ship_job(agent, "FLEET-SHIP")
 
       assert Fleet.autopilot_config(agent, "FLEET-SHIP").id == persisted.id
+
+      assert {:ok, %Job{status: "paused", desired_mode: "manual"}} =
+               Fleet.pause_miner_job(agent, "FLEET-SHIP")
     end
 
     test "pauses and resumes without losing the configured loop" do

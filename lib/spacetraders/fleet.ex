@@ -284,11 +284,17 @@ defmodule SpaceTraders.Fleet do
     end
   end
 
-  def pause_miner_job(%AgentRecord{} = agent, ship_symbol),
-    do: pause_autopilot(agent, ship_symbol)
+  def pause_miner_job(%AgentRecord{} = agent, ship_symbol) do
+    with {:ok, %AutopilotConfig{id: id}} <- pause_autopilot(agent, ship_symbol) do
+      {:ok, Repo.get!(Job, id)}
+    end
+  end
 
-  def resume_miner_job(%AgentRecord{} = agent, ship_symbol),
-    do: resume_autopilot(agent, ship_symbol)
+  def resume_miner_job(%AgentRecord{} = agent, ship_symbol) do
+    with {:ok, %AutopilotConfig{id: id}} <- resume_autopilot(agent, ship_symbol) do
+      {:ok, Repo.get!(Job, id)}
+    end
+  end
 
   def stop_miner_job(%AgentRecord{} = agent, ship_symbol), do: stop_autopilot(agent, ship_symbol)
 
@@ -473,6 +479,14 @@ defmodule SpaceTraders.Fleet do
   @doc "Reconciles a ready Autopilot and dispatches its next loop leg."
   def advance_autopilot(%AgentRecord{} = agent, %AutopilotConfig{} = config, live_ship) do
     advance_autopilot(agent, config, live_ship, :normal)
+  end
+
+  def advance_autopilot(%AgentRecord{} = agent, %Job{id: id}, live_ship) do
+    advance_autopilot(agent, Repo.get!(AutopilotConfig, id), live_ship, :normal)
+  end
+
+  defp advance_autopilot(%AgentRecord{} = agent, %Job{id: id}, live_ship, mode) do
+    advance_autopilot(agent, Repo.get!(AutopilotConfig, id), live_ship, mode)
   end
 
   defp advance_autopilot(%AgentRecord{} = agent, %AutopilotConfig{} = config, live_ship, mode) do
@@ -1378,7 +1392,7 @@ defmodule SpaceTraders.Fleet do
     timeline_symbols = Timeline.pending_owners(:ship) |> Enum.map(& &1.owner_id)
 
     autopilot_symbols =
-      AutopilotConfig
+      Job
       |> join(:inner, [c], s in Ship, on: c.ship_id == s.id)
       |> where([c, _s], c.desired_mode == "autopilot")
       |> select([_c, s], s.symbol)
@@ -1392,7 +1406,7 @@ defmodule SpaceTraders.Fleet do
           ShipServer.ensure_started(ship_symbol, agent_id, agent_token)
 
           unless ship_symbol in timeline_symbols do
-            recover_autopilot_on_boot(ship_symbol, agent_id, agent_token)
+            recover_job_on_boot(ship_symbol, agent_id, agent_token)
           end
 
         :error ->
@@ -1407,8 +1421,13 @@ defmodule SpaceTraders.Fleet do
 
   @doc "Reconciles a persisted in-flight Autopilot action after a process restart."
   def recover_autopilot_on_boot(ship_symbol, agent_id, agent_token) do
+    recover_job_on_boot(ship_symbol, agent_id, agent_token)
+  end
+
+  @doc "Reconciles a persisted Miner Job's in-flight action after a process restart."
+  def recover_job_on_boot(ship_symbol, agent_id, agent_token) do
     with %Ship{} = ship <- Repo.get_by(Ship, symbol: ship_symbol, agent_id: agent_id),
-         %AutopilotConfig{} = config <- Repo.get_by(AutopilotConfig, ship_id: ship.id) do
+         %Job{} = config <- Repo.get_by(Job, ship_id: ship.id) do
       if config.desired_mode == "autopilot" do
         case SpaceTraders.API.get_ship(agent_token, ship_symbol) do
           {:ok, live_ship} when config.status == "ready" and is_nil(config.in_flight_action) ->
@@ -1553,8 +1572,7 @@ defmodule SpaceTraders.Fleet do
 
   defp recovery_retry_or_block(agent_id, ship_symbol, reason, agent_token) do
     with %Ship{} = ship <- Repo.get_by(Ship, symbol: ship_symbol, agent_id: agent_id),
-         %AutopilotConfig{desired_mode: "autopilot"} = config <-
-           Repo.get_by(AutopilotConfig, ship_id: ship.id) do
+         %Job{desired_mode: "autopilot"} = config <- Repo.get_by(Job, ship_id: ship.id) do
       if config.recovery_attempts < 3 do
         Repo.update!(
           Ecto.Changeset.change(config, recovery_attempts: config.recovery_attempts + 1)
@@ -1568,7 +1586,7 @@ defmodule SpaceTraders.Fleet do
           "transport_error"
         )
 
-        recover_autopilot_on_boot(ship_symbol, agent_id, agent_token)
+        recover_job_on_boot(ship_symbol, agent_id, agent_token)
       else
         block_recovery(agent_id, ship, config, "retry_exhausted: #{inspect(reason)}")
       end
