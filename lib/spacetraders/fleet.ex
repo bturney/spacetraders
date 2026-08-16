@@ -1220,6 +1220,61 @@ defmodule SpaceTraders.Fleet do
   def jettison_cargo(%AgentRecord{}, _ship_symbol, _trade_symbol, _units),
     do: {:error, :invalid_units}
 
+  @doc "Transfers cargo to another ship after validating both live ship states."
+  def transfer_cargo(
+        %AgentRecord{agent_token: token} = agent,
+        from_ship,
+        to_ship,
+        trade_symbol,
+        units
+      )
+      when is_binary(token) and token != "" and is_integer(units) and units > 0 do
+    with :ok <- different_transfer_ships?(from_ship, to_ship),
+         {:ok, source} <- SpaceTraders.API.get_ship(token, from_ship),
+         {:ok, target} <- SpaceTraders.API.get_ship(token, to_ship),
+         :ok <- transfer_preflight(source, target, trade_symbol, units),
+         :ok <- preempt_autopilot_for(agent, from_ship, {:manual_override, "cargo transfer"}),
+         :ok <- ShipServer.ensure_ready(from_ship) do
+      SpaceTraders.API.transfer_cargo(token, from_ship, trade_symbol, units, to_ship)
+    end
+  end
+
+  def transfer_cargo(
+        %AgentRecord{agent_token: token},
+        _from_ship,
+        _to_ship,
+        _trade_symbol,
+        _units
+      )
+      when not is_binary(token) or token == "",
+      do: {:error, :agent_token_missing}
+
+  def transfer_cargo(%AgentRecord{}, _from_ship, _to_ship, _trade_symbol, _units),
+    do: {:error, :invalid_units}
+
+  defp transfer_preflight(source, target, trade_symbol, units) do
+    cond do
+      source.nav.waypoint_symbol != target.nav.waypoint_symbol ->
+        {:error, :transfer_waypoint_mismatch}
+
+      source.nav.status not in ["DOCKED", "IN_ORBIT"] or
+          source.nav.status != target.nav.status ->
+        {:error, :transfer_state_mismatch}
+
+      item_units(source, trade_symbol) < units ->
+        {:error, :transfer_cargo_missing}
+
+      cargo_units(target) + units > target.cargo.capacity ->
+        {:error, :transfer_target_cargo_full}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp different_transfer_ships?(ship, ship), do: {:error, :transfer_same_ship}
+  defp different_transfer_ships?(_from_ship, _to_ship), do: :ok
+
   @doc """
   Re-arms ship servers for every ship with a pending timeline event.
 

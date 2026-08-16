@@ -386,6 +386,32 @@ defmodule SpaceTradersWeb.DashboardLive do
   end
 
   @impl true
+  def handle_event(
+        "transfer_cargo",
+        %{
+          "from_ship" => from_ship,
+          "to_ship" => to_ship,
+          "trade_symbol" => trade_symbol,
+          "units" => units
+        },
+        socket
+      ) do
+    with {:ok, agent} <- agent_for_ship(socket, from_ship),
+         {:ok, units} <- parse_units(units),
+         {:ok, _result} <- Fleet.transfer_cargo(agent, from_ship, to_ship, trade_symbol, units) do
+      {:noreply,
+       put_flash(
+         refresh_agent(socket, agent)
+         |> clear_draft(draft_key("transfer", [from_ship])),
+         :info,
+         "Transferred #{units} #{trade_symbol} from #{from_ship} to #{to_ship}."
+       )}
+    else
+      {:error, reason} -> {:noreply, put_flash(socket, :error, live_error(reason))}
+    end
+  end
+
+  @impl true
   def handle_event("select_waypoint", %{"agent_id" => agent_id, "symbol" => symbol}, socket) do
     selected_waypoints = Map.put(socket.assigns.selected_waypoints, agent_id, symbol)
     key = {agent_id, symbol}
@@ -1984,6 +2010,7 @@ defmodule SpaceTradersWeb.DashboardLive do
             <.ship_card
               :for={ship <- ships}
               ship={ship}
+              ships={ships}
               agent_id={@agent.id}
               cooldown_tick={@cooldown_tick}
               form_drafts={@form_drafts}
@@ -1999,6 +2026,7 @@ defmodule SpaceTradersWeb.DashboardLive do
   end
 
   attr :ship, :map, required: true
+  attr :ships, :list, required: true
   attr :agent_id, :integer, required: true
   attr :cooldown_tick, :integer, default: 0
   attr :form_drafts, :map, default: %{}
@@ -2141,6 +2169,8 @@ defmodule SpaceTradersWeb.DashboardLive do
           >Back to Fleet</button>
         </div>
         <.autopilot_panel ship={@ship} form_drafts={@form_drafts} />
+
+        <.transfer_panel ship={@ship} ships={@ships} form_drafts={@form_drafts} />
 
         <%= if in_transit?(@ship) do %>
           <div class="flex flex-wrap items-center gap-2 text-xs">
@@ -2400,6 +2430,89 @@ defmodule SpaceTradersWeb.DashboardLive do
           </div>
         </div>
       </details>
+    </div>
+    """
+  end
+
+  attr :ship, :map, required: true
+  attr :ships, :list, required: true
+  attr :form_drafts, :map, default: %{}
+
+  defp transfer_panel(assigns) do
+    ~H"""
+    <div
+      :if={transfer_targets(@ship, @ships) != [] and cargo_inventory(@ship) != []}
+      class="mt-4 rounded border border-base-300/60 p-3"
+    >
+      <p class="text-xs font-semibold uppercase tracking-wide opacity-60">Transfer cargo</p>
+      <form
+        id={"transfer-form-#{@ship.symbol}"}
+        phx-change="track_draft"
+        phx-submit="transfer_cargo"
+        class="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-4"
+      >
+        <input type="hidden" name="from_ship" value={@ship.symbol} />
+        <input
+          type="hidden"
+          name="draft_key"
+          value={
+            draft_key("transfer", [
+              @ship.symbol
+            ])
+          }
+        />
+        <select name="to_ship" class="select select-bordered select-sm">
+          <option
+            :for={target <- transfer_targets(@ship, @ships)}
+            value={target.symbol}
+            selected={
+              draft_field(
+                @form_drafts,
+                "transfer",
+                [@ship.symbol],
+                "to_ship",
+                transfer_target(@ship, @ships)
+              ) == target.symbol
+            }
+          >
+            {target.symbol}
+          </option>
+        </select>
+        <select name="trade_symbol" class="select select-bordered select-sm">
+          <option
+            :for={item <- cargo_inventory(@ship)}
+            value={item.symbol}
+            selected={
+              draft_field(
+                @form_drafts,
+                "transfer",
+                [@ship.symbol],
+                "trade_symbol",
+                transfer_symbol(@ship)
+              ) == item.symbol
+            }
+          >
+            {item.symbol}
+          </option>
+        </select>
+        <input
+          type="number"
+          name="units"
+          min="1"
+          max={cargo_units(cargo_item(@ship, transfer_symbol(@ship)))}
+          value={
+            draft_field(
+              @form_drafts,
+              "transfer",
+              [@ship.symbol],
+              "units",
+              cargo_units(cargo_item(@ship, transfer_symbol(@ship)))
+            )
+          }
+          class="input input-bordered input-sm"
+        />
+        <button type="submit" class="btn btn-secondary btn-sm">Transfer</button>
+      </form>
     </div>
     """
   end
@@ -2801,6 +2914,16 @@ defmodule SpaceTradersWeb.DashboardLive do
   defp live_error(:ship_not_docked), do: "This action requires the Ship to be docked."
   defp live_error(:cargo_missing), do: "This Ship does not carry that trade good."
   defp live_error(:cargo_full), do: "This Ship has no cargo space available."
+  defp live_error(:transfer_same_ship), do: "Choose a different receiving Ship."
+  defp live_error(:transfer_waypoint_mismatch), do: "Both Ships must be at the same waypoint."
+  defp live_error(:transfer_state_mismatch), do: "Both Ships must be docked or both in orbit."
+
+  defp live_error(:transfer_cargo_missing),
+    do: "The transferring Ship does not carry enough cargo."
+
+  defp live_error(:transfer_target_cargo_full),
+    do: "The receiving Ship does not have enough cargo space."
+
   defp live_error(:trade_unavailable), do: "This Market does not sell that trade good."
   defp live_error(:agent_token_missing), do: "No AgentToken stored for this agent."
 
@@ -3066,6 +3189,26 @@ defmodule SpaceTradersWeb.DashboardLive do
 
   defp cargo_inventory(%{cargo: %{inventory: inventory}}) when is_list(inventory), do: inventory
   defp cargo_inventory(_), do: []
+
+  defp transfer_targets(ship, ships) do
+    Enum.filter(ships, &transfer_target?(ship, &1))
+  end
+
+  defp transfer_target?(%{symbol: source}, %{symbol: source}), do: false
+
+  defp transfer_target?(%{nav: %{waypoint_symbol: waypoint, status: status}}, %{
+         nav: %{waypoint_symbol: waypoint, status: status}
+       })
+       when status in ["DOCKED", "IN_ORBIT"],
+       do: true
+
+  defp transfer_target?(_, _), do: false
+
+  defp transfer_target(ship, ships),
+    do: transfer_targets(ship, ships) |> List.first() |> then(&(&1 && &1.symbol))
+
+  defp transfer_symbol(ship),
+    do: cargo_inventory(ship) |> List.first() |> then(&(&1 && &1.symbol))
 
   defp cargo_name(%{name: name}) when is_binary(name) and name != "", do: name
   defp cargo_name(_), do: nil

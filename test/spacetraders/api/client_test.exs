@@ -272,6 +272,25 @@ defmodule SpaceTraders.API.ClientTest do
                API.jettison_cargo("TOKEN", "ORBITALIST-1", "IRON_ORE", 3)
     end
 
+    test "transfer_cargo/5 posts the good, units, and receiving ship" do
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        assert conn.request_path == "/v2/my/ships/ORBITALIST-1/transfer"
+
+        assert conn.body_params == %{
+                 "tradeSymbol" => "IRON_ORE",
+                 "units" => 3,
+                 "shipSymbol" => "ORBITALIST-2"
+               }
+
+        Req.Test.json(conn, %{
+          "data" => %{"cargo" => %{"capacity" => 40, "units" => 2, "inventory" => []}}
+        })
+      end)
+
+      assert {:ok, %{cargo: %Model.ShipCargo{units: 2}}} =
+               API.transfer_cargo("TOKEN", "ORBITALIST-1", "IRON_ORE", 3, "ORBITALIST-2")
+    end
+
     test "purchase_cargo/4 posts the good and units and decodes the transaction" do
       Req.Test.stub(SpaceTraders.API, fn conn ->
         assert conn.request_path == "/v2/my/ships/ORBITALIST-1/purchase"

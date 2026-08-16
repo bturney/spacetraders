@@ -26,6 +26,7 @@ defmodule Mix.Tasks.SpaceTraders.Gen.Models do
     {"/my/ships/{shipSymbol}/sell", "SellCargoRequest"},
     {"/my/ships/{shipSymbol}/purchase", "PurchaseCargoRequest"},
     {"/my/ships/{shipSymbol}/jettison", "JettisonCargoRequest"},
+    {"/my/ships/{shipSymbol}/transfer", "TransferCargoRequest"},
     {"/my/ships", "PurchaseShipRequest"}
   ]
 

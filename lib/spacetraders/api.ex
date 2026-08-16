@@ -59,7 +59,8 @@ defmodule SpaceTraders.API do
     PurchaseCargoRequest,
     PurchaseShipRequest,
     RegisterRequest,
-    SellCargoRequest
+    SellCargoRequest,
+    TransferCargoRequest
   }
 
   @type token() :: String.t()
@@ -266,6 +267,21 @@ defmodule SpaceTraders.API do
       json:
         JettisonCargoRequest.new(%{symbol: trade_symbol, units: units})
         |> JettisonCargoRequest.to_json(),
+      as: {:map, %{cargo: {:model, ShipCargo}}}
+    )
+  end
+
+  @doc "POST /my/ships/{symbol}/transfer — transfers cargo to another ship."
+  @spec transfer_cargo(token(), String.t(), String.t(), pos_integer(), String.t()) :: result()
+  def transfer_cargo(token, ship_symbol, trade_symbol, units, target_ship_symbol) do
+    request(:post, "/my/ships/#{ship_symbol}/transfer", token,
+      json:
+        TransferCargoRequest.new(%{
+          trade_symbol: trade_symbol,
+          units: units,
+          ship_symbol: target_ship_symbol
+        })
+        |> TransferCargoRequest.to_json(),
       as: {:map, %{cargo: {:model, ShipCargo}}}
     )
   end
