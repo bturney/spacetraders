@@ -2499,14 +2499,14 @@ defmodule SpaceTradersWeb.DashboardLive do
           type="number"
           name="units"
           min="1"
-          max={cargo_units(cargo_item(@ship, transfer_symbol(@ship)))}
+          max={cargo_units(transfer_item(@ship, @form_drafts))}
           value={
             draft_field(
               @form_drafts,
               "transfer",
               [@ship.symbol],
               "units",
-              cargo_units(cargo_item(@ship, transfer_symbol(@ship)))
+              cargo_units(transfer_item(@ship, @form_drafts))
             )
           }
           class="input input-bordered input-sm"
@@ -3209,6 +3209,11 @@ defmodule SpaceTradersWeb.DashboardLive do
 
   defp transfer_symbol(ship),
     do: cargo_inventory(ship) |> List.first() |> then(&(&1 && &1.symbol))
+
+  defp transfer_symbol(ship, drafts),
+    do: draft_field(drafts, "transfer", [ship.symbol], "trade_symbol", transfer_symbol(ship))
+
+  defp transfer_item(ship, drafts), do: cargo_item(ship, transfer_symbol(ship, drafts))
 
   defp cargo_name(%{name: name}) when is_binary(name) and name != "", do: name
   defp cargo_name(_), do: nil
