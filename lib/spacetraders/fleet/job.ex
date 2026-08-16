@@ -1,12 +1,11 @@
-defmodule SpaceTraders.Fleet.AutopilotConfig do
-  @moduledoc "Durable, operator-owned configuration and status for one Ship's Autopilot."
+defmodule SpaceTraders.Fleet.Job do
+  @moduledoc "A durable, operator-selected outcome for one Ship."
 
   use Ecto.Schema
   import Ecto.Changeset
 
-  # Compatibility projection for callers that still speak Autopilot. The durable
-  # record is a Miner Job; this schema intentionally has no table of its own.
   schema "jobs" do
+    field :type, :string, default: "miner"
     field :extraction_waypoint, :string
     field :market_waypoint, :string
     field :cargo_threshold, :integer
@@ -24,9 +23,10 @@ defmodule SpaceTraders.Fleet.AutopilotConfig do
     timestamps(type: :utc_datetime)
   end
 
-  def changeset(config, attrs) do
-    config
+  def changeset(job, attrs) do
+    job
     |> cast(attrs, [
+      :type,
       :extraction_waypoint,
       :market_waypoint,
       :cargo_threshold,
@@ -35,7 +35,8 @@ defmodule SpaceTraders.Fleet.AutopilotConfig do
       :blocked_reason,
       :last_validated_at
     ])
-    |> validate_required([:extraction_waypoint, :market_waypoint, :cargo_threshold])
+    |> validate_required([:type, :extraction_waypoint, :market_waypoint, :cargo_threshold])
+    |> validate_inclusion(:type, ["miner"])
     |> validate_number(:cargo_threshold, greater_than: 0)
     |> validate_inclusion(:desired_mode, ["manual", "autopilot"])
     |> validate_inclusion(:status, ["revalidating", "ready", "waiting", "blocked", "paused"])

@@ -19,7 +19,7 @@ defmodule SpaceTraders.Fleet do
 
   alias SpaceTraders.Agent.Agent, as: AgentRecord
   alias SpaceTraders.API.Model.{ShipNav, ShipNavRoute}
-  alias SpaceTraders.Fleet.{Activity, AutopilotConfig, Ship, ShipDestination}
+  alias SpaceTraders.Fleet.{Activity, AutopilotConfig, Job, Ship, ShipDestination}
   alias SpaceTraders.Fleet.ShipServer
   alias SpaceTraders.Repo
   alias SpaceTraders.{Agent, Contracts, Listing, Shipyard}
@@ -124,6 +124,7 @@ defmodule SpaceTraders.Fleet do
        ensure_ship_record(agent, ship)
 
        ship
+       |> Map.put(:job, ship_job(agent, ship.symbol))
        |> Map.put(:autopilot, autopilot_config(agent, ship.symbol))
        |> Map.put(:destination_history, destination_history(agent, ship.symbol))
      end)}
@@ -260,6 +261,36 @@ defmodule SpaceTraders.Fleet do
       _ -> nil
     end
   end
+
+  @doc "Returns a Ship's durable Job, or nil."
+  def ship_job(%AgentRecord{} = agent, ship_symbol) do
+    case owned_ship(agent, ship_symbol) do
+      {:ok, ship} -> Repo.get_by(Job, ship_id: ship.id)
+      _ -> nil
+    end
+  end
+
+  @doc "Configures a Miner Job while preserving the Autopilot compatibility boundary."
+  def configure_miner_job(%AgentRecord{} = agent, ship_symbol, attrs) when is_map(attrs) do
+    with {:ok, %AutopilotConfig{id: id}} <- configure_autopilot(agent, ship_symbol, attrs) do
+      {:ok, Repo.get!(Job, id)}
+    end
+  end
+
+  @doc "Starts a configured Miner Job after authoritative validation."
+  def start_miner_job(%AgentRecord{} = agent, ship_symbol) do
+    with {:ok, %AutopilotConfig{id: id}} <- start_autopilot(agent, ship_symbol) do
+      {:ok, Repo.get!(Job, id)}
+    end
+  end
+
+  def pause_miner_job(%AgentRecord{} = agent, ship_symbol),
+    do: pause_autopilot(agent, ship_symbol)
+
+  def resume_miner_job(%AgentRecord{} = agent, ship_symbol),
+    do: resume_autopilot(agent, ship_symbol)
+
+  def stop_miner_job(%AgentRecord{} = agent, ship_symbol), do: stop_autopilot(agent, ship_symbol)
 
   @doc "Explicitly starts a configured Autopilot after authoritative validation."
   def start_autopilot(%AgentRecord{} = agent, ship_symbol) do
