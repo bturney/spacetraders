@@ -1368,6 +1368,83 @@ defmodule SpaceTraders.FleetTest do
       assert [%Event{event_type: "cooldown"}] = Timeline.pending_events(:ship, "FLEET-SHIP")
     end
 
+    test "keeps gathering when total cargo clears the threshold but sellable cargo does not" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      {:ok, config} =
+        Fleet.configure_miner_job(agent, "FLEET-SHIP", %{
+          extraction_waypoint: "X1-UX81-A2",
+          market_waypoint: "X1-UX81-A1",
+          cargo_threshold: 30
+        })
+
+      config = activate_for_extraction(config, ["IRON_ORE"])
+      test_pid = self()
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case conn.request_path do
+          "/v2/my/ships/FLEET-SHIP/jettison" ->
+            send(test_pid, {:jettison_request, conn.body_params})
+
+            Req.Test.json(conn, %{
+              "data" => %{
+                "cargo" => %{
+                  "capacity" => 60,
+                  "units" => 10,
+                  "inventory" => [%{"symbol" => "IRON_ORE", "units" => 10}]
+                }
+              }
+            })
+
+          "/v2/my/ships/FLEET-SHIP/extract" ->
+            send(test_pid, {:extract_request})
+
+            Req.Test.json(conn, %{
+              "data" => %{
+                "cooldown" => %{
+                  "shipSymbol" => "FLEET-SHIP",
+                  "totalSeconds" => 60,
+                  "remainingSeconds" => 60,
+                  "expiration" => future_iso(60)
+                },
+                "extraction" => %{
+                  "shipSymbol" => "FLEET-SHIP",
+                  "yield" => %{"symbol" => "IRON_ORE", "units" => 5}
+                },
+                "cargo" => %{
+                  "capacity" => 60,
+                  "units" => 15,
+                  "inventory" => [%{"symbol" => "IRON_ORE", "units" => 15}]
+                }
+              }
+            })
+        end
+      end)
+
+      live_ship = %Model.Ship{
+        symbol: "FLEET-SHIP",
+        nav: %Model.ShipNav{
+          status: "IN_ORBIT",
+          waypoint_symbol: "X1-UX81-A2",
+          system_symbol: "X1-UX81"
+        },
+        cargo: %Model.ShipCargo{
+          capacity: 60,
+          units: 50,
+          inventory: [cargo_item("IRON_ORE", 10), cargo_item("COPPER_ORE", 40)]
+        },
+        cooldown: %Model.Cooldown{remaining_seconds: 0}
+      }
+
+      assert {:ok, %Job{status: "waiting", in_flight_action: %{"kind" => "extract"}}} =
+               Fleet.advance_miner_job(agent, config, live_ship)
+
+      assert_receive {:jettison_request, %{"symbol" => "COPPER_ORE", "units" => 40}}
+      assert_receive {:extract_request}
+      refute_receive {:navigate_request, _}
+    end
+
     test "falls back to the total-cargo loop when the market's goods are unknown" do
       agent = agent_fixture()
       ship_fixture(agent, "FLEET-SHIP")
