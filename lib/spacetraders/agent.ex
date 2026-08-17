@@ -391,7 +391,7 @@ defmodule SpaceTraders.Agent do
     |> Repo.update()
   end
 
-  defp server_reset_mismatch?(%SpaceTraders.API.GameplayError{code: 4011, message: message}) do
+  defp server_reset_mismatch?(%SpaceTraders.API.GameplayError{message: message}) do
     Regex.match?(
       ~r/^Failed to parse token\. Token reset_date does not match the server\. Server resets happen .+ After a reset, you should re-register your agent\. Expected: \d{4}-\d{2}-\d{2}, Actual: \d{4}-\d{2}-\d{2}$/,
       message

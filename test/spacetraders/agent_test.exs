@@ -739,7 +739,7 @@ defmodule SpaceTraders.AgentTest do
         |> Map.put(:status, 401)
         |> Req.Test.json(%{
           "error" => %{
-            "code" => 4011,
+            "code" => 4113,
             "message" =>
               "Failed to parse token. Token reset_date does not match the server. Server resets happen on a weekly to bi-weekly frequency during alpha. After a reset, you should re-register your agent. Expected: 2026-08-16, Actual: 2026-08-09"
           }
