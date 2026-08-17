@@ -55,6 +55,8 @@ defmodule SpaceTradersWeb.DashboardLive do
               <.link navigate={~p"/agents/new"} class="btn btn-primary min-h-12 shrink-0">Mint an agent</.link>
             </div>
 
+            <.stale_agent_card stale_agents={stale_agents(@overviews)} />
+
             <.contract_hero overviews={non_stale_overviews(@overviews)} />
 
             <div :if={@overviews == []} class="alert alert-outline">
@@ -78,8 +80,6 @@ defmodule SpaceTradersWeb.DashboardLive do
               waypoint_markets={@waypoint_markets}
               selected_ships={@selected_ships}
             />
-
-            <.stale_agent_card stale_agents={stale_agents(@overviews)} />
 
             <.activity_panel overviews={non_stale_overviews(@overviews)} />
           </div>
