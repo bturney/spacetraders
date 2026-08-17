@@ -2687,6 +2687,12 @@ defmodule SpaceTradersWeb.DashboardLive do
             {job_next_transition(@job, @ship)}
           </dd>
         </div>
+        <div>
+          <dt class="opacity-60">Effective sellable payload</dt>
+          <dd data-job-sellable>
+            {job_sellable_payload(@job, @ship)}
+          </dd>
+        </div>
       </dl>
       <p
         :if={job_reason(@job)}
@@ -2921,6 +2927,25 @@ defmodule SpaceTradersWeb.DashboardLive do
 
   defp job_next_transition(_, _ship), do: "Start Miner Job"
 
+  defp job_sellable_payload(nil, ship), do: "#{cargo_units(ship.cargo)} total units"
+
+  defp job_sellable_payload(%{cargo_threshold: threshold, sellable_goods: goods}, ship)
+       when is_list(goods) and goods != [] do
+    "#{sellable_units_in(ship, MapSet.new(goods))} / #{threshold} sellable units"
+  end
+
+  defp job_sellable_payload(%{cargo_threshold: threshold}, ship) do
+    "#{cargo_units(ship.cargo)} / #{threshold} total units"
+  end
+
+  defp sellable_units_in(%{cargo: %{inventory: inventory}}, accepted) do
+    Enum.reduce(inventory || [], 0, fn item, acc ->
+      if MapSet.member?(accepted, item.symbol), do: acc + item.units, else: acc
+    end)
+  end
+
+  defp sellable_units_in(_ship, _accepted), do: 0
+
   defp job_blocked_reason(":invalid_extraction_waypoint"),
     do: "Choose an ASTEROID_FIELD or ENGINEERED_ASTEROID extraction waypoint."
 
@@ -2979,7 +3004,7 @@ defmodule SpaceTradersWeb.DashboardLive do
   defp activity_facts(%{metadata: metadata}) when is_map(metadata) do
     metadata
     |> Enum.filter(fn {key, _value} ->
-      key in ["outcome", "delta", "wait", "retry", "block", "recovery"]
+      key in ["outcome", "delta", "wait", "retry", "block", "recovery", "jettison"]
     end)
     |> Enum.map(fn {key, value} -> {key, format_activity_value(value)} end)
   end

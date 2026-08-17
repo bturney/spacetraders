@@ -18,7 +18,7 @@ defmodule SpaceTraders.Fleet do
   require Logger
 
   alias SpaceTraders.Agent.Agent, as: AgentRecord
-  alias SpaceTraders.API.Model.{ShipNav, ShipNavRoute}
+  alias SpaceTraders.API.Model.{Market, ShipNav, ShipNavRoute}
   alias SpaceTraders.Fleet.{Activity, Job, Ship, ShipDestination}
   alias SpaceTraders.Fleet.ShipServer
   alias SpaceTraders.Repo
@@ -266,13 +266,14 @@ defmodule SpaceTraders.Fleet do
   def start_miner_job(%AgentRecord{} = agent, ship_symbol) do
     with {:ok, ship} <- owned_ship(agent, ship_symbol),
          %Job{} = job <- Repo.get_by(Job, ship_id: ship.id),
-         {:ok, live_ship} <- validate_miner_job(agent, ship, job) do
+         {:ok, live_ship, sellable_goods} <- validate_miner_job(agent, ship, job) do
       job =
         Repo.update!(
           Ecto.Changeset.change(job,
             desired_mode: "active",
             status: "ready",
             blocked_reason: nil,
+            sellable_goods: sellable_goods,
             last_validated_at: DateTime.utc_now() |> DateTime.truncate(:second)
           )
         )
@@ -302,6 +303,7 @@ defmodule SpaceTraders.Fleet do
     |> Ecto.Changeset.put_change(:desired_mode, "manual")
     |> Ecto.Changeset.put_change(:status, "ready")
     |> Ecto.Changeset.put_change(:blocked_reason, nil)
+    |> Ecto.Changeset.put_change(:sellable_goods, [])
     |> Repo.insert_or_update()
   end
 
@@ -369,7 +371,7 @@ defmodule SpaceTraders.Fleet do
          :ok <- market_available?(market),
          :ok <- cargo_policy?(live_ship, config.cargo_threshold),
          :ok <- mining_capability?(live_ship) do
-      {:ok, live_ship}
+      {:ok, live_ship, accepted_sellable_goods(market)}
     end
   end
 
@@ -587,57 +589,214 @@ defmodule SpaceTraders.Fleet do
            )
          )}
 
-      cargo_units(live_ship) < config.cargo_threshold ->
-        action = %{
-          "kind" => "extract",
-          "waypoint" => config.extraction_waypoint,
-          "expected" => %{"cargo_units_at_least" => cargo_units(live_ship) + 1}
-        }
+      true ->
+        evaluate_extraction_cargo(agent, config, live_ship, mode)
+    end
+  end
 
+  # Idle at the extraction Waypoint: when the configured Market's accepted
+  # sellable goods are known, unsellable holdings are jettisoned in bounded
+  # batches and the Ship only departs once sellable cargo reaches the threshold.
+  # Missing market goods degrade to today's total-cargo loop and never block.
+  defp evaluate_extraction_cargo(agent, config, live_ship, mode) do
+    case sellable_goods_set(config) do
+      :unknown ->
+        extract_or_depart_by_total(agent, config, live_ship, mode)
+
+      accepted ->
+        case first_non_sellable_item(live_ship, accepted) do
+          nil ->
+            if sellable_units(live_ship, accepted) < config.cargo_threshold do
+              extract_miner_job(agent, config, live_ship, mode)
+            else
+              revalidate_market_before_departure(agent, config, live_ship, mode)
+            end
+
+          item ->
+            jettison_unsellable_or_retry(agent, config, live_ship, item, mode)
+        end
+    end
+  end
+
+  defp sellable_goods_set(%Job{sellable_goods: goods}) when is_list(goods) and goods != [],
+    do: MapSet.new(goods)
+
+  defp sellable_goods_set(_config), do: :unknown
+
+  # Jettison one unsellable held good at the mining Waypoint, confirmed against
+  # the authoritative cargo response, then re-evaluate the loop (a subsequent
+  # batch or an extract decision follows the same path; jettison carries no
+  # cooldown in this API version, so there is nothing to wait for).
+  defp jettison_unsellable_or_retry(agent, config, live_ship, item, mode) do
+    case jettison_unsellable_at_extraction(agent, config, live_ship, item) do
+      {:ok, live_ship, config} ->
+        advance_miner_job(agent, config, live_ship, mode)
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp jettison_unsellable_at_extraction(agent, config, live_ship, item) do
+    action = %{
+      "kind" => "jettison",
+      "waypoint" => config.extraction_waypoint,
+      "trade_symbol" => item.symbol,
+      "expected" => %{"units_at_most" => item_units(live_ship, item.symbol) - item.units}
+    }
+
+    config =
+      Repo.update!(
+        Ecto.Changeset.change(config, status: "revalidating", in_flight_action: action)
+      )
+
+    case jettison_cargo_for_miner_job(agent, live_ship.symbol, item.symbol, item.units) do
+      {:ok, %{cargo: cargo}} ->
         config =
           Repo.update!(
-            Ecto.Changeset.change(config, status: "revalidating", in_flight_action: action)
+            Ecto.Changeset.change(config,
+              status: "ready",
+              in_flight_action: nil,
+              last_action_result: %{"kind" => "jettison", "trade_symbol" => item.symbol}
+            )
           )
 
-        extract =
-          case mode do
-            :timeline -> &extract_resources_for_miner_job/2
-            :normal -> &extract_resources/2
-          end
+        record_miner_job_activity(
+          agent,
+          live_ship,
+          "miner_job_jettison",
+          "Jettisoned #{item.units} #{item.symbol} at #{config.extraction_waypoint} (#{config.market_waypoint} will not buy it)",
+          %{"jettison" => "#{item.symbol} #{item.units}"}
+        )
 
-        case extract.(agent, live_ship.symbol) do
-          {:ok, result} ->
-            result_snapshot = %{
-              "kind" => "extract",
-              "yield" => extraction_yield(result)
-            }
+        {:ok, %{live_ship | cargo: cargo}, config}
 
-            {:ok,
-             Repo.update!(
-               Ecto.Changeset.change(config,
-                 status: "waiting",
-                 last_action_result: result_snapshot
-               )
-             )}
+      {:error, reason} ->
+        mark_miner_job_blocked(config, {:jettison_unsellable_failed, item.symbol, reason})
+    end
+  end
 
-          {:error, reason} ->
-            Repo.update!(
-              Ecto.Changeset.change(config, status: "blocked", blocked_reason: inspect(reason))
-            )
+  # Revalidates the configured Market's accepted goods before departing. A good
+  # the Market no longer accepts is jettisoned at the mining Waypoint first, so
+  # the Ship never hauls it to the Market on stale data; an unavailable Market
+  # degrades to today's behavior (depart and let the Market leg sort the hold).
+  defp revalidate_market_before_departure(agent, config, live_ship, mode) do
+    case fetch_configured_market(agent, live_ship, config) do
+      {:ok, market} ->
+        fresh = accepted_sellable_goods(market)
+        config = Repo.update!(Ecto.Changeset.change(config, sellable_goods: fresh))
 
-            record_miner_job_activity(
-              agent,
-              live_ship,
-              "miner_job_blocked",
-              "Miner Job blocked: #{inspect(reason)}",
-              %{"block" => inspect(reason), "recovery" => "resume"}
-            )
-
-            {:error, reason}
+        if fresh == [] do
+          navigate_miner_job(agent, config, live_ship, config.market_waypoint)
+        else
+          evaluate_fresh_market(agent, config, live_ship, MapSet.new(fresh), mode)
         end
 
-      true ->
+      {:error, _reason} ->
         navigate_miner_job(agent, config, live_ship, config.market_waypoint)
+    end
+  end
+
+  defp evaluate_fresh_market(agent, config, live_ship, accepted, mode) do
+    case first_non_sellable_item(live_ship, accepted) do
+      nil ->
+        if sellable_units(live_ship, accepted) < config.cargo_threshold do
+          evaluate_extraction_cargo(agent, config, live_ship, mode)
+        else
+          navigate_miner_job(agent, config, live_ship, config.market_waypoint)
+        end
+
+      item ->
+        jettison_unsellable_or_retry(agent, config, live_ship, item, mode)
+    end
+  end
+
+  defp fetch_configured_market(%AgentRecord{agent_token: token}, live_ship, config)
+       when is_binary(token) and token != "" do
+    SpaceTraders.API.get_market(token, live_ship.nav.system_symbol, config.market_waypoint)
+  end
+
+  defp fetch_configured_market(_agent, _live_ship, _config), do: {:error, :agent_token_missing}
+
+  # The configured Market's authoritative accepted sellable goods (its imports
+  # and exchange lists) as a sorted list of trade symbols. An empty list means
+  # market-goods information is unavailable and the loop falls back to the
+  # total-cargo behavior.
+  defp accepted_sellable_goods(%Market{} = market) do
+    ((market.imports || []) ++ (market.exchange || []))
+    |> Enum.map(& &1.symbol)
+    |> Enum.reject(&is_nil/1)
+    |> Enum.uniq()
+    |> Enum.sort()
+  end
+
+  defp sellable_units(%{cargo: %{inventory: inventory}}, accepted) do
+    Enum.reduce(inventory || [], 0, fn item, acc ->
+      if MapSet.member?(accepted, item.symbol), do: acc + item.units, else: acc
+    end)
+  end
+
+  defp first_non_sellable_item(%{cargo: %{inventory: inventory}}, accepted) do
+    Enum.find(inventory || [], &(not MapSet.member?(accepted, &1.symbol)))
+  end
+
+  # The total-cargo loop, used only when market-goods information is unavailable
+  # so an unreadable Market never blocks or pauses the Miner Job.
+  defp extract_or_depart_by_total(agent, config, live_ship, mode) do
+    if cargo_units(live_ship) < config.cargo_threshold do
+      extract_miner_job(agent, config, live_ship, mode)
+    else
+      navigate_miner_job(agent, config, live_ship, config.market_waypoint)
+    end
+  end
+
+  defp extract_miner_job(agent, config, live_ship, mode) do
+    action = %{
+      "kind" => "extract",
+      "waypoint" => config.extraction_waypoint,
+      "expected" => %{"cargo_units_at_least" => cargo_units(live_ship) + 1}
+    }
+
+    config =
+      Repo.update!(
+        Ecto.Changeset.change(config, status: "revalidating", in_flight_action: action)
+      )
+
+    extract =
+      case mode do
+        :timeline -> &extract_resources_for_miner_job/2
+        :normal -> &extract_resources/2
+      end
+
+    case extract.(agent, live_ship.symbol) do
+      {:ok, result} ->
+        result_snapshot = %{
+          "kind" => "extract",
+          "yield" => extraction_yield(result)
+        }
+
+        {:ok,
+         Repo.update!(
+           Ecto.Changeset.change(config,
+             status: "waiting",
+             last_action_result: result_snapshot
+           )
+         )}
+
+      {:error, reason} ->
+        Repo.update!(
+          Ecto.Changeset.change(config, status: "blocked", blocked_reason: inspect(reason))
+        )
+
+        record_miner_job_activity(
+          agent,
+          live_ship,
+          "miner_job_blocked",
+          "Miner Job blocked: #{inspect(reason)}",
+          %{"block" => inspect(reason), "recovery" => "resume"}
+        )
+
+        {:error, reason}
     end
   end
 

@@ -1149,6 +1149,383 @@ defmodule SpaceTraders.FleetTest do
       assert [%{kind: "miner_job_recovery", metadata: %{"outcome" => "ambiguous"}} | _] =
                Fleet.recent_activity(agent)
     end
+
+    defp sorting_market_body(imports, overrides \\ %{}) do
+      Map.merge(
+        %{
+          "symbol" => "X1-UX81-A1",
+          "imports" => Enum.map(imports, &%{"symbol" => &1}),
+          "exchange" => [],
+          "exports" => [],
+          "tradeGoods" => []
+        },
+        overrides
+      )
+    end
+
+    defp mining_ship_at_extraction(inventory) do
+      units = Enum.reduce(inventory, 0, fn item, acc -> acc + item.units end)
+
+      %Model.Ship{
+        symbol: "FLEET-SHIP",
+        nav: %Model.ShipNav{
+          status: "IN_ORBIT",
+          waypoint_symbol: "X1-UX81-A2",
+          system_symbol: "X1-UX81"
+        },
+        cargo: %Model.ShipCargo{capacity: 40, units: units, inventory: inventory},
+        cooldown: %Model.Cooldown{remaining_seconds: 0}
+      }
+    end
+
+    defp cargo_item(symbol, units), do: %Model.ShipCargoItem{symbol: symbol, units: units}
+
+    defp activate_for_extraction(config, sellable_goods) do
+      Repo.update!(
+        Ecto.Changeset.change(config,
+          desired_mode: "active",
+          status: "ready",
+          sellable_goods: sellable_goods,
+          progress: %{"waypoint" => "X1-UX81-A2"}
+        )
+      )
+    end
+
+    test "start persists the configured Market's accepted sellable goods" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      Fleet.configure_miner_job(agent, "FLEET-SHIP", %{
+        extraction_waypoint: "X1-UX81-A2",
+        market_waypoint: "X1-UX81-A1",
+        cargo_threshold: 30
+      })
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case conn.request_path do
+          "/v2/my/ships/FLEET-SHIP" ->
+            Req.Test.json(conn, %{
+              "data" =>
+                ship_body("FLEET-SHIP", %{
+                  "mounts" => [%{"symbol" => "MOUNT_MINING_LASER_I"}]
+                })
+            })
+
+          "/v2/systems/X1-UX81/waypoints/X1-UX81-A2" ->
+            Req.Test.json(conn, %{
+              "data" => %{"symbol" => "X1-UX81-A2", "type" => "ASTEROID_FIELD", "traits" => []}
+            })
+
+          "/v2/systems/X1-UX81/waypoints/X1-UX81-A1" ->
+            Req.Test.json(conn, %{
+              "data" => %{
+                "symbol" => "X1-UX81-A1",
+                "type" => "ORBITAL_STATION",
+                "traits" => [%{"symbol" => "MARKETPLACE"}]
+              }
+            })
+
+          "/v2/systems/X1-UX81/waypoints/X1-UX81-A1/market" ->
+            Req.Test.json(conn, %{"data" => sorting_market_body(["IRON_ORE"])})
+
+          "/v2/my/ships/FLEET-SHIP/orbit" ->
+            Req.Test.json(conn, %{"data" => %{"nav" => nav_body("IN_ORBIT")}})
+
+          "/v2/my/ships/FLEET-SHIP/navigate" ->
+            Req.Test.json(conn, %{"data" => navigate_response("IN_TRANSIT")})
+        end
+      end)
+
+      assert {:ok, %Job{}} = Fleet.start_miner_job(agent, "FLEET-SHIP")
+      assert Fleet.ship_job(agent, "FLEET-SHIP").sellable_goods == ["IRON_ORE"]
+    end
+
+    test "jettisons unsellable cargo at the mining waypoint before a sellable threshold departure" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      {:ok, config} =
+        Fleet.configure_miner_job(agent, "FLEET-SHIP", %{
+          extraction_waypoint: "X1-UX81-A2",
+          market_waypoint: "X1-UX81-A1",
+          cargo_threshold: 30
+        })
+
+      config = activate_for_extraction(config, ["IRON_ORE"])
+      test_pid = self()
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case conn.request_path do
+          "/v2/systems/X1-UX81/waypoints/X1-UX81-A1/market" ->
+            Req.Test.json(conn, %{"data" => sorting_market_body(["IRON_ORE"])})
+
+          "/v2/my/ships/FLEET-SHIP/jettison" ->
+            send(test_pid, {:jettison_request, conn.body_params})
+
+            Req.Test.json(conn, %{
+              "data" => %{
+                "cargo" => %{
+                  "capacity" => 40,
+                  "units" => 30,
+                  "inventory" => [%{"symbol" => "IRON_ORE", "units" => 30}]
+                }
+              }
+            })
+
+          "/v2/my/ships/FLEET-SHIP/navigate" ->
+            Req.Test.json(conn, %{"data" => navigate_response("IN_TRANSIT")})
+        end
+      end)
+
+      live_ship =
+        mining_ship_at_extraction([
+          cargo_item("IRON_ORE", 30),
+          cargo_item("COPPER_ORE", 6)
+        ])
+
+      assert {:ok,
+              %Job{
+                status: "waiting",
+                in_flight_action: %{"kind" => "navigate", "waypoint" => "X1-UX81-A1"}
+              }} = Fleet.advance_miner_job(agent, config, live_ship)
+
+      assert_receive {:jettison_request, %{"symbol" => "COPPER_ORE", "units" => 6}}
+      refute_receive {:jettison_request, _}
+
+      assert [%{kind: "miner_job_jettison", metadata: %{"jettison" => _}} | _] =
+               Fleet.recent_activity(agent)
+    end
+
+    test "keeps gathering while sellable cargo is below the threshold" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      {:ok, config} =
+        Fleet.configure_miner_job(agent, "FLEET-SHIP", %{
+          extraction_waypoint: "X1-UX81-A2",
+          market_waypoint: "X1-UX81-A1",
+          cargo_threshold: 30
+        })
+
+      config = activate_for_extraction(config, ["IRON_ORE"])
+      test_pid = self()
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case conn.request_path do
+          "/v2/systems/X1-UX81/waypoints/X1-UX81-A1/market" ->
+            Req.Test.json(conn, %{"data" => sorting_market_body(["IRON_ORE"])})
+
+          "/v2/my/ships/FLEET-SHIP/jettison" ->
+            send(test_pid, {:jettison_request, conn.body_params})
+
+            Req.Test.json(conn, %{
+              "data" => %{
+                "cargo" => %{
+                  "capacity" => 40,
+                  "units" => 10,
+                  "inventory" => [%{"symbol" => "IRON_ORE", "units" => 10}]
+                }
+              }
+            })
+
+          "/v2/my/ships/FLEET-SHIP/extract" ->
+            send(test_pid, {:extract_request})
+
+            Req.Test.json(conn, %{
+              "data" => %{
+                "cooldown" => %{
+                  "shipSymbol" => "FLEET-SHIP",
+                  "totalSeconds" => 60,
+                  "remainingSeconds" => 60,
+                  "expiration" => future_iso(60)
+                },
+                "extraction" => %{
+                  "shipSymbol" => "FLEET-SHIP",
+                  "yield" => %{"symbol" => "IRON_ORE", "units" => 15}
+                },
+                "cargo" => %{
+                  "capacity" => 40,
+                  "units" => 25,
+                  "inventory" => [%{"symbol" => "IRON_ORE", "units" => 25}]
+                }
+              }
+            })
+        end
+      end)
+
+      live_ship =
+        mining_ship_at_extraction([
+          cargo_item("IRON_ORE", 10),
+          cargo_item("COPPER_ORE", 6)
+        ])
+
+      assert {:ok, %Job{status: "waiting", in_flight_action: %{"kind" => "extract"}}} =
+               Fleet.advance_miner_job(agent, config, live_ship)
+
+      assert_receive {:jettison_request, %{"symbol" => "COPPER_ORE", "units" => 6}}
+      assert_receive {:extract_request}
+
+      assert [%Event{event_type: "cooldown"}] = Timeline.pending_events(:ship, "FLEET-SHIP")
+    end
+
+    test "falls back to the total-cargo loop when the market's goods are unknown" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      {:ok, config} =
+        Fleet.configure_miner_job(agent, "FLEET-SHIP", %{
+          extraction_waypoint: "X1-UX81-A2",
+          market_waypoint: "X1-UX81-A1",
+          cargo_threshold: 30
+        })
+
+      config = activate_for_extraction(config, [])
+      test_pid = self()
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        assert conn.request_path == "/v2/my/ships/FLEET-SHIP/navigate"
+        send(test_pid, {:navigate_request})
+        Req.Test.json(conn, %{"data" => navigate_response("IN_TRANSIT")})
+      end)
+
+      live_ship =
+        mining_ship_at_extraction([
+          cargo_item("IRON_ORE", 30),
+          cargo_item("QUARTZ_SAND", 10)
+        ])
+
+      assert {:ok, %Job{in_flight_action: %{"kind" => "navigate", "waypoint" => "X1-UX81-A1"}}} =
+               Fleet.advance_miner_job(agent, config, live_ship)
+
+      assert_receive {:navigate_request}
+      refute_receive {:jettison_request, _}
+    end
+
+    test "revalidates accepted goods before departure and jettisons newly unsellable cargo" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      {:ok, config} =
+        Fleet.configure_miner_job(agent, "FLEET-SHIP", %{
+          extraction_waypoint: "X1-UX81-A2",
+          market_waypoint: "X1-UX81-A1",
+          cargo_threshold: 30
+        })
+
+      config = activate_for_extraction(config, ["IRON_ORE", "COPPER_ORE"])
+      test_pid = self()
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case conn.request_path do
+          "/v2/systems/X1-UX81/waypoints/X1-UX81-A1/market" ->
+            Req.Test.json(conn, %{"data" => sorting_market_body(["IRON_ORE"])})
+
+          "/v2/my/ships/FLEET-SHIP/jettison" ->
+            send(test_pid, {:jettison_request, conn.body_params})
+
+            Req.Test.json(conn, %{
+              "data" => %{
+                "cargo" => %{
+                  "capacity" => 40,
+                  "units" => 30,
+                  "inventory" => [%{"symbol" => "IRON_ORE", "units" => 30}]
+                }
+              }
+            })
+
+          "/v2/my/ships/FLEET-SHIP/navigate" ->
+            Req.Test.json(conn, %{"data" => navigate_response("IN_TRANSIT")})
+        end
+      end)
+
+      live_ship =
+        mining_ship_at_extraction([
+          cargo_item("IRON_ORE", 30),
+          cargo_item("COPPER_ORE", 4)
+        ])
+
+      assert {:ok, %Job{status: "waiting", in_flight_action: %{"kind" => "navigate"}}} =
+               Fleet.advance_miner_job(agent, config, live_ship)
+
+      assert_receive {:jettison_request, %{"symbol" => "COPPER_ORE", "units" => 4}}
+
+      assert %Job{sellable_goods: ["IRON_ORE"]} = Fleet.ship_job(agent, "FLEET-SHIP")
+    end
+
+    test "sells the sellable payload at the market and never hauls rejected goods there" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      {:ok, config} =
+        Fleet.configure_miner_job(agent, "FLEET-SHIP", %{
+          extraction_waypoint: "X1-UX81-A2",
+          market_waypoint: "X1-UX81-A1",
+          cargo_threshold: 30
+        })
+
+      config =
+        Repo.update!(
+          Ecto.Changeset.change(config,
+            desired_mode: "active",
+            status: "ready",
+            sellable_goods: ["IRON_ORE"],
+            progress: %{"waypoint" => "X1-UX81-A1"}
+          )
+        )
+
+      test_pid = self()
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case conn.request_path do
+          "/v2/systems/X1-UX81/waypoints/X1-UX81-A1/market" ->
+            Req.Test.json(conn, %{
+              "data" =>
+                sorting_market_body(["IRON_ORE"], %{
+                  "tradeGoods" => [%{"symbol" => "FUEL"}]
+                })
+            })
+
+          "/v2/my/ships/FLEET-SHIP/sell" ->
+            send(test_pid, {:sell_request, conn.body_params})
+
+            Req.Test.json(conn, %{
+              "data" => %{
+                "cargo" => %{"capacity" => 40, "units" => 0, "inventory" => []}
+              }
+            })
+
+          "/v2/my/ships/FLEET-SHIP/refuel" ->
+            Req.Test.json(conn, %{"data" => %{"fuel" => %{"capacity" => 200, "current" => 200}}})
+
+          "/v2/my/ships/FLEET-SHIP/orbit" ->
+            Req.Test.json(conn, %{"data" => %{"nav" => nav_body("IN_ORBIT")}})
+
+          "/v2/my/ships/FLEET-SHIP/navigate" ->
+            Req.Test.json(conn, %{"data" => navigate_response("IN_TRANSIT")})
+        end
+      end)
+
+      live_ship = %Model.Ship{
+        symbol: "FLEET-SHIP",
+        nav: %Model.ShipNav{
+          status: "DOCKED",
+          waypoint_symbol: "X1-UX81-A1",
+          system_symbol: "X1-UX81"
+        },
+        cargo: %Model.ShipCargo{
+          capacity: 40,
+          units: 30,
+          inventory: [cargo_item("IRON_ORE", 30)]
+        },
+        fuel: %Model.ShipFuel{capacity: 200, current: 5}
+      }
+
+      assert {:ok, %Job{status: "waiting", in_flight_action: %{"kind" => "navigate"}}} =
+               Fleet.advance_miner_job(agent, config, live_ship)
+
+      assert_receive {:sell_request, %{"symbol" => "IRON_ORE", "units" => 30}}
+      refute_receive {:jettison_request, _}
+    end
   end
 
   describe "command_snapshot/1" do
