@@ -599,43 +599,53 @@ defmodule SpaceTraders.Fleet do
   # batches and the Ship only departs once sellable cargo reaches the threshold.
   # Missing market goods degrade to today's total-cargo loop and never block.
   defp evaluate_extraction_cargo(agent, config, live_ship, mode) do
-    case sellable_goods_set(config) do
+    case configured_sellable_goods(config) do
       :unknown ->
         extract_or_depart_by_total(agent, config, live_ship, mode)
 
-      accepted ->
-        case first_non_sellable_item(live_ship, accepted) do
-          nil ->
-            if sellable_units(live_ship, accepted) < config.cargo_threshold do
-              extract_miner_job(agent, config, live_ship, mode)
-            else
-              revalidate_market_before_departure(agent, config, live_ship, mode)
-            end
+      {:ok, accepted} ->
+        evaluate_hold(agent, config, live_ship, accepted, :revalidate, mode)
+    end
+  end
 
-          item ->
-            jettison_unsellable_or_retry(agent, config, live_ship, item, mode)
+  defp configured_sellable_goods(%Job{sellable_goods: goods}) when is_list(goods) and goods != [],
+    do: {:ok, MapSet.new(goods)}
+
+  defp configured_sellable_goods(_config), do: :unknown
+
+  # One hold evaluator shared by the persisted accepted goods and a freshly
+  # revalidated departure set: jettison unsellable holdings first (one bounded
+  # batch at a time against the authoritative cargo response), then either keep
+  # gathering below the sellable threshold or depart. Jettison carries no
+  # cooldown in this API version, so a batch re-enters the loop immediately.
+  defp evaluate_hold(agent, config, live_ship, accepted, departure, mode) do
+    case first_non_sellable_item(live_ship, accepted) do
+      nil ->
+        if sellable_units(live_ship, accepted) < config.cargo_threshold do
+          extract_miner_job(agent, config, live_ship, mode)
+        else
+          depart_for(agent, config, live_ship, mode, departure)
+        end
+
+      item ->
+        case jettison_unsellable_at_extraction(agent, config, live_ship, item) do
+          {:ok, live_ship, config} ->
+            advance_miner_job(agent, config, live_ship, mode)
+
+          {:error, reason} ->
+            {:error, reason}
         end
     end
   end
 
-  defp sellable_goods_set(%Job{sellable_goods: goods}) when is_list(goods) and goods != [],
-    do: MapSet.new(goods)
+  # A `:fresh` departure set comes from the just-revalidated Market, so the Ship
+  # navigates directly; a `:revalidate` departure must check the Market again
+  # first so it never departs on stale accepted goods.
+  defp depart_for(agent, config, live_ship, _mode, :fresh),
+    do: navigate_miner_job(agent, config, live_ship, config.market_waypoint)
 
-  defp sellable_goods_set(_config), do: :unknown
-
-  # Jettison one unsellable held good at the mining Waypoint, confirmed against
-  # the authoritative cargo response, then re-evaluate the loop (a subsequent
-  # batch or an extract decision follows the same path; jettison carries no
-  # cooldown in this API version, so there is nothing to wait for).
-  defp jettison_unsellable_or_retry(agent, config, live_ship, item, mode) do
-    case jettison_unsellable_at_extraction(agent, config, live_ship, item) do
-      {:ok, live_ship, config} ->
-        advance_miner_job(agent, config, live_ship, mode)
-
-      {:error, reason} ->
-        {:error, reason}
-    end
-  end
+  defp depart_for(agent, config, live_ship, mode, :revalidate),
+    do: revalidate_market_before_departure(agent, config, live_ship, mode)
 
   defp jettison_unsellable_at_extraction(agent, config, live_ship, item) do
     action = %{
@@ -689,25 +699,11 @@ defmodule SpaceTraders.Fleet do
         if fresh == [] do
           navigate_miner_job(agent, config, live_ship, config.market_waypoint)
         else
-          evaluate_fresh_market(agent, config, live_ship, MapSet.new(fresh), mode)
+          evaluate_hold(agent, config, live_ship, MapSet.new(fresh), :fresh, mode)
         end
 
       {:error, _reason} ->
         navigate_miner_job(agent, config, live_ship, config.market_waypoint)
-    end
-  end
-
-  defp evaluate_fresh_market(agent, config, live_ship, accepted, mode) do
-    case first_non_sellable_item(live_ship, accepted) do
-      nil ->
-        if sellable_units(live_ship, accepted) < config.cargo_threshold do
-          evaluate_extraction_cargo(agent, config, live_ship, mode)
-        else
-          navigate_miner_job(agent, config, live_ship, config.market_waypoint)
-        end
-
-      item ->
-        jettison_unsellable_or_retry(agent, config, live_ship, item, mode)
     end
   end
 

@@ -1452,6 +1452,47 @@ defmodule SpaceTraders.FleetTest do
       assert %Job{sellable_goods: ["IRON_ORE"]} = Fleet.ship_job(agent, "FLEET-SHIP")
     end
 
+    test "departs when the pre-departure market revalidation is unavailable" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      {:ok, config} =
+        Fleet.configure_miner_job(agent, "FLEET-SHIP", %{
+          extraction_waypoint: "X1-UX81-A2",
+          market_waypoint: "X1-UX81-A1",
+          cargo_threshold: 30
+        })
+
+      config = activate_for_extraction(config, ["IRON_ORE"])
+      test_pid = self()
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case conn.request_path do
+          "/v2/systems/X1-UX81/waypoints/X1-UX81-A1/market" ->
+            conn
+            |> Map.put(:status, 500)
+            |> Req.Test.json(%{})
+
+          "/v2/my/ships/FLEET-SHIP/navigate" ->
+            send(test_pid, {:navigate_request})
+            Req.Test.json(conn, %{"data" => navigate_response("IN_TRANSIT")})
+        end
+      end)
+
+      live_ship = mining_ship_at_extraction([cargo_item("IRON_ORE", 30)])
+
+      assert {:ok,
+              %Job{
+                status: "waiting",
+                in_flight_action: %{"kind" => "navigate", "waypoint" => "X1-UX81-A1"}
+              }} = Fleet.advance_miner_job(agent, config, live_ship)
+
+      assert_receive {:navigate_request}
+
+      assert %Job{status: "waiting"} = Fleet.ship_job(agent, "FLEET-SHIP")
+      refute Fleet.ship_job(agent, "FLEET-SHIP").status == "blocked"
+    end
+
     test "sells the sellable payload at the market and never hauls rejected goods there" do
       agent = agent_fixture()
       ship_fixture(agent, "FLEET-SHIP")
