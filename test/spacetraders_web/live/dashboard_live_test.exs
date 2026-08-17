@@ -1516,6 +1516,85 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       assert :binary.match(html, "Retrying recovery") < :binary.match(html, "Recovery confirmed")
     end
 
+    test "shows the effective sellable payload and jettison activity while drafts stay patch-safe",
+         %{conn: conn, operator: operator} do
+      agent = agent_fixture(operator)
+
+      ship =
+        Repo.insert!(%Ship{
+          agent_id: agent.id,
+          symbol: "ORBITALIST-1",
+          ship_type: "SHIP_COMMAND_FRIGATE"
+        })
+
+      Repo.insert!(%Job{
+        ship_id: ship.id,
+        extraction_waypoint: "X1-UX81-A2",
+        market_waypoint: "X1-UX81-A1",
+        cargo_threshold: 30,
+        desired_mode: "active",
+        status: "ready",
+        sellable_goods: ["IRON_ORE"]
+      })
+
+      Repo.insert!(%Activity{
+        agent_id: agent.id,
+        ship_id: ship.id,
+        kind: "miner_job_jettison",
+        message: "Jettisoned 6 COPPER_ORE at X1-UX81-A2 (X1-UX81-A1 will not buy it)",
+        metadata: %{"jettison" => "COPPER_ORE 6"}
+      })
+
+      stub_live_game(
+        agent_overview_body(agent.symbol),
+        [
+          ship_body("ORBITALIST-1", %{
+            "cargo" => %{
+              "capacity" => 40,
+              "units" => 16,
+              "inventory" => [
+                %{"symbol" => "IRON_ORE", "units" => 10},
+                %{"symbol" => "COPPER_ORE", "units" => 6}
+              ]
+            }
+          })
+        ]
+      )
+
+      {:ok, lv, _html} = live(conn, ~p"/")
+      html = render(lv)
+
+      assert has_element?(
+               lv,
+               "[data-ship-card=\"ORBITALIST-1\"] [data-job-sellable]",
+               "10 / 30 sellable units"
+             )
+
+      assert html =~ "Jettisoned 6 COPPER_ORE at X1-UX81-A2"
+      assert html =~ "jettison: COPPER_ORE 6"
+
+      lv
+      |> element("form[phx-change=\"track_draft\"][id=\"miner-job-form-ORBITALIST-1\"]")
+      |> render_change(%{
+        draft_key: "miner_job:ORBITALIST-1",
+        ship_symbol: "ORBITALIST-1",
+        extraction_waypoint: "X1-UX81-A2",
+        market_waypoint: "X1-UX81-A1",
+        cargo_threshold: "55"
+      })
+
+      send(lv.pid, :cooldown_tick)
+      render(lv)
+
+      assert input_value(lv, "miner-job-form-ORBITALIST-1", "cargo_threshold") =~ ~s(value="55")
+
+      send(lv.pid, {:ship_updated, agent.id, "ORBITALIST-1"})
+      render(lv)
+
+      assert input_value(lv, "miner-job-form-ORBITALIST-1", "cargo_threshold") =~ ~s(value="55")
+      assert has_element?(lv, "[data-job-sellable]", "10 / 30 sellable units")
+    end
+
     test "keeps an in-progress Miner Job draft across live patches", %{
       conn: conn,
       operator: operator
