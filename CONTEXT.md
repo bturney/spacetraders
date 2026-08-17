@@ -126,6 +126,14 @@ _Avoid_: bot, automatic mode
 A durable Job that owns one configured local extract/sell loop for a Ship. It uses Policies and Intents to pursue the configured extraction Waypoint, Market, and Cargo threshold; it is the first concrete Job and absorbs the existing Autopilot capability.
 _Avoid_: autopilot (when referring to the Job type), mining bot
 
+**Sellable Cargo**:
+The cargo a Ship holds that its configured Market will actually buy, determined by the Market's authoritative accepted goods (its imports and exchange lists). The Miner Job's Cargo threshold counts sellable cargo only.
+_Avoid_: marketable goods, valuable cargo
+
+**Gather Mode**:
+How a Miner Job gathers on its configured extraction Waypoint: extract on mineral-bearing Waypoints or siphon on gas-bearing Waypoints. Chosen during configuration and revalidated against authoritative Waypoint and Ship capability.
+_Avoid_: mining style, collection mode
+
 **Manual Mode**:
 A Ship operating mode in which the Operator issues a direct game action or invokes a one-off Intent. Any manual command pauses the active Job before it runs; resuming automation requires revalidation against game truth. A completed one-off Intent leaves the Ship in Manual Mode.
 **Ship Readiness**:
