@@ -25,6 +25,8 @@ defmodule SpaceTraders.Fleet do
   alias SpaceTraders.{Agent, Contracts, Listing, Shipyard}
   alias SpaceTraders.Timeline
 
+  @gather_kinds ["extract", "siphon"]
+
   @doc """
   Pulls the agent's live fleet from the game API.
 
@@ -391,13 +393,7 @@ defmodule SpaceTraders.Fleet do
 
   defp gather_waypoint?(_mode, _), do: {:error, :invalid_extraction_waypoint}
 
-  defp gather_capability?("siphon", ship) do
-    case siphon_capability?(ship) do
-      :ok -> :ok
-      error -> error
-    end
-  end
-
+  defp gather_capability?("siphon", ship), do: siphon_capability?(ship)
   defp gather_capability?(_mode, ship), do: mining_capability?(ship)
 
   defp market_waypoint?(%{traits: traits}) do
@@ -502,7 +498,7 @@ defmodule SpaceTraders.Fleet do
          true <- cooldown_ready?(live_ship),
          %AgentRecord{} = agent <- Repo.get(AgentRecord, agent_id) do
       case config.in_flight_action do
-        %{"kind" => kind} when kind in ["extract", "siphon"] ->
+        %{"kind" => kind} when kind in @gather_kinds ->
           config =
             Repo.update!(
               Ecto.Changeset.change(config,
@@ -1655,7 +1651,7 @@ defmodule SpaceTraders.Fleet do
          %{"kind" => kind, "expected" => %{"cargo_units_at_least" => units}},
          live_ship
        )
-       when kind in ["extract", "siphon"] do
+       when kind in @gather_kinds do
     if cargo_units(live_ship) >= units, do: :confirmed, else: :absent
   end
 

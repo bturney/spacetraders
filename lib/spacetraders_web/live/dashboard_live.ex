@@ -33,6 +33,8 @@ defmodule SpaceTradersWeb.DashboardLive do
   alias SpaceTraders.SystemWaypointProjection
   alias SpaceTradersWeb.DashboardPrototype
 
+  @gather_kinds ["extract", "siphon"]
+
   @impl true
   def render(assigns) do
     ~H"""
@@ -2906,7 +2908,7 @@ defmodule SpaceTradersWeb.DashboardLive do
          %{status: "waiting", in_flight_action: %{"kind" => kind}},
          _ship
        )
-       when kind in ["extract", "siphon"],
+       when kind in @gather_kinds,
        do: "Waiting for cooldown"
 
   defp job_active_work(

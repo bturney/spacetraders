@@ -827,6 +827,130 @@ defmodule SpaceTraders.FleetTest do
                Fleet.recent_activity(agent)
     end
 
+    test "departs the gas giant when siphoned cargo reaches the sellable threshold" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      {:ok, config} =
+        Fleet.configure_miner_job(agent, "FLEET-SHIP", %{
+          extraction_waypoint: "X1-UX81-A3",
+          market_waypoint: "X1-UX81-A1",
+          cargo_threshold: 30,
+          gather_mode: "siphon"
+        })
+
+      Repo.update!(Ecto.Changeset.change(config, sellable_goods: ["LIQUID_HYDROGEN"]))
+
+      live_ship = %Model.Ship{
+        symbol: "FLEET-SHIP",
+        nav: %Model.ShipNav{status: "IN_ORBIT", waypoint_symbol: "X1-UX81-A3"},
+        cargo: %Model.ShipCargo{
+          capacity: 40,
+          units: 30,
+          inventory: [%Model.ShipCargoItem{symbol: "LIQUID_HYDROGEN", units: 30}]
+        }
+      }
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case conn.request_path do
+          "/v2/systems/X1-UX81/waypoints/X1-UX81-A1/market" ->
+            Req.Test.json(conn, %{
+              "data" => %{
+                "symbol" => "X1-UX81-A1",
+                "imports" => [%{"symbol" => "LIQUID_HYDROGEN"}],
+                "tradeGoods" => []
+              }
+            })
+
+          "/v2/my/ships/FLEET-SHIP/navigate" ->
+            Req.Test.json(conn, %{"data" => navigate_response("IN_TRANSIT")})
+        end
+      end)
+
+      assert {:ok,
+              %Job{
+                status: "waiting",
+                in_flight_action: %{"kind" => "navigate", "waypoint" => "X1-UX81-A1"}
+              }} =
+               Fleet.advance_miner_job(agent, %{config | desired_mode: "active"}, live_ship)
+
+      assert [%Event{event_type: "arrival"}] = Timeline.pending_events(:ship, "FLEET-SHIP")
+    end
+
+    test "sells siphoned cargo at the configured market and returns to the gas giant" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      {:ok, config} =
+        Fleet.configure_miner_job(agent, "FLEET-SHIP", %{
+          extraction_waypoint: "X1-UX81-A3",
+          market_waypoint: "X1-UX81-A1",
+          cargo_threshold: 30,
+          gather_mode: "siphon"
+        })
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case conn.request_path do
+          "/v2/systems/X1-UX81/waypoints/X1-UX81-A1/market" ->
+            Req.Test.json(conn, %{
+              "data" => %{
+                "symbol" => "X1-UX81-A1",
+                "imports" => [%{"symbol" => "LIQUID_HYDROGEN"}],
+                "tradeGoods" => [%{"symbol" => "FUEL"}]
+              }
+            })
+
+          "/v2/systems/X1-UX81/waypoints/X1-UX81-A1" ->
+            Req.Test.json(conn, %{"data" => %{"symbol" => "X1-UX81-A1", "x" => 0, "y" => 0}})
+
+          "/v2/systems/X1-UX81/waypoints/X1-UX81-A3" ->
+            Req.Test.json(conn, %{"data" => %{"symbol" => "X1-UX81-A3", "x" => 10, "y" => 0}})
+
+          "/v2/my/ships/FLEET-SHIP/sell" ->
+            assert conn.body_params == %{"symbol" => "LIQUID_HYDROGEN", "units" => 30}
+
+            Req.Test.json(conn, %{
+              "data" => %{"cargo" => %{"capacity" => 40, "units" => 0, "inventory" => []}}
+            })
+
+          "/v2/my/ships/FLEET-SHIP/refuel" ->
+            Req.Test.json(conn, %{
+              "data" => %{"fuel" => %{"capacity" => 200, "current" => 200}}
+            })
+
+          "/v2/my/ships/FLEET-SHIP/navigate" ->
+            Req.Test.json(conn, %{
+              "data" => navigate_response("IN_TRANSIT", future_iso(), "X1-UX81-A3")
+            })
+
+          "/v2/my/ships/FLEET-SHIP/orbit" ->
+            Req.Test.json(conn, %{
+              "data" => %{"nav" => nav_body("IN_ORBIT", destination: "X1-UX81-A3")}
+            })
+        end
+      end)
+
+      live_ship = %Model.Ship{
+        symbol: "FLEET-SHIP",
+        nav: %Model.ShipNav{
+          status: "DOCKED",
+          waypoint_symbol: "X1-UX81-A1",
+          system_symbol: "X1-UX81"
+        },
+        cargo: %Model.ShipCargo{
+          capacity: 40,
+          units: 30,
+          inventory: [%Model.ShipCargoItem{symbol: "LIQUID_HYDROGEN", units: 30}]
+        },
+        fuel: %Model.ShipFuel{capacity: 200, current: 5}
+      }
+
+      config = %{config | desired_mode: "active", progress: %{"waypoint" => "X1-UX81-A1"}}
+
+      assert {:ok, %Job{status: "waiting", in_flight_action: %{"kind" => "navigate"}}} =
+               Fleet.advance_miner_job(agent, config, live_ship)
+    end
+
     test "navigates to the configured market when cargo reaches the threshold" do
       agent = agent_fixture()
       ship_fixture(agent, "FLEET-SHIP")
