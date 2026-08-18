@@ -1158,6 +1158,114 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       assert has_element?(lv, "[data-job-next-transition]", "Start Miner Job")
     end
 
+    test "shows the gather mode and surfaces siphon results as active work", %{
+      conn: conn,
+      operator: operator
+    } do
+      agent = agent_fixture(operator)
+
+      extract_ship =
+        Repo.insert!(%Ship{
+          agent_id: agent.id,
+          symbol: "ORBITALIST-1",
+          ship_type: "SHIP_COMMAND_FRIGATE"
+        })
+
+      siphon_ship =
+        Repo.insert!(%Ship{
+          agent_id: agent.id,
+          symbol: "ORBITALIST-2",
+          ship_type: "SHIP_COMMAND_FRIGATE"
+        })
+
+      Repo.insert!(
+        struct(
+          Job,
+          extraction_waypoint: "X1-UX81-A2",
+          market_waypoint: "X1-UX81-A1",
+          cargo_threshold: 30,
+          desired_mode: "active",
+          status: "waiting",
+          gather_mode: "siphon",
+          ship_id: siphon_ship.id,
+          in_flight_action: %{"kind" => "siphon"},
+          last_action_result: %{
+            "kind" => "siphon",
+            "yield" => %{"symbol" => "LIQUID_HYDROGEN", "units" => 5}
+          }
+        )
+      )
+
+      Repo.insert!(
+        struct(
+          Job,
+          extraction_waypoint: "X1-UX81-A2",
+          market_waypoint: "X1-UX81-A1",
+          cargo_threshold: 30,
+          desired_mode: "manual",
+          ship_id: extract_ship.id
+        )
+      )
+
+      stub_live_game(agent_overview_body(agent.symbol), [
+        ship_body("ORBITALIST-1"),
+        ship_body("ORBITALIST-2")
+      ])
+
+      {:ok, lv, _html} = live(conn, ~p"/")
+
+      assert has_element?(
+               lv,
+               "[data-ship-card=\"ORBITALIST-2\"] [data-job-gather-mode]",
+               "Siphon"
+             )
+
+      assert has_element?(
+               lv,
+               "[data-ship-card=\"ORBITALIST-2\"] [data-job-active-work]",
+               "Waiting for cooldown"
+             )
+
+      assert has_element?(
+               lv,
+               "[data-ship-card=\"ORBITALIST-1\"] [data-job-gather-mode]",
+               "Extract"
+             )
+    end
+
+    test "saves a siphon gather mode through the configured form", %{
+      conn: conn,
+      operator: operator
+    } do
+      agent = agent_fixture(operator)
+      stub_live_game(agent_overview_body(agent.symbol), [ship_body("ORBITALIST-1")])
+
+      {:ok, lv, html} = live(conn, ~p"/")
+
+      html =
+        lv
+        |> element("form[phx-submit=\"configure_miner_job\"]")
+        |> render_submit(%{
+          ship_symbol: "ORBITALIST-1",
+          gather_mode: "siphon",
+          extraction_waypoint: "X1-UX81-A3",
+          market_waypoint: "X1-UX81-A1",
+          cargo_threshold: "30"
+        })
+
+      assert html =~ "Miner Job configuration saved. Start remains manual."
+
+      assert has_element?(
+               lv,
+               "[data-ship-card=\"ORBITALIST-1\"] [data-job-gather-mode]",
+               "Siphon"
+             )
+
+      job = Repo.get_by!(Job, ship_id: Repo.get_by!(Ship, symbol: "ORBITALIST-1").id)
+      assert job.gather_mode == "siphon"
+      assert job.extraction_waypoint == "X1-UX81-A3"
+    end
+
     test "shows Operator recovery controls and Activity", %{conn: conn, operator: operator} do
       agent = agent_fixture(operator)
       stub_live_game(agent_overview_body(agent.symbol), [ship_body("ORBITALIST-1")])
@@ -1643,6 +1751,53 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
                ~s(value="X1-UX81-A1")
 
       assert input_value(lv, "miner-job-form-ORBITALIST-1", "cargo_threshold") =~ ~s(value="55")
+    end
+
+    test "keeps a siphon gather-mode draft across cooldown ticks and fleet pushes", %{
+      conn: conn,
+      operator: operator
+    } do
+      agent = agent_fixture(operator)
+      stub_live_game(agent_overview_body(agent.symbol), [ship_body("ORBITALIST-1")])
+
+      {:ok, lv, _html} = live(conn, ~p"/")
+
+      lv
+      |> element("form[phx-change=\"track_draft\"][id=\"miner-job-form-ORBITALIST-1\"]")
+      |> render_change(%{
+        draft_key: "miner_job:ORBITALIST-1",
+        ship_symbol: "ORBITALIST-1",
+        gather_mode: "siphon",
+        extraction_waypoint: "X1-UX81-A3",
+        market_waypoint: "X1-UX81-A1",
+        cargo_threshold: "55"
+      })
+
+      assert has_element?(
+               lv,
+               "form#miner-job-form-ORBITALIST-1 option[value=\"siphon\"][selected]"
+             )
+
+      send(lv.pid, :cooldown_tick)
+      render(lv)
+
+      assert has_element?(
+               lv,
+               "form#miner-job-form-ORBITALIST-1 option[value=\"siphon\"][selected]"
+             )
+
+      send(lv.pid, {:ship_updated, agent.id, "ORBITALIST-1"})
+      render(lv)
+
+      assert has_element?(
+               lv,
+               "form#miner-job-form-ORBITALIST-1 option[value=\"siphon\"][selected]"
+             )
+
+      refute has_element?(
+               lv,
+               "form#miner-job-form-ORBITALIST-1 option[value=\"extract\"][selected]"
+             )
     end
 
     test "clears the Miner Job draft once the configuration is saved", %{
