@@ -119,11 +119,11 @@ An Intent to restore a Ship's fuel where the game permits refueling. It is reusa
 _Avoid_: fuel action (when referring to the state-aware capability)
 
 **Autopilot**:
-An Operator-started, per-Ship Job to execute one configured local extract/sell loop. Its persisted configuration and execution status are Fleet state; it never resumes an action without reconciling authoritative game state. It may act only within its configured extraction Waypoint, Market, and Cargo threshold.
+An Operator-started, per-Ship Job to execute one configured local gather/sell loop. Its persisted configuration and execution status are Fleet state; it never resumes an action without reconciling authoritative game state. It may act only within its configured extraction Waypoint, Market, and Cargo threshold.
 _Avoid_: bot, automatic mode
 
 **Miner Job**:
-A durable Job that owns one configured local extract/sell loop for a Ship. It uses Policies and Intents to pursue the configured extraction Waypoint, Market, and Cargo threshold; it is the first concrete Job and absorbs the existing Autopilot capability.
+A durable Job that owns one configured local gather/sell loop for a Ship. It uses Policies and Intents to pursue the configured extraction Waypoint, Market, and Cargo threshold; it is the first concrete Job and absorbs the existing Autopilot capability.
 _Avoid_: autopilot (when referring to the Job type), mining bot
 
 **Sellable Cargo**:

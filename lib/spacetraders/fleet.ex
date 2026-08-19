@@ -25,6 +25,8 @@ defmodule SpaceTraders.Fleet do
   alias SpaceTraders.{Agent, Contracts, Listing, Shipyard}
   alias SpaceTraders.Timeline
 
+  @gather_kinds ["extract", "siphon"]
+
   @doc """
   Pulls the agent's live fleet from the game API.
 
@@ -360,9 +362,9 @@ defmodule SpaceTraders.Fleet do
   defp validate_miner_job(%AgentRecord{agent_token: token}, ship, config)
        when is_binary(token) and token != "" do
     with {:ok, live_ship} <- SpaceTraders.API.get_ship(token, ship.symbol),
-         {:ok, extraction} <-
+         {:ok, gather} <-
            waypoint(token, live_ship.nav.system_symbol, config.extraction_waypoint),
-         :ok <- extraction_waypoint?(extraction),
+         :ok <- gather_waypoint?(config.gather_mode, gather),
          {:ok, market_waypoint} <-
            waypoint(token, live_ship.nav.system_symbol, config.market_waypoint),
          :ok <- market_waypoint?(market_waypoint),
@@ -370,7 +372,7 @@ defmodule SpaceTraders.Fleet do
            SpaceTraders.API.get_market(token, live_ship.nav.system_symbol, config.market_waypoint),
          :ok <- market_available?(market),
          :ok <- cargo_policy?(live_ship, config.cargo_threshold),
-         :ok <- mining_capability?(live_ship) do
+         :ok <- gather_capability?(config.gather_mode, live_ship) do
       {:ok, live_ship, accepted_sellable_goods(market)}
     end
   end
@@ -379,10 +381,20 @@ defmodule SpaceTraders.Fleet do
 
   defp waypoint(token, system, symbol), do: SpaceTraders.API.get_waypoint(token, system, symbol)
 
-  defp extraction_waypoint?(%{type: type}) when type in ["ASTEROID_FIELD", "ENGINEERED_ASTEROID"],
-    do: :ok
+  # The gather mode's Waypoint capability is checked against the game's
+  # authoritative Waypoint state, not persisted trust; the game's action
+  # response remains the binding check once the loop runs.
+  defp gather_waypoint?("siphon", %{type: "GAS_GIANT"}), do: :ok
+  defp gather_waypoint?("siphon", _), do: {:error, :invalid_siphon_waypoint}
 
-  defp extraction_waypoint?(_), do: {:error, :invalid_extraction_waypoint}
+  defp gather_waypoint?(_mode, %{type: type})
+       when type in ["ASTEROID_FIELD", "ENGINEERED_ASTEROID"],
+       do: :ok
+
+  defp gather_waypoint?(_mode, _), do: {:error, :invalid_extraction_waypoint}
+
+  defp gather_capability?("siphon", ship), do: siphon_capability?(ship)
+  defp gather_capability?(_mode, ship), do: mining_capability?(ship)
 
   defp market_waypoint?(%{traits: traits}) do
     if Enum.any?(traits || [], &(&1.symbol == "MARKETPLACE")),
@@ -486,13 +498,13 @@ defmodule SpaceTraders.Fleet do
          true <- cooldown_ready?(live_ship),
          %AgentRecord{} = agent <- Repo.get(AgentRecord, agent_id) do
       case config.in_flight_action do
-        %{"kind" => "extract"} ->
+        %{"kind" => kind} when kind in @gather_kinds ->
           config =
             Repo.update!(
               Ecto.Changeset.change(config,
                 status: "ready",
                 in_flight_action: nil,
-                progress: Map.merge(config.progress || %{}, %{"last_completed" => "extract"})
+                progress: Map.merge(config.progress || %{}, %{"last_completed" => kind})
               )
             )
 
@@ -622,7 +634,7 @@ defmodule SpaceTraders.Fleet do
     case first_non_sellable_item(live_ship, accepted) do
       nil ->
         if sellable_units(live_ship, accepted) < config.cargo_threshold do
-          extract_miner_job(agent, config, live_ship, mode)
+          gather_miner_job(agent, config, live_ship, mode)
         else
           depart_for(agent, config, live_ship, mode, departure)
         end
@@ -740,15 +752,25 @@ defmodule SpaceTraders.Fleet do
   # so an unreadable Market never blocks or pauses the Miner Job.
   defp extract_or_depart_by_total(agent, config, live_ship, mode) do
     if cargo_units(live_ship) < config.cargo_threshold do
-      extract_miner_job(agent, config, live_ship, mode)
+      gather_miner_job(agent, config, live_ship, mode)
     else
       navigate_miner_job(agent, config, live_ship, config.market_waypoint)
     end
   end
 
-  defp extract_miner_job(agent, config, live_ship, mode) do
+  # The gather leg: extract or siphon per the configured gather mode. The
+  # authoritative action response is the binding check that the action is
+  # allowed, mirroring the manual action's gates.
+  defp gather_miner_job(agent, config, live_ship, mode) do
+    case config.gather_mode do
+      "siphon" -> perform_gather_action(agent, config, live_ship, mode, "siphon")
+      _ -> perform_gather_action(agent, config, live_ship, mode, "extract")
+    end
+  end
+
+  defp perform_gather_action(agent, config, live_ship, mode, kind) do
     action = %{
-      "kind" => "extract",
+      "kind" => kind,
       "waypoint" => config.extraction_waypoint,
       "expected" => %{"cargo_units_at_least" => cargo_units(live_ship) + 1}
     }
@@ -758,17 +780,19 @@ defmodule SpaceTraders.Fleet do
         Ecto.Changeset.change(config, status: "revalidating", in_flight_action: action)
       )
 
-    extract =
-      case mode do
-        :timeline -> &extract_resources_for_miner_job/2
-        :normal -> &extract_resources/2
+    gather =
+      case {kind, mode} do
+        {"siphon", :timeline} -> &siphon_resources_for_miner_job/2
+        {"siphon", :normal} -> &siphon_resources/2
+        {"extract", :timeline} -> &extract_resources_for_miner_job/2
+        {"extract", :normal} -> &extract_resources/2
       end
 
-    case extract.(agent, live_ship.symbol) do
+    case gather.(agent, live_ship.symbol) do
       {:ok, result} ->
         result_snapshot = %{
-          "kind" => "extract",
-          "yield" => extraction_yield(result)
+          "kind" => kind,
+          "yield" => gather_yield(kind, result)
         }
 
         {:ok,
@@ -795,6 +819,11 @@ defmodule SpaceTraders.Fleet do
         {:error, reason}
     end
   end
+
+  defp gather_yield("siphon", %{siphon: %{yield: %{symbol: symbol, units: units}}}),
+    do: %{"symbol" => symbol, "units" => units}
+
+  defp gather_yield(_kind, result), do: extraction_yield(result)
 
   defp sell_at_market(%AgentRecord{agent_token: token} = agent, config, live_ship)
        when is_binary(token) and token != "" do
@@ -1068,6 +1097,14 @@ defmodule SpaceTraders.Fleet do
   defp extract_resources_for_miner_job(%AgentRecord{agent_token: token} = agent, ship_symbol)
        when is_binary(token) and token != "" do
     with {:ok, result} <- SpaceTraders.API.extract_resources(token, ship_symbol),
+         :ok <- schedule_cooldown(agent, ship_symbol, result) do
+      {:ok, result}
+    end
+  end
+
+  defp siphon_resources_for_miner_job(%AgentRecord{agent_token: token} = agent, ship_symbol)
+       when is_binary(token) and token != "" do
+    with {:ok, result} <- SpaceTraders.API.siphon_resources(token, ship_symbol),
          :ok <- schedule_cooldown(agent, ship_symbol, result) do
       {:ok, result}
     end
@@ -1611,9 +1648,10 @@ defmodule SpaceTraders.Fleet do
   end
 
   defp action_outcome(
-         %{"kind" => "extract", "expected" => %{"cargo_units_at_least" => units}},
+         %{"kind" => kind, "expected" => %{"cargo_units_at_least" => units}},
          live_ship
-       ) do
+       )
+       when kind in @gather_kinds do
     if cargo_units(live_ship) >= units, do: :confirmed, else: :absent
   end
 

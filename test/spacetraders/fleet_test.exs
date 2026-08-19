@@ -265,6 +265,7 @@ defmodule SpaceTraders.FleetTest do
 
       assert %Job{
                type: "miner",
+               gather_mode: "extract",
                extraction_waypoint: "X1-UX81-A2",
                market_waypoint: "X1-UX81-A1",
                cargo_threshold: 30,
@@ -282,6 +283,21 @@ defmodule SpaceTraders.FleetTest do
 
       assert {:ok, %Job{status: "paused", desired_mode: "manual"}} =
                Fleet.pause_miner_job(agent, "FLEET-SHIP")
+    end
+
+    test "persists a siphon gather mode on the configured Waypoint" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      assert {:ok, %Job{gather_mode: "siphon"}} =
+               Fleet.configure_miner_job(agent, "FLEET-SHIP", %{
+                 extraction_waypoint: "X1-UX81-A3",
+                 market_waypoint: "X1-UX81-A1",
+                 cargo_threshold: 30,
+                 gather_mode: "siphon"
+               })
+
+      assert Fleet.ship_job(agent, "FLEET-SHIP").gather_mode == "siphon"
     end
 
     test "pauses and resumes the Miner Job without losing its configured loop" do
@@ -574,6 +590,365 @@ defmodule SpaceTraders.FleetTest do
               }} = Fleet.start_miner_job(agent, "FLEET-SHIP")
 
       assert [%Event{event_type: "cooldown"}] = Timeline.pending_events(:ship, "FLEET-SHIP")
+    end
+
+    test "siphons once below the cargo threshold at the configured waypoint" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      Fleet.configure_miner_job(agent, "FLEET-SHIP", %{
+        extraction_waypoint: "X1-UX81-A3",
+        market_waypoint: "X1-UX81-A1",
+        cargo_threshold: 30,
+        gather_mode: "siphon"
+      })
+
+      expiration = future_iso(60)
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case conn.request_path do
+          "/v2/my/ships/FLEET-SHIP" ->
+            Req.Test.json(conn, %{
+              "data" =>
+                ship_body("FLEET-SHIP", %{
+                  "nav" => nav_body("IN_ORBIT", destination: "X1-UX81-A3"),
+                  "cargo" => %{"capacity" => 40, "units" => 0, "inventory" => []},
+                  "mounts" => [%{"symbol" => "MOUNT_GAS_SIPHON_I"}],
+                  "modules" => [%{"symbol" => "MODULE_GAS_PROCESSOR_I"}]
+                })
+            })
+
+          "/v2/systems/X1-UX81/waypoints/X1-UX81-A3" ->
+            Req.Test.json(conn, %{
+              "data" => %{"symbol" => "X1-UX81-A3", "type" => "GAS_GIANT", "traits" => []}
+            })
+
+          "/v2/systems/X1-UX81/waypoints/X1-UX81-A1" ->
+            Req.Test.json(conn, %{
+              "data" => %{
+                "symbol" => "X1-UX81-A1",
+                "type" => "ORBITAL_STATION",
+                "traits" => [%{"symbol" => "MARKETPLACE"}]
+              }
+            })
+
+          "/v2/systems/X1-UX81/waypoints/X1-UX81-A1/market" ->
+            Req.Test.json(conn, %{"data" => %{"symbol" => "X1-UX81-A1", "tradeGoods" => []}})
+
+          "/v2/my/ships/FLEET-SHIP/siphon" ->
+            Req.Test.json(conn, %{
+              "data" => %{
+                "cooldown" => %{
+                  "shipSymbol" => "FLEET-SHIP",
+                  "totalSeconds" => 60,
+                  "remainingSeconds" => 60,
+                  "expiration" => expiration
+                },
+                "siphon" => %{
+                  "shipSymbol" => "FLEET-SHIP",
+                  "yield" => %{"symbol" => "LIQUID_HYDROGEN", "units" => 5}
+                },
+                "cargo" => %{
+                  "capacity" => 40,
+                  "units" => 5,
+                  "inventory" => [%{"symbol" => "LIQUID_HYDROGEN", "units" => 5}]
+                },
+                "events" => []
+              }
+            })
+        end
+      end)
+
+      assert {:ok,
+              %Job{
+                status: "waiting",
+                in_flight_action: %{"kind" => "siphon"},
+                last_action_result: %{
+                  "kind" => "siphon",
+                  "yield" => %{"symbol" => "LIQUID_HYDROGEN", "units" => 5}
+                }
+              }} = Fleet.start_miner_job(agent, "FLEET-SHIP")
+
+      assert [%Event{event_type: "cooldown"}] = Timeline.pending_events(:ship, "FLEET-SHIP")
+    end
+
+    test "cooldown wakeup records siphon completion before another siphon" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      {:ok, config} =
+        Fleet.configure_miner_job(agent, "FLEET-SHIP", %{
+          extraction_waypoint: "X1-UX81-A3",
+          market_waypoint: "X1-UX81-A1",
+          cargo_threshold: 30,
+          gather_mode: "siphon"
+        })
+
+      Repo.update!(
+        Ecto.Changeset.change(config,
+          desired_mode: "active",
+          status: "waiting",
+          in_flight_action: %{"kind" => "siphon"},
+          last_action_result: %{
+            "kind" => "siphon",
+            "yield" => %{"symbol" => "LIQUID_HYDROGEN", "units" => 5}
+          }
+        )
+      )
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        assert conn.request_path == "/v2/my/ships/FLEET-SHIP/siphon"
+
+        Req.Test.json(conn, %{
+          "data" => %{
+            "cooldown" => %{
+              "shipSymbol" => "FLEET-SHIP",
+              "totalSeconds" => 0,
+              "remainingSeconds" => 0,
+              "expiration" => future_iso()
+            },
+            "siphon" => %{
+              "shipSymbol" => "FLEET-SHIP",
+              "yield" => %{"symbol" => "LIQUID_HYDROGEN", "units" => 5}
+            },
+            "cargo" => %{
+              "capacity" => 40,
+              "units" => 10,
+              "inventory" => [%{"symbol" => "LIQUID_HYDROGEN", "units" => 10}]
+            },
+            "events" => []
+          }
+        })
+      end)
+
+      assert {:ok,
+              %Job{
+                status: "waiting",
+                in_flight_action: %{"kind" => "siphon"},
+                progress: progress
+              }} =
+               Fleet.revalidate_miner_job_cooldown(
+                 agent.id,
+                 "FLEET-SHIP",
+                 %Model.Ship{
+                   symbol: "FLEET-SHIP",
+                   nav: %Model.ShipNav{status: "IN_ORBIT", waypoint_symbol: "X1-UX81-A3"},
+                   cargo: %Model.ShipCargo{capacity: 40, units: 5, inventory: []},
+                   cooldown: %Model.Cooldown{remaining_seconds: 0}
+                 }
+               )
+
+      assert progress == %{"last_completed" => "siphon"}
+    end
+
+    test "boot recovery confirms an in-flight siphon and re-arms the loop" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      {:ok, config} =
+        Fleet.configure_miner_job(agent, "FLEET-SHIP", %{
+          extraction_waypoint: "X1-UX81-A3",
+          market_waypoint: "X1-UX81-A1",
+          cargo_threshold: 30,
+          gather_mode: "siphon"
+        })
+
+      Repo.update!(
+        Ecto.Changeset.change(config,
+          desired_mode: "active",
+          status: "revalidating",
+          in_flight_action: %{
+            "kind" => "siphon",
+            "waypoint" => "X1-UX81-A3",
+            "expected" => %{"cargo_units_at_least" => 1}
+          }
+        )
+      )
+
+      test_pid = self()
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        send(test_pid, {:api_request, conn.request_path})
+
+        case conn.request_path do
+          "/v2/my/ships/FLEET-SHIP" ->
+            Req.Test.json(conn, %{
+              "data" =>
+                ship_body("FLEET-SHIP", %{
+                  "nav" => nav_body("IN_ORBIT", destination: "X1-UX81-A3"),
+                  "cargo" => %{
+                    "capacity" => 40,
+                    "units" => 5,
+                    "inventory" => [%{"symbol" => "LIQUID_HYDROGEN", "units" => 5}]
+                  }
+                })
+            })
+
+          "/v2/my/ships/FLEET-SHIP/siphon" ->
+            Req.Test.json(conn, %{
+              "data" => %{
+                "cooldown" => %{
+                  "shipSymbol" => "FLEET-SHIP",
+                  "totalSeconds" => 0,
+                  "remainingSeconds" => 0,
+                  "expiration" => future_iso()
+                },
+                "siphon" => %{
+                  "shipSymbol" => "FLEET-SHIP",
+                  "yield" => %{"symbol" => "LIQUID_HYDROGEN", "units" => 5}
+                },
+                "cargo" => %{
+                  "capacity" => 40,
+                  "units" => 10,
+                  "inventory" => [%{"symbol" => "LIQUID_HYDROGEN", "units" => 10}]
+                },
+                "events" => []
+              }
+            })
+        end
+      end)
+
+      assert {:ok, _} = Fleet.recover_job_on_boot("FLEET-SHIP", agent.id, agent.agent_token)
+
+      assert_receive {:api_request, "/v2/my/ships/FLEET-SHIP"}
+      assert_receive {:api_request, "/v2/my/ships/FLEET-SHIP/siphon"}
+      refute_receive {:api_request, _}
+
+      recovered = Fleet.ship_job(agent, "FLEET-SHIP")
+      assert recovered.status == "waiting"
+      assert recovered.in_flight_action["kind"] == "siphon"
+
+      assert recovered.last_action_result["yield"] == %{
+               "symbol" => "LIQUID_HYDROGEN",
+               "units" => 5
+             }
+
+      assert [%{kind: "miner_job_recovery", metadata: %{"outcome" => "confirmed"}} | _] =
+               Fleet.recent_activity(agent)
+    end
+
+    test "departs the gas giant when siphoned cargo reaches the sellable threshold" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      {:ok, config} =
+        Fleet.configure_miner_job(agent, "FLEET-SHIP", %{
+          extraction_waypoint: "X1-UX81-A3",
+          market_waypoint: "X1-UX81-A1",
+          cargo_threshold: 30,
+          gather_mode: "siphon"
+        })
+
+      Repo.update!(Ecto.Changeset.change(config, sellable_goods: ["LIQUID_HYDROGEN"]))
+
+      live_ship = %Model.Ship{
+        symbol: "FLEET-SHIP",
+        nav: %Model.ShipNav{status: "IN_ORBIT", waypoint_symbol: "X1-UX81-A3"},
+        cargo: %Model.ShipCargo{
+          capacity: 40,
+          units: 30,
+          inventory: [%Model.ShipCargoItem{symbol: "LIQUID_HYDROGEN", units: 30}]
+        }
+      }
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case conn.request_path do
+          "/v2/systems/X1-UX81/waypoints/X1-UX81-A1/market" ->
+            Req.Test.json(conn, %{
+              "data" => %{
+                "symbol" => "X1-UX81-A1",
+                "imports" => [%{"symbol" => "LIQUID_HYDROGEN"}],
+                "tradeGoods" => []
+              }
+            })
+
+          "/v2/my/ships/FLEET-SHIP/navigate" ->
+            Req.Test.json(conn, %{"data" => navigate_response("IN_TRANSIT")})
+        end
+      end)
+
+      assert {:ok,
+              %Job{
+                status: "waiting",
+                in_flight_action: %{"kind" => "navigate", "waypoint" => "X1-UX81-A1"}
+              }} =
+               Fleet.advance_miner_job(agent, %{config | desired_mode: "active"}, live_ship)
+
+      assert [%Event{event_type: "arrival"}] = Timeline.pending_events(:ship, "FLEET-SHIP")
+    end
+
+    test "sells siphoned cargo at the configured market and returns to the gas giant" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      {:ok, config} =
+        Fleet.configure_miner_job(agent, "FLEET-SHIP", %{
+          extraction_waypoint: "X1-UX81-A3",
+          market_waypoint: "X1-UX81-A1",
+          cargo_threshold: 30,
+          gather_mode: "siphon"
+        })
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case conn.request_path do
+          "/v2/systems/X1-UX81/waypoints/X1-UX81-A1/market" ->
+            Req.Test.json(conn, %{
+              "data" => %{
+                "symbol" => "X1-UX81-A1",
+                "imports" => [%{"symbol" => "LIQUID_HYDROGEN"}],
+                "tradeGoods" => [%{"symbol" => "FUEL"}]
+              }
+            })
+
+          "/v2/systems/X1-UX81/waypoints/X1-UX81-A1" ->
+            Req.Test.json(conn, %{"data" => %{"symbol" => "X1-UX81-A1", "x" => 0, "y" => 0}})
+
+          "/v2/systems/X1-UX81/waypoints/X1-UX81-A3" ->
+            Req.Test.json(conn, %{"data" => %{"symbol" => "X1-UX81-A3", "x" => 10, "y" => 0}})
+
+          "/v2/my/ships/FLEET-SHIP/sell" ->
+            assert conn.body_params == %{"symbol" => "LIQUID_HYDROGEN", "units" => 30}
+
+            Req.Test.json(conn, %{
+              "data" => %{"cargo" => %{"capacity" => 40, "units" => 0, "inventory" => []}}
+            })
+
+          "/v2/my/ships/FLEET-SHIP/refuel" ->
+            Req.Test.json(conn, %{
+              "data" => %{"fuel" => %{"capacity" => 200, "current" => 200}}
+            })
+
+          "/v2/my/ships/FLEET-SHIP/navigate" ->
+            Req.Test.json(conn, %{
+              "data" => navigate_response("IN_TRANSIT", future_iso(), "X1-UX81-A3")
+            })
+
+          "/v2/my/ships/FLEET-SHIP/orbit" ->
+            Req.Test.json(conn, %{
+              "data" => %{"nav" => nav_body("IN_ORBIT", destination: "X1-UX81-A3")}
+            })
+        end
+      end)
+
+      live_ship = %Model.Ship{
+        symbol: "FLEET-SHIP",
+        nav: %Model.ShipNav{
+          status: "DOCKED",
+          waypoint_symbol: "X1-UX81-A1",
+          system_symbol: "X1-UX81"
+        },
+        cargo: %Model.ShipCargo{
+          capacity: 40,
+          units: 30,
+          inventory: [%Model.ShipCargoItem{symbol: "LIQUID_HYDROGEN", units: 30}]
+        },
+        fuel: %Model.ShipFuel{capacity: 200, current: 5}
+      }
+
+      config = %{config | desired_mode: "active", progress: %{"waypoint" => "X1-UX81-A1"}}
+
+      assert {:ok, %Job{status: "waiting", in_flight_action: %{"kind" => "navigate"}}} =
+               Fleet.advance_miner_job(agent, config, live_ship)
     end
 
     test "navigates to the configured market when cargo reaches the threshold" do
@@ -1029,6 +1404,120 @@ defmodule SpaceTraders.FleetTest do
                 "type" => "ORBITAL_STATION",
                 "traits" => [%{"symbol" => "MARKETPLACE"}]
               }
+            })
+        end
+      end)
+
+      assert {:error, {:miner_job_blocked, :invalid_extraction_waypoint}} =
+               Fleet.start_miner_job(agent, "FLEET-SHIP")
+
+      assert Fleet.ship_job(agent, "FLEET-SHIP").status == "blocked"
+    end
+
+    test "blocks a siphon-mode Job at a non-gas-giant waypoint without a game action" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      Fleet.configure_miner_job(agent, "FLEET-SHIP", %{
+        extraction_waypoint: "X1-UX81-A1",
+        market_waypoint: "X1-UX81-A1",
+        cargo_threshold: 30,
+        gather_mode: "siphon"
+      })
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case conn.request_path do
+          "/v2/my/ships/FLEET-SHIP" ->
+            Req.Test.json(conn, %{
+              "data" =>
+                ship_body("FLEET-SHIP", %{
+                  "mounts" => [%{"symbol" => "MOUNT_GAS_SIPHON_I"}],
+                  "modules" => [%{"symbol" => "MODULE_GAS_PROCESSOR_I"}]
+                })
+            })
+
+          "/v2/systems/X1-UX81/waypoints/X1-UX81-A1" ->
+            Req.Test.json(conn, %{
+              "data" => %{
+                "symbol" => "X1-UX81-A1",
+                "type" => "ORBITAL_STATION",
+                "traits" => [%{"symbol" => "MARKETPLACE"}]
+              }
+            })
+        end
+      end)
+
+      assert {:error, {:miner_job_blocked, :invalid_siphon_waypoint}} =
+               Fleet.start_miner_job(agent, "FLEET-SHIP")
+
+      assert Fleet.ship_job(agent, "FLEET-SHIP").status == "blocked"
+    end
+
+    test "blocks a siphon-mode Job without gas siphon capability" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      Fleet.configure_miner_job(agent, "FLEET-SHIP", %{
+        extraction_waypoint: "X1-UX81-A3",
+        market_waypoint: "X1-UX81-A1",
+        cargo_threshold: 30,
+        gather_mode: "siphon"
+      })
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case conn.request_path do
+          "/v2/my/ships/FLEET-SHIP" ->
+            Req.Test.json(conn, %{"data" => ship_body("FLEET-SHIP")})
+
+          "/v2/systems/X1-UX81/waypoints/X1-UX81-A3" ->
+            Req.Test.json(conn, %{
+              "data" => %{"symbol" => "X1-UX81-A3", "type" => "GAS_GIANT", "traits" => []}
+            })
+
+          "/v2/systems/X1-UX81/waypoints/X1-UX81-A1" ->
+            Req.Test.json(conn, %{
+              "data" => %{
+                "symbol" => "X1-UX81-A1",
+                "type" => "ORBITAL_STATION",
+                "traits" => [%{"symbol" => "MARKETPLACE"}]
+              }
+            })
+
+          "/v2/systems/X1-UX81/waypoints/X1-UX81-A1/market" ->
+            Req.Test.json(conn, %{"data" => %{"symbol" => "X1-UX81-A1", "tradeGoods" => []}})
+        end
+      end)
+
+      assert {:error, {:miner_job_blocked, :siphon_capability_missing}} =
+               Fleet.start_miner_job(agent, "FLEET-SHIP")
+
+      assert Fleet.ship_job(agent, "FLEET-SHIP").status == "blocked"
+    end
+
+    test "extract mode still requires a mineral-bearing waypoint" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      Fleet.configure_miner_job(agent, "FLEET-SHIP", %{
+        extraction_waypoint: "X1-UX81-A3",
+        market_waypoint: "X1-UX81-A1",
+        cargo_threshold: 30
+      })
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case conn.request_path do
+          "/v2/my/ships/FLEET-SHIP" ->
+            Req.Test.json(conn, %{
+              "data" =>
+                ship_body("FLEET-SHIP", %{
+                  "mounts" => [%{"symbol" => "MOUNT_GAS_SIPHON_I"}],
+                  "modules" => [%{"symbol" => "MODULE_GAS_PROCESSOR_I"}]
+                })
+            })
+
+          "/v2/systems/X1-UX81/waypoints/X1-UX81-A3" ->
+            Req.Test.json(conn, %{
+              "data" => %{"symbol" => "X1-UX81-A3", "type" => "GAS_GIANT", "traits" => []}
             })
         end
       end)

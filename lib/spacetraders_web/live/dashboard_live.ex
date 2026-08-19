@@ -33,6 +33,8 @@ defmodule SpaceTradersWeb.DashboardLive do
   alias SpaceTraders.SystemWaypointProjection
   alias SpaceTradersWeb.DashboardPrototype
 
+  @gather_kinds ["extract", "siphon"]
+
   @impl true
   def render(assigns) do
     ~H"""
@@ -275,7 +277,8 @@ defmodule SpaceTradersWeb.DashboardLive do
            Fleet.configure_miner_job(agent, params["ship_symbol"], %{
              extraction_waypoint: String.trim(params["extraction_waypoint"] || ""),
              market_waypoint: String.trim(params["market_waypoint"] || ""),
-             cargo_threshold: threshold
+             cargo_threshold: threshold,
+             gather_mode: params["gather_mode"] || "extract"
            }) do
       socket =
         socket
@@ -2676,6 +2679,12 @@ defmodule SpaceTradersWeb.DashboardLive do
       </div>
       <dl class="mt-3 grid grid-cols-1 gap-1 text-xs sm:grid-cols-2">
         <div>
+          <dt class="opacity-60">Gather mode</dt>
+          <dd data-job-gather-mode>
+            {gather_mode_label(@job)}
+          </dd>
+        </div>
+        <div>
           <dt class="opacity-60">Active work</dt>
           <dd data-job-active-work>
             {job_active_work(@job, @ship)}
@@ -2709,6 +2718,24 @@ defmodule SpaceTradersWeb.DashboardLive do
       >
         <input type="hidden" name="draft_key" value={draft_key("miner_job", [@ship.symbol])} />
         <input type="hidden" name="ship_symbol" value={@ship.symbol} />
+        <select
+          name="gather_mode"
+          class="select select-bordered select-sm"
+          aria-label="Gather mode"
+        >
+          <option
+            value="extract"
+            selected={gather_mode_selected?(@form_drafts, @job, @ship.symbol, "extract")}
+          >
+            Extract
+          </option>
+          <option
+            value="siphon"
+            selected={gather_mode_selected?(@form_drafts, @job, @ship.symbol, "siphon")}
+          >
+            Siphon
+          </option>
+        </select>
         <input
           name="extraction_waypoint"
           value={
@@ -2848,6 +2875,15 @@ defmodule SpaceTradersWeb.DashboardLive do
     """
   end
 
+  defp gather_mode_label(%{gather_mode: "siphon"}), do: "Siphon"
+  defp gather_mode_label(%{gather_mode: "extract"}), do: "Extract"
+  defp gather_mode_label(_), do: "Extract"
+
+  defp gather_mode_selected?(drafts, job, ship_symbol, value) do
+    draft_field(drafts, "miner_job", [ship_symbol], "gather_mode", job && job.gather_mode) ==
+      value
+  end
+
   defp job_status(%{status: "blocked"}), do: "Blocked"
 
   defp job_status(%{status: "paused", blocked_reason: reason}),
@@ -2869,9 +2905,10 @@ defmodule SpaceTradersWeb.DashboardLive do
   defp job_reason(_), do: nil
 
   defp job_active_work(
-         %{status: "waiting", in_flight_action: %{"kind" => "extract"}},
+         %{status: "waiting", in_flight_action: %{"kind" => kind}},
          _ship
-       ),
+       )
+       when kind in @gather_kinds,
        do: "Waiting for cooldown"
 
   defp job_active_work(
@@ -2949,6 +2986,12 @@ defmodule SpaceTradersWeb.DashboardLive do
   defp job_blocked_reason(":invalid_extraction_waypoint"),
     do: "Choose an ASTEROID_FIELD or ENGINEERED_ASTEROID extraction waypoint."
 
+  defp job_blocked_reason(":invalid_siphon_waypoint"),
+    do: "Choose a GAS_GIANT siphon waypoint."
+
+  defp job_blocked_reason(":siphon_capability_missing"),
+    do: "This Ship needs a gas siphon mount and gas processor."
+
   defp job_blocked_reason(":invalid_market_waypoint"),
     do: "Choose a waypoint with a MARKETPLACE trait."
 
@@ -2969,6 +3012,8 @@ defmodule SpaceTradersWeb.DashboardLive do
   defp job_correction(":invalid_extraction_waypoint"),
     do: "Choose an asteroid extraction waypoint"
 
+  defp job_correction(":invalid_siphon_waypoint"), do: "Choose a gas giant siphon waypoint"
+  defp job_correction(":siphon_capability_missing"), do: "Use a Ship with a gas siphon"
   defp job_correction(":invalid_market_waypoint"), do: "Choose a marketplace waypoint"
   defp job_correction(":cargo_threshold_exceeds_capacity"), do: "Lower the cargo threshold"
   defp job_correction(":mining_capability_missing"), do: "Use a Ship with a mining laser"
@@ -2976,6 +3021,7 @@ defmodule SpaceTradersWeb.DashboardLive do
 
   defp job_action_label("navigate"), do: "navigation"
   defp job_action_label("extract"), do: "extraction"
+  defp job_action_label("siphon"), do: "siphoning"
   defp job_action_label("sell"), do: "sale"
   defp job_action_label("jettison"), do: "jettison"
   defp job_action_label("refuel"), do: "refueling"

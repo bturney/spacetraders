@@ -6,6 +6,7 @@ defmodule SpaceTraders.Fleet.Job do
 
   schema "jobs" do
     field :type, :string, default: "miner"
+    field :gather_mode, :string, default: "extract"
     field :extraction_waypoint, :string
     field :market_waypoint, :string
     field :cargo_threshold, :integer
@@ -28,6 +29,7 @@ defmodule SpaceTraders.Fleet.Job do
     job
     |> cast(attrs, [
       :type,
+      :gather_mode,
       :extraction_waypoint,
       :market_waypoint,
       :cargo_threshold,
@@ -38,6 +40,7 @@ defmodule SpaceTraders.Fleet.Job do
     ])
     |> validate_required([:type, :extraction_waypoint, :market_waypoint, :cargo_threshold])
     |> validate_inclusion(:type, ["miner"])
+    |> validate_inclusion(:gather_mode, ["extract", "siphon"])
     |> validate_number(:cargo_threshold, greater_than: 0)
     |> validate_inclusion(:desired_mode, ["manual", "active"])
     |> validate_inclusion(:status, ["revalidating", "ready", "waiting", "blocked", "paused"])
