@@ -268,7 +268,7 @@ defmodule SpaceTraders.Fleet do
   def start_miner_job(%AgentRecord{} = agent, ship_symbol) do
     with {:ok, ship} <- owned_ship(agent, ship_symbol),
          %Job{} = job <- Repo.get_by(Job, ship_id: ship.id),
-         {:ok, live_ship, sellable_goods} <- validate_miner_job(agent, ship, job) do
+         {:ok, live_ship, sellable_goods, deliverables} <- validate_miner_job(agent, ship, job) do
       job =
         Repo.update!(
           Ecto.Changeset.change(job,
@@ -276,6 +276,7 @@ defmodule SpaceTraders.Fleet do
             status: "ready",
             blocked_reason: nil,
             sellable_goods: sellable_goods,
+            contract_deliverables: deliverables,
             last_validated_at: DateTime.utc_now() |> DateTime.truncate(:second)
           )
         )
@@ -359,7 +360,7 @@ defmodule SpaceTraders.Fleet do
     record_activity(agent, ship, kind, message, metadata)
   end
 
-  defp validate_miner_job(%AgentRecord{agent_token: token}, ship, config)
+  defp validate_miner_job(%AgentRecord{agent_token: token} = agent, ship, config)
        when is_binary(token) and token != "" do
     with {:ok, live_ship} <- SpaceTraders.API.get_ship(token, ship.symbol),
          {:ok, gather} <-
@@ -373,7 +374,13 @@ defmodule SpaceTraders.Fleet do
          :ok <- market_available?(market),
          :ok <- cargo_policy?(live_ship, config.cargo_threshold),
          :ok <- gather_capability?(config.gather_mode, live_ship) do
-      {:ok, live_ship, accepted_sellable_goods(market)}
+      deliverables =
+        case Contracts.active_deliverables(agent) do
+          {:ok, entries} -> entries
+          {:error, _reason} -> config.contract_deliverables || []
+        end
+
+      {:ok, live_ship, accepted_sellable_goods(market), deliverables}
     end
   end
 
@@ -834,7 +841,7 @@ defmodule SpaceTraders.Fleet do
              live_ship.nav.system_symbol,
              config.market_waypoint
            ),
-         {:ok, live_ship} <- settle_market_cargo(agent, config, live_ship, market),
+         {:ok, live_ship, config} <- settle_market_cargo(agent, config, live_ship, market),
          {:ok, live_ship} <- refuel_for_market_departure(agent, config, live_ship, market) do
       navigate_miner_job(agent, config, live_ship, config.extraction_waypoint)
     else
@@ -852,17 +859,181 @@ defmodule SpaceTraders.Fleet do
     end
   end
 
+  # Settles the hold at the configured Market. An active contract the Ship can
+  # satisfy at this Waypoint is delivered first: each stood deliverable is
+  # delivered up to its remaining requirement before the rest is sold or
+  # jettisoned, so delivery is never crowded out by selling. The authoritative
+  # contract state is refreshed just before the sales below; when that refresh is
+  # unavailable the Job's last-revalidated deliverables still prevent an owed
+  # good from being sold.
   defp settle_market_cargo(agent, config, live_ship, market) do
     accepted = MapSet.new((market.imports || []) ++ (market.exchange || []), & &1.symbol)
 
-    Enum.reduce_while(live_ship.cargo.inventory || [], {:ok, live_ship}, fn item, {:ok, ship} ->
-      action_kind = if MapSet.member?(accepted, item.symbol), do: "sell", else: "jettison"
-
-      case perform_market_cargo_action(agent, config, ship, item, action_kind) do
-        {:ok, ship} -> {:cont, {:ok, ship}}
-        {:error, reason} -> {:halt, {:error, reason}}
+    with {:ok, pending, config} <- pending_market_deliverables(agent, config, live_ship) do
+      case settle_cargo_items(agent, config, live_ship, accepted, pending) do
+        {:ok, live_ship, _config} -> {:ok, live_ship, Repo.get!(Job, config.id)}
+        {:error, reason} -> {:error, reason}
       end
-    end)
+    end
+  end
+
+  defp pending_market_deliverables(agent, config, live_ship) do
+    waypoint = live_ship.nav.waypoint_symbol
+
+    case Contracts.active_deliverables(agent) do
+      {:ok, entries} ->
+        config = Repo.update!(Ecto.Changeset.change(config, contract_deliverables: entries))
+        {:ok, Contracts.pending_deliverables(entries, waypoint), config}
+
+      {:error, _reason} ->
+        {:ok, Contracts.pending_deliverables(config.contract_deliverables || [], waypoint),
+         config}
+    end
+  end
+
+  defp settle_cargo_items(agent, config, live_ship, accepted, pending) do
+    Enum.reduce_while(
+      live_ship.cargo.inventory || [],
+      {:ok, live_ship, config},
+      fn item, {:ok, ship, config} ->
+        case settle_cargo_item(agent, config, ship, item, accepted, pending) do
+          {:ok, ship, config} -> {:cont, {:ok, ship, config}}
+          {:error, reason} -> {:halt, {:error, reason}}
+        end
+      end
+    )
+  end
+
+  # One cargo item: deliver every contract-stood unit the Ship holds at this
+  # Waypoint, then sell or jettison whatever remains.
+  defp settle_cargo_item(agent, config, live_ship, item, accepted, pending) do
+    owed = Enum.filter(pending, &(Map.get(&1, "trade_symbol") == item.symbol))
+
+    with {:ok, live_ship, config} <- deliver_owed_units(agent, config, live_ship, owed),
+         {:ok, live_ship} <-
+           dispose_market_remainder(agent, config, live_ship, item, accepted) do
+      {:ok, live_ship, config}
+    end
+  end
+
+  defp deliver_owed_units(_agent, config, live_ship, []), do: {:ok, live_ship, config}
+
+  defp deliver_owed_units(agent, config, live_ship, [entry | rest]) do
+    held = item_units(live_ship, entry["trade_symbol"])
+    remaining = Map.get(entry, "units_remaining", 0)
+
+    if held <= 0 or remaining <= 0 do
+      deliver_owed_units(agent, config, live_ship, rest)
+    else
+      units = min(held, remaining)
+
+      case deliver_for_miner_job(agent, config, live_ship, entry, units) do
+        {:ok, %{ship: ship, config: config}} ->
+          deliver_owed_units(agent, config, ship, rest)
+
+        {:error, reason} ->
+          {:error, reason}
+      end
+    end
+  end
+
+  defp deliver_for_miner_job(agent, config, live_ship, entry, units) do
+    contract_id = entry["contract_id"]
+    trade_symbol = entry["trade_symbol"]
+    waypoint = entry["destination_symbol"]
+
+    action = %{
+      "kind" => "deliver",
+      "waypoint" => waypoint,
+      "trade_symbol" => trade_symbol,
+      "expected" => %{"units_at_most" => item_units(live_ship, trade_symbol) - units}
+    }
+
+    config =
+      Repo.update!(
+        Ecto.Changeset.change(config, status: "revalidating", in_flight_action: action)
+      )
+
+    case Contracts.deliver_goods(agent, contract_id, live_ship.symbol, trade_symbol, units) do
+      {:ok, %{cargo: cargo, contract: contract}} ->
+        config = refresh_contract_deliverables(config, contract_id, trade_symbol, contract)
+
+        config =
+          Repo.update!(
+            Ecto.Changeset.change(config,
+              status: "ready",
+              in_flight_action: nil,
+              last_action_result: %{
+                "kind" => "deliver",
+                "trade_symbol" => trade_symbol,
+                "units" => units
+              }
+            )
+          )
+
+        remaining = remaining_after(config, contract_id, trade_symbol)
+
+        record_miner_job_activity(
+          agent,
+          live_ship,
+          "miner_job_deliver",
+          "Delivered #{units} #{trade_symbol} to contract #{contract_id} at #{waypoint}; " <>
+            "#{remaining} remain",
+          %{"deliver" => "#{trade_symbol} #{units}", "remaining" => "#{remaining} remain"}
+        )
+
+        {:ok, %{ship: %{live_ship | cargo: cargo}, config: config}}
+
+      {:error, reason} ->
+        mark_miner_job_blocked(config, {:deliver_failed, contract_id, trade_symbol, reason})
+    end
+  end
+
+  defp refresh_contract_deliverables(config, contract_id, trade_symbol, contract) do
+    delivered = find_deliverable(contract, trade_symbol)
+
+    entries =
+      Enum.map(config.contract_deliverables || [], fn entry ->
+        if entry["contract_id"] == contract_id and entry["trade_symbol"] == trade_symbol and
+             delivered do
+          Contracts.refresh_deliverable(
+            entry,
+            delivered.units_required,
+            delivered.units_fulfilled
+          )
+        else
+          entry
+        end
+      end)
+
+    Repo.update!(Ecto.Changeset.change(config, contract_deliverables: entries))
+  end
+
+  defp find_deliverable(%{terms: %{deliver: deliver}}, trade_symbol) do
+    Enum.find(deliver || [], &(&1.trade_symbol == trade_symbol))
+  end
+
+  defp find_deliverable(_contract, _trade_symbol), do: nil
+
+  defp remaining_after(config, contract_id, trade_symbol) do
+    case Enum.find(
+           config.contract_deliverables || [],
+           &(&1["contract_id"] == contract_id and &1["trade_symbol"] == trade_symbol)
+         ) do
+      %{"units_remaining" => remaining} -> remaining
+      _ -> 0
+    end
+  end
+
+  defp dispose_market_remainder(agent, config, live_ship, item, accepted) do
+    held = item_units(live_ship, item.symbol)
+
+    if held <= 0 do
+      {:ok, live_ship}
+    else
+      kind = if MapSet.member?(accepted, item.symbol), do: "sell", else: "jettison"
+      perform_market_cargo_action(agent, config, live_ship, %{item | units: held}, kind)
+    end
   end
 
   defp perform_market_cargo_action(agent, config, live_ship, item, kind) do
@@ -1659,7 +1830,7 @@ defmodule SpaceTraders.Fleet do
          %{"kind" => kind, "trade_symbol" => symbol, "expected" => %{"units_at_most" => units}},
          live_ship
        )
-       when kind in ["sell", "jettison"] do
+       when kind in ["sell", "jettison", "deliver"] do
     if item_units(live_ship, symbol) <= units, do: :confirmed, else: :absent
   end
 

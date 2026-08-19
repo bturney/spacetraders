@@ -177,6 +177,12 @@ The time a pending Contract stops being available for acceptance. It is distinct
 **Contract Reward**:
 The staged payment terms of a Contract: credits paid on acceptance and credits paid on fulfillment. Both stages inform the decision to accept.
 
+**Contract Delivery**:
+An action that removes a Ship's goods at a Contract deliver destination against an accepted Contract's outstanding requirements. The Miner Job performs it before selling the same good at a Market that is also a deliver destination, so deliveries are never crowded out by sales.
+
+**Deliverable**:
+The required goods a Contract still owes at a destination as required minus fulfilled units. The Miner Job tracks it from authoritative Contract state and never sells a good an active Contract still owes at the same destination.
+
 **Mission**:
 Our term for a human-steered flow through the game: accept a Contract, gather and deliver its goods, fulfill it. Distinct from the API's Contract.
 _Avoid_: quest, job, contract (for the flow)

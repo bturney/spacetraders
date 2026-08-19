@@ -89,6 +89,52 @@ defmodule SpaceTraders.Contracts do
 
   def accept_contract(%AgentRecord{}, _contract_id), do: {:error, :agent_token_missing}
 
+  @doc "Fetches the Agent's accepted, actionable contracts' remaining deliverables."
+  def active_deliverables(%AgentRecord{agent_token: token})
+      when is_binary(token) and token != "" do
+    with {:ok, contracts} <- SpaceTraders.API.get_contracts(token) do
+      {:ok, remaining_deliverables(contracts)}
+    end
+  end
+
+  def active_deliverables(%AgentRecord{}), do: {:error, :agent_token_missing}
+
+  @doc "Flattens active Contracts into their remaining delivery terms."
+  def remaining_deliverables(contracts) when is_list(contracts) do
+    contracts
+    |> Enum.filter(&active?/1)
+    |> Enum.flat_map(&deliver_terms/1)
+  end
+
+  @doc "The deliverable entries still owed at a given Waypoint, in contract order."
+  def pending_deliverables(entries, waypoint) do
+    entries
+    |> Enum.filter(&(Map.get(&1, "destination_symbol") == waypoint))
+    |> Enum.filter(&(Map.get(&1, "units_remaining", 0) > 0))
+  end
+
+  defp deliver_terms(%Contract{id: id, terms: %{deliver: deliver}}) do
+    (deliver || [])
+    |> Enum.map(fn good ->
+      base = %{
+        "contract_id" => id,
+        "destination_symbol" => good.destination_symbol,
+        "trade_symbol" => good.trade_symbol
+      }
+
+      refresh_deliverable(base, good.units_required, good.units_fulfilled)
+    end)
+  end
+
+  @doc "Rebuilds a deliverable entry's requirement fields from authoritative counts."
+  def refresh_deliverable(entry, units_required, units_fulfilled) do
+    Map.merge(entry, %{
+      "units_required" => units_required,
+      "units_fulfilled" => units_fulfilled,
+      "units_remaining" => max(units_required - units_fulfilled, 0)
+    })
+  end
+
   @doc "Delivers goods from a Ship against an accepted contract."
   def deliver_goods(
         %AgentRecord{agent_token: token},

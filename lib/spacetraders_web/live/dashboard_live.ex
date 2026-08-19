@@ -2702,6 +2702,12 @@ defmodule SpaceTradersWeb.DashboardLive do
             {job_sellable_payload(@job, @ship)}
           </dd>
         </div>
+        <div>
+          <dt class="opacity-60">Pending delivery</dt>
+          <dd data-job-pending-delivery>
+            {job_pending_delivery(@job, @ship)}
+          </dd>
+        </div>
       </dl>
       <p
         :if={job_reason(@job)}
@@ -2923,6 +2929,12 @@ defmodule SpaceTradersWeb.DashboardLive do
        ),
        do: "Waiting for cooldown"
 
+  defp job_active_work(
+         %{status: "revalidating", in_flight_action: %{"kind" => "deliver"}},
+         _ship
+       ),
+       do: "Delivering contract cargo"
+
   defp job_active_work(%{status: "revalidating", in_flight_action: %{"kind" => kind}}, _ship),
     do: "Revalidating #{job_action_label(kind)}"
 
@@ -2983,6 +2995,29 @@ defmodule SpaceTradersWeb.DashboardLive do
 
   defp sellable_units_in(_ship, _accepted), do: 0
 
+  defp job_pending_delivery(nil, _ship), do: "—"
+
+  defp job_pending_delivery(%{status: "paused"}, _ship), do: "—"
+
+  defp job_pending_delivery(%{contract_deliverables: entries}, %{
+         nav: %{waypoint_symbol: waypoint}
+       })
+       when is_list(entries) and entries != [] do
+    case Contracts.pending_deliverables(entries, waypoint) do
+      [] ->
+        "—"
+
+      pending ->
+        pending
+        |> Enum.map(fn entry ->
+          "#{entry["trade_symbol"]} #{entry["units_remaining"]} due here"
+        end)
+        |> Enum.join(", ")
+    end
+  end
+
+  defp job_pending_delivery(_job, _ship), do: "—"
+
   defp job_blocked_reason(":invalid_extraction_waypoint"),
     do: "Choose an ASTEROID_FIELD or ENGINEERED_ASTEROID extraction waypoint."
 
@@ -3023,6 +3058,7 @@ defmodule SpaceTradersWeb.DashboardLive do
   defp job_action_label("extract"), do: "extraction"
   defp job_action_label("siphon"), do: "siphoning"
   defp job_action_label("sell"), do: "sale"
+  defp job_action_label("deliver"), do: "delivery"
   defp job_action_label("jettison"), do: "jettison"
   defp job_action_label("refuel"), do: "refueling"
   defp job_action_label(_kind), do: "Job work"
@@ -3050,7 +3086,17 @@ defmodule SpaceTradersWeb.DashboardLive do
   defp activity_facts(%{metadata: metadata}) when is_map(metadata) do
     metadata
     |> Enum.filter(fn {key, _value} ->
-      key in ["outcome", "delta", "wait", "retry", "block", "recovery", "jettison"]
+      key in [
+        "outcome",
+        "delta",
+        "wait",
+        "retry",
+        "block",
+        "recovery",
+        "jettison",
+        "deliver",
+        "remaining"
+      ]
     end)
     |> Enum.map(fn {key, value} -> {key, format_activity_value(value)} end)
   end

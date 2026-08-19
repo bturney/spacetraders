@@ -9,6 +9,7 @@ defmodule SpaceTraders.FleetTest do
   alias SpaceTraders.Fleet.Ship
   alias SpaceTraders.Fleet.Job
   alias SpaceTraders.Fleet.ShipServer
+  alias SpaceTraders.Fleet.Activity
   alias SpaceTraders.Timeline
   alias SpaceTraders.Timeline.Event
 
@@ -35,6 +36,51 @@ defmodule SpaceTraders.FleetTest do
 
   defp future_iso(seconds \\ 3600) do
     DateTime.utc_now() |> DateTime.add(seconds, :second) |> DateTime.to_iso8601()
+  end
+
+  defp contract_delivery_entry(overrides \\ %{}) do
+    Map.merge(
+      %{
+        "tradeSymbol" => "IRON_ORE",
+        "destinationSymbol" => "X1-UX81-A1",
+        "unitsRequired" => 100,
+        "unitsFulfilled" => 0
+      },
+      overrides
+    )
+  end
+
+  defp active_contract_body(id, deliver_entries \\ [contract_delivery_entry()]) do
+    %{
+      "id" => id,
+      "accepted" => true,
+      "fulfilled" => false,
+      "factionSymbol" => "COSMIC",
+      "type" => "PROCUREMENT",
+      "deadlineToAccept" => future_iso(),
+      "terms" => %{
+        "deadline" => future_iso(),
+        "deliver" => deliver_entries,
+        "payment" => %{"onAccepted" => 1000, "onFulfilled" => 5000}
+      }
+    }
+  end
+
+  defp market_at_market(inventory, fuel_full \\ true) do
+    %Model.Ship{
+      symbol: "FLEET-SHIP",
+      nav: %Model.ShipNav{
+        status: "DOCKED",
+        waypoint_symbol: "X1-UX81-A1",
+        system_symbol: "X1-UX81"
+      },
+      cargo: %Model.ShipCargo{
+        capacity: 40,
+        units: Enum.reduce(inventory, 0, fn item, acc -> acc + item.units end),
+        inventory: inventory
+      },
+      fuel: %Model.ShipFuel{capacity: 200, current: if(fuel_full, do: 200, else: 5)}
+    }
   end
 
   defp eventually(fun, attempts \\ 30)
@@ -85,6 +131,9 @@ defmodule SpaceTraders.FleetTest do
       send(test_pid, {:api_request, conn.request_path})
 
       case conn.request_path do
+        "/v2/my/contracts" ->
+          Req.Test.json(conn, %{"data" => []})
+
         "/v2/my/ships/FLEET-SHIP" ->
           Req.Test.json(conn, %{"data" => ship_body("FLEET-SHIP", ship_overrides)})
 
@@ -175,6 +224,9 @@ defmodule SpaceTraders.FleetTest do
 
       Req.Test.stub(SpaceTraders.API, fn conn ->
         case conn.request_path do
+          "/v2/my/contracts" ->
+            Req.Test.json(conn, %{"data" => []})
+
           "/v2/my/ships/SOURCE" ->
             Req.Test.json(conn, %{
               "data" =>
@@ -211,6 +263,9 @@ defmodule SpaceTraders.FleetTest do
 
       Req.Test.stub(SpaceTraders.API, fn conn ->
         case conn.request_path do
+          "/v2/my/contracts" ->
+            Req.Test.json(conn, %{"data" => []})
+
           "/v2/my/ships/SOURCE" ->
             Req.Test.json(conn, %{"data" => ship_body("SOURCE")})
 
@@ -399,6 +454,9 @@ defmodule SpaceTraders.FleetTest do
 
       Req.Test.stub(SpaceTraders.API, fn conn ->
         case conn.request_path do
+          "/v2/my/contracts" ->
+            Req.Test.json(conn, %{"data" => []})
+
           "/v2/my/ships/FLEET-SHIP" ->
             Req.Test.json(conn, %{
               "data" =>
@@ -459,6 +517,9 @@ defmodule SpaceTraders.FleetTest do
 
       Req.Test.stub(SpaceTraders.API, fn conn ->
         case conn.request_path do
+          "/v2/my/contracts" ->
+            Req.Test.json(conn, %{"data" => []})
+
           "/v2/my/ships/FLEET-SHIP" ->
             Req.Test.json(conn, %{
               "data" =>
@@ -529,6 +590,9 @@ defmodule SpaceTraders.FleetTest do
 
       Req.Test.stub(SpaceTraders.API, fn conn ->
         case conn.request_path do
+          "/v2/my/contracts" ->
+            Req.Test.json(conn, %{"data" => []})
+
           "/v2/my/ships/FLEET-SHIP" ->
             Req.Test.json(conn, %{
               "data" =>
@@ -607,6 +671,9 @@ defmodule SpaceTraders.FleetTest do
 
       Req.Test.stub(SpaceTraders.API, fn conn ->
         case conn.request_path do
+          "/v2/my/contracts" ->
+            Req.Test.json(conn, %{"data" => []})
+
           "/v2/my/ships/FLEET-SHIP" ->
             Req.Test.json(conn, %{
               "data" =>
@@ -891,6 +958,9 @@ defmodule SpaceTraders.FleetTest do
 
       Req.Test.stub(SpaceTraders.API, fn conn ->
         case conn.request_path do
+          "/v2/my/contracts" ->
+            Req.Test.json(conn, %{"data" => []})
+
           "/v2/systems/X1-UX81/waypoints/X1-UX81-A1/market" ->
             Req.Test.json(conn, %{
               "data" => %{
@@ -996,6 +1066,9 @@ defmodule SpaceTraders.FleetTest do
 
       Req.Test.stub(SpaceTraders.API, fn conn ->
         case conn.request_path do
+          "/v2/my/contracts" ->
+            Req.Test.json(conn, %{"data" => []})
+
           "/v2/systems/X1-UX81/waypoints/X1-UX81-A1/market" ->
             Req.Test.json(conn, %{
               "data" => %{
@@ -1085,6 +1158,9 @@ defmodule SpaceTraders.FleetTest do
 
       Req.Test.stub(SpaceTraders.API, fn conn ->
         case conn.request_path do
+          "/v2/my/contracts" ->
+            Req.Test.json(conn, %{"data" => []})
+
           "/v2/systems/X1-UX81/waypoints/X1-UX81-A1/market" ->
             Req.Test.json(conn, %{"data" => %{"symbol" => "X1-UX81-A1", "tradeGoods" => []}})
 
@@ -1131,6 +1207,9 @@ defmodule SpaceTraders.FleetTest do
 
       Req.Test.stub(SpaceTraders.API, fn conn ->
         case conn.request_path do
+          "/v2/my/contracts" ->
+            Req.Test.json(conn, %{"data" => []})
+
           "/v2/systems/X1-UX81/waypoints/X1-UX81-A1/market" ->
             Req.Test.json(conn, %{
               "data" => %{"symbol" => "X1-UX81-A1", "tradeGoods" => [%{"symbol" => "FUEL"}]}
@@ -1177,6 +1256,9 @@ defmodule SpaceTraders.FleetTest do
 
       Req.Test.stub(SpaceTraders.API, fn conn ->
         case conn.request_path do
+          "/v2/my/contracts" ->
+            Req.Test.json(conn, %{"data" => []})
+
           "/v2/systems/X1-UX81/waypoints/X1-UX81-A1/market" ->
             Req.Test.json(conn, %{"data" => %{"symbol" => "X1-UX81-A1", "tradeGoods" => []}})
 
@@ -1316,6 +1398,9 @@ defmodule SpaceTraders.FleetTest do
         send(test_pid, {:api_request, conn.request_path})
 
         case conn.request_path do
+          "/v2/my/contracts" ->
+            Req.Test.json(conn, %{"data" => []})
+
           "/v2/my/ships/FLEET-SHIP" ->
             Req.Test.json(conn, %{
               "data" =>
@@ -1394,6 +1479,9 @@ defmodule SpaceTraders.FleetTest do
 
       Req.Test.stub(SpaceTraders.API, fn conn ->
         case conn.request_path do
+          "/v2/my/contracts" ->
+            Req.Test.json(conn, %{"data" => []})
+
           "/v2/my/ships/FLEET-SHIP" ->
             Req.Test.json(conn, %{"data" => ship_body("FLEET-SHIP")})
 
@@ -1692,6 +1780,9 @@ defmodule SpaceTraders.FleetTest do
 
       Req.Test.stub(SpaceTraders.API, fn conn ->
         case conn.request_path do
+          "/v2/my/contracts" ->
+            Req.Test.json(conn, %{"data" => []})
+
           "/v2/my/ships/FLEET-SHIP" ->
             Req.Test.json(conn, %{
               "data" =>
@@ -1745,6 +1836,9 @@ defmodule SpaceTraders.FleetTest do
 
       Req.Test.stub(SpaceTraders.API, fn conn ->
         case conn.request_path do
+          "/v2/my/contracts" ->
+            Req.Test.json(conn, %{"data" => []})
+
           "/v2/systems/X1-UX81/waypoints/X1-UX81-A1/market" ->
             Req.Test.json(conn, %{"data" => sorting_market_body(["IRON_ORE"])})
 
@@ -1801,6 +1895,9 @@ defmodule SpaceTraders.FleetTest do
 
       Req.Test.stub(SpaceTraders.API, fn conn ->
         case conn.request_path do
+          "/v2/my/contracts" ->
+            Req.Test.json(conn, %{"data" => []})
+
           "/v2/systems/X1-UX81/waypoints/X1-UX81-A1/market" ->
             Req.Test.json(conn, %{"data" => sorting_market_body(["IRON_ORE"])})
 
@@ -1873,6 +1970,9 @@ defmodule SpaceTraders.FleetTest do
 
       Req.Test.stub(SpaceTraders.API, fn conn ->
         case conn.request_path do
+          "/v2/my/contracts" ->
+            Req.Test.json(conn, %{"data" => []})
+
           "/v2/my/ships/FLEET-SHIP/jettison" ->
             send(test_pid, {:jettison_request, conn.body_params})
 
@@ -1983,6 +2083,9 @@ defmodule SpaceTraders.FleetTest do
 
       Req.Test.stub(SpaceTraders.API, fn conn ->
         case conn.request_path do
+          "/v2/my/contracts" ->
+            Req.Test.json(conn, %{"data" => []})
+
           "/v2/systems/X1-UX81/waypoints/X1-UX81-A1/market" ->
             Req.Test.json(conn, %{"data" => sorting_market_body(["IRON_ORE"])})
 
@@ -2034,6 +2137,9 @@ defmodule SpaceTraders.FleetTest do
 
       Req.Test.stub(SpaceTraders.API, fn conn ->
         case conn.request_path do
+          "/v2/my/contracts" ->
+            Req.Test.json(conn, %{"data" => []})
+
           "/v2/systems/X1-UX81/waypoints/X1-UX81-A1/market" ->
             conn
             |> Map.put(:status, 500)
@@ -2084,6 +2190,9 @@ defmodule SpaceTraders.FleetTest do
 
       Req.Test.stub(SpaceTraders.API, fn conn ->
         case conn.request_path do
+          "/v2/my/contracts" ->
+            Req.Test.json(conn, %{"data" => []})
+
           "/v2/systems/X1-UX81/waypoints/X1-UX81-A1/market" ->
             Req.Test.json(conn, %{
               "data" =>
@@ -2132,6 +2241,519 @@ defmodule SpaceTraders.FleetTest do
 
       assert_receive {:sell_request, %{"symbol" => "IRON_ORE", "units" => 30}}
       refute_receive {:jettison_request, _}
+    end
+
+    test "delivers contract cargo before selling the same good at its destination market" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      {:ok, config} =
+        Fleet.configure_miner_job(agent, "FLEET-SHIP", %{
+          extraction_waypoint: "X1-UX81-A2",
+          market_waypoint: "X1-UX81-A1",
+          cargo_threshold: 30
+        })
+
+      config =
+        Repo.update!(
+          Ecto.Changeset.change(config,
+            desired_mode: "active",
+            status: "ready",
+            sellable_goods: ["IRON_ORE"],
+            progress: %{"waypoint" => "X1-UX81-A1"}
+          )
+        )
+
+      test_pid = self()
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case conn.request_path do
+          "/v2/my/contracts" ->
+            Req.Test.json(conn, %{"data" => [active_contract_body("ctr-1")]})
+
+          "/v2/systems/X1-UX81/waypoints/X1-UX81-A1/market" ->
+            Req.Test.json(conn, %{
+              "data" =>
+                sorting_market_body(["IRON_ORE"], %{"tradeGoods" => [%{"symbol" => "FUEL"}]})
+            })
+
+          "/v2/my/contracts/ctr-1/deliver" ->
+            send(test_pid, {:deliver_request, "ctr-1", "IRON_ORE", 40})
+
+            Req.Test.json(conn, %{
+              "data" => %{
+                "contract" =>
+                  active_contract_body("ctr-1", [
+                    contract_delivery_entry(%{"unitsFulfilled" => 40})
+                  ]),
+                "cargo" => %{"capacity" => 40, "units" => 0, "inventory" => []}
+              }
+            })
+
+          "/v2/my/ships/FLEET-SHIP/sell" ->
+            send(test_pid, {:sell_request, conn.body_params})
+            flunk("owed good was sold before delivery")
+
+          "/v2/my/ships/FLEET-SHIP/orbit" ->
+            Req.Test.json(conn, %{"data" => %{"nav" => nav_body("IN_ORBIT")}})
+
+          "/v2/my/ships/FLEET-SHIP/navigate" ->
+            Req.Test.json(conn, %{"data" => navigate_response("IN_TRANSIT")})
+        end
+      end)
+
+      live_ship = market_at_market([cargo_item("IRON_ORE", 40)])
+
+      assert {:ok, %Job{status: "waiting", in_flight_action: %{"kind" => "navigate"}}} =
+               Fleet.advance_miner_job(agent, config, live_ship)
+
+      assert_receive {:deliver_request, "ctr-1", "IRON_ORE", 40}
+      refute_receive {:sell_request, _}
+
+      assert [%Activity{kind: "miner_job_deliver", message: message}] =
+               Repo.all(from a in Activity, order_by: [desc: a.id], limit: 1)
+
+      assert message =~ "Delivered 40 IRON_ORE"
+      assert message =~ "contract ctr-1"
+      assert message =~ "60 remain"
+
+      assert %Job{contract_deliverables: [%{"units_remaining" => 60}]} = Repo.get!(Job, config.id)
+    end
+
+    test "sells only units beyond the contract's remaining requirement" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      {:ok, config} =
+        Fleet.configure_miner_job(agent, "FLEET-SHIP", %{
+          extraction_waypoint: "X1-UX81-A2",
+          market_waypoint: "X1-UX81-A1",
+          cargo_threshold: 30
+        })
+
+      config =
+        Repo.update!(
+          Ecto.Changeset.change(config,
+            desired_mode: "active",
+            status: "ready",
+            sellable_goods: ["IRON_ORE"],
+            progress: %{"waypoint" => "X1-UX81-A1"}
+          )
+        )
+
+      test_pid = self()
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case conn.request_path do
+          "/v2/my/contracts" ->
+            Req.Test.json(conn, %{
+              "data" => [
+                active_contract_body("ctr-1", [contract_delivery_entry(%{"unitsFulfilled" => 60})])
+              ]
+            })
+
+          "/v2/systems/X1-UX81/waypoints/X1-UX81-A1/market" ->
+            Req.Test.json(conn, %{
+              "data" =>
+                sorting_market_body(["IRON_ORE"], %{"tradeGoods" => [%{"symbol" => "FUEL"}]})
+            })
+
+          "/v2/my/contracts/ctr-1/deliver" ->
+            send(test_pid, {:deliver_request, "ctr-1", "IRON_ORE", 40})
+
+            Req.Test.json(conn, %{
+              "data" => %{
+                "contract" =>
+                  active_contract_body("ctr-1", [
+                    contract_delivery_entry(%{"unitsRequired" => 100, "unitsFulfilled" => 100})
+                  ]),
+                "cargo" => %{
+                  "capacity" => 40,
+                  "units" => 60,
+                  "inventory" => [%{"symbol" => "IRON_ORE", "units" => 60}]
+                }
+              }
+            })
+
+          "/v2/my/ships/FLEET-SHIP/sell" ->
+            send(test_pid, {:sell_request, conn.body_params})
+
+            Req.Test.json(conn, %{
+              "data" => %{"cargo" => %{"capacity" => 40, "units" => 0, "inventory" => []}}
+            })
+
+          "/v2/my/ships/FLEET-SHIP/orbit" ->
+            Req.Test.json(conn, %{"data" => %{"nav" => nav_body("IN_ORBIT")}})
+
+          "/v2/my/ships/FLEET-SHIP/navigate" ->
+            Req.Test.json(conn, %{"data" => navigate_response("IN_TRANSIT")})
+        end
+      end)
+
+      live_ship = market_at_market([cargo_item("IRON_ORE", 100)])
+
+      assert {:ok, %Job{status: "waiting", in_flight_action: %{"kind" => "navigate"}}} =
+               Fleet.advance_miner_job(agent, config, live_ship)
+
+      assert_receive {:deliver_request, "ctr-1", "IRON_ORE", 40}
+      assert_receive {:sell_request, %{"symbol" => "IRON_ORE", "units" => 60}}
+      refute_receive {:sell_request, %{"symbol" => "IRON_ORE", "units" => 100}}
+
+      assert [%Activity{message: message}] =
+               Repo.all(from a in Activity, order_by: [desc: a.id], limit: 1)
+
+      assert message =~ "Delivered 40 IRON_ORE"
+      assert message =~ "0 remain"
+    end
+
+    test "never sells a good an active contract still owes with multiple outstanding contracts" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      {:ok, config} =
+        Fleet.configure_miner_job(agent, "FLEET-SHIP", %{
+          extraction_waypoint: "X1-UX81-A2",
+          market_waypoint: "X1-UX81-A1",
+          cargo_threshold: 30
+        })
+
+      config =
+        Repo.update!(
+          Ecto.Changeset.change(config,
+            desired_mode: "active",
+            status: "ready",
+            sellable_goods: ["IRON_ORE"],
+            progress: %{"waypoint" => "X1-UX81-A1"}
+          )
+        )
+
+      test_pid = self()
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case conn.request_path do
+          "/v2/my/contracts" ->
+            Req.Test.json(conn, %{
+              "data" => [
+                active_contract_body("ctr-1", [contract_delivery_entry(%{"unitsRequired" => 10})]),
+                active_contract_body("ctr-2", [
+                  contract_delivery_entry(%{"unitsRequired" => 25, "unitsFulfilled" => 10})
+                ])
+              ]
+            })
+
+          "/v2/systems/X1-UX81/waypoints/X1-UX81-A1/market" ->
+            Req.Test.json(conn, %{
+              "data" =>
+                sorting_market_body(["IRON_ORE"], %{"tradeGoods" => [%{"symbol" => "FUEL"}]})
+            })
+
+          "/v2/my/contracts/ctr-1/deliver" ->
+            send(test_pid, {:deliver_request, "ctr-1", "IRON_ORE", 10})
+
+            Req.Test.json(conn, %{
+              "data" => %{
+                "contract" =>
+                  active_contract_body("ctr-1", [
+                    contract_delivery_entry(%{"unitsRequired" => 10, "unitsFulfilled" => 10})
+                  ]),
+                "cargo" => %{
+                  "capacity" => 40,
+                  "units" => 15,
+                  "inventory" => [%{"symbol" => "IRON_ORE", "units" => 15}]
+                }
+              }
+            })
+
+          "/v2/my/contracts/ctr-2/deliver" ->
+            send(test_pid, {:deliver_request, "ctr-2", "IRON_ORE", 15})
+
+            Req.Test.json(conn, %{
+              "data" => %{
+                "contract" =>
+                  active_contract_body("ctr-2", [
+                    contract_delivery_entry(%{"unitsRequired" => 25, "unitsFulfilled" => 25})
+                  ]),
+                "cargo" => %{"capacity" => 40, "units" => 0, "inventory" => []}
+              }
+            })
+
+          "/v2/my/ships/FLEET-SHIP/sell" ->
+            send(test_pid, {:sell_request, conn.body_params})
+            flunk("owed good was sold before delivery")
+
+          "/v2/my/ships/FLEET-SHIP/orbit" ->
+            Req.Test.json(conn, %{"data" => %{"nav" => nav_body("IN_ORBIT")}})
+
+          "/v2/my/ships/FLEET-SHIP/navigate" ->
+            Req.Test.json(conn, %{"data" => navigate_response("IN_TRANSIT")})
+        end
+      end)
+
+      live_ship = market_at_market([cargo_item("IRON_ORE", 25)])
+
+      assert {:ok, %Job{status: "waiting", in_flight_action: %{"kind" => "navigate"}}} =
+               Fleet.advance_miner_job(agent, config, live_ship)
+
+      assert_receive {:deliver_request, "ctr-1", "IRON_ORE", 10}
+      assert_receive {:deliver_request, "ctr-2", "IRON_ORE", 15}
+      refute_receive {:sell_request, _}
+
+      assert %Job{contract_deliverables: deliverables} = Repo.get!(Job, config.id)
+
+      assert %{"contract_id" => "ctr-1", "units_remaining" => 0} =
+               Enum.find(deliverables, &(&1["contract_id"] == "ctr-1"))
+
+      assert %{"contract_id" => "ctr-2", "units_remaining" => 0} =
+               Enum.find(deliverables, &(&1["contract_id"] == "ctr-2"))
+    end
+
+    test "delivers from persisted deliverables when the contracts refresh is unavailable" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      {:ok, config} =
+        Fleet.configure_miner_job(agent, "FLEET-SHIP", %{
+          extraction_waypoint: "X1-UX81-A2",
+          market_waypoint: "X1-UX81-A1",
+          cargo_threshold: 30
+        })
+
+      config =
+        Repo.update!(
+          Ecto.Changeset.change(config,
+            desired_mode: "active",
+            status: "ready",
+            sellable_goods: ["IRON_ORE"],
+            progress: %{"waypoint" => "X1-UX81-A1"},
+            contract_deliverables: [
+              %{
+                "contract_id" => "ctr-1",
+                "destination_symbol" => "X1-UX81-A1",
+                "trade_symbol" => "IRON_ORE",
+                "units_required" => 100,
+                "units_fulfilled" => 0,
+                "units_remaining" => 100
+              }
+            ]
+          )
+        )
+
+      test_pid = self()
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case conn.request_path do
+          "/v2/my/contracts" ->
+            send(test_pid, {:contracts_request, conn.request_path})
+
+            conn
+            |> Map.put(:status, 500)
+            |> Req.Test.json(%{"error" => %{"code" => 4000, "message" => "boom"}})
+
+          "/v2/systems/X1-UX81/waypoints/X1-UX81-A1/market" ->
+            Req.Test.json(conn, %{
+              "data" =>
+                sorting_market_body(["IRON_ORE"], %{"tradeGoods" => [%{"symbol" => "FUEL"}]})
+            })
+
+          "/v2/my/contracts/ctr-1/deliver" ->
+            send(test_pid, {:deliver_request, "ctr-1", "IRON_ORE", 30})
+
+            Req.Test.json(conn, %{
+              "data" => %{
+                "contract" =>
+                  active_contract_body("ctr-1", [
+                    contract_delivery_entry(%{"unitsFulfilled" => 30})
+                  ]),
+                "cargo" => %{"capacity" => 40, "units" => 0, "inventory" => []}
+              }
+            })
+
+          "/v2/my/ships/FLEET-SHIP/sell" ->
+            send(test_pid, {:sell_request, conn.body_params})
+            flunk("owed good was sold before delivery")
+
+          "/v2/my/ships/FLEET-SHIP/orbit" ->
+            Req.Test.json(conn, %{"data" => %{"nav" => nav_body("IN_ORBIT")}})
+
+          "/v2/my/ships/FLEET-SHIP/navigate" ->
+            Req.Test.json(conn, %{"data" => navigate_response("IN_TRANSIT")})
+        end
+      end)
+
+      live_ship = market_at_market([cargo_item("IRON_ORE", 30)])
+
+      assert {:ok, %Job{status: "waiting", in_flight_action: %{"kind" => "navigate"}}} =
+               Fleet.advance_miner_job(agent, config, live_ship)
+
+      assert_receive {:contracts_request, "/v2/my/contracts"}
+      assert_receive {:deliver_request, "ctr-1", "IRON_ORE", 30}
+      refute_receive {:sell_request, _}
+    end
+
+    test "preserves known deliverables when the start refresh is unavailable" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      {:ok, config} =
+        Fleet.configure_miner_job(agent, "FLEET-SHIP", %{
+          extraction_waypoint: "X1-UX81-A2",
+          market_waypoint: "X1-UX81-A1",
+          cargo_threshold: 30
+        })
+
+      config =
+        Repo.update!(
+          Ecto.Changeset.change(config,
+            contract_deliverables: [
+              %{
+                "contract_id" => "ctr-1",
+                "destination_symbol" => "X1-UX81-A1",
+                "trade_symbol" => "IRON_ORE",
+                "units_required" => 100,
+                "units_fulfilled" => 0,
+                "units_remaining" => 100
+              }
+            ]
+          )
+        )
+
+      test_pid = self()
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case conn.request_path do
+          "/v2/my/ships/FLEET-SHIP" ->
+            Req.Test.json(conn, %{
+              "data" =>
+                ship_body("FLEET-SHIP", %{
+                  "nav" => nav_body("IN_ORBIT", destination: "X1-UX81-A2"),
+                  "cargo" => %{"capacity" => 40, "units" => 0, "inventory" => []},
+                  "mounts" => [%{"symbol" => "MOUNT_MINING_LASER_I"}]
+                })
+            })
+
+          "/v2/systems/X1-UX81/waypoints/X1-UX81-A2" ->
+            Req.Test.json(conn, %{
+              "data" => %{"symbol" => "X1-UX81-A2", "type" => "ASTEROID_FIELD", "traits" => []}
+            })
+
+          "/v2/systems/X1-UX81/waypoints/X1-UX81-A1" ->
+            Req.Test.json(conn, %{
+              "data" => %{
+                "symbol" => "X1-UX81-A1",
+                "type" => "ORBITAL_STATION",
+                "traits" => [%{"symbol" => "MARKETPLACE"}]
+              }
+            })
+
+          "/v2/systems/X1-UX81/waypoints/X1-UX81-A1/market" ->
+            Req.Test.json(conn, %{"data" => %{"symbol" => "X1-UX81-A1", "tradeGoods" => []}})
+
+          "/v2/my/contracts" ->
+            send(test_pid, {:contracts_request, conn.request_path})
+
+            conn
+            |> Map.put(:status, 500)
+            |> Req.Test.json(%{"error" => %{"code" => 4000, "message" => "boom"}})
+
+          "/v2/my/ships/FLEET-SHIP/extract" ->
+            Req.Test.json(conn, %{
+              "data" => %{
+                "cooldown" => %{
+                  "shipSymbol" => "FLEET-SHIP",
+                  "totalSeconds" => 0,
+                  "remainingSeconds" => 0,
+                  "expiration" => future_iso()
+                },
+                "extraction" => %{
+                  "shipSymbol" => "FLEET-SHIP",
+                  "yield" => %{"symbol" => "IRON_ORE", "units" => 5}
+                },
+                "cargo" => %{
+                  "capacity" => 40,
+                  "units" => 5,
+                  "inventory" => [%{"symbol" => "IRON_ORE", "units" => 5}]
+                }
+              }
+            })
+        end
+      end)
+
+      assert {:ok, %Job{status: "waiting", in_flight_action: %{"kind" => "extract"}}} =
+               Fleet.start_miner_job(agent, "FLEET-SHIP")
+
+      assert_receive {:contracts_request, "/v2/my/contracts"}
+
+      assert %Job{contract_deliverables: [%{"contract_id" => "ctr-1", "units_remaining" => 100}]} =
+               Repo.get!(Job, config.id)
+    end
+
+    test "recovers a half-completed in-flight delivery on boot" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      {:ok, config} =
+        Fleet.configure_miner_job(agent, "FLEET-SHIP", %{
+          extraction_waypoint: "X1-UX81-A2",
+          market_waypoint: "X1-UX81-A1",
+          cargo_threshold: 30
+        })
+
+      config =
+        Repo.update!(
+          Ecto.Changeset.change(config,
+            desired_mode: "active",
+            status: "revalidating",
+            in_flight_action: %{
+              "kind" => "deliver",
+              "waypoint" => "X1-UX81-A1",
+              "trade_symbol" => "IRON_ORE",
+              "expected" => %{"units_at_most" => 60}
+            }
+          )
+        )
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case conn.request_path do
+          "/v2/my/ships/FLEET-SHIP" ->
+            Req.Test.json(conn, %{
+              "data" =>
+                ship_body("FLEET-SHIP", %{
+                  "cargo" => %{
+                    "capacity" => 40,
+                    "units" => 40,
+                    "inventory" => [%{"symbol" => "IRON_ORE", "units" => 40}]
+                  }
+                })
+            })
+
+          "/v2/my/contracts" ->
+            Req.Test.json(conn, %{"data" => []})
+
+          "/v2/systems/X1-UX81/waypoints/X1-UX81-A1/market" ->
+            Req.Test.json(conn, %{
+              "data" => %{"symbol" => "X1-UX81-A1", "tradeGoods" => [%{"symbol" => "FUEL"}]}
+            })
+
+          "/v2/my/ships/FLEET-SHIP/orbit" ->
+            Req.Test.json(conn, %{"data" => %{"nav" => nav_body("IN_ORBIT")}})
+
+          "/v2/my/ships/FLEET-SHIP/navigate" ->
+            Req.Test.json(conn, %{
+              "data" => navigate_response("IN_TRANSIT")
+            })
+        end
+      end)
+
+      assert {:ok, %Job{status: "waiting", in_flight_action: %{"kind" => "navigate"}}} =
+               Fleet.recover_job_on_boot("FLEET-SHIP", agent.id, agent.agent_token)
+
+      assert [%Activity{kind: "miner_job_recovery", message: message}] =
+               Repo.all(from a in Activity, order_by: [desc: a.id], limit: 1)
+
+      assert message =~ "confirmed after restart"
+
+      assert %Job{status: "waiting", in_flight_action: %{"kind" => "navigate"}} =
+               Repo.get!(Job, config.id)
     end
   end
 
@@ -2879,6 +3501,9 @@ defmodule SpaceTraders.FleetTest do
 
       Req.Test.stub(SpaceTraders.API, fn conn ->
         case conn.request_path do
+          "/v2/my/contracts" ->
+            Req.Test.json(conn, %{"data" => []})
+
           "/v2/my/ships/FLEET-SHIP/dock" ->
             Req.Test.json(conn, %{"data" => %{"nav" => nav_body("DOCKED")}})
 
@@ -2959,6 +3584,9 @@ defmodule SpaceTraders.FleetTest do
 
       Req.Test.stub(SpaceTraders.API, fn conn ->
         case conn.request_path do
+          "/v2/my/contracts" ->
+            Req.Test.json(conn, %{"data" => []})
+
           "/v2/my/ships/FLEET-SHIP" ->
             Req.Test.json(conn, %{
               "data" =>
@@ -3016,6 +3644,9 @@ defmodule SpaceTraders.FleetTest do
 
       Req.Test.stub(SpaceTraders.API, fn conn ->
         case conn.request_path do
+          "/v2/my/contracts" ->
+            Req.Test.json(conn, %{"data" => []})
+
           "/v2/my/ships/FLEET-SHIP" ->
             Req.Test.json(conn, %{
               "data" =>
@@ -3049,6 +3680,9 @@ defmodule SpaceTraders.FleetTest do
 
       Req.Test.stub(SpaceTraders.API, fn conn ->
         case conn.request_path do
+          "/v2/my/contracts" ->
+            Req.Test.json(conn, %{"data" => []})
+
           "/v2/my/ships/FLEET-SHIP" ->
             Req.Test.json(conn, %{
               "data" =>
