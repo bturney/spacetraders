@@ -656,6 +656,115 @@ defmodule SpaceTraders.FleetTest do
       assert [%Event{event_type: "cooldown"}] = Timeline.pending_events(:ship, "FLEET-SHIP")
     end
 
+    test "the own extraction does not preempt the started job and the loop continues" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      {:ok, config} =
+        Fleet.configure_miner_job(agent, "FLEET-SHIP", %{
+          extraction_waypoint: "X1-UX81-A2",
+          market_waypoint: "X1-UX81-A1",
+          cargo_threshold: 30
+        })
+
+      expiration = future_iso(60)
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case conn.request_path do
+          "/v2/my/contracts" ->
+            Req.Test.json(conn, %{"data" => []})
+
+          "/v2/my/ships/FLEET-SHIP" ->
+            Req.Test.json(conn, %{
+              "data" =>
+                ship_body("FLEET-SHIP", %{
+                  "nav" => nav_body("IN_ORBIT", destination: "X1-UX81-A2"),
+                  "cargo" => %{"capacity" => 40, "units" => 0, "inventory" => []},
+                  "mounts" => [%{"symbol" => "MOUNT_MINING_LASER_I"}]
+                })
+            })
+
+          "/v2/systems/X1-UX81/waypoints/X1-UX81-A2" ->
+            Req.Test.json(conn, %{
+              "data" => %{"symbol" => "X1-UX81-A2", "type" => "ASTEROID_FIELD", "traits" => []}
+            })
+
+          "/v2/systems/X1-UX81/waypoints/X1-UX81-A1" ->
+            Req.Test.json(conn, %{
+              "data" => %{
+                "symbol" => "X1-UX81-A1",
+                "type" => "ORBITAL_STATION",
+                "traits" => [%{"symbol" => "MARKETPLACE"}]
+              }
+            })
+
+          "/v2/systems/X1-UX81/waypoints/X1-UX81-A1/market" ->
+            Req.Test.json(conn, %{
+              "data" => %{
+                "symbol" => "X1-UX81-A1",
+                "imports" => [%{"symbol" => "IRON_ORE"}],
+                "tradeGoods" => [%{"symbol" => "FUEL"}]
+              }
+            })
+
+          "/v2/my/ships/FLEET-SHIP/extract" ->
+            Req.Test.json(conn, %{
+              "data" => %{
+                "cooldown" => %{
+                  "shipSymbol" => "FLEET-SHIP",
+                  "totalSeconds" => 60,
+                  "remainingSeconds" => 60,
+                  "expiration" => expiration
+                },
+                "extraction" => %{
+                  "shipSymbol" => "FLEET-SHIP",
+                  "yield" => %{"symbol" => "IRON_ORE", "units" => 5}
+                },
+                "cargo" => %{
+                  "capacity" => 40,
+                  "units" => 5,
+                  "inventory" => [%{"symbol" => "IRON_ORE", "units" => 5}]
+                }
+              }
+            })
+        end
+      end)
+
+      assert {:ok, _job} = Fleet.start_miner_job(agent, "FLEET-SHIP")
+
+      stored = Repo.get!(Job, config.id)
+
+      assert stored.desired_mode == "active"
+      assert stored.status == "waiting"
+      assert stored.blocked_reason == nil
+      assert %{"kind" => "extract"} = stored.in_flight_action
+
+      refute Repo.exists?(
+               from a in SpaceTraders.Fleet.Activity,
+                 where: a.ship_id == ^stored.ship_id and a.kind == "manual_override"
+             )
+
+      assert [%Event{event_type: "cooldown"}] = Timeline.pending_events(:ship, "FLEET-SHIP")
+
+      refreshed = %Model.Ship{
+        symbol: "FLEET-SHIP",
+        nav: %Model.ShipNav{status: "IN_ORBIT", waypoint_symbol: "X1-UX81-A2"},
+        cargo: %Model.ShipCargo{capacity: 40, units: 0, inventory: []},
+        cooldown: %Model.Cooldown{
+          ship_symbol: "FLEET-SHIP",
+          total_seconds: 0,
+          remaining_seconds: 0,
+          expiration: future_iso(60)
+        }
+      }
+
+      assert {:ok, %Job{desired_mode: "active"}} =
+               Fleet.revalidate_miner_job_cooldown(agent.id, "FLEET-SHIP", refreshed)
+
+      assert %Job{desired_mode: "active", status: "waiting", blocked_reason: nil} =
+               Repo.get!(Job, config.id)
+    end
+
     test "siphons once below the cargo threshold at the configured waypoint" do
       agent = agent_fixture()
       ship_fixture(agent, "FLEET-SHIP")
