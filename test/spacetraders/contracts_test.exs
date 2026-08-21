@@ -138,4 +138,116 @@ defmodule SpaceTraders.ContractsTest do
     assert {:error, :invalid_units} =
              Contracts.deliver_goods(agent(), "ctr-1", "SHIP-1", "IRON_ORE", 0)
   end
+
+  test "flattens active contracts into remaining deliverable terms" do
+    pending = contract_body(%{"accepted" => true})
+
+    fulfilled =
+      contract_body(%{
+        "id" => "ctr-2",
+        "accepted" => true,
+        "terms" => %{
+          "deadline" => future_iso(3_600),
+          "deliver" => [
+            %{
+              "tradeSymbol" => "COPPER_ORE",
+              "destinationSymbol" => "X1-UX81-A1",
+              "unitsRequired" => 10,
+              "unitsFulfilled" => 10
+            }
+          ],
+          "payment" => %{}
+        }
+      })
+
+    unaccepted = contract_body(%{"accepted" => false})
+    fulfilled_contract = contract_body(%{"accepted" => true, "fulfilled" => true})
+
+    contracts =
+      Enum.map([pending, fulfilled, unaccepted, fulfilled_contract], &Contract.from_json/1)
+
+    assert Contracts.remaining_deliverables(contracts) == [
+             %{
+               "contract_id" => "ctr-1",
+               "destination_symbol" => "X1-UX81-A2",
+               "trade_symbol" => "IRON_ORE",
+               "units_required" => 10,
+               "units_fulfilled" => 0,
+               "units_remaining" => 10
+             },
+             %{
+               "contract_id" => "ctr-2",
+               "destination_symbol" => "X1-UX81-A1",
+               "trade_symbol" => "COPPER_ORE",
+               "units_required" => 10,
+               "units_fulfilled" => 10,
+               "units_remaining" => 0
+             }
+           ]
+  end
+
+  test "computes pending deliverables for a single destination across contracts" do
+    first = contract_body(%{"accepted" => true})
+
+    second =
+      contract_body(%{
+        "id" => "ctr-2",
+        "accepted" => true,
+        "terms" => %{
+          "deadline" => future_iso(3_600),
+          "deliver" => [
+            %{
+              "tradeSymbol" => "IRON_ORE",
+              "destinationSymbol" => "X1-UX81-A2",
+              "unitsRequired" => 25,
+              "unitsFulfilled" => 10
+            }
+          ],
+          "payment" => %{}
+        }
+      })
+
+    entries =
+      [first, second]
+      |> Enum.map(&Contract.from_json/1)
+      |> Contracts.remaining_deliverables()
+
+    assert Contracts.pending_deliverables(entries, "X1-UX81-A2") == [
+             %{
+               "contract_id" => "ctr-1",
+               "destination_symbol" => "X1-UX81-A2",
+               "trade_symbol" => "IRON_ORE",
+               "units_required" => 10,
+               "units_fulfilled" => 0,
+               "units_remaining" => 10
+             },
+             %{
+               "contract_id" => "ctr-2",
+               "destination_symbol" => "X1-UX81-A2",
+               "trade_symbol" => "IRON_ORE",
+               "units_required" => 25,
+               "units_fulfilled" => 10,
+               "units_remaining" => 15
+             }
+           ]
+
+    assert Contracts.pending_deliverables(entries, "X1-UX81-A1") == []
+  end
+
+  test "fetches active deliverables from authoritative agency state" do
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      assert conn.request_path == "/v2/my/contracts"
+
+      Req.Test.json(conn, %{
+        "data" => [
+          contract_body(%{"accepted" => true}),
+          contract_body(%{"accepted" => false})
+        ]
+      })
+    end)
+
+    assert {:ok, [%{"contract_id" => "ctr-1"}]} = Contracts.active_deliverables(agent())
+
+    assert {:error, :agent_token_missing} = Contracts.active_deliverables(agent(nil))
+  end
 end

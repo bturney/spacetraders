@@ -19,6 +19,7 @@ defmodule SpaceTraders.Fleet.Job do
     field :progress, :map, default: %{}
     field :recovery_attempts, :integer, default: 0
     field :sellable_goods, {:array, :string}, default: []
+    field :contract_deliverables, {:array, :map}, default: []
 
     belongs_to :ship, SpaceTraders.Fleet.Ship
 
