@@ -790,9 +790,9 @@ defmodule SpaceTraders.Fleet do
     gather =
       case {kind, mode} do
         {"siphon", :timeline} -> &siphon_resources_for_miner_job/2
-        {"siphon", :normal} -> &siphon_resources/2
+        {"siphon", :normal} -> &siphon_resources_for_miner_job/2
         {"extract", :timeline} -> &extract_resources_for_miner_job/2
-        {"extract", :normal} -> &extract_resources/2
+        {"extract", :normal} -> &extract_resources_for_miner_job/2
       end
 
     case gather.(agent, live_ship.symbol) do
