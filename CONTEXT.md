@@ -102,6 +102,14 @@ _Avoid_: route history (which implies completed journeys), saved route (which im
 A durable, Operator-selected outcome for exactly one Ship. A Ship has at most one assigned unfinished Job. A finite Job declares completion criteria; a recurring Job maintains a condition or loop until paused, replaced, or stopped. Its Policy evaluates authoritative game state to choose an Intent; it never stores a fixed action script.
 _Avoid_: automation, workflow
 
+**Job State**:
+The shared lifecycle of a Job. An active Job may be `active` while pursuing progress, `waiting` while progress is expected without intervention, `paused` by Operator choice, or `blocked` when changed circumstances or Operator action are required. A Job ends as `completed`, `failed`, `stopped`, or `replaced`; completion is an immutable historical result, and failure requires authoritative evidence that the outcome is impossible.
+_Avoid_: status (when the lifecycle distinction matters), error (for blocked or failed)
+
+**Job Blocker**:
+A structured explanation of why a Job cannot currently progress. It records a stable reason, evidence and observation time, who or what can resolve it, the condition for another attempt, and any corrective actions. A Job remains blocked while changed Operator input, capability, intelligence, resources, or future game state could permit progress; uncertainty is never failure.
+_Avoid_: error, failure, message
+
 **System Exploration Job**:
 A finite Job that uses one Ship to establish baseline Operational Intelligence for every Waypoint in a fixed target System captured from the Ship's current System at assignment. The baseline requires a usable observation of identity, coordinates, type, orbital relationships, real traits, current modifiers, chart provenance when supplied, construction state, and Market composition. It acquires facts rather than following an exhaustive itinerary, opportunistically retains live Market Listings and other decision-specific volatile observations without making them completion requirements, and blocks with explicit unresolved coverage when no acquisition path remains.
 _Avoid_: Explorer, System Survey Job
@@ -143,7 +151,7 @@ How a Miner Job gathers on its configured extraction Waypoint: extract on minera
 _Avoid_: mining style, collection mode
 
 **Manual Control**:
-The Operator acting as an alternate caller of one-off Intents or direct game actions, not a Job or durable Ship mode. A manual command pauses the assigned active Job before it runs; resuming the Job requires revalidation against game truth. Outcome-level Intents are the default controls, while posture-level actions remain available through progressive disclosure.
+The Operator acting as an alternate caller of one-off Intents or direct game actions, not a Job or durable Ship mode. A manual command durably pauses the assigned active Job before it runs, and only one Intent actively commands a Ship. Manual execution survives app restarts; the Job remains paused afterward until explicit resume and revalidation against game truth. Outcome-level Intents are the default controls, while serialized posture-level actions remain available through progressive disclosure.
 _Avoid_: Manual Mode
 
 **Ship Readiness**:
