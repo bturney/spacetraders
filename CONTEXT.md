@@ -53,8 +53,12 @@ A Waypoint located at the exact coordinates of its Parent Waypoint, such as a mo
 A visual, interactive representation of every Waypoint in one System, positioned by its game-supplied coordinates and showing the Fleet's current state.
 _Avoid_: galaxy map, sector map
 
+**Operational Intelligence**:
+Observed facts about the game world that a Policy combines with authoritative Agent, Ship, Contract, and Job state to make decisions. Intelligence is scoped, may be partial or stale, and carries its source and observation time. It excludes goals, planned work, execution evidence, and the immediate state of owned entities.
+_Avoid_: operational knowledge, world state
+
 **Waypoint Intelligence**:
-Operational and contextual metadata returned for a Waypoint beyond its location and immediate navigability: construction status, modifiers, controlling faction, and chart provenance. Construction status and modifiers are operational state; faction and chart provenance are secondary context. Display it when present without a per-selection API request.
+Operational Intelligence about one Waypoint beyond its location and immediate navigability: construction status, modifiers, controlling faction, and chart provenance. Construction status and modifiers are operational state; faction and chart provenance are secondary context.
 
 **Waypoint Modifier**:
 An API-supplied condition affecting a Waypoint (e.g., RADIATION_LEAK or CIVIL_UNREST). It signals caution but has no API-supplied severity ranking; do not infer one.
@@ -72,10 +76,6 @@ _Avoid_: system map
 
 **Headquarters**:
 The Agent's home waypoint, where the Agent starts.
-
-**Waypoint Intelligence**:
-The operational state of a Waypoint that the inspector surfaces before any secondary context: construction status and Waypoint Modifiers.
-_Avoid_: waypoint stats, waypoint info
 
 **Waypoint Modifier**:
 An API-supplied caution flag on a Waypoint (e.g., STRIPPED, UNSTABLE), carrying a symbol, name, and description. Shown with caution styling; the game does not rank modifiers, so the app invents no severity order.
