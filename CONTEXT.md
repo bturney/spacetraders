@@ -99,23 +99,23 @@ The five most recently used distinct Waypoints for one Ship, retained as persist
 _Avoid_: route history (which implies completed journeys), saved route (which implies a multi-Waypoint plan)
 
 **Job**:
-A durable, Operator-selected outcome for exactly one Ship. Its Policy evaluates authoritative game state to choose an Intent; a Job is paused by a direct Ship action and must be revalidated before resuming.
+A durable, Operator-selected outcome for exactly one Ship. A Ship has at most one assigned unfinished Job. A finite Job declares completion criteria; a recurring Job maintains a condition or loop until paused, replaced, or stopped. Its Policy evaluates authoritative game state to choose an Intent; it never stores a fixed action script.
 _Avoid_: automation, workflow
 
 **Policy**:
-The decision rule belonging to a Job that selects a viable Intent from authoritative state. It chooses among valid alternatives but does not prescribe game API calls.
+A Job's state machine for reconciling its target, constraints, progress, and authoritative game state. It decides that the Job is complete, waiting, or blocked, or selects the next viable Intent; it does not prescribe game API calls.
 _Avoid_: script, action plan
 
 **Intent**:
-A state-aware request for a Ship to achieve an operational outcome, such as reaching a Waypoint. A Job Policy or the Operator in Manual Mode can invoke an Intent. An Intent selects and performs the necessary game actions from authoritative Ship state; it is not a fixed sequence of API calls.
+A state-aware request for a Ship to achieve an operational outcome, such as reaching a Waypoint. A Job Policy or the Operator through Manual Control can invoke an Intent. An Intent reconciles authoritative Ship state, may delegate one prerequisite Intent at a time, and performs the necessary game actions; it is not a fixed sequence of API calls. Its active chain, meaningful progress, and in-flight evidence survive app restarts so commands are reconciled rather than replayed.
 _Avoid_: action, macro, script
 
 **Navigate Intent**:
-An Intent to reach a requested Waypoint. It makes required local posture and refueling work explicit as progress rather than requiring the Operator to issue each game action. It is reusable by a Job Policy and in Manual Mode.
+An Intent to reach a requested Waypoint. It makes required local posture and refueling work explicit as progress rather than requiring the Operator to issue each game action. It is reusable by a Job Policy and through Manual Control.
 _Avoid_: Navigate Job, route script
 
 **Refuel Intent**:
-An Intent to restore a Ship's fuel where the game permits refueling. It is reusable independently in Manual Mode and as part of Navigate.
+An Intent to restore a Ship's fuel where the game permits refueling. It is reusable independently through Manual Control and as part of Navigate.
 _Avoid_: fuel action (when referring to the state-aware capability)
 
 **Autopilot**:
@@ -134,8 +134,10 @@ _Avoid_: marketable goods, valuable cargo
 How a Miner Job gathers on its configured extraction Waypoint: extract on mineral-bearing Waypoints or siphon on gas-bearing Waypoints. Chosen during configuration and revalidated against authoritative Waypoint and Ship capability.
 _Avoid_: mining style, collection mode
 
-**Manual Mode**:
-A Ship operating mode in which the Operator issues a direct game action or invokes a one-off Intent. Any manual command pauses the active Job before it runs; resuming automation requires revalidation against game truth. A completed one-off Intent leaves the Ship in Manual Mode.
+**Manual Control**:
+The Operator acting as an alternate caller of one-off Intents or direct game actions, not a Job or durable Ship mode. A manual command pauses the assigned active Job before it runs; resuming the Job requires revalidation against game truth. Outcome-level Intents are the default controls, while posture-level actions remain available through progressive disclosure.
+_Avoid_: Manual Mode
+
 **Ship Readiness**:
 The capability and condition information that determines what a Ship can do: flight mode, crew, frame, reactor, engine, modules, and mounts. It supplements, but does not replace, the Ship's immediate operational status, location, fuel, cargo, and actions.
 
@@ -182,13 +184,6 @@ An action that removes a Ship's goods at a Contract deliver destination against 
 
 **Deliverable**:
 The required goods a Contract still owes at a destination as required minus fulfilled units. The Miner Job tracks it from authoritative Contract state and never sells a good an active Contract still owes at the same destination.
-
-**Mission**:
-Our term for a human-steered flow through the game: accept a Contract, gather and deliver its goods, fulfill it. Distinct from the API's Contract.
-_Avoid_: quest, job, contract (for the flow)
-
-**Leg**:
-One step of a Mission (e.g., navigate to the asteroid, extract, sell).
 
 **Cooldown**:
 A forced wait after certain Ship actions (extract, survey, refine) before the action can be repeated.
