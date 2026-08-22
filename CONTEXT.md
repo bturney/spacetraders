@@ -102,6 +102,10 @@ _Avoid_: route history (which implies completed journeys), saved route (which im
 A durable, Operator-selected outcome for exactly one Ship. A Ship has at most one assigned unfinished Job. A finite Job declares completion criteria; a recurring Job maintains a condition or loop until paused, replaced, or stopped. Its Policy evaluates authoritative game state to choose an Intent; it never stores a fixed action script.
 _Avoid_: automation, workflow
 
+**System Exploration Job**:
+A finite Job that uses one Ship to establish baseline Operational Intelligence for every Waypoint in a fixed target System captured from the Ship's current System at assignment. The baseline requires a usable observation of identity, coordinates, type, orbital relationships, real traits, current modifiers, chart provenance when supplied, construction state, and Market composition. It acquires facts rather than following an exhaustive itinerary, opportunistically retains live Market Listings and other decision-specific volatile observations without making them completion requirements, and blocks with explicit unresolved coverage when no acquisition path remains.
+_Avoid_: Explorer, System Survey Job
+
 **Policy**:
 A Job's state machine for reconciling its target, constraints, progress, and authoritative game state. It decides that the Job is complete, waiting, or blocked, or selects the next viable Intent; it does not prescribe game API calls.
 _Avoid_: script, action plan
@@ -117,6 +121,10 @@ _Avoid_: Navigate Job, route script
 **Refuel Intent**:
 An Intent to restore a Ship's fuel where the game permits refueling. It is reusable independently through Manual Control and as part of Navigate.
 _Avoid_: fuel action (when referring to the state-aware capability)
+
+**Acquire Waypoint Intelligence Intent**:
+An Intent to establish a requested set of facts about one Waypoint. It reconciles existing and publicly available intelligence and may use scanning, navigation, charting, and on-site observation while retaining the provenance of every acquired fact.
+_Avoid_: exploration script, visit waypoint action
 
 **Autopilot**:
 An Operator-started, per-Ship Job to execute one configured local gather/sell loop. Its persisted configuration and execution status are Fleet state; it never resumes an action without reconciling authoritative game state. It may act only within its configured extraction Waypoint, Market, and Cargo threshold.
@@ -140,6 +148,10 @@ _Avoid_: Manual Mode
 
 **Ship Readiness**:
 The capability and condition information that determines what a Ship can do: flight mode, crew, frame, reactor, engine, modules, and mounts. It supplements, but does not replace, the Ship's immediate operational status, location, fuel, cargo, and actions.
+
+**Fuel-independent Ship**:
+A Ship whose authoritative fuel capacity is zero and whose navigation therefore has no refueling requirement. Its zero current fuel is a Ship Readiness capability, not fuel starvation; game responses remain authoritative for actual navigation eligibility.
+_Avoid_: unlimited-fuel Ship, empty Ship
 
 **Ship Offer**:
 A Ship configuration currently available at a Shipyard. It is evaluated before purchase using the same capability vocabulary as an owned Ship, alongside its price and availability signals.
