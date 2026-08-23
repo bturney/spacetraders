@@ -122,6 +122,10 @@ _Avoid_: Arbitrage Job, Trader
 A finite Job that uses one Ship to acquire a requested quantity of a Trade Good and deliver it to a specified Contract or Construction project, or sell it at a specified Market. It may accumulate and deliver the quantity across multiple purchases and trips within its sourcing and spending constraints.
 _Avoid_: Delivery Job, Procurement and Delivery Job
 
+**Construction Supply Job**:
+A finite Job that uses one Ship to complete every outstanding material requirement for one fixed Construction project. It plans viable Cargo batches within explicit sourcing and spending constraints, reconciles shared Construction progress before each purchase and delivery, and completes when authoritative game state shows the project is complete, including when external deliveries finish it.
+_Avoid_: Construction Job, construction workflow
+
 **Policy**:
 A Job's state machine for reconciling its target, constraints, progress, and authoritative game state. It decides that the Job is complete, waiting, or blocked, or selects the next viable Intent; it does not prescribe game API calls.
 _Avoid_: script, action plan
