@@ -114,6 +114,14 @@ _Avoid_: error, failure, message
 A finite Job that uses one Ship to establish baseline Operational Intelligence for every Waypoint in a fixed target System captured from the Ship's current System at assignment. The baseline requires a usable observation of identity, coordinates, type, orbital relationships, real traits, current modifiers, chart provenance when supplied, construction state, and Market composition. It acquires facts rather than following an exhaustive itinerary, opportunistically retains live Market Listings and other decision-specific volatile observations without making them completion requirements, and blocks with explicit unresolved coverage when no acquisition path remains.
 _Avoid_: Explorer, System Survey Job
 
+**Market Trading Job**:
+A recurring Job that uses one Ship to repeatedly buy and sell goods for realized net profit within a fixed target System and Operator-selected financial constraints. It chooses among currently known viable trades rather than forecasting prices or searching globally, and distinguishes estimated returns from realized results.
+_Avoid_: Arbitrage Job, Trader
+
+**Procurement Job**:
+A finite Job that uses one Ship to acquire a requested quantity of a Trade Good and deliver it to a specified Contract or Construction project, or sell it at a specified Market. It may accumulate and deliver the quantity across multiple purchases and trips within its sourcing and spending constraints.
+_Avoid_: Delivery Job, Procurement and Delivery Job
+
 **Policy**:
 A Job's state machine for reconciling its target, constraints, progress, and authoritative game state. It decides that the Job is complete, waiting, or blocked, or selects the next viable Intent; it does not prescribe game API calls.
 _Avoid_: script, action plan
@@ -133,6 +141,15 @@ _Avoid_: fuel action (when referring to the state-aware capability)
 **Acquire Waypoint Intelligence Intent**:
 An Intent to establish a requested set of facts about one Waypoint. It reconciles existing and publicly available intelligence and may use scanning, navigation, charting, and on-site observation while retaining the provenance of every acquired fact.
 _Avoid_: exploration script, visit waypoint action
+
+**Buy Goods Intent**:
+An Intent to acquire a requested quantity of a Trade Good from a specified Market within an explicit price constraint. It reconciles Cargo, credits, physical presence, and fresh Market Listings before buying.
+
+**Sell Goods Intent**:
+An Intent to sell a requested quantity of a Trade Good at a specified Market within an explicit price constraint. It reconciles Cargo, physical presence, and fresh Market Listings before selling.
+
+**Deliver Goods Intent**:
+An Intent to have a requested quantity of a specified Trade Good from Cargo authoritatively accepted by a specified Contract or Construction recipient. It reconciles Cargo, physical presence, and recipient progress before delivery.
 
 **Autopilot**:
 An Operator-started, per-Ship Job to execute one configured local gather/sell loop. Its persisted configuration and execution status are Fleet state; it never resumes an action without reconciling authoritative game state. It may act only within its configured extraction Waypoint, Market, and Cargo threshold.
