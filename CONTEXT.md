@@ -139,7 +139,7 @@ An Intent to reach a requested Waypoint in the current or another System. It rec
 _Avoid_: Navigate Job, route script
 
 **Ship Outfitting Job**:
-A finite Job that uses its assigned Ship to acquire and install a requested module so authoritative Ship Readiness has the requested capability. It never removes installed modules without explicit Operator permission or coordinates another Ship; an unreachable source blocks the Job, while Cargo supplied independently by the Operator may let it resume.
+A finite Job that uses its assigned Ship to satisfy a requested Ship Readiness capability with one of an explicit set of acceptable module symbols. It sources only within a fixed System and the Operator's spending, source, and removal constraints; it never removes an installed module without explicit permission or coordinates another Ship. It completes from authoritative installed-module state, blocks when changed input or resources could permit progress, and fails only when the Ship's immutable configuration proves the outcome impossible. Cargo supplied independently by the Operator may let a blocked Job resume.
 _Avoid_: outfitting workflow, courier Job
 
 **Refuel Intent**:
