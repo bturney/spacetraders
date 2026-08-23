@@ -131,8 +131,12 @@ A state-aware request for a Ship to achieve an operational outcome, such as reac
 _Avoid_: action, macro, script
 
 **Navigate Intent**:
-An Intent to reach a requested Waypoint. It makes required local posture and refueling work explicit as progress rather than requiring the Operator to issue each game action. It is reusable by a Job Policy and through Manual Control.
+An Intent to reach a requested Waypoint in the current or another System. It reconciles local navigation, jump, and warp paths from authoritative state, makes required posture and refueling work explicit, and blocks with corrective options rather than silently starting prerequisite Jobs. It is reusable by a Job Policy and through Manual Control.
 _Avoid_: Navigate Job, route script
+
+**Ship Outfitting Job**:
+A finite Job that uses its assigned Ship to acquire and install a requested module so authoritative Ship Readiness has the requested capability. It never removes installed modules without explicit Operator permission or coordinates another Ship; an unreachable source blocks the Job, while Cargo supplied independently by the Operator may let it resume.
+_Avoid_: outfitting workflow, courier Job
 
 **Refuel Intent**:
 An Intent to restore a Ship's fuel where the game permits refueling. It is reusable independently through Manual Control and as part of Navigate.
