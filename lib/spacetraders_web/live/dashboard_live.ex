@@ -40,7 +40,12 @@ defmodule SpaceTradersWeb.DashboardLive do
     ~H"""
     <Layouts.app flash={@flash} current_scope={@current_scope} wide>
       <%= if @prototype_variant do %>
-        <DashboardPrototype.render variant={@prototype_variant} />
+        <DashboardPrototype.render
+          variant={@prototype_variant}
+          stage={@prototype_stage}
+          path={@prototype_path}
+          view={@prototype_view}
+        />
       <% else %>
         <%= if @operator do %>
           <div class="space-y-6">
@@ -104,7 +109,13 @@ defmodule SpaceTradersWeb.DashboardLive do
 
   @impl true
   def mount(params, _session, socket) do
-    socket = assign(socket, :prototype_variant, prototype_variant(params["prototype"]))
+    socket =
+      assign(socket,
+        prototype_variant: prototype_variant(params["prototype"]),
+        prototype_stage: prototype_stage(params["stage"]),
+        prototype_path: prototype_path(params["path"]),
+        prototype_view: prototype_view(params["view"])
+      )
 
     if socket.assigns.prototype_variant do
       {:ok, socket}
@@ -124,8 +135,28 @@ defmodule SpaceTradersWeb.DashboardLive do
     end
   end
 
+  @impl true
+  def handle_params(params, _uri, socket) do
+    {:noreply,
+     assign(socket,
+       prototype_variant: prototype_variant(params["prototype"]),
+       prototype_stage: prototype_stage(params["stage"]),
+       prototype_path: prototype_path(params["path"]),
+       prototype_view: prototype_view(params["view"])
+     )}
+  end
+
   defp prototype_variant(variant) when variant in ["a", "b", "c"], do: variant
   defp prototype_variant(_variant), do: nil
+
+  defp prototype_stage(stage) when stage in ["1", "2", "3", "4"], do: String.to_integer(stage)
+  defp prototype_stage(_stage), do: 1
+
+  defp prototype_path(path) when path in ["jump", "repair", "warp"], do: path
+  defp prototype_path(_path), do: "repair"
+
+  defp prototype_view(view) when view in ["fleet", "ship"], do: view
+  defp prototype_view(_view), do: "fleet"
 
   defp previous_prototype("a"), do: "c"
   defp previous_prototype("b"), do: "a"
@@ -167,6 +198,13 @@ defmodule SpaceTradersWeb.DashboardLive do
        waypoint_filters: %{},
        waypoint_markets: %{}
      )}
+  end
+
+  defp prototype_patch(socket, variant) do
+    push_patch(socket,
+      to:
+        "/?prototype=#{variant}&stage=#{socket.assigns.prototype_stage}&path=#{socket.assigns.prototype_path}&view=#{socket.assigns.prototype_view}"
+    )
   end
 
   @impl true
@@ -610,17 +648,29 @@ defmodule SpaceTradersWeb.DashboardLive do
 
   @impl true
   def handle_event("prototype_variant", %{"variant" => variant}, socket) do
-    {:noreply, push_patch(socket, to: "/?prototype=#{prototype_variant(variant)}")}
+    {:noreply, prototype_patch(socket, prototype_variant(variant))}
   end
 
   def handle_event("prototype_variant", %{"key" => "ArrowLeft"}, socket) do
-    {:noreply,
-     push_patch(socket, to: "/?prototype=#{previous_prototype(socket.assigns.prototype_variant)}")}
+    {:noreply, prototype_patch(socket, previous_prototype(socket.assigns.prototype_variant))}
   end
 
   def handle_event("prototype_variant", %{"key" => "ArrowRight"}, socket) do
+    {:noreply, prototype_patch(socket, next_prototype(socket.assigns.prototype_variant))}
+  end
+
+  def handle_event("prototype_journey", %{"stage" => stage, "path" => path}, socket) do
     {:noreply,
-     push_patch(socket, to: "/?prototype=#{next_prototype(socket.assigns.prototype_variant)}")}
+     socket
+     |> assign(prototype_stage: prototype_stage(stage), prototype_path: prototype_path(path))
+     |> prototype_patch(socket.assigns.prototype_variant)}
+  end
+
+  def handle_event("prototype_view", %{"view" => view}, socket) do
+    {:noreply,
+     socket
+     |> assign(:prototype_view, prototype_view(view))
+     |> prototype_patch(socket.assigns.prototype_variant)}
   end
 
   @impl true
