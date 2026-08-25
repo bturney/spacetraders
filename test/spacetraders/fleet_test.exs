@@ -8,6 +8,7 @@ defmodule SpaceTraders.FleetTest do
   alias SpaceTraders.Fleet
   alias SpaceTraders.Fleet.Ship
   alias SpaceTraders.Fleet.Job
+  alias SpaceTraders.Fleet.JobBlocker
   alias SpaceTraders.Fleet.ShipServer
   alias SpaceTraders.Fleet.Activity
   alias SpaceTraders.Timeline
@@ -380,20 +381,19 @@ defmodule SpaceTraders.FleetTest do
       assert %Job{
                extraction_waypoint: "X1-UX81-A2",
                status: "blocked",
-               blocker: %{
-                 "reason" => reason,
-                 "evidence" => evidence,
-                 "observed_at" => observed_at,
-                 "resolver" => "game_state",
-                 "retry_condition" => "authoritative_read_succeeds",
-                 "corrective_actions" => ["resume"]
+               blocker: %JobBlocker{
+                 reason: reason,
+                 evidence: evidence,
+                 observed_at: %DateTime{},
+                 resolver: "game_state",
+                 retry_condition: "authoritative_read_succeeds",
+                 corrective_actions: ["resume"]
                }
              } =
                Fleet.ship_job(agent, "FLEET-SHIP")
 
       assert is_binary(reason)
       assert is_binary(evidence)
-      assert {:ok, %DateTime{}, 0} = DateTime.from_iso8601(observed_at)
     end
 
     test "replaces the assigned Miner Job and preserves the predecessor as terminal history" do
@@ -1989,13 +1989,13 @@ defmodule SpaceTraders.FleetTest do
       assert recovered.status == "blocked"
       assert recovered.last_action_result["outcome"] == "ambiguous"
 
-      assert recovered.blocker == %{
-               "reason" => "ambiguous",
-               "evidence" => "\"ambiguous\"",
-               "observed_at" => recovered.blocker["observed_at"],
-               "resolver" => "game_state",
-               "retry_condition" => "authoritative_action_outcome_available",
-               "corrective_actions" => ["inspect_activity", "resume"]
+      assert recovered.blocker == %JobBlocker{
+               reason: "ambiguous",
+               evidence: "\"ambiguous\"",
+               observed_at: recovered.blocker.observed_at,
+               resolver: "game_state",
+               retry_condition: "authoritative_action_outcome_available",
+               corrective_actions: ["inspect_activity", "resume"]
              }
 
       assert [%{kind: "miner_job_recovery", metadata: %{"outcome" => "ambiguous"}} | _] =

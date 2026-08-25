@@ -18,7 +18,7 @@ defmodule SpaceTraders.Fleet.Job do
     field :desired_mode, :string, default: "manual"
     field :status, :string, default: "paused"
     field :blocked_reason, :string
-    field :blocker, :map
+    embeds_one :blocker, SpaceTraders.Fleet.JobBlocker
     field :last_validated_at, :utc_datetime
     field :in_flight_action, :map
     field :last_action_result, :map
@@ -49,9 +49,9 @@ defmodule SpaceTraders.Fleet.Job do
       :cargo_threshold,
       :status,
       :blocked_reason,
-      :blocker,
       :last_validated_at
     ])
+    |> cast_embed(:blocker)
     |> validate_required([:type, :extraction_waypoint, :market_waypoint, :cargo_threshold])
     |> validate_inclusion(:type, ["miner"])
     |> validate_inclusion(:gather_mode, ["extract", "siphon"])

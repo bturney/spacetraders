@@ -31,6 +31,7 @@ defmodule SpaceTradersWeb.DashboardLive do
   alias SpaceTraders.Contracts
   alias SpaceTraders.Fleet
   alias SpaceTraders.Fleet.Job
+  alias SpaceTraders.Fleet.JobBlocker
   alias SpaceTraders.SystemWaypointProjection
   alias SpaceTradersWeb.DashboardPrototype
 
@@ -2954,11 +2955,11 @@ defmodule SpaceTradersWeb.DashboardLive do
 
   defp job_reason(%{
          status: "blocked",
-         blocker: %{
-           "reason" => reason,
-           "resolver" => resolver,
-           "retry_condition" => retry_condition,
-           "corrective_actions" => actions
+         blocker: %JobBlocker{
+           reason: reason,
+           resolver: resolver,
+           retry_condition: retry_condition,
+           corrective_actions: actions
          }
        }) do
     "Blocked: #{reason}. Resolver: #{resolver}; retry: #{retry_condition}; actions: #{Enum.join(actions, ", ")}"

@@ -19,7 +19,7 @@ defmodule SpaceTraders.Fleet do
 
   alias SpaceTraders.Agent.Agent, as: AgentRecord
   alias SpaceTraders.API.Model.{Market, ShipNav, ShipNavRoute}
-  alias SpaceTraders.Fleet.{Activity, Job, Ship, ShipDestination}
+  alias SpaceTraders.Fleet.{Activity, Job, JobBlocker, Ship, ShipDestination}
   alias SpaceTraders.Fleet.ShipServer
   alias SpaceTraders.Repo
   alias SpaceTraders.{Agent, Contracts, Listing, Shipyard}
@@ -216,8 +216,14 @@ defmodule SpaceTraders.Fleet do
 
       nil ->
         case record_ship(agent, symbol, "UNKNOWN") do
-          {:ok, ship} -> ship
-          _ -> Repo.get_by!(Ship, agent_id: agent.id, symbol: symbol)
+          {:ok, %Ship{id: id} = ship} when is_integer(id) ->
+            ship
+
+          {:ok, _conflict} ->
+            Repo.get_by!(Ship, agent_id: agent.id, symbol: symbol)
+
+          {:error, changeset} ->
+            raise Ecto.InvalidChangesetError, action: :insert, changeset: changeset
         end
     end
   end
@@ -907,23 +913,7 @@ defmodule SpaceTraders.Fleet do
          )}
 
       {:error, reason} ->
-        Repo.update!(
-          Ecto.Changeset.change(config,
-            status: "blocked",
-            blocked_reason: inspect(reason),
-            blocker: job_blocker(reason)
-          )
-        )
-
-        record_miner_job_activity(
-          agent,
-          live_ship,
-          "miner_job_blocked",
-          "Miner Job blocked: #{inspect(reason)}",
-          %{"block" => inspect(reason), "recovery" => "resume"}
-        )
-
-        {:error, reason}
+        mark_miner_job_blocked(config, reason)
     end
   end
 
@@ -1290,25 +1280,7 @@ defmodule SpaceTraders.Fleet do
          )}
 
       {:error, reason} ->
-        Repo.update!(
-          Ecto.Changeset.change(config,
-            status: "blocked",
-            blocked_reason: inspect(reason),
-            blocker: job_blocker(reason)
-          )
-        )
-
-        record_activity_by_config(
-          config,
-          "miner_job_blocked",
-          "Miner Job blocked: #{inspect(reason)}",
-          %{
-            "block" => inspect(reason),
-            "recovery" => "resume"
-          }
-        )
-
-        {:error, reason}
+        mark_miner_job_blocked(config, reason)
     end
   end
 
@@ -2050,13 +2022,13 @@ defmodule SpaceTraders.Fleet do
   defp job_blocker(reason) do
     {resolver, retry_condition, corrective_actions} = blocker_resolution(reason)
 
-    %{
-      "reason" => blocker_reason(reason),
-      "evidence" => inspect(reason),
-      "observed_at" => DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601(),
-      "resolver" => resolver,
-      "retry_condition" => retry_condition,
-      "corrective_actions" => corrective_actions
+    %JobBlocker{
+      reason: blocker_reason(reason),
+      evidence: inspect(reason),
+      observed_at: DateTime.utc_now() |> DateTime.truncate(:second),
+      resolver: resolver,
+      retry_condition: retry_condition,
+      corrective_actions: corrective_actions
     }
   end
 
