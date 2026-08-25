@@ -30,6 +30,7 @@ defmodule SpaceTradersWeb.DashboardLive do
   alias SpaceTraders.Agent
   alias SpaceTraders.Contracts
   alias SpaceTraders.Fleet
+  alias SpaceTraders.Fleet.Job
   alias SpaceTraders.SystemWaypointProjection
   alias SpaceTradersWeb.DashboardPrototype
 
@@ -2811,7 +2812,7 @@ defmodule SpaceTradersWeb.DashboardLive do
       </form>
       <div class="mt-2 flex flex-wrap gap-2">
         <button
-          :if={@job && @job.status in ["active", "waiting"]}
+          :if={Job.running?(@job)}
           type="button"
           phx-click="pause_miner_job"
           phx-value-symbol={@ship.symbol}
@@ -2950,6 +2951,18 @@ defmodule SpaceTradersWeb.DashboardLive do
 
   defp terminal_job_result(%{last_action_result: %{"kind" => kind}}), do: job_action_label(kind)
   defp terminal_job_result(_), do: "No completed action recorded"
+
+  defp job_reason(%{
+         status: "blocked",
+         blocker: %{
+           "reason" => reason,
+           "resolver" => resolver,
+           "retry_condition" => retry_condition,
+           "corrective_actions" => actions
+         }
+       }) do
+    "Blocked: #{reason}. Resolver: #{resolver}; retry: #{retry_condition}; actions: #{Enum.join(actions, ", ")}"
+  end
 
   defp job_reason(%{status: "blocked", blocked_reason: reason}) when is_binary(reason),
     do: "Blocked: #{job_blocked_reason(reason)}"

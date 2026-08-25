@@ -384,15 +384,18 @@ defmodule SpaceTraders.FleetTest do
                  "reason" => reason,
                  "evidence" => evidence,
                  "observed_at" => observed_at,
-                 "resolver" => "operator_or_game_state",
-                 "retry_condition" => "authoritative_revalidation",
-                 "corrective_actions" => ["resume"]
+                 "resolver" => resolver,
+                 "retry_condition" => retry_condition,
+                 "corrective_actions" => corrective_actions
                }
              } =
                Fleet.ship_job(agent, "FLEET-SHIP")
 
       assert is_binary(reason)
       assert is_binary(evidence)
+      assert resolver in ["operator", "game_state"]
+      assert is_binary(retry_condition)
+      assert is_list(corrective_actions)
       assert {:ok, %DateTime{}, 0} = DateTime.from_iso8601(observed_at)
     end
 

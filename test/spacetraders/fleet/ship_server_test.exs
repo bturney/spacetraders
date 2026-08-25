@@ -146,6 +146,28 @@ defmodule SpaceTraders.Fleet.ShipServerTest do
       assert Repo.get(Event, arrival.id).status == "pending"
       assert ShipServer.ensure_ready(symbol) == {:error, :ship_in_transit}
     end
+
+    test "a cancelled event cannot clear its same-time successor" do
+      symbol = unique_symbol()
+      stub_refresh(symbol)
+      due_at = DateTime.add(DateTime.utc_now(), 100, :millisecond)
+
+      predecessor = schedule(symbol, :arrival, due_at)
+      start_server(symbol)
+
+      successor = schedule(symbol, :arrival, due_at)
+
+      assert :ok =
+               ShipServer.arm(
+                 %Agent{id: @agent_id, agent_token: "AGENT_TOKEN"},
+                 symbol,
+                 successor
+               )
+
+      assert eventually(fn -> Repo.get(Event, successor.id).status == "done" end)
+      assert Repo.get(Event, predecessor.id).status == "cancelled"
+      assert ShipServer.ensure_ready(symbol) == :ok
+    end
   end
 
   describe "ensure_ready/1" do

@@ -26,7 +26,8 @@ defmodule SpaceTraders.Fleet do
   alias SpaceTraders.Timeline
 
   @gather_kinds ["extract", "siphon"]
-  @terminal_job_states ["completed", "failed", "stopped", "replaced"]
+  @terminal_job_states Job.terminal_states()
+  @running_job_states Job.running_states()
 
   @doc """
   Pulls the agent's live fleet from the game API.
@@ -381,7 +382,7 @@ defmodule SpaceTraders.Fleet do
 
   defp preempt_miner_job(agent, ship, reason) do
     case unfinished_job(ship.id) do
-      %Job{status: status} = config when status in ["active", "waiting"] ->
+      %Job{status: status} = config when status in @running_job_states ->
         Repo.update!(
           Ecto.Changeset.change(config,
             status: "paused",
@@ -575,7 +576,7 @@ defmodule SpaceTraders.Fleet do
     with %Ship{} = ship <- Repo.get_by(Ship, agent_id: agent_id, symbol: ship_symbol),
          %Job{} = config <- unfinished_job(ship.id),
          true <- job_matches_event?(config, expected_job_id),
-         true <- config.status in ["active", "waiting"],
+         true <- config.status in @running_job_states,
          true <- cooldown_ready?(live_ship),
          %AgentRecord{} = agent <- Repo.get(AgentRecord, agent_id) do
       case config.in_flight_action do
@@ -614,7 +615,7 @@ defmodule SpaceTraders.Fleet do
     with %Ship{} = ship <- Repo.get_by(Ship, agent_id: agent_id, symbol: ship_symbol),
          %Job{} = config <- unfinished_job(ship.id),
          true <- job_matches_event?(config, expected_job_id),
-         true <- config.status in ["active", "waiting"],
+         true <- config.status in @running_job_states,
          true <- arrived_at_configured_waypoint?(live_ship, config) do
       agent = Repo.get!(AgentRecord, agent_id)
       waypoint = get_in(config.in_flight_action, ["waypoint"])
@@ -1804,7 +1805,7 @@ defmodule SpaceTraders.Fleet do
     job_symbols =
       Job
       |> join(:inner, [c], s in Ship, on: c.ship_id == s.id)
-      |> where([c, _s], c.status in ["active", "waiting"])
+      |> where([c, _s], c.status in ^@running_job_states)
       |> select([_c, s], s.symbol)
       |> Repo.all()
 
@@ -1833,7 +1834,7 @@ defmodule SpaceTraders.Fleet do
   def recover_job_on_boot(ship_symbol, agent_id, agent_token) do
     with %Ship{} = ship <- Repo.get_by(Ship, symbol: ship_symbol, agent_id: agent_id),
          %Job{} = config <- unfinished_job(ship.id) do
-      if config.status in ["active", "waiting"] do
+      if config.status in @running_job_states do
         case SpaceTraders.API.get_ship(agent_token, ship_symbol) do
           {:ok, live_ship} when config.status == "active" and is_nil(config.in_flight_action) ->
             advance_miner_job(Repo.get!(AgentRecord, agent_id), config, live_ship)
@@ -1981,7 +1982,7 @@ defmodule SpaceTraders.Fleet do
 
   defp recovery_retry_or_block(agent_id, ship_symbol, reason, agent_token) do
     with %Ship{} = ship <- Repo.get_by(Ship, symbol: ship_symbol, agent_id: agent_id),
-         %Job{status: status} = config when status in ["active", "waiting"] <-
+         %Job{status: status} = config when status in @running_job_states <-
            unfinished_job(ship.id) do
       if config.recovery_attempts < 3 do
         Repo.update!(
@@ -2031,14 +2032,43 @@ defmodule SpaceTraders.Fleet do
   end
 
   defp job_blocker(reason) do
+    {resolver, retry_condition, corrective_actions} = blocker_resolution(reason)
+
     %{
-      "reason" => inspect(reason),
+      "reason" => blocker_reason(reason),
       "evidence" => inspect(reason),
       "observed_at" => DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601(),
-      "resolver" => "operator_or_game_state",
-      "retry_condition" => "authoritative_revalidation",
-      "corrective_actions" => ["resume"]
+      "resolver" => resolver,
+      "retry_condition" => retry_condition,
+      "corrective_actions" => corrective_actions
     }
+  end
+
+  defp blocker_reason(reason) when is_atom(reason), do: Atom.to_string(reason)
+  defp blocker_reason(reason) when is_tuple(reason), do: reason |> elem(0) |> blocker_reason()
+  defp blocker_reason(%{__struct__: module}), do: module |> Module.split() |> List.last()
+  defp blocker_reason(_reason), do: "miner_job_action_blocked"
+
+  defp blocker_resolution(reason) do
+    case blocker_reason(reason) do
+      reason
+      when reason in [
+             "invalid_extraction_waypoint",
+             "invalid_siphon_waypoint",
+             "invalid_market_waypoint",
+             "cargo_threshold_exceeds_capacity"
+           ] ->
+        {"operator", "configuration_changed", ["replace_job", "resume"]}
+
+      reason when reason in ["siphon_capability_missing", "mining_capability_missing"] ->
+        {"operator", "ship_capability_changed", ["outfit_ship", "resume"]}
+
+      "agent_token_missing" ->
+        {"operator", "agent_credentials_restored", ["restore_credentials", "resume"]}
+
+      _reason ->
+        {"game_state", "authoritative_state_changed", ["resume"]}
+    end
   end
 
   defp maybe_schedule_arrival(agent, ship_symbol, result),

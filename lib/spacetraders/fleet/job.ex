@@ -4,6 +4,10 @@ defmodule SpaceTraders.Fleet.Job do
   use Ecto.Schema
   import Ecto.Changeset
 
+  @unfinished_states ["active", "waiting", "blocked", "paused"]
+  @terminal_states ["completed", "failed", "stopped", "replaced"]
+  @running_states ["active", "waiting"]
+
   schema "jobs" do
     field :type, :string, default: "miner"
     field :gather_mode, :string, default: "extract"
@@ -29,6 +33,12 @@ defmodule SpaceTraders.Fleet.Job do
     timestamps(type: :utc_datetime)
   end
 
+  def unfinished_states, do: @unfinished_states
+  def terminal_states, do: @terminal_states
+  def running_states, do: @running_states
+  def running?(%__MODULE__{status: status}), do: status in @running_states
+  def running?(_job), do: false
+
   def changeset(job, attrs) do
     job
     |> cast(attrs, [
@@ -46,16 +56,7 @@ defmodule SpaceTraders.Fleet.Job do
     |> validate_inclusion(:type, ["miner"])
     |> validate_inclusion(:gather_mode, ["extract", "siphon"])
     |> validate_number(:cargo_threshold, greater_than: 0)
-    |> validate_inclusion(:status, [
-      "active",
-      "waiting",
-      "blocked",
-      "paused",
-      "completed",
-      "failed",
-      "stopped",
-      "replaced"
-    ])
+    |> validate_inclusion(:status, @unfinished_states ++ @terminal_states)
     |> unique_constraint(:ship_id, name: :jobs_one_unfinished_per_ship_index)
   end
 end
