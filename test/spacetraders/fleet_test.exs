@@ -336,7 +336,7 @@ defmodule SpaceTraders.FleetTest do
 
       assert Fleet.ship_job(agent, "FLEET-SHIP").id == persisted.id
 
-      assert {:ok, %Job{status: "paused", desired_mode: "manual"}} =
+      assert {:ok, %Job{status: "paused"}} =
                Fleet.pause_miner_job(agent, "FLEET-SHIP")
     end
 
@@ -377,8 +377,23 @@ defmodule SpaceTraders.FleetTest do
 
       assert {:error, {:miner_job_blocked, _reason}} = Fleet.resume_miner_job(agent, "FLEET-SHIP")
 
-      assert %Job{extraction_waypoint: "X1-UX81-A2", status: "blocked"} =
+      assert %Job{
+               extraction_waypoint: "X1-UX81-A2",
+               status: "blocked",
+               blocker: %{
+                 "reason" => reason,
+                 "evidence" => evidence,
+                 "observed_at" => observed_at,
+                 "resolver" => "operator_or_game_state",
+                 "retry_condition" => "authoritative_revalidation",
+                 "corrective_actions" => ["resume"]
+               }
+             } =
                Fleet.ship_job(agent, "FLEET-SHIP")
+
+      assert is_binary(reason)
+      assert is_binary(evidence)
+      assert {:ok, %DateTime{}, 0} = DateTime.from_iso8601(observed_at)
     end
 
     test "replaces the assigned Miner Job and preserves the predecessor as terminal history" do
@@ -407,6 +422,28 @@ defmodule SpaceTraders.FleetTest do
 
       assert [%Job{id: ^predecessor_id, status: "replaced", finished_at: %DateTime{}}] =
                Fleet.ship_job_history(agent, "FLEET-SHIP")
+
+      predecessor = Repo.get!(Job, predecessor_id)
+
+      assert_raise Exqlite.Error, ~r/terminal jobs are immutable/, fn ->
+        Repo.update!(Ecto.Changeset.change(predecessor, status: "active"))
+      end
+
+      refreshed = %Model.Ship{
+        symbol: "FLEET-SHIP",
+        cooldown: %Model.Cooldown{remaining_seconds: 0}
+      }
+
+      assert :ok =
+               Fleet.revalidate_miner_job_cooldown(
+                 agent.id,
+                 "FLEET-SHIP",
+                 refreshed,
+                 predecessor_id
+               )
+
+      assert %Job{id: ^successor_id, status: "paused"} =
+               Fleet.ship_job(agent, "FLEET-SHIP")
     end
 
     test "stops the Miner Job and preserves it as immutable terminal history" do
@@ -451,11 +488,7 @@ defmodule SpaceTraders.FleetTest do
 
       assert {:ok, _} = Fleet.navigate_ship(agent, "FLEET-SHIP", "X1-UX81-A1")
 
-      assert %{
-               desired_mode: "manual",
-               status: "paused",
-               blocked_reason: "Paused by direct navigation"
-             } =
+      assert %{status: "paused", blocked_reason: "Paused by direct navigation"} =
                Fleet.ship_job(agent, "FLEET-SHIP")
 
       assert [%{kind: "manual_override"} | _] = Fleet.recent_activity(agent)
@@ -529,7 +562,6 @@ defmodule SpaceTraders.FleetTest do
 
       assert {:ok,
               %Job{
-                desired_mode: "active",
                 status: "waiting",
                 in_flight_action: %{"kind" => "navigate", "waypoint" => "X1-UX81-A2"},
                 last_action_result: %{"status" => "IN_TRANSIT"},
@@ -688,7 +720,10 @@ defmodule SpaceTraders.FleetTest do
                 }
               }} = Fleet.start_miner_job(agent, "FLEET-SHIP")
 
-      assert [%Event{event_type: "cooldown"}] = Timeline.pending_events(:ship, "FLEET-SHIP")
+      assert [%Event{event_type: "cooldown", payload: %{"job_id" => job_id}}] =
+               Timeline.pending_events(:ship, "FLEET-SHIP")
+
+      assert job_id == Fleet.ship_job(agent, "FLEET-SHIP").id
     end
 
     test "the own extraction does not preempt the started job and the loop continues" do
@@ -769,7 +804,6 @@ defmodule SpaceTraders.FleetTest do
 
       stored = Repo.get!(Job, config.id)
 
-      assert stored.desired_mode == "active"
       assert stored.status == "waiting"
       assert stored.blocked_reason == nil
       assert %{"kind" => "extract"} = stored.in_flight_action
@@ -793,10 +827,10 @@ defmodule SpaceTraders.FleetTest do
         }
       }
 
-      assert {:ok, %Job{desired_mode: "active"}} =
+      assert {:ok, %Job{status: "waiting"}} =
                Fleet.revalidate_miner_job_cooldown(agent.id, "FLEET-SHIP", refreshed)
 
-      assert %Job{desired_mode: "active", status: "waiting", blocked_reason: nil} =
+      assert %Job{status: "waiting", blocked_reason: nil} =
                Repo.get!(Job, config.id)
     end
 

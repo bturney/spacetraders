@@ -1586,6 +1586,8 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
 
       assert html =~ "Miner Job replaced."
       assert has_element?(lv, "[data-job-history]", "Replaced")
+      assert has_element?(lv, "[data-job-history-entry=\"#{predecessor.id}\"]", "X1-UX81-A2")
+      assert has_element?(lv, "[data-job-history-entry=\"#{predecessor.id}\"]", "30")
       assert Repo.get!(Job, predecessor.id).status == "replaced"
       assert Fleet.ship_job(agent, "ORBITALIST-1").extraction_waypoint == "X1-UX81-A3"
     end

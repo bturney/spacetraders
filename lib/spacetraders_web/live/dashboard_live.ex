@@ -2841,10 +2841,36 @@ defmodule SpaceTradersWeb.DashboardLive do
       </div>
       <div :if={@job_history != []} class="mt-3 border-t border-base-300/60 pt-3" data-job-history>
         <p class="text-xs font-semibold uppercase tracking-wider opacity-60">Terminal history</p>
-        <ol class="mt-2 space-y-1 text-xs">
-          <li :for={historical_job <- @job_history} class="flex justify-between gap-3">
-            <span>{terminal_job_state(historical_job.status)}</span>
-            <time>{format_job_finished_at(historical_job.finished_at)}</time>
+        <ol class="mt-2 space-y-2 text-xs">
+          <li :for={historical_job <- @job_history}>
+            <details data-job-history-entry={historical_job.id}>
+              <summary class="cursor-pointer">
+                <span class="font-semibold">{terminal_job_state(historical_job.status)}</span>
+                <time class="ml-2 opacity-60">{format_job_finished_at(historical_job.finished_at)}</time>
+              </summary>
+              <dl class="mt-2 grid gap-1 pl-3 sm:grid-cols-2">
+                <div>
+                  <dt class="opacity-60">Job</dt><dd>Miner #{historical_job.id}</dd>
+                </div>
+                <div>
+                  <dt class="opacity-60">Gather mode</dt><dd>{gather_mode_label(historical_job)}</dd>
+                </div>
+                <div class="sm:col-span-2">
+                  <dt class="opacity-60">Configured loop</dt>
+                  <dd class="font-mono">
+                    {historical_job.extraction_waypoint} → {historical_job.market_waypoint}
+                  </dd>
+                </div>
+                <div>
+                  <dt class="opacity-60">Cargo threshold</dt><dd>{historical_job.cargo_threshold}</dd>
+                </div>
+                <div>
+                  <dt class="opacity-60">Last result</dt><dd>
+                    {terminal_job_result(historical_job)}
+                  </dd>
+                </div>
+              </dl>
+            </details>
           </li>
         </ol>
       </div>
@@ -2908,9 +2934,8 @@ defmodule SpaceTradersWeb.DashboardLive do
 
   defp job_status(%{status: "paused"}), do: "Paused"
   defp job_status(nil), do: "Manual"
-  defp job_status(%{desired_mode: "active", status: "waiting"}), do: "Waiting"
+  defp job_status(%{status: "waiting"}), do: "Waiting"
   defp job_status(%{status: "active"}), do: "Active Miner Job"
-  defp job_status(%{desired_mode: "active"}), do: "Active Miner Job"
   defp job_status(_), do: "Manual"
 
   defp terminal_job_state("completed"), do: "Completed"
@@ -2922,6 +2947,9 @@ defmodule SpaceTradersWeb.DashboardLive do
     do: Calendar.strftime(finished_at, "%Y-%m-%d %H:%M UTC")
 
   defp format_job_finished_at(_), do: ""
+
+  defp terminal_job_result(%{last_action_result: %{"kind" => kind}}), do: job_action_label(kind)
+  defp terminal_job_result(_), do: "No completed action recorded"
 
   defp job_reason(%{status: "blocked", blocked_reason: reason}) when is_binary(reason),
     do: "Blocked: #{job_blocked_reason(reason)}"
@@ -2965,7 +2993,7 @@ defmodule SpaceTradersWeb.DashboardLive do
     do: paused_status(reason)
 
   defp job_active_work(%{status: "paused"}, _ship), do: "Paused by manual action"
-  defp job_active_work(%{desired_mode: "active"}, _ship), do: "Evaluating cargo"
+  defp job_active_work(%{status: "active"}, _ship), do: "Evaluating cargo"
   defp job_active_work(_, _ship), do: "Manual"
 
   defp job_next_transition(
@@ -2989,7 +3017,7 @@ defmodule SpaceTradersWeb.DashboardLive do
 
   defp job_next_transition(%{status: "paused"}, _ship), do: "Resume after revalidation"
 
-  defp job_next_transition(%{desired_mode: "active", extraction_waypoint: waypoint}, ship) do
+  defp job_next_transition(%{status: "active", extraction_waypoint: waypoint}, ship) do
     if cooldown_display_active?(ship),
       do: "Wait through #{cooldown_label(ship, 0)}",
       else: "Evaluate at #{waypoint}"

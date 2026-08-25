@@ -6,6 +6,7 @@ defmodule SpaceTraders.Repo.Migrations.AddJobTerminalHistory do
 
     alter table(:jobs) do
       add :finished_at, :utc_datetime
+      add :blocker, :map
     end
 
     execute(
@@ -22,5 +23,17 @@ defmodule SpaceTraders.Repo.Migrations.AddJobTerminalHistory do
              where: "status NOT IN ('completed', 'failed', 'stopped', 'replaced')",
              name: :jobs_one_unfinished_per_ship_index
            )
+
+    execute(
+      """
+      CREATE TRIGGER jobs_terminal_immutable
+      BEFORE UPDATE ON jobs
+      WHEN OLD.status IN ('completed', 'failed', 'stopped', 'replaced')
+      BEGIN
+        SELECT RAISE(ABORT, 'terminal jobs are immutable');
+      END
+      """,
+      "DROP TRIGGER jobs_terminal_immutable"
+    )
   end
 end

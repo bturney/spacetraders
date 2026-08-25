@@ -10,9 +10,11 @@ defmodule SpaceTraders.Fleet.Job do
     field :extraction_waypoint, :string
     field :market_waypoint, :string
     field :cargo_threshold, :integer
+    # Retained for deployed rows; Job State is the sole runtime lifecycle.
     field :desired_mode, :string, default: "manual"
     field :status, :string, default: "paused"
     field :blocked_reason, :string
+    field :blocker, :map
     field :last_validated_at, :utc_datetime
     field :in_flight_action, :map
     field :last_action_result, :map
@@ -35,16 +37,15 @@ defmodule SpaceTraders.Fleet.Job do
       :extraction_waypoint,
       :market_waypoint,
       :cargo_threshold,
-      :desired_mode,
       :status,
       :blocked_reason,
+      :blocker,
       :last_validated_at
     ])
     |> validate_required([:type, :extraction_waypoint, :market_waypoint, :cargo_threshold])
     |> validate_inclusion(:type, ["miner"])
     |> validate_inclusion(:gather_mode, ["extract", "siphon"])
     |> validate_number(:cargo_threshold, greater_than: 0)
-    |> validate_inclusion(:desired_mode, ["manual", "active"])
     |> validate_inclusion(:status, [
       "active",
       "waiting",

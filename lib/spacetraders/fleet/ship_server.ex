@@ -167,10 +167,20 @@ defmodule SpaceTraders.Fleet.ShipServer do
 
           case type do
             :arrival ->
-              SpaceTraders.Fleet.revalidate_miner_job_arrival(state.agent_id, state.symbol, ship)
+              SpaceTraders.Fleet.revalidate_miner_job_arrival(
+                state.agent_id,
+                state.symbol,
+                ship,
+                event.payload["job_id"]
+              )
 
             :cooldown ->
-              SpaceTraders.Fleet.revalidate_miner_job_cooldown(state.agent_id, state.symbol, ship)
+              SpaceTraders.Fleet.revalidate_miner_job_cooldown(
+                state.agent_id,
+                state.symbol,
+                ship,
+                event.payload["job_id"]
+              )
 
             _ ->
               :ok
