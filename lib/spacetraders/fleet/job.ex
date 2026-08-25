@@ -11,7 +11,7 @@ defmodule SpaceTraders.Fleet.Job do
     field :market_waypoint, :string
     field :cargo_threshold, :integer
     field :desired_mode, :string, default: "manual"
-    field :status, :string, default: "ready"
+    field :status, :string, default: "paused"
     field :blocked_reason, :string
     field :last_validated_at, :utc_datetime
     field :in_flight_action, :map
@@ -20,6 +20,7 @@ defmodule SpaceTraders.Fleet.Job do
     field :recovery_attempts, :integer, default: 0
     field :sellable_goods, {:array, :string}, default: []
     field :contract_deliverables, {:array, :map}, default: []
+    field :finished_at, :utc_datetime
 
     belongs_to :ship, SpaceTraders.Fleet.Ship
 
@@ -44,7 +45,16 @@ defmodule SpaceTraders.Fleet.Job do
     |> validate_inclusion(:gather_mode, ["extract", "siphon"])
     |> validate_number(:cargo_threshold, greater_than: 0)
     |> validate_inclusion(:desired_mode, ["manual", "active"])
-    |> validate_inclusion(:status, ["revalidating", "ready", "waiting", "blocked", "paused"])
-    |> unique_constraint(:ship_id)
+    |> validate_inclusion(:status, [
+      "active",
+      "waiting",
+      "blocked",
+      "paused",
+      "completed",
+      "failed",
+      "stopped",
+      "replaced"
+    ])
+    |> unique_constraint(:ship_id, name: :jobs_one_unfinished_per_ship_index)
   end
 end

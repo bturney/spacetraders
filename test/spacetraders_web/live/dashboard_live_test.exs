@@ -5,7 +5,7 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
   import SpaceTraders.AgentFixtures
   import SpaceTraders.ShipBody
 
-  alias SpaceTraders.Timeline
+  alias SpaceTraders.{Fleet, Timeline}
   alias SpaceTraders.Fleet.Ship
   alias SpaceTraders.Fleet.ShipServer
   alias SpaceTraders.Fleet.ShipDestination
@@ -414,17 +414,16 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       assert html =~ "Sold 5 IRON_ORE for 400 credits."
       assert html =~ "42,400"
 
-      html =
-        lv
-        |> element(
-          "form[phx-change=\"track_draft\"][id=\"sell-form-X1-UX81-A1-ORBITALIST-1-IRON_ORE\"]"
-        )
-        |> render_change(%{
-          draft_key: "sell:ORBITALIST-1:IRON_ORE",
-          symbol: "ORBITALIST-1",
-          trade_symbol: "IRON_ORE",
-          units: "3"
-        })
+      lv
+      |> element(
+        "form[phx-change=\"track_draft\"][id=\"sell-form-X1-UX81-A1-ORBITALIST-1-IRON_ORE\"]"
+      )
+      |> render_change(%{
+        draft_key: "sell:ORBITALIST-1:IRON_ORE",
+        symbol: "ORBITALIST-1",
+        trade_symbol: "IRON_ORE",
+        units: "3"
+      })
 
       assert input_value(lv, "sell-form-X1-UX81-A1-ORBITALIST-1-IRON_ORE", "units") =~
                ~s(value="3")
@@ -1117,15 +1116,14 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       assert html =~ ~s(phx-click="extract")
     end
 
-    test "saves a loop configuration and keeps Start explicit", %{conn: conn, operator: operator} do
+    test "assigns a loop as a paused Miner Job", %{conn: conn, operator: operator} do
       agent = agent_fixture(operator)
 
       stub_live_game(agent_overview_body(agent.symbol), [ship_body("ORBITALIST-1")])
 
       {:ok, lv, html} = live(conn, ~p"/")
-      assert html =~ "Save Miner Job configuration"
-      assert html =~ "Start Miner Job"
-      assert html =~ "data-confirm=\"Start Miner Job for this Ship?\""
+      assert html =~ "Assign Miner Job"
+      refute html =~ "Start Miner Job"
 
       html =
         lv
@@ -1137,8 +1135,9 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
           cargo_threshold: "30"
         })
 
-      assert html =~ "Miner Job configuration saved. Start remains manual."
-      assert has_element?(lv, "[data-job-status]", "Manual")
+      assert html =~ "Miner Job assigned and paused."
+      assert has_element?(lv, "[data-job-status]", "Paused")
+      assert has_element?(lv, "button[phx-click=\"resume_miner_job\"]")
     end
 
     test "presents the configured loop as a Miner Job", %{conn: conn, operator: operator} do
@@ -1155,7 +1154,7 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
              )
 
       assert has_element?(lv, "[data-job-status]", "Manual")
-      assert has_element?(lv, "[data-job-next-transition]", "Start Miner Job")
+      assert has_element?(lv, "[data-job-next-transition]", "Assign Miner Job")
     end
 
     test "shows the gather mode and surfaces siphon results as active work", %{
@@ -1240,7 +1239,7 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       agent = agent_fixture(operator)
       stub_live_game(agent_overview_body(agent.symbol), [ship_body("ORBITALIST-1")])
 
-      {:ok, lv, html} = live(conn, ~p"/")
+      {:ok, lv, _html} = live(conn, ~p"/")
 
       html =
         lv
@@ -1253,7 +1252,7 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
           cargo_threshold: "30"
         })
 
-      assert html =~ "Miner Job configuration saved. Start remains manual."
+      assert html =~ "Miner Job assigned and paused."
 
       assert has_element?(
                lv,
@@ -1272,7 +1271,7 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
 
       {:ok, _lv, html} = live(conn, ~p"/")
 
-      assert html =~ "Start Miner Job"
+      assert html =~ "Assign Miner Job"
       assert html =~ "Activity"
       assert html =~ "No local recovery events yet."
     end
@@ -1362,7 +1361,7 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
           Keyword.put(config_attrs, :ship_id, waiting_ship.id) ++
             [
               desired_mode: "active",
-              status: "revalidating",
+              status: "active",
               in_flight_action: %{"kind" => "navigate"}
             ]
         )
@@ -1391,7 +1390,7 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       assert has_element?(
                lv,
                "[data-ship-card=\"ORBITALIST-1\"] [data-job-status]",
-               "Paused by manual action"
+               "Paused"
              )
 
       assert has_element?(
@@ -1403,7 +1402,7 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       assert has_element?(
                lv,
                "[data-ship-card=\"ORBITALIST-2\"] [data-job-status]",
-               "Revalidating"
+               "Active Miner Job"
              )
 
       assert has_element?(
@@ -1466,7 +1465,8 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
         market_waypoint: "X1-UX81-A1",
         cargo_threshold: 30,
         desired_mode: "manual",
-        status: "ready"
+        status: "paused",
+        blocked_reason: "Awaiting Operator resume"
       })
 
       Req.Test.stub(SpaceTraders.API, fn conn ->
@@ -1525,22 +1525,69 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       end)
 
       {:ok, lv, _html} = live(conn, ~p"/")
-      assert has_element?(lv, "[data-job-status]", "Manual")
-      assert has_element?(lv, "button[phx-click=\"start_miner_job\"]")
+      assert has_element?(lv, "[data-job-status]", "Paused")
+      assert has_element?(lv, "button[phx-click=\"resume_miner_job\"]")
+      assert has_element?(lv, "form[phx-submit=\"replace_miner_job\"]", "Replace Miner Job")
+      refute has_element?(lv, "button[phx-click=\"pause_miner_job\"]")
 
-      lv |> element("button[phx-click=\"start_miner_job\"]") |> render_click()
+      lv |> element("button[phx-click=\"resume_miner_job\"]") |> render_click()
       assert has_element?(lv, "button[phx-click=\"pause_miner_job\"]")
 
       lv |> element("button[phx-click=\"pause_miner_job\"]") |> render_click()
-      assert has_element?(lv, "[data-job-status]", "Paused by Operator")
+      assert has_element?(lv, "[data-job-status]", "Paused")
       assert has_element?(lv, "button[phx-click=\"resume_miner_job\"]")
 
       lv |> element("button[phx-click=\"resume_miner_job\"]") |> render_click()
-      refute has_element?(lv, "[data-job-status]", "Paused by Operator")
+      refute has_element?(lv, "[data-job-status]", "Paused")
 
       lv |> element("button[phx-click=\"stop_miner_job\"]") |> render_click()
       assert has_element?(lv, "[data-job-status]", "Manual")
+      assert has_element?(lv, "[data-job-history]", "Stopped")
       refute has_element?(lv, "button[phx-click=\"stop_miner_job\"]")
+      refute has_element?(lv, "button[phx-click=\"resume_miner_job\"]")
+    end
+
+    test "explicitly replaces the assigned Miner Job and displays terminal history", %{
+      conn: conn,
+      operator: operator
+    } do
+      agent = agent_fixture(operator)
+
+      ship =
+        Repo.insert!(%Ship{
+          agent_id: agent.id,
+          symbol: "ORBITALIST-1",
+          ship_type: "SHIP_COMMAND_FRIGATE"
+        })
+
+      predecessor =
+        Repo.insert!(%Job{
+          ship_id: ship.id,
+          extraction_waypoint: "X1-UX81-A2",
+          market_waypoint: "X1-UX81-A1",
+          cargo_threshold: 30,
+          status: "paused"
+        })
+
+      stub_live_game(agent_overview_body(agent.symbol), [ship_body("ORBITALIST-1")])
+
+      {:ok, lv, _html} = live(conn, ~p"/")
+
+      html =
+        lv
+        |> form("form[phx-submit=\"replace_miner_job\"]", %{
+          "ship_symbol" => "ORBITALIST-1",
+          "gather_mode" => "extract",
+          "extraction_waypoint" => "X1-UX81-A3",
+          "market_waypoint" => "X1-UX81-A1",
+          "cargo_threshold" => "20"
+        })
+        |> render_submit()
+
+      assert html =~ "Miner Job replaced."
+      assert has_element?(lv, "[data-job-history]", "Replaced")
+      assert Repo.get!(Job, predecessor.id).status == "replaced"
+      assert Fleet.ship_job(agent, "ORBITALIST-1").extraction_waypoint == "X1-UX81-A3"
     end
 
     test "selects a Ship operation panel and returns to the Fleet roster on mobile", %{
@@ -1641,7 +1688,7 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
         market_waypoint: "X1-UX81-A1",
         cargo_threshold: 30,
         desired_mode: "active",
-        status: "ready",
+        status: "active",
         sellable_goods: ["IRON_ORE"]
       })
 
@@ -1723,7 +1770,7 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
         market_waypoint: "X1-UX81-A1",
         cargo_threshold: 30,
         desired_mode: "active",
-        status: "ready",
+        status: "active",
         sellable_goods: ["IRON_ORE"],
         contract_deliverables: [
           %{

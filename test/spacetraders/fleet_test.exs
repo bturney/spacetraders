@@ -120,7 +120,7 @@ defmodule SpaceTraders.FleetTest do
     Repo.update!(
       Ecto.Changeset.change(config,
         desired_mode: "active",
-        status: "revalidating",
+        status: "active",
         in_flight_action: action
       )
     )
@@ -381,11 +381,39 @@ defmodule SpaceTraders.FleetTest do
                Fleet.ship_job(agent, "FLEET-SHIP")
     end
 
-    test "stops the Miner Job, clears its durable record, and returns the Ship to Manual Mode" do
+    test "replaces the assigned Miner Job and preserves the predecessor as terminal history" do
       agent = agent_fixture()
       ship_fixture(agent, "FLEET-SHIP")
 
-      assert {:ok, %Job{}} =
+      assert {:ok, %Job{id: predecessor_id}} =
+               Fleet.configure_miner_job(agent, "FLEET-SHIP", %{
+                 extraction_waypoint: "X1-UX81-A2",
+                 market_waypoint: "X1-UX81-A1",
+                 cargo_threshold: 30
+               })
+
+      assert {:ok, %Job{id: successor_id, status: "paused"}} =
+               Fleet.replace_miner_job(agent, "FLEET-SHIP", %{
+                 extraction_waypoint: "X1-UX81-A3",
+                 market_waypoint: "X1-UX81-A1",
+                 cargo_threshold: 20,
+                 gather_mode: "siphon"
+               })
+
+      refute predecessor_id == successor_id
+
+      assert %Job{id: ^successor_id, extraction_waypoint: "X1-UX81-A3"} =
+               Fleet.ship_job(agent, "FLEET-SHIP")
+
+      assert [%Job{id: ^predecessor_id, status: "replaced", finished_at: %DateTime{}}] =
+               Fleet.ship_job_history(agent, "FLEET-SHIP")
+    end
+
+    test "stops the Miner Job and preserves it as immutable terminal history" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      assert {:ok, %Job{id: job_id}} =
                Fleet.configure_miner_job(agent, "FLEET-SHIP", %{
                  extraction_waypoint: "X1-UX81-A2",
                  market_waypoint: "X1-UX81-A1",
@@ -394,6 +422,13 @@ defmodule SpaceTraders.FleetTest do
 
       assert :ok = Fleet.stop_miner_job(agent, "FLEET-SHIP")
       assert Fleet.ship_job(agent, "FLEET-SHIP") == nil
+
+      assert [%Job{id: ^job_id, status: "stopped", finished_at: %DateTime{}}] =
+               Fleet.ship_job_history(agent, "FLEET-SHIP")
+
+      assert {:error, :miner_job_not_configured} =
+               Fleet.resume_miner_job(agent, "FLEET-SHIP")
+
       assert [%{kind: "stop"} | _] = Fleet.recent_activity(agent)
     end
 
@@ -438,7 +473,7 @@ defmodule SpaceTraders.FleetTest do
                })
 
       assert config.desired_mode == "manual"
-      assert config.status == "ready"
+      assert config.status == "paused"
       assert Fleet.ship_job(agent, "FLEET-SHIP").cargo_threshold == 30
     end
 
@@ -932,7 +967,7 @@ defmodule SpaceTraders.FleetTest do
       Repo.update!(
         Ecto.Changeset.change(config,
           desired_mode: "active",
-          status: "revalidating",
+          status: "active",
           in_flight_action: %{
             "kind" => "siphon",
             "waypoint" => "X1-UX81-A3",
@@ -1815,7 +1850,7 @@ defmodule SpaceTraders.FleetTest do
       Repo.update!(
         Ecto.Changeset.change(config,
           desired_mode: "active",
-          status: "revalidating",
+          status: "active",
           in_flight_action: %{"kind" => "unknown_action"}
         )
       )
@@ -1870,7 +1905,7 @@ defmodule SpaceTraders.FleetTest do
       Repo.update!(
         Ecto.Changeset.change(config,
           desired_mode: "active",
-          status: "ready",
+          status: "active",
           sellable_goods: sellable_goods,
           progress: %{"waypoint" => "X1-UX81-A2"}
         )
@@ -2289,7 +2324,7 @@ defmodule SpaceTraders.FleetTest do
         Repo.update!(
           Ecto.Changeset.change(config,
             desired_mode: "active",
-            status: "ready",
+            status: "active",
             sellable_goods: ["IRON_ORE"],
             progress: %{"waypoint" => "X1-UX81-A1"}
           )
@@ -2367,7 +2402,7 @@ defmodule SpaceTraders.FleetTest do
         Repo.update!(
           Ecto.Changeset.change(config,
             desired_mode: "active",
-            status: "ready",
+            status: "active",
             sellable_goods: ["IRON_ORE"],
             progress: %{"waypoint" => "X1-UX81-A1"}
           )
@@ -2444,7 +2479,7 @@ defmodule SpaceTraders.FleetTest do
         Repo.update!(
           Ecto.Changeset.change(config,
             desired_mode: "active",
-            status: "ready",
+            status: "active",
             sellable_goods: ["IRON_ORE"],
             progress: %{"waypoint" => "X1-UX81-A1"}
           )
@@ -2530,7 +2565,7 @@ defmodule SpaceTraders.FleetTest do
         Repo.update!(
           Ecto.Changeset.change(config,
             desired_mode: "active",
-            status: "ready",
+            status: "active",
             sellable_goods: ["IRON_ORE"],
             progress: %{"waypoint" => "X1-UX81-A1"}
           )
@@ -2631,7 +2666,7 @@ defmodule SpaceTraders.FleetTest do
         Repo.update!(
           Ecto.Changeset.change(config,
             desired_mode: "active",
-            status: "ready",
+            status: "active",
             sellable_goods: ["IRON_ORE"],
             progress: %{"waypoint" => "X1-UX81-A1"},
             contract_deliverables: [
@@ -2811,7 +2846,7 @@ defmodule SpaceTraders.FleetTest do
         Repo.update!(
           Ecto.Changeset.change(config,
             desired_mode: "active",
-            status: "revalidating",
+            status: "active",
             in_flight_action: %{
               "kind" => "deliver",
               "waypoint" => "X1-UX81-A1",
