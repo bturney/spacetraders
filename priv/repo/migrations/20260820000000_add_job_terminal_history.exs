@@ -30,25 +30,16 @@ defmodule SpaceTraders.Repo.Migrations.AddJobTerminalHistory do
       SELECT RAISE(ABORT, 'terminal jobs are immutable');
     END
     """)
-
-    execute("""
-    CREATE TRIGGER jobs_terminal_immutable_delete
-    BEFORE DELETE ON jobs
-    WHEN OLD.status IN #{@terminal_states}
-    BEGIN
-      SELECT RAISE(ABORT, 'terminal jobs are immutable');
-    END
-    """)
   end
 
   def down do
-    execute("DROP TRIGGER jobs_terminal_immutable_delete")
     execute("DROP TRIGGER jobs_terminal_immutable_update")
 
     drop unique_index(:jobs, [:ship_id], name: :jobs_one_unfinished_per_ship_index)
 
     # Terminal rows exist only because of this migration's history feature;
-    # they cannot be represented without the columns it added.
+    # they cannot be represented without the columns it added. The Agent
+    # retirement cascade is the only deletion path for them.
     execute("DELETE FROM jobs WHERE finished_at IS NOT NULL")
 
     create unique_index(:jobs, [:ship_id])

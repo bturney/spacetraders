@@ -123,14 +123,17 @@ defmodule SpaceTraders.Fleet do
   end
 
   defp annotate_jobs({:ok, ships}, agent) do
+    ship_records = Enum.map(ships, &ensure_ship_record(agent, &1))
+    jobs_by_ship = jobs_for_ships(ship_records)
+
     {:ok,
      Enum.map(ships, fn ship ->
-       ensure_ship_record(agent, ship)
-       job = ship_job(agent, ship.symbol)
+       ship_record = Enum.find(ship_records, &(&1.symbol == ship.symbol))
+       {job, history} = job_and_history(Map.get(jobs_by_ship, ship_record.id, []))
 
        ship
        |> Map.put(:job, job)
-       |> Map.put(:job_history, ship_job_history(agent, ship.symbol))
+       |> Map.put(:job_history, history)
        |> Map.put(:destination_history, destination_history(agent, ship.symbol))
      end)}
   end
@@ -207,11 +210,16 @@ defmodule SpaceTraders.Fleet do
   defp action_state(false, reason), do: %{allowed?: false, reason: reason}
 
   defp ensure_ship_record(agent, %{symbol: symbol}) do
-    if is_nil(Repo.get_by(Ship, agent_id: agent.id, symbol: symbol)) do
-      record_ship(agent, symbol, "UNKNOWN")
-    end
+    case Repo.get_by(Ship, agent_id: agent.id, symbol: symbol) do
+      %Ship{} = ship ->
+        ship
 
-    :ok
+      nil ->
+        case record_ship(agent, symbol, "UNKNOWN") do
+          {:ok, ship} -> ship
+          _ -> Repo.get_by!(Ship, agent_id: agent.id, symbol: symbol)
+        end
+    end
   end
 
   @doc "Saves a Miner Job configuration without activating it."
@@ -306,6 +314,26 @@ defmodule SpaceTraders.Fleet do
       _ ->
         []
     end
+  end
+
+  defp jobs_for_ships(ship_records) do
+    ship_ids = Enum.map(ship_records, & &1.id)
+
+    Job
+    |> where([job], job.ship_id in ^ship_ids)
+    |> Repo.all()
+    |> Enum.group_by(& &1.ship_id)
+  end
+
+  defp job_and_history(jobs) do
+    job = Enum.find(jobs, &(&1.status not in @terminal_job_states))
+
+    history =
+      jobs
+      |> Enum.filter(&(&1.status in @terminal_job_states))
+      |> Enum.sort_by(&{&1.finished_at, &1.id}, :desc)
+
+    {job, history}
   end
 
   @doc "Starts a configured Miner Job after authoritative validation."
@@ -507,25 +535,7 @@ defmodule SpaceTraders.Fleet do
       {:ok, ship} ->
         case unfinished_job(ship.id) do
           %Job{} = config ->
-            Repo.update!(
-              Ecto.Changeset.change(config,
-                status: "blocked",
-                blocked_reason: inspect(reason),
-                blocker: job_blocker(reason)
-              )
-            )
-
-            record_activity(
-              agent,
-              ship,
-              "miner_job_blocked",
-              "Miner Job blocked: #{inspect(reason)}",
-              %{
-                "block" => inspect(reason),
-                "recovery" => "resume"
-              }
-            )
-
+            mark_miner_job_blocked(config, reason)
             {:error, {:miner_job_blocked, reason}}
 
           nil ->

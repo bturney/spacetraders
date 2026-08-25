@@ -429,10 +429,6 @@ defmodule SpaceTraders.FleetTest do
         Repo.update!(Ecto.Changeset.change(predecessor, status: "active"))
       end
 
-      assert_raise Exqlite.Error, ~r/terminal jobs are immutable/, fn ->
-        Repo.delete(predecessor)
-      end
-
       refreshed = %Model.Ship{
         symbol: "FLEET-SHIP",
         cooldown: %Model.Cooldown{remaining_seconds: 0}
@@ -471,6 +467,26 @@ defmodule SpaceTraders.FleetTest do
                Fleet.resume_miner_job(agent, "FLEET-SHIP")
 
       assert [%{kind: "stop"} | _] = Fleet.recent_activity(agent)
+    end
+
+    test "terminal history does not block stale Agent retirement" do
+      agent = agent_fixture()
+      ship = ship_fixture(agent, "FLEET-SHIP")
+
+      assert {:ok, %Job{id: job_id}} =
+               Fleet.configure_miner_job(agent, "FLEET-SHIP", %{
+                 extraction_waypoint: "X1-UX81-A2",
+                 market_waypoint: "X1-UX81-A1",
+                 cargo_threshold: 30
+               })
+
+      assert :ok = Fleet.stop_miner_job(agent, "FLEET-SHIP")
+      assert Repo.get!(Job, job_id).status == "stopped"
+
+      assert %{id: id} = Repo.delete!(agent)
+      assert id == agent.id
+      refute Repo.get(Job, job_id)
+      refute Repo.get(Ship, ship.id)
     end
 
     test "manual navigation pauses active Miner Job before dispatch" do
