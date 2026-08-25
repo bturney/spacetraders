@@ -1454,10 +1454,10 @@ defmodule SpaceTraders.FleetTest do
       assert {:error, {:market_fuel_unavailable, "X1-UX81-A1"}} =
                Fleet.advance_miner_job(agent, config, live_ship)
 
-      assert %Job{status: "blocked", blocked_reason: reason} =
+      assert %Job{status: "blocked", blocker: %JobBlocker{reason: reason}} =
                Repo.get!(Job, config.id)
 
-      assert reason =~ "market_fuel_unavailable"
+      assert reason == "market_fuel_unavailable"
     end
 
     test "blocks when configured market refueling remains below return-leg fuel" do

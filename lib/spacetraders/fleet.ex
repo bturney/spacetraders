@@ -1312,7 +1312,6 @@ defmodule SpaceTraders.Fleet do
     Repo.update!(
       Ecto.Changeset.change(config,
         status: "blocked",
-        blocked_reason: inspect(reason),
         blocker: job_blocker(reason)
       )
     )
@@ -2065,9 +2064,6 @@ defmodule SpaceTraders.Fleet do
 
       {_code, reason} when is_struct(reason) ->
         {"game_state", "authoritative_read_succeeds", ["resume"]}
-
-      {_code, reason} when is_tuple(reason) ->
-        {"game_state", "authoritative_state_changed", ["resume"]}
 
       {_code, _reason} ->
         {"game_state", "authoritative_state_changed", ["resume"]}

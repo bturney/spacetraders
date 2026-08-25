@@ -282,19 +282,6 @@ defmodule SpaceTradersWeb.DashboardLive do
   end
 
   @impl true
-  def handle_event("start_miner_job", %{"symbol" => ship_symbol}, socket) do
-    with {:ok, agent} <- agent_for_ship(socket, ship_symbol),
-         {:ok, _job} <- Fleet.start_miner_job(agent, ship_symbol) do
-      {:noreply,
-       put_flash(refresh_agent(socket, agent), :info, "#{ship_symbol} Miner Job started.")}
-    else
-      {:error, reason} ->
-        {:noreply,
-         put_flash(refresh_agent_for_ship(socket, ship_symbol), :error, live_error(reason))}
-    end
-  end
-
-  @impl true
   def handle_event(
         "set_flight_mode",
         %{"symbol" => ship_symbol, "flight_mode" => flight_mode} = params,
