@@ -3097,15 +3097,8 @@ defmodule SpaceTradersWeb.DashboardLive do
     end
   end
 
-  defp job_correction(":invalid_extraction_waypoint"),
-    do: "Choose an asteroid extraction waypoint"
-
-  defp job_correction(":invalid_siphon_waypoint"), do: "Choose a gas giant siphon waypoint"
-  defp job_correction(":siphon_capability_missing"), do: "Use a Ship with a gas siphon"
-  defp job_correction(":invalid_market_waypoint"), do: "Choose a marketplace waypoint"
-  defp job_correction(":cargo_threshold_exceeds_capacity"), do: "Lower the cargo threshold"
-  defp job_correction(":mining_capability_missing"), do: "Use a Ship with a mining laser"
-  defp job_correction(_reason), do: "Check the Job Activity"
+  defp job_correction(":" <> reason), do: job_blocker_correction(reason)
+  defp job_correction(reason), do: job_blocker_correction(reason)
 
   defp job_blocker_correction("invalid_extraction_waypoint"),
     do: "Choose an asteroid extraction waypoint"

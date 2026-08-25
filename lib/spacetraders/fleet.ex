@@ -1312,6 +1312,7 @@ defmodule SpaceTraders.Fleet do
     Repo.update!(
       Ecto.Changeset.change(config,
         status: "blocked",
+        blocked_reason: nil,
         blocker: job_blocker(reason)
       )
     )
