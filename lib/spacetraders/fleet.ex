@@ -245,11 +245,17 @@ defmodule SpaceTraders.Fleet do
   def pause_miner_job(%AgentRecord{} = agent, ship_symbol) do
     with {:ok, ship} <- owned_ship(agent, ship_symbol),
          %Job{} = job <- unfinished_job(ship.id) do
+      in_flight_action =
+        case job.in_flight_action do
+          %{"kind" => "navigate"} = action -> action
+          _ -> nil
+        end
+
       job =
         Repo.update!(
           Ecto.Changeset.change(job,
             status: "paused",
-            in_flight_action: nil,
+            in_flight_action: in_flight_action,
             blocker: nil,
             blocked_reason: "Paused by Operator"
           )
@@ -2053,9 +2059,9 @@ defmodule SpaceTraders.Fleet do
   defp blocker_reason(_reason), do: "miner_job_action_blocked"
 
   defp blocker_resolution(reason) do
-    case blocker_reason(reason) do
-      reason
-      when reason in [
+    case {blocker_reason(reason), reason} do
+      {code, _reason}
+      when code in [
              "invalid_extraction_waypoint",
              "invalid_siphon_waypoint",
              "invalid_market_waypoint",
@@ -2063,20 +2069,26 @@ defmodule SpaceTraders.Fleet do
            ] ->
         {"operator", "configuration_changed", ["replace_job", "resume"]}
 
-      reason when reason in ["siphon_capability_missing", "mining_capability_missing"] ->
+      {code, _reason} when code in ["siphon_capability_missing", "mining_capability_missing"] ->
         {"operator", "ship_capability_changed", ["outfit_ship", "resume"]}
 
-      "agent_token_missing" ->
+      {"agent_token_missing", _reason} ->
         {"operator", "agent_credentials_restored", ["restore_credentials", "resume"]}
 
-      "ambiguous" ->
+      {"ambiguous", _reason} ->
         {"game_state", "authoritative_action_outcome_available", ["inspect_activity", "resume"]}
 
-      "retry_exhausted" ->
+      {"retry_exhausted", _reason} ->
         {"game_state", "authoritative_read_succeeds", ["resume"]}
 
-      _reason ->
-        {"operator", "operator_input_changed", ["review_job", "resume"]}
+      {_code, reason} when is_struct(reason) ->
+        {"game_state", "authoritative_read_succeeds", ["resume"]}
+
+      {_code, reason} when is_tuple(reason) ->
+        {"game_state", "authoritative_state_changed", ["resume"]}
+
+      {_code, _reason} ->
+        {"game_state", "authoritative_state_changed", ["resume"]}
     end
   end
 

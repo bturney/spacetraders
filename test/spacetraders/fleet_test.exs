@@ -384,18 +384,15 @@ defmodule SpaceTraders.FleetTest do
                  "reason" => reason,
                  "evidence" => evidence,
                  "observed_at" => observed_at,
-                 "resolver" => resolver,
-                 "retry_condition" => retry_condition,
-                 "corrective_actions" => corrective_actions
+                 "resolver" => "game_state",
+                 "retry_condition" => "authoritative_read_succeeds",
+                 "corrective_actions" => ["resume"]
                }
              } =
                Fleet.ship_job(agent, "FLEET-SHIP")
 
       assert is_binary(reason)
       assert is_binary(evidence)
-      assert resolver in ["operator", "game_state"]
-      assert is_binary(retry_condition)
-      assert is_list(corrective_actions)
       assert {:ok, %DateTime{}, 0} = DateTime.from_iso8601(observed_at)
     end
 
@@ -430,6 +427,10 @@ defmodule SpaceTraders.FleetTest do
 
       assert_raise Exqlite.Error, ~r/terminal jobs are immutable/, fn ->
         Repo.update!(Ecto.Changeset.change(predecessor, status: "active"))
+      end
+
+      assert_raise Exqlite.Error, ~r/terminal jobs are immutable/, fn ->
+        Repo.delete(predecessor)
       end
 
       refreshed = %Model.Ship{
@@ -495,6 +496,74 @@ defmodule SpaceTraders.FleetTest do
                Fleet.ship_job(agent, "FLEET-SHIP")
 
       assert [%{kind: "manual_override"} | _] = Fleet.recent_activity(agent)
+    end
+
+    test "pausing during an arrival wait preserves the in-flight navigation" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      {:ok, config} =
+        Fleet.configure_miner_job(agent, "FLEET-SHIP", %{
+          extraction_waypoint: "X1-UX81-A2",
+          market_waypoint: "X1-UX81-A1",
+          cargo_threshold: 30
+        })
+
+      in_flight = %{
+        "kind" => "navigate",
+        "waypoint" => "X1-UX81-A2",
+        "expected" => %{"status" => "IN_TRANSIT", "destination" => "X1-UX81-A2"}
+      }
+
+      Repo.update!(Ecto.Changeset.change(config, status: "waiting", in_flight_action: in_flight))
+
+      assert {:ok, %Job{status: "paused", in_flight_action: ^in_flight}} =
+               Fleet.pause_miner_job(agent, "FLEET-SHIP")
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case {conn.request_path, conn.method} do
+          {"/v2/my/contracts", "GET"} ->
+            Req.Test.json(conn, %{"data" => []})
+
+          {"/v2/my/ships/FLEET-SHIP", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" =>
+                ship_body("FLEET-SHIP", %{
+                  "mounts" => [%{"symbol" => "MOUNT_MINING_LASER_I"}],
+                  "nav" =>
+                    nav_body("IN_TRANSIT", arrival: future_iso(), destination: "X1-UX81-A2")
+                })
+            })
+
+          {"/v2/systems/X1-UX81/waypoints/X1-UX81-A2", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => %{"symbol" => "X1-UX81-A2", "type" => "ASTEROID_FIELD", "traits" => []}
+            })
+
+          {"/v2/systems/X1-UX81/waypoints/X1-UX81-A1", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => %{
+                "symbol" => "X1-UX81-A1",
+                "type" => "ORBITAL_STATION",
+                "traits" => [%{"symbol" => "MARKETPLACE"}]
+              }
+            })
+
+          {"/v2/systems/X1-UX81/waypoints/X1-UX81-A1/market", "GET"} ->
+            Req.Test.json(conn, %{"data" => %{"symbol" => "X1-UX81-A1", "tradeGoods" => []}})
+
+          {path, _method} ->
+            flunk("unexpected request #{path}")
+        end
+      end)
+
+      assert {:ok, %Job{status: "waiting", in_flight_action: ^in_flight}} =
+               Fleet.resume_miner_job(agent, "FLEET-SHIP")
+
+      assert [%Event{event_type: "arrival", payload: %{"job_id" => job_id}}] =
+               Timeline.pending_events(:ship, "FLEET-SHIP")
+
+      assert job_id == config.id
     end
 
     test "persists a loop without starting it" do
