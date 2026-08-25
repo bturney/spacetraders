@@ -3013,6 +3013,9 @@ defmodule SpaceTradersWeb.DashboardLive do
   defp job_next_transition(%{status: "active", in_flight_action: %{"kind" => kind}}, _ship),
     do: "Continue #{job_action_label(kind)} recovery"
 
+  defp job_next_transition(%{status: "blocked", blocker: %JobBlocker{reason: reason}}, _ship),
+    do: "#{job_blocker_correction(reason)}, then Resume"
+
   defp job_next_transition(%{status: "blocked", blocked_reason: reason}, _ship),
     do: "#{job_correction(reason)}, then Resume"
 
@@ -3103,6 +3106,19 @@ defmodule SpaceTradersWeb.DashboardLive do
   defp job_correction(":cargo_threshold_exceeds_capacity"), do: "Lower the cargo threshold"
   defp job_correction(":mining_capability_missing"), do: "Use a Ship with a mining laser"
   defp job_correction(_reason), do: "Check the Job Activity"
+
+  defp job_blocker_correction("invalid_extraction_waypoint"),
+    do: "Choose an asteroid extraction waypoint"
+
+  defp job_blocker_correction("invalid_siphon_waypoint"), do: "Choose a gas giant siphon waypoint"
+  defp job_blocker_correction("siphon_capability_missing"), do: "Use a Ship with a gas siphon"
+  defp job_blocker_correction("invalid_market_waypoint"), do: "Choose a marketplace waypoint"
+
+  defp job_blocker_correction("cargo_threshold_exceeds_capacity"),
+    do: "Lower the cargo threshold"
+
+  defp job_blocker_correction("mining_capability_missing"), do: "Use a Ship with a mining laser"
+  defp job_blocker_correction(_reason), do: "Check the Job Activity"
 
   defp job_action_label("navigate"), do: "navigation"
   defp job_action_label("extract"), do: "extraction"

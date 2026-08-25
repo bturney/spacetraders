@@ -10,6 +10,7 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
   alias SpaceTraders.Fleet.ShipServer
   alias SpaceTraders.Fleet.ShipDestination
   alias SpaceTraders.Fleet.Job
+  alias SpaceTraders.Fleet.JobBlocker
   alias SpaceTraders.Fleet.Activity
   alias SpaceTraders.Repo
 
@@ -1311,6 +1312,46 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       assert has_element?(lv, "[data-ship-card=\"ORBITALIST-1\"]", "Blocked")
       assert has_element?(lv, "[data-ship-card=\"ORBITALIST-2\"]", "IN_TRANSIT")
       assert html =~ "ambiguous outcome"
+    end
+
+    test "a blocked Job with a structured blocker shows its correction, not Assign", %{
+      conn: conn,
+      operator: operator
+    } do
+      agent = agent_fixture(operator)
+
+      ship =
+        Repo.insert!(%Ship{
+          agent_id: agent.id,
+          symbol: "ORBITALIST-1",
+          ship_type: "SHIP_COMMAND_FRIGATE"
+        })
+
+      Repo.insert!(%Job{
+        ship_id: ship.id,
+        extraction_waypoint: "X1-UX81-A2",
+        market_waypoint: "X1-UX81-A1",
+        cargo_threshold: 30,
+        status: "blocked",
+        blocker: %JobBlocker{
+          reason: "invalid_extraction_waypoint",
+          resolver: "operator",
+          retry_condition: "configuration_changed",
+          corrective_actions: ["replace_job", "resume"]
+        }
+      })
+
+      stub_live_game(agent_overview_body(agent.symbol), [ship_body("ORBITALIST-1")])
+
+      {:ok, lv, _html} = live(conn, ~p"/")
+
+      assert has_element?(
+               lv,
+               "[data-ship-card=\"ORBITALIST-1\"] [data-job-next-transition]",
+               "Choose an asteroid extraction waypoint, then Resume"
+             )
+
+      refute has_element?(lv, "[data-job-next-transition]", "Assign Miner Job")
     end
 
     test "keeps Miner Job mode, action, and recovery aligned", %{

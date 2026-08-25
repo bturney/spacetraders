@@ -1997,7 +1997,6 @@ defmodule SpaceTraders.Fleet do
     Repo.update!(
       Ecto.Changeset.change(config,
         status: "blocked",
-        blocked_reason: "Miner Job recovery #{outcome}; no game action was replayed",
         blocker: job_blocker(outcome),
         last_action_result: %{"kind" => "recovery", "outcome" => outcome}
       )
