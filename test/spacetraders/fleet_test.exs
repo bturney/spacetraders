@@ -1904,6 +1904,15 @@ defmodule SpaceTraders.FleetTest do
       assert recovered.status == "blocked"
       assert recovered.last_action_result["outcome"] == "ambiguous"
 
+      assert recovered.blocker == %{
+               "reason" => "ambiguous",
+               "evidence" => "\"ambiguous\"",
+               "observed_at" => recovered.blocker["observed_at"],
+               "resolver" => "game_state",
+               "retry_condition" => "authoritative_action_outcome_available",
+               "corrective_actions" => ["inspect_activity", "resume"]
+             }
+
       assert [%{kind: "miner_job_recovery", metadata: %{"outcome" => "ambiguous"}} | _] =
                Fleet.recent_activity(agent)
     end

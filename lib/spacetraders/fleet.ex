@@ -2047,6 +2047,9 @@ defmodule SpaceTraders.Fleet do
   defp blocker_reason(reason) when is_atom(reason), do: Atom.to_string(reason)
   defp blocker_reason(reason) when is_tuple(reason), do: reason |> elem(0) |> blocker_reason()
   defp blocker_reason(%{__struct__: module}), do: module |> Module.split() |> List.last()
+
+  defp blocker_reason("retry_exhausted:" <> _evidence), do: "retry_exhausted"
+  defp blocker_reason(reason) when is_binary(reason), do: reason
   defp blocker_reason(_reason), do: "miner_job_action_blocked"
 
   defp blocker_resolution(reason) do
@@ -2066,8 +2069,14 @@ defmodule SpaceTraders.Fleet do
       "agent_token_missing" ->
         {"operator", "agent_credentials_restored", ["restore_credentials", "resume"]}
 
+      "ambiguous" ->
+        {"game_state", "authoritative_action_outcome_available", ["inspect_activity", "resume"]}
+
+      "retry_exhausted" ->
+        {"game_state", "authoritative_read_succeeds", ["resume"]}
+
       _reason ->
-        {"game_state", "authoritative_state_changed", ["resume"]}
+        {"operator", "operator_input_changed", ["review_job", "resume"]}
     end
   end
 
