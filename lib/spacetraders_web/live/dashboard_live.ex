@@ -30,6 +30,8 @@ defmodule SpaceTradersWeb.DashboardLive do
   alias SpaceTraders.Agent
   alias SpaceTraders.Contracts
   alias SpaceTraders.Fleet
+  alias SpaceTraders.Fleet.Job
+  alias SpaceTraders.Fleet.JobBlocker
   alias SpaceTraders.SystemWaypointProjection
   alias SpaceTradersWeb.DashboardPrototype
 
@@ -271,42 +273,12 @@ defmodule SpaceTradersWeb.DashboardLive do
 
   @impl true
   def handle_event("configure_miner_job", params, socket) do
-    with {:ok, agent} <- agent_for_ship(socket, params["ship_symbol"]),
-         {:ok, threshold} <- parse_units(params["cargo_threshold"]),
-         {:ok, _config} <-
-           Fleet.configure_miner_job(agent, params["ship_symbol"], %{
-             extraction_waypoint: String.trim(params["extraction_waypoint"] || ""),
-             market_waypoint: String.trim(params["market_waypoint"] || ""),
-             cargo_threshold: threshold,
-             gather_mode: params["gather_mode"] || "extract"
-           }) do
-      socket =
-        socket
-        |> refresh_agent(agent)
-        |> clear_draft(draft_key("miner_job", [params["ship_symbol"]]))
-
-      {:noreply,
-       put_flash(
-         socket,
-         :info,
-         "Miner Job configuration saved. Start remains manual."
-       )}
-    else
-      {:error, reason} -> {:noreply, put_flash(socket, :error, live_error(reason))}
-    end
+    save_miner_job(socket, params, :configure)
   end
 
   @impl true
-  def handle_event("start_miner_job", %{"symbol" => ship_symbol}, socket) do
-    with {:ok, agent} <- agent_for_ship(socket, ship_symbol),
-         {:ok, _job} <- Fleet.start_miner_job(agent, ship_symbol) do
-      {:noreply,
-       put_flash(refresh_agent(socket, agent), :info, "#{ship_symbol} Miner Job started.")}
-    else
-      {:error, reason} ->
-        {:noreply,
-         put_flash(refresh_agent_for_ship(socket, ship_symbol), :error, live_error(reason))}
-    end
+  def handle_event("replace_miner_job", params, socket) do
+    save_miner_job(socket, params, :replace)
   end
 
   @impl true
@@ -652,6 +624,38 @@ defmodule SpaceTradersWeb.DashboardLive do
   defp miner_job_action("stop_miner_job", agent, ship), do: Fleet.stop_miner_job(agent, ship)
   defp unwrap_config({:ok, _config}), do: :ok
   defp unwrap_config(error), do: error
+
+  defp save_miner_job(socket, params, mode) do
+    with {:ok, agent} <- agent_for_ship(socket, params["ship_symbol"]),
+         {:ok, threshold} <- parse_units(params["cargo_threshold"]),
+         {:ok, _config} <-
+           save_miner_job(mode, agent, params["ship_symbol"], %{
+             extraction_waypoint: String.trim(params["extraction_waypoint"] || ""),
+             market_waypoint: String.trim(params["market_waypoint"] || ""),
+             cargo_threshold: threshold,
+             gather_mode: params["gather_mode"] || "extract"
+           }) do
+      socket =
+        socket
+        |> refresh_agent(agent)
+        |> clear_draft(draft_key("miner_job", [params["ship_symbol"]]))
+
+      message =
+        if mode == :replace,
+          do: "Miner Job replaced.",
+          else: "Miner Job assigned and paused."
+
+      {:noreply, put_flash(socket, :info, message)}
+    else
+      {:error, reason} -> {:noreply, put_flash(socket, :error, live_error(reason))}
+    end
+  end
+
+  defp save_miner_job(:configure, agent, ship_symbol, attrs),
+    do: Fleet.configure_miner_job(agent, ship_symbol, attrs)
+
+  defp save_miner_job(:replace, agent, ship_symbol, attrs),
+    do: Fleet.replace_miner_job(agent, ship_symbol, attrs)
 
   @impl true
   def handle_info({:ship_updated, agent_id, _ship_symbol}, socket) do
@@ -2667,7 +2671,8 @@ defmodule SpaceTradersWeb.DashboardLive do
 
   defp miner_job_panel(assigns) do
     job = Map.get(assigns.ship, :job)
-    assigns = assign(assigns, :job, job)
+    history = Map.get(assigns.ship, :job_history, [])
+    assigns = assign(assigns, job: job, job_history: history)
 
     ~H"""
     <div class="mt-4 rounded border border-primary/20 p-3" data-job-panel="miner">
@@ -2719,7 +2724,7 @@ defmodule SpaceTradersWeb.DashboardLive do
       <form
         id={"miner-job-form-#{@ship.symbol}"}
         phx-change="track_draft"
-        phx-submit="configure_miner_job"
+        phx-submit={if(@job, do: "replace_miner_job", else: "configure_miner_job")}
         class="mt-3 grid gap-2 sm:grid-cols-3"
       >
         <input type="hidden" name="draft_key" value={draft_key("miner_job", [@ship.symbol])} />
@@ -2789,24 +2794,13 @@ defmodule SpaceTradersWeb.DashboardLive do
           class="input input-bordered input-sm"
           required
         />
-        <button type="submit" class="btn btn-ghost btn-sm sm:col-span-3">Save Miner Job configuration</button>
+        <button type="submit" class="btn btn-ghost btn-sm sm:col-span-3">
+          {if(@job, do: "Replace Miner Job", else: "Assign Miner Job")}
+        </button>
       </form>
       <div class="mt-2 flex flex-wrap gap-2">
         <button
-          :if={
-            is_nil(@job) or
-              (@job.desired_mode == "manual" and @job.status not in ["paused", "blocked"])
-          }
-          type="button"
-          phx-click="start_miner_job"
-          phx-value-symbol={@ship.symbol}
-          data-confirm="Start Miner Job for this Ship?"
-          class="btn btn-primary btn-sm"
-        >
-          Start Miner Job
-        </button>
-        <button
-          :if={@job && @job.desired_mode == "active" && @job.status != "blocked"}
+          :if={Job.running?(@job)}
           type="button"
           phx-click="pause_miner_job"
           phx-value-symbol={@ship.symbol}
@@ -2828,11 +2822,46 @@ defmodule SpaceTradersWeb.DashboardLive do
           type="button"
           phx-click="stop_miner_job"
           phx-value-symbol={@ship.symbol}
-          data-confirm="Stop Miner Job and clear this configuration?"
+          data-confirm="Stop Miner Job? Terminal history remains available."
           class="btn btn-ghost btn-sm"
         >
-          Stop to Manual
+          Stop
         </button>
+      </div>
+      <div :if={@job_history != []} class="mt-3 border-t border-base-300/60 pt-3" data-job-history>
+        <p class="text-xs font-semibold uppercase tracking-wider opacity-60">Terminal history</p>
+        <ol class="mt-2 space-y-2 text-xs">
+          <li :for={historical_job <- @job_history}>
+            <details data-job-history-entry={historical_job.id}>
+              <summary class="cursor-pointer">
+                <span class="font-semibold">{terminal_job_state(historical_job.status)}</span>
+                <time class="ml-2 opacity-60">{format_job_finished_at(historical_job.finished_at)}</time>
+              </summary>
+              <dl class="mt-2 grid gap-1 pl-3 sm:grid-cols-2">
+                <div>
+                  <dt class="opacity-60">Job</dt><dd>Miner #{historical_job.id}</dd>
+                </div>
+                <div>
+                  <dt class="opacity-60">Gather mode</dt><dd>{gather_mode_label(historical_job)}</dd>
+                </div>
+                <div class="sm:col-span-2">
+                  <dt class="opacity-60">Configured loop</dt>
+                  <dd class="font-mono">
+                    {historical_job.extraction_waypoint} → {historical_job.market_waypoint}
+                  </dd>
+                </div>
+                <div>
+                  <dt class="opacity-60">Cargo threshold</dt><dd>{historical_job.cargo_threshold}</dd>
+                </div>
+                <div>
+                  <dt class="opacity-60">Last result</dt><dd>
+                    {terminal_job_result(historical_job)}
+                  </dd>
+                </div>
+              </dl>
+            </details>
+          </li>
+        </ol>
       </div>
     </div>
     """
@@ -2892,15 +2921,36 @@ defmodule SpaceTradersWeb.DashboardLive do
 
   defp job_status(%{status: "blocked"}), do: "Blocked"
 
-  defp job_status(%{status: "paused", blocked_reason: reason}),
-    do: paused_status(reason)
-
-  defp job_status(%{status: "paused"}), do: "Paused by manual action"
+  defp job_status(%{status: "paused"}), do: "Paused"
   defp job_status(nil), do: "Manual"
-  defp job_status(%{status: "revalidating"}), do: "Revalidating"
-  defp job_status(%{desired_mode: "active", status: "waiting"}), do: "Waiting"
-  defp job_status(%{desired_mode: "active"}), do: "Active Miner Job"
+  defp job_status(%{status: "waiting"}), do: "Waiting"
+  defp job_status(%{status: "active"}), do: "Active Miner Job"
   defp job_status(_), do: "Manual"
+
+  defp terminal_job_state("completed"), do: "Completed"
+  defp terminal_job_state("failed"), do: "Failed"
+  defp terminal_job_state("stopped"), do: "Stopped"
+  defp terminal_job_state("replaced"), do: "Replaced"
+
+  defp format_job_finished_at(%DateTime{} = finished_at),
+    do: Calendar.strftime(finished_at, "%Y-%m-%d %H:%M UTC")
+
+  defp format_job_finished_at(_), do: ""
+
+  defp terminal_job_result(%{last_action_result: %{"kind" => kind}}), do: job_action_label(kind)
+  defp terminal_job_result(_), do: "No completed action recorded"
+
+  defp job_reason(%{
+         status: "blocked",
+         blocker: %JobBlocker{
+           reason: reason,
+           resolver: resolver,
+           retry_condition: retry_condition,
+           corrective_actions: actions
+         }
+       }) do
+    "Blocked: #{reason}. Resolver: #{resolver}; retry: #{retry_condition}; actions: #{Enum.join(actions, ", ")}"
+  end
 
   defp job_reason(%{status: "blocked", blocked_reason: reason}) when is_binary(reason),
     do: "Blocked: #{job_blocked_reason(reason)}"
@@ -2930,12 +2980,12 @@ defmodule SpaceTradersWeb.DashboardLive do
        do: "Waiting for cooldown"
 
   defp job_active_work(
-         %{status: "revalidating", in_flight_action: %{"kind" => "deliver"}},
+         %{status: "active", in_flight_action: %{"kind" => "deliver"}},
          _ship
        ),
        do: "Delivering contract cargo"
 
-  defp job_active_work(%{status: "revalidating", in_flight_action: %{"kind" => kind}}, _ship),
+  defp job_active_work(%{status: "active", in_flight_action: %{"kind" => kind}}, _ship),
     do: "Revalidating #{job_action_label(kind)}"
 
   defp job_active_work(%{status: "blocked"}, _ship), do: "Blocked"
@@ -2944,7 +2994,7 @@ defmodule SpaceTradersWeb.DashboardLive do
     do: paused_status(reason)
 
   defp job_active_work(%{status: "paused"}, _ship), do: "Paused by manual action"
-  defp job_active_work(%{desired_mode: "active"}, _ship), do: "Evaluating cargo"
+  defp job_active_work(%{status: "active"}, _ship), do: "Evaluating cargo"
   defp job_active_work(_, _ship), do: "Manual"
 
   defp job_next_transition(
@@ -2960,21 +3010,24 @@ defmodule SpaceTradersWeb.DashboardLive do
     end
   end
 
-  defp job_next_transition(%{status: "revalidating", in_flight_action: %{"kind" => kind}}, _ship),
+  defp job_next_transition(%{status: "active", in_flight_action: %{"kind" => kind}}, _ship),
     do: "Continue #{job_action_label(kind)} recovery"
+
+  defp job_next_transition(%{status: "blocked", blocker: %JobBlocker{reason: reason}}, _ship),
+    do: "#{job_blocker_correction(reason)}, then Resume"
 
   defp job_next_transition(%{status: "blocked", blocked_reason: reason}, _ship),
     do: "#{job_correction(reason)}, then Resume"
 
   defp job_next_transition(%{status: "paused"}, _ship), do: "Resume after revalidation"
 
-  defp job_next_transition(%{desired_mode: "active", extraction_waypoint: waypoint}, ship) do
+  defp job_next_transition(%{status: "active", extraction_waypoint: waypoint}, ship) do
     if cooldown_display_active?(ship),
       do: "Wait through #{cooldown_label(ship, 0)}",
       else: "Evaluate at #{waypoint}"
   end
 
-  defp job_next_transition(_, _ship), do: "Start Miner Job"
+  defp job_next_transition(_, _ship), do: "Assign Miner Job"
 
   defp job_sellable_payload(nil, ship), do: "#{cargo_units(ship.cargo)} total units"
 
@@ -3044,15 +3097,21 @@ defmodule SpaceTradersWeb.DashboardLive do
     end
   end
 
-  defp job_correction(":invalid_extraction_waypoint"),
+  defp job_correction(":" <> reason), do: job_blocker_correction(reason)
+  defp job_correction(reason), do: job_blocker_correction(reason)
+
+  defp job_blocker_correction("invalid_extraction_waypoint"),
     do: "Choose an asteroid extraction waypoint"
 
-  defp job_correction(":invalid_siphon_waypoint"), do: "Choose a gas giant siphon waypoint"
-  defp job_correction(":siphon_capability_missing"), do: "Use a Ship with a gas siphon"
-  defp job_correction(":invalid_market_waypoint"), do: "Choose a marketplace waypoint"
-  defp job_correction(":cargo_threshold_exceeds_capacity"), do: "Lower the cargo threshold"
-  defp job_correction(":mining_capability_missing"), do: "Use a Ship with a mining laser"
-  defp job_correction(_reason), do: "Check the Job Activity"
+  defp job_blocker_correction("invalid_siphon_waypoint"), do: "Choose a gas giant siphon waypoint"
+  defp job_blocker_correction("siphon_capability_missing"), do: "Use a Ship with a gas siphon"
+  defp job_blocker_correction("invalid_market_waypoint"), do: "Choose a marketplace waypoint"
+
+  defp job_blocker_correction("cargo_threshold_exceeds_capacity"),
+    do: "Lower the cargo threshold"
+
+  defp job_blocker_correction("mining_capability_missing"), do: "Use a Ship with a mining laser"
+  defp job_blocker_correction(_reason), do: "Check the Job Activity"
 
   defp job_action_label("navigate"), do: "navigation"
   defp job_action_label("extract"), do: "extraction"

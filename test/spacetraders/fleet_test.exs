@@ -8,6 +8,7 @@ defmodule SpaceTraders.FleetTest do
   alias SpaceTraders.Fleet
   alias SpaceTraders.Fleet.Ship
   alias SpaceTraders.Fleet.Job
+  alias SpaceTraders.Fleet.JobBlocker
   alias SpaceTraders.Fleet.ShipServer
   alias SpaceTraders.Fleet.Activity
   alias SpaceTraders.Timeline
@@ -120,7 +121,7 @@ defmodule SpaceTraders.FleetTest do
     Repo.update!(
       Ecto.Changeset.change(config,
         desired_mode: "active",
-        status: "revalidating",
+        status: "active",
         in_flight_action: action
       )
     )
@@ -336,7 +337,7 @@ defmodule SpaceTraders.FleetTest do
 
       assert Fleet.ship_job(agent, "FLEET-SHIP").id == persisted.id
 
-      assert {:ok, %Job{status: "paused", desired_mode: "manual"}} =
+      assert {:ok, %Job{status: "paused"}} =
                Fleet.pause_miner_job(agent, "FLEET-SHIP")
     end
 
@@ -377,15 +378,79 @@ defmodule SpaceTraders.FleetTest do
 
       assert {:error, {:miner_job_blocked, _reason}} = Fleet.resume_miner_job(agent, "FLEET-SHIP")
 
-      assert %Job{extraction_waypoint: "X1-UX81-A2", status: "blocked"} =
+      assert %Job{
+               extraction_waypoint: "X1-UX81-A2",
+               status: "blocked",
+               blocker: %JobBlocker{
+                 reason: reason,
+                 evidence: evidence,
+                 observed_at: %DateTime{},
+                 resolver: "game_state",
+                 retry_condition: "authoritative_read_succeeds",
+                 corrective_actions: ["resume"]
+               }
+             } =
                Fleet.ship_job(agent, "FLEET-SHIP")
+
+      assert is_binary(reason)
+      assert is_binary(evidence)
     end
 
-    test "stops the Miner Job, clears its durable record, and returns the Ship to Manual Mode" do
+    test "replaces the assigned Miner Job and preserves the predecessor as terminal history" do
       agent = agent_fixture()
       ship_fixture(agent, "FLEET-SHIP")
 
-      assert {:ok, %Job{}} =
+      assert {:ok, %Job{id: predecessor_id}} =
+               Fleet.configure_miner_job(agent, "FLEET-SHIP", %{
+                 extraction_waypoint: "X1-UX81-A2",
+                 market_waypoint: "X1-UX81-A1",
+                 cargo_threshold: 30
+               })
+
+      assert {:ok, %Job{id: successor_id, status: "paused"}} =
+               Fleet.replace_miner_job(agent, "FLEET-SHIP", %{
+                 extraction_waypoint: "X1-UX81-A3",
+                 market_waypoint: "X1-UX81-A1",
+                 cargo_threshold: 20,
+                 gather_mode: "siphon"
+               })
+
+      refute predecessor_id == successor_id
+
+      assert %Job{id: ^successor_id, extraction_waypoint: "X1-UX81-A3"} =
+               Fleet.ship_job(agent, "FLEET-SHIP")
+
+      assert [%Job{id: ^predecessor_id, status: "replaced", finished_at: %DateTime{}}] =
+               Fleet.ship_job_history(agent, "FLEET-SHIP")
+
+      predecessor = Repo.get!(Job, predecessor_id)
+
+      assert_raise Exqlite.Error, ~r/terminal jobs are immutable/, fn ->
+        Repo.update!(Ecto.Changeset.change(predecessor, status: "active"))
+      end
+
+      refreshed = %Model.Ship{
+        symbol: "FLEET-SHIP",
+        cooldown: %Model.Cooldown{remaining_seconds: 0}
+      }
+
+      assert :ok =
+               Fleet.revalidate_miner_job_cooldown(
+                 agent.id,
+                 "FLEET-SHIP",
+                 refreshed,
+                 predecessor_id
+               )
+
+      assert %Job{id: ^successor_id, status: "paused"} =
+               Fleet.ship_job(agent, "FLEET-SHIP")
+    end
+
+    test "stops the Miner Job and preserves it as immutable terminal history" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      assert {:ok, %Job{id: job_id}} =
                Fleet.configure_miner_job(agent, "FLEET-SHIP", %{
                  extraction_waypoint: "X1-UX81-A2",
                  market_waypoint: "X1-UX81-A1",
@@ -394,7 +459,34 @@ defmodule SpaceTraders.FleetTest do
 
       assert :ok = Fleet.stop_miner_job(agent, "FLEET-SHIP")
       assert Fleet.ship_job(agent, "FLEET-SHIP") == nil
+
+      assert [%Job{id: ^job_id, status: "stopped", finished_at: %DateTime{}}] =
+               Fleet.ship_job_history(agent, "FLEET-SHIP")
+
+      assert {:error, :miner_job_not_configured} =
+               Fleet.resume_miner_job(agent, "FLEET-SHIP")
+
       assert [%{kind: "stop"} | _] = Fleet.recent_activity(agent)
+    end
+
+    test "terminal history does not block stale Agent retirement" do
+      agent = agent_fixture()
+      ship = ship_fixture(agent, "FLEET-SHIP")
+
+      assert {:ok, %Job{id: job_id}} =
+               Fleet.configure_miner_job(agent, "FLEET-SHIP", %{
+                 extraction_waypoint: "X1-UX81-A2",
+                 market_waypoint: "X1-UX81-A1",
+                 cargo_threshold: 30
+               })
+
+      assert :ok = Fleet.stop_miner_job(agent, "FLEET-SHIP")
+      assert Repo.get!(Job, job_id).status == "stopped"
+
+      assert %{id: id} = Repo.delete!(agent)
+      assert id == agent.id
+      refute Repo.get(Job, job_id)
+      refute Repo.get(Ship, ship.id)
     end
 
     test "manual navigation pauses active Miner Job before dispatch" do
@@ -416,14 +508,78 @@ defmodule SpaceTraders.FleetTest do
 
       assert {:ok, _} = Fleet.navigate_ship(agent, "FLEET-SHIP", "X1-UX81-A1")
 
-      assert %{
-               desired_mode: "manual",
-               status: "paused",
-               blocked_reason: "Paused by direct navigation"
-             } =
+      assert %{status: "paused", blocked_reason: "Paused by direct navigation"} =
                Fleet.ship_job(agent, "FLEET-SHIP")
 
       assert [%{kind: "manual_override"} | _] = Fleet.recent_activity(agent)
+    end
+
+    test "pausing during an arrival wait preserves the in-flight navigation" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      {:ok, config} =
+        Fleet.configure_miner_job(agent, "FLEET-SHIP", %{
+          extraction_waypoint: "X1-UX81-A2",
+          market_waypoint: "X1-UX81-A1",
+          cargo_threshold: 30
+        })
+
+      in_flight = %{
+        "kind" => "navigate",
+        "waypoint" => "X1-UX81-A2",
+        "expected" => %{"status" => "IN_TRANSIT", "destination" => "X1-UX81-A2"}
+      }
+
+      Repo.update!(Ecto.Changeset.change(config, status: "waiting", in_flight_action: in_flight))
+
+      assert {:ok, %Job{status: "paused", in_flight_action: ^in_flight}} =
+               Fleet.pause_miner_job(agent, "FLEET-SHIP")
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case {conn.request_path, conn.method} do
+          {"/v2/my/contracts", "GET"} ->
+            Req.Test.json(conn, %{"data" => []})
+
+          {"/v2/my/ships/FLEET-SHIP", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" =>
+                ship_body("FLEET-SHIP", %{
+                  "mounts" => [%{"symbol" => "MOUNT_MINING_LASER_I"}],
+                  "nav" =>
+                    nav_body("IN_TRANSIT", arrival: future_iso(), destination: "X1-UX81-A2")
+                })
+            })
+
+          {"/v2/systems/X1-UX81/waypoints/X1-UX81-A2", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => %{"symbol" => "X1-UX81-A2", "type" => "ASTEROID_FIELD", "traits" => []}
+            })
+
+          {"/v2/systems/X1-UX81/waypoints/X1-UX81-A1", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => %{
+                "symbol" => "X1-UX81-A1",
+                "type" => "ORBITAL_STATION",
+                "traits" => [%{"symbol" => "MARKETPLACE"}]
+              }
+            })
+
+          {"/v2/systems/X1-UX81/waypoints/X1-UX81-A1/market", "GET"} ->
+            Req.Test.json(conn, %{"data" => %{"symbol" => "X1-UX81-A1", "tradeGoods" => []}})
+
+          {path, _method} ->
+            flunk("unexpected request #{path}")
+        end
+      end)
+
+      assert {:ok, %Job{status: "waiting", in_flight_action: ^in_flight}} =
+               Fleet.resume_miner_job(agent, "FLEET-SHIP")
+
+      assert [%Event{event_type: "arrival", payload: %{"job_id" => job_id}}] =
+               Timeline.pending_events(:ship, "FLEET-SHIP")
+
+      assert job_id == config.id
     end
 
     test "persists a loop without starting it" do
@@ -438,7 +594,7 @@ defmodule SpaceTraders.FleetTest do
                })
 
       assert config.desired_mode == "manual"
-      assert config.status == "ready"
+      assert config.status == "paused"
       assert Fleet.ship_job(agent, "FLEET-SHIP").cargo_threshold == 30
     end
 
@@ -494,7 +650,6 @@ defmodule SpaceTraders.FleetTest do
 
       assert {:ok,
               %Job{
-                desired_mode: "active",
                 status: "waiting",
                 in_flight_action: %{"kind" => "navigate", "waypoint" => "X1-UX81-A2"},
                 last_action_result: %{"status" => "IN_TRANSIT"},
@@ -653,7 +808,10 @@ defmodule SpaceTraders.FleetTest do
                 }
               }} = Fleet.start_miner_job(agent, "FLEET-SHIP")
 
-      assert [%Event{event_type: "cooldown"}] = Timeline.pending_events(:ship, "FLEET-SHIP")
+      assert [%Event{event_type: "cooldown", payload: %{"job_id" => job_id}}] =
+               Timeline.pending_events(:ship, "FLEET-SHIP")
+
+      assert job_id == Fleet.ship_job(agent, "FLEET-SHIP").id
     end
 
     test "the own extraction does not preempt the started job and the loop continues" do
@@ -734,7 +892,6 @@ defmodule SpaceTraders.FleetTest do
 
       stored = Repo.get!(Job, config.id)
 
-      assert stored.desired_mode == "active"
       assert stored.status == "waiting"
       assert stored.blocked_reason == nil
       assert %{"kind" => "extract"} = stored.in_flight_action
@@ -758,10 +915,10 @@ defmodule SpaceTraders.FleetTest do
         }
       }
 
-      assert {:ok, %Job{desired_mode: "active"}} =
+      assert {:ok, %Job{status: "waiting"}} =
                Fleet.revalidate_miner_job_cooldown(agent.id, "FLEET-SHIP", refreshed)
 
-      assert %Job{desired_mode: "active", status: "waiting", blocked_reason: nil} =
+      assert %Job{status: "waiting", blocked_reason: nil} =
                Repo.get!(Job, config.id)
     end
 
@@ -932,7 +1089,7 @@ defmodule SpaceTraders.FleetTest do
       Repo.update!(
         Ecto.Changeset.change(config,
           desired_mode: "active",
-          status: "revalidating",
+          status: "active",
           in_flight_action: %{
             "kind" => "siphon",
             "waypoint" => "X1-UX81-A3",
@@ -1297,10 +1454,10 @@ defmodule SpaceTraders.FleetTest do
       assert {:error, {:market_fuel_unavailable, "X1-UX81-A1"}} =
                Fleet.advance_miner_job(agent, config, live_ship)
 
-      assert %Job{status: "blocked", blocked_reason: reason} =
+      assert %Job{status: "blocked", blocker: %JobBlocker{reason: reason}} =
                Repo.get!(Job, config.id)
 
-      assert reason =~ "market_fuel_unavailable"
+      assert reason == "market_fuel_unavailable"
     end
 
     test "blocks when configured market refueling remains below return-leg fuel" do
@@ -1815,7 +1972,7 @@ defmodule SpaceTraders.FleetTest do
       Repo.update!(
         Ecto.Changeset.change(config,
           desired_mode: "active",
-          status: "revalidating",
+          status: "active",
           in_flight_action: %{"kind" => "unknown_action"}
         )
       )
@@ -1831,6 +1988,15 @@ defmodule SpaceTraders.FleetTest do
       recovered = Fleet.ship_job(agent, "FLEET-SHIP")
       assert recovered.status == "blocked"
       assert recovered.last_action_result["outcome"] == "ambiguous"
+
+      assert recovered.blocker == %JobBlocker{
+               reason: "ambiguous",
+               evidence: "\"ambiguous\"",
+               observed_at: recovered.blocker.observed_at,
+               resolver: "game_state",
+               retry_condition: "authoritative_action_outcome_available",
+               corrective_actions: ["inspect_activity", "resume"]
+             }
 
       assert [%{kind: "miner_job_recovery", metadata: %{"outcome" => "ambiguous"}} | _] =
                Fleet.recent_activity(agent)
@@ -1870,7 +2036,7 @@ defmodule SpaceTraders.FleetTest do
       Repo.update!(
         Ecto.Changeset.change(config,
           desired_mode: "active",
-          status: "ready",
+          status: "active",
           sellable_goods: sellable_goods,
           progress: %{"waypoint" => "X1-UX81-A2"}
         )
@@ -2289,7 +2455,7 @@ defmodule SpaceTraders.FleetTest do
         Repo.update!(
           Ecto.Changeset.change(config,
             desired_mode: "active",
-            status: "ready",
+            status: "active",
             sellable_goods: ["IRON_ORE"],
             progress: %{"waypoint" => "X1-UX81-A1"}
           )
@@ -2367,7 +2533,7 @@ defmodule SpaceTraders.FleetTest do
         Repo.update!(
           Ecto.Changeset.change(config,
             desired_mode: "active",
-            status: "ready",
+            status: "active",
             sellable_goods: ["IRON_ORE"],
             progress: %{"waypoint" => "X1-UX81-A1"}
           )
@@ -2444,7 +2610,7 @@ defmodule SpaceTraders.FleetTest do
         Repo.update!(
           Ecto.Changeset.change(config,
             desired_mode: "active",
-            status: "ready",
+            status: "active",
             sellable_goods: ["IRON_ORE"],
             progress: %{"waypoint" => "X1-UX81-A1"}
           )
@@ -2530,7 +2696,7 @@ defmodule SpaceTraders.FleetTest do
         Repo.update!(
           Ecto.Changeset.change(config,
             desired_mode: "active",
-            status: "ready",
+            status: "active",
             sellable_goods: ["IRON_ORE"],
             progress: %{"waypoint" => "X1-UX81-A1"}
           )
@@ -2631,7 +2797,7 @@ defmodule SpaceTraders.FleetTest do
         Repo.update!(
           Ecto.Changeset.change(config,
             desired_mode: "active",
-            status: "ready",
+            status: "active",
             sellable_goods: ["IRON_ORE"],
             progress: %{"waypoint" => "X1-UX81-A1"},
             contract_deliverables: [
@@ -2811,7 +2977,7 @@ defmodule SpaceTraders.FleetTest do
         Repo.update!(
           Ecto.Changeset.change(config,
             desired_mode: "active",
-            status: "revalidating",
+            status: "active",
             in_flight_action: %{
               "kind" => "deliver",
               "waypoint" => "X1-UX81-A1",

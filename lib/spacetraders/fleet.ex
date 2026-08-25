@@ -19,13 +19,15 @@ defmodule SpaceTraders.Fleet do
 
   alias SpaceTraders.Agent.Agent, as: AgentRecord
   alias SpaceTraders.API.Model.{Market, ShipNav, ShipNavRoute}
-  alias SpaceTraders.Fleet.{Activity, Job, Ship, ShipDestination}
+  alias SpaceTraders.Fleet.{Activity, Job, JobBlocker, Ship, ShipDestination}
   alias SpaceTraders.Fleet.ShipServer
   alias SpaceTraders.Repo
   alias SpaceTraders.{Agent, Contracts, Listing, Shipyard}
   alias SpaceTraders.Timeline
 
   @gather_kinds ["extract", "siphon"]
+  @terminal_job_states Job.terminal_states()
+  @running_job_states Job.running_states()
 
   @doc """
   Pulls the agent's live fleet from the game API.
@@ -121,13 +123,17 @@ defmodule SpaceTraders.Fleet do
   end
 
   defp annotate_jobs({:ok, ships}, agent) do
+    ship_records = Enum.map(ships, &ensure_ship_record(agent, &1))
+    jobs_by_ship = jobs_for_ships(ship_records)
+
     {:ok,
      Enum.map(ships, fn ship ->
-       ensure_ship_record(agent, ship)
-       job = ship_job(agent, ship.symbol)
+       ship_record = Enum.find(ship_records, &(&1.symbol == ship.symbol))
+       {job, history} = job_and_history(Map.get(jobs_by_ship, ship_record.id, []))
 
        ship
        |> Map.put(:job, job)
+       |> Map.put(:job_history, history)
        |> Map.put(:destination_history, destination_history(agent, ship.symbol))
      end)}
   end
@@ -204,33 +210,67 @@ defmodule SpaceTraders.Fleet do
   defp action_state(false, reason), do: %{allowed?: false, reason: reason}
 
   defp ensure_ship_record(agent, %{symbol: symbol}) do
-    if is_nil(Repo.get_by(Ship, agent_id: agent.id, symbol: symbol)) do
-      record_ship(agent, symbol, "UNKNOWN")
-    end
+    case Repo.get_by(Ship, agent_id: agent.id, symbol: symbol) do
+      %Ship{} = ship ->
+        ship
 
-    :ok
+      nil ->
+        case record_ship(agent, symbol, "UNKNOWN") do
+          {:ok, %Ship{id: id} = ship} when is_integer(id) ->
+            ship
+
+          {:ok, _conflict} ->
+            Repo.get_by!(Ship, agent_id: agent.id, symbol: symbol)
+
+          {:error, changeset} ->
+            raise Ecto.InvalidChangesetError, action: :insert, changeset: changeset
+        end
+    end
   end
 
   @doc "Saves a Miner Job configuration without activating it."
   def configure_miner_job(%AgentRecord{} = agent, ship_symbol, attrs) when is_map(attrs) do
     with {:ok, ship} <- owned_ship(agent, ship_symbol),
-         :ok <- preempt_miner_job(agent, ship, :configuration_changed),
-         {:ok, job} <- upsert_miner_job(ship, attrs) do
+         nil <- unfinished_job(ship.id),
+         {:ok, job} <- insert_miner_job(ship, attrs) do
       record_activity(agent, ship, "configuration", "Miner Job configuration changed")
       {:ok, job}
+    else
+      %Job{} -> {:error, :unfinished_job_already_assigned}
+      error -> error
+    end
+  end
+
+  @doc "Replaces a Ship's unfinished Job and preserves the predecessor as terminal history."
+  def replace_miner_job(%AgentRecord{} = agent, ship_symbol, attrs) when is_map(attrs) do
+    with {:ok, ship} <- owned_ship(agent, ship_symbol) do
+      case Repo.transaction(fn -> replace_miner_job_transaction(ship, attrs) end) do
+        {:ok, job} ->
+          record_activity(agent, ship, "configuration", "Miner Job replaced")
+          {:ok, job}
+
+        {:error, reason} ->
+          {:error, reason}
+      end
     end
   end
 
   @doc "Pauses an active Miner Job while retaining its configuration."
   def pause_miner_job(%AgentRecord{} = agent, ship_symbol) do
     with {:ok, ship} <- owned_ship(agent, ship_symbol),
-         %Job{} = job <- Repo.get_by(Job, ship_id: ship.id) do
+         %Job{} = job <- unfinished_job(ship.id) do
+      in_flight_action =
+        case job.in_flight_action do
+          %{"kind" => "navigate"} = action -> action
+          _ -> nil
+        end
+
       job =
         Repo.update!(
           Ecto.Changeset.change(job,
-            desired_mode: "manual",
             status: "paused",
-            in_flight_action: nil,
+            in_flight_action: in_flight_action,
+            blocker: nil,
             blocked_reason: "Paused by Operator"
           )
         )
@@ -247,34 +287,72 @@ defmodule SpaceTraders.Fleet do
   def resume_miner_job(%AgentRecord{} = agent, ship_symbol),
     do: start_miner_job(agent, ship_symbol)
 
-  @doc "Stops a Miner Job, cancels pending work, and removes its saved configuration."
+  @doc "Stops a Miner Job, cancels pending work, and preserves its terminal history."
   def stop_miner_job(%AgentRecord{} = agent, ship_symbol) do
-    with {:ok, ship} <- owned_ship(agent, ship_symbol) do
-      Repo.delete_all(from job in Job, where: job.ship_id == ^ship.id)
+    with {:ok, ship} <- owned_ship(agent, ship_symbol),
+         %Job{} = job <- unfinished_job(ship.id) do
+      terminalize_job!(job, "stopped")
       record_activity(agent, ship, "stop", "Miner Job stopped; Ship returned to Manual")
       :ok
+    else
+      nil -> {:error, :miner_job_not_configured}
+      error -> error
     end
   end
 
   @doc "Returns a Ship's durable Job, or nil."
   def ship_job(%AgentRecord{} = agent, ship_symbol) do
     case owned_ship(agent, ship_symbol) do
-      {:ok, ship} -> Repo.get_by(Job, ship_id: ship.id)
+      {:ok, ship} -> unfinished_job(ship.id)
       _ -> nil
     end
+  end
+
+  @doc "Returns a Ship's immutable terminal Job history, newest first."
+  def ship_job_history(%AgentRecord{} = agent, ship_symbol) do
+    case owned_ship(agent, ship_symbol) do
+      {:ok, ship} ->
+        Job
+        |> where([job], job.ship_id == ^ship.id and job.status in ^@terminal_job_states)
+        |> order_by([job], desc: job.finished_at, desc: job.id)
+        |> Repo.all()
+
+      _ ->
+        []
+    end
+  end
+
+  defp jobs_for_ships(ship_records) do
+    ship_ids = Enum.map(ship_records, & &1.id)
+
+    Job
+    |> where([job], job.ship_id in ^ship_ids)
+    |> Repo.all()
+    |> Enum.group_by(& &1.ship_id)
+  end
+
+  defp job_and_history(jobs) do
+    job = Enum.find(jobs, &(&1.status not in @terminal_job_states))
+
+    history =
+      jobs
+      |> Enum.filter(&(&1.status in @terminal_job_states))
+      |> Enum.sort_by(&{&1.finished_at, &1.id}, :desc)
+
+    {job, history}
   end
 
   @doc "Starts a configured Miner Job after authoritative validation."
   def start_miner_job(%AgentRecord{} = agent, ship_symbol) do
     with {:ok, ship} <- owned_ship(agent, ship_symbol),
-         %Job{} = job <- Repo.get_by(Job, ship_id: ship.id),
+         %Job{} = job <- unfinished_job(ship.id),
          {:ok, live_ship, sellable_goods, deliverables} <- validate_miner_job(agent, ship, job) do
       job =
         Repo.update!(
           Ecto.Changeset.change(job,
-            desired_mode: "active",
-            status: "ready",
+            status: "active",
             blocked_reason: nil,
+            blocker: nil,
             sellable_goods: sellable_goods,
             contract_deliverables: deliverables,
             last_validated_at: DateTime.utc_now() |> DateTime.truncate(:second)
@@ -298,26 +376,58 @@ defmodule SpaceTraders.Fleet do
     end
   end
 
-  defp upsert_miner_job(ship, attrs) do
-    job = Repo.get_by(Job, ship_id: ship.id) || %Job{ship_id: ship.id}
-
-    job
+  defp insert_miner_job(ship, attrs) do
+    %Job{ship_id: ship.id}
     |> Job.changeset(attrs)
-    |> Ecto.Changeset.put_change(:desired_mode, "manual")
-    |> Ecto.Changeset.put_change(:status, "ready")
-    |> Ecto.Changeset.put_change(:blocked_reason, nil)
+    |> Ecto.Changeset.put_change(:status, "paused")
+    |> Ecto.Changeset.put_change(:blocked_reason, "Awaiting Operator resume")
+    |> Ecto.Changeset.put_change(:blocker, nil)
     |> Ecto.Changeset.put_change(:sellable_goods, [])
-    |> Repo.insert_or_update()
+    |> Repo.insert()
+  end
+
+  defp replace_miner_job_transaction(ship, attrs) do
+    case unfinished_job(ship.id) do
+      %Job{} = predecessor ->
+        terminalize_job!(predecessor, "replaced")
+
+        case insert_miner_job(ship, attrs) do
+          {:ok, successor} -> successor
+          {:error, changeset} -> Repo.rollback(changeset)
+        end
+
+      nil ->
+        Repo.rollback(:miner_job_not_configured)
+    end
+  end
+
+  defp terminalize_job!(job, status) when status in @terminal_job_states do
+    Repo.update!(
+      Ecto.Changeset.change(job,
+        status: status,
+        blocked_reason: nil,
+        blocker: nil,
+        in_flight_action: nil,
+        finished_at: DateTime.utc_now() |> DateTime.truncate(:second)
+      )
+    )
+  end
+
+  defp unfinished_job(ship_id) do
+    Repo.one(
+      from job in Job,
+        where: job.ship_id == ^ship_id and job.status not in ^@terminal_job_states
+    )
   end
 
   defp preempt_miner_job(agent, ship, reason) do
-    case Repo.get_by(Job, ship_id: ship.id) do
-      %Job{desired_mode: "active"} = config ->
+    case unfinished_job(ship.id) do
+      %Job{status: status} = config when status in @running_job_states ->
         Repo.update!(
           Ecto.Changeset.change(config,
-            desired_mode: "manual",
             status: "paused",
             in_flight_action: nil,
+            blocker: nil,
             blocked_reason: preemption_message(reason)
           )
         )
@@ -429,27 +539,9 @@ defmodule SpaceTraders.Fleet do
   defp block_miner_job(agent, ship_symbol, reason) do
     case owned_ship(agent, ship_symbol) do
       {:ok, ship} ->
-        case Repo.get_by(Job, ship_id: ship.id) do
+        case unfinished_job(ship.id) do
           %Job{} = config ->
-            Repo.update!(
-              Ecto.Changeset.change(config,
-                desired_mode: "active",
-                status: "blocked",
-                blocked_reason: inspect(reason)
-              )
-            )
-
-            record_activity(
-              agent,
-              ship,
-              "miner_job_blocked",
-              "Miner Job blocked: #{inspect(reason)}",
-              %{
-                "block" => inspect(reason),
-                "recovery" => "resume"
-              }
-            )
-
+            mark_miner_job_blocked(config, reason)
             {:error, {:miner_job_blocked, reason}}
 
           nil ->
@@ -469,7 +561,7 @@ defmodule SpaceTraders.Fleet do
   defp advance_miner_job(%AgentRecord{} = agent, %Job{} = config, live_ship, mode) do
     cond do
       in_flight_arrival?(config, live_ship) ->
-        maybe_schedule_arrival(agent, live_ship.symbol, %{nav: live_ship.nav})
+        maybe_schedule_arrival(agent, live_ship.symbol, %{nav: live_ship.nav}, config.id)
 
         record_miner_job_activity(
           agent,
@@ -499,9 +591,14 @@ defmodule SpaceTraders.Fleet do
 
   @doc "Marks Miner Job extraction complete after authoritative cooldown revalidation."
   def revalidate_miner_job_cooldown(agent_id, ship_symbol, live_ship) do
+    revalidate_miner_job_cooldown(agent_id, ship_symbol, live_ship, nil)
+  end
+
+  def revalidate_miner_job_cooldown(agent_id, ship_symbol, live_ship, expected_job_id) do
     with %Ship{} = ship <- Repo.get_by(Ship, agent_id: agent_id, symbol: ship_symbol),
-         %Job{} = config <- Repo.get_by(Job, ship_id: ship.id),
-         true <- config.desired_mode == "active",
+         %Job{} = config <- unfinished_job(ship.id),
+         true <- job_matches_event?(config, expected_job_id),
+         true <- config.status in @running_job_states,
          true <- cooldown_ready?(live_ship),
          %AgentRecord{} = agent <- Repo.get(AgentRecord, agent_id) do
       case config.in_flight_action do
@@ -509,7 +606,7 @@ defmodule SpaceTraders.Fleet do
           config =
             Repo.update!(
               Ecto.Changeset.change(config,
-                status: "ready",
+                status: "active",
                 in_flight_action: nil,
                 progress: Map.merge(config.progress || %{}, %{"last_completed" => kind})
               )
@@ -519,7 +616,7 @@ defmodule SpaceTraders.Fleet do
 
         %{"kind" => "cooldown"} ->
           config =
-            Repo.update!(Ecto.Changeset.change(config, status: "ready", in_flight_action: nil))
+            Repo.update!(Ecto.Changeset.change(config, status: "active", in_flight_action: nil))
 
           advance_miner_job(agent, config, live_ship, :timeline)
 
@@ -533,9 +630,14 @@ defmodule SpaceTraders.Fleet do
 
   @doc "Marks Miner Job navigation complete after authoritative Arrival revalidation."
   def revalidate_miner_job_arrival(agent_id, ship_symbol, live_ship) do
+    revalidate_miner_job_arrival(agent_id, ship_symbol, live_ship, nil)
+  end
+
+  def revalidate_miner_job_arrival(agent_id, ship_symbol, live_ship, expected_job_id) do
     with %Ship{} = ship <- Repo.get_by(Ship, agent_id: agent_id, symbol: ship_symbol),
-         %Job{} = config <- Repo.get_by(Job, ship_id: ship.id),
-         true <- config.desired_mode == "active",
+         %Job{} = config <- unfinished_job(ship.id),
+         true <- job_matches_event?(config, expected_job_id),
+         true <- config.status in @running_job_states,
          true <- arrived_at_configured_waypoint?(live_ship, config) do
       agent = Repo.get!(AgentRecord, agent_id)
       waypoint = get_in(config.in_flight_action, ["waypoint"])
@@ -543,7 +645,7 @@ defmodule SpaceTraders.Fleet do
       config =
         Repo.update!(
           Ecto.Changeset.change(config,
-            status: "ready",
+            status: "active",
             in_flight_action: nil,
             progress: %{"waypoint" => waypoint, "last_completed" => "navigate"}
           )
@@ -554,6 +656,10 @@ defmodule SpaceTraders.Fleet do
       _ -> :ok
     end
   end
+
+  defp job_matches_event?(_job, nil), do: true
+  defp job_matches_event?(%Job{id: id}, id), do: true
+  defp job_matches_event?(_job, _expected_job_id), do: false
 
   defp at_extraction_waypoint?(
          %{nav: %{status: status, waypoint_symbol: waypoint}},
@@ -590,7 +696,7 @@ defmodule SpaceTraders.Fleet do
         end
 
       cooldown_active?(live_ship) ->
-        maybe_schedule_live_cooldown(agent, live_ship)
+        maybe_schedule_live_cooldown(agent, live_ship, config.id)
 
         record_miner_job_activity(
           agent,
@@ -675,16 +781,14 @@ defmodule SpaceTraders.Fleet do
     }
 
     config =
-      Repo.update!(
-        Ecto.Changeset.change(config, status: "revalidating", in_flight_action: action)
-      )
+      Repo.update!(Ecto.Changeset.change(config, status: "active", in_flight_action: action))
 
     case jettison_cargo_for_miner_job(agent, live_ship.symbol, item.symbol, item.units) do
       {:ok, %{cargo: cargo}} ->
         config =
           Repo.update!(
             Ecto.Changeset.change(config,
-              status: "ready",
+              status: "active",
               in_flight_action: nil,
               last_action_result: %{"kind" => "jettison", "trade_symbol" => item.symbol}
             )
@@ -783,19 +887,17 @@ defmodule SpaceTraders.Fleet do
     }
 
     config =
-      Repo.update!(
-        Ecto.Changeset.change(config, status: "revalidating", in_flight_action: action)
-      )
+      Repo.update!(Ecto.Changeset.change(config, status: "active", in_flight_action: action))
 
     gather =
       case {kind, mode} do
-        {"siphon", :timeline} -> &siphon_resources_for_miner_job/2
-        {"siphon", :normal} -> &siphon_resources_for_miner_job/2
-        {"extract", :timeline} -> &extract_resources_for_miner_job/2
-        {"extract", :normal} -> &extract_resources_for_miner_job/2
+        {"siphon", :timeline} -> &siphon_resources_for_miner_job/3
+        {"siphon", :normal} -> &siphon_resources_for_miner_job/3
+        {"extract", :timeline} -> &extract_resources_for_miner_job/3
+        {"extract", :normal} -> &extract_resources_for_miner_job/3
       end
 
-    case gather.(agent, live_ship.symbol) do
+    case gather.(agent, live_ship.symbol, config.id) do
       {:ok, result} ->
         result_snapshot = %{
           "kind" => kind,
@@ -811,19 +913,7 @@ defmodule SpaceTraders.Fleet do
          )}
 
       {:error, reason} ->
-        Repo.update!(
-          Ecto.Changeset.change(config, status: "blocked", blocked_reason: inspect(reason))
-        )
-
-        record_miner_job_activity(
-          agent,
-          live_ship,
-          "miner_job_blocked",
-          "Miner Job blocked: #{inspect(reason)}",
-          %{"block" => inspect(reason), "recovery" => "resume"}
-        )
-
-        {:error, reason}
+        mark_miner_job_blocked(config, reason)
     end
   end
 
@@ -950,9 +1040,7 @@ defmodule SpaceTraders.Fleet do
     }
 
     config =
-      Repo.update!(
-        Ecto.Changeset.change(config, status: "revalidating", in_flight_action: action)
-      )
+      Repo.update!(Ecto.Changeset.change(config, status: "active", in_flight_action: action))
 
     case Contracts.deliver_goods(agent, contract_id, live_ship.symbol, trade_symbol, units) do
       {:ok, %{cargo: cargo, contract: contract}} ->
@@ -961,7 +1049,7 @@ defmodule SpaceTraders.Fleet do
         config =
           Repo.update!(
             Ecto.Changeset.change(config,
-              status: "ready",
+              status: "active",
               in_flight_action: nil,
               last_action_result: %{
                 "kind" => "deliver",
@@ -1045,9 +1133,7 @@ defmodule SpaceTraders.Fleet do
     }
 
     config =
-      Repo.update!(
-        Ecto.Changeset.change(config, status: "revalidating", in_flight_action: action)
-      )
+      Repo.update!(Ecto.Changeset.change(config, status: "active", in_flight_action: action))
 
     request =
       if kind == "sell" do
@@ -1060,7 +1146,7 @@ defmodule SpaceTraders.Fleet do
       {:ok, %{cargo: cargo}} ->
         Repo.update!(
           Ecto.Changeset.change(config,
-            status: "ready",
+            status: "active",
             in_flight_action: nil,
             last_action_result: %{"kind" => kind, "trade_symbol" => item.symbol}
           )
@@ -1126,15 +1212,13 @@ defmodule SpaceTraders.Fleet do
     }
 
     config =
-      Repo.update!(
-        Ecto.Changeset.change(config, status: "revalidating", in_flight_action: action)
-      )
+      Repo.update!(Ecto.Changeset.change(config, status: "active", in_flight_action: action))
 
     case SpaceTraders.API.refuel_ship(agent.agent_token, live_ship.symbol) do
       {:ok, %{fuel: fuel}} when fuel.current >= fuel.capacity ->
         Repo.update!(
           Ecto.Changeset.change(config,
-            status: "ready",
+            status: "active",
             in_flight_action: nil,
             last_action_result: %{"kind" => "refuel", "fuel" => fuel.current}
           )
@@ -1175,13 +1259,11 @@ defmodule SpaceTraders.Fleet do
     }
 
     config =
-      Repo.update!(
-        Ecto.Changeset.change(config, status: "revalidating", in_flight_action: action)
-      )
+      Repo.update!(Ecto.Changeset.change(config, status: "active", in_flight_action: action))
 
     case SpaceTraders.API.navigate_ship(agent.agent_token, live_ship.symbol, waypoint) do
       {:ok, result} ->
-        maybe_schedule_arrival(agent, live_ship.symbol, result)
+        maybe_schedule_arrival(agent, live_ship.symbol, result, config.id)
 
         {:ok,
          Repo.update!(
@@ -1198,21 +1280,7 @@ defmodule SpaceTraders.Fleet do
          )}
 
       {:error, reason} ->
-        Repo.update!(
-          Ecto.Changeset.change(config, status: "blocked", blocked_reason: inspect(reason))
-        )
-
-        record_activity_by_config(
-          config,
-          "miner_job_blocked",
-          "Miner Job blocked: #{inspect(reason)}",
-          %{
-            "block" => inspect(reason),
-            "recovery" => "resume"
-          }
-        )
-
-        {:error, reason}
+        mark_miner_job_blocked(config, reason)
     end
   end
 
@@ -1242,7 +1310,11 @@ defmodule SpaceTraders.Fleet do
     already_blocked? = Repo.get!(Job, config.id).status == "blocked"
 
     Repo.update!(
-      Ecto.Changeset.change(config, status: "blocked", blocked_reason: inspect(reason))
+      Ecto.Changeset.change(config,
+        status: "blocked",
+        blocked_reason: nil,
+        blocker: job_blocker(reason)
+      )
     )
 
     unless already_blocked? do
@@ -1265,25 +1337,33 @@ defmodule SpaceTraders.Fleet do
     record_activity(Repo.get!(AgentRecord, ship.agent_id), ship, kind, message, metadata)
   end
 
-  defp extract_resources_for_miner_job(%AgentRecord{agent_token: token} = agent, ship_symbol)
+  defp extract_resources_for_miner_job(
+         %AgentRecord{agent_token: token} = agent,
+         ship_symbol,
+         job_id
+       )
        when is_binary(token) and token != "" do
     with {:ok, result} <- SpaceTraders.API.extract_resources(token, ship_symbol),
-         :ok <- schedule_cooldown(agent, ship_symbol, result) do
+         :ok <- schedule_cooldown(agent, ship_symbol, result, job_id) do
       {:ok, result}
     end
   end
 
-  defp siphon_resources_for_miner_job(%AgentRecord{agent_token: token} = agent, ship_symbol)
+  defp siphon_resources_for_miner_job(
+         %AgentRecord{agent_token: token} = agent,
+         ship_symbol,
+         job_id
+       )
        when is_binary(token) and token != "" do
     with {:ok, result} <- SpaceTraders.API.siphon_resources(token, ship_symbol),
-         :ok <- schedule_cooldown(agent, ship_symbol, result) do
+         :ok <- schedule_cooldown(agent, ship_symbol, result, job_id) do
       {:ok, result}
     end
   end
 
-  defp maybe_schedule_live_cooldown(agent, %{symbol: ship_symbol, cooldown: cooldown}) do
+  defp maybe_schedule_live_cooldown(agent, %{symbol: ship_symbol, cooldown: cooldown}, job_id) do
     due_at = parse_expiration(cooldown.expiration, cooldown.remaining_seconds)
-    schedule_cooldown_event(agent, ship_symbol, due_at)
+    schedule_cooldown_event(agent, ship_symbol, due_at, %{"job_id" => job_id})
   end
 
   defp cooldown_active?(%{cooldown: %{remaining_seconds: seconds}})
@@ -1713,7 +1793,7 @@ defmodule SpaceTraders.Fleet do
     job_symbols =
       Job
       |> join(:inner, [c], s in Ship, on: c.ship_id == s.id)
-      |> where([c, _s], c.desired_mode == "active")
+      |> where([c, _s], c.status in ^@running_job_states)
       |> select([_c, s], s.symbol)
       |> Repo.all()
 
@@ -1741,14 +1821,14 @@ defmodule SpaceTraders.Fleet do
   @doc "Reconciles a persisted Miner Job's in-flight action after a process restart."
   def recover_job_on_boot(ship_symbol, agent_id, agent_token) do
     with %Ship{} = ship <- Repo.get_by(Ship, symbol: ship_symbol, agent_id: agent_id),
-         %Job{} = config <- Repo.get_by(Job, ship_id: ship.id) do
-      if config.desired_mode == "active" do
+         %Job{} = config <- unfinished_job(ship.id) do
+      if config.status in @running_job_states do
         case SpaceTraders.API.get_ship(agent_token, ship_symbol) do
-          {:ok, live_ship} when config.status == "ready" and is_nil(config.in_flight_action) ->
+          {:ok, live_ship} when config.status == "active" and is_nil(config.in_flight_action) ->
             advance_miner_job(Repo.get!(AgentRecord, agent_id), config, live_ship)
 
           {:ok, live_ship}
-          when config.status in ["revalidating", "waiting"] and is_map(config.in_flight_action) ->
+          when config.status in ["active", "waiting"] and is_map(config.in_flight_action) ->
             reconcile_in_flight(agent_id, ship, config, live_ship)
 
           {:ok, _live_ship} ->
@@ -1779,9 +1859,12 @@ defmodule SpaceTraders.Fleet do
         )
 
         if live_ship.nav.status == "IN_TRANSIT" do
-          maybe_schedule_arrival(Repo.get!(AgentRecord, agent_id), live_ship.symbol, %{
-            nav: live_ship.nav
-          })
+          maybe_schedule_arrival(
+            Repo.get!(AgentRecord, agent_id),
+            live_ship.symbol,
+            %{nav: live_ship.nav},
+            recovered_config.id
+          )
 
           {:ok, recovered_config}
         else
@@ -1852,7 +1935,7 @@ defmodule SpaceTraders.Fleet do
 
     Repo.update!(
       Ecto.Changeset.change(config,
-        status: if(live_ship.nav.status == "IN_TRANSIT", do: "waiting", else: "ready"),
+        status: if(live_ship.nav.status == "IN_TRANSIT", do: "waiting", else: "active"),
         blocked_reason: nil,
         recovery_attempts: 0,
         last_action_result: %{"kind" => "recovery", "outcome" => "confirmed"},
@@ -1887,7 +1970,8 @@ defmodule SpaceTraders.Fleet do
 
   defp recovery_retry_or_block(agent_id, ship_symbol, reason, agent_token) do
     with %Ship{} = ship <- Repo.get_by(Ship, symbol: ship_symbol, agent_id: agent_id),
-         %Job{desired_mode: "active"} = config <- Repo.get_by(Job, ship_id: ship.id) do
+         %Job{status: status} = config when status in @running_job_states <-
+           unfinished_job(ship.id) do
       if config.recovery_attempts < 3 do
         Repo.update!(
           Ecto.Changeset.change(config, recovery_attempts: config.recovery_attempts + 1)
@@ -1914,7 +1998,7 @@ defmodule SpaceTraders.Fleet do
     Repo.update!(
       Ecto.Changeset.change(config,
         status: "blocked",
-        blocked_reason: "Miner Job recovery #{outcome}; no game action was replayed",
+        blocker: job_blocker(outcome),
         last_action_result: %{"kind" => "recovery", "outcome" => outcome}
       )
     )
@@ -1934,16 +2018,78 @@ defmodule SpaceTraders.Fleet do
     record_activity(Repo.get!(AgentRecord, agent_id), ship, kind, message, %{"outcome" => outcome})
   end
 
-  defp maybe_schedule_arrival(agent, ship_symbol, %{nav: %ShipNav{status: "IN_TRANSIT"} = nav}) do
+  defp job_blocker(reason) do
+    {resolver, retry_condition, corrective_actions} = blocker_resolution(reason)
+
+    %JobBlocker{
+      reason: blocker_reason(reason),
+      evidence: inspect(reason),
+      observed_at: DateTime.utc_now() |> DateTime.truncate(:second),
+      resolver: resolver,
+      retry_condition: retry_condition,
+      corrective_actions: corrective_actions
+    }
+  end
+
+  defp blocker_reason(reason) when is_atom(reason), do: Atom.to_string(reason)
+  defp blocker_reason(reason) when is_tuple(reason), do: reason |> elem(0) |> blocker_reason()
+  defp blocker_reason(%{__struct__: module}), do: module |> Module.split() |> List.last()
+
+  defp blocker_reason("retry_exhausted:" <> _evidence), do: "retry_exhausted"
+  defp blocker_reason(reason) when is_binary(reason), do: reason
+  defp blocker_reason(_reason), do: "miner_job_action_blocked"
+
+  defp blocker_resolution(reason) do
+    case {blocker_reason(reason), reason} do
+      {code, _reason}
+      when code in [
+             "invalid_extraction_waypoint",
+             "invalid_siphon_waypoint",
+             "invalid_market_waypoint",
+             "cargo_threshold_exceeds_capacity"
+           ] ->
+        {"operator", "configuration_changed", ["replace_job", "resume"]}
+
+      {code, _reason} when code in ["siphon_capability_missing", "mining_capability_missing"] ->
+        {"operator", "ship_capability_changed", ["outfit_ship", "resume"]}
+
+      {"agent_token_missing", _reason} ->
+        {"operator", "agent_credentials_restored", ["restore_credentials", "resume"]}
+
+      {"ambiguous", _reason} ->
+        {"game_state", "authoritative_action_outcome_available", ["inspect_activity", "resume"]}
+
+      {"retry_exhausted", _reason} ->
+        {"game_state", "authoritative_read_succeeds", ["resume"]}
+
+      {_code, reason} when is_struct(reason) ->
+        {"game_state", "authoritative_read_succeeds", ["resume"]}
+
+      {_code, _reason} ->
+        {"game_state", "authoritative_state_changed", ["resume"]}
+    end
+  end
+
+  defp maybe_schedule_arrival(agent, ship_symbol, result),
+    do: maybe_schedule_arrival(agent, ship_symbol, result, nil)
+
+  defp maybe_schedule_arrival(
+         agent,
+         ship_symbol,
+         %{nav: %ShipNav{status: "IN_TRANSIT"} = nav},
+         job_id
+       ) do
     with {:ok, due_at} <- parse_arrival(nav.route) do
+      payload = arrival_payload(nav) |> maybe_put_job_id(job_id)
+
       {:ok, event} =
-        Timeline.schedule_event(:ship, ship_symbol, :arrival, due_at, arrival_payload(nav))
+        Timeline.schedule_event(:ship, ship_symbol, :arrival, due_at, payload)
 
       ShipServer.arm(agent, ship_symbol, event)
     end
   end
 
-  defp maybe_schedule_arrival(_agent, _ship_symbol, _result), do: :ok
+  defp maybe_schedule_arrival(_agent, _ship_symbol, _result, _job_id), do: :ok
 
   defp schedule_cooldown(agent, ship_symbol, %{
          cooldown: %{remaining_seconds: seconds, expiration: expiration}
@@ -1955,6 +2101,18 @@ defmodule SpaceTraders.Fleet do
 
   defp schedule_cooldown(_agent, _ship_symbol, _result), do: :ok
 
+  defp schedule_cooldown(agent, ship_symbol, result, job_id) do
+    case result do
+      %{cooldown: %{remaining_seconds: seconds, expiration: expiration}}
+      when is_integer(seconds) and seconds > 0 ->
+        due_at = parse_expiration(expiration, seconds)
+        schedule_cooldown_event(agent, ship_symbol, due_at, %{"job_id" => job_id})
+
+      _ ->
+        :ok
+    end
+  end
+
   defp parse_expiration(expiration, seconds) when is_binary(expiration) do
     case DateTime.from_iso8601(expiration) do
       {:ok, due_at, _offset} -> due_at
@@ -1965,10 +2123,13 @@ defmodule SpaceTraders.Fleet do
   defp parse_expiration(_expiration, seconds),
     do: DateTime.add(DateTime.utc_now(), seconds, :second)
 
-  defp schedule_cooldown_event(agent, ship_symbol, due_at) do
-    {:ok, event} = Timeline.schedule_event(:ship, ship_symbol, :cooldown, due_at)
+  defp schedule_cooldown_event(agent, ship_symbol, due_at, payload \\ %{}) do
+    {:ok, event} = Timeline.schedule_event(:ship, ship_symbol, :cooldown, due_at, payload)
     ShipServer.arm(agent, ship_symbol, event)
   end
+
+  defp maybe_put_job_id(payload, nil), do: payload
+  defp maybe_put_job_id(payload, job_id), do: Map.put(payload, "job_id", job_id)
 
   defp parse_arrival(%ShipNavRoute{arrival: arrival}) when is_binary(arrival) do
     case DateTime.from_iso8601(arrival) do

@@ -150,7 +150,7 @@ defmodule SpaceTraders.Fleet.ShipServer do
     type = String.to_existing_atom(event.event_type)
 
     if not Timeline.pending?(event) do
-      {:noreply, %{state | pending: Map.delete(state.pending, type)}}
+      {:noreply, drop_pending_event(state, type, event)}
     else
       handle_pending_event(type, event, state)
     end
@@ -163,14 +163,24 @@ defmodule SpaceTraders.Fleet.ShipServer do
           retry(event, state, "ship is still #{busy_label(type)} after #{type}")
         else
           Timeline.fire_event(event)
-          state = %{state | pending: Map.delete(state.pending, type)}
+          state = drop_pending_event(state, type, event)
 
           case type do
             :arrival ->
-              SpaceTraders.Fleet.revalidate_miner_job_arrival(state.agent_id, state.symbol, ship)
+              SpaceTraders.Fleet.revalidate_miner_job_arrival(
+                state.agent_id,
+                state.symbol,
+                ship,
+                event.payload["job_id"]
+              )
 
             :cooldown ->
-              SpaceTraders.Fleet.revalidate_miner_job_cooldown(state.agent_id, state.symbol, ship)
+              SpaceTraders.Fleet.revalidate_miner_job_cooldown(
+                state.agent_id,
+                state.symbol,
+                ship,
+                event.payload["job_id"]
+              )
 
             _ ->
               :ok
@@ -221,12 +231,12 @@ defmodule SpaceTraders.Fleet.ShipServer do
 
   # Arms one persisted event: an immediate catch-up message when already due,
   # otherwise a `Process.send_after` timer. Records the type as pending. Re-arming
-  # the same (type, due_at) is a no-op, so a cast that races a just-started
+  # the same event id is a no-op, so a cast that races a just-started
   # server's init (which re-arms from the same row) does not double the timer.
   defp rearm(%Event{} = event, state) do
     type = String.to_existing_atom(event.event_type)
 
-    if Map.get(state.pending, type) == event.due_at do
+    if match?(%{id: id} when id == event.id, Map.get(state.pending, type)) do
       state
     else
       delay_ms =
@@ -242,7 +252,15 @@ defmodule SpaceTraders.Fleet.ShipServer do
         Process.send_after(self(), {:timeline, event}, delay_ms)
       end
 
-      %{state | pending: Map.put(state.pending, type, event.due_at)}
+      pending_event = %{id: event.id, due_at: event.due_at}
+      %{state | pending: Map.put(state.pending, type, pending_event)}
+    end
+  end
+
+  defp drop_pending_event(state, type, event) do
+    case Map.get(state.pending, type) do
+      %{id: id} when id == event.id -> %{state | pending: Map.delete(state.pending, type)}
+      _ -> state
     end
   end
 
