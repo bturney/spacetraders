@@ -128,8 +128,6 @@ defmodule SpaceTraders.Fleet do
     Activity
     |> where([a], a.agent_id == ^agent.id)
     |> order_by([a], desc: a.inserted_at)
-    # The dashboard removes retry/polling noise before selecting its latest ten.
-    |> limit(100)
     |> preload(:ship)
     |> Repo.all()
   end
@@ -917,6 +915,7 @@ defmodule SpaceTraders.Fleet do
     Repo.update!(
       Ecto.Changeset.change(job,
         status: status,
+        blocked_reason: terminal_job_reason(status),
         in_flight_action: nil,
         finished_at: DateTime.utc_now() |> DateTime.truncate(:second)
       )
@@ -986,7 +985,15 @@ defmodule SpaceTraders.Fleet do
     with %Ship{} = ship <- Repo.get_by(Ship, agent_id: agent.id, symbol: ship_symbol) do
       record_activity(agent, ship, kind, message)
     end
+  rescue
+    exception ->
+      Logger.warning("Could not record #{kind} activity: #{Exception.message(exception)}")
   end
+
+  defp terminal_job_reason("completed"), do: "Completed"
+  defp terminal_job_reason("failed"), do: "Failed"
+  defp terminal_job_reason("stopped"), do: "Stopped by Operator"
+  defp terminal_job_reason("replaced"), do: "Replaced by configuration change"
 
   defp command_label(kind), do: String.replace(kind, "_", " ") |> String.capitalize()
 
