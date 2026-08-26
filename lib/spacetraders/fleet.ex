@@ -975,8 +975,7 @@ defmodule SpaceTraders.Fleet do
          {:ok, market_waypoint} <-
            waypoint(token, live_ship.nav.system_symbol, config.market_waypoint),
          :ok <- market_waypoint?(market_waypoint),
-         {:ok, market} <-
-           SpaceTraders.API.get_market(token, live_ship.nav.system_symbol, config.market_waypoint),
+         {:ok, market} <- market_for_ship(agent, live_ship, config.market_waypoint),
          :ok <- market_available?(market),
          :ok <- cargo_policy?(live_ship, config.cargo_threshold),
          :ok <- gather_capability?(config.gather_mode, live_ship) do
@@ -1326,9 +1325,9 @@ defmodule SpaceTraders.Fleet do
     end
   end
 
-  defp fetch_configured_market(%AgentRecord{agent_token: token}, live_ship, config)
+  defp fetch_configured_market(%AgentRecord{agent_token: token} = agent, live_ship, config)
        when is_binary(token) and token != "" do
-    SpaceTraders.API.get_market(token, live_ship.nav.system_symbol, config.market_waypoint)
+    market_for_ship(agent, live_ship, config.market_waypoint)
   end
 
   defp fetch_configured_market(_agent, _live_ship, _config), do: {:error, :agent_token_missing}
@@ -1421,12 +1420,7 @@ defmodule SpaceTraders.Fleet do
   defp sell_at_market(%AgentRecord{agent_token: token} = agent, config, live_ship)
        when is_binary(token) and token != "" do
     with {:ok, live_ship} <- dock_for_market(agent, live_ship),
-         {:ok, market} <-
-           SpaceTraders.API.get_market(
-             token,
-             live_ship.nav.system_symbol,
-             config.market_waypoint
-           ),
+         {:ok, market} <- market_for_ship(agent, live_ship, config.market_waypoint),
          {:ok, live_ship, config} <- settle_market_cargo(agent, config, live_ship, market),
          {:ok, live_ship} <- refuel_for_market_departure(agent, config, live_ship, market) do
       navigate_miner_job(agent, config, live_ship, config.extraction_waypoint)
@@ -1656,12 +1650,15 @@ defmodule SpaceTraders.Fleet do
   end
 
   defp sell_cargo_for_miner_job(
-         %AgentRecord{agent_token: token},
+         %AgentRecord{agent_token: token} = agent,
          ship_symbol,
          trade_symbol,
          units
        ) do
-    SpaceTraders.API.sell_cargo(token, ship_symbol, trade_symbol, units)
+    invalidate_market_after(
+      SpaceTraders.API.sell_cargo(token, ship_symbol, trade_symbol, units),
+      agent
+    )
   end
 
   defp jettison_cargo_for_miner_job(
@@ -1710,7 +1707,10 @@ defmodule SpaceTraders.Fleet do
     config =
       Repo.update!(Ecto.Changeset.change(config, status: "active", in_flight_action: action))
 
-    case SpaceTraders.API.refuel_ship(agent.agent_token, live_ship.symbol) do
+    case invalidate_market_after(
+           SpaceTraders.API.refuel_ship(agent.agent_token, live_ship.symbol),
+           agent
+         ) do
       {:ok, %{fuel: fuel}} when fuel.current >= fuel.capacity ->
         Repo.update!(
           Ecto.Changeset.change(config,
@@ -1931,16 +1931,32 @@ defmodule SpaceTraders.Fleet do
   defp record_waypoint_observation(%AgentRecord{id: id} = agent, waypoint, source)
        when is_integer(id) do
     Intelligence.observe_waypoint(agent, waypoint, source: source)
+  rescue
+    exception ->
+      Logger.warning("Could not persist waypoint intelligence: #{Exception.message(exception)}")
   end
 
   defp record_waypoint_observation(_agent, _waypoint, _source), do: :ok
 
   defp record_market_observation(%AgentRecord{id: id} = agent, system, market, source)
        when is_integer(id) do
-    Intelligence.observe_market(agent, system, market, source: source)
+    record_market_observation(agent, system, market, source, nil)
   end
 
   defp record_market_observation(_agent, _system, _market, _source), do: :ok
+
+  defp record_market_observation(%AgentRecord{id: id} = agent, system, market, source, observer)
+       when is_integer(id) do
+    Intelligence.observe_market(agent, system, market,
+      source: source,
+      observing_ship_symbol: observer
+    )
+  rescue
+    exception ->
+      Logger.warning("Could not persist market intelligence: #{Exception.message(exception)}")
+  end
+
+  defp record_market_observation(_agent, _system, _market, _source, _observer), do: :ok
 
   defp system_from_headquarters(headquarters) do
     case Regex.run(~r/^(.+)-[^-]+$/, headquarters, capture: :all) do
@@ -2249,6 +2265,24 @@ defmodule SpaceTraders.Fleet do
   rescue
     exception ->
       Logger.warning("Could not invalidate market intelligence: #{Exception.message(exception)}")
+  end
+
+  defp market_for_ship(%AgentRecord{agent_token: token} = agent, live_ship, waypoint_symbol) do
+    system_symbol = live_ship.nav.system_symbol
+
+    case SpaceTraders.API.get_market(token, system_symbol, waypoint_symbol) do
+      {:ok, market} = result ->
+        observer = if live_ship.nav.waypoint_symbol == waypoint_symbol, do: live_ship.symbol
+        record_market_observation(agent, system_symbol, market, "get_market", observer)
+        result
+
+      {:error, %SpaceTraders.API.GameplayError{}} = result ->
+        invalidate_market_facts(agent, system_symbol, waypoint_symbol)
+        result
+
+      result ->
+        result
+    end
   end
 
   @doc "Jettisons cargo from a ship's hold and returns the updated cargo."
