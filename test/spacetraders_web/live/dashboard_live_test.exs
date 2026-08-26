@@ -778,6 +778,30 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       assert html =~ "SATELLITE"
     end
 
+    test "keeps the map before compact Fleet rows and opens a grouped Ship console", %{
+      conn: conn,
+      operator: operator
+    } do
+      agent = agent_fixture(operator)
+      stub_live_game(agent_overview_body(agent.symbol), [ship_body("ORBITALIST-1")])
+
+      {:ok, lv, html} = live(conn, ~p"/")
+
+      assert_before(html, "System map", "Ship status")
+      assert has_element?(lv, "[data-ship-card=\"ORBITALIST-1\"]", "ORBITALIST-1")
+      assert has_element?(lv, "button[data-select-ship=ORBITALIST-1]", "Open operations")
+
+      lv |> element("button[data-select-ship=ORBITALIST-1]") |> render_click()
+      html = render(lv)
+
+      assert has_element?(lv, "[data-ship-card=\"ORBITALIST-1\"][data-selected=\"true\"]")
+      assert html =~ "Selected Ship operations"
+      assert html =~ "Navigation"
+      assert html =~ "Cargo &amp; Trade"
+      assert html =~ "Ship"
+      assert html =~ "Sensors"
+    end
+
     test "shows transfer controls only for ships at the same waypoint and state", %{
       conn: conn,
       operator: operator

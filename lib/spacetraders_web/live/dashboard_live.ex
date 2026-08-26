@@ -956,6 +956,16 @@ defmodule SpaceTradersWeb.DashboardLive do
     ~H"""
     <section class="space-y-5 border-t border-base-300/70 pt-6">
       <.agent_overview_card agent={@overview.agent} live={@overview.overview} />
+      <.system_map
+        waypoints={@overview.waypoints}
+        ships={@overview.ships}
+        agent_id={@overview.agent.id}
+        headquarters_system={headquarters_system(@overview.agent.headquarters)}
+        selected_symbol={Map.get(@selected_waypoints, to_string(@overview.agent.id))}
+        filter={Map.get(@waypoint_filters, to_string(@overview.agent.id), "all")}
+        waypoint_markets={@waypoint_markets}
+        form_drafts={@form_drafts}
+      />
       <.fleet_grid
         agent={@overview.agent}
         ships={@overview.ships}
@@ -985,16 +995,6 @@ defmodule SpaceTradersWeb.DashboardLive do
           />
         </div>
       </div>
-      <.system_map
-        waypoints={@overview.waypoints}
-        ships={@overview.ships}
-        agent_id={@overview.agent.id}
-        headquarters_system={headquarters_system(@overview.agent.headquarters)}
-        selected_symbol={Map.get(@selected_waypoints, to_string(@overview.agent.id))}
-        filter={Map.get(@waypoint_filters, to_string(@overview.agent.id), "all")}
-        waypoint_markets={@waypoint_markets}
-        form_drafts={@form_drafts}
-      />
     </section>
     """
   end
@@ -2308,9 +2308,14 @@ defmodule SpaceTradersWeb.DashboardLive do
             data-back-to-fleet
           >Back to Fleet</button>
         </div>
+        <p class="mt-4 text-xs font-semibold uppercase tracking-wider opacity-60">
+          Cargo &amp; Trade
+        </p>
         <.miner_job_panel ship={@ship} form_drafts={@form_drafts} />
 
         <.transfer_panel ship={@ship} ships={@ships} form_drafts={@form_drafts} />
+
+        <p class="mt-4 text-xs font-semibold uppercase tracking-wider opacity-60">Navigation</p>
 
         <%= if in_transit?(@ship) do %>
           <div class="flex flex-wrap items-center gap-2 text-xs">
@@ -2651,6 +2656,13 @@ defmodule SpaceTradersWeb.DashboardLive do
           </div>
         </div>
       </details>
+      <section
+        class={"mt-4 border-t border-base-300/60 pt-3 #{operations_class(@selected)}"}
+        data-sensor-controls
+      >
+        <p class="text-sm font-semibold">Sensors</p>
+        <p class="mt-1 text-xs opacity-60">Sensor controls are unavailable for this Ship.</p>
+      </section>
     </div>
     """
   end
