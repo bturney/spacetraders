@@ -640,8 +640,13 @@ defmodule SpaceTradersWeb.DashboardLive do
              "pause_miner_job",
              "resume_miner_job",
              "reconcile_miner_job",
-             "stop_miner_job"
+             "stop_miner_job",
+             "row_pause_miner_job",
+             "row_resume_miner_job",
+             "row_reconcile_miner_job"
            ] do
+    action = String.replace_prefix(action, "row_", "")
+
     with {:ok, agent} <- agent_for_ship(socket, ship_symbol),
          :ok <- miner_job_action(action, agent, ship_symbol) do
       message =
@@ -2202,6 +2207,57 @@ defmodule SpaceTradersWeb.DashboardLive do
         data-select-ship={@ship.symbol}
       >Open operations</button>
 
+      <div class="mt-3 flex flex-wrap items-center gap-2 text-xs" data-ship-row-status>
+        <span :if={@ship.job} class="badge badge-outline badge-sm">{job_status(@ship.job)}</span>
+        <span
+          :if={@ship.manual_intent}
+          class={manual_intent_status_class(@ship.manual_intent)}
+          data-row-manual-intent
+        >
+          Manual: {manual_intent_status(@ship.manual_intent)}
+        </span>
+        <span :if={job_reason(@ship.job)} class="truncate text-warning" data-row-attention>
+          {job_reason(@ship.job)}
+        </span>
+        <button
+          :if={not @selected and Job.running?(@ship.job)}
+          type="button"
+          phx-click="row_pause_miner_job"
+          phx-value-symbol={@ship.symbol}
+          class="btn btn-warning btn-xs"
+        >
+          Pause
+        </button>
+        <button
+          :if={
+            (not @selected and @ship.job) &&
+              (@ship.job.status == "paused" or
+                 (@ship.job.status == "blocked" and
+                    not (match?(%JobBlocker{}, @ship.job.blocker) and
+                           is_map(@ship.job.in_flight_action))))
+          }
+          type="button"
+          phx-click="row_resume_miner_job"
+          phx-value-symbol={@ship.symbol}
+          class="btn btn-primary btn-xs"
+        >
+          Resolve
+        </button>
+        <button
+          :if={
+            (not @selected and @ship.job) && @ship.job.status == "blocked" &&
+              match?(%JobBlocker{}, @ship.job.blocker) &&
+              is_map(@ship.job.in_flight_action)
+          }
+          type="button"
+          phx-click="row_reconcile_miner_job"
+          phx-value-symbol={@ship.symbol}
+          class="btn btn-primary btn-xs"
+        >
+          Resolve
+        </button>
+      </div>
+
       <div class="mt-4 grid grid-cols-2 gap-4 border-y border-base-300/60 py-4 text-sm">
         <div>
           <div class="text-xs opacity-60">Location</div>
@@ -2485,6 +2541,7 @@ defmodule SpaceTradersWeb.DashboardLive do
         id={"ship-readiness-#{@ship.symbol}"}
         class={"mt-4 border-t border-base-300/60 pt-3 #{operations_class(@selected)}"}
         data-ship-readiness
+        data-console-section="ship"
       >
         <summary class="cursor-pointer text-sm font-semibold">Ship Readiness</summary>
         <div class="mt-3 space-y-4 text-sm">

@@ -798,7 +798,7 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       assert html =~ "Selected Ship operations"
       assert html =~ "Navigation"
       assert html =~ "Cargo &amp; Trade"
-      assert html =~ "Ship"
+      assert has_element?(lv, "[data-console-section=\"ship\"] summary", "Ship Readiness")
       assert html =~ "Sensors"
     end
 
@@ -1335,6 +1335,19 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       assert has_element?(lv, "[data-needs-attention-count]", "1 needs attention")
       refute has_element?(lv, "[data-fleet-healthy]")
       assert has_element?(lv, "[data-ship-card=\"ORBITALIST-1\"]", "Blocked")
+
+      assert has_element?(
+               lv,
+               "[data-ship-card=\"ORBITALIST-1\"] [data-ship-row-status]",
+               "Blocked"
+             )
+
+      assert has_element?(
+               lv,
+               "[data-ship-card=\"ORBITALIST-1\"] button[phx-click=\"row_resume_miner_job\"]",
+               "Resolve"
+             )
+
       assert has_element?(lv, "[data-ship-card=\"ORBITALIST-2\"]", "IN_TRANSIT")
       assert html =~ "ambiguous outcome"
     end
