@@ -458,15 +458,14 @@ defmodule SpaceTraders.API do
     end
   end
 
-  # Mutations are never automatically replayed: a failed response can be
-  # ambiguous. Their caller persists action evidence and reconciles first.
-  # Authoritative reads are safe to retry with Req's exponential jittered delay.
-  defp retry_strategy(:get, path), do: fn request, response -> retry(request, response, path) end
-  defp retry_strategy(_, _path), do: false
+  # A 429 proves the game rejected the request before applying it, so every
+  # method can safely honor Retry-After. Other mutation failures are ambiguous:
+  # their caller persists action evidence and reconciles before any retry.
+  defp retry_strategy(method, path),
+    do: fn request, response -> retry(request, response, path, method) end
 
-  defp retry(_request, %Req.Response{status: status} = response, path)
-       when status == 429 or status in 500..599 do
-    emit_request_metric(path, status)
+  defp retry(_request, %Req.Response{status: 429} = response, path, _method) do
+    emit_request_metric(path, 429)
 
     case Req.Response.get_retry_after(response) do
       delay when is_integer(delay) -> {:delay, delay}
@@ -474,8 +473,13 @@ defmodule SpaceTraders.API do
     end
   end
 
-  defp retry(_request, %Req.TransportError{}, _path), do: true
-  defp retry(_request, _response, _path), do: false
+  defp retry(_request, %Req.Response{status: status}, path, :get) when status in 500..599 do
+    emit_request_metric(path, status)
+    true
+  end
+
+  defp retry(_request, %Req.TransportError{}, _path, :get), do: true
+  defp retry(_request, _response, _path, _method), do: false
 
   defp base_url do
     Application.get_env(:spacetraders, __MODULE__, [])

@@ -2841,7 +2841,7 @@ defmodule SpaceTradersWeb.DashboardLive do
           phx-value-symbol={@ship.symbol}
           class="btn btn-primary btn-sm"
         >
-          Reconcile and retry
+          {if(@job.blocker.reason == "retry_exhausted", do: "Reconcile", else: "Reconcile and retry")}
         </button>
         <button
           :if={@job}

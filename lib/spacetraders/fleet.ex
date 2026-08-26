@@ -2117,7 +2117,7 @@ defmodule SpaceTraders.Fleet do
          ["inspect_activity", "reconcile_and_retry"]}
 
       {"retry_exhausted", _reason} ->
-        {"game_state", "authoritative_read_succeeds", ["reconcile_and_retry"]}
+        {"game_state", "authoritative_read_succeeds", ["reconcile"]}
 
       {_code, reason} when is_struct(reason) ->
         {"game_state", "authoritative_read_succeeds", ["resume"]}

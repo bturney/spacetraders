@@ -119,5 +119,23 @@ defmodule SpaceTraders.API.ErrorTest do
 
       assert {:error, %Error{status: 503}} = API.navigate_ship("TOKEN", "SHIP-1", "X1-UX81-A2")
     end
+
+    test "retries a rate-limited mutation after Retry-After" do
+      Req.Test.expect(SpaceTraders.API, 2, fn conn ->
+        retries = Map.get(conn.private, :req_private, %{})[:req_retry_count] || 0
+
+        if retries > 0 do
+          Req.Test.json(conn, %{"data" => %{"nav" => %{"status" => "IN_TRANSIT"}}})
+        else
+          conn
+          |> Plug.Conn.put_resp_header("retry-after", "0")
+          |> Plug.Conn.put_status(429)
+          |> Req.Test.json(%{"error" => %{"code" => 429, "message" => "rate limited"}})
+        end
+      end)
+
+      assert {:ok, %{nav: %{status: "IN_TRANSIT"}}} =
+               API.navigate_ship("TOKEN", "SHIP-1", "X1-UX81-A2")
+    end
   end
 end
