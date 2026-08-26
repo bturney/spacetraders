@@ -123,12 +123,13 @@ defmodule SpaceTraders.Fleet do
 
   def waypoint_market(%AgentRecord{}, _waypoint), do: {:error, :agent_token_missing}
 
-  @doc "Returns the ten most recent local events for an Agent, newest first."
+  @doc "Returns recent local events for an Agent, newest first."
   def recent_activity(%AgentRecord{} = agent) do
     Activity
     |> where([a], a.agent_id == ^agent.id)
     |> order_by([a], desc: a.inserted_at)
-    |> limit(10)
+    # The dashboard removes retry/polling noise before selecting its latest ten.
+    |> limit(100)
     |> preload(:ship)
     |> Repo.all()
   end
@@ -137,6 +138,7 @@ defmodule SpaceTraders.Fleet do
     ship_records = Enum.map(ships, &ensure_ship_record(agent, &1))
     jobs_by_ship = jobs_for_ships(ship_records)
     intents_by_ship = manual_intents_for_ships(ship_records)
+    intent_history_by_ship = manual_intent_history_for_ships(ship_records)
 
     {:ok,
      Enum.map(ships, fn ship ->
@@ -147,7 +149,7 @@ defmodule SpaceTraders.Fleet do
        |> Map.put(:job, job)
        |> Map.put(:job_history, history)
        |> Map.put(:manual_intent, Map.get(intents_by_ship, ship_record.id))
-       |> Map.put(:manual_intent_history, manual_intent_history(ship_record.id))
+       |> Map.put(:manual_intent_history, Map.get(intent_history_by_ship, ship_record.id, []))
        |> Map.put(:destination_history, destination_history(agent, ship.symbol))
      end)}
   end
@@ -166,11 +168,14 @@ defmodule SpaceTraders.Fleet do
     |> Map.new(&{&1.ship_id, &1})
   end
 
-  defp manual_intent_history(ship_id) do
+  defp manual_intent_history_for_ships(ship_records) do
+    ship_ids = Enum.map(ship_records, & &1.id)
+
     ManualIntent
-    |> where([intent], intent.ship_id == ^ship_id and intent.status in ^@terminal_intent_states)
+    |> where([intent], intent.ship_id in ^ship_ids and intent.status in ^@terminal_intent_states)
     |> order_by([intent], desc: intent.finished_at, desc: intent.id)
     |> Repo.all()
+    |> Enum.group_by(& &1.ship_id)
   end
 
   defp annotate_actions({:ok, ships}) do
@@ -839,10 +844,10 @@ defmodule SpaceTraders.Fleet do
       jobs
       |> Enum.filter(&(&1.status in @terminal_job_states))
       |> Enum.sort_by(&{&1.finished_at, &1.id}, :desc)
-      |> Enum.map(fn historical_job ->
-        successor = Enum.find(jobs, &(&1.predecessor_job_id == historical_job.id))
-        Map.put(historical_job, :successor_job_id, successor && successor.id)
-      end)
+
+    successors = Map.new(jobs, &{&1.predecessor_job_id, &1.id})
+
+    history = Enum.map(history, &Map.put(&1, :successor_job_id, Map.get(successors, &1.id)))
 
     {job, history}
   end
@@ -969,6 +974,21 @@ defmodule SpaceTraders.Fleet do
 
     :ok
   end
+
+  defp record_command_result(agent, ship_symbol, kind, {:ok, _result} = result) do
+    record_command_activity(agent, ship_symbol, kind, "#{command_label(kind)} command completed")
+    result
+  end
+
+  defp record_command_result(_agent, _ship_symbol, _kind, result), do: result
+
+  defp record_command_activity(agent, ship_symbol, kind, message) do
+    with %Ship{} = ship <- Repo.get_by(Ship, agent_id: agent.id, symbol: ship_symbol) do
+      record_activity(agent, ship, kind, message)
+    end
+  end
+
+  defp command_label(kind), do: String.replace(kind, "_", " ") |> String.capitalize()
 
   defp record_miner_job_activity(agent, live_ship, kind, message, metadata) do
     ship = Repo.get_by!(Ship, agent_id: agent.id, symbol: live_ship.symbol)
@@ -2033,6 +2053,7 @@ defmodule SpaceTraders.Fleet do
            SpaceTraders.API.navigate_ship(agent_token, ship_symbol, waypoint_symbol) do
       maybe_schedule_arrival(agent, ship_symbol, result)
       persist_destination_history(agent, ship_symbol, result.nav.route.destination.symbol)
+      record_command_activity(agent, ship_symbol, "navigate", "Navigate command accepted")
       {:ok, result}
     end
   end
@@ -2052,6 +2073,7 @@ defmodule SpaceTraders.Fleet do
     with :ok <- preempt_miner_job_for(agent, ship_symbol, {:manual_override, "flight mode"}),
          :ok <- flight_mode_change_allowed?(ship_symbol) do
       SpaceTraders.API.set_ship_flight_mode(agent_token, ship_symbol, flight_mode)
+      |> then(&record_command_result(agent, ship_symbol, "flight_mode", &1))
     end
   end
 
@@ -2137,6 +2159,7 @@ defmodule SpaceTraders.Fleet do
     with :ok <- preempt_miner_job_for(agent, ship_symbol, {:manual_override, "docking"}),
          :ok <- ShipServer.ensure_ready(ship_symbol) do
       SpaceTraders.API.dock_ship(agent_token, ship_symbol)
+      |> then(&record_command_result(agent, ship_symbol, "dock", &1))
     end
   end
 
@@ -2148,6 +2171,7 @@ defmodule SpaceTraders.Fleet do
     with :ok <- preempt_miner_job_for(agent, ship_symbol, {:manual_override, "orbit"}),
          :ok <- ShipServer.ensure_ready(ship_symbol) do
       SpaceTraders.API.orbit_ship(agent_token, ship_symbol)
+      |> then(&record_command_result(agent, ship_symbol, "orbit", &1))
     end
   end
 
@@ -2160,6 +2184,7 @@ defmodule SpaceTraders.Fleet do
          :ok <- ShipServer.ensure_ready(ship_symbol),
          {:ok, result} <- SpaceTraders.API.extract_resources(agent_token, ship_symbol),
          :ok <- schedule_cooldown(agent, ship_symbol, result) do
+      record_command_activity(agent, ship_symbol, "extract", "Extract command completed")
       {:ok, result}
     end
   end
@@ -2182,6 +2207,7 @@ defmodule SpaceTraders.Fleet do
          :ok <- siphon_capability?(live_ship),
          {:ok, result} <- SpaceTraders.API.siphon_resources(agent_token, ship_symbol),
          :ok <- schedule_cooldown(agent, ship_symbol, result) do
+      record_command_activity(agent, ship_symbol, "siphon", "Siphon command completed")
       {:ok, result}
     end
   end
@@ -2209,6 +2235,7 @@ defmodule SpaceTraders.Fleet do
         SpaceTraders.API.sell_cargo(agent_token, ship_symbol, trade_symbol, units),
         agent
       )
+      |> then(&record_command_result(agent, ship_symbol, "sell", &1))
     end
   end
 
@@ -2229,6 +2256,7 @@ defmodule SpaceTraders.Fleet do
         SpaceTraders.API.purchase_cargo(agent_token, ship_symbol, trade_symbol, units),
         agent
       )
+      |> then(&record_command_result(agent, ship_symbol, "purchase", &1))
     end
   end
 
@@ -2245,6 +2273,7 @@ defmodule SpaceTraders.Fleet do
     with :ok <- preempt_miner_job_for(agent, ship_symbol, {:manual_override, "refueling"}),
          :ok <- ShipServer.ensure_ready(ship_symbol) do
       invalidate_market_after(SpaceTraders.API.refuel_ship(agent_token, ship_symbol), agent)
+      |> then(&record_command_result(agent, ship_symbol, "refuel", &1))
     end
   end
 
@@ -2306,6 +2335,7 @@ defmodule SpaceTraders.Fleet do
            preempt_miner_job_for(agent, ship_symbol, {:manual_override, "jettisoning cargo"}),
          :ok <- ShipServer.ensure_ready(ship_symbol) do
       SpaceTraders.API.jettison_cargo(agent_token, ship_symbol, trade_symbol, units)
+      |> then(&record_command_result(agent, ship_symbol, "jettison", &1))
     end
   end
 
@@ -2332,6 +2362,7 @@ defmodule SpaceTraders.Fleet do
          :ok <- preempt_miner_job_for(agent, from_ship, {:manual_override, "cargo transfer"}),
          :ok <- ShipServer.ensure_ready(from_ship) do
       SpaceTraders.API.transfer_cargo(token, from_ship, trade_symbol, units, to_ship)
+      |> then(&record_command_result(agent, from_ship, "transfer", &1))
     end
   end
 

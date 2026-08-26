@@ -3512,6 +3512,9 @@ defmodule SpaceTradersWeb.DashboardLive do
   defp needs_attention?(%{nav: %{status: "IN_TRANSIT"}}), do: false
   defp needs_attention?(_), do: false
 
+  defp attention_summary(%{manual_intent: %{status: "blocked"} = intent}),
+    do: manual_intent_reason(intent) || manual_intent_status(intent)
+
   defp attention_summary(%{job: job}) when not is_nil(job), do: job_reason(job) || job_status(job)
 
   defp attention_summary(%{manual_intent: intent}),
@@ -3520,6 +3523,12 @@ defmodule SpaceTradersWeb.DashboardLive do
   defp attention_summary(_), do: "Review Ship state"
 
   defp activity_noise?(%{kind: kind}) when kind in ["retry", "manual_intent_waiting"], do: true
+
+  defp activity_noise?(%{kind: kind, message: message})
+       when kind in ["manual_intent_recovery", "miner_job_recovery"] do
+    String.contains?(String.downcase(message), "retrying")
+  end
+
   defp activity_noise?(_), do: false
 
   defp activity_facts(%{metadata: metadata}) when is_map(metadata) do

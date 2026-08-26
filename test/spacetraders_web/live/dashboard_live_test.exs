@@ -1743,7 +1743,7 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       Repo.insert!(%Activity{
         agent_id: agent.id,
         ship_id: ship.id,
-        kind: "retry",
+        kind: "miner_job_recovery",
         message: "Retrying recovery",
         metadata: %{"outcome" => "transport_error", "retry" => 2}
       })
