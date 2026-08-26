@@ -174,12 +174,26 @@ defmodule SpaceTraders.Fleet.ShipServer do
                 event.payload["job_id"]
               )
 
+              SpaceTraders.Fleet.revalidate_manual_intent_arrival(
+                state.agent_id,
+                state.symbol,
+                ship,
+                event.payload["intent_id"]
+              )
+
             :cooldown ->
               SpaceTraders.Fleet.revalidate_miner_job_cooldown(
                 state.agent_id,
                 state.symbol,
                 ship,
                 event.payload["job_id"]
+              )
+
+              SpaceTraders.Fleet.revalidate_manual_intent_cooldown(
+                state.agent_id,
+                state.symbol,
+                ship,
+                event.payload["intent_id"]
               )
 
             _ ->

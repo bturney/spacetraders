@@ -6,6 +6,7 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
   import SpaceTraders.ShipBody
 
   alias SpaceTraders.{Fleet, Timeline}
+  alias SpaceTraders.Timeline.Event
   alias SpaceTraders.Fleet.Ship
   alias SpaceTraders.Fleet.ShipServer
   alias SpaceTraders.Fleet.ShipDestination
@@ -2254,6 +2255,18 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
 
             Req.Test.json(conn, %{"data" => [ship_body("ORBITALIST-1", %{"nav" => nav})]})
 
+          {"/v2/my/ships/ORBITALIST-1", "GET"} ->
+            nav =
+              case Agent.get(state, & &1.arrival) do
+                nil -> nav_body("DOCKED")
+                arrival -> nav_body("IN_TRANSIT", arrival: arrival, destination: "X1-UX81-A2")
+              end
+
+            Req.Test.json(conn, %{"data" => ship_body("ORBITALIST-1", %{"nav" => nav})})
+
+          {"/v2/my/ships/ORBITALIST-1/orbit", "POST"} ->
+            Req.Test.json(conn, %{"data" => %{"nav" => nav_body("IN_ORBIT")}})
+
           {"/v2/my/ships/ORBITALIST-1/navigate", "POST"} ->
             Agent.update(state, &%{&1 | arrival: arrival})
 
@@ -2282,9 +2295,10 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       assert html =~ arrival_label_for(arrival)
       assert html =~ "Waypoint symbol"
       assert html =~ "This ship is in transit; actions resume on arrival."
+      assert has_element?(lv, ~s([data-manual-intent="waiting"]))
     end
 
-    test "disables navigate while the ship is on a live cooldown", %{
+    test "keeps outcome-level Navigate available during a live cooldown and waits it out", %{
       conn: conn,
       operator: operator
     } do
@@ -2311,15 +2325,105 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
               ]
             })
 
+          {"/v2/my/ships/ORBITALIST-1", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" =>
+                ship_body("ORBITALIST-1", %{
+                  "nav" => nav_body("IN_ORBIT"),
+                  "cooldown" => %{
+                    "shipSymbol" => "ORBITALIST-1",
+                    "totalSeconds" => 60,
+                    "remainingSeconds" => 42,
+                    "expiration" => future_iso(42)
+                  }
+                })
+            })
+
           {"/v2/systems/X1-UX81/waypoints", "GET"} ->
             Req.Test.json(conn, %{"data" => []})
         end
       end)
 
-      {:ok, _lv, html} = live(conn, ~p"/")
+      {:ok, lv, html} = live(conn, ~p"/")
 
       assert html =~ "Cooldown 42s"
-      assert html =~ ~s(data-tip="This ship is on cooldown; wait for it to end.")
+
+      # The outcome-level Navigate control is not gated by the cooldown: its
+      # Intent waits for the authoritative cooldown instead of refusing.
+      assert has_element?(
+               lv,
+               "form[phx-submit=\"navigate\"] button[type=\"submit\"]:not([disabled])"
+             )
+
+      html =
+        lv
+        |> element("form[phx-submit=\"navigate\"]")
+        |> render_submit(%{symbol: "ORBITALIST-1", waypoint_symbol: "X1-UX81-A2"})
+
+      assert html =~ "ORBITALIST-1 will navigate to X1-UX81-A2 once its cooldown ends."
+      assert has_element?(lv, ~s([data-manual-intent="waiting"]))
+
+      assert [%Event{event_type: "cooldown"}] = Timeline.pending_events(:ship, "ORBITALIST-1")
+      Timeline.cancel_events(:ship, "ORBITALIST-1", :cooldown)
+      ShipServer.cancel_pending("ORBITALIST-1")
+    end
+
+    test "exposes the active Navigate Intent with Stop and keeps posture actions disclosed", %{
+      conn: conn,
+      operator: operator
+    } do
+      agent = agent_fixture(operator)
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case {conn.request_path, conn.method} do
+          {"/v2/my/agent", "GET"} ->
+            Req.Test.json(conn, %{"data" => agent_overview_body(agent.symbol)})
+
+          {"/v2/my/contracts", "GET"} ->
+            Req.Test.json(conn, %{"data" => []})
+
+          {"/v2/my/ships", "GET"} ->
+            Req.Test.json(
+              conn,
+              %{"data" => [ship_body("ORBITALIST-1", %{"nav" => nav_body("IN_ORBIT")})]}
+            )
+
+          {"/v2/my/ships/ORBITALIST-1", "GET"} ->
+            Req.Test.json(
+              conn,
+              %{"data" => ship_body("ORBITALIST-1", %{"nav" => nav_body("IN_ORBIT")})}
+            )
+
+          {"/v2/my/ships/ORBITALIST-1/navigate", "POST"} ->
+            Req.Test.json(conn, %{
+              "data" => %{
+                "fuel" => %{"capacity" => 200, "current" => 80},
+                "nav" => nav_body("IN_TRANSIT", arrival: future_iso(), destination: "X1-UX81-A2")
+              }
+            })
+
+          {"/v2/systems/X1-UX81/waypoints", "GET"} ->
+            Req.Test.json(conn, %{"data" => []})
+        end
+      end)
+
+      {:ok, lv, html} = live(conn, ~p"/")
+
+      # Posture-level actions stay available through progressive disclosure.
+      assert has_element?(lv, "[data-posture-actions] button[phx-click=\"dock\"]")
+      assert has_element?(lv, "[data-posture-actions] button[phx-click=\"refuel\"]")
+
+      lv
+      |> element("form[phx-submit=\"navigate\"]")
+      |> render_submit(%{symbol: "ORBITALIST-1", waypoint_symbol: "X1-UX81-A2"})
+
+      assert has_element?(lv, ~s([data-manual-intent="waiting"]))
+      assert has_element?(lv, "[data-manual-intent]", "X1-UX81-A2")
+
+      html = lv |> element("[data-manual-intent] button", "Stop") |> render_click()
+
+      assert html =~ "ORBITALIST-1 manual Navigate stopped"
+      refute has_element?(lv, "[data-manual-intent]")
     end
 
     test "shows an on-site shipyard and buys a mining drone", %{conn: conn, operator: operator} do
@@ -3135,8 +3239,36 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
 
       {:ok, state} =
         Agent.start_link(fn ->
-          %{status: "DOCKED", mode: "CRUISE", fuel: 81, destination: "X1-UX81-B21"}
+          %{
+            status: "DOCKED",
+            mode: "CRUISE",
+            fuel: 81,
+            destination: "X1-UX81-B21",
+            arrival: nil,
+            consumed: nil
+          }
         end)
+
+      ship_from_state = fn ->
+        %{status: status, mode: mode, fuel: fuel, destination: destination} =
+          Agent.get(state, & &1)
+
+        arrival = Agent.get(state, & &1.arrival)
+        consumed = Agent.get(state, & &1.consumed)
+
+        nav_overrides = if arrival, do: [arrival: arrival], else: []
+
+        nav =
+          nav_body(status, [destination: destination] ++ nav_overrides)
+          |> Map.put("flightMode", mode)
+
+        fuel_body =
+          if consumed,
+            do: %{"capacity" => 400, "current" => fuel, "consumed" => %{"amount" => consumed}},
+            else: %{"capacity" => 400, "current" => fuel}
+
+        ship_body("ORBITALIST-1", %{"nav" => nav, "fuel" => fuel_body})
+      end
 
       Req.Test.stub(SpaceTraders.API, fn conn ->
         case {conn.request_path, conn.method} do
@@ -3147,23 +3279,19 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
             Req.Test.json(conn, %{"data" => []})
 
           {"/v2/my/ships", "GET"} ->
-            %{status: status, mode: mode, fuel: fuel, destination: destination} =
-              Agent.get(state, & &1)
+            Req.Test.json(conn, %{"data" => [ship_from_state.()]})
 
-            nav = nav_body(status, destination: destination) |> Map.put("flightMode", mode)
-
-            Req.Test.json(conn, %{
-              "data" => [
-                ship_body("ORBITALIST-1", %{
-                  "nav" => nav,
-                  "fuel" => %{"capacity" => 400, "current" => fuel}
-                })
-              ]
-            })
+          {"/v2/my/ships/ORBITALIST-1", "GET"} ->
+            Req.Test.json(conn, %{"data" => ship_from_state.()})
 
           {"/v2/my/ships/ORBITALIST-1/orbit", "POST"} ->
             Agent.update(state, &%{&1 | status: "IN_ORBIT"})
-            Req.Test.json(conn, %{"data" => %{"nav" => nav_body("IN_ORBIT")}})
+            destination = Agent.get(state, & &1.destination)
+
+            Req.Test.json(
+              conn,
+              %{"data" => %{"nav" => nav_body("IN_ORBIT", destination: destination)}}
+            )
 
           {"/v2/my/ships/ORBITALIST-1/nav", "PATCH"} ->
             %{"flightMode" => mode} = conn.body_params
@@ -3186,9 +3314,11 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
               state,
               &%{
                 &1
-                | status: "IN_ORBIT",
+                | status: "IN_TRANSIT",
                   fuel: 80,
-                  destination: "X1-UX81-C43"
+                  destination: "X1-UX81-C43",
+                  arrival: future_iso(),
+                  consumed: 1
               }
             )
 
@@ -3244,6 +3374,10 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
 
       Timeline.cancel_events(:ship, "ORBITALIST-1", :arrival)
       ShipServer.cancel_pending("ORBITALIST-1")
+
+      # Simulate the authoritative post-arrival game state before the wakeup.
+      Agent.update(state, &%{&1 | status: "IN_ORBIT", arrival: nil})
+
       send(lv.pid, {:ship_updated, agent.id, "ORBITALIST-1"})
       render(lv)
 
@@ -4046,6 +4180,14 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
                 off_system_ship
               ]
             })
+
+          {"/v2/my/ships/ORBITALIST-1", "GET"} ->
+            nav =
+              if Agent.get(state, & &1.navigated),
+                do: nav_body("IN_TRANSIT", arrival: arrival, destination: "X1-UX81-A3"),
+                else: nav_body("IN_ORBIT", destination: "X1-UX81-A1")
+
+            Req.Test.json(conn, %{"data" => ship_body("ORBITALIST-1", %{"nav" => nav})})
 
           {"/v2/my/ships/ORBITALIST-1/navigate", "POST"} ->
             Agent.update(state, &%{&1 | navigated: true})

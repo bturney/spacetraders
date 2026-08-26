@@ -11,6 +11,7 @@ defmodule SpaceTraders.FleetTest do
   alias SpaceTraders.Fleet.JobBlocker
   alias SpaceTraders.Fleet.ShipServer
   alias SpaceTraders.Fleet.Activity
+  alias SpaceTraders.Fleet.ManualIntent
   alias SpaceTraders.Timeline
   alias SpaceTraders.Timeline.Event
 
@@ -3067,7 +3068,10 @@ defmodule SpaceTraders.FleetTest do
       snapshot = Fleet.command_snapshot(agent)
 
       assert {:ok, [%{actions: actions}]} = snapshot.ships
-      assert actions.navigate == %{allowed?: false, reason: :cooldown_active}
+
+      # Outcome-level Navigate is always dispatchable: its Intent reconciles
+      # cooldown and transit instead of refusing while the Ship is busy.
+      assert actions.navigate == %{allowed?: true, reason: nil}
       assert actions.dock == %{allowed?: false, reason: :cooldown_active}
       assert actions.orbit == %{allowed?: false, reason: :cooldown_active}
       assert actions.extract == %{allowed?: false, reason: :cooldown_active}
@@ -3652,6 +3656,634 @@ defmodule SpaceTraders.FleetTest do
                Fleet.navigate_ship(agent, "FLEET-SHIP", "X1-UX81-A3")
 
       assert Fleet.destination_history(agent, "FLEET-SHIP") == ["X1-UX81-A2"]
+    end
+  end
+
+  describe "navigate_intent/3" do
+    test "persists the active Job pause before Navigate dispatches a mutating request" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      {:ok, config} =
+        Fleet.configure_miner_job(agent, "FLEET-SHIP", %{
+          extraction_waypoint: "X1-UX81-A2",
+          market_waypoint: "X1-UX81-A1",
+          cargo_threshold: 30
+        })
+
+      Repo.update!(Ecto.Changeset.change(config, status: "active"))
+      test_pid = self()
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case {conn.request_path, conn.method} do
+          {"/v2/my/ships/FLEET-SHIP", "GET"} ->
+            Req.Test.json(conn, %{"data" => ship_body("FLEET-SHIP")})
+
+          {"/v2/my/ships/FLEET-SHIP/orbit", "POST"} ->
+            Req.Test.json(conn, %{"data" => %{"nav" => nav_body("IN_ORBIT")}})
+
+          {"/v2/my/ships/FLEET-SHIP/navigate", "POST"} ->
+            send(test_pid, {:job_status_at_dispatch, Repo.get!(Job, config.id).status})
+
+            Req.Test.json(
+              conn,
+              %{"data" => navigate_response("IN_TRANSIT", future_iso(), "X1-UX81-A2")}
+            )
+        end
+      end)
+
+      assert {:ok, %ManualIntent{status: "waiting", target_waypoint: "X1-UX81-A2"}} =
+               Fleet.navigate_intent(agent, "FLEET-SHIP", "X1-UX81-A2")
+
+      assert_receive {:job_status_at_dispatch, "paused"}
+      assert %{status: "paused"} = Fleet.ship_job(agent, "FLEET-SHIP")
+    end
+
+    test "completes immediately when the Ship is already at the requested Waypoint" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        assert {"/v2/my/ships/FLEET-SHIP", "GET"} = {conn.request_path, conn.method}
+
+        Req.Test.json(conn, %{
+          "data" =>
+            ship_body("FLEET-SHIP", %{"nav" => nav_body("IN_ORBIT", destination: "X1-UX81-A2")})
+        })
+      end)
+
+      assert {:ok, %ManualIntent{status: "completed"}} =
+               Fleet.navigate_intent(agent, "FLEET-SHIP", "X1-UX81-A2")
+
+      assert Timeline.pending_events(:ship, "FLEET-SHIP") == []
+    end
+
+    test "keeps the preempted Job paused after completion" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      {:ok, config} =
+        Fleet.configure_miner_job(agent, "FLEET-SHIP", %{
+          extraction_waypoint: "X1-UX81-A2",
+          market_waypoint: "X1-UX81-A1",
+          cargo_threshold: 30
+        })
+
+      Repo.update!(Ecto.Changeset.change(config, status: "active"))
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        assert {"/v2/my/ships/FLEET-SHIP", "GET"} = {conn.request_path, conn.method}
+
+        Req.Test.json(conn, %{
+          "data" =>
+            ship_body("FLEET-SHIP", %{"nav" => nav_body("IN_ORBIT", destination: "X1-UX81-A2")})
+        })
+      end)
+
+      assert {:ok, %ManualIntent{status: "completed"}} =
+               Fleet.navigate_intent(agent, "FLEET-SHIP", "X1-UX81-A2")
+
+      assert %{status: "paused", blocked_reason: "Paused by direct navigation"} =
+               Fleet.ship_job(agent, "FLEET-SHIP")
+    end
+
+    test "orbits a docked Ship before navigating and persists the Intent's arrival" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+      arrival = future_iso()
+      test_pid = self()
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case {conn.request_path, conn.method} do
+          {"/v2/my/ships/FLEET-SHIP", "GET"} ->
+            Req.Test.json(conn, %{"data" => ship_body("FLEET-SHIP")})
+
+          {"/v2/my/ships/FLEET-SHIP/orbit", "POST"} ->
+            send(test_pid, :orbit)
+            Req.Test.json(conn, %{"data" => %{"nav" => nav_body("IN_ORBIT")}})
+
+          {"/v2/my/ships/FLEET-SHIP/navigate", "POST"} ->
+            send(test_pid, :navigate)
+
+            Req.Test.json(
+              conn,
+              %{"data" => navigate_response("IN_TRANSIT", arrival, "X1-UX81-A2")}
+            )
+        end
+      end)
+
+      assert {:ok, %ManualIntent{status: "waiting"}} =
+               Fleet.navigate_intent(agent, "FLEET-SHIP", "X1-UX81-A2")
+
+      assert_received :orbit
+      assert_received :navigate
+
+      assert [%Event{} = event] = Timeline.pending_events(:ship, "FLEET-SHIP")
+      assert event.event_type == "arrival"
+      assert event.payload["destination"] == "X1-UX81-A2"
+      assert event.payload["intent_id"]
+      refute event.payload["job_id"]
+    end
+
+    test "waits when an in-transit Ship is already heading to the target" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case {conn.request_path, conn.method} do
+          {"/v2/my/ships/FLEET-SHIP", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" =>
+                ship_body("FLEET-SHIP", %{
+                  "nav" =>
+                    nav_body("IN_TRANSIT", arrival: future_iso(), destination: "X1-UX81-A2")
+                })
+            })
+
+          {path, _method} ->
+            flunk("unexpected request #{path}")
+        end
+      end)
+
+      assert {:ok, %ManualIntent{status: "waiting"}} =
+               Fleet.navigate_intent(agent, "FLEET-SHIP", "X1-UX81-A2")
+
+      assert [%Event{event_type: "arrival", payload: %{"intent_id" => _}}] =
+               Timeline.pending_events(:ship, "FLEET-SHIP")
+    end
+
+    test "waits through a live cooldown before navigating" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case {conn.request_path, conn.method} do
+          {"/v2/my/ships/FLEET-SHIP", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" =>
+                ship_body("FLEET-SHIP", %{
+                  "nav" => nav_body("IN_ORBIT"),
+                  "cooldown" => %{
+                    "shipSymbol" => "FLEET-SHIP",
+                    "totalSeconds" => 60,
+                    "remainingSeconds" => 60,
+                    "expiration" => future_iso(60)
+                  }
+                })
+            })
+
+          {path, _method} ->
+            flunk("unexpected request #{path}")
+        end
+      end)
+
+      assert {:ok, %ManualIntent{status: "waiting"}} =
+               Fleet.navigate_intent(agent, "FLEET-SHIP", "X1-UX81-A2")
+
+      assert [%Event{event_type: "cooldown", payload: %{"intent_id" => _}}] =
+               Timeline.pending_events(:ship, "FLEET-SHIP")
+    end
+
+    test "blocks a fuel-empty Ship without dispatching navigation" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case {conn.request_path, conn.method} do
+          {"/v2/my/ships/FLEET-SHIP", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" =>
+                ship_body("FLEET-SHIP", %{
+                  "nav" => nav_body("IN_ORBIT"),
+                  "fuel" => %{"capacity" => 200, "current" => 0}
+                })
+            })
+
+          {path, _method} ->
+            flunk("unexpected request #{path}")
+        end
+      end)
+
+      assert {:ok, %ManualIntent{status: "blocked"} = intent} =
+               Fleet.navigate_intent(agent, "FLEET-SHIP", "X1-UX81-A2")
+
+      assert intent.blocker.reason == "insufficient_fuel"
+      assert "refuel" in intent.blocker.corrective_actions
+    end
+
+    test "blocks on an authoritative insufficient-fuel rejection without retrying" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+      test_pid = self()
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case {conn.request_path, conn.method} do
+          {"/v2/my/ships/FLEET-SHIP", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" =>
+                ship_body("FLEET-SHIP", %{
+                  "nav" => nav_body("IN_ORBIT"),
+                  "fuel" => %{"capacity" => 200, "current" => 5}
+                })
+            })
+
+          {"/v2/my/ships/FLEET-SHIP/navigate", "POST"} ->
+            send(test_pid, :navigate)
+
+            conn
+            |> Map.put(:status, 422)
+            |> Req.Test.json(%{
+              "error" => %{
+                "code" => 4203,
+                "message" => "Ship does not have enough fuel to travel to destination."
+              }
+            })
+
+          {path, _method} ->
+            flunk("unexpected request #{path}")
+        end
+      end)
+
+      assert {:ok, %ManualIntent{status: "blocked"} = intent} =
+               Fleet.navigate_intent(agent, "FLEET-SHIP", "X1-UX81-A2")
+
+      assert_received :navigate
+      refute_receive :navigate
+      assert intent.blocker.reason == "insufficient_fuel"
+    end
+
+    test "replaces a pending manual outcome explicitly without cancelling accepted transit" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case {conn.request_path, conn.method} do
+          {"/v2/my/ships/FLEET-SHIP", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" =>
+                ship_body("FLEET-SHIP", %{
+                  "nav" =>
+                    nav_body("IN_TRANSIT", arrival: future_iso(), destination: "X1-UX81-A2")
+                })
+            })
+
+          {"/v2/my/ships/FLEET-SHIP/navigate", "POST"} ->
+            Req.Test.json(
+              conn,
+              %{"data" => navigate_response("IN_TRANSIT", future_iso(), "X1-UX81-A2")}
+            )
+        end
+      end)
+
+      assert {:ok, first} = Fleet.navigate_intent(agent, "FLEET-SHIP", "X1-UX81-A2")
+
+      assert {:ok, second} = Fleet.navigate_intent(agent, "FLEET-SHIP", "X1-UX81-A3")
+
+      intents = Repo.all(from intent in ManualIntent, where: intent.ship_id == ^first.ship_id)
+      assert length(intents) == 2
+
+      predecessor = Enum.find(intents, &(&1.id == first.id))
+      successor = Enum.find(intents, &(&1.id == second.id))
+
+      assert %{status: "stopped", target_waypoint: "X1-UX81-A2"} = predecessor
+      assert %{status: "waiting", target_waypoint: "X1-UX81-A3"} = successor
+      refute_received :navigate
+    end
+
+    test "refuses Job resume while a manual Navigate is active" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      Fleet.configure_miner_job(agent, "FLEET-SHIP", %{
+        extraction_waypoint: "X1-UX81-A2",
+        market_waypoint: "X1-UX81-A1",
+        cargo_threshold: 30
+      })
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case {conn.request_path, conn.method} do
+          {"/v2/my/ships/FLEET-SHIP", "GET"} ->
+            Req.Test.json(conn, %{"data" => ship_body("FLEET-SHIP")})
+
+          {"/v2/my/ships/FLEET-SHIP/orbit", "POST"} ->
+            Req.Test.json(conn, %{"data" => %{"nav" => nav_body("IN_ORBIT")}})
+
+          {"/v2/my/ships/FLEET-SHIP/navigate", "POST"} ->
+            Req.Test.json(
+              conn,
+              %{"data" => navigate_response("IN_TRANSIT", future_iso(), "X1-UX81-A2")}
+            )
+        end
+      end)
+
+      assert {:ok, %ManualIntent{status: "waiting"}} =
+               Fleet.navigate_intent(agent, "FLEET-SHIP", "X1-UX81-A2")
+
+      assert {:error, :manual_intent_active} = Fleet.resume_miner_job(agent, "FLEET-SHIP")
+    end
+
+    test "stops an active manual Navigate and keeps the Ship in Manual Control" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      {:ok, config} =
+        Fleet.configure_miner_job(agent, "FLEET-SHIP", %{
+          extraction_waypoint: "X1-UX81-A2",
+          market_waypoint: "X1-UX81-A1",
+          cargo_threshold: 30
+        })
+
+      Repo.update!(Ecto.Changeset.change(config, status: "active"))
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case {conn.request_path, conn.method} do
+          {"/v2/my/ships/FLEET-SHIP", "GET"} ->
+            Req.Test.json(conn, %{"data" => ship_body("FLEET-SHIP")})
+
+          {"/v2/my/ships/FLEET-SHIP/orbit", "POST"} ->
+            Req.Test.json(conn, %{"data" => %{"nav" => nav_body("IN_ORBIT")}})
+
+          {"/v2/my/ships/FLEET-SHIP/navigate", "POST"} ->
+            Req.Test.json(
+              conn,
+              %{"data" => navigate_response("IN_TRANSIT", future_iso(), "X1-UX81-A2")}
+            )
+        end
+      end)
+
+      assert {:ok, %ManualIntent{status: "waiting"}} =
+               Fleet.navigate_intent(agent, "FLEET-SHIP", "X1-UX81-A2")
+
+      assert :ok = Fleet.stop_manual_intent(agent, "FLEET-SHIP")
+      assert Fleet.ship_manual_intent(agent, "FLEET-SHIP") == nil
+
+      assert %{status: "paused"} = Fleet.ship_job(agent, "FLEET-SHIP")
+
+      intent = Repo.one!(from i in ManualIntent, select: i.status)
+      assert intent == "stopped"
+    end
+
+    test "returns an error when the agent has no stored token" do
+      assert {:error, :agent_token_missing} =
+               Fleet.navigate_intent(%AgentRecord{agent_token: nil}, "FLEET-SHIP", "X1-UX81-A2")
+    end
+  end
+
+  describe "manual intent revalidation" do
+    test "arrival revalidation completes the Intent at the requested Waypoint" do
+      agent = agent_fixture()
+      ship = ship_fixture(agent, "FLEET-SHIP")
+
+      intent =
+        Repo.insert!(%ManualIntent{
+          ship_id: ship.id,
+          type: "navigate",
+          target_waypoint: "X1-UX81-A2",
+          status: "waiting"
+        })
+
+      live_ship = %Model.Ship{
+        symbol: "FLEET-SHIP",
+        nav: %Model.ShipNav{
+          status: "IN_ORBIT",
+          waypoint_symbol: "X1-UX81-A2",
+          system_symbol: "X1-UX81"
+        }
+      }
+
+      assert {:ok, %ManualIntent{status: "completed"}} =
+               Fleet.revalidate_manual_intent_arrival(
+                 agent.id,
+                 "FLEET-SHIP",
+                 live_ship,
+                 intent.id
+               )
+    end
+
+    test "arrival revalidation navigates on from game truth after arriving elsewhere" do
+      agent = agent_fixture()
+      ship = ship_fixture(agent, "FLEET-SHIP")
+      test_pid = self()
+
+      intent =
+        Repo.insert!(%ManualIntent{
+          ship_id: ship.id,
+          type: "navigate",
+          target_waypoint: "X1-UX81-A2",
+          status: "waiting"
+        })
+
+      live_ship = %Model.Ship{
+        symbol: "FLEET-SHIP",
+        nav: %Model.ShipNav{
+          status: "DOCKED",
+          waypoint_symbol: "X1-UX81-A3",
+          system_symbol: "X1-UX81"
+        },
+        fuel: %Model.ShipFuel{capacity: 200, current: 100}
+      }
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case {conn.request_path, conn.method} do
+          {"/v2/my/ships/FLEET-SHIP/orbit", "POST"} ->
+            Req.Test.json(conn, %{
+              "data" => %{"nav" => nav_body("IN_ORBIT", destination: "X1-UX81-A3")}
+            })
+
+          {"/v2/my/ships/FLEET-SHIP/navigate", "POST"} ->
+            send(test_pid, :navigate)
+            assert conn.body_params["waypointSymbol"] == "X1-UX81-A2"
+
+            Req.Test.json(
+              conn,
+              %{"data" => navigate_response("IN_TRANSIT", future_iso(), "X1-UX81-A2")}
+            )
+
+          {path, _method} ->
+            flunk("unexpected request #{path}")
+        end
+      end)
+
+      assert {:ok, %ManualIntent{status: "waiting"}} =
+               Fleet.revalidate_manual_intent_arrival(
+                 agent.id,
+                 "FLEET-SHIP",
+                 live_ship,
+                 intent.id
+               )
+
+      assert_received :navigate
+    end
+
+    test "ignores events that do not belong to the active Intent" do
+      agent = agent_fixture()
+      ship = ship_fixture(agent, "FLEET-SHIP")
+
+      Repo.insert!(%ManualIntent{
+        ship_id: ship.id,
+        type: "navigate",
+        target_waypoint: "X1-UX81-A2",
+        status: "waiting"
+      })
+
+      live_ship = %Model.Ship{
+        symbol: "FLEET-SHIP",
+        nav: %Model.ShipNav{
+          status: "DOCKED",
+          waypoint_symbol: "X1-UX81-A3",
+          system_symbol: "X1-UX81"
+        }
+      }
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        flunk("unexpected request #{conn.request_path}")
+      end)
+
+      assert :ok = Fleet.revalidate_manual_intent_arrival(agent.id, "FLEET-SHIP", live_ship, nil)
+    end
+
+    test "cooldown revalidation dispatches the pending navigation" do
+      agent = agent_fixture()
+      ship = ship_fixture(agent, "FLEET-SHIP")
+      test_pid = self()
+
+      intent =
+        Repo.insert!(%ManualIntent{
+          ship_id: ship.id,
+          type: "navigate",
+          target_waypoint: "X1-UX81-A2",
+          status: "waiting"
+        })
+
+      live_ship = %Model.Ship{
+        symbol: "FLEET-SHIP",
+        nav: %Model.ShipNav{
+          status: "IN_ORBIT",
+          waypoint_symbol: "X1-UX81-A1",
+          system_symbol: "X1-UX81"
+        },
+        cooldown: %Model.Cooldown{remaining_seconds: 0},
+        fuel: %Model.ShipFuel{capacity: 200, current: 100}
+      }
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case {conn.request_path, conn.method} do
+          {"/v2/my/ships/FLEET-SHIP/navigate", "POST"} ->
+            send(test_pid, :navigate)
+
+            Req.Test.json(conn, %{
+              "data" => navigate_response("IN_TRANSIT", future_iso(), "X1-UX81-A2")
+            })
+
+          {path, _method} ->
+            flunk("unexpected request #{path}")
+        end
+      end)
+
+      assert {:ok, %ManualIntent{status: "waiting"}} =
+               Fleet.revalidate_manual_intent_cooldown(
+                 agent.id,
+                 "FLEET-SHIP",
+                 live_ship,
+                 intent.id
+               )
+
+      assert_received :navigate
+    end
+  end
+
+  describe "manual intent restart recovery" do
+    test "boot recovery confirms an in-flight navigation and re-arms its arrival" do
+      agent = agent_fixture()
+      ship = ship_fixture(agent, "FLEET-SHIP")
+
+      Repo.insert!(%ManualIntent{
+        ship_id: ship.id,
+        type: "navigate",
+        target_waypoint: "X1-UX81-A2",
+        status: "waiting",
+        in_flight_action: %{
+          "kind" => "navigate",
+          "waypoint" => "X1-UX81-A2",
+          "expected" => %{"status" => "IN_TRANSIT", "destination" => "X1-UX81-A2"}
+        }
+      })
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case {conn.request_path, conn.method} do
+          {"/v2/my/ships/FLEET-SHIP", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" =>
+                ship_body("FLEET-SHIP", %{
+                  "nav" =>
+                    nav_body("IN_TRANSIT", arrival: future_iso(), destination: "X1-UX81-A2")
+                })
+            })
+
+          {path, _method} ->
+            flunk("unexpected request #{path}")
+        end
+      end)
+
+      assert {:ok, %ManualIntent{status: "waiting"}} =
+               Fleet.recover_manual_intent_on_boot("FLEET-SHIP", agent.id, agent.agent_token)
+
+      assert [%Event{event_type: "arrival", payload: %{"intent_id" => _}}] =
+               Timeline.pending_events(:ship, "FLEET-SHIP")
+    end
+
+    test "boot recovery completes an Intent whose Ship already sits at the target" do
+      agent = agent_fixture()
+      ship = ship_fixture(agent, "FLEET-SHIP")
+
+      Repo.insert!(%ManualIntent{
+        ship_id: ship.id,
+        type: "navigate",
+        target_waypoint: "X1-UX81-A2",
+        status: "active",
+        in_flight_action: %{"kind" => "orbit", "waypoint" => "X1-UX81-A2"}
+      })
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case {conn.request_path, conn.method} do
+          {"/v2/my/ships/FLEET-SHIP", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" =>
+                ship_body("FLEET-SHIP", %{
+                  "nav" => nav_body("IN_ORBIT", destination: "X1-UX81-A2")
+                })
+            })
+
+          {path, _method} ->
+            flunk("unexpected request #{path}")
+        end
+      end)
+
+      assert {:ok, %ManualIntent{status: "completed"}} =
+               Fleet.recover_manual_intent_on_boot("FLEET-SHIP", agent.id, agent.agent_token)
+    end
+
+    test "boot recovery blocks after repeated authoritative read failures" do
+      agent = agent_fixture()
+      ship = ship_fixture(agent, "FLEET-SHIP")
+
+      Repo.insert!(%ManualIntent{
+        ship_id: ship.id,
+        type: "navigate",
+        target_waypoint: "X1-UX81-A2",
+        status: "active"
+      })
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        conn |> Map.put(:status, 500) |> Req.Test.json(%{})
+      end)
+
+      assert {:error, :manual_intent_recovery_blocked} =
+               Fleet.recover_manual_intent_on_boot("FLEET-SHIP", agent.id, agent.agent_token)
+
+      intent = Repo.one!(from i in ManualIntent, where: i.ship_id == ^ship.id)
+      assert intent.status == "blocked"
+      assert intent.blocker.reason == "retry_exhausted"
     end
   end
 
