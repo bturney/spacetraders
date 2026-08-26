@@ -109,5 +109,15 @@ defmodule SpaceTraders.API.ErrorTest do
 
       assert {:ok, %{symbol: "ORBITALIST"}} = API.get_agent("TOKEN")
     end
+
+    test "does not replay a failed mutation" do
+      Req.Test.expect(SpaceTraders.API, 1, fn conn ->
+        conn
+        |> Plug.Conn.put_status(503)
+        |> Req.Test.json(%{"error" => %{"code" => 503, "message" => "unavailable"}})
+      end)
+
+      assert {:error, %Error{status: 503}} = API.navigate_ship("TOKEN", "SHIP-1", "X1-UX81-A2")
+    end
   end
 end

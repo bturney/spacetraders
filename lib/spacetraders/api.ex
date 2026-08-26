@@ -159,8 +159,14 @@ defmodule SpaceTraders.API do
 
   @doc "GET /my/ships/{symbol}"
   @spec get_ship(token(), String.t()) :: result()
-  def get_ship(token, ship_symbol) do
-    request(:get, "/my/ships/#{ship_symbol}", token, as: {:model, Ship})
+  def get_ship(token, ship_symbol), do: get_ship(token, ship_symbol, [])
+
+  @doc false
+  def get_ship(token, ship_symbol, opts) when is_list(opts) do
+    request(:get, "/my/ships/#{ship_symbol}", token,
+      as: {:model, Ship},
+      retry: Keyword.get(opts, :retry, :default)
+    )
   end
 
   @doc "POST /my/ships/{symbol}/navigate"
@@ -384,6 +390,7 @@ defmodule SpaceTraders.API do
         |> Keyword.merge(config_req_options())
         |> maybe_put(opts, :json)
         |> maybe_put(opts, :params)
+        |> maybe_put_retry(opts)
       )
 
     case Req.request(req) do
@@ -424,7 +431,7 @@ defmodule SpaceTraders.API do
       base_url: base_url(),
       method: method,
       url: path,
-      retry: fn request, response -> retry(request, response, path) end,
+      retry: retry_strategy(method, path),
       retry_log_level: :warning
     ] ++ maybe_auth(token)
   end
@@ -444,16 +451,31 @@ defmodule SpaceTraders.API do
     end
   end
 
-  # Safety net on top of the client-side rate limiter: retry only rate-limit
-  # responses (429/503), honoring Retry-After. Transport errors are NOT retried —
-  # the client is additive and retrying a state-changing POST could double-apply it.
-  defp retry(_request, %Req.Response{status: 429}, path) do
-    emit_request_metric(path, 429)
-    true
+  defp maybe_put_retry(options, opts) do
+    case Keyword.get(opts, :retry, :default) do
+      :default -> options
+      retry -> Keyword.put(options, :retry, retry)
+    end
   end
 
-  defp retry(_request, %Req.Response{status: 503}, _path), do: true
-  defp retry(_request, _, _path), do: false
+  # Mutations are never automatically replayed: a failed response can be
+  # ambiguous. Their caller persists action evidence and reconciles first.
+  # Authoritative reads are safe to retry with Req's exponential jittered delay.
+  defp retry_strategy(:get, path), do: fn request, response -> retry(request, response, path) end
+  defp retry_strategy(_, _path), do: false
+
+  defp retry(_request, %Req.Response{status: status} = response, path)
+       when status == 429 or status in 500..599 do
+    emit_request_metric(path, status)
+
+    case Req.Response.get_retry_after(response) do
+      delay when is_integer(delay) -> {:delay, delay}
+      _ -> true
+    end
+  end
+
+  defp retry(_request, %Req.TransportError{}, _path), do: true
+  defp retry(_request, _response, _path), do: false
 
   defp base_url do
     Application.get_env(:spacetraders, __MODULE__, [])

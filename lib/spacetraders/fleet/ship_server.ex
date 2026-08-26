@@ -269,7 +269,9 @@ defmodule SpaceTraders.Fleet.ShipServer do
   # confirms the event is genuinely done before the ship is unblocked.
   defp refresh(%{agent_token: agent_token, symbol: symbol})
        when is_binary(agent_token) and agent_token != "" do
-    SpaceTraders.API.get_ship(agent_token, symbol)
+    # This GenServer owns a persisted retry timer; blocking it with request-level
+    # backoff would make readiness calls unresponsive.
+    SpaceTraders.API.get_ship(agent_token, symbol, retry: false)
   end
 
   defp refresh(_state), do: {:error, :agent_token_missing}
