@@ -1005,6 +1005,11 @@ defmodule SpaceTradersWeb.DashboardLive do
         form_drafts={@form_drafts}
         selected_ship={Map.get(@selected_ships, to_string(@overview.agent.id))}
       />
+      <.fleet_attention
+        agent_id={@overview.agent.id}
+        ships={@overview.ships}
+        selected_ship={Map.get(@selected_ships, to_string(@overview.agent.id))}
+      />
       <div class="grid gap-5 lg:grid-cols-2">
         <.contract_panel
           contracts={@overview.contracts}
@@ -2222,6 +2227,52 @@ defmodule SpaceTradersWeb.DashboardLive do
     """
   end
 
+  attr :agent_id, :integer, required: true
+  attr :ships, :any, required: true
+  attr :selected_ship, :string, default: nil
+
+  defp fleet_attention(assigns) do
+    attention =
+      case assigns.ships do
+        {:ok, ships} -> Enum.filter(ships, &needs_attention?/1)
+        _ -> []
+      end
+
+    assigns = assign(assigns, :attention, attention)
+
+    ~H"""
+    <section
+      :if={@attention != []}
+      class="card border border-warning/40 bg-warning/10 p-4"
+      data-fleet-attention
+    >
+      <p class="eyebrow">Needs attention</p>
+      <h3 class="mt-1 text-lg font-semibold">Resolve blocked work before reviewing history</h3>
+      <ul class="mt-3 space-y-2">
+        <li
+          :for={ship <- @attention}
+          class="flex flex-wrap items-center justify-between gap-2 rounded border border-warning/30 p-3"
+        >
+          <div>
+            <span class="font-mono font-semibold">{ship.symbol}</span>
+            <span class="ml-2 text-sm">{attention_summary(ship)}</span>
+          </div>
+          <button
+            :if={@selected_ship != ship.symbol}
+            type="button"
+            phx-click="select_ship"
+            phx-value-agent_id={@agent_id}
+            phx-value-symbol={ship.symbol}
+            class="btn btn-primary btn-sm"
+            data-open-attention={ship.symbol}
+          >Resolve</button>
+          <span :if={@selected_ship == ship.symbol} class="badge badge-primary">Open in Ship console</span>
+        </li>
+      </ul>
+    </section>
+    """
+  end
+
   attr :ship, :map, required: true
   attr :ships, :list, required: true
   attr :agent_id, :integer, required: true
@@ -2865,7 +2916,8 @@ defmodule SpaceTradersWeb.DashboardLive do
   defp miner_job_panel(assigns) do
     job = Map.get(assigns.ship, :job)
     history = Map.get(assigns.ship, :job_history, [])
-    assigns = assign(assigns, job: job, job_history: history)
+    intent_history = Map.get(assigns.ship, :manual_intent_history, [])
+    assigns = assign(assigns, job: job, job_history: history, intent_history: intent_history)
 
     ~H"""
     <div class="mt-4 rounded border border-primary/20 p-3" data-job-panel="miner">
@@ -3068,6 +3120,64 @@ defmodule SpaceTradersWeb.DashboardLive do
                     {terminal_job_result(historical_job)}
                   </dd>
                 </div>
+                <div>
+                  <dt class="opacity-60">Final progress</dt><dd>
+                    {format_terminal_value(historical_job.progress)}
+                  </dd>
+                </div>
+                <div :if={historical_job.blocked_reason || historical_job.blocker}>
+                  <dt class="opacity-60">Terminal reason</dt><dd>
+                    {terminal_job_reason(historical_job)}
+                  </dd>
+                </div>
+                <div
+                  :if={historical_job.blocker && historical_job.blocker.evidence}
+                  class="sm:col-span-2"
+                >
+                  <dt class="opacity-60">Decision evidence</dt><dd>
+                    {historical_job.blocker.evidence}
+                  </dd>
+                </div>
+                <div :if={historical_job.predecessor_job_id}>
+                  <dt class="opacity-60">Predecessor</dt><dd>
+                    Miner {historical_job.predecessor_job_id}
+                  </dd>
+                </div>
+                <div :if={historical_job.successor_job_id}>
+                  <dt class="opacity-60">Successor</dt><dd>
+                    Miner {historical_job.successor_job_id}
+                  </dd>
+                </div>
+              </dl>
+            </details>
+          </li>
+        </ol>
+      </div>
+      <div
+        :if={@intent_history != []}
+        class="mt-3 border-t border-base-300/60 pt-3"
+        data-manual-intent-history
+      >
+        <p class="text-xs font-semibold uppercase tracking-wider opacity-60">
+          Manual control history
+        </p>
+        <ol class="mt-2 space-y-2 text-xs">
+          <li :for={intent <- @intent_history}>
+            <details data-manual-intent-history-entry={intent.id}>
+              <summary class="cursor-pointer">
+                {manual_intent_status(intent)} Navigate to {intent.target_waypoint}
+              </summary>
+              <dl class="mt-2 grid gap-1 pl-3 sm:grid-cols-2">
+                <div>
+                  <dt class="opacity-60">Last result</dt><dd>
+                    {format_terminal_value(intent.last_action_result)}
+                  </dd>
+                </div>
+                <div :if={intent.blocker}>
+                  <dt class="opacity-60">Decision evidence</dt><dd>
+                    {intent.blocker.evidence || blocker_summary(intent.blocker)}
+                  </dd>
+                </div>
               </dl>
             </details>
           </li>
@@ -3081,6 +3191,7 @@ defmodule SpaceTradersWeb.DashboardLive do
     activities =
       assigns.overviews
       |> Enum.flat_map(fn %{activity: activity} -> activity end)
+      |> Enum.reject(&activity_noise?/1)
       |> Enum.sort_by(& &1.inserted_at, {:desc, DateTime})
       |> Enum.take(10)
       |> Enum.sort_by(& &1.inserted_at, DateTime)
@@ -3150,6 +3261,16 @@ defmodule SpaceTradersWeb.DashboardLive do
   defp terminal_job_result(%{last_action_result: %{"kind" => kind}}), do: job_action_label(kind)
   defp terminal_job_result(_), do: "No completed action recorded"
 
+  defp terminal_job_reason(%{blocker: %JobBlocker{} = blocker}), do: blocker_summary(blocker)
+
+  defp terminal_job_reason(%{blocked_reason: reason}) when is_binary(reason),
+    do: job_blocked_reason(reason)
+
+  defp terminal_job_reason(_), do: "No terminal reason recorded"
+
+  defp format_terminal_value(value) when value in [nil, %{}], do: "None recorded"
+  defp format_terminal_value(value), do: inspect(value)
+
   defp job_reason(%{
          status: "blocked",
          blocker: %JobBlocker{
@@ -3173,6 +3294,9 @@ defmodule SpaceTradersWeb.DashboardLive do
   defp manual_intent_status(%{status: "active"}), do: "Working"
   defp manual_intent_status(%{status: "waiting"}), do: "Waiting"
   defp manual_intent_status(%{status: "blocked"}), do: "Blocked"
+  defp manual_intent_status(%{status: "completed"}), do: "Completed"
+  defp manual_intent_status(%{status: "stopped"}), do: "Stopped"
+  defp manual_intent_status(_), do: "Manual"
 
   defp manual_intent_status_class(%{status: "waiting"}),
     do: "badge badge-warning badge-sm ml-2"
@@ -3384,8 +3508,19 @@ defmodule SpaceTradersWeb.DashboardLive do
 
   defp needs_attention?(%{job: %{status: "blocked"}}), do: true
   defp needs_attention?(%{job: %{status: "paused"}}), do: true
+  defp needs_attention?(%{manual_intent: %{status: "blocked"}}), do: true
   defp needs_attention?(%{nav: %{status: "IN_TRANSIT"}}), do: false
   defp needs_attention?(_), do: false
+
+  defp attention_summary(%{job: job}) when not is_nil(job), do: job_reason(job) || job_status(job)
+
+  defp attention_summary(%{manual_intent: intent}),
+    do: manual_intent_reason(intent) || manual_intent_status(intent)
+
+  defp attention_summary(_), do: "Review Ship state"
+
+  defp activity_noise?(%{kind: kind}) when kind in ["retry", "manual_intent_waiting"], do: true
+  defp activity_noise?(_), do: false
 
   defp activity_facts(%{metadata: metadata}) when is_map(metadata) do
     metadata

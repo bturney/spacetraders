@@ -30,6 +30,7 @@ defmodule SpaceTraders.Fleet.Job do
     field :finished_at, :utc_datetime
 
     belongs_to :ship, SpaceTraders.Fleet.Ship
+    belongs_to :predecessor_job, SpaceTraders.Fleet.Job
 
     timestamps(type: :utc_datetime)
   end
@@ -50,7 +51,8 @@ defmodule SpaceTraders.Fleet.Job do
       :cargo_threshold,
       :status,
       :blocked_reason,
-      :last_validated_at
+      :last_validated_at,
+      :predecessor_job_id
     ])
     |> cast_embed(:blocker)
     |> validate_required([:type, :extraction_waypoint, :market_waypoint, :cargo_threshold])

@@ -1334,6 +1334,14 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
 
       assert has_element?(lv, "[data-needs-attention-count]", "1 needs attention")
       refute has_element?(lv, "[data-fleet-healthy]")
+
+      assert has_element?(
+               lv,
+               "[data-fleet-attention]",
+               "Resolve blocked work before reviewing history"
+             )
+
+      assert has_element?(lv, "[data-open-attention=\"ORBITALIST-1\"]", "Resolve")
       assert has_element?(lv, "[data-ship-card=\"ORBITALIST-1\"]", "Blocked")
 
       assert has_element?(
@@ -1667,8 +1675,11 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       assert has_element?(lv, "[data-job-history]", "Replaced")
       assert has_element?(lv, "[data-job-history-entry=\"#{predecessor.id}\"]", "X1-UX81-A2")
       assert has_element?(lv, "[data-job-history-entry=\"#{predecessor.id}\"]", "30")
+      assert has_element?(lv, "[data-job-history-entry=\"#{predecessor.id}\"]", "Successor")
       assert Repo.get!(Job, predecessor.id).status == "replaced"
-      assert Fleet.ship_job(agent, "ORBITALIST-1").extraction_waypoint == "X1-UX81-A3"
+      successor = Fleet.ship_job(agent, "ORBITALIST-1")
+      assert successor.extraction_waypoint == "X1-UX81-A3"
+      assert successor.predecessor_job_id == predecessor.id
     end
 
     test "selects a Ship operation panel and returns to the Fleet roster on mobile", %{
@@ -1703,7 +1714,7 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       refute html =~ "Selected Ship operations"
     end
 
-    test "renders latest ten activity entries chronologically with recovery facts", %{
+    test "renders consequential activity chronologically without retry noise", %{
       conn: conn,
       operator: operator
     } do
@@ -1722,11 +1733,19 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       Repo.insert!(%Activity{
         agent_id: agent.id,
         ship_id: ship.id,
-        kind: "retry",
-        message: "Retrying recovery",
-        metadata: %{"outcome" => "transport_error", "retry" => 2},
+        kind: "configuration",
+        message: "Miner Job configuration changed",
+        metadata: %{},
         inserted_at: older,
         updated_at: older
+      })
+
+      Repo.insert!(%Activity{
+        agent_id: agent.id,
+        ship_id: ship.id,
+        kind: "retry",
+        message: "Retrying recovery",
+        metadata: %{"outcome" => "transport_error", "retry" => 2}
       })
 
       Repo.insert!(%Activity{
@@ -1744,12 +1763,14 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       {:ok, lv, _html} = live(conn, ~p"/")
       html = render(lv)
 
-      assert html =~ "Retrying recovery"
+      assert html =~ "Miner Job configuration changed"
       assert html =~ "Recovery confirmed"
       assert html =~ "outcome: confirmed"
       assert html =~ "delta: cargo +5"
-      assert html =~ "retry: 2"
-      assert :binary.match(html, "Retrying recovery") < :binary.match(html, "Recovery confirmed")
+      refute html =~ "Retrying recovery"
+
+      assert :binary.match(html, "Miner Job configuration changed") <
+               :binary.match(html, "Recovery confirmed")
     end
 
     test "shows the effective sellable payload and jettison activity while drafts stay patch-safe",

@@ -147,6 +147,7 @@ defmodule SpaceTraders.Fleet do
        |> Map.put(:job, job)
        |> Map.put(:job_history, history)
        |> Map.put(:manual_intent, Map.get(intents_by_ship, ship_record.id))
+       |> Map.put(:manual_intent_history, manual_intent_history(ship_record.id))
        |> Map.put(:destination_history, destination_history(agent, ship.symbol))
      end)}
   end
@@ -163,6 +164,13 @@ defmodule SpaceTraders.Fleet do
     )
     |> Repo.all()
     |> Map.new(&{&1.ship_id, &1})
+  end
+
+  defp manual_intent_history(ship_id) do
+    ManualIntent
+    |> where([intent], intent.ship_id == ^ship_id and intent.status in ^@terminal_intent_states)
+    |> order_by([intent], desc: intent.finished_at, desc: intent.id)
+    |> Repo.all()
   end
 
   defp annotate_actions({:ok, ships}) do
@@ -480,7 +488,6 @@ defmodule SpaceTraders.Fleet do
     Repo.update!(
       Ecto.Changeset.change(intent,
         status: status,
-        blocker: nil,
         in_flight_action: nil,
         finished_at: DateTime.utc_now() |> DateTime.truncate(:second)
       )
@@ -832,6 +839,10 @@ defmodule SpaceTraders.Fleet do
       jobs
       |> Enum.filter(&(&1.status in @terminal_job_states))
       |> Enum.sort_by(&{&1.finished_at, &1.id}, :desc)
+      |> Enum.map(fn historical_job ->
+        successor = Enum.find(jobs, &(&1.predecessor_job_id == historical_job.id))
+        Map.put(historical_job, :successor_job_id, successor && successor.id)
+      end)
 
     {job, history}
   end
@@ -885,9 +896,9 @@ defmodule SpaceTraders.Fleet do
   defp replace_miner_job_transaction(ship, attrs) do
     case unfinished_job(ship.id) do
       %Job{} = predecessor ->
-        terminalize_job!(predecessor, "replaced")
+        predecessor = terminalize_job!(predecessor, "replaced")
 
-        case insert_miner_job(ship, attrs) do
+        case insert_miner_job(ship, Map.put(attrs, :predecessor_job_id, predecessor.id)) do
           {:ok, successor} -> successor
           {:error, changeset} -> Repo.rollback(changeset)
         end
@@ -901,8 +912,6 @@ defmodule SpaceTraders.Fleet do
     Repo.update!(
       Ecto.Changeset.change(job,
         status: status,
-        blocked_reason: nil,
-        blocker: nil,
         in_flight_action: nil,
         finished_at: DateTime.utc_now() |> DateTime.truncate(:second)
       )
