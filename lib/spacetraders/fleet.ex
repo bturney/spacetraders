@@ -754,7 +754,9 @@ defmodule SpaceTraders.Fleet do
           advance_manual_intent(agent, intent, live_ship)
 
         {:error, reason} ->
-          intent_recovery_retry_or_block(ship, intent, agent_id, agent_token, reason)
+          if reason == :stale_agent,
+            do: :ok,
+            else: intent_recovery_retry_or_block(ship, intent, agent_id, agent_token, reason)
       end
     else
       _ -> :ok
@@ -2511,12 +2513,16 @@ defmodule SpaceTraders.Fleet do
 
   @doc "Reconciles a blocked in-flight Miner Job before explicitly retrying it."
   def reconcile_miner_job(%AgentRecord{} = agent, ship_symbol) do
-    with {:ok, ship} <- owned_ship(agent, ship_symbol),
+    with :ok <- Agent.execution_allowed?(agent),
+         {:ok, ship} <- owned_ship(agent, ship_symbol),
          %Job{status: "blocked", blocker: %JobBlocker{}, in_flight_action: action} = config
          when is_map(action) <-
            unfinished_job(ship.id),
          {:ok, live_ship} <-
-           SpaceTraders.API.get_ship(agent.agent_token, ship_symbol, retry: false) do
+           Agent.handle_game_result(
+             agent,
+             SpaceTraders.API.get_ship(agent.agent_token, ship_symbol, retry: false)
+           ) do
       reconcile_in_flight(agent.id, ship, config, live_ship)
     else
       %Job{} -> {:error, :miner_job_not_blocked}
