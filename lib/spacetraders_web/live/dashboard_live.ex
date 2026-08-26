@@ -32,6 +32,7 @@ defmodule SpaceTradersWeb.DashboardLive do
   alias SpaceTraders.Fleet
   alias SpaceTraders.Fleet.Job
   alias SpaceTraders.Fleet.JobBlocker
+  alias SpaceTraders.Intelligence
   alias SpaceTraders.SystemWaypointProjection
   alias SpaceTradersWeb.DashboardPrototype
 
@@ -82,6 +83,7 @@ defmodule SpaceTradersWeb.DashboardLive do
               expanded_market_descriptions={@expanded_market_descriptions}
               show_historical_contracts={@show_historical_contracts}
               waypoint_markets={@waypoint_markets}
+              waypoint_intelligence={@waypoint_intelligence}
               selected_ships={@selected_ships}
             />
 
@@ -167,7 +169,8 @@ defmodule SpaceTradersWeb.DashboardLive do
        selected_waypoints: %{},
        selected_ships: %{},
        waypoint_filters: %{},
-       waypoint_markets: %{}
+       waypoint_markets: %{},
+       waypoint_intelligence: %{}
      )}
   end
 
@@ -488,7 +491,10 @@ defmodule SpaceTradersWeb.DashboardLive do
         nil -> load_waypoint_market(socket, agent_id, symbol, key)
       end
 
-    {:noreply, assign(socket, selected_waypoints: selected_waypoints)}
+    {:noreply,
+     socket
+     |> load_waypoint_intelligence(agent_id, symbol, key)
+     |> assign(selected_waypoints: selected_waypoints)}
   end
 
   @impl true
@@ -834,6 +840,25 @@ defmodule SpaceTradersWeb.DashboardLive do
     end
   end
 
+  defp load_waypoint_intelligence(socket, agent_id, symbol, key) do
+    facts =
+      case Enum.find(socket.assigns.overviews, &(to_string(&1.agent.id) == agent_id)) do
+        %{agent: agent, waypoints: {:ok, waypoints}} ->
+          case Enum.find(waypoints, &(&1.symbol == symbol)) do
+            nil ->
+              %{}
+
+            waypoint ->
+              Intelligence.subject(agent, :waypoint, waypoint.system_symbol, waypoint.symbol)
+          end
+
+        _ ->
+          %{}
+      end
+
+    update(socket, :waypoint_intelligence, &Map.put(&1, key, facts))
+  end
+
   defp refresh_agent_for_ship(socket, ship_symbol) do
     case agent_for_ship(socket, ship_symbol) do
       {:ok, agent} -> refresh_agent(socket, agent)
@@ -955,6 +980,7 @@ defmodule SpaceTradersWeb.DashboardLive do
   attr :expanded_market_descriptions, :any, default: MapSet.new()
   attr :show_historical_contracts, :any, default: MapSet.new()
   attr :waypoint_markets, :map, default: %{}
+  attr :waypoint_intelligence, :map, default: %{}
   attr :selected_ships, :map, default: %{}
 
   defp agent_section(assigns) do
@@ -969,6 +995,7 @@ defmodule SpaceTradersWeb.DashboardLive do
         selected_symbol={Map.get(@selected_waypoints, to_string(@overview.agent.id))}
         filter={Map.get(@waypoint_filters, to_string(@overview.agent.id), "all")}
         waypoint_markets={@waypoint_markets}
+        waypoint_intelligence={@waypoint_intelligence}
         form_drafts={@form_drafts}
       />
       <.fleet_grid
@@ -1536,6 +1563,7 @@ defmodule SpaceTradersWeb.DashboardLive do
   attr :selected_symbol, :string, default: nil
   attr :filter, :string, default: "all"
   attr :waypoint_markets, :map, default: %{}
+  attr :waypoint_intelligence, :map, default: %{}
   attr :form_drafts, :map, default: %{}
 
   defp system_map(assigns) do
@@ -1705,6 +1733,9 @@ defmodule SpaceTradersWeb.DashboardLive do
                       ships_at={@ships_at}
                       agent_id={@agent_id}
                       market={Map.get(@waypoint_markets, {to_string(@agent_id), @selected_symbol})}
+                      intelligence={
+                        Map.get(@waypoint_intelligence, {to_string(@agent_id), @selected_symbol}, %{})
+                      }
                       form_drafts={@form_drafts}
                     />
                   </div>
@@ -1733,6 +1764,9 @@ defmodule SpaceTradersWeb.DashboardLive do
             ships_at={@ships_at}
             agent_id={@agent_id}
             market={Map.get(@waypoint_markets, {to_string(@agent_id), @selected_symbol})}
+            intelligence={
+              Map.get(@waypoint_intelligence, {to_string(@agent_id), @selected_symbol}, %{})
+            }
             form_drafts={@form_drafts}
           />
           <.fleet_location_summary
@@ -1816,6 +1850,7 @@ defmodule SpaceTradersWeb.DashboardLive do
   attr :ships_at, :any, required: true
   attr :agent_id, :integer, required: true
   attr :market, :any, default: nil
+  attr :intelligence, :map, default: %{}
   attr :form_drafts, :map, default: %{}
 
   defp waypoint_details(assigns) do
@@ -1881,6 +1916,23 @@ defmodule SpaceTradersWeb.DashboardLive do
               </li>
             </ul>
           </div>
+          <details :if={map_size(@intelligence) > 0} class="mt-4" data-operational-intelligence>
+            <summary class="cursor-pointer text-xs font-semibold uppercase tracking-wider opacity-60">
+              Operational Intelligence
+            </summary>
+            <dl class="mt-2 space-y-2 text-sm">
+              <div :for={{field, fact} <- Enum.sort_by(@intelligence, &elem(&1, 0))}>
+                <dt class="font-mono text-xs">{field}</dt>
+                <dd class="opacity-70">
+                  <span class="badge badge-outline badge-xs">{fact.state}</span>
+                  <span class="ml-1">{fact.observation.source}</span>
+                  <time class="ml-1 font-mono text-xs">{DateTime.to_iso8601(
+                    fact.observation.observed_at
+                  )}</time>
+                </dd>
+              </div>
+            </dl>
+          </details>
           <%= case @market do %>
             <% {:ok, market} -> %>
               <div class="mt-4" data-waypoint-market>
