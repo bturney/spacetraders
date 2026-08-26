@@ -22,7 +22,7 @@ defmodule SpaceTraders.Fleet do
   alias SpaceTraders.Fleet.{Activity, Job, JobBlocker, ManualIntent, Ship, ShipDestination}
   alias SpaceTraders.Fleet.ShipServer
   alias SpaceTraders.Repo
-  alias SpaceTraders.{Agent, Contracts, Listing, Shipyard}
+  alias SpaceTraders.{Agent, Contracts, Intelligence, Listing, Shipyard}
   alias SpaceTraders.Timeline
 
   @gather_kinds ["extract", "siphon"]
@@ -102,12 +102,19 @@ defmodule SpaceTraders.Fleet do
   end
 
   @doc "Reads Market data for a selected Waypoint when it is a Marketplace."
-  def waypoint_market(%AgentRecord{agent_token: token}, waypoint)
+  def waypoint_market(%AgentRecord{agent_token: token} = agent, waypoint)
       when is_binary(token) and token != "" do
     with :ok <- market_waypoint?(waypoint),
          %{system_symbol: system, symbol: symbol} when is_binary(system) and is_binary(symbol) <-
            waypoint do
-      SpaceTraders.API.get_market(token, system, symbol)
+      case SpaceTraders.API.get_market(token, system, symbol) do
+        {:ok, market} = result ->
+          record_market_observation(agent, system, market, "get_market")
+          result
+
+        result ->
+          result
+      end
     else
       {:error, :invalid_market_waypoint} -> :not_a_marketplace
       _ -> {:error, :waypoint_unavailable}
@@ -1898,10 +1905,17 @@ defmodule SpaceTraders.Fleet do
   is fully collected. Returns
   `{:ok, [%SpaceTraders.API.Model.Waypoint{}]}` or an API error.
   """
-  def list_waypoints(%AgentRecord{agent_token: agent_token, headquarters: headquarters})
+  def list_waypoints(%AgentRecord{agent_token: agent_token, headquarters: headquarters} = agent)
       when is_binary(agent_token) and agent_token != "" and is_binary(headquarters) do
     with {:ok, system} <- system_from_headquarters(headquarters) do
-      fetch_waypoint_pages(agent_token, system)
+      case fetch_waypoint_pages(agent_token, system) do
+        {:ok, waypoints} = result ->
+          Enum.each(waypoints, &record_waypoint_observation(agent, &1, "get_waypoints"))
+          result
+
+        result ->
+          result
+      end
     end
   end
 
@@ -1913,6 +1927,20 @@ defmodule SpaceTraders.Fleet do
       {:error, reason, _collected} -> {:error, reason}
     end
   end
+
+  defp record_waypoint_observation(%AgentRecord{id: id} = agent, waypoint, source)
+       when is_integer(id) do
+    Intelligence.observe_waypoint(agent, waypoint, source: source)
+  end
+
+  defp record_waypoint_observation(_agent, _waypoint, _source), do: :ok
+
+  defp record_market_observation(%AgentRecord{id: id} = agent, system, market, source)
+       when is_integer(id) do
+    Intelligence.observe_market(agent, system, market, source: source)
+  end
+
+  defp record_market_observation(_agent, _system, _market, _source), do: :ok
 
   defp system_from_headquarters(headquarters) do
     case Regex.run(~r/^(.+)-[^-]+$/, headquarters, capture: :all) do
@@ -2152,7 +2180,10 @@ defmodule SpaceTraders.Fleet do
       when is_binary(agent_token) and agent_token != "" do
     with :ok <- preempt_miner_job_for(agent, ship_symbol, {:manual_override, "selling cargo"}),
          :ok <- ShipServer.ensure_ready(ship_symbol) do
-      SpaceTraders.API.sell_cargo(agent_token, ship_symbol, trade_symbol, units)
+      invalidate_market_after(
+        SpaceTraders.API.sell_cargo(agent_token, ship_symbol, trade_symbol, units),
+        agent
+      )
     end
   end
 
@@ -2169,7 +2200,10 @@ defmodule SpaceTraders.Fleet do
       when is_binary(agent_token) and agent_token != "" and is_integer(units) and units > 0 do
     with :ok <- preempt_miner_job_for(agent, ship_symbol, {:manual_override, "purchasing cargo"}),
          :ok <- ShipServer.ensure_ready(ship_symbol) do
-      SpaceTraders.API.purchase_cargo(agent_token, ship_symbol, trade_symbol, units)
+      invalidate_market_after(
+        SpaceTraders.API.purchase_cargo(agent_token, ship_symbol, trade_symbol, units),
+        agent
+      )
     end
   end
 
@@ -2185,11 +2219,23 @@ defmodule SpaceTraders.Fleet do
       when is_binary(agent_token) and agent_token != "" do
     with :ok <- preempt_miner_job_for(agent, ship_symbol, {:manual_override, "refueling"}),
          :ok <- ShipServer.ensure_ready(ship_symbol) do
-      SpaceTraders.API.refuel_ship(agent_token, ship_symbol)
+      invalidate_market_after(SpaceTraders.API.refuel_ship(agent_token, ship_symbol), agent)
     end
   end
 
   def refuel_ship(%AgentRecord{}, _ship_symbol), do: {:error, :agent_token_missing}
+
+  defp invalidate_market_after({:ok, _result} = result, agent) do
+    Intelligence.invalidate_subject_type(agent, :market)
+    result
+  end
+
+  defp invalidate_market_after({:error, %SpaceTraders.API.GameplayError{}} = result, agent) do
+    Intelligence.invalidate_subject_type(agent, :market)
+    result
+  end
+
+  defp invalidate_market_after(result, _agent), do: result
 
   @doc "Jettisons cargo from a ship's hold and returns the updated cargo."
   def jettison_cargo(

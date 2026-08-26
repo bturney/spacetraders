@@ -2,13 +2,14 @@ defmodule SpaceTraders.Listing do
   @moduledoc false
 
   alias SpaceTraders.Agent.Agent, as: AgentRecord
+  alias SpaceTraders.Intelligence
 
   @market_trait "MARKETPLACE"
   @shipyard_trait "SHIPYARD"
 
   @doc "Builds market and shipyard listings, reusing fresh headquarters waypoints when available."
   def for_ships(
-        %AgentRecord{agent_token: token, headquarters: headquarters},
+        %AgentRecord{agent_token: token, headquarters: headquarters} = agent,
         ships,
         headquarters_waypoints
       )
@@ -18,7 +19,13 @@ defmodule SpaceTraders.Listing do
 
     %{
       markets:
-        market_listings(token, ships_by_system, headquarters_system, headquarters_waypoints),
+        market_listings(
+          agent,
+          token,
+          ships_by_system,
+          headquarters_system,
+          headquarters_waypoints
+        ),
       shipyards:
         shipyard_listings(token, ships_by_system, headquarters_system, headquarters_waypoints)
     }
@@ -47,7 +54,7 @@ defmodule SpaceTraders.Listing do
     if unavailable?, do: {:partial, listings}, else: {:ok, listings}
   end
 
-  defp market_listings(token, ships_by_system, headquarters_system, headquarters_waypoints) do
+  defp market_listings(agent, token, ships_by_system, headquarters_system, headquarters_waypoints) do
     {waypoints, unavailable?} =
       discover_for_snapshot(
         token,
@@ -62,6 +69,8 @@ defmodule SpaceTraders.Listing do
         {waypoint, ships}, {listings, unavailable?} ->
           case SpaceTraders.API.get_market(token, waypoint.system_symbol, waypoint.symbol) do
             {:ok, market} ->
+              record_market_observation(agent, waypoint, ships, market)
+
               {[%{waypoint: waypoint.symbol, market: market, ships: ships} | listings],
                unavailable?}
 
@@ -165,4 +174,14 @@ defmodule SpaceTraders.Listing do
   end
 
   defp system_from_headquarters(_), do: nil
+
+  defp record_market_observation(%AgentRecord{id: id} = agent, waypoint, [ship | _], market)
+       when is_integer(id) do
+    Intelligence.observe_market(agent, waypoint.system_symbol, market,
+      source: "get_market",
+      observing_ship_symbol: ship.symbol
+    )
+  end
+
+  defp record_market_observation(_agent, _waypoint, _ships, _market), do: :ok
 end
