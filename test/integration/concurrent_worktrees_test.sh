@@ -81,6 +81,7 @@ port_two="$(awk -F= '/^export PORT=/{print $2}' "$WORKTREE_TWO/.worktree-env")"
 
 if [ "$port_one" = "$port_two" ]; then
   echo "Distinct task IDs received the same port." >&2
+  grep -H . "$TEMP_ROOT"/one.log "$TEMP_ROOT"/two.log >&2 || true
   exit 1
 fi
 
@@ -91,7 +92,7 @@ grep -q '^Restored warm cache ' "$TEMP_ROOT/three.log"
 
 printf '\n# dirty cache bypass\n' >> "$WORKTREE_DIRTY/README.md"
 setup_worktree "$WORKTREE_DIRTY" integration-dirty >"$TEMP_ROOT/dirty.log" 2>&1
-grep -q '^Dirty worktree: compiling privately\.' "$TEMP_ROOT/dirty.log"
+grep -q '^Dirty worktree: compiling privately' "$TEMP_ROOT/dirty.log"
 
 if setup_worktree "$WORKTREE_THREE" integration-one >"$TEMP_ROOT/duplicate.log" 2>&1; then
   echo "Duplicate task ID unexpectedly received an allocated port." >&2

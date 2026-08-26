@@ -33,8 +33,9 @@ config :spacetraders, SpaceTraders.Mailer, adapter: Swoosh.Adapters.Test
 # Disable swoosh api client as it is only required for production adapters
 config :swoosh, :api_client, false
 
-# Print only warnings and errors during test
-config :logger, level: :warning
+# Print only errors during test: warning-level retry/polling logs from Req and
+# ShipServer recovery paths are expected stubbed-failure noise in this suite.
+config :logger, level: :error
 
 # Game API client: stub the HTTP transport with Req.Test in test env, and
 # disable the token-bucket rate limiter so API tests are not throttled.
