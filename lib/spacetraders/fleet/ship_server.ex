@@ -288,7 +288,7 @@ defmodule SpaceTraders.Fleet.ShipServer do
     # backoff would make readiness calls unresponsive.
     case SpaceTraders.Repo.get(Agent, state.agent_id) do
       nil ->
-        SpaceTraders.API.get_ship(agent_token, symbol, retry: false)
+        {:error, :stale_agent}
 
       agent ->
         with :ok <- AgentContext.execution_allowed?(agent) do
