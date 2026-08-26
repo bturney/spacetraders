@@ -24,6 +24,7 @@ defmodule SpaceTraders.Fleet.Job do
     field :last_action_result, :map
     field :progress, :map, default: %{}
     field :recovery_attempts, :integer, default: 0
+    field :recovery_started_at, :utc_datetime
     field :sellable_goods, {:array, :string}, default: []
     field :contract_deliverables, {:array, :map}, default: []
     field :finished_at, :utc_datetime

@@ -636,13 +636,19 @@ defmodule SpaceTradersWeb.DashboardLive do
 
   @impl true
   def handle_event(action, %{"symbol" => ship_symbol}, socket)
-      when action in ["pause_miner_job", "resume_miner_job", "stop_miner_job"] do
+      when action in [
+             "pause_miner_job",
+             "resume_miner_job",
+             "reconcile_miner_job",
+             "stop_miner_job"
+           ] do
     with {:ok, agent} <- agent_for_ship(socket, ship_symbol),
          :ok <- miner_job_action(action, agent, ship_symbol) do
       message =
         case action do
           "pause_miner_job" -> "#{ship_symbol} Miner Job paused."
           "resume_miner_job" -> "#{ship_symbol} Miner Job resumed after revalidation."
+          "reconcile_miner_job" -> "#{ship_symbol} Miner Job reconciled and retried."
           "stop_miner_job" -> "#{ship_symbol} Miner Job stopped; Ship is manual."
         end
 
@@ -659,6 +665,9 @@ defmodule SpaceTradersWeb.DashboardLive do
 
   defp miner_job_action("resume_miner_job", agent, ship),
     do: unwrap_config(Fleet.resume_miner_job(agent, ship))
+
+  defp miner_job_action("reconcile_miner_job", agent, ship),
+    do: unwrap_config(Fleet.reconcile_miner_job(agent, ship))
 
   defp miner_job_action("stop_miner_job", agent, ship), do: Fleet.stop_miner_job(agent, ship)
   defp unwrap_config({:ok, _config}), do: :ok
@@ -2872,13 +2881,30 @@ defmodule SpaceTradersWeb.DashboardLive do
           Pause
         </button>
         <button
-          :if={@job && @job.status in ["paused", "blocked"]}
+          :if={
+            @job &&
+              (@job.status == "paused" or
+                 (@job.status == "blocked" and
+                    not (match?(%JobBlocker{}, @job.blocker) and is_map(@job.in_flight_action))))
+          }
           type="button"
           phx-click="resume_miner_job"
           phx-value-symbol={@ship.symbol}
           class="btn btn-primary btn-sm"
         >
           Resume after revalidation
+        </button>
+        <button
+          :if={
+            @job && @job.status == "blocked" && match?(%JobBlocker{}, @job.blocker) &&
+              is_map(@job.in_flight_action)
+          }
+          type="button"
+          phx-click="reconcile_miner_job"
+          phx-value-symbol={@ship.symbol}
+          class="btn btn-primary btn-sm"
+        >
+          {if(@job.blocker.reason == "retry_exhausted", do: "Reconcile", else: "Reconcile and retry")}
         </button>
         <button
           :if={@job}

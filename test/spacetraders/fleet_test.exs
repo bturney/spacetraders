@@ -1992,11 +1992,12 @@ defmodule SpaceTraders.FleetTest do
 
       assert recovered.blocker == %JobBlocker{
                reason: "ambiguous",
+               summary: "The game did not confirm whether the in-flight action completed.",
                evidence: "\"ambiguous\"",
                observed_at: recovered.blocker.observed_at,
                resolver: "game_state",
                retry_condition: "authoritative_action_outcome_available",
-               corrective_actions: ["inspect_activity", "resume"]
+               corrective_actions: ["inspect_activity", "reconcile_and_retry"]
              }
 
       assert [%{kind: "miner_job_recovery", metadata: %{"outcome" => "ambiguous"}} | _] =

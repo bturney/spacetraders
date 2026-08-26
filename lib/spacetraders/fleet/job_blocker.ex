@@ -12,6 +12,7 @@ defmodule SpaceTraders.Fleet.JobBlocker do
   @primary_key false
   embedded_schema do
     field :reason, :string
+    field :summary, :string
     field :evidence, :string
     field :observed_at, :utc_datetime
     field :resolver, :string

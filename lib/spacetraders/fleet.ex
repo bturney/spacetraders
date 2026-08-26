@@ -28,6 +28,8 @@ defmodule SpaceTraders.Fleet do
   @gather_kinds ["extract", "siphon"]
   @terminal_job_states Job.terminal_states()
   @running_job_states Job.running_states()
+  @max_recovery_attempts 5
+  @recovery_window_seconds 15 * 60
   @unfinished_intent_states ManualIntent.unfinished_states()
   @terminal_intent_states ManualIntent.terminal_states()
 
@@ -2318,7 +2320,9 @@ defmodule SpaceTraders.Fleet do
     with %Ship{} = ship <- Repo.get_by(Ship, symbol: ship_symbol, agent_id: agent_id),
          %Job{} = config <- unfinished_job(ship.id) do
       if config.status in @running_job_states do
-        case SpaceTraders.API.get_ship(agent_token, ship_symbol) do
+        # Recovery owns its own persisted attempt budget. Avoid nested client
+        # retries so one authoritative read counts as one recovery attempt.
+        case SpaceTraders.API.get_ship(agent_token, ship_symbol, retry: false) do
           {:ok, live_ship} when config.status == "active" and is_nil(config.in_flight_action) ->
             advance_miner_job(Repo.get!(AgentRecord, agent_id), config, live_ship)
 
@@ -2337,6 +2341,22 @@ defmodule SpaceTraders.Fleet do
       end
     else
       _ -> :ok
+    end
+  end
+
+  @doc "Reconciles a blocked in-flight Miner Job before explicitly retrying it."
+  def reconcile_miner_job(%AgentRecord{} = agent, ship_symbol) do
+    with {:ok, ship} <- owned_ship(agent, ship_symbol),
+         %Job{status: "blocked", blocker: %JobBlocker{}, in_flight_action: action} = config
+         when is_map(action) <-
+           unfinished_job(ship.id),
+         {:ok, live_ship} <-
+           SpaceTraders.API.get_ship(agent.agent_token, ship_symbol, retry: false) do
+      reconcile_in_flight(agent.id, ship, config, live_ship)
+    else
+      %Job{} -> {:error, :miner_job_not_blocked}
+      nil -> {:error, :miner_job_not_configured}
+      {:error, reason} -> {:error, reason}
     end
   end
 
@@ -2372,7 +2392,7 @@ defmodule SpaceTraders.Fleet do
         end
 
       :absent ->
-        if config.recovery_attempts < 3 do
+        if recovery_available?(config) do
           retry_recovery(agent_id, ship, config, live_ship)
         else
           block_recovery(agent_id, ship, config, "retry_exhausted")
@@ -2432,7 +2452,9 @@ defmodule SpaceTraders.Fleet do
       Ecto.Changeset.change(config,
         status: if(live_ship.nav.status == "IN_TRANSIT", do: "waiting", else: "active"),
         blocked_reason: nil,
+        blocker: nil,
         recovery_attempts: 0,
+        recovery_started_at: nil,
         last_action_result: %{"kind" => "recovery", "outcome" => "confirmed"},
         progress: progress,
         in_flight_action:
@@ -2444,7 +2466,17 @@ defmodule SpaceTraders.Fleet do
   defp retry_recovery(agent_id, ship, config, live_ship) do
     attempts = config.recovery_attempts + 1
 
-    config = Repo.update!(Ecto.Changeset.change(config, recovery_attempts: attempts))
+    config =
+      Repo.update!(
+        Ecto.Changeset.change(config,
+          status: "active",
+          blocked_reason: nil,
+          blocker: nil,
+          recovery_attempts: attempts,
+          recovery_started_at:
+            config.recovery_started_at || DateTime.utc_now() |> DateTime.truncate(:second)
+        )
+      )
 
     record_activity_by_id(
       agent_id,
@@ -2456,7 +2488,10 @@ defmodule SpaceTraders.Fleet do
 
     case advance_miner_job(Repo.get!(AgentRecord, agent_id), config, live_ship, :timeline) do
       {:ok, recovered_config} ->
-        {:ok, Repo.update!(Ecto.Changeset.change(recovered_config, recovery_attempts: 0))}
+        {:ok,
+         Repo.update!(
+           Ecto.Changeset.change(recovered_config, recovery_attempts: 0, recovery_started_at: nil)
+         )}
 
       error ->
         error
@@ -2467,9 +2502,13 @@ defmodule SpaceTraders.Fleet do
     with %Ship{} = ship <- Repo.get_by(Ship, symbol: ship_symbol, agent_id: agent_id),
          %Job{status: status} = config when status in @running_job_states <-
            unfinished_job(ship.id) do
-      if config.recovery_attempts < 3 do
+      if recovery_available?(config) do
         Repo.update!(
-          Ecto.Changeset.change(config, recovery_attempts: config.recovery_attempts + 1)
+          Ecto.Changeset.change(config,
+            recovery_attempts: config.recovery_attempts + 1,
+            recovery_started_at:
+              config.recovery_started_at || DateTime.utc_now() |> DateTime.truncate(:second)
+          )
         )
 
         record_activity_by_id(
@@ -2487,6 +2526,17 @@ defmodule SpaceTraders.Fleet do
     else
       _ -> :ok
     end
+  end
+
+  defp recovery_available?(config) do
+    config.recovery_attempts < @max_recovery_attempts and
+      recovery_within_window?(config.recovery_started_at)
+  end
+
+  defp recovery_within_window?(nil), do: true
+
+  defp recovery_within_window?(%DateTime{} = started_at) do
+    DateTime.diff(DateTime.utc_now(), started_at, :second) < @recovery_window_seconds
   end
 
   defp block_recovery(agent_id, ship, config, outcome) do
@@ -2518,6 +2568,7 @@ defmodule SpaceTraders.Fleet do
 
     %JobBlocker{
       reason: blocker_reason(reason),
+      summary: blocker_summary(reason),
       evidence: inspect(reason),
       observed_at: DateTime.utc_now() |> DateTime.truncate(:second),
       resolver: resolver,
@@ -2525,6 +2576,14 @@ defmodule SpaceTraders.Fleet do
       corrective_actions: corrective_actions
     }
   end
+
+  defp blocker_summary("ambiguous"),
+    do: "The game did not confirm whether the in-flight action completed."
+
+  defp blocker_summary("retry_exhausted" <> _),
+    do: "Authoritative recovery could not complete within its retry budget."
+
+  defp blocker_summary(reason), do: "Miner Job cannot progress: #{blocker_reason(reason)}."
 
   defp blocker_reason(reason) when is_atom(reason), do: Atom.to_string(reason)
   defp blocker_reason(reason) when is_tuple(reason), do: reason |> elem(0) |> blocker_reason()
@@ -2561,10 +2620,11 @@ defmodule SpaceTraders.Fleet do
         {"game_state", "authoritative_state_changed", ["resume"]}
 
       {"ambiguous", _reason} ->
-        {"game_state", "authoritative_action_outcome_available", ["inspect_activity", "resume"]}
+        {"game_state", "authoritative_action_outcome_available",
+         ["inspect_activity", "reconcile_and_retry"]}
 
       {"retry_exhausted", _reason} ->
-        {"game_state", "authoritative_read_succeeds", ["resume"]}
+        {"game_state", "authoritative_read_succeeds", ["reconcile"]}
 
       {_code, reason} when is_struct(reason) ->
         {"game_state", "authoritative_read_succeeds", ["resume"]}
