@@ -339,6 +339,9 @@ defmodule SpaceTraders.Fleet do
          :ok <- preempt_miner_job_for(agent, ship_symbol, {:manual_override, "navigation"}),
          {:ok, intent} <- replace_manual_intent(ship, waypoint) do
       reconcile_manual_intent(agent, intent)
+    else
+      {:error, %Ecto.Changeset{}} -> {:error, :manual_intent_conflict}
+      error -> error
     end
   end
 
@@ -468,7 +471,6 @@ defmodule SpaceTraders.Fleet do
     Repo.update!(
       Ecto.Changeset.change(intent,
         status: status,
-        blocked_reason: nil,
         blocker: nil,
         in_flight_action: nil,
         finished_at: DateTime.utc_now() |> DateTime.truncate(:second)
@@ -481,7 +483,6 @@ defmodule SpaceTraders.Fleet do
       Repo.update!(
         Ecto.Changeset.change(intent,
           status: "completed",
-          blocked_reason: nil,
           blocker: nil,
           in_flight_action: nil,
           last_action_result: %{"kind" => "navigate", "waypoint" => intent.target_waypoint},
@@ -527,8 +528,8 @@ defmodule SpaceTraders.Fleet do
 
         {:ok, intent}
 
-      blocked ->
-        blocked
+      {:error, _reason} = error ->
+        error
     end
   end
 
@@ -662,7 +663,7 @@ defmodule SpaceTraders.Fleet do
 
       :error ->
         block_manual_intent(intent, :unreadable_arrival)
-        :error
+        {:error, :unreadable_arrival}
     end
   end
 
@@ -675,7 +676,6 @@ defmodule SpaceTraders.Fleet do
       Repo.update!(
         Ecto.Changeset.change(intent,
           status: "blocked",
-          blocked_reason: nil,
           blocker: job_blocker(manual_intent_block_reason(reason)),
           in_flight_action: nil
         )
@@ -757,7 +757,7 @@ defmodule SpaceTraders.Fleet do
         Repo.update!(
           Ecto.Changeset.change(intent,
             status: "blocked",
-            blocker: job_blocker("retry_exhausted: #{inspect(reason)}"),
+            blocker: job_blocker({:retry_exhausted, reason}),
             in_flight_action: nil
           )
         )

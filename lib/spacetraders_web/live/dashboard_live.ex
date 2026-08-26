@@ -3424,6 +3424,10 @@ defmodule SpaceTradersWeb.DashboardLive do
     do: "A manual Navigate is still active for this Ship; stop it before resuming the Job."
 
   defp live_error(:manual_intent_not_active), do: "There is no manual Navigate to stop."
+
+  defp live_error(:manual_intent_conflict),
+    do: "Another manual Navigate was just issued for this Ship; try again."
+
   defp live_error(:invalid_waypoint), do: "Enter a target waypoint."
   defp live_error({:miner_job_blocked, reason}), do: "Miner Job blocked: #{live_error(reason)}"
   defp live_error(:invalid_units), do: "Enter a positive number of units."

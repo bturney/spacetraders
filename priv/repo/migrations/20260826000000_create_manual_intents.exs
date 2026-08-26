@@ -9,7 +9,6 @@ defmodule SpaceTraders.Repo.Migrations.CreateManualIntents do
       add :type, :string, null: false, default: "navigate"
       add :target_waypoint, :string, null: false
       add :status, :string, null: false, default: "active"
-      add :blocked_reason, :string
       add :blocker, :map
       add :in_flight_action, :map
       add :last_action_result, :map

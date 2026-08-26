@@ -2,11 +2,11 @@ defmodule SpaceTraders.Fleet.ManualIntent do
   @moduledoc """
   A durable Manual Control Intent for one Ship.
 
-  Manual Control is an alternate caller of a reusable outcome-level Intent, not
-  a Job or durable Ship mode (ADR context: Phase 3.5 single-Ship outcomes). The
-  active intent chain, meaningful progress, and in-flight request/response
-  evidence persist across restarts so recovery can reconcile game truth before
-  another mutation instead of blindly replaying a command.
+  Manual Control is an alternate caller of a reusable outcome-level Intent,
+  not a Job or durable Ship mode (Phase 3.5 single-Ship outcomes). The active
+  intent chain, meaningful progress, and in-flight request/response evidence
+  persist across restarts so recovery can reconcile game truth before another
+  mutation instead of blindly replaying a command.
   """
 
   use Ecto.Schema
@@ -19,7 +19,6 @@ defmodule SpaceTraders.Fleet.ManualIntent do
     field :type, :string, default: "navigate"
     field :target_waypoint, :string
     field :status, :string, default: "active"
-    field :blocked_reason, :string
     embeds_one :blocker, SpaceTraders.Fleet.JobBlocker
     field :in_flight_action, :map
     field :last_action_result, :map
@@ -44,5 +43,6 @@ defmodule SpaceTraders.Fleet.ManualIntent do
     |> validate_required([:type, :target_waypoint])
     |> validate_inclusion(:type, ["navigate"])
     |> validate_inclusion(:status, @unfinished_states ++ @terminal_states)
+    |> unique_constraint(:ship_id, name: :manual_intents_one_active_per_ship_index)
   end
 end
