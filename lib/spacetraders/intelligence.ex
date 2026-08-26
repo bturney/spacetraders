@@ -22,7 +22,8 @@ defmodule SpaceTraders.Intelligence do
     :is_under_construction
   ]
   @waypoint_listing_fields [:symbol, :system_symbol, :type, :x, :y, :orbits, :orbitals, :traits]
-  @market_fields [:symbol, :exports, :imports, :exchange, :trade_goods, :transactions]
+  @market_composition_fields [:symbol, :exports, :imports, :exchange]
+  @market_listing_fields @market_composition_fields ++ [:trade_goods, :transactions]
 
   @doc "Records one Waypoint observation without claiming omitted fields are false."
   def observe_waypoint(%AgentRecord{} = agent, waypoint, opts \\ []) do
@@ -44,7 +45,12 @@ defmodule SpaceTraders.Intelligence do
 
   @doc "Records one Market Listing observation, optionally tied to its observing Ship."
   def observe_market(%AgentRecord{} = agent, system_symbol, market, opts \\ []) do
-    observe(agent, "market", system_symbol, market.symbol, market, @market_fields, opts)
+    fields =
+      if Keyword.get(opts, :observing_ship_symbol),
+        do: @market_listing_fields,
+        else: @market_composition_fields
+
+    observe(agent, "market", system_symbol, market.symbol, market, fields, opts)
   end
 
   @doc "Records an authoritative declaration that a field cannot currently be read."
@@ -104,20 +110,6 @@ defmodule SpaceTraders.Intelligence do
         else: where(query, [fact], fact.field in ^Enum.map(fields, &to_string/1))
 
     {count, _} = Repo.update_all(query, set: [invalidated_at: now()])
-    {:ok, count}
-  end
-
-  @doc "Invalidates one mutable intelligence subject class after a game action changes it."
-  def invalidate_subject_type(%AgentRecord{} = agent, subject_type) do
-    {count, _} =
-      Fact
-      |> where(
-        [fact],
-        fact.agent_id == ^agent.id and fact.subject_type == ^to_string(subject_type) and
-          is_nil(fact.invalidated_at)
-      )
-      |> Repo.update_all(set: [invalidated_at: now()])
-
     {:ok, count}
   end
 

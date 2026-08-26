@@ -2225,17 +2225,31 @@ defmodule SpaceTraders.Fleet do
 
   def refuel_ship(%AgentRecord{}, _ship_symbol), do: {:error, :agent_token_missing}
 
-  defp invalidate_market_after({:ok, _result} = result, agent) do
-    Intelligence.invalidate_subject_type(agent, :market)
-    result
-  end
+  defp invalidate_market_after(
+         {:ok, %{transaction: %{waypoint_symbol: waypoint_symbol}}} = result,
+         agent
+       )
+       when is_binary(waypoint_symbol) do
+    with {:ok, system_symbol} <- system_from_headquarters(waypoint_symbol) do
+      invalidate_market_facts(agent, system_symbol, waypoint_symbol)
+    end
 
-  defp invalidate_market_after({:error, %SpaceTraders.API.GameplayError{}} = result, agent) do
-    Intelligence.invalidate_subject_type(agent, :market)
     result
   end
 
   defp invalidate_market_after(result, _agent), do: result
+
+  # Intelligence must never make a confirmed game mutation look failed. A later
+  # read will still refresh this Listing if local persistence is unavailable.
+  defp invalidate_market_facts(agent, system_symbol, waypoint_symbol) do
+    Intelligence.invalidate(agent, :market, system_symbol, waypoint_symbol, [
+      :trade_goods,
+      :transactions
+    ])
+  rescue
+    exception ->
+      Logger.warning("Could not invalidate market intelligence: #{Exception.message(exception)}")
+  end
 
   @doc "Jettisons cargo from a ship's hold and returns the updated cargo."
   def jettison_cargo(

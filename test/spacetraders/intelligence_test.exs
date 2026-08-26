@@ -91,6 +91,23 @@ defmodule SpaceTraders.IntelligenceTest do
              Intelligence.subject(agent, :market, "X1-UX81", "X1-UX81-A2")["exports"]
   end
 
+  test "remote market composition does not claim omitted live listings are empty" do
+    agent = agent()
+
+    market =
+      Market.from_json(%{
+        "symbol" => "X1-UX81-A1",
+        "exports" => [%{"symbol" => "IRON_ORE", "name" => "Iron Ore", "description" => "Ore"}]
+      })
+
+    assert {:ok, _} = Intelligence.observe_market(agent, "X1-UX81", market, source: "get_market")
+
+    facts = Intelligence.subject(agent, :market, "X1-UX81", "X1-UX81-A1")
+    assert Map.has_key?(facts, "exports")
+    refute Map.has_key?(facts, "trade_goods")
+    refute Map.has_key?(facts, "transactions")
+  end
+
   test "Fleet waypoint reads persist subject-first intelligence" do
     agent = agent()
 
