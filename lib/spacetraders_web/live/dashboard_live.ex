@@ -201,26 +201,65 @@ defmodule SpaceTradersWeb.DashboardLive do
 
     with {:ok, agent} <- agent_for_ship(socket, ship_symbol),
          :ok <- validate_waypoint(waypoint) do
-      case Fleet.navigate_ship(agent, ship_symbol, waypoint) do
-        {:ok, %{nav: %{route: %{destination: %{symbol: destination}}}} = result} ->
+      case Fleet.navigate_intent(agent, ship_symbol, waypoint) do
+        {:ok, %{status: "completed", target_waypoint: target}} ->
           {:noreply,
            put_flash(
-             socket
-             |> refresh_agent_fleet(agent.id)
-             |> apply_ship_result(agent.id, ship_symbol, result)
-             |> clear_draft(drafted_key),
+             socket |> refresh_agent_fleet(agent.id) |> clear_draft(drafted_key),
              :info,
-             "#{ship_symbol} is in transit to #{destination}."
+             "#{ship_symbol} is already at #{target}."
            )}
 
-        {:ok, _result} ->
-          {:noreply, refresh_and_clear(socket, agent.id, drafted_key)}
+        {:ok, %{status: "waiting", target_waypoint: target} = intent} ->
+          message =
+            if match?(%{"wait" => "cooldown"}, intent.last_action_result) do
+              "#{ship_symbol} will navigate to #{target} once its cooldown ends."
+            else
+              "#{ship_symbol} is in transit to #{target}."
+            end
+
+          {:noreply,
+           put_flash(
+             socket |> refresh_agent_fleet(agent.id) |> clear_draft(drafted_key),
+             :info,
+             message
+           )}
+
+        {:ok, %{status: "active", target_waypoint: target}} ->
+          {:noreply,
+           put_flash(
+             socket |> refresh_agent_fleet(agent.id) |> clear_draft(drafted_key),
+             :info,
+             "#{ship_symbol} is navigating to #{target}."
+           )}
+
+        {:ok, %{status: "blocked", blocker: blocker, target_waypoint: target}} ->
+          {:noreply,
+           put_flash(
+             socket |> refresh_agent_fleet(agent.id),
+             :error,
+             "Navigate to #{target} blocked: #{blocker_summary(blocker)}"
+           )}
 
         {:error, reason} ->
           {:noreply, put_flash(socket, :error, live_error(reason))}
       end
     else
       {:error, message} -> {:noreply, put_flash(socket, :error, message)}
+    end
+  end
+
+  @impl true
+  def handle_event("stop_manual_intent", %{"symbol" => ship_symbol}, socket) do
+    with {:ok, agent} <- agent_for_ship(socket, ship_symbol),
+         :ok <- Fleet.stop_manual_intent(agent, ship_symbol) do
+      message = "#{ship_symbol} manual Navigate stopped; the Ship stays in Manual Control."
+
+      {:noreply, put_flash(refresh_agent_fleet(socket, agent.id), :info, message)}
+    else
+      {:error, reason} ->
+        {:noreply,
+         put_flash(refresh_agent_for_ship(socket, ship_symbol), :error, live_error(reason))}
     end
   end
 
@@ -2337,71 +2376,95 @@ defmodule SpaceTradersWeb.DashboardLive do
             </button>
           </.action_tooltip>
         </form>
+        <div
+          :if={@ship.manual_intent}
+          class="mt-2 flex flex-wrap items-center justify-between gap-2 rounded border border-base-300/60 bg-base-300/30 px-3 py-2 text-xs"
+          data-manual-intent={@ship.manual_intent.status}
+        >
+          <div>
+            <span class="font-semibold">Manual Control</span>
+            <span class="ml-1">
+              Navigate to <span class="font-mono">{@ship.manual_intent.target_waypoint}</span>
+            </span>
+            <span class={manual_intent_status_class(@ship.manual_intent)}>
+              {manual_intent_status(@ship.manual_intent)}
+            </span>
+            <div :if={manual_intent_reason(@ship.manual_intent)} class="mt-1 opacity-70">
+              {manual_intent_reason(@ship.manual_intent)}
+            </div>
+          </div>
+          <button
+            type="button"
+            phx-click="stop_manual_intent"
+            phx-value-symbol={@ship.symbol}
+            class="btn btn-ghost btn-xs"
+          >
+            Stop
+          </button>
+        </div>
         <p class="mt-2 text-xs opacity-60">
-          Recovery route: select <span class="font-semibold">Marketplaces</span>
-          in the Waypoint Grid,
-          inspect the fuel listing, then use its
-          <span class="font-semibold">Navigate a ship here</span>
-          control.
           The game API remains authoritative for route fuel requirements.
         </p>
-        <div class="mt-2 flex flex-wrap gap-2">
-          <.action_tooltip reason={action_reason(ship_action_state(@ship, :dock))}>
-            <button
-              type="button"
-              phx-click="dock"
-              phx-value-symbol={@ship.symbol}
-              disabled={not action_allowed?(ship_action_state(@ship, :dock))}
-              class="btn btn-ghost min-h-10 btn-sm"
-            >
-              Dock
-            </button>
-          </.action_tooltip>
-          <.action_tooltip reason={action_reason(ship_action_state(@ship, :orbit))}>
-            <button
-              type="button"
-              phx-click="orbit"
-              phx-value-symbol={@ship.symbol}
-              disabled={not action_allowed?(ship_action_state(@ship, :orbit))}
-              class="btn btn-ghost min-h-10 btn-sm"
-            >
-              Orbit
-            </button>
-          </.action_tooltip>
-          <.action_tooltip reason={action_reason(ship_action_state(@ship, :extract))}>
-            <button
-              type="button"
-              phx-click="extract"
-              phx-value-symbol={@ship.symbol}
-              disabled={not action_allowed?(ship_action_state(@ship, :extract))}
-              class="btn btn-ghost min-h-10 btn-sm"
-            >
-              Extract
-            </button>
-          </.action_tooltip>
-          <.action_tooltip reason={action_reason(ship_action_state(@ship, :siphon))}>
-            <button
-              type="button"
-              phx-click="siphon"
-              phx-value-symbol={@ship.symbol}
-              disabled={not action_allowed?(ship_action_state(@ship, :siphon))}
-              class="btn btn-ghost min-h-10 btn-sm"
-            >
-              Siphon
-            </button>
-          </.action_tooltip>
-          <.action_tooltip reason={action_reason(ship_action_state(@ship, :refuel))}>
-            <button
-              type="button"
-              phx-click="refuel"
-              phx-value-symbol={@ship.symbol}
-              disabled={not action_allowed?(ship_action_state(@ship, :refuel))}
-              class="btn btn-ghost min-h-10 btn-sm"
-            >
-              Refuel
-            </button>
-          </.action_tooltip>
-        </div>
+        <details id={"posture-actions-#{@ship.symbol}"} class="mt-2" data-posture-actions>
+          <summary class="cursor-pointer text-xs opacity-70">Posture &amp; direct actions</summary>
+          <div class="mt-2 flex flex-wrap gap-2">
+            <.action_tooltip reason={action_reason(ship_action_state(@ship, :dock))}>
+              <button
+                type="button"
+                phx-click="dock"
+                phx-value-symbol={@ship.symbol}
+                disabled={not action_allowed?(ship_action_state(@ship, :dock))}
+                class="btn btn-ghost min-h-10 btn-sm"
+              >
+                Dock
+              </button>
+            </.action_tooltip>
+            <.action_tooltip reason={action_reason(ship_action_state(@ship, :orbit))}>
+              <button
+                type="button"
+                phx-click="orbit"
+                phx-value-symbol={@ship.symbol}
+                disabled={not action_allowed?(ship_action_state(@ship, :orbit))}
+                class="btn btn-ghost min-h-10 btn-sm"
+              >
+                Orbit
+              </button>
+            </.action_tooltip>
+            <.action_tooltip reason={action_reason(ship_action_state(@ship, :extract))}>
+              <button
+                type="button"
+                phx-click="extract"
+                phx-value-symbol={@ship.symbol}
+                disabled={not action_allowed?(ship_action_state(@ship, :extract))}
+                class="btn btn-ghost min-h-10 btn-sm"
+              >
+                Extract
+              </button>
+            </.action_tooltip>
+            <.action_tooltip reason={action_reason(ship_action_state(@ship, :siphon))}>
+              <button
+                type="button"
+                phx-click="siphon"
+                phx-value-symbol={@ship.symbol}
+                disabled={not action_allowed?(ship_action_state(@ship, :siphon))}
+                class="btn btn-ghost min-h-10 btn-sm"
+              >
+                Siphon
+              </button>
+            </.action_tooltip>
+            <.action_tooltip reason={action_reason(ship_action_state(@ship, :refuel))}>
+              <button
+                type="button"
+                phx-click="refuel"
+                phx-value-symbol={@ship.symbol}
+                disabled={not action_allowed?(ship_action_state(@ship, :refuel))}
+                class="btn btn-ghost min-h-10 btn-sm"
+              >
+                Refuel
+              </button>
+            </.action_tooltip>
+          </div>
+        </details>
       </div>
 
       <details
@@ -2960,6 +3023,33 @@ defmodule SpaceTradersWeb.DashboardLive do
 
   defp job_reason(_), do: nil
 
+  defp manual_intent_status(%{status: "active"}), do: "Working"
+  defp manual_intent_status(%{status: "waiting"}), do: "Waiting"
+  defp manual_intent_status(%{status: "blocked"}), do: "Blocked"
+
+  defp manual_intent_status_class(%{status: "waiting"}),
+    do: "badge badge-warning badge-sm ml-2"
+
+  defp manual_intent_status_class(%{status: "blocked"}),
+    do: "badge badge-error badge-sm ml-2"
+
+  defp manual_intent_status_class(_), do: "badge badge-info badge-sm ml-2"
+
+  defp manual_intent_reason(%{status: "blocked", blocker: %JobBlocker{} = blocker}),
+    do: blocker_summary(blocker)
+
+  defp manual_intent_reason(_intent), do: nil
+
+  defp blocker_summary(%JobBlocker{
+         reason: reason,
+         resolver: resolver,
+         retry_condition: retry_condition
+       }),
+       do:
+         "#{job_blocker_correction(reason)}. Resolver: #{resolver}; retry when #{retry_condition}."
+
+  defp blocker_summary(_blocker), do: "Check Activity for details."
+
   defp job_active_work(
          %{status: "waiting", in_flight_action: %{"kind" => kind}},
          _ship
@@ -3111,6 +3201,14 @@ defmodule SpaceTradersWeb.DashboardLive do
     do: "Lower the cargo threshold"
 
   defp job_blocker_correction("mining_capability_missing"), do: "Use a Ship with a mining laser"
+
+  defp job_blocker_correction("insufficient_fuel"),
+    do: "Refuel the Ship, then issue Navigate again"
+
+  defp job_blocker_correction("outside_system"),
+    do: "Cross-System travel is not available yet; choose a Waypoint in this System"
+
+  defp job_blocker_correction("unreadable_arrival"), do: "Reconcile the Ship from game state"
   defp job_blocker_correction(_reason), do: "Check the Job Activity"
 
   defp job_action_label("navigate"), do: "navigation"
@@ -3321,6 +3419,12 @@ defmodule SpaceTradersWeb.DashboardLive do
 
   defp live_error(:ship_not_owned), do: "That Ship is not in this agent's Fleet."
   defp live_error(:miner_job_not_configured), do: "Save a Miner Job configuration first."
+
+  defp live_error(:manual_intent_active),
+    do: "A manual Navigate is still active for this Ship; stop it before resuming the Job."
+
+  defp live_error(:manual_intent_not_active), do: "There is no manual Navigate to stop."
+  defp live_error(:invalid_waypoint), do: "Enter a target waypoint."
   defp live_error({:miner_job_blocked, reason}), do: "Miner Job blocked: #{live_error(reason)}"
   defp live_error(:invalid_units), do: "Enter a positive number of units."
   defp live_error(:invalid_contract_deadline), do: "The contract deadline could not be read."

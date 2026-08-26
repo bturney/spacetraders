@@ -19,7 +19,7 @@ defmodule SpaceTraders.Fleet do
 
   alias SpaceTraders.Agent.Agent, as: AgentRecord
   alias SpaceTraders.API.Model.{Market, ShipNav, ShipNavRoute}
-  alias SpaceTraders.Fleet.{Activity, Job, JobBlocker, Ship, ShipDestination}
+  alias SpaceTraders.Fleet.{Activity, Job, JobBlocker, ManualIntent, Ship, ShipDestination}
   alias SpaceTraders.Fleet.ShipServer
   alias SpaceTraders.Repo
   alias SpaceTraders.{Agent, Contracts, Listing, Shipyard}
@@ -28,6 +28,8 @@ defmodule SpaceTraders.Fleet do
   @gather_kinds ["extract", "siphon"]
   @terminal_job_states Job.terminal_states()
   @running_job_states Job.running_states()
+  @unfinished_intent_states ManualIntent.unfinished_states()
+  @terminal_intent_states ManualIntent.terminal_states()
 
   @doc """
   Pulls the agent's live fleet from the game API.
@@ -125,6 +127,7 @@ defmodule SpaceTraders.Fleet do
   defp annotate_jobs({:ok, ships}, agent) do
     ship_records = Enum.map(ships, &ensure_ship_record(agent, &1))
     jobs_by_ship = jobs_for_ships(ship_records)
+    intents_by_ship = manual_intents_for_ships(ship_records)
 
     {:ok,
      Enum.map(ships, fn ship ->
@@ -134,11 +137,24 @@ defmodule SpaceTraders.Fleet do
        ship
        |> Map.put(:job, job)
        |> Map.put(:job_history, history)
+       |> Map.put(:manual_intent, Map.get(intents_by_ship, ship_record.id))
        |> Map.put(:destination_history, destination_history(agent, ship.symbol))
      end)}
   end
 
   defp annotate_jobs(result, _agent), do: result
+
+  defp manual_intents_for_ships(ship_records) do
+    ship_ids = Enum.map(ship_records, & &1.id)
+
+    ManualIntent
+    |> where(
+      [intent],
+      intent.ship_id in ^ship_ids and intent.status in ^@unfinished_intent_states
+    )
+    |> Repo.all()
+    |> Map.new(&{&1.ship_id, &1})
+  end
 
   defp annotate_actions({:ok, ships}) do
     {:ok, Enum.map(ships, &Map.put(&1, :actions, ship_actions(&1)))}
@@ -146,16 +162,15 @@ defmodule SpaceTraders.Fleet do
 
   defp annotate_actions(result), do: result
 
+  # Outcome-level Navigate is always dispatchable: its Intent reconciles
+  # authoritative location, transit, posture, fuel, arrival, and cooldown
+  # instead of refusing while the Ship is busy.
   defp ship_actions(ship) do
     cooldown = cooldown_active?(ship)
     status = ship_status(ship)
 
     %{
-      navigate:
-        action_state(
-          not cooldown and status != "IN_TRANSIT",
-          cooldown_reason(cooldown, :ship_in_transit)
-        ),
+      navigate: action_state(true, nil),
       set_flight_mode:
         action_state(
           status != "IN_TRANSIT",
@@ -300,6 +315,476 @@ defmodule SpaceTraders.Fleet do
     end
   end
 
+  @doc """
+  Issues a same-System Navigate Intent through Manual Control.
+
+  Manual Control durably pauses the assigned Job before the Intent may dispatch
+  a mutating game request, persists the intent chain and in-flight evidence,
+  and reconciles authoritative location, navigation state, posture, fuel,
+  arrival, and cooldown instead of persisting a fixed action script. Issuing a
+  new Navigate explicitly replaces a pending one without cancelling an action
+  the game already accepted. Completion requires authoritative Ship state at
+  the requested Waypoint; the preempted Job remains paused until an explicit
+  resume.
+
+  Returns `{:ok, %ManualIntent{}}` with its current status (`active`,
+  `waiting`, `blocked`, or `completed`), or an error.
+  """
+  def navigate_intent(%AgentRecord{agent_token: agent_token} = agent, ship_symbol, waypoint)
+      when is_binary(agent_token) and agent_token != "" do
+    waypoint = String.trim(waypoint || "")
+
+    with :ok <- validate_intent_waypoint(waypoint),
+         {:ok, ship} <- owned_ship(agent, ship_symbol),
+         :ok <- preempt_miner_job_for(agent, ship_symbol, {:manual_override, "navigation"}),
+         {:ok, intent} <- replace_manual_intent(ship, waypoint) do
+      reconcile_manual_intent(agent, intent)
+    end
+  end
+
+  def navigate_intent(%AgentRecord{}, _ship_symbol, _waypoint),
+    do: {:error, :agent_token_missing}
+
+  @doc "Returns a Ship's unfinished Manual Control Intent, or nil."
+  def ship_manual_intent(%AgentRecord{} = agent, ship_symbol) do
+    case owned_ship(agent, ship_symbol) do
+      {:ok, ship} -> unfinished_manual_intent(ship.id)
+      _ -> nil
+    end
+  end
+
+  @doc "Stops a Ship's unfinished Manual Control Intent; the assigned Job remains paused."
+  def stop_manual_intent(%AgentRecord{} = agent, ship_symbol) do
+    with {:ok, ship} <- owned_ship(agent, ship_symbol),
+         %ManualIntent{target_waypoint: target} = intent <- unfinished_manual_intent(ship.id) do
+      terminalize_manual_intent!(intent, "stopped")
+      record_activity(agent, ship, "manual_intent_stopped", "Navigate to #{target} stopped")
+      :ok
+    else
+      nil -> {:error, :manual_intent_not_active}
+      error -> error
+    end
+  end
+
+  @doc "Reconciles the Ship's Manual Control Intent after an authoritative arrival."
+  def revalidate_manual_intent_arrival(agent_id, ship_symbol, live_ship, expected_intent_id) do
+    revalidate_manual_intent(agent_id, ship_symbol, live_ship, expected_intent_id)
+  end
+
+  @doc "Reconciles the Ship's Manual Control Intent after an authoritative cooldown."
+  def revalidate_manual_intent_cooldown(agent_id, ship_symbol, live_ship, expected_intent_id) do
+    revalidate_manual_intent(agent_id, ship_symbol, live_ship, expected_intent_id)
+  end
+
+  # The Navigate Intent reconcile loop. Every step derives the next API action
+  # from authoritative Ship state — location, navigation state, posture, fuel,
+  # arrival, and cooldown — so recovery can resume from game truth instead of
+  # replaying a fixed script.
+  defp advance_manual_intent(
+         agent,
+         %ManualIntent{recovery_attempts: attempts} = intent,
+         live_ship
+       )
+       when attempts > 0 do
+    intent = Repo.update!(Ecto.Changeset.change(intent, recovery_attempts: 0))
+    advance_manual_intent(agent, intent, live_ship)
+  end
+
+  defp advance_manual_intent(agent, %ManualIntent{} = intent, live_ship) do
+    cond do
+      arrived_at_target?(live_ship, intent.target_waypoint) ->
+        complete_manual_intent(agent, intent)
+
+      in_transit?(live_ship) ->
+        wait_for_manual_arrival(agent, intent, live_ship)
+
+      cooldown_active?(live_ship) ->
+        wait_for_manual_cooldown(agent, intent, live_ship)
+
+      docked?(live_ship) ->
+        orbit_for_manual_intent(agent, intent, live_ship)
+
+      fuel_empty?(live_ship) ->
+        block_manual_intent(intent, {:insufficient_fuel, intent.target_waypoint})
+
+      true ->
+        dispatch_manual_navigate(agent, intent, live_ship)
+    end
+  end
+
+  defp reconcile_manual_intent(agent, intent) do
+    ship = Repo.get!(Ship, intent.ship_id)
+
+    case SpaceTraders.API.get_ship(agent.agent_token, ship.symbol) do
+      {:ok, live_ship} -> advance_manual_intent(agent, intent, live_ship)
+      {:error, reason} -> block_manual_intent(intent, reason)
+    end
+  end
+
+  defp revalidate_manual_intent(agent_id, ship_symbol, live_ship, expected_intent_id) do
+    with %Ship{} = ship <- Repo.get_by(Ship, agent_id: agent_id, symbol: ship_symbol),
+         %ManualIntent{} = intent <- unfinished_manual_intent(ship.id),
+         true <- intent_matches_event?(intent, expected_intent_id) do
+      advance_manual_intent(Repo.get!(AgentRecord, agent_id), intent, live_ship)
+    else
+      _ -> :ok
+    end
+  end
+
+  defp intent_matches_event?(_intent, nil), do: false
+  defp intent_matches_event?(%ManualIntent{id: id}, id), do: true
+  defp intent_matches_event?(_intent, _expected_intent_id), do: false
+
+  defp validate_intent_waypoint(""), do: {:error, :invalid_waypoint}
+  defp validate_intent_waypoint(_waypoint), do: :ok
+
+  # Replacing a pending manual outcome is explicit; it cannot cancel an action
+  # the game already accepted, which reconciliation below accounts for.
+  defp replace_manual_intent(ship, waypoint) do
+    Repo.transaction(fn ->
+      case unfinished_manual_intent(ship.id) do
+        %ManualIntent{} = predecessor -> terminalize_manual_intent!(predecessor, "stopped")
+        nil -> :ok
+      end
+
+      {:ok, intent} =
+        %ManualIntent{ship_id: ship.id}
+        |> ManualIntent.changeset(%{target_waypoint: waypoint})
+        |> Ecto.Changeset.put_change(:status, "active")
+        |> Repo.insert()
+
+      intent
+    end)
+  end
+
+  defp unfinished_manual_intent(ship_id) do
+    Repo.one(
+      from intent in ManualIntent,
+        where: intent.ship_id == ^ship_id and intent.status in ^@unfinished_intent_states
+    )
+  end
+
+  defp terminalize_manual_intent!(intent, status) when status in @terminal_intent_states do
+    Repo.update!(
+      Ecto.Changeset.change(intent,
+        status: status,
+        blocked_reason: nil,
+        blocker: nil,
+        in_flight_action: nil,
+        finished_at: DateTime.utc_now() |> DateTime.truncate(:second)
+      )
+    )
+  end
+
+  defp complete_manual_intent(agent, intent) do
+    intent =
+      Repo.update!(
+        Ecto.Changeset.change(intent,
+          status: "completed",
+          blocked_reason: nil,
+          blocker: nil,
+          in_flight_action: nil,
+          last_action_result: %{"kind" => "navigate", "waypoint" => intent.target_waypoint},
+          finished_at: DateTime.utc_now() |> DateTime.truncate(:second)
+        )
+      )
+
+    ship = Repo.get!(Ship, intent.ship_id)
+
+    record_activity(
+      agent,
+      ship,
+      "manual_intent_completed",
+      "Navigate complete at #{intent.target_waypoint}",
+      %{"waypoint" => intent.target_waypoint}
+    )
+
+    {:ok, intent}
+  end
+
+  # The Ship is already travelling — toward the target or elsewhere — so the
+  # Intent waits for that authoritative arrival before choosing another step.
+  defp wait_for_manual_arrival(agent, intent, live_ship) do
+    case schedule_intent_arrival(agent, intent, live_ship.symbol, %{nav: live_ship.nav}) do
+      :ok ->
+        intent =
+          Repo.update!(
+            Ecto.Changeset.change(intent,
+              status: "waiting",
+              last_action_result: %{"kind" => "wait", "wait" => "arrival"}
+            )
+          )
+
+        ship = Repo.get!(Ship, intent.ship_id)
+
+        record_activity(
+          agent,
+          ship,
+          "manual_intent_waiting",
+          "Navigate to #{intent.target_waypoint} waiting for arrival",
+          %{"wait" => "arrival"}
+        )
+
+        {:ok, intent}
+
+      blocked ->
+        blocked
+    end
+  end
+
+  defp wait_for_manual_cooldown(agent, intent, live_ship) do
+    due_at = parse_expiration(live_ship.cooldown.expiration, live_ship.cooldown.remaining_seconds)
+
+    {:ok, event} =
+      Timeline.schedule_event(:ship, live_ship.symbol, :cooldown, due_at, %{
+        "intent_id" => intent.id
+      })
+
+    ShipServer.arm(agent, live_ship.symbol, event)
+
+    intent =
+      Repo.update!(
+        Ecto.Changeset.change(intent,
+          status: "waiting",
+          last_action_result: %{"kind" => "wait", "wait" => "cooldown"}
+        )
+      )
+
+    ship = Repo.get!(Ship, intent.ship_id)
+
+    record_activity(
+      agent,
+      ship,
+      "manual_intent_waiting",
+      "Navigate to #{intent.target_waypoint} waiting for cooldown",
+      %{"wait" => "cooldown"}
+    )
+
+    {:ok, intent}
+  end
+
+  defp orbit_for_manual_intent(agent, intent, live_ship) do
+    intent =
+      Repo.update!(
+        Ecto.Changeset.change(intent,
+          status: "active",
+          in_flight_action: %{
+            "kind" => "orbit",
+            "waypoint" => live_ship.nav.waypoint_symbol,
+            "expected" => %{"status" => "IN_ORBIT"}
+          }
+        )
+      )
+
+    case SpaceTraders.API.orbit_ship(agent.agent_token, live_ship.symbol) do
+      {:ok, result} ->
+        intent =
+          Repo.update!(
+            Ecto.Changeset.change(intent,
+              in_flight_action: nil,
+              last_action_result: %{"kind" => "orbit", "status" => result.nav.status}
+            )
+          )
+
+        advance_manual_intent(agent, intent, %{live_ship | nav: result.nav})
+
+      {:error, reason} ->
+        block_manual_intent(intent, reason)
+    end
+  end
+
+  defp dispatch_manual_navigate(agent, intent, live_ship) do
+    intent =
+      Repo.update!(
+        Ecto.Changeset.change(intent,
+          status: "active",
+          in_flight_action: %{
+            "kind" => "navigate",
+            "waypoint" => intent.target_waypoint,
+            "expected" => %{"status" => "IN_TRANSIT", "destination" => intent.target_waypoint}
+          }
+        )
+      )
+
+    case SpaceTraders.API.navigate_ship(
+           agent.agent_token,
+           live_ship.symbol,
+           intent.target_waypoint
+         ) do
+      {:ok, result} ->
+        schedule_intent_arrival(agent, intent, live_ship.symbol, result)
+        persist_destination_history(agent, live_ship.symbol, result.nav.route.destination.symbol)
+
+        intent =
+          Repo.update!(
+            Ecto.Changeset.change(intent,
+              status: "waiting",
+              last_action_result: %{
+                "kind" => "navigate",
+                "waypoint" => intent.target_waypoint,
+                "status" => result.nav.status,
+                "destination" => result.nav.route.destination.symbol
+              }
+            )
+          )
+
+        ship = Repo.get!(Ship, intent.ship_id)
+
+        record_activity(
+          agent,
+          ship,
+          "manual_intent_navigate",
+          "#{live_ship.symbol} navigating to #{intent.target_waypoint}",
+          %{"waypoint" => intent.target_waypoint}
+        )
+
+        {:ok, intent}
+
+      {:error, reason} ->
+        block_manual_intent(intent, reason)
+    end
+  end
+
+  defp schedule_intent_arrival(
+         agent,
+         intent,
+         ship_symbol,
+         %{nav: %ShipNav{status: "IN_TRANSIT"} = nav}
+       ) do
+    case parse_arrival(nav.route) do
+      {:ok, due_at} ->
+        payload = arrival_payload(nav) |> Map.put("intent_id", intent.id)
+
+        {:ok, event} = Timeline.schedule_event(:ship, ship_symbol, :arrival, due_at, payload)
+
+        ShipServer.arm(agent, ship_symbol, event)
+        :ok
+
+      :error ->
+        block_manual_intent(intent, :unreadable_arrival)
+        :error
+    end
+  end
+
+  defp schedule_intent_arrival(_agent, _intent, _ship_symbol, _result), do: :ok
+
+  defp block_manual_intent(intent, reason) do
+    already_blocked? = Repo.get!(ManualIntent, intent.id).status == "blocked"
+
+    intent =
+      Repo.update!(
+        Ecto.Changeset.change(intent,
+          status: "blocked",
+          blocked_reason: nil,
+          blocker: job_blocker(manual_intent_block_reason(reason)),
+          in_flight_action: nil
+        )
+      )
+
+    unless already_blocked? do
+      record_activity_by_intent(
+        intent,
+        "manual_intent_blocked",
+        "Navigate to #{intent.target_waypoint} blocked: #{inspect(reason)}",
+        %{"block" => inspect(reason)}
+      )
+    end
+
+    {:ok, intent}
+  end
+
+  # Typed game rejections become stable blocker reasons; transport failures
+  # keep their struct evidence.
+  defp manual_intent_block_reason(%SpaceTraders.API.GameplayError{type: type})
+       when is_atom(type) and type != :other,
+       do: type
+
+  defp manual_intent_block_reason(reason), do: reason
+
+  defp arrived_at_target?(%{nav: %{status: status, waypoint_symbol: waypoint}}, target)
+       when status in ["DOCKED", "IN_ORBIT"],
+       do: waypoint == target
+
+  defp arrived_at_target?(_, _), do: false
+
+  defp in_transit?(%{nav: %{status: "IN_TRANSIT"}}), do: true
+  defp in_transit?(_), do: false
+
+  defp docked?(%{nav: %{status: "DOCKED"}}), do: true
+  defp docked?(_), do: false
+
+  # A fuel-independent Ship is recognized from authoritative capacity; zero
+  # current fuel only blocks Ships that actually burn fuel.
+  defp fuel_empty?(%{fuel: %{capacity: capacity}}) when is_integer(capacity) and capacity <= 0,
+    do: false
+
+  defp fuel_empty?(%{fuel: %{current: current}}) when is_integer(current), do: current <= 0
+  defp fuel_empty?(_), do: false
+
+  @doc "Reconciles a persisted Manual Control Intent after a process restart."
+  def recover_manual_intent_on_boot(ship_symbol, agent_id, agent_token) do
+    with %Ship{} = ship <- Repo.get_by(Ship, symbol: ship_symbol, agent_id: agent_id),
+         %ManualIntent{} = intent <- unfinished_manual_intent(ship.id) do
+      case SpaceTraders.API.get_ship(agent_token, ship_symbol) do
+        {:ok, live_ship} ->
+          advance_manual_intent(Repo.get!(AgentRecord, agent_id), intent, live_ship)
+
+        {:error, reason} ->
+          intent_recovery_retry_or_block(ship, intent, agent_id, agent_token, reason)
+      end
+    else
+      _ -> :ok
+    end
+  end
+
+  defp intent_recovery_retry_or_block(ship, intent, agent_id, agent_token, reason) do
+    ship_symbol = ship.symbol
+
+    if intent.recovery_attempts < 3 do
+      Repo.update!(Ecto.Changeset.change(intent, recovery_attempts: intent.recovery_attempts + 1))
+
+      record_activity_by_id(
+        agent_id,
+        ship,
+        "manual_intent_recovery",
+        "Authoritative recovery read failed; retrying",
+        "transport_error"
+      )
+
+      recover_manual_intent_on_boot(ship_symbol, agent_id, agent_token)
+    else
+      intent =
+        Repo.update!(
+          Ecto.Changeset.change(intent,
+            status: "blocked",
+            blocker: job_blocker("retry_exhausted: #{inspect(reason)}"),
+            in_flight_action: nil
+          )
+        )
+
+      record_activity_by_intent(
+        intent,
+        "manual_intent_recovery",
+        "Manual navigate recovery blocked after retry exhaustion",
+        %{"outcome" => "retry_exhausted"}
+      )
+
+      {:error, :manual_intent_recovery_blocked}
+    end
+  end
+
+  defp record_activity_by_intent(intent, kind, message, metadata) do
+    ship = Repo.get!(Ship, intent.ship_id)
+
+    record_activity(
+      Repo.get!(AgentRecord, ship.agent_id),
+      ship,
+      kind,
+      message,
+      metadata
+    )
+  end
+
   @doc "Returns a Ship's durable Job, or nil."
   def ship_job(%AgentRecord{} = agent, ship_symbol) do
     case owned_ship(agent, ship_symbol) do
@@ -346,6 +831,7 @@ defmodule SpaceTraders.Fleet do
   def start_miner_job(%AgentRecord{} = agent, ship_symbol) do
     with {:ok, ship} <- owned_ship(agent, ship_symbol),
          %Job{} = job <- unfinished_job(ship.id),
+         nil <- unfinished_manual_intent(ship.id),
          {:ok, live_ship, sellable_goods, deliverables} <- validate_miner_job(agent, ship, job) do
       job =
         Repo.update!(
@@ -365,6 +851,7 @@ defmodule SpaceTraders.Fleet do
       end
     else
       nil -> {:error, :miner_job_not_configured}
+      %ManualIntent{} -> {:error, :manual_intent_active}
       {:error, reason} -> block_miner_job(agent, ship_symbol, reason)
     end
   end
@@ -1797,7 +2284,14 @@ defmodule SpaceTraders.Fleet do
       |> select([_c, s], s.symbol)
       |> Repo.all()
 
-    (timeline_symbols ++ job_symbols)
+    intent_symbols =
+      ManualIntent
+      |> join(:inner, [i], s in Ship, on: i.ship_id == s.id)
+      |> where([i, _s], i.status in ^@unfinished_intent_states)
+      |> select([_i, s], s.symbol)
+      |> Repo.all()
+
+    (timeline_symbols ++ job_symbols ++ intent_symbols)
     |> Enum.uniq()
     |> Enum.each(fn ship_symbol ->
       case ship_credentials(ship_symbol) do
@@ -1806,6 +2300,7 @@ defmodule SpaceTraders.Fleet do
 
           unless ship_symbol in timeline_symbols do
             recover_job_on_boot(ship_symbol, agent_id, agent_token)
+            recover_manual_intent_on_boot(ship_symbol, agent_id, agent_token)
           end
 
         :error ->
@@ -2055,6 +2550,15 @@ defmodule SpaceTraders.Fleet do
 
       {"agent_token_missing", _reason} ->
         {"operator", "agent_credentials_restored", ["restore_credentials", "resume"]}
+
+      {"insufficient_fuel", _reason} ->
+        {"operator", "ship_refueled", ["refuel"]}
+
+      {"outside_system", _reason} ->
+        {"operator", "cross_system_navigate_available", []}
+
+      {"unreadable_arrival", _reason} ->
+        {"game_state", "authoritative_state_changed", ["resume"]}
 
       {"ambiguous", _reason} ->
         {"game_state", "authoritative_action_outcome_available", ["inspect_activity", "resume"]}

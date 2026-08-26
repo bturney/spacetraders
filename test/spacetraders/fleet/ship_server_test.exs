@@ -301,4 +301,132 @@ defmodule SpaceTraders.Fleet.ShipServerTest do
       assert [%Event{event_type: "cooldown"}] = Timeline.pending_events(:ship, "MINER-JOB-SHIP")
     end
   end
+
+  describe "Manual Control Intent continuation" do
+    test "arrival wakeup completes the manual Navigate Intent at its target" do
+      agent =
+        Repo.insert!(%Agent{
+          id: @agent_id,
+          symbol: "SHIP-SERVER-AGENT",
+          faction: "COSMIC",
+          headquarters: "X1-UX81-A1",
+          agent_token: "AGENT_TOKEN"
+        })
+
+      symbol = unique_symbol()
+
+      ship =
+        Repo.insert!(%Ship{symbol: symbol, ship_type: "SHIP_COMMAND_FRIGATE", agent_id: agent.id})
+
+      intent =
+        Repo.insert!(%SpaceTraders.Fleet.ManualIntent{
+          ship_id: ship.id,
+          type: "navigate",
+          target_waypoint: "X1-UX81-A2",
+          status: "waiting"
+        })
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case {conn.request_path, conn.method} do
+          {"/v2/my/ships/" <> ^symbol, "GET"} ->
+            Req.Test.json(conn, %{
+              "data" =>
+                ship_body(symbol, %{"nav" => nav_body("IN_ORBIT", destination: "X1-UX81-A2")})
+            })
+
+          {path, _method} ->
+            flunk("unexpected request #{path}")
+        end
+      end)
+
+      {:ok, event} =
+        Timeline.schedule_event(
+          :ship,
+          symbol,
+          :arrival,
+          DateTime.add(DateTime.utc_now(), -1, :second),
+          %{"intent_id" => intent.id, "destination" => "X1-UX81-A2"}
+        )
+
+      start_server(symbol)
+
+      assert eventually(fn -> Repo.get(Event, event.id).status == "done" end)
+
+      assert eventually(fn ->
+               Repo.get!(SpaceTraders.Fleet.ManualIntent, intent.id).status == "completed"
+             end)
+    end
+
+    test "cooldown wakeup dispatches a waiting manual Navigate Intent" do
+      agent =
+        Repo.insert!(%Agent{
+          id: @agent_id,
+          symbol: "SHIP-SERVER-AGENT",
+          faction: "COSMIC",
+          headquarters: "X1-UX81-A1",
+          agent_token: "AGENT_TOKEN"
+        })
+
+      symbol = unique_symbol()
+
+      ship =
+        Repo.insert!(%Ship{symbol: symbol, ship_type: "SHIP_COMMAND_FRIGATE", agent_id: agent.id})
+
+      intent =
+        Repo.insert!(%SpaceTraders.Fleet.ManualIntent{
+          ship_id: ship.id,
+          type: "navigate",
+          target_waypoint: "X1-UX81-A2",
+          status: "waiting"
+        })
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case {conn.request_path, conn.method} do
+          {"/v2/my/ships/" <> ^symbol, "GET"} ->
+            Req.Test.json(conn, %{
+              "data" =>
+                ship_body(symbol, %{
+                  "nav" => nav_body("IN_ORBIT"),
+                  "cooldown" => %{
+                    "shipSymbol" => symbol,
+                    "totalSeconds" => 0,
+                    "remainingSeconds" => 0,
+                    "expiration" => future_iso(0)
+                  }
+                })
+            })
+
+          {"/v2/my/ships/" <> ^symbol <> "/navigate", "POST"} ->
+            Req.Test.json(conn, %{
+              "data" => %{
+                "fuel" => %{"capacity" => 200, "current" => 80},
+                "nav" =>
+                  nav_body("IN_TRANSIT",
+                    arrival: future_iso(60),
+                    destination: "X1-UX81-A2"
+                  )
+              }
+            })
+        end
+      end)
+
+      {:ok, event} =
+        Timeline.schedule_event(
+          :ship,
+          symbol,
+          :cooldown,
+          DateTime.add(DateTime.utc_now(), -1, :second),
+          %{"intent_id" => intent.id}
+        )
+
+      start_server(symbol)
+
+      assert eventually(fn -> Repo.get(Event, event.id).status == "done" end)
+
+      assert eventually(fn ->
+               reloaded = Repo.get!(SpaceTraders.Fleet.ManualIntent, intent.id)
+               reloaded.status == "waiting" and reloaded.last_action_result["kind"] == "navigate"
+             end)
+    end
+  end
 end

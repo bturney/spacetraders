@@ -7,6 +7,9 @@ defmodule SpaceTraders.API.GameplayError do
   hardcoding numbers:
 
     * `:in_transit` — ship is travelling, action blocked
+    * `:insufficient_fuel` — the requested transit exceeds remaining fuel
+    * `:outside_system` — the destination waypoint is in another System
+    * `:same_destination` — the Ship is already at that Waypoint
     * `:cooldown` — ship is in a forced cooldown
     * `:insufficient_cargo` / `:cargo_full` — cargo limits
     * `:insufficient_credits` — not enough credits for the action
@@ -32,6 +35,9 @@ defmodule SpaceTraders.API.GameplayError do
   @code_types %{
     4000 => :cooldown,
     4200 => :in_transit,
+    4203 => :insufficient_fuel,
+    4202 => :outside_system,
+    4204 => :same_destination,
     4214 => :in_transit,
     4216 => :insufficient_credits,
     4217 => :cargo_exceeds_limit,
