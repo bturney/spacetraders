@@ -107,7 +107,7 @@ The shared lifecycle of a Job. An active Job may be `active` while pursuing prog
 _Avoid_: status (when the lifecycle distinction matters), error (for blocked or failed)
 
 **Job Blocker**:
-A structured explanation of why a Job cannot currently progress. It records a stable reason, evidence and observation time, who or what can resolve it, the condition for another attempt, and any corrective actions. A Job remains blocked while changed Operator input, capability, intelligence, resources, or future game state could permit progress; uncertainty is never failure.
+A structured explanation of why a Job cannot currently progress. It records a stable reason, human-readable summary, evidence and observation time, who or what can resolve it, the condition for another attempt, and any corrective actions. A Job remains blocked while changed Operator input, capability, intelligence, resources, or future game state could permit progress; uncertainty is never failure.
 _Avoid_: error, failure, message
 
 **System Exploration Job**:

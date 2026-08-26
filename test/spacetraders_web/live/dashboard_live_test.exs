@@ -1415,8 +1415,7 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
             [
               desired_mode: "active",
               status: "blocked",
-              blocked_reason: ":invalid_extraction_waypoint",
-              in_flight_action: %{"kind" => "navigate", "waypoint" => "X1-UX81-A2"}
+              blocked_reason: ":invalid_extraction_waypoint"
             ]
         )
       )
@@ -1479,7 +1478,7 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
 
       assert has_element?(
                lv,
-               "[data-ship-card=\"ORBITALIST-3\"] button[phx-click=\"reconcile_miner_job\"]"
+               "[data-ship-card=\"ORBITALIST-3\"] button[phx-click=\"resume_miner_job\"]"
              )
 
       refute has_element?(

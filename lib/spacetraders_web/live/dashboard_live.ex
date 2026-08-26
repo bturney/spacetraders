@@ -2821,7 +2821,8 @@ defmodule SpaceTradersWeb.DashboardLive do
           :if={
             @job &&
               (@job.status == "paused" or
-                 (@job.status == "blocked" and not is_map(@job.in_flight_action)))
+                 (@job.status == "blocked" and
+                    not (match?(%JobBlocker{}, @job.blocker) and is_map(@job.in_flight_action))))
           }
           type="button"
           phx-click="resume_miner_job"
@@ -2831,7 +2832,10 @@ defmodule SpaceTradersWeb.DashboardLive do
           Resume after revalidation
         </button>
         <button
-          :if={@job && @job.status == "blocked" && is_map(@job.in_flight_action)}
+          :if={
+            @job && @job.status == "blocked" && match?(%JobBlocker{}, @job.blocker) &&
+              is_map(@job.in_flight_action)
+          }
           type="button"
           phx-click="reconcile_miner_job"
           phx-value-symbol={@ship.symbol}

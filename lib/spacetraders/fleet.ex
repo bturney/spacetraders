@@ -1850,7 +1850,8 @@ defmodule SpaceTraders.Fleet do
   @doc "Reconciles a blocked in-flight Miner Job before explicitly retrying it."
   def reconcile_miner_job(%AgentRecord{} = agent, ship_symbol) do
     with {:ok, ship} <- owned_ship(agent, ship_symbol),
-         %Job{status: "blocked", in_flight_action: action} = config when is_map(action) <-
+         %Job{status: "blocked", blocker: %JobBlocker{}, in_flight_action: action} = config
+         when is_map(action) <-
            unfinished_job(ship.id),
          {:ok, live_ship} <- SpaceTraders.API.get_ship(agent.agent_token, ship_symbol) do
       reconcile_in_flight(agent.id, ship, config, live_ship)
@@ -1953,6 +1954,7 @@ defmodule SpaceTraders.Fleet do
       Ecto.Changeset.change(config,
         status: if(live_ship.nav.status == "IN_TRANSIT", do: "waiting", else: "active"),
         blocked_reason: nil,
+        blocker: nil,
         recovery_attempts: 0,
         recovery_started_at: nil,
         last_action_result: %{"kind" => "recovery", "outcome" => "confirmed"},
@@ -1969,6 +1971,9 @@ defmodule SpaceTraders.Fleet do
     config =
       Repo.update!(
         Ecto.Changeset.change(config,
+          status: "active",
+          blocked_reason: nil,
+          blocker: nil,
           recovery_attempts: attempts,
           recovery_started_at:
             config.recovery_started_at || DateTime.utc_now() |> DateTime.truncate(:second)
@@ -2108,10 +2113,11 @@ defmodule SpaceTraders.Fleet do
         {"operator", "agent_credentials_restored", ["restore_credentials", "resume"]}
 
       {"ambiguous", _reason} ->
-        {"game_state", "authoritative_action_outcome_available", ["inspect_activity", "resume"]}
+        {"game_state", "authoritative_action_outcome_available",
+         ["inspect_activity", "reconcile_and_retry"]}
 
       {"retry_exhausted", _reason} ->
-        {"game_state", "authoritative_read_succeeds", ["resume"]}
+        {"game_state", "authoritative_read_succeeds", ["reconcile_and_retry"]}
 
       {_code, reason} when is_struct(reason) ->
         {"game_state", "authoritative_read_succeeds", ["resume"]}
