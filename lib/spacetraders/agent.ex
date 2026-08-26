@@ -187,6 +187,28 @@ defmodule SpaceTraders.Agent do
   @doc "Returns whether the game has verified this Agent as stale after a Server Reset."
   def stale?(%Agent{stale_at: stale_at}), do: not is_nil(stale_at)
 
+  @doc "Fences execution against an Agent retired or invalidated by a Server Reset."
+  def execution_allowed?(%Agent{id: nil}), do: :ok
+
+  def execution_allowed?(%Agent{id: id}) do
+    case Repo.get(Agent, id) do
+      %Agent{stale_at: nil} -> :ok
+      _ -> {:error, :stale_agent}
+    end
+  end
+
+  @doc "Converts a reset mismatch from any game call into the durable stale state."
+  def handle_game_result(%Agent{} = agent, {:error, error}) do
+    if server_reset_mismatch?(error) do
+      mark_stale(agent)
+      {:error, :stale_agent}
+    else
+      {:error, error}
+    end
+  end
+
+  def handle_game_result(_agent, result), do: result
+
   @doc """
   Mints a new agent in the game on behalf of the operator.
 

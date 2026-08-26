@@ -4761,4 +4761,30 @@ defmodule SpaceTraders.FleetTest do
       assert ShipServer.ensure_ready("GHOST-SHIP") == :ok
     end
   end
+
+  describe "stale Agent execution" do
+    test "stops manual commands immediately after a reset mismatch" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        conn
+        |> Map.put(:status, 401)
+        |> Req.Test.json(%{
+          "error" => %{
+            "code" => 4113,
+            "message" =>
+              "Failed to parse token. Token reset_date does not match the server. Server resets happen on a weekly to bi-weekly frequency during alpha. After a reset, you should re-register your agent. Expected: 2026-08-16, Actual: 2026-08-09"
+          }
+        })
+      end)
+
+      assert {:error, :stale_agent} = Fleet.dock_ship(agent, "FLEET-SHIP")
+      assert %{stale_at: %DateTime{}} = Repo.get!(AgentRecord, agent.id)
+
+      Req.Test.stub(SpaceTraders.API, fn _conn -> flunk("stale Agent made a game request") end)
+
+      assert {:error, :stale_agent} = Fleet.navigate_ship(agent, "FLEET-SHIP", "X1-UX81-A2")
+    end
+  end
 end
