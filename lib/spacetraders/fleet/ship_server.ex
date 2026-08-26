@@ -19,6 +19,7 @@ defmodule SpaceTraders.Fleet.ShipServer do
   require Logger
 
   alias SpaceTraders.API.Model.{Cooldown, Ship, ShipNav}
+  alias SpaceTraders.Agent, as: AgentContext
   alias SpaceTraders.Agent.Agent
   alias SpaceTraders.Timeline
   alias SpaceTraders.Timeline.Event
@@ -281,11 +282,22 @@ defmodule SpaceTraders.Fleet.ShipServer do
   # Re-pulls the ship's real state from the game. The result is not cached — the
   # dashboard reads the live fleet through the Fleet context; this call is what
   # confirms the event is genuinely done before the ship is unblocked.
-  defp refresh(%{agent_token: agent_token, symbol: symbol})
+  defp refresh(%{agent_token: agent_token, symbol: symbol} = state)
        when is_binary(agent_token) and agent_token != "" do
     # This GenServer owns a persisted retry timer; blocking it with request-level
     # backoff would make readiness calls unresponsive.
-    SpaceTraders.API.get_ship(agent_token, symbol, retry: false)
+    case SpaceTraders.Repo.get(Agent, state.agent_id) do
+      nil ->
+        {:error, :stale_agent}
+
+      agent ->
+        with :ok <- AgentContext.execution_allowed?(agent) do
+          AgentContext.handle_game_result(
+            agent,
+            SpaceTraders.API.get_ship(agent_token, symbol, retry: false)
+          )
+        end
+    end
   end
 
   defp refresh(_state), do: {:error, :agent_token_missing}

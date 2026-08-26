@@ -16,6 +16,14 @@ defmodule SpaceTraders.Fleet.ShipServerTest do
   @agent_id 900_001
 
   setup do
+    Repo.insert!(%Agent{
+      id: @agent_id,
+      symbol: "SHIP-SERVER-AGENT",
+      faction: "COSMIC",
+      headquarters: "X1-UX81-A1",
+      agent_token: "AGENT_TOKEN"
+    })
+
     on_exit(fn -> ShipServer.stop_all() end)
     :ok
   end
@@ -104,6 +112,26 @@ defmodule SpaceTraders.Fleet.ShipServerTest do
       event = schedule(symbol, :arrival, DateTime.add(DateTime.utc_now(), -60, :second))
 
       start_server(symbol)
+
+      Process.sleep(50)
+      assert Repo.get(Event, event.id).status == "pending"
+      assert ShipServer.ensure_ready(symbol) == {:error, :ship_in_transit}
+    end
+
+    test "does not resume a stale Agent's timer after restart" do
+      symbol = unique_symbol()
+
+      Repo.update!(
+        Ecto.Changeset.change(Repo.get!(Agent, @agent_id),
+          agent_token: "STALE_TOKEN",
+          stale_at: DateTime.utc_now() |> DateTime.truncate(:second)
+        )
+      )
+
+      event = schedule(symbol, :arrival, DateTime.add(DateTime.utc_now(), -60, :second))
+      Req.Test.stub(SpaceTraders.API, fn _conn -> flunk("stale timer made a game request") end)
+
+      start_server(symbol, "STALE_TOKEN")
 
       Process.sleep(50)
       assert Repo.get(Event, event.id).status == "pending"
@@ -221,14 +249,7 @@ defmodule SpaceTraders.Fleet.ShipServerTest do
 
   describe "Miner Job continuation" do
     test "continues extraction after a cooldown wakeup without crashing the server" do
-      agent =
-        Repo.insert!(%Agent{
-          id: @agent_id,
-          symbol: "SHIP-SERVER-AGENT",
-          faction: "COSMIC",
-          headquarters: "X1-UX81-A1",
-          agent_token: "AGENT_TOKEN"
-        })
+      agent = Repo.get!(Agent, @agent_id)
 
       ship =
         Repo.insert!(%Ship{
@@ -304,14 +325,7 @@ defmodule SpaceTraders.Fleet.ShipServerTest do
 
   describe "Manual Control Intent continuation" do
     test "arrival wakeup completes the manual Navigate Intent at its target" do
-      agent =
-        Repo.insert!(%Agent{
-          id: @agent_id,
-          symbol: "SHIP-SERVER-AGENT",
-          faction: "COSMIC",
-          headquarters: "X1-UX81-A1",
-          agent_token: "AGENT_TOKEN"
-        })
+      agent = Repo.get!(Agent, @agent_id)
 
       symbol = unique_symbol()
 
@@ -358,14 +372,7 @@ defmodule SpaceTraders.Fleet.ShipServerTest do
     end
 
     test "cooldown wakeup dispatches a waiting manual Navigate Intent" do
-      agent =
-        Repo.insert!(%Agent{
-          id: @agent_id,
-          symbol: "SHIP-SERVER-AGENT",
-          faction: "COSMIC",
-          headquarters: "X1-UX81-A1",
-          agent_token: "AGENT_TOKEN"
-        })
+      agent = Repo.get!(Agent, @agent_id)
 
       symbol = unique_symbol()
 

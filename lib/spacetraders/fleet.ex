@@ -42,9 +42,11 @@ defmodule SpaceTraders.Fleet do
   Returns `{:ok, [%SpaceTraders.API.Model.Ship{}]}` or an API error. An agent
   without a stored AgentToken returns `{:error, :agent_token_missing}`.
   """
-  def list_ships(%AgentRecord{agent_token: agent_token})
+  def list_ships(%AgentRecord{agent_token: agent_token} = agent)
       when is_binary(agent_token) and agent_token != "" do
-    SpaceTraders.API.get_ships(agent_token)
+    with :ok <- Agent.execution_allowed?(agent) do
+      Agent.handle_game_result(agent, SpaceTraders.API.get_ships(agent_token))
+    end
   end
 
   def list_ships(%AgentRecord{}), do: {:error, :agent_token_missing}
@@ -427,7 +429,10 @@ defmodule SpaceTraders.Fleet do
   defp reconcile_manual_intent(agent, intent) do
     ship = Repo.get!(Ship, intent.ship_id)
 
-    case SpaceTraders.API.get_ship(agent.agent_token, ship.symbol) do
+    case Agent.handle_game_result(
+           agent,
+           SpaceTraders.API.get_ship(agent.agent_token, ship.symbol)
+         ) do
       {:ok, live_ship} -> advance_manual_intent(agent, intent, live_ship)
       {:error, reason} -> block_manual_intent(intent, reason)
     end
@@ -436,8 +441,10 @@ defmodule SpaceTraders.Fleet do
   defp revalidate_manual_intent(agent_id, ship_symbol, live_ship, expected_intent_id) do
     with %Ship{} = ship <- Repo.get_by(Ship, agent_id: agent_id, symbol: ship_symbol),
          %ManualIntent{} = intent <- unfinished_manual_intent(ship.id),
-         true <- intent_matches_event?(intent, expected_intent_id) do
-      advance_manual_intent(Repo.get!(AgentRecord, agent_id), intent, live_ship)
+         true <- intent_matches_event?(intent, expected_intent_id),
+         %AgentRecord{} = agent <- Repo.get(AgentRecord, agent_id),
+         :ok <- Agent.execution_allowed?(agent) do
+      advance_manual_intent(agent, intent, live_ship)
     else
       _ -> :ok
     end
@@ -586,7 +593,10 @@ defmodule SpaceTraders.Fleet do
         )
       )
 
-    case SpaceTraders.API.orbit_ship(agent.agent_token, live_ship.symbol) do
+    case Agent.handle_game_result(
+           agent,
+           SpaceTraders.API.orbit_ship(agent.agent_token, live_ship.symbol)
+         ) do
       {:ok, result} ->
         intent =
           Repo.update!(
@@ -616,10 +626,13 @@ defmodule SpaceTraders.Fleet do
         )
       )
 
-    case SpaceTraders.API.navigate_ship(
-           agent.agent_token,
-           live_ship.symbol,
-           intent.target_waypoint
+    case Agent.handle_game_result(
+           agent,
+           SpaceTraders.API.navigate_ship(
+             agent.agent_token,
+             live_ship.symbol,
+             intent.target_waypoint
+           )
          ) do
       {:ok, result} ->
         schedule_intent_arrival(agent, intent, live_ship.symbol, result)
@@ -733,13 +746,17 @@ defmodule SpaceTraders.Fleet do
   @doc "Reconciles a persisted Manual Control Intent after a process restart."
   def recover_manual_intent_on_boot(ship_symbol, agent_id, agent_token) do
     with %Ship{} = ship <- Repo.get_by(Ship, symbol: ship_symbol, agent_id: agent_id),
-         %ManualIntent{} = intent <- unfinished_manual_intent(ship.id) do
-      case SpaceTraders.API.get_ship(agent_token, ship_symbol) do
+         %ManualIntent{} = intent <- unfinished_manual_intent(ship.id),
+         %AgentRecord{} = agent <- Repo.get(AgentRecord, agent_id),
+         :ok <- Agent.execution_allowed?(agent) do
+      case Agent.handle_game_result(agent, SpaceTraders.API.get_ship(agent_token, ship_symbol)) do
         {:ok, live_ship} ->
-          advance_manual_intent(Repo.get!(AgentRecord, agent_id), intent, live_ship)
+          advance_manual_intent(agent, intent, live_ship)
 
         {:error, reason} ->
-          intent_recovery_retry_or_block(ship, intent, agent_id, agent_token, reason)
+          if reason == :stale_agent,
+            do: :ok,
+            else: intent_recovery_retry_or_block(ship, intent, agent_id, agent_token, reason)
       end
     else
       _ -> :ok
@@ -838,7 +855,8 @@ defmodule SpaceTraders.Fleet do
 
   @doc "Starts a configured Miner Job after authoritative validation."
   def start_miner_job(%AgentRecord{} = agent, ship_symbol) do
-    with {:ok, ship} <- owned_ship(agent, ship_symbol),
+    with :ok <- Agent.execution_allowed?(agent),
+         {:ok, ship} <- owned_ship(agent, ship_symbol),
          %Job{} = job <- unfinished_job(ship.id),
          nil <- unfinished_manual_intent(ship.id),
          {:ok, live_ship, sellable_goods, deliverables} <- validate_miner_job(agent, ship, job) do
@@ -943,9 +961,11 @@ defmodule SpaceTraders.Fleet do
   defp preemption_message(reason), do: "Paused: #{inspect(reason)}"
 
   defp preempt_miner_job_for(agent, ship_symbol, reason) do
-    case Repo.get_by(Ship, agent_id: agent.id, symbol: ship_symbol) do
-      %Ship{} = ship -> preempt_miner_job(agent, ship, reason)
-      nil -> :ok
+    with :ok <- Agent.execution_allowed?(agent) do
+      case Repo.get_by(Ship, agent_id: agent.id, symbol: ship_symbol) do
+        %Ship{} = ship -> preempt_miner_job(agent, ship, reason)
+        nil -> :ok
+      end
     end
   end
 
@@ -1050,7 +1070,9 @@ defmodule SpaceTraders.Fleet do
 
   @doc "Reconciles a ready Miner Job and dispatches its next loop leg."
   def advance_miner_job(%AgentRecord{} = agent, %Job{} = config, live_ship) do
-    advance_miner_job(agent, config, live_ship, :normal)
+    with :ok <- Agent.execution_allowed?(agent) do
+      Agent.handle_game_result(agent, advance_miner_job(agent, config, live_ship, :normal))
+    end
   end
 
   defp advance_miner_job(%AgentRecord{} = agent, %Job{} = config, live_ship, mode) do
@@ -1095,7 +1117,8 @@ defmodule SpaceTraders.Fleet do
          true <- job_matches_event?(config, expected_job_id),
          true <- config.status in @running_job_states,
          true <- cooldown_ready?(live_ship),
-         %AgentRecord{} = agent <- Repo.get(AgentRecord, agent_id) do
+         %AgentRecord{} = agent <- Repo.get(AgentRecord, agent_id),
+         :ok <- Agent.execution_allowed?(agent) do
       case config.in_flight_action do
         %{"kind" => kind} when kind in @gather_kinds ->
           config =
@@ -1133,8 +1156,9 @@ defmodule SpaceTraders.Fleet do
          %Job{} = config <- unfinished_job(ship.id),
          true <- job_matches_event?(config, expected_job_id),
          true <- config.status in @running_job_states,
-         true <- arrived_at_configured_waypoint?(live_ship, config) do
-      agent = Repo.get!(AgentRecord, agent_id)
+         true <- arrived_at_configured_waypoint?(live_ship, config),
+         %AgentRecord{} = agent <- Repo.get(AgentRecord, agent_id),
+         :ok <- Agent.execution_allowed?(agent) do
       waypoint = get_in(config.in_flight_action, ["waypoint"])
 
       config =
@@ -1185,7 +1209,10 @@ defmodule SpaceTraders.Fleet do
   defp extract_if_below_threshold(agent, config, live_ship, mode) do
     cond do
       live_ship.nav.status == "DOCKED" ->
-        case SpaceTraders.API.orbit_ship(agent.agent_token, live_ship.symbol) do
+        case Agent.handle_game_result(
+               agent,
+               SpaceTraders.API.orbit_ship(agent.agent_token, live_ship.symbol)
+             ) do
           {:ok, result} -> advance_miner_job(agent, config, %{live_ship | nav: result.nav}, mode)
           {:error, reason} -> mark_miner_job_blocked(config, reason)
         end
@@ -1757,7 +1784,10 @@ defmodule SpaceTraders.Fleet do
     config =
       Repo.update!(Ecto.Changeset.change(config, status: "active", in_flight_action: action))
 
-    case SpaceTraders.API.navigate_ship(agent.agent_token, live_ship.symbol, waypoint) do
+    case Agent.handle_game_result(
+           agent,
+           SpaceTraders.API.navigate_ship(agent.agent_token, live_ship.symbol, waypoint)
+         ) do
       {:ok, result} ->
         maybe_schedule_arrival(agent, live_ship.symbol, result, config.id)
 
@@ -1839,7 +1869,8 @@ defmodule SpaceTraders.Fleet do
          job_id
        )
        when is_binary(token) and token != "" do
-    with {:ok, result} <- SpaceTraders.API.extract_resources(token, ship_symbol),
+    with {:ok, result} <-
+           Agent.handle_game_result(agent, SpaceTraders.API.extract_resources(token, ship_symbol)),
          :ok <- schedule_cooldown(agent, ship_symbol, result, job_id) do
       {:ok, result}
     end
@@ -1851,7 +1882,8 @@ defmodule SpaceTraders.Fleet do
          job_id
        )
        when is_binary(token) and token != "" do
-    with {:ok, result} <- SpaceTraders.API.siphon_resources(token, ship_symbol),
+    with {:ok, result} <-
+           Agent.handle_game_result(agent, SpaceTraders.API.siphon_resources(token, ship_symbol)),
          :ok <- schedule_cooldown(agent, ship_symbol, result, job_id) do
       {:ok, result}
     end
@@ -2021,7 +2053,10 @@ defmodule SpaceTraders.Fleet do
     with :ok <- preempt_miner_job_for(agent, ship_symbol, {:manual_override, "navigation"}),
          :ok <- ShipServer.ensure_ready(ship_symbol),
          {:ok, result} <-
-           SpaceTraders.API.navigate_ship(agent_token, ship_symbol, waypoint_symbol) do
+           Agent.handle_game_result(
+             agent,
+             SpaceTraders.API.navigate_ship(agent_token, ship_symbol, waypoint_symbol)
+           ) do
       maybe_schedule_arrival(agent, ship_symbol, result)
       persist_destination_history(agent, ship_symbol, result.nav.route.destination.symbol)
       {:ok, result}
@@ -2042,7 +2077,10 @@ defmodule SpaceTraders.Fleet do
              flight_mode in ["DRIFT", "STEALTH", "CRUISE", "BURN"] do
     with :ok <- preempt_miner_job_for(agent, ship_symbol, {:manual_override, "flight mode"}),
          :ok <- flight_mode_change_allowed?(ship_symbol) do
-      SpaceTraders.API.set_ship_flight_mode(agent_token, ship_symbol, flight_mode)
+      Agent.handle_game_result(
+        agent,
+        SpaceTraders.API.set_ship_flight_mode(agent_token, ship_symbol, flight_mode)
+      )
     end
   end
 
@@ -2127,7 +2165,7 @@ defmodule SpaceTraders.Fleet do
       when is_binary(agent_token) and agent_token != "" do
     with :ok <- preempt_miner_job_for(agent, ship_symbol, {:manual_override, "docking"}),
          :ok <- ShipServer.ensure_ready(ship_symbol) do
-      SpaceTraders.API.dock_ship(agent_token, ship_symbol)
+      Agent.handle_game_result(agent, SpaceTraders.API.dock_ship(agent_token, ship_symbol))
     end
   end
 
@@ -2138,7 +2176,7 @@ defmodule SpaceTraders.Fleet do
       when is_binary(agent_token) and agent_token != "" do
     with :ok <- preempt_miner_job_for(agent, ship_symbol, {:manual_override, "orbit"}),
          :ok <- ShipServer.ensure_ready(ship_symbol) do
-      SpaceTraders.API.orbit_ship(agent_token, ship_symbol)
+      Agent.handle_game_result(agent, SpaceTraders.API.orbit_ship(agent_token, ship_symbol))
     end
   end
 
@@ -2149,7 +2187,11 @@ defmodule SpaceTraders.Fleet do
       when is_binary(agent_token) and agent_token != "" do
     with :ok <- preempt_miner_job_for(agent, ship_symbol, {:manual_override, "extraction"}),
          :ok <- ShipServer.ensure_ready(ship_symbol),
-         {:ok, result} <- SpaceTraders.API.extract_resources(agent_token, ship_symbol),
+         {:ok, result} <-
+           Agent.handle_game_result(
+             agent,
+             SpaceTraders.API.extract_resources(agent_token, ship_symbol)
+           ),
          :ok <- schedule_cooldown(agent, ship_symbol, result) do
       {:ok, result}
     end
@@ -2162,16 +2204,24 @@ defmodule SpaceTraders.Fleet do
       when is_binary(agent_token) and agent_token != "" do
     with :ok <- preempt_miner_job_for(agent, ship_symbol, {:manual_override, "siphoning"}),
          :ok <- ShipServer.ensure_ready(ship_symbol),
-         {:ok, live_ship} <- SpaceTraders.API.get_ship(agent_token, ship_symbol),
+         {:ok, live_ship} <-
+           Agent.handle_game_result(agent, SpaceTraders.API.get_ship(agent_token, ship_symbol)),
          {:ok, waypoint} <-
-           SpaceTraders.API.get_waypoint(
-             agent_token,
-             live_ship.nav.system_symbol,
-             live_ship.nav.waypoint_symbol
+           Agent.handle_game_result(
+             agent,
+             SpaceTraders.API.get_waypoint(
+               agent_token,
+               live_ship.nav.system_symbol,
+               live_ship.nav.waypoint_symbol
+             )
            ),
          :ok <- siphon_location?(waypoint),
          :ok <- siphon_capability?(live_ship),
-         {:ok, result} <- SpaceTraders.API.siphon_resources(agent_token, ship_symbol),
+         {:ok, result} <-
+           Agent.handle_game_result(
+             agent,
+             SpaceTraders.API.siphon_resources(agent_token, ship_symbol)
+           ),
          :ok <- schedule_cooldown(agent, ship_symbol, result) do
       {:ok, result}
     end
@@ -2197,7 +2247,10 @@ defmodule SpaceTraders.Fleet do
     with :ok <- preempt_miner_job_for(agent, ship_symbol, {:manual_override, "selling cargo"}),
          :ok <- ShipServer.ensure_ready(ship_symbol) do
       invalidate_market_after(
-        SpaceTraders.API.sell_cargo(agent_token, ship_symbol, trade_symbol, units),
+        Agent.handle_game_result(
+          agent,
+          SpaceTraders.API.sell_cargo(agent_token, ship_symbol, trade_symbol, units)
+        ),
         agent
       )
     end
@@ -2217,7 +2270,10 @@ defmodule SpaceTraders.Fleet do
     with :ok <- preempt_miner_job_for(agent, ship_symbol, {:manual_override, "purchasing cargo"}),
          :ok <- ShipServer.ensure_ready(ship_symbol) do
       invalidate_market_after(
-        SpaceTraders.API.purchase_cargo(agent_token, ship_symbol, trade_symbol, units),
+        Agent.handle_game_result(
+          agent,
+          SpaceTraders.API.purchase_cargo(agent_token, ship_symbol, trade_symbol, units)
+        ),
         agent
       )
     end
@@ -2235,7 +2291,10 @@ defmodule SpaceTraders.Fleet do
       when is_binary(agent_token) and agent_token != "" do
     with :ok <- preempt_miner_job_for(agent, ship_symbol, {:manual_override, "refueling"}),
          :ok <- ShipServer.ensure_ready(ship_symbol) do
-      invalidate_market_after(SpaceTraders.API.refuel_ship(agent_token, ship_symbol), agent)
+      invalidate_market_after(
+        Agent.handle_game_result(agent, SpaceTraders.API.refuel_ship(agent_token, ship_symbol)),
+        agent
+      )
     end
   end
 
@@ -2296,7 +2355,10 @@ defmodule SpaceTraders.Fleet do
     with :ok <-
            preempt_miner_job_for(agent, ship_symbol, {:manual_override, "jettisoning cargo"}),
          :ok <- ShipServer.ensure_ready(ship_symbol) do
-      SpaceTraders.API.jettison_cargo(agent_token, ship_symbol, trade_symbol, units)
+      Agent.handle_game_result(
+        agent,
+        SpaceTraders.API.jettison_cargo(agent_token, ship_symbol, trade_symbol, units)
+      )
     end
   end
 
@@ -2316,13 +2378,19 @@ defmodule SpaceTraders.Fleet do
         units
       )
       when is_binary(token) and token != "" and is_integer(units) and units > 0 do
-    with :ok <- different_transfer_ships?(from_ship, to_ship),
-         {:ok, source} <- SpaceTraders.API.get_ship(token, from_ship),
-         {:ok, target} <- SpaceTraders.API.get_ship(token, to_ship),
+    with :ok <- Agent.execution_allowed?(agent),
+         :ok <- different_transfer_ships?(from_ship, to_ship),
+         {:ok, source} <-
+           Agent.handle_game_result(agent, SpaceTraders.API.get_ship(token, from_ship)),
+         {:ok, target} <-
+           Agent.handle_game_result(agent, SpaceTraders.API.get_ship(token, to_ship)),
          :ok <- transfer_preflight(source, target, trade_symbol, units),
          :ok <- preempt_miner_job_for(agent, from_ship, {:manual_override, "cargo transfer"}),
          :ok <- ShipServer.ensure_ready(from_ship) do
-      SpaceTraders.API.transfer_cargo(token, from_ship, trade_symbol, units, to_ship)
+      Agent.handle_game_result(
+        agent,
+        SpaceTraders.API.transfer_cargo(token, from_ship, trade_symbol, units, to_ship)
+      )
     end
   end
 
@@ -2412,13 +2480,18 @@ defmodule SpaceTraders.Fleet do
   @doc "Reconciles a persisted Miner Job's in-flight action after a process restart."
   def recover_job_on_boot(ship_symbol, agent_id, agent_token) do
     with %Ship{} = ship <- Repo.get_by(Ship, symbol: ship_symbol, agent_id: agent_id),
-         %Job{} = config <- unfinished_job(ship.id) do
+         %Job{} = config <- unfinished_job(ship.id),
+         %AgentRecord{} = agent <- Repo.get(AgentRecord, agent_id),
+         :ok <- Agent.execution_allowed?(agent) do
       if config.status in @running_job_states do
         # Recovery owns its own persisted attempt budget. Avoid nested client
         # retries so one authoritative read counts as one recovery attempt.
-        case SpaceTraders.API.get_ship(agent_token, ship_symbol, retry: false) do
+        case Agent.handle_game_result(
+               agent,
+               SpaceTraders.API.get_ship(agent_token, ship_symbol, retry: false)
+             ) do
           {:ok, live_ship} when config.status == "active" and is_nil(config.in_flight_action) ->
-            advance_miner_job(Repo.get!(AgentRecord, agent_id), config, live_ship)
+            advance_miner_job(agent, config, live_ship)
 
           {:ok, live_ship}
           when config.status in ["active", "waiting"] and is_map(config.in_flight_action) ->
@@ -2440,12 +2513,16 @@ defmodule SpaceTraders.Fleet do
 
   @doc "Reconciles a blocked in-flight Miner Job before explicitly retrying it."
   def reconcile_miner_job(%AgentRecord{} = agent, ship_symbol) do
-    with {:ok, ship} <- owned_ship(agent, ship_symbol),
+    with :ok <- Agent.execution_allowed?(agent),
+         {:ok, ship} <- owned_ship(agent, ship_symbol),
          %Job{status: "blocked", blocker: %JobBlocker{}, in_flight_action: action} = config
          when is_map(action) <-
            unfinished_job(ship.id),
          {:ok, live_ship} <-
-           SpaceTraders.API.get_ship(agent.agent_token, ship_symbol, retry: false) do
+           Agent.handle_game_result(
+             agent,
+             SpaceTraders.API.get_ship(agent.agent_token, ship_symbol, retry: false)
+           ) do
       reconcile_in_flight(agent.id, ship, config, live_ship)
     else
       %Job{} -> {:error, :miner_job_not_blocked}
