@@ -20,7 +20,18 @@ else
   exit 1
 fi
 
-# Cheap insurance for a fresh or partial checkout: make sure deps are present.
-"$MIX" deps.get
+# Cheap insurance for a fresh or partial checkout: fetch deps only when they are
+# missing so steady-state runs stay quiet (deps.get lists every locked package
+# and its security advisories). On failure the resolver output is surfaced.
+if [ ! -d deps ] || [ -z "$(ls -A deps 2>/dev/null)" ]; then
+  deps_log="$(mktemp)"
+  if ! "$MIX" deps.get >"$deps_log" 2>&1; then
+    echo "mix deps.get failed:" >&2
+    cat "$deps_log" >&2
+    rm -f "$deps_log"
+    exit 1
+  fi
+  rm -f "$deps_log"
+fi
 
 "$MIX" verify

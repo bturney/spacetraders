@@ -79,6 +79,40 @@ port="$(allocate_port)"
 port_lease=1
 if [ -n "$requested_port" ]; then port_lease=0; fi
 setup_complete=0
+
+# Bootstrap and compile are slow and chatty; stream a single progress line and
+# keep the full output in a log artifact, dumping its tail only on failure.
+quiet_bootstrap() {
+  local log="$1" progress="$2"
+
+  echo "$progress (full output: $log)"
+
+  if ! (
+    "$SCRIPT_DIR/bootstrap" &&
+    export PATH="$ELIXIR_DIR/bin:$OTP_DIR/bin:$PATH" &&
+    "$ELIXIR_DIR/bin/mix" compile
+  ) >"$log" 2>&1; then
+    echo "Worktree setup failed; last 80 lines of $log:" >&2
+    tail -n 80 "$log" >&2
+    exit 1
+  fi
+}
+
+# Warm-cache entries carry deps and _build only; MIX_HOME (Hex/Rebar archives)
+# lives outside them, so a restored checkout may still be missing the package
+# manager. Install silently when absent instead of prompting mid-command.
+ensure_mix_home() {
+  mkdir -p "$MIX_HOME"
+
+  if [ ! -e "$MIX_HOME/archives/hex.ez" ]; then
+    "$ELIXIR_DIR/bin/mix" local.hex --if-missing --force
+  fi
+
+  if [ ! -e "$MIX_HOME/rebar3" ]; then
+    "$ELIXIR_DIR/bin/mix" local.rebar --if-missing --force
+  fi
+}
+
 cleanup_failed_setup() {
   if [ "$setup_complete" -eq 0 ] && [ "$port_lease" -eq 1 ]; then
     "$SCRIPT_DIR/worktree-release-port" "$task_id"
@@ -108,11 +142,9 @@ if clean_worktree; then
     cp -a "$cache_entry/_build/." "$PROJECT_ROOT/_build/"
     touch "$cache_entry/complete"
     echo "Restored warm cache $cache_key."
+    ensure_mix_home
   else
-    echo "Populating warm cache $cache_key."
-    "$SCRIPT_DIR/bootstrap"
-    export PATH="$ELIXIR_DIR/bin:$OTP_DIR/bin:$PATH"
-    "$ELIXIR_DIR/bin/mix" compile
+    quiet_bootstrap "$cache_root/setup-$task_id.log" "Populating warm cache $cache_key"
 
     temporary_entry="$cache_root/entries/.${cache_key}.partial-$$"
     rm -rf "$temporary_entry"
@@ -123,10 +155,7 @@ if clean_worktree; then
     mv "$temporary_entry" "$cache_entry"
   fi
 else
-  echo "Dirty worktree: compiling privately."
-  "$SCRIPT_DIR/bootstrap"
-  export PATH="$ELIXIR_DIR/bin:$OTP_DIR/bin:$PATH"
-  "$ELIXIR_DIR/bin/mix" compile
+  quiet_bootstrap "$cache_root/setup-$task_id.log" "Dirty worktree: compiling privately"
 fi
 
 {
