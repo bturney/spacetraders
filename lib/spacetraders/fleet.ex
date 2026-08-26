@@ -1825,7 +1825,9 @@ defmodule SpaceTraders.Fleet do
     with %Ship{} = ship <- Repo.get_by(Ship, symbol: ship_symbol, agent_id: agent_id),
          %Job{} = config <- unfinished_job(ship.id) do
       if config.status in @running_job_states do
-        case SpaceTraders.API.get_ship(agent_token, ship_symbol) do
+        # Recovery owns its own persisted attempt budget. Avoid nested client
+        # retries so one authoritative read counts as one recovery attempt.
+        case SpaceTraders.API.get_ship(agent_token, ship_symbol, retry: false) do
           {:ok, live_ship} when config.status == "active" and is_nil(config.in_flight_action) ->
             advance_miner_job(Repo.get!(AgentRecord, agent_id), config, live_ship)
 
@@ -1853,7 +1855,8 @@ defmodule SpaceTraders.Fleet do
          %Job{status: "blocked", blocker: %JobBlocker{}, in_flight_action: action} = config
          when is_map(action) <-
            unfinished_job(ship.id),
-         {:ok, live_ship} <- SpaceTraders.API.get_ship(agent.agent_token, ship_symbol) do
+         {:ok, live_ship} <-
+           SpaceTraders.API.get_ship(agent.agent_token, ship_symbol, retry: false) do
       reconcile_in_flight(agent.id, ship, config, live_ship)
     else
       %Job{} -> {:error, :miner_job_not_blocked}
