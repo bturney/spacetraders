@@ -1890,7 +1890,11 @@ defmodule SpaceTraders.Fleet do
           Ecto.Changeset.change(config,
             status: "active",
             in_flight_action: nil,
-            progress: %{"waypoint" => waypoint, "last_completed" => "navigate"}
+            progress:
+              Map.merge(config.progress || %{}, %{
+                "waypoint" => waypoint,
+                "last_completed" => "navigate"
+              })
           )
         )
 
