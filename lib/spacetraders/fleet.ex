@@ -322,6 +322,410 @@ defmodule SpaceTraders.Fleet do
 
   def configure_explorer_job(%AgentRecord{}, _ship_symbol), do: {:error, :agent_token_missing}
 
+  @doc "Captures a paused Procurement Job for one Contract delivery requirement."
+  def configure_procurement_job(%AgentRecord{} = agent, ship_symbol, attrs) when is_map(attrs) do
+    with {:ok, ship} <- owned_ship(agent, ship_symbol),
+         nil <- unfinished_job(ship.id),
+         {:ok, progress} <- procurement_progress(attrs) do
+      job =
+        %Job{ship_id: ship.id}
+        |> Job.changeset(%{
+          type: "procurement",
+          # Legacy Miner columns remain non-null while policies own their config.
+          extraction_waypoint: "PROCUREMENT-NONE",
+          market_waypoint: "PROCUREMENT-NONE",
+          cargo_threshold: 1
+        })
+        |> Ecto.Changeset.put_change(:status, "paused")
+        |> Ecto.Changeset.put_change(:blocked_reason, "Awaiting Operator resume")
+        |> Ecto.Changeset.put_change(:progress, progress)
+        |> Repo.insert!()
+
+      record_activity(agent, ship, "configuration", "Procurement Job configured")
+      {:ok, job}
+    else
+      %Job{} -> {:error, :unfinished_job_already_assigned}
+      error -> error
+    end
+  end
+
+  defp procurement_progress(attrs) do
+    contract_id = attrs[:contract_id] || attrs["contract_id"]
+    trade_symbol = attrs[:trade_symbol] || attrs["trade_symbol"]
+    quantity = attrs[:quantity] || attrs["quantity"]
+    destination = attrs[:destination_waypoint] || attrs["destination_waypoint"]
+    source_systems = attrs[:source_systems] || attrs["source_systems"] || []
+    reserve_credits = attrs[:reserve_credits] || attrs["reserve_credits"] || 0
+    price_ceiling = attrs[:price_ceiling] || attrs["price_ceiling"]
+
+    compatible_cargo? =
+      attrs[:compatible_existing_cargo?] || attrs["compatible_existing_cargo?"] || false
+
+    if is_binary(contract_id) and is_binary(trade_symbol) and is_integer(quantity) and
+         quantity > 0 and
+         is_binary(destination) and is_list(source_systems) and
+         Enum.all?(source_systems, &is_binary/1) and
+         is_integer(reserve_credits) and reserve_credits >= 0 and
+         (is_nil(price_ceiling) or (is_integer(price_ceiling) and price_ceiling > 0)) do
+      {:ok,
+       %{
+         "contract_id" => contract_id,
+         "trade_symbol" => trade_symbol,
+         "requested" => quantity,
+         "destination_waypoint" => destination,
+         "source_systems" => source_systems,
+         "reserve_credits" => reserve_credits,
+         "price_ceiling" => price_ceiling,
+         "compatible_existing_cargo" => compatible_cargo?,
+         "acquired" => 0,
+         "aboard" => 0,
+         "accepted" => 0
+       }}
+    else
+      {:error, :invalid_procurement_configuration}
+    end
+  end
+
+  @doc "Starts or resumes a Procurement Job from fresh Contract, Ship, and credit state."
+  def start_procurement_job(%AgentRecord{} = agent, ship_symbol) do
+    with :ok <- Agent.execution_allowed?(agent),
+         {:ok, ship} <- owned_ship(agent, ship_symbol),
+         %Job{type: "procurement"} = job <- unfinished_job(ship.id),
+         nil <- unfinished_manual_intent(ship.id),
+         {:ok, live_ship} <-
+           Agent.handle_game_result(
+             agent,
+             SpaceTraders.API.get_ship(agent.agent_token, ship_symbol)
+           ),
+         {:ok, contract} <- procurement_contract(agent, job),
+         {:ok, job} <- initialize_procurement_progress(job, live_ship, contract),
+         {:ok, overview} <- Agent.agent_overview(agent) do
+      job =
+        Repo.update!(
+          Ecto.Changeset.change(job,
+            status: "active",
+            blocker: nil,
+            blocked_reason: nil,
+            last_validated_at: DateTime.utc_now() |> DateTime.truncate(:second)
+          )
+        )
+
+      advance_procurement_job(agent, job, live_ship, contract, overview.credits)
+    else
+      nil -> {:error, :procurement_job_not_configured}
+      %Job{} -> {:error, :procurement_job_not_configured}
+      %ManualIntent{} -> {:error, :manual_intent_active}
+      {:error, reason} -> block_procurement_job(agent, ship_symbol, reason)
+    end
+  end
+
+  def resume_procurement_job(agent, ship_symbol), do: start_procurement_job(agent, ship_symbol)
+
+  def pause_procurement_job(%AgentRecord{} = agent, ship_symbol),
+    do: pause_job_type(agent, ship_symbol, "procurement", "Procurement Job")
+
+  def stop_procurement_job(%AgentRecord{} = agent, ship_symbol),
+    do: stop_job_type(agent, ship_symbol, "procurement", "Procurement Job")
+
+  defp pause_job_type(agent, ship_symbol, type, label) do
+    with {:ok, ship} <- owned_ship(agent, ship_symbol),
+         %Job{type: ^type} = job <- unfinished_job(ship.id) do
+      job =
+        Repo.update!(
+          Ecto.Changeset.change(job,
+            status: "paused",
+            blocker: nil,
+            blocked_reason: "Paused by Operator"
+          )
+        )
+
+      record_activity(agent, ship, "pause", "#{label} paused by Operator")
+      {:ok, job}
+    else
+      _ -> {:error, :procurement_job_not_configured}
+    end
+  end
+
+  defp stop_job_type(agent, ship_symbol, type, label) do
+    with {:ok, ship} <- owned_ship(agent, ship_symbol),
+         %Job{type: ^type} = job <- unfinished_job(ship.id) do
+      terminalize_job!(job, "stopped")
+      record_activity(agent, ship, "stop", "#{label} stopped; Ship returned to Manual")
+      :ok
+    else
+      _ -> {:error, :procurement_job_not_configured}
+    end
+  end
+
+  defp procurement_contract(agent, job) do
+    with {:ok, contracts} <- Contracts.list_contracts(agent),
+         %{} = contract <- Enum.find(contracts, &(&1.id == job.progress["contract_id"])),
+         true <- Contracts.active?(contract),
+         %{} = term <-
+           Enum.find(
+             contract.terms.deliver || [],
+             &(&1.trade_symbol == job.progress["trade_symbol"])
+           ),
+         true <- term.destination_symbol == job.progress["destination_waypoint"] do
+      {:ok, contract}
+    else
+      nil -> {:error, :recipient_unavailable}
+      false -> {:error, :recipient_conflict}
+      _ -> {:error, :recipient_unavailable}
+    end
+  end
+
+  defp initialize_procurement_progress(job, live_ship, contract) do
+    progress = job.progress || %{}
+    held = item_units(live_ship, progress["trade_symbol"])
+
+    cond do
+      not progress["compatible_existing_cargo"] and not is_integer(progress["accepted_baseline"]) and
+          held > 0 ->
+        {:error, :incompatible_existing_cargo}
+
+      is_integer(progress["accepted_baseline"]) ->
+        {:ok, job}
+
+      true ->
+        term =
+          Enum.find(contract.terms.deliver || [], &(&1.trade_symbol == progress["trade_symbol"]))
+
+        {:ok,
+         Repo.update!(
+           Ecto.Changeset.change(job,
+             progress: Map.put(progress, "accepted_baseline", term.units_fulfilled)
+           )
+         )}
+    end
+  end
+
+  # The policy always re-reads its Contract before deciding. Cargo and purchases
+  # are evidence only; accepted units in the Contract response are completion.
+  defp advance_procurement_job(agent, job, live_ship, contract, credits) do
+    progress = procurement_counts(job.progress, live_ship, contract)
+    job = Repo.update!(Ecto.Changeset.change(job, progress: progress, in_flight_action: nil))
+
+    cond do
+      progress["accepted"] >= progress["requested"] ->
+        job = terminalize_job!(job, "completed")
+
+        record_activity_by_config(
+          job,
+          "procurement_completed",
+          "Procurement Job completed",
+          progress
+        )
+
+        {:ok, job}
+
+      progress["aboard"] > 0 ->
+        if live_ship.nav.waypoint_symbol == progress["destination_waypoint"] and
+             live_ship.nav.status != "IN_TRANSIT" do
+          deliver_procurement_goods(agent, job, live_ship, contract)
+        else
+          navigate_miner_job(agent, job, live_ship, progress["destination_waypoint"])
+        end
+
+      true ->
+        buy_procurement_goods(agent, job, live_ship, credits)
+    end
+  end
+
+  defp procurement_counts(progress, live_ship, contract) do
+    term = Enum.find(contract.terms.deliver || [], &(&1.trade_symbol == progress["trade_symbol"]))
+
+    accepted =
+      max(term.units_fulfilled - (progress["accepted_baseline"] || term.units_fulfilled), 0)
+
+    requested = progress["requested"]
+    held = item_units(live_ship, progress["trade_symbol"])
+
+    aboard =
+      if progress["compatible_existing_cargo"], do: min(held, requested - accepted), else: held
+
+    progress
+    |> Map.put("requested", requested)
+    |> Map.put("accepted", accepted)
+    |> Map.put("aboard", max(aboard, 0))
+    |> Map.put("acquired", max(progress["acquired"] || 0, accepted + aboard))
+  end
+
+  defp deliver_procurement_goods(agent, job, live_ship, _contract) do
+    progress = job.progress
+    units = min(progress["aboard"], progress["requested"] - progress["accepted"])
+
+    action = %{
+      "kind" => "deliver",
+      "trade_symbol" => progress["trade_symbol"],
+      "expected" => %{"units_at_most" => item_units(live_ship, progress["trade_symbol"]) - units}
+    }
+
+    with {:ok, live_ship} <- dock_for_market(agent, live_ship) do
+      job = Repo.update!(Ecto.Changeset.change(job, in_flight_action: action))
+
+      case Contracts.deliver_goods(
+             agent,
+             progress["contract_id"],
+             live_ship.symbol,
+             progress["trade_symbol"],
+             units
+           ) do
+        {:ok, %{cargo: cargo, contract: fresh_contract}} ->
+          with {:ok, overview} <- Agent.agent_overview(agent) do
+            advance_procurement_job(
+              agent,
+              job,
+              %{live_ship | cargo: cargo},
+              fresh_contract,
+              overview.credits
+            )
+          else
+            {:error, reason} -> mark_procurement_job_blocked(job, {:credits_unavailable, reason})
+          end
+
+        {:error, reason} ->
+          mark_procurement_job_blocked(job, {:recipient_delivery_failed, reason})
+      end
+    else
+      {:error, reason} -> mark_procurement_job_blocked(job, {:dock_failed, reason})
+    end
+  end
+
+  defp buy_procurement_goods(agent, job, live_ship, credits) do
+    progress = job.progress
+
+    with {:ok, source} <- procurement_source(agent, live_ship, progress),
+         :ok <- procurement_price_allowed?(source.good, progress),
+         {:ok, units} <- procurement_purchase_units(live_ship, source.good, progress, credits) do
+      if live_ship.nav.waypoint_symbol == source.waypoint and live_ship.nav.status != "IN_TRANSIT" do
+        action = %{
+          "kind" => "buy",
+          "trade_symbol" => progress["trade_symbol"],
+          "expected" => %{
+            "cargo_units_at_least" => item_units(live_ship, progress["trade_symbol"]) + units
+          }
+        }
+
+        with {:ok, live_ship} <- dock_for_market(agent, live_ship) do
+          job = Repo.update!(Ecto.Changeset.change(job, in_flight_action: action))
+
+          case SpaceTraders.API.purchase_cargo(
+                 agent.agent_token,
+                 live_ship.symbol,
+                 progress["trade_symbol"],
+                 units
+               ) do
+            {:ok, %{cargo: cargo, agent: purchase_agent}} ->
+              job =
+                Repo.update!(
+                  Ecto.Changeset.change(job,
+                    last_action_result: %{"kind" => "buy", "units" => units}
+                  )
+                )
+
+              with {:ok, contract} <- procurement_contract(agent, job) do
+                advance_procurement_job(
+                  agent,
+                  job,
+                  %{live_ship | cargo: cargo},
+                  contract,
+                  purchase_agent.credits
+                )
+              else
+                {:error, reason} -> mark_procurement_job_blocked(job, reason)
+              end
+
+            {:error, reason} ->
+              mark_procurement_job_blocked(job, {:purchase_failed, reason})
+          end
+        else
+          {:error, reason} -> mark_procurement_job_blocked(job, {:dock_failed, reason})
+        end
+      else
+        navigate_miner_job(agent, job, live_ship, source.waypoint)
+      end
+    else
+      {:error, reason} -> mark_procurement_job_blocked(job, reason)
+    end
+  end
+
+  defp procurement_source(agent, live_ship, progress) do
+    systems = progress["source_systems"]
+    systems = if systems == [], do: [live_ship.nav.system_symbol], else: systems
+
+    Enum.reduce_while(systems, {:error, :source_market_unavailable}, fn system, _ ->
+      with {:ok, waypoints} <- fetch_waypoint_pages(agent.agent_token, system),
+           source when not is_nil(source) <-
+             procurement_market_source(agent, live_ship, waypoints, progress["trade_symbol"]) do
+        {:halt, {:ok, source}}
+      else
+        _ -> {:cont, {:error, :source_market_unavailable}}
+      end
+    end)
+  end
+
+  defp procurement_market_source(agent, live_ship, waypoints, trade_symbol) do
+    Enum.find_value(waypoints, fn waypoint ->
+      if market_waypoint?(waypoint) == :ok do
+        case market_for_ship(agent, live_ship, waypoint.symbol) do
+          {:ok, market} ->
+            case Enum.find(market.trade_goods || [], &(&1.symbol == trade_symbol)) do
+              nil -> nil
+              good -> %{waypoint: waypoint.symbol, good: good}
+            end
+
+          _ ->
+            nil
+        end
+      end
+    end)
+  end
+
+  defp procurement_price_allowed?(_good, %{"price_ceiling" => nil}), do: :ok
+
+  defp procurement_price_allowed?(%{purchase_price: price}, %{"price_ceiling" => ceiling})
+       when price <= ceiling,
+       do: :ok
+
+  defp procurement_price_allowed?(_, _), do: {:error, :price_ceiling_exceeded}
+
+  defp procurement_purchase_units(live_ship, good, progress, credits) do
+    affordable = max(div(max(credits - progress["reserve_credits"], 0), good.purchase_price), 0)
+    free = max(live_ship.cargo.capacity - live_ship.cargo.units, 0)
+    needed = progress["requested"] - progress["accepted"]
+    units = min(min(free, good.trade_volume), min(needed, affordable))
+    if units > 0, do: {:ok, units}, else: {:error, :spending_or_cargo_constraint}
+  end
+
+  defp block_procurement_job(agent, ship_symbol, reason) do
+    with {:ok, ship} <- owned_ship(agent, ship_symbol),
+         %Job{type: "procurement"} = job <- unfinished_job(ship.id) do
+      mark_procurement_job_blocked(job, reason)
+      {:error, {:procurement_job_blocked, reason}}
+    else
+      _ -> {:error, :procurement_job_not_configured}
+    end
+  end
+
+  defp mark_procurement_job_blocked(job, reason) do
+    blocker = %{
+      job_blocker(reason)
+      | summary: "Procurement Job cannot progress: #{blocker_reason(reason)}."
+    }
+
+    job =
+      Repo.update!(
+        Ecto.Changeset.change(job, status: "blocked", blocker: blocker, blocked_reason: nil)
+      )
+
+    record_activity_by_config(job, "procurement_job_blocked", "Procurement Job blocked", %{
+      "block" => inspect(reason)
+    })
+
+    {:error, reason}
+  end
+
   @doc "Starts a System Exploration Job and acquires its current public baseline."
   def start_explorer_job(%AgentRecord{} = agent, ship_symbol) do
     with :ok <- Agent.execution_allowed?(agent),
@@ -1569,13 +1973,19 @@ defmodule SpaceTraders.Fleet do
           Ecto.Changeset.change(config,
             status: "active",
             in_flight_action: nil,
-            progress: %{"waypoint" => waypoint, "last_completed" => "navigate"}
+            progress:
+              Map.merge(config.progress || %{}, %{
+                "waypoint" => waypoint,
+                "last_completed" => "navigate"
+              })
           )
         )
 
-      if config.type == "explorer",
-        do: advance_explorer_job(agent, config, live_ship),
-        else: advance_miner_job(agent, config, live_ship, :timeline)
+      case config.type do
+        "explorer" -> advance_explorer_job(agent, config, live_ship)
+        "procurement" -> start_procurement_job(agent, ship_symbol)
+        _ -> advance_miner_job(agent, config, live_ship, :timeline)
+      end
     else
       _ -> :ok
     end
@@ -2946,6 +3356,7 @@ defmodule SpaceTraders.Fleet do
           {:ok, live_ship} when config.status == "active" and is_nil(config.in_flight_action) ->
             case config.type do
               "explorer" -> advance_explorer_job(agent, config, live_ship)
+              "procurement" -> start_procurement_job(agent, ship_symbol)
               _ -> advance_miner_job(agent, config, live_ship)
             end
 
@@ -3012,9 +3423,11 @@ defmodule SpaceTraders.Fleet do
         else
           agent = Repo.get!(AgentRecord, agent_id)
 
-          if recovered_config.type == "explorer",
-            do: advance_explorer_job(agent, recovered_config, live_ship),
-            else: advance_miner_job(agent, recovered_config, live_ship, :timeline)
+          case recovered_config.type do
+            "explorer" -> advance_explorer_job(agent, recovered_config, live_ship)
+            "procurement" -> start_procurement_job(agent, live_ship.symbol)
+            _ -> advance_miner_job(agent, recovered_config, live_ship, :timeline)
+          end
         end
 
       :absent ->
@@ -3056,6 +3469,17 @@ defmodule SpaceTraders.Fleet do
        )
        when kind in ["sell", "jettison", "deliver"] do
     if item_units(live_ship, symbol) <= units, do: :confirmed, else: :absent
+  end
+
+  defp action_outcome(
+         %{
+           "kind" => "buy",
+           "trade_symbol" => symbol,
+           "expected" => %{"cargo_units_at_least" => units}
+         },
+         live_ship
+       ) do
+    if item_units(live_ship, symbol) >= units, do: :confirmed, else: :absent
   end
 
   defp action_outcome(%{"kind" => "refuel", "expected" => %{"fuel_full" => true}}, live_ship) do
@@ -3123,7 +3547,14 @@ defmodule SpaceTraders.Fleet do
       "absent"
     )
 
-    case advance_miner_job(Repo.get!(AgentRecord, agent_id), config, live_ship, :timeline) do
+    agent = Repo.get!(AgentRecord, agent_id)
+
+    result =
+      if config.type == "procurement",
+        do: start_procurement_job(agent, live_ship.symbol),
+        else: advance_miner_job(agent, config, live_ship, :timeline)
+
+    case result do
       {:ok, recovered_config} ->
         {:ok,
          Repo.update!(
