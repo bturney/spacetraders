@@ -3113,7 +3113,13 @@ defmodule SpaceTraders.FleetTest do
               "data" => %{
                 "agent" => %{"symbol" => agent.symbol, "credits" => 1_750},
                 "cargo" => %{"capacity" => 40, "units" => 0, "inventory" => []},
-                "transaction" => %{}
+                "transaction" => %{
+                  "type" => "SELL",
+                  "tradeSymbol" => "IRON_ORE",
+                  "shipSymbol" => "FLEET-SHIP",
+                  "waypointSymbol" => "X1-UX81-A1",
+                  "units" => 30
+                }
               }
             })
         end

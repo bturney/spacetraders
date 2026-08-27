@@ -590,12 +590,20 @@ defmodule SpaceTraders.Fleet do
 
   defp deliver_procurement_goods(agent, job, live_ship, :market) do
     progress = job.progress
-    units = min(progress["aboard"], progress["requested"] - progress["accepted"])
 
     with {:ok, live_ship} <- dock_for_market(agent, live_ship),
          {:ok, market} <- market_for_ship(agent, live_ship, progress["destination_waypoint"]),
-         :ok <- procurement_sale_price_allowed?(market, progress) do
-      action = %{"kind" => "sell", "trade_symbol" => progress["trade_symbol"], "units" => units}
+         {:ok, units} <- procurement_sale_units(market, progress) do
+      action = %{
+        "kind" => "sell",
+        "trade_symbol" => progress["trade_symbol"],
+        "units" => units,
+        "sold_baseline" => progress["sold"] || 0,
+        "expected" => %{
+          "units_at_most" => item_units(live_ship, progress["trade_symbol"]) - units
+        }
+      }
+
       job = Repo.update!(Ecto.Changeset.change(job, in_flight_action: action))
 
       case SpaceTraders.API.sell_cargo(
@@ -604,21 +612,25 @@ defmodule SpaceTraders.Fleet do
              progress["trade_symbol"],
              units
            ) do
-        {:ok, %{cargo: cargo, agent: sale_agent}} ->
-          progress = Map.update!(job.progress, "sold", &(&1 + units))
+        {:ok, %{cargo: cargo, agent: sale_agent, transaction: transaction}} ->
+          with :ok <- confirm_procurement_sale(transaction, progress, live_ship, units) do
+            progress = Map.update!(job.progress, "sold", &(&1 + transaction.units))
 
-          job =
-            Repo.update!(
-              Ecto.Changeset.change(job, progress: progress, last_action_result: action)
+            job =
+              Repo.update!(
+                Ecto.Changeset.change(job, progress: progress, last_action_result: action)
+              )
+
+            advance_procurement_job(
+              agent,
+              job,
+              %{live_ship | cargo: cargo},
+              :market,
+              sale_agent.credits
             )
-
-          advance_procurement_job(
-            agent,
-            job,
-            %{live_ship | cargo: cargo},
-            :market,
-            sale_agent.credits
-          )
+          else
+            {:error, reason} -> mark_procurement_job_blocked(job, reason)
+          end
 
         {:error, reason} ->
           mark_procurement_job_blocked(job, {:market_sale_failed, reason})
@@ -648,14 +660,13 @@ defmodule SpaceTraders.Fleet do
              progress["trade_symbol"],
              units
            ) do
-        {:ok, %{cargo: cargo, contract: _fresh_contract}} ->
-          with {:ok, overview} <- Agent.agent_overview(agent),
-               {:ok, recipient} <- procurement_recipient(agent, job) do
+        {:ok, %{cargo: cargo, contract: fresh_contract}} ->
+          with {:ok, overview} <- Agent.agent_overview(agent) do
             advance_procurement_job(
               agent,
               job,
               %{live_ship | cargo: cargo},
-              recipient,
+              fresh_contract,
               overview.credits
             )
           else
@@ -768,13 +779,31 @@ defmodule SpaceTraders.Fleet do
 
   defp procurement_price_allowed?(_, _), do: {:error, :price_ceiling_exceeded}
 
-  defp procurement_sale_price_allowed?(market, progress) do
+  defp procurement_sale_units(market, progress) do
     minimum = progress["minimum_sale_price"]
+    requested = min(progress["aboard"], progress["requested"] - progress["accepted"])
 
     case Enum.find(market.trade_goods || [], &(&1.symbol == progress["trade_symbol"])) do
-      %{sell_price: price} when is_nil(minimum) or price >= minimum -> :ok
-      %{sell_price: _price} -> {:error, :minimum_sale_price_not_met}
-      nil -> {:error, :market_good_unavailable}
+      %{sell_price: price, trade_volume: volume}
+      when (is_nil(minimum) or price >= minimum) and is_integer(volume) and volume > 0 ->
+        {:ok, min(requested, volume)}
+
+      %{sell_price: _price} ->
+        {:error, :minimum_sale_price_not_met}
+
+      nil ->
+        {:error, :market_good_unavailable}
+    end
+  end
+
+  defp confirm_procurement_sale(transaction, progress, live_ship, units) do
+    if transaction.type == "SELL" and transaction.trade_symbol == progress["trade_symbol"] and
+         transaction.ship_symbol == live_ship.symbol and
+         transaction.waypoint_symbol == progress["destination_waypoint"] and
+         transaction.units == units do
+      :ok
+    else
+      {:error, :unexpected_market_sale_transaction}
     end
   end
 
@@ -3973,10 +4002,15 @@ defmodule SpaceTraders.Fleet do
     action = config.in_flight_action
 
     progress =
-      if action["kind"] == "navigate" do
-        Map.put(config.progress || %{}, "waypoint", action["waypoint"])
-      else
-        config.progress || %{}
+      case action do
+        %{"kind" => "navigate", "waypoint" => waypoint} ->
+          Map.put(config.progress || %{}, "waypoint", waypoint)
+
+        %{"kind" => "sell", "units" => units, "sold_baseline" => baseline} ->
+          Map.put(config.progress || %{}, "sold", baseline + units)
+
+        _ ->
+          config.progress || %{}
       end
 
     Repo.update!(
