@@ -469,7 +469,8 @@ defmodule SpaceTraders.Fleet do
     held = item_units(live_ship, progress["trade_symbol"])
 
     cond do
-      not progress["compatible_existing_cargo"] and held > 0 ->
+      not progress["compatible_existing_cargo"] and not is_integer(progress["accepted_baseline"]) and
+          held > 0 ->
         {:error, :incompatible_existing_cargo}
 
       is_integer(progress["accepted_baseline"]) ->
@@ -3423,6 +3424,17 @@ defmodule SpaceTraders.Fleet do
     if item_units(live_ship, symbol) <= units, do: :confirmed, else: :absent
   end
 
+  defp action_outcome(
+         %{
+           "kind" => "buy",
+           "trade_symbol" => symbol,
+           "expected" => %{"cargo_units_at_least" => units}
+         },
+         live_ship
+       ) do
+    if item_units(live_ship, symbol) >= units, do: :confirmed, else: :absent
+  end
+
   defp action_outcome(%{"kind" => "refuel", "expected" => %{"fuel_full" => true}}, live_ship) do
     if fuel_full?(live_ship), do: :confirmed, else: :absent
   end
@@ -3488,7 +3500,14 @@ defmodule SpaceTraders.Fleet do
       "absent"
     )
 
-    case advance_miner_job(Repo.get!(AgentRecord, agent_id), config, live_ship, :timeline) do
+    agent = Repo.get!(AgentRecord, agent_id)
+
+    result =
+      if config.type == "procurement",
+        do: start_procurement_job(agent, live_ship.symbol),
+        else: advance_miner_job(agent, config, live_ship, :timeline)
+
+    case result do
       {:ok, recovered_config} ->
         {:ok,
          Repo.update!(
