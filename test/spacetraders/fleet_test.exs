@@ -512,7 +512,8 @@ defmodule SpaceTraders.FleetTest do
       assert %{status: "paused", blocked_reason: "Paused by direct navigation"} =
                Fleet.ship_job(agent, "FLEET-SHIP")
 
-      assert [%{kind: "manual_override"} | _] = Fleet.recent_activity(agent)
+      assert Enum.any?(Fleet.recent_activity(agent), &(&1.kind == "manual_override"))
+      assert Enum.any?(Fleet.recent_activity(agent), &(&1.kind == "navigate"))
     end
 
     test "pausing during an arrival wait preserves the in-flight navigation" do
