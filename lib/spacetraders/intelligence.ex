@@ -160,7 +160,7 @@ defmodule SpaceTraders.Intelligence do
       observation = Repo.insert!(Observation.changeset(%Observation{}, attrs))
 
       Enum.each(fields, fn field ->
-        {state, value} = field_value(payload, field, Keyword.get(opts, :unavailable, false))
+        {state, value} = field_value(payload, field, opts)
 
         Repo.insert!(
           Fact.changeset(%Fact{}, %{
@@ -197,12 +197,18 @@ defmodule SpaceTraders.Intelligence do
   defp coverage_field_name({:market, field}), do: "market_#{field}"
   defp coverage_field_name(field), do: to_string(field)
 
-  defp field_value(_payload, _field, true), do: {"known_unavailable", nil}
+  defp field_value(payload, field, opts) do
+    if opts[:unavailable] do
+      {"known_unavailable", nil}
+    else
+      value = Map.get(payload, field)
 
-  defp field_value(payload, field, false) do
-    value = Map.get(payload, field)
-
-    if not is_nil(value), do: {"known", normalize(value)}, else: {"unknown", nil}
+      if not is_nil(value) or opts[:source] == "get_waypoint" do
+        {"known", normalize(value)}
+      else
+        {"unknown", nil}
+      end
+    end
   end
 
   # A partial endpoint must not erase an earlier usable fact. Unknown remains

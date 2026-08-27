@@ -390,15 +390,17 @@ defmodule SpaceTraders.Fleet do
   def advance_explorer_job(
         %AgentRecord{agent_token: token} = agent,
         %Job{type: "explorer"} = job,
-        _live_ship
+        live_ship
       )
       when is_binary(token) and token != "" do
     system = get_in(job.progress || %{}, ["target_system"])
 
     with true <- is_binary(system),
+         :ok <- scan_explorer_waypoints(agent, token, live_ship),
          {:ok, waypoints} <- fetch_waypoint_pages(token, system),
-         :ok <- acquire_explorer_baseline(agent, token, system, waypoints) do
-      coverage = Intelligence.waypoint_coverage(agent, system, waypoints)
+         :ok <- acquire_explorer_baseline(agent, token, system, waypoints),
+         {:ok, final_waypoints} <- fetch_waypoint_pages(token, system) do
+      coverage = Intelligence.waypoint_coverage(agent, system, final_waypoints)
       missing = Map.new(coverage, fn {symbol, result} -> {symbol, result.missing} end)
 
       job =
@@ -439,6 +441,30 @@ defmodule SpaceTraders.Fleet do
       {:error, reason} -> block_explorer_job(job, reason)
     end
   end
+
+  defp scan_explorer_waypoints(agent, token, live_ship) do
+    if sensor_capability?(live_ship) and not cooldown_active?(live_ship) do
+      with {:ok, %{waypoints: waypoints}} <-
+             Agent.handle_game_result(
+               agent,
+               SpaceTraders.API.scan_waypoints(token, live_ship.symbol)
+             ) do
+        Enum.each(waypoints, fn waypoint ->
+          Intelligence.observe_waypoint(agent, waypoint, source: "scan_waypoints")
+        end)
+
+        :ok
+      end
+    else
+      :ok
+    end
+  end
+
+  defp sensor_capability?(%{mounts: mounts}) do
+    Enum.any?(mounts || [], &String.starts_with?(&1.symbol || "", "MOUNT_SENSOR_ARRAY"))
+  end
+
+  defp sensor_capability?(_), do: false
 
   defp acquire_explorer_baseline(agent, token, system, waypoints) do
     Enum.reduce_while(waypoints, :ok, fn waypoint, :ok ->
@@ -2728,7 +2754,10 @@ defmodule SpaceTraders.Fleet do
                SpaceTraders.API.get_ship(agent_token, ship_symbol, retry: false)
              ) do
           {:ok, live_ship} when config.status == "active" and is_nil(config.in_flight_action) ->
-            advance_miner_job(agent, config, live_ship)
+            case config.type do
+              "explorer" -> advance_explorer_job(agent, config, live_ship)
+              _ -> advance_miner_job(agent, config, live_ship)
+            end
 
           {:ok, live_ship}
           when config.status in ["active", "waiting"] and is_map(config.in_flight_action) ->
