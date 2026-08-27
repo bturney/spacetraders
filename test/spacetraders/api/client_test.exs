@@ -136,6 +136,57 @@ defmodule SpaceTraders.API.ClientTest do
   end
 
   describe "ship actions" do
+    test "scan_waypoints/2 posts a scan and decodes the discovered waypoints" do
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        assert conn.method == "POST"
+        assert conn.request_path == "/v2/my/ships/ORBITALIST-1/scan/waypoints"
+
+        Req.Test.json(conn, %{
+          "data" => %{
+            "cooldown" => %{"shipSymbol" => "ORBITALIST-1", "remainingSeconds" => 30},
+            "waypoints" => [
+              %{
+                "symbol" => "X1-UX81-A2",
+                "systemSymbol" => "X1-UX81",
+                "type" => "PLANET",
+                "x" => 2,
+                "y" => 3
+              }
+            ]
+          }
+        })
+      end)
+
+      assert {:ok,
+              %{
+                cooldown: %Model.Cooldown{remaining_seconds: 30},
+                waypoints: [%{symbol: "X1-UX81-A2"}]
+              }} =
+               API.scan_waypoints("TOKEN", "ORBITALIST-1")
+    end
+
+    test "create_chart/2 posts a chart and decodes the waypoint" do
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        assert conn.method == "POST"
+        assert conn.request_path == "/v2/my/ships/ORBITALIST-1/chart"
+
+        Req.Test.json(conn, %{
+          "data" => %{
+            "chart" => %{"waypointSymbol" => "X1-UX81-A1", "submittedBy" => "ORBITALIST"},
+            "waypoint" => %{
+              "symbol" => "X1-UX81-A1",
+              "systemSymbol" => "X1-UX81",
+              "type" => "PLANET"
+            },
+            "agent" => %{"symbol" => "ORBITALIST", "credits" => 1}
+          }
+        })
+      end)
+
+      assert {:ok, %{waypoint: %Model.Waypoint{symbol: "X1-UX81-A1"}}} =
+               API.create_chart("TOKEN", "ORBITALIST-1")
+    end
+
     test "navigate_ship/3 posts the waypoint and decodes fuel + nav" do
       Req.Test.stub(SpaceTraders.API, fn conn ->
         assert conn.request_path == "/v2/my/ships/ORBITALIST-1/navigate"
@@ -349,6 +400,26 @@ defmodule SpaceTraders.API.ClientTest do
                 transaction: %Model.MarketTransaction{total_price: 71_920}
               }} =
                API.purchase_cargo("TOKEN", "ORBITALIST-1", "SHIP_PLATING", 5)
+    end
+  end
+
+  describe "construction reads" do
+    test "get_construction/3 reads authoritative construction state" do
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        assert conn.method == "GET"
+        assert conn.request_path == "/v2/systems/X1-UX81/waypoints/X1-UX81-A1/construction"
+
+        Req.Test.json(conn, %{
+          "data" => %{
+            "symbol" => "X1-UX81-A1",
+            "isComplete" => false,
+            "materials" => []
+          }
+        })
+      end)
+
+      assert {:ok, %{symbol: "X1-UX81-A1", is_complete: false}} =
+               API.get_construction("TOKEN", "X1-UX81", "X1-UX81-A1")
     end
   end
 

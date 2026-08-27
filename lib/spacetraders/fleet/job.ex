@@ -53,11 +53,24 @@ defmodule SpaceTraders.Fleet.Job do
       :last_validated_at
     ])
     |> cast_embed(:blocker)
-    |> validate_required([:type, :extraction_waypoint, :market_waypoint, :cargo_threshold])
-    |> validate_inclusion(:type, ["miner"])
+    |> validate_required([:type])
+    |> validate_miner_fields()
+    |> validate_inclusion(:type, ["miner", "explorer"])
     |> validate_inclusion(:gather_mode, ["extract", "siphon"])
     |> validate_number(:cargo_threshold, greater_than: 0)
     |> validate_inclusion(:status, @unfinished_states ++ @terminal_states)
     |> unique_constraint(:ship_id, name: :jobs_one_unfinished_per_ship_index)
+  end
+
+  defp validate_miner_fields(%Ecto.Changeset{changes: %{type: "explorer"}} = changeset),
+    do: changeset
+
+  defp validate_miner_fields(%Ecto.Changeset{data: %{type: "explorer"}} = changeset),
+    do: changeset
+
+  defp validate_miner_fields(changeset) do
+    changeset
+    |> validate_required([:extraction_waypoint, :market_waypoint, :cargo_threshold])
+    |> validate_number(:cargo_threshold, greater_than: 0)
   end
 end

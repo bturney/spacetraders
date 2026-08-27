@@ -267,6 +267,211 @@ defmodule SpaceTraders.Fleet do
     end
   end
 
+  @doc "Captures a Ship's authoritative current System as a paused System Exploration Job."
+  def configure_explorer_job(%AgentRecord{agent_token: token} = agent, ship_symbol)
+      when is_binary(token) and token != "" do
+    with :ok <- Agent.execution_allowed?(agent),
+         {:ok, ship} <- owned_ship(agent, ship_symbol),
+         nil <- unfinished_job(ship.id),
+         {:ok, live_ship} <-
+           Agent.handle_game_result(agent, SpaceTraders.API.get_ship(token, ship_symbol)),
+         system when is_binary(system) <- live_ship.nav.system_symbol,
+         {:ok, waypoints} <- fetch_waypoint_pages(token, system) do
+      Enum.each(waypoints, &record_waypoint_observation(agent, &1, "get_waypoints"))
+
+      job =
+        %Job{ship_id: ship.id}
+        # The original Miner schema keeps these columns non-null. Explorer
+        # policy never reads them; its fixed target belongs in progress.
+        |> Job.changeset(%{
+          type: "explorer",
+          extraction_waypoint: "EXPLORER-NONE",
+          market_waypoint: "EXPLORER-NONE",
+          cargo_threshold: 1
+        })
+        |> Ecto.Changeset.put_change(:status, "paused")
+        |> Ecto.Changeset.put_change(:blocked_reason, "Awaiting Operator resume")
+        |> Ecto.Changeset.put_change(:progress, %{"target_system" => system})
+        |> Repo.insert!()
+
+      record_activity(
+        agent,
+        ship,
+        "configuration",
+        "System Exploration Job configured for #{system}"
+      )
+
+      {:ok, job}
+    else
+      %Job{} -> {:error, :unfinished_job_already_assigned}
+      nil -> {:error, :current_system_unavailable}
+      error -> error
+    end
+  end
+
+  def configure_explorer_job(%AgentRecord{}, _ship_symbol), do: {:error, :agent_token_missing}
+
+  @doc "Starts a System Exploration Job and acquires its current public baseline."
+  def start_explorer_job(%AgentRecord{} = agent, ship_symbol) do
+    with :ok <- Agent.execution_allowed?(agent),
+         {:ok, ship} <- owned_ship(agent, ship_symbol),
+         %Job{type: "explorer"} = job <- unfinished_job(ship.id),
+         {:ok, live_ship} <-
+           Agent.handle_game_result(
+             agent,
+             SpaceTraders.API.get_ship(agent.agent_token, ship_symbol)
+           ) do
+      job =
+        Repo.update!(
+          Ecto.Changeset.change(job,
+            status: "active",
+            blocker: nil,
+            blocked_reason: nil,
+            last_validated_at: DateTime.utc_now() |> DateTime.truncate(:second)
+          )
+        )
+
+      advance_explorer_job(agent, job, live_ship)
+    else
+      nil -> {:error, :explorer_job_not_configured}
+      %Job{} -> {:error, :explorer_job_not_configured}
+      {:error, reason} -> block_explorer_job(agent, ship_symbol, reason)
+    end
+  end
+
+  @doc "Pauses a System Exploration Job without changing its fixed target."
+  def pause_explorer_job(%AgentRecord{} = agent, ship_symbol) do
+    with {:ok, ship} <- owned_ship(agent, ship_symbol),
+         %Job{type: "explorer"} = job <- unfinished_job(ship.id) do
+      job =
+        Repo.update!(
+          Ecto.Changeset.change(job,
+            status: "paused",
+            blocker: nil,
+            blocked_reason: "Paused by Operator"
+          )
+        )
+
+      record_activity(agent, ship, "pause", "System Exploration Job paused by Operator")
+      {:ok, job}
+    else
+      _ -> {:error, :explorer_job_not_configured}
+    end
+  end
+
+  @doc "Resumes a System Exploration Job from authoritative game state."
+  def resume_explorer_job(%AgentRecord{} = agent, ship_symbol),
+    do: start_explorer_job(agent, ship_symbol)
+
+  @doc "Stops a System Exploration Job and preserves its terminal history."
+  def stop_explorer_job(%AgentRecord{} = agent, ship_symbol) do
+    with {:ok, ship} <- owned_ship(agent, ship_symbol),
+         %Job{type: "explorer"} = job <- unfinished_job(ship.id) do
+      terminalize_job!(job, "stopped")
+
+      record_activity(
+        agent,
+        ship,
+        "stop",
+        "System Exploration Job stopped; Ship returned to Manual"
+      )
+
+      :ok
+    else
+      _ -> {:error, :explorer_job_not_configured}
+    end
+  end
+
+  @doc "Reconciles an Explorer Job after an explicit Operator retry."
+  def reconcile_explorer_job(%AgentRecord{} = agent, ship_symbol),
+    do: start_explorer_job(agent, ship_symbol)
+
+  @doc "Reconciles public baseline acquisition for a System Exploration Job."
+  def advance_explorer_job(
+        %AgentRecord{agent_token: token} = agent,
+        %Job{type: "explorer"} = job,
+        _live_ship
+      )
+      when is_binary(token) and token != "" do
+    system = get_in(job.progress || %{}, ["target_system"])
+
+    with true <- is_binary(system),
+         {:ok, waypoints} <- fetch_waypoint_pages(token, system),
+         :ok <- acquire_explorer_baseline(agent, token, system, waypoints) do
+      coverage = Intelligence.waypoint_coverage(agent, system, waypoints)
+      missing = Map.new(coverage, fn {symbol, result} -> {symbol, result.missing} end)
+
+      job =
+        Repo.update!(
+          Ecto.Changeset.change(job,
+            progress: Map.merge(job.progress || %{}, %{"coverage" => missing})
+          )
+        )
+
+      if Enum.all?(coverage, fn {_symbol, result} -> result.complete? end) do
+        job =
+          Repo.update!(
+            Ecto.Changeset.change(job,
+              status: "completed",
+              blocker: nil,
+              blocked_reason: nil,
+              last_action_result: %{"kind" => "baseline_acquired"},
+              finished_at: DateTime.utc_now() |> DateTime.truncate(:second)
+            )
+          )
+
+        record_activity_by_config(
+          job,
+          "explorer_job_completed",
+          "System Exploration Job completed",
+          %{
+            "system" => system,
+            "coverage" => missing
+          }
+        )
+
+        {:ok, job}
+      else
+        block_explorer_job(job, {:unresolved_coverage, missing})
+      end
+    else
+      false -> block_explorer_job(job, :target_system_missing)
+      {:error, reason} -> block_explorer_job(job, reason)
+    end
+  end
+
+  defp acquire_explorer_baseline(agent, token, system, waypoints) do
+    Enum.reduce_while(waypoints, :ok, fn waypoint, :ok ->
+      with {:ok, full_waypoint} <-
+             SpaceTraders.API.get_waypoint(token, system, waypoint.symbol),
+           :ok <- observe_explorer_waypoint(agent, full_waypoint),
+           :ok <- acquire_explorer_market(agent, token, system, full_waypoint) do
+        {:cont, :ok}
+      else
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  defp observe_explorer_waypoint(agent, waypoint) do
+    case Intelligence.observe_waypoint(agent, waypoint, source: "get_waypoint") do
+      {:ok, _observation} -> :ok
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp acquire_explorer_market(agent, token, system, waypoint) do
+    if market_waypoint?(waypoint) == :ok do
+      with {:ok, market} <- SpaceTraders.API.get_market(token, system, waypoint.symbol),
+           {:ok, _observation} <-
+             Intelligence.observe_market(agent, system, market, source: "get_market") do
+        :ok
+      end
+    else
+      :ok
+    end
+  end
+
   @doc "Replaces a Ship's unfinished Job and preserves the predecessor as terminal history."
   def replace_miner_job(%AgentRecord{} = agent, ship_symbol, attrs) when is_map(attrs) do
     with {:ok, ship} <- owned_ship(agent, ship_symbol) do
@@ -1856,6 +2061,38 @@ defmodule SpaceTraders.Fleet do
     end
 
     {:error, reason}
+  end
+
+  defp block_explorer_job(agent, ship_symbol, reason) do
+    case owned_ship(agent, ship_symbol) do
+      {:ok, ship} ->
+        case unfinished_job(ship.id) do
+          %Job{type: "explorer"} = job -> block_explorer_job(job, reason)
+          _ -> {:error, :explorer_job_not_configured}
+        end
+
+      error ->
+        error
+    end
+  end
+
+  defp block_explorer_job(job, reason) do
+    job =
+      Repo.update!(
+        Ecto.Changeset.change(job,
+          status: "blocked",
+          blocker: job_blocker(reason),
+          blocked_reason: nil,
+          in_flight_action: nil
+        )
+      )
+
+    record_activity_by_config(job, "explorer_job_blocked", "System Exploration Job blocked", %{
+      "reason" => inspect(reason),
+      "coverage" => get_in(job.progress || %{}, ["coverage"]) || %{}
+    })
+
+    {:error, {:explorer_job_blocked, reason}}
   end
 
   defp record_activity_by_config(config, kind, message, metadata) do

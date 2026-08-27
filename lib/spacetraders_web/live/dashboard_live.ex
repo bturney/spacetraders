@@ -324,6 +324,23 @@ defmodule SpaceTradersWeb.DashboardLive do
   end
 
   @impl true
+  def handle_event("configure_explorer_job", %{"symbol" => ship_symbol}, socket) do
+    with {:ok, agent} <- agent_for_ship(socket, ship_symbol),
+         {:ok, _job} <- Fleet.configure_explorer_job(agent, ship_symbol) do
+      {:noreply,
+       put_flash(
+         refresh_agent(socket, agent),
+         :info,
+         "System Exploration Job assigned and paused."
+       )}
+    else
+      {:error, reason} ->
+        {:noreply,
+         put_flash(refresh_agent_for_ship(socket, ship_symbol), :error, live_error(reason))}
+    end
+  end
+
+  @impl true
   def handle_event(
         "set_flight_mode",
         %{"symbol" => ship_symbol, "flight_mode" => flight_mode} = params,
@@ -671,6 +688,32 @@ defmodule SpaceTradersWeb.DashboardLive do
     end
   end
 
+  @impl true
+  def handle_event(action, %{"symbol" => ship_symbol}, socket)
+      when action in [
+             "pause_explorer_job",
+             "resume_explorer_job",
+             "reconcile_explorer_job",
+             "stop_explorer_job"
+           ] do
+    with {:ok, agent} <- agent_for_ship(socket, ship_symbol),
+         :ok <- explorer_job_action(action, agent, ship_symbol) do
+      message =
+        case action do
+          "pause_explorer_job" -> "#{ship_symbol} System Exploration Job paused."
+          "resume_explorer_job" -> "#{ship_symbol} System Exploration Job resumed."
+          "reconcile_explorer_job" -> "#{ship_symbol} System Exploration Job reconciled."
+          "stop_explorer_job" -> "#{ship_symbol} System Exploration Job stopped; Ship is manual."
+        end
+
+      {:noreply, put_flash(refresh_agent(socket, agent), :info, message)}
+    else
+      {:error, reason} ->
+        {:noreply,
+         put_flash(refresh_agent_for_ship(socket, ship_symbol), :error, live_error(reason))}
+    end
+  end
+
   defp miner_job_action("pause_miner_job", agent, ship),
     do: unwrap_config(Fleet.pause_miner_job(agent, ship))
 
@@ -681,6 +724,19 @@ defmodule SpaceTradersWeb.DashboardLive do
     do: unwrap_config(Fleet.reconcile_miner_job(agent, ship))
 
   defp miner_job_action("stop_miner_job", agent, ship), do: Fleet.stop_miner_job(agent, ship)
+
+  defp explorer_job_action("pause_explorer_job", agent, ship),
+    do: unwrap_config(Fleet.pause_explorer_job(agent, ship))
+
+  defp explorer_job_action("resume_explorer_job", agent, ship),
+    do: unwrap_config(Fleet.resume_explorer_job(agent, ship))
+
+  defp explorer_job_action("reconcile_explorer_job", agent, ship),
+    do: unwrap_config(Fleet.reconcile_explorer_job(agent, ship))
+
+  defp explorer_job_action("stop_explorer_job", agent, ship),
+    do: Fleet.stop_explorer_job(agent, ship)
+
   defp unwrap_config({:ok, _config}), do: :ok
   defp unwrap_config(error), do: error
 
@@ -2419,7 +2475,19 @@ defmodule SpaceTradersWeb.DashboardLive do
         <p class="mt-4 text-xs font-semibold uppercase tracking-wider opacity-60">
           Cargo &amp; Trade
         </p>
-        <.miner_job_panel ship={@ship} form_drafts={@form_drafts} />
+        <%= if @ship.job && @ship.job.type == "explorer" do %>
+          <.explorer_job_panel ship={@ship} />
+        <% else %>
+          <.miner_job_panel ship={@ship} form_drafts={@form_drafts} />
+          <button
+            :if={is_nil(@ship.job)}
+            type="button"
+            phx-click="configure_explorer_job"
+            phx-value-symbol={@ship.symbol}
+            class="btn btn-outline btn-sm mt-2"
+            data-configure-explorer-job
+          >Assign System Exploration Job</button>
+        <% end %>
 
         <.transfer_panel ship={@ship} ships={@ships} form_drafts={@form_drafts} />
 
@@ -2862,6 +2930,64 @@ defmodule SpaceTradersWeb.DashboardLive do
   attr :ship, :map, required: true
   attr :form_drafts, :map, default: %{}
 
+  defp explorer_job_panel(assigns) do
+    coverage = get_in(assigns.ship.job.progress || %{}, ["coverage"]) || %{}
+    unresolved = Enum.filter(coverage, fn {_symbol, missing} -> missing != [] end)
+
+    assigns = assign(assigns, coverage: coverage, unresolved: unresolved)
+
+    ~H"""
+    <section class="mt-4 rounded border border-base-300 p-3" data-explorer-job-panel>
+      <div class="flex items-center justify-between gap-2">
+        <span class="text-xs font-semibold uppercase tracking-wider opacity-60">System Exploration Job</span>
+        <span class="badge badge-sm">{job_status(@ship.job)}</span>
+      </div>
+      <p class="mt-2 text-xs opacity-70" data-explorer-target-system>
+        Target System:
+        <span class="font-mono">{get_in(@ship.job.progress || %{}, ["target_system"])}</span>
+      </p>
+      <p class="mt-1 text-xs opacity-70" data-explorer-coverage>
+        Completed coverage: {map_size(@coverage) - length(@unresolved)} / {map_size(@coverage)} Waypoints
+      </p>
+      <div :if={@unresolved != []} class="mt-2 text-xs" data-explorer-unresolved>
+        <p class="font-semibold">Unresolved coverage</p>
+        <p :for={{symbol, missing} <- @unresolved} class="font-mono opacity-70">
+          {symbol}: {Enum.join(missing, ", ")}
+        </p>
+      </div>
+      <p :if={@ship.job.blocker} class="mt-2 text-xs text-warning" data-explorer-blocker>
+        {@ship.job.blocker.summary} {@ship.job.blocker.retry_condition}
+      </p>
+      <div class="mt-3 flex flex-wrap gap-2">
+        <button
+          type="button"
+          phx-click="pause_explorer_job"
+          phx-value-symbol={@ship.symbol}
+          class="btn btn-ghost btn-xs"
+        >Pause</button>
+        <button
+          type="button"
+          phx-click="resume_explorer_job"
+          phx-value-symbol={@ship.symbol}
+          class="btn btn-primary btn-xs"
+        >Resume</button>
+        <button
+          type="button"
+          phx-click="reconcile_explorer_job"
+          phx-value-symbol={@ship.symbol}
+          class="btn btn-ghost btn-xs"
+        >Reconcile</button>
+        <button
+          type="button"
+          phx-click="stop_explorer_job"
+          phx-value-symbol={@ship.symbol}
+          class="btn btn-error btn-outline btn-xs"
+        >Stop</button>
+      </div>
+    </section>
+    """
+  end
+
   defp miner_job_panel(assigns) do
     job = Map.get(assigns.ship, :job)
     history = Map.get(assigns.ship, :job_history, [])
@@ -3134,6 +3260,7 @@ defmodule SpaceTradersWeb.DashboardLive do
   defp job_status(%{status: "paused"}), do: "Paused"
   defp job_status(nil), do: "Manual"
   defp job_status(%{status: "waiting"}), do: "Waiting"
+  defp job_status(%{type: "explorer", status: "active"}), do: "Active System Exploration Job"
   defp job_status(%{status: "active"}), do: "Active Miner Job"
   defp job_status(_), do: "Manual"
 
@@ -3566,6 +3693,9 @@ defmodule SpaceTradersWeb.DashboardLive do
 
   defp live_error(:ship_not_owned), do: "That Ship is not in this agent's Fleet."
   defp live_error(:miner_job_not_configured), do: "Save a Miner Job configuration first."
+
+  defp live_error(:explorer_job_not_configured),
+    do: "Save a System Exploration Job configuration first."
 
   defp live_error(:manual_intent_active),
     do: "A manual Navigate is still active for this Ship; stop it before resuming the Job."

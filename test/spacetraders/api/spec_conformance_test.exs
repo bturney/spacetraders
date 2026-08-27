@@ -42,6 +42,8 @@ defmodule SpaceTraders.API.SpecConformanceTest do
     {:orbit_ship, :post, "/my/ships/{shipSymbol}/orbit", :data},
     {:extract_resources, :post, "/my/ships/{shipSymbol}/extract", :data},
     {:siphon_resources, :post, "/my/ships/{shipSymbol}/siphon", :data},
+    {:scan_waypoints, :post, "/my/ships/{shipSymbol}/scan/waypoints", :data},
+    {:create_chart, :post, "/my/ships/{shipSymbol}/chart", :data},
     {:refuel_ship, :post, "/my/ships/{shipSymbol}/refuel", :data},
     {:sell_cargo, :post, "/my/ships/{shipSymbol}/sell", :data},
     {:purchase_cargo, :post, "/my/ships/{shipSymbol}/purchase", :data},
@@ -52,6 +54,8 @@ defmodule SpaceTraders.API.SpecConformanceTest do
     {:get_waypoints, :get, "/systems/{systemSymbol}/waypoints", :data},
     {:get_waypoint, :get, "/systems/{systemSymbol}/waypoints/{waypointSymbol}", :data},
     {:get_market, :get, "/systems/{systemSymbol}/waypoints/{waypointSymbol}/market", :data},
+    {:get_construction, :get, "/systems/{systemSymbol}/waypoints/{waypointSymbol}/construction",
+     :data},
     {:get_shipyard, :get, "/systems/{systemSymbol}/waypoints/{waypointSymbol}/shipyard", :data},
     {:get_factions, :get, "/factions", :data},
     {:get_faction, :get, "/factions/{factionSymbol}", :data}
@@ -154,6 +158,8 @@ defmodule SpaceTraders.API.SpecConformanceTest do
   defp arity_of(:orbit_ship), do: 2
   defp arity_of(:extract_resources), do: 2
   defp arity_of(:siphon_resources), do: 2
+  defp arity_of(:scan_waypoints), do: 2
+  defp arity_of(:create_chart), do: 2
   defp arity_of(:refuel_ship), do: 2
   defp arity_of(:sell_cargo), do: 4
   defp arity_of(:purchase_cargo), do: 4
@@ -164,6 +170,7 @@ defmodule SpaceTraders.API.SpecConformanceTest do
   defp arity_of(:get_waypoints), do: 3
   defp arity_of(:get_waypoint), do: 3
   defp arity_of(:get_market), do: 3
+  defp arity_of(:get_construction), do: 3
   defp arity_of(:get_shipyard), do: 3
   defp arity_of(:get_factions), do: 1
   defp arity_of(:get_faction), do: 2
