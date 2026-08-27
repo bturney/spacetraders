@@ -329,6 +329,25 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
               ]
             })
 
+          "/v2/my/ships/ORBITALIST-1" ->
+            Req.Test.json(conn, %{
+              "data" =>
+                ship_body("ORBITALIST-1", %{
+                  "cargo" => %{
+                    "capacity" => 40,
+                    "units" => Agent.get(state, & &1.cargo_units),
+                    "inventory" => [
+                      %{
+                        "symbol" => "IRON_ORE",
+                        "name" => "Iron Ore",
+                        "units" => Agent.get(state, &(&1.cargo_units - 3))
+                      },
+                      %{"symbol" => "COPPER_ORE", "name" => "Copper Ore", "units" => 3}
+                    ]
+                  }
+                })
+            })
+
           "/v2/systems/X1-UX81/waypoints" ->
             Req.Test.json(conn, %{
               "data" => [
@@ -484,6 +503,24 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
                   }
                 })
               ]
+            })
+
+          "/v2/my/ships/ORBITALIST-1" ->
+            Req.Test.json(conn, %{
+              "data" =>
+                ship_body("ORBITALIST-1", %{
+                  "cargo" => %{
+                    "capacity" => 40,
+                    "units" => Agent.get(state, & &1.cargo_units),
+                    "inventory" =>
+                      if(Agent.get(state, &(&1.cargo_units == 0)),
+                        do: [],
+                        else: [
+                          %{"symbol" => "SHIP_PLATING", "name" => "Ship Plating", "units" => 5}
+                        ]
+                      )
+                  }
+                })
             })
 
           "/v2/systems/X1-UX81/waypoints" ->
@@ -1612,6 +1649,26 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
               "data" =>
                 ship_body("ORBITALIST-1", %{
                   "mounts" => [%{"symbol" => "MOUNT_MINING_LASER_I"}]
+                })
+            })
+
+          {"/v2/my/ships/ORBITALIST-3", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" =>
+                ship_body("ORBITALIST-3", %{
+                  "nav" => nav_body("DOCKED", destination: "X1-UX81-A2"),
+                  "cargo" => %{
+                    "capacity" => 40,
+                    "units" => 9,
+                    "inventory" => [
+                      %{
+                        "symbol" => "COPPER_ORE",
+                        "name" => "Copper Ore",
+                        "description" => "Ore",
+                        "units" => 9
+                      }
+                    ]
+                  }
                 })
             })
 
@@ -3242,8 +3299,51 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
               ]
             })
 
+          {"/v2/my/ships/ORBITALIST-3", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" =>
+                ship_body("ORBITALIST-3", %{
+                  "nav" => nav_body("DOCKED", destination: "X1-UX81-A2"),
+                  "cargo" => %{
+                    "capacity" => 40,
+                    "units" => 9,
+                    "inventory" => [
+                      %{
+                        "symbol" => "COPPER_ORE",
+                        "name" => "Copper Ore",
+                        "description" => "Ore",
+                        "units" => 9
+                      }
+                    ]
+                  }
+                })
+            })
+
           {"/v2/my/contracts/ctr-partial-delivery/deliver", "POST"} ->
-            Req.Test.json(conn, %{"data" => %{"contract" => %{}, "cargo" => %{}}})
+            Req.Test.json(conn, %{
+              "data" => %{
+                "cargo" => %{"capacity" => 40, "units" => 0, "inventory" => []},
+                "contract" => %{
+                  "id" => "ctr-partial-delivery",
+                  "accepted" => true,
+                  "fulfilled" => false,
+                  "factionSymbol" => "COSMIC",
+                  "type" => "PROCUREMENT",
+                  "terms" => %{
+                    "deadline" => future_iso(),
+                    "deliver" => [
+                      %{
+                        "tradeSymbol" => "COPPER_ORE",
+                        "destinationSymbol" => "X1-UX81-A2",
+                        "unitsRequired" => 53,
+                        "unitsFulfilled" => 9
+                      }
+                    ],
+                    "payment" => %{"onAccepted" => 1000, "onFulfilled" => 5000}
+                  }
+                }
+              }
+            })
 
           {"/v2/systems/X1-UX81/waypoints", "GET"} ->
             Req.Test.json(conn, %{"data" => []})

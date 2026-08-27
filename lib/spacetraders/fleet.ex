@@ -1135,6 +1135,63 @@ defmodule SpaceTraders.Fleet do
   def navigate_intent(%AgentRecord{}, _ship_symbol, _waypoint),
     do: {:error, :agent_token_missing}
 
+  @doc "Starts a durable Buy Goods Intent at a specified Market."
+  def buy_goods_intent(agent, ship_symbol, waypoint, trade_symbol, units, opts \\ []) do
+    cargo_intent(agent, ship_symbol, "buy", waypoint, trade_symbol, units, opts)
+  end
+
+  @doc "Starts a durable Sell Goods Intent at a specified Market."
+  def sell_goods_intent(agent, ship_symbol, waypoint, trade_symbol, units, opts \\ []) do
+    cargo_intent(agent, ship_symbol, "sell", waypoint, trade_symbol, units, opts)
+  end
+
+  @doc "Starts a durable Deliver Goods Intent for a Contract recipient."
+  def deliver_goods_intent(agent, ship_symbol, waypoint, contract_id, trade_symbol, units) do
+    cargo_intent(agent, ship_symbol, "deliver", waypoint, trade_symbol, units,
+      contract_id: contract_id
+    )
+  end
+
+  defp cargo_intent(
+         %AgentRecord{agent_token: token} = agent,
+         ship_symbol,
+         type,
+         waypoint,
+         trade_symbol,
+         units,
+         opts
+       )
+       when is_binary(token) and token != "" do
+    parameters =
+      opts
+      |> Map.new()
+      |> Map.put(:trade_symbol, trade_symbol)
+      |> Map.put(:units, units)
+      |> Map.new(fn {key, value} -> {to_string(key), value} end)
+
+    with true <- type in ["buy", "sell", "deliver"],
+         :ok <- validate_intent_waypoint(waypoint),
+         true <-
+           is_binary(trade_symbol) and trade_symbol != "" and is_integer(units) and units > 0,
+         {:ok, ship} <- owned_ship(agent, ship_symbol),
+         :ok <- preempt_miner_job_for(agent, ship_symbol, {:manual_override, "#{type} goods"}),
+         {:ok, intent} <-
+           replace_manual_intent(ship, %{
+             type: type,
+             target_waypoint: waypoint,
+             parameters: parameters
+           }) do
+      reconcile_manual_intent(agent, intent)
+    else
+      false -> {:error, :invalid_cargo_intent}
+      {:error, %Ecto.Changeset{}} -> {:error, :manual_intent_conflict}
+      error -> error
+    end
+  end
+
+  defp cargo_intent(%AgentRecord{}, _ship_symbol, _type, _waypoint, _trade_symbol, _units, _opts),
+    do: {:error, :agent_token_missing}
+
   @doc "Returns a Ship's unfinished Manual Control Intent, or nil."
   def ship_manual_intent(%AgentRecord{} = agent, ship_symbol) do
     case owned_ship(agent, ship_symbol) do
@@ -1180,7 +1237,7 @@ defmodule SpaceTraders.Fleet do
     advance_manual_intent(agent, intent, live_ship)
   end
 
-  defp advance_manual_intent(agent, %ManualIntent{} = intent, live_ship) do
+  defp advance_manual_intent(agent, %ManualIntent{type: "navigate"} = intent, live_ship) do
     cond do
       arrived_at_target?(live_ship, intent.target_waypoint) ->
         complete_manual_intent(agent, intent)
@@ -1200,6 +1257,316 @@ defmodule SpaceTraders.Fleet do
       true ->
         dispatch_manual_navigate(agent, intent, live_ship)
     end
+  end
+
+  defp advance_manual_intent(agent, %ManualIntent{type: type} = intent, live_ship)
+       when type in ["buy", "sell", "deliver"] do
+    cond do
+      is_map(intent.in_flight_action) ->
+        # Ship cargo alone cannot correlate a Market sale to this command.
+        block_cargo_intent(intent, {:ambiguous_operation_evidence, type})
+
+      live_ship.nav.waypoint_symbol != intent.target_waypoint ->
+        advance_cargo_navigation(agent, intent, live_ship)
+
+      in_transit?(live_ship) ->
+        wait_for_manual_arrival(agent, intent, live_ship)
+
+      cooldown_active?(live_ship) ->
+        wait_for_manual_cooldown(agent, intent, live_ship)
+
+      not docked?(live_ship) ->
+        dock_for_cargo_intent(agent, intent, live_ship)
+
+      true ->
+        dispatch_cargo_intent(agent, intent, live_ship)
+    end
+  end
+
+  defp advance_cargo_navigation(agent, intent, live_ship) do
+    cond do
+      in_transit?(live_ship) ->
+        wait_for_manual_arrival(agent, intent, live_ship)
+
+      cooldown_active?(live_ship) ->
+        wait_for_manual_cooldown(agent, intent, live_ship)
+
+      docked?(live_ship) ->
+        orbit_for_manual_intent(agent, intent, live_ship)
+
+      fuel_empty?(live_ship) ->
+        block_cargo_intent(intent, {:insufficient_fuel, intent.target_waypoint})
+
+      true ->
+        dispatch_manual_navigate(agent, intent, live_ship)
+    end
+  end
+
+  defp dock_for_cargo_intent(agent, intent, live_ship) do
+    intent =
+      Repo.update!(
+        Ecto.Changeset.change(intent,
+          in_flight_action: %{"kind" => "dock", "waypoint" => live_ship.nav.waypoint_symbol}
+        )
+      )
+
+    case Agent.handle_game_result(
+           agent,
+           SpaceTraders.API.dock_ship(agent.agent_token, live_ship.symbol)
+         ) do
+      {:ok, %{nav: nav}} ->
+        intent = Repo.update!(Ecto.Changeset.change(intent, in_flight_action: nil))
+        advance_manual_intent(agent, intent, %{live_ship | nav: nav})
+
+      {:error, reason} ->
+        block_cargo_intent(intent, reason)
+    end
+  end
+
+  defp dispatch_cargo_intent(agent, intent, live_ship) do
+    if intent.type == "deliver" do
+      with {:ok, units} <- executable_cargo_units(intent, live_ship, nil, agent) do
+        intent =
+          Repo.update!(
+            Ecto.Changeset.change(intent,
+              in_flight_action: %{
+                "kind" => "deliver",
+                "trade_symbol" => intent.parameters["trade_symbol"],
+                "units" => units,
+                "recipient" => intent.parameters["contract_id"]
+              }
+            )
+          )
+
+        execute_cargo_intent(agent, intent, live_ship, units, nil)
+      else
+        {:error, reason} -> block_cargo_intent(intent, reason)
+      end
+    else
+      dispatch_market_cargo_intent(agent, intent, live_ship)
+    end
+  end
+
+  defp dispatch_market_cargo_intent(agent, intent, live_ship) do
+    with {:ok, market} <- market_for_ship(agent, live_ship, intent.target_waypoint),
+         good when not is_nil(good) <-
+           Enum.find(market.trade_goods || [], &(&1.symbol == intent.parameters["trade_symbol"])),
+         {:ok, units} <- executable_cargo_units(intent, live_ship, good, agent) do
+      intent =
+        Repo.update!(
+          Ecto.Changeset.change(intent,
+            in_flight_action: %{
+              "kind" => intent.type,
+              "trade_symbol" => intent.parameters["trade_symbol"],
+              "units" => units,
+              "listing_price" => cargo_price(intent.type, good)
+            }
+          )
+        )
+
+      execute_cargo_intent(agent, intent, live_ship, units, good)
+    else
+      nil ->
+        block_cargo_intent(
+          intent,
+          {:listing_missing_trade_good, intent.parameters["trade_symbol"]}
+        )
+
+      {:error, reason} ->
+        block_cargo_intent(intent, reason)
+    end
+  end
+
+  defp executable_cargo_units(
+         %ManualIntent{type: "buy", parameters: parameters},
+         live_ship,
+         good,
+         agent
+       ) do
+    price = good.purchase_price
+    max_price = parameters["max_price"]
+    free = max(live_ship.cargo.capacity - live_ship.cargo.units, 0)
+
+    cond do
+      is_integer(max_price) and price > max_price ->
+        {:error, {:price_constraint, price, max_price}}
+
+      true ->
+        with {:ok, overview} <- Agent.agent_overview(agent) do
+          units =
+            min(
+              parameters["units"],
+              min(good.trade_volume, min(free, div(overview.credits, price)))
+            )
+
+          if units > 0, do: {:ok, units}, else: {:error, :buy_unavailable}
+        end
+    end
+  end
+
+  defp executable_cargo_units(
+         %ManualIntent{type: "sell", parameters: parameters},
+         live_ship,
+         good,
+         _agent
+       ) do
+    price = good.sell_price
+    min_price = parameters["min_price"]
+    held = item_units(live_ship, parameters["trade_symbol"])
+
+    cond do
+      is_integer(min_price) and price < min_price ->
+        {:error, {:price_constraint, price, min_price}}
+
+      good.trade_volume <= 0 ->
+        {:error,
+         {:market_demand_unavailable, good.symbol, price, good.trade_volume,
+          parameters["min_price"]}}
+
+      true ->
+        units = min(parameters["units"], min(held, good.trade_volume))
+        if units > 0, do: {:ok, units}, else: {:error, :cargo_missing}
+    end
+  end
+
+  defp executable_cargo_units(
+         %ManualIntent{type: "deliver", parameters: parameters},
+         live_ship,
+         _good,
+         _agent
+       ) do
+    held = item_units(live_ship, parameters["trade_symbol"])
+    units = min(parameters["units"], held)
+    if units > 0, do: {:ok, units}, else: {:error, :cargo_missing}
+  end
+
+  defp execute_cargo_intent(agent, %ManualIntent{type: "buy"} = intent, live_ship, units, good) do
+    case SpaceTraders.API.purchase_cargo(
+           agent.agent_token,
+           live_ship.symbol,
+           intent.parameters["trade_symbol"],
+           units
+         ) do
+      {:ok, result} -> complete_cargo_intent(agent, intent, units, good.purchase_price, result)
+      {:error, reason} -> block_cargo_intent(intent, reason)
+    end
+  end
+
+  defp execute_cargo_intent(agent, %ManualIntent{type: "sell"} = intent, live_ship, units, good) do
+    case SpaceTraders.API.sell_cargo(
+           agent.agent_token,
+           live_ship.symbol,
+           intent.parameters["trade_symbol"],
+           units
+         ) do
+      {:ok, result} -> complete_cargo_intent(agent, intent, units, good.sell_price, result)
+      {:error, reason} -> block_cargo_intent(intent, reason)
+    end
+  end
+
+  defp execute_cargo_intent(
+         agent,
+         %ManualIntent{type: "deliver"} = intent,
+         live_ship,
+         units,
+         _good
+       ) do
+    with {:ok, contract} <- procurement_contract_for_intent(agent, intent),
+         {:ok, result} <-
+           Contracts.deliver_goods(
+             agent,
+             intent.parameters["contract_id"],
+             live_ship.symbol,
+             intent.parameters["trade_symbol"],
+             units
+           ) do
+      accepted = delivered_units(contract, result.contract, intent.parameters["trade_symbol"])
+
+      if accepted > 0,
+        do: complete_cargo_intent(agent, intent, accepted, nil, result),
+        else: block_cargo_intent(intent, :recipient_rejected_delivery)
+    else
+      {:error, reason} -> block_cargo_intent(intent, reason)
+    end
+  end
+
+  defp cargo_price("buy", good), do: good.purchase_price
+  defp cargo_price("sell", good), do: good.sell_price
+  defp cargo_price(_, _good), do: nil
+
+  defp complete_cargo_intent(_agent, intent, units, price, _result) do
+    result = %{"kind" => intent.type, "units" => units} |> maybe_put_price(price)
+
+    intent =
+      Repo.update!(
+        Ecto.Changeset.change(intent,
+          status: "completed",
+          in_flight_action: nil,
+          last_action_result: result,
+          blocker: nil,
+          finished_at: DateTime.utc_now() |> DateTime.truncate(:second)
+        )
+      )
+
+    record_activity_by_intent(
+      intent,
+      "manual_intent_completed",
+      "#{String.capitalize(intent.type)} Goods complete",
+      result
+    )
+
+    {:ok, intent}
+  end
+
+  defp maybe_put_price(result, nil), do: result
+  defp maybe_put_price(result, price), do: Map.put(result, "price", price)
+
+  defp block_cargo_intent(intent, reason) do
+    evidence = %{
+      "target" => intent.target_waypoint,
+      "trade_good" => intent.parameters["trade_symbol"],
+      "constraint" => intent.parameters,
+      "observed" => inspect(reason)
+    }
+
+    intent =
+      Repo.update!(
+        Ecto.Changeset.change(intent,
+          status: "blocked",
+          blocker: %{job_blocker(reason) | evidence: inspect(evidence)},
+          in_flight_action: nil,
+          last_action_result: %{"kind" => intent.type, "error" => cargo_error_message(reason)}
+        )
+      )
+
+    {:ok, intent}
+  end
+
+  defp cargo_error_message(%{message: message}) when is_binary(message), do: message
+  defp cargo_error_message(reason) when is_atom(reason), do: Atom.to_string(reason)
+  defp cargo_error_message(reason), do: inspect(reason)
+
+  defp procurement_contract_for_intent(agent, intent) do
+    with {:ok, contracts} <- Contracts.list_contracts(agent),
+         contract when not is_nil(contract) <-
+           Enum.find(contracts, &(&1.id == intent.parameters["contract_id"])),
+         true <- Contracts.fulfillable?(contract) do
+      {:ok, contract}
+    else
+      false -> {:error, :recipient_conflict}
+      _ -> {:error, :recipient_unavailable}
+    end
+  end
+
+  defp delivered_units(before, recipient, trade_symbol) do
+    before_term = Enum.find(before.terms.deliver || [], &(&1.trade_symbol == trade_symbol))
+    after_term = Enum.find(recipient.terms.deliver || [], &(&1.trade_symbol == trade_symbol))
+
+    max(
+      ((after_term && after_term.units_fulfilled) || 0) -
+        ((before_term && before_term.units_fulfilled) || 0),
+      0
+    )
   end
 
   defp reconcile_manual_intent(agent, intent) do
@@ -1235,7 +1602,10 @@ defmodule SpaceTraders.Fleet do
 
   # Replacing a pending manual outcome is explicit; it cannot cancel an action
   # the game already accepted, which reconciliation below accounts for.
-  defp replace_manual_intent(ship, waypoint) do
+  defp replace_manual_intent(ship, waypoint) when is_binary(waypoint),
+    do: replace_manual_intent(ship, %{type: "navigate", target_waypoint: waypoint})
+
+  defp replace_manual_intent(ship, attrs) when is_map(attrs) do
     Repo.transaction(fn ->
       case unfinished_manual_intent(ship.id) do
         %ManualIntent{} = predecessor -> terminalize_manual_intent!(predecessor, "stopped")
@@ -1244,7 +1614,7 @@ defmodule SpaceTraders.Fleet do
 
       {:ok, intent} =
         %ManualIntent{ship_id: ship.id}
-        |> ManualIntent.changeset(%{target_waypoint: waypoint})
+        |> ManualIntent.changeset(attrs)
         |> Ecto.Changeset.put_change(:status, "active")
         |> Repo.insert()
 
