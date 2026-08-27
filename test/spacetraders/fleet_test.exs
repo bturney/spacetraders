@@ -3085,6 +3085,27 @@ defmodule SpaceTraders.FleetTest do
               }
             })
 
+          "/v2/my/ships/FLEET-SHIP/chart" ->
+            Req.Test.json(conn, %{
+              "data" => %{
+                "agent" => %{},
+                "chart" => %{"waypointSymbol" => "X1-UX81-A1", "submittedBy" => "FLEET-SHIP"},
+                "waypoint" => %{
+                  "symbol" => "X1-UX81-A1",
+                  "systemSymbol" => "X1-UX81",
+                  "type" => "ORBITAL_STATION",
+                  "x" => 1,
+                  "y" => 2,
+                  "orbits" => "X1-UX81-A0",
+                  "orbitals" => [],
+                  "traits" => [%{"symbol" => "MARKETPLACE"}],
+                  "modifiers" => [],
+                  "isUnderConstruction" => false,
+                  "chart" => %{"waypointSymbol" => "X1-UX81-A1", "submittedBy" => "FLEET-SHIP"}
+                }
+              }
+            })
+
           path ->
             flunk("unexpected request #{path}")
         end

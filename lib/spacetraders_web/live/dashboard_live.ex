@@ -2933,8 +2933,16 @@ defmodule SpaceTradersWeb.DashboardLive do
   defp explorer_job_panel(assigns) do
     coverage = get_in(assigns.ship.job.progress || %{}, ["coverage"]) || %{}
     unresolved = Enum.filter(coverage, fn {_symbol, missing} -> missing != [] end)
+    methods = get_in(assigns.ship.job.progress || %{}, ["methods"]) || %{}
+    viability = get_in(assigns.ship.job.progress || %{}, ["viability"]) || %{}
 
-    assigns = assign(assigns, coverage: coverage, unresolved: unresolved)
+    assigns =
+      assign(assigns,
+        coverage: coverage,
+        unresolved: unresolved,
+        methods: methods,
+        viability: viability
+      )
 
     ~H"""
     <section class="mt-4 rounded border border-base-300 p-3" data-explorer-job-panel>
@@ -2953,6 +2961,18 @@ defmodule SpaceTradersWeb.DashboardLive do
         <p class="font-semibold">Unresolved coverage</p>
         <p :for={{symbol, missing} <- @unresolved} class="font-mono opacity-70">
           {symbol}: {Enum.join(missing, ", ")}
+        </p>
+      </div>
+      <div :if={map_size(@methods) > 0} class="mt-2 text-xs" data-explorer-methods>
+        <p class="font-semibold">Acquisition methods</p>
+        <p :for={{subject, method} <- @methods} class="font-mono opacity-70">
+          {subject}: {method}
+        </p>
+      </div>
+      <div :if={map_size(@viability) > 0} class="mt-2 text-xs text-warning" data-explorer-viability>
+        <p class="font-semibold">Viability blockers</p>
+        <p :for={{subject, reason} <- @viability} class="font-mono opacity-70">
+          {subject}: {reason}
         </p>
       </div>
       <p :if={@ship.job.blocker} class="mt-2 text-xs text-warning" data-explorer-blocker>

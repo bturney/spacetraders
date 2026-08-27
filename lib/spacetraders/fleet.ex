@@ -396,17 +396,24 @@ defmodule SpaceTraders.Fleet do
     system = get_in(job.progress || %{}, ["target_system"])
 
     with true <- is_binary(system),
-         :ok <- scan_explorer_waypoints(agent, token, live_ship),
+         {:ok, job} <- scan_explorer_waypoints(agent, token, job, live_ship),
          {:ok, waypoints} <- fetch_waypoint_pages(token, system),
-         :ok <- acquire_explorer_baseline(agent, token, system, waypoints),
-         {:ok, final_waypoints} <- fetch_waypoint_pages(token, system) do
+         {:ok, job} <- acquire_explorer_baseline(agent, token, job, live_ship, system, waypoints),
+         {:ok, final_waypoints} <- fetch_waypoint_pages(token, system),
+         {:ok, job} <-
+           acquire_explorer_baseline(agent, token, job, live_ship, system, final_waypoints) do
       coverage = Intelligence.waypoint_coverage(agent, system, final_waypoints)
       missing = Map.new(coverage, fn {symbol, result} -> {symbol, result.missing} end)
 
       job =
         Repo.update!(
           Ecto.Changeset.change(job,
-            progress: Map.merge(job.progress || %{}, %{"coverage" => missing})
+            progress:
+              Map.merge(job.progress || %{}, %{
+                "coverage" => missing,
+                "methods" => get_in(job.progress || %{}, ["methods"]) || %{},
+                "viability" => get_in(job.progress || %{}, ["viability"]) || %{}
+              })
           )
         )
 
@@ -434,7 +441,10 @@ defmodule SpaceTraders.Fleet do
 
         {:ok, job}
       else
-        block_explorer_job(job, {:unresolved_coverage, missing})
+        block_explorer_job(
+          job,
+          {:unresolved_coverage, missing, get_in(job.progress || %{}, ["viability"]) || %{}}
+        )
       end
     else
       false -> block_explorer_job(job, :target_system_missing)
@@ -442,21 +452,50 @@ defmodule SpaceTraders.Fleet do
     end
   end
 
-  defp scan_explorer_waypoints(agent, token, live_ship) do
-    if sensor_capability?(live_ship) and not cooldown_active?(live_ship) do
-      with {:ok, %{waypoints: waypoints}} <-
-             Agent.handle_game_result(
+  defp scan_explorer_waypoints(agent, token, job, live_ship) do
+    cond do
+      cooldown_active?(live_ship) ->
+        wait_for_explorer_cooldown(agent, job, live_ship, "cooldown")
+
+      get_in(job.progress || %{}, ["methods", "scan"]) == "completed" ->
+        {:ok, job}
+
+      not sensor_capability?(live_ship) ->
+        {:ok, record_explorer_method(job, "scan", "unavailable", "sensor_capability_missing")}
+
+      true ->
+        action = %{"kind" => "scan", "expected" => %{"cooldown_or_observation" => true}}
+        job = Repo.update!(Ecto.Changeset.change(job, status: "active", in_flight_action: action))
+
+        case Agent.handle_game_result(
                agent,
                SpaceTraders.API.scan_waypoints(token, live_ship.symbol)
              ) do
-        Enum.each(waypoints, fn waypoint ->
-          Intelligence.observe_waypoint(agent, waypoint, source: "scan_waypoints")
-        end)
+          {:ok, %{waypoints: waypoints} = result} ->
+            Enum.each(
+              waypoints,
+              &Intelligence.observe_waypoint(agent, &1, source: "scan_waypoints")
+            )
 
-        :ok
-      end
-    else
-      :ok
+            job = record_explorer_method(job, "scan", "completed", nil)
+
+            if cooldown_active?(%{cooldown: result.cooldown}) do
+              wait_for_explorer_cooldown(
+                agent,
+                job,
+                %{live_ship | cooldown: result.cooldown},
+                "scan"
+              )
+            else
+              {:ok, Repo.update!(Ecto.Changeset.change(job, in_flight_action: nil))}
+            end
+
+          {:error, reason} ->
+            {:ok,
+             job
+             |> record_explorer_method("scan", "unavailable", inspect(reason))
+             |> then(&Repo.update!(Ecto.Changeset.change(&1, in_flight_action: nil)))}
+        end
     end
   end
 
@@ -466,17 +505,98 @@ defmodule SpaceTraders.Fleet do
 
   defp sensor_capability?(_), do: false
 
-  defp acquire_explorer_baseline(agent, token, system, waypoints) do
-    Enum.reduce_while(waypoints, :ok, fn waypoint, :ok ->
-      with {:ok, full_waypoint} <-
-             SpaceTraders.API.get_waypoint(token, system, waypoint.symbol),
-           :ok <- observe_explorer_waypoint(agent, full_waypoint),
-           :ok <- acquire_explorer_market(agent, token, system, full_waypoint) do
-        {:cont, :ok}
+  defp acquire_explorer_baseline(agent, token, job, live_ship, system, waypoints) do
+    Enum.reduce_while(waypoints, {:ok, job}, fn waypoint, {:ok, job} ->
+      missing =
+        get_in(Intelligence.waypoint_coverage(agent, system, [waypoint]), [
+          waypoint.symbol,
+          :missing
+        ])
+
+      if missing == [] do
+        {:cont, {:ok, record_explorer_method(job, waypoint.symbol, "reused_public", nil)}}
       else
-        {:error, reason} -> {:halt, {:error, reason}}
+        case SpaceTraders.API.get_waypoint(token, system, waypoint.symbol) do
+          {:ok, full_waypoint} ->
+            with :ok <- observe_explorer_waypoint(agent, full_waypoint),
+                 :ok <- acquire_explorer_market(agent, token, system, full_waypoint) do
+              job = record_explorer_method(job, waypoint.symbol, "public_read", nil)
+              {:cont, maybe_chart_explorer_waypoint(agent, token, job, live_ship, full_waypoint)}
+            else
+              {:error, reason} ->
+                {:cont,
+                 {:ok,
+                  record_explorer_method(
+                    job,
+                    waypoint.symbol,
+                    "public_read_failed",
+                    inspect(reason)
+                  )}}
+            end
+
+          {:error, reason} ->
+            {:cont,
+             {:ok,
+              record_explorer_method(job, waypoint.symbol, "public_read_failed", inspect(reason))}}
+        end
       end
     end)
+  end
+
+  # Charting is optional baseline enrichment, but its request changes game state.
+  # Persist the exact method first so restart recovery never blindly repeats it.
+  defp maybe_chart_explorer_waypoint(agent, token, job, live_ship, waypoint) do
+    if live_ship.nav.status in ["DOCKED", "IN_ORBIT"] and
+         live_ship.nav.waypoint_symbol == waypoint.symbol and is_nil(waypoint.chart) do
+      action = %{"kind" => "chart", "waypoint" => waypoint.symbol}
+      job = Repo.update!(Ecto.Changeset.change(job, in_flight_action: action))
+
+      case Agent.handle_game_result(agent, SpaceTraders.API.create_chart(token, live_ship.symbol)) do
+        {:ok, %{waypoint: charted_waypoint}} ->
+          :ok = observe_explorer_waypoint(agent, charted_waypoint)
+
+          {:ok,
+           job
+           |> record_explorer_method(waypoint.symbol, "chart", nil)
+           |> then(&Repo.update!(Ecto.Changeset.change(&1, in_flight_action: nil)))}
+
+        {:error, reason} ->
+          {:ok,
+           job
+           |> record_explorer_method(waypoint.symbol, "chart_unavailable", inspect(reason))
+           |> then(&Repo.update!(Ecto.Changeset.change(&1, in_flight_action: nil)))}
+      end
+    else
+      {:ok, job}
+    end
+  end
+
+  defp wait_for_explorer_cooldown(agent, job, live_ship, method) do
+    maybe_schedule_live_cooldown(agent, live_ship, job.id)
+
+    {:ok,
+     Repo.update!(
+       Ecto.Changeset.change(job,
+         status: "waiting",
+         in_flight_action: %{"kind" => "cooldown", "method" => method}
+       )
+     )}
+  end
+
+  defp record_explorer_method(job, key, method, viability) do
+    progress = job.progress || %{}
+    methods = Map.put(progress["methods"] || %{}, key, method)
+
+    viability =
+      if is_nil(viability),
+        do: Map.delete(progress["viability"] || %{}, key),
+        else: Map.put(progress["viability"] || %{}, key, viability)
+
+    Repo.update!(
+      Ecto.Changeset.change(job,
+        progress: Map.merge(progress, %{"methods" => methods, "viability" => viability})
+      )
+    )
   end
 
   defp observe_explorer_waypoint(agent, waypoint) do
@@ -1351,6 +1471,12 @@ defmodule SpaceTraders.Fleet do
          %AgentRecord{} = agent <- Repo.get(AgentRecord, agent_id),
          :ok <- Agent.execution_allowed?(agent) do
       case config.in_flight_action do
+        %{"kind" => "cooldown"} when config.type == "explorer" ->
+          config =
+            Repo.update!(Ecto.Changeset.change(config, status: "active", in_flight_action: nil))
+
+          advance_explorer_job(agent, config, live_ship)
+
         %{"kind" => kind} when kind in @gather_kinds ->
           config =
             Repo.update!(
@@ -1401,7 +1527,9 @@ defmodule SpaceTraders.Fleet do
           )
         )
 
-      advance_miner_job(agent, config, live_ship, :timeline)
+      if config.type == "explorer",
+        do: advance_explorer_job(agent, config, live_ship),
+        else: advance_miner_job(agent, config, live_ship, :timeline)
     else
       _ -> :ok
     end
@@ -1429,11 +1557,11 @@ defmodule SpaceTraders.Fleet do
 
   defp at_market_waypoint?(_, _), do: false
 
-  defp arrived_at_configured_waypoint?(live_ship, %Job{
+  defp arrived_at_configured_waypoint?(%{nav: %{waypoint_symbol: waypoint, status: status}}, %Job{
          in_flight_action: %{"waypoint" => waypoint}
-       }) do
-    at_extraction_waypoint?(live_ship, waypoint) or at_market_waypoint?(live_ship, waypoint)
-  end
+       })
+       when status in ["DOCKED", "IN_ORBIT"],
+       do: true
 
   defp arrived_at_configured_waypoint?(_, _), do: false
 
@@ -2820,12 +2948,11 @@ defmodule SpaceTraders.Fleet do
 
           {:ok, recovered_config}
         else
-          advance_miner_job(
-            Repo.get!(AgentRecord, agent_id),
-            recovered_config,
-            live_ship,
-            :timeline
-          )
+          agent = Repo.get!(AgentRecord, agent_id)
+
+          if recovered_config.type == "explorer",
+            do: advance_explorer_job(agent, recovered_config, live_ship),
+            else: advance_miner_job(agent, recovered_config, live_ship, :timeline)
         end
 
       :absent ->
@@ -2845,7 +2972,7 @@ defmodule SpaceTraders.Fleet do
       live_ship.nav.status == "IN_TRANSIT" and live_ship.nav.route.destination.symbol == waypoint ->
         :confirmed
 
-      at_extraction_waypoint?(live_ship, waypoint) or at_market_waypoint?(live_ship, waypoint) ->
+      arrived_at_waypoint?(live_ship, waypoint) ->
         :confirmed
 
       true ->
@@ -2873,7 +3000,18 @@ defmodule SpaceTraders.Fleet do
     if fuel_full?(live_ship), do: :confirmed, else: :absent
   end
 
+  # The persisted cooldown action is written only after the mutating request
+  # returned. It is therefore safe to continue after a restart, even if the
+  # cooldown elapsed while the process was down.
+  defp action_outcome(%{"kind" => "cooldown"}, _live_ship), do: :confirmed
+
   defp action_outcome(_action, _live_ship), do: :ambiguous
+
+  defp arrived_at_waypoint?(%{nav: %{waypoint_symbol: waypoint, status: status}}, waypoint)
+       when status in ["DOCKED", "IN_ORBIT"],
+       do: true
+
+  defp arrived_at_waypoint?(_live_ship, _waypoint), do: false
 
   defp confirm_recovery(config, live_ship) do
     action = config.in_flight_action
