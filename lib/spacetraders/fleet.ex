@@ -784,12 +784,16 @@ defmodule SpaceTraders.Fleet do
     requested = min(progress["aboard"], progress["requested"] - progress["accepted"])
 
     case Enum.find(market.trade_goods || [], &(&1.symbol == progress["trade_symbol"])) do
-      %{sell_price: price, trade_volume: volume}
-      when (is_nil(minimum) or price >= minimum) and is_integer(volume) and volume > 0 ->
+      %{sell_price: price} when not is_nil(minimum) and price < minimum ->
+        {:error, {:minimum_sale_price_not_met, progress["destination_waypoint"], price, minimum}}
+
+      %{sell_price: _price, trade_volume: volume} when is_integer(volume) and volume > 0 ->
         {:ok, min(requested, volume)}
 
-      %{sell_price: _price} ->
-        {:error, :minimum_sale_price_not_met}
+      %{sell_price: price, trade_volume: volume} ->
+        {:error,
+         {:market_demand_unavailable, progress["destination_waypoint"], progress["trade_symbol"],
+          price, volume}}
 
       nil ->
         {:error, :market_good_unavailable}
@@ -3961,6 +3965,12 @@ defmodule SpaceTraders.Fleet do
        when kind in @gather_kinds do
     if cargo_units(live_ship) >= units, do: :confirmed, else: :absent
   end
+
+  # Cargo alone cannot distinguish a Market sale from another mutation after a
+  # crash. Preserve the in-flight evidence as an actionable blocker instead of
+  # claiming Market completion from an uncorrelated hold decrease.
+  defp action_outcome(%{"kind" => "sell", "sold_baseline" => _baseline}, _live_ship),
+    do: :ambiguous
 
   defp action_outcome(
          %{"kind" => kind, "trade_symbol" => symbol, "expected" => %{"units_at_most" => units}},
