@@ -322,7 +322,7 @@ defmodule SpaceTraders.Fleet do
 
   def configure_explorer_job(%AgentRecord{}, _ship_symbol), do: {:error, :agent_token_missing}
 
-  @doc "Captures a paused Procurement Job for one Contract delivery requirement."
+  @doc "Captures a paused Procurement Job for one Contract or Market recipient."
   def configure_procurement_job(%AgentRecord{} = agent, ship_symbol, attrs) when is_map(attrs) do
     with {:ok, ship} <- owned_ship(agent, ship_symbol),
          nil <- unfinished_job(ship.id),
@@ -351,40 +351,54 @@ defmodule SpaceTraders.Fleet do
 
   defp procurement_progress(attrs) do
     contract_id = attrs[:contract_id] || attrs["contract_id"]
+    recipient_type = attrs[:recipient_type] || attrs["recipient_type"] || "contract"
     trade_symbol = attrs[:trade_symbol] || attrs["trade_symbol"]
     quantity = attrs[:quantity] || attrs["quantity"]
     destination = attrs[:destination_waypoint] || attrs["destination_waypoint"]
     source_systems = attrs[:source_systems] || attrs["source_systems"] || []
     reserve_credits = attrs[:reserve_credits] || attrs["reserve_credits"] || 0
     price_ceiling = attrs[:price_ceiling] || attrs["price_ceiling"]
+    minimum_sale_price = attrs[:minimum_sale_price] || attrs["minimum_sale_price"]
 
     compatible_cargo? =
       attrs[:compatible_existing_cargo?] || attrs["compatible_existing_cargo?"] || false
 
-    if is_binary(contract_id) and is_binary(trade_symbol) and is_integer(quantity) and
+    if recipient_type in ["contract", "market"] and
+         (recipient_type == "market" or is_binary(contract_id)) and is_binary(trade_symbol) and
+         is_integer(quantity) and
          quantity > 0 and
          is_binary(destination) and is_list(source_systems) and
          Enum.all?(source_systems, &is_binary/1) and
          is_integer(reserve_credits) and reserve_credits >= 0 and
-         (is_nil(price_ceiling) or (is_integer(price_ceiling) and price_ceiling > 0)) do
+         (is_nil(price_ceiling) or (is_integer(price_ceiling) and price_ceiling > 0)) and
+         (is_nil(minimum_sale_price) or
+            (is_integer(minimum_sale_price) and minimum_sale_price > 0)) do
       {:ok,
        %{
-         "contract_id" => contract_id,
+         "recipient_type" => recipient_type,
          "trade_symbol" => trade_symbol,
          "requested" => quantity,
          "destination_waypoint" => destination,
          "source_systems" => source_systems,
          "reserve_credits" => reserve_credits,
          "price_ceiling" => price_ceiling,
+         "minimum_sale_price" => minimum_sale_price,
          "compatible_existing_cargo" => compatible_cargo?,
          "acquired" => 0,
          "aboard" => 0,
+         "sold" => 0,
          "accepted" => 0
-       }}
+       }
+       |> maybe_put_contract_id(contract_id)}
     else
       {:error, :invalid_procurement_configuration}
     end
   end
+
+  defp maybe_put_contract_id(progress, contract_id) when is_binary(contract_id),
+    do: Map.put(progress, "contract_id", contract_id)
+
+  defp maybe_put_contract_id(progress, _contract_id), do: progress
 
   @doc "Starts or resumes a Procurement Job from fresh Contract, Ship, and credit state."
   def start_procurement_job(%AgentRecord{} = agent, ship_symbol) do
@@ -397,8 +411,8 @@ defmodule SpaceTraders.Fleet do
              agent,
              SpaceTraders.API.get_ship(agent.agent_token, ship_symbol)
            ),
-         {:ok, contract} <- procurement_contract(agent, job),
-         {:ok, job} <- initialize_procurement_progress(job, live_ship, contract),
+         {:ok, recipient} <- procurement_recipient(agent, job),
+         {:ok, job} <- initialize_procurement_progress(job, live_ship, recipient),
          {:ok, overview} <- Agent.agent_overview(agent) do
       job =
         Repo.update!(
@@ -410,7 +424,7 @@ defmodule SpaceTraders.Fleet do
           )
         )
 
-      advance_procurement_job(agent, job, live_ship, contract, overview.credits)
+      advance_procurement_job(agent, job, live_ship, recipient, overview.credits)
     else
       nil -> {:error, :procurement_job_not_configured}
       %Job{} -> {:error, :procurement_job_not_configured}
@@ -475,7 +489,12 @@ defmodule SpaceTraders.Fleet do
     end
   end
 
-  defp initialize_procurement_progress(job, live_ship, contract) do
+  defp procurement_recipient(_agent, %{progress: %{"recipient_type" => "market"}}),
+    do: {:ok, :market}
+
+  defp procurement_recipient(agent, job), do: procurement_contract(agent, job)
+
+  defp initialize_procurement_progress(job, live_ship, recipient) do
     progress = job.progress || %{}
     held = item_units(live_ship, progress["trade_symbol"])
 
@@ -488,22 +507,30 @@ defmodule SpaceTraders.Fleet do
         {:ok, job}
 
       true ->
-        term =
-          Enum.find(contract.terms.deliver || [], &(&1.trade_symbol == progress["trade_symbol"]))
+        baseline =
+          case recipient do
+            :market ->
+              0
+
+            contract ->
+              contract.terms.deliver
+              |> Enum.find(&(&1.trade_symbol == progress["trade_symbol"]))
+              |> Map.fetch!(:units_fulfilled)
+          end
 
         {:ok,
          Repo.update!(
            Ecto.Changeset.change(job,
-             progress: Map.put(progress, "accepted_baseline", term.units_fulfilled)
+             progress: Map.put(progress, "accepted_baseline", baseline)
            )
          )}
     end
   end
 
-  # The policy always re-reads its Contract before deciding. Cargo and purchases
-  # are evidence only; accepted units in the Contract response are completion.
-  defp advance_procurement_job(agent, job, live_ship, contract, credits) do
-    progress = procurement_counts(job.progress, live_ship, contract)
+  # The policy re-reads its recipient before deciding. Contract acceptance and
+  # successful Market sale transactions are the authoritative completion evidence.
+  defp advance_procurement_job(agent, job, live_ship, recipient, credits) do
+    progress = procurement_counts(job.progress, live_ship, recipient)
     job = Repo.update!(Ecto.Changeset.change(job, progress: progress, in_flight_action: nil))
 
     cond do
@@ -522,7 +549,7 @@ defmodule SpaceTraders.Fleet do
       progress["aboard"] > 0 ->
         if live_ship.nav.waypoint_symbol == progress["destination_waypoint"] and
              live_ship.nav.status != "IN_TRANSIT" do
-          deliver_procurement_goods(agent, job, live_ship, contract)
+          deliver_procurement_goods(agent, job, live_ship, recipient)
         else
           navigate_miner_job(agent, job, live_ship, progress["destination_waypoint"])
         end
@@ -532,11 +559,21 @@ defmodule SpaceTraders.Fleet do
     end
   end
 
-  defp procurement_counts(progress, live_ship, contract) do
-    term = Enum.find(contract.terms.deliver || [], &(&1.trade_symbol == progress["trade_symbol"]))
-
+  defp procurement_counts(progress, live_ship, recipient) do
     accepted =
-      max(term.units_fulfilled - (progress["accepted_baseline"] || term.units_fulfilled), 0)
+      case recipient do
+        :market ->
+          progress["sold"] || 0
+
+        contract ->
+          term =
+            Enum.find(
+              contract.terms.deliver || [],
+              &(&1.trade_symbol == progress["trade_symbol"])
+            )
+
+          max(term.units_fulfilled - (progress["accepted_baseline"] || term.units_fulfilled), 0)
+      end
 
     requested = progress["requested"]
     held = item_units(live_ship, progress["trade_symbol"])
@@ -549,6 +586,46 @@ defmodule SpaceTraders.Fleet do
     |> Map.put("accepted", accepted)
     |> Map.put("aboard", max(aboard, 0))
     |> Map.put("acquired", max(progress["acquired"] || 0, accepted + aboard))
+  end
+
+  defp deliver_procurement_goods(agent, job, live_ship, :market) do
+    progress = job.progress
+    units = min(progress["aboard"], progress["requested"] - progress["accepted"])
+
+    with {:ok, live_ship} <- dock_for_market(agent, live_ship),
+         {:ok, market} <- market_for_ship(agent, live_ship, progress["destination_waypoint"]),
+         :ok <- procurement_sale_price_allowed?(market, progress) do
+      action = %{"kind" => "sell", "trade_symbol" => progress["trade_symbol"], "units" => units}
+      job = Repo.update!(Ecto.Changeset.change(job, in_flight_action: action))
+
+      case SpaceTraders.API.sell_cargo(
+             agent.agent_token,
+             live_ship.symbol,
+             progress["trade_symbol"],
+             units
+           ) do
+        {:ok, %{cargo: cargo, agent: sale_agent}} ->
+          progress = Map.update!(job.progress, "sold", &(&1 + units))
+
+          job =
+            Repo.update!(
+              Ecto.Changeset.change(job, progress: progress, last_action_result: action)
+            )
+
+          advance_procurement_job(
+            agent,
+            job,
+            %{live_ship | cargo: cargo},
+            :market,
+            sale_agent.credits
+          )
+
+        {:error, reason} ->
+          mark_procurement_job_blocked(job, {:market_sale_failed, reason})
+      end
+    else
+      {:error, reason} -> mark_procurement_job_blocked(job, reason)
+    end
   end
 
   defp deliver_procurement_goods(agent, job, live_ship, _contract) do
@@ -571,13 +648,14 @@ defmodule SpaceTraders.Fleet do
              progress["trade_symbol"],
              units
            ) do
-        {:ok, %{cargo: cargo, contract: fresh_contract}} ->
-          with {:ok, overview} <- Agent.agent_overview(agent) do
+        {:ok, %{cargo: cargo, contract: _fresh_contract}} ->
+          with {:ok, overview} <- Agent.agent_overview(agent),
+               {:ok, recipient} <- procurement_recipient(agent, job) do
             advance_procurement_job(
               agent,
               job,
               %{live_ship | cargo: cargo},
-              fresh_contract,
+              recipient,
               overview.credits
             )
           else
@@ -624,12 +702,12 @@ defmodule SpaceTraders.Fleet do
                   )
                 )
 
-              with {:ok, contract} <- procurement_contract(agent, job) do
+              with {:ok, recipient} <- procurement_recipient(agent, job) do
                 advance_procurement_job(
                   agent,
                   job,
                   %{live_ship | cargo: cargo},
-                  contract,
+                  recipient,
                   purchase_agent.credits
                 )
               else
@@ -689,6 +767,16 @@ defmodule SpaceTraders.Fleet do
        do: :ok
 
   defp procurement_price_allowed?(_, _), do: {:error, :price_ceiling_exceeded}
+
+  defp procurement_sale_price_allowed?(market, progress) do
+    minimum = progress["minimum_sale_price"]
+
+    case Enum.find(market.trade_goods || [], &(&1.symbol == progress["trade_symbol"])) do
+      %{sell_price: price} when is_nil(minimum) or price >= minimum -> :ok
+      %{sell_price: _price} -> {:error, :minimum_sale_price_not_met}
+      nil -> {:error, :market_good_unavailable}
+    end
+  end
 
   defp procurement_purchase_units(live_ship, good, progress, credits) do
     affordable = max(div(max(credits - progress["reserve_credits"], 0), good.purchase_price), 0)

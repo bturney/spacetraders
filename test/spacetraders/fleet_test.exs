@@ -3036,6 +3036,106 @@ defmodule SpaceTraders.FleetTest do
   end
 
   describe "Procurement Job" do
+    test "persists a fixed Market recipient and sale floor" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      assert {:ok, %Job{} = job} =
+               Fleet.configure_procurement_job(agent, "FLEET-SHIP", %{
+                 recipient_type: "market",
+                 trade_symbol: "IRON_ORE",
+                 quantity: 30,
+                 destination_waypoint: "X1-UX81-A1",
+                 source_systems: ["X1-UX81"],
+                 minimum_sale_price: 25
+               })
+
+      assert job.progress == %{
+               "recipient_type" => "market",
+               "trade_symbol" => "IRON_ORE",
+               "requested" => 30,
+               "destination_waypoint" => "X1-UX81-A1",
+               "source_systems" => ["X1-UX81"],
+               "reserve_credits" => 0,
+               "price_ceiling" => nil,
+               "minimum_sale_price" => 25,
+               "compatible_existing_cargo" => false,
+               "acquired" => 0,
+               "aboard" => 0,
+               "sold" => 0,
+               "accepted" => 0
+             }
+    end
+
+    test "sells at the fixed Market from a fresh listing and completes from the transaction" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+      test_pid = self()
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case conn.request_path do
+          "/v2/my/ships/FLEET-SHIP" ->
+            Req.Test.json(conn, %{
+              "data" =>
+                ship_body("FLEET-SHIP", %{
+                  "cargo" => %{
+                    "capacity" => 40,
+                    "units" => 30,
+                    "inventory" => [%{"symbol" => "IRON_ORE", "units" => 30}]
+                  }
+                })
+            })
+
+          "/v2/my/agent" ->
+            Req.Test.json(conn, %{"data" => %{"symbol" => agent.symbol, "credits" => 1_000}})
+
+          "/v2/systems/X1-UX81/waypoints/X1-UX81-A1/market" ->
+            send(test_pid, :fresh_sale_listing)
+
+            Req.Test.json(conn, %{
+              "data" => %{
+                "symbol" => "X1-UX81-A1",
+                "tradeGoods" => [
+                  %{
+                    "symbol" => "IRON_ORE",
+                    "sellPrice" => 25,
+                    "purchasePrice" => 10,
+                    "tradeVolume" => 30
+                  }
+                ]
+              }
+            })
+
+          "/v2/my/ships/FLEET-SHIP/sell" ->
+            send(test_pid, {:sale, conn.body_params})
+
+            Req.Test.json(conn, %{
+              "data" => %{
+                "agent" => %{"symbol" => agent.symbol, "credits" => 1_750},
+                "cargo" => %{"capacity" => 40, "units" => 0, "inventory" => []},
+                "transaction" => %{}
+              }
+            })
+        end
+      end)
+
+      assert {:ok, _job} =
+               Fleet.configure_procurement_job(agent, "FLEET-SHIP", %{
+                 recipient_type: "market",
+                 trade_symbol: "IRON_ORE",
+                 quantity: 30,
+                 destination_waypoint: "X1-UX81-A1",
+                 minimum_sale_price: 25,
+                 compatible_existing_cargo?: true
+               })
+
+      assert {:ok, %Job{status: "completed", progress: %{"sold" => 30, "accepted" => 30}}} =
+               Fleet.start_procurement_job(agent, "FLEET-SHIP")
+
+      assert_receive :fresh_sale_listing
+      assert_receive {:sale, %{"symbol" => "IRON_ORE", "units" => 30}}
+    end
+
     test "persists the fixed delivery constraints and initial progress" do
       agent = agent_fixture()
       ship_fixture(agent, "FLEET-SHIP")
@@ -3057,15 +3157,18 @@ defmodule SpaceTraders.FleetTest do
 
       assert job.progress == %{
                "contract_id" => "CONTRACT-1",
+               "recipient_type" => "contract",
                "trade_symbol" => "IRON_ORE",
                "requested" => 30,
                "destination_waypoint" => "X1-UX81-A1",
                "source_systems" => ["X1-UX81", "X1-DF55"],
                "reserve_credits" => 500,
                "price_ceiling" => 75,
+               "minimum_sale_price" => nil,
                "compatible_existing_cargo" => true,
                "acquired" => 0,
                "aboard" => 0,
+               "sold" => 0,
                "accepted" => 0
              }
     end
