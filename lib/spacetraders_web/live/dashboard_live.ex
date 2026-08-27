@@ -615,7 +615,7 @@ defmodule SpaceTradersWeb.DashboardLive do
     with {:ok, agent, contract} <- agent_for_contract(socket, agent_id, contract_id),
          true <- Contracts.fulfillable?(contract),
          {:ok, units} <- parse_units(units),
-         {:ok, _intent} <-
+         {:ok, %{status: "completed"}} <-
            Fleet.deliver_goods_intent(
              agent,
              ship_symbol,
@@ -630,8 +630,22 @@ defmodule SpaceTradersWeb.DashboardLive do
 
       {:noreply, put_flash(socket, :info, "Delivered #{units} #{trade_symbol}.")}
     else
-      false -> {:noreply, put_flash(socket, :error, "This contract is no longer actionable.")}
-      {:error, reason} -> {:noreply, put_flash(socket, :error, live_error(reason))}
+      {:ok, intent} ->
+        {:noreply,
+         put_flash(
+           socket,
+           :error,
+           if(intent.blocker,
+             do: live_error(intent.last_action_result["error"] || intent.blocker.reason),
+             else: "Deliver Goods Intent is #{intent.status}."
+           )
+         )}
+
+      false ->
+        {:noreply, put_flash(socket, :error, "This contract is no longer actionable.")}
+
+      {:error, reason} ->
+        {:noreply, put_flash(socket, :error, live_error(reason))}
     end
   end
 

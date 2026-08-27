@@ -1261,11 +1261,23 @@ defmodule SpaceTraders.Fleet do
 
   defp advance_manual_intent(agent, %ManualIntent{type: type} = intent, live_ship)
        when type in ["buy", "sell", "deliver"] do
-    cond do
-      is_map(intent.in_flight_action) ->
+    case intent.in_flight_action do
+      %{"kind" => kind} when kind in ["navigate", "orbit", "dock"] ->
+        # Prerequisites are proved by the authoritative Ship state and may safely resume.
+        intent = Repo.update!(Ecto.Changeset.change(intent, in_flight_action: nil))
+        advance_manual_intent(agent, intent, live_ship)
+
+      action when is_map(action) ->
         # Ship cargo alone cannot correlate a Market sale to this command.
         block_cargo_intent(intent, {:ambiguous_operation_evidence, type})
 
+      _ ->
+        advance_cargo_intent(agent, intent, live_ship)
+    end
+  end
+
+  defp advance_cargo_intent(agent, intent, live_ship) do
+    cond do
       live_ship.nav.waypoint_symbol != intent.target_waypoint ->
         advance_cargo_navigation(agent, intent, live_ship)
 
