@@ -521,20 +521,34 @@ defmodule SpaceTraders.Fleet do
       "expected" => %{"units_at_most" => item_units(live_ship, progress["trade_symbol"]) - units}
     }
 
-    job = Repo.update!(Ecto.Changeset.change(job, in_flight_action: action))
+    with {:ok, live_ship} <- dock_for_market(agent, live_ship) do
+      job = Repo.update!(Ecto.Changeset.change(job, in_flight_action: action))
 
-    case Contracts.deliver_goods(
-           agent,
-           progress["contract_id"],
-           live_ship.symbol,
-           progress["trade_symbol"],
-           units
-         ) do
-      {:ok, %{cargo: cargo, contract: fresh_contract}} ->
-        advance_procurement_job(agent, job, %{live_ship | cargo: cargo}, fresh_contract, 0)
+      case Contracts.deliver_goods(
+             agent,
+             progress["contract_id"],
+             live_ship.symbol,
+             progress["trade_symbol"],
+             units
+           ) do
+        {:ok, %{cargo: cargo, contract: fresh_contract}} ->
+          with {:ok, overview} <- Agent.agent_overview(agent) do
+            advance_procurement_job(
+              agent,
+              job,
+              %{live_ship | cargo: cargo},
+              fresh_contract,
+              overview.credits
+            )
+          else
+            {:error, reason} -> mark_procurement_job_blocked(job, {:credits_unavailable, reason})
+          end
 
-      {:error, reason} ->
-        mark_procurement_job_blocked(job, {:recipient_delivery_failed, reason})
+        {:error, reason} ->
+          mark_procurement_job_blocked(job, {:recipient_delivery_failed, reason})
+      end
+    else
+      {:error, reason} -> mark_procurement_job_blocked(job, {:dock_failed, reason})
     end
   end
 
@@ -553,36 +567,40 @@ defmodule SpaceTraders.Fleet do
           }
         }
 
-        job = Repo.update!(Ecto.Changeset.change(job, in_flight_action: action))
+        with {:ok, live_ship} <- dock_for_market(agent, live_ship) do
+          job = Repo.update!(Ecto.Changeset.change(job, in_flight_action: action))
 
-        case SpaceTraders.API.purchase_cargo(
-               agent.agent_token,
-               live_ship.symbol,
-               progress["trade_symbol"],
-               units
-             ) do
-          {:ok, %{cargo: cargo, agent: purchase_agent}} ->
-            job =
-              Repo.update!(
-                Ecto.Changeset.change(job,
-                  last_action_result: %{"kind" => "buy", "units" => units}
+          case SpaceTraders.API.purchase_cargo(
+                 agent.agent_token,
+                 live_ship.symbol,
+                 progress["trade_symbol"],
+                 units
+               ) do
+            {:ok, %{cargo: cargo, agent: purchase_agent}} ->
+              job =
+                Repo.update!(
+                  Ecto.Changeset.change(job,
+                    last_action_result: %{"kind" => "buy", "units" => units}
+                  )
                 )
-              )
 
-            with {:ok, contract} <- procurement_contract(agent, job) do
-              advance_procurement_job(
-                agent,
-                job,
-                %{live_ship | cargo: cargo},
-                contract,
-                purchase_agent.credits
-              )
-            else
-              {:error, reason} -> mark_procurement_job_blocked(job, reason)
-            end
+              with {:ok, contract} <- procurement_contract(agent, job) do
+                advance_procurement_job(
+                  agent,
+                  job,
+                  %{live_ship | cargo: cargo},
+                  contract,
+                  purchase_agent.credits
+                )
+              else
+                {:error, reason} -> mark_procurement_job_blocked(job, reason)
+              end
 
-          {:error, reason} ->
-            mark_procurement_job_blocked(job, {:purchase_failed, reason})
+            {:error, reason} ->
+              mark_procurement_job_blocked(job, {:purchase_failed, reason})
+          end
+        else
+          {:error, reason} -> mark_procurement_job_blocked(job, {:dock_failed, reason})
         end
       else
         navigate_miner_job(agent, job, live_ship, source.waypoint)
