@@ -399,13 +399,18 @@ defmodule SpaceTradersWeb.DashboardLive do
   @impl true
   def handle_event(
         "sell_cargo",
-        %{"symbol" => ship_symbol, "trade_symbol" => trade_symbol, "units" => units},
+        %{
+          "symbol" => ship_symbol,
+          "waypoint" => waypoint,
+          "trade_symbol" => trade_symbol,
+          "units" => units
+        },
         socket
       ) do
     with {:ok, agent} <- agent_for_ship(socket, ship_symbol),
          {:ok, units} <- parse_units(units),
-         {:ok, %{transaction: transaction}} <-
-           Fleet.sell_cargo(agent, ship_symbol, trade_symbol, units) do
+         {:ok, %{status: "completed"} = intent} <-
+           Fleet.sell_goods_intent(agent, ship_symbol, waypoint, trade_symbol, units) do
       socket =
         socket
         |> refresh_agent(agent)
@@ -415,23 +420,37 @@ defmodule SpaceTradersWeb.DashboardLive do
        put_flash(
          socket,
          :info,
-         "Sold #{transaction.units} #{trade_symbol} for #{transaction.total_price} credits."
+         "Sold #{intent.last_action_result["units"] || 0} #{trade_symbol} for #{(intent.last_action_result["units"] || 0) * (intent.last_action_result["price"] || 0)} credits."
        )}
     else
-      {:error, reason} -> {:noreply, put_flash(socket, :error, live_error(reason))}
+      {:ok, intent} ->
+        {:noreply,
+         put_flash(
+           socket,
+           :error,
+           live_error(intent.last_action_result["error"] || intent.blocker.reason)
+         )}
+
+      {:error, reason} ->
+        {:noreply, put_flash(socket, :error, live_error(reason))}
     end
   end
 
   @impl true
   def handle_event(
         "purchase_cargo",
-        %{"symbol" => ship_symbol, "trade_symbol" => trade_symbol, "units" => units},
+        %{
+          "symbol" => ship_symbol,
+          "waypoint" => waypoint,
+          "trade_symbol" => trade_symbol,
+          "units" => units
+        },
         socket
       ) do
     with {:ok, agent} <- agent_for_ship(socket, ship_symbol),
          {:ok, units} <- parse_units(units),
-         {:ok, %{transaction: transaction}} <-
-           Fleet.purchase_cargo(agent, ship_symbol, trade_symbol, units) do
+         {:ok, %{status: "completed"} = intent} <-
+           Fleet.buy_goods_intent(agent, ship_symbol, waypoint, trade_symbol, units) do
       socket =
         socket
         |> refresh_agent(agent)
@@ -441,10 +460,19 @@ defmodule SpaceTradersWeb.DashboardLive do
        put_flash(
          socket,
          :info,
-         "Bought #{transaction.units} #{trade_symbol} for #{transaction.total_price} credits."
+         "Bought #{intent.last_action_result["units"] || 0} #{trade_symbol} for #{(intent.last_action_result["units"] || 0) * (intent.last_action_result["price"] || 0)} credits."
        )}
     else
-      {:error, reason} -> {:noreply, put_flash(socket, :error, live_error(reason))}
+      {:ok, intent} ->
+        {:noreply,
+         put_flash(
+           socket,
+           :error,
+           live_error(intent.last_action_result["error"] || intent.blocker.reason)
+         )}
+
+      {:error, reason} ->
+        {:noreply, put_flash(socket, :error, live_error(reason))}
     end
   end
 
@@ -577,6 +605,7 @@ defmodule SpaceTradersWeb.DashboardLive do
         %{
           "agent_id" => agent_id,
           "contract_id" => contract_id,
+          "destination_waypoint" => destination_waypoint,
           "ship_symbol" => ship_symbol,
           "trade_symbol" => trade_symbol,
           "units" => units
@@ -586,11 +615,12 @@ defmodule SpaceTradersWeb.DashboardLive do
     with {:ok, agent, contract} <- agent_for_contract(socket, agent_id, contract_id),
          true <- Contracts.fulfillable?(contract),
          {:ok, units} <- parse_units(units),
-         {:ok, _result} <-
-           SpaceTraders.Contracts.deliver_goods(
+         {:ok, %{status: "completed"}} <-
+           Fleet.deliver_goods_intent(
              agent,
-             contract_id,
              ship_symbol,
+             destination_waypoint,
+             contract_id,
              trade_symbol,
              units
            ) do
@@ -600,8 +630,22 @@ defmodule SpaceTradersWeb.DashboardLive do
 
       {:noreply, put_flash(socket, :info, "Delivered #{units} #{trade_symbol}.")}
     else
-      false -> {:noreply, put_flash(socket, :error, "This contract is no longer actionable.")}
-      {:error, reason} -> {:noreply, put_flash(socket, :error, live_error(reason))}
+      {:ok, intent} ->
+        {:noreply,
+         put_flash(
+           socket,
+           :error,
+           if(intent.blocker,
+             do: live_error(intent.last_action_result["error"] || intent.blocker.reason),
+             else: "Deliver Goods Intent is #{intent.status}."
+           )
+         )}
+
+      false ->
+        {:noreply, put_flash(socket, :error, "This contract is no longer actionable.")}
+
+      {:error, reason} ->
+        {:noreply, put_flash(socket, :error, live_error(reason))}
     end
   end
 
@@ -1193,6 +1237,7 @@ defmodule SpaceTradersWeb.DashboardLive do
             >
               <input type="hidden" name="agent_id" value={@agent_id} />
               <input type="hidden" name="contract_id" value={contract.id} />
+              <input type="hidden" name="destination_waypoint" value={good.destination_symbol} />
               <input type="hidden" name="trade_symbol" value={good.trade_symbol} />
               <input type="hidden" name="ship_symbol" value={ship.symbol} />
               <input
@@ -1535,6 +1580,7 @@ defmodule SpaceTradersWeb.DashboardLive do
               >
                 <% sell_action = trade_action(ship, good.symbol, :sell) %>
                 <input type="hidden" name="symbol" value={ship.symbol} />
+                <input type="hidden" name="waypoint" value={listing.waypoint} />
                 <input type="hidden" name="trade_symbol" value={good.symbol} />
                 <input
                   type="hidden"
@@ -1577,6 +1623,7 @@ defmodule SpaceTradersWeb.DashboardLive do
               >
                 <% buy_action = trade_action(ship, good.symbol, :buy) %>
                 <input type="hidden" name="symbol" value={ship.symbol} />
+                <input type="hidden" name="waypoint" value={listing.waypoint} />
                 <input type="hidden" name="trade_symbol" value={good.symbol} />
                 <input
                   type="hidden"

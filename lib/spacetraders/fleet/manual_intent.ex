@@ -18,6 +18,8 @@ defmodule SpaceTraders.Fleet.ManualIntent do
   schema "manual_intents" do
     field :type, :string, default: "navigate"
     field :target_waypoint, :string
+    # Operation-specific target, quantity, price, and recipient constraints.
+    field :parameters, :map, default: %{}
     field :status, :string, default: "active"
     embeds_one :blocker, SpaceTraders.Fleet.JobBlocker
     field :in_flight_action, :map
@@ -38,10 +40,10 @@ defmodule SpaceTraders.Fleet.ManualIntent do
 
   def changeset(intent, attrs) do
     intent
-    |> cast(attrs, [:type, :target_waypoint, :status])
+    |> cast(attrs, [:type, :target_waypoint, :parameters, :status])
     |> cast_embed(:blocker)
     |> validate_required([:type, :target_waypoint])
-    |> validate_inclusion(:type, ["navigate"])
+    |> validate_inclusion(:type, ["navigate", "buy", "sell", "deliver"])
     |> validate_inclusion(:status, @unfinished_states ++ @terminal_states)
     |> unique_constraint(:ship_id, name: :manual_intents_one_active_per_ship_index)
   end
