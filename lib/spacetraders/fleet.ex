@@ -387,6 +387,7 @@ defmodule SpaceTraders.Fleet do
              SpaceTraders.API.get_ship(agent.agent_token, ship_symbol)
            ),
          {:ok, contract} <- procurement_contract(agent, job),
+         {:ok, job} <- initialize_procurement_progress(job, live_ship, contract),
          {:ok, overview} <- Agent.agent_overview(agent) do
       job =
         Repo.update!(
@@ -463,6 +464,30 @@ defmodule SpaceTraders.Fleet do
     end
   end
 
+  defp initialize_procurement_progress(job, live_ship, contract) do
+    progress = job.progress || %{}
+    held = item_units(live_ship, progress["trade_symbol"])
+
+    cond do
+      not progress["compatible_existing_cargo"] and held > 0 ->
+        {:error, :incompatible_existing_cargo}
+
+      is_integer(progress["accepted_baseline"]) ->
+        {:ok, job}
+
+      true ->
+        term =
+          Enum.find(contract.terms.deliver || [], &(&1.trade_symbol == progress["trade_symbol"]))
+
+        {:ok,
+         Repo.update!(
+           Ecto.Changeset.change(job,
+             progress: Map.put(progress, "accepted_baseline", term.units_fulfilled)
+           )
+         )}
+    end
+  end
+
   # The policy always re-reads its Contract before deciding. Cargo and purchases
   # are evidence only; accepted units in the Contract response are completion.
   defp advance_procurement_job(agent, job, live_ship, contract, credits) do
@@ -497,8 +522,11 @@ defmodule SpaceTraders.Fleet do
 
   defp procurement_counts(progress, live_ship, contract) do
     term = Enum.find(contract.terms.deliver || [], &(&1.trade_symbol == progress["trade_symbol"]))
-    accepted = term.units_fulfilled
-    requested = min(progress["requested"], term.units_required)
+
+    accepted =
+      max(term.units_fulfilled - (progress["accepted_baseline"] || term.units_fulfilled), 0)
+
+    requested = progress["requested"]
     held = item_units(live_ship, progress["trade_symbol"])
 
     aboard =
