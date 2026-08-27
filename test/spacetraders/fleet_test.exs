@@ -3034,6 +3034,55 @@ defmodule SpaceTraders.FleetTest do
     end
   end
 
+  describe "Procurement Job" do
+    test "persists the fixed delivery constraints and initial progress" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      assert {:ok, %Job{} = job} =
+               Fleet.configure_procurement_job(agent, "FLEET-SHIP", %{
+                 contract_id: "CONTRACT-1",
+                 trade_symbol: "IRON_ORE",
+                 quantity: 30,
+                 destination_waypoint: "X1-UX81-A1",
+                 source_systems: ["X1-UX81", "X1-DF55"],
+                 reserve_credits: 500,
+                 price_ceiling: 75,
+                 compatible_existing_cargo?: true
+               })
+
+      assert job.type == "procurement"
+      assert job.status == "paused"
+
+      assert job.progress == %{
+               "contract_id" => "CONTRACT-1",
+               "trade_symbol" => "IRON_ORE",
+               "requested" => 30,
+               "destination_waypoint" => "X1-UX81-A1",
+               "source_systems" => ["X1-UX81", "X1-DF55"],
+               "reserve_credits" => 500,
+               "price_ceiling" => 75,
+               "compatible_existing_cargo" => true,
+               "acquired" => 0,
+               "aboard" => 0,
+               "accepted" => 0
+             }
+    end
+
+    test "rejects incomplete procurement constraints" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      assert {:error, :invalid_procurement_configuration} =
+               Fleet.configure_procurement_job(agent, "FLEET-SHIP", %{
+                 contract_id: "CONTRACT-1",
+                 trade_symbol: "IRON_ORE",
+                 quantity: 0,
+                 destination_waypoint: "X1-UX81-A1"
+               })
+    end
+  end
+
   describe "System Exploration Job" do
     test "captures the authoritative current System and completes remote baseline coverage" do
       agent = agent_fixture()
