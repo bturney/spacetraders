@@ -24,6 +24,18 @@ defmodule SpaceTraders.Intelligence do
   @waypoint_listing_fields [:symbol, :system_symbol, :type, :x, :y, :orbits, :orbitals, :traits]
   @market_composition_fields [:symbol, :exports, :imports, :exchange]
   @market_listing_fields @market_composition_fields ++ [:trade_goods, :transactions]
+  @baseline_waypoint_fields [
+    :symbol,
+    :type,
+    :x,
+    :y,
+    :orbits,
+    :orbitals,
+    :traits,
+    :modifiers,
+    :is_under_construction
+  ]
+  @marketplace_trait "MARKETPLACE"
 
   @doc "Records one Waypoint observation without claiming omitted fields are false."
   def observe_waypoint(%AgentRecord{} = agent, waypoint, opts \\ []) do
@@ -93,6 +105,26 @@ defmodule SpaceTraders.Intelligence do
     |> Map.new(fn {field, field_facts} -> {field, usable_fact(field_facts) |> present_fact()} end)
   end
 
+  @doc "Returns baseline fact gaps for the supplied authoritative System Waypoints."
+  def waypoint_coverage(%AgentRecord{} = agent, system_symbol, waypoints)
+      when is_list(waypoints) do
+    Map.new(waypoints, fn waypoint ->
+      facts = subject(agent, :waypoint, system_symbol, waypoint.symbol)
+
+      required =
+        if marketplace?(waypoint),
+          do: @baseline_waypoint_fields ++ Enum.map(@market_composition_fields, &{:market, &1}),
+          else: @baseline_waypoint_fields
+
+      missing =
+        required
+        |> Enum.reject(&known?(agent, system_symbol, waypoint.symbol, facts, &1))
+        |> Enum.map(&coverage_field_name/1)
+
+      {waypoint.symbol, %{missing: missing, complete?: missing == []}}
+    end)
+  end
+
   @doc "Marks mutable facts for a subject stale after a confirmed mutation or precondition conflict."
   def invalidate(%AgentRecord{} = agent, subject_type, system_symbol, symbol, fields \\ :all) do
     query =
@@ -128,7 +160,7 @@ defmodule SpaceTraders.Intelligence do
       observation = Repo.insert!(Observation.changeset(%Observation{}, attrs))
 
       Enum.each(fields, fn field ->
-        {state, value} = field_value(payload, field, Keyword.get(opts, :unavailable, false))
+        {state, value} = field_value(payload, field, opts)
 
         Repo.insert!(
           Fact.changeset(%Fact{}, %{
@@ -148,12 +180,35 @@ defmodule SpaceTraders.Intelligence do
     end)
   end
 
-  defp field_value(_payload, _field, true), do: {"known_unavailable", nil}
+  defp marketplace?(%{traits: traits}) do
+    Enum.any?(traits || [], &(&1.symbol == @marketplace_trait))
+  end
 
-  defp field_value(payload, field, false) do
-    value = Map.get(payload, field)
+  defp marketplace?(_), do: false
 
-    if not is_nil(value), do: {"known", normalize(value)}, else: {"unknown", nil}
+  defp known?(_agent, _system, _symbol, facts, field) when is_atom(field) do
+    match?(%Fact{state: "known"}, Map.get(facts, to_string(field)))
+  end
+
+  defp known?(agent, system, symbol, _facts, {:market, field}) do
+    match?(%Fact{state: "known"}, subject(agent, :market, system, symbol)[to_string(field)])
+  end
+
+  defp coverage_field_name({:market, field}), do: "market_#{field}"
+  defp coverage_field_name(field), do: to_string(field)
+
+  defp field_value(payload, field, opts) do
+    if opts[:unavailable] do
+      {"known_unavailable", nil}
+    else
+      value = Map.get(payload, field)
+
+      if not is_nil(value) or opts[:source] == "get_waypoint" do
+        {"known", normalize(value)}
+      else
+        {"unknown", nil}
+      end
+    end
   end
 
   # A partial endpoint must not erase an earlier usable fact. Unknown remains

@@ -3034,6 +3034,94 @@ defmodule SpaceTraders.FleetTest do
     end
   end
 
+  describe "System Exploration Job" do
+    test "captures the authoritative current System and completes remote baseline coverage" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case conn.request_path do
+          "/v2/my/ships/FLEET-SHIP" ->
+            Req.Test.json(conn, %{"data" => ship_body("FLEET-SHIP")})
+
+          "/v2/systems/X1-UX81/waypoints" ->
+            Req.Test.json(conn, %{
+              "data" => [
+                %{
+                  "symbol" => "X1-UX81-A1",
+                  "systemSymbol" => "X1-UX81",
+                  "type" => "ORBITAL_STATION",
+                  "x" => 1,
+                  "y" => 2,
+                  "traits" => [%{"symbol" => "MARKETPLACE"}]
+                }
+              ],
+              "meta" => %{"page" => 1, "total" => 1}
+            })
+
+          "/v2/systems/X1-UX81/waypoints/X1-UX81-A1" ->
+            Req.Test.json(conn, %{
+              "data" => %{
+                "symbol" => "X1-UX81-A1",
+                "systemSymbol" => "X1-UX81",
+                "type" => "ORBITAL_STATION",
+                "x" => 1,
+                "y" => 2,
+                "orbits" => "X1-UX81-A0",
+                "orbitals" => [],
+                "traits" => [%{"symbol" => "MARKETPLACE"}],
+                "modifiers" => [],
+                "isUnderConstruction" => false
+              }
+            })
+
+          "/v2/systems/X1-UX81/waypoints/X1-UX81-A1/market" ->
+            Req.Test.json(conn, %{
+              "data" => %{
+                "symbol" => "X1-UX81-A1",
+                "exports" => [],
+                "imports" => [],
+                "exchange" => []
+              }
+            })
+
+          "/v2/my/ships/FLEET-SHIP/chart" ->
+            Req.Test.json(conn, %{
+              "data" => %{
+                "agent" => %{},
+                "chart" => %{"waypointSymbol" => "X1-UX81-A1", "submittedBy" => "FLEET-SHIP"},
+                "waypoint" => %{
+                  "symbol" => "X1-UX81-A1",
+                  "systemSymbol" => "X1-UX81",
+                  "type" => "ORBITAL_STATION",
+                  "x" => 1,
+                  "y" => 2,
+                  "orbits" => "X1-UX81-A0",
+                  "orbitals" => [],
+                  "traits" => [%{"symbol" => "MARKETPLACE"}],
+                  "modifiers" => [],
+                  "isUnderConstruction" => false,
+                  "chart" => %{"waypointSymbol" => "X1-UX81-A1", "submittedBy" => "FLEET-SHIP"}
+                }
+              }
+            })
+
+          path ->
+            flunk("unexpected request #{path}")
+        end
+      end)
+
+      assert {:ok,
+              %Job{type: "explorer", status: "paused", progress: %{"target_system" => "X1-UX81"}}} =
+               Fleet.configure_explorer_job(agent, "FLEET-SHIP")
+
+      assert {:ok, %Job{status: "completed", progress: %{"coverage" => coverage}}} =
+               Fleet.start_explorer_job(agent, "FLEET-SHIP")
+
+      assert coverage["X1-UX81-A1"] == []
+    end
+  end
+
   describe "command_snapshot/1" do
     test "adds Ship command decisions with stable block reasons" do
       agent = agent_fixture()

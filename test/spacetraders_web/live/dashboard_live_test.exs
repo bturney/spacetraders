@@ -1183,6 +1183,43 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       assert has_element?(lv, "[data-job-next-transition]", "Assign Miner Job")
     end
 
+    test "renders System Exploration Job coverage and recovery controls", %{
+      conn: conn,
+      operator: operator
+    } do
+      agent = agent_fixture(operator)
+
+      ship =
+        Repo.insert!(%Ship{
+          agent_id: agent.id,
+          symbol: "ORBITALIST-1",
+          ship_type: "SHIP_COMMAND_FRIGATE"
+        })
+
+      Repo.insert!(%Job{
+        ship_id: ship.id,
+        type: "explorer",
+        extraction_waypoint: "EXPLORER-NONE",
+        market_waypoint: "EXPLORER-NONE",
+        cargo_threshold: 1,
+        status: "blocked",
+        progress: %{
+          "target_system" => "X1-UX81",
+          "coverage" => %{"X1-UX81-A1" => [], "X1-UX81-A2" => ["modifiers"]}
+        }
+      })
+
+      stub_live_game(agent_overview_body(agent.symbol), [ship_body("ORBITALIST-1")])
+
+      {:ok, lv, _html} = live(conn, ~p"/")
+
+      assert has_element?(lv, "[data-explorer-job-panel]", "System Exploration Job")
+      assert has_element?(lv, "[data-explorer-target-system]", "X1-UX81")
+      assert has_element?(lv, "[data-explorer-coverage]", "1 / 2")
+      assert has_element?(lv, "[data-explorer-unresolved]", "X1-UX81-A2: modifiers")
+      assert has_element?(lv, "button[phx-click=\"reconcile_explorer_job\"]")
+    end
+
     test "shows the gather mode and surfaces siphon results as active work", %{
       conn: conn,
       operator: operator

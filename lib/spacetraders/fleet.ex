@@ -267,6 +267,367 @@ defmodule SpaceTraders.Fleet do
     end
   end
 
+  @doc "Captures a Ship's authoritative current System as a paused System Exploration Job."
+  def configure_explorer_job(%AgentRecord{agent_token: token} = agent, ship_symbol)
+      when is_binary(token) and token != "" do
+    with :ok <- Agent.execution_allowed?(agent),
+         {:ok, ship} <- owned_ship(agent, ship_symbol),
+         nil <- unfinished_job(ship.id),
+         {:ok, live_ship} <-
+           Agent.handle_game_result(agent, SpaceTraders.API.get_ship(token, ship_symbol)),
+         system when is_binary(system) <- live_ship.nav.system_symbol,
+         {:ok, waypoints} <- fetch_waypoint_pages(token, system) do
+      Enum.each(waypoints, &record_waypoint_observation(agent, &1, "get_waypoints"))
+
+      job =
+        %Job{ship_id: ship.id}
+        # The original Miner schema keeps these columns non-null. Explorer
+        # policy never reads them; its fixed target belongs in progress.
+        |> Job.changeset(%{
+          type: "explorer",
+          extraction_waypoint: "EXPLORER-NONE",
+          market_waypoint: "EXPLORER-NONE",
+          cargo_threshold: 1
+        })
+        |> Ecto.Changeset.put_change(:status, "paused")
+        |> Ecto.Changeset.put_change(:blocked_reason, "Awaiting Operator resume")
+        |> Ecto.Changeset.put_change(:progress, %{"target_system" => system})
+        |> Repo.insert!()
+
+      record_activity(
+        agent,
+        ship,
+        "configuration",
+        "System Exploration Job configured for #{system}"
+      )
+
+      {:ok, job}
+    else
+      %Job{} -> {:error, :unfinished_job_already_assigned}
+      nil -> {:error, :current_system_unavailable}
+      error -> error
+    end
+  end
+
+  def configure_explorer_job(%AgentRecord{}, _ship_symbol), do: {:error, :agent_token_missing}
+
+  @doc "Starts a System Exploration Job and acquires its current public baseline."
+  def start_explorer_job(%AgentRecord{} = agent, ship_symbol) do
+    with :ok <- Agent.execution_allowed?(agent),
+         {:ok, ship} <- owned_ship(agent, ship_symbol),
+         %Job{type: "explorer"} = job <- unfinished_job(ship.id),
+         {:ok, live_ship} <-
+           Agent.handle_game_result(
+             agent,
+             SpaceTraders.API.get_ship(agent.agent_token, ship_symbol)
+           ) do
+      job =
+        Repo.update!(
+          Ecto.Changeset.change(job,
+            status: "active",
+            blocker: nil,
+            blocked_reason: nil,
+            last_validated_at: DateTime.utc_now() |> DateTime.truncate(:second)
+          )
+        )
+
+      advance_explorer_job(agent, job, live_ship)
+    else
+      nil -> {:error, :explorer_job_not_configured}
+      %Job{} -> {:error, :explorer_job_not_configured}
+      {:error, reason} -> block_explorer_job(agent, ship_symbol, reason)
+    end
+  end
+
+  @doc "Pauses a System Exploration Job without changing its fixed target."
+  def pause_explorer_job(%AgentRecord{} = agent, ship_symbol) do
+    with {:ok, ship} <- owned_ship(agent, ship_symbol),
+         %Job{type: "explorer"} = job <- unfinished_job(ship.id) do
+      job =
+        Repo.update!(
+          Ecto.Changeset.change(job,
+            status: "paused",
+            blocker: nil,
+            blocked_reason: "Paused by Operator"
+          )
+        )
+
+      record_activity(agent, ship, "pause", "System Exploration Job paused by Operator")
+      {:ok, job}
+    else
+      _ -> {:error, :explorer_job_not_configured}
+    end
+  end
+
+  @doc "Resumes a System Exploration Job from authoritative game state."
+  def resume_explorer_job(%AgentRecord{} = agent, ship_symbol),
+    do: start_explorer_job(agent, ship_symbol)
+
+  @doc "Stops a System Exploration Job and preserves its terminal history."
+  def stop_explorer_job(%AgentRecord{} = agent, ship_symbol) do
+    with {:ok, ship} <- owned_ship(agent, ship_symbol),
+         %Job{type: "explorer"} = job <- unfinished_job(ship.id) do
+      terminalize_job!(job, "stopped")
+
+      record_activity(
+        agent,
+        ship,
+        "stop",
+        "System Exploration Job stopped; Ship returned to Manual"
+      )
+
+      :ok
+    else
+      _ -> {:error, :explorer_job_not_configured}
+    end
+  end
+
+  @doc "Reconciles an Explorer Job after an explicit Operator retry."
+  def reconcile_explorer_job(%AgentRecord{} = agent, ship_symbol),
+    do: start_explorer_job(agent, ship_symbol)
+
+  @doc "Reconciles public baseline acquisition for a System Exploration Job."
+  def advance_explorer_job(
+        %AgentRecord{agent_token: token} = agent,
+        %Job{type: "explorer"} = job,
+        live_ship
+      )
+      when is_binary(token) and token != "" do
+    system = get_in(job.progress || %{}, ["target_system"])
+
+    with true <- is_binary(system),
+         {:ok, job} <- scan_explorer_waypoints(agent, token, job, live_ship),
+         {:ok, waypoints} <- fetch_waypoint_pages(token, system),
+         {:ok, job} <- acquire_explorer_baseline(agent, token, job, live_ship, system, waypoints),
+         {:ok, final_waypoints} <- fetch_waypoint_pages(token, system),
+         {:ok, job} <-
+           acquire_explorer_baseline(agent, token, job, live_ship, system, final_waypoints) do
+      coverage = Intelligence.waypoint_coverage(agent, system, final_waypoints)
+      missing = Map.new(coverage, fn {symbol, result} -> {symbol, result.missing} end)
+
+      job =
+        Repo.update!(
+          Ecto.Changeset.change(job,
+            progress:
+              Map.merge(job.progress || %{}, %{
+                "coverage" => missing,
+                "methods" => get_in(job.progress || %{}, ["methods"]) || %{},
+                "viability" => get_in(job.progress || %{}, ["viability"]) || %{}
+              })
+          )
+        )
+
+      if Enum.all?(coverage, fn {_symbol, result} -> result.complete? end) do
+        job =
+          Repo.update!(
+            Ecto.Changeset.change(job,
+              status: "completed",
+              blocker: nil,
+              blocked_reason: nil,
+              last_action_result: %{"kind" => "baseline_acquired"},
+              finished_at: DateTime.utc_now() |> DateTime.truncate(:second)
+            )
+          )
+
+        record_activity_by_config(
+          job,
+          "explorer_job_completed",
+          "System Exploration Job completed",
+          %{
+            "system" => system,
+            "coverage" => missing
+          }
+        )
+
+        {:ok, job}
+      else
+        block_explorer_job(
+          job,
+          {:unresolved_coverage, missing, get_in(job.progress || %{}, ["viability"]) || %{}}
+        )
+      end
+    else
+      {:waiting, job} -> {:ok, job}
+      false -> block_explorer_job(job, :target_system_missing)
+      {:error, reason} -> block_explorer_job(job, reason)
+    end
+  end
+
+  defp scan_explorer_waypoints(agent, token, job, live_ship) do
+    cond do
+      cooldown_active?(live_ship) ->
+        {:waiting, job} = wait_for_explorer_cooldown(agent, job, live_ship, "cooldown")
+        {:waiting, job}
+
+      get_in(job.progress || %{}, ["methods", "scan"]) == "completed" ->
+        {:ok, job}
+
+      not sensor_capability?(live_ship) ->
+        {:ok, record_explorer_method(job, "scan", "unavailable", "sensor_capability_missing")}
+
+      true ->
+        action = %{"kind" => "scan", "expected" => %{"cooldown_or_observation" => true}}
+        job = Repo.update!(Ecto.Changeset.change(job, status: "active", in_flight_action: action))
+
+        case Agent.handle_game_result(
+               agent,
+               SpaceTraders.API.scan_waypoints(token, live_ship.symbol)
+             ) do
+          {:ok, %{waypoints: waypoints} = result} ->
+            Enum.each(
+              waypoints,
+              &Intelligence.observe_waypoint(agent, &1, source: "scan_waypoints")
+            )
+
+            job = record_explorer_method(job, "scan", "completed", nil)
+
+            if cooldown_active?(%{cooldown: result.cooldown}) do
+              wait_for_explorer_cooldown(
+                agent,
+                job,
+                %{live_ship | cooldown: result.cooldown},
+                "scan"
+              )
+            else
+              {:ok, Repo.update!(Ecto.Changeset.change(job, in_flight_action: nil))}
+            end
+
+          {:error, reason} ->
+            {:ok,
+             job
+             |> record_explorer_method("scan", "unavailable", inspect(reason))
+             |> then(&Repo.update!(Ecto.Changeset.change(&1, in_flight_action: nil)))}
+        end
+    end
+  end
+
+  defp sensor_capability?(%{mounts: mounts}) do
+    Enum.any?(mounts || [], &String.starts_with?(&1.symbol || "", "MOUNT_SENSOR_ARRAY"))
+  end
+
+  defp sensor_capability?(_), do: false
+
+  defp acquire_explorer_baseline(agent, token, job, live_ship, system, waypoints) do
+    Enum.reduce_while(waypoints, {:ok, job}, fn waypoint, {:ok, job} ->
+      missing =
+        get_in(Intelligence.waypoint_coverage(agent, system, [waypoint]), [
+          waypoint.symbol,
+          :missing
+        ])
+
+      if missing == [] do
+        {:cont, {:ok, record_explorer_method(job, waypoint.symbol, "reused_public", nil)}}
+      else
+        case SpaceTraders.API.get_waypoint(token, system, waypoint.symbol) do
+          {:ok, full_waypoint} ->
+            with :ok <- observe_explorer_waypoint(agent, full_waypoint),
+                 :ok <- acquire_explorer_market(agent, token, system, live_ship, full_waypoint) do
+              job = record_explorer_method(job, waypoint.symbol, "public_read", nil)
+              {:cont, maybe_chart_explorer_waypoint(agent, token, job, live_ship, full_waypoint)}
+            else
+              {:error, reason} ->
+                {:cont,
+                 {:ok,
+                  record_explorer_method(
+                    job,
+                    waypoint.symbol,
+                    "public_read_failed",
+                    inspect(reason)
+                  )}}
+            end
+
+          {:error, reason} ->
+            {:cont,
+             {:ok,
+              record_explorer_method(job, waypoint.symbol, "public_read_failed", inspect(reason))}}
+        end
+      end
+    end)
+  end
+
+  # Charting is optional baseline enrichment, but its request changes game state.
+  # Persist the exact method first so restart recovery never blindly repeats it.
+  defp maybe_chart_explorer_waypoint(agent, token, job, live_ship, waypoint) do
+    if live_ship.nav.status in ["DOCKED", "IN_ORBIT"] and
+         live_ship.nav.waypoint_symbol == waypoint.symbol and is_nil(waypoint.chart) do
+      action = %{"kind" => "chart", "waypoint" => waypoint.symbol}
+      job = Repo.update!(Ecto.Changeset.change(job, in_flight_action: action))
+
+      case Agent.handle_game_result(agent, SpaceTraders.API.create_chart(token, live_ship.symbol)) do
+        {:ok, %{waypoint: charted_waypoint}} ->
+          :ok = observe_explorer_waypoint(agent, charted_waypoint)
+
+          {:ok,
+           job
+           |> record_explorer_method(waypoint.symbol, "chart", nil)
+           |> then(&Repo.update!(Ecto.Changeset.change(&1, in_flight_action: nil)))}
+
+        {:error, reason} ->
+          {:ok,
+           job
+           |> record_explorer_method(waypoint.symbol, "chart_unavailable", inspect(reason))
+           |> then(&Repo.update!(Ecto.Changeset.change(&1, in_flight_action: nil)))}
+      end
+    else
+      {:ok, job}
+    end
+  end
+
+  defp wait_for_explorer_cooldown(agent, job, live_ship, method) do
+    maybe_schedule_live_cooldown(agent, live_ship, job.id)
+
+    {:waiting,
+     Repo.update!(
+       Ecto.Changeset.change(job,
+         status: "waiting",
+         in_flight_action: %{"kind" => "cooldown", "method" => method}
+       )
+     )}
+  end
+
+  defp record_explorer_method(job, key, method, viability) do
+    progress = job.progress || %{}
+    methods = Map.put(progress["methods"] || %{}, key, method)
+
+    viability =
+      if is_nil(viability),
+        do: Map.delete(progress["viability"] || %{}, key),
+        else: Map.put(progress["viability"] || %{}, key, viability)
+
+    Repo.update!(
+      Ecto.Changeset.change(job,
+        progress: Map.merge(progress, %{"methods" => methods, "viability" => viability})
+      )
+    )
+  end
+
+  defp observe_explorer_waypoint(agent, waypoint) do
+    case Intelligence.observe_waypoint(agent, waypoint, source: "get_waypoint") do
+      {:ok, _observation} -> :ok
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp acquire_explorer_market(agent, token, system, live_ship, waypoint) do
+    if market_waypoint?(waypoint) == :ok do
+      with {:ok, market} <- SpaceTraders.API.get_market(token, system, waypoint.symbol),
+           {:ok, _observation} <-
+             Intelligence.observe_market(agent, system, market,
+               source: "get_market",
+               observing_ship_symbol: observing_ship_at(live_ship, waypoint.symbol)
+             ) do
+        :ok
+      end
+    else
+      :ok
+    end
+  end
+
+  defp observing_ship_at(%{symbol: ship_symbol, nav: %{waypoint_symbol: waypoint}}, waypoint),
+    do: ship_symbol
+
+  defp observing_ship_at(_live_ship, _waypoint), do: nil
+
   @doc "Replaces a Ship's unfinished Job and preserves the predecessor as terminal history."
   def replace_miner_job(%AgentRecord{} = agent, ship_symbol, attrs) when is_map(attrs) do
     with {:ok, ship} <- owned_ship(agent, ship_symbol) do
@@ -1120,6 +1481,12 @@ defmodule SpaceTraders.Fleet do
          %AgentRecord{} = agent <- Repo.get(AgentRecord, agent_id),
          :ok <- Agent.execution_allowed?(agent) do
       case config.in_flight_action do
+        %{"kind" => "cooldown"} when config.type == "explorer" ->
+          config =
+            Repo.update!(Ecto.Changeset.change(config, status: "active", in_flight_action: nil))
+
+          advance_explorer_job(agent, config, live_ship)
+
         %{"kind" => kind} when kind in @gather_kinds ->
           config =
             Repo.update!(
@@ -1170,7 +1537,9 @@ defmodule SpaceTraders.Fleet do
           )
         )
 
-      advance_miner_job(agent, config, live_ship, :timeline)
+      if config.type == "explorer",
+        do: advance_explorer_job(agent, config, live_ship),
+        else: advance_miner_job(agent, config, live_ship, :timeline)
     else
       _ -> :ok
     end
@@ -1198,11 +1567,11 @@ defmodule SpaceTraders.Fleet do
 
   defp at_market_waypoint?(_, _), do: false
 
-  defp arrived_at_configured_waypoint?(live_ship, %Job{
+  defp arrived_at_configured_waypoint?(%{nav: %{waypoint_symbol: waypoint, status: status}}, %Job{
          in_flight_action: %{"waypoint" => waypoint}
-       }) do
-    at_extraction_waypoint?(live_ship, waypoint) or at_market_waypoint?(live_ship, waypoint)
-  end
+       })
+       when status in ["DOCKED", "IN_ORBIT"],
+       do: true
 
   defp arrived_at_configured_waypoint?(_, _), do: false
 
@@ -1858,6 +2227,43 @@ defmodule SpaceTraders.Fleet do
     {:error, reason}
   end
 
+  defp block_explorer_job(agent, ship_symbol, reason) do
+    case owned_ship(agent, ship_symbol) do
+      {:ok, ship} ->
+        case unfinished_job(ship.id) do
+          %Job{type: "explorer"} = job -> block_explorer_job(job, reason)
+          _ -> {:error, :explorer_job_not_configured}
+        end
+
+      error ->
+        error
+    end
+  end
+
+  defp block_explorer_job(job, reason) do
+    blocker = %{
+      job_blocker(reason)
+      | summary: "System Exploration Job cannot progress: #{blocker_reason(reason)}."
+    }
+
+    job =
+      Repo.update!(
+        Ecto.Changeset.change(job,
+          status: "blocked",
+          blocker: blocker,
+          blocked_reason: nil,
+          in_flight_action: nil
+        )
+      )
+
+    record_activity_by_config(job, "explorer_job_blocked", "System Exploration Job blocked", %{
+      "reason" => inspect(reason),
+      "coverage" => get_in(job.progress || %{}, ["coverage"]) || %{}
+    })
+
+    {:error, {:explorer_job_blocked, reason}}
+  end
+
   defp record_activity_by_config(config, kind, message, metadata) do
     ship = Repo.get!(Ship, config.ship_id)
     record_activity(Repo.get!(AgentRecord, ship.agent_id), ship, kind, message, metadata)
@@ -2491,7 +2897,10 @@ defmodule SpaceTraders.Fleet do
                SpaceTraders.API.get_ship(agent_token, ship_symbol, retry: false)
              ) do
           {:ok, live_ship} when config.status == "active" and is_nil(config.in_flight_action) ->
-            advance_miner_job(agent, config, live_ship)
+            case config.type do
+              "explorer" -> advance_explorer_job(agent, config, live_ship)
+              _ -> advance_miner_job(agent, config, live_ship)
+            end
 
           {:ok, live_ship}
           when config.status in ["active", "waiting"] and is_map(config.in_flight_action) ->
@@ -2554,12 +2963,11 @@ defmodule SpaceTraders.Fleet do
 
           {:ok, recovered_config}
         else
-          advance_miner_job(
-            Repo.get!(AgentRecord, agent_id),
-            recovered_config,
-            live_ship,
-            :timeline
-          )
+          agent = Repo.get!(AgentRecord, agent_id)
+
+          if recovered_config.type == "explorer",
+            do: advance_explorer_job(agent, recovered_config, live_ship),
+            else: advance_miner_job(agent, recovered_config, live_ship, :timeline)
         end
 
       :absent ->
@@ -2579,7 +2987,7 @@ defmodule SpaceTraders.Fleet do
       live_ship.nav.status == "IN_TRANSIT" and live_ship.nav.route.destination.symbol == waypoint ->
         :confirmed
 
-      at_extraction_waypoint?(live_ship, waypoint) or at_market_waypoint?(live_ship, waypoint) ->
+      arrived_at_waypoint?(live_ship, waypoint) ->
         :confirmed
 
       true ->
@@ -2607,7 +3015,18 @@ defmodule SpaceTraders.Fleet do
     if fuel_full?(live_ship), do: :confirmed, else: :absent
   end
 
+  # The persisted cooldown action is written only after the mutating request
+  # returned. It is therefore safe to continue after a restart, even if the
+  # cooldown elapsed while the process was down.
+  defp action_outcome(%{"kind" => "cooldown"}, _live_ship), do: :confirmed
+
   defp action_outcome(_action, _live_ship), do: :ambiguous
+
+  defp arrived_at_waypoint?(%{nav: %{waypoint_symbol: waypoint, status: status}}, waypoint)
+       when status in ["DOCKED", "IN_ORBIT"],
+       do: true
+
+  defp arrived_at_waypoint?(_live_ship, _waypoint), do: false
 
   defp confirm_recovery(config, live_ship) do
     action = config.in_flight_action

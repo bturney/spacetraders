@@ -31,6 +31,8 @@ defmodule SpaceTraders.API do
 
   alias SpaceTraders.API.Model.{
     Agent,
+    Chart,
+    Construction,
     Contract,
     Cooldown,
     Extraction,
@@ -38,7 +40,8 @@ defmodule SpaceTraders.API do
     Market,
     Ship,
     ShipConditionEvent,
-    Siphon
+    Siphon,
+    ScannedWaypoint
   }
 
   alias SpaceTraders.API.Model.{
@@ -230,6 +233,22 @@ defmodule SpaceTraders.API do
     )
   end
 
+  @doc "POST /my/ships/{symbol}/scan/waypoints"
+  @spec scan_waypoints(token(), String.t()) :: result()
+  def scan_waypoints(token, ship_symbol) do
+    request(:post, "/my/ships/#{ship_symbol}/scan/waypoints", token,
+      as: {:map, %{cooldown: {:model, Cooldown}, waypoints: {:list, ScannedWaypoint}}}
+    )
+  end
+
+  @doc "POST /my/ships/{symbol}/chart"
+  @spec create_chart(token(), String.t()) :: result()
+  def create_chart(token, ship_symbol) do
+    request(:post, "/my/ships/#{ship_symbol}/chart", token,
+      as: {:map, %{chart: {:model, Chart}, waypoint: {:model, Waypoint}, agent: {:model, Agent}}}
+    )
+  end
+
   @doc "POST /my/ships/{symbol}/refuel"
   @spec refuel_ship(token(), String.t()) :: result()
   def refuel_ship(token, ship_symbol) do
@@ -356,6 +375,14 @@ defmodule SpaceTraders.API do
   def get_market(token, system_symbol, waypoint_symbol) do
     request(:get, "/systems/#{system_symbol}/waypoints/#{waypoint_symbol}/market", token,
       as: {:model, Market}
+    )
+  end
+
+  @doc "GET /systems/{symbol}/waypoints/{waypoint}/construction"
+  @spec get_construction(token(), String.t(), String.t()) :: result()
+  def get_construction(token, system_symbol, waypoint_symbol) do
+    request(:get, "/systems/#{system_symbol}/waypoints/#{waypoint_symbol}/construction", token,
+      as: {:model, Construction}
     )
   end
 
