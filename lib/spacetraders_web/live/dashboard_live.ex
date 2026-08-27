@@ -2957,6 +2957,10 @@ defmodule SpaceTradersWeb.DashboardLive do
       <p class="mt-1 text-xs opacity-70" data-explorer-coverage>
         Completed coverage: {map_size(@coverage) - length(@unresolved)} / {map_size(@coverage)} Waypoints
       </p>
+      <p :if={@ship.job.in_flight_action} class="mt-1 text-xs opacity-70" data-explorer-active-method>
+        Active method: {Map.get(@ship.job.in_flight_action, "method") ||
+          Map.get(@ship.job.in_flight_action, "kind")}
+      </p>
       <div :if={@unresolved != []} class="mt-2 text-xs" data-explorer-unresolved>
         <p class="font-semibold">Unresolved coverage</p>
         <p :for={{symbol, missing} <- @unresolved} class="font-mono opacity-70">

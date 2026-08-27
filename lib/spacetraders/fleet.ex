@@ -447,6 +447,7 @@ defmodule SpaceTraders.Fleet do
         )
       end
     else
+      {:waiting, job} -> {:ok, job}
       false -> block_explorer_job(job, :target_system_missing)
       {:error, reason} -> block_explorer_job(job, reason)
     end
@@ -455,7 +456,8 @@ defmodule SpaceTraders.Fleet do
   defp scan_explorer_waypoints(agent, token, job, live_ship) do
     cond do
       cooldown_active?(live_ship) ->
-        wait_for_explorer_cooldown(agent, job, live_ship, "cooldown")
+        {:waiting, job} = wait_for_explorer_cooldown(agent, job, live_ship, "cooldown")
+        {:waiting, job}
 
       get_in(job.progress || %{}, ["methods", "scan"]) == "completed" ->
         {:ok, job}
@@ -519,7 +521,7 @@ defmodule SpaceTraders.Fleet do
         case SpaceTraders.API.get_waypoint(token, system, waypoint.symbol) do
           {:ok, full_waypoint} ->
             with :ok <- observe_explorer_waypoint(agent, full_waypoint),
-                 :ok <- acquire_explorer_market(agent, token, system, full_waypoint) do
+                 :ok <- acquire_explorer_market(agent, token, system, live_ship, full_waypoint) do
               job = record_explorer_method(job, waypoint.symbol, "public_read", nil)
               {:cont, maybe_chart_explorer_waypoint(agent, token, job, live_ship, full_waypoint)}
             else
@@ -574,7 +576,7 @@ defmodule SpaceTraders.Fleet do
   defp wait_for_explorer_cooldown(agent, job, live_ship, method) do
     maybe_schedule_live_cooldown(agent, live_ship, job.id)
 
-    {:ok,
+    {:waiting,
      Repo.update!(
        Ecto.Changeset.change(job,
          status: "waiting",
@@ -606,17 +608,25 @@ defmodule SpaceTraders.Fleet do
     end
   end
 
-  defp acquire_explorer_market(agent, token, system, waypoint) do
+  defp acquire_explorer_market(agent, token, system, live_ship, waypoint) do
     if market_waypoint?(waypoint) == :ok do
       with {:ok, market} <- SpaceTraders.API.get_market(token, system, waypoint.symbol),
            {:ok, _observation} <-
-             Intelligence.observe_market(agent, system, market, source: "get_market") do
+             Intelligence.observe_market(agent, system, market,
+               source: "get_market",
+               observing_ship_symbol: observing_ship_at(live_ship, waypoint.symbol)
+             ) do
         :ok
       end
     else
       :ok
     end
   end
+
+  defp observing_ship_at(%{symbol: ship_symbol, nav: %{waypoint_symbol: waypoint}}, waypoint),
+    do: ship_symbol
+
+  defp observing_ship_at(_live_ship, _waypoint), do: nil
 
   @doc "Replaces a Ship's unfinished Job and preserves the predecessor as terminal history."
   def replace_miner_job(%AgentRecord{} = agent, ship_symbol, attrs) when is_map(attrs) do
@@ -2231,11 +2241,16 @@ defmodule SpaceTraders.Fleet do
   end
 
   defp block_explorer_job(job, reason) do
+    blocker = %{
+      job_blocker(reason)
+      | summary: "System Exploration Job cannot progress: #{blocker_reason(reason)}."
+    }
+
     job =
       Repo.update!(
         Ecto.Changeset.change(job,
           status: "blocked",
-          blocker: job_blocker(reason),
+          blocker: blocker,
           blocked_reason: nil,
           in_flight_action: nil
         )
