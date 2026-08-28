@@ -4570,6 +4570,272 @@ defmodule SpaceTraders.FleetTest do
   end
 
   describe "ship actions" do
+    test "manual module installation persists evidence and leaves a preempted Job paused" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      {:ok, job} =
+        Fleet.configure_miner_job(agent, "FLEET-SHIP", %{
+          extraction_waypoint: "X1-UX81-A2",
+          market_waypoint: "X1-UX81-A1",
+          cargo_threshold: 30
+        })
+
+      Repo.update!(Ecto.Changeset.change(job, status: "active"))
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case {conn.request_path, conn.method} do
+          {"/v2/my/ships/FLEET-SHIP", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" =>
+                ship_body("FLEET-SHIP", %{
+                  "cargo" => %{
+                    "capacity" => 40,
+                    "units" => 1,
+                    "inventory" => [%{"symbol" => "MODULE_CARGO_HOLD_I", "units" => 1}]
+                  }
+                })
+            })
+
+          {"/v2/my/ships/FLEET-SHIP/modules/install", "POST"} ->
+            assert conn.body_params == %{"symbol" => "MODULE_CARGO_HOLD_I"}
+
+            Req.Test.json(conn, %{
+              "data" => %{
+                "agent" => %{"symbol" => agent.symbol, "credits" => 99},
+                "modules" => [%{"symbol" => "MODULE_CARGO_HOLD_I", "name" => "Cargo Hold I"}],
+                "cargo" => %{"capacity" => 40, "units" => 0, "inventory" => []},
+                "transaction" => %{
+                  "shipSymbol" => "FLEET-SHIP",
+                  "tradeSymbol" => "MODULE_CARGO_HOLD_I",
+                  "totalPrice" => 1,
+                  "waypointSymbol" => "X1-UX81-A1",
+                  "timestamp" => "2026-01-01T00:00:00.000Z"
+                }
+              }
+            })
+        end
+      end)
+
+      assert {:ok, %ManualIntent{type: "install_module", status: "completed"} = intent} =
+               Fleet.install_module_intent(agent, "FLEET-SHIP", "MODULE_CARGO_HOLD_I")
+
+      assert intent.parameters == %{
+               "authorized_removals" => %{},
+               "caller" => "manual",
+               "module_symbol" => "MODULE_CARGO_HOLD_I",
+               "quantity" => 1
+             }
+
+      assert intent.last_action_result["transaction"]["total_price"] == 1
+      assert Fleet.ship_job(agent, "FLEET-SHIP").status == "paused"
+    end
+
+    test "manual module removal requires exact authorization" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      assert {:error, :invalid_module_intent} =
+               Fleet.remove_module_intent(agent, "FLEET-SHIP", "MODULE_CARGO_HOLD_I", %{})
+
+      assert {:error, :invalid_module_intent} =
+               Fleet.remove_module_intent(agent, "FLEET-SHIP", "MODULE_CARGO_HOLD_I", %{
+                 "MODULE_CARGO_HOLD_I" => 2
+               })
+    end
+
+    test "manual module removal returns only the removed module to Cargo" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case {conn.request_path, conn.method} do
+          {"/v2/my/ships/FLEET-SHIP", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" =>
+                ship_body("FLEET-SHIP", %{
+                  "modules" => [%{"symbol" => "MODULE_CARGO_HOLD_I", "name" => "Cargo Hold I"}],
+                  "cargo" => %{
+                    "capacity" => 40,
+                    "units" => 3,
+                    "inventory" => [%{"symbol" => "IRON_ORE", "units" => 3}]
+                  }
+                })
+            })
+
+          {"/v2/my/ships/FLEET-SHIP/modules/remove", "POST"} ->
+            assert conn.body_params == %{"symbol" => "MODULE_CARGO_HOLD_I"}
+
+            Req.Test.json(conn, %{
+              "data" => %{
+                "agent" => %{"symbol" => agent.symbol, "credits" => 99},
+                "modules" => [],
+                "cargo" => %{
+                  "capacity" => 40,
+                  "units" => 4,
+                  "inventory" => [
+                    %{"symbol" => "IRON_ORE", "units" => 3},
+                    %{"symbol" => "MODULE_CARGO_HOLD_I", "units" => 1}
+                  ]
+                },
+                "transaction" => %{
+                  "shipSymbol" => "FLEET-SHIP",
+                  "tradeSymbol" => "MODULE_CARGO_HOLD_I",
+                  "totalPrice" => 1,
+                  "waypointSymbol" => "X1-UX81-A1",
+                  "timestamp" => "2026-01-01T00:00:00.000Z"
+                }
+              }
+            })
+        end
+      end)
+
+      assert {:ok, %ManualIntent{type: "remove_module", status: "completed"}} =
+               Fleet.remove_module_intent(agent, "FLEET-SHIP", "MODULE_CARGO_HOLD_I", %{
+                 "MODULE_CARGO_HOLD_I" => 1
+               })
+    end
+
+    test "reconciles an ambiguous module installation before accepting another mutation" do
+      agent = agent_fixture()
+      ship = ship_fixture(agent, "FLEET-SHIP")
+
+      Repo.insert!(%ManualIntent{
+        ship_id: ship.id,
+        type: "install_module",
+        target_waypoint: "MODULE_CARGO_HOLD_I",
+        parameters: %{
+          "caller" => "manual",
+          "module_symbol" => "MODULE_CARGO_HOLD_I",
+          "quantity" => 1,
+          "authorized_removals" => %{}
+        },
+        status: "blocked",
+        in_flight_action: %{
+          "kind" => "install_module",
+          "module_symbol" => "MODULE_CARGO_HOLD_I",
+          "quantity" => 1,
+          "installed_before" => 0,
+          "cargo_before" => 1
+        }
+      })
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        assert {"/v2/my/ships/FLEET-SHIP", "GET"} = {conn.request_path, conn.method}
+
+        Req.Test.json(conn, %{
+          "data" =>
+            ship_body("FLEET-SHIP", %{
+              "cargo" => %{
+                "capacity" => 40,
+                "units" => 1,
+                "inventory" => [%{"symbol" => "MODULE_CARGO_HOLD_I", "units" => 1}]
+              }
+            })
+        })
+      end)
+
+      assert {:error, :manual_intent_reconciliation_required} =
+               Fleet.install_module_intent(agent, "FLEET-SHIP", "MODULE_CARGO_HOLD_I")
+
+      assert %ManualIntent{status: "blocked", in_flight_action: action} =
+               Fleet.ship_manual_intent(agent, "FLEET-SHIP")
+
+      assert action["kind"] == "install_module"
+    end
+
+    test "returns a confirmed ambiguous installation without posting it again" do
+      agent = agent_fixture()
+      ship = ship_fixture(agent, "FLEET-SHIP")
+
+      Repo.insert!(%ManualIntent{
+        ship_id: ship.id,
+        type: "install_module",
+        target_waypoint: "MODULE_CARGO_HOLD_I",
+        parameters: %{
+          "caller" => "manual",
+          "module_symbol" => "MODULE_CARGO_HOLD_I",
+          "quantity" => 1,
+          "authorized_removals" => %{}
+        },
+        status: "blocked",
+        in_flight_action: %{
+          "kind" => "install_module",
+          "module_symbol" => "MODULE_CARGO_HOLD_I",
+          "quantity" => 1,
+          "installed_before" => 0,
+          "cargo_before" => 1
+        }
+      })
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        assert {"/v2/my/ships/FLEET-SHIP", "GET"} = {conn.request_path, conn.method}
+
+        Req.Test.json(conn, %{
+          "data" =>
+            ship_body("FLEET-SHIP", %{
+              "modules" => [%{"symbol" => "MODULE_CARGO_HOLD_I", "name" => "Cargo Hold I"}],
+              "cargo" => %{"capacity" => 40, "units" => 0, "inventory" => []}
+            })
+        })
+      end)
+
+      assert {:ok, %ManualIntent{status: "completed", last_action_result: result}} =
+               Fleet.install_module_intent(agent, "FLEET-SHIP", "MODULE_CARGO_HOLD_I")
+
+      assert result["modules"] == [
+               %{
+                 "symbol" => "MODULE_CARGO_HOLD_I",
+                 "name" => "Cargo Hold I",
+                 "capacity" => nil,
+                 "range" => nil
+               }
+             ]
+    end
+
+    test "does not replace unresolved module evidence with navigation" do
+      agent = agent_fixture()
+      ship = ship_fixture(agent, "FLEET-SHIP")
+
+      Repo.insert!(%ManualIntent{
+        ship_id: ship.id,
+        type: "install_module",
+        target_waypoint: "MODULE_CARGO_HOLD_I",
+        parameters: %{"module_symbol" => "MODULE_CARGO_HOLD_I", "quantity" => 1},
+        status: "blocked",
+        in_flight_action: %{
+          "kind" => "install_module",
+          "module_symbol" => "MODULE_CARGO_HOLD_I",
+          "quantity" => 1,
+          "installed_before" => 0,
+          "cargo_before" => 1
+        }
+      })
+
+      assert {:error, :manual_intent_reconciliation_required} =
+               Fleet.navigate_intent(agent, "FLEET-SHIP", "X1-UX81-A2")
+    end
+
+    test "does not stop and discard unresolved module evidence" do
+      agent = agent_fixture()
+      ship = ship_fixture(agent, "FLEET-SHIP")
+
+      intent =
+        Repo.insert!(%ManualIntent{
+          ship_id: ship.id,
+          type: "remove_module",
+          target_waypoint: "MODULE_CARGO_HOLD_I",
+          parameters: %{"module_symbol" => "MODULE_CARGO_HOLD_I", "quantity" => 1},
+          status: "blocked",
+          in_flight_action: %{"kind" => "remove_module", "module_symbol" => "MODULE_CARGO_HOLD_I"}
+        })
+
+      assert {:error, :manual_intent_reconciliation_required} =
+               Fleet.stop_manual_intent(agent, "FLEET-SHIP")
+
+      assert Repo.get!(ManualIntent, intent.id).in_flight_action["kind"] == "remove_module"
+    end
+
     test "Buy Goods Intent pauses the active Job and buys from a fresh on-site Listing" do
       agent = agent_fixture()
       ship_fixture(agent, "FLEET-SHIP")

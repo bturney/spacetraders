@@ -918,6 +918,7 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
           "frame" => %{
             "symbol" => "FRAME_FRIGATE",
             "name" => "Frigate",
+            "moduleSlots" => 2,
             "condition" => 55,
             "integrity" => 100,
             "quality" => 75,
@@ -986,6 +987,8 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
                "Crew Quarters I capacity 6"
              )
 
+      assert has_element?(lv, "[data-module-capacity]", "2 / 2 module slots")
+
       assert has_element?(
                lv,
                "[data-mount=\"MOUNT_MINING_LASER_I\"]",
@@ -1001,6 +1004,35 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
                "details[data-equipment-description]",
                "Expands the ship's cargo capacity."
              )
+    end
+
+    test "offers explicit module installation and one-module removal controls", %{
+      conn: conn,
+      operator: operator
+    } do
+      agent = agent_fixture(operator)
+
+      stub_live_game(agent_overview_body(agent.symbol), [
+        ship_body("ORBITALIST-1", %{
+          "modules" => [%{"symbol" => "MODULE_CARGO_HOLD_I", "name" => "Cargo Hold I"}],
+          "cargo" => %{
+            "capacity" => 40,
+            "units" => 1,
+            "inventory" => [%{"symbol" => "MODULE_GAS_PROCESSOR_I", "units" => 1}]
+          }
+        })
+      ])
+
+      {:ok, lv, _html} = live(conn, ~p"/")
+      lv |> element("button[data-select-ship=ORBITALIST-1]") |> render_click()
+
+      assert has_element?(
+               lv,
+               "button[data-install-module=MODULE_GAS_PROCESSOR_I]",
+               "Install module"
+             )
+
+      assert has_element?(lv, "button[data-remove-module=MODULE_CARGO_HOLD_I]", "Remove module")
     end
 
     test "shows an in-transit ship's origin and destination with departure in Route details", %{

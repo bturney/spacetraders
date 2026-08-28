@@ -48,6 +48,8 @@ defmodule SpaceTraders.API do
     MarketTransaction,
     ShipCargo,
     ShipFuel,
+    ShipModificationTransaction,
+    ShipModule,
     ShipNav,
     Shipyard,
     ShipyardTransaction,
@@ -57,11 +59,13 @@ defmodule SpaceTraders.API do
 
   alias SpaceTraders.API.Request.{
     DeliverContractRequest,
+    InstallShipModuleRequest,
     JettisonCargoRequest,
     NavigateRequest,
     PurchaseCargoRequest,
     PurchaseShipRequest,
     RegisterRequest,
+    RemoveShipModuleRequest,
     SellCargoRequest,
     ShipNavRequest,
     TransferCargoRequest
@@ -308,6 +312,18 @@ defmodule SpaceTraders.API do
     )
   end
 
+  @doc "POST /my/ships/{symbol}/modules/install — installs one module from Cargo."
+  @spec install_ship_module(token(), String.t(), String.t()) :: result()
+  def install_ship_module(token, ship_symbol, module_symbol) do
+    modify_ship_module(token, ship_symbol, "install", module_symbol, InstallShipModuleRequest)
+  end
+
+  @doc "POST /my/ships/{symbol}/modules/remove — removes one installed module into Cargo."
+  @spec remove_ship_module(token(), String.t(), String.t()) :: result()
+  def remove_ship_module(token, ship_symbol, module_symbol) do
+    modify_ship_module(token, ship_symbol, "remove", module_symbol, RemoveShipModuleRequest)
+  end
+
   @doc "POST /my/ships/{symbol}/transfer — transfers cargo to another ship."
   @spec transfer_cargo(token(), String.t(), String.t(), pos_integer(), String.t()) :: result()
   def transfer_cargo(token, ship_symbol, trade_symbol, units, target_ship_symbol) do
@@ -336,6 +352,20 @@ defmodule SpaceTraders.API do
            agent: {:model, Agent},
            ship: {:model, Ship},
            transaction: {:model, ShipyardTransaction}
+         }}
+    )
+  end
+
+  defp modify_ship_module(token, ship_symbol, operation, module_symbol, request_module) do
+    request(:post, "/my/ships/#{ship_symbol}/modules/#{operation}", token,
+      json: request_module.new(%{symbol: module_symbol}) |> request_module.to_json(),
+      as:
+        {:map,
+         %{
+           agent: {:model, Agent},
+           modules: {:list, ShipModule},
+           cargo: {:model, ShipCargo},
+           transaction: {:model, ShipModificationTransaction}
          }}
     )
   end
