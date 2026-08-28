@@ -2672,7 +2672,7 @@ defmodule SpaceTradersWeb.DashboardLive do
           <div>
             <span class="font-semibold">Manual Control</span>
             <span class="ml-1">
-              Navigate to <span class="font-mono">{@ship.manual_intent.target_waypoint}</span>
+              {manual_intent_label(@ship.manual_intent)}
             </span>
             <span class={manual_intent_status_class(@ship.manual_intent)}>
               {manual_intent_status(@ship.manual_intent)}
@@ -3362,7 +3362,7 @@ defmodule SpaceTradersWeb.DashboardLive do
           <li :for={intent <- @intent_history}>
             <details data-manual-intent-history-entry={intent.id}>
               <summary class="cursor-pointer">
-                {manual_intent_status(intent)} Navigate to {intent.target_waypoint}
+                {manual_intent_status(intent)} {manual_intent_label(intent)}
               </summary>
               <dl class="mt-2 grid gap-1 pl-3 sm:grid-cols-2">
                 <div>
@@ -3495,6 +3495,17 @@ defmodule SpaceTradersWeb.DashboardLive do
   defp manual_intent_status(%{status: "completed"}), do: "Completed"
   defp manual_intent_status(%{status: "stopped"}), do: "Stopped"
   defp manual_intent_status(_), do: "Manual"
+
+  defp manual_intent_label(%{type: "buy", parameters: parameters, target_waypoint: waypoint}),
+    do: "Buy #{parameters["trade_symbol"]} at #{waypoint}"
+
+  defp manual_intent_label(%{type: "sell", parameters: parameters, target_waypoint: waypoint}),
+    do: "Sell #{parameters["trade_symbol"]} at #{waypoint}"
+
+  defp manual_intent_label(%{type: "deliver", parameters: parameters, target_waypoint: waypoint}),
+    do: "Deliver #{parameters["trade_symbol"]} at #{waypoint}"
+
+  defp manual_intent_label(%{target_waypoint: waypoint}), do: "Navigate to #{waypoint}"
 
   defp manual_intent_status_class(%{status: "waiting"}),
     do: "badge badge-warning badge-sm ml-2"

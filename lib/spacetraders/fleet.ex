@@ -592,58 +592,39 @@ defmodule SpaceTraders.Fleet do
     end
   end
 
-  defp buy_procurement_goods(agent, job, live_ship, credits) do
+  defp buy_procurement_goods(agent, job, live_ship, _credits) do
     progress = job.progress
 
     with {:ok, source} <- procurement_source(agent, live_ship, progress),
-         :ok <- procurement_price_allowed?(source.good, progress),
-         {:ok, units} <- procurement_purchase_units(live_ship, source.good, progress, credits) do
-      if live_ship.nav.waypoint_symbol == source.waypoint and live_ship.nav.status != "IN_TRANSIT" do
-        action = %{
-          "kind" => "buy",
-          "trade_symbol" => progress["trade_symbol"],
-          "expected" => %{
-            "cargo_units_at_least" => item_units(live_ship, progress["trade_symbol"]) + units
-          }
-        }
-
-        with {:ok, live_ship} <- dock_for_market(agent, live_ship) do
-          job = Repo.update!(Ecto.Changeset.change(job, in_flight_action: action))
-
-          case SpaceTraders.API.purchase_cargo(
-                 agent.agent_token,
-                 live_ship.symbol,
-                 progress["trade_symbol"],
-                 units
-               ) do
-            {:ok, %{cargo: cargo, agent: purchase_agent}} ->
-              job =
-                Repo.update!(
-                  Ecto.Changeset.change(job,
-                    last_action_result: %{"kind" => "buy", "units" => units}
-                  )
-                )
-
-              with {:ok, contract} <- procurement_contract(agent, job) do
-                advance_procurement_job(
-                  agent,
-                  job,
-                  %{live_ship | cargo: cargo},
-                  contract,
-                  purchase_agent.credits
-                )
-              else
-                {:error, reason} -> mark_procurement_job_blocked(job, reason)
-              end
-
-            {:error, reason} ->
-              mark_procurement_job_blocked(job, {:purchase_failed, reason})
+         {:ok, intent} <-
+           cargo_intent(
+             agent,
+             live_ship.symbol,
+             "buy",
+             source.waypoint,
+             progress["trade_symbol"],
+             progress["requested"] - progress["accepted"],
+             caller: "job",
+             job_id: job.id,
+             reserve_credits: progress["reserve_credits"],
+             max_unit_price: progress["price_ceiling"]
+           ) do
+      case intent.status do
+        "completed" ->
+          with {:ok, refreshed_ship} <-
+                 Agent.handle_game_result(
+                   agent,
+                   SpaceTraders.API.get_ship(agent.agent_token, live_ship.symbol)
+                 ),
+               {:ok, contract} <- procurement_contract(agent, job),
+               {:ok, overview} <- Agent.agent_overview(agent) do
+            advance_procurement_job(agent, job, refreshed_ship, contract, overview.credits)
+          else
+            {:error, reason} -> mark_procurement_job_blocked(job, reason)
           end
-        else
-          {:error, reason} -> mark_procurement_job_blocked(job, {:dock_failed, reason})
-        end
-      else
-        navigate_miner_job(agent, job, live_ship, source.waypoint)
+
+        _ ->
+          {:ok, job}
       end
     else
       {:error, reason} -> mark_procurement_job_blocked(job, reason)
@@ -680,22 +661,6 @@ defmodule SpaceTraders.Fleet do
         end
       end
     end)
-  end
-
-  defp procurement_price_allowed?(_good, %{"price_ceiling" => nil}), do: :ok
-
-  defp procurement_price_allowed?(%{purchase_price: price}, %{"price_ceiling" => ceiling})
-       when price <= ceiling,
-       do: :ok
-
-  defp procurement_price_allowed?(_, _), do: {:error, :price_ceiling_exceeded}
-
-  defp procurement_purchase_units(live_ship, good, progress, credits) do
-    affordable = max(div(max(credits - progress["reserve_credits"], 0), good.purchase_price), 0)
-    free = max(live_ship.cargo.capacity - live_ship.cargo.units, 0)
-    needed = progress["requested"] - progress["accepted"]
-    units = min(min(free, good.trade_volume), min(needed, affordable))
-    if units > 0, do: {:ok, units}, else: {:error, :spending_or_cargo_constraint}
   end
 
   defp block_procurement_job(agent, ship_symbol, reason) do
@@ -1174,7 +1139,7 @@ defmodule SpaceTraders.Fleet do
          true <-
            is_binary(trade_symbol) and trade_symbol != "" and is_integer(units) and units > 0,
          {:ok, ship} <- owned_ship(agent, ship_symbol),
-         :ok <- preempt_miner_job_for(agent, ship_symbol, {:manual_override, "#{type} goods"}),
+         :ok <- preempt_for_cargo_intent(agent, ship_symbol, type, opts),
          {:ok, intent} <-
            replace_manual_intent(ship, %{
              type: type,
@@ -1191,6 +1156,14 @@ defmodule SpaceTraders.Fleet do
 
   defp cargo_intent(%AgentRecord{}, _ship_symbol, _type, _waypoint, _trade_symbol, _units, _opts),
     do: {:error, :agent_token_missing}
+
+  defp preempt_for_cargo_intent(agent, ship_symbol, type, opts) do
+    if opts[:caller] == "job" do
+      :ok
+    else
+      preempt_miner_job_for(agent, ship_symbol, {:manual_override, "#{type} goods"})
+    end
+  end
 
   @doc "Returns a Ship's unfinished Manual Control Intent, or nil."
   def ship_manual_intent(%AgentRecord{} = agent, ship_symbol) do
@@ -1267,9 +1240,12 @@ defmodule SpaceTraders.Fleet do
         intent = Repo.update!(Ecto.Changeset.change(intent, in_flight_action: nil))
         advance_manual_intent(agent, intent, live_ship)
 
+      %{"kind" => "buy"} = action ->
+        reconcile_buy_cargo_intent(agent, intent, live_ship, action)
+
       action when is_map(action) ->
         # Ship cargo alone cannot correlate a Market sale to this command.
-        block_cargo_intent(intent, {:ambiguous_operation_evidence, type})
+        block_cargo_intent_preserving_evidence(intent, {:ambiguous_operation_evidence, type})
 
       _ ->
         advance_cargo_intent(agent, intent, live_ship)
@@ -1337,7 +1313,7 @@ defmodule SpaceTraders.Fleet do
 
   defp dispatch_cargo_intent(agent, intent, live_ship) do
     if intent.type == "deliver" do
-      with {:ok, units} <- executable_cargo_units(intent, live_ship, nil, agent) do
+      with {:ok, units, _credits} <- executable_cargo_units(intent, live_ship, nil, agent) do
         intent =
           Repo.update!(
             Ecto.Changeset.change(intent,
@@ -1363,7 +1339,18 @@ defmodule SpaceTraders.Fleet do
     with {:ok, market} <- market_for_ship(agent, live_ship, intent.target_waypoint),
          good when not is_nil(good) <-
            Enum.find(market.trade_goods || [], &(&1.symbol == intent.parameters["trade_symbol"])),
-         {:ok, units} <- executable_cargo_units(intent, live_ship, good, agent) do
+         {:ok, units, credits} <- executable_cargo_units(intent, live_ship, good, agent) do
+      expected =
+        if intent.type == "buy" do
+          %{
+            "cargo_units_at_least" =>
+              item_units(live_ship, intent.parameters["trade_symbol"]) + units,
+            "credits_at_most" => credits - cargo_price(intent.type, good) * units
+          }
+        else
+          %{}
+        end
+
       intent =
         Repo.update!(
           Ecto.Changeset.change(intent,
@@ -1371,7 +1358,8 @@ defmodule SpaceTraders.Fleet do
               "kind" => intent.type,
               "trade_symbol" => intent.parameters["trade_symbol"],
               "units" => units,
-              "listing_price" => cargo_price(intent.type, good)
+              "listing_price" => cargo_price(intent.type, good),
+              "expected" => expected
             }
           )
         )
@@ -1396,7 +1384,9 @@ defmodule SpaceTraders.Fleet do
          agent
        ) do
     price = good.purchase_price
-    max_price = parameters["max_price"]
+    max_price = parameters["max_unit_price"] || parameters["max_price"]
+    max_total_price = parameters["max_total_price"]
+    reserve_credits = parameters["reserve_credits"] || 0
     free = max(live_ship.cargo.capacity - live_ship.cargo.units, 0)
 
     cond do
@@ -1408,10 +1398,16 @@ defmodule SpaceTraders.Fleet do
           units =
             min(
               parameters["units"],
-              min(good.trade_volume, min(free, div(overview.credits, price)))
+              min(
+                good.trade_volume,
+                min(
+                  free,
+                  affordable_units(overview.credits - reserve_credits, price, max_total_price)
+                )
+              )
             )
 
-          if units > 0, do: {:ok, units}, else: {:error, :buy_unavailable}
+          if units > 0, do: {:ok, units, overview.credits}, else: {:error, :buy_unavailable}
         end
     end
   end
@@ -1437,7 +1433,7 @@ defmodule SpaceTraders.Fleet do
 
       true ->
         units = min(parameters["units"], min(held, good.trade_volume))
-        if units > 0, do: {:ok, units}, else: {:error, :cargo_missing}
+        if units > 0, do: {:ok, units, nil}, else: {:error, :cargo_missing}
     end
   end
 
@@ -1449,17 +1445,32 @@ defmodule SpaceTraders.Fleet do
        ) do
     held = item_units(live_ship, parameters["trade_symbol"])
     units = min(parameters["units"], held)
-    if units > 0, do: {:ok, units}, else: {:error, :cargo_missing}
+    if units > 0, do: {:ok, units, nil}, else: {:error, :cargo_missing}
+  end
+
+  defp affordable_units(_credits, 0, _max_total_price), do: :infinity
+
+  defp affordable_units(credits, price, max_total_price) do
+    credit_limit = max(div(max(credits, 0), price), 0)
+
+    case max_total_price do
+      limit when is_integer(limit) -> min(credit_limit, max(div(limit, price), 0))
+      _ -> credit_limit
+    end
   end
 
   defp execute_cargo_intent(agent, %ManualIntent{type: "buy"} = intent, live_ship, units, good) do
-    case SpaceTraders.API.purchase_cargo(
-           agent.agent_token,
-           live_ship.symbol,
-           intent.parameters["trade_symbol"],
-           units
+    case Agent.handle_game_result(
+           agent,
+           SpaceTraders.API.purchase_cargo(
+             agent.agent_token,
+             live_ship.symbol,
+             intent.parameters["trade_symbol"],
+             units
+           )
          ) do
       {:ok, result} -> complete_cargo_intent(agent, intent, units, good.purchase_price, result)
+      {:error, %SpaceTraders.API.Error{} = reason} -> await_cargo_reconciliation(intent, reason)
       {:error, reason} -> block_cargo_intent(intent, reason)
     end
   end
@@ -1530,6 +1541,22 @@ defmodule SpaceTraders.Fleet do
     {:ok, intent}
   end
 
+  # Buy has two independent authoritative effects. Both must match the persisted
+  # request before recovery can declare an unknown transport outcome complete.
+  defp reconcile_buy_cargo_intent(agent, intent, live_ship, action) do
+    expected = action["expected"] || %{}
+    trade_symbol = action["trade_symbol"]
+
+    with {:ok, overview} <- Agent.agent_overview(agent),
+         true <-
+           item_units(live_ship, trade_symbol) >= (expected["cargo_units_at_least"] || 0),
+         true <- overview.credits <= (expected["credits_at_most"] || overview.credits) do
+      complete_cargo_intent(agent, intent, action["units"], action["listing_price"], nil)
+    else
+      _ -> block_cargo_intent_preserving_evidence(intent, {:ambiguous_operation_evidence, "buy"})
+    end
+  end
+
   defp maybe_put_price(result, nil), do: result
   defp maybe_put_price(result, price), do: Map.put(result, "price", price)
 
@@ -1547,6 +1574,34 @@ defmodule SpaceTraders.Fleet do
           status: "blocked",
           blocker: %{job_blocker(reason) | evidence: inspect(evidence)},
           in_flight_action: nil,
+          last_action_result: %{"kind" => intent.type, "error" => cargo_error_message(reason)}
+        )
+      )
+
+    {:ok, intent}
+  end
+
+  # A failed transport can follow an accepted mutation. Keep its request evidence
+  # intact so restart recovery reconciles game truth instead of posting again.
+  defp await_cargo_reconciliation(intent, reason) do
+    intent =
+      Repo.update!(
+        Ecto.Changeset.change(intent,
+          status: "blocked",
+          blocker: job_blocker({:awaiting_reconciliation, reason}),
+          last_action_result: %{"kind" => intent.type, "error" => cargo_error_message(reason)}
+        )
+      )
+
+    {:ok, intent}
+  end
+
+  defp block_cargo_intent_preserving_evidence(intent, reason) do
+    intent =
+      Repo.update!(
+        Ecto.Changeset.change(intent,
+          status: "blocked",
+          blocker: job_blocker(reason),
           last_action_result: %{"kind" => intent.type, "error" => cargo_error_message(reason)}
         )
       )
@@ -2100,7 +2155,6 @@ defmodule SpaceTraders.Fleet do
         Repo.update!(
           Ecto.Changeset.change(config,
             status: "paused",
-            in_flight_action: nil,
             blocker: nil,
             blocked_reason: preemption_message(reason)
           )
