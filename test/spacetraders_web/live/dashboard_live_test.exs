@@ -3794,6 +3794,9 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
               }
             })
 
+          {"/v2/systems/X1-UX81/waypoints/X1-UX81-C1/jump-gate", "GET"} ->
+            Req.Test.json(conn, %{"data" => %{"symbol" => "X1-UX81-C1", "connections" => []}})
+
           {"/v2/systems/X1-UX81/waypoints/X1-UX81-A3/market", "GET"} ->
             conn
             |> Map.put(:status, 400)
@@ -3887,7 +3890,7 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
         %{
           "symbol" => "X1-UX81-A1",
           "systemSymbol" => "X1-UX81",
-          "type" => "ORBITAL_STATION",
+          "type" => "JUMP_GATE",
           "x" => -12,
           "y" => 8,
           "isUnderConstruction" => true,
@@ -3958,6 +3961,22 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
               }
             })
 
+          {"/v2/systems/X1-UX81/waypoints/X1-UX81-A1/construction", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => %{
+                "symbol" => "X1-UX81-A1",
+                "isComplete" => false,
+                "materials" => [
+                  %{"tradeSymbol" => "IRON_ORE", "required" => 20, "fulfilled" => 7}
+                ]
+              }
+            })
+
+          {"/v2/systems/X1-UX81/waypoints/X1-UX81-A1/jump-gate", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => %{"symbol" => "X1-UX81-A1", "connections" => ["X1-TEST-A1"]}
+            })
+
           {"/v2/systems/X1-UX81/waypoints/X1-UX81-A3/market", "GET"} ->
             conn
             |> Map.put(:status, 400)
@@ -3982,6 +4001,9 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       assert inspector_html =~ "UNSTABLE"
       assert has_element?(lv, "[data-waypoint-intelligence]")
       assert has_element?(lv, "[data-construction-status]", "Under construction")
+      assert has_element?(lv, "[data-readiness=\"construction\"]", "material:IRON_ORE:remaining")
+      assert has_element?(lv, "[data-readiness=\"construction\"]", "13")
+      assert has_element?(lv, "[data-readiness=\"jump_gate\"]", "X1-TEST-A1")
       assert has_element?(lv, "details[data-modifier=\"STRIPPED\"] summary", "Stripped")
 
       assert has_element?(

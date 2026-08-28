@@ -949,7 +949,7 @@ defmodule SpaceTradersWeb.DashboardLive do
               %{}
 
             waypoint ->
-              Intelligence.subject(agent, :waypoint, waypoint.system_symbol, waypoint.symbol)
+              load_waypoint_readiness(agent, waypoint)
           end
 
         _ ->
@@ -957,6 +957,35 @@ defmodule SpaceTradersWeb.DashboardLive do
       end
 
     update(socket, :waypoint_intelligence, &Map.put(&1, key, facts))
+  end
+
+  defp load_waypoint_readiness(agent, waypoint) do
+    waypoint_facts =
+      Intelligence.subject(agent, :waypoint, waypoint.system_symbol, waypoint.symbol)
+
+    construction_facts =
+      if waypoint.is_under_construction == true do
+        _ = Fleet.waypoint_construction(agent, waypoint)
+        Intelligence.subject(agent, :construction, waypoint.system_symbol, waypoint.symbol)
+      else
+        %{}
+      end
+
+    gate_facts =
+      if waypoint.type == "JUMP_GATE" do
+        _ = Fleet.waypoint_jump_gate(agent, waypoint)
+        Intelligence.subject(agent, :jump_gate, waypoint.system_symbol, waypoint.symbol)
+      else
+        %{}
+      end
+
+    waypoint_facts
+    |> Map.merge(namespace_readiness_facts(construction_facts, "construction"))
+    |> Map.merge(namespace_readiness_facts(gate_facts, "jump_gate"))
+  end
+
+  defp namespace_readiness_facts(facts, namespace) do
+    Map.new(facts, fn {field, fact} -> {"#{namespace}.#{field}", fact} end)
   end
 
   defp refresh_agent_for_ship(socket, ship_symbol) do
@@ -2034,6 +2063,9 @@ defmodule SpaceTradersWeb.DashboardLive do
                 <dd class="opacity-70">
                   <span class="badge badge-outline badge-xs">{fact.state}</span>
                   <span class="ml-1">{fact.observation.source}</span>
+                  <span :if={fact.observation.observing_ship_symbol} class="ml-1 font-mono text-xs">
+                    observed by {fact.observation.observing_ship_symbol}
+                  </span>
                   <time class="ml-1 font-mono text-xs">{DateTime.to_iso8601(
                     fact.observation.observed_at
                   )}</time>
@@ -2041,6 +2073,16 @@ defmodule SpaceTradersWeb.DashboardLive do
               </div>
             </dl>
           </details>
+          <.readiness_facts
+            facts={@intelligence}
+            namespace="construction"
+            title="Construction readiness"
+          />
+          <.readiness_facts
+            facts={@intelligence}
+            namespace="jump_gate"
+            title="Jump-gate connections"
+          />
           <%= case @market do %>
             <% {:ok, market} -> %>
               <div class="mt-4" data-waypoint-market>
@@ -2193,6 +2235,39 @@ defmodule SpaceTradersWeb.DashboardLive do
           </form>
       <% end %>
     </div>
+    """
+  end
+
+  attr :facts, :map, required: true
+  attr :namespace, :string, required: true
+  attr :title, :string, required: true
+
+  defp readiness_facts(assigns) do
+    prefix = "#{assigns.namespace}."
+
+    facts =
+      Enum.filter(assigns.facts, fn {field, _fact} -> String.starts_with?(field, prefix) end)
+
+    assigns = assign(assigns, :facts, facts)
+
+    ~H"""
+    <section :if={@facts != []} class="mt-4" data-readiness={@namespace}>
+      <p class="text-xs font-semibold uppercase tracking-wider opacity-60">{@title}</p>
+      <dl class="mt-2 space-y-2 text-sm">
+        <div :for={{field, fact} <- @facts}>
+          <dt class="font-mono text-xs">{String.replace_prefix(field, "#{@namespace}.", "")}</dt>
+          <dd class="opacity-70">
+            <span class="badge badge-outline badge-xs">{fact.state}</span>
+            <span class="ml-1">{inspect(fact.value)}</span>
+            <span class="ml-1">{fact.observation.source}</span>
+            <span :if={fact.observation.observing_ship_symbol} class="ml-1 font-mono text-xs">
+              observed by {fact.observation.observing_ship_symbol}
+            </span>
+            <time class="ml-1 font-mono text-xs">{DateTime.to_iso8601(fact.observation.observed_at)}</time>
+          </dd>
+        </div>
+      </dl>
+    </section>
     """
   end
 

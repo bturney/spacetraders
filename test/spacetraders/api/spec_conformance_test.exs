@@ -56,6 +56,9 @@ defmodule SpaceTraders.API.SpecConformanceTest do
     {:get_market, :get, "/systems/{systemSymbol}/waypoints/{waypointSymbol}/market", :data},
     {:get_construction, :get, "/systems/{systemSymbol}/waypoints/{waypointSymbol}/construction",
      :data},
+    {:get_jump_gate, :get, "/systems/{systemSymbol}/waypoints/{waypointSymbol}/jump-gate", :data},
+    {:supply_construction, :post,
+     "/systems/{systemSymbol}/waypoints/{waypointSymbol}/construction/supply", :data},
     {:get_shipyard, :get, "/systems/{systemSymbol}/waypoints/{waypointSymbol}/shipyard", :data},
     {:get_factions, :get, "/factions", :data},
     {:get_faction, :get, "/factions/{factionSymbol}", :data}
@@ -72,7 +75,10 @@ defmodule SpaceTraders.API.SpecConformanceTest do
     {:purchase_cargo, :post, "/my/ships/{shipSymbol}/purchase", Request.PurchaseCargoRequest},
     {:jettison_cargo, :post, "/my/ships/{shipSymbol}/jettison", Request.JettisonCargoRequest},
     {:transfer_cargo, :post, "/my/ships/{shipSymbol}/transfer", Request.TransferCargoRequest},
-    {:purchase_ship, :post, "/my/ships", Request.PurchaseShipRequest}
+    {:purchase_ship, :post, "/my/ships", Request.PurchaseShipRequest},
+    {:supply_construction, :post,
+     "/systems/{systemSymbol}/waypoints/{waypointSymbol}/construction/supply",
+     Request.SupplyConstructionRequest}
   ]
 
   describe "client envelope declarations match the bundled spec" do
@@ -171,6 +177,8 @@ defmodule SpaceTraders.API.SpecConformanceTest do
   defp arity_of(:get_waypoint), do: 3
   defp arity_of(:get_market), do: 3
   defp arity_of(:get_construction), do: 3
+  defp arity_of(:get_jump_gate), do: 3
+  defp arity_of(:supply_construction), do: 6
   defp arity_of(:get_shipyard), do: 3
   defp arity_of(:get_factions), do: 1
   defp arity_of(:get_faction), do: 2

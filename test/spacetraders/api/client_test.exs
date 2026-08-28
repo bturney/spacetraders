@@ -421,6 +421,54 @@ defmodule SpaceTraders.API.ClientTest do
       assert {:ok, %{symbol: "X1-UX81-A1", is_complete: false}} =
                API.get_construction("TOKEN", "X1-UX81", "X1-UX81-A1")
     end
+
+    test "get_jump_gate/3 reads connections independently of construction" do
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        assert conn.method == "GET"
+        assert conn.request_path == "/v2/systems/X1-UX81/waypoints/X1-UX81-A1/jump-gate"
+
+        Req.Test.json(conn, %{
+          "data" => %{"symbol" => "X1-UX81-A1", "connections" => ["X1-TEST-A1"]}
+        })
+      end)
+
+      assert {:ok, %{symbol: "X1-UX81-A1", connections: ["X1-TEST-A1"]}} =
+               API.get_jump_gate("TOKEN", "X1-UX81", "X1-UX81-A1")
+    end
+
+    test "supply_construction/6 posts the supplying ship and decodes the fresh project state" do
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        assert conn.method == "POST"
+        assert conn.request_path == "/v2/systems/X1-UX81/waypoints/X1-UX81-A1/construction/supply"
+
+        assert conn.body_params == %{
+                 "shipSymbol" => "ORBITALIST-1",
+                 "tradeSymbol" => "IRON_ORE",
+                 "units" => 5
+               }
+
+        Req.Test.json(conn, %{
+          "data" => %{
+            "construction" => %{
+              "symbol" => "X1-UX81-A1",
+              "isComplete" => false,
+              "materials" => []
+            },
+            "cargo" => %{"capacity" => 40, "units" => 2, "inventory" => []}
+          }
+        })
+      end)
+
+      assert {:ok, %{construction: %{symbol: "X1-UX81-A1"}, cargo: %{units: 2}}} =
+               API.supply_construction(
+                 "TOKEN",
+                 "X1-UX81",
+                 "X1-UX81-A1",
+                 "ORBITALIST-1",
+                 "IRON_ORE",
+                 5
+               )
+    end
   end
 
   describe "universe reads" do

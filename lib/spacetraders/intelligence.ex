@@ -65,6 +65,17 @@ defmodule SpaceTraders.Intelligence do
     observe(agent, "market", system_symbol, market.symbol, market, fields, opts)
   end
 
+  @doc "Records authoritative Construction progress as independently refreshable facts."
+  def observe_construction(%AgentRecord{} = agent, system_symbol, construction, opts \\ []) do
+    {payload, fields} = construction_fields(construction)
+    observe(agent, "construction", system_symbol, construction.symbol, payload, fields, opts)
+  end
+
+  @doc "Records a Jump Gate's connections without inferring endpoint readiness."
+  def observe_jump_gate(%AgentRecord{} = agent, system_symbol, gate, opts \\ []) do
+    observe(agent, "jump_gate", system_symbol, gate.symbol, gate, [:connections], opts)
+  end
+
   @doc "Records an authoritative declaration that a field cannot currently be read."
   def mark_unavailable(
         %AgentRecord{} = agent,
@@ -185,6 +196,25 @@ defmodule SpaceTraders.Intelligence do
   end
 
   defp marketplace?(_), do: false
+
+  defp construction_fields(construction) do
+    materials = construction.materials || []
+
+    material_facts =
+      Enum.flat_map(materials, fn material ->
+        remaining = max((material.required || 0) - (material.fulfilled || 0), 0)
+        prefix = "material:#{material.trade_symbol}"
+
+        [
+          {"#{prefix}:required", material.required},
+          {"#{prefix}:fulfilled", material.fulfilled},
+          {"#{prefix}:remaining", remaining}
+        ]
+      end)
+
+    Map.new([{"complete", construction.is_complete} | material_facts])
+    |> then(fn payload -> {payload, Map.keys(payload)} end)
+  end
 
   defp known?(_agent, _system, _symbol, facts, field) when is_atom(field) do
     match?(%Fact{state: "known"}, Map.get(facts, to_string(field)))
