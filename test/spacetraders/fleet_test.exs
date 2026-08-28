@@ -4696,6 +4696,54 @@ defmodule SpaceTraders.FleetTest do
                })
     end
 
+    test "reconciles an ambiguous module installation before accepting another mutation" do
+      agent = agent_fixture()
+      ship = ship_fixture(agent, "FLEET-SHIP")
+
+      Repo.insert!(%ManualIntent{
+        ship_id: ship.id,
+        type: "install_module",
+        target_waypoint: "MODULE_CARGO_HOLD_I",
+        parameters: %{
+          "caller" => "manual",
+          "module_symbol" => "MODULE_CARGO_HOLD_I",
+          "quantity" => 1,
+          "authorized_removals" => %{}
+        },
+        status: "blocked",
+        in_flight_action: %{
+          "kind" => "install_module",
+          "module_symbol" => "MODULE_CARGO_HOLD_I",
+          "quantity" => 1,
+          "installed_before" => 0,
+          "cargo_before" => 1
+        }
+      })
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        assert {"/v2/my/ships/FLEET-SHIP", "GET"} = {conn.request_path, conn.method}
+
+        Req.Test.json(conn, %{
+          "data" =>
+            ship_body("FLEET-SHIP", %{
+              "cargo" => %{
+                "capacity" => 40,
+                "units" => 1,
+                "inventory" => [%{"symbol" => "MODULE_CARGO_HOLD_I", "units" => 1}]
+              }
+            })
+        })
+      end)
+
+      assert {:error, :manual_intent_reconciliation_required} =
+               Fleet.install_module_intent(agent, "FLEET-SHIP", "MODULE_CARGO_HOLD_I")
+
+      assert %ManualIntent{status: "blocked", in_flight_action: action} =
+               Fleet.ship_manual_intent(agent, "FLEET-SHIP")
+
+      assert action["kind"] == "install_module"
+    end
+
     test "Buy Goods Intent pauses the active Job and buys from a fresh on-site Listing" do
       agent = agent_fixture()
       ship_fixture(agent, "FLEET-SHIP")

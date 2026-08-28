@@ -4007,6 +4007,10 @@ defmodule SpaceTradersWeb.DashboardLive do
 
   defp live_error(:invalid_waypoint), do: "Enter a target waypoint."
   defp live_error(:invalid_module_intent), do: "Choose a module with exact removal authorization."
+
+  defp live_error(:manual_intent_reconciliation_required),
+    do: "The prior module operation is still being reconciled from the game."
+
   defp live_error({:miner_job_blocked, reason}), do: "Miner Job blocked: #{live_error(reason)}"
   defp live_error(:invalid_units), do: "Enter a positive number of units."
   defp live_error(:invalid_contract_deadline), do: "The contract deadline could not be read."

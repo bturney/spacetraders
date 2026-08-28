@@ -1127,6 +1127,7 @@ defmodule SpaceTraders.Fleet do
          true <- is_binary(module_symbol) and module_symbol != "",
          true <- valid_module_removal?(type, module_symbol, parameters["authorized_removals"]),
          {:ok, ship} <- owned_ship(agent, ship_symbol),
+         :ok <- reconcile_pending_module_intent(agent, ship),
          :ok <-
            preempt_miner_job_for(agent, ship_symbol, {:manual_override, "module modification"}),
          {:ok, intent} <-
@@ -1156,6 +1157,25 @@ defmodule SpaceTraders.Fleet do
     do: Map.new(map, fn {key, value} -> {to_string(key), value} end)
 
   defp stringify_keys(_), do: %{}
+
+  # An unknown mutation outcome must be reconciled before a later Manual Control
+  # request can replace its durable evidence and accidentally repeat the command.
+  defp reconcile_pending_module_intent(agent, ship) do
+    case unfinished_manual_intent(ship.id) do
+      %ManualIntent{type: type, in_flight_action: action} = intent
+      when type in ["install_module", "remove_module"] and is_map(action) ->
+        case reconcile_manual_intent(agent, intent) do
+          {:ok, %ManualIntent{in_flight_action: action}} when is_map(action) ->
+            {:error, :manual_intent_reconciliation_required}
+
+          {:ok, _intent} ->
+            :ok
+        end
+
+      _ ->
+        :ok
+    end
+  end
 
   defp cargo_intent(
          %AgentRecord{agent_token: token} = agent,
@@ -1742,9 +1762,18 @@ defmodule SpaceTraders.Fleet do
       end
 
     case Agent.handle_game_result(agent, result) do
-      {:ok, result} -> complete_module_intent(intent, result)
-      {:error, %SpaceTraders.API.Error{} = reason} -> await_module_reconciliation(intent, reason)
-      {:error, reason} -> block_module_intent(intent, reason)
+      {:ok, result} ->
+        if module_modification_evidence?(intent, result.modules, result.cargo) do
+          complete_module_intent(intent, result)
+        else
+          block_module_intent_preserving_evidence(intent, :module_modification_unconfirmed)
+        end
+
+      {:error, %SpaceTraders.API.Error{} = reason} ->
+        await_module_reconciliation(intent, reason)
+
+      {:error, reason} ->
+        block_module_intent(intent, reason)
     end
   end
 
@@ -1796,12 +1825,15 @@ defmodule SpaceTraders.Fleet do
   defp module_result(type, module_symbol, nil),
     do: %{"kind" => type, "module_symbol" => module_symbol, "quantity" => 1}
 
-  defp module_result(type, module_symbol, %{transaction: transaction}) do
+  defp module_result(type, module_symbol, %{
+         modules: modules,
+         cargo: cargo,
+         transaction: transaction
+       }) do
     %{"kind" => type, "module_symbol" => module_symbol, "quantity" => 1}
-    |> Map.put("transaction", %{
-      "total_price" => transaction.total_price,
-      "waypoint" => transaction.waypoint_symbol
-    })
+    |> Map.put("modules", Enum.map(modules, &module_evidence/1))
+    |> Map.put("cargo", cargo_evidence(cargo))
+    |> Map.put("transaction", transaction_evidence(transaction))
   end
 
   defp await_module_reconciliation(intent, reason) do
@@ -1847,6 +1879,55 @@ defmodule SpaceTraders.Fleet do
   defp module_count(modules, symbol), do: Enum.count(modules || [], &(&1.symbol == symbol))
   defp module_intent_verb("install_module"), do: "Install"
   defp module_intent_verb("remove_module"), do: "Remove"
+
+  defp module_modification_evidence?(intent, modules, cargo) do
+    action = intent.in_flight_action
+    module_symbol = action["module_symbol"]
+    installed_before = action["installed_before"]
+    cargo_before = action["cargo_before"]
+    installed_now = module_count(modules, module_symbol)
+    cargo_now = item_units(cargo, module_symbol)
+
+    case intent.type do
+      "install_module" -> installed_now == installed_before + 1 and cargo_now == cargo_before - 1
+      "remove_module" -> installed_now == installed_before - 1 and cargo_now == cargo_before + 1
+    end
+  end
+
+  defp module_evidence(module) do
+    %{
+      "symbol" => module.symbol,
+      "name" => module.name,
+      "capacity" => module.capacity,
+      "range" => module.range
+    }
+  end
+
+  defp cargo_evidence(cargo) do
+    %{
+      "capacity" => cargo.capacity,
+      "units" => cargo.units,
+      "inventory" =>
+        Enum.map(cargo.inventory || [], fn item ->
+          %{
+            "symbol" => item.symbol,
+            "name" => item.name,
+            "description" => item.description,
+            "units" => item.units
+          }
+        end)
+    }
+  end
+
+  defp transaction_evidence(transaction) do
+    %{
+      "ship_symbol" => transaction.ship_symbol,
+      "timestamp" => transaction.timestamp,
+      "total_price" => transaction.total_price,
+      "trade_symbol" => transaction.trade_symbol,
+      "waypoint_symbol" => transaction.waypoint_symbol
+    }
+  end
 
   # A Contract fulfillment delta identifies this delivery; the matching cargo
   # decrease prevents a later, unrelated Contract update from completing it.
