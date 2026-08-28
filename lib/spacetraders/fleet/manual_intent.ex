@@ -1,6 +1,6 @@
 defmodule SpaceTraders.Fleet.ManualIntent do
   @moduledoc """
-  A durable Manual Control Intent for one Ship.
+  A durable cargo-operation Intent for one Ship.
 
   Manual Control is an alternate caller of a reusable outcome-level Intent,
   not a Job or durable Ship mode (Phase 3.5 single-Ship outcomes). The active
@@ -16,6 +16,9 @@ defmodule SpaceTraders.Fleet.ManualIntent do
   @terminal_states ["completed", "stopped"]
 
   schema "manual_intents" do
+    # "manual" intents belong to Manual Control; "job" intents are the
+    # operation ledger for a Job policy and never preempt their owning Job.
+    field :caller, :string, default: "manual"
     field :type, :string, default: "navigate"
     field :target_waypoint, :string
     # Operation-specific target, quantity, price, and recipient constraints.
@@ -28,6 +31,7 @@ defmodule SpaceTraders.Fleet.ManualIntent do
     field :finished_at, :utc_datetime
 
     belongs_to :ship, SpaceTraders.Fleet.Ship
+    belongs_to :job, SpaceTraders.Fleet.Job
 
     timestamps(type: :utc_datetime)
   end
@@ -40,11 +44,21 @@ defmodule SpaceTraders.Fleet.ManualIntent do
 
   def changeset(intent, attrs) do
     intent
-    |> cast(attrs, [:type, :target_waypoint, :parameters, :status])
+    |> cast(attrs, [:caller, :type, :target_waypoint, :parameters, :status, :job_id])
     |> cast_embed(:blocker)
-    |> validate_required([:type, :target_waypoint])
+    |> validate_required([:caller, :type, :target_waypoint])
+    |> validate_inclusion(:caller, ["manual", "job"])
+    |> validate_job_owner()
     |> validate_inclusion(:type, ["navigate", "buy", "sell", "deliver"])
     |> validate_inclusion(:status, @unfinished_states ++ @terminal_states)
     |> unique_constraint(:ship_id, name: :manual_intents_one_active_per_ship_index)
   end
+
+  defp validate_job_owner(%Ecto.Changeset{changes: %{caller: "job"}} = changeset),
+    do: validate_required(changeset, [:job_id])
+
+  defp validate_job_owner(%Ecto.Changeset{data: %{caller: "job"}} = changeset),
+    do: validate_required(changeset, [:job_id])
+
+  defp validate_job_owner(changeset), do: changeset
 end
