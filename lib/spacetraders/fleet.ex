@@ -606,12 +606,7 @@ defmodule SpaceTraders.Fleet do
 
       job = Repo.update!(Ecto.Changeset.change(job, in_flight_action: action))
 
-      case SpaceTraders.API.sell_cargo(
-             agent.agent_token,
-             live_ship.symbol,
-             progress["trade_symbol"],
-             units
-           ) do
+      case execute_cargo_operation(agent, "sell", live_ship, progress["trade_symbol"], units) do
         {:ok, %{cargo: cargo, agent: sale_agent, transaction: transaction}} ->
           with :ok <- confirm_procurement_sale(transaction, progress, live_ship, units) do
             progress = Map.update!(job.progress, "sold", &(&1 + transaction.units))
@@ -653,12 +648,13 @@ defmodule SpaceTraders.Fleet do
     with {:ok, live_ship} <- dock_for_market(agent, live_ship) do
       job = Repo.update!(Ecto.Changeset.change(job, in_flight_action: action))
 
-      case Contracts.deliver_goods(
+      case execute_cargo_operation(
              agent,
-             progress["contract_id"],
-             live_ship.symbol,
+             "deliver",
+             live_ship,
              progress["trade_symbol"],
-             units
+             units,
+             progress["contract_id"]
            ) do
         {:ok, %{cargo: cargo, contract: fresh_contract}} ->
           with {:ok, overview} <- Agent.agent_overview(agent) do
@@ -699,12 +695,7 @@ defmodule SpaceTraders.Fleet do
         with {:ok, live_ship} <- dock_for_market(agent, live_ship) do
           job = Repo.update!(Ecto.Changeset.change(job, in_flight_action: action))
 
-          case SpaceTraders.API.purchase_cargo(
-                 agent.agent_token,
-                 live_ship.symbol,
-                 progress["trade_symbol"],
-                 units
-               ) do
+          case execute_cargo_operation(agent, "buy", live_ship, progress["trade_symbol"], units) do
             {:ok, %{cargo: cargo, agent: purchase_agent}} ->
               job =
                 Repo.update!(
@@ -1529,7 +1520,7 @@ defmodule SpaceTraders.Fleet do
           units =
             min(
               parameters["units"],
-              min(good.trade_volume, min(free, div(overview.credits, price)))
+              min(good.trade_volume, min(free, affordable_cargo_units(overview.credits, price)))
             )
 
           if units > 0, do: {:ok, units}, else: {:error, :buy_unavailable}
@@ -1573,10 +1564,14 @@ defmodule SpaceTraders.Fleet do
     if units > 0, do: {:ok, units}, else: {:error, :cargo_missing}
   end
 
+  defp affordable_cargo_units(_credits, 0), do: :infinity
+  defp affordable_cargo_units(credits, price), do: div(credits, price)
+
   defp execute_cargo_intent(agent, %ManualIntent{type: "buy"} = intent, live_ship, units, good) do
-    case SpaceTraders.API.purchase_cargo(
-           agent.agent_token,
-           live_ship.symbol,
+    case execute_cargo_operation(
+           agent,
+           "buy",
+           live_ship,
            intent.parameters["trade_symbol"],
            units
          ) do
@@ -1586,9 +1581,10 @@ defmodule SpaceTraders.Fleet do
   end
 
   defp execute_cargo_intent(agent, %ManualIntent{type: "sell"} = intent, live_ship, units, good) do
-    case SpaceTraders.API.sell_cargo(
-           agent.agent_token,
-           live_ship.symbol,
+    case execute_cargo_operation(
+           agent,
+           "sell",
+           live_ship,
            intent.parameters["trade_symbol"],
            units
          ) do
@@ -1606,12 +1602,13 @@ defmodule SpaceTraders.Fleet do
        ) do
     with {:ok, contract} <- procurement_contract_for_intent(agent, intent),
          {:ok, result} <-
-           Contracts.deliver_goods(
+           execute_cargo_operation(
              agent,
-             intent.parameters["contract_id"],
-             live_ship.symbol,
+             "deliver",
+             live_ship,
              intent.parameters["trade_symbol"],
-             units
+             units,
+             intent.parameters["contract_id"]
            ) do
       accepted = delivered_units(contract, result.contract, intent.parameters["trade_symbol"])
 
@@ -1626,6 +1623,32 @@ defmodule SpaceTraders.Fleet do
   defp cargo_price("buy", good), do: good.purchase_price
   defp cargo_price("sell", good), do: good.sell_price
   defp cargo_price(_, _good), do: nil
+
+  # Cargo mutations are shared by Manual Control and Procurement. Callers persist
+  # their own in-flight evidence before dispatching, then derive completion from
+  # the authoritative response appropriate to their policy.
+  defp execute_cargo_operation(agent, type, live_ship, trade_symbol, units, contract_id \\ nil)
+
+  defp execute_cargo_operation(agent, "buy", live_ship, trade_symbol, units, _contract_id) do
+    Agent.handle_game_result(
+      agent,
+      SpaceTraders.API.purchase_cargo(agent.agent_token, live_ship.symbol, trade_symbol, units)
+    )
+  end
+
+  defp execute_cargo_operation(agent, "sell", live_ship, trade_symbol, units, _contract_id) do
+    Agent.handle_game_result(
+      agent,
+      SpaceTraders.API.sell_cargo(agent.agent_token, live_ship.symbol, trade_symbol, units)
+    )
+  end
+
+  defp execute_cargo_operation(agent, "deliver", live_ship, trade_symbol, units, contract_id) do
+    Agent.handle_game_result(
+      agent,
+      Contracts.deliver_goods(agent, contract_id, live_ship.symbol, trade_symbol, units)
+    )
+  end
 
   defp complete_cargo_intent(_agent, intent, units, price, _result) do
     result = %{"kind" => intent.type, "units" => units} |> maybe_put_price(price)
@@ -1667,7 +1690,8 @@ defmodule SpaceTraders.Fleet do
         Ecto.Changeset.change(intent,
           status: "blocked",
           blocker: %{job_blocker(reason) | evidence: inspect(evidence)},
-          in_flight_action: nil,
+          in_flight_action:
+            if(ambiguous_cargo_operation_error?(reason), do: intent.in_flight_action, else: nil),
           last_action_result: %{"kind" => intent.type, "error" => cargo_error_message(reason)}
         )
       )
@@ -1678,6 +1702,10 @@ defmodule SpaceTraders.Fleet do
   defp cargo_error_message(%{message: message}) when is_binary(message), do: message
   defp cargo_error_message(reason) when is_atom(reason), do: Atom.to_string(reason)
   defp cargo_error_message(reason), do: inspect(reason)
+
+  defp ambiguous_cargo_operation_error?(%SpaceTraders.API.Error{}), do: true
+  defp ambiguous_cargo_operation_error?({:ambiguous_operation_evidence, _type}), do: true
+  defp ambiguous_cargo_operation_error?(_reason), do: false
 
   defp procurement_contract_for_intent(agent, intent) do
     with {:ok, contracts} <- Contracts.list_contracts(agent),
@@ -2217,11 +2245,10 @@ defmodule SpaceTraders.Fleet do
 
   defp preempt_miner_job(agent, ship, reason) do
     case unfinished_job(ship.id) do
-      %Job{status: status} = config when status in @running_job_states ->
+      %Job{status: status, in_flight_action: nil} = config when status in @running_job_states ->
         Repo.update!(
           Ecto.Changeset.change(config,
             status: "paused",
-            in_flight_action: nil,
             blocker: nil,
             blocked_reason: preemption_message(reason)
           )
@@ -2230,6 +2257,9 @@ defmodule SpaceTraders.Fleet do
         message = preemption_message(reason)
         record_activity(agent, ship, "manual_override", message, %{"recovery" => "resume"})
         :ok
+
+      %Job{in_flight_action: action} when is_map(action) ->
+        {:error, :job_action_reconciliation_required}
 
       _ ->
         :ok
@@ -2877,7 +2907,10 @@ defmodule SpaceTraders.Fleet do
     config =
       Repo.update!(Ecto.Changeset.change(config, status: "active", in_flight_action: action))
 
-    case Contracts.deliver_goods(agent, contract_id, live_ship.symbol, trade_symbol, units) do
+    case Agent.handle_game_result(
+           agent,
+           Contracts.deliver_goods(agent, contract_id, live_ship.symbol, trade_symbol, units)
+         ) do
       {:ok, %{cargo: cargo, contract: contract}} ->
         config = refresh_contract_deliverables(config, contract_id, trade_symbol, contract)
 
@@ -3001,7 +3034,10 @@ defmodule SpaceTraders.Fleet do
          units
        ) do
     invalidate_market_after(
-      SpaceTraders.API.sell_cargo(token, ship_symbol, trade_symbol, units),
+      Agent.handle_game_result(
+        agent,
+        SpaceTraders.API.sell_cargo(token, ship_symbol, trade_symbol, units)
+      ),
       agent
     )
   end

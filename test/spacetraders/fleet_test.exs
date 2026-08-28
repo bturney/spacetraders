@@ -3140,6 +3140,7 @@ defmodule SpaceTraders.FleetTest do
 
       assert_receive :fresh_sale_listing
       assert_receive {:sale, %{"symbol" => "IRON_ORE", "units" => 30}}
+      assert Fleet.ship_manual_intent(agent, "FLEET-SHIP") == nil
     end
 
     test "persists the fixed delivery constraints and initial progress" do
@@ -4744,6 +4745,57 @@ defmodule SpaceTraders.FleetTest do
 
       assert blocker.reason == "ambiguous_operation_evidence"
       assert Repo.get!(ManualIntent, intent.id).last_action_result["error"] =~ "ambiguous"
+    end
+
+    test "preserves an ambiguous sale request as in-flight evidence" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case {conn.request_path, conn.method} do
+          {"/v2/my/ships/FLEET-SHIP", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" =>
+                ship_body("FLEET-SHIP", %{
+                  "cargo" => %{
+                    "capacity" => 40,
+                    "units" => 5,
+                    "inventory" => [%{"symbol" => "IRON_ORE", "units" => 5}]
+                  }
+                })
+            })
+
+          {"/v2/systems/X1-UX81/waypoints/X1-UX81-A1/market", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => %{
+                "symbol" => "X1-UX81-A1",
+                "tradeGoods" => [
+                  %{
+                    "symbol" => "IRON_ORE",
+                    "purchasePrice" => 10,
+                    "sellPrice" => 8,
+                    "tradeVolume" => 5
+                  }
+                ]
+              }
+            })
+
+          {"/v2/my/ships/FLEET-SHIP/sell", "POST"} ->
+            conn |> Map.put(:status, 500) |> Req.Test.json(%{})
+        end
+      end)
+
+      assert {:ok, %ManualIntent{status: "blocked", in_flight_action: action}} =
+               Fleet.sell_goods_intent(agent, "FLEET-SHIP", "X1-UX81-A1", "IRON_ORE", 5,
+                 min_price: 8
+               )
+
+      assert action == %{
+               "kind" => "sell",
+               "trade_symbol" => "IRON_ORE",
+               "units" => 5,
+               "listing_price" => 8
+             }
     end
 
     test "sells cargo through the game API" do
