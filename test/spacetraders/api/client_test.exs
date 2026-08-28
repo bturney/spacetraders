@@ -348,6 +348,35 @@ defmodule SpaceTraders.API.ClientTest do
                API.jettison_cargo("TOKEN", "ORBITALIST-1", "IRON_ORE", 3)
     end
 
+    test "install_ship_module/3 posts the module and decodes the modified readiness" do
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        assert conn.request_path == "/v2/my/ships/ORBITALIST-1/modules/install"
+        assert conn.body_params == %{"symbol" => "MODULE_CARGO_HOLD_I"}
+
+        Req.Test.json(conn, %{
+          "data" => %{
+            "agent" => %{"symbol" => "ORBITALIST", "credits" => 42},
+            "modules" => [%{"symbol" => "MODULE_CARGO_HOLD_I", "name" => "Cargo Hold I"}],
+            "cargo" => %{"capacity" => 40, "units" => 12, "inventory" => []},
+            "transaction" => %{
+              "shipSymbol" => "ORBITALIST-1",
+              "tradeSymbol" => "MODULE_CARGO_HOLD_I",
+              "totalPrice" => 1_000,
+              "waypointSymbol" => "X1-UX81-A1",
+              "timestamp" => "2026-01-01T00:00:00.000Z"
+            }
+          }
+        })
+      end)
+
+      assert {:ok,
+              %{
+                modules: [%Model.ShipModule{symbol: "MODULE_CARGO_HOLD_I"}],
+                cargo: %Model.ShipCargo{units: 12},
+                transaction: %Model.ShipModificationTransaction{total_price: 1_000}
+              }} = API.install_ship_module("TOKEN", "ORBITALIST-1", "MODULE_CARGO_HOLD_I")
+    end
+
     test "transfer_cargo/5 posts the good, units, and receiving ship" do
       Req.Test.stub(SpaceTraders.API, fn conn ->
         assert conn.request_path == "/v2/my/ships/ORBITALIST-1/transfer"

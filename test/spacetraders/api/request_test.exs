@@ -3,11 +3,13 @@ defmodule SpaceTraders.API.RequestTest do
 
   alias SpaceTraders.API.Request.{
     DeliverContractRequest,
+    InstallShipModuleRequest,
     JettisonCargoRequest,
     NavigateRequest,
     PurchaseCargoRequest,
     PurchaseShipRequest,
     RegisterRequest,
+    RemoveShipModuleRequest,
     SellCargoRequest,
     TransferCargoRequest
   }
@@ -26,6 +28,10 @@ defmodule SpaceTraders.API.RequestTest do
      %{"symbol" => "IRON_ORE", "units" => 3}, :symbol},
     {JettisonCargoRequest, %{symbol: "IRON_ORE", units: 3},
      %{"symbol" => "IRON_ORE", "units" => 3}, :symbol},
+    {InstallShipModuleRequest, %{symbol: "MODULE_CARGO_HOLD_I"},
+     %{"symbol" => "MODULE_CARGO_HOLD_I"}, :symbol},
+    {RemoveShipModuleRequest, %{symbol: "MODULE_CARGO_HOLD_I"},
+     %{"symbol" => "MODULE_CARGO_HOLD_I"}, :symbol},
     {TransferCargoRequest, %{trade_symbol: "IRON_ORE", units: 3, ship_symbol: "SHIP-2"},
      %{"tradeSymbol" => "IRON_ORE", "units" => 3, "shipSymbol" => "SHIP-2"}, :trade_symbol},
     {PurchaseShipRequest, %{ship_type: "SHIP_MINING_DRONE", waypoint_symbol: "X1-UX81-A1"},

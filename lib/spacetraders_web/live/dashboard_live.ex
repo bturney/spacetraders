@@ -297,6 +297,45 @@ defmodule SpaceTradersWeb.DashboardLive do
   end
 
   @impl true
+  def handle_event(
+        "install_module",
+        %{"symbol" => ship_symbol, "module_symbol" => module_symbol},
+        socket
+      ) do
+    with {:ok, agent} <- agent_for_ship(socket, ship_symbol),
+         {:ok, intent} <- Fleet.install_module_intent(agent, ship_symbol, module_symbol) do
+      {:noreply,
+       put_flash(
+         refresh_agent_fleet(socket, agent.id),
+         :info,
+         "#{module_symbol} installation #{manual_intent_status(intent)}."
+       )}
+    else
+      {:error, reason} -> {:noreply, put_flash(socket, :error, live_error(reason))}
+    end
+  end
+
+  @impl true
+  def handle_event(
+        "remove_module",
+        %{"symbol" => ship_symbol, "module_symbol" => module_symbol},
+        socket
+      ) do
+    with {:ok, agent} <- agent_for_ship(socket, ship_symbol),
+         {:ok, intent} <-
+           Fleet.remove_module_intent(agent, ship_symbol, module_symbol, %{module_symbol => 1}) do
+      {:noreply,
+       put_flash(
+         refresh_agent_fleet(socket, agent.id),
+         :info,
+         "#{module_symbol} removal #{manual_intent_status(intent)}."
+       )}
+    else
+      {:error, reason} -> {:noreply, put_flash(socket, :error, live_error(reason))}
+    end
+  end
+
+  @impl true
   def handle_event("track_draft", %{"draft_key" => key} = params, socket) do
     draft = Map.drop(params, ["draft_key"])
 
@@ -2642,6 +2681,17 @@ defmodule SpaceTradersWeb.DashboardLive do
               />
               <button type="submit" class="btn btn-ghost btn-xs">Jettison</button>
             </form>
+            <button
+              :if={String.starts_with?(item.symbol, "MODULE_")}
+              type="button"
+              phx-click="install_module"
+              phx-value-symbol={@ship.symbol}
+              phx-value-module_symbol={item.symbol}
+              class="btn btn-primary btn-xs"
+              data-install-module={item.symbol}
+            >
+              Install module
+            </button>
           </div>
         </div>
       </div>
@@ -2959,7 +3009,12 @@ defmodule SpaceTradersWeb.DashboardLive do
           </div>
 
           <div>
-            <p class="text-xs font-semibold uppercase tracking-wider opacity-60">Modules</p>
+            <div class="flex items-center justify-between gap-2">
+              <p class="text-xs font-semibold uppercase tracking-wider opacity-60">Modules</p>
+              <span class="font-mono text-xs opacity-60" data-module-capacity>
+                {length(@ship.modules || [])} / {module_slots(@ship)} module slots
+              </span>
+            </div>
             <div :if={@ship.modules == []} class="mt-1 text-xs opacity-60">
               No modules installed.
             </div>
@@ -2972,6 +3027,16 @@ defmodule SpaceTradersWeb.DashboardLive do
                     <span :if={module_range(module)}>range {module_range(module)}</span>
                   </span>
                 </div>
+                <button
+                  type="button"
+                  phx-click="remove_module"
+                  phx-value-symbol={@ship.symbol}
+                  phx-value-module_symbol={module.symbol}
+                  class="btn btn-ghost btn-xs mt-2"
+                  data-remove-module={module.symbol}
+                >
+                  Remove module
+                </button>
                 <details
                   :if={equipment_description(module)}
                   id={"module-description-#{@ship.symbol}-#{module.symbol}"}
@@ -3595,7 +3660,16 @@ defmodule SpaceTradersWeb.DashboardLive do
   defp manual_intent_label(%{type: "deliver", parameters: parameters, target_waypoint: waypoint}),
     do: "Deliver #{parameters["trade_symbol"]} at #{waypoint}"
 
+  defp manual_intent_label(%{type: "install_module", parameters: parameters}),
+    do: "Install #{parameters["module_symbol"]}"
+
+  defp manual_intent_label(%{type: "remove_module", parameters: parameters}),
+    do: "Remove #{parameters["module_symbol"]}"
+
   defp manual_intent_label(%{target_waypoint: waypoint}), do: "Navigate to #{waypoint}"
+
+  defp module_slots(%{frame: %{module_slots: slots}}) when is_integer(slots), do: slots
+  defp module_slots(_ship), do: "?"
 
   defp manual_intent_status_class(%{status: "waiting"}),
     do: "badge badge-warning badge-sm ml-2"
@@ -4022,6 +4096,11 @@ defmodule SpaceTradersWeb.DashboardLive do
     do: "Another manual Navigate was just issued for this Ship; try again."
 
   defp live_error(:invalid_waypoint), do: "Enter a target waypoint."
+  defp live_error(:invalid_module_intent), do: "Choose a module with exact removal authorization."
+
+  defp live_error(:manual_intent_reconciliation_required),
+    do: "The prior module operation is still being reconciled from the game."
+
   defp live_error({:miner_job_blocked, reason}), do: "Miner Job blocked: #{live_error(reason)}"
   defp live_error(:invalid_units), do: "Enter a positive number of units."
   defp live_error(:invalid_contract_deadline), do: "The contract deadline could not be read."
