@@ -840,15 +840,25 @@ defmodule SpaceTraders.Fleet do
     systems = progress["source_systems"]
     systems = if systems == [], do: [live_ship.nav.system_symbol], else: systems
 
-    Enum.reduce_while(systems, {:error, :source_market_unavailable}, fn system, _ ->
-      with {:ok, waypoints} <- fetch_waypoint_pages(agent.agent_token, system),
-           source when not is_nil(source) <-
-             procurement_market_source(agent, live_ship, waypoints, progress["trade_symbol"]) do
-        {:halt, {:ok, source}}
-      else
-        _ -> {:cont, {:error, :source_market_unavailable}}
-      end
-    end)
+    case Enum.find(systems, &(&1 != live_ship.nav.system_symbol)) do
+      nil ->
+        Enum.reduce_while(systems, {:error, :source_market_unavailable}, fn system, _ ->
+          with {:ok, waypoints} <- fetch_waypoint_pages(agent.agent_token, system),
+               source when not is_nil(source) <-
+                 procurement_market_source(agent, live_ship, waypoints, progress["trade_symbol"]) do
+            {:halt, {:ok, source}}
+          else
+            _ -> {:cont, {:error, :source_market_unavailable}}
+          end
+        end)
+
+      source_system ->
+        # Market reads are scoped to the Ship's current System. Do not inspect a
+        # remote waypoint through that local route until inter-System routing exists.
+        {:error,
+         {:remote_source_system_unsupported,
+          %{current_system: live_ship.nav.system_symbol, source_system: source_system}}}
+    end
   end
 
   defp procurement_market_source(agent, live_ship, waypoints, trade_symbol) do
@@ -926,6 +936,19 @@ defmodule SpaceTraders.Fleet do
     else
       _ -> {:error, :procurement_job_not_configured}
     end
+  end
+
+  defp mark_procurement_job_blocked(job, %JobBlocker{} = blocker) do
+    job =
+      Repo.update!(
+        Ecto.Changeset.change(job, status: "blocked", blocker: blocker, blocked_reason: nil)
+      )
+
+    record_activity_by_config(job, "procurement_job_blocked", "Procurement Job blocked", %{
+      "block" => blocker.evidence
+    })
+
+    {:error, blocker}
   end
 
   defp mark_procurement_job_blocked(job, reason) do
@@ -2736,25 +2759,45 @@ defmodule SpaceTraders.Fleet do
   end
 
   defp preempt_job_without_unresolved_operation(agent, ship, config, reason) do
-    cond do
-      config.status in @running_job_states and is_nil(config.in_flight_action) ->
-        Repo.update!(
-          Ecto.Changeset.change(config,
-            status: "paused",
-            blocker: nil,
-            blocked_reason: preemption_message(reason)
-          )
-        )
+    Repo.transaction(
+      fn ->
+        current = Repo.get(Job, config.id)
 
-        message = preemption_message(reason)
-        record_activity(agent, ship, "manual_override", message, %{"recovery" => "resume"})
-        :ok
+        cond do
+          is_nil(current) ->
+            :ok
 
-      is_map(config.in_flight_action) ->
-        {:error, :job_action_reconciliation_required}
+          is_map(current.in_flight_action) ->
+            Repo.rollback(:job_action_reconciliation_required)
 
-      true ->
-        :ok
+          match?(
+            %ManualIntent{in_flight_action: action} when is_map(action),
+            unfinished_job_intent(current.id)
+          ) ->
+            Repo.rollback(:job_action_reconciliation_required)
+
+          current.status in @running_job_states ->
+            Repo.update!(
+              Ecto.Changeset.change(current,
+                status: "paused",
+                blocker: nil,
+                blocked_reason: preemption_message(reason)
+              )
+            )
+
+            message = preemption_message(reason)
+            record_activity(agent, ship, "manual_override", message, %{"recovery" => "resume"})
+            :ok
+
+          true ->
+            :ok
+        end
+      end,
+      mode: :immediate
+    )
+    |> case do
+      {:ok, result} -> result
+      {:error, reason} -> {:error, reason}
     end
   end
 

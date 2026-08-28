@@ -516,6 +516,37 @@ defmodule SpaceTraders.FleetTest do
       assert Enum.any?(Fleet.recent_activity(agent), &(&1.kind == "navigate"))
     end
 
+    test "direct navigation refuses an in-flight Job-owned Intent before dispatch" do
+      agent = agent_fixture()
+      ship = ship_fixture(agent, "FLEET-SHIP")
+
+      {:ok, job} =
+        Fleet.configure_miner_job(agent, "FLEET-SHIP", %{
+          extraction_waypoint: "X1-UX81-A2",
+          market_waypoint: "X1-UX81-A1",
+          cargo_threshold: 30
+        })
+
+      Repo.update!(Ecto.Changeset.change(job, status: "active"))
+
+      Repo.insert!(%ManualIntent{
+        ship_id: ship.id,
+        job_id: job.id,
+        caller: "job",
+        type: "navigate",
+        target_waypoint: "X1-UX81-A2",
+        status: "active",
+        in_flight_action: %{"kind" => "navigate"}
+      })
+
+      Req.Test.stub(SpaceTraders.API, fn _conn -> flunk("direct navigation was dispatched") end)
+
+      assert {:error, :job_action_reconciliation_required} =
+               Fleet.navigate_ship(agent, "FLEET-SHIP", "X1-UX81-A1")
+
+      assert %{status: "active"} = Repo.get!(Job, job.id)
+    end
+
     test "pausing during an arrival wait preserves the in-flight navigation" do
       agent = agent_fixture()
       ship_fixture(agent, "FLEET-SHIP")
@@ -3206,6 +3237,118 @@ defmodule SpaceTraders.FleetTest do
                  quantity: 0,
                  destination_waypoint: "X1-UX81-A1"
                })
+    end
+
+    test "blocks configured remote sources without querying them through the local System" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case conn.request_path do
+          "/v2/my/ships/FLEET-SHIP" ->
+            Req.Test.json(conn, %{
+              "data" =>
+                ship_body("FLEET-SHIP", %{
+                  "cargo" => %{"capacity" => 40, "units" => 0, "inventory" => []}
+                })
+            })
+
+          "/v2/my/agent" ->
+            Req.Test.json(conn, %{"data" => %{"symbol" => agent.symbol, "credits" => 1_000}})
+
+          path ->
+            flunk("remote source made an API request: #{path}")
+        end
+      end)
+
+      assert {:ok, job} =
+               Fleet.configure_procurement_job(agent, "FLEET-SHIP", %{
+                 recipient_type: "market",
+                 trade_symbol: "IRON_ORE",
+                 quantity: 30,
+                 destination_waypoint: "X1-UX81-A1",
+                 source_systems: ["X1-DF55"]
+               })
+
+      assert {:error,
+              {:remote_source_system_unsupported,
+               %{current_system: "X1-UX81", source_system: "X1-DF55"}}} =
+               Fleet.start_procurement_job(agent, "FLEET-SHIP")
+
+      assert %Job{status: "blocked", blocker: %JobBlocker{} = blocker} = Repo.get!(Job, job.id)
+      assert blocker.reason == "remote_source_system_unsupported"
+      assert blocker.evidence =~ "current_system: \"X1-UX81\""
+      assert blocker.evidence =~ "source_system: \"X1-DF55\""
+    end
+
+    test "preserves a blocked shared Intent's blocker evidence on its Procurement Job" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+      market_reads = :counters.new(1, [])
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case conn.request_path do
+          "/v2/my/ships/FLEET-SHIP" ->
+            Req.Test.json(conn, %{
+              "data" =>
+                ship_body("FLEET-SHIP", %{
+                  "cargo" => %{"capacity" => 40, "units" => 0, "inventory" => []}
+                })
+            })
+
+          "/v2/my/agent" ->
+            Req.Test.json(conn, %{"data" => %{"symbol" => agent.symbol, "credits" => 1_000}})
+
+          "/v2/systems/X1-UX81/waypoints" ->
+            Req.Test.json(conn, %{
+              "data" => [
+                %{
+                  "symbol" => "X1-UX81-A1",
+                  "systemSymbol" => "X1-UX81",
+                  "type" => "ORBITAL_STATION",
+                  "traits" => [%{"symbol" => "MARKETPLACE"}]
+                }
+              ]
+            })
+
+          "/v2/systems/X1-UX81/waypoints/X1-UX81-A1/market" ->
+            :counters.add(market_reads, 1, 1)
+            purchase_price = if :counters.get(market_reads, 1) == 1, do: 10, else: 20
+
+            Req.Test.json(conn, %{
+              "data" => %{
+                "symbol" => "X1-UX81-A1",
+                "tradeGoods" => [
+                  %{
+                    "symbol" => "IRON_ORE",
+                    "purchasePrice" => purchase_price,
+                    "sellPrice" => 25,
+                    "tradeVolume" => 30
+                  }
+                ]
+              }
+            })
+        end
+      end)
+
+      assert {:ok, job} =
+               Fleet.configure_procurement_job(agent, "FLEET-SHIP", %{
+                 recipient_type: "market",
+                 trade_symbol: "IRON_ORE",
+                 quantity: 30,
+                 destination_waypoint: "X1-UX81-A1",
+                 price_ceiling: 10
+               })
+
+      assert {:error, %JobBlocker{reason: "price_constraint"}} =
+               Fleet.start_procurement_job(agent, "FLEET-SHIP")
+
+      assert %ManualIntent{status: "blocked", blocker: %JobBlocker{} = intent_blocker} =
+               Repo.get_by!(ManualIntent, job_id: job.id)
+
+      assert %Job{status: "blocked", blocker: %JobBlocker{} = blocker} = Repo.get!(Job, job.id)
+      assert blocker.reason == intent_blocker.reason
+      assert blocker.evidence == intent_blocker.evidence
     end
   end
 
