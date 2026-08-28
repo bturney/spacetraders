@@ -1276,9 +1276,13 @@ defmodule SpaceTraders.Fleet do
   def stop_manual_intent(%AgentRecord{} = agent, ship_symbol) do
     with {:ok, ship} <- owned_ship(agent, ship_symbol),
          %ManualIntent{target_waypoint: target} = intent <- unfinished_manual_intent(ship.id) do
-      terminalize_manual_intent!(intent, "stopped")
-      record_activity(agent, ship, "manual_intent_stopped", "Navigate to #{target} stopped")
-      :ok
+      if unresolved_module_evidence?(intent) do
+        {:error, :manual_intent_reconciliation_required}
+      else
+        terminalize_manual_intent!(intent, "stopped")
+        record_activity(agent, ship, "manual_intent_stopped", "Navigate to #{target} stopped")
+        :ok
+      end
     else
       nil -> {:error, :manual_intent_not_active}
       error -> error
@@ -2165,6 +2169,12 @@ defmodule SpaceTraders.Fleet do
       )
     )
   end
+
+  defp unresolved_module_evidence?(%ManualIntent{type: type, in_flight_action: action})
+       when type in ["install_module", "remove_module"] and is_map(action),
+       do: true
+
+  defp unresolved_module_evidence?(_intent), do: false
 
   defp complete_manual_intent(agent, intent) do
     intent =
