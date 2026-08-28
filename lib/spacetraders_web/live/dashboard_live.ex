@@ -297,6 +297,45 @@ defmodule SpaceTradersWeb.DashboardLive do
   end
 
   @impl true
+  def handle_event(
+        "install_module",
+        %{"symbol" => ship_symbol, "module_symbol" => module_symbol},
+        socket
+      ) do
+    with {:ok, agent} <- agent_for_ship(socket, ship_symbol),
+         {:ok, intent} <- Fleet.install_module_intent(agent, ship_symbol, module_symbol) do
+      {:noreply,
+       put_flash(
+         refresh_agent_fleet(socket, agent.id),
+         :info,
+         "#{module_symbol} installation #{manual_intent_status(intent)}."
+       )}
+    else
+      {:error, reason} -> {:noreply, put_flash(socket, :error, live_error(reason))}
+    end
+  end
+
+  @impl true
+  def handle_event(
+        "remove_module",
+        %{"symbol" => ship_symbol, "module_symbol" => module_symbol},
+        socket
+      ) do
+    with {:ok, agent} <- agent_for_ship(socket, ship_symbol),
+         {:ok, intent} <-
+           Fleet.remove_module_intent(agent, ship_symbol, module_symbol, %{module_symbol => 1}) do
+      {:noreply,
+       put_flash(
+         refresh_agent_fleet(socket, agent.id),
+         :info,
+         "#{module_symbol} removal #{manual_intent_status(intent)}."
+       )}
+    else
+      {:error, reason} -> {:noreply, put_flash(socket, :error, live_error(reason))}
+    end
+  end
+
+  @impl true
   def handle_event("track_draft", %{"draft_key" => key} = params, socket) do
     draft = Map.drop(params, ["draft_key"])
 
@@ -949,7 +988,7 @@ defmodule SpaceTradersWeb.DashboardLive do
               %{}
 
             waypoint ->
-              Intelligence.subject(agent, :waypoint, waypoint.system_symbol, waypoint.symbol)
+              load_waypoint_readiness(agent, waypoint)
           end
 
         _ ->
@@ -957,6 +996,40 @@ defmodule SpaceTradersWeb.DashboardLive do
       end
 
     update(socket, :waypoint_intelligence, &Map.put(&1, key, facts))
+  end
+
+  defp load_waypoint_readiness(agent, waypoint) do
+    waypoint_facts =
+      Intelligence.subject(agent, :waypoint, waypoint.system_symbol, waypoint.symbol)
+
+    if waypoint.is_under_construction == true do
+      _ = Fleet.waypoint_construction(agent, waypoint)
+    end
+
+    construction =
+      Intelligence.subject_with_stale(
+        agent,
+        :construction,
+        waypoint.system_symbol,
+        waypoint.symbol
+      )
+
+    if waypoint.type == "JUMP_GATE" do
+      _ = Fleet.waypoint_jump_gate(agent, waypoint)
+    end
+
+    gate =
+      Intelligence.subject_with_stale(agent, :jump_gate, waypoint.system_symbol, waypoint.symbol)
+
+    waypoint_facts
+    |> Map.merge(namespace_readiness_facts(construction.current, "construction"))
+    |> Map.merge(namespace_readiness_facts(construction.stale, "construction_stale"))
+    |> Map.merge(namespace_readiness_facts(gate.current, "jump_gate"))
+    |> Map.merge(namespace_readiness_facts(gate.stale, "jump_gate_stale"))
+  end
+
+  defp namespace_readiness_facts(facts, namespace) do
+    Map.new(facts, fn {field, fact} -> {"#{namespace}.#{field}", fact} end)
   end
 
   defp refresh_agent_for_ship(socket, ship_symbol) do
@@ -2034,6 +2107,9 @@ defmodule SpaceTradersWeb.DashboardLive do
                 <dd class="opacity-70">
                   <span class="badge badge-outline badge-xs">{fact.state}</span>
                   <span class="ml-1">{fact.observation.source}</span>
+                  <span :if={fact.observation.observing_ship_symbol} class="ml-1 font-mono text-xs">
+                    observed by {fact.observation.observing_ship_symbol}
+                  </span>
                   <time class="ml-1 font-mono text-xs">{DateTime.to_iso8601(
                     fact.observation.observed_at
                   )}</time>
@@ -2041,6 +2117,26 @@ defmodule SpaceTradersWeb.DashboardLive do
               </div>
             </dl>
           </details>
+          <.readiness_facts
+            facts={@intelligence}
+            namespace="construction"
+            title="Construction readiness"
+          />
+          <.readiness_facts
+            facts={@intelligence}
+            namespace="jump_gate"
+            title="Jump-gate connections"
+          />
+          <.readiness_facts
+            facts={@intelligence}
+            namespace="construction_stale"
+            title="Stale Construction readiness"
+          />
+          <.readiness_facts
+            facts={@intelligence}
+            namespace="jump_gate_stale"
+            title="Stale Jump-gate connections"
+          />
           <%= case @market do %>
             <% {:ok, market} -> %>
               <div class="mt-4" data-waypoint-market>
@@ -2193,6 +2289,39 @@ defmodule SpaceTradersWeb.DashboardLive do
           </form>
       <% end %>
     </div>
+    """
+  end
+
+  attr :facts, :map, required: true
+  attr :namespace, :string, required: true
+  attr :title, :string, required: true
+
+  defp readiness_facts(assigns) do
+    prefix = "#{assigns.namespace}."
+
+    facts =
+      Enum.filter(assigns.facts, fn {field, _fact} -> String.starts_with?(field, prefix) end)
+
+    assigns = assign(assigns, :facts, facts)
+
+    ~H"""
+    <section :if={@facts != []} class="mt-4" data-readiness={@namespace}>
+      <p class="text-xs font-semibold uppercase tracking-wider opacity-60">{@title}</p>
+      <dl class="mt-2 space-y-2 text-sm">
+        <div :for={{field, fact} <- @facts}>
+          <dt class="font-mono text-xs">{String.replace_prefix(field, "#{@namespace}.", "")}</dt>
+          <dd class="opacity-70">
+            <span class="badge badge-outline badge-xs">{fact.state}</span>
+            <span class="ml-1">{inspect(fact.value)}</span>
+            <span class="ml-1">{fact.observation.source}</span>
+            <span :if={fact.observation.observing_ship_symbol} class="ml-1 font-mono text-xs">
+              observed by {fact.observation.observing_ship_symbol}
+            </span>
+            <time class="ml-1 font-mono text-xs">{DateTime.to_iso8601(fact.observation.observed_at)}</time>
+          </dd>
+        </div>
+      </dl>
+    </section>
     """
   end
 
@@ -2552,6 +2681,17 @@ defmodule SpaceTradersWeb.DashboardLive do
               />
               <button type="submit" class="btn btn-ghost btn-xs">Jettison</button>
             </form>
+            <button
+              :if={String.starts_with?(item.symbol, "MODULE_")}
+              type="button"
+              phx-click="install_module"
+              phx-value-symbol={@ship.symbol}
+              phx-value-module_symbol={item.symbol}
+              class="btn btn-primary btn-xs"
+              data-install-module={item.symbol}
+            >
+              Install module
+            </button>
           </div>
         </div>
       </div>
@@ -2672,7 +2812,7 @@ defmodule SpaceTradersWeb.DashboardLive do
           <div>
             <span class="font-semibold">Manual Control</span>
             <span class="ml-1">
-              Navigate to <span class="font-mono">{@ship.manual_intent.target_waypoint}</span>
+              {manual_intent_label(@ship.manual_intent)}
             </span>
             <span class={manual_intent_status_class(@ship.manual_intent)}>
               {manual_intent_status(@ship.manual_intent)}
@@ -2869,7 +3009,12 @@ defmodule SpaceTradersWeb.DashboardLive do
           </div>
 
           <div>
-            <p class="text-xs font-semibold uppercase tracking-wider opacity-60">Modules</p>
+            <div class="flex items-center justify-between gap-2">
+              <p class="text-xs font-semibold uppercase tracking-wider opacity-60">Modules</p>
+              <span class="font-mono text-xs opacity-60" data-module-capacity>
+                {length(@ship.modules || [])} / {module_slots(@ship)} module slots
+              </span>
+            </div>
             <div :if={@ship.modules == []} class="mt-1 text-xs opacity-60">
               No modules installed.
             </div>
@@ -2882,6 +3027,16 @@ defmodule SpaceTradersWeb.DashboardLive do
                     <span :if={module_range(module)}>range {module_range(module)}</span>
                   </span>
                 </div>
+                <button
+                  type="button"
+                  phx-click="remove_module"
+                  phx-value-symbol={@ship.symbol}
+                  phx-value-module_symbol={module.symbol}
+                  class="btn btn-ghost btn-xs mt-2"
+                  data-remove-module={module.symbol}
+                >
+                  Remove module
+                </button>
                 <details
                   :if={equipment_description(module)}
                   id={"module-description-#{@ship.symbol}-#{module.symbol}"}
@@ -3362,7 +3517,7 @@ defmodule SpaceTradersWeb.DashboardLive do
           <li :for={intent <- @intent_history}>
             <details data-manual-intent-history-entry={intent.id}>
               <summary class="cursor-pointer">
-                {manual_intent_status(intent)} Navigate to {intent.target_waypoint}
+                {manual_intent_status(intent)} {manual_intent_label(intent)}
               </summary>
               <dl class="mt-2 grid gap-1 pl-3 sm:grid-cols-2">
                 <div>
@@ -3495,6 +3650,26 @@ defmodule SpaceTradersWeb.DashboardLive do
   defp manual_intent_status(%{status: "completed"}), do: "Completed"
   defp manual_intent_status(%{status: "stopped"}), do: "Stopped"
   defp manual_intent_status(_), do: "Manual"
+
+  defp manual_intent_label(%{type: "buy", parameters: parameters, target_waypoint: waypoint}),
+    do: "Buy #{parameters["trade_symbol"]} at #{waypoint}"
+
+  defp manual_intent_label(%{type: "sell", parameters: parameters, target_waypoint: waypoint}),
+    do: "Sell #{parameters["trade_symbol"]} at #{waypoint}"
+
+  defp manual_intent_label(%{type: "deliver", parameters: parameters, target_waypoint: waypoint}),
+    do: "Deliver #{parameters["trade_symbol"]} at #{waypoint}"
+
+  defp manual_intent_label(%{type: "install_module", parameters: parameters}),
+    do: "Install #{parameters["module_symbol"]}"
+
+  defp manual_intent_label(%{type: "remove_module", parameters: parameters}),
+    do: "Remove #{parameters["module_symbol"]}"
+
+  defp manual_intent_label(%{target_waypoint: waypoint}), do: "Navigate to #{waypoint}"
+
+  defp module_slots(%{frame: %{module_slots: slots}}) when is_integer(slots), do: slots
+  defp module_slots(_ship), do: "?"
 
   defp manual_intent_status_class(%{status: "waiting"}),
     do: "badge badge-warning badge-sm ml-2"
@@ -3921,6 +4096,11 @@ defmodule SpaceTradersWeb.DashboardLive do
     do: "Another manual Navigate was just issued for this Ship; try again."
 
   defp live_error(:invalid_waypoint), do: "Enter a target waypoint."
+  defp live_error(:invalid_module_intent), do: "Choose a module with exact removal authorization."
+
+  defp live_error(:manual_intent_reconciliation_required),
+    do: "The prior module operation is still being reconciled from the game."
+
   defp live_error({:miner_job_blocked, reason}), do: "Miner Job blocked: #{live_error(reason)}"
   defp live_error(:invalid_units), do: "Enter a positive number of units."
   defp live_error(:invalid_contract_deadline), do: "The contract deadline could not be read."

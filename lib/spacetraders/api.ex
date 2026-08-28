@@ -37,6 +37,7 @@ defmodule SpaceTraders.API do
     Cooldown,
     Extraction,
     Faction,
+    JumpGate,
     Market,
     Ship,
     ShipConditionEvent,
@@ -48,6 +49,8 @@ defmodule SpaceTraders.API do
     MarketTransaction,
     ShipCargo,
     ShipFuel,
+    ShipModificationTransaction,
+    ShipModule,
     ShipNav,
     Shipyard,
     ShipyardTransaction,
@@ -57,13 +60,16 @@ defmodule SpaceTraders.API do
 
   alias SpaceTraders.API.Request.{
     DeliverContractRequest,
+    InstallShipModuleRequest,
     JettisonCargoRequest,
     NavigateRequest,
     PurchaseCargoRequest,
     PurchaseShipRequest,
     RegisterRequest,
+    RemoveShipModuleRequest,
     SellCargoRequest,
     ShipNavRequest,
+    SupplyConstructionRequest,
     TransferCargoRequest
   }
 
@@ -308,6 +314,18 @@ defmodule SpaceTraders.API do
     )
   end
 
+  @doc "POST /my/ships/{symbol}/modules/install — installs one module from Cargo."
+  @spec install_ship_module(token(), String.t(), String.t()) :: result()
+  def install_ship_module(token, ship_symbol, module_symbol) do
+    modify_ship_module(token, ship_symbol, "install", module_symbol, InstallShipModuleRequest)
+  end
+
+  @doc "POST /my/ships/{symbol}/modules/remove — removes one installed module into Cargo."
+  @spec remove_ship_module(token(), String.t(), String.t()) :: result()
+  def remove_ship_module(token, ship_symbol, module_symbol) do
+    modify_ship_module(token, ship_symbol, "remove", module_symbol, RemoveShipModuleRequest)
+  end
+
   @doc "POST /my/ships/{symbol}/transfer — transfers cargo to another ship."
   @spec transfer_cargo(token(), String.t(), String.t(), pos_integer(), String.t()) :: result()
   def transfer_cargo(token, ship_symbol, trade_symbol, units, target_ship_symbol) do
@@ -336,6 +354,20 @@ defmodule SpaceTraders.API do
            agent: {:model, Agent},
            ship: {:model, Ship},
            transaction: {:model, ShipyardTransaction}
+         }}
+    )
+  end
+
+  defp modify_ship_module(token, ship_symbol, operation, module_symbol, request_module) do
+    request(:post, "/my/ships/#{ship_symbol}/modules/#{operation}", token,
+      json: request_module.new(%{symbol: module_symbol}) |> request_module.to_json(),
+      as:
+        {:map,
+         %{
+           agent: {:model, Agent},
+           modules: {:list, ShipModule},
+           cargo: {:model, ShipCargo},
+           transaction: {:model, ShipModificationTransaction}
          }}
     )
   end
@@ -383,6 +415,40 @@ defmodule SpaceTraders.API do
   def get_construction(token, system_symbol, waypoint_symbol) do
     request(:get, "/systems/#{system_symbol}/waypoints/#{waypoint_symbol}/construction", token,
       as: {:model, Construction}
+    )
+  end
+
+  @doc "GET /systems/{symbol}/waypoints/{waypoint}/jump-gate"
+  @spec get_jump_gate(token(), String.t(), String.t()) :: result()
+  def get_jump_gate(token, system_symbol, waypoint_symbol) do
+    request(:get, "/systems/#{system_symbol}/waypoints/#{waypoint_symbol}/jump-gate", token,
+      as: {:model, JumpGate}
+    )
+  end
+
+  @doc "POST /systems/{symbol}/waypoints/{waypoint}/construction/supply"
+  @spec supply_construction(
+          token(),
+          String.t(),
+          String.t(),
+          String.t(),
+          String.t(),
+          pos_integer()
+        ) ::
+          result()
+  def supply_construction(token, system_symbol, waypoint_symbol, ship_symbol, trade_symbol, units) do
+    request(
+      :post,
+      "/systems/#{system_symbol}/waypoints/#{waypoint_symbol}/construction/supply",
+      token,
+      json:
+        SupplyConstructionRequest.new(%{
+          ship_symbol: ship_symbol,
+          trade_symbol: trade_symbol,
+          units: units
+        })
+        |> SupplyConstructionRequest.to_json(),
+      as: {:map, %{construction: {:model, Construction}, cargo: {:model, ShipCargo}}}
     )
   end
 

@@ -1,7 +1,7 @@
 defmodule SpaceTraders.IntelligenceTest do
   use SpaceTraders.DataCase, async: true
 
-  alias SpaceTraders.API.Model.{Market, Waypoint}
+  alias SpaceTraders.API.Model.{Construction, JumpGate, Market, Waypoint}
   alias SpaceTraders.Agent.Agent, as: AgentRecord
   alias SpaceTraders.Intelligence
   alias SpaceTraders.Fleet
@@ -91,6 +91,49 @@ defmodule SpaceTraders.IntelligenceTest do
              Intelligence.subject(agent, :market, "X1-UX81", "X1-UX81-A2")["exports"]
   end
 
+  test "keeps authoritative construction material progress as independently usable facts" do
+    agent = agent()
+
+    construction =
+      Construction.from_json(%{
+        "symbol" => "X1-UX81-A1",
+        "isComplete" => false,
+        "materials" => [
+          %{"tradeSymbol" => "IRON_ORE", "required" => 20, "fulfilled" => 7}
+        ]
+      })
+
+    assert {:ok, _} =
+             Intelligence.observe_construction(agent, "X1-UX81", construction,
+               source: "get_construction",
+               observing_ship_symbol: "INTEL-1"
+             )
+
+    facts = Intelligence.subject(agent, :construction, "X1-UX81", "X1-UX81-A1")
+
+    assert %{state: "known", value: false} = facts["complete"]
+    assert %{state: "known", value: 20} = facts["material:IRON_ORE:required"]
+    assert %{state: "known", value: 7} = facts["material:IRON_ORE:fulfilled"]
+    assert %{state: "known", value: 13} = facts["material:IRON_ORE:remaining"]
+    assert facts["material:IRON_ORE:remaining"].observation.observing_ship_symbol == "INTEL-1"
+  end
+
+  test "records jump-gate connections without claiming either endpoint is complete" do
+    agent = agent()
+    gate = JumpGate.from_json(%{"symbol" => "X1-UX81-A1", "connections" => ["X1-TEST-A1"]})
+
+    assert {:ok, _} =
+             Intelligence.observe_jump_gate(agent, "X1-UX81", gate,
+               source: "get_jump_gate",
+               observing_ship_symbol: "INTEL-1"
+             )
+
+    facts = Intelligence.subject(agent, :jump_gate, "X1-UX81", "X1-UX81-A1")
+
+    assert %{state: "known", value: ["X1-TEST-A1"]} = facts["connections"]
+    refute Map.has_key?(facts, "complete")
+  end
+
   test "remote market composition does not claim omitted live listings are empty" do
     agent = agent()
 
@@ -133,6 +176,76 @@ defmodule SpaceTraders.IntelligenceTest do
 
     assert %{state: "known", value: "PLANET"} =
              Intelligence.subject(agent, :waypoint, "X1-UX81", "X1-UX81-A1")["type"]
+  end
+
+  test "Fleet construction and jump-gate reads expose independent public intelligence" do
+    agent = agent()
+
+    construction_waypoint =
+      Waypoint.from_json(%{
+        "symbol" => "X1-UX81-A1",
+        "systemSymbol" => "X1-UX81",
+        "type" => "JUMP_GATE"
+      })
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      case conn.request_path do
+        "/v2/systems/X1-UX81/waypoints/X1-UX81-A1/construction" ->
+          Req.Test.json(conn, %{
+            "data" => %{
+              "symbol" => "X1-UX81-A1",
+              "isComplete" => false,
+              "materials" => [%{"tradeSymbol" => "IRON_ORE", "required" => 20, "fulfilled" => 7}]
+            }
+          })
+
+        "/v2/systems/X1-UX81/waypoints/X1-UX81-A1/jump-gate" ->
+          Req.Test.json(conn, %{
+            "data" => %{"symbol" => "X1-UX81-A1", "connections" => ["X1-TEST-A1"]}
+          })
+      end
+    end)
+
+    assert {:ok, _} = Fleet.waypoint_construction(agent, construction_waypoint)
+    assert {:ok, _} = Fleet.waypoint_jump_gate(agent, construction_waypoint)
+
+    assert %{value: 13} =
+             Intelligence.subject(agent, :construction, "X1-UX81", "X1-UX81-A1")[
+               "material:IRON_ORE:remaining"
+             ]
+
+    assert %{value: ["X1-TEST-A1"]} =
+             Intelligence.subject(agent, :jump_gate, "X1-UX81", "X1-UX81-A1")["connections"]
+  end
+
+  test "Fleet supply precondition failures invalidate stale construction facts" do
+    agent = agent()
+
+    construction =
+      Construction.from_json(%{
+        "symbol" => "X1-UX81-A1",
+        "isComplete" => false,
+        "materials" => [%{"tradeSymbol" => "IRON_ORE", "required" => 20, "fulfilled" => 7}]
+      })
+
+    assert {:ok, _} =
+             Intelligence.observe_construction(agent, "X1-UX81", construction,
+               source: "get_construction"
+             )
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      conn
+      |> Map.put(:status, 400)
+      |> Req.Test.json(%{"error" => %{"code" => 4218, "message" => "Insufficient cargo"}})
+    end)
+
+    assert {:error, %SpaceTraders.API.GameplayError{type: :insufficient_cargo}} =
+             Fleet.supply_construction(agent, "X1-UX81", "X1-UX81-A1", "INTEL-1", "IRON_ORE", 5)
+
+    assert Intelligence.subject(agent, :construction, "X1-UX81", "X1-UX81-A1") == %{}
+
+    assert %{current: %{}, stale: %{"material:IRON_ORE:remaining" => %{value: 13}}} =
+             Intelligence.subject_with_stale(agent, :construction, "X1-UX81", "X1-UX81-A1")
   end
 
   test "reports exact baseline gaps for every listed Waypoint" do

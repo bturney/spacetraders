@@ -49,7 +49,14 @@ defmodule SpaceTraders.Fleet.ManualIntent do
     |> validate_required([:caller, :type, :target_waypoint])
     |> validate_inclusion(:caller, ["manual", "job"])
     |> validate_job_owner()
-    |> validate_inclusion(:type, ["navigate", "buy", "sell", "deliver"])
+    |> validate_inclusion(:type, [
+      "navigate",
+      "buy",
+      "sell",
+      "deliver",
+      "install_module",
+      "remove_module"
+    ])
     |> validate_inclusion(:status, @unfinished_states ++ @terminal_states)
     |> unique_constraint(:ship_id, name: :manual_intents_one_active_per_ship_index)
   end

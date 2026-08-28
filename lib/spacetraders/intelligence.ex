@@ -65,6 +65,17 @@ defmodule SpaceTraders.Intelligence do
     observe(agent, "market", system_symbol, market.symbol, market, fields, opts)
   end
 
+  @doc "Records authoritative Construction progress as independently refreshable facts."
+  def observe_construction(%AgentRecord{} = agent, system_symbol, construction, opts \\ []) do
+    {payload, fields} = construction_fields(construction)
+    observe(agent, "construction", system_symbol, construction.symbol, payload, fields, opts)
+  end
+
+  @doc "Records a Jump Gate's connections without inferring endpoint readiness."
+  def observe_jump_gate(%AgentRecord{} = agent, system_symbol, gate, opts \\ []) do
+    observe(agent, "jump_gate", system_symbol, gate.symbol, gate, [:connections], opts)
+  end
+
   @doc "Records an authoritative declaration that a field cannot currently be read."
   def mark_unavailable(
         %AgentRecord{} = agent,
@@ -103,6 +114,32 @@ defmodule SpaceTraders.Intelligence do
     facts
     |> Enum.group_by(& &1.field)
     |> Map.new(fn {field, field_facts} -> {field, usable_fact(field_facts) |> present_fact()} end)
+  end
+
+  @doc "Returns current facts and invalidated facts separately for subject inspection."
+  def subject_with_stale(%AgentRecord{} = agent, subject_type, system_symbol, symbol) do
+    facts =
+      Fact
+      |> join(:inner, [fact], observation in assoc(fact, :observation))
+      |> where(
+        [fact],
+        fact.agent_id == ^agent.id and fact.subject_type == ^to_string(subject_type) and
+          fact.subject_system_symbol == ^system_symbol and fact.subject_symbol == ^symbol
+      )
+      |> order_by([fact, observation], desc: observation.observed_at, desc: fact.id)
+      |> preload([_fact, observation], observation: observation)
+      |> Repo.all()
+
+    %{
+      current:
+        facts
+        |> Enum.reject(& &1.invalidated_at)
+        |> facts_by_field(),
+      stale:
+        facts
+        |> Enum.filter(& &1.invalidated_at)
+        |> facts_by_field()
+    }
   end
 
   @doc "Returns baseline fact gaps for the supplied authoritative System Waypoints."
@@ -186,6 +223,25 @@ defmodule SpaceTraders.Intelligence do
 
   defp marketplace?(_), do: false
 
+  defp construction_fields(construction) do
+    materials = construction.materials || []
+
+    material_facts =
+      Enum.flat_map(materials, fn material ->
+        remaining = max((material.required || 0) - (material.fulfilled || 0), 0)
+        prefix = "material:#{material.trade_symbol}"
+
+        [
+          {"#{prefix}:required", material.required},
+          {"#{prefix}:fulfilled", material.fulfilled},
+          {"#{prefix}:remaining", remaining}
+        ]
+      end)
+
+    Map.new([{"complete", construction.is_complete} | material_facts])
+    |> then(fn payload -> {payload, Map.keys(payload)} end)
+  end
+
   defp known?(_agent, _system, _symbol, facts, field) when is_atom(field) do
     match?(%Fact{state: "known"}, Map.get(facts, to_string(field)))
   end
@@ -214,6 +270,12 @@ defmodule SpaceTraders.Intelligence do
   # A partial endpoint must not erase an earlier usable fact. Unknown remains
   # visible only when it is the only observation for that field.
   defp usable_fact(facts), do: Enum.find(facts, &(&1.state != "unknown")) || List.first(facts)
+
+  defp facts_by_field(facts) do
+    facts
+    |> Enum.group_by(& &1.field)
+    |> Map.new(fn {field, field_facts} -> {field, usable_fact(field_facts) |> present_fact()} end)
+  end
 
   defp present_fact(nil), do: nil
   defp present_fact(%Fact{value: %{"value" => value}} = fact), do: %{fact | value: value}

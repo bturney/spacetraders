@@ -918,6 +918,7 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
           "frame" => %{
             "symbol" => "FRAME_FRIGATE",
             "name" => "Frigate",
+            "moduleSlots" => 2,
             "condition" => 55,
             "integrity" => 100,
             "quality" => 75,
@@ -986,6 +987,8 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
                "Crew Quarters I capacity 6"
              )
 
+      assert has_element?(lv, "[data-module-capacity]", "2 / 2 module slots")
+
       assert has_element?(
                lv,
                "[data-mount=\"MOUNT_MINING_LASER_I\"]",
@@ -1001,6 +1004,35 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
                "details[data-equipment-description]",
                "Expands the ship's cargo capacity."
              )
+    end
+
+    test "offers explicit module installation and one-module removal controls", %{
+      conn: conn,
+      operator: operator
+    } do
+      agent = agent_fixture(operator)
+
+      stub_live_game(agent_overview_body(agent.symbol), [
+        ship_body("ORBITALIST-1", %{
+          "modules" => [%{"symbol" => "MODULE_CARGO_HOLD_I", "name" => "Cargo Hold I"}],
+          "cargo" => %{
+            "capacity" => 40,
+            "units" => 1,
+            "inventory" => [%{"symbol" => "MODULE_GAS_PROCESSOR_I", "units" => 1}]
+          }
+        })
+      ])
+
+      {:ok, lv, _html} = live(conn, ~p"/")
+      lv |> element("button[data-select-ship=ORBITALIST-1]") |> render_click()
+
+      assert has_element?(
+               lv,
+               "button[data-install-module=MODULE_GAS_PROCESSOR_I]",
+               "Install module"
+             )
+
+      assert has_element?(lv, "button[data-remove-module=MODULE_CARGO_HOLD_I]", "Remove module")
     end
 
     test "shows an in-transit ship's origin and destination with departure in Route details", %{
@@ -3794,6 +3826,9 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
               }
             })
 
+          {"/v2/systems/X1-UX81/waypoints/X1-UX81-C1/jump-gate", "GET"} ->
+            Req.Test.json(conn, %{"data" => %{"symbol" => "X1-UX81-C1", "connections" => []}})
+
           {"/v2/systems/X1-UX81/waypoints/X1-UX81-A3/market", "GET"} ->
             conn
             |> Map.put(:status, 400)
@@ -3887,7 +3922,7 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
         %{
           "symbol" => "X1-UX81-A1",
           "systemSymbol" => "X1-UX81",
-          "type" => "ORBITAL_STATION",
+          "type" => "JUMP_GATE",
           "x" => -12,
           "y" => 8,
           "isUnderConstruction" => true,
@@ -3958,6 +3993,22 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
               }
             })
 
+          {"/v2/systems/X1-UX81/waypoints/X1-UX81-A1/construction", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => %{
+                "symbol" => "X1-UX81-A1",
+                "isComplete" => false,
+                "materials" => [
+                  %{"tradeSymbol" => "IRON_ORE", "required" => 20, "fulfilled" => 7}
+                ]
+              }
+            })
+
+          {"/v2/systems/X1-UX81/waypoints/X1-UX81-A1/jump-gate", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => %{"symbol" => "X1-UX81-A1", "connections" => ["X1-TEST-A1"]}
+            })
+
           {"/v2/systems/X1-UX81/waypoints/X1-UX81-A3/market", "GET"} ->
             conn
             |> Map.put(:status, 400)
@@ -3982,6 +4033,9 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       assert inspector_html =~ "UNSTABLE"
       assert has_element?(lv, "[data-waypoint-intelligence]")
       assert has_element?(lv, "[data-construction-status]", "Under construction")
+      assert has_element?(lv, "[data-readiness=\"construction\"]", "material:IRON_ORE:remaining")
+      assert has_element?(lv, "[data-readiness=\"construction\"]", "13")
+      assert has_element?(lv, "[data-readiness=\"jump_gate\"]", "X1-TEST-A1")
       assert has_element?(lv, "details[data-modifier=\"STRIPPED\"] summary", "Stripped")
 
       assert has_element?(
