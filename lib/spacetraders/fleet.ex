@@ -557,16 +557,19 @@ defmodule SpaceTraders.Fleet do
     progress = job.progress
     units = min(progress["aboard"], progress["requested"] - progress["accepted"])
 
-    deliver_goods_intent(
-      agent,
-      live_ship.symbol,
-      progress["destination_waypoint"],
-      progress["contract_id"],
-      progress["trade_symbol"],
-      units,
-      caller: "job",
-      job_id: job.id
-    )
+    case deliver_goods_intent(
+           agent,
+           live_ship.symbol,
+           progress["destination_waypoint"],
+           progress["contract_id"],
+           progress["trade_symbol"],
+           units,
+           caller: "job",
+           job_id: job.id
+         ) do
+      {:ok, _intent} -> {:ok, Repo.get!(Job, job.id)}
+      error -> error
+    end
   end
 
   defp buy_procurement_goods(agent, job, live_ship, _credits) do
@@ -1728,6 +1731,7 @@ defmodule SpaceTraders.Fleet do
         )
       )
 
+    block_job_owned_cargo(intent, reason)
     {:ok, intent}
   end
 
@@ -2143,14 +2147,12 @@ defmodule SpaceTraders.Fleet do
 
       recover_manual_intent_on_boot(ship_symbol, agent_id, agent_token)
     else
-      intent =
-        Repo.update!(
-          Ecto.Changeset.change(intent,
-            status: "blocked",
-            blocker: job_blocker({:retry_exhausted, reason}),
-            in_flight_action: nil
-          )
-        )
+      changes =
+        [status: "blocked", blocker: job_blocker({:retry_exhausted, reason})]
+        |> maybe_clear_recovery_action(intent)
+
+      intent = Repo.update!(Ecto.Changeset.change(intent, changes))
+      block_job_owned_cargo(intent, {:retry_exhausted, reason})
 
       record_activity_by_intent(
         intent,
@@ -2162,6 +2164,13 @@ defmodule SpaceTraders.Fleet do
       {:error, :manual_intent_recovery_blocked}
     end
   end
+
+  defp maybe_clear_recovery_action(changes, %ManualIntent{type: type, in_flight_action: action})
+       when type in ["buy", "sell", "deliver"] and is_map(action),
+       do: changes
+
+  defp maybe_clear_recovery_action(changes, _intent),
+    do: Keyword.put(changes, :in_flight_action, nil)
 
   defp record_activity_by_intent(intent, kind, message, metadata) do
     ship = Repo.get!(Ship, intent.ship_id)
