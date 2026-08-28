@@ -116,6 +116,32 @@ defmodule SpaceTraders.Intelligence do
     |> Map.new(fn {field, field_facts} -> {field, usable_fact(field_facts) |> present_fact()} end)
   end
 
+  @doc "Returns current facts and invalidated facts separately for subject inspection."
+  def subject_with_stale(%AgentRecord{} = agent, subject_type, system_symbol, symbol) do
+    facts =
+      Fact
+      |> join(:inner, [fact], observation in assoc(fact, :observation))
+      |> where(
+        [fact],
+        fact.agent_id == ^agent.id and fact.subject_type == ^to_string(subject_type) and
+          fact.subject_system_symbol == ^system_symbol and fact.subject_symbol == ^symbol
+      )
+      |> order_by([fact, observation], desc: observation.observed_at, desc: fact.id)
+      |> preload([_fact, observation], observation: observation)
+      |> Repo.all()
+
+    %{
+      current:
+        facts
+        |> Enum.reject(& &1.invalidated_at)
+        |> facts_by_field(),
+      stale:
+        facts
+        |> Enum.filter(& &1.invalidated_at)
+        |> facts_by_field()
+    }
+  end
+
   @doc "Returns baseline fact gaps for the supplied authoritative System Waypoints."
   def waypoint_coverage(%AgentRecord{} = agent, system_symbol, waypoints)
       when is_list(waypoints) do
@@ -244,6 +270,12 @@ defmodule SpaceTraders.Intelligence do
   # A partial endpoint must not erase an earlier usable fact. Unknown remains
   # visible only when it is the only observation for that field.
   defp usable_fact(facts), do: Enum.find(facts, &(&1.state != "unknown")) || List.first(facts)
+
+  defp facts_by_field(facts) do
+    facts
+    |> Enum.group_by(& &1.field)
+    |> Map.new(fn {field, field_facts} -> {field, usable_fact(field_facts) |> present_fact()} end)
+  end
 
   defp present_fact(nil), do: nil
   defp present_fact(%Fact{value: %{"value" => value}} = fact), do: %{fact | value: value}

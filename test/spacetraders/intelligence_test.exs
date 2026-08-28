@@ -243,6 +243,9 @@ defmodule SpaceTraders.IntelligenceTest do
              Fleet.supply_construction(agent, "X1-UX81", "X1-UX81-A1", "INTEL-1", "IRON_ORE", 5)
 
     assert Intelligence.subject(agent, :construction, "X1-UX81", "X1-UX81-A1") == %{}
+
+    assert %{current: %{}, stale: %{"material:IRON_ORE:remaining" => %{value: 13}}} =
+             Intelligence.subject_with_stale(agent, :construction, "X1-UX81", "X1-UX81-A1")
   end
 
   test "reports exact baseline gaps for every listed Waypoint" do

@@ -963,25 +963,30 @@ defmodule SpaceTradersWeb.DashboardLive do
     waypoint_facts =
       Intelligence.subject(agent, :waypoint, waypoint.system_symbol, waypoint.symbol)
 
-    construction_facts =
-      if waypoint.is_under_construction == true do
-        _ = Fleet.waypoint_construction(agent, waypoint)
-        Intelligence.subject(agent, :construction, waypoint.system_symbol, waypoint.symbol)
-      else
-        %{}
-      end
+    if waypoint.is_under_construction == true do
+      _ = Fleet.waypoint_construction(agent, waypoint)
+    end
 
-    gate_facts =
-      if waypoint.type == "JUMP_GATE" do
-        _ = Fleet.waypoint_jump_gate(agent, waypoint)
-        Intelligence.subject(agent, :jump_gate, waypoint.system_symbol, waypoint.symbol)
-      else
-        %{}
-      end
+    construction =
+      Intelligence.subject_with_stale(
+        agent,
+        :construction,
+        waypoint.system_symbol,
+        waypoint.symbol
+      )
+
+    if waypoint.type == "JUMP_GATE" do
+      _ = Fleet.waypoint_jump_gate(agent, waypoint)
+    end
+
+    gate =
+      Intelligence.subject_with_stale(agent, :jump_gate, waypoint.system_symbol, waypoint.symbol)
 
     waypoint_facts
-    |> Map.merge(namespace_readiness_facts(construction_facts, "construction"))
-    |> Map.merge(namespace_readiness_facts(gate_facts, "jump_gate"))
+    |> Map.merge(namespace_readiness_facts(construction.current, "construction"))
+    |> Map.merge(namespace_readiness_facts(construction.stale, "construction_stale"))
+    |> Map.merge(namespace_readiness_facts(gate.current, "jump_gate"))
+    |> Map.merge(namespace_readiness_facts(gate.stale, "jump_gate_stale"))
   end
 
   defp namespace_readiness_facts(facts, namespace) do
@@ -2082,6 +2087,16 @@ defmodule SpaceTradersWeb.DashboardLive do
             facts={@intelligence}
             namespace="jump_gate"
             title="Jump-gate connections"
+          />
+          <.readiness_facts
+            facts={@intelligence}
+            namespace="construction_stale"
+            title="Stale Construction readiness"
+          />
+          <.readiness_facts
+            facts={@intelligence}
+            namespace="jump_gate_stale"
+            title="Stale Jump-gate connections"
           />
           <%= case @market do %>
             <% {:ok, market} -> %>
