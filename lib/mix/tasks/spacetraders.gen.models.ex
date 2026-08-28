@@ -28,9 +28,11 @@ defmodule Mix.Tasks.SpaceTraders.Gen.Models do
     {:post, "/my/ships/{shipSymbol}/purchase", "PurchaseCargoRequest"},
     {:post, "/my/ships/{shipSymbol}/jettison", "JettisonCargoRequest"},
     {:post, "/my/ships/{shipSymbol}/transfer", "TransferCargoRequest"},
+    {:post, "/my/ships", "PurchaseShipRequest"},
+    {:post, "/systems/{systemSymbol}/waypoints/{waypointSymbol}/construction/supply",
+     "SupplyConstructionRequest"},
     {:post, "/my/ships/{shipSymbol}/modules/install", "InstallShipModuleRequest"},
-    {:post, "/my/ships/{shipSymbol}/modules/remove", "RemoveShipModuleRequest"},
-    {:post, "/my/ships", "PurchaseShipRequest"}
+    {:post, "/my/ships/{shipSymbol}/modules/remove", "RemoveShipModuleRequest"}
   ]
 
   @impl true

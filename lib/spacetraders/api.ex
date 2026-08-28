@@ -37,6 +37,7 @@ defmodule SpaceTraders.API do
     Cooldown,
     Extraction,
     Faction,
+    JumpGate,
     Market,
     Ship,
     ShipConditionEvent,
@@ -68,6 +69,7 @@ defmodule SpaceTraders.API do
     RemoveShipModuleRequest,
     SellCargoRequest,
     ShipNavRequest,
+    SupplyConstructionRequest,
     TransferCargoRequest
   }
 
@@ -413,6 +415,40 @@ defmodule SpaceTraders.API do
   def get_construction(token, system_symbol, waypoint_symbol) do
     request(:get, "/systems/#{system_symbol}/waypoints/#{waypoint_symbol}/construction", token,
       as: {:model, Construction}
+    )
+  end
+
+  @doc "GET /systems/{symbol}/waypoints/{waypoint}/jump-gate"
+  @spec get_jump_gate(token(), String.t(), String.t()) :: result()
+  def get_jump_gate(token, system_symbol, waypoint_symbol) do
+    request(:get, "/systems/#{system_symbol}/waypoints/#{waypoint_symbol}/jump-gate", token,
+      as: {:model, JumpGate}
+    )
+  end
+
+  @doc "POST /systems/{symbol}/waypoints/{waypoint}/construction/supply"
+  @spec supply_construction(
+          token(),
+          String.t(),
+          String.t(),
+          String.t(),
+          String.t(),
+          pos_integer()
+        ) ::
+          result()
+  def supply_construction(token, system_symbol, waypoint_symbol, ship_symbol, trade_symbol, units) do
+    request(
+      :post,
+      "/systems/#{system_symbol}/waypoints/#{waypoint_symbol}/construction/supply",
+      token,
+      json:
+        SupplyConstructionRequest.new(%{
+          ship_symbol: ship_symbol,
+          trade_symbol: trade_symbol,
+          units: units
+        })
+        |> SupplyConstructionRequest.to_json(),
+      as: {:map, %{construction: {:model, Construction}, cargo: {:model, ShipCargo}}}
     )
   end
 

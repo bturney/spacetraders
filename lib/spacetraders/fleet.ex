@@ -125,6 +125,98 @@ defmodule SpaceTraders.Fleet do
 
   def waypoint_market(%AgentRecord{}, _waypoint), do: {:error, :agent_token_missing}
 
+  @doc "Reads and records authoritative Construction facts for a selected Waypoint."
+  def waypoint_construction(%AgentRecord{agent_token: token} = agent, waypoint)
+      when is_binary(token) and token != "" do
+    with %{system_symbol: system, symbol: symbol} when is_binary(system) and is_binary(symbol) <-
+           waypoint do
+      case SpaceTraders.API.get_construction(token, system, symbol) do
+        {:ok, construction} = result ->
+          record_construction_observation(agent, system, construction, "get_construction")
+          result
+
+        {:error, %SpaceTraders.API.GameplayError{}} = result ->
+          Intelligence.mark_unavailable(agent, :construction, system, symbol, [:complete],
+            source: "get_construction"
+          )
+
+          result
+
+        result ->
+          result
+      end
+    else
+      _ -> {:error, :waypoint_unavailable}
+    end
+  end
+
+  def waypoint_construction(%AgentRecord{}, _waypoint), do: {:error, :agent_token_missing}
+
+  @doc "Reads and records a Jump Gate's connections without inferring Construction readiness."
+  def waypoint_jump_gate(%AgentRecord{agent_token: token} = agent, waypoint)
+      when is_binary(token) and token != "" do
+    with %{system_symbol: system, symbol: symbol} when is_binary(system) and is_binary(symbol) <-
+           waypoint do
+      case SpaceTraders.API.get_jump_gate(token, system, symbol) do
+        {:ok, gate} = result ->
+          record_jump_gate_observation(agent, system, gate, "get_jump_gate")
+          result
+
+        {:error, %SpaceTraders.API.GameplayError{}} = result ->
+          Intelligence.mark_unavailable(agent, :jump_gate, system, symbol, [:connections],
+            source: "get_jump_gate"
+          )
+
+          result
+
+        result ->
+          result
+      end
+    else
+      _ -> {:error, :waypoint_unavailable}
+    end
+  end
+
+  def waypoint_jump_gate(%AgentRecord{}, _waypoint), do: {:error, :agent_token_missing}
+
+  @doc "Supplies a Construction project and refreshes or invalidates its authoritative facts."
+  def supply_construction(
+        %AgentRecord{agent_token: token} = agent,
+        system_symbol,
+        waypoint_symbol,
+        ship_symbol,
+        trade_symbol,
+        units
+      )
+      when is_binary(token) and token != "" and is_integer(units) and units > 0 do
+    agent
+    |> Agent.handle_game_result(
+      SpaceTraders.API.supply_construction(
+        token,
+        system_symbol,
+        waypoint_symbol,
+        ship_symbol,
+        trade_symbol,
+        units
+      )
+    )
+    |> refresh_construction_after(agent, system_symbol, waypoint_symbol, ship_symbol)
+  end
+
+  def supply_construction(
+        %AgentRecord{agent_token: token},
+        _system,
+        _waypoint,
+        _ship,
+        _trade,
+        _units
+      )
+      when not is_binary(token) or token == "",
+      do: {:error, :agent_token_missing}
+
+  def supply_construction(%AgentRecord{}, _system, _waypoint, _ship, _trade, _units),
+    do: {:error, :invalid_units}
+
   @doc "Returns recent local events for an Agent, newest first."
   def recent_activity(%AgentRecord{} = agent) do
     Activity
@@ -3760,6 +3852,70 @@ defmodule SpaceTraders.Fleet do
   end
 
   defp record_market_observation(_agent, _system, _market, _source, _observer), do: :ok
+
+  defp record_construction_observation(%AgentRecord{id: id} = agent, system, construction, source)
+       when is_integer(id) do
+    Intelligence.observe_construction(agent, system, construction, source: source)
+  rescue
+    exception ->
+      Logger.warning(
+        "Could not persist construction intelligence: #{Exception.message(exception)}"
+      )
+  end
+
+  defp record_construction_observation(_agent, _system, _construction, _source), do: :ok
+
+  defp record_jump_gate_observation(%AgentRecord{id: id} = agent, system, gate, source)
+       when is_integer(id) do
+    Intelligence.observe_jump_gate(agent, system, gate, source: source)
+  rescue
+    exception ->
+      Logger.warning("Could not persist jump-gate intelligence: #{Exception.message(exception)}")
+  end
+
+  defp record_jump_gate_observation(_agent, _system, _gate, _source), do: :ok
+
+  defp refresh_construction_after(
+         {:ok, %{construction: construction}} = result,
+         agent,
+         system_symbol,
+         _waypoint_symbol,
+         ship_symbol
+       ) do
+    Intelligence.observe_construction(agent, system_symbol, construction,
+      source: "supply_construction",
+      observing_ship_symbol: ship_symbol
+    )
+
+    result
+  rescue
+    exception ->
+      Logger.warning(
+        "Could not persist supplied construction intelligence: #{Exception.message(exception)}"
+      )
+
+      result
+  end
+
+  defp refresh_construction_after(
+         {:error, %SpaceTraders.API.GameplayError{}} = result,
+         agent,
+         system_symbol,
+         waypoint_symbol,
+         _ship_symbol
+       ) do
+    Intelligence.invalidate(agent, :construction, system_symbol, waypoint_symbol)
+    result
+  rescue
+    exception ->
+      Logger.warning(
+        "Could not invalidate construction intelligence: #{Exception.message(exception)}"
+      )
+
+      result
+  end
+
+  defp refresh_construction_after(result, _agent, _system, _waypoint, _ship), do: result
 
   defp system_from_headquarters(headquarters) do
     case Regex.run(~r/^(.+)-[^-]+$/, headquarters, capture: :all) do
