@@ -1127,7 +1127,7 @@ defmodule SpaceTraders.Fleet do
          true <- is_binary(module_symbol) and module_symbol != "",
          true <- valid_module_removal?(type, module_symbol, parameters["authorized_removals"]),
          {:ok, ship} <- owned_ship(agent, ship_symbol) do
-      case reconcile_pending_module_intent(agent, ship) do
+      case reconcile_pending_module_intent(agent, ship, type, module_symbol) do
         {:resolved, intent} -> {:ok, intent}
         :ok -> start_module_intent(agent, ship, type, module_symbol, parameters)
         error -> error
@@ -1155,7 +1155,7 @@ defmodule SpaceTraders.Fleet do
 
   # An unknown mutation outcome must be reconciled before a later Manual Control
   # request can replace its durable evidence and accidentally repeat the command.
-  defp reconcile_pending_module_intent(agent, ship) do
+  defp reconcile_pending_module_intent(agent, ship, requested_type, requested_module_symbol) do
     case unfinished_manual_intent(ship.id) do
       %ManualIntent{type: type, in_flight_action: action} = intent
       when type in ["install_module", "remove_module"] and is_map(action) ->
@@ -1164,7 +1164,10 @@ defmodule SpaceTraders.Fleet do
             {:error, :manual_intent_reconciliation_required}
 
           {:ok, intent} ->
-            {:resolved, intent}
+            if intent.type == requested_type and
+                 intent.parameters["module_symbol"] == requested_module_symbol,
+               do: {:resolved, intent},
+               else: :ok
         end
 
       _ ->
@@ -2125,8 +2128,15 @@ defmodule SpaceTraders.Fleet do
   defp replace_manual_intent(ship, attrs) when is_map(attrs) do
     Repo.transaction(fn ->
       case unfinished_manual_intent(ship.id) do
-        %ManualIntent{} = predecessor -> terminalize_manual_intent!(predecessor, "stopped")
-        nil -> :ok
+        %ManualIntent{type: type, in_flight_action: action}
+        when type in ["install_module", "remove_module"] and is_map(action) ->
+          Repo.rollback(:manual_intent_reconciliation_required)
+
+        %ManualIntent{} = predecessor ->
+          terminalize_manual_intent!(predecessor, "stopped")
+
+        nil ->
+          :ok
       end
 
       {:ok, intent} =

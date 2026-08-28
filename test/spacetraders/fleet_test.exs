@@ -4793,6 +4793,29 @@ defmodule SpaceTraders.FleetTest do
              ]
     end
 
+    test "does not replace unresolved module evidence with navigation" do
+      agent = agent_fixture()
+      ship = ship_fixture(agent, "FLEET-SHIP")
+
+      Repo.insert!(%ManualIntent{
+        ship_id: ship.id,
+        type: "install_module",
+        target_waypoint: "MODULE_CARGO_HOLD_I",
+        parameters: %{"module_symbol" => "MODULE_CARGO_HOLD_I", "quantity" => 1},
+        status: "blocked",
+        in_flight_action: %{
+          "kind" => "install_module",
+          "module_symbol" => "MODULE_CARGO_HOLD_I",
+          "quantity" => 1,
+          "installed_before" => 0,
+          "cargo_before" => 1
+        }
+      })
+
+      assert {:error, :manual_intent_reconciliation_required} =
+               Fleet.navigate_intent(agent, "FLEET-SHIP", "X1-UX81-A2")
+    end
+
     test "Buy Goods Intent pauses the active Job and buys from a fresh on-site Listing" do
       agent = agent_fixture()
       ship_fixture(agent, "FLEET-SHIP")
