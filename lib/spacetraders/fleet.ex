@@ -1098,6 +1098,65 @@ defmodule SpaceTraders.Fleet do
     )
   end
 
+  @doc "Installs one Cargo module through durable Manual Control."
+  def install_module_intent(agent, ship_symbol, module_symbol) do
+    module_intent(agent, ship_symbol, "install_module", module_symbol, %{})
+  end
+
+  @doc "Removes one installed module only when its exact symbol and count are authorized."
+  def remove_module_intent(agent, ship_symbol, module_symbol, authorized_removals) do
+    module_intent(agent, ship_symbol, "remove_module", module_symbol, authorized_removals)
+  end
+
+  defp module_intent(
+         %AgentRecord{agent_token: token} = agent,
+         ship_symbol,
+         type,
+         module_symbol,
+         authorized_removals
+       )
+       when is_binary(token) and token != "" do
+    parameters = %{
+      "caller" => "manual",
+      "module_symbol" => module_symbol,
+      "quantity" => 1,
+      "authorized_removals" => stringify_keys(authorized_removals)
+    }
+
+    with true <- type in ["install_module", "remove_module"],
+         true <- is_binary(module_symbol) and module_symbol != "",
+         true <- valid_module_removal?(type, module_symbol, parameters["authorized_removals"]),
+         {:ok, ship} <- owned_ship(agent, ship_symbol),
+         :ok <-
+           preempt_miner_job_for(agent, ship_symbol, {:manual_override, "module modification"}),
+         {:ok, intent} <-
+           replace_manual_intent(ship, %{
+             type: type,
+             target_waypoint: module_symbol,
+             parameters: parameters
+           }) do
+      reconcile_manual_intent(agent, intent)
+    else
+      false -> {:error, :invalid_module_intent}
+      {:error, %Ecto.Changeset{}} -> {:error, :manual_intent_conflict}
+      error -> error
+    end
+  end
+
+  defp module_intent(%AgentRecord{}, _ship_symbol, _type, _module_symbol, _authorized_removals),
+    do: {:error, :agent_token_missing}
+
+  defp valid_module_removal?("install_module", _module_symbol, _authorized_removals), do: true
+
+  defp valid_module_removal?("remove_module", module_symbol, authorized_removals) do
+    authorized_removals == %{module_symbol => 1}
+  end
+
+  defp stringify_keys(map) when is_map(map),
+    do: Map.new(map, fn {key, value} -> {to_string(key), value} end)
+
+  defp stringify_keys(_), do: %{}
+
   defp cargo_intent(
          %AgentRecord{agent_token: token} = agent,
          ship_symbol,
@@ -1235,6 +1294,14 @@ defmodule SpaceTraders.Fleet do
 
       true ->
         dispatch_manual_navigate(agent, intent, live_ship)
+    end
+  end
+
+  defp advance_manual_intent(agent, %ManualIntent{type: type} = intent, live_ship)
+       when type in ["install_module", "remove_module"] do
+    case intent.in_flight_action do
+      %{"kind" => ^type} = action -> reconcile_module_intent(intent, live_ship, action)
+      _ -> dispatch_module_intent(agent, intent, live_ship)
     end
   end
 
@@ -1646,6 +1713,140 @@ defmodule SpaceTraders.Fleet do
       _ -> block_cargo_intent_preserving_evidence(intent, {:ambiguous_operation_evidence, "buy"})
     end
   end
+
+  defp dispatch_module_intent(agent, intent, live_ship) do
+    module_symbol = intent.parameters["module_symbol"]
+    installed_before = module_count(live_ship.modules, module_symbol)
+    cargo_before = item_units(live_ship.cargo, module_symbol)
+
+    intent =
+      Repo.update!(
+        Ecto.Changeset.change(intent,
+          in_flight_action: %{
+            "kind" => intent.type,
+            "module_symbol" => module_symbol,
+            "quantity" => 1,
+            "installed_before" => installed_before,
+            "cargo_before" => cargo_before
+          }
+        )
+      )
+
+    result =
+      case intent.type do
+        "install_module" ->
+          SpaceTraders.API.install_ship_module(agent.agent_token, live_ship.symbol, module_symbol)
+
+        "remove_module" ->
+          SpaceTraders.API.remove_ship_module(agent.agent_token, live_ship.symbol, module_symbol)
+      end
+
+    case Agent.handle_game_result(agent, result) do
+      {:ok, result} -> complete_module_intent(intent, result)
+      {:error, %SpaceTraders.API.Error{} = reason} -> await_module_reconciliation(intent, reason)
+      {:error, reason} -> block_module_intent(intent, reason)
+    end
+  end
+
+  defp reconcile_module_intent(intent, live_ship, action) do
+    module_symbol = action["module_symbol"]
+    installed_before = action["installed_before"]
+    cargo_before = action["cargo_before"]
+    installed_now = module_count(live_ship.modules, module_symbol)
+    cargo_now = item_units(live_ship.cargo, module_symbol)
+
+    completed? =
+      case intent.type do
+        "install_module" ->
+          installed_now == installed_before + 1 and cargo_now == cargo_before - 1
+
+        "remove_module" ->
+          installed_now == installed_before - 1 and cargo_now == cargo_before + 1
+      end
+
+    if completed?,
+      do: complete_module_intent(intent, nil),
+      else: block_module_intent_preserving_evidence(intent, :ambiguous_module_modification)
+  end
+
+  defp complete_module_intent(intent, result) do
+    module_symbol = intent.parameters["module_symbol"]
+
+    intent =
+      Repo.update!(
+        Ecto.Changeset.change(intent,
+          status: "completed",
+          blocker: nil,
+          in_flight_action: nil,
+          last_action_result: module_result(intent.type, module_symbol, result),
+          finished_at: DateTime.utc_now() |> DateTime.truncate(:second)
+        )
+      )
+
+    record_activity_by_intent(
+      intent,
+      "manual_intent_completed",
+      "#{module_intent_verb(intent.type)} #{module_symbol} complete",
+      intent.last_action_result
+    )
+
+    {:ok, intent}
+  end
+
+  defp module_result(type, module_symbol, nil),
+    do: %{"kind" => type, "module_symbol" => module_symbol, "quantity" => 1}
+
+  defp module_result(type, module_symbol, %{transaction: transaction}) do
+    %{"kind" => type, "module_symbol" => module_symbol, "quantity" => 1}
+    |> Map.put("transaction", %{
+      "total_price" => transaction.total_price,
+      "waypoint" => transaction.waypoint_symbol
+    })
+  end
+
+  defp await_module_reconciliation(intent, reason) do
+    intent =
+      Repo.update!(
+        Ecto.Changeset.change(intent,
+          status: "blocked",
+          blocker: job_blocker({:awaiting_reconciliation, reason}),
+          last_action_result: %{"kind" => intent.type, "error" => inspect(reason)}
+        )
+      )
+
+    {:ok, intent}
+  end
+
+  defp block_module_intent(intent, reason) do
+    intent =
+      Repo.update!(
+        Ecto.Changeset.change(intent,
+          status: "blocked",
+          blocker: job_blocker(manual_intent_block_reason(reason)),
+          in_flight_action: nil,
+          last_action_result: %{"kind" => intent.type, "error" => inspect(reason)}
+        )
+      )
+
+    {:ok, intent}
+  end
+
+  defp block_module_intent_preserving_evidence(intent, reason) do
+    intent =
+      Repo.update!(
+        Ecto.Changeset.change(intent,
+          status: "blocked",
+          blocker: job_blocker(reason),
+          last_action_result: %{"kind" => intent.type, "error" => inspect(reason)}
+        )
+      )
+
+    {:ok, intent}
+  end
+
+  defp module_count(modules, symbol), do: Enum.count(modules || [], &(&1.symbol == symbol))
+  defp module_intent_verb("install_module"), do: "Install"
+  defp module_intent_verb("remove_module"), do: "Remove"
 
   # A Contract fulfillment delta identifies this delivery; the matching cargo
   # decrease prevents a later, unrelated Contract update from completing it.
