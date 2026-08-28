@@ -613,7 +613,20 @@ defmodule SpaceTraders.Fleet do
 
             job =
               Repo.update!(
-                Ecto.Changeset.change(job, progress: progress, last_action_result: action)
+                Ecto.Changeset.change(job,
+                  progress: progress,
+                  in_flight_action: nil,
+                  last_action_result: %{
+                    "kind" => "sell",
+                    "transaction" => %{
+                      "trade_symbol" => transaction.trade_symbol,
+                      "ship_symbol" => transaction.ship_symbol,
+                      "waypoint_symbol" => transaction.waypoint_symbol,
+                      "units" => transaction.units,
+                      "price_per_unit" => transaction.price_per_unit
+                    }
+                  }
+                )
               )
 
             advance_procurement_job(
@@ -803,7 +816,9 @@ defmodule SpaceTraders.Fleet do
   end
 
   defp procurement_purchase_units(live_ship, good, progress, credits) do
-    affordable = max(div(max(credits - progress["reserve_credits"], 0), good.purchase_price), 0)
+    affordable =
+      affordable_cargo_units(max(credits - progress["reserve_credits"], 0), good.purchase_price)
+
     free = max(live_ship.cargo.capacity - live_ship.cargo.units, 0)
     needed = progress["requested"] - progress["accepted"]
     units = min(min(free, good.trade_volume), min(needed, affordable))
@@ -3729,7 +3744,10 @@ defmodule SpaceTraders.Fleet do
   defp market_for_ship(%AgentRecord{agent_token: token} = agent, live_ship, waypoint_symbol) do
     system_symbol = live_ship.nav.system_symbol
 
-    case SpaceTraders.API.get_market(token, system_symbol, waypoint_symbol) do
+    case Agent.handle_game_result(
+           agent,
+           SpaceTraders.API.get_market(token, system_symbol, waypoint_symbol)
+         ) do
       {:ok, market} = result ->
         observer = if live_ship.nav.waypoint_symbol == waypoint_symbol, do: live_ship.symbol
         record_market_observation(agent, system_symbol, market, "get_market", observer)
