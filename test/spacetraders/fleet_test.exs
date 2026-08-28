@@ -3155,6 +3155,7 @@ defmodule SpaceTraders.FleetTest do
 
           {"/v2/my/ships/FLEET-SHIP/purchase", "POST"} ->
             intent = Repo.one!(from i in ManualIntent, where: i.ship_id == ^ship.id)
+
             send(test_pid, {:job_buy_intent, intent.parameters, Repo.get!(Job, job.id).status})
 
             Req.Test.json(conn, %{
@@ -3179,6 +3180,17 @@ defmodule SpaceTraders.FleetTest do
             })
 
           {"/v2/my/contracts/CONTRACT-1/deliver", "POST"} ->
+            intent =
+              Repo.one!(
+                from i in ManualIntent,
+                  where: i.ship_id == ^ship.id and i.type == "deliver"
+              )
+
+            send(
+              test_pid,
+              {:job_delivery_intent, intent.parameters, Repo.get!(Job, job.id).status}
+            )
+
             Req.Test.json(conn, %{
               "data" => %{
                 "cargo" => %{"capacity" => 40, "units" => 0, "inventory" => []},
@@ -3201,6 +3213,15 @@ defmodule SpaceTraders.FleetTest do
                         "job_id" => ^job_id,
                         "max_unit_price" => nil,
                         "reserve_credits" => 0,
+                        "trade_symbol" => "IRON_ORE",
+                        "units" => 5
+                      }, "active"}
+
+      assert_receive {:job_delivery_intent,
+                      %{
+                        "caller" => "job",
+                        "contract_id" => "CONTRACT-1",
+                        "job_id" => ^job_id,
                         "trade_symbol" => "IRON_ORE",
                         "units" => 5
                       }, "active"}
@@ -4825,6 +4846,62 @@ defmodule SpaceTraders.FleetTest do
                )
 
       assert intent.last_action_result == %{"kind" => "deliver", "units" => 5}
+    end
+
+    test "restart recovery confirms an in-flight delivery from Contract and Cargo evidence" do
+      agent = agent_fixture()
+      ship = ship_fixture(agent, "FLEET-SHIP")
+
+      Repo.insert!(%ManualIntent{
+        ship_id: ship.id,
+        type: "deliver",
+        target_waypoint: "X1-UX81-A1",
+        parameters: %{
+          "caller" => "manual",
+          "contract_id" => "CONTRACT-1",
+          "trade_symbol" => "IRON_ORE",
+          "units" => 5
+        },
+        status: "blocked",
+        in_flight_action: %{
+          "kind" => "deliver",
+          "trade_symbol" => "IRON_ORE",
+          "units" => 5,
+          "recipient" => "CONTRACT-1",
+          "fulfilled_before" => 0,
+          "cargo_before" => 5
+        }
+      })
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case {conn.request_path, conn.method} do
+          {"/v2/my/ships/FLEET-SHIP", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" =>
+                ship_body("FLEET-SHIP", %{
+                  "cargo" => %{
+                    "capacity" => 40,
+                    "units" => 2,
+                    "inventory" => [%{"symbol" => "IRON_ORE", "units" => 2}]
+                  }
+                })
+            })
+
+          {"/v2/my/contracts", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => [
+                active_contract_body("CONTRACT-1", [
+                  contract_delivery_entry(%{"unitsFulfilled" => 3})
+                ])
+              ]
+            })
+        end
+      end)
+
+      assert {:ok, %ManualIntent{status: "completed", last_action_result: result}} =
+               Fleet.recover_manual_intent_on_boot("FLEET-SHIP", agent.id, agent.agent_token)
+
+      assert result == %{"kind" => "deliver", "units" => 3}
     end
 
     test "restart recovery does not infer a completed sale from a cargo delta" do
