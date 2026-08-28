@@ -165,6 +165,7 @@ defmodule SpaceTraders.Fleet do
       intent.ship_id in ^ship_ids and intent.status in ^@unfinished_intent_states
     )
     |> Repo.all()
+    |> Enum.reject(&(&1.parameters["caller"] == "job"))
     |> Map.new(&{&1.ship_id, &1})
   end
 
@@ -175,6 +176,7 @@ defmodule SpaceTraders.Fleet do
     |> where([intent], intent.ship_id in ^ship_ids and intent.status in ^@terminal_intent_states)
     |> order_by([intent], desc: intent.finished_at, desc: intent.id)
     |> Repo.all()
+    |> Enum.reject(&(&1.parameters["caller"] == "job"))
     |> Enum.group_by(& &1.ship_id)
   end
 
@@ -1169,7 +1171,7 @@ defmodule SpaceTraders.Fleet do
 
   defp validate_cargo_caller(ship, "job", %{"job_id" => job_id}) when is_integer(job_id) do
     case Repo.get(Job, job_id) do
-      %Job{ship_id: ship_id, status: "active"} when ship_id == ship.id -> :ok
+      %Job{ship_id: ship_id, type: "procurement", status: "active"} when ship_id == ship.id -> :ok
       _ -> {:error, :invalid_cargo_intent_owner}
     end
   end
@@ -1560,7 +1562,8 @@ defmodule SpaceTraders.Fleet do
   defp continue_job_owned_buy(agent, %ManualIntent{type: "buy", parameters: parameters} = intent) do
     with "job" <- parameters["caller"],
          job_id when is_integer(job_id) <- parameters["job_id"],
-         %Job{type: "procurement", status: "active"} = job <- Repo.get(Job, job_id),
+         %Job{type: "procurement", status: status} = job <- Repo.get(Job, job_id),
+         true <- status in ["active", "blocked"],
          %Ship{} = ship <- Repo.get(Ship, intent.ship_id),
          {:ok, live_ship} <-
            Agent.handle_game_result(
@@ -1569,6 +1572,11 @@ defmodule SpaceTraders.Fleet do
            ),
          {:ok, contract} <- procurement_contract(agent, job),
          {:ok, overview} <- Agent.agent_overview(agent) do
+      job =
+        Repo.update!(
+          Ecto.Changeset.change(job, status: "active", blocker: nil, blocked_reason: nil)
+        )
+
       advance_procurement_job(agent, job, live_ship, contract, overview.credits)
     else
       "manual" ->
@@ -1593,10 +1601,11 @@ defmodule SpaceTraders.Fleet do
     expected = action["expected"] || %{}
     trade_symbol = action["trade_symbol"]
 
-    with {:ok, overview} <- Agent.agent_overview(agent),
-         true <-
-           item_units(live_ship, trade_symbol) >= (expected["cargo_units_at_least"] || 0),
-         true <- overview.credits <= (expected["credits_at_most"] || overview.credits) do
+    with cargo_threshold when is_integer(cargo_threshold) <- expected["cargo_units_at_least"],
+         credit_threshold when is_integer(credit_threshold) <- expected["credits_at_most"],
+         {:ok, overview} <- Agent.agent_overview(agent),
+         true <- item_units(live_ship, trade_symbol) >= cargo_threshold,
+         true <- overview.credits <= credit_threshold do
       complete_cargo_intent(agent, intent, action["units"], action["listing_price"], nil)
     else
       _ -> block_cargo_intent_preserving_evidence(intent, {:ambiguous_operation_evidence, "buy"})
@@ -1624,6 +1633,7 @@ defmodule SpaceTraders.Fleet do
         )
       )
 
+    block_job_owned_buy(intent, reason)
     {:ok, intent}
   end
 
@@ -1639,8 +1649,22 @@ defmodule SpaceTraders.Fleet do
         )
       )
 
+    block_job_owned_buy(intent, reason)
     {:ok, intent}
   end
+
+  defp block_job_owned_buy(
+         %ManualIntent{parameters: %{"caller" => "job", "job_id" => job_id}},
+         reason
+       )
+       when is_integer(job_id) do
+    case Repo.get(Job, job_id) do
+      %Job{type: "procurement"} = job -> mark_procurement_job_blocked(job, reason)
+      _ -> :ok
+    end
+  end
+
+  defp block_job_owned_buy(_intent, _reason), do: :ok
 
   defp block_cargo_intent_preserving_evidence(intent, reason) do
     intent =
@@ -3808,8 +3832,8 @@ defmodule SpaceTraders.Fleet do
           ShipServer.ensure_started(ship_symbol, agent_id, agent_token)
 
           unless ship_symbol in timeline_symbols do
-            recover_job_on_boot(ship_symbol, agent_id, agent_token)
             recover_manual_intent_on_boot(ship_symbol, agent_id, agent_token)
+            recover_job_on_boot(ship_symbol, agent_id, agent_token)
           end
 
         :error ->
