@@ -4620,7 +4620,19 @@ defmodule SpaceTraders.FleetTest do
 
       assert_receive {:job_status_at_purchase, "paused"}
       assert intent.last_action_result == %{"kind" => "buy", "units" => 5, "price" => 10}
+      assert intent.parameters["caller"] == "manual"
       assert Fleet.ship_job(agent, "FLEET-SHIP").status == "paused"
+    end
+
+    test "Buy Goods Intent rejects an unverified Job caller" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      assert {:error, :invalid_cargo_intent_owner} =
+               Fleet.buy_goods_intent(agent, "FLEET-SHIP", "X1-UX81-A1", "IRON_ORE", 1,
+                 caller: "job",
+                 job_id: -1
+               )
     end
 
     test "Buy Goods Intent permits a zero-price listing within cargo capacity" do

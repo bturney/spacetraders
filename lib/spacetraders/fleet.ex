@@ -610,21 +610,8 @@ defmodule SpaceTraders.Fleet do
              max_unit_price: progress["price_ceiling"]
            ) do
       case intent.status do
-        "completed" ->
-          with {:ok, refreshed_ship} <-
-                 Agent.handle_game_result(
-                   agent,
-                   SpaceTraders.API.get_ship(agent.agent_token, live_ship.symbol)
-                 ),
-               {:ok, contract} <- procurement_contract(agent, job),
-               {:ok, overview} <- Agent.agent_overview(agent) do
-            advance_procurement_job(agent, job, refreshed_ship, contract, overview.credits)
-          else
-            {:error, reason} -> mark_procurement_job_blocked(job, reason)
-          end
-
-        _ ->
-          {:ok, job}
+        "completed" -> {:ok, Repo.get!(Job, job.id)}
+        _ -> {:ok, job}
       end
     else
       {:error, reason} -> mark_procurement_job_blocked(job, reason)
@@ -1127,9 +1114,12 @@ defmodule SpaceTraders.Fleet do
          opts
        )
        when is_binary(token) and token != "" do
+    caller = opts[:caller] || "manual"
+
     parameters =
       opts
       |> Map.new()
+      |> Map.put(:caller, caller)
       |> Map.put(:trade_symbol, trade_symbol)
       |> Map.put(:units, units)
       |> Map.new(fn {key, value} -> {to_string(key), value} end)
@@ -1139,7 +1129,9 @@ defmodule SpaceTraders.Fleet do
          true <-
            is_binary(trade_symbol) and trade_symbol != "" and is_integer(units) and units > 0,
          {:ok, ship} <- owned_ship(agent, ship_symbol),
-         :ok <- preempt_for_cargo_intent(agent, ship_symbol, type, opts),
+         true <- valid_cargo_constraints?(type, parameters),
+         :ok <- validate_cargo_caller(ship, caller, parameters),
+         :ok <- preempt_for_cargo_intent(agent, ship_symbol, type, caller),
          {:ok, intent} <-
            replace_manual_intent(ship, %{
              type: type,
@@ -1157,13 +1149,33 @@ defmodule SpaceTraders.Fleet do
   defp cargo_intent(%AgentRecord{}, _ship_symbol, _type, _waypoint, _trade_symbol, _units, _opts),
     do: {:error, :agent_token_missing}
 
-  defp preempt_for_cargo_intent(agent, ship_symbol, type, opts) do
-    if opts[:caller] == "job" do
+  defp preempt_for_cargo_intent(agent, ship_symbol, type, caller) do
+    if caller == "job" do
       :ok
     else
       preempt_miner_job_for(agent, ship_symbol, {:manual_override, "#{type} goods"})
     end
   end
+
+  defp valid_cargo_constraints?("buy", parameters) do
+    Enum.all?(["max_price", "max_unit_price", "max_total_price", "reserve_credits"], fn key ->
+      is_nil(parameters[key]) or (is_integer(parameters[key]) and parameters[key] >= 0)
+    end)
+  end
+
+  defp valid_cargo_constraints?(_type, _parameters), do: true
+
+  defp validate_cargo_caller(_ship, "manual", _parameters), do: :ok
+
+  defp validate_cargo_caller(ship, "job", %{"job_id" => job_id}) when is_integer(job_id) do
+    case Repo.get(Job, job_id) do
+      %Job{ship_id: ship_id, status: "active"} when ship_id == ship.id -> :ok
+      _ -> {:error, :invalid_cargo_intent_owner}
+    end
+  end
+
+  defp validate_cargo_caller(_ship, _caller, _parameters),
+    do: {:error, :invalid_cargo_intent_owner}
 
   @doc "Returns a Ship's unfinished Manual Control Intent, or nil."
   def ship_manual_intent(%AgentRecord{} = agent, ship_symbol) do
@@ -1517,7 +1529,7 @@ defmodule SpaceTraders.Fleet do
   defp cargo_price("sell", good), do: good.sell_price
   defp cargo_price(_, _good), do: nil
 
-  defp complete_cargo_intent(_agent, intent, units, price, _result) do
+  defp complete_cargo_intent(agent, intent, units, price, _result) do
     result = %{"kind" => intent.type, "units" => units} |> maybe_put_price(price)
 
     intent =
@@ -1538,8 +1550,42 @@ defmodule SpaceTraders.Fleet do
       result
     )
 
+    continue_job_owned_buy(agent, intent)
+
     {:ok, intent}
   end
+
+  # A Job-owned Buy is one Policy decision, even if prerequisite navigation or
+  # restart recovery completes it later than the original Policy evaluation.
+  defp continue_job_owned_buy(agent, %ManualIntent{type: "buy", parameters: parameters} = intent) do
+    with "job" <- parameters["caller"],
+         job_id when is_integer(job_id) <- parameters["job_id"],
+         %Job{type: "procurement", status: "active"} = job <- Repo.get(Job, job_id),
+         %Ship{} = ship <- Repo.get(Ship, intent.ship_id),
+         {:ok, live_ship} <-
+           Agent.handle_game_result(
+             agent,
+             SpaceTraders.API.get_ship(agent.agent_token, ship.symbol)
+           ),
+         {:ok, contract} <- procurement_contract(agent, job),
+         {:ok, overview} <- Agent.agent_overview(agent) do
+      advance_procurement_job(agent, job, live_ship, contract, overview.credits)
+    else
+      "manual" ->
+        :ok
+
+      nil ->
+        :ok
+
+      {:error, reason} ->
+        mark_procurement_job_blocked(Repo.get!(Job, parameters["job_id"]), reason)
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp continue_job_owned_buy(_agent, _intent), do: :ok
 
   # Buy has two independent authoritative effects. Both must match the persisted
   # request before recovery can declare an unknown transport outcome complete.
