@@ -1126,17 +1126,12 @@ defmodule SpaceTraders.Fleet do
     with true <- type in ["install_module", "remove_module"],
          true <- is_binary(module_symbol) and module_symbol != "",
          true <- valid_module_removal?(type, module_symbol, parameters["authorized_removals"]),
-         {:ok, ship} <- owned_ship(agent, ship_symbol),
-         :ok <- reconcile_pending_module_intent(agent, ship),
-         :ok <-
-           preempt_miner_job_for(agent, ship_symbol, {:manual_override, "module modification"}),
-         {:ok, intent} <-
-           replace_manual_intent(ship, %{
-             type: type,
-             target_waypoint: module_symbol,
-             parameters: parameters
-           }) do
-      reconcile_manual_intent(agent, intent)
+         {:ok, ship} <- owned_ship(agent, ship_symbol) do
+      case reconcile_pending_module_intent(agent, ship) do
+        {:resolved, intent} -> {:ok, intent}
+        :ok -> start_module_intent(agent, ship, type, module_symbol, parameters)
+        error -> error
+      end
     else
       false -> {:error, :invalid_module_intent}
       {:error, %Ecto.Changeset{}} -> {:error, :manual_intent_conflict}
@@ -1168,12 +1163,28 @@ defmodule SpaceTraders.Fleet do
           {:ok, %ManualIntent{in_flight_action: action}} when is_map(action) ->
             {:error, :manual_intent_reconciliation_required}
 
-          {:ok, _intent} ->
-            :ok
+          {:ok, intent} ->
+            {:resolved, intent}
         end
 
       _ ->
         :ok
+    end
+  end
+
+  defp start_module_intent(agent, ship, type, module_symbol, parameters) do
+    with :ok <-
+           preempt_miner_job_for(agent, ship.symbol, {:manual_override, "module modification"}),
+         {:ok, intent} <-
+           replace_manual_intent(ship, %{
+             type: type,
+             target_waypoint: module_symbol,
+             parameters: parameters
+           }) do
+      reconcile_manual_intent(agent, intent)
+    else
+      {:error, %Ecto.Changeset{}} -> {:error, :manual_intent_conflict}
+      error -> error
     end
   end
 
@@ -1794,7 +1805,7 @@ defmodule SpaceTraders.Fleet do
       end
 
     if completed?,
-      do: complete_module_intent(intent, nil),
+      do: complete_module_intent(intent, %{modules: live_ship.modules, cargo: live_ship.cargo}),
       else: block_module_intent_preserving_evidence(intent, :ambiguous_module_modification)
   end
 
@@ -1825,16 +1836,17 @@ defmodule SpaceTraders.Fleet do
   defp module_result(type, module_symbol, nil),
     do: %{"kind" => type, "module_symbol" => module_symbol, "quantity" => 1}
 
-  defp module_result(type, module_symbol, %{
-         modules: modules,
-         cargo: cargo,
-         transaction: transaction
-       }) do
+  defp module_result(type, module_symbol, %{modules: modules, cargo: cargo} = result) do
     %{"kind" => type, "module_symbol" => module_symbol, "quantity" => 1}
     |> Map.put("modules", Enum.map(modules, &module_evidence/1))
     |> Map.put("cargo", cargo_evidence(cargo))
-    |> Map.put("transaction", transaction_evidence(transaction))
+    |> maybe_put_transaction(Map.get(result, :transaction))
   end
+
+  defp maybe_put_transaction(result, nil), do: result
+
+  defp maybe_put_transaction(result, transaction),
+    do: Map.put(result, "transaction", transaction_evidence(transaction))
 
   defp await_module_reconciliation(intent, reason) do
     intent =
