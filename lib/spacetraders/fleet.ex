@@ -421,7 +421,7 @@ defmodule SpaceTraders.Fleet do
 
   def configure_explorer_job(%AgentRecord{}, _ship_symbol), do: {:error, :agent_token_missing}
 
-  @doc "Captures a paused Procurement Job for one Contract or Market recipient."
+  @doc "Captures a paused Procurement Job for one Contract, Construction, or Market recipient."
   def configure_procurement_job(%AgentRecord{agent_token: token} = agent, ship_symbol, attrs)
       when is_binary(token) and token != "" and is_map(attrs) do
     with :ok <- Agent.execution_allowed?(agent),
@@ -506,6 +506,7 @@ defmodule SpaceTraders.Fleet do
   defp procurement_progress_in_system(attrs, target_system) do
     contract_id = attrs[:contract_id] || attrs["contract_id"]
     recipient_type = attrs[:recipient_type] || attrs["recipient_type"] || "contract"
+    construction_system = attrs[:construction_system] || attrs["construction_system"]
     trade_symbol = attrs[:trade_symbol] || attrs["trade_symbol"]
     quantity = attrs[:quantity] || attrs["quantity"]
     destination = attrs[:destination_waypoint] || attrs["destination_waypoint"]
@@ -518,8 +519,9 @@ defmodule SpaceTraders.Fleet do
     compatible_cargo? =
       attrs[:compatible_existing_cargo?] || attrs["compatible_existing_cargo?"] || false
 
-    if recipient_type in ["contract", "market"] and
-         (recipient_type == "market" or is_binary(contract_id)) and is_binary(trade_symbol) and
+    if recipient_type in ["contract", "construction", "market"] and
+         (recipient_type in ["market", "construction"] or is_binary(contract_id)) and
+         is_binary(trade_symbol) and
          is_integer(quantity) and
          quantity > 0 and
          is_binary(destination) and is_list(source_systems) and
@@ -529,7 +531,8 @@ defmodule SpaceTraders.Fleet do
          (is_nil(minimum_sale_price) or
             (is_integer(minimum_sale_price) and minimum_sale_price > 0)) and
          (is_nil(minimum_sale_value) or
-            (is_integer(minimum_sale_value) and minimum_sale_value > 0)) do
+            (is_integer(minimum_sale_value) and minimum_sale_value > 0)) and
+         valid_construction_recipient?(recipient_type, construction_system, target_system) do
       {:ok,
        %{
          "recipient_type" => recipient_type,
@@ -548,7 +551,8 @@ defmodule SpaceTraders.Fleet do
          "sold" => 0,
          "accepted" => 0
        }
-       |> maybe_put_contract_id(contract_id)}
+       |> maybe_put_contract_id(contract_id)
+       |> maybe_put_construction_system(recipient_type, construction_system)}
     else
       {:error, :invalid_procurement_configuration}
     end
@@ -558,6 +562,18 @@ defmodule SpaceTraders.Fleet do
     do: Map.put(progress, "contract_id", contract_id)
 
   defp maybe_put_contract_id(progress, _contract_id), do: progress
+
+  defp maybe_put_construction_system(progress, "construction", construction_system),
+    do: Map.put(progress, "construction_system", construction_system)
+
+  defp maybe_put_construction_system(progress, _recipient_type, _construction_system),
+    do: progress
+
+  defp valid_construction_recipient?("construction", construction_system, target_system),
+    do: is_binary(construction_system) and construction_system == target_system
+
+  defp valid_construction_recipient?(_recipient_type, _construction_system, _target_system),
+    do: true
 
   @doc "Starts or resumes a Procurement Job from fresh Contract, Ship, and credit state."
   def start_procurement_job(%AgentRecord{} = agent, ship_symbol) do
@@ -733,8 +749,29 @@ defmodule SpaceTraders.Fleet do
     end
   end
 
+  defp procurement_construction(agent, job) do
+    system = job.progress["construction_system"]
+    waypoint = job.progress["destination_waypoint"]
+
+    with true <- system == job.progress["target_system"],
+         {:ok, construction} <-
+           Agent.handle_game_result(
+             agent,
+             SpaceTraders.API.get_construction(agent.agent_token, system, waypoint)
+           ) do
+      record_construction_observation(agent, system, construction, "get_construction")
+      {:ok, construction}
+    else
+      false -> {:error, :recipient_conflict}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
   defp procurement_recipient(_agent, %{progress: %{"recipient_type" => "market"}}),
     do: {:ok, :market}
+
+  defp procurement_recipient(agent, %{progress: %{"recipient_type" => "construction"}} = job),
+    do: procurement_construction(agent, job)
 
   defp procurement_recipient(agent, job), do: procurement_contract(agent, job)
 
@@ -756,10 +793,8 @@ defmodule SpaceTraders.Fleet do
             :market ->
               0
 
-            contract ->
-              contract.terms.deliver
-              |> Enum.find(&(&1.trade_symbol == progress["trade_symbol"]))
-              |> Map.fetch!(:units_fulfilled)
+            recipient ->
+              recipient_fulfilled_units(recipient, progress["trade_symbol"])
           end
 
         {:ok,
@@ -804,14 +839,9 @@ defmodule SpaceTraders.Fleet do
         :market ->
           progress["sold"] || 0
 
-        contract ->
-          term =
-            Enum.find(
-              contract.terms.deliver || [],
-              &(&1.trade_symbol == progress["trade_symbol"])
-            )
-
-          max(term.units_fulfilled - (progress["accepted_baseline"] || term.units_fulfilled), 0)
+        recipient ->
+          fulfilled = recipient_fulfilled_units(recipient, progress["trade_symbol"])
+          max(fulfilled - (progress["accepted_baseline"] || fulfilled), 0)
       end
 
     requested = progress["requested"]
@@ -876,8 +906,9 @@ defmodule SpaceTraders.Fleet do
              "units" => units,
              "contract_id" => progress["contract_id"],
              "recipient" => %{
-               "type" => "contract",
+               "type" => progress["recipient_type"],
                "contract_id" => progress["contract_id"],
+               "system" => progress["construction_system"],
                "waypoint" => progress["destination_waypoint"]
              }
            }
@@ -899,6 +930,7 @@ defmodule SpaceTraders.Fleet do
                "recipient" => %{
                  "type" => progress["recipient_type"],
                  "contract_id" => progress["contract_id"],
+                 "system" => progress["construction_system"],
                  "waypoint" => progress["destination_waypoint"]
                }
              }
@@ -996,6 +1028,20 @@ defmodule SpaceTraders.Fleet do
       Repo.update!(
         Ecto.Changeset.change(job, progress: Map.put(progress, "last_applied_intent_id", id))
       )
+    end
+  end
+
+  defp recipient_fulfilled_units(%{terms: terms}, trade_symbol) do
+    case Enum.find(terms.deliver || [], &(&1.trade_symbol == trade_symbol)) do
+      %{units_fulfilled: units} when is_integer(units) -> units
+      _ -> 0
+    end
+  end
+
+  defp recipient_fulfilled_units(%{materials: materials}, trade_symbol) do
+    case Enum.find(materials || [], &(&1.trade_symbol == trade_symbol)) do
+      %{fulfilled: units} when is_integer(units) -> units
+      _ -> 0
     end
   end
 
@@ -1104,6 +1150,16 @@ defmodule SpaceTraders.Fleet do
     case find_deliverable(contract, trade_symbol) do
       nil -> %{"trade_symbol" => trade_symbol, "accepted" => "unavailable"}
       delivery -> %{"trade_symbol" => trade_symbol, "units_fulfilled" => delivery.units_fulfilled}
+    end
+  end
+
+  defp construction_delivery_evidence(construction, trade_symbol) do
+    case Enum.find(construction.materials || [], &(&1.trade_symbol == trade_symbol)) do
+      %{fulfilled: fulfilled} when is_integer(fulfilled) ->
+        %{"trade_symbol" => trade_symbol, "units_fulfilled" => fulfilled}
+
+      _ ->
+        %{"trade_symbol" => trade_symbol, "accepted" => "unavailable"}
     end
   end
 
@@ -1584,6 +1640,20 @@ defmodule SpaceTraders.Fleet do
     )
   end
 
+  @doc "Starts a durable Deliver Goods Intent for a Construction recipient."
+  def deliver_construction_goods_intent(
+        agent,
+        ship_symbol,
+        system_symbol,
+        waypoint,
+        trade_symbol,
+        units
+      ) do
+    cargo_intent(agent, ship_symbol, "deliver", waypoint, trade_symbol, units,
+      recipient: %{type: "construction", system: system_symbol, waypoint: waypoint}
+    )
+  end
+
   @doc "Installs one Cargo module through durable Manual Control."
   def install_module_intent(agent, ship_symbol, module_symbol) do
     module_intent(agent, ship_symbol, "install_module", module_symbol, %{})
@@ -1729,6 +1799,7 @@ defmodule SpaceTraders.Fleet do
     Map.put(parameters, "recipient", %{
       "type" => recipient[:type] || recipient["type"],
       "contract_id" => recipient[:contract_id] || recipient["contract_id"],
+      "system" => recipient[:system] || recipient["system"],
       "waypoint" => recipient[:waypoint] || recipient["waypoint"] || waypoint
     })
   end
@@ -1965,8 +2036,8 @@ defmodule SpaceTraders.Fleet do
 
   defp dispatch_cargo_intent(agent, intent, live_ship) do
     if intent.type == "deliver" do
-      with {:ok, contract} <- delivery_contract_for_intent(agent, intent),
-           {:ok, units, _credits} <- executable_cargo_units(intent, live_ship, contract, agent) do
+      with {:ok, recipient} <- delivery_recipient_for_intent(agent, intent),
+           {:ok, units, _credits} <- executable_cargo_units(intent, live_ship, recipient, agent) do
         with {:ok, intent} <-
                claim_intent_action(intent, %{
                  "kind" => "deliver",
@@ -1974,7 +2045,7 @@ defmodule SpaceTraders.Fleet do
                  "units" => units,
                  "recipient" => intent.parameters["recipient"]
                }) do
-          execute_cargo_intent(agent, intent, live_ship, units, contract)
+          execute_cargo_intent(agent, intent, live_ship, units, recipient)
         else
           {:error, _reason} -> :ok
         end
@@ -2133,7 +2204,7 @@ defmodule SpaceTraders.Fleet do
          %ManualIntent{type: "deliver"} = intent,
          live_ship,
          units,
-         _contract
+         {:contract, _contract}
        ) do
     with {:ok, contract} <- procurement_contract_for_intent(agent, intent),
          {:ok, result} <-
@@ -2164,6 +2235,38 @@ defmodule SpaceTraders.Fleet do
     else
       {:error, %SpaceTraders.API.Error{} = reason} -> block_cargo_intent(intent, reason)
       {:error, reason} -> block_cargo_intent(intent, reason)
+    end
+  end
+
+  defp execute_cargo_intent(
+         agent,
+         %ManualIntent{type: "deliver"} = intent,
+         live_ship,
+         units,
+         {:construction, construction}
+       ) do
+    recipient = intent.parameters["recipient"]
+
+    case supply_construction(
+           agent,
+           recipient["system"],
+           recipient["waypoint"],
+           live_ship.symbol,
+           intent.parameters["trade_symbol"],
+           units
+         ) do
+      {:ok, %{construction: updated} = result} ->
+        accepted =
+          delivered_construction_units(construction, updated, intent.parameters["trade_symbol"])
+
+        if accepted > 0 do
+          complete_cargo_intent(agent, intent, accepted, nil, result)
+        else
+          block_cargo_intent(intent, :recipient_rejected_delivery)
+        end
+
+      {:error, reason} ->
+        block_cargo_intent(intent, reason)
     end
   end
 
@@ -2531,6 +2634,14 @@ defmodule SpaceTraders.Fleet do
     Map.put(result, "recipient", contract_delivery_evidence(contract, result["trade_symbol"]))
   end
 
+  defp maybe_put_delivery(result, %{construction: construction}, "deliver") do
+    Map.put(
+      result,
+      "recipient",
+      construction_delivery_evidence(construction, result["trade_symbol"])
+    )
+  end
+
   defp maybe_put_delivery(result, _response, _type), do: result
 
   defp block_cargo_intent(intent, reason) do
@@ -2603,10 +2714,36 @@ defmodule SpaceTraders.Fleet do
     end
   end
 
+  defp delivery_recipient_for_intent(agent, intent) do
+    case delivery_recipient(intent) do
+      {:ok, %{"type" => "construction", "system" => system, "waypoint" => waypoint}}
+      when is_binary(system) and is_binary(waypoint) and waypoint == intent.target_waypoint ->
+        case Agent.handle_game_result(
+               agent,
+               SpaceTraders.API.get_construction(agent.agent_token, system, waypoint)
+             ) do
+          {:ok, construction} ->
+            record_construction_observation(agent, system, construction, "get_construction")
+            {:ok, {:construction, construction}}
+
+          {:error, reason} ->
+            {:error, reason}
+        end
+
+      _ ->
+        with {:ok, contract} <- delivery_contract_for_intent(agent, intent),
+             do: {:ok, {:contract, contract}}
+    end
+  end
+
   defp delivery_recipient(%ManualIntent{} = intent) do
     recipient = (intent.in_flight_action || %{})["recipient"] || intent.parameters["recipient"]
 
     case recipient do
+      %{"type" => "construction", "system" => system, "waypoint" => waypoint}
+      when is_binary(system) and is_binary(waypoint) ->
+        {:ok, recipient}
+
       %{"type" => "contract", "contract_id" => contract_id, "waypoint" => waypoint}
       when is_binary(contract_id) and is_binary(waypoint) ->
         {:ok, recipient}
@@ -2649,6 +2786,21 @@ defmodule SpaceTraders.Fleet do
     max(fulfilled_units(recipient, trade_symbol) - fulfilled_units(before, trade_symbol), 0)
   end
 
+  defp delivered_construction_units(before, recipient, trade_symbol) do
+    max(
+      construction_fulfilled_units(recipient, trade_symbol) -
+        construction_fulfilled_units(before, trade_symbol),
+      0
+    )
+  end
+
+  defp construction_fulfilled_units(construction, trade_symbol) do
+    case Enum.find(construction.materials || [], &(&1.trade_symbol == trade_symbol)) do
+      %{fulfilled: fulfilled} when is_integer(fulfilled) -> fulfilled
+      _ -> 0
+    end
+  end
+
   defp fulfilled_units(contract, trade_symbol) do
     case Enum.find(contract.terms.deliver || [], &(&1.trade_symbol == trade_symbol)) do
       %{units_fulfilled: units} when is_integer(units) -> units
@@ -2679,9 +2831,23 @@ defmodule SpaceTraders.Fleet do
     end
   end
 
-  defp fulfillment_remaining(contract, trade_symbol) do
+  defp fulfillment_remaining({:contract, contract}, trade_symbol) do
     case Enum.find(contract.terms.deliver || [], &(&1.trade_symbol == trade_symbol)) do
       %{units_required: required, units_fulfilled: fulfilled}
+      when is_integer(required) and is_integer(fulfilled) ->
+        max(required - fulfilled, 0)
+
+      _ ->
+        0
+    end
+  end
+
+  defp fulfillment_remaining({:construction, construction}, trade_symbol),
+    do: construction_fulfillment_remaining(construction, trade_symbol)
+
+  defp construction_fulfillment_remaining(construction, trade_symbol) do
+    case Enum.find(construction.materials || [], &(&1.trade_symbol == trade_symbol)) do
+      %{required: required, fulfilled: fulfilled}
       when is_integer(required) and is_integer(fulfilled) ->
         max(required - fulfilled, 0)
 

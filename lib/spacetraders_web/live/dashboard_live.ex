@@ -690,6 +690,56 @@ defmodule SpaceTradersWeb.DashboardLive do
 
   @impl true
   def handle_event(
+        "deliver_construction",
+        %{
+          "agent_id" => agent_id,
+          "system_symbol" => system_symbol,
+          "destination_waypoint" => destination_waypoint,
+          "ship_symbol" => ship_symbol,
+          "trade_symbol" => trade_symbol,
+          "units" => units
+        },
+        socket
+      ) do
+    with %{agent: agent} <-
+           Enum.find(socket.assigns.overviews, &(to_string(&1.agent.id) == agent_id)),
+         {:ok, units} <- parse_units(units),
+         {:ok, %{status: "completed"}} <-
+           Fleet.deliver_construction_goods_intent(
+             agent,
+             ship_symbol,
+             system_symbol,
+             destination_waypoint,
+             trade_symbol,
+             units
+           ) do
+      socket =
+        refresh_agent(socket, agent)
+        |> clear_draft(draft_key("deliver-construction", [ship_symbol, destination_waypoint]))
+
+      {:noreply, put_flash(socket, :info, "Supplied #{units} #{trade_symbol}.")}
+    else
+      {:ok, intent} ->
+        {:noreply,
+         put_flash(
+           socket,
+           :error,
+           if(intent.blocker,
+             do: live_error(intent.last_action_result["error"] || intent.blocker.reason),
+             else: "Deliver Goods Intent is #{intent.status}."
+           )
+         )}
+
+      nil ->
+        {:noreply, put_flash(socket, :error, "That Construction project is not available.")}
+
+      {:error, reason} ->
+        {:noreply, put_flash(socket, :error, live_error(reason))}
+    end
+  end
+
+  @impl true
+  def handle_event(
         "fulfill_contract",
         %{"agent_id" => agent_id, "contract_id" => contract_id},
         socket
@@ -2122,6 +2172,57 @@ defmodule SpaceTradersWeb.DashboardLive do
             namespace="construction"
             title="Construction readiness"
           />
+          <form
+            :for={ship <- construction_delivery_ships(@ships, waypoint.symbol)}
+            :if={waypoint.is_under_construction == true}
+            id={"deliver-construction-#{@agent_id}-#{waypoint.symbol}-#{ship.symbol}"}
+            phx-change="track_draft"
+            phx-submit="deliver_construction"
+            class="mt-4 grid grid-cols-[minmax(0,1fr)_5rem_auto] gap-2 sm:flex"
+            data-construction-delivery
+          >
+            <input type="hidden" name="agent_id" value={@agent_id} />
+            <input type="hidden" name="system_symbol" value={waypoint.system_symbol} />
+            <input type="hidden" name="destination_waypoint" value={waypoint.symbol} />
+            <input type="hidden" name="ship_symbol" value={ship.symbol} />
+            <input
+              type="hidden"
+              name="draft_key"
+              value={draft_key("deliver-construction", [ship.symbol, waypoint.symbol])}
+            />
+            <input
+              name="trade_symbol"
+              placeholder="Trade good"
+              value={
+                draft_field(
+                  @form_drafts,
+                  "deliver-construction",
+                  [ship.symbol, waypoint.symbol],
+                  "trade_symbol",
+                  ""
+                )
+              }
+              class="input input-bordered input-sm w-full font-mono"
+              required
+            />
+            <input
+              name="units"
+              type="number"
+              min="1"
+              value={
+                draft_field(
+                  @form_drafts,
+                  "deliver-construction",
+                  [ship.symbol, waypoint.symbol],
+                  "units",
+                  1
+                )
+              }
+              class="input input-bordered input-sm w-full sm:w-20"
+              required
+            />
+            <button type="submit" class="btn btn-secondary btn-sm">Supply</button>
+          </form>
           <.readiness_facts
             facts={@intelligence}
             namespace="jump_gate"
@@ -4336,6 +4437,14 @@ defmodule SpaceTradersWeb.DashboardLive do
   end
 
   defp delivery_ships(_, _, _), do: []
+
+  defp construction_delivery_ships({:ok, ships}, destination) when is_list(ships) do
+    Enum.filter(ships, fn ship ->
+      not in_transit?(ship) and ship_location(ship) == destination and cargo_units(ship.cargo) > 0
+    end)
+  end
+
+  defp construction_delivery_ships(_, _), do: []
 
   defp delivery_limit(ship, good) do
     min(delivery_units(ship, good.trade_symbol), good.units_required - good.units_fulfilled)
