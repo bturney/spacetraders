@@ -422,10 +422,16 @@ defmodule SpaceTraders.Fleet do
   def configure_explorer_job(%AgentRecord{}, _ship_symbol), do: {:error, :agent_token_missing}
 
   @doc "Captures a paused Procurement Job for one Contract or Market recipient."
-  def configure_procurement_job(%AgentRecord{} = agent, ship_symbol, attrs) when is_map(attrs) do
-    with {:ok, ship} <- owned_ship(agent, ship_symbol),
+  def configure_procurement_job(%AgentRecord{agent_token: token} = agent, ship_symbol, attrs)
+      when is_binary(token) and token != "" and is_map(attrs) do
+    with :ok <- Agent.execution_allowed?(agent),
+         {:ok, ship} <- owned_ship(agent, ship_symbol),
          nil <- unfinished_job(ship.id),
-         {:ok, progress} <- procurement_progress(attrs) do
+         :ok <- validate_procurement_attrs(attrs),
+         {:ok, live_ship} <-
+           Agent.handle_game_result(agent, SpaceTraders.API.get_ship(token, ship_symbol)),
+         system when is_binary(system) <- live_ship.nav.system_symbol,
+         {:ok, progress} <- procurement_progress(attrs, system) do
       job =
         %Job{ship_id: ship.id}
         |> Job.changeset(%{
@@ -448,7 +454,56 @@ defmodule SpaceTraders.Fleet do
     end
   end
 
-  defp procurement_progress(attrs) do
+  def configure_procurement_job(%AgentRecord{}, _ship_symbol, _attrs),
+    do: {:error, :agent_token_missing}
+
+  defp procurement_progress(attrs, target_system) do
+    destination = attrs[:destination_waypoint] || attrs["destination_waypoint"]
+    source_systems = attrs[:source_systems] || attrs["source_systems"] || []
+
+    with {:ok, destination_system} <- system_from_headquarters(destination),
+         :ok <- validate_procurement_destination(destination_system, target_system),
+         :ok <- validate_procurement_sources(source_systems, target_system) do
+      procurement_progress_in_system(attrs, target_system)
+    else
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp validate_procurement_destination(destination_system, destination_system), do: :ok
+
+  defp validate_procurement_destination(destination_system, target_system) do
+    {:error,
+     {:remote_destination_system_unsupported,
+      %{current_system: target_system, destination_system: destination_system}}}
+  end
+
+  defp validate_procurement_sources(source_systems, target_system) do
+    case Enum.find(source_systems, &(&1 != target_system)) do
+      nil ->
+        :ok
+
+      source_system ->
+        {:error,
+         {:remote_source_system_unsupported,
+          %{current_system: target_system, source_system: source_system}}}
+    end
+  end
+
+  defp validate_procurement_attrs(attrs) do
+    with trade_symbol when is_binary(trade_symbol) <-
+           attrs[:trade_symbol] || attrs["trade_symbol"],
+         quantity when is_integer(quantity) and quantity > 0 <-
+           attrs[:quantity] || attrs["quantity"],
+         destination when is_binary(destination) <-
+           attrs[:destination_waypoint] || attrs["destination_waypoint"] do
+      :ok
+    else
+      _ -> {:error, :invalid_procurement_configuration}
+    end
+  end
+
+  defp procurement_progress_in_system(attrs, target_system) do
     contract_id = attrs[:contract_id] || attrs["contract_id"]
     recipient_type = attrs[:recipient_type] || attrs["recipient_type"] || "contract"
     trade_symbol = attrs[:trade_symbol] || attrs["trade_symbol"]
@@ -478,6 +533,7 @@ defmodule SpaceTraders.Fleet do
          "trade_symbol" => trade_symbol,
          "requested" => quantity,
          "destination_waypoint" => destination,
+         "target_system" => target_system,
          "source_systems" => source_systems,
          "reserve_credits" => reserve_credits,
          "price_ceiling" => price_ceiling,
@@ -547,6 +603,7 @@ defmodule SpaceTraders.Fleet do
              agent,
              SpaceTraders.API.get_ship(agent.agent_token, ship_symbol)
            ),
+         :ok <- procurement_system_matches?(job.progress, live_ship),
          {:ok, recipient} <- procurement_recipient(agent, job),
          {:ok, job} <- initialize_procurement_progress(job, live_ship, recipient),
          {:ok, overview} <- Agent.agent_overview(agent) do
@@ -762,7 +819,7 @@ defmodule SpaceTraders.Fleet do
     |> Map.put("requested", requested)
     |> Map.put("accepted", accepted)
     |> Map.put("aboard", max(aboard, 0))
-    |> Map.put("acquired", max(progress["acquired"] || 0, accepted + aboard))
+    |> Map.put("acquired", progress["acquired"] || 0)
   end
 
   # Procurement selects parameters; the shared Intent engine owns every Ship
@@ -904,6 +961,13 @@ defmodule SpaceTraders.Fleet do
     else
       progress =
         case intent do
+          %ManualIntent{type: "buy", last_action_result: result} ->
+            Map.update!(
+              job.progress,
+              "acquired",
+              &(&1 + (get_in(result, ["transaction", "units"]) || 0))
+            )
+
           %ManualIntent{type: "sell", last_action_result: result} ->
             Map.update!(
               job.progress,
@@ -966,6 +1030,19 @@ defmodule SpaceTraders.Fleet do
           %{current_system: live_ship.nav.system_symbol, source_system: source_system}}}
     end
   end
+
+  defp procurement_system_matches?(%{"target_system" => system}, live_ship)
+       when system == live_ship.nav.system_symbol,
+       do: :ok
+
+  defp procurement_system_matches?(%{"target_system" => system}, live_ship) do
+    {:error,
+     {:fixed_system_changed,
+      %{configured_system: system, current_system: live_ship.nav.system_symbol}}}
+  end
+
+  defp procurement_system_matches?(_progress, _live_ship),
+    do: {:error, :current_system_unavailable}
 
   defp procurement_market_source(agent, live_ship, waypoints, trade_symbol) do
     Enum.find_value(waypoints, fn waypoint ->
@@ -4521,12 +4598,14 @@ defmodule SpaceTraders.Fleet do
 
   defp refresh_construction_after(result, _agent, _system, _waypoint, _ship), do: result
 
-  defp system_from_headquarters(headquarters) do
+  defp system_from_headquarters(headquarters) when is_binary(headquarters) do
     case Regex.run(~r/^(.+)-[^-]+$/, headquarters, capture: :all) do
       [_, system] -> {:ok, system}
       _ -> {:error, :invalid_headquarters}
     end
   end
+
+  defp system_from_headquarters(_headquarters), do: {:error, :invalid_headquarters}
 
   @doc """
   Purchases a Ship offered by an on-site Shipyard in a Fleet command snapshot.

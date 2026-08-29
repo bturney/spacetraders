@@ -3067,6 +3067,49 @@ defmodule SpaceTraders.FleetTest do
   end
 
   describe "Procurement Job" do
+    setup do
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case {conn.request_path, conn.method} do
+          {"/v2/my/ships/" <> ship_symbol, "GET"} ->
+            Req.Test.json(conn, %{"data" => ship_body(ship_symbol)})
+
+          {path, method} ->
+            flunk("unexpected request #{method} #{path}")
+        end
+      end)
+
+      :ok
+    end
+
+    test "captures the Ship's fixed current System and rejects a remote destination" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+      ship_fixture(agent, "FLEET-SHIP-2")
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        assert {"GET", "/v2/my/ships/" <> ship_symbol} = {conn.method, conn.request_path}
+        Req.Test.json(conn, %{"data" => ship_body(ship_symbol)})
+      end)
+
+      assert {:ok, %Job{progress: %{"target_system" => "X1-UX81"}}} =
+               Fleet.configure_procurement_job(agent, "FLEET-SHIP-2", %{
+                 recipient_type: "market",
+                 trade_symbol: "IRON_ORE",
+                 quantity: 30,
+                 destination_waypoint: "X1-UX81-A1"
+               })
+
+      assert {:error,
+              {:remote_destination_system_unsupported,
+               %{current_system: "X1-UX81", destination_system: "X1-DF55"}}} =
+               Fleet.configure_procurement_job(agent, "FLEET-SHIP", %{
+                 recipient_type: "market",
+                 trade_symbol: "IRON_ORE",
+                 quantity: 30,
+                 destination_waypoint: "X1-DF55-A1"
+               })
+    end
+
     test "persists a fixed Market recipient and sale floor" do
       agent = agent_fixture()
       ship_fixture(agent, "FLEET-SHIP")
@@ -3086,6 +3129,7 @@ defmodule SpaceTraders.FleetTest do
                "trade_symbol" => "IRON_ORE",
                "requested" => 30,
                "destination_waypoint" => "X1-UX81-A1",
+               "target_system" => "X1-UX81",
                "source_systems" => ["X1-UX81"],
                "reserve_credits" => 0,
                "price_ceiling" => nil,
@@ -3166,7 +3210,11 @@ defmodule SpaceTraders.FleetTest do
                  compatible_existing_cargo?: true
                })
 
-      assert {:ok, %Job{status: "completed", progress: %{"sold" => 30, "accepted" => 30}}} =
+      assert {:ok,
+              %Job{
+                status: "completed",
+                progress: %{"acquired" => 0, "sold" => 30, "accepted" => 30}
+              }} =
                Fleet.start_procurement_job(agent, "FLEET-SHIP")
 
       assert_receive :fresh_sale_listing
@@ -3199,7 +3247,7 @@ defmodule SpaceTraders.FleetTest do
                  trade_symbol: "IRON_ORE",
                  quantity: 30,
                  destination_waypoint: "X1-UX81-A1",
-                 source_systems: ["X1-UX81", "X1-DF55"],
+                 source_systems: ["X1-UX81"],
                  reserve_credits: 500,
                  price_ceiling: 75,
                  compatible_existing_cargo?: true
@@ -3214,7 +3262,8 @@ defmodule SpaceTraders.FleetTest do
                "trade_symbol" => "IRON_ORE",
                "requested" => 30,
                "destination_waypoint" => "X1-UX81-A1",
-               "source_systems" => ["X1-UX81", "X1-DF55"],
+               "target_system" => "X1-UX81",
+               "source_systems" => ["X1-UX81"],
                "reserve_credits" => 500,
                "price_ceiling" => 75,
                "minimum_sale_price" => nil,
