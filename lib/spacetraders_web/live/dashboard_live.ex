@@ -363,6 +363,11 @@ defmodule SpaceTradersWeb.DashboardLive do
   end
 
   @impl true
+  def handle_event("configure_procurement_job", params, socket) do
+    save_procurement_job(socket, params)
+  end
+
+  @impl true
   def handle_event("configure_explorer_job", %{"symbol" => ship_symbol}, socket) do
     with {:ok, agent} <- agent_for_ship(socket, ship_symbol),
          {:ok, _job} <- Fleet.configure_explorer_job(agent, ship_symbol) do
@@ -847,6 +852,26 @@ defmodule SpaceTradersWeb.DashboardLive do
     end
   end
 
+  @impl true
+  def handle_event(action, %{"symbol" => ship_symbol}, socket)
+      when action in ["pause_procurement_job", "resume_procurement_job", "stop_procurement_job"] do
+    with {:ok, agent} <- agent_for_ship(socket, ship_symbol),
+         :ok <- procurement_job_action(action, agent, ship_symbol) do
+      message =
+        case action do
+          "pause_procurement_job" -> "#{ship_symbol} Procurement Job paused."
+          "resume_procurement_job" -> "#{ship_symbol} Procurement Job resumed."
+          "stop_procurement_job" -> "#{ship_symbol} Procurement Job stopped; Ship is manual."
+        end
+
+      {:noreply, put_flash(refresh_agent(socket, agent), :info, message)}
+    else
+      {:error, reason} ->
+        {:noreply,
+         put_flash(refresh_agent_for_ship(socket, ship_symbol), :error, live_error(reason))}
+    end
+  end
+
   defp miner_job_action("pause_miner_job", agent, ship),
     do: unwrap_config(Fleet.pause_miner_job(agent, ship))
 
@@ -869,6 +894,15 @@ defmodule SpaceTradersWeb.DashboardLive do
 
   defp explorer_job_action("stop_explorer_job", agent, ship),
     do: Fleet.stop_explorer_job(agent, ship)
+
+  defp procurement_job_action("pause_procurement_job", agent, ship),
+    do: Fleet.pause_procurement_job(agent, ship) |> unwrap_job_result()
+
+  defp procurement_job_action("resume_procurement_job", agent, ship),
+    do: Fleet.resume_procurement_job(agent, ship) |> unwrap_job_result()
+
+  defp procurement_job_action("stop_procurement_job", agent, ship),
+    do: Fleet.stop_procurement_job(agent, ship)
 
   defp unwrap_config({:ok, _config}), do: :ok
   defp unwrap_config(error), do: error
@@ -904,6 +938,62 @@ defmodule SpaceTradersWeb.DashboardLive do
 
   defp save_miner_job(:replace, agent, ship_symbol, attrs),
     do: Fleet.replace_miner_job(agent, ship_symbol, attrs)
+
+  defp save_procurement_job(socket, params) do
+    with {:ok, agent} <- agent_for_ship(socket, params["ship_symbol"]),
+         {:ok, quantity} <- parse_units(params["quantity"]),
+         {:ok, reserve_credits} <- parse_optional_units(params["reserve_credits"]),
+         {:ok, price_ceiling} <- parse_optional_units(params["price_ceiling"]),
+         {:ok, minimum_sale_price} <- parse_optional_units(params["minimum_sale_price"]),
+         {:ok, minimum_sale_value} <- parse_optional_units(params["minimum_sale_value"]),
+         {:ok, _job} <-
+           Fleet.configure_procurement_job(agent, params["ship_symbol"], %{
+             recipient_type: params["recipient_type"] || "market",
+             contract_id: blank_to_nil(params["contract_id"]),
+             trade_symbol: String.trim(params["trade_symbol"] || ""),
+             quantity: quantity,
+             destination_waypoint: String.trim(params["destination_waypoint"] || ""),
+             source_systems: split_systems(params["source_systems"]),
+             reserve_credits: reserve_credits || 0,
+             price_ceiling: price_ceiling,
+             minimum_sale_price: minimum_sale_price,
+             minimum_sale_value: minimum_sale_value,
+             compatible_existing_cargo?: Map.has_key?(params, "compatible_existing_cargo")
+           }) do
+      {:noreply,
+       put_flash(
+         socket
+         |> refresh_agent(agent)
+         |> clear_draft(draft_key("procurement_job", [params["ship_symbol"]])),
+         :info,
+         "Procurement Job assigned and paused."
+       )}
+    else
+      {:error, reason} -> {:noreply, put_flash(socket, :error, live_error(reason))}
+    end
+  end
+
+  defp parse_optional_units(nil), do: {:ok, nil}
+  defp parse_optional_units(""), do: {:ok, nil}
+  defp parse_optional_units(value), do: parse_units(value)
+
+  defp blank_to_nil(value) when is_binary(value) do
+    case String.trim(value) do
+      "" -> nil
+      value -> value
+    end
+  end
+
+  defp blank_to_nil(value), do: value
+
+  defp split_systems(value) when is_binary(value) do
+    value |> String.split(",", trim: true) |> Enum.map(&String.trim/1)
+  end
+
+  defp split_systems(_value), do: []
+
+  defp unwrap_job_result({:ok, _job}), do: :ok
+  defp unwrap_job_result(error), do: error
 
   @impl true
   def handle_info({:ship_updated, agent_id, _ship_symbol}, socket) do
@@ -2814,18 +2904,22 @@ defmodule SpaceTradersWeb.DashboardLive do
         <p class="mt-4 text-xs font-semibold uppercase tracking-wider opacity-60">
           Cargo &amp; Trade
         </p>
-        <%= if @ship.job && @ship.job.type == "explorer" do %>
-          <.explorer_job_panel ship={@ship} />
-        <% else %>
-          <.miner_job_panel ship={@ship} form_drafts={@form_drafts} />
-          <button
-            :if={is_nil(@ship.job)}
-            type="button"
-            phx-click="configure_explorer_job"
-            phx-value-symbol={@ship.symbol}
-            class="btn btn-outline btn-sm mt-2"
-            data-configure-explorer-job
-          >Assign System Exploration Job</button>
+        <%= cond do %>
+          <% @ship.job && @ship.job.type == "explorer" -> %>
+            <.explorer_job_panel ship={@ship} />
+          <% @ship.job && @ship.job.type == "procurement" -> %>
+            <.procurement_job_panel ship={@ship} />
+          <% true -> %>
+            <.miner_job_panel ship={@ship} form_drafts={@form_drafts} />
+            <.procurement_job_panel ship={@ship} form_drafts={@form_drafts} />
+            <button
+              :if={is_nil(@ship.job)}
+              type="button"
+              phx-click="configure_explorer_job"
+              phx-value-symbol={@ship.symbol}
+              class="btn btn-outline btn-sm mt-2"
+              data-configure-explorer-job
+            >Assign System Exploration Job</button>
         <% end %>
 
         <.transfer_panel ship={@ship} ships={@ships} form_drafts={@form_drafts} />
@@ -3366,6 +3460,152 @@ defmodule SpaceTradersWeb.DashboardLive do
     """
   end
 
+  attr :ship, :map, required: true
+  attr :form_drafts, :map, default: %{}
+
+  defp procurement_job_panel(assigns) do
+    job = Map.get(assigns.ship, :job)
+    progress = (job && job.progress) || %{}
+    assigns = assign(assigns, job: job, progress: progress)
+
+    ~H"""
+    <section class="mt-4 rounded border border-secondary/30 p-3" data-job-panel="procurement">
+      <div class="flex items-center justify-between gap-2">
+        <span class="text-xs font-semibold uppercase tracking-wider opacity-60">Procurement Job</span>
+        <span class="badge badge-outline badge-sm" data-procurement-job-status>
+          {job_status(@job)}
+        </span>
+      </div>
+      <dl :if={@job} class="mt-3 grid grid-cols-1 gap-1 text-xs sm:grid-cols-2">
+        <div>
+          <dt class="opacity-60">Cargo</dt><dd>
+            {@progress["trade_symbol"]} · {@progress["aboard"] || 0} / {@progress["requested"] || 0}
+          </dd>
+        </div>
+        <div>
+          <dt class="opacity-60">Destination</dt><dd class="font-mono">
+            {@progress["destination_waypoint"]}
+          </dd>
+        </div>
+        <div>
+          <dt class="opacity-60">Active work</dt><dd>{job_active_work(@job, @ship)}</dd>
+        </div>
+        <div>
+          <dt class="opacity-60">Next expected transition</dt><dd>
+            {job_next_transition(@job, @ship)}
+          </dd>
+        </div>
+      </dl>
+      <p :if={job_reason(@job)} class="mt-2 text-xs text-error" data-procurement-job-reason>
+        {job_reason(@job)}
+      </p>
+      <form
+        :if={is_nil(@job)}
+        id={"procurement-job-form-#{@ship.symbol}"}
+        phx-change="track_draft"
+        phx-submit="configure_procurement_job"
+        class="mt-3 grid gap-2 sm:grid-cols-2"
+      >
+        <input type="hidden" name="draft_key" value={draft_key("procurement_job", [@ship.symbol])} />
+        <input type="hidden" name="ship_symbol" value={@ship.symbol} />
+        <select
+          name="recipient_type"
+          class="select select-bordered select-sm"
+          aria-label="Recipient type"
+        >
+          <option value="market">Market</option>
+          <option value="contract">Contract</option>
+        </select>
+        <input
+          name="contract_id"
+          placeholder="Contract ID (for contract delivery)"
+          class="input input-bordered input-sm"
+        />
+        <input
+          name="trade_symbol"
+          placeholder="Trade symbol"
+          class="input input-bordered input-sm font-mono"
+          required
+        />
+        <input
+          name="quantity"
+          type="number"
+          min="1"
+          placeholder="Quantity"
+          class="input input-bordered input-sm"
+          required
+        />
+        <input
+          name="destination_waypoint"
+          placeholder="Destination waypoint"
+          class="input input-bordered input-sm font-mono"
+          required
+        />
+        <input
+          name="source_systems"
+          placeholder="Source systems (comma-separated)"
+          class="input input-bordered input-sm font-mono"
+        />
+        <input
+          name="reserve_credits"
+          type="number"
+          min="0"
+          placeholder="Reserve credits"
+          class="input input-bordered input-sm"
+        />
+        <input
+          name="price_ceiling"
+          type="number"
+          min="1"
+          placeholder="Purchase price ceiling"
+          class="input input-bordered input-sm"
+        />
+        <input
+          name="minimum_sale_price"
+          type="number"
+          min="1"
+          placeholder="Minimum sale price"
+          class="input input-bordered input-sm"
+        />
+        <input
+          name="minimum_sale_value"
+          type="number"
+          min="1"
+          placeholder="Minimum sale value"
+          class="input input-bordered input-sm"
+        />
+        <label class="label cursor-pointer justify-start gap-2 sm:col-span-2">
+          <input name="compatible_existing_cargo" type="checkbox" class="checkbox checkbox-sm" />
+          <span class="label-text">Use compatible cargo already aboard</span>
+        </label>
+        <button type="submit" class="btn btn-secondary btn-sm sm:col-span-2">Assign Procurement Job</button>
+      </form>
+      <div :if={@job} class="mt-3 flex flex-wrap gap-2">
+        <button
+          :if={Job.running?(@job)}
+          type="button"
+          phx-click="pause_procurement_job"
+          phx-value-symbol={@ship.symbol}
+          class="btn btn-warning btn-sm"
+        >Pause</button>
+        <button
+          :if={@job.status in ["paused", "blocked"]}
+          type="button"
+          phx-click="resume_procurement_job"
+          phx-value-symbol={@ship.symbol}
+          class="btn btn-primary btn-sm"
+        >Resume</button>
+        <button
+          type="button"
+          phx-click="stop_procurement_job"
+          phx-value-symbol={@ship.symbol}
+          class="btn btn-ghost btn-sm"
+        >Stop</button>
+      </div>
+    </section>
+    """
+  end
+
   defp miner_job_panel(assigns) do
     job = Map.get(assigns.ship, :job)
     history = Map.get(assigns.ship, :job_history, [])
@@ -3699,6 +3939,7 @@ defmodule SpaceTradersWeb.DashboardLive do
   defp job_status(nil), do: "Manual"
   defp job_status(%{status: "waiting"}), do: "Waiting"
   defp job_status(%{type: "explorer", status: "active"}), do: "Active System Exploration Job"
+  defp job_status(%{type: "procurement", status: "active"}), do: "Active Procurement Job"
   defp job_status(%{status: "active"}), do: "Active Miner Job"
   defp job_status(_), do: "Manual"
 

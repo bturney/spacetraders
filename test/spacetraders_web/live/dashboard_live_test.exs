@@ -18,10 +18,20 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
   defp stub_live_game(agent_overview, ships) do
     Req.Test.stub(SpaceTraders.API, fn conn ->
       case conn.request_path do
-        "/v2/my/agent" -> Req.Test.json(conn, %{"data" => agent_overview})
-        "/v2/my/ships" -> Req.Test.json(conn, %{"data" => ships})
-        "/v2/my/contracts" -> Req.Test.json(conn, %{"data" => []})
-        "/v2/systems/X1-UX81/waypoints" -> Req.Test.json(conn, %{"data" => []})
+        "/v2/my/agent" ->
+          Req.Test.json(conn, %{"data" => agent_overview})
+
+        "/v2/my/ships" ->
+          Req.Test.json(conn, %{"data" => ships})
+
+        "/v2/my/ships/" <> symbol ->
+          Req.Test.json(conn, %{"data" => Enum.find(ships, &(&1["symbol"] == symbol))})
+
+        "/v2/my/contracts" ->
+          Req.Test.json(conn, %{"data" => []})
+
+        "/v2/systems/X1-UX81/waypoints" ->
+          Req.Test.json(conn, %{"data" => []})
       end
     end)
   end
@@ -1233,6 +1243,35 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       assert html =~ "Miner Job assigned and paused."
       assert has_element?(lv, "[data-job-status]", "Paused")
       assert has_element?(lv, "button[phx-click=\"resume_miner_job\"]")
+    end
+
+    test "assigns a Procurement Job from the ship operations panel", %{
+      conn: conn,
+      operator: operator
+    } do
+      agent = agent_fixture(operator)
+      stub_live_game(agent_overview_body(agent.symbol), [ship_body("ORBITALIST-1")])
+
+      {:ok, lv, _html} = live(conn, ~p"/")
+
+      assert has_element?(lv, "form#procurement-job-form-ORBITALIST-1")
+      assert has_element?(lv, "form#procurement-job-form-ORBITALIST-1", "Assign Procurement Job")
+
+      html =
+        lv
+        |> element("form#procurement-job-form-ORBITALIST-1")
+        |> render_submit(%{
+          ship_symbol: "ORBITALIST-1",
+          recipient_type: "market",
+          trade_symbol: "IRON_ORE",
+          quantity: "30",
+          destination_waypoint: "X1-UX81-A1"
+        })
+
+      assert html =~ "Procurement Job assigned and paused."
+      assert has_element?(lv, "[data-job-panel=procurement]", "Procurement Job")
+      assert has_element?(lv, "[data-procurement-job-status]", "Paused")
+      assert has_element?(lv, "button[phx-click=\"resume_procurement_job\"]")
     end
 
     test "presents the configured loop as a Miner Job", %{conn: conn, operator: operator} do
