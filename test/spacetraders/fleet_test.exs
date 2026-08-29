@@ -5596,35 +5596,6 @@ defmodule SpaceTraders.FleetTest do
                Fleet.stop_manual_intent(agent, "FLEET-SHIP")
     end
 
-    test "sells cargo through the game API" do
-      agent = agent_fixture()
-
-      Req.Test.stub(SpaceTraders.API, fn conn ->
-        assert conn.request_path == "/v2/my/ships/FLEET-SHIP/sell"
-        assert conn.body_params == %{"symbol" => "IRON_ORE", "units" => 5}
-
-        Req.Test.json(conn, %{
-          "data" => %{
-            "agent" => %{"symbol" => agent.symbol, "credits" => 42_400},
-            "cargo" => %{"capacity" => 40, "units" => 7, "inventory" => []},
-            "transaction" => %{
-              "shipSymbol" => "FLEET-SHIP",
-              "tradeSymbol" => "IRON_ORE",
-              "type" => "SELL",
-              "units" => 5,
-              "pricePerUnit" => 80,
-              "totalPrice" => 400,
-              "waypointSymbol" => "X1-UX81-A1",
-              "timestamp" => "2026-01-01T00:00:00.000Z"
-            }
-          }
-        })
-      end)
-
-      assert {:ok, %{cargo: %{units: 7}, transaction: %{total_price: 400}}} =
-               Fleet.sell_cargo(agent, "FLEET-SHIP", "IRON_ORE", 5)
-    end
-
     test "preserves an in-flight sale when the successful response transaction is uncorrelated" do
       agent = agent_fixture()
       ship_fixture(agent, "FLEET-SHIP")
@@ -5735,42 +5706,6 @@ defmodule SpaceTraders.FleetTest do
 
       assert {:error, :invalid_units} =
                Fleet.jettison_cargo(agent, "FLEET-SHIP", "COPPER_ORE", 0)
-    end
-
-    test "purchases cargo through the game API" do
-      agent = agent_fixture()
-
-      Req.Test.stub(SpaceTraders.API, fn conn ->
-        assert conn.request_path == "/v2/my/ships/FLEET-SHIP/purchase"
-        assert conn.body_params == %{"symbol" => "SHIP_PLATING", "units" => 5}
-
-        Req.Test.json(conn, %{
-          "data" => %{
-            "agent" => %{"symbol" => agent.symbol, "credits" => 121_819},
-            "cargo" => %{
-              "capacity" => 40,
-              "units" => 5,
-              "inventory" => [%{"symbol" => "SHIP_PLATING", "units" => 5}]
-            },
-            "transaction" => %{
-              "shipSymbol" => "FLEET-SHIP",
-              "tradeSymbol" => "SHIP_PLATING",
-              "type" => "PURCHASE",
-              "units" => 5,
-              "pricePerUnit" => 14_384,
-              "totalPrice" => 71_920,
-              "waypointSymbol" => "X1-UX81-C42",
-              "timestamp" => "2026-01-01T00:00:00.000Z"
-            }
-          }
-        })
-      end)
-
-      assert {:ok, %{cargo: %{units: 5}, transaction: %{total_price: 71_920}}} =
-               Fleet.purchase_cargo(agent, "FLEET-SHIP", "SHIP_PLATING", 5)
-
-      assert {:error, :invalid_units} =
-               Fleet.purchase_cargo(agent, "FLEET-SHIP", "SHIP_PLATING", 0)
     end
 
     test "docks and orbits a ship" do

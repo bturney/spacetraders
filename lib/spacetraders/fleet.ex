@@ -5088,53 +5088,6 @@ defmodule SpaceTraders.Fleet do
   defp siphon_location?(%{type: "GAS_GIANT"}), do: :ok
   defp siphon_location?(_), do: {:error, :invalid_siphon_waypoint}
 
-  @doc "Sells cargo from a ship and returns the updated cargo and transaction."
-  def sell_cargo(%AgentRecord{agent_token: agent_token} = agent, ship_symbol, trade_symbol, units)
-      when is_binary(agent_token) and agent_token != "" do
-    with :ok <- preempt_miner_job_for(agent, ship_symbol, {:manual_override, "selling cargo"}),
-         :ok <- ShipServer.ensure_ready(ship_symbol) do
-      invalidate_market_after(
-        Agent.handle_game_result(
-          agent,
-          SpaceTraders.API.sell_cargo(agent_token, ship_symbol, trade_symbol, units)
-        ),
-        agent
-      )
-      |> then(&record_command_result(agent, ship_symbol, "sell", &1))
-    end
-  end
-
-  def sell_cargo(%AgentRecord{}, _ship_symbol, _trade_symbol, _units),
-    do: {:error, :agent_token_missing}
-
-  @doc "Purchases cargo from a market the ship is docked at."
-  def purchase_cargo(
-        %AgentRecord{agent_token: agent_token} = agent,
-        ship_symbol,
-        trade_symbol,
-        units
-      )
-      when is_binary(agent_token) and agent_token != "" and is_integer(units) and units > 0 do
-    with :ok <- preempt_miner_job_for(agent, ship_symbol, {:manual_override, "purchasing cargo"}),
-         :ok <- ShipServer.ensure_ready(ship_symbol) do
-      invalidate_market_after(
-        Agent.handle_game_result(
-          agent,
-          SpaceTraders.API.purchase_cargo(agent_token, ship_symbol, trade_symbol, units)
-        ),
-        agent
-      )
-      |> then(&record_command_result(agent, ship_symbol, "purchase", &1))
-    end
-  end
-
-  def purchase_cargo(%AgentRecord{agent_token: token}, _ship_symbol, _trade_symbol, _units)
-      when not is_binary(token) or token == "",
-      do: {:error, :agent_token_missing}
-
-  def purchase_cargo(%AgentRecord{}, _ship_symbol, _trade_symbol, _units),
-    do: {:error, :invalid_units}
-
   @doc "Refuels a ship at a marketplace that sells fuel."
   def refuel_ship(%AgentRecord{agent_token: agent_token} = agent, ship_symbol)
       when is_binary(agent_token) and agent_token != "" do
