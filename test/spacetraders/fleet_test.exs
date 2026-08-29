@@ -3139,7 +3139,10 @@ defmodule SpaceTraders.FleetTest do
                "acquired" => 0,
                "aboard" => 0,
                "sold" => 0,
-               "accepted" => 0
+               "accepted" => 0,
+               "shared_fulfilled" => 0,
+               "external_progress" => 0,
+               "spent" => 0
              }
     end
 
@@ -3273,7 +3276,10 @@ defmodule SpaceTraders.FleetTest do
                "acquired" => 0,
                "aboard" => 0,
                "sold" => 0,
-               "accepted" => 0
+               "accepted" => 0,
+               "shared_fulfilled" => 0,
+               "external_progress" => 0,
+               "spent" => 0
              }
     end
 
@@ -3310,7 +3316,10 @@ defmodule SpaceTraders.FleetTest do
                "acquired" => 0,
                "aboard" => 0,
                "sold" => 0,
-               "accepted" => 0
+               "accepted" => 0,
+               "shared_fulfilled" => 0,
+               "external_progress" => 0,
+               "spent" => 0
              }
     end
 

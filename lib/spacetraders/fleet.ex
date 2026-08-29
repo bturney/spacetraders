@@ -549,7 +549,10 @@ defmodule SpaceTraders.Fleet do
          "acquired" => 0,
          "aboard" => 0,
          "sold" => 0,
-         "accepted" => 0
+         "accepted" => 0,
+         "shared_fulfilled" => 0,
+         "external_progress" => 0,
+         "spent" => 0
        }
        |> maybe_put_contract_id(contract_id)
        |> maybe_put_construction_system(recipient_type, construction_system)}
@@ -758,13 +761,22 @@ defmodule SpaceTraders.Fleet do
            Agent.handle_game_result(
              agent,
              SpaceTraders.API.get_construction(agent.agent_token, system, waypoint)
-           ) do
+           ),
+         :ok <- construction_requirement_available?(construction, job.progress["trade_symbol"]) do
       record_construction_observation(agent, system, construction, "get_construction")
       {:ok, construction}
     else
       false -> {:error, :recipient_conflict}
       {:error, reason} -> {:error, reason}
     end
+  end
+
+  defp construction_requirement_available?(%{is_complete: true}, _trade_symbol), do: :ok
+
+  defp construction_requirement_available?(construction, trade_symbol) do
+    if Enum.any?(construction.materials || [], &(&1.trade_symbol == trade_symbol)),
+      do: :ok,
+      else: {:error, :recipient_conflict}
   end
 
   defp procurement_recipient(_agent, %{progress: %{"recipient_type" => "market"}}),
@@ -806,14 +818,15 @@ defmodule SpaceTraders.Fleet do
     end
   end
 
-  # The policy re-reads its recipient before deciding. Contract acceptance and
-  # successful Market sale transactions are the authoritative completion evidence.
+  # The policy re-reads its recipient before deciding. Shared fulfillment reduces
+  # outstanding work, while only correlated operation evidence counts as this Job's acceptance.
   defp advance_procurement_job(agent, job, live_ship, recipient, credits) do
     progress = procurement_counts(job.progress, live_ship, recipient)
     job = Repo.update!(Ecto.Changeset.change(job, progress: progress))
 
     cond do
-      progress["accepted"] >= progress["requested"] ->
+      progress["accepted"] >= progress["requested"] or
+          progress["shared_fulfilled"] >= progress["requested"] ->
         job = terminalize_job!(job, "completed")
 
         record_activity_by_config(
@@ -834,27 +847,36 @@ defmodule SpaceTraders.Fleet do
   end
 
   defp procurement_counts(progress, live_ship, recipient) do
-    accepted =
+    {accepted, shared_fulfilled, external_progress} =
       case recipient do
         :market ->
-          progress["sold"] || 0
+          sold = progress["sold"] || 0
+          {sold, sold, 0}
 
         recipient ->
           fulfilled = recipient_fulfilled_units(recipient, progress["trade_symbol"])
-          max(fulfilled - (progress["accepted_baseline"] || fulfilled), 0)
+          shared = max(fulfilled - (progress["accepted_baseline"] || fulfilled), 0)
+          accepted = min(progress["accepted"] || 0, shared)
+          {accepted, shared, max(shared - accepted, 0)}
       end
 
     requested = progress["requested"]
+    remaining = max(requested - shared_fulfilled, 0)
     held = item_units(live_ship, progress["trade_symbol"])
 
     aboard =
-      if progress["compatible_existing_cargo"], do: min(held, requested - accepted), else: held
+      if progress["compatible_existing_cargo"],
+        do: min(held, remaining),
+        else: min(held, remaining)
 
     progress
     |> Map.put("requested", requested)
     |> Map.put("accepted", accepted)
+    |> Map.put("shared_fulfilled", shared_fulfilled)
+    |> Map.put("external_progress", external_progress)
     |> Map.put("aboard", max(aboard, 0))
     |> Map.put("acquired", progress["acquired"] || 0)
+    |> Map.put("spent", progress["spent"] || 0)
   end
 
   # Procurement selects parameters; the shared Intent engine owns every Ship
@@ -879,7 +901,7 @@ defmodule SpaceTraders.Fleet do
   end
 
   defp procurement_intent_attrs(agent, live_ship, progress, recipient, credits) do
-    units = min(progress["aboard"], progress["requested"] - progress["accepted"])
+    units = min(progress["aboard"], max(progress["requested"] - progress["shared_fulfilled"], 0))
 
     cond do
       units > 0 and recipient == :market ->
@@ -1000,11 +1022,12 @@ defmodule SpaceTraders.Fleet do
       progress =
         case intent do
           %ManualIntent{type: "buy", last_action_result: result} ->
-            Map.update!(
-              job.progress,
-              "acquired",
-              &(&1 + (get_in(result, ["transaction", "units"]) || 0))
-            )
+            units = get_in(result, ["transaction", "units"]) || 0
+            total_price = get_in(result, ["transaction", "total_price"]) || 0
+
+            job.progress
+            |> Map.update("acquired", units, &(&1 + units))
+            |> Map.update("spent", total_price, &(&1 + total_price))
 
           %ManualIntent{type: "sell", last_action_result: result} ->
             Map.update!(
@@ -1014,11 +1037,8 @@ defmodule SpaceTraders.Fleet do
             )
 
           %ManualIntent{type: "deliver", last_action_result: result} ->
-            fulfilled = get_in(result, ["recipient", "units_fulfilled"])
-            baseline = job.progress["accepted_baseline"] || 0
-
-            if is_integer(fulfilled),
-              do: Map.put(job.progress, "accepted", max(fulfilled - baseline, 0)),
+            if is_integer(result["units"]),
+              do: Map.update(job.progress, "accepted", result["units"], &(&1 + result["units"])),
               else: job.progress
 
           _ ->

@@ -950,6 +950,7 @@ defmodule SpaceTradersWeb.DashboardLive do
            Fleet.configure_procurement_job(agent, params["ship_symbol"], %{
              recipient_type: params["recipient_type"] || "market",
              contract_id: blank_to_nil(params["contract_id"]),
+             construction_system: blank_to_nil(params["construction_system"]),
              trade_symbol: String.trim(params["trade_symbol"] || ""),
              quantity: quantity,
              destination_waypoint: String.trim(params["destination_waypoint"] || ""),
@@ -3515,11 +3516,17 @@ defmodule SpaceTradersWeb.DashboardLive do
         >
           <option value="market">Market</option>
           <option value="contract">Contract</option>
+          <option value="construction">Construction</option>
         </select>
         <input
           name="contract_id"
           placeholder="Contract ID (for contract delivery)"
           class="input input-bordered input-sm"
+        />
+        <input
+          name="construction_system"
+          placeholder="Construction system"
+          class="input input-bordered input-sm font-mono"
         />
         <input
           name="trade_symbol"
