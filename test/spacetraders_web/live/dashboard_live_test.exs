@@ -1274,6 +1274,57 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       assert has_element?(lv, "button[phx-click=\"resume_procurement_job\"]")
     end
 
+    test "keeps Procurement Job drafts across dashboard patches", %{
+      conn: conn,
+      operator: operator
+    } do
+      agent = agent_fixture(operator)
+      stub_live_game(agent_overview_body(agent.symbol), [ship_body("ORBITALIST-1")])
+
+      {:ok, lv, _html} = live(conn, ~p"/")
+
+      lv
+      |> element("form#procurement-job-form-ORBITALIST-1")
+      |> render_change(%{
+        draft_key: "procurement_job:ORBITALIST-1",
+        ship_symbol: "ORBITALIST-1",
+        recipient_type: "contract",
+        contract_id: "CONTRACT-1",
+        construction_system: "X1-UX81",
+        trade_symbol: "IRON_ORE",
+        quantity: "30",
+        destination_waypoint: "X1-UX81-A1",
+        source_systems: "X1-UX81",
+        reserve_credits: "500",
+        price_ceiling: "10",
+        minimum_sale_price: "25",
+        minimum_sale_value: "750",
+        compatible_existing_cargo: "on"
+      })
+
+      send(lv.pid, :cooldown_tick)
+      render(lv)
+
+      assert input_value(lv, "procurement-job-form-ORBITALIST-1", "trade_symbol") =~
+               ~s(value="IRON_ORE")
+
+      assert input_value(lv, "procurement-job-form-ORBITALIST-1", "quantity") =~
+               ~s(value="30")
+
+      assert input_value(lv, "procurement-job-form-ORBITALIST-1", "destination_waypoint") =~
+               ~s(value="X1-UX81-A1")
+
+      assert has_element?(
+               lv,
+               "form#procurement-job-form-ORBITALIST-1 option[value=\"contract\"][selected]"
+             )
+
+      assert has_element?(
+               lv,
+               "form#procurement-job-form-ORBITALIST-1 input[name=\"compatible_existing_cargo\"][checked]"
+             )
+    end
+
     test "presents the configured loop as a Miner Job", %{conn: conn, operator: operator} do
       agent = agent_fixture(operator)
       stub_live_game(agent_overview_body(agent.symbol), [ship_body("ORBITALIST-1")])

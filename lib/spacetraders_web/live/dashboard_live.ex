@@ -3514,28 +3514,54 @@ defmodule SpaceTradersWeb.DashboardLive do
           class="select select-bordered select-sm"
           aria-label="Recipient type"
         >
-          <option value="market">Market</option>
-          <option value="contract">Contract</option>
-          <option value="construction">Construction</option>
+          <option
+            value="market"
+            selected={
+              procurement_draft(@form_drafts, @ship.symbol, "recipient_type", "market") == "market"
+            }
+          >
+            Market
+          </option>
+          <option
+            value="contract"
+            selected={
+              procurement_draft(@form_drafts, @ship.symbol, "recipient_type", "market") == "contract"
+            }
+          >
+            Contract
+          </option>
+          <option
+            value="construction"
+            selected={
+              procurement_draft(@form_drafts, @ship.symbol, "recipient_type", "market") ==
+                "construction"
+            }
+          >
+            Construction
+          </option>
         </select>
         <input
           name="contract_id"
+          value={procurement_draft(@form_drafts, @ship.symbol, "contract_id", "")}
           placeholder="Contract ID (for contract delivery)"
           class="input input-bordered input-sm"
         />
         <input
           name="construction_system"
+          value={procurement_draft(@form_drafts, @ship.symbol, "construction_system", "")}
           placeholder="Construction system"
           class="input input-bordered input-sm font-mono"
         />
         <input
           name="trade_symbol"
+          value={procurement_draft(@form_drafts, @ship.symbol, "trade_symbol", "")}
           placeholder="Trade symbol"
           class="input input-bordered input-sm font-mono"
           required
         />
         <input
           name="quantity"
+          value={procurement_draft(@form_drafts, @ship.symbol, "quantity", "")}
           type="number"
           min="1"
           placeholder="Quantity"
@@ -3544,17 +3570,20 @@ defmodule SpaceTradersWeb.DashboardLive do
         />
         <input
           name="destination_waypoint"
+          value={procurement_draft(@form_drafts, @ship.symbol, "destination_waypoint", "")}
           placeholder="Destination waypoint"
           class="input input-bordered input-sm font-mono"
           required
         />
         <input
           name="source_systems"
+          value={procurement_draft(@form_drafts, @ship.symbol, "source_systems", "")}
           placeholder="Source systems (comma-separated)"
           class="input input-bordered input-sm font-mono"
         />
         <input
           name="reserve_credits"
+          value={procurement_draft(@form_drafts, @ship.symbol, "reserve_credits", "")}
           type="number"
           min="0"
           placeholder="Reserve credits"
@@ -3562,6 +3591,7 @@ defmodule SpaceTradersWeb.DashboardLive do
         />
         <input
           name="price_ceiling"
+          value={procurement_draft(@form_drafts, @ship.symbol, "price_ceiling", "")}
           type="number"
           min="1"
           placeholder="Purchase price ceiling"
@@ -3569,6 +3599,7 @@ defmodule SpaceTradersWeb.DashboardLive do
         />
         <input
           name="minimum_sale_price"
+          value={procurement_draft(@form_drafts, @ship.symbol, "minimum_sale_price", "")}
           type="number"
           min="1"
           placeholder="Minimum sale price"
@@ -3576,13 +3607,25 @@ defmodule SpaceTradersWeb.DashboardLive do
         />
         <input
           name="minimum_sale_value"
+          value={procurement_draft(@form_drafts, @ship.symbol, "minimum_sale_value", "")}
           type="number"
           min="1"
           placeholder="Minimum sale value"
           class="input input-bordered input-sm"
         />
         <label class="label cursor-pointer justify-start gap-2 sm:col-span-2">
-          <input name="compatible_existing_cargo" type="checkbox" class="checkbox checkbox-sm" />
+          <input
+            name="compatible_existing_cargo"
+            type="checkbox"
+            class="checkbox checkbox-sm"
+            checked={
+              procurement_draft(@form_drafts, @ship.symbol, "compatible_existing_cargo", nil) in [
+                "on",
+                "true",
+                true
+              ]
+            }
+          />
           <span class="label-text">Use compatible cargo already aboard</span>
         </label>
         <button type="submit" class="btn btn-secondary btn-sm sm:col-span-2">Assign Procurement Job</button>
@@ -3939,6 +3982,9 @@ defmodule SpaceTradersWeb.DashboardLive do
     draft_field(drafts, "miner_job", [ship_symbol], "gather_mode", job && job.gather_mode) ==
       value
   end
+
+  defp procurement_draft(drafts, ship_symbol, field, fallback),
+    do: draft_field(drafts, "procurement_job", [ship_symbol], field, fallback)
 
   defp job_status(%{status: "blocked"}), do: "Blocked"
 
