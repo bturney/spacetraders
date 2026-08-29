@@ -854,14 +854,35 @@ defmodule SpaceTradersWeb.DashboardLive do
 
   @impl true
   def handle_event(action, %{"symbol" => ship_symbol}, socket)
-      when action in ["pause_procurement_job", "resume_procurement_job", "stop_procurement_job"] do
+      when action in [
+             "pause_procurement_job",
+             "resume_procurement_job",
+             "stop_procurement_job",
+             "pause_market_trading_job",
+             "resume_market_trading_job",
+             "stop_market_trading_job"
+           ] do
     with {:ok, agent} <- agent_for_ship(socket, ship_symbol),
-         :ok <- procurement_job_action(action, agent, ship_symbol) do
+         :ok <- job_action(action, agent, ship_symbol) do
       message =
         case action do
-          "pause_procurement_job" -> "#{ship_symbol} Procurement Job paused."
-          "resume_procurement_job" -> "#{ship_symbol} Procurement Job resumed."
-          "stop_procurement_job" -> "#{ship_symbol} Procurement Job stopped; Ship is manual."
+          "pause_procurement_job" ->
+            "#{ship_symbol} Procurement Job paused."
+
+          "resume_procurement_job" ->
+            "#{ship_symbol} Procurement Job resumed."
+
+          "stop_procurement_job" ->
+            "#{ship_symbol} Procurement Job stopped; Ship is manual."
+
+          "pause_market_trading_job" ->
+            "#{ship_symbol} Market Trading Job paused."
+
+          "resume_market_trading_job" ->
+            "#{ship_symbol} Market Trading Job resumed."
+
+          "stop_market_trading_job" ->
+            "#{ship_symbol} Market Trading Job stopped; Ship is manual."
         end
 
       {:noreply, put_flash(refresh_agent(socket, agent), :info, message)}
@@ -903,6 +924,23 @@ defmodule SpaceTradersWeb.DashboardLive do
 
   defp procurement_job_action("stop_procurement_job", agent, ship),
     do: Fleet.stop_procurement_job(agent, ship)
+
+  defp job_action(action, agent, ship)
+       when action in [
+              "pause_procurement_job",
+              "resume_procurement_job",
+              "stop_procurement_job"
+            ],
+       do: procurement_job_action(action, agent, ship)
+
+  defp job_action("pause_market_trading_job", agent, ship),
+    do: Fleet.pause_market_trading_job(agent, ship) |> unwrap_job_result()
+
+  defp job_action("resume_market_trading_job", agent, ship),
+    do: Fleet.resume_market_trading_job(agent, ship) |> unwrap_job_result()
+
+  defp job_action("stop_market_trading_job", agent, ship),
+    do: Fleet.stop_market_trading_job(agent, ship)
 
   defp unwrap_config({:ok, _config}), do: :ok
   defp unwrap_config(error), do: error
@@ -3993,6 +4031,10 @@ defmodule SpaceTradersWeb.DashboardLive do
   defp job_status(%{status: "waiting"}), do: "Waiting"
   defp job_status(%{type: "explorer", status: "active"}), do: "Active System Exploration Job"
   defp job_status(%{type: "procurement", status: "active"}), do: "Active Procurement Job"
+
+  defp job_status(%{type: "market_trading", status: "active"}),
+    do: "Active Market Trading Job"
+
   defp job_status(%{status: "active"}), do: "Active Miner Job"
   defp job_status(_), do: "Manual"
 

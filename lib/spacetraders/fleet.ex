@@ -19,7 +19,17 @@ defmodule SpaceTraders.Fleet do
 
   alias SpaceTraders.Agent.Agent, as: AgentRecord
   alias SpaceTraders.API.Model.{Market, ShipNav, ShipNavRoute}
-  alias SpaceTraders.Fleet.{Activity, Job, JobBlocker, ManualIntent, Ship, ShipDestination}
+
+  alias SpaceTraders.Fleet.{
+    Activity,
+    Job,
+    JobBlocker,
+    ManualIntent,
+    MarketTradingPolicy,
+    Ship,
+    ShipDestination
+  }
+
   alias SpaceTraders.Fleet.ShipServer
   alias SpaceTraders.Repo
   alias SpaceTraders.{Agent, Contracts, Intelligence, Listing, Shipyard}
@@ -456,6 +466,171 @@ defmodule SpaceTraders.Fleet do
 
   def configure_procurement_job(%AgentRecord{}, _ship_symbol, _attrs),
     do: {:error, :agent_token_missing}
+
+  @doc "Captures a paused recurring Market Trading Job for the Ship's current System."
+  def configure_market_trading_job(%AgentRecord{agent_token: token} = agent, ship_symbol, attrs)
+      when is_binary(token) and token != "" and is_map(attrs) do
+    with :ok <- Agent.execution_allowed?(agent),
+         {:ok, ship} <- owned_ship(agent, ship_symbol),
+         nil <- unfinished_job(ship.id),
+         {:ok, live_ship} <-
+           Agent.handle_game_result(agent, SpaceTraders.API.get_ship(token, ship_symbol)),
+         system when is_binary(system) <- live_ship.nav.system_symbol,
+         {:ok, progress} <- market_trading_progress(attrs, system) do
+      %Job{ship_id: ship.id}
+      |> Job.changeset(%{
+        type: "market_trading",
+        extraction_waypoint: "MARKET-NONE",
+        market_waypoint: "MARKET-NONE",
+        cargo_threshold: 1
+      })
+      |> Ecto.Changeset.put_change(:status, "paused")
+      |> Ecto.Changeset.put_change(:blocked_reason, "Awaiting Operator resume")
+      |> Ecto.Changeset.put_change(:progress, progress)
+      |> Repo.insert()
+    else
+      %Job{} -> {:error, :unfinished_job_already_assigned}
+      nil -> {:error, :current_system_unavailable}
+      error -> error
+    end
+  end
+
+  def configure_market_trading_job(%AgentRecord{}, _ship_symbol, _attrs),
+    do: {:error, :agent_token_missing}
+
+  @doc "Starts or resumes a recurring Market Trading Job from known candidates."
+  def start_market_trading_job(%AgentRecord{} = agent, ship_symbol) do
+    with :ok <- Agent.execution_allowed?(agent),
+         {:ok, ship} <- owned_ship(agent, ship_symbol),
+         %Job{type: "market_trading"} = job <- unfinished_job(ship.id),
+         nil <- unfinished_manual_intent(ship.id),
+         {:ok, live_ship} <-
+           Agent.handle_game_result(
+             agent,
+             SpaceTraders.API.get_ship(agent.agent_token, ship_symbol)
+           ),
+         :ok <- market_system_matches?(job.progress, live_ship),
+         {:ok, overview} <- Agent.agent_overview(agent) do
+      job =
+        Repo.update!(
+          Ecto.Changeset.change(job, status: "active", blocker: nil, blocked_reason: nil)
+        )
+
+      constraints =
+        job.progress["constraints"]
+        |> atomize_market_keys()
+        |> Map.put(:credits, overview.credits)
+
+      {candidate, rejected} = MarketTradingPolicy.select(job.progress["candidates"], constraints)
+
+      if candidate do
+        params = %{
+          "trade_symbol" => candidate.trade_symbol,
+          "units" => candidate.units,
+          "max_price" => candidate.purchase_price,
+          "reserve_credits" => constraints.reserve_credits,
+          "market_trade" => candidate
+        }
+
+        with {:ok, intent} <-
+               insert_job_intent(job, %{
+                 type: "buy",
+                 target_waypoint: candidate.source_waypoint,
+                 parameters: params
+               }),
+             {:ok, intent} <- advance_manual_intent(agent, intent, live_ship) do
+          {:ok,
+           Repo.update!(
+             Ecto.Changeset.change(job,
+               progress: Map.put(job.progress, "last_intent_id", intent.id)
+             )
+           )}
+        end
+      else
+        blocker = job_blocker({:no_viable_market_trade, rejected})
+
+        Repo.update!(
+          Ecto.Changeset.change(job, status: "blocked", blocker: blocker, blocked_reason: nil)
+        )
+
+        {:error, {:market_trading_job_blocked, blocker}}
+      end
+    else
+      nil -> {:error, :market_trading_job_not_configured}
+      %Job{} -> {:error, :market_trading_job_not_configured}
+      {:error, reason} -> block_market_trading_job(agent, ship_symbol, reason)
+    end
+  end
+
+  def resume_market_trading_job(agent, ship_symbol),
+    do: start_market_trading_job(agent, ship_symbol)
+
+  def pause_market_trading_job(%AgentRecord{} = agent, ship_symbol),
+    do: pause_job_type(agent, ship_symbol, "market_trading", "Market Trading Job")
+
+  def stop_market_trading_job(%AgentRecord{} = agent, ship_symbol),
+    do: stop_job_type(agent, ship_symbol, "market_trading", "Market Trading Job")
+
+  defp market_trading_progress(attrs, system) do
+    candidates = attrs[:candidates] || attrs["candidates"] || []
+
+    constraints = %{
+      "reserve_credits" => attrs[:reserve_credits] || attrs["reserve_credits"] || 0,
+      "credit_exposure" => attrs[:credit_exposure] || attrs["credit_exposure"],
+      "minimum_profit" => attrs[:minimum_profit] || attrs["minimum_profit"] || 0,
+      "minimum_return_percentage" =>
+        attrs[:minimum_return_percentage] || attrs["minimum_return_percentage"] || 0,
+      "compatible_existing_cargo" =>
+        attrs[:compatible_existing_cargo] || attrs["compatible_existing_cargo"] || false
+    }
+
+    if is_list(candidates) and is_integer(constraints["reserve_credits"]) and
+         is_integer(constraints["minimum_profit"]) and
+         is_number(constraints["minimum_return_percentage"]) and
+         (is_nil(constraints["credit_exposure"]) or is_integer(constraints["credit_exposure"])),
+       do:
+         {:ok,
+          %{
+            "target_system" => system,
+            "constraints" => constraints,
+            "candidates" => candidates,
+            "completed_trades" => 0,
+            "realized_gross_profit" => 0,
+            "realized_net_profit" => 0,
+            "estimated_fuel_cost" => 0
+          }},
+       else: {:error, :invalid_market_trading_configuration}
+  end
+
+  defp atomize_market_keys(map),
+    do: Map.new(map, fn {key, value} -> {String.to_existing_atom(key), value} end)
+
+  defp market_system_matches?(%{"target_system" => system}, live_ship)
+       when system == live_ship.nav.system_symbol,
+       do: :ok
+
+  defp market_system_matches?(%{"target_system" => system}, live_ship),
+    do:
+      {:error,
+       {:fixed_system_changed,
+        %{configured_system: system, current_system: live_ship.nav.system_symbol}}}
+
+  defp market_system_matches?(_, _), do: {:error, :current_system_unavailable}
+
+  defp block_market_trading_job(agent, ship_symbol, reason) do
+    with {:ok, ship} <- owned_ship(agent, ship_symbol),
+         %Job{type: "market_trading"} = job <- unfinished_job(ship.id) do
+      blocker = job_blocker(reason)
+
+      Repo.update!(
+        Ecto.Changeset.change(job, status: "blocked", blocker: blocker, blocked_reason: nil)
+      )
+
+      {:error, {:market_trading_job_blocked, reason}}
+    else
+      _ -> {:error, :market_trading_job_not_configured}
+    end
+  end
 
   defp procurement_progress(attrs, target_system) do
     destination = attrs[:destination_waypoint] || attrs["destination_waypoint"]
@@ -968,7 +1143,12 @@ defmodule SpaceTraders.Fleet do
     |> Repo.insert()
   end
 
-  defp advance_procurement_after_intent(agent, job, %ManualIntent{status: "completed"} = intent) do
+  defp advance_procurement_after_intent(
+         agent,
+         %Job{type: type} = job,
+         %ManualIntent{status: "completed"} = intent
+       )
+       when type != "market_trading" do
     job = apply_procurement_intent_result(job, intent)
 
     if intent.type == "deliver" and job.progress["accepted"] >= job.progress["requested"] do
@@ -992,6 +1172,70 @@ defmodule SpaceTraders.Fleet do
         {:error, reason} -> mark_procurement_job_blocked(job, reason)
       end
     end
+  end
+
+  defp advance_procurement_after_intent(
+         agent,
+         %Job{type: "market_trading"} = job,
+         %ManualIntent{status: "completed", type: "buy"} = intent
+       ) do
+    candidate = intent.parameters["market_trade"]
+
+    sell_attrs = %{
+      type: "sell",
+      target_waypoint: candidate["destination_waypoint"],
+      parameters: %{
+        "trade_symbol" => candidate["trade_symbol"],
+        "units" => candidate["units"],
+        "min_price" => candidate["sell_price"],
+        "market_trade" => candidate
+      }
+    }
+
+    with {:ok, sell} <- insert_job_intent(job, sell_attrs),
+         {:ok, live_ship} <-
+           Agent.handle_game_result(
+             agent,
+             SpaceTraders.API.get_ship(agent.agent_token, Repo.get!(Ship, job.ship_id).symbol)
+           ),
+         {:ok, sell} <- advance_manual_intent(agent, sell, live_ship) do
+      advance_procurement_after_intent(agent, job, sell)
+    end
+  end
+
+  defp advance_procurement_after_intent(
+         agent,
+         %Job{type: "market_trading"} = job,
+         %ManualIntent{status: "completed", type: "sell"} = intent
+       ) do
+    candidate = intent.parameters["market_trade"]
+    units = candidate["units"]
+    profit = (candidate["sell_price"] - candidate["purchase_price"]) * units
+
+    progress =
+      job.progress
+      |> Map.update!("completed_trades", &(&1 + 1))
+      |> Map.update!("realized_gross_profit", &(&1 + profit))
+      |> Map.update!(
+        "realized_net_profit",
+        &(&1 + profit - (candidate["estimated_fuel_cost"] || 0))
+      )
+
+    job = Repo.update!(Ecto.Changeset.change(job, status: "active", progress: progress))
+    start_market_trading_job(agent, Repo.get!(Ship, job.ship_id).symbol)
+  end
+
+  defp advance_procurement_after_intent(
+         _agent,
+         %Job{type: "market_trading"} = job,
+         %ManualIntent{} = intent
+       ) do
+    blocker = intent.blocker || job_blocker(:market_trade_intent_blocked)
+
+    {:error,
+     Repo.update!(
+       Ecto.Changeset.change(job, status: "blocked", blocker: blocker, blocked_reason: nil)
+     )}
   end
 
   defp advance_procurement_after_intent(_agent, job, %ManualIntent{status: "waiting"} = intent) do
