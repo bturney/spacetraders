@@ -516,6 +516,37 @@ defmodule SpaceTraders.FleetTest do
       assert Enum.any?(Fleet.recent_activity(agent), &(&1.kind == "navigate"))
     end
 
+    test "direct navigation refuses an in-flight Job-owned Intent before dispatch" do
+      agent = agent_fixture()
+      ship = ship_fixture(agent, "FLEET-SHIP")
+
+      {:ok, job} =
+        Fleet.configure_miner_job(agent, "FLEET-SHIP", %{
+          extraction_waypoint: "X1-UX81-A2",
+          market_waypoint: "X1-UX81-A1",
+          cargo_threshold: 30
+        })
+
+      Repo.update!(Ecto.Changeset.change(job, status: "active"))
+
+      Repo.insert!(%ManualIntent{
+        ship_id: ship.id,
+        job_id: job.id,
+        caller: "job",
+        type: "navigate",
+        target_waypoint: "X1-UX81-A2",
+        status: "active",
+        in_flight_action: %{"kind" => "navigate"}
+      })
+
+      Req.Test.stub(SpaceTraders.API, fn _conn -> flunk("direct navigation was dispatched") end)
+
+      assert {:error, :job_action_reconciliation_required} =
+               Fleet.navigate_ship(agent, "FLEET-SHIP", "X1-UX81-A1")
+
+      assert %{status: "active"} = Repo.get!(Job, job.id)
+    end
+
     test "pausing during an arrival wait preserves the in-flight navigation" do
       agent = agent_fixture()
       ship_fixture(agent, "FLEET-SHIP")
@@ -3036,6 +3067,177 @@ defmodule SpaceTraders.FleetTest do
   end
 
   describe "Procurement Job" do
+    setup do
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case {conn.request_path, conn.method} do
+          {"/v2/my/ships/" <> ship_symbol, "GET"} ->
+            Req.Test.json(conn, %{"data" => ship_body(ship_symbol)})
+
+          {path, method} ->
+            flunk("unexpected request #{method} #{path}")
+        end
+      end)
+
+      :ok
+    end
+
+    test "captures the Ship's fixed current System and rejects a remote destination" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+      ship_fixture(agent, "FLEET-SHIP-2")
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        assert {"GET", "/v2/my/ships/" <> ship_symbol} = {conn.method, conn.request_path}
+        Req.Test.json(conn, %{"data" => ship_body(ship_symbol)})
+      end)
+
+      assert {:ok, %Job{progress: %{"target_system" => "X1-UX81"}}} =
+               Fleet.configure_procurement_job(agent, "FLEET-SHIP-2", %{
+                 recipient_type: "market",
+                 trade_symbol: "IRON_ORE",
+                 quantity: 30,
+                 destination_waypoint: "X1-UX81-A1"
+               })
+
+      assert {:error,
+              {:remote_destination_system_unsupported,
+               %{current_system: "X1-UX81", destination_system: "X1-DF55"}}} =
+               Fleet.configure_procurement_job(agent, "FLEET-SHIP", %{
+                 recipient_type: "market",
+                 trade_symbol: "IRON_ORE",
+                 quantity: 30,
+                 destination_waypoint: "X1-DF55-A1"
+               })
+    end
+
+    test "persists a fixed Market recipient and sale floor" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      assert {:ok, %Job{} = job} =
+               Fleet.configure_procurement_job(agent, "FLEET-SHIP", %{
+                 recipient_type: "market",
+                 trade_symbol: "IRON_ORE",
+                 quantity: 30,
+                 destination_waypoint: "X1-UX81-A1",
+                 source_systems: ["X1-UX81"],
+                 minimum_sale_price: 25
+               })
+
+      assert job.progress == %{
+               "recipient_type" => "market",
+               "trade_symbol" => "IRON_ORE",
+               "requested" => 30,
+               "destination_waypoint" => "X1-UX81-A1",
+               "target_system" => "X1-UX81",
+               "source_systems" => ["X1-UX81"],
+               "reserve_credits" => 0,
+               "price_ceiling" => nil,
+               "minimum_sale_price" => 25,
+               "minimum_sale_value" => nil,
+               "compatible_existing_cargo" => false,
+               "acquired" => 0,
+               "aboard" => 0,
+               "sold" => 0,
+               "accepted" => 0
+             }
+    end
+
+    test "sells at the fixed Market from a fresh listing and completes from the transaction" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+      test_pid = self()
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case conn.request_path do
+          "/v2/my/ships/FLEET-SHIP" ->
+            Req.Test.json(conn, %{
+              "data" =>
+                ship_body("FLEET-SHIP", %{
+                  "cargo" => %{
+                    "capacity" => 40,
+                    "units" => 30,
+                    "inventory" => [%{"symbol" => "IRON_ORE", "units" => 30}]
+                  }
+                })
+            })
+
+          "/v2/my/agent" ->
+            Req.Test.json(conn, %{"data" => %{"symbol" => agent.symbol, "credits" => 1_000}})
+
+          "/v2/systems/X1-UX81/waypoints/X1-UX81-A1/market" ->
+            send(test_pid, :fresh_sale_listing)
+
+            Req.Test.json(conn, %{
+              "data" => %{
+                "symbol" => "X1-UX81-A1",
+                "tradeGoods" => [
+                  %{
+                    "symbol" => "IRON_ORE",
+                    "sellPrice" => 25,
+                    "purchasePrice" => 10,
+                    "tradeVolume" => 30
+                  }
+                ]
+              }
+            })
+
+          "/v2/my/ships/FLEET-SHIP/sell" ->
+            send(test_pid, {:sale, conn.body_params})
+
+            Req.Test.json(conn, %{
+              "data" => %{
+                "agent" => %{"symbol" => agent.symbol, "credits" => 1_750},
+                "cargo" => %{"capacity" => 40, "units" => 0, "inventory" => []},
+                "transaction" => %{
+                  "type" => "SELL",
+                  "tradeSymbol" => "IRON_ORE",
+                  "shipSymbol" => "FLEET-SHIP",
+                  "waypointSymbol" => "X1-UX81-A1",
+                  "units" => 30
+                }
+              }
+            })
+        end
+      end)
+
+      assert {:ok, configured_job} =
+               Fleet.configure_procurement_job(agent, "FLEET-SHIP", %{
+                 recipient_type: "market",
+                 trade_symbol: "IRON_ORE",
+                 quantity: 30,
+                 destination_waypoint: "X1-UX81-A1",
+                 minimum_sale_price: 25,
+                 compatible_existing_cargo?: true
+               })
+
+      assert {:ok,
+              %Job{
+                status: "completed",
+                progress: %{"acquired" => 0, "sold" => 30, "accepted" => 30}
+              }} =
+               Fleet.start_procurement_job(agent, "FLEET-SHIP")
+
+      assert_receive :fresh_sale_listing
+      assert_receive {:sale, %{"symbol" => "IRON_ORE", "units" => 30}}
+      assert Fleet.ship_manual_intent(agent, "FLEET-SHIP") == nil
+      configured_job_id = configured_job.id
+
+      assert %ManualIntent{
+               caller: "job",
+               job_id: ^configured_job_id,
+               type: "sell",
+               status: "completed",
+               last_action_result: %{"transaction" => %{"type" => "SELL", "units" => 30}}
+             } =
+               Repo.one!(
+                 from intent in ManualIntent,
+                   where: intent.job_id == ^configured_job.id,
+                   order_by: [desc: intent.id],
+                   limit: 1
+               )
+    end
+
     test "persists the fixed delivery constraints and initial progress" do
       agent = agent_fixture()
       ship_fixture(agent, "FLEET-SHIP")
@@ -3046,7 +3248,7 @@ defmodule SpaceTraders.FleetTest do
                  trade_symbol: "IRON_ORE",
                  quantity: 30,
                  destination_waypoint: "X1-UX81-A1",
-                 source_systems: ["X1-UX81", "X1-DF55"],
+                 source_systems: ["X1-UX81"],
                  reserve_credits: 500,
                  price_ceiling: 75,
                  compatible_existing_cargo?: true
@@ -3057,15 +3259,20 @@ defmodule SpaceTraders.FleetTest do
 
       assert job.progress == %{
                "contract_id" => "CONTRACT-1",
+               "recipient_type" => "contract",
                "trade_symbol" => "IRON_ORE",
                "requested" => 30,
                "destination_waypoint" => "X1-UX81-A1",
-               "source_systems" => ["X1-UX81", "X1-DF55"],
+               "target_system" => "X1-UX81",
+               "source_systems" => ["X1-UX81"],
                "reserve_credits" => 500,
                "price_ceiling" => 75,
+               "minimum_sale_price" => nil,
+               "minimum_sale_value" => nil,
                "compatible_existing_cargo" => true,
                "acquired" => 0,
                "aboard" => 0,
+               "sold" => 0,
                "accepted" => 0
              }
     end
@@ -3205,13 +3412,14 @@ defmodule SpaceTraders.FleetTest do
 
       assert {:ok, %Job{status: "completed"}} = Fleet.start_procurement_job(agent, ship.symbol)
 
-      job_id = job.id
-
       assert_receive {:job_buy_intent,
                       %{
-                        "caller" => "job",
-                        "job_id" => ^job_id,
-                        "max_unit_price" => nil,
+                        "max_price" => nil,
+                        "recipient" => %{
+                          "contract_id" => "CONTRACT-1",
+                          "type" => "contract",
+                          "waypoint" => "X1-UX81-A1"
+                        },
                         "reserve_credits" => 0,
                         "trade_symbol" => "IRON_ORE",
                         "units" => 5
@@ -3219,9 +3427,12 @@ defmodule SpaceTraders.FleetTest do
 
       assert_receive {:job_delivery_intent,
                       %{
-                        "caller" => "job",
                         "contract_id" => "CONTRACT-1",
-                        "job_id" => ^job_id,
+                        "recipient" => %{
+                          "contract_id" => "CONTRACT-1",
+                          "type" => "contract",
+                          "waypoint" => "X1-UX81-A1"
+                        },
                         "trade_symbol" => "IRON_ORE",
                         "units" => 5
                       }, "active"}
@@ -4906,8 +5117,14 @@ defmodule SpaceTraders.FleetTest do
                )
 
       assert_receive {:job_status_at_purchase, "paused"}
-      assert intent.last_action_result == %{"kind" => "buy", "units" => 5, "price" => 10}
-      assert intent.parameters["caller"] == "manual"
+
+      assert %{
+               "kind" => "buy",
+               "units" => 5,
+               "price" => 10,
+               "transaction" => %{"type" => "PURCHASE", "units" => 5}
+             } = intent.last_action_result
+
       assert Fleet.ship_job(agent, "FLEET-SHIP").status == "paused"
     end
 
@@ -4978,7 +5195,7 @@ defmodule SpaceTraders.FleetTest do
       assert {:ok, %ManualIntent{status: "completed", last_action_result: result}} =
                Fleet.buy_goods_intent(agent, "FLEET-SHIP", "X1-UX81-A1", "IRON_ORE", 5)
 
-      assert result == %{"kind" => "buy", "units" => 5, "price" => 0}
+      assert %{"kind" => "buy", "units" => 5, "price" => 0} = result
     end
 
     test "manual Buy preserves a preempted Job's in-flight recovery evidence" do
@@ -5111,7 +5328,11 @@ defmodule SpaceTraders.FleetTest do
                  5
                )
 
-      assert intent.last_action_result == %{"kind" => "deliver", "units" => 5}
+      assert %{
+               "kind" => "deliver",
+               "units" => 5,
+               "recipient" => %{"units_fulfilled" => 5}
+             } = intent.last_action_result
     end
 
     test "restart recovery confirms an in-flight delivery from Contract and Cargo evidence" do
@@ -5167,7 +5388,7 @@ defmodule SpaceTraders.FleetTest do
       assert {:ok, %ManualIntent{status: "completed", last_action_result: result}} =
                Fleet.recover_manual_intent_on_boot("FLEET-SHIP", agent.id, agent.agent_token)
 
-      assert result == %{"kind" => "deliver", "units" => 3}
+      assert %{"kind" => "deliver", "units" => 3} = result
     end
 
     test "restart recovery does not infer a completed sale from a cargo delta" do
@@ -5207,25 +5428,9 @@ defmodule SpaceTraders.FleetTest do
       assert Repo.get!(ManualIntent, intent.id).last_action_result["error"] =~ "ambiguous"
     end
 
-    test "restart recovery confirms an in-flight Buy from correlated cargo and credits" do
+    test "preserves an ambiguous sale request as in-flight evidence" do
       agent = agent_fixture()
-      ship = ship_fixture(agent, "FLEET-SHIP")
-
-      intent =
-        Repo.insert!(%ManualIntent{
-          ship_id: ship.id,
-          type: "buy",
-          target_waypoint: "X1-UX81-A1",
-          parameters: %{"trade_symbol" => "IRON_ORE", "units" => 5},
-          status: "blocked",
-          in_flight_action: %{
-            "kind" => "buy",
-            "trade_symbol" => "IRON_ORE",
-            "units" => 5,
-            "listing_price" => 10,
-            "expected" => %{"cargo_units_at_least" => 5, "credits_at_most" => 50}
-          }
-        })
+      ship_fixture(agent, "FLEET-SHIP")
 
       Req.Test.stub(SpaceTraders.API, fn conn ->
         case {conn.request_path, conn.method} do
@@ -5241,16 +5446,40 @@ defmodule SpaceTraders.FleetTest do
                 })
             })
 
-          {"/v2/my/agent", "GET"} ->
-            Req.Test.json(conn, %{"data" => %{"symbol" => agent.symbol, "credits" => 50}})
+          {"/v2/systems/X1-UX81/waypoints/X1-UX81-A1/market", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => %{
+                "symbol" => "X1-UX81-A1",
+                "tradeGoods" => [
+                  %{
+                    "symbol" => "IRON_ORE",
+                    "purchasePrice" => 10,
+                    "sellPrice" => 8,
+                    "tradeVolume" => 5
+                  }
+                ]
+              }
+            })
+
+          {"/v2/my/ships/FLEET-SHIP/sell", "POST"} ->
+            conn |> Map.put(:status, 500) |> Req.Test.json(%{})
         end
       end)
 
-      assert {:ok, %ManualIntent{status: "completed", last_action_result: result}} =
-               Fleet.recover_manual_intent_on_boot("FLEET-SHIP", agent.id, agent.agent_token)
+      assert {:ok, %ManualIntent{status: "blocked", in_flight_action: action}} =
+               Fleet.sell_goods_intent(agent, "FLEET-SHIP", "X1-UX81-A1", "IRON_ORE", 5,
+                 min_price: 8
+               )
 
-      assert result == %{"kind" => "buy", "units" => 5, "price" => 10}
-      assert Repo.get!(ManualIntent, intent.id).in_flight_action == nil
+      assert action == %{
+               "kind" => "sell",
+               "trade_symbol" => "IRON_ORE",
+               "units" => 5,
+               "listing_price" => 8
+             }
+
+      assert {:error, :cargo_operation_reconciliation_required} =
+               Fleet.stop_manual_intent(agent, "FLEET-SHIP")
     end
 
     test "sells cargo through the game API" do
@@ -5280,6 +5509,67 @@ defmodule SpaceTraders.FleetTest do
 
       assert {:ok, %{cargo: %{units: 7}, transaction: %{total_price: 400}}} =
                Fleet.sell_cargo(agent, "FLEET-SHIP", "IRON_ORE", 5)
+    end
+
+    test "preserves an in-flight sale when the successful response transaction is uncorrelated" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case {conn.request_path, conn.method} do
+          {"/v2/my/ships/FLEET-SHIP", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" =>
+                ship_body("FLEET-SHIP", %{
+                  "cargo" => %{
+                    "capacity" => 40,
+                    "units" => 5,
+                    "inventory" => [%{"symbol" => "IRON_ORE", "units" => 5}]
+                  }
+                })
+            })
+
+          {"/v2/systems/X1-UX81/waypoints/X1-UX81-A1/market", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => %{
+                "symbol" => "X1-UX81-A1",
+                "tradeGoods" => [
+                  %{
+                    "symbol" => "IRON_ORE",
+                    "purchasePrice" => 10,
+                    "sellPrice" => 8,
+                    "tradeVolume" => 5
+                  }
+                ]
+              }
+            })
+
+          {"/v2/my/ships/FLEET-SHIP/sell", "POST"} ->
+            Req.Test.json(conn, %{
+              "data" => %{
+                "agent" => %{"symbol" => agent.symbol, "credits" => 100},
+                "cargo" => %{"capacity" => 40, "units" => 0, "inventory" => []},
+                "transaction" => %{
+                  "shipSymbol" => "FLEET-SHIP",
+                  "tradeSymbol" => "COPPER_ORE",
+                  "type" => "SELL",
+                  "units" => 5,
+                  "pricePerUnit" => 8,
+                  "totalPrice" => 40,
+                  "waypointSymbol" => "X1-UX81-A1",
+                  "timestamp" => "2026-01-01T00:00:00.000Z"
+                }
+              }
+            })
+        end
+      end)
+
+      assert {:ok, %ManualIntent{status: "blocked", in_flight_action: action}} =
+               Fleet.sell_goods_intent(agent, "FLEET-SHIP", "X1-UX81-A1", "IRON_ORE", 5,
+                 min_price: 8
+               )
+
+      assert action["kind"] == "sell"
     end
 
     test "refuels a ship through the game API" do

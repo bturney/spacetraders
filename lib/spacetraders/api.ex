@@ -590,17 +590,19 @@ defmodule SpaceTraders.API do
   ## Decoding
 
   defp decode(body, {:model, mod}) do
-    decode_data(body, &mod.from_json/1)
+    decode_safely(fn -> decode_data(body, &mod.from_json/1) end)
   end
 
   defp decode(body, {:list, mod}) do
-    decode_data(body, fn data -> Enum.map(data, &mod.from_json/1) end)
+    decode_safely(fn -> decode_data(body, fn data -> Enum.map(data, &mod.from_json/1) end) end)
   end
 
   defp decode(body, {:map, fields}) do
-    decode_data(body, fn data ->
-      Map.new(fields, fn {key, spec} ->
-        {key, decode_field(Map.get(data, to_string(key)), spec)}
+    decode_safely(fn ->
+      decode_data(body, fn data ->
+        Map.new(fields, fn {key, spec} ->
+          {key, decode_field(Map.get(data, to_string(key)), spec)}
+        end)
       end)
     end)
   end
@@ -612,6 +614,13 @@ defmodule SpaceTraders.API do
 
   defp decode_data(_body, _decode_fun) do
     {:error, SpaceTraders.API.Error.new(200, "undecodable response: missing `data`")}
+  end
+
+  defp decode_safely(decode_fun) do
+    decode_fun.()
+  rescue
+    _error in [FunctionClauseError, BadMapError, Protocol.UndefinedError] ->
+      {:error, SpaceTraders.API.Error.new(200, "undecodable response: invalid model field")}
   end
 
   defp decode_field(nil, _spec), do: nil
