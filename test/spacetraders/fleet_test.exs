@@ -3139,7 +3139,10 @@ defmodule SpaceTraders.FleetTest do
                "acquired" => 0,
                "aboard" => 0,
                "sold" => 0,
-               "accepted" => 0
+               "accepted" => 0,
+               "shared_fulfilled" => 0,
+               "external_progress" => 0,
+               "spent" => 0
              }
     end
 
@@ -3273,7 +3276,50 @@ defmodule SpaceTraders.FleetTest do
                "acquired" => 0,
                "aboard" => 0,
                "sold" => 0,
-               "accepted" => 0
+               "accepted" => 0,
+               "shared_fulfilled" => 0,
+               "external_progress" => 0,
+               "spent" => 0
+             }
+    end
+
+    test "persists a fixed Construction recipient and initial progress" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      assert {:ok, %Job{} = job} =
+               Fleet.configure_procurement_job(agent, "FLEET-SHIP", %{
+                 recipient_type: "construction",
+                 construction_system: "X1-UX81",
+                 trade_symbol: "IRON_ORE",
+                 quantity: 30,
+                 destination_waypoint: "X1-UX81-A1",
+                 source_systems: ["X1-UX81"],
+                 reserve_credits: 500,
+                 price_ceiling: 75,
+                 compatible_existing_cargo?: true
+               })
+
+      assert job.progress == %{
+               "recipient_type" => "construction",
+               "construction_system" => "X1-UX81",
+               "trade_symbol" => "IRON_ORE",
+               "requested" => 30,
+               "destination_waypoint" => "X1-UX81-A1",
+               "target_system" => "X1-UX81",
+               "source_systems" => ["X1-UX81"],
+               "reserve_credits" => 500,
+               "price_ceiling" => 75,
+               "minimum_sale_price" => nil,
+               "minimum_sale_value" => nil,
+               "compatible_existing_cargo" => true,
+               "acquired" => 0,
+               "aboard" => 0,
+               "sold" => 0,
+               "accepted" => 0,
+               "shared_fulfilled" => 0,
+               "external_progress" => 0,
+               "spent" => 0
              }
     end
 
@@ -5332,6 +5378,74 @@ defmodule SpaceTraders.FleetTest do
                "kind" => "deliver",
                "units" => 5,
                "recipient" => %{"units_fulfilled" => 5}
+             } = intent.last_action_result
+    end
+
+    test "Deliver Goods Intent supplies Construction from fresh project evidence" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case {conn.request_path, conn.method} do
+          {"/v2/my/ships/FLEET-SHIP", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" =>
+                ship_body("FLEET-SHIP", %{
+                  "cargo" => %{
+                    "capacity" => 40,
+                    "units" => 5,
+                    "inventory" => [%{"symbol" => "IRON_ORE", "units" => 5}]
+                  }
+                })
+            })
+
+          {"/v2/systems/X1-UX81/waypoints/X1-UX81-A1/construction", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => %{
+                "symbol" => "X1-UX81-A1",
+                "isComplete" => false,
+                "materials" => [
+                  %{"tradeSymbol" => "IRON_ORE", "required" => 20, "fulfilled" => 7}
+                ]
+              }
+            })
+
+          {"/v2/systems/X1-UX81/waypoints/X1-UX81-A1/construction/supply", "POST"} ->
+            assert conn.body_params == %{
+                     "shipSymbol" => "FLEET-SHIP",
+                     "tradeSymbol" => "IRON_ORE",
+                     "units" => 5
+                   }
+
+            Req.Test.json(conn, %{
+              "data" => %{
+                "cargo" => %{"capacity" => 40, "units" => 0, "inventory" => []},
+                "construction" => %{
+                  "symbol" => "X1-UX81-A1",
+                  "isComplete" => false,
+                  "materials" => [
+                    %{"tradeSymbol" => "IRON_ORE", "required" => 20, "fulfilled" => 12}
+                  ]
+                }
+              }
+            })
+        end
+      end)
+
+      assert {:ok, %ManualIntent{type: "deliver", status: "completed"} = intent} =
+               Fleet.deliver_construction_goods_intent(
+                 agent,
+                 "FLEET-SHIP",
+                 "X1-UX81",
+                 "X1-UX81-A1",
+                 "IRON_ORE",
+                 5
+               )
+
+      assert %{
+               "kind" => "deliver",
+               "units" => 5,
+               "recipient" => %{"units_fulfilled" => 12}
              } = intent.last_action_result
     end
 
