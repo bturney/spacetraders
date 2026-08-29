@@ -513,6 +513,7 @@ defmodule SpaceTraders.Fleet do
     reserve_credits = attrs[:reserve_credits] || attrs["reserve_credits"] || 0
     price_ceiling = attrs[:price_ceiling] || attrs["price_ceiling"]
     minimum_sale_price = attrs[:minimum_sale_price] || attrs["minimum_sale_price"]
+    minimum_sale_value = attrs[:minimum_sale_value] || attrs["minimum_sale_value"]
 
     compatible_cargo? =
       attrs[:compatible_existing_cargo?] || attrs["compatible_existing_cargo?"] || false
@@ -526,7 +527,9 @@ defmodule SpaceTraders.Fleet do
          is_integer(reserve_credits) and reserve_credits >= 0 and
          (is_nil(price_ceiling) or (is_integer(price_ceiling) and price_ceiling > 0)) and
          (is_nil(minimum_sale_price) or
-            (is_integer(minimum_sale_price) and minimum_sale_price > 0)) do
+            (is_integer(minimum_sale_price) and minimum_sale_price > 0)) and
+         (is_nil(minimum_sale_value) or
+            (is_integer(minimum_sale_value) and minimum_sale_value > 0)) do
       {:ok,
        %{
          "recipient_type" => recipient_type,
@@ -538,6 +541,7 @@ defmodule SpaceTraders.Fleet do
          "reserve_credits" => reserve_credits,
          "price_ceiling" => price_ceiling,
          "minimum_sale_price" => minimum_sale_price,
+         "minimum_sale_value" => minimum_sale_value,
          "compatible_existing_cargo" => compatible_cargo?,
          "acquired" => 0,
          "aboard" => 0,
@@ -629,6 +633,7 @@ defmodule SpaceTraders.Fleet do
              agent,
              SpaceTraders.API.get_ship(agent.agent_token, ship.symbol)
            ),
+         :ok <- procurement_system_matches?(job.progress, live_ship),
          %Job{} = current_job <- Repo.get(Job, job.id),
          true <- Job.running?(current_job) or current_job.status == "paused",
          %ManualIntent{} = current_intent <- Repo.get(ManualIntent, intent.id),
@@ -856,6 +861,7 @@ defmodule SpaceTraders.Fleet do
              "trade_symbol" => progress["trade_symbol"],
              "units" => units,
              "min_price" => progress["minimum_sale_price"],
+             "min_total" => progress["minimum_sale_value"],
              "recipient" => %{"type" => "market", "waypoint" => progress["destination_waypoint"]}
            }
          }}
@@ -2058,7 +2064,17 @@ defmodule SpaceTraders.Fleet do
 
       true ->
         units = min(parameters["units"], min(held, good.trade_volume))
-        if units > 0, do: {:ok, units, nil}, else: {:error, :cargo_missing}
+
+        cond do
+          units <= 0 ->
+            {:error, :cargo_missing}
+
+          is_integer(parameters["min_total"]) and price * units < parameters["min_total"] ->
+            {:error, {:sale_value_constraint, price * units, parameters["min_total"]}}
+
+          true ->
+            {:ok, units, nil}
+        end
     end
   end
 
@@ -5161,6 +5177,7 @@ defmodule SpaceTraders.Fleet do
         # requests with unresolved response evidence become durable blockers.
         with %Job{} = current_job <- Repo.get(Job, job.id),
              true <- Job.running?(current_job),
+             :ok <- procurement_system_matches?(current_job.progress, live_ship),
              %ManualIntent{} = current_intent <- Repo.get(ManualIntent, intent.id),
              true <- ManualIntent.unfinished?(current_intent),
              {:ok, current_intent} <- advance_manual_intent(agent, current_intent, live_ship) do
