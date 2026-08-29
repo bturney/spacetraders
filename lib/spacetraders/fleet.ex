@@ -1649,9 +1649,21 @@ defmodule SpaceTraders.Fleet do
         trade_symbol,
         units
       ) do
-    cargo_intent(agent, ship_symbol, "deliver", waypoint, trade_symbol, units,
-      recipient: %{type: "construction", system: system_symbol, waypoint: waypoint}
-    )
+    with {:ok, live_ship} <-
+           Agent.handle_game_result(
+             agent,
+             SpaceTraders.API.get_ship(agent.agent_token, ship_symbol)
+           ),
+         {:ok, ^system_symbol} <- system_from_headquarters(waypoint),
+         true <- live_ship.nav.system_symbol == system_symbol do
+      cargo_intent(agent, ship_symbol, "deliver", waypoint, trade_symbol, units,
+        recipient: %{type: "construction", system: system_symbol, waypoint: waypoint}
+      )
+    else
+      false -> {:error, :remote_destination_system_unsupported}
+      {:ok, _system} -> {:error, :remote_destination_system_unsupported}
+      error -> error
+    end
   end
 
   @doc "Installs one Cargo module through durable Manual Control."
@@ -2038,13 +2050,21 @@ defmodule SpaceTraders.Fleet do
     if intent.type == "deliver" do
       with {:ok, recipient} <- delivery_recipient_for_intent(agent, intent),
            {:ok, units, _credits} <- executable_cargo_units(intent, live_ship, recipient, agent) do
+        action =
+          %{
+            "kind" => "deliver",
+            "trade_symbol" => intent.parameters["trade_symbol"],
+            "units" => units,
+            "recipient" => intent.parameters["recipient"]
+          }
+          |> delivery_action_evidence(
+            recipient,
+            live_ship.cargo,
+            intent.parameters["trade_symbol"]
+          )
+
         with {:ok, intent} <-
-               claim_intent_action(intent, %{
-                 "kind" => "deliver",
-                 "trade_symbol" => intent.parameters["trade_symbol"],
-                 "units" => units,
-                 "recipient" => intent.parameters["recipient"]
-               }) do
+               claim_intent_action(intent, action) do
           execute_cargo_intent(agent, intent, live_ship, units, recipient)
         else
           {:error, _reason} -> :ok
@@ -2794,6 +2814,14 @@ defmodule SpaceTraders.Fleet do
     )
   end
 
+  defp delivery_action_evidence(action, {:construction, construction}, cargo, trade_symbol) do
+    action
+    |> Map.put("fulfilled_before", construction_fulfilled_units(construction, trade_symbol))
+    |> Map.put("cargo_before", item_units(cargo, trade_symbol))
+  end
+
+  defp delivery_action_evidence(action, _recipient, _cargo, _trade_symbol), do: action
+
   defp construction_fulfilled_units(construction, trade_symbol) do
     case Enum.find(construction.materials || [], &(&1.trade_symbol == trade_symbol)) do
       %{fulfilled: fulfilled} when is_integer(fulfilled) -> fulfilled
@@ -2810,9 +2838,10 @@ defmodule SpaceTraders.Fleet do
 
   defp reconcile_deliver_cargo_intent(agent, intent, live_ship, action) do
     with fulfilled_before when is_integer(fulfilled_before) <- action["fulfilled_before"],
-         {:ok, contract} <- procurement_contract_for_intent(agent, intent),
+         {:ok, recipient} <- delivery_recipient_for_intent(agent, intent),
          accepted when accepted > 0 <-
-           fulfilled_units(contract, action["trade_symbol"]) - fulfilled_before,
+           recipient_fulfilled_units(elem(recipient, 1), action["trade_symbol"]) -
+             fulfilled_before,
          true <- delivery_evidence?(action, live_ship.cargo, accepted) do
       complete_cargo_intent(agent, intent, accepted, nil, %{})
     else
