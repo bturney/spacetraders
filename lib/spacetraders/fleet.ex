@@ -506,6 +506,225 @@ defmodule SpaceTraders.Fleet do
   def configure_construction_supply_job(%AgentRecord{}, _ship_symbol, _attrs),
     do: {:error, :agent_token_missing}
 
+  @doc "Captures a paused Ship Outfitting Job with its explicit readiness target and removal authority."
+  def configure_outfitting_job(%AgentRecord{} = agent, ship_symbol, attrs) when is_map(attrs) do
+    with {:ok, ship} <- owned_ship(agent, ship_symbol),
+         nil <- unfinished_job(ship.id),
+         {:ok, progress} <- outfitting_progress(attrs) do
+      %Job{ship_id: ship.id}
+      |> Job.changeset(%{
+        type: "outfitting",
+        extraction_waypoint: "OUTFITTING-NONE",
+        market_waypoint: "OUTFITTING-NONE",
+        cargo_threshold: 1
+      })
+      |> Ecto.Changeset.put_change(:status, "paused")
+      |> Ecto.Changeset.put_change(:blocked_reason, "Awaiting Operator resume")
+      |> Ecto.Changeset.put_change(:progress, progress)
+      |> Repo.insert()
+    else
+      %Job{} -> {:error, :unfinished_job_already_assigned}
+      error -> error
+    end
+  end
+
+  defp outfitting_progress(attrs) do
+    capability = attrs[:requested_capability] || attrs["requested_capability"]
+    acceptable = attrs[:acceptable_modules] || attrs["acceptable_modules"]
+    removals = attrs[:authorized_removals] || attrs["authorized_removals"] || %{}
+
+    if is_binary(capability) and capability != "" and is_list(acceptable) and acceptable != [] and
+         Enum.all?(acceptable, &(is_binary(&1) and &1 != "")) and is_map(removals) and
+         Enum.all?(removals, fn {symbol, count} ->
+           is_binary(symbol) and symbol != "" and is_integer(count) and count > 0
+         end) do
+      {:ok,
+       %{
+         "requested_capability" => capability,
+         "acceptable_modules" => Enum.uniq(acceptable),
+         "authorized_removals" => removals,
+         "installed_modules" => [],
+         "cargo_candidate" => nil,
+         "active_operation" => nil,
+         "evidence" => []
+       }}
+    else
+      {:error, :invalid_outfitting_configuration}
+    end
+  end
+
+  @doc "Starts or resumes a Ship Outfitting Job from authoritative installed modules and Cargo."
+  def start_outfitting_job(%AgentRecord{} = agent, ship_symbol) do
+    with :ok <- Agent.execution_allowed?(agent),
+         {:ok, ship} <- owned_ship(agent, ship_symbol),
+         %Job{type: "outfitting"} = job <- unfinished_job(ship.id),
+         nil <- unfinished_manual_intent(ship.id),
+         {:ok, live_ship} <-
+           Agent.handle_game_result(
+             agent,
+             SpaceTraders.API.get_ship(agent.agent_token, ship_symbol)
+           ) do
+      job =
+        Repo.update!(
+          Ecto.Changeset.change(job, status: "active", blocker: nil, blocked_reason: nil)
+        )
+
+      advance_outfitting_job(agent, job, live_ship)
+    else
+      nil -> {:error, :outfitting_job_not_configured}
+      %Job{} -> {:error, :outfitting_job_not_configured}
+      %ManualIntent{} -> {:error, :manual_intent_active}
+      {:error, reason} -> block_outfitting_job(agent, ship_symbol, reason)
+    end
+  end
+
+  def resume_outfitting_job(agent, ship_symbol), do: start_outfitting_job(agent, ship_symbol)
+
+  def pause_outfitting_job(%AgentRecord{} = agent, ship_symbol),
+    do: pause_job_type(agent, ship_symbol, "outfitting", "Ship Outfitting Job")
+
+  def stop_outfitting_job(%AgentRecord{} = agent, ship_symbol),
+    do: stop_job_type(agent, ship_symbol, "outfitting", "Ship Outfitting Job")
+
+  defp advance_outfitting_job(agent, job, live_ship) do
+    module_slots = live_ship.frame && live_ship.frame.module_slots
+    candidate = Enum.find(job.progress["acceptable_modules"], &(item_units(live_ship, &1) > 0))
+
+    progress =
+      job.progress
+      |> Map.put("installed_modules", Enum.map(live_ship.modules || [], & &1.symbol))
+      |> Map.put("active_operation", nil)
+
+    job =
+      Repo.update!(
+        Ecto.Changeset.change(job,
+          progress: progress,
+          last_validated_at: DateTime.utc_now() |> DateTime.truncate(:second)
+        )
+      )
+
+    cond do
+      Enum.any?(progress["acceptable_modules"], &(&1 in progress["installed_modules"])) ->
+        evidence = %{"installed_modules" => progress["installed_modules"], "outcome" => "ready"}
+
+        {:ok,
+         terminalize_job!(
+           Repo.update!(
+             Ecto.Changeset.change(job,
+               progress: Map.update!(progress, "evidence", &(&1 ++ [evidence]))
+             )
+           ),
+           "completed"
+         )}
+
+      is_struct(unfinished_job_intent(job.id), ManualIntent) ->
+        reconcile_outfitting_intent(agent, job, unfinished_job_intent(job.id), live_ship)
+
+      is_binary(candidate) and
+          (not is_integer(module_slots) or module_slots > length(live_ship.modules || [])) ->
+        start_outfitting_operation(agent, job, live_ship, "install_module", candidate)
+
+      is_integer(module_slots) and module_slots <= length(live_ship.modules || []) ->
+        case authorized_removal(progress, live_ship) do
+          nil -> mark_outfitting_job_blocked(job, :module_slot_removal_not_authorized)
+          symbol -> start_outfitting_operation(agent, job, live_ship, "remove_module", symbol)
+        end
+
+      true ->
+        mark_outfitting_job_blocked(
+          job,
+          {:acceptable_module_missing_from_cargo, progress["acceptable_modules"]}
+        )
+    end
+  end
+
+  defp start_outfitting_operation(agent, job, live_ship, type, module_symbol) do
+    progress =
+      job.progress
+      |> Map.put("cargo_candidate", if(type == "install_module", do: module_symbol, else: nil))
+      |> Map.put("active_operation", %{"kind" => type, "module_symbol" => module_symbol})
+
+    job = Repo.update!(Ecto.Changeset.change(job, progress: progress))
+
+    with {:ok, intent} <-
+           insert_job_intent(job, %{
+             type: type,
+             target_waypoint: module_symbol,
+             parameters: %{
+               "module_symbol" => module_symbol,
+               "quantity" => 1,
+               "authorized_removals" => job.progress["authorized_removals"]
+             }
+           }),
+         {:ok, intent} <- advance_manual_intent(agent, intent, live_ship) do
+      advance_outfitting_after_intent(agent, job, intent)
+    else
+      {:error, reason} -> mark_outfitting_job_blocked(job, reason)
+      :ok -> :ok
+    end
+  end
+
+  defp reconcile_outfitting_intent(agent, job, intent, live_ship) do
+    case advance_manual_intent(agent, intent, live_ship) do
+      {:ok, intent} -> advance_outfitting_after_intent(agent, job, intent)
+      :ok -> :ok
+      {:error, reason} -> mark_outfitting_job_blocked(job, reason)
+    end
+  end
+
+  defp advance_outfitting_after_intent(agent, job, %ManualIntent{status: "completed"} = intent) do
+    with %Job{} = current <- Repo.get(Job, job.id),
+         true <- Job.running?(current),
+         {:ok, live_ship} <-
+           Agent.handle_game_result(
+             agent,
+             SpaceTraders.API.get_ship(agent.agent_token, Repo.get!(Ship, current.ship_id).symbol)
+           ) do
+      evidence = %{"operation" => intent.last_action_result, "outcome" => "confirmed"}
+      progress = Map.update!(current.progress, "evidence", &(&1 ++ [evidence]))
+
+      advance_outfitting_job(
+        agent,
+        Repo.update!(Ecto.Changeset.change(current, progress: progress)),
+        live_ship
+      )
+    else
+      false -> {:ok, job}
+      {:error, reason} -> mark_outfitting_job_blocked(job, reason)
+    end
+  end
+
+  defp advance_outfitting_after_intent(_agent, job, %ManualIntent{} = intent),
+    do: mark_outfitting_job_blocked(job, intent.blocker || :outfitting_operation_blocked)
+
+  defp authorized_removal(progress, live_ship) do
+    Enum.find_value(progress["authorized_removals"], fn {symbol, count} ->
+      if count > 0 and module_count(live_ship.modules, symbol) > 0, do: symbol
+    end)
+  end
+
+  defp block_outfitting_job(agent, ship_symbol, reason) do
+    with {:ok, ship} <- owned_ship(agent, ship_symbol),
+         %Job{type: "outfitting"} = job <- unfinished_job(ship.id) do
+      mark_outfitting_job_blocked(job, reason)
+      {:error, {:outfitting_job_blocked, reason}}
+    else
+      _ -> {:error, :outfitting_job_not_configured}
+    end
+  end
+
+  defp mark_outfitting_job_blocked(job, reason) do
+    blocker = %{
+      job_blocker(reason)
+      | summary: "Ship Outfitting Job cannot progress: #{blocker_reason(reason)}."
+    }
+
+    {:error,
+     Repo.update!(
+       Ecto.Changeset.change(job, status: "blocked", blocker: blocker, blocked_reason: nil)
+     )}
+  end
+
   defp construction_supply_progress(attrs, target_system) do
     system = attrs[:construction_system] || attrs["construction_system"]
     waypoint = attrs[:construction_waypoint] || attrs["construction_waypoint"]
@@ -6073,9 +6292,11 @@ defmodule SpaceTraders.Fleet do
          %Job{} = config <- unfinished_job(ship.id),
          %AgentRecord{} = agent <- Repo.get(AgentRecord, agent_id),
          :ok <- Agent.execution_allowed?(agent) do
-      if config.type in ["procurement", "construction_supply"] and
+      if config.type in ["procurement", "construction_supply", "outfitting"] and
            match?(%ManualIntent{}, unfinished_job_intent(config.id)) do
-        recover_procurement_intent(agent, ship, config)
+        if config.type == "outfitting",
+          do: start_outfitting_job(agent, ship_symbol),
+          else: recover_procurement_intent(agent, ship, config)
       else
         if config.status in @running_job_states do
           # Recovery owns its own persisted attempt budget. Avoid nested client
@@ -6089,6 +6310,7 @@ defmodule SpaceTraders.Fleet do
                 "explorer" -> advance_explorer_job(agent, config, live_ship)
                 "procurement" -> start_procurement_job(agent, ship_symbol)
                 "construction_supply" -> start_construction_supply_job(agent, ship_symbol)
+                "outfitting" -> start_outfitting_job(agent, ship_symbol)
                 _ -> advance_miner_job(agent, config, live_ship)
               end
 

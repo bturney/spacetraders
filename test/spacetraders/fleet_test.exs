@@ -4904,6 +4904,110 @@ defmodule SpaceTraders.FleetTest do
   end
 
   describe "ship actions" do
+    test "Outfitting Job completes from fresh authoritative installed readiness" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      assert {:ok, job} =
+               Fleet.configure_outfitting_job(agent, "FLEET-SHIP", %{
+                 requested_capability: "cargo capacity",
+                 acceptable_modules: ["MODULE_CARGO_HOLD_I"],
+                 authorized_removals: %{}
+               })
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        assert {"/v2/my/ships/FLEET-SHIP", "GET"} = {conn.request_path, conn.method}
+
+        Req.Test.json(conn, %{
+          "data" =>
+            ship_body("FLEET-SHIP", %{
+              "modules" => [%{"symbol" => "MODULE_CARGO_HOLD_I", "name" => "Cargo Hold I"}]
+            })
+        })
+      end)
+
+      assert {:ok, %Job{status: "completed", progress: progress}} =
+               Fleet.start_outfitting_job(agent, "FLEET-SHIP")
+
+      assert progress["requested_capability"] == "cargo capacity"
+      assert progress["acceptable_modules"] == ["MODULE_CARGO_HOLD_I"]
+      assert progress["installed_modules"] == ["MODULE_CARGO_HOLD_I"]
+
+      assert progress["evidence"] == [
+               %{"installed_modules" => ["MODULE_CARGO_HOLD_I"], "outcome" => "ready"}
+             ]
+
+      assert Repo.get!(Job, job.id).status == "completed"
+    end
+
+    test "Outfitting Job installs an acceptable Cargo module through the durable operation" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      assert {:ok, _job} =
+               Fleet.configure_outfitting_job(agent, "FLEET-SHIP", %{
+                 requested_capability: "gas processing",
+                 acceptable_modules: ["MODULE_GAS_PROCESSOR_I"],
+                 authorized_removals: %{}
+               })
+
+      {:ok, response_state} = Elixir.Agent.start_link(fn -> :cargo end)
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case {conn.request_path, conn.method} do
+          {"/v2/my/ships/FLEET-SHIP", "GET"} ->
+            installed? = Elixir.Agent.get(response_state, &(&1 == :installed))
+
+            Req.Test.json(conn, %{
+              "data" =>
+                ship_body("FLEET-SHIP", %{
+                  "modules" =>
+                    if(installed?,
+                      do: [%{"symbol" => "MODULE_GAS_PROCESSOR_I", "name" => "Gas Processor I"}],
+                      else: []
+                    ),
+                  "cargo" => %{
+                    "capacity" => 40,
+                    "units" => if(installed?, do: 0, else: 1),
+                    "inventory" =>
+                      if(installed?,
+                        do: [],
+                        else: [%{"symbol" => "MODULE_GAS_PROCESSOR_I", "units" => 1}]
+                      )
+                  }
+                })
+            })
+
+          {"/v2/my/ships/FLEET-SHIP/modules/install", "POST"} ->
+            assert conn.body_params == %{"symbol" => "MODULE_GAS_PROCESSOR_I"}
+            Elixir.Agent.update(response_state, fn _ -> :installed end)
+
+            Req.Test.json(conn, %{
+              "data" => %{
+                "agent" => %{"symbol" => agent.symbol, "credits" => 99},
+                "modules" => [
+                  %{"symbol" => "MODULE_GAS_PROCESSOR_I", "name" => "Gas Processor I"}
+                ],
+                "cargo" => %{"capacity" => 40, "units" => 0, "inventory" => []},
+                "transaction" => %{
+                  "shipSymbol" => "FLEET-SHIP",
+                  "tradeSymbol" => "MODULE_GAS_PROCESSOR_I",
+                  "totalPrice" => 1,
+                  "waypointSymbol" => "X1-UX81-A1",
+                  "timestamp" => "2026-01-01T00:00:00.000Z"
+                }
+              }
+            })
+        end
+      end)
+
+      assert {:ok, %Job{status: "completed", progress: progress}} =
+               Fleet.start_outfitting_job(agent, "FLEET-SHIP")
+
+      assert progress["cargo_candidate"] == "MODULE_GAS_PROCESSOR_I"
+      assert [%{"operation" => %{"kind" => "install_module"}} | _] = progress["evidence"]
+    end
+
     test "manual module installation persists evidence and leaves a preempted Job paused" do
       agent = agent_fixture()
       ship_fixture(agent, "FLEET-SHIP")
