@@ -368,6 +368,11 @@ defmodule SpaceTradersWeb.DashboardLive do
   end
 
   @impl true
+  def handle_event("configure_construction_supply_job", params, socket) do
+    save_construction_supply_job(socket, params)
+  end
+
+  @impl true
   def handle_event("configure_explorer_job", %{"symbol" => ship_symbol}, socket) do
     with {:ok, agent} <- agent_for_ship(socket, ship_symbol),
          {:ok, _job} <- Fleet.configure_explorer_job(agent, ship_symbol) do
@@ -858,6 +863,9 @@ defmodule SpaceTradersWeb.DashboardLive do
              "pause_procurement_job",
              "resume_procurement_job",
              "stop_procurement_job",
+             "pause_construction_supply_job",
+             "resume_construction_supply_job",
+             "stop_construction_supply_job",
              "pause_market_trading_job",
              "resume_market_trading_job",
              "stop_market_trading_job"
@@ -874,6 +882,15 @@ defmodule SpaceTradersWeb.DashboardLive do
 
           "stop_procurement_job" ->
             "#{ship_symbol} Procurement Job stopped; Ship is manual."
+
+          "pause_construction_supply_job" ->
+            "#{ship_symbol} Construction Supply Job paused."
+
+          "resume_construction_supply_job" ->
+            "#{ship_symbol} Construction Supply Job resumed."
+
+          "stop_construction_supply_job" ->
+            "#{ship_symbol} Construction Supply Job stopped; Ship is manual."
 
           "pause_market_trading_job" ->
             "#{ship_symbol} Market Trading Job paused."
@@ -925,6 +942,15 @@ defmodule SpaceTradersWeb.DashboardLive do
   defp procurement_job_action("stop_procurement_job", agent, ship),
     do: Fleet.stop_procurement_job(agent, ship)
 
+  defp construction_supply_job_action("pause_construction_supply_job", agent, ship),
+    do: Fleet.pause_construction_supply_job(agent, ship) |> unwrap_job_result()
+
+  defp construction_supply_job_action("resume_construction_supply_job", agent, ship),
+    do: Fleet.resume_construction_supply_job(agent, ship) |> unwrap_job_result()
+
+  defp construction_supply_job_action("stop_construction_supply_job", agent, ship),
+    do: Fleet.stop_construction_supply_job(agent, ship)
+
   defp job_action(action, agent, ship)
        when action in [
               "pause_procurement_job",
@@ -932,6 +958,14 @@ defmodule SpaceTradersWeb.DashboardLive do
               "stop_procurement_job"
             ],
        do: procurement_job_action(action, agent, ship)
+
+  defp job_action(action, agent, ship)
+       when action in [
+              "pause_construction_supply_job",
+              "resume_construction_supply_job",
+              "stop_construction_supply_job"
+            ],
+       do: construction_supply_job_action(action, agent, ship)
 
   defp job_action("pause_market_trading_job", agent, ship),
     do: Fleet.pause_market_trading_job(agent, ship) |> unwrap_job_result()
@@ -1006,6 +1040,32 @@ defmodule SpaceTradersWeb.DashboardLive do
          |> clear_draft(draft_key("procurement_job", [params["ship_symbol"]])),
          :info,
          "Procurement Job assigned and paused."
+       )}
+    else
+      {:error, reason} -> {:noreply, put_flash(socket, :error, live_error(reason))}
+    end
+  end
+
+  defp save_construction_supply_job(socket, params) do
+    with {:ok, agent} <- agent_for_ship(socket, params["ship_symbol"]),
+         {:ok, reserve_credits} <- parse_optional_units(params["reserve_credits"]),
+         {:ok, maximum_total_cost} <- parse_optional_units(params["maximum_total_cost"]),
+         {:ok, _job} <-
+           Fleet.configure_construction_supply_job(agent, params["ship_symbol"], %{
+             construction_system: blank_to_nil(params["construction_system"]),
+             construction_waypoint: String.trim(params["construction_waypoint"] || ""),
+             source_systems: split_systems(params["source_systems"]),
+             reserve_credits: reserve_credits || 0,
+             maximum_total_cost: maximum_total_cost,
+             compatible_existing_cargo?: Map.has_key?(params, "compatible_existing_cargo")
+           }) do
+      {:noreply,
+       put_flash(
+         socket
+         |> refresh_agent(agent)
+         |> clear_draft(draft_key("construction_supply_job", [params["ship_symbol"]])),
+         :info,
+         "Construction Supply Job assigned and paused."
        )}
     else
       {:error, reason} -> {:noreply, put_flash(socket, :error, live_error(reason))}
@@ -2948,9 +3008,12 @@ defmodule SpaceTradersWeb.DashboardLive do
             <.explorer_job_panel ship={@ship} />
           <% @ship.job && @ship.job.type == "procurement" -> %>
             <.procurement_job_panel ship={@ship} />
+          <% @ship.job && @ship.job.type == "construction_supply" -> %>
+            <.construction_supply_job_panel ship={@ship} />
           <% true -> %>
             <.miner_job_panel ship={@ship} form_drafts={@form_drafts} />
             <.procurement_job_panel ship={@ship} form_drafts={@form_drafts} />
+            <.construction_supply_job_panel ship={@ship} form_drafts={@form_drafts} />
             <button
               :if={is_nil(@ship.job)}
               type="button"
@@ -3694,6 +3757,128 @@ defmodule SpaceTradersWeb.DashboardLive do
     """
   end
 
+  attr :ship, :map, required: true
+  attr :form_drafts, :map, default: %{}
+
+  defp construction_supply_job_panel(assigns) do
+    job = Map.get(assigns.ship, :job)
+    progress = (job && job.progress) || %{}
+    assigns = assign(assigns, job: job, progress: progress)
+
+    ~H"""
+    <section class="mt-4 rounded border border-secondary/30 p-3" data-job-panel="construction-supply">
+      <div class="flex items-center justify-between gap-2">
+        <span class="text-xs font-semibold uppercase tracking-wider opacity-60">Construction Supply Job</span>
+        <span class="badge badge-outline badge-sm" data-construction-supply-job-status>{job_status(
+          @job
+        )}</span>
+      </div>
+      <dl :if={@job} class="mt-3 grid grid-cols-1 gap-1 text-xs sm:grid-cols-2">
+        <div>
+          <dt class="opacity-60">Project</dt><dd class="font-mono">
+            {@progress["construction_waypoint"]}
+          </dd>
+        </div>
+        <div>
+          <dt class="opacity-60">Spent</dt><dd>{@progress["spent"] || 0} credits</dd>
+        </div>
+        <div>
+          <dt class="opacity-60">Trips</dt><dd>{@progress["trips"] || 0}</dd>
+        </div>
+        <div>
+          <dt class="opacity-60">Active work</dt><dd>{job_active_work(@job, @ship)}</dd>
+        </div>
+      </dl>
+      <p :if={job_reason(@job)} class="mt-2 text-xs text-error">{job_reason(@job)}</p>
+      <form
+        :if={is_nil(@job)}
+        id={"construction-supply-job-form-#{@ship.symbol}"}
+        phx-change="track_draft"
+        phx-submit="configure_construction_supply_job"
+        class="mt-3 grid gap-2 sm:grid-cols-2"
+      >
+        <input
+          type="hidden"
+          name="draft_key"
+          value={draft_key("construction_supply_job", [@ship.symbol])}
+        />
+        <input type="hidden" name="ship_symbol" value={@ship.symbol} />
+        <input
+          name="construction_system"
+          value={construction_supply_draft(@form_drafts, @ship.symbol, "construction_system", "")}
+          placeholder="Construction system"
+          class="input input-bordered input-sm font-mono"
+          required
+        />
+        <input
+          name="construction_waypoint"
+          value={construction_supply_draft(@form_drafts, @ship.symbol, "construction_waypoint", "")}
+          placeholder="Construction waypoint"
+          class="input input-bordered input-sm font-mono"
+          required
+        />
+        <input
+          name="source_systems"
+          value={construction_supply_draft(@form_drafts, @ship.symbol, "source_systems", "")}
+          placeholder="Source systems (comma-separated)"
+          class="input input-bordered input-sm font-mono"
+        />
+        <input
+          name="reserve_credits"
+          value={construction_supply_draft(@form_drafts, @ship.symbol, "reserve_credits", "")}
+          type="number"
+          min="0"
+          placeholder="Reserve credits"
+          class="input input-bordered input-sm"
+        />
+        <input
+          name="maximum_total_cost"
+          value={construction_supply_draft(@form_drafts, @ship.symbol, "maximum_total_cost", "")}
+          type="number"
+          min="1"
+          placeholder="Maximum total cost"
+          class="input input-bordered input-sm"
+        />
+        <label class="label cursor-pointer justify-start gap-2"><input
+          name="compatible_existing_cargo"
+          type="checkbox"
+          class="checkbox checkbox-sm"
+          checked={
+            construction_supply_draft(@form_drafts, @ship.symbol, "compatible_existing_cargo", nil) in [
+              "on",
+              "true",
+              true
+            ]
+          }
+        /><span class="label-text">Use compatible cargo already aboard</span></label>
+        <button type="submit" class="btn btn-secondary btn-sm sm:col-span-2">Assign Construction Supply Job</button>
+      </form>
+      <div :if={@job} class="mt-3 flex flex-wrap gap-2">
+        <button
+          :if={Job.running?(@job)}
+          type="button"
+          phx-click="pause_construction_supply_job"
+          phx-value-symbol={@ship.symbol}
+          class="btn btn-warning btn-sm"
+        >Pause</button>
+        <button
+          :if={@job.status in ["paused", "blocked"]}
+          type="button"
+          phx-click="resume_construction_supply_job"
+          phx-value-symbol={@ship.symbol}
+          class="btn btn-primary btn-sm"
+        >Resume</button>
+        <button
+          type="button"
+          phx-click="stop_construction_supply_job"
+          phx-value-symbol={@ship.symbol}
+          class="btn btn-ghost btn-sm"
+        >Stop</button>
+      </div>
+    </section>
+    """
+  end
+
   defp miner_job_panel(assigns) do
     job = Map.get(assigns.ship, :job)
     history = Map.get(assigns.ship, :job_history, [])
@@ -4024,6 +4209,9 @@ defmodule SpaceTradersWeb.DashboardLive do
   defp procurement_draft(drafts, ship_symbol, field, fallback),
     do: draft_field(drafts, "procurement_job", [ship_symbol], field, fallback)
 
+  defp construction_supply_draft(drafts, ship_symbol, field, fallback),
+    do: draft_field(drafts, "construction_supply_job", [ship_symbol], field, fallback)
+
   defp job_status(%{status: "blocked"}), do: "Blocked"
 
   defp job_status(%{status: "paused"}), do: "Paused"
@@ -4031,6 +4219,9 @@ defmodule SpaceTradersWeb.DashboardLive do
   defp job_status(%{status: "waiting"}), do: "Waiting"
   defp job_status(%{type: "explorer", status: "active"}), do: "Active System Exploration Job"
   defp job_status(%{type: "procurement", status: "active"}), do: "Active Procurement Job"
+
+  defp job_status(%{type: "construction_supply", status: "active"}),
+    do: "Active Construction Supply Job"
 
   defp job_status(%{type: "market_trading", status: "active"}),
     do: "Active Market Trading Job"
@@ -4523,6 +4714,9 @@ defmodule SpaceTradersWeb.DashboardLive do
 
   defp live_error(:explorer_job_not_configured),
     do: "Save a System Exploration Job configuration first."
+
+  defp live_error(:source_market_unavailable),
+    do: "Procurement Job blocked: no source market is available in the current system."
 
   defp live_error(:manual_intent_active),
     do: "A manual Navigate is still active for this Ship; stop it before resuming the Job."

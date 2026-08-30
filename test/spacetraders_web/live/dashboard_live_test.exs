@@ -1274,6 +1274,103 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       assert has_element?(lv, "button[phx-click=\"resume_procurement_job\"]")
     end
 
+    test "explains when a Procurement Job cannot find a source market", %{
+      conn: conn,
+      operator: operator
+    } do
+      agent = agent_fixture(operator)
+
+      Repo.insert!(%Ship{
+        agent_id: agent.id,
+        symbol: "ORBITALIST-1",
+        ship_type: "SHIP_COMMAND_FRIGATE"
+      })
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case {conn.request_path, conn.method} do
+          {"/v2/my/agent", "GET"} ->
+            Req.Test.json(conn, %{"data" => agent_overview_body(agent.symbol)})
+
+          {"/v2/my/ships", "GET"} ->
+            Req.Test.json(conn, %{"data" => [ship_body("ORBITALIST-1")]})
+
+          {"/v2/my/ships/ORBITALIST-1", "GET"} ->
+            Req.Test.json(conn, %{"data" => ship_body("ORBITALIST-1")})
+
+          {"/v2/my/contracts", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => [
+                contract_body(%{
+                  "accepted" => true,
+                  "terms" => %{
+                    "deadline" => future_iso(),
+                    "deliver" => [
+                      %{
+                        "tradeSymbol" => "DIAMONDS",
+                        "destinationSymbol" => "X1-UX81-A1",
+                        "unitsRequired" => 10,
+                        "unitsFulfilled" => 0
+                      }
+                    ],
+                    "payment" => %{"onAccepted" => 1000, "onFulfilled" => 5000}
+                  }
+                })
+              ]
+            })
+
+          {"/v2/systems/X1-UX81/waypoints", "GET"} ->
+            Req.Test.json(conn, %{"data" => []})
+        end
+      end)
+
+      assert {:ok, _job} =
+               Fleet.configure_procurement_job(agent, "ORBITALIST-1", %{
+                 contract_id: "ctr-1",
+                 trade_symbol: "DIAMONDS",
+                 quantity: 10,
+                 destination_waypoint: "X1-UX81-A1"
+               })
+
+      {:ok, lv, _html} = live(conn, ~p"/")
+
+      html =
+        lv
+        |> element("button[phx-click=\"resume_procurement_job\"]")
+        |> render_click()
+
+      assert html =~
+               "Procurement Job blocked: no source market is available in the current system."
+
+      refute html =~ "The game API could not be reached."
+    end
+
+    test "assigns a Construction Supply Job from the ship operations panel", %{
+      conn: conn,
+      operator: operator
+    } do
+      agent = agent_fixture(operator)
+      stub_live_game(agent_overview_body(agent.symbol), [ship_body("ORBITALIST-1")])
+
+      {:ok, lv, _html} = live(conn, ~p"/")
+      assert has_element?(lv, "form#construction-supply-job-form-ORBITALIST-1")
+
+      html =
+        lv
+        |> element("form#construction-supply-job-form-ORBITALIST-1")
+        |> render_submit(%{
+          ship_symbol: "ORBITALIST-1",
+          construction_system: "X1-UX81",
+          construction_waypoint: "X1-UX81-A1",
+          reserve_credits: "500",
+          maximum_total_cost: "2000"
+        })
+
+      assert html =~ "Construction Supply Job assigned and paused."
+      assert has_element?(lv, "[data-job-panel=construction-supply]", "Construction Supply Job")
+      assert has_element?(lv, "[data-construction-supply-job-status]", "Paused")
+      assert has_element?(lv, "button[phx-click=\"resume_construction_supply_job\"]")
+    end
+
     test "keeps Procurement Job drafts across dashboard patches", %{
       conn: conn,
       operator: operator

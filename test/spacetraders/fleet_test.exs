@@ -3336,6 +3336,45 @@ defmodule SpaceTraders.FleetTest do
                })
     end
 
+    test "preserves waypoint API failures while sourcing a Procurement Job" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      assert {:ok, _job} =
+               Fleet.configure_procurement_job(agent, "FLEET-SHIP", %{
+                 contract_id: "CONTRACT-1",
+                 trade_symbol: "DIAMONDS",
+                 quantity: 10,
+                 destination_waypoint: "X1-UX81-A1"
+               })
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case {conn.request_path, conn.method} do
+          {"/v2/my/ships/FLEET-SHIP", "GET"} ->
+            Req.Test.json(conn, %{"data" => ship_body("FLEET-SHIP")})
+
+          {"/v2/my/contracts", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => [
+                active_contract_body(
+                  "CONTRACT-1",
+                  [contract_delivery_entry(%{"tradeSymbol" => "DIAMONDS", "unitsRequired" => 10})]
+                )
+              ]
+            })
+
+          {"/v2/my/agent", "GET"} ->
+            Req.Test.json(conn, %{"data" => %{"symbol" => agent.symbol, "credits" => 100}})
+
+          {"/v2/systems/X1-UX81/waypoints", "GET"} ->
+            Plug.Conn.send_resp(conn, 500, ~s({"error":"boom"}))
+        end
+      end)
+
+      assert {:error, %SpaceTraders.API.Error{status: 500}} =
+               Fleet.start_procurement_job(agent, "FLEET-SHIP")
+    end
+
     test "uses the persisted Buy Goods Intent without preempting itself" do
       agent = agent_fixture()
       ship = ship_fixture(agent, "FLEET-SHIP")
@@ -3482,6 +3521,44 @@ defmodule SpaceTraders.FleetTest do
                         "trade_symbol" => "IRON_ORE",
                         "units" => 5
                       }, "active"}
+    end
+  end
+
+  describe "Construction Supply Job" do
+    test "captures one fixed Construction project and its multi-material constraints" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        assert {"GET", "/v2/my/ships/FLEET-SHIP"} = {conn.method, conn.request_path}
+        Req.Test.json(conn, %{"data" => ship_body("FLEET-SHIP")})
+      end)
+
+      assert {:ok, %Job{type: "construction_supply", status: "paused", progress: progress}} =
+               Fleet.configure_construction_supply_job(agent, "FLEET-SHIP", %{
+                 construction_system: "X1-UX81",
+                 construction_waypoint: "X1-UX81-A1",
+                 source_systems: ["X1-UX81"],
+                 reserve_credits: 500,
+                 maximum_total_cost: 2_000,
+                 compatible_existing_cargo?: true
+               })
+
+      assert progress == %{
+               "construction_system" => "X1-UX81",
+               "construction_waypoint" => "X1-UX81-A1",
+               "target_system" => "X1-UX81",
+               "source_systems" => ["X1-UX81"],
+               "reserve_credits" => 500,
+               "maximum_total_cost" => 2_000,
+               "compatible_existing_cargo" => true,
+               "accepted" => %{},
+               "acquired" => %{},
+               "committed_cargo" => %{},
+               "spent" => 0,
+               "trips" => 0,
+               "external_progress" => %{}
+             }
     end
   end
 

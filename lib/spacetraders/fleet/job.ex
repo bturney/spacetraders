@@ -57,7 +57,13 @@ defmodule SpaceTraders.Fleet.Job do
     |> cast_embed(:blocker)
     |> validate_required([:type])
     |> validate_miner_fields()
-    |> validate_inclusion(:type, ["miner", "explorer", "procurement", "market_trading"])
+    |> validate_inclusion(:type, [
+      "miner",
+      "explorer",
+      "procurement",
+      "construction_supply",
+      "market_trading"
+    ])
     |> validate_inclusion(:gather_mode, ["extract", "siphon"])
     |> validate_number(:cargo_threshold, greater_than: 0)
     |> validate_inclusion(:status, @unfinished_states ++ @terminal_states)
@@ -71,11 +77,11 @@ defmodule SpaceTraders.Fleet.Job do
     do: changeset
 
   defp validate_miner_fields(%Ecto.Changeset{changes: %{type: type}} = changeset)
-       when type in ["procurement", "market_trading"],
+       when type in ["procurement", "construction_supply", "market_trading"],
        do: changeset
 
   defp validate_miner_fields(%Ecto.Changeset{data: %{type: type}} = changeset)
-       when type in ["procurement", "market_trading"],
+       when type in ["procurement", "construction_supply", "market_trading"],
        do: changeset
 
   defp validate_miner_fields(changeset) do
