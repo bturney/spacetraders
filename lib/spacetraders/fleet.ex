@@ -4225,6 +4225,9 @@ defmodule SpaceTraders.Fleet do
         when type in ["install_module", "remove_module"] and is_map(action) ->
           Repo.rollback(:manual_intent_reconciliation_required)
 
+        %ManualIntent{in_flight_action: %{"kind" => "jump"}} ->
+          Repo.rollback(:manual_intent_reconciliation_required)
+
         %ManualIntent{} = predecessor ->
           terminalize_manual_intent!(predecessor, "stopped")
 
@@ -4355,8 +4358,10 @@ defmodule SpaceTraders.Fleet do
 
   defp complete_manual_intent(agent, intent) do
     result =
-      if get_in(intent.last_action_result || %{}, ["kind"]) == "jump" do
-        Map.put(intent.last_action_result, "completion", "authoritative_ship_state")
+      if jump_evidence?(intent) do
+        (intent.last_action_result || %{"kind" => "jump", "waypoint" => intent.target_waypoint})
+        |> Map.put("kind", "jump")
+        |> Map.put("completion", "authoritative_ship_state")
       else
         %{"kind" => "navigate", "waypoint" => intent.target_waypoint}
       end
@@ -4594,6 +4599,9 @@ defmodule SpaceTraders.Fleet do
             :intent_no_longer_owned -> :ok
           end
 
+        {:error, %SpaceTraders.API.GameplayError{} = reason} ->
+          clear_jump_claim_and_block(intent, reason)
+
         {:error, reason} ->
           block_manual_intent(intent, reason)
       end
@@ -4687,6 +4695,13 @@ defmodule SpaceTraders.Fleet do
     end
   end
 
+  defp clear_jump_claim_and_block(intent, reason) do
+    case transition_intent(intent, in_flight_action: nil) do
+      {:ok, intent} -> block_manual_intent(intent, reason)
+      :intent_no_longer_owned -> :ok
+    end
+  end
+
   # Typed game rejections become stable blocker reasons; transport failures
   # keep their struct evidence.
   defp manual_intent_block_reason(%SpaceTraders.API.GameplayError{type: type})
@@ -4722,6 +4737,11 @@ defmodule SpaceTraders.Fleet do
     else
       _ -> false
     end
+  end
+
+  defp jump_evidence?(intent) do
+    get_in(intent.last_action_result || %{}, ["kind"]) == "jump" or
+      unresolved_jump_action?(intent)
   end
 
   @doc "Reconciles a persisted Manual Control Intent after a process restart."
