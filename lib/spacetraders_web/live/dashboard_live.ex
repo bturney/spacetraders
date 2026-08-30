@@ -2891,6 +2891,10 @@ defmodule SpaceTradersWeb.DashboardLive do
     """
   end
 
+  defp source_waypoint_label([]), do: "any Market"
+  defp source_waypoint_label(waypoints) when is_list(waypoints), do: Enum.join(waypoints, ", ")
+  defp source_waypoint_label(_), do: "any Market"
+
   attr :ship, :map, required: true
   attr :ships, :list, required: true
   attr :agent_id, :integer, required: true
@@ -4008,7 +4012,7 @@ defmodule SpaceTradersWeb.DashboardLive do
         </div>
         <div :if={@progress["source_system"]}>
           <dt class="opacity-60">Source Waypoints</dt><dd class="font-mono">
-            {Enum.join(@progress["source_waypoints"] || [], ", ") || "any Market"}
+            {source_waypoint_label(@progress["source_waypoints"])}
           </dd>
         </div>
         <div :if={@progress["source_system"]}>

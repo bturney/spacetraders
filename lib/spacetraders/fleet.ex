@@ -581,6 +581,7 @@ defmodule SpaceTraders.Fleet do
          "reserve_credits" => reserve_credits,
          "maximum_total_cost" => maximum_total_cost,
          "spent" => 0,
+         "removed_modules" => %{},
          "installed_modules" => [],
          "cargo_candidate" => nil,
          "active_operation" => nil,
@@ -645,9 +646,6 @@ defmodule SpaceTraders.Fleet do
       )
 
     cond do
-      is_struct(intent, ManualIntent) ->
-        reconcile_outfitting_intent(agent, job, intent, live_ship)
-
       Enum.any?(progress["acceptable_modules"], &(&1 in progress["installed_modules"])) ->
         evidence = %{"installed_modules" => progress["installed_modules"], "outcome" => "ready"}
 
@@ -660,6 +658,9 @@ defmodule SpaceTraders.Fleet do
            ),
            "completed"
          )}
+
+      is_struct(intent, ManualIntent) ->
+        reconcile_outfitting_intent(agent, job, intent, live_ship)
 
       is_binary(candidate) and
           (not is_integer(module_slots) or module_slots > length(live_ship.modules || [])) ->
@@ -765,6 +766,7 @@ defmodule SpaceTraders.Fleet do
         |> Map.update!("evidence", &(&1 ++ [evidence]))
         |> apply_outfitting_purchase(intent)
         |> mark_outfitting_purchase_applied(intent)
+        |> apply_outfitting_removal(intent)
 
       advance_outfitting_job(
         agent,
@@ -777,12 +779,24 @@ defmodule SpaceTraders.Fleet do
     end
   end
 
+  defp advance_outfitting_after_intent(_agent, job, %ManualIntent{status: "waiting"} = intent) do
+    {:ok,
+     Repo.update!(
+       Ecto.Changeset.change(job,
+         status: "waiting",
+         progress: Map.put(job.progress, "active_operation", outfitting_operation(intent))
+       )
+     )}
+  end
+
   defp advance_outfitting_after_intent(_agent, job, %ManualIntent{} = intent),
     do: mark_outfitting_job_blocked(job, intent.blocker || :outfitting_operation_blocked)
 
   defp authorized_removal(progress, live_ship) do
     Enum.find_value(progress["authorized_removals"], fn {symbol, count} ->
-      if count > 0 and module_count(live_ship.modules, symbol) > 0, do: symbol
+      removed = get_in(progress, ["removed_modules", symbol]) || 0
+
+      if count > removed and module_count(live_ship.modules, symbol) > 0, do: symbol
     end)
   end
 
@@ -801,6 +815,16 @@ defmodule SpaceTraders.Fleet do
     do: Map.put(progress, "last_applied_purchase_intent_id", id)
 
   defp mark_outfitting_purchase_applied(progress, _intent), do: progress
+
+  defp apply_outfitting_removal(progress, %ManualIntent{type: "remove_module"} = intent) do
+    symbol = intent.parameters["module_symbol"]
+
+    Map.update(progress, "removed_modules", %{symbol => 1}, fn removed ->
+      Map.update(removed, symbol, 1, &(&1 + 1))
+    end)
+  end
+
+  defp apply_outfitting_removal(progress, _intent), do: progress
 
   defp apply_unapplied_outfitting_purchase!(job) do
     intent =
@@ -846,10 +870,10 @@ defmodule SpaceTraders.Fleet do
       Enum.reduce_while(waypoints, {:error, :source_market_unavailable}, fn waypoint, _result ->
         case market_for_ship(agent, live_ship, waypoint) do
           {:ok, market} ->
-            case Enum.find(
-                   market.trade_goods || [],
-                   &(&1.symbol in progress["acceptable_modules"])
-                 ) do
+            case Enum.find(market.trade_goods || [], fn good ->
+                   good.symbol in progress["acceptable_modules"] and
+                     outfitting_price_allowed?(good, progress) == :ok
+                 end) do
               nil -> {:cont, {:error, :source_market_unavailable}}
               good -> {:halt, {:ok, %{waypoint: waypoint, good: good}}}
             end
