@@ -2862,6 +2862,47 @@ defmodule SpaceTraders.Fleet do
   def navigate_intent(%AgentRecord{}, _ship_symbol, _waypoint),
     do: {:error, :agent_token_missing}
 
+  @doc "Reads the authoritative prerequisites for a direct jump-gate route without mutation."
+  def jump_preview(%AgentRecord{agent_token: token} = agent, ship_symbol, waypoint)
+      when is_binary(token) and token != "" do
+    waypoint = String.trim(waypoint || "")
+
+    with :ok <- validate_intent_waypoint(waypoint),
+         {:ok, ship} <- owned_ship(agent, ship_symbol),
+         {:ok, live_ship} <-
+           Agent.handle_game_result(agent, SpaceTraders.API.get_ship(token, ship.symbol)),
+         true <- remote_waypoint?(live_ship.nav.waypoint_symbol, waypoint),
+         true <- live_ship.nav.status == "IN_ORBIT" || {:error, :ship_not_in_orbit},
+         {:ok, source_system} <- system_from_headquarters(live_ship.nav.waypoint_symbol),
+         {:ok, destination_system} <- system_from_headquarters(waypoint),
+         :ok <-
+           validate_jump_route(
+             agent,
+             source_system,
+             live_ship.nav.waypoint_symbol,
+             destination_system,
+             waypoint
+           ),
+         {:ok, overview} <- Agent.agent_overview(agent) do
+      {:ok,
+       %{
+         ship_symbol: ship.symbol,
+         source_waypoint: live_ship.nav.waypoint_symbol,
+         destination_waypoint: waypoint,
+         flight_mode: live_ship.nav.flight_mode,
+         cooldown_seconds: live_ship.cooldown.remaining_seconds,
+         credits: overview.credits,
+         antimatter_cost: :confirmed_by_jump_response
+       }}
+    else
+      false -> {:error, :same_system_route}
+      {:error, _reason} = error -> error
+      error -> {:error, error}
+    end
+  end
+
+  def jump_preview(%AgentRecord{}, _ship_symbol, _waypoint), do: {:error, :agent_token_missing}
+
   @doc "Starts a durable Buy Goods Intent at a specified Market."
   def buy_goods_intent(agent, ship_symbol, waypoint, trade_symbol, units, opts \\ []) do
     cargo_intent(agent, ship_symbol, "buy", waypoint, trade_symbol, units, opts)
@@ -3121,6 +3162,9 @@ defmodule SpaceTraders.Fleet do
                        Repo.rollback(:cargo_operation_reconciliation_required)
 
                      unresolved_module_evidence?(intent) ->
+                       Repo.rollback(:manual_intent_reconciliation_required)
+
+                     unresolved_jump_action?(intent) ->
                        Repo.rollback(:manual_intent_reconciliation_required)
 
                      true ->
@@ -4791,7 +4835,7 @@ defmodule SpaceTraders.Fleet do
                      blocker: job_blocker({:retry_exhausted, reason}),
                      in_flight_action:
                        if(
-                         unresolved_cargo_action?(current),
+                         unresolved_cargo_action?(current) or unresolved_jump_action?(current),
                          do: current.in_flight_action,
                          else: nil
                        )

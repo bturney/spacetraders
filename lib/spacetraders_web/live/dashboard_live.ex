@@ -85,6 +85,7 @@ defmodule SpaceTradersWeb.DashboardLive do
               waypoint_markets={@waypoint_markets}
               waypoint_intelligence={@waypoint_intelligence}
               selected_ships={@selected_ships}
+              jump_previews={@jump_previews}
             />
 
             <.activity_panel overviews={non_stale_overviews(@overviews)} />
@@ -168,6 +169,7 @@ defmodule SpaceTradersWeb.DashboardLive do
        show_historical_contracts: MapSet.new(),
        selected_waypoints: %{},
        selected_ships: %{},
+       jump_previews: %{},
        waypoint_filters: %{},
        waypoint_markets: %{},
        waypoint_intelligence: %{}
@@ -204,7 +206,24 @@ defmodule SpaceTradersWeb.DashboardLive do
 
     with {:ok, agent} <- agent_for_ship(socket, ship_symbol),
          :ok <- validate_waypoint(waypoint) do
-      case Fleet.navigate_intent(agent, ship_symbol, waypoint) do
+      result =
+        if params["confirm_jump"] == "true" do
+          Fleet.navigate_intent(agent, ship_symbol, waypoint)
+        else
+          case Fleet.jump_preview(agent, ship_symbol, waypoint) do
+            {:ok, preview} -> {:preview, preview}
+            {:error, :same_system_route} -> Fleet.navigate_intent(agent, ship_symbol, waypoint)
+            error -> error
+          end
+        end
+
+      case result do
+        {:preview, preview} ->
+          {:noreply,
+           socket
+           |> assign(:jump_previews, Map.put(socket.assigns.jump_previews, ship_symbol, preview))
+           |> put_flash(:info, "Review the jump route before dispatching it.")}
+
         {:ok, %{status: "completed", target_waypoint: target}} ->
           {:noreply,
            put_flash(
@@ -1490,6 +1509,7 @@ defmodule SpaceTradersWeb.DashboardLive do
   attr :waypoint_markets, :map, default: %{}
   attr :waypoint_intelligence, :map, default: %{}
   attr :selected_ships, :map, default: %{}
+  attr :jump_previews, :map, default: %{}
 
   defp agent_section(assigns) do
     ~H"""
@@ -1512,6 +1532,7 @@ defmodule SpaceTradersWeb.DashboardLive do
         cooldown_tick={@cooldown_tick}
         form_drafts={@form_drafts}
         selected_ship={Map.get(@selected_ships, to_string(@overview.agent.id))}
+        jump_previews={@jump_previews}
       />
       <.fleet_attention
         agent_id={@overview.agent.id}
@@ -2793,6 +2814,7 @@ defmodule SpaceTradersWeb.DashboardLive do
   attr :cooldown_tick, :integer, required: true
   attr :form_drafts, :map, default: %{}
   attr :selected_ship, :string, default: nil
+  attr :jump_previews, :map, default: %{}
 
   defp fleet_grid(assigns) do
     ~H"""
@@ -2834,6 +2856,7 @@ defmodule SpaceTradersWeb.DashboardLive do
               agent_id={@agent.id}
               cooldown_tick={@cooldown_tick}
               form_drafts={@form_drafts}
+              jump_preview={Map.get(@jump_previews, ship.symbol)}
               selected={@selected_ship == ship.symbol}
               selected_mode={not is_nil(@selected_ship)}
             />
@@ -2900,6 +2923,7 @@ defmodule SpaceTradersWeb.DashboardLive do
   attr :agent_id, :integer, required: true
   attr :cooldown_tick, :integer, default: 0
   attr :form_drafts, :map, default: %{}
+  attr :jump_preview, :map, default: nil
   attr :selected, :boolean, default: false
   attr :selected_mode, :boolean, default: false
 
@@ -3204,6 +3228,32 @@ defmodule SpaceTradersWeb.DashboardLive do
             </button>
           </.action_tooltip>
         </form>
+        <section
+          :if={@jump_preview}
+          class="mt-2 rounded border border-primary/40 bg-primary/10 p-3 text-xs"
+          data-jump-preview
+        >
+          <p class="font-semibold">Jump route ready for review</p>
+          <dl class="mt-2 grid grid-cols-2 gap-x-3 gap-y-1">
+            <dt class="opacity-70">Selected gates</dt>
+            <dd class="font-mono">
+              {@jump_preview.source_waypoint} to {@jump_preview.destination_waypoint}
+            </dd>
+            <dt class="opacity-70">Flight mode</dt>
+            <dd class="font-mono">{@jump_preview.flight_mode}</dd>
+            <dt class="opacity-70">Credits</dt>
+            <dd class="font-mono">{@jump_preview.credits}</dd>
+            <dt class="opacity-70">Jump cost</dt>
+            <dd>Antimatter charge confirmed by the authoritative jump response.</dd>
+            <dt class="opacity-70">Cooldown</dt>
+            <dd>{@jump_preview.cooldown_seconds || 0} seconds before dispatch.</dd>
+          </dl>
+          <form phx-submit="navigate" phx-value-symbol={@ship.symbol} class="mt-3">
+            <input type="hidden" name="waypoint_symbol" value={@jump_preview.destination_waypoint} />
+            <input type="hidden" name="confirm_jump" value="true" />
+            <button type="submit" class="btn btn-primary btn-sm">Confirm jump</button>
+          </form>
+        </section>
         <div
           :if={@ship.manual_intent}
           class="mt-2 flex flex-wrap items-center justify-between gap-2 rounded border border-base-300/60 bg-base-300/30 px-3 py-2 text-xs"
