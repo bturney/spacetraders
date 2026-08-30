@@ -232,6 +232,35 @@ defmodule SpaceTraders.API.ClientTest do
                API.navigate_ship("TOKEN", "ORBITALIST-1", "X1-UX81-A3")
     end
 
+    test "jump_ship/3 posts the connected waypoint and decodes execution evidence" do
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        assert conn.request_path == "/v2/my/ships/ORBITALIST-1/jump"
+        assert conn.body_params == %{"waypointSymbol" => "X2-UX81-A1"}
+
+        Req.Test.json(conn, %{
+          "data" => %{
+            "nav" => %{
+              "systemSymbol" => "X2-UX81",
+              "waypointSymbol" => "X2-UX81-A1",
+              "status" => "IN_ORBIT",
+              "flightMode" => "CRUISE"
+            },
+            "cooldown" => %{"shipSymbol" => "ORBITALIST-1", "remainingSeconds" => 60},
+            "transaction" => %{"waypointSymbol" => "X1-UX81-A1", "pricePerUnit" => 1_000},
+            "agent" => %{"symbol" => "ORBITALIST", "credits" => 41_000}
+          }
+        })
+      end)
+
+      assert {:ok,
+              %{
+                nav: %Model.ShipNav{waypoint_symbol: "X2-UX81-A1", status: "IN_ORBIT"},
+                cooldown: %Model.Cooldown{remaining_seconds: 60},
+                transaction: %Model.MarketTransaction{price_per_unit: 1_000},
+                agent: %Model.Agent{credits: 41_000}
+              }} = API.jump_ship("TOKEN", "ORBITALIST-1", "X2-UX81-A1")
+    end
+
     test "set_ship_flight_mode/3 patches the flight mode and decodes fuel + nav" do
       Req.Test.stub(SpaceTraders.API, fn conn ->
         assert conn.method == "PATCH"

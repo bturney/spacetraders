@@ -3176,6 +3176,18 @@ defmodule SpaceTraders.Fleet do
     end
   end
 
+  defp do_advance_manual_intent(
+         agent,
+         %ManualIntent{type: "navigate", in_flight_action: %{"kind" => "jump"}} = intent,
+         live_ship
+       ) do
+    if arrived_at_target?(live_ship, intent.target_waypoint) do
+      complete_manual_intent(agent, intent)
+    else
+      block_manual_intent(intent, :ambiguous_jump_evidence)
+    end
+  end
+
   defp do_advance_manual_intent(agent, %ManualIntent{type: "navigate"} = intent, live_ship) do
     cond do
       arrived_at_target?(live_ship, intent.target_waypoint) ->
@@ -3189,6 +3201,9 @@ defmodule SpaceTraders.Fleet do
 
       docked?(live_ship) ->
         orbit_for_manual_intent(agent, intent, live_ship)
+
+      remote_waypoint?(live_ship.nav.waypoint_symbol, intent.target_waypoint) ->
+        dispatch_manual_jump(agent, intent, live_ship)
 
       fuel_empty?(live_ship) ->
         block_manual_intent(intent, {:insufficient_fuel, intent.target_waypoint})
@@ -4298,6 +4313,10 @@ defmodule SpaceTraders.Fleet do
       intent.in_flight_action["kind"] in ["buy", "sell", "deliver"]
   end
 
+  defp unresolved_jump_action?(intent) do
+    is_map(intent.in_flight_action) and intent.in_flight_action["kind"] == "jump"
+  end
+
   defp unfinished_intent(ship_id) do
     Repo.one(
       from intent in ManualIntent,
@@ -4315,7 +4334,9 @@ defmodule SpaceTraders.Fleet do
   end
 
   defp terminalize_manual_intent!(intent, status) when status in @terminal_intent_states do
-    preserve_evidence? = unresolved_cargo_action?(intent) or unresolved_module_evidence?(intent)
+    preserve_evidence? =
+      unresolved_cargo_action?(intent) or unresolved_module_evidence?(intent) or
+        unresolved_jump_action?(intent)
 
     Repo.update!(
       Ecto.Changeset.change(intent,
@@ -4333,11 +4354,18 @@ defmodule SpaceTraders.Fleet do
   defp unresolved_module_evidence?(_intent), do: false
 
   defp complete_manual_intent(agent, intent) do
+    result =
+      if get_in(intent.last_action_result || %{}, ["kind"]) == "jump" do
+        Map.put(intent.last_action_result, "completion", "authoritative_ship_state")
+      else
+        %{"kind" => "navigate", "waypoint" => intent.target_waypoint}
+      end
+
     case transition_intent(intent,
            status: "completed",
            blocker: nil,
            in_flight_action: nil,
-           last_action_result: %{"kind" => "navigate", "waypoint" => intent.target_waypoint},
+           last_action_result: result,
            finished_at: DateTime.utc_now() |> DateTime.truncate(:second)
          ) do
       {:ok, intent} ->
@@ -4524,6 +4552,91 @@ defmodule SpaceTraders.Fleet do
     end
   end
 
+  # A jump response proves execution, not completion. The subsequent Ship read
+  # is what proves the requested off-System arrival after a restart or timeout.
+  defp dispatch_manual_jump(agent, intent, live_ship) do
+    with {:ok, source_system} <- system_from_headquarters(live_ship.nav.waypoint_symbol),
+         {:ok, destination_system} <- system_from_headquarters(intent.target_waypoint),
+         :ok <-
+           validate_jump_route(
+             agent,
+             source_system,
+             live_ship.nav.waypoint_symbol,
+             destination_system,
+             intent.target_waypoint
+           ),
+         {:ok, intent} <-
+           claim_intent_action(intent, %{
+             "kind" => "jump",
+             "waypoint" => intent.target_waypoint,
+             "expected" => %{
+               "status" => "IN_ORBIT",
+               "waypoint" => intent.target_waypoint,
+               "system" => destination_system
+             }
+           }) do
+      case Agent.handle_game_result(
+             agent,
+             SpaceTraders.API.jump_ship(
+               agent.agent_token,
+               live_ship.symbol,
+               intent.target_waypoint
+             )
+           ) do
+        {:ok, result} ->
+          schedule_cooldown(agent, live_ship.symbol, result)
+
+          case transition_intent(intent,
+                 status: "active",
+                 last_action_result: jump_execution_evidence(intent.target_waypoint, result)
+               ) do
+            {:ok, intent} -> reconcile_manual_intent(agent, intent)
+            :intent_no_longer_owned -> :ok
+          end
+
+        {:error, reason} ->
+          block_manual_intent(intent, reason)
+      end
+    else
+      {:error, reason} -> block_manual_intent(intent, reason)
+    end
+  end
+
+  defp validate_jump_route(agent, source_system, source, destination_system, destination) do
+    source_waypoint = %{system_symbol: source_system, symbol: source}
+    destination_waypoint = %{system_symbol: destination_system, symbol: destination}
+
+    with {:ok, source_construction} <- waypoint_construction(agent, source_waypoint),
+         true <- source_construction.is_complete || {:error, {:jump_gate_incomplete, source}},
+         {:ok, source_gate} <- waypoint_jump_gate(agent, source_waypoint),
+         true <-
+           destination in source_gate.connections ||
+             {:error, {:jump_gate_not_connected, source, destination}},
+         {:ok, destination_construction} <- waypoint_construction(agent, destination_waypoint),
+         true <-
+           destination_construction.is_complete || {:error, {:jump_gate_incomplete, destination}},
+         {:ok, destination_gate} <- waypoint_jump_gate(agent, destination_waypoint),
+         true <-
+           source in destination_gate.connections ||
+             {:error, {:jump_gate_not_connected, destination, source}} do
+      :ok
+    else
+      false -> {:error, :jump_route_unavailable}
+      {:error, _reason} = error -> error
+      error -> {:error, error}
+    end
+  end
+
+  defp jump_execution_evidence(destination, result) do
+    %{
+      "kind" => "jump",
+      "waypoint" => destination,
+      "status" => result.nav.status,
+      "transaction" => result.transaction |> Map.from_struct() |> stringify_keys(),
+      "credits" => result.agent.credits
+    }
+  end
+
   defp schedule_intent_arrival(
          agent,
          intent,
@@ -4554,7 +4667,8 @@ defmodule SpaceTraders.Fleet do
     case transition_intent(intent,
            status: "blocked",
            blocker: job_blocker(manual_intent_block_reason(reason)),
-           in_flight_action: nil
+           in_flight_action:
+             if(unresolved_jump_action?(intent), do: intent.in_flight_action, else: nil)
          ) do
       {:ok, intent} ->
         unless already_blocked? do
@@ -4600,6 +4714,15 @@ defmodule SpaceTraders.Fleet do
 
   defp fuel_empty?(%{fuel: %{current: current}}) when is_integer(current), do: current <= 0
   defp fuel_empty?(_), do: false
+
+  defp remote_waypoint?(source, destination) do
+    with {:ok, source_system} <- system_from_headquarters(source),
+         {:ok, destination_system} <- system_from_headquarters(destination) do
+      source_system != destination_system
+    else
+      _ -> false
+    end
+  end
 
   @doc "Reconciles a persisted Manual Control Intent after a process restart."
   def recover_manual_intent_on_boot(ship_symbol, agent_id, agent_token) do
@@ -6928,6 +7051,15 @@ defmodule SpaceTraders.Fleet do
   defp blocker_summary("retry_exhausted" <> _),
     do: "Authoritative recovery could not complete within its retry budget."
 
+  defp blocker_summary({:jump_gate_incomplete, waypoint}),
+    do: "Jump Gate #{waypoint} is not complete."
+
+  defp blocker_summary({:jump_gate_not_connected, source, destination}),
+    do: "Jump Gate #{source} is not connected to #{destination}."
+
+  defp blocker_summary(:ambiguous_jump_evidence),
+    do: "The jump response is ambiguous; authoritative Ship state did not confirm arrival."
+
   defp blocker_summary(reason), do: "Miner Job cannot progress: #{blocker_reason(reason)}."
 
   defp blocker_reason(reason) when is_atom(reason), do: Atom.to_string(reason)
@@ -6957,6 +7089,17 @@ defmodule SpaceTraders.Fleet do
 
       {"insufficient_fuel", _reason} ->
         {"operator", "ship_refueled", ["refuel"]}
+
+      {"jump_gate_incomplete", _reason} ->
+        {"operator", "construction_completed",
+         ["inspect_construction", "supply_construction", "resume"]}
+
+      {"jump_gate_not_connected", _reason} ->
+        {"operator", "connected_gate_selected",
+         ["inspect_jump_gate", "choose_connected_gate", "resume"]}
+
+      {"ambiguous_jump_evidence", _reason} ->
+        {"game_state", "authoritative_arrival_confirmed", ["inspect_activity", "reconcile"]}
 
       {"outside_system", _reason} ->
         {"operator", "cross_system_navigate_available", []}

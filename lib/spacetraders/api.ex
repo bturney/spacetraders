@@ -187,6 +187,22 @@ defmodule SpaceTraders.API do
     )
   end
 
+  @doc "POST /my/ships/{symbol}/jump"
+  @spec jump_ship(token(), String.t(), String.t()) :: result()
+  def jump_ship(token, ship_symbol, waypoint_symbol) do
+    request(:post, "/my/ships/#{ship_symbol}/jump", token,
+      json: NavigateRequest.new(%{waypoint_symbol: waypoint_symbol}) |> NavigateRequest.to_json(),
+      as:
+        {:map,
+         %{
+           agent: {:model, Agent},
+           cooldown: {:model, Cooldown},
+           nav: {:model, ShipNav},
+           transaction: {:model, MarketTransaction}
+         }}
+    )
+  end
+
   @doc "PATCH /my/ships/{symbol}/nav — updates a ship's flight mode."
   @spec set_ship_flight_mode(token(), String.t(), String.t()) :: result()
   def set_ship_flight_mode(token, ship_symbol, flight_mode) do
