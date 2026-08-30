@@ -602,6 +602,8 @@ defmodule SpaceTraders.Fleet do
              agent,
              SpaceTraders.API.get_ship(agent.agent_token, ship_symbol)
            ) do
+      job = apply_unapplied_outfitting_purchase!(job)
+
       job =
         Repo.update!(
           Ecto.Changeset.change(job, status: "active", blocker: nil, blocked_reason: nil)
@@ -762,6 +764,7 @@ defmodule SpaceTraders.Fleet do
         current.progress
         |> Map.update!("evidence", &(&1 ++ [evidence]))
         |> apply_outfitting_purchase(intent)
+        |> mark_outfitting_purchase_applied(intent)
 
       advance_outfitting_job(
         agent,
@@ -794,9 +797,39 @@ defmodule SpaceTraders.Fleet do
 
   defp apply_outfitting_purchase(progress, _intent), do: progress
 
+  defp mark_outfitting_purchase_applied(progress, %ManualIntent{type: "buy", id: id}),
+    do: Map.put(progress, "last_applied_purchase_intent_id", id)
+
+  defp mark_outfitting_purchase_applied(progress, _intent), do: progress
+
+  defp apply_unapplied_outfitting_purchase!(job) do
+    intent =
+      Repo.one(
+        from intent in ManualIntent,
+          where:
+            intent.job_id == ^job.id and intent.caller == "job" and intent.type == "buy" and
+              intent.status == "completed",
+          order_by: [desc: intent.id],
+          limit: 1
+      )
+
+    if intent && job.progress["last_applied_purchase_intent_id"] != intent.id do
+      progress =
+        job.progress
+        |> apply_outfitting_purchase(intent)
+        |> Map.put("last_applied_purchase_intent_id", intent.id)
+
+      Repo.update!(Ecto.Changeset.change(job, progress: progress))
+    else
+      job
+    end
+  end
+
   defp outfitting_system_matches?(%{"source_system" => system}, live_ship)
        when system == live_ship.nav.system_symbol,
        do: :ok
+
+  defp outfitting_system_matches?(%{"source_system" => nil}, _live_ship), do: :ok
 
   defp outfitting_system_matches?(%{"source_system" => system}, live_ship) do
     {:error,
@@ -4105,7 +4138,7 @@ defmodule SpaceTraders.Fleet do
               %Job{} = job ->
                 if Job.running?(job) do
                   with {:ok, intent} <- advance_manual_intent(agent, intent, live_ship) do
-                    advance_procurement_after_intent(agent, job, intent)
+                    advance_job_intent_after_event(agent, job, intent)
                   end
                 else
                   :ok
@@ -4123,6 +4156,12 @@ defmodule SpaceTraders.Fleet do
         :ok
     end
   end
+
+  defp advance_job_intent_after_event(agent, %Job{type: "outfitting"} = job, intent),
+    do: advance_outfitting_after_intent(agent, job, intent)
+
+  defp advance_job_intent_after_event(agent, job, intent),
+    do: advance_procurement_after_intent(agent, job, intent)
 
   defp intent_matches_event?(_intent, nil), do: false
   defp intent_matches_event?(%ManualIntent{id: id}, id), do: true
@@ -6462,7 +6501,7 @@ defmodule SpaceTraders.Fleet do
       if config.type in ["procurement", "construction_supply", "outfitting"] and
            match?(%ManualIntent{}, unfinished_job_intent(config.id)) do
         if config.type == "outfitting",
-          do: start_outfitting_job(agent, ship_symbol),
+          do: recover_outfitting_intent(agent, config),
           else: recover_procurement_intent(agent, ship, config)
       else
         if config.status in @running_job_states do
@@ -6497,6 +6536,29 @@ defmodule SpaceTraders.Fleet do
       end
     else
       _ -> :ok
+    end
+  end
+
+  defp recover_outfitting_intent(agent, job) do
+    intent = unfinished_job_intent(job.id)
+    ship = Repo.get!(Ship, job.ship_id)
+
+    with {:ok, live_ship} <-
+           Agent.handle_game_result(
+             agent,
+             SpaceTraders.API.get_ship(agent.agent_token, ship.symbol)
+           ),
+         %Job{} = current_job <- Repo.get(Job, job.id),
+         true <- Job.running?(current_job),
+         :ok <- outfitting_system_matches?(current_job.progress, live_ship),
+         %ManualIntent{} = current_intent <- Repo.get(ManualIntent, intent.id),
+         true <- ManualIntent.unfinished?(current_intent),
+         {:ok, current_intent} <- advance_manual_intent(agent, current_intent, live_ship) do
+      advance_outfitting_after_intent(agent, current_job, current_intent)
+    else
+      false -> :ok
+      nil -> :ok
+      {:error, reason} -> mark_outfitting_job_blocked(job, reason)
     end
   end
 
