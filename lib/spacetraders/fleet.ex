@@ -605,6 +605,9 @@ defmodule SpaceTraders.Fleet do
       )
 
     cond do
+      is_struct(intent, ManualIntent) ->
+        reconcile_outfitting_intent(agent, job, intent, live_ship)
+
       Enum.any?(progress["acceptable_modules"], &(&1 in progress["installed_modules"])) ->
         evidence = %{"installed_modules" => progress["installed_modules"], "outcome" => "ready"}
 
@@ -617,9 +620,6 @@ defmodule SpaceTraders.Fleet do
            ),
            "completed"
          )}
-
-      is_struct(intent, ManualIntent) ->
-        reconcile_outfitting_intent(agent, job, intent, live_ship)
 
       is_binary(candidate) and
           (not is_integer(module_slots) or module_slots > length(live_ship.modules || [])) ->
@@ -649,7 +649,10 @@ defmodule SpaceTraders.Fleet do
   defp start_outfitting_operation(agent, job, live_ship, type, module_symbol) do
     progress =
       job.progress
-      |> Map.put("cargo_candidate", if(type == "install_module", do: module_symbol, else: nil))
+      |> Map.put(
+        "cargo_candidate",
+        if(type == "install_module", do: module_symbol, else: job.progress["cargo_candidate"])
+      )
       |> Map.put("active_operation", %{"kind" => type, "module_symbol" => module_symbol})
 
     job = Repo.update!(Ecto.Changeset.change(job, progress: progress))

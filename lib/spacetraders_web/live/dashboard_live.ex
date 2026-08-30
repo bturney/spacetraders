@@ -3993,8 +3993,25 @@ defmodule SpaceTradersWeb.DashboardLive do
           </dd>
         </div>
         <div>
+          <dt class="opacity-60">Installed modules</dt><dd class="font-mono">
+            {Enum.join(@progress["installed_modules"] || [], ", ")}
+          </dd>
+        </div>
+        <div>
+          <dt class="opacity-60">Authorized removals</dt><dd class="font-mono">
+            {Enum.map_join(@progress["authorized_removals"] || %{}, ", ", fn {symbol, count} ->
+              "#{symbol}:#{count}"
+            end)}
+          </dd>
+        </div>
+        <div>
           <dt class="opacity-60">Active operation</dt><dd class="font-mono">
             {get_in(@progress, ["active_operation", "kind"]) || "none"}
+          </dd>
+        </div>
+        <div>
+          <dt class="opacity-60">Evidence</dt><dd>
+            {(@progress["evidence"] || []) |> length()} observations
           </dd>
         </div>
       </dl>
