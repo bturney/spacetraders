@@ -1056,6 +1056,9 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       lv |> element("button[data-select-ship=ORBITALIST-1]") |> render_click()
 
       assert has_element?(lv, "form[id=outfitting-job-form-ORBITALIST-1]")
+      assert has_element?(lv, "input[name=source_waypoints]")
+      assert has_element?(lv, "input[name=reserve_credits]")
+      assert has_element?(lv, "input[name=maximum_total_cost][required]")
 
       assert has_element?(
                lv,

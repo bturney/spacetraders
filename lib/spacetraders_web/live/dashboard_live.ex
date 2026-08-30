@@ -1105,11 +1105,16 @@ defmodule SpaceTradersWeb.DashboardLive do
   defp save_outfitting_job(socket, params) do
     with {:ok, agent} <- agent_for_ship(socket, params["ship_symbol"]),
          {:ok, authorized_removals} <- parse_authorized_removals(params["authorized_removals"]),
+         {:ok, reserve_credits} <- parse_optional_units(params["reserve_credits"]),
+         {:ok, maximum_total_cost} <- parse_required_units(params["maximum_total_cost"]),
          {:ok, _job} <-
            Fleet.configure_outfitting_job(agent, params["ship_symbol"], %{
              requested_capability: String.trim(params["requested_capability"] || ""),
              acceptable_modules: split_module_symbols(params["acceptable_modules"]),
-             authorized_removals: authorized_removals
+             authorized_removals: authorized_removals,
+             source_waypoints: split_systems(params["source_waypoints"]),
+             reserve_credits: reserve_credits || 0,
+             maximum_total_cost: maximum_total_cost
            }) do
       {:noreply,
        put_flash(
@@ -1157,6 +1162,15 @@ defmodule SpaceTradersWeb.DashboardLive do
   defp parse_optional_units(nil), do: {:ok, nil}
   defp parse_optional_units(""), do: {:ok, nil}
   defp parse_optional_units(value), do: parse_units(value)
+
+  defp parse_required_units(value) do
+    with {:ok, units} <- parse_units(value),
+         true <- units > 0 do
+      {:ok, units}
+    else
+      _ -> {:error, :invalid_outfitting_configuration}
+    end
+  end
 
   defp blank_to_nil(value) when is_binary(value) do
     case String.trim(value) do
@@ -3987,6 +4001,26 @@ defmodule SpaceTradersWeb.DashboardLive do
             {Enum.join(@progress["acceptable_modules"] || [], ", ")}
           </dd>
         </div>
+        <div :if={@progress["source_system"]}>
+          <dt class="opacity-60">Source System</dt><dd class="font-mono">
+            {@progress["source_system"]}
+          </dd>
+        </div>
+        <div :if={@progress["source_system"]}>
+          <dt class="opacity-60">Source Waypoints</dt><dd class="font-mono">
+            {Enum.join(@progress["source_waypoints"] || [], ", ") || "any Market"}
+          </dd>
+        </div>
+        <div :if={@progress["source_system"]}>
+          <dt class="opacity-60">Spend</dt><dd>
+            {@progress["spent"] || 0} / {@progress["maximum_total_cost"]} credits
+          </dd>
+        </div>
+        <div :if={@progress["source_system"]}>
+          <dt class="opacity-60">Credit reserve</dt><dd>
+            {@progress["reserve_credits"] || 0} credits
+          </dd>
+        </div>
         <div>
           <dt class="opacity-60">Cargo candidate</dt><dd class="font-mono">
             {@progress["cargo_candidate"] || "none"}
@@ -4050,6 +4084,29 @@ defmodule SpaceTradersWeb.DashboardLive do
           }
           placeholder="Authorized removals: MODULE:count"
           class="input input-bordered input-sm font-mono sm:col-span-2"
+        />
+        <input
+          name="source_waypoints"
+          value={draft_field(@form_drafts, "outfitting_job", [@ship.symbol], "source_waypoints", "")}
+          placeholder="Source Waypoints (optional, comma-separated)"
+          class="input input-bordered input-sm font-mono sm:col-span-2"
+        />
+        <input
+          name="reserve_credits"
+          value={draft_field(@form_drafts, "outfitting_job", [@ship.symbol], "reserve_credits", "")}
+          placeholder="Reserve credits (optional)"
+          inputmode="numeric"
+          class="input input-bordered input-sm"
+        />
+        <input
+          name="maximum_total_cost"
+          value={
+            draft_field(@form_drafts, "outfitting_job", [@ship.symbol], "maximum_total_cost", "")
+          }
+          placeholder="Maximum spend"
+          inputmode="numeric"
+          required
+          class="input input-bordered input-sm"
         />
         <button type="submit" class="btn btn-secondary btn-sm sm:col-span-2">Assign Ship Outfitting Job</button>
       </form>

@@ -507,10 +507,12 @@ defmodule SpaceTraders.Fleet do
     do: {:error, :agent_token_missing}
 
   @doc "Captures a paused Ship Outfitting Job with its explicit readiness target and removal authority."
-  def configure_outfitting_job(%AgentRecord{} = agent, ship_symbol, attrs) when is_map(attrs) do
+  def configure_outfitting_job(%AgentRecord{agent_token: token} = agent, ship_symbol, attrs)
+      when is_binary(token) and token != "" and is_map(attrs) do
     with {:ok, ship} <- owned_ship(agent, ship_symbol),
          nil <- unfinished_job(ship.id),
-         {:ok, progress} <- outfitting_progress(attrs) do
+         {:ok, system} <- outfitting_source_system(agent, ship_symbol, attrs),
+         {:ok, progress} <- outfitting_progress(attrs, system) do
       %Job{ship_id: ship.id}
       |> Job.changeset(%{
         type: "outfitting",
@@ -528,21 +530,57 @@ defmodule SpaceTraders.Fleet do
     end
   end
 
-  defp outfitting_progress(attrs) do
+  def configure_outfitting_job(%AgentRecord{}, _ship_symbol, _attrs),
+    do: {:error, :agent_token_missing}
+
+  # Cargo-only Outfitting Jobs from the prior capability do not source or spend.
+  # Sourcing configurations always capture the Ship's current System up front.
+  defp outfitting_source_system(_agent, _ship_symbol, attrs)
+       when not is_map_key(attrs, :maximum_total_cost) and
+              not is_map_key(attrs, "maximum_total_cost"),
+       do: {:ok, nil}
+
+  defp outfitting_source_system(agent, ship_symbol, _attrs) do
+    with {:ok, live_ship} <-
+           Agent.handle_game_result(
+             agent,
+             SpaceTraders.API.get_ship(agent.agent_token, ship_symbol)
+           ),
+         system when is_binary(system) <- live_ship.nav.system_symbol do
+      {:ok, system}
+    else
+      _ -> {:error, :current_system_unavailable}
+    end
+  end
+
+  defp outfitting_progress(attrs, source_system) do
     capability = attrs[:requested_capability] || attrs["requested_capability"]
     acceptable = attrs[:acceptable_modules] || attrs["acceptable_modules"]
     removals = attrs[:authorized_removals] || attrs["authorized_removals"] || %{}
+    source_waypoints = attrs[:source_waypoints] || attrs["source_waypoints"] || []
+    reserve_credits = attrs[:reserve_credits] || attrs["reserve_credits"] || 0
+    maximum_total_cost = attrs[:maximum_total_cost] || attrs["maximum_total_cost"]
 
     if is_binary(capability) and capability != "" and is_list(acceptable) and acceptable != [] and
          Enum.all?(acceptable, &(is_binary(&1) and &1 != "")) and is_map(removals) and
          Enum.all?(removals, fn {symbol, count} ->
            is_binary(symbol) and symbol != "" and is_integer(count) and count > 0
-         end) do
+         end) and is_list(source_waypoints) and
+         Enum.all?(source_waypoints, &(is_binary(&1) and &1 != "")) and
+         Enum.all?(source_waypoints, &waypoint_in_system?(&1, source_system)) and
+         is_integer(reserve_credits) and reserve_credits >= 0 and
+         ((is_nil(source_system) and is_nil(maximum_total_cost)) or
+            (is_integer(maximum_total_cost) and maximum_total_cost > 0)) do
       {:ok,
        %{
          "requested_capability" => capability,
          "acceptable_modules" => Enum.uniq(acceptable),
          "authorized_removals" => removals,
+         "source_system" => source_system,
+         "source_waypoints" => Enum.uniq(source_waypoints),
+         "reserve_credits" => reserve_credits,
+         "maximum_total_cost" => maximum_total_cost,
+         "spent" => 0,
          "installed_modules" => [],
          "cargo_candidate" => nil,
          "active_operation" => nil,
@@ -632,6 +670,9 @@ defmodule SpaceTraders.Fleet do
           symbol -> start_outfitting_operation(agent, job, live_ship, "remove_module", symbol)
         end
 
+      is_binary(progress["source_system"]) ->
+        start_outfitting_purchase(agent, job, live_ship)
+
       true ->
         mark_outfitting_job_blocked(
           job,
@@ -675,6 +716,30 @@ defmodule SpaceTraders.Fleet do
     end
   end
 
+  defp start_outfitting_purchase(agent, job, live_ship) do
+    with :ok <- outfitting_system_matches?(job.progress, live_ship),
+         {:ok, source} <- outfitting_market_source(agent, live_ship, job.progress),
+         :ok <- outfitting_price_allowed?(source.good, job.progress),
+         {:ok, intent} <-
+           insert_job_intent(job, %{
+             type: "buy",
+             target_waypoint: source.waypoint,
+             parameters: %{
+               "trade_symbol" => source.good.symbol,
+               "units" => 1,
+               "max_price" => outfitting_remaining_budget(job.progress),
+               "reserve_credits" => job.progress["reserve_credits"],
+               "source_waypoint" => source.waypoint
+             }
+           }),
+         {:ok, intent} <- advance_manual_intent(agent, intent, live_ship) do
+      advance_outfitting_after_intent(agent, job, intent)
+    else
+      {:error, reason} -> mark_outfitting_job_blocked(job, reason)
+      :ok -> :ok
+    end
+  end
+
   defp reconcile_outfitting_intent(agent, job, intent, live_ship) do
     case advance_manual_intent(agent, intent, live_ship) do
       {:ok, intent} -> advance_outfitting_after_intent(agent, job, intent)
@@ -692,7 +757,11 @@ defmodule SpaceTraders.Fleet do
              SpaceTraders.API.get_ship(agent.agent_token, Repo.get!(Ship, current.ship_id).symbol)
            ) do
       evidence = %{"operation" => intent.last_action_result, "outcome" => "confirmed"}
-      progress = Map.update!(current.progress, "evidence", &(&1 ++ [evidence]))
+
+      progress =
+        current.progress
+        |> Map.update!("evidence", &(&1 ++ [evidence]))
+        |> apply_outfitting_purchase(intent)
 
       advance_outfitting_job(
         agent,
@@ -713,6 +782,89 @@ defmodule SpaceTraders.Fleet do
       if count > 0 and module_count(live_ship.modules, symbol) > 0, do: symbol
     end)
   end
+
+  defp apply_outfitting_purchase(progress, %ManualIntent{type: "buy", last_action_result: result}) do
+    Map.update(
+      progress,
+      "spent",
+      get_in(result, ["transaction", "total_price"]) || 0,
+      &(&1 + (get_in(result, ["transaction", "total_price"]) || 0))
+    )
+  end
+
+  defp apply_outfitting_purchase(progress, _intent), do: progress
+
+  defp outfitting_system_matches?(%{"source_system" => system}, live_ship)
+       when system == live_ship.nav.system_symbol,
+       do: :ok
+
+  defp outfitting_system_matches?(%{"source_system" => system}, live_ship) do
+    {:error,
+     {:fixed_system_changed,
+      %{configured_system: system, current_system: live_ship.nav.system_symbol}}}
+  end
+
+  defp outfitting_system_matches?(_progress, _live_ship),
+    do: {:error, :current_system_unavailable}
+
+  defp outfitting_market_source(agent, live_ship, progress) do
+    with :ok <- outfitting_system_matches?(progress, live_ship),
+         {:ok, waypoints} <- outfitting_source_waypoints(agent, progress) do
+      Enum.reduce_while(waypoints, {:error, :source_market_unavailable}, fn waypoint, _result ->
+        case market_for_ship(agent, live_ship, waypoint) do
+          {:ok, market} ->
+            case Enum.find(
+                   market.trade_goods || [],
+                   &(&1.symbol in progress["acceptable_modules"])
+                 ) do
+              nil -> {:cont, {:error, :source_market_unavailable}}
+              good -> {:halt, {:ok, %{waypoint: waypoint, good: good}}}
+            end
+
+          {:error, reason} ->
+            {:halt, {:error, reason}}
+        end
+      end)
+    end
+  end
+
+  defp outfitting_source_waypoints(_agent, %{"source_waypoints" => [_ | _] = waypoints}),
+    do: {:ok, waypoints}
+
+  defp outfitting_source_waypoints(agent, %{"source_system" => system}) do
+    with {:ok, waypoints} <- fetch_waypoint_pages(agent.agent_token, system) do
+      {:ok,
+       waypoints
+       |> Enum.filter(&(market_waypoint?(&1) == :ok))
+       |> Enum.map(& &1.symbol)}
+    end
+  end
+
+  defp outfitting_source_waypoints(_agent, _progress), do: {:error, :source_market_unavailable}
+
+  defp outfitting_price_allowed?(%{purchase_price: price}, progress) when is_integer(price) do
+    if is_nil(progress["maximum_total_cost"]) or
+         price <= outfitting_remaining_budget(progress),
+       do: :ok,
+       else: {:error, :maximum_total_cost_exceeded}
+  end
+
+  defp outfitting_price_allowed?(_good, _progress), do: {:error, :source_market_unavailable}
+
+  defp outfitting_remaining_budget(%{"maximum_total_cost" => nil}), do: nil
+
+  defp outfitting_remaining_budget(progress),
+    do: max(progress["maximum_total_cost"] - progress["spent"], 0)
+
+  defp waypoint_in_system?(waypoint, system) when is_binary(waypoint) and is_binary(system) do
+    case system_from_headquarters(waypoint) do
+      {:ok, ^system} -> true
+      _ -> false
+    end
+  end
+
+  defp waypoint_in_system?(_waypoint, nil), do: true
+  defp waypoint_in_system?(_waypoint, _system), do: false
 
   defp block_outfitting_job(agent, ship_symbol, reason) do
     with {:ok, ship} <- owned_ship(agent, ship_symbol),
@@ -2877,8 +3029,12 @@ defmodule SpaceTraders.Fleet do
 
   defp validate_cargo_caller(ship, "job", %{"job_id" => job_id}) when is_integer(job_id) do
     case Repo.get(Job, job_id) do
-      %Job{ship_id: ship_id, type: "procurement", status: "active"} when ship_id == ship.id -> :ok
-      _ -> {:error, :invalid_cargo_intent_owner}
+      %Job{ship_id: ship_id, type: type, status: "active"}
+      when ship_id == ship.id and type in ["procurement", "outfitting"] ->
+        :ok
+
+      _ ->
+        {:error, :invalid_cargo_intent_owner}
     end
   end
 
