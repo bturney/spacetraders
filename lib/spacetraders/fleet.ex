@@ -467,6 +467,84 @@ defmodule SpaceTraders.Fleet do
   def configure_procurement_job(%AgentRecord{}, _ship_symbol, _attrs),
     do: {:error, :agent_token_missing}
 
+  @doc "Captures a paused Construction Supply Job for every material of one fixed project."
+  def configure_construction_supply_job(
+        %AgentRecord{agent_token: token} = agent,
+        ship_symbol,
+        attrs
+      )
+      when is_binary(token) and token != "" and is_map(attrs) do
+    with :ok <- Agent.execution_allowed?(agent),
+         {:ok, ship} <- owned_ship(agent, ship_symbol),
+         nil <- unfinished_job(ship.id),
+         {:ok, live_ship} <-
+           Agent.handle_game_result(agent, SpaceTraders.API.get_ship(token, ship_symbol)),
+         system when is_binary(system) <- live_ship.nav.system_symbol,
+         {:ok, progress} <- construction_supply_progress(attrs, system) do
+      job =
+        %Job{ship_id: ship.id}
+        |> Job.changeset(%{
+          type: "construction_supply",
+          extraction_waypoint: "CONSTRUCTION-SUPPLY-NONE",
+          market_waypoint: "CONSTRUCTION-SUPPLY-NONE",
+          cargo_threshold: 1
+        })
+        |> Ecto.Changeset.put_change(:status, "paused")
+        |> Ecto.Changeset.put_change(:blocked_reason, "Awaiting Operator resume")
+        |> Ecto.Changeset.put_change(:progress, progress)
+        |> Repo.insert!()
+
+      record_activity(agent, ship, "configuration", "Construction Supply Job configured")
+      {:ok, job}
+    else
+      %Job{} -> {:error, :unfinished_job_already_assigned}
+      nil -> {:error, :current_system_unavailable}
+      error -> error
+    end
+  end
+
+  def configure_construction_supply_job(%AgentRecord{}, _ship_symbol, _attrs),
+    do: {:error, :agent_token_missing}
+
+  defp construction_supply_progress(attrs, target_system) do
+    system = attrs[:construction_system] || attrs["construction_system"]
+    waypoint = attrs[:construction_waypoint] || attrs["construction_waypoint"]
+    sources = attrs[:source_systems] || attrs["source_systems"] || []
+    reserve = attrs[:reserve_credits] || attrs["reserve_credits"] || 0
+    maximum_total_cost = attrs[:maximum_total_cost] || attrs["maximum_total_cost"]
+
+    compatible? =
+      attrs[:compatible_existing_cargo?] || attrs["compatible_existing_cargo?"] || false
+
+    with true <- is_binary(system) and system == target_system,
+         true <- is_binary(waypoint),
+         :ok <- validate_procurement_sources(sources, target_system),
+         true <- is_integer(reserve) and reserve >= 0,
+         true <-
+           is_nil(maximum_total_cost) or
+             (is_integer(maximum_total_cost) and maximum_total_cost > 0) do
+      {:ok,
+       %{
+         "construction_system" => system,
+         "construction_waypoint" => waypoint,
+         "target_system" => target_system,
+         "source_systems" => sources,
+         "reserve_credits" => reserve,
+         "maximum_total_cost" => maximum_total_cost,
+         "compatible_existing_cargo" => compatible?,
+         "accepted" => %{},
+         "acquired" => %{},
+         "committed_cargo" => %{},
+         "spent" => 0,
+         "trips" => 0,
+         "external_progress" => %{}
+       }}
+    else
+      false -> {:error, :invalid_construction_supply_configuration}
+      {:error, _reason} = error -> error
+    end
+  end
+
   @doc "Captures a paused recurring Market Trading Job for the Ship's current System."
   def configure_market_trading_job(%AgentRecord{agent_token: token} = agent, ship_symbol, attrs)
       when is_binary(token) and token != "" and is_map(attrs) do
@@ -1474,6 +1552,427 @@ defmodule SpaceTraders.Fleet do
     record_activity_by_config(job, "procurement_job_blocked", "Procurement Job blocked", %{
       "block" => inspect(reason)
     })
+
+    {:error, reason}
+  end
+
+  @doc "Starts or resumes a Construction Supply Job from fresh project, Ship, and credit state."
+  def start_construction_supply_job(%AgentRecord{} = agent, ship_symbol) do
+    with :ok <- Agent.execution_allowed?(agent),
+         {:ok, ship} <- owned_ship(agent, ship_symbol),
+         %Job{type: "construction_supply"} = job <- unfinished_job(ship.id),
+         nil <- unfinished_manual_intent(ship.id),
+         nil <- unresolved_cargo_intent(ship.id) do
+      job = apply_unapplied_construction_supply_intent!(job)
+
+      case unfinished_job_intent(job.id) do
+        %ManualIntent{} = intent -> reconcile_construction_supply_intent(agent, ship, job, intent)
+        nil -> start_fresh_construction_supply_job(agent, ship_symbol, job)
+      end
+    else
+      nil ->
+        {:error, :construction_supply_job_not_configured}
+
+      %Job{} ->
+        {:error, :construction_supply_job_not_configured}
+
+      %ManualIntent{in_flight_action: action} when is_map(action) ->
+        {:error, :cargo_operation_reconciliation_required}
+
+      %ManualIntent{} ->
+        {:error, :manual_intent_active}
+
+      :cargo_operation_reconciliation_required ->
+        {:error, :cargo_operation_reconciliation_required}
+
+      {:error, reason} ->
+        block_construction_supply_job(agent, ship_symbol, reason)
+    end
+  end
+
+  def resume_construction_supply_job(agent, ship_symbol),
+    do: start_construction_supply_job(agent, ship_symbol)
+
+  def pause_construction_supply_job(%AgentRecord{} = agent, ship_symbol),
+    do: pause_job_type(agent, ship_symbol, "construction_supply", "Construction Supply Job")
+
+  def stop_construction_supply_job(%AgentRecord{} = agent, ship_symbol),
+    do: stop_job_type(agent, ship_symbol, "construction_supply", "Construction Supply Job")
+
+  defp start_fresh_construction_supply_job(agent, ship_symbol, job) do
+    with {:ok, live_ship} <-
+           Agent.handle_game_result(
+             agent,
+             SpaceTraders.API.get_ship(agent.agent_token, ship_symbol)
+           ),
+         :ok <- procurement_system_matches?(job.progress, live_ship),
+         {:ok, construction} <- construction_supply_construction(agent, job),
+         {:ok, job} <- initialize_construction_supply_progress(job, live_ship, construction),
+         {:ok, overview} <- Agent.agent_overview(agent) do
+      job =
+        Repo.update!(
+          Ecto.Changeset.change(job,
+            status: "active",
+            blocker: nil,
+            blocked_reason: nil,
+            last_validated_at: DateTime.utc_now() |> DateTime.truncate(:second)
+          )
+        )
+
+      advance_construction_supply_job(agent, job, live_ship, construction, overview.credits)
+    else
+      {:error, reason} -> block_construction_supply_job(agent, ship_symbol, reason)
+    end
+  end
+
+  defp construction_supply_construction(agent, job) do
+    Agent.handle_game_result(
+      agent,
+      SpaceTraders.API.get_construction(
+        agent.agent_token,
+        job.progress["construction_system"],
+        job.progress["construction_waypoint"]
+      )
+    )
+  end
+
+  defp initialize_construction_supply_progress(job, live_ship, construction) do
+    requirements = construction_supply_requirements(construction)
+
+    cond do
+      requirements == [] and not construction.is_complete ->
+        {:error, :construction_requirements_unavailable}
+
+      not job.progress["compatible_existing_cargo"] and
+          Enum.any?(requirements, &(item_units(live_ship, &1["trade_symbol"]) > 0)) ->
+        {:error, :incompatible_existing_cargo}
+
+      true ->
+        baseline = Map.new(requirements, &{&1["trade_symbol"], &1["fulfilled"]})
+
+        {:ok,
+         Repo.update!(
+           Ecto.Changeset.change(job,
+             progress:
+               job.progress
+               |> Map.put_new("fulfilled_baseline", baseline)
+               |> Map.put("requirements", requirements)
+           )
+         )}
+    end
+  end
+
+  defp advance_construction_supply_job(agent, job, live_ship, construction, credits) do
+    progress = construction_supply_counts(job.progress, live_ship, construction)
+    job = Repo.update!(Ecto.Changeset.change(job, progress: progress))
+
+    if construction.is_complete or construction_supply_remaining(progress) == 0 do
+      {:ok, terminalize_job!(job, "completed")}
+    else
+      start_construction_supply_intent(agent, job, live_ship, construction, credits)
+    end
+  end
+
+  defp construction_supply_counts(progress, live_ship, construction) do
+    requirements = construction_supply_requirements(construction)
+    baseline = progress["fulfilled_baseline"] || %{}
+    accepted = progress["accepted"] || %{}
+
+    external_progress =
+      Map.new(requirements, fn requirement ->
+        symbol = requirement["trade_symbol"]
+
+        shared =
+          max(requirement["fulfilled"] - Map.get(baseline, symbol, requirement["fulfilled"]), 0)
+
+        {symbol, max(shared - Map.get(accepted, symbol, 0), 0)}
+      end)
+
+    committed =
+      Map.new(requirements, fn requirement ->
+        symbol = requirement["trade_symbol"]
+        remaining = max(requirement["required"] - requirement["fulfilled"], 0)
+        {symbol, min(item_units(live_ship, symbol), remaining)}
+      end)
+
+    progress
+    |> Map.put("requirements", requirements)
+    |> Map.put("external_progress", external_progress)
+    |> Map.put("committed_cargo", committed)
+  end
+
+  defp construction_supply_requirements(construction) do
+    Enum.map(construction.materials || [], fn material ->
+      %{
+        "trade_symbol" => material.trade_symbol,
+        "required" => material.required,
+        "fulfilled" => material.fulfilled
+      }
+    end)
+  end
+
+  defp construction_supply_remaining(progress) do
+    Enum.reduce(progress["requirements"] || [], 0, fn requirement, total ->
+      total + max(requirement["required"] - requirement["fulfilled"], 0)
+    end)
+  end
+
+  defp start_construction_supply_intent(agent, job, live_ship, construction, credits) do
+    with {:ok, attrs} <-
+           construction_supply_intent_attrs(agent, job.progress, live_ship, construction, credits),
+         {:ok, intent} <- insert_job_intent(job, attrs),
+         {:ok, intent} <- advance_manual_intent(agent, intent, live_ship) do
+      advance_construction_supply_after_intent(agent, job, intent)
+    else
+      :ok ->
+        :ok
+
+      {:ok, %ManualIntent{} = intent} ->
+        mark_construction_supply_job_blocked(
+          job,
+          intent.blocker || :construction_supply_operation_blocked
+        )
+
+      {:error, reason} ->
+        mark_construction_supply_job_blocked(job, reason)
+    end
+  end
+
+  defp construction_supply_intent_attrs(agent, progress, live_ship, construction, credits) do
+    case Enum.find(progress["requirements"], fn requirement ->
+           item_units(live_ship, requirement["trade_symbol"]) > 0 and
+             requirement["fulfilled"] < requirement["required"]
+         end) do
+      %{"trade_symbol" => symbol, "required" => required, "fulfilled" => fulfilled} ->
+        {:ok,
+         %{
+           type: "deliver",
+           target_waypoint: progress["construction_waypoint"],
+           parameters: %{
+             "trade_symbol" => symbol,
+             "units" => min(item_units(live_ship, symbol), required - fulfilled),
+             "recipient" => %{
+               "type" => "construction",
+               "system" => progress["construction_system"],
+               "waypoint" => progress["construction_waypoint"]
+             }
+           }
+         }}
+
+      nil ->
+        construction_supply_purchase_attrs(agent, progress, live_ship, construction, credits)
+    end
+  end
+
+  defp construction_supply_purchase_attrs(agent, progress, live_ship, _construction, credits) do
+    with {:ok, source} <- construction_supply_source(agent, live_ship, progress),
+         :ok <- construction_supply_cost_allowed?(progress, source.good, credits),
+         {:ok, units} <-
+           construction_supply_purchase_units(
+             live_ship,
+             source.good,
+             source.remaining,
+             progress,
+             credits
+           ) do
+      {:ok,
+       %{
+         type: "buy",
+         target_waypoint: source.waypoint,
+         parameters: %{
+           "trade_symbol" => source.symbol,
+           "units" => units,
+           "reserve_credits" => progress["reserve_credits"],
+           "max_price" => source.good.purchase_price,
+           "recipient" => %{
+             "type" => "construction",
+             "system" => progress["construction_system"],
+             "waypoint" => progress["construction_waypoint"]
+           }
+         }
+       }}
+    end
+  end
+
+  defp construction_supply_source(agent, live_ship, progress) do
+    with {:ok, waypoints} <- fetch_waypoint_pages(agent.agent_token, live_ship.nav.system_symbol) do
+      progress["requirements"]
+      |> Enum.filter(&(&1["fulfilled"] < &1["required"]))
+      |> Enum.find_value({:error, :source_market_unavailable}, fn requirement ->
+        case procurement_market_source(agent, live_ship, waypoints, requirement["trade_symbol"]) do
+          nil ->
+            false
+
+          source ->
+            {:ok,
+             Map.merge(source, %{
+               symbol: requirement["trade_symbol"],
+               remaining: requirement["required"] - requirement["fulfilled"]
+             })}
+        end
+      end)
+    end
+  end
+
+  defp construction_supply_cost_allowed?(progress, good, credits) do
+    maximum = progress["maximum_total_cost"]
+    remaining_budget = if maximum, do: maximum - progress["spent"], else: credits
+
+    if remaining_budget >= good.purchase_price,
+      do: :ok,
+      else: {:error, :maximum_total_cost_exceeded}
+  end
+
+  defp construction_supply_purchase_units(live_ship, good, needed, progress, credits) do
+    credit_budget = max(credits - progress["reserve_credits"], 0)
+
+    total_budget =
+      case progress["maximum_total_cost"] do
+        nil -> credit_budget
+        maximum -> min(credit_budget, max(maximum - progress["spent"], 0))
+      end
+
+    units =
+      min(
+        min(max(live_ship.cargo.capacity - live_ship.cargo.units, 0), good.trade_volume),
+        min(needed, affordable_cargo_units(total_budget, good.purchase_price))
+      )
+
+    if units > 0, do: {:ok, units}, else: {:error, :spending_or_cargo_constraint}
+  end
+
+  defp reconcile_construction_supply_intent(agent, ship, job, intent) do
+    with {:ok, live_ship} <-
+           Agent.handle_game_result(
+             agent,
+             SpaceTraders.API.get_ship(agent.agent_token, ship.symbol)
+           ),
+         :ok <- procurement_system_matches?(job.progress, live_ship),
+         %Job{} = current_job <- Repo.get(Job, job.id),
+         true <- Job.running?(current_job) or current_job.status == "paused",
+         %ManualIntent{} = current_intent <- Repo.get(ManualIntent, intent.id),
+         true <- ManualIntent.unfinished?(current_intent),
+         {:ok, current_intent} <- advance_manual_intent(agent, current_intent, live_ship) do
+      advance_construction_supply_after_intent(agent, current_job, current_intent)
+    else
+      false ->
+        :ok
+
+      nil ->
+        :ok
+
+      {:error, reason} ->
+        block_procurement_cargo_intent(intent, reason)
+        mark_construction_supply_job_blocked(job, reason)
+    end
+  end
+
+  defp advance_construction_supply_after_intent(
+         agent,
+         job,
+         %ManualIntent{status: "completed"} = intent
+       ) do
+    job = apply_construction_supply_intent_result(job, intent)
+
+    with %Job{} = current <- Repo.get(Job, job.id),
+         true <- Job.running?(current),
+         {:ok, live_ship} <-
+           Agent.handle_game_result(
+             agent,
+             SpaceTraders.API.get_ship(agent.agent_token, Repo.get!(Ship, current.ship_id).symbol)
+           ),
+         {:ok, construction} <- construction_supply_construction(agent, current),
+         {:ok, overview} <- Agent.agent_overview(agent) do
+      advance_construction_supply_job(agent, current, live_ship, construction, overview.credits)
+    else
+      false -> {:ok, job}
+      {:error, reason} -> mark_construction_supply_job_blocked(job, reason)
+    end
+  end
+
+  defp advance_construction_supply_after_intent(_agent, job, %ManualIntent{status: "waiting"}),
+    do: {:ok, Repo.update!(Ecto.Changeset.change(job, status: "waiting"))}
+
+  defp advance_construction_supply_after_intent(_agent, job, %ManualIntent{} = intent),
+    do:
+      mark_construction_supply_job_blocked(
+        job,
+        intent.blocker || :construction_supply_operation_blocked
+      )
+
+  defp apply_construction_supply_intent_result(job, %ManualIntent{id: id} = intent) do
+    if job.progress["last_applied_intent_id"] == id do
+      job
+    else
+      progress =
+        case intent do
+          %ManualIntent{type: "buy", last_action_result: result} ->
+            symbol = intent.parameters["trade_symbol"]
+            units = get_in(result, ["transaction", "units"]) || 0
+            cost = get_in(result, ["transaction", "total_price"]) || 0
+
+            job.progress
+            |> update_in(["acquired", symbol], fn value -> (value || 0) + units end)
+            |> Map.update("spent", cost, &(&1 + cost))
+
+          %ManualIntent{type: "deliver", last_action_result: result} ->
+            symbol = intent.parameters["trade_symbol"]
+            units = result["units"] || 0
+
+            job.progress
+            |> update_in(["accepted", symbol], fn value -> (value || 0) + units end)
+            |> Map.update("trips", 1, &(&1 + 1))
+
+          _ ->
+            job.progress
+        end
+
+      Repo.update!(
+        Ecto.Changeset.change(job, progress: Map.put(progress, "last_applied_intent_id", id))
+      )
+    end
+  end
+
+  defp apply_unapplied_construction_supply_intent!(job) do
+    intent =
+      Repo.one(
+        from intent in ManualIntent,
+          where:
+            intent.job_id == ^job.id and intent.caller == "job" and intent.status == "completed",
+          order_by: [desc: intent.id],
+          limit: 1
+      )
+
+    if intent, do: apply_construction_supply_intent_result(job, intent), else: job
+  end
+
+  defp block_construction_supply_job(agent, ship_symbol, reason) do
+    with {:ok, ship} <- owned_ship(agent, ship_symbol),
+         %Job{type: "construction_supply"} = job <- unfinished_job(ship.id) do
+      mark_construction_supply_job_blocked(job, reason)
+      {:error, {:construction_supply_job_blocked, reason}}
+    else
+      _ -> {:error, :construction_supply_job_not_configured}
+    end
+  end
+
+  defp mark_construction_supply_job_blocked(job, reason) do
+    blocker = %{
+      job_blocker(reason)
+      | summary: "Construction Supply Job cannot progress: #{blocker_reason(reason)}."
+    }
+
+    job =
+      Repo.update!(
+        Ecto.Changeset.change(job, status: "blocked", blocker: blocker, blocked_reason: nil)
+      )
+
+    record_activity_by_config(
+      job,
+      "construction_supply_job_blocked",
+      "Construction Supply Job blocked",
+      %{"block" => inspect(reason)}
+    )
 
     {:error, reason}
   end
@@ -4137,6 +4636,7 @@ defmodule SpaceTraders.Fleet do
       case config.type do
         "explorer" -> advance_explorer_job(agent, config, live_ship)
         "procurement" -> start_procurement_job(agent, ship_symbol)
+        "construction_supply" -> start_construction_supply_job(agent, ship_symbol)
         _ -> advance_miner_job(agent, config, live_ship, :timeline)
       end
     else
@@ -5535,7 +6035,7 @@ defmodule SpaceTraders.Fleet do
          %Job{} = config <- unfinished_job(ship.id),
          %AgentRecord{} = agent <- Repo.get(AgentRecord, agent_id),
          :ok <- Agent.execution_allowed?(agent) do
-      if config.type == "procurement" and
+      if config.type in ["procurement", "construction_supply"] and
            match?(%ManualIntent{}, unfinished_job_intent(config.id)) do
         recover_procurement_intent(agent, ship, config)
       else
@@ -5550,6 +6050,7 @@ defmodule SpaceTraders.Fleet do
               case config.type do
                 "explorer" -> advance_explorer_job(agent, config, live_ship)
                 "procurement" -> start_procurement_job(agent, ship_symbol)
+                "construction_supply" -> start_construction_supply_job(agent, ship_symbol)
                 _ -> advance_miner_job(agent, config, live_ship)
               end
 
@@ -5593,7 +6094,9 @@ defmodule SpaceTraders.Fleet do
              %ManualIntent{} = current_intent <- Repo.get(ManualIntent, intent.id),
              true <- ManualIntent.unfinished?(current_intent),
              {:ok, current_intent} <- advance_manual_intent(agent, current_intent, live_ship) do
-          advance_procurement_after_intent(agent, current_job, current_intent)
+          if current_job.type == "construction_supply",
+            do: advance_construction_supply_after_intent(agent, current_job, current_intent),
+            else: advance_procurement_after_intent(agent, current_job, current_intent)
         else
           false -> :ok
           nil -> :ok
@@ -5673,6 +6176,7 @@ defmodule SpaceTraders.Fleet do
           case recovered_config.type do
             "explorer" -> advance_explorer_job(agent, recovered_config, live_ship)
             "procurement" -> start_procurement_job(agent, live_ship.symbol)
+            "construction_supply" -> start_construction_supply_job(agent, live_ship.symbol)
             _ -> advance_miner_job(agent, recovered_config, live_ship, :timeline)
           end
         end
@@ -5808,9 +6312,11 @@ defmodule SpaceTraders.Fleet do
     agent = Repo.get!(AgentRecord, agent_id)
 
     result =
-      if config.type == "procurement",
-        do: start_procurement_job(agent, live_ship.symbol),
-        else: advance_miner_job(agent, config, live_ship, :timeline)
+      case config.type do
+        "procurement" -> start_procurement_job(agent, live_ship.symbol)
+        "construction_supply" -> start_construction_supply_job(agent, live_ship.symbol)
+        _ -> advance_miner_job(agent, config, live_ship, :timeline)
+      end
 
     case result do
       {:ok, recovered_config} ->

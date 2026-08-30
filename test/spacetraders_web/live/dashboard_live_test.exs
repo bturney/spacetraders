@@ -1274,6 +1274,33 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       assert has_element?(lv, "button[phx-click=\"resume_procurement_job\"]")
     end
 
+    test "assigns a Construction Supply Job from the ship operations panel", %{
+      conn: conn,
+      operator: operator
+    } do
+      agent = agent_fixture(operator)
+      stub_live_game(agent_overview_body(agent.symbol), [ship_body("ORBITALIST-1")])
+
+      {:ok, lv, _html} = live(conn, ~p"/")
+      assert has_element?(lv, "form#construction-supply-job-form-ORBITALIST-1")
+
+      html =
+        lv
+        |> element("form#construction-supply-job-form-ORBITALIST-1")
+        |> render_submit(%{
+          ship_symbol: "ORBITALIST-1",
+          construction_system: "X1-UX81",
+          construction_waypoint: "X1-UX81-A1",
+          reserve_credits: "500",
+          maximum_total_cost: "2000"
+        })
+
+      assert html =~ "Construction Supply Job assigned and paused."
+      assert has_element?(lv, "[data-job-panel=construction-supply]", "Construction Supply Job")
+      assert has_element?(lv, "[data-construction-supply-job-status]", "Paused")
+      assert has_element?(lv, "button[phx-click=\"resume_construction_supply_job\"]")
+    end
+
     test "keeps Procurement Job drafts across dashboard patches", %{
       conn: conn,
       operator: operator

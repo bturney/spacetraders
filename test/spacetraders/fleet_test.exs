@@ -3485,6 +3485,44 @@ defmodule SpaceTraders.FleetTest do
     end
   end
 
+  describe "Construction Supply Job" do
+    test "captures one fixed Construction project and its multi-material constraints" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        assert {"GET", "/v2/my/ships/FLEET-SHIP"} = {conn.method, conn.request_path}
+        Req.Test.json(conn, %{"data" => ship_body("FLEET-SHIP")})
+      end)
+
+      assert {:ok, %Job{type: "construction_supply", status: "paused", progress: progress}} =
+               Fleet.configure_construction_supply_job(agent, "FLEET-SHIP", %{
+                 construction_system: "X1-UX81",
+                 construction_waypoint: "X1-UX81-A1",
+                 source_systems: ["X1-UX81"],
+                 reserve_credits: 500,
+                 maximum_total_cost: 2_000,
+                 compatible_existing_cargo?: true
+               })
+
+      assert progress == %{
+               "construction_system" => "X1-UX81",
+               "construction_waypoint" => "X1-UX81-A1",
+               "target_system" => "X1-UX81",
+               "source_systems" => ["X1-UX81"],
+               "reserve_credits" => 500,
+               "maximum_total_cost" => 2_000,
+               "compatible_existing_cargo" => true,
+               "accepted" => %{},
+               "acquired" => %{},
+               "committed_cargo" => %{},
+               "spent" => 0,
+               "trips" => 0,
+               "external_progress" => %{}
+             }
+    end
+  end
+
   describe "System Exploration Job" do
     test "captures the authoritative current System and completes remote baseline coverage" do
       agent = agent_fixture()
