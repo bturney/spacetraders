@@ -5008,6 +5008,37 @@ defmodule SpaceTraders.FleetTest do
       assert [%{"operation" => %{"kind" => "install_module"}} | _] = progress["evidence"]
     end
 
+    test "Outfitting Job never removes a module before an acceptable replacement is in Cargo" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      assert {:ok, _job} =
+               Fleet.configure_outfitting_job(agent, "FLEET-SHIP", %{
+                 requested_capability: "gas processing",
+                 acceptable_modules: ["MODULE_GAS_PROCESSOR_I"],
+                 authorized_removals: %{"MODULE_CARGO_HOLD_I" => 1}
+               })
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        assert {"/v2/my/ships/FLEET-SHIP", "GET"} = {conn.request_path, conn.method}
+
+        Req.Test.json(conn, %{
+          "data" =>
+            ship_body("FLEET-SHIP", %{
+              "modules" => [
+                %{"symbol" => "MODULE_CARGO_HOLD_I", "name" => "Cargo Hold I"},
+                %{"symbol" => "MODULE_CREW_QUARTERS_I", "name" => "Crew Quarters I"}
+              ]
+            })
+        })
+      end)
+
+      assert {:error, %Job{status: "blocked", blocker: blocker}} =
+               Fleet.start_outfitting_job(agent, "FLEET-SHIP")
+
+      assert blocker.reason == "acceptable_module_missing_from_cargo"
+    end
+
     test "manual module installation persists evidence and leaves a preempted Job paused" do
       agent = agent_fixture()
       ship_fixture(agent, "FLEET-SHIP")

@@ -589,11 +589,12 @@ defmodule SpaceTraders.Fleet do
   defp advance_outfitting_job(agent, job, live_ship) do
     module_slots = live_ship.frame && live_ship.frame.module_slots
     candidate = Enum.find(job.progress["acceptable_modules"], &(item_units(live_ship, &1) > 0))
+    intent = unfinished_job_intent(job.id)
 
     progress =
       job.progress
       |> Map.put("installed_modules", Enum.map(live_ship.modules || [], & &1.symbol))
-      |> Map.put("active_operation", nil)
+      |> Map.put("active_operation", outfitting_operation(intent))
 
     job =
       Repo.update!(
@@ -617,14 +618,15 @@ defmodule SpaceTraders.Fleet do
            "completed"
          )}
 
-      is_struct(unfinished_job_intent(job.id), ManualIntent) ->
-        reconcile_outfitting_intent(agent, job, unfinished_job_intent(job.id), live_ship)
+      is_struct(intent, ManualIntent) ->
+        reconcile_outfitting_intent(agent, job, intent, live_ship)
 
       is_binary(candidate) and
           (not is_integer(module_slots) or module_slots > length(live_ship.modules || [])) ->
         start_outfitting_operation(agent, job, live_ship, "install_module", candidate)
 
-      is_integer(module_slots) and module_slots <= length(live_ship.modules || []) ->
+      is_binary(candidate) and is_integer(module_slots) and
+          module_slots <= length(live_ship.modules || []) ->
         case authorized_removal(progress, live_ship) do
           nil -> mark_outfitting_job_blocked(job, :module_slot_removal_not_authorized)
           symbol -> start_outfitting_operation(agent, job, live_ship, "remove_module", symbol)
@@ -637,6 +639,12 @@ defmodule SpaceTraders.Fleet do
         )
     end
   end
+
+  defp outfitting_operation(%ManualIntent{} = intent) do
+    %{"kind" => intent.type, "module_symbol" => intent.parameters["module_symbol"]}
+  end
+
+  defp outfitting_operation(_intent), do: nil
 
   defp start_outfitting_operation(agent, job, live_ship, type, module_symbol) do
     progress =

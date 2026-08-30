@@ -4010,18 +4010,27 @@ defmodule SpaceTradersWeb.DashboardLive do
         <input type="hidden" name="ship_symbol" value={@ship.symbol} />
         <input
           name="requested_capability"
+          value={
+            draft_field(@form_drafts, "outfitting_job", [@ship.symbol], "requested_capability", "")
+          }
           placeholder="Requested readiness capability"
           required
           class="input input-bordered input-sm"
         />
         <input
           name="acceptable_modules"
+          value={
+            draft_field(@form_drafts, "outfitting_job", [@ship.symbol], "acceptable_modules", "")
+          }
           placeholder="Acceptable modules (comma-separated)"
           required
           class="input input-bordered input-sm font-mono"
         />
         <input
           name="authorized_removals"
+          value={
+            draft_field(@form_drafts, "outfitting_job", [@ship.symbol], "authorized_removals", "")
+          }
           placeholder="Authorized removals: MODULE:count"
           class="input input-bordered input-sm font-mono sm:col-span-2"
         />
