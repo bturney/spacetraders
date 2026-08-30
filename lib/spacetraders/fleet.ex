@@ -1695,8 +1695,14 @@ defmodule SpaceTraders.Fleet do
         {symbol, min(item_units(live_ship, symbol), remaining)}
       end)
 
+    remaining =
+      Map.new(requirements, fn requirement ->
+        {requirement["trade_symbol"], max(requirement["required"] - requirement["fulfilled"], 0)}
+      end)
+
     progress
     |> Map.put("requirements", requirements)
+    |> Map.put("remaining", remaining)
     |> Map.put("external_progress", external_progress)
     |> Map.put("committed_cargo", committed)
   end
@@ -1739,6 +1745,23 @@ defmodule SpaceTraders.Fleet do
   end
 
   defp construction_supply_intent_attrs(agent, progress, live_ship, construction, credits) do
+    if live_ship.cargo.units < live_ship.cargo.capacity do
+      case construction_supply_purchase_attrs(agent, progress, live_ship, construction, credits) do
+        {:ok, _attrs} = purchase ->
+          purchase
+
+        {:error, reason} ->
+          case construction_supply_delivery_attrs(progress, live_ship) do
+            {:ok, _attrs} = delivery -> delivery
+            {:error, _} -> {:error, reason}
+          end
+      end
+    else
+      construction_supply_delivery_attrs(progress, live_ship)
+    end
+  end
+
+  defp construction_supply_delivery_attrs(progress, live_ship) do
     case Enum.find(progress["requirements"], fn requirement ->
            item_units(live_ship, requirement["trade_symbol"]) > 0 and
              requirement["fulfilled"] < requirement["required"]
@@ -1760,7 +1783,7 @@ defmodule SpaceTraders.Fleet do
          }}
 
       nil ->
-        construction_supply_purchase_attrs(agent, progress, live_ship, construction, credits)
+        {:error, :no_executable_construction_supply_batch}
     end
   end
 
@@ -1797,7 +1820,10 @@ defmodule SpaceTraders.Fleet do
   defp construction_supply_source(agent, live_ship, progress) do
     with {:ok, waypoints} <- fetch_waypoint_pages(agent.agent_token, live_ship.nav.system_symbol) do
       progress["requirements"]
-      |> Enum.filter(&(&1["fulfilled"] < &1["required"]))
+      |> Enum.filter(fn requirement ->
+        requirement["fulfilled"] + item_units(live_ship, requirement["trade_symbol"]) <
+          requirement["required"]
+      end)
       |> Enum.find_value({:error, :source_market_unavailable}, fn requirement ->
         case procurement_market_source(agent, live_ship, waypoints, requirement["trade_symbol"]) do
           nil ->
@@ -1807,7 +1833,9 @@ defmodule SpaceTraders.Fleet do
             {:ok,
              Map.merge(source, %{
                symbol: requirement["trade_symbol"],
-               remaining: requirement["required"] - requirement["fulfilled"]
+               remaining:
+                 requirement["required"] - requirement["fulfilled"] -
+                   item_units(live_ship, requirement["trade_symbol"])
              })}
         end
       end)
