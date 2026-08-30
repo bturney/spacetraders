@@ -373,6 +373,11 @@ defmodule SpaceTradersWeb.DashboardLive do
   end
 
   @impl true
+  def handle_event("configure_outfitting_job", params, socket) do
+    save_outfitting_job(socket, params)
+  end
+
+  @impl true
   def handle_event("configure_explorer_job", %{"symbol" => ship_symbol}, socket) do
     with {:ok, agent} <- agent_for_ship(socket, ship_symbol),
          {:ok, _job} <- Fleet.configure_explorer_job(agent, ship_symbol) do
@@ -868,7 +873,10 @@ defmodule SpaceTradersWeb.DashboardLive do
              "stop_construction_supply_job",
              "pause_market_trading_job",
              "resume_market_trading_job",
-             "stop_market_trading_job"
+             "stop_market_trading_job",
+             "pause_outfitting_job",
+             "resume_outfitting_job",
+             "stop_outfitting_job"
            ] do
     with {:ok, agent} <- agent_for_ship(socket, ship_symbol),
          :ok <- job_action(action, agent, ship_symbol) do
@@ -900,6 +908,15 @@ defmodule SpaceTradersWeb.DashboardLive do
 
           "stop_market_trading_job" ->
             "#{ship_symbol} Market Trading Job stopped; Ship is manual."
+
+          "pause_outfitting_job" ->
+            "#{ship_symbol} Ship Outfitting Job paused."
+
+          "resume_outfitting_job" ->
+            "#{ship_symbol} Ship Outfitting Job resumed."
+
+          "stop_outfitting_job" ->
+            "#{ship_symbol} Ship Outfitting Job stopped; Ship is manual."
         end
 
       {:noreply, put_flash(refresh_agent(socket, agent), :info, message)}
@@ -951,6 +968,15 @@ defmodule SpaceTradersWeb.DashboardLive do
   defp construction_supply_job_action("stop_construction_supply_job", agent, ship),
     do: Fleet.stop_construction_supply_job(agent, ship)
 
+  defp outfitting_job_action("pause_outfitting_job", agent, ship),
+    do: Fleet.pause_outfitting_job(agent, ship) |> unwrap_job_result()
+
+  defp outfitting_job_action("resume_outfitting_job", agent, ship),
+    do: Fleet.resume_outfitting_job(agent, ship) |> unwrap_job_result()
+
+  defp outfitting_job_action("stop_outfitting_job", agent, ship),
+    do: Fleet.stop_outfitting_job(agent, ship)
+
   defp job_action(action, agent, ship)
        when action in [
               "pause_procurement_job",
@@ -972,6 +998,10 @@ defmodule SpaceTradersWeb.DashboardLive do
 
   defp job_action("resume_market_trading_job", agent, ship),
     do: Fleet.resume_market_trading_job(agent, ship) |> unwrap_job_result()
+
+  defp job_action(action, agent, ship)
+       when action in ["pause_outfitting_job", "resume_outfitting_job", "stop_outfitting_job"],
+       do: outfitting_job_action(action, agent, ship)
 
   defp job_action("stop_market_trading_job", agent, ship),
     do: Fleet.stop_market_trading_job(agent, ship)
@@ -1071,6 +1101,58 @@ defmodule SpaceTradersWeb.DashboardLive do
       {:error, reason} -> {:noreply, put_flash(socket, :error, live_error(reason))}
     end
   end
+
+  defp save_outfitting_job(socket, params) do
+    with {:ok, agent} <- agent_for_ship(socket, params["ship_symbol"]),
+         {:ok, authorized_removals} <- parse_authorized_removals(params["authorized_removals"]),
+         {:ok, _job} <-
+           Fleet.configure_outfitting_job(agent, params["ship_symbol"], %{
+             requested_capability: String.trim(params["requested_capability"] || ""),
+             acceptable_modules: split_module_symbols(params["acceptable_modules"]),
+             authorized_removals: authorized_removals
+           }) do
+      {:noreply,
+       put_flash(
+         socket
+         |> refresh_agent(agent)
+         |> clear_draft(draft_key("outfitting_job", [params["ship_symbol"]])),
+         :info,
+         "Ship Outfitting Job assigned and paused."
+       )}
+    else
+      {:error, reason} -> {:noreply, put_flash(socket, :error, live_error(reason))}
+    end
+  end
+
+  defp split_module_symbols(value) when is_binary(value),
+    do: value |> String.split(",", trim: true) |> Enum.map(&String.trim/1)
+
+  defp split_module_symbols(_), do: []
+
+  defp parse_authorized_removals(nil), do: {:ok, %{}}
+  defp parse_authorized_removals(""), do: {:ok, %{}}
+
+  defp parse_authorized_removals(value) when is_binary(value) do
+    value
+    |> String.split(",", trim: true)
+    |> Enum.reduce_while({:ok, %{}}, fn entry, {:ok, removals} ->
+      case String.split(entry, ":", parts: 2) do
+        [symbol, count] ->
+          case Integer.parse(String.trim(count)) do
+            {count, ""} when count > 0 ->
+              {:cont, {:ok, Map.put(removals, String.trim(symbol), count)}}
+
+            _ ->
+              {:halt, {:error, :invalid_outfitting_configuration}}
+          end
+
+        _ ->
+          {:halt, {:error, :invalid_outfitting_configuration}}
+      end
+    end)
+  end
+
+  defp parse_authorized_removals(_), do: {:error, :invalid_outfitting_configuration}
 
   defp parse_optional_units(nil), do: {:ok, nil}
   defp parse_optional_units(""), do: {:ok, nil}
@@ -3010,10 +3092,13 @@ defmodule SpaceTradersWeb.DashboardLive do
             <.procurement_job_panel ship={@ship} />
           <% @ship.job && @ship.job.type == "construction_supply" -> %>
             <.construction_supply_job_panel ship={@ship} />
+          <% @ship.job && @ship.job.type == "outfitting" -> %>
+            <.outfitting_job_panel ship={@ship} form_drafts={@form_drafts} />
           <% true -> %>
             <.miner_job_panel ship={@ship} form_drafts={@form_drafts} />
             <.procurement_job_panel ship={@ship} form_drafts={@form_drafts} />
             <.construction_supply_job_panel ship={@ship} form_drafts={@form_drafts} />
+            <.outfitting_job_panel ship={@ship} form_drafts={@form_drafts} />
             <button
               :if={is_nil(@ship.job)}
               type="button"
@@ -3871,6 +3956,121 @@ defmodule SpaceTradersWeb.DashboardLive do
         <button
           type="button"
           phx-click="stop_construction_supply_job"
+          phx-value-symbol={@ship.symbol}
+          class="btn btn-ghost btn-sm"
+        >Stop</button>
+      </div>
+    </section>
+    """
+  end
+
+  attr :ship, :map, required: true
+  attr :form_drafts, :map, default: %{}
+
+  defp outfitting_job_panel(assigns) do
+    job = Map.get(assigns.ship, :job)
+    progress = (job && job.progress) || %{}
+    assigns = assign(assigns, job: job, progress: progress)
+
+    ~H"""
+    <section class="mt-4 rounded border border-secondary/30 p-3" data-job-panel="outfitting">
+      <div class="flex items-center justify-between gap-2">
+        <span class="text-xs font-semibold uppercase tracking-wider opacity-60">Ship Outfitting Job</span>
+        <span class="badge badge-outline badge-sm" data-outfitting-job-status>{job_status(@job)}</span>
+      </div>
+      <dl :if={@job} class="mt-3 grid grid-cols-1 gap-1 text-xs sm:grid-cols-2">
+        <div>
+          <dt class="opacity-60">Readiness</dt><dd>{@progress["requested_capability"]}</dd>
+        </div>
+        <div>
+          <dt class="opacity-60">Acceptable modules</dt><dd class="font-mono">
+            {Enum.join(@progress["acceptable_modules"] || [], ", ")}
+          </dd>
+        </div>
+        <div>
+          <dt class="opacity-60">Cargo candidate</dt><dd class="font-mono">
+            {@progress["cargo_candidate"] || "none"}
+          </dd>
+        </div>
+        <div>
+          <dt class="opacity-60">Installed modules</dt><dd class="font-mono">
+            {Enum.join(@progress["installed_modules"] || [], ", ")}
+          </dd>
+        </div>
+        <div>
+          <dt class="opacity-60">Authorized removals</dt><dd class="font-mono">
+            {Enum.map_join(@progress["authorized_removals"] || %{}, ", ", fn {symbol, count} ->
+              "#{symbol}:#{count}"
+            end)}
+          </dd>
+        </div>
+        <div>
+          <dt class="opacity-60">Active operation</dt><dd class="font-mono">
+            {get_in(@progress, ["active_operation", "kind"]) || "none"}
+          </dd>
+        </div>
+        <div>
+          <dt class="opacity-60">Evidence</dt><dd>
+            {(@progress["evidence"] || []) |> length()} observations
+          </dd>
+        </div>
+      </dl>
+      <p :if={job_reason(@job)} class="mt-2 text-xs text-error">{job_reason(@job)}</p>
+      <form
+        :if={is_nil(@job)}
+        id={"outfitting-job-form-#{@ship.symbol}"}
+        phx-change="track_draft"
+        phx-submit="configure_outfitting_job"
+        class="mt-3 grid gap-2 sm:grid-cols-2"
+      >
+        <input type="hidden" name="draft_key" value={draft_key("outfitting_job", [@ship.symbol])} />
+        <input type="hidden" name="ship_symbol" value={@ship.symbol} />
+        <input
+          name="requested_capability"
+          value={
+            draft_field(@form_drafts, "outfitting_job", [@ship.symbol], "requested_capability", "")
+          }
+          placeholder="Requested readiness capability"
+          required
+          class="input input-bordered input-sm"
+        />
+        <input
+          name="acceptable_modules"
+          value={
+            draft_field(@form_drafts, "outfitting_job", [@ship.symbol], "acceptable_modules", "")
+          }
+          placeholder="Acceptable modules (comma-separated)"
+          required
+          class="input input-bordered input-sm font-mono"
+        />
+        <input
+          name="authorized_removals"
+          value={
+            draft_field(@form_drafts, "outfitting_job", [@ship.symbol], "authorized_removals", "")
+          }
+          placeholder="Authorized removals: MODULE:count"
+          class="input input-bordered input-sm font-mono sm:col-span-2"
+        />
+        <button type="submit" class="btn btn-secondary btn-sm sm:col-span-2">Assign Ship Outfitting Job</button>
+      </form>
+      <div :if={@job} class="mt-3 flex flex-wrap gap-2">
+        <button
+          :if={Job.running?(@job)}
+          type="button"
+          phx-click="pause_outfitting_job"
+          phx-value-symbol={@ship.symbol}
+          class="btn btn-warning btn-sm"
+        >Pause</button>
+        <button
+          :if={@job.status in ["paused", "blocked"]}
+          type="button"
+          phx-click="resume_outfitting_job"
+          phx-value-symbol={@ship.symbol}
+          class="btn btn-primary btn-sm"
+        >Resume</button>
+        <button
+          type="button"
+          phx-click="stop_outfitting_job"
           phx-value-symbol={@ship.symbol}
           class="btn btn-ghost btn-sm"
         >Stop</button>

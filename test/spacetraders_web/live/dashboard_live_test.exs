@@ -1045,6 +1045,25 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       assert has_element?(lv, "button[data-remove-module=MODULE_CARGO_HOLD_I]", "Remove module")
     end
 
+    test "offers Ship Outfitting Job assignment from Ship Readiness", %{
+      conn: conn,
+      operator: operator
+    } do
+      agent = agent_fixture(operator)
+      stub_live_game(agent_overview_body(agent.symbol), [ship_body("ORBITALIST-1")])
+
+      {:ok, lv, _html} = live(conn, ~p"/")
+      lv |> element("button[data-select-ship=ORBITALIST-1]") |> render_click()
+
+      assert has_element?(lv, "form[id=outfitting-job-form-ORBITALIST-1]")
+
+      assert has_element?(
+               lv,
+               "button[type=submit]",
+               "Assign Ship Outfitting Job"
+             )
+    end
+
     test "shows an in-transit ship's origin and destination with departure in Route details", %{
       conn: conn,
       operator: operator
