@@ -5039,6 +5039,121 @@ defmodule SpaceTraders.FleetTest do
       assert blocker.reason == "acceptable_module_missing_from_cargo"
     end
 
+    test "Outfitting Job buys an acceptable module from its fixed source Listing" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+      {:ok, response_state} = Elixir.Agent.start_link(fn -> :before_purchase end)
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case {conn.request_path, conn.method} do
+          {"/v2/my/ships/FLEET-SHIP", "GET"} ->
+            installed? = Elixir.Agent.get(response_state, &(&1 == :installed))
+            purchased? = Elixir.Agent.get(response_state, &(&1 == :purchased))
+
+            Req.Test.json(conn, %{
+              "data" =>
+                ship_body("FLEET-SHIP", %{
+                  "modules" =>
+                    if(installed?,
+                      do: [%{"symbol" => "MODULE_GAS_PROCESSOR_I", "name" => "Gas Processor I"}],
+                      else: []
+                    ),
+                  "cargo" => %{
+                    "capacity" => 40,
+                    "units" => if(purchased?, do: 1, else: 0),
+                    "inventory" =>
+                      if(purchased?,
+                        do: [%{"symbol" => "MODULE_GAS_PROCESSOR_I", "units" => 1}],
+                        else: []
+                      )
+                  }
+                })
+            })
+
+          {"/v2/my/agent", "GET"} ->
+            Req.Test.json(conn, %{"data" => %{"symbol" => agent.symbol, "credits" => 500}})
+
+          {"/v2/systems/X1-UX81/waypoints/X1-UX81-A1/market", "GET"} ->
+            send(self(), :fresh_outfitting_listing)
+
+            Req.Test.json(conn, %{
+              "data" => %{
+                "symbol" => "X1-UX81-A1",
+                "tradeGoods" => [
+                  %{
+                    "symbol" => "MODULE_GAS_PROCESSOR_I",
+                    "purchasePrice" => 100,
+                    "sellPrice" => 75,
+                    "tradeVolume" => 1
+                  }
+                ]
+              }
+            })
+
+          {"/v2/my/ships/FLEET-SHIP/purchase", "POST"} ->
+            assert conn.body_params == %{"symbol" => "MODULE_GAS_PROCESSOR_I", "units" => 1}
+            Elixir.Agent.update(response_state, fn _ -> :purchased end)
+
+            Req.Test.json(conn, %{
+              "data" => %{
+                "agent" => %{"symbol" => agent.symbol, "credits" => 400},
+                "cargo" => %{"capacity" => 40, "units" => 1, "inventory" => []},
+                "transaction" => %{
+                  "type" => "PURCHASE",
+                  "shipSymbol" => "FLEET-SHIP",
+                  "tradeSymbol" => "MODULE_GAS_PROCESSOR_I",
+                  "waypointSymbol" => "X1-UX81-A1",
+                  "units" => 1,
+                  "pricePerUnit" => 100,
+                  "totalPrice" => 100
+                }
+              }
+            })
+
+          {"/v2/my/ships/FLEET-SHIP/modules/install", "POST"} ->
+            assert conn.body_params == %{"symbol" => "MODULE_GAS_PROCESSOR_I"}
+            Elixir.Agent.update(response_state, fn _ -> :installed end)
+
+            Req.Test.json(conn, %{
+              "data" => %{
+                "agent" => %{"symbol" => agent.symbol, "credits" => 400},
+                "modules" => [
+                  %{"symbol" => "MODULE_GAS_PROCESSOR_I", "name" => "Gas Processor I"}
+                ],
+                "cargo" => %{"capacity" => 40, "units" => 0, "inventory" => []},
+                "transaction" => %{
+                  "shipSymbol" => "FLEET-SHIP",
+                  "tradeSymbol" => "MODULE_GAS_PROCESSOR_I",
+                  "totalPrice" => 1,
+                  "waypointSymbol" => "X1-UX81-A1",
+                  "timestamp" => "2026-01-01T00:00:00.000Z"
+                }
+              }
+            })
+        end
+      end)
+
+      assert {:ok, %Job{progress: progress}} =
+               Fleet.configure_outfitting_job(agent, "FLEET-SHIP", %{
+                 requested_capability: "gas processing",
+                 acceptable_modules: ["MODULE_GAS_PROCESSOR_I"],
+                 authorized_removals: %{},
+                 source_waypoints: ["X1-UX81-A1"],
+                 reserve_credits: 250,
+                 maximum_total_cost: 100
+               })
+
+      assert progress["source_system"] == "X1-UX81"
+
+      assert {:ok, %Job{status: "completed", progress: progress}} =
+               Fleet.start_outfitting_job(agent, "FLEET-SHIP")
+
+      assert_receive :fresh_outfitting_listing
+      assert_receive :fresh_outfitting_listing
+      assert progress["spent"] == 100
+      assert progress["cargo_candidate"] == "MODULE_GAS_PROCESSOR_I"
+    end
+
     test "manual module installation persists evidence and leaves a preempted Job paused" do
       agent = agent_fixture()
       ship_fixture(agent, "FLEET-SHIP")
