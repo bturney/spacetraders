@@ -4715,6 +4715,9 @@ defmodule SpaceTradersWeb.DashboardLive do
   defp live_error(:explorer_job_not_configured),
     do: "Save a System Exploration Job configuration first."
 
+  defp live_error(:source_market_unavailable),
+    do: "Procurement Job blocked: no source market is available in the current system."
+
   defp live_error(:manual_intent_active),
     do: "A manual Navigate is still active for this Ship; stop it before resuming the Job."
 

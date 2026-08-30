@@ -3336,6 +3336,45 @@ defmodule SpaceTraders.FleetTest do
                })
     end
 
+    test "preserves waypoint API failures while sourcing a Procurement Job" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      assert {:ok, _job} =
+               Fleet.configure_procurement_job(agent, "FLEET-SHIP", %{
+                 contract_id: "CONTRACT-1",
+                 trade_symbol: "DIAMONDS",
+                 quantity: 10,
+                 destination_waypoint: "X1-UX81-A1"
+               })
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case {conn.request_path, conn.method} do
+          {"/v2/my/ships/FLEET-SHIP", "GET"} ->
+            Req.Test.json(conn, %{"data" => ship_body("FLEET-SHIP")})
+
+          {"/v2/my/contracts", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => [
+                active_contract_body(
+                  "CONTRACT-1",
+                  [contract_delivery_entry(%{"tradeSymbol" => "DIAMONDS", "unitsRequired" => 10})]
+                )
+              ]
+            })
+
+          {"/v2/my/agent", "GET"} ->
+            Req.Test.json(conn, %{"data" => %{"symbol" => agent.symbol, "credits" => 100}})
+
+          {"/v2/systems/X1-UX81/waypoints", "GET"} ->
+            Plug.Conn.send_resp(conn, 500, ~s({"error":"boom"}))
+        end
+      end)
+
+      assert {:error, %SpaceTraders.API.Error{status: 500}} =
+               Fleet.start_procurement_job(agent, "FLEET-SHIP")
+    end
+
     test "uses the persisted Buy Goods Intent without preempting itself" do
       agent = agent_fixture()
       ship = ship_fixture(agent, "FLEET-SHIP")

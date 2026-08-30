@@ -1408,11 +1408,15 @@ defmodule SpaceTraders.Fleet do
       nil ->
         Enum.reduce_while(systems, {:error, :source_market_unavailable}, fn system, _ ->
           with {:ok, waypoints} <- fetch_waypoint_pages(agent.agent_token, system),
-               source when not is_nil(source) <-
+               {:ok, source} <-
                  procurement_market_source(agent, live_ship, waypoints, progress["trade_symbol"]) do
             {:halt, {:ok, source}}
           else
-            _ -> {:cont, {:error, :source_market_unavailable}}
+            {:error, :source_market_unavailable} ->
+              {:cont, {:error, :source_market_unavailable}}
+
+            {:error, reason} ->
+              {:halt, {:error, reason}}
           end
         end)
 
@@ -1439,18 +1443,20 @@ defmodule SpaceTraders.Fleet do
     do: {:error, :current_system_unavailable}
 
   defp procurement_market_source(agent, live_ship, waypoints, trade_symbol) do
-    Enum.find_value(waypoints, fn waypoint ->
+    Enum.reduce_while(waypoints, {:error, :source_market_unavailable}, fn waypoint, _result ->
       if market_waypoint?(waypoint) == :ok do
         case market_for_ship(agent, live_ship, waypoint.symbol) do
           {:ok, market} ->
             case Enum.find(market.trade_goods || [], &(&1.symbol == trade_symbol)) do
-              nil -> nil
-              good -> %{waypoint: waypoint.symbol, good: good}
+              nil -> {:cont, {:error, :source_market_unavailable}}
+              good -> {:halt, {:ok, %{waypoint: waypoint.symbol, good: good}}}
             end
 
-          _ ->
-            nil
+          {:error, reason} ->
+            {:halt, {:error, reason}}
         end
+      else
+        {:cont, {:error, :source_market_unavailable}}
       end
     end)
   end
@@ -1824,19 +1830,23 @@ defmodule SpaceTraders.Fleet do
         requirement["fulfilled"] + item_units(live_ship, requirement["trade_symbol"]) <
           requirement["required"]
       end)
-      |> Enum.find_value({:error, :source_market_unavailable}, fn requirement ->
+      |> Enum.reduce_while({:error, :source_market_unavailable}, fn requirement, _result ->
         case procurement_market_source(agent, live_ship, waypoints, requirement["trade_symbol"]) do
-          nil ->
-            false
+          {:ok, source} ->
+            {:halt,
+             {:ok,
+              Map.merge(source, %{
+                symbol: requirement["trade_symbol"],
+                remaining:
+                  requirement["required"] - requirement["fulfilled"] -
+                    item_units(live_ship, requirement["trade_symbol"])
+              })}}
 
-          source ->
-            {:ok,
-             Map.merge(source, %{
-               symbol: requirement["trade_symbol"],
-               remaining:
-                 requirement["required"] - requirement["fulfilled"] -
-                   item_units(live_ship, requirement["trade_symbol"])
-             })}
+          {:error, :source_market_unavailable} ->
+            {:cont, {:error, :source_market_unavailable}}
+
+          {:error, reason} ->
+            {:halt, {:error, reason}}
         end
       end)
     end
