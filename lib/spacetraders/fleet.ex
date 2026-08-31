@@ -2883,17 +2883,16 @@ defmodule SpaceTraders.Fleet do
              destination_system,
              waypoint
            ),
-         {:ok, overview} <- Agent.agent_overview(agent) do
+         {:ok, preflight} <-
+           jump_cost_preflight(agent, source_system, live_ship.nav.waypoint_symbol) do
       {:ok,
-       %{
+       Map.merge(preflight, %{
          ship_symbol: ship.symbol,
          source_waypoint: live_ship.nav.waypoint_symbol,
          destination_waypoint: waypoint,
          flight_mode: live_ship.nav.flight_mode,
-         cooldown_seconds: live_ship.cooldown.remaining_seconds,
-         credits: overview.credits,
-         antimatter_cost: :confirmed_by_jump_response
-       }}
+         cooldown_seconds: live_ship.cooldown.remaining_seconds
+       })}
     else
       false -> {:error, :same_system_route}
       {:error, _reason} = error -> error
@@ -4614,6 +4613,8 @@ defmodule SpaceTraders.Fleet do
              destination_system,
              intent.target_waypoint
            ),
+         {:ok, _preflight} <-
+           jump_cost_preflight(agent, source_system, live_ship.nav.waypoint_symbol),
          {:ok, intent} <-
            claim_intent_action(intent, %{
              "kind" => "jump",
@@ -4676,6 +4677,25 @@ defmodule SpaceTraders.Fleet do
       false -> {:error, :jump_route_unavailable}
       {:error, _reason} = error -> error
       error -> {:error, error}
+    end
+  end
+
+  defp jump_cost_preflight(agent, source_system, source_waypoint) do
+    with {:ok, overview} <- Agent.agent_overview(agent),
+         {:ok, market} <-
+           Agent.handle_game_result(
+             agent,
+             SpaceTraders.API.get_market(agent.agent_token, source_system, source_waypoint)
+           ),
+         antimatter when not is_nil(antimatter) <-
+           Enum.find(market.trade_goods || [], &(&1.symbol == "ANTIMATTER")),
+         price when is_integer(price) and price >= 0 <- antimatter.purchase_price,
+         true <- overview.credits >= price || {:error, {:insufficient_credits, price}} do
+      {:ok, %{credits: overview.credits, antimatter_cost: price}}
+    else
+      nil -> {:error, :antimatter_unavailable}
+      {:error, _reason} = error -> error
+      _ -> {:error, :antimatter_unavailable}
     end
   end
 

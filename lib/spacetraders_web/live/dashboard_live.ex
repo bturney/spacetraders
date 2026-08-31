@@ -3244,7 +3244,7 @@ defmodule SpaceTradersWeb.DashboardLive do
             <dt class="opacity-70">Credits</dt>
             <dd class="font-mono">{@jump_preview.credits}</dd>
             <dt class="opacity-70">Jump cost</dt>
-            <dd>Antimatter charge confirmed by the authoritative jump response.</dd>
+            <dd>{@jump_preview.antimatter_cost} credits for one antimatter charge.</dd>
             <dt class="opacity-70">Cooldown</dt>
             <dd>{@jump_preview.cooldown_seconds || 0} seconds before dispatch.</dd>
           </dl>

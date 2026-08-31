@@ -4297,6 +4297,17 @@ defmodule SpaceTraders.FleetTest do
                 })
             })
 
+          {"/v2/my/agent", "GET"} ->
+            Req.Test.json(conn, %{"data" => %{"symbol" => agent.symbol, "credits" => 42_000}})
+
+          {"/v2/systems/X1-UX81/waypoints/X1-UX81-G1/market", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => %{
+                "symbol" => "X1-UX81-G1",
+                "tradeGoods" => [%{"symbol" => "ANTIMATTER", "purchasePrice" => 1_000}]
+              }
+            })
+
           {"/v2/systems/X1-UX81/waypoints/X1-UX81-G1/construction", "GET"} ->
             Req.Test.json(conn, %{
               "data" => %{"symbol" => "X1-UX81-G1", "isComplete" => true, "materials" => []}
