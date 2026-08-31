@@ -22,6 +22,8 @@ mkdir -p "$PROJECT_ROOT/scripts" "$LEASES"
 export TEST_LEASES="$LEASES"
 cp "$SOURCE_ROOT/scripts/task-start" "$PROJECT_ROOT/scripts/task-start"
 cp "$SOURCE_ROOT/scripts/task-stop" "$PROJECT_ROOT/scripts/task-stop"
+cp "$SOURCE_ROOT/scripts/_toolchain.sh" "$PROJECT_ROOT/scripts/_toolchain.sh"
+cp "$SOURCE_ROOT/.tool-versions" "$PROJECT_ROOT/.tool-versions"
 
 cat > "$PROJECT_ROOT/scripts/worktree-setup" <<'EOF'
 #!/usr/bin/env bash
@@ -56,7 +58,7 @@ chmod +x "$PROJECT_ROOT/scripts/"* "$RUNNER"
 git -C "$PROJECT_ROOT" init --initial-branch=main >/dev/null
 git -C "$PROJECT_ROOT" config user.email test@example.com
 git -C "$PROJECT_ROOT" config user.name "Task Workspace Test"
-git -C "$PROJECT_ROOT" add .gitignore scripts
+git -C "$PROJECT_ROOT" add .gitignore .tool-versions scripts
 git -C "$PROJECT_ROOT" commit -m "Fixture" >/dev/null
 
 printf 'alternate base\n' > "$PROJECT_ROOT/alternate.txt"

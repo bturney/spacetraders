@@ -138,6 +138,7 @@ fi
 
 (
   cd "$workspace"
+  source scripts/_toolchain.sh
   source .worktree-env
   "$@"
 )
