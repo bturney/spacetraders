@@ -2931,7 +2931,7 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
         end
       end)
 
-      {:ok, lv, html} = live(conn, ~p"/")
+      {:ok, lv, _html} = live(conn, ~p"/")
 
       # Posture-level actions stay available through progressive disclosure.
       assert has_element?(lv, "[data-posture-actions] button[phx-click=\"dock\"]")

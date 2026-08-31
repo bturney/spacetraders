@@ -2894,8 +2894,6 @@ defmodule SpaceTraders.Fleet do
           "credits" => fresh_preview.credits,
           "antimatter_cost" => fresh_preview.antimatter_cost,
           "cooldown_seconds" => fresh_preview.cooldown_seconds || 0,
-          "fuel_budget" => fresh_preview.fuel_budget,
-          "time_budget_seconds" => fresh_preview.time_budget_seconds,
           "candidates" => fresh_preview.candidates
         }
       })
@@ -2925,13 +2923,7 @@ defmodule SpaceTraders.Fleet do
       canonical_preview_value(reviewed_value(reviewed, :flight_mode)) == fresh.flight_mode and
       integer_reviewed_value(reviewed, :credits) == fresh.credits and
       integer_reviewed_value(reviewed, :antimatter_cost) == fresh.antimatter_cost and
-      integer_reviewed_value(reviewed, :cooldown_seconds) == (fresh.cooldown_seconds || 0) and
-      canonical_preview_value(reviewed_value(reviewed, :fuel_budget)) ==
-        canonical_preview_value(fresh.fuel_budget) and
-      canonical_preview_value(reviewed_value(reviewed, :time_budget_seconds)) ==
-        fresh.time_budget_seconds and
-      canonical_preview_value(reviewed_value(reviewed, :candidates)) ==
-        canonical_preview_value(fresh.candidates)
+      integer_reviewed_value(reviewed, :cooldown_seconds) == (fresh.cooldown_seconds || 0)
   end
 
   defp reviewed_value(map, key), do: Map.get(map, key, Map.get(map, Atom.to_string(key)))
@@ -2978,55 +2970,39 @@ defmodule SpaceTraders.Fleet do
          {:ok, ship} <- owned_ship(agent, ship_symbol),
          {:ok, live_ship} <-
            Agent.handle_game_result(agent, SpaceTraders.API.get_ship(token, ship.symbol)),
-         :ok <- validate_jump_flight_mode(live_ship.nav.flight_mode) do
-      if remote_waypoint?(live_ship.nav.waypoint_symbol, waypoint),
-        do: remote_jump_preview(agent, ship, live_ship, waypoint),
-        else: {:error, :same_system_route}
+         true <- remote_waypoint?(live_ship.nav.waypoint_symbol, waypoint),
+         {:ok, source_system} <- system_from_headquarters(live_ship.nav.waypoint_symbol),
+         {:ok, destination_system} <- system_from_headquarters(waypoint),
+         {:ok, candidates} <- jump_origin_candidates(agent, source_system, waypoint),
+         {:ok, origin_gate} <- jump_origin_for(agent, source_system, waypoint),
+         :ok <-
+           validate_jump_route(
+             agent,
+             source_system,
+             origin_gate,
+             destination_system,
+             waypoint
+           ),
+         {:ok, preflight} <-
+           jump_cost_preflight(agent, source_system, origin_gate) do
+      {:ok,
+       Map.merge(preflight, %{
+         ship_symbol: ship.symbol,
+         current_waypoint: live_ship.nav.waypoint_symbol,
+         source_waypoint: origin_gate,
+         destination_waypoint: waypoint,
+         flight_mode: live_ship.nav.flight_mode,
+         cooldown_seconds: live_ship.cooldown.remaining_seconds,
+         candidates: candidates
+       })}
     else
+      false -> {:error, :same_system_route}
       {:error, _reason} = error -> error
       error -> {:error, error}
     end
   end
 
   def jump_preview(%AgentRecord{}, _ship_symbol, _waypoint), do: {:error, :agent_token_missing}
-
-  defp remote_jump_preview(agent, ship, live_ship, waypoint) do
-    with {:ok, source_system} <- system_from_headquarters(live_ship.nav.waypoint_symbol),
-         {:ok, destination_system} <- system_from_headquarters(waypoint),
-         {:ok, candidates} <- jump_origin_candidates(agent, source_system, waypoint),
-         {:ok, candidates} <-
-           review_jump_candidates(
-             agent,
-             live_ship,
-             source_system,
-             destination_system,
-             waypoint,
-             candidates,
-             live_ship.nav.flight_mode,
-             live_ship.engine
-           ),
-         {:ok, selected} <- viable_jump_origin(candidates) do
-      {:ok,
-       %{
-         ship_symbol: ship.symbol,
-         current_waypoint: live_ship.nav.waypoint_symbol,
-         source_waypoint: selected.waypoint,
-         destination_waypoint: waypoint,
-         flight_mode: live_ship.nav.flight_mode,
-         credits: selected.credits,
-         antimatter_cost: selected.antimatter_cost,
-         cooldown_seconds: selected.cooldown_seconds,
-         fuel_budget: selected.fuel_budget,
-         time_budget_seconds: selected.time_budget_seconds,
-         candidates: candidates
-       }}
-    end
-  end
-
-  defp validate_jump_flight_mode(mode) when mode in ["DRIFT", "STEALTH", "CRUISE", "BURN"],
-    do: :ok
-
-  defp validate_jump_flight_mode(_mode), do: {:error, :flight_mode_unavailable}
 
   @doc "Starts a durable Buy Goods Intent at a specified Market."
   def buy_goods_intent(agent, ship_symbol, waypoint, trade_symbol, units, opts \\ []) do
@@ -4705,272 +4681,25 @@ defmodule SpaceTraders.Fleet do
     end
   end
 
-  defp review_jump_candidates(
-         agent,
-         live_ship,
-         source_system,
-         destination_system,
-         destination,
-         candidates,
-         mode,
-         engine
-       ) do
-    with {:ok, current} <- current_waypoint_coordinates(agent, live_ship) do
-      candidates =
-        Enum.map(candidates, fn candidate ->
-          evaluate_jump_candidate(
-            agent,
-            live_ship,
-            source_system,
-            destination_system,
-            destination,
-            current,
-            candidate,
-            mode,
-            engine
-          )
-        end)
-
-      {:ok, candidates}
-    end
-  end
-
-  defp evaluate_jump_candidate(
-         agent,
-         live_ship,
-         source_system,
-         destination_system,
-         destination,
-         current,
-         candidate,
-         mode,
-         engine
-       ) do
-    budget = navigation_budget(current, candidate, engine, mode)
-
-    candidate =
-      candidate
-      |> Map.put(:fuel_budget, budget_value(budget))
-      |> Map.put(:cooldown_seconds, cooldown_seconds(live_ship))
-      |> Map.put(:credits, nil)
-      |> Map.put(:antimatter_cost, nil)
-      |> Map.put(:time_budget_seconds, nil)
-
-    checks = [
-      candidate_check(candidate, budget, :navigation_budget_unavailable),
-      candidate_check(candidate, jump_posture(live_ship), :orbit_required),
-      candidate_check(candidate, not cooldown_active?(live_ship), :cooldown_active),
-      destination_readiness(agent, destination_system, destination),
-      reverse_connection(agent, destination_system, destination, candidate.waypoint),
-      cost_readiness(agent, source_system, candidate)
-    ]
-
-    Enum.reduce(checks, candidate, fn
-      {:ok, value}, candidate when is_map(value) -> Map.merge(candidate, value)
-      :ok, candidate -> candidate
-      {:error, reason}, candidate -> reject_candidate(candidate, reason)
-    end)
-    |> add_budget_rejection(live_ship, candidate.fuel_budget)
-    |> then(&Map.put(&1, :viable, candidate_viable?(&1)))
-  end
-
-  defp navigation_budget(current, candidate, engine, mode) do
-    if is_number(candidate[:x]) and is_number(candidate[:y]),
-      do: navigation_leg_budget(current, candidate, engine, mode),
-      else: {:error, :navigation_budget_unavailable}
-  end
-
-  defp budget_value({:ok, budget}), do: budget
-  defp budget_value({:error, _reason}), do: nil
-
-  defp candidate_check(_candidate, {:ok, value}, _default), do: {:ok, value}
-  defp candidate_check(_candidate, {:error, reason}, _default), do: {:error, reason}
-  defp candidate_check(_candidate, false, reason), do: {:error, reason}
-  defp candidate_check(_candidate, true, _reason), do: :ok
-  defp candidate_check(_candidate, value, _reason), do: {:ok, value}
-
-  defp jump_posture(%{nav: %{status: "IN_ORBIT"}}), do: true
-  defp jump_posture(_live_ship), do: false
-
-  defp cooldown_seconds(%{cooldown: %{remaining_seconds: seconds}}), do: seconds
-  defp cooldown_seconds(_live_ship), do: 0
-
-  defp destination_readiness(agent, system, symbol) do
-    case waypoint_construction(agent, %{system_symbol: system, symbol: symbol}) do
-      {:ok, %{is_complete: true}} -> :ok
-      {:ok, _} -> {:error, :destination_construction_incomplete}
-      {:error, _} -> {:error, :construction_intelligence_unavailable}
-    end
-  end
-
-  defp reverse_connection(agent, system, destination, source) do
-    case waypoint_jump_gate(agent, %{system_symbol: system, symbol: destination}) do
-      {:ok, %{connections: connections}} ->
-        if source in connections, do: :ok, else: {:error, :reverse_connection_unavailable}
-
-      {:error, _} ->
-        {:error, :jump_gate_intelligence_unavailable}
-    end
-  end
-
-  defp cost_readiness(agent, source_system, candidate) do
-    case jump_cost_preflight(agent, source_system, candidate.waypoint) do
-      {:ok, preflight} -> {:ok, Map.put(preflight, :resource, "available")}
-      {:error, reason} -> {:error, reason}
-    end
-  end
-
-  defp reject_candidate(candidate, reason) do
-    reason =
-      case reason do
-        {:insufficient_credits, _price} -> :insufficient_credits
-        {:jump_gate_incomplete, _waypoint} -> :destination_construction_incomplete
-        {:jump_gate_not_connected, _source, _destination} -> :reverse_connection_unavailable
-        reason when is_atom(reason) -> reason
-        _ -> :route_unavailable
-      end
-
-    candidate =
-      case reason do
-        reason when reason in [:antimatter_unavailable, :insufficient_credits] ->
-          %{candidate | resource: "unavailable"}
-
-        _ ->
-          candidate
-      end
-
-    %{candidate | reasons: candidate.reasons ++ [Atom.to_string(reason)], viable: false}
-  end
-
-  defp candidate_viable?(candidate), do: candidate.reasons == []
-
-  defp current_waypoint_coordinates(agent, live_ship) do
-    with {:ok, system} <- system_from_headquarters(live_ship.nav.waypoint_symbol),
-         {:ok, waypoint} <-
-           authoritative_waypoint(agent, system, live_ship.nav.waypoint_symbol) do
-      {:ok, waypoint}
-    end
-  end
-
-  defp add_budget_rejection(candidate, live_ship, %{fuel: fuel}) do
-    current_fuel = live_ship.fuel && live_ship.fuel.current
-
-    cond do
-      not is_integer(current_fuel) ->
-        add_candidate_reason(candidate, "fuel_unavailable")
-
-      current_fuel < fuel ->
-        add_candidate_reason(candidate, "insufficient_fuel")
-
-      true ->
-        candidate
-    end
-  end
-
-  defp add_budget_rejection(candidate, _live_ship, nil), do: candidate
-
-  defp add_candidate_reason(candidate, reason) do
-    if reason in candidate.reasons,
-      do: %{candidate | viable: false},
-      else: %{candidate | viable: false, reasons: candidate.reasons ++ [reason]}
-  end
-
-  defp authoritative_waypoint(agent, system, symbol) do
-    case SpaceTraders.API.get_waypoint(agent.agent_token, system, symbol) do
-      {:ok, waypoint} ->
-        if is_number(waypoint.x) and is_number(waypoint.y),
-          do: {:ok, waypoint},
-          else: {:error, :navigation_coordinates_unavailable}
-
-      {:error, _reason} ->
-        {:error, :navigation_waypoint_unavailable}
-    end
-  end
-
-  defp navigation_leg_budget(source, destination, _engine, mode) do
-    with distance when is_integer(distance) <-
-           waypoint_distance(source.x, source.y, destination.x, destination.y),
-         fuel when is_integer(fuel) <- flight_mode_fuel(mode, distance) do
-      {:ok, %{mode: mode, distance: distance, fuel: fuel, time: nil}}
-    else
-      _ -> {:error, :navigation_budget_unavailable}
-    end
-  end
-
-  defp waypoint_distance(x1, y1, x2, y2)
-       when is_number(x1) and is_number(y1) and is_number(x2) and is_number(y2),
-       do: round(:math.sqrt(:math.pow(x1 - x2, 2) + :math.pow(y1 - y2, 2)))
-
-  defp waypoint_distance(_, _, _, _), do: nil
-  defp flight_mode_fuel("CRUISE", distance), do: distance
-  defp flight_mode_fuel(_mode, _distance), do: nil
-
   defp jump_origin_for(agent, system, destination) do
     with {:ok, waypoints} <-
            SpaceTraders.API.get_waypoints(agent.agent_token, system, type: "JUMP_GATE"),
-         {:ok, gate} <- jump_origin_from_waypoints(agent, waypoints, destination) do
+         {:ok, gate} <-
+           Enum.find_value(waypoints, fn waypoint ->
+             case waypoint_jump_gate(agent, waypoint) do
+               {:ok, %{connections: connections}} ->
+                 if destination in connections, do: {:ok, waypoint}
+
+               _ ->
+                 nil
+             end
+           end) || {:error, :jump_gate_connection_unavailable} do
       {:ok, gate.symbol}
     end
   end
 
-  defp jump_origin_from_waypoints(agent, waypoints, destination) do
-    viable =
-      Enum.find_value(waypoints, fn waypoint ->
-        with {:ok, %{is_complete: true}} <- waypoint_construction(agent, waypoint),
-             {:ok, %{connections: connections}} <- waypoint_jump_gate(agent, waypoint),
-             true <- destination in connections do
-          {:ok, waypoint}
-        else
-          _ -> nil
-        end
-      end)
-
-    viable ||
-      case Enum.find(waypoints, fn waypoint ->
-             match?({:ok, %{is_complete: false}}, waypoint_construction(agent, waypoint))
-           end) do
-        %{symbol: waypoint} -> {:error, {:jump_gate_incomplete, waypoint}}
-        nil -> {:error, :jump_gate_connection_unavailable}
-      end
-  end
-
-  defp viable_jump_origin(candidates) do
-    case Enum.find(candidates, & &1.viable) do
-      candidate when is_map(candidate) ->
-        {:ok, candidate}
-
-      nil ->
-        case Enum.find(candidates, &("construction_incomplete" in &1.reasons)) do
-          %{waypoint: _waypoint} ->
-            {:error, {:jump_route_candidates, :jump_gate_incomplete, candidates}}
-
-          nil ->
-            cond do
-              Enum.any?(candidates, &("construction_unavailable" in &1.reasons)) ->
-                {:error, {:jump_route_candidates, :construction_unavailable, candidates}}
-
-              Enum.any?(candidates, &("jump_gate_intelligence_unavailable" in &1.reasons)) ->
-                {:error,
-                 {:jump_route_candidates, :jump_gate_intelligence_unavailable, candidates}}
-
-              Enum.any?(candidates, &("navigation_budget_unavailable" in &1.reasons)) ->
-                {:error, {:jump_route_candidates, :navigation_budget_unavailable, candidates}}
-
-              Enum.any?(candidates, &("fuel_unavailable" in &1.reasons)) ->
-                {:error, {:jump_route_candidates, :fuel_unavailable, candidates}}
-
-              Enum.any?(candidates, &("insufficient_fuel" in &1.reasons)) ->
-                {:error, {:jump_route_candidates, :insufficient_fuel, candidates}}
-
-              true ->
-                {:error, {:jump_route_candidates, :jump_gate_connection_unavailable, candidates}}
-            end
-        end
-    end
-  end
-
-  # Keep rejected gates visible so a preview explains why another route was
-  # not selected instead of silently dropping incomplete or unobserved gates.
+  # Keep every discovered gate visible to Manual Control. A connection read can
+  # fail independently, so rejection remains evidence rather than omission.
   defp jump_origin_candidates(agent, system, destination) do
     with {:ok, waypoints} <-
            SpaceTraders.API.get_waypoints(agent.agent_token, system, type: "JUMP_GATE") do
