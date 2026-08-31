@@ -2893,7 +2893,8 @@ defmodule SpaceTraders.Fleet do
       reviewed["flight_mode"] == fresh.flight_mode and
       reviewed["credits"] == to_string(fresh.credits) and
       reviewed["antimatter_cost"] == to_string(fresh.antimatter_cost) and
-      reviewed["cooldown_seconds"] == to_string(fresh.cooldown_seconds || 0)
+      reviewed["cooldown_seconds"] == to_string(fresh.cooldown_seconds || 0) and
+      reviewed["candidates"] == fresh.candidates
   end
 
   @doc "Reads the authoritative prerequisites for a direct jump-gate route without mutation."
@@ -2905,11 +2906,12 @@ defmodule SpaceTraders.Fleet do
          {:ok, ship} <- owned_ship(agent, ship_symbol),
          {:ok, live_ship} <-
            Agent.handle_game_result(agent, SpaceTraders.API.get_ship(token, ship.symbol)),
+         :ok <- validate_jump_flight_mode(live_ship.nav.flight_mode),
          true <- remote_waypoint?(live_ship.nav.waypoint_symbol, waypoint),
          {:ok, source_system} <- system_from_headquarters(live_ship.nav.waypoint_symbol),
          {:ok, destination_system} <- system_from_headquarters(waypoint),
          {:ok, candidates} <- jump_origin_candidates(agent, source_system, waypoint),
-         {:ok, origin_gate} <- jump_origin_for(agent, source_system, waypoint),
+         {:ok, origin_gate} <- viable_jump_origin(candidates),
          :ok <-
            validate_jump_route(
              agent,
@@ -2938,6 +2940,11 @@ defmodule SpaceTraders.Fleet do
   end
 
   def jump_preview(%AgentRecord{}, _ship_symbol, _waypoint), do: {:error, :agent_token_missing}
+
+  defp validate_jump_flight_mode(mode) when mode in ["DRIFT", "STEALTH", "CRUISE", "BURN"],
+    do: :ok
+
+  defp validate_jump_flight_mode(_mode), do: {:error, :flight_mode_unavailable}
 
   @doc "Starts a durable Buy Goods Intent at a specified Market."
   def buy_goods_intent(agent, ship_symbol, waypoint, trade_symbol, units, opts \\ []) do
@@ -4594,17 +4601,47 @@ defmodule SpaceTraders.Fleet do
   defp jump_origin_for(agent, system, destination) do
     with {:ok, waypoints} <-
            SpaceTraders.API.get_waypoints(agent.agent_token, system, type: "JUMP_GATE"),
-         {:ok, gate} <-
-           Enum.find_value(waypoints, fn waypoint ->
-             case waypoint_jump_gate(agent, waypoint) do
-               {:ok, %{connections: connections}} ->
-                 if destination in connections, do: {:ok, waypoint}
-
-               _ ->
-                 nil
-             end
-           end) || {:error, :jump_gate_connection_unavailable} do
+         {:ok, gate} <- jump_origin_from_waypoints(agent, waypoints, destination) do
       {:ok, gate.symbol}
+    end
+  end
+
+  defp jump_origin_from_waypoints(agent, waypoints, destination) do
+    viable =
+      Enum.find_value(waypoints, fn waypoint ->
+        with {:ok, %{is_complete: true}} <- waypoint_construction(agent, waypoint),
+             {:ok, %{connections: connections}} <- waypoint_jump_gate(agent, waypoint),
+             true <- destination in connections do
+          {:ok, waypoint}
+        else
+          _ -> nil
+        end
+      end)
+
+    viable ||
+      case Enum.find(waypoints, fn waypoint ->
+             match?({:ok, %{is_complete: false}}, waypoint_construction(agent, waypoint))
+           end) do
+        %{symbol: waypoint} -> {:error, {:jump_gate_incomplete, waypoint}}
+        nil -> {:error, :jump_gate_connection_unavailable}
+      end
+  end
+
+  defp viable_jump_origin(candidates) do
+    case Enum.find(candidates, & &1.viable) do
+      %{waypoint: waypoint} ->
+        {:ok, waypoint}
+
+      nil ->
+        case Enum.find(candidates, &("construction_incomplete" in &1.reasons)) do
+          %{waypoint: waypoint} ->
+            {:error, {:jump_gate_incomplete, waypoint}}
+
+          nil ->
+            if Enum.any?(candidates, &("jump_gate_intelligence_unavailable" in &1.reasons)),
+              do: {:error, :jump_gate_intelligence_unavailable},
+              else: {:error, :jump_gate_connection_unavailable}
+        end
     end
   end
 
@@ -4653,7 +4690,7 @@ defmodule SpaceTraders.Fleet do
                 intelligence: "unavailable",
                 resource: "unreviewed",
                 viable: false,
-                reasons: [to_string(reason)]
+                reasons: [jump_gate_rejection_reason(reason)]
               }
           end
         end)
@@ -4661,6 +4698,15 @@ defmodule SpaceTraders.Fleet do
       {:ok, candidates}
     end
   end
+
+  defp jump_gate_rejection_reason(%SpaceTraders.API.GameplayError{type: type})
+       when is_atom(type),
+       do: "jump_gate_#{type}"
+
+  defp jump_gate_rejection_reason(%SpaceTraders.API.Error{}),
+    do: "jump_gate_intelligence_unavailable"
+
+  defp jump_gate_rejection_reason(_reason), do: "jump_gate_intelligence_unavailable"
 
   defp dispatch_manual_navigate(agent, intent, live_ship, destination \\ nil) do
     destination = destination || intent.target_waypoint

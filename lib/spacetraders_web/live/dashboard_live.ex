@@ -208,7 +208,12 @@ defmodule SpaceTradersWeb.DashboardLive do
          :ok <- validate_waypoint(waypoint) do
       result =
         if params["confirm_jump"] == "true" do
-          Fleet.confirm_jump_intent(agent, ship_symbol, waypoint, params)
+          Fleet.confirm_jump_intent(
+            agent,
+            ship_symbol,
+            waypoint,
+            Map.get(socket.assigns.jump_previews, ship_symbol, %{})
+          )
         else
           case Fleet.jump_preview(agent, ship_symbol, waypoint) do
             {:ok, preview} -> {:preview, preview}
@@ -3260,7 +3265,12 @@ defmodule SpaceTradersWeb.DashboardLive do
               </li>
             </ul>
           </div>
-          <form phx-submit="navigate" phx-value-symbol={@ship.symbol} class="mt-3">
+          <form
+            id={"confirm-jump-form-#{@ship.symbol}"}
+            phx-submit="navigate"
+            phx-value-symbol={@ship.symbol}
+            class="mt-3"
+          >
             <input type="hidden" name="waypoint_symbol" value={@jump_preview.destination_waypoint} />
             <input type="hidden" name="confirm_jump" value="true" />
             <input type="hidden" name="ship_symbol" value={@jump_preview.ship_symbol} />

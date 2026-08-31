@@ -2782,6 +2782,7 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       assert has_element?(lv, "[data-jump-preview]", "1000 credits for one antimatter charge.")
       assert has_element?(lv, "[data-jump-candidates]", "X1-UX81-G1")
       assert has_element?(lv, "[data-jump-candidates]", "viable")
+      assert has_element?(lv, "form#confirm-jump-form-ORBITALIST-1")
       refute_received {:request, "/v2/my/ships/ORBITALIST-1/jump", "POST"}
     end
 
