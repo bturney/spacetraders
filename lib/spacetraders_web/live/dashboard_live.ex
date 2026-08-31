@@ -3263,28 +3263,38 @@ defmodule SpaceTradersWeb.DashboardLive do
         </form>
         <section
           :if={@jump_preview}
-          class="mt-2 rounded border border-primary/40 bg-primary/10 p-3 text-xs"
+          class={
+             "mt-2 rounded border p-3 text-xs " <>
+               if(@jump_preview[:status] == "blocked",
+                 do: "border-error/40 bg-error/10",
+                 else: "border-primary/40 bg-primary/10")
+           }
           data-jump-preview
         >
-          <p class="font-semibold">Jump route ready for review</p>
-          <dl class="mt-2 grid grid-cols-2 gap-x-3 gap-y-1">
-            <dt class="opacity-70">Selected gates</dt>
-            <dd class="font-mono">
-              {@jump_preview.source_waypoint} to {@jump_preview.destination_waypoint}
-            </dd>
-            <dt class="opacity-70">Flight mode</dt>
-            <dd class="font-mono">{@jump_preview.flight_mode}</dd>
-            <dt class="opacity-70">Credits</dt>
-            <dd class="font-mono">{@jump_preview.credits}</dd>
-            <dt class="opacity-70">Jump cost</dt>
-            <dd>{@jump_preview.antimatter_cost} credits for one antimatter charge.</dd>
-            <dt class="opacity-70">Cooldown</dt>
-            <dd>{@jump_preview.cooldown_seconds || 0} seconds before dispatch.</dd>
-            <dt class="opacity-70">Gate-leg budget</dt>
-            <dd data-jump-leg-budget>
-              {jump_leg_budget_label(@jump_preview)}
-            </dd>
-          </dl>
+          <%= if @jump_preview[:status] == "blocked" do %>
+            <p class="font-semibold">Jump route blocked</p>
+            <p class="mt-1">No candidate passed every prerequisite. Review the evidence below.</p>
+          <% else %>
+            <p class="font-semibold">Jump route ready for review</p>
+            <dl class="mt-2 grid grid-cols-2 gap-x-3 gap-y-1">
+              <dt class="opacity-70">Selected gates</dt>
+              <dd class="font-mono">
+                {@jump_preview.source_waypoint} to {@jump_preview.destination_waypoint}
+              </dd>
+              <dt class="opacity-70">Flight mode</dt>
+              <dd class="font-mono">{@jump_preview.flight_mode}</dd>
+              <dt class="opacity-70">Credits</dt>
+              <dd class="font-mono">{@jump_preview.credits}</dd>
+              <dt class="opacity-70">Jump cost</dt>
+              <dd>{@jump_preview.antimatter_cost} credits for one antimatter charge.</dd>
+              <dt class="opacity-70">Cooldown</dt>
+              <dd>{@jump_preview.cooldown_seconds} seconds before dispatch.</dd>
+              <dt class="opacity-70">Gate-leg budget</dt>
+              <dd data-jump-leg-budget>
+                {jump_leg_budget_label(@jump_preview)}
+              </dd>
+            </dl>
+          <% end %>
           <div :if={@jump_preview[:candidates] != []} class="mt-3" data-jump-candidates>
             <p class="font-semibold">Gate alternatives</p>
             <ul class="mt-1 space-y-1">
@@ -3294,6 +3304,27 @@ defmodule SpaceTradersWeb.DashboardLive do
                 <span :if={not candidate.viable} class="ml-2 opacity-70">
                   rejected: {Enum.join(candidate.reasons, ", ")}
                 </span>
+                <ul :if={not candidate.viable} class="ml-4 mt-1 list-disc opacity-70">
+                  <li :for={reason <- candidate.reasons}>{jump_correction(reason)}</li>
+                </ul>
+                <div class="mt-2 flex flex-wrap gap-2">
+                  <button
+                    :if={"orbit_required" in candidate.reasons}
+                    type="button"
+                    phx-click="orbit"
+                    phx-value-symbol={@ship.symbol}
+                    class="btn btn-secondary btn-xs"
+                    data-jump-corrective-action="orbit"
+                  >Orbit Ship</button>
+                  <button
+                    :if={"insufficient_fuel" in candidate.reasons}
+                    type="button"
+                    phx-click="refuel"
+                    phx-value-symbol={@ship.symbol}
+                    class="btn btn-secondary btn-xs"
+                    data-jump-corrective-action="refuel"
+                  >Refuel Ship</button>
+                </div>
               </li>
             </ul>
           </div>
@@ -4648,8 +4679,6 @@ defmodule SpaceTradersWeb.DashboardLive do
   defp jump_preview_viable?(_), do: false
 
   defp candidate_preview(waypoint, candidates, reason) do
-    fuel_budget = Enum.find_value(candidates, &Map.get(&1, :fuel_budget))
-
     candidates =
       if candidates == [] do
         [
@@ -4673,14 +4702,11 @@ defmodule SpaceTradersWeb.DashboardLive do
       end
 
     %{
+      status: "blocked",
+      reason: format_preview_reason(reason),
       source_waypoint: "unknown",
       destination_waypoint: waypoint,
       flight_mode: "unknown",
-      credits: 0,
-      antimatter_cost: 0,
-      cooldown_seconds: 0,
-      fuel_budget: fuel_budget,
-      time_budget_seconds: fuel_budget && fuel_budget.time,
       candidates: candidates
     }
   end
@@ -4688,6 +4714,42 @@ defmodule SpaceTradersWeb.DashboardLive do
   defp format_preview_reason(nil), do: "route_unavailable"
   defp format_preview_reason(reason) when is_atom(reason), do: Atom.to_string(reason)
   defp format_preview_reason(_reason), do: "route_unavailable"
+
+  defp jump_correction("insufficient_credits"),
+    do: "Acquire credits, then preview the jump again."
+
+  defp jump_correction("antimatter_unavailable"),
+    do: "Buy or report an ANTIMATTER listing at this gate."
+
+  defp jump_correction("insufficient_fuel"), do: "Refuel this Ship, then preview the jump again."
+
+  defp jump_correction("fuel_unavailable"),
+    do: "Refresh Ship fuel data, then preview the jump again."
+
+  defp jump_correction("construction_incomplete"),
+    do: "Inspect and supply construction until the gate is complete."
+
+  defp jump_correction("destination_construction_incomplete"),
+    do: "Inspect and complete the destination gate construction."
+
+  defp jump_correction("construction_intelligence_unavailable"),
+    do: "Inspect construction intelligence, then preview again."
+
+  defp jump_correction("jump_gate_intelligence_unavailable"),
+    do: "Inspect jump-gate connections, then preview again."
+
+  defp jump_correction("navigation_budget_unavailable"),
+    do: "Provide waypoint coordinates or choose a navigable gate."
+
+  defp jump_correction("orbit_required"), do: "Orbit the Ship, then preview the jump again."
+
+  defp jump_correction("cooldown_active"),
+    do: "Wait for the Ship cooldown, then preview the jump again."
+
+  defp jump_correction("reverse_connection_unavailable"),
+    do: "Choose a gate with a confirmed reverse connection."
+
+  defp jump_correction(reason), do: "Resolve #{reason}, then preview the jump again."
 
   defp job_reason(%{
          status: "blocked",
