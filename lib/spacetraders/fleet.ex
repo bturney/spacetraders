@@ -3246,6 +3246,12 @@ defmodule SpaceTraders.Fleet do
       docked?(live_ship) ->
         orbit_for_manual_intent(agent, intent, live_ship)
 
+      arrived_at_intermediate_waypoint?(intent, live_ship) ->
+        case transition_intent(intent, in_flight_action: nil) do
+          {:ok, intent} -> advance_manual_intent(agent, intent, live_ship)
+          :intent_no_longer_owned -> :ok
+        end
+
       remote_waypoint?(live_ship.nav.waypoint_symbol, intent.target_waypoint) ->
         advance_manual_jump_route(agent, intent, live_ship)
 
@@ -4835,6 +4841,14 @@ defmodule SpaceTraders.Fleet do
       _ -> false
     end
   end
+
+  defp arrived_at_intermediate_waypoint?(%ManualIntent{in_flight_action: action}, live_ship)
+       when is_map(action) do
+    action["kind"] == "navigate" and action["waypoint"] == live_ship.nav.waypoint_symbol and
+      not in_transit?(live_ship)
+  end
+
+  defp arrived_at_intermediate_waypoint?(_intent, _live_ship), do: false
 
   defp jump_evidence?(intent) do
     get_in(intent.last_action_result || %{}, ["kind"]) == "jump" or
