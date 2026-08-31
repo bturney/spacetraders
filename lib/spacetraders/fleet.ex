@@ -2872,23 +2872,24 @@ defmodule SpaceTraders.Fleet do
          {:ok, live_ship} <-
            Agent.handle_game_result(agent, SpaceTraders.API.get_ship(token, ship.symbol)),
          true <- remote_waypoint?(live_ship.nav.waypoint_symbol, waypoint),
-         true <- live_ship.nav.status == "IN_ORBIT" || {:error, :ship_not_in_orbit},
          {:ok, source_system} <- system_from_headquarters(live_ship.nav.waypoint_symbol),
          {:ok, destination_system} <- system_from_headquarters(waypoint),
+         {:ok, origin_gate} <- jump_origin_for(agent, source_system, waypoint),
          :ok <-
            validate_jump_route(
              agent,
              source_system,
-             live_ship.nav.waypoint_symbol,
+             origin_gate,
              destination_system,
              waypoint
            ),
          {:ok, preflight} <-
-           jump_cost_preflight(agent, source_system, live_ship.nav.waypoint_symbol) do
+           jump_cost_preflight(agent, source_system, origin_gate) do
       {:ok,
        Map.merge(preflight, %{
          ship_symbol: ship.symbol,
-         source_waypoint: live_ship.nav.waypoint_symbol,
+         current_waypoint: live_ship.nav.waypoint_symbol,
+         source_waypoint: origin_gate,
          destination_waypoint: waypoint,
          flight_mode: live_ship.nav.flight_mode,
          cooldown_seconds: live_ship.cooldown.remaining_seconds

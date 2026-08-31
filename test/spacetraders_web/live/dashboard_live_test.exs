@@ -1341,7 +1341,15 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
             })
 
           {"/v2/systems/X1-UX81/waypoints", "GET"} ->
-            Req.Test.json(conn, %{"data" => []})
+            Req.Test.json(conn, %{
+              "data" => [
+                %{
+                  "symbol" => "X1-UX81-G1",
+                  "systemSymbol" => "X1-UX81",
+                  "type" => "JUMP_GATE"
+                }
+              ]
+            })
         end
       end)
 
@@ -2751,7 +2759,15 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
             })
 
           {"/v2/systems/X1-UX81/waypoints", "GET"} ->
-            Req.Test.json(conn, %{"data" => []})
+            Req.Test.json(conn, %{
+              "data" => [
+                %{
+                  "symbol" => "X1-UX81-G1",
+                  "systemSymbol" => "X1-UX81",
+                  "type" => "JUMP_GATE"
+                }
+              ]
+            })
         end
       end)
 
