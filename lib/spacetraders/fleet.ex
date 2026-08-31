@@ -4936,6 +4936,7 @@ defmodule SpaceTraders.Fleet do
   defp dispatch_manual_warp(agent, intent, live_ship) do
     with :ok <- reviewed_warp_flight_mode(intent, live_ship.nav.flight_mode),
          {:ok, _module} <- installed_warp_drive(live_ship),
+         true <- live_ship.nav.flight_mode != "BURN" || {:error, :warp_burn_fuel_budget_unknown},
          true <- not fuel_empty?(live_ship) || {:error, :insufficient_fuel},
          {:ok, intent} <-
            claim_intent_action(intent, %{
@@ -7125,8 +7126,11 @@ defmodule SpaceTraders.Fleet do
         {:ok, agent_id, agent_token} ->
           ShipServer.ensure_started(ship_symbol, agent_id, agent_token)
 
-          unless ship_symbol in timeline_symbols do
+          unless manual_intent_waiting_on_timeline?(ship_symbol) do
             recover_manual_intent_on_boot(ship_symbol, agent_id, agent_token)
+          end
+
+          unless ship_symbol in timeline_symbols do
             recover_job_on_boot(ship_symbol, agent_id, agent_token)
           end
 
@@ -7138,6 +7142,16 @@ defmodule SpaceTraders.Fleet do
     end)
 
     :ok
+  end
+
+  defp manual_intent_waiting_on_timeline?(ship_symbol) do
+    with %Ship{} = ship <- Repo.get_by(Ship, symbol: ship_symbol),
+         %ManualIntent{} = intent <- unfinished_manual_intent(ship.id) do
+      Timeline.pending_events(:ship, ship_symbol)
+      |> Enum.any?(&(&1.payload["intent_id"] == intent.id))
+    else
+      _ -> false
+    end
   end
 
   @doc "Reconciles a persisted Miner Job's in-flight action after a process restart."

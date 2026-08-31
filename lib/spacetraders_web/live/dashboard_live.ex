@@ -226,7 +226,7 @@ defmodule SpaceTradersWeb.DashboardLive do
             {:error, {:jump_route_candidates, reason, candidates} = route_reason} ->
               case Fleet.warp_preview(agent, ship_symbol, waypoint) do
                 {:ok, preview} ->
-                  {:preview, Map.put(preview, :jump_candidates, candidates)}
+                  {:preview, Map.put(preview, :candidates, candidates)}
 
                 {:error, _warp_reason} ->
                   case Fleet.block_jump_preview(agent, ship_symbol, waypoint, route_reason) do
