@@ -3246,7 +3246,7 @@ defmodule SpaceTraders.Fleet do
         orbit_for_manual_intent(agent, intent, live_ship)
 
       remote_waypoint?(live_ship.nav.waypoint_symbol, intent.target_waypoint) ->
-        dispatch_manual_jump(agent, intent, live_ship)
+        advance_manual_jump_route(agent, intent, live_ship)
 
       fuel_empty?(live_ship) ->
         block_manual_intent(intent, {:insufficient_fuel, intent.target_waypoint})
@@ -4535,19 +4535,51 @@ defmodule SpaceTraders.Fleet do
     end
   end
 
-  defp dispatch_manual_navigate(agent, intent, live_ship) do
+  defp advance_manual_jump_route(agent, intent, live_ship) do
+    with {:ok, source_system} <- system_from_headquarters(live_ship.nav.waypoint_symbol),
+         {:ok, origin_gate} <- jump_origin_for(agent, source_system, intent.target_waypoint) do
+      if live_ship.nav.waypoint_symbol == origin_gate do
+        dispatch_manual_jump(agent, intent, live_ship)
+      else
+        dispatch_manual_navigate(agent, intent, live_ship, origin_gate)
+      end
+    else
+      {:error, reason} -> block_manual_intent(intent, reason)
+    end
+  end
+
+  defp jump_origin_for(agent, system, destination) do
+    with {:ok, waypoints} <-
+           SpaceTraders.API.get_waypoints(agent.agent_token, system, type: "JUMP_GATE"),
+         {:ok, gate} <-
+           Enum.find_value(waypoints, fn waypoint ->
+             case waypoint_jump_gate(agent, waypoint) do
+               {:ok, %{connections: connections}} ->
+                 if destination in connections, do: {:ok, waypoint}
+
+               _ ->
+                 nil
+             end
+           end) || {:error, :jump_gate_connection_unavailable} do
+      {:ok, gate.symbol}
+    end
+  end
+
+  defp dispatch_manual_navigate(agent, intent, live_ship, destination \\ nil) do
+    destination = destination || intent.target_waypoint
+
     with {:ok, intent} <-
            claim_intent_action(intent, %{
              "kind" => "navigate",
-             "waypoint" => intent.target_waypoint,
-             "expected" => %{"status" => "IN_TRANSIT", "destination" => intent.target_waypoint}
+             "waypoint" => destination,
+             "expected" => %{"status" => "IN_TRANSIT", "destination" => destination}
            }) do
       case Agent.handle_game_result(
              agent,
              SpaceTraders.API.navigate_ship(
                agent.agent_token,
                live_ship.symbol,
-               intent.target_waypoint
+               destination
              )
            ) do
         {:ok, result} ->
@@ -4563,7 +4595,7 @@ defmodule SpaceTraders.Fleet do
                      status: "waiting",
                      last_action_result: %{
                        "kind" => "navigate",
-                       "waypoint" => intent.target_waypoint,
+                       "waypoint" => destination,
                        "status" => result.nav.status,
                        "destination" => result.nav.route.destination.symbol
                      }
@@ -4575,8 +4607,8 @@ defmodule SpaceTraders.Fleet do
                     agent,
                     ship,
                     "manual_intent_navigate",
-                    "#{live_ship.symbol} navigating to #{intent.target_waypoint}",
-                    %{"waypoint" => intent.target_waypoint}
+                    "#{live_ship.symbol} navigating to #{destination}",
+                    %{"waypoint" => destination}
                   )
 
                   {:ok, intent}

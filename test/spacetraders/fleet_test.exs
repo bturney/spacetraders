@@ -4300,6 +4300,17 @@ defmodule SpaceTraders.FleetTest do
           {"/v2/my/agent", "GET"} ->
             Req.Test.json(conn, %{"data" => %{"symbol" => agent.symbol, "credits" => 42_000}})
 
+          {"/v2/systems/X1-UX81/waypoints", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => [
+                %{
+                  "symbol" => "X1-UX81-G1",
+                  "systemSymbol" => "X1-UX81",
+                  "type" => "JUMP_GATE"
+                }
+              ]
+            })
+
           {"/v2/systems/X1-UX81/waypoints/X1-UX81-G1/market", "GET"} ->
             Req.Test.json(conn, %{
               "data" => %{
