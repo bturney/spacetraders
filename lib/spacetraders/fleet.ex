@@ -2862,6 +2862,24 @@ defmodule SpaceTraders.Fleet do
   def navigate_intent(%AgentRecord{}, _ship_symbol, _waypoint),
     do: {:error, :agent_token_missing}
 
+  @doc "Dispatches a reviewed jump route only when its fresh authority still matches the preview."
+  def confirm_jump_intent(agent, ship_symbol, waypoint, preview) when is_map(preview) do
+    with {:ok, fresh_preview} <- jump_preview(agent, ship_symbol, waypoint),
+         true <- reviewed_jump_matches?(preview, fresh_preview) || {:error, :jump_preview_stale} do
+      navigate_intent(agent, ship_symbol, waypoint)
+    else
+      {:error, _reason} = error -> error
+      false -> {:error, :jump_preview_stale}
+    end
+  end
+
+  defp reviewed_jump_matches?(reviewed, fresh) do
+    reviewed["source_waypoint"] == fresh.source_waypoint and
+      reviewed["destination_waypoint"] == fresh.destination_waypoint and
+      reviewed["flight_mode"] == fresh.flight_mode and
+      reviewed["antimatter_cost"] == to_string(fresh.antimatter_cost)
+  end
+
   @doc "Reads the authoritative prerequisites for a direct jump-gate route without mutation."
   def jump_preview(%AgentRecord{agent_token: token} = agent, ship_symbol, waypoint)
       when is_binary(token) and token != "" do
@@ -3243,14 +3261,14 @@ defmodule SpaceTraders.Fleet do
       cooldown_active?(live_ship) ->
         wait_for_manual_cooldown(agent, intent, live_ship)
 
-      docked?(live_ship) ->
-        orbit_for_manual_intent(agent, intent, live_ship)
-
       arrived_at_intermediate_waypoint?(intent, live_ship) ->
         case transition_intent(intent, in_flight_action: nil) do
           {:ok, intent} -> advance_manual_intent(agent, intent, live_ship)
           :intent_no_longer_owned -> :ok
         end
+
+      docked?(live_ship) ->
+        orbit_for_manual_intent(agent, intent, live_ship)
 
       remote_waypoint?(live_ship.nav.waypoint_symbol, intent.target_waypoint) ->
         advance_manual_jump_route(agent, intent, live_ship)
