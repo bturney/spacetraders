@@ -3252,6 +3252,10 @@ defmodule SpaceTradersWeb.DashboardLive do
             <dd>{@jump_preview.antimatter_cost} credits for one antimatter charge.</dd>
             <dt class="opacity-70">Cooldown</dt>
             <dd>{@jump_preview.cooldown_seconds || 0} seconds before dispatch.</dd>
+            <dt class="opacity-70">Gate-leg budget</dt>
+            <dd data-jump-leg-budget>
+              {jump_leg_budget_label(@jump_preview)}
+            </dd>
           </dl>
           <div :if={@jump_preview[:candidates] != []} class="mt-3" data-jump-candidates>
             <p class="font-semibold">Gate alternatives</p>
@@ -4600,6 +4604,11 @@ defmodule SpaceTradersWeb.DashboardLive do
 
   defp format_terminal_value(value) when value in [nil, %{}], do: "None recorded"
   defp format_terminal_value(value), do: inspect(value)
+
+  defp jump_leg_budget_label(%{fuel_budget: %{mode: mode, fuel: fuel}, time_budget_seconds: time}),
+    do: "#{mode}: #{fuel} fuel, #{time}s"
+
+  defp jump_leg_budget_label(_preview), do: "Unavailable from waypoint coordinates"
 
   defp job_reason(%{
          status: "blocked",

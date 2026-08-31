@@ -2702,6 +2702,7 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
     test "previews a remote jump before it dispatches", %{conn: conn, operator: operator} do
       agent = agent_fixture(operator)
       test_pid = self()
+      {:ok, jump_state} = Agent.start_link(fn -> false end)
 
       Req.Test.stub(SpaceTraders.API, fn conn ->
         send(test_pid, {:request, conn.request_path, conn.method})
@@ -2723,10 +2724,13 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
             })
 
           {"/v2/my/ships/ORBITALIST-1", "GET"} ->
+            destination = if Agent.get(jump_state, & &1), do: "X2-UX81-G1", else: "X1-UX81-G1"
+            system = if destination == "X2-UX81-G1", do: "X2-UX81", else: "X1-UX81"
+
             Req.Test.json(conn, %{
               "data" =>
                 ship_body("ORBITALIST-1", %{
-                  "nav" => nav_body("IN_ORBIT", destination: "X1-UX81-G1")
+                  "nav" => nav_body("IN_ORBIT", destination: destination, systemSymbol: system)
                 })
             })
 
@@ -2768,6 +2772,19 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
                 }
               ]
             })
+
+          {"/v2/my/ships/ORBITALIST-1/jump", "POST"} ->
+            send(test_pid, :jump_dispatched)
+            Agent.update(jump_state, fn _ -> true end)
+
+            Req.Test.json(conn, %{
+              "data" => %{
+                "nav" => nav_body("IN_ORBIT", destination: "X2-UX81-G1", systemSymbol: "X2-UX81"),
+                "cooldown" => %{"shipSymbol" => "ORBITALIST-1", "remainingSeconds" => 60},
+                "transaction" => %{"pricePerUnit" => 1_000, "totalPrice" => 1_000},
+                "agent" => %{"symbol" => agent.symbol, "credits" => 41_000}
+              }
+            })
         end
       end)
 
@@ -2784,6 +2801,12 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       assert has_element?(lv, "[data-jump-candidates]", "viable")
       assert has_element?(lv, "form#confirm-jump-form-ORBITALIST-1")
       refute_received {:request, "/v2/my/ships/ORBITALIST-1/jump", "POST"}
+
+      lv
+      |> element("form#confirm-jump-form-ORBITALIST-1")
+      |> render_submit()
+
+      assert_received :jump_dispatched
     end
 
     test "keeps outcome-level Navigate available during a live cooldown and waits it out", %{

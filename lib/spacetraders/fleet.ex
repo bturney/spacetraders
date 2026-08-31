@@ -2847,11 +2847,29 @@ defmodule SpaceTraders.Fleet do
   """
   def navigate_intent(%AgentRecord{agent_token: agent_token} = agent, ship_symbol, waypoint)
       when is_binary(agent_token) and agent_token != "" do
+    navigate_intent(agent, ship_symbol, waypoint, %{})
+  end
+
+  def navigate_intent(%AgentRecord{}, _ship_symbol, _waypoint),
+    do: {:error, :agent_token_missing}
+
+  def navigate_intent(
+        %AgentRecord{agent_token: agent_token} = agent,
+        ship_symbol,
+        waypoint,
+        parameters
+      )
+      when is_binary(agent_token) and agent_token != "" and is_map(parameters) do
     waypoint = String.trim(waypoint || "")
 
     with :ok <- validate_intent_waypoint(waypoint),
          {:ok, ship} <- owned_ship(agent, ship_symbol),
-         {:ok, intent} <- replace_manual_intent(ship, waypoint) do
+         {:ok, intent} <-
+           replace_manual_intent(ship, %{
+             type: "navigate",
+             target_waypoint: waypoint,
+             parameters: parameters
+           }) do
       reconcile_manual_intent(agent, intent)
     else
       {:error, %Ecto.Changeset{}} -> {:error, :manual_intent_conflict}
@@ -2859,14 +2877,21 @@ defmodule SpaceTraders.Fleet do
     end
   end
 
-  def navigate_intent(%AgentRecord{}, _ship_symbol, _waypoint),
+  def navigate_intent(%AgentRecord{}, _ship_symbol, _waypoint, _parameters),
     do: {:error, :agent_token_missing}
 
   @doc "Dispatches a reviewed jump route only when its fresh authority still matches the preview."
   def confirm_jump_intent(agent, ship_symbol, waypoint, preview) when is_map(preview) do
     with {:ok, fresh_preview} <- jump_preview(agent, ship_symbol, waypoint),
          true <- reviewed_jump_matches?(preview, fresh_preview) || {:error, :jump_preview_stale} do
-      navigate_intent(agent, ship_symbol, waypoint)
+      navigate_intent(agent, ship_symbol, waypoint, %{
+        "reviewed_jump" => %{
+          "source_waypoint" => fresh_preview.source_waypoint,
+          "flight_mode" => fresh_preview.flight_mode,
+          "fuel_budget" => fresh_preview.fuel_budget,
+          "time_budget_seconds" => fresh_preview.time_budget_seconds
+        }
+      })
     else
       {:error, _reason} = error -> error
       false -> {:error, :jump_preview_stale}
@@ -2886,15 +2911,27 @@ defmodule SpaceTraders.Fleet do
   end
 
   defp reviewed_jump_matches?(reviewed, fresh) do
-    reviewed["ship_symbol"] == fresh.ship_symbol and
-      reviewed["current_waypoint"] == fresh.current_waypoint and
-      reviewed["source_waypoint"] == fresh.source_waypoint and
-      reviewed["destination_waypoint"] == fresh.destination_waypoint and
-      reviewed["flight_mode"] == fresh.flight_mode and
-      reviewed["credits"] == to_string(fresh.credits) and
-      reviewed["antimatter_cost"] == to_string(fresh.antimatter_cost) and
-      reviewed["cooldown_seconds"] == to_string(fresh.cooldown_seconds || 0) and
-      reviewed["candidates"] == fresh.candidates
+    reviewed_value(reviewed, :ship_symbol) == fresh.ship_symbol and
+      reviewed_value(reviewed, :current_waypoint) == fresh.current_waypoint and
+      reviewed_value(reviewed, :source_waypoint) == fresh.source_waypoint and
+      reviewed_value(reviewed, :destination_waypoint) == fresh.destination_waypoint and
+      reviewed_value(reviewed, :flight_mode) == fresh.flight_mode and
+      integer_reviewed_value(reviewed, :credits) == fresh.credits and
+      integer_reviewed_value(reviewed, :antimatter_cost) == fresh.antimatter_cost and
+      integer_reviewed_value(reviewed, :cooldown_seconds) == (fresh.cooldown_seconds || 0) and
+      reviewed_value(reviewed, :fuel_budget) == fresh.fuel_budget and
+      reviewed_value(reviewed, :time_budget_seconds) == fresh.time_budget_seconds and
+      reviewed_value(reviewed, :candidates) == fresh.candidates
+  end
+
+  defp reviewed_value(map, key), do: Map.get(map, key, Map.get(map, Atom.to_string(key)))
+
+  defp integer_reviewed_value(map, key) do
+    case reviewed_value(map, key) do
+      value when is_integer(value) -> value
+      value when is_binary(value) -> String.to_integer(value)
+      _ -> nil
+    end
   end
 
   @doc "Reads the authoritative prerequisites for a direct jump-gate route without mutation."
@@ -2922,16 +2959,36 @@ defmodule SpaceTraders.Fleet do
            ),
          {:ok, preflight} <-
            jump_cost_preflight(agent, source_system, origin_gate) do
-      {:ok,
-       Map.merge(preflight, %{
-         ship_symbol: ship.symbol,
-         current_waypoint: live_ship.nav.waypoint_symbol,
-         source_waypoint: origin_gate,
-         destination_waypoint: waypoint,
-         flight_mode: live_ship.nav.flight_mode,
-         cooldown_seconds: live_ship.cooldown.remaining_seconds,
-         candidates: candidates
-       })}
+      leg_budget =
+        jump_leg_budget(
+          live_ship.nav.waypoint_symbol,
+          origin_gate,
+          candidates,
+          live_ship.nav.flight_mode
+        )
+
+      if insufficient_jump_fuel?(live_ship, leg_budget) do
+        {:error, {:insufficient_fuel, leg_budget.fuel}}
+      else
+        {:ok,
+         Map.merge(preflight, %{
+           ship_symbol: ship.symbol,
+           current_waypoint: live_ship.nav.waypoint_symbol,
+           source_waypoint: origin_gate,
+           destination_waypoint: waypoint,
+           flight_mode: live_ship.nav.flight_mode,
+           cooldown_seconds: live_ship.cooldown.remaining_seconds,
+           fuel_budget: leg_budget,
+           time_budget_seconds:
+             jump_leg_time_budget(
+               live_ship.nav.waypoint_symbol,
+               origin_gate,
+               candidates,
+               live_ship.nav.flight_mode
+             ),
+           candidates: candidates
+         })}
+      end
     else
       false -> {:error, :same_system_route}
       {:error, _reason} = error -> error
@@ -4587,7 +4644,7 @@ defmodule SpaceTraders.Fleet do
 
   defp advance_manual_jump_route(agent, intent, live_ship) do
     with {:ok, source_system} <- system_from_headquarters(live_ship.nav.waypoint_symbol),
-         {:ok, origin_gate} <- jump_origin_for(agent, source_system, intent.target_waypoint) do
+         {:ok, origin_gate} <- jump_origin_for_intent(agent, source_system, intent) do
       if live_ship.nav.waypoint_symbol == origin_gate do
         dispatch_manual_jump(agent, intent, live_ship)
       else
@@ -4597,6 +4654,68 @@ defmodule SpaceTraders.Fleet do
       {:error, reason} -> block_manual_intent(intent, reason)
     end
   end
+
+  defp jump_origin_for_intent(
+         agent,
+         source_system,
+         %ManualIntent{parameters: parameters} = intent
+       ) do
+    case get_in(parameters, ["reviewed_jump", "source_waypoint"]) do
+      source when is_binary(source) ->
+        with {:ok, destination_system} <- system_from_headquarters(intent.target_waypoint),
+             :ok <-
+               validate_jump_route(
+                 agent,
+                 source_system,
+                 source,
+                 destination_system,
+                 intent.target_waypoint
+               ),
+             {:ok, _} <- jump_cost_preflight(agent, source_system, source) do
+          {:ok, source}
+        end
+
+      _ ->
+        jump_origin_for(agent, source_system, intent.target_waypoint)
+    end
+  end
+
+  defp jump_leg_budget(current, origin, candidates, mode) do
+    with %{x: x1, y: y1} <- Enum.find(candidates, &(&1.waypoint == current)),
+         %{x: x2, y: y2} <- Enum.find(candidates, &(&1.waypoint == origin)),
+         distance when is_number(distance) <- waypoint_distance(x1, y1, x2, y2) do
+      %{mode: mode, distance: distance, fuel: flight_mode_fuel(mode, distance)}
+    else
+      _ -> nil
+    end
+  end
+
+  defp jump_leg_time_budget(current, origin, candidates, mode) do
+    case jump_leg_budget(current, origin, candidates, mode) do
+      %{distance: distance} -> round(distance * flight_mode_time_factor(mode))
+      _ -> nil
+    end
+  end
+
+  defp insufficient_jump_fuel?(%{fuel: %{current: current}}, %{fuel: needed})
+       when is_integer(current) and is_integer(needed),
+       do: current < needed
+
+  defp insufficient_jump_fuel?(_, _), do: false
+
+  defp waypoint_distance(x1, y1, x2, y2)
+       when is_number(x1) and is_number(y1) and is_number(x2) and is_number(y2),
+       do: :math.sqrt(:math.pow(x1 - x2, 2) + :math.pow(y1 - y2, 2)) |> Float.ceil() |> trunc()
+
+  defp waypoint_distance(_, _, _, _), do: nil
+  defp flight_mode_fuel("DRIFT", _distance), do: 0
+  defp flight_mode_fuel("STEALTH", distance), do: distance
+  defp flight_mode_fuel("CRUISE", distance), do: distance * 2
+  defp flight_mode_fuel("BURN", distance), do: distance * 3
+  defp flight_mode_time_factor("DRIFT"), do: 2
+  defp flight_mode_time_factor("STEALTH"), do: 1.5
+  defp flight_mode_time_factor("CRUISE"), do: 1
+  defp flight_mode_time_factor("BURN"), do: 0.5
 
   defp jump_origin_for(agent, system, destination) do
     with {:ok, waypoints} <-
@@ -4638,9 +4757,17 @@ defmodule SpaceTraders.Fleet do
             {:error, {:jump_gate_incomplete, waypoint}}
 
           nil ->
-            if Enum.any?(candidates, &("jump_gate_intelligence_unavailable" in &1.reasons)),
-              do: {:error, :jump_gate_intelligence_unavailable},
-              else: {:error, :jump_gate_connection_unavailable}
+            cond do
+              Enum.any?(candidates, &("construction_unavailable" in &1.reasons)) ->
+                {:error, {:jump_route_candidates, :construction_unavailable, candidates}}
+
+              Enum.any?(candidates, &("jump_gate_intelligence_unavailable" in &1.reasons)) ->
+                {:error,
+                 {:jump_route_candidates, :jump_gate_intelligence_unavailable, candidates}}
+
+              true ->
+                {:error, {:jump_route_candidates, :jump_gate_connection_unavailable, candidates}}
+            end
         end
     end
   end
@@ -4656,7 +4783,7 @@ defmodule SpaceTraders.Fleet do
             case waypoint_construction(agent, waypoint) do
               {:ok, %{is_complete: true}} -> "complete"
               {:ok, _} -> "incomplete"
-              {:error, _} -> "unknown"
+              {:error, _} -> "unavailable"
             end
 
           case waypoint_jump_gate(agent, waypoint) do
@@ -4666,14 +4793,17 @@ defmodule SpaceTraders.Fleet do
               reasons =
                 []
                 |> then(
-                  if construction == "complete",
+                  if(construction == "complete",
                     do: & &1,
                     else: &["construction_#{construction}" | &1]
+                  )
                 )
                 |> then(if(connected?, do: & &1, else: &["not_connected" | &1]))
 
               %{
                 waypoint: waypoint.symbol,
+                x: waypoint.x,
+                y: waypoint.y,
                 construction: construction,
                 connection: if(connected?, do: "connected", else: "not_connected"),
                 intelligence: "available",
@@ -4779,6 +4909,7 @@ defmodule SpaceTraders.Fleet do
   # is what proves the requested off-System arrival after a restart or timeout.
   defp dispatch_manual_jump(agent, intent, live_ship) do
     with {:ok, source_system} <- system_from_headquarters(live_ship.nav.waypoint_symbol),
+         :ok <- reviewed_jump_flight_mode(intent, live_ship.nav.flight_mode),
          {:ok, destination_system} <- system_from_headquarters(intent.target_waypoint),
          :ok <-
            validate_jump_route(
@@ -4827,6 +4958,14 @@ defmodule SpaceTraders.Fleet do
       end
     else
       {:error, reason} -> block_manual_intent(intent, reason)
+    end
+  end
+
+  defp reviewed_jump_flight_mode(%ManualIntent{parameters: parameters}, current_mode) do
+    case get_in(parameters, ["reviewed_jump", "flight_mode"]) do
+      nil -> :ok
+      ^current_mode -> :ok
+      _ -> {:error, :jump_preview_stale}
     end
   end
 
@@ -7324,12 +7463,16 @@ defmodule SpaceTraders.Fleet do
   defp blocker_summary({:jump_gate_not_connected, source, destination}),
     do: "Jump Gate #{source} is not connected to #{destination}."
 
+  defp blocker_summary({:jump_route_candidates, reason, _candidates}),
+    do: "Jump route blocked: #{blocker_reason(reason)}."
+
   defp blocker_summary(:ambiguous_jump_evidence),
     do: "The jump response is ambiguous; authoritative Ship state did not confirm arrival."
 
   defp blocker_summary(reason), do: "Miner Job cannot progress: #{blocker_reason(reason)}."
 
   defp blocker_reason(reason) when is_atom(reason), do: Atom.to_string(reason)
+  defp blocker_reason({:jump_route_candidates, reason, _candidates}), do: blocker_reason(reason)
   defp blocker_reason(reason) when is_tuple(reason), do: reason |> elem(0) |> blocker_reason()
   defp blocker_reason(%{__struct__: module}), do: module |> Module.split() |> List.last()
 
