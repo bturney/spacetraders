@@ -2864,7 +2864,8 @@ defmodule SpaceTraders.Fleet do
 
   @doc "Dispatches a reviewed jump route only when its fresh authority still matches the preview."
   def confirm_jump_intent(agent, ship_symbol, waypoint, preview) when is_map(preview) do
-    with {:ok, fresh_preview} <- jump_preview(agent, ship_symbol, waypoint),
+    with {:ok, fresh_preview} <-
+           jump_preview(agent, ship_symbol, waypoint, preview["flight_mode"]),
          true <- reviewed_jump_matches?(preview, fresh_preview) || {:error, :jump_preview_stale} do
       navigate_intent(agent, ship_symbol, waypoint)
     else
@@ -2886,14 +2887,21 @@ defmodule SpaceTraders.Fleet do
   end
 
   defp reviewed_jump_matches?(reviewed, fresh) do
-    reviewed["source_waypoint"] == fresh.source_waypoint and
+    reviewed["ship_symbol"] == fresh.ship_symbol and
+      reviewed["current_waypoint"] == fresh.current_waypoint and
+      reviewed["source_waypoint"] == fresh.source_waypoint and
       reviewed["destination_waypoint"] == fresh.destination_waypoint and
       reviewed["flight_mode"] == fresh.flight_mode and
-      reviewed["antimatter_cost"] == to_string(fresh.antimatter_cost)
+      reviewed["credits"] == to_string(fresh.credits) and
+      reviewed["antimatter_cost"] == to_string(fresh.antimatter_cost) and
+      reviewed["cooldown_seconds"] == to_string(fresh.cooldown_seconds || 0)
   end
 
   @doc "Reads the authoritative prerequisites for a direct jump-gate route without mutation."
-  def jump_preview(%AgentRecord{agent_token: token} = agent, ship_symbol, waypoint)
+  def jump_preview(agent, ship_symbol, waypoint),
+    do: jump_preview(agent, ship_symbol, waypoint, nil)
+
+  def jump_preview(%AgentRecord{agent_token: token} = agent, ship_symbol, waypoint, flight_mode)
       when is_binary(token) and token != "" do
     waypoint = String.trim(waypoint || "")
 
@@ -2901,6 +2909,7 @@ defmodule SpaceTraders.Fleet do
          {:ok, ship} <- owned_ship(agent, ship_symbol),
          {:ok, live_ship} <-
            Agent.handle_game_result(agent, SpaceTraders.API.get_ship(token, ship.symbol)),
+         :ok <- reviewed_flight_mode(live_ship.nav.flight_mode, flight_mode),
          true <- remote_waypoint?(live_ship.nav.waypoint_symbol, waypoint),
          {:ok, source_system} <- system_from_headquarters(live_ship.nav.waypoint_symbol),
          {:ok, destination_system} <- system_from_headquarters(waypoint),
@@ -2931,7 +2940,18 @@ defmodule SpaceTraders.Fleet do
     end
   end
 
-  def jump_preview(%AgentRecord{}, _ship_symbol, _waypoint), do: {:error, :agent_token_missing}
+  def jump_preview(%AgentRecord{}, _ship_symbol, _waypoint, _flight_mode),
+    do: {:error, :agent_token_missing}
+
+  defp reviewed_flight_mode(live_mode, nil)
+       when live_mode in ["DRIFT", "STEALTH", "CRUISE", "BURN"],
+       do: :ok
+
+  defp reviewed_flight_mode(live_mode, live_mode)
+       when live_mode in ["DRIFT", "STEALTH", "CRUISE", "BURN"],
+       do: :ok
+
+  defp reviewed_flight_mode(_live_mode, _selected_mode), do: {:error, :jump_flight_mode_stale}
 
   @doc "Starts a durable Buy Goods Intent at a specified Market."
   def buy_goods_intent(agent, ship_symbol, waypoint, trade_symbol, units, opts \\ []) do

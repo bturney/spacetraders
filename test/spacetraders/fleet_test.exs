@@ -4276,6 +4276,86 @@ defmodule SpaceTraders.FleetTest do
   end
 
   describe "navigate_intent/3" do
+    test "rejects a jump confirmation when the reviewed Ship location changed" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+      {:ok, state} = Agent.start_link(fn -> %{waypoint: "X1-UX81-G1"} end)
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case {conn.request_path, conn.method} do
+          {"/v2/my/ships/FLEET-SHIP", "GET"} ->
+            waypoint = Agent.get(state, & &1.waypoint)
+
+            Req.Test.json(conn, %{
+              "data" =>
+                ship_body("FLEET-SHIP", %{
+                  "nav" => nav_body("IN_ORBIT", destination: waypoint)
+                })
+            })
+
+          {"/v2/my/agent", "GET"} ->
+            Req.Test.json(conn, %{"data" => %{"symbol" => agent.symbol, "credits" => 42_000}})
+
+          {"/v2/systems/X1-UX81/waypoints", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => [
+                %{
+                  "symbol" => "X1-UX81-G1",
+                  "systemSymbol" => "X1-UX81",
+                  "type" => "JUMP_GATE"
+                }
+              ]
+            })
+
+          {"/v2/systems/X1-UX81/waypoints/X1-UX81-G1/construction", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => %{"symbol" => "X1-UX81-G1", "isComplete" => true, "materials" => []}
+            })
+
+          {"/v2/systems/X1-UX81/waypoints/X1-UX81-G1/jump-gate", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => %{"symbol" => "X1-UX81-G1", "connections" => ["X2-UX81-G1"]}
+            })
+
+          {"/v2/systems/X2-UX81/waypoints/X2-UX81-G1/construction", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => %{"symbol" => "X2-UX81-G1", "isComplete" => true, "materials" => []}
+            })
+
+          {"/v2/systems/X2-UX81/waypoints/X2-UX81-G1/jump-gate", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => %{"symbol" => "X2-UX81-G1", "connections" => ["X1-UX81-G1"]}
+            })
+
+          {"/v2/systems/X1-UX81/waypoints/X1-UX81-G1/market", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => %{
+                "symbol" => "X1-UX81-G1",
+                "tradeGoods" => [%{"symbol" => "ANTIMATTER", "purchasePrice" => 1_000}]
+              }
+            })
+
+          {path, method} ->
+            flunk("unexpected request #{method} #{path}")
+        end
+      end)
+
+      assert {:ok, preview} = Fleet.jump_preview(agent, "FLEET-SHIP", "X2-UX81-G1")
+
+      assert {:error, :jump_flight_mode_stale} =
+               Fleet.jump_preview(agent, "FLEET-SHIP", "X2-UX81-G1", "BURN")
+
+      Agent.update(state, &%{&1 | waypoint: "X1-UX81-A2"})
+
+      assert {:error, :jump_preview_stale} =
+               Fleet.confirm_jump_intent(
+                 agent,
+                 "FLEET-SHIP",
+                 "X2-UX81-G1",
+                 Map.new(preview, fn {key, value} -> {to_string(key), to_string(value)} end)
+               )
+    end
+
     test "jumps through connected complete gates and completes from a fresh Ship read" do
       agent = agent_fixture()
       ship_fixture(agent, "FLEET-SHIP")

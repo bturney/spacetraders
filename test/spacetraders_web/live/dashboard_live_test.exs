@@ -2773,6 +2773,8 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
 
       {:ok, lv, _html} = live(conn, ~p"/")
 
+      assert has_element?(lv, "select[name=\"flight_mode\"] option[value=\"BURN\"]")
+
       lv
       |> element("form[phx-submit=\"navigate\"]")
       |> render_submit(%{symbol: "ORBITALIST-1", waypoint_symbol: "X2-UX81-G1"})
@@ -2892,7 +2894,7 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
         end
       end)
 
-      {:ok, lv, html} = live(conn, ~p"/")
+      {:ok, lv, _html} = live(conn, ~p"/")
 
       # Posture-level actions stay available through progressive disclosure.
       assert has_element?(lv, "[data-posture-actions] button[phx-click=\"dock\"]")
