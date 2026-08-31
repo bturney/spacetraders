@@ -2886,10 +2886,17 @@ defmodule SpaceTraders.Fleet do
          true <- reviewed_jump_matches?(preview, fresh_preview) || {:error, :jump_preview_stale} do
       navigate_intent(agent, ship_symbol, waypoint, %{
         "reviewed_jump" => %{
+          "ship_symbol" => fresh_preview.ship_symbol,
+          "current_waypoint" => fresh_preview.current_waypoint,
           "source_waypoint" => fresh_preview.source_waypoint,
+          "destination_waypoint" => fresh_preview.destination_waypoint,
           "flight_mode" => fresh_preview.flight_mode,
+          "credits" => fresh_preview.credits,
+          "antimatter_cost" => fresh_preview.antimatter_cost,
+          "cooldown_seconds" => fresh_preview.cooldown_seconds || 0,
           "fuel_budget" => fresh_preview.fuel_budget,
-          "time_budget_seconds" => fresh_preview.time_budget_seconds
+          "time_budget_seconds" => fresh_preview.time_budget_seconds,
+          "candidates" => fresh_preview.candidates
         }
       })
     else
@@ -3007,22 +3014,24 @@ defmodule SpaceTraders.Fleet do
              live_ship.nav.flight_mode,
              live_ship.engine
            ) do
-      if insufficient_jump_fuel?(live_ship, leg_budget) do
-        rejected_candidates = Enum.map(candidates, &Map.put(&1, :fuel_budget, leg_budget))
-        {:error, {:jump_route_candidates, :insufficient_fuel, rejected_candidates}}
-      else
-        {:ok,
-         Map.merge(preflight, %{
-           ship_symbol: ship.symbol,
-           current_waypoint: live_ship.nav.waypoint_symbol,
-           source_waypoint: origin_gate,
-           destination_waypoint: waypoint,
-           flight_mode: live_ship.nav.flight_mode,
-           cooldown_seconds: live_ship.cooldown.remaining_seconds,
-           fuel_budget: leg_budget,
-           time_budget_seconds: leg_budget && leg_budget.time,
-           candidates: candidates
-         })}
+      case jump_fuel_status(live_ship, leg_budget) do
+        :ok ->
+          {:ok,
+           Map.merge(preflight, %{
+             ship_symbol: ship.symbol,
+             current_waypoint: live_ship.nav.waypoint_symbol,
+             source_waypoint: origin_gate,
+             destination_waypoint: waypoint,
+             flight_mode: live_ship.nav.flight_mode,
+             cooldown_seconds: live_ship.cooldown.remaining_seconds,
+             fuel_budget: leg_budget,
+             time_budget_seconds: leg_budget.time,
+             candidates: candidates
+           })}
+
+        {:error, reason} ->
+          rejected_candidates = Enum.map(candidates, &Map.put(&1, :fuel_budget, leg_budget))
+          {:error, {:jump_route_candidates, reason, rejected_candidates}}
       end
     end
   end
@@ -4773,7 +4782,8 @@ defmodule SpaceTraders.Fleet do
            waypoint_distance(source.x, source.y, destination.x, destination.y),
          speed when is_number(speed) and speed > 0 <- engine_speed(engine),
          fuel when is_integer(fuel) <- flight_mode_fuel(mode, distance) do
-      time = ceil(distance * flight_mode_time_factor(mode) / speed)
+      # Engine speed is measured in distance units per hour by the API.
+      time = ceil(distance * flight_mode_time_factor(mode) / speed * 3_600)
       {:ok, %{mode: mode, distance: distance, fuel: fuel, time: time}}
     else
       _ -> {:error, :navigation_budget_unavailable}
@@ -4783,11 +4793,15 @@ defmodule SpaceTraders.Fleet do
   defp engine_speed(%{speed: speed}), do: speed
   defp engine_speed(_engine), do: nil
 
-  defp insufficient_jump_fuel?(%{fuel: %{current: current}}, %{fuel: needed})
-       when is_integer(current) and is_integer(needed),
-       do: current < needed
+  defp jump_fuel_status(%{fuel: %{current: current}}, %{fuel: needed})
+       when is_integer(current) and is_integer(needed) and current >= needed,
+       do: :ok
 
-  defp insufficient_jump_fuel?(_, _), do: false
+  defp jump_fuel_status(%{fuel: %{current: current}}, %{fuel: needed})
+       when is_integer(current) and is_integer(needed) and current < needed,
+       do: {:error, :insufficient_fuel}
+
+  defp jump_fuel_status(_, _), do: {:error, :fuel_unavailable}
 
   defp waypoint_distance(x1, y1, x2, y2)
        when is_number(x1) and is_number(y1) and is_number(x2) and is_number(y2),
@@ -4899,6 +4913,13 @@ defmodule SpaceTraders.Fleet do
               }
 
             {:error, reason} ->
+              reasons =
+                [
+                  if(construction == "complete", do: nil, else: "construction_#{construction}"),
+                  jump_gate_rejection_reason(reason)
+                ]
+                |> Enum.reject(&is_nil/1)
+
               %{
                 waypoint: waypoint.symbol,
                 construction: construction,
@@ -4906,7 +4927,7 @@ defmodule SpaceTraders.Fleet do
                 intelligence: "unavailable",
                 resource: "unreviewed",
                 viable: false,
-                reasons: [jump_gate_rejection_reason(reason)]
+                reasons: reasons
               }
           end
         end)
