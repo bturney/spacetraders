@@ -38,6 +38,7 @@ defmodule SpaceTraders.API.SpecConformanceTest do
     {:get_ship, :get, "/my/ships/{shipSymbol}", :data},
     {:navigate_ship, :post, "/my/ships/{shipSymbol}/navigate", :data},
     {:jump_ship, :post, "/my/ships/{shipSymbol}/jump", :data},
+    {:warp_ship, :post, "/my/ships/{shipSymbol}/warp", :data},
     {:set_ship_flight_mode, :patch, "/my/ships/{shipSymbol}/nav", :data},
     {:dock_ship, :post, "/my/ships/{shipSymbol}/dock", :data},
     {:orbit_ship, :post, "/my/ships/{shipSymbol}/orbit", :data},
@@ -74,6 +75,7 @@ defmodule SpaceTraders.API.SpecConformanceTest do
      Request.DeliverContractRequest},
     {:navigate_ship, :post, "/my/ships/{shipSymbol}/navigate", Request.NavigateRequest},
     {:jump_ship, :post, "/my/ships/{shipSymbol}/jump", Request.NavigateRequest},
+    {:warp_ship, :post, "/my/ships/{shipSymbol}/warp", Request.NavigateRequest},
     {:set_ship_flight_mode, :patch, "/my/ships/{shipSymbol}/nav", Request.ShipNavRequest},
     {:sell_cargo, :post, "/my/ships/{shipSymbol}/sell", Request.SellCargoRequest},
     {:purchase_cargo, :post, "/my/ships/{shipSymbol}/purchase", Request.PurchaseCargoRequest},
@@ -168,6 +170,7 @@ defmodule SpaceTraders.API.SpecConformanceTest do
   defp arity_of(:get_ship), do: 2
   defp arity_of(:navigate_ship), do: 3
   defp arity_of(:jump_ship), do: 3
+  defp arity_of(:warp_ship), do: 3
   defp arity_of(:set_ship_flight_mode), do: 3
   defp arity_of(:dock_ship), do: 2
   defp arity_of(:orbit_ship), do: 2

@@ -232,6 +232,35 @@ defmodule SpaceTraders.API.ClientTest do
                API.navigate_ship("TOKEN", "ORBITALIST-1", "X1-UX81-A3")
     end
 
+    test "warp_ship/3 posts the remote waypoint and decodes fuel + nav" do
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        assert conn.request_path == "/v2/my/ships/ORBITALIST-1/warp"
+        assert conn.body_params == %{"waypointSymbol" => "X2-UX81-A3"}
+
+        Req.Test.json(conn, %{
+          "data" => %{
+            "fuel" => %{"capacity" => 200, "current" => 80},
+            "nav" => %{
+              "systemSymbol" => "X2-UX81",
+              "waypointSymbol" => "X2-UX81-A3",
+              "status" => "IN_TRANSIT",
+              "flightMode" => "CRUISE",
+              "route" => %{
+                "destination" => %{"symbol" => "X2-UX81-A3", "systemSymbol" => "X2-UX81"},
+                "origin" => %{"symbol" => "X1-UX81-A1", "systemSymbol" => "X1-UX81"},
+                "departureTime" => "2026-01-01T00:00:00.000Z",
+                "arrival" => "2026-01-01T01:00:00.000Z"
+              }
+            }
+          }
+        })
+      end)
+
+      assert {:ok,
+              %{fuel: %Model.ShipFuel{current: 80}, nav: %Model.ShipNav{status: "IN_TRANSIT"}}} =
+               API.warp_ship("TOKEN", "ORBITALIST-1", "X2-UX81-A3")
+    end
+
     test "jump_ship/3 posts the connected waypoint and decodes execution evidence" do
       Req.Test.stub(SpaceTraders.API, fn conn ->
         assert conn.request_path == "/v2/my/ships/ORBITALIST-1/jump"

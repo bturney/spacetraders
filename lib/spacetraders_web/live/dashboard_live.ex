@@ -208,12 +208,13 @@ defmodule SpaceTradersWeb.DashboardLive do
          :ok <- validate_waypoint(waypoint) do
       result =
         if params["confirm_jump"] == "true" do
-          Fleet.confirm_jump_intent(
-            agent,
-            ship_symbol,
-            waypoint,
-            Map.get(socket.assigns.jump_previews, ship_symbol, %{})
-          )
+          preview = Map.get(socket.assigns.jump_previews, ship_symbol, %{})
+
+          if preview[:method] == "warp" do
+            Fleet.confirm_warp_intent(agent, ship_symbol, waypoint, preview)
+          else
+            Fleet.confirm_jump_intent(agent, ship_symbol, waypoint, preview)
+          end
         else
           case Fleet.jump_preview(agent, ship_symbol, waypoint) do
             {:ok, preview} ->
@@ -223,21 +224,33 @@ defmodule SpaceTradersWeb.DashboardLive do
               Fleet.navigate_intent(agent, ship_symbol, waypoint)
 
             {:error, {:jump_route_candidates, reason, candidates} = route_reason} ->
-              case Fleet.block_jump_preview(agent, ship_symbol, waypoint, route_reason) do
-                {:ok, intent} ->
-                  {:blocked_preview, candidate_preview(waypoint, candidates, reason), intent}
+              case Fleet.warp_preview(agent, ship_symbol, waypoint) do
+                {:ok, preview} ->
+                  {:preview, Map.put(preview, :jump_candidates, candidates)}
 
-                other ->
-                  other
+                {:error, _warp_reason} ->
+                  case Fleet.block_jump_preview(agent, ship_symbol, waypoint, route_reason) do
+                    {:ok, intent} ->
+                      {:blocked_preview, candidate_preview(waypoint, candidates, reason), intent}
+
+                    other ->
+                      other
+                  end
               end
 
             {:error, reason} ->
-              case Fleet.block_jump_preview(agent, ship_symbol, waypoint, reason) do
-                {:ok, intent} ->
-                  {:blocked_preview, candidate_preview(waypoint, [], reason), intent}
+              case Fleet.warp_preview(agent, ship_symbol, waypoint) do
+                {:ok, preview} ->
+                  {:preview, preview}
 
-                other ->
-                  other
+                {:error, _warp_reason} ->
+                  case Fleet.block_jump_preview(agent, ship_symbol, waypoint, reason) do
+                    {:ok, intent} ->
+                      {:blocked_preview, candidate_preview(waypoint, [], reason), intent}
+
+                    other ->
+                      other
+                  end
               end
           end
         end
@@ -3275,25 +3288,43 @@ defmodule SpaceTradersWeb.DashboardLive do
             <p class="font-semibold">Jump route blocked</p>
             <p class="mt-1">No candidate passed every prerequisite. Review the evidence below.</p>
           <% else %>
-            <p class="font-semibold">Jump route ready for review</p>
-            <dl class="mt-2 grid grid-cols-2 gap-x-3 gap-y-1">
-              <dt class="opacity-70">Selected gates</dt>
-              <dd class="font-mono">
-                {@jump_preview.source_waypoint} to {@jump_preview.destination_waypoint}
-              </dd>
-              <dt class="opacity-70">Flight mode</dt>
-              <dd class="font-mono">{@jump_preview.flight_mode}</dd>
-              <dt class="opacity-70">Credits</dt>
-              <dd class="font-mono">{@jump_preview.credits}</dd>
-              <dt class="opacity-70">Jump cost</dt>
-              <dd>{@jump_preview.antimatter_cost} credits for one antimatter charge.</dd>
-              <dt class="opacity-70">Cooldown</dt>
-              <dd>{@jump_preview.cooldown_seconds} seconds before dispatch.</dd>
-              <dt class="opacity-70">Gate-leg budget</dt>
-              <dd data-jump-leg-budget>
-                {jump_leg_budget_label(@jump_preview)}
-              </dd>
-            </dl>
+            <%= if @jump_preview[:method] == "warp" do %>
+              <p class="font-semibold">Warp route ready for review</p>
+              <dl class="mt-2 grid grid-cols-2 gap-x-3 gap-y-1">
+                <dt class="opacity-70">Destination</dt>
+                <dd class="font-mono">{@jump_preview.destination_waypoint}</dd>
+                <dt class="opacity-70">Flight mode</dt>
+                <dd class="font-mono">{@jump_preview.flight_mode}</dd>
+                <dt class="opacity-70">Warp Drive</dt>
+                <dd class="font-mono">{@jump_preview.warp_drive}</dd>
+                <dt class="opacity-70">Fuel before dispatch</dt>
+                <dd>{@jump_preview.fuel_current} / {@jump_preview.fuel_capacity}</dd>
+                <dt class="opacity-70">Range</dt>
+                <dd>{@jump_preview.warp_range || "API-enforced"}</dd>
+                <dt class="opacity-70">Transit and cooldown</dt>
+                <dd>Authoritative response will provide the expected arrival and fuel use.</dd>
+              </dl>
+            <% else %>
+              <p class="font-semibold">Jump route ready for review</p>
+              <dl class="mt-2 grid grid-cols-2 gap-x-3 gap-y-1">
+                <dt class="opacity-70">Selected gates</dt>
+                <dd class="font-mono">
+                  {@jump_preview.source_waypoint} to {@jump_preview.destination_waypoint}
+                </dd>
+                <dt class="opacity-70">Flight mode</dt>
+                <dd class="font-mono">{@jump_preview.flight_mode}</dd>
+                <dt class="opacity-70">Credits</dt>
+                <dd class="font-mono">{@jump_preview.credits}</dd>
+                <dt class="opacity-70">Jump cost</dt>
+                <dd>{@jump_preview.antimatter_cost} credits for one antimatter charge.</dd>
+                <dt class="opacity-70">Cooldown</dt>
+                <dd>{@jump_preview.cooldown_seconds} seconds before dispatch.</dd>
+                <dt class="opacity-70">Gate-leg budget</dt>
+                <dd data-jump-leg-budget>
+                  {jump_leg_budget_label(@jump_preview)}
+                </dd>
+              </dl>
+            <% end %>
           <% end %>
           <div :if={@jump_preview[:candidates] != []} class="mt-3" data-jump-candidates>
             <p class="font-semibold">Gate alternatives</p>
@@ -4674,6 +4705,7 @@ defmodule SpaceTradersWeb.DashboardLive do
 
   defp jump_leg_budget_label(_preview), do: "Unavailable from waypoint coordinates"
 
+  defp jump_preview_viable?(%{method: "warp"}), do: true
   defp jump_preview_viable?(%{route_type: "navigate"}), do: true
   defp jump_preview_viable?(%{candidates: candidates}), do: Enum.any?(candidates, & &1.viable)
   defp jump_preview_viable?(_), do: false

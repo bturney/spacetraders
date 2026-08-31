@@ -2903,6 +2903,19 @@ defmodule SpaceTraders.Fleet do
     end
   end
 
+  @doc "Dispatches a reviewed warp route only when fresh Ship readiness still matches the preview."
+  def confirm_warp_intent(agent, ship_symbol, waypoint, preview) when is_map(preview) do
+    with {:ok, fresh_preview} <- warp_preview(agent, ship_symbol, waypoint),
+         true <- reviewed_warp_matches?(preview, fresh_preview) || {:error, :warp_preview_stale} do
+      navigate_intent(agent, ship_symbol, waypoint, %{
+        "reviewed_warp" => Map.new(fresh_preview, fn {key, value} -> {to_string(key), value} end)
+      })
+    else
+      {:error, _reason} = error -> error
+      false -> {:error, :warp_preview_stale}
+    end
+  end
+
   @doc "Records a rejected jump preview as durable Manual Control work without mutation."
   def block_jump_preview(%AgentRecord{} = agent, ship_symbol, waypoint, reason) do
     with :ok <- validate_intent_waypoint(waypoint),
@@ -2924,6 +2937,12 @@ defmodule SpaceTraders.Fleet do
       integer_reviewed_value(reviewed, :credits) == fresh.credits and
       integer_reviewed_value(reviewed, :antimatter_cost) == fresh.antimatter_cost and
       integer_reviewed_value(reviewed, :cooldown_seconds) == (fresh.cooldown_seconds || 0)
+  end
+
+  defp reviewed_warp_matches?(reviewed, fresh) do
+    Enum.all?(fresh, fn {key, value} ->
+      canonical_preview_value(reviewed_value(reviewed, key)) == canonical_preview_value(value)
+    end)
   end
 
   defp reviewed_value(map, key), do: Map.get(map, key, Map.get(map, Atom.to_string(key)))
@@ -3003,6 +3022,47 @@ defmodule SpaceTraders.Fleet do
   end
 
   def jump_preview(%AgentRecord{}, _ship_symbol, _waypoint), do: {:error, :agent_token_missing}
+
+  @doc "Reads authoritative Ship readiness for a direct inter-System warp without mutation."
+  def warp_preview(%AgentRecord{agent_token: token} = agent, ship_symbol, waypoint)
+      when is_binary(token) and token != "" do
+    waypoint = String.trim(waypoint || "")
+
+    with :ok <- validate_intent_waypoint(waypoint),
+         {:ok, ship} <- owned_ship(agent, ship_symbol),
+         {:ok, live_ship} <-
+           Agent.handle_game_result(agent, SpaceTraders.API.get_ship(token, ship.symbol)),
+         true <-
+           remote_waypoint?(live_ship.nav.waypoint_symbol, waypoint) ||
+             {:error, :same_system_route},
+         {:ok, module} <- installed_warp_drive(live_ship),
+         true <- not fuel_empty?(live_ship) || {:error, :insufficient_fuel} do
+      {:ok,
+       %{
+         method: "warp",
+         ship_symbol: ship.symbol,
+         current_waypoint: live_ship.nav.waypoint_symbol,
+         destination_waypoint: waypoint,
+         flight_mode: live_ship.nav.flight_mode,
+         fuel_current: live_ship.fuel.current,
+         fuel_capacity: live_ship.fuel.capacity,
+         warp_drive: module.symbol,
+         warp_range: module.range
+       }}
+    else
+      {:error, _reason} = error -> error
+      error -> {:error, error}
+    end
+  end
+
+  def warp_preview(%AgentRecord{}, _ship_symbol, _waypoint), do: {:error, :agent_token_missing}
+
+  defp installed_warp_drive(%{modules: modules}) do
+    case Enum.find(modules || [], &(&1.symbol == "MODULE_WARP_DRIVE_I")) do
+      nil -> {:error, :warp_drive_missing}
+      module -> {:ok, module}
+    end
+  end
 
   @doc "Starts a durable Buy Goods Intent at a specified Market."
   def buy_goods_intent(agent, ship_symbol, waypoint, trade_symbol, units, opts \\ []) do
@@ -3333,6 +3393,18 @@ defmodule SpaceTraders.Fleet do
     end
   end
 
+  defp do_advance_manual_intent(
+         agent,
+         %ManualIntent{type: "navigate", in_flight_action: %{"kind" => "warp"}} = intent,
+         live_ship
+       ) do
+    if arrived_at_target?(live_ship, intent.target_waypoint) do
+      complete_manual_intent(agent, intent)
+    else
+      block_manual_intent(intent, :ambiguous_warp_evidence)
+    end
+  end
+
   defp do_advance_manual_intent(agent, %ManualIntent{type: "navigate"} = intent, live_ship) do
     cond do
       arrived_at_target?(live_ship, intent.target_waypoint) ->
@@ -3354,7 +3426,7 @@ defmodule SpaceTraders.Fleet do
         orbit_for_manual_intent(agent, intent, live_ship)
 
       remote_waypoint?(live_ship.nav.waypoint_symbol, intent.target_waypoint) ->
-        advance_manual_jump_route(agent, intent, live_ship)
+        advance_manual_remote_route(agent, intent, live_ship)
 
       fuel_empty?(live_ship) ->
         block_manual_intent(intent, {:insufficient_fuel, intent.target_waypoint})
@@ -4471,6 +4543,10 @@ defmodule SpaceTraders.Fleet do
     is_map(intent.in_flight_action) and intent.in_flight_action["kind"] == "jump"
   end
 
+  defp unresolved_warp_action?(intent) do
+    is_map(intent.in_flight_action) and intent.in_flight_action["kind"] == "warp"
+  end
+
   defp unfinished_intent(ship_id) do
     Repo.one(
       from intent in ManualIntent,
@@ -4490,7 +4566,7 @@ defmodule SpaceTraders.Fleet do
   defp terminalize_manual_intent!(intent, status) when status in @terminal_intent_states do
     preserve_evidence? =
       unresolved_cargo_action?(intent) or unresolved_module_evidence?(intent) or
-        unresolved_jump_action?(intent)
+        unresolved_jump_action?(intent) or unresolved_warp_action?(intent)
 
     Repo.update!(
       Ecto.Changeset.change(intent,
@@ -4509,9 +4585,9 @@ defmodule SpaceTraders.Fleet do
 
   defp complete_manual_intent(agent, intent) do
     result =
-      if jump_evidence?(intent) do
+      if jump_evidence?(intent) or warp_evidence?(intent) do
         (intent.last_action_result || %{"kind" => "jump", "waypoint" => intent.target_waypoint})
-        |> Map.put("kind", "jump")
+        |> Map.put("kind", if(warp_evidence?(intent), do: "warp", else: "jump"))
         |> Map.put("completion", "authoritative_ship_state")
       else
         %{"kind" => "navigate", "waypoint" => intent.target_waypoint}
@@ -4653,6 +4729,14 @@ defmodule SpaceTraders.Fleet do
       end
     else
       {:error, reason} -> block_manual_intent(intent, reason)
+    end
+  end
+
+  defp advance_manual_remote_route(agent, intent, live_ship) do
+    if get_in(intent.parameters, ["reviewed_warp", "method"]) == "warp" do
+      dispatch_manual_warp(agent, intent, live_ship)
+    else
+      advance_manual_jump_route(agent, intent, live_ship)
     end
   end
 
@@ -4838,6 +4922,64 @@ defmodule SpaceTraders.Fleet do
     end
   end
 
+  defp dispatch_manual_warp(agent, intent, live_ship) do
+    with :ok <- reviewed_warp_flight_mode(intent, live_ship.nav.flight_mode),
+         {:ok, _module} <- installed_warp_drive(live_ship),
+         true <- not fuel_empty?(live_ship) || {:error, :insufficient_fuel},
+         {:ok, intent} <-
+           claim_intent_action(intent, %{
+             "kind" => "warp",
+             "waypoint" => intent.target_waypoint,
+             "expected" => %{"status" => "IN_TRANSIT", "destination" => intent.target_waypoint}
+           }) do
+      case Agent.handle_game_result(
+             agent,
+             SpaceTraders.API.warp_ship(
+               agent.agent_token,
+               live_ship.symbol,
+               intent.target_waypoint
+             )
+           ) do
+        {:ok, result} ->
+          with :ok <- schedule_intent_arrival(agent, intent, live_ship.symbol, result),
+               {:ok, intent} <-
+                 transition_intent(intent,
+                   status: "waiting",
+                   last_action_result: %{
+                     "kind" => "warp",
+                     "waypoint" => intent.target_waypoint,
+                     "status" => result.nav.status,
+                     "destination" => result.nav.route.destination.symbol,
+                     "fuel_current" => result.fuel.current
+                   }
+                 ) do
+            persist_destination_history(
+              agent,
+              live_ship.symbol,
+              result.nav.route.destination.symbol
+            )
+
+            {:ok, intent}
+          else
+            :intent_no_longer_owned -> :ok
+            {:error, _reason} = error -> error
+          end
+
+        {:error, reason} ->
+          block_manual_intent(intent, reason)
+      end
+    else
+      {:error, reason} -> block_manual_intent(intent, reason)
+    end
+  end
+
+  defp reviewed_warp_flight_mode(%ManualIntent{parameters: parameters}, current_mode) do
+    case get_in(parameters, ["reviewed_warp", "flight_mode"]) do
+      ^current_mode -> :ok
+      _ -> {:error, :warp_preview_stale}
+    end
+  end
+
   # A jump response proves execution, not completion. The subsequent Ship read
   # is what proves the requested off-System arrival after a restart or timeout.
   defp dispatch_manual_jump(agent, intent, live_ship) do
@@ -4987,7 +5129,10 @@ defmodule SpaceTraders.Fleet do
            status: "blocked",
            blocker: job_blocker(manual_intent_block_reason(reason)),
            in_flight_action:
-             if(unresolved_jump_action?(intent), do: intent.in_flight_action, else: nil)
+             if(unresolved_jump_action?(intent) or unresolved_warp_action?(intent),
+               do: intent.in_flight_action,
+               else: nil
+             )
          ) do
       {:ok, intent} ->
         unless already_blocked? do
@@ -5061,6 +5206,11 @@ defmodule SpaceTraders.Fleet do
   defp jump_evidence?(intent) do
     get_in(intent.last_action_result || %{}, ["kind"]) == "jump" or
       unresolved_jump_action?(intent)
+  end
+
+  defp warp_evidence?(intent) do
+    get_in(intent.last_action_result || %{}, ["kind"]) == "warp" or
+      unresolved_warp_action?(intent)
   end
 
   @doc "Reconciles a persisted Manual Control Intent after a process restart."

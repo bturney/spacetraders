@@ -187,6 +187,15 @@ defmodule SpaceTraders.API do
     )
   end
 
+  @doc "POST /my/ships/{symbol}/warp"
+  @spec warp_ship(token(), String.t(), String.t()) :: result()
+  def warp_ship(token, ship_symbol, waypoint_symbol) do
+    request(:post, "/my/ships/#{ship_symbol}/warp", token,
+      json: NavigateRequest.new(%{waypoint_symbol: waypoint_symbol}) |> NavigateRequest.to_json(),
+      as: {:map, %{fuel: {:model, ShipFuel}, nav: {:model, ShipNav}}}
+    )
+  end
+
   @doc "POST /my/ships/{symbol}/jump"
   @spec jump_ship(token(), String.t(), String.t()) :: result()
   def jump_ship(token, ship_symbol, waypoint_symbol) do
