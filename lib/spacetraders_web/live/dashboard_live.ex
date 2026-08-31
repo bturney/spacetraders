@@ -213,7 +213,7 @@ defmodule SpaceTradersWeb.DashboardLive do
           case Fleet.jump_preview(agent, ship_symbol, waypoint) do
             {:ok, preview} -> {:preview, preview}
             {:error, :same_system_route} -> Fleet.navigate_intent(agent, ship_symbol, waypoint)
-            error -> error
+            {:error, reason} -> Fleet.block_jump_preview(agent, ship_symbol, waypoint, reason)
           end
         end
 

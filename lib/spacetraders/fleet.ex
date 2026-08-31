@@ -2873,6 +2873,18 @@ defmodule SpaceTraders.Fleet do
     end
   end
 
+  @doc "Records a rejected jump preview as durable Manual Control work without mutation."
+  def block_jump_preview(%AgentRecord{} = agent, ship_symbol, waypoint, reason) do
+    with :ok <- validate_intent_waypoint(waypoint),
+         {:ok, ship} <- owned_ship(agent, ship_symbol),
+         {:ok, intent} <- replace_manual_intent(ship, waypoint) do
+      block_manual_intent(intent, reason)
+    else
+      {:error, %Ecto.Changeset{}} -> {:error, :manual_intent_conflict}
+      error -> error
+    end
+  end
+
   defp reviewed_jump_matches?(reviewed, fresh) do
     reviewed["source_waypoint"] == fresh.source_waypoint and
       reviewed["destination_waypoint"] == fresh.destination_waypoint and
