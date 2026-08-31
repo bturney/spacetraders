@@ -3326,10 +3326,10 @@ defmodule SpaceTradersWeb.DashboardLive do
               </dl>
             <% end %>
           <% end %>
-          <div :if={@jump_preview[:candidates] != []} class="mt-3" data-jump-candidates>
+          <div :if={Map.get(@jump_preview, :candidates, []) != []} class="mt-3" data-jump-candidates>
             <p class="font-semibold">Gate alternatives</p>
             <ul class="mt-1 space-y-1">
-              <li :for={candidate <- @jump_preview.candidates}>
+              <li :for={candidate <- Map.get(@jump_preview, :candidates, [])}>
                 <span class="font-mono">{candidate.waypoint}</span>
                 <span :if={candidate.viable} class="ml-2">viable</span>
                 <span :if={not candidate.viable} class="ml-2 opacity-70">
@@ -3368,23 +3368,9 @@ defmodule SpaceTradersWeb.DashboardLive do
           >
             <input type="hidden" name="waypoint_symbol" value={@jump_preview.destination_waypoint} />
             <input type="hidden" name="confirm_jump" value="true" />
-            <input type="hidden" name="ship_symbol" value={@jump_preview.ship_symbol} />
-            <input type="hidden" name="current_waypoint" value={@jump_preview.current_waypoint} />
-            <input type="hidden" name="source_waypoint" value={@jump_preview.source_waypoint} />
-            <input
-              type="hidden"
-              name="destination_waypoint"
-              value={@jump_preview.destination_waypoint}
-            />
-            <input type="hidden" name="flight_mode" value={@jump_preview.flight_mode} />
-            <input type="hidden" name="credits" value={@jump_preview.credits} />
-            <input type="hidden" name="antimatter_cost" value={@jump_preview.antimatter_cost} />
-            <input
-              type="hidden"
-              name="cooldown_seconds"
-              value={@jump_preview.cooldown_seconds || 0}
-            />
-            <button type="submit" class="btn btn-primary btn-sm">Confirm jump</button>
+            <button type="submit" class="btn btn-primary btn-sm">
+              {if @jump_preview[:method] == "warp", do: "Confirm warp", else: "Confirm jump"}
+            </button>
           </form>
         </section>
         <div

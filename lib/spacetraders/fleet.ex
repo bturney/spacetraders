@@ -3036,6 +3036,7 @@ defmodule SpaceTraders.Fleet do
            remote_waypoint?(live_ship.nav.waypoint_symbol, waypoint) ||
              {:error, :same_system_route},
          {:ok, module} <- installed_warp_drive(live_ship),
+         true <- live_ship.nav.flight_mode != "BURN" || {:error, :warp_burn_fuel_budget_unknown},
          true <- not fuel_empty?(live_ship) || {:error, :insufficient_fuel} do
       {:ok,
        %{
@@ -3058,11 +3059,16 @@ defmodule SpaceTraders.Fleet do
   def warp_preview(%AgentRecord{}, _ship_symbol, _waypoint), do: {:error, :agent_token_missing}
 
   defp installed_warp_drive(%{modules: modules}) do
-    case Enum.find(modules || [], &(&1.symbol == "MODULE_WARP_DRIVE_I")) do
+    case Enum.find(modules || [], &warp_drive_module?/1) do
       nil -> {:error, :warp_drive_missing}
       module -> {:ok, module}
     end
   end
+
+  defp warp_drive_module?(%{symbol: symbol}) when is_binary(symbol),
+    do: symbol in ~w(MODULE_WARP_DRIVE_I MODULE_WARP_DRIVE_II MODULE_WARP_DRIVE_III)
+
+  defp warp_drive_module?(_), do: false
 
   @doc "Starts a durable Buy Goods Intent at a specified Market."
   def buy_goods_intent(agent, ship_symbol, waypoint, trade_symbol, units, opts \\ []) do
@@ -3325,7 +3331,7 @@ defmodule SpaceTraders.Fleet do
                      unresolved_module_evidence?(intent) ->
                        Repo.rollback(:manual_intent_reconciliation_required)
 
-                     unresolved_jump_action?(intent) ->
+                     unresolved_jump_action?(intent) or unresolved_warp_action?(intent) ->
                        Repo.rollback(:manual_intent_reconciliation_required)
 
                      true ->
@@ -3398,10 +3404,15 @@ defmodule SpaceTraders.Fleet do
          %ManualIntent{type: "navigate", in_flight_action: %{"kind" => "warp"}} = intent,
          live_ship
        ) do
-    if arrived_at_target?(live_ship, intent.target_waypoint) do
-      complete_manual_intent(agent, intent)
-    else
-      block_manual_intent(intent, :ambiguous_warp_evidence)
+    cond do
+      arrived_at_target?(live_ship, intent.target_waypoint) ->
+        complete_manual_intent(agent, intent)
+
+      in_transit?(live_ship) ->
+        wait_for_manual_arrival(agent, intent, live_ship)
+
+      true ->
+        block_manual_intent(intent, :ambiguous_warp_evidence)
     end
   end
 
@@ -5260,7 +5271,8 @@ defmodule SpaceTraders.Fleet do
                      blocker: job_blocker({:retry_exhausted, reason}),
                      in_flight_action:
                        if(
-                         unresolved_cargo_action?(current) or unresolved_jump_action?(current),
+                         unresolved_cargo_action?(current) or unresolved_jump_action?(current) or
+                           unresolved_warp_action?(current),
                          do: current.in_flight_action,
                          else: nil
                        )
