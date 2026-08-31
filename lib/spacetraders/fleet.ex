@@ -2994,6 +2994,14 @@ defmodule SpaceTraders.Fleet do
     with {:ok, source_system} <- system_from_headquarters(live_ship.nav.waypoint_symbol),
          {:ok, destination_system} <- system_from_headquarters(waypoint),
          {:ok, candidates} <- jump_origin_candidates(agent, source_system, waypoint),
+         {:ok, candidates} <-
+           review_jump_candidates(
+             agent,
+             live_ship,
+             candidates,
+             live_ship.nav.flight_mode,
+             live_ship.engine
+           ),
          {:ok, origin_gate} <- viable_jump_origin(candidates),
          :ok <-
            validate_jump_route(
@@ -3005,15 +3013,7 @@ defmodule SpaceTraders.Fleet do
            ),
          {:ok, preflight} <-
            jump_cost_preflight(agent, source_system, origin_gate),
-         {:ok, leg_budget} <-
-           jump_leg_budget_for_route(
-             agent,
-             live_ship.nav.waypoint_symbol,
-             origin_gate,
-             route_candidates(candidates, live_ship),
-             live_ship.nav.flight_mode,
-             live_ship.engine
-           ) do
+         {:ok, leg_budget} <- candidate_budget(candidates, origin_gate) do
       case jump_fuel_status(live_ship, leg_budget) do
         :ok ->
           {:ok,
@@ -3030,7 +3030,13 @@ defmodule SpaceTraders.Fleet do
            })}
 
         {:error, reason} ->
-          rejected_candidates = Enum.map(candidates, &Map.put(&1, :fuel_budget, leg_budget))
+          rejected_candidates =
+            Enum.map(candidates, fn candidate ->
+              if candidate.waypoint == origin_gate,
+                do: %{candidate | reasons: candidate.reasons ++ [Atom.to_string(reason)]},
+                else: candidate
+            end)
+
           {:error, {:jump_route_candidates, reason, rejected_candidates}}
       end
     end
@@ -4718,51 +4724,67 @@ defmodule SpaceTraders.Fleet do
     end
   end
 
-  defp jump_leg_budget(current, origin, candidates, mode, engine) do
-    with %{x: x1, y: y1} <- Enum.find(candidates, &(&1.waypoint == current)),
-         %{x: x2, y: y2} <- Enum.find(candidates, &(&1.waypoint == origin)),
-         distance when is_number(distance) <- waypoint_distance(x1, y1, x2, y2) do
-      navigation_leg_budget(%{x: x1, y: y1}, %{x: x2, y: y2}, engine, mode)
-    else
-      _ -> {:error, :navigation_budget_unavailable}
+  defp review_jump_candidates(agent, live_ship, candidates, mode, engine) do
+    with {:ok, current} <- current_waypoint_coordinates(agent, live_ship) do
+      candidates =
+        Enum.map(candidates, fn candidate ->
+          budget =
+            if is_number(candidate[:x]) and is_number(candidate[:y]) do
+              navigation_leg_budget(current, candidate, engine, mode)
+            else
+              {:error, :navigation_budget_unavailable}
+            end
+
+          case budget do
+            {:ok, budget} ->
+              candidate
+              |> Map.put(:fuel_budget, budget)
+              |> add_budget_rejection(live_ship, budget)
+
+            {:error, reason} ->
+              candidate
+              |> Map.put(:fuel_budget, nil)
+              |> Map.update!(:reasons, &(&1 ++ [Atom.to_string(reason)]))
+              |> Map.put(:viable, false)
+          end
+        end)
+
+      {:ok, candidates}
     end
   end
 
-  defp jump_leg_budget_for_route(agent, current, origin, candidates, mode, engine) do
-    if Enum.any?(candidates, &(&1.waypoint == current)) do
-      case jump_leg_budget(current, origin, candidates, mode, engine) do
-        {:ok, budget} -> {:ok, budget}
-        {:error, reason} -> {:error, reason}
-      end
-    else
-      with {:ok, system} <- system_from_headquarters(current),
-           {:ok, current_waypoint} <- authoritative_waypoint(agent, system, current),
-           {:ok, origin_waypoint} <- authoritative_candidate(candidates, origin),
-           {:ok, budget} <- navigation_leg_budget(current_waypoint, origin_waypoint, engine, mode) do
-        {:ok, budget}
-      end
+  defp current_waypoint_coordinates(agent, live_ship) do
+    with {:ok, system} <- system_from_headquarters(live_ship.nav.waypoint_symbol),
+         {:ok, waypoint} <-
+           authoritative_waypoint(agent, system, live_ship.nav.waypoint_symbol) do
+      {:ok, waypoint}
     end
   end
 
-  defp authoritative_candidate(candidates, symbol) do
-    case Enum.find(candidates, &(&1.waypoint == symbol)) do
-      %{x: x, y: y} when is_number(x) and is_number(y) -> {:ok, %{x: x, y: y}}
-      _ -> {:error, :navigation_coordinates_unavailable}
-    end
-  end
+  defp add_budget_rejection(candidate, live_ship, %{fuel: fuel}) do
+    current_fuel = live_ship.fuel && live_ship.fuel.current
 
-  defp route_candidates(candidates, live_ship) do
-    route_waypoint = live_ship.nav.route && live_ship.nav.route.destination
-
-    Enum.map(candidates, fn candidate ->
-      if ((candidate.waypoint == live_ship.nav.waypoint_symbol and
-             route_waypoint) && route_waypoint.symbol == candidate.waypoint) and
-           is_number(route_waypoint.x) and is_number(route_waypoint.y) do
-        %{candidate | x: route_waypoint.x, y: route_waypoint.y}
-      else
+    cond do
+      not candidate.viable ->
         candidate
-      end
-    end)
+
+      not is_integer(current_fuel) ->
+        %{candidate | viable: false, reasons: candidate.reasons ++ ["fuel_unavailable"]}
+
+      current_fuel < fuel ->
+        %{candidate | viable: false, reasons: candidate.reasons ++ ["insufficient_fuel"]}
+
+      true ->
+        candidate
+    end
+  end
+
+  defp candidate_budget(candidates, waypoint) do
+    case Enum.find(candidates, &(&1.waypoint == waypoint)) do
+      %{viable: true, fuel_budget: budget} when is_map(budget) -> {:ok, budget}
+      %{fuel_budget: nil} -> {:error, :navigation_budget_unavailable}
+      _ -> {:error, :insufficient_fuel}
+    end
   end
 
   defp authoritative_waypoint(agent, system, symbol) do
@@ -4777,21 +4799,15 @@ defmodule SpaceTraders.Fleet do
     end
   end
 
-  defp navigation_leg_budget(source, destination, engine, mode) do
+  defp navigation_leg_budget(source, destination, _engine, mode) do
     with distance when is_integer(distance) <-
            waypoint_distance(source.x, source.y, destination.x, destination.y),
-         speed when is_number(speed) and speed > 0 <- engine_speed(engine),
          fuel when is_integer(fuel) <- flight_mode_fuel(mode, distance) do
-      # Engine speed is measured in distance units per hour by the API.
-      time = ceil(distance * flight_mode_time_factor(mode) / speed * 3_600)
-      {:ok, %{mode: mode, distance: distance, fuel: fuel, time: time}}
+      {:ok, %{mode: mode, distance: distance, fuel: fuel, time: nil}}
     else
       _ -> {:error, :navigation_budget_unavailable}
     end
   end
-
-  defp engine_speed(%{speed: speed}), do: speed
-  defp engine_speed(_engine), do: nil
 
   defp jump_fuel_status(%{fuel: %{current: current}}, %{fuel: needed})
        when is_integer(current) and is_integer(needed) and current >= needed,
@@ -4805,17 +4821,11 @@ defmodule SpaceTraders.Fleet do
 
   defp waypoint_distance(x1, y1, x2, y2)
        when is_number(x1) and is_number(y1) and is_number(x2) and is_number(y2),
-       do: :math.sqrt(:math.pow(x1 - x2, 2) + :math.pow(y1 - y2, 2)) |> Float.ceil() |> trunc()
+       do: round(:math.sqrt(:math.pow(x1 - x2, 2) + :math.pow(y1 - y2, 2)))
 
   defp waypoint_distance(_, _, _, _), do: nil
-  defp flight_mode_fuel("DRIFT", _distance), do: 0
-  defp flight_mode_fuel("STEALTH", distance), do: distance
-  defp flight_mode_fuel("CRUISE", distance), do: distance * 2
-  defp flight_mode_fuel("BURN", distance), do: distance * 3
-  defp flight_mode_time_factor("DRIFT"), do: 2
-  defp flight_mode_time_factor("STEALTH"), do: 1.5
-  defp flight_mode_time_factor("CRUISE"), do: 1
-  defp flight_mode_time_factor("BURN"), do: 0.5
+  defp flight_mode_fuel("CRUISE", distance), do: distance
+  defp flight_mode_fuel(_mode, _distance), do: nil
 
   defp jump_origin_for(agent, system, destination) do
     with {:ok, waypoints} <-
@@ -4864,6 +4874,15 @@ defmodule SpaceTraders.Fleet do
               Enum.any?(candidates, &("jump_gate_intelligence_unavailable" in &1.reasons)) ->
                 {:error,
                  {:jump_route_candidates, :jump_gate_intelligence_unavailable, candidates}}
+
+              Enum.any?(candidates, &("navigation_budget_unavailable" in &1.reasons)) ->
+                {:error, {:jump_route_candidates, :navigation_budget_unavailable, candidates}}
+
+              Enum.any?(candidates, &("fuel_unavailable" in &1.reasons)) ->
+                {:error, {:jump_route_candidates, :fuel_unavailable, candidates}}
+
+              Enum.any?(candidates, &("insufficient_fuel" in &1.reasons)) ->
+                {:error, {:jump_route_candidates, :insufficient_fuel, candidates}}
 
               true ->
                 {:error, {:jump_route_candidates, :jump_gate_connection_unavailable, candidates}}

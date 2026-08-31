@@ -4634,8 +4634,12 @@ defmodule SpaceTradersWeb.DashboardLive do
   defp format_terminal_value(value) when value in [nil, %{}], do: "None recorded"
   defp format_terminal_value(value), do: inspect(value)
 
-  defp jump_leg_budget_label(%{fuel_budget: %{mode: mode, fuel: fuel}, time_budget_seconds: time}),
-    do: "#{mode}: #{fuel} fuel, #{time}s"
+  defp jump_leg_budget_label(%{fuel_budget: %{mode: mode, fuel: fuel}, time_budget_seconds: time})
+       when is_integer(time),
+       do: "#{mode}: #{fuel} fuel, #{time}s"
+
+  defp jump_leg_budget_label(%{fuel_budget: %{mode: mode, fuel: fuel}}),
+    do: "#{mode}: #{fuel} fuel; time unavailable"
 
   defp jump_leg_budget_label(_preview), do: "Unavailable from waypoint coordinates"
 
@@ -4648,7 +4652,16 @@ defmodule SpaceTradersWeb.DashboardLive do
 
     candidates =
       if candidates == [] do
-        [%{waypoint: waypoint, viable: false, reasons: [format_preview_reason(reason)]}]
+        [
+          %{
+            waypoint: waypoint,
+            viable: false,
+            construction: "unknown",
+            intelligence: "unknown",
+            connection: "unknown",
+            reasons: [format_preview_reason(reason)]
+          }
+        ]
       else
         Enum.map(candidates, fn candidate ->
           if reason == :insufficient_fuel and candidate.viable do

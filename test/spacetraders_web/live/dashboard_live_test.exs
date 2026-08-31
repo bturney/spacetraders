@@ -2768,9 +2768,22 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
                 %{
                   "symbol" => "X1-UX81-G1",
                   "systemSymbol" => "X1-UX81",
-                  "type" => "JUMP_GATE"
+                  "type" => "JUMP_GATE",
+                  "x" => 10,
+                  "y" => 0
                 }
               ]
+            })
+
+          {"/v2/systems/X1-UX81/waypoints/X1-UX81-G1", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => %{
+                "symbol" => "X1-UX81-G1",
+                "systemSymbol" => "X1-UX81",
+                "type" => "JUMP_GATE",
+                "x" => 0,
+                "y" => 0
+              }
             })
 
           {"/v2/my/ships/ORBITALIST-1/jump", "POST"} ->

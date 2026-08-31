@@ -4275,6 +4275,101 @@ defmodule SpaceTraders.FleetTest do
     end
   end
 
+  describe "jump_preview/3 and confirm_jump_intent/4" do
+    test "uses only the empirical CRUISE budget and blocks every other mode" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+      test_pid = self()
+      {:ok, mode} = Agent.start_link(fn -> "CRUISE" end)
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        send(test_pid, {:request, conn.request_path})
+
+        case conn.request_path do
+          "/v2/my/ships/FLEET-SHIP" ->
+            Req.Test.json(conn, %{
+              "data" =>
+                ship_body("FLEET-SHIP", %{
+                  "fuel" => %{"capacity" => 200, "current" => 150},
+                  "nav" => %{
+                    "systemSymbol" => "X1-UX81",
+                    "waypointSymbol" => "X1-UX81-G1",
+                    "status" => "IN_ORBIT",
+                    "flightMode" => Agent.get(mode, & &1)
+                  }
+                })
+            })
+
+          "/v2/my/agent" ->
+            Req.Test.json(conn, %{"data" => %{"credits" => 2_000}})
+
+          "/v2/systems/X1-UX81/waypoints" ->
+            Req.Test.json(conn, %{
+              "data" => [
+                %{
+                  "symbol" => "X1-UX81-G1",
+                  "systemSymbol" => "X1-UX81",
+                  "type" => "JUMP_GATE",
+                  "x" => 0,
+                  "y" => 0
+                }
+              ]
+            })
+
+          "/v2/systems/X1-UX81/waypoints/X1-UX81-G1" ->
+            Req.Test.json(conn, %{"data" => %{"symbol" => "X1-UX81-G1", "x" => 0, "y" => 0}})
+
+          "/v2/systems/X1-UX81/waypoints/X1-UX81-G1/construction" ->
+            Req.Test.json(conn, %{
+              "data" => %{
+                "symbol" => "X1-UX81-G1",
+                "isComplete" => true,
+                "materials" => []
+              }
+            })
+
+          "/v2/systems/X1-UX81/waypoints/X1-UX81-G1/jump-gate" ->
+            Req.Test.json(conn, %{"data" => %{"connections" => ["X2-UX81-G1"]}})
+
+          "/v2/systems/X2-UX81/waypoints/X2-UX81-G1/construction" ->
+            Req.Test.json(conn, %{
+              "data" => %{
+                "symbol" => "X2-UX81-G1",
+                "isComplete" => true,
+                "materials" => []
+              }
+            })
+
+          "/v2/systems/X2-UX81/waypoints/X2-UX81-G1/jump-gate" ->
+            Req.Test.json(conn, %{"data" => %{"connections" => ["X1-UX81-G1"]}})
+
+          "/v2/systems/X1-UX81/waypoints/X1-UX81-G1/market" ->
+            Req.Test.json(conn, %{
+              "data" => %{"tradeGoods" => [%{"symbol" => "ANTIMATTER", "purchasePrice" => 1_000}]}
+            })
+        end
+      end)
+
+      assert {:ok, preview} = Fleet.jump_preview(agent, "FLEET-SHIP", "X2-UX81-G1")
+      assert preview.flight_mode == "CRUISE"
+      assert preview.fuel_budget == %{mode: "CRUISE", distance: 0, fuel: 0, time: nil}
+      assert preview.time_budget_seconds == nil
+
+      assert {:error, :jump_preview_stale} =
+               Fleet.confirm_jump_intent(agent, "FLEET-SHIP", "X2-UX81-G1", %{"nested" => %{}})
+
+      for unsupported <- ~w(DRIFT STEALTH BURN) do
+        Agent.update(mode, fn _ -> unsupported end)
+
+        assert {:error, {:jump_route_candidates, :navigation_budget_unavailable, candidates}} =
+                 Fleet.jump_preview(agent, "FLEET-SHIP", "X2-UX81-G1")
+
+        assert [%{viable: false, fuel_budget: nil} = candidate] = candidates
+        assert "navigation_budget_unavailable" in candidate.reasons
+      end
+    end
+  end
+
   describe "navigate_intent/3" do
     test "jumps through connected complete gates and completes from a fresh Ship read" do
       agent = agent_fixture()
