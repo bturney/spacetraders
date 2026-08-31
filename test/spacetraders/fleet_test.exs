@@ -4276,6 +4276,157 @@ defmodule SpaceTraders.FleetTest do
   end
 
   describe "navigate_intent/3" do
+    test "jumps through connected complete gates and completes from a fresh Ship read" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+      test_pid = self()
+      {:ok, state} = Agent.start_link(fn -> %{jumped?: false} end)
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        send(test_pid, {:request, conn.request_path, conn.method})
+
+        case {conn.request_path, conn.method} do
+          {"/v2/my/ships/FLEET-SHIP", "GET"} ->
+            destination = if Agent.get(state, & &1.jumped?), do: "X2-UX81-G1", else: "X1-UX81-G1"
+            system = if destination == "X2-UX81-G1", do: "X2-UX81", else: "X1-UX81"
+
+            Req.Test.json(conn, %{
+              "data" =>
+                ship_body("FLEET-SHIP", %{
+                  "nav" => nav_body("IN_ORBIT", destination: destination, systemSymbol: system)
+                })
+            })
+
+          {"/v2/my/agent", "GET"} ->
+            Req.Test.json(conn, %{"data" => %{"symbol" => agent.symbol, "credits" => 42_000}})
+
+          {"/v2/systems/X1-UX81/waypoints", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => [
+                %{
+                  "symbol" => "X1-UX81-G1",
+                  "systemSymbol" => "X1-UX81",
+                  "type" => "JUMP_GATE"
+                }
+              ]
+            })
+
+          {"/v2/systems/X1-UX81/waypoints/X1-UX81-G1/market", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => %{
+                "symbol" => "X1-UX81-G1",
+                "tradeGoods" => [%{"symbol" => "ANTIMATTER", "purchasePrice" => 1_000}]
+              }
+            })
+
+          {"/v2/systems/X1-UX81/waypoints", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => [
+                %{
+                  "symbol" => "X1-UX81-G1",
+                  "systemSymbol" => "X1-UX81",
+                  "type" => "JUMP_GATE"
+                }
+              ]
+            })
+
+          {"/v2/systems/X1-UX81/waypoints/X1-UX81-G1/construction", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => %{"symbol" => "X1-UX81-G1", "isComplete" => true, "materials" => []}
+            })
+
+          {"/v2/systems/X1-UX81/waypoints/X1-UX81-G1/jump-gate", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => %{"symbol" => "X1-UX81-G1", "connections" => ["X2-UX81-G1"]}
+            })
+
+          {"/v2/systems/X2-UX81/waypoints/X2-UX81-G1/construction", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => %{"symbol" => "X2-UX81-G1", "isComplete" => true, "materials" => []}
+            })
+
+          {"/v2/systems/X2-UX81/waypoints/X2-UX81-G1/jump-gate", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => %{"symbol" => "X2-UX81-G1", "connections" => ["X1-UX81-G1"]}
+            })
+
+          {"/v2/my/ships/FLEET-SHIP/jump", "POST"} ->
+            assert conn.body_params == %{"waypointSymbol" => "X2-UX81-G1"}
+            Agent.update(state, &%{&1 | jumped?: true})
+
+            Req.Test.json(conn, %{
+              "data" => %{
+                "nav" => nav_body("IN_ORBIT", destination: "X2-UX81-G1", systemSymbol: "X2-UX81"),
+                "cooldown" => %{"shipSymbol" => "FLEET-SHIP", "remainingSeconds" => 60},
+                "transaction" => %{"pricePerUnit" => 1_000, "totalPrice" => 1_000},
+                "agent" => %{"symbol" => agent.symbol, "credits" => 41_000}
+              }
+            })
+        end
+      end)
+
+      assert {:ok, %ManualIntent{status: "completed", last_action_result: evidence}} =
+               Fleet.navigate_intent(agent, "FLEET-SHIP", "X2-UX81-G1")
+
+      assert evidence["kind"] == "jump"
+      assert evidence["transaction"]["total_price"] == 1_000
+      assert_receive {:request, "/v2/my/ships/FLEET-SHIP/jump", "POST"}
+    end
+
+    test "blocks an incomplete jump-gate endpoint without dispatching a jump" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+      test_pid = self()
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        send(test_pid, {:request, conn.request_path, conn.method})
+
+        case {conn.request_path, conn.method} do
+          {"/v2/my/ships/FLEET-SHIP", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" =>
+                ship_body("FLEET-SHIP", %{
+                  "nav" => nav_body("IN_ORBIT", destination: "X1-UX81-G1")
+                })
+            })
+
+          {"/v2/systems/X1-UX81/waypoints", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => [
+                %{
+                  "symbol" => "X1-UX81-G1",
+                  "systemSymbol" => "X1-UX81",
+                  "type" => "JUMP_GATE"
+                }
+              ]
+            })
+
+          {"/v2/systems/X1-UX81/waypoints/X1-UX81-G1/jump-gate", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => %{"symbol" => "X1-UX81-G1", "connections" => ["X2-UX81-G1"]}
+            })
+
+          {"/v2/systems/X1-UX81/waypoints/X1-UX81-G1/construction", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => %{"symbol" => "X1-UX81-G1", "isComplete" => false, "materials" => []}
+            })
+        end
+      end)
+
+      assert {:ok, %ManualIntent{status: "blocked", blocker: blocker}} =
+               Fleet.navigate_intent(agent, "FLEET-SHIP", "X2-UX81-G1")
+
+      assert blocker.reason == "jump_gate_incomplete"
+
+      assert blocker.corrective_actions == [
+               "inspect_construction",
+               "supply_construction",
+               "resume"
+             ]
+
+      refute_received {:request, "/v2/my/ships/FLEET-SHIP/jump", "POST"}
+    end
+
     test "persists the active Job pause before Navigate dispatches a mutating request" do
       agent = agent_fixture()
       ship_fixture(agent, "FLEET-SHIP")

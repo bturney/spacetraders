@@ -1341,7 +1341,15 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
             })
 
           {"/v2/systems/X1-UX81/waypoints", "GET"} ->
-            Req.Test.json(conn, %{"data" => []})
+            Req.Test.json(conn, %{
+              "data" => [
+                %{
+                  "symbol" => "X1-UX81-G1",
+                  "systemSymbol" => "X1-UX81",
+                  "type" => "JUMP_GATE"
+                }
+              ]
+            })
         end
       end)
 
@@ -2689,6 +2697,90 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       assert html =~ "Waypoint symbol"
       assert html =~ "This ship is in transit; actions resume on arrival."
       assert has_element?(lv, ~s([data-manual-intent="waiting"]))
+    end
+
+    test "previews a remote jump before it dispatches", %{conn: conn, operator: operator} do
+      agent = agent_fixture(operator)
+      test_pid = self()
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        send(test_pid, {:request, conn.request_path, conn.method})
+
+        case {conn.request_path, conn.method} do
+          {"/v2/my/agent", "GET"} ->
+            Req.Test.json(conn, %{"data" => agent_overview_body(agent.symbol)})
+
+          {"/v2/my/contracts", "GET"} ->
+            Req.Test.json(conn, %{"data" => []})
+
+          {"/v2/my/ships", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => [
+                ship_body("ORBITALIST-1", %{
+                  "nav" => nav_body("IN_ORBIT", destination: "X1-UX81-G1")
+                })
+              ]
+            })
+
+          {"/v2/my/ships/ORBITALIST-1", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" =>
+                ship_body("ORBITALIST-1", %{
+                  "nav" => nav_body("IN_ORBIT", destination: "X1-UX81-G1")
+                })
+            })
+
+          {"/v2/systems/X1-UX81/waypoints/X1-UX81-G1/construction", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => %{"symbol" => "X1-UX81-G1", "isComplete" => true, "materials" => []}
+            })
+
+          {"/v2/systems/X1-UX81/waypoints/X1-UX81-G1/jump-gate", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => %{"symbol" => "X1-UX81-G1", "connections" => ["X2-UX81-G1"]}
+            })
+
+          {"/v2/systems/X2-UX81/waypoints/X2-UX81-G1/construction", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => %{"symbol" => "X2-UX81-G1", "isComplete" => true, "materials" => []}
+            })
+
+          {"/v2/systems/X2-UX81/waypoints/X2-UX81-G1/jump-gate", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => %{"symbol" => "X2-UX81-G1", "connections" => ["X1-UX81-G1"]}
+            })
+
+          {"/v2/systems/X1-UX81/waypoints/X1-UX81-G1/market", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => %{
+                "symbol" => "X1-UX81-G1",
+                "tradeGoods" => [%{"symbol" => "ANTIMATTER", "purchasePrice" => 1_000}]
+              }
+            })
+
+          {"/v2/systems/X1-UX81/waypoints", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => [
+                %{
+                  "symbol" => "X1-UX81-G1",
+                  "systemSymbol" => "X1-UX81",
+                  "type" => "JUMP_GATE"
+                }
+              ]
+            })
+        end
+      end)
+
+      {:ok, lv, _html} = live(conn, ~p"/")
+
+      lv
+      |> element("form[phx-submit=\"navigate\"]")
+      |> render_submit(%{symbol: "ORBITALIST-1", waypoint_symbol: "X2-UX81-G1"})
+
+      assert has_element?(lv, "[data-jump-preview]", "Jump route ready for review")
+      assert has_element?(lv, "[data-jump-preview]", "X1-UX81-G1 to X2-UX81-G1")
+      assert has_element?(lv, "[data-jump-preview]", "1000 credits for one antimatter charge.")
+      refute_received {:request, "/v2/my/ships/ORBITALIST-1/jump", "POST"}
     end
 
     test "keeps outcome-level Navigate available during a live cooldown and waits it out", %{
