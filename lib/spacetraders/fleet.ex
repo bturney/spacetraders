@@ -2541,8 +2541,10 @@ defmodule SpaceTraders.Fleet do
     with true <- is_binary(system),
          {:ok, job} <- scan_explorer_waypoints(agent, token, job, live_ship),
          {:ok, waypoints} <- fetch_waypoint_pages(token, system),
+         :ok <- ensure_explorer_waypoints(waypoints),
          {:ok, job} <- acquire_explorer_baseline(agent, token, job, live_ship, system, waypoints),
          {:ok, final_waypoints} <- fetch_waypoint_pages(token, system),
+         :ok <- ensure_explorer_waypoints(final_waypoints),
          {:ok, job} <-
            acquire_explorer_baseline(agent, token, job, live_ship, system, final_waypoints) do
       coverage = Intelligence.waypoint_coverage(agent, system, final_waypoints)
@@ -2643,6 +2645,9 @@ defmodule SpaceTraders.Fleet do
         end
     end
   end
+
+  defp ensure_explorer_waypoints([]), do: {:error, :target_system_waypoints_unavailable}
+  defp ensure_explorer_waypoints(_waypoints), do: :ok
 
   defp sensor_capability?(%{mounts: mounts}) do
     Enum.any?(mounts || [], &String.starts_with?(&1.symbol || "", "MOUNT_SENSOR_ARRAY"))
@@ -7577,6 +7582,9 @@ defmodule SpaceTraders.Fleet do
 
   defp blocker_summary(:ambiguous_jump_evidence),
     do: "The jump response is ambiguous; authoritative Ship state did not confirm arrival."
+
+  defp blocker_summary(:target_system_waypoints_unavailable),
+    do: "System Exploration Job cannot progress: target system waypoints are unavailable."
 
   defp blocker_summary(reason), do: "Miner Job cannot progress: #{blocker_reason(reason)}."
 

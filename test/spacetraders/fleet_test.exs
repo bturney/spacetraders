@@ -3563,6 +3563,62 @@ defmodule SpaceTraders.FleetTest do
   end
 
   describe "System Exploration Job" do
+    test "does not complete when the target system has no authoritative waypoints" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case conn.request_path do
+          "/v2/my/ships/FLEET-SHIP" ->
+            Req.Test.json(conn, %{"data" => ship_body("FLEET-SHIP")})
+
+          "/v2/systems/X1-UX81/waypoints" ->
+            if Process.get(:explorer_waypoints_read) do
+              Req.Test.json(conn, %{"data" => []})
+            else
+              Process.put(:explorer_waypoints_read, true)
+
+              Req.Test.json(conn, %{
+                "data" => [
+                  %{
+                    "symbol" => "X1-UX81-A1",
+                    "systemSymbol" => "X1-UX81",
+                    "type" => "ORBITAL_STATION",
+                    "x" => 1,
+                    "y" => 2,
+                    "traits" => []
+                  }
+                ]
+              })
+            end
+
+          "/v2/systems/X1-UX81/waypoints/X1-UX81-A1" ->
+            Req.Test.json(conn, %{
+              "data" => %{
+                "symbol" => "X1-UX81-A1",
+                "systemSymbol" => "X1-UX81",
+                "type" => "ORBITAL_STATION",
+                "x" => 1,
+                "y" => 2,
+                "orbits" => nil,
+                "orbitals" => [],
+                "traits" => [],
+                "modifiers" => [],
+                "isUnderConstruction" => false
+              }
+            })
+        end
+      end)
+
+      assert {:ok, %Job{status: "paused"}} = Fleet.configure_explorer_job(agent, "FLEET-SHIP")
+
+      assert {:error, {:explorer_job_blocked, :target_system_waypoints_unavailable}} =
+               Fleet.start_explorer_job(agent, "FLEET-SHIP")
+
+      assert Repo.get_by!(Job, ship_id: Repo.get_by!(Ship, symbol: "FLEET-SHIP").id).status ==
+               "blocked"
+    end
+
     test "captures the authoritative current System and completes remote baseline coverage" do
       agent = agent_fixture()
       ship_fixture(agent, "FLEET-SHIP")

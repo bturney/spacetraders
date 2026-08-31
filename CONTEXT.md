@@ -134,6 +134,10 @@ _Avoid_: script, action plan
 A state-aware request for a Ship to achieve an operational outcome, such as reaching a Waypoint. A Job Policy or the Operator through Manual Control can invoke an Intent. An Intent reconciles authoritative Ship state, may delegate one prerequisite Intent at a time, and performs the necessary game actions; it is not a fixed sequence of API calls. Its active chain, meaningful progress, and in-flight evidence survive app restarts so commands are reconciled rather than replayed.
 _Avoid_: action, macro, script
 
+**Intent State**:
+The shared lifecycle of an Intent. An unfinished Intent may be `active` while it can progress immediately, `waiting` while progress is expected from game state or time, `awaiting_confirmation` while a durable reviewed choice requires Operator authorization, or `blocked` while changed circumstances or Operator action are required. It ends as `completed` only when authoritative state proves its outcome, or `stopped` when its caller safely ends or replaces it. Unresolved game-action evidence prevents stopping or replacement.
+_Avoid_: status (when the lifecycle distinction matters), error (for blocked or awaiting confirmation)
+
 **Navigate Intent**:
 An Intent to reach a requested Waypoint in the current or another System. It reconciles local navigation, jump, and warp paths from authoritative state, makes required posture and refueling work explicit, and blocks with corrective options rather than silently starting prerequisite Jobs. It is reusable by a Job Policy and through Manual Control.
 _Avoid_: Navigate Job, route script
