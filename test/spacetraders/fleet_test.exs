@@ -4342,9 +4342,6 @@ defmodule SpaceTraders.FleetTest do
 
       assert {:ok, preview} = Fleet.jump_preview(agent, "FLEET-SHIP", "X2-UX81-G1")
 
-      assert {:error, :jump_flight_mode_stale} =
-               Fleet.jump_preview(agent, "FLEET-SHIP", "X2-UX81-G1", "BURN")
-
       Agent.update(state, &%{&1 | waypoint: "X1-UX81-A2"})
 
       assert {:error, :jump_preview_stale} =
@@ -4352,7 +4349,10 @@ defmodule SpaceTraders.FleetTest do
                  agent,
                  "FLEET-SHIP",
                  "X2-UX81-G1",
-                 Map.new(preview, fn {key, value} -> {to_string(key), to_string(value)} end)
+                 Map.new(preview, fn {key, value} ->
+                   {to_string(key),
+                    if(is_list(value), do: inspect(value), else: to_string(value))}
+                 end)
                )
     end
 

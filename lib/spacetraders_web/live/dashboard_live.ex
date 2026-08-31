@@ -210,7 +210,7 @@ defmodule SpaceTradersWeb.DashboardLive do
         if params["confirm_jump"] == "true" do
           Fleet.confirm_jump_intent(agent, ship_symbol, waypoint, params)
         else
-          case Fleet.jump_preview(agent, ship_symbol, waypoint, params["flight_mode"]) do
+          case Fleet.jump_preview(agent, ship_symbol, waypoint) do
             {:ok, preview} -> {:preview, preview}
             {:error, :same_system_route} -> Fleet.navigate_intent(agent, ship_symbol, waypoint)
             {:error, reason} -> Fleet.block_jump_preview(agent, ship_symbol, waypoint, reason)
@@ -3218,27 +3218,6 @@ defmodule SpaceTradersWeb.DashboardLive do
           >
             <option :for={destination <- destination_history(@ship)} value={destination} />
           </datalist>
-          <select
-            name="flight_mode"
-            class="select select-bordered select-sm min-h-11 w-24 font-mono"
-            aria-label="Jump prerequisite flight mode"
-          >
-            <option
-              :for={mode <- ["DRIFT", "STEALTH", "CRUISE", "BURN"]}
-              value={mode}
-              selected={
-                draft_field(
-                  @form_drafts,
-                  "navigate",
-                  [@ship.symbol],
-                  "flight_mode",
-                  flight_mode(@ship)
-                ) == mode
-              }
-            >
-              {mode}
-            </option>
-          </select>
           <.action_tooltip reason={action_reason(ship_action_state(@ship, :navigate))}>
             <button
               type="submit"

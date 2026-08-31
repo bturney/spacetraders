@@ -2773,8 +2773,6 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
 
       {:ok, lv, _html} = live(conn, ~p"/")
 
-      assert has_element?(lv, "select[name=\"flight_mode\"] option[value=\"BURN\"]")
-
       lv
       |> element("form[phx-submit=\"navigate\"]")
       |> render_submit(%{symbol: "ORBITALIST-1", waypoint_symbol: "X2-UX81-G1"})

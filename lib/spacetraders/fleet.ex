@@ -2864,8 +2864,7 @@ defmodule SpaceTraders.Fleet do
 
   @doc "Dispatches a reviewed jump route only when its fresh authority still matches the preview."
   def confirm_jump_intent(agent, ship_symbol, waypoint, preview) when is_map(preview) do
-    with {:ok, fresh_preview} <-
-           jump_preview(agent, ship_symbol, waypoint, preview["flight_mode"]),
+    with {:ok, fresh_preview} <- jump_preview(agent, ship_symbol, waypoint),
          true <- reviewed_jump_matches?(preview, fresh_preview) || {:error, :jump_preview_stale} do
       navigate_intent(agent, ship_symbol, waypoint)
     else
@@ -2898,10 +2897,7 @@ defmodule SpaceTraders.Fleet do
   end
 
   @doc "Reads the authoritative prerequisites for a direct jump-gate route without mutation."
-  def jump_preview(agent, ship_symbol, waypoint),
-    do: jump_preview(agent, ship_symbol, waypoint, nil)
-
-  def jump_preview(%AgentRecord{agent_token: token} = agent, ship_symbol, waypoint, flight_mode)
+  def jump_preview(%AgentRecord{agent_token: token} = agent, ship_symbol, waypoint)
       when is_binary(token) and token != "" do
     waypoint = String.trim(waypoint || "")
 
@@ -2909,10 +2905,10 @@ defmodule SpaceTraders.Fleet do
          {:ok, ship} <- owned_ship(agent, ship_symbol),
          {:ok, live_ship} <-
            Agent.handle_game_result(agent, SpaceTraders.API.get_ship(token, ship.symbol)),
-         :ok <- reviewed_flight_mode(live_ship.nav.flight_mode, flight_mode),
          true <- remote_waypoint?(live_ship.nav.waypoint_symbol, waypoint),
          {:ok, source_system} <- system_from_headquarters(live_ship.nav.waypoint_symbol),
          {:ok, destination_system} <- system_from_headquarters(waypoint),
+         {:ok, candidates} <- jump_origin_candidates(agent, source_system, waypoint),
          {:ok, origin_gate} <- jump_origin_for(agent, source_system, waypoint),
          :ok <-
            validate_jump_route(
@@ -2931,7 +2927,8 @@ defmodule SpaceTraders.Fleet do
          source_waypoint: origin_gate,
          destination_waypoint: waypoint,
          flight_mode: live_ship.nav.flight_mode,
-         cooldown_seconds: live_ship.cooldown.remaining_seconds
+         cooldown_seconds: live_ship.cooldown.remaining_seconds,
+         candidates: candidates
        })}
     else
       false -> {:error, :same_system_route}
@@ -2940,18 +2937,7 @@ defmodule SpaceTraders.Fleet do
     end
   end
 
-  def jump_preview(%AgentRecord{}, _ship_symbol, _waypoint, _flight_mode),
-    do: {:error, :agent_token_missing}
-
-  defp reviewed_flight_mode(live_mode, nil)
-       when live_mode in ["DRIFT", "STEALTH", "CRUISE", "BURN"],
-       do: :ok
-
-  defp reviewed_flight_mode(live_mode, live_mode)
-       when live_mode in ["DRIFT", "STEALTH", "CRUISE", "BURN"],
-       do: :ok
-
-  defp reviewed_flight_mode(_live_mode, _selected_mode), do: {:error, :jump_flight_mode_stale}
+  def jump_preview(%AgentRecord{}, _ship_symbol, _waypoint), do: {:error, :agent_token_missing}
 
   @doc "Starts a durable Buy Goods Intent at a specified Market."
   def buy_goods_intent(agent, ship_symbol, waypoint, trade_symbol, units, opts \\ []) do
@@ -4619,6 +4605,61 @@ defmodule SpaceTraders.Fleet do
              end
            end) || {:error, :jump_gate_connection_unavailable} do
       {:ok, gate.symbol}
+    end
+  end
+
+  # Keep every discovered gate visible to Manual Control. A connection read can
+  # fail independently, so rejection remains evidence rather than omission.
+  defp jump_origin_candidates(agent, system, destination) do
+    with {:ok, waypoints} <-
+           SpaceTraders.API.get_waypoints(agent.agent_token, system, type: "JUMP_GATE") do
+      candidates =
+        Enum.map(waypoints, fn waypoint ->
+          construction =
+            case waypoint_construction(agent, waypoint) do
+              {:ok, %{is_complete: true}} -> "complete"
+              {:ok, _} -> "incomplete"
+              {:error, _} -> "unknown"
+            end
+
+          case waypoint_jump_gate(agent, waypoint) do
+            {:ok, %{connections: connections}} ->
+              connected? = destination in connections
+
+              reasons =
+                []
+                |> then(
+                  if(construction == "complete",
+                    do: & &1,
+                    else: &["construction_#{construction}" | &1]
+                  )
+                )
+                |> then(if(connected?, do: & &1, else: &["not_connected" | &1]))
+
+              %{
+                waypoint: waypoint.symbol,
+                construction: construction,
+                connection: if(connected?, do: "connected", else: "not_connected"),
+                intelligence: "available",
+                resource: "unreviewed",
+                viable: reasons == [],
+                reasons: Enum.reverse(reasons)
+              }
+
+            {:error, reason} ->
+              %{
+                waypoint: waypoint.symbol,
+                construction: construction,
+                connection: "unknown",
+                intelligence: "unavailable",
+                resource: "unreviewed",
+                viable: false,
+                reasons: [to_string(reason)]
+              }
+          end
+        end)
+
+      {:ok, candidates}
     end
   end
 
