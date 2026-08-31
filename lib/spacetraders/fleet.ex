@@ -2886,10 +2886,14 @@ defmodule SpaceTraders.Fleet do
   end
 
   defp reviewed_jump_matches?(reviewed, fresh) do
-    reviewed["source_waypoint"] == fresh.source_waypoint and
+    reviewed["ship_symbol"] == fresh.ship_symbol and
+      reviewed["current_waypoint"] == fresh.current_waypoint and
+      reviewed["source_waypoint"] == fresh.source_waypoint and
       reviewed["destination_waypoint"] == fresh.destination_waypoint and
       reviewed["flight_mode"] == fresh.flight_mode and
-      reviewed["antimatter_cost"] == to_string(fresh.antimatter_cost)
+      reviewed["credits"] == to_string(fresh.credits) and
+      reviewed["antimatter_cost"] == to_string(fresh.antimatter_cost) and
+      reviewed["cooldown_seconds"] == to_string(fresh.cooldown_seconds || 0)
   end
 
   @doc "Reads the authoritative prerequisites for a direct jump-gate route without mutation."
@@ -2904,6 +2908,7 @@ defmodule SpaceTraders.Fleet do
          true <- remote_waypoint?(live_ship.nav.waypoint_symbol, waypoint),
          {:ok, source_system} <- system_from_headquarters(live_ship.nav.waypoint_symbol),
          {:ok, destination_system} <- system_from_headquarters(waypoint),
+         {:ok, candidates} <- jump_origin_candidates(agent, source_system, waypoint),
          {:ok, origin_gate} <- jump_origin_for(agent, source_system, waypoint),
          :ok <-
            validate_jump_route(
@@ -2922,7 +2927,8 @@ defmodule SpaceTraders.Fleet do
          source_waypoint: origin_gate,
          destination_waypoint: waypoint,
          flight_mode: live_ship.nav.flight_mode,
-         cooldown_seconds: live_ship.cooldown.remaining_seconds
+         cooldown_seconds: live_ship.cooldown.remaining_seconds,
+         candidates: candidates
        })}
     else
       false -> {:error, :same_system_route}
@@ -4599,6 +4605,61 @@ defmodule SpaceTraders.Fleet do
              end
            end) || {:error, :jump_gate_connection_unavailable} do
       {:ok, gate.symbol}
+    end
+  end
+
+  # Keep every discovered gate visible to Manual Control. A connection read can
+  # fail independently, so rejection remains evidence rather than omission.
+  defp jump_origin_candidates(agent, system, destination) do
+    with {:ok, waypoints} <-
+           SpaceTraders.API.get_waypoints(agent.agent_token, system, type: "JUMP_GATE") do
+      candidates =
+        Enum.map(waypoints, fn waypoint ->
+          construction =
+            case waypoint_construction(agent, waypoint) do
+              {:ok, %{is_complete: true}} -> "complete"
+              {:ok, _} -> "incomplete"
+              {:error, _} -> "unknown"
+            end
+
+          case waypoint_jump_gate(agent, waypoint) do
+            {:ok, %{connections: connections}} ->
+              connected? = destination in connections
+
+              reasons =
+                []
+                |> then(
+                  if(construction == "complete",
+                    do: & &1,
+                    else: &["construction_#{construction}" | &1]
+                  )
+                )
+                |> then(if(connected?, do: & &1, else: &["not_connected" | &1]))
+
+              %{
+                waypoint: waypoint.symbol,
+                construction: construction,
+                connection: if(connected?, do: "connected", else: "not_connected"),
+                intelligence: "available",
+                resource: "unreviewed",
+                viable: reasons == [],
+                reasons: Enum.reverse(reasons)
+              }
+
+            {:error, reason} ->
+              %{
+                waypoint: waypoint.symbol,
+                construction: construction,
+                connection: "unknown",
+                intelligence: "unavailable",
+                resource: "unreviewed",
+                viable: false,
+                reasons: [to_string(reason)]
+              }
+          end
+        end)
+
+      {:ok, candidates}
     end
   end
 

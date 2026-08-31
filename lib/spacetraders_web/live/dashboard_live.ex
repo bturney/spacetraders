@@ -3251,6 +3251,8 @@ defmodule SpaceTradersWeb.DashboardLive do
           <form phx-submit="navigate" phx-value-symbol={@ship.symbol} class="mt-3">
             <input type="hidden" name="waypoint_symbol" value={@jump_preview.destination_waypoint} />
             <input type="hidden" name="confirm_jump" value="true" />
+            <input type="hidden" name="ship_symbol" value={@jump_preview.ship_symbol} />
+            <input type="hidden" name="current_waypoint" value={@jump_preview.current_waypoint} />
             <input type="hidden" name="source_waypoint" value={@jump_preview.source_waypoint} />
             <input
               type="hidden"
@@ -3258,7 +3260,13 @@ defmodule SpaceTradersWeb.DashboardLive do
               value={@jump_preview.destination_waypoint}
             />
             <input type="hidden" name="flight_mode" value={@jump_preview.flight_mode} />
+            <input type="hidden" name="credits" value={@jump_preview.credits} />
             <input type="hidden" name="antimatter_cost" value={@jump_preview.antimatter_cost} />
+            <input
+              type="hidden"
+              name="cooldown_seconds"
+              value={@jump_preview.cooldown_seconds || 0}
+            />
             <button type="submit" class="btn btn-primary btn-sm">Confirm jump</button>
           </form>
         </section>
