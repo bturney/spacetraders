@@ -2911,28 +2911,56 @@ defmodule SpaceTraders.Fleet do
   end
 
   defp reviewed_jump_matches?(reviewed, fresh) do
-    reviewed_value(reviewed, :ship_symbol) == fresh.ship_symbol and
+    canonical_preview_value(reviewed_value(reviewed, :ship_symbol)) == fresh.ship_symbol and
       reviewed_value(reviewed, :current_waypoint) == fresh.current_waypoint and
       reviewed_value(reviewed, :source_waypoint) == fresh.source_waypoint and
       reviewed_value(reviewed, :destination_waypoint) == fresh.destination_waypoint and
-      reviewed_value(reviewed, :flight_mode) == fresh.flight_mode and
+      canonical_preview_value(reviewed_value(reviewed, :flight_mode)) == fresh.flight_mode and
       integer_reviewed_value(reviewed, :credits) == fresh.credits and
       integer_reviewed_value(reviewed, :antimatter_cost) == fresh.antimatter_cost and
       integer_reviewed_value(reviewed, :cooldown_seconds) == (fresh.cooldown_seconds || 0) and
-      reviewed_value(reviewed, :fuel_budget) == fresh.fuel_budget and
-      reviewed_value(reviewed, :time_budget_seconds) == fresh.time_budget_seconds and
-      reviewed_value(reviewed, :candidates) == fresh.candidates
+      canonical_preview_value(reviewed_value(reviewed, :fuel_budget)) ==
+        canonical_preview_value(fresh.fuel_budget) and
+      canonical_preview_value(reviewed_value(reviewed, :time_budget_seconds)) ==
+        fresh.time_budget_seconds and
+      canonical_preview_value(reviewed_value(reviewed, :candidates)) ==
+        canonical_preview_value(fresh.candidates)
   end
 
   defp reviewed_value(map, key), do: Map.get(map, key, Map.get(map, Atom.to_string(key)))
 
   defp integer_reviewed_value(map, key) do
     case reviewed_value(map, key) do
-      value when is_integer(value) -> value
-      value when is_binary(value) -> String.to_integer(value)
-      _ -> nil
+      value when is_integer(value) ->
+        value
+
+      value when is_binary(value) ->
+        case Integer.parse(value) do
+          {integer, ""} -> integer
+          _ -> nil
+        end
+
+      _ ->
+        nil
     end
   end
+
+  defp canonical_preview_value(value) when is_map(value) do
+    value
+    |> Enum.map(fn {key, value} ->
+      {canonical_preview_key(key), canonical_preview_value(value)}
+    end)
+    |> Map.new()
+  end
+
+  defp canonical_preview_value(value) when is_list(value),
+    do: Enum.map(value, &canonical_preview_value/1)
+
+  defp canonical_preview_value(value), do: value
+
+  defp canonical_preview_key(key) when is_binary(key), do: key
+  defp canonical_preview_key(key) when is_atom(key), do: Atom.to_string(key)
+  defp canonical_preview_key(_key), do: "__malformed_key__"
 
   @doc "Reads the authoritative prerequisites for a direct jump-gate route without mutation."
   def jump_preview(%AgentRecord{agent_token: token} = agent, ship_symbol, waypoint)
@@ -2943,9 +2971,20 @@ defmodule SpaceTraders.Fleet do
          {:ok, ship} <- owned_ship(agent, ship_symbol),
          {:ok, live_ship} <-
            Agent.handle_game_result(agent, SpaceTraders.API.get_ship(token, ship.symbol)),
-         :ok <- validate_jump_flight_mode(live_ship.nav.flight_mode),
-         true <- remote_waypoint?(live_ship.nav.waypoint_symbol, waypoint),
-         {:ok, source_system} <- system_from_headquarters(live_ship.nav.waypoint_symbol),
+         :ok <- validate_jump_flight_mode(live_ship.nav.flight_mode) do
+      if remote_waypoint?(live_ship.nav.waypoint_symbol, waypoint),
+        do: remote_jump_preview(agent, ship, live_ship, waypoint),
+        else: {:error, :same_system_route}
+    else
+      {:error, _reason} = error -> error
+      error -> {:error, error}
+    end
+  end
+
+  def jump_preview(%AgentRecord{}, _ship_symbol, _waypoint), do: {:error, :agent_token_missing}
+
+  defp remote_jump_preview(agent, ship, live_ship, waypoint) do
+    with {:ok, source_system} <- system_from_headquarters(live_ship.nav.waypoint_symbol),
          {:ok, destination_system} <- system_from_headquarters(waypoint),
          {:ok, candidates} <- jump_origin_candidates(agent, source_system, waypoint),
          {:ok, origin_gate} <- viable_jump_origin(candidates),
@@ -2958,17 +2997,19 @@ defmodule SpaceTraders.Fleet do
              waypoint
            ),
          {:ok, preflight} <-
-           jump_cost_preflight(agent, source_system, origin_gate) do
-      leg_budget =
-        jump_leg_budget(
-          live_ship.nav.waypoint_symbol,
-          origin_gate,
-          candidates,
-          live_ship.nav.flight_mode
-        )
-
+           jump_cost_preflight(agent, source_system, origin_gate),
+         {:ok, leg_budget} <-
+           jump_leg_budget_for_route(
+             agent,
+             live_ship.nav.waypoint_symbol,
+             origin_gate,
+             route_candidates(candidates, live_ship),
+             live_ship.nav.flight_mode,
+             live_ship.engine
+           ) do
       if insufficient_jump_fuel?(live_ship, leg_budget) do
-        {:error, {:insufficient_fuel, leg_budget.fuel}}
+        rejected_candidates = Enum.map(candidates, &Map.put(&1, :fuel_budget, leg_budget))
+        {:error, {:jump_route_candidates, :insufficient_fuel, rejected_candidates}}
       else
         {:ok,
          Map.merge(preflight, %{
@@ -2979,24 +3020,12 @@ defmodule SpaceTraders.Fleet do
            flight_mode: live_ship.nav.flight_mode,
            cooldown_seconds: live_ship.cooldown.remaining_seconds,
            fuel_budget: leg_budget,
-           time_budget_seconds:
-             jump_leg_time_budget(
-               live_ship.nav.waypoint_symbol,
-               origin_gate,
-               candidates,
-               live_ship.nav.flight_mode
-             ),
+           time_budget_seconds: leg_budget && leg_budget.time,
            candidates: candidates
          })}
       end
-    else
-      false -> {:error, :same_system_route}
-      {:error, _reason} = error -> error
-      error -> {:error, error}
     end
   end
-
-  def jump_preview(%AgentRecord{}, _ship_symbol, _waypoint), do: {:error, :agent_token_missing}
 
   defp validate_jump_flight_mode(mode) when mode in ["DRIFT", "STEALTH", "CRUISE", "BURN"],
     do: :ok
@@ -4680,22 +4709,79 @@ defmodule SpaceTraders.Fleet do
     end
   end
 
-  defp jump_leg_budget(current, origin, candidates, mode) do
+  defp jump_leg_budget(current, origin, candidates, mode, engine) do
     with %{x: x1, y: y1} <- Enum.find(candidates, &(&1.waypoint == current)),
          %{x: x2, y: y2} <- Enum.find(candidates, &(&1.waypoint == origin)),
          distance when is_number(distance) <- waypoint_distance(x1, y1, x2, y2) do
-      %{mode: mode, distance: distance, fuel: flight_mode_fuel(mode, distance)}
+      navigation_leg_budget(%{x: x1, y: y1}, %{x: x2, y: y2}, engine, mode)
     else
-      _ -> nil
+      _ -> {:error, :navigation_budget_unavailable}
     end
   end
 
-  defp jump_leg_time_budget(current, origin, candidates, mode) do
-    case jump_leg_budget(current, origin, candidates, mode) do
-      %{distance: distance} -> round(distance * flight_mode_time_factor(mode))
-      _ -> nil
+  defp jump_leg_budget_for_route(agent, current, origin, candidates, mode, engine) do
+    if Enum.any?(candidates, &(&1.waypoint == current)) do
+      case jump_leg_budget(current, origin, candidates, mode, engine) do
+        {:ok, budget} -> {:ok, budget}
+        {:error, reason} -> {:error, reason}
+      end
+    else
+      with {:ok, system} <- system_from_headquarters(current),
+           {:ok, current_waypoint} <- authoritative_waypoint(agent, system, current),
+           {:ok, origin_waypoint} <- authoritative_candidate(candidates, origin),
+           {:ok, budget} <- navigation_leg_budget(current_waypoint, origin_waypoint, engine, mode) do
+        {:ok, budget}
+      end
     end
   end
+
+  defp authoritative_candidate(candidates, symbol) do
+    case Enum.find(candidates, &(&1.waypoint == symbol)) do
+      %{x: x, y: y} when is_number(x) and is_number(y) -> {:ok, %{x: x, y: y}}
+      _ -> {:error, :navigation_coordinates_unavailable}
+    end
+  end
+
+  defp route_candidates(candidates, live_ship) do
+    route_waypoint = live_ship.nav.route && live_ship.nav.route.destination
+
+    Enum.map(candidates, fn candidate ->
+      if ((candidate.waypoint == live_ship.nav.waypoint_symbol and
+             route_waypoint) && route_waypoint.symbol == candidate.waypoint) and
+           is_number(route_waypoint.x) and is_number(route_waypoint.y) do
+        %{candidate | x: route_waypoint.x, y: route_waypoint.y}
+      else
+        candidate
+      end
+    end)
+  end
+
+  defp authoritative_waypoint(agent, system, symbol) do
+    case SpaceTraders.API.get_waypoint(agent.agent_token, system, symbol) do
+      {:ok, waypoint} ->
+        if is_number(waypoint.x) and is_number(waypoint.y),
+          do: {:ok, waypoint},
+          else: {:error, :navigation_coordinates_unavailable}
+
+      {:error, _reason} ->
+        {:error, :navigation_waypoint_unavailable}
+    end
+  end
+
+  defp navigation_leg_budget(source, destination, engine, mode) do
+    with distance when is_integer(distance) <-
+           waypoint_distance(source.x, source.y, destination.x, destination.y),
+         speed when is_number(speed) and speed > 0 <- engine_speed(engine),
+         fuel when is_integer(fuel) <- flight_mode_fuel(mode, distance) do
+      time = ceil(distance * flight_mode_time_factor(mode) / speed)
+      {:ok, %{mode: mode, distance: distance, fuel: fuel, time: time}}
+    else
+      _ -> {:error, :navigation_budget_unavailable}
+    end
+  end
+
+  defp engine_speed(%{speed: speed}), do: speed
+  defp engine_speed(_engine), do: nil
 
   defp insufficient_jump_fuel?(%{fuel: %{current: current}}, %{fuel: needed})
        when is_integer(current) and is_integer(needed),
@@ -4753,8 +4839,8 @@ defmodule SpaceTraders.Fleet do
 
       nil ->
         case Enum.find(candidates, &("construction_incomplete" in &1.reasons)) do
-          %{waypoint: waypoint} ->
-            {:error, {:jump_gate_incomplete, waypoint}}
+          %{waypoint: _waypoint} ->
+            {:error, {:jump_route_candidates, :jump_gate_incomplete, candidates}}
 
           nil ->
             cond do

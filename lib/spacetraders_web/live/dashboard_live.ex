@@ -216,9 +216,29 @@ defmodule SpaceTradersWeb.DashboardLive do
           )
         else
           case Fleet.jump_preview(agent, ship_symbol, waypoint) do
-            {:ok, preview} -> {:preview, preview}
-            {:error, :same_system_route} -> Fleet.navigate_intent(agent, ship_symbol, waypoint)
-            {:error, reason} -> Fleet.block_jump_preview(agent, ship_symbol, waypoint, reason)
+            {:ok, preview} ->
+              {:preview, preview}
+
+            {:error, :same_system_route} ->
+              Fleet.navigate_intent(agent, ship_symbol, waypoint)
+
+            {:error, {:jump_route_candidates, reason, candidates} = route_reason} ->
+              case Fleet.block_jump_preview(agent, ship_symbol, waypoint, route_reason) do
+                {:ok, intent} ->
+                  {:blocked_preview, candidate_preview(waypoint, candidates, reason), intent}
+
+                other ->
+                  other
+              end
+
+            {:error, reason} ->
+              case Fleet.block_jump_preview(agent, ship_symbol, waypoint, reason) do
+                {:ok, intent} ->
+                  {:blocked_preview, candidate_preview(waypoint, [], reason), intent}
+
+                other ->
+                  other
+              end
           end
         end
 
@@ -228,6 +248,14 @@ defmodule SpaceTradersWeb.DashboardLive do
            socket
            |> assign(:jump_previews, Map.put(socket.assigns.jump_previews, ship_symbol, preview))
            |> put_flash(:info, "Review the jump route before dispatching it.")}
+
+        {:blocked_preview, preview,
+         %{status: "blocked", blocker: blocker, target_waypoint: target}} ->
+          {:noreply,
+           socket
+           |> assign(:jump_previews, Map.put(socket.assigns.jump_previews, ship_symbol, preview))
+           |> refresh_agent_fleet(agent.id)
+           |> put_flash(:error, "Navigate to #{target} blocked: #{blocker_summary(blocker)}")}
 
         {:ok, %{status: "completed", target_waypoint: target}} ->
           {:noreply,
@@ -3270,6 +3298,7 @@ defmodule SpaceTradersWeb.DashboardLive do
             </ul>
           </div>
           <form
+            :if={jump_preview_viable?(@jump_preview)}
             id={"confirm-jump-form-#{@ship.symbol}"}
             phx-submit="navigate"
             phx-value-symbol={@ship.symbol}
@@ -4609,6 +4638,43 @@ defmodule SpaceTradersWeb.DashboardLive do
     do: "#{mode}: #{fuel} fuel, #{time}s"
 
   defp jump_leg_budget_label(_preview), do: "Unavailable from waypoint coordinates"
+
+  defp jump_preview_viable?(%{route_type: "navigate"}), do: true
+  defp jump_preview_viable?(%{candidates: candidates}), do: Enum.any?(candidates, & &1.viable)
+  defp jump_preview_viable?(_), do: false
+
+  defp candidate_preview(waypoint, candidates, reason) do
+    fuel_budget = Enum.find_value(candidates, &Map.get(&1, :fuel_budget))
+
+    candidates =
+      if candidates == [] do
+        [%{waypoint: waypoint, viable: false, reasons: [format_preview_reason(reason)]}]
+      else
+        Enum.map(candidates, fn candidate ->
+          if reason == :insufficient_fuel and candidate.viable do
+            %{candidate | viable: false, reasons: candidate.reasons ++ ["insufficient_fuel"]}
+          else
+            candidate
+          end
+        end)
+      end
+
+    %{
+      source_waypoint: "unknown",
+      destination_waypoint: waypoint,
+      flight_mode: "unknown",
+      credits: 0,
+      antimatter_cost: 0,
+      cooldown_seconds: 0,
+      fuel_budget: fuel_budget,
+      time_budget_seconds: fuel_budget && fuel_budget.time,
+      candidates: candidates
+    }
+  end
+
+  defp format_preview_reason(nil), do: "route_unavailable"
+  defp format_preview_reason(reason) when is_atom(reason), do: Atom.to_string(reason)
+  defp format_preview_reason(_reason), do: "route_unavailable"
 
   defp job_reason(%{
          status: "blocked",
