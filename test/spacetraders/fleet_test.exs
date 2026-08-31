@@ -4319,6 +4319,17 @@ defmodule SpaceTraders.FleetTest do
               }
             })
 
+          {"/v2/systems/X1-UX81/waypoints", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => [
+                %{
+                  "symbol" => "X1-UX81-G1",
+                  "systemSymbol" => "X1-UX81",
+                  "type" => "JUMP_GATE"
+                }
+              ]
+            })
+
           {"/v2/systems/X1-UX81/waypoints/X1-UX81-G1/construction", "GET"} ->
             Req.Test.json(conn, %{
               "data" => %{"symbol" => "X1-UX81-G1", "isComplete" => true, "materials" => []}
@@ -4377,6 +4388,22 @@ defmodule SpaceTraders.FleetTest do
                 ship_body("FLEET-SHIP", %{
                   "nav" => nav_body("IN_ORBIT", destination: "X1-UX81-G1")
                 })
+            })
+
+          {"/v2/systems/X1-UX81/waypoints", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => [
+                %{
+                  "symbol" => "X1-UX81-G1",
+                  "systemSymbol" => "X1-UX81",
+                  "type" => "JUMP_GATE"
+                }
+              ]
+            })
+
+          {"/v2/systems/X1-UX81/waypoints/X1-UX81-G1/jump-gate", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => %{"symbol" => "X1-UX81-G1", "connections" => ["X2-UX81-G1"]}
             })
 
           {"/v2/systems/X1-UX81/waypoints/X1-UX81-G1/construction", "GET"} ->
