@@ -4366,6 +4366,82 @@ defmodule SpaceTraders.FleetTest do
         refute Map.has_key?(preview, :fuel_budget)
       end
     end
+
+    test "warps with an authoritatively installed Warp Drive and persists arrival evidence" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+      arrival = future_iso()
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case {conn.request_path, conn.method} do
+          {"/v2/my/ships/FLEET-SHIP", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" =>
+                ship_body("FLEET-SHIP", %{
+                  "fuel" => %{"capacity" => 200, "current" => 150},
+                  "modules" => [%{"symbol" => "MODULE_WARP_DRIVE_I", "range" => 30}],
+                  "nav" => %{
+                    "systemSymbol" => "X1-UX81",
+                    "waypointSymbol" => "X1-UX81-A1",
+                    "status" => "IN_ORBIT",
+                    "flightMode" => "CRUISE"
+                  }
+                })
+            })
+
+          {"/v2/my/ships/FLEET-SHIP/warp", "POST"} ->
+            assert conn.body_params == %{"waypointSymbol" => "X2-UX81-A3"}
+
+            Req.Test.json(conn, %{
+              "data" => %{
+                "fuel" => %{"capacity" => 200, "current" => 80},
+                "nav" =>
+                  nav_body("IN_TRANSIT",
+                    arrival: arrival,
+                    destination: "X2-UX81-A3",
+                    systemSymbol: "X2-UX81"
+                  )
+              }
+            })
+        end
+      end)
+
+      assert {:ok, preview} = Fleet.warp_preview(agent, "FLEET-SHIP", "X2-UX81-A3")
+      assert preview.warp_drive == "MODULE_WARP_DRIVE_I"
+      assert preview.flight_mode == "CRUISE"
+      assert preview.fuel_current == 150
+
+      assert {:ok, %ManualIntent{status: "waiting", in_flight_action: %{"kind" => "warp"}}} =
+               Fleet.confirm_warp_intent(agent, "FLEET-SHIP", "X2-UX81-A3", preview)
+
+      assert [%Event{event_type: "arrival", payload: %{"destination" => "X2-UX81-A3"}}] =
+               Timeline.pending_events(:ship, "FLEET-SHIP")
+    end
+
+    test "does not infer a Warp Drive from a module symbol not installed on the Ship" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        assert conn.request_path == "/v2/my/ships/FLEET-SHIP"
+
+        Req.Test.json(conn, %{
+          "data" =>
+            ship_body("FLEET-SHIP", %{
+              "modules" => [%{"symbol" => "MODULE_CARGO_HOLD_I"}],
+              "nav" => %{
+                "systemSymbol" => "X1-UX81",
+                "waypointSymbol" => "X1-UX81-A1",
+                "status" => "IN_ORBIT",
+                "flightMode" => "CRUISE"
+              }
+            })
+        })
+      end)
+
+      assert {:error, :warp_drive_missing} =
+               Fleet.warp_preview(agent, "FLEET-SHIP", "X2-UX81-A3")
+    end
   end
 
   describe "navigate_intent/3" do
