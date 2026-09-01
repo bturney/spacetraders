@@ -2906,17 +2906,11 @@ defmodule SpaceTraders.Fleet do
              parameters: %{
                "review_method" => method,
                "reviewed_#{method}" => review
-             }
+             },
+             status: "awaiting_confirmation",
+             review_revision: 1
            }) do
-      {:ok,
-       Repo.update!(
-         Ecto.Changeset.change(intent,
-           status: "awaiting_confirmation",
-           review_revision: 1,
-           in_flight_action: nil,
-           blocker: nil
-         )
-       )}
+      {:ok, intent}
     else
       {:error, %Ecto.Changeset{}} -> {:error, :intents_conflict}
       error -> error
@@ -3040,16 +3034,32 @@ defmodule SpaceTraders.Fleet do
     fresh = stringify_nested_keys(fresh)
 
     if canonical_preview_value(persisted) == canonical_preview_value(fresh) do
-      {:ok, Repo.update!(Ecto.Changeset.change(intent, status: "active"))}
+      case Repo.update_all(
+             from(i in Intent,
+               where:
+                 i.id == ^intent.id and i.status == "awaiting_confirmation" and
+                   i.review_revision == ^intent.review_revision
+             ),
+             set: [status: "active"]
+           ) do
+        {1, _} -> {:ok, Repo.get!(Intent, intent.id)}
+        {0, _} -> {:error, :review_revision_stale}
+      end
     else
-      {:ok,
-       Repo.update!(
-         Ecto.Changeset.change(intent,
-           parameters: Map.put(intent.parameters, key, fresh),
-           review_revision: intent.review_revision + 1,
-           status: "awaiting_confirmation"
-         )
-       )}
+      case Repo.update_all(
+             from(i in Intent,
+               where:
+                 i.id == ^intent.id and i.status == "awaiting_confirmation" and
+                   i.review_revision == ^intent.review_revision
+             ),
+             set: [
+               parameters: Map.put(intent.parameters, key, fresh),
+               review_revision: intent.review_revision + 1
+             ]
+           ) do
+        {1, _} -> {:ok, Repo.get!(Intent, intent.id)}
+        {0, _} -> {:error, :review_revision_stale}
+      end
     end
   end
 
@@ -4661,7 +4671,7 @@ defmodule SpaceTraders.Fleet do
       {:ok, intent} =
         %Intent{ship_id: ship.id}
         |> Intent.changeset(attrs)
-        |> Ecto.Changeset.put_change(:status, "active")
+        |> Ecto.Changeset.put_change(:status, Map.get(attrs, :status, "active"))
         |> Repo.insert()
 
       intent

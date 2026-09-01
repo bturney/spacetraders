@@ -4739,11 +4739,43 @@ defmodule SpaceTradersWeb.DashboardLive do
   defp jump_preview_for_intent(_intent), do: nil
 
   defp atomize_preview(value) when is_map(value) do
-    Map.new(value, fn {key, value} -> {String.to_atom(to_string(key)), atomize_preview(value)} end)
+    Map.new(value, fn {key, value} -> {preview_key(key), atomize_preview(value)} end)
   end
 
   defp atomize_preview(value) when is_list(value), do: Enum.map(value, &atomize_preview/1)
   defp atomize_preview(value), do: value
+
+  defp preview_key(key) when is_atom(key), do: key
+
+  defp preview_key(key) when is_binary(key) do
+    case key do
+      "method" -> :method
+      "status" -> :status
+      "route_type" -> :route_type
+      "source_waypoint" -> :source_waypoint
+      "destination_waypoint" -> :destination_waypoint
+      "flight_mode" -> :flight_mode
+      "credits" -> :credits
+      "antimatter_cost" -> :antimatter_cost
+      "cooldown_seconds" -> :cooldown_seconds
+      "candidates" -> :candidates
+      "waypoint" -> :waypoint
+      "viable" -> :viable
+      "reasons" -> :reasons
+      "construction" -> :construction
+      "connection" -> :connection
+      "intelligence" -> :intelligence
+      "resource" -> :resource
+      "fuel_current" -> :fuel_current
+      "fuel_capacity" -> :fuel_capacity
+      "warp_drive" -> :warp_drive
+      "warp_range" -> :warp_range
+      "validation_error" -> :validation_error
+      _ -> key
+    end
+  end
+
+  defp preview_key(key), do: key
 
   defp candidate_preview(waypoint, candidates, reason) do
     candidates =
