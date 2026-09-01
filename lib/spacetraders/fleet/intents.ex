@@ -53,18 +53,11 @@ defmodule SpaceTraders.Fleet.Intents do
   @doc "Stops one owned Intent without hiding unresolved mutation evidence."
   def stop(agent, owner, intent_id) do
     with {:ok, :manual} <- normalize_owner(owner),
-         %Intent{ship_id: ship_id} <- owned_intent(agent, intent_id),
-         %Ship{} = ship <- Repo.get(Ship, ship_id) do
-      Fleet.stop_intents_legacy(agent, ship.symbol)
+         %Intent{} <- owned_intent(agent, intent_id) do
+      Fleet.stop_intent_legacy(agent, intent_id)
     else
       nil -> {:error, :intent_not_found}
       error -> error
-    end
-  end
-
-  def stop_by_ship(agent, owner, ship_symbol) do
-    with {:ok, :manual} <- normalize_owner(owner) do
-      Fleet.stop_intents_legacy(agent, ship_symbol)
     end
   end
 

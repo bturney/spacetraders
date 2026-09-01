@@ -2894,14 +2894,26 @@ defmodule SpaceTraders.Fleet do
 
   def request_job_navigate_legacy(agent, job, ship_symbol, waypoint, parameters) do
     with {:ok, ship} <- owned_ship(agent, ship_symbol),
-         true <- ship.id == job.ship_id || {:error, :invalid_intent_owner},
-         true <- Job.running?(job) || {:error, :invalid_intent_owner},
          {:ok, intent} <-
-           insert_job_intent(job, %{
-             type: "navigate",
-             target_waypoint: waypoint,
-             parameters: parameters
-           }),
+           Repo.transaction(
+             fn ->
+               current_job = Repo.get(Job, job.id)
+
+               if current_job && current_job.ship_id == ship.id && Job.running?(current_job) do
+                 case insert_job_intent(current_job, %{
+                        type: "navigate",
+                        target_waypoint: waypoint,
+                        parameters: parameters
+                      }) do
+                   {:ok, intent} -> intent
+                   {:error, reason} -> Repo.rollback(reason)
+                 end
+               else
+                 Repo.rollback(:invalid_intent_owner)
+               end
+             end,
+             mode: :immediate
+           ),
          {:ok, live_ship} <-
            Agent.handle_game_result(
              agent,
@@ -3533,49 +3545,61 @@ defmodule SpaceTraders.Fleet do
 
   @doc "Stops a Ship's unfinished Manual Control Intent; the assigned Job remains paused."
   def stop_intents(%AgentRecord{} = agent, ship_symbol) do
-    SpaceTraders.Fleet.Intents.stop_by_ship(agent, :manual, ship_symbol)
+    case ship_intents(agent, ship_symbol) do
+      %Intent{id: intent_id} -> SpaceTraders.Fleet.Intents.stop(agent, :manual, intent_id)
+      nil -> {:error, :intents_not_active}
+    end
   end
 
-  # Temporary internal delegator. Stop semantics are implemented by Intents.
-  def stop_intents_legacy(%AgentRecord{} = agent, ship_symbol) do
-    with {:ok, ship} <- owned_ship(agent, ship_symbol) do
-      # This transaction shares the write lock used to claim an action. A stop
-      # therefore cannot clear a request fingerprint after another process has
-      # claimed the operation but before it sends the mutation.
-      case Repo.transaction(
-             fn ->
-               case unfinished_intents(ship.id) do
-                 %Intent{} = intent ->
-                   cond do
-                     unresolved_cargo_action?(intent) ->
-                       Repo.rollback(:cargo_operation_reconciliation_required)
+  def stop_intent_legacy(%AgentRecord{} = agent, intent_id) do
+    case Repo.transaction(
+           fn ->
+             intent =
+               Repo.one(
+                 from intent in Intent,
+                   join: ship in Ship,
+                   on: ship.id == intent.ship_id,
+                   where:
+                     intent.id == ^intent_id and ship.agent_id == ^agent.id and
+                       intent.caller == "manual" and intent.status in ^@unfinished_intent_states
+               )
 
-                     unresolved_module_evidence?(intent) ->
-                       Repo.rollback(:intents_reconciliation_required)
+             case intent do
+               %Intent{} = intent ->
+                 cond do
+                   unresolved_cargo_action?(intent) ->
+                     Repo.rollback(:cargo_operation_reconciliation_required)
 
-                     unresolved_jump_action?(intent) or unresolved_warp_action?(intent) ->
-                       Repo.rollback(:intents_reconciliation_required)
+                   unresolved_module_evidence?(intent) ->
+                     Repo.rollback(:intents_reconciliation_required)
 
-                     true ->
-                       terminalize_intents!(intent, "stopped")
-                       {:ok, intent.target_waypoint}
-                   end
+                   unresolved_jump_action?(intent) or unresolved_warp_action?(intent) ->
+                     Repo.rollback(:intents_reconciliation_required)
 
-                 nil ->
-                   Repo.rollback(:intents_not_active)
-               end
-             end,
-             mode: :immediate
-           ) do
-        {:ok, {:ok, target}} ->
-          record_activity(agent, ship, "manual_intent_stopped", "Navigate to #{target} stopped")
-          :ok
+                   true ->
+                     terminalize_intents!(intent, "stopped")
+                 end
 
-        {:error, reason} ->
-          {:error, reason}
-      end
-    else
-      error -> error
+               nil ->
+                 Repo.rollback(:intents_not_active)
+             end
+           end,
+           mode: :immediate
+         ) do
+      {:ok, %Intent{} = intent} ->
+        ship = Repo.get!(Ship, intent.ship_id)
+
+        record_activity(
+          agent,
+          ship,
+          "manual_intent_stopped",
+          "Navigate to #{intent.target_waypoint} stopped"
+        )
+
+        :ok
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
