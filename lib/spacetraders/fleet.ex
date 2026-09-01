@@ -3007,24 +3007,25 @@ defmodule SpaceTraders.Fleet do
     method = intent.parameters["review_method"]
     key = "reviewed_#{method}"
 
-    {:ok,
-     Repo.update!(
-       Ecto.Changeset.change(intent,
-         parameters:
-           Map.put(
-             intent.parameters,
-             key,
-             %{
-               "method" => method,
-               "destination_waypoint" => intent.target_waypoint,
-               "status" => "blocked",
-               "validation_error" => inspect(reason)
-             }
+    parameters =
+      Map.put(intent.parameters, key, %{
+        "method" => method,
+        "destination_waypoint" => intent.target_waypoint,
+        "status" => "blocked",
+        "validation_error" => inspect(reason)
+      })
+
+    case Repo.update_all(
+           from(i in Intent,
+             where:
+               i.id == ^intent.id and i.status == "awaiting_confirmation" and
+                 i.review_revision == ^intent.review_revision
            ),
-         review_revision: intent.review_revision + 1,
-         status: "awaiting_confirmation"
-       )
-     )}
+           set: [parameters: parameters, review_revision: intent.review_revision + 1]
+         ) do
+      {1, _} -> {:ok, Repo.get!(Intent, intent.id)}
+      {0, _} -> {:error, :review_revision_stale}
+    end
   end
 
   defp refresh_or_authorize_review(intent, {:ok, fresh}) do
@@ -3033,7 +3034,8 @@ defmodule SpaceTraders.Fleet do
     persisted = intent.parameters[key] || %{}
     fresh = stringify_nested_keys(fresh)
 
-    if canonical_preview_value(persisted) == canonical_preview_value(fresh) do
+    if canonical_preview_value(review_for_comparison(method, persisted)) ==
+         canonical_preview_value(review_for_comparison(method, fresh)) do
       case Repo.update_all(
              from(i in Intent,
                where:
@@ -3062,6 +3064,9 @@ defmodule SpaceTraders.Fleet do
       end
     end
   end
+
+  defp review_for_comparison("warp", review), do: Map.delete(review, "candidates")
+  defp review_for_comparison(_method, review), do: review
 
   defp stringify_nested_keys(value) when is_map(value),
     do: Map.new(value, fn {key, value} -> {to_string(key), stringify_nested_keys(value)} end)
