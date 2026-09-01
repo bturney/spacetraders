@@ -239,8 +239,8 @@ defmodule SpaceTraders.Fleet do
   defp annotate_jobs({:ok, ships}, agent) do
     ship_records = Enum.map(ships, &ensure_ship_record(agent, &1))
     jobs_by_ship = jobs_for_ships(ship_records)
-    intents_by_ship = intents_for_ships(ship_records)
-    intent_history_by_ship = intents_history_for_ships(ship_records)
+    intents_by_ship = intents_for_ships(agent)
+    intent_history_by_ship = intents_history_for_ships(agent)
 
     {:ok,
      Enum.map(ships, fn ship ->
@@ -258,31 +258,16 @@ defmodule SpaceTraders.Fleet do
 
   defp annotate_jobs(result, _agent), do: result
 
-  defp intents_for_ships(ship_records) do
-    ship_ids = Enum.map(ship_records, & &1.id)
-
-    Intent
-    |> where(
-      [intent],
-      intent.ship_id in ^ship_ids and intent.caller == "manual" and
-        intent.status in ^@unfinished_intent_states
-    )
-    |> Repo.all()
+  defp intents_for_ships(agent) do
+    agent
+    |> SpaceTraders.Fleet.Intents.current()
     |> Enum.reject(&(&1.parameters["caller"] == "job"))
     |> Map.new(&{&1.ship_id, &1})
   end
 
-  defp intents_history_for_ships(ship_records) do
-    ship_ids = Enum.map(ship_records, & &1.id)
-
-    Intent
-    |> where(
-      [intent],
-      intent.ship_id in ^ship_ids and intent.caller == "manual" and
-        intent.status in ^@terminal_intent_states
-    )
-    |> order_by([intent], desc: intent.finished_at, desc: intent.id)
-    |> Repo.all()
+  defp intents_history_for_ships(agent) do
+    agent
+    |> SpaceTraders.Fleet.Intents.history()
     |> Enum.reject(&(&1.parameters["caller"] == "job"))
     |> Enum.group_by(& &1.ship_id)
   end

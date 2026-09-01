@@ -31,7 +31,7 @@ defmodule SpaceTraders.IntentsTest do
 
     assert [%Intent{status: "awaiting_confirmation"}] = Intents.current(first_agent)
     assert [%Intent{status: "completed"}] = Intents.history(first_agent)
-    assert [%Intent{status: "active"}] = Intents.list_current(second_agent)
+    assert [%Intent{status: "active"}] = Intents.current(second_agent)
   end
 
   defp agent_fixture(symbol) do

@@ -31,7 +31,4 @@ defmodule SpaceTraders.Fleet.Intents do
         order_by: [desc: intent.finished_at, desc: intent.id]
     )
   end
-
-  def list_current(%AgentRecord{} = agent), do: current(agent)
-  def list_history(%AgentRecord{} = agent), do: history(agent)
 end
