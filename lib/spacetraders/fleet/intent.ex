@@ -1,9 +1,9 @@
-defmodule SpaceTraders.Fleet.ManualIntent do
+defmodule SpaceTraders.Fleet.Intent do
   @moduledoc """
   A durable cargo-operation Intent for one Ship.
 
-  Manual Control is an alternate caller of a reusable outcome-level Intent,
-  not a Job or durable Ship mode (Phase 3.5 single-Ship outcomes). The active
+  Manual Control and Job policies are callers of a reusable outcome-level
+  Intent, not a durable Ship mode (Phase 3.5 single-Ship outcomes). The active
   intent chain, meaningful progress, and in-flight request/response evidence
   persist across restarts so recovery can reconcile game truth before another
   mutation instead of blindly replaying a command.
@@ -12,10 +12,10 @@ defmodule SpaceTraders.Fleet.ManualIntent do
   use Ecto.Schema
   import Ecto.Changeset
 
-  @unfinished_states ["active", "waiting", "blocked"]
+  @unfinished_states ["active", "waiting", "awaiting_confirmation", "blocked"]
   @terminal_states ["completed", "stopped"]
 
-  schema "manual_intents" do
+  schema "intents" do
     # "manual" intents belong to Manual Control; "job" intents are the
     # operation ledger for a Job policy and never preempt their owning Job.
     field :caller, :string, default: "manual"
@@ -23,6 +23,7 @@ defmodule SpaceTraders.Fleet.ManualIntent do
     field :target_waypoint, :string
     # Operation-specific target, quantity, price, and recipient constraints.
     field :parameters, :map, default: %{}
+    field :review_revision, :integer, default: 0
     field :status, :string, default: "active"
     embeds_one :blocker, SpaceTraders.Fleet.JobBlocker
     field :in_flight_action, :map
@@ -44,7 +45,15 @@ defmodule SpaceTraders.Fleet.ManualIntent do
 
   def changeset(intent, attrs) do
     intent
-    |> cast(attrs, [:caller, :type, :target_waypoint, :parameters, :status, :job_id])
+    |> cast(attrs, [
+      :caller,
+      :type,
+      :target_waypoint,
+      :parameters,
+      :review_revision,
+      :status,
+      :job_id
+    ])
     |> cast_embed(:blocker)
     |> validate_required([:caller, :type, :target_waypoint])
     |> validate_inclusion(:caller, ["manual", "job"])
@@ -58,7 +67,7 @@ defmodule SpaceTraders.Fleet.ManualIntent do
       "remove_module"
     ])
     |> validate_inclusion(:status, @unfinished_states ++ @terminal_states)
-    |> unique_constraint(:ship_id, name: :manual_intents_one_active_per_ship_index)
+    |> unique_constraint(:ship_id, name: :intents_one_active_per_ship_index)
   end
 
   defp validate_job_owner(%Ecto.Changeset{changes: %{caller: "job"}} = changeset),

@@ -318,9 +318,9 @@ defmodule SpaceTradersWeb.DashboardLive do
   end
 
   @impl true
-  def handle_event("stop_manual_intent", %{"symbol" => ship_symbol}, socket) do
+  def handle_event("stop_intents", %{"symbol" => ship_symbol}, socket) do
     with {:ok, agent} <- agent_for_ship(socket, ship_symbol),
-         :ok <- Fleet.stop_manual_intent(agent, ship_symbol) do
+         :ok <- Fleet.stop_intents(agent, ship_symbol) do
       message = "#{ship_symbol} manual Navigate stopped; the Ship stays in Manual Control."
 
       {:noreply, put_flash(refresh_agent_fleet(socket, agent.id), :info, message)}
@@ -373,7 +373,7 @@ defmodule SpaceTradersWeb.DashboardLive do
        put_flash(
          refresh_agent_fleet(socket, agent.id),
          :info,
-         "#{module_symbol} installation #{manual_intent_status(intent)}."
+         "#{module_symbol} installation #{intents_status(intent)}."
        )}
     else
       {:error, reason} -> {:noreply, put_flash(socket, :error, live_error(reason))}
@@ -393,7 +393,7 @@ defmodule SpaceTradersWeb.DashboardLive do
        put_flash(
          refresh_agent_fleet(socket, agent.id),
          :info,
-         "#{module_symbol} removal #{manual_intent_status(intent)}."
+         "#{module_symbol} removal #{intents_status(intent)}."
        )}
     else
       {:error, reason} -> {:noreply, put_flash(socket, :error, live_error(reason))}
@@ -3005,11 +3005,11 @@ defmodule SpaceTradersWeb.DashboardLive do
       <div class="mt-3 flex flex-wrap items-center gap-2 text-xs" data-ship-row-status>
         <span :if={@ship.job} class="badge badge-outline badge-sm">{job_status(@ship.job)}</span>
         <span
-          :if={@ship.manual_intent}
-          class={manual_intent_status_class(@ship.manual_intent)}
+          :if={@ship.intents}
+          class={intents_status_class(@ship.intents)}
           data-row-manual-intent
         >
-          Manual: {manual_intent_status(@ship.manual_intent)}
+          Manual: {intents_status(@ship.intents)}
         </span>
         <span :if={job_reason(@ship.job)} class="truncate text-warning" data-row-attention>
           {job_reason(@ship.job)}
@@ -3374,25 +3374,25 @@ defmodule SpaceTradersWeb.DashboardLive do
           </form>
         </section>
         <div
-          :if={@ship.manual_intent}
+          :if={@ship.intents}
           class="mt-2 flex flex-wrap items-center justify-between gap-2 rounded border border-base-300/60 bg-base-300/30 px-3 py-2 text-xs"
-          data-manual-intent={@ship.manual_intent.status}
+          data-manual-intent={@ship.intents.status}
         >
           <div>
             <span class="font-semibold">Manual Control</span>
             <span class="ml-1">
-              {manual_intent_label(@ship.manual_intent)}
+              {intents_label(@ship.intents)}
             </span>
-            <span class={manual_intent_status_class(@ship.manual_intent)}>
-              {manual_intent_status(@ship.manual_intent)}
+            <span class={intents_status_class(@ship.intents)}>
+              {intents_status(@ship.intents)}
             </span>
-            <div :if={manual_intent_reason(@ship.manual_intent)} class="mt-1 opacity-70">
-              {manual_intent_reason(@ship.manual_intent)}
+            <div :if={intents_reason(@ship.intents)} class="mt-1 opacity-70">
+              {intents_reason(@ship.intents)}
             </div>
           </div>
           <button
             type="button"
-            phx-click="stop_manual_intent"
+            phx-click="stop_intents"
             phx-value-symbol={@ship.symbol}
             class="btn btn-ghost btn-xs"
           >
@@ -4312,7 +4312,7 @@ defmodule SpaceTradersWeb.DashboardLive do
   defp miner_job_panel(assigns) do
     job = Map.get(assigns.ship, :job)
     history = Map.get(assigns.ship, :job_history, [])
-    intent_history = Map.get(assigns.ship, :manual_intent_history, [])
+    intent_history = Map.get(assigns.ship, :intents_history, [])
     assigns = assign(assigns, job: job, job_history: history, intent_history: intent_history)
 
     ~H"""
@@ -4561,7 +4561,7 @@ defmodule SpaceTradersWeb.DashboardLive do
           <li :for={intent <- @intent_history}>
             <details data-manual-intent-history-entry={intent.id}>
               <summary class="cursor-pointer">
-                {manual_intent_status(intent)} {manual_intent_label(intent)}
+                {intents_status(intent)} {intents_label(intent)}
               </summary>
               <dl class="mt-2 grid gap-1 pl-3 sm:grid-cols-2">
                 <div>
@@ -4789,45 +4789,49 @@ defmodule SpaceTradersWeb.DashboardLive do
 
   defp job_reason(_), do: nil
 
-  defp manual_intent_status(%{status: "active"}), do: "Working"
-  defp manual_intent_status(%{status: "waiting"}), do: "Waiting"
-  defp manual_intent_status(%{status: "blocked"}), do: "Blocked"
-  defp manual_intent_status(%{status: "completed"}), do: "Completed"
-  defp manual_intent_status(%{status: "stopped"}), do: "Stopped"
-  defp manual_intent_status(_), do: "Manual"
+  defp intents_status(%{status: "active"}), do: "Working"
+  defp intents_status(%{status: "waiting"}), do: "Waiting"
+  defp intents_status(%{status: "awaiting_confirmation"}), do: "Awaiting confirmation"
+  defp intents_status(%{status: "blocked"}), do: "Blocked"
+  defp intents_status(%{status: "completed"}), do: "Completed"
+  defp intents_status(%{status: "stopped"}), do: "Stopped"
+  defp intents_status(_), do: "Manual"
 
-  defp manual_intent_label(%{type: "buy", parameters: parameters, target_waypoint: waypoint}),
+  defp intents_label(%{type: "buy", parameters: parameters, target_waypoint: waypoint}),
     do: "Buy #{parameters["trade_symbol"]} at #{waypoint}"
 
-  defp manual_intent_label(%{type: "sell", parameters: parameters, target_waypoint: waypoint}),
+  defp intents_label(%{type: "sell", parameters: parameters, target_waypoint: waypoint}),
     do: "Sell #{parameters["trade_symbol"]} at #{waypoint}"
 
-  defp manual_intent_label(%{type: "deliver", parameters: parameters, target_waypoint: waypoint}),
+  defp intents_label(%{type: "deliver", parameters: parameters, target_waypoint: waypoint}),
     do: "Deliver #{parameters["trade_symbol"]} at #{waypoint}"
 
-  defp manual_intent_label(%{type: "install_module", parameters: parameters}),
+  defp intents_label(%{type: "install_module", parameters: parameters}),
     do: "Install #{parameters["module_symbol"]}"
 
-  defp manual_intent_label(%{type: "remove_module", parameters: parameters}),
+  defp intents_label(%{type: "remove_module", parameters: parameters}),
     do: "Remove #{parameters["module_symbol"]}"
 
-  defp manual_intent_label(%{target_waypoint: waypoint}), do: "Navigate to #{waypoint}"
+  defp intents_label(%{target_waypoint: waypoint}), do: "Navigate to #{waypoint}"
 
   defp module_slots(%{frame: %{module_slots: slots}}) when is_integer(slots), do: slots
   defp module_slots(_ship), do: "?"
 
-  defp manual_intent_status_class(%{status: "waiting"}),
+  defp intents_status_class(%{status: "waiting"}),
     do: "badge badge-warning badge-sm ml-2"
 
-  defp manual_intent_status_class(%{status: "blocked"}),
+  defp intents_status_class(%{status: "awaiting_confirmation"}),
+    do: "badge badge-warning badge-sm ml-2"
+
+  defp intents_status_class(%{status: "blocked"}),
     do: "badge badge-error badge-sm ml-2"
 
-  defp manual_intent_status_class(_), do: "badge badge-info badge-sm ml-2"
+  defp intents_status_class(_), do: "badge badge-info badge-sm ml-2"
 
-  defp manual_intent_reason(%{status: "blocked", blocker: %JobBlocker{} = blocker}),
+  defp intents_reason(%{status: "blocked", blocker: %JobBlocker{} = blocker}),
     do: blocker_summary(blocker)
 
-  defp manual_intent_reason(_intent), do: nil
+  defp intents_reason(_intent), do: nil
 
   defp blocker_summary(%JobBlocker{
          reason: reason,
@@ -5026,17 +5030,17 @@ defmodule SpaceTradersWeb.DashboardLive do
 
   defp needs_attention?(%{job: %{status: "blocked"}}), do: true
   defp needs_attention?(%{job: %{status: "paused"}}), do: true
-  defp needs_attention?(%{manual_intent: %{status: "blocked"}}), do: true
+  defp needs_attention?(%{intents: %{status: "blocked"}}), do: true
   defp needs_attention?(%{nav: %{status: "IN_TRANSIT"}}), do: false
   defp needs_attention?(_), do: false
 
-  defp attention_summary(%{manual_intent: %{status: "blocked"} = intent}),
-    do: manual_intent_reason(intent) || manual_intent_status(intent)
+  defp attention_summary(%{intents: %{status: "blocked"} = intent}),
+    do: intents_reason(intent) || intents_status(intent)
 
   defp attention_summary(%{job: job}) when not is_nil(job), do: job_reason(job) || job_status(job)
 
-  defp attention_summary(%{manual_intent: intent}),
-    do: manual_intent_reason(intent) || manual_intent_status(intent)
+  defp attention_summary(%{intents: intent}),
+    do: intents_reason(intent) || intents_status(intent)
 
   defp attention_summary(_), do: "Review Ship state"
 
@@ -5235,18 +5239,18 @@ defmodule SpaceTradersWeb.DashboardLive do
   defp live_error(:source_market_unavailable),
     do: "Procurement Job blocked: no source market is available in the current system."
 
-  defp live_error(:manual_intent_active),
+  defp live_error(:intents_active),
     do: "A manual Navigate is still active for this Ship; stop it before resuming the Job."
 
-  defp live_error(:manual_intent_not_active), do: "There is no manual Navigate to stop."
+  defp live_error(:intents_not_active), do: "There is no manual Navigate to stop."
 
-  defp live_error(:manual_intent_conflict),
+  defp live_error(:intents_conflict),
     do: "Another manual Navigate was just issued for this Ship; try again."
 
   defp live_error(:invalid_waypoint), do: "Enter a target waypoint."
   defp live_error(:invalid_module_intent), do: "Choose a module with exact removal authorization."
 
-  defp live_error(:manual_intent_reconciliation_required),
+  defp live_error(:intents_reconciliation_required),
     do: "The prior module operation is still being reconciled from the game."
 
   defp live_error({:miner_job_blocked, reason}), do: "Miner Job blocked: #{live_error(reason)}"

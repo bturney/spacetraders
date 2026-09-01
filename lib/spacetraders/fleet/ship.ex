@@ -14,6 +14,7 @@ defmodule SpaceTraders.Fleet.Ship do
 
     belongs_to :agent, SpaceTraders.Agent.Agent
     has_one :job, SpaceTraders.Fleet.Job
+    has_many :intents, SpaceTraders.Fleet.Intent
     has_many :destination_history, SpaceTraders.Fleet.ShipDestination
 
     timestamps(type: :utc_datetime)

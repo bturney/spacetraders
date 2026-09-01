@@ -11,7 +11,7 @@ defmodule SpaceTraders.FleetTest do
   alias SpaceTraders.Fleet.JobBlocker
   alias SpaceTraders.Fleet.ShipServer
   alias SpaceTraders.Fleet.Activity
-  alias SpaceTraders.Fleet.ManualIntent
+  alias SpaceTraders.Fleet.Intent
   alias SpaceTraders.Timeline
   alias SpaceTraders.Timeline.Event
 
@@ -529,7 +529,7 @@ defmodule SpaceTraders.FleetTest do
 
       Repo.update!(Ecto.Changeset.change(job, status: "active"))
 
-      Repo.insert!(%ManualIntent{
+      Repo.insert!(%Intent{
         ship_id: ship.id,
         job_id: job.id,
         caller: "job",
@@ -3223,10 +3223,10 @@ defmodule SpaceTraders.FleetTest do
 
       assert_receive :fresh_sale_listing
       assert_receive {:sale, %{"symbol" => "IRON_ORE", "units" => 30}}
-      assert Fleet.ship_manual_intent(agent, "FLEET-SHIP") == nil
+      assert Fleet.ship_intents(agent, "FLEET-SHIP") == nil
       configured_job_id = configured_job.id
 
-      assert %ManualIntent{
+      assert %Intent{
                caller: "job",
                job_id: ^configured_job_id,
                type: "sell",
@@ -3234,7 +3234,7 @@ defmodule SpaceTraders.FleetTest do
                last_action_result: %{"transaction" => %{"type" => "SELL", "units" => 30}}
              } =
                Repo.one!(
-                 from intent in ManualIntent,
+                 from intent in Intent,
                    where: intent.job_id == ^configured_job.id,
                    order_by: [desc: intent.id],
                    limit: 1
@@ -3446,7 +3446,7 @@ defmodule SpaceTraders.FleetTest do
             })
 
           {"/v2/my/ships/FLEET-SHIP/purchase", "POST"} ->
-            intent = Repo.one!(from i in ManualIntent, where: i.ship_id == ^ship.id)
+            intent = Repo.one!(from i in Intent, where: i.ship_id == ^ship.id)
 
             send(test_pid, {:job_buy_intent, intent.parameters, Repo.get!(Job, job.id).status})
 
@@ -3474,7 +3474,7 @@ defmodule SpaceTraders.FleetTest do
           {"/v2/my/contracts/CONTRACT-1/deliver", "POST"} ->
             intent =
               Repo.one!(
-                from i in ManualIntent,
+                from i in Intent,
                   where: i.ship_id == ^ship.id and i.type == "deliver"
               )
 
@@ -4467,7 +4467,7 @@ defmodule SpaceTraders.FleetTest do
       assert preview.flight_mode == "CRUISE"
       assert preview.fuel_current == 150
 
-      assert {:ok, %ManualIntent{status: "waiting", in_flight_action: %{"kind" => "warp"}}} =
+      assert {:ok, %Intent{status: "waiting", in_flight_action: %{"kind" => "warp"}}} =
                Fleet.confirm_warp_intent(agent, "FLEET-SHIP", "X2-UX81-A3", preview)
 
       assert [%Event{event_type: "arrival", payload: %{"destination" => "X2-UX81-A3"}}] =
@@ -4670,7 +4670,7 @@ defmodule SpaceTraders.FleetTest do
         end
       end)
 
-      assert {:ok, %ManualIntent{status: "completed", last_action_result: evidence}} =
+      assert {:ok, %Intent{status: "completed", last_action_result: evidence}} =
                Fleet.navigate_intent(agent, "FLEET-SHIP", "X2-UX81-G1")
 
       assert evidence["kind"] == "jump"
@@ -4718,7 +4718,7 @@ defmodule SpaceTraders.FleetTest do
         end
       end)
 
-      assert {:ok, %ManualIntent{status: "blocked", blocker: blocker}} =
+      assert {:ok, %Intent{status: "blocked", blocker: blocker}} =
                Fleet.navigate_intent(agent, "FLEET-SHIP", "X2-UX81-G1")
 
       assert blocker.reason == "jump_gate_incomplete"
@@ -4764,7 +4764,7 @@ defmodule SpaceTraders.FleetTest do
         end
       end)
 
-      assert {:ok, %ManualIntent{status: "waiting", target_waypoint: "X1-UX81-A2"}} =
+      assert {:ok, %Intent{status: "waiting", target_waypoint: "X1-UX81-A2"}} =
                Fleet.navigate_intent(agent, "FLEET-SHIP", "X1-UX81-A2")
 
       assert_receive {:job_status_at_dispatch, "paused"}
@@ -4784,7 +4784,7 @@ defmodule SpaceTraders.FleetTest do
         })
       end)
 
-      assert {:ok, %ManualIntent{status: "completed"}} =
+      assert {:ok, %Intent{status: "completed"}} =
                Fleet.navigate_intent(agent, "FLEET-SHIP", "X1-UX81-A2")
 
       assert Timeline.pending_events(:ship, "FLEET-SHIP") == []
@@ -4812,7 +4812,7 @@ defmodule SpaceTraders.FleetTest do
         })
       end)
 
-      assert {:ok, %ManualIntent{status: "completed"}} =
+      assert {:ok, %Intent{status: "completed"}} =
                Fleet.navigate_intent(agent, "FLEET-SHIP", "X1-UX81-A2")
 
       assert %{status: "paused", blocked_reason: "Paused by direct navigation"} =
@@ -4844,7 +4844,7 @@ defmodule SpaceTraders.FleetTest do
         end
       end)
 
-      assert {:ok, %ManualIntent{status: "waiting"}} =
+      assert {:ok, %Intent{status: "waiting"}} =
                Fleet.navigate_intent(agent, "FLEET-SHIP", "X1-UX81-A2")
 
       assert_received :orbit
@@ -4877,7 +4877,7 @@ defmodule SpaceTraders.FleetTest do
         end
       end)
 
-      assert {:ok, %ManualIntent{status: "waiting"}} =
+      assert {:ok, %Intent{status: "waiting"}} =
                Fleet.navigate_intent(agent, "FLEET-SHIP", "X1-UX81-A2")
 
       assert [%Event{event_type: "arrival", payload: %{"intent_id" => _}}] =
@@ -4909,7 +4909,7 @@ defmodule SpaceTraders.FleetTest do
         end
       end)
 
-      assert {:ok, %ManualIntent{status: "waiting"}} =
+      assert {:ok, %Intent{status: "waiting"}} =
                Fleet.navigate_intent(agent, "FLEET-SHIP", "X1-UX81-A2")
 
       assert [%Event{event_type: "cooldown", payload: %{"intent_id" => _}}] =
@@ -4936,7 +4936,7 @@ defmodule SpaceTraders.FleetTest do
         end
       end)
 
-      assert {:ok, %ManualIntent{status: "blocked"} = intent} =
+      assert {:ok, %Intent{status: "blocked"} = intent} =
                Fleet.navigate_intent(agent, "FLEET-SHIP", "X1-UX81-A2")
 
       assert intent.blocker.reason == "insufficient_fuel"
@@ -4976,7 +4976,7 @@ defmodule SpaceTraders.FleetTest do
         end
       end)
 
-      assert {:ok, %ManualIntent{status: "blocked"} = intent} =
+      assert {:ok, %Intent{status: "blocked"} = intent} =
                Fleet.navigate_intent(agent, "FLEET-SHIP", "X1-UX81-A2")
 
       assert_received :navigate
@@ -5011,7 +5011,7 @@ defmodule SpaceTraders.FleetTest do
 
       assert {:ok, second} = Fleet.navigate_intent(agent, "FLEET-SHIP", "X1-UX81-A3")
 
-      intents = Repo.all(from intent in ManualIntent, where: intent.ship_id == ^first.ship_id)
+      intents = Repo.all(from intent in Intent, where: intent.ship_id == ^first.ship_id)
       assert length(intents) == 2
 
       predecessor = Enum.find(intents, &(&1.id == first.id))
@@ -5048,10 +5048,10 @@ defmodule SpaceTraders.FleetTest do
         end
       end)
 
-      assert {:ok, %ManualIntent{status: "waiting"}} =
+      assert {:ok, %Intent{status: "waiting"}} =
                Fleet.navigate_intent(agent, "FLEET-SHIP", "X1-UX81-A2")
 
-      assert {:error, :manual_intent_active} = Fleet.resume_miner_job(agent, "FLEET-SHIP")
+      assert {:error, :intents_active} = Fleet.resume_miner_job(agent, "FLEET-SHIP")
     end
 
     test "stops an active manual Navigate and keeps the Ship in Manual Control" do
@@ -5083,15 +5083,15 @@ defmodule SpaceTraders.FleetTest do
         end
       end)
 
-      assert {:ok, %ManualIntent{status: "waiting"}} =
+      assert {:ok, %Intent{status: "waiting"}} =
                Fleet.navigate_intent(agent, "FLEET-SHIP", "X1-UX81-A2")
 
-      assert :ok = Fleet.stop_manual_intent(agent, "FLEET-SHIP")
-      assert Fleet.ship_manual_intent(agent, "FLEET-SHIP") == nil
+      assert :ok = Fleet.stop_intents(agent, "FLEET-SHIP")
+      assert Fleet.ship_intents(agent, "FLEET-SHIP") == nil
 
       assert %{status: "paused"} = Fleet.ship_job(agent, "FLEET-SHIP")
 
-      intent = Repo.one!(from i in ManualIntent, select: i.status)
+      intent = Repo.one!(from i in Intent, select: i.status)
       assert intent == "stopped"
     end
 
@@ -5107,7 +5107,7 @@ defmodule SpaceTraders.FleetTest do
       ship = ship_fixture(agent, "FLEET-SHIP")
 
       intent =
-        Repo.insert!(%ManualIntent{
+        Repo.insert!(%Intent{
           ship_id: ship.id,
           type: "navigate",
           target_waypoint: "X1-UX81-A2",
@@ -5123,8 +5123,8 @@ defmodule SpaceTraders.FleetTest do
         }
       }
 
-      assert {:ok, %ManualIntent{status: "completed"}} =
-               Fleet.revalidate_manual_intent_arrival(
+      assert {:ok, %Intent{status: "completed"}} =
+               Fleet.revalidate_intents_arrival(
                  agent.id,
                  "FLEET-SHIP",
                  live_ship,
@@ -5138,7 +5138,7 @@ defmodule SpaceTraders.FleetTest do
       test_pid = self()
 
       intent =
-        Repo.insert!(%ManualIntent{
+        Repo.insert!(%Intent{
           ship_id: ship.id,
           type: "navigate",
           target_waypoint: "X1-UX81-A2",
@@ -5176,8 +5176,8 @@ defmodule SpaceTraders.FleetTest do
         end
       end)
 
-      assert {:ok, %ManualIntent{status: "waiting"}} =
-               Fleet.revalidate_manual_intent_arrival(
+      assert {:ok, %Intent{status: "waiting"}} =
+               Fleet.revalidate_intents_arrival(
                  agent.id,
                  "FLEET-SHIP",
                  live_ship,
@@ -5191,7 +5191,7 @@ defmodule SpaceTraders.FleetTest do
       agent = agent_fixture()
       ship = ship_fixture(agent, "FLEET-SHIP")
 
-      Repo.insert!(%ManualIntent{
+      Repo.insert!(%Intent{
         ship_id: ship.id,
         type: "navigate",
         target_waypoint: "X1-UX81-A2",
@@ -5211,7 +5211,7 @@ defmodule SpaceTraders.FleetTest do
         flunk("unexpected request #{conn.request_path}")
       end)
 
-      assert :ok = Fleet.revalidate_manual_intent_arrival(agent.id, "FLEET-SHIP", live_ship, nil)
+      assert :ok = Fleet.revalidate_intents_arrival(agent.id, "FLEET-SHIP", live_ship, nil)
     end
 
     test "cooldown revalidation dispatches the pending navigation" do
@@ -5220,7 +5220,7 @@ defmodule SpaceTraders.FleetTest do
       test_pid = self()
 
       intent =
-        Repo.insert!(%ManualIntent{
+        Repo.insert!(%Intent{
           ship_id: ship.id,
           type: "navigate",
           target_waypoint: "X1-UX81-A2",
@@ -5252,8 +5252,8 @@ defmodule SpaceTraders.FleetTest do
         end
       end)
 
-      assert {:ok, %ManualIntent{status: "waiting"}} =
-               Fleet.revalidate_manual_intent_cooldown(
+      assert {:ok, %Intent{status: "waiting"}} =
+               Fleet.revalidate_intents_cooldown(
                  agent.id,
                  "FLEET-SHIP",
                  live_ship,
@@ -5269,7 +5269,7 @@ defmodule SpaceTraders.FleetTest do
       agent = agent_fixture()
       ship = ship_fixture(agent, "FLEET-SHIP")
 
-      Repo.insert!(%ManualIntent{
+      Repo.insert!(%Intent{
         ship_id: ship.id,
         type: "navigate",
         target_waypoint: "X1-UX81-A2",
@@ -5297,8 +5297,8 @@ defmodule SpaceTraders.FleetTest do
         end
       end)
 
-      assert {:ok, %ManualIntent{status: "waiting"}} =
-               Fleet.recover_manual_intent_on_boot("FLEET-SHIP", agent.id, agent.agent_token)
+      assert {:ok, %Intent{status: "waiting"}} =
+               Fleet.recover_intents_on_boot("FLEET-SHIP", agent.id, agent.agent_token)
 
       assert [%Event{event_type: "arrival", payload: %{"intent_id" => _}}] =
                Timeline.pending_events(:ship, "FLEET-SHIP")
@@ -5308,7 +5308,7 @@ defmodule SpaceTraders.FleetTest do
       agent = agent_fixture()
       ship = ship_fixture(agent, "FLEET-SHIP")
 
-      Repo.insert!(%ManualIntent{
+      Repo.insert!(%Intent{
         ship_id: ship.id,
         type: "navigate",
         target_waypoint: "X1-UX81-A2",
@@ -5331,15 +5331,15 @@ defmodule SpaceTraders.FleetTest do
         end
       end)
 
-      assert {:ok, %ManualIntent{status: "completed"}} =
-               Fleet.recover_manual_intent_on_boot("FLEET-SHIP", agent.id, agent.agent_token)
+      assert {:ok, %Intent{status: "completed"}} =
+               Fleet.recover_intents_on_boot("FLEET-SHIP", agent.id, agent.agent_token)
     end
 
     test "boot recovery blocks after repeated authoritative read failures" do
       agent = agent_fixture()
       ship = ship_fixture(agent, "FLEET-SHIP")
 
-      Repo.insert!(%ManualIntent{
+      Repo.insert!(%Intent{
         ship_id: ship.id,
         type: "navigate",
         target_waypoint: "X1-UX81-A2",
@@ -5350,10 +5350,10 @@ defmodule SpaceTraders.FleetTest do
         conn |> Map.put(:status, 500) |> Req.Test.json(%{})
       end)
 
-      assert {:error, :manual_intent_recovery_blocked} =
-               Fleet.recover_manual_intent_on_boot("FLEET-SHIP", agent.id, agent.agent_token)
+      assert {:error, :intents_recovery_blocked} =
+               Fleet.recover_intents_on_boot("FLEET-SHIP", agent.id, agent.agent_token)
 
-      intent = Repo.one!(from i in ManualIntent, where: i.ship_id == ^ship.id)
+      intent = Repo.one!(from i in Intent, where: i.ship_id == ^ship.id)
       assert intent.status == "blocked"
       assert intent.blocker.reason == "retry_exhausted"
     end
@@ -5657,7 +5657,7 @@ defmodule SpaceTraders.FleetTest do
         end
       end)
 
-      assert {:ok, %ManualIntent{type: "install_module", status: "completed"} = intent} =
+      assert {:ok, %Intent{type: "install_module", status: "completed"} = intent} =
                Fleet.install_module_intent(agent, "FLEET-SHIP", "MODULE_CARGO_HOLD_I")
 
       assert intent.parameters == %{
@@ -5730,7 +5730,7 @@ defmodule SpaceTraders.FleetTest do
         end
       end)
 
-      assert {:ok, %ManualIntent{type: "remove_module", status: "completed"}} =
+      assert {:ok, %Intent{type: "remove_module", status: "completed"}} =
                Fleet.remove_module_intent(agent, "FLEET-SHIP", "MODULE_CARGO_HOLD_I", %{
                  "MODULE_CARGO_HOLD_I" => 1
                })
@@ -5740,7 +5740,7 @@ defmodule SpaceTraders.FleetTest do
       agent = agent_fixture()
       ship = ship_fixture(agent, "FLEET-SHIP")
 
-      Repo.insert!(%ManualIntent{
+      Repo.insert!(%Intent{
         ship_id: ship.id,
         type: "install_module",
         target_waypoint: "MODULE_CARGO_HOLD_I",
@@ -5775,11 +5775,11 @@ defmodule SpaceTraders.FleetTest do
         })
       end)
 
-      assert {:error, :manual_intent_reconciliation_required} =
+      assert {:error, :intents_reconciliation_required} =
                Fleet.install_module_intent(agent, "FLEET-SHIP", "MODULE_CARGO_HOLD_I")
 
-      assert %ManualIntent{status: "blocked", in_flight_action: action} =
-               Fleet.ship_manual_intent(agent, "FLEET-SHIP")
+      assert %Intent{status: "blocked", in_flight_action: action} =
+               Fleet.ship_intents(agent, "FLEET-SHIP")
 
       assert action["kind"] == "install_module"
     end
@@ -5788,7 +5788,7 @@ defmodule SpaceTraders.FleetTest do
       agent = agent_fixture()
       ship = ship_fixture(agent, "FLEET-SHIP")
 
-      Repo.insert!(%ManualIntent{
+      Repo.insert!(%Intent{
         ship_id: ship.id,
         type: "install_module",
         target_waypoint: "MODULE_CARGO_HOLD_I",
@@ -5820,7 +5820,7 @@ defmodule SpaceTraders.FleetTest do
         })
       end)
 
-      assert {:ok, %ManualIntent{status: "completed", last_action_result: result}} =
+      assert {:ok, %Intent{status: "completed", last_action_result: result}} =
                Fleet.install_module_intent(agent, "FLEET-SHIP", "MODULE_CARGO_HOLD_I")
 
       assert result["modules"] == [
@@ -5837,7 +5837,7 @@ defmodule SpaceTraders.FleetTest do
       agent = agent_fixture()
       ship = ship_fixture(agent, "FLEET-SHIP")
 
-      Repo.insert!(%ManualIntent{
+      Repo.insert!(%Intent{
         ship_id: ship.id,
         type: "install_module",
         target_waypoint: "MODULE_CARGO_HOLD_I",
@@ -5852,7 +5852,7 @@ defmodule SpaceTraders.FleetTest do
         }
       })
 
-      assert {:error, :manual_intent_reconciliation_required} =
+      assert {:error, :intents_reconciliation_required} =
                Fleet.navigate_intent(agent, "FLEET-SHIP", "X1-UX81-A2")
     end
 
@@ -5861,7 +5861,7 @@ defmodule SpaceTraders.FleetTest do
       ship = ship_fixture(agent, "FLEET-SHIP")
 
       intent =
-        Repo.insert!(%ManualIntent{
+        Repo.insert!(%Intent{
           ship_id: ship.id,
           type: "remove_module",
           target_waypoint: "MODULE_CARGO_HOLD_I",
@@ -5870,10 +5870,10 @@ defmodule SpaceTraders.FleetTest do
           in_flight_action: %{"kind" => "remove_module", "module_symbol" => "MODULE_CARGO_HOLD_I"}
         })
 
-      assert {:error, :manual_intent_reconciliation_required} =
-               Fleet.stop_manual_intent(agent, "FLEET-SHIP")
+      assert {:error, :intents_reconciliation_required} =
+               Fleet.stop_intents(agent, "FLEET-SHIP")
 
-      assert Repo.get!(ManualIntent, intent.id).in_flight_action["kind"] == "remove_module"
+      assert Repo.get!(Intent, intent.id).in_flight_action["kind"] == "remove_module"
     end
 
     test "Buy Goods Intent pauses the active Job and buys from a fresh on-site Listing" do
@@ -5940,7 +5940,7 @@ defmodule SpaceTraders.FleetTest do
         end
       end)
 
-      assert {:ok, %ManualIntent{type: "buy", status: "completed"} = intent} =
+      assert {:ok, %Intent{type: "buy", status: "completed"} = intent} =
                Fleet.buy_goods_intent(agent, "FLEET-SHIP", "X1-UX81-A1", "IRON_ORE", 5,
                  max_price: 10
                )
@@ -6021,7 +6021,7 @@ defmodule SpaceTraders.FleetTest do
         end
       end)
 
-      assert {:ok, %ManualIntent{status: "completed", last_action_result: result}} =
+      assert {:ok, %Intent{status: "completed", last_action_result: result}} =
                Fleet.buy_goods_intent(agent, "FLEET-SHIP", "X1-UX81-A1", "IRON_ORE", 5)
 
       assert %{"kind" => "buy", "units" => 5, "price" => 0} = result
@@ -6054,7 +6054,7 @@ defmodule SpaceTraders.FleetTest do
         end
       end)
 
-      assert {:ok, %ManualIntent{status: "blocked"}} =
+      assert {:ok, %Intent{status: "blocked"}} =
                Fleet.buy_goods_intent(agent, ship.symbol, "X1-UX81-A1", "IRON_ORE", 1)
 
       assert Fleet.ship_job(agent, ship.symbol).in_flight_action == evidence
@@ -6098,7 +6098,7 @@ defmodule SpaceTraders.FleetTest do
         end
       end)
 
-      assert {:ok, %ManualIntent{type: "sell", status: "blocked", blocker: blocker}} =
+      assert {:ok, %Intent{type: "sell", status: "blocked", blocker: blocker}} =
                Fleet.sell_goods_intent(agent, "FLEET-SHIP", "X1-UX81-A1", "IRON_ORE", 5,
                  min_price: 8
                )
@@ -6147,7 +6147,7 @@ defmodule SpaceTraders.FleetTest do
         end
       end)
 
-      assert {:ok, %ManualIntent{type: "deliver", status: "completed"} = intent} =
+      assert {:ok, %Intent{type: "deliver", status: "completed"} = intent} =
                Fleet.deliver_goods_intent(
                  agent,
                  "FLEET-SHIP",
@@ -6215,7 +6215,7 @@ defmodule SpaceTraders.FleetTest do
         end
       end)
 
-      assert {:ok, %ManualIntent{type: "deliver", status: "completed"} = intent} =
+      assert {:ok, %Intent{type: "deliver", status: "completed"} = intent} =
                Fleet.deliver_construction_goods_intent(
                  agent,
                  "FLEET-SHIP",
@@ -6236,7 +6236,7 @@ defmodule SpaceTraders.FleetTest do
       agent = agent_fixture()
       ship = ship_fixture(agent, "FLEET-SHIP")
 
-      Repo.insert!(%ManualIntent{
+      Repo.insert!(%Intent{
         ship_id: ship.id,
         type: "deliver",
         target_waypoint: "X1-UX81-A1",
@@ -6282,8 +6282,8 @@ defmodule SpaceTraders.FleetTest do
         end
       end)
 
-      assert {:ok, %ManualIntent{status: "completed", last_action_result: result}} =
-               Fleet.recover_manual_intent_on_boot("FLEET-SHIP", agent.id, agent.agent_token)
+      assert {:ok, %Intent{status: "completed", last_action_result: result}} =
+               Fleet.recover_intents_on_boot("FLEET-SHIP", agent.id, agent.agent_token)
 
       assert %{"kind" => "deliver", "units" => 3} = result
     end
@@ -6293,7 +6293,7 @@ defmodule SpaceTraders.FleetTest do
       ship = ship_fixture(agent, "FLEET-SHIP")
 
       intent =
-        Repo.insert!(%ManualIntent{
+        Repo.insert!(%Intent{
           ship_id: ship.id,
           type: "sell",
           target_waypoint: "X1-UX81-A1",
@@ -6318,11 +6318,11 @@ defmodule SpaceTraders.FleetTest do
         })
       end)
 
-      assert {:ok, %ManualIntent{status: "blocked", blocker: blocker}} =
-               Fleet.recover_manual_intent_on_boot("FLEET-SHIP", agent.id, agent.agent_token)
+      assert {:ok, %Intent{status: "blocked", blocker: blocker}} =
+               Fleet.recover_intents_on_boot("FLEET-SHIP", agent.id, agent.agent_token)
 
       assert blocker.reason == "ambiguous_operation_evidence"
-      assert Repo.get!(ManualIntent, intent.id).last_action_result["error"] =~ "ambiguous"
+      assert Repo.get!(Intent, intent.id).last_action_result["error"] =~ "ambiguous"
     end
 
     test "preserves an ambiguous sale request as in-flight evidence" do
@@ -6363,7 +6363,7 @@ defmodule SpaceTraders.FleetTest do
         end
       end)
 
-      assert {:ok, %ManualIntent{status: "blocked", in_flight_action: action}} =
+      assert {:ok, %Intent{status: "blocked", in_flight_action: action}} =
                Fleet.sell_goods_intent(agent, "FLEET-SHIP", "X1-UX81-A1", "IRON_ORE", 5,
                  min_price: 8
                )
@@ -6376,7 +6376,7 @@ defmodule SpaceTraders.FleetTest do
              }
 
       assert {:error, :cargo_operation_reconciliation_required} =
-               Fleet.stop_manual_intent(agent, "FLEET-SHIP")
+               Fleet.stop_intents(agent, "FLEET-SHIP")
     end
 
     test "preserves an in-flight sale when the successful response transaction is uncorrelated" do
@@ -6432,7 +6432,7 @@ defmodule SpaceTraders.FleetTest do
         end
       end)
 
-      assert {:ok, %ManualIntent{status: "blocked", in_flight_action: action}} =
+      assert {:ok, %Intent{status: "blocked", in_flight_action: action}} =
                Fleet.sell_goods_intent(agent, "FLEET-SHIP", "X1-UX81-A1", "IRON_ORE", 5,
                  min_price: 8
                )

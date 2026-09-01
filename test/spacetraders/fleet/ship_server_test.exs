@@ -333,7 +333,7 @@ defmodule SpaceTraders.Fleet.ShipServerTest do
         Repo.insert!(%Ship{symbol: symbol, ship_type: "SHIP_COMMAND_FRIGATE", agent_id: agent.id})
 
       intent =
-        Repo.insert!(%SpaceTraders.Fleet.ManualIntent{
+        Repo.insert!(%SpaceTraders.Fleet.Intent{
           ship_id: ship.id,
           type: "navigate",
           target_waypoint: "X1-UX81-A2",
@@ -367,7 +367,7 @@ defmodule SpaceTraders.Fleet.ShipServerTest do
       assert eventually(fn -> Repo.get(Event, event.id).status == "done" end)
 
       assert eventually(fn ->
-               Repo.get!(SpaceTraders.Fleet.ManualIntent, intent.id).status == "completed"
+               Repo.get!(SpaceTraders.Fleet.Intent, intent.id).status == "completed"
              end)
     end
 
@@ -380,7 +380,7 @@ defmodule SpaceTraders.Fleet.ShipServerTest do
         Repo.insert!(%Ship{symbol: symbol, ship_type: "SHIP_COMMAND_FRIGATE", agent_id: agent.id})
 
       intent =
-        Repo.insert!(%SpaceTraders.Fleet.ManualIntent{
+        Repo.insert!(%SpaceTraders.Fleet.Intent{
           ship_id: ship.id,
           type: "navigate",
           target_waypoint: "X1-UX81-A2",
@@ -431,7 +431,7 @@ defmodule SpaceTraders.Fleet.ShipServerTest do
       assert eventually(fn -> Repo.get(Event, event.id).status == "done" end)
 
       assert eventually(fn ->
-               reloaded = Repo.get!(SpaceTraders.Fleet.ManualIntent, intent.id)
+               reloaded = Repo.get!(SpaceTraders.Fleet.Intent, intent.id)
                reloaded.status == "waiting" and reloaded.last_action_result["kind"] == "navigate"
              end)
     end
