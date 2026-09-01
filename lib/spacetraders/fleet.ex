@@ -2893,6 +2893,189 @@ defmodule SpaceTraders.Fleet do
     end
   end
 
+  @doc "Persists a remote Navigate review without dispatching a mutation."
+  def review_navigation_intent(agent, ship_symbol, waypoint, preview) when is_map(preview) do
+    method = if preview[:method] == "warp", do: "warp", else: "jump"
+    review = stringify_nested_keys(preview)
+
+    with {:ok, ship} <- owned_ship(agent, ship_symbol),
+         {:ok, intent} <-
+           replace_intents(ship, %{
+             type: "navigate",
+             target_waypoint: waypoint,
+             parameters: %{
+               "review_method" => method,
+               "reviewed_#{method}" => review
+             },
+             status: "awaiting_confirmation",
+             review_revision: 1
+           }) do
+      {:ok, intent}
+    else
+      {:error, %Ecto.Changeset{}} -> {:error, :intents_conflict}
+      error -> error
+    end
+  end
+
+  @doc "Confirms a persisted remote Navigate review after re-reading game truth."
+  def confirm_navigation_intent(%AgentRecord{} = agent, intent_id, review_revision) do
+    with {:ok, revision} <- parse_review_revision(review_revision),
+         %Intent{} = intent <- owned_intent(agent, intent_id),
+         true <-
+           intent.status == "awaiting_confirmation" || {:error, :intent_not_awaiting_confirmation},
+         true <- intent.review_revision == revision || {:error, :review_revision_stale},
+         fresh <- fresh_navigation_review(agent, intent),
+         {:ok, intent} <- refresh_or_authorize_review(intent, fresh) do
+      case intent.status do
+        "awaiting_confirmation" -> {:ok, intent}
+        "active" -> reconcile_intents(agent, intent)
+      end
+    else
+      nil -> {:error, :intent_not_found}
+      {:error, _reason} = error -> error
+      false -> {:error, :review_revision_stale}
+    end
+  end
+
+  def confirm_navigation_intent(%{operator: %{id: operator_id}}, intent_id, review_revision) do
+    with {:ok, revision} <- parse_review_revision(review_revision),
+         {%Intent{} = intent, %AgentRecord{} = agent} <-
+           owned_intent_for_operator(operator_id, intent_id),
+         true <-
+           intent.status == "awaiting_confirmation" || {:error, :intent_not_awaiting_confirmation},
+         true <- intent.review_revision == revision || {:error, :review_revision_stale},
+         fresh <- fresh_navigation_review(agent, intent),
+         {:ok, intent} <- refresh_or_authorize_review(intent, fresh) do
+      case intent.status do
+        "awaiting_confirmation" -> {:ok, intent}
+        "active" -> reconcile_intents(agent, intent)
+      end
+    else
+      nil -> {:error, :intent_not_found}
+      {:error, _reason} = error -> error
+      false -> {:error, :review_revision_stale}
+    end
+  end
+
+  defp parse_review_revision(value) when is_integer(value), do: {:ok, value}
+
+  defp parse_review_revision(value) when is_binary(value) do
+    case Integer.parse(value) do
+      {revision, ""} -> {:ok, revision}
+      _ -> {:error, :review_revision_stale}
+    end
+  end
+
+  defp parse_review_revision(_value), do: {:error, :review_revision_stale}
+
+  defp owned_intent(%AgentRecord{id: agent_id}, intent_id) do
+    Repo.one(
+      from intent in Intent,
+        join: ship in Ship,
+        on: ship.id == intent.ship_id,
+        where: intent.id == ^intent_id and ship.agent_id == ^agent_id
+    )
+  end
+
+  defp owned_intent_for_operator(operator_id, intent_id) do
+    Repo.one(
+      from intent in Intent,
+        join: ship in Ship,
+        on: ship.id == intent.ship_id,
+        join: agent in AgentRecord,
+        on: agent.id == ship.agent_id,
+        where: intent.id == ^intent_id and agent.operator_id == ^operator_id,
+        select: {intent, agent}
+    )
+  end
+
+  defp fresh_navigation_review(
+         agent,
+         %Intent{target_waypoint: waypoint, ship_id: ship_id} = intent
+       ) do
+    ship = Repo.get!(Ship, ship_id)
+    method = intent.parameters["review_method"]
+
+    case method do
+      "warp" -> warp_preview(agent, ship.symbol, waypoint)
+      "jump" -> jump_preview(agent, ship.symbol, waypoint)
+      _ -> {:error, :review_revision_stale}
+    end
+  end
+
+  defp refresh_or_authorize_review(intent, {:error, reason}) do
+    method = intent.parameters["review_method"]
+    key = "reviewed_#{method}"
+
+    parameters =
+      Map.put(intent.parameters, key, %{
+        "method" => method,
+        "destination_waypoint" => intent.target_waypoint,
+        "status" => "blocked",
+        "validation_error" => inspect(reason)
+      })
+
+    case Repo.update_all(
+           from(i in Intent,
+             where:
+               i.id == ^intent.id and i.status == "awaiting_confirmation" and
+                 i.review_revision == ^intent.review_revision
+           ),
+           set: [parameters: parameters, review_revision: intent.review_revision + 1]
+         ) do
+      {1, _} -> {:ok, Repo.get!(Intent, intent.id)}
+      {0, _} -> {:error, :review_revision_stale}
+    end
+  end
+
+  defp refresh_or_authorize_review(intent, {:ok, fresh}) do
+    method = intent.parameters["review_method"]
+    key = "reviewed_#{method}"
+    persisted = intent.parameters[key] || %{}
+    fresh = stringify_nested_keys(fresh)
+
+    if canonical_preview_value(review_for_comparison(method, persisted)) ==
+         canonical_preview_value(review_for_comparison(method, fresh)) do
+      case Repo.update_all(
+             from(i in Intent,
+               where:
+                 i.id == ^intent.id and i.status == "awaiting_confirmation" and
+                   i.review_revision == ^intent.review_revision
+             ),
+             set: [status: "active"]
+           ) do
+        {1, _} -> {:ok, Repo.get!(Intent, intent.id)}
+        {0, _} -> {:error, :review_revision_stale}
+      end
+    else
+      case Repo.update_all(
+             from(i in Intent,
+               where:
+                 i.id == ^intent.id and i.status == "awaiting_confirmation" and
+                   i.review_revision == ^intent.review_revision
+             ),
+             set: [
+               parameters: Map.put(intent.parameters, key, fresh),
+               review_revision: intent.review_revision + 1
+             ]
+           ) do
+        {1, _} -> {:ok, Repo.get!(Intent, intent.id)}
+        {0, _} -> {:error, :review_revision_stale}
+      end
+    end
+  end
+
+  defp review_for_comparison("warp", review), do: Map.delete(review, "candidates")
+  defp review_for_comparison(_method, review), do: review
+
+  defp stringify_nested_keys(value) when is_map(value),
+    do: Map.new(value, fn {key, value} -> {to_string(key), stringify_nested_keys(value)} end)
+
+  defp stringify_nested_keys(value) when is_list(value),
+    do: Enum.map(value, &stringify_nested_keys/1)
+
+  defp stringify_nested_keys(value), do: value
+
   @doc "Dispatches a reviewed warp route only when fresh Ship readiness still matches the preview."
   def confirm_warp_intent(agent, ship_symbol, waypoint, preview) when is_map(preview) do
     with {:ok, fresh_preview} <- warp_preview(agent, ship_symbol, waypoint),
@@ -4493,7 +4676,7 @@ defmodule SpaceTraders.Fleet do
       {:ok, intent} =
         %Intent{ship_id: ship.id}
         |> Intent.changeset(attrs)
-        |> Ecto.Changeset.put_change(:status, "active")
+        |> Ecto.Changeset.put_change(:status, Map.get(attrs, :status, "active"))
         |> Repo.insert()
 
       intent
@@ -5218,7 +5401,8 @@ defmodule SpaceTraders.Fleet do
   @doc "Reconciles a persisted Manual Control Intent after a process restart."
   def recover_intents_on_boot(ship_symbol, agent_id, agent_token) do
     with %Ship{} = ship <- Repo.get_by(Ship, symbol: ship_symbol, agent_id: agent_id),
-         %Intent{} = intent <- unfinished_intents(ship.id),
+         %Intent{status: status} = intent when status != "awaiting_confirmation" <-
+           unfinished_intents(ship.id),
          %AgentRecord{} = agent <- Repo.get(AgentRecord, agent_id),
          :ok <- Agent.execution_allowed?(agent) do
       case Agent.handle_game_result(agent, SpaceTraders.API.get_ship(agent_token, ship_symbol)) do
