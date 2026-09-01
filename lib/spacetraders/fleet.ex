@@ -3551,7 +3551,7 @@ defmodule SpaceTraders.Fleet do
     end
   end
 
-  def stop_intent_legacy(%AgentRecord{} = agent, intent_id) do
+  def stop_intent_legacy(%AgentRecord{} = agent, intent_id, owner \\ :manual) do
     case Repo.transaction(
            fn ->
              intent =
@@ -3561,12 +3561,19 @@ defmodule SpaceTraders.Fleet do
                    on: ship.id == intent.ship_id,
                    where:
                      intent.id == ^intent_id and ship.agent_id == ^agent.id and
-                       intent.caller == "manual" and intent.status in ^@unfinished_intent_states
+                       intent.status in ^@unfinished_intent_states
                )
 
              case intent do
                %Intent{} = intent ->
                  cond do
+                   owner == :manual and intent.caller != "manual" ->
+                     Repo.rollback(:invalid_intent_owner)
+
+                   is_struct(owner, Job) and
+                       (intent.caller != "job" or intent.job_id != owner.id) ->
+                     Repo.rollback(:invalid_intent_owner)
+
                    unresolved_cargo_action?(intent) ->
                      Repo.rollback(:cargo_operation_reconciliation_required)
 

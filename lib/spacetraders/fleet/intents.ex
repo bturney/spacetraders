@@ -30,13 +30,17 @@ defmodule SpaceTraders.Fleet.Intents do
   def request(agent, owner, ship_symbol, %Navigate{} = goal) do
     with :ok <- token_present(agent),
          {:ok, owner} <- normalize_owner(owner),
+         :ok <- valid_goal_parameters(goal.parameters),
          {:ok, waypoint} <- valid_goal_waypoint(goal.waypoint) do
       case owner do
         :manual ->
           Fleet.navigate_intent_legacy(agent, ship_symbol, waypoint, goal.parameters)
 
-        %JobOwner{job: %Job{} = job} ->
+        %JobOwner{job: %Job{type: type} = job} when type in ["procurement", "market_trading"] ->
           Fleet.request_job_navigate_legacy(agent, job, ship_symbol, waypoint, goal.parameters)
+
+        %JobOwner{} ->
+          {:error, :unsupported_job_navigate}
       end
     end
   end
@@ -52,9 +56,10 @@ defmodule SpaceTraders.Fleet.Intents do
 
   @doc "Stops one owned Intent without hiding unresolved mutation evidence."
   def stop(agent, owner, intent_id) do
-    with {:ok, :manual} <- normalize_owner(owner),
-         %Intent{} <- owned_intent(agent, intent_id) do
-      Fleet.stop_intent_legacy(agent, intent_id)
+    with {:ok, owner} <- normalize_owner(owner),
+         %Intent{} = intent <- owned_intent(agent, intent_id),
+         :ok <- owner_matches?(owner, intent) do
+      Fleet.stop_intent_legacy(agent, intent_id, owner)
     else
       nil -> {:error, :intent_not_found}
       error -> error
@@ -85,6 +90,16 @@ defmodule SpaceTraders.Fleet.Intents do
   end
 
   defp valid_goal_waypoint(_waypoint), do: {:error, :invalid_waypoint}
+
+  defp valid_goal_parameters(parameters) when is_map(parameters), do: :ok
+  defp valid_goal_parameters(_parameters), do: {:error, :invalid_intent_parameters}
+
+  defp owner_matches?(:manual, %Intent{caller: "manual"}), do: :ok
+
+  defp owner_matches?(%JobOwner{job: %Job{id: job_id}}, %Intent{caller: "job", job_id: job_id}),
+    do: :ok
+
+  defp owner_matches?(_owner, _intent), do: {:error, :invalid_intent_owner}
 
   defp owned_intent(%AgentRecord{id: agent_id}, intent_id) do
     Repo.one(
