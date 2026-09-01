@@ -4791,6 +4791,7 @@ defmodule SpaceTradersWeb.DashboardLive do
 
   defp intents_status(%{status: "active"}), do: "Working"
   defp intents_status(%{status: "waiting"}), do: "Waiting"
+  defp intents_status(%{status: "awaiting_confirmation"}), do: "Awaiting confirmation"
   defp intents_status(%{status: "blocked"}), do: "Blocked"
   defp intents_status(%{status: "completed"}), do: "Completed"
   defp intents_status(%{status: "stopped"}), do: "Stopped"
@@ -4817,6 +4818,9 @@ defmodule SpaceTradersWeb.DashboardLive do
   defp module_slots(_ship), do: "?"
 
   defp intents_status_class(%{status: "waiting"}),
+    do: "badge badge-warning badge-sm ml-2"
+
+  defp intents_status_class(%{status: "awaiting_confirmation"}),
     do: "badge badge-warning badge-sm ml-2"
 
   defp intents_status_class(%{status: "blocked"}),

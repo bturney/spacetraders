@@ -119,5 +119,8 @@ defmodule SpaceTraders.Repo.Migrations.AddGatherModeToJobsTest do
 
     assert [["job", ^job_id]] =
              Repo.query!("SELECT caller, job_id FROM intents WHERE ship_id = ?", [ship.id]).rows
+
+    assert [[0]] =
+             Repo.query!("SELECT review_revision FROM intents WHERE ship_id = ?", [ship.id]).rows
   end
 end

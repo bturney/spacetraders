@@ -3351,7 +3351,7 @@ defmodule SpaceTraders.Fleet do
              mode: :immediate
            ) do
         {:ok, {:ok, target}} ->
-          record_activity(agent, ship, "intents_stopped", "Navigate to #{target} stopped")
+          record_activity(agent, ship, "manual_intent_stopped", "Navigate to #{target} stopped")
           :ok
 
         {:error, reason} ->
@@ -3923,7 +3923,7 @@ defmodule SpaceTraders.Fleet do
       {:ok, intent} ->
         record_activity_by_intent(
           intent,
-          "intents_completed",
+          "manual_intent_completed",
           "#{String.capitalize(intent.type)} Goods complete",
           result
         )
@@ -4015,7 +4015,7 @@ defmodule SpaceTraders.Fleet do
 
     record_activity_by_intent(
       intent,
-      "intents_completed",
+      "manual_intent_completed",
       "#{module_intent_verb(intent.type)} #{module_symbol} complete",
       intent.last_action_result
     )
@@ -4622,7 +4622,7 @@ defmodule SpaceTraders.Fleet do
         record_activity(
           agent,
           ship,
-          "intents_completed",
+          "manual_intent_completed",
           "Navigate complete at #{intent.target_waypoint}",
           %{"waypoint" => intent.target_waypoint}
         )
@@ -4649,7 +4649,7 @@ defmodule SpaceTraders.Fleet do
             record_activity(
               agent,
               ship,
-              "intents_waiting",
+              "manual_intent_waiting",
               "Navigate to #{intent.target_waypoint} waiting for arrival",
               %{"wait" => "arrival"}
             )
@@ -4691,7 +4691,7 @@ defmodule SpaceTraders.Fleet do
             record_activity(
               agent,
               ship,
-              "intents_waiting",
+              "manual_intent_waiting",
               "Navigate to #{intent.target_waypoint} waiting for cooldown",
               %{"wait" => "cooldown"}
             )
@@ -4912,7 +4912,7 @@ defmodule SpaceTraders.Fleet do
                   record_activity(
                     agent,
                     ship,
-                    "intents_navigate",
+                    "manual_intent_navigate",
                     "#{live_ship.symbol} navigating to #{destination}",
                     %{"waypoint" => destination}
                   )
@@ -5155,7 +5155,7 @@ defmodule SpaceTraders.Fleet do
         unless already_blocked? do
           record_activity_by_intent(
             intent,
-            "intents_blocked",
+            "manual_intent_blocked",
             "Navigate to #{intent.target_waypoint} blocked: #{inspect(reason)}",
             %{"block" => inspect(reason)}
           )
@@ -5259,7 +5259,7 @@ defmodule SpaceTraders.Fleet do
       record_activity_by_id(
         agent_id,
         ship,
-        "intents_recovery",
+        "manual_intent_recovery",
         "Authoritative recovery read failed; retrying",
         "transport_error"
       )
@@ -5293,7 +5293,7 @@ defmodule SpaceTraders.Fleet do
         {:ok, blocked_intent} ->
           record_activity_by_intent(
             blocked_intent,
-            "intents_recovery",
+            "manual_intent_recovery",
             "Manual navigate recovery blocked after retry exhaustion",
             %{"outcome" => "retry_exhausted"}
           )
