@@ -8,11 +8,14 @@ defmodule SpaceTraders.Repo.Migrations.AddGatherModeToJobsTest do
   alias SpaceTraders.Repo
   alias SpaceTraders.Repo.Migrations.AddCallerOwnershipToManualIntents
   alias SpaceTraders.Repo.Migrations.AddGatherModeToJobs
+  alias SpaceTraders.Repo.Migrations.RenameManualIntentsToIntents
 
   @migration AddGatherModeToJobs
   @version 2026_08_18_000000
   @caller_ownership_migration AddCallerOwnershipToManualIntents
   @caller_ownership_version 2026_08_30_000000
+  @rename_migration RenameManualIntentsToIntents
+  @rename_version 2026_08_31_000000
 
   test "saved Miner Jobs migrate unchanged with extract as their gather mode" do
     assert :ok = Ecto.Migrator.down(Repo, @version, @migration, log: false)
@@ -55,6 +58,8 @@ defmodule SpaceTraders.Repo.Migrations.AddGatherModeToJobsTest do
   end
 
   test "saved Job-owned Intents retain their caller ownership" do
+    assert :ok = Ecto.Migrator.down(Repo, @rename_version, @rename_migration, log: false)
+
     assert :ok =
              Ecto.Migrator.down(
                Repo,
@@ -94,7 +99,7 @@ defmodule SpaceTraders.Repo.Migrations.AddGatherModeToJobsTest do
 
     Repo.query!(
       """
-      INSERT INTO manual_intents
+       INSERT INTO manual_intents
         (ship_id, type, target_waypoint, parameters, status, inserted_at, updated_at)
       VALUES
         (?, 'buy', 'X1-UX81-A1', ?, 'blocked', datetime('now'), datetime('now'))
@@ -110,7 +115,9 @@ defmodule SpaceTraders.Repo.Migrations.AddGatherModeToJobsTest do
                log: false
              )
 
+    assert :ok = Ecto.Migrator.up(Repo, @rename_version, @rename_migration, log: false)
+
     assert [["job", ^job_id]] =
-             Repo.query!("SELECT caller, job_id FROM manual_intents WHERE ship_id = ?", [ship.id]).rows
+             Repo.query!("SELECT caller, job_id FROM intents WHERE ship_id = ?", [ship.id]).rows
   end
 end
