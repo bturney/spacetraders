@@ -3583,6 +3583,9 @@ defmodule SpaceTraders.Fleet do
                    unresolved_jump_action?(intent) or unresolved_warp_action?(intent) ->
                      Repo.rollback(:intents_reconciliation_required)
 
+                   unresolved_navigation_action?(intent) ->
+                     Repo.rollback(:intents_reconciliation_required)
+
                    true ->
                      terminalize_intents!(intent, "stopped")
                  end
@@ -4712,11 +4715,13 @@ defmodule SpaceTraders.Fleet do
         when type in ["install_module", "remove_module"] and is_map(action) ->
           Repo.rollback(:intents_reconciliation_required)
 
-        %Intent{in_flight_action: %{"kind" => "jump"}} ->
-          Repo.rollback(:intents_reconciliation_required)
-
         %Intent{} = predecessor ->
-          terminalize_intents!(predecessor, "stopped")
+          if unresolved_navigation_action?(predecessor) or
+               unresolved_jump_action?(predecessor) or unresolved_warp_action?(predecessor) do
+            Repo.rollback(:intents_reconciliation_required)
+          else
+            terminalize_intents!(predecessor, "stopped")
+          end
 
         nil ->
           :ok
@@ -4732,8 +4737,15 @@ defmodule SpaceTraders.Fleet do
           end
 
           case unfinished_job_intent(job.id) do
-            %Intent{} = predecessor -> terminalize_intents!(predecessor, "stopped")
-            nil -> :ok
+            %Intent{} = predecessor ->
+              if unresolved_intent_evidence?(predecessor) do
+                Repo.rollback(:intents_reconciliation_required)
+              else
+                terminalize_intents!(predecessor, "stopped")
+              end
+
+            nil ->
+              :ok
           end
 
           unless job.status == "paused" do
@@ -4787,10 +4799,15 @@ defmodule SpaceTraders.Fleet do
         # A claimed prerequisite can still be accepted by the game after this
         # process yields. Preemption must wait for its authoritative outcome,
         # just as it does for cargo mutations.
-        if is_map(intent.in_flight_action) do
-          Repo.rollback(:cargo_operation_reconciliation_required)
-        else
-          terminalize_intents!(intent, "stopped")
+        cond do
+          unresolved_cargo_action?(intent) ->
+            Repo.rollback(:cargo_operation_reconciliation_required)
+
+          unresolved_intent_evidence?(intent) ->
+            Repo.rollback(:intents_reconciliation_required)
+
+          true ->
+            terminalize_intents!(intent, "stopped")
         end
 
       nil ->
@@ -4805,6 +4822,11 @@ defmodule SpaceTraders.Fleet do
 
   defp unresolved_jump_action?(intent) do
     is_map(intent.in_flight_action) and intent.in_flight_action["kind"] == "jump"
+  end
+
+  defp unresolved_navigation_action?(intent) do
+    (is_map(intent.in_flight_action) and intent.in_flight_action["kind"] == "navigate") or
+      (is_map(intent.last_action_result) and intent.last_action_result["wait"] == "arrival")
   end
 
   defp unresolved_warp_action?(intent) do
@@ -4828,9 +4850,7 @@ defmodule SpaceTraders.Fleet do
   end
 
   defp terminalize_intents!(intent, status) when status in @terminal_intent_states do
-    preserve_evidence? =
-      unresolved_cargo_action?(intent) or unresolved_module_evidence?(intent) or
-        unresolved_jump_action?(intent) or unresolved_warp_action?(intent)
+    preserve_evidence? = unresolved_intent_evidence?(intent)
 
     Repo.update!(
       Ecto.Changeset.change(intent,
@@ -4839,6 +4859,12 @@ defmodule SpaceTraders.Fleet do
         finished_at: DateTime.utc_now() |> DateTime.truncate(:second)
       )
     )
+  end
+
+  defp unresolved_intent_evidence?(intent) do
+    unresolved_cargo_action?(intent) or unresolved_module_evidence?(intent) or
+      unresolved_jump_action?(intent) or unresolved_warp_action?(intent) or
+      unresolved_navigation_action?(intent)
   end
 
   defp unresolved_module_evidence?(%Intent{type: type, in_flight_action: action})

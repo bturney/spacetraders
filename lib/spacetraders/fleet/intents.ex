@@ -47,6 +47,23 @@ defmodule SpaceTraders.Fleet.Intents do
 
   def request(_agent, _owner, _ship_symbol, _goal), do: {:error, :unsupported_intent_goal}
 
+  @doc "Persists a reviewed Navigate Intent without dispatching a mutation."
+  def review(agent, owner, ship_symbol, waypoint, preview) when is_map(preview) do
+    with {:ok, :manual} <- normalize_owner(owner) do
+      Fleet.review_navigation_intent(agent, ship_symbol, waypoint, preview)
+    end
+  end
+
+  def review(_agent, _owner, _ship_symbol, _waypoint, _preview),
+    do: {:error, :unsupported_intent_review}
+
+  @doc "Persists a blocked Navigate Intent after preview rejects the route."
+  def block_review(agent, owner, ship_symbol, waypoint, reason) do
+    with {:ok, :manual} <- normalize_owner(owner) do
+      Fleet.block_jump_preview(agent, ship_symbol, waypoint, reason)
+    end
+  end
+
   @doc "Confirms a persisted reviewed Navigate Intent by identity and revision."
   def confirm(agent, owner, intent_id, review_revision) do
     with {:ok, :manual} <- normalize_owner(owner) do
@@ -59,6 +76,19 @@ defmodule SpaceTraders.Fleet.Intents do
     with {:ok, owner} <- normalize_owner(owner),
          %Intent{} = intent <- owned_intent(agent, intent_id),
          :ok <- owner_matches?(owner, intent) do
+      Fleet.stop_intent_legacy(agent, intent_id, owner)
+    else
+      nil -> {:error, :intent_not_found}
+      error -> error
+    end
+  end
+
+  @doc "Stops an owned Intent after binding the request to its Ship identity."
+  def stop(agent, owner, ship_symbol, intent_id) do
+    with {:ok, owner} <- normalize_owner(owner),
+         %Intent{} = intent <- owned_intent(agent, intent_id),
+         :ok <- owner_matches?(owner, intent),
+         :ok <- intent_ship_matches?(intent, ship_symbol) do
       Fleet.stop_intent_legacy(agent, intent_id, owner)
     else
       nil -> {:error, :intent_not_found}
@@ -100,6 +130,14 @@ defmodule SpaceTraders.Fleet.Intents do
     do: :ok
 
   defp owner_matches?(_owner, _intent), do: {:error, :invalid_intent_owner}
+
+  defp intent_ship_matches?(%Intent{ship_id: ship_id}, ship_symbol) do
+    case Repo.get(Ship, ship_id) do
+      %Ship{symbol: ^ship_symbol} -> :ok
+      %Ship{} -> {:error, :intent_ship_mismatch}
+      nil -> {:error, :intent_not_found}
+    end
+  end
 
   defp owned_intent(%AgentRecord{id: agent_id}, intent_id) do
     Repo.one(

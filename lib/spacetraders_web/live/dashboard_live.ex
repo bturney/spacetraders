@@ -32,6 +32,7 @@ defmodule SpaceTradersWeb.DashboardLive do
   alias SpaceTraders.Fleet
   alias SpaceTraders.Fleet.Job
   alias SpaceTraders.Fleet.JobBlocker
+  alias SpaceTraders.Fleet.Intents
   alias SpaceTraders.Intelligence
   alias SpaceTraders.SystemWaypointProjection
   alias SpaceTradersWeb.DashboardPrototype
@@ -181,7 +182,7 @@ defmodule SpaceTradersWeb.DashboardLive do
         socket
       ) do
     result =
-      Fleet.confirm_navigation_intent(socket.assigns.current_scope, intent_id, revision)
+      Intents.confirm(socket.assigns.current_scope, %Intents.ManualControl{}, intent_id, revision)
 
     case result do
       {:ok, %{status: "awaiting_confirmation"}} ->
@@ -243,23 +244,35 @@ defmodule SpaceTradersWeb.DashboardLive do
       result =
         case Fleet.jump_preview(agent, ship_symbol, waypoint) do
           {:ok, preview} ->
-            Fleet.review_navigation_intent(agent, ship_symbol, waypoint, preview)
+            Intents.review(agent, %Intents.ManualControl{}, ship_symbol, waypoint, preview)
 
           {:error, :same_system_route} ->
-            Fleet.navigate_intent(agent, ship_symbol, waypoint)
+            Intents.request(
+              agent,
+              %Intents.ManualControl{},
+              ship_symbol,
+              %Intents.Navigate{waypoint: waypoint}
+            )
 
           {:error, {:jump_route_candidates, reason, candidates} = route_reason} ->
             case Fleet.warp_preview(agent, ship_symbol, waypoint) do
               {:ok, preview} ->
-                Fleet.review_navigation_intent(
+                Intents.review(
                   agent,
+                  %Intents.ManualControl{},
                   ship_symbol,
                   waypoint,
                   Map.put(preview, :candidates, candidates)
                 )
 
               {:error, _warp_reason} ->
-                case Fleet.block_jump_preview(agent, ship_symbol, waypoint, route_reason) do
+                case Intents.block_review(
+                       agent,
+                       %Intents.ManualControl{},
+                       ship_symbol,
+                       waypoint,
+                       route_reason
+                     ) do
                   {:ok, intent} ->
                     {:blocked_preview, candidate_preview(waypoint, candidates, reason), intent}
 
@@ -271,10 +284,16 @@ defmodule SpaceTradersWeb.DashboardLive do
           {:error, reason} ->
             case Fleet.warp_preview(agent, ship_symbol, waypoint) do
               {:ok, preview} ->
-                Fleet.review_navigation_intent(agent, ship_symbol, waypoint, preview)
+                Intents.review(agent, %Intents.ManualControl{}, ship_symbol, waypoint, preview)
 
               {:error, _warp_reason} ->
-                case Fleet.block_jump_preview(agent, ship_symbol, waypoint, reason) do
+                case Intents.block_review(
+                       agent,
+                       %Intents.ManualControl{},
+                       ship_symbol,
+                       waypoint,
+                       reason
+                     ) do
                   {:ok, intent} ->
                     {:blocked_preview, candidate_preview(waypoint, [], reason), intent}
 
@@ -346,9 +365,13 @@ defmodule SpaceTradersWeb.DashboardLive do
   end
 
   @impl true
-  def handle_event("stop_intents", %{"symbol" => ship_symbol}, socket) do
+  def handle_event(
+        "stop_intents",
+        %{"symbol" => ship_symbol, "intent_id" => intent_id},
+        socket
+      ) do
     with {:ok, agent} <- agent_for_ship(socket, ship_symbol),
-         :ok <- Fleet.stop_intents(agent, ship_symbol) do
+         :ok <- Intents.stop(agent, %Intents.ManualControl{}, ship_symbol, intent_id) do
       message = "#{ship_symbol} manual Navigate stopped; the Ship stays in Manual Control."
 
       {:noreply, put_flash(refresh_agent_fleet(socket, agent.id), :info, message)}
@@ -3426,6 +3449,7 @@ defmodule SpaceTradersWeb.DashboardLive do
             type="button"
             phx-click="stop_intents"
             phx-value-symbol={@ship.symbol}
+            phx-value-intent_id={@ship.intents.id}
             class="btn btn-ghost btn-xs"
           >
             Stop
@@ -5332,7 +5356,7 @@ defmodule SpaceTradersWeb.DashboardLive do
   defp live_error(:invalid_module_intent), do: "Choose a module with exact removal authorization."
 
   defp live_error(:intents_reconciliation_required),
-    do: "The prior module operation is still being reconciled from the game."
+    do: "The prior manual operation is still being reconciled from the game."
 
   defp live_error({:miner_job_blocked, reason}), do: "Miner Job blocked: #{live_error(reason)}"
   defp live_error(:invalid_units), do: "Enter a positive number of units."

@@ -2958,8 +2958,8 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
 
       html = lv |> element("[data-manual-intent] button", "Stop") |> render_click()
 
-      assert html =~ "ORBITALIST-1 manual Navigate stopped"
-      refute has_element?(lv, "[data-manual-intent]")
+      assert html =~ "prior manual operation is still being reconciled"
+      assert has_element?(lv, ~s([data-manual-intent="waiting"]))
     end
 
     test "shows an on-site shipyard and buys a mining drone", %{conn: conn, operator: operator} do
