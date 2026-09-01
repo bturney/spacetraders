@@ -103,6 +103,36 @@ defmodule SpaceTraders.IntentsTest do
     assert %Intent{status: "stopped"} = Repo.get!(Intent, intent.id)
   end
 
+  test "binds stopping to the requested Ship" do
+    agent = agent_fixture("INTENTS-MISMATCH")
+    ship = ship_fixture(agent, "INTENTS-SHIP-ONE")
+    ship_fixture(agent, "INTENTS-SHIP-TWO")
+    intent = Repo.insert!(%Intent{ship_id: ship.id, target_waypoint: "X1-UX81-A2"})
+
+    assert {:error, :intent_ship_mismatch} =
+             Intents.stop(agent, %Intents.ManualControl{}, "INTENTS-SHIP-TWO", intent.id)
+
+    assert %Intent{status: "active"} = Repo.get!(Intent, intent.id)
+  end
+
+  test "refuses to stop Navigate with unresolved mutation evidence" do
+    agent = agent_fixture("INTENTS-EVIDENCE")
+    ship = ship_fixture(agent, "INTENTS-EVIDENCE-SHIP")
+
+    intent =
+      Repo.insert!(%Intent{
+        ship_id: ship.id,
+        target_waypoint: "X1-UX81-A2",
+        status: "waiting",
+        in_flight_action: %{"kind" => "navigate"}
+      })
+
+    assert {:error, :intents_reconciliation_required} =
+             Intents.stop(agent, %Intents.ManualControl{}, intent.id)
+
+    assert %Intent{status: "waiting"} = Repo.get!(Intent, intent.id)
+  end
+
   defp agent_fixture(symbol) do
     Repo.insert!(%AgentRecord{
       symbol: symbol,

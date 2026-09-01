@@ -3583,6 +3583,9 @@ defmodule SpaceTraders.Fleet do
                    unresolved_jump_action?(intent) or unresolved_warp_action?(intent) ->
                      Repo.rollback(:intents_reconciliation_required)
 
+                   unresolved_navigation_action?(intent) ->
+                     Repo.rollback(:intents_reconciliation_required)
+
                    true ->
                      terminalize_intents!(intent, "stopped")
                  end
@@ -4805,6 +4808,10 @@ defmodule SpaceTraders.Fleet do
 
   defp unresolved_jump_action?(intent) do
     is_map(intent.in_flight_action) and intent.in_flight_action["kind"] == "jump"
+  end
+
+  defp unresolved_navigation_action?(intent) do
+    is_map(intent.in_flight_action) and intent.in_flight_action["kind"] == "navigate"
   end
 
   defp unresolved_warp_action?(intent) do

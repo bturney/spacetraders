@@ -371,7 +371,7 @@ defmodule SpaceTradersWeb.DashboardLive do
         socket
       ) do
     with {:ok, agent} <- agent_for_ship(socket, ship_symbol),
-         :ok <- Intents.stop(agent, %Intents.ManualControl{}, intent_id) do
+         :ok <- Intents.stop(agent, %Intents.ManualControl{}, ship_symbol, intent_id) do
       message = "#{ship_symbol} manual Navigate stopped; the Ship stays in Manual Control."
 
       {:noreply, put_flash(refresh_agent_fleet(socket, agent.id), :info, message)}
@@ -5356,7 +5356,7 @@ defmodule SpaceTradersWeb.DashboardLive do
   defp live_error(:invalid_module_intent), do: "Choose a module with exact removal authorization."
 
   defp live_error(:intents_reconciliation_required),
-    do: "The prior module operation is still being reconciled from the game."
+    do: "The prior manual operation is still being reconciled from the game."
 
   defp live_error({:miner_job_blocked, reason}), do: "Miner Job blocked: #{live_error(reason)}"
   defp live_error(:invalid_units), do: "Enter a positive number of units."

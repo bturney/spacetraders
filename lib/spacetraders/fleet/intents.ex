@@ -83,6 +83,19 @@ defmodule SpaceTraders.Fleet.Intents do
     end
   end
 
+  @doc "Stops an owned Intent after binding the request to its Ship identity."
+  def stop(agent, owner, ship_symbol, intent_id) do
+    with {:ok, owner} <- normalize_owner(owner),
+         %Intent{} = intent <- owned_intent(agent, intent_id),
+         :ok <- owner_matches?(owner, intent),
+         :ok <- intent_ship_matches?(intent, ship_symbol) do
+      Fleet.stop_intent_legacy(agent, intent_id, owner)
+    else
+      nil -> {:error, :intent_not_found}
+      error -> error
+    end
+  end
+
   @doc "Re-enters the shared reconciliation path for a fresh Ship observation."
   def reconcile(agent, ship_symbol, live_ship, expected_intent_id) do
     Fleet.revalidate_intents_arrival(agent.id, ship_symbol, live_ship, expected_intent_id)
@@ -117,6 +130,14 @@ defmodule SpaceTraders.Fleet.Intents do
     do: :ok
 
   defp owner_matches?(_owner, _intent), do: {:error, :invalid_intent_owner}
+
+  defp intent_ship_matches?(%Intent{ship_id: ship_id}, ship_symbol) do
+    case Repo.get(Ship, ship_id) do
+      %Ship{symbol: ^ship_symbol} -> :ok
+      %Ship{} -> {:error, :intent_ship_mismatch}
+      nil -> {:error, :intent_not_found}
+    end
+  end
 
   defp owned_intent(%AgentRecord{id: agent_id}, intent_id) do
     Repo.one(
