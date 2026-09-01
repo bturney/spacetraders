@@ -261,14 +261,14 @@ defmodule SpaceTraders.Fleet do
   defp intents_for_ships(agent) do
     agent
     |> SpaceTraders.Fleet.Intents.current()
-    |> Enum.reject(&(&1.parameters["caller"] == "job"))
+    |> Enum.filter(&(&1.caller == "manual"))
     |> Map.new(&{&1.ship_id, &1})
   end
 
   defp intents_history_for_ships(agent) do
     agent
     |> SpaceTraders.Fleet.Intents.history()
-    |> Enum.reject(&(&1.parameters["caller"] == "job"))
+    |> Enum.filter(&(&1.caller == "manual"))
     |> Enum.group_by(& &1.ship_id)
   end
 
