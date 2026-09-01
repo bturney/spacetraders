@@ -1,4 +1,4 @@
-defmodule SpaceTraders.Repo.Migrations.AddGatherModeToJobsTest do
+defmodule SpaceTraders.Repo.Migrations.PersistenceRenameTest do
   # Migrations execute DDL against the shared repo; nothing else may run
   # concurrently.
   use SpaceTraders.DataCase, async: false
