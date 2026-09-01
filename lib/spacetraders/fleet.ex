@@ -2837,13 +2837,38 @@ defmodule SpaceTraders.Fleet do
   """
   def navigate_intent(%AgentRecord{agent_token: agent_token} = agent, ship_symbol, waypoint)
       when is_binary(agent_token) and agent_token != "" do
-    navigate_intent(agent, ship_symbol, waypoint, %{})
+    SpaceTraders.Fleet.Intents.request(
+      agent,
+      :manual,
+      ship_symbol,
+      %SpaceTraders.Fleet.Intents.Navigate{waypoint: waypoint}
+    )
   end
 
   def navigate_intent(%AgentRecord{}, _ship_symbol, _waypoint),
     do: {:error, :agent_token_missing}
 
   def navigate_intent(
+        %AgentRecord{agent_token: agent_token} = agent,
+        ship_symbol,
+        waypoint,
+        parameters
+      )
+      when is_binary(agent_token) and agent_token != "" and is_map(parameters) do
+    SpaceTraders.Fleet.Intents.request(
+      agent,
+      :manual,
+      ship_symbol,
+      %SpaceTraders.Fleet.Intents.Navigate{waypoint: waypoint, parameters: parameters}
+    )
+  end
+
+  def navigate_intent(%AgentRecord{}, _ship_symbol, _waypoint, _parameters),
+    do: {:error, :agent_token_missing}
+
+  # Temporary internal delegator. Navigate execution lives behind Intents while
+  # existing Fleet callers migrate to the seam.
+  def navigate_intent_legacy(
         %AgentRecord{agent_token: agent_token} = agent,
         ship_symbol,
         waypoint,
@@ -2867,8 +2892,27 @@ defmodule SpaceTraders.Fleet do
     end
   end
 
-  def navigate_intent(%AgentRecord{}, _ship_symbol, _waypoint, _parameters),
-    do: {:error, :agent_token_missing}
+  def request_job_navigate_legacy(agent, job, ship_symbol, waypoint, parameters) do
+    with {:ok, ship} <- owned_ship(agent, ship_symbol),
+         true <- ship.id == job.ship_id || {:error, :invalid_intent_owner},
+         true <- Job.running?(job) || {:error, :invalid_intent_owner},
+         {:ok, intent} <-
+           insert_job_intent(job, %{
+             type: "navigate",
+             target_waypoint: waypoint,
+             parameters: parameters
+           }),
+         {:ok, live_ship} <-
+           Agent.handle_game_result(
+             agent,
+             SpaceTraders.API.get_ship(agent.agent_token, ship.symbol)
+           ) do
+      advance_intents(agent, intent, live_ship)
+    else
+      false -> {:error, :invalid_intent_owner}
+      error -> error
+    end
+  end
 
   @doc "Dispatches a reviewed jump route only when its fresh authority still matches the preview."
   def confirm_jump_intent(agent, ship_symbol, waypoint, preview) when is_map(preview) do
@@ -3489,6 +3533,11 @@ defmodule SpaceTraders.Fleet do
 
   @doc "Stops a Ship's unfinished Manual Control Intent; the assigned Job remains paused."
   def stop_intents(%AgentRecord{} = agent, ship_symbol) do
+    SpaceTraders.Fleet.Intents.stop_by_ship(agent, :manual, ship_symbol)
+  end
+
+  # Temporary internal delegator. Stop semantics are implemented by Intents.
+  def stop_intents_legacy(%AgentRecord{} = agent, ship_symbol) do
     with {:ok, ship} <- owned_ship(agent, ship_symbol) do
       # This transaction shares the write lock used to claim an action. A stop
       # therefore cannot clear a request fingerprint after another process has
