@@ -85,7 +85,6 @@ defmodule SpaceTradersWeb.DashboardLive do
               waypoint_markets={@waypoint_markets}
               waypoint_intelligence={@waypoint_intelligence}
               selected_ships={@selected_ships}
-              jump_previews={@jump_previews}
             />
 
             <.activity_panel overviews={non_stale_overviews(@overviews)} />
@@ -169,11 +168,47 @@ defmodule SpaceTradersWeb.DashboardLive do
        show_historical_contracts: MapSet.new(),
        selected_waypoints: %{},
        selected_ships: %{},
-       jump_previews: %{},
        waypoint_filters: %{},
        waypoint_markets: %{},
        waypoint_intelligence: %{}
      )}
+  end
+
+  @impl true
+  def handle_event(
+        "navigate",
+        %{"intent_id" => intent_id, "review_revision" => revision},
+        socket
+      ) do
+    result =
+      socket.assigns.current_scope.operator
+      |> Agent.list_agents()
+      |> Enum.reduce_while({:error, :intent_not_found}, fn agent, _acc ->
+        case Fleet.confirm_navigation_intent(agent, intent_id, revision) do
+          {:error, :intent_not_found} -> {:cont, {:error, :intent_not_found}}
+          result -> {:halt, result}
+        end
+      end)
+
+    case result do
+      {:ok, %{status: "awaiting_confirmation"}} ->
+        {:noreply,
+         socket
+         |> refresh_all_fleets()
+         |> put_flash(
+           :info,
+           "The route changed. Review the refreshed authority before confirming."
+         )}
+
+      {:ok, %{status: status}} when status in ["active", "waiting", "completed"] ->
+        {:noreply,
+         socket
+         |> refresh_all_fleets()
+         |> put_flash(:info, "Remote navigation confirmed.")}
+
+      {:error, reason} ->
+        {:noreply, put_flash(socket, :error, live_error(reason))}
+    end
   end
 
   @impl true
@@ -207,66 +242,60 @@ defmodule SpaceTradersWeb.DashboardLive do
     with {:ok, agent} <- agent_for_ship(socket, ship_symbol),
          :ok <- validate_waypoint(waypoint) do
       result =
-        if params["confirm_jump"] == "true" do
-          preview = Map.get(socket.assigns.jump_previews, ship_symbol, %{})
+        case Fleet.jump_preview(agent, ship_symbol, waypoint) do
+          {:ok, preview} ->
+            Fleet.review_navigation_intent(agent, ship_symbol, waypoint, preview)
 
-          if preview[:method] == "warp" do
-            Fleet.confirm_warp_intent(agent, ship_symbol, waypoint, preview)
-          else
-            Fleet.confirm_jump_intent(agent, ship_symbol, waypoint, preview)
-          end
-        else
-          case Fleet.jump_preview(agent, ship_symbol, waypoint) do
-            {:ok, preview} ->
-              {:preview, preview}
+          {:error, :same_system_route} ->
+            Fleet.navigate_intent(agent, ship_symbol, waypoint)
 
-            {:error, :same_system_route} ->
-              Fleet.navigate_intent(agent, ship_symbol, waypoint)
+          {:error, {:jump_route_candidates, reason, candidates} = route_reason} ->
+            case Fleet.warp_preview(agent, ship_symbol, waypoint) do
+              {:ok, preview} ->
+                Fleet.review_navigation_intent(
+                  agent,
+                  ship_symbol,
+                  waypoint,
+                  Map.put(preview, :candidates, candidates)
+                )
 
-            {:error, {:jump_route_candidates, reason, candidates} = route_reason} ->
-              case Fleet.warp_preview(agent, ship_symbol, waypoint) do
-                {:ok, preview} ->
-                  {:preview, Map.put(preview, :candidates, candidates)}
+              {:error, _warp_reason} ->
+                case Fleet.block_jump_preview(agent, ship_symbol, waypoint, route_reason) do
+                  {:ok, intent} ->
+                    {:blocked_preview, candidate_preview(waypoint, candidates, reason), intent}
 
-                {:error, _warp_reason} ->
-                  case Fleet.block_jump_preview(agent, ship_symbol, waypoint, route_reason) do
-                    {:ok, intent} ->
-                      {:blocked_preview, candidate_preview(waypoint, candidates, reason), intent}
+                  other ->
+                    other
+                end
+            end
 
-                    other ->
-                      other
-                  end
-              end
+          {:error, reason} ->
+            case Fleet.warp_preview(agent, ship_symbol, waypoint) do
+              {:ok, preview} ->
+                Fleet.review_navigation_intent(agent, ship_symbol, waypoint, preview)
 
-            {:error, reason} ->
-              case Fleet.warp_preview(agent, ship_symbol, waypoint) do
-                {:ok, preview} ->
-                  {:preview, preview}
+              {:error, _warp_reason} ->
+                case Fleet.block_jump_preview(agent, ship_symbol, waypoint, reason) do
+                  {:ok, intent} ->
+                    {:blocked_preview, candidate_preview(waypoint, [], reason), intent}
 
-                {:error, _warp_reason} ->
-                  case Fleet.block_jump_preview(agent, ship_symbol, waypoint, reason) do
-                    {:ok, intent} ->
-                      {:blocked_preview, candidate_preview(waypoint, [], reason), intent}
-
-                    other ->
-                      other
-                  end
-              end
-          end
+                  other ->
+                    other
+                end
+            end
         end
 
       case result do
-        {:preview, preview} ->
+        {:ok, %{status: "awaiting_confirmation"}} ->
           {:noreply,
            socket
-           |> assign(:jump_previews, Map.put(socket.assigns.jump_previews, ship_symbol, preview))
+           |> refresh_agent_fleet(agent.id)
            |> put_flash(:info, "Review the jump route before dispatching it.")}
 
-        {:blocked_preview, preview,
+        {:blocked_preview, _preview,
          %{status: "blocked", blocker: blocker, target_waypoint: target}} ->
           {:noreply,
            socket
-           |> assign(:jump_previews, Map.put(socket.assigns.jump_previews, ship_symbol, preview))
            |> refresh_agent_fleet(agent.id)
            |> put_flash(:error, "Navigate to #{target} blocked: #{blocker_summary(blocker)}")}
 
@@ -1356,6 +1385,12 @@ defmodule SpaceTradersWeb.DashboardLive do
     if overview, do: refresh_agent(socket, overview.agent), else: socket
   end
 
+  defp refresh_all_fleets(socket) do
+    Enum.reduce(socket.assigns.overviews, socket, fn overview, socket ->
+      refresh_agent(socket, overview.agent)
+    end)
+  end
+
   defp load_waypoint_market(socket, agent_id, symbol, key) do
     result =
       case Enum.find(socket.assigns.overviews, &(to_string(&1.agent.id) == agent_id)) do
@@ -1555,7 +1590,6 @@ defmodule SpaceTradersWeb.DashboardLive do
   attr :waypoint_markets, :map, default: %{}
   attr :waypoint_intelligence, :map, default: %{}
   attr :selected_ships, :map, default: %{}
-  attr :jump_previews, :map, default: %{}
 
   defp agent_section(assigns) do
     ~H"""
@@ -1578,7 +1612,6 @@ defmodule SpaceTradersWeb.DashboardLive do
         cooldown_tick={@cooldown_tick}
         form_drafts={@form_drafts}
         selected_ship={Map.get(@selected_ships, to_string(@overview.agent.id))}
-        jump_previews={@jump_previews}
       />
       <.fleet_attention
         agent_id={@overview.agent.id}
@@ -2860,7 +2893,6 @@ defmodule SpaceTradersWeb.DashboardLive do
   attr :cooldown_tick, :integer, required: true
   attr :form_drafts, :map, default: %{}
   attr :selected_ship, :string, default: nil
-  attr :jump_previews, :map, default: %{}
 
   defp fleet_grid(assigns) do
     ~H"""
@@ -2902,7 +2934,7 @@ defmodule SpaceTradersWeb.DashboardLive do
               agent_id={@agent.id}
               cooldown_tick={@cooldown_tick}
               form_drafts={@form_drafts}
-              jump_preview={Map.get(@jump_previews, ship.symbol)}
+              jump_preview={jump_preview_for_intent(ship.intents)}
               selected={@selected_ship == ship.symbol}
               selected_mode={not is_nil(@selected_ship)}
             />
@@ -3360,14 +3392,15 @@ defmodule SpaceTradersWeb.DashboardLive do
             </ul>
           </div>
           <form
-            :if={jump_preview_viable?(@jump_preview)}
+            :if={
+              jump_preview_viable?(@jump_preview) and @ship.intents.status == "awaiting_confirmation"
+            }
             id={"confirm-jump-form-#{@ship.symbol}"}
             phx-submit="navigate"
-            phx-value-symbol={@ship.symbol}
             class="mt-3"
           >
-            <input type="hidden" name="waypoint_symbol" value={@jump_preview.destination_waypoint} />
-            <input type="hidden" name="confirm_jump" value="true" />
+            <input type="hidden" name="intent_id" value={@ship.intents.id} />
+            <input type="hidden" name="review_revision" value={@ship.intents.review_revision} />
             <button type="submit" class="btn btn-primary btn-sm">
               {if @jump_preview[:method] == "warp", do: "Confirm warp", else: "Confirm jump"}
             </button>
@@ -4695,6 +4728,22 @@ defmodule SpaceTradersWeb.DashboardLive do
   defp jump_preview_viable?(%{route_type: "navigate"}), do: true
   defp jump_preview_viable?(%{candidates: candidates}), do: Enum.any?(candidates, & &1.viable)
   defp jump_preview_viable?(_), do: false
+
+  defp jump_preview_for_intent(%{status: "awaiting_confirmation", parameters: parameters}) do
+    case parameters["review_method"] do
+      method when method in ["jump", "warp"] -> atomize_preview(parameters["reviewed_#{method}"])
+      _ -> nil
+    end
+  end
+
+  defp jump_preview_for_intent(_intent), do: nil
+
+  defp atomize_preview(value) when is_map(value) do
+    Map.new(value, fn {key, value} -> {String.to_atom(to_string(key)), atomize_preview(value)} end)
+  end
+
+  defp atomize_preview(value) when is_list(value), do: Enum.map(value, &atomize_preview/1)
+  defp atomize_preview(value), do: value
 
   defp candidate_preview(waypoint, candidates, reason) do
     candidates =

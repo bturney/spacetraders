@@ -13,6 +13,7 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
   alias SpaceTraders.Fleet.Job
   alias SpaceTraders.Fleet.JobBlocker
   alias SpaceTraders.Fleet.Activity
+  alias SpaceTraders.Fleet.Intent
   alias SpaceTraders.Repo
 
   defp stub_live_game(agent_overview, ships) do
@@ -2814,6 +2815,17 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       assert has_element?(lv, "[data-jump-candidates]", "viable")
       assert has_element?(lv, "form#confirm-jump-form-ORBITALIST-1")
       refute_received {:request, "/v2/my/ships/ORBITALIST-1/jump", "POST"}
+
+      assert %Intent{
+               status: "awaiting_confirmation",
+               review_revision: 1,
+               parameters: %{"review_method" => "jump", "reviewed_jump" => review}
+             } = Repo.get_by!(Intent, target_waypoint: "X2-UX81-G1")
+
+      assert review["source_waypoint"] == "X1-UX81-G1"
+
+      {:ok, reconnected, _html} = live(conn, ~p"/")
+      assert has_element?(reconnected, "form#confirm-jump-form-ORBITALIST-1")
 
       lv
       |> element("form#confirm-jump-form-ORBITALIST-1")
