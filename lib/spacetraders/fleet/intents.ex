@@ -47,6 +47,16 @@ defmodule SpaceTraders.Fleet.Intents do
 
   def request(_agent, _owner, _ship_symbol, _goal), do: {:error, :unsupported_intent_goal}
 
+  @doc "Persists a reviewed Navigate Intent without dispatching a mutation."
+  def review(agent, owner, ship_symbol, waypoint, preview) when is_map(preview) do
+    with {:ok, :manual} <- normalize_owner(owner) do
+      Fleet.review_navigation_intent(agent, ship_symbol, waypoint, preview)
+    end
+  end
+
+  def review(_agent, _owner, _ship_symbol, _waypoint, _preview),
+    do: {:error, :unsupported_intent_review}
+
   @doc "Confirms a persisted reviewed Navigate Intent by identity and revision."
   def confirm(agent, owner, intent_id, review_revision) do
     with {:ok, :manual} <- normalize_owner(owner) do
