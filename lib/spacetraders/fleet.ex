@@ -5401,7 +5401,8 @@ defmodule SpaceTraders.Fleet do
   @doc "Reconciles a persisted Manual Control Intent after a process restart."
   def recover_intents_on_boot(ship_symbol, agent_id, agent_token) do
     with %Ship{} = ship <- Repo.get_by(Ship, symbol: ship_symbol, agent_id: agent_id),
-         %Intent{} = intent <- unfinished_intents(ship.id),
+         %Intent{status: status} = intent when status != "awaiting_confirmation" <-
+           unfinished_intents(ship.id),
          %AgentRecord{} = agent <- Repo.get(AgentRecord, agent_id),
          :ok <- Agent.execution_allowed?(agent) do
       case Agent.handle_game_result(agent, SpaceTraders.API.get_ship(agent_token, ship_symbol)) do
