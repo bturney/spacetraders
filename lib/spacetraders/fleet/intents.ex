@@ -57,6 +57,13 @@ defmodule SpaceTraders.Fleet.Intents do
   def review(_agent, _owner, _ship_symbol, _waypoint, _preview),
     do: {:error, :unsupported_intent_review}
 
+  @doc "Persists a blocked Navigate Intent after preview rejects the route."
+  def block_review(agent, owner, ship_symbol, waypoint, reason) do
+    with {:ok, :manual} <- normalize_owner(owner) do
+      Fleet.block_jump_preview(agent, ship_symbol, waypoint, reason)
+    end
+  end
+
   @doc "Confirms a persisted reviewed Navigate Intent by identity and revision."
   def confirm(agent, owner, intent_id, review_revision) do
     with {:ok, :manual} <- normalize_owner(owner) do

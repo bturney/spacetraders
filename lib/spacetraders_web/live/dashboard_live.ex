@@ -266,7 +266,13 @@ defmodule SpaceTradersWeb.DashboardLive do
                 )
 
               {:error, _warp_reason} ->
-                case Fleet.block_jump_preview(agent, ship_symbol, waypoint, route_reason) do
+                case Intents.block_review(
+                       agent,
+                       %Intents.ManualControl{},
+                       ship_symbol,
+                       waypoint,
+                       route_reason
+                     ) do
                   {:ok, intent} ->
                     {:blocked_preview, candidate_preview(waypoint, candidates, reason), intent}
 
@@ -281,7 +287,13 @@ defmodule SpaceTradersWeb.DashboardLive do
                 Intents.review(agent, %Intents.ManualControl{}, ship_symbol, waypoint, preview)
 
               {:error, _warp_reason} ->
-                case Fleet.block_jump_preview(agent, ship_symbol, waypoint, reason) do
+                case Intents.block_review(
+                       agent,
+                       %Intents.ManualControl{},
+                       ship_symbol,
+                       waypoint,
+                       reason
+                     ) do
                   {:ok, intent} ->
                     {:blocked_preview, candidate_preview(waypoint, [], reason), intent}
 
