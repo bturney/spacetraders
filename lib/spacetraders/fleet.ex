@@ -4799,10 +4799,15 @@ defmodule SpaceTraders.Fleet do
         # A claimed prerequisite can still be accepted by the game after this
         # process yields. Preemption must wait for its authoritative outcome,
         # just as it does for cargo mutations.
-        if is_map(intent.in_flight_action) do
-          Repo.rollback(:cargo_operation_reconciliation_required)
-        else
-          terminalize_intents!(intent, "stopped")
+        cond do
+          unresolved_cargo_action?(intent) ->
+            Repo.rollback(:cargo_operation_reconciliation_required)
+
+          unresolved_intent_evidence?(intent) ->
+            Repo.rollback(:intents_reconciliation_required)
+
+          true ->
+            terminalize_intents!(intent, "stopped")
         end
 
       nil ->
