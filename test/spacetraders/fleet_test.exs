@@ -5009,16 +5009,14 @@ defmodule SpaceTraders.FleetTest do
 
       assert {:ok, first} = Fleet.navigate_intent(agent, "FLEET-SHIP", "X1-UX81-A2")
 
-      assert {:ok, second} = Fleet.navigate_intent(agent, "FLEET-SHIP", "X1-UX81-A3")
+      assert {:error, :intents_reconciliation_required} =
+               Fleet.navigate_intent(agent, "FLEET-SHIP", "X1-UX81-A3")
 
       intents = Repo.all(from intent in Intent, where: intent.ship_id == ^first.ship_id)
-      assert length(intents) == 2
+      assert length(intents) == 1
 
       predecessor = Enum.find(intents, &(&1.id == first.id))
-      successor = Enum.find(intents, &(&1.id == second.id))
-
-      assert %{status: "stopped", target_waypoint: "X1-UX81-A2"} = predecessor
-      assert %{status: "waiting", target_waypoint: "X1-UX81-A3"} = successor
+      assert %{status: "waiting", target_waypoint: "X1-UX81-A2"} = predecessor
       refute_received :navigate
     end
 

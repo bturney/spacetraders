@@ -4715,11 +4715,13 @@ defmodule SpaceTraders.Fleet do
         when type in ["install_module", "remove_module"] and is_map(action) ->
           Repo.rollback(:intents_reconciliation_required)
 
-        %Intent{in_flight_action: %{"kind" => "jump"}} ->
-          Repo.rollback(:intents_reconciliation_required)
-
         %Intent{} = predecessor ->
-          terminalize_intents!(predecessor, "stopped")
+          if unresolved_navigation_action?(predecessor) or
+               unresolved_jump_action?(predecessor) or unresolved_warp_action?(predecessor) do
+            Repo.rollback(:intents_reconciliation_required)
+          else
+            terminalize_intents!(predecessor, "stopped")
+          end
 
         nil ->
           :ok
@@ -4811,7 +4813,8 @@ defmodule SpaceTraders.Fleet do
   end
 
   defp unresolved_navigation_action?(intent) do
-    is_map(intent.in_flight_action) and intent.in_flight_action["kind"] == "navigate"
+    (is_map(intent.in_flight_action) and intent.in_flight_action["kind"] == "navigate") or
+      (is_map(intent.last_action_result) and intent.last_action_result["wait"] == "arrival")
   end
 
   defp unresolved_warp_action?(intent) do
