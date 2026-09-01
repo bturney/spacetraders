@@ -2924,9 +2924,29 @@ defmodule SpaceTraders.Fleet do
   end
 
   @doc "Confirms a persisted remote Navigate review after re-reading game truth."
-  def confirm_navigation_intent(agent, intent_id, review_revision) do
+  def confirm_navigation_intent(%AgentRecord{} = agent, intent_id, review_revision) do
     with {:ok, revision} <- parse_review_revision(review_revision),
          %Intent{} = intent <- owned_intent(agent, intent_id),
+         true <-
+           intent.status == "awaiting_confirmation" || {:error, :intent_not_awaiting_confirmation},
+         true <- intent.review_revision == revision || {:error, :review_revision_stale},
+         fresh <- fresh_navigation_review(agent, intent),
+         {:ok, intent} <- refresh_or_authorize_review(intent, fresh) do
+      case intent.status do
+        "awaiting_confirmation" -> {:ok, intent}
+        "active" -> reconcile_intents(agent, intent)
+      end
+    else
+      nil -> {:error, :intent_not_found}
+      {:error, _reason} = error -> error
+      false -> {:error, :review_revision_stale}
+    end
+  end
+
+  def confirm_navigation_intent(%{operator: %{id: operator_id}}, intent_id, review_revision) do
+    with {:ok, revision} <- parse_review_revision(review_revision),
+         {%Intent{} = intent, %AgentRecord{} = agent} <-
+           owned_intent_for_operator(operator_id, intent_id),
          true <-
            intent.status == "awaiting_confirmation" || {:error, :intent_not_awaiting_confirmation},
          true <- intent.review_revision == revision || {:error, :review_revision_stale},
@@ -2963,6 +2983,18 @@ defmodule SpaceTraders.Fleet do
     )
   end
 
+  defp owned_intent_for_operator(operator_id, intent_id) do
+    Repo.one(
+      from intent in Intent,
+        join: ship in Ship,
+        on: ship.id == intent.ship_id,
+        join: agent in AgentRecord,
+        on: agent.id == ship.agent_id,
+        where: intent.id == ^intent_id and agent.operator_id == ^operator_id,
+        select: {intent, agent}
+    )
+  end
+
   defp fresh_navigation_review(
          agent,
          %Intent{target_waypoint: waypoint, ship_id: ship_id} = intent
@@ -2980,7 +3012,6 @@ defmodule SpaceTraders.Fleet do
   defp refresh_or_authorize_review(intent, {:error, reason}) do
     method = intent.parameters["review_method"]
     key = "reviewed_#{method}"
-    review = intent.parameters[key] || %{}
 
     {:ok,
      Repo.update!(
@@ -2989,10 +3020,12 @@ defmodule SpaceTraders.Fleet do
            Map.put(
              intent.parameters,
              key,
-             Map.merge(review, %{
+             %{
+               "method" => method,
+               "destination_waypoint" => intent.target_waypoint,
                "status" => "blocked",
                "validation_error" => inspect(reason)
-             })
+             }
            ),
          review_revision: intent.review_revision + 1,
          status: "awaiting_confirmation"

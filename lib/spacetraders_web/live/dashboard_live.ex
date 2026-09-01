@@ -181,14 +181,7 @@ defmodule SpaceTradersWeb.DashboardLive do
         socket
       ) do
     result =
-      socket.assigns.current_scope.operator
-      |> Agent.list_agents()
-      |> Enum.reduce_while({:error, :intent_not_found}, fn agent, _acc ->
-        case Fleet.confirm_navigation_intent(agent, intent_id, revision) do
-          {:error, :intent_not_found} -> {:cont, {:error, :intent_not_found}}
-          result -> {:halt, result}
-        end
-      end)
+      Fleet.confirm_navigation_intent(socket.assigns.current_scope, intent_id, revision)
 
     case result do
       {:ok, %{status: "awaiting_confirmation"}} ->
@@ -205,6 +198,12 @@ defmodule SpaceTradersWeb.DashboardLive do
          socket
          |> refresh_all_fleets()
          |> put_flash(:info, "Remote navigation confirmed.")}
+
+      {:ok, %{status: "blocked", blocker: blocker}} ->
+        {:noreply,
+         socket
+         |> refresh_all_fleets()
+         |> put_flash(:error, "Remote navigation blocked: #{blocker_summary(blocker)}")}
 
       {:error, reason} ->
         {:noreply, put_flash(socket, :error, live_error(reason))}
@@ -4724,6 +4723,7 @@ defmodule SpaceTradersWeb.DashboardLive do
 
   defp jump_leg_budget_label(_preview), do: "Unavailable from waypoint coordinates"
 
+  defp jump_preview_viable?(%{status: "blocked"}), do: false
   defp jump_preview_viable?(%{method: "warp"}), do: true
   defp jump_preview_viable?(%{route_type: "navigate"}), do: true
   defp jump_preview_viable?(%{candidates: candidates}), do: Enum.any?(candidates, & &1.viable)
