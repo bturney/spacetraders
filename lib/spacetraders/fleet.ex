@@ -4737,8 +4737,15 @@ defmodule SpaceTraders.Fleet do
           end
 
           case unfinished_job_intent(job.id) do
-            %Intent{} = predecessor -> terminalize_intents!(predecessor, "stopped")
-            nil -> :ok
+            %Intent{} = predecessor ->
+              if unresolved_intent_evidence?(predecessor) do
+                Repo.rollback(:intents_reconciliation_required)
+              else
+                terminalize_intents!(predecessor, "stopped")
+              end
+
+            nil ->
+              :ok
           end
 
           unless job.status == "paused" do
@@ -4838,9 +4845,7 @@ defmodule SpaceTraders.Fleet do
   end
 
   defp terminalize_intents!(intent, status) when status in @terminal_intent_states do
-    preserve_evidence? =
-      unresolved_cargo_action?(intent) or unresolved_module_evidence?(intent) or
-        unresolved_jump_action?(intent) or unresolved_warp_action?(intent)
+    preserve_evidence? = unresolved_intent_evidence?(intent)
 
     Repo.update!(
       Ecto.Changeset.change(intent,
@@ -4849,6 +4854,12 @@ defmodule SpaceTraders.Fleet do
         finished_at: DateTime.utc_now() |> DateTime.truncate(:second)
       )
     )
+  end
+
+  defp unresolved_intent_evidence?(intent) do
+    unresolved_cargo_action?(intent) or unresolved_module_evidence?(intent) or
+      unresolved_jump_action?(intent) or unresolved_warp_action?(intent) or
+      unresolved_navigation_action?(intent)
   end
 
   defp unresolved_module_evidence?(%Intent{type: type, in_flight_action: action})
