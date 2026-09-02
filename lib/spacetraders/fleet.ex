@@ -1585,17 +1585,34 @@ defmodule SpaceTraders.Fleet do
          live_ship,
          %{type: "deliver", target_waypoint: waypoint, parameters: parameters}
        ) do
-    Intents.request(
-      agent,
-      %Intents.JobOwner{job: job},
-      live_ship.symbol,
-      %Intents.DeliverGoods{
-        contract_id: parameters["contract_id"],
-        destination: waypoint,
-        trade_good: parameters["trade_symbol"],
-        quantity: parameters["units"]
-      }
-    )
+    owner = %Intents.JobOwner{job: job}
+
+    if get_in(parameters, ["recipient", "type"]) == "construction" do
+      Intents.request(
+        agent,
+        owner,
+        live_ship.symbol,
+        %Intents.DeliverConstructionGoods{
+          system: get_in(parameters, ["recipient", "system"]),
+          waypoint: waypoint,
+          trade_good: parameters["trade_symbol"],
+          quantity: parameters["units"]
+        },
+        live_ship
+      )
+    else
+      Intents.request(
+        agent,
+        owner,
+        live_ship.symbol,
+        %Intents.DeliverGoods{
+          contract_id: parameters["contract_id"],
+          destination: waypoint,
+          trade_good: parameters["trade_symbol"],
+          quantity: parameters["units"]
+        }
+      )
+    end
   end
 
   defp procurement_intent_request(
@@ -2206,8 +2223,7 @@ defmodule SpaceTraders.Fleet do
   defp start_construction_supply_intent(agent, job, live_ship, construction, credits) do
     with {:ok, attrs} <-
            construction_supply_intent_attrs(agent, job.progress, live_ship, construction, credits),
-         {:ok, intent} <- insert_job_intent(job, attrs),
-         {:ok, intent} <- advance_intents(agent, intent, live_ship) do
+         {:ok, intent} <- construction_supply_intent_request(agent, job, live_ship, attrs) do
       advance_construction_supply_after_intent(agent, job, intent)
     else
       :ok ->
@@ -2221,6 +2237,32 @@ defmodule SpaceTraders.Fleet do
 
       {:error, reason} ->
         mark_construction_supply_job_blocked(job, reason)
+    end
+  end
+
+  defp construction_supply_intent_request(
+         agent,
+         job,
+         live_ship,
+         %{type: "deliver", target_waypoint: waypoint, parameters: parameters}
+       ) do
+    Intents.request(
+      agent,
+      %Intents.JobOwner{job: job},
+      live_ship.symbol,
+      %Intents.DeliverConstructionGoods{
+        system: get_in(parameters, ["recipient", "system"]),
+        waypoint: waypoint,
+        trade_good: parameters["trade_symbol"],
+        quantity: parameters["units"]
+      },
+      live_ship
+    )
+  end
+
+  defp construction_supply_intent_request(agent, job, live_ship, attrs) do
+    with {:ok, intent} <- insert_job_intent(job, attrs) do
+      advance_intents(agent, intent, live_ship)
     end
   end
 
@@ -3520,22 +3562,38 @@ defmodule SpaceTraders.Fleet do
         system_symbol,
         waypoint,
         trade_symbol,
-        units
+        units,
+        opts \\ []
       ) do
     with {:ok, live_ship} <-
-           Agent.handle_game_result(
-             agent,
-             SpaceTraders.API.get_ship(agent.agent_token, ship_symbol)
-           ),
+           construction_live_ship(agent, ship_symbol, opts),
          {:ok, ^system_symbol} <- system_from_headquarters(waypoint),
          true <- live_ship.nav.system_symbol == system_symbol do
-      cargo_intent(agent, ship_symbol, "deliver", waypoint, trade_symbol, units,
-        recipient: %{type: "construction", system: system_symbol, waypoint: waypoint}
+      cargo_intent(
+        agent,
+        ship_symbol,
+        "deliver",
+        waypoint,
+        trade_symbol,
+        units,
+        Keyword.merge(opts,
+          recipient: %{type: "construction", system: system_symbol, waypoint: waypoint}
+        )
       )
     else
       false -> {:error, :remote_destination_system_unsupported}
       {:ok, _system} -> {:error, :remote_destination_system_unsupported}
       error -> error
+    end
+  end
+
+  defp construction_live_ship(agent, ship_symbol, opts) do
+    case opts[:live_ship] do
+      %SpaceTraders.API.Model.Ship{} = ship ->
+        {:ok, ship}
+
+      _ ->
+        Agent.handle_game_result(agent, SpaceTraders.API.get_ship(agent.agent_token, ship_symbol))
     end
   end
 

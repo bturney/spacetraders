@@ -28,6 +28,11 @@ defmodule SpaceTraders.Fleet.Intents do
     defstruct [:contract_id, :destination, :trade_good, :quantity]
   end
 
+  defmodule DeliverConstructionGoods do
+    @moduledoc "A closed Deliver Goods goal for a Construction recipient."
+    defstruct [:system, :waypoint, :trade_good, :quantity]
+  end
+
   defmodule InstallModule do
     @moduledoc "A closed Install Module goal for a Ship."
     defstruct [:module_symbol, parameters: %{}]
@@ -151,6 +156,33 @@ defmodule SpaceTraders.Fleet.Intents do
         ship_symbol,
         destination,
         contract_id,
+        trade_good,
+        goal.quantity,
+        opts
+      )
+    end
+  end
+
+  def request(agent, owner, ship_symbol, %DeliverConstructionGoods{} = goal) do
+    with :ok <- token_present(agent),
+         {:ok, owner} <- normalize_owner(owner),
+         {:ok, system} <- valid_identifier(goal.system, :invalid_system_symbol),
+         {:ok, waypoint} <- valid_goal_waypoint(goal.waypoint),
+         {:ok, trade_good} <- valid_trade_good(goal.trade_good),
+         :ok <- valid_quantity(goal.quantity) do
+      opts = [recipient: %{type: "construction", system: system, waypoint: waypoint}]
+
+      opts =
+        case owner do
+          :manual -> opts
+          %JobOwner{job: %Job{id: job_id}} -> Keyword.merge(opts, caller: "job", job_id: job_id)
+        end
+
+      Fleet.deliver_construction_goods_intent(
+        agent,
+        ship_symbol,
+        system,
+        waypoint,
         trade_good,
         goal.quantity,
         opts
@@ -298,6 +330,33 @@ defmodule SpaceTraders.Fleet.Intents do
         ship_symbol,
         destination,
         contract_id,
+        trade_good,
+        goal.quantity,
+        caller: "job",
+        job_id: owner.job.id,
+        live_ship: live_ship
+      )
+    end
+  end
+
+  def request(
+        agent,
+        %JobOwner{} = owner,
+        ship_symbol,
+        %DeliverConstructionGoods{} = goal,
+        live_ship
+      ) do
+    with {:ok, owner} <- normalize_owner(owner),
+         :ok <- token_present(agent),
+         {:ok, system} <- valid_identifier(goal.system, :invalid_system_symbol),
+         {:ok, waypoint} <- valid_goal_waypoint(goal.waypoint),
+         {:ok, trade_good} <- valid_trade_good(goal.trade_good),
+         :ok <- valid_quantity(goal.quantity) do
+      Fleet.deliver_construction_goods_intent(
+        agent,
+        ship_symbol,
+        system,
+        waypoint,
         trade_good,
         goal.quantity,
         caller: "job",
