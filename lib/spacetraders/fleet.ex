@@ -4414,36 +4414,40 @@ defmodule SpaceTraders.Fleet do
 
   defp module_mutation_allowed?(%Intent{type: type} = intent, live_ship) do
     module_symbol = intent.parameters["module_symbol"]
-    installed = module_count(live_ship.modules, module_symbol)
-    cargo_units = item_units(live_ship.cargo, module_symbol)
-    cargo_capacity = live_ship.cargo && live_ship.cargo.capacity
-    module_slots = live_ship.frame && live_ship.frame.module_slots
 
     cond do
       not docked?(live_ship) ->
         {:error, :module_operation_requires_docked_ship}
 
       not is_list(live_ship.modules) or not is_map(live_ship.cargo) or
-          not is_integer(module_slots) ->
+          not is_integer(live_ship.frame && live_ship.frame.module_slots) ->
         {:error, :module_readiness_unavailable}
 
-      type == "install_module" and cargo_units < 1 ->
-        {:error, :module_missing_from_cargo}
-
-      type == "install_module" and installed >= module_slots ->
-        {:error, :module_capacity_full}
-
-      type == "remove_module" and installed < 1 ->
-        {:error, :module_not_installed}
-
-      type == "remove_module" and not is_integer(cargo_capacity) ->
-        {:error, :cargo_capacity_unavailable}
-
-      type == "remove_module" and live_ship.cargo.units >= cargo_capacity ->
-        {:error, :cargo_full}
-
       true ->
-        :ok
+        installed = module_count(live_ship.modules, module_symbol)
+        cargo_units = item_units(live_ship.cargo, module_symbol)
+        cargo_capacity = live_ship.cargo.capacity
+        module_slots = live_ship.frame.module_slots
+
+        cond do
+          type == "install_module" and cargo_units < 1 ->
+            {:error, :module_missing_from_cargo}
+
+          type == "install_module" and installed >= module_slots ->
+            {:error, :module_capacity_full}
+
+          type == "remove_module" and installed < 1 ->
+            {:error, :module_not_installed}
+
+          type == "remove_module" and not is_integer(cargo_capacity) ->
+            {:error, :cargo_capacity_unavailable}
+
+          type == "remove_module" and live_ship.cargo.units >= cargo_capacity ->
+            {:error, :cargo_full}
+
+          true ->
+            :ok
+        end
     end
   end
 
