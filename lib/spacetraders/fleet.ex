@@ -2835,8 +2835,8 @@ defmodule SpaceTraders.Fleet do
   Returns `{:ok, %Intent{}}` with its current status (`active`,
   `waiting`, `blocked`, or `completed`), or an error.
   """
-  def navigate_intent(%AgentRecord{agent_token: agent_token} = agent, ship_symbol, waypoint)
-      when is_binary(agent_token) and agent_token != "" do
+  # Kept as a thin compatibility facade; execution remains in Intents.
+  def navigate_intent(%AgentRecord{} = agent, ship_symbol, waypoint) do
     SpaceTraders.Fleet.Intents.request(
       agent,
       :manual,
@@ -2845,30 +2845,9 @@ defmodule SpaceTraders.Fleet do
     )
   end
 
-  def navigate_intent(%AgentRecord{}, _ship_symbol, _waypoint),
-    do: {:error, :agent_token_missing}
-
-  def navigate_intent(
-        %AgentRecord{agent_token: agent_token} = agent,
-        ship_symbol,
-        waypoint,
-        parameters
-      )
-      when is_binary(agent_token) and agent_token != "" and is_map(parameters) do
-    SpaceTraders.Fleet.Intents.request(
-      agent,
-      :manual,
-      ship_symbol,
-      %SpaceTraders.Fleet.Intents.Navigate{waypoint: waypoint, parameters: parameters}
-    )
-  end
-
-  def navigate_intent(%AgentRecord{}, _ship_symbol, _waypoint, _parameters),
-    do: {:error, :agent_token_missing}
-
   # Job Navigate is inserted and advanced as a Job-owned Intent. Manual Navigate
   # uses the separate path above because it may preempt a Job.
-  def navigate_intent_legacy(
+  def request_manual_navigate(
         %AgentRecord{agent_token: agent_token} = agent,
         ship_symbol,
         waypoint,
@@ -3005,19 +2984,27 @@ defmodule SpaceTraders.Fleet do
   def confirm_jump_intent(agent, ship_symbol, waypoint, preview) when is_map(preview) do
     with {:ok, fresh_preview} <- jump_preview(agent, ship_symbol, waypoint),
          true <- reviewed_jump_matches?(preview, fresh_preview) || {:error, :jump_preview_stale} do
-      navigate_intent(agent, ship_symbol, waypoint, %{
-        "reviewed_jump" => %{
-          "ship_symbol" => fresh_preview.ship_symbol,
-          "current_waypoint" => fresh_preview.current_waypoint,
-          "source_waypoint" => fresh_preview.source_waypoint,
-          "destination_waypoint" => fresh_preview.destination_waypoint,
-          "flight_mode" => fresh_preview.flight_mode,
-          "credits" => fresh_preview.credits,
-          "antimatter_cost" => fresh_preview.antimatter_cost,
-          "cooldown_seconds" => fresh_preview.cooldown_seconds || 0,
-          "candidates" => fresh_preview.candidates
+      SpaceTraders.Fleet.Intents.request(
+        agent,
+        %SpaceTraders.Fleet.Intents.ManualControl{},
+        ship_symbol,
+        %SpaceTraders.Fleet.Intents.Navigate{
+          waypoint: waypoint,
+          parameters: %{
+            "reviewed_jump" => %{
+              "ship_symbol" => fresh_preview.ship_symbol,
+              "current_waypoint" => fresh_preview.current_waypoint,
+              "source_waypoint" => fresh_preview.source_waypoint,
+              "destination_waypoint" => fresh_preview.destination_waypoint,
+              "flight_mode" => fresh_preview.flight_mode,
+              "credits" => fresh_preview.credits,
+              "antimatter_cost" => fresh_preview.antimatter_cost,
+              "cooldown_seconds" => fresh_preview.cooldown_seconds || 0,
+              "candidates" => fresh_preview.candidates
+            }
+          }
         }
-      })
+      )
     else
       {:error, _reason} = error -> error
       false -> {:error, :jump_preview_stale}
@@ -3211,9 +3198,18 @@ defmodule SpaceTraders.Fleet do
   def confirm_warp_intent(agent, ship_symbol, waypoint, preview) when is_map(preview) do
     with {:ok, fresh_preview} <- warp_preview(agent, ship_symbol, waypoint),
          true <- reviewed_warp_matches?(preview, fresh_preview) || {:error, :warp_preview_stale} do
-      navigate_intent(agent, ship_symbol, waypoint, %{
-        "reviewed_warp" => Map.new(fresh_preview, fn {key, value} -> {to_string(key), value} end)
-      })
+      SpaceTraders.Fleet.Intents.request(
+        agent,
+        %SpaceTraders.Fleet.Intents.ManualControl{},
+        ship_symbol,
+        %SpaceTraders.Fleet.Intents.Navigate{
+          waypoint: waypoint,
+          parameters: %{
+            "reviewed_warp" =>
+              Map.new(fresh_preview, fn {key, value} -> {to_string(key), value} end)
+          }
+        }
+      )
     else
       {:error, _reason} = error -> error
       false -> {:error, :warp_preview_stale}
@@ -3696,6 +3692,42 @@ defmodule SpaceTraders.Fleet do
   @doc "Reconciles the Ship's Manual Control Intent after an authoritative cooldown."
   def revalidate_intents_cooldown(agent_id, ship_symbol, live_ship, expected_intent_id) do
     revalidate_intents(agent_id, ship_symbol, live_ship, expected_intent_id)
+  end
+
+  @doc "Reconciles whichever Navigate owner scheduled a durable Ship timer."
+  def reconcile_timeline_event(
+        agent_id,
+        ship_symbol,
+        live_ship,
+        trigger,
+        expected_intent_id,
+        expected_job_id
+      ) do
+    cond do
+      is_integer(expected_intent_id) ->
+        revalidate_intents(agent_id, ship_symbol, live_ship, expected_intent_id)
+
+      is_integer(expected_job_id) and unfinished_intent_for_ship_symbol?(agent_id, ship_symbol) ->
+        :ok
+
+      trigger == :arrival ->
+        revalidate_miner_job_arrival(agent_id, ship_symbol, live_ship, expected_job_id)
+
+      trigger == :cooldown ->
+        revalidate_miner_job_cooldown(agent_id, ship_symbol, live_ship, expected_job_id)
+
+      true ->
+        :ok
+    end
+  end
+
+  defp unfinished_intent_for_ship_symbol?(agent_id, ship_symbol) do
+    with %Ship{id: ship_id} <- Repo.get_by(Ship, agent_id: agent_id, symbol: ship_symbol),
+         %Intent{} <- unfinished_intent_for_ship(ship_id) do
+      true
+    else
+      _ -> false
+    end
   end
 
   # The Navigate Intent reconcile loop. Every step derives the next API action
@@ -5605,7 +5637,7 @@ defmodule SpaceTraders.Fleet do
          :ok <- Agent.execution_allowed?(agent) do
       case Agent.handle_game_result(agent, SpaceTraders.API.get_ship(agent_token, ship_symbol)) do
         {:ok, live_ship} ->
-          advance_intents(agent, intent, live_ship)
+          SpaceTraders.Fleet.Intents.recover(agent, ship_symbol, live_ship, intent.id, nil)
 
         {:error, reason} ->
           if reason == :stale_agent,
@@ -7572,7 +7604,19 @@ defmodule SpaceTraders.Fleet do
 
             {:ok, live_ship}
             when config.status in ["active", "waiting"] and is_map(config.in_flight_action) ->
-              reconcile_in_flight(agent_id, ship, config, live_ship)
+              case unfinished_job_intent(config.id) do
+                %Intent{type: "navigate", id: intent_id} ->
+                  SpaceTraders.Fleet.Intents.recover(
+                    agent,
+                    ship_symbol,
+                    live_ship,
+                    intent_id,
+                    config.id
+                  )
+
+                _ ->
+                  reconcile_in_flight(agent_id, ship, config, live_ship)
+              end
 
             {:ok, _live_ship} ->
               :ok
