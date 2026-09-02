@@ -586,7 +586,12 @@ defmodule SpaceTradersWeb.DashboardLive do
     with {:ok, agent} <- agent_for_ship(socket, ship_symbol),
          {:ok, units} <- parse_units(units),
          {:ok, %{status: "completed"} = intent} <-
-           Fleet.sell_goods_intent(agent, ship_symbol, waypoint, trade_symbol, units) do
+           Intents.request(
+             agent,
+             %Intents.ManualControl{},
+             ship_symbol,
+             %Intents.SellGoods{market: waypoint, trade_good: trade_symbol, quantity: units}
+           ) do
       socket =
         socket
         |> refresh_agent(agent)
