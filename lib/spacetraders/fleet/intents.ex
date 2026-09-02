@@ -239,17 +239,20 @@ defmodule SpaceTraders.Fleet.Intents do
     with :ok <- token_present(agent),
          {:ok, owner} <- normalize_owner(owner),
          :ok <- valid_module_symbol(module_symbol),
-         {:ok, parameters} <- valid_module_parameters(type, module_symbol, parameters) do
+         {:ok, parameters} <- valid_module_request(type, module_symbol, parameters, owner) do
       case owner do
-        :manual when type == "install_module" ->
-          Fleet.install_module_intent(agent, ship_symbol, module_symbol)
-
         :manual ->
-          removals = parameters[:authorized_removals] || parameters["authorized_removals"] || %{}
-          Fleet.remove_module_intent(agent, ship_symbol, module_symbol, removals)
+          Fleet.request_module_intent(
+            agent,
+            :manual,
+            ship_symbol,
+            type,
+            module_symbol,
+            parameters
+          )
 
         %JobOwner{job: %Job{} = job} ->
-          Fleet.request_job_module_intent(
+          Fleet.request_module_intent(
             agent,
             job,
             ship_symbol,
@@ -263,6 +266,16 @@ defmodule SpaceTraders.Fleet.Intents do
 
   defp request_module(_agent, _owner, _ship_symbol, _type, _module_symbol, _parameters),
     do: {:error, :invalid_intent_parameters}
+
+  defp valid_module_request(type, module_symbol, parameters, :manual),
+    do: valid_module_parameters(type, module_symbol, parameters)
+
+  defp valid_module_request("remove_module", module_symbol, parameters, %JobOwner{})
+       when is_map(parameters),
+       do: {:ok, Map.merge(parameters, %{"module_symbol" => module_symbol, "quantity" => 1})}
+
+  defp valid_module_request(type, module_symbol, parameters, %JobOwner{}),
+    do: valid_module_parameters(type, module_symbol, parameters)
 
   def request(agent, %JobOwner{} = owner, ship_symbol, %Navigate{} = goal, live_ship) do
     with {:ok, owner} <- normalize_owner(owner),

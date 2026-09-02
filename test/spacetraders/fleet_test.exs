@@ -12,6 +12,7 @@ defmodule SpaceTraders.FleetTest do
   alias SpaceTraders.Fleet.ShipServer
   alias SpaceTraders.Fleet.Activity
   alias SpaceTraders.Fleet.Intent
+  alias SpaceTraders.Fleet.Intents
   alias SpaceTraders.Timeline
   alias SpaceTraders.Timeline.Event
 
@@ -5656,7 +5657,12 @@ defmodule SpaceTraders.FleetTest do
       end)
 
       assert {:ok, %Intent{type: "install_module", status: "completed"} = intent} =
-               Fleet.install_module_intent(agent, "FLEET-SHIP", "MODULE_CARGO_HOLD_I")
+               Intents.request(
+                 agent,
+                 %Intents.ManualControl{},
+                 "FLEET-SHIP",
+                 %Intents.InstallModule{module_symbol: "MODULE_CARGO_HOLD_I"}
+               )
 
       assert intent.parameters == %{
                "authorized_removals" => %{},
@@ -5674,12 +5680,26 @@ defmodule SpaceTraders.FleetTest do
       ship_fixture(agent, "FLEET-SHIP")
 
       assert {:error, :invalid_module_intent} =
-               Fleet.remove_module_intent(agent, "FLEET-SHIP", "MODULE_CARGO_HOLD_I", %{})
+               Intents.request(
+                 agent,
+                 %Intents.ManualControl{},
+                 "FLEET-SHIP",
+                 %Intents.RemoveModule{
+                   module_symbol: "MODULE_CARGO_HOLD_I",
+                   authorized_removals: %{}
+                 }
+               )
 
       assert {:error, :invalid_module_intent} =
-               Fleet.remove_module_intent(agent, "FLEET-SHIP", "MODULE_CARGO_HOLD_I", %{
-                 "MODULE_CARGO_HOLD_I" => 2
-               })
+               Intents.request(
+                 agent,
+                 %Intents.ManualControl{},
+                 "FLEET-SHIP",
+                 %Intents.RemoveModule{
+                   module_symbol: "MODULE_CARGO_HOLD_I",
+                   authorized_removals: %{"MODULE_CARGO_HOLD_I" => 2}
+                 }
+               )
     end
 
     test "manual module removal returns only the removed module to Cargo" do
@@ -5729,9 +5749,15 @@ defmodule SpaceTraders.FleetTest do
       end)
 
       assert {:ok, %Intent{type: "remove_module", status: "completed"}} =
-               Fleet.remove_module_intent(agent, "FLEET-SHIP", "MODULE_CARGO_HOLD_I", %{
-                 "MODULE_CARGO_HOLD_I" => 1
-               })
+               Intents.request(
+                 agent,
+                 %Intents.ManualControl{},
+                 "FLEET-SHIP",
+                 %Intents.RemoveModule{
+                   module_symbol: "MODULE_CARGO_HOLD_I",
+                   authorized_removals: %{"MODULE_CARGO_HOLD_I" => 1}
+                 }
+               )
     end
 
     test "reconciles an ambiguous module installation before accepting another mutation" do
@@ -5774,7 +5800,12 @@ defmodule SpaceTraders.FleetTest do
       end)
 
       assert {:error, :intents_reconciliation_required} =
-               Fleet.install_module_intent(agent, "FLEET-SHIP", "MODULE_CARGO_HOLD_I")
+               Intents.request(
+                 agent,
+                 %Intents.ManualControl{},
+                 "FLEET-SHIP",
+                 %Intents.InstallModule{module_symbol: "MODULE_CARGO_HOLD_I"}
+               )
 
       assert %Intent{status: "blocked", in_flight_action: action} =
                Fleet.ship_intents(agent, "FLEET-SHIP")
@@ -5819,7 +5850,12 @@ defmodule SpaceTraders.FleetTest do
       end)
 
       assert {:ok, %Intent{status: "completed", last_action_result: result}} =
-               Fleet.install_module_intent(agent, "FLEET-SHIP", "MODULE_CARGO_HOLD_I")
+               Intents.request(
+                 agent,
+                 %Intents.ManualControl{},
+                 "FLEET-SHIP",
+                 %Intents.InstallModule{module_symbol: "MODULE_CARGO_HOLD_I"}
+               )
 
       assert result["modules"] == [
                %{
