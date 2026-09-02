@@ -41,6 +41,107 @@ defmodule SpaceTraders.IntentsTest do
              )
   end
 
+  test "requests a closed Buy Goods goal through Manual Control" do
+    agent = agent_fixture("INTENTS-BUY")
+    ship_fixture(agent, "INTENTS-BUY-SHIP")
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      case {conn.request_path, conn.method} do
+        {"/v2/my/ships/INTENTS-BUY-SHIP", "GET"} ->
+          Req.Test.json(conn, %{
+            "data" => %{
+              "symbol" => "INTENTS-BUY-SHIP",
+              "nav" => %{
+                "systemSymbol" => "X1-UX81",
+                "waypointSymbol" => "X1-UX81-A1",
+                "status" => "DOCKED",
+                "flightMode" => "CRUISE"
+              },
+              "fuel" => %{"current" => 100, "capacity" => 100},
+              "cargo" => %{"capacity" => 40, "units" => 0, "inventory" => []},
+              "cooldown" => %{"remainingSeconds" => 0}
+            }
+          })
+
+        {"/v2/my/agent", "GET"} ->
+          Req.Test.json(conn, %{"data" => %{"symbol" => agent.symbol, "credits" => 100}})
+
+        {"/v2/systems/X1-UX81/waypoints/X1-UX81-A1/market", "GET"} ->
+          Req.Test.json(conn, %{
+            "data" => %{
+              "symbol" => "X1-UX81-A1",
+              "tradeGoods" => [
+                %{"symbol" => "IRON_ORE", "purchasePrice" => 10, "tradeVolume" => 5}
+              ]
+            }
+          })
+
+        {"/v2/my/ships/INTENTS-BUY-SHIP/purchase", "POST"} ->
+          Req.Test.json(conn, %{
+            "data" => %{
+              "agent" => %{"symbol" => agent.symbol, "credits" => 50},
+              "cargo" => %{
+                "capacity" => 40,
+                "units" => 5,
+                "inventory" => [%{"symbol" => "IRON_ORE", "units" => 5}]
+              },
+              "transaction" => %{
+                "shipSymbol" => "INTENTS-BUY-SHIP",
+                "tradeSymbol" => "IRON_ORE",
+                "type" => "PURCHASE",
+                "units" => 5,
+                "pricePerUnit" => 10,
+                "totalPrice" => 50,
+                "waypointSymbol" => "X1-UX81-A1",
+                "timestamp" => "2026-01-01T00:00:00.000Z"
+              }
+            }
+          })
+      end
+    end)
+
+    assert {:ok, %Intent{type: "buy", status: "completed"}} =
+             Intents.request(
+               agent,
+               %Intents.ManualControl{},
+               "INTENTS-BUY-SHIP",
+               %Intents.BuyGoods{
+                 market: "X1-UX81-A1",
+                 trade_good: "IRON_ORE",
+                 quantity: 5,
+                 constraints: %{max_unit_price: 10, reserve_credits: 25}
+               }
+             )
+  end
+
+  test "accepts Buy Goods ownership from a Market Trading Job" do
+    agent = agent_fixture("INTENTS-BUY-JOB")
+    ship = ship_fixture(agent, "INTENTS-BUY-JOB-SHIP")
+
+    job =
+      Repo.insert!(%Job{
+        ship_id: ship.id,
+        type: "market_trading",
+        status: "active",
+        extraction_waypoint: "X1-UX81-A1",
+        market_waypoint: "X1-UX81-A1",
+        cargo_threshold: 10
+      })
+
+    assert {:error, :invalid_buy_constraints} =
+             Intents.request(
+               agent,
+               %Intents.JobOwner{job: job},
+               ship.symbol,
+               %Intents.BuyGoods{
+                 market: "X1-UX81-A1",
+                 trade_good: "IRON_ORE",
+                 quantity: 1,
+                 constraints: %{unsupported: 1}
+               }
+             )
+  end
+
   test "requests a running Job Navigate without Manual Control confirmation" do
     agent = agent_fixture("INTENTS-JOB-NAV")
     ship = ship_fixture(agent, "INTENTS-JOB-NAV-SHIP")
