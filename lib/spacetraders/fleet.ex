@@ -1583,6 +1583,25 @@ defmodule SpaceTraders.Fleet do
          agent,
          job,
          live_ship,
+         %{type: "deliver", target_waypoint: waypoint, parameters: parameters}
+       ) do
+    Intents.request(
+      agent,
+      %Intents.JobOwner{job: job},
+      live_ship.symbol,
+      %Intents.DeliverGoods{
+        contract_id: parameters["contract_id"],
+        destination: waypoint,
+        trade_good: parameters["trade_symbol"],
+        quantity: parameters["units"]
+      }
+    )
+  end
+
+  defp procurement_intent_request(
+         agent,
+         job,
+         live_ship,
          %{type: "sell", parameters: parameters} = attrs
        ) do
     constraints =
@@ -3449,11 +3468,52 @@ defmodule SpaceTraders.Fleet do
   end
 
   @doc "Starts a durable Deliver Goods Intent for a Contract recipient."
-  def deliver_goods_intent(agent, ship_symbol, waypoint, contract_id, trade_symbol, units) do
-    cargo_intent(agent, ship_symbol, "deliver", waypoint, trade_symbol, units,
-      contract_id: contract_id,
-      recipient: %{type: "contract", contract_id: contract_id, waypoint: waypoint}
-    )
+  def deliver_goods_intent(
+        agent,
+        ship_symbol,
+        waypoint,
+        contract_id,
+        trade_symbol,
+        units,
+        opts \\ []
+      ) do
+    opts =
+      Keyword.merge(opts,
+        contract_id: contract_id,
+        recipient: %{type: "contract", contract_id: contract_id, waypoint: waypoint}
+      )
+
+    case opts[:caller] do
+      "job" ->
+        with %Job{} = job <- Repo.get(Job, opts[:job_id]),
+             {:ok, ship} <- owned_ship(agent, ship_symbol),
+             true <- job.ship_id == ship.id and Job.running?(job),
+             {:ok, live_ship} <-
+               Agent.handle_game_result(
+                 agent,
+                 SpaceTraders.API.get_ship(agent.agent_token, ship_symbol)
+               ),
+             {:ok, intent} <-
+               insert_job_intent(job, %{
+                 type: "deliver",
+                 target_waypoint: waypoint,
+                 parameters:
+                   opts
+                   |> Map.new()
+                   |> Map.put(:trade_symbol, trade_symbol)
+                   |> Map.put(:units, units)
+                   |> Map.new(fn {key, value} -> {to_string(key), value} end)
+                   |> then(&normalize_delivery_recipient("deliver", &1, waypoint))
+               }) do
+          advance_intents(agent, intent, live_ship)
+        else
+          false -> {:error, :invalid_cargo_intent_owner}
+          error -> error
+        end
+
+      _ ->
+        cargo_intent(agent, ship_symbol, "deliver", waypoint, trade_symbol, units, opts)
+    end
   end
 
   @doc "Starts a durable Deliver Goods Intent for a Construction recipient."
@@ -3695,16 +3755,17 @@ defmodule SpaceTraders.Fleet do
 
   defp validate_cargo_caller(ship, "job", %{"job_id" => job_id}) when is_integer(job_id) do
     case Repo.get(Job, job_id) do
-      %Job{ship_id: ship_id, type: type, status: "active"}
-      when ship_id == ship.id and
+      %Job{ship_id: ship_id, type: type} = job ->
+        if ship_id == ship.id and
              type in [
                "miner",
                "procurement",
                "construction_supply",
                "outfitting",
                "market_trading"
-             ] ->
-        :ok
+             ] and Job.running?(job),
+           do: :ok,
+           else: {:error, :invalid_cargo_intent_owner}
 
       _ ->
         {:error, :invalid_cargo_intent_owner}
@@ -4912,6 +4973,12 @@ defmodule SpaceTraders.Fleet do
   defp delivery_action_evidence(action, {:construction, construction}, cargo, trade_symbol) do
     action
     |> Map.put("fulfilled_before", construction_fulfilled_units(construction, trade_symbol))
+    |> Map.put("cargo_before", item_units(cargo, trade_symbol))
+  end
+
+  defp delivery_action_evidence(action, {:contract, contract}, cargo, trade_symbol) do
+    action
+    |> Map.put("fulfilled_before", fulfilled_units(contract, trade_symbol))
     |> Map.put("cargo_before", item_units(cargo, trade_symbol))
   end
 
