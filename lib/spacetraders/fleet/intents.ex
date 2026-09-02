@@ -23,6 +23,11 @@ defmodule SpaceTraders.Fleet.Intents do
     defstruct [:market, :trade_good, :quantity, constraints: %{}, parameters: %{}]
   end
 
+  defmodule DeliverGoods do
+    @moduledoc "A closed Deliver Goods goal for a Contract recipient."
+    defstruct [:contract_id, :destination, :trade_good, :quantity]
+  end
+
   defmodule InstallModule do
     @moduledoc "A closed Install Module goal for a Ship."
     defstruct [:module_symbol, parameters: %{}]
@@ -113,6 +118,43 @@ defmodule SpaceTraders.Fleet.Intents do
             nil
           )
       end
+    end
+  end
+
+  def request(agent, owner, ship_symbol, %DeliverGoods{} = goal) do
+    with :ok <- token_present(agent),
+         {:ok, owner} <- normalize_owner(owner),
+         {:ok, contract_id} <- valid_identifier(goal.contract_id, :invalid_contract_id),
+         {:ok, destination} <- valid_goal_waypoint(goal.destination),
+         {:ok, trade_good} <- valid_trade_good(goal.trade_good),
+         :ok <- valid_quantity(goal.quantity) do
+      opts = [
+        contract_id: contract_id,
+        recipient: %{
+          type: "contract",
+          contract_id: contract_id,
+          waypoint: destination
+        }
+      ]
+
+      opts =
+        case owner do
+          :manual ->
+            opts
+
+          %JobOwner{job: %Job{id: job_id}} ->
+            Keyword.merge(opts, caller: "job", job_id: job_id)
+        end
+
+      Fleet.deliver_goods_intent(
+        agent,
+        ship_symbol,
+        destination,
+        contract_id,
+        trade_good,
+        goal.quantity,
+        opts
+      )
     end
   end
 
@@ -244,6 +286,27 @@ defmodule SpaceTraders.Fleet.Intents do
     end
   end
 
+  def request(agent, %JobOwner{} = owner, ship_symbol, %DeliverGoods{} = goal, live_ship) do
+    with {:ok, owner} <- normalize_owner(owner),
+         :ok <- token_present(agent),
+         {:ok, contract_id} <- valid_identifier(goal.contract_id, :invalid_contract_id),
+         {:ok, destination} <- valid_goal_waypoint(goal.destination),
+         {:ok, trade_good} <- valid_trade_good(goal.trade_good),
+         :ok <- valid_quantity(goal.quantity) do
+      Fleet.deliver_goods_intent(
+        agent,
+        ship_symbol,
+        destination,
+        contract_id,
+        trade_good,
+        goal.quantity,
+        caller: "job",
+        job_id: owner.job.id,
+        live_ship: live_ship
+      )
+    end
+  end
+
   @doc "Persists a reviewed Navigate Intent without dispatching a mutation."
   def review(agent, owner, ship_symbol, waypoint, preview) when is_map(preview) do
     with {:ok, :manual} <- normalize_owner(owner) do
@@ -361,6 +424,15 @@ defmodule SpaceTraders.Fleet.Intents do
   end
 
   defp valid_trade_good(_trade_good), do: {:error, :invalid_trade_good}
+
+  defp valid_identifier(value, error) when is_binary(value) do
+    case String.trim(value) do
+      "" -> {:error, error}
+      value -> {:ok, value}
+    end
+  end
+
+  defp valid_identifier(_value, error), do: {:error, error}
 
   defp valid_quantity(quantity) when is_integer(quantity) and quantity > 0, do: :ok
   defp valid_quantity(_quantity), do: {:error, :invalid_quantity}

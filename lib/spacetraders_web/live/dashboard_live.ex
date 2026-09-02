@@ -802,13 +802,16 @@ defmodule SpaceTradersWeb.DashboardLive do
          true <- Contracts.fulfillable?(contract),
          {:ok, units} <- parse_units(units),
          {:ok, %{status: "completed"}} <-
-           Fleet.deliver_goods_intent(
+           Intents.request(
              agent,
+             %Intents.ManualControl{},
              ship_symbol,
-             destination_waypoint,
-             contract_id,
-             trade_symbol,
-             units
+             %Intents.DeliverGoods{
+               contract_id: contract_id,
+               destination: destination_waypoint,
+               trade_good: trade_symbol,
+               quantity: units
+             }
            ) do
       socket =
         refresh_agent(socket, agent)

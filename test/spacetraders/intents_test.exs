@@ -184,6 +184,92 @@ defmodule SpaceTraders.IntentsTest do
              )
   end
 
+  test "requests a closed Deliver Goods goal through Manual Control" do
+    agent = agent_fixture("INTENTS-DELIVER")
+    ship_fixture(agent, "INTENTS-DELIVER-SHIP")
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      case {conn.request_path, conn.method} do
+        {"/v2/my/ships/INTENTS-DELIVER-SHIP", "GET"} ->
+          Req.Test.json(conn, %{
+            "data" => %{
+              "symbol" => "INTENTS-DELIVER-SHIP",
+              "nav" => %{
+                "systemSymbol" => "X1-UX81",
+                "waypointSymbol" => "X1-UX81-A1",
+                "status" => "DOCKED",
+                "flightMode" => "CRUISE"
+              },
+              "fuel" => %{"current" => 100, "capacity" => 100},
+              "cargo" => %{
+                "capacity" => 40,
+                "units" => 5,
+                "inventory" => [%{"symbol" => "IRON_ORE", "units" => 5}]
+              }
+            }
+          })
+
+        {"/v2/my/contracts", "GET"} ->
+          Req.Test.json(conn, %{
+            "data" => [
+              %{
+                "id" => "INTENTS-CONTRACT",
+                "accepted" => true,
+                "fulfilled" => false,
+                "terms" => %{
+                  "deadline" => "2030-01-01T00:00:00Z",
+                  "deliver" => [
+                    %{
+                      "tradeSymbol" => "IRON_ORE",
+                      "destinationSymbol" => "X1-UX81-A1",
+                      "unitsRequired" => 5,
+                      "unitsFulfilled" => 0
+                    }
+                  ]
+                }
+              }
+            ]
+          })
+
+        {"/v2/my/contracts/INTENTS-CONTRACT/deliver", "POST"} ->
+          Req.Test.json(conn, %{
+            "data" => %{
+              "cargo" => %{"capacity" => 40, "units" => 0, "inventory" => []},
+              "contract" => %{
+                "id" => "INTENTS-CONTRACT",
+                "accepted" => true,
+                "fulfilled" => false,
+                "terms" => %{
+                  "deadline" => "2030-01-01T00:00:00Z",
+                  "deliver" => [
+                    %{
+                      "tradeSymbol" => "IRON_ORE",
+                      "destinationSymbol" => "X1-UX81-A1",
+                      "unitsRequired" => 5,
+                      "unitsFulfilled" => 5
+                    }
+                  ]
+                }
+              }
+            }
+          })
+      end
+    end)
+
+    assert {:ok, %Intent{caller: "manual", type: "deliver", status: "completed"}} =
+             Intents.request(
+               agent,
+               %Intents.ManualControl{},
+               "INTENTS-DELIVER-SHIP",
+               %Intents.DeliverGoods{
+                 contract_id: "INTENTS-CONTRACT",
+                 destination: "X1-UX81-A1",
+                 trade_good: "IRON_ORE",
+                 quantity: 5
+               }
+             )
+  end
+
   test "requests a closed Install Module goal through Manual Control" do
     agent = agent_fixture("INTENTS-INSTALL")
     ship_fixture(agent, "INTENTS-INSTALL-SHIP")
