@@ -13,6 +13,11 @@ defmodule SpaceTraders.Fleet.Intents do
     defstruct [:waypoint, parameters: %{}]
   end
 
+  defmodule BuyGoods do
+    @moduledoc "A closed Buy Goods goal for a Ship."
+    defstruct [:market, :trade_good, :quantity, constraints: %{}]
+  end
+
   defmodule ManualControl do
     @moduledoc "Manual Control ownership for an Intent."
     defstruct []
@@ -32,6 +37,29 @@ defmodule SpaceTraders.Fleet.Intents do
   ]
 
   @doc "Requests a closed operational goal for Manual Control or a Job."
+  def request(agent, owner, ship_symbol, %BuyGoods{} = goal) do
+    with :ok <- token_present(agent),
+         {:ok, owner} <- normalize_owner(owner),
+         :ok <- valid_goal_parameters(goal.constraints),
+         {:ok, market} <- valid_goal_waypoint(goal.market),
+         {:ok, trade_good} <- valid_trade_good(goal.trade_good),
+         :ok <- valid_quantity(goal.quantity),
+         :ok <- valid_buy_constraints(goal.constraints) do
+      opts =
+        goal.constraints
+        |> Map.to_list()
+        |> Keyword.new()
+
+      opts =
+        case owner do
+          :manual -> opts
+          %JobOwner{job: %Job{id: job_id}} -> Keyword.merge(opts, caller: "job", job_id: job_id)
+        end
+
+      Fleet.buy_goods_intent(agent, ship_symbol, market, trade_good, goal.quantity, opts)
+    end
+  end
+
   def request(agent, owner, ship_symbol, %Navigate{} = goal) do
     with :ok <- token_present(agent),
          {:ok, owner} <- normalize_owner(owner),
@@ -162,6 +190,27 @@ defmodule SpaceTraders.Fleet.Intents do
 
   defp valid_goal_parameters(parameters) when is_map(parameters), do: :ok
   defp valid_goal_parameters(_parameters), do: {:error, :invalid_intent_parameters}
+
+  defp valid_trade_good(trade_good) when is_binary(trade_good) do
+    case String.trim(trade_good) do
+      "" -> {:error, :invalid_trade_good}
+      trade_good -> {:ok, trade_good}
+    end
+  end
+
+  defp valid_trade_good(_trade_good), do: {:error, :invalid_trade_good}
+
+  defp valid_quantity(quantity) when is_integer(quantity) and quantity > 0, do: :ok
+  defp valid_quantity(_quantity), do: {:error, :invalid_quantity}
+
+  defp valid_buy_constraints(constraints) do
+    if Enum.all?(constraints, fn {key, value} ->
+         key in [:max_price, :max_unit_price, :max_total_price, :reserve_credits] and
+           is_integer(value) and value >= 0
+       end),
+       do: :ok,
+       else: {:error, :invalid_buy_constraints}
+  end
 
   defp owner_matches?(:manual, %Intent{caller: "manual"}), do: :ok
 

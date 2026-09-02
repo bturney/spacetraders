@@ -3595,7 +3595,8 @@ defmodule SpaceTraders.Fleet do
   defp validate_cargo_caller(ship, "job", %{"job_id" => job_id}) when is_integer(job_id) do
     case Repo.get(Job, job_id) do
       %Job{ship_id: ship_id, type: type, status: "active"}
-      when ship_id == ship.id and type in ["procurement", "outfitting"] ->
+      when ship_id == ship.id and
+             type in ["procurement", "construction_supply", "outfitting", "market_trading"] ->
         :ok
 
       _ ->
@@ -3938,13 +3939,14 @@ defmodule SpaceTraders.Fleet do
          good when not is_nil(good) <-
            Enum.find(market.trade_goods || [], &(&1.symbol == intent.parameters["trade_symbol"])),
          {:ok, units, _credits} <- executable_cargo_units(intent, live_ship, good, agent) do
-      with {:ok, intent} <-
-             claim_intent_action(intent, %{
-               "kind" => intent.type,
-               "trade_symbol" => intent.parameters["trade_symbol"],
-               "units" => units,
-               "listing_price" => cargo_price(intent.type, good)
-             }) do
+      action = %{
+        "kind" => intent.type,
+        "trade_symbol" => intent.parameters["trade_symbol"],
+        "units" => units,
+        "listing_price" => cargo_price(intent.type, good)
+      }
+
+      with {:ok, intent} <- claim_intent_action(intent, action) do
         execute_cargo_intent(agent, intent, live_ship, units, good)
       else
         {:error, _reason} -> :ok
@@ -3979,10 +3981,14 @@ defmodule SpaceTraders.Fleet do
         with {:ok, overview} <- Agent.agent_overview(agent) do
           available_credits = max(overview.credits - (parameters["reserve_credits"] || 0), 0)
 
+          total_budget =
+            parameters["max_total_price"]
+            |> then(&if(is_integer(&1), do: min(available_credits, &1), else: available_credits))
+
           units =
             min(
               parameters["units"],
-              min(good.trade_volume, min(free, affordable_cargo_units(available_credits, price)))
+              min(good.trade_volume, min(free, affordable_cargo_units(total_budget, price)))
             )
 
           if units > 0, do: {:ok, units, overview.credits}, else: {:error, :buy_unavailable}
@@ -4209,6 +4215,25 @@ defmodule SpaceTraders.Fleet do
   end
 
   defp intent_owned_by_running_job_or_manual?(%Intent{}), do: true
+
+  defp complete_market_cargo_intent(
+         agent,
+         %Intent{type: "buy"} = intent,
+         units,
+         price,
+         %{transaction: transaction} = result
+       )
+       when is_map(transaction) do
+    case validate_market_transaction(intent, transaction, units) do
+      :ok ->
+        if units == intent.parameters["units"],
+          do: complete_cargo_intent(agent, intent, units, price, result),
+          else: block_cargo_intent(intent, :buy_quantity_unfulfilled)
+
+      {:error, reason} ->
+        block_cargo_intent(intent, reason)
+    end
+  end
 
   defp complete_market_cargo_intent(
          agent,
@@ -6955,8 +6980,10 @@ defmodule SpaceTraders.Fleet do
   end
 
   defp inventory_units(inventory, symbol) do
-    case Enum.find(inventory || [], &(&1.symbol == symbol)) do
-      %{units: units} when is_integer(units) -> units
+    case Enum.find(inventory || [], fn item ->
+           (Map.get(item, :symbol) || Map.get(item, "symbol")) == symbol
+         end) do
+      item when is_map(item) -> Map.get(item, :units) || Map.get(item, "units") || 0
       _ -> 0
     end
   end
