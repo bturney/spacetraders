@@ -319,6 +319,63 @@ defmodule SpaceTraders.IntentsTest do
              )
   end
 
+  test "requests a closed Remove Module goal through Manual Control" do
+    agent = agent_fixture("INTENTS-REMOVE")
+    ship_fixture(agent, "INTENTS-REMOVE-SHIP")
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      case {conn.request_path, conn.method} do
+        {"/v2/my/ships/INTENTS-REMOVE-SHIP", "GET"} ->
+          Req.Test.json(conn, %{
+            "data" => %{
+              "symbol" => "INTENTS-REMOVE-SHIP",
+              "nav" => %{
+                "systemSymbol" => "X1-UX81",
+                "waypointSymbol" => "X1-UX81-A1",
+                "status" => "DOCKED",
+                "flightMode" => "CRUISE"
+              },
+              "frame" => %{"moduleSlots" => 2},
+              "modules" => [%{"symbol" => "MODULE_CARGO_HOLD_I", "name" => "Cargo Hold I"}],
+              "fuel" => %{"current" => 100, "capacity" => 100},
+              "cargo" => %{
+                "capacity" => 40,
+                "units" => 1,
+                "inventory" => [%{"symbol" => "IRON_ORE", "units" => 1}]
+              },
+              "cooldown" => %{"remainingSeconds" => 0}
+            }
+          })
+
+        {"/v2/my/ships/INTENTS-REMOVE-SHIP/modules/remove", "POST"} ->
+          Req.Test.json(conn, %{
+            "data" => %{
+              "modules" => [],
+              "cargo" => %{
+                "capacity" => 40,
+                "units" => 2,
+                "inventory" => [
+                  %{"symbol" => "IRON_ORE", "units" => 1},
+                  %{"symbol" => "MODULE_CARGO_HOLD_I", "units" => 1}
+                ]
+              }
+            }
+          })
+      end
+    end)
+
+    assert {:ok, %Intent{type: "remove_module", status: "completed"}} =
+             Intents.request(
+               agent,
+               %Intents.ManualControl{},
+               "INTENTS-REMOVE-SHIP",
+               %Intents.RemoveModule{
+                 module_symbol: "MODULE_CARGO_HOLD_I",
+                 authorized_removals: %{"MODULE_CARGO_HOLD_I" => 1}
+               }
+             )
+  end
+
   test "accepts Buy Goods ownership from a Market Trading Job" do
     agent = agent_fixture("INTENTS-BUY-JOB")
     ship = ship_fixture(agent, "INTENTS-BUY-JOB-SHIP")
@@ -345,6 +402,99 @@ defmodule SpaceTraders.IntentsTest do
                  constraints: %{unsupported: 1}
                }
              )
+  end
+
+  test "does not let a stale paused Outfitting Job request module removal" do
+    agent = agent_fixture("INTENTS-STALE-OUTFIT")
+    ship = ship_fixture(agent, "INTENTS-STALE-OUTFIT-SHIP")
+
+    job =
+      Repo.insert!(%Job{
+        ship_id: ship.id,
+        type: "outfitting",
+        status: "active",
+        extraction_waypoint: "X1-UX81-A1",
+        market_waypoint: "X1-UX81-A1",
+        cargo_threshold: 1
+      })
+
+    Repo.update!(Ecto.Changeset.change(job, status: "paused"))
+
+    assert {:error, :invalid_module_intent} =
+             Intents.request(
+               agent,
+               %Intents.JobOwner{job: job},
+               ship.symbol,
+               %Intents.RemoveModule{
+                 module_symbol: "MODULE_CARGO_HOLD_I",
+                 authorized_removals: %{"MODULE_CARGO_HOLD_I" => 1}
+               }
+             )
+
+    assert Repo.all(Intent) == []
+  end
+
+  test "requests module removal through a running Outfitting Job" do
+    agent = agent_fixture("INTENTS-OUTFIT-REMOVE")
+    ship = ship_fixture(agent, "INTENTS-OUTFIT-REMOVE-SHIP")
+
+    job =
+      Repo.insert!(%Job{
+        ship_id: ship.id,
+        type: "outfitting",
+        status: "active",
+        extraction_waypoint: "X1-UX81-A1",
+        market_waypoint: "X1-UX81-A1",
+        cargo_threshold: 1,
+        progress: %{"authorized_removals" => %{"MODULE_CARGO_HOLD_I" => 2}}
+      })
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      case {conn.request_path, conn.method} do
+        {"/v2/my/ships/INTENTS-OUTFIT-REMOVE-SHIP", "GET"} ->
+          Req.Test.json(conn, %{
+            "data" => %{
+              "symbol" => ship.symbol,
+              "nav" => %{
+                "systemSymbol" => "X1-UX81",
+                "waypointSymbol" => "X1-UX81-A1",
+                "status" => "DOCKED",
+                "flightMode" => "CRUISE"
+              },
+              "frame" => %{"moduleSlots" => 2},
+              "modules" => [%{"symbol" => "MODULE_CARGO_HOLD_I", "name" => "Cargo Hold I"}],
+              "fuel" => %{"current" => 100, "capacity" => 100},
+              "cargo" => %{"capacity" => 40, "units" => 0, "inventory" => []},
+              "cooldown" => %{"remainingSeconds" => 0}
+            }
+          })
+
+        {"/v2/my/ships/INTENTS-OUTFIT-REMOVE-SHIP/modules/remove", "POST"} ->
+          Req.Test.json(conn, %{
+            "data" => %{
+              "modules" => [],
+              "cargo" => %{
+                "capacity" => 40,
+                "units" => 1,
+                "inventory" => [%{"symbol" => "MODULE_CARGO_HOLD_I", "units" => 1}]
+              }
+            }
+          })
+      end
+    end)
+
+    assert {:ok, %Intent{caller: "job", job_id: job_id, status: "completed"}} =
+             Intents.request(
+               agent,
+               %Intents.JobOwner{job: job},
+               ship.symbol,
+               %Intents.RemoveModule{
+                 module_symbol: "MODULE_CARGO_HOLD_I",
+                 authorized_removals: %{}
+               }
+             )
+
+    assert job_id == job.id
   end
 
   test "requests a running Job Navigate without Manual Control confirmation" do

@@ -3539,20 +3539,18 @@ defmodule SpaceTraders.Fleet do
     end
   end
 
-  @doc "Installs one Cargo module through durable Manual Control."
-  def install_module_intent(agent, ship_symbol, module_symbol) do
-    module_intent(agent, ship_symbol, "install_module", module_symbol, %{})
+  @doc "Starts a module Intent for Manual Control or a Ship Outfitting Job."
+  def request_module_intent(agent, :manual, ship_symbol, type, module_symbol, parameters)
+      when type in ["install_module", "remove_module"] and is_map(parameters) do
+    authorized_removals =
+      parameters[:authorized_removals] || parameters["authorized_removals"] || %{}
+
+    module_intent(agent, ship_symbol, type, module_symbol, authorized_removals)
   end
 
-  @doc "Removes one installed module only when its exact symbol and count are authorized."
-  def remove_module_intent(agent, ship_symbol, module_symbol, authorized_removals) do
-    module_intent(agent, ship_symbol, "remove_module", module_symbol, authorized_removals)
-  end
-
-  @doc "Starts a module Intent owned by a running Ship Outfitting Job."
-  def request_job_module_intent(
+  def request_module_intent(
         %AgentRecord{} = agent,
-        %Job{type: "outfitting", id: job_id, ship_id: ship_id} = job,
+        %Job{type: "outfitting", id: job_id, ship_id: ship_id},
         ship_symbol,
         type,
         module_symbol,
@@ -3561,18 +3559,15 @@ defmodule SpaceTraders.Fleet do
       when type in ["install_module", "remove_module"] and is_map(parameters) do
     with {:ok, ship} <- owned_ship(agent, ship_symbol),
          true <- ship.id == ship_id,
-         true <- job.status in ["active", "waiting"],
+         %Job{} = current_job <- Repo.get(Job, job_id),
+         true <- current_job.ship_id == ship_id and Job.running?(current_job),
          {:ok, live_ship} <-
            Agent.handle_game_result(
              agent,
              SpaceTraders.API.get_ship(agent.agent_token, ship_symbol)
            ),
          {:ok, intent} <-
-           insert_job_intent(job, %{
-             type: type,
-             target_waypoint: module_symbol,
-             parameters: Map.merge(parameters, %{"caller" => "job", "job_id" => job_id})
-           }) do
+           insert_module_job_intent(current_job, ship_id, type, module_symbol, parameters) do
       advance_intents(agent, intent, live_ship)
     else
       false -> {:error, :invalid_module_intent}
@@ -3580,7 +3575,38 @@ defmodule SpaceTraders.Fleet do
     end
   end
 
-  def request_job_module_intent(_, _, _, _, _, _), do: {:error, :invalid_module_intent}
+  def request_module_intent(_, _, _, _, _, _), do: {:error, :invalid_module_intent}
+
+  defp insert_module_job_intent(job, ship_id, type, module_symbol, parameters) do
+    Repo.transaction(fn ->
+      current_job = Repo.get(Job, job.id)
+
+      unless match?(%Job{type: "outfitting", ship_id: ^ship_id}, current_job) and
+               Job.running?(current_job) do
+        Repo.rollback(:invalid_module_intent)
+      end
+
+      authorized = get_in(current_job.progress, ["authorized_removals"]) || %{}
+      removed = get_in(current_job.progress, ["removed_modules", module_symbol]) || 0
+      allowance = Map.get(authorized, module_symbol, 0) - removed
+
+      if type == "remove_module" and allowance < 1 do
+        Repo.rollback(:invalid_module_intent)
+      end
+
+      case insert_job_intent(current_job, %{
+             type: type,
+             target_waypoint: module_symbol,
+             parameters:
+               parameters
+               |> Map.put("authorized_removals", %{module_symbol => 1})
+               |> Map.merge(%{"caller" => "job", "job_id" => current_job.id})
+           }) do
+        {:ok, intent} -> intent
+        {:error, changeset} -> Repo.rollback(changeset)
+      end
+    end)
+  end
 
   defp module_intent(
          %AgentRecord{agent_token: token} = agent,
