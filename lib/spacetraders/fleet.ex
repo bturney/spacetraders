@@ -3609,8 +3609,11 @@ defmodule SpaceTraders.Fleet do
 
   defp construction_live_ship(agent, ship_symbol, opts) do
     case opts[:live_ship] do
-      %SpaceTraders.API.Model.Ship{} = ship ->
+      %SpaceTraders.API.Model.Ship{symbol: ^ship_symbol} = ship ->
         {:ok, ship}
+
+      %SpaceTraders.API.Model.Ship{} ->
+        {:error, :invalid_cargo_intent_owner}
 
       _ ->
         Agent.handle_game_result(agent, SpaceTraders.API.get_ship(agent.agent_token, ship_symbol))
@@ -4149,31 +4152,45 @@ defmodule SpaceTraders.Fleet do
   defp dispatch_cargo_intent(agent, intent, live_ship) do
     if intent.type == "deliver" do
       with {:ok, recipient} <- delivery_recipient_for_intent(agent, intent),
-           {:ok, units, _credits} <- executable_cargo_units(intent, live_ship, recipient, agent) do
-        action =
-          %{
-            "kind" => "deliver",
-            "trade_symbol" => intent.parameters["trade_symbol"],
-            "units" => units,
-            "recipient" => intent.parameters["recipient"]
-          }
-          |> delivery_action_evidence(
-            recipient,
-            live_ship.cargo,
-            intent.parameters["trade_symbol"]
-          )
-
-        with {:ok, intent} <-
-               claim_intent_action(intent, action) do
-          execute_cargo_intent(agent, intent, live_ship, units, recipient)
-        else
-          {:error, _reason} -> :ok
-        end
+           result <- dispatch_or_complete_construction(agent, intent, live_ship, recipient) do
+        result
       else
         {:error, reason} -> block_cargo_intent(intent, reason)
       end
     else
       dispatch_market_cargo_intent(agent, intent, live_ship)
+    end
+  end
+
+  defp dispatch_or_complete_construction(agent, intent, _live_ship, {:construction, construction})
+       when construction.is_complete do
+    complete_cargo_intent(
+      agent,
+      intent,
+      0,
+      nil,
+      %{construction: construction, external_completion: true}
+    )
+  end
+
+  defp dispatch_or_complete_construction(agent, intent, live_ship, recipient) do
+    with {:ok, units, _credits} <- executable_cargo_units(intent, live_ship, recipient, agent) do
+      action =
+        %{
+          "kind" => "deliver",
+          "trade_symbol" => intent.parameters["trade_symbol"],
+          "units" => units,
+          "recipient" => intent.parameters["recipient"]
+        }
+        |> delivery_action_evidence(recipient, live_ship.cargo, intent.parameters["trade_symbol"])
+
+      with {:ok, intent} <- claim_intent_action(intent, action) do
+        execute_cargo_intent(agent, intent, live_ship, units, recipient)
+      else
+        {:error, _reason} -> :ok
+      end
+    else
+      {:error, reason} -> block_cargo_intent(intent, reason)
     end
   end
 
