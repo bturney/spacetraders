@@ -24,8 +24,18 @@ defmodule SpaceTraders.Fleet.Intents do
   end
 
   defmodule DeliverGoods do
-    @moduledoc "A closed Deliver Goods goal for a Contract recipient."
-    defstruct [:contract_id, :destination, :trade_good, :quantity]
+    @moduledoc "A closed Deliver Goods goal for a typed recipient."
+    defstruct [:recipient, :trade_good, :quantity]
+  end
+
+  defmodule ContractRecipient do
+    @moduledoc "A typed Contract recipient for Deliver Goods."
+    defstruct [:contract_id, :waypoint]
+  end
+
+  defmodule ConstructionRecipient do
+    @moduledoc "A typed Construction recipient for Deliver Goods."
+    defstruct [:system, :waypoint]
   end
 
   defmodule InstallModule do
@@ -122,40 +132,7 @@ defmodule SpaceTraders.Fleet.Intents do
   end
 
   def request(agent, owner, ship_symbol, %DeliverGoods{} = goal) do
-    with :ok <- token_present(agent),
-         {:ok, owner} <- normalize_owner(owner),
-         {:ok, contract_id} <- valid_identifier(goal.contract_id, :invalid_contract_id),
-         {:ok, destination} <- valid_goal_waypoint(goal.destination),
-         {:ok, trade_good} <- valid_trade_good(goal.trade_good),
-         :ok <- valid_quantity(goal.quantity) do
-      opts = [
-        contract_id: contract_id,
-        recipient: %{
-          type: "contract",
-          contract_id: contract_id,
-          waypoint: destination
-        }
-      ]
-
-      opts =
-        case owner do
-          :manual ->
-            opts
-
-          %JobOwner{job: %Job{id: job_id}} ->
-            Keyword.merge(opts, caller: "job", job_id: job_id)
-        end
-
-      Fleet.deliver_goods_intent(
-        agent,
-        ship_symbol,
-        destination,
-        contract_id,
-        trade_good,
-        goal.quantity,
-        opts
-      )
-    end
+    request_delivery(agent, owner, ship_symbol, goal, nil)
   end
 
   def request(agent, owner, ship_symbol, %Navigate{} = goal) do
@@ -300,22 +277,30 @@ defmodule SpaceTraders.Fleet.Intents do
   end
 
   def request(agent, %JobOwner{} = owner, ship_symbol, %DeliverGoods{} = goal, live_ship) do
-    with {:ok, owner} <- normalize_owner(owner),
-         :ok <- token_present(agent),
-         {:ok, contract_id} <- valid_identifier(goal.contract_id, :invalid_contract_id),
-         {:ok, destination} <- valid_goal_waypoint(goal.destination),
+    request_delivery(agent, owner, ship_symbol, goal, live_ship)
+  end
+
+  defp request_delivery(agent, owner, ship_symbol, goal, live_ship) do
+    with :ok <- token_present(agent),
+         {:ok, owner} <- normalize_owner(owner),
+         {:ok, recipient, waypoint} <- valid_delivery_recipient(goal.recipient),
          {:ok, trade_good} <- valid_trade_good(goal.trade_good),
          :ok <- valid_quantity(goal.quantity) do
+      opts = if live_ship, do: [live_ship: live_ship], else: []
+
+      opts =
+        if owner == :manual,
+          do: opts,
+          else: Keyword.merge(opts, caller: "job", job_id: owner.job.id)
+
       Fleet.deliver_goods_intent(
         agent,
         ship_symbol,
-        destination,
-        contract_id,
+        recipient,
+        waypoint,
         trade_good,
         goal.quantity,
-        caller: "job",
-        job_id: owner.job.id,
-        live_ship: live_ship
+        opts
       )
     end
   end
@@ -446,6 +431,22 @@ defmodule SpaceTraders.Fleet.Intents do
   end
 
   defp valid_identifier(_value, error), do: {:error, error}
+
+  defp valid_delivery_recipient(%ContractRecipient{contract_id: contract_id, waypoint: waypoint}) do
+    with {:ok, contract_id} <- valid_identifier(contract_id, :invalid_contract_id),
+         {:ok, waypoint} <- valid_goal_waypoint(waypoint) do
+      {:ok, %{type: "contract", contract_id: contract_id, waypoint: waypoint}, waypoint}
+    end
+  end
+
+  defp valid_delivery_recipient(%ConstructionRecipient{system: system, waypoint: waypoint}) do
+    with {:ok, system} <- valid_identifier(system, :invalid_system_symbol),
+         {:ok, waypoint} <- valid_goal_waypoint(waypoint) do
+      {:ok, %{type: "construction", system: system, waypoint: waypoint}, waypoint}
+    end
+  end
+
+  defp valid_delivery_recipient(_recipient), do: {:error, :invalid_delivery_recipient}
 
   defp valid_quantity(quantity) when is_integer(quantity) and quantity > 0, do: :ok
   defp valid_quantity(_quantity), do: {:error, :invalid_quantity}

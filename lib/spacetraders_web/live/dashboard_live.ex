@@ -807,8 +807,10 @@ defmodule SpaceTradersWeb.DashboardLive do
              %Intents.ManualControl{},
              ship_symbol,
              %Intents.DeliverGoods{
-               contract_id: contract_id,
-               destination: destination_waypoint,
+               recipient: %Intents.ContractRecipient{
+                 contract_id: contract_id,
+                 waypoint: destination_waypoint
+               },
                trade_good: trade_symbol,
                quantity: units
              }
@@ -855,13 +857,18 @@ defmodule SpaceTradersWeb.DashboardLive do
            Enum.find(socket.assigns.overviews, &(to_string(&1.agent.id) == agent_id)),
          {:ok, units} <- parse_units(units),
          {:ok, %{status: "completed"}} <-
-           Fleet.deliver_construction_goods_intent(
+           Intents.request(
              agent,
+             %Intents.ManualControl{},
              ship_symbol,
-             system_symbol,
-             destination_waypoint,
-             trade_symbol,
-             units
+             %Intents.DeliverGoods{
+               recipient: %Intents.ConstructionRecipient{
+                 system: system_symbol,
+                 waypoint: destination_waypoint
+               },
+               trade_good: trade_symbol,
+               quantity: units
+             }
            ) do
       socket =
         refresh_agent(socket, agent)

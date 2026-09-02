@@ -262,8 +262,83 @@ defmodule SpaceTraders.IntentsTest do
                %Intents.ManualControl{},
                "INTENTS-DELIVER-SHIP",
                %Intents.DeliverGoods{
-                 contract_id: "INTENTS-CONTRACT",
-                 destination: "X1-UX81-A1",
+                 recipient: %Intents.ContractRecipient{
+                   contract_id: "INTENTS-CONTRACT",
+                   waypoint: "X1-UX81-A1"
+                 },
+                 trade_good: "IRON_ORE",
+                 quantity: 5
+               }
+             )
+  end
+
+  test "requests a Construction recipient through Deliver Goods" do
+    agent = agent_fixture("INTENTS-CONSTRUCTION")
+    ship_fixture(agent, "INTENTS-CONSTRUCTION-SHIP")
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      case {conn.request_path, conn.method} do
+        {"/v2/my/ships/INTENTS-CONSTRUCTION-SHIP", "GET"} ->
+          Req.Test.json(conn, %{
+            "data" => %{
+              "symbol" => "INTENTS-CONSTRUCTION-SHIP",
+              "nav" => %{
+                "systemSymbol" => "X1-UX81",
+                "waypointSymbol" => "X1-UX81-A1",
+                "status" => "DOCKED",
+                "flightMode" => "CRUISE"
+              },
+              "fuel" => %{"current" => 100, "capacity" => 100},
+              "cargo" => %{
+                "capacity" => 40,
+                "units" => 5,
+                "inventory" => [%{"symbol" => "IRON_ORE", "units" => 5}]
+              },
+              "cooldown" => %{"remainingSeconds" => 0}
+            }
+          })
+
+        {"/v2/systems/X1-UX81/waypoints/X1-UX81-A1/construction", "GET"} ->
+          Req.Test.json(conn, %{
+            "data" => %{
+              "symbol" => "X1-UX81-A1",
+              "isComplete" => false,
+              "materials" => [%{"tradeSymbol" => "IRON_ORE", "required" => 20, "fulfilled" => 7}]
+            }
+          })
+
+        {"/v2/systems/X1-UX81/waypoints/X1-UX81-A1/construction/supply", "POST"} ->
+          assert conn.body_params == %{
+                   "shipSymbol" => "INTENTS-CONSTRUCTION-SHIP",
+                   "tradeSymbol" => "IRON_ORE",
+                   "units" => 5
+                 }
+
+          Req.Test.json(conn, %{
+            "data" => %{
+              "cargo" => %{"capacity" => 40, "units" => 0, "inventory" => []},
+              "construction" => %{
+                "symbol" => "X1-UX81-A1",
+                "isComplete" => false,
+                "materials" => [
+                  %{"tradeSymbol" => "IRON_ORE", "required" => 20, "fulfilled" => 12}
+                ]
+              }
+            }
+          })
+      end
+    end)
+
+    assert {:ok, %Intent{caller: "manual", type: "deliver", status: "completed"}} =
+             Intents.request(
+               agent,
+               %Intents.ManualControl{},
+               "INTENTS-CONSTRUCTION-SHIP",
+               %Intents.DeliverGoods{
+                 recipient: %Intents.ConstructionRecipient{
+                   system: "X1-UX81",
+                   waypoint: "X1-UX81-A1"
+                 },
                  trade_good: "IRON_ORE",
                  quantity: 5
                }
