@@ -5230,6 +5230,14 @@ defmodule SpaceTraders.Fleet do
   defp advance_job_intent_after_event(agent, %Job{type: "miner"} = job, intent, live_ship),
     do: advance_miner_after_intent(agent, job, intent, live_ship)
 
+  defp advance_job_intent_after_event(
+         agent,
+         %Job{type: "construction_supply"} = job,
+         intent,
+         _live_ship
+       ),
+       do: advance_construction_supply_after_intent(agent, job, intent)
+
   defp advance_job_intent_after_event(agent, job, intent, _live_ship),
     do: advance_procurement_after_intent(agent, job, intent)
 
