@@ -1,6 +1,6 @@
 # Concurrent worktrees use immutable warm caches and allocated ports
 
-**Status:** proposed
+**Status:** implemented; routine workflow policy is under review in #267.
 
 Parallel ticket work uses one task-ID-based setup flow for humans and runners. Clean committed worktrees restore a private build from an immutable cache keyed by revision, lockfile, and toolchain; cache population is serialized, while dirty worktrees compile privately. A lock-protected registry assigns each live task a deterministic port, failing collisions unless `PORT` is explicitly overridden, so mutable build state and HTTP listeners never cross worktree boundaries.
 

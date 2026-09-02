@@ -61,10 +61,18 @@ _Avoid_: operational knowledge, world state
 Operational Intelligence about one Waypoint beyond its location and immediate navigability: construction status, modifiers, controlling faction, and chart provenance. Construction status and modifiers are operational state; faction and chart provenance are secondary context.
 
 **Waypoint Modifier**:
-An API-supplied condition affecting a Waypoint (e.g., RADIATION_LEAK or CIVIL_UNREST). It signals caution but has no API-supplied severity ranking; do not infer one.
+An API-supplied caution condition affecting a Waypoint (e.g., RADIATION_LEAK,
+CIVIL_UNREST, STRIPPED, or UNSTABLE), carrying a symbol, name, and description.
+Show it with caution styling; the game supplies no severity ranking, so the app
+must not infer one.
+_Avoid_: debuff, penalty, severity
 
 **Chart Provenance**:
-The Agent and time recorded by the game when a Waypoint was charted. It is secondary context, not an operational condition. Its absence is unknown optional data, not a claim that a Waypoint is uncharted.
+The Agent and absolute time the game returns for a Waypoint's chart. It is
+secondary context, not an operational condition. Its absence is unknown optional
+data, not a claim that the Waypoint is uncharted; show only returned facts and
+never placeholders for partial provenance.
+_Avoid_: chart history, discovered-by
 
 **Waypoint Grid**:
 A structured, actionable view of Waypoints in one System. It is linked to the System Map: selecting a Waypoint in either view selects and highlights it in both.
@@ -76,14 +84,6 @@ _Avoid_: system map
 
 **Headquarters**:
 The Agent's home waypoint, where the Agent starts.
-
-**Waypoint Modifier**:
-An API-supplied caution flag on a Waypoint (e.g., STRIPPED, UNSTABLE), carrying a symbol, name, and description. Shown with caution styling; the game does not rank modifiers, so the app invents no severity order.
-_Avoid_: debuff, penalty, severity
-
-**Chart Provenance**:
-The chart facts the API returns for a Waypoint: the submitter and the charted absolute time. Shown only when returned; partial provenance never uses placeholders.
-_Avoid_: chart history, discovered-by
 
 ### Fleet
 
