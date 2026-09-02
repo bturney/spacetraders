@@ -3569,17 +3569,37 @@ defmodule SpaceTraders.Fleet do
            construction_live_ship(agent, ship_symbol, opts),
          {:ok, ^system_symbol} <- system_from_headquarters(waypoint),
          true <- live_ship.nav.system_symbol == system_symbol do
-      cargo_intent(
-        agent,
-        ship_symbol,
-        "deliver",
-        waypoint,
-        trade_symbol,
-        units,
+      opts =
         Keyword.merge(opts,
           recipient: %{type: "construction", system: system_symbol, waypoint: waypoint}
         )
-      )
+
+      case opts[:caller] do
+        "job" ->
+          with %Job{} = job <- Repo.get(Job, opts[:job_id]),
+               {:ok, ship} <- owned_ship(agent, ship_symbol),
+               true <- job.ship_id == ship.id and Job.running?(job),
+               {:ok, intent} <-
+                 insert_job_intent(job, %{
+                   type: "deliver",
+                   target_waypoint: waypoint,
+                   parameters:
+                     opts
+                     |> Keyword.delete(:live_ship)
+                     |> Map.new()
+                     |> Map.put(:trade_symbol, trade_symbol)
+                     |> Map.put(:units, units)
+                     |> Map.new(fn {key, value} -> {to_string(key), value} end)
+                 }) do
+            advance_intents(agent, intent, live_ship)
+          else
+            false -> {:error, :invalid_cargo_intent_owner}
+            error -> error
+          end
+
+        _ ->
+          cargo_intent(agent, ship_symbol, "deliver", waypoint, trade_symbol, units, opts)
+      end
     else
       false -> {:error, :remote_destination_system_unsupported}
       {:ok, _system} -> {:error, :remote_destination_system_unsupported}
@@ -4372,6 +4392,20 @@ defmodule SpaceTraders.Fleet do
        ) do
     recipient = intent.parameters["recipient"]
 
+    if construction.is_complete do
+      complete_cargo_intent(
+        agent,
+        intent,
+        0,
+        nil,
+        %{construction: construction, external_completion: true}
+      )
+    else
+      execute_construction_delivery(agent, intent, live_ship, units, recipient, construction)
+    end
+  end
+
+  defp execute_construction_delivery(agent, intent, live_ship, units, recipient, construction) do
     case supply_construction(
            agent,
            recipient["system"],
