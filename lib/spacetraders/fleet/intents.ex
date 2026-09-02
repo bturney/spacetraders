@@ -25,6 +25,11 @@ defmodule SpaceTraders.Fleet.Intents do
 
   @unfinished_states Intent.unfinished_states()
   @terminal_states Intent.terminal_states()
+  @job_types [
+    "miner",
+    "procurement",
+    "market_trading"
+  ]
 
   @doc "Requests a closed operational goal for Manual Control or a Job."
   def request(agent, owner, ship_symbol, %Navigate{} = goal) do
@@ -36,8 +41,8 @@ defmodule SpaceTraders.Fleet.Intents do
         :manual ->
           Fleet.navigate_intent_legacy(agent, ship_symbol, waypoint, goal.parameters)
 
-        %JobOwner{job: %Job{type: type} = job} when type in ["procurement", "market_trading"] ->
-          Fleet.request_job_navigate_legacy(agent, job, ship_symbol, waypoint, goal.parameters)
+        %JobOwner{job: %Job{type: type} = job} when type in @job_types ->
+          Fleet.request_job_navigate(agent, job, ship_symbol, waypoint, goal.parameters)
 
         %JobOwner{} ->
           {:error, :unsupported_job_navigate}
@@ -46,6 +51,28 @@ defmodule SpaceTraders.Fleet.Intents do
   end
 
   def request(_agent, _owner, _ship_symbol, _goal), do: {:error, :unsupported_intent_goal}
+
+  def request(agent, %JobOwner{} = owner, ship_symbol, %Navigate{} = goal, live_ship) do
+    with {:ok, owner} <- normalize_owner(owner),
+         :ok <- token_present(agent),
+         :ok <- valid_goal_parameters(goal.parameters),
+         {:ok, waypoint} <- valid_goal_waypoint(goal.waypoint) do
+      case owner do
+        %JobOwner{job: %Job{type: type} = job} when type in @job_types ->
+          Fleet.request_job_navigate(
+            agent,
+            job,
+            ship_symbol,
+            waypoint,
+            goal.parameters,
+            live_ship
+          )
+
+        _ ->
+          {:error, :unsupported_job_navigate}
+      end
+    end
+  end
 
   @doc "Persists a reviewed Navigate Intent without dispatching a mutation."
   def review(agent, owner, ship_symbol, waypoint, preview) when is_map(preview) do
