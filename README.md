@@ -64,43 +64,26 @@ env; see `test/spacetraders/api/`.
 ### Run the app
 
 ```sh
+source scripts/_toolchain.sh
 mix phx.server   # http://localhost:4000, GET /health returns {"status":"ok"}
 ```
 
-### Parallel worktrees
+### Optional isolated work
 
-Create every concurrent ticket or ad-hoc Task Workspace through the repository
-workflow. The stable ID can be an issue number or a descriptive slug:
+Routine work uses the current checkout. For concurrent or explicitly isolated
+work, create a Task Workspace from current `origin/main` rather than assuming a
+local branch is current:
 
 ```sh
-scripts/task-start 28
-scripts/task-start diagnose-navigation-timeout
+git fetch origin main
+scripts/task-start 28 --base origin/main
 ```
 
-`task-start` creates `feature/<task-id>` from `main`, creates a sibling linked
-worktree, and runs the task-scoped setup contract. Use `--base <ref>` for a
-different starting point. It refuses existing task branches or worktrees unless
-`--resume` is explicit. To hand the configured workspace to any runner, append
-the command after `--`; the command runs there with `.worktree-env` loaded:
+The workspace uses `feature/<task-id>`, a private build, and an allocated port.
+Stop it after its changes are committed or removed:
 
 ```sh
-scripts/task-start diagnose-navigation-timeout -- your-runner
-```
-
-Stop a completed task only after committing or removing its changes. This
-releases its port and removes its worktree but leaves its branch for review:
-
-```sh
-scripts/task-stop diagnose-navigation-timeout
-```
-
-The setup command serializes immutable warm-cache population and gives each task
-a unique port in `41000-50999`. Cache entries are never mutated; prune them
-explicitly when needed:
-
-```sh
-scripts/worktree-cache-prune                         # 30 days, 10 GiB
-scripts/worktree-cache-prune --max-age-days 7 --max-size-gib 2
+scripts/task-stop 28
 ```
 
 First boot redirects to `/setup` — create the first operator (email + password,

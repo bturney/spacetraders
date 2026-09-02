@@ -4,22 +4,18 @@
 
 ### Issue tracker
 
-Issues and PRDs live as GitHub issues, managed via the `gh` CLI. See `docs/agents/issue-tracker.md`.
-
-### Triage labels
-
-Five canonical triage roles mapped to the labels `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`. See `docs/agents/triage-labels.md`.
+Before creating, triaging, labelling, or closing an issue, read `docs/agents/issue-tracker.md`. When applying a triage role, read `docs/agents/triage-labels.md`.
 
 ### Domain docs
 
-Single-context — one `CONTEXT.md` plus `docs/adr/` at the repo root. See `docs/agents/domain.md`.
+Before exploring a domain area or naming a domain concept, read `docs/agents/domain.md`.
 
 ### Matt skill bindings
 
 - `/triage <issue>` reads and labels the Issue. It does not create a Task Workspace.
-- `/implement <issue>` requires an accepted Issue labelled `ready-for-agent`. Start or explicitly resume its Task Workspace with `scripts/task-start <issue>`, then follow the Task Workspace lifecycle below. A current feature or prototype branch is not an implementation workspace unless the accepted Issue explicitly names it as `--base`.
+- `/implement <issue>` requires an accepted Issue labelled `ready-for-agent`. Work in the current checkout unless isolation is explicitly requested or concurrent work requires it.
 - `/code-review` reviews a committed Task Workspace branch or PR diff against its explicit fixed point.
-- Kimaki worktrees are for explicitly requested isolated ad-hoc sessions. Repository-dispatched implementation uses a Task Workspace, not a Kimaki worktree.
+- Kimaki worktrees are for explicitly requested isolated ad-hoc sessions. Task Workspaces are the separate repository-managed option for concurrent or isolated work.
 - Merge and Issue closure require an explicit Operator request. Deployments
   from `main` are automatic after the image publish workflow succeeds.
 
@@ -27,13 +23,11 @@ Single-context — one `CONTEXT.md` plus `docs/adr/` at the repo root. See `docs
 
 Phoenix 1.8 (Bandit + LiveView), SQLite via `ecto_sqlite3`. Toolchain versions owned by `.tool-versions`.
 
-- `scripts/bootstrap` — from a clean checkout: installs the pinned OTP/Elixir toolchain without sudo, fetches deps.
-- The gate: `scripts/verify` — format, warnings-as-errors compile, tests, real boot + `/health` 200. Run it before pushing; CI runs it on every PR.
-- `scripts/teardown` — stops a server rooted here, removes `_build` and `*.db`, and releases this task's allocated port.
-- Unattended tasks: `scripts/agent-run`; runner inputs, artifacts, and automation path: `docs/agents/readiness.md`.
-- Run/test commands live in README → Development.
-- API-client contract: the bundled OpenAPI spec (`priv/spec/SpaceTraders.json`) is ground truth; `test/spacetraders/api/spec_conformance_test.exs` ties the client's `data`-envelope assumptions to it (root `/` is the lone flat response).
-- LiveView forms: the dashboard patches ~1s (`:cooldown_tick`) and on fleet pushes. Never render a user-editable input with a bare server `value` — LiveView re-applies it to non-focused inputs on every patch and wipes the draft. Track drafts with `phx-change` into a socket assign (`@form_drafts` is the reference pattern) and give every form a unique `id` for form recovery.
+- Use `scripts/bootstrap` in a clean checkout and `scripts/verify` before pushing. Run/test commands are in README's Development section.
+- Before starting new implementation, run `git fetch origin main` and `git merge-base --is-ancestor origin/main HEAD`; branch names do not prove freshness. Preserve local changes rather than switching or resetting a dirty checkout. Workflow policy is under review in #267.
+- For unattended CI or runner work, read `docs/agents/readiness.md`.
+- When changing the API client, treat `priv/spec/SpaceTraders.json` as ground truth and read `test/spacetraders/api/spec_conformance_test.exs`.
+- When changing a LiveView form, use the `@form_drafts` pattern; recurring patches must not overwrite a user's draft.
 
 ### Agent dev shell
 
@@ -43,12 +37,9 @@ The pinned toolchain is **not** on PATH. In every fresh shell, source it first:
 source scripts/_toolchain.sh   # puts pinned mix/elixir on PATH
 ```
 
-### Task workspaces
+### Isolated work
 
-1. Start concurrent ticket or ad-hoc work with `scripts/task-start <issue-number|slug>`. It creates `feature/<task-id>` in a sibling worktree and invokes `scripts/worktree-setup`. Use `--base <ref>` for dependent work and `--resume` to continue a known task.
-2. Append a runner command after `--`; it receives the workspace as its current directory with `.worktree-env` loaded. For direct Mix commands, work from the printed workspace and run `source .worktree-env`; project scripts load it automatically. Iterate `mix test <file>` — the test DB is dropped and re-migrated every run.
-3. Gate with `scripts/verify`, commit, then run `/code-review <base>`. Address findings, gate, commit, and review again until clean; then push and open a PR.
-4. After PR creation, run `scripts/task-stop <issue-number|slug>`. It releases the port, removes only a clean worktree, and preserves its review branch. Prune old cache entries with `scripts/worktree-cache-prune` (30 days and 10 GiB by default).
+Use a Task Workspace only for explicitly requested or concurrent isolated work. Read README's Optional isolated work section before creating one.
 
 <!-- phoenix-gen-auth-start -->
 ## Authentication
