@@ -286,6 +286,27 @@ defmodule SpaceTraders.Fleet.Intents do
     end
   end
 
+  def request(agent, %JobOwner{} = owner, ship_symbol, %DeliverGoods{} = goal, live_ship) do
+    with {:ok, owner} <- normalize_owner(owner),
+         :ok <- token_present(agent),
+         {:ok, contract_id} <- valid_identifier(goal.contract_id, :invalid_contract_id),
+         {:ok, destination} <- valid_goal_waypoint(goal.destination),
+         {:ok, trade_good} <- valid_trade_good(goal.trade_good),
+         :ok <- valid_quantity(goal.quantity) do
+      Fleet.deliver_goods_intent(
+        agent,
+        ship_symbol,
+        destination,
+        contract_id,
+        trade_good,
+        goal.quantity,
+        caller: "job",
+        job_id: owner.job.id,
+        live_ship: live_ship
+      )
+    end
+  end
+
   @doc "Persists a reviewed Navigate Intent without dispatching a mutation."
   def review(agent, owner, ship_symbol, waypoint, preview) when is_map(preview) do
     with {:ok, :manual} <- normalize_owner(owner) do
