@@ -100,13 +100,18 @@ defmodule SpaceTraders.Fleet.Intents do
   end
 
   def request(agent, owner, ship_symbol, %RemoveModule{} = goal) do
+    parameters =
+      if is_map(goal.parameters),
+        do: Map.put(goal.parameters, :authorized_removals, goal.authorized_removals),
+        else: goal.parameters
+
     request_module(
       agent,
       owner,
       ship_symbol,
       "remove_module",
       goal.module_symbol,
-      Map.put(goal.parameters, :authorized_removals, goal.authorized_removals)
+      parameters
     )
   end
 
@@ -265,11 +270,12 @@ defmodule SpaceTraders.Fleet.Intents do
 
   defp valid_module_parameters("remove_module", module_symbol, parameters) do
     removals = parameters[:authorized_removals] || parameters["authorized_removals"] || %{}
-    removals = Map.new(removals, fn {key, value} -> {to_string(key), value} end)
 
-    if removals == %{module_symbol => 1},
-      do: {:ok, Map.merge(parameters, %{"module_symbol" => module_symbol, "quantity" => 1})},
-      else: {:error, :invalid_module_intent}
+    if is_map(removals) and
+         Map.new(removals, fn {key, value} -> {to_string(key), value} end) ==
+           %{module_symbol => 1},
+       do: {:ok, Map.merge(parameters, %{"module_symbol" => module_symbol, "quantity" => 1})},
+       else: {:error, :invalid_module_intent}
   end
 
   defp valid_trade_good(trade_good) when is_binary(trade_good) do

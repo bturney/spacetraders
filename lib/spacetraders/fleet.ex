@@ -3439,17 +3439,17 @@ defmodule SpaceTraders.Fleet do
     with {:ok, ship} <- owned_ship(agent, ship_symbol),
          true <- ship.id == ship_id,
          true <- job.status in ["active", "waiting"],
+         {:ok, live_ship} <-
+           Agent.handle_game_result(
+             agent,
+             SpaceTraders.API.get_ship(agent.agent_token, ship_symbol)
+           ),
          {:ok, intent} <-
            insert_job_intent(job, %{
              type: type,
              target_waypoint: module_symbol,
              parameters: Map.merge(parameters, %{"caller" => "job", "job_id" => job_id})
-           }),
-         {:ok, live_ship} <-
-           Agent.handle_game_result(
-             agent,
-             SpaceTraders.API.get_ship(agent.agent_token, ship_symbol)
-           ) do
+           }) do
       advance_intents(agent, intent, live_ship)
     else
       false -> {:error, :invalid_module_intent}
