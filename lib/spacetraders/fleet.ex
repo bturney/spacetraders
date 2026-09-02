@@ -3738,6 +3738,9 @@ defmodule SpaceTraders.Fleet do
     do_advance_intents(agent, intent, live_ship)
   end
 
+  @doc false
+  def reconcile_intent(agent, intent, live_ship), do: advance_intents(agent, intent, live_ship)
+
   defp do_advance_intents(
          agent,
          %Intent{recovery_attempts: attempts} = intent,
@@ -5637,7 +5640,7 @@ defmodule SpaceTraders.Fleet do
          :ok <- Agent.execution_allowed?(agent) do
       case Agent.handle_game_result(agent, SpaceTraders.API.get_ship(agent_token, ship_symbol)) do
         {:ok, live_ship} ->
-          advance_intents(agent, intent, live_ship)
+          SpaceTraders.Fleet.Intents.recover(agent, ship_symbol, live_ship, intent.id, nil)
 
         {:error, reason} ->
           if reason == :stale_agent,
@@ -7604,7 +7607,19 @@ defmodule SpaceTraders.Fleet do
 
             {:ok, live_ship}
             when config.status in ["active", "waiting"] and is_map(config.in_flight_action) ->
-              reconcile_in_flight(agent_id, ship, config, live_ship)
+              case unfinished_job_intent(config.id) do
+                %Intent{type: "navigate", id: intent_id} ->
+                  SpaceTraders.Fleet.Intents.recover(
+                    agent,
+                    ship_symbol,
+                    live_ship,
+                    intent_id,
+                    config.id
+                  )
+
+                _ ->
+                  reconcile_in_flight(agent_id, ship, config, live_ship)
+              end
 
             {:ok, _live_ship} ->
               :ok

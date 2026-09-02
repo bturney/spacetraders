@@ -135,6 +135,11 @@ defmodule SpaceTraders.Fleet.Intents do
     )
   end
 
+  @doc "Re-enters Navigate reconciliation after boot's authoritative Ship read."
+  def recover(agent, ship_symbol, live_ship, expected_intent_id, expected_job_id) do
+    reconcile(agent.id, ship_symbol, live_ship, :boot, expected_intent_id, expected_job_id)
+  end
+
   defp normalize_owner(:manual), do: {:ok, :manual}
   defp normalize_owner(%ManualControl{}), do: {:ok, :manual}
   defp normalize_owner(%JobOwner{job: %Job{} = job}), do: {:ok, %JobOwner{job: job}}
