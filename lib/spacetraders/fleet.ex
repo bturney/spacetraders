@@ -2866,8 +2866,8 @@ defmodule SpaceTraders.Fleet do
   def navigate_intent(%AgentRecord{}, _ship_symbol, _waypoint, _parameters),
     do: {:error, :agent_token_missing}
 
-  # Temporary internal delegator. Navigate execution lives behind Intents while
-  # existing Fleet callers migrate to the seam.
+  # Job Navigate is inserted and advanced as a Job-owned Intent. Manual Navigate
+  # uses the separate path above because it may preempt a Job.
   def navigate_intent_legacy(
         %AgentRecord{agent_token: agent_token} = agent,
         ship_symbol,
@@ -2892,19 +2892,22 @@ defmodule SpaceTraders.Fleet do
     end
   end
 
-  def request_job_navigate_legacy(agent, job, ship_symbol, waypoint, parameters) do
+  def request_job_navigate(agent, job, ship_symbol, waypoint, parameters) do
     with {:ok, ship} <- owned_ship(agent, ship_symbol),
+         :ok <- job_navigation_allowed?(job, waypoint),
+         existing_intent <- unfinished_intent_for_ship(ship.id),
          {:ok, intent} <-
            Repo.transaction(
              fn ->
                current_job = Repo.get(Job, job.id)
 
                if current_job && current_job.ship_id == ship.id && Job.running?(current_job) do
-                 case insert_job_intent(current_job, %{
-                        type: "navigate",
-                        target_waypoint: waypoint,
-                        parameters: parameters
-                      }) do
+                 case insert_or_reuse_job_navigation_intent(
+                        current_job,
+                        waypoint,
+                        parameters,
+                        existing_intent
+                      ) do
                    {:ok, intent} -> intent
                    {:error, reason} -> Repo.rollback(reason)
                  end
@@ -2925,6 +2928,78 @@ defmodule SpaceTraders.Fleet do
       error -> error
     end
   end
+
+  def request_job_navigate(agent, job, ship_symbol, waypoint, parameters, live_ship) do
+    with {:ok, ship} <- owned_ship(agent, ship_symbol),
+         :ok <- job_navigation_allowed?(job, waypoint),
+         existing_intent <- unfinished_intent_for_ship(ship.id),
+         {:ok, intent} <-
+           Repo.transaction(
+             fn ->
+               current_job = Repo.get(Job, job.id)
+
+               if current_job && current_job.ship_id == ship.id && Job.running?(current_job) do
+                 case insert_or_reuse_job_navigation_intent(
+                        current_job,
+                        waypoint,
+                        parameters,
+                        existing_intent
+                      ) do
+                   {:ok, intent} -> intent
+                   {:error, reason} -> Repo.rollback(reason)
+                 end
+               else
+                 Repo.rollback(:invalid_intent_owner)
+               end
+             end,
+             mode: :immediate
+           ) do
+      advance_intents(agent, intent, live_ship)
+    else
+      false -> {:error, :invalid_intent_owner}
+      error -> error
+    end
+  end
+
+  defp insert_or_reuse_job_navigation_intent(job, waypoint, parameters, existing_intent) do
+    case existing_intent do
+      %Intent{caller: "job", job_id: job_id, type: "navigate"} = intent when job_id == job.id ->
+        if intent.target_waypoint == waypoint and intent.parameters == parameters,
+          do: {:ok, intent},
+          else: {:error, :intents_active}
+
+      %Intent{} ->
+        {:error, :intents_active}
+
+      nil ->
+        insert_job_intent(job, %{
+          type: "navigate",
+          target_waypoint: waypoint,
+          parameters: parameters
+        })
+    end
+  end
+
+  defp unfinished_intent_for_ship(ship_id) do
+    Repo.one(
+      from intent in Intent,
+        where: intent.ship_id == ^ship_id and intent.status in ^@unfinished_intent_states
+    )
+  end
+
+  defp job_navigation_allowed?(
+         %Job{type: "miner", extraction_waypoint: extraction, market_waypoint: market},
+         waypoint
+       )
+       when waypoint == extraction or waypoint == market,
+       do: :ok
+
+  defp job_navigation_allowed?(%Job{type: type}, _waypoint)
+       when type in ["procurement", "market_trading"],
+       do: :ok
+
+  defp job_navigation_allowed?(_job, waypoint),
+    do: {:error, {:job_navigation_not_authorized, waypoint}}
 
   @doc "Dispatches a reviewed jump route only when its fresh authority still matches the preview."
   def confirm_jump_intent(agent, ship_symbol, waypoint, preview) when is_map(preview) do
@@ -4667,7 +4742,7 @@ defmodule SpaceTraders.Fleet do
               %Job{} = job ->
                 if Job.running?(job) do
                   with {:ok, intent} <- advance_intents(agent, intent, live_ship) do
-                    advance_job_intent_after_event(agent, job, intent)
+                    advance_job_intent_after_event(agent, job, intent, live_ship)
                   end
                 else
                   :ok
@@ -4686,10 +4761,13 @@ defmodule SpaceTraders.Fleet do
     end
   end
 
-  defp advance_job_intent_after_event(agent, %Job{type: "outfitting"} = job, intent),
+  defp advance_job_intent_after_event(agent, %Job{type: "outfitting"} = job, intent, _live_ship),
     do: advance_outfitting_after_intent(agent, job, intent)
 
-  defp advance_job_intent_after_event(agent, job, intent),
+  defp advance_job_intent_after_event(agent, %Job{type: "miner"} = job, intent, live_ship),
+    do: advance_miner_after_intent(agent, job, intent, live_ship)
+
+  defp advance_job_intent_after_event(agent, job, intent, _live_ship),
     do: advance_procurement_after_intent(agent, job, intent)
 
   defp intent_matches_event?(_intent, nil), do: false
@@ -4893,13 +4971,15 @@ defmodule SpaceTraders.Fleet do
       {:ok, intent} ->
         ship = Repo.get!(Ship, intent.ship_id)
 
-        record_activity(
-          agent,
-          ship,
-          "manual_intent_completed",
-          "Navigate complete at #{intent.target_waypoint}",
-          %{"waypoint" => intent.target_waypoint}
-        )
+        if intent.caller == "manual" do
+          record_activity(
+            agent,
+            ship,
+            "manual_intent_completed",
+            "Navigate complete at #{intent.target_waypoint}",
+            %{"waypoint" => intent.target_waypoint}
+          )
+        end
 
         {:ok, intent}
 
@@ -4997,8 +5077,18 @@ defmodule SpaceTraders.Fleet do
                  in_flight_action: nil,
                  last_action_result: %{"kind" => "orbit", "status" => result.nav.status}
                ) do
-            {:ok, intent} -> advance_intents(agent, intent, %{live_ship | nav: result.nav})
-            :intent_no_longer_owned -> :ok
+            {:ok, intent} ->
+              live_ship = %{live_ship | nav: result.nav}
+
+              if intent.caller == "job" and
+                   not remote_waypoint?(live_ship.nav.waypoint_symbol, intent.target_waypoint) do
+                dispatch_manual_navigate(agent, intent, live_ship)
+              else
+                advance_intents(agent, intent, live_ship)
+              end
+
+            :intent_no_longer_owned ->
+              :ok
           end
 
         {:error, reason} ->
@@ -5183,13 +5273,15 @@ defmodule SpaceTraders.Fleet do
                 {:ok, intent} ->
                   ship = Repo.get!(Ship, intent.ship_id)
 
-                  record_activity(
-                    agent,
-                    ship,
-                    "manual_intent_navigate",
-                    "#{live_ship.symbol} navigating to #{destination}",
-                    %{"waypoint" => destination}
-                  )
+                  if intent.caller == "manual" do
+                    record_activity(
+                      agent,
+                      ship,
+                      "manual_intent_navigate",
+                      "#{live_ship.symbol} navigating to #{destination}",
+                      %{"waypoint" => destination}
+                    )
+                  end
 
                   {:ok, intent}
 
@@ -6003,6 +6095,33 @@ defmodule SpaceTraders.Fleet do
   end
 
   def revalidate_miner_job_arrival(agent_id, ship_symbol, live_ship, expected_job_id) do
+    case Repo.get_by(Ship, agent_id: agent_id, symbol: ship_symbol) do
+      %Ship{} = ship ->
+        case unfinished_intent_for_ship(ship.id) do
+          %Intent{id: intent_id} ->
+            revalidate_intents(agent_id, ship_symbol, live_ship, intent_id)
+            {:ok, Repo.get!(Job, unfinished_job(ship.id).id)}
+
+          nil ->
+            revalidate_miner_job_arrival_without_intent(
+              agent_id,
+              ship_symbol,
+              live_ship,
+              expected_job_id
+            )
+        end
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp revalidate_miner_job_arrival_without_intent(
+         agent_id,
+         ship_symbol,
+         live_ship,
+         expected_job_id
+       ) do
     with %Ship{} = ship <- Repo.get_by(Ship, agent_id: agent_id, symbol: ship_symbol),
          %Job{} = config <- unfinished_job(ship.id),
          true <- job_matches_event?(config, expected_job_id),
@@ -6627,54 +6746,43 @@ defmodule SpaceTraders.Fleet do
   end
 
   defp navigate_miner_job(agent, config, live_ship, waypoint) do
-    if live_ship.nav.status == "DOCKED" do
-      case SpaceTraders.API.orbit_ship(agent.agent_token, live_ship.symbol) do
-        {:ok, result} ->
-          navigate_miner_job(agent, config, %{live_ship | nav: result.nav}, waypoint)
-
-        {:error, reason} ->
-          mark_miner_job_blocked(config, reason)
-      end
-    else
-      do_navigate_miner_job(agent, config, live_ship, waypoint)
-    end
+    do_navigate_miner_job(agent, config, live_ship, waypoint)
   end
 
   defp do_navigate_miner_job(agent, config, live_ship, waypoint) do
-    action = %{
-      "kind" => "navigate",
-      "waypoint" => waypoint,
-      "expected" => %{"status" => "IN_TRANSIT", "destination" => waypoint}
-    }
+    config = Repo.update!(Ecto.Changeset.change(config, status: "active"))
 
-    config =
-      Repo.update!(Ecto.Changeset.change(config, status: "active", in_flight_action: action))
-
-    case Agent.handle_game_result(
+    case SpaceTraders.Fleet.Intents.request(
            agent,
-           SpaceTraders.API.navigate_ship(agent.agent_token, live_ship.symbol, waypoint)
+           %SpaceTraders.Fleet.Intents.JobOwner{job: config},
+           live_ship.symbol,
+           %SpaceTraders.Fleet.Intents.Navigate{waypoint: waypoint},
+           live_ship
          ) do
-      {:ok, result} ->
-        maybe_schedule_arrival(agent, live_ship.symbol, result, config.id)
-
-        {:ok,
-         Repo.update!(
-           Ecto.Changeset.change(config,
-             status: "waiting",
-             last_action_result: %{
-               "kind" => "navigate",
-               "waypoint" => waypoint,
-               "status" => result.nav.status,
-               "destination" => result.nav.route.destination.symbol
-             },
-             progress: Map.put(config.progress || %{}, "waypoint", waypoint)
-           )
-         )}
-
-      {:error, reason} ->
-        mark_miner_job_blocked(config, reason)
+      {:ok, intent} -> advance_miner_after_intent(agent, config, intent, live_ship)
+      :ok -> {:ok, config}
+      {:error, reason} -> mark_miner_job_blocked(config, reason)
     end
   end
+
+  defp advance_miner_after_intent(_agent, job, %Intent{status: "waiting"} = intent, _live_ship) do
+    {:ok,
+     Repo.update!(
+       Ecto.Changeset.change(job,
+         status: "waiting",
+         in_flight_action: intent.in_flight_action,
+         last_action_result: intent.last_action_result,
+         progress: Map.put(job.progress || %{}, "waypoint", intent.target_waypoint)
+       )
+     )}
+  end
+
+  defp advance_miner_after_intent(agent, job, %Intent{status: "completed"}, live_ship) do
+    advance_miner_job(agent, %{job | in_flight_action: nil}, live_ship, :timeline)
+  end
+
+  defp advance_miner_after_intent(_agent, job, %Intent{} = intent, _live_ship),
+    do: mark_miner_job_blocked(job, intent.blocker || :navigation_blocked)
 
   defp market_leg?(%Job{
          in_flight_action: %{"waypoint" => waypoint},
