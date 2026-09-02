@@ -687,16 +687,18 @@ defmodule SpaceTraders.Fleet do
     job = Repo.update!(Ecto.Changeset.change(job, progress: progress))
 
     with {:ok, intent} <-
-           insert_job_intent(job, %{
-             type: type,
-             target_waypoint: module_symbol,
-             parameters: %{
-               "module_symbol" => module_symbol,
-               "quantity" => 1,
-               "authorized_removals" => job.progress["authorized_removals"]
-             }
-           }),
-         {:ok, intent} <- advance_intents(agent, intent, live_ship) do
+           SpaceTraders.Fleet.Intents.request(
+             agent,
+             %SpaceTraders.Fleet.Intents.JobOwner{job: job},
+             live_ship.symbol,
+             if(type == "install_module",
+               do: %SpaceTraders.Fleet.Intents.InstallModule{module_symbol: module_symbol},
+               else: %SpaceTraders.Fleet.Intents.RemoveModule{
+                 module_symbol: module_symbol,
+                 authorized_removals: job.progress["authorized_removals"]
+               }
+             )
+           ) do
       advance_outfitting_after_intent(agent, job, intent)
     else
       {:error, reason} -> mark_outfitting_job_blocked(job, reason)
@@ -3423,6 +3425,39 @@ defmodule SpaceTraders.Fleet do
   def remove_module_intent(agent, ship_symbol, module_symbol, authorized_removals) do
     module_intent(agent, ship_symbol, "remove_module", module_symbol, authorized_removals)
   end
+
+  @doc "Starts a module Intent owned by a running Ship Outfitting Job."
+  def request_job_module_intent(
+        %AgentRecord{} = agent,
+        %Job{type: "outfitting", id: job_id, ship_id: ship_id} = job,
+        ship_symbol,
+        type,
+        module_symbol,
+        parameters
+      )
+      when type in ["install_module", "remove_module"] and is_map(parameters) do
+    with {:ok, ship} <- owned_ship(agent, ship_symbol),
+         true <- ship.id == ship_id,
+         true <- job.status in ["active", "waiting"],
+         {:ok, intent} <-
+           insert_job_intent(job, %{
+             type: type,
+             target_waypoint: module_symbol,
+             parameters: Map.merge(parameters, %{"caller" => "job", "job_id" => job_id})
+           }),
+         {:ok, live_ship} <-
+           Agent.handle_game_result(
+             agent,
+             SpaceTraders.API.get_ship(agent.agent_token, ship_symbol)
+           ) do
+      advance_intents(agent, intent, live_ship)
+    else
+      false -> {:error, :invalid_module_intent}
+      error -> error
+    end
+  end
+
+  def request_job_module_intent(_, _, _, _, _, _), do: {:error, :invalid_module_intent}
 
   defp module_intent(
          %AgentRecord{agent_token: token} = agent,

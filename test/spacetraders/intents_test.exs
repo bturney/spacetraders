@@ -114,6 +114,55 @@ defmodule SpaceTraders.IntentsTest do
              )
   end
 
+  test "requests a closed Install Module goal through Manual Control" do
+    agent = agent_fixture("INTENTS-INSTALL")
+    ship_fixture(agent, "INTENTS-INSTALL-SHIP")
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      case {conn.request_path, conn.method} do
+        {"/v2/my/ships/INTENTS-INSTALL-SHIP", "GET"} ->
+          Req.Test.json(conn, %{
+            "data" => %{
+              "symbol" => "INTENTS-INSTALL-SHIP",
+              "nav" => %{
+                "systemSymbol" => "X1-UX81",
+                "waypointSymbol" => "X1-UX81-A1",
+                "status" => "DOCKED",
+                "flightMode" => "CRUISE"
+              },
+              "frame" => %{"moduleSlots" => 2},
+              "modules" => [],
+              "fuel" => %{"current" => 100, "capacity" => 100},
+              "cargo" => %{
+                "capacity" => 40,
+                "units" => 1,
+                "inventory" => [%{"symbol" => "MODULE_CARGO_HOLD_I", "units" => 1}]
+              },
+              "cooldown" => %{"remainingSeconds" => 0}
+            }
+          })
+
+        {"/v2/my/ships/INTENTS-INSTALL-SHIP/modules/install", "POST"} ->
+          assert conn.body_params == %{"symbol" => "MODULE_CARGO_HOLD_I"}
+
+          Req.Test.json(conn, %{
+            "data" => %{
+              "modules" => [%{"symbol" => "MODULE_CARGO_HOLD_I", "name" => "Cargo Hold I"}],
+              "cargo" => %{"capacity" => 40, "units" => 0, "inventory" => []}
+            }
+          })
+      end
+    end)
+
+    assert {:ok, %Intent{type: "install_module", status: "completed"}} =
+             Intents.request(
+               agent,
+               %Intents.ManualControl{},
+               "INTENTS-INSTALL-SHIP",
+               %Intents.InstallModule{module_symbol: "MODULE_CARGO_HOLD_I"}
+             )
+  end
+
   test "accepts Buy Goods ownership from a Market Trading Job" do
     agent = agent_fixture("INTENTS-BUY-JOB")
     ship = ship_fixture(agent, "INTENTS-BUY-JOB-SHIP")

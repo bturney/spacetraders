@@ -18,6 +18,16 @@ defmodule SpaceTraders.Fleet.Intents do
     defstruct [:market, :trade_good, :quantity, constraints: %{}]
   end
 
+  defmodule InstallModule do
+    @moduledoc "A closed Install Module goal for a Ship."
+    defstruct [:module_symbol, parameters: %{}]
+  end
+
+  defmodule RemoveModule do
+    @moduledoc "A closed Remove Module goal for a Ship."
+    defstruct [:module_symbol, authorized_removals: %{}, parameters: %{}]
+  end
+
   defmodule ManualControl do
     @moduledoc "Manual Control ownership for an Intent."
     defstruct []
@@ -78,7 +88,55 @@ defmodule SpaceTraders.Fleet.Intents do
     end
   end
 
+  def request(agent, owner, ship_symbol, %InstallModule{} = goal) do
+    request_module(
+      agent,
+      owner,
+      ship_symbol,
+      "install_module",
+      goal.module_symbol,
+      goal.parameters
+    )
+  end
+
+  def request(agent, owner, ship_symbol, %RemoveModule{} = goal) do
+    request_module(
+      agent,
+      owner,
+      ship_symbol,
+      "remove_module",
+      goal.module_symbol,
+      Map.put(goal.parameters, :authorized_removals, goal.authorized_removals)
+    )
+  end
+
   def request(_agent, _owner, _ship_symbol, _goal), do: {:error, :unsupported_intent_goal}
+
+  defp request_module(agent, owner, ship_symbol, type, module_symbol, parameters)
+       when is_map(parameters) do
+    with :ok <- token_present(agent),
+         {:ok, owner} <- normalize_owner(owner),
+         :ok <- valid_module_symbol(module_symbol),
+         {:ok, parameters} <- valid_module_parameters(type, module_symbol, parameters) do
+      case owner do
+        :manual ->
+          Fleet.install_module_intent(agent, ship_symbol, module_symbol)
+
+        %JobOwner{job: %Job{} = job} ->
+          Fleet.request_job_module_intent(
+            agent,
+            job,
+            ship_symbol,
+            type,
+            module_symbol,
+            parameters
+          )
+      end
+    end
+  end
+
+  defp request_module(_agent, _owner, _ship_symbol, _type, _module_symbol, _parameters),
+    do: {:error, :invalid_intent_parameters}
 
   def request(agent, %JobOwner{} = owner, ship_symbol, %Navigate{} = goal, live_ship) do
     with {:ok, owner} <- normalize_owner(owner),
@@ -190,6 +248,25 @@ defmodule SpaceTraders.Fleet.Intents do
 
   defp valid_goal_parameters(parameters) when is_map(parameters), do: :ok
   defp valid_goal_parameters(_parameters), do: {:error, :invalid_intent_parameters}
+
+  defp valid_module_symbol(symbol) when is_binary(symbol) do
+    if String.trim(symbol) == "", do: {:error, :invalid_module_intent}, else: :ok
+  end
+
+  defp valid_module_symbol(_symbol), do: {:error, :invalid_module_intent}
+
+  defp valid_module_parameters("install_module", module_symbol, parameters) do
+    {:ok, Map.merge(parameters, %{"module_symbol" => module_symbol, "quantity" => 1})}
+  end
+
+  defp valid_module_parameters("remove_module", module_symbol, parameters) do
+    removals = parameters[:authorized_removals] || parameters["authorized_removals"] || %{}
+    removals = Map.new(removals, fn {key, value} -> {to_string(key), value} end)
+
+    if removals == %{module_symbol => 1},
+      do: {:ok, Map.merge(parameters, %{"module_symbol" => module_symbol, "quantity" => 1})},
+      else: {:error, :invalid_module_intent}
+  end
 
   defp valid_trade_good(trade_good) when is_binary(trade_good) do
     case String.trim(trade_good) do
