@@ -4365,41 +4365,50 @@ defmodule SpaceTraders.Fleet do
     installed_before = module_count(live_ship.modules, module_symbol)
     cargo_before = item_units(live_ship.cargo, module_symbol)
 
-    intent =
-      Repo.update!(
-        Ecto.Changeset.change(intent,
-          in_flight_action: %{
-            "kind" => intent.type,
-            "module_symbol" => module_symbol,
-            "quantity" => 1,
-            "installed_before" => installed_before,
-            "cargo_before" => cargo_before
-          }
-        )
-      )
+    action = %{
+      "kind" => intent.type,
+      "module_symbol" => module_symbol,
+      "quantity" => 1,
+      "installed_before" => installed_before,
+      "cargo_before" => cargo_before
+    }
 
-    result =
-      case intent.type do
-        "install_module" ->
-          SpaceTraders.API.install_ship_module(agent.agent_token, live_ship.symbol, module_symbol)
+    case claim_intent_action(intent, action) do
+      {:ok, intent} ->
+        result =
+          case intent.type do
+            "install_module" ->
+              SpaceTraders.API.install_ship_module(
+                agent.agent_token,
+                live_ship.symbol,
+                module_symbol
+              )
 
-        "remove_module" ->
-          SpaceTraders.API.remove_ship_module(agent.agent_token, live_ship.symbol, module_symbol)
-      end
+            "remove_module" ->
+              SpaceTraders.API.remove_ship_module(
+                agent.agent_token,
+                live_ship.symbol,
+                module_symbol
+              )
+          end
 
-    case Agent.handle_game_result(agent, result) do
-      {:ok, result} ->
-        if module_modification_evidence?(intent, result.modules, result.cargo) do
-          complete_module_intent(intent, result)
-        else
-          block_module_intent_preserving_evidence(intent, :module_modification_unconfirmed)
+        case Agent.handle_game_result(agent, result) do
+          {:ok, result} ->
+            if module_modification_evidence?(intent, result.modules, result.cargo) do
+              complete_module_intent(intent, result)
+            else
+              block_module_intent_preserving_evidence(intent, :module_modification_unconfirmed)
+            end
+
+          {:error, %SpaceTraders.API.Error{} = reason} ->
+            await_module_reconciliation(intent, reason)
+
+          {:error, reason} ->
+            block_module_intent(intent, reason)
         end
 
-      {:error, %SpaceTraders.API.Error{} = reason} ->
-        await_module_reconciliation(intent, reason)
-
-      {:error, reason} ->
-        block_module_intent(intent, reason)
+      {:error, :intent_dispatch_no_longer_allowed} ->
+        :ok
     end
   end
 
