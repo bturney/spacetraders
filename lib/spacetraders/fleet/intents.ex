@@ -13,7 +13,7 @@ defmodule SpaceTraders.Fleet.Intents do
   require Logger
 
   alias SpaceTraders.Agent.Agent, as: AgentRecord
-  alias SpaceTraders.API.Model.{Contract, ShipNav, ShipNavRoute}
+  alias SpaceTraders.API.Model.{Contract, ShipNav}
   alias SpaceTraders.Fleet.{Intent, Job, Ship}
   alias SpaceTraders.Fleet
   alias SpaceTraders.Fleet.ShipServer
@@ -519,6 +519,23 @@ defmodule SpaceTraders.Fleet.Intents do
     end
   end
 
+  @doc false
+  def unfinished_intent(intent_id) do
+    case Repo.get(Intent, intent_id) do
+      %Intent{} = intent ->
+        if Intent.unfinished?(intent), do: intent, else: nil
+
+      nil ->
+        nil
+    end
+  end
+
+  @doc false
+  def clear_ship_intents!(ship_id) do
+    Repo.delete_all(from intent in Intent, where: intent.ship_id == ^ship_id)
+    :ok
+  end
+
   @doc "Lists unfinished Intents for all Ships owned by the Agent."
   def current(%AgentRecord{id: agent_id}) do
     Repo.all(
@@ -698,7 +715,9 @@ defmodule SpaceTraders.Fleet.Intents do
     end
   end
 
-  defp request_job_navigate(agent, job, ship_symbol, waypoint, parameters) do
+  # A Job Policy may pass its fresh authoritative Ship observation; without one,
+  # the request performs its own authoritative read before advancing.
+  defp request_job_navigate(agent, job, ship_symbol, waypoint, parameters, live_ship \\ nil) do
     with {:ok, ship} <- Fleet.owned_ship(agent, ship_symbol),
          :ok <- job_navigation_allowed?(job, waypoint),
          existing_intent <- unfinished_intent_for_ship(ship.id),
@@ -723,11 +742,7 @@ defmodule SpaceTraders.Fleet.Intents do
              end,
              mode: :immediate
            ),
-         {:ok, live_ship} <-
-           Agent.handle_game_result(
-             agent,
-             SpaceTraders.API.get_ship(agent.agent_token, ship.symbol)
-           ) do
+         {:ok, live_ship} <- fresh_job_ship(agent, ship_symbol, live_ship) do
       advance_intents(agent, intent, live_ship)
     else
       false -> {:error, :invalid_intent_owner}
@@ -735,36 +750,14 @@ defmodule SpaceTraders.Fleet.Intents do
     end
   end
 
-  defp request_job_navigate(agent, job, ship_symbol, waypoint, parameters, live_ship) do
-    with {:ok, ship} <- Fleet.owned_ship(agent, ship_symbol),
-         :ok <- job_navigation_allowed?(job, waypoint),
-         existing_intent <- unfinished_intent_for_ship(ship.id),
-         {:ok, intent} <-
-           Repo.transaction(
-             fn ->
-               current_job = Repo.get(Job, job.id)
+  defp fresh_job_ship(_agent, _ship_symbol, %SpaceTraders.API.Model.Ship{} = live_ship),
+    do: {:ok, live_ship}
 
-               if current_job && current_job.ship_id == ship.id && Job.running?(current_job) do
-                 case insert_or_reuse_job_navigation_intent(
-                        current_job,
-                        waypoint,
-                        parameters,
-                        existing_intent
-                      ) do
-                   {:ok, intent} -> intent
-                   {:error, reason} -> Repo.rollback(reason)
-                 end
-               else
-                 Repo.rollback(:invalid_intent_owner)
-               end
-             end,
-             mode: :immediate
-           ) do
-      advance_intents(agent, intent, live_ship)
-    else
-      false -> {:error, :invalid_intent_owner}
-      error -> error
-    end
+  defp fresh_job_ship(agent, ship_symbol, _live_ship) do
+    Agent.handle_game_result(
+      agent,
+      SpaceTraders.API.get_ship(agent.agent_token, ship_symbol)
+    )
   end
 
   defp insert_or_reuse_job_navigation_intent(job, waypoint, parameters, existing_intent) do
@@ -3162,7 +3155,11 @@ defmodule SpaceTraders.Fleet.Intents do
   end
 
   defp wait_for_manual_cooldown(agent, intent, live_ship) do
-    due_at = parse_expiration(live_ship.cooldown.expiration, live_ship.cooldown.remaining_seconds)
+    due_at =
+      Timeline.parse_expiration(
+        live_ship.cooldown.expiration,
+        live_ship.cooldown.remaining_seconds
+      )
 
     case with_current_intent(intent, fn current ->
            {:ok, event} =
@@ -3582,9 +3579,9 @@ defmodule SpaceTraders.Fleet.Intents do
          ship_symbol,
          %{nav: %ShipNav{status: "IN_TRANSIT"} = nav}
        ) do
-    case parse_arrival(nav.route) do
+    case Timeline.parse_arrival(nav.route) do
       {:ok, due_at} ->
-        payload = arrival_payload(nav) |> Map.put("intent_id", intent.id)
+        payload = Timeline.arrival_payload(nav) |> Map.put("intent_id", intent.id)
 
         with_current_intent(intent, fn _current ->
           {:ok, event} = Timeline.schedule_event(:ship, ship_symbol, :arrival, due_at, payload)
@@ -3763,45 +3760,12 @@ defmodule SpaceTraders.Fleet.Intents do
          cooldown: %{remaining_seconds: seconds, expiration: expiration}
        })
        when is_integer(seconds) and seconds > 0 do
-    due_at = parse_expiration(expiration, seconds)
-    schedule_cooldown_event(agent, ship_symbol, due_at)
-  end
-
-  defp schedule_cooldown(_agent, _ship_symbol, _result), do: :ok
-
-  defp parse_expiration(expiration, seconds) when is_binary(expiration) do
-    case DateTime.from_iso8601(expiration) do
-      {:ok, due_at, _offset} -> due_at
-      _ -> DateTime.add(DateTime.utc_now(), seconds, :second)
-    end
-  end
-
-  defp parse_expiration(_expiration, seconds),
-    do: DateTime.add(DateTime.utc_now(), seconds, :second)
-
-  defp schedule_cooldown_event(agent, ship_symbol, due_at, payload \\ %{}) do
-    {:ok, event} = Timeline.schedule_event(:ship, ship_symbol, :cooldown, due_at, payload)
+    due_at = Timeline.parse_expiration(expiration, seconds)
+    {:ok, event} = Timeline.schedule_event(:ship, ship_symbol, :cooldown, due_at)
     ShipServer.arm(agent, ship_symbol, event)
   end
 
-  defp parse_arrival(%ShipNavRoute{arrival: arrival}) when is_binary(arrival) do
-    case DateTime.from_iso8601(arrival) do
-      {:ok, due_at, _offset} ->
-        {:ok, due_at}
-
-      _ ->
-        Logger.warning("ship arrival #{arrival} is not a parseable timestamp")
-        :error
-    end
-  end
-
-  defp parse_arrival(_route), do: :error
-
-  defp arrival_payload(%ShipNav{route: %{destination: %{symbol: destination}}})
-       when is_binary(destination),
-       do: %{destination: destination}
-
-  defp arrival_payload(_nav), do: %{}
+  defp schedule_cooldown(_agent, _ship_symbol, _result), do: :ok
 
   defp persist_destination_history(agent, ship_symbol, waypoint_symbol) do
     try do

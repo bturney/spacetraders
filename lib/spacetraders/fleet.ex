@@ -18,7 +18,7 @@ defmodule SpaceTraders.Fleet do
   require Logger
 
   alias SpaceTraders.Agent.Agent, as: AgentRecord
-  alias SpaceTraders.API.Model.{Market, ShipCargo, ShipNav, ShipNavRoute}
+  alias SpaceTraders.API.Model.{Market, ShipCargo, ShipNav}
 
   alias SpaceTraders.Fleet.{
     Activity,
@@ -1325,8 +1325,7 @@ defmodule SpaceTraders.Fleet do
          :ok <- procurement_system_matches?(job.progress, live_ship),
          %Job{} = current_job <- Repo.get(Job, job.id),
          true <- Job.running?(current_job) or current_job.status == "paused",
-         %Intent{} = current_intent <- Repo.get(Intent, intent.id),
-         true <- Intent.unfinished?(current_intent),
+         %Intent{} = current_intent <- Intents.unfinished_intent(intent.id),
          {:ok, current_intent} <- Intents.advance(agent, current_intent, live_ship) do
       advance_procurement_after_intent(agent, current_job, current_intent)
     else
@@ -2455,8 +2454,7 @@ defmodule SpaceTraders.Fleet do
          :ok <- procurement_system_matches?(job.progress, live_ship),
          %Job{} = current_job <- Repo.get(Job, job.id),
          true <- Job.running?(current_job) or current_job.status == "paused",
-         %Intent{} = current_intent <- Repo.get(Intent, intent.id),
-         true <- Intent.unfinished?(current_intent),
+         %Intent{} = current_intent <- Intents.unfinished_intent(intent.id),
          {:ok, current_intent} <- Intents.advance(agent, current_intent, live_ship) do
       advance_construction_supply_after_intent(agent, current_job, current_intent)
     else
@@ -3817,9 +3815,8 @@ defmodule SpaceTraders.Fleet do
            },
            live_ship
          ) do
-      {:ok, %Intent{status: "completed", last_action_result: result} = intent} ->
-        Repo.delete!(intent)
-        Repo.delete_all(from i in Intent, where: i.ship_id == ^config.ship_id)
+      {:ok, %Intent{status: "completed", last_action_result: result}} ->
+        Intents.clear_ship_intents!(config.ship_id)
 
         fresh_ship =
           case result["cargo"] do
@@ -3903,7 +3900,7 @@ defmodule SpaceTraders.Fleet do
   end
 
   defp perform_market_cargo_action(agent, config, live_ship, item, kind) do
-    Repo.delete_all(from i in Intent, where: i.ship_id == ^config.ship_id)
+    Intents.clear_ship_intents!(config.ship_id)
 
     action = %{
       "kind" => kind,
@@ -4195,8 +4192,18 @@ defmodule SpaceTraders.Fleet do
   end
 
   defp maybe_schedule_live_cooldown(agent, %{symbol: ship_symbol, cooldown: cooldown}, job_id) do
-    due_at = parse_expiration(cooldown.expiration, cooldown.remaining_seconds)
+    due_at = Timeline.parse_expiration(cooldown.expiration, cooldown.remaining_seconds)
     schedule_cooldown_event(agent, ship_symbol, due_at, %{"job_id" => job_id})
+  end
+
+  defp maybe_put_job_id(payload, nil), do: payload
+  defp maybe_put_job_id(payload, job_id), do: Map.put(payload, "job_id", job_id)
+
+  # Arms a persisted cooldown on the Ship's timer; Job policies only ever arm
+  # through Timeline persistence plus ShipServer.
+  defp schedule_cooldown_event(agent, ship_symbol, due_at, payload \\ %{}) do
+    {:ok, event} = Timeline.schedule_event(:ship, ship_symbol, :cooldown, due_at, payload)
+    ShipServer.arm(agent, ship_symbol, event)
   end
 
   @doc false
@@ -4855,8 +4862,7 @@ defmodule SpaceTraders.Fleet do
          %Job{} = current_job <- Repo.get(Job, job.id),
          true <- Job.running?(current_job),
          :ok <- outfitting_system_matches?(current_job.progress, live_ship),
-         %Intent{} = current_intent <- Repo.get(Intent, intent.id),
-         true <- Intent.unfinished?(current_intent),
+         %Intent{} = current_intent <- Intents.unfinished_intent(intent.id),
          {:ok, current_intent} <- Intents.advance(agent, current_intent, live_ship) do
       advance_outfitting_after_intent(agent, current_job, current_intent)
     else
@@ -4884,8 +4890,7 @@ defmodule SpaceTraders.Fleet do
         with %Job{} = current_job <- Repo.get(Job, job.id),
              true <- Job.running?(current_job),
              :ok <- procurement_system_matches?(current_job.progress, live_ship),
-             %Intent{} = current_intent <- Repo.get(Intent, intent.id),
-             true <- Intent.unfinished?(current_intent),
+             %Intent{} = current_intent <- Intents.unfinished_intent(intent.id),
              {:ok, current_intent} <- Intents.advance(agent, current_intent, live_ship) do
           if current_job.type == "construction_supply",
             do: advance_construction_supply_after_intent(agent, current_job, current_intent),
@@ -4903,10 +4908,10 @@ defmodule SpaceTraders.Fleet do
   defp block_procurement_recovery_if_current(intent, job, reason) do
     case Repo.transaction(
            fn ->
-             current_intent = Repo.get!(Intent, intent.id)
+             current_intent = Intents.unfinished_intent(intent.id)
              current_job = Repo.get!(Job, job.id)
 
-             if Intent.unfinished?(current_intent) and Job.running?(current_job) and
+             if match?(%Intent{}, current_intent) and Job.running?(current_job) and
                   current_intent.in_flight_action == intent.in_flight_action do
                block_procurement_cargo_intent(current_intent, reason)
                mark_procurement_job_blocked(current_job, reason)
@@ -5326,8 +5331,8 @@ defmodule SpaceTraders.Fleet do
          %{nav: %ShipNav{status: "IN_TRANSIT"} = nav},
          job_id
        ) do
-    with {:ok, due_at} <- parse_arrival(nav.route) do
-      payload = arrival_payload(nav) |> maybe_put_job_id(job_id)
+    with {:ok, due_at} <- Timeline.parse_arrival(nav.route) do
+      payload = Timeline.arrival_payload(nav) |> maybe_put_job_id(job_id)
 
       {:ok, event} =
         Timeline.schedule_event(:ship, ship_symbol, :arrival, due_at, payload)
@@ -5342,7 +5347,7 @@ defmodule SpaceTraders.Fleet do
          cooldown: %{remaining_seconds: seconds, expiration: expiration}
        })
        when is_integer(seconds) and seconds > 0 do
-    due_at = parse_expiration(expiration, seconds)
+    due_at = Timeline.parse_expiration(expiration, seconds)
     schedule_cooldown_event(agent, ship_symbol, due_at)
   end
 
@@ -5352,50 +5357,13 @@ defmodule SpaceTraders.Fleet do
     case result do
       %{cooldown: %{remaining_seconds: seconds, expiration: expiration}}
       when is_integer(seconds) and seconds > 0 ->
-        due_at = parse_expiration(expiration, seconds)
+        due_at = Timeline.parse_expiration(expiration, seconds)
         schedule_cooldown_event(agent, ship_symbol, due_at, %{"job_id" => job_id})
 
       _ ->
         :ok
     end
   end
-
-  defp parse_expiration(expiration, seconds) when is_binary(expiration) do
-    case DateTime.from_iso8601(expiration) do
-      {:ok, due_at, _offset} -> due_at
-      _ -> DateTime.add(DateTime.utc_now(), seconds, :second)
-    end
-  end
-
-  defp parse_expiration(_expiration, seconds),
-    do: DateTime.add(DateTime.utc_now(), seconds, :second)
-
-  defp schedule_cooldown_event(agent, ship_symbol, due_at, payload \\ %{}) do
-    {:ok, event} = Timeline.schedule_event(:ship, ship_symbol, :cooldown, due_at, payload)
-    ShipServer.arm(agent, ship_symbol, event)
-  end
-
-  defp maybe_put_job_id(payload, nil), do: payload
-  defp maybe_put_job_id(payload, job_id), do: Map.put(payload, "job_id", job_id)
-
-  defp parse_arrival(%ShipNavRoute{arrival: arrival}) when is_binary(arrival) do
-    case DateTime.from_iso8601(arrival) do
-      {:ok, due_at, _offset} ->
-        {:ok, due_at}
-
-      _ ->
-        Logger.warning("ship arrival #{arrival} is not a parseable timestamp")
-        :error
-    end
-  end
-
-  defp parse_arrival(_route), do: :error
-
-  defp arrival_payload(%ShipNav{route: %{destination: %{symbol: destination}}})
-       when is_binary(destination),
-       do: %{destination: destination}
-
-  defp arrival_payload(_nav), do: %{}
 
   defp snapshot_listings(agent, {:ok, ships}, waypoints),
     do: Listing.for_ships(agent, ships, waypoints)
