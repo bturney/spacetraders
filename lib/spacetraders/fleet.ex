@@ -3738,9 +3738,6 @@ defmodule SpaceTraders.Fleet do
     do_advance_intents(agent, intent, live_ship)
   end
 
-  @doc false
-  def reconcile_intent(agent, intent, live_ship), do: advance_intents(agent, intent, live_ship)
-
   defp do_advance_intents(
          agent,
          %Intent{recovery_attempts: attempts} = intent,
