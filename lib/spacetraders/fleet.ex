@@ -1355,7 +1355,32 @@ defmodule SpaceTraders.Fleet do
     end
   end
 
-  def resume_procurement_job(agent, ship_symbol), do: start_procurement_job(agent, ship_symbol)
+  def resume_procurement_job(agent, ship_symbol) do
+    case start_procurement_job(agent, ship_symbol) do
+      {:error, :cargo_operation_reconciliation_required} ->
+        reconcile_procurement_job(agent, ship_symbol)
+
+      result ->
+        result
+    end
+  end
+
+  @doc "Reconciles unresolved Cargo evidence for the owning Procurement Job."
+  def reconcile_procurement_job(%AgentRecord{} = agent, ship_symbol) do
+    with {:ok, ship} <- owned_ship(agent, ship_symbol),
+         %Job{type: "procurement"} = job <- unfinished_job(ship.id),
+         %Intent{in_flight_action: action} = intent <- unfinished_job_intent(job.id),
+         true <- is_map(action) do
+      job =
+        Repo.update!(
+          Ecto.Changeset.change(job, status: "active", blocker: nil, blocked_reason: nil)
+        )
+
+      reconcile_procurement_intent(agent, ship, job, intent)
+    else
+      _ -> {:error, :cargo_operation_reconciliation_required}
+    end
+  end
 
   def pause_procurement_job(%AgentRecord{} = agent, ship_symbol),
     do: pause_job_type(agent, ship_symbol, "procurement", "Procurement Job")
@@ -1592,9 +1617,11 @@ defmodule SpaceTraders.Fleet do
         agent,
         owner,
         live_ship.symbol,
-        %Intents.DeliverConstructionGoods{
-          system: get_in(parameters, ["recipient", "system"]),
-          waypoint: waypoint,
+        %Intents.DeliverGoods{
+          recipient: %Intents.ConstructionRecipient{
+            system: get_in(parameters, ["recipient", "system"]),
+            waypoint: waypoint
+          },
           trade_good: parameters["trade_symbol"],
           quantity: parameters["units"]
         },
@@ -1606,8 +1633,10 @@ defmodule SpaceTraders.Fleet do
         owner,
         live_ship.symbol,
         %Intents.DeliverGoods{
-          contract_id: parameters["contract_id"],
-          destination: waypoint,
+          recipient: %Intents.ContractRecipient{
+            contract_id: parameters["contract_id"],
+            waypoint: waypoint
+          },
           trade_good: parameters["trade_symbol"],
           quantity: parameters["units"]
         }
@@ -2087,8 +2116,32 @@ defmodule SpaceTraders.Fleet do
     end
   end
 
-  def resume_construction_supply_job(agent, ship_symbol),
-    do: start_construction_supply_job(agent, ship_symbol)
+  def resume_construction_supply_job(agent, ship_symbol) do
+    case start_construction_supply_job(agent, ship_symbol) do
+      {:error, :cargo_operation_reconciliation_required} ->
+        reconcile_construction_supply_job(agent, ship_symbol)
+
+      result ->
+        result
+    end
+  end
+
+  @doc "Reconciles unresolved Cargo evidence for the owning Construction Supply Job."
+  def reconcile_construction_supply_job(%AgentRecord{} = agent, ship_symbol) do
+    with {:ok, ship} <- owned_ship(agent, ship_symbol),
+         %Job{type: "construction_supply"} = job <- unfinished_job(ship.id),
+         %Intent{in_flight_action: action} = intent <- unfinished_job_intent(job.id),
+         true <- is_map(action) do
+      job =
+        Repo.update!(
+          Ecto.Changeset.change(job, status: "active", blocker: nil, blocked_reason: nil)
+        )
+
+      reconcile_construction_supply_intent(agent, ship, job, intent)
+    else
+      _ -> {:error, :cargo_operation_reconciliation_required}
+    end
+  end
 
   def pause_construction_supply_job(%AgentRecord{} = agent, ship_symbol),
     do: pause_job_type(agent, ship_symbol, "construction_supply", "Construction Supply Job")
@@ -2250,9 +2303,11 @@ defmodule SpaceTraders.Fleet do
       agent,
       %Intents.JobOwner{job: job},
       live_ship.symbol,
-      %Intents.DeliverConstructionGoods{
-        system: get_in(parameters, ["recipient", "system"]),
-        waypoint: waypoint,
+      %Intents.DeliverGoods{
+        recipient: %Intents.ConstructionRecipient{
+          system: get_in(parameters, ["recipient", "system"]),
+          waypoint: waypoint
+        },
         trade_good: parameters["trade_symbol"],
         quantity: parameters["units"]
       },
@@ -3509,7 +3564,49 @@ defmodule SpaceTraders.Fleet do
     end
   end
 
-  @doc "Starts a durable Deliver Goods Intent for a Contract recipient."
+  @doc "Starts a durable Deliver Goods Intent for a typed recipient."
+  def deliver_goods_intent(
+        agent,
+        ship_symbol,
+        recipient,
+        waypoint,
+        trade_symbol,
+        units,
+        opts \\ []
+      )
+
+  def deliver_goods_intent(
+        agent,
+        ship_symbol,
+        %{type: "construction", system: system} = recipient,
+        waypoint,
+        trade_symbol,
+        units,
+        opts
+      ) do
+    deliver_construction_goods_intent(
+      agent,
+      ship_symbol,
+      system,
+      waypoint,
+      trade_symbol,
+      units,
+      Keyword.put(opts, :recipient, recipient)
+    )
+  end
+
+  def deliver_goods_intent(
+        agent,
+        ship_symbol,
+        %{type: "contract", contract_id: contract_id},
+        waypoint,
+        trade_symbol,
+        units,
+        opts
+      ) do
+    deliver_goods_intent(agent, ship_symbol, waypoint, contract_id, trade_symbol, units, opts)
+  end
+
   def deliver_goods_intent(
         agent,
         ship_symbol,
@@ -3517,7 +3614,7 @@ defmodule SpaceTraders.Fleet do
         contract_id,
         trade_symbol,
         units,
-        opts \\ []
+        opts
       ) do
     opts =
       Keyword.merge(opts,
@@ -5152,14 +5249,47 @@ defmodule SpaceTraders.Fleet do
   defp reconcile_deliver_cargo_intent(agent, intent, live_ship, action) do
     with fulfilled_before when is_integer(fulfilled_before) <- action["fulfilled_before"],
          {:ok, recipient} <- delivery_recipient_for_intent(agent, intent),
-         accepted when accepted > 0 <-
-           recipient_fulfilled_units(elem(recipient, 1), action["trade_symbol"]) -
-             fulfilled_before,
-         true <- delivery_evidence?(action, live_ship.cargo, accepted) do
-      complete_cargo_intent(agent, intent, accepted, nil, %{})
+         result <-
+           reconcile_delivery_evidence(recipient, action, live_ship.cargo, fulfilled_before) do
+      case result do
+        {:accepted, units} ->
+          complete_cargo_intent(agent, intent, units, nil, %{})
+
+        :external_completion ->
+          complete_cargo_intent(agent, intent, 0, nil, %{
+            construction: elem(recipient, 1),
+            external_completion: true
+          })
+
+        :ambiguous ->
+          block_cargo_intent(intent, {:ambiguous_operation_evidence, "deliver"})
+      end
     else
       _ -> block_cargo_intent(intent, {:ambiguous_operation_evidence, "deliver"})
     end
+  end
+
+  defp reconcile_delivery_evidence({:construction, construction}, action, cargo, fulfilled_before) do
+    fulfilled_delta =
+      construction_fulfilled_units(construction, action["trade_symbol"]) - fulfilled_before
+
+    cargo_delta = action["cargo_before"] - item_units(cargo, action["trade_symbol"])
+
+    cond do
+      construction.is_complete and cargo_delta == 0 ->
+        :external_completion
+
+      cargo_delta > 0 and cargo_delta <= action["units"] and fulfilled_delta >= cargo_delta ->
+        {:accepted, cargo_delta}
+
+      true ->
+        :ambiguous
+    end
+  end
+
+  defp reconcile_delivery_evidence({_type, recipient}, action, cargo, fulfilled_before) do
+    accepted = recipient_fulfilled_units(recipient, action["trade_symbol"]) - fulfilled_before
+    if delivery_evidence?(action, cargo, accepted), do: {:accepted, accepted}, else: :ambiguous
   end
 
   defp delivery_evidence?(action, cargo, accepted) do
@@ -7030,8 +7160,10 @@ defmodule SpaceTraders.Fleet do
            %Intents.JobOwner{job: config},
            live_ship.symbol,
            %Intents.DeliverGoods{
-             contract_id: contract_id,
-             destination: waypoint,
+             recipient: %Intents.ContractRecipient{
+               contract_id: contract_id,
+               waypoint: waypoint
+             },
              trade_good: trade_symbol,
              quantity: units
            },

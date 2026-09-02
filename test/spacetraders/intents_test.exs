@@ -262,15 +262,17 @@ defmodule SpaceTraders.IntentsTest do
                %Intents.ManualControl{},
                "INTENTS-DELIVER-SHIP",
                %Intents.DeliverGoods{
-                 contract_id: "INTENTS-CONTRACT",
-                 destination: "X1-UX81-A1",
+                 recipient: %Intents.ContractRecipient{
+                   contract_id: "INTENTS-CONTRACT",
+                   waypoint: "X1-UX81-A1"
+                 },
                  trade_good: "IRON_ORE",
                  quantity: 5
                }
              )
   end
 
-  test "requests a Construction Deliver Goods goal through Manual Control" do
+  test "requests a Construction recipient through Deliver Goods" do
     agent = agent_fixture("INTENTS-CONSTRUCTION")
     ship_fixture(agent, "INTENTS-CONSTRUCTION-SHIP")
 
@@ -332,9 +334,11 @@ defmodule SpaceTraders.IntentsTest do
                agent,
                %Intents.ManualControl{},
                "INTENTS-CONSTRUCTION-SHIP",
-               %Intents.DeliverConstructionGoods{
-                 system: "X1-UX81",
-                 waypoint: "X1-UX81-A1",
+               %Intents.DeliverGoods{
+                 recipient: %Intents.ConstructionRecipient{
+                   system: "X1-UX81",
+                   waypoint: "X1-UX81-A1"
+                 },
                  trade_good: "IRON_ORE",
                  quantity: 5
                }

@@ -807,8 +807,10 @@ defmodule SpaceTradersWeb.DashboardLive do
              %Intents.ManualControl{},
              ship_symbol,
              %Intents.DeliverGoods{
-               contract_id: contract_id,
-               destination: destination_waypoint,
+               recipient: %Intents.ContractRecipient{
+                 contract_id: contract_id,
+                 waypoint: destination_waypoint
+               },
                trade_good: trade_symbol,
                quantity: units
              }
@@ -859,9 +861,11 @@ defmodule SpaceTradersWeb.DashboardLive do
              agent,
              %Intents.ManualControl{},
              ship_symbol,
-             %Intents.DeliverConstructionGoods{
-               system: system_symbol,
-               waypoint: destination_waypoint,
+             %Intents.DeliverGoods{
+               recipient: %Intents.ConstructionRecipient{
+                 system: system_symbol,
+                 waypoint: destination_waypoint
+               },
                trade_good: trade_symbol,
                quantity: units
              }
