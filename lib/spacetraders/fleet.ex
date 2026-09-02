@@ -4555,17 +4555,33 @@ defmodule SpaceTraders.Fleet do
            units
          ) do
       {:ok, %{construction: updated} = result} ->
-        accepted =
-          delivered_construction_units(construction, updated, intent.parameters["trade_symbol"])
+        accepted = construction_response_accepted_units(intent, result, construction, updated)
 
-        if accepted > 0 do
+        if is_integer(accepted) and accepted > 0 do
           complete_cargo_intent(agent, intent, accepted, nil, result)
         else
-          block_cargo_intent(intent, :recipient_rejected_delivery)
+          block_cargo_intent(intent, {:ambiguous_operation_evidence, "deliver"})
         end
 
       {:error, reason} ->
         block_cargo_intent(intent, reason)
+    end
+  end
+
+  defp construction_response_accepted_units(intent, result, before, updated) do
+    trade_symbol = intent.parameters["trade_symbol"]
+    claimed = get_in(intent.in_flight_action, ["units"])
+    cargo_before = get_in(intent.in_flight_action, ["cargo_before"])
+
+    with true <- is_integer(claimed) and claimed > 0,
+         true <- is_integer(cargo_before),
+         cargo when not is_nil(cargo) <- result.cargo,
+         cargo_delta = cargo_before - item_units(cargo, trade_symbol),
+         fulfilled_delta = delivered_construction_units(before, updated, trade_symbol),
+         true <- cargo_delta > 0 and cargo_delta <= claimed and fulfilled_delta >= cargo_delta do
+      cargo_delta
+    else
+      _ -> nil
     end
   end
 
@@ -5029,7 +5045,13 @@ defmodule SpaceTraders.Fleet do
     |> maybe_put_transaction(response)
     |> maybe_put_delivery(response, type)
     |> maybe_put_cargo(response, type)
+    |> maybe_put_external_completion(response)
   end
+
+  defp maybe_put_external_completion(result, %{external_completion: true}),
+    do: Map.put(result, "external_completion", true)
+
+  defp maybe_put_external_completion(result, _response), do: result
 
   defp maybe_put_cargo(result, %{cargo: cargo}, "deliver"),
     do: Map.put(result, "cargo", cargo_evidence(cargo))
@@ -5270,20 +5292,26 @@ defmodule SpaceTraders.Fleet do
   end
 
   defp reconcile_delivery_evidence({:construction, construction}, action, cargo, fulfilled_before) do
-    fulfilled_delta =
-      construction_fulfilled_units(construction, action["trade_symbol"]) - fulfilled_before
+    with trade_symbol when is_binary(trade_symbol) <- action["trade_symbol"],
+         cargo_before when is_integer(cargo_before) <- action["cargo_before"],
+         units when is_integer(units) and units > 0 <- action["units"] do
+      fulfilled_delta =
+        construction_fulfilled_units(construction, trade_symbol) - fulfilled_before
 
-    cargo_delta = action["cargo_before"] - item_units(cargo, action["trade_symbol"])
+      cargo_delta = cargo_before - item_units(cargo, trade_symbol)
 
-    cond do
-      construction.is_complete and cargo_delta == 0 ->
-        :external_completion
+      cond do
+        construction.is_complete and cargo_delta == 0 ->
+          :external_completion
 
-      cargo_delta > 0 and cargo_delta <= action["units"] and fulfilled_delta >= cargo_delta ->
-        {:accepted, cargo_delta}
+        cargo_delta > 0 and cargo_delta <= units and fulfilled_delta >= cargo_delta ->
+          {:accepted, cargo_delta}
 
-      true ->
-        :ambiguous
+        true ->
+          :ambiguous
+      end
+    else
+      _ -> :ambiguous
     end
   end
 
