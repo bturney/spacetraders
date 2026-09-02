@@ -4354,6 +4354,13 @@ defmodule SpaceTraders.Fleet do
   end
 
   defp dispatch_module_intent(agent, intent, live_ship) do
+    case module_mutation_allowed?(intent, live_ship) do
+      :ok -> dispatch_module_request(agent, intent, live_ship)
+      {:error, reason} -> block_module_intent(intent, reason)
+    end
+  end
+
+  defp dispatch_module_request(agent, intent, live_ship) do
     module_symbol = intent.parameters["module_symbol"]
     installed_before = module_count(live_ship.modules, module_symbol)
     cargo_before = item_units(live_ship.cargo, module_symbol)
@@ -4393,6 +4400,41 @@ defmodule SpaceTraders.Fleet do
 
       {:error, reason} ->
         block_module_intent(intent, reason)
+    end
+  end
+
+  defp module_mutation_allowed?(%Intent{type: type} = intent, live_ship) do
+    module_symbol = intent.parameters["module_symbol"]
+    installed = module_count(live_ship.modules, module_symbol)
+    cargo_units = item_units(live_ship.cargo, module_symbol)
+    cargo_capacity = live_ship.cargo && live_ship.cargo.capacity
+    module_slots = live_ship.frame && live_ship.frame.module_slots
+
+    cond do
+      not docked?(live_ship) ->
+        {:error, :module_operation_requires_docked_ship}
+
+      not is_list(live_ship.modules) or not is_map(live_ship.cargo) or
+          not is_integer(module_slots) ->
+        {:error, :module_readiness_unavailable}
+
+      type == "install_module" and cargo_units < 1 ->
+        {:error, :module_missing_from_cargo}
+
+      type == "install_module" and installed >= module_slots ->
+        {:error, :module_capacity_full}
+
+      type == "remove_module" and installed < 1 ->
+        {:error, :module_not_installed}
+
+      type == "remove_module" and not is_integer(cargo_capacity) ->
+        {:error, :cargo_capacity_unavailable}
+
+      type == "remove_module" and live_ship.cargo.units >= cargo_capacity ->
+        {:error, :cargo_full}
+
+      true ->
+        :ok
     end
   end
 

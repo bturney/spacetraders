@@ -119,8 +119,12 @@ defmodule SpaceTraders.Fleet.Intents do
          :ok <- valid_module_symbol(module_symbol),
          {:ok, parameters} <- valid_module_parameters(type, module_symbol, parameters) do
       case owner do
-        :manual ->
+        :manual when type == "install_module" ->
           Fleet.install_module_intent(agent, ship_symbol, module_symbol)
+
+        :manual ->
+          removals = parameters[:authorized_removals] || parameters["authorized_removals"] || %{}
+          Fleet.remove_module_intent(agent, ship_symbol, module_symbol, removals)
 
         %JobOwner{job: %Job{} = job} ->
           Fleet.request_job_module_intent(
