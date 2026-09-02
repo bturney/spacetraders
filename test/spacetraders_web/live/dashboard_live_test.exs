@@ -401,7 +401,14 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
               Req.Test.json(conn, %{
                 "data" => %{
                   "agent" => %{},
-                  "cargo" => %{"capacity" => 40, "units" => 10, "inventory" => []},
+                  "cargo" => %{
+                    "capacity" => 40,
+                    "units" => 10,
+                    "inventory" => [
+                      %{"symbol" => "IRON_ORE", "units" => 7},
+                      %{"symbol" => "COPPER_ORE", "units" => 3}
+                    ]
+                  },
                   "transaction" => %{
                     "shipSymbol" => "ORBITALIST-1",
                     "tradeSymbol" => "IRON_ORE",
