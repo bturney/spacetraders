@@ -685,6 +685,151 @@ defmodule SpaceTraders.IntentsTest do
     assert Repo.all(Intent) == []
   end
 
+  test "refreshes the Ship when a Job Sell Goods request has no live observation" do
+    agent = agent_fixture("INTENTS-JOB-SELL-REFRESH")
+    ship = ship_fixture(agent, "INTENTS-JOB-SELL-REFRESH-SHIP")
+
+    job =
+      Repo.insert!(%Job{
+        ship_id: ship.id,
+        type: "market_trading",
+        status: "active",
+        extraction_waypoint: "X1-UX81-A1",
+        market_waypoint: "X1-UX81-A1",
+        cargo_threshold: 10
+      })
+
+    test_pid = self()
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      case conn.request_path do
+        "/v2/my/ships/INTENTS-JOB-SELL-REFRESH-SHIP" ->
+          assert conn.method == "GET"
+          send(test_pid, :job_sell_ship_refreshed)
+
+          Req.Test.json(conn, %{
+            "data" => %{
+              "symbol" => ship.symbol,
+              "nav" => %{
+                "systemSymbol" => "X1-UX81",
+                "waypointSymbol" => "X1-UX81-A1",
+                "status" => "DOCKED",
+                "flightMode" => "CRUISE"
+              },
+              "fuel" => %{"current" => 100, "capacity" => 100},
+              "cargo" => %{"capacity" => 40, "units" => 0, "inventory" => []},
+              "cooldown" => %{"remainingSeconds" => 0}
+            }
+          })
+
+        _ ->
+          conn
+          |> Plug.Conn.put_status(400)
+          |> Req.Test.json(%{"error" => %{"message" => "market unavailable"}})
+      end
+    end)
+
+    assert {:ok, %Intent{caller: "job", status: "blocked"}} =
+             Intents.request(
+               agent,
+               %Intents.JobOwner{job: job},
+               ship.symbol,
+               %Intents.SellGoods{
+                 market: "X1-UX81-A1",
+                 trade_good: "IRON_ORE",
+                 quantity: 1,
+                 constraints: %{min_price: 1}
+               }
+             )
+
+    assert_received :job_sell_ship_refreshed
+  end
+
+  test "rejects a Sell Goods request when the persisted Job is no longer running" do
+    agent = agent_fixture("INTENTS-STALE-JOB-SELL")
+    ship = ship_fixture(agent, "INTENTS-STALE-JOB-SELL-SHIP")
+
+    job =
+      Repo.insert!(%Job{
+        ship_id: ship.id,
+        type: "market_trading",
+        status: "active",
+        extraction_waypoint: "X1-UX81-A1",
+        market_waypoint: "X1-UX81-A1",
+        cargo_threshold: 10
+      })
+
+    Repo.update!(Ecto.Changeset.change(job, status: "paused"))
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      Req.Test.json(conn, %{
+        "data" => %{
+          "symbol" => ship.symbol,
+          "nav" => %{
+            "systemSymbol" => "X1-UX81",
+            "waypointSymbol" => "X1-UX81-A1",
+            "status" => "DOCKED",
+            "flightMode" => "CRUISE"
+          },
+          "fuel" => %{"current" => 100, "capacity" => 100},
+          "cargo" => %{"capacity" => 40, "units" => 0, "inventory" => []},
+          "cooldown" => %{"remainingSeconds" => 0}
+        }
+      })
+    end)
+
+    assert {:error, :invalid_intent_owner} =
+             Intents.request(
+               agent,
+               %Intents.JobOwner{job: job},
+               ship.symbol,
+               %Intents.SellGoods{
+                 market: "X1-UX81-A1",
+                 trade_good: "IRON_ORE",
+                 quantity: 1,
+                 constraints: %{min_price: 1}
+               }
+             )
+
+    assert Repo.all(Intent) == []
+  end
+
+  test "does not persist a Sell Goods Intent when Ship refresh fails" do
+    agent = agent_fixture("INTENTS-JOB-SELL-FAILED-REFRESH")
+    ship = ship_fixture(agent, "INTENTS-JOB-SELL-FAILED-REFRESH-SHIP")
+
+    job =
+      Repo.insert!(%Job{
+        ship_id: ship.id,
+        type: "market_trading",
+        status: "active",
+        extraction_waypoint: "X1-UX81-A1",
+        market_waypoint: "X1-UX81-A1",
+        cargo_threshold: 10
+      })
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      conn
+      |> Plug.Conn.put_status(503)
+      |> Req.Test.json(%{"error" => %{"message" => "unavailable"}})
+    end)
+
+    assert {:error, _reason} =
+             Intents.request(
+               agent,
+               %Intents.JobOwner{job: job},
+               ship.symbol,
+               %Intents.SellGoods{
+                 market: "X1-UX81-A1",
+                 trade_good: "IRON_ORE",
+                 quantity: 1,
+                 constraints: %{min_price: 1}
+               }
+             )
+
+    assert Repo.all(Intent) == []
+  end
+
   test "current and historical reads are scoped to the Agent" do
     first_agent = agent_fixture("INTENTS-ONE")
     second_agent = agent_fixture("INTENTS-TWO")

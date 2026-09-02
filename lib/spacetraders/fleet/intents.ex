@@ -1129,14 +1129,28 @@ defmodule SpaceTraders.Fleet.Intents do
 
     with {:ok, ship} <- Fleet.owned_ship(agent, ship_symbol),
          true <- ship.id == ship_id,
+         {:ok, live_ship} <- fresh_job_ship(agent, ship_symbol, live_ship),
          true <- live_ship.symbol == ship_symbol,
-         true <- job.status in ["active", "waiting"],
          {:ok, intent} <-
-           insert_job_intent(job, %{
-             type: "sell",
-             target_waypoint: waypoint,
-             parameters: intent_parameters
-           }) do
+           Repo.transaction(
+             fn ->
+               current_job = Repo.get(Job, job.id)
+
+               if current_job && current_job.ship_id == ship.id && Job.running?(current_job) do
+                 case insert_job_intent(current_job, %{
+                        type: "sell",
+                        target_waypoint: waypoint,
+                        parameters: intent_parameters
+                      }) do
+                   {:ok, intent} -> intent
+                   {:error, reason} -> Repo.rollback(reason)
+                 end
+               else
+                 Repo.rollback(:invalid_intent_owner)
+               end
+             end,
+             mode: :immediate
+           ) do
       advance_intents(agent, intent, live_ship)
     else
       false -> {:error, :invalid_cargo_intent_owner}
