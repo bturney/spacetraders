@@ -114,6 +114,76 @@ defmodule SpaceTraders.IntentsTest do
              )
   end
 
+  test "requests a closed Sell Goods goal through Manual Control" do
+    agent = agent_fixture("INTENTS-SELL")
+    ship_fixture(agent, "INTENTS-SELL-SHIP")
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      case {conn.request_path, conn.method} do
+        {"/v2/my/ships/INTENTS-SELL-SHIP", "GET"} ->
+          Req.Test.json(conn, %{
+            "data" => %{
+              "symbol" => "INTENTS-SELL-SHIP",
+              "nav" => %{
+                "systemSymbol" => "X1-UX81",
+                "waypointSymbol" => "X1-UX81-A1",
+                "status" => "DOCKED",
+                "flightMode" => "CRUISE"
+              },
+              "fuel" => %{"current" => 100, "capacity" => 100},
+              "cargo" => %{
+                "capacity" => 40,
+                "units" => 5,
+                "inventory" => [%{"symbol" => "IRON_ORE", "units" => 5}]
+              },
+              "cooldown" => %{"remainingSeconds" => 0}
+            }
+          })
+
+        {"/v2/systems/X1-UX81/waypoints/X1-UX81-A1/market", "GET"} ->
+          Req.Test.json(conn, %{
+            "data" => %{
+              "symbol" => "X1-UX81-A1",
+              "tradeGoods" => [
+                %{"symbol" => "IRON_ORE", "sellPrice" => 25, "tradeVolume" => 5}
+              ]
+            }
+          })
+
+        {"/v2/my/ships/INTENTS-SELL-SHIP/sell", "POST"} ->
+          Req.Test.json(conn, %{
+            "data" => %{
+              "agent" => %{"symbol" => agent.symbol, "credits" => 125},
+              "cargo" => %{"capacity" => 40, "units" => 0, "inventory" => []},
+              "transaction" => %{
+                "shipSymbol" => "INTENTS-SELL-SHIP",
+                "tradeSymbol" => "IRON_ORE",
+                "type" => "SELL",
+                "units" => 5,
+                "pricePerUnit" => 25,
+                "totalPrice" => 125,
+                "waypointSymbol" => "X1-UX81-A1",
+                "timestamp" => "2026-01-01T00:00:00.000Z"
+              }
+            }
+          })
+      end
+    end)
+
+    assert {:ok, %Intent{type: "sell", status: "completed"}} =
+             Intents.request(
+               agent,
+               %Intents.ManualControl{},
+               "INTENTS-SELL-SHIP",
+               %Intents.SellGoods{
+                 market: "X1-UX81-A1",
+                 trade_good: "IRON_ORE",
+                 quantity: 5,
+                 constraints: %{min_price: 20, min_total: 100}
+               }
+             )
+  end
+
   test "requests a closed Install Module goal through Manual Control" do
     agent = agent_fixture("INTENTS-INSTALL")
     ship_fixture(agent, "INTENTS-INSTALL-SHIP")

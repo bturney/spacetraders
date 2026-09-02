@@ -18,6 +18,11 @@ defmodule SpaceTraders.Fleet.Intents do
     defstruct [:market, :trade_good, :quantity, constraints: %{}]
   end
 
+  defmodule SellGoods do
+    @moduledoc "A closed Sell Goods goal for a Ship."
+    defstruct [:market, :trade_good, :quantity, constraints: %{}, parameters: %{}]
+  end
+
   defmodule InstallModule do
     @moduledoc "A closed Install Module goal for a Ship."
     defstruct [:module_symbol, parameters: %{}]
@@ -70,6 +75,47 @@ defmodule SpaceTraders.Fleet.Intents do
     end
   end
 
+  def request(agent, owner, ship_symbol, %SellGoods{} = goal) do
+    with :ok <- token_present(agent),
+         {:ok, owner} <- normalize_owner(owner),
+         :ok <- valid_goal_parameters(goal.constraints),
+         :ok <- valid_goal_parameters(goal.parameters),
+         {:ok, market} <- valid_goal_waypoint(goal.market),
+         {:ok, trade_good} <- valid_trade_good(goal.trade_good),
+         :ok <- valid_quantity(goal.quantity),
+         :ok <- valid_sell_constraints(goal.constraints) do
+      opts =
+        goal.constraints
+        |> Map.to_list()
+        |> Keyword.new()
+        |> Keyword.merge(Map.to_list(goal.parameters))
+
+      opts =
+        case owner do
+          :manual -> opts
+          %JobOwner{job: %Job{id: job_id}} -> Keyword.merge(opts, caller: "job", job_id: job_id)
+        end
+
+      case owner do
+        :manual ->
+          Fleet.sell_goods_intent(agent, ship_symbol, market, trade_good, goal.quantity, opts)
+
+        %JobOwner{job: job} ->
+          Fleet.request_job_sell_goods_intent(
+            agent,
+            job,
+            ship_symbol,
+            market,
+            trade_good,
+            goal.quantity,
+            goal.constraints,
+            goal.parameters,
+            nil
+          )
+      end
+    end
+  end
+
   def request(agent, owner, ship_symbol, %Navigate{} = goal) do
     with :ok <- token_present(agent),
          {:ok, owner} <- normalize_owner(owner),
@@ -116,6 +162,35 @@ defmodule SpaceTraders.Fleet.Intents do
   end
 
   def request(_agent, _owner, _ship_symbol, _goal), do: {:error, :unsupported_intent_goal}
+
+  def request_sell_with_live_ship(
+        agent,
+        %JobOwner{job: %Job{} = job} = owner,
+        ship_symbol,
+        %SellGoods{} = goal,
+        live_ship
+      ) do
+    with :ok <- token_present(agent),
+         {:ok, _owner} <- normalize_owner(owner),
+         :ok <- valid_goal_parameters(goal.constraints),
+         :ok <- valid_goal_parameters(goal.parameters),
+         {:ok, market} <- valid_goal_waypoint(goal.market),
+         {:ok, trade_good} <- valid_trade_good(goal.trade_good),
+         :ok <- valid_quantity(goal.quantity),
+         :ok <- valid_sell_constraints(goal.constraints) do
+      Fleet.request_job_sell_goods_intent(
+        agent,
+        job,
+        ship_symbol,
+        market,
+        trade_good,
+        goal.quantity,
+        goal.constraints,
+        goal.parameters,
+        live_ship
+      )
+    end
+  end
 
   defp request_module(agent, owner, ship_symbol, type, module_symbol, parameters)
        when is_map(parameters) do
@@ -297,6 +372,14 @@ defmodule SpaceTraders.Fleet.Intents do
        end),
        do: :ok,
        else: {:error, :invalid_buy_constraints}
+  end
+
+  defp valid_sell_constraints(constraints) do
+    if Enum.all?(constraints, fn {key, value} ->
+         key in [:min_price, :min_total] and is_integer(value) and value >= 0
+       end),
+       do: :ok,
+       else: {:error, :invalid_sell_constraints}
   end
 
   defp owner_matches?(:manual, %Intent{caller: "manual"}), do: :ok

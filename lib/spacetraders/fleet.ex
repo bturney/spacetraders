@@ -31,6 +31,7 @@ defmodule SpaceTraders.Fleet do
   }
 
   alias SpaceTraders.Fleet.ShipServer
+  alias SpaceTraders.Fleet.Intents
   alias SpaceTraders.Repo
   alias SpaceTraders.{Agent, Contracts, Intelligence, Listing, Shipyard}
   alias SpaceTraders.Timeline
@@ -1564,8 +1565,7 @@ defmodule SpaceTraders.Fleet do
     progress = job.progress
 
     with {:ok, attrs} <- procurement_intent_attrs(agent, live_ship, progress, recipient, credits),
-         {:ok, intent} <- insert_job_intent(job, attrs),
-         {:ok, intent} <- advance_intents(agent, intent, live_ship) do
+         {:ok, intent} <- procurement_intent_request(agent, job, live_ship, attrs) do
       advance_procurement_after_intent(agent, job, intent)
     else
       :ok ->
@@ -1576,6 +1576,39 @@ defmodule SpaceTraders.Fleet do
 
       {:error, reason} ->
         mark_procurement_job_blocked(job, reason)
+    end
+  end
+
+  defp procurement_intent_request(
+         agent,
+         job,
+         live_ship,
+         %{type: "sell", parameters: parameters} = attrs
+       ) do
+    constraints =
+      parameters
+      |> Map.take(["min_price", "min_total"])
+      |> Map.reject(fn {_key, value} -> is_nil(value) end)
+      |> Map.new(fn {key, value} -> {String.to_existing_atom(key), value} end)
+
+    Intents.request_sell_with_live_ship(
+      agent,
+      %Intents.JobOwner{job: job},
+      live_ship.symbol,
+      %Intents.SellGoods{
+        market: attrs.target_waypoint,
+        trade_good: parameters["trade_symbol"],
+        quantity: parameters["units"],
+        constraints: constraints,
+        parameters: %{}
+      },
+      live_ship
+    )
+  end
+
+  defp procurement_intent_request(agent, job, live_ship, attrs) do
+    with {:ok, intent} <- insert_job_intent(job, attrs) do
+      advance_intents(agent, intent, live_ship)
     end
   end
 
@@ -1655,7 +1688,8 @@ defmodule SpaceTraders.Fleet do
        when type != "market_trading" do
     job = apply_procurement_intent_result(job, intent)
 
-    if intent.type == "deliver" and job.progress["accepted"] >= job.progress["requested"] do
+    if (intent.type == "deliver" and job.progress["accepted"] >= job.progress["requested"]) or
+         (intent.type == "sell" and job.progress["sold"] >= job.progress["requested"]) do
       {:ok, terminalize_job!(job, "completed")}
     else
       with %Job{} = current_job <- Repo.get(Job, job.id),
@@ -1685,24 +1719,19 @@ defmodule SpaceTraders.Fleet do
        ) do
     candidate = intent.parameters["market_trade"]
 
-    sell_attrs = %{
-      type: "sell",
-      target_waypoint: candidate["destination_waypoint"],
-      parameters: %{
-        "trade_symbol" => candidate["trade_symbol"],
-        "units" => candidate["units"],
-        "min_price" => candidate["sell_price"],
-        "market_trade" => candidate
-      }
-    }
-
-    with {:ok, sell} <- insert_job_intent(job, sell_attrs),
-         {:ok, live_ship} <-
-           Agent.handle_game_result(
+    with {:ok, sell} <-
+           SpaceTraders.Fleet.Intents.request(
              agent,
-             SpaceTraders.API.get_ship(agent.agent_token, Repo.get!(Ship, job.ship_id).symbol)
-           ),
-         {:ok, sell} <- advance_intents(agent, sell, live_ship) do
+             %SpaceTraders.Fleet.Intents.JobOwner{job: job},
+             Repo.get!(Ship, job.ship_id).symbol,
+             %SpaceTraders.Fleet.Intents.SellGoods{
+               market: candidate["destination_waypoint"],
+               trade_good: candidate["trade_symbol"],
+               quantity: candidate["units"],
+               constraints: %{min_price: candidate["sell_price"]},
+               parameters: %{market_trade: candidate}
+             }
+           ) do
       advance_procurement_after_intent(agent, job, sell)
     end
   end
@@ -1778,11 +1807,11 @@ defmodule SpaceTraders.Fleet do
             |> Map.update("spent", total_price, &(&1 + total_price))
 
           %Intent{type: "sell", last_action_result: result} ->
-            Map.update!(
-              job.progress,
-              "sold",
-              &(&1 + (get_in(result, ["transaction", "units"]) || 0))
-            )
+            units = get_in(result, ["transaction", "units"]) || result["units"] || 0
+
+            job.progress
+            |> Map.update("sold", units, &(&1 + units))
+            |> Map.update("accepted", units, &(&1 + units))
 
           %Intent{type: "deliver", last_action_result: result} ->
             if is_integer(result["units"]),
@@ -3382,6 +3411,43 @@ defmodule SpaceTraders.Fleet do
     cargo_intent(agent, ship_symbol, "sell", waypoint, trade_symbol, units, opts)
   end
 
+  def request_job_sell_goods_intent(
+        agent,
+        %Job{id: job_id, ship_id: ship_id} = job,
+        ship_symbol,
+        waypoint,
+        trade_symbol,
+        units,
+        constraints,
+        parameters,
+        live_ship
+      ) do
+    intent_parameters =
+      constraints
+      |> Map.merge(parameters)
+      |> Map.put(:caller, "job")
+      |> Map.put(:job_id, job_id)
+      |> Map.put(:trade_symbol, trade_symbol)
+      |> Map.put(:units, units)
+      |> Map.new(fn {key, value} -> {to_string(key), value} end)
+
+    with {:ok, ship} <- owned_ship(agent, ship_symbol),
+         true <- ship.id == ship_id,
+         true <- live_ship.symbol == ship_symbol,
+         true <- job.status in ["active", "waiting"],
+         {:ok, intent} <-
+           insert_job_intent(job, %{
+             type: "sell",
+             target_waypoint: waypoint,
+             parameters: intent_parameters
+           }) do
+      advance_intents(agent, intent, live_ship)
+    else
+      false -> {:error, :invalid_cargo_intent_owner}
+      error -> error
+    end
+  end
+
   @doc "Starts a durable Deliver Goods Intent for a Contract recipient."
   def deliver_goods_intent(agent, ship_symbol, waypoint, contract_id, trade_symbol, units) do
     cargo_intent(agent, ship_symbol, "deliver", waypoint, trade_symbol, units,
@@ -3631,7 +3697,13 @@ defmodule SpaceTraders.Fleet do
     case Repo.get(Job, job_id) do
       %Job{ship_id: ship_id, type: type, status: "active"}
       when ship_id == ship.id and
-             type in ["procurement", "construction_supply", "outfitting", "market_trading"] ->
+             type in [
+               "miner",
+               "procurement",
+               "construction_supply",
+               "outfitting",
+               "market_trading"
+             ] ->
         :ok
 
       _ ->
@@ -3970,9 +4042,7 @@ defmodule SpaceTraders.Fleet do
   end
 
   defp dispatch_market_cargo_intent(agent, intent, live_ship) do
-    with {:ok, market} <- market_for_ship(agent, live_ship, intent.target_waypoint),
-         good when not is_nil(good) <-
-           Enum.find(market.trade_goods || [], &(&1.symbol == intent.parameters["trade_symbol"])),
+    with {:ok, good} <- market_good_for_intent(agent, live_ship, intent),
          {:ok, units, _credits} <- executable_cargo_units(intent, live_ship, good, agent) do
       action = %{
         "kind" => intent.type,
@@ -3987,7 +4057,7 @@ defmodule SpaceTraders.Fleet do
         {:error, _reason} -> :ok
       end
     else
-      nil ->
+      {:error, :listing_missing_trade_good} ->
         block_cargo_intent(
           intent,
           {:listing_missing_trade_good, intent.parameters["trade_symbol"]}
@@ -3995,6 +4065,28 @@ defmodule SpaceTraders.Fleet do
 
       {:error, reason} ->
         block_cargo_intent(intent, reason)
+    end
+  end
+
+  defp market_good_for_intent(_agent, _live_ship, %Intent{
+         parameters: %{"market_listing_prevalidated" => true} = parameters
+       }) do
+    {:ok,
+     %{
+       symbol: parameters["trade_symbol"],
+       sell_price: parameters["sell_price"] || 0,
+       trade_volume: parameters["units"]
+     }}
+  end
+
+  defp market_good_for_intent(agent, live_ship, intent) do
+    with {:ok, market} <- market_for_ship(agent, live_ship, intent.target_waypoint),
+         good when not is_nil(good) <-
+           Enum.find(market.trade_goods || [], &(&1.symbol == intent.parameters["trade_symbol"])) do
+      {:ok, good}
+    else
+      nil -> {:error, :listing_missing_trade_good}
+      {:error, reason} -> {:error, reason}
     end
   end
 
@@ -4279,13 +4371,45 @@ defmodule SpaceTraders.Fleet do
        )
        when is_map(transaction) do
     case validate_market_transaction(intent, transaction, units) do
-      :ok -> complete_cargo_intent(agent, intent, units, price, result)
-      {:error, reason} -> block_cargo_intent(intent, reason)
+      :ok ->
+        if intent.type == "sell" and not sale_cargo_evidence?(result.cargo) do
+          block_cargo_intent(intent, :unexpected_sale_cargo)
+        else
+          complete_cargo_intent(agent, intent, units, price, result)
+        end
+
+      {:error, reason} ->
+        block_cargo_intent(intent, reason)
     end
+  end
+
+  defp complete_market_cargo_intent(
+         _agent,
+         %Intent{parameters: %{"market_listing_prevalidated" => true}} = intent,
+         units,
+         price,
+         %{cargo: cargo} = result
+       )
+       when is_map(cargo) do
+    complete_cargo_intent_without_transaction(intent, units, price, result)
   end
 
   defp complete_market_cargo_intent(_agent, intent, _units, _price, _result),
     do: block_cargo_intent(intent, :missing_market_transaction)
+
+  defp complete_cargo_intent_without_transaction(intent, units, price, _result) do
+    result = %{"kind" => "sell", "units" => units, "price" => price}
+
+    transition_intent(intent,
+      status: "completed",
+      in_flight_action: nil,
+      last_action_result: result,
+      blocker: nil,
+      finished_at: DateTime.utc_now() |> DateTime.truncate(:second)
+    )
+  end
+
+  defp sale_cargo_evidence?(cargo), do: is_map(cargo)
 
   defp validate_market_transaction(intent, transaction, units) do
     expected_type = if intent.type == "buy", do: "PURCHASE", else: "SELL"
@@ -6783,7 +6907,27 @@ defmodule SpaceTraders.Fleet do
 
     request =
       if kind == "sell" do
-        sell_cargo_for_miner_job(agent, live_ship.symbol, item.symbol, item.units)
+        case SpaceTraders.Fleet.Intents.request_sell_with_live_ship(
+               agent,
+               %SpaceTraders.Fleet.Intents.JobOwner{job: config},
+               live_ship.symbol,
+               %SpaceTraders.Fleet.Intents.SellGoods{
+                 market: config.market_waypoint,
+                 trade_good: item.symbol,
+                 quantity: item.units,
+                 parameters: %{market_listing_prevalidated: true}
+               },
+               live_ship
+             ) do
+          {:ok, %Intent{status: "completed"}} ->
+            {:ok, %{live_ship | cargo: remove_cargo_item(live_ship.cargo, item.symbol)}}
+
+          {:ok, %Intent{} = intent} ->
+            {:error, intent.blocker || :market_sale_blocked}
+
+          {:error, reason} ->
+            {:error, reason}
+        end
       else
         jettison_cargo_for_miner_job(agent, live_ship.symbol, item.symbol, item.units)
       end
@@ -6805,21 +6949,6 @@ defmodule SpaceTraders.Fleet do
     end
   end
 
-  defp sell_cargo_for_miner_job(
-         %AgentRecord{agent_token: token} = agent,
-         ship_symbol,
-         trade_symbol,
-         units
-       ) do
-    invalidate_market_after(
-      Agent.handle_game_result(
-        agent,
-        SpaceTraders.API.sell_cargo(token, ship_symbol, trade_symbol, units)
-      ),
-      agent
-    )
-  end
-
   defp jettison_cargo_for_miner_job(
          %AgentRecord{agent_token: token},
          ship_symbol,
@@ -6827,6 +6956,14 @@ defmodule SpaceTraders.Fleet do
          units
        ) do
     SpaceTraders.API.jettison_cargo(token, ship_symbol, trade_symbol, units)
+  end
+
+  defp remove_cargo_item(cargo, symbol) do
+    %{
+      cargo
+      | units: max(cargo.units - item_units(cargo, symbol), 0),
+        inventory: Enum.reject(cargo.inventory || [], &(&1.symbol == symbol))
+    }
   end
 
   defp refuel_for_market_departure(agent, config, live_ship, market) do
