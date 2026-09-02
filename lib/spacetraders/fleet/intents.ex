@@ -1764,9 +1764,35 @@ defmodule SpaceTraders.Fleet.Intents do
   end
 
   defp unresolved_navigation_action?(intent) do
-    (is_map(intent.in_flight_action) and intent.in_flight_action["kind"] == "navigate") or
+    (is_map(intent.in_flight_action) and
+       intent.in_flight_action["kind"] in ["navigate", "orbit", "dock"]) or
       (is_map(intent.last_action_result) and intent.last_action_result["wait"] == "arrival")
   end
+
+  defp prerequisite_action_reconciled?(
+         %{"kind" => "orbit", "waypoint" => waypoint},
+         live_ship
+       ),
+       do: live_ship.nav.status == "IN_ORBIT" and live_ship.nav.waypoint_symbol == waypoint
+
+  defp prerequisite_action_reconciled?(%{"kind" => "dock", "waypoint" => waypoint}, live_ship),
+    do: live_ship.nav.status == "DOCKED" and live_ship.nav.waypoint_symbol == waypoint
+
+  defp prerequisite_action_reconciled?(
+         %{"kind" => "navigate", "waypoint" => waypoint},
+         live_ship
+       ),
+       do: arrived_at_target?(live_ship, waypoint) or in_transit_to?(live_ship, waypoint)
+
+  defp prerequisite_action_reconciled?(_action, _live_ship), do: false
+
+  defp in_transit_to?(
+         %{nav: %{status: "IN_TRANSIT", route: %{destination: %{symbol: destination}}}},
+         destination
+       ),
+       do: true
+
+  defp in_transit_to?(_live_ship, _destination), do: false
 
   defp unresolved_warp_action?(intent) do
     is_map(intent.in_flight_action) and intent.in_flight_action["kind"] == "warp"
@@ -1858,6 +1884,26 @@ defmodule SpaceTraders.Fleet.Intents do
     end
   end
 
+  defp do_advance_intents(
+         agent,
+         %Intent{type: "navigate", in_flight_action: action} = intent,
+         live_ship
+       )
+       when is_map(action) do
+    if action["kind"] in ["navigate", "orbit", "dock"] do
+      if prerequisite_action_reconciled?(action, live_ship) do
+        case transition_intent(intent, in_flight_action: nil) do
+          {:ok, intent} -> advance_intents(agent, intent, live_ship)
+          :intent_no_longer_owned -> :ok
+        end
+      else
+        block_intents(intent, {:ambiguous_operation_evidence, action["kind"]})
+      end
+    else
+      block_intents(intent, {:ambiguous_operation_evidence, action["kind"]})
+    end
+  end
+
   defp do_advance_intents(agent, %Intent{type: "navigate"} = intent, live_ship) do
     cond do
       arrived_at_target?(live_ship, intent.target_waypoint) ->
@@ -1900,11 +1946,14 @@ defmodule SpaceTraders.Fleet.Intents do
   defp do_advance_intents(agent, %Intent{type: type} = intent, live_ship)
        when type in ["buy", "sell", "deliver"] do
     case intent.in_flight_action do
-      %{"kind" => kind} when kind in ["navigate", "orbit", "dock"] ->
-        # Prerequisites are proved by the authoritative Ship state and may safely resume.
-        case transition_intent(intent, in_flight_action: nil) do
-          {:ok, intent} -> advance_intents(agent, intent, live_ship)
-          :intent_no_longer_owned -> :ok
+      %{"kind" => kind} = action when kind in ["navigate", "orbit", "dock"] ->
+        if prerequisite_action_reconciled?(action, live_ship) do
+          case transition_intent(intent, in_flight_action: nil) do
+            {:ok, intent} -> advance_intents(agent, intent, live_ship)
+            :intent_no_longer_owned -> :ok
+          end
+        else
+          block_cargo_intent(intent, {:ambiguous_operation_evidence, kind})
         end
 
       action when is_map(action) and type == "deliver" ->
@@ -2033,7 +2082,8 @@ defmodule SpaceTraders.Fleet.Intents do
         "kind" => intent.type,
         "trade_symbol" => intent.parameters["trade_symbol"],
         "units" => units,
-        "listing_price" => cargo_price(intent.type, good)
+        "listing_price" => cargo_price(intent.type, good),
+        "cargo_before" => Fleet.item_units(live_ship.cargo, intent.parameters["trade_symbol"])
       }
 
       with {:ok, intent} <- claim_intent_action(intent, action) do
@@ -2372,9 +2422,10 @@ defmodule SpaceTraders.Fleet.Intents do
        when is_map(transaction) do
     case validate_market_transaction(intent, transaction, units) do
       :ok ->
-        if units == intent.parameters["units"],
-          do: complete_cargo_intent(agent, intent, units, price, result),
-          else: block_cargo_intent(intent, :buy_quantity_unfulfilled)
+        if units == intent.parameters["units"] and
+             market_cargo_evidence?(intent, result.cargo, units),
+           do: complete_cargo_intent(agent, intent, units, price, result),
+           else: block_cargo_intent(intent, :ambiguous_operation_evidence)
 
       {:error, reason} ->
         block_cargo_intent(intent, reason)
@@ -2391,10 +2442,10 @@ defmodule SpaceTraders.Fleet.Intents do
        when is_map(transaction) do
     case validate_market_transaction(intent, transaction, units) do
       :ok ->
-        if intent.type == "sell" and not sale_cargo_evidence?(result.cargo) do
-          block_cargo_intent(intent, :unexpected_sale_cargo)
-        else
+        if market_cargo_evidence?(intent, result.cargo, units) do
           complete_cargo_intent(agent, intent, units, price, result)
+        else
+          block_cargo_intent(intent, :ambiguous_operation_evidence)
         end
 
       {:error, reason} ->
@@ -2410,14 +2461,16 @@ defmodule SpaceTraders.Fleet.Intents do
          %{cargo: cargo} = result
        )
        when is_map(cargo) do
-    complete_cargo_intent_without_transaction(intent, units, price, result)
+    if market_cargo_evidence?(intent, cargo, units),
+      do: complete_cargo_intent_without_transaction(intent, units, price, result),
+      else: block_cargo_intent(intent, :ambiguous_operation_evidence)
   end
 
   defp complete_market_cargo_intent(_agent, intent, _units, _price, _result),
     do: block_cargo_intent(intent, :missing_market_transaction)
 
   defp complete_cargo_intent_without_transaction(intent, units, price, _result) do
-    result = %{"kind" => "sell", "units" => units, "price" => price}
+    result = %{"kind" => intent.type, "units" => units, "price" => price}
 
     transition_intent(intent,
       status: "completed",
@@ -2428,7 +2481,20 @@ defmodule SpaceTraders.Fleet.Intents do
     )
   end
 
-  defp sale_cargo_evidence?(cargo), do: is_map(cargo)
+  defp market_cargo_evidence?(%Intent{type: type, in_flight_action: action}, cargo, units)
+       when type in ["buy", "sell"] and is_map(action) and is_map(cargo) do
+    with cargo_before when is_integer(cargo_before) <- action["cargo_before"],
+         trade_symbol when is_binary(trade_symbol) <- Map.get(action, "trade_symbol"),
+         cargo_now when is_integer(cargo_now) <- Fleet.item_units(cargo, trade_symbol),
+         true <- units > 0 do
+      expected_delta = if type == "buy", do: units, else: -units
+      cargo_now - cargo_before == expected_delta
+    else
+      _ -> false
+    end
+  end
+
+  defp market_cargo_evidence?(_intent, _cargo, _units), do: false
 
   defp validate_market_transaction(intent, transaction, units) do
     expected_type = if intent.type == "buy", do: "PURCHASE", else: "SELL"
@@ -2546,8 +2612,11 @@ defmodule SpaceTraders.Fleet.Intents do
           {:error, %SpaceTraders.API.Error{} = reason} ->
             await_module_reconciliation(intent, reason)
 
-          {:error, reason} ->
+          {:error, %SpaceTraders.API.GameplayError{} = reason} ->
             block_module_intent(intent, reason)
+
+          {:error, reason} ->
+            await_module_reconciliation(intent, reason)
         end
 
       {:error, :intent_dispatch_no_longer_allowed} ->
@@ -2807,7 +2876,10 @@ defmodule SpaceTraders.Fleet.Intents do
            status: "blocked",
            blocker: %{Fleet.job_blocker(reason) | evidence: inspect(evidence)},
            in_flight_action:
-             if(ambiguous_cargo_operation_error?(reason), do: intent.in_flight_action, else: nil),
+             if(preserve_claim?(reason) and is_map(intent.in_flight_action),
+               do: intent.in_flight_action,
+               else: nil
+             ),
            last_action_result: %{"kind" => intent.type, "error" => cargo_error_message(reason)}
          ) do
       {:ok, intent} -> {:ok, intent}
@@ -3604,7 +3676,7 @@ defmodule SpaceTraders.Fleet.Intents do
            status: "blocked",
            blocker: Fleet.job_blocker(intents_block_reason(reason)),
            in_flight_action:
-             if(unresolved_jump_action?(intent) or unresolved_warp_action?(intent),
+             if(preserve_claim?(reason) and is_map(intent.in_flight_action),
                do: intent.in_flight_action,
                else: nil
              )
@@ -3640,6 +3712,10 @@ defmodule SpaceTraders.Fleet.Intents do
        do: type
 
   defp intents_block_reason(reason), do: reason
+
+  defp preserve_claim?(%SpaceTraders.API.GameplayError{}), do: false
+  defp preserve_claim?(:stale_agent), do: false
+  defp preserve_claim?(_reason), do: true
 
   defp arrived_at_target?(%{nav: %{status: status, waypoint_symbol: waypoint}}, target)
        when status in ["DOCKED", "IN_ORBIT"],

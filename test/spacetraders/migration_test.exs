@@ -137,8 +137,8 @@ defmodule SpaceTraders.Repo.Migrations.PersistenceRenameTest do
 
     states = ["active", "waiting", "blocked", "completed", "stopped"]
 
-    Enum.each(states, fn status ->
-      Enum.each(["manual", "job"], fn caller ->
+    original_rows =
+      for status <- states, caller <- ["manual", "job"] do
         ship =
           Repo.insert!(%Ship{
             symbol: "MATRIX-SHIP-#{System.unique_integer([:positive])}",
@@ -156,21 +156,43 @@ defmodule SpaceTraders.Repo.Migrations.PersistenceRenameTest do
             |> List.first()
           end
 
-        Repo.query!(
-          "INSERT INTO manual_intents (ship_id, type, target_waypoint, parameters, status, blocker, in_flight_action, last_action_result, recovery_attempts, finished_at, caller, job_id, inserted_at, updated_at) VALUES (?, 'navigate', 'X1-UX81-A1', ?, ?, ?, ?, ?, 2, datetime('now'), ?, ?, datetime('now'), datetime('now'))",
-          [
-            ship.id,
-            Jason.encode!(%{"marker" => "#{caller}-#{status}"}),
-            status,
-            Jason.encode!(%{"reason" => "preserve"}),
-            Jason.encode!(%{"kind" => "navigate"}),
-            Jason.encode!(%{"result" => "preserve"}),
-            caller,
-            job_id
-          ]
-        )
-      end)
-    end)
+        inserted_at = ~U[2026-01-01 00:00:00Z]
+        updated_at = ~U[2026-01-02 00:00:00Z]
+        finished_at = if status in ["completed", "stopped"], do: updated_at
+
+        [id] =
+          Repo.query!(
+            "INSERT INTO manual_intents (ship_id, type, target_waypoint, parameters, status, blocker, in_flight_action, last_action_result, recovery_attempts, finished_at, caller, job_id, inserted_at, updated_at) VALUES (?, 'navigate', 'X1-UX81-A1', ?, ?, ?, ?, ?, 2, ?, ?, ?, ?, ?) RETURNING id",
+            [
+              ship.id,
+              Jason.encode!(%{"marker" => "#{caller}-#{status}"}),
+              status,
+              Jason.encode!(%{"reason" => "#{caller}-#{status}"}),
+              Jason.encode!(%{"kind" => "navigate", "marker" => "#{caller}-#{status}"}),
+              Jason.encode!(%{"result" => "#{caller}-#{status}"}),
+              finished_at,
+              caller,
+              job_id,
+              inserted_at,
+              updated_at
+            ]
+          ).rows
+          |> List.first()
+
+        %{
+          id: id,
+          ship_id: ship.id,
+          caller: caller,
+          job_id: job_id,
+          type: "navigate",
+          target_waypoint: "X1-UX81-A1",
+          status: status,
+          marker: "#{caller}-#{status}",
+          inserted_at: inserted_at,
+          updated_at: updated_at,
+          finished_at: finished_at
+        }
+      end
 
     assert :ok = Ecto.Migrator.up(Repo, @rename_version, @rename_migration, log: false)
 
@@ -179,5 +201,67 @@ defmodule SpaceTraders.Repo.Migrations.PersistenceRenameTest do
 
     assert Enum.sort(Repo.all(from i in Intent, select: i.status)) ==
              Enum.sort(states ++ states)
+
+    migrated_rows =
+      Repo.all(
+        from i in Intent,
+          select: %{
+            id: i.id,
+            ship_id: i.ship_id,
+            caller: i.caller,
+            job_id: i.job_id,
+            type: i.type,
+            target_waypoint: i.target_waypoint,
+            status: i.status,
+            parameters: i.parameters,
+            blocker: i.blocker,
+            in_flight_action: i.in_flight_action,
+            last_action_result: i.last_action_result,
+            recovery_attempts: i.recovery_attempts,
+            finished_at: i.finished_at,
+            inserted_at: i.inserted_at,
+            updated_at: i.updated_at
+          }
+      )
+
+    assert Enum.sort(Enum.map(original_rows, & &1.id)) ==
+             Enum.sort(Enum.map(migrated_rows, & &1.id))
+
+    assert Enum.all?(original_rows, fn original ->
+             migrated = Enum.find(migrated_rows, &(&1.id == original.id))
+             marker = original.marker
+
+             migrated != nil and migrated.ship_id == original.ship_id and
+               migrated.caller == original.caller and
+               migrated.job_id == original.job_id and migrated.status == original.status and
+               migrated.type == original.type and
+               migrated.target_waypoint == original.target_waypoint and
+               migrated.parameters["marker"] == marker and
+               migrated.blocker.reason == original.caller <> "-" <> original.status and
+               migrated.in_flight_action["marker"] == marker and
+               migrated.last_action_result["result"] == marker and
+               migrated.recovery_attempts == 2 and
+               migrated.finished_at == original.finished_at and
+               migrated.inserted_at == original.inserted_at and
+               migrated.updated_at == original.updated_at
+           end)
+
+    active = Enum.find(original_rows, &(&1.status == "active"))
+
+    assert [["intents_one_active_per_ship_index"]] =
+             Repo.query!(
+               "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'intents_one_active_per_ship_index'"
+             ).rows
+
+    assert_raise Ecto.ConstraintError, ~r/intents_(one_active_per_ship|ship_id)_index/, fn ->
+      %Intent{ship_id: active.ship_id}
+      |> Intent.changeset(%{
+        caller: "manual",
+        type: "navigate",
+        target_waypoint: active.target_waypoint,
+        status: "active"
+      })
+      |> Repo.insert!()
+    end
   end
 end

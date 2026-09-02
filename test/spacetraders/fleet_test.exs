@@ -3375,7 +3375,12 @@ defmodule SpaceTraders.FleetTest do
       Req.Test.stub(SpaceTraders.API, fn conn ->
         case {conn.request_path, conn.method} do
           {"/v2/my/ships/FLEET-SHIP", "GET"} ->
-            Req.Test.json(conn, %{"data" => ship_body("FLEET-SHIP")})
+            Req.Test.json(conn, %{
+              "data" =>
+                ship_body("FLEET-SHIP", %{
+                  "cargo" => %{"capacity" => 40, "units" => 0, "inventory" => []}
+                })
+            })
 
           {"/v2/my/contracts", "GET"} ->
             Req.Test.json(conn, %{
@@ -4549,7 +4554,11 @@ defmodule SpaceTraders.FleetTest do
             Req.Test.json(conn, %{
               "data" => %{
                 "agent" => %{"symbol" => agent.symbol, "credits" => 400},
-                "cargo" => %{"capacity" => 40, "units" => 1, "inventory" => []},
+                "cargo" => %{
+                  "capacity" => 40,
+                  "units" => 1,
+                  "inventory" => [%{"symbol" => "MODULE_GAS_PROCESSOR_I", "units" => 1}]
+                },
                 "transaction" => %{
                   "type" => "PURCHASE",
                   "shipSymbol" => "FLEET-SHIP",
@@ -4957,8 +4966,8 @@ defmodule SpaceTraders.FleetTest do
                 "agent" => %{"symbol" => agent.symbol, "credits" => 50},
                 "cargo" => %{
                   "capacity" => 40,
-                  "units" => 5,
-                  "inventory" => [%{"symbol" => "IRON_ORE", "units" => 5}]
+                  "units" => 17,
+                  "inventory" => [%{"symbol" => "IRON_ORE", "units" => 17}]
                 },
                 "transaction" => %{
                   "shipSymbol" => "FLEET-SHIP",
@@ -5020,7 +5029,12 @@ defmodule SpaceTraders.FleetTest do
       Req.Test.stub(SpaceTraders.API, fn conn ->
         case {conn.request_path, conn.method} do
           {"/v2/my/ships/FLEET-SHIP", "GET"} ->
-            Req.Test.json(conn, %{"data" => ship_body("FLEET-SHIP")})
+            Req.Test.json(conn, %{
+              "data" =>
+                ship_body("FLEET-SHIP", %{
+                  "cargo" => %{"capacity" => 40, "units" => 0, "inventory" => []}
+                })
+            })
 
           {"/v2/my/agent", "GET"} ->
             Req.Test.json(conn, %{"data" => %{"symbol" => agent.symbol, "credits" => 0}})
@@ -5453,7 +5467,8 @@ defmodule SpaceTraders.FleetTest do
                "kind" => "sell",
                "trade_symbol" => "IRON_ORE",
                "units" => 5,
-               "listing_price" => 8
+               "listing_price" => 8,
+               "cargo_before" => 5
              }
 
       assert {:error, :cargo_operation_reconciliation_required} =
