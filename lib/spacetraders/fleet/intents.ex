@@ -39,7 +39,7 @@ defmodule SpaceTraders.Fleet.Intents do
          {:ok, waypoint} <- valid_goal_waypoint(goal.waypoint) do
       case owner do
         :manual ->
-          Fleet.navigate_intent_legacy(agent, ship_symbol, waypoint, goal.parameters)
+          Fleet.request_manual_navigate(agent, ship_symbol, waypoint, goal.parameters)
 
         %JobOwner{job: %Job{type: type} = job} when type in @job_types ->
           Fleet.request_job_navigate(agent, job, ship_symbol, waypoint, goal.parameters)
@@ -123,9 +123,16 @@ defmodule SpaceTraders.Fleet.Intents do
     end
   end
 
-  @doc "Re-enters the shared reconciliation path for a fresh Ship observation."
-  def reconcile(agent, ship_symbol, live_ship, expected_intent_id) do
-    Fleet.revalidate_intents_arrival(agent.id, ship_symbol, live_ship, expected_intent_id)
+  @doc "Re-enters shared reconciliation after a durable Ship timer fires."
+  def reconcile(agent_id, ship_symbol, live_ship, trigger, expected_intent_id, expected_job_id) do
+    Fleet.reconcile_timeline_event(
+      agent_id,
+      ship_symbol,
+      live_ship,
+      trigger,
+      expected_intent_id,
+      expected_job_id
+    )
   end
 
   defp normalize_owner(:manual), do: {:ok, :manual}

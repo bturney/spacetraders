@@ -166,40 +166,14 @@ defmodule SpaceTraders.Fleet.ShipServer do
           Timeline.fire_event(event)
           state = drop_pending_event(state, type, event)
 
-          case type do
-            :arrival ->
-              SpaceTraders.Fleet.revalidate_miner_job_arrival(
-                state.agent_id,
-                state.symbol,
-                ship,
-                event.payload["job_id"]
-              )
-
-              SpaceTraders.Fleet.revalidate_intents_arrival(
-                state.agent_id,
-                state.symbol,
-                ship,
-                event.payload["intent_id"]
-              )
-
-            :cooldown ->
-              SpaceTraders.Fleet.revalidate_miner_job_cooldown(
-                state.agent_id,
-                state.symbol,
-                ship,
-                event.payload["job_id"]
-              )
-
-              SpaceTraders.Fleet.revalidate_intents_cooldown(
-                state.agent_id,
-                state.symbol,
-                ship,
-                event.payload["intent_id"]
-              )
-
-            _ ->
-              :ok
-          end
+          SpaceTraders.Fleet.Intents.reconcile(
+            state.agent_id,
+            state.symbol,
+            ship,
+            type,
+            event.payload["intent_id"],
+            event.payload["job_id"]
+          )
 
           Phoenix.PubSub.broadcast(
             SpaceTraders.PubSub,
