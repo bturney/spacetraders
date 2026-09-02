@@ -242,7 +242,7 @@ defmodule SpaceTradersWeb.DashboardLive do
     with {:ok, agent} <- agent_for_ship(socket, ship_symbol),
          :ok <- validate_waypoint(waypoint) do
       result =
-        case Fleet.jump_preview(agent, ship_symbol, waypoint) do
+        case Intents.jump_preview(agent, ship_symbol, waypoint) do
           {:ok, preview} ->
             Intents.review(agent, %Intents.ManualControl{}, ship_symbol, waypoint, preview)
 
@@ -255,7 +255,7 @@ defmodule SpaceTradersWeb.DashboardLive do
             )
 
           {:error, {:jump_route_candidates, reason, candidates} = route_reason} ->
-            case Fleet.warp_preview(agent, ship_symbol, waypoint) do
+            case Intents.warp_preview(agent, ship_symbol, waypoint) do
               {:ok, preview} ->
                 Intents.review(
                   agent,
@@ -282,7 +282,7 @@ defmodule SpaceTradersWeb.DashboardLive do
             end
 
           {:error, reason} ->
-            case Fleet.warp_preview(agent, ship_symbol, waypoint) do
+            case Intents.warp_preview(agent, ship_symbol, waypoint) do
               {:ok, preview} ->
                 Intents.review(agent, %Intents.ManualControl{}, ship_symbol, waypoint, preview)
 
