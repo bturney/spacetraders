@@ -15,9 +15,11 @@ defmodule SpaceTraders.Timeline do
 
   import Ecto.Query, warn: false
 
-  alias SpaceTraders.Repo
-  alias SpaceTraders.Timeline.Event
+  require Logger
 
+  alias SpaceTraders.Repo
+  alias SpaceTraders.API.Model.{ShipNav, ShipNavRoute}
+  alias SpaceTraders.Timeline.Event
   @event_types [:arrival, :cooldown, :deadline]
 
   @typedoc "The pending-event statuses stored in `timeline_events.status`."
@@ -134,4 +136,39 @@ defmodule SpaceTraders.Timeline do
     {usec, _precision} = dt.microsecond
     %{dt | microsecond: {usec, 6}}
   end
+
+  @doc false
+  def parse_expiration(expiration, seconds) when is_binary(expiration) do
+    case DateTime.from_iso8601(expiration) do
+      {:ok, due_at, _offset} -> due_at
+      _ -> DateTime.add(DateTime.utc_now(), seconds, :second)
+    end
+  end
+
+  @doc false
+  def parse_expiration(_expiration, seconds),
+    do: DateTime.add(DateTime.utc_now(), seconds, :second)
+
+  @doc false
+  def parse_arrival(%ShipNavRoute{arrival: arrival}) when is_binary(arrival) do
+    case DateTime.from_iso8601(arrival) do
+      {:ok, due_at, _offset} ->
+        {:ok, due_at}
+
+      _ ->
+        Logger.warning("ship arrival #{arrival} is not a parseable timestamp")
+        :error
+    end
+  end
+
+  @doc false
+  def parse_arrival(_route), do: :error
+
+  @doc false
+  def arrival_payload(%ShipNav{route: %{destination: %{symbol: destination}}})
+      when is_binary(destination),
+      do: %{destination: destination}
+
+  @doc false
+  def arrival_payload(_nav), do: %{}
 end

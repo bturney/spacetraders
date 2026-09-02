@@ -2,7 +2,7 @@ defmodule SpaceTraders.Fleet.ShipServerBoot do
   @moduledoc """
   Re-arms ship servers when the app boots.
 
-  A one-shot GenServer: on init it asks `SpaceTraders.Fleet.rearm_ships_on_boot/0`
+  A one-shot GenServer: on init it asks `SpaceTraders.Fleet.Intents.rearm_on_boot/0`
   to start a ship server for every ship with a pending timeline event. Each
   server then re-arms its own timers and catches up any events that came due
   while the app was down (ADR 0005). It stops normally once done, so it is not
@@ -17,7 +17,7 @@ defmodule SpaceTraders.Fleet.ShipServerBoot do
 
   @impl true
   def init(:ok) do
-    SpaceTraders.Fleet.rearm_ships_on_boot()
+    SpaceTraders.Fleet.Intents.rearm_on_boot()
     :ignore
   end
 end
