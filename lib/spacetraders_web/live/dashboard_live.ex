@@ -419,7 +419,10 @@ defmodule SpaceTradersWeb.DashboardLive do
         socket
       ) do
     with {:ok, agent} <- agent_for_ship(socket, ship_symbol),
-         {:ok, intent} <- Fleet.install_module_intent(agent, ship_symbol, module_symbol) do
+         {:ok, intent} <-
+           Intents.request(agent, %Intents.ManualControl{}, ship_symbol, %Intents.InstallModule{
+             module_symbol: module_symbol
+           }) do
       {:noreply,
        put_flash(
          refresh_agent_fleet(socket, agent.id),
@@ -439,7 +442,10 @@ defmodule SpaceTradersWeb.DashboardLive do
       ) do
     with {:ok, agent} <- agent_for_ship(socket, ship_symbol),
          {:ok, intent} <-
-           Fleet.remove_module_intent(agent, ship_symbol, module_symbol, %{module_symbol => 1}) do
+           Intents.request(agent, %Intents.ManualControl{}, ship_symbol, %Intents.RemoveModule{
+             module_symbol: module_symbol,
+             authorized_removals: %{module_symbol => 1}
+           }) do
       {:noreply,
        put_flash(
          refresh_agent_fleet(socket, agent.id),

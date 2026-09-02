@@ -687,16 +687,18 @@ defmodule SpaceTraders.Fleet do
     job = Repo.update!(Ecto.Changeset.change(job, progress: progress))
 
     with {:ok, intent} <-
-           insert_job_intent(job, %{
-             type: type,
-             target_waypoint: module_symbol,
-             parameters: %{
-               "module_symbol" => module_symbol,
-               "quantity" => 1,
-               "authorized_removals" => job.progress["authorized_removals"]
-             }
-           }),
-         {:ok, intent} <- advance_intents(agent, intent, live_ship) do
+           SpaceTraders.Fleet.Intents.request(
+             agent,
+             %SpaceTraders.Fleet.Intents.JobOwner{job: job},
+             live_ship.symbol,
+             if(type == "install_module",
+               do: %SpaceTraders.Fleet.Intents.InstallModule{module_symbol: module_symbol},
+               else: %SpaceTraders.Fleet.Intents.RemoveModule{
+                 module_symbol: module_symbol,
+                 authorized_removals: job.progress["authorized_removals"]
+               }
+             )
+           ) do
       advance_outfitting_after_intent(agent, job, intent)
     else
       {:error, reason} -> mark_outfitting_job_blocked(job, reason)
@@ -3424,6 +3426,39 @@ defmodule SpaceTraders.Fleet do
     module_intent(agent, ship_symbol, "remove_module", module_symbol, authorized_removals)
   end
 
+  @doc "Starts a module Intent owned by a running Ship Outfitting Job."
+  def request_job_module_intent(
+        %AgentRecord{} = agent,
+        %Job{type: "outfitting", id: job_id, ship_id: ship_id} = job,
+        ship_symbol,
+        type,
+        module_symbol,
+        parameters
+      )
+      when type in ["install_module", "remove_module"] and is_map(parameters) do
+    with {:ok, ship} <- owned_ship(agent, ship_symbol),
+         true <- ship.id == ship_id,
+         true <- job.status in ["active", "waiting"],
+         {:ok, live_ship} <-
+           Agent.handle_game_result(
+             agent,
+             SpaceTraders.API.get_ship(agent.agent_token, ship_symbol)
+           ),
+         {:ok, intent} <-
+           insert_job_intent(job, %{
+             type: type,
+             target_waypoint: module_symbol,
+             parameters: Map.merge(parameters, %{"caller" => "job", "job_id" => job_id})
+           }) do
+      advance_intents(agent, intent, live_ship)
+    else
+      false -> {:error, :invalid_module_intent}
+      error -> error
+    end
+  end
+
+  def request_job_module_intent(_, _, _, _, _, _), do: {:error, :invalid_module_intent}
+
   defp module_intent(
          %AgentRecord{agent_token: token} = agent,
          ship_symbol,
@@ -4319,45 +4354,100 @@ defmodule SpaceTraders.Fleet do
   end
 
   defp dispatch_module_intent(agent, intent, live_ship) do
+    case module_mutation_allowed?(intent, live_ship) do
+      :ok -> dispatch_module_request(agent, intent, live_ship)
+      {:error, reason} -> block_module_intent(intent, reason)
+    end
+  end
+
+  defp dispatch_module_request(agent, intent, live_ship) do
     module_symbol = intent.parameters["module_symbol"]
     installed_before = module_count(live_ship.modules, module_symbol)
     cargo_before = item_units(live_ship.cargo, module_symbol)
 
-    intent =
-      Repo.update!(
-        Ecto.Changeset.change(intent,
-          in_flight_action: %{
-            "kind" => intent.type,
-            "module_symbol" => module_symbol,
-            "quantity" => 1,
-            "installed_before" => installed_before,
-            "cargo_before" => cargo_before
-          }
-        )
-      )
+    action = %{
+      "kind" => intent.type,
+      "module_symbol" => module_symbol,
+      "quantity" => 1,
+      "installed_before" => installed_before,
+      "cargo_before" => cargo_before
+    }
 
-    result =
-      case intent.type do
-        "install_module" ->
-          SpaceTraders.API.install_ship_module(agent.agent_token, live_ship.symbol, module_symbol)
+    case claim_intent_action(intent, action) do
+      {:ok, intent} ->
+        result =
+          case intent.type do
+            "install_module" ->
+              SpaceTraders.API.install_ship_module(
+                agent.agent_token,
+                live_ship.symbol,
+                module_symbol
+              )
 
-        "remove_module" ->
-          SpaceTraders.API.remove_ship_module(agent.agent_token, live_ship.symbol, module_symbol)
-      end
+            "remove_module" ->
+              SpaceTraders.API.remove_ship_module(
+                agent.agent_token,
+                live_ship.symbol,
+                module_symbol
+              )
+          end
 
-    case Agent.handle_game_result(agent, result) do
-      {:ok, result} ->
-        if module_modification_evidence?(intent, result.modules, result.cargo) do
-          complete_module_intent(intent, result)
-        else
-          block_module_intent_preserving_evidence(intent, :module_modification_unconfirmed)
+        case Agent.handle_game_result(agent, result) do
+          {:ok, result} ->
+            if module_modification_evidence?(intent, result.modules, result.cargo) do
+              complete_module_intent(intent, result)
+            else
+              block_module_intent_preserving_evidence(intent, :module_modification_unconfirmed)
+            end
+
+          {:error, %SpaceTraders.API.Error{} = reason} ->
+            await_module_reconciliation(intent, reason)
+
+          {:error, reason} ->
+            block_module_intent(intent, reason)
         end
 
-      {:error, %SpaceTraders.API.Error{} = reason} ->
-        await_module_reconciliation(intent, reason)
+      {:error, :intent_dispatch_no_longer_allowed} ->
+        :ok
+    end
+  end
 
-      {:error, reason} ->
-        block_module_intent(intent, reason)
+  defp module_mutation_allowed?(%Intent{type: type} = intent, live_ship) do
+    module_symbol = intent.parameters["module_symbol"]
+
+    cond do
+      not docked?(live_ship) ->
+        {:error, :module_operation_requires_docked_ship}
+
+      not is_list(live_ship.modules) or not is_map(live_ship.cargo) or
+          not is_integer(live_ship.frame && live_ship.frame.module_slots) ->
+        {:error, :module_readiness_unavailable}
+
+      true ->
+        installed = module_count(live_ship.modules, module_symbol)
+        cargo_units = item_units(live_ship.cargo, module_symbol)
+        cargo_capacity = live_ship.cargo.capacity
+        module_slots = live_ship.frame.module_slots
+
+        cond do
+          type == "install_module" and cargo_units < 1 ->
+            {:error, :module_missing_from_cargo}
+
+          type == "install_module" and installed >= module_slots ->
+            {:error, :module_capacity_full}
+
+          type == "remove_module" and installed < 1 ->
+            {:error, :module_not_installed}
+
+          type == "remove_module" and not is_integer(cargo_capacity) ->
+            {:error, :cargo_capacity_unavailable}
+
+          type == "remove_module" and live_ship.cargo.units >= cargo_capacity ->
+            {:error, :cargo_full}
+
+          true ->
+            :ok
+        end
     end
   end
 
