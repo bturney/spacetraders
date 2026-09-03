@@ -242,66 +242,13 @@ defmodule SpaceTradersWeb.DashboardLive do
     with {:ok, agent} <- agent_for_ship(socket, ship_symbol),
          :ok <- validate_waypoint(waypoint) do
       result =
-        case Intents.jump_preview(agent, ship_symbol, waypoint) do
-          {:ok, preview} ->
-            Intents.review(agent, %Intents.ManualControl{}, ship_symbol, waypoint, preview)
-
-          {:error, :same_system_route} ->
-            Intents.request(
-              agent,
-              %Intents.ManualControl{},
-              ship_symbol,
-              %Intents.Navigate{waypoint: waypoint}
-            )
-
-          {:error, {:jump_route_candidates, reason, candidates} = route_reason} ->
-            case Intents.warp_preview(agent, ship_symbol, waypoint) do
-              {:ok, preview} ->
-                Intents.review(
-                  agent,
-                  %Intents.ManualControl{},
-                  ship_symbol,
-                  waypoint,
-                  Map.put(preview, :candidates, candidates)
-                )
-
-              {:error, _warp_reason} ->
-                case Intents.block_review(
-                       agent,
-                       %Intents.ManualControl{},
-                       ship_symbol,
-                       waypoint,
-                       route_reason
-                     ) do
-                  {:ok, intent} ->
-                    {:blocked_preview, candidate_preview(waypoint, candidates, reason), intent}
-
-                  other ->
-                    other
-                end
-            end
-
-          {:error, reason} ->
-            case Intents.warp_preview(agent, ship_symbol, waypoint) do
-              {:ok, preview} ->
-                Intents.review(agent, %Intents.ManualControl{}, ship_symbol, waypoint, preview)
-
-              {:error, _warp_reason} ->
-                case Intents.block_review(
-                       agent,
-                       %Intents.ManualControl{},
-                       ship_symbol,
-                       waypoint,
-                       reason
-                     ) do
-                  {:ok, intent} ->
-                    {:blocked_preview, candidate_preview(waypoint, [], reason), intent}
-
-                  other ->
-                    other
-                end
-            end
-        end
+        Intents.request(
+          socket.assigns.current_scope,
+          agent,
+          %Intents.ManualControl{},
+          ship_symbol,
+          %Intents.Navigate{waypoint: waypoint}
+        )
 
       case result do
         {:ok, %{status: "awaiting_confirmation"}} ->
@@ -309,13 +256,6 @@ defmodule SpaceTradersWeb.DashboardLive do
            socket
            |> refresh_agent_fleet(agent.id)
            |> put_flash(:info, "Review the jump route before dispatching it.")}
-
-        {:blocked_preview, _preview,
-         %{status: "blocked", blocker: blocker, target_waypoint: target}} ->
-          {:noreply,
-           socket
-           |> refresh_agent_fleet(agent.id)
-           |> put_flash(:error, "Navigate to #{target} blocked: #{blocker_summary(blocker)}")}
 
         {:ok, %{status: "completed", target_waypoint: target}} ->
           {:noreply,
@@ -371,8 +311,8 @@ defmodule SpaceTradersWeb.DashboardLive do
         socket
       ) do
     with {:ok, agent} <- agent_for_ship(socket, ship_symbol),
-         :ok <- Intents.stop(agent, %Intents.ManualControl{}, ship_symbol, intent_id) do
-      message = "#{ship_symbol} manual Navigate stopped; the Ship stays in Manual Control."
+         :ok <- Intents.stop(socket.assigns.current_scope, %Intents.ManualControl{}, intent_id) do
+      message = "#{ship_symbol} manual Intent stopped; the Ship stays in Manual Control."
 
       {:noreply, put_flash(refresh_agent_fleet(socket, agent.id), :info, message)}
     else
@@ -420,9 +360,15 @@ defmodule SpaceTradersWeb.DashboardLive do
       ) do
     with {:ok, agent} <- agent_for_ship(socket, ship_symbol),
          {:ok, intent} <-
-           Intents.request(agent, %Intents.ManualControl{}, ship_symbol, %Intents.InstallModule{
-             module_symbol: module_symbol
-           }) do
+           Intents.request(
+             socket.assigns.current_scope,
+             agent,
+             %Intents.ManualControl{},
+             ship_symbol,
+             %Intents.InstallModule{
+               module_symbol: module_symbol
+             }
+           ) do
       {:noreply,
        put_flash(
          refresh_agent_fleet(socket, agent.id),
@@ -442,10 +388,16 @@ defmodule SpaceTradersWeb.DashboardLive do
       ) do
     with {:ok, agent} <- agent_for_ship(socket, ship_symbol),
          {:ok, intent} <-
-           Intents.request(agent, %Intents.ManualControl{}, ship_symbol, %Intents.RemoveModule{
-             module_symbol: module_symbol,
-             authorized_removals: %{module_symbol => 1}
-           }) do
+           Intents.request(
+             socket.assigns.current_scope,
+             agent,
+             %Intents.ManualControl{},
+             ship_symbol,
+             %Intents.RemoveModule{
+               module_symbol: module_symbol,
+               authorized_removals: %{module_symbol => 1}
+             }
+           ) do
       {:noreply,
        put_flash(
          refresh_agent_fleet(socket, agent.id),
@@ -587,6 +539,7 @@ defmodule SpaceTradersWeb.DashboardLive do
          {:ok, units} <- parse_units(units),
          {:ok, %{status: "completed"} = intent} <-
            Intents.request(
+             socket.assigns.current_scope,
              agent,
              %Intents.ManualControl{},
              ship_symbol,
@@ -632,6 +585,7 @@ defmodule SpaceTradersWeb.DashboardLive do
          {:ok, units} <- parse_units(units),
          {:ok, %{status: "completed"} = intent} <-
            Intents.request(
+             socket.assigns.current_scope,
              agent,
              %Intents.ManualControl{},
              ship_symbol,
@@ -803,6 +757,7 @@ defmodule SpaceTradersWeb.DashboardLive do
          {:ok, units} <- parse_units(units),
          {:ok, %{status: "completed"}} <-
            Intents.request(
+             socket.assigns.current_scope,
              agent,
              %Intents.ManualControl{},
              ship_symbol,
@@ -858,6 +813,7 @@ defmodule SpaceTradersWeb.DashboardLive do
          {:ok, units} <- parse_units(units),
          {:ok, %{status: "completed"}} <-
            Intents.request(
+             socket.assigns.current_scope,
              agent,
              %Intents.ManualControl{},
              ship_symbol,
@@ -4826,43 +4782,6 @@ defmodule SpaceTradersWeb.DashboardLive do
   end
 
   defp preview_key(key), do: key
-
-  defp candidate_preview(waypoint, candidates, reason) do
-    candidates =
-      if candidates == [] do
-        [
-          %{
-            waypoint: waypoint,
-            viable: false,
-            construction: "unknown",
-            intelligence: "unknown",
-            connection: "unknown",
-            reasons: [format_preview_reason(reason)]
-          }
-        ]
-      else
-        Enum.map(candidates, fn candidate ->
-          if reason == :insufficient_fuel and candidate.viable do
-            %{candidate | viable: false, reasons: candidate.reasons ++ ["insufficient_fuel"]}
-          else
-            candidate
-          end
-        end)
-      end
-
-    %{
-      status: "blocked",
-      reason: format_preview_reason(reason),
-      source_waypoint: "unknown",
-      destination_waypoint: waypoint,
-      flight_mode: "unknown",
-      candidates: candidates
-    }
-  end
-
-  defp format_preview_reason(nil), do: "route_unavailable"
-  defp format_preview_reason(reason) when is_atom(reason), do: Atom.to_string(reason)
-  defp format_preview_reason(_reason), do: "route_unavailable"
 
   defp jump_correction("insufficient_credits"),
     do: "Acquire credits, then preview the jump again."

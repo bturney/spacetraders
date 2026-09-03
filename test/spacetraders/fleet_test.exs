@@ -25,7 +25,7 @@ defmodule SpaceTraders.FleetTest do
   end
 
   defp stop_current_intent(agent) do
-    case Intents.current(agent) do
+    case Intents.list(%SpaceTraders.Agent.Scope{operator: %{id: nil}}, :current) do
       [%Intent{id: id} | _] -> Intents.stop(agent, %Intents.ManualControl{}, id)
       [] -> {:error, :intents_not_active}
     end
@@ -761,7 +761,8 @@ defmodule SpaceTraders.FleetTest do
 
       # The scheduled arrival trigger names the Intent; reconciliation validates
       # the identity, completes the Intent, and continues the owning Job.
-      assert [%Intent{id: arrival_intent_id, type: "navigate"}] = Intents.current(agent)
+      assert [%Intent{id: arrival_intent_id, type: "navigate"}] =
+               Intents.list(%SpaceTraders.Agent.Scope{operator: %{id: nil}}, :current)
 
       assert {:ok,
               %Job{
@@ -3247,7 +3248,7 @@ defmodule SpaceTraders.FleetTest do
 
       assert_receive :fresh_sale_listing
       assert_receive {:sale, %{"symbol" => "IRON_ORE", "units" => 30}}
-      assert Intents.current(agent) == []
+      assert Intents.list(%SpaceTraders.Agent.Scope{operator: %{id: nil}}, :current) == []
       configured_job_id = configured_job.id
 
       assert %Intent{
@@ -4813,7 +4814,8 @@ defmodule SpaceTraders.FleetTest do
                  %Intents.InstallModule{module_symbol: "MODULE_CARGO_HOLD_I"}
                )
 
-      assert [%Intent{status: "blocked", in_flight_action: action}] = Intents.current(agent)
+      assert [%Intent{status: "blocked", in_flight_action: action}] =
+               Intents.list(%SpaceTraders.Agent.Scope{operator: %{id: nil}}, :current)
 
       assert action["kind"] == "install_module"
     end
@@ -5898,7 +5900,7 @@ defmodule SpaceTraders.FleetTest do
           DateTime.add(DateTime.utc_now(), 60, :second)
         )
 
-      assert :ok = Intents.rearm_on_boot()
+      assert :ok = Fleet.rearm_on_boot()
 
       assert ShipServer.ensure_ready("FLEET-SHIP") == {:error, :ship_in_transit}
     end
@@ -5931,7 +5933,7 @@ defmodule SpaceTraders.FleetTest do
         end
       end)
 
-      assert :ok = Intents.rearm_on_boot()
+      assert :ok = Fleet.rearm_on_boot()
 
       assert_receive {:ship_updated, ^agent_id, "FLEET-SHIP"}, 1_000
       assert Repo.get(Event, event.id).status == "done"
@@ -5947,7 +5949,7 @@ defmodule SpaceTraders.FleetTest do
           DateTime.add(DateTime.utc_now(), 60, :second)
         )
 
-      assert :ok = Intents.rearm_on_boot()
+      assert :ok = Fleet.rearm_on_boot()
 
       assert ShipServer.ensure_ready("GHOST-SHIP") == :ok
     end
