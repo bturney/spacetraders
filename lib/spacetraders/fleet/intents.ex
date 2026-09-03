@@ -73,19 +73,13 @@ defmodule SpaceTraders.Fleet.Intents do
 
   @unfinished_states Intent.unfinished_states()
   @terminal_states Intent.terminal_states()
-  @compile {:no_warn_unused,
-            [
-              confirm_navigation_intent_for_agent: 3,
-              terminalize_job_intent!: 1,
-              ambiguous_cargo_operation_error?: 1
-            ]}
   @job_types [
     "miner",
     "procurement",
     "market_trading"
   ]
 
-  def request(agent, owner, ship_symbol, %BuyGoods{} = goal) do
+  defp request_internal(agent, owner, ship_symbol, %BuyGoods{} = goal) do
     with :ok <- token_present(agent),
          {:ok, owner} <- normalize_owner(owner),
          :ok <- valid_goal_parameters(goal.constraints),
@@ -108,7 +102,7 @@ defmodule SpaceTraders.Fleet.Intents do
     end
   end
 
-  def request(agent, owner, ship_symbol, %SellGoods{} = goal) do
+  defp request_internal(agent, owner, ship_symbol, %SellGoods{} = goal) do
     with :ok <- token_present(agent),
          {:ok, owner} <- normalize_owner(owner),
          :ok <- valid_goal_parameters(goal.constraints),
@@ -149,11 +143,11 @@ defmodule SpaceTraders.Fleet.Intents do
     end
   end
 
-  def request(agent, owner, ship_symbol, %DeliverGoods{} = goal) do
+  defp request_internal(agent, owner, ship_symbol, %DeliverGoods{} = goal) do
     request_delivery(agent, owner, ship_symbol, goal, nil)
   end
 
-  def request(agent, owner, ship_symbol, %Navigate{} = goal) do
+  defp request_internal(agent, owner, ship_symbol, %Navigate{} = goal) do
     with :ok <- token_present(agent),
          {:ok, owner} <- normalize_owner(owner),
          :ok <- valid_goal_parameters(goal.parameters),
@@ -171,7 +165,7 @@ defmodule SpaceTraders.Fleet.Intents do
     end
   end
 
-  def request(agent, owner, ship_symbol, %InstallModule{} = goal) do
+  defp request_internal(agent, owner, ship_symbol, %InstallModule{} = goal) do
     request_module(
       agent,
       owner,
@@ -182,7 +176,7 @@ defmodule SpaceTraders.Fleet.Intents do
     )
   end
 
-  def request(agent, owner, ship_symbol, %RemoveModule{} = goal) do
+  defp request_internal(agent, owner, ship_symbol, %RemoveModule{} = goal) do
     parameters =
       if is_map(goal.parameters),
         do: Map.put(goal.parameters, :authorized_removals, goal.authorized_removals),
@@ -198,7 +192,8 @@ defmodule SpaceTraders.Fleet.Intents do
     )
   end
 
-  def request(_agent, _owner, _ship_symbol, _goal), do: {:error, :unsupported_intent_goal}
+  defp request_internal(_agent, _owner, _ship_symbol, _goal),
+    do: {:error, :unsupported_intent_goal}
 
   defp request_sell_with_live_ship(
          agent,
@@ -229,7 +224,7 @@ defmodule SpaceTraders.Fleet.Intents do
     end
   end
 
-  def request(agent, %JobOwner{} = owner, ship_symbol, %Navigate{} = goal, live_ship) do
+  defp request_internal(agent, %JobOwner{} = owner, ship_symbol, %Navigate{} = goal, live_ship) do
     with {:ok, owner} <- normalize_owner(owner),
          :ok <- token_present(agent),
          :ok <- valid_goal_parameters(goal.parameters),
@@ -244,13 +239,13 @@ defmodule SpaceTraders.Fleet.Intents do
     end
   end
 
-  def request(
-        agent,
-        %JobOwner{job: %Job{} = job} = owner,
-        ship_symbol,
-        %BuyGoods{} = goal,
-        live_ship
-      ) do
+  defp request_internal(
+         agent,
+         %JobOwner{job: %Job{} = job} = owner,
+         ship_symbol,
+         %BuyGoods{} = goal,
+         live_ship
+       ) do
     with :ok <- token_present(agent),
          {:ok, _owner} <- normalize_owner(owner),
          :ok <- valid_goal_parameters(goal.constraints),
@@ -298,11 +293,17 @@ defmodule SpaceTraders.Fleet.Intents do
     end
   end
 
-  def request(agent, %JobOwner{} = owner, ship_symbol, %SellGoods{} = goal, live_ship),
+  defp request_internal(agent, %JobOwner{} = owner, ship_symbol, %SellGoods{} = goal, live_ship),
     do: request_sell_with_live_ship(agent, owner, ship_symbol, goal, live_ship)
 
-  def request(agent, %JobOwner{} = owner, ship_symbol, %DeliverGoods{} = goal, live_ship),
-    do: request_delivery(agent, owner, ship_symbol, goal, live_ship)
+  defp request_internal(
+         agent,
+         %JobOwner{} = owner,
+         ship_symbol,
+         %DeliverGoods{} = goal,
+         live_ship
+       ),
+       do: request_delivery(agent, owner, ship_symbol, goal, live_ship)
 
   @doc "Requests a closed operational goal for Manual Control or a Job."
   def request(
@@ -312,14 +313,56 @@ defmodule SpaceTraders.Fleet.Intents do
         ship_symbol,
         goal
       ) do
-    with :ok <- agent_owned_by_operator?(agent, operator),
-         {:ok, _ship} <- Fleet.owned_ship(agent, ship_symbol) do
-      request(agent, %ManualControl{}, ship_symbol, goal)
+    with :ok <- token_present(agent),
+         %AgentRecord{} = persisted_agent <-
+           agent_for_operator(agent.id, operator.id),
+         {:ok, _ship} <- Fleet.owned_ship(persisted_agent, ship_symbol) do
+      request_internal(persisted_agent, %ManualControl{}, ship_symbol, goal)
+    else
+      nil -> {:error, :agent_not_owned}
+      error -> error
+    end
+  end
+
+  def request(
+        %Scope{operator: operator},
+        %AgentRecord{} = agent,
+        %JobOwner{} = owner,
+        ship_symbol,
+        goal
+      ) do
+    with :ok <- token_present(agent),
+         %AgentRecord{} = persisted_agent <-
+           agent_for_operator(agent.id, operator.id),
+         {:ok, _ship} <- Fleet.owned_ship(persisted_agent, ship_symbol) do
+      request_internal(persisted_agent, owner, ship_symbol, goal)
+    else
+      nil -> {:error, :agent_not_owned}
+      error -> error
     end
   end
 
   def request(%Scope{}, _agent, _owner, _ship_symbol, _goal),
     do: {:error, :agent_not_owned}
+
+  def request(
+        %Scope{operator: operator},
+        %AgentRecord{} = agent,
+        %JobOwner{} = owner,
+        ship_symbol,
+        goal,
+        live_ship
+      ) do
+    with :ok <- token_present(agent),
+         %AgentRecord{} = persisted_agent <-
+           agent_for_operator(agent.id, operator.id),
+         {:ok, _ship} <- Fleet.owned_ship(persisted_agent, ship_symbol) do
+      request_internal(persisted_agent, owner, ship_symbol, goal, live_ship)
+    else
+      nil -> {:error, :agent_not_owned}
+      error -> error
+    end
+  end
 
   defp request_delivery(agent, owner, ship_symbol, goal, live_ship) do
     with :ok <- token_present(agent),
@@ -395,13 +438,9 @@ defmodule SpaceTraders.Fleet.Intents do
     end
   end
 
-  def stop(%Scope{}, _owner, _intent_id), do: {:error, :invalid_intent_owner}
-
-  def stop(agent, owner, intent_id) do
-    _ = if false, do: terminalize_job_intent!(%Job{id: 0})
-
-    with {:ok, owner} <- normalize_owner(owner),
-         %Intent{} = intent <- owned_intent(agent, intent_id),
+  def stop(%Scope{operator: operator}, %JobOwner{} = owner, intent_id) do
+    with {%Intent{} = intent, %AgentRecord{} = agent} <-
+           owned_intent_for_operator(operator.id, intent_id),
          :ok <- owner_matches?(owner, intent) do
       do_stop_intent(agent, intent_id, owner)
     else
@@ -410,18 +449,7 @@ defmodule SpaceTraders.Fleet.Intents do
     end
   end
 
-  @doc "Stops an owned Intent after binding the request to its Ship identity."
-  def stop(agent, owner, ship_symbol, intent_id) do
-    with {:ok, owner} <- normalize_owner(owner),
-         %Intent{} = intent <- owned_intent(agent, intent_id),
-         :ok <- owner_matches?(owner, intent),
-         :ok <- intent_ship_matches?(intent, ship_symbol) do
-      do_stop_intent(agent, intent_id, owner)
-    else
-      nil -> {:error, :intent_not_found}
-      error -> error
-    end
-  end
+  def stop(%Scope{}, _owner, _intent_id), do: {:error, :invalid_intent_owner}
 
   @doc """
   Re-enters the one shared Intent reconciliation for a typed trigger.
@@ -431,26 +459,21 @@ defmodule SpaceTraders.Fleet.Intents do
   fresh authoritative read itself before any progress. Stale events that name a
   replaced Intent are ignored idempotently and cannot advance replacement work.
   """
-  def reconcile(agent_id, ship_symbol, nil, :boot, _expected_intent_id, expected_job_id) do
+  def reconcile_internal(agent_id, ship_symbol, nil, :boot, _expected_intent_id, expected_job_id) do
     case Repo.get(AgentRecord, agent_id) do
       %AgentRecord{agent_token: agent_token} = agent
       when is_binary(agent_token) and agent_token != "" ->
         with %Ship{} = ship <- Repo.get_by(Ship, symbol: ship_symbol, agent_id: agent_id),
-             %Intent{status: status} = intent when status != "awaiting_confirmation" <-
-               unfinished_intent_for_ship(ship.id),
              :ok <- Agent.execution_allowed?(agent) do
-          case Agent.handle_game_result(
-                 agent,
-                 SpaceTraders.API.get_ship(agent.agent_token, ship_symbol)
-               ) do
-            {:ok, fresh_ship} ->
-              reconcile(agent_id, ship_symbol, fresh_ship, :boot, intent.id, expected_job_id)
-
-            {:error, :stale_agent} ->
+          case unfinished_intent_for_ship(ship.id) do
+            %Intent{status: "awaiting_confirmation"} ->
               :ok
 
-            {:error, reason} ->
-              intent_recovery_retry_or_block(ship, intent, agent_id, reason)
+            %Intent{} = intent ->
+              boot_read_and_reconcile(agent, ship, intent.id, expected_job_id)
+
+            nil ->
+              boot_read_and_reconcile(agent, ship, nil, expected_job_id)
           end
         else
           _ -> :ok
@@ -461,7 +484,14 @@ defmodule SpaceTraders.Fleet.Intents do
     end
   end
 
-  def reconcile(agent_id, ship_symbol, live_ship, trigger, expected_intent_id, expected_job_id) do
+  def reconcile_internal(
+        agent_id,
+        ship_symbol,
+        live_ship,
+        trigger,
+        expected_intent_id,
+        expected_job_id
+      ) do
     with %Ship{} = ship <- Repo.get_by(Ship, agent_id: agent_id, symbol: ship_symbol),
          %AgentRecord{} = agent <- Repo.get(AgentRecord, agent_id),
          :ok <- Agent.execution_allowed?(agent) do
@@ -476,6 +506,9 @@ defmodule SpaceTraders.Fleet.Intents do
         nil when trigger in [:arrival, :cooldown] ->
           Fleet.continue_job_event(agent_id, ship_symbol, live_ship, trigger, expected_job_id)
 
+        nil when trigger == :boot ->
+          Fleet.continue_job_event(agent_id, ship_symbol, live_ship, :boot, expected_job_id)
+
         _ ->
           :ok
       end
@@ -484,16 +517,51 @@ defmodule SpaceTraders.Fleet.Intents do
     end
   end
 
+  defp boot_read_and_reconcile(agent, ship, expected_intent_id, expected_job_id) do
+    case Agent.handle_game_result(
+           agent,
+           SpaceTraders.API.get_ship(agent.agent_token, ship.symbol)
+         ) do
+      {:ok, fresh_ship} ->
+        reconcile_internal(
+          agent.id,
+          ship.symbol,
+          fresh_ship,
+          :boot,
+          expected_intent_id,
+          expected_job_id
+        )
+
+      {:error, :stale_agent} ->
+        :ok
+
+      {:error, reason} ->
+        case expected_intent_id && Repo.get(Intent, expected_intent_id) do
+          %Intent{} = intent -> intent_recovery_retry_or_block(ship, intent, agent.id, reason)
+          _ -> :ok
+        end
+    end
+  end
+
+  # Internal continuation used by legacy Job integration tests and callers. Manual
+  # Control must use the scope-first reconcile/5 above.
+  @doc false
+  def reconcile(agent_id, ship_symbol, live_ship, trigger, expected_intent_id, expected_job_id),
+    do:
+      reconcile_internal(
+        agent_id,
+        ship_symbol,
+        live_ship,
+        trigger,
+        expected_intent_id,
+        expected_job_id
+      )
+
   @doc "Reconciles a Manual Control Intent after resolving the Ship under the Operator scope."
   def reconcile(%Scope{operator: operator}, ship_symbol, live_ship, trigger, expected_intent_id) do
     with %Ship{agent_id: agent_id} = ship <-
-           Repo.one(
-             from s in Ship,
-               join: agent in AgentRecord,
-               on: agent.id == s.agent_id,
-               where: s.symbol == ^ship_symbol and agent.operator_id == ^operator.id
-           ) do
-      reconcile(agent_id, ship.symbol, live_ship, trigger, expected_intent_id, nil)
+           owned_ship_for_operator(ship_symbol, operator.id) do
+      reconcile_internal(agent_id, ship.symbol, live_ship, trigger, expected_intent_id, nil)
     else
       nil -> {:error, :ship_not_owned}
     end
@@ -531,7 +599,8 @@ defmodule SpaceTraders.Fleet.Intents do
   end
 
   @doc "Lists current or historical Intents owned by the Operator."
-  def list(%Scope{operator: %{id: operator_id}}, kind) when kind in [:current, :history] do
+  def list(%Scope{operator: %{id: operator_id}}, %AgentRecord{id: agent_id}, kind)
+      when kind in [:current, :history] do
     states = if kind == :current, do: @unfinished_states, else: @terminal_states
 
     ownership =
@@ -543,9 +612,37 @@ defmodule SpaceTraders.Fleet.Intents do
     |> join(:inner, [intent], ship in Ship, on: ship.id == intent.ship_id)
     |> join(:inner, [_intent, ship], agent in AgentRecord, on: agent.id == ship.agent_id)
     |> where(^ownership)
+    |> where([_intent, _ship, agent], agent.id == ^agent_id)
     |> where([intent, _ship, _agent], intent.status in ^states)
     |> order_by(^if(kind == :current, do: [asc: :id], else: [desc: :finished_at, desc: :id]))
     |> Repo.all()
+  end
+
+  defp agent_for_operator(agent_id, nil) do
+    Repo.one(
+      from agent in AgentRecord, where: agent.id == ^agent_id and is_nil(agent.operator_id)
+    )
+  end
+
+  defp agent_for_operator(agent_id, operator_id),
+    do: Repo.get_by(AgentRecord, id: agent_id, operator_id: operator_id)
+
+  defp owned_ship_for_operator(ship_symbol, nil) do
+    Repo.one(
+      from s in Ship,
+        join: agent in AgentRecord,
+        on: agent.id == s.agent_id,
+        where: s.symbol == ^ship_symbol and is_nil(agent.operator_id)
+    )
+  end
+
+  defp owned_ship_for_operator(ship_symbol, operator_id) do
+    Repo.one(
+      from s in Ship,
+        join: agent in AgentRecord,
+        on: agent.id == s.agent_id,
+        where: s.symbol == ^ship_symbol and agent.operator_id == ^operator_id
+    )
   end
 
   defp normalize_owner(:manual), do: {:ok, :manual}
@@ -558,11 +655,6 @@ defmodule SpaceTraders.Fleet.Intents do
     do: :ok
 
   defp token_present(_agent), do: {:error, :agent_token_missing}
-
-  defp agent_owned_by_operator?(%AgentRecord{operator_id: operator_id}, %{id: operator_id}),
-    do: :ok
-
-  defp agent_owned_by_operator?(_agent, _operator), do: {:error, :agent_not_owned}
 
   defp valid_goal_waypoint(waypoint) when is_binary(waypoint) do
     case String.trim(waypoint) do
@@ -656,14 +748,6 @@ defmodule SpaceTraders.Fleet.Intents do
     do: :ok
 
   defp owner_matches?(_owner, _intent), do: {:error, :invalid_intent_owner}
-
-  defp intent_ship_matches?(%Intent{ship_id: ship_id}, ship_symbol) do
-    case Repo.get(Ship, ship_id) do
-      %Ship{symbol: ^ship_symbol} -> :ok
-      %Ship{} -> {:error, :intent_ship_mismatch}
-      nil -> {:error, :intent_not_found}
-    end
-  end
 
   defp validate_intent_waypoint(""), do: {:error, :invalid_waypoint}
   defp validate_intent_waypoint(_waypoint), do: :ok
@@ -887,24 +971,19 @@ defmodule SpaceTraders.Fleet.Intents do
 
   defp parse_review_revision(_value), do: {:error, :review_revision_stale}
 
-  defp owned_intent(%AgentRecord{id: agent_id}, intent_id) do
-    Repo.one(
-      from intent in Intent,
-        join: ship in Ship,
-        on: ship.id == intent.ship_id,
-        where: intent.id == ^intent_id and ship.agent_id == ^agent_id
-    )
-  end
-
   defp owned_intent_for_operator(operator_id, intent_id) do
+    ownership =
+      if is_nil(operator_id),
+        do: dynamic([_intent, _ship, agent], is_nil(agent.operator_id)),
+        else: dynamic([_intent, _ship, agent], agent.operator_id == ^operator_id)
+
     Repo.one(
-      from intent in Intent,
-        join: ship in Ship,
-        on: ship.id == intent.ship_id,
-        join: agent in AgentRecord,
-        on: agent.id == ship.agent_id,
-        where: intent.id == ^intent_id and agent.operator_id == ^operator_id,
-        select: {intent, agent}
+      Intent
+      |> join(:inner, [intent], ship in Ship, on: ship.id == intent.ship_id)
+      |> join(:inner, [_intent, ship], agent in AgentRecord, on: agent.id == ship.agent_id)
+      |> where([intent, _ship, _agent], intent.id == ^intent_id)
+      |> where(^ownership)
+      |> select([intent, _ship, agent], {intent, agent})
     )
   end
 
@@ -1758,28 +1837,6 @@ defmodule SpaceTraders.Fleet.Intents do
   end
 
   @doc false
-  defp terminalize_job_intent!(job) do
-    case unfinished_job_intent(job.id) do
-      %Intent{} = intent ->
-        # A claimed prerequisite can still be accepted by the game after this
-        # process yields. Preemption must wait for its authoritative outcome,
-        # just as it does for cargo mutations.
-        cond do
-          unresolved_cargo_action?(intent) ->
-            Repo.rollback(:cargo_operation_reconciliation_required)
-
-          unresolved_intent_evidence?(intent) ->
-            Repo.rollback(:intents_reconciliation_required)
-
-          true ->
-            terminalize_intents!(intent, "stopped")
-        end
-
-      nil ->
-        :ok
-    end
-  end
-
   defp unresolved_cargo_action?(intent) do
     is_map(intent.in_flight_action) and
       intent.in_flight_action["kind"] in ["buy", "sell", "deliver"]
@@ -2439,11 +2496,13 @@ defmodule SpaceTraders.Fleet.Intents do
   @doc false
   defp transition_intent(intent, attrs) do
     with_current_intent(intent, fn current ->
-      case Keyword.pop(attrs, :blocker) do
-        {nil, attrs} ->
+      case Keyword.has_key?(attrs, :blocker) do
+        false ->
           {:ok, Repo.update!(Ecto.Changeset.change(current, attrs))}
 
-        {blocker, attrs} ->
+        true ->
+          blocker = Keyword.get(attrs, :blocker)
+          attrs = Keyword.delete(attrs, :blocker)
           Repo.update!(Ecto.Changeset.change(current, attrs))
           Repo.update_all(from(i in Intent, where: i.id == ^current.id), set: [blocker: blocker])
           {:ok, Repo.get!(Intent, current.id)}
@@ -3836,7 +3895,7 @@ defmodule SpaceTraders.Fleet.Intents do
         "transport_error"
       )
 
-      recover_manual_intent_on_boot(ship_symbol, agent_id)
+      reconcile_internal(agent_id, ship_symbol, nil, :boot, intent.id, nil)
     else
       case Repo.transaction(
              fn ->
@@ -3961,31 +4020,6 @@ defmodule SpaceTraders.Fleet.Intents do
       nil -> {:error, :antimatter_unavailable}
       {:error, _reason} = error -> error
       _ -> {:error, :antimatter_unavailable}
-    end
-  end
-
-  # A restarted job-owned navigate Intent re-enters the same reconciliation from
-  # boot's fresh observation; recovery never replays a stored mutation.
-  defp recover_manual_intent_on_boot(ship_symbol, agent_id) do
-    with %Ship{} = ship <- Repo.get_by(Ship, symbol: ship_symbol, agent_id: agent_id),
-         %Intent{status: status} = intent when status != "awaiting_confirmation" <-
-           unfinished_manual_intent(ship.id),
-         %AgentRecord{} = agent <- Repo.get(AgentRecord, agent_id),
-         :ok <- Agent.execution_allowed?(agent) do
-      case Agent.handle_game_result(
-             agent,
-             SpaceTraders.API.get_ship(agent.agent_token, ship_symbol)
-           ) do
-        {:ok, live_ship} ->
-          reconcile(agent.id, ship_symbol, live_ship, :boot, intent.id, nil)
-
-        {:error, reason} ->
-          if reason == :stale_agent,
-            do: :ok,
-            else: intent_recovery_retry_or_block(ship, intent, agent_id, reason)
-      end
-    else
-      _ -> :ok
     end
   end
 

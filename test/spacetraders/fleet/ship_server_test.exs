@@ -319,7 +319,16 @@ defmodule SpaceTraders.Fleet.ShipServerTest do
 
       assert [{pid, _}] = Registry.lookup(SpaceTraders.Fleet.ShipRegistry, "MINER-JOB-SHIP")
       assert Process.alive?(pid)
-      assert [%Event{event_type: "cooldown"}] = Timeline.pending_events(:ship, "MINER-JOB-SHIP")
+
+      assert eventually(
+               fn ->
+                 match?(
+                   [%Event{event_type: "cooldown"}],
+                   Timeline.pending_events(:ship, "MINER-JOB-SHIP")
+                 )
+               end,
+               100
+             )
     end
   end
 

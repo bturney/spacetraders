@@ -4,6 +4,7 @@ defmodule SpaceTraders.FleetTest do
   use SpaceTraders.DataCase, async: false
 
   alias SpaceTraders.Agent.Agent, as: AgentRecord
+  alias SpaceTraders.Agent.Scope
   alias SpaceTraders.API.Model
   alias SpaceTraders.Fleet
   alias SpaceTraders.Fleet.Ship
@@ -25,11 +26,21 @@ defmodule SpaceTraders.FleetTest do
   end
 
   defp stop_current_intent(agent) do
-    case Intents.list(%SpaceTraders.Agent.Scope{operator: %{id: nil}}, :current) do
-      [%Intent{id: id} | _] -> Intents.stop(agent, %Intents.ManualControl{}, id)
-      [] -> {:error, :intents_not_active}
+    case Intents.list(%SpaceTraders.Agent.Scope{operator: %{id: nil}}, agent, :current) do
+      [%Intent{id: id} | _] ->
+        Intents.stop(
+          %SpaceTraders.Agent.Scope{operator: %{id: nil}},
+          %Intents.ManualControl{},
+          id
+        )
+
+      [] ->
+        {:error, :intents_not_active}
     end
   end
+
+  defp scope_for(%AgentRecord{operator_id: operator_id}),
+    do: %Scope{operator: %{id: operator_id}}
 
   defp agent_fixture(token \\ "AGENT_TOKEN") do
     Repo.insert!(%AgentRecord{
@@ -155,7 +166,14 @@ defmodule SpaceTraders.FleetTest do
       end
     end)
 
-    assert {:ok, _} = Fleet.recover_job_on_boot("FLEET-SHIP", agent.id, agent.agent_token)
+    assert {:ok, _} =
+             Intents.reconcile(
+               %SpaceTraders.Agent.Scope{operator: %{id: nil}},
+               "FLEET-SHIP",
+               nil,
+               :boot,
+               nil
+             )
 
     assert_receive {:api_request, "/v2/my/ships/FLEET-SHIP"}
     assert_receive {:api_request, "/v2/my/ships/FLEET-SHIP/orbit"}
@@ -762,7 +780,7 @@ defmodule SpaceTraders.FleetTest do
       # The scheduled arrival trigger names the Intent; reconciliation validates
       # the identity, completes the Intent, and continues the owning Job.
       assert [%Intent{id: arrival_intent_id, type: "navigate"}] =
-               Intents.list(%SpaceTraders.Agent.Scope{operator: %{id: nil}}, :current)
+               Intents.list(%SpaceTraders.Agent.Scope{operator: %{id: nil}}, agent, :current)
 
       assert {:ok,
               %Job{
@@ -1197,7 +1215,14 @@ defmodule SpaceTraders.FleetTest do
         end
       end)
 
-      assert {:ok, _} = Fleet.recover_job_on_boot("FLEET-SHIP", agent.id, agent.agent_token)
+      assert {:ok, _} =
+               Intents.reconcile(
+                 %SpaceTraders.Agent.Scope{operator: %{id: nil}},
+                 "FLEET-SHIP",
+                 nil,
+                 :boot,
+                 nil
+               )
 
       assert_receive {:api_request, "/v2/my/ships/FLEET-SHIP"}
       assert_receive {:api_request, "/v2/my/ships/FLEET-SHIP/siphon"}
@@ -1975,7 +2000,15 @@ defmodule SpaceTraders.FleetTest do
         })
       end)
 
-      assert {:ok, _} = Fleet.recover_job_on_boot("FLEET-SHIP", agent.id, agent.agent_token)
+      assert {:ok, _} =
+               Intents.reconcile(
+                 %SpaceTraders.Agent.Scope{operator: %{id: nil}},
+                 "FLEET-SHIP",
+                 nil,
+                 :boot,
+                 nil
+               )
+
       recovered = Fleet.ship_job(agent, "FLEET-SHIP")
       assert recovered.last_action_result == %{"kind" => "recovery", "outcome" => "confirmed"}
       assert recovered.recovery_attempts == 0
@@ -2041,7 +2074,13 @@ defmodule SpaceTraders.FleetTest do
       end)
 
       assert {:error, :miner_job_recovery_blocked} =
-               Fleet.recover_job_on_boot("FLEET-SHIP", agent.id, agent.agent_token)
+               Intents.reconcile(
+                 %SpaceTraders.Agent.Scope{operator: %{id: nil}},
+                 "FLEET-SHIP",
+                 nil,
+                 :boot,
+                 nil
+               )
 
       recovered = Fleet.ship_job(agent, "FLEET-SHIP")
       assert recovered.status == "blocked"
@@ -3079,7 +3118,13 @@ defmodule SpaceTraders.FleetTest do
       end)
 
       assert {:ok, %Job{status: "waiting", in_flight_action: %{"kind" => "navigate"}}} =
-               Fleet.recover_job_on_boot("FLEET-SHIP", agent.id, agent.agent_token)
+               Intents.reconcile(
+                 %SpaceTraders.Agent.Scope{operator: %{id: nil}},
+                 "FLEET-SHIP",
+                 nil,
+                 :boot,
+                 nil
+               )
 
       assert [%Activity{kind: "miner_job_recovery", message: message}] =
                Repo.all(from a in Activity, order_by: [desc: a.id], limit: 1)
@@ -3248,7 +3293,7 @@ defmodule SpaceTraders.FleetTest do
 
       assert_receive :fresh_sale_listing
       assert_receive {:sale, %{"symbol" => "IRON_ORE", "units" => 30}}
-      assert Intents.list(%SpaceTraders.Agent.Scope{operator: %{id: nil}}, :current) == []
+      assert Intents.list(%SpaceTraders.Agent.Scope{operator: %{id: nil}}, agent, :current) == []
       configured_job_id = configured_job.id
 
       assert %Intent{
@@ -4665,6 +4710,7 @@ defmodule SpaceTraders.FleetTest do
 
       assert {:ok, %Intent{type: "install_module", status: "completed"} = intent} =
                Intents.request(
+                 scope_for(agent),
                  agent,
                  %Intents.ManualControl{},
                  "FLEET-SHIP",
@@ -4688,6 +4734,7 @@ defmodule SpaceTraders.FleetTest do
 
       assert {:error, :invalid_module_intent} =
                Intents.request(
+                 scope_for(agent),
                  agent,
                  %Intents.ManualControl{},
                  "FLEET-SHIP",
@@ -4699,6 +4746,7 @@ defmodule SpaceTraders.FleetTest do
 
       assert {:error, :invalid_module_intent} =
                Intents.request(
+                 scope_for(agent),
                  agent,
                  %Intents.ManualControl{},
                  "FLEET-SHIP",
@@ -4757,6 +4805,7 @@ defmodule SpaceTraders.FleetTest do
 
       assert {:ok, %Intent{type: "remove_module", status: "completed"}} =
                Intents.request(
+                 scope_for(agent),
                  agent,
                  %Intents.ManualControl{},
                  "FLEET-SHIP",
@@ -4808,6 +4857,7 @@ defmodule SpaceTraders.FleetTest do
 
       assert {:error, :intents_reconciliation_required} =
                Intents.request(
+                 scope_for(agent),
                  agent,
                  %Intents.ManualControl{},
                  "FLEET-SHIP",
@@ -4815,7 +4865,7 @@ defmodule SpaceTraders.FleetTest do
                )
 
       assert [%Intent{status: "blocked", in_flight_action: action}] =
-               Intents.list(%SpaceTraders.Agent.Scope{operator: %{id: nil}}, :current)
+               Intents.list(%SpaceTraders.Agent.Scope{operator: %{id: nil}}, agent, :current)
 
       assert action["kind"] == "install_module"
     end
@@ -4858,6 +4908,7 @@ defmodule SpaceTraders.FleetTest do
 
       assert {:ok, %Intent{status: "completed", last_action_result: result}} =
                Intents.request(
+                 scope_for(agent),
                  agent,
                  %Intents.ManualControl{},
                  "FLEET-SHIP",
@@ -4895,6 +4946,7 @@ defmodule SpaceTraders.FleetTest do
 
       assert {:error, :intents_reconciliation_required} =
                Intents.request(
+                 scope_for(agent),
                  agent,
                  %Intents.ManualControl{},
                  "FLEET-SHIP",
@@ -4988,6 +5040,7 @@ defmodule SpaceTraders.FleetTest do
 
       assert {:ok, %Intent{type: "buy", status: "completed"} = intent} =
                Intents.request(
+                 scope_for(agent),
                  agent,
                  %Intents.ManualControl{},
                  "FLEET-SHIP",
@@ -5017,6 +5070,7 @@ defmodule SpaceTraders.FleetTest do
 
       assert {:error, :invalid_cargo_intent_owner} =
                Intents.request(
+                 scope_for(agent),
                  agent,
                  %Intents.JobOwner{job: %Job{id: -1, ship_id: ship.id}},
                  "FLEET-SHIP",
@@ -5084,6 +5138,7 @@ defmodule SpaceTraders.FleetTest do
 
       assert {:ok, %Intent{status: "completed", last_action_result: result}} =
                Intents.request(
+                 scope_for(agent),
                  agent,
                  %Intents.ManualControl{},
                  "FLEET-SHIP",
@@ -5122,6 +5177,7 @@ defmodule SpaceTraders.FleetTest do
 
       assert {:ok, %Intent{status: "blocked"}} =
                Intents.request(
+                 scope_for(agent),
                  agent,
                  %Intents.ManualControl{},
                  ship.symbol,
@@ -5171,6 +5227,7 @@ defmodule SpaceTraders.FleetTest do
 
       assert {:ok, %Intent{type: "sell", status: "blocked", blocker: blocker}} =
                Intents.request(
+                 scope_for(agent),
                  agent,
                  %Intents.ManualControl{},
                  "FLEET-SHIP",
@@ -5228,6 +5285,7 @@ defmodule SpaceTraders.FleetTest do
 
       assert {:ok, %Intent{type: "deliver", status: "completed"} = intent} =
                Intents.request(
+                 scope_for(agent),
                  agent,
                  %Intents.ManualControl{},
                  "FLEET-SHIP",
@@ -5301,6 +5359,7 @@ defmodule SpaceTraders.FleetTest do
 
       assert {:ok, %Intent{type: "deliver", status: "completed"} = intent} =
                Intents.request(
+                 scope_for(agent),
                  agent,
                  %Intents.ManualControl{},
                  "FLEET-SHIP",
@@ -5372,7 +5431,13 @@ defmodule SpaceTraders.FleetTest do
       end)
 
       assert {:ok, %Intent{status: "completed", last_action_result: result}} =
-               Intents.reconcile(agent.id, "FLEET-SHIP", nil, :boot, nil, nil)
+               Intents.reconcile(
+                 %SpaceTraders.Agent.Scope{operator: %{id: nil}},
+                 "FLEET-SHIP",
+                 nil,
+                 :boot,
+                 nil
+               )
 
       assert %{"kind" => "deliver", "units" => 3} = result
     end
@@ -5408,7 +5473,13 @@ defmodule SpaceTraders.FleetTest do
       end)
 
       assert {:ok, %Intent{status: "blocked", blocker: blocker}} =
-               Intents.reconcile(agent.id, "FLEET-SHIP", nil, :boot, nil, nil)
+               Intents.reconcile(
+                 %SpaceTraders.Agent.Scope{operator: %{id: nil}},
+                 "FLEET-SHIP",
+                 nil,
+                 :boot,
+                 nil
+               )
 
       assert blocker.reason == "ambiguous_operation_evidence"
       assert Repo.get!(Intent, intent.id).last_action_result["error"] =~ "ambiguous"
@@ -5454,6 +5525,7 @@ defmodule SpaceTraders.FleetTest do
 
       assert {:ok, %Intent{status: "blocked", in_flight_action: action}} =
                Intents.request(
+                 scope_for(agent),
                  agent,
                  %Intents.ManualControl{},
                  "FLEET-SHIP",
@@ -5532,6 +5604,7 @@ defmodule SpaceTraders.FleetTest do
 
       assert {:ok, %Intent{status: "blocked", in_flight_action: action}} =
                Intents.request(
+                 scope_for(agent),
                  agent,
                  %Intents.ManualControl{},
                  "FLEET-SHIP",

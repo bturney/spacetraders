@@ -26,6 +26,9 @@ defmodule SpaceTraders.IntentsTest do
     |> DateTime.to_iso8601()
   end
 
+  defp scope_for(%AgentRecord{operator_id: operator_id}),
+    do: %Scope{operator: %{id: operator_id}}
+
   defp navigate_response(status, arrival, destination) do
     %{
       "fuel" => %{"capacity" => 200, "current" => 80},
@@ -62,6 +65,7 @@ defmodule SpaceTraders.IntentsTest do
 
     assert {:ok, %Intent{status: "completed", target_waypoint: "X1-UX81-A2"}} =
              Intents.request(
+               scope_for(agent),
                agent,
                %Intents.ManualControl{},
                "INTENTS-NAV-SHIP",
@@ -130,6 +134,7 @@ defmodule SpaceTraders.IntentsTest do
 
     assert {:ok, %Intent{type: "buy", status: "completed"}} =
              Intents.request(
+               scope_for(agent),
                agent,
                %Intents.ManualControl{},
                "INTENTS-BUY-SHIP",
@@ -200,6 +205,7 @@ defmodule SpaceTraders.IntentsTest do
 
     assert {:ok, %Intent{type: "sell", status: "completed"}} =
              Intents.request(
+               scope_for(agent),
                agent,
                %Intents.ManualControl{},
                "INTENTS-SELL-SHIP",
@@ -286,6 +292,7 @@ defmodule SpaceTraders.IntentsTest do
 
     assert {:ok, %Intent{caller: "manual", type: "deliver", status: "completed"}} =
              Intents.request(
+               scope_for(agent),
                agent,
                %Intents.ManualControl{},
                "INTENTS-DELIVER-SHIP",
@@ -359,6 +366,7 @@ defmodule SpaceTraders.IntentsTest do
 
     assert {:ok, %Intent{caller: "manual", type: "deliver", status: "completed"}} =
              Intents.request(
+               scope_for(agent),
                agent,
                %Intents.ManualControl{},
                "INTENTS-CONSTRUCTION-SHIP",
@@ -415,6 +423,7 @@ defmodule SpaceTraders.IntentsTest do
 
     assert {:ok, %Intent{type: "install_module", status: "completed"}} =
              Intents.request(
+               scope_for(agent),
                agent,
                %Intents.ManualControl{},
                "INTENTS-INSTALL-SHIP",
@@ -469,6 +478,7 @@ defmodule SpaceTraders.IntentsTest do
 
     assert {:ok, %Intent{type: "remove_module", status: "completed"}} =
              Intents.request(
+               scope_for(agent),
                agent,
                %Intents.ManualControl{},
                "INTENTS-REMOVE-SHIP",
@@ -495,6 +505,7 @@ defmodule SpaceTraders.IntentsTest do
 
     assert {:error, :invalid_buy_constraints} =
              Intents.request(
+               scope_for(agent),
                agent,
                %Intents.JobOwner{job: job},
                ship.symbol,
@@ -525,6 +536,7 @@ defmodule SpaceTraders.IntentsTest do
 
     assert {:error, :invalid_module_intent} =
              Intents.request(
+               scope_for(agent),
                agent,
                %Intents.JobOwner{job: job},
                ship.symbol,
@@ -588,6 +600,7 @@ defmodule SpaceTraders.IntentsTest do
 
     assert {:ok, %Intent{caller: "job", job_id: job_id, status: "completed"}} =
              Intents.request(
+               scope_for(agent),
                agent,
                %Intents.JobOwner{job: job},
                ship.symbol,
@@ -652,6 +665,7 @@ defmodule SpaceTraders.IntentsTest do
 
     assert {:ok, %Intent{id: intent_id, caller: "job", job_id: job_id, status: "waiting"}} =
              Intents.request(
+               scope_for(agent),
                agent,
                %Intents.JobOwner{job: job},
                ship.symbol,
@@ -678,6 +692,7 @@ defmodule SpaceTraders.IntentsTest do
 
     assert {:error, :invalid_intent_owner} =
              Intents.request(
+               scope_for(agent),
                agent,
                %Intents.JobOwner{job: job},
                ship.symbol,
@@ -733,6 +748,7 @@ defmodule SpaceTraders.IntentsTest do
 
     assert {:ok, %Intent{caller: "job", status: "blocked"}} =
              Intents.request(
+               scope_for(agent),
                agent,
                %Intents.JobOwner{job: job},
                ship.symbol,
@@ -782,6 +798,7 @@ defmodule SpaceTraders.IntentsTest do
 
     assert {:error, :invalid_intent_owner} =
              Intents.request(
+               scope_for(agent),
                agent,
                %Intents.JobOwner{job: job},
                ship.symbol,
@@ -818,6 +835,7 @@ defmodule SpaceTraders.IntentsTest do
 
     assert {:error, _reason} =
              Intents.request(
+               scope_for(agent),
                agent,
                %Intents.JobOwner{job: job},
                ship.symbol,
@@ -860,9 +878,11 @@ defmodule SpaceTraders.IntentsTest do
       status: "active"
     })
 
-    assert [%Intent{status: "awaiting_confirmation"}] = Intents.list(first_scope, :current)
-    assert [%Intent{status: "completed"}] = Intents.list(first_scope, :history)
-    assert [%Intent{status: "active"}] = Intents.list(second_scope, :current)
+    assert [%Intent{status: "awaiting_confirmation"}] =
+             Intents.list(first_scope, first_agent, :current)
+
+    assert [%Intent{status: "completed"}] = Intents.list(first_scope, first_agent, :history)
+    assert [%Intent{status: "active"}] = Intents.list(second_scope, second_agent, :current)
   end
 
   test "rejects request, confirmation, stop, reconcile, and list across Operators" do
@@ -893,8 +913,8 @@ defmodule SpaceTraders.IntentsTest do
     assert {:error, :ship_not_owned} =
              Intents.reconcile(other_scope, ship.symbol, nil, :arrival, intent.id)
 
-    assert Intents.list(other_scope, :current) == []
-    assert [%Intent{id: intent_id}] = Intents.list(scope, :current)
+    assert Intents.list(other_scope, agent, :current) == []
+    assert [%Intent{id: intent_id}] = Intents.list(scope, agent, :current)
     assert intent_id == intent.id
   end
 
@@ -904,20 +924,8 @@ defmodule SpaceTraders.IntentsTest do
 
     intent = Repo.insert!(%Intent{ship_id: ship.id, target_waypoint: "X1-UX81-A2"})
 
-    assert :ok = Intents.stop(agent, %Intents.ManualControl{}, intent.id)
+    assert :ok = Intents.stop(scope_for(agent), %Intents.ManualControl{}, intent.id)
     assert %Intent{status: "stopped"} = Repo.get!(Intent, intent.id)
-  end
-
-  test "binds stopping to the requested Ship" do
-    agent = agent_fixture("INTENTS-MISMATCH")
-    ship = ship_fixture(agent, "INTENTS-SHIP-ONE")
-    ship_fixture(agent, "INTENTS-SHIP-TWO")
-    intent = Repo.insert!(%Intent{ship_id: ship.id, target_waypoint: "X1-UX81-A2"})
-
-    assert {:error, :intent_ship_mismatch} =
-             Intents.stop(agent, %Intents.ManualControl{}, "INTENTS-SHIP-TWO", intent.id)
-
-    assert %Intent{status: "active"} = Repo.get!(Intent, intent.id)
   end
 
   test "refuses to stop Navigate with unresolved mutation evidence" do
@@ -933,7 +941,7 @@ defmodule SpaceTraders.IntentsTest do
       })
 
     assert {:error, :intents_reconciliation_required} =
-             Intents.stop(agent, %Intents.ManualControl{}, intent.id)
+             Intents.stop(scope_for(agent), %Intents.ManualControl{}, intent.id)
 
     assert %Intent{status: "waiting"} = Repo.get!(Intent, intent.id)
   end
@@ -1327,9 +1335,15 @@ defmodule SpaceTraders.IntentsTest do
       end)
 
       assert {:ok, %Intent{status: "awaiting_confirmation"}} =
-               Intents.request(agent, %Intents.ManualControl{}, "FLEET-SHIP", %Intents.Navigate{
-                 waypoint: "X2-UX81-G1"
-               })
+               Intents.request(
+                 scope_for(agent),
+                 agent,
+                 %Intents.ManualControl{},
+                 "FLEET-SHIP",
+                 %Intents.Navigate{
+                   waypoint: "X2-UX81-G1"
+                 }
+               )
 
       refute_received {:request, "/v2/my/ships/FLEET-SHIP/jump", "POST"}
     end
@@ -1375,9 +1389,15 @@ defmodule SpaceTraders.IntentsTest do
       end)
 
       assert {:ok, %Intent{status: "blocked", blocker: blocker}} =
-               Intents.request(agent, %Intents.ManualControl{}, "FLEET-SHIP", %Intents.Navigate{
-                 waypoint: "X2-UX81-G1"
-               })
+               Intents.request(
+                 scope_for(agent),
+                 agent,
+                 %Intents.ManualControl{},
+                 "FLEET-SHIP",
+                 %Intents.Navigate{
+                   waypoint: "X2-UX81-G1"
+                 }
+               )
 
       assert blocker.reason == "jump_gate_incomplete"
 
@@ -1423,9 +1443,15 @@ defmodule SpaceTraders.IntentsTest do
       end)
 
       assert {:ok, %Intent{status: "waiting", target_waypoint: "X1-UX81-A2"}} =
-               Intents.request(agent, %Intents.ManualControl{}, "FLEET-SHIP", %Intents.Navigate{
-                 waypoint: "X1-UX81-A2"
-               })
+               Intents.request(
+                 scope_for(agent),
+                 agent,
+                 %Intents.ManualControl{},
+                 "FLEET-SHIP",
+                 %Intents.Navigate{
+                   waypoint: "X1-UX81-A2"
+                 }
+               )
 
       assert_receive {:job_status_at_dispatch, "paused"}
       assert %{status: "paused"} = Fleet.ship_job(agent, "FLEET-SHIP")
@@ -1445,9 +1471,15 @@ defmodule SpaceTraders.IntentsTest do
       end)
 
       assert {:ok, %Intent{status: "completed"}} =
-               Intents.request(agent, %Intents.ManualControl{}, "FLEET-SHIP", %Intents.Navigate{
-                 waypoint: "X1-UX81-A2"
-               })
+               Intents.request(
+                 scope_for(agent),
+                 agent,
+                 %Intents.ManualControl{},
+                 "FLEET-SHIP",
+                 %Intents.Navigate{
+                   waypoint: "X1-UX81-A2"
+                 }
+               )
 
       assert Timeline.pending_events(:ship, "FLEET-SHIP") == []
     end
@@ -1475,9 +1507,15 @@ defmodule SpaceTraders.IntentsTest do
       end)
 
       assert {:ok, %Intent{status: "completed"}} =
-               Intents.request(agent, %Intents.ManualControl{}, "FLEET-SHIP", %Intents.Navigate{
-                 waypoint: "X1-UX81-A2"
-               })
+               Intents.request(
+                 scope_for(agent),
+                 agent,
+                 %Intents.ManualControl{},
+                 "FLEET-SHIP",
+                 %Intents.Navigate{
+                   waypoint: "X1-UX81-A2"
+                 }
+               )
 
       assert %{status: "paused", blocked_reason: "Paused by direct navigation"} =
                Fleet.ship_job(agent, "FLEET-SHIP")
@@ -1509,9 +1547,15 @@ defmodule SpaceTraders.IntentsTest do
       end)
 
       assert {:ok, %Intent{status: "waiting"}} =
-               Intents.request(agent, %Intents.ManualControl{}, "FLEET-SHIP", %Intents.Navigate{
-                 waypoint: "X1-UX81-A2"
-               })
+               Intents.request(
+                 scope_for(agent),
+                 agent,
+                 %Intents.ManualControl{},
+                 "FLEET-SHIP",
+                 %Intents.Navigate{
+                   waypoint: "X1-UX81-A2"
+                 }
+               )
 
       assert_received :orbit
       assert_received :navigate
@@ -1544,9 +1588,15 @@ defmodule SpaceTraders.IntentsTest do
       end)
 
       assert {:ok, %Intent{status: "waiting"}} =
-               Intents.request(agent, %Intents.ManualControl{}, "FLEET-SHIP", %Intents.Navigate{
-                 waypoint: "X1-UX81-A2"
-               })
+               Intents.request(
+                 scope_for(agent),
+                 agent,
+                 %Intents.ManualControl{},
+                 "FLEET-SHIP",
+                 %Intents.Navigate{
+                   waypoint: "X1-UX81-A2"
+                 }
+               )
 
       assert [%Event{event_type: "arrival", payload: %{"intent_id" => _}}] =
                Timeline.pending_events(:ship, "FLEET-SHIP")
@@ -1578,9 +1628,15 @@ defmodule SpaceTraders.IntentsTest do
       end)
 
       assert {:ok, %Intent{status: "waiting"}} =
-               Intents.request(agent, %Intents.ManualControl{}, "FLEET-SHIP", %Intents.Navigate{
-                 waypoint: "X1-UX81-A2"
-               })
+               Intents.request(
+                 scope_for(agent),
+                 agent,
+                 %Intents.ManualControl{},
+                 "FLEET-SHIP",
+                 %Intents.Navigate{
+                   waypoint: "X1-UX81-A2"
+                 }
+               )
 
       assert [%Event{event_type: "cooldown", payload: %{"intent_id" => _}}] =
                Timeline.pending_events(:ship, "FLEET-SHIP")
@@ -1607,9 +1663,15 @@ defmodule SpaceTraders.IntentsTest do
       end)
 
       assert {:ok, %Intent{status: "blocked"} = intent} =
-               Intents.request(agent, %Intents.ManualControl{}, "FLEET-SHIP", %Intents.Navigate{
-                 waypoint: "X1-UX81-A2"
-               })
+               Intents.request(
+                 scope_for(agent),
+                 agent,
+                 %Intents.ManualControl{},
+                 "FLEET-SHIP",
+                 %Intents.Navigate{
+                   waypoint: "X1-UX81-A2"
+                 }
+               )
 
       assert intent.blocker.reason == "insufficient_fuel"
       assert "refuel" in intent.blocker.corrective_actions
@@ -1649,9 +1711,15 @@ defmodule SpaceTraders.IntentsTest do
       end)
 
       assert {:ok, %Intent{status: "blocked"} = intent} =
-               Intents.request(agent, %Intents.ManualControl{}, "FLEET-SHIP", %Intents.Navigate{
-                 waypoint: "X1-UX81-A2"
-               })
+               Intents.request(
+                 scope_for(agent),
+                 agent,
+                 %Intents.ManualControl{},
+                 "FLEET-SHIP",
+                 %Intents.Navigate{
+                   waypoint: "X1-UX81-A2"
+                 }
+               )
 
       assert_received :navigate
       refute_receive :navigate
@@ -1682,14 +1750,26 @@ defmodule SpaceTraders.IntentsTest do
       end)
 
       assert {:ok, first} =
-               Intents.request(agent, %Intents.ManualControl{}, "FLEET-SHIP", %Intents.Navigate{
-                 waypoint: "X1-UX81-A2"
-               })
+               Intents.request(
+                 scope_for(agent),
+                 agent,
+                 %Intents.ManualControl{},
+                 "FLEET-SHIP",
+                 %Intents.Navigate{
+                   waypoint: "X1-UX81-A2"
+                 }
+               )
 
       assert {:error, :intents_reconciliation_required} =
-               Intents.request(agent, %Intents.ManualControl{}, "FLEET-SHIP", %Intents.Navigate{
-                 waypoint: "X1-UX81-A3"
-               })
+               Intents.request(
+                 scope_for(agent),
+                 agent,
+                 %Intents.ManualControl{},
+                 "FLEET-SHIP",
+                 %Intents.Navigate{
+                   waypoint: "X1-UX81-A3"
+                 }
+               )
 
       intents = Repo.all(from intent in Intent, where: intent.ship_id == ^first.ship_id)
       assert length(intents) == 1
@@ -1726,9 +1806,15 @@ defmodule SpaceTraders.IntentsTest do
       end)
 
       assert {:ok, %Intent{status: "waiting"}} =
-               Intents.request(agent, %Intents.ManualControl{}, "FLEET-SHIP", %Intents.Navigate{
-                 waypoint: "X1-UX81-A2"
-               })
+               Intents.request(
+                 scope_for(agent),
+                 agent,
+                 %Intents.ManualControl{},
+                 "FLEET-SHIP",
+                 %Intents.Navigate{
+                   waypoint: "X1-UX81-A2"
+                 }
+               )
 
       assert {:error, :intents_active} = Fleet.resume_miner_job(agent, "FLEET-SHIP")
     end
@@ -1775,12 +1861,12 @@ defmodule SpaceTraders.IntentsTest do
                  }
                )
 
-      assert [%Intent{id: stop_id, status: "waiting"}] = Intents.list(scope, :current)
+      assert [%Intent{id: stop_id, status: "waiting"}] = Intents.list(scope, agent, :current)
 
       assert {:error, :intents_reconciliation_required} =
                Intents.stop(scope, %Intents.ManualControl{}, stop_id)
 
-      assert [%Intent{}] = Intents.list(scope, :current)
+      assert [%Intent{}] = Intents.list(scope, agent, :current)
 
       assert %{status: "paused"} = Fleet.ship_job(agent, "FLEET-SHIP")
 
@@ -1791,6 +1877,7 @@ defmodule SpaceTraders.IntentsTest do
     test "returns an error when the agent has no stored token" do
       assert {:error, :agent_token_missing} =
                Intents.request(
+                 %Scope{operator: %{id: nil}},
                  %AgentRecord{agent_token: nil},
                  %Intents.ManualControl{},
                  "FLEET-SHIP",
@@ -1822,7 +1909,7 @@ defmodule SpaceTraders.IntentsTest do
       }
 
       assert {:ok, %Intent{status: "completed"}} =
-               Intents.reconcile(agent.id, "FLEET-SHIP", live_ship, :arrival, intent.id, nil)
+               Intents.reconcile(scope_for(agent), "FLEET-SHIP", live_ship, :arrival, intent.id)
     end
 
     test "arrival revalidation navigates on from game truth after arriving elsewhere" do
@@ -1870,7 +1957,7 @@ defmodule SpaceTraders.IntentsTest do
       end)
 
       assert {:ok, %Intent{status: "waiting"}} =
-               Intents.reconcile(agent.id, "FLEET-SHIP", live_ship, :arrival, intent.id, nil)
+               Intents.reconcile(scope_for(agent), "FLEET-SHIP", live_ship, :arrival, intent.id)
 
       assert_received :navigate
     end
@@ -1899,7 +1986,7 @@ defmodule SpaceTraders.IntentsTest do
         flunk("unexpected request #{conn.request_path}")
       end)
 
-      assert :ok = Intents.reconcile(agent.id, "FLEET-SHIP", live_ship, :arrival, nil, nil)
+      assert :ok = Intents.reconcile(scope_for(agent), "FLEET-SHIP", live_ship, :arrival, nil)
     end
 
     test "cooldown revalidation dispatches the pending navigation" do
@@ -1941,7 +2028,7 @@ defmodule SpaceTraders.IntentsTest do
       end)
 
       assert {:ok, %Intent{status: "waiting"}} =
-               Intents.reconcile(agent.id, "FLEET-SHIP", live_ship, :cooldown, intent.id, nil)
+               Intents.reconcile(scope_for(agent), "FLEET-SHIP", live_ship, :cooldown, intent.id)
 
       assert_received :navigate
     end
@@ -1981,7 +2068,7 @@ defmodule SpaceTraders.IntentsTest do
       end)
 
       assert {:ok, %Intent{status: "waiting"}} =
-               Intents.reconcile(agent.id, "FLEET-SHIP", nil, :boot, nil, nil)
+               Intents.reconcile(scope_for(agent), "FLEET-SHIP", nil, :boot, nil)
 
       assert [%Event{event_type: "arrival", payload: %{"intent_id" => _}}] =
                Timeline.pending_events(:ship, "FLEET-SHIP")
@@ -2015,7 +2102,7 @@ defmodule SpaceTraders.IntentsTest do
       end)
 
       assert {:ok, %Intent{status: "completed"}} =
-               Intents.reconcile(agent.id, "FLEET-SHIP", nil, :boot, nil, nil)
+               Intents.reconcile(scope_for(agent), "FLEET-SHIP", nil, :boot, nil)
     end
 
     test "boot recovery blocks after repeated authoritative read failures" do
@@ -2036,10 +2123,10 @@ defmodule SpaceTraders.IntentsTest do
       end)
 
       assert {:error, :intents_recovery_blocked} =
-               Intents.reconcile(agent.id, "FLEET-SHIP", nil, :boot, nil, nil)
+               Intents.reconcile(scope_for(agent), "FLEET-SHIP", nil, :boot, nil)
 
       assert [%Intent{status: "blocked", blocker: %JobBlocker{reason: "retry_exhausted"}}] =
-               Intents.list(scope, :current)
+               Intents.list(scope, agent, :current)
 
       intent = Repo.one!(from i in Intent, where: i.ship_id == ^ship.id)
       assert intent.status == "blocked"

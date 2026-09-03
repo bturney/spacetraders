@@ -18,6 +18,7 @@ defmodule SpaceTraders.Fleet do
   require Logger
 
   alias SpaceTraders.Agent.Agent, as: AgentRecord
+  alias SpaceTraders.Agent.Scope
   alias SpaceTraders.API.Model.{Market, ShipCargo, ShipNav}
 
   alias SpaceTraders.Fleet.{
@@ -259,14 +260,14 @@ defmodule SpaceTraders.Fleet do
 
   defp intents_for_ships(agent) do
     %SpaceTraders.Agent.Scope{operator: %{id: agent.operator_id}}
-    |> SpaceTraders.Fleet.Intents.list(:current)
+    |> SpaceTraders.Fleet.Intents.list(agent, :current)
     |> Enum.filter(&(&1.caller == "manual"))
     |> Map.new(&{&1.ship_id, &1})
   end
 
   defp intents_history_for_ships(agent) do
     %SpaceTraders.Agent.Scope{operator: %{id: agent.operator_id}}
-    |> SpaceTraders.Fleet.Intents.list(:history)
+    |> SpaceTraders.Fleet.Intents.list(agent, :history)
     |> Enum.filter(&(&1.caller == "manual"))
     |> Enum.group_by(& &1.ship_id)
   end
@@ -687,6 +688,7 @@ defmodule SpaceTraders.Fleet do
 
     with {:ok, intent} <-
            SpaceTraders.Fleet.Intents.request(
+             job_scope(agent),
              agent,
              %SpaceTraders.Fleet.Intents.JobOwner{job: job},
              live_ship.symbol,
@@ -729,7 +731,14 @@ defmodule SpaceTraders.Fleet do
   end
 
   defp reconcile_outfitting_intent(agent, job, intent, live_ship) do
-    case Intents.reconcile(agent.id, live_ship.symbol, live_ship, :job, intent.id, job.id) do
+    case Intents.reconcile_internal(
+           agent.id,
+           live_ship.symbol,
+           live_ship,
+           :job,
+           intent.id,
+           job.id
+         ) do
       {:ok, intent} -> advance_outfitting_after_intent(agent, job, intent)
       :ok -> :ok
       {:error, reason} -> mark_outfitting_job_blocked(job, reason)
@@ -1033,7 +1042,14 @@ defmodule SpaceTraders.Fleet do
                  parameters: params
                }),
              {:ok, intent} <-
-               Intents.reconcile(agent.id, live_ship.symbol, live_ship, :job, intent.id, job.id) do
+               Intents.reconcile_internal(
+                 agent.id,
+                 live_ship.symbol,
+                 live_ship,
+                 :job,
+                 intent.id,
+                 job.id
+               ) do
           {:ok,
            Repo.update!(
              Ecto.Changeset.change(job,
@@ -1344,7 +1360,7 @@ defmodule SpaceTraders.Fleet do
          true <- Job.running?(current_job) or current_job.status == "paused",
          %Intent{} = current_intent <- unfinished_intent(intent.id),
          reconciliation <-
-           Intents.reconcile(
+           Intents.reconcile_internal(
              agent.id,
              live_ship.symbol,
              live_ship,
@@ -1420,7 +1436,10 @@ defmodule SpaceTraders.Fleet do
          %Job{type: ^type} = job <- unfinished_job(ship.id) do
       case Repo.transaction(
              fn ->
-               terminalize_job_intent!(job)
+               case stop_job_intent(agent, job) do
+                 :ok -> :ok
+                 {:error, reason} -> Repo.rollback(reason)
+               end
 
                Repo.update!(
                  Ecto.Changeset.change(job,
@@ -1449,7 +1468,11 @@ defmodule SpaceTraders.Fleet do
          %Job{type: ^type} = job <- unfinished_job(ship.id) do
       case Repo.transaction(
              fn ->
-               terminalize_job_intent!(job)
+               case stop_job_intent(agent, job) do
+                 :ok -> :ok
+                 {:error, reason} -> Repo.rollback(reason)
+               end
+
                terminalize_job!(job, "stopped")
              end,
              mode: :immediate
@@ -1641,6 +1664,7 @@ defmodule SpaceTraders.Fleet do
 
     if get_in(parameters, ["recipient", "type"]) == "construction" do
       Intents.request(
+        job_scope(agent),
         agent,
         owner,
         live_ship.symbol,
@@ -1655,6 +1679,7 @@ defmodule SpaceTraders.Fleet do
       )
     else
       Intents.request(
+        job_scope(agent),
         agent,
         owner,
         live_ship.symbol,
@@ -1683,6 +1708,7 @@ defmodule SpaceTraders.Fleet do
       |> Map.new(fn {key, value} -> {String.to_existing_atom(key), value} end)
 
     Intents.request(
+      job_scope(agent),
       agent,
       %Intents.JobOwner{job: job},
       live_ship.symbol,
@@ -1699,7 +1725,14 @@ defmodule SpaceTraders.Fleet do
 
   defp procurement_intent_request(agent, job, live_ship, attrs) do
     with {:ok, intent} <- request_job_intent(agent, job, live_ship, attrs) do
-      case Intents.reconcile(agent.id, live_ship.symbol, live_ship, :job, intent.id, job.id) do
+      case Intents.reconcile_internal(
+             agent.id,
+             live_ship.symbol,
+             live_ship,
+             :job,
+             intent.id,
+             job.id
+           ) do
         :ok -> {:ok, Repo.get!(Intent, intent.id)}
         result -> result
       end
@@ -1808,6 +1841,7 @@ defmodule SpaceTraders.Fleet do
 
     with {:ok, sell} <-
            SpaceTraders.Fleet.Intents.request(
+             job_scope(agent),
              agent,
              %SpaceTraders.Fleet.Intents.JobOwner{job: job},
              Repo.get!(Ship, job.ship_id).symbol,
@@ -2335,6 +2369,7 @@ defmodule SpaceTraders.Fleet do
          %{type: "deliver", target_waypoint: waypoint, parameters: parameters}
        ) do
     Intents.request(
+      job_scope(agent),
       agent,
       %Intents.JobOwner{job: job},
       live_ship.symbol,
@@ -2352,7 +2387,7 @@ defmodule SpaceTraders.Fleet do
 
   defp construction_supply_intent_request(agent, job, live_ship, attrs) do
     with {:ok, intent} <- request_job_intent(agent, job, live_ship, attrs) do
-      Intents.reconcile(agent.id, live_ship.symbol, live_ship, :job, intent.id, job.id)
+      Intents.reconcile_internal(agent.id, live_ship.symbol, live_ship, :job, intent.id, job.id)
     end
   end
 
@@ -2496,7 +2531,7 @@ defmodule SpaceTraders.Fleet do
          true <- Job.running?(current_job) or current_job.status == "paused",
          %Intent{} = current_intent <- unfinished_intent(intent.id),
          {:ok, current_intent} <-
-           Intents.reconcile(
+           Intents.reconcile_internal(
              agent.id,
              live_ship.symbol,
              live_ship,
@@ -3400,9 +3435,20 @@ defmodule SpaceTraders.Fleet do
          %AgentRecord{} = agent <- Repo.get(AgentRecord, agent_id),
          :ok <- Agent.execution_allowed?(agent) do
       case trigger do
-        :arrival -> job_arrival_event(agent, ship_symbol, config, live_ship)
-        :cooldown -> job_cooldown_event(agent, config, live_ship)
-        _ -> :ok
+        :arrival ->
+          job_arrival_event(agent, ship_symbol, config, live_ship)
+
+        :cooldown ->
+          job_cooldown_event(agent, config, live_ship)
+
+        :boot when is_map(config.in_flight_action) ->
+          reconcile_in_flight(agent.id, ship, config, live_ship)
+
+        :boot ->
+          continue_job_policy(agent, config, live_ship)
+
+        _ ->
+          :ok
       end
     else
       _ -> :ok
@@ -3412,6 +3458,16 @@ defmodule SpaceTraders.Fleet do
   defp job_matches_event?(_job, nil), do: true
   defp job_matches_event?(%Job{id: id}, id), do: true
   defp job_matches_event?(_job, _expected_job_id), do: false
+
+  defp continue_job_policy(agent, config, live_ship) do
+    case config.type do
+      "explorer" -> advance_explorer_job(agent, config, live_ship)
+      "procurement" -> start_procurement_job(agent, live_ship.symbol)
+      "construction_supply" -> start_construction_supply_job(agent, live_ship.symbol)
+      "outfitting" -> start_outfitting_job(agent, live_ship.symbol)
+      _ -> advance_miner_job(agent, config, live_ship)
+    end
+  end
 
   # Marks Job-owned navigation progress after an authoritative arrival, then
   # continues the owning Job policy.
@@ -3850,6 +3906,7 @@ defmodule SpaceTraders.Fleet do
     waypoint = entry["destination_symbol"]
 
     case Intents.request(
+           job_scope(agent),
            agent,
            %Intents.JobOwner{job: config},
            live_ship.symbol,
@@ -3864,8 +3921,6 @@ defmodule SpaceTraders.Fleet do
            live_ship
          ) do
       {:ok, %Intent{status: "completed", last_action_result: result}} ->
-        clear_ship_intents!(config.ship_id)
-
         fresh_ship =
           case result["cargo"] do
             cargo when is_map(cargo) -> %{live_ship | cargo: ShipCargo.from_json(cargo)}
@@ -3948,8 +4003,6 @@ defmodule SpaceTraders.Fleet do
   end
 
   defp perform_market_cargo_action(agent, config, live_ship, item, kind) do
-    clear_ship_intents!(config.ship_id)
-
     action = %{
       "kind" => kind,
       "waypoint" => config.market_waypoint,
@@ -3963,6 +4016,7 @@ defmodule SpaceTraders.Fleet do
     request =
       if kind == "sell" do
         case SpaceTraders.Fleet.Intents.request(
+               job_scope(agent),
                agent,
                %SpaceTraders.Fleet.Intents.JobOwner{job: config},
                live_ship.symbol,
@@ -4092,6 +4146,7 @@ defmodule SpaceTraders.Fleet do
     config = Repo.update!(Ecto.Changeset.change(config, status: "active"))
 
     case SpaceTraders.Fleet.Intents.request(
+           job_scope(agent),
            agent,
            %SpaceTraders.Fleet.Intents.JobOwner{job: config},
            live_ship.symbol,
@@ -4839,158 +4894,6 @@ defmodule SpaceTraders.Fleet do
   defp different_transfer_ships?(ship, ship), do: {:error, :transfer_same_ship}
   defp different_transfer_ships?(_from_ship, _to_ship), do: :ok
 
-  @doc "Reconciles a persisted Miner Job's in-flight action after a process restart."
-  def recover_job_on_boot(ship_symbol, agent_id, agent_token) do
-    with %Ship{} = ship <- Repo.get_by(Ship, symbol: ship_symbol, agent_id: agent_id),
-         %Job{} = config <- unfinished_job(ship.id),
-         %AgentRecord{} = agent <- Repo.get(AgentRecord, agent_id),
-         :ok <- Agent.execution_allowed?(agent) do
-      if config.type in ["procurement", "construction_supply", "outfitting"] and
-           match?(%Intent{}, unfinished_job_intent(config.id)) do
-        if config.type == "outfitting",
-          do: recover_outfitting_intent(agent, config),
-          else: recover_procurement_intent(agent, ship, config)
-      else
-        if config.status in @running_job_states do
-          # Recovery owns its own persisted attempt budget. Avoid nested client
-          # retries so one authoritative read counts as one recovery attempt.
-          case Agent.handle_game_result(
-                 agent,
-                 SpaceTraders.API.get_ship(agent_token, ship_symbol, retry: false)
-               ) do
-            {:ok, live_ship} when config.status == "active" and is_nil(config.in_flight_action) ->
-              case config.type do
-                "explorer" -> advance_explorer_job(agent, config, live_ship)
-                "procurement" -> start_procurement_job(agent, ship_symbol)
-                "construction_supply" -> start_construction_supply_job(agent, ship_symbol)
-                "outfitting" -> start_outfitting_job(agent, ship_symbol)
-                _ -> advance_miner_job(agent, config, live_ship)
-              end
-
-            {:ok, live_ship}
-            when config.status in ["active", "waiting"] and is_map(config.in_flight_action) ->
-              case unfinished_job_intent(config.id) do
-                %Intent{type: "navigate", id: intent_id} ->
-                  SpaceTraders.Fleet.Intents.reconcile(
-                    agent.id,
-                    ship_symbol,
-                    live_ship,
-                    :boot,
-                    intent_id,
-                    config.id
-                  )
-
-                _ ->
-                  reconcile_in_flight(agent_id, ship, config, live_ship)
-              end
-
-            {:ok, _live_ship} ->
-              :ok
-
-            {:error, reason} ->
-              recovery_retry_or_block(agent_id, ship_symbol, reason, agent_token)
-          end
-        else
-          :ok
-        end
-      end
-    else
-      _ -> :ok
-    end
-  end
-
-  defp recover_outfitting_intent(agent, job) do
-    intent = unfinished_job_intent(job.id)
-    ship = Repo.get!(Ship, job.ship_id)
-
-    with {:ok, live_ship} <-
-           Agent.handle_game_result(
-             agent,
-             SpaceTraders.API.get_ship(agent.agent_token, ship.symbol)
-           ),
-         %Job{} = current_job <- Repo.get(Job, job.id),
-         true <- Job.running?(current_job),
-         :ok <- outfitting_system_matches?(current_job.progress, live_ship),
-         %Intent{} = current_intent <- unfinished_intent(intent.id),
-         {:ok, current_intent} <-
-           Intents.reconcile(
-             agent.id,
-             live_ship.symbol,
-             live_ship,
-             :job,
-             current_intent.id,
-             job.id
-           ) do
-      advance_outfitting_after_intent(agent, current_job, current_intent)
-    else
-      false -> :ok
-      nil -> :ok
-      {:error, reason} -> mark_outfitting_job_blocked(job, reason)
-    end
-  end
-
-  # A restarted cargo request has no idempotency key or transaction lookup. Its
-  # request fingerprint stays durable, but the Job must stop until an Operator
-  # can reconcile authoritative operation-specific evidence.
-  defp recover_procurement_intent(_agent, _ship, job) do
-    intent = unfinished_job_intent(job.id)
-    agent = Repo.get!(AgentRecord, Repo.get!(Ship, job.ship_id).agent_id)
-    ship = Repo.get!(Ship, job.ship_id)
-
-    case Agent.handle_game_result(
-           agent,
-           SpaceTraders.API.get_ship(agent.agent_token, ship.symbol)
-         ) do
-      {:ok, live_ship} ->
-        # Uses the same operation reconciliation as Manual Control. Cargo
-        # requests with unresolved response evidence become durable blockers.
-        with %Job{} = current_job <- Repo.get(Job, job.id),
-             true <- Job.running?(current_job),
-             :ok <- procurement_system_matches?(current_job.progress, live_ship),
-             %Intent{} = current_intent <- unfinished_intent(intent.id),
-             {:ok, current_intent} <-
-               Intents.reconcile(
-                 agent.id,
-                 live_ship.symbol,
-                 live_ship,
-                 :job,
-                 current_intent.id,
-                 job.id
-               ) do
-          if current_job.type == "construction_supply",
-            do: advance_construction_supply_after_intent(agent, current_job, current_intent),
-            else: advance_procurement_after_intent(agent, current_job, current_intent)
-        else
-          false -> :ok
-          nil -> :ok
-        end
-
-      {:error, reason} ->
-        block_procurement_recovery_if_current(intent, job, reason)
-    end
-  end
-
-  defp block_procurement_recovery_if_current(intent, job, reason) do
-    case Repo.transaction(
-           fn ->
-             current_intent = unfinished_intent(intent.id)
-             current_job = Repo.get!(Job, job.id)
-
-             if match?(%Intent{}, current_intent) and Job.running?(current_job) and
-                  current_intent.in_flight_action == intent.in_flight_action do
-               block_procurement_cargo_intent(current_intent, reason)
-               mark_procurement_job_blocked(current_job, reason)
-             else
-               Repo.rollback(:operation_no_longer_current)
-             end
-           end,
-           mode: :immediate
-         ) do
-      {:ok, result} -> result
-      {:error, :operation_no_longer_current} -> :ok
-    end
-  end
-
   @doc "Reconciles a blocked in-flight Miner Job before explicitly retrying it."
   def reconcile_miner_job(%AgentRecord{} = agent, ship_symbol) do
     with :ok <- Agent.execution_allowed?(agent),
@@ -5190,36 +5093,6 @@ defmodule SpaceTraders.Fleet do
 
       error ->
         error
-    end
-  end
-
-  defp recovery_retry_or_block(agent_id, ship_symbol, reason, agent_token) do
-    with %Ship{} = ship <- Repo.get_by(Ship, symbol: ship_symbol, agent_id: agent_id),
-         %Job{status: status} = config when status in @running_job_states <-
-           unfinished_job(ship.id) do
-      if recovery_available?(config) do
-        Repo.update!(
-          Ecto.Changeset.change(config,
-            recovery_attempts: config.recovery_attempts + 1,
-            recovery_started_at:
-              config.recovery_started_at || DateTime.utc_now() |> DateTime.truncate(:second)
-          )
-        )
-
-        record_activity_by_id(
-          agent_id,
-          ship,
-          "miner_job_recovery",
-          "Authoritative recovery read failed; retrying",
-          "transport_error"
-        )
-
-        recover_job_on_boot(ship_symbol, agent_id, agent_token)
-      else
-        block_recovery(agent_id, ship, config, "retry_exhausted: #{inspect(reason)}")
-      end
-    else
-      _ -> :ok
     end
   end
 
@@ -5532,8 +5405,15 @@ defmodule SpaceTraders.Fleet do
     intent_ship_ids =
       Repo.all(
         from intent in Intent,
-          where: intent.status in ["active", "waiting", "blocked"],
+          where: intent.status in ^Intent.unfinished_states(),
           select: intent.ship_id
+      )
+
+    job_ship_ids =
+      Repo.all(
+        from job in Job,
+          where: job.status in ^@running_job_states,
+          select: job.ship_id
       )
 
     pending_ship_ids =
@@ -5545,7 +5425,7 @@ defmodule SpaceTraders.Fleet do
         end
       end)
 
-    (intent_ship_ids ++ pending_ship_ids)
+    (intent_ship_ids ++ job_ship_ids ++ pending_ship_ids)
     |> Enum.reject(&is_nil/1)
     |> Enum.uniq()
     |> Enum.each(fn ship_id ->
@@ -5555,8 +5435,8 @@ defmodule SpaceTraders.Fleet do
             {:ok, ^agent_id, token} ->
               ShipServer.ensure_started(symbol, agent_id, token)
 
-              unless Timeline.pending_events(:ship, symbol) != [] do
-                Intents.reconcile(agent_id, symbol, nil, :boot, nil, nil)
+              unless pending_event_matches_current_intent?(symbol) do
+                Intents.reconcile_internal(agent_id, symbol, nil, :boot, nil, nil)
               end
 
             _ ->
@@ -5571,12 +5451,34 @@ defmodule SpaceTraders.Fleet do
     :ok
   end
 
+  defp pending_event_matches_current_intent?(ship_symbol) do
+    case Repo.get_by(Ship, symbol: ship_symbol) do
+      %Ship{id: ship_id} ->
+        case Repo.one(
+               from intent in Intent,
+                 where:
+                   intent.ship_id == ^ship_id and intent.status in ^Intent.unfinished_states()
+             ) do
+          %Intent{id: intent_id} ->
+            Timeline.pending_events(:ship, ship_symbol)
+            |> Enum.any?(&(&1.payload["intent_id"] == intent_id))
+
+          nil ->
+            Timeline.pending_events(:ship, ship_symbol) != []
+        end
+
+      nil ->
+        false
+    end
+  end
+
   defp request_job_intent(agent, job, live_ship, %{
          type: "buy",
          target_waypoint: waypoint,
          parameters: p
        }) do
     Intents.request(
+      job_scope(agent),
       agent,
       %Intents.JobOwner{job: job},
       live_ship.symbol,
@@ -5601,6 +5503,7 @@ defmodule SpaceTraders.Fleet do
          parameters: p
        }) do
     Intents.request(
+      job_scope(agent),
       agent,
       %Intents.JobOwner{job: job},
       live_ship.symbol,
@@ -5620,6 +5523,19 @@ defmodule SpaceTraders.Fleet do
 
   defp request_job_intent(_agent, _job, _live_ship, _attrs),
     do: {:error, :unsupported_intent_goal}
+
+  defp job_scope(%AgentRecord{operator_id: operator_id}),
+    do: %Scope{operator: %{id: operator_id}}
+
+  defp stop_job_intent(agent, job) do
+    case unfinished_job_intent(job.id) do
+      %Intent{id: intent_id} ->
+        Intents.stop(job_scope(agent), %Intents.JobOwner{job: job}, intent_id)
+
+      nil ->
+        :ok
+    end
+  end
 
   defp unfinished_intent(id) do
     case Repo.get(Intent, id) do
@@ -5644,9 +5560,6 @@ defmodule SpaceTraders.Fleet do
               i.status in ["active", "waiting", "blocked", "awaiting_confirmation"]
       )
 
-  defp clear_ship_intents!(ship_id),
-    do: Repo.delete_all(from i in Intent, where: i.ship_id == ^ship_id)
-
   defp last_completed_job_intent(job_id, type \\ nil) do
     query =
       from i in Intent,
@@ -5656,9 +5569,6 @@ defmodule SpaceTraders.Fleet do
 
     Repo.one(if(type, do: where(query, [i], i.type == ^type), else: query))
   end
-
-  defp terminalize_job_intent!(job),
-    do: Repo.update!(Ecto.Changeset.change(job, status: "stopped"))
 
   defp with_current_intent(%Intent{id: id}, fun) do
     case Repo.get(Intent, id) do
