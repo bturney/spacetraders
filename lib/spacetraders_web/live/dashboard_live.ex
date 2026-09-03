@@ -244,10 +244,18 @@ defmodule SpaceTradersWeb.DashboardLive do
       result =
         case Intents.jump_preview(agent, ship_symbol, waypoint) do
           {:ok, preview} ->
-            Intents.review(agent, %Intents.ManualControl{}, ship_symbol, waypoint, preview)
+            Intents.review(
+              socket.assigns.current_scope,
+              agent,
+              %Intents.ManualControl{},
+              ship_symbol,
+              waypoint,
+              preview
+            )
 
           {:error, :same_system_route} ->
             Intents.request(
+              socket.assigns.current_scope,
               agent,
               %Intents.ManualControl{},
               ship_symbol,
@@ -258,6 +266,7 @@ defmodule SpaceTradersWeb.DashboardLive do
             case Intents.warp_preview(agent, ship_symbol, waypoint) do
               {:ok, preview} ->
                 Intents.review(
+                  socket.assigns.current_scope,
                   agent,
                   %Intents.ManualControl{},
                   ship_symbol,
@@ -267,6 +276,7 @@ defmodule SpaceTradersWeb.DashboardLive do
 
               {:error, _warp_reason} ->
                 case Intents.block_review(
+                       socket.assigns.current_scope,
                        agent,
                        %Intents.ManualControl{},
                        ship_symbol,
@@ -284,10 +294,18 @@ defmodule SpaceTradersWeb.DashboardLive do
           {:error, reason} ->
             case Intents.warp_preview(agent, ship_symbol, waypoint) do
               {:ok, preview} ->
-                Intents.review(agent, %Intents.ManualControl{}, ship_symbol, waypoint, preview)
+                Intents.review(
+                  socket.assigns.current_scope,
+                  agent,
+                  %Intents.ManualControl{},
+                  ship_symbol,
+                  waypoint,
+                  preview
+                )
 
               {:error, _warp_reason} ->
                 case Intents.block_review(
+                       socket.assigns.current_scope,
                        agent,
                        %Intents.ManualControl{},
                        ship_symbol,
@@ -371,7 +389,13 @@ defmodule SpaceTradersWeb.DashboardLive do
         socket
       ) do
     with {:ok, agent} <- agent_for_ship(socket, ship_symbol),
-         :ok <- Intents.stop(agent, %Intents.ManualControl{}, ship_symbol, intent_id) do
+         :ok <-
+           Intents.stop(
+             socket.assigns.current_scope,
+             %Intents.ManualControl{},
+             ship_symbol,
+             intent_id
+           ) do
       message = "#{ship_symbol} manual Navigate stopped; the Ship stays in Manual Control."
 
       {:noreply, put_flash(refresh_agent_fleet(socket, agent.id), :info, message)}
@@ -420,9 +444,13 @@ defmodule SpaceTradersWeb.DashboardLive do
       ) do
     with {:ok, agent} <- agent_for_ship(socket, ship_symbol),
          {:ok, intent} <-
-           Intents.request(agent, %Intents.ManualControl{}, ship_symbol, %Intents.InstallModule{
-             module_symbol: module_symbol
-           }) do
+           Intents.request(
+             socket.assigns.current_scope,
+             agent,
+             %Intents.ManualControl{},
+             ship_symbol,
+             %Intents.InstallModule{module_symbol: module_symbol}
+           ) do
       {:noreply,
        put_flash(
          refresh_agent_fleet(socket, agent.id),
@@ -442,10 +470,16 @@ defmodule SpaceTradersWeb.DashboardLive do
       ) do
     with {:ok, agent} <- agent_for_ship(socket, ship_symbol),
          {:ok, intent} <-
-           Intents.request(agent, %Intents.ManualControl{}, ship_symbol, %Intents.RemoveModule{
-             module_symbol: module_symbol,
-             authorized_removals: %{module_symbol => 1}
-           }) do
+           Intents.request(
+             socket.assigns.current_scope,
+             agent,
+             %Intents.ManualControl{},
+             ship_symbol,
+             %Intents.RemoveModule{
+               module_symbol: module_symbol,
+               authorized_removals: %{module_symbol => 1}
+             }
+           ) do
       {:noreply,
        put_flash(
          refresh_agent_fleet(socket, agent.id),
@@ -587,6 +621,7 @@ defmodule SpaceTradersWeb.DashboardLive do
          {:ok, units} <- parse_units(units),
          {:ok, %{status: "completed"} = intent} <-
            Intents.request(
+             socket.assigns.current_scope,
              agent,
              %Intents.ManualControl{},
              ship_symbol,
@@ -632,6 +667,7 @@ defmodule SpaceTradersWeb.DashboardLive do
          {:ok, units} <- parse_units(units),
          {:ok, %{status: "completed"} = intent} <-
            Intents.request(
+             socket.assigns.current_scope,
              agent,
              %Intents.ManualControl{},
              ship_symbol,
@@ -803,6 +839,7 @@ defmodule SpaceTradersWeb.DashboardLive do
          {:ok, units} <- parse_units(units),
          {:ok, %{status: "completed"}} <-
            Intents.request(
+             socket.assigns.current_scope,
              agent,
              %Intents.ManualControl{},
              ship_symbol,
@@ -858,6 +895,7 @@ defmodule SpaceTradersWeb.DashboardLive do
          {:ok, units} <- parse_units(units),
          {:ok, %{status: "completed"}} <-
            Intents.request(
+             socket.assigns.current_scope,
              agent,
              %Intents.ManualControl{},
              ship_symbol,

@@ -3816,8 +3816,6 @@ defmodule SpaceTraders.Fleet do
            live_ship
          ) do
       {:ok, %Intent{status: "completed", last_action_result: result}} ->
-        Intents.clear_ship_intents!(config.ship_id)
-
         fresh_ship =
           case result["cargo"] do
             cargo when is_map(cargo) -> %{live_ship | cargo: ShipCargo.from_json(cargo)}
@@ -3900,8 +3898,6 @@ defmodule SpaceTraders.Fleet do
   end
 
   defp perform_market_cargo_action(agent, config, live_ship, item, kind) do
-    Intents.clear_ship_intents!(config.ship_id)
-
     action = %{
       "kind" => kind,
       "waypoint" => config.market_waypoint,

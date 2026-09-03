@@ -13,6 +13,7 @@ defmodule SpaceTraders.Fleet.Intents do
   require Logger
 
   alias SpaceTraders.Agent.Agent, as: AgentRecord
+  alias SpaceTraders.Agent.Scope
   alias SpaceTraders.API.Model.{Contract, ShipNav}
   alias SpaceTraders.Fleet.{Intent, Job, Ship}
   alias SpaceTraders.Fleet
@@ -78,8 +79,7 @@ defmodule SpaceTraders.Fleet.Intents do
     "market_trading"
   ]
 
-  @doc "Requests a closed operational goal for Manual Control or a Job."
-  def request(agent, owner, ship_symbol, %BuyGoods{} = goal) do
+  defp request_for_agent(agent, owner, ship_symbol, %BuyGoods{} = goal) do
     with :ok <- token_present(agent),
          {:ok, owner} <- normalize_owner(owner),
          :ok <- valid_goal_parameters(goal.constraints),
@@ -102,7 +102,7 @@ defmodule SpaceTraders.Fleet.Intents do
     end
   end
 
-  def request(agent, owner, ship_symbol, %SellGoods{} = goal) do
+  defp request_for_agent(agent, owner, ship_symbol, %SellGoods{} = goal) do
     with :ok <- token_present(agent),
          {:ok, owner} <- normalize_owner(owner),
          :ok <- valid_goal_parameters(goal.constraints),
@@ -143,11 +143,11 @@ defmodule SpaceTraders.Fleet.Intents do
     end
   end
 
-  def request(agent, owner, ship_symbol, %DeliverGoods{} = goal) do
+  defp request_for_agent(agent, owner, ship_symbol, %DeliverGoods{} = goal) do
     request_delivery(agent, owner, ship_symbol, goal, nil)
   end
 
-  def request(agent, owner, ship_symbol, %Navigate{} = goal) do
+  defp request_for_agent(agent, owner, ship_symbol, %Navigate{} = goal) do
     with :ok <- token_present(agent),
          {:ok, owner} <- normalize_owner(owner),
          :ok <- valid_goal_parameters(goal.parameters),
@@ -165,7 +165,7 @@ defmodule SpaceTraders.Fleet.Intents do
     end
   end
 
-  def request(agent, owner, ship_symbol, %InstallModule{} = goal) do
+  defp request_for_agent(agent, owner, ship_symbol, %InstallModule{} = goal) do
     request_module(
       agent,
       owner,
@@ -176,7 +176,7 @@ defmodule SpaceTraders.Fleet.Intents do
     )
   end
 
-  def request(agent, owner, ship_symbol, %RemoveModule{} = goal) do
+  defp request_for_agent(agent, owner, ship_symbol, %RemoveModule{} = goal) do
     parameters =
       if is_map(goal.parameters),
         do: Map.put(goal.parameters, :authorized_removals, goal.authorized_removals),
@@ -192,7 +192,15 @@ defmodule SpaceTraders.Fleet.Intents do
     )
   end
 
-  def request(_agent, _owner, _ship_symbol, _goal), do: {:error, :unsupported_intent_goal}
+  defp request_for_agent(_agent, _owner, _ship_symbol, _goal),
+    do: {:error, :unsupported_intent_goal}
+
+  @doc "Requests a closed operational goal for its owning Job."
+  def request(%AgentRecord{} = agent, %JobOwner{} = owner, ship_symbol, goal) do
+    request_for_agent(agent, owner, ship_symbol, goal)
+  end
+
+  def request(_agent, _owner, _ship_symbol, _goal), do: {:error, :invalid_intent_owner}
 
   def request_sell_with_live_ship(
         agent,
@@ -240,6 +248,19 @@ defmodule SpaceTraders.Fleet.Intents do
 
   def request(agent, %JobOwner{} = owner, ship_symbol, %DeliverGoods{} = goal, live_ship) do
     request_delivery(agent, owner, ship_symbol, goal, live_ship)
+  end
+
+  @doc "Requests a closed operational goal through Operator-owned Manual Control."
+  def request(
+        %Scope{} = current_scope,
+        %AgentRecord{} = agent,
+        %ManualControl{},
+        ship_symbol,
+        goal
+      ) do
+    with {:ok, agent} <- scoped_agent_for_ship(current_scope, agent.id, ship_symbol) do
+      request_for_agent(agent, :manual, ship_symbol, goal)
+    end
   end
 
   defp request_delivery(agent, owner, ship_symbol, goal, live_ship) do
@@ -296,34 +317,60 @@ defmodule SpaceTraders.Fleet.Intents do
   defp valid_module_request(type, module_symbol, parameters, %JobOwner{}),
     do: valid_module_parameters(type, module_symbol, parameters)
 
-  @doc "Persists a reviewed Navigate Intent without dispatching a mutation."
-  def review(agent, owner, ship_symbol, waypoint, preview) when is_map(preview) do
-    with {:ok, :manual} <- normalize_owner(owner) do
+  @doc "Persists an Operator-scoped reviewed Navigate Intent without dispatching a mutation."
+  def review(
+        %Scope{} = current_scope,
+        %AgentRecord{} = agent,
+        %ManualControl{},
+        ship_symbol,
+        waypoint,
+        preview
+      )
+      when is_map(preview) do
+    with {:ok, agent} <- scoped_agent_for_ship(current_scope, agent.id, ship_symbol) do
       review_navigation_intent(agent, ship_symbol, waypoint, preview)
     end
   end
 
-  def review(_agent, _owner, _ship_symbol, _waypoint, _preview),
+  def review(_current_scope, _agent, _owner, _ship_symbol, _waypoint, _preview),
     do: {:error, :unsupported_intent_review}
 
-  @doc "Persists a blocked Navigate Intent after preview rejects the route."
-  def block_review(agent, owner, ship_symbol, waypoint, reason) do
-    with {:ok, :manual} <- normalize_owner(owner) do
+  @doc "Persists an Operator-scoped blocked Navigate Intent after preview rejects the route."
+  def block_review(
+        %Scope{} = current_scope,
+        %AgentRecord{} = agent,
+        %ManualControl{},
+        ship_symbol,
+        waypoint,
+        reason
+      ) do
+    with {:ok, agent} <- scoped_agent_for_ship(current_scope, agent.id, ship_symbol) do
       block_jump_preview(agent, ship_symbol, waypoint, reason)
     end
   end
 
   @doc "Confirms a persisted reviewed Navigate Intent by identity and revision."
-  def confirm(agent, owner, intent_id, review_revision) do
-    with {:ok, :manual} <- normalize_owner(owner) do
-      confirm_navigation_intent(agent, intent_id, review_revision)
+  def confirm(%Scope{} = current_scope, %ManualControl{}, intent_id, review_revision) do
+    confirm_navigation_intent(current_scope, intent_id, review_revision)
+  end
+
+  def confirm(_current_scope, _owner, _intent_id, _review_revision),
+    do: {:error, :invalid_intent_owner}
+
+  @doc "Stops one owned Intent without hiding unresolved mutation evidence."
+  def stop(%Scope{operator: %{id: operator_id}}, %ManualControl{}, intent_id) do
+    with {%Intent{} = intent, %AgentRecord{} = agent} <-
+           owned_intent_for_operator(operator_id, intent_id),
+         :ok <- owner_matches?(:manual, intent) do
+      do_stop_intent(agent, intent_id, :manual)
+    else
+      nil -> {:error, :intent_not_found}
+      error -> error
     end
   end
 
-  @doc "Stops one owned Intent without hiding unresolved mutation evidence."
-  def stop(agent, owner, intent_id) do
-    with {:ok, owner} <- normalize_owner(owner),
-         %Intent{} = intent <- owned_intent(agent, intent_id),
+  def stop(%AgentRecord{} = agent, %JobOwner{} = owner, intent_id) do
+    with %Intent{} = intent <- owned_intent(agent, intent_id),
          :ok <- owner_matches?(owner, intent) do
       do_stop_intent(agent, intent_id, owner)
     else
@@ -333,9 +380,20 @@ defmodule SpaceTraders.Fleet.Intents do
   end
 
   @doc "Stops an owned Intent after binding the request to its Ship identity."
-  def stop(agent, owner, ship_symbol, intent_id) do
-    with {:ok, owner} <- normalize_owner(owner),
-         %Intent{} = intent <- owned_intent(agent, intent_id),
+  def stop(%Scope{operator: %{id: operator_id}}, %ManualControl{}, ship_symbol, intent_id) do
+    with {%Intent{} = intent, %AgentRecord{} = agent} <-
+           owned_intent_for_operator(operator_id, intent_id),
+         :ok <- owner_matches?(:manual, intent),
+         :ok <- intent_ship_matches?(intent, ship_symbol) do
+      do_stop_intent(agent, intent_id, :manual)
+    else
+      nil -> {:error, :intent_not_found}
+      error -> error
+    end
+  end
+
+  def stop(%AgentRecord{} = agent, %JobOwner{} = owner, ship_symbol, intent_id) do
+    with %Intent{} = intent <- owned_intent(agent, intent_id),
          :ok <- owner_matches?(owner, intent),
          :ok <- intent_ship_matches?(intent, ship_symbol) do
       do_stop_intent(agent, intent_id, owner)
@@ -528,12 +586,6 @@ defmodule SpaceTraders.Fleet.Intents do
       nil ->
         nil
     end
-  end
-
-  @doc false
-  def clear_ship_intents!(ship_id) do
-    Repo.delete_all(from intent in Intent, where: intent.ship_id == ^ship_id)
-    :ok
   end
 
   @doc "Lists unfinished Intents for all Ships owned by the Agent."
@@ -823,26 +875,7 @@ defmodule SpaceTraders.Fleet.Intents do
     end
   end
 
-  defp confirm_navigation_intent(%AgentRecord{} = agent, intent_id, review_revision) do
-    with {:ok, revision} <- parse_review_revision(review_revision),
-         %Intent{} = intent <- owned_intent(agent, intent_id),
-         true <-
-           intent.status == "awaiting_confirmation" || {:error, :intent_not_awaiting_confirmation},
-         true <- intent.review_revision == revision || {:error, :review_revision_stale},
-         fresh <- fresh_navigation_review(agent, intent),
-         {:ok, intent} <- refresh_or_authorize_review(intent, fresh) do
-      case intent.status do
-        "awaiting_confirmation" -> {:ok, intent}
-        "active" -> reconcile_intents(agent, intent)
-      end
-    else
-      nil -> {:error, :intent_not_found}
-      {:error, _reason} = error -> error
-      false -> {:error, :review_revision_stale}
-    end
-  end
-
-  defp confirm_navigation_intent(%{operator: %{id: operator_id}}, intent_id, review_revision) do
+  defp confirm_navigation_intent(%Scope{operator: %{id: operator_id}}, intent_id, review_revision) do
     with {:ok, revision} <- parse_review_revision(review_revision),
          {%Intent{} = intent, %AgentRecord{} = agent} <-
            owned_intent_for_operator(operator_id, intent_id),
@@ -893,6 +926,28 @@ defmodule SpaceTraders.Fleet.Intents do
         select: {intent, agent}
     )
   end
+
+  defp scoped_agent_for_ship(
+         %Scope{operator: %{id: operator_id}},
+         agent_id,
+         ship_symbol
+       ) do
+    case Repo.one(
+           from agent in AgentRecord,
+             join: ship in Ship,
+             on: ship.agent_id == agent.id,
+             where:
+               agent.id == ^agent_id and agent.operator_id == ^operator_id and
+                 ship.symbol == ^ship_symbol,
+             select: agent
+         ) do
+      %AgentRecord{} = agent -> {:ok, agent}
+      nil -> {:error, :agent_not_owned}
+    end
+  end
+
+  defp scoped_agent_for_ship(_current_scope, _agent_id, _ship_symbol),
+    do: {:error, :agent_not_owned}
 
   defp fresh_navigation_review(
          agent,
