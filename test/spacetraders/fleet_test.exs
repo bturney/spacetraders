@@ -4,6 +4,8 @@ defmodule SpaceTraders.FleetTest do
   use SpaceTraders.DataCase, async: false
 
   alias SpaceTraders.Agent.Agent, as: AgentRecord
+  alias SpaceTraders.Agent.Operator
+  alias SpaceTraders.Agent.Scope
   alias SpaceTraders.API.Model
   alias SpaceTraders.Fleet
   alias SpaceTraders.Fleet.Ship
@@ -26,18 +28,30 @@ defmodule SpaceTraders.FleetTest do
 
   defp stop_current_intent(agent) do
     case Intents.current(agent) do
-      [%Intent{id: id} | _] -> Intents.stop(agent, %Intents.ManualControl{}, id)
+      [%Intent{id: id} | _] -> Intents.stop(manual_scope(agent), %Intents.ManualControl{}, id)
       [] -> {:error, :intents_not_active}
     end
   end
 
   defp agent_fixture(token \\ "AGENT_TOKEN") do
+    operator =
+      Repo.insert!(%Operator{
+        email: "fleet-operator-#{System.unique_integer([:positive])}@example.com"
+      })
+
     Repo.insert!(%AgentRecord{
       symbol: "FLEET-#{System.unique_integer([:positive])}",
       faction: "COSMIC",
       headquarters: "X1-UX81-A1",
-      agent_token: token
+      agent_token: token,
+      operator_id: operator.id
     })
+  end
+
+  defp manual_scope(%AgentRecord{operator_id: operator_id}) do
+    operator_id
+    |> then(&Repo.get!(Operator, &1))
+    |> Scope.for_operator()
   end
 
   defp ship_fixture(agent, symbol) do
@@ -2651,6 +2665,11 @@ defmodule SpaceTraders.FleetTest do
       assert message =~ "60 remain"
 
       assert %Job{contract_deliverables: [%{"units_remaining" => 60}]} = Repo.get!(Job, config.id)
+
+      assert [%Intent{type: "deliver", status: "completed", job_id: job_id}] =
+               Intents.history(agent)
+
+      assert job_id == config.id
     end
 
     test "sells only units beyond the contract's remaining requirement" do
@@ -4664,6 +4683,7 @@ defmodule SpaceTraders.FleetTest do
 
       assert {:ok, %Intent{type: "install_module", status: "completed"} = intent} =
                Intents.request(
+                 manual_scope(agent),
                  agent,
                  %Intents.ManualControl{},
                  "FLEET-SHIP",
@@ -4687,6 +4707,7 @@ defmodule SpaceTraders.FleetTest do
 
       assert {:error, :invalid_module_intent} =
                Intents.request(
+                 manual_scope(agent),
                  agent,
                  %Intents.ManualControl{},
                  "FLEET-SHIP",
@@ -4698,6 +4719,7 @@ defmodule SpaceTraders.FleetTest do
 
       assert {:error, :invalid_module_intent} =
                Intents.request(
+                 manual_scope(agent),
                  agent,
                  %Intents.ManualControl{},
                  "FLEET-SHIP",
@@ -4756,6 +4778,7 @@ defmodule SpaceTraders.FleetTest do
 
       assert {:ok, %Intent{type: "remove_module", status: "completed"}} =
                Intents.request(
+                 manual_scope(agent),
                  agent,
                  %Intents.ManualControl{},
                  "FLEET-SHIP",
@@ -4807,6 +4830,7 @@ defmodule SpaceTraders.FleetTest do
 
       assert {:error, :intents_reconciliation_required} =
                Intents.request(
+                 manual_scope(agent),
                  agent,
                  %Intents.ManualControl{},
                  "FLEET-SHIP",
@@ -4856,6 +4880,7 @@ defmodule SpaceTraders.FleetTest do
 
       assert {:ok, %Intent{status: "completed", last_action_result: result}} =
                Intents.request(
+                 manual_scope(agent),
                  agent,
                  %Intents.ManualControl{},
                  "FLEET-SHIP",
@@ -4893,6 +4918,7 @@ defmodule SpaceTraders.FleetTest do
 
       assert {:error, :intents_reconciliation_required} =
                Intents.request(
+                 manual_scope(agent),
                  agent,
                  %Intents.ManualControl{},
                  "FLEET-SHIP",
@@ -4986,6 +5012,7 @@ defmodule SpaceTraders.FleetTest do
 
       assert {:ok, %Intent{type: "buy", status: "completed"} = intent} =
                Intents.request(
+                 manual_scope(agent),
                  agent,
                  %Intents.ManualControl{},
                  "FLEET-SHIP",
@@ -5082,6 +5109,7 @@ defmodule SpaceTraders.FleetTest do
 
       assert {:ok, %Intent{status: "completed", last_action_result: result}} =
                Intents.request(
+                 manual_scope(agent),
                  agent,
                  %Intents.ManualControl{},
                  "FLEET-SHIP",
@@ -5120,6 +5148,7 @@ defmodule SpaceTraders.FleetTest do
 
       assert {:ok, %Intent{status: "blocked"}} =
                Intents.request(
+                 manual_scope(agent),
                  agent,
                  %Intents.ManualControl{},
                  ship.symbol,
@@ -5169,6 +5198,7 @@ defmodule SpaceTraders.FleetTest do
 
       assert {:ok, %Intent{type: "sell", status: "blocked", blocker: blocker}} =
                Intents.request(
+                 manual_scope(agent),
                  agent,
                  %Intents.ManualControl{},
                  "FLEET-SHIP",
@@ -5226,6 +5256,7 @@ defmodule SpaceTraders.FleetTest do
 
       assert {:ok, %Intent{type: "deliver", status: "completed"} = intent} =
                Intents.request(
+                 manual_scope(agent),
                  agent,
                  %Intents.ManualControl{},
                  "FLEET-SHIP",
@@ -5299,6 +5330,7 @@ defmodule SpaceTraders.FleetTest do
 
       assert {:ok, %Intent{type: "deliver", status: "completed"} = intent} =
                Intents.request(
+                 manual_scope(agent),
                  agent,
                  %Intents.ManualControl{},
                  "FLEET-SHIP",
@@ -5452,6 +5484,7 @@ defmodule SpaceTraders.FleetTest do
 
       assert {:ok, %Intent{status: "blocked", in_flight_action: action}} =
                Intents.request(
+                 manual_scope(agent),
                  agent,
                  %Intents.ManualControl{},
                  "FLEET-SHIP",
@@ -5530,6 +5563,7 @@ defmodule SpaceTraders.FleetTest do
 
       assert {:ok, %Intent{status: "blocked", in_flight_action: action}} =
                Intents.request(
+                 manual_scope(agent),
                  agent,
                  %Intents.ManualControl{},
                  "FLEET-SHIP",
