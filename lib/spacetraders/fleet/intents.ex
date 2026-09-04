@@ -319,20 +319,31 @@ defmodule SpaceTraders.Fleet.Intents do
 
   @doc "Persists an Operator-scoped reviewed Navigate Intent without dispatching a mutation."
   def review(
+        scope,
+        agent,
+        owner,
+        ship_symbol,
+        waypoint,
+        preview,
+        opts \\ []
+      )
+
+  def review(
         %Scope{} = current_scope,
         %AgentRecord{} = agent,
         %ManualControl{},
         ship_symbol,
         waypoint,
-        preview
+        preview,
+        opts
       )
       when is_map(preview) do
     with {:ok, agent} <- scoped_agent_for_ship(current_scope, agent.id, ship_symbol) do
-      review_navigation_intent(agent, ship_symbol, waypoint, preview)
+      review_navigation_intent(agent, ship_symbol, waypoint, preview, opts)
     end
   end
 
-  def review(_current_scope, _agent, _owner, _ship_symbol, _waypoint, _preview),
+  def review(_current_scope, _agent, _owner, _ship_symbol, _waypoint, _preview, _opts),
     do: {:error, :unsupported_intent_review}
 
   @doc "Persists an Operator-scoped blocked Navigate Intent after preview rejects the route."
@@ -852,9 +863,11 @@ defmodule SpaceTraders.Fleet.Intents do
   defp job_navigation_allowed?(_job, waypoint),
     do: {:error, {:job_navigation_not_authorized, waypoint}}
 
-  defp review_navigation_intent(agent, ship_symbol, waypoint, preview) when is_map(preview) do
+  defp review_navigation_intent(agent, ship_symbol, waypoint, preview, opts)
+       when is_map(preview) do
     method = if preview[:method] == "warp", do: "warp", else: "jump"
     review = stringify_nested_keys(preview)
+    allowed_methods = Keyword.get(opts, :allowed_methods, ["jump", "warp"])
 
     with {:ok, ship} <- Fleet.owned_ship(agent, ship_symbol),
          {:ok, intent} <-
@@ -863,7 +876,8 @@ defmodule SpaceTraders.Fleet.Intents do
              target_waypoint: waypoint,
              parameters: %{
                "review_method" => method,
-               "reviewed_#{method}" => review
+               "reviewed_#{method}" => review,
+               "allowed_methods" => allowed_methods
              },
              status: "awaiting_confirmation",
              review_revision: 1
@@ -1141,6 +1155,72 @@ defmodule SpaceTraders.Fleet.Intents do
   end
 
   def warp_preview(%AgentRecord{}, _ship_symbol, _waypoint), do: {:error, :agent_token_missing}
+
+  @doc """
+  Evaluates both jump and warp from fresh authoritative state and returns the
+  ranked viable methods for an off-System Navigate Intent.
+
+  The selection includes the preferred method, all viable alternatives, and
+  rejection reasons for every non-viable option. When `allowed_methods` is
+  provided, only those methods may appear in the result; restricting to a
+  single method skips the other preview entirely.
+  """
+  def method_selection(agent, ship_symbol, waypoint, opts \\ [])
+
+  def method_selection(%AgentRecord{agent_token: token} = agent, ship_symbol, waypoint, opts)
+      when is_binary(token) and token != "" do
+    allowed = Keyword.get(opts, :allowed_methods, ["jump", "warp"])
+
+    jump =
+      if "jump" in allowed,
+        do: jump_preview(agent, ship_symbol, waypoint),
+        else: {:error, :method_not_allowed}
+
+    warp =
+      if "warp" in allowed,
+        do: warp_preview(agent, ship_symbol, waypoint),
+        else: {:error, :method_not_allowed}
+
+    # Both preview functions return {:error, :same_system_route} for same-system
+    # targets, which propagates here as a same_system_route error.
+    cond do
+      match?({:error, :same_system_route}, jump) ->
+        {:error, :same_system_route}
+
+      match?({:error, :same_system_route}, warp) and not match?({:ok, _}, jump) ->
+        {:error, :same_system_route}
+
+      true ->
+        viable =
+          [{"jump", jump}, {"warp", warp}]
+          |> Enum.filter(fn {_method, result} -> match?({:ok, _}, result) end)
+          |> Enum.map(fn {method, {:ok, preview}} -> {method, preview} end)
+
+        rejected =
+          [{"jump", jump}, {"warp", warp}]
+          |> Enum.filter(fn {_method, result} -> match?({:error, _}, result) end)
+          |> Enum.map(fn {method, {:error, reason}} -> {method, reason} end)
+
+        selected =
+          cond do
+            viable == [] -> nil
+            # Jump is preferred before warp unless the operator restricts it
+            List.keyfind(viable, "jump", 0) -> "jump"
+            true -> "warp"
+          end
+
+        {:ok,
+         %{
+           selected: selected,
+           viable: viable,
+           rejected: rejected,
+           allowed_methods: allowed
+         }}
+    end
+  end
+
+  def method_selection(%AgentRecord{}, _ship_symbol, _waypoint, _opts),
+    do: {:error, :agent_token_missing}
 
   defp installed_warp_drive(%{modules: modules}) do
     case Enum.find(modules || [], &warp_drive_module?/1) do
@@ -3390,10 +3470,18 @@ defmodule SpaceTraders.Fleet.Intents do
   end
 
   defp advance_manual_remote_route(agent, intent, live_ship) do
-    if get_in(intent.parameters, ["reviewed_warp", "method"]) == "warp" do
-      dispatch_manual_warp(agent, intent, live_ship)
-    else
-      advance_manual_jump_route(agent, intent, live_ship)
+    allowed = get_in(intent.parameters, ["allowed_methods"]) || ["jump", "warp"]
+    warp_reviewed? = get_in(intent.parameters, ["reviewed_warp", "method"]) == "warp"
+
+    cond do
+      warp_reviewed? and "warp" in allowed ->
+        dispatch_manual_warp(agent, intent, live_ship)
+
+      "jump" in allowed ->
+        advance_manual_jump_route(agent, intent, live_ship)
+
+      true ->
+        block_intents(intent, :method_not_allowed)
     end
   end
 
