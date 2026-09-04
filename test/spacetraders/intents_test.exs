@@ -1211,6 +1211,148 @@ defmodule SpaceTraders.IntentsTest do
       assert {:error, :warp_drive_missing} =
                Intents.warp_preview(agent, "FLEET-SHIP", "X2-UX81-A3")
     end
+
+    test "persists allowed_methods with the reviewed Intent" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case {conn.request_path, conn.method} do
+          {"/v2/my/ships/FLEET-SHIP", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" =>
+                ship_body("FLEET-SHIP", %{
+                  "fuel" => %{"capacity" => 200, "current" => 150},
+                  "modules" => [%{"symbol" => "MODULE_WARP_DRIVE_I", "range" => 30}],
+                  "nav" => %{
+                    "systemSymbol" => "X1-UX81",
+                    "waypointSymbol" => "X1-UX81-A1",
+                    "status" => "IN_ORBIT",
+                    "flightMode" => "CRUISE"
+                  }
+                })
+            })
+        end
+      end)
+
+      assert {:ok, preview} = Intents.warp_preview(agent, "FLEET-SHIP", "X2-UX81-A3")
+
+      # Review with allowed_methods: ["jump"] persists the restriction
+      assert {:ok, %Intent{parameters: params}} =
+               Intents.review(
+                 manual_scope(agent),
+                 agent,
+                 %Intents.ManualControl{},
+                 "FLEET-SHIP",
+                 "X2-UX81-A3",
+                 preview,
+                 allowed_methods: ["jump"]
+               )
+
+      assert params["allowed_methods"] == ["jump"]
+      assert params["review_method"] == "warp"
+
+      # Review without allowed_methods defaults to both
+      assert {:ok, %Intent{parameters: params2}} =
+               Intents.review(
+                 manual_scope(agent),
+                 agent,
+                 %Intents.ManualControl{},
+                 "FLEET-SHIP",
+                 "X2-UX81-A3",
+                 preview
+               )
+
+      assert params2["allowed_methods"] == ["jump", "warp"]
+    end
+
+    test "method_selection returns jump-only when allowed_methods restricts to jump" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case {conn.request_path, conn.method} do
+          {"/v2/my/ships/FLEET-SHIP", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" =>
+                ship_body("FLEET-SHIP", %{
+                  "modules" => [%{"symbol" => "MODULE_WARP_DRIVE_I", "range" => 30}],
+                  "fuel" => %{"capacity" => 200, "current" => 150},
+                  "nav" => %{
+                    "systemSymbol" => "X1-UX81",
+                    "waypointSymbol" => "X1-UX81-G1",
+                    "status" => "IN_ORBIT",
+                    "flightMode" => "CRUISE"
+                  }
+                })
+            })
+
+          {"/v2/my/agent", "GET"} ->
+            Req.Test.json(conn, %{"data" => %{"credits" => 2_000}})
+
+          {"/v2/systems/X1-UX81/waypoints", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => [
+                %{
+                  "symbol" => "X1-UX81-G1",
+                  "systemSymbol" => "X1-UX81",
+                  "type" => "JUMP_GATE",
+                  "x" => 0,
+                  "y" => 0
+                }
+              ]
+            })
+
+          {"/v2/systems/X1-UX81/waypoints/X1-UX81-G1", "GET"} ->
+            Req.Test.json(conn, %{"data" => %{"symbol" => "X1-UX81-G1", "x" => 0, "y" => 0}})
+
+          {"/v2/systems/X1-UX81/waypoints/X1-UX81-G1/construction", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => %{
+                "symbol" => "X1-UX81-G1",
+                "isComplete" => true,
+                "materials" => []
+              }
+            })
+
+          {"/v2/systems/X1-UX81/waypoints/X1-UX81-G1/jump-gate", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => %{"connections" => ["X2-UX81-G1"]}
+            })
+
+          {"/v2/systems/X2-UX81/waypoints/X2-UX81-G1/construction", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => %{
+                "symbol" => "X2-UX81-G1",
+                "isComplete" => true,
+                "materials" => []
+              }
+            })
+
+          {"/v2/systems/X2-UX81/waypoints/X2-UX81-G1/jump-gate", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => %{"connections" => ["X1-UX81-G1"]}
+            })
+
+          {"/v2/systems/X1-UX81/waypoints/X1-UX81-G1/market", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => %{
+                "tradeGoods" => [%{"symbol" => "ANTIMATTER", "purchasePrice" => 1_000}]
+              }
+            })
+        end
+      end)
+
+      # Even though warp is viable, restricting to jump-only excludes it
+      assert {:ok, selection} =
+               Intents.method_selection(agent, "FLEET-SHIP", "X2-UX81-G1",
+                 allowed_methods: ["jump"]
+               )
+
+      assert selection.selected == "jump"
+      assert {"jump", _} = List.keyfind!(selection.viable, "jump", 0)
+      assert {"warp", :method_not_allowed} = List.keyfind!(selection.rejected, "warp", 0)
+    end
   end
 
   describe "manual Navigate Intents" do
@@ -2211,5 +2353,424 @@ defmodule SpaceTraders.IntentsTest do
 
   defp ship_fixture(agent, symbol) do
     Repo.insert!(%Ship{symbol: symbol, ship_type: "SHIP_COMMAND_FRIGATE", agent_id: agent.id})
+  end
+
+  describe "method_selection" do
+    test "prefers jump over warp when both are viable" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case {conn.request_path, conn.method} do
+          {"/v2/my/ships/FLEET-SHIP", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" =>
+                ship_body("FLEET-SHIP", %{
+                  "modules" => [%{"symbol" => "MODULE_WARP_DRIVE_I", "range" => 30}],
+                  "fuel" => %{"capacity" => 200, "current" => 150},
+                  "nav" => %{
+                    "systemSymbol" => "X1-UX81",
+                    "waypointSymbol" => "X1-UX81-A1",
+                    "status" => "IN_ORBIT",
+                    "flightMode" => "CRUISE"
+                  }
+                })
+            })
+
+          {"/v2/my/agent", "GET"} ->
+            Req.Test.json(conn, %{"data" => %{"credits" => 2_000}})
+
+          {"/v2/systems/X1-UX81/waypoints", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => [
+                %{
+                  "symbol" => "X1-UX81-G1",
+                  "systemSymbol" => "X1-UX81",
+                  "type" => "JUMP_GATE",
+                  "x" => 0,
+                  "y" => 0
+                }
+              ]
+            })
+
+          {"/v2/systems/X1-UX81/waypoints/X1-UX81-G1", "GET"} ->
+            Req.Test.json(conn, %{"data" => %{"symbol" => "X1-UX81-G1", "x" => 0, "y" => 0}})
+
+          {"/v2/systems/X1-UX81/waypoints/X1-UX81-G1/construction", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => %{
+                "symbol" => "X1-UX81-G1",
+                "isComplete" => true,
+                "materials" => []
+              }
+            })
+
+          {"/v2/systems/X1-UX81/waypoints/X1-UX81-G1/jump-gate", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => %{"connections" => ["X2-UX81-G1"]}
+            })
+
+          {"/v2/systems/X2-UX81/waypoints/X2-UX81-G1/construction", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => %{
+                "symbol" => "X2-UX81-G1",
+                "isComplete" => true,
+                "materials" => []
+              }
+            })
+
+          {"/v2/systems/X2-UX81/waypoints/X2-UX81-G1/jump-gate", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => %{"connections" => ["X1-UX81-G1"]}
+            })
+
+          {"/v2/systems/X1-UX81/waypoints/X1-UX81-G1/market", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => %{
+                "tradeGoods" => [%{"symbol" => "ANTIMATTER", "purchasePrice" => 1_000}]
+              }
+            })
+        end
+      end)
+
+      assert {:ok, selection} =
+               Intents.method_selection(agent, "FLEET-SHIP", "X2-UX81-G1")
+
+      assert selection.selected == "jump"
+      assert {"jump", _preview} = List.keyfind!(selection.viable, "jump", 0)
+      assert {"warp", _preview} = List.keyfind!(selection.viable, "warp", 0)
+      assert selection.rejected == []
+    end
+
+    test "falls back to warp when jump gate is incomplete" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case {conn.request_path, conn.method} do
+          {"/v2/my/ships/FLEET-SHIP", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" =>
+                ship_body("FLEET-SHIP", %{
+                  "modules" => [%{"symbol" => "MODULE_WARP_DRIVE_I", "range" => 30}],
+                  "fuel" => %{"capacity" => 200, "current" => 150},
+                  "nav" => %{
+                    "systemSymbol" => "X1-UX81",
+                    "waypointSymbol" => "X1-UX81-A1",
+                    "status" => "IN_ORBIT",
+                    "flightMode" => "CRUISE"
+                  }
+                })
+            })
+
+          {"/v2/my/agent", "GET"} ->
+            Req.Test.json(conn, %{"data" => %{"credits" => 2_000}})
+
+          {"/v2/systems/X1-UX81/waypoints", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => [
+                %{
+                  "symbol" => "X1-UX81-G1",
+                  "systemSymbol" => "X1-UX81",
+                  "type" => "JUMP_GATE",
+                  "x" => 0,
+                  "y" => 0
+                }
+              ]
+            })
+
+          {"/v2/systems/X1-UX81/waypoints/X1-UX81-G1", "GET"} ->
+            Req.Test.json(conn, %{"data" => %{"symbol" => "X1-UX81-G1", "x" => 0, "y" => 0}})
+
+          {"/v2/systems/X1-UX81/waypoints/X1-UX81-G1/construction", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => %{
+                "symbol" => "X1-UX81-G1",
+                "isComplete" => false,
+                "materials" => []
+              }
+            })
+
+          {"/v2/systems/X1-UX81/waypoints/X1-UX81-G1/jump-gate", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => %{"connections" => ["X2-UX81-G1"]}
+            })
+
+          {"/v2/systems/X2-UX81/waypoints/X2-UX81-G1/construction", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => %{
+                "symbol" => "X2-UX81-G1",
+                "isComplete" => true,
+                "materials" => []
+              }
+            })
+
+          {"/v2/systems/X2-UX81/waypoints/X2-UX81-G1/jump-gate", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => %{"connections" => ["X1-UX81-G1"]}
+            })
+
+          {"/v2/systems/X1-UX81/waypoints/X1-UX81-G1/market", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => %{
+                "tradeGoods" => [%{"symbol" => "ANTIMATTER", "purchasePrice" => 1_000}]
+              }
+            })
+        end
+      end)
+
+      assert {:ok, selection} =
+               Intents.method_selection(agent, "FLEET-SHIP", "X2-UX81-G1")
+
+      assert selection.selected == "warp"
+      assert {"warp", _preview} = List.keyfind!(selection.viable, "warp", 0)
+      assert {"jump", reason} = List.keyfind!(selection.rejected, "jump", 0)
+      assert {:jump_gate_incomplete, "X1-UX81-G1"} = reason
+    end
+
+    test "returns only jump when warp drive is missing" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case {conn.request_path, conn.method} do
+          {"/v2/my/ships/FLEET-SHIP", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" =>
+                ship_body("FLEET-SHIP", %{
+                  "modules" => [%{"symbol" => "MODULE_CARGO_HOLD_I"}],
+                  "fuel" => %{"capacity" => 200, "current" => 150},
+                  "nav" => %{
+                    "systemSymbol" => "X1-UX81",
+                    "waypointSymbol" => "X1-UX81-G1",
+                    "status" => "IN_ORBIT",
+                    "flightMode" => "CRUISE"
+                  }
+                })
+            })
+
+          {"/v2/my/agent", "GET"} ->
+            Req.Test.json(conn, %{"data" => %{"credits" => 2_000}})
+
+          {"/v2/systems/X1-UX81/waypoints", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => [
+                %{
+                  "symbol" => "X1-UX81-G1",
+                  "systemSymbol" => "X1-UX81",
+                  "type" => "JUMP_GATE",
+                  "x" => 0,
+                  "y" => 0
+                }
+              ]
+            })
+
+          {"/v2/systems/X1-UX81/waypoints/X1-UX81-G1", "GET"} ->
+            Req.Test.json(conn, %{"data" => %{"symbol" => "X1-UX81-G1", "x" => 0, "y" => 0}})
+
+          {"/v2/systems/X1-UX81/waypoints/X1-UX81-G1/construction", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => %{
+                "symbol" => "X1-UX81-G1",
+                "isComplete" => true,
+                "materials" => []
+              }
+            })
+
+          {"/v2/systems/X1-UX81/waypoints/X1-UX81-G1/jump-gate", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => %{"connections" => ["X2-UX81-G1"]}
+            })
+
+          {"/v2/systems/X2-UX81/waypoints/X2-UX81-G1/construction", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => %{
+                "symbol" => "X2-UX81-G1",
+                "isComplete" => true,
+                "materials" => []
+              }
+            })
+
+          {"/v2/systems/X2-UX81/waypoints/X2-UX81-G1/jump-gate", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => %{"connections" => ["X1-UX81-G1"]}
+            })
+
+          {"/v2/systems/X1-UX81/waypoints/X1-UX81-G1/market", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => %{
+                "tradeGoods" => [%{"symbol" => "ANTIMATTER", "purchasePrice" => 1_000}]
+              }
+            })
+        end
+      end)
+
+      assert {:ok, selection} =
+               Intents.method_selection(agent, "FLEET-SHIP", "X2-UX81-G1")
+
+      assert selection.selected == "jump"
+      assert {"jump", _preview} = List.keyfind!(selection.viable, "jump", 0)
+      assert {"warp", :warp_drive_missing} = List.keyfind!(selection.rejected, "warp", 0)
+    end
+
+    test "restricts to only warp when allowed_methods excludes jump" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case {conn.request_path, conn.method} do
+          {"/v2/my/ships/FLEET-SHIP", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" =>
+                ship_body("FLEET-SHIP", %{
+                  "modules" => [%{"symbol" => "MODULE_WARP_DRIVE_I", "range" => 30}],
+                  "fuel" => %{"capacity" => 200, "current" => 150},
+                  "nav" => %{
+                    "systemSymbol" => "X1-UX81",
+                    "waypointSymbol" => "X1-UX81-G1",
+                    "status" => "IN_ORBIT",
+                    "flightMode" => "CRUISE"
+                  }
+                })
+            })
+
+          {"/v2/my/agent", "GET"} ->
+            Req.Test.json(conn, %{"data" => %{"credits" => 2_000}})
+
+          {"/v2/systems/X1-UX81/waypoints", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => [
+                %{
+                  "symbol" => "X1-UX81-G1",
+                  "systemSymbol" => "X1-UX81",
+                  "type" => "JUMP_GATE",
+                  "x" => 0,
+                  "y" => 0
+                }
+              ]
+            })
+
+          {"/v2/systems/X1-UX81/waypoints/X1-UX81-G1", "GET"} ->
+            Req.Test.json(conn, %{"data" => %{"symbol" => "X1-UX81-G1", "x" => 0, "y" => 0}})
+        end
+      end)
+
+      assert {:ok, selection} =
+               Intents.method_selection(agent, "FLEET-SHIP", "X2-UX81-G1",
+                 allowed_methods: ["warp"]
+               )
+
+      assert selection.selected == "warp"
+      assert {"warp", _preview} = List.keyfind!(selection.viable, "warp", 0)
+      assert {"jump", :method_not_allowed} = List.keyfind!(selection.rejected, "jump", 0)
+      assert selection.allowed_methods == ["warp"]
+    end
+
+    test "returns no viable methods when both jump and warp fail" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case {conn.request_path, conn.method} do
+          {"/v2/my/ships/FLEET-SHIP", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" =>
+                ship_body("FLEET-SHIP", %{
+                  "modules" => [%{"symbol" => "MODULE_CARGO_HOLD_I"}],
+                  "fuel" => %{"capacity" => 200, "current" => 0},
+                  "nav" => %{
+                    "systemSymbol" => "X1-UX81",
+                    "waypointSymbol" => "X1-UX81-G1",
+                    "status" => "IN_ORBIT",
+                    "flightMode" => "CRUISE"
+                  }
+                })
+            })
+
+          {"/v2/my/agent", "GET"} ->
+            Req.Test.json(conn, %{"data" => %{"credits" => 2_000}})
+
+          {"/v2/systems/X1-UX81/waypoints", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => [
+                %{
+                  "symbol" => "X1-UX81-G1",
+                  "systemSymbol" => "X1-UX81",
+                  "type" => "JUMP_GATE",
+                  "x" => 0,
+                  "y" => 0
+                }
+              ]
+            })
+
+          {"/v2/systems/X1-UX81/waypoints/X1-UX81-G1", "GET"} ->
+            Req.Test.json(conn, %{"data" => %{"symbol" => "X1-UX81-G1", "x" => 0, "y" => 0}})
+
+          {"/v2/systems/X1-UX81/waypoints/X1-UX81-G1/construction", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => %{
+                "symbol" => "X1-UX81-G1",
+                "isComplete" => false,
+                "materials" => []
+              }
+            })
+
+          {"/v2/systems/X1-UX81/waypoints/X1-UX81-G1/jump-gate", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => %{"connections" => ["X2-UX81-G1"]}
+            })
+
+          {"/v2/systems/X2-UX81/waypoints/X2-UX81-G1/construction", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => %{
+                "symbol" => "X2-UX81-G1",
+                "isComplete" => true,
+                "materials" => []
+              }
+            })
+
+          {"/v2/systems/X2-UX81/waypoints/X2-UX81-G1/jump-gate", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => %{"connections" => ["X1-UX81-G1"]}
+            })
+
+          {"/v2/systems/X1-UX81/waypoints/X1-UX81-G1/market", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => %{
+                "tradeGoods" => [%{"symbol" => "ANTIMATTER", "purchasePrice" => 1_000}]
+              }
+            })
+        end
+      end)
+
+      assert {:ok, selection} =
+               Intents.method_selection(agent, "FLEET-SHIP", "X2-UX81-G1")
+
+      assert selection.selected == nil
+      assert selection.viable == []
+      assert length(selection.rejected) == 2
+    end
+
+    test "returns same_system_route for same-system targets" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        Req.Test.json(conn, %{
+          "data" =>
+            ship_body("FLEET-SHIP", %{
+              "nav" => %{
+                "systemSymbol" => "X1-UX81",
+                "waypointSymbol" => "X1-UX81-A1",
+                "status" => "IN_ORBIT",
+                "flightMode" => "CRUISE"
+              }
+            })
+        })
+      end)
+
+      assert {:error, :same_system_route} =
+               Intents.method_selection(agent, "FLEET-SHIP", "X1-UX81-A2")
+    end
   end
 end

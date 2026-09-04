@@ -242,15 +242,37 @@ defmodule SpaceTradersWeb.DashboardLive do
     with {:ok, agent} <- agent_for_ship(socket, ship_symbol),
          :ok <- validate_waypoint(waypoint) do
       result =
-        case Intents.jump_preview(agent, ship_symbol, waypoint) do
-          {:ok, preview} ->
+        case Intents.method_selection(agent, ship_symbol, waypoint) do
+          {:ok, %{selected: nil, rejected: rejected}} ->
+            reason = rejected |> List.first() |> elem(1)
+
+            case Intents.block_review(
+                   socket.assigns.current_scope,
+                   agent,
+                   %Intents.ManualControl{},
+                   ship_symbol,
+                   waypoint,
+                   reason
+                 ) do
+              {:ok, intent} ->
+                {:blocked_preview, candidate_preview(waypoint, [], reason), intent}
+
+              other ->
+                other
+            end
+
+          {:ok, %{selected: _method} = selection} ->
+            {_method, preview} =
+              List.keyfind!(selection.viable, selection.selected, 0)
+
             Intents.review(
               socket.assigns.current_scope,
               agent,
               %Intents.ManualControl{},
               ship_symbol,
               waypoint,
-              preview
+              preview,
+              allowed_methods: selection.allowed_methods
             )
 
           {:error, :same_system_route} ->
@@ -262,62 +284,20 @@ defmodule SpaceTradersWeb.DashboardLive do
               %Intents.Navigate{waypoint: waypoint}
             )
 
-          {:error, {:jump_route_candidates, reason, candidates} = route_reason} ->
-            case Intents.warp_preview(agent, ship_symbol, waypoint) do
-              {:ok, preview} ->
-                Intents.review(
-                  socket.assigns.current_scope,
-                  agent,
-                  %Intents.ManualControl{},
-                  ship_symbol,
-                  waypoint,
-                  Map.put(preview, :candidates, candidates)
-                )
-
-              {:error, _warp_reason} ->
-                case Intents.block_review(
-                       socket.assigns.current_scope,
-                       agent,
-                       %Intents.ManualControl{},
-                       ship_symbol,
-                       waypoint,
-                       route_reason
-                     ) do
-                  {:ok, intent} ->
-                    {:blocked_preview, candidate_preview(waypoint, candidates, reason), intent}
-
-                  other ->
-                    other
-                end
-            end
-
           {:error, reason} ->
-            case Intents.warp_preview(agent, ship_symbol, waypoint) do
-              {:ok, preview} ->
-                Intents.review(
-                  socket.assigns.current_scope,
-                  agent,
-                  %Intents.ManualControl{},
-                  ship_symbol,
-                  waypoint,
-                  preview
-                )
+            case Intents.block_review(
+                   socket.assigns.current_scope,
+                   agent,
+                   %Intents.ManualControl{},
+                   ship_symbol,
+                   waypoint,
+                   reason
+                 ) do
+              {:ok, intent} ->
+                {:blocked_preview, candidate_preview(waypoint, [], reason), intent}
 
-              {:error, _warp_reason} ->
-                case Intents.block_review(
-                       socket.assigns.current_scope,
-                       agent,
-                       %Intents.ManualControl{},
-                       ship_symbol,
-                       waypoint,
-                       reason
-                     ) do
-                  {:ok, intent} ->
-                    {:blocked_preview, candidate_preview(waypoint, [], reason), intent}
-
-                  other ->
-                    other
-                end
+              other ->
+                other
             end
         end
 
@@ -3021,6 +3001,7 @@ defmodule SpaceTradersWeb.DashboardLive do
               cooldown_tick={@cooldown_tick}
               form_drafts={@form_drafts}
               jump_preview={jump_preview_for_intent(ship.intents)}
+              alternative_preview={alternative_preview_for_intent(ship.intents)}
               selected={@selected_ship == ship.symbol}
               selected_mode={not is_nil(@selected_ship)}
             />
@@ -3088,6 +3069,7 @@ defmodule SpaceTradersWeb.DashboardLive do
   attr :cooldown_tick, :integer, default: 0
   attr :form_drafts, :map, default: %{}
   attr :jump_preview, :map, default: nil
+  attr :alternative_preview, :map, default: nil
   attr :selected, :boolean, default: false
   attr :selected_mode, :boolean, default: false
 
@@ -3491,6 +3473,37 @@ defmodule SpaceTradersWeb.DashboardLive do
               {if @jump_preview[:method] == "warp", do: "Confirm warp", else: "Confirm jump"}
             </button>
           </form>
+        </section>
+        <section
+          :if={@alternative_preview}
+          class="mt-2 rounded border border-base-300/40 bg-base-300/10 p-3 text-xs"
+          data-alternative-method
+        >
+          <p class="font-semibold opacity-70">
+            Also available: {if @jump_preview[:method] == "warp", do: "jump", else: "warp"}
+          </p>
+          <%= if @alternative_preview[:method] == "warp" do %>
+            <dl class="mt-1 grid grid-cols-2 gap-x-3 gap-y-1 opacity-70">
+              <dt>Warp Drive</dt>
+              <dd class="font-mono">{@alternative_preview.warp_drive}</dd>
+              <dt>Fuel</dt>
+              <dd>{@alternative_preview.fuel_current} / {@alternative_preview.fuel_capacity}</dd>
+              <dt>Range</dt>
+              <dd>{@alternative_preview.warp_range || "API-enforced"}</dd>
+            </dl>
+          <% else %>
+            <dl class="mt-1 grid grid-cols-2 gap-x-3 gap-y-1 opacity-70">
+              <dt>Gates</dt>
+              <dd class="font-mono">
+                {@alternative_preview.source_waypoint} to {@alternative_preview.destination_waypoint}
+              </dd>
+              <dt>Jump cost</dt>
+              <dd>{@alternative_preview.antimatter_cost} credits</dd>
+              <dt>Cooldown</dt>
+              <dd>{@alternative_preview.cooldown_seconds}s</dd>
+            </dl>
+          <% end %>
+          <p class="mt-1 opacity-60">Re-submit the form to switch.</p>
         </section>
         <div
           :if={@ship.intents}
@@ -4825,6 +4838,27 @@ defmodule SpaceTradersWeb.DashboardLive do
   end
 
   defp jump_preview_for_intent(_intent), do: nil
+
+  defp alternative_preview_for_intent(%{status: "awaiting_confirmation", parameters: parameters}) do
+    case parameters["review_method"] do
+      "jump" ->
+        case parameters["reviewed_warp"] do
+          %{"method" => "warp"} = warp -> atomize_preview(warp)
+          _ -> nil
+        end
+
+      "warp" ->
+        case parameters["reviewed_jump"] do
+          %{"method" => "jump"} = jump -> atomize_preview(jump)
+          _ -> nil
+        end
+
+      _ ->
+        nil
+    end
+  end
+
+  defp alternative_preview_for_intent(_intent), do: nil
 
   defp atomize_preview(value) when is_map(value) do
     Map.new(value, fn {key, value} -> {preview_key(key), atomize_preview(value)} end)
