@@ -3754,19 +3754,33 @@ defmodule SpaceTraders.FleetTest do
     end
   end
 
-  describe "Phase 3.5 acceptance" do
-    test "Market Trading maintains its selected trade through the public Fleet seam" do
+  describe "Phase 3.5 Job acceptance" do
+    test "Market Trading Job realizes a selected trade and starts its next cycle through Fleet" do
       agent = agent_fixture()
       ship_fixture(agent, "FLEET-SHIP")
+      {:ok, state} = Elixir.Agent.start_link(fn -> :empty_cargo end)
 
       Req.Test.stub(SpaceTraders.API, fn conn ->
         case {conn.request_path, conn.method} do
           {"/v2/my/ships/FLEET-SHIP", "GET"} ->
+            cargo =
+              case Elixir.Agent.get(state, & &1) do
+                :purchased ->
+                  %{
+                    "capacity" => 40,
+                    "units" => 5,
+                    "inventory" => [%{"symbol" => "IRON_ORE", "units" => 5}]
+                  }
+
+                _ ->
+                  %{"capacity" => 40, "units" => 0, "inventory" => []}
+              end
+
             Req.Test.json(conn, %{
               "data" =>
                 ship_body("FLEET-SHIP", %{
                   "nav" => nav_body("DOCKED"),
-                  "cargo" => %{"capacity" => 40, "units" => 0, "inventory" => []}
+                  "cargo" => cargo
                 })
             })
 
@@ -3785,6 +3799,7 @@ defmodule SpaceTraders.FleetTest do
 
           {"/v2/my/ships/FLEET-SHIP/purchase", "POST"} ->
             assert conn.body_params == %{"symbol" => "IRON_ORE", "units" => 5}
+            Elixir.Agent.update(state, fn _ -> :purchased end)
 
             Req.Test.json(conn, %{
               "data" => %{
@@ -3805,6 +3820,26 @@ defmodule SpaceTraders.FleetTest do
                 }
               }
             })
+
+          {"/v2/my/ships/FLEET-SHIP/sell", "POST"} ->
+            assert conn.body_params == %{"symbol" => "IRON_ORE", "units" => 5}
+            Elixir.Agent.update(state, fn _ -> :empty_cargo end)
+
+            Req.Test.json(conn, %{
+              "data" => %{
+                "agent" => %{"symbol" => agent.symbol, "credits" => 100},
+                "cargo" => %{"capacity" => 40, "units" => 0, "inventory" => []},
+                "transaction" => %{
+                  "type" => "SELL",
+                  "shipSymbol" => "FLEET-SHIP",
+                  "tradeSymbol" => "IRON_ORE",
+                  "waypointSymbol" => "X1-UX81-A1",
+                  "units" => 5,
+                  "pricePerUnit" => 20,
+                  "totalPrice" => 100
+                }
+              }
+            })
         end
       end)
 
@@ -3814,7 +3849,7 @@ defmodule SpaceTraders.FleetTest do
                    %{
                      trade_symbol: "IRON_ORE",
                      source_waypoint: "X1-UX81-A1",
-                     destination_waypoint: "X1-UX81-A2",
+                     destination_waypoint: "X1-UX81-A1",
                      units: 5,
                      purchase_price: 10,
                      sell_price: 20
@@ -3825,17 +3860,40 @@ defmodule SpaceTraders.FleetTest do
       assert {:ok, %Job{status: "active"} = job} =
                Fleet.start_market_trading_job(agent, "FLEET-SHIP")
 
+      buy_intent = Repo.one!(from intent in Intent, order_by: [desc: intent.id], limit: 1)
+
       assert %Intent{
                job_id: job_id,
                type: "buy",
                status: "completed",
+               parameters: %{
+                 "market_trade" => %{
+                   "destination_waypoint" => "X1-UX81-A1",
+                   "purchase_price" => 10,
+                   "sell_price" => 20,
+                   "trade_symbol" => "IRON_ORE",
+                   "units" => 5
+                 }
+               },
                last_action_result: %{"transaction" => %{"total_price" => 50}}
-             } = Repo.one!(from intent in Intent, order_by: [desc: intent.id], limit: 1)
+             } = buy_intent
 
       assert job_id == job.id
+
+      assert {:ok, %Job{status: "active", progress: progress}} =
+               Fleet.continue_job_after_intent(agent, job, buy_intent, %{})
+
+      assert progress["completed_trades"] == 1
+      assert progress["realized_net_profit"] == 50
+
+      assert 2 =
+               Repo.aggregate(
+                 from(intent in Intent, where: intent.job_id == ^job.id and intent.type == "buy"),
+                 :count
+               )
     end
 
-    test "Construction Supply completes from authoritative project state through Fleet" do
+    test "Construction Supply Job completes from authoritative project state through Fleet" do
       agent = agent_fixture()
       ship_fixture(agent, "FLEET-SHIP")
 
