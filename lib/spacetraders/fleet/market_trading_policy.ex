@@ -14,7 +14,7 @@ defmodule SpaceTraders.Fleet.MarketTradingPolicy do
     selected =
       viable
       |> Enum.sort_by(fn candidate ->
-        {-candidate.expected_net_profit, candidate.transit_seconds, -candidate.destination_age}
+        {-candidate.expected_net_profit, candidate.transit_seconds, candidate.destination_age}
       end)
       |> List.first()
 

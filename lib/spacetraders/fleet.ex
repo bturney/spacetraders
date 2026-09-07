@@ -1827,6 +1827,22 @@ defmodule SpaceTraders.Fleet do
   defp advance_procurement_after_intent(
          agent,
          %Job{type: "market_trading"} = job,
+         %Intent{status: "blocked", type: "sell"} = intent
+       ) do
+    case alternate_market_buyer(job, intent) do
+      nil ->
+        block_market_trading_intent(job, intent)
+
+      candidate ->
+        with {:ok, sell} <- request_market_trade_sale(agent, job, candidate, intent) do
+          advance_procurement_after_intent(agent, job, sell)
+        end
+    end
+  end
+
+  defp advance_procurement_after_intent(
+         agent,
+         %Job{type: "market_trading"} = job,
          %Intent{status: "completed", type: "buy"} = intent
        ) do
     candidate = intent.parameters["market_trade"]
@@ -1871,12 +1887,7 @@ defmodule SpaceTraders.Fleet do
          %Job{type: "market_trading"} = job,
          %Intent{} = intent
        ) do
-    blocker = intent.blocker || job_blocker(:market_trade_intent_blocked)
-
-    {:error,
-     Repo.update!(
-       Ecto.Changeset.change(job, status: "blocked", blocker: blocker, blocked_reason: nil)
-     )}
+    block_market_trading_intent(job, intent)
   end
 
   defp advance_procurement_after_intent(_agent, job, %Intent{status: "waiting"} = intent) do
@@ -1885,6 +1896,43 @@ defmodule SpaceTraders.Fleet do
 
   defp advance_procurement_after_intent(_agent, job, %Intent{} = intent),
     do: mark_procurement_job_blocked(job, intent.blocker || :procurement_operation_blocked)
+
+  defp alternate_market_buyer(job, intent) do
+    attempted = intent.parameters["attempted_destinations"] || [intent.target_waypoint]
+
+    Enum.find(job.progress["candidates"], fn candidate ->
+      candidate["trade_symbol"] == intent.parameters["trade_symbol"] and
+        candidate["destination_waypoint"] not in attempted
+    end)
+  end
+
+  defp request_market_trade_sale(agent, job, candidate, intent) do
+    attempted =
+      (intent.parameters["attempted_destinations"] || [intent.target_waypoint]) ++
+        [candidate["destination_waypoint"]]
+
+    SpaceTraders.Fleet.Intents.request(
+      agent,
+      %SpaceTraders.Fleet.Intents.JobOwner{job: job},
+      Repo.get!(Ship, job.ship_id).symbol,
+      %SpaceTraders.Fleet.Intents.SellGoods{
+        market: candidate["destination_waypoint"],
+        trade_good: candidate["trade_symbol"],
+        quantity: candidate["units"],
+        constraints: %{min_price: candidate["sell_price"]},
+        parameters: %{market_trade: candidate, attempted_destinations: attempted}
+      }
+    )
+  end
+
+  defp block_market_trading_intent(job, intent) do
+    blocker = intent.blocker || job_blocker(:market_trade_intent_blocked)
+
+    {:error,
+     Repo.update!(
+       Ecto.Changeset.change(job, status: "blocked", blocker: blocker, blocked_reason: nil)
+     )}
+  end
 
   defp mark_job_waiting(job, intent) do
     case Intents.with_current_intent(intent, fn _current_intent ->
