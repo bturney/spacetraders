@@ -3825,7 +3825,7 @@ defmodule SpaceTraders.FleetTest do
       assert {:ok, %Job{status: "active"} = job} =
                Fleet.start_market_trading_job(agent, "FLEET-SHIP")
 
-      buy_intent = Repo.one!(from intent in Intent, order_by: [desc: intent.id], limit: 1)
+      assert [buy_intent] = Intents.history(agent)
 
       assert %Intent{
                job_id: job_id,
