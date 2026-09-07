@@ -1057,8 +1057,22 @@ defmodule SpaceTraders.Fleet do
     end
   end
 
-  def resume_market_trading_job(agent, ship_symbol),
-    do: start_market_trading_job(agent, ship_symbol)
+  def resume_market_trading_job(%AgentRecord{} = agent, ship_symbol) do
+    with {:ok, ship} <- owned_ship(agent, ship_symbol),
+         %Job{type: "market_trading"} = job <- unfinished_job(ship.id) do
+      if Intents.unfinished_job_intent(job.id) do
+        Repo.update!(
+          Ecto.Changeset.change(job, status: "active", blocker: nil, blocked_reason: nil)
+        )
+
+        advance_market_trading_job(agent, ship_symbol)
+      else
+        start_market_trading_job(agent, ship_symbol)
+      end
+    else
+      _ -> {:error, :market_trading_job_not_configured}
+    end
+  end
 
   @doc "Advances a Market Trading Job from fresh authoritative Ship state."
   def advance_market_trading_job(%AgentRecord{} = agent, ship_symbol) do
@@ -1804,6 +1818,13 @@ defmodule SpaceTraders.Fleet do
   end
 
   defp advance_procurement_after_intent(
+         _agent,
+         %Job{type: "market_trading"} = job,
+         %Intent{status: "waiting"} = intent
+       ),
+       do: mark_job_waiting(job, intent)
+
+  defp advance_procurement_after_intent(
          agent,
          %Job{type: "market_trading"} = job,
          %Intent{status: "completed", type: "buy"} = intent
@@ -1859,6 +1880,13 @@ defmodule SpaceTraders.Fleet do
   end
 
   defp advance_procurement_after_intent(_agent, job, %Intent{status: "waiting"} = intent) do
+    mark_job_waiting(job, intent)
+  end
+
+  defp advance_procurement_after_intent(_agent, job, %Intent{} = intent),
+    do: mark_procurement_job_blocked(job, intent.blocker || :procurement_operation_blocked)
+
+  defp mark_job_waiting(job, intent) do
     case Intents.with_current_intent(intent, fn _current_intent ->
            case Repo.get(Job, job.id) do
              %Job{} = current when current.status == "active" ->
@@ -1875,9 +1903,6 @@ defmodule SpaceTraders.Fleet do
       result -> result
     end
   end
-
-  defp advance_procurement_after_intent(_agent, job, %Intent{} = intent),
-    do: mark_procurement_job_blocked(job, intent.blocker || :procurement_operation_blocked)
 
   defp realized_market_trade_progress(progress, buy, sell) do
     with %{"total_price" => purchase_total} <- get_in(buy.last_action_result, ["transaction"]),
@@ -4951,21 +4976,35 @@ defmodule SpaceTraders.Fleet do
         # requests with unresolved response evidence become durable blockers.
         with %Job{} = current_job <- Repo.get(Job, job.id),
              true <- Job.running?(current_job),
-             :ok <- procurement_system_matches?(current_job.progress, live_ship),
+             :ok <- job_system_matches?(current_job, live_ship),
              %Intent{} = current_intent <- Intents.unfinished_intent(intent.id),
              {:ok, current_intent} <- Intents.advance(agent, current_intent, live_ship) do
           if current_job.type == "construction_supply",
             do: advance_construction_supply_after_intent(agent, current_job, current_intent),
             else: advance_procurement_after_intent(agent, current_job, current_intent)
         else
-          false -> :ok
-          nil -> :ok
+          false ->
+            :ok
+
+          nil ->
+            :ok
+
+          {:error, reason} ->
+            if job.type == "market_trading",
+              do: block_market_trading_job(agent, ship.symbol, reason),
+              else: mark_procurement_job_blocked(job, reason)
         end
 
       {:error, reason} ->
         block_procurement_recovery_if_current(intent, job, reason)
     end
   end
+
+  defp job_system_matches?(%Job{type: "market_trading", progress: progress}, live_ship),
+    do: market_system_matches?(progress, live_ship)
+
+  defp job_system_matches?(%Job{progress: progress}, live_ship),
+    do: procurement_system_matches?(progress, live_ship)
 
   defp block_procurement_recovery_if_current(intent, job, reason) do
     case Repo.transaction(
