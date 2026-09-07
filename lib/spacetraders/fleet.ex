@@ -22,10 +22,15 @@ defmodule SpaceTraders.Fleet do
 
   alias SpaceTraders.Fleet.{
     Activity,
+    ConstructionSupplyPolicy,
+    ExplorerPolicy,
     Job,
     JobBlocker,
     Intent,
     MarketTradingPolicy,
+    MinerPolicy,
+    OutfittingPolicy,
+    ProcurementPolicy,
     Ship,
     ShipDestination
   }
@@ -629,8 +634,21 @@ defmodule SpaceTraders.Fleet do
         )
       )
 
-    cond do
-      Enum.any?(progress["acceptable_modules"], &(&1 in progress["installed_modules"])) ->
+    decision =
+      OutfittingPolicy.decide(%{
+        ready?: Enum.any?(progress["acceptable_modules"], &(&1 in progress["installed_modules"])),
+        intent?: is_struct(intent, Intent),
+        cargo_candidate: candidate,
+        slot_available?:
+          not is_integer(module_slots) or module_slots > length(live_ship.modules || []),
+        authorized_removal: authorized_removal(progress, live_ship),
+        sourcing?: is_binary(progress["source_system"]),
+        acceptable_modules: progress["acceptable_modules"],
+        installed_modules: progress["installed_modules"]
+      })
+
+    case decision do
+      {:complete, _evidence} ->
         evidence = %{"installed_modules" => progress["installed_modules"], "outcome" => "ready"}
 
         {:ok,
@@ -643,28 +661,20 @@ defmodule SpaceTraders.Fleet do
            "completed"
          )}
 
-      is_struct(intent, Intent) ->
+      {:intent, :reconcile} ->
         reconcile_outfitting_intent(agent, job, intent, live_ship)
 
-      is_binary(candidate) and
-          (not is_integer(module_slots) or module_slots > length(live_ship.modules || [])) ->
-        start_outfitting_operation(agent, job, live_ship, "install_module", candidate)
+      {:intent, %{type: :install_module, module_symbol: module_symbol}} ->
+        start_outfitting_operation(agent, job, live_ship, "install_module", module_symbol)
 
-      is_binary(candidate) and is_integer(module_slots) and
-          module_slots <= length(live_ship.modules || []) ->
-        case authorized_removal(progress, live_ship) do
-          nil -> mark_outfitting_job_blocked(job, :module_slot_removal_not_authorized)
-          symbol -> start_outfitting_operation(agent, job, live_ship, "remove_module", symbol)
-        end
+      {:intent, %{type: :remove_module, module_symbol: module_symbol}} ->
+        start_outfitting_operation(agent, job, live_ship, "remove_module", module_symbol)
 
-      is_binary(progress["source_system"]) ->
+      {:intent, :purchase_module} ->
         start_outfitting_purchase(agent, job, live_ship)
 
-      true ->
-        mark_outfitting_job_blocked(
-          job,
-          {:acceptable_module_missing_from_cargo, progress["acceptable_modules"]}
-        )
+      {:block, reason} ->
+        mark_outfitting_job_blocked(job, reason)
     end
   end
 
@@ -1016,39 +1026,42 @@ defmodule SpaceTraders.Fleet do
         |> atomize_market_keys()
         |> Map.put(:credits, overview.credits)
 
-      {candidate, rejected} = MarketTradingPolicy.select(job.progress["candidates"], constraints)
+      case MarketTradingPolicy.decide(%{
+             candidates: job.progress["candidates"],
+             constraints: constraints
+           }) do
+        {:intent, %{type: :buy, candidate: candidate}} ->
+          params = %{
+            "trade_symbol" => candidate.trade_symbol,
+            "units" => candidate.units,
+            "max_price" => candidate.purchase_price,
+            "reserve_credits" => constraints.reserve_credits,
+            "market_trade" => candidate
+          }
 
-      if candidate do
-        params = %{
-          "trade_symbol" => candidate.trade_symbol,
-          "units" => candidate.units,
-          "max_price" => candidate.purchase_price,
-          "reserve_credits" => constraints.reserve_credits,
-          "market_trade" => candidate
-        }
+          with {:ok, intent} <-
+                 Intents.insert_job_intent(job, %{
+                   type: "buy",
+                   target_waypoint: candidate.source_waypoint,
+                   parameters: params
+                 }),
+               {:ok, intent} <- Intents.advance(agent, intent, live_ship) do
+            {:ok,
+             Repo.update!(
+               Ecto.Changeset.change(job,
+                 progress: Map.put(job.progress, "last_intent_id", intent.id)
+               )
+             )}
+          end
 
-        with {:ok, intent} <-
-               Intents.insert_job_intent(job, %{
-                 type: "buy",
-                 target_waypoint: candidate.source_waypoint,
-                 parameters: params
-               }),
-             {:ok, intent} <- Intents.advance(agent, intent, live_ship) do
-          {:ok,
-           Repo.update!(
-             Ecto.Changeset.change(job,
-               progress: Map.put(job.progress, "last_intent_id", intent.id)
-             )
-           )}
-        end
-      else
-        blocker = job_blocker({:no_viable_market_trade, rejected})
+        {:block, reason} ->
+          blocker = job_blocker(reason)
 
-        Repo.update!(
-          Ecto.Changeset.change(job, status: "blocked", blocker: blocker, blocked_reason: nil)
-        )
+          Repo.update!(
+            Ecto.Changeset.change(job, status: "blocked", blocker: blocker, blocked_reason: nil)
+          )
 
-        {:error, {:market_trading_job_blocked, blocker}}
+          {:error, {:market_trading_job_blocked, blocker}}
       end
     else
       nil -> {:error, :market_trading_job_not_configured}
@@ -1576,9 +1589,12 @@ defmodule SpaceTraders.Fleet do
     progress = procurement_counts(job.progress, live_ship, recipient)
     job = Repo.update!(Ecto.Changeset.change(job, progress: progress))
 
-    cond do
-      progress["accepted"] >= progress["requested"] or
-          progress["shared_fulfilled"] >= progress["requested"] ->
+    case ProcurementPolicy.decide(%{
+           accepted: progress["accepted"],
+           shared_fulfilled: progress["shared_fulfilled"],
+           requested: progress["requested"]
+         }) do
+      {:complete, _evidence} ->
         job = terminalize_job!(job, "completed")
 
         record_activity_by_config(
@@ -1590,10 +1606,7 @@ defmodule SpaceTraders.Fleet do
 
         {:ok, job}
 
-      progress["aboard"] > 0 ->
-        start_procurement_intent(agent, job, live_ship, recipient, credits)
-
-      true ->
+      {:intent, :procure_or_deliver} ->
         start_procurement_intent(agent, job, live_ship, recipient, credits)
     end
   end
@@ -2349,10 +2362,15 @@ defmodule SpaceTraders.Fleet do
     progress = construction_supply_counts(job.progress, live_ship, construction)
     job = Repo.update!(Ecto.Changeset.change(job, progress: progress))
 
-    if construction.is_complete or construction_supply_remaining(progress) == 0 do
-      {:ok, terminalize_job!(job, "completed")}
-    else
-      start_construction_supply_intent(agent, job, live_ship, construction, credits)
+    case ConstructionSupplyPolicy.decide(%{
+           construction_complete?: construction.is_complete,
+           remaining: construction_supply_remaining(progress)
+         }) do
+      {:complete, _evidence} ->
+        {:ok, terminalize_job!(job, "completed")}
+
+      {:intent, :supply_construction} ->
+        start_construction_supply_intent(agent, job, live_ship, construction, credits)
     end
   end
 
@@ -2819,34 +2837,39 @@ defmodule SpaceTraders.Fleet do
           )
         )
 
-      if Enum.all?(coverage, fn {_symbol, result} -> result.complete? end) do
-        job =
-          Repo.update!(
-            Ecto.Changeset.change(job,
-              status: "completed",
-              blocker: nil,
-              blocked_reason: nil,
-              last_action_result: %{"kind" => "baseline_acquired"},
-              finished_at: DateTime.utc_now() |> DateTime.truncate(:second)
+      decision =
+        ExplorerPolicy.decide(%{
+          coverage: missing,
+          viability: get_in(job.progress || %{}, ["viability"]) || %{}
+        })
+
+      case decision do
+        {:complete, _evidence} ->
+          job =
+            Repo.update!(
+              Ecto.Changeset.change(job,
+                status: "completed",
+                blocker: nil,
+                blocked_reason: nil,
+                last_action_result: %{"kind" => "baseline_acquired"},
+                finished_at: DateTime.utc_now() |> DateTime.truncate(:second)
+              )
             )
+
+          record_activity_by_config(
+            job,
+            "explorer_job_completed",
+            "System Exploration Job completed",
+            %{
+              "system" => system,
+              "coverage" => missing
+            }
           )
 
-        record_activity_by_config(
-          job,
-          "explorer_job_completed",
-          "System Exploration Job completed",
-          %{
-            "system" => system,
-            "coverage" => missing
-          }
-        )
+          {:ok, job}
 
-        {:ok, job}
-      else
-        block_explorer_job(
-          job,
-          {:unresolved_coverage, missing, get_in(job.progress || %{}, ["viability"]) || %{}}
-        )
+        {:block, reason} ->
+          block_explorer_job(job, reason)
       end
     else
       {:waiting, job} -> {:ok, job}
@@ -3449,8 +3472,18 @@ defmodule SpaceTraders.Fleet do
   end
 
   defp advance_miner_job(%AgentRecord{} = agent, %Job{} = config, live_ship, mode) do
-    cond do
-      in_flight_arrival?(config, live_ship) ->
+    decision =
+      MinerPolicy.decide(%{
+        in_flight_arrival?: in_flight_arrival?(config, live_ship),
+        pending_navigation?: pending_navigation?(config),
+        at_extraction?: at_extraction_waypoint?(live_ship, config.extraction_waypoint),
+        at_market?: at_market_waypoint?(live_ship, config.market_waypoint),
+        market_leg?: market_leg?(config),
+        extraction_waypoint: config.extraction_waypoint
+      })
+
+    case decision do
+      {:wait, :arrival} ->
         maybe_schedule_arrival(agent, live_ship.symbol, %{nav: live_ship.nav}, config.id)
 
         record_miner_job_activity(
@@ -3465,17 +3498,17 @@ defmodule SpaceTraders.Fleet do
 
         {:ok, Repo.update!(Ecto.Changeset.change(config, status: "waiting"))}
 
-      pending_navigation?(config) ->
+      {:wait, :navigation} ->
         {:ok, config}
 
-      at_extraction_waypoint?(live_ship, config.extraction_waypoint) ->
+      {:intent, :gather} ->
         extract_if_below_threshold(agent, config, live_ship, mode)
 
-      at_market_waypoint?(live_ship, config.market_waypoint) and market_leg?(config) ->
+      {:intent, :settle_market} ->
         sell_at_market(agent, config, live_ship)
 
-      true ->
-        navigate_miner_job(agent, config, live_ship, config.extraction_waypoint)
+      {:intent, %{type: :navigate, waypoint: waypoint}} ->
+        navigate_miner_job(agent, config, live_ship, waypoint)
     end
   end
 
