@@ -3758,6 +3758,7 @@ defmodule SpaceTraders.FleetTest do
     test "starts its selected Buy Goods Intent through Fleet" do
       agent = agent_fixture()
       ship_fixture(agent, "FLEET-SHIP")
+      {:ok, ship_state} = Elixir.Agent.start_link(fn -> :empty end)
 
       Req.Test.stub(SpaceTraders.API, fn conn ->
         case {conn.request_path, conn.method} do
@@ -3766,7 +3767,15 @@ defmodule SpaceTraders.FleetTest do
               "data" =>
                 ship_body("FLEET-SHIP", %{
                   "nav" => nav_body("DOCKED"),
-                  "cargo" => %{"capacity" => 40, "units" => 0, "inventory" => []}
+                  "cargo" =>
+                    if(Elixir.Agent.get(ship_state, & &1) == :purchased,
+                      do: %{
+                        "capacity" => 40,
+                        "units" => 5,
+                        "inventory" => [%{"symbol" => "IRON_ORE", "units" => 5}]
+                      },
+                      else: %{"capacity" => 40, "units" => 0, "inventory" => []}
+                    )
                 })
             })
 
@@ -3778,13 +3787,19 @@ defmodule SpaceTraders.FleetTest do
               "data" => %{
                 "symbol" => "X1-UX81-A1",
                 "tradeGoods" => [
-                  %{"symbol" => "IRON_ORE", "purchasePrice" => 10, "tradeVolume" => 5}
+                  %{
+                    "symbol" => "IRON_ORE",
+                    "purchasePrice" => 10,
+                    "sellPrice" => 20,
+                    "tradeVolume" => 5
+                  }
                 ]
               }
             })
 
           {"/v2/my/ships/FLEET-SHIP/purchase", "POST"} ->
             assert conn.body_params == %{"symbol" => "IRON_ORE", "units" => 5}
+            Elixir.Agent.update(ship_state, fn _ -> :purchased end)
 
             Req.Test.json(conn, %{
               "data" => %{
@@ -3800,8 +3815,28 @@ defmodule SpaceTraders.FleetTest do
                   "tradeSymbol" => "IRON_ORE",
                   "waypointSymbol" => "X1-UX81-A1",
                   "units" => 5,
-                  "pricePerUnit" => 10,
-                  "totalPrice" => 50
+                  "pricePerUnit" => 12,
+                  "totalPrice" => 60
+                }
+              }
+            })
+
+          {"/v2/my/ships/FLEET-SHIP/sell", "POST"} ->
+            assert conn.body_params == %{"symbol" => "IRON_ORE", "units" => 5}
+            Elixir.Agent.update(ship_state, fn _ -> :empty end)
+
+            Req.Test.json(conn, %{
+              "data" => %{
+                "agent" => %{"symbol" => agent.symbol, "credits" => 155},
+                "cargo" => %{"capacity" => 40, "units" => 0, "inventory" => []},
+                "transaction" => %{
+                  "type" => "SELL",
+                  "shipSymbol" => "FLEET-SHIP",
+                  "tradeSymbol" => "IRON_ORE",
+                  "waypointSymbol" => "X1-UX81-A1",
+                  "units" => 5,
+                  "pricePerUnit" => 23,
+                  "totalPrice" => 115
                 }
               }
             })
@@ -3814,7 +3849,7 @@ defmodule SpaceTraders.FleetTest do
                    %{
                      trade_symbol: "IRON_ORE",
                      source_waypoint: "X1-UX81-A1",
-                     destination_waypoint: "X1-UX81-A2",
+                     destination_waypoint: "X1-UX81-A1",
                      units: 5,
                      purchase_price: 10,
                      sell_price: 20
@@ -3833,17 +3868,34 @@ defmodule SpaceTraders.FleetTest do
                status: "completed",
                parameters: %{
                  "market_trade" => %{
-                   "destination_waypoint" => "X1-UX81-A2",
+                   "destination_waypoint" => "X1-UX81-A1",
                    "purchase_price" => 10,
                    "sell_price" => 20,
                    "trade_symbol" => "IRON_ORE",
                    "units" => 5
                  }
                },
-               last_action_result: %{"transaction" => %{"total_price" => 50}}
+               last_action_result: %{"transaction" => %{"total_price" => 60}}
              } = buy_intent
 
       assert job_id == job.id
+
+      assert {:ok,
+              %Job{
+                status: "active",
+                progress: %{
+                  "completed_trades" => 1,
+                  "realized_gross_profit" => 55,
+                  "realized_net_profit" => 55,
+                  "last_trade" => %{"purchase_total" => 60, "sale_total" => 115}
+                }
+              }} = Fleet.advance_market_trading_job(agent, "FLEET-SHIP")
+
+      assert [
+               %Intent{type: "buy", status: "completed"},
+               %Intent{type: "sell", status: "completed"} | _
+             ] =
+               Intents.history(agent)
     end
   end
 

@@ -1060,6 +1060,28 @@ defmodule SpaceTraders.Fleet do
   def resume_market_trading_job(agent, ship_symbol),
     do: start_market_trading_job(agent, ship_symbol)
 
+  @doc "Advances a Market Trading Job from fresh authoritative Ship state."
+  def advance_market_trading_job(%AgentRecord{} = agent, ship_symbol) do
+    with :ok <- Agent.execution_allowed?(agent),
+         {:ok, ship} <- owned_ship(agent, ship_symbol),
+         %Job{type: "market_trading"} = job <- unfinished_job(ship.id),
+         nil <- Intents.unfinished_manual_intent(ship.id),
+         {:ok, live_ship} <-
+           Agent.handle_game_result(
+             agent,
+             SpaceTraders.API.get_ship(agent.agent_token, ship_symbol)
+           ),
+         :ok <- market_system_matches?(job.progress, live_ship),
+         %Intent{} = intent <- market_trading_intent(job),
+         {:ok, intent} <- advance_market_trading_intent(agent, intent, live_ship) do
+      advance_procurement_after_intent(agent, job, intent)
+    else
+      nil -> {:error, :market_trading_job_not_configured}
+      %Job{} -> {:error, :market_trading_job_not_configured}
+      {:error, reason} -> block_market_trading_job(agent, ship_symbol, reason)
+    end
+  end
+
   def pause_market_trading_job(%AgentRecord{} = agent, ship_symbol),
     do: pause_job_type(agent, ship_symbol, "market_trading", "Market Trading Job")
 
@@ -1125,6 +1147,16 @@ defmodule SpaceTraders.Fleet do
     else
       _ -> {:error, :market_trading_job_not_configured}
     end
+  end
+
+  defp market_trading_intent(job) do
+    Intents.unfinished_job_intent(job.id) || Intents.last_completed_job_intent(job.id)
+  end
+
+  defp advance_market_trading_intent(agent, %Intent{} = intent, live_ship) do
+    if Intent.unfinished?(intent),
+      do: Intents.advance(agent, intent, live_ship),
+      else: {:ok, intent}
   end
 
   defp procurement_progress(attrs, target_system) do
@@ -1788,21 +1820,13 @@ defmodule SpaceTraders.Fleet do
          %Job{type: "market_trading"} = job,
          %Intent{status: "completed", type: "sell"} = intent
        ) do
-    candidate = intent.parameters["market_trade"]
-    units = candidate["units"]
-    profit = (candidate["sell_price"] - candidate["purchase_price"]) * units
-
-    progress =
-      job.progress
-      |> Map.update!("completed_trades", &(&1 + 1))
-      |> Map.update!("realized_gross_profit", &(&1 + profit))
-      |> Map.update!(
-        "realized_net_profit",
-        &(&1 + profit - (candidate["estimated_fuel_cost"] || 0))
-      )
-
-    job = Repo.update!(Ecto.Changeset.change(job, status: "active", progress: progress))
-    start_market_trading_job(agent, Repo.get!(Ship, job.ship_id).symbol)
+    with %Intent{} = buy <- Intents.last_completed_job_intent(job.id, "buy"),
+         {:ok, progress} <- realized_market_trade_progress(job.progress, buy, intent) do
+      job = Repo.update!(Ecto.Changeset.change(job, status: "active", progress: progress))
+      start_market_trading_job(agent, Repo.get!(Ship, job.ship_id).symbol)
+    else
+      _ -> mark_procurement_job_blocked(job, :market_trade_transaction_evidence_missing)
+    end
   end
 
   defp advance_procurement_after_intent(
@@ -1838,6 +1862,29 @@ defmodule SpaceTraders.Fleet do
 
   defp advance_procurement_after_intent(_agent, job, %Intent{} = intent),
     do: mark_procurement_job_blocked(job, intent.blocker || :procurement_operation_blocked)
+
+  defp realized_market_trade_progress(progress, buy, sell) do
+    with %{"total_price" => purchase_total} <- get_in(buy.last_action_result, ["transaction"]),
+         %{"total_price" => sale_total} <- get_in(sell.last_action_result, ["transaction"]),
+         true <- is_integer(purchase_total) and is_integer(sale_total) do
+      estimated_fuel_cost = get_in(sell.parameters, ["market_trade", "estimated_fuel_cost"]) || 0
+      gross_profit = sale_total - purchase_total
+
+      {:ok,
+       progress
+       |> Map.update!("completed_trades", &(&1 + 1))
+       |> Map.update!("realized_gross_profit", &(&1 + gross_profit))
+       |> Map.update!("estimated_fuel_cost", &(&1 + estimated_fuel_cost))
+       |> Map.update!("realized_net_profit", &(&1 + gross_profit - estimated_fuel_cost))
+       |> Map.put("last_trade", %{
+         "purchase_total" => purchase_total,
+         "sale_total" => sale_total,
+         "realized_gross_profit" => gross_profit
+       })}
+    else
+      _ -> {:error, :market_trade_transaction_evidence_missing}
+    end
+  end
 
   defp apply_procurement_intent_result(job, %Intent{id: id} = intent) do
     if job.progress["last_applied_intent_id"] == id do
