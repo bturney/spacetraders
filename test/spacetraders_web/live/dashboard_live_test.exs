@@ -1304,6 +1304,39 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       assert has_element?(lv, "button[phx-click=\"resume_procurement_job\"]")
     end
 
+    test "assigns a Market Trading Job from the ship operations panel", %{
+      conn: conn,
+      operator: operator
+    } do
+      agent = agent_fixture(operator)
+      stub_live_game(agent_overview_body(agent.symbol), [ship_body("ORBITALIST-1")])
+
+      {:ok, lv, _html} = live(conn, ~p"/")
+
+      assert has_element?(lv, "form#market-trading-job-form-ORBITALIST-1")
+
+      html =
+        lv
+        |> element("form#market-trading-job-form-ORBITALIST-1")
+        |> render_submit(%{
+          ship_symbol: "ORBITALIST-1",
+          trade_symbol: "IRON_ORE",
+          units: "5",
+          source_waypoint: "X1-UX81-A1",
+          destination_waypoint: "X1-UX81-A2",
+          purchase_price: "10",
+          sell_price: "20",
+          reserve_credits: "50",
+          minimum_profit: "25",
+          minimum_return_percentage: "10"
+        })
+
+      assert html =~ "Market Trading Job assigned and paused."
+      assert has_element?(lv, "[data-job-panel=market-trading]", "Market Trading Job")
+      assert has_element?(lv, "[data-market-trading-job-status]", "Paused")
+      assert has_element?(lv, "button[phx-click=\"resume_market_trading_job\"]")
+    end
+
     test "explains when a Procurement Job cannot find a source market", %{
       conn: conn,
       operator: operator
@@ -1457,6 +1490,46 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       assert has_element?(
                lv,
                "form#procurement-job-form-ORBITALIST-1 input[name=\"compatible_existing_cargo\"][checked]"
+             )
+    end
+
+    test "keeps Market Trading Job drafts across dashboard patches", %{
+      conn: conn,
+      operator: operator
+    } do
+      agent = agent_fixture(operator)
+      stub_live_game(agent_overview_body(agent.symbol), [ship_body("ORBITALIST-1")])
+
+      {:ok, lv, _html} = live(conn, ~p"/")
+
+      lv
+      |> element("form#market-trading-job-form-ORBITALIST-1")
+      |> render_change(%{
+        draft_key: "market_trading_job:ORBITALIST-1",
+        ship_symbol: "ORBITALIST-1",
+        trade_symbol: "IRON_ORE",
+        units: "5",
+        source_waypoint: "X1-UX81-A1",
+        destination_waypoint: "X1-UX81-A2",
+        purchase_price: "10",
+        sell_price: "20",
+        reserve_credits: "50",
+        minimum_profit: "25",
+        compatible_existing_cargo: "on"
+      })
+
+      send(lv.pid, :cooldown_tick)
+      render(lv)
+
+      assert input_value(lv, "market-trading-job-form-ORBITALIST-1", "trade_symbol") =~
+               ~s(value="IRON_ORE")
+
+      assert input_value(lv, "market-trading-job-form-ORBITALIST-1", "destination_waypoint") =~
+               ~s(value="X1-UX81-A2")
+
+      assert has_element?(
+               lv,
+               "form#market-trading-job-form-ORBITALIST-1 input[name=\"compatible_existing_cargo\"][checked]"
              )
     end
 

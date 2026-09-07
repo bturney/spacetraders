@@ -514,6 +514,11 @@ defmodule SpaceTradersWeb.DashboardLive do
   end
 
   @impl true
+  def handle_event("configure_market_trading_job", params, socket) do
+    save_market_trading_job(socket, params)
+  end
+
+  @impl true
   def handle_event("configure_explorer_job", %{"symbol" => ship_symbol}, socket) do
     with {:ok, agent} <- agent_for_ship(socket, ship_symbol),
          {:ok, _job} <- Fleet.configure_explorer_job(agent, ship_symbol) do
@@ -1289,6 +1294,50 @@ defmodule SpaceTradersWeb.DashboardLive do
     end
   end
 
+  defp save_market_trading_job(socket, params) do
+    with {:ok, agent} <- agent_for_ship(socket, params["ship_symbol"]),
+         {:ok, units} <- parse_units(params["units"]),
+         {:ok, purchase_price} <- parse_units(params["purchase_price"]),
+         {:ok, sell_price} <- parse_units(params["sell_price"]),
+         {:ok, reserve_credits} <- parse_optional_nonnegative_units(params["reserve_credits"]),
+         {:ok, credit_exposure} <- parse_optional_units(params["credit_exposure"]),
+         {:ok, minimum_profit} <- parse_optional_nonnegative_units(params["minimum_profit"]),
+         {:ok, minimum_return_percentage} <-
+           parse_optional_nonnegative_number(params["minimum_return_percentage"]),
+         {:ok, estimated_fuel_cost} <-
+           parse_optional_nonnegative_units(params["estimated_fuel_cost"]),
+         {:ok, _job} <-
+           Fleet.configure_market_trading_job(agent, params["ship_symbol"], %{
+             candidates: [
+               %{
+                 trade_symbol: String.trim(params["trade_symbol"] || ""),
+                 source_waypoint: String.trim(params["source_waypoint"] || ""),
+                 destination_waypoint: String.trim(params["destination_waypoint"] || ""),
+                 units: units,
+                 purchase_price: purchase_price,
+                 sell_price: sell_price,
+                 estimated_fuel_cost: estimated_fuel_cost || 0
+               }
+             ],
+             reserve_credits: reserve_credits || 0,
+             credit_exposure: credit_exposure,
+             minimum_profit: minimum_profit || 0,
+             minimum_return_percentage: minimum_return_percentage || 0,
+             compatible_existing_cargo: Map.has_key?(params, "compatible_existing_cargo")
+           }) do
+      {:noreply,
+       put_flash(
+         socket
+         |> refresh_agent(agent)
+         |> clear_draft(draft_key("market_trading_job", [params["ship_symbol"]])),
+         :info,
+         "Market Trading Job assigned and paused."
+       )}
+    else
+      {:error, reason} -> {:noreply, put_flash(socket, :error, live_error(reason))}
+    end
+  end
+
   defp split_module_symbols(value) when is_binary(value),
     do: value |> String.split(",", trim: true) |> Enum.map(&String.trim/1)
 
@@ -1322,6 +1371,36 @@ defmodule SpaceTradersWeb.DashboardLive do
   defp parse_optional_units(nil), do: {:ok, nil}
   defp parse_optional_units(""), do: {:ok, nil}
   defp parse_optional_units(value), do: parse_units(value)
+
+  defp parse_optional_nonnegative_units(nil), do: {:ok, nil}
+  defp parse_optional_nonnegative_units(""), do: {:ok, nil}
+
+  defp parse_optional_nonnegative_units(value) when is_integer(value) and value >= 0,
+    do: {:ok, value}
+
+  defp parse_optional_nonnegative_units(value) when is_binary(value) do
+    case Integer.parse(value) do
+      {units, ""} when units >= 0 -> {:ok, units}
+      _ -> {:error, "Enter a non-negative whole number."}
+    end
+  end
+
+  defp parse_optional_nonnegative_units(_), do: {:error, "Enter a non-negative whole number."}
+
+  defp parse_optional_nonnegative_number(nil), do: {:ok, nil}
+  defp parse_optional_nonnegative_number(""), do: {:ok, nil}
+
+  defp parse_optional_nonnegative_number(value) when is_number(value) and value >= 0,
+    do: {:ok, value}
+
+  defp parse_optional_nonnegative_number(value) when is_binary(value) do
+    case Float.parse(value) do
+      {number, ""} when number >= 0 -> {:ok, number}
+      _ -> {:error, "Enter a non-negative number."}
+    end
+  end
+
+  defp parse_optional_nonnegative_number(_), do: {:error, "Enter a non-negative number."}
 
   defp parse_required_units(value) do
     with {:ok, units} <- parse_units(value),
@@ -3282,11 +3361,14 @@ defmodule SpaceTradersWeb.DashboardLive do
             <.construction_supply_job_panel ship={@ship} />
           <% @ship.job && @ship.job.type == "outfitting" -> %>
             <.outfitting_job_panel ship={@ship} form_drafts={@form_drafts} />
+          <% @ship.job && @ship.job.type == "market_trading" -> %>
+            <.market_trading_job_panel ship={@ship} form_drafts={@form_drafts} />
           <% true -> %>
             <.miner_job_panel ship={@ship} form_drafts={@form_drafts} />
             <.procurement_job_panel ship={@ship} form_drafts={@form_drafts} />
             <.construction_supply_job_panel ship={@ship} form_drafts={@form_drafts} />
             <.outfitting_job_panel ship={@ship} form_drafts={@form_drafts} />
+            <.market_trading_job_panel ship={@ship} form_drafts={@form_drafts} />
             <button
               :if={is_nil(@ship.job)}
               type="button"
@@ -3961,6 +4043,212 @@ defmodule SpaceTradersWeb.DashboardLive do
           phx-click="stop_explorer_job"
           phx-value-symbol={@ship.symbol}
           class="btn btn-error btn-outline btn-xs"
+        >Stop</button>
+      </div>
+    </section>
+    """
+  end
+
+  attr :ship, :map, required: true
+  attr :form_drafts, :map, default: %{}
+
+  defp market_trading_job_panel(assigns) do
+    job = Map.get(assigns.ship, :job)
+    progress = (job && job.progress) || %{}
+    assigns = assign(assigns, job: job, progress: progress)
+
+    ~H"""
+    <section class="mt-4 rounded border border-secondary/30 p-3" data-job-panel="market-trading">
+      <div class="flex items-center justify-between gap-2">
+        <span class="text-xs font-semibold uppercase tracking-wider opacity-60">Market Trading Job</span>
+        <span class="badge badge-outline badge-sm" data-market-trading-job-status>{job_status(@job)}</span>
+      </div>
+      <dl :if={@job} class="mt-3 grid grid-cols-1 gap-1 text-xs sm:grid-cols-2">
+        <div>
+          <dt class="opacity-60">Completed trades</dt><dd>{@progress["completed_trades"] || 0}</dd>
+        </div>
+        <div>
+          <dt class="opacity-60">Realized net profit</dt><dd>
+            {@progress["realized_net_profit"] || 0}
+          </dd>
+        </div>
+        <div>
+          <dt class="opacity-60">Estimated fuel cost</dt><dd>
+            {@progress["estimated_fuel_cost"] || 0}
+          </dd>
+        </div>
+        <div>
+          <dt class="opacity-60">Active work</dt><dd>{job_active_work(@job, @ship)}</dd>
+        </div>
+      </dl>
+      <p :if={job_reason(@job)} class="mt-2 text-xs text-error" data-market-trading-job-reason>
+        {job_reason(@job)}
+      </p>
+      <form
+        :if={is_nil(@job)}
+        id={"market-trading-job-form-#{@ship.symbol}"}
+        phx-change="track_draft"
+        phx-submit="configure_market_trading_job"
+        class="mt-3 grid gap-2 sm:grid-cols-2"
+      >
+        <input type="hidden" name="draft_key" value={draft_key("market_trading_job", [@ship.symbol])} />
+        <input type="hidden" name="ship_symbol" value={@ship.symbol} />
+        <input
+          name="trade_symbol"
+          required
+          placeholder="Trade symbol"
+          value={draft_field(@form_drafts, "market_trading_job", [@ship.symbol], "trade_symbol", "")}
+          class="input input-bordered input-sm font-mono"
+        />
+        <input
+          name="units"
+          required
+          type="number"
+          min="1"
+          placeholder="Units"
+          value={draft_field(@form_drafts, "market_trading_job", [@ship.symbol], "units", "")}
+          class="input input-bordered input-sm"
+        />
+        <input
+          name="source_waypoint"
+          required
+          placeholder="Source market"
+          value={
+            draft_field(@form_drafts, "market_trading_job", [@ship.symbol], "source_waypoint", "")
+          }
+          class="input input-bordered input-sm font-mono"
+        />
+        <input
+          name="destination_waypoint"
+          required
+          placeholder="Destination market"
+          value={
+            draft_field(
+              @form_drafts,
+              "market_trading_job",
+              [@ship.symbol],
+              "destination_waypoint",
+              ""
+            )
+          }
+          class="input input-bordered input-sm font-mono"
+        />
+        <input
+          name="purchase_price"
+          required
+          type="number"
+          min="1"
+          placeholder="Purchase price ceiling"
+          value={
+            draft_field(@form_drafts, "market_trading_job", [@ship.symbol], "purchase_price", "")
+          }
+          class="input input-bordered input-sm"
+        />
+        <input
+          name="sell_price"
+          required
+          type="number"
+          min="1"
+          placeholder="Minimum sale price"
+          value={draft_field(@form_drafts, "market_trading_job", [@ship.symbol], "sell_price", "")}
+          class="input input-bordered input-sm"
+        />
+        <input
+          name="reserve_credits"
+          type="number"
+          min="0"
+          placeholder="Reserve credits"
+          value={
+            draft_field(@form_drafts, "market_trading_job", [@ship.symbol], "reserve_credits", "")
+          }
+          class="input input-bordered input-sm"
+        />
+        <input
+          name="credit_exposure"
+          type="number"
+          min="1"
+          placeholder="Credit exposure"
+          value={
+            draft_field(@form_drafts, "market_trading_job", [@ship.symbol], "credit_exposure", "")
+          }
+          class="input input-bordered input-sm"
+        />
+        <input
+          name="minimum_profit"
+          type="number"
+          min="0"
+          placeholder="Minimum net profit"
+          value={
+            draft_field(@form_drafts, "market_trading_job", [@ship.symbol], "minimum_profit", "")
+          }
+          class="input input-bordered input-sm"
+        />
+        <input
+          name="minimum_return_percentage"
+          type="number"
+          min="0"
+          step="0.01"
+          placeholder="Minimum return %"
+          value={
+            draft_field(
+              @form_drafts,
+              "market_trading_job",
+              [@ship.symbol],
+              "minimum_return_percentage",
+              ""
+            )
+          }
+          class="input input-bordered input-sm"
+        />
+        <input
+          name="estimated_fuel_cost"
+          type="number"
+          min="0"
+          placeholder="Estimated fuel cost"
+          value={
+            draft_field(@form_drafts, "market_trading_job", [@ship.symbol], "estimated_fuel_cost", "")
+          }
+          class="input input-bordered input-sm"
+        />
+        <label class="label cursor-pointer justify-start gap-2">
+          <input
+            name="compatible_existing_cargo"
+            type="checkbox"
+            class="checkbox checkbox-sm"
+            checked={
+              draft_field(
+                @form_drafts,
+                "market_trading_job",
+                [@ship.symbol],
+                "compatible_existing_cargo",
+                nil
+              ) in ["on", "true", true]
+            }
+          />
+          <span class="label-text">Use compatible cargo already aboard</span>
+        </label>
+        <button type="submit" class="btn btn-secondary btn-sm sm:col-span-2">Assign Market Trading Job</button>
+      </form>
+      <div :if={@job} class="mt-3 flex flex-wrap gap-2">
+        <button
+          :if={Job.running?(@job)}
+          type="button"
+          phx-click="pause_market_trading_job"
+          phx-value-symbol={@ship.symbol}
+          class="btn btn-warning btn-sm"
+        >Pause</button>
+        <button
+          :if={@job.status in ["paused", "blocked"]}
+          type="button"
+          phx-click="resume_market_trading_job"
+          phx-value-symbol={@ship.symbol}
+          class="btn btn-primary btn-sm"
+        >Resume</button>
+        <button
+          type="button"
+          phx-click="stop_market_trading_job"
+          phx-value-symbol={@ship.symbol}
+          class="btn btn-ghost btn-sm"
         >Stop</button>
       </div>
     </section>

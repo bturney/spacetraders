@@ -3754,6 +3754,191 @@ defmodule SpaceTraders.FleetTest do
     end
   end
 
+  describe "Market Trading Job" do
+    test "starts its selected Buy Goods Intent through Fleet" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+      {:ok, ship_state} = Elixir.Agent.start_link(fn -> :empty end)
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case {conn.request_path, conn.method} do
+          {"/v2/my/ships/FLEET-SHIP", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" =>
+                ship_body("FLEET-SHIP", %{
+                  "nav" => nav_body("DOCKED"),
+                  "cargo" =>
+                    if(Elixir.Agent.get(ship_state, & &1) == :purchased,
+                      do: %{
+                        "capacity" => 40,
+                        "units" => 5,
+                        "inventory" => [%{"symbol" => "IRON_ORE", "units" => 5}]
+                      },
+                      else: %{"capacity" => 40, "units" => 0, "inventory" => []}
+                    )
+                })
+            })
+
+          {"/v2/my/agent", "GET"} ->
+            Req.Test.json(conn, %{"data" => %{"symbol" => agent.symbol, "credits" => 100}})
+
+          {"/v2/systems/X1-UX81/waypoints/X1-UX81-A1/market", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => %{
+                "symbol" => "X1-UX81-A1",
+                "tradeGoods" => [
+                  %{
+                    "symbol" => "IRON_ORE",
+                    "purchasePrice" => 10,
+                    "sellPrice" => 20,
+                    "tradeVolume" => 5
+                  }
+                ]
+              }
+            })
+
+          {"/v2/my/ships/FLEET-SHIP/purchase", "POST"} ->
+            assert conn.body_params == %{"symbol" => "IRON_ORE", "units" => 5}
+            Elixir.Agent.update(ship_state, fn _ -> :purchased end)
+
+            Req.Test.json(conn, %{
+              "data" => %{
+                "agent" => %{"symbol" => agent.symbol, "credits" => 50},
+                "cargo" => %{
+                  "capacity" => 40,
+                  "units" => 5,
+                  "inventory" => [%{"symbol" => "IRON_ORE", "units" => 5}]
+                },
+                "transaction" => %{
+                  "type" => "PURCHASE",
+                  "shipSymbol" => "FLEET-SHIP",
+                  "tradeSymbol" => "IRON_ORE",
+                  "waypointSymbol" => "X1-UX81-A1",
+                  "units" => 5,
+                  "pricePerUnit" => 12,
+                  "totalPrice" => 60
+                }
+              }
+            })
+
+          {"/v2/my/ships/FLEET-SHIP/sell", "POST"} ->
+            assert conn.body_params == %{"symbol" => "IRON_ORE", "units" => 5}
+            Elixir.Agent.update(ship_state, fn _ -> :empty end)
+
+            Req.Test.json(conn, %{
+              "data" => %{
+                "agent" => %{"symbol" => agent.symbol, "credits" => 155},
+                "cargo" => %{"capacity" => 40, "units" => 0, "inventory" => []},
+                "transaction" => %{
+                  "type" => "SELL",
+                  "shipSymbol" => "FLEET-SHIP",
+                  "tradeSymbol" => "IRON_ORE",
+                  "waypointSymbol" => "X1-UX81-A1",
+                  "units" => 5,
+                  "pricePerUnit" => 23,
+                  "totalPrice" => 115
+                }
+              }
+            })
+        end
+      end)
+
+      assert {:ok, %Job{status: "paused"}} =
+               Fleet.configure_market_trading_job(agent, "FLEET-SHIP", %{
+                 candidates: [
+                   %{
+                     trade_symbol: "IRON_ORE",
+                     source_waypoint: "X1-UX81-A1",
+                     destination_waypoint: "X1-UX81-A1",
+                     units: 5,
+                     purchase_price: 10,
+                     sell_price: 20
+                   }
+                 ]
+               })
+
+      assert {:ok, %Job{status: "active"} = job} =
+               Fleet.start_market_trading_job(agent, "FLEET-SHIP")
+
+      assert [buy_intent] = Intents.history(agent)
+
+      assert %Intent{
+               job_id: job_id,
+               type: "buy",
+               status: "completed",
+               parameters: %{
+                 "market_trade" => %{
+                   "destination_waypoint" => "X1-UX81-A1",
+                   "purchase_price" => 10,
+                   "sell_price" => 20,
+                   "trade_symbol" => "IRON_ORE",
+                   "units" => 5
+                 }
+               },
+               last_action_result: %{"transaction" => %{"total_price" => 60}}
+             } = buy_intent
+
+      assert job_id == job.id
+
+      assert {:ok,
+              %Job{
+                status: "active",
+                progress: %{
+                  "completed_trades" => 1,
+                  "realized_gross_profit" => 55,
+                  "realized_net_profit" => 55,
+                  "last_trade" => %{"purchase_total" => 60, "sale_total" => 115}
+                }
+              }} = Fleet.advance_market_trading_job(agent, "FLEET-SHIP")
+
+      assert [
+               %Intent{type: "buy", status: "completed"},
+               %Intent{type: "sell", status: "completed"} | _
+             ] =
+               Intents.history(agent)
+    end
+  end
+
+  describe "Construction Supply Job completion acceptance" do
+    test "Construction Supply Job completes from authoritative project state through Fleet" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case {conn.request_path, conn.method} do
+          {"/v2/my/ships/FLEET-SHIP", "GET"} ->
+            Req.Test.json(conn, %{"data" => ship_body("FLEET-SHIP")})
+
+          {"/v2/systems/X1-UX81/waypoints/X1-UX81-A1/construction", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => %{
+                "symbol" => "X1-UX81-A1",
+                "isComplete" => true,
+                "materials" => [
+                  %{"tradeSymbol" => "IRON_ORE", "required" => 5, "fulfilled" => 5}
+                ]
+              }
+            })
+
+          {"/v2/my/agent", "GET"} ->
+            Req.Test.json(conn, %{"data" => %{"symbol" => agent.symbol, "credits" => 100}})
+        end
+      end)
+
+      assert {:ok, %Job{status: "paused"}} =
+               Fleet.configure_construction_supply_job(agent, "FLEET-SHIP", %{
+                 construction_system: "X1-UX81",
+                 construction_waypoint: "X1-UX81-A1",
+                 compatible_existing_cargo?: true
+               })
+
+      assert {:ok, %Job{status: "completed", progress: progress}} =
+               Fleet.start_construction_supply_job(agent, "FLEET-SHIP")
+
+      assert progress["remaining"] == %{"IRON_ORE" => 0}
+    end
+  end
+
   describe "command_snapshot/1" do
     test "adds Ship command decisions with stable block reasons" do
       agent = agent_fixture()

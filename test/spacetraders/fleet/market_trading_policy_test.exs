@@ -43,6 +43,16 @@ defmodule SpaceTraders.Fleet.MarketTradingPolicyTest do
     assert selected.transit_seconds == 10
   end
 
+  test "prefers fresher destination intelligence when returns and transit tie" do
+    {selected, _rejected} =
+      MarketTradingPolicy.select(
+        [candidate(%{destination_age: 8}), candidate(%{destination_age: 2})],
+        %{credits: 1_000, reserve_credits: 0}
+      )
+
+    assert selected.destination_age == 2
+  end
+
   test "returns rejected candidates when constraints eliminate every trade" do
     {selected, rejected} =
       MarketTradingPolicy.select([candidate(%{sell_price: 11})], %{minimum_profit: 20})
