@@ -3754,6 +3754,126 @@ defmodule SpaceTraders.FleetTest do
     end
   end
 
+  describe "Phase 3.5 acceptance" do
+    test "Market Trading maintains its selected trade through the public Fleet seam" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case {conn.request_path, conn.method} do
+          {"/v2/my/ships/FLEET-SHIP", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" =>
+                ship_body("FLEET-SHIP", %{
+                  "nav" => nav_body("DOCKED"),
+                  "cargo" => %{"capacity" => 40, "units" => 0, "inventory" => []}
+                })
+            })
+
+          {"/v2/my/agent", "GET"} ->
+            Req.Test.json(conn, %{"data" => %{"symbol" => agent.symbol, "credits" => 100}})
+
+          {"/v2/systems/X1-UX81/waypoints/X1-UX81-A1/market", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => %{
+                "symbol" => "X1-UX81-A1",
+                "tradeGoods" => [
+                  %{"symbol" => "IRON_ORE", "purchasePrice" => 10, "tradeVolume" => 5}
+                ]
+              }
+            })
+
+          {"/v2/my/ships/FLEET-SHIP/purchase", "POST"} ->
+            assert conn.body_params == %{"symbol" => "IRON_ORE", "units" => 5}
+
+            Req.Test.json(conn, %{
+              "data" => %{
+                "agent" => %{"symbol" => agent.symbol, "credits" => 50},
+                "cargo" => %{
+                  "capacity" => 40,
+                  "units" => 5,
+                  "inventory" => [%{"symbol" => "IRON_ORE", "units" => 5}]
+                },
+                "transaction" => %{
+                  "type" => "PURCHASE",
+                  "shipSymbol" => "FLEET-SHIP",
+                  "tradeSymbol" => "IRON_ORE",
+                  "waypointSymbol" => "X1-UX81-A1",
+                  "units" => 5,
+                  "pricePerUnit" => 10,
+                  "totalPrice" => 50
+                }
+              }
+            })
+        end
+      end)
+
+      assert {:ok, %Job{status: "paused"}} =
+               Fleet.configure_market_trading_job(agent, "FLEET-SHIP", %{
+                 candidates: [
+                   %{
+                     trade_symbol: "IRON_ORE",
+                     source_waypoint: "X1-UX81-A1",
+                     destination_waypoint: "X1-UX81-A2",
+                     units: 5,
+                     purchase_price: 10,
+                     sell_price: 20
+                   }
+                 ]
+               })
+
+      assert {:ok, %Job{status: "active"} = job} =
+               Fleet.start_market_trading_job(agent, "FLEET-SHIP")
+
+      assert %Intent{
+               job_id: job_id,
+               type: "buy",
+               status: "completed",
+               last_action_result: %{"transaction" => %{"total_price" => 50}}
+             } = Repo.one!(from intent in Intent, order_by: [desc: intent.id], limit: 1)
+
+      assert job_id == job.id
+    end
+
+    test "Construction Supply completes from authoritative project state through Fleet" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case {conn.request_path, conn.method} do
+          {"/v2/my/ships/FLEET-SHIP", "GET"} ->
+            Req.Test.json(conn, %{"data" => ship_body("FLEET-SHIP")})
+
+          {"/v2/systems/X1-UX81/waypoints/X1-UX81-A1/construction", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => %{
+                "symbol" => "X1-UX81-A1",
+                "isComplete" => true,
+                "materials" => [
+                  %{"tradeSymbol" => "IRON_ORE", "required" => 5, "fulfilled" => 5}
+                ]
+              }
+            })
+
+          {"/v2/my/agent", "GET"} ->
+            Req.Test.json(conn, %{"data" => %{"symbol" => agent.symbol, "credits" => 100}})
+        end
+      end)
+
+      assert {:ok, %Job{status: "paused"}} =
+               Fleet.configure_construction_supply_job(agent, "FLEET-SHIP", %{
+                 construction_system: "X1-UX81",
+                 construction_waypoint: "X1-UX81-A1",
+                 compatible_existing_cargo?: true
+               })
+
+      assert {:ok, %Job{status: "completed", progress: progress}} =
+               Fleet.start_construction_supply_job(agent, "FLEET-SHIP")
+
+      assert progress["remaining"] == %{"IRON_ORE" => 0}
+    end
+  end
+
   describe "command_snapshot/1" do
     test "adds Ship command decisions with stable block reasons" do
       agent = agent_fixture()
