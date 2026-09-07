@@ -23,7 +23,6 @@ defmodule SpaceTraders.Fleet do
   alias SpaceTraders.Fleet.{
     Activity,
     ConstructionSupplyPolicy,
-    ExplorerPolicy,
     Job,
     JobBlocker,
     Intent,
@@ -32,7 +31,8 @@ defmodule SpaceTraders.Fleet do
     OutfittingPolicy,
     ProcurementPolicy,
     Ship,
-    ShipDestination
+    ShipDestination,
+    SystemExplorationPolicy
   }
 
   alias SpaceTraders.Fleet.ShipServer
@@ -2838,7 +2838,7 @@ defmodule SpaceTraders.Fleet do
         )
 
       decision =
-        ExplorerPolicy.decide(%{
+        SystemExplorationPolicy.decide(%{
           coverage: missing,
           viability: get_in(job.progress || %{}, ["viability"]) || %{}
         })

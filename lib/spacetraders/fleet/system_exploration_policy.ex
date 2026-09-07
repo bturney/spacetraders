@@ -1,4 +1,4 @@
-defmodule SpaceTraders.Fleet.ExplorerPolicy do
+defmodule SpaceTraders.Fleet.SystemExplorationPolicy do
   @moduledoc "Decides whether System Exploration baseline coverage is complete."
 
   alias SpaceTraders.Fleet.JobPolicy

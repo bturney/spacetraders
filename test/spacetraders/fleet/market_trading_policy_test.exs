@@ -70,4 +70,12 @@ defmodule SpaceTraders.Fleet.MarketTradingPolicyTest do
 
     assert selected.trade_symbol == "IRON_ORE"
   end
+
+  test "returns a block through the Job Policy interface when every trade is rejected" do
+    assert {:block, {:no_viable_market_trade, [%{reason: :candidate_constraints}]}} =
+             MarketTradingPolicy.decide(%{
+               candidates: [candidate(%{sell_price: 11})],
+               constraints: %{minimum_profit: 20}
+             })
+  end
 end
