@@ -1101,7 +1101,8 @@ defmodule SpaceTraders.Fleet do
         attrs[:compatible_existing_cargo] || attrs["compatible_existing_cargo"] || false
     }
 
-    if is_list(candidates) and is_integer(constraints["reserve_credits"]) and
+    if is_list(candidates) and market_trade_candidates_in_system?(candidates, system) and
+         is_integer(constraints["reserve_credits"]) and
          is_integer(constraints["minimum_profit"]) and
          is_number(constraints["minimum_return_percentage"]) and
          (is_nil(constraints["credit_exposure"]) or is_integer(constraints["credit_exposure"])),
@@ -1114,9 +1115,20 @@ defmodule SpaceTraders.Fleet do
             "completed_trades" => 0,
             "realized_gross_profit" => 0,
             "realized_net_profit" => 0,
+            "estimated_net_profit" => 0,
             "estimated_fuel_cost" => 0
           }},
        else: {:error, :invalid_market_trading_configuration}
+  end
+
+  defp market_trade_candidates_in_system?(candidates, system) do
+    Enum.all?(candidates, fn candidate ->
+      source = candidate[:source_waypoint] || candidate["source_waypoint"]
+      destination = candidate[:destination_waypoint] || candidate["destination_waypoint"]
+
+      system_from_headquarters(source) == {:ok, system} and
+        system_from_headquarters(destination) == {:ok, system}
+    end)
   end
 
   defp atomize_market_keys(map),
@@ -1822,8 +1834,12 @@ defmodule SpaceTraders.Fleet do
        ) do
     with %Intent{} = buy <- Intents.last_completed_job_intent(job.id, "buy"),
          {:ok, progress} <- realized_market_trade_progress(job.progress, buy, intent) do
-      job = Repo.update!(Ecto.Changeset.change(job, status: "active", progress: progress))
-      start_market_trading_job(agent, Repo.get!(Ship, job.ship_id).symbol)
+      if job.progress["last_applied_intent_id"] == intent.id do
+        start_market_trading_job(agent, Repo.get!(Ship, job.ship_id).symbol)
+      else
+        job = Repo.update!(Ecto.Changeset.change(job, status: "active", progress: progress))
+        start_market_trading_job(agent, Repo.get!(Ship, job.ship_id).symbol)
+      end
     else
       _ -> mark_procurement_job_blocked(job, :market_trade_transaction_evidence_missing)
     end
@@ -1875,7 +1891,9 @@ defmodule SpaceTraders.Fleet do
        |> Map.update!("completed_trades", &(&1 + 1))
        |> Map.update!("realized_gross_profit", &(&1 + gross_profit))
        |> Map.update!("estimated_fuel_cost", &(&1 + estimated_fuel_cost))
-       |> Map.update!("realized_net_profit", &(&1 + gross_profit - estimated_fuel_cost))
+       |> Map.update!("realized_net_profit", &(&1 + gross_profit))
+       |> Map.update!("estimated_net_profit", &(&1 + gross_profit - estimated_fuel_cost))
+       |> Map.put("last_applied_intent_id", sell.id)
        |> Map.put("last_trade", %{
          "purchase_total" => purchase_total,
          "sale_total" => sale_total,
@@ -4840,7 +4858,7 @@ defmodule SpaceTraders.Fleet do
          %Job{} = config <- unfinished_job(ship.id),
          %AgentRecord{} = agent <- Repo.get(AgentRecord, agent_id),
          :ok <- Agent.execution_allowed?(agent) do
-      if config.type in ["procurement", "construction_supply", "outfitting"] and
+      if config.type in ["procurement", "construction_supply", "market_trading", "outfitting"] and
            match?(%Intent{}, Intents.unfinished_job_intent(config.id)) do
         if config.type == "outfitting",
           do: recover_outfitting_intent(agent, config),
@@ -4858,6 +4876,7 @@ defmodule SpaceTraders.Fleet do
                 "explorer" -> advance_explorer_job(agent, config, live_ship)
                 "procurement" -> start_procurement_job(agent, ship_symbol)
                 "construction_supply" -> start_construction_supply_job(agent, ship_symbol)
+                "market_trading" -> advance_market_trading_job(agent, ship_symbol)
                 "outfitting" -> start_outfitting_job(agent, ship_symbol)
                 _ -> advance_miner_job(agent, config, live_ship)
               end
