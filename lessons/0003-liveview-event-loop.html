@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Lesson 3: The LiveView event loop</title>
+    <link rel="stylesheet" href="../assets/teach/lesson.css">
+  </head>
+  <body>
+    <p class="lesson-meta"><span class="num">Lesson 3</span> / 30 minutes / LiveView</p>
+    <h1>The LiveView event loop</h1>
+    <p class="standfirst">A LiveView keeps the page's working state on the server. The browser sends it an event; the server sends back only the HTML that changed.</p>
+
+    <section>
+      <h2>1. Start with the picture</h2>
+      <p>When an Operator clicks <strong>Extract</strong>, the browser does not call the SpaceTraders game directly. It sends a small event to the running <code>DashboardLive</code> process on this server.</p>
+      <pre><code>Browser: Operator clicks Extract
+    |
+    | event name: "extract"
+    | Ship symbol: "ORBITALIST-1"
+    v
+Server: one DashboardLive process
+    |
+    | asks the Fleet context to extract resources
+    v
+Fleet.extract_resources(agent, ship_symbol)
+    |
+    | returns updated information
+    v
+DashboardLive: renders changed HTML
+    |
+    v
+Browser: updates the relevant part of the page</code></pre>
+      <p>A <strong>context</strong> is the application's module boundary for a domain area. Here, <code>Fleet</code> owns Ship actions. <code>DashboardLive</code> owns browser interaction and display.</p>
+    </section>
+
+    <section>
+      <h2>2. The LiveView has a working notebook</h2>
+      <p>Each open dashboard page has a LiveView process on the server. Its <code>socket</code> is its working notebook: it holds the data needed to render that one page, such as the current Operator and Fleet overview.</p>
+      <p>Do not confuse this <code>socket</code> with a network socket. For this lesson, read it as “the LiveView's current page data”.</p>
+      <pre><code>before click: socket has current Fleet overview
+after click:  socket has refreshed Fleet overview
+
+LiveView compares the two renders and sends the browser a small update.</code></pre>
+      <p>This is why the dashboard can update without a full browser reload.</p>
+    </section>
+
+    <section>
+      <h2>3. A browser event goes to <code>handle_event</code></h2>
+      <p>The real dashboard has a function named <code>handle_event</code>. The name tells Phoenix LiveView what it is for: handle an event sent by the browser.</p>
+      <pre><code>Browser click: phx-click="extract"
+    |
+    v
+DashboardLive.handle_event("extract", %{ "symbol" =&gt; ship_symbol }, socket)
+    |
+    v
+Fleet.extract_resources(agent, ship_symbol)
+    |
+    v
+refresh_agent_fleet(socket, agent.id)
+    |
+    v
+{:noreply, updated_socket} -&gt; HTML patch to browser</code></pre>
+      <p>The handler is at <code>lib/spacetraders_web/live/dashboard_live.ex:390</code>. Read it only as: “on Extract, ask Fleet to do the work, refresh page data, and update the browser.”</p>
+    </section>
+
+    <section>
+      <h2>4. A Ship process can also update the page</h2>
+      <p>Not every dashboard update starts with a browser click. A ShipServer sends a message when a Ship's Arrival or Cooldown changes. The dashboard receives that kind of message in <code>handle_info</code>.</p>
+      <pre><code>ShipServer finishes a timer
+    |
+    | broadcasts: {:ship_updated, agent_id, ship_symbol}
+    v
+DashboardLive.handle_info(...)
+    |
+    | refreshes page data
+    v
+Browser receives updated HTML</code></pre>
+      <p>The real callback is deliberately small:</p>
+      <pre><code>def handle_info({:ship_updated, agent_id, _ship_symbol}, socket) do
+  {:noreply, refresh_agent_fleet(socket, agent_id)}
+end</code></pre>
+      <p><code>_ship_symbol</code> means this message contains a Ship symbol, but this function does not need it. The updated <code>socket</code> causes LiveView to update the page.</p>
+    </section>
+
+    <section class="callout tryit">
+      <p class="callout-label">Practice: name the source</p>
+      <p>For each situation, say which function receives it:</p>
+      <ol>
+        <li>An Operator clicks Extract.</li>
+        <li>A Ship finishes an Arrival timer.</li>
+      </ol>
+      <p>Answers: <code>handle_event</code> receives the browser click. <code>handle_info</code> receives the Ship update. Verify at lines 390 and 1433 of <code>dashboard_live.ex</code>.</p>
+    </section>
+
+    <div class="quiz">
+      <p class="q">An Operator clicks a dashboard button. Which callback receives it?</p>
+      <button class="opt">mount/3</button>
+      <button class="opt" data-correct>handle_event/3</button>
+      <button class="opt">handle_info/2</button>
+      <p class="explain"><code>handle_event/3</code> receives browser events. <code>handle_info/2</code> receives messages from inside the application, such as a ShipServer update.</p>
+    </div>
+
+    <div class="callout ask">
+      <p class="callout-label">Before moving on</p>
+      <p>Remember only this: browser click means <code>handle_event</code>; message from another application process means <code>handle_info</code>. A later lesson can add the <code>with</code> and pipeline syntax one piece at a time.</p>
+    </div>
+
+    <p class="cite">Primary source: <a href="https://hexdocs.pm/phoenix_live_view/Phoenix.LiveView.html">Phoenix.LiveView</a>. Repository example: <code>lib/spacetraders_web/live/dashboard_live.ex:151-176,390-402,1433-1441</code>.</p>
+    <nav class="lesson-nav"><a href="0002-a-health-request-through-phoenix.html">&lt;- Previous: Phoenix</a><a href="0004-one-ship-one-process.html">Next: ShipServer -&gt;</a></nav>
+    <script src="../assets/teach/quiz.js"></script>
+  </body>
+</html>

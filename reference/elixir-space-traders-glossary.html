@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Elixir and SpaceTraders glossary</title>
+    <link rel="stylesheet" href="../assets/teach/lesson.css">
+  </head>
+  <body>
+    <p class="lesson-meta"><span class="num">Reference</span> / keep nearby</p>
+    <h1>Elixir and SpaceTraders glossary</h1>
+    <p class="standfirst">Small vocabulary for reading the first lessons.</p>
+
+    <h2>Elixir</h2>
+    <dl>
+      <dt><strong>Atom</strong></dt><dd>A named constant such as <code>:ok</code> or <code>:ship_in_transit</code>. Similar to a safe enum value.</dd>
+      <dt><strong>Tuple</strong></dt><dd>A fixed-size ordered value, such as <code>{:ok, ship}</code>. It commonly makes success and error paths explicit.</dd>
+      <dt><strong>Pattern match</strong></dt><dd>Shape-based binding or dispatch. <code>{:ok, value} = result</code> both verifies the shape and binds <code>value</code>.</dd>
+      <dt><strong>Function clause</strong></dt><dd>One implementation selected by argument shape or a guard. This replaces many conditional branches and method overloads.</dd>
+      <dt><strong>Process</strong></dt><dd>An isolated BEAM runtime unit with its own mailbox and state. It is not an operating-system process or a Java thread.</dd>
+      <dt><strong>Supervisor</strong></dt><dd>A process that starts and restarts child processes according to a declared strategy.</dd>
+    </dl>
+
+    <h2>SpaceTraders</h2>
+    <dl>
+      <dt><strong>Operator</strong></dt><dd>The human who drives the dashboard and authorizes external actions.</dd>
+      <dt><strong>Agent</strong></dt><dd>The in-game identity that owns credits, Fleet, contracts, and headquarters.</dd>
+      <dt><strong>Ship</strong></dt><dd>A vessel owned by exactly one Agent. Each running ShipServer owns one Ship's in-memory timers.</dd>
+      <dt><strong>Job</strong></dt><dd>A durable Operator-selected outcome for one Ship, driven by a Policy.</dd>
+      <dt><strong>Intent</strong></dt><dd>A state-aware request for a Ship outcome, such as reaching a Waypoint. It is not a fixed API-call script.</dd>
+      <dt><strong>Manual Control</strong></dt><dd>The Operator as an alternate caller of one-off Intents or direct game actions. It is not a durable Ship mode.</dd>
+    </dl>
+
+    <p class="cite">Terms follow <a href="../CONTEXT.md">the project context</a>. Return to <a href="../lessons/index.html">the lesson index</a>.</p>
+  </body>
+</html>

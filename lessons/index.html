@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>SpaceTraders Elixir course</title>
+    <link rel="stylesheet" href="../assets/teach/lesson.css">
+  </head>
+  <body>
+    <p class="lesson-meta"><span class="num">SpaceTraders</span> / server-first Elixir course</p>
+    <h1>Learn Elixir through SpaceTraders</h1>
+    <p class="standfirst">A self-directed course for an experienced engineer who knows the game domain but is new to Elixir and OTP.</p>
+
+    <div class="callout">
+      <p class="callout-label">Environment</p>
+      <p>Use the Linux server as the development machine. Source <code>scripts/_toolchain.sh</code> before every Elixir command. Use Kimaki tunnels for browser access and tuistory for persistent commands. A MacBook Elixir install is not required.</p>
+    </div>
+
+    <section>
+      <h2>Open these lessons from the server</h2>
+      <p>Start the static course server through the tunnel. It copies only <code>lessons/</code>, <code>reference/</code>, and the teaching assets into a temporary directory; it never exposes the repository root.</p>
+      <pre><code>kimaki tunnel -- scripts/serve-lessons</code></pre>
+      <p>For a persistent session, run that command through a named tuistory session. Open the tunnel URL it prints, then choose a lesson from this page.</p>
+    </section>
+
+    <h2>First sequence</h2>
+    <ol>
+      <li><a href="0001-values-pattern-matching.html">Values and pattern matching</a> - read the success and error vocabulary used throughout the app.</li>
+      <li><a href="0002-a-health-request-through-phoenix.html">A health request through Phoenix</a> - follow <code>GET /health</code> from route to controller to test.</li>
+      <li><a href="0003-liveview-event-loop.html">The LiveView event loop</a> - trace an Operator command through one persistent server process.</li>
+      <li><a href="0004-one-ship-one-process.html">One Ship, one process</a> - understand the supervision tree and the ShipServer.</li>
+    </ol>
+
+    <h2>Useful reference</h2>
+    <p><a href="../reference/elixir-space-traders-glossary.html">Elixir and SpaceTraders glossary</a></p>
+
+    <h2>Next, when these are complete</h2>
+    <p>The next incremental set will follow the generated SpaceTraders API client into a context and Ecto, then guide one bounded test-first change. Those lessons depend on what you find difficult in this sequence.</p>
+
+    <div class="callout ask">
+      <p class="callout-label">Study independently</p>
+      <p>Do each lesson in order. Predict before revealing an answer or running a command. The quizzes give immediate feedback; the repository tests give executable feedback.</p>
+    </div>
+  </body>
+</html>

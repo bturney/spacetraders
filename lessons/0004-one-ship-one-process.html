@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Lesson 4: One Ship, one process</title>
+    <link rel="stylesheet" href="../assets/teach/lesson.css">
+  </head>
+  <body>
+    <p class="lesson-meta"><span class="num">Lesson 4</span> / 30 minutes / OTP</p>
+    <h1>One Ship, one process</h1>
+    <p class="standfirst">The application uses a GenServer for each active Ship because arrival and Cooldown timers are independent, stateful, and must recover after application restart.</p>
+
+    <section>
+      <h2>The relevant supervision tree</h2>
+      <pre><code>SpaceTraders.Supervisor
+    |
+    +-- Registry: ShipRegistry
+    +-- DynamicSupervisor: ShipSupervisor
+             |
+             +-- ShipServer for ORBITALIST-1
+             +-- ShipServer for ORBITALIST-2
+             +-- ...</code></pre>
+      <p><code>SpaceTraders.Application.start/2</code> starts the Registry and DynamicSupervisor. A <code>DynamicSupervisor</code> accepts new children at runtime, so a ShipServer exists only when a Ship needs one. This is closer to Go actors managed by a fault-tolerant runtime than to a fixed Java executor pool.</p>
+    </section>
+
+    <section>
+      <h2>What the ShipServer owns</h2>
+      <p><code>SpaceTraders.Fleet.ShipServer</code> owns only in-memory waiting state for one Ship: arrival and Cooldown timers. Durable Timeline events live in SQLite. On startup, <code>init/1</code> reads pending events and re-arms timers. When a timer fires, it fetches authoritative Ship state from the game before unblocking the Ship.</p>
+      <pre><code>def handle_info({:timeline, %Event{} = event}, state) do
+  type = String.to_existing_atom(event.event_type)
+
+  if not Timeline.pending?(event) do
+    {:noreply, drop_pending_event(state, type, event)}
+  else
+    handle_pending_event(type, event, state)
+  end
+end</code></pre>
+      <p>The callback receives its own scheduled message. It returns <code>{:noreply, state}</code>: do not send a synchronous reply; keep running with this next immutable state value.</p>
+    </section>
+
+    <section>
+      <h2>Why not trust a timer?</h2>
+      <p>The game is authoritative. A local timer might expire while the game still reports <code>IN_TRANSIT</code> because of clock skew or stale state. The ShipServer re-pulls the Ship and retries rather than allowing an action known to fail. This preserves the project's game-truth rule.</p>
+    </section>
+
+    <section class="callout tryit">
+      <p class="callout-label">Practice: execute the actor test</p>
+      <pre><code>source scripts/_toolchain.sh
+mix test test/spacetraders/fleet/ship_server_test.exs</code></pre>
+      <p>Then read the test named <code>"does not unblock while the game still reports the ship in transit"</code>. It tests a time-sensitive concurrent behavior without talking to the real game API.</p>
+    </section>
+
+    <div class="quiz">
+      <p class="q">Why does a ShipServer refresh the Ship after an arrival timer fires?</p>
+      <button class="opt">To mutate the Ship object in memory</button>
+      <button class="opt" data-correct">To verify game truth before unblocking actions</button>
+      <button class="opt">To create a new browser WebSocket</button>
+      <p class="explain">The timer is a local scheduling hint. The SpaceTraders game decides whether the Ship is truly no longer in transit or on Cooldown.</p>
+    </div>
+
+    <p class="cite">Primary sources: <a href="https://hexdocs.pm/elixir/1.18.4/GenServer.html">GenServer</a> and <a href="https://hexdocs.pm/elixir/1.18.4/Supervisor.html">Supervisor</a>. Repository examples: <code>lib/spacetraders/application.ex</code> and <code>lib/spacetraders/fleet/ship_server.ex</code>.</p>
+    <nav class="lesson-nav"><a href="0003-liveview-event-loop.html">&lt;- Previous: LiveView</a><a href="index.html">Course index</a></nav>
+    <script src="../assets/teach/quiz.js"></script>
+  </body>
+</html>

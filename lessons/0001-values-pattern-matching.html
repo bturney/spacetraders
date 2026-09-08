@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Lesson 1: Values and pattern matching</title>
+    <link rel="stylesheet" href="../assets/teach/lesson.css">
+  </head>
+  <body>
+    <p class="lesson-meta"><span class="num">Lesson 1</span> / 30 minutes / Elixir core</p>
+    <h1>Values and pattern matching</h1>
+    <p class="standfirst">Start with four small pieces: a named value, a pair of values, a variable, and a choice based on that pair.</p>
+
+    <section>
+      <h2>1. A value is some data</h2>
+      <p>A <strong>value</strong> is a piece of data a program can use. You already know values such as the number <code>42</code> and the text <code>"hello"</code>.</p>
+      <p>Elixir also has <strong>atoms</strong>. An atom is a fixed named value that starts with a colon:</p>
+      <pre><code>:ok
+:error
+:cooldown_active</code></pre>
+      <p>Read them aloud as “ok”, “error”, and “cooldown active”. They are not variables and do not change. This application uses atoms for small, known states, like a Ship being ready or on Cooldown.</p>
+    </section>
+
+    <section>
+      <h2>2. A tuple keeps values together</h2>
+      <p>Curly braces make a <strong>tuple</strong>: one value that contains a fixed number of values in order.</p>
+      <pre><code>{:error, :cooldown_active}</code></pre>
+      <p>Think of this as a two-slot card:</p>
+      <pre><code>first slot:   :error
+second slot:  :cooldown_active</code></pre>
+      <p>In this project, the first slot often says whether an operation worked. The second slot gives useful detail. A successful operation might return <code>{:ok, ship}</code>; an unsuccessful one can return <code>{:error, :cooldown_active}</code>.</p>
+    </section>
+
+    <section class="callout tryit">
+      <p class="callout-label">Try it slowly in IEx</p>
+      <p>IEx is Elixir's interactive prompt. Run these one line at a time. After each line, read what IEx prints before entering the next one.</p>
+      <pre><code>source scripts/_toolchain.sh
+iex</code></pre>
+      <p>First, enter an atom:</p>
+      <pre><code>:ok</code></pre>
+      <p>IEx prints <code>:ok</code>. Next, enter a tuple:</p>
+      <pre><code>{:error, :cooldown_active}</code></pre>
+      <p>IEx prints the same tuple. You have asked it to evaluate data, not to call the SpaceTraders application.</p>
+    </section>
+
+    <section>
+      <h2>3. Give the tuple a temporary name</h2>
+      <p>A <strong>variable</strong> is a name you use to refer to a value. This line puts the tuple behind the name <code>result</code>:</p>
+      <pre><code>result = {:error, :cooldown_active}</code></pre>
+      <p>In Elixir, <code>=</code> is called the <strong>match operator</strong>. At this beginner stage, read that line as “put this value in <code>result</code>”. Later lessons explain its stricter matching behavior.</p>
+      <p>Enter the line above in IEx, then enter:</p>
+      <pre><code>result</code></pre>
+      <p>IEx prints <code>{:error, :cooldown_active}</code> because <code>result</code> refers to that tuple.</p>
+    </section>
+
+    <section>
+      <h2>4. Choose what to do with <code>case</code></h2>
+      <p><code>case</code> examines one value. It runs the line whose left side has the same shape as that value. The arrow <code>-&gt;</code> means “then produce this result”.</p>
+      <pre><code>case result do
+  :ok -&gt; "the Ship is ready"
+  {:error, reason} -&gt; reason
+end</code></pre>
+      <p>Enter that whole block in IEx. It prints <code>:cooldown_active</code>.</p>
+      <p>Why? <code>result</code> is not <code>:ok</code>, so Elixir skips the first line. It does match <code>{:error, reason}</code>. The name <code>reason</code> becomes the second item in the tuple, so this branch returns <code>:cooldown_active</code>.</p>
+      <p>Do not worry about writing this from memory yet. Your goal is only to recognize the two shapes:</p>
+      <pre><code>:ok
+{:error, reason}</code></pre>
+    </section>
+
+    <div class="quiz">
+      <p class="q">Which value is an Elixir atom?</p>
+      <button class="opt">"cooldown active"</button>
+      <button class="opt" data-correct>:cooldown_active</button>
+      <button class="opt">{:error, :cooldown_active}</button>
+      <p class="explain">An atom starts with a colon. Quotation marks create text, and curly braces create a tuple containing more than one value.</p>
+    </div>
+
+    <div class="callout ask">
+      <p class="callout-label">Before Lesson 2</p>
+      <p>Make sure you can look at <code>{:error, :cooldown_active}</code> and say: “a tuple; first it says error, then it says why.” That is enough for today. Exit IEx with <code>Ctrl+C</code>, then <code>a</code>.</p>
+    </div>
+
+    <p class="cite">Primary source: <a href="https://hexdocs.pm/elixir/1.18.4/patterns-and-guards.html">Elixir patterns and guards</a>. You will meet this application's Ship readiness code after these basic shapes feel familiar.</p>
+    <nav class="lesson-nav"><a href="index.html">Course index</a><a href="0002-a-health-request-through-phoenix.html">Next: Phoenix request -&gt;</a></nav>
+    <script src="../assets/teach/quiz.js"></script>
+  </body>
+</html>

@@ -1,0 +1,14 @@
+#!/usr/bin/env sh
+set -eu
+
+# Serve only course files, never the repository root or its local secrets/data.
+site_dir=$(mktemp -d "${TMPDIR:-/tmp}/spacetraders-lessons.XXXXXX")
+trap 'rm -rf "$site_dir"' EXIT INT TERM
+
+mkdir -p "$site_dir/assets"
+cp -R lessons reference "$site_dir/"
+cp -R assets/teach "$site_dir/assets/"
+cp CONTEXT.md "$site_dir/"
+cp course-index.html "$site_dir/index.html"
+
+exec python3 -m http.server "${PORT:-8080}" --bind 127.0.0.1 --directory "$site_dir"

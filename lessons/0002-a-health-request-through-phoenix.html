@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Lesson 2: A health request through Phoenix</title>
+    <link rel="stylesheet" href="../assets/teach/lesson.css">
+  </head>
+  <body>
+    <p class="lesson-meta"><span class="num">Lesson 2</span> / 20 minutes / Phoenix</p>
+    <h1>A health request through Phoenix</h1>
+    <p class="standfirst">Follow the smallest complete HTTP path in this application before you study the dashboard.</p>
+
+    <section>
+      <h2>The path</h2>
+      <pre><code>GET /health
+    |
+    v
+Router: :api pipeline, HealthController.show/2
+    |
+    v
+Controller: json(conn, %{status: "ok"})
+    |
+    v
+HTTP 200 {"status":"ok"}</code></pre>
+      <p><code>lib/spacetraders_web/router.ex:16-24</code> creates the <code>:api</code> pipeline, accepts JSON, and routes <code>GET /health</code> to <code>HealthController.show/2</code>. The slash and verb select the endpoint; <code>:show</code> selects the function.</p>
+    </section>
+
+    <section>
+      <h2>Why <code>show/2</code>?</h2>
+      <p>Elixir names a function by its module, name, and arity. <code>show/2</code> means the function named <code>show</code> takes two arguments:</p>
+      <pre><code>def show(conn, _params) do
+  json(conn, %{status: "ok"})
+end</code></pre>
+      <p><code>conn</code> is the request/response value threaded through Plug and Phoenix. <code>_params</code> means the function receives route/query parameters but deliberately does not use them. The leading underscore avoids an unused-variable warning.</p>
+    </section>
+
+    <section>
+      <h2>The executable specification</h2>
+      <p>The controller test makes the HTTP contract precise:</p>
+      <pre><code>test "GET /health responds 200 with status ok", %{conn: conn} do
+  conn = get(conn, ~p"/health")
+  assert json_response(conn, 200) == %{"status" =&gt; "ok"}
+end</code></pre>
+      <p><code>~p"/health"</code> is Phoenix's verified-route sigil. It checks the route against the router at compile time. Unlike a generic string, a stale route is caught before deployment.</p>
+    </section>
+
+    <section class="callout tryit">
+      <p class="callout-label">Practice: run the exact test</p>
+      <pre><code>source scripts/_toolchain.sh
+mix test test/spacetraders_web/controllers/health_controller_test.exs</code></pre>
+      <p>Expected result: one test, zero failures. This does not need the running application or a game token. Read the test output before moving on.</p>
+    </section>
+
+    <div class="quiz">
+      <p class="q">Which file decides that <code>GET /health</code> invokes <code>HealthController.show/2</code>?</p>
+      <button class="opt">The controller test</button>
+      <button class="opt" data-correct>The Phoenix router</button>
+      <button class="opt">The application supervisor</button>
+      <p class="explain">The router maps an HTTP method and path to a controller action. The test checks that the resulting behavior matches the contract.</p>
+    </div>
+
+    <p class="cite">Primary source: <a href="https://hexdocs.pm/phoenix/1.8.0/request_lifecycle.html">Phoenix request lifecycle</a>. Repository files: <code>lib/spacetraders_web/router.ex</code>, <code>lib/spacetraders_web/controllers/health_controller.ex</code>, and its test.</p>
+    <nav class="lesson-nav"><a href="0001-values-pattern-matching.html">&lt;- Previous: matching</a><a href="0003-liveview-event-loop.html">Next: LiveView -&gt;</a></nav>
+    <script src="../assets/teach/quiz.js"></script>
+  </body>
+</html>
