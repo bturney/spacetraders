@@ -21,6 +21,15 @@ defmodule SpaceTraders.Fleet.MarketTradingPolicy do
     {selected, Enum.reverse(rejected)}
   end
 
+  @doc "Chooses a buy Intent or reports why no currently known trade is viable."
+  @spec decide(map()) :: SpaceTraders.Fleet.JobPolicy.decision()
+  def decide(%{candidates: candidates, constraints: constraints}) do
+    case select(candidates, constraints) do
+      {nil, rejected} -> {:block, {:no_viable_market_trade, rejected}}
+      {candidate, _rejected} -> {:intent, %{type: :buy, candidate: candidate}}
+    end
+  end
+
   defp evaluate(candidate, constraints) do
     candidate = normalize(candidate)
 

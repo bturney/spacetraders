@@ -60,4 +60,22 @@ defmodule SpaceTraders.Fleet.MarketTradingPolicyTest do
     assert selected == nil
     assert [%{reason: :candidate_constraints}] = rejected
   end
+
+  test "returns the next buy Intent through the Job Policy interface" do
+    assert {:intent, %{type: :buy, candidate: selected}} =
+             MarketTradingPolicy.decide(%{
+               candidates: [candidate(%{})],
+               constraints: %{credits: 1_000, reserve_credits: 0}
+             })
+
+    assert selected.trade_symbol == "IRON_ORE"
+  end
+
+  test "returns a block through the Job Policy interface when every trade is rejected" do
+    assert {:block, {:no_viable_market_trade, [%{reason: :candidate_constraints}]}} =
+             MarketTradingPolicy.decide(%{
+               candidates: [candidate(%{sell_price: 11})],
+               constraints: %{minimum_profit: 20}
+             })
+  end
 end
