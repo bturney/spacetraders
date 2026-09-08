@@ -1153,6 +1153,101 @@ defmodule SpaceTraders.Fleet do
   def configure_market_trading_job(%AgentRecord{}, _ship_symbol, _attrs),
     do: {:error, :agent_token_missing}
 
+  @doc "Captures a paused Market Reconnaissance Job for one ordered Marketplace tour."
+  def configure_market_reconnaissance_job(
+        %AgentRecord{agent_token: token} = agent,
+        ship_symbol,
+        attrs
+      )
+      when is_binary(token) and token != "" and is_map(attrs) do
+    with :ok <- Agent.execution_allowed?(agent),
+         {:ok, ship} <- owned_ship(agent, ship_symbol),
+         nil <- unfinished_job(ship.id),
+         {:ok, live_ship} <-
+           Agent.handle_game_result(agent, SpaceTraders.API.get_ship(token, ship_symbol)),
+         system when is_binary(system) <- live_ship.nav.system_symbol,
+         {:ok, stops} <- reconnaissance_stops(attrs, token, system) do
+      %Job{ship_id: ship.id}
+      |> Job.changeset(%{
+        type: "market_reconnaissance",
+        extraction_waypoint: "RECONNAISSANCE-NONE",
+        market_waypoint: "RECONNAISSANCE-NONE",
+        cargo_threshold: 1
+      })
+      |> Ecto.Changeset.put_change(:status, "paused")
+      |> Ecto.Changeset.put_change(:blocked_reason, "Awaiting Operator resume")
+      |> Ecto.Changeset.put_change(:progress, %{
+        "target_system" => system,
+        "stops" => stops,
+        "completed_stops" => [],
+        "listings" => %{},
+        "candidate_routes" => []
+      })
+      |> Repo.insert()
+    else
+      %Job{} -> {:error, :unfinished_job_already_assigned}
+      nil -> {:error, :current_system_unavailable}
+      error -> error
+    end
+  end
+
+  def configure_market_reconnaissance_job(%AgentRecord{}, _ship_symbol, _attrs),
+    do: {:error, :agent_token_missing}
+
+  @doc "Starts or explicitly resumes a Market Reconnaissance Job."
+  def start_market_reconnaissance_job(%AgentRecord{} = agent, ship_symbol) do
+    with :ok <- Agent.execution_allowed?(agent),
+         {:ok, ship} <- owned_ship(agent, ship_symbol),
+         %Job{type: "market_reconnaissance"} = job <- unfinished_job(ship.id),
+         {:ok, live_ship} <-
+           Agent.handle_game_result(
+             agent,
+             SpaceTraders.API.get_ship(agent.agent_token, ship_symbol)
+           ),
+         :ok <- market_system_matches?(job.progress, live_ship) do
+      job =
+        Repo.update!(
+          Ecto.Changeset.change(job, status: "active", blocker: nil, blocked_reason: nil)
+        )
+
+      advance_market_reconnaissance_job(agent, job, live_ship)
+    else
+      nil -> {:error, :market_reconnaissance_job_not_configured}
+      %Job{} -> {:error, :market_reconnaissance_job_not_configured}
+      {:error, reason} -> block_market_reconnaissance_job(agent, ship_symbol, reason)
+    end
+  end
+
+  def resume_market_reconnaissance_job(agent, ship_symbol),
+    do: start_market_reconnaissance_job(agent, ship_symbol)
+
+  def pause_market_reconnaissance_job(agent, ship_symbol),
+    do: pause_job_type(agent, ship_symbol, "market_reconnaissance", "Market Reconnaissance Job")
+
+  def stop_market_reconnaissance_job(agent, ship_symbol),
+    do: stop_job_type(agent, ship_symbol, "market_reconnaissance", "Market Reconnaissance Job")
+
+  defp reconnaissance_stops(attrs, token, system) do
+    stops = attrs[:stops] || attrs["stops"] || []
+
+    with true <- is_list(stops) and stops != [] and Enum.all?(stops, &is_binary/1),
+         true <- Enum.uniq(stops) == stops,
+         {:ok, waypoints} <- fetch_waypoint_pages(token, system),
+         true <- Enum.all?(stops, &marketplace_stop?(&1, waypoints)) do
+      {:ok, stops}
+    else
+      false -> {:error, :invalid_market_reconnaissance_tour}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp marketplace_stop?(symbol, waypoints) do
+    Enum.any?(waypoints, fn waypoint ->
+      waypoint.symbol == symbol and
+        Enum.any?(waypoint.traits || [], &(&1.symbol == "MARKETPLACE"))
+    end)
+  end
+
   @doc "Starts or resumes a recurring Market Trading Job from known candidates."
   def start_market_trading_job(%AgentRecord{} = agent, ship_symbol) do
     with :ok <- Agent.execution_allowed?(agent),
@@ -1322,6 +1417,143 @@ defmodule SpaceTraders.Fleet do
         %{configured_system: system, current_system: live_ship.nav.system_symbol}}}
 
   defp market_system_matches?(_, _), do: {:error, :current_system_unavailable}
+
+  # A completed Navigate Intent is the authoritative arrival evidence. Only then
+  # does reconnaissance issue the read-only Market request for the current stop.
+  defp advance_market_reconnaissance_job(agent, %Job{} = job, live_ship) do
+    stops = job.progress["stops"] || []
+    completed = job.progress["completed_stops"] || []
+
+    case Enum.find(stops, &(&1 not in completed)) do
+      nil ->
+        {:ok,
+         Repo.update!(
+           Ecto.Changeset.change(job,
+             status: "completed",
+             blocker: nil,
+             blocked_reason: nil,
+             finished_at: DateTime.utc_now() |> DateTime.truncate(:second)
+           )
+         )}
+
+      stop when live_ship.nav.status != "IN_TRANSIT" and live_ship.nav.waypoint_symbol == stop ->
+        read_reconnaissance_market(agent, job, stop, live_ship)
+
+      stop ->
+        Intents.request(
+          agent,
+          %Intents.JobOwner{job: job},
+          live_ship.symbol,
+          %Intents.Navigate{waypoint: stop},
+          live_ship
+        )
+        |> case do
+          {:ok, %Intent{status: "blocked"} = intent} ->
+            block_market_reconnaissance_job(
+              job,
+              {:marketplace_unreachable, stop, intent.blocker || :navigate_blocked}
+            )
+
+          {:ok, _intent} ->
+            {:ok, job}
+
+          {:error, reason} ->
+            block_market_reconnaissance_job(job, {:marketplace_unreachable, stop, reason})
+        end
+    end
+  end
+
+  defp read_reconnaissance_market(%AgentRecord{agent_token: token} = agent, job, stop, live_ship) do
+    system = job.progress["target_system"]
+
+    case Agent.handle_game_result(agent, SpaceTraders.API.get_market(token, system, stop)) do
+      {:ok, market} ->
+        observed_at = DateTime.utc_now() |> DateTime.truncate(:second)
+
+        _observation =
+          Intelligence.observe_market(agent, system, market,
+            observing_ship_symbol: Repo.get!(Ship, job.ship_id).symbol,
+            observed_at: observed_at
+          )
+
+        listing = %{
+          "observed_at" => DateTime.to_iso8601(observed_at),
+          "trade_goods" => Enum.map(market.trade_goods || [], &reconnaissance_trade_good/1)
+        }
+
+        listings = Map.put(job.progress["listings"] || %{}, stop, listing)
+        completed = (job.progress["completed_stops"] || []) ++ [stop]
+
+        job =
+          Repo.update!(
+            Ecto.Changeset.change(job,
+              progress:
+                job.progress
+                |> Map.put("listings", listings)
+                |> Map.put("completed_stops", completed)
+                |> Map.put("candidate_routes", candidate_trade_routes(listings))
+            )
+          )
+
+        advance_market_reconnaissance_job(agent, job, live_ship)
+
+      {:error, reason} ->
+        block_market_reconnaissance_job(job, {:market_listing_unavailable, stop, reason})
+    end
+  end
+
+  defp reconnaissance_trade_good(good) do
+    %{
+      "symbol" => good.symbol,
+      "purchase_price" => good.purchase_price,
+      "sell_price" => good.sell_price
+    }
+  end
+
+  defp candidate_trade_routes(listings) do
+    for {source, source_listing} <- listings,
+        {destination, destination_listing} <- listings,
+        source != destination,
+        source_good <- source_listing["trade_goods"],
+        destination_good <- destination_listing["trade_goods"],
+        source_good["symbol"] == destination_good["symbol"],
+        destination_good["sell_price"] > source_good["purchase_price"] do
+      %{
+        "trade_symbol" => source_good["symbol"],
+        "source_waypoint" => source,
+        "destination_waypoint" => destination,
+        "source_buy_price" => source_good["purchase_price"],
+        "destination_sell_price" => destination_good["sell_price"],
+        "per_unit_spread" => destination_good["sell_price"] - source_good["purchase_price"],
+        "source_observed_at" => source_listing["observed_at"],
+        "destination_observed_at" => destination_listing["observed_at"]
+      }
+    end
+  end
+
+  defp block_market_reconnaissance_job(agent, ship_symbol, reason) do
+    with {:ok, ship} <- owned_ship(agent, ship_symbol),
+         %Job{type: "market_reconnaissance"} = job <- unfinished_job(ship.id) do
+      block_market_reconnaissance_job(job, reason)
+    else
+      _ -> {:error, :market_reconnaissance_job_not_configured}
+    end
+  end
+
+  defp block_market_reconnaissance_job(job, reason) do
+    blocker = %{
+      job_blocker(reason)
+      | summary:
+          "Market Reconnaissance Job cannot read its selected Marketplace: #{blocker_reason(reason)}."
+    }
+
+    _job =
+      Repo.update!(
+        Ecto.Changeset.change(job, status: "blocked", blocker: blocker, blocked_reason: nil)
+      )
+
+    {:error, {:market_reconnaissance_job_blocked, reason}}
+  end
 
   defp block_market_trading_job(agent, ship_symbol, reason) do
     with {:ok, ship} <- owned_ship(agent, ship_symbol),
@@ -3287,6 +3519,14 @@ defmodule SpaceTraders.Fleet do
       ),
       do: advance_construction_supply_after_intent(agent, job, intent)
 
+  def continue_job_after_intent(
+        agent,
+        %Job{type: "market_reconnaissance"} = job,
+        %Intent{status: "completed"},
+        live_ship
+      ),
+      do: advance_market_reconnaissance_job(agent, job, live_ship)
+
   def continue_job_after_intent(agent, job, intent, _live_ship),
     do: advance_procurement_after_intent(agent, job, intent)
 
@@ -3707,6 +3947,7 @@ defmodule SpaceTraders.Fleet do
 
       case config.type do
         "explorer" -> advance_explorer_job(agent, config, live_ship)
+        "market_reconnaissance" -> advance_market_reconnaissance_job(agent, config, live_ship)
         "procurement" -> start_procurement_job(agent, ship_symbol)
         "construction_supply" -> start_construction_supply_job(agent, ship_symbol)
         _ -> advance_miner_job(agent, config, live_ship, :timeline)
@@ -5114,11 +5355,19 @@ defmodule SpaceTraders.Fleet do
          %Job{} = config <- unfinished_job(ship.id),
          %AgentRecord{} = agent <- Repo.get(AgentRecord, agent_id),
          :ok <- Agent.execution_allowed?(agent) do
-      if config.type in ["procurement", "construction_supply", "market_trading", "outfitting"] and
+      if config.type in [
+           "procurement",
+           "construction_supply",
+           "market_trading",
+           "market_reconnaissance",
+           "outfitting"
+         ] and
            match?(%Intent{}, Intents.unfinished_job_intent(config.id)) do
-        if config.type == "outfitting",
-          do: recover_outfitting_intent(agent, config),
-          else: recover_procurement_intent(agent, ship, config)
+        case config.type do
+          "outfitting" -> recover_outfitting_intent(agent, config)
+          "market_reconnaissance" -> recover_market_reconnaissance_intent(agent, config)
+          _ -> recover_procurement_intent(agent, ship, config)
+        end
       else
         if config.status in @running_job_states do
           # Recovery owns its own persisted attempt budget. Avoid nested client
@@ -5129,12 +5378,26 @@ defmodule SpaceTraders.Fleet do
                ) do
             {:ok, live_ship} when config.status == "active" and is_nil(config.in_flight_action) ->
               case config.type do
-                "explorer" -> advance_explorer_job(agent, config, live_ship)
-                "procurement" -> start_procurement_job(agent, ship_symbol)
-                "construction_supply" -> start_construction_supply_job(agent, ship_symbol)
-                "market_trading" -> advance_market_trading_job(agent, ship_symbol)
-                "outfitting" -> start_outfitting_job(agent, ship_symbol)
-                _ -> advance_miner_job(agent, config, live_ship)
+                "explorer" ->
+                  advance_explorer_job(agent, config, live_ship)
+
+                "procurement" ->
+                  start_procurement_job(agent, ship_symbol)
+
+                "construction_supply" ->
+                  start_construction_supply_job(agent, ship_symbol)
+
+                "market_trading" ->
+                  advance_market_trading_job(agent, ship_symbol)
+
+                "market_reconnaissance" ->
+                  advance_market_reconnaissance_job(agent, config, live_ship)
+
+                "outfitting" ->
+                  start_outfitting_job(agent, ship_symbol)
+
+                _ ->
+                  advance_miner_job(agent, config, live_ship)
               end
 
             {:ok, live_ship}
@@ -5187,6 +5450,28 @@ defmodule SpaceTraders.Fleet do
       false -> :ok
       nil -> :ok
       {:error, reason} -> mark_outfitting_job_blocked(job, reason)
+    end
+  end
+
+  defp recover_market_reconnaissance_intent(agent, job) do
+    intent = Intents.unfinished_job_intent(job.id)
+    ship = Repo.get!(Ship, job.ship_id)
+
+    with {:ok, live_ship} <-
+           Agent.handle_game_result(
+             agent,
+             SpaceTraders.API.get_ship(agent.agent_token, ship.symbol)
+           ),
+         %Job{} = current_job <- Repo.get(Job, job.id),
+         true <- Job.running?(current_job),
+         :ok <- market_system_matches?(current_job.progress, live_ship),
+         %Intent{} = current_intent <- Intents.unfinished_intent(intent.id),
+         {:ok, current_intent} <- Intents.advance(agent, current_intent, live_ship) do
+      continue_job_after_intent(agent, current_job, current_intent, live_ship)
+    else
+      false -> :ok
+      nil -> :ok
+      {:error, reason} -> block_market_reconnaissance_job(job, reason)
     end
   end
 
@@ -5304,10 +5589,20 @@ defmodule SpaceTraders.Fleet do
           agent = Repo.get!(AgentRecord, agent_id)
 
           case recovered_config.type do
-            "explorer" -> advance_explorer_job(agent, recovered_config, live_ship)
-            "procurement" -> start_procurement_job(agent, live_ship.symbol)
-            "construction_supply" -> start_construction_supply_job(agent, live_ship.symbol)
-            _ -> advance_miner_job(agent, recovered_config, live_ship, :timeline)
+            "explorer" ->
+              advance_explorer_job(agent, recovered_config, live_ship)
+
+            "market_reconnaissance" ->
+              advance_market_reconnaissance_job(agent, recovered_config, live_ship)
+
+            "procurement" ->
+              start_procurement_job(agent, live_ship.symbol)
+
+            "construction_supply" ->
+              start_construction_supply_job(agent, live_ship.symbol)
+
+            _ ->
+              advance_miner_job(agent, recovered_config, live_ship, :timeline)
           end
         end
 

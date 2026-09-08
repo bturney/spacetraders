@@ -76,7 +76,8 @@ defmodule SpaceTraders.Fleet.Intents do
   @job_types [
     "miner",
     "procurement",
-    "market_trading"
+    "market_trading",
+    "market_reconnaissance"
   ]
 
   defp request_for_agent(agent, owner, ship_symbol, %BuyGoods{} = goal) do
@@ -857,7 +858,7 @@ defmodule SpaceTraders.Fleet.Intents do
        do: :ok
 
   defp job_navigation_allowed?(%Job{type: type}, _waypoint)
-       when type in ["procurement", "market_trading"],
+       when type in ["procurement", "market_trading", "market_reconnaissance"],
        do: :ok
 
   defp job_navigation_allowed?(_job, waypoint),
