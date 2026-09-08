@@ -1337,6 +1337,76 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       assert has_element?(lv, "button[phx-click=\"resume_market_trading_job\"]")
     end
 
+    test "defaults a Market Reconnaissance Job tour to current System Marketplaces", %{
+      conn: conn,
+      operator: operator
+    } do
+      agent = agent_fixture(operator)
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case conn.request_path do
+          "/v2/my/agent" ->
+            Req.Test.json(conn, %{"data" => agent_overview_body(agent.symbol)})
+
+          "/v2/my/ships" ->
+            Req.Test.json(conn, %{"data" => [ship_body("ORBITALIST-1")]})
+
+          "/v2/my/contracts" ->
+            Req.Test.json(conn, %{"data" => []})
+
+          "/v2/systems/X1-UX81/waypoints" ->
+            Req.Test.json(conn, %{
+              "data" => [
+                %{
+                  "symbol" => "X1-UX81-B1",
+                  "systemSymbol" => "X1-UX81",
+                  "traits" => [%{"symbol" => "MARKETPLACE"}]
+                },
+                %{
+                  "symbol" => "X1-UX81-A1",
+                  "systemSymbol" => "X1-UX81",
+                  "traits" => [%{"symbol" => "MARKETPLACE"}]
+                },
+                %{
+                  "symbol" => "X1-UX81-C1",
+                  "systemSymbol" => "X1-UX81",
+                  "traits" => []
+                }
+              ]
+            })
+
+          "/v2/systems/X1-UX81/waypoints/X1-UX81-B1/market" ->
+            Req.Test.json(conn, %{"data" => %{"symbol" => "X1-UX81-B1", "tradeGoods" => []}})
+
+          "/v2/systems/X1-UX81/waypoints/X1-UX81-A1/market" ->
+            Req.Test.json(conn, %{"data" => %{"symbol" => "X1-UX81-A1", "tradeGoods" => []}})
+        end
+      end)
+
+      {:ok, lv, _html} = live(conn, ~p"/")
+
+      assert input_value(lv, "market-reconnaissance-job-form-ORBITALIST-1", "stops") =~
+               ~s(value="X1-UX81-A1, X1-UX81-B1")
+    end
+
+    test "explains that Waypoint Intelligence is required without known Marketplaces", %{
+      conn: conn,
+      operator: operator
+    } do
+      agent = agent_fixture(operator)
+      stub_live_game(agent_overview_body(agent.symbol), [ship_body("ORBITALIST-1")])
+
+      {:ok, lv, _html} = live(conn, ~p"/")
+
+      assert has_element?(
+               lv,
+               "[data-market-reconnaissance-prerequisite]",
+               "Waypoint Intelligence"
+             )
+
+      refute has_element?(lv, "form#market-reconnaissance-job-form-ORBITALIST-1")
+    end
+
     test "explains when a Procurement Job cannot find a source market", %{
       conn: conn,
       operator: operator

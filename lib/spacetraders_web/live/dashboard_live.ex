@@ -1796,6 +1796,7 @@ defmodule SpaceTradersWeb.DashboardLive do
         agent={@overview.agent}
         ships={@overview.ships}
         control={@overview.control}
+        waypoints={@overview.waypoints}
         cooldown_tick={@cooldown_tick}
         form_drafts={@form_drafts}
         selected_ship={Map.get(@selected_ships, to_string(@overview.agent.id))}
@@ -3078,6 +3079,7 @@ defmodule SpaceTradersWeb.DashboardLive do
   attr :agent, :map, required: true
   attr :ships, :any, required: true
   attr :control, :map, required: true
+  attr :waypoints, :any, required: true
   attr :cooldown_tick, :integer, required: true
   attr :form_drafts, :map, default: %{}
   attr :selected_ship, :string, default: nil
@@ -3119,6 +3121,8 @@ defmodule SpaceTradersWeb.DashboardLive do
               :for={ship <- ships}
               ship={ship}
               ships={ships}
+              waypoints={@waypoints}
+              agent={@agent}
               agent_id={@agent.id}
               cooldown_tick={@cooldown_tick}
               form_drafts={@form_drafts}
@@ -3179,6 +3183,8 @@ defmodule SpaceTradersWeb.DashboardLive do
 
   attr :ship, :map, required: true
   attr :ships, :list, required: true
+  attr :waypoints, :any, required: true
+  attr :agent, :map, required: true
   attr :agent_id, :integer, required: true
   attr :cooldown_tick, :integer, default: 0
   attr :form_drafts, :map, default: %{}
@@ -3399,14 +3405,24 @@ defmodule SpaceTradersWeb.DashboardLive do
           <% @ship.job && @ship.job.type == "market_trading" -> %>
             <.market_trading_job_panel ship={@ship} form_drafts={@form_drafts} />
           <% @ship.job && @ship.job.type == "market_reconnaissance" -> %>
-            <.market_reconnaissance_job_panel ship={@ship} form_drafts={@form_drafts} />
+            <.market_reconnaissance_job_panel
+              ship={@ship}
+              waypoints={@waypoints}
+              agent={@agent}
+              form_drafts={@form_drafts}
+            />
           <% true -> %>
             <.miner_job_panel ship={@ship} form_drafts={@form_drafts} />
             <.procurement_job_panel ship={@ship} form_drafts={@form_drafts} />
             <.construction_supply_job_panel ship={@ship} form_drafts={@form_drafts} />
             <.outfitting_job_panel ship={@ship} form_drafts={@form_drafts} />
             <.market_trading_job_panel ship={@ship} form_drafts={@form_drafts} />
-            <.market_reconnaissance_job_panel ship={@ship} form_drafts={@form_drafts} />
+            <.market_reconnaissance_job_panel
+              ship={@ship}
+              waypoints={@waypoints}
+              agent={@agent}
+              form_drafts={@form_drafts}
+            />
             <button
               :if={is_nil(@ship.job)}
               type="button"
@@ -4088,12 +4104,15 @@ defmodule SpaceTradersWeb.DashboardLive do
   end
 
   attr :ship, :map, required: true
+  attr :waypoints, :any, required: true
+  attr :agent, :map, required: true
   attr :form_drafts, :map, default: %{}
 
   defp market_reconnaissance_job_panel(assigns) do
     job = Map.get(assigns.ship, :job)
     progress = (job && job.progress) || %{}
-    assigns = assign(assigns, job: job, progress: progress)
+    stops = market_reconnaissance_stops(assigns.ship, assigns.agent, assigns.waypoints)
+    assigns = assign(assigns, job: job, progress: progress, stops: stops)
 
     ~H"""
     <section
@@ -4109,7 +4128,7 @@ defmodule SpaceTradersWeb.DashboardLive do
       </p>
       <p :if={job_reason(@job)} class="mt-2 text-xs text-error">{job_reason(@job)}</p>
       <form
-        :if={is_nil(@job)}
+        :if={is_nil(@job) and match?({:ok, [_ | _]}, @stops)}
         id={"market-reconnaissance-job-form-#{@ship.symbol}"}
         phx-change="track_draft"
         phx-submit="configure_market_reconnaissance_job"
@@ -4125,12 +4144,37 @@ defmodule SpaceTradersWeb.DashboardLive do
           name="stops"
           required
           placeholder="Marketplace waypoints, in tour order (comma-separated)"
-          value={draft_field(@form_drafts, "market_reconnaissance_job", [@ship.symbol], "stops", "")}
+          value={
+            draft_field(
+              @form_drafts,
+              "market_reconnaissance_job",
+              [@ship.symbol],
+              "stops",
+              @stops |> elem(1) |> Enum.join(", ")
+            )
+          }
           class="input input-bordered input-sm font-mono"
         />
         <button type="submit" class="btn btn-secondary btn-sm">Assign Market Reconnaissance Job</button>
       </form>
+      <p
+        :if={is_nil(@job) and @stops == {:ok, []}}
+        class="mt-3 text-xs opacity-70"
+        data-market-reconnaissance-prerequisite
+      >
+        Waypoint Intelligence must first be established before Marketplace stops can be selected.
+      </p>
+      <p :if={is_nil(@job) and match?({:error, _}, @stops)} class="mt-3 text-xs text-warning">
+        Marketplace selection is unavailable: {live_error(elem(@stops, 1))}
+      </p>
       <div :if={@job} class="mt-3 space-y-2 text-xs">
+        <div
+          :for={{waypoint, listing} <- @progress["listings"] || %{}}
+          class="rounded bg-base-200 p-2"
+          data-market-reconnaissance-listing={waypoint}
+        >
+          <span class="font-mono">{waypoint}</span> Listing observed: {listing["observed_at"]}
+        </div>
         <div :for={route <- @progress["candidate_routes"] || []} class="rounded bg-base-200 p-2">
           {route["trade_symbol"]}: {route["source_waypoint"]} buy {route["source_buy_price"]} -> {route[
             "destination_waypoint"
@@ -4165,6 +4209,23 @@ defmodule SpaceTradersWeb.DashboardLive do
     </section>
     """
   end
+
+  defp market_reconnaissance_stops(ship, agent, {:ok, waypoints}) when is_list(waypoints) do
+    if Enum.any?(waypoints, &(&1.system_symbol == ship.nav.system_symbol)) do
+      {:ok,
+       waypoints
+       |> Enum.filter(&(&1.system_symbol == ship.nav.system_symbol))
+       |> Enum.filter(fn waypoint ->
+         Enum.any?(waypoint.traits || [], &(&1.symbol == "MARKETPLACE"))
+       end)
+       |> Enum.map(& &1.symbol)
+       |> Enum.sort()}
+    else
+      {:ok, Intelligence.marketplace_waypoints(agent, ship.nav.system_symbol)}
+    end
+  end
+
+  defp market_reconnaissance_stops(_ship, _agent, {:error, reason}), do: {:error, reason}
 
   defp market_trading_job_panel(assigns) do
     job = Map.get(assigns.ship, :job)
