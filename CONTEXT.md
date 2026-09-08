@@ -115,7 +115,7 @@ A finite Job that uses one Ship to establish baseline Operational Intelligence f
 _Avoid_: Explorer, System Survey Job
 
 **Market Trading Job**:
-A recurring Job that uses one Ship to repeatedly buy and sell goods for realized net profit within a fixed target System and Operator-selected financial constraints. It chooses among currently known viable trades rather than forecasting prices or searching globally, and distinguishes estimated returns from realized results.
+A recurring Job that uses one Ship to repeatedly buy and sell up to an Operator-selected quantity of the Trade Good between the fixed source and destination Marketplaces selected from one Candidate Trade Route, within a fixed target System and Operator-confirmed financial constraints. It reconciles live prices before each purchase and sale, blocks when those prices no longer satisfy its constraints, and distinguishes estimated returns from realized results.
 _Avoid_: Arbitrage Job, Trader
 
 **Market Reconnaissance Job**:
@@ -123,7 +123,7 @@ A finite Job that uses one Ship to visit an Operator-selected ordered set of dis
 _Avoid_: market scanner, reconnaissance loop, trader
 
 **Candidate Trade Route**:
-A directional comparison of fresh Listings for one Trade Good at two Marketplaces: source buy price, destination sell price, per-unit spread, and the observation time for each Listing. It is Operational Intelligence, not a commitment or estimate for a particular Ship; Cargo capacity, travel time, fuel cost, credits, and financial constraints belong to the Policy that may act on it.
+A retained directional comparison of Listings for one Trade Good at two Marketplaces: source buy price, destination sell price, per-unit spread, and the observation time for each Listing. It is Operational Intelligence, not a commitment or estimate for a particular Ship; Cargo capacity, travel time, fuel cost, credits, and financial constraints belong to the Policy that may act on it.
 _Avoid_: trade plan, profit forecast, arbitrage
 
 **Procurement Job**:
