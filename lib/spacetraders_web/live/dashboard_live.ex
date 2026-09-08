@@ -1754,13 +1754,14 @@ defmodule SpaceTradersWeb.DashboardLive do
       <.fleet_grid
         agent={@overview.agent}
         ships={@overview.ships}
+        control={@overview.control}
         cooldown_tick={@cooldown_tick}
         form_drafts={@form_drafts}
         selected_ship={Map.get(@selected_ships, to_string(@overview.agent.id))}
       />
       <.fleet_attention
         agent_id={@overview.agent.id}
-        ships={@overview.ships}
+        attention={@overview.control.attention}
         selected_ship={Map.get(@selected_ships, to_string(@overview.agent.id))}
       />
       <div class="grid gap-5 lg:grid-cols-2">
@@ -3035,6 +3036,7 @@ defmodule SpaceTradersWeb.DashboardLive do
 
   attr :agent, :map, required: true
   attr :ships, :any, required: true
+  attr :control, :map, required: true
   attr :cooldown_tick, :integer, required: true
   attr :form_drafts, :map, default: %{}
   attr :selected_ship, :string, default: nil
@@ -3050,14 +3052,14 @@ defmodule SpaceTradersWeb.DashboardLive do
         <div class="flex items-center gap-2 text-xs">
           <span data-fleet-roster>{fleet_count_label(@ships)}</span>
           <span
-            :if={attention_count(@ships) > 0}
+            :if={@control.attention_count > 0}
             class="badge badge-warning badge-sm"
             data-needs-attention-count
           >
-            {attention_count(@ships)} needs attention
+            {@control.attention_count} needs attention
           </span>
           <span
-            :if={fleet_healthy?(@ships)}
+            :if={@control.healthy?}
             class="badge badge-success badge-sm"
             data-fleet-healthy
           >
@@ -3093,18 +3095,10 @@ defmodule SpaceTradersWeb.DashboardLive do
   end
 
   attr :agent_id, :integer, required: true
-  attr :ships, :any, required: true
+  attr :attention, :list, required: true
   attr :selected_ship, :string, default: nil
 
   defp fleet_attention(assigns) do
-    attention =
-      case assigns.ships do
-        {:ok, ships} -> Enum.filter(ships, &needs_attention?/1)
-        _ -> []
-      end
-
-    assigns = assign(assigns, :attention, attention)
-
     ~H"""
     <section
       :if={@attention != []}
@@ -3120,7 +3114,7 @@ defmodule SpaceTradersWeb.DashboardLive do
         >
           <div>
             <span class="font-mono font-semibold">{ship.symbol}</span>
-            <span class="ml-2 text-sm">{attention_summary(ship)}</span>
+            <span class="ml-2 text-sm">{ship.control.attention.summary}</span>
           </div>
           <button
             :if={@selected_ship != ship.symbol}
@@ -3434,17 +3428,17 @@ defmodule SpaceTradersWeb.DashboardLive do
             placeholder="Waypoint symbol"
             autocomplete="off"
             list={
-              if destination_history(@ship) == [],
+              if @ship.control.navigation.destinations == [],
                 do: nil,
                 else: "destination-history-#{@ship.symbol}"
             }
             class="input input-sm input-bordered min-h-11 flex-1 font-mono"
           />
           <datalist
-            :if={destination_history(@ship) != []}
+            :if={@ship.control.navigation.destinations != []}
             id={"destination-history-#{@ship.symbol}"}
           >
-            <option :for={destination <- destination_history(@ship)} value={destination} />
+            <option :for={destination <- @ship.control.navigation.destinations} value={destination} />
           </datalist>
           <.action_tooltip reason={action_reason(ship_action_state(@ship, :navigate))}>
             <button
@@ -3690,7 +3684,7 @@ defmodule SpaceTradersWeb.DashboardLive do
           <div class="grid grid-cols-1 gap-3 sm:grid-cols-3">
             <div>
               <div class="text-xs opacity-60">Flight Mode</div>
-              <div class="font-mono">{flight_mode(@ship)}</div>
+              <div class="font-mono">{@ship.control.readiness.flight_mode}</div>
               <form
                 id={"flight-mode-form-#{@ship.symbol}"}
                 phx-change="track_draft"
@@ -3717,7 +3711,7 @@ defmodule SpaceTradersWeb.DashboardLive do
                         "flight_mode",
                         [@ship.symbol],
                         "flight_mode",
-                        flight_mode(@ship)
+                        @ship.control.readiness.flight_mode
                       ) ==
                         mode
                     }
@@ -5008,7 +5002,7 @@ defmodule SpaceTradersWeb.DashboardLive do
     activities =
       assigns.overviews
       |> Enum.flat_map(fn %{activity: activity} -> activity end)
-      |> Enum.reject(&activity_noise?/1)
+      |> Enum.filter(& &1.control.visible?)
       |> Enum.sort_by(& &1.inserted_at, {:desc, DateTime})
       |> Enum.take(10)
       |> Enum.sort_by(& &1.inserted_at, DateTime)
@@ -5035,7 +5029,7 @@ defmodule SpaceTradersWeb.DashboardLive do
             <span :if={event.ship}> · <span class="font-mono">{event.ship.symbol}</span></span>
             <span>{event.message}</span>
             <span
-              :for={{label, value} <- activity_facts(event)}
+              :for={{label, value} <- event.control.facts}
               class="badge badge-outline badge-xs ml-1"
             >
               {label}: {value}
@@ -5510,62 +5504,8 @@ defmodule SpaceTradersWeb.DashboardLive do
   defp paused_status(reason) when is_binary(reason), do: reason
   defp paused_status(_), do: "Paused"
 
-  defp attention_count({:ok, ships}), do: Enum.count(ships, &needs_attention?/1)
-  defp attention_count(_), do: 0
-
-  defp fleet_healthy?({:ok, ships}), do: ships != [] and attention_count({:ok, ships}) == 0
-  defp fleet_healthy?(_), do: false
-
   defp operations_class(true), do: ""
   defp operations_class(false), do: "hidden"
-
-  defp needs_attention?(%{job: %{status: "blocked"}}), do: true
-  defp needs_attention?(%{job: %{status: "paused"}}), do: true
-  defp needs_attention?(%{intents: %{status: "blocked"}}), do: true
-  defp needs_attention?(%{nav: %{status: "IN_TRANSIT"}}), do: false
-  defp needs_attention?(_), do: false
-
-  defp attention_summary(%{intents: %{status: "blocked"} = intent}),
-    do: intents_reason(intent) || intents_status(intent)
-
-  defp attention_summary(%{job: job}) when not is_nil(job), do: job_reason(job) || job_status(job)
-
-  defp attention_summary(%{intents: intent}),
-    do: intents_reason(intent) || intents_status(intent)
-
-  defp attention_summary(_), do: "Review Ship state"
-
-  defp activity_noise?(%{kind: kind}) when kind in ["retry", "manual_intent_waiting"], do: true
-
-  defp activity_noise?(%{kind: kind, message: message})
-       when kind in ["manual_intent_recovery", "miner_job_recovery"] do
-    String.contains?(String.downcase(message), "retrying")
-  end
-
-  defp activity_noise?(_), do: false
-
-  defp activity_facts(%{metadata: metadata}) when is_map(metadata) do
-    metadata
-    |> Enum.filter(fn {key, _value} ->
-      key in [
-        "outcome",
-        "delta",
-        "wait",
-        "retry",
-        "block",
-        "recovery",
-        "jettison",
-        "deliver",
-        "remaining"
-      ]
-    end)
-    |> Enum.map(fn {key, value} -> {key, format_activity_value(value)} end)
-  end
-
-  defp activity_facts(_), do: []
-
-  defp format_activity_value(value) when is_binary(value), do: value
-  defp format_activity_value(value), do: inspect(value)
 
   ## Display helpers
 
@@ -5839,9 +5779,6 @@ defmodule SpaceTradersWeb.DashboardLive do
 
   defp arrival_label(_), do: "arrives soon"
 
-  defp flight_mode(%{nav: %{flight_mode: mode}}) when is_binary(mode), do: mode
-  defp flight_mode(_), do: "—"
-
   defp fuel_consumed_label(%{fuel: %{consumed: %{amount: amount}}}) when is_integer(amount),
     do: "#{amount} fuel"
 
@@ -6109,13 +6046,13 @@ defmodule SpaceTradersWeb.DashboardLive do
   defp headquarters_system(_), do: nil
 
   defp browser_ships({:ok, ships}, system_symbol) when is_list(ships) do
-    Enum.filter(ships, &(&1.nav.status == "IN_ORBIT" and &1.nav.system_symbol == system_symbol))
+    Enum.filter(
+      ships,
+      &(&1.control.navigation.selectable? and &1.nav.system_symbol == system_symbol)
+    )
   end
 
   defp browser_ships(_, _), do: []
-
-  defp destination_history(%{destination_history: history}) when is_list(history), do: history
-  defp destination_history(_), do: []
 
   defp browser_navigation_destinations(ships, waypoint, drafts) do
     available_ships = browser_ships(ships, waypoint.system_symbol)
@@ -6124,7 +6061,7 @@ defmodule SpaceTradersWeb.DashboardLive do
     ship =
       Enum.find(available_ships, &(&1.symbol == selected_ship)) || List.first(available_ships)
 
-    [waypoint.symbol | destination_history(ship)]
+    [waypoint.symbol | ship.control.navigation.destinations]
     |> Enum.uniq()
   end
 

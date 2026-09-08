@@ -3972,7 +3972,7 @@ defmodule SpaceTraders.FleetTest do
 
       snapshot = Fleet.command_snapshot(agent)
 
-      assert {:ok, [%{actions: actions}]} = snapshot.ships
+      assert {:ok, [%{actions: actions, control: control}]} = snapshot.ships
 
       # Outcome-level Navigate is always dispatchable: its Intent reconciles
       # cooldown and transit instead of refusing while the Ship is busy.
@@ -3982,6 +3982,10 @@ defmodule SpaceTraders.FleetTest do
       assert actions.extract == %{allowed?: false, reason: :cooldown_active}
       assert actions.siphon == %{allowed?: false, reason: :cooldown_active}
       assert actions.refuel == %{allowed?: false, reason: :cooldown_active}
+      assert control.attention == %{needed?: false, summary: nil}
+      assert control.readiness == %{flight_mode: "CRUISE"}
+      assert control.navigation == %{available?: true, selectable?: false, destinations: []}
+      assert snapshot.control == %{attention: [], attention_count: 0, healthy?: true}
     end
 
     test "reuses fresh headquarters waypoints for the browser and listings" do
@@ -4071,6 +4075,57 @@ defmodule SpaceTraders.FleetTest do
 
       assert {:ok, [%{waypoint: "X1-UX81-A1", shipyard: %{symbol: "X1-UX81-A1"}}]} =
                snapshot.shipyards
+    end
+
+    test "prioritizes a blocked Manual Control Intent over its paused Job" do
+      agent = agent_fixture()
+      ship = ship_fixture(agent, "FLEET-SHIP")
+
+      {:ok, job} =
+        Fleet.configure_miner_job(agent, "FLEET-SHIP", %{
+          extraction_waypoint: "X1-UX81-A2",
+          market_waypoint: "X1-UX81-A1",
+          cargo_threshold: 30
+        })
+
+      Repo.update!(Ecto.Changeset.change(job, status: "paused"))
+
+      Repo.insert!(%Intent{
+        ship_id: ship.id,
+        caller: "manual",
+        type: "navigate",
+        target_waypoint: "X1-UX81-A2",
+        status: "blocked",
+        blocker: %JobBlocker{
+          corrective_actions: ["review route"],
+          resolver: "operator",
+          retry_condition: "route is confirmed"
+        }
+      })
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case conn.request_path do
+          "/v2/my/agent" ->
+            Req.Test.json(conn, %{"data" => %{"symbol" => agent.symbol, "credits" => 42_000}})
+
+          "/v2/my/contracts" ->
+            Req.Test.json(conn, %{"data" => []})
+
+          "/v2/my/ships" ->
+            Req.Test.json(conn, %{"data" => [ship_body("FLEET-SHIP")]})
+
+          "/v2/systems/X1-UX81/waypoints" ->
+            Req.Test.json(conn, %{"data" => []})
+        end
+      end)
+
+      snapshot = Fleet.command_snapshot(agent)
+
+      assert {:ok, [%{control: %{attention: attention}}]} = snapshot.ships
+      assert attention.needed?
+      assert attention.summary =~ "Actions: review route"
+      assert attention.summary =~ "Resolver: operator"
+      assert snapshot.control.attention_count == 1
     end
 
     test "falls back to independent listing discovery when headquarters waypoints are unavailable" do

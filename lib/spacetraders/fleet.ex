@@ -82,8 +82,9 @@ defmodule SpaceTraders.Fleet do
         stale_snapshot(agent)
       else
         ships = list_ships(agent) |> annotate_jobs(agent)
-        ships = annotate_actions(ships)
+        ships = annotate_actions(ships) |> annotate_control_state()
         waypoints = list_waypoints(agent)
+        activity = recent_activity(agent) |> annotate_activity()
 
         listings =
           snapshot_listings(agent, ships, waypoints) |> annotate_listing_actions(overview)
@@ -97,7 +98,8 @@ defmodule SpaceTraders.Fleet do
           shipyards: listings.shipyards,
           markets: listings.markets,
           waypoints: waypoints,
-          activity: recent_activity(agent)
+          activity: activity,
+          control: fleet_control(ships)
         }
       end
     end
@@ -113,9 +115,157 @@ defmodule SpaceTraders.Fleet do
       shipyards: {:error, :stale_agent},
       markets: {:error, :stale_agent},
       waypoints: {:error, :stale_agent},
-      activity: []
+      activity: [],
+      control: %{attention: [], attention_count: 0, healthy?: false}
     }
   end
+
+  # These facts keep operational interpretation at the Manual Control boundary.
+  # The dashboard can still render the underlying game state without recreating
+  # decisions about what needs an Operator's attention.
+  defp annotate_control_state({:ok, ships}) do
+    {:ok,
+     Enum.map(ships, fn ship ->
+       Map.put(ship, :control, %{
+         attention: ship_attention(ship),
+         readiness: %{flight_mode: ship_flight_mode(ship)},
+         navigation: %{
+           available?: Map.get(Map.get(ship, :actions, %{}), :navigate, %{})[:allowed?] == true,
+           selectable?: ship_status(ship) == "IN_ORBIT",
+           destinations: Map.get(ship, :destination_history, [])
+         }
+       })
+     end)}
+  end
+
+  defp annotate_control_state(result), do: result
+
+  defp fleet_control({:ok, ships}) do
+    attention = Enum.filter(ships, & &1.control.attention.needed?)
+
+    %{
+      attention: attention,
+      attention_count: length(attention),
+      healthy?: ships != [] and attention == []
+    }
+  end
+
+  defp fleet_control(_), do: %{attention: [], attention_count: 0, healthy?: false}
+
+  defp ship_attention(%{intents: %{status: "blocked"} = intent}) do
+    %{needed?: true, summary: intent_attention_summary(intent)}
+  end
+
+  defp ship_attention(%{job: %{status: status}} = ship) when status in ["blocked", "paused"] do
+    %{needed?: true, summary: job_attention_summary(ship.job)}
+  end
+
+  defp ship_attention(_), do: %{needed?: false, summary: nil}
+
+  defp ship_flight_mode(%{nav: %{flight_mode: mode}}) when is_binary(mode), do: mode
+  defp ship_flight_mode(_), do: "—"
+
+  defp job_attention_summary(%{blocker: %JobBlocker{} = blocker}),
+    do: blocker_attention_summary(blocker)
+
+  defp job_attention_summary(%{blocked_reason: reason}) when is_binary(reason),
+    do: human_blocked_reason(reason)
+
+  defp job_attention_summary(%{status: "blocked"}), do: "Blocked"
+  defp job_attention_summary(%{status: "paused"}), do: "Paused"
+  defp job_attention_summary(_), do: "Review Ship state"
+
+  defp intent_attention_summary(%{blocker: %JobBlocker{} = blocker}),
+    do: blocker_attention_summary(blocker)
+
+  defp intent_attention_summary(_), do: "Blocked"
+
+  defp blocker_attention_summary(%JobBlocker{summary: summary})
+       when is_binary(summary) and summary != "",
+       do: summary
+
+  defp blocker_attention_summary(%JobBlocker{
+         corrective_actions: actions,
+         resolver: resolver,
+         retry_condition: retry_condition
+       }) do
+    actions = Enum.join(actions || [], ", ")
+
+    [
+      if(actions == "", do: "Resolve blocked work", else: "Actions: #{actions}"),
+      if(is_binary(resolver) and resolver != "", do: "Resolver: #{resolver}"),
+      if(is_binary(retry_condition) and retry_condition != "",
+        do: "retry when #{retry_condition}"
+      )
+    ]
+    |> Enum.reject(&is_nil/1)
+    |> Enum.join("; ")
+  end
+
+  defp human_blocked_reason(":invalid_extraction_waypoint"),
+    do: "Choose an ASTEROID_FIELD or ENGINEERED_ASTEROID extraction Waypoint."
+
+  defp human_blocked_reason(":invalid_siphon_waypoint"), do: "Choose a GAS_GIANT siphon Waypoint."
+
+  defp human_blocked_reason(":siphon_capability_missing"),
+    do: "This Ship needs gas siphon capability."
+
+  defp human_blocked_reason(":invalid_market_waypoint"), do: "Choose a Marketplace Waypoint."
+
+  defp human_blocked_reason(":cargo_threshold_exceeds_capacity"),
+    do: "Cargo threshold exceeds Ship capacity."
+
+  defp human_blocked_reason(":mining_capability_missing"),
+    do: "This Ship has no mining laser installed."
+
+  defp human_blocked_reason(reason) when is_binary(reason) do
+    if String.starts_with?(reason, [":", "{", "%"]),
+      do: "A Job action could not be completed.",
+      else: reason
+  end
+
+  defp human_blocked_reason(_), do: "Review Ship state"
+
+  defp annotate_activity(activity) do
+    Enum.map(activity, fn event ->
+      Map.put(event, :control, %{
+        visible?: not activity_noise?(event),
+        facts: activity_facts(event)
+      })
+    end)
+  end
+
+  defp activity_noise?(%{kind: kind}) when kind in ["retry", "manual_intent_waiting"], do: true
+
+  defp activity_noise?(%{kind: kind, message: message})
+       when kind in ["manual_intent_recovery", "miner_job_recovery"] do
+    String.contains?(String.downcase(message), "retrying")
+  end
+
+  defp activity_noise?(_), do: false
+
+  defp activity_facts(%{metadata: metadata}) when is_map(metadata) do
+    metadata
+    |> Enum.filter(fn {key, _value} ->
+      key in [
+        "outcome",
+        "delta",
+        "wait",
+        "retry",
+        "block",
+        "recovery",
+        "jettison",
+        "deliver",
+        "remaining"
+      ]
+    end)
+    |> Enum.map(fn {key, value} -> {key, format_activity_value(value)} end)
+  end
+
+  defp activity_facts(_), do: []
+
+  defp format_activity_value(value) when is_binary(value), do: value
+  defp format_activity_value(value), do: inspect(value)
 
   @doc "Reads Market data for a selected Waypoint when it is a Marketplace."
   def waypoint_market(%AgentRecord{agent_token: token} = agent, waypoint)
