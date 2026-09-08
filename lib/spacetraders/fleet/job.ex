@@ -63,6 +63,7 @@ defmodule SpaceTraders.Fleet.Job do
       "procurement",
       "construction_supply",
       "market_trading",
+      "market_reconnaissance",
       "outfitting"
     ])
     |> validate_inclusion(:gather_mode, ["extract", "siphon"])
@@ -78,11 +79,23 @@ defmodule SpaceTraders.Fleet.Job do
     do: changeset
 
   defp validate_miner_fields(%Ecto.Changeset{changes: %{type: type}} = changeset)
-       when type in ["procurement", "construction_supply", "market_trading", "outfitting"],
+       when type in [
+              "procurement",
+              "construction_supply",
+              "market_trading",
+              "market_reconnaissance",
+              "outfitting"
+            ],
        do: changeset
 
   defp validate_miner_fields(%Ecto.Changeset{data: %{type: type}} = changeset)
-       when type in ["procurement", "construction_supply", "market_trading", "outfitting"],
+       when type in [
+              "procurement",
+              "construction_supply",
+              "market_trading",
+              "market_reconnaissance",
+              "outfitting"
+            ],
        do: changeset
 
   defp validate_miner_fields(changeset) do

@@ -519,6 +519,26 @@ defmodule SpaceTradersWeb.DashboardLive do
   end
 
   @impl true
+  def handle_event("configure_market_reconnaissance_job", params, socket) do
+    with {:ok, agent} <- agent_for_ship(socket, params["ship_symbol"]),
+         {:ok, _job} <-
+           Fleet.configure_market_reconnaissance_job(agent, params["ship_symbol"], %{
+             stops: split_module_symbols(params["stops"] || "")
+           }) do
+      {:noreply,
+       put_flash(
+         socket
+         |> refresh_agent(agent)
+         |> clear_draft(draft_key("market_reconnaissance_job", [params["ship_symbol"]])),
+         :info,
+         "Market Reconnaissance Job assigned and paused."
+       )}
+    else
+      {:error, reason} -> {:noreply, put_flash(socket, :error, live_error(reason))}
+    end
+  end
+
+  @impl true
   def handle_event("configure_explorer_job", %{"symbol" => ship_symbol}, socket) do
     with {:ok, agent} <- agent_for_ship(socket, ship_symbol),
          {:ok, _job} <- Fleet.configure_explorer_job(agent, ship_symbol) do
@@ -1039,6 +1059,9 @@ defmodule SpaceTradersWeb.DashboardLive do
              "pause_market_trading_job",
              "resume_market_trading_job",
              "stop_market_trading_job",
+             "pause_market_reconnaissance_job",
+             "resume_market_reconnaissance_job",
+             "stop_market_reconnaissance_job",
              "pause_outfitting_job",
              "resume_outfitting_job",
              "stop_outfitting_job"
@@ -1073,6 +1096,15 @@ defmodule SpaceTradersWeb.DashboardLive do
 
           "stop_market_trading_job" ->
             "#{ship_symbol} Market Trading Job stopped; Ship is manual."
+
+          "pause_market_reconnaissance_job" ->
+            "#{ship_symbol} Market Reconnaissance Job paused."
+
+          "resume_market_reconnaissance_job" ->
+            "#{ship_symbol} Market Reconnaissance Job resumed."
+
+          "stop_market_reconnaissance_job" ->
+            "#{ship_symbol} Market Reconnaissance Job stopped; Ship is manual."
 
           "pause_outfitting_job" ->
             "#{ship_symbol} Ship Outfitting Job paused."
@@ -1170,6 +1202,15 @@ defmodule SpaceTradersWeb.DashboardLive do
 
   defp job_action("stop_market_trading_job", agent, ship),
     do: Fleet.stop_market_trading_job(agent, ship)
+
+  defp job_action("pause_market_reconnaissance_job", agent, ship),
+    do: Fleet.pause_market_reconnaissance_job(agent, ship) |> unwrap_job_result()
+
+  defp job_action("resume_market_reconnaissance_job", agent, ship),
+    do: Fleet.resume_market_reconnaissance_job(agent, ship) |> unwrap_job_result()
+
+  defp job_action("stop_market_reconnaissance_job", agent, ship),
+    do: Fleet.stop_market_reconnaissance_job(agent, ship)
 
   defp unwrap_config({:ok, _config}), do: :ok
   defp unwrap_config(error), do: error
@@ -3357,12 +3398,15 @@ defmodule SpaceTradersWeb.DashboardLive do
             <.outfitting_job_panel ship={@ship} form_drafts={@form_drafts} />
           <% @ship.job && @ship.job.type == "market_trading" -> %>
             <.market_trading_job_panel ship={@ship} form_drafts={@form_drafts} />
+          <% @ship.job && @ship.job.type == "market_reconnaissance" -> %>
+            <.market_reconnaissance_job_panel ship={@ship} form_drafts={@form_drafts} />
           <% true -> %>
             <.miner_job_panel ship={@ship} form_drafts={@form_drafts} />
             <.procurement_job_panel ship={@ship} form_drafts={@form_drafts} />
             <.construction_supply_job_panel ship={@ship} form_drafts={@form_drafts} />
             <.outfitting_job_panel ship={@ship} form_drafts={@form_drafts} />
             <.market_trading_job_panel ship={@ship} form_drafts={@form_drafts} />
+            <.market_reconnaissance_job_panel ship={@ship} form_drafts={@form_drafts} />
             <button
               :if={is_nil(@ship.job)}
               type="button"
@@ -4045,6 +4089,82 @@ defmodule SpaceTradersWeb.DashboardLive do
 
   attr :ship, :map, required: true
   attr :form_drafts, :map, default: %{}
+
+  defp market_reconnaissance_job_panel(assigns) do
+    job = Map.get(assigns.ship, :job)
+    progress = (job && job.progress) || %{}
+    assigns = assign(assigns, job: job, progress: progress)
+
+    ~H"""
+    <section
+      class="mt-4 rounded border border-secondary/30 p-3"
+      data-job-panel="market-reconnaissance"
+    >
+      <div class="flex items-center justify-between gap-2">
+        <span class="text-xs font-semibold uppercase tracking-wider opacity-60">Market Reconnaissance Job</span>
+        <span class="badge badge-outline badge-sm">{job_status(@job)}</span>
+      </div>
+      <p :if={@job} class="mt-2 text-xs">
+        Read stops: {Enum.join(@progress["completed_stops"] || [], ", ") || "none yet"}
+      </p>
+      <p :if={job_reason(@job)} class="mt-2 text-xs text-error">{job_reason(@job)}</p>
+      <form
+        :if={is_nil(@job)}
+        id={"market-reconnaissance-job-form-#{@ship.symbol}"}
+        phx-change="track_draft"
+        phx-submit="configure_market_reconnaissance_job"
+        class="mt-3 grid gap-2"
+      >
+        <input
+          type="hidden"
+          name="draft_key"
+          value={draft_key("market_reconnaissance_job", [@ship.symbol])}
+        />
+        <input type="hidden" name="ship_symbol" value={@ship.symbol} />
+        <input
+          name="stops"
+          required
+          placeholder="Marketplace waypoints, in tour order (comma-separated)"
+          value={draft_field(@form_drafts, "market_reconnaissance_job", [@ship.symbol], "stops", "")}
+          class="input input-bordered input-sm font-mono"
+        />
+        <button type="submit" class="btn btn-secondary btn-sm">Assign Market Reconnaissance Job</button>
+      </form>
+      <div :if={@job} class="mt-3 space-y-2 text-xs">
+        <div :for={route <- @progress["candidate_routes"] || []} class="rounded bg-base-200 p-2">
+          {route["trade_symbol"]}: {route["source_waypoint"]} buy {route["source_buy_price"]} -> {route[
+            "destination_waypoint"
+          ]} sell {route["destination_sell_price"]} (spread {route["per_unit_spread"]})
+          <span class="block opacity-60">
+            Observed: {route["source_observed_at"]} / {route["destination_observed_at"]}
+          </span>
+        </div>
+        <div class="flex flex-wrap gap-2">
+          <button
+            :if={Job.running?(@job)}
+            type="button"
+            phx-click="pause_market_reconnaissance_job"
+            phx-value-symbol={@ship.symbol}
+            class="btn btn-warning btn-sm"
+          >Pause</button>
+          <button
+            :if={@job.status in ["paused", "blocked"]}
+            type="button"
+            phx-click="resume_market_reconnaissance_job"
+            phx-value-symbol={@ship.symbol}
+            class="btn btn-primary btn-sm"
+          >Resume</button>
+          <button
+            type="button"
+            phx-click="stop_market_reconnaissance_job"
+            phx-value-symbol={@ship.symbol}
+            class="btn btn-ghost btn-sm"
+          >Stop</button>
+        </div>
+      </div>
+    </section>
+    """
+  end
 
   defp market_trading_job_panel(assigns) do
     job = Map.get(assigns.ship, :job)
@@ -5070,6 +5190,9 @@ defmodule SpaceTradersWeb.DashboardLive do
 
   defp job_status(%{type: "market_trading", status: "active"}),
     do: "Active Market Trading Job"
+
+  defp job_status(%{type: "market_reconnaissance", status: "active"}),
+    do: "Active Market Reconnaissance Job"
 
   defp job_status(%{status: "active"}), do: "Active Miner Job"
   defp job_status(_), do: "Manual"

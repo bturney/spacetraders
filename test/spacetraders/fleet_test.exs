@@ -3899,6 +3899,66 @@ defmodule SpaceTraders.FleetTest do
     end
   end
 
+  describe "Market Reconnaissance Job" do
+    test "persists an ordered distinct Marketplace tour" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case {conn.request_path, conn.method} do
+          {"/v2/my/ships/FLEET-SHIP", "GET"} ->
+            Req.Test.json(conn, %{"data" => ship_body("FLEET-SHIP")})
+
+          {"/v2/systems/X1-UX81/waypoints", "GET"} ->
+            case conn.query_params["page"] do
+              page when page in [nil, "1"] ->
+                Req.Test.json(conn, %{
+                  "data" => [
+                    %{
+                      "symbol" => "X1-UX81-A1",
+                      "systemSymbol" => "X1-UX81",
+                      "traits" => [%{"symbol" => "MARKETPLACE"}]
+                    },
+                    %{
+                      "symbol" => "X1-UX81-A2",
+                      "systemSymbol" => "X1-UX81",
+                      "traits" => [%{"symbol" => "MARKETPLACE"}]
+                    }
+                  ]
+                })
+
+              _ ->
+                Req.Test.json(conn, %{"data" => []})
+            end
+        end
+      end)
+
+      assert {:ok, %Job{type: "market_reconnaissance", status: "paused", progress: progress}} =
+               Fleet.configure_market_reconnaissance_job(agent, "FLEET-SHIP", %{
+                 stops: ["X1-UX81-A2", "X1-UX81-A1"]
+               })
+
+      assert progress["target_system"] == "X1-UX81"
+      assert progress["stops"] == ["X1-UX81-A2", "X1-UX81-A1"]
+      assert progress["completed_stops"] == []
+    end
+
+    test "rejects a duplicate Marketplace stop" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        assert conn.request_path == "/v2/my/ships/FLEET-SHIP"
+        Req.Test.json(conn, %{"data" => ship_body("FLEET-SHIP")})
+      end)
+
+      assert {:error, :invalid_market_reconnaissance_tour} =
+               Fleet.configure_market_reconnaissance_job(agent, "FLEET-SHIP", %{
+                 stops: ["X1-UX81-A1", "X1-UX81-A1"]
+               })
+    end
+  end
+
   describe "Construction Supply Job completion acceptance" do
     test "Construction Supply Job completes from authoritative project state through Fleet" do
       agent = agent_fixture()
