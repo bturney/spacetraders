@@ -179,6 +179,18 @@ _Avoid_: bot, automatic mode
 A durable Job that owns one configured local gather/sell loop for a Ship. It uses Policies and Intents to pursue the configured extraction Waypoint, Market, and Cargo threshold; it is the first concrete Job and absorbs the existing Autopilot capability.
 _Avoid_: autopilot (when referring to the Job type), mining bot
 
+**Survey Job**:
+A recurring Job that uses a survey-equipped Ship to maintain valid Surveys at one configured extraction Waypoint. It contributes Operational Intelligence without owning the Miner Jobs that may consume it.
+_Avoid_: survey pass, scanner Job
+
+**Survey**:
+Agent-scoped Operational Intelligence from a survey action, carrying a signature, size, expiration, and its Survey Deposits. It is usable for extraction until its expiration or an authoritative extraction response proves it exhausted; a Miner Job may use it at the matching extraction Waypoint before falling back to normal gathering.
+_Avoid_: mining target, survey cache
+
+**Survey Deposit**:
+One resource symbol within a Survey. It describes the Survey's resource composition but is not independently usable for extraction.
+_Avoid_: extraction opportunity, mining target
+
 **Sellable Cargo**:
 The cargo a Ship holds that its configured Market will actually buy, determined by the Market's authoritative accepted goods (its imports and exchange lists). The Miner Job's Cargo threshold counts sellable cargo only.
 _Avoid_: marketable goods, valuable cargo
