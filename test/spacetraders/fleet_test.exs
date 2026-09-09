@@ -317,6 +317,32 @@ defmodule SpaceTraders.FleetTest do
   end
 
   describe "Miner Job" do
+    test "clears a blocked Job's structured blocker during recovery" do
+      agent = agent_fixture()
+      ship = ship_fixture(agent, "FLEET-SHIP")
+
+      job =
+        Repo.insert!(%Job{
+          ship_id: ship.id,
+          status: "blocked",
+          extraction_waypoint: "X1-UX81-A2",
+          market_waypoint: "X1-UX81-A1",
+          cargo_threshold: 30,
+          blocker: %JobBlocker{
+            reason: "ambiguous",
+            summary: "The game did not confirm the action outcome.",
+            evidence: "ambiguous",
+            observed_at: ~U[2030-01-01 00:00:00Z],
+            resolver: "game_state",
+            retry_condition: "authoritative_action_outcome_available",
+            corrective_actions: ["reconcile_and_retry"]
+          }
+        })
+
+      assert %Job{blocker: nil} =
+               Repo.update!(Ecto.Changeset.change(job, blocker: nil))
+    end
+
     test "configures a Survey Job only for a survey-equipped Ship at an extraction Waypoint" do
       agent = agent_fixture()
       ship_fixture(agent, "FLEET-SURVEYOR")

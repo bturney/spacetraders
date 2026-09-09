@@ -18,7 +18,7 @@ defmodule SpaceTraders.Fleet.Job do
     field :desired_mode, :string, default: "manual"
     field :status, :string, default: "paused"
     field :blocked_reason, :string
-    embeds_one :blocker, SpaceTraders.Fleet.JobBlocker
+    embeds_one :blocker, SpaceTraders.Fleet.JobBlocker, on_replace: :delete
     field :last_validated_at, :utc_datetime
     field :in_flight_action, :map
     field :last_action_result, :map
