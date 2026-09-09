@@ -1350,30 +1350,31 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
           ship_type: "SHIP_COMMAND_FRIGATE"
         })
 
-      Repo.insert!(%Job{
-        ship_id: ship.id,
-        type: "market_reconnaissance",
-        status: "completed",
-        extraction_waypoint: "RECONNAISSANCE-NONE",
-        market_waypoint: "RECONNAISSANCE-NONE",
-        cargo_threshold: 1,
-        finished_at: ~U[2026-09-09 00:02:00Z],
-        progress: %{
-          "target_system" => "X1-UX81",
-          "candidate_routes" => [
-            %{
-              "trade_symbol" => "IRON_ORE",
-              "source_waypoint" => "X1-UX81-A1",
-              "destination_waypoint" => "X1-UX81-A2",
-              "source_buy_price" => 10,
-              "destination_sell_price" => 20,
-              "per_unit_spread" => 10,
-              "source_observed_at" => "2026-09-09T00:00:00Z",
-              "destination_observed_at" => "2026-09-09T00:01:00Z"
-            }
-          ]
-        }
-      })
+      reconnaissance =
+        Repo.insert!(%Job{
+          ship_id: ship.id,
+          type: "market_reconnaissance",
+          status: "completed",
+          extraction_waypoint: "RECONNAISSANCE-NONE",
+          market_waypoint: "RECONNAISSANCE-NONE",
+          cargo_threshold: 1,
+          finished_at: ~U[2026-09-09 00:02:00Z],
+          progress: %{
+            "target_system" => "X1-UX81",
+            "candidate_routes" => [
+              %{
+                "trade_symbol" => "IRON_ORE",
+                "source_waypoint" => "X1-UX81-A1",
+                "destination_waypoint" => "X1-UX81-A2",
+                "source_buy_price" => 10,
+                "destination_sell_price" => 20,
+                "per_unit_spread" => 10,
+                "source_observed_at" => "2026-09-09T00:00:00Z",
+                "destination_observed_at" => "2026-09-09T00:01:00Z"
+              }
+            ]
+          }
+        })
 
       stub_live_game(agent_overview_body(agent.symbol), [ship_body("ORBITALIST-1")])
 
@@ -1393,8 +1394,10 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
         |> element("form#market-trading-from-reconnaissance-form-ORBITALIST-1-0")
         |> render_submit(%{
           ship_symbol: "ORBITALIST-1",
+          reconnaissance_job_id: Integer.to_string(reconnaissance.id),
           route_index: "0",
           units: "5",
+          maximum_observation_age: "3600",
           reserve_credits: "50",
           minimum_profit: "25",
           minimum_return_percentage: "10"

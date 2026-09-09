@@ -3898,7 +3898,7 @@ defmodule SpaceTraders.FleetTest do
                Intents.history(agent)
     end
 
-    test "blocks when refreshed destination pricing makes a reconnaissance route unprofitable" do
+    test "carries the confirmed purchase limit into its Buy Goods Intent" do
       agent = agent_fixture()
       ship_fixture(agent, "FLEET-SHIP")
 
@@ -3917,7 +3917,7 @@ defmodule SpaceTraders.FleetTest do
                 "tradeGoods" => [
                   %{
                     "symbol" => "IRON_ORE",
-                    "purchasePrice" => 10,
+                    "purchasePrice" => 21,
                     "sellPrice" => 8,
                     "tradeVolume" => 5
                   }
@@ -3956,8 +3956,7 @@ defmodule SpaceTraders.FleetTest do
                  ]
                })
 
-      assert {:error, {:market_trading_job_blocked, _blocker}} =
-               Fleet.start_market_trading_job(agent, "FLEET-SHIP")
+      assert {:ok, %Job{status: "active"}} = Fleet.start_market_trading_job(agent, "FLEET-SHIP")
     end
   end
 

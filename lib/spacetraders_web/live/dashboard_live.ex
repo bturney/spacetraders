@@ -541,9 +541,11 @@ defmodule SpaceTradersWeb.DashboardLive do
   @impl true
   def handle_event("configure_market_trading_job_from_reconnaissance", params, socket) do
     with {:ok, agent} <- agent_for_ship(socket, params["ship_symbol"]),
+         {:ok, reconnaissance_job_id} <- parse_units(params["reconnaissance_job_id"]),
          {:ok, route_index} <- parse_optional_nonnegative_units(params["route_index"]),
          route_index when is_integer(route_index) <- route_index,
          {:ok, units} <- parse_units(params["units"]),
+         {:ok, maximum_observation_age} <- parse_units(params["maximum_observation_age"]),
          {:ok, reserve_credits} <- parse_optional_nonnegative_units(params["reserve_credits"]),
          {:ok, credit_exposure} <- parse_optional_units(params["credit_exposure"]),
          {:ok, minimum_profit} <- parse_optional_nonnegative_units(params["minimum_profit"]),
@@ -555,9 +557,11 @@ defmodule SpaceTradersWeb.DashboardLive do
            Fleet.configure_market_trading_job_from_reconnaissance(
              agent,
              params["ship_symbol"],
+             reconnaissance_job_id,
              route_index,
              %{
                units: units,
+               maximum_observation_age: maximum_observation_age,
                reserve_credits: reserve_credits || 0,
                credit_exposure: credit_exposure,
                minimum_profit: minimum_profit || 0,
@@ -571,7 +575,10 @@ defmodule SpaceTradersWeb.DashboardLive do
          socket
          |> refresh_agent(agent)
          |> clear_draft(
-           draft_key("market_trading_from_reconnaissance", [params["ship_symbol"], route_index])
+           draft_key(
+             "market_trading_from_reconnaissance",
+             [params["ship_symbol"], reconnaissance_job_id, route_index]
+           )
          ),
          :info,
          "Market Trading Job assigned and paused."
@@ -4245,9 +4252,10 @@ defmodule SpaceTradersWeb.DashboardLive do
             <input
               type="hidden"
               name="draft_key"
-              value={draft_key("market_trading_from_reconnaissance", [@ship.symbol, index])}
+              value={draft_key("market_trading_from_reconnaissance", [@ship.symbol, @job.id, index])}
             />
             <input type="hidden" name="ship_symbol" value={@ship.symbol} />
+            <input type="hidden" name="reconnaissance_job_id" value={@job.id} />
             <input type="hidden" name="route_index" value={index} />
             <p class="sm:col-span-2">
               Confirm buy at <span class="font-mono">{route["source_waypoint"]}</span>
@@ -4263,8 +4271,25 @@ defmodule SpaceTradersWeb.DashboardLive do
                 draft_field(
                   @form_drafts,
                   "market_trading_from_reconnaissance",
-                  [@ship.symbol, index],
+                  [@ship.symbol, @job.id, index],
                   "units",
+                  ""
+                )
+              }
+              class="input input-bordered input-sm"
+            />
+            <input
+              name="maximum_observation_age"
+              required
+              type="number"
+              min="1"
+              placeholder="Maximum destination age (seconds)"
+              value={
+                draft_field(
+                  @form_drafts,
+                  "market_trading_from_reconnaissance",
+                  [@ship.symbol, @job.id, index],
+                  "maximum_observation_age",
                   ""
                 )
               }
@@ -4279,7 +4304,7 @@ defmodule SpaceTradersWeb.DashboardLive do
                 draft_field(
                   @form_drafts,
                   "market_trading_from_reconnaissance",
-                  [@ship.symbol, index],
+                  [@ship.symbol, @job.id, index],
                   "reserve_credits",
                   ""
                 )
@@ -4295,7 +4320,7 @@ defmodule SpaceTradersWeb.DashboardLive do
                 draft_field(
                   @form_drafts,
                   "market_trading_from_reconnaissance",
-                  [@ship.symbol, index],
+                  [@ship.symbol, @job.id, index],
                   "credit_exposure",
                   ""
                 )
@@ -4311,7 +4336,7 @@ defmodule SpaceTradersWeb.DashboardLive do
                 draft_field(
                   @form_drafts,
                   "market_trading_from_reconnaissance",
-                  [@ship.symbol, index],
+                  [@ship.symbol, @job.id, index],
                   "minimum_profit",
                   ""
                 )
@@ -4328,7 +4353,7 @@ defmodule SpaceTradersWeb.DashboardLive do
                 draft_field(
                   @form_drafts,
                   "market_trading_from_reconnaissance",
-                  [@ship.symbol, index],
+                  [@ship.symbol, @job.id, index],
                   "minimum_return_percentage",
                   ""
                 )
@@ -4344,7 +4369,7 @@ defmodule SpaceTradersWeb.DashboardLive do
                 draft_field(
                   @form_drafts,
                   "market_trading_from_reconnaissance",
-                  [@ship.symbol, index],
+                  [@ship.symbol, @job.id, index],
                   "estimated_fuel_cost",
                   ""
                 )
