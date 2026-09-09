@@ -568,7 +568,11 @@ defmodule SpaceTradersWeb.DashboardLive do
            ) do
       {:noreply,
        put_flash(
-         socket |> refresh_agent(agent),
+         socket
+         |> refresh_agent(agent)
+         |> clear_draft(
+           draft_key("market_trading_from_reconnaissance", [params["ship_symbol"], route_index])
+         ),
          :info,
          "Market Trading Job assigned and paused."
        )}
@@ -4148,7 +4152,12 @@ defmodule SpaceTradersWeb.DashboardLive do
   attr :form_drafts, :map, default: %{}
 
   defp market_reconnaissance_job_panel(assigns) do
-    job = Map.get(assigns.ship, :job)
+    job =
+      Map.get(assigns.ship, :job) ||
+        Enum.find(assigns.ship.job_history || [], fn job ->
+          job.type == "market_reconnaissance" and job.progress["candidate_routes"] != []
+        end)
+
     progress = (job && job.progress) || %{}
     stops = market_reconnaissance_stops(assigns.ship, assigns.agent, assigns.waypoints)
     assigns = assign(assigns, job: job, progress: progress, stops: stops)
@@ -4227,7 +4236,7 @@ defmodule SpaceTradersWeb.DashboardLive do
             <br />Observation age: {market_observation_age(route)}
           </span>
           <form
-            :if={@job.status in ["paused", "blocked"]}
+            :if={@job.status in ["paused", "blocked", "completed"]}
             id={"market-trading-from-reconnaissance-form-#{@ship.symbol}-#{index}"}
             phx-change="track_draft"
             phx-submit="configure_market_trading_job_from_reconnaissance"
@@ -4343,7 +4352,20 @@ defmodule SpaceTradersWeb.DashboardLive do
               class="input input-bordered input-sm"
             />
             <label class="label cursor-pointer justify-start gap-2 sm:col-span-2">
-              <input name="compatible_existing_cargo" type="checkbox" class="checkbox checkbox-sm" />
+              <input
+                name="compatible_existing_cargo"
+                type="checkbox"
+                class="checkbox checkbox-sm"
+                checked={
+                  draft_field(
+                    @form_drafts,
+                    "market_trading_from_reconnaissance",
+                    [@ship.symbol, index],
+                    "compatible_existing_cargo",
+                    nil
+                  ) in ["on", "true", true]
+                }
+              />
               <span class="label-text">Use compatible cargo already aboard</span>
             </label>
             <button
@@ -4353,7 +4375,7 @@ defmodule SpaceTradersWeb.DashboardLive do
             >Configure Market Trading Job</button>
           </form>
         </div>
-        <div class="flex flex-wrap gap-2">
+        <div :if={@job.status not in Job.terminal_states()} class="flex flex-wrap gap-2">
           <button
             :if={Job.running?(@job)}
             type="button"

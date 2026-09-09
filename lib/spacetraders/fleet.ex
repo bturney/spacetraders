@@ -1153,7 +1153,8 @@ defmodule SpaceTraders.Fleet do
       when is_binary(token) and token != "" and is_integer(route_index) and is_map(attrs) do
     with :ok <- Agent.execution_allowed?(agent),
          {:ok, ship} <- owned_ship(agent, ship_symbol),
-         %Job{type: "market_reconnaissance"} = reconnaissance <- unfinished_job(ship.id),
+         %Job{type: "market_reconnaissance"} = reconnaissance <-
+           selectable_market_reconnaissance_job(ship.id),
          {:ok, live_ship} <-
            Agent.handle_game_result(agent, SpaceTraders.API.get_ship(token, ship_symbol)),
          system when is_binary(system) <- live_ship.nav.system_symbol,
@@ -1163,8 +1164,13 @@ defmodule SpaceTraders.Fleet do
            market_trading_progress(Map.put(attrs, :candidates, [candidate]), system) do
       Repo.transaction(
         fn ->
-          Intents.terminalize_job_intent!(reconnaissance)
-          predecessor = terminalize_job!(reconnaissance, "replaced")
+          predecessor =
+            if reconnaissance.status in Job.terminal_states() do
+              reconnaissance
+            else
+              Intents.terminalize_job_intent!(reconnaissance)
+              terminalize_job!(reconnaissance, "replaced")
+            end
 
           case insert_market_trading_job(ship, progress, predecessor.id) do
             {:ok, job} -> job
@@ -1296,7 +1302,13 @@ defmodule SpaceTraders.Fleet do
              SpaceTraders.API.get_ship(agent.agent_token, ship_symbol)
            ),
          :ok <- market_system_matches?(job.progress, live_ship),
-         {:ok, overview} <- Agent.agent_overview(agent) do
+         {:ok, overview} <- Agent.agent_overview(agent),
+         {:ok, candidates} <-
+           reconcile_market_trade_candidates(
+             agent,
+             job.progress["candidates"],
+             job.progress["target_system"]
+           ) do
       job =
         Repo.update!(
           Ecto.Changeset.change(job, status: "active", blocker: nil, blocked_reason: nil)
@@ -1308,7 +1320,7 @@ defmodule SpaceTraders.Fleet do
         |> Map.put(:credits, overview.credits)
 
       case MarketTradingPolicy.decide(%{
-             candidates: job.progress["candidates"],
+             candidates: candidates,
              constraints: constraints
            }) do
         {:intent, %{type: :buy, candidate: candidate}} ->
@@ -1465,6 +1477,63 @@ defmodule SpaceTraders.Fleet do
     else
       _ -> {:error, :candidate_trade_route_not_selected}
     end
+  end
+
+  defp selectable_market_reconnaissance_job(ship_id) do
+    Repo.one(
+      from job in Job,
+        where:
+          job.ship_id == ^ship_id and job.type == "market_reconnaissance" and
+            job.status in ["paused", "blocked", "completed"],
+        order_by: [desc: job.id],
+        limit: 1
+    )
+  end
+
+  # A reconnaissance route is only a lead. Refresh both Listings before the
+  # Policy commits credits to a Buy Goods Intent.
+  defp reconcile_market_trade_candidates(agent, candidates, system)
+       when is_list(candidates) and is_binary(system) do
+    Enum.reduce_while(candidates, {:ok, []}, fn candidate, {:ok, refreshed_candidates} ->
+      candidate = atomize_market_keys(candidate)
+
+      with {:ok, source} <-
+             Agent.handle_game_result(
+               agent,
+               SpaceTraders.API.get_market(agent.agent_token, system, candidate.source_waypoint)
+             ),
+           {:ok, destination} <-
+             Agent.handle_game_result(
+               agent,
+               SpaceTraders.API.get_market(
+                 agent.agent_token,
+                 system,
+                 candidate.destination_waypoint
+               )
+             ),
+           %{purchase_price: purchase_price} <- market_trade_good(source, candidate.trade_symbol),
+           %{sell_price: sell_price} <- market_trade_good(destination, candidate.trade_symbol) do
+        refreshed_candidate = %{
+          candidate
+          | purchase_price: purchase_price,
+            sell_price: sell_price
+        }
+
+        {:cont, {:ok, [refreshed_candidate | refreshed_candidates]}}
+      else
+        _ -> {:halt, {:error, :market_trade_listing_unavailable}}
+      end
+    end)
+    |> then(fn
+      {:ok, candidates} -> {:ok, Enum.reverse(candidates)}
+      error -> error
+    end)
+  end
+
+  defp reconcile_market_trade_candidates(_, _, _), do: {:error, :market_trade_listing_unavailable}
+
+  defp market_trade_good(market, trade_symbol) do
+    Enum.find(market.trade_goods || [], &(&1.symbol == trade_symbol))
   end
 
   defp market_trade_candidates_in_system?(candidates, system) do

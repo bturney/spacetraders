@@ -1353,10 +1353,11 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       Repo.insert!(%Job{
         ship_id: ship.id,
         type: "market_reconnaissance",
-        status: "paused",
+        status: "completed",
         extraction_waypoint: "RECONNAISSANCE-NONE",
         market_waypoint: "RECONNAISSANCE-NONE",
         cargo_threshold: 1,
+        finished_at: ~U[2026-09-09 00:02:00Z],
         progress: %{
           "target_system" => "X1-UX81",
           "candidate_routes" => [

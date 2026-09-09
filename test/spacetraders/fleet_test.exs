@@ -3897,6 +3897,68 @@ defmodule SpaceTraders.FleetTest do
              ] =
                Intents.history(agent)
     end
+
+    test "blocks when refreshed destination pricing makes a reconnaissance route unprofitable" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case {conn.request_path, conn.method} do
+          {"/v2/my/ships/FLEET-SHIP", "GET"} ->
+            Req.Test.json(conn, %{"data" => ship_body("FLEET-SHIP")})
+
+          {"/v2/my/agent", "GET"} ->
+            Req.Test.json(conn, %{"data" => %{"symbol" => agent.symbol, "credits" => 100}})
+
+          {"/v2/systems/X1-UX81/waypoints/X1-UX81-A1/market", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => %{
+                "symbol" => "X1-UX81-A1",
+                "tradeGoods" => [
+                  %{
+                    "symbol" => "IRON_ORE",
+                    "purchasePrice" => 10,
+                    "sellPrice" => 8,
+                    "tradeVolume" => 5
+                  }
+                ]
+              }
+            })
+
+          {"/v2/systems/X1-UX81/waypoints/X1-UX81-A2/market", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => %{
+                "symbol" => "X1-UX81-A2",
+                "tradeGoods" => [
+                  %{
+                    "symbol" => "IRON_ORE",
+                    "purchasePrice" => 12,
+                    "sellPrice" => 9,
+                    "tradeVolume" => 5
+                  }
+                ]
+              }
+            })
+        end
+      end)
+
+      assert {:ok, %Job{status: "paused"}} =
+               Fleet.configure_market_trading_job(agent, "FLEET-SHIP", %{
+                 candidates: [
+                   %{
+                     trade_symbol: "IRON_ORE",
+                     source_waypoint: "X1-UX81-A1",
+                     destination_waypoint: "X1-UX81-A2",
+                     units: 5,
+                     purchase_price: 10,
+                     sell_price: 20
+                   }
+                 ]
+               })
+
+      assert {:error, {:market_trading_job_blocked, _blocker}} =
+               Fleet.start_market_trading_job(agent, "FLEET-SHIP")
+    end
   end
 
   describe "Market Reconnaissance Job" do
