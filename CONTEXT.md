@@ -119,7 +119,7 @@ A recurring Job that uses one Ship to repeatedly buy and sell up to an Operator-
 _Avoid_: Arbitrage Job, Trader
 
 **Market Reconnaissance Job**:
-A finite Job that uses one Ship to visit an Operator-selected ordered set of distinct known Marketplaces in one fixed System, record fresh Market Listings as Operational Intelligence, and complete once every selected Marketplace has been read. It derives candidate trade routes from those Listings but never buys or sells; a later Policy may use its observations to make trading decisions. Listings and candidates from completed stops remain available while the Job is active or blocked. It blocks with a Job Blocker when a selected Marketplace cannot be reached or read.
+A finite Job that uses one Ship to visit an Operator-selected ordered set of distinct known Marketplaces in one fixed System, record fresh Market Listings as Operational Intelligence, and complete once every selected Marketplace has been read. Completion does not consume the Ship's ability to configure another Market Reconnaissance Job. It derives candidate trade routes from those Listings but never buys or sells; a later Policy may use its observations to make trading decisions. Listings and candidates from completed stops remain available after completion as well as while the Job is active or blocked. It blocks with a Job Blocker when a selected Marketplace cannot be reached or read.
 _Avoid_: market scanner, reconnaissance loop, trader
 
 **Candidate Trade Route**:
