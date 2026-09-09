@@ -1390,6 +1390,7 @@ defmodule SpaceTraders.Fleet do
            ),
          :ok <- market_system_matches?(job.progress, live_ship),
          %Intent{} = intent <- market_trading_intent(job),
+         :ok <- market_trade_destination_fresh?(job, intent),
          {:ok, intent} <- advance_market_trading_intent(agent, intent, live_ship) do
       advance_procurement_after_intent(agent, job, intent)
     else
@@ -1674,6 +1675,22 @@ defmodule SpaceTraders.Fleet do
   defp market_trading_intent(job) do
     Intents.unfinished_job_intent(job.id) || Intents.last_completed_job_intent(job.id)
   end
+
+  defp market_trade_destination_fresh?(job, %Intent{type: "buy", parameters: parameters}) do
+    candidate = parameters["market_trade"] || %{}
+    maximum_age = get_in(job.progress, ["constraints", "maximum_observation_age"])
+
+    with age when is_integer(age) and age > 0 <- maximum_age,
+         observed_at when is_binary(observed_at) <- candidate["destination_observed_at"],
+         {:ok, observed_at, _} <- DateTime.from_iso8601(observed_at),
+         true <- DateTime.diff(DateTime.utc_now(), observed_at, :second) <= age do
+      :ok
+    else
+      _ -> {:error, :market_trade_destination_observation_stale}
+    end
+  end
+
+  defp market_trade_destination_fresh?(_job, _intent), do: :ok
 
   defp advance_market_trading_intent(agent, %Intent{} = intent, live_ship) do
     if Intent.unfinished?(intent),
