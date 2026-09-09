@@ -1132,17 +1132,7 @@ defmodule SpaceTraders.Fleet do
            Agent.handle_game_result(agent, SpaceTraders.API.get_ship(token, ship_symbol)),
          system when is_binary(system) <- live_ship.nav.system_symbol,
          {:ok, progress} <- market_trading_progress(attrs, system) do
-      %Job{ship_id: ship.id}
-      |> Job.changeset(%{
-        type: "market_trading",
-        extraction_waypoint: "MARKET-NONE",
-        market_waypoint: "MARKET-NONE",
-        cargo_threshold: 1
-      })
-      |> Ecto.Changeset.put_change(:status, "paused")
-      |> Ecto.Changeset.put_change(:blocked_reason, "Awaiting Operator resume")
-      |> Ecto.Changeset.put_change(:progress, progress)
-      |> Repo.insert()
+      insert_market_trading_job(ship, progress)
     else
       %Job{} -> {:error, :unfinished_job_already_assigned}
       nil -> {:error, :current_system_unavailable}
@@ -1152,6 +1142,61 @@ defmodule SpaceTraders.Fleet do
 
   def configure_market_trading_job(%AgentRecord{}, _ship_symbol, _attrs),
     do: {:error, :agent_token_missing}
+
+  @doc "Replaces a Market Reconnaissance Job with a paused Market Trading Job from one retained Candidate Trade Route."
+  def configure_market_trading_job_from_reconnaissance(
+        %AgentRecord{agent_token: token} = agent,
+        ship_symbol,
+        reconnaissance_job_id,
+        route_index,
+        attrs
+      )
+      when is_binary(token) and token != "" and is_integer(reconnaissance_job_id) and
+             is_integer(route_index) and is_map(attrs) do
+    with :ok <- Agent.execution_allowed?(agent),
+         {:ok, ship} <- owned_ship(agent, ship_symbol),
+         %Job{type: "market_reconnaissance"} = reconnaissance <-
+           selectable_market_reconnaissance_job(ship.id, reconnaissance_job_id),
+         {:ok, live_ship} <-
+           Agent.handle_game_result(agent, SpaceTraders.API.get_ship(token, ship_symbol)),
+         system when is_binary(system) <- live_ship.nav.system_symbol,
+         :ok <- market_system_matches?(reconnaissance.progress, live_ship),
+         {:ok, candidate} <- market_trade_candidate(reconnaissance, route_index, attrs),
+         {:ok, progress} <-
+           market_trading_progress(Map.put(attrs, :candidates, [candidate]), system) do
+      Repo.transaction(
+        fn ->
+          predecessor =
+            if reconnaissance.status in Job.terminal_states() do
+              reconnaissance
+            else
+              Intents.terminalize_job_intent!(reconnaissance)
+              terminalize_job!(reconnaissance, "replaced")
+            end
+
+          case insert_market_trading_job(ship, progress, predecessor.id) do
+            {:ok, job} -> job
+            {:error, changeset} -> Repo.rollback(changeset)
+          end
+        end,
+        mode: :immediate
+      )
+    else
+      nil -> {:error, :market_reconnaissance_job_not_configured}
+      %Job{} -> {:error, :market_reconnaissance_job_not_configured}
+      {:error, _reason} = error -> error
+      _ -> {:error, :invalid_market_trading_configuration}
+    end
+  end
+
+  def configure_market_trading_job_from_reconnaissance(
+        %AgentRecord{},
+        _ship_symbol,
+        _reconnaissance_job_id,
+        _route_index,
+        _attrs
+      ),
+      do: {:error, :agent_token_missing}
 
   @doc "Captures a paused Market Reconnaissance Job for one ordered Marketplace tour."
   def configure_market_reconnaissance_job(
@@ -1345,6 +1390,7 @@ defmodule SpaceTraders.Fleet do
            ),
          :ok <- market_system_matches?(job.progress, live_ship),
          %Intent{} = intent <- market_trading_intent(job),
+         :ok <- market_trade_destination_fresh?(job, intent),
          {:ok, intent} <- advance_market_trading_intent(agent, intent, live_ship) do
       advance_procurement_after_intent(agent, job, intent)
     else
@@ -1369,6 +1415,8 @@ defmodule SpaceTraders.Fleet do
       "minimum_profit" => attrs[:minimum_profit] || attrs["minimum_profit"] || 0,
       "minimum_return_percentage" =>
         attrs[:minimum_return_percentage] || attrs["minimum_return_percentage"] || 0,
+      "maximum_observation_age" =>
+        attrs[:maximum_observation_age] || attrs["maximum_observation_age"],
       "compatible_existing_cargo" =>
         attrs[:compatible_existing_cargo] || attrs["compatible_existing_cargo"] || false
     }
@@ -1377,6 +1425,9 @@ defmodule SpaceTraders.Fleet do
          is_integer(constraints["reserve_credits"]) and
          is_integer(constraints["minimum_profit"]) and
          is_number(constraints["minimum_return_percentage"]) and
+         (is_nil(constraints["maximum_observation_age"]) or
+            (is_integer(constraints["maximum_observation_age"]) and
+               constraints["maximum_observation_age"] > 0)) and
          (is_nil(constraints["credit_exposure"]) or is_integer(constraints["credit_exposure"])),
        do:
          {:ok,
@@ -1391,6 +1442,57 @@ defmodule SpaceTraders.Fleet do
             "estimated_fuel_cost" => 0
           }},
        else: {:error, :invalid_market_trading_configuration}
+  end
+
+  defp insert_market_trading_job(ship, progress, predecessor_job_id \\ nil) do
+    %Job{ship_id: ship.id}
+    |> Job.changeset(%{
+      type: "market_trading",
+      extraction_waypoint: "MARKET-NONE",
+      market_waypoint: "MARKET-NONE",
+      cargo_threshold: 1,
+      predecessor_job_id: predecessor_job_id
+    })
+    |> Ecto.Changeset.put_change(:status, "paused")
+    |> Ecto.Changeset.put_change(:blocked_reason, "Awaiting Operator resume")
+    |> Ecto.Changeset.put_change(:progress, progress)
+    |> Repo.insert()
+  end
+
+  defp market_trade_candidate(job, route_index, attrs) do
+    with %{} = route <- Enum.at(job.progress["candidate_routes"] || [], route_index),
+         trade_symbol when is_binary(trade_symbol) <- route["trade_symbol"],
+         source_waypoint when is_binary(source_waypoint) <- route["source_waypoint"],
+         destination_waypoint when is_binary(destination_waypoint) <-
+           route["destination_waypoint"],
+         purchase_price when is_integer(purchase_price) <- route["source_buy_price"],
+         sell_price when is_integer(sell_price) <- route["destination_sell_price"] do
+      {:ok,
+       %{
+         trade_symbol: trade_symbol,
+         source_waypoint: source_waypoint,
+         destination_waypoint: destination_waypoint,
+         purchase_price: purchase_price,
+         sell_price: sell_price,
+         source_observed_at: route["source_observed_at"],
+         destination_observed_at: route["destination_observed_at"],
+         units: attrs[:units] || attrs["units"],
+         estimated_fuel_cost: attrs[:estimated_fuel_cost] || attrs["estimated_fuel_cost"] || 0
+       }}
+    else
+      _ -> {:error, :candidate_trade_route_not_selected}
+    end
+  end
+
+  defp selectable_market_reconnaissance_job(ship_id, job_id) do
+    Repo.one(
+      from job in Job,
+        where:
+          job.id == ^job_id and job.ship_id == ^ship_id and job.type == "market_reconnaissance" and
+            job.status in ["paused", "blocked", "completed"],
+        order_by: [desc: job.id],
+        limit: 1
+    )
   end
 
   defp market_trade_candidates_in_system?(candidates, system) do
@@ -1573,6 +1675,25 @@ defmodule SpaceTraders.Fleet do
   defp market_trading_intent(job) do
     Intents.unfinished_job_intent(job.id) || Intents.last_completed_job_intent(job.id)
   end
+
+  defp market_trade_destination_fresh?(job, %Intent{type: "buy", parameters: parameters}) do
+    candidate = parameters["market_trade"] || %{}
+    maximum_age = get_in(job.progress, ["constraints", "maximum_observation_age"])
+
+    if is_integer(maximum_age) and maximum_age > 0 do
+      with observed_at when is_binary(observed_at) <- candidate["destination_observed_at"],
+           {:ok, observed_at, _} <- DateTime.from_iso8601(observed_at),
+           true <- DateTime.diff(DateTime.utc_now(), observed_at, :second) <= maximum_age do
+        :ok
+      else
+        _ -> {:error, :market_trade_destination_observation_stale}
+      end
+    else
+      :ok
+    end
+  end
+
+  defp market_trade_destination_fresh?(_job, _intent), do: :ok
 
   defp advance_market_trading_intent(agent, %Intent{} = intent, live_ship) do
     if Intent.unfinished?(intent),

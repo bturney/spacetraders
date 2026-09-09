@@ -61,6 +61,22 @@ defmodule SpaceTraders.Fleet.MarketTradingPolicyTest do
     assert [%{reason: :candidate_constraints}] = rejected
   end
 
+  test "rejects a Candidate Trade Route with a stale destination observation" do
+    {selected, rejected} =
+      MarketTradingPolicy.select(
+        [
+          candidate(%{
+            destination_observed_at:
+              DateTime.utc_now() |> DateTime.add(-61, :second) |> DateTime.to_iso8601()
+          })
+        ],
+        %{credits: 1_000, reserve_credits: 0, maximum_observation_age: 60}
+      )
+
+    assert selected == nil
+    assert [%{reason: :candidate_constraints}] = rejected
+  end
+
   test "returns the next buy Intent through the Job Policy interface" do
     assert {:intent, %{type: :buy, candidate: selected}} =
              MarketTradingPolicy.decide(%{

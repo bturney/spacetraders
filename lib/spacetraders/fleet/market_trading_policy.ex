@@ -36,6 +36,7 @@ defmodule SpaceTraders.Fleet.MarketTradingPolicy do
     with true <- valid_candidate?(candidate),
          true <- candidate.units > 0,
          true <- candidate.sell_price > candidate.purchase_price,
+         true <- fresh_destination_observation?(candidate, constraints),
          expected_net_profit <-
            (candidate.sell_price - candidate.purchase_price) * candidate.units -
              Map.get(candidate, :estimated_fuel_cost, 0),
@@ -84,6 +85,25 @@ defmodule SpaceTraders.Fleet.MarketTradingPolicy do
   defp compatible_cargo?(candidate, constraints) do
     Map.get(constraints, :compatible_existing_cargo, false) or
       Map.get(candidate, :existing_cargo_units, 0) == 0
+  end
+
+  defp fresh_destination_observation?(candidate, constraints) do
+    case Map.get(constraints, :maximum_observation_age) do
+      nil ->
+        true
+
+      maximum_age when is_integer(maximum_age) and maximum_age > 0 ->
+        with observed_at when is_binary(observed_at) <-
+               Map.get(candidate, :destination_observed_at),
+             {:ok, observed_at, _} <- DateTime.from_iso8601(observed_at) do
+          DateTime.diff(DateTime.utc_now(), observed_at, :second) <= maximum_age
+        else
+          _ -> false
+        end
+
+      _ ->
+        false
+    end
   end
 
   defp return_percentage(_profit, 0), do: 0
