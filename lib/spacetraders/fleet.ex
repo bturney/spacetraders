@@ -1680,13 +1680,16 @@ defmodule SpaceTraders.Fleet do
     candidate = parameters["market_trade"] || %{}
     maximum_age = get_in(job.progress, ["constraints", "maximum_observation_age"])
 
-    with age when is_integer(age) and age > 0 <- maximum_age,
-         observed_at when is_binary(observed_at) <- candidate["destination_observed_at"],
-         {:ok, observed_at, _} <- DateTime.from_iso8601(observed_at),
-         true <- DateTime.diff(DateTime.utc_now(), observed_at, :second) <= age do
-      :ok
+    if is_integer(maximum_age) and maximum_age > 0 do
+      with observed_at when is_binary(observed_at) <- candidate["destination_observed_at"],
+           {:ok, observed_at, _} <- DateTime.from_iso8601(observed_at),
+           true <- DateTime.diff(DateTime.utc_now(), observed_at, :second) <= maximum_age do
+        :ok
+      else
+        _ -> {:error, :market_trade_destination_observation_stale}
+      end
     else
-      _ -> {:error, :market_trade_destination_observation_stale}
+      :ok
     end
   end
 
