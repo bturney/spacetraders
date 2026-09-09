@@ -1,6 +1,6 @@
 defmodule SpaceTraders.Fleet.ShipServer do
   @moduledoc """
-  Owns one ship's async timers (arrival, cooldown) in memory.
+   Owns one ship's async timers (arrival, cooldown, Survey expiration) in memory.
 
   The game's waiting is modeled per-entity (ADR 0005): each ship has a GenServer
   that owns its `Process.send_after` timers, backed by persisted `timeline_events`

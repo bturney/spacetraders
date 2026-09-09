@@ -346,6 +346,34 @@ defmodule SpaceTraders.API.ClientTest do
               }} = API.extract_resources("TOKEN", "ORBITALIST-2")
     end
 
+    test "create_survey/2 posts on-site and decodes its Surveys" do
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        assert conn.method == "POST"
+        assert conn.request_path == "/v2/my/ships/ORBITALIST-2/survey"
+
+        Req.Test.json(conn, %{
+          "data" => %{
+            "cooldown" => %{"shipSymbol" => "ORBITALIST-2", "remainingSeconds" => 60},
+            "surveys" => [
+              %{
+                "signature" => "survey-signature",
+                "symbol" => "X1-UX81-A2",
+                "size" => "MODERATE",
+                "expiration" => "2030-01-01T00:01:00.000Z",
+                "deposits" => [%{"symbol" => "IRON_ORE"}]
+              }
+            ]
+          }
+        })
+      end)
+
+      assert {:ok, %{cooldown: %Model.Cooldown{remaining_seconds: 60}, surveys: [survey]}} =
+               API.create_survey("TOKEN", "ORBITALIST-2")
+
+      assert survey.signature == "survey-signature"
+      assert [%{symbol: "IRON_ORE"}] = survey.deposits
+    end
+
     test "siphon_resources/2 posts to siphon and decodes cooldown + siphon + cargo" do
       Req.Test.stub(SpaceTraders.API, fn conn ->
         assert conn.method == "POST"

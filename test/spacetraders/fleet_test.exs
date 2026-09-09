@@ -317,6 +317,56 @@ defmodule SpaceTraders.FleetTest do
   end
 
   describe "Miner Job" do
+    test "configures a Survey Job only for a survey-equipped Ship at an extraction Waypoint" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SURVEYOR")
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case conn.request_path do
+          "/v2/my/ships/FLEET-SURVEYOR" ->
+            Req.Test.json(conn, %{
+              "data" =>
+                ship_body("FLEET-SURVEYOR", %{mounts: [%{"symbol" => "MOUNT_SURVEYOR_I"}]})
+            })
+
+          "/v2/systems/X1-UX81/waypoints/X1-UX81-A2" ->
+            Req.Test.json(conn, %{
+              "data" => %{"symbol" => "X1-UX81-A2", "type" => "ASTEROID_FIELD", "traits" => []}
+            })
+        end
+      end)
+
+      assert {:ok, %Job{type: "survey", status: "paused", extraction_waypoint: "X1-UX81-A2"}} =
+               Fleet.configure_survey_job(agent, "FLEET-SURVEYOR", %{
+                 extraction_waypoint: "X1-UX81-A2"
+               })
+    end
+
+    test "rejects Survey Job configuration without survey capability" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-MINER")
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case conn.request_path do
+          "/v2/my/ships/FLEET-MINER" ->
+            Req.Test.json(conn, %{
+              "data" =>
+                ship_body("FLEET-MINER", %{mounts: [%{"symbol" => "MOUNT_MINING_LASER_I"}]})
+            })
+
+          "/v2/systems/X1-UX81/waypoints/X1-UX81-A2" ->
+            Req.Test.json(conn, %{
+              "data" => %{"symbol" => "X1-UX81-A2", "type" => "ASTEROID_FIELD", "traits" => []}
+            })
+        end
+      end)
+
+      assert {:error, :survey_capability_missing} =
+               Fleet.configure_survey_job(agent, "FLEET-MINER", %{
+                 extraction_waypoint: "X1-UX81-A2"
+               })
+    end
+
     test "projects a saved Miner Job loop as the Ship's Miner Job" do
       agent = agent_fixture()
       ship_fixture(agent, "FLEET-SHIP")

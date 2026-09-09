@@ -499,6 +499,11 @@ defmodule SpaceTradersWeb.DashboardLive do
   end
 
   @impl true
+  def handle_event("configure_survey_job", params, socket) do
+    save_survey_job(socket, params)
+  end
+
+  @impl true
   def handle_event("configure_procurement_job", params, socket) do
     save_procurement_job(socket, params)
   end
@@ -1114,7 +1119,10 @@ defmodule SpaceTradersWeb.DashboardLive do
              "stop_market_reconnaissance_job",
              "pause_outfitting_job",
              "resume_outfitting_job",
-             "stop_outfitting_job"
+             "stop_outfitting_job",
+             "pause_survey_job",
+             "resume_survey_job",
+             "stop_survey_job"
            ] do
     with {:ok, agent} <- agent_for_ship(socket, ship_symbol),
          :ok <- job_action(action, agent, ship_symbol) do
@@ -1164,6 +1172,15 @@ defmodule SpaceTradersWeb.DashboardLive do
 
           "stop_outfitting_job" ->
             "#{ship_symbol} Ship Outfitting Job stopped; Ship is manual."
+
+          "pause_survey_job" ->
+            "#{ship_symbol} Survey Job paused."
+
+          "resume_survey_job" ->
+            "#{ship_symbol} Survey Job resumed."
+
+          "stop_survey_job" ->
+            "#{ship_symbol} Survey Job stopped; Ship is manual."
         end
 
       {:noreply, put_flash(refresh_agent(socket, agent), :info, message)}
@@ -1262,6 +1279,14 @@ defmodule SpaceTradersWeb.DashboardLive do
   defp job_action("stop_market_reconnaissance_job", agent, ship),
     do: Fleet.stop_market_reconnaissance_job(agent, ship)
 
+  defp job_action("pause_survey_job", agent, ship),
+    do: Fleet.pause_survey_job(agent, ship) |> unwrap_job_result()
+
+  defp job_action("resume_survey_job", agent, ship),
+    do: Fleet.resume_survey_job(agent, ship) |> unwrap_job_result()
+
+  defp job_action("stop_survey_job", agent, ship), do: Fleet.stop_survey_job(agent, ship)
+
   defp unwrap_config({:ok, _config}), do: :ok
   defp unwrap_config(error), do: error
 
@@ -1296,6 +1321,23 @@ defmodule SpaceTradersWeb.DashboardLive do
 
   defp save_miner_job(:replace, agent, ship_symbol, attrs),
     do: Fleet.replace_miner_job(agent, ship_symbol, attrs)
+
+  defp save_survey_job(socket, params) do
+    with {:ok, agent} <- agent_for_ship(socket, params["ship_symbol"]),
+         {:ok, _job} <-
+           Fleet.configure_survey_job(agent, params["ship_symbol"], %{
+             extraction_waypoint: String.trim(params["extraction_waypoint"] || "")
+           }) do
+      socket =
+        socket
+        |> refresh_agent(agent)
+        |> clear_draft(draft_key("survey_job", [params["ship_symbol"]]))
+
+      {:noreply, put_flash(socket, :info, "Survey Job assigned and paused.")}
+    else
+      {:error, reason} -> {:noreply, put_flash(socket, :error, live_error(reason))}
+    end
+  end
 
   defp save_procurement_job(socket, params) do
     with {:ok, agent} <- agent_for_ship(socket, params["ship_symbol"]),
@@ -3461,8 +3503,11 @@ defmodule SpaceTradersWeb.DashboardLive do
               agent={@agent}
               form_drafts={@form_drafts}
             />
+          <% @ship.job && @ship.job.type == "survey" -> %>
+            <.survey_job_panel ship={@ship} agent={@agent} />
           <% true -> %>
             <.miner_job_panel ship={@ship} form_drafts={@form_drafts} />
+            <.survey_job_panel ship={@ship} agent={@agent} form_drafts={@form_drafts} />
             <.procurement_job_panel ship={@ship} form_drafts={@form_drafts} />
             <.construction_supply_job_panel ship={@ship} form_drafts={@form_drafts} />
             <.outfitting_job_panel ship={@ship} form_drafts={@form_drafts} />
@@ -5133,6 +5178,75 @@ defmodule SpaceTradersWeb.DashboardLive do
         <button
           type="button"
           phx-click="stop_outfitting_job"
+          phx-value-symbol={@ship.symbol}
+          class="btn btn-ghost btn-sm"
+        >Stop</button>
+      </div>
+    </section>
+    """
+  end
+
+  defp survey_job_panel(assigns) do
+    job = Map.get(assigns.ship, :job)
+    drafts = Map.get(assigns, :form_drafts, %{})
+
+    survey =
+      if job,
+        do: Intelligence.usable_survey(assigns.agent, job.extraction_waypoint),
+        else: nil
+
+    assigns = assign(assigns, job: job, form_drafts: drafts, survey: survey)
+
+    ~H"""
+    <section class="mt-4 rounded border border-secondary/20 p-3" data-job-panel="survey">
+      <div class="flex items-center justify-between gap-2">
+        <span class="text-xs font-semibold uppercase tracking-wider opacity-60">Survey Job</span>
+        <span :if={@job} class="badge badge-outline badge-sm">{job_status(@job)}</span>
+      </div>
+      <p :if={@job} class="mt-2 text-xs opacity-70" data-survey-status>
+        <%= if @survey do %>
+          Survey available at <span class="font-mono">{@job.extraction_waypoint}</span>
+          until <time data-survey-expiration>{format_job_finished_at(@survey.expiration)}</time>.
+        <% else %>
+          No usable Survey at <span class="font-mono">{@job.extraction_waypoint}</span>; the Job will create one.
+        <% end %>
+      </p>
+      <form
+        :if={is_nil(@job)}
+        id={"survey-job-form-#{@ship.symbol}"}
+        phx-change="track_draft"
+        phx-submit="configure_survey_job"
+        class="mt-3 flex gap-2"
+      >
+        <input type="hidden" name="draft_key" value={draft_key("survey_job", [@ship.symbol])} />
+        <input type="hidden" name="ship_symbol" value={@ship.symbol} />
+        <input
+          name="extraction_waypoint"
+          value={draft_field(@form_drafts, "survey_job", [@ship.symbol], "extraction_waypoint", "")}
+          placeholder="Extraction waypoint"
+          class="input input-bordered input-sm flex-1 font-mono"
+          required
+        />
+        <button type="submit" class="btn btn-secondary btn-sm">Assign Survey Job</button>
+      </form>
+      <div :if={@job} class="mt-3 flex flex-wrap gap-2">
+        <button
+          :if={Job.running?(@job)}
+          type="button"
+          phx-click="pause_survey_job"
+          phx-value-symbol={@ship.symbol}
+          class="btn btn-warning btn-sm"
+        >Pause</button>
+        <button
+          :if={@job.status in ["paused", "blocked"]}
+          type="button"
+          phx-click="resume_survey_job"
+          phx-value-symbol={@ship.symbol}
+          class="btn btn-primary btn-sm"
+        >Resume</button>
+        <button
+          type="button"
+          phx-click="stop_survey_job"
           phx-value-symbol={@ship.symbol}
           class="btn btn-ghost btn-sm"
         >Stop</button>

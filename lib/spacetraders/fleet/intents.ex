@@ -75,6 +75,7 @@ defmodule SpaceTraders.Fleet.Intents do
   @terminal_states Intent.terminal_states()
   @job_types [
     "miner",
+    "survey",
     "procurement",
     "market_trading",
     "market_reconnaissance"
@@ -465,7 +466,7 @@ defmodule SpaceTraders.Fleet.Intents do
             :ok
           end
 
-        nil when trigger in [:arrival, :cooldown] ->
+        nil when trigger in [:arrival, :cooldown, :survey_expiration] ->
           Fleet.continue_job_event(agent_id, ship_symbol, live_ship, trigger, expected_job_id)
 
         _ ->
@@ -856,6 +857,9 @@ defmodule SpaceTraders.Fleet.Intents do
        )
        when waypoint == extraction or waypoint == market,
        do: :ok
+
+  defp job_navigation_allowed?(%Job{type: "survey", extraction_waypoint: waypoint}, waypoint),
+    do: :ok
 
   defp job_navigation_allowed?(%Job{type: type}, _waypoint)
        when type in ["procurement", "market_trading", "market_reconnaissance"],
