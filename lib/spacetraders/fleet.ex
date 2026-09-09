@@ -32,6 +32,7 @@ defmodule SpaceTraders.Fleet do
     ProcurementPolicy,
     Ship,
     ShipDestination,
+    SurveyPolicy,
     SystemExplorationPolicy
   }
 
@@ -525,6 +526,51 @@ defmodule SpaceTraders.Fleet do
       error -> error
     end
   end
+
+  @doc "Configures a paused Survey Job for one eligible extraction Waypoint."
+  def configure_survey_job(%AgentRecord{agent_token: token} = agent, ship_symbol, attrs)
+      when is_binary(token) and token != "" and is_map(attrs) do
+    waypoint_symbol = attrs[:extraction_waypoint] || attrs["extraction_waypoint"]
+
+    with :ok <- Agent.execution_allowed?(agent),
+         {:ok, ship} <- owned_ship(agent, ship_symbol),
+         nil <- unfinished_job(ship.id),
+         true <- is_binary(waypoint_symbol) and waypoint_symbol != "",
+         {:ok, live_ship} <-
+           Agent.handle_game_result(agent, SpaceTraders.API.get_ship(token, ship_symbol)),
+         {:ok, waypoint} <- waypoint(token, live_ship.nav.system_symbol, waypoint_symbol),
+         :ok <- gather_waypoint?("extract", waypoint),
+         :ok <- survey_capability?(live_ship) do
+      job =
+        %Job{ship_id: ship.id}
+        |> Job.changeset(%{
+          type: "survey",
+          extraction_waypoint: waypoint_symbol,
+          market_waypoint: "SURVEY-NONE",
+          cargo_threshold: 1
+        })
+        |> Ecto.Changeset.put_change(:status, "paused")
+        |> Ecto.Changeset.put_change(:blocked_reason, "Awaiting Operator resume")
+        |> Ecto.Changeset.put_change(:progress, %{"target_system" => live_ship.nav.system_symbol})
+        |> Repo.insert()
+
+      case job do
+        {:ok, job} ->
+          record_activity(agent, ship, "configuration", "Survey Job configuration changed")
+          {:ok, job}
+
+        error ->
+          error
+      end
+    else
+      %Job{} -> {:error, :unfinished_job_already_assigned}
+      false -> {:error, :invalid_extraction_waypoint}
+      error -> error
+    end
+  end
+
+  def configure_survey_job(%AgentRecord{}, _ship_symbol, _attrs),
+    do: {:error, :agent_token_missing}
 
   @doc "Captures a Ship's authoritative current System as a paused System Exploration Job."
   def configure_explorer_job(%AgentRecord{agent_token: token} = agent, ship_symbol)
@@ -3632,6 +3678,9 @@ defmodule SpaceTraders.Fleet do
   def continue_job_after_intent(agent, %Job{type: "miner"} = job, intent, live_ship),
     do: advance_miner_after_intent(agent, job, intent, live_ship)
 
+  def continue_job_after_intent(agent, %Job{type: "survey"} = job, intent, live_ship),
+    do: advance_survey_after_intent(agent, job, intent, live_ship)
+
   def continue_job_after_intent(
         agent,
         %Job{type: "construction_supply"} = job,
@@ -3672,6 +3721,48 @@ defmodule SpaceTraders.Fleet do
         []
     end
   end
+
+  @doc "Starts a configured Survey Job after authoritative Ship and Waypoint validation."
+  def start_survey_job(%AgentRecord{} = agent, ship_symbol) do
+    with :ok <- Agent.execution_allowed?(agent),
+         {:ok, ship} <- owned_ship(agent, ship_symbol),
+         %Job{type: "survey"} = job <- unfinished_job(ship.id),
+         nil <- Intents.unfinished_manual_intent(ship.id),
+         {:ok, live_ship} <-
+           Agent.handle_game_result(
+             agent,
+             SpaceTraders.API.get_ship(agent.agent_token, ship_symbol)
+           ),
+         {:ok, waypoint} <-
+           waypoint(agent.agent_token, live_ship.nav.system_symbol, job.extraction_waypoint),
+         :ok <- gather_waypoint?("extract", waypoint),
+         :ok <- survey_capability?(live_ship) do
+      job =
+        Repo.update!(
+          Ecto.Changeset.change(job,
+            status: "active",
+            blocker: nil,
+            blocked_reason: nil,
+            last_validated_at: DateTime.utc_now() |> DateTime.truncate(:second)
+          )
+        )
+
+      advance_survey_job(agent, job, live_ship)
+    else
+      nil -> {:error, :survey_job_not_configured}
+      %Job{} -> {:error, :survey_job_not_configured}
+      %Intent{} -> {:error, :intents_active}
+      {:error, reason} -> block_survey_job(agent, ship_symbol, reason)
+    end
+  end
+
+  def resume_survey_job(agent, ship_symbol), do: start_survey_job(agent, ship_symbol)
+
+  def pause_survey_job(agent, ship_symbol),
+    do: pause_job_type(agent, ship_symbol, "survey", "Survey Job")
+
+  def stop_survey_job(agent, ship_symbol),
+    do: stop_job_type(agent, ship_symbol, "survey", "Survey Job")
 
   defp jobs_for_ships(ship_records) do
     ship_ids = Enum.map(ship_records, & &1.id)
@@ -3958,6 +4049,14 @@ defmodule SpaceTraders.Fleet do
 
   defp mining_capability?(_), do: {:error, :mining_capability_missing}
 
+  defp survey_capability?(%{mounts: mounts}) do
+    if Enum.any?(mounts || [], &String.starts_with?(&1.symbol || "", "MOUNT_SURVEYOR_")),
+      do: :ok,
+      else: {:error, :survey_capability_missing}
+  end
+
+  defp survey_capability?(_), do: {:error, :survey_capability_missing}
+
   defp block_miner_job(agent, ship_symbol, reason) do
     case owned_ship(agent, ship_symbol) do
       {:ok, ship} ->
@@ -3981,6 +4080,117 @@ defmodule SpaceTraders.Fleet do
       Agent.handle_game_result(agent, advance_miner_job(agent, config, live_ship, :normal))
     end
   end
+
+  @doc "Reconciles a Survey Job and creates Surveys only when no usable Survey remains."
+  def advance_survey_job(%AgentRecord{} = agent, %Job{type: "survey"} = job, live_ship) do
+    decision =
+      SurveyPolicy.decide(%{
+        in_flight_arrival?: in_flight_arrival?(job, live_ship),
+        pending_navigation?: pending_navigation?(job),
+        at_extraction?: at_extraction_waypoint?(live_ship, job.extraction_waypoint),
+        valid_survey?: not is_nil(Intelligence.usable_survey(agent, job.extraction_waypoint)),
+        extraction_waypoint: job.extraction_waypoint
+      })
+
+    case decision do
+      {:wait, :arrival} ->
+        maybe_schedule_arrival(agent, live_ship.symbol, %{nav: live_ship.nav}, job.id)
+        {:ok, Repo.update!(Ecto.Changeset.change(job, status: "waiting"))}
+
+      {:wait, :navigation} ->
+        {:ok, job}
+
+      {:wait, :survey_available} ->
+        survey = Intelligence.usable_survey(agent, job.extraction_waypoint)
+        due_at = Timeline.parse_expiration(survey.expiration |> DateTime.to_iso8601(), 0)
+        schedule_cooldown_event(agent, live_ship.symbol, due_at, %{"job_id" => job.id})
+
+        {:ok,
+         Repo.update!(
+           Ecto.Changeset.change(job,
+             status: "waiting",
+             in_flight_action: %{
+               "kind" => "survey_available",
+               "waypoint" => job.extraction_waypoint
+             }
+           )
+         )}
+
+      {:intent, :survey} ->
+        perform_survey_action(agent, job, live_ship)
+
+      {:intent, %{type: :navigate, waypoint: waypoint}} ->
+        navigate_survey_job(agent, job, live_ship, waypoint)
+    end
+  end
+
+  defp perform_survey_action(agent, job, live_ship) do
+    action = %{"kind" => "survey", "waypoint" => job.extraction_waypoint}
+    job = Repo.update!(Ecto.Changeset.change(job, status: "active", in_flight_action: action))
+
+    with {:ok, result} <-
+           Agent.handle_game_result(
+             agent,
+             SpaceTraders.API.create_survey(agent.agent_token, live_ship.symbol)
+           ),
+         :ok <- persist_surveys(agent, result.surveys, job.extraction_waypoint, live_ship.symbol),
+         :ok <- schedule_cooldown(agent, live_ship.symbol, result, job.id) do
+      {:ok,
+       Repo.update!(
+         Ecto.Changeset.change(job,
+           status: "waiting",
+           in_flight_action: %{"kind" => "cooldown", "waypoint" => job.extraction_waypoint},
+           last_action_result: %{"kind" => "survey", "count" => length(result.surveys || [])}
+         )
+       )}
+    else
+      {:error, reason} -> mark_survey_job_blocked(job, reason)
+    end
+  end
+
+  defp persist_surveys(agent, surveys, waypoint_symbol, ship_symbol) do
+    Enum.reduce_while(surveys || [], :ok, fn survey, :ok ->
+      case Intelligence.record_survey(agent, survey, waypoint_symbol,
+             observing_ship_symbol: ship_symbol
+           ) do
+        {:ok, _} -> {:cont, :ok}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  defp navigate_survey_job(agent, job, live_ship, waypoint) do
+    job = Repo.update!(Ecto.Changeset.change(job, status: "active"))
+
+    case Intents.request(
+           agent,
+           %Intents.JobOwner{job: job},
+           live_ship.symbol,
+           %Intents.Navigate{waypoint: waypoint},
+           live_ship
+         ) do
+      {:ok, intent} -> advance_survey_after_intent(agent, job, intent, live_ship)
+      :ok -> {:ok, job}
+      {:error, reason} -> mark_survey_job_blocked(job, reason)
+    end
+  end
+
+  defp advance_survey_after_intent(_agent, job, %Intent{status: "waiting"} = intent, _live_ship) do
+    {:ok,
+     Repo.update!(
+       Ecto.Changeset.change(job,
+         status: "waiting",
+         in_flight_action: intent.in_flight_action,
+         last_action_result: intent.last_action_result
+       )
+     )}
+  end
+
+  defp advance_survey_after_intent(agent, job, %Intent{status: "completed"}, live_ship),
+    do: advance_survey_job(agent, %{job | in_flight_action: nil}, live_ship)
+
+  defp advance_survey_after_intent(_agent, job, %Intent{} = intent, _live_ship),
+    do: mark_survey_job_blocked(job, intent.blocker || :navigation_blocked)
 
   defp advance_miner_job(%AgentRecord{} = agent, %Job{} = config, live_ship, mode) do
     decision =
@@ -4068,6 +4278,7 @@ defmodule SpaceTraders.Fleet do
 
       case config.type do
         "explorer" -> advance_explorer_job(agent, config, live_ship)
+        "survey" -> advance_survey_job(agent, config, live_ship)
         "market_reconnaissance" -> advance_market_reconnaissance_job(agent, config, live_ship)
         "procurement" -> start_procurement_job(agent, ship_symbol)
         "construction_supply" -> start_construction_supply_job(agent, ship_symbol)
@@ -4099,7 +4310,15 @@ defmodule SpaceTraders.Fleet do
               )
             )
 
-          advance_miner_job(agent, config, live_ship, :timeline)
+          if config.type == "survey",
+            do: advance_survey_job(agent, config, live_ship),
+            else: advance_miner_job(agent, config, live_ship, :timeline)
+
+        %{"kind" => "survey_available"} when config.type == "survey" ->
+          config =
+            Repo.update!(Ecto.Changeset.change(config, status: "active", in_flight_action: nil))
+
+          advance_survey_job(agent, config, live_ship)
 
         %{"kind" => "cooldown"} ->
           config =
@@ -4337,21 +4556,40 @@ defmodule SpaceTraders.Fleet do
   end
 
   defp perform_gather_action(agent, config, live_ship, mode, kind) do
+    survey =
+      if kind == "extract",
+        do: Intelligence.usable_survey(agent, config.extraction_waypoint),
+        else: nil
+
     action = %{
       "kind" => kind,
       "waypoint" => config.extraction_waypoint,
       "expected" => %{"cargo_units_at_least" => cargo_units(live_ship) + 1}
     }
 
+    action = if survey, do: Map.put(action, "survey_signature", survey.signature), else: action
+
     config =
       Repo.update!(Ecto.Changeset.change(config, status: "active", in_flight_action: action))
 
     gather =
-      case {kind, mode} do
-        {"siphon", :timeline} -> &siphon_resources_for_miner_job/3
-        {"siphon", :normal} -> &siphon_resources_for_miner_job/3
-        {"extract", :timeline} -> &extract_resources_for_miner_job/3
-        {"extract", :normal} -> &extract_resources_for_miner_job/3
+      case {kind, mode, survey} do
+        {"extract", _, survey} when not is_nil(survey) ->
+          fn agent, ship_symbol, job_id ->
+            extract_resources_with_survey_for_miner_job(agent, ship_symbol, job_id, survey)
+          end
+
+        {"siphon", :timeline, _} ->
+          &siphon_resources_for_miner_job/3
+
+        {"siphon", :normal, _} ->
+          &siphon_resources_for_miner_job/3
+
+        {"extract", :timeline, _} ->
+          &extract_resources_for_miner_job/3
+
+        {"extract", :normal, _} ->
+          &extract_resources_for_miner_job/3
       end
 
     case gather.(agent, live_ship.symbol, config.id) do
@@ -4802,6 +5040,39 @@ defmodule SpaceTraders.Fleet do
     {:error, reason}
   end
 
+  defp block_survey_job(agent, ship_symbol, reason) do
+    with {:ok, ship} <- owned_ship(agent, ship_symbol),
+         %Job{type: "survey"} = job <- unfinished_job(ship.id) do
+      mark_survey_job_blocked(job, reason)
+      {:error, {:survey_job_blocked, reason}}
+    else
+      _ -> {:error, :survey_job_not_configured}
+    end
+  end
+
+  defp mark_survey_job_blocked(job, reason) do
+    job =
+      Repo.update!(
+        Ecto.Changeset.change(job,
+          status: "blocked",
+          blocked_reason: nil,
+          blocker: job_blocker(reason)
+        )
+      )
+
+    record_activity_by_config(
+      job,
+      "survey_job_blocked",
+      "Survey Job blocked: #{inspect(reason)}",
+      %{
+        "block" => inspect(reason),
+        "recovery" => "resume"
+      }
+    )
+
+    {:error, reason}
+  end
+
   defp block_explorer_job(agent, ship_symbol, reason) do
     case owned_ship(agent, ship_symbol) do
       {:ok, ship} ->
@@ -4854,6 +5125,35 @@ defmodule SpaceTraders.Fleet do
            Agent.handle_game_result(agent, SpaceTraders.API.extract_resources(token, ship_symbol)),
          :ok <- schedule_cooldown(agent, ship_symbol, result, job_id) do
       {:ok, result}
+    end
+  end
+
+  defp extract_resources_with_survey_for_miner_job(agent, ship_symbol, job_id, survey) do
+    payload = %{
+      "signature" => survey.signature,
+      "symbol" => survey.symbol,
+      "size" => survey.size,
+      "expiration" => DateTime.to_iso8601(survey.expiration),
+      "deposits" => survey.deposits
+    }
+
+    case Agent.handle_game_result(
+           agent,
+           SpaceTraders.API.extract_resources_with_survey(agent.agent_token, ship_symbol, payload)
+         ) do
+      {:ok, result} ->
+        with :ok <- schedule_cooldown(agent, ship_symbol, result, job_id), do: {:ok, result}
+
+      {:error, %{message: message} = reason} ->
+        if String.contains?(String.downcase(message || ""), "survey") and
+             String.contains?(String.downcase(message || ""), "exhaust") do
+          Intelligence.exhaust_survey(agent, survey.signature)
+        end
+
+        {:error, reason}
+
+      error ->
+        error
     end
   end
 
@@ -5517,6 +5817,9 @@ defmodule SpaceTraders.Fleet do
                 "outfitting" ->
                   start_outfitting_job(agent, ship_symbol)
 
+                "survey" ->
+                  advance_survey_job(agent, config, live_ship)
+
                 _ ->
                   advance_miner_job(agent, config, live_ship)
               end
@@ -5722,6 +6025,9 @@ defmodule SpaceTraders.Fleet do
             "construction_supply" ->
               start_construction_supply_job(agent, live_ship.symbol)
 
+            "survey" ->
+              advance_survey_job(agent, recovered_config, live_ship)
+
             _ ->
               advance_miner_job(agent, recovered_config, live_ship, :timeline)
           end
@@ -5861,6 +6167,7 @@ defmodule SpaceTraders.Fleet do
       case config.type do
         "procurement" -> start_procurement_job(agent, live_ship.symbol)
         "construction_supply" -> start_construction_supply_job(agent, live_ship.symbol)
+        "survey" -> advance_survey_job(agent, config, live_ship)
         _ -> advance_miner_job(agent, config, live_ship, :timeline)
       end
 

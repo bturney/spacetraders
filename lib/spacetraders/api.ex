@@ -42,6 +42,7 @@ defmodule SpaceTraders.API do
     Ship,
     ShipConditionEvent,
     Siphon,
+    Survey,
     ScannedWaypoint
   }
 
@@ -246,6 +247,30 @@ defmodule SpaceTraders.API do
            extraction: {:model, Extraction},
            cargo: {:model, ShipCargo}
          }}
+    )
+  end
+
+  @doc "POST /my/ships/{symbol}/extract/survey"
+  @spec extract_resources_with_survey(token(), String.t(), map()) :: result()
+  def extract_resources_with_survey(token, ship_symbol, survey) when is_map(survey) do
+    request(:post, "/my/ships/#{ship_symbol}/extract/survey", token,
+      json: survey,
+      as:
+        {:map,
+         %{
+           cooldown: {:model, Cooldown},
+           extraction: {:model, Extraction},
+           cargo: {:model, ShipCargo},
+           events: {:list, ShipConditionEvent}
+         }}
+    )
+  end
+
+  @doc "POST /my/ships/{symbol}/survey"
+  @spec create_survey(token(), String.t()) :: result()
+  def create_survey(token, ship_symbol) do
+    request(:post, "/my/ships/#{ship_symbol}/survey", token,
+      as: {:map, %{cooldown: {:model, Cooldown}, surveys: {:list, Survey}}}
     )
   end
 

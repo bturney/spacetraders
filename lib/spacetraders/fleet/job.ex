@@ -59,6 +59,7 @@ defmodule SpaceTraders.Fleet.Job do
     |> validate_miner_fields()
     |> validate_inclusion(:type, [
       "miner",
+      "survey",
       "explorer",
       "procurement",
       "construction_supply",
@@ -72,11 +73,13 @@ defmodule SpaceTraders.Fleet.Job do
     |> unique_constraint(:ship_id, name: :jobs_one_unfinished_per_ship_index)
   end
 
-  defp validate_miner_fields(%Ecto.Changeset{changes: %{type: "explorer"}} = changeset),
-    do: changeset
+  defp validate_miner_fields(%Ecto.Changeset{changes: %{type: type}} = changeset)
+       when type in ["explorer", "survey"],
+       do: changeset
 
-  defp validate_miner_fields(%Ecto.Changeset{data: %{type: "explorer"}} = changeset),
-    do: changeset
+  defp validate_miner_fields(%Ecto.Changeset{data: %{type: type}} = changeset)
+       when type in ["explorer", "survey"],
+       do: changeset
 
   defp validate_miner_fields(%Ecto.Changeset{changes: %{type: type}} = changeset)
        when type in [

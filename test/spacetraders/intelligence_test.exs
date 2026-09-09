@@ -1,7 +1,7 @@
 defmodule SpaceTraders.IntelligenceTest do
   use SpaceTraders.DataCase, async: true
 
-  alias SpaceTraders.API.Model.{Construction, JumpGate, Market, Waypoint}
+  alias SpaceTraders.API.Model.{Construction, JumpGate, Market, Survey, Waypoint}
   alias SpaceTraders.Agent.Agent, as: AgentRecord
   alias SpaceTraders.Intelligence
   alias SpaceTraders.Fleet
@@ -14,6 +14,34 @@ defmodule SpaceTraders.IntelligenceTest do
       headquarters: "X1-UX81-A1",
       agent_token: "AGENT_TOKEN"
     })
+  end
+
+  test "retains usable Surveys by Agent and extraction Waypoint until expiration or exhaustion" do
+    agent = agent()
+
+    survey =
+      Survey.from_json(%{
+        "signature" => "survey-signature",
+        "symbol" => "X1-UX81-A2",
+        "size" => "MODERATE",
+        "expiration" => "2030-01-01T01:00:00Z",
+        "deposits" => [%{"symbol" => "IRON_ORE"}]
+      })
+
+    assert {:ok, persisted} =
+             Intelligence.record_survey(agent, survey, "X1-UX81-A2",
+               observing_ship_symbol: "INTEL-1"
+             )
+
+    assert persisted.signature == "survey-signature"
+    assert persisted.deposits == [%{"symbol" => "IRON_ORE"}]
+
+    assert %SpaceTraders.Intelligence.Survey{signature: "survey-signature"} =
+             Intelligence.usable_survey(agent, "X1-UX81-A2", ~U[2030-01-01 00:00:00Z])
+
+    assert :ok = Intelligence.exhaust_survey(agent, "survey-signature")
+    assert Intelligence.usable_survey(agent, "X1-UX81-A2", ~U[2030-01-01 00:00:00Z]) == nil
+    assert Intelligence.usable_survey(agent, "X1-UX81-A2", ~U[2030-01-01 01:00:00Z]) == nil
   end
 
   test "retains usable waypoint facts when a later partial observation omits them" do

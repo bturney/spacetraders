@@ -6,6 +6,7 @@ defmodule SpaceTraders.Fleet.JobPoliciesTest do
     MinerPolicy,
     OutfittingPolicy,
     ProcurementPolicy,
+    SurveyPolicy,
     SystemExplorationPolicy
   }
 
@@ -45,6 +46,38 @@ defmodule SpaceTraders.Fleet.JobPoliciesTest do
 
   test "Miner Policy navigates back to the extraction waypoint" do
     assert {:intent, %{type: :navigate, waypoint: "X1-A1"}} = MinerPolicy.decide(miner_facts(%{}))
+  end
+
+  defp survey_facts(overrides) do
+    Map.merge(
+      %{
+        in_flight_arrival?: false,
+        pending_navigation?: false,
+        at_extraction?: false,
+        valid_survey?: false,
+        extraction_waypoint: "X1-A1"
+      },
+      overrides
+    )
+  end
+
+  test "Survey Policy waits for durable navigation" do
+    assert {:wait, :arrival} = SurveyPolicy.decide(survey_facts(%{in_flight_arrival?: true}))
+
+    assert {:wait, :navigation} =
+             SurveyPolicy.decide(survey_facts(%{pending_navigation?: true}))
+  end
+
+  test "Survey Policy creates Surveys on-site only when none remain usable" do
+    assert {:intent, :survey} = SurveyPolicy.decide(survey_facts(%{at_extraction?: true}))
+
+    assert {:wait, :survey_available} =
+             SurveyPolicy.decide(survey_facts(%{at_extraction?: true, valid_survey?: true}))
+  end
+
+  test "Survey Policy navigates to its extraction Waypoint" do
+    assert {:intent, %{type: :navigate, waypoint: "X1-A1"}} =
+             SurveyPolicy.decide(survey_facts(%{}))
   end
 
   test "System Exploration Policy completes when every waypoint has been covered" do

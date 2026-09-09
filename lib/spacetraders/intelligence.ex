@@ -4,7 +4,7 @@ defmodule SpaceTraders.Intelligence do
   import Ecto.Query
 
   alias SpaceTraders.Agent.Agent, as: AgentRecord
-  alias SpaceTraders.Intelligence.{Fact, Observation}
+  alias SpaceTraders.Intelligence.{Fact, Observation, Survey}
   alias SpaceTraders.Repo
 
   @waypoint_fields [
@@ -36,6 +36,50 @@ defmodule SpaceTraders.Intelligence do
     :is_under_construction
   ]
   @marketplace_trait "MARKETPLACE"
+
+  @doc "Records a Survey returned by an on-site survey action."
+  def record_survey(%AgentRecord{} = agent, survey, waypoint_symbol, _opts \\ []) do
+    attrs = %{
+      agent_id: agent.id,
+      waypoint_symbol: waypoint_symbol,
+      signature: survey.signature,
+      symbol: survey.symbol,
+      size: survey.size,
+      expiration: parse_datetime(survey.expiration),
+      deposits: Enum.map(survey.deposits || [], &%{"symbol" => &1.symbol})
+    }
+
+    %Survey{}
+    |> Survey.changeset(attrs)
+    |> Repo.insert(
+      on_conflict:
+        {:replace, [:symbol, :size, :expiration, :deposits, :exhausted_at, :updated_at]},
+      conflict_target: [:agent_id, :signature]
+    )
+  end
+
+  @doc "Returns one usable Survey for an Agent at an extraction Waypoint."
+  def usable_survey(%AgentRecord{} = agent, waypoint_symbol, now \\ now()) do
+    Survey
+    |> where(
+      [survey],
+      survey.agent_id == ^agent.id and survey.waypoint_symbol == ^waypoint_symbol and
+        survey.expiration > ^now and is_nil(survey.exhausted_at)
+    )
+    |> order_by([survey], desc: survey.inserted_at, desc: survey.id)
+    |> limit(1)
+    |> Repo.one()
+  end
+
+  @doc "Marks a Survey unusable after an authoritative extraction rejection."
+  def exhaust_survey(%AgentRecord{} = agent, signature) do
+    {_, _} =
+      Survey
+      |> where([survey], survey.agent_id == ^agent.id and survey.signature == ^signature)
+      |> Repo.update_all(set: [exhausted_at: now()])
+
+    :ok
+  end
 
   @doc "Records one Waypoint observation without claiming omitted fields are false."
   def observe_waypoint(%AgentRecord{} = agent, waypoint, opts \\ []) do
@@ -321,5 +365,6 @@ defmodule SpaceTraders.Intelligence do
   end
 
   defp normalize(value), do: value
+  defp parse_datetime(value) when is_binary(value), do: DateTime.from_iso8601(value) |> elem(1)
   defp now, do: DateTime.utc_now() |> DateTime.truncate(:second)
 end
