@@ -9,7 +9,7 @@ defmodule SpaceTraders.Intelligence.Survey do
     field :signature, :string
     field :symbol, :string
     field :size, :string
-    field :expiration, :utc_datetime
+    field :expiration, :utc_datetime_usec
     field :deposits, {:array, :map}, default: []
     field :source, :string
     field :observing_ship_symbol, :string

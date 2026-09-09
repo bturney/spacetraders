@@ -46,6 +46,24 @@ defmodule SpaceTraders.IntelligenceTest do
     assert Intelligence.usable_survey(agent, "X1-UX81-A2", ~U[2030-01-01 01:00:00Z]) == nil
   end
 
+  test "preserves fractional-second Survey expiration for signature validation" do
+    agent = agent()
+    expiration = "2030-01-01T01:00:00.123Z"
+
+    survey =
+      Survey.from_json(%{
+        "signature" => "fractional-survey-signature",
+        "symbol" => "X1-UX81-A2",
+        "size" => "MODERATE",
+        "expiration" => expiration,
+        "deposits" => [%{"symbol" => "IRON_ORE"}]
+      })
+
+    assert {:ok, persisted} = Intelligence.record_survey(agent, survey, "X1-UX81-A2")
+    assert {:ok, expected_expiration, 0} = DateTime.from_iso8601(expiration)
+    assert DateTime.compare(persisted.expiration, expected_expiration) == :eq
+  end
+
   test "retains usable waypoint facts when a later partial observation omits them" do
     agent = agent()
 
