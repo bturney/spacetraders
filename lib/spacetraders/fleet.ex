@@ -4631,6 +4631,9 @@ defmodule SpaceTraders.Fleet do
            )
          )}
 
+      {:error, :survey_unusable} ->
+        perform_gather_action(agent, Repo.get!(Job, config.id), live_ship, mode, kind)
+
       {:error, reason} ->
         mark_miner_job_blocked(config, reason)
     end
@@ -5169,9 +5172,9 @@ defmodule SpaceTraders.Fleet do
         with :ok <- schedule_cooldown(agent, ship_symbol, result, job_id), do: {:ok, result}
 
       {:error, %{message: message} = reason} ->
-        if survey_exhausted?(message) do
+        if survey_unusable?(message) do
           Intelligence.exhaust_survey(agent, survey.signature)
-          extract_resources_for_miner_job(agent, ship_symbol, job_id)
+          {:error, :survey_unusable}
         else
           {:error, reason}
         end
@@ -5181,12 +5184,15 @@ defmodule SpaceTraders.Fleet do
     end
   end
 
-  defp survey_exhausted?(message) when is_binary(message) do
+  defp survey_unusable?(message) when is_binary(message) do
     message = String.downcase(message)
-    String.contains?(message, "survey") and String.contains?(message, "exhaust")
+
+    String.contains?(message, "survey") and
+      (String.contains?(message, "exhaust") or
+         (String.contains?(message, "invalid") and String.contains?(message, "signature")))
   end
 
-  defp survey_exhausted?(_message), do: false
+  defp survey_unusable?(_message), do: false
 
   defp siphon_resources_for_miner_job(
          %AgentRecord{agent_token: token} = agent,
