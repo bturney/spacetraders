@@ -21,6 +21,13 @@ defmodule SpaceTraders.TimelineTest do
       assert event.payload == %{destination: "X1-UX81-A2"}
     end
 
+    test "persists Survey expiration separately from Ship cooldowns" do
+      due_at = DateTime.add(DateTime.utc_now(), 300, :second)
+
+      assert {:ok, %Event{event_type: "survey_expiration"}} =
+               Timeline.schedule_event(:ship, "ORBITALIST-1", :survey_expiration, due_at)
+    end
+
     test "cancels the outstanding pending event of the same owner and type" do
       {:ok, first} =
         Timeline.schedule_event(:ship, "ORBITALIST-1", :arrival, DateTime.utc_now())

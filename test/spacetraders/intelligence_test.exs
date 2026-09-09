@@ -35,6 +35,8 @@ defmodule SpaceTraders.IntelligenceTest do
 
     assert persisted.signature == "survey-signature"
     assert persisted.deposits == [%{"symbol" => "IRON_ORE"}]
+    assert persisted.observing_ship_symbol == "INTEL-1"
+    assert persisted.source == "survey"
 
     assert %SpaceTraders.Intelligence.Survey{signature: "survey-signature"} =
              Intelligence.usable_survey(agent, "X1-UX81-A2", ~U[2030-01-01 00:00:00Z])

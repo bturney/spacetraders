@@ -38,7 +38,7 @@ defmodule SpaceTraders.Intelligence do
   @marketplace_trait "MARKETPLACE"
 
   @doc "Records a Survey returned by an on-site survey action."
-  def record_survey(%AgentRecord{} = agent, survey, waypoint_symbol, _opts \\ []) do
+  def record_survey(%AgentRecord{} = agent, survey, waypoint_symbol, opts \\ []) do
     attrs = %{
       agent_id: agent.id,
       waypoint_symbol: waypoint_symbol,
@@ -46,14 +46,27 @@ defmodule SpaceTraders.Intelligence do
       symbol: survey.symbol,
       size: survey.size,
       expiration: parse_datetime(survey.expiration),
-      deposits: Enum.map(survey.deposits || [], &%{"symbol" => &1.symbol})
+      deposits: Enum.map(survey.deposits || [], &%{"symbol" => &1.symbol}),
+      source: Keyword.get(opts, :source, "survey"),
+      observing_ship_symbol: Keyword.get(opts, :observing_ship_symbol),
+      observed_at: Keyword.get(opts, :observed_at, now())
     }
 
     %Survey{}
     |> Survey.changeset(attrs)
     |> Repo.insert(
       on_conflict:
-        {:replace, [:symbol, :size, :expiration, :deposits, :exhausted_at, :updated_at]},
+        {:replace,
+         [
+           :symbol,
+           :size,
+           :expiration,
+           :deposits,
+           :source,
+           :observing_ship_symbol,
+           :observed_at,
+           :updated_at
+         ]},
       conflict_target: [:agent_id, :signature]
     )
   end
