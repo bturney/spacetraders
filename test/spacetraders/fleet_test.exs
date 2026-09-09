@@ -15,6 +15,7 @@ defmodule SpaceTraders.FleetTest do
   alias SpaceTraders.Fleet.Activity
   alias SpaceTraders.Fleet.Intent
   alias SpaceTraders.Fleet.Intents
+  alias SpaceTraders.Intelligence
   alias SpaceTraders.Timeline
   alias SpaceTraders.Timeline.Event
 
@@ -955,6 +956,89 @@ defmodule SpaceTraders.FleetTest do
                Timeline.pending_events(:ship, "FLEET-SHIP")
 
       assert job_id == Fleet.ship_job(agent, "FLEET-SHIP").id
+    end
+
+    test "discards an invalid Survey signature and uses another usable Survey" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      {:ok, job} =
+        Fleet.configure_miner_job(agent, "FLEET-SHIP", %{
+          extraction_waypoint: "X1-UX81-A2",
+          market_waypoint: "X1-UX81-A1",
+          cargo_threshold: 30
+        })
+
+      assert {:ok, usable_survey} =
+               Intelligence.record_survey(
+                 agent,
+                 Model.Survey.from_json(%{
+                   "signature" => "usable-survey-signature",
+                   "symbol" => "X1-UX81-A2",
+                   "size" => "SMALL",
+                   "expiration" => future_iso(60),
+                   "deposits" => [%{"symbol" => "IRON_ORE"}]
+                 }),
+                 "X1-UX81-A2",
+                 observing_ship_symbol: "FLEET-SURVEYOR"
+               )
+
+      assert {:ok, invalid_survey} =
+               Intelligence.record_survey(
+                 agent,
+                 Model.Survey.from_json(%{
+                   "signature" => "invalid-survey-signature",
+                   "symbol" => "X1-UX81-A2",
+                   "size" => "SMALL",
+                   "expiration" => future_iso(60),
+                   "deposits" => [%{"symbol" => "IRON_ORE"}]
+                 }),
+                 "X1-UX81-A2",
+                 observing_ship_symbol: "FLEET-SURVEYOR"
+               )
+
+      expiration = future_iso(60)
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case conn.request_path do
+          "/v2/my/ships/FLEET-SHIP/extract/survey" ->
+            case conn.body_params["signature"] do
+              "invalid-survey-signature" ->
+                conn
+                |> Map.put(:status, 400)
+                |> Req.Test.json(%{
+                  "error" => %{"code" => 4224, "message" => "Invalid survey signature"}
+                })
+
+              "usable-survey-signature" ->
+                Req.Test.json(conn, %{
+                  "data" => %{
+                    "cooldown" => %{
+                      "shipSymbol" => "FLEET-SHIP",
+                      "totalSeconds" => 60,
+                      "remainingSeconds" => 60,
+                      "expiration" => expiration
+                    },
+                    "extraction" => %{
+                      "shipSymbol" => "FLEET-SHIP",
+                      "yield" => %{"symbol" => "IRON_ORE", "units" => 5}
+                    },
+                    "cargo" => %{
+                      "capacity" => 40,
+                      "units" => 5,
+                      "inventory" => [%{"symbol" => "IRON_ORE", "units" => 5}]
+                    }
+                  }
+                })
+            end
+        end
+      end)
+
+      assert {:ok, %Job{status: "waiting", in_flight_action: %{"kind" => "extract"}}} =
+               Fleet.advance_miner_job(agent, job, mining_ship_at_extraction([]))
+
+      assert Repo.get!(SpaceTraders.Intelligence.Survey, invalid_survey.id).exhausted_at
+      refute Repo.get!(SpaceTraders.Intelligence.Survey, usable_survey.id).exhausted_at
     end
 
     test "the own extraction does not preempt the started job and the loop continues" do
