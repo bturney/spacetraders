@@ -24,7 +24,7 @@ defmodule SpaceTraders.IntelligenceTest do
         "signature" => "survey-signature",
         "symbol" => "X1-UX81-A2",
         "size" => "MODERATE",
-        "expiration" => "2030-01-01T01:00:00Z",
+        "expiration" => "2030-01-01T01:00:00.000Z",
         "deposits" => [%{"symbol" => "IRON_ORE"}]
       })
 

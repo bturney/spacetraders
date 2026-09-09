@@ -3504,10 +3504,10 @@ defmodule SpaceTradersWeb.DashboardLive do
               form_drafts={@form_drafts}
             />
           <% @ship.job && @ship.job.type == "survey" -> %>
-            <.survey_job_panel ship={@ship} />
+            <.survey_job_panel ship={@ship} agent={@agent} />
           <% true -> %>
             <.miner_job_panel ship={@ship} form_drafts={@form_drafts} />
-            <.survey_job_panel ship={@ship} form_drafts={@form_drafts} />
+            <.survey_job_panel ship={@ship} agent={@agent} form_drafts={@form_drafts} />
             <.procurement_job_panel ship={@ship} form_drafts={@form_drafts} />
             <.construction_supply_job_panel ship={@ship} form_drafts={@form_drafts} />
             <.outfitting_job_panel ship={@ship} form_drafts={@form_drafts} />
@@ -5189,7 +5189,13 @@ defmodule SpaceTradersWeb.DashboardLive do
   defp survey_job_panel(assigns) do
     job = Map.get(assigns.ship, :job)
     drafts = Map.get(assigns, :form_drafts, %{})
-    assigns = assign(assigns, job: job, form_drafts: drafts)
+
+    survey =
+      if job,
+        do: Intelligence.usable_survey(assigns.agent, job.extraction_waypoint),
+        else: nil
+
+    assigns = assign(assigns, job: job, form_drafts: drafts, survey: survey)
 
     ~H"""
     <section class="mt-4 rounded border border-secondary/20 p-3" data-job-panel="survey">
@@ -5198,8 +5204,12 @@ defmodule SpaceTradersWeb.DashboardLive do
         <span :if={@job} class="badge badge-outline badge-sm">{job_status(@job)}</span>
       </div>
       <p :if={@job} class="mt-2 text-xs opacity-70" data-survey-status>
-        Maintains Surveys at <span class="font-mono">{@job.extraction_waypoint}</span>. A Miner Job
-        can use a valid Survey at this Waypoint until it expires or is exhausted.
+        <%= if @survey do %>
+          Survey available at <span class="font-mono">{@job.extraction_waypoint}</span>
+          until <time data-survey-expiration>{format_job_finished_at(@survey.expiration)}</time>.
+        <% else %>
+          No usable Survey at <span class="font-mono">{@job.extraction_waypoint}</span>; the Job will create one.
+        <% end %>
       </p>
       <form
         :if={is_nil(@job)}

@@ -6,11 +6,20 @@ defmodule SpaceTraders.Fleet.SurveyPolicy do
   @spec decide(map()) :: JobPolicy.decision()
   def decide(facts) do
     cond do
-      facts.in_flight_arrival? -> {:wait, :arrival}
-      facts.pending_navigation? -> {:wait, :navigation}
-      facts.valid_survey? -> {:wait, :survey_available}
-      facts.at_extraction? -> {:intent, :survey}
-      true -> {:intent, %{type: :navigate, waypoint: facts.extraction_waypoint}}
+      facts.in_flight_arrival? ->
+        {:wait, :arrival}
+
+      facts.pending_navigation? ->
+        {:wait, :navigation}
+
+      not facts.at_extraction? ->
+        {:intent, %{type: :navigate, waypoint: facts.extraction_waypoint}}
+
+      facts.valid_survey? ->
+        {:wait, :survey_available}
+
+      true ->
+        {:intent, :survey}
     end
   end
 end

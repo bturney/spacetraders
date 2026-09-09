@@ -365,6 +365,9 @@ defmodule SpaceTraders.Intelligence do
   end
 
   defp normalize(value), do: value
-  defp parse_datetime(value) when is_binary(value), do: DateTime.from_iso8601(value) |> elem(1)
+
+  defp parse_datetime(value) when is_binary(value),
+    do: DateTime.from_iso8601(value) |> elem(1) |> DateTime.truncate(:second)
+
   defp now, do: DateTime.utc_now() |> DateTime.truncate(:second)
 end

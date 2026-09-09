@@ -4103,7 +4103,7 @@ defmodule SpaceTraders.Fleet do
       {:wait, :survey_available} ->
         survey = Intelligence.usable_survey(agent, job.extraction_waypoint)
         due_at = Timeline.parse_expiration(survey.expiration |> DateTime.to_iso8601(), 0)
-        schedule_cooldown_event(agent, live_ship.symbol, due_at, %{"job_id" => job.id})
+        schedule_survey_expiration_event(agent, live_ship.symbol, due_at, %{"job_id" => job.id})
 
         {:ok,
          Repo.update!(
@@ -4117,7 +4117,9 @@ defmodule SpaceTraders.Fleet do
          )}
 
       {:intent, :survey} ->
-        perform_survey_action(agent, job, live_ship)
+        if cooldown_active?(live_ship),
+          do: wait_for_survey_cooldown(agent, job, live_ship),
+          else: perform_survey_action(agent, job, live_ship)
 
       {:intent, %{type: :navigate, waypoint: waypoint}} ->
         navigate_survey_job(agent, job, live_ship, waypoint)
@@ -4146,6 +4148,18 @@ defmodule SpaceTraders.Fleet do
     else
       {:error, reason} -> mark_survey_job_blocked(job, reason)
     end
+  end
+
+  defp wait_for_survey_cooldown(agent, job, live_ship) do
+    maybe_schedule_live_cooldown(agent, live_ship, job.id)
+
+    {:ok,
+     Repo.update!(
+       Ecto.Changeset.change(job,
+         status: "waiting",
+         in_flight_action: %{"kind" => "cooldown", "waypoint" => job.extraction_waypoint}
+       )
+     )}
   end
 
   defp persist_surveys(agent, surveys, waypoint_symbol, ship_symbol) do
@@ -4246,6 +4260,7 @@ defmodule SpaceTraders.Fleet do
       case trigger do
         :arrival -> job_arrival_event(agent, ship_symbol, config, live_ship)
         :cooldown -> job_cooldown_event(agent, config, live_ship)
+        :survey_expiration -> job_survey_expiration_event(agent, config, live_ship)
         _ -> :ok
       end
     else
@@ -4324,7 +4339,9 @@ defmodule SpaceTraders.Fleet do
           config =
             Repo.update!(Ecto.Changeset.change(config, status: "active", in_flight_action: nil))
 
-          advance_miner_job(agent, config, live_ship, :timeline)
+          if config.type == "survey",
+            do: advance_survey_job(agent, config, live_ship),
+            else: advance_miner_job(agent, config, live_ship, :timeline)
 
         _ ->
           :ok
@@ -4333,6 +4350,13 @@ defmodule SpaceTraders.Fleet do
       _ -> :ok
     end
   end
+
+  defp job_survey_expiration_event(agent, %Job{type: "survey"} = job, live_ship) do
+    job = Repo.update!(Ecto.Changeset.change(job, status: "active", in_flight_action: nil))
+    advance_survey_job(agent, job, live_ship)
+  end
+
+  defp job_survey_expiration_event(_agent, _job, _live_ship), do: :ok
 
   defp at_extraction_waypoint?(
          %{nav: %{status: status, waypoint_symbol: waypoint}},
@@ -5145,17 +5169,24 @@ defmodule SpaceTraders.Fleet do
         with :ok <- schedule_cooldown(agent, ship_symbol, result, job_id), do: {:ok, result}
 
       {:error, %{message: message} = reason} ->
-        if String.contains?(String.downcase(message || ""), "survey") and
-             String.contains?(String.downcase(message || ""), "exhaust") do
+        if survey_exhausted?(message) do
           Intelligence.exhaust_survey(agent, survey.signature)
+          extract_resources_for_miner_job(agent, ship_symbol, job_id)
+        else
+          {:error, reason}
         end
-
-        {:error, reason}
 
       error ->
         error
     end
   end
+
+  defp survey_exhausted?(message) when is_binary(message) do
+    message = String.downcase(message)
+    String.contains?(message, "survey") and String.contains?(message, "exhaust")
+  end
+
+  defp survey_exhausted?(_message), do: false
 
   defp siphon_resources_for_miner_job(
          %AgentRecord{agent_token: token} = agent,
@@ -5182,6 +5213,13 @@ defmodule SpaceTraders.Fleet do
   # through Timeline persistence plus ShipServer.
   defp schedule_cooldown_event(agent, ship_symbol, due_at, payload \\ %{}) do
     {:ok, event} = Timeline.schedule_event(:ship, ship_symbol, :cooldown, due_at, payload)
+    ShipServer.arm(agent, ship_symbol, event)
+  end
+
+  defp schedule_survey_expiration_event(agent, ship_symbol, due_at, payload) do
+    {:ok, event} =
+      Timeline.schedule_event(:ship, ship_symbol, :survey_expiration, due_at, payload)
+
     ShipServer.arm(agent, ship_symbol, event)
   end
 
