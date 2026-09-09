@@ -4629,7 +4629,7 @@ defmodule SpaceTraders.Fleet do
              status: "waiting",
              last_action_result: result_snapshot
            )
-          )}
+         )}
 
       {:error, :survey_unusable} ->
         perform_gather_action(agent, Repo.get!(Job, config.id), live_ship, mode, kind)
