@@ -3957,6 +3957,55 @@ defmodule SpaceTraders.FleetTest do
                  stops: ["X1-UX81-A1", "X1-UX81-A1"]
                })
     end
+
+    test "reads an on-site Listing and completes without a trade" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case {conn.request_path, conn.method} do
+          {"/v2/my/ships/FLEET-SHIP", "GET"} ->
+            Req.Test.json(conn, %{"data" => ship_body("FLEET-SHIP")})
+
+          {"/v2/systems/X1-UX81/waypoints", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => [
+                %{
+                  "symbol" => "X1-UX81-A1",
+                  "systemSymbol" => "X1-UX81",
+                  "traits" => [%{"symbol" => "MARKETPLACE"}]
+                }
+              ]
+            })
+
+          {"/v2/systems/X1-UX81/waypoints/X1-UX81-A1/market", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => %{
+                "symbol" => "X1-UX81-A1",
+                "tradeGoods" => [
+                  %{"symbol" => "IRON_ORE", "purchasePrice" => 10, "sellPrice" => 20}
+                ]
+              }
+            })
+        end
+      end)
+
+      assert {:ok, %Job{status: "paused"}} =
+               Fleet.configure_market_reconnaissance_job(agent, "FLEET-SHIP", %{
+                 stops: ["X1-UX81-A1"]
+               })
+
+      assert {:ok, %Job{status: "completed", progress: progress}} =
+               Fleet.start_market_reconnaissance_job(agent, "FLEET-SHIP")
+
+      assert progress["completed_stops"] == ["X1-UX81-A1"]
+
+      assert get_in(progress, ["listings", "X1-UX81-A1", "trade_goods"]) == [
+               %{"symbol" => "IRON_ORE", "purchase_price" => 10, "sell_price" => 20}
+             ]
+
+      assert progress["candidate_routes"] == []
+    end
   end
 
   describe "Construction Supply Job completion acceptance" do

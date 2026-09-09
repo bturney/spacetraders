@@ -116,6 +116,30 @@ defmodule SpaceTraders.Intelligence do
     |> Map.new(fn {field, field_facts} -> {field, usable_fact(field_facts) |> present_fact()} end)
   end
 
+  @doc "Returns known Marketplace Waypoint symbols in one System in stable order."
+  def marketplace_waypoints(%AgentRecord{} = agent, system_symbol)
+      when is_binary(system_symbol) do
+    Fact
+    |> join(:inner, [fact], observation in assoc(fact, :observation))
+    |> where(
+      [fact],
+      fact.agent_id == ^agent.id and fact.subject_type == "waypoint" and
+        fact.subject_system_symbol == ^system_symbol and fact.field == "traits" and
+        fact.state == "known" and is_nil(fact.invalidated_at)
+    )
+    |> order_by([_fact, observation], desc: observation.observed_at, desc: observation.id)
+    |> Repo.all()
+    |> Enum.group_by(& &1.subject_symbol)
+    |> Enum.filter(fn {_symbol, [fact | _]} ->
+      Enum.any?(
+        Map.get(fact.value || %{}, "value", []),
+        &(Map.get(&1, "symbol") == @marketplace_trait)
+      )
+    end)
+    |> Enum.map(&elem(&1, 0))
+    |> Enum.sort()
+  end
+
   @doc "Returns current facts and invalidated facts separately for subject inspection."
   def subject_with_stale(%AgentRecord{} = agent, subject_type, system_symbol, symbol) do
     facts =
