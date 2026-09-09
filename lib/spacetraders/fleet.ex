@@ -1132,17 +1132,7 @@ defmodule SpaceTraders.Fleet do
            Agent.handle_game_result(agent, SpaceTraders.API.get_ship(token, ship_symbol)),
          system when is_binary(system) <- live_ship.nav.system_symbol,
          {:ok, progress} <- market_trading_progress(attrs, system) do
-      %Job{ship_id: ship.id}
-      |> Job.changeset(%{
-        type: "market_trading",
-        extraction_waypoint: "MARKET-NONE",
-        market_waypoint: "MARKET-NONE",
-        cargo_threshold: 1
-      })
-      |> Ecto.Changeset.put_change(:status, "paused")
-      |> Ecto.Changeset.put_change(:blocked_reason, "Awaiting Operator resume")
-      |> Ecto.Changeset.put_change(:progress, progress)
-      |> Repo.insert()
+      insert_market_trading_job(ship, progress)
     else
       %Job{} -> {:error, :unfinished_job_already_assigned}
       nil -> {:error, :current_system_unavailable}
@@ -1152,6 +1142,52 @@ defmodule SpaceTraders.Fleet do
 
   def configure_market_trading_job(%AgentRecord{}, _ship_symbol, _attrs),
     do: {:error, :agent_token_missing}
+
+  @doc "Replaces a Market Reconnaissance Job with a paused Market Trading Job from one retained Candidate Trade Route."
+  def configure_market_trading_job_from_reconnaissance(
+        %AgentRecord{agent_token: token} = agent,
+        ship_symbol,
+        route_index,
+        attrs
+      )
+      when is_binary(token) and token != "" and is_integer(route_index) and is_map(attrs) do
+    with :ok <- Agent.execution_allowed?(agent),
+         {:ok, ship} <- owned_ship(agent, ship_symbol),
+         %Job{type: "market_reconnaissance"} = reconnaissance <- unfinished_job(ship.id),
+         {:ok, live_ship} <-
+           Agent.handle_game_result(agent, SpaceTraders.API.get_ship(token, ship_symbol)),
+         system when is_binary(system) <- live_ship.nav.system_symbol,
+         :ok <- market_system_matches?(reconnaissance.progress, live_ship),
+         {:ok, candidate} <- market_trade_candidate(reconnaissance, route_index, attrs),
+         {:ok, progress} <-
+           market_trading_progress(Map.put(attrs, :candidates, [candidate]), system) do
+      Repo.transaction(
+        fn ->
+          Intents.terminalize_job_intent!(reconnaissance)
+          predecessor = terminalize_job!(reconnaissance, "replaced")
+
+          case insert_market_trading_job(ship, progress, predecessor.id) do
+            {:ok, job} -> job
+            {:error, changeset} -> Repo.rollback(changeset)
+          end
+        end,
+        mode: :immediate
+      )
+    else
+      nil -> {:error, :market_reconnaissance_job_not_configured}
+      %Job{} -> {:error, :market_reconnaissance_job_not_configured}
+      {:error, _reason} = error -> error
+      _ -> {:error, :invalid_market_trading_configuration}
+    end
+  end
+
+  def configure_market_trading_job_from_reconnaissance(
+        %AgentRecord{},
+        _ship_symbol,
+        _route_index,
+        _attrs
+      ),
+      do: {:error, :agent_token_missing}
 
   @doc "Captures a paused Market Reconnaissance Job for one ordered Marketplace tour."
   def configure_market_reconnaissance_job(
@@ -1391,6 +1427,44 @@ defmodule SpaceTraders.Fleet do
             "estimated_fuel_cost" => 0
           }},
        else: {:error, :invalid_market_trading_configuration}
+  end
+
+  defp insert_market_trading_job(ship, progress, predecessor_job_id \\ nil) do
+    %Job{ship_id: ship.id}
+    |> Job.changeset(%{
+      type: "market_trading",
+      extraction_waypoint: "MARKET-NONE",
+      market_waypoint: "MARKET-NONE",
+      cargo_threshold: 1,
+      predecessor_job_id: predecessor_job_id
+    })
+    |> Ecto.Changeset.put_change(:status, "paused")
+    |> Ecto.Changeset.put_change(:blocked_reason, "Awaiting Operator resume")
+    |> Ecto.Changeset.put_change(:progress, progress)
+    |> Repo.insert()
+  end
+
+  defp market_trade_candidate(job, route_index, attrs) do
+    with %{} = route <- Enum.at(job.progress["candidate_routes"] || [], route_index),
+         trade_symbol when is_binary(trade_symbol) <- route["trade_symbol"],
+         source_waypoint when is_binary(source_waypoint) <- route["source_waypoint"],
+         destination_waypoint when is_binary(destination_waypoint) <-
+           route["destination_waypoint"],
+         purchase_price when is_integer(purchase_price) <- route["source_buy_price"],
+         sell_price when is_integer(sell_price) <- route["destination_sell_price"] do
+      {:ok,
+       %{
+         trade_symbol: trade_symbol,
+         source_waypoint: source_waypoint,
+         destination_waypoint: destination_waypoint,
+         purchase_price: purchase_price,
+         sell_price: sell_price,
+         units: attrs[:units] || attrs["units"],
+         estimated_fuel_cost: attrs[:estimated_fuel_cost] || attrs["estimated_fuel_cost"] || 0
+       }}
+    else
+      _ -> {:error, :candidate_trade_route_not_selected}
+    end
   end
 
   defp market_trade_candidates_in_system?(candidates, system) do

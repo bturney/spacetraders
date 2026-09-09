@@ -539,6 +539,45 @@ defmodule SpaceTradersWeb.DashboardLive do
   end
 
   @impl true
+  def handle_event("configure_market_trading_job_from_reconnaissance", params, socket) do
+    with {:ok, agent} <- agent_for_ship(socket, params["ship_symbol"]),
+         {:ok, route_index} <- parse_optional_nonnegative_units(params["route_index"]),
+         route_index when is_integer(route_index) <- route_index,
+         {:ok, units} <- parse_units(params["units"]),
+         {:ok, reserve_credits} <- parse_optional_nonnegative_units(params["reserve_credits"]),
+         {:ok, credit_exposure} <- parse_optional_units(params["credit_exposure"]),
+         {:ok, minimum_profit} <- parse_optional_nonnegative_units(params["minimum_profit"]),
+         {:ok, minimum_return_percentage} <-
+           parse_optional_nonnegative_number(params["minimum_return_percentage"]),
+         {:ok, estimated_fuel_cost} <-
+           parse_optional_nonnegative_units(params["estimated_fuel_cost"]),
+         {:ok, _job} <-
+           Fleet.configure_market_trading_job_from_reconnaissance(
+             agent,
+             params["ship_symbol"],
+             route_index,
+             %{
+               units: units,
+               reserve_credits: reserve_credits || 0,
+               credit_exposure: credit_exposure,
+               minimum_profit: minimum_profit || 0,
+               minimum_return_percentage: minimum_return_percentage || 0,
+               estimated_fuel_cost: estimated_fuel_cost || 0,
+               compatible_existing_cargo: Map.has_key?(params, "compatible_existing_cargo")
+             }
+           ) do
+      {:noreply,
+       put_flash(
+         socket |> refresh_agent(agent),
+         :info,
+         "Market Trading Job assigned and paused."
+       )}
+    else
+      {:error, reason} -> {:noreply, put_flash(socket, :error, live_error(reason))}
+    end
+  end
+
+  @impl true
   def handle_event("configure_explorer_job", %{"symbol" => ship_symbol}, socket) do
     with {:ok, agent} <- agent_for_ship(socket, ship_symbol),
          {:ok, _job} <- Fleet.configure_explorer_job(agent, ship_symbol) do
@@ -4175,13 +4214,144 @@ defmodule SpaceTradersWeb.DashboardLive do
         >
           <span class="font-mono">{waypoint}</span> Listing observed: {listing["observed_at"]}
         </div>
-        <div :for={route <- @progress["candidate_routes"] || []} class="rounded bg-base-200 p-2">
+        <div
+          :for={{route, index} <- Enum.with_index(@progress["candidate_routes"] || [])}
+          class="rounded bg-base-200 p-2"
+          data-candidate-trade-route
+        >
           {route["trade_symbol"]}: {route["source_waypoint"]} buy {route["source_buy_price"]} -> {route[
             "destination_waypoint"
           ]} sell {route["destination_sell_price"]} (spread {route["per_unit_spread"]})
-          <span class="block opacity-60">
+          <span class="block opacity-60" data-candidate-trade-route-age>
             Observed: {route["source_observed_at"]} / {route["destination_observed_at"]}
+            <br />Observation age: {market_observation_age(route)}
           </span>
+          <form
+            :if={@job.status in ["paused", "blocked"]}
+            id={"market-trading-from-reconnaissance-form-#{@ship.symbol}-#{index}"}
+            phx-change="track_draft"
+            phx-submit="configure_market_trading_job_from_reconnaissance"
+            class="mt-2 grid gap-2 sm:grid-cols-2"
+          >
+            <input
+              type="hidden"
+              name="draft_key"
+              value={draft_key("market_trading_from_reconnaissance", [@ship.symbol, index])}
+            />
+            <input type="hidden" name="ship_symbol" value={@ship.symbol} />
+            <input type="hidden" name="route_index" value={index} />
+            <p class="sm:col-span-2">
+              Confirm buy at <span class="font-mono">{route["source_waypoint"]}</span>
+              and sell at <span class="font-mono"> {route["destination_waypoint"]}</span>.
+            </p>
+            <input
+              name="units"
+              required
+              type="number"
+              min="1"
+              placeholder="Units per trip"
+              value={
+                draft_field(
+                  @form_drafts,
+                  "market_trading_from_reconnaissance",
+                  [@ship.symbol, index],
+                  "units",
+                  ""
+                )
+              }
+              class="input input-bordered input-sm"
+            />
+            <input
+              name="reserve_credits"
+              type="number"
+              min="0"
+              placeholder="Reserve credits"
+              value={
+                draft_field(
+                  @form_drafts,
+                  "market_trading_from_reconnaissance",
+                  [@ship.symbol, index],
+                  "reserve_credits",
+                  ""
+                )
+              }
+              class="input input-bordered input-sm"
+            />
+            <input
+              name="credit_exposure"
+              type="number"
+              min="1"
+              placeholder="Credit exposure"
+              value={
+                draft_field(
+                  @form_drafts,
+                  "market_trading_from_reconnaissance",
+                  [@ship.symbol, index],
+                  "credit_exposure",
+                  ""
+                )
+              }
+              class="input input-bordered input-sm"
+            />
+            <input
+              name="minimum_profit"
+              type="number"
+              min="0"
+              placeholder="Minimum net profit"
+              value={
+                draft_field(
+                  @form_drafts,
+                  "market_trading_from_reconnaissance",
+                  [@ship.symbol, index],
+                  "minimum_profit",
+                  ""
+                )
+              }
+              class="input input-bordered input-sm"
+            />
+            <input
+              name="minimum_return_percentage"
+              type="number"
+              min="0"
+              step="0.01"
+              placeholder="Minimum return %"
+              value={
+                draft_field(
+                  @form_drafts,
+                  "market_trading_from_reconnaissance",
+                  [@ship.symbol, index],
+                  "minimum_return_percentage",
+                  ""
+                )
+              }
+              class="input input-bordered input-sm"
+            />
+            <input
+              name="estimated_fuel_cost"
+              type="number"
+              min="0"
+              placeholder="Estimated fuel cost"
+              value={
+                draft_field(
+                  @form_drafts,
+                  "market_trading_from_reconnaissance",
+                  [@ship.symbol, index],
+                  "estimated_fuel_cost",
+                  ""
+                )
+              }
+              class="input input-bordered input-sm"
+            />
+            <label class="label cursor-pointer justify-start gap-2 sm:col-span-2">
+              <input name="compatible_existing_cargo" type="checkbox" class="checkbox checkbox-sm" />
+              <span class="label-text">Use compatible cargo already aboard</span>
+            </label>
+            <button
+              type="submit"
+              class="btn btn-secondary btn-sm sm:col-span-2"
+              data-select-market-trade-route
+            >Configure Market Trading Job</button>
+          </form>
         </div>
         <div class="flex flex-wrap gap-2">
           <button
@@ -4226,6 +4396,25 @@ defmodule SpaceTradersWeb.DashboardLive do
   end
 
   defp market_reconnaissance_stops(_ship, _agent, {:error, reason}), do: {:error, reason}
+
+  defp market_observation_age(route) do
+    with source when is_binary(source) <- route["source_observed_at"],
+         destination when is_binary(destination) <- route["destination_observed_at"],
+         {:ok, source, _} <- DateTime.from_iso8601(source),
+         {:ok, destination, _} <- DateTime.from_iso8601(destination) do
+      [source, destination]
+      |> Enum.map(&(DateTime.diff(DateTime.utc_now(), &1, :second) |> max(0)))
+      |> Enum.max()
+      |> format_duration()
+    else
+      _ -> "unknown"
+    end
+  end
+
+  defp format_duration(seconds) when seconds < 60, do: "#{seconds}s"
+  defp format_duration(seconds) when seconds < 3_600, do: "#{div(seconds, 60)}m"
+  defp format_duration(seconds) when seconds < 86_400, do: "#{div(seconds, 3_600)}h"
+  defp format_duration(seconds), do: "#{div(seconds, 86_400)}d"
 
   defp market_trading_job_panel(assigns) do
     job = Map.get(assigns.ship, :job)

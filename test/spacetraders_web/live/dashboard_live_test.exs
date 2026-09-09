@@ -1337,6 +1337,73 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       assert has_element?(lv, "button[phx-click=\"resume_market_trading_job\"]")
     end
 
+    test "selects a reconnaissance Candidate Trade Route for a Market Trading Job", %{
+      conn: conn,
+      operator: operator
+    } do
+      agent = agent_fixture(operator)
+
+      ship =
+        Repo.insert!(%Ship{
+          agent_id: agent.id,
+          symbol: "ORBITALIST-1",
+          ship_type: "SHIP_COMMAND_FRIGATE"
+        })
+
+      Repo.insert!(%Job{
+        ship_id: ship.id,
+        type: "market_reconnaissance",
+        status: "paused",
+        extraction_waypoint: "RECONNAISSANCE-NONE",
+        market_waypoint: "RECONNAISSANCE-NONE",
+        cargo_threshold: 1,
+        progress: %{
+          "target_system" => "X1-UX81",
+          "candidate_routes" => [
+            %{
+              "trade_symbol" => "IRON_ORE",
+              "source_waypoint" => "X1-UX81-A1",
+              "destination_waypoint" => "X1-UX81-A2",
+              "source_buy_price" => 10,
+              "destination_sell_price" => 20,
+              "per_unit_spread" => 10,
+              "source_observed_at" => "2026-09-09T00:00:00Z",
+              "destination_observed_at" => "2026-09-09T00:01:00Z"
+            }
+          ]
+        }
+      })
+
+      stub_live_game(agent_overview_body(agent.symbol), [ship_body("ORBITALIST-1")])
+
+      {:ok, lv, _html} = live(conn, ~p"/")
+
+      assert has_element?(lv, "[data-candidate-trade-route]", "IRON_ORE")
+      assert has_element?(lv, "[data-candidate-trade-route-age]", "Observation age")
+
+      assert has_element?(
+               lv,
+               "button[data-select-market-trade-route]",
+               "Configure Market Trading Job"
+             )
+
+      html =
+        lv
+        |> element("form#market-trading-from-reconnaissance-form-ORBITALIST-1-0")
+        |> render_submit(%{
+          ship_symbol: "ORBITALIST-1",
+          route_index: "0",
+          units: "5",
+          reserve_credits: "50",
+          minimum_profit: "25",
+          minimum_return_percentage: "10"
+        })
+
+      assert html =~ "Market Trading Job assigned and paused."
+      assert has_element?(lv, "[data-job-panel=market-trading]", "Market Trading Job")
+      assert has_element?(lv, "[data-market-trading-job-status]", "Paused")
+    end
+
     test "defaults a Market Reconnaissance Job tour to current System Marketplaces", %{
       conn: conn,
       operator: operator
