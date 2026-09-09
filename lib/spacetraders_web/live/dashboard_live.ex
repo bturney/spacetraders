@@ -86,6 +86,8 @@ defmodule SpaceTradersWeb.DashboardLive do
               waypoint_markets={@waypoint_markets}
               waypoint_intelligence={@waypoint_intelligence}
               selected_ships={@selected_ships}
+              selected_market_trade_routes={@selected_market_trade_routes}
+              market_trade_route_sorts={@market_trade_route_sorts}
             />
 
             <.activity_panel overviews={non_stale_overviews(@overviews)} />
@@ -169,6 +171,8 @@ defmodule SpaceTradersWeb.DashboardLive do
        show_historical_contracts: MapSet.new(),
        selected_waypoints: %{},
        selected_ships: %{},
+       selected_market_trade_routes: %{},
+       market_trade_route_sorts: %{},
        waypoint_filters: %{},
        waypoint_markets: %{},
        waypoint_intelligence: %{}
@@ -582,7 +586,7 @@ defmodule SpaceTradersWeb.DashboardLive do
          |> clear_draft(
            draft_key(
              "market_trading_from_reconnaissance",
-             [params["ship_symbol"], reconnaissance_job_id, route_index]
+             [reconnaissance_job_id, route_index]
            )
          ),
          :info,
@@ -590,6 +594,39 @@ defmodule SpaceTradersWeb.DashboardLive do
        )}
     else
       {:error, reason} -> {:noreply, put_flash(socket, :error, live_error(reason))}
+    end
+  end
+
+  @impl true
+  def handle_event(
+        "select_market_trade_route",
+        %{"job_id" => job_id, "route_index" => route_index},
+        socket
+      ) do
+    with {:ok, job_id} <- parse_units(job_id),
+         {:ok, route_index} <- parse_optional_nonnegative_units(route_index),
+         route_index when is_integer(route_index) <- route_index do
+      {:noreply, assign(socket, :selected_market_trade_routes, %{job_id => route_index})}
+    else
+      _ -> {:noreply, socket}
+    end
+  end
+
+  @impl true
+  def handle_event("sort_market_trade_routes", %{"job_id" => job_id, "field" => field}, socket) do
+    with {:ok, job_id} <- parse_units(job_id),
+         true <- field in market_trade_route_sort_fields() do
+      {:noreply,
+       update(socket, :market_trade_route_sorts, fn sorts ->
+         {previous_field, previous_direction} = Map.get(sorts, job_id, {"per_unit_spread", :desc})
+
+         direction =
+           if previous_field == field and previous_direction == :desc, do: :asc, else: :desc
+
+         Map.put(sorts, job_id, {field, direction})
+       end)}
+    else
+      _ -> {:noreply, socket}
     end
   end
 
@@ -1868,6 +1905,8 @@ defmodule SpaceTradersWeb.DashboardLive do
   attr :waypoint_markets, :map, default: %{}
   attr :waypoint_intelligence, :map, default: %{}
   attr :selected_ships, :map, default: %{}
+  attr :selected_market_trade_routes, :map, default: %{}
+  attr :market_trade_route_sorts, :map, default: %{}
 
   defp agent_section(assigns) do
     ~H"""
@@ -1892,6 +1931,8 @@ defmodule SpaceTradersWeb.DashboardLive do
         cooldown_tick={@cooldown_tick}
         form_drafts={@form_drafts}
         selected_ship={Map.get(@selected_ships, to_string(@overview.agent.id))}
+        selected_market_trade_routes={@selected_market_trade_routes}
+        market_trade_route_sorts={@market_trade_route_sorts}
       />
       <.fleet_attention
         agent_id={@overview.agent.id}
@@ -3175,6 +3216,8 @@ defmodule SpaceTradersWeb.DashboardLive do
   attr :cooldown_tick, :integer, required: true
   attr :form_drafts, :map, default: %{}
   attr :selected_ship, :string, default: nil
+  attr :selected_market_trade_routes, :map, default: %{}
+  attr :market_trade_route_sorts, :map, default: %{}
 
   defp fleet_grid(assigns) do
     ~H"""
@@ -3218,6 +3261,8 @@ defmodule SpaceTradersWeb.DashboardLive do
               agent_id={@agent.id}
               cooldown_tick={@cooldown_tick}
               form_drafts={@form_drafts}
+              selected_market_trade_routes={@selected_market_trade_routes}
+              market_trade_route_sorts={@market_trade_route_sorts}
               jump_preview={jump_preview_for_intent(ship.intents)}
               alternative_preview={alternative_preview_for_intent(ship.intents)}
               selected={@selected_ship == ship.symbol}
@@ -3280,6 +3325,8 @@ defmodule SpaceTradersWeb.DashboardLive do
   attr :agent_id, :integer, required: true
   attr :cooldown_tick, :integer, default: 0
   attr :form_drafts, :map, default: %{}
+  attr :selected_market_trade_routes, :map, default: %{}
+  attr :market_trade_route_sorts, :map, default: %{}
   attr :jump_preview, :map, default: nil
   attr :alternative_preview, :map, default: nil
   attr :selected, :boolean, default: false
@@ -3499,9 +3546,12 @@ defmodule SpaceTradersWeb.DashboardLive do
           <% @ship.job && @ship.job.type == "market_reconnaissance" -> %>
             <.market_reconnaissance_job_panel
               ship={@ship}
+              ships={@ships}
               waypoints={@waypoints}
               agent={@agent}
               form_drafts={@form_drafts}
+              selected_market_trade_routes={@selected_market_trade_routes}
+              market_trade_route_sorts={@market_trade_route_sorts}
             />
           <% @ship.job && @ship.job.type == "survey" -> %>
             <.survey_job_panel ship={@ship} agent={@agent} />
@@ -3514,9 +3564,12 @@ defmodule SpaceTradersWeb.DashboardLive do
             <.market_trading_job_panel ship={@ship} form_drafts={@form_drafts} />
             <.market_reconnaissance_job_panel
               ship={@ship}
+              ships={@ships}
               waypoints={@waypoints}
               agent={@agent}
               form_drafts={@form_drafts}
+              selected_market_trade_routes={@selected_market_trade_routes}
+              market_trade_route_sorts={@market_trade_route_sorts}
             />
             <button
               :if={is_nil(@ship.job)}
@@ -4199,20 +4252,35 @@ defmodule SpaceTradersWeb.DashboardLive do
   end
 
   attr :ship, :map, required: true
+  attr :ships, :list, required: true
   attr :waypoints, :any, required: true
   attr :agent, :map, required: true
   attr :form_drafts, :map, default: %{}
+  attr :selected_market_trade_routes, :map, default: %{}
+  attr :market_trade_route_sorts, :map, default: %{}
 
   defp market_reconnaissance_job_panel(assigns) do
-    job =
-      Map.get(assigns.ship, :job) ||
-        Enum.find(assigns.ship.job_history || [], fn job ->
-          job.type == "market_reconnaissance" and job.progress["candidate_routes"] != []
-        end)
+    active_job = Map.get(assigns.ship, :job)
 
+    result_jobs =
+      assigns.ship.job_history
+      |> Enum.filter(fn job ->
+        job.type == "market_reconnaissance" and job.status == "completed" and
+          job.progress["candidate_routes"] != []
+      end)
+
+    job = if active_job && active_job.type == "market_reconnaissance", do: active_job
     progress = (job && job.progress) || %{}
     stops = market_reconnaissance_stops(assigns.ship, assigns.agent, assigns.waypoints)
-    assigns = assign(assigns, job: job, progress: progress, stops: stops)
+
+    assigns =
+      assign(assigns,
+        job: job,
+        active_job: active_job,
+        progress: progress,
+        stops: stops,
+        result_jobs: result_jobs
+      )
 
     ~H"""
     <section
@@ -4228,7 +4296,7 @@ defmodule SpaceTradersWeb.DashboardLive do
       </p>
       <p :if={job_reason(@job)} class="mt-2 text-xs text-error">{job_reason(@job)}</p>
       <form
-        :if={is_nil(@job) and match?({:ok, [_ | _]}, @stops)}
+        :if={is_nil(@active_job) and match?({:ok, [_ | _]}, @stops)}
         id={"market-reconnaissance-job-form-#{@ship.symbol}"}
         phx-change="track_draft"
         phx-submit="configure_market_reconnaissance_job"
@@ -4258,13 +4326,13 @@ defmodule SpaceTradersWeb.DashboardLive do
         <button type="submit" class="btn btn-secondary btn-sm">Assign Market Reconnaissance Job</button>
       </form>
       <p
-        :if={is_nil(@job) and @stops == {:ok, []}}
+        :if={is_nil(@active_job) and @stops == {:ok, []}}
         class="mt-3 text-xs opacity-70"
         data-market-reconnaissance-prerequisite
       >
         Waypoint Intelligence must first be established before Marketplace stops can be selected.
       </p>
-      <p :if={is_nil(@job) and match?({:error, _}, @stops)} class="mt-3 text-xs text-warning">
+      <p :if={is_nil(@active_job) and match?({:error, _}, @stops)} class="mt-3 text-xs text-warning">
         Marketplace selection is unavailable: {live_error(elem(@stops, 1))}
       </p>
       <div :if={@job} class="mt-3 space-y-2 text-xs">
@@ -4468,8 +4536,241 @@ defmodule SpaceTradersWeb.DashboardLive do
           >Stop</button>
         </div>
       </div>
+      <.market_reconnaissance_results
+        :for={result <- @result_jobs}
+        job={result}
+        ships={@ships}
+        form_drafts={@form_drafts}
+        selected_route={Map.get(@selected_market_trade_routes, result.id)}
+        sort={Map.get(@market_trade_route_sorts, result.id, {"per_unit_spread", :desc})}
+      />
     </section>
     """
+  end
+
+  attr :job, :map, required: true
+  attr :ships, :list, required: true
+  attr :form_drafts, :map, default: %{}
+  attr :selected_route, :integer, default: nil
+  attr :sort, :any, default: {"per_unit_spread", :desc}
+
+  defp market_reconnaissance_results(assigns) do
+    routes = sort_market_trade_routes(assigns.job.progress["candidate_routes"], assigns.sort)
+
+    selected =
+      Enum.find(routes, fn {_route, index} -> index == assigns.selected_route end)
+
+    eligible_ships =
+      Enum.filter(assigns.ships, fn ship ->
+        ship.nav.system_symbol == assigns.job.progress["target_system"] and is_nil(ship.job)
+      end)
+
+    assigns = assign(assigns, routes: routes, selected: selected, eligible_ships: eligible_ships)
+
+    ~H"""
+    <section class="mt-3 overflow-x-auto" data-market-reconnaissance-results={@job.id}>
+      <table class="table table-xs" data-candidate-trade-routes>
+        <thead>
+          <tr>
+            <th :for={{field, label} <- market_trade_route_sort_columns()}>
+              <button
+                type="button"
+                phx-click="sort_market_trade_routes"
+                phx-value-job_id={@job.id}
+                phx-value-field={field}
+              >{label}</button>
+            </th>
+            <th>Action</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr :for={{route, index} <- @routes} data-candidate-trade-route>
+            <td>{route["trade_symbol"]}</td>
+            <td class="font-mono">{route["source_waypoint"]}</td>
+            <td class="font-mono">{route["destination_waypoint"]}</td>
+            <td>{route["per_unit_spread"]}</td>
+            <td data-candidate-trade-route-age>{market_observation_age(route)}</td>
+            <td>
+              <button
+                type="button"
+                phx-click="select_market_trade_route"
+                phx-value-job_id={@job.id}
+                phx-value-route_index={index}
+                class="btn btn-ghost btn-xs"
+                data-select-market-trade-route={"#{@job.id}-#{index}"}
+              >Configure</button>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+      <form
+        :if={@selected && @eligible_ships != []}
+        id={"market-trading-from-reconnaissance-form-#{@job.id}-#{elem(@selected, 1)}"}
+        phx-change="track_draft"
+        phx-submit="configure_market_trading_job_from_reconnaissance"
+        class="mt-3 grid gap-2 sm:grid-cols-2"
+        data-market-trading-from-reconnaissance-form
+      >
+        <input
+          type="hidden"
+          name="draft_key"
+          value={draft_key("market_trading_from_reconnaissance", [@job.id, elem(@selected, 1)])}
+        />
+        <input type="hidden" name="reconnaissance_job_id" value={@job.id} />
+        <input type="hidden" name="route_index" value={elem(@selected, 1)} />
+        <p class="sm:col-span-2">
+          Confirm buy at <span class="font-mono">{elem(@selected, 0)["source_waypoint"]}</span>
+          and sell at <span class="font-mono">{elem(@selected, 0)["destination_waypoint"]}</span>.
+        </p>
+        <select
+          name="ship_symbol"
+          class="select select-bordered select-sm"
+          value={
+            draft_field(
+              @form_drafts,
+              "market_trading_from_reconnaissance",
+              [@job.id, elem(@selected, 1)],
+              "ship_symbol",
+              hd(@eligible_ships).symbol
+            )
+          }
+        >
+          <option :for={ship <- @eligible_ships} value={ship.symbol}>{ship.symbol}</option>
+        </select>
+        <input
+          name="units"
+          required
+          type="number"
+          min="1"
+          placeholder="Units per trip"
+          class="input input-bordered input-sm"
+          value={reconnaissance_draft(@form_drafts, @job.id, elem(@selected, 1), "units")}
+        />
+        <input
+          name="maximum_observation_age"
+          required
+          type="number"
+          min="1"
+          placeholder="Maximum destination age (seconds)"
+          class="input input-bordered input-sm"
+          value={
+            reconnaissance_draft(@form_drafts, @job.id, elem(@selected, 1), "maximum_observation_age")
+          }
+        />
+        <input
+          name="reserve_credits"
+          type="number"
+          min="0"
+          placeholder="Reserve credits"
+          class="input input-bordered input-sm"
+          value={reconnaissance_draft(@form_drafts, @job.id, elem(@selected, 1), "reserve_credits")}
+        />
+        <input
+          name="credit_exposure"
+          type="number"
+          min="1"
+          placeholder="Credit exposure"
+          class="input input-bordered input-sm"
+          value={reconnaissance_draft(@form_drafts, @job.id, elem(@selected, 1), "credit_exposure")}
+        />
+        <input
+          name="minimum_profit"
+          type="number"
+          min="0"
+          placeholder="Minimum net profit"
+          class="input input-bordered input-sm"
+          value={reconnaissance_draft(@form_drafts, @job.id, elem(@selected, 1), "minimum_profit")}
+        />
+        <input
+          name="minimum_return_percentage"
+          type="number"
+          min="0"
+          step="0.01"
+          placeholder="Minimum return %"
+          class="input input-bordered input-sm"
+          value={
+            reconnaissance_draft(
+              @form_drafts,
+              @job.id,
+              elem(@selected, 1),
+              "minimum_return_percentage"
+            )
+          }
+        />
+        <input
+          name="estimated_fuel_cost"
+          type="number"
+          min="0"
+          placeholder="Estimated fuel cost"
+          class="input input-bordered input-sm"
+          value={
+            reconnaissance_draft(@form_drafts, @job.id, elem(@selected, 1), "estimated_fuel_cost")
+          }
+        />
+        <label class="label cursor-pointer justify-start gap-2 sm:col-span-2">
+          <input
+            name="compatible_existing_cargo"
+            type="checkbox"
+            class="checkbox checkbox-sm"
+            checked={
+              reconnaissance_draft(
+                @form_drafts,
+                @job.id,
+                elem(@selected, 1),
+                "compatible_existing_cargo"
+              ) in ["on", "true", true]
+            }
+          />
+          <span class="label-text">Use compatible cargo already aboard</span>
+        </label>
+        <button type="submit" class="btn btn-secondary btn-sm sm:col-span-2">Configure Market Trading Job</button>
+      </form>
+      <p :if={@selected && @eligible_ships == []} class="mt-2 text-xs text-warning">
+        No idle Ship is currently in this System.
+      </p>
+    </section>
+    """
+  end
+
+  defp reconnaissance_draft(drafts, job_id, route_index, field),
+    do:
+      draft_field(drafts, "market_trading_from_reconnaissance", [job_id, route_index], field, "")
+
+  defp sort_market_trade_routes(routes, {field, direction}) do
+    routes
+    |> Enum.with_index()
+    |> Enum.sort_by(
+      fn {route, _index} -> market_trade_route_sort_value(route, field) end,
+      direction
+    )
+  end
+
+  defp market_trade_route_sort_value(route, "age"), do: market_observation_age_seconds(route)
+  defp market_trade_route_sort_value(route, field), do: route[field]
+
+  defp market_trade_route_sort_columns,
+    do: [
+      {"trade_symbol", "Trade Good"},
+      {"source_waypoint", "Source"},
+      {"destination_waypoint", "Destination"},
+      {"per_unit_spread", "Spread"},
+      {"age", "Observation age"}
+    ]
+
+  defp market_trade_route_sort_fields,
+    do: Enum.map(market_trade_route_sort_columns(), &elem(&1, 0))
+
+  defp market_observation_age_seconds(route) do
+    with source when is_binary(source) <- route["source_observed_at"],
+         destination when is_binary(destination) <- route["destination_observed_at"],
+         {:ok, source, _} <- DateTime.from_iso8601(source),
+         {:ok, destination, _} <- DateTime.from_iso8601(destination) do
+      [source, destination]
+      |> Enum.map(&DateTime.diff(DateTime.utc_now(), &1, :second))
+      |> Enum.max()
+    else
+      _ -> -1
+    end
   end
 
   defp market_reconnaissance_stops(ship, agent, {:ok, waypoints}) when is_list(waypoints) do

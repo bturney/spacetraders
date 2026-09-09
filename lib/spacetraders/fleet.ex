@@ -1189,7 +1189,7 @@ defmodule SpaceTraders.Fleet do
   def configure_market_trading_job(%AgentRecord{}, _ship_symbol, _attrs),
     do: {:error, :agent_token_missing}
 
-  @doc "Replaces a Market Reconnaissance Job with a paused Market Trading Job from one retained Candidate Trade Route."
+  @doc "Creates a paused Market Trading Job from one retained Candidate Trade Route."
   def configure_market_trading_job_from_reconnaissance(
         %AgentRecord{agent_token: token} = agent,
         ship_symbol,
@@ -1202,7 +1202,8 @@ defmodule SpaceTraders.Fleet do
     with :ok <- Agent.execution_allowed?(agent),
          {:ok, ship} <- owned_ship(agent, ship_symbol),
          %Job{type: "market_reconnaissance"} = reconnaissance <-
-           selectable_market_reconnaissance_job(ship.id, reconnaissance_job_id),
+           selectable_market_reconnaissance_job(agent.id, reconnaissance_job_id),
+         :ok <- target_ship_available_for_reconnaissance?(ship, reconnaissance),
          {:ok, live_ship} <-
            Agent.handle_game_result(agent, SpaceTraders.API.get_ship(token, ship_symbol)),
          system when is_binary(system) <- live_ship.nav.system_symbol,
@@ -1530,15 +1531,34 @@ defmodule SpaceTraders.Fleet do
     end
   end
 
-  defp selectable_market_reconnaissance_job(ship_id, job_id) do
+  defp selectable_market_reconnaissance_job(agent_id, job_id) do
     Repo.one(
       from job in Job,
+        join: ship in Ship,
+        on: ship.id == job.ship_id,
         where:
-          job.id == ^job_id and job.ship_id == ^ship_id and job.type == "market_reconnaissance" and
+          job.id == ^job_id and ship.agent_id == ^agent_id and job.type == "market_reconnaissance" and
             job.status in ["paused", "blocked", "completed"],
         order_by: [desc: job.id],
         limit: 1
     )
+  end
+
+  defp target_ship_available_for_reconnaissance?(%Ship{id: ship_id}, %Job{
+         ship_id: ship_id,
+         status: status
+       })
+       when status in ["paused", "blocked"],
+       do: :ok
+
+  defp target_ship_available_for_reconnaissance?(_ship, %Job{status: status})
+       when status != "completed",
+       do: {:error, :market_reconnaissance_job_not_configured}
+
+  defp target_ship_available_for_reconnaissance?(ship, _reconnaissance) do
+    if unfinished_job(ship.id),
+      do: {:error, :unfinished_job_already_assigned},
+      else: :ok
   end
 
   defp market_trade_candidates_in_system?(candidates, system) do

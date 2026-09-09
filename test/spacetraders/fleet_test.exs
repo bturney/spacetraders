@@ -4121,6 +4121,153 @@ defmodule SpaceTraders.FleetTest do
   end
 
   describe "Market Reconnaissance Job" do
+    test "hands a completed Candidate Trade Route to another Ship in the target System" do
+      agent = agent_fixture()
+      reconnaissance_ship = ship_fixture(agent, "RECON-SHIP")
+      ship_fixture(agent, "TRADING-SHIP")
+
+      reconnaissance =
+        Repo.insert!(%Job{
+          ship_id: reconnaissance_ship.id,
+          type: "market_reconnaissance",
+          status: "completed",
+          extraction_waypoint: "RECONNAISSANCE-NONE",
+          market_waypoint: "RECONNAISSANCE-NONE",
+          cargo_threshold: 1,
+          finished_at: ~U[2026-09-09 00:02:00Z],
+          progress: %{
+            "target_system" => "X1-UX81",
+            "candidate_routes" => [
+              %{
+                "trade_symbol" => "IRON_ORE",
+                "source_waypoint" => "X1-UX81-A1",
+                "destination_waypoint" => "X1-UX81-A2",
+                "source_buy_price" => 10,
+                "destination_sell_price" => 20,
+                "per_unit_spread" => 10,
+                "source_observed_at" => "2026-09-09T00:00:00Z",
+                "destination_observed_at" => "2026-09-09T00:01:00Z"
+              }
+            ]
+          }
+        })
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        assert conn.request_path == "/v2/my/ships/TRADING-SHIP"
+        Req.Test.json(conn, %{"data" => ship_body("TRADING-SHIP")})
+      end)
+
+      assert {:ok,
+              %Job{type: "market_trading", status: "paused", predecessor_job_id: predecessor_id}} =
+               Fleet.configure_market_trading_job_from_reconnaissance(
+                 agent,
+                 "TRADING-SHIP",
+                 reconnaissance.id,
+                 0,
+                 %{units: 5, maximum_observation_age: 3_600}
+               )
+
+      assert predecessor_id == reconnaissance.id
+
+      assert Fleet.ship_job_history(agent, "RECON-SHIP")
+             |> Enum.any?(&(&1.id == reconnaissance.id))
+    end
+
+    test "rejects a completed Candidate Trade Route handoff outside its target System" do
+      agent = agent_fixture()
+      reconnaissance_ship = ship_fixture(agent, "RECON-SHIP")
+      ship_fixture(agent, "TRADING-SHIP")
+
+      reconnaissance =
+        Repo.insert!(%Job{
+          ship_id: reconnaissance_ship.id,
+          type: "market_reconnaissance",
+          status: "completed",
+          extraction_waypoint: "RECONNAISSANCE-NONE",
+          market_waypoint: "RECONNAISSANCE-NONE",
+          cargo_threshold: 1,
+          finished_at: ~U[2026-09-09 00:02:00Z],
+          progress: %{
+            "target_system" => "X1-UX81",
+            "candidate_routes" => [
+              %{
+                "trade_symbol" => "IRON_ORE",
+                "source_waypoint" => "X1-UX81-A1",
+                "destination_waypoint" => "X1-UX81-A2",
+                "source_buy_price" => 10,
+                "destination_sell_price" => 20
+              }
+            ]
+          }
+        })
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        assert conn.request_path == "/v2/my/ships/TRADING-SHIP"
+
+        Req.Test.json(conn, %{
+          "data" =>
+            ship_body("TRADING-SHIP", %{"nav" => nav_body("DOCKED", systemSymbol: "X1-OTHER")})
+        })
+      end)
+
+      assert {:error,
+              {:fixed_system_changed, %{configured_system: "X1-UX81", current_system: "X1-OTHER"}}} =
+               Fleet.configure_market_trading_job_from_reconnaissance(
+                 agent,
+                 "TRADING-SHIP",
+                 reconnaissance.id,
+                 0,
+                 %{units: 5, maximum_observation_age: 3_600}
+               )
+    end
+
+    test "does not assign a second Job to the reconnaissance Ship after a later assignment" do
+      agent = agent_fixture()
+      reconnaissance_ship = ship_fixture(agent, "RECON-SHIP")
+
+      reconnaissance =
+        Repo.insert!(%Job{
+          ship_id: reconnaissance_ship.id,
+          type: "market_reconnaissance",
+          status: "completed",
+          extraction_waypoint: "RECONNAISSANCE-NONE",
+          market_waypoint: "RECONNAISSANCE-NONE",
+          cargo_threshold: 1,
+          finished_at: ~U[2026-09-09 00:02:00Z],
+          progress: %{
+            "target_system" => "X1-UX81",
+            "candidate_routes" => [
+              %{
+                "trade_symbol" => "IRON_ORE",
+                "source_waypoint" => "X1-UX81-A1",
+                "destination_waypoint" => "X1-UX81-A2",
+                "source_buy_price" => 10,
+                "destination_sell_price" => 20
+              }
+            ]
+          }
+        })
+
+      Repo.insert!(%Job{
+        ship_id: reconnaissance_ship.id,
+        type: "market_reconnaissance",
+        status: "paused",
+        extraction_waypoint: "RECONNAISSANCE-NONE",
+        market_waypoint: "RECONNAISSANCE-NONE",
+        cargo_threshold: 1,
+        progress: %{"target_system" => "X1-UX81", "candidate_routes" => []}
+      })
+
+      assert {:error, :unfinished_job_already_assigned} =
+               Fleet.configure_market_trading_job_from_reconnaissance(
+                 agent,
+                 "RECON-SHIP",
+                 reconnaissance.id,
+                 0,
+                 %{units: 5, maximum_observation_age: 3_600}
+               )
+    end
+
     test "persists an ordered distinct Marketplace tour" do
       agent = agent_fixture()
       ship_fixture(agent, "FLEET-SHIP")

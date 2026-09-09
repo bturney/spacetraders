@@ -1337,22 +1337,28 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       assert has_element?(lv, "button[phx-click=\"resume_market_trading_job\"]")
     end
 
-    test "selects a reconnaissance Candidate Trade Route for a Market Trading Job", %{
+    test "selects a completed reconnaissance Candidate Trade Route for another Ship", %{
       conn: conn,
       operator: operator
     } do
       agent = agent_fixture(operator)
 
-      ship =
+      reconnaissance_ship =
         Repo.insert!(%Ship{
           agent_id: agent.id,
           symbol: "ORBITALIST-1",
           ship_type: "SHIP_COMMAND_FRIGATE"
         })
 
+      Repo.insert!(%Ship{
+        agent_id: agent.id,
+        symbol: "ORBITALIST-2",
+        ship_type: "SHIP_COMMAND_FRIGATE"
+      })
+
       reconnaissance =
         Repo.insert!(%Job{
-          ship_id: ship.id,
+          ship_id: reconnaissance_ship.id,
           type: "market_reconnaissance",
           status: "completed",
           extraction_waypoint: "RECONNAISSANCE-NONE",
@@ -1371,29 +1377,50 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
                 "per_unit_spread" => 10,
                 "source_observed_at" => "2026-09-09T00:00:00Z",
                 "destination_observed_at" => "2026-09-09T00:01:00Z"
+              },
+              %{
+                "trade_symbol" => "COPPER_ORE",
+                "source_waypoint" => "X1-UX81-A2",
+                "destination_waypoint" => "X1-UX81-A1",
+                "source_buy_price" => 9,
+                "destination_sell_price" => 14,
+                "per_unit_spread" => 5,
+                "source_observed_at" => "2026-09-09T00:00:00Z",
+                "destination_observed_at" => "2026-09-09T00:01:00Z"
               }
             ]
           }
         })
 
-      stub_live_game(agent_overview_body(agent.symbol), [ship_body("ORBITALIST-1")])
+      stub_live_game(agent_overview_body(agent.symbol), [
+        ship_body("ORBITALIST-1"),
+        ship_body("ORBITALIST-2")
+      ])
 
       {:ok, lv, _html} = live(conn, ~p"/")
 
+      assert has_element?(lv, "table[data-candidate-trade-routes]")
       assert has_element?(lv, "[data-candidate-trade-route]", "IRON_ORE")
-      assert has_element?(lv, "[data-candidate-trade-route-age]", "Observation age")
+      refute has_element?(lv, "form[data-market-trading-from-reconnaissance-form]")
 
       assert has_element?(
                lv,
-               "button[data-select-market-trade-route]",
-               "Configure Market Trading Job"
+               "button[data-select-market-trade-route=\"#{reconnaissance.id}-0\"]",
+               "Configure"
              )
+
+      lv
+      |> element("button[data-select-market-trade-route=\"#{reconnaissance.id}-0\"]")
+      |> render_click()
+
+      assert has_element?(lv, "form[data-market-trading-from-reconnaissance-form]")
+      assert has_element?(lv, "select[name=ship_symbol] option[value=ORBITALIST-2]")
 
       html =
         lv
-        |> element("form#market-trading-from-reconnaissance-form-ORBITALIST-1-0")
+        |> element("form[data-market-trading-from-reconnaissance-form]")
         |> render_submit(%{
-          ship_symbol: "ORBITALIST-1",
+          ship_symbol: "ORBITALIST-2",
           reconnaissance_job_id: Integer.to_string(reconnaissance.id),
           route_index: "0",
           units: "5",
