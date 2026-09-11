@@ -36,6 +36,7 @@ defmodule SpaceTradersWeb.DashboardLive do
   alias SpaceTraders.Intelligence
   alias SpaceTraders.SystemWaypointProjection
   alias SpaceTradersWeb.DashboardPrototype
+  alias SpaceTradersWeb.StrategyPrototype
 
   @gather_kinds ["extract", "siphon"]
 
@@ -43,66 +44,70 @@ defmodule SpaceTradersWeb.DashboardLive do
   def render(assigns) do
     ~H"""
     <Layouts.app flash={@flash} current_scope={@current_scope} wide>
-      <%= if @prototype_variant do %>
-        <DashboardPrototype.render variant={@prototype_variant} />
+      <%= if @strategy_variant do %>
+        <StrategyPrototype.render variant={@strategy_variant} />
       <% else %>
-        <%= if @operator do %>
-          <div class="space-y-6">
-            <div class="flex flex-col gap-5 sm:flex-row sm:items-end sm:justify-between">
-              <div class="space-y-2">
-                <p class="eyebrow">Operator command deck</p>
-                <.header>
-                  Fleet command
-                  <:subtitle>
-                    Learn the loop: choose a Mission, move a Ship, and watch your Fleet grow.
-                  </:subtitle>
-                </.header>
-              </div>
-              <.link navigate={~p"/agents/new"} class="btn btn-primary min-h-12 shrink-0">Mint an agent</.link>
-            </div>
-
-            <.stale_agent_card stale_agents={stale_agents(@overviews)} />
-
-            <.contract_hero overviews={non_stale_overviews(@overviews)} />
-
-            <div :if={@overviews == []} class="alert alert-outline">
-              You haven't minted any agents yet.
-              <.link navigate={~p"/agents/new"} class="font-semibold underline">
-                Mint your first agent
-              </.link>
-              .
-            </div>
-
-            <.agent_section
-              :for={overview <- @overviews}
-              :if={not overview.stale?}
-              overview={overview}
-              cooldown_tick={@cooldown_tick}
-              form_drafts={@form_drafts}
-              selected_waypoints={@selected_waypoints}
-              waypoint_filters={@waypoint_filters}
-              expanded_market_descriptions={@expanded_market_descriptions}
-              show_historical_contracts={@show_historical_contracts}
-              waypoint_markets={@waypoint_markets}
-              waypoint_intelligence={@waypoint_intelligence}
-              selected_ships={@selected_ships}
-              selected_market_trade_routes={@selected_market_trade_routes}
-              market_trade_route_sorts={@market_trade_route_sorts}
-            />
-
-            <.activity_panel overviews={non_stale_overviews(@overviews)} />
-          </div>
+        <%= if @prototype_variant do %>
+          <DashboardPrototype.render variant={@prototype_variant} />
         <% else %>
-          <div class="mx-auto max-w-lg py-16 text-center">
-            <h1 class="text-4xl font-bold tracking-tight">SpaceTraders dashboard</h1>
-            <p class="mt-4 text-lg opacity-80">
-              Drive your fleet and missions from the browser. Log in or register to get started.
-            </p>
-            <div class="mt-10 flex justify-center gap-4">
-              <.link href={~p"/operators/log-in"} class="btn btn-primary">Log in</.link>
-              <.link href={~p"/operators/register"} class="btn btn-soft">Register</.link>
+          <%= if @operator do %>
+            <div class="space-y-6">
+              <div class="flex flex-col gap-5 sm:flex-row sm:items-end sm:justify-between">
+                <div class="space-y-2">
+                  <p class="eyebrow">Operator command deck</p>
+                  <.header>
+                    Fleet command
+                    <:subtitle>
+                      Learn the loop: choose a Mission, move a Ship, and watch your Fleet grow.
+                    </:subtitle>
+                  </.header>
+                </div>
+                <.link navigate={~p"/agents/new"} class="btn btn-primary min-h-12 shrink-0">Mint an agent</.link>
+              </div>
+
+              <.stale_agent_card stale_agents={stale_agents(@overviews)} />
+
+              <.contract_hero overviews={non_stale_overviews(@overviews)} />
+
+              <div :if={@overviews == []} class="alert alert-outline">
+                You haven't minted any agents yet.
+                <.link navigate={~p"/agents/new"} class="font-semibold underline">
+                  Mint your first agent
+                </.link>
+                .
+              </div>
+
+              <.agent_section
+                :for={overview <- @overviews}
+                :if={not overview.stale?}
+                overview={overview}
+                cooldown_tick={@cooldown_tick}
+                form_drafts={@form_drafts}
+                selected_waypoints={@selected_waypoints}
+                waypoint_filters={@waypoint_filters}
+                expanded_market_descriptions={@expanded_market_descriptions}
+                show_historical_contracts={@show_historical_contracts}
+                waypoint_markets={@waypoint_markets}
+                waypoint_intelligence={@waypoint_intelligence}
+                selected_ships={@selected_ships}
+                selected_market_trade_routes={@selected_market_trade_routes}
+                market_trade_route_sorts={@market_trade_route_sorts}
+              />
+
+              <.activity_panel overviews={non_stale_overviews(@overviews)} />
             </div>
-          </div>
+          <% else %>
+            <div class="mx-auto max-w-lg py-16 text-center">
+              <h1 class="text-4xl font-bold tracking-tight">SpaceTraders dashboard</h1>
+              <p class="mt-4 text-lg opacity-80">
+                Drive your fleet and missions from the browser. Log in or register to get started.
+              </p>
+              <div class="mt-10 flex justify-center gap-4">
+                <.link href={~p"/operators/log-in"} class="btn btn-primary">Log in</.link>
+                <.link href={~p"/operators/register"} class="btn btn-soft">Register</.link>
+              </div>
+            </div>
+          <% end %>
         <% end %>
       <% end %>
     </Layouts.app>
@@ -111,9 +116,13 @@ defmodule SpaceTradersWeb.DashboardLive do
 
   @impl true
   def mount(params, _session, socket) do
-    socket = assign(socket, :prototype_variant, prototype_variant(params["prototype"]))
+    socket =
+      assign(socket,
+        prototype_variant: prototype_variant(params["prototype"]),
+        strategy_variant: strategy_variant(params["strategy"])
+      )
 
-    if socket.assigns.prototype_variant do
+    if socket.assigns.prototype_variant || socket.assigns.strategy_variant do
       {:ok, socket}
     else
       case socket.assigns.current_scope do
@@ -121,6 +130,15 @@ defmodule SpaceTradersWeb.DashboardLive do
         %{operator: operator} -> mount_operator(socket, operator)
       end
     end
+  end
+
+  @impl true
+  def handle_params(params, _uri, socket) do
+    {:noreply,
+     assign(socket,
+       prototype_variant: prototype_variant(params["prototype"]),
+       strategy_variant: strategy_variant(params["strategy"])
+     )}
   end
 
   defp mount_anonymous(socket) do
@@ -134,6 +152,9 @@ defmodule SpaceTradersWeb.DashboardLive do
   defp prototype_variant(variant) when variant in ["a", "b", "c"], do: variant
   defp prototype_variant(_variant), do: nil
 
+  defp strategy_variant(variant) when variant in ["a", "b", "c"], do: variant
+  defp strategy_variant(_variant), do: nil
+
   defp previous_prototype("a"), do: "c"
   defp previous_prototype("b"), do: "a"
   defp previous_prototype("c"), do: "b"
@@ -143,6 +164,16 @@ defmodule SpaceTradersWeb.DashboardLive do
   defp next_prototype("b"), do: "c"
   defp next_prototype("c"), do: "a"
   defp next_prototype(_variant), do: "a"
+
+  defp previous_strategy("a"), do: "c"
+  defp previous_strategy("b"), do: "a"
+  defp previous_strategy("c"), do: "b"
+  defp previous_strategy(_variant), do: "a"
+
+  defp next_strategy("a"), do: "b"
+  defp next_strategy("b"), do: "c"
+  defp next_strategy("c"), do: "a"
+  defp next_strategy(_variant), do: "a"
 
   defp non_stale_overviews(overviews), do: Enum.reject(overviews, & &1.stale?)
 
@@ -1081,6 +1112,23 @@ defmodule SpaceTradersWeb.DashboardLive do
     {:noreply,
      push_patch(socket, to: "/?prototype=#{next_prototype(socket.assigns.prototype_variant)}")}
   end
+
+  @impl true
+  def handle_event("strategy_variant", %{"variant" => variant}, socket) do
+    {:noreply, push_patch(socket, to: "/?strategy=#{strategy_variant(variant)}")}
+  end
+
+  def handle_event("strategy_variant", %{"key" => "ArrowLeft"}, socket) do
+    {:noreply,
+     push_patch(socket, to: "/?strategy=#{previous_strategy(socket.assigns.strategy_variant)}")}
+  end
+
+  def handle_event("strategy_variant", %{"key" => "ArrowRight"}, socket) do
+    {:noreply,
+     push_patch(socket, to: "/?strategy=#{next_strategy(socket.assigns.strategy_variant)}")}
+  end
+
+  def handle_event("strategy_variant", %{"key" => _key}, socket), do: {:noreply, socket}
 
   @impl true
   def handle_event(action, %{"symbol" => ship_symbol}, socket)
