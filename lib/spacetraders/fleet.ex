@@ -3965,6 +3965,9 @@ defmodule SpaceTraders.Fleet do
 
   @doc false
   def record_activity(agent, ship, kind, message, metadata \\ %{}) do
+    message = SpaceTraders.Observability.redact(message, agent.agent_token)
+    metadata = SpaceTraders.Observability.redact(metadata, agent.agent_token)
+
     Repo.insert!(%Activity{
       agent_id: agent.id,
       ship_id: ship.id,
@@ -3973,6 +3976,14 @@ defmodule SpaceTraders.Fleet do
       metadata: metadata
     })
 
+    job =
+      Job
+      |> where([job], job.ship_id == ^ship.id)
+      |> order_by([job], desc: job.inserted_at, desc: job.id)
+      |> limit(1)
+      |> Repo.one()
+
+    SpaceTraders.Observability.fleet_activity(agent, ship, job, kind, metadata)
     :ok
   end
 

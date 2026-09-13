@@ -14,6 +14,18 @@ defmodule SpaceTraders.API.ErrorTest do
   end
 
   describe "gameplay 4xx errors" do
+    test "redacts an AgentToken echoed by an API error" do
+      stub_error(401, %{
+        "code" => 4100,
+        "message" => "Rejected AGENT_TOKEN_SECRET",
+        "data" => %{"authorization" => "Bearer AGENT_TOKEN_SECRET"}
+      })
+
+      assert {:error, %GameplayError{} = error} = API.get_agent("AGENT_TOKEN_SECRET")
+      refute inspect(error) =~ "AGENT_TOKEN_SECRET"
+      assert error.message == "Rejected [REDACTED]"
+    end
+
     test "in transit surfaces as %GameplayError{type: :in_transit}" do
       stub_error(409, %{"code" => 4200, "message" => "Ship is in transit.", "data" => %{}})
 

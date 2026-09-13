@@ -550,23 +550,22 @@ defmodule SpaceTraders.API do
 
       {:ok, %{status: status, body: body}} when status in 400..499 ->
         emit_request_metric(path, status)
-        {:error, gameplay_error(status, body)}
+        {:error, gameplay_error(status, SpaceTraders.Observability.redact(body, token))}
 
       {:ok, %{status: status}} ->
         emit_request_metric(path, status)
         {:error, SpaceTraders.API.Error.new(status, "unexpected response")}
 
       {:error, reason} ->
-        emit_request_metric(path, 0)
-        {:error, SpaceTraders.API.Error.transport(reason)}
+        emit_request_metric(path, "unknown")
+
+        {:error,
+         SpaceTraders.API.Error.transport(SpaceTraders.Observability.redact(reason, token))}
     end
   end
 
   defp emit_request_metric(path, status) do
-    :telemetry.execute([:spacetraders, :api, :request], %{count: 1}, %{
-      endpoint: path,
-      status: status
-    })
+    SpaceTraders.Observability.api_request(path, status)
   end
 
   defp build_options(method, path, token) do
@@ -575,7 +574,7 @@ defmodule SpaceTraders.API do
       method: method,
       url: path,
       retry: retry_strategy(method, path),
-      retry_log_level: :warning
+      retry_log_level: false
     ] ++ maybe_auth(token)
   end
 
@@ -621,7 +620,11 @@ defmodule SpaceTraders.API do
     true
   end
 
-  defp retry(_request, %Req.TransportError{}, _path, :get), do: true
+  defp retry(_request, %Req.TransportError{}, path, :get) do
+    emit_request_metric(path, "unknown")
+    true
+  end
+
   defp retry(_request, _response, _path, _method), do: false
 
   defp base_url do

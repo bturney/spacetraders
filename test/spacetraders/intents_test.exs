@@ -20,6 +20,33 @@ defmodule SpaceTraders.IntentsTest do
     :ok
   end
 
+  test "Intent transitions emit stable lifecycle correlation identifiers" do
+    agent = agent_fixture()
+    ship = ship_fixture(agent, "INTENT-SHIP")
+    intent = Repo.insert!(%Intent{ship_id: ship.id, target_waypoint: "X1-UX81-A2"})
+    event = [:spacetraders, :intent, :transition]
+    handler_id = "intent-transition-#{System.unique_integer()}"
+    :telemetry.attach(handler_id, event, &__MODULE__.handle_event/4, self())
+    on_exit(fn -> :telemetry.detach(handler_id) end)
+
+    assert {:ok, updated} = Intents.transition_intent(intent, status: "waiting")
+    assert updated.status == "waiting"
+
+    assert_receive {:telemetry, ^event, %{count: 1}, metadata}
+    assert metadata.intent_id == intent.id
+    assert metadata.ship_id == ship.id
+    assert metadata.intent_type == "navigate"
+    assert metadata.from_state == "active"
+    assert metadata.to_state == "waiting"
+
+    assert {:ok, _updated} = Intents.transition_intent(updated, recovery_attempts: 1)
+    refute_receive {:telemetry, ^event, %{count: 1}, _metadata}
+  end
+
+  def handle_event(event, measurements, metadata, test_pid) do
+    send(test_pid, {:telemetry, event, measurements, metadata})
+  end
+
   defp future_iso(seconds \\ 3600) do
     DateTime.add(DateTime.utc_now(), seconds, :second)
     |> DateTime.to_iso8601()
