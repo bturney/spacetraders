@@ -2302,6 +2302,55 @@ defmodule SpaceTraders.IntentsTest do
                Intents.reconcile(agent.id, "FLEET-SHIP", nil, :boot, nil, nil)
     end
 
+    test "boot recovery fences a sent-or-unknown purchase without replaying it" do
+      agent = agent_fixture()
+      ship = ship_fixture(agent, "FLEET-SHIP")
+
+      Repo.insert!(%Intent{
+        ship_id: ship.id,
+        type: "buy",
+        target_waypoint: "X1-UX81-A1",
+        parameters: %{
+          "trade_symbol" => "IRON_ORE",
+          "units" => 5,
+          "max_unit_price" => 10
+        },
+        status: "active",
+        in_flight_action: %{
+          "kind" => "buy",
+          "trade_symbol" => "IRON_ORE",
+          "units" => 5,
+          "listing_price" => 10,
+          "cargo_before" => 0
+        }
+      })
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case {conn.request_path, conn.method} do
+          {"/v2/my/ships/FLEET-SHIP", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" =>
+                ship_body("FLEET-SHIP", %{
+                  "cargo" => %{
+                    "capacity" => 40,
+                    "units" => 5,
+                    "inventory" => [%{"symbol" => "IRON_ORE", "units" => 5}]
+                  }
+                })
+            })
+
+          {path, method} ->
+            flunk("unexpected request #{method} #{path}")
+        end
+      end)
+
+      assert {:ok,
+              %Intent{
+                status: "blocked",
+                blocker: %JobBlocker{reason: "ambiguous_operation_evidence"}
+              }} = Intents.reconcile(agent.id, "FLEET-SHIP", nil, :boot, nil, nil)
+    end
+
     test "boot recovery blocks after repeated authoritative read failures" do
       agent = agent_fixture()
       ship = ship_fixture(agent, "FLEET-SHIP")
