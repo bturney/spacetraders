@@ -27,6 +27,54 @@ defmodule SpaceTraders.FleetTest do
     :ok
   end
 
+  test "Fleet activity emits correlated telemetry without AgentToken values" do
+    agent = agent_fixture("AGENT_TOKEN_SECRET")
+    ship = ship_fixture(agent, "FLEET-SHIP")
+
+    job =
+      Repo.insert!(%Job{
+        ship_id: ship.id,
+        type: "miner",
+        status: "waiting",
+        extraction_waypoint: "X1-UX81-A2",
+        market_waypoint: "X1-UX81-A1",
+        cargo_threshold: 20
+      })
+
+    event = [:spacetraders, :fleet, :activity]
+    handler_id = "fleet-activity-#{System.unique_integer()}"
+    :telemetry.attach(handler_id, event, &__MODULE__.handle_event/4, self())
+    on_exit(fn -> :telemetry.detach(handler_id) end)
+
+    assert :ok =
+             Fleet.record_activity(
+               agent,
+               ship,
+               "miner_job_waiting",
+               "Waiting after AGENT_TOKEN_SECRET",
+               %{"detail" => "AGENT_TOKEN_SECRET"}
+             )
+
+    assert_receive {:telemetry, ^event, %{count: 1}, metadata}
+    assert metadata.agent_id == agent.id
+    assert metadata.ship_id == ship.id
+    assert metadata.ship_symbol == "FLEET-SHIP"
+    assert metadata.job_id == job.id
+    assert metadata.job_type == "miner"
+    assert metadata.job_state == "waiting"
+    assert metadata.kind == "miner_job_waiting"
+    refute inspect(metadata) =~ "AGENT_TOKEN_SECRET"
+
+    [activity] = Fleet.recent_activity(agent)
+    refute activity.message =~ "AGENT_TOKEN_SECRET"
+    refute inspect(activity.metadata) =~ "AGENT_TOKEN_SECRET"
+    assert activity.message =~ "[REDACTED]"
+  end
+
+  def handle_event(event, measurements, metadata, test_pid) do
+    send(test_pid, {:telemetry, event, measurements, metadata})
+  end
+
   defp stop_current_intent(agent) do
     case Intents.current(agent) do
       [%Intent{id: id} | _] -> Intents.stop(manual_scope(agent), %Intents.ManualControl{}, id)

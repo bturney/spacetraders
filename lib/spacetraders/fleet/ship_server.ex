@@ -125,6 +125,8 @@ defmodule SpaceTraders.Fleet.ShipServer do
       pending: %{}
     }
 
+    Logger.metadata(agent_id: state.agent_id, ship_symbol: state.symbol)
+
     state =
       Enum.reduce(Timeline.pending_events(:ship, state.symbol), state, &rearm/2)
 
@@ -148,13 +150,18 @@ defmodule SpaceTraders.Fleet.ShipServer do
 
   @impl true
   def handle_info({:timeline, %Event{} = event}, state) do
-    type = String.to_existing_atom(event.event_type)
+    SpaceTraders.Observability.with_context(
+      [intent_id: event.payload["intent_id"], job_id: event.payload["job_id"]],
+      fn ->
+        type = String.to_existing_atom(event.event_type)
 
-    if not Timeline.pending?(event) do
-      {:noreply, drop_pending_event(state, type, event)}
-    else
-      handle_pending_event(type, event, state)
-    end
+        if not Timeline.pending?(event) do
+          {:noreply, drop_pending_event(state, type, event)}
+        else
+          handle_pending_event(type, event, state)
+        end
+      end
+    )
   end
 
   defp handle_pending_event(type, event, state) do

@@ -2,10 +2,11 @@ defmodule SpaceTraders.AgentTest do
   use SpaceTraders.DataCase
 
   alias SpaceTraders.Agent
+  alias SpaceTraders.Fleet
 
   import SpaceTraders.AgentFixtures
   alias SpaceTraders.Agent.{Operator, OperatorToken, Scope}
-  alias SpaceTraders.Fleet.{Ship, ShipServer}
+  alias SpaceTraders.Fleet.{Intent, Intents, Job, Ship, ShipServer}
   alias SpaceTraders.Timeline
   alias SpaceTraders.Timeline.Event
 
@@ -533,6 +534,25 @@ defmodule SpaceTraders.AgentTest do
           agent_id: stale_agent.id
         })
 
+      job =
+        Repo.insert!(%Job{
+          ship_id: ship.id,
+          type: "miner",
+          status: "active",
+          extraction_waypoint: "X1-UX81-A2",
+          market_waypoint: "X1-UX81-A1",
+          cargo_threshold: 30
+        })
+
+      Repo.insert!(%Intent{
+        ship_id: ship.id,
+        job_id: job.id,
+        caller: "job",
+        type: "navigate",
+        target_waypoint: "X1-UX81-A2",
+        status: "waiting"
+      })
+
       {:ok, event} =
         Timeline.schedule_event(
           :ship,
@@ -576,6 +596,8 @@ defmodule SpaceTraders.AgentTest do
       assert agent.agent_token == "FRESH_TOKEN"
       refute Repo.get(SpaceTraders.Agent.Agent, stale_agent.id)
       refute Repo.get(Ship, ship.id)
+      refute Fleet.ship_job(stale_agent, ship.symbol)
+      assert Intents.current(stale_agent) == []
       assert Repo.get(Event, event.id).status == "cancelled"
       assert Registry.lookup(SpaceTraders.Fleet.ShipRegistry, ship.symbol) == []
     end

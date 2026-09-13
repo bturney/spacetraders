@@ -1275,6 +1275,66 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       assert has_element?(lv, "button[phx-click=\"resume_miner_job\"]")
     end
 
+    test "assigns a Survey Job from the ship operations panel", %{
+      conn: conn,
+      operator: operator
+    } do
+      agent = agent_fixture(operator)
+
+      ship =
+        ship_body("ORBITALIST-1", %{
+          "mounts" => [%{"symbol" => "MOUNT_SURVEYOR_I"}]
+        })
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case {conn.request_path, conn.method} do
+          {"/v2/my/agent", "GET"} ->
+            Req.Test.json(conn, %{"data" => agent_overview_body(agent.symbol)})
+
+          {"/v2/my/ships", "GET"} ->
+            Req.Test.json(conn, %{"data" => [ship]})
+
+          {"/v2/my/ships/ORBITALIST-1", "GET"} ->
+            Req.Test.json(conn, %{"data" => ship})
+
+          {"/v2/my/contracts", "GET"} ->
+            Req.Test.json(conn, %{"data" => []})
+
+          {"/v2/systems/X1-UX81/waypoints", "GET"} ->
+            Req.Test.json(conn, %{"data" => []})
+
+          {"/v2/systems/X1-UX81/waypoints/X1-UX81-A2", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => %{
+                "symbol" => "X1-UX81-A2",
+                "type" => "ASTEROID_FIELD",
+                "traits" => []
+              }
+            })
+
+          {path, method} ->
+            flunk("unexpected request #{method} #{path}")
+        end
+      end)
+
+      {:ok, lv, _html} = live(conn, ~p"/")
+
+      assert has_element?(lv, "form#survey-job-form-ORBITALIST-1", "Assign Survey Job")
+
+      html =
+        lv
+        |> element("form#survey-job-form-ORBITALIST-1")
+        |> render_submit(%{
+          ship_symbol: "ORBITALIST-1",
+          extraction_waypoint: "X1-UX81-A2"
+        })
+
+      assert html =~ "Survey Job assigned and paused."
+      assert has_element?(lv, "[data-job-panel=survey]", "Survey Job")
+      assert has_element?(lv, "[data-job-panel=survey]", "Paused")
+      assert has_element?(lv, "button[phx-click=\"resume_survey_job\"]")
+    end
+
     test "assigns a Procurement Job from the ship operations panel", %{
       conn: conn,
       operator: operator

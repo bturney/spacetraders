@@ -79,7 +79,32 @@ config :logger, :default_formatter,
   format: "$time $metadata[$level] $message\n",
   metadata: [:request_id]
 
-config :logger, :default_handler, formatter: {LoggerJSON.Formatters.Basic, metadata: :all}
+config :logger, :default_handler,
+  formatter:
+    {LoggerJSON.Formatters.Basic,
+     metadata: [
+       :request_id,
+       :operator_id,
+       :agent_id,
+       :fleet_generation_id,
+       :strategy_revision_id,
+       :decision_episode_id,
+       :commitment_id,
+       :ship_id,
+       :ship_symbol,
+       :job_id,
+       :intent_id,
+       :mutation_attempt_id,
+       :endpoint,
+       :status,
+       :outcome,
+       :kind,
+       :job_type,
+       :job_state,
+       :intent_type,
+       :from_state,
+       :to_state
+     ]}
 
 config :spacetraders, SpaceTraders.PromEx,
   disabled: false,

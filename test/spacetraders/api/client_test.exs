@@ -4,6 +4,7 @@ defmodule SpaceTraders.API.ClientTest do
   alias SpaceTraders.API
   alias SpaceTraders.API.Model
 
+  import ExUnit.CaptureLog
   import Plug.Conn, only: [get_req_header: 2]
 
   describe "get_status/0" do
@@ -27,7 +28,7 @@ defmodule SpaceTraders.API.ClientTest do
               }} = API.get_status()
     end
 
-    test "emits an API request metric with endpoint and response status" do
+    test "emits correlated API telemetry with a bounded endpoint and measured outcome" do
       event = [:spacetraders, :api, :request]
       handler_id = "api-metric-#{System.unique_integer()}"
       :telemetry.attach(handler_id, event, &__MODULE__.handle_event/4, self())
@@ -38,8 +39,19 @@ defmodule SpaceTraders.API.ClientTest do
         Req.Test.json(conn, %{"data" => %{}})
       end)
 
-      assert {:ok, %Model.Agent{}} = API.get_agent("TOKEN")
-      assert_receive {:telemetry, ^event, %{count: 1}, %{endpoint: "/my/agent", status: 200}}
+      Logger.metadata(request_id: "request-123", intent_id: 41, job_id: 29)
+
+      assert {:ok, %Model.Ship{}} = API.get_ship("AGENT_TOKEN_SECRET", "ORBITALIST-1")
+
+      assert_receive {:telemetry, ^event, %{count: 1}, metadata}
+      assert metadata.endpoint == "/my/ships/{shipSymbol}"
+      assert metadata.status == 200
+      assert metadata.outcome == "ok"
+      assert metadata.request_id == "request-123"
+      assert metadata.ship_symbol == "ORBITALIST-1"
+      assert metadata.intent_id == 41
+      assert metadata.job_id == 29
+      refute inspect(metadata) =~ "AGENT_TOKEN_SECRET"
     end
 
     test "emits a 429 API request metric after rate-limit retries" do
@@ -61,8 +73,57 @@ defmodule SpaceTraders.API.ClientTest do
 
       assert {:error, %SpaceTraders.API.GameplayError{code: 1000}} = API.get_agent("TOKEN")
 
-      assert_receive {:telemetry, ^event, %{count: 1}, %{endpoint: "/my/agent", status: 429}},
-                     5_000
+      assert_receive {:telemetry, ^event, %{count: 1}, metadata}, 5_000
+      assert metadata.endpoint == "/my/agent"
+      assert metadata.status == 429
+      assert metadata.outcome == "client_error"
+    end
+
+    test "reports a transport collection gap as unknown rather than zero" do
+      event = [:spacetraders, :api, :request]
+      handler_id = "api-transport-metric-#{System.unique_integer()}"
+      :telemetry.attach(handler_id, event, &__MODULE__.handle_event/4, self())
+
+      on_exit(fn -> :telemetry.detach(handler_id) end)
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        Req.Test.transport_error(conn, :timeout)
+      end)
+
+      assert {:error, %SpaceTraders.API.Error{}} =
+               API.get_ship("AGENT_TOKEN_SECRET", "SHIP-1", retry: false)
+
+      assert_receive {:telemetry, ^event, %{count: 1}, metadata}
+      assert metadata.status == "unknown"
+      assert metadata.outcome == "unknown"
+      refute inspect(metadata) =~ "AGENT_TOKEN_SECRET"
+    end
+
+    test "reports a retryable transport gap before the successful retry" do
+      event = [:spacetraders, :api, :request]
+      handler_id = "api-retry-transport-metric-#{System.unique_integer()}"
+      :telemetry.attach(handler_id, event, &__MODULE__.handle_event/4, self())
+      on_exit(fn -> :telemetry.detach(handler_id) end)
+
+      Req.Test.expect(SpaceTraders.API, 2, fn conn ->
+        retries = Map.get(conn.private, :req_private, %{})[:req_retry_count] || 0
+
+        if retries > 0 do
+          Req.Test.json(conn, %{"data" => %{}})
+        else
+          Req.Test.transport_error(conn, :timeout)
+        end
+      end)
+
+      log =
+        capture_log(fn ->
+          assert {:ok, %Model.Agent{}} = API.get_agent("AGENT_TOKEN_SECRET")
+        end)
+
+      refute log =~ "AGENT_TOKEN_SECRET"
+
+      assert_receive {:telemetry, ^event, %{count: 1}, %{outcome: "unknown", status: "unknown"}}
+      assert_receive {:telemetry, ^event, %{count: 1}, %{outcome: "ok", status: 200}}
     end
   end
 

@@ -1023,8 +1023,13 @@ defmodule SpaceTraders.Fleet.Intents do
              ),
              set: [status: "active"]
            ) do
-        {1, _} -> {:ok, Repo.get!(Intent, intent.id)}
-        {0, _} -> {:error, :review_revision_stale}
+        {1, _} ->
+          updated = Repo.get!(Intent, intent.id)
+          SpaceTraders.Observability.intent_transition(intent, updated)
+          {:ok, updated}
+
+        {0, _} ->
+          {:error, :review_revision_stale}
       end
     else
       case Repo.update_all(
@@ -1965,7 +1970,7 @@ defmodule SpaceTraders.Fleet.Intents do
   defp terminalize_intents!(intent, status) when status in @terminal_states do
     preserve_evidence? = unresolved_intent_evidence?(intent)
 
-    Repo.update!(
+    update_intent!(
       Ecto.Changeset.change(intent,
         status: status,
         in_flight_action: if(preserve_evidence?, do: intent.in_flight_action, else: nil),
@@ -2514,7 +2519,9 @@ defmodule SpaceTraders.Fleet.Intents do
 
         if (current && Intent.unfinished?(current)) and is_nil(current.in_flight_action) and
              intent_owned_by_running_job_or_manual?(current) do
-          Repo.update!(Ecto.Changeset.change(current, status: "active", in_flight_action: action))
+          update_intent!(
+            Ecto.Changeset.change(current, status: "active", in_flight_action: action)
+          )
         else
           Repo.rollback(:intent_dispatch_no_longer_allowed)
         end
@@ -2553,9 +2560,22 @@ defmodule SpaceTraders.Fleet.Intents do
   @doc false
   def transition_intent(intent, attrs) do
     with_current_intent(intent, fn current ->
-      {:ok, Repo.update!(Ecto.Changeset.change(current, attrs))}
+      updated = Repo.update!(Ecto.Changeset.change(current, attrs))
+      emit_intent_transition(current, updated)
+      {:ok, updated}
     end)
   end
+
+  defp update_intent!(%Ecto.Changeset{data: intent} = changeset) do
+    updated = Repo.update!(changeset)
+    emit_intent_transition(intent, updated)
+    updated
+  end
+
+  defp emit_intent_transition(%Intent{status: state}, %Intent{status: state}), do: :ok
+
+  defp emit_intent_transition(intent, updated),
+    do: SpaceTraders.Observability.intent_transition(intent, updated)
 
   defp intent_owned_by_running_job_or_manual?(%Intent{caller: "job", job_id: job_id}) do
     case Repo.get(Job, job_id) do
@@ -2842,7 +2862,7 @@ defmodule SpaceTraders.Fleet.Intents do
     module_symbol = intent.parameters["module_symbol"]
 
     intent =
-      Repo.update!(
+      update_intent!(
         Ecto.Changeset.change(intent,
           status: "completed",
           blocker: nil,
@@ -2879,7 +2899,7 @@ defmodule SpaceTraders.Fleet.Intents do
 
   defp await_module_reconciliation(intent, reason) do
     intent =
-      Repo.update!(
+      update_intent!(
         Ecto.Changeset.change(intent,
           status: "blocked",
           blocker: Fleet.job_blocker({:awaiting_reconciliation, reason}),
@@ -2892,7 +2912,7 @@ defmodule SpaceTraders.Fleet.Intents do
 
   defp block_module_intent(intent, reason) do
     intent =
-      Repo.update!(
+      update_intent!(
         Ecto.Changeset.change(intent,
           status: "blocked",
           blocker: Fleet.job_blocker(intents_block_reason(reason)),
@@ -2906,7 +2926,7 @@ defmodule SpaceTraders.Fleet.Intents do
 
   defp block_module_intent_preserving_evidence(intent, reason) do
     intent =
-      Repo.update!(
+      update_intent!(
         Ecto.Changeset.change(intent,
           status: "blocked",
           blocker: Fleet.job_blocker(reason),
@@ -3947,7 +3967,7 @@ defmodule SpaceTraders.Fleet.Intents do
                current = Repo.get!(Intent, intent.id)
 
                if Intent.unfinished?(current) do
-                 Repo.update!(
+                 update_intent!(
                    Ecto.Changeset.change(current,
                      status: "blocked",
                      blocker: Fleet.job_blocker({:retry_exhausted, reason}),
