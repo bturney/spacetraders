@@ -57,6 +57,14 @@ _Avoid_: galaxy map, sector map
 Observed facts about the game world that a Policy combines with authoritative Agent, Ship, Contract, and Job state to make decisions. Intelligence is scoped, may be partial or stale, and carries its source and observation time. It excludes goals, planned work, execution evidence, and the immediate state of owned entities.
 _Avoid_: operational knowledge, world state
 
+**Observation Demand**:
+A revocable requirement for authoritative evidence, including its subject, required facts, acceptable freshness, deadline or expiry, and Fleet Strategy provenance. It may request Operational Intelligence or the immediate state of an owned entity. Compatible demands share one observation; it describes the evidence needed rather than prescribing an API request.
+_Avoid_: poll, refresh job, API request
+
+**API Capacity Governor**:
+The Fleet-wide authority that admits and orders reads and mutations when API capacity is scarce. It combines compatible Observation Demands, protects safety and recovery work, applies Strategic Priority, and reports backpressure for Fleet reallocation. It is distinct from the raw rate limiter, which only enforces the API's protocol limits.
+_Avoid_: rate limiter, request queue
+
 **Waypoint Intelligence**:
 Operational Intelligence about one Waypoint beyond its location and immediate navigability: construction status, modifiers, controlling faction, and chart provenance. Construction status and modifiers are operational state; faction and chart provenance are secondary context.
 
@@ -89,6 +97,83 @@ The Agent's home waypoint, where the Agent starts.
 
 **Fleet**:
 The collection of ships owned by exactly one Agent. Ships never span Agents.
+
+**Fleet Generation**:
+One Agent and its Fleet from successful minting until that Agent becomes stale
+and is retired. A Fleet Strategy may govern successive Fleet Generations across
+Server Resets; each replacement begins again from the game's default resources.
+_Avoid_: restored Fleet, persistent Fleet
+
+**Fleet Strategy**:
+A durable, Operator-owned ordered portfolio of Strategic Objectives and meaningful hard constraints governing successive Fleet Generations. It records outcome-level intent rather than technical allocation settings, survives Server Resets, and leaves planning and tactical execution to the system; it never invokes game actions directly.
+_Avoid_: fleet objective (for the complete strategic direction), automation
+
+**Fleet Strategy Revision**:
+An immutable snapshot of the outcome-level choices the Operator accepted for a Fleet Strategy, whether selected directly or through a preset. Each current Fleet has at most one active Fleet Strategy Revision. The active revision applies automatically to replacement Fleet Generations; recommendations and product changes never alter it silently.
+
+**Strategy Decision Episode**:
+A durable account of one Fleet Strategy reconciliation decision. It receives a stable identity when a plan is selected, preserves its original evidence references, compact provenance, and expectations, and accumulates outcome evidence until it is explicitly classified as realized, partially realized, superseded, reset-censored, or still evaluating. It connects the active Fleet Strategy Revision and objective evaluations to the evidence considered, admissible alternatives, binding constraints, selected plan, expected and actual outcomes, calibration version, and any later supersession. It is the causal join point for explanation and optimization, not a gameplay action or long-lived plan.
+
+**Outcome Observability**:
+Evidence of whether a Fleet Strategy is achieving its Strategic Objectives, including progress, economics, Fleet productivity, leaderboard movement, constraints, and expected-versus-actual outcomes. Mission Control summarizes it for the Operator; deeper analysis may use the observability platform.
+
+**System Observability**:
+Evidence of how the autonomous software behaves and performs, including planning, execution, API pressure, errors, latency, recovery, and resource use. It supports diagnosis and optimization and becomes Operator-facing only when it materially affects Fleet Strategy.
+
+**Strategy-capable Time**:
+Time during which the system can safely make progress on at least one Strategic Objective. It distinguishes useful autonomous availability from process uptime and excludes periods when faults or unavailable dependencies prevent all Strategy progress.
+
+**Strategic Objective**:
+One measurable outcome in a Fleet Strategy, with an ordered Strategic Priority, an evaluation rule, and a Fleet Generation, Strategy-lifetime, or recurring scope. An attain objective minimizes time to a target, a maintain objective protects a target with sufficient margin, and a continuous objective maximizes its outcome rate over a horizon.
+
+**Strategic Priority**:
+A Strategic Objective's position in the Fleet Strategy's ordered protection model. Under contention, the system protects a feasible plan for a higher Strategic Priority before committing remaining resources lower down; supporting work may proceed when it improves that protected plan.
+_Avoid_: request score, task priority
+
+**Candidate Contribution**:
+An objective-specific planner's evidence-bound proposal for advancing a Strategic Objective. It declares expected outcomes, uncertainty, required roles and resources, dependencies, validity conditions, and alternatives without assigning Ships or acquiring resources. Fleet allocation accepts or rejects it as part of the whole commitment portfolio.
+_Avoid_: task, request, Ship assignment
+
+**Fleet Commitment**:
+An accepted, evidence-bound promise to pursue an outcome contribution using declared claims, reservations, pledges, and dependencies. Fleet allocation maintains Fleet Commitments as a coherent portfolio; a commitment may coordinate one Ship, multiple Ships, or preparatory work, and is retained, superseded, or safely unwound at reconciliation boundaries.
+_Avoid_: fixed plan, task, Job
+
+**Claim**:
+A Fleet Commitment's exclusive authority to use an indivisible Fleet resource or interval, such as commanding one Ship. A resource cannot support conflicting active claims.
+_Avoid_: lock, assignment
+
+**Reservation**:
+A Fleet Commitment's protected share of a fungible Fleet resource, such as credits, Cargo capacity, or time margin. It is bounded by amount and evidence-valid horizon and releases when its justification no longer holds.
+_Avoid_: budget (when referring to committed capacity), claim
+
+**Pledge**:
+A Fleet Commitment's promised quantity toward a divisible shared outcome, backed by sufficient claims, reservations, or explicit acquisition dependencies. Authoritative outcome progress, including progress caused outside the Fleet, reduces the remaining fulfillment rather than being treated as failure.
+_Avoid_: reservation, fixed quota
+
+**Shared World State**:
+Mutable game state that may be changed by other Agents as well as this Fleet. An observation is evidence at a point in time, not a lock; Fleet planning records assumptions about it and refreshes them only when uncertainty can materially affect admissibility, expected value, or the next irreversible action.
+_Avoid_: external interference, single-player state
+
+**Hard Constraint**:
+An explicit Fleet Strategy admissibility rule that the system may never knowingly violate. Uncertainty requires more evidence, a provably safe alternative, or escalation of a genuine contradiction; it never silently permits a violation.
+
+**Preference**:
+An Operator-owned choice that ranks plans already admitted by every Hard Constraint. Unlike a Hard Constraint, it may yield to a higher Strategic Priority or a better admissible outcome.
+
+**Standing Authority**:
+The continuing authority an active Fleet Strategy Revision grants the system to perform strategically justified gameplay actions whose possible consequences satisfy every Hard Constraint. Spending, irreversible consequences, and bounded losses do not independently require Operator approval; changing Operator-owned Strategy intent does.
+
+**Safety Fence**:
+A suppression of new mutations whose admissibility depends on unresolved evidence. It covers the smallest affected entity, resource, or commitment and every dependent reservation, pledge, plan, and mutation while unrelated admissible work continues.
+
+**Bounded Unknown**:
+An ambiguous mutation outcome whose worst possible consequence can be accounted for and remains inside every Hard Constraint. It may be retained as unresolved evidence without preventing unrelated or provably admissible work.
+
+**Degraded Operation**:
+Continued autonomous operation while a failing capability or API scope is quarantined. Unaffected planning, timers, telemetry, and admissible gameplay continue while recovery is retried at a sustainable rate.
+
+**Emergency Stop**:
+Durable Operator-owned state that suppresses every new gameplay mutation, including replacement minting, without cancelling actions already accepted by the game. Safety-critical reconciliation and observation continue; explicit resume starts from authoritative state and fresh planning.
 
 **Ship**:
 A vessel the Agent owns (e.g., ORBITALIST-1, class COMMAND). Travels between waypoints, carries cargo, consumes fuel, and is subject to cooldowns.
@@ -139,15 +224,15 @@ A Job's state machine for reconciling its target, constraints, progress, and aut
 _Avoid_: script, action plan
 
 **Intent**:
-A state-aware request for a Ship to achieve an operational outcome, such as reaching a Waypoint. A Job Policy or the Operator through Manual Control can invoke an Intent. An Intent reconciles authoritative Ship state, may delegate one prerequisite Intent at a time, and performs the necessary game actions; it is not a fixed sequence of API calls. Its active chain, meaningful progress, and in-flight evidence survive app restarts so commands are reconciled rather than replayed.
+A state-aware request for one Ship to achieve a bounded operational outcome, such as reaching a Waypoint. Its caller owns authority to command that Ship; in autonomous operation that authority comes from a Fleet Commitment's Claim. One root Intent holds the Ship while it composes prerequisite outcomes internally and performs the necessary game actions; prerequisites never compete as separately active Intents, and the Intent is not a fixed sequence of API calls. It does not own Fleet-level allocation or multi-Ship coordination. Its active outcome chain, meaningful progress, and in-flight evidence survive app restarts so commands are reconciled rather than replayed.
 _Avoid_: action, macro, script
 
 **Intent State**:
-The shared lifecycle of an Intent. An unfinished Intent may be `active` while it can progress immediately, `waiting` while progress is expected from game state or time, `awaiting_confirmation` while a durable reviewed choice requires Operator authorization, or `blocked` while changed circumstances or Operator action are required. It ends as `completed` only when authoritative state proves its outcome, or `stopped` when its caller safely ends or replaces it. Unresolved game-action evidence prevents stopping or replacement.
-_Avoid_: status (when the lifecycle distinction matters), error (for blocked or awaiting confirmation)
+The shared lifecycle of an Intent. An unfinished Intent may be active while it can progress, waiting for game state or time, or safety-fenced while unresolved mutation evidence makes further dependent work unsafe. It completes only when authoritative state proves its outcome, becomes infeasible when authoritative evidence proves its outcome cannot be achieved within the Fleet Commitment and Hard Constraints, or is superseded after safe unwind. Infeasibility returns to Fleet allocation for replanning rather than becoming an Operator approval request; unresolved game-action evidence prevents supersession.
+_Avoid_: status (when the lifecycle distinction matters), error, Operator blocker
 
 **Navigate Intent**:
-An Intent to reach a requested Waypoint in the current or another System. It reconciles local navigation, jump, and warp paths from authoritative state, makes required posture and refueling work explicit, and blocks with corrective options rather than silently starting prerequisite Jobs. It is reusable by a Job Policy and through Manual Control.
+An Intent to reach a requested Waypoint in the current or another System. From authoritative state it selects and performs the necessary Flight Mode, posture, refueling, local navigation, jump, warp, and wait outcomes within the caller's constraints. The caller supplies the destination and meaningful constraints rather than prerequisite choreography.
 _Avoid_: Navigate Job, route script
 
 **Ship Outfitting Job**:
@@ -155,7 +240,7 @@ A finite Job that uses its assigned Ship to satisfy a requested Ship Readiness c
 _Avoid_: outfitting workflow, courier Job
 
 **Refuel Intent**:
-An Intent to restore a Ship's fuel where the game permits refueling. It is reusable independently through Manual Control and as part of Navigate.
+An Intent to restore a Ship's fuel where the game permits refueling. Its outcome handling is reusable as a root Intent or as a prerequisite within another Intent such as Navigate.
 _Avoid_: fuel action (when referring to the state-aware capability)
 
 **Acquire Waypoint Intelligence Intent**:
