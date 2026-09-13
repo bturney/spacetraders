@@ -10,6 +10,14 @@ Phases 1–5 of the play effort, with status and per-phase maps, live on the alw
 
 Phase 1 (Boot) is currently charting: [SpaceTraders Play Plan — Map](https://github.com/bturney/spacetraders/issues/1).
 
+## Architecture
+
+[ADR 0010](docs/adr/0010-autonomous-runtime.md) is the accepted governing
+decision for the target autonomous Fleet Strategy runtime. It identifies which
+earlier decisions remain legacy implementation guidance and reaffirms
+[ADR 0007](docs/adr/0007-game-truth-and-quality-of-life-guardrails.md) as the
+gameplay authority boundary.
+
 ## Development
 
 Phoenix 1.8 app (Bandit + LiveView) with SQLite via `ecto_sqlite3`. Erlang/OTP

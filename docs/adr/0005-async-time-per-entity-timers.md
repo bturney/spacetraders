@@ -1,3 +1,8 @@
 # Async time modeled per-entity with a shared Timeline library
 
+The timer ownership, SQLite persistence, and per-entity scheduling decisions are
+superseded for the autonomous runtime by
+[ADR 0010](0010-autonomous-runtime.md). They remain the current legacy
+implementation until replacement phases activate.
+
 The game's waiting (arrivals, cooldowns, contract deadlines) is modeled with per-entity timers: each Ship GenServer owns its own `Process.send_after` arrival/cooldown timers, and the Contracts context owns contract deadlines. A shared `SpaceTraders.Timeline` module (a library, not a scheduler process) persists every pending event to a `timeline_events` table, re-arms owners on boot, and catches up events that came due while the app was down. On arrival a ship re-pulls its state from the API — local state is a cache, the server is truth. Chosen over a centralized scheduler process (no single hot-spot, no dispatcher, less machinery) at this fleet size; promoting Timeline to a real scheduler is a local change if Phase-4 fleet growth demands it.
