@@ -71,6 +71,16 @@ Set `DATABASE_URL` to use another PostgreSQL instance. The `postgres_test` Mix
 environment is test-only; adapter-specific historical migration SQL is kept
 explicitly branched and covered by this gate.
 
+Autonomous runtime scenarios use `SpaceTraders.ScenarioCase` and run only in
+this PostgreSQL gate. The case drives authenticated Phoenix interfaces while
+providing controlled SpaceTraders API responses, a shared fake clock, runtime
+process restarts, durable `SpaceTraders.Repo` inspection, and captured telemetry
+and Fleet notifications. Run the representative scenario directly with:
+
+```sh
+MIX_ENV=postgres_test mix test test/integration/autonomous_runtime_scenario_test.exs
+```
+
 ### Game API client & codegen
 
 The thin `SpaceTraders.API` Req client (structs in `SpaceTraders.API.Model.*`) is
