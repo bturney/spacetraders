@@ -188,9 +188,15 @@ defmodule SpaceTraders.Agent do
   def stale?(%Agent{stale_at: stale_at}), do: not is_nil(stale_at)
 
   @doc "Fences execution against an Agent retired or invalidated by a Server Reset."
-  def execution_allowed?(%Agent{id: nil}), do: :ok
+  def execution_allowed?(%Agent{} = agent) do
+    with :ok <- SpaceTraders.RuntimeAuthority.execution_allowed?() do
+      agent_execution_allowed?(agent)
+    end
+  end
 
-  def execution_allowed?(%Agent{id: id}) do
+  defp agent_execution_allowed?(%Agent{id: nil}), do: :ok
+
+  defp agent_execution_allowed?(%Agent{id: id}) do
     case Repo.get(Agent, id) do
       %Agent{stale_at: nil} -> :ok
       _ -> {:error, :stale_agent}
@@ -225,7 +231,8 @@ defmodule SpaceTraders.Agent do
   def mint_agent(%Operator{} = operator, attrs) do
     changeset = Agent.changeset(%Agent{}, attrs)
 
-    with :ok <- validate_mint_attrs(changeset),
+    with :ok <- SpaceTraders.RuntimeAuthority.execution_allowed?(),
+         :ok <- validate_mint_attrs(changeset),
          {:ok, account_token} <- require_account_token(operator),
          :ok <-
            ensure_symbol_is_not_stale_for_another_operator(

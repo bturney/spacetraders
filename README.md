@@ -54,11 +54,11 @@ scripts/verify   # == mix verify
 4. `space_traders.gen.models --check` — fail if committed API structs are stale
 5. `verify.boot` — starts the full app on a real HTTP server and asserts `GET /health` → 200
 
-### PostgreSQL compatibility verification
+### PostgreSQL verification
 
-SQLite remains the production database until the approved authority cutover.
-Maintainers can run the identical verification gate against PostgreSQL without
-changing the production adapter:
+PostgreSQL is the production durable application store. Maintainers can run the
+identical verification gate against PostgreSQL while the fast default test suite
+continues to use SQLite:
 
 ```sh
 docker run --rm --name spacetraders-postgres -p 5432:5432 \

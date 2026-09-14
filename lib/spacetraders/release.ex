@@ -3,6 +3,8 @@ defmodule SpaceTraders.Release do
 
   @app :spacetraders
 
+  alias SpaceTraders.{LegacyRepo, Repo}
+
   def migrate do
     Application.load(@app)
 
@@ -11,46 +13,120 @@ defmodule SpaceTraders.Release do
     end
   end
 
-  def migrate_postgres do
+  def cutover do
     Application.load(@app)
-
-    if Application.get_env(@app, SpaceTraders.PostgresRepo) do
-      original_adapter = Application.fetch_env!(@app, :repo_adapter)
-      Application.put_env(@app, :repo_adapter, Ecto.Adapters.Postgres)
-
-      try do
-        migrate_repo(SpaceTraders.PostgresRepo)
-        rehearse_sqlite_to_postgres()
-      after
-        Application.put_env(@app, :repo_adapter, original_adapter)
-      end
-    end
+    migrate_repo(Repo)
+    transform_sqlite(:cutover)
   end
 
   def rehearse_sqlite_to_postgres do
-    Ecto.Migrator.with_repo(SpaceTraders.Repo, fn _ ->
-      Ecto.Migrator.with_repo(SpaceTraders.PostgresRepo, fn _ ->
-        {:ok, {tables, source}} =
-          SpaceTraders.Repo.transaction(fn ->
-            tables = source_tables()
-            {tables, Map.new(tables, &{&1, source_rows(&1)})}
-          end)
+    Application.load(@app)
+    migrate_repo(Repo)
+    transform_sqlite(:rehearsal)
+  end
 
-        SpaceTraders.PostgresRepo.transaction(fn ->
-          truncate_tables(tables)
-          copy_tables(tables, source)
-          reset_sequences(tables)
-          verify_reconciliation!(tables, source)
-        end)
+  defp transform_sqlite(mode) do
+    Ecto.Migrator.with_repo(LegacyRepo, fn _ ->
+      Ecto.Migrator.with_repo(Repo, fn _ ->
+        if authoritative?() do
+          if mode == :rehearsal do
+            raise "PostgreSQL authority has advanced; SQLite rehearsal is no longer permitted"
+          end
 
-        {table_count, row_count, reconciliation} = reconciliation_report(tables, source)
+          IO.puts("operation=postgres_cutover status=already_authoritative store=postgresql")
+        else
+          {:ok, {tables, source}} =
+            LegacyRepo.transaction(
+              fn ->
+                tables = source_tables()
 
-        IO.puts(
-          "operation=sqlite_rehearsal status=completed tables=#{table_count} rows=#{row_count} reconciliation=#{reconciliation}"
-        )
+                if "intents" in tables or "jobs" in tables do
+                  case SpaceTraders.Cutover.assess(LegacyRepo) do
+                    :ok ->
+                      :ok
+
+                    {:error, {:unprotected_mutations, counts}} ->
+                      raise "PostgreSQL cutover refused: admitted mutations are not settled or safety-fenced #{inspect(counts)}"
+                  end
+                end
+
+                source = Map.new(tables, &{&1, source_rows(&1)})
+                transform_destination(mode, tables, source)
+                {tables, source}
+              end,
+              mode: :immediate
+            )
+
+          {table_count, row_count, reconciliation} = reconciliation_report(tables, source)
+
+          IO.puts(
+            "operation=#{operation(mode)} status=completed tables=#{table_count} rows=#{row_count} reconciliation=#{reconciliation}"
+          )
+        end
       end)
     end)
   end
+
+  defp transform_destination(:rehearsal, tables, source) do
+    Repo.transaction(fn -> copy_and_verify(tables, source) end)
+  end
+
+  defp transform_destination(:cutover, tables, source) do
+    {:ok, :ok} =
+      SpaceTraders.Outbox.publish(
+        %{
+          topic: "runtime",
+          event: "postgresql_authority_advanced",
+          payload: %{"store" => "postgresql"}
+        },
+        fn ->
+          copy_and_verify(tables, source)
+          stop_legacy_work(tables)
+
+          Repo.query!(
+            "INSERT INTO runtime_authority (name, store, advanced_at) VALUES ('durable_truth', 'postgresql', $1)",
+            [DateTime.utc_now()]
+          )
+
+          :ok
+        end
+      )
+  end
+
+  defp copy_and_verify(tables, source) do
+    truncate_tables(tables)
+    copy_tables(tables, source)
+    reset_sequences(tables)
+    verify_reconciliation!(tables, source)
+  end
+
+  defp stop_legacy_work(tables) do
+    now = DateTime.utc_now()
+
+    if "intents" in tables do
+      Repo.query!(
+        "UPDATE intents SET status = 'stopped', finished_at = $1, updated_at = $1 WHERE status IN ('active', 'waiting', 'awaiting_confirmation', 'blocked') AND in_flight_action IS NULL",
+        [now]
+      )
+    end
+
+    if "jobs" in tables do
+      Repo.query!(
+        "UPDATE jobs SET status = 'stopped', finished_at = $1, updated_at = $1 WHERE status IN ('active', 'waiting', 'blocked', 'paused') AND in_flight_action IS NULL",
+        [now]
+      )
+    end
+  end
+
+  defp authoritative? do
+    %{rows: rows} =
+      Repo.query!("SELECT store FROM runtime_authority WHERE name = 'durable_truth'")
+
+    rows == [["postgresql"]]
+  end
+
+  defp operation(:cutover), do: "postgres_cutover"
+  defp operation(:rehearsal), do: "sqlite_rehearsal"
 
   defp migrate_repo(repo) do
     {:ok, _, _} = Ecto.Migrator.with_repo(repo, &Ecto.Migrator.run(&1, :up, all: true))
@@ -59,10 +135,11 @@ defmodule SpaceTraders.Release do
   defp source_tables do
     %{rows: rows} =
       Ecto.Adapters.SQL.query!(
-        SpaceTraders.Repo,
+        LegacyRepo,
         """
         SELECT name FROM sqlite_master
-        WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name != 'schema_migrations'
+         WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+           AND name NOT IN ('schema_migrations', 'runtime_authority', 'outbox_notifications')
         ORDER BY name
         """
       )
@@ -72,7 +149,7 @@ defmodule SpaceTraders.Release do
 
   defp source_rows(table) do
     %{columns: columns, rows: rows} =
-      Ecto.Adapters.SQL.query!(SpaceTraders.Repo, "SELECT * FROM #{quote_identifier(table)}")
+      Ecto.Adapters.SQL.query!(LegacyRepo, "SELECT * FROM #{quote_identifier(table)}")
 
     types = postgres_column_types(table)
 
@@ -88,7 +165,7 @@ defmodule SpaceTraders.Release do
   defp postgres_column_types(table) do
     %{rows: rows} =
       Ecto.Adapters.SQL.query!(
-        SpaceTraders.PostgresRepo,
+        Repo,
         """
         SELECT column_name, data_type, udt_name
         FROM information_schema.columns
@@ -131,7 +208,7 @@ defmodule SpaceTraders.Release do
 
   defp truncate_tables(tables) do
     Ecto.Adapters.SQL.query!(
-      SpaceTraders.PostgresRepo,
+      Repo,
       "TRUNCATE TABLE #{Enum.map_join(tables, ", ", &quote_identifier/1)} RESTART IDENTITY CASCADE"
     )
   end
@@ -147,7 +224,7 @@ defmodule SpaceTraders.Release do
       Map.new(tables, fn table ->
         %{rows: rows} =
           Ecto.Adapters.SQL.query!(
-            SpaceTraders.Repo,
+            LegacyRepo,
             "PRAGMA foreign_key_list(#{quote_literal(table)})"
           )
 
@@ -197,7 +274,7 @@ defmodule SpaceTraders.Release do
   defp self_references(table) do
     %{rows: rows} =
       Ecto.Adapters.SQL.query!(
-        SpaceTraders.Repo,
+        LegacyRepo,
         "PRAGMA foreign_key_list(#{quote_literal(table)})"
       )
 
@@ -214,7 +291,7 @@ defmodule SpaceTraders.Release do
       end)
 
     Ecto.Adapters.SQL.query!(
-      SpaceTraders.PostgresRepo,
+      Repo,
       "INSERT INTO #{quote_identifier(table)} (#{columns_sql}) VALUES (#{placeholders})",
       values
     )
@@ -233,7 +310,7 @@ defmodule SpaceTraders.Release do
     parameters = Enum.map(self_references, &Map.fetch!(values, &1)) ++ [Map.fetch!(values, "id")]
 
     Ecto.Adapters.SQL.query!(
-      SpaceTraders.PostgresRepo,
+      Repo,
       "UPDATE #{quote_identifier(table)} SET #{assignment_sql} WHERE id = $#{length(parameters)}",
       parameters
     )
@@ -242,7 +319,7 @@ defmodule SpaceTraders.Release do
   defp reset_sequences(tables) do
     Enum.each(tables, fn table ->
       Ecto.Adapters.SQL.query!(
-        SpaceTraders.PostgresRepo,
+        Repo,
         "SELECT setval(pg_get_serial_sequence($1, 'id'), COALESCE((SELECT MAX(id) FROM #{quote_identifier(table)}), 1), EXISTS (SELECT 1 FROM #{quote_identifier(table)}))",
         [table]
       )
@@ -255,7 +332,7 @@ defmodule SpaceTraders.Release do
 
       %{rows: actual_rows} =
         Ecto.Adapters.SQL.query!(
-          SpaceTraders.PostgresRepo,
+          Repo,
           "SELECT * FROM #{quote_identifier(table)}"
         )
 
@@ -266,7 +343,7 @@ defmodule SpaceTraders.Release do
       # The query result must retain the source column order for the row comparison to be meaningful.
       %{columns: ^columns} =
         Ecto.Adapters.SQL.query!(
-          SpaceTraders.PostgresRepo,
+          Repo,
           "SELECT * FROM #{quote_identifier(table)} LIMIT 0"
         )
     end)

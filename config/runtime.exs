@@ -48,18 +48,26 @@ if config_env() == :prod do
       For example: /etc/spacetraders/spacetraders.db
       """
 
-  config :spacetraders, SpaceTraders.Repo,
-    database: database_path,
-    pool_size: String.to_integer(System.get_env("POOL_SIZE") || "5")
+  postgres_host =
+    System.get_env("POSTGRES_HOST") ||
+      raise "environment variable POSTGRES_HOST is missing"
 
-  if postgres_host = System.get_env("POSTGRES_HOST") do
-    config :spacetraders, SpaceTraders.PostgresRepo,
-      hostname: postgres_host,
-      database: System.get_env("POSTGRES_DB", "spacetraders"),
-      username: System.get_env("POSTGRES_USER", "spacetraders"),
-      password: System.fetch_env!("POSTGRES_PASSWORD"),
-      pool_size: 2
-  end
+  postgres_config = [
+    hostname: postgres_host,
+    database: System.get_env("POSTGRES_DB", "spacetraders"),
+    username: System.get_env("POSTGRES_USER", "spacetraders"),
+    password: System.fetch_env!("POSTGRES_PASSWORD")
+  ]
+
+  config :spacetraders,
+         SpaceTraders.Repo,
+         postgres_config ++ [pool_size: String.to_integer(System.get_env("POOL_SIZE") || "5")]
+
+  # Mounted read-only by the application after cutover. Release tasks use this
+  # adapter exactly once as the pre-cutover rollback artifact.
+  config :spacetraders, SpaceTraders.LegacyRepo,
+    database: database_path,
+    pool_size: 1
 
   # The secret key base is used to sign/encrypt cookies and other secrets.
   # A default value is used in config/dev.exs and config/test.exs but you

@@ -525,8 +525,22 @@ defmodule SpaceTraders.API do
   ## Request plumbing
 
   defp request(method, path, token, opts) do
+    with :ok <- mutation_authorized?(method) do
+      do_request(method, path, token, opts)
+    end
+  end
+
+  defp do_request(method, path, token, opts) do
     RateLimiter.acquire()
 
+    # Admission can wait for capacity. Recheck immediately before each network
+    # dispatch so a runtime that lost its PostgreSQL lock cannot mutate.
+    with :ok <- mutation_authorized?(method) do
+      send_request(method, path, token, opts)
+    end
+  end
+
+  defp send_request(method, path, token, opts) do
     req =
       Req.new(
         build_options(method, path, token)
@@ -563,6 +577,9 @@ defmodule SpaceTraders.API do
          SpaceTraders.API.Error.transport(SpaceTraders.Observability.redact(reason, token))}
     end
   end
+
+  defp mutation_authorized?(:get), do: :ok
+  defp mutation_authorized?(_method), do: SpaceTraders.RuntimeAuthority.execution_allowed?()
 
   defp emit_request_metric(path, status) do
     SpaceTraders.Observability.api_request(path, status)
@@ -606,12 +623,16 @@ defmodule SpaceTraders.API do
   defp retry_strategy(method, path),
     do: fn request, response -> retry(request, response, path, method) end
 
-  defp retry(_request, %Req.Response{status: 429} = response, path, _method) do
-    emit_request_metric(path, 429)
+  defp retry(_request, %Req.Response{status: 429} = response, path, method) do
+    if mutation_authorized?(method) != :ok do
+      false
+    else
+      emit_request_metric(path, 429)
 
-    case Req.Response.get_retry_after(response) do
-      delay when is_integer(delay) -> {:delay, delay}
-      _ -> true
+      case Req.Response.get_retry_after(response) do
+        delay when is_integer(delay) -> {:delay, delay}
+        _ -> true
+      end
     end
   end
 

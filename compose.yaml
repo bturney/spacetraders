@@ -17,13 +17,9 @@ services:
   migrate:
     build: .
     command:
-      - sh
-      - -c
-      - >-
-        bin/spacetraders eval 'SpaceTraders.Release.migrate()' &&
-        bin/spacetraders eval 'if Code.ensure_loaded?(SpaceTraders.Release) and
-        function_exported?(SpaceTraders.Release, :migrate_postgres, 0),
-        do: SpaceTraders.Release.migrate_postgres()'
+      - bin/spacetraders
+      - eval
+      - "if function_exported?(SpaceTraders.Release, :cutover, 0), do: SpaceTraders.Release.cutover(), else: SpaceTraders.Release.migrate()"
     environment:
       DATABASE_PATH: /data/spacetraders.db
       POSTGRES_HOST: postgres
@@ -43,6 +39,10 @@ services:
     build: .
     environment:
       DATABASE_PATH: /data/spacetraders.db
+      POSTGRES_HOST: postgres
+      POSTGRES_DB: ${POSTGRES_DB:-spacetraders}
+      POSTGRES_USER: ${POSTGRES_USER:-spacetraders}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       SECRET_KEY_BASE: ${SECRET_KEY_BASE:?set SECRET_KEY_BASE in the host .env}
       ENCRYPTION_KEY: ${ENCRYPTION_KEY:?set ENCRYPTION_KEY in the host .env}
       PHX_HOST: ${PHX_HOST:?set PHX_HOST in the host .env}

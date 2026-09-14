@@ -7,13 +7,15 @@ Before changing deployment guarantees, read
 
 ## Authority boundary
 
-SQLite is the authoritative application database. PostgreSQL is migrated,
-monitored, and rehearsed for a later authority cutover. `web` does not connect
-to PostgreSQL in this phase.
+PostgreSQL is the authoritative application database. The first deployment of
+this phase refuses unfenced admitted mutations, copies retained SQLite state
+once, stops unfinished legacy work, and commits the authority marker with its
+outbox notification. Later application runtimes do not open SQLite; its volume
+remains mounted only as the pre-cutover rollback artifact.
 
 The host keeps `.env` and image-state files under
-`/srv/projects/spacetraders`. Docker manages the authoritative SQLite data in
-the `spacetraders_spacetraders-data` volume and PostgreSQL data in the
+`/srv/projects/spacetraders`. Docker retains the SQLite rollback artifact in the
+`spacetraders_spacetraders-data` volume and authoritative PostgreSQL data in the
 `spacetraders_spacetraders-postgres` volume. Versioned deployment commands send
 only committed Compose files and scripts. They do not send host secrets.
 
@@ -56,21 +58,23 @@ Pushes to `main` publish an immutable `sha-<commit>` image and queue one
 deployment. The workflow uses the image, Compose files, and deployment script
 from the same commit.
 
-For a manual deployment or rollback from a Tailscale-connected checkout:
+For a manual deployment from a Tailscale-connected checkout:
 
 ```sh
 scripts/deploy deploy <sha|tag>
-scripts/deploy rollback
 ```
 
 PostgreSQL must pass `pg_isready` before the one-shot `migrate` service runs.
-Migration updates SQLite and PostgreSQL and can run repeatedly. `web` starts
-only after migration succeeds. Deployment is complete when `GET /health`
-returns `{"status":"ok"}` and the host records the application image.
+The one-shot migration service migrates PostgreSQL and either performs the first
+SQLite transformation or verifies that PostgreSQL authority already advanced.
+It can run repeatedly without copying SQLite again. `web` starts only after it
+succeeds. Deployment is complete when `GET /health` returns `{"status":"ok"}`
+and the host records the application image.
 
-A failed deployment makes a best-effort attempt to start the previous image
-with the current Compose files. Use fresh-database recovery if this cannot
-restore service.
+Before authority advances, a failed deployment makes a best-effort attempt to
+start the previous image. After authority advances, image rollback is disabled:
+fix the release and deploy forward so PostgreSQL writes are never
+reverse-transformed into SQLite.
 
 ## PostgreSQL health and migration
 
@@ -116,8 +120,9 @@ table count, and row count.
 
 ## Fresh-database recovery
 
-This procedure deletes both production database volumes. Use it only when no
-usable backup remains. Run it on `project-host` from the deployment checkout:
+This procedure deletes the production PostgreSQL database and the retained
+SQLite artifact. Use it only when no usable PostgreSQL backup remains. Run it on
+`project-host` from the deployment checkout:
 
 ```sh
 export COMPOSE_PROJECT_NAME=spacetraders
@@ -130,6 +135,6 @@ docker compose run --rm web \
 docker compose up -d
 ```
 
-`web` stays stopped until migration and SQLite reseeding complete. Recovery is
-complete when `GET /health` returns `{"status":"ok"}` and the seeded Agent and
-Fleet are visible to the Operator.
+`web` stays stopped until PostgreSQL migration and reseeding complete. Recovery
+is complete when `GET /health` returns `{"status":"ok"}` and the seeded Agent
+and Fleet are visible to the Operator.

@@ -16,23 +16,64 @@ compose=(docker compose -p "$PROJECT_NAME" -f compose.yaml)
 trap '"${compose[@]}" down --volumes >/dev/null 2>&1 || true' EXIT
 
 "${compose[@]}" up --detach --wait postgres
-"${compose[@]}" run --rm migrate
+
+# Build a representative legacy SQLite database. The release no longer migrates
+# SQLite during normal deployment once PostgreSQL becomes authoritative.
+"${compose[@]}" run --rm migrate bin/spacetraders eval '
+  original_adapter = Application.fetch_env!(:spacetraders, :repo_adapter)
+  Application.put_env(:spacetraders, :repo_adapter, Ecto.Adapters.SQLite3)
+
+  try do
+    Ecto.Migrator.with_repo(SpaceTraders.LegacyRepo, fn repo ->
+      Ecto.Migrator.run(repo, :up, all: true)
+    end)
+  after
+    Application.put_env(:spacetraders, :repo_adapter, original_adapter)
+  end
+'
 
 # Cover retained current state, historical activity, encrypted credential references,
 # and a scheduled wakeup before repeating the one-way rehearsal.
 "${compose[@]}" run --rm migrate bin/spacetraders eval '
-  Ecto.Migrator.with_repo(SpaceTraders.Repo, fn _ ->
-    SpaceTraders.Repo.query!("INSERT INTO operators (email, account_token_ciphertext, inserted_at, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)", ["sqlite@example.test", "encrypted-account-token"])
-    SpaceTraders.Repo.query!("INSERT INTO operators_tokens (operator_id, token, context, inserted_at) VALUES (1, ?, ?, CURRENT_TIMESTAMP)", [<<1, 2, 3>>, "session"])
-    SpaceTraders.Repo.query!("INSERT INTO agents (symbol, faction, headquarters, agent_token_ciphertext, operator_id, inserted_at, updated_at) VALUES (?, ?, ?, ?, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)", ["SQLITE-1", "COSMIC", "X1-TEST-A1", "encrypted-agent-token"])
-    SpaceTraders.Repo.query!("INSERT INTO ships (symbol, ship_type, agent_id, inserted_at, updated_at) VALUES (?, ?, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)", ["SQLITE-1-1", "SHIP_PROBE"])
-    SpaceTraders.Repo.query!("INSERT INTO fleet_activity (agent_id, ship_id, kind, message, metadata, inserted_at, updated_at) VALUES (1, 1, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)", ["historical", "retained activity", ~s({"source":"sqlite"})])
-    SpaceTraders.Repo.query!("INSERT INTO timeline_events (owner_type, owner_id, event_type, due_at, status, payload, inserted_at, updated_at) VALUES (?, 1, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)", ["ship", "arrival", "2030-01-01T00:00:00Z", "scheduled", ~s({"waypoint":"X1-TEST-A1"})])
+  Ecto.Migrator.with_repo(SpaceTraders.LegacyRepo, fn _ ->
+    repo = SpaceTraders.LegacyRepo
+    repo.query!("INSERT INTO operators (email, account_token_ciphertext, inserted_at, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)", ["sqlite@example.test", "encrypted-account-token"])
+    repo.query!("INSERT INTO operators_tokens (operator_id, token, context, inserted_at) VALUES (1, ?, ?, CURRENT_TIMESTAMP)", [<<1, 2, 3>>, "session"])
+    repo.query!("INSERT INTO agents (symbol, faction, headquarters, agent_token_ciphertext, operator_id, inserted_at, updated_at) VALUES (?, ?, ?, ?, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)", ["SQLITE-1", "COSMIC", "X1-TEST-A1", "encrypted-agent-token"])
+    repo.query!("INSERT INTO ships (symbol, ship_type, agent_id, inserted_at, updated_at) VALUES (?, ?, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)", ["SQLITE-1-1", "SHIP_PROBE"])
+    repo.query!("INSERT INTO fleet_activity (agent_id, ship_id, kind, message, metadata, inserted_at, updated_at) VALUES (1, 1, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)", ["historical", "retained activity", ~s({"source":"sqlite"})])
+    repo.query!("INSERT INTO timeline_events (owner_type, owner_id, event_type, due_at, status, payload, inserted_at, updated_at) VALUES (?, 1, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)", ["ship", "arrival", "2030-01-01T00:00:00Z", "scheduled", ~s({"waypoint":"X1-TEST-A1"})])
+    repo.query!("INSERT INTO jobs (ship_id, type, extraction_waypoint, market_waypoint, cargo_threshold, status, sellable_goods, inserted_at, updated_at) VALUES (1, ?, ?, ?, 10, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)", ["explorer", "X1-TEST-A1", "X1-TEST-A1", "active", "[]"])
+    repo.query!("INSERT INTO intents (ship_id, type, target_waypoint, caller, status, in_flight_action, inserted_at, updated_at) VALUES (1, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)", ["navigate", "X1-TEST-A2", "manual", "active", ~s({"kind":"navigate"})])
   end)
 '
 
-first_rehearsal=$("${compose[@]}" run --rm migrate)
-second_rehearsal=$("${compose[@]}" run --rm migrate)
+unsafe_log=$(mktemp)
+if "${compose[@]}" run --rm migrate >"$unsafe_log" 2>&1; then
+  printf '%s\n' 'Expected cutover to refuse an unfenced admitted mutation.' >&2
+  exit 1
+fi
+grep -q 'PostgreSQL cutover refused: admitted mutations are not settled or safety-fenced' "$unsafe_log"
+rm -f "$unsafe_log"
+
+"${compose[@]}" run --rm migrate bin/spacetraders eval '
+  Ecto.Migrator.with_repo(SpaceTraders.LegacyRepo, fn _ ->
+    SpaceTraders.LegacyRepo.query!("UPDATE intents SET status = ?, blocker = ? WHERE id = 1", ["blocked", ~s({"reason":"mutation_outcome_unknown","summary":"Reconcile before dependent work","evidence":"intent_id=1","retry_condition":"authoritative_mutation_outcome_available"})])
+  end)
+'
+
+if "${compose[@]}" run --rm -e SQLITE_REHEARSAL_FAIL_AFTER_TABLE=agents migrate; then
+  printf '%s\n' 'Expected forced cutover transformation failure.' >&2
+  exit 1
+fi
+
+authority_after_failure=$("${compose[@]}" exec -T postgres \
+  psql --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" --tuples-only --no-align \
+  --command "SELECT count(*) FROM runtime_authority")
+[[ "$authority_after_failure" == 0 ]]
+
+first_cutover=$("${compose[@]}" run --rm migrate)
+second_cutover=$("${compose[@]}" run --rm migrate)
 
 migration_count=$("${compose[@]}" exec -T postgres \
   psql --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" --tuples-only --no-align \
@@ -40,35 +81,31 @@ migration_count=$("${compose[@]}" exec -T postgres \
 
 [[ "$migration_count" -gt 0 ]]
 
-first_reconciliation=$(sed -n 's/.*reconciliation=//p' <<<"$first_rehearsal")
-second_reconciliation=$(sed -n 's/.*reconciliation=//p' <<<"$second_rehearsal")
+first_reconciliation=$(sed -n 's/.*reconciliation=//p' <<<"$first_cutover")
 [[ "$first_reconciliation" =~ ^[0-9a-f]{64}$ ]]
-[[ "$first_reconciliation" == "$second_reconciliation" ]]
-grep -q 'operation=sqlite_rehearsal status=completed tables=12 rows=6' <<<"$first_rehearsal"
+grep -q 'operation=postgres_cutover status=completed tables=12 rows=8' <<<"$first_cutover"
+grep -q 'operation=postgres_cutover status=already_authoritative store=postgresql' <<<"$second_cutover"
 
 postgres_state=$("${compose[@]}" exec -T postgres psql --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" --tuples-only --no-align \
   --command "SELECT email || ':' || account_token_ciphertext FROM operators")
 [[ "$postgres_state" == sqlite@example.test:encrypted-account-token ]]
 
-sqlite_before=$("${compose[@]}" run --rm migrate bin/spacetraders eval '
-  Ecto.Migrator.with_repo(SpaceTraders.Repo, fn _ ->
-    %{rows: [[count]]} = SpaceTraders.Repo.query!("SELECT count(*) FROM operators")
-    IO.puts(count)
-  end)
-')
+authority_state=$("${compose[@]}" exec -T postgres psql --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" --tuples-only --no-align \
+  --command "SELECT r.store || ':' || j.status || ':' || i.status || ':' || o.event FROM runtime_authority r CROSS JOIN jobs j CROSS JOIN intents i CROSS JOIN outbox_notifications o")
+[[ "$authority_state" == postgresql:stopped:blocked:postgresql_authority_advanced ]]
 
-if "${compose[@]}" run --rm -e SQLITE_REHEARSAL_FAIL_AFTER_TABLE=agents migrate; then
-  printf '%s\n' 'Expected rehearsal transformation failure.' >&2
+if "${compose[@]}" run --rm migrate bin/spacetraders eval 'SpaceTraders.Release.rehearse_sqlite_to_postgres()'; then
+  printf '%s\n' 'Expected forward-only authority to reject SQLite rehearsal.' >&2
   exit 1
 fi
 
-sqlite_after=$("${compose[@]}" run --rm migrate bin/spacetraders eval '
-  Ecto.Migrator.with_repo(SpaceTraders.Repo, fn _ ->
-    %{rows: [[count]]} = SpaceTraders.Repo.query!("SELECT count(*) FROM operators")
-    IO.puts(count)
+sqlite_state=$("${compose[@]}" run --rm migrate bin/spacetraders eval '
+  Ecto.Migrator.with_repo(SpaceTraders.LegacyRepo, fn _ ->
+    %{rows: [[job, intent]]} = SpaceTraders.LegacyRepo.query!("SELECT jobs.status, intents.status FROM jobs CROSS JOIN intents")
+    IO.puts("#{job}:#{intent}")
   end)
 ')
-[[ "$sqlite_before" == "$sqlite_after" ]]
+[[ "$sqlite_state" == active:blocked ]]
 
 "${compose[@]}" exec -T postgres psql --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" \
   --command "INSERT INTO operators (email, inserted_at, updated_at) VALUES ('recovery@example.test', now(), now())"
