@@ -171,7 +171,16 @@ defmodule SpaceTraders.Fleet.ShipServer do
         if still_busy?(type, ship) do
           retry(event, state, "ship is still #{busy_label(type)} after #{type}")
         else
-          Timeline.fire_event(event)
+          {:ok, :ok} =
+            SpaceTraders.Outbox.publish(
+              %{
+                topic: "fleet:#{state.agent_id}",
+                event: "ship_updated",
+                payload: %{"agent_id" => state.agent_id, "ship_symbol" => state.symbol}
+              },
+              fn -> Timeline.fire_event(event) end
+            )
+
           state = drop_pending_event(state, type, event)
 
           SpaceTraders.Fleet.Intents.reconcile(
@@ -181,12 +190,6 @@ defmodule SpaceTraders.Fleet.ShipServer do
             type,
             event.payload["intent_id"],
             event.payload["job_id"]
-          )
-
-          Phoenix.PubSub.broadcast(
-            SpaceTraders.PubSub,
-            "fleet:#{state.agent_id}",
-            {:ship_updated, state.agent_id, state.symbol}
           )
 
           {:noreply, state}

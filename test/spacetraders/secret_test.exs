@@ -56,7 +56,8 @@ defmodule SpaceTraders.SecretTest do
       {:ok, binary} = Base.decode64(ciphertext)
       <<iv::binary-size(12), tag::binary-size(16), payload::binary>> = binary
       # Corrupt the authentication tag in place (length unchanged).
-      tampered = Base.encode64(iv <> <<0>> <> binary_part(tag, 1, 15) <> payload)
+      <<first_byte, rest::binary>> = tag
+      tampered = Base.encode64(iv <> <<Bitwise.bxor(first_byte, 1)>> <> rest <> payload)
       assert_raise RuntimeError, ~r/failed to decrypt/, fn -> Secret.load(tampered) end
     end
   end

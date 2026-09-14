@@ -11,6 +11,7 @@ jq -e '
   .services.postgres.healthcheck.test == ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"] and
   .services.migrate.depends_on.postgres.condition == "service_healthy" and
   .services.web.depends_on.migrate.condition == "service_completed_successfully" and
+  .services.web.environment.POSTGRES_HOST == "postgres" and
   .services.postgres.volumes[0].source == "spacetraders-postgres"
 ' <<<"$config" >/dev/null
 

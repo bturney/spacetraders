@@ -40,6 +40,37 @@ health_check() {
   [[ "$response" == '{"status":"ok"}' ]]
 }
 
+postgres_authority_state() {
+  local image=$1
+  local table
+  local authority
+
+  table=$(compose "$image" exec -T postgres sh -c \
+    'psql --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" --tuples-only --no-align --command "SELECT to_regclass('\''public.runtime_authority'\'')"' \
+    2>/dev/null) || {
+    printf '%s\n' unknown
+    return
+  }
+
+  if [[ "$table" != runtime_authority ]]; then
+    printf '%s\n' pre_cutover
+    return
+  fi
+
+  authority=$(compose "$image" exec -T postgres sh -c \
+    'psql --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" --tuples-only --no-align --command "SELECT CASE WHEN count(*) = 0 THEN NULL WHEN count(*) = 1 THEN min(store) ELSE '\''invalid'\'' END FROM runtime_authority WHERE name = '\''durable_truth'\''"' \
+    2>/dev/null) || {
+    printf '%s\n' unknown
+    return
+  }
+
+  case "$authority" in
+    postgresql) printf '%s\n' postgresql ;;
+    '') printf '%s\n' pre_cutover ;;
+    *) printf '%s\n' unknown ;;
+  esac
+}
+
 running_image() {
   docker inspect --format '{{.Config.Image}}' spacetraders-web-1 2>/dev/null
 }
@@ -80,6 +111,7 @@ deploy_image() {
 
   validate_image "$image"
   compose "$image" pull
+  compose "$image" stop web
 
   if compose "$image" up -d && health_check; then
     record_success "$image" "$previous"
@@ -89,6 +121,15 @@ deploy_image() {
   if [[ -z "$previous" || "$previous" == "$image" ]]; then
     die "Deployment failed; no previous image is available for rollback."
   fi
+
+  case "$(postgres_authority_state "$image")" in
+    postgresql)
+      die "Deployment failed after PostgreSQL authority advanced; recover forward with a fixed image."
+      ;;
+    unknown)
+      die "Deployment failed and PostgreSQL authority could not be disproved; refusing rollback."
+      ;;
+  esac
 
   printf '%s\n' "Deployment failed; rolling back." >&2
   restore "$previous"
@@ -104,6 +145,14 @@ case "${1:-}" in
     [[ $# -eq 1 ]] || die "Usage: deploy rollback"
     [[ -s "$STATE_FILE" ]] || die "No current image is recorded."
     current=$(<"$STATE_FILE")
+    case "$(postgres_authority_state "$current")" in
+      postgresql)
+        die "PostgreSQL authority has advanced; image rollback is disabled. Recover forward."
+        ;;
+      unknown)
+        die "PostgreSQL authority could not be disproved; refusing rollback."
+        ;;
+    esac
     previous=$(recorded_rollback_image) || die "No previous image is available for rollback."
     restore "$previous"
     printf '%s\n' "$current" >"$PREVIOUS_STATE_FILE"
