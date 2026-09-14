@@ -1783,7 +1783,7 @@ defmodule SpaceTradersWeb.DashboardLive do
   end
 
   defp credentialed_agent(socket, agent) do
-    Agent.get_agent(socket.assigns.current_scope, agent.id)
+    Agent.get_agent(socket.assigns.current_scope, agent.id) || agent
   end
 
   defp clear_draft(socket, key) do
