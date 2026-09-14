@@ -81,7 +81,7 @@ backup_output=$(scripts/postgres-recovery backup "$backup_dir/rehearsal")
 restore_output=$(scripts/postgres-recovery restore-rehearsal "$backup_dir/rehearsal")
 backup_operation_id=$(<"$backup_dir/rehearsal/operation_id")
 
-grep -Eq '^operators=1:[0-9a-f]{64}$' "$backup_dir/rehearsal/manifest"
+grep -Eq '^operators=2:[0-9a-f]{64}$' "$backup_dir/rehearsal/manifest"
 grep -q 'operation=backup status=completed' <<<"$backup_output"
 grep -q 'operation=restore_rehearsal status=completed' <<<"$restore_output"
 grep -q "backup_operation_id=$backup_operation_id" <<<"$restore_output"
@@ -90,7 +90,7 @@ grep -q "backup_operation_id=$backup_operation_id" <<<"$restore_output"
 "${compose[@]}" exec -T postgres pg_restore --username "$POSTGRES_USER" \
   --dbname recovery_value_check --no-owner --no-acl <"$backup_dir/rehearsal/database.dump"
 restored_email=$("${compose[@]}" exec -T postgres psql --username "$POSTGRES_USER" \
-  --dbname recovery_value_check --tuples-only --no-align --command 'SELECT email FROM operators')
+  --dbname recovery_value_check --tuples-only --no-align --command "SELECT email FROM operators WHERE email = 'recovery@example.test'")
 [[ "$restored_email" == recovery@example.test ]]
 
 failure_override="$backup_dir/migration-failure.yaml"
