@@ -22,9 +22,10 @@ defmodule SpaceTraders.MissionControlTest do
       operator = operator_fixture()
       _agent = agent_fixture(operator, %{agent_token: "AGENT_TOKEN_SECRET"})
       Req.Test.stub(SpaceTraders.API, &unavailable_response/1)
+      scope = Scope.for_operator(operator)
 
-      assert [%{agent: %{agent_token: nil}}] =
-               MissionControl.dashboard(Scope.for_operator(operator))
+      assert [%{agent_token: nil} = agent_ref] = MissionControl.agents(scope)
+      assert [%{agent: %{agent_token: nil}}] = MissionControl.dashboard(scope, [agent_ref])
     end
 
     test "uses only read requests and preserves unavailable values" do

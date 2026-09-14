@@ -41,4 +41,13 @@ defmodule SpaceTraders.FleetGenerationTest do
     refute inspect(agent) =~ "ACCOUNT_TOKEN_SECRET"
     refute inspect(agent) =~ "AGENT_TOKEN_SECRET"
   end
+
+  test "is the sole production owner of registration" do
+    callers =
+      "lib/spacetraders/**/*.ex"
+      |> Path.wildcard()
+      |> Enum.filter(&(File.read!(&1) =~ "SpaceTraders.API.register("))
+
+    assert callers == ["lib/spacetraders/fleet_generation.ex"]
+  end
 end

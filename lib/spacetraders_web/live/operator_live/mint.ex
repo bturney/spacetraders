@@ -81,7 +81,7 @@ defmodule SpaceTradersWeb.OperatorLive.Mint do
       |> assign(:factions, FactionSymbol.values())
       |> assign(
         :account_token_linked?,
-        Agent.account_token_linked?(socket.assigns.current_scope.operator)
+        Agent.account_token_linked?(socket.assigns.current_scope)
       )
       |> assign_form(Agent.change_mint())
 

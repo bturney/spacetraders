@@ -130,7 +130,7 @@ defmodule SpaceTraders.Agent do
   end
 
   @doc "Returns whether the Operator has a stored AccountToken without loading its value."
-  def account_token_linked?(%Operator{id: operator_id}) do
+  def account_token_linked?(%Scope{operator: %Operator{id: operator_id}}) do
     Repo.exists?(
       from(operator in Operator,
         where: operator.id == ^operator_id and not is_nil(operator.account_token)
@@ -162,6 +162,8 @@ defmodule SpaceTraders.Agent do
   def get_agent(%Operator{id: operator_id}, agent_id) do
     Repo.get_by(Agent, id: agent_id, operator_id: operator_id)
   end
+
+  def get_agent(%Scope{operator: operator}, agent_id), do: get_agent(operator, agent_id)
 
   @doc """
   Pulls an agent's live game record — credits, headquarters and faction — from
