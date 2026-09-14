@@ -17,13 +17,58 @@ trap '"${compose[@]}" down --volumes >/dev/null 2>&1 || true' EXIT
 
 "${compose[@]}" up --detach --wait postgres
 "${compose[@]}" run --rm migrate
-"${compose[@]}" run --rm migrate
+
+# Cover retained current state, historical activity, encrypted credential references,
+# and a scheduled wakeup before repeating the one-way rehearsal.
+"${compose[@]}" run --rm migrate bin/spacetraders eval '
+  Ecto.Migrator.with_repo(SpaceTraders.Repo, fn _ ->
+    SpaceTraders.Repo.query!("INSERT INTO operators (email, account_token_ciphertext, inserted_at, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)", ["sqlite@example.test", "encrypted-account-token"])
+    SpaceTraders.Repo.query!("INSERT INTO operators_tokens (operator_id, token, context, inserted_at) VALUES (1, ?, ?, CURRENT_TIMESTAMP)", [<<1, 2, 3>>, "session"])
+    SpaceTraders.Repo.query!("INSERT INTO agents (symbol, faction, headquarters, agent_token_ciphertext, operator_id, inserted_at, updated_at) VALUES (?, ?, ?, ?, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)", ["SQLITE-1", "COSMIC", "X1-TEST-A1", "encrypted-agent-token"])
+    SpaceTraders.Repo.query!("INSERT INTO ships (symbol, ship_type, agent_id, inserted_at, updated_at) VALUES (?, ?, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)", ["SQLITE-1-1", "SHIP_PROBE"])
+    SpaceTraders.Repo.query!("INSERT INTO fleet_activity (agent_id, ship_id, kind, message, metadata, inserted_at, updated_at) VALUES (1, 1, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)", ["historical", "retained activity", ~s({"source":"sqlite"})])
+    SpaceTraders.Repo.query!("INSERT INTO timeline_events (owner_type, owner_id, event_type, due_at, status, payload, inserted_at, updated_at) VALUES (?, 1, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)", ["ship", "arrival", "2030-01-01T00:00:00Z", "scheduled", ~s({"waypoint":"X1-TEST-A1"})])
+  end)
+'
+
+first_rehearsal=$("${compose[@]}" run --rm migrate)
+second_rehearsal=$("${compose[@]}" run --rm migrate)
 
 migration_count=$("${compose[@]}" exec -T postgres \
   psql --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" --tuples-only --no-align \
   --command 'SELECT count(*) FROM schema_migrations')
 
 [[ "$migration_count" -gt 0 ]]
+
+first_reconciliation=$(sed -n 's/.*reconciliation=//p' <<<"$first_rehearsal")
+second_reconciliation=$(sed -n 's/.*reconciliation=//p' <<<"$second_rehearsal")
+[[ "$first_reconciliation" =~ ^[0-9a-f]{64}$ ]]
+[[ "$first_reconciliation" == "$second_reconciliation" ]]
+grep -q 'operation=sqlite_rehearsal status=completed tables=12 rows=6' <<<"$first_rehearsal"
+
+postgres_state=$("${compose[@]}" exec -T postgres psql --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" --tuples-only --no-align \
+  --command "SELECT email || ':' || account_token_ciphertext FROM operators")
+[[ "$postgres_state" == sqlite@example.test:encrypted-account-token ]]
+
+sqlite_before=$("${compose[@]}" run --rm migrate bin/spacetraders eval '
+  Ecto.Migrator.with_repo(SpaceTraders.Repo, fn _ ->
+    %{rows: [[count]]} = SpaceTraders.Repo.query!("SELECT count(*) FROM operators")
+    IO.puts(count)
+  end)
+')
+
+if "${compose[@]}" run --rm -e SQLITE_REHEARSAL_FAIL_AFTER_TABLE=agents migrate; then
+  printf '%s\n' 'Expected rehearsal transformation failure.' >&2
+  exit 1
+fi
+
+sqlite_after=$("${compose[@]}" run --rm migrate bin/spacetraders eval '
+  Ecto.Migrator.with_repo(SpaceTraders.Repo, fn _ ->
+    %{rows: [[count]]} = SpaceTraders.Repo.query!("SELECT count(*) FROM operators")
+    IO.puts(count)
+  end)
+')
+[[ "$sqlite_before" == "$sqlite_after" ]]
 
 "${compose[@]}" exec -T postgres psql --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" \
   --command "INSERT INTO operators (email, inserted_at, updated_at) VALUES ('recovery@example.test', now(), now())"
