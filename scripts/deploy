@@ -52,6 +52,6 @@ case "${1:-}" in
     run_remote HEAD "\"\$temporary/scripts/postgres-recovery\" restore-rehearsal $(printf '%q' "$2")"
     ;;
   *)
-    die "Usage: scripts/deploy {deploy <sha|tag|digest>|rollback|postgres-health|postgres-backup [directory]|postgres-restore-rehearsal <directory>}"
+    die "Usage: scripts/deploy {deploy <sha|tag>|rollback|postgres-health|postgres-backup [directory]|postgres-restore-rehearsal <directory>}"
     ;;
 esac

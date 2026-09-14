@@ -26,6 +26,7 @@ Phoenix 1.8 (Bandit + LiveView), SQLite via `ecto_sqlite3`. Toolchain versions o
 - Use `scripts/bootstrap` in a clean checkout and `scripts/verify` before pushing. Run/test commands are in README's Development section.
 - Before starting new implementation, run `git fetch origin main` and `git merge-base --is-ancestor origin/main HEAD`; branch names do not prove freshness. Preserve local changes rather than switching or resetting a dirty checkout. Workflow policy is under review in #267.
 - For unattended CI or runner work, read `docs/agents/readiness.md`.
+- Production operations: before changing or running deployment, migration, backup, restore, or Compose on `project-host`, read `docs/operations/project-host.md`.
 - When changing the API client, treat `priv/spec/SpaceTraders.json` as ground truth and read `test/spacetraders/api/spec_conformance_test.exs`.
 - When changing a LiveView form, use the `@form_drafts` pattern; recurring patches must not overwrite a user's draft.
 
