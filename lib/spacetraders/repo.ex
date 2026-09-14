@@ -1,5 +1,5 @@
 defmodule SpaceTraders.Repo do
   use Ecto.Repo,
     otp_app: :spacetraders,
-    adapter: Ecto.Adapters.SQLite3
+    adapter: Application.compile_env(:spacetraders, :repo_adapter)
 end

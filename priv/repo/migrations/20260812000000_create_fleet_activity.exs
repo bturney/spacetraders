@@ -6,7 +6,9 @@ defmodule SpaceTraders.Repo.Migrations.CreateFleetActivity do
       add :agent_id, references(:agents, on_delete: :delete_all), null: false
       add :ship_id, references(:ships, on_delete: :delete_all)
       add :kind, :string, null: false
-      add :message, :string, null: false
+      # Activity records retain game-provided evidence that can exceed the
+      # PostgreSQL :string (varchar(255)) limit SQLite does not enforce.
+      add :message, :text, null: false
       add :metadata, :map, null: false, default: %{}
 
       timestamps(type: :utc_datetime)

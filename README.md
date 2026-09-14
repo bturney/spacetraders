@@ -54,6 +54,23 @@ scripts/verify   # == mix verify
 4. `space_traders.gen.models --check` — fail if committed API structs are stale
 5. `verify.boot` — starts the full app on a real HTTP server and asserts `GET /health` → 200
 
+### PostgreSQL compatibility verification
+
+SQLite remains the production database until the approved authority cutover.
+Maintainers can run the identical verification gate against PostgreSQL without
+changing the production adapter:
+
+```sh
+docker run --rm --name spacetraders-postgres -p 5432:5432 \
+  -e POSTGRES_DB=spacetraders_test -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=postgres \
+  postgres:17
+scripts/verify-postgres
+```
+
+Set `DATABASE_URL` to use another PostgreSQL instance. The `postgres_test` Mix
+environment is test-only; adapter-specific historical migration SQL is kept
+explicitly branched and covered by this gate.
+
 ### Game API client & codegen
 
 The thin `SpaceTraders.API` Req client (structs in `SpaceTraders.API.Model.*`) is

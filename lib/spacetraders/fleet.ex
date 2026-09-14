@@ -386,7 +386,7 @@ defmodule SpaceTraders.Fleet do
   def recent_activity(%AgentRecord{} = agent) do
     Activity
     |> where([a], a.agent_id == ^agent.id)
-    |> order_by([a], desc: a.inserted_at)
+    |> order_by([a], desc: a.inserted_at, desc: a.id)
     |> preload(:ship)
     |> Repo.all()
   end

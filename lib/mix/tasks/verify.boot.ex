@@ -58,12 +58,11 @@ defmodule Mix.Tasks.Verify.Boot do
     end
   end
 
-  # In test env the DB file is named after this process's PID and is removed
-  # when the test suite finishes (see test/test_helper.exs), so the boot leg
-  # must not assume it survived the test run. These tasks may already have run
-  # in this process; Mix.Task.run/2 skips previously-run tasks, so force them.
+  # Test environments may remove their SQLite file or recreate their PostgreSQL
+  # database between test and boot. These tasks may already have run in this
+  # process, so force them.
   defp ensure_migrated_db do
-    if Mix.env() == :test do
+    if test_env?() do
       # The test leg already evaluated the migration modules in this process;
       # silence Ecto's "redefining module" warnings when they are re-evaluated.
       previous = Code.compiler_options()[:ignore_module_conflict]
@@ -76,8 +75,9 @@ defmodule Mix.Tasks.Verify.Boot do
     end
   end
 
-  # The boot leg migrates its own PID-named test DB; remove it so verify runs
-  # leave nothing behind. The dev DB is the operator's own data and untouched.
+  # The boot leg migrates its own PID-named SQLite test DB; remove it so verify
+  # runs leave nothing behind. PostgreSQL test database lifecycle is managed by
+  # `mix ecto.drop/create`, and the dev SQLite DB is untouched.
   defp cleanup_test_db do
     if Mix.env() == :test do
       db = Application.fetch_env!(:spacetraders, SpaceTraders.Repo)[:database]
@@ -87,6 +87,8 @@ defmodule Mix.Tasks.Verify.Boot do
       end
     end
   end
+
+  defp test_env?, do: Mix.env() in [:test, :postgres_test]
 
   defp health_url do
     case SpaceTradersWeb.Endpoint.server_info(:http) do

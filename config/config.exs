@@ -25,6 +25,10 @@ config :spacetraders,
   ecto_repos: [SpaceTraders.Repo],
   generators: [timestamp_type: :utc_datetime]
 
+# SQLite remains the production store until the authority cutover. The
+# PostgreSQL test environment overrides this compile-time adapter selection.
+config :spacetraders, :repo_adapter, Ecto.Adapters.SQLite3
+
 # Configure the endpoint
 config :spacetraders, SpaceTradersWeb.Endpoint,
   url: [host: "localhost"],

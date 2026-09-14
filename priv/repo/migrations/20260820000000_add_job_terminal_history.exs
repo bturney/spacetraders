@@ -22,18 +22,11 @@ defmodule SpaceTraders.Repo.Migrations.AddJobTerminalHistory do
              name: :jobs_one_unfinished_per_ship_index
            )
 
-    execute("""
-    CREATE TRIGGER jobs_terminal_immutable_update
-    BEFORE UPDATE ON jobs
-    WHEN OLD.status IN #{@terminal_states}
-    BEGIN
-      SELECT RAISE(ABORT, 'terminal jobs are immutable');
-    END
-    """)
+    create_terminal_job_trigger()
   end
 
   def down do
-    execute("DROP TRIGGER jobs_terminal_immutable_update")
+    drop_terminal_job_trigger()
 
     drop unique_index(:jobs, [:ship_id], name: :jobs_one_unfinished_per_ship_index)
 
@@ -55,4 +48,45 @@ defmodule SpaceTraders.Repo.Migrations.AddJobTerminalHistory do
 
     execute("UPDATE jobs SET status = 'ready' WHERE status IN ('active', 'paused')")
   end
+
+  defp create_terminal_job_trigger do
+    if postgres?() do
+      execute("""
+      CREATE FUNCTION jobs_terminal_immutable_update()
+      RETURNS trigger AS $$
+      BEGIN
+        RAISE EXCEPTION 'terminal jobs are immutable';
+      END;
+      $$ LANGUAGE plpgsql
+      """)
+
+      execute("""
+      CREATE TRIGGER jobs_terminal_immutable_update
+      BEFORE UPDATE ON jobs
+      FOR EACH ROW WHEN (OLD.status IN #{@terminal_states})
+      EXECUTE FUNCTION jobs_terminal_immutable_update()
+      """)
+    else
+      execute("""
+      CREATE TRIGGER jobs_terminal_immutable_update
+      BEFORE UPDATE ON jobs
+      WHEN OLD.status IN #{@terminal_states}
+      BEGIN
+        SELECT RAISE(ABORT, 'terminal jobs are immutable');
+      END
+      """)
+    end
+  end
+
+  defp drop_terminal_job_trigger do
+    if postgres?() do
+      execute("DROP TRIGGER jobs_terminal_immutable_update ON jobs")
+      execute("DROP FUNCTION jobs_terminal_immutable_update()")
+    else
+      execute("DROP TRIGGER jobs_terminal_immutable_update")
+    end
+  end
+
+  defp postgres?,
+    do: Application.fetch_env!(:spacetraders, :repo_adapter) == Ecto.Adapters.Postgres
 end
