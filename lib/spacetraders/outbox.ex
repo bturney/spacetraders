@@ -26,7 +26,10 @@ defmodule SpaceTraders.Outbox do
            {result, notification}
          end) do
       {:ok, {result, notification}} ->
-        dispatch(notification)
+        if Process.whereis(SpaceTraders.PubSub) do
+          dispatch(notification)
+        end
+
         {:ok, result}
 
       error ->
