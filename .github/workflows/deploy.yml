@@ -16,5 +16,10 @@ jobs:
       github.event.workflow_run.head_branch == 'main'
     runs-on: [self-hosted, project-host]
     steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
       - name: Deploy published image
-        run: /srv/projects/spacetraders/deploy deploy ghcr.io/bturney/spacetraders:sha-${{ github.event.workflow_run.head_sha }}
+        env:
+          SPACETRADERS_BUNDLE_DIR: ${{ github.workspace }}
+        run: scripts/deploy-host deploy ghcr.io/bturney/spacetraders:sha-${{ github.event.workflow_run.head_sha }}

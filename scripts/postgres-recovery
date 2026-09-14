@@ -1,0 +1,170 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+readonly OPERATION_ID=${OPERATION_ID:-postgres-$(date -u +%Y%m%dT%H%M%SZ)-$$}
+if [[ -n "${SPACETRADERS_BUNDLE_DIR:-}" ]]; then
+  readonly DEPLOY_DIR=${SPACETRADERS_DEPLOY_DIR:?set SPACETRADERS_DEPLOY_DIR}
+  readonly COMPOSE=(docker compose --project-name spacetraders --env-file "$DEPLOY_DIR/.env"
+    -f "$SPACETRADERS_BUNDLE_DIR/compose.yaml"
+    -f "$SPACETRADERS_BUNDLE_DIR/compose.production.yaml")
+else
+  readonly COMPOSE=(docker compose)
+fi
+
+CURRENT_OPERATION=initialization
+
+log() {
+  printf 'operation_id=%s operation=%s status=%s%s\n' \
+    "$OPERATION_ID" "$1" "$2" "${3:+ $3}"
+}
+
+failure() {
+  local status=$?
+  trap - ERR
+  log "$CURRENT_OPERATION" failed "exit_code=$status"
+  exit "$status"
+}
+
+trap failure ERR
+
+readonly POSTGRES_DB=$("${COMPOSE[@]}" exec -T postgres sh -c 'printf %s "$POSTGRES_DB"')
+readonly POSTGRES_USER=$("${COMPOSE[@]}" exec -T postgres sh -c 'printf %s "$POSTGRES_USER"')
+
+psql_command() {
+  local database=$1
+  shift
+  "${COMPOSE[@]}" exec -T postgres \
+    psql --username "$POSTGRES_USER" --dbname "$database" --no-psqlrc "$@" </dev/null
+}
+
+row_manifest() {
+  local database=$1
+  local table
+  local count
+  local content_hash
+
+  while IFS= read -r table; do
+    count=$(psql_command "$database" --tuples-only --no-align \
+      --command "SELECT count(*) FROM public.\"$table\"")
+    content_hash=$(psql_command "$database" \
+      --command "COPY (SELECT row_to_json(t)::text FROM public.\"$table\" t ORDER BY row_to_json(t)::text) TO STDOUT" |
+      sha256sum | cut -d' ' -f1)
+    printf '%s=%s:%s\n' "$table" "$count" "$content_hash"
+  done < <(psql_command "$database" --tuples-only --no-align \
+    --command "SELECT tablename FROM pg_tables WHERE schemaname = 'public' ORDER BY tablename")
+}
+
+restore_manifest() (
+  local source=$1
+  local destination=$2
+  local nonce
+  nonce=$(printf '%s' "$OPERATION_ID-$RANDOM-$(date +%s%N)" | sha256sum | cut -c1-16)
+  local database="spacetraders_rehearsal_$nonce"
+  database=${database:0:63}
+  local cleanup_enabled=false
+
+  cleanup() {
+    if [[ "$cleanup_enabled" == true ]]; then
+      psql_command postgres --command "DROP DATABASE IF EXISTS \"$database\" WITH (FORCE)" \
+        >/dev/null 2>&1 || true
+      cleanup_enabled=false
+    fi
+  }
+  trap cleanup EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+
+  psql_command postgres --command "CREATE DATABASE \"$database\"" >/dev/null
+  cleanup_enabled=true
+
+  "${COMPOSE[@]}" exec -T postgres pg_restore \
+    --username "$POSTGRES_USER" --dbname "$database" \
+    --no-owner --no-acl <"$source"
+  row_manifest "$database" >"$destination"
+)
+
+backup() {
+  local destination=${1:-backups/postgres-$(date -u +%Y%m%dT%H%M%SZ)}
+  local parent
+  local temporary
+  parent=$(dirname "$destination")
+
+  if [[ -e "$destination" ]]; then
+    log backup failed "reason=destination_exists destination=$destination"
+    return 1
+  fi
+
+  mkdir -p "$parent"
+  temporary=$(mktemp -d "$parent/.postgres-backup.XXXXXX")
+  trap 'rm -rf "$temporary"' EXIT
+  umask 077
+
+  log backup started "destination=$destination"
+  "${COMPOSE[@]}" exec -T postgres pg_dump \
+    --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" \
+    --format=custom --no-owner --no-acl >"$temporary/database.dump"
+  restore_manifest "$temporary/database.dump" "$temporary/manifest"
+  (cd "$temporary" && sha256sum database.dump >database.dump.sha256)
+  printf '%s\n' "$OPERATION_ID" >"$temporary/operation_id"
+  mv --no-clobber --no-target-directory "$temporary" "$destination"
+  if [[ -d "$temporary" ]]; then
+    log backup failed "reason=destination_collision destination=$destination"
+    return 1
+  fi
+  trap - EXIT
+  log backup completed \
+    "destination=$destination checksum=$(cut -d' ' -f1 <"$destination/database.dump.sha256")"
+}
+
+restore_rehearsal() {
+  local source=${1:?Usage: scripts/postgres-recovery restore-rehearsal <backup-directory>}
+  local restored_manifest
+  local backup_operation_id
+  local count
+  local count_and_hash
+  local row_count=0
+  restored_manifest=$(mktemp)
+  trap 'rm -f "$restored_manifest"' EXIT
+
+  [[ -r "$source/database.dump" && -r "$source/manifest" &&
+    -r "$source/database.dump.sha256" && -r "$source/operation_id" ]]
+  (cd "$source" && sha256sum --check database.dump.sha256 >/dev/null)
+  backup_operation_id=$(<"$source/operation_id")
+  log restore_rehearsal started "source=$source backup_operation_id=$backup_operation_id"
+  restore_manifest "$source/database.dump" "$restored_manifest"
+  cmp --silent "$source/manifest" "$restored_manifest"
+
+  while IFS='=' read -r _ count_and_hash; do
+    count=${count_and_hash%%:*}
+    row_count=$((row_count + count))
+  done <"$restored_manifest"
+
+  log restore_rehearsal completed \
+    "source=$source backup_operation_id=$backup_operation_id tables=$(wc -l <"$restored_manifest") rows=$row_count"
+  rm -f "$restored_manifest"
+  trap - EXIT
+}
+
+case "${1:-}" in
+  health)
+    CURRENT_OPERATION=health
+    log health started
+    "${COMPOSE[@]}" exec -T postgres \
+      pg_isready --username "$POSTGRES_USER" --dbname "$POSTGRES_DB"
+    log health completed
+    ;;
+  backup)
+    CURRENT_OPERATION=backup
+    shift
+    backup "$@"
+    ;;
+  restore-rehearsal)
+    CURRENT_OPERATION=restore_rehearsal
+    shift
+    restore_rehearsal "$@"
+    ;;
+  *)
+    printf '%s\n' 'Usage: scripts/postgres-recovery {health|backup [directory]|restore-rehearsal <directory>}' >&2
+    exit 1
+    ;;
+esac

@@ -2,7 +2,6 @@
 set -euo pipefail
 
 readonly HOST=project-host
-readonly HOST_DEPLOY=/srv/projects/spacetraders/deploy
 readonly IMAGE_REPOSITORY=ghcr.io/bturney/spacetraders
 
 die() {
@@ -10,28 +9,49 @@ die() {
   exit 1
 }
 
+run_remote() {
+  local revision=$1
+  local command=$2
+  git archive --format=tar "$revision" -- \
+    compose.yaml compose.production.yaml scripts/deploy-host scripts/postgres-recovery | gzip | \
+    tailscale ssh "$HOST" "set -euo pipefail; temporary=\$(mktemp -d); trap 'rm -rf \"\$temporary\"' EXIT; tar --extract --gzip --file - --directory \"\$temporary\"; cd /srv/projects/spacetraders; SPACETRADERS_DEPLOY_DIR=/srv/projects/spacetraders SPACETRADERS_BUNDLE_DIR=\"\$temporary\" $command"
+}
+
 case "${1:-}" in
   deploy)
     [[ $# -eq 2 ]] || die "Usage: scripts/deploy deploy <sha|tag|digest>"
     ref=$2
-    if [[ "$ref" == sha256:[0-9a-f]* ]]; then
-      image="$IMAGE_REPOSITORY@$ref"
-    elif [[ "$ref" == *"/"* || "$ref" == *"@sha256:"* ]]; then
-      image=$ref
-    elif [[ "$ref" == sha-* ]]; then
+    if [[ "$ref" == sha-[0-9a-f]* ]]; then
+      revision=${ref#sha-}
       image="$IMAGE_REPOSITORY:$ref"
     elif [[ "$ref" =~ ^[0-9a-f]{40}$ ]]; then
+      revision=$ref
       image="$IMAGE_REPOSITORY:sha-$ref"
     else
+      revision=$(git rev-list -n 1 "$ref")
+      [[ -n "$revision" ]] || die "Tag does not identify a local commit: $ref"
       image="$IMAGE_REPOSITORY:$ref"
     fi
-    exec tailscale ssh "$HOST" "$HOST_DEPLOY deploy $(printf '%q' "$image")"
+    run_remote "$revision" "\"\$temporary/scripts/deploy-host\" deploy $(printf '%q' "$image")"
     ;;
   rollback)
     [[ $# -eq 1 ]] || die "Usage: scripts/deploy rollback"
-    exec tailscale ssh "$HOST" "$HOST_DEPLOY rollback"
+    run_remote HEAD '"$temporary/scripts/deploy-host" rollback'
+    ;;
+  postgres-health)
+    [[ $# -eq 1 ]] || die "Usage: scripts/deploy postgres-health"
+    run_remote HEAD '"$temporary/scripts/postgres-recovery" health'
+    ;;
+  postgres-backup)
+    [[ $# -le 2 ]] || die "Usage: scripts/deploy postgres-backup [directory]"
+    destination=${2:-}
+    run_remote HEAD "\"\$temporary/scripts/postgres-recovery\" backup $(printf '%q' "$destination")"
+    ;;
+  postgres-restore-rehearsal)
+    [[ $# -eq 2 ]] || die "Usage: scripts/deploy postgres-restore-rehearsal <directory>"
+    run_remote HEAD "\"\$temporary/scripts/postgres-recovery\" restore-rehearsal $(printf '%q' "$2")"
     ;;
   *)
-    die "Usage: scripts/deploy {deploy <sha|tag|digest>|rollback}"
+    die "Usage: scripts/deploy {deploy <sha|tag|digest>|rollback|postgres-health|postgres-backup [directory]|postgres-restore-rehearsal <directory>}"
     ;;
 esac

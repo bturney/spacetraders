@@ -51,6 +51,10 @@ jobs:
         run: scripts/bootstrap
       - name: Verify PostgreSQL behavior
         run: scripts/verify-postgres
+      - name: Verify PostgreSQL deployment and recovery
+        run: |
+          test/integration/postgres_compose_test.sh
+          test/integration/postgres_migration_test.sh
 
   concurrent-worktrees:
     runs-on: ubuntu-24.04

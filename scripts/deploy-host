@@ -3,9 +3,9 @@
 set -euo pipefail
 
 readonly DEPLOY_DIR=/srv/projects/spacetraders
+readonly BUNDLE_DIR=${SPACETRADERS_BUNDLE_DIR:-$DEPLOY_DIR}
 readonly STATE_FILE="$DEPLOY_DIR/.current-image"
 readonly PREVIOUS_STATE_FILE="$DEPLOY_DIR/.previous-image"
-readonly COMPOSE=(docker compose -f compose.yaml -f compose.production.yaml)
 readonly HEALTH_URL=http://127.0.0.1:4000/health
 
 cd "$DEPLOY_DIR"
@@ -18,14 +18,19 @@ die() {
 compose() {
   local image=$1
   shift
-  SPACETRADERS_IMAGE="$image" "${COMPOSE[@]}" "$@"
+  SPACETRADERS_IMAGE="$image" docker compose --project-name spacetraders \
+    --env-file "$DEPLOY_DIR/.env" \
+    -f "$BUNDLE_DIR/compose.yaml" \
+    -f "$BUNDLE_DIR/compose.production.yaml" "$@"
 }
 
 validate_image() {
   local image=$1
   local resolved
+  local expected
   resolved=$(compose "$image" config --images | sort -u)
-  [[ "$resolved" == "$image" ]] || die "Compose did not resolve the requested image."
+  expected=$(printf '%s\n%s\n' "$image" postgres:17-alpine | sort -u)
+  [[ "$resolved" == "$expected" ]] || die "Compose did not resolve the requested images."
 }
 
 health_check() {
@@ -82,10 +87,10 @@ deploy_image() {
   fi
 
   if [[ -z "$previous" || "$previous" == "$image" ]]; then
-    die "Deployment health check failed; no previous image is available for rollback."
+    die "Deployment failed; no previous image is available for rollback."
   fi
 
-  printf '%s\n' "Deployment health check failed; rolling back." >&2
+  printf '%s\n' "Deployment failed; rolling back." >&2
   restore "$previous"
   die "Deployment failed; rollback completed."
 }
