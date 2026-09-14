@@ -27,6 +27,7 @@ defmodule SpaceTraders.MissionControl do
     agents
     |> Enum.filter(&owned_by?(&1, scope))
     |> Enum.map(&Agent.get_agent(scope, &1.id))
+    |> Enum.reject(&is_nil/1)
     |> Enum.map(&Fleet.command_snapshot/1)
     |> Enum.map(&without_credentials/1)
   end

@@ -472,7 +472,7 @@ defmodule SpaceTraders.AgentTest do
     end
   end
 
-  describe "mint_agent/2" do
+  describe "FleetGeneration minting and Stale Agent retirement" do
     setup do
       operator = operator_fixture()
       {:ok, operator} = Agent.link_account_token(operator, "ACCOUNT_TOKEN")

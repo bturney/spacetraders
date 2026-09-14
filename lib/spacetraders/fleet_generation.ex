@@ -161,8 +161,13 @@ defmodule SpaceTraders.FleetGeneration do
                |> then(fn {symbols, ships} -> {List.flatten(symbols), List.flatten(ships)} end)
 
              case create_agent(operator, game_agent, agent_token, faction) do
-               {:ok, agent} -> {agent, retired_symbols, ship_symbols}
-               {:error, changeset} -> Repo.rollback(changeset)
+               {:ok, agent} ->
+                 {agent, retired_symbols, ship_symbols}
+
+               {:error, changeset} ->
+                 changeset
+                 |> Ecto.Changeset.delete_change(:agent_token)
+                 |> Repo.rollback()
              end
            end) do
       Enum.each(ship_symbols, &ShipServer.stop/1)

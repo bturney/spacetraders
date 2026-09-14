@@ -28,6 +28,16 @@ defmodule SpaceTraders.MissionControlTest do
       assert [%{agent: %{agent_token: nil}}] = MissionControl.dashboard(scope, [agent_ref])
     end
 
+    test "ignores an Agent retired after its projection reference was listed" do
+      operator = operator_fixture()
+      agent = agent_fixture(operator, %{agent_token: nil})
+      scope = Scope.for_operator(operator)
+      [agent_ref] = MissionControl.agents(scope)
+      Repo.delete!(agent)
+
+      assert MissionControl.dashboard(scope, [agent_ref]) == []
+    end
+
     test "uses only read requests and preserves unavailable values" do
       operator = operator_fixture()
       agent = agent_fixture(operator)
