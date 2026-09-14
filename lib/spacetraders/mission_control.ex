@@ -23,6 +23,7 @@ defmodule SpaceTraders.MissionControl do
     agents
     |> Enum.filter(&owned_by?(&1, scope))
     |> Enum.map(&Fleet.command_snapshot/1)
+    |> Enum.map(&without_credentials/1)
   end
 
   @doc """
@@ -39,7 +40,7 @@ defmodule SpaceTraders.MissionControl do
       agent ->
         Enum.map(projections, fn projection ->
           if projection.agent.id == agent.id do
-            Fleet.command_snapshot(agent)
+            agent |> Fleet.command_snapshot() |> without_credentials()
           else
             projection
           end
@@ -116,6 +117,10 @@ defmodule SpaceTraders.MissionControl do
     do: true
 
   defp owned_by?(_agent, _scope), do: false
+
+  defp without_credentials(%{agent: %AgentRecord{} = agent} = projection) do
+    %{projection | agent: %{agent | agent_token: nil}}
+  end
 
   defp namespace_facts(facts, namespace) do
     Map.new(facts, fn {field, fact} -> {"#{namespace}.#{field}", fact} end)

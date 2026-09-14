@@ -1,22 +1,20 @@
 defmodule SpaceTraders.Agent do
   @moduledoc """
-  The Agent context: operator accounts, game secrets, and agent minting.
+  The Agent context: Operator accounts, stored game credentials, and Agents.
 
   Owns the human Operators (email/password login, per-operator AccountToken
-  linking) and the in-game Agents they mint. AccountTokens and AgentTokens are
+  linking) and the in-game Agents they own. AccountTokens and AgentTokens are
   stored encrypted at rest via `SpaceTraders.Secret` (ADR 0006) — the app reads
-  them only from the database, never from `.env`. Minting talks to the game
-  through `SpaceTraders.API.register/3`.
+  them only from the database, never from `.env`. Fleet Generation owns minting
+  and Stale Agent retirement.
   """
 
-  import Ecto.Changeset, only: [get_field: 2]
   import Ecto.Query, warn: false
   alias SpaceTraders.Repo
 
   alias SpaceTraders.API.Model.Agent, as: GameAgent
   alias SpaceTraders.Agent.{Agent, Operator, OperatorToken, OperatorNotifier, Scope}
-  alias SpaceTraders.Fleet.{Ship, ShipServer}
-  alias SpaceTraders.Timeline
+  alias SpaceTraders.FleetGeneration
 
   ## Database getters
 
@@ -131,6 +129,15 @@ defmodule SpaceTraders.Agent do
     Operator.account_token_changeset(%Operator{}, attrs)
   end
 
+  @doc "Returns whether the Operator has a stored AccountToken without loading its value."
+  def account_token_linked?(%Operator{id: operator_id}) do
+    Repo.exists?(
+      from(operator in Operator,
+        where: operator.id == ^operator_id and not is_nil(operator.account_token)
+      )
+    )
+  end
+
   ## Agents
 
   @doc """
@@ -168,116 +175,19 @@ defmodule SpaceTraders.Agent do
   """
   def agent_overview(%Agent{agent_token: agent_token} = agent)
       when is_binary(agent_token) and agent_token != "" do
-    case SpaceTraders.API.get_agent(agent_token) do
-      {:error, %SpaceTraders.API.GameplayError{} = error} = result ->
-        if server_reset_mismatch?(error) do
-          mark_stale(agent)
-          {:error, :stale_agent}
-        else
-          result
-        end
-
-      result ->
-        result
-    end
+    FleetGeneration.agent_overview(agent)
   end
 
   def agent_overview(%Agent{}), do: {:error, :agent_token_missing}
 
   @doc "Returns whether the game has verified this Agent as stale after a Server Reset."
-  def stale?(%Agent{stale_at: stale_at}), do: not is_nil(stale_at)
+  defdelegate stale?(agent), to: FleetGeneration
 
   @doc "Fences execution against an Agent retired or invalidated by a Server Reset."
-  def execution_allowed?(%Agent{} = agent) do
-    with :ok <- SpaceTraders.RuntimeAuthority.execution_allowed?() do
-      agent_execution_allowed?(agent)
-    end
-  end
-
-  defp agent_execution_allowed?(%Agent{id: nil}), do: :ok
-
-  defp agent_execution_allowed?(%Agent{id: id}) do
-    case Repo.get(Agent, id) do
-      %Agent{stale_at: nil} -> :ok
-      _ -> {:error, :stale_agent}
-    end
-  end
+  defdelegate execution_allowed?(agent), to: FleetGeneration
 
   @doc "Converts a reset mismatch from any game call into the durable stale state."
-  def handle_game_result(%Agent{} = agent, {:error, error}) do
-    if server_reset_mismatch?(error) do
-      mark_stale(agent)
-      {:error, :stale_agent}
-    else
-      {:error, error}
-    end
-  end
-
-  def handle_game_result(_agent, result), do: result
-
-  @doc """
-  Mints a new agent in the game on behalf of the operator.
-
-  Calls `POST /register` with the operator's linked AccountToken and the chosen
-  symbol + faction, then stores the resulting agent and its AgentToken
-  (encrypted, per-agent) in the database.
-
-  Returns `{:ok, %{agent: %Agent{}, retired_symbols: [String.t()]}}`, or one of:
-
-    * `{:error, %Ecto.Changeset{}}` — invalid symbol/faction
-    * `{:error, :account_token_not_linked}` — the operator has no AccountToken
-    * `{:error, %SpaceTraders.API.Error{} | %SpaceTraders.API.GameplayError{}}` — API failure
-  """
-  def mint_agent(%Operator{} = operator, attrs) do
-    changeset = Agent.changeset(%Agent{}, attrs)
-
-    with :ok <- SpaceTraders.RuntimeAuthority.execution_allowed?(),
-         :ok <- validate_mint_attrs(changeset),
-         {:ok, account_token} <- require_account_token(operator),
-         :ok <-
-           ensure_symbol_is_not_stale_for_another_operator(
-             operator,
-             get_field(changeset, :symbol)
-           ) do
-      case SpaceTraders.API.register(
-             account_token,
-             get_field(changeset, :symbol),
-             get_field(changeset, :faction),
-             operator.email
-           ) do
-        {:ok, %{token: agent_token, agent: %GameAgent{} = game_agent}} ->
-          replace_stale_agent_and_create(
-            operator,
-            game_agent,
-            agent_token,
-            get_field(changeset, :faction)
-          )
-
-        {:error, _reason} = error ->
-          error
-      end
-    end
-  end
-
-  @doc """
-  Retires every Stale Agent owned by the Operator and returns their symbols.
-
-  Retirement is local-only: cached state is removed and running ShipServers are
-  stopped without contacting the game API.
-  """
-  def retire_stale_agents(%Operator{} = operator) do
-    with {:ok, {retired_symbols, ship_symbols}} <-
-           Repo.transaction(fn ->
-             operator
-             |> detected_stale_agent_ids()
-             |> Enum.map(&retire_stale_agent/1)
-             |> Enum.unzip()
-             |> then(fn {symbols, ships} -> {List.flatten(symbols), List.flatten(ships)} end)
-           end) do
-      Enum.each(ship_symbols, &ShipServer.stop/1)
-      {:ok, retired_symbols}
-    end
-  end
+  defdelegate handle_game_result(agent, result), to: FleetGeneration
 
   @doc """
   Imports an existing game agent after explicitly validating its AgentToken.
@@ -313,29 +223,6 @@ defmodule SpaceTraders.Agent do
     end
   end
 
-  defp validate_mint_attrs(%{valid?: true}), do: :ok
-  defp validate_mint_attrs(%{valid?: false} = changeset), do: {:error, changeset}
-
-  defp require_account_token(%Operator{account_token: account_token})
-       when is_binary(account_token) and account_token != "" do
-    {:ok, account_token}
-  end
-
-  defp require_account_token(_operator), do: {:error, :account_token_not_linked}
-
-  defp ensure_symbol_is_not_stale_for_another_operator(%Operator{id: operator_id}, symbol) do
-    case Repo.get_by(Agent, symbol: symbol) do
-      %Agent{operator_id: ^operator_id} ->
-        :ok
-
-      %Agent{stale_at: stale_at} when not is_nil(stale_at) ->
-        {:error, :stale_symbol_owned_elsewhere}
-
-      _ ->
-        :ok
-    end
-  end
-
   defp create_agent(operator, %GameAgent{} = game_agent, agent_token, requested_faction) do
     %Agent{}
     |> Agent.changeset(%{
@@ -347,87 +234,6 @@ defmodule SpaceTraders.Agent do
     |> Ecto.Changeset.put_change(:operator_id, operator.id)
     |> Repo.insert()
   end
-
-  # Registration proves a same-symbol cache row is stale and replaces every
-  # previously detected stale Agent owned by this Operator.
-  defp replace_stale_agent_and_create(
-         operator,
-         %GameAgent{} = game_agent,
-         agent_token,
-         faction
-       ) do
-    with {:ok, {agent, retired_symbols, ship_symbols}} <-
-           Repo.transaction(fn ->
-             {retired_symbols, ship_symbols} =
-               operator
-               |> stale_agent_ids(game_agent.symbol)
-               |> Enum.map(&retire_stale_agent/1)
-               |> Enum.unzip()
-               |> then(fn {symbols, ships} -> {List.flatten(symbols), List.flatten(ships)} end)
-
-             case create_agent(operator, game_agent, agent_token, faction) do
-               {:ok, agent} -> {agent, retired_symbols, ship_symbols}
-               {:error, changeset} -> Repo.rollback(changeset)
-             end
-           end) do
-      Enum.each(ship_symbols, &ShipServer.stop/1)
-      {:ok, %{agent: agent, retired_symbols: retired_symbols}}
-    end
-  end
-
-  defp stale_agent_ids(%Operator{id: operator_id}, symbol) do
-    detected_stale_ids = detected_stale_agent_ids(operator_id)
-
-    same_symbol_id =
-      Repo.one(
-        from(agent in Agent,
-          where: agent.operator_id == ^operator_id and agent.symbol == ^symbol,
-          select: agent.id
-        )
-      )
-
-    [same_symbol_id | detected_stale_ids]
-    |> Enum.reject(&is_nil/1)
-    |> Enum.uniq()
-  end
-
-  defp detected_stale_agent_ids(%Operator{id: operator_id}),
-    do: detected_stale_agent_ids(operator_id)
-
-  defp detected_stale_agent_ids(operator_id) do
-    Repo.all(
-      from(agent in Agent,
-        where: agent.operator_id == ^operator_id and not is_nil(agent.stale_at),
-        select: agent.id
-      )
-    )
-  end
-
-  defp retire_stale_agent(stale_agent_id) do
-    stale_agent = Repo.get!(Agent, stale_agent_id)
-
-    ship_symbols =
-      Repo.all(from(ship in Ship, where: ship.agent_id == ^stale_agent.id, select: ship.symbol))
-
-    Enum.each(ship_symbols, &Timeline.cancel_events(:ship, &1))
-    Repo.delete!(stale_agent)
-    {[stale_agent.symbol], ship_symbols}
-  end
-
-  defp mark_stale(%Agent{} = agent) do
-    agent
-    |> Ecto.Changeset.change(stale_at: DateTime.utc_now() |> DateTime.truncate(:second))
-    |> Repo.update()
-  end
-
-  defp server_reset_mismatch?(%SpaceTraders.API.GameplayError{message: message}) do
-    Regex.match?(
-      ~r/^Failed to parse token\. Token reset_date does not match the server\. Server resets happen .+ After a reset, you should re-register your agent\. Expected: \d{4}-\d{2}-\d{2}, Actual: \d{4}-\d{2}-\d{2}$/,
-      message
-    )
-  end
-
-  defp server_reset_mismatch?(_error), do: false
 
   @doc """
   Checks whether the operator is in sudo mode.

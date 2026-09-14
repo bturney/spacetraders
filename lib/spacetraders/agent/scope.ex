@@ -26,7 +26,7 @@ defmodule SpaceTraders.Agent.Scope do
   Returns nil if no operator is given.
   """
   def for_operator(%Operator{} = operator) do
-    %__MODULE__{operator: operator}
+    %__MODULE__{operator: %{operator | account_token: nil}}
   end
 
   def for_operator(nil), do: nil

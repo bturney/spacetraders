@@ -30,6 +30,7 @@ defmodule SpaceTradersWeb.DashboardLive do
   alias SpaceTraders.Agent
   alias SpaceTraders.Contracts
   alias SpaceTraders.Fleet
+  alias SpaceTraders.FleetGeneration
   alias SpaceTraders.Fleet.Job
   alias SpaceTraders.Fleet.JobBlocker
   alias SpaceTraders.Fleet.Intents
@@ -218,7 +219,7 @@ defmodule SpaceTradersWeb.DashboardLive do
 
   @impl true
   def handle_event("retire_stale_agents", _params, socket) do
-    case Agent.retire_stale_agents(socket.assigns.current_scope.operator) do
+    case FleetGeneration.retire_stale_agents(socket.assigns.current_scope) do
       {:ok, []} ->
         {:noreply, put_flash(socket, :info, "There are no stale Agents to retire.")}
 
@@ -990,6 +991,7 @@ defmodule SpaceTradersWeb.DashboardLive do
       ) do
     with %{agent: agent} <-
            Enum.find(socket.assigns.overviews, &(to_string(&1.agent.id) == agent_id)),
+         %{} = agent <- credentialed_agent(socket, agent),
          {:ok, units} <- parse_units(units),
          {:ok, %{status: "completed"}} <-
            Intents.request(
@@ -1619,7 +1621,7 @@ defmodule SpaceTradersWeb.DashboardLive do
         case overview.ships do
           {:ok, ships} ->
             if Enum.any?(ships, &(&1.symbol == ship_symbol)) do
-              {:ok, overview.agent}
+              {:ok, credentialed_agent(socket, overview.agent)}
             end
 
           _error ->
@@ -1637,7 +1639,8 @@ defmodule SpaceTradersWeb.DashboardLive do
         if to_string(overview.agent.id) == agent_id and
              match?({:ok, contracts} when is_list(contracts), overview.contracts) and
              Enum.any?(elem(overview.contracts, 1), &(&1.id == contract_id)) do
-          {:ok, overview.agent, Enum.find(elem(overview.contracts, 1), &(&1.id == contract_id))}
+          {:ok, credentialed_agent(socket, overview.agent),
+           Enum.find(elem(overview.contracts, 1), &(&1.id == contract_id))}
         end
       end
     )
@@ -1653,7 +1656,7 @@ defmodule SpaceTradersWeb.DashboardLive do
              match?({:ok, contracts} when is_list(contracts), overview.contracts) and
              Contracts.negotiable?(elem(overview.contracts, 1)) and
              Enum.any?(elem(overview.ships, 1), &(&1.symbol == ship_symbol)) do
-          {:ok, overview.agent}
+          {:ok, credentialed_agent(socket, overview.agent)}
         end
       end
     )
@@ -1672,7 +1675,9 @@ defmodule SpaceTradersWeb.DashboardLive do
       socket.assigns.overviews,
       {:error, "That shipyard is not available."},
       fn snapshot ->
-        if to_string(snapshot.agent.id) == agent_id, do: {:ok, snapshot}
+        if to_string(snapshot.agent.id) == agent_id do
+          {:ok, %{snapshot | agent: credentialed_agent(socket, snapshot.agent)}}
+        end
       end
     )
   end
@@ -1713,12 +1718,13 @@ defmodule SpaceTradersWeb.DashboardLive do
         nil ->
           {:error, :waypoint_unavailable}
 
-        %{waypoints: {:ok, waypoints}, agent: agent} when is_list(waypoints) ->
+        %{waypoints: {:ok, waypoints}, agent: projected_agent} when is_list(waypoints) ->
           case Enum.find(waypoints, &(&1.symbol == symbol)) do
             nil ->
               {:error, :waypoint_unavailable}
 
             waypoint ->
+              agent = credentialed_agent(socket, projected_agent)
               MissionControl.waypoint_market(socket.assigns.current_scope, agent, waypoint)
           end
 
@@ -1736,12 +1742,14 @@ defmodule SpaceTradersWeb.DashboardLive do
   defp load_waypoint_intelligence(socket, agent_id, symbol, key) do
     facts =
       case Enum.find(socket.assigns.overviews, &(to_string(&1.agent.id) == agent_id)) do
-        %{agent: agent, waypoints: {:ok, waypoints}} ->
+        %{agent: projected_agent, waypoints: {:ok, waypoints}} ->
           case Enum.find(waypoints, &(&1.symbol == symbol)) do
             nil ->
               %{}
 
             waypoint ->
+              agent = credentialed_agent(socket, projected_agent)
+
               MissionControl.waypoint_readiness(
                 socket.assigns.current_scope,
                 agent,
@@ -1772,6 +1780,10 @@ defmodule SpaceTradersWeb.DashboardLive do
       )
 
     assign(socket, :overviews, overviews)
+  end
+
+  defp credentialed_agent(socket, agent) do
+    Agent.get_agent(socket.assigns.current_scope.operator, agent.id)
   end
 
   defp clear_draft(socket, key) do
