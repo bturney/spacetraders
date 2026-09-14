@@ -13,7 +13,11 @@ defmodule SpaceTraders.MissionControl do
   alias SpaceTraders.{Agent, Fleet, Intelligence}
 
   @doc "Returns the signed-in Operator's Agents for adapter subscriptions."
-  def agents(%Scope{operator: operator}), do: Agent.list_agents(operator)
+  def agents(%Scope{operator: operator}) do
+    operator
+    |> Agent.list_agents()
+    |> Enum.map(&without_agent_credentials/1)
+  end
 
   @doc "Returns the dashboard projections for the signed-in Operator's Agents."
   def dashboard(%Scope{} = scope), do: dashboard(scope, agents(scope))
@@ -22,7 +26,10 @@ defmodule SpaceTraders.MissionControl do
   def dashboard(%Scope{} = scope, agents) do
     agents
     |> Enum.filter(&owned_by?(&1, scope))
+    |> Enum.map(&Agent.get_agent(scope, &1.id))
+    |> Enum.reject(&is_nil/1)
     |> Enum.map(&Fleet.command_snapshot/1)
+    |> Enum.map(&without_credentials/1)
   end
 
   @doc """
@@ -39,7 +46,7 @@ defmodule SpaceTraders.MissionControl do
       agent ->
         Enum.map(projections, fn projection ->
           if projection.agent.id == agent.id do
-            Fleet.command_snapshot(agent)
+            agent |> Fleet.command_snapshot() |> without_credentials()
           else
             projection
           end
@@ -116,6 +123,12 @@ defmodule SpaceTraders.MissionControl do
     do: true
 
   defp owned_by?(_agent, _scope), do: false
+
+  defp without_credentials(%{agent: %AgentRecord{} = agent} = projection) do
+    %{projection | agent: without_agent_credentials(agent)}
+  end
+
+  defp without_agent_credentials(%AgentRecord{} = agent), do: %{agent | agent_token: nil}
 
   defp namespace_facts(facts, namespace) do
     Map.new(facts, fn {field, fact} -> {"#{namespace}.#{field}", fact} end)

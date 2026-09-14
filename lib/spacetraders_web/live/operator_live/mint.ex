@@ -6,8 +6,7 @@ defmodule SpaceTradersWeb.OperatorLive.Mint do
 
   use SpaceTradersWeb, :live_view
 
-  alias SpaceTraders.Agent
-  alias SpaceTraders.Agent.Scope
+  alias SpaceTraders.{Agent, FleetGeneration}
   alias SpaceTraders.API.Model.FactionSymbol
 
   @impl true
@@ -77,13 +76,13 @@ defmodule SpaceTradersWeb.OperatorLive.Mint do
 
   @impl true
   def mount(_params, _session, socket) do
-    operator = Agent.get_operator!(socket.assigns.current_scope.operator.id)
-
     socket =
       socket
-      |> assign(:current_scope, Scope.for_operator(operator))
       |> assign(:factions, FactionSymbol.values())
-      |> assign(:account_token_linked?, not is_nil(operator.account_token))
+      |> assign(
+        :account_token_linked?,
+        Agent.account_token_linked?(socket.assigns.current_scope)
+      )
       |> assign_form(Agent.change_mint())
 
     {:ok, socket, temporary_assigns: [form: nil]}
@@ -91,9 +90,7 @@ defmodule SpaceTradersWeb.OperatorLive.Mint do
 
   @impl true
   def handle_event("mint", %{"agent" => mint_params}, socket) do
-    operator = socket.assigns.current_scope.operator
-
-    case Agent.mint_agent(operator, mint_params) do
+    case FleetGeneration.mint(socket.assigns.current_scope, mint_params) do
       {:ok, %{agent: agent, retired_symbols: retired_symbols}} ->
         retired_message =
           case retired_symbols do

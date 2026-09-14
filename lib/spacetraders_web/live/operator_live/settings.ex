@@ -166,7 +166,7 @@ defmodule SpaceTradersWeb.OperatorLive.Settings do
       |> assign(:email_form, to_form(email_changeset))
       |> assign(:password_form, to_form(password_changeset))
       |> assign(:trigger_submit, false)
-      |> assign(:account_token_linked?, not is_nil(operator.account_token))
+      |> assign(:account_token_linked?, Agent.account_token_linked?(socket.assigns.current_scope))
       |> assign(:import_agent_form, import_agent_form())
       |> assign_account_token_form()
 
@@ -193,7 +193,7 @@ defmodule SpaceTradersWeb.OperatorLive.Settings do
           socket
           |> put_flash(:info, "AccountToken linked.")
           |> assign(:current_scope, Scope.for_operator(updated_operator))
-          |> assign(:account_token_linked?, not is_nil(updated_operator.account_token))
+          |> assign(:account_token_linked?, true)
           |> assign_account_token_form()
 
         {:noreply, socket}

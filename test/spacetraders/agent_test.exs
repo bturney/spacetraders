@@ -3,6 +3,7 @@ defmodule SpaceTraders.AgentTest do
 
   alias SpaceTraders.Agent
   alias SpaceTraders.Fleet
+  alias SpaceTraders.FleetGeneration
 
   import SpaceTraders.AgentFixtures
   alias SpaceTraders.Agent.{Operator, OperatorToken, Scope}
@@ -471,14 +472,17 @@ defmodule SpaceTraders.AgentTest do
     end
   end
 
-  describe "mint_agent/2" do
+  describe "FleetGeneration minting and Stale Agent retirement" do
     setup do
       operator = operator_fixture()
       {:ok, operator} = Agent.link_account_token(operator, "ACCOUNT_TOKEN")
-      %{operator: operator}
+      %{operator: operator, scope: Scope.for_operator(operator)}
     end
 
-    test "mints an agent and stores its AgentToken encrypted per-agent", %{operator: operator} do
+    test "mints an agent and stores its AgentToken encrypted per-agent", %{
+      operator: operator,
+      scope: scope
+    } do
       Req.Test.stub(SpaceTraders.API, fn conn ->
         assert conn.method == "POST"
         assert conn.request_path == "/v2/register"
@@ -506,7 +510,7 @@ defmodule SpaceTraders.AgentTest do
       end)
 
       assert {:ok, %{agent: agent, retired_symbols: []}} =
-               Agent.mint_agent(operator, %{symbol: "NEWSYM", faction: "COSMIC"})
+               FleetGeneration.mint(scope, %{symbol: "NEWSYM", faction: "COSMIC"})
 
       assert agent.symbol == "NEWSYM"
       assert agent.faction == "COSMIC"
@@ -524,7 +528,7 @@ defmodule SpaceTraders.AgentTest do
       end)
     end
 
-    test "replaces a stale local agent after a server reset", %{operator: operator} do
+    test "replaces a stale local agent after a server reset", %{operator: operator, scope: scope} do
       stale_agent = agent_fixture(operator, %{symbol: "RESETME", agent_token: "STALE_TOKEN"})
 
       ship =
@@ -590,10 +594,11 @@ defmodule SpaceTraders.AgentTest do
       end)
 
       assert {:ok, %{agent: agent, retired_symbols: ["RESETME"]}} =
-               Agent.mint_agent(operator, %{symbol: "RESETME", faction: "COSMIC"})
+               FleetGeneration.mint(scope, %{symbol: "RESETME", faction: "COSMIC"})
 
       refute agent.id == stale_agent.id
-      assert agent.agent_token == "FRESH_TOKEN"
+      assert agent.agent_token == nil
+      assert Repo.get!(SpaceTraders.Agent.Agent, agent.id).agent_token == "FRESH_TOKEN"
       refute Repo.get(SpaceTraders.Agent.Agent, stale_agent.id)
       refute Repo.get(Ship, ship.id)
       refute Fleet.ship_job(stale_agent, ship.symbol)
@@ -603,7 +608,8 @@ defmodule SpaceTraders.AgentTest do
     end
 
     test "retires detected stale agents when a replacement uses a new symbol", %{
-      operator: operator
+      operator: operator,
+      scope: scope
     } do
       stale_agent =
         agent_fixture(operator, %{
@@ -649,7 +655,7 @@ defmodule SpaceTraders.AgentTest do
       end)
 
       assert {:ok, %{agent: %{symbol: "TURNEY"}, retired_symbols: ["ORBITALIST"]}} =
-               Agent.mint_agent(operator, %{symbol: "TURNEY", faction: "COSMIC"})
+               FleetGeneration.mint(scope, %{symbol: "TURNEY", faction: "COSMIC"})
 
       refute Repo.get(SpaceTraders.Agent.Agent, stale_agent.id)
       refute Repo.get(Ship, ship.id)
@@ -657,7 +663,10 @@ defmodule SpaceTraders.AgentTest do
       assert Registry.lookup(SpaceTraders.Fleet.ShipRegistry, ship.symbol) == []
     end
 
-    test "retires only this operator's stale agents and their local work", %{operator: operator} do
+    test "retires only this operator's stale agents and their local work", %{
+      operator: operator,
+      scope: scope
+    } do
       stale_agent =
         agent_fixture(operator, %{
           symbol: "ORBITALIST",
@@ -688,7 +697,7 @@ defmodule SpaceTraders.AgentTest do
 
       {:ok, _pid} = ShipServer.ensure_started(stale_agent, ship.symbol)
 
-      assert {:ok, ["ORBITALIST"]} = Agent.retire_stale_agents(operator)
+      assert {:ok, ["ORBITALIST"]} = FleetGeneration.retire_stale_agents(scope)
 
       refute Repo.get(SpaceTraders.Agent.Agent, stale_agent.id)
       refute Repo.get(Ship, ship.id)
@@ -697,11 +706,13 @@ defmodule SpaceTraders.AgentTest do
       assert Repo.get(SpaceTraders.Agent.Agent, other_stale_agent.id)
     end
 
-    test "reports when an operator has no stale agents", %{operator: operator} do
-      assert {:ok, []} = Agent.retire_stale_agents(operator)
+    test "reports when an operator has no stale agents", %{scope: scope} do
+      assert {:ok, []} = FleetGeneration.retire_stale_agents(scope)
     end
 
-    test "does not mint a symbol retained as stale by another operator", %{operator: operator} do
+    test "does not mint a symbol retained as stale by another operator", %{
+      scope: scope
+    } do
       other_operator = operator_fixture()
 
       agent_fixture(other_operator, %{
@@ -710,12 +721,12 @@ defmodule SpaceTraders.AgentTest do
       })
 
       assert {:error, :stale_symbol_owned_elsewhere} =
-               Agent.mint_agent(operator, %{symbol: "ORBITALIST", faction: "COSMIC"})
+               FleetGeneration.mint(scope, %{symbol: "ORBITALIST", faction: "COSMIC"})
     end
 
-    test "rejects an invalid symbol before calling the API", %{operator: operator} do
+    test "rejects an invalid symbol before calling the API", %{scope: scope} do
       assert {:error, changeset} =
-               Agent.mint_agent(operator, %{symbol: "lower case", faction: "COSMIC"})
+               FleetGeneration.mint(scope, %{symbol: "lower case", faction: "COSMIC"})
 
       assert "must be 1-20 uppercase letters, digits, dashes or underscores" in errors_on(
                changeset
@@ -724,12 +735,13 @@ defmodule SpaceTraders.AgentTest do
 
     test "requires the operator to have linked an AccountToken" do
       operator = operator_fixture()
+      scope = Scope.for_operator(operator)
 
-      assert Agent.mint_agent(operator, %{symbol: "NEWSYM", faction: "COSMIC"}) ==
+      assert FleetGeneration.mint(scope, %{symbol: "NEWSYM", faction: "COSMIC"}) ==
                {:error, :account_token_not_linked}
     end
 
-    test "surfaces a game API rejection as a GameplayError", %{operator: operator} do
+    test "surfaces a game API rejection as a GameplayError", %{scope: scope} do
       Req.Test.stub(SpaceTraders.API, fn conn ->
         conn
         |> Map.put(:status, 400)
@@ -738,16 +750,16 @@ defmodule SpaceTraders.AgentTest do
 
       assert {:error,
               %SpaceTraders.API.GameplayError{type: :other, message: "Symbol is already in use"}} =
-               Agent.mint_agent(operator, %{symbol: "DUPLICATE", faction: "COSMIC"})
+               FleetGeneration.mint(scope, %{symbol: "DUPLICATE", faction: "COSMIC"})
     end
 
-    test "surfaces a fatal API failure as an Error", %{operator: operator} do
+    test "surfaces a fatal API failure as an Error", %{scope: scope} do
       Req.Test.stub(SpaceTraders.API, fn conn ->
         Plug.Conn.send_resp(conn, 500, ~s({"error":"boom"}))
       end)
 
       assert {:error, %SpaceTraders.API.Error{status: 500}} =
-               Agent.mint_agent(operator, %{symbol: "NEWSYM", faction: "COSMIC"})
+               FleetGeneration.mint(scope, %{symbol: "NEWSYM", faction: "COSMIC"})
     end
   end
 
