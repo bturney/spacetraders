@@ -5,8 +5,8 @@ defmodule SpaceTradersWeb.DashboardLive do
   Mission-led layout: a contract hero placeholder, then per-agent sections with
   an overview card (live credits, headquarters, faction) and a fleet card grid
   (location, fuel, cargo, cooldown, docked/orbiting state). A thin consumer —
-  every read goes through the `SpaceTraders.Agent` and `SpaceTraders.Fleet`
-  contexts; there is no game logic here.
+  every dashboard read goes through the `SpaceTraders.MissionControl`
+  projection seam; there is no game logic here.
 
   Live data is pulled from the game API at mount time: the server is the source
   of truth and the local DB rows are a cache (ADR 0005). A per-agent fetch
@@ -33,7 +33,7 @@ defmodule SpaceTradersWeb.DashboardLive do
   alias SpaceTraders.Fleet.Job
   alias SpaceTraders.Fleet.JobBlocker
   alias SpaceTraders.Fleet.Intents
-  alias SpaceTraders.Intelligence
+  alias SpaceTraders.MissionControl
   alias SpaceTraders.SystemWaypointProjection
   alias SpaceTradersWeb.DashboardPrototype
 
@@ -77,6 +77,7 @@ defmodule SpaceTradersWeb.DashboardLive do
               :for={overview <- @overviews}
               :if={not overview.stale?}
               overview={overview}
+              current_scope={@current_scope}
               cooldown_tick={@cooldown_tick}
               form_drafts={@form_drafts}
               selected_waypoints={@selected_waypoints}
@@ -151,13 +152,13 @@ defmodule SpaceTradersWeb.DashboardLive do
   end
 
   defp mount_operator(socket, operator) do
-    agents = Agent.list_agents(operator)
+    agents = MissionControl.agents(socket.assigns.current_scope)
 
     for %{id: agent_id} <- agents do
       Phoenix.PubSub.subscribe(SpaceTraders.PubSub, "fleet:#{agent_id}")
     end
 
-    overviews = Enum.map(agents, &Fleet.command_snapshot/1)
+    overviews = MissionControl.dashboard(socket.assigns.current_scope, agents)
 
     Process.send_after(self(), :cooldown_tick, 1_000)
 
@@ -1714,8 +1715,11 @@ defmodule SpaceTradersWeb.DashboardLive do
 
         %{waypoints: {:ok, waypoints}, agent: agent} when is_list(waypoints) ->
           case Enum.find(waypoints, &(&1.symbol == symbol)) do
-            nil -> {:error, :waypoint_unavailable}
-            waypoint -> Fleet.waypoint_market(agent, waypoint)
+            nil ->
+              {:error, :waypoint_unavailable}
+
+            waypoint ->
+              MissionControl.waypoint_market(socket.assigns.current_scope, agent, waypoint)
           end
 
         _ ->
@@ -1738,7 +1742,11 @@ defmodule SpaceTradersWeb.DashboardLive do
               %{}
 
             waypoint ->
-              load_waypoint_readiness(agent, waypoint)
+              MissionControl.waypoint_readiness(
+                socket.assigns.current_scope,
+                agent,
+                waypoint
+              )
           end
 
         _ ->
@@ -1746,40 +1754,6 @@ defmodule SpaceTradersWeb.DashboardLive do
       end
 
     update(socket, :waypoint_intelligence, &Map.put(&1, key, facts))
-  end
-
-  defp load_waypoint_readiness(agent, waypoint) do
-    waypoint_facts =
-      Intelligence.subject(agent, :waypoint, waypoint.system_symbol, waypoint.symbol)
-
-    if waypoint.is_under_construction == true do
-      _ = Fleet.waypoint_construction(agent, waypoint)
-    end
-
-    construction =
-      Intelligence.subject_with_stale(
-        agent,
-        :construction,
-        waypoint.system_symbol,
-        waypoint.symbol
-      )
-
-    if waypoint.type == "JUMP_GATE" do
-      _ = Fleet.waypoint_jump_gate(agent, waypoint)
-    end
-
-    gate =
-      Intelligence.subject_with_stale(agent, :jump_gate, waypoint.system_symbol, waypoint.symbol)
-
-    waypoint_facts
-    |> Map.merge(namespace_readiness_facts(construction.current, "construction"))
-    |> Map.merge(namespace_readiness_facts(construction.stale, "construction_stale"))
-    |> Map.merge(namespace_readiness_facts(gate.current, "jump_gate"))
-    |> Map.merge(namespace_readiness_facts(gate.stale, "jump_gate_stale"))
-  end
-
-  defp namespace_readiness_facts(facts, namespace) do
-    Map.new(facts, fn {field, fact} -> {"#{namespace}.#{field}", fact} end)
   end
 
   defp refresh_agent_for_ship(socket, ship_symbol) do
@@ -1791,13 +1765,11 @@ defmodule SpaceTradersWeb.DashboardLive do
 
   defp refresh_agent(socket, agent) do
     overviews =
-      Enum.map(socket.assigns.overviews, fn overview ->
-        if overview.agent.id == agent.id do
-          Fleet.command_snapshot(agent)
-        else
-          overview
-        end
-      end)
+      MissionControl.refresh_agent(
+        socket.assigns.current_scope,
+        socket.assigns.overviews,
+        agent.id
+      )
 
     assign(socket, :overviews, overviews)
   end
@@ -1896,6 +1868,7 @@ defmodule SpaceTradersWeb.DashboardLive do
   end
 
   attr :overview, :map, required: true
+  attr :current_scope, :map, required: true
   attr :cooldown_tick, :integer, required: true
   attr :form_drafts, :map, default: %{}
   attr :selected_waypoints, :map, default: %{}
@@ -1924,6 +1897,7 @@ defmodule SpaceTradersWeb.DashboardLive do
         form_drafts={@form_drafts}
       />
       <.fleet_grid
+        current_scope={@current_scope}
         agent={@overview.agent}
         ships={@overview.ships}
         control={@overview.control}
@@ -3210,6 +3184,7 @@ defmodule SpaceTradersWeb.DashboardLive do
   end
 
   attr :agent, :map, required: true
+  attr :current_scope, :map, required: true
   attr :ships, :any, required: true
   attr :control, :map, required: true
   attr :waypoints, :any, required: true
@@ -3254,6 +3229,7 @@ defmodule SpaceTradersWeb.DashboardLive do
           <div :if={ships != []} class="grid grid-cols-1 gap-4 xl:grid-cols-2">
             <.ship_card
               :for={ship <- ships}
+              current_scope={@current_scope}
               ship={ship}
               ships={ships}
               waypoints={@waypoints}
@@ -3319,6 +3295,7 @@ defmodule SpaceTradersWeb.DashboardLive do
   defp source_waypoint_label(_), do: "any Market"
 
   attr :ship, :map, required: true
+  attr :current_scope, :map, required: true
   attr :ships, :list, required: true
   attr :waypoints, :any, required: true
   attr :agent, :map, required: true
@@ -3545,6 +3522,7 @@ defmodule SpaceTradersWeb.DashboardLive do
             <.market_trading_job_panel ship={@ship} form_drafts={@form_drafts} />
           <% @ship.job && @ship.job.type == "market_reconnaissance" -> %>
             <.market_reconnaissance_job_panel
+              current_scope={@current_scope}
               ship={@ship}
               ships={@ships}
               waypoints={@waypoints}
@@ -3554,15 +3532,21 @@ defmodule SpaceTradersWeb.DashboardLive do
               market_trade_route_sorts={@market_trade_route_sorts}
             />
           <% @ship.job && @ship.job.type == "survey" -> %>
-            <.survey_job_panel ship={@ship} agent={@agent} />
+            <.survey_job_panel ship={@ship} agent={@agent} current_scope={@current_scope} />
           <% true -> %>
             <.miner_job_panel ship={@ship} form_drafts={@form_drafts} />
-            <.survey_job_panel ship={@ship} agent={@agent} form_drafts={@form_drafts} />
+            <.survey_job_panel
+              ship={@ship}
+              agent={@agent}
+              current_scope={@current_scope}
+              form_drafts={@form_drafts}
+            />
             <.procurement_job_panel ship={@ship} form_drafts={@form_drafts} />
             <.construction_supply_job_panel ship={@ship} form_drafts={@form_drafts} />
             <.outfitting_job_panel ship={@ship} form_drafts={@form_drafts} />
             <.market_trading_job_panel ship={@ship} form_drafts={@form_drafts} />
             <.market_reconnaissance_job_panel
+              current_scope={@current_scope}
               ship={@ship}
               ships={@ships}
               waypoints={@waypoints}
@@ -4252,6 +4236,7 @@ defmodule SpaceTradersWeb.DashboardLive do
   end
 
   attr :ship, :map, required: true
+  attr :current_scope, :map, required: true
   attr :ships, :list, required: true
   attr :waypoints, :any, required: true
   attr :agent, :map, required: true
@@ -4271,7 +4256,14 @@ defmodule SpaceTradersWeb.DashboardLive do
 
     job = if active_job && active_job.type == "market_reconnaissance", do: active_job
     progress = (job && job.progress) || %{}
-    stops = market_reconnaissance_stops(assigns.ship, assigns.agent, assigns.waypoints)
+
+    stops =
+      market_reconnaissance_stops(
+        assigns.current_scope,
+        assigns.ship,
+        assigns.agent,
+        assigns.waypoints
+      )
 
     assigns =
       assign(assigns,
@@ -4773,7 +4765,8 @@ defmodule SpaceTradersWeb.DashboardLive do
     end
   end
 
-  defp market_reconnaissance_stops(ship, agent, {:ok, waypoints}) when is_list(waypoints) do
+  defp market_reconnaissance_stops(scope, ship, agent, {:ok, waypoints})
+       when is_list(waypoints) do
     if Enum.any?(waypoints, &(&1.system_symbol == ship.nav.system_symbol)) do
       {:ok,
        waypoints
@@ -4784,11 +4777,12 @@ defmodule SpaceTradersWeb.DashboardLive do
        |> Enum.map(& &1.symbol)
        |> Enum.sort()}
     else
-      {:ok, Intelligence.marketplace_waypoints(agent, ship.nav.system_symbol)}
+      {:ok, MissionControl.marketplace_waypoints(scope, agent, ship.nav.system_symbol)}
     end
   end
 
-  defp market_reconnaissance_stops(_ship, _agent, {:error, reason}), do: {:error, reason}
+  defp market_reconnaissance_stops(_scope, _ship, _agent, {:error, reason}),
+    do: {:error, reason}
 
   defp market_observation_age(route) do
     with source when is_binary(source) <- route["source_observed_at"],
@@ -5487,13 +5481,23 @@ defmodule SpaceTradersWeb.DashboardLive do
     """
   end
 
+  attr :ship, :map, required: true
+  attr :agent, :map, required: true
+  attr :current_scope, :map, required: true
+  attr :form_drafts, :map, default: %{}
+
   defp survey_job_panel(assigns) do
     job = Map.get(assigns.ship, :job)
     drafts = Map.get(assigns, :form_drafts, %{})
 
     survey =
       if job,
-        do: Intelligence.usable_survey(assigns.agent, job.extraction_waypoint),
+        do:
+          MissionControl.usable_survey(
+            assigns.current_scope,
+            assigns.agent,
+            job.extraction_waypoint
+          ),
         else: nil
 
     assigns = assign(assigns, job: job, form_drafts: drafts, survey: survey)
