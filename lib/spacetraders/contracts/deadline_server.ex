@@ -3,7 +3,7 @@ defmodule SpaceTraders.Contracts.DeadlineServer do
 
   use GenServer
 
-  alias SpaceTraders.Timeline
+  alias SpaceTraders.{Clock, Timeline}
   alias SpaceTraders.Timeline.Event
 
   def start_link(contract_id) do
@@ -58,8 +58,7 @@ defmodule SpaceTraders.Contracts.DeadlineServer do
   end
 
   defp arm(%Event{} = event, state) do
-    delay = max(DateTime.diff(event.due_at, DateTime.utc_now(), :millisecond), 0)
-    Process.send_after(self(), {:timeline, event}, delay)
+    Clock.send_at(self(), {:timeline, event}, event.due_at)
     %{state | event: event}
   end
 end

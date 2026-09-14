@@ -21,6 +21,7 @@ defmodule SpaceTraders.Fleet.ShipServer do
   alias SpaceTraders.API.Model.{Cooldown, Ship, ShipNav}
   alias SpaceTraders.Agent, as: AgentContext
   alias SpaceTraders.Agent.Agent
+  alias SpaceTraders.Clock
   alias SpaceTraders.Timeline
   alias SpaceTraders.Timeline.Event
 
@@ -206,7 +207,7 @@ defmodule SpaceTraders.Fleet.ShipServer do
 
   defp retry(event, state, reason) do
     Logger.warning("ship #{state.symbol}: #{reason}; retrying in #{@retry_delay_ms}ms")
-    Process.send_after(self(), {:timeline, event}, @retry_delay_ms)
+    Clock.send_after(self(), {:timeline, event}, @retry_delay_ms)
     {:noreply, state}
   end
 
@@ -235,18 +236,7 @@ defmodule SpaceTraders.Fleet.ShipServer do
     if match?(%{id: id} when id == event.id, Map.get(state.pending, type)) do
       state
     else
-      delay_ms =
-        if Timeline.due?(event) do
-          0
-        else
-          DateTime.diff(event.due_at, DateTime.utc_now(), :millisecond)
-        end
-
-      if delay_ms == 0 do
-        Process.send(self(), {:timeline, event}, [])
-      else
-        Process.send_after(self(), {:timeline, event}, delay_ms)
-      end
+      Clock.send_at(self(), {:timeline, event}, event.due_at)
 
       pending_event = %{id: event.id, due_at: event.due_at}
       %{state | pending: Map.put(state.pending, type, pending_event)}

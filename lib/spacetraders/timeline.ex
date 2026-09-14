@@ -17,7 +17,7 @@ defmodule SpaceTraders.Timeline do
 
   require Logger
 
-  alias SpaceTraders.Repo
+  alias SpaceTraders.{Clock, Repo}
   alias SpaceTraders.API.Model.{ShipNav, ShipNavRoute}
   alias SpaceTraders.Timeline.Event
   @event_types [:arrival, :cooldown, :survey_expiration, :deadline]
@@ -115,7 +115,7 @@ defmodule SpaceTraders.Timeline do
   Returns whether `event` is already due at `now`.
   """
   @spec due?(Event.t(), DateTime.t()) :: boolean()
-  def due?(%Event{due_at: due_at}, now \\ DateTime.utc_now()) do
+  def due?(%Event{due_at: due_at}, now \\ Clock.utc_now()) do
     DateTime.compare(due_at, now) != :gt
   end
 
@@ -141,13 +141,13 @@ defmodule SpaceTraders.Timeline do
   def parse_expiration(expiration, seconds) when is_binary(expiration) do
     case DateTime.from_iso8601(expiration) do
       {:ok, due_at, _offset} -> due_at
-      _ -> DateTime.add(DateTime.utc_now(), seconds, :second)
+      _ -> DateTime.add(Clock.utc_now(), seconds, :second)
     end
   end
 
   @doc false
   def parse_expiration(_expiration, seconds),
-    do: DateTime.add(DateTime.utc_now(), seconds, :second)
+    do: DateTime.add(Clock.utc_now(), seconds, :second)
 
   @doc false
   def parse_arrival(%ShipNavRoute{arrival: arrival}) when is_binary(arrival) do
