@@ -28,7 +28,11 @@ defmodule SpaceTraders.DataCase do
   end
 
   setup tags do
-    SpaceTraders.DataCase.setup_sandbox(tags)
+    unless tags[:migration_test] &&
+             Application.fetch_env!(:spacetraders, :repo_adapter) == Ecto.Adapters.Postgres do
+      SpaceTraders.DataCase.setup_sandbox(tags)
+    end
+
     :ok
   end
 

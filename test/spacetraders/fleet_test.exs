@@ -573,7 +573,7 @@ defmodule SpaceTraders.FleetTest do
 
       predecessor = Repo.get!(Job, predecessor_id)
 
-      assert_raise Exqlite.Error, ~r/terminal jobs are immutable/, fn ->
+      assert_raise terminal_job_immutability_error(), ~r/terminal jobs are immutable/, fn ->
         Repo.update!(Ecto.Changeset.change(predecessor, status: "active"))
       end
 
@@ -3314,6 +3314,14 @@ defmodule SpaceTraders.FleetTest do
 
       assert %Job{status: "waiting", in_flight_action: %{"kind" => "navigate"}} =
                Repo.get!(Job, config.id)
+    end
+  end
+
+  defp terminal_job_immutability_error do
+    if Application.fetch_env!(:spacetraders, :repo_adapter) == Ecto.Adapters.Postgres do
+      Postgrex.Error
+    else
+      Exqlite.Error
     end
   end
 
