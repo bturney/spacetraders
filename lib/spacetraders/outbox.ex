@@ -13,17 +13,25 @@ defmodule SpaceTraders.Outbox do
 
   def publish(%{topic: topic, event: event} = notification, state_change)
       when is_binary(topic) and is_binary(event) and is_function(state_change, 0) do
-    Repo.transaction(fn ->
-      result = state_change.()
+    case Repo.transaction(fn ->
+           result = state_change.()
 
-      Repo.insert!(%Notification{
-        topic: topic,
-        event: event,
-        payload: Map.get(notification, :payload, %{})
-      })
+           notification =
+             Repo.insert!(%Notification{
+               topic: topic,
+               event: event,
+               payload: Map.get(notification, :payload, %{})
+             })
 
-      result
-    end)
+           {result, notification}
+         end) do
+      {:ok, {result, notification}} ->
+        dispatch(notification)
+        {:ok, result}
+
+      error ->
+        error
+    end
   end
 
   def dispatch_pending(limit \\ 100) do
@@ -36,10 +44,19 @@ defmodule SpaceTraders.Outbox do
   end
 
   defp dispatch(notification) do
+    message =
+      case notification.event do
+        "ship_updated" ->
+          {:ship_updated, notification.payload["agent_id"], notification.payload["ship_symbol"]}
+
+        event ->
+          {:outbox, notification.id, event, notification.payload}
+      end
+
     Phoenix.PubSub.broadcast(
       SpaceTraders.PubSub,
       notification.topic,
-      {:outbox, notification.id, notification.event, notification.payload}
+      message
     )
 
     notification

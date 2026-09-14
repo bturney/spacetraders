@@ -6,6 +6,8 @@ defmodule SpaceTraders.OutboxTest do
   alias SpaceTraders.Outbox.Notification
 
   test "state publication and its notification commit atomically" do
+    Phoenix.PubSub.subscribe(SpaceTraders.PubSub, "runtime")
+
     assert {:ok, %Operator{id: operator_id}} =
              Outbox.publish(
                %{
@@ -23,6 +25,8 @@ defmodule SpaceTraders.OutboxTest do
              event: "authority_advanced",
              payload: %{"store" => "postgresql"}
            } = Repo.one!(Notification)
+
+    assert_receive {:outbox, _id, "authority_advanced", %{"store" => "postgresql"}}
   end
 
   test "failed state publication leaves neither state nor notification" do
