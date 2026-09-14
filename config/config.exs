@@ -28,6 +28,7 @@ config :spacetraders,
 # SQLite remains the production store until the authority cutover. The
 # PostgreSQL test environment overrides this compile-time adapter selection.
 config :spacetraders, :repo_adapter, Ecto.Adapters.SQLite3
+config :spacetraders, SpaceTraders.PostgresRepo, priv: "priv/repo"
 
 # Configure the endpoint
 config :spacetraders, SpaceTradersWeb.Endpoint,

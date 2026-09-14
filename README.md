@@ -150,41 +150,7 @@ scripts/teardown
 
 ### Project-host deployment
 
-The production deployment runs on the Tailscale machine `project-host`, reached
-with `tailscale ssh`. The deployment checkout is `/srv/projects/spacetraders`.
-Its `.env` stays on the host and contains
-`PHX_HOST`, `PHX_CHECK_ORIGINS`, `SECRET_KEY_BASE`, and `ENCRYPTION_KEY`; never
-copy those values into the repository. `PHX_CHECK_ORIGINS` is optional: when
-set, it is a comma-separated Phoenix origin allowlist, for example
-`//short-host:4000,//full-host.tailnet.ts.net:4000`. For access through both
-Tailscale names, configure both origins, including their non-default port. The
-named `spacetraders-data` volume holds the SQLite DB.
-
-Every push to `main` publishes both `latest` and an immutable `sha-<commit>`
-image tag. A successful publish automatically queues a deployment on the
-`project-host` self-hosted GitHub Actions runner. Deployments run in order and
-use the immutable image tag. The host routine validates the resolved Compose
-image, pulls it, starts services, checks `GET /health`, and records the tag
-only after that check succeeds. A failed check rolls back to the previously
-recorded healthy image. The host retains the preceding healthy image for
-`scripts/deploy rollback`.
-
-Bootstrap the runner once on `project-host` as root, then run the printed
-one-command GitHub registration command as an authenticated operator:
-
-```sh
-sudo scripts/install-runner
-```
-
-For a manual deployment or rollback from a Tailscale-connected machine, use
-the same host routine as the workflow:
-
-```sh
-scripts/deploy deploy <sha|tag|digest>
-scripts/deploy rollback
-```
-
-The one-shot `migrate` service completes before `web` starts. A successful
-health check returns `{"status":"ok"}`. The production overlay accepts
-`SPACETRADERS_IMAGE` so deploys can pin an immutable tag or digest. `.env`
-stays on the host and is never printed by the installer or deployment scripts.
+Production runs on the Tailscale machine `project-host`. SQLite remains the
+authoritative database; PostgreSQL is prepared for the later authority cutover.
+Read the [project-host runbook](docs/operations/project-host.md) before changing
+or running deployment, migration, backup, restore, or fresh-database recovery.
