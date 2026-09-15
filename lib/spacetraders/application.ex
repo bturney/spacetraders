@@ -16,7 +16,8 @@ defmodule SpaceTraders.Application do
          repos: Application.fetch_env!(:spacetraders, :ecto_repos), skip: skip_migrations?()},
         {DNSCluster, query: Application.get_env(:spacetraders, :dns_cluster_query) || :ignore},
         {Phoenix.PubSub, name: SpaceTraders.PubSub},
-        SpaceTraders.EmergencyStopAdmission
+        SpaceTraders.EmergencyStopAdmission,
+        SpaceTraders.FleetGenerationAdmission
       ] ++
         runtime_authority_children() ++
         [

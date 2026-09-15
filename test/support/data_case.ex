@@ -46,7 +46,10 @@ defmodule SpaceTraders.DataCase do
   def setup_sandbox(tags) do
     pid = Ecto.Adapters.SQL.Sandbox.start_owner!(SpaceTraders.Repo, shared: not tags[:async])
 
-    on_exit(fn -> SpaceTraders.EmergencyStopAdmission.clear() end)
+    on_exit(fn ->
+      SpaceTraders.EmergencyStopAdmission.clear()
+      SpaceTraders.FleetGenerationAdmission.clear()
+    end)
 
     on_exit(fn -> Ecto.Adapters.SQL.Sandbox.stop_owner(pid) end)
   end

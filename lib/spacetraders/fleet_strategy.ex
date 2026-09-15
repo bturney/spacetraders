@@ -216,6 +216,7 @@ defmodule SpaceTraders.FleetStrategy do
       if updated == 1 do
         projection = get(scope)
         :ok = EmergencyStopAdmission.resume(operator_id, projection.emergency_stop_version)
+        _ = SpaceTraders.FleetGeneration.replace_stale_agents(scope)
         broadcast_update(scope)
         {:ok, projection}
       else
@@ -362,7 +363,12 @@ defmodule SpaceTraders.FleetStrategy do
         end
       end)
 
-    if match?({:ok, %Revision{}}, result), do: broadcast_update(scope)
+    if match?({:ok, %Revision{}}, result) do
+      {:ok, revision} = result
+      :ok = SpaceTraders.FleetGeneration.activate_strategy(scope, revision)
+      broadcast_update(scope)
+    end
+
     result
   end
 
