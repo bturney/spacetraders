@@ -43,8 +43,17 @@ defmodule SpaceTradersWeb.StrategyLive do
             <div>
               <p class="eyebrow">Fleet-wide safety</p>
               <h2 class="text-xl font-bold">Emergency Stop</h2>
-              <p :if={@projection.emergency_stopped_at} class="mt-1 text-sm">
+              <p
+                :if={
+                  @projection.emergency_stopped_at &&
+                    !@projection.emergency_resume_prepared_at
+                }
+                class="mt-1 text-sm"
+              >
                 Gameplay mutations are suppressed. Reconciliation, safety observations, telemetry, and history continue.
+              </p>
+              <p :if={@projection.emergency_resume_prepared_at} class="mt-1 text-sm">
+                Authoritative state is refreshed and stale work is retired. Mutations remain suppressed until fresh Fleet Allocation selects an admissible plan.
               </p>
               <p :if={!@projection.emergency_stopped_at} class="mt-1 text-sm opacity-70">
                 Immediately suppress every new gameplay mutation, including replacement minting.
@@ -59,7 +68,10 @@ defmodule SpaceTradersWeb.StrategyLive do
               Engage Emergency Stop
             </button>
             <button
-              :if={@projection.emergency_stopped_at}
+              :if={
+                @projection.emergency_stopped_at &&
+                  !@projection.emergency_resume_prepared_at
+              }
               id="resume-from-emergency-stop"
               phx-click="resume_from_emergency_stop"
               class="btn btn-outline"
@@ -234,7 +246,7 @@ defmodule SpaceTradersWeb.StrategyLive do
          socket
          |> put_flash(
            :info,
-           "Emergency Stop cleared. Fresh planning is required before autonomous mutation."
+           "Authoritative state refreshed. Fresh planning must select an admissible plan before Emergency Stop clears."
          )
          |> assign(:projection, with_presets(projection, socket))}
 

@@ -573,8 +573,14 @@ defmodule SpaceTraders.API do
         end
 
       {:ok, %{status: status, body: body}} when status in 400..499 ->
-        emit_request_metric(path, status)
-        {:error, gameplay_error(status, SpaceTraders.Observability.redact(body, token))}
+        case mutation_authorized_after_response(status, method, token) do
+          :ok ->
+            emit_request_metric(path, status)
+            {:error, gameplay_error(status, SpaceTraders.Observability.redact(body, token))}
+
+          {:error, reason} ->
+            {:error, reason}
+        end
 
       {:ok, %{status: status}} ->
         emit_request_metric(path, status)
@@ -608,6 +614,11 @@ defmodule SpaceTraders.API do
       SpaceTraders.EmergencyStopAdmission.mutation_allowed?(token)
     end
   end
+
+  defp mutation_authorized_after_response(429, method, token),
+    do: mutation_authorized?(method, token)
+
+  defp mutation_authorized_after_response(_status, _method, _token), do: :ok
 
   defp emit_request_metric(path, status) do
     SpaceTraders.Observability.api_request(path, status)

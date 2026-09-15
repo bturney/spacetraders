@@ -13,7 +13,7 @@ defmodule SpaceTraders.Fleet.Intent do
   import Ecto.Changeset
 
   @unfinished_states ["active", "waiting", "awaiting_confirmation", "blocked"]
-  @terminal_states ["completed", "stopped"]
+  @terminal_states ["completed", "stopped", "superseded"]
 
   schema "intents" do
     # "manual" intents belong to Manual Control; "job" intents are the

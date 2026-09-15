@@ -10,10 +10,9 @@ defmodule SpaceTraders.FleetStrategy do
   import Ecto.Query, warn: false
 
   alias SpaceTraders.Agent.{Agent, Operator, Scope}
-  alias SpaceTraders.Agent, as: Agents
   alias SpaceTraders.EmergencyStopAdmission
+  alias SpaceTraders.Evidence
   alias SpaceTraders.Fleet
-  alias SpaceTraders.Fleet.{Intent, Job, Ship}
 
   alias SpaceTraders.FleetStrategy.{
     ObjectiveEvaluation,
@@ -115,7 +114,11 @@ defmodule SpaceTraders.FleetStrategy do
         Repo.update_all(
           from(strategy in Strategy, where: strategy.operator_id == ^operator_id),
           inc: [emergency_stop_version: 1],
-          set: [emergency_stopped_at: now, updated_at: DateTime.utc_now(:second)]
+          set: [
+            emergency_stopped_at: now,
+            emergency_resume_prepared_at: nil,
+            updated_at: DateTime.utc_now(:second)
+          ]
         )
 
         get(scope)
@@ -139,7 +142,7 @@ defmodule SpaceTraders.FleetStrategy do
     result
   end
 
-  @doc "Explicitly resumes mutation authority from the currently reviewed Emergency Stop state."
+  @doc "Refreshes game truth and retires stale work while mutation admission remains stopped."
   def resume(
         %Scope{operator: %Operator{id: operator_id}} = scope,
         expected_emergency_stop_version
@@ -151,10 +154,11 @@ defmodule SpaceTraders.FleetStrategy do
   end
 
   defp do_resume(scope, operator_id, expected_emergency_stop_version) do
-    with :ok <- refresh_authoritative_state(scope) do
+    with :ok <- Evidence.refresh_for_emergency_stop_resume(scope) do
       result =
         Repo.transaction(fn ->
-          now = DateTime.utc_now(:second)
+          prepared_at = DateTime.utc_now()
+          now = DateTime.truncate(prepared_at, :second)
 
           {updated, _rows} =
             Repo.update_all(
@@ -165,33 +169,18 @@ defmodule SpaceTraders.FleetStrategy do
                     not is_nil(strategy.emergency_stopped_at)
               ),
               inc: [emergency_stop_version: 1],
-              set: [updated_at: now]
+              set: [emergency_resume_prepared_at: prepared_at, updated_at: now]
             )
 
           if updated != 1, do: Repo.rollback(:stale_emergency_stop)
 
-          censor_stale_generation_work(operator_id, now)
-
-          if ensure_mutations_reconciled(operator_id) != :ok,
+          if Fleet.prepare_emergency_stop_resume(operator_id, now) != :ok,
             do: Repo.rollback(:reconciliation_required)
-
-          discard_stale_work(operator_id, now)
-
-          Repo.update_all(
-            from(strategy in Strategy,
-              where:
-                strategy.operator_id == ^operator_id and
-                  strategy.emergency_stop_version == ^(expected_emergency_stop_version + 1)
-            ),
-            set: [emergency_stopped_at: nil, updated_at: now]
-          )
 
           get(scope)
         end)
 
       if match?({:ok, _projection}, result) do
-        {:ok, projection} = result
-        :ok = EmergencyStopAdmission.resume(operator_id, projection.emergency_stop_version)
         broadcast_update(scope)
       end
 
@@ -199,143 +188,40 @@ defmodule SpaceTraders.FleetStrategy do
     end
   end
 
-  defp refresh_authoritative_state(%Scope{operator: operator}) do
-    operator
-    |> Agents.list_agents()
-    |> Enum.reduce_while(:ok, fn agent, :ok ->
-      case Agents.agent_overview(agent) do
-        {:ok, _overview} ->
-          case Fleet.list_ships(agent) do
-            {:ok, _ships} -> {:cont, :ok}
-            _error -> {:halt, {:error, :authoritative_refresh_required}}
-          end
+  @doc false
+  def complete_emergency_stop_resume(
+        %Scope{operator: %Operator{id: operator_id}} = scope,
+        expected_emergency_stop_version
+      ) do
+    :global.trans({{__MODULE__, :emergency_stop, operator_id}, self()}, fn ->
+      now = DateTime.utc_now(:second)
 
-        {:error, :stale_agent} ->
-          {:cont, :ok}
+      {updated, _rows} =
+        Repo.update_all(
+          from(strategy in Strategy,
+            where:
+              strategy.operator_id == ^operator_id and
+                strategy.emergency_stop_version == ^expected_emergency_stop_version and
+                not is_nil(strategy.emergency_stopped_at) and
+                not is_nil(strategy.emergency_resume_prepared_at)
+          ),
+          inc: [emergency_stop_version: 1],
+          set: [
+            emergency_stopped_at: nil,
+            emergency_resume_prepared_at: nil,
+            updated_at: now
+          ]
+        )
 
-        _error ->
-          {:halt, {:error, :authoritative_refresh_required}}
+      if updated == 1 do
+        projection = get(scope)
+        :ok = EmergencyStopAdmission.resume(operator_id, projection.emergency_stop_version)
+        broadcast_update(scope)
+        {:ok, projection}
+      else
+        {:error, :stale_emergency_stop}
       end
     end)
-  end
-
-  defp ensure_mutations_reconciled(operator_id) do
-    ship_ids = operator_ship_ids(operator_id, :current_generation)
-
-    unresolved? =
-      ship_ids != [] and
-        (Repo.exists?(
-           from(job in Job,
-             where:
-               job.ship_id in ^ship_ids and job.status in ^Job.unfinished_states() and
-                 not is_nil(job.in_flight_action)
-           )
-         ) or
-           Repo.exists?(
-             from(intent in Intent,
-               where:
-                 intent.ship_id in ^ship_ids and intent.status in ^Intent.unfinished_states() and
-                   not is_nil(intent.in_flight_action)
-             )
-           ))
-
-    if unresolved?, do: {:error, :reconciliation_required}, else: :ok
-  end
-
-  defp censor_stale_generation_work(operator_id, now) do
-    ship_ids = operator_ship_ids(operator_id, :stale_generation)
-    result = %{"outcome" => "reset_censored"}
-
-    if ship_ids != [] do
-      Repo.update_all(
-        from(job in Job,
-          where:
-            job.ship_id in ^ship_ids and job.status in ^Job.unfinished_states() and
-              not is_nil(job.in_flight_action)
-        ),
-        set: [
-          status: "stopped",
-          in_flight_action: nil,
-          last_action_result: result,
-          finished_at: now,
-          updated_at: now
-        ]
-      )
-
-      Repo.update_all(
-        from(intent in Intent,
-          where:
-            intent.ship_id in ^ship_ids and intent.status in ^Intent.unfinished_states() and
-              not is_nil(intent.in_flight_action)
-        ),
-        set: [
-          status: "stopped",
-          in_flight_action: nil,
-          last_action_result: result,
-          finished_at: now,
-          updated_at: now
-        ]
-      )
-    end
-
-    :ok
-  end
-
-  defp discard_stale_work(operator_id, now) do
-    ship_ids = operator_ship_ids(operator_id)
-
-    if ship_ids != [] do
-      Repo.update_all(
-        from(job in Job,
-          where: job.ship_id in ^ship_ids and job.status in ^Job.unfinished_states()
-        ),
-        set: [status: "stopped", finished_at: now, updated_at: now]
-      )
-
-      Repo.update_all(
-        from(intent in Intent,
-          where: intent.ship_id in ^ship_ids and intent.status in ^Intent.unfinished_states()
-        ),
-        set: [status: "stopped", finished_at: now, updated_at: now]
-      )
-    end
-
-    :ok
-  end
-
-  defp operator_ship_ids(operator_id, generation \\ :all)
-
-  defp operator_ship_ids(operator_id, :all) do
-    Repo.all(
-      from(ship in Ship,
-        join: agent in Agent,
-        on: agent.id == ship.agent_id,
-        where: agent.operator_id == ^operator_id,
-        select: ship.id
-      )
-    )
-  end
-
-  defp operator_ship_ids(operator_id, :current_generation) do
-    Repo.all(
-      from(ship in Ship,
-        join: agent in Agent,
-        on: agent.id == ship.agent_id,
-        where: agent.operator_id == ^operator_id and is_nil(agent.stale_at),
-        select: ship.id
-      )
-    )
-  end
-
-  defp operator_ship_ids(operator_id, :stale_generation) do
-    Repo.all(
-      from(ship in Ship,
-        join: agent in Agent,
-        on: agent.id == ship.agent_id,
-        where: agent.operator_id == ^operator_id and not is_nil(agent.stale_at),
-        select: ship.id
-      )
-    )
   end
 
   @doc "Returns whether Emergency Stop permits a new gameplay mutation."
@@ -370,6 +256,7 @@ defmodule SpaceTraders.FleetStrategy do
           draft_version: 0,
           active_revision: nil,
           emergency_stopped_at: nil,
+          emergency_resume_prepared_at: nil,
           emergency_stop_version: 0
         }
 
@@ -380,6 +267,7 @@ defmodule SpaceTraders.FleetStrategy do
           draft_version: strategy.draft_version,
           active_revision: active_revision(strategy),
           emergency_stopped_at: strategy.emergency_stopped_at,
+          emergency_resume_prepared_at: strategy.emergency_resume_prepared_at,
           emergency_stop_version: strategy.emergency_stop_version
         }
     end
@@ -631,6 +519,7 @@ defmodule SpaceTraders.FleetStrategy do
       draft_version: Map.get(overrides, :draft_version, strategy.draft_version),
       active_revision: active_revision(strategy),
       emergency_stopped_at: strategy.emergency_stopped_at,
+      emergency_resume_prepared_at: strategy.emergency_resume_prepared_at,
       emergency_stop_version: strategy.emergency_stop_version
     }
   end

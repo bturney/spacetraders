@@ -73,11 +73,13 @@ defmodule SpaceTraders.FleetGenerationTest do
     assert {:error, :stale_agent} = FleetGeneration.agent_overview(agent)
     assert FleetStrategy.get(scope).emergency_stopped_at == stopped.emergency_stopped_at
 
-    assert {:ok, resumed} = FleetStrategy.resume(scope, stopped.emergency_stop_version)
-    assert resumed.emergency_stopped_at == nil
+    assert {:ok, prepared} = FleetStrategy.resume(scope, stopped.emergency_stop_version)
+    assert prepared.emergency_stopped_at == stopped.emergency_stopped_at
+    assert %DateTime{} = prepared.emergency_resume_prepared_at
 
     assert Enum.any?(Intents.history(agent), fn candidate ->
              candidate.id == intent.id and
+               candidate.status == "superseded" and
                candidate.last_action_result == %{"outcome" => "reset_censored"}
            end)
   end
@@ -90,6 +92,7 @@ defmodule SpaceTraders.FleetGenerationTest do
 
     Req.Test.stub(SpaceTraders.API, fn conn ->
       send(test_pid, :mutation_attempted)
+      assert_receive :release_rate_limit_response
 
       conn
       |> Plug.Conn.put_resp_header("retry-after", "1")
@@ -104,6 +107,7 @@ defmodule SpaceTraders.FleetGenerationTest do
 
     assert_receive :mutation_attempted
     assert {:ok, _stop} = FleetStrategy.engage_emergency_stop(scope)
+    send(request.pid, :release_rate_limit_response)
     assert Task.await(request, 2_000) == {:error, :emergency_stopped}
     refute_receive :mutation_attempted
   end

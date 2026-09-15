@@ -178,18 +178,6 @@ defmodule SpaceTraders.FleetGeneration do
     end
   end
 
-  defp create_agent(operator, %GameAgent{} = game_agent, agent_token, requested_faction) do
-    %Agent{}
-    |> Agent.changeset(%{
-      symbol: game_agent.symbol,
-      faction: game_agent.starting_faction || requested_faction
-    })
-    |> Ecto.Changeset.put_change(:headquarters, game_agent.headquarters)
-    |> Ecto.Changeset.put_change(:agent_token, agent_token)
-    |> Ecto.Changeset.put_change(:operator_id, operator.id)
-    |> Repo.insert()
-  end
-
   defp replace_stale_agent_and_create(operator, game_agent, agent_token, faction) do
     with {:ok, {agent, retired_symbols, ship_symbols}} <-
            Repo.transaction(fn ->
@@ -200,7 +188,7 @@ defmodule SpaceTraders.FleetGeneration do
                |> Enum.unzip()
                |> then(fn {symbols, ships} -> {List.flatten(symbols), List.flatten(ships)} end)
 
-             case create_agent(operator, game_agent, agent_token, faction) do
+             case SpaceTraders.Agent.store_agent(operator, game_agent, agent_token, faction) do
                {:ok, agent} ->
                  {agent, retired_symbols, ship_symbols}
 
@@ -211,7 +199,6 @@ defmodule SpaceTraders.FleetGeneration do
              end
            end) do
       Enum.each(ship_symbols, &ShipServer.stop/1)
-      SpaceTraders.EmergencyStopAdmission.sync(operator.id)
       {:ok, %{agent: %{agent | agent_token: nil}, retired_symbols: retired_symbols}}
     end
   end

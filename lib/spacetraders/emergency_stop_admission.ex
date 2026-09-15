@@ -32,15 +32,11 @@ defmodule SpaceTraders.EmergencyStopAdmission do
   def cancel_block(operator_id, guard),
     do: GenServer.call(__MODULE__, {:cancel, operator_id, guard})
 
-  def sync(operator_id) do
-    case Repo.get_by(Strategy, operator_id: operator_id) do
-      %Strategy{emergency_stopped_at: %DateTime{}, emergency_stop_version: version} ->
-        GenServer.call(__MODULE__, {:sync, operator_id, version, token_fingerprints(operator_id)})
-
-      _strategy ->
-        resume(operator_id, :infinity)
-    end
+  def track_credential(operator_id, token) when is_binary(token) and token != "" do
+    GenServer.call(__MODULE__, {:track_credential, operator_id, fingerprint(token)})
   end
+
+  def track_credential(_operator_id, _token), do: :ok
 
   def resume(operator_id, version),
     do: GenServer.call(__MODULE__, {:delete, operator_id, version})
@@ -67,10 +63,12 @@ defmodule SpaceTraders.EmergencyStopAdmission do
 
   @impl true
   def handle_call({:block, operator_id, guard, fingerprints}, _from, state) do
+    previous = Map.get(state, operator_id)
+
     stop = %{
       version: {:pending, guard},
-      fingerprints: fingerprints,
-      previous: Map.get(state, operator_id)
+      fingerprints: merge_fingerprints(previous, fingerprints),
+      previous: previous
     }
 
     {:reply, :ok, Map.put(state, operator_id, stop)}
@@ -79,11 +77,18 @@ defmodule SpaceTraders.EmergencyStopAdmission do
   def handle_call({:engage, operator_id, version, guard, fingerprints}, _from, state) do
     state =
       case Map.get(state, operator_id) do
-        %{version: {:pending, ^guard}} ->
-          Map.put(state, operator_id, %{version: version, fingerprints: fingerprints})
+        %{version: {:pending, ^guard}, fingerprints: guarded_fingerprints} ->
+          Map.put(state, operator_id, %{
+            version: version,
+            fingerprints: MapSet.union(guarded_fingerprints, fingerprints)
+          })
 
-        %{version: current} when is_integer(current) and current <= version ->
-          Map.put(state, operator_id, %{version: version, fingerprints: fingerprints})
+        %{version: current, fingerprints: current_fingerprints}
+        when is_integer(current) and current <= version ->
+          Map.put(state, operator_id, %{
+            version: version,
+            fingerprints: MapSet.union(current_fingerprints, fingerprints)
+          })
 
         _newer_stop ->
           state
@@ -108,11 +113,18 @@ defmodule SpaceTraders.EmergencyStopAdmission do
     {:reply, :ok, state}
   end
 
-  def handle_call({:sync, operator_id, version, fingerprints}, _from, state) do
+  def handle_call({:track_credential, operator_id, fingerprint}, _from, state) do
     state =
-      Map.update(state, operator_id, %{version: version, fingerprints: fingerprints}, fn stop ->
-        %{stop | fingerprints: fingerprints}
-      end)
+      case Map.get(state, operator_id) do
+        nil ->
+          state
+
+        stop ->
+          Map.put(state, operator_id, %{
+            stop
+            | fingerprints: MapSet.put(stop.fingerprints, fingerprint)
+          })
+      end
 
     {:reply, :ok, state}
   end
@@ -207,6 +219,11 @@ defmodule SpaceTraders.EmergencyStopAdmission do
     |> Enum.map(&fingerprint/1)
     |> MapSet.new()
   end
+
+  defp merge_fingerprints(nil, fingerprints), do: fingerprints
+
+  defp merge_fingerprints(stop, fingerprints),
+    do: MapSet.union(stop.fingerprints, fingerprints)
 
   defp fingerprint(token), do: :crypto.hash(:sha256, token)
 end

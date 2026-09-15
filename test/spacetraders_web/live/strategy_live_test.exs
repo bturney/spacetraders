@@ -27,8 +27,9 @@ defmodule SpaceTradersWeb.StrategyLiveTest do
     assert html =~ "Gameplay mutations are suppressed"
 
     reconnected |> element("#resume-from-emergency-stop") |> render_click()
-    assert render(reconnected) =~ "Fresh planning is required"
-    assert FleetStrategy.get(scope).emergency_stopped_at == nil
+    assert render(reconnected) =~ "Fresh planning must select an admissible plan"
+    assert %DateTime{} = FleetStrategy.get(scope).emergency_stopped_at
+    assert %DateTime{} = FleetStrategy.get(scope).emergency_resume_prepared_at
   end
 
   test "discloses each preset's ordered objectives, Hard Constraints, Preferences, and consequences",

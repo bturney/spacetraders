@@ -48,6 +48,81 @@ defmodule SpaceTraders.Fleet do
   @max_recovery_attempts 5
   @recovery_window_seconds 15 * 60
 
+  @doc "Safely retires pre-stop execution state before fresh Fleet planning."
+  def prepare_emergency_stop_resume(operator_id, now) do
+    current_ship_ids = operator_ship_ids(operator_id, :current_generation)
+    stale_ship_ids = operator_ship_ids(operator_id, :stale_generation)
+    all_ship_ids = current_ship_ids ++ stale_ship_ids
+
+    censor_reset_generation_jobs(stale_ship_ids, now)
+    Intents.censor_reset_generation(stale_ship_ids, now)
+
+    if emergency_stop_jobs_reconciled?(current_ship_ids) and
+         Intents.emergency_stop_reconciled?(current_ship_ids) do
+      stop_jobs_for_emergency_stop(all_ship_ids, now)
+      Intents.supersede_for_emergency_stop(all_ship_ids, now)
+      :ok
+    else
+      {:error, :reconciliation_required}
+    end
+  end
+
+  defp emergency_stop_jobs_reconciled?(ship_ids) do
+    not Repo.exists?(
+      from job in Job,
+        where:
+          job.ship_id in ^ship_ids and job.status in ^Job.unfinished_states() and
+            not is_nil(job.in_flight_action)
+    )
+  end
+
+  defp censor_reset_generation_jobs(ship_ids, now) do
+    if ship_ids != [] do
+      Repo.update_all(
+        from(job in Job,
+          where:
+            job.ship_id in ^ship_ids and job.status in ^Job.unfinished_states() and
+              not is_nil(job.in_flight_action)
+        ),
+        set: [
+          status: "stopped",
+          in_flight_action: nil,
+          last_action_result: %{"outcome" => "reset_censored"},
+          finished_at: now,
+          updated_at: now
+        ]
+      )
+    end
+  end
+
+  defp stop_jobs_for_emergency_stop(ship_ids, now) do
+    if ship_ids != [] do
+      Repo.update_all(
+        from(job in Job,
+          where: job.ship_id in ^ship_ids and job.status in ^Job.unfinished_states()
+        ),
+        set: [status: "stopped", finished_at: now, updated_at: now]
+      )
+    end
+  end
+
+  defp operator_ship_ids(operator_id, generation) do
+    stale_filter =
+      case generation do
+        :current_generation -> dynamic([_ship, agent], is_nil(agent.stale_at))
+        :stale_generation -> dynamic([_ship, agent], not is_nil(agent.stale_at))
+      end
+
+    Repo.all(
+      from ship in Ship,
+        join: agent in AgentRecord,
+        on: agent.id == ship.agent_id,
+        where: agent.operator_id == ^operator_id,
+        where: ^stale_filter,
+        select: ship.id
+    )
+  end
+
   @doc """
   Pulls the agent's live fleet from the game API.
 
