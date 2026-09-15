@@ -10,7 +10,7 @@ defmodule SpaceTraders.MissionControl do
 
   alias SpaceTraders.Agent.Scope
   alias SpaceTraders.Agent.Agent, as: AgentRecord
-  alias SpaceTraders.{Agent, Fleet, Intelligence}
+  alias SpaceTraders.{Agent, Fleet, FleetStrategy, Intelligence}
 
   @doc "Returns the signed-in Operator's Agents for adapter subscriptions."
   def agents(%Scope{operator: operator}) do
@@ -30,6 +30,12 @@ defmodule SpaceTraders.MissionControl do
     |> Enum.reject(&is_nil/1)
     |> Enum.map(&Fleet.command_snapshot/1)
     |> Enum.map(&without_credentials/1)
+  end
+
+  @doc "Returns the authenticated Operator's Fleet Strategy review projection."
+  def strategy(%Scope{} = scope) do
+    FleetStrategy.get(scope)
+    |> Map.put(:presets, FleetStrategy.presets())
   end
 
   @doc """
