@@ -45,7 +45,7 @@ defmodule SpaceTraders.FleetStrategyTest do
   test "resume discards stale work but preserves in-flight mutation evidence for reconciliation" do
     operator = operator_fixture()
     scope = Scope.for_operator(operator)
-    agent = agent_fixture(operator)
+    agent = agent_fixture(operator, %{agent_token: "STOP_DISCARD_AGENT_TOKEN"})
 
     queued_ship =
       Repo.insert!(%Ship{symbol: "QUEUED-1", ship_type: "SHIP_PROBE", agent_id: agent.id})
@@ -122,7 +122,7 @@ defmodule SpaceTraders.FleetStrategyTest do
   test "resume keeps mutations stopped until authoritative refresh succeeds" do
     operator = operator_fixture()
     scope = Scope.for_operator(operator)
-    agent = agent_fixture(operator)
+    agent = agent_fixture(operator, %{agent_token: "STOP_REFRESH_AGENT_TOKEN"})
     assert {:ok, stopped} = FleetStrategy.engage_emergency_stop(scope)
 
     Req.Test.stub(SpaceTraders.API, fn conn -> Req.Test.transport_error(conn, :timeout) end)

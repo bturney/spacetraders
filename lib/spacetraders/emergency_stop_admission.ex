@@ -45,6 +45,9 @@ defmodule SpaceTraders.EmergencyStopAdmission do
   def resume(operator_id, version),
     do: GenServer.call(__MODULE__, {:delete, operator_id, version})
 
+  @doc "Rebuilds the cache from durable state. Used to reset test isolation."
+  def clear, do: GenServer.call(__MODULE__, :clear)
+
   def mutation_allowed?(token) when is_binary(token) do
     GenServer.call(__MODULE__, {:mutation_allowed, fingerprint(token)})
   end
@@ -131,6 +134,10 @@ defmodule SpaceTraders.EmergencyStopAdmission do
       end
 
     {:reply, :ok, state}
+  end
+
+  def handle_call(:clear, _from, _state) do
+    {:reply, :ok, %{}}
   end
 
   def handle_call({:mutation_allowed, fingerprint}, _from, state) do

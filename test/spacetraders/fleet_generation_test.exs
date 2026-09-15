@@ -46,7 +46,7 @@ defmodule SpaceTraders.FleetGenerationTest do
   test "Emergency Stop survives definitive Server Reset detection" do
     operator = operator_fixture()
     scope = Scope.for_operator(operator)
-    agent = agent_fixture(operator)
+    agent = agent_fixture(operator, %{agent_token: "STOP_RESET_AGENT_TOKEN"})
     ship = Repo.insert!(%Ship{symbol: "RESET-1", ship_type: "SHIP_PROBE", agent_id: agent.id})
 
     intent =
