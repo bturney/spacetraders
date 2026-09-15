@@ -93,6 +93,15 @@ defmodule SpaceTraders.FleetStrategyTest do
                Map.put(document("Grow credits", "No scrap"), "account_token", "secret")
              )
 
+    nested_credential =
+      put_in(
+        document("Grow credits", "No scrap"),
+        ["objectives", Access.at(0), "evaluation"],
+        %{"agent_token" => "secret"}
+      )
+
+    assert {:error, :invalid_document} = save_draft(scope, nested_credential)
+
     assert {:ok, _draft} =
              save_draft(scope, %{
                "objectives" => [%{"objective" => "Grow credits"}],

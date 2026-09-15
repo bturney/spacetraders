@@ -162,7 +162,6 @@ defmodule SpaceTradersWeb.StrategyLive do
               <button
                 id="activate-strategy"
                 phx-click="activate"
-                phx-value-version={@projection.draft_version}
                 disabled={@draft_stale?}
                 class="btn btn-primary"
               >
@@ -179,8 +178,8 @@ defmodule SpaceTradersWeb.StrategyLive do
   @impl true
   def handle_event("select_preset", %{"id" => preset_id}, socket) do
     case FleetStrategy.select_preset(socket.assigns.current_scope, preset_id) do
-      {:ok, _projection} ->
-        {:noreply, assign_projection(socket)}
+      {:ok, projection} ->
+        {:noreply, assign_projection(socket, nil, with_presets(projection, socket))}
 
       {:error, :draft_exists} ->
         {:noreply, put_flash(socket, :error, "Discard or activate the current draft first.")}
@@ -199,8 +198,8 @@ defmodule SpaceTradersWeb.StrategyLive do
              document_from_params(params),
              socket.assigns.projection.draft_version
            ) do
-        {:ok, _projection} ->
-          {:noreply, assign_projection(socket, params)}
+        {:ok, projection} ->
+          {:noreply, assign_projection(socket, params, with_presets(projection, socket))}
 
         {:error, :stale_draft} ->
           {:noreply, mark_draft_stale(socket, "The draft changed before this edit was saved.")}
@@ -213,11 +212,11 @@ defmodule SpaceTradersWeb.StrategyLive do
            socket.assigns.current_scope,
            socket.assigns.projection.draft_version
          ) do
-      {:ok, _projection} ->
+      {:ok, projection} ->
         {:noreply,
          socket
          |> put_flash(:info, "Draft discarded. Active intent is unchanged.")
-         |> assign_projection()}
+         |> assign_projection(nil, with_presets(projection, socket))}
 
       {:error, :stale_draft} ->
         {:noreply, mark_draft_stale(socket, "The draft changed before it could be discarded.")}
@@ -228,18 +227,27 @@ defmodule SpaceTradersWeb.StrategyLive do
     {:noreply, assign_projection(socket)}
   end
 
-  def handle_event("activate", %{"version" => version}, socket) do
+  def handle_event("activate", _params, socket) do
     if socket.assigns.draft_stale? do
       {:noreply, put_flash(socket, :error, "Review the latest durable draft before activation.")}
     else
-      {expected_version, ""} = Integer.parse(version)
-
-      case FleetStrategy.activate(socket.assigns.current_scope, expected_version) do
+      case FleetStrategy.activate(
+             socket.assigns.current_scope,
+             socket.assigns.projection.draft_version
+           ) do
         {:ok, revision} ->
+          projection = %{
+            socket.assigns.projection
+            | draft: nil,
+              draft_source: nil,
+              draft_version: socket.assigns.projection.draft_version + 1,
+              active_revision: revision
+          }
+
           {:noreply,
            socket
            |> put_flash(:info, "Fleet Strategy Revision #{revision.number} activated.")
-           |> assign_projection()}
+           |> assign_projection(nil, projection)}
 
         {:error, :invalid_document} ->
           {:noreply,
@@ -345,8 +353,8 @@ defmodule SpaceTradersWeb.StrategyLive do
     """
   end
 
-  defp assign_projection(socket, form_drafts \\ nil) do
-    projection = MissionControl.strategy(socket.assigns.current_scope)
+  defp assign_projection(socket, form_drafts \\ nil, projection \\ nil) do
+    projection = projection || MissionControl.strategy(socket.assigns.current_scope)
     form_drafts = form_drafts || form_values(projection.draft)
 
     socket
@@ -354,6 +362,10 @@ defmodule SpaceTradersWeb.StrategyLive do
     |> assign(:draft_stale?, false)
     |> assign(:form_drafts, form_drafts)
     |> assign(:form, to_form(form_drafts, as: "strategy"))
+  end
+
+  defp with_presets(projection, socket) do
+    Map.put(projection, :presets, socket.assigns.projection.presets)
   end
 
   defp mark_draft_stale(socket, message) do

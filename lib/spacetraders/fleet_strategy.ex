@@ -208,9 +208,9 @@ defmodule SpaceTraders.FleetStrategy do
                  draft_version: 1
                })
                |> Repo.insert() do
-            {:ok, _strategy} ->
+            {:ok, strategy} ->
               broadcast_update(scope)
-              {:ok, get(scope)}
+              {:ok, projection(strategy)}
 
             {:error,
              %{errors: [operator_id: {_message, constraint: :unique, constraint_name: _}]}} ->
@@ -238,7 +238,13 @@ defmodule SpaceTraders.FleetStrategy do
 
           if claimed == 1 do
             broadcast_update(scope)
-            {:ok, get(scope)}
+
+            {:ok,
+             projection(strategy, %{
+               draft_document: document,
+               draft_source: source,
+               draft_version: strategy.draft_version + 1
+             })}
           else
             {:error, :draft_exists}
           end
@@ -281,9 +287,18 @@ defmodule SpaceTraders.FleetStrategy do
       end
 
     case result do
-      {:ok, _strategy} ->
+      {:ok, %Strategy{} = strategy} ->
         broadcast_update(scope)
-        {:ok, get(scope)}
+
+        {:ok,
+         projection(strategy, %{
+           draft_document: attrs[:draft_document],
+           draft_source: attrs[:draft_source],
+           draft_version: expected_draft_version + 1
+         })}
+
+      {:error, %Ecto.Changeset{}} when is_nil(strategy.id) ->
+        {:error, :stale_draft}
 
       error ->
         error
@@ -297,6 +312,15 @@ defmodule SpaceTraders.FleetStrategy do
       from revision in Revision,
         where: revision.id == ^revision_id and revision.fleet_strategy_id == ^strategy_id
     )
+  end
+
+  defp projection(strategy, overrides \\ %{}) do
+    %{
+      draft: Map.get(overrides, :draft_document, strategy.draft_document),
+      draft_source: Map.get(overrides, :draft_source, strategy.draft_source),
+      draft_version: Map.get(overrides, :draft_version, strategy.draft_version),
+      active_revision: active_revision(strategy)
+    }
   end
 
   defp validate_document(%{
@@ -333,7 +357,10 @@ defmodule SpaceTraders.FleetStrategy do
   end
 
   defp valid_draft_objective?(objective) when is_map(objective) do
-    Enum.all?(Map.keys(objective), &(&1 in ["objective", "kind", "evaluation", "scope"]))
+    allowed_keys = ["objective", "kind", "evaluation", "scope"]
+
+    Enum.all?(Map.keys(objective), &(&1 in allowed_keys)) and
+      Enum.all?(Map.values(objective), &is_binary/1)
   end
 
   defp valid_draft_objective?(_objective), do: false
@@ -344,7 +371,9 @@ defmodule SpaceTraders.FleetStrategy do
          "evaluation" => evaluation,
          "scope" => scope
        }) do
-    objective != "" and kind in ["attain", "maintain", "continuous"] and evaluation != "" and
+    is_binary(objective) and objective != "" and
+      is_binary(evaluation) and evaluation != "" and
+      kind in ["attain", "maintain", "continuous"] and
       scope in ["fleet_generation", "strategy_lifetime", "recurring"]
   end
 

@@ -137,7 +137,7 @@ defmodule SpaceTradersWeb.StrategyLiveTest do
     assert FleetStrategy.get(scope).active_revision == nil
     assert render(view) =~ "Review this draft before activation"
 
-    view |> element("#activate-strategy") |> render_click()
+    render_click(view, "activate", %{"version" => "not-an-integer"})
 
     projection = FleetStrategy.get(scope)
     assert projection.draft == nil
