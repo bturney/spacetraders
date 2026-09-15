@@ -30,7 +30,6 @@ defmodule SpaceTradersWeb.DashboardLive do
   alias SpaceTraders.Agent
   alias SpaceTraders.Contracts
   alias SpaceTraders.Fleet
-  alias SpaceTraders.FleetGeneration
   alias SpaceTraders.Fleet.Job
   alias SpaceTraders.Fleet.JobBlocker
   alias SpaceTraders.Fleet.Intents
@@ -214,20 +213,6 @@ defmodule SpaceTradersWeb.DashboardLive do
 
       {:error, reason} ->
         {:noreply, put_flash(socket, :error, live_error(reason))}
-    end
-  end
-
-  @impl true
-  def handle_event("retire_stale_agents", _params, socket) do
-    case FleetGeneration.retire_stale_agents(socket.assigns.current_scope) do
-      {:ok, []} ->
-        {:noreply, put_flash(socket, :info, "There are no stale Agents to retire.")}
-
-      {:ok, retired_symbols} ->
-        {:noreply,
-         socket
-         |> assign(:overviews, non_stale_overviews(socket.assigns.overviews))
-         |> put_flash(:info, "Retired stale Agents: #{Enum.join(retired_symbols, ", ")}.")}
     end
   end
 
@@ -1959,17 +1944,9 @@ defmodule SpaceTradersWeb.DashboardLive do
       <p class="eyebrow">Server reset recovery</p>
       <h2 class="mt-1 text-xl font-bold">Your stale Agents are no longer available</h2>
       <p class="mt-2 text-sm leading-6">
-        The game reset and invalidated {Enum.map_join(@stale_agents, ", ", & &1.symbol)}. Retire these stale local records, or mint a replacement Agent.
+        The game reset and invalidated {Enum.map_join(@stale_agents, ", ", & &1.symbol)}. These records remain available until a replacement Agent is ready.
       </p>
       <div class="mt-4 flex flex-wrap gap-3">
-        <button
-          id="retire-stale-agents"
-          type="button"
-          phx-click="retire_stale_agents"
-          class="btn btn-warning"
-        >
-          Retire stale Agents
-        </button>
         <.link navigate={~p"/agents/new"} class="btn btn-ghost">Mint a replacement</.link>
       </div>
     </section>

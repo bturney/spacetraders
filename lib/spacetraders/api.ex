@@ -610,7 +610,8 @@ defmodule SpaceTraders.API do
   defp mutation_authorized?(:get, _token), do: :ok
 
   defp mutation_authorized?(_method, token) do
-    with :ok <- SpaceTraders.RuntimeAuthority.execution_allowed?() do
+    with :ok <- SpaceTraders.RuntimeAuthority.execution_allowed?(),
+         :ok <- SpaceTraders.FleetGenerationAdmission.mutation_allowed?(token) do
       SpaceTraders.EmergencyStopAdmission.mutation_allowed?(token)
     end
   end

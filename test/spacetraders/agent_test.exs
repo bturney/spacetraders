@@ -663,7 +663,7 @@ defmodule SpaceTraders.AgentTest do
       assert Registry.lookup(SpaceTraders.Fleet.ShipRegistry, ship.symbol) == []
     end
 
-    test "retires only this operator's stale agents and their local work", %{
+    test "retains stale agents and their local work until replacement", %{
       operator: operator,
       scope: scope
     } do
@@ -697,12 +697,12 @@ defmodule SpaceTraders.AgentTest do
 
       {:ok, _pid} = ShipServer.ensure_started(stale_agent, ship.symbol)
 
-      assert {:ok, ["ORBITALIST"]} = FleetGeneration.retire_stale_agents(scope)
+      assert {:error, :replacement_required} = FleetGeneration.retire_stale_agents(scope)
 
-      refute Repo.get(SpaceTraders.Agent.Agent, stale_agent.id)
-      refute Repo.get(Ship, ship.id)
-      assert Repo.get(Event, event.id).status == "cancelled"
-      assert Registry.lookup(SpaceTraders.Fleet.ShipRegistry, ship.symbol) == []
+      assert Repo.get(SpaceTraders.Agent.Agent, stale_agent.id)
+      assert Repo.get(Ship, ship.id)
+      assert Repo.get(Event, event.id).status == "pending"
+      assert Registry.lookup(SpaceTraders.Fleet.ShipRegistry, ship.symbol) != []
       assert Repo.get(SpaceTraders.Agent.Agent, other_stale_agent.id)
     end
 
