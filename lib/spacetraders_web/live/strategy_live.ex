@@ -111,7 +111,7 @@ defmodule SpaceTradersWeb.StrategyLive do
                 type="textarea"
                 label="Hard Constraints"
                 rows="3"
-                placeholder="One non-negotiable boundary per line"
+                placeholder="Keep at least 50,000 credits available\nNo scrap"
               />
               <.input
                 field={@form[:preferences]}
@@ -252,6 +252,14 @@ defmodule SpaceTradersWeb.StrategyLive do
         {:error, :invalid_document} ->
           {:noreply,
            put_flash(socket, :error, "Add at least one Strategic Objective before activation.")}
+
+        {:error, {:unenforceable_hard_constraint, constraint, explanation}} ->
+          {:noreply,
+           put_flash(
+             socket,
+             :error,
+             "Hard Constraint '#{constraint}' cannot be enforced. #{explanation}"
+           )}
 
         {:error, :draft_not_found} ->
           {:noreply, put_flash(socket, :error, "There is no draft to activate.")}

@@ -4,7 +4,10 @@ defmodule SpaceTraders.FleetStrategyTest do
   import SpaceTraders.AgentFixtures
 
   alias SpaceTraders.Agent.Scope
+  alias SpaceTraders.FleetAllocation
+  alias SpaceTraders.FleetGeneration
   alias SpaceTraders.FleetStrategy
+  alias SpaceTraders.FleetStrategy.Revision
 
   test "presets disclose ordered objectives, Hard Constraints, Preferences, and consequences" do
     assert [preset | _] = FleetStrategy.presets()
@@ -145,6 +148,277 @@ defmodule SpaceTraders.FleetStrategyTest do
     assert FleetStrategy.get(scope).draft_version == latest.draft_version
   end
 
+  test "attain, maintain, and continuous objectives expose purpose-appropriate evaluations" do
+    revision = %Revision{
+      id: 101,
+      document: %{
+        "objectives" => [
+          objective("Map the system", "attain", "fleet_generation"),
+          objective("Protect liquidity", "maintain", "recurring"),
+          objective("Grow credits", "continuous", "strategy_lifetime")
+        ]
+      }
+    }
+
+    assert {:ok,
+            %{
+              objective_index: 0,
+              kind: :attain,
+              feasible?: true,
+              progress: 0.4,
+              remaining: 60,
+              attained?: false,
+              expected_seconds_to_target: 120
+            }} =
+             FleetStrategy.evaluate_objective(
+               revision,
+               0,
+               %{current: 40, target: 100, expected_seconds_to_target: 120, feasible?: true}
+             )
+
+    assert {:ok, %{kind: :maintain, margin: 20, required_margin: 10, protected?: true}} =
+             FleetStrategy.evaluate_objective(
+               revision,
+               1,
+               %{current: 120, target: 100, required_margin: 10, feasible?: true}
+             )
+
+    assert {:ok, %{kind: :continuous, rate: 1_800.0, horizon_seconds: 3_600}} =
+             FleetStrategy.evaluate_objective(
+               revision,
+               2,
+               %{change: 30, elapsed_seconds: 60, horizon_seconds: 3_600, feasible?: true}
+             )
+  end
+
+  test "a Server Reset clears Fleet Generation and recurring progress but retains Strategy-lifetime progress" do
+    revision = %Revision{
+      id: 102,
+      document: %{
+        "objectives" => [
+          objective("Map the system", "attain", "fleet_generation"),
+          objective("Grow total credits", "continuous", "strategy_lifetime"),
+          objective("Fulfill contracts", "attain", "recurring")
+        ]
+      }
+    }
+
+    progress = %{
+      revision_id: revision.id,
+      fleet_generation_id: "generation-1",
+      objectives: %{
+        0 => %{progress: 0.8},
+        1 => %{change: 250_000},
+        2 => %{"contract-1" => %{progress: 0.5}}
+      }
+    }
+
+    assert {:ok,
+            %{
+              revision_id: 102,
+              fleet_generation_id: "generation-2",
+              objectives: %{
+                0 => nil,
+                1 => %{change: 250_000},
+                2 => %{recurrence_id: nil, progress: nil}
+              }
+            }} = FleetGeneration.advance_objective_progress(revision, progress, "generation-2")
+  end
+
+  test "recurring objectives reset only their own progress at a recurrence boundary" do
+    revision = %Revision{
+      id: 103,
+      document: %{
+        "objectives" => [
+          objective("Grow total credits", "continuous", "strategy_lifetime"),
+          objective("Fulfill contracts", "attain", "recurring")
+        ]
+      }
+    }
+
+    progress = %{
+      revision_id: revision.id,
+      fleet_generation_id: "generation-1",
+      objectives: %{
+        0 => %{change: 250_000},
+        1 => %{recurrence_id: "contract-1", progress: %{delivered: 20}}
+      }
+    }
+
+    assert {:ok,
+            %{
+              objectives: %{
+                0 => %{change: 250_000},
+                1 => %{recurrence_id: "contract-2", progress: nil}
+              }
+            }} = FleetStrategy.advance_recurrence(revision, progress, 1, "contract-2")
+
+    assert {:error, :invalid_objective_progress} =
+             FleetStrategy.advance_recurrence(revision, progress, -1, "contract-2")
+  end
+
+  test "ordered Strategic Priority is protected before Preferences rank admissible plans" do
+    scope = operator_fixture() |> Scope.for_operator()
+
+    document =
+      document("Map the system", "Keep at least 50,000 credits available")
+      |> Map.put("objectives", [
+        objective("Map the system", "attain", "fleet_generation"),
+        objective("Grow credits", "continuous", "recurring")
+      ])
+
+    revision = activate_document(scope, document)
+
+    high_priority =
+      plan(revision, :high_priority, 60, 5, [1], 60_000)
+
+    preferred =
+      plan(revision, :preferred, 90, 100, [2], 60_000)
+
+    inadmissible =
+      plan(revision, :inadmissible, 30, 1_000, [100], 40_000)
+
+    assert {:ok,
+            %{
+              admissible: [%{id: :high_priority}, %{id: :preferred}],
+              rejected: [%{plan: %{id: :inadmissible}, reasons: [reason]}]
+            }} = FleetAllocation.rank_plans(scope, [preferred, inadmissible, high_priority])
+
+    assert reason =~ "50,000 credit floor"
+
+    equally_protected =
+      plan(revision, :equally_protected, 60, 5, [2], 60_000)
+
+    assert {:ok, %{admissible: [%{id: :equally_protected}, %{id: :high_priority}]}} =
+             FleetAllocation.rank_plans(scope, [high_priority, equally_protected])
+  end
+
+  test "plans with incomplete or mismatched evaluations cannot yield to Preferences" do
+    scope = operator_fixture() |> Scope.for_operator()
+    revision = activate_document(scope, document("Grow credits", "No scrap"))
+
+    incomplete = %{
+      id: :incomplete,
+      objective_evaluations: [],
+      preference_evaluations: [],
+      safety: safety_bounds(revision, %{scraps_ship: false})
+    }
+
+    {:ok, evaluation} =
+      FleetStrategy.evaluate_objective(revision, 0, %{
+        change: 10,
+        elapsed_seconds: 10,
+        horizon_seconds: 60,
+        feasible?: true
+      })
+
+    complete = %{
+      id: :complete,
+      objective_evaluations: [evaluation],
+      preference_evaluations: [preference_evaluation(revision, 0, 0)],
+      safety: safety_bounds(revision, %{scraps_ship: false})
+    }
+
+    assert {:ok,
+            %{
+              admissible: [%{id: :complete}],
+              rejected: [%{plan: %{id: :incomplete}, reasons: [reason]}]
+            }} = FleetAllocation.rank_plans(scope, [incomplete, complete])
+
+    assert reason =~ "complete matching evaluation"
+  end
+
+  test "activation rejects a Hard Constraint that Standing Authority cannot enforce" do
+    scope = operator_fixture() |> Scope.for_operator()
+
+    unenforceable =
+      document("Grow credits", "Never pay more than 100 credits per unit of fuel")
+
+    assert {:ok, _draft} = save_draft(scope, unenforceable)
+
+    assert {:error, {:unenforceable_hard_constraint, constraint, explanation}} =
+             FleetStrategy.activate(scope, FleetStrategy.get(scope).draft_version)
+
+    assert constraint == "Never pay more than 100 credits per unit of fuel"
+    assert explanation =~ "SpaceTraders does not provide a conditional maximum price"
+    assert FleetStrategy.get(scope).active_revision == nil
+  end
+
+  test "Standing Authority requires safety evidence for every Hard Constraint" do
+    scope = operator_fixture() |> Scope.for_operator()
+    document = document("Grow credits", "Keep at least 50,000 credits available")
+    revision = activate_document(scope, document)
+
+    assert {:ok, %{revision_id: revision_id, evidence_id: "evidence-1"}} =
+             FleetStrategy.authorize(scope, safety_bounds(revision, %{minimum_credits: 50_000}))
+
+    assert revision_id == revision.id
+
+    assert {:error, [reason]} =
+             FleetStrategy.authorize(scope, safety_bounds(revision, %{}))
+
+    assert reason =~ "Cannot prove the 50,000 credit floor"
+  end
+
+  test "malformed constraints and consequence bounds are rejected conservatively" do
+    scope = operator_fixture() |> Scope.for_operator()
+    malformed = document("Grow credits", "Keep at least 1,,000 credits available")
+
+    assert {:ok, _draft} = save_draft(scope, malformed)
+
+    assert {:error, {:unenforceable_hard_constraint, _, explanation}} =
+             FleetStrategy.activate(scope, FleetStrategy.get(scope).draft_version)
+
+    assert explanation =~ "No enforceable consequence rule"
+
+    assert {:ok, _} = FleetStrategy.discard_draft(scope, FleetStrategy.get(scope).draft_version)
+    revision = activate_document(scope, document("Grow credits", "No scrap"))
+
+    assert {:error, [reason]} =
+             FleetStrategy.authorize(scope, safety_bounds(revision, %{scraps_ship: :unknown}))
+
+    assert reason =~ "Cannot prove that no Ship would be scrapped"
+  end
+
+  test "ranking rejects stale revision evidence and incomplete evaluation shapes" do
+    scope = operator_fixture() |> Scope.for_operator()
+    first = activate_document(scope, document("Grow credits", "No scrap"))
+
+    {:ok, stale_evaluation} =
+      FleetStrategy.evaluate_objective(first, 0, %{
+        change: 10,
+        elapsed_seconds: 10,
+        horizon_seconds: 60,
+        feasible?: true
+      })
+
+    assert {:ok, _draft} = save_draft(scope, document("Grow faster", "No scrap"))
+    assert {:ok, current} = FleetStrategy.activate(scope, FleetStrategy.get(scope).draft_version)
+
+    stale_plan = %{
+      id: :stale,
+      objective_evaluations: [stale_evaluation],
+      preference_evaluations: [preference_evaluation(first, 0, 1)],
+      safety: safety_bounds(first, %{scraps_ship: false})
+    }
+
+    incomplete_plan = %{
+      id: :incomplete,
+      objective_evaluations: [
+        %{revision_id: current.id, objective_index: 0, kind: :continuous, feasible?: true}
+      ],
+      preference_evaluations: [preference_evaluation(current, 0, 1)],
+      safety: safety_bounds(current, %{scraps_ship: false})
+    }
+
+    assert {:ok, %{admissible: [], rejected: rejected, revision_id: revision_id}} =
+             FleetAllocation.rank_plans(scope, [stale_plan, incomplete_plan, :malformed])
+
+    assert revision_id == current.id
+    assert length(rejected) == 3
+    assert Enum.all?(rejected, fn rejection -> rejection.reasons != [] end)
+  end
+
   defp document(objective, constraint) do
     %{
       "objectives" => [
@@ -159,6 +433,63 @@ defmodule SpaceTraders.FleetStrategyTest do
       "preferences" => ["Prefer efficient plans"],
       "consequences" => "The Fleet will pursue the listed outcomes within every Hard Constraint."
     }
+  end
+
+  defp objective(name, kind, scope) do
+    %{
+      "objective" => name,
+      "kind" => kind,
+      "evaluation" => "Measure progress",
+      "scope" => scope
+    }
+  end
+
+  defp plan(revision, id, expected_seconds, rate, preference_scores, minimum_credits) do
+    {:ok, attain} =
+      FleetStrategy.evaluate_objective(revision, 0, %{
+        current: 0,
+        target: 1,
+        expected_seconds_to_target: expected_seconds,
+        feasible?: true
+      })
+
+    {:ok, continuous} =
+      FleetStrategy.evaluate_objective(revision, 1, %{
+        change: rate,
+        elapsed_seconds: 1,
+        horizon_seconds: 1,
+        feasible?: true
+      })
+
+    %{
+      id: id,
+      objective_evaluations: [attain, continuous],
+      preference_evaluations:
+        preference_scores
+        |> Enum.with_index()
+        |> Enum.map(fn {score, index} -> preference_evaluation(revision, index, score) end),
+      safety: safety_bounds(revision, %{minimum_credits: minimum_credits})
+    }
+  end
+
+  defp preference_evaluation(revision, index, score) do
+    assert {:ok, evaluation} = FleetStrategy.evaluate_preference(revision, index, score)
+    evaluation
+  end
+
+  defp safety_bounds(revision, bounds) do
+    %{
+      revision_id: revision.id,
+      evidence_id: "evidence-1",
+      observed_at: DateTime.utc_now(),
+      bounds: bounds
+    }
+  end
+
+  defp activate_document(scope, document) do
+    assert {:ok, _draft} = save_draft(scope, document)
+    assert {:ok, revision} = FleetStrategy.activate(scope, FleetStrategy.get(scope).draft_version)
+    revision
   end
 
   defp save_draft(scope, document) do

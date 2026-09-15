@@ -13,6 +13,7 @@ defmodule SpaceTraders.FleetGeneration do
   alias SpaceTraders.API.Model.Agent, as: GameAgent
   alias SpaceTraders.Agent.{Agent, Operator, Scope}
   alias SpaceTraders.Fleet.{Ship, ShipServer}
+  alias SpaceTraders.FleetStrategy.Revision
   alias SpaceTraders.{Repo, Timeline}
 
   defmodule CredentialReference do
@@ -21,6 +22,44 @@ defmodule SpaceTraders.FleetGeneration do
     @enforce_keys [:operator_id]
     defstruct [:operator_id]
   end
+
+  @doc "Carries Strategic Objective progress into a replacement Fleet Generation by scope."
+  def advance_objective_progress(
+        %Revision{id: revision_id, document: %{"objectives" => objectives}},
+        %{
+          revision_id: revision_id,
+          fleet_generation_id: current_generation_id,
+          objectives: progress
+        },
+        next_generation_id
+      )
+      when is_list(objectives) and is_map(progress) and not is_nil(current_generation_id) and
+             not is_nil(next_generation_id) do
+    expected_indexes = objectives |> Enum.with_index() |> Enum.map(&elem(&1, 1)) |> MapSet.new()
+
+    if MapSet.new(Map.keys(progress)) == expected_indexes do
+      next_progress =
+        objectives
+        |> Enum.with_index()
+        |> Map.new(fn
+          {%{"scope" => "strategy_lifetime"}, index} -> {index, Map.fetch!(progress, index)}
+          {%{"scope" => "recurring"}, index} -> {index, %{recurrence_id: nil, progress: nil}}
+          {_objective, index} -> {index, nil}
+        end)
+
+      {:ok,
+       %{
+         revision_id: revision_id,
+         fleet_generation_id: next_generation_id,
+         objectives: next_progress
+       }}
+    else
+      {:error, :invalid_objective_progress}
+    end
+  end
+
+  def advance_objective_progress(_revision, _progress, _next_generation_id),
+    do: {:error, :invalid_objective_progress}
 
   @doc "Mints a new Fleet Generation for the authenticated Operator."
   def mint(%Scope{operator: %Operator{id: operator_id}}, attrs) do
