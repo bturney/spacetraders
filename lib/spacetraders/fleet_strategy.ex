@@ -10,7 +10,15 @@ defmodule SpaceTraders.FleetStrategy do
   import Ecto.Query, warn: false
 
   alias SpaceTraders.Agent.{Operator, Scope}
-  alias SpaceTraders.FleetStrategy.{Revision, Strategy}
+
+  alias SpaceTraders.FleetStrategy.{
+    ObjectiveEvaluation,
+    PreferenceEvaluation,
+    Revision,
+    StandingAuthority,
+    Strategy
+  }
+
   alias SpaceTraders.Repo
 
   @presets [
@@ -58,6 +66,28 @@ defmodule SpaceTraders.FleetStrategy do
 
   @doc "Returns fully disclosed built-in Fleet Strategy presets."
   def presets, do: @presets
+
+  @doc "Evaluates one Strategic Objective from an immutable revision."
+  defdelegate evaluate_objective(revision, objective_index, facts),
+    to: ObjectiveEvaluation,
+    as: :evaluate
+
+  @doc "Binds one planner-supplied score to a Preference in an immutable revision."
+  defdelegate evaluate_preference(revision, preference_index, score),
+    to: PreferenceEvaluation,
+    as: :evaluate
+
+  @doc "Starts a new instance of one recurring Strategic Objective."
+  defdelegate advance_recurrence(revision, progress, objective_index, next_recurrence_id),
+    to: ObjectiveEvaluation
+
+  @doc "Checks possible consequence bounds against the active revision's Standing Authority."
+  def authorize(%Scope{} = scope, consequence_bounds) do
+    case get(scope).active_revision do
+      %Revision{} = revision -> StandingAuthority.authorize(revision, consequence_bounds)
+      nil -> {:error, :strategy_not_active}
+    end
+  end
 
   @doc "Returns the authenticated Operator's current draft and active revision."
   def get(%Scope{operator: %Operator{id: operator_id}}) do
@@ -330,11 +360,13 @@ defmodule SpaceTraders.FleetStrategy do
          "consequences" => consequences
        })
        when is_list(preferences) and is_binary(consequences) and consequences != "" do
-    if Enum.all?(objectives, &valid_objective?/1) and
-         Enum.all?(constraints ++ preferences, &(is_binary(&1) and &1 != "")) do
+    with true <- Enum.all?(objectives, &valid_objective?/1),
+         true <- Enum.all?(constraints ++ preferences, &(is_binary(&1) and &1 != "")),
+         :ok <- StandingAuthority.validate_constraints(constraints) do
       :ok
     else
-      {:error, :invalid_document}
+      false -> {:error, :invalid_document}
+      {:error, reason} -> {:error, reason}
     end
   end
 

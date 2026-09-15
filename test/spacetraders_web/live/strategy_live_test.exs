@@ -164,4 +164,28 @@ defmodule SpaceTradersWeb.StrategyLiveTest do
     assert projection.active_revision.id == active.id
     refute render(view) =~ "Review this draft before activation"
   end
+
+  test "explains why an unenforceable Hard Constraint cannot be activated", %{
+    conn: conn,
+    scope: scope
+  } do
+    {:ok, view, _html} = live(conn, ~p"/strategy")
+
+    view
+    |> form("#strategy-draft-form", %{
+      "strategy" => %{
+        "objectives" => "Grow credits | continuous | Measure growth | recurring",
+        "hard_constraints" => "Never pay more than 100 credits per unit of fuel",
+        "preferences" => "Prefer inexpensive fuel",
+        "consequences" => "Fuel purchases may be delayed"
+      }
+    })
+    |> render_change()
+
+    html = render_click(view, "activate")
+
+    assert html =~ "cannot be enforced"
+    assert html =~ "does not provide a conditional maximum price"
+    assert FleetStrategy.get(scope).active_revision == nil
+  end
 end
