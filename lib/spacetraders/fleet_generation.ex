@@ -14,7 +14,7 @@ defmodule SpaceTraders.FleetGeneration do
   alias SpaceTraders.Agent.{Agent, Operator, Scope}
   alias SpaceTraders.Fleet.{Ship, ShipServer}
   alias SpaceTraders.FleetStrategy.Revision
-  alias SpaceTraders.{Repo, Timeline}
+  alias SpaceTraders.{FleetStrategy, Repo, Timeline}
 
   defmodule CredentialReference do
     @moduledoc "A non-secret reference to an Operator's stored AccountToken."
@@ -62,11 +62,12 @@ defmodule SpaceTraders.FleetGeneration do
     do: {:error, :invalid_objective_progress}
 
   @doc "Mints a new Fleet Generation for the authenticated Operator."
-  def mint(%Scope{operator: %Operator{id: operator_id}}, attrs) do
+  def mint(%Scope{operator: %Operator{id: operator_id}} = scope, attrs) do
     changeset = Agent.changeset(%Agent{}, attrs)
     credential_ref = %CredentialReference{operator_id: operator_id}
 
     with :ok <- SpaceTraders.RuntimeAuthority.execution_allowed?(),
+         :ok <- FleetStrategy.mutation_allowed?(scope),
          :ok <- validate_mint_attrs(changeset),
          {:ok, operator, account_token} <- resolve_account_token(credential_ref),
          :ok <-
@@ -210,6 +211,7 @@ defmodule SpaceTraders.FleetGeneration do
              end
            end) do
       Enum.each(ship_symbols, &ShipServer.stop/1)
+      SpaceTraders.EmergencyStopAdmission.sync(operator.id)
       {:ok, %{agent: %{agent | agent_token: nil}, retired_symbols: retired_symbols}}
     end
   end

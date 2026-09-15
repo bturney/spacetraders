@@ -12,6 +12,25 @@ defmodule SpaceTradersWeb.StrategyLiveTest do
     assert {:error, {:redirect, %{to: "/operators/log-in"}}} = live(conn, ~p"/strategy")
   end
 
+  test "engages and explicitly resumes a durable Emergency Stop", %{
+    conn: conn,
+    scope: scope
+  } do
+    {:ok, view, _html} = live(conn, ~p"/strategy")
+
+    view |> element("#engage-emergency-stop") |> render_click()
+    assert render(view) =~ "Emergency Stop engaged"
+    assert %DateTime{} = FleetStrategy.get(scope).emergency_stopped_at
+
+    GenServer.stop(view.pid, :normal)
+    {:ok, reconnected, html} = live(conn, ~p"/strategy")
+    assert html =~ "Gameplay mutations are suppressed"
+
+    reconnected |> element("#resume-from-emergency-stop") |> render_click()
+    assert render(reconnected) =~ "Fresh planning is required"
+    assert FleetStrategy.get(scope).emergency_stopped_at == nil
+  end
+
   test "discloses each preset's ordered objectives, Hard Constraints, Preferences, and consequences",
        %{conn: conn} do
     {:ok, view, html} = live(conn, ~p"/strategy")

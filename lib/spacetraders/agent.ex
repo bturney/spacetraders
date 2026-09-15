@@ -114,9 +114,15 @@ defmodule SpaceTraders.Agent do
   actions and never leaves the database in plaintext (ADR 0006).
   """
   def link_account_token(%Operator{} = operator, account_token) when is_binary(account_token) do
-    operator
-    |> Operator.account_token_changeset(%{account_token: account_token})
-    |> Repo.update()
+    result =
+      operator
+      |> Operator.account_token_changeset(%{account_token: account_token})
+      |> Repo.update()
+
+    if match?({:ok, _operator}, result),
+      do: SpaceTraders.EmergencyStopAdmission.sync(operator.id)
+
+    result
   end
 
   @doc """
@@ -220,7 +226,8 @@ defmodule SpaceTraders.Agent do
           do: {:error, :agent_already_imported},
           else: {:error, changeset}
 
-      result ->
+      {:ok, _agent} = result ->
+        SpaceTraders.EmergencyStopAdmission.sync(operator.id)
         result
     end
   end
