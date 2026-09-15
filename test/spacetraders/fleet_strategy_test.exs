@@ -3,11 +3,242 @@ defmodule SpaceTraders.FleetStrategyTest do
 
   import SpaceTraders.AgentFixtures
 
+  alias SpaceTraders.Agent
   alias SpaceTraders.Agent.Scope
+  alias SpaceTraders.EmergencyStopAdmission
   alias SpaceTraders.FleetAllocation
+  alias SpaceTraders.Fleet
+  alias SpaceTraders.Fleet.{Intent, Intents, Job, Ship}
   alias SpaceTraders.FleetGeneration
   alias SpaceTraders.FleetStrategy
   alias SpaceTraders.FleetStrategy.Revision
+  alias SpaceTraders.Repo
+
+  test "Emergency Stop is durable and scoped to its Operator" do
+    scope = operator_fixture() |> Scope.for_operator()
+    other_scope = operator_fixture() |> Scope.for_operator()
+
+    assert {:ok, stopped} = FleetStrategy.engage_emergency_stop(scope)
+    assert %DateTime{} = stopped.emergency_stopped_at
+    assert stopped.emergency_stop_version == 1
+
+    assert FleetStrategy.get(scope).emergency_stopped_at == stopped.emergency_stopped_at
+    assert FleetStrategy.get(other_scope).emergency_stopped_at == nil
+
+    assert {:ok, reengaged} = FleetStrategy.engage_emergency_stop(scope)
+    assert reengaged.emergency_stop_version == stopped.emergency_stop_version + 1
+  end
+
+  test "resume rejects stale Operator state and keeps admission stopped for fresh planning" do
+    scope = operator_fixture() |> Scope.for_operator()
+
+    assert {:ok, stopped} = FleetStrategy.engage_emergency_stop(scope)
+    assert {:error, :emergency_stopped} = FleetStrategy.authorize(scope, %{})
+    assert {:error, :stale_emergency_stop} = FleetStrategy.resume(scope, 0)
+
+    assert {:ok, prepared} = FleetStrategy.resume(scope, stopped.emergency_stop_version)
+    assert prepared.emergency_stopped_at == stopped.emergency_stopped_at
+    assert %DateTime{} = prepared.emergency_resume_prepared_at
+    assert prepared.emergency_stop_version == stopped.emergency_stop_version + 1
+    assert {:error, :emergency_stopped} = FleetStrategy.authorize(scope, %{})
+
+    assert {:ok, stopped_again} = FleetStrategy.engage_emergency_stop(scope)
+    assert stopped_again.emergency_stop_version == prepared.emergency_stop_version + 1
+    assert stopped_again.emergency_resume_prepared_at == nil
+  end
+
+  test "fresh Fleet Allocation completes resume before mutation admission reopens" do
+    operator = operator_fixture()
+    scope = Scope.for_operator(operator)
+    agent = agent_fixture(operator, %{agent_token: "STOP_FRESH_PLAN_AGENT_TOKEN"})
+    revision = activate_document(scope, document("Grow credits", "No scrap"))
+
+    {:ok, evaluation} =
+      FleetStrategy.evaluate_objective(revision, 0, %{
+        change: 10,
+        elapsed_seconds: 10,
+        horizon_seconds: 60,
+        feasible?: true
+      })
+
+    stale_plan = %{
+      id: :pre_stop,
+      objective_evaluations: [evaluation],
+      preference_evaluations: [preference_evaluation(revision, 0, 1)],
+      safety: safety_bounds(revision, %{scraps_ship: false})
+    }
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      case conn.request_path do
+        "/v2/my/agent" ->
+          Req.Test.json(conn, %{
+            "data" => %{
+              "symbol" => agent.symbol,
+              "headquarters" => agent.headquarters,
+              "credits" => 175_000,
+              "startingFaction" => agent.faction,
+              "shipCount" => 0
+            }
+          })
+
+        "/v2/my/ships" ->
+          Req.Test.json(conn, %{"data" => []})
+      end
+    end)
+
+    assert {:ok, stopped} = FleetStrategy.engage_emergency_stop(scope)
+    assert {:ok, prepared} = FleetStrategy.resume(scope, stopped.emergency_stop_version)
+
+    assert {:error, :emergency_stopped} =
+             EmergencyStopAdmission.mutation_allowed?(agent.agent_token)
+
+    assert {:error, :fresh_plan_required} =
+             FleetAllocation.complete_emergency_stop_resume(
+               scope,
+               [stale_plan],
+               prepared.emergency_stop_version
+             )
+
+    fresh_plan = %{
+      id: :post_stop,
+      objective_evaluations: [evaluation],
+      preference_evaluations: [preference_evaluation(revision, 0, 1)],
+      safety: safety_bounds(revision, %{scraps_ship: false})
+    }
+
+    assert {:ok, %{strategy: resumed, ranking: %{admissible: [^fresh_plan]}}} =
+             FleetAllocation.complete_emergency_stop_resume(
+               scope,
+               [fresh_plan],
+               prepared.emergency_stop_version
+             )
+
+    assert resumed.emergency_stopped_at == nil
+    assert resumed.emergency_resume_prepared_at == nil
+    assert :ok = EmergencyStopAdmission.mutation_allowed?(agent.agent_token)
+  end
+
+  test "resume discards stale work but preserves in-flight mutation evidence for reconciliation" do
+    operator = operator_fixture()
+    scope = Scope.for_operator(operator)
+    agent = agent_fixture(operator, %{agent_token: "STOP_DISCARD_AGENT_TOKEN"})
+
+    queued_ship =
+      Repo.insert!(%Ship{symbol: "QUEUED-1", ship_type: "SHIP_PROBE", agent_id: agent.id})
+
+    in_flight_ship =
+      Repo.insert!(%Ship{symbol: "IN-FLIGHT-1", ship_type: "SHIP_PROBE", agent_id: agent.id})
+
+    Repo.insert!(%Job{
+      type: "explorer",
+      status: "active",
+      extraction_waypoint: "X1-UX81-A1",
+      market_waypoint: "X1-UX81-A1",
+      cargo_threshold: 1,
+      ship_id: queued_ship.id
+    })
+
+    queued_intent =
+      Repo.insert!(%Intent{ship_id: queued_ship.id, target_waypoint: "X1-UX81-A2"})
+
+    in_flight_intent =
+      Repo.insert!(%Intent{
+        ship_id: in_flight_ship.id,
+        target_waypoint: "X1-UX81-A2",
+        status: "waiting",
+        in_flight_action: %{"kind" => "navigate"}
+      })
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      case conn.request_path do
+        "/v2/my/agent" ->
+          Req.Test.json(conn, %{
+            "data" => %{
+              "symbol" => agent.symbol,
+              "headquarters" => agent.headquarters,
+              "credits" => 175_000,
+              "startingFaction" => agent.faction,
+              "shipCount" => 2
+            }
+          })
+
+        "/v2/my/ships" ->
+          Req.Test.json(conn, %{"data" => []})
+      end
+    end)
+
+    assert {:ok, stopped} = FleetStrategy.engage_emergency_stop(scope)
+
+    assert {:error, :reconciliation_required} =
+             FleetStrategy.resume(scope, stopped.emergency_stop_version)
+
+    assert FleetStrategy.get(scope).emergency_stopped_at == stopped.emergency_stopped_at
+    assert Fleet.ship_job(agent, queued_ship.symbol).status == "active"
+    assert Enum.any?(Intents.current(agent), &(&1.id == queued_intent.id))
+    assert Enum.any?(Intents.current(agent), &(&1.id == in_flight_intent.id))
+
+    Repo.update!(
+      Ecto.Changeset.change(in_flight_intent,
+        status: "completed",
+        in_flight_action: nil,
+        finished_at: DateTime.utc_now(:second)
+      )
+    )
+
+    assert {:ok, prepared} = FleetStrategy.resume(scope, stopped.emergency_stop_version)
+    assert %DateTime{} = prepared.emergency_resume_prepared_at
+    assert %DateTime{} = prepared.emergency_stopped_at
+    assert Fleet.ship_job(agent, queued_ship.symbol) == nil
+    assert [%Job{status: "stopped"}] = Fleet.ship_job_history(agent, queued_ship.symbol)
+
+    assert Enum.any?(
+             Intents.history(agent),
+             &(&1.id == queued_intent.id and &1.status == "superseded")
+           )
+  end
+
+  test "credential replacement cannot release an in-flight token during Emergency Stop" do
+    operator = operator_fixture()
+    scope = Scope.for_operator(operator)
+    old_token = "STOP_OLD_ACCOUNT_TOKEN"
+    new_token = "STOP_NEW_ACCOUNT_TOKEN"
+
+    assert {:ok, operator} = Agent.link_account_token(operator, old_token)
+    assert {:ok, _stopped} = FleetStrategy.engage_emergency_stop(scope)
+    assert {:ok, _operator} = Agent.link_account_token(operator, new_token)
+    assert {:ok, _reengaged} = FleetStrategy.engage_emergency_stop(scope)
+
+    assert {:error, :emergency_stopped} = EmergencyStopAdmission.mutation_allowed?(old_token)
+    assert {:error, :emergency_stopped} = EmergencyStopAdmission.mutation_allowed?(new_token)
+  end
+
+  test "Emergency Stop admission reconstructs from durable state after process restart" do
+    operator = operator_fixture()
+    scope = Scope.for_operator(operator)
+    agent = agent_fixture(operator, %{agent_token: "STOP_RESTART_AGENT_TOKEN"})
+
+    assert {:ok, _stopped} = FleetStrategy.engage_emergency_stop(scope)
+    assert :ok = Supervisor.terminate_child(SpaceTraders.Supervisor, EmergencyStopAdmission)
+    assert {:ok, _pid} = Supervisor.restart_child(SpaceTraders.Supervisor, EmergencyStopAdmission)
+
+    assert {:error, :emergency_stopped} =
+             EmergencyStopAdmission.mutation_allowed?(agent.agent_token)
+  end
+
+  test "resume keeps mutations stopped until authoritative refresh succeeds" do
+    operator = operator_fixture()
+    scope = Scope.for_operator(operator)
+    agent = agent_fixture(operator, %{agent_token: "STOP_REFRESH_AGENT_TOKEN"})
+    assert {:ok, stopped} = FleetStrategy.engage_emergency_stop(scope)
+
+    Req.Test.stub(SpaceTraders.API, fn conn -> Req.Test.transport_error(conn, :timeout) end)
+
+    assert {:error, :authoritative_refresh_required} =
+             FleetStrategy.resume(scope, stopped.emergency_stop_version)
+
+    assert {:error, :emergency_stopped} =
+             SpaceTraders.API.accept_contract(agent.agent_token, "contract-1")
+  end
 
   test "presets disclose ordered objectives, Hard Constraints, Preferences, and consequences" do
     assert [preset | _] = FleetStrategy.presets()

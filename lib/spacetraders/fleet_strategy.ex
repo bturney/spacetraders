@@ -9,7 +9,10 @@ defmodule SpaceTraders.FleetStrategy do
 
   import Ecto.Query, warn: false
 
-  alias SpaceTraders.Agent.{Operator, Scope}
+  alias SpaceTraders.Agent.{Agent, Operator, Scope}
+  alias SpaceTraders.EmergencyStopAdmission
+  alias SpaceTraders.Evidence
+  alias SpaceTraders.Fleet
 
   alias SpaceTraders.FleetStrategy.{
     ObjectiveEvaluation,
@@ -83,9 +86,163 @@ defmodule SpaceTraders.FleetStrategy do
 
   @doc "Checks possible consequence bounds against the active revision's Standing Authority."
   def authorize(%Scope{} = scope, consequence_bounds) do
-    case get(scope).active_revision do
-      %Revision{} = revision -> StandingAuthority.authorize(revision, consequence_bounds)
-      nil -> {:error, :strategy_not_active}
+    with :ok <- mutation_allowed?(scope) do
+      case get(scope).active_revision do
+        %Revision{} = revision -> StandingAuthority.authorize(revision, consequence_bounds)
+        nil -> {:error, :strategy_not_active}
+      end
+    end
+  end
+
+  @doc "Durably suppresses every new gameplay mutation for the authenticated Operator."
+  def engage_emergency_stop(%Scope{operator: %Operator{id: operator_id}} = scope) do
+    :global.trans({{__MODULE__, :emergency_stop, operator_id}, self()}, fn ->
+      do_engage_emergency_stop(scope, operator_id)
+    end)
+  end
+
+  defp do_engage_emergency_stop(scope, operator_id) do
+    now = DateTime.utc_now()
+    admission_guard = EmergencyStopAdmission.block(operator_id)
+
+    result =
+      Repo.transaction(fn ->
+        %Strategy{}
+        |> Strategy.changeset(%{operator_id: operator_id})
+        |> Repo.insert(on_conflict: :nothing, conflict_target: :operator_id)
+
+        Repo.update_all(
+          from(strategy in Strategy, where: strategy.operator_id == ^operator_id),
+          inc: [emergency_stop_version: 1],
+          set: [
+            emergency_stopped_at: now,
+            emergency_resume_prepared_at: nil,
+            updated_at: DateTime.utc_now(:second)
+          ]
+        )
+
+        get(scope)
+      end)
+
+    if match?({:ok, _projection}, result) do
+      {:ok, projection} = result
+
+      :ok =
+        EmergencyStopAdmission.engage(
+          operator_id,
+          projection.emergency_stop_version,
+          admission_guard
+        )
+
+      broadcast_update(scope)
+    else
+      EmergencyStopAdmission.cancel_block(operator_id, admission_guard)
+    end
+
+    result
+  end
+
+  @doc "Refreshes game truth and retires stale work while mutation admission remains stopped."
+  def resume(
+        %Scope{operator: %Operator{id: operator_id}} = scope,
+        expected_emergency_stop_version
+      )
+      when is_integer(expected_emergency_stop_version) do
+    :global.trans({{__MODULE__, :emergency_stop, operator_id}, self()}, fn ->
+      do_resume(scope, operator_id, expected_emergency_stop_version)
+    end)
+  end
+
+  defp do_resume(scope, operator_id, expected_emergency_stop_version) do
+    with :ok <- Evidence.refresh_for_emergency_stop_resume(scope) do
+      result =
+        Repo.transaction(fn ->
+          prepared_at = DateTime.utc_now()
+          now = DateTime.truncate(prepared_at, :second)
+
+          {updated, _rows} =
+            Repo.update_all(
+              from(strategy in Strategy,
+                where:
+                  strategy.operator_id == ^operator_id and
+                    strategy.emergency_stop_version == ^expected_emergency_stop_version and
+                    not is_nil(strategy.emergency_stopped_at)
+              ),
+              inc: [emergency_stop_version: 1],
+              set: [emergency_resume_prepared_at: prepared_at, updated_at: now]
+            )
+
+          if updated != 1, do: Repo.rollback(:stale_emergency_stop)
+
+          if Fleet.prepare_emergency_stop_resume(operator_id, now) != :ok,
+            do: Repo.rollback(:reconciliation_required)
+
+          get(scope)
+        end)
+
+      if match?({:ok, _projection}, result) do
+        broadcast_update(scope)
+      end
+
+      result
+    end
+  end
+
+  @doc false
+  def complete_emergency_stop_resume(
+        %Scope{operator: %Operator{id: operator_id}} = scope,
+        expected_emergency_stop_version
+      ) do
+    :global.trans({{__MODULE__, :emergency_stop, operator_id}, self()}, fn ->
+      now = DateTime.utc_now(:second)
+
+      {updated, _rows} =
+        Repo.update_all(
+          from(strategy in Strategy,
+            where:
+              strategy.operator_id == ^operator_id and
+                strategy.emergency_stop_version == ^expected_emergency_stop_version and
+                not is_nil(strategy.emergency_stopped_at) and
+                not is_nil(strategy.emergency_resume_prepared_at)
+          ),
+          inc: [emergency_stop_version: 1],
+          set: [
+            emergency_stopped_at: nil,
+            emergency_resume_prepared_at: nil,
+            updated_at: now
+          ]
+        )
+
+      if updated == 1 do
+        projection = get(scope)
+        :ok = EmergencyStopAdmission.resume(operator_id, projection.emergency_stop_version)
+        broadcast_update(scope)
+        {:ok, projection}
+      else
+        {:error, :stale_emergency_stop}
+      end
+    end)
+  end
+
+  @doc "Returns whether Emergency Stop permits a new gameplay mutation."
+  def mutation_allowed?(%Scope{operator: %Operator{id: operator_id}}),
+    do: mutation_allowed_for_operator?(operator_id)
+
+  def mutation_allowed?(%Agent{operator_id: operator_id}),
+    do: mutation_allowed_for_operator?(operator_id)
+
+  defp mutation_allowed_for_operator?(nil), do: :ok
+
+  defp mutation_allowed_for_operator?(operator_id) do
+    if Repo.exists?(
+         from(strategy in Strategy,
+           where:
+             strategy.operator_id == ^operator_id and not is_nil(strategy.emergency_stopped_at)
+         )
+       ) do
+      {:error, :emergency_stopped}
+    else
+      :ok
     end
   end
 
@@ -93,14 +250,25 @@ defmodule SpaceTraders.FleetStrategy do
   def get(%Scope{operator: %Operator{id: operator_id}}) do
     case Repo.get_by(Strategy, operator_id: operator_id) do
       nil ->
-        %{draft: nil, draft_source: nil, draft_version: 0, active_revision: nil}
+        %{
+          draft: nil,
+          draft_source: nil,
+          draft_version: 0,
+          active_revision: nil,
+          emergency_stopped_at: nil,
+          emergency_resume_prepared_at: nil,
+          emergency_stop_version: 0
+        }
 
       strategy ->
         %{
           draft: strategy.draft_document,
           draft_source: strategy.draft_source,
           draft_version: strategy.draft_version,
-          active_revision: active_revision(strategy)
+          active_revision: active_revision(strategy),
+          emergency_stopped_at: strategy.emergency_stopped_at,
+          emergency_resume_prepared_at: strategy.emergency_resume_prepared_at,
+          emergency_stop_version: strategy.emergency_stop_version
         }
     end
   end
@@ -349,7 +517,10 @@ defmodule SpaceTraders.FleetStrategy do
       draft: Map.get(overrides, :draft_document, strategy.draft_document),
       draft_source: Map.get(overrides, :draft_source, strategy.draft_source),
       draft_version: Map.get(overrides, :draft_version, strategy.draft_version),
-      active_revision: active_revision(strategy)
+      active_revision: active_revision(strategy),
+      emergency_stopped_at: strategy.emergency_stopped_at,
+      emergency_resume_prepared_at: strategy.emergency_resume_prepared_at,
+      emergency_stop_version: strategy.emergency_stop_version
     }
   end
 

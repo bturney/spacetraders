@@ -79,6 +79,11 @@ defmodule SpaceTraders.API do
           {:ok, term()}
           | {:error, SpaceTraders.API.GameplayError.t() | SpaceTraders.API.Error.t()}
 
+  defmodule MutationSuppressedError do
+    @moduledoc false
+    defexception [:reason, message: "gameplay mutation suppressed"]
+  end
+
   @doc "GET / — server status and global data."
   @spec get_status() :: result()
   def get_status do
@@ -525,7 +530,7 @@ defmodule SpaceTraders.API do
   ## Request plumbing
 
   defp request(method, path, token, opts) do
-    with :ok <- mutation_authorized?(method) do
+    with :ok <- mutation_authorized?(method, token) do
       do_request(method, path, token, opts)
     end
   end
@@ -535,7 +540,7 @@ defmodule SpaceTraders.API do
 
     # Admission can wait for capacity. Recheck immediately before each network
     # dispatch so a runtime that lost its PostgreSQL lock cannot mutate.
-    with :ok <- mutation_authorized?(method) do
+    with :ok <- mutation_authorized?(method, token) do
       send_request(method, path, token, opts)
     end
   end
@@ -548,6 +553,11 @@ defmodule SpaceTraders.API do
         |> maybe_put(opts, :json)
         |> maybe_put(opts, :params)
         |> maybe_put_retry(opts)
+      )
+      |> Req.Request.append_request_steps(
+        spacetraders_mutation_admission: fn request ->
+          authorize_dispatch(request, method, token)
+        end
       )
 
     case Req.request(req) do
@@ -563,23 +573,52 @@ defmodule SpaceTraders.API do
         end
 
       {:ok, %{status: status, body: body}} when status in 400..499 ->
-        emit_request_metric(path, status)
-        {:error, gameplay_error(status, SpaceTraders.Observability.redact(body, token))}
+        case mutation_authorized_after_response(status, method, token) do
+          :ok ->
+            emit_request_metric(path, status)
+            {:error, gameplay_error(status, SpaceTraders.Observability.redact(body, token))}
+
+          {:error, reason} ->
+            {:error, reason}
+        end
 
       {:ok, %{status: status}} ->
         emit_request_metric(path, status)
         {:error, SpaceTraders.API.Error.new(status, "unexpected response")}
 
       {:error, reason} ->
-        emit_request_metric(path, "unknown")
+        case reason do
+          %MutationSuppressedError{reason: suppression_reason} ->
+            {:error, suppression_reason}
 
-        {:error,
-         SpaceTraders.API.Error.transport(SpaceTraders.Observability.redact(reason, token))}
+          reason ->
+            emit_request_metric(path, "unknown")
+
+            {:error,
+             SpaceTraders.API.Error.transport(SpaceTraders.Observability.redact(reason, token))}
+        end
     end
   end
 
-  defp mutation_authorized?(:get), do: :ok
-  defp mutation_authorized?(_method), do: SpaceTraders.RuntimeAuthority.execution_allowed?()
+  defp authorize_dispatch(request, method, token) do
+    case mutation_authorized?(method, token) do
+      :ok -> request
+      {:error, reason} -> Req.Request.halt(request, %MutationSuppressedError{reason: reason})
+    end
+  end
+
+  defp mutation_authorized?(:get, _token), do: :ok
+
+  defp mutation_authorized?(_method, token) do
+    with :ok <- SpaceTraders.RuntimeAuthority.execution_allowed?() do
+      SpaceTraders.EmergencyStopAdmission.mutation_allowed?(token)
+    end
+  end
+
+  defp mutation_authorized_after_response(429, method, token),
+    do: mutation_authorized?(method, token)
+
+  defp mutation_authorized_after_response(_status, _method, _token), do: :ok
 
   defp emit_request_metric(path, status) do
     SpaceTraders.Observability.api_request(path, status)
@@ -590,7 +629,7 @@ defmodule SpaceTraders.API do
       base_url: base_url(),
       method: method,
       url: path,
-      retry: retry_strategy(method, path),
+      retry: retry_strategy(method, path, token),
       retry_log_level: false
     ] ++ maybe_auth(token)
   end
@@ -620,11 +659,11 @@ defmodule SpaceTraders.API do
   # A 429 proves the game rejected the request before applying it, so every
   # method can safely honor Retry-After. Other mutation failures are ambiguous:
   # their caller persists action evidence and reconciles before any retry.
-  defp retry_strategy(method, path),
-    do: fn request, response -> retry(request, response, path, method) end
+  defp retry_strategy(method, path, token),
+    do: fn request, response -> retry(request, response, path, method, token) end
 
-  defp retry(_request, %Req.Response{status: 429} = response, path, method) do
-    if mutation_authorized?(method) != :ok do
+  defp retry(_request, %Req.Response{status: 429} = response, path, method, token) do
+    if mutation_authorized?(method, token) != :ok do
       false
     else
       emit_request_metric(path, 429)
@@ -636,17 +675,18 @@ defmodule SpaceTraders.API do
     end
   end
 
-  defp retry(_request, %Req.Response{status: status}, path, :get) when status in 500..599 do
+  defp retry(_request, %Req.Response{status: status}, path, :get, _token)
+       when status in 500..599 do
     emit_request_metric(path, status)
     true
   end
 
-  defp retry(_request, %Req.TransportError{}, path, :get) do
+  defp retry(_request, %Req.TransportError{}, path, :get, _token) do
     emit_request_metric(path, "unknown")
     true
   end
 
-  defp retry(_request, _response, _path, _method), do: false
+  defp retry(_request, _response, _path, _method, _token), do: false
 
   defp base_url do
     Application.get_env(:spacetraders, __MODULE__, [])

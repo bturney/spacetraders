@@ -38,9 +38,16 @@ defmodule SpaceTraders.DataCase do
 
   @doc """
   Sets up the sandbox based on the test tags.
+
+  The Emergency Stop admission cache is cleared after every test sandbox closes;
+  otherwise a stop engaged inside one test's transaction would keep blocking
+  later tests that reuse the same token literals.
   """
   def setup_sandbox(tags) do
     pid = Ecto.Adapters.SQL.Sandbox.start_owner!(SpaceTraders.Repo, shared: not tags[:async])
+
+    on_exit(fn -> SpaceTraders.EmergencyStopAdmission.clear() end)
+
     on_exit(fn -> Ecto.Adapters.SQL.Sandbox.stop_owner(pid) end)
   end
 

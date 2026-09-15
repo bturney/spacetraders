@@ -114,9 +114,15 @@ defmodule SpaceTraders.Agent do
   actions and never leaves the database in plaintext (ADR 0006).
   """
   def link_account_token(%Operator{} = operator, account_token) when is_binary(account_token) do
-    operator
-    |> Operator.account_token_changeset(%{account_token: account_token})
-    |> Repo.update()
+    result =
+      operator
+      |> Operator.account_token_changeset(%{account_token: account_token})
+      |> Repo.update()
+
+    if match?({:ok, _operator}, result),
+      do: SpaceTraders.EmergencyStopAdmission.track_credential(operator.id, account_token)
+
+    result
   end
 
   @doc """
@@ -214,27 +220,39 @@ defmodule SpaceTraders.Agent do
   end
 
   defp create_imported_agent(operator, game_agent, agent_token) do
-    case create_agent(operator, game_agent, agent_token, game_agent.starting_faction) do
+    case store_agent(operator, game_agent, agent_token, game_agent.starting_faction) do
       {:error, %Ecto.Changeset{} = changeset} ->
         if Keyword.has_key?(changeset.errors, :symbol),
           do: {:error, :agent_already_imported},
           else: {:error, changeset}
 
-      result ->
+      {:ok, _agent} = result ->
         result
     end
   end
 
-  defp create_agent(operator, %GameAgent{} = game_agent, agent_token, requested_faction) do
-    %Agent{}
-    |> Agent.changeset(%{
-      symbol: game_agent.symbol,
-      faction: game_agent.starting_faction || requested_faction
-    })
-    |> Ecto.Changeset.put_change(:headquarters, game_agent.headquarters)
-    |> Ecto.Changeset.put_change(:agent_token, agent_token)
-    |> Ecto.Changeset.put_change(:operator_id, operator.id)
-    |> Repo.insert()
+  @doc false
+  def store_agent(
+        %Operator{} = operator,
+        %GameAgent{} = game_agent,
+        agent_token,
+        requested_faction
+      ) do
+    result =
+      %Agent{}
+      |> Agent.changeset(%{
+        symbol: game_agent.symbol,
+        faction: game_agent.starting_faction || requested_faction
+      })
+      |> Ecto.Changeset.put_change(:headquarters, game_agent.headquarters)
+      |> Ecto.Changeset.put_change(:agent_token, agent_token)
+      |> Ecto.Changeset.put_change(:operator_id, operator.id)
+      |> Repo.insert()
+
+    if match?({:ok, _agent}, result),
+      do: SpaceTraders.EmergencyStopAdmission.track_credential(operator.id, agent_token)
+
+    result
   end
 
   @doc """

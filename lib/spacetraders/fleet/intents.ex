@@ -41,6 +41,58 @@ defmodule SpaceTraders.Fleet.Intents do
     defstruct [:recipient, :trade_good, :quantity]
   end
 
+  @doc false
+  def emergency_stop_reconciled?(ship_ids) when is_list(ship_ids) do
+    unfinished_states = Intent.unfinished_states()
+
+    not Repo.exists?(
+      from intent in Intent,
+        where:
+          intent.ship_id in ^ship_ids and intent.status in ^unfinished_states and
+            not is_nil(intent.in_flight_action)
+    )
+  end
+
+  @doc false
+  def censor_reset_generation(ship_ids, now) when is_list(ship_ids) do
+    if ship_ids != [] do
+      unfinished_states = Intent.unfinished_states()
+
+      Repo.update_all(
+        from(intent in Intent,
+          where:
+            intent.ship_id in ^ship_ids and intent.status in ^unfinished_states and
+              not is_nil(intent.in_flight_action)
+        ),
+        set: [
+          status: "superseded",
+          in_flight_action: nil,
+          last_action_result: %{"outcome" => "reset_censored"},
+          finished_at: now,
+          updated_at: now
+        ]
+      )
+    end
+
+    :ok
+  end
+
+  @doc false
+  def supersede_for_emergency_stop(ship_ids, now) when is_list(ship_ids) do
+    if ship_ids != [] do
+      unfinished_states = Intent.unfinished_states()
+
+      Repo.update_all(
+        from(intent in Intent,
+          where: intent.ship_id in ^ship_ids and intent.status in ^unfinished_states
+        ),
+        set: [status: "superseded", finished_at: now, updated_at: now]
+      )
+    end
+
+    :ok
+  end
+
   defmodule ContractRecipient do
     @moduledoc "A typed Contract recipient for Deliver Goods."
     defstruct [:contract_id, :waypoint]

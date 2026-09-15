@@ -14,7 +14,7 @@ defmodule SpaceTraders.FleetGeneration do
   alias SpaceTraders.Agent.{Agent, Operator, Scope}
   alias SpaceTraders.Fleet.{Ship, ShipServer}
   alias SpaceTraders.FleetStrategy.Revision
-  alias SpaceTraders.{Repo, Timeline}
+  alias SpaceTraders.{FleetStrategy, Repo, Timeline}
 
   defmodule CredentialReference do
     @moduledoc "A non-secret reference to an Operator's stored AccountToken."
@@ -62,11 +62,12 @@ defmodule SpaceTraders.FleetGeneration do
     do: {:error, :invalid_objective_progress}
 
   @doc "Mints a new Fleet Generation for the authenticated Operator."
-  def mint(%Scope{operator: %Operator{id: operator_id}}, attrs) do
+  def mint(%Scope{operator: %Operator{id: operator_id}} = scope, attrs) do
     changeset = Agent.changeset(%Agent{}, attrs)
     credential_ref = %CredentialReference{operator_id: operator_id}
 
     with :ok <- SpaceTraders.RuntimeAuthority.execution_allowed?(),
+         :ok <- FleetStrategy.mutation_allowed?(scope),
          :ok <- validate_mint_attrs(changeset),
          {:ok, operator, account_token} <- resolve_account_token(credential_ref),
          :ok <-
@@ -177,18 +178,6 @@ defmodule SpaceTraders.FleetGeneration do
     end
   end
 
-  defp create_agent(operator, %GameAgent{} = game_agent, agent_token, requested_faction) do
-    %Agent{}
-    |> Agent.changeset(%{
-      symbol: game_agent.symbol,
-      faction: game_agent.starting_faction || requested_faction
-    })
-    |> Ecto.Changeset.put_change(:headquarters, game_agent.headquarters)
-    |> Ecto.Changeset.put_change(:agent_token, agent_token)
-    |> Ecto.Changeset.put_change(:operator_id, operator.id)
-    |> Repo.insert()
-  end
-
   defp replace_stale_agent_and_create(operator, game_agent, agent_token, faction) do
     with {:ok, {agent, retired_symbols, ship_symbols}} <-
            Repo.transaction(fn ->
@@ -199,7 +188,7 @@ defmodule SpaceTraders.FleetGeneration do
                |> Enum.unzip()
                |> then(fn {symbols, ships} -> {List.flatten(symbols), List.flatten(ships)} end)
 
-             case create_agent(operator, game_agent, agent_token, faction) do
+             case SpaceTraders.Agent.store_agent(operator, game_agent, agent_token, faction) do
                {:ok, agent} ->
                  {agent, retired_symbols, ship_symbols}
 
