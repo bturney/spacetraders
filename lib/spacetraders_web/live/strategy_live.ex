@@ -103,7 +103,7 @@ defmodule SpaceTradersWeb.StrategyLive do
               type="textarea"
               label="Objectives in Strategic Priority order"
               rows="4"
-              placeholder="Outcome | evaluation rule | recurring"
+              placeholder="Outcome | continuous | evaluation rule | recurring"
             />
             <.input
               field={@form[:hard_constraints]}
@@ -129,10 +129,30 @@ defmodule SpaceTradersWeb.StrategyLive do
           </.form>
 
           <div :if={@projection.draft} class="mt-6 border-t border-base-300 pt-6">
+            <div :if={@projection.active_revision} class="mb-6 rounded-xl bg-base-200 p-4">
+              <h3 class="text-lg font-bold">Revision changes</h3>
+              <div class="mt-3 grid gap-5 lg:grid-cols-2">
+                <div>
+                  <p class="eyebrow">Current active</p>
+                  <.strategy_document document={@projection.active_revision.document} />
+                </div>
+                <div>
+                  <p class="eyebrow">Proposed draft</p>
+                  <.strategy_document document={@projection.draft} />
+                </div>
+              </div>
+            </div>
             <.strategy_document document={@projection.draft} />
             <div class="mt-6 flex flex-col-reverse gap-3 sm:flex-row sm:justify-end">
               <button id="discard-strategy-draft" phx-click="discard_draft" class="btn btn-ghost">Discard draft</button>
-              <button id="activate-strategy" phx-click="activate" class="btn btn-primary">Activate this exact revision</button>
+              <button
+                id="activate-strategy"
+                phx-click="activate"
+                phx-value-version={@projection.draft_version}
+                class="btn btn-primary"
+              >
+                Activate this exact revision
+              </button>
             </div>
           </div>
         </section>
@@ -171,8 +191,10 @@ defmodule SpaceTradersWeb.StrategyLive do
      |> assign_projection()}
   end
 
-  def handle_event("activate", _params, socket) do
-    case FleetStrategy.activate(socket.assigns.current_scope) do
+  def handle_event("activate", %{"version" => version}, socket) do
+    {expected_version, ""} = Integer.parse(version)
+
+    case FleetStrategy.activate(socket.assigns.current_scope, expected_version) do
       {:ok, revision} ->
         {:noreply,
          socket
@@ -185,13 +207,19 @@ defmodule SpaceTradersWeb.StrategyLive do
 
       {:error, :draft_not_found} ->
         {:noreply, put_flash(socket, :error, "There is no draft to activate.")}
+
+      {:error, :stale_draft} ->
+        {:noreply,
+         socket
+         |> put_flash(:error, "The draft changed. Review the latest version before activation.")
+         |> assign_projection()}
     end
   end
 
   @impl true
   def handle_info({:fleet_strategy_updated, operator_id}, socket) do
     if socket.assigns.current_scope.operator.id == operator_id do
-      {:noreply, assign_projection(socket, socket.assigns.form_drafts)}
+      {:noreply, assign_projection(socket)}
     else
       {:noreply, socket}
     end
@@ -207,7 +235,11 @@ defmodule SpaceTradersWeb.StrategyLive do
         <ol class="mt-2 list-inside list-decimal space-y-2">
           <li :for={objective <- @preset.objectives}>
             <strong>{objective["objective"]}</strong>
-            <span class="block pl-5 opacity-70">{objective["evaluation"]}</span>
+            <span class="block pl-5 opacity-70">
+              {kind_label(objective["kind"])} / {objective["evaluation"]} / {scope_label(
+                objective["scope"]
+              )}
+            </span>
           </li>
         </ol>
       </div>
@@ -232,7 +264,9 @@ defmodule SpaceTradersWeb.StrategyLive do
           <li :for={objective <- @document["objectives"] || []}>
             <strong>{objective_name(objective)}</strong>
             <span :if={is_map(objective)} class="block pl-5 opacity-70">
-              {objective["evaluation"]} / {scope_label(objective["scope"])}
+              {kind_label(objective["kind"])} / {objective["evaluation"]} / {scope_label(
+                objective["scope"]
+              )}
             </span>
           </li>
         </ol>
@@ -308,20 +342,33 @@ defmodule SpaceTradersWeb.StrategyLive do
   defp scope_label("recurring"), do: "Recurring"
   defp scope_label(_scope), do: "Scope not yet specified"
 
+  defp kind_label("attain"), do: "Attain"
+  defp kind_label("maintain"), do: "Maintain"
+  defp kind_label("continuous"), do: "Continuous"
+  defp kind_label(_kind), do: "Kind not yet specified"
+
   defp objective_line(objective) do
     Enum.join(
-      [objective["objective"] || "", objective["evaluation"] || "", objective["scope"] || ""],
+      [
+        objective["objective"] || "",
+        objective["kind"] || "",
+        objective["evaluation"] || "",
+        objective["scope"] || ""
+      ],
       " | "
     )
   end
 
   defp objective_from_line(line) do
-    case line |> String.split("|", parts: 3) |> Enum.map(&String.trim/1) do
-      [objective, evaluation, scope] ->
-        %{"objective" => objective, "evaluation" => evaluation, "scope" => scope}
+    case line |> String.split("|", parts: 4) |> Enum.map(&String.trim/1) do
+      [objective, kind, evaluation, scope] ->
+        %{"objective" => objective, "kind" => kind, "evaluation" => evaluation, "scope" => scope}
 
-      [objective, evaluation] ->
-        %{"objective" => objective, "evaluation" => evaluation}
+      [objective, kind, evaluation] ->
+        %{"objective" => objective, "kind" => kind, "evaluation" => evaluation}
+
+      [objective, kind] ->
+        %{"objective" => objective, "kind" => kind}
 
       [objective] ->
         %{"objective" => objective}

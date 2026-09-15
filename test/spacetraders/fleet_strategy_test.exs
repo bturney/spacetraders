@@ -14,6 +14,7 @@ defmodule SpaceTraders.FleetStrategyTest do
              objectives: [
                %{
                  "objective" => "Grow credits",
+                 "kind" => "continuous",
                  "evaluation" => "Maximize net credit growth over time",
                  "scope" => "recurring"
                }
@@ -34,7 +35,7 @@ defmodule SpaceTraders.FleetStrategyTest do
     assert {:ok, %{draft: ^original, active_revision: nil}} =
              FleetStrategy.save_draft(scope, original)
 
-    assert {:ok, revision} = FleetStrategy.activate(scope)
+    assert {:ok, revision} = FleetStrategy.activate(scope, FleetStrategy.get(scope).draft_version)
     assert revision.number == 1
     assert revision.document == original
 
@@ -51,7 +52,7 @@ defmodule SpaceTraders.FleetStrategyTest do
     active_document = document("Grow credits", "Keep 50,000 credits available")
 
     assert {:ok, _draft} = FleetStrategy.save_draft(scope, active_document)
-    assert {:ok, revision} = FleetStrategy.activate(scope)
+    assert {:ok, revision} = FleetStrategy.activate(scope, FleetStrategy.get(scope).draft_version)
 
     assert {:ok, _draft} =
              FleetStrategy.save_draft(scope, document("Chart waypoints", "No scrap"))
@@ -69,7 +70,7 @@ defmodule SpaceTraders.FleetStrategyTest do
              FleetStrategy.save_draft(owner_scope, document("Grow credits", "No scrap"))
 
     assert %{draft: nil, active_revision: nil} = FleetStrategy.get(other_scope)
-    assert {:error, :draft_not_found} = FleetStrategy.activate(other_scope)
+    assert {:error, :draft_not_found} = FleetStrategy.activate(other_scope, 0)
   end
 
   test "preset selection cannot silently replace an existing draft" do
@@ -98,13 +99,32 @@ defmodule SpaceTraders.FleetStrategyTest do
                "consequences" => "Not yet specified"
              })
 
-    assert {:error, :invalid_document} = FleetStrategy.activate(scope)
+    assert {:error, :invalid_document} =
+             FleetStrategy.activate(scope, FleetStrategy.get(scope).draft_version)
+  end
+
+  test "activation rejects a stale draft version" do
+    scope = operator_fixture() |> Scope.for_operator()
+
+    assert {:ok, first} = FleetStrategy.save_draft(scope, document("Grow credits", "No scrap"))
+
+    assert {:ok, current} =
+             FleetStrategy.save_draft(scope, document("Chart waypoints", "No scrap"))
+
+    assert current.draft_version > first.draft_version
+    assert {:error, :stale_draft} = FleetStrategy.activate(scope, first.draft_version)
+    assert FleetStrategy.get(scope).active_revision == nil
   end
 
   defp document(objective, constraint) do
     %{
       "objectives" => [
-        %{"objective" => objective, "evaluation" => "Measure progress", "scope" => "recurring"}
+        %{
+          "objective" => objective,
+          "kind" => "continuous",
+          "evaluation" => "Measure progress",
+          "scope" => "recurring"
+        }
       ],
       "hard_constraints" => [constraint],
       "preferences" => ["Prefer efficient plans"],

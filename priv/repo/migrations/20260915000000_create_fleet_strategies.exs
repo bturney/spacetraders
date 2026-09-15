@@ -6,6 +6,8 @@ defmodule SpaceTraders.Repo.Migrations.CreateFleetStrategies do
       add :operator_id, references(:operators, on_delete: :delete_all), null: false
       add :draft_document, :map
       add :draft_source, :string
+      add :draft_version, :integer, null: false, default: 0
+      add :revision_number, :integer, null: false, default: 0
       add :active_revision_id, :integer
 
       timestamps(type: :utc_datetime)

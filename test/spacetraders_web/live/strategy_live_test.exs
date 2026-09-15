@@ -19,6 +19,8 @@ defmodule SpaceTradersWeb.StrategyLiveTest do
     assert html =~ "Steady growth"
     assert has_element?(view, "#preset-steady_growth ol li:first-child strong", "Grow credits")
     assert html =~ "Maximize net credit growth over time"
+    assert html =~ "Continuous"
+    assert html =~ "Recurring"
     assert html =~ "Keep at least 50,000 credits available"
     assert html =~ "Prefer lower-risk routes when expected returns are similar"
     assert html =~ "may spend credits"
@@ -36,7 +38,7 @@ defmodule SpaceTradersWeb.StrategyLiveTest do
       |> form("#strategy-draft-form", %{
         "strategy" => %{
           "objectives" =>
-            "Protect liquidity | Maintain at least 90,000 credits | recurring\nGrow credits | Maximize net credit growth | recurring",
+            "Protect liquidity | maintain | Maintain at least 90,000 credits | recurring\nGrow credits | continuous | Maximize net credit growth | recurring",
           "hard_constraints" => "Keep at least 90,000 credits available",
           "preferences" => "Prefer shorter routes",
           "consequences" => "Growth may slow while liquidity is protected"
@@ -80,10 +82,13 @@ defmodule SpaceTradersWeb.StrategyLiveTest do
     scope: scope
   } do
     assert {:ok, _draft} = FleetStrategy.select_preset(scope, "steady_growth")
-    assert {:ok, active} = FleetStrategy.activate(scope)
+    assert {:ok, active} = FleetStrategy.activate(scope, FleetStrategy.get(scope).draft_version)
     assert {:ok, _draft} = FleetStrategy.select_preset(scope, "charted_expansion")
 
     {:ok, view, _html} = live(conn, ~p"/strategy")
+    assert render(view) =~ "Revision changes"
+    assert render(view) =~ "Current active"
+    assert render(view) =~ "Proposed draft"
     view |> element("#discard-strategy-draft") |> render_click()
 
     projection = FleetStrategy.get(scope)

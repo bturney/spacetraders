@@ -21,6 +21,7 @@ defmodule SpaceTraders.FleetStrategy do
       objectives: [
         %{
           "objective" => "Grow credits",
+          "kind" => "continuous",
           "evaluation" => "Maximize net credit growth over time",
           "scope" => "recurring"
         }
@@ -37,11 +38,13 @@ defmodule SpaceTraders.FleetStrategy do
       objectives: [
         %{
           "objective" => "Chart useful waypoints",
+          "kind" => "attain",
           "evaluation" => "Increase newly charted waypoint coverage",
           "scope" => "fleet_generation"
         },
         %{
           "objective" => "Grow credits",
+          "kind" => "continuous",
           "evaluation" => "Maximize net credit growth after charting needs are protected",
           "scope" => "recurring"
         }
@@ -60,12 +63,13 @@ defmodule SpaceTraders.FleetStrategy do
   def get(%Scope{operator: %Operator{id: operator_id}}) do
     case Repo.get_by(Strategy, operator_id: operator_id) do
       nil ->
-        %{draft: nil, draft_source: nil, active_revision: nil}
+        %{draft: nil, draft_source: nil, draft_version: 0, active_revision: nil}
 
       strategy ->
         %{
           draft: strategy.draft_document,
           draft_source: strategy.draft_source,
+          draft_version: strategy.draft_version,
           active_revision: active_revision(strategy)
         }
     end
@@ -102,35 +106,55 @@ defmodule SpaceTraders.FleetStrategy do
   end
 
   @doc "Explicitly activates the current draft as a new immutable revision."
-  def activate(%Scope{operator: %Operator{id: operator_id}} = scope) do
+  def activate(%Scope{operator: %Operator{id: operator_id}} = scope, expected_draft_version)
+      when is_integer(expected_draft_version) do
     result =
       Repo.transaction(fn ->
         with %Strategy{} = strategy <- Repo.get_by(Strategy, operator_id: operator_id),
              document when is_map(document) <- strategy.draft_document,
+             true <- strategy.draft_version == expected_draft_version,
              :ok <- validate_document(document) do
+          next_revision_number = strategy.revision_number + 1
+
+          {claimed, _rows} =
+            Repo.update_all(
+              from(candidate in Strategy,
+                where:
+                  candidate.id == ^strategy.id and
+                    candidate.draft_version == ^expected_draft_version and
+                    candidate.revision_number == ^strategy.revision_number
+              ),
+              inc: [draft_version: 1, revision_number: 1],
+              set: [
+                draft_document: nil,
+                draft_source: nil,
+                updated_at: DateTime.utc_now(:second)
+              ]
+            )
+
+          if claimed != 1, do: Repo.rollback(:stale_draft)
+
           revision =
             %Revision{}
             |> Revision.create_changeset(%{
               fleet_strategy_id: strategy.id,
-              number: next_revision_number(strategy.id),
+              number: next_revision_number,
               document: document,
               source: strategy.draft_source || "operator",
               activated_at: DateTime.utc_now(:second)
             })
             |> Repo.insert!()
 
-          strategy
-          |> Strategy.changeset(%{
-            active_revision_id: revision.id,
-            draft_document: nil,
-            draft_source: nil
-          })
-          |> Repo.update!()
+          Repo.update_all(
+            from(candidate in Strategy, where: candidate.id == ^strategy.id),
+            set: [active_revision_id: revision.id]
+          )
 
           revision
         else
           nil -> Repo.rollback(:draft_not_found)
           :error -> Repo.rollback(:draft_not_found)
+          false -> Repo.rollback(:stale_draft)
           {:error, reason} -> Repo.rollback(reason)
         end
       end)
@@ -152,7 +176,27 @@ defmodule SpaceTraders.FleetStrategy do
   defp put_draft(_scope, _document, _source), do: {:error, :invalid_document}
 
   defp update_strategy(strategy, scope, attrs) do
-    case strategy |> Strategy.changeset(attrs) |> Repo.insert_or_update() do
+    result =
+      if strategy.id do
+        {1, _rows} =
+          Repo.update_all(
+            from(candidate in Strategy, where: candidate.id == ^strategy.id),
+            inc: [draft_version: 1],
+            set: [
+              draft_document: attrs[:draft_document],
+              draft_source: attrs[:draft_source],
+              updated_at: DateTime.utc_now(:second)
+            ]
+          )
+
+        {:ok, strategy}
+      else
+        strategy
+        |> Strategy.changeset(Map.put(attrs, :draft_version, 1))
+        |> Repo.insert()
+      end
+
+    case result do
       {:ok, _strategy} ->
         broadcast_update(scope)
         {:ok, get(scope)}
@@ -164,14 +208,6 @@ defmodule SpaceTraders.FleetStrategy do
 
   defp active_revision(%Strategy{active_revision_id: nil}), do: nil
   defp active_revision(%Strategy{active_revision_id: id}), do: Repo.get(Revision, id)
-
-  defp next_revision_number(strategy_id) do
-    Repo.one(
-      from revision in Revision,
-        where: revision.fleet_strategy_id == ^strategy_id,
-        select: coalesce(max(revision.number), 0)
-    ) + 1
-  end
 
   defp validate_document(%{
          "objectives" => [_ | _] = objectives,
@@ -207,17 +243,18 @@ defmodule SpaceTraders.FleetStrategy do
   end
 
   defp valid_draft_objective?(objective) when is_map(objective) do
-    Enum.all?(Map.keys(objective), &(&1 in ["objective", "evaluation", "scope"]))
+    Enum.all?(Map.keys(objective), &(&1 in ["objective", "kind", "evaluation", "scope"]))
   end
 
   defp valid_draft_objective?(_objective), do: false
 
   defp valid_objective?(%{
          "objective" => objective,
+         "kind" => kind,
          "evaluation" => evaluation,
          "scope" => scope
        }) do
-    objective != "" and evaluation != "" and
+    objective != "" and kind in ["attain", "maintain", "continuous"] and evaluation != "" and
       scope in ["fleet_generation", "strategy_lifetime", "recurring"]
   end
 

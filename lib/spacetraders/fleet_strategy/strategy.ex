@@ -9,6 +9,8 @@ defmodule SpaceTraders.FleetStrategy.Strategy do
   schema "fleet_strategies" do
     field :draft_document, :map
     field :draft_source, :string
+    field :draft_version, :integer, default: 0
+    field :revision_number, :integer, default: 0
     field :active_revision_id, :integer
 
     belongs_to :operator, SpaceTraders.Agent.Operator
@@ -19,7 +21,14 @@ defmodule SpaceTraders.FleetStrategy.Strategy do
 
   def changeset(strategy, attrs) do
     strategy
-    |> cast(attrs, [:operator_id, :draft_document, :draft_source, :active_revision_id])
+    |> cast(attrs, [
+      :operator_id,
+      :draft_document,
+      :draft_source,
+      :draft_version,
+      :revision_number,
+      :active_revision_id
+    ])
     |> validate_required([:operator_id])
     |> unique_constraint(:operator_id)
   end
