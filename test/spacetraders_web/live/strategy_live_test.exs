@@ -35,9 +35,11 @@ defmodule SpaceTradersWeb.StrategyLiveTest do
       view
       |> form("#strategy-draft-form", %{
         "strategy" => %{
-          "objectives" => "Protect liquidity\nGrow credits",
+          "objectives" =>
+            "Protect liquidity | Maintain at least 90,000 credits | recurring\nGrow credits | Maximize net credit growth | recurring",
           "hard_constraints" => "Keep at least 90,000 credits available",
-          "preferences" => "Prefer shorter routes"
+          "preferences" => "Prefer shorter routes",
+          "consequences" => "Growth may slow while liquidity is protected"
         }
       })
       |> render_change()
@@ -52,6 +54,7 @@ defmodule SpaceTradersWeb.StrategyLiveTest do
     {:ok, _reconnected_view, reconnected_html} = live(conn, ~p"/strategy")
     assert reconnected_html =~ "Protect liquidity"
     assert reconnected_html =~ "Keep at least 90,000 credits available"
+    assert reconnected_html =~ "Maintain at least 90,000 credits"
   end
 
   test "preset selection creates a draft and activation requires an explicit action", %{

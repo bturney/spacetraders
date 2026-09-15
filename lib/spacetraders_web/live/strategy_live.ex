@@ -73,6 +73,7 @@ defmodule SpaceTradersWeb.StrategyLive do
                 id={"select-preset-#{preset.id}"}
                 phx-click="select_preset"
                 phx-value-id={preset.id}
+                disabled={not is_nil(@projection.draft)}
                 class="btn btn-outline mt-5 w-full"
               >
                 Review as draft
@@ -102,7 +103,7 @@ defmodule SpaceTradersWeb.StrategyLive do
               type="textarea"
               label="Objectives in Strategic Priority order"
               rows="4"
-              placeholder="One outcome per line"
+              placeholder="Outcome | evaluation rule | recurring"
             />
             <.input
               field={@form[:hard_constraints]}
@@ -117,6 +118,13 @@ defmodule SpaceTradersWeb.StrategyLive do
               label="Preferences"
               rows="3"
               placeholder="One plan-ranking preference per line"
+            />
+            <.input
+              field={@form[:consequences]}
+              type="textarea"
+              label="Likely consequences"
+              rows="3"
+              placeholder="What authority and tradeoffs would activation permit?"
             />
           </.form>
 
@@ -135,15 +143,23 @@ defmodule SpaceTradersWeb.StrategyLive do
 
   @impl true
   def handle_event("select_preset", %{"id" => preset_id}, socket) do
-    {:ok, _projection} = FleetStrategy.select_preset(socket.assigns.current_scope, preset_id)
-    {:noreply, assign_projection(socket)}
+    case FleetStrategy.select_preset(socket.assigns.current_scope, preset_id) do
+      {:ok, _projection} ->
+        {:noreply, assign_projection(socket)}
+
+      {:error, :draft_exists} ->
+        {:noreply, put_flash(socket, :error, "Discard or activate the current draft first.")}
+
+      {:error, :preset_not_found} ->
+        {:noreply, put_flash(socket, :error, "That preset is unavailable.")}
+    end
   end
 
   def handle_event("save_draft", %{"strategy" => params}, socket) do
     {:ok, _projection} =
       FleetStrategy.save_draft(socket.assigns.current_scope, document_from_params(params))
 
-    {:noreply, assign_projection(socket)}
+    {:noreply, assign_projection(socket, params)}
   end
 
   def handle_event("discard_draft", _params, socket) do
@@ -175,7 +191,7 @@ defmodule SpaceTradersWeb.StrategyLive do
   @impl true
   def handle_info({:fleet_strategy_updated, operator_id}, socket) do
     if socket.assigns.current_scope.operator.id == operator_id do
-      {:noreply, assign_projection(socket)}
+      {:noreply, assign_projection(socket, socket.assigns.form_drafts)}
     else
       {:noreply, socket}
     end
@@ -212,8 +228,13 @@ defmodule SpaceTradersWeb.StrategyLive do
     <div class="mt-5 grid gap-4 text-sm sm:grid-cols-3">
       <div>
         <h3 class="font-bold">Strategic Objectives</h3>
-        <ol class="mt-2 list-inside list-decimal space-y-1">
-          <li :for={objective <- @document["objectives"] || []}>{objective_name(objective)}</li>
+        <ol class="mt-2 list-inside list-decimal space-y-2">
+          <li :for={objective <- @document["objectives"] || []}>
+            <strong>{objective_name(objective)}</strong>
+            <span :if={is_map(objective)} class="block pl-5 opacity-70">
+              {objective["evaluation"]} / {scope_label(objective["scope"])}
+            </span>
+          </li>
         </ol>
       </div>
       <.choice_list title="Hard Constraints" choices={@document["hard_constraints"] || []} />
@@ -239,22 +260,27 @@ defmodule SpaceTradersWeb.StrategyLive do
     """
   end
 
-  defp assign_projection(socket) do
+  defp assign_projection(socket, form_drafts \\ nil) do
     projection = MissionControl.strategy(socket.assigns.current_scope)
+    form_drafts = form_drafts || form_values(projection.draft)
 
     socket
     |> assign(:projection, projection)
-    |> assign(:form, to_form(form_values(projection.draft), as: "strategy"))
+    |> assign(:form_drafts, form_drafts)
+    |> assign(:form, to_form(form_drafts, as: "strategy"))
   end
 
-  defp form_values(nil), do: %{"objectives" => "", "hard_constraints" => "", "preferences" => ""}
+  defp form_values(nil) do
+    %{"objectives" => "", "hard_constraints" => "", "preferences" => "", "consequences" => ""}
+  end
 
   defp form_values(document) do
     %{
       "objectives" =>
-        document |> Map.get("objectives", []) |> Enum.map_join("\n", &objective_name/1),
+        document |> Map.get("objectives", []) |> Enum.map_join("\n", &objective_line/1),
       "hard_constraints" => document |> Map.get("hard_constraints", []) |> Enum.join("\n"),
-      "preferences" => document |> Map.get("preferences", []) |> Enum.join("\n")
+      "preferences" => document |> Map.get("preferences", []) |> Enum.join("\n"),
+      "consequences" => Map.get(document, "consequences", "")
     }
   end
 
@@ -264,9 +290,10 @@ defmodule SpaceTradersWeb.StrategyLive do
         params
         |> Map.get("objectives", "")
         |> lines()
-        |> Enum.map(&%{"objective" => &1, "evaluation" => "Operator-defined outcome"}),
+        |> Enum.map(&objective_from_line/1),
       "hard_constraints" => params |> Map.get("hard_constraints", "") |> lines(),
-      "preferences" => params |> Map.get("preferences", "") |> lines()
+      "preferences" => params |> Map.get("preferences", "") |> lines(),
+      "consequences" => params |> Map.get("consequences", "") |> String.trim()
     }
   end
 
@@ -275,4 +302,29 @@ defmodule SpaceTradersWeb.StrategyLive do
 
   defp objective_name(%{"objective" => objective}), do: objective
   defp objective_name(objective) when is_binary(objective), do: objective
+
+  defp scope_label("fleet_generation"), do: "Fleet Generation"
+  defp scope_label("strategy_lifetime"), do: "Strategy lifetime"
+  defp scope_label("recurring"), do: "Recurring"
+  defp scope_label(_scope), do: "Scope not yet specified"
+
+  defp objective_line(objective) do
+    Enum.join(
+      [objective["objective"] || "", objective["evaluation"] || "", objective["scope"] || ""],
+      " | "
+    )
+  end
+
+  defp objective_from_line(line) do
+    case line |> String.split("|", parts: 3) |> Enum.map(&String.trim/1) do
+      [objective, evaluation, scope] ->
+        %{"objective" => objective, "evaluation" => evaluation, "scope" => scope}
+
+      [objective, evaluation] ->
+        %{"objective" => objective, "evaluation" => evaluation}
+
+      [objective] ->
+        %{"objective" => objective}
+    end
+  end
 end

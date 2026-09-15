@@ -21,7 +21,8 @@ defmodule SpaceTraders.FleetStrategy do
       objectives: [
         %{
           "objective" => "Grow credits",
-          "evaluation" => "Maximize net credit growth over time"
+          "evaluation" => "Maximize net credit growth over time",
+          "scope" => "recurring"
         }
       ],
       hard_constraints: ["Keep at least 50,000 credits available"],
@@ -36,11 +37,13 @@ defmodule SpaceTraders.FleetStrategy do
       objectives: [
         %{
           "objective" => "Chart useful waypoints",
-          "evaluation" => "Increase newly charted waypoint coverage"
+          "evaluation" => "Increase newly charted waypoint coverage",
+          "scope" => "fleet_generation"
         },
         %{
           "objective" => "Grow credits",
-          "evaluation" => "Maximize net credit growth after charting needs are protected"
+          "evaluation" => "Maximize net credit growth after charting needs are protected",
+          "scope" => "recurring"
         }
       ],
       hard_constraints: ["Keep at least 75,000 credits available"],
@@ -81,9 +84,12 @@ defmodule SpaceTraders.FleetStrategy do
 
   @doc "Copies a disclosed preset into a reviewable draft."
   def select_preset(%Scope{} = scope, preset_id) do
-    case Enum.find(@presets, &(&1.id == preset_id)) do
+    with %{draft: nil} <- get(scope),
+         preset when not is_nil(preset) <- Enum.find(@presets, &(&1.id == preset_id)) do
+      put_draft(scope, preset_document(preset), "preset:#{preset.id}")
+    else
+      %{draft: _draft} -> {:error, :draft_exists}
       nil -> {:error, :preset_not_found}
-      preset -> put_draft(scope, preset_document(preset), "preset:#{preset.id}")
     end
   end
 
@@ -135,10 +141,12 @@ defmodule SpaceTraders.FleetStrategy do
 
   defp put_draft(%Scope{operator: %Operator{id: operator_id}} = scope, document, source)
        when is_map(document) do
-    strategy =
-      Repo.get_by(Strategy, operator_id: operator_id) || %Strategy{operator_id: operator_id}
+    with :ok <- validate_draft_document(document) do
+      strategy =
+        Repo.get_by(Strategy, operator_id: operator_id) || %Strategy{operator_id: operator_id}
 
-    update_strategy(strategy, scope, %{draft_document: document, draft_source: source})
+      update_strategy(strategy, scope, %{draft_document: document, draft_source: source})
+    end
   end
 
   defp put_draft(_scope, _document, _source), do: {:error, :invalid_document}
@@ -166,14 +174,54 @@ defmodule SpaceTraders.FleetStrategy do
   end
 
   defp validate_document(%{
-         "objectives" => [_ | _],
-         "hard_constraints" => constraints,
-         "preferences" => preferences
+         "objectives" => [_ | _] = objectives,
+         "hard_constraints" => [_ | _] = constraints,
+         "preferences" => preferences,
+         "consequences" => consequences
        })
-       when is_list(constraints) and is_list(preferences),
-       do: :ok
+       when is_list(preferences) and is_binary(consequences) and consequences != "" do
+    if Enum.all?(objectives, &valid_objective?/1) and
+         Enum.all?(constraints ++ preferences, &(is_binary(&1) and &1 != "")) do
+      :ok
+    else
+      {:error, :invalid_document}
+    end
+  end
 
   defp validate_document(_document), do: {:error, :invalid_document}
+
+  defp validate_draft_document(document) do
+    allowed_keys = ["objectives", "hard_constraints", "preferences", "consequences"]
+
+    with true <- Enum.all?(Map.keys(document), &(&1 in allowed_keys)),
+         objectives when is_list(objectives) <- Map.get(document, "objectives"),
+         constraints when is_list(constraints) <- Map.get(document, "hard_constraints"),
+         preferences when is_list(preferences) <- Map.get(document, "preferences"),
+         consequences when is_binary(consequences) <- Map.get(document, "consequences"),
+         true <- Enum.all?(objectives, &valid_draft_objective?/1),
+         true <- Enum.all?(constraints ++ preferences, &is_binary/1) do
+      :ok
+    else
+      _ -> {:error, :invalid_document}
+    end
+  end
+
+  defp valid_draft_objective?(objective) when is_map(objective) do
+    Enum.all?(Map.keys(objective), &(&1 in ["objective", "evaluation", "scope"]))
+  end
+
+  defp valid_draft_objective?(_objective), do: false
+
+  defp valid_objective?(%{
+         "objective" => objective,
+         "evaluation" => evaluation,
+         "scope" => scope
+       }) do
+    objective != "" and evaluation != "" and
+      scope in ["fleet_generation", "strategy_lifetime", "recurring"]
+  end
+
+  defp valid_objective?(_objective), do: false
 
   defp preset_document(preset) do
     %{

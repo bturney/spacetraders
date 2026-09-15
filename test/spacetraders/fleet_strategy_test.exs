@@ -14,7 +14,8 @@ defmodule SpaceTraders.FleetStrategyTest do
              objectives: [
                %{
                  "objective" => "Grow credits",
-                 "evaluation" => "Maximize net credit growth over time"
+                 "evaluation" => "Maximize net credit growth over time",
+                 "scope" => "recurring"
                }
              ],
              hard_constraints: ["Keep at least 50,000 credits available"],
@@ -71,11 +72,43 @@ defmodule SpaceTraders.FleetStrategyTest do
     assert {:error, :draft_not_found} = FleetStrategy.activate(other_scope)
   end
 
+  test "preset selection cannot silently replace an existing draft" do
+    scope = operator_fixture() |> Scope.for_operator()
+    original = document("Grow credits", "No scrap")
+
+    assert {:ok, _draft} = FleetStrategy.save_draft(scope, original)
+    assert {:error, :draft_exists} = FleetStrategy.select_preset(scope, "steady_growth")
+    assert FleetStrategy.get(scope).draft == original
+  end
+
+  test "documents reject credential fields and incomplete Strategic Objectives" do
+    scope = operator_fixture() |> Scope.for_operator()
+
+    assert {:error, :invalid_document} =
+             FleetStrategy.save_draft(
+               scope,
+               Map.put(document("Grow credits", "No scrap"), "account_token", "secret")
+             )
+
+    assert {:ok, _draft} =
+             FleetStrategy.save_draft(scope, %{
+               "objectives" => [%{"objective" => "Grow credits"}],
+               "hard_constraints" => ["No scrap"],
+               "preferences" => [],
+               "consequences" => "Not yet specified"
+             })
+
+    assert {:error, :invalid_document} = FleetStrategy.activate(scope)
+  end
+
   defp document(objective, constraint) do
     %{
-      "objectives" => [%{"objective" => objective, "evaluation" => "Measure progress"}],
+      "objectives" => [
+        %{"objective" => objective, "evaluation" => "Measure progress", "scope" => "recurring"}
+      ],
       "hard_constraints" => [constraint],
-      "preferences" => ["Prefer efficient plans"]
+      "preferences" => ["Prefer efficient plans"],
+      "consequences" => "The Fleet will pursue the listed outcomes within every Hard Constraint."
     }
   end
 end
