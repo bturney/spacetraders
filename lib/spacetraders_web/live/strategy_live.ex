@@ -98,34 +98,36 @@ defmodule SpaceTradersWeb.StrategyLive do
           </div>
 
           <.form for={@form} id="strategy-draft-form" phx-change="save_draft" class="mt-6 grid gap-5">
-            <.input
-              field={@form[:objectives]}
-              type="textarea"
-              label="Objectives in Strategic Priority order"
-              rows="4"
-              placeholder="Outcome | continuous | evaluation rule | recurring"
-            />
-            <.input
-              field={@form[:hard_constraints]}
-              type="textarea"
-              label="Hard Constraints"
-              rows="3"
-              placeholder="One non-negotiable boundary per line"
-            />
-            <.input
-              field={@form[:preferences]}
-              type="textarea"
-              label="Preferences"
-              rows="3"
-              placeholder="One plan-ranking preference per line"
-            />
-            <.input
-              field={@form[:consequences]}
-              type="textarea"
-              label="Likely consequences"
-              rows="3"
-              placeholder="What authority and tradeoffs would activation permit?"
-            />
+            <fieldset disabled={@draft_stale?} class="contents">
+              <.input
+                field={@form[:objectives]}
+                type="textarea"
+                label="Objectives in Strategic Priority order"
+                rows="4"
+                placeholder="Outcome | continuous | evaluation rule | recurring"
+              />
+              <.input
+                field={@form[:hard_constraints]}
+                type="textarea"
+                label="Hard Constraints"
+                rows="3"
+                placeholder="One non-negotiable boundary per line"
+              />
+              <.input
+                field={@form[:preferences]}
+                type="textarea"
+                label="Preferences"
+                rows="3"
+                placeholder="One plan-ranking preference per line"
+              />
+              <.input
+                field={@form[:consequences]}
+                type="textarea"
+                label="Likely consequences"
+                rows="3"
+                placeholder="What authority and tradeoffs would activation permit?"
+              />
+            </fieldset>
           </.form>
 
           <div :if={@projection.draft} class="mt-6 border-t border-base-300 pt-6">
@@ -188,10 +190,14 @@ defmodule SpaceTradersWeb.StrategyLive do
   end
 
   def handle_event("save_draft", %{"strategy" => params}, socket) do
-    {:ok, _projection} =
-      FleetStrategy.save_draft(socket.assigns.current_scope, document_from_params(params))
+    if socket.assigns.draft_stale? do
+      {:noreply, put_flash(socket, :error, "Review the latest durable draft before editing.")}
+    else
+      {:ok, _projection} =
+        FleetStrategy.save_draft(socket.assigns.current_scope, document_from_params(params))
 
-    {:noreply, assign_projection(socket, params)}
+      {:noreply, assign_projection(socket, params)}
+    end
   end
 
   def handle_event("discard_draft", _params, socket) do

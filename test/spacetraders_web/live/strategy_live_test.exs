@@ -96,6 +96,21 @@ defmodule SpaceTradersWeb.StrategyLiveTest do
     assert html =~ "Grow credits | continuous | Measure growth | recurring"
     assert has_element?(view, "#activate-strategy[disabled]")
 
+    render_change(view, "save_draft", %{
+      "strategy" => %{
+        "objectives" => "Replace remote draft | attain | Should not save | recurring",
+        "hard_constraints" => "No constraints",
+        "preferences" => "No preferences",
+        "consequences" => "Should not save"
+      }
+    })
+
+    assert FleetStrategy.get(scope).draft["objectives"] |> hd() |> Map.fetch!("objective") ==
+             "Chart waypoints"
+
+    assert render(view) =~ "Draft changed elsewhere"
+    assert has_element?(view, "#activate-strategy[disabled]")
+
     view |> element("#review-latest-draft") |> render_click()
     assert render(view) =~ "Chart waypoints | attain | Increase chart coverage | fleet_generation"
     refute has_element?(view, "#activate-strategy[disabled]")
