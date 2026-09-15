@@ -76,7 +76,9 @@ defmodule SpaceTraders.FleetStrategy do
   end
 
   @doc "Persists an Operator-authored draft without changing active intent."
-  def save_draft(%Scope{} = scope, document), do: put_draft(scope, document, "operator")
+  def save_draft(%Scope{} = scope, document, expected_draft_version) do
+    put_draft(scope, document, "operator", expected_draft_version)
+  end
 
   @doc "Opens a recommendation as a reviewable draft without changing active intent."
   def recommend(%Scope{} = scope, document), do: open_draft(scope, document, "recommendation")
@@ -90,10 +92,21 @@ defmodule SpaceTraders.FleetStrategy do
   end
 
   @doc "Discards the draft without changing active intent."
-  def discard_draft(%Scope{operator: %Operator{id: operator_id}} = scope) do
+  def discard_draft(
+        %Scope{operator: %Operator{id: operator_id}} = scope,
+        expected_draft_version
+      ) do
     case Repo.get_by(Strategy, operator_id: operator_id) do
-      nil -> {:ok, get(scope)}
-      strategy -> update_strategy(strategy, scope, %{draft_document: nil, draft_source: nil})
+      nil ->
+        {:ok, get(scope)}
+
+      strategy ->
+        update_strategy(
+          strategy,
+          scope,
+          %{draft_document: nil, draft_source: nil},
+          expected_draft_version
+        )
     end
   end
 
@@ -155,17 +168,28 @@ defmodule SpaceTraders.FleetStrategy do
     result
   end
 
-  defp put_draft(%Scope{operator: %Operator{id: operator_id}} = scope, document, source)
+  defp put_draft(
+         %Scope{operator: %Operator{id: operator_id}} = scope,
+         document,
+         source,
+         expected_draft_version
+       )
        when is_map(document) do
     with :ok <- validate_draft_document(document) do
       strategy =
         Repo.get_by(Strategy, operator_id: operator_id) || %Strategy{operator_id: operator_id}
 
-      update_strategy(strategy, scope, %{draft_document: document, draft_source: source})
+      update_strategy(
+        strategy,
+        scope,
+        %{draft_document: document, draft_source: source},
+        expected_draft_version
+      )
     end
   end
 
-  defp put_draft(_scope, _document, _source), do: {:error, :invalid_document}
+  defp put_draft(_scope, _document, _source, _expected_draft_version),
+    do: {:error, :invalid_document}
 
   defp open_draft(
          %Scope{operator: %Operator{id: operator_id}} = scope,
@@ -227,12 +251,16 @@ defmodule SpaceTraders.FleetStrategy do
 
   defp open_draft(_scope, _document, _source), do: {:error, :invalid_document}
 
-  defp update_strategy(strategy, scope, attrs) do
+  defp update_strategy(strategy, scope, attrs, expected_draft_version) do
     result =
       if strategy.id do
-        {1, _rows} =
+        {updated, _rows} =
           Repo.update_all(
-            from(candidate in Strategy, where: candidate.id == ^strategy.id),
+            from(candidate in Strategy,
+              where:
+                candidate.id == ^strategy.id and
+                  candidate.draft_version == ^expected_draft_version
+            ),
             inc: [draft_version: 1],
             set: [
               draft_document: attrs[:draft_document],
@@ -241,11 +269,15 @@ defmodule SpaceTraders.FleetStrategy do
             ]
           )
 
-        {:ok, strategy}
+        if updated == 1, do: {:ok, strategy}, else: {:error, :stale_draft}
       else
-        strategy
-        |> Strategy.changeset(Map.put(attrs, :draft_version, 1))
-        |> Repo.insert()
+        if expected_draft_version == 0 do
+          strategy
+          |> Strategy.changeset(Map.put(attrs, :draft_version, 1))
+          |> Repo.insert()
+        else
+          {:error, :stale_draft}
+        end
       end
 
     case result do

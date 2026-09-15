@@ -130,18 +130,19 @@ defmodule SpaceTradersWeb.StrategyLive do
             </fieldset>
           </.form>
 
-          <div :if={@projection.draft} class="mt-6 border-t border-base-300 pt-6">
-            <div :if={@draft_stale?} class="alert alert-warning mb-6 items-start">
-              <div>
-                <strong>Draft changed elsewhere</strong>
-                <p class="text-sm">
-                  Your local text is preserved. Review the latest durable draft before activation.
-                </p>
-              </div>
-              <button id="review-latest-draft" phx-click="review_latest" class="btn btn-sm">
-                Review latest draft
-              </button>
+          <div :if={@draft_stale?} class="alert alert-warning mt-6 items-start">
+            <div>
+              <strong>Draft changed elsewhere</strong>
+              <p class="text-sm">
+                Your local text is preserved. Review the latest durable draft before activation.
+              </p>
             </div>
+            <button id="review-latest-draft" phx-click="review_latest" class="btn btn-sm">
+              Review latest draft
+            </button>
+          </div>
+
+          <div :if={@projection.draft} class="mt-6 border-t border-base-300 pt-6">
             <div :if={@projection.active_revision} class="mb-6 rounded-xl bg-base-200 p-4">
               <h3 class="text-lg font-bold">Revision changes</h3>
               <div class="mt-3 grid gap-5 lg:grid-cols-2">
@@ -193,20 +194,34 @@ defmodule SpaceTradersWeb.StrategyLive do
     if socket.assigns.draft_stale? do
       {:noreply, put_flash(socket, :error, "Review the latest durable draft before editing.")}
     else
-      {:ok, _projection} =
-        FleetStrategy.save_draft(socket.assigns.current_scope, document_from_params(params))
+      case FleetStrategy.save_draft(
+             socket.assigns.current_scope,
+             document_from_params(params),
+             socket.assigns.projection.draft_version
+           ) do
+        {:ok, _projection} ->
+          {:noreply, assign_projection(socket, params)}
 
-      {:noreply, assign_projection(socket, params)}
+        {:error, :stale_draft} ->
+          {:noreply, mark_draft_stale(socket, "The draft changed before this edit was saved.")}
+      end
     end
   end
 
   def handle_event("discard_draft", _params, socket) do
-    {:ok, _projection} = FleetStrategy.discard_draft(socket.assigns.current_scope)
+    case FleetStrategy.discard_draft(
+           socket.assigns.current_scope,
+           socket.assigns.projection.draft_version
+         ) do
+      {:ok, _projection} ->
+        {:noreply,
+         socket
+         |> put_flash(:info, "Draft discarded. Active intent is unchanged.")
+         |> assign_projection()}
 
-    {:noreply,
-     socket
-     |> put_flash(:info, "Draft discarded. Active intent is unchanged.")
-     |> assign_projection()}
+      {:error, :stale_draft} ->
+        {:noreply, mark_draft_stale(socket, "The draft changed before it could be discarded.")}
+    end
   end
 
   def handle_event("review_latest", _params, socket) do
@@ -214,27 +229,32 @@ defmodule SpaceTradersWeb.StrategyLive do
   end
 
   def handle_event("activate", %{"version" => version}, socket) do
-    {expected_version, ""} = Integer.parse(version)
+    if socket.assigns.draft_stale? do
+      {:noreply, put_flash(socket, :error, "Review the latest durable draft before activation.")}
+    else
+      {expected_version, ""} = Integer.parse(version)
 
-    case FleetStrategy.activate(socket.assigns.current_scope, expected_version) do
-      {:ok, revision} ->
-        {:noreply,
-         socket
-         |> put_flash(:info, "Fleet Strategy Revision #{revision.number} activated.")
-         |> assign_projection()}
+      case FleetStrategy.activate(socket.assigns.current_scope, expected_version) do
+        {:ok, revision} ->
+          {:noreply,
+           socket
+           |> put_flash(:info, "Fleet Strategy Revision #{revision.number} activated.")
+           |> assign_projection()}
 
-      {:error, :invalid_document} ->
-        {:noreply,
-         put_flash(socket, :error, "Add at least one Strategic Objective before activation.")}
+        {:error, :invalid_document} ->
+          {:noreply,
+           put_flash(socket, :error, "Add at least one Strategic Objective before activation.")}
 
-      {:error, :draft_not_found} ->
-        {:noreply, put_flash(socket, :error, "There is no draft to activate.")}
+        {:error, :draft_not_found} ->
+          {:noreply, put_flash(socket, :error, "There is no draft to activate.")}
 
-      {:error, :stale_draft} ->
-        {:noreply,
-         socket
-         |> put_flash(:error, "The draft changed. Review the latest version before activation.")
-         |> assign_projection()}
+        {:error, :stale_draft} ->
+          {:noreply,
+           mark_draft_stale(
+             socket,
+             "The draft changed. Review the latest version before activation."
+           )}
+      end
     end
   end
 
@@ -334,6 +354,13 @@ defmodule SpaceTradersWeb.StrategyLive do
     |> assign(:draft_stale?, false)
     |> assign(:form_drafts, form_drafts)
     |> assign(:form, to_form(form_drafts, as: "strategy"))
+  end
+
+  defp mark_draft_stale(socket, message) do
+    socket
+    |> put_flash(:error, message)
+    |> assign(:projection, MissionControl.strategy(socket.assigns.current_scope))
+    |> assign(:draft_stale?, true)
   end
 
   defp form_values(nil) do

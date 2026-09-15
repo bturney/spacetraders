@@ -33,7 +33,7 @@ defmodule SpaceTraders.FleetStrategyTest do
     recommendation = document("Chart waypoints", "Keep 75,000 credits available")
 
     assert {:ok, %{draft: ^original, active_revision: nil}} =
-             FleetStrategy.save_draft(scope, original)
+             save_draft(scope, original)
 
     assert {:ok, revision} = FleetStrategy.activate(scope, FleetStrategy.get(scope).draft_version)
     assert revision.number == 1
@@ -51,13 +51,15 @@ defmodule SpaceTraders.FleetStrategyTest do
     scope = operator_fixture() |> Scope.for_operator()
     active_document = document("Grow credits", "Keep 50,000 credits available")
 
-    assert {:ok, _draft} = FleetStrategy.save_draft(scope, active_document)
+    assert {:ok, _draft} = save_draft(scope, active_document)
     assert {:ok, revision} = FleetStrategy.activate(scope, FleetStrategy.get(scope).draft_version)
 
     assert {:ok, _draft} =
-             FleetStrategy.save_draft(scope, document("Chart waypoints", "No scrap"))
+             save_draft(scope, document("Chart waypoints", "No scrap"))
 
-    assert {:ok, %{draft: nil, active_revision: active}} = FleetStrategy.discard_draft(scope)
+    assert {:ok, %{draft: nil, active_revision: active}} =
+             FleetStrategy.discard_draft(scope, FleetStrategy.get(scope).draft_version)
+
     assert active.id == revision.id
     assert active.document == active_document
   end
@@ -67,7 +69,7 @@ defmodule SpaceTraders.FleetStrategyTest do
     other_scope = operator_fixture() |> Scope.for_operator()
 
     assert {:ok, _draft} =
-             FleetStrategy.save_draft(owner_scope, document("Grow credits", "No scrap"))
+             save_draft(owner_scope, document("Grow credits", "No scrap"))
 
     assert %{draft: nil, active_revision: nil} = FleetStrategy.get(other_scope)
     assert {:error, :draft_not_found} = FleetStrategy.activate(other_scope, 0)
@@ -77,7 +79,7 @@ defmodule SpaceTraders.FleetStrategyTest do
     scope = operator_fixture() |> Scope.for_operator()
     original = document("Grow credits", "No scrap")
 
-    assert {:ok, _draft} = FleetStrategy.save_draft(scope, original)
+    assert {:ok, _draft} = save_draft(scope, original)
     assert {:error, :draft_exists} = FleetStrategy.select_preset(scope, "steady_growth")
     assert FleetStrategy.get(scope).draft == original
   end
@@ -86,13 +88,13 @@ defmodule SpaceTraders.FleetStrategyTest do
     scope = operator_fixture() |> Scope.for_operator()
 
     assert {:error, :invalid_document} =
-             FleetStrategy.save_draft(
+             save_draft(
                scope,
                Map.put(document("Grow credits", "No scrap"), "account_token", "secret")
              )
 
     assert {:ok, _draft} =
-             FleetStrategy.save_draft(scope, %{
+             save_draft(scope, %{
                "objectives" => [%{"objective" => "Grow credits"}],
                "hard_constraints" => ["No scrap"],
                "preferences" => [],
@@ -106,14 +108,32 @@ defmodule SpaceTraders.FleetStrategyTest do
   test "activation rejects a stale draft version" do
     scope = operator_fixture() |> Scope.for_operator()
 
-    assert {:ok, first} = FleetStrategy.save_draft(scope, document("Grow credits", "No scrap"))
+    assert {:ok, first} = save_draft(scope, document("Grow credits", "No scrap"))
 
     assert {:ok, current} =
-             FleetStrategy.save_draft(scope, document("Chart waypoints", "No scrap"))
+             save_draft(scope, document("Chart waypoints", "No scrap"))
 
     assert current.draft_version > first.draft_version
     assert {:error, :stale_draft} = FleetStrategy.activate(scope, first.draft_version)
     assert FleetStrategy.get(scope).active_revision == nil
+  end
+
+  test "draft edits and discard reject a stale draft version" do
+    scope = operator_fixture() |> Scope.for_operator()
+    original = document("Grow credits", "No scrap")
+    current = document("Chart waypoints", "No scrap")
+
+    assert {:ok, first} = save_draft(scope, original)
+    assert {:ok, latest} = FleetStrategy.save_draft(scope, current, first.draft_version)
+
+    assert {:error, :stale_draft} =
+             FleetStrategy.save_draft(scope, original, first.draft_version)
+
+    assert {:error, :stale_draft} =
+             FleetStrategy.discard_draft(scope, first.draft_version)
+
+    assert FleetStrategy.get(scope).draft == current
+    assert FleetStrategy.get(scope).draft_version == latest.draft_version
   end
 
   defp document(objective, constraint) do
@@ -130,5 +150,9 @@ defmodule SpaceTraders.FleetStrategyTest do
       "preferences" => ["Prefer efficient plans"],
       "consequences" => "The Fleet will pursue the listed outcomes within every Hard Constraint."
     }
+  end
+
+  defp save_draft(scope, document) do
+    FleetStrategy.save_draft(scope, document, FleetStrategy.get(scope).draft_version)
   end
 end

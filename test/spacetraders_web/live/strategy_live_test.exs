@@ -77,19 +77,23 @@ defmodule SpaceTradersWeb.StrategyLiveTest do
     |> render_change()
 
     assert {:ok, _updated} =
-             FleetStrategy.save_draft(scope, %{
-               "objectives" => [
-                 %{
-                   "objective" => "Chart waypoints",
-                   "kind" => "attain",
-                   "evaluation" => "Increase chart coverage",
-                   "scope" => "fleet_generation"
-                 }
-               ],
-               "hard_constraints" => ["Keep 75,000 credits available"],
-               "preferences" => ["Prefer nearby systems"],
-               "consequences" => "Near-term growth may slow"
-             })
+             FleetStrategy.save_draft(
+               scope,
+               %{
+                 "objectives" => [
+                   %{
+                     "objective" => "Chart waypoints",
+                     "kind" => "attain",
+                     "evaluation" => "Increase chart coverage",
+                     "scope" => "fleet_generation"
+                   }
+                 ],
+                 "hard_constraints" => ["Keep 75,000 credits available"],
+                 "preferences" => ["Prefer nearby systems"],
+                 "consequences" => "Near-term growth may slow"
+               },
+               FleetStrategy.get(scope).draft_version
+             )
 
     html = render(view)
     assert html =~ "Draft changed elsewhere"
@@ -110,6 +114,13 @@ defmodule SpaceTradersWeb.StrategyLiveTest do
 
     assert render(view) =~ "Draft changed elsewhere"
     assert has_element?(view, "#activate-strategy[disabled]")
+
+    render_click(view, "activate", %{
+      "version" => to_string(FleetStrategy.get(scope).draft_version)
+    })
+
+    assert FleetStrategy.get(scope).active_revision == nil
+    assert render(view) =~ "Draft changed elsewhere"
 
     view |> element("#review-latest-draft") |> render_click()
     assert render(view) =~ "Chart waypoints | attain | Increase chart coverage | fleet_generation"
