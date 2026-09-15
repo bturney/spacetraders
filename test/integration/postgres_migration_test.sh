@@ -86,7 +86,7 @@ migration_count=$("${compose[@]}" exec -T postgres \
 
 first_reconciliation=$(sed -n 's/.*reconciliation=//p' <<<"$first_cutover")
 [[ "$first_reconciliation" =~ ^[0-9a-f]{64}$ ]]
-grep -q 'operation=postgres_cutover status=completed tables=14 rows=10' <<<"$first_cutover"
+grep -q 'operation=postgres_cutover status=completed tables=15 rows=10' <<<"$first_cutover"
 grep -q 'operation=postgres_cutover status=already_authoritative store=postgresql' <<<"$second_cutover"
 
 postgres_state=$("${compose[@]}" exec -T postgres psql --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" --tuples-only --no-align \

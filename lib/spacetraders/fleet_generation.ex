@@ -10,10 +10,12 @@ defmodule SpaceTraders.FleetGeneration do
   import Ecto.Changeset, only: [get_field: 2]
   import Ecto.Query, warn: false
 
+  alias SpaceTraders.API.GameplayError
   alias SpaceTraders.API.Model.Agent, as: GameAgent
   alias SpaceTraders.Agent.{Agent, Operator, Scope}
   alias SpaceTraders.Fleet.{Ship, ShipServer}
-  alias SpaceTraders.FleetStrategy.Revision
+  alias SpaceTraders.FleetGeneration.Generation
+  alias SpaceTraders.FleetStrategy.{Revision, Strategy}
   alias SpaceTraders.{FleetStrategy, Repo, Timeline}
 
   defmodule CredentialReference do
@@ -63,36 +65,73 @@ defmodule SpaceTraders.FleetGeneration do
 
   @doc "Mints a new Fleet Generation for the authenticated Operator."
   def mint(%Scope{operator: %Operator{id: operator_id}} = scope, attrs) do
+    :global.trans({{__MODULE__, :mint, operator_id}, self()}, fn ->
+      do_mint(scope, attrs, operator_id)
+    end)
+  end
+
+  defp do_mint(scope, attrs, operator_id) do
     changeset = Agent.changeset(%Agent{}, attrs)
     credential_ref = %CredentialReference{operator_id: operator_id}
+    replacement_symbols = replacement_symbols(attrs, changeset)
 
     with :ok <- SpaceTraders.RuntimeAuthority.execution_allowed?(),
          :ok <- FleetStrategy.mutation_allowed?(scope),
          :ok <- validate_mint_attrs(changeset),
+         :ok <- validate_replacement_symbols(replacement_symbols, get_field(changeset, :faction)),
          {:ok, operator, account_token} <- resolve_account_token(credential_ref),
          :ok <-
            ensure_symbol_is_not_stale_for_another_operator(
              operator,
-             get_field(changeset, :symbol)
+             replacement_symbols
            ) do
-      case SpaceTraders.API.register(
+      case register_first_available(
              account_token,
-             get_field(changeset, :symbol),
+             replacement_symbols,
              get_field(changeset, :faction),
              operator.email
            ) do
-        {:ok, %{token: agent_token, agent: %GameAgent{} = game_agent}} ->
-          replace_stale_agent_and_create(
-            operator,
-            game_agent,
-            agent_token,
-            get_field(changeset, :faction)
+        {:ok, %{token: agent_token, agent: %GameAgent{}} = registration} ->
+          replace_stale_agent_and_create(operator, registration, agent_token,
+            faction: get_field(changeset, :faction),
+            replacement_symbols: replacement_symbols
           )
 
         {:error, _reason} = error ->
           error
       end
     end
+  end
+
+  @doc "Returns the Operator's Fleet Generation history, newest first."
+  def list_generations(%Scope{operator: %Operator{id: operator_id}}) do
+    Repo.all(
+      from generation in Generation,
+        where: generation.operator_id == ^operator_id,
+        order_by: [desc: generation.number]
+    )
+  end
+
+  @doc false
+  def activate_strategy(
+        %Scope{operator: %Operator{id: operator_id}},
+        %Revision{id: revision_id} = revision
+      ) do
+    now = DateTime.utc_now()
+
+    Repo.update_all(
+      from(generation in Generation,
+        where: generation.operator_id == ^operator_id and is_nil(generation.retired_at)
+      ),
+      set: [
+        fleet_strategy_revision_id: revision_id,
+        objective_progress: generation_progress(revision, nil),
+        strategy_capable_at: now,
+        updated_at: DateTime.utc_now(:second)
+      ]
+    )
+
+    :ok
   end
 
   @doc "Retires every Stale Agent owned by the authenticated Operator."
@@ -116,7 +155,7 @@ defmodule SpaceTraders.FleetGeneration do
     case SpaceTraders.API.get_agent(agent_token) do
       {:error, %SpaceTraders.API.GameplayError{} = error} = result ->
         if server_reset_mismatch?(error) do
-          mark_stale(agent)
+          mark_stale_and_replace(agent)
           {:error, :stale_agent}
         else
           result
@@ -142,7 +181,7 @@ defmodule SpaceTraders.FleetGeneration do
   @doc "Converts a reset mismatch from any game call into the durable stale state."
   def handle_game_result(%Agent{} = agent, {:error, error}) do
     if server_reset_mismatch?(error) do
-      mark_stale(agent)
+      mark_stale_and_replace(agent)
       {:error, :stale_agent}
     else
       {:error, error}
@@ -165,32 +204,64 @@ defmodule SpaceTraders.FleetGeneration do
   defp validate_mint_attrs(%{valid?: true}), do: :ok
   defp validate_mint_attrs(%{valid?: false} = changeset), do: {:error, changeset}
 
-  defp ensure_symbol_is_not_stale_for_another_operator(%Operator{id: operator_id}, symbol) do
-    case Repo.get_by(Agent, symbol: symbol) do
-      %Agent{operator_id: ^operator_id} ->
-        :ok
-
-      %Agent{stale_at: stale_at} when not is_nil(stale_at) ->
-        {:error, :stale_symbol_owned_elsewhere}
-
-      _ ->
-        :ok
+  defp ensure_symbol_is_not_stale_for_another_operator(%Operator{id: operator_id}, symbols) do
+    if Repo.exists?(
+         from agent in Agent,
+           where:
+             agent.symbol in ^symbols and agent.operator_id != ^operator_id and
+               not is_nil(agent.stale_at)
+       ) do
+      {:error, :stale_symbol_owned_elsewhere}
+    else
+      :ok
     end
   end
 
-  defp replace_stale_agent_and_create(operator, game_agent, agent_token, faction) do
-    with {:ok, {agent, retired_symbols, ship_symbols}} <-
+  defp replace_stale_agent_and_create(operator, registration, agent_token, opts) do
+    game_agent = registration.agent
+    faction = Keyword.fetch!(opts, :faction)
+    replacement_symbols = Keyword.fetch!(opts, :replacement_symbols)
+
+    with {:ok, {agent, _generation, retired_symbols, ship_symbols}} <-
            Repo.transaction(fn ->
+             stale_ids = stale_agent_ids(operator, game_agent.symbol)
+
+             predecessors =
+               Repo.all(
+                 from generation in Generation,
+                   where:
+                     generation.operator_id == ^operator.id and
+                       generation.agent_id in ^stale_ids and is_nil(generation.retired_at),
+                   order_by: [desc: generation.number]
+               )
+
+             predecessor = List.first(predecessors)
+
              {retired_symbols, ship_symbols} =
-               operator
-               |> stale_agent_ids(game_agent.symbol)
+               stale_ids
                |> Enum.map(&retire_stale_agent/1)
                |> Enum.unzip()
                |> then(fn {symbols, ships} -> {List.flatten(symbols), List.flatten(ships)} end)
 
              case SpaceTraders.Agent.store_agent(operator, game_agent, agent_token, faction) do
                {:ok, agent} ->
-                 {agent, retired_symbols, ship_symbols}
+                 bootstrap_ships(agent, Map.get(registration, :ships, []))
+
+                 generation =
+                   establish_generation!(
+                     operator,
+                     agent,
+                     predecessor,
+                     replacement_symbols,
+                     faction
+                   )
+
+                 Enum.each(
+                   predecessors,
+                   &retire_generation(&1, generation.strategy_capable_at)
+                 )
+
+                 {agent, generation, retired_symbols, ship_symbols}
 
                {:error, changeset} ->
                  changeset
@@ -199,8 +270,150 @@ defmodule SpaceTraders.FleetGeneration do
              end
            end) do
       Enum.each(ship_symbols, &ShipServer.stop/1)
+
       {:ok, %{agent: %{agent | agent_token: nil}, retired_symbols: retired_symbols}}
     end
+  end
+
+  defp register_first_available(_account_token, [], _faction, _email),
+    do: {:error, :replacement_symbols_exhausted}
+
+  defp register_first_available(account_token, [symbol | rest], faction, email) do
+    case SpaceTraders.API.register(account_token, symbol, faction, email) do
+      {:error, %GameplayError{code: 4103}} when rest != [] ->
+        register_first_available(account_token, rest, faction, email)
+
+      result ->
+        result
+    end
+  end
+
+  defp replacement_symbols(attrs, changeset) do
+    symbols = attrs[:replacement_symbols] || attrs["replacement_symbols"]
+    symbols = if is_list(symbols), do: symbols, else: [get_field(changeset, :symbol)]
+    Enum.uniq(symbols)
+  end
+
+  defp validate_replacement_symbols([_ | _] = symbols, faction) do
+    if Enum.all?(symbols, fn symbol ->
+         Agent.changeset(%Agent{}, %{symbol: symbol, faction: faction}).valid?
+       end) do
+      :ok
+    else
+      {:error, :invalid_replacement_symbols}
+    end
+  end
+
+  defp validate_replacement_symbols(_symbols, _faction),
+    do: {:error, :invalid_replacement_symbols}
+
+  defp bootstrap_ships(agent, ships) do
+    Enum.each(ships, fn ship ->
+      ship_type =
+        get_in(ship, [Access.key(:frame), Access.key(:symbol)]) ||
+          get_in(ship, [Access.key(:registration), Access.key(:role)]) || "UNKNOWN"
+
+      %Ship{}
+      |> Ecto.Changeset.change(symbol: ship.symbol, ship_type: ship_type, agent_id: agent.id)
+      |> Ecto.Changeset.validate_required([:symbol, :ship_type, :agent_id])
+      |> Ecto.Changeset.unique_constraint(:symbol)
+      |> Repo.insert()
+      |> case do
+        {:ok, _ship} -> :ok
+        {:error, _changeset} -> Repo.rollback(:bootstrap_failed)
+      end
+    end)
+  end
+
+  defp establish_generation!(operator, agent, predecessor, replacement_symbols, faction) do
+    revision = active_revision(operator.id)
+    number = next_generation_number(operator.id)
+    now = DateTime.utc_now()
+
+    objective_progress =
+      generation_progress(revision, predecessor && predecessor.objective_progress)
+
+    %Generation{}
+    |> Generation.changeset(%{
+      operator_id: operator.id,
+      agent_id: agent.id,
+      fleet_strategy_revision_id: revision && revision.id,
+      number: number,
+      symbol: agent.symbol,
+      faction: faction,
+      replacement_symbols: %{"symbols" => replacement_symbols},
+      objective_progress: objective_progress,
+      strategy_capable_at: if(revision, do: now)
+    })
+    |> Repo.insert!()
+  end
+
+  defp active_revision(operator_id) do
+    Repo.one(
+      from strategy in Strategy,
+        join: revision in Revision,
+        on: revision.id == strategy.active_revision_id,
+        where: strategy.operator_id == ^operator_id,
+        select: revision
+    )
+  end
+
+  defp next_generation_number(operator_id) do
+    (Repo.one(
+       from generation in Generation,
+         where: generation.operator_id == ^operator_id,
+         select: max(generation.number)
+     ) || 0) + 1
+  end
+
+  defp generation_progress(nil, _prior), do: %{}
+
+  defp generation_progress(%Revision{document: %{"objectives" => objectives}}, prior)
+       when is_list(objectives) do
+    objectives
+    |> Enum.with_index()
+    |> Map.new(fn {objective, index} ->
+      key = Integer.to_string(index)
+
+      progress =
+        case objective["scope"] do
+          "strategy_lifetime" -> get_in(prior || %{}, [key])
+          "recurring" -> %{"recurrence_id" => nil, "progress" => nil}
+          _ -> nil
+        end
+
+      {key, progress}
+    end)
+  end
+
+  defp retire_generation(nil, _retired_at), do: :ok
+
+  defp retire_generation(%Generation{} = generation, retired_at) do
+    generation
+    |> Ecto.Changeset.change(retired_at: retired_at)
+    |> Repo.update!()
+
+    :ok
+  end
+
+  defp mark_stale_and_replace(%Agent{} = agent) do
+    with {:ok, stale_agent} <- mark_stale(agent),
+         %Generation{retired_at: nil, fleet_strategy_revision_id: revision_id} = generation
+         when not is_nil(revision_id) <-
+           Repo.get_by(Generation, agent_id: stale_agent.id),
+         %Operator{} = operator <- Repo.get(Operator, stale_agent.operator_id) do
+      symbols = generation.replacement_symbols["symbols"]
+      symbols = if is_list(symbols) and symbols != [], do: symbols, else: [stale_agent.symbol]
+
+      _ =
+        mint(Scope.for_operator(operator), %{
+          symbol: hd(symbols),
+          faction: generation.faction,
+          replacement_symbols: symbols
+        })
+    end
+
+    :ok
   end
 
   defp stale_agent_ids(%Operator{id: operator_id}, symbol) do
@@ -241,10 +454,39 @@ defmodule SpaceTraders.FleetGeneration do
   end
 
   defp mark_stale(%Agent{} = agent) do
-    agent
-    |> Ecto.Changeset.change(stale_at: DateTime.utc_now() |> DateTime.truncate(:second))
-    |> Repo.update()
+    Repo.transaction(fn ->
+      now = DateTime.utc_now()
+      ensure_generation_for_agent!(agent)
+
+      stale_agent =
+        agent
+        |> Ecto.Changeset.change(stale_at: DateTime.truncate(now, :second))
+        |> Repo.update!()
+
+      Repo.update_all(
+        from(generation in Generation,
+          where: generation.agent_id == ^agent.id and is_nil(generation.fenced_at)
+        ),
+        set: [fenced_at: now, updated_at: DateTime.truncate(now, :second)]
+      )
+
+      stale_agent
+    end)
   end
+
+  defp ensure_generation_for_agent!(%Agent{id: agent_id, operator_id: operator_id} = agent)
+       when is_integer(operator_id) do
+    Repo.get_by(Generation, agent_id: agent_id) ||
+      establish_generation!(
+        Repo.get!(Operator, operator_id),
+        agent,
+        nil,
+        [agent.symbol],
+        agent.faction
+      )
+  end
+
+  defp ensure_generation_for_agent!(%Agent{}), do: nil
 
   defp agent_execution_allowed?(%Agent{id: nil}), do: :ok
 

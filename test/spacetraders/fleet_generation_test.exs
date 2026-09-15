@@ -10,6 +10,162 @@ defmodule SpaceTraders.FleetGenerationTest do
   alias SpaceTraders.FleetStrategy
   alias SpaceTraders.Repo
 
+  test "a definitive Server Reset activates and bootstraps a fallback Fleet Generation" do
+    operator = operator_fixture()
+    {:ok, operator} = Agent.link_account_token(operator, "ACCOUNT_TOKEN_SECRET")
+    scope = Scope.for_operator(operator)
+
+    assert {:ok, strategy} = FleetStrategy.select_preset(scope, "charted_expansion")
+    assert {:ok, revision} = FleetStrategy.activate(scope, strategy.draft_version)
+
+    test_pid = self()
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      case {conn.method, conn.request_path, conn.body_params["symbol"]} do
+        {"POST", "/v2/register", "RESETME"} ->
+          Req.Test.json(conn, registration_body("RESETME", "RESETME-1", "FIRST_TOKEN"))
+      end
+    end)
+
+    assert {:ok, %{agent: stale_agent}} =
+             FleetGeneration.mint(scope, %{
+               symbol: "RESETME",
+               faction: "COSMIC",
+               replacement_symbols: ["RESETME", "FALLBACK"]
+             })
+
+    assert [first_generation] = FleetGeneration.list_generations(scope)
+    assert first_generation.fleet_strategy_revision_id == revision.id
+    assert %DateTime{} = first_generation.strategy_capable_at
+    assert Repo.get_by!(Ship, symbol: "RESETME-1").agent_id == stale_agent.id
+    stale_agent = Repo.get!(SpaceTraders.Agent.Agent, stale_agent.id)
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      case {conn.method, conn.request_path, conn.body_params["symbol"]} do
+        {"GET", "/v2/my/agent", nil} ->
+          conn
+          |> Map.put(:status, 401)
+          |> Req.Test.json(%{
+            "error" => %{
+              "code" => 4113,
+              "message" =>
+                "Failed to parse token. Token reset_date does not match the server. Server resets happen on a weekly to bi-weekly frequency during alpha. After a reset, you should re-register your agent. Expected: 2026-09-15, Actual: 2026-09-01"
+            }
+          })
+
+        {"POST", "/v2/register", "RESETME"} ->
+          fenced = Repo.get!(SpaceTraders.Agent.Agent, stale_agent.id)
+          assert %DateTime{} = fenced.stale_at
+          assert {:error, :stale_agent} = FleetGeneration.execution_allowed?(fenced)
+          send(test_pid, :stale_agent_retained)
+
+          conn
+          |> Map.put(:status, 400)
+          |> Req.Test.json(%{
+            "error" => %{"code" => 4103, "message" => "Symbol is already in use"}
+          })
+
+        {"POST", "/v2/register", "FALLBACK"} ->
+          assert Repo.get(SpaceTraders.Agent.Agent, stale_agent.id)
+          Req.Test.json(conn, registration_body("FALLBACK", "FALLBACK-1", "SECOND_TOKEN"))
+      end
+    end)
+
+    assert {:error, :stale_agent} = FleetGeneration.agent_overview(stale_agent)
+    assert_receive :stale_agent_retained
+
+    refute Repo.get(SpaceTraders.Agent.Agent, stale_agent.id)
+    replacement = Repo.get_by!(SpaceTraders.Agent.Agent, symbol: "FALLBACK")
+    assert Repo.get_by!(Ship, symbol: "FALLBACK-1").agent_id == replacement.id
+
+    assert [second_generation, retired_generation] = FleetGeneration.list_generations(scope)
+    assert second_generation.number == 2
+    assert second_generation.agent_id == replacement.id
+    assert second_generation.fleet_strategy_revision_id == revision.id
+    assert %DateTime{} = second_generation.strategy_capable_at
+    assert retired_generation.id == first_generation.id
+    assert %DateTime{} = retired_generation.fenced_at
+    assert %DateTime{} = retired_generation.retired_at
+    assert FleetStrategy.get(scope).active_revision.id == revision.id
+  end
+
+  test "activating Strategy makes an already bootstrapped Fleet Generation Strategy-capable" do
+    operator = operator_fixture()
+    {:ok, operator} = Agent.link_account_token(operator, "ACCOUNT_TOKEN_SECRET")
+    scope = Scope.for_operator(operator)
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      Req.Test.json(conn, registration_body("READY", "READY-1", "READY_TOKEN"))
+    end)
+
+    assert {:ok, _minted} =
+             FleetGeneration.mint(scope, %{symbol: "READY", faction: "COSMIC"})
+
+    assert [%{fleet_strategy_revision_id: nil, strategy_capable_at: nil}] =
+             FleetGeneration.list_generations(scope)
+
+    assert {:ok, strategy} = FleetStrategy.select_preset(scope, "steady_growth")
+    assert {:ok, revision} = FleetStrategy.activate(scope, strategy.draft_version)
+
+    assert [%{fleet_strategy_revision_id: revision_id, strategy_capable_at: capable_at}] =
+             FleetGeneration.list_generations(scope)
+
+    assert revision_id == revision.id
+    assert %DateTime{} = capable_at
+  end
+
+  test "retains the Stale Agent when replacement bootstrap fails" do
+    operator = operator_fixture()
+    {:ok, operator} = Agent.link_account_token(operator, "ACCOUNT_TOKEN_SECRET")
+    scope = Scope.for_operator(operator)
+    assert {:ok, strategy} = FleetStrategy.select_preset(scope, "steady_growth")
+    assert {:ok, _revision} = FleetStrategy.activate(scope, strategy.draft_version)
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      Req.Test.json(conn, registration_body("RESETME", "RESETME-1", "FIRST_TOKEN"))
+    end)
+
+    assert {:ok, %{agent: minted}} =
+             FleetGeneration.mint(scope, %{symbol: "RESETME", faction: "COSMIC"})
+
+    stale_agent = Repo.get!(SpaceTraders.Agent.Agent, minted.id)
+    conflict_owner = operator_fixture()
+    conflict_agent = agent_fixture(conflict_owner, %{symbol: "CONFLICT_OWNER"})
+
+    Repo.insert!(%Ship{
+      symbol: "CONFLICT-1",
+      ship_type: "SHIP_PROBE",
+      agent_id: conflict_agent.id
+    })
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      case conn.method do
+        "GET" ->
+          conn
+          |> Map.put(:status, 401)
+          |> Req.Test.json(%{
+            "error" => %{
+              "code" => 4113,
+              "message" =>
+                "Failed to parse token. Token reset_date does not match the server. Server resets happen on a weekly to bi-weekly frequency during alpha. After a reset, you should re-register your agent. Expected: 2026-09-15, Actual: 2026-09-01"
+            }
+          })
+
+        "POST" ->
+          Req.Test.json(conn, registration_body("RESETME", "CONFLICT-1", "SECOND_TOKEN"))
+      end
+    end)
+
+    assert {:error, :stale_agent} = FleetGeneration.agent_overview(stale_agent)
+    retained = Repo.get!(SpaceTraders.Agent.Agent, stale_agent.id)
+    assert %DateTime{} = retained.stale_at
+
+    assert [%{agent_id: agent_id, fenced_at: %DateTime{}, retired_at: nil}] =
+             FleetGeneration.list_generations(scope)
+
+    assert agent_id == stale_agent.id
+  end
+
   test "Emergency Stop blocks Agent mutations and replacement minting while reads continue" do
     operator = operator_fixture()
     {:ok, operator} = Agent.link_account_token(operator, "ACCOUNT_TOKEN_SECRET")
@@ -212,5 +368,101 @@ defmodule SpaceTraders.FleetGenerationTest do
     assert Ecto.Changeset.get_change(changeset, :agent_token) == nil
     refute inspect(changeset) =~ "AGENT_TOKEN_SECRET"
     refute Repo.get_by(SpaceTraders.Agent.Agent, symbol: "NEWSYM")
+  end
+
+  defp registration_body(agent_symbol, ship_symbol, token) do
+    %{
+      "data" => %{
+        "token" => token,
+        "agent" => %{
+          "symbol" => agent_symbol,
+          "credits" => 175_000,
+          "headquarters" => "X1-UX81-A2",
+          "startingFaction" => "COSMIC"
+        },
+        "contract" => %{"id" => "c1", "type" => "PROCUREMENT"},
+        "faction" => %{"symbol" => "COSMIC", "name" => "Cosmic", "isRecruiting" => true},
+        "ships" => [
+          %{
+            "symbol" => ship_symbol,
+            "registration" => %{
+              "name" => ship_symbol,
+              "factionSymbol" => "COSMIC",
+              "role" => "COMMAND"
+            },
+            "nav" => %{
+              "systemSymbol" => "X1-UX81",
+              "waypointSymbol" => "X1-UX81-A2",
+              "route" => %{
+                "destination" => %{
+                  "symbol" => "X1-UX81-A2",
+                  "type" => "PLANET",
+                  "systemSymbol" => "X1-UX81",
+                  "x" => 0,
+                  "y" => 0
+                },
+                "origin" => %{
+                  "symbol" => "X1-UX81-A2",
+                  "type" => "PLANET",
+                  "systemSymbol" => "X1-UX81",
+                  "x" => 0,
+                  "y" => 0
+                },
+                "departureTime" => "2026-09-15T00:00:00.000Z",
+                "arrival" => "2026-09-15T00:00:00.000Z"
+              },
+              "status" => "DOCKED",
+              "flightMode" => "CRUISE"
+            },
+            "crew" => %{
+              "current" => 1,
+              "required" => 1,
+              "capacity" => 1,
+              "rotation" => "STRICT",
+              "morale" => 100,
+              "wages" => 0
+            },
+            "frame" => %{
+              "symbol" => "FRAME_PROBE",
+              "name" => "Probe",
+              "description" => "Probe",
+              "condition" => 100,
+              "integrity" => 100,
+              "moduleSlots" => 0,
+              "mountingPoints" => 0,
+              "fuelCapacity" => 0,
+              "requirements" => %{"power" => 0, "crew" => 0, "slots" => 0}
+            },
+            "reactor" => %{
+              "symbol" => "REACTOR_SOLAR_I",
+              "name" => "Solar",
+              "description" => "Solar",
+              "condition" => 100,
+              "integrity" => 100,
+              "powerOutput" => 1,
+              "requirements" => %{"power" => 0, "crew" => 0, "slots" => 0}
+            },
+            "engine" => %{
+              "symbol" => "ENGINE_IMPULSE_DRIVE_I",
+              "name" => "Impulse",
+              "description" => "Impulse",
+              "condition" => 100,
+              "integrity" => 100,
+              "speed" => 1,
+              "requirements" => %{"power" => 0, "crew" => 0, "slots" => 0}
+            },
+            "modules" => [],
+            "mounts" => [],
+            "cargo" => %{"capacity" => 0, "units" => 0, "inventory" => []},
+            "fuel" => %{"current" => 0, "capacity" => 0, "consumed" => %{"amount" => 0}},
+            "cooldown" => %{
+              "shipSymbol" => ship_symbol,
+              "totalSeconds" => 0,
+              "remainingSeconds" => 0
+            }
+          }
+        ]
+      }
+    }
   end
 end

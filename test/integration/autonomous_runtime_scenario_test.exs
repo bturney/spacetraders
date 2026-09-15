@@ -6,7 +6,6 @@ defmodule SpaceTraders.AutonomousRuntimeScenarioTest do
 
   alias SpaceTraders.Agent
   alias SpaceTraders.Agent.Agent, as: GameAgent
-  alias SpaceTraders.Fleet.Ship
   alias SpaceTraders.Fleet.ShipServer
   alias SpaceTraders.Timeline
   alias SpaceTraders.Timeline.Event
@@ -62,12 +61,6 @@ defmodule SpaceTraders.AutonomousRuntimeScenarioTest do
     refute inspect(minted) =~ @agent_token
 
     game_agent = Repo.get_by!(GameAgent, symbol: "SCENARIO")
-
-    Repo.insert!(%Ship{
-      symbol: @ship_symbol,
-      ship_type: "SHIP_COMMAND_FRIGATE",
-      agent_id: game_agent.id
-    })
 
     subscribe_to_notifications(game_agent)
 
