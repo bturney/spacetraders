@@ -6,7 +6,7 @@ Parallel ticket work uses one task-ID-based setup flow for humans and runners. C
 
 ## Consequences
 
-The cache is pruned explicitly, retaining entries for at most 30 days and 10 GiB by default. The parallel-worktree contract is proven by a separate required CI job rather than the normal local verification gate.
+The cache is pruned explicitly, retaining entries for at most 30 days and 10 GiB by default. The worktree and Task Workspace integration scripts remain available for manual diagnosis, but are not a required CI gate; their maintenance cost and overlap with the canonical lifecycle outweighed the signal from running them on every change.
 
 ## Task workspace lifecycle
 

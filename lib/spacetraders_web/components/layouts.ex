@@ -52,6 +52,7 @@ defmodule SpaceTradersWeb.Layouts do
           <nav class="flex items-center gap-1 sm:gap-2" aria-label="Operator navigation">
             <%= if @current_scope do %>
               <span class="hidden max-w-44 truncate px-2 text-xs opacity-60 md:block">{@current_scope.operator.email}</span>
+              <.link navigate={~p"/strategy"} class="btn btn-sm btn-ghost">Strategy</.link>
               <.link navigate={~p"/agents/new"} class="btn btn-sm btn-primary">Mint agent</.link>
               <.link navigate={~p"/operators/settings"} class="btn btn-sm btn-ghost">Settings</.link>
               <.link href={~p"/operators/log-out"} method="delete" class="btn btn-sm btn-ghost">Log out</.link>

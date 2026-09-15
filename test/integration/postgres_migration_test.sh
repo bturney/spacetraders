@@ -39,6 +39,9 @@ trap '"${compose[@]}" down --volumes >/dev/null 2>&1 || true' EXIT
     repo = SpaceTraders.LegacyRepo
     repo.query!("INSERT INTO operators (email, account_token_ciphertext, inserted_at, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)", ["sqlite@example.test", "encrypted-account-token"])
     repo.query!("INSERT INTO operators_tokens (operator_id, token, context, inserted_at) VALUES (1, ?, ?, CURRENT_TIMESTAMP)", [<<1, 2, 3>>, "session"])
+    repo.query!("INSERT INTO fleet_strategies (operator_id, draft_document, draft_source, draft_version, revision_number, inserted_at, updated_at) VALUES (1, ?, ?, 2, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)", [~s({"objectives":[{"objective":"Chart waypoints","kind":"attain","evaluation":"Increase chart coverage","scope":"fleet_generation"}],"hard_constraints":["Keep 75000 credits available"],"preferences":["Prefer nearby systems"],"consequences":"Near-term growth may slow"}), "operator"])
+    repo.query!("INSERT INTO fleet_strategy_revisions (fleet_strategy_id, number, document, source, activated_at, inserted_at) VALUES (1, 1, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)", [~s({"objectives":[{"objective":"Grow credits","kind":"continuous","evaluation":"Maximize net credit growth","scope":"recurring"}],"hard_constraints":["Keep 50000 credits available"],"preferences":["Prefer short routes"],"consequences":"Credits may be spent above the floor"}), "preset:steady_growth"])
+    repo.query!("UPDATE fleet_strategies SET active_revision_id = 1 WHERE id = 1")
     repo.query!("INSERT INTO agents (symbol, faction, headquarters, agent_token_ciphertext, operator_id, inserted_at, updated_at) VALUES (?, ?, ?, ?, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)", ["SQLITE-1", "COSMIC", "X1-TEST-A1", "encrypted-agent-token"])
     repo.query!("INSERT INTO ships (symbol, ship_type, agent_id, inserted_at, updated_at) VALUES (?, ?, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)", ["SQLITE-1-1", "SHIP_PROBE"])
     repo.query!("INSERT INTO fleet_activity (agent_id, ship_id, kind, message, metadata, inserted_at, updated_at) VALUES (1, 1, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)", ["historical", "retained activity", ~s({"source":"sqlite"})])
@@ -83,7 +86,7 @@ migration_count=$("${compose[@]}" exec -T postgres \
 
 first_reconciliation=$(sed -n 's/.*reconciliation=//p' <<<"$first_cutover")
 [[ "$first_reconciliation" =~ ^[0-9a-f]{64}$ ]]
-grep -q 'operation=postgres_cutover status=completed tables=12 rows=8' <<<"$first_cutover"
+grep -q 'operation=postgres_cutover status=completed tables=14 rows=10' <<<"$first_cutover"
 grep -q 'operation=postgres_cutover status=already_authoritative store=postgresql' <<<"$second_cutover"
 
 postgres_state=$("${compose[@]}" exec -T postgres psql --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" --tuples-only --no-align \
@@ -93,6 +96,10 @@ postgres_state=$("${compose[@]}" exec -T postgres psql --username "$POSTGRES_USE
 authority_state=$("${compose[@]}" exec -T postgres psql --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" --tuples-only --no-align \
   --command "SELECT r.store || ':' || j.status || ':' || i.status || ':' || o.event FROM runtime_authority r CROSS JOIN jobs j CROSS JOIN intents i CROSS JOIN outbox_notifications o")
 [[ "$authority_state" == postgresql:stopped:blocked:postgresql_authority_advanced ]]
+
+strategy_state=$("${compose[@]}" exec -T postgres psql --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" --tuples-only --no-align \
+  --command "SELECT (fs.draft_document->'objectives'->0->>'objective') || ':' || (fr.document->'objectives'->0->>'objective') || ':' || fs.active_revision_id FROM fleet_strategies fs JOIN fleet_strategy_revisions fr ON fr.id = fs.active_revision_id")
+[[ "$strategy_state" == "Chart waypoints:Grow credits:1" ]]
 
 if "${compose[@]}" run --rm migrate bin/spacetraders eval 'SpaceTraders.Release.rehearse_sqlite_to_postgres()'; then
   printf '%s\n' 'Expected forward-only authority to reject SQLite rehearsal.' >&2
