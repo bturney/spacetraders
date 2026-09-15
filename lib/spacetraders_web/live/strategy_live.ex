@@ -129,6 +129,17 @@ defmodule SpaceTradersWeb.StrategyLive do
           </.form>
 
           <div :if={@projection.draft} class="mt-6 border-t border-base-300 pt-6">
+            <div :if={@draft_stale?} class="alert alert-warning mb-6 items-start">
+              <div>
+                <strong>Draft changed elsewhere</strong>
+                <p class="text-sm">
+                  Your local text is preserved. Review the latest durable draft before activation.
+                </p>
+              </div>
+              <button id="review-latest-draft" phx-click="review_latest" class="btn btn-sm">
+                Review latest draft
+              </button>
+            </div>
             <div :if={@projection.active_revision} class="mb-6 rounded-xl bg-base-200 p-4">
               <h3 class="text-lg font-bold">Revision changes</h3>
               <div class="mt-3 grid gap-5 lg:grid-cols-2">
@@ -149,6 +160,7 @@ defmodule SpaceTradersWeb.StrategyLive do
                 id="activate-strategy"
                 phx-click="activate"
                 phx-value-version={@projection.draft_version}
+                disabled={@draft_stale?}
                 class="btn btn-primary"
               >
                 Activate this exact revision
@@ -191,6 +203,10 @@ defmodule SpaceTradersWeb.StrategyLive do
      |> assign_projection()}
   end
 
+  def handle_event("review_latest", _params, socket) do
+    {:noreply, assign_projection(socket)}
+  end
+
   def handle_event("activate", %{"version" => version}, socket) do
     {expected_version, ""} = Integer.parse(version)
 
@@ -219,7 +235,16 @@ defmodule SpaceTradersWeb.StrategyLive do
   @impl true
   def handle_info({:fleet_strategy_updated, operator_id}, socket) do
     if socket.assigns.current_scope.operator.id == operator_id do
-      {:noreply, assign_projection(socket)}
+      projection = MissionControl.strategy(socket.assigns.current_scope)
+
+      if projection.draft_version == socket.assigns.projection.draft_version do
+        {:noreply, socket}
+      else
+        {:noreply,
+         socket
+         |> assign(:projection, projection)
+         |> assign(:draft_stale?, true)}
+      end
     else
       {:noreply, socket}
     end
@@ -300,6 +325,7 @@ defmodule SpaceTradersWeb.StrategyLive do
 
     socket
     |> assign(:projection, projection)
+    |> assign(:draft_stale?, false)
     |> assign(:form_drafts, form_drafts)
     |> assign(:form, to_form(form_drafts, as: "strategy"))
   end

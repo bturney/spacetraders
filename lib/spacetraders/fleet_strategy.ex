@@ -79,21 +79,13 @@ defmodule SpaceTraders.FleetStrategy do
   def save_draft(%Scope{} = scope, document), do: put_draft(scope, document, "operator")
 
   @doc "Opens a recommendation as a reviewable draft without changing active intent."
-  def recommend(%Scope{} = scope, document) do
-    case get(scope) do
-      %{draft: nil} -> put_draft(scope, document, "recommendation")
-      _ -> {:error, :draft_exists}
-    end
-  end
+  def recommend(%Scope{} = scope, document), do: open_draft(scope, document, "recommendation")
 
   @doc "Copies a disclosed preset into a reviewable draft."
   def select_preset(%Scope{} = scope, preset_id) do
-    with %{draft: nil} <- get(scope),
-         preset when not is_nil(preset) <- Enum.find(@presets, &(&1.id == preset_id)) do
-      put_draft(scope, preset_document(preset), "preset:#{preset.id}")
-    else
-      %{draft: _draft} -> {:error, :draft_exists}
+    case Enum.find(@presets, &(&1.id == preset_id)) do
       nil -> {:error, :preset_not_found}
+      preset -> open_draft(scope, preset_document(preset), "preset:#{preset.id}")
     end
   end
 
@@ -175,6 +167,66 @@ defmodule SpaceTraders.FleetStrategy do
 
   defp put_draft(_scope, _document, _source), do: {:error, :invalid_document}
 
+  defp open_draft(
+         %Scope{operator: %Operator{id: operator_id}} = scope,
+         document,
+         source
+       )
+       when is_map(document) do
+    with :ok <- validate_draft_document(document) do
+      case Repo.get_by(Strategy, operator_id: operator_id) do
+        nil ->
+          case %Strategy{}
+               |> Strategy.changeset(%{
+                 operator_id: operator_id,
+                 draft_document: document,
+                 draft_source: source,
+                 draft_version: 1
+               })
+               |> Repo.insert() do
+            {:ok, _strategy} ->
+              broadcast_update(scope)
+              {:ok, get(scope)}
+
+            {:error,
+             %{errors: [operator_id: {_message, constraint: :unique, constraint_name: _}]}} ->
+              {:error, :draft_exists}
+
+            error ->
+              error
+          end
+
+        %Strategy{draft_document: nil} = strategy ->
+          {claimed, _rows} =
+            Repo.update_all(
+              from(candidate in Strategy,
+                where:
+                  candidate.id == ^strategy.id and
+                    candidate.draft_version == ^strategy.draft_version
+              ),
+              inc: [draft_version: 1],
+              set: [
+                draft_document: document,
+                draft_source: source,
+                updated_at: DateTime.utc_now(:second)
+              ]
+            )
+
+          if claimed == 1 do
+            broadcast_update(scope)
+            {:ok, get(scope)}
+          else
+            {:error, :draft_exists}
+          end
+
+        %Strategy{} ->
+          {:error, :draft_exists}
+      end
+    end
+  end
+
+  defp open_draft(_scope, _document, _source), do: {:error, :invalid_document}
+
   defp update_strategy(strategy, scope, attrs) do
     result =
       if strategy.id do
@@ -207,7 +259,13 @@ defmodule SpaceTraders.FleetStrategy do
   end
 
   defp active_revision(%Strategy{active_revision_id: nil}), do: nil
-  defp active_revision(%Strategy{active_revision_id: id}), do: Repo.get(Revision, id)
+
+  defp active_revision(%Strategy{id: strategy_id, active_revision_id: revision_id}) do
+    Repo.one(
+      from revision in Revision,
+        where: revision.id == ^revision_id and revision.fleet_strategy_id == ^strategy_id
+    )
+  end
 
   defp validate_document(%{
          "objectives" => [_ | _] = objectives,

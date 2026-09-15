@@ -59,6 +59,48 @@ defmodule SpaceTradersWeb.StrategyLiveTest do
     assert reconnected_html =~ "Maintain at least 90,000 credits"
   end
 
+  test "an external draft update preserves local form text and requires renewed review", %{
+    conn: conn,
+    scope: scope
+  } do
+    {:ok, view, _html} = live(conn, ~p"/strategy")
+
+    view
+    |> form("#strategy-draft-form", %{
+      "strategy" => %{
+        "objectives" => "Grow credits | continuous | Measure growth | recurring",
+        "hard_constraints" => "Keep 50,000 credits available",
+        "preferences" => "Prefer short routes",
+        "consequences" => "Credits may be spent above the floor"
+      }
+    })
+    |> render_change()
+
+    assert {:ok, _updated} =
+             FleetStrategy.save_draft(scope, %{
+               "objectives" => [
+                 %{
+                   "objective" => "Chart waypoints",
+                   "kind" => "attain",
+                   "evaluation" => "Increase chart coverage",
+                   "scope" => "fleet_generation"
+                 }
+               ],
+               "hard_constraints" => ["Keep 75,000 credits available"],
+               "preferences" => ["Prefer nearby systems"],
+               "consequences" => "Near-term growth may slow"
+             })
+
+    html = render(view)
+    assert html =~ "Draft changed elsewhere"
+    assert html =~ "Grow credits | continuous | Measure growth | recurring"
+    assert has_element?(view, "#activate-strategy[disabled]")
+
+    view |> element("#review-latest-draft") |> render_click()
+    assert render(view) =~ "Chart waypoints | attain | Increase chart coverage | fleet_generation"
+    refute has_element?(view, "#activate-strategy[disabled]")
+  end
+
   test "preset selection creates a draft and activation requires an explicit action", %{
     conn: conn,
     scope: scope
