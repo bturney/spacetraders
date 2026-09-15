@@ -2,7 +2,7 @@
 # Teardown for the spacetraders project.
 #
 # Stops any running BEAM server process rooted at this checkout and removes
-# build artifacts and local SQLite databases. Deps are shared across checkouts
+# build artifacts. Deps are shared across checkouts
 # under the toolchain dir (see _toolchain.sh) and are left in place.
 # Does not remove the installed Erlang/Elixir toolchain (that lives outside the checkout).
 #
@@ -21,12 +21,10 @@ for pid in $(pgrep -f 'beam\.smp' 2>/dev/null || true); do
   fi
 done
 
-# Wait briefly for the server to release the SQLite files.
 sleep 1
 
 rm -rf "$PROJECT_ROOT/_build" "$PROJECT_ROOT/deps"
 rm -rf "$PROJECT_ROOT/priv/static/assets"
-rm -f "$PROJECT_ROOT"/*.db "$PROJECT_ROOT"/*.db-*
 
 if [ "${WORKTREE_PORT_LEASE:-0}" = 1 ] && [ -n "${AGENT_TASK_ID:-}" ]; then
   "$SCRIPT_DIR/worktree-release-port" "$AGENT_TASK_ID"

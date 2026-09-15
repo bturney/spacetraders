@@ -4,7 +4,7 @@ defmodule SpaceTraders.ArchitectureDecisionTest do
   @adr_dir Path.expand("../../docs/adr", __DIR__)
   @governing_adr Path.join(@adr_dir, "0010-autonomous-runtime.md")
   @relationships [
-    {"0002-sqlite-local-state.md", "ADR 0002 is superseded",
+    {"0002-sqlite-local-state.md", "ADR 0002 is retired",
      "Superseded for the autonomous runtime by [ADR 0010](0010-autonomous-runtime.md)."},
     {"0004-liveview-as-control-surface-no-cli.md", "ADR 0004 is superseded",
      "The per-Ship manual-control framing is superseded for the autonomous runtime by [ADR 0010](0010-autonomous-runtime.md)."},

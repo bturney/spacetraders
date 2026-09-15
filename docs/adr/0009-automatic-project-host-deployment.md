@@ -16,8 +16,8 @@ after a passing health check. A failed deployment makes a best-effort attempt to
 reinstate the last recorded image with the current Compose bundle; when no state
 file exists, it uses the current web container image as the rollback candidate.
 This single-Operator service does not retain versioned Compose bundles. If image
-rollback cannot recover service, the Operator creates fresh database volumes,
-runs migrations, and reseeds authoritative SQLite state.
+rollback cannot recover service, the Operator creates a fresh PostgreSQL volume,
+runs migrations, and reseeds authoritative PostgreSQL state.
 
 The self-hosted workflow and the Tailscale-based `scripts/deploy` wrapper use the
 same versioned routine and Compose files. The runner uses a dedicated account

@@ -3317,13 +3317,7 @@ defmodule SpaceTraders.FleetTest do
     end
   end
 
-  defp terminal_job_immutability_error do
-    if Application.fetch_env!(:spacetraders, :repo_adapter) == Ecto.Adapters.Postgres do
-      Postgrex.Error
-    else
-      Exqlite.Error
-    end
-  end
+  defp terminal_job_immutability_error, do: Postgrex.Error
 
   describe "Procurement Job" do
     setup do

@@ -6,8 +6,8 @@ Date: 2026-09-13
 
 ## Context
 
-The application currently combines a LiveView dashboard, SQLite-backed local
-state, per-entity timers, Jobs, Policies, and Intents. Those choices support
+The application combines a LiveView dashboard, PostgreSQL-backed state,
+per-entity timers, Jobs, Policies, and Intents. Those choices support
 Operator-directed automation, but they do not define how durable outcome-level
 intent becomes coherent Fleet-wide action, how shared resources are allocated,
 or how autonomous authority survives failures and Server Resets.
@@ -81,9 +81,8 @@ and history continue.
 
 ## Superseded and reaffirmed decisions
 
-- **ADR 0002 is superseded for the target runtime.** PostgreSQL, not SQLite, is
-  the durable application store. SQLite remains only during migration and as a
-  cutover rollback artifact.
+- **ADR 0002 is retired.** PostgreSQL is the durable application store; the
+  former SQLite migration and rollback path has been removed.
 - **ADR 0004 is superseded where it frames the dashboard as a per-Ship manual
   control surface.** LiveView remains the initial Mission Control adapter, but
   routine gameplay is governed by Fleet Strategy and Standing Authority.

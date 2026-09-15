@@ -25,11 +25,6 @@ config :spacetraders,
   ecto_repos: [SpaceTraders.Repo],
   generators: [timestamp_type: :utc_datetime]
 
-# Development and the fast default test suite retain SQLite. Production and the
-# PostgreSQL verification environment override this compile-time adapter.
-config :spacetraders, :repo_adapter, Ecto.Adapters.SQLite3
-
-config :spacetraders, SpaceTraders.LegacyRepo, priv: "priv/repo"
 config :spacetraders, SpaceTraders.RuntimeAuthority, enabled: false
 
 # Configure the endpoint

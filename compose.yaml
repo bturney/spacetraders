@@ -19,9 +19,8 @@ services:
     command:
       - bin/spacetraders
       - eval
-      - "if function_exported?(SpaceTraders.Release, :cutover, 0), do: SpaceTraders.Release.cutover(), else: SpaceTraders.Release.migrate()"
+       - "SpaceTraders.Release.migrate()"
     environment:
-      DATABASE_PATH: /data/spacetraders.db
       POSTGRES_HOST: postgres
       POSTGRES_DB: ${POSTGRES_DB:-spacetraders}
       POSTGRES_USER: ${POSTGRES_USER:-spacetraders}
@@ -29,8 +28,6 @@ services:
       SECRET_KEY_BASE: ${SECRET_KEY_BASE:?set SECRET_KEY_BASE in the host .env}
       ENCRYPTION_KEY: ${ENCRYPTION_KEY:?set ENCRYPTION_KEY in the host .env}
       PHX_HOST: ${PHX_HOST:?set PHX_HOST in the host .env}
-    volumes:
-      - spacetraders-data:/data
     depends_on:
       postgres:
         condition: service_healthy
@@ -38,7 +35,6 @@ services:
   web:
     build: .
     environment:
-      DATABASE_PATH: /data/spacetraders.db
       POSTGRES_HOST: postgres
       POSTGRES_DB: ${POSTGRES_DB:-spacetraders}
       POSTGRES_USER: ${POSTGRES_USER:-spacetraders}
@@ -54,9 +50,6 @@ services:
       migrate:
         condition: service_completed_successfully
     stop_grace_period: 60s
-    volumes:
-      - spacetraders-data:/data
 
 volumes:
-  spacetraders-data:
   spacetraders-postgres:

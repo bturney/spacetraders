@@ -11,13 +11,12 @@ config :pbkdf2_elixir, :rounds, 1
 test_partition = System.get_env("MIX_TEST_PARTITION") || System.pid()
 
 config :spacetraders, SpaceTraders.Repo,
-  database: Path.expand("../spacetraders_test#{test_partition}.db", __DIR__),
-  # SQLite permits one writer; one sandbox connection makes concurrent ExUnit
-  # cases wait instead of failing intermittently with "Database busy".
-  pool_size: 1,
-  # Concurrent worktree verification can hold SQLite's write lock longer than
-  # the adapter's 2-second default while each suite creates and tears down its DB.
-  busy_timeout: 10_000,
+  url:
+    System.get_env(
+      "DATABASE_URL",
+      "postgres://postgres:postgres@localhost/spacetraders_test#{test_partition}"
+    ),
+  pool_size: 10,
   pool: Ecto.Adapters.SQL.Sandbox
 
 # We don't run a server during test. If one is required,

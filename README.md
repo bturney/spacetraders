@@ -20,7 +20,7 @@ gameplay authority boundary.
 
 ## Development
 
-Phoenix 1.8 app (Bandit + LiveView) with SQLite via `ecto_sqlite3`. Erlang/OTP
+Phoenix 1.8 app (Bandit + LiveView) with PostgreSQL via `postgrex`. Erlang/OTP
 27.3.4 + Elixir 1.18.4 (see `.tool-versions`).
 
 ### Bootstrap
@@ -54,31 +54,28 @@ scripts/verify   # == mix verify
 4. `space_traders.gen.models --check` — fail if committed API structs are stale
 5. `verify.boot` — starts the full app on a real HTTP server and asserts `GET /health` → 200
 
-### PostgreSQL verification
+### PostgreSQL
 
-PostgreSQL is the production durable application store. Maintainers can run the
-identical verification gate against PostgreSQL while the fast default test suite
-continues to use SQLite:
+PostgreSQL is the application store and the verification database. Start a local
+instance, then run the same canonical gate used by CI:
 
 ```sh
 docker run --rm --name spacetraders-postgres -p 5432:5432 \
   -e POSTGRES_DB=spacetraders_test -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=postgres \
   postgres:17
-scripts/verify-postgres
+scripts/verify
 ```
 
-Set `DATABASE_URL` to use another PostgreSQL instance. The `postgres_test` Mix
-environment is test-only; adapter-specific historical migration SQL is kept
-explicitly branched and covered by this gate.
+Set `DATABASE_URL` to use another PostgreSQL instance.
 
-Autonomous runtime scenarios use `SpaceTraders.ScenarioCase` and run only in
-this PostgreSQL gate. The case drives authenticated Phoenix interfaces while
-providing controlled SpaceTraders API responses, a shared fake clock, runtime
-process restarts, durable `SpaceTraders.Repo` inspection, and captured telemetry
-and Fleet notifications. Run the representative scenario directly with:
+Autonomous runtime scenarios use `SpaceTraders.ScenarioCase`. The case drives
+authenticated Phoenix interfaces while providing controlled SpaceTraders API
+responses, a shared fake clock, runtime process restarts, durable
+`SpaceTraders.Repo` inspection, and captured telemetry and Fleet notifications.
+Run the representative scenario directly with:
 
 ```sh
-MIX_ENV=postgres_test mix test test/integration/autonomous_runtime_scenario_test.exs
+mix test test/integration/autonomous_runtime_scenario_test.exs
 ```
 
 ### Game API client & codegen
@@ -152,7 +149,7 @@ SPACETRADERS_AGENT_TOKEN=<token> mix run priv/repo/seeds.exs   # real token
 ### Teardown
 
 Stops a running server rooted at this checkout and removes build artifacts
-and local SQLite files (deps are shared across checkouts and left in place):
+(deps are shared across checkouts and left in place):
 
 ```sh
 scripts/teardown
@@ -160,7 +157,7 @@ scripts/teardown
 
 ### Project-host deployment
 
-Production runs on the Tailscale machine `project-host`. SQLite remains the
-authoritative database; PostgreSQL is prepared for the later authority cutover.
+Production runs on the Tailscale machine `project-host` with PostgreSQL as the
+authoritative database.
 Read the [project-host runbook](docs/operations/project-host.md) before changing
 or running deployment, migration, backup, restore, or fresh-database recovery.

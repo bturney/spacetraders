@@ -6,12 +6,9 @@ defmodule SpaceTraders.DataCase do
   You may define functions here to be used as helpers in
   your tests.
 
-  Finally, if the test case interacts with the database,
-  we enable the SQL sandbox, so changes done to the database
-  are reverted at the end of every test. If you are using
-  PostgreSQL, you can even run database tests asynchronously
-  by setting `use SpaceTraders.DataCase, async: true`, although
-  this option is not recommended for other databases.
+   Finally, if the test case interacts with the database,
+   we enable the SQL sandbox, so changes done to the database
+   are reverted at the end of every test.
   """
 
   use ExUnit.CaseTemplate
@@ -28,10 +25,7 @@ defmodule SpaceTraders.DataCase do
   end
 
   setup tags do
-    unless tags[:migration_test] &&
-             Application.fetch_env!(:spacetraders, :repo_adapter) == Ecto.Adapters.Postgres do
-      SpaceTraders.DataCase.setup_sandbox(tags)
-    end
+    unless tags[:migration_test], do: SpaceTraders.DataCase.setup_sandbox(tags)
 
     :ok
   end
