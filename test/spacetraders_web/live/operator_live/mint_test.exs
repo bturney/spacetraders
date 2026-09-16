@@ -147,6 +147,27 @@ defmodule SpaceTradersWeb.OperatorLive.MintTest do
       assert result =~ "Symbol is already in use"
     end
 
+    test "reports when mutation authority is unavailable", %{conn: conn} do
+      previous = Application.get_env(:spacetraders, SpaceTraders.RuntimeAuthority)
+      Application.put_env(:spacetraders, SpaceTraders.RuntimeAuthority, enabled: true)
+
+      on_exit(fn ->
+        Application.put_env(:spacetraders, SpaceTraders.RuntimeAuthority, previous)
+      end)
+
+      operator = operator_fixture()
+      {:ok, operator} = Agent.link_account_token(operator, "ACCOUNT_TOKEN")
+
+      {:ok, lv, _html} = conn |> log_in_operator(operator) |> live(~p"/agents/new")
+
+      result =
+        lv
+        |> form("#mint_form", @mint_form)
+        |> render_submit()
+
+      assert result =~ "Minting is temporarily unavailable. Please try again shortly."
+    end
+
     test "explains when an AgentToken is linked instead of an AccountToken", %{conn: conn} do
       operator = operator_fixture()
       {:ok, operator} = Agent.link_account_token(operator, "AGENT_TOKEN")

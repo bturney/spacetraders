@@ -110,6 +110,14 @@ defmodule SpaceTradersWeb.OperatorLive.Mint do
          |> put_flash(:error, "Link your AccountToken in Settings before minting.")
          |> redirect(to: ~p"/operators/settings")}
 
+      {:error, :runtime_authority_unavailable} ->
+        {:noreply,
+         put_flash(
+           socket,
+           :error,
+           "Minting is temporarily unavailable. Please try again shortly."
+         )}
+
       {:error, :stale_symbol_owned_elsewhere} ->
         {:noreply,
          put_flash(

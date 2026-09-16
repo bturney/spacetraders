@@ -42,6 +42,23 @@ defmodule SpaceTraders.RuntimeAuthorityTest do
 
   test "does not claim mutation authority before PostgreSQL cutover completes" do
     name = :pre_cutover_authority
+    {:ok, connection} = Postgrex.start_link(runtime_authority_connection_options())
+    Process.unlink(connection)
+
+    Postgrex.query!(connection, "DELETE FROM runtime_authority WHERE name = 'durable_truth'", [])
+
+    on_exit(fn ->
+      Postgrex.query!(
+        connection,
+        """
+        INSERT INTO runtime_authority (name, store, advanced_at)
+        VALUES ('durable_truth', 'postgresql', CURRENT_TIMESTAMP)
+        """,
+        []
+      )
+
+      GenServer.stop(connection)
+    end)
 
     start_supervised!(
       {RuntimeAuthority, name: name, lock_key: System.unique_integer([:positive])}
@@ -132,5 +149,20 @@ defmodule SpaceTraders.RuntimeAuthorityTest do
       Process.sleep(10)
       assert_eventually(fun, attempts - 1)
     end
+  end
+
+  defp runtime_authority_connection_options do
+    SpaceTraders.Repo.config()
+    |> Keyword.take([
+      :hostname,
+      :port,
+      :username,
+      :password,
+      :database,
+      :ssl,
+      :socket_options,
+      :timeout,
+      :connect_timeout
+    ])
   end
 end
