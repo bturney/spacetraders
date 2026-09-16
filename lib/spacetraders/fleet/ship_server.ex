@@ -211,8 +211,16 @@ defmodule SpaceTraders.Fleet.ShipServer do
 
   defp retry(event, state, reason) do
     Logger.warning("ship #{state.symbol}: #{reason}; retrying in #{@retry_delay_ms}ms")
-    Clock.send_after(self(), {:timeline, event}, @retry_delay_ms)
-    {:noreply, state}
+
+    due_at = DateTime.add(Clock.utc_now(), @retry_delay_ms, :millisecond)
+
+    case Timeline.reschedule_event(event, due_at) do
+      {:ok, event} ->
+        {:noreply, rearm(event, state)}
+
+      {:error, :event_not_pending} ->
+        {:noreply, drop_pending_event(state, event_type(event), event)}
+    end
   end
 
   # An arrival is only done once the game reports the ship out of transit, and a
@@ -237,7 +245,7 @@ defmodule SpaceTraders.Fleet.ShipServer do
   defp rearm(%Event{} = event, state) do
     type = String.to_existing_atom(event.event_type)
 
-    if match?(%{id: id} when id == event.id, Map.get(state.pending, type)) do
+    if Map.get(state.pending, type) == %{id: event.id, due_at: event.due_at} do
       state
     else
       Clock.send_at(self(), {:timeline, event}, event.due_at)
@@ -246,6 +254,8 @@ defmodule SpaceTraders.Fleet.ShipServer do
       %{state | pending: Map.put(state.pending, type, pending_event)}
     end
   end
+
+  defp event_type(event), do: String.to_existing_atom(event.event_type)
 
   defp drop_pending_event(state, type, event) do
     case Map.get(state.pending, type) do

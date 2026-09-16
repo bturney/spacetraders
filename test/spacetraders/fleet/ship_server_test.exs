@@ -111,6 +111,20 @@ defmodule SpaceTraders.Fleet.ShipServerTest do
       assert Repo.get(Event, event.id).status == "done"
     end
 
+    test "reconstructs a future wakeup after the Ship Server restarts" do
+      symbol = unique_symbol()
+      subscribe_fleet()
+      stub_refresh(symbol)
+
+      event = schedule(symbol, :arrival, DateTime.add(DateTime.utc_now(), 100, :millisecond))
+
+      pid = start_server(symbol)
+      :ok = GenServer.stop(pid)
+
+      assert_receive {:ship_updated, @agent_id, ^symbol}, 1_000
+      assert Repo.get(Event, event.id).status == "done"
+    end
+
     test "keeps a past-due event pending and retries when the refresh fails" do
       symbol = unique_symbol()
       stub_refresh(symbol, :error)
@@ -119,8 +133,11 @@ defmodule SpaceTraders.Fleet.ShipServerTest do
 
       start_server(symbol)
 
-      Process.sleep(50)
-      assert Repo.get(Event, event.id).status == "pending"
+      assert eventually(fn ->
+               persisted = Repo.get!(Event, event.id)
+               persisted.status == "pending" and DateTime.compare(persisted.due_at, DateTime.utc_now()) == :gt
+             end)
+
       assert ShipServer.ensure_ready(symbol) == {:error, :ship_in_transit}
     end
 
@@ -157,7 +174,12 @@ defmodule SpaceTraders.Fleet.ShipServerTest do
       # Clock skew between the game and this app: the event is due, but the game
       # still says IN_TRANSIT, so the ship stays busy and no update is broadcast.
       refute_receive {:ship_updated, @agent_id, ^symbol}, 150
-      assert Repo.get(Event, event.id).status == "pending"
+
+      assert eventually(fn ->
+               persisted = Repo.get!(Event, event.id)
+               persisted.status == "pending" and DateTime.compare(persisted.due_at, DateTime.utc_now()) == :gt
+             end)
+
       assert ShipServer.ensure_ready(symbol) == {:error, :ship_in_transit}
     end
 
