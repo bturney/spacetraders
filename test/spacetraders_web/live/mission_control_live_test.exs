@@ -57,7 +57,14 @@ defmodule SpaceTradersWeb.MissionControlLiveTest do
       symbol: agent.symbol,
       faction: agent.faction,
       replacement_symbols: %{"symbols" => [agent.symbol]},
-      objective_progress: %{},
+      objective_progress: %{
+        "0" => %{
+          "change" => 10,
+          "elapsed_seconds" => 5,
+          "feasible?" => true,
+          "horizon_seconds" => 10
+        }
+      },
       strategy_capable_at: DateTime.utc_now()
     })
 
@@ -66,5 +73,6 @@ defmodule SpaceTradersWeb.MissionControlLiveTest do
     assert html =~ agent.symbol
     assert html =~ "Generation 1"
     assert html =~ "Strategy-capable"
+    assert html =~ "Measured outcome rate: 20.0 per horizon."
   end
 end
