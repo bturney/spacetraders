@@ -606,8 +606,8 @@ defmodule SpaceTraders.API do
       {:error, reason} ->
         complete_shadow(
           shadow,
-          "not_dispatched",
-          "persistence_error",
+          :not_dispatched,
+          :persistence_error,
           {:error, SpaceTraders.API.Error.transport(reason)}
         )
     end
@@ -625,13 +625,13 @@ defmodule SpaceTraders.API do
                    reason: "response_decode_failed"
                  }) do
               :ok ->
-                complete_shadow(shadow, status, "decode_error", {:error, error})
+                complete_shadow(shadow, status, :decode_error, {:error, error})
 
               {:error, reason} ->
                 complete_shadow(
                   shadow,
                   status,
-                  "persistence_error",
+                  :persistence_error,
                   {:error, SpaceTraders.API.Error.transport(reason)}
                 )
             end
@@ -639,13 +639,13 @@ defmodule SpaceTraders.API do
           decoded ->
             case record_mutation_outcome(attempt, :succeeded, %{status: status}) do
               :ok ->
-                complete_shadow(shadow, status, "ok", {:ok, decoded})
+                complete_shadow(shadow, status, :ok, {:ok, decoded})
 
               {:error, reason} ->
                 complete_shadow(
                   shadow,
                   status,
-                  "persistence_error",
+                  :persistence_error,
                   {:error, SpaceTraders.API.Error.transport(reason)}
                 )
             end
@@ -661,19 +661,19 @@ defmodule SpaceTraders.API do
                 complete_shadow(
                   shadow,
                   status,
-                  "client_error",
+                  :client_error,
                   {:error, gameplay_error(status, SpaceTraders.Observability.redact(body, token))}
                 )
 
               {:error, reason} ->
-                complete_shadow(shadow, status, "suppressed", {:error, reason})
+                complete_shadow(shadow, status, :suppressed, {:error, reason})
             end
 
           {:error, persistence_reason} ->
             complete_shadow(
               shadow,
               status,
-              "persistence_error",
+              :persistence_error,
               {:error, SpaceTraders.API.Error.transport(persistence_reason)}
             )
         end
@@ -694,7 +694,7 @@ defmodule SpaceTraders.API do
             complete_shadow(
               shadow,
               status,
-              "persistence_error",
+              :persistence_error,
               {:error, SpaceTraders.API.Error.transport(reason)}
             )
         end
@@ -702,7 +702,7 @@ defmodule SpaceTraders.API do
       {:error, reason} ->
         case reason do
           %MutationSuppressedError{reason: suppression_reason} ->
-            complete_shadow(shadow, "not_dispatched", "suppressed", {:error, suppression_reason})
+            complete_shadow(shadow, :not_dispatched, :suppressed, {:error, suppression_reason})
 
           reason ->
             emit_request_metric(path, "unknown")
@@ -714,16 +714,16 @@ defmodule SpaceTraders.API do
               :ok ->
                 complete_shadow(
                   shadow,
-                  "unknown",
-                  "unknown",
+                  :unknown,
+                  :unknown,
                   {:error, SpaceTraders.API.Error.transport(redacted_reason)}
                 )
 
               {:error, persistence_reason} ->
                 complete_shadow(
                   shadow,
-                  "unknown",
-                  "persistence_error",
+                  :unknown,
+                  :persistence_error,
                   {:error, SpaceTraders.API.Error.transport(persistence_reason)}
                 )
             end
@@ -752,8 +752,8 @@ defmodule SpaceTraders.API do
     result
   end
 
-  defp shadow_outcome(status) when status in 500..599, do: "server_error"
-  defp shadow_outcome(_status), do: "unknown"
+  defp shadow_outcome(status) when status in 500..599, do: :server_error
+  defp shadow_outcome(_status), do: :unknown
 
   defp mark_mutation_sent(nil), do: {:ok, nil}
   defp mark_mutation_sent(attempt), do: MutationAttempts.mark_sent_or_unknown(attempt)

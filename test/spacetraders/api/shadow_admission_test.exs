@@ -2,9 +2,10 @@ defmodule SpaceTraders.API.ShadowAdmissionTest do
   use ExUnit.Case, async: true
 
   alias SpaceTraders.API.ShadowAdmission
+  alias SpaceTraders.API.ShadowAdmission.{Candidate, Snapshot}
 
   test "identical demand, capacity, and evidence snapshots produce identical explained ordering" do
-    snapshot = %{
+    snapshot = %Snapshot{
       observed_at: ~U[2030-01-01 00:00:00Z],
       available_slots: 3,
       evidence_fingerprint: "evidence-v1",
@@ -12,25 +13,33 @@ defmodule SpaceTraders.API.ShadowAdmissionTest do
       backpressure: :none
     }
 
-    demands = [
-      demand("discovery", lane: :standard, deadline_at: ~U[2030-01-01 00:05:00Z], discovery: true),
-      demand("value", lane: :standard, deadline_at: ~U[2030-01-01 00:05:00Z], value: 10),
-      demand("priority",
+    candidates = [
+      candidate("discovery",
+        lane: :standard,
+        deadline_at: ~U[2030-01-01 00:05:00Z],
+        discovery: true
+      ),
+      candidate("value",
+        lane: :standard,
+        deadline_at: ~U[2030-01-01 00:05:00Z],
+        expected_value: 10
+      ),
+      candidate("priority",
         lane: :standard,
         deadline_at: ~U[2030-01-01 00:05:00Z],
         strategic_priority: 1
       ),
-      demand("deadline", lane: :standard, deadline_at: ~U[2030-01-01 00:01:00Z]),
-      demand("reconciliation", lane: :reconciliation),
-      demand("safety", lane: :safety)
+      candidate("deadline", lane: :standard, deadline_at: ~U[2030-01-01 00:01:00Z]),
+      candidate("reconciliation", lane: :reconciliation),
+      candidate("safety", lane: :safety)
     ]
 
-    first = ShadowAdmission.compare(demands, snapshot)
-    second = ShadowAdmission.compare(Enum.reverse(demands), snapshot)
+    first = ShadowAdmission.compare(candidates, snapshot)
+    second = ShadowAdmission.compare(Enum.reverse(candidates), snapshot)
 
     assert first == second
 
-    assert Enum.map(first, & &1.demand_id) ==
+    assert Enum.map(first, & &1.candidate_id) ==
              ~w(safety reconciliation deadline priority value discovery)
 
     assert Enum.map(first, & &1.disposition) == [
@@ -46,7 +55,7 @@ defmodule SpaceTraders.API.ShadowAdmissionTest do
              lane: :safety,
              deadline_at: nil,
              strategic_priority: nil,
-             value: nil,
+             expected_value: nil,
              discovery: false
            ]
 
@@ -55,7 +64,7 @@ defmodule SpaceTraders.API.ShadowAdmissionTest do
   end
 
   test "outage pacing and sustained backpressure are reported without admitting demand" do
-    snapshot = %{
+    snapshot = %Snapshot{
       observed_at: ~U[2030-01-01 00:00:00Z],
       available_slots: 5,
       evidence_fingerprint: "evidence-v2",
@@ -63,7 +72,7 @@ defmodule SpaceTraders.API.ShadowAdmissionTest do
       backpressure: :sustained
     }
 
-    assert [decision] = ShadowAdmission.compare([demand("safety", lane: :safety)], snapshot)
+    assert [decision] = ShadowAdmission.compare([candidate("safety", lane: :safety)], snapshot)
     assert decision.disposition == :would_delay
     assert decision.reason == :outage_pacing
     assert decision.backpressure == :sustained
@@ -101,8 +110,23 @@ defmodule SpaceTraders.API.ShadowAdmissionTest do
     assert admission.correlation_id == correlation_id
     assert admission.disposition == :would_admit
 
+    safety_id = ShadowAdmission.observe_request(operation, %{lane: :safety}, name)
+
+    assert_receive {:telemetry, [:spacetraders, :api, :capacity, :admission], %{count: 1},
+                    %{
+                      correlation_id: ^safety_id,
+                      rank: 1,
+                      ordering: [
+                        lane: :safety,
+                        deadline_at: nil,
+                        strategic_priority: nil,
+                        expected_value: nil,
+                        discovery: false
+                      ]
+                    }}
+
     ShadowAdmission.observe_dispatch(correlation_id, name)
-    ShadowAdmission.observe_outcome(correlation_id, 200, "ok", name)
+    ShadowAdmission.observe_outcome(correlation_id, 200, :ok, name)
 
     assert_receive {:telemetry, [:spacetraders, :api, :capacity, :actual], measurements, actual}
     assert measurements.count == 1
@@ -111,19 +135,13 @@ defmodule SpaceTraders.API.ShadowAdmissionTest do
     assert actual.correlation_id == correlation_id
     assert actual.shadow_fingerprint == admission.fingerprint
     assert actual.status == 200
-    assert actual.outcome == "ok"
+    assert actual.outcome == :ok
+
+    ShadowAdmission.observe_dispatch(safety_id, name)
+    ShadowAdmission.observe_outcome(safety_id, 200, :ok, name)
   end
 
-  defp demand(id, attrs) do
-    %{
-      id: id,
-      operation_id: "get-my-agent",
-      lane: :standard,
-      deadline_at: nil,
-      strategic_priority: nil,
-      value: nil,
-      discovery: false
-    }
-    |> Map.merge(Map.new(attrs))
+  defp candidate(id, attrs) do
+    struct!(Candidate, Keyword.merge([id: id, operation_id: "get-my-agent"], attrs))
   end
 end

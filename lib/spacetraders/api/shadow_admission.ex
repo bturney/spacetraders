@@ -8,11 +8,38 @@ defmodule SpaceTraders.API.ShadowAdmission do
   """
 
   use GenServer
+  require Logger
+
+  defmodule Candidate do
+    @moduledoc "A read or mutation considered by shadow API capacity admission."
+    @enforce_keys [:id, :operation_id]
+    defstruct [
+      :id,
+      :operation_id,
+      lane: :standard,
+      deadline_at: nil,
+      strategic_priority: nil,
+      expected_value: nil,
+      discovery: false
+    ]
+  end
+
+  defmodule Snapshot do
+    @moduledoc "An immutable API capacity and evidence snapshot used for comparison."
+    @enforce_keys [
+      :observed_at,
+      :available_slots,
+      :evidence_fingerprint,
+      :next_outage_probe_at,
+      :backpressure
+    ]
+    defstruct @enforce_keys
+  end
 
   defmodule Decision do
     @moduledoc false
     @enforce_keys [
-      :demand_id,
+      :candidate_id,
       :operation_id,
       :rank,
       :disposition,
@@ -38,6 +65,7 @@ defmodule SpaceTraders.API.ShadowAdmission do
   @doc "Asynchronously records a production request for shadow comparison."
   def observe_request(operation, attrs \\ %{}, name \\ __MODULE__) when is_map(attrs) do
     correlation_id = Integer.to_string(System.unique_integer([:positive, :monotonic]))
+    attrs = Map.merge(logger_admission_context(), attrs)
 
     GenServer.cast(
       name,
@@ -61,8 +89,8 @@ defmodule SpaceTraders.API.ShadowAdmission do
   end
 
   @doc "Returns explained shadow decisions in deterministic admission order."
-  def compare(demands, snapshot) when is_list(demands) and is_map(snapshot) do
-    demands
+  def compare(candidates, %Snapshot{} = snapshot) when is_list(candidates) do
+    candidates
     |> Enum.sort_by(&ordering_key/1)
     |> Enum.with_index(1)
     |> Enum.map(fn {demand, rank} -> decision(demand, snapshot, rank) end)
@@ -92,17 +120,17 @@ defmodule SpaceTraders.API.ShadowAdmission do
     state = refill(state, requested_ms)
     backpressure = if state.backpressure_streak >= 2, do: :sustained, else: :none
 
-    demand = %{
+    candidate = %Candidate{
       id: correlation_id,
       operation_id: operation.id,
       lane: Map.get(attrs, :lane, operation_lane(operation)),
       deadline_at: Map.get(attrs, :deadline_at),
       strategic_priority: Map.get(attrs, :strategic_priority),
-      value: Map.get(attrs, :value),
+      expected_value: Map.get(attrs, :expected_value),
       discovery: Map.get(attrs, :discovery, false)
     }
 
-    snapshot = %{
+    snapshot = %Snapshot{
       observed_at: requested_at,
       available_slots: floor(state.tokens),
       evidence_fingerprint: Map.get(attrs, :evidence_fingerprint, "unavailable"),
@@ -110,16 +138,24 @@ defmodule SpaceTraders.API.ShadowAdmission do
       backpressure: backpressure
     }
 
-    [decision] = compare([demand], snapshot)
+    pending_candidates =
+      state.requests
+      |> Map.values()
+      |> Enum.filter(&is_nil(&1.dispatched_at))
+      |> Enum.map(& &1.candidate)
+
+    decisions = compare([candidate | pending_candidates], snapshot)
+    decision = Enum.find(decisions, &(&1.candidate_id == correlation_id))
 
     metadata = %{
       correlation_id: correlation_id,
       operation_id: operation.id,
       classification: operation.classification,
       owner: operation.owner,
+      rank: decision.rank,
       disposition: decision.disposition,
       reason: decision.reason,
-      lane: demand.lane,
+      lane: candidate.lane,
       backpressure: decision.backpressure,
       ordering: decision.ordering,
       available_slots: decision.available_slots,
@@ -130,12 +166,14 @@ defmodule SpaceTraders.API.ShadowAdmission do
     }
 
     :telemetry.execute([:spacetraders, :api, :capacity, :admission], %{count: 1}, metadata)
+    Logger.info("Shadow API capacity admission", Map.to_list(metadata))
 
     request = %{
       requested_at: requested_at,
       requested_ms: requested_ms,
       dispatched_at: nil,
       dispatched_ms: nil,
+      candidate: candidate,
       decision: decision
     }
 
@@ -190,21 +228,26 @@ defmodule SpaceTraders.API.ShadowAdmission do
 
         :telemetry.execute([:spacetraders, :api, :capacity, :actual], measurements, metadata)
 
+        Logger.info(
+          "Shadow API capacity actual outcome",
+          Map.to_list(Map.merge(metadata, measurements))
+        )
+
         state = %{state | requests: requests} |> update_pressure(status, completed_at)
         {:noreply, state}
     end
   end
 
-  defp decision(demand, snapshot, rank) do
+  defp decision(candidate, snapshot, rank) do
     pacing? = outage_pacing?(snapshot)
     available_slots = Map.fetch!(snapshot, :available_slots)
     disposition = if not pacing? and rank <= available_slots, do: :would_admit, else: :would_delay
     reason = if pacing?, do: :outage_pacing, else: capacity_reason(disposition)
-    ordering = ordering(demand)
+    ordering = ordering(candidate)
 
     attributes = %{
-      demand_id: Map.fetch!(demand, :id),
-      operation_id: Map.fetch!(demand, :operation_id),
+      candidate_id: candidate.id,
+      operation_id: candidate.operation_id,
       rank: rank,
       disposition: disposition,
       reason: reason,
@@ -219,24 +262,24 @@ defmodule SpaceTraders.API.ShadowAdmission do
     struct!(Decision, Map.put(attributes, :fingerprint, fingerprint(attributes)))
   end
 
-  defp ordering_key(demand) do
+  defp ordering_key(%Candidate{} = candidate) do
     [
-      Map.fetch!(@lane_rank, Map.fetch!(demand, :lane)),
-      datetime_key(Map.get(demand, :deadline_at)),
-      Map.get(demand, :strategic_priority) || :infinity,
-      descending_number(Map.get(demand, :value)),
-      not Map.get(demand, :discovery, false),
-      to_string(Map.fetch!(demand, :id))
+      Map.fetch!(@lane_rank, candidate.lane),
+      datetime_key(candidate.deadline_at),
+      candidate.strategic_priority || :infinity,
+      descending_number(candidate.expected_value),
+      not candidate.discovery,
+      to_string(candidate.id)
     ]
   end
 
-  defp ordering(demand) do
+  defp ordering(%Candidate{} = candidate) do
     [
-      lane: Map.fetch!(demand, :lane),
-      deadline_at: Map.get(demand, :deadline_at),
-      strategic_priority: Map.get(demand, :strategic_priority),
-      value: Map.get(demand, :value),
-      discovery: Map.get(demand, :discovery, false)
+      lane: candidate.lane,
+      deadline_at: candidate.deadline_at,
+      strategic_priority: candidate.strategic_priority,
+      expected_value: candidate.expected_value,
+      discovery: candidate.discovery
     ]
   end
 
@@ -267,6 +310,19 @@ defmodule SpaceTraders.API.ShadowAdmission do
   defp operation_lane(%{owner: :fleet_reconciliation}), do: :reconciliation
   defp operation_lane(_operation), do: :standard
 
+  defp logger_admission_context do
+    Logger.metadata()
+    |> Map.new()
+    |> Map.take([
+      :lane,
+      :deadline_at,
+      :strategic_priority,
+      :expected_value,
+      :discovery,
+      :evidence_fingerprint
+    ])
+  end
+
   defp refill(%{rate: rate} = state, now) when rate > 0 do
     elapsed_seconds = max(now - state.last_refill, 0) / 1000
 
@@ -284,7 +340,7 @@ defmodule SpaceTraders.API.ShadowAdmission do
   end
 
   defp update_pressure(state, status, completed_at)
-       when status == "unknown" or status in 500..599 do
+       when status == :unknown or status in 500..599 do
     outage_streak = state.outage_streak + 1
     delay_seconds = min(trunc(:math.pow(2, outage_streak - 1)), 60)
 

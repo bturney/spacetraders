@@ -71,6 +71,17 @@ defmodule SpaceTraders.API.ClientTest do
         Req.Test.json(conn, %{"data" => %{}})
       end)
 
+      deadline = ~U[2030-01-01 00:05:00Z]
+
+      Logger.metadata(
+        lane: :safety,
+        deadline_at: deadline,
+        strategic_priority: 1,
+        expected_value: 10,
+        discovery: true,
+        evidence_fingerprint: "evidence-v1"
+      )
+
       assert {:ok, %Model.Ship{}} =
                API.get_ship(agent_token_reference(), "ORBITALIST-1", retry: false)
 
@@ -82,10 +93,20 @@ defmodule SpaceTraders.API.ClientTest do
       assert admission.operation_id == "get-my-ship"
       assert admission.classification == :read
       assert admission.owner == :evidence
+
+      assert admission.ordering == [
+               lane: :safety,
+               deadline_at: deadline,
+               strategic_priority: 1,
+               expected_value: 10,
+               discovery: true
+             ]
+
+      assert admission.evidence_fingerprint == "evidence-v1"
       assert actual.correlation_id == admission.correlation_id
       assert actual.shadow_fingerprint == admission.fingerprint
       assert actual.status == 200
-      assert actual.outcome == "ok"
+      assert actual.outcome == :ok
       assert measurements.queue_time >= 0
       assert measurements.request_time >= 0
     end
