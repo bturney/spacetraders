@@ -57,6 +57,39 @@ defmodule SpaceTraders.API.ClientTest do
       refute inspect(metadata) =~ "AGENT_TOKEN_SECRET"
     end
 
+    test "correlates shadow admission with the production request outcome" do
+      events = [
+        [:spacetraders, :api, :capacity, :admission],
+        [:spacetraders, :api, :capacity, :actual]
+      ]
+
+      handler_id = "api-capacity-shadow-#{System.unique_integer()}"
+      :telemetry.attach_many(handler_id, events, &__MODULE__.handle_event/4, self())
+      on_exit(fn -> :telemetry.detach(handler_id) end)
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        Req.Test.json(conn, %{"data" => %{}})
+      end)
+
+      assert {:ok, %Model.Ship{}} =
+               API.get_ship(agent_token_reference(), "ORBITALIST-1", retry: false)
+
+      assert_receive {:telemetry, [:spacetraders, :api, :capacity, :admission], %{count: 1},
+                      admission}
+
+      assert_receive {:telemetry, [:spacetraders, :api, :capacity, :actual], measurements, actual}
+
+      assert admission.operation_id == "get-my-ship"
+      assert admission.classification == :read
+      assert admission.owner == :evidence
+      assert actual.correlation_id == admission.correlation_id
+      assert actual.shadow_fingerprint == admission.fingerprint
+      assert actual.status == 200
+      assert actual.outcome == "ok"
+      assert measurements.queue_time >= 0
+      assert measurements.request_time >= 0
+    end
+
     test "emits a 429 API request metric after rate-limit retries" do
       event = [:spacetraders, :api, :request]
       handler_id = "api-rate-limit-metric-#{System.unique_integer()}"

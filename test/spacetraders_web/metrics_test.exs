@@ -22,6 +22,8 @@ defmodule SpaceTradersWeb.MetricsTest do
     body = response(conn, 200)
     assert body =~ "# HELP"
     assert body =~ "spacetraders_api_requests_total"
+    assert body =~ "spacetraders_api_capacity_admissions_total"
+    assert body =~ "spacetraders_api_capacity_actual_total"
     assert body =~ ~s(endpoint="/my/ships/{shipSymbol}")
     assert body =~ ~s(outcome="ok")
     refute body =~ "ORBITALIST-1"
