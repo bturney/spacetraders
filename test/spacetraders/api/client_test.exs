@@ -251,7 +251,7 @@ defmodule SpaceTraders.API.ClientTest do
       end)
 
       assert {:ok, %{waypoint: %Model.Waypoint{symbol: "X1-UX81-A1"}}} =
-               API.create_chart(agent_token_reference(), "ORBITALIST-1")
+               API.create_chart(agent_token_reference(), "ORBITALIST-1", "X1-TEST-A1")
     end
 
     test "navigate_ship/3 posts the waypoint and decodes fuel + nav" do

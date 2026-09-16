@@ -6,10 +6,13 @@ defmodule SpaceTraders.MutationAttemptsTest do
   alias SpaceTraders.Agent.Scope
   alias SpaceTraders.API
   alias SpaceTraders.API.AgentTokenReference
+  alias SpaceTraders.API.OperationInventory
+  alias SpaceTraders.Evidence
   alias SpaceTraders.Fleet.{Intent, Ship}
   alias SpaceTraders.FleetGeneration.Generation
   alias SpaceTraders.FleetStrategy
   alias SpaceTraders.MutationAttempts
+  alias SpaceTraders.SafetyFence
 
   test "a mutation is durable and sent-or-unknown before network dispatch" do
     operator = operator_fixture()
@@ -106,22 +109,389 @@ defmodule SpaceTraders.MutationAttemptsTest do
     assert attempt.state == "ambiguous"
     assert [%{classification: "ambiguous"}] = attempt.outcomes
 
+    assert {:error, %API.Error{reason: {:safety_fenced, [blocking_id]}}} =
+             API.navigate_ship(AgentTokenReference.new(agent), agent.symbol, "X1-TEST-C3")
+
+    assert blocking_id == attempt.id
+
     reloaded = MutationAttempts.get!(attempt.id)
     assert reloaded.id == attempt.id
     assert reloaded.state == "ambiguous"
 
     assert {:ok, reconciled} =
-             MutationAttempts.reconcile(reloaded, :succeeded, %{
-               source: "authoritative Ship state"
-             })
+             MutationAttempts.reconcile(reloaded, :accepted, [observation(reloaded, :accepted)])
 
     assert reconciled.id == attempt.id
-    assert reconciled.state == "reconciled"
+    assert reconciled.state == "accepted"
 
     assert [ambiguous, reconciled_outcome] = reconciled.outcomes
     assert ambiguous.classification == "ambiguous"
-    assert reconciled_outcome.classification == "reconciled"
-    assert reconciled_outcome.evidence["resolution"] == "succeeded"
+    assert reconciled_outcome.classification == "accepted"
+
+    assert [%{"operation_id" => "get-my-ship"}] =
+             reconciled_outcome.evidence["observations"]
+  end
+
+  test "an ambiguous Ship mutation fences only dependent Ship mutations" do
+    operator = operator_fixture()
+    agent = agent_fixture(operator)
+
+    ship_one =
+      Repo.insert!(%Ship{agent_id: agent.id, symbol: "FENCE-1", ship_type: "COMMAND_FRIGATE"})
+
+    ship_two =
+      Repo.insert!(%Ship{agent_id: agent.id, symbol: "FENCE-2", ship_type: "PROBE"})
+
+    operation = OperationInventory.fetch!("navigate-ship")
+
+    assert {:ok, attempt} =
+             MutationAttempts.prepare(operation, "/my/ships/#{ship_one.symbol}/navigate",
+               agent_id: agent.id,
+               json: %{"waypointSymbol" => "X1-TEST-B2"}
+             )
+
+    assert {:ok, attempt} = MutationAttempts.mark_sent_or_unknown(attempt)
+
+    assert {:ok, attempt} =
+             MutationAttempts.record_outcome(attempt, :ambiguous, %{reason: "timeout"})
+
+    assert SafetyFence.active?(attempt)
+
+    assert {:error, {:safety_fenced, [blocking_id]}} =
+             MutationAttempts.prepare(operation, "/my/ships/#{ship_one.symbol}/navigate",
+               agent_id: agent.id,
+               json: %{"waypointSymbol" => "X1-TEST-C3"}
+             )
+
+    assert blocking_id == attempt.id
+
+    assert {:ok, unrelated_attempt} =
+             MutationAttempts.prepare(operation, "/my/ships/#{ship_two.symbol}/navigate",
+               agent_id: agent.id,
+               json: %{"waypointSymbol" => "X1-TEST-C3"}
+             )
+
+    assert unrelated_attempt.dependency_keys != attempt.dependency_keys
+  end
+
+  test "reconciliation durably distinguishes accepted, absent, and Bounded Unknown outcomes" do
+    operator = operator_fixture()
+    agent = agent_fixture(operator)
+    scope = Scope.for_operator(operator)
+    {:ok, strategy} = FleetStrategy.select_preset(scope, "steady_growth")
+    {:ok, revision} = FleetStrategy.activate(scope, strategy.draft_version)
+
+    Repo.insert!(%Generation{
+      operator_id: operator.id,
+      agent_id: agent.id,
+      fleet_strategy_revision_id: revision.id,
+      number: 1,
+      symbol: agent.symbol,
+      faction: agent.faction,
+      replacement_symbols: %{},
+      objective_progress: %{}
+    })
+
+    operation = OperationInventory.fetch!("navigate-ship")
+
+    accepted = ambiguous_attempt(agent, operation, "OUTCOME-1")
+
+    assert {:ok, accepted} =
+             MutationAttempts.reconcile(accepted, :accepted, [observation(accepted, :accepted)])
+
+    assert accepted.state == "accepted"
+    refute SafetyFence.active?(accepted)
+    assert List.last(accepted.outcomes).classification == "accepted"
+
+    absent = ambiguous_attempt(agent, operation, "OUTCOME-2")
+
+    assert {:ok, absent} =
+             MutationAttempts.reconcile(absent, :absent, [observation(absent)])
+
+    assert absent.state == "absent"
+    refute SafetyFence.active?(absent)
+    assert List.last(absent.outcomes).classification == "absent"
+    assert List.last(absent.outcomes).evidence["action_selection"]["selected"]
+
+    bounded_unknown = ambiguous_attempt(agent, operation, "OUTCOME-3")
+
+    assert {:error, :hard_constraint_accounting_required} =
+             MutationAttempts.reconcile(bounded_unknown, :bounded_unknown, [
+               observation(bounded_unknown, :bounded_unknown)
+             ])
+
+    assert {:ok, bounded_unknown} =
+             MutationAttempts.reconcile(
+               bounded_unknown,
+               :bounded_unknown,
+               [observation(bounded_unknown, :bounded_unknown)],
+               constraint_accounting:
+                 Evidence.constraint_accounting(
+                   "at most one transit",
+                   Enum.map(revision.document["hard_constraints"], fn constraint ->
+                     %{
+                       constraint: constraint,
+                       satisfied: true,
+                       evidence: "The bounded transit consequence does not spend credits."
+                     }
+                   end)
+                 )
+             )
+
+    assert bounded_unknown.state == "bounded_unknown"
+    assert SafetyFence.active?(bounded_unknown)
+    assert List.last(bounded_unknown.outcomes).classification == "bounded_unknown"
+
+    assert {:error, {:safety_fenced, [_attempt_id]}} =
+             MutationAttempts.prepare(
+               operation,
+               "/my/ships/OUTCOME-3/navigate",
+               agent_id: agent.id,
+               json: %{"waypointSymbol" => "X1-TEST-C3"}
+             )
+
+    combined_accounting =
+      Evidence.constraint_accounting(
+        "The retained bound plus this mutation remains inside every Hard Constraint.",
+        Enum.map(revision.document["hard_constraints"], fn constraint ->
+          %{
+            constraint: constraint,
+            satisfied: true,
+            evidence: "Neither consequence spends credits."
+          }
+        end)
+      )
+
+    assert {:ok, admitted} =
+             MutationAttempts.prepare(
+               operation,
+               "/my/ships/OUTCOME-3/navigate",
+               agent_id: agent.id,
+               json: %{"waypointSymbol" => "X1-TEST-C3"},
+               bounded_unknown_admissions: [{bounded_unknown, combined_accounting}]
+             )
+
+    assert admitted.admitted_bounded_unknown_ids == [bounded_unknown.id]
+  end
+
+  test "retry requires authoritative absence, continued selection, and the same action" do
+    operator = operator_fixture()
+    agent = agent_fixture(operator)
+    operation = OperationInventory.fetch!("navigate-ship")
+    attempt = ambiguous_attempt(agent, operation, "RETRY-1", "X1-TEST-B2")
+
+    assert {:error, :authoritative_evidence_required} =
+             MutationAttempts.reconcile(attempt, :absent, [])
+
+    unrelated_observation =
+      Evidence.authoritative_observation(
+        "get-my-ship",
+        attempt.dependency_keys,
+        %{fuel: %{current: 100}},
+        DateTime.add(attempt.sent_or_unknown_at, 1, :microsecond)
+      )
+
+    assert {:error, :authoritative_evidence_required} =
+             MutationAttempts.reconcile(attempt, :absent, [unrelated_observation])
+
+    assert {:ok, absent} =
+             MutationAttempts.reconcile(attempt, :absent, [observation(attempt)])
+
+    assert {:error, :retry_action_mismatch} =
+             MutationAttempts.prepare_retry(
+               absent,
+               operation,
+               "/my/ships/RETRY-1/navigate",
+               agent_id: agent.id,
+               json: %{"waypointSymbol" => "X1-TEST-C3"}
+             )
+
+    assert {:ok, retry} =
+             MutationAttempts.prepare_retry(
+               absent,
+               operation,
+               "/my/ships/RETRY-1/navigate",
+               agent_id: agent.id,
+               json: %{"waypointSymbol" => "X1-TEST-B2"}
+             )
+
+    assert retry.retry_of_id == attempt.id
+
+    assert {:error, :retry_not_authorized} =
+             MutationAttempts.prepare_retry(
+               absent,
+               operation,
+               "/my/ships/RETRY-1/navigate",
+               agent_id: agent.id,
+               json: %{"waypointSymbol" => "X1-TEST-B2"}
+             )
+
+    not_selected = ambiguous_attempt(agent, operation, "RETRY-2", "X1-TEST-D4")
+    intent_id = not_selected.provenance["intent_id"]
+
+    intent_id
+    |> then(&Repo.get!(Intent, &1))
+    |> Ecto.Changeset.change(in_flight_action: %{})
+    |> Repo.update!()
+
+    assert {:ok, not_selected} =
+             MutationAttempts.reconcile(not_selected, :absent, [observation(not_selected)])
+
+    assert {:error, :retry_not_authorized} =
+             MutationAttempts.prepare_retry(
+               not_selected,
+               operation,
+               "/my/ships/RETRY-2/navigate",
+               agent_id: agent.id,
+               json: %{"waypointSymbol" => "X1-TEST-D4"}
+             )
+
+    selection_changed = ambiguous_attempt(agent, operation, "RETRY-3", "X1-TEST-E5")
+
+    assert {:ok, selection_changed} =
+             MutationAttempts.reconcile(selection_changed, :absent, [
+               observation(selection_changed)
+             ])
+
+    selection_changed.provenance["intent_id"]
+    |> then(&Repo.get!(Intent, &1))
+    |> Ecto.Changeset.change(in_flight_action: %{})
+    |> Repo.update!()
+
+    assert {:error, :retry_not_authorized} =
+             MutationAttempts.prepare_retry(
+               selection_changed,
+               operation,
+               "/my/ships/RETRY-3/navigate",
+               agent_id: agent.id,
+               json: %{"waypointSymbol" => "X1-TEST-E5"}
+             )
+  end
+
+  test "the API reconciliation path dispatches exactly one authorized retry" do
+    operator = operator_fixture()
+    agent = agent_fixture(operator)
+    operation = OperationInventory.fetch!("navigate-ship")
+    attempt = ambiguous_attempt(agent, operation, "API-RETRY-1", "X1-TEST-B2")
+    test_pid = self()
+
+    Req.Test.stub(API, fn conn ->
+      Req.Test.json(conn, %{
+        "data" => %{
+          "fuel" => %{},
+          "nav" => %{
+            "systemSymbol" => "X1-TEST",
+            "waypointSymbol" => "X1-TEST-B2",
+            "status" => "IN_TRANSIT",
+            "flightMode" => "CRUISE",
+            "route" => %{}
+          }
+        }
+      })
+    end)
+
+    assert {:ok, %{}} =
+             API.reconcile_absent_and_retry(
+               attempt,
+               [observation(attempt)],
+               fn ->
+                 result =
+                   API.navigate_ship(
+                     AgentTokenReference.new(agent),
+                     "API-RETRY-1",
+                     "X1-TEST-B2"
+                   )
+
+                 send(
+                   test_pid,
+                   API.navigate_ship(
+                     AgentTokenReference.new(agent),
+                     "API-RETRY-1",
+                     "X1-TEST-B2"
+                   )
+                 )
+
+                 result
+               end
+             )
+
+    assert_receive {:error, %API.Error{reason: :retry_already_dispatched}}
+
+    assert [original, retry] = MutationAttempts.list_for_agent(agent)
+    assert original.state == "absent"
+    refute original.retry_authorized
+    assert retry.retry_of_id == original.id
+    assert retry.state == "succeeded"
+  end
+
+  test "Waypoint evidence fences dependent mutations across Ships at that Waypoint" do
+    operator = operator_fixture()
+    agent = agent_fixture(operator)
+    operation = OperationInventory.fetch!("create-chart")
+
+    Repo.insert!(%Ship{agent_id: agent.id, symbol: "CHART-1", ship_type: "PROBE"})
+    Repo.insert!(%Ship{agent_id: agent.id, symbol: "CHART-2", ship_type: "PROBE"})
+
+    assert {:ok, attempt} =
+             MutationAttempts.prepare(operation, "/my/ships/CHART-1/chart",
+               agent_id: agent.id,
+               dependency_context: %{waypoint_symbol: "X1-TEST-A1"}
+             )
+
+    assert {:ok, attempt} = MutationAttempts.mark_sent_or_unknown(attempt)
+
+    assert {:ok, _attempt} =
+             MutationAttempts.record_outcome(attempt, :ambiguous, %{reason: "timeout"})
+
+    assert "waypoint:#{agent.id}:X1-TEST-A1" in attempt.dependency_keys
+
+    assert {:error, {:safety_fenced, [blocking_id]}} =
+             MutationAttempts.prepare(operation, "/my/ships/CHART-2/chart",
+               agent_id: agent.id,
+               dependency_context: %{waypoint_symbol: "X1-TEST-A1"}
+             )
+
+    assert blocking_id == attempt.id
+
+    assert {:ok, _unrelated} =
+             MutationAttempts.prepare(operation, "/my/ships/CHART-2/chart",
+               agent_id: agent.id,
+               dependency_context: %{waypoint_symbol: "X1-TEST-B2"}
+             )
+  end
+
+  test "an ambiguous Contract acceptance fences credit-dependent work but not Ship movement" do
+    operator = operator_fixture()
+    agent = agent_fixture(operator)
+    ship = Repo.insert!(%Ship{agent_id: agent.id, symbol: "CREDIT-1", ship_type: "PROBE"})
+
+    assert {:ok, attempt} =
+             MutationAttempts.prepare(
+               OperationInventory.fetch!("accept-contract"),
+               "/my/contracts/CONTRACT-1/accept",
+               agent_id: agent.id
+             )
+
+    assert {:ok, attempt} = MutationAttempts.mark_sent_or_unknown(attempt)
+    assert {:ok, _attempt} = MutationAttempts.record_outcome(attempt, :ambiguous, %{})
+
+    assert {:error, {:safety_fenced, [blocking_id]}} =
+             MutationAttempts.prepare(
+               OperationInventory.fetch!("purchase-cargo"),
+               "/my/ships/#{ship.symbol}/purchase",
+               agent_id: agent.id,
+               json: %{"symbol" => "IRON_ORE", "units" => 1}
+             )
+
+    assert blocking_id == attempt.id
+
+    assert {:ok, _unrelated} =
+             MutationAttempts.prepare(
+               OperationInventory.fetch!("navigate-ship"),
+               "/my/ships/#{ship.symbol}/navigate",
+               agent_id: agent.id,
+               json: %{"waypointSymbol" => "X1-TEST-B2"}
+             )
   end
 
   test "a deterministic game rejection is retained as a rejected outcome" do
@@ -222,5 +592,37 @@ defmodule SpaceTraders.MutationAttemptsTest do
     assert attempt.operation_id == "register"
     refute inspect(attempt) =~ "ACCOUNT_TOKEN_SECRET"
     refute inspect(attempt) =~ "NEW_AGENT_TOKEN_SECRET"
+  end
+
+  defp ambiguous_attempt(agent, operation, ship_symbol, destination \\ "X1-TEST-B2") do
+    ship = Repo.insert!(%Ship{agent_id: agent.id, symbol: ship_symbol, ship_type: "PROBE"})
+
+    Repo.insert!(%Intent{
+      ship_id: ship.id,
+      caller: "manual",
+      type: "navigate",
+      target_waypoint: destination,
+      in_flight_action: %{"kind" => "navigate", "waypoint" => destination}
+    })
+
+    {:ok, attempt} =
+      MutationAttempts.prepare(operation, "/my/ships/#{ship_symbol}/navigate",
+        agent_id: agent.id,
+        json: %{"waypointSymbol" => destination}
+      )
+
+    {:ok, attempt} = MutationAttempts.mark_sent_or_unknown(attempt)
+    {:ok, attempt} = MutationAttempts.record_outcome(attempt, :ambiguous, %{reason: "timeout"})
+    attempt
+  end
+
+  defp observation(attempt, outcome \\ :absent) do
+    Evidence.reconciliation_observation(
+      "get-my-ship",
+      attempt,
+      outcome,
+      "Fresh Ship state proves the requested effect #{outcome}.",
+      DateTime.add(attempt.sent_or_unknown_at, 1, :microsecond)
+    )
   end
 end

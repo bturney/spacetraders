@@ -42,6 +42,7 @@ defmodule Mix.Tasks.SpaceTraders.Gen.Operations do
       :success_evidence,
       :waits,
       :ambiguity,
+      :fence_dependencies,
       :visibility,
       :pagination
     ]
@@ -277,6 +278,7 @@ defmodule Mix.Tasks.SpaceTraders.Gen.Operations do
         :success_evidence,
         :waits,
         :ambiguity,
+        :fence_dependencies,
         :visibility,
         :pagination
       ]
@@ -421,6 +423,7 @@ defmodule Mix.Tasks.SpaceTraders.Gen.Operations do
       success_evidence: ["successful response body with observation provenance"],
       waits: [],
       ambiguity: :safe_retry,
+      fence_dependencies: [],
       visibility: visibility(operation, :evidence),
       pagination: pagination(operation)
     })
@@ -440,6 +443,7 @@ defmodule Mix.Tasks.SpaceTraders.Gen.Operations do
       success_evidence: success_evidence,
       waits: mutation_waits(id, waits),
       ambiguity: {:reconcile_before_retry, reconciliation_evidence(id)},
+      fence_dependencies: fence_dependencies(id, owner),
       visibility: visibility(operation, owner),
       pagination: :none
     })
@@ -518,6 +522,27 @@ defmodule Mix.Tasks.SpaceTraders.Gen.Operations do
        do: ["Ship state", "Ship Readiness"]
 
   defp reconciliation_evidence(_id), do: ["Ship state"]
+
+  defp fence_dependencies("register", _owner), do: [:agent_symbol]
+  defp fence_dependencies("create-chart", _owner), do: [:waypoint]
+
+  defp fence_dependencies(id, _owner)
+       when id in ["accept-contract", "fulfill-contract", "negotiateContract"],
+       do: [:contract, :agent_credits]
+
+  defp fence_dependencies("deliver-contract", _owner), do: [:contract, :ship]
+  defp fence_dependencies("supply-construction", _owner), do: [:construction, :ship]
+  defp fence_dependencies("purchase-ship", _owner), do: [:owned_fleet, :agent_credits]
+  defp fence_dependencies("scrap-ship", _owner), do: [:owned_fleet, :agent_credits]
+
+  defp fence_dependencies(id, _owner)
+       when id in ["purchase-cargo", "sell-cargo", "refuel-ship"],
+       do: [:ship, :agent_credits]
+
+  defp fence_dependencies("transfer-cargo", _owner), do: [:ship, :target_ship]
+
+  defp fence_dependencies(_id, :ship_execution), do: [:ship]
+  defp fence_dependencies(_id, _owner), do: [:agent]
 
   defp check_no_drift(source) do
     case File.read(@target_path) do

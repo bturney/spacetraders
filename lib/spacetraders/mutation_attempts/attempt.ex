@@ -14,6 +14,9 @@ defmodule SpaceTraders.MutationAttempts.Attempt do
     field :prepared_evidence, :map
     field :expected_effects, {:array, :string}
     field :consequence_bounds, {:array, :string}
+    field :dependency_keys, {:array, :string}, default: []
+    field :admitted_bounded_unknown_ids, {:array, :binary_id}, default: []
+    field :retry_authorized, :boolean, default: false
     field :provenance, :map
     field :prepared_at, :utc_datetime_usec
     field :sent_or_unknown_at, :utc_datetime_usec
@@ -22,6 +25,7 @@ defmodule SpaceTraders.MutationAttempts.Attempt do
     belongs_to :agent, SpaceTraders.Agent.Agent, type: :id
     belongs_to :fleet_generation, SpaceTraders.FleetGeneration.Generation, type: :id
     belongs_to :strategy_revision, SpaceTraders.FleetStrategy.Revision, type: :id
+    belongs_to :retry_of, __MODULE__, type: :binary_id
 
     has_many :outcomes, SpaceTraders.MutationAttempts.Outcome,
       foreign_key: :mutation_attempt_id,

@@ -3684,7 +3684,7 @@ defmodule SpaceTraders.Fleet do
 
       case Agent.handle_game_result(
              agent,
-             SpaceTraders.API.create_chart(credential_ref, live_ship.symbol)
+             SpaceTraders.API.create_chart(credential_ref, live_ship.symbol, waypoint.symbol)
            ) do
         {:ok, %{waypoint: charted_waypoint}} ->
           :ok = observe_explorer_waypoint(agent, charted_waypoint)
