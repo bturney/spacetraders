@@ -10,7 +10,18 @@ defmodule SpaceTraders.MissionControl do
 
   alias SpaceTraders.Agent.Scope
   alias SpaceTraders.Agent.Agent, as: AgentRecord
-  alias SpaceTraders.{Agent, Fleet, FleetStrategy, Intelligence}
+  alias SpaceTraders.{Agent, Fleet, FleetGeneration, FleetStrategy, Intelligence}
+
+  @evaluation_fact_keys %{
+    "change" => :change,
+    "current" => :current,
+    "elapsed_seconds" => :elapsed_seconds,
+    "expected_seconds_to_target" => :expected_seconds_to_target,
+    "feasible?" => :feasible?,
+    "horizon_seconds" => :horizon_seconds,
+    "required_margin" => :required_margin,
+    "target" => :target
+  }
 
   @doc "Returns the signed-in Operator's Agents for adapter subscriptions."
   def agents(%Scope{operator: operator}) do
@@ -36,6 +47,20 @@ defmodule SpaceTraders.MissionControl do
   def strategy(%Scope{} = scope) do
     FleetStrategy.get(scope)
     |> Map.put(:presets, FleetStrategy.presets())
+  end
+
+  @doc "Returns the concise Fleet Strategy and Fleet Generation read projection."
+  def overview(%Scope{} = scope) do
+    strategy = strategy(scope)
+    generations = FleetGeneration.list_generations(scope)
+    snapshots = dashboard(scope)
+
+    %{
+      strategy: strategy,
+      generations: generations,
+      fleets: Enum.map(snapshots, &fleet_overview(&1, generations)),
+      objectives: objective_overviews(strategy.active_revision, generations)
+    }
   end
 
   @doc """
@@ -135,6 +160,42 @@ defmodule SpaceTraders.MissionControl do
   end
 
   defp without_agent_credentials(%AgentRecord{} = agent), do: %{agent | agent_token: nil}
+
+  defp fleet_overview(snapshot, generations) do
+    generation =
+      Enum.find(generations, &(&1.agent_id == snapshot.agent.id and is_nil(&1.retired_at)))
+
+    Map.take(snapshot, [:agent, :stale?, :overview, :ships, :activity, :control])
+    |> Map.put(:generation, generation)
+  end
+
+  defp objective_overviews(nil, _generations), do: []
+
+  defp objective_overviews(revision, generations) do
+    generation =
+      Enum.find(generations, fn generation ->
+        generation.fleet_strategy_revision_id == revision.id and is_nil(generation.retired_at)
+      end)
+
+    revision.document
+    |> Map.get("objectives", [])
+    |> Enum.with_index()
+    |> Enum.map(fn {objective, index} ->
+      facts = generation && Map.get(generation.objective_progress, Integer.to_string(index))
+
+      %{
+        objective: objective,
+        evaluation:
+          if(is_map(facts),
+            do: FleetStrategy.evaluate_objective(revision, index, atomize_keys(facts)),
+            else: {:error, :unknown}
+          )
+      }
+    end)
+  end
+
+  defp atomize_keys(facts),
+    do: Map.new(facts, fn {key, value} -> {@evaluation_fact_keys[key], value} end)
 
   defp namespace_facts(facts, namespace) do
     Map.new(facts, fn {field, fact} -> {"#{namespace}.#{field}", fact} end)
