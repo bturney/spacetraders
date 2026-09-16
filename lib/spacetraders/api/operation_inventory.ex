@@ -886,7 +886,7 @@ defmodule SpaceTraders.API.OperationInventory do
       success_evidence: ["Agent and scrap transaction response"],
       waits: [],
       ambiguity: {:reconcile_before_retry, ["owned Fleet", "Agent credits"]},
-      fence_dependencies: [:owned_fleet],
+      fence_dependencies: [:owned_fleet, :agent_credits],
       visibility: :agent_private,
       pagination: :none
     },
@@ -902,7 +902,7 @@ defmodule SpaceTraders.API.OperationInventory do
       success_evidence: ["Agent, Cargo, and transaction response"],
       waits: [],
       ambiguity: {:reconcile_before_retry, ["Ship state", "Agent credits"]},
-      fence_dependencies: [:ship],
+      fence_dependencies: [:ship, :agent_credits],
       visibility: :ship_private,
       pagination: :none
     },
@@ -966,7 +966,7 @@ defmodule SpaceTraders.API.OperationInventory do
       success_evidence: ["source Cargo response"],
       waits: [],
       ambiguity: {:reconcile_before_retry, ["Ship Cargo", "Ship Readiness"]},
-      fence_dependencies: [:ship],
+      fence_dependencies: [:ship, :target_ship],
       visibility: :ship_private,
       pagination: :none
     },

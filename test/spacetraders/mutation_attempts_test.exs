@@ -119,7 +119,7 @@ defmodule SpaceTraders.MutationAttemptsTest do
     assert reloaded.state == "ambiguous"
 
     assert {:ok, reconciled} =
-             MutationAttempts.reconcile(reloaded, :accepted, [observation(reloaded)])
+             MutationAttempts.reconcile(reloaded, :accepted, [observation(reloaded, :accepted)])
 
     assert reconciled.id == attempt.id
     assert reconciled.state == "accepted"
@@ -197,7 +197,7 @@ defmodule SpaceTraders.MutationAttemptsTest do
     accepted = ambiguous_attempt(agent, operation, "OUTCOME-1")
 
     assert {:ok, accepted} =
-             MutationAttempts.reconcile(accepted, :accepted, [observation(accepted)])
+             MutationAttempts.reconcile(accepted, :accepted, [observation(accepted, :accepted)])
 
     assert accepted.state == "accepted"
     refute SafetyFence.active?(accepted)
@@ -217,14 +217,14 @@ defmodule SpaceTraders.MutationAttemptsTest do
 
     assert {:error, :hard_constraint_accounting_required} =
              MutationAttempts.reconcile(bounded_unknown, :bounded_unknown, [
-               observation(bounded_unknown)
+               observation(bounded_unknown, :bounded_unknown)
              ])
 
     assert {:ok, bounded_unknown} =
              MutationAttempts.reconcile(
                bounded_unknown,
                :bounded_unknown,
-               [observation(bounded_unknown)],
+               [observation(bounded_unknown, :bounded_unknown)],
                constraint_accounting:
                  Evidence.constraint_accounting(
                    "at most one transit",
@@ -241,6 +241,37 @@ defmodule SpaceTraders.MutationAttemptsTest do
     assert bounded_unknown.state == "bounded_unknown"
     assert SafetyFence.active?(bounded_unknown)
     assert List.last(bounded_unknown.outcomes).classification == "bounded_unknown"
+
+    assert {:error, {:safety_fenced, [_attempt_id]}} =
+             MutationAttempts.prepare(
+               operation,
+               "/my/ships/OUTCOME-3/navigate",
+               agent_id: agent.id,
+               json: %{"waypointSymbol" => "X1-TEST-C3"}
+             )
+
+    combined_accounting =
+      Evidence.constraint_accounting(
+        "The retained bound plus this mutation remains inside every Hard Constraint.",
+        Enum.map(revision.document["hard_constraints"], fn constraint ->
+          %{
+            constraint: constraint,
+            satisfied: true,
+            evidence: "Neither consequence spends credits."
+          }
+        end)
+      )
+
+    assert {:ok, admitted} =
+             MutationAttempts.prepare(
+               operation,
+               "/my/ships/OUTCOME-3/navigate",
+               agent_id: agent.id,
+               json: %{"waypointSymbol" => "X1-TEST-C3"},
+               bounded_unknown_admissions: [{bounded_unknown, combined_accounting}]
+             )
+
+    assert admitted.admitted_bounded_unknown_ids == [bounded_unknown.id]
   end
 
   test "retry requires authoritative absence, continued selection, and the same action" do
@@ -251,6 +282,17 @@ defmodule SpaceTraders.MutationAttemptsTest do
 
     assert {:error, :authoritative_evidence_required} =
              MutationAttempts.reconcile(attempt, :absent, [])
+
+    unrelated_observation =
+      Evidence.authoritative_observation(
+        "get-my-ship",
+        attempt.dependency_keys,
+        %{fuel: %{current: 100}},
+        DateTime.add(attempt.sent_or_unknown_at, 1, :microsecond)
+      )
+
+    assert {:error, :authoritative_evidence_required} =
+             MutationAttempts.reconcile(attempt, :absent, [unrelated_observation])
 
     assert {:ok, absent} =
              MutationAttempts.reconcile(attempt, :absent, [observation(attempt)])
@@ -574,11 +616,12 @@ defmodule SpaceTraders.MutationAttemptsTest do
     attempt
   end
 
-  defp observation(attempt) do
-    Evidence.authoritative_observation(
+  defp observation(attempt, outcome \\ :absent) do
+    Evidence.reconciliation_observation(
       "get-my-ship",
-      attempt.dependency_keys,
-      %{mutation_occurred: false, source: "fresh Ship state"},
+      attempt,
+      outcome,
+      "Fresh Ship state proves the requested effect #{outcome}.",
       DateTime.add(attempt.sent_or_unknown_at, 1, :microsecond)
     )
   end

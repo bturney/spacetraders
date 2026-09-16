@@ -44,6 +44,7 @@ defmodule SpaceTraders.API.OperationInventoryTest do
                  :contract,
                  :owned_fleet,
                  :ship,
+                 :target_ship,
                  :waypoint
                ]
              end)
@@ -82,6 +83,21 @@ defmodule SpaceTraders.API.OperationInventoryTest do
            ]
 
     assert OperationInventory.fetch!("create-chart").fence_dependencies == [:waypoint]
+
+    assert OperationInventory.fetch!("sell-cargo").fence_dependencies == [
+             :ship,
+             :agent_credits
+           ]
+
+    assert OperationInventory.fetch!("scrap-ship").fence_dependencies == [
+             :owned_fleet,
+             :agent_credits
+           ]
+
+    assert OperationInventory.fetch!("transfer-cargo").fence_dependencies == [
+             :ship,
+             :target_ship
+           ]
   end
 
   test "resolves a concrete request path to its generated operation" do

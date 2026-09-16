@@ -15,6 +15,7 @@ defmodule SpaceTraders.MutationAttempts.Attempt do
     field :expected_effects, {:array, :string}
     field :consequence_bounds, {:array, :string}
     field :dependency_keys, {:array, :string}, default: []
+    field :admitted_bounded_unknown_ids, {:array, :binary_id}, default: []
     field :retry_authorized, :boolean, default: false
     field :provenance, :map
     field :prepared_at, :utc_datetime_usec

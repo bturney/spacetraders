@@ -533,10 +533,13 @@ defmodule Mix.Tasks.SpaceTraders.Gen.Operations do
   defp fence_dependencies("deliver-contract", _owner), do: [:contract, :ship]
   defp fence_dependencies("supply-construction", _owner), do: [:construction, :ship]
   defp fence_dependencies("purchase-ship", _owner), do: [:owned_fleet, :agent_credits]
-  defp fence_dependencies("scrap-ship", _owner), do: [:owned_fleet]
+  defp fence_dependencies("scrap-ship", _owner), do: [:owned_fleet, :agent_credits]
 
-  defp fence_dependencies(id, _owner) when id in ["purchase-cargo", "refuel-ship"],
-    do: [:ship, :agent_credits]
+  defp fence_dependencies(id, _owner)
+       when id in ["purchase-cargo", "sell-cargo", "refuel-ship"],
+       do: [:ship, :agent_credits]
+
+  defp fence_dependencies("transfer-cargo", _owner), do: [:ship, :target_ship]
 
   defp fence_dependencies(_id, :ship_execution), do: [:ship]
   defp fence_dependencies(_id, _owner), do: [:agent]

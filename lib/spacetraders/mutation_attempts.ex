@@ -18,6 +18,7 @@ defmodule SpaceTraders.MutationAttempts do
   alias SpaceTraders.MutationAttempts.{Attempt, Outcome}
   alias SpaceTraders.Repo
   alias SpaceTraders.SafetyFence
+  alias SpaceTraders.SafetyFence.DependencyKey
 
   @correlation_keys [
     :request_id,
@@ -40,7 +41,11 @@ defmodule SpaceTraders.MutationAttempts do
     context = context(Keyword.get(opts, :agent_id), path, opts)
     attempt = build_attempt(operation, path, opts, context)
 
-    case SafetyFence.blocking_attempts(attempt.dependency_keys) do
+    case SafetyFence.blocking_attempts(
+           attempt.dependency_keys,
+           nil,
+           attempt.admitted_bounded_unknown_ids
+         ) do
       [] -> Repo.insert(attempt)
       blocking -> {:error, {:safety_fenced, Enum.map(blocking, & &1.id)}}
     end
@@ -97,7 +102,11 @@ defmodule SpaceTraders.MutationAttempts do
           Repo.rollback(:retry_action_mismatch)
 
         true ->
-          case SafetyFence.blocking_attempts(retry.dependency_keys, current.id) do
+          case SafetyFence.blocking_attempts(
+                 retry.dependency_keys,
+                 current.id,
+                 retry.admitted_bounded_unknown_ids
+               ) do
             [] ->
               current
               |> Ecto.Changeset.change(retry_authorized: false)
@@ -119,7 +128,11 @@ defmodule SpaceTraders.MutationAttempts do
       lock_dependencies(attempt.dependency_keys)
       current = locked_attempt(attempt.id)
 
-      case SafetyFence.blocking_attempts(current.dependency_keys, current.id) do
+      case SafetyFence.blocking_attempts(
+             current.dependency_keys,
+             current.id,
+             current.admitted_bounded_unknown_ids
+           ) do
         [] ->
           current
           |> Ecto.Changeset.change(
@@ -235,6 +248,7 @@ defmodule SpaceTraders.MutationAttempts do
   defp build_attempt(operation, path, opts, context) do
     now = DateTime.utc_now()
     dependency_keys = dependency_keys(operation, path, opts, context)
+    admitted_bounded_unknown_ids = admitted_bounded_unknown_ids(opts)
 
     prepared_evidence =
       scrub(%{
@@ -251,6 +265,7 @@ defmodule SpaceTraders.MutationAttempts do
       expected_effects: operation.success_evidence,
       consequence_bounds: operation.consequences,
       dependency_keys: dependency_keys,
+      admitted_bounded_unknown_ids: admitted_bounded_unknown_ids,
       provenance: provenance(context),
       prepared_at: now,
       operator_id: context.operator_id,
@@ -340,31 +355,38 @@ defmodule SpaceTraders.MutationAttempts do
   defp dependency_key(:ship, _path, _opts, context), do: ship_dependency_keys(context)
 
   defp dependency_key(:agent_credits, _path, _opts, context),
-    do: scoped_key("agent-credits", context.agent_id)
+    do: [DependencyKey.agent_credits(context.agent_id)]
 
   defp dependency_key(:owned_fleet, _path, _opts, context),
-    do: scoped_key("owned-fleet", context.agent_id)
+    do: [DependencyKey.owned_fleet(context.agent_id)]
 
   defp dependency_key(:agent_symbol, _path, opts, context) do
     symbol = get_in(opts, [:json, "symbol"]) || get_in(opts, [:json, :symbol])
-    ["agent-symbol:#{context.operator_id || "unknown"}:#{symbol || "unknown"}"]
+    [DependencyKey.agent_symbol(context.operator_id || "unknown", symbol || "unknown")]
   end
 
   defp dependency_key(:contract, path, _opts, context),
-    do: ["contract:#{path_parameter(path, "contracts") || context.agent_id || "unknown"}"]
+    do: [DependencyKey.contract(context.agent_id, path_parameter(path, "contracts") || "unknown")]
 
   defp dependency_key(:construction, path, _opts, context),
-    do: ["construction:#{path_parameter(path, "waypoints") || context.agent_id || "unknown"}"]
+    do: [
+      DependencyKey.construction(context.agent_id, path_parameter(path, "waypoints") || "unknown")
+    ]
 
   defp dependency_key(:waypoint, _path, opts, context),
     do: waypoint_dependency_keys(opts, context)
+
+  defp dependency_key(:target_ship, _path, opts, context) do
+    ship_symbol = get_in(opts, [:json, "shipSymbol"]) || get_in(opts, [:json, :shipSymbol])
+    [DependencyKey.ship(context.agent_id, ship_symbol || "unknown")]
+  end
 
   defp dependency_key(:agent, _path, _opts, context),
     do: [fallback_dependency_key(context)]
 
   defp ship_dependency_keys(%{agent_id: agent_id, ship_symbol: ship_symbol})
        when is_integer(agent_id) and is_binary(ship_symbol),
-       do: ["ship:#{agent_id}:#{ship_symbol}"]
+       do: [DependencyKey.ship(agent_id, ship_symbol)]
 
   defp ship_dependency_keys(context), do: [fallback_dependency_key(context)]
 
@@ -374,22 +396,19 @@ defmodule SpaceTraders.MutationAttempts do
         get_in(opts, [:dependency_context, "waypoint_symbol"])
 
     if is_binary(waypoint_symbol) and waypoint_symbol != "" do
-      ["waypoint:#{context.agent_id || "unknown"}:#{waypoint_symbol}"]
+      [DependencyKey.waypoint(context.agent_id || "unknown", waypoint_symbol)]
     else
-      ship_dependency_keys(context)
+      [fallback_dependency_key(context)]
     end
   end
 
   defp fallback_dependency_key(%{agent_id: agent_id}) when is_integer(agent_id),
-    do: "agent:#{agent_id}"
+    do: DependencyKey.agent(agent_id)
 
   defp fallback_dependency_key(%{operator_id: operator_id}) when is_integer(operator_id),
-    do: "operator:#{operator_id}"
+    do: DependencyKey.operator(operator_id)
 
   defp fallback_dependency_key(_context), do: "global"
-
-  defp scoped_key(scope, id) when is_integer(id), do: ["#{scope}:#{id}"]
-  defp scoped_key(_scope, _id), do: []
 
   defp path_parameter(path, segment) do
     parts = String.split(path, "/", trim: true)
@@ -398,6 +417,25 @@ defmodule SpaceTraders.MutationAttempts do
       nil -> nil
       index -> Enum.at(parts, index + 1)
     end
+  end
+
+  defp admitted_bounded_unknown_ids(opts) do
+    opts
+    |> Keyword.get(:bounded_unknown_admissions, [])
+    |> Enum.flat_map(fn
+      {%Attempt{id: attempt_id}, %ConstraintAccounting{} = accounting} ->
+        current = get!(attempt_id)
+
+        if current.state == "bounded_unknown" and
+             Evidence.validate_constraint_accounting(current, accounting) == :ok do
+          [attempt_id]
+        else
+          []
+        end
+
+      _invalid_admission ->
+        []
+    end)
   end
 
   defp list(query) do
@@ -420,17 +458,13 @@ defmodule SpaceTraders.MutationAttempts do
   end
 
   defp fingerprint(operation_id, prepared_evidence, dependency_keys) do
-    :sha256
-    |> :crypto.hash(
-      :erlang.term_to_binary({operation_id, prepared_evidence, dependency_keys}, [:deterministic])
-    )
-    |> Base.encode16(case: :lower)
+    Evidence.fingerprint({operation_id, prepared_evidence, dependency_keys})
   end
 
   defp validate_reconciliation_evidence(attempt, resolution, observations, opts) do
     accounting = Keyword.get(opts, :constraint_accounting)
 
-    with :ok <- validate_observations(attempt, observations),
+    with :ok <- validate_observations(attempt, resolution, observations),
          :ok <- validate_constraint_accounting(attempt, resolution, accounting) do
       evidence = %{"observations" => Enum.map(observations, &Evidence.serialize/1)}
 
@@ -442,7 +476,7 @@ defmodule SpaceTraders.MutationAttempts do
     end
   end
 
-  defp validate_observations(attempt, observations) do
+  defp validate_observations(attempt, resolution, observations) do
     covered_dependencies =
       observations
       |> Enum.filter(&Evidence.valid_observation?/1)
@@ -452,7 +486,10 @@ defmodule SpaceTraders.MutationAttempts do
       |> Enum.flat_map(& &1.dependency_keys)
       |> MapSet.new()
 
-    if length(observations) > 0 and
+    proves_outcome? =
+      Enum.any?(observations, &observation_proves?(&1, attempt, resolution))
+
+    if length(observations) > 0 and proves_outcome? and
          Enum.all?(observations, &Evidence.valid_observation?/1) and
          MapSet.subset?(MapSet.new(attempt.dependency_keys), covered_dependencies) do
       :ok
@@ -461,43 +498,31 @@ defmodule SpaceTraders.MutationAttempts do
     end
   end
 
+  defp observation_proves?(%AuthoritativeObservation{facts: facts}, attempt, resolution) do
+    conclusion = Map.get(facts, :reconciliation) || Map.get(facts, "reconciliation") || %{}
+
+    (Map.get(conclusion, :mutation_attempt_id) || conclusion["mutation_attempt_id"]) == attempt.id and
+      (Map.get(conclusion, :request_fingerprint) || conclusion["request_fingerprint"]) ==
+        attempt.request_fingerprint and
+      (Map.get(conclusion, :outcome) || conclusion["outcome"]) == Atom.to_string(resolution) and
+      is_binary(Map.get(conclusion, :basis) || conclusion["basis"])
+  end
+
+  defp observation_proves?(_observation, _attempt, _resolution), do: false
+
   defp validate_constraint_accounting(_attempt, resolution, nil)
        when resolution != :bounded_unknown,
        do: :ok
 
-  defp validate_constraint_accounting(attempt, :bounded_unknown, %ConstraintAccounting{
-         consequence_bound: bound,
-         hard_constraints: evaluations
-       }) do
-    constraints = active_hard_constraints(attempt)
-    evaluated_constraints = Enum.map(evaluations, &Map.get(&1, :constraint, &1["constraint"]))
-
-    valid_evaluations? =
-      Enum.all?(evaluations, fn evaluation ->
-        satisfied = Map.get(evaluation, :satisfied, evaluation["satisfied"])
-        evidence = Map.get(evaluation, :evidence, evaluation["evidence"])
-        satisfied == true and is_binary(evidence) and evidence != ""
-      end)
-
-    if is_binary(bound) and bound != "" and valid_evaluations? and
-         MapSet.new(evaluated_constraints) == MapSet.new(constraints) do
-      :ok
-    else
-      {:error, :hard_constraint_accounting_required}
-    end
-  end
+  defp validate_constraint_accounting(
+         attempt,
+         :bounded_unknown,
+         %ConstraintAccounting{} = accounting
+       ),
+       do: Evidence.validate_constraint_accounting(attempt, accounting)
 
   defp validate_constraint_accounting(_attempt, :bounded_unknown, _accounting),
     do: {:error, :hard_constraint_accounting_required}
-
-  defp active_hard_constraints(%Attempt{strategy_revision_id: nil}), do: []
-
-  defp active_hard_constraints(%Attempt{strategy_revision_id: revision_id}) do
-    case Repo.get(SpaceTraders.FleetStrategy.Revision, revision_id) do
-      %{document: %{"hard_constraints" => constraints}} when is_list(constraints) -> constraints
-      _revision -> []
-    end
-  end
 
   defp action_remains_selected?(%Attempt{provenance: provenance}) do
     with intent_id when is_integer(intent_id) <- provenance["intent_id"],
@@ -511,9 +536,7 @@ defmodule SpaceTraders.MutationAttempts do
   end
 
   defp action_fingerprint(action) when is_map(action) and map_size(action) > 0 do
-    :sha256
-    |> :crypto.hash(:erlang.term_to_binary(action, [:deterministic]))
-    |> Base.encode16(case: :lower)
+    Evidence.fingerprint(action)
   end
 
   defp action_fingerprint(_action), do: nil

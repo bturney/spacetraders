@@ -11,6 +11,9 @@ defmodule SpaceTraders.Evidence do
   alias SpaceTraders.Fleet
   alias SpaceTraders.FleetGeneration
   alias SpaceTraders.API.OperationInventory
+  alias SpaceTraders.FleetStrategy.Revision
+  alias SpaceTraders.MutationAttempts.Attempt
+  alias SpaceTraders.Repo
 
   defmodule AuthoritativeObservation do
     @moduledoc "A successful authoritative read with the facts used for reconciliation."
@@ -47,6 +50,30 @@ defmodule SpaceTraders.Evidence do
     }
   end
 
+  @doc "Records the operation-specific conclusion drawn from a fresh authoritative read."
+  def reconciliation_observation(
+        operation_id,
+        %Attempt{} = attempt,
+        outcome,
+        basis,
+        observed_at \\ DateTime.utc_now()
+      )
+      when outcome in [:accepted, :absent, :bounded_unknown] and is_binary(basis) and basis != "" do
+    authoritative_observation(
+      operation_id,
+      attempt.dependency_keys,
+      %{
+        reconciliation: %{
+          mutation_attempt_id: attempt.id,
+          request_fingerprint: attempt.request_fingerprint,
+          outcome: Atom.to_string(outcome),
+          basis: basis
+        }
+      },
+      observed_at
+    )
+  end
+
   @doc "Records how the bounded consequence satisfies each active Hard Constraint."
   def constraint_accounting(consequence_bound, hard_constraints)
       when is_binary(consequence_bound) and consequence_bound != "" and
@@ -77,9 +104,40 @@ defmodule SpaceTraders.Evidence do
 
   def serialize(%ConstraintAccounting{} = accounting), do: Map.from_struct(accounting)
 
-  defp fingerprint(facts) do
+  def validate_constraint_accounting(
+        %Attempt{} = attempt,
+        %ConstraintAccounting{consequence_bound: bound, hard_constraints: evaluations}
+      ) do
+    constraints =
+      case attempt.strategy_revision_id && Repo.get(Revision, attempt.strategy_revision_id) do
+        %{document: %{"hard_constraints" => values}} when is_list(values) -> values
+        _revision -> []
+      end
+
+    evaluated_constraints = Enum.map(evaluations, &Map.get(&1, :constraint, &1["constraint"]))
+
+    valid_evaluations? =
+      Enum.all?(evaluations, fn evaluation ->
+        satisfied = Map.get(evaluation, :satisfied, evaluation["satisfied"])
+        evidence = Map.get(evaluation, :evidence, evaluation["evidence"])
+        satisfied == true and is_binary(evidence) and evidence != ""
+      end)
+
+    if is_binary(bound) and bound != "" and valid_evaluations? and
+         MapSet.new(evaluated_constraints) == MapSet.new(constraints) do
+      :ok
+    else
+      {:error, :hard_constraint_accounting_required}
+    end
+  end
+
+  def validate_constraint_accounting(_attempt, _accounting),
+    do: {:error, :hard_constraint_accounting_required}
+
+  @doc false
+  def fingerprint(value) do
     :sha256
-    |> :crypto.hash(:erlang.term_to_binary(facts, [:deterministic]))
+    |> :crypto.hash(:erlang.term_to_binary(value, [:deterministic]))
     |> Base.encode16(case: :lower)
   end
 

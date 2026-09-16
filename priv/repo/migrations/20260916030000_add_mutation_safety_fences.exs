@@ -4,6 +4,7 @@ defmodule SpaceTraders.Repo.Migrations.AddMutationSafetyFences do
   def up do
     alter table(:mutation_attempts) do
       add :dependency_keys, {:array, :string}, null: false, default: []
+      add :admitted_bounded_unknown_ids, {:array, :uuid}, null: false, default: []
       add :retry_authorized, :boolean, null: false, default: false
 
       add :retry_of_id,
@@ -51,6 +52,7 @@ defmodule SpaceTraders.Repo.Migrations.AddMutationSafetyFences do
     alter table(:mutation_attempts) do
       remove :retry_of_id
       remove :retry_authorized
+      remove :admitted_bounded_unknown_ids
       remove :dependency_keys
     end
   end
