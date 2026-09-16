@@ -79,9 +79,9 @@ defmodule SpaceTraders.ScenarioCase do
     Req.Test.allow(SpaceTraders.API, test_pid, fn ->
       SpaceTraders.Fleet.ShipSupervisor
       |> DynamicSupervisor.which_children()
-      |> Enum.find_value(test_pid, fn
-        {_id, pid, _type, _modules} when is_pid(pid) -> pid
-        _ -> nil
+      |> Enum.flat_map(fn
+        {_id, pid, _type, _modules} when is_pid(pid) -> [pid]
+        _ -> []
       end)
     end)
   end
