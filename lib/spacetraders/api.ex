@@ -81,6 +81,7 @@ defmodule SpaceTraders.API do
   @type account_token() :: String.t()
   @type result() ::
           {:ok, term()}
+          | {:error, :agent_token_missing}
           | {:error, SpaceTraders.API.GameplayError.t() | SpaceTraders.API.Error.t()}
 
   defmodule MutationSuppressedError do

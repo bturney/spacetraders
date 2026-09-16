@@ -88,9 +88,15 @@ defmodule Mix.Tasks.SpaceTraders.Gen.Operations do
           :cooldown
         ),
       "create-chart" =>
-        ship_mutation(["uncharted current Waypoint"], ["charts current Waypoint"], [
-          "Chart and Waypoint response"
-        ]),
+        ship_mutation(
+          ["uncharted current Waypoint"],
+          [
+            "charts current Waypoint and may add credits"
+          ],
+          [
+            "Chart, Waypoint, and Agent response"
+          ]
+        ),
       "dock-ship" =>
         ship_mutation(["orbiting Ship"], ["changes Ship posture to docked"], ["Ship nav response"]),
       "create-survey" =>
@@ -340,6 +346,18 @@ defmodule Mix.Tasks.SpaceTraders.Gen.Operations do
           "Unclassified: #{inspect(missing)}; absent from spec: #{inspect(removed)}"
       )
     end
+
+    misclassified =
+      Enum.filter(operations, fn operation ->
+        operation.id in @read_operations != (operation.method == :get)
+      end)
+
+    if misclassified != [] do
+      Mix.raise(
+        "Pinned API read/mutation drift: " <>
+          inspect(Enum.map(misclassified, &{&1.id, &1.method}))
+      )
+    end
   end
 
   defp classify(%{id: id} = operation) when id in @read_operations do
@@ -379,6 +397,10 @@ defmodule Mix.Tasks.SpaceTraders.Gen.Operations do
 
   defp read_prerequisites(%{id: "get-status"}), do: ["public API availability"]
 
+  defp read_prerequisites(%{id: id}) when id in ["get-market", "get-shipyard"] do
+    ["requested Waypoint identifiers", "Ship presence for full Listing visibility"]
+  end
+
   defp read_prerequisites(%{path: path}) do
     if String.starts_with?(path, "/my/") do
       ["AgentToken credential reference", "requested entity identifiers"]
@@ -405,6 +427,16 @@ defmodule Mix.Tasks.SpaceTraders.Gen.Operations do
   defp mutation_waits(_id, wait), do: [wait]
 
   defp reconciliation_evidence("register"), do: ["Agent existence by symbol"]
+  defp reconciliation_evidence("create-chart"), do: ["Waypoint Chart", "Agent credits"]
+  defp reconciliation_evidence("create-survey"), do: ["Ship Cooldown", "Bounded Unknown Surveys"]
+
+  defp reconciliation_evidence(id)
+       when id in [
+              "create-ship-system-scan",
+              "create-ship-waypoint-scan",
+              "create-ship-ship-scan"
+            ],
+       do: ["Ship Cooldown", "Bounded Unknown scan results"]
 
   defp reconciliation_evidence(id)
        when id in ["accept-contract", "fulfill-contract", "negotiateContract"],

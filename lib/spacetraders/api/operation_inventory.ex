@@ -51,10 +51,10 @@ defmodule SpaceTraders.API.OperationInventory do
       classification: :mutation,
       owner: :ship_execution,
       prerequisites: ["uncharted current Waypoint"],
-      consequences: ["charts current Waypoint"],
-      success_evidence: ["Chart and Waypoint response"],
+      consequences: ["charts current Waypoint and may add credits"],
+      success_evidence: ["Chart, Waypoint, and Agent response"],
       waits: [],
-      ambiguity: {:reconcile_before_retry, ["Ship state"]},
+      ambiguity: {:reconcile_before_retry, ["Waypoint Chart", "Agent credits"]},
       visibility: :ship_local,
       pagination: :none
     },
@@ -68,7 +68,7 @@ defmodule SpaceTraders.API.OperationInventory do
       consequences: ["observes nearby Ships"],
       success_evidence: ["scanned Ships and Cooldown response"],
       waits: [:cooldown],
-      ambiguity: {:reconcile_before_retry, ["Ship state"]},
+      ambiguity: {:reconcile_before_retry, ["Ship Cooldown", "Bounded Unknown scan results"]},
       visibility: :ship_local,
       pagination: :none
     },
@@ -82,7 +82,7 @@ defmodule SpaceTraders.API.OperationInventory do
       consequences: ["observes nearby Systems"],
       success_evidence: ["scanned Systems and Cooldown response"],
       waits: [:cooldown],
-      ambiguity: {:reconcile_before_retry, ["Ship state"]},
+      ambiguity: {:reconcile_before_retry, ["Ship Cooldown", "Bounded Unknown scan results"]},
       visibility: :ship_local,
       pagination: :none
     },
@@ -96,7 +96,7 @@ defmodule SpaceTraders.API.OperationInventory do
       consequences: ["observes nearby Waypoints"],
       success_evidence: ["scanned Waypoints and Cooldown response"],
       waits: [:cooldown],
-      ambiguity: {:reconcile_before_retry, ["Ship state"]},
+      ambiguity: {:reconcile_before_retry, ["Ship Cooldown", "Bounded Unknown scan results"]},
       visibility: :ship_local,
       pagination: :none
     },
@@ -110,7 +110,7 @@ defmodule SpaceTraders.API.OperationInventory do
       consequences: ["creates Surveys"],
       success_evidence: ["Surveys and Cooldown response"],
       waits: [:cooldown],
-      ambiguity: {:reconcile_before_retry, ["Ship state"]},
+      ambiguity: {:reconcile_before_retry, ["Ship Cooldown", "Bounded Unknown Surveys"]},
       visibility: :ship_local,
       pagination: :none
     },
@@ -302,7 +302,10 @@ defmodule SpaceTraders.API.OperationInventory do
       path: "/systems/{systemSymbol}/waypoints/{waypointSymbol}/market",
       classification: :read,
       owner: :evidence,
-      prerequisites: ["requested entity identifiers"],
+      prerequisites: [
+        "requested Waypoint identifiers",
+        "Ship presence for full Listing visibility"
+      ],
       consequences: ["records an authoritative observation without changing game state"],
       success_evidence: ["successful response body with observation provenance"],
       waits: [],
@@ -456,7 +459,10 @@ defmodule SpaceTraders.API.OperationInventory do
       path: "/systems/{systemSymbol}/waypoints/{waypointSymbol}/shipyard",
       classification: :read,
       owner: :evidence,
-      prerequisites: ["requested entity identifiers"],
+      prerequisites: [
+        "requested Waypoint identifiers",
+        "Ship presence for full Listing visibility"
+      ],
       consequences: ["records an authoritative observation without changing game state"],
       success_evidence: ["successful response body with observation provenance"],
       waits: [],

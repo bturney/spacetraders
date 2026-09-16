@@ -17,6 +17,7 @@ defmodule SpaceTraders.API.OperationInventoryTest do
     for operation <- operations do
       assert %OperationInventory.Operation{} = operation
       assert operation.classification in [:read, :mutation]
+      assert operation.classification == :read == (operation.method == :get)
 
       assert operation.owner in [
                :evidence,
