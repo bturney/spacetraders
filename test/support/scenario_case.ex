@@ -86,16 +86,6 @@ defmodule SpaceTraders.ScenarioCase do
     end)
   end
 
-  def restart_runtime_processes do
-    allow_runtime_api()
-
-    SpaceTraders.Fleet.ShipServer.stop_all()
-    SpaceTraders.Contracts.DeadlineServer.stop_all()
-    :ignore = SpaceTraders.Contracts.DeadlineServerBoot.start_link([])
-    :ignore = SpaceTraders.Fleet.ShipServerBoot.start_link([])
-    :ok
-  end
-
   def subscribe_to_notifications(%SpaceTraders.Agent.Agent{id: agent_id}) do
     Phoenix.PubSub.subscribe(SpaceTraders.PubSub, "fleet:#{agent_id}")
   end
