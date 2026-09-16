@@ -208,10 +208,17 @@ defmodule SpaceTraders.MutationAttemptsTest do
 
     bounded_unknown = ambiguous_attempt(agent, operation, "OUTCOME-3")
 
-    assert {:ok, bounded_unknown} =
+    assert {:error, :hard_constraint_accounting_required} =
              MutationAttempts.reconcile(bounded_unknown, :bounded_unknown, %{
                authoritative: true,
                consequence_bound: "at most one transit"
+             })
+
+    assert {:ok, bounded_unknown} =
+             MutationAttempts.reconcile(bounded_unknown, :bounded_unknown, %{
+               authoritative: true,
+               consequence_bound: "at most one transit",
+               hard_constraints_satisfied: true
              })
 
     assert bounded_unknown.state == "bounded_unknown"
@@ -287,6 +294,98 @@ defmodule SpaceTraders.MutationAttemptsTest do
                "/my/ships/RETRY-2/navigate",
                agent_id: agent.id,
                json: %{"waypointSymbol" => "X1-TEST-D4"}
+             )
+  end
+
+  test "the API reconciliation path dispatches exactly one authorized retry" do
+    operator = operator_fixture()
+    agent = agent_fixture(operator)
+    operation = OperationInventory.fetch!("navigate-ship")
+    attempt = ambiguous_attempt(agent, operation, "API-RETRY-1", "X1-TEST-B2")
+    test_pid = self()
+
+    Req.Test.stub(API, fn conn ->
+      Req.Test.json(conn, %{
+        "data" => %{
+          "fuel" => %{},
+          "nav" => %{
+            "systemSymbol" => "X1-TEST",
+            "waypointSymbol" => "X1-TEST-B2",
+            "status" => "IN_TRANSIT",
+            "flightMode" => "CRUISE",
+            "route" => %{}
+          }
+        }
+      })
+    end)
+
+    assert {:ok, %{}} =
+             API.reconcile_absent_and_retry(
+               attempt,
+               %{authoritative: true, source: "fresh Ship state"},
+               fn ->
+                 result =
+                   API.navigate_ship(
+                     AgentTokenReference.new(agent),
+                     "API-RETRY-1",
+                     "X1-TEST-B2"
+                   )
+
+                 send(
+                   test_pid,
+                   API.navigate_ship(
+                     AgentTokenReference.new(agent),
+                     "API-RETRY-1",
+                     "X1-TEST-B2"
+                   )
+                 )
+
+                 result
+               end
+             )
+
+    assert_receive {:error, %API.Error{reason: :retry_already_dispatched}}
+
+    assert [original, retry] = MutationAttempts.list_for_agent(agent)
+    assert original.state == "absent"
+    refute original.retry_authorized
+    assert retry.retry_of_id == original.id
+    assert retry.state == "succeeded"
+  end
+
+  test "Waypoint evidence fences dependent mutations across Ships at that Waypoint" do
+    operator = operator_fixture()
+    agent = agent_fixture(operator)
+    operation = OperationInventory.fetch!("create-chart")
+
+    Repo.insert!(%Ship{agent_id: agent.id, symbol: "CHART-1", ship_type: "PROBE"})
+    Repo.insert!(%Ship{agent_id: agent.id, symbol: "CHART-2", ship_type: "PROBE"})
+
+    assert {:ok, attempt} =
+             MutationAttempts.prepare(operation, "/my/ships/CHART-1/chart",
+               agent_id: agent.id,
+               dependency_context: %{waypoint_symbol: "X1-TEST-A1"}
+             )
+
+    assert {:ok, attempt} = MutationAttempts.mark_sent_or_unknown(attempt)
+
+    assert {:ok, _attempt} =
+             MutationAttempts.record_outcome(attempt, :ambiguous, %{reason: "timeout"})
+
+    assert "waypoint:#{agent.id}:X1-TEST-A1" in attempt.dependency_keys
+
+    assert {:error, {:safety_fenced, [blocking_id]}} =
+             MutationAttempts.prepare(operation, "/my/ships/CHART-2/chart",
+               agent_id: agent.id,
+               dependency_context: %{waypoint_symbol: "X1-TEST-A1"}
+             )
+
+    assert blocking_id == attempt.id
+
+    assert {:ok, _unrelated} =
+             MutationAttempts.prepare(operation, "/my/ships/CHART-2/chart",
+               agent_id: agent.id,
+               dependency_context: %{waypoint_symbol: "X1-TEST-B2"}
              )
   end
 

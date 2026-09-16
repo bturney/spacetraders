@@ -32,6 +32,7 @@ defmodule SpaceTraders.API do
   alias SpaceTraders.API.OperationInventory
   alias SpaceTraders.Agent.Agent, as: AgentRecord
   alias SpaceTraders.MutationAttempts
+  alias SpaceTraders.MutationAttempts.Attempt
   alias SpaceTraders.Repo
 
   alias SpaceTraders.API.Model.{
@@ -310,11 +311,22 @@ defmodule SpaceTraders.API do
   end
 
   @doc "POST /my/ships/{symbol}/chart"
-  @spec create_chart(token(), String.t()) :: result()
-  def create_chart(token, ship_symbol) do
+  @spec create_chart(token(), String.t(), String.t() | nil) :: result()
+  def create_chart(token, ship_symbol, waypoint_symbol \\ nil) do
     request(:post, "/my/ships/#{ship_symbol}/chart", token,
-      as: {:map, %{chart: {:model, Chart}, waypoint: {:model, Waypoint}, agent: {:model, Agent}}}
+      as: {:map, %{chart: {:model, Chart}, waypoint: {:model, Waypoint}, agent: {:model, Agent}}},
+      dependency_context: %{waypoint_symbol: waypoint_symbol}
     )
+  end
+
+  @doc "Retries an ambiguous mutation only after authoritative absence is recorded."
+  @spec reconcile_absent_and_retry(Attempt.t(), map(), (-> result())) :: result()
+  def reconcile_absent_and_retry(%Attempt{} = attempt, evidence, callback)
+      when is_map(evidence) and is_function(callback, 0) do
+    with {:ok, absent} <-
+           MutationAttempts.reconcile(attempt, :absent, evidence, action_selected: true) do
+      MutationAttempts.with_retry(absent, callback)
+    end
   end
 
   @doc "POST /my/ships/{symbol}/refuel"
@@ -672,7 +684,7 @@ defmodule SpaceTraders.API do
 
   defp prepare_mutation_attempt(method, path, opts) do
     operation = OperationInventory.fetch_by_request!(method, path)
-    MutationAttempts.prepare(operation, path, opts)
+    MutationAttempts.prepare_for_dispatch(operation, path, opts)
   end
 
   defp mark_mutation_sent(nil), do: {:ok, nil}
