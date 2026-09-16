@@ -8,7 +8,7 @@ defmodule SpaceTraders.Repo.Migrations.CreateMutationAttempts do
       add :operation_owner, :string, null: false
       add :state, :string, null: false
       add :request_fingerprint, :string, null: false
-      add :parameters, :map, null: false, default: %{}
+      add :prepared_evidence, :map, null: false, default: %{}
       add :expected_effects, {:array, :string}, null: false, default: []
       add :consequence_bounds, {:array, :string}, null: false, default: []
       add :provenance, :map, null: false, default: %{}
@@ -30,9 +30,14 @@ defmodule SpaceTraders.Repo.Migrations.CreateMutationAttempts do
     create index(:mutation_attempts, [:strategy_revision_id, :prepared_at])
     create index(:mutation_attempts, [:state])
 
+    create constraint(:mutation_attempts, :mutation_attempts_state,
+             check:
+               "state IN ('prepared', 'sent_or_unknown', 'succeeded', 'rejected', 'ambiguous', 'reconciled')"
+           )
+
     create table(:mutation_attempt_outcomes) do
       add :mutation_attempt_id,
-          references(:mutation_attempts, type: :uuid, on_delete: :delete_all),
+          references(:mutation_attempts, type: :uuid),
           null: false
 
       add :classification, :string, null: false
@@ -43,5 +48,9 @@ defmodule SpaceTraders.Repo.Migrations.CreateMutationAttempts do
     end
 
     create index(:mutation_attempt_outcomes, [:mutation_attempt_id, :recorded_at])
+
+    create constraint(:mutation_attempt_outcomes, :mutation_attempt_outcomes_classification,
+             check: "classification IN ('succeeded', 'rejected', 'ambiguous', 'reconciled')"
+           )
   end
 end

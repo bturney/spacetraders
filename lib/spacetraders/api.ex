@@ -592,18 +592,24 @@ defmodule SpaceTraders.API do
       {:ok, %{status: status, body: body}} when status in 200..299 ->
         emit_request_metric(path, status)
 
-        case record_mutation_outcome(attempt, :succeeded, %{status: status}) do
-          :ok ->
-            case decode(body, opts[:as]) do
-              {:error, %SpaceTraders.API.Error{} = error} ->
-                {:error, error}
-
-              decoded ->
-                {:ok, decoded}
+        case decode(body, opts[:as]) do
+          {:error, %SpaceTraders.API.Error{} = error} ->
+            case record_mutation_outcome(attempt, :ambiguous, %{
+                   status: status,
+                   reason: "response_decode_failed"
+                 }) do
+              :ok -> {:error, error}
+              {:error, reason} -> {:error, SpaceTraders.API.Error.transport(reason)}
             end
 
-          {:error, reason} ->
-            {:error, SpaceTraders.API.Error.transport(reason)}
+          decoded ->
+            case record_mutation_outcome(attempt, :succeeded, %{status: status}) do
+              :ok ->
+                {:ok, decoded}
+
+              {:error, reason} ->
+                {:error, SpaceTraders.API.Error.transport(reason)}
+            end
         end
 
       {:ok, %{status: status, body: body}} when status in 400..499 ->

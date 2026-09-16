@@ -6,6 +6,7 @@ defmodule SpaceTraders.MutationAttemptsTest do
   alias SpaceTraders.Agent.Scope
   alias SpaceTraders.API
   alias SpaceTraders.API.AgentTokenReference
+  alias SpaceTraders.Fleet.{Intent, Ship}
   alias SpaceTraders.FleetGeneration.Generation
   alias SpaceTraders.FleetStrategy
   alias SpaceTraders.MutationAttempts
@@ -29,15 +30,35 @@ defmodule SpaceTraders.MutationAttemptsTest do
         objective_progress: %{}
       })
 
+    ship =
+      Repo.insert!(%Ship{agent_id: agent.id, symbol: agent.symbol, ship_type: "COMMAND_FRIGATE"})
+
+    intent =
+      Repo.insert!(%Intent{
+        ship_id: ship.id,
+        caller: "manual",
+        type: "navigate",
+        target_waypoint: "X1-TEST-B2",
+        in_flight_action: %{"kind" => "navigate"}
+      })
+
     Req.Test.stub(API, fn conn ->
       assert [attempt] = MutationAttempts.list_for_agent(agent)
       assert attempt.state == "sent_or_unknown"
       assert attempt.fleet_generation_id == generation.id
       assert attempt.strategy_revision_id == revision.id
-      assert attempt.provenance["intent_id"] == 41
+      assert attempt.provenance["ship_id"] == ship.id
+      assert attempt.provenance["ship_symbol"] == ship.symbol
+      assert attempt.provenance["intent_id"] == intent.id
       assert attempt.provenance["decision_episode_id"] == 17
       assert attempt.expected_effects == ["Ship nav and fuel response"]
       assert attempt.consequence_bounds == ["starts local transit"]
+
+      assert attempt.prepared_evidence["preconditions"] == [
+               "reachable destination",
+               "sufficient fuel"
+             ]
+
       refute inspect(attempt) =~ "AGENT_TOKEN_SECRET"
 
       Req.Test.json(conn, %{
@@ -56,7 +77,7 @@ defmodule SpaceTraders.MutationAttemptsTest do
 
     result =
       SpaceTraders.Observability.with_context(
-        [intent_id: 41, decision_episode_id: 17],
+        [decision_episode_id: 17],
         fn ->
           API.navigate_ship(AgentTokenReference.new(agent), agent.symbol, "X1-TEST-B2")
         end
@@ -119,6 +140,22 @@ defmodule SpaceTraders.MutationAttemptsTest do
     assert [attempt] = MutationAttempts.list_for_agent(agent)
     assert attempt.state == "rejected"
     assert [%{classification: "rejected", evidence: %{"status" => 400}}] = attempt.outcomes
+  end
+
+  test "an undecodable successful response remains ambiguous" do
+    operator = operator_fixture()
+    agent = agent_fixture(operator)
+
+    Req.Test.stub(API, fn conn -> Req.Test.json(conn, %{"unexpected" => true}) end)
+
+    assert {:error, %API.Error{}} =
+             API.navigate_ship(AgentTokenReference.new(agent), agent.symbol, "X1-TEST-B2")
+
+    assert [attempt] = MutationAttempts.list_for_agent(agent)
+    assert attempt.state == "ambiguous"
+
+    assert [%{classification: "ambiguous", evidence: evidence}] = attempt.outcomes
+    assert evidence == %{"reason" => "response_decode_failed", "status" => 200}
   end
 
   test "registration evidence excludes credential values" do

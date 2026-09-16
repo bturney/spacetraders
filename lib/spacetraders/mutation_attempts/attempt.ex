@@ -11,7 +11,7 @@ defmodule SpaceTraders.MutationAttempts.Attempt do
     field :operation_owner, :string
     field :state, :string
     field :request_fingerprint, :string
-    field :parameters, :map
+    field :prepared_evidence, :map
     field :expected_effects, {:array, :string}
     field :consequence_bounds, {:array, :string}
     field :provenance, :map

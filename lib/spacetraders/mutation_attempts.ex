@@ -11,6 +11,7 @@ defmodule SpaceTraders.MutationAttempts do
 
   alias SpaceTraders.Agent.{Agent, Operator}
   alias SpaceTraders.API.OperationInventory.Operation
+  alias SpaceTraders.Fleet.{Intent, Ship}
   alias SpaceTraders.FleetGeneration.Generation
   alias SpaceTraders.MutationAttempts.{Attempt, Outcome}
   alias SpaceTraders.Repo
@@ -32,15 +33,20 @@ defmodule SpaceTraders.MutationAttempts do
   @spec prepare(Operation.t(), String.t(), keyword()) :: {:ok, Attempt.t()} | {:error, term()}
   def prepare(%Operation{classification: :mutation} = operation, path, opts) do
     now = DateTime.utc_now()
-    context = context(Keyword.get(opts, :agent_id))
-    parameters = scrub(%{"path" => path, "body" => opts[:json], "query" => opts[:params]})
+    context = context(Keyword.get(opts, :agent_id), path)
+
+    prepared_evidence =
+      scrub(%{
+        "request" => %{"path" => path, "body" => opts[:json], "query" => opts[:params]},
+        "preconditions" => operation.prerequisites
+      })
 
     %Attempt{
       operation_id: operation.id,
       operation_owner: Atom.to_string(operation.owner),
       state: "prepared",
-      request_fingerprint: fingerprint(operation.id, parameters),
-      parameters: parameters,
+      request_fingerprint: fingerprint(operation.id, prepared_evidence),
+      prepared_evidence: prepared_evidence,
       expected_effects: operation.success_evidence,
       consequence_bounds: operation.consequences,
       provenance: provenance(context),
@@ -132,7 +138,7 @@ defmodule SpaceTraders.MutationAttempts do
 
   defp outcome_allowed?(_state, _classification), do: false
 
-  defp context(agent_id) when is_integer(agent_id) do
+  defp context(agent_id, path) when is_integer(agent_id) do
     agent = Repo.get(Agent, agent_id)
 
     generation =
@@ -142,15 +148,18 @@ defmodule SpaceTraders.MutationAttempts do
           limit: 1
       )
 
+    execution = execution_context(agent_id, path)
+
     %{
       operator_id: agent && agent.operator_id,
       agent_id: agent_id,
       fleet_generation_id: generation && generation.id,
       strategy_revision_id: generation && generation.fleet_strategy_revision_id
     }
+    |> Map.merge(execution)
   end
 
-  defp context(_agent_id) do
+  defp context(_agent_id, _path) do
     metadata = logger_metadata()
 
     %{
@@ -159,6 +168,29 @@ defmodule SpaceTraders.MutationAttempts do
       fleet_generation_id: metadata[:fleet_generation_id],
       strategy_revision_id: metadata[:strategy_revision_id]
     }
+  end
+
+  defp execution_context(agent_id, path) do
+    with ["my", "ships", ship_symbol | _rest] <- String.split(path, "/", trim: true),
+         %Ship{} = ship <- Repo.get_by(Ship, agent_id: agent_id, symbol: ship_symbol) do
+      intent =
+        Repo.one(
+          from intent in Intent,
+            where: intent.ship_id == ^ship.id and intent.status in ^Intent.unfinished_states(),
+            order_by: [desc: intent.id],
+            limit: 1
+        )
+
+      %{
+        ship_id: ship.id,
+        ship_symbol: ship.symbol,
+        intent_id: intent && intent.id,
+        job_id: intent && intent.job_id
+      }
+      |> Map.reject(fn {_key, value} -> is_nil(value) end)
+    else
+      _ -> %{}
+    end
   end
 
   defp list(query) do
@@ -180,9 +212,9 @@ defmodule SpaceTraders.MutationAttempts do
     |> Map.take(@correlation_keys)
   end
 
-  defp fingerprint(operation_id, parameters) do
+  defp fingerprint(operation_id, prepared_evidence) do
     :sha256
-    |> :crypto.hash(:erlang.term_to_binary({operation_id, parameters}, [:deterministic]))
+    |> :crypto.hash(:erlang.term_to_binary({operation_id, prepared_evidence}, [:deterministic]))
     |> Base.encode16(case: :lower)
   end
 
