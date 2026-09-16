@@ -34,6 +34,7 @@ defmodule Mix.Tasks.SpaceTraders.Gen.Operations do
       :id,
       :method,
       :path,
+      :spec_fingerprint,
       :classification,
       :owner,
       :prerequisites,
@@ -131,9 +132,9 @@ defmodule Mix.Tasks.SpaceTraders.Gen.Operations do
       "jump-ship" =>
         ship_mutation(
           ["connected Jump Gate", "eligible Ship"],
-          ["starts inter-System transit"],
+          ["relocates Ship to the connected System"],
           ["Ship nav, Agent, and Cooldown response"],
-          :transit
+          :cooldown
         ),
       "navigate-ship" =>
         ship_mutation(
@@ -268,6 +269,7 @@ defmodule Mix.Tasks.SpaceTraders.Gen.Operations do
         :id,
         :method,
         :path,
+        :spec_fingerprint,
         :classification,
         :owner,
         :prerequisites,
@@ -311,9 +313,10 @@ defmodule Mix.Tasks.SpaceTraders.Gen.Operations do
   end
 
   defp load_operations do
-    @spec_path
-    |> File.read!()
-    |> Jason.decode!()
+    spec = @spec_path |> File.read!() |> Jason.decode!()
+    global_security = Map.get(spec, "security", [])
+
+    spec
     |> Map.fetch!("paths")
     |> Enum.flat_map(fn {path, path_item} ->
       path_item
@@ -323,6 +326,12 @@ defmodule Mix.Tasks.SpaceTraders.Gen.Operations do
           id: Map.fetch!(operation, "operationId"),
           method: String.to_atom(method),
           path: path,
+          spec_fingerprint:
+            operation_fingerprint(
+              operation,
+              Map.get(path_item, "parameters", []),
+              global_security
+            ),
           query_parameters:
             operation
             |> Map.get("parameters", [])
@@ -332,6 +341,27 @@ defmodule Mix.Tasks.SpaceTraders.Gen.Operations do
     end)
     |> Enum.sort_by(& &1.id)
   end
+
+  defp operation_fingerprint(operation, path_parameters, global_security) do
+    %{
+      "operation" => operation,
+      "pathParameters" => path_parameters,
+      "effectiveSecurity" => Map.get(operation, "security", global_security)
+    }
+    |> canonical_term()
+    |> :erlang.term_to_binary()
+    |> then(&:crypto.hash(:sha256, &1))
+    |> Base.encode16(case: :lower)
+  end
+
+  defp canonical_term(value) when is_map(value) do
+    value
+    |> Enum.map(fn {key, item} -> {key, canonical_term(item)} end)
+    |> Enum.sort_by(&elem(&1, 0))
+  end
+
+  defp canonical_term(value) when is_list(value), do: Enum.map(value, &canonical_term/1)
+  defp canonical_term(value), do: value
 
   defp assert_complete_classification!(operations) do
     spec_ids = MapSet.new(operations, & &1.id)
@@ -371,7 +401,7 @@ defmodule Mix.Tasks.SpaceTraders.Gen.Operations do
       success_evidence: ["successful response body with observation provenance"],
       waits: [],
       ambiguity: :safe_retry,
-      visibility: visibility(operation),
+      visibility: visibility(operation, :evidence),
       pagination: pagination(operation)
     })
   end
@@ -390,7 +420,7 @@ defmodule Mix.Tasks.SpaceTraders.Gen.Operations do
       success_evidence: success_evidence,
       waits: mutation_waits(id, waits),
       ambiguity: {:reconcile_before_retry, reconciliation_evidence(id)},
-      visibility: visibility(operation),
+      visibility: visibility(operation, owner),
       pagination: :none
     })
   end
@@ -409,11 +439,20 @@ defmodule Mix.Tasks.SpaceTraders.Gen.Operations do
     end
   end
 
-  defp visibility(%{id: "get-status"}), do: :public
-  defp visibility(%{id: id}) when id in ["get-market", "get-shipyard"], do: :location_dependent
-  defp visibility(%{path: "/my/ships/" <> _}), do: :ship_local
-  defp visibility(%{path: "/my/" <> _}), do: :agent
-  defp visibility(_operation), do: :public
+  defp visibility(%{id: "get-status"}, _owner), do: :global_game_state
+
+  defp visibility(%{id: id}, _owner) when id in ["get-market", "get-shipyard"],
+    do: :location_dependent_listing
+
+  defp visibility(_operation, :ship_execution), do: :ship_private
+
+  defp visibility(_operation, owner)
+       when owner in [:fleet_generation, :fleet_reconciliation],
+       do: :agent_private
+
+  defp visibility(%{path: "/my/ships/" <> _}, :evidence), do: :ship_private
+  defp visibility(%{path: "/my/" <> _}, :evidence), do: :agent_private
+  defp visibility(_operation, :evidence), do: :global_game_state
 
   defp pagination(%{query_parameters: []}), do: :none
 
@@ -422,7 +461,6 @@ defmodule Mix.Tasks.SpaceTraders.Gen.Operations do
     if MapSet.subset?(MapSet.new(["page", "limit"]), names), do: :page_limit, else: :none
   end
 
-  defp mutation_waits("jump-ship", :transit), do: [:transit, :cooldown]
   defp mutation_waits(_id, :none), do: []
   defp mutation_waits(_id, wait), do: [wait]
 

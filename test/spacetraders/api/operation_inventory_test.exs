@@ -16,6 +16,7 @@ defmodule SpaceTraders.API.OperationInventoryTest do
 
     for operation <- operations do
       assert %OperationInventory.Operation{} = operation
+      assert operation.spec_fingerprint =~ ~r/^[0-9a-f]{64}$/
       assert operation.classification in [:read, :mutation]
       assert operation.classification == :read == (operation.method == :get)
 
@@ -34,7 +35,13 @@ defmodule SpaceTraders.API.OperationInventoryTest do
       assert operation.ambiguity == :safe_retry or
                match?({:reconcile_before_retry, [_ | _]}, operation.ambiguity)
 
-      assert operation.visibility in [:public, :agent, :ship_local, :location_dependent]
+      assert operation.visibility in [
+               :global_game_state,
+               :agent_private,
+               :ship_private,
+               :location_dependent_listing
+             ]
+
       assert operation.pagination in [:none, :page_limit]
     end
   end
