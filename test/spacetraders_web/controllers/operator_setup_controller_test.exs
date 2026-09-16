@@ -44,10 +44,11 @@ defmodule SpaceTradersWeb.OperatorSetupControllerTest do
     end
 
     test "links an AccountToken when provided", %{conn: conn} do
-      params = put_in(@valid_params, ["operator", "account_token"], "ACCOUNT_TOKEN")
+      account_token = String.duplicate("a", 162)
+      params = put_in(@valid_params, ["operator", "account_token"], account_token)
       post(conn, ~p"/setup", params)
 
-      assert Agent.get_operator_by_email("first@example.com").account_token == "ACCOUNT_TOKEN"
+      assert Agent.get_operator_by_email("first@example.com").account_token == account_token
     end
 
     test "re-renders with errors on invalid data", %{conn: conn} do
