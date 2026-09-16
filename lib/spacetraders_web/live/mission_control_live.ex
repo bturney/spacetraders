@@ -1,0 +1,193 @@
+defmodule SpaceTradersWeb.MissionControlLive do
+  @moduledoc "Authenticated, concise read projection for Fleet Strategy outcomes."
+
+  use SpaceTradersWeb, :live_view
+
+  alias SpaceTraders.MissionControl
+
+  @impl true
+  def mount(_params, _session, socket) do
+    operator_id = socket.assigns.current_scope.operator.id
+
+    if connected?(socket) do
+      Phoenix.PubSub.subscribe(SpaceTraders.PubSub, "fleet_strategy:#{operator_id}")
+    end
+
+    {:ok, assign_projection(socket)}
+  end
+
+  @impl true
+  def render(assigns) do
+    ~H"""
+    <Layouts.app flash={@flash} current_scope={@current_scope} wide>
+      <div class="space-y-6">
+        <header class="max-w-3xl space-y-2">
+          <p class="eyebrow">Autonomous outcome summary</p>
+          <.header>
+            Mission Control
+            <:subtitle>
+              Strategy intent, Fleet health, and only the Operator actions that need attention.
+            </:subtitle>
+          </.header>
+        </header>
+
+        <section
+          :if={!@projection.strategy.active_revision || @projection.fleets == []}
+          id="mission-onboarding"
+          class="rounded-2xl border border-primary/30 bg-primary/5 p-5 sm:p-7"
+        >
+          <h2 class="text-xl font-bold">Set the Fleet direction</h2>
+          <p class="mt-1 text-sm opacity-70">{onboarding_message(@projection)}</p>
+          <div class="mt-4 flex flex-wrap gap-3">
+            <.link
+              :if={!@projection.strategy.active_revision}
+              navigate={~p"/strategy"}
+              class="btn btn-primary"
+            >Review Fleet Strategy</.link>
+            <.link :if={@projection.fleets == []} navigate={~p"/agents/new"} class="btn btn-outline">Mint an Agent</.link>
+          </div>
+        </section>
+
+        <section id="strategy-context" class="grid gap-4 lg:grid-cols-3">
+          <article class="rounded-2xl border border-base-300 bg-base-100 p-5">
+            <p class="eyebrow">Fleet Strategy Revision</p>
+            <p :if={@projection.strategy.active_revision} class="mt-2 text-2xl font-bold">
+              Revision {@projection.strategy.active_revision.number}
+            </p>
+            <p :if={!@projection.strategy.active_revision} class="mt-2 font-semibold">
+              No active revision
+            </p>
+            <.link navigate={~p"/strategy"} class="link link-primary mt-3 inline-block text-sm">Review Strategy</.link>
+          </article>
+          <article class="rounded-2xl border border-base-300 bg-base-100 p-5">
+            <p class="eyebrow">Fleet Generation</p>
+            <p :if={current_generation(@projection)} class="mt-2 text-2xl font-bold">
+              Generation {current_generation(@projection).number}
+            </p>
+            <p :if={!current_generation(@projection)} class="mt-2 font-semibold">
+              No current Fleet Generation
+            </p>
+            <p :if={current_generation(@projection)} class="mt-1 text-sm opacity-70">
+              {current_generation(@projection).symbol}
+            </p>
+          </article>
+          <article class="rounded-2xl border border-base-300 bg-base-100 p-5">
+            <p class="eyebrow">Strategy-capable state</p>
+            <p class="mt-2 font-semibold">
+              {strategy_capable_label(current_generation(@projection))}
+            </p>
+            <p class="mt-1 text-sm opacity-70">
+              {strategy_capable_detail(current_generation(@projection))}
+            </p>
+          </article>
+        </section>
+
+        <section id="objective-evaluations" class="space-y-3">
+          <div>
+            <p class="eyebrow">Outcome Observability</p><h2 class="text-2xl font-bold">
+              Objective evaluations
+            </h2>
+          </div>
+          <p
+            :if={@projection.objectives == []}
+            class="rounded-2xl border border-dashed border-base-300 p-5 text-sm opacity-70"
+          >
+            No Strategic Objectives are active yet.
+          </p>
+          <article
+            :for={objective <- @projection.objectives}
+            class="rounded-2xl border border-base-300 bg-base-100 p-5"
+          >
+            <h3 class="font-bold">{objective.objective["objective"]}</h3>
+            <p class="mt-1 text-sm opacity-70">{objective.objective["evaluation"]}</p>
+            <p class="mt-4 text-sm">{evaluation_label(objective.evaluation)}</p>
+          </article>
+        </section>
+
+        <section id="fleet-health" class="grid gap-4 lg:grid-cols-2">
+          <article
+            :for={fleet <- @projection.fleets}
+            class="rounded-2xl border border-base-300 bg-base-100 p-5"
+          >
+            <div class="flex items-start justify-between gap-3">
+              <div>
+                <p class="eyebrow">Agent / Fleet contribution</p><h2 class="text-xl font-bold">
+                  {fleet.agent.symbol}
+                </h2>
+              </div><span class="badge">{fleet_status(fleet)}</span>
+            </div>
+            <p class="mt-3 text-sm">{fleet_contribution(fleet)}</p>
+            <div :if={fleet.control.attention != []} class="mt-4 rounded-xl bg-warning/10 p-4">
+              <p class="font-semibold">Attention</p>
+              <ul class="mt-2 list-inside list-disc text-sm">
+                <li :for={ship <- fleet.control.attention}>
+                  {ship.symbol}: {ship.control.attention.summary}
+                </li>
+              </ul>
+              <.link navigate={~p"/"} class="link link-primary mt-3 inline-block text-sm">Intervene in Fleet command</.link>
+            </div>
+            <div :if={fleet.activity != []} class="mt-4 border-t border-base-300 pt-4">
+              <p class="eyebrow">Activity</p><p class="mt-2 text-sm">{hd(fleet.activity).message}</p>
+            </div>
+          </article>
+        </section>
+      </div>
+    </Layouts.app>
+    """
+  end
+
+  @impl true
+  def handle_info({:fleet_strategy_updated, operator_id}, socket)
+      when operator_id == socket.assigns.current_scope.operator.id,
+      do: {:noreply, assign_projection(socket)}
+
+  def handle_info(_message, socket), do: {:noreply, socket}
+
+  defp assign_projection(socket),
+    do: assign(socket, :projection, MissionControl.overview(socket.assigns.current_scope))
+
+  defp current_generation(projection),
+    do: Enum.find(projection.generations, &is_nil(&1.retired_at))
+
+  defp strategy_capable_label(%{strategy_capable_at: %DateTime{}}), do: "Strategy-capable"
+  defp strategy_capable_label(_), do: "Not Strategy-capable"
+
+  defp strategy_capable_detail(%{strategy_capable_at: at}),
+    do: "Available since #{Calendar.strftime(at, "%Y-%m-%d %H:%M UTC")}."
+
+  defp strategy_capable_detail(nil),
+    do: "Activate a Fleet Strategy and establish a Fleet Generation."
+
+  defp strategy_capable_detail(_),
+    do: "This Fleet Generation is still establishing authoritative state."
+
+  defp onboarding_message(%{strategy: %{active_revision: nil}}),
+    do:
+      "Choose and explicitly activate a Fleet Strategy Revision before autonomous progress begins."
+
+  defp onboarding_message(_), do: "Mint an Agent to establish the current Fleet Generation."
+  defp fleet_status(%{stale?: true}), do: "Stale Agent"
+  defp fleet_status(%{control: %{healthy?: true}}), do: "Healthy"
+  defp fleet_status(_), do: "Limited"
+
+  defp fleet_contribution(%{ships: {:ok, ships}}),
+    do: "#{length(ships)} Ships contributing to this Fleet Generation."
+
+  defp fleet_contribution(%{ships: {:error, _}}),
+    do: "Fleet contribution is unknown while authoritative Ship state is unavailable."
+
+  defp evaluation_label({:ok, %{kind: :attain, progress: progress, feasible?: true}}),
+    do: "Measured progress: #{Float.round(progress * 100, 1)}%."
+
+  defp evaluation_label({:ok, %{kind: :maintain, margin: margin, feasible?: true}}),
+    do: "Measured margin: #{margin}."
+
+  defp evaluation_label({:ok, %{kind: :continuous, rate: rate, feasible?: true}}),
+    do: "Measured outcome rate: #{Float.round(rate, 2)} per horizon."
+
+  defp evaluation_label({:ok, %{feasible?: false}}),
+    do:
+      "Limitation: current evidence shows this objective is not feasible. Attention is required."
+
+  defp evaluation_label(_), do: "Unknown: no complete, authoritative evaluation is available yet."
+end
