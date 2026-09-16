@@ -193,11 +193,8 @@ defmodule Mix.Tasks.SpaceTraders.Gen.Operations do
           ["source Cargo response"]
         ),
       "negotiateContract" =>
-        ship_mutation(
-          ["Ship at faction headquarters", "Contract capacity"],
-          ["creates an offered Contract"],
-          ["Contract response"]
-        ),
+        {:fleet_reconciliation, ["Ship at faction headquarters", "Contract capacity"],
+         ["creates an offered Contract"], ["Contract response"], :none},
       "install-mount" =>
         ship_mutation(
           ["Ship at capable Shipyard", "mount in Cargo", "Ship capacity"],
@@ -354,7 +351,7 @@ defmodule Mix.Tasks.SpaceTraders.Gen.Operations do
       prerequisites: read_prerequisites(operation),
       consequences: ["records an authoritative observation without changing game state"],
       success_evidence: ["successful response body with observation provenance"],
-      waits: :none,
+      waits: [],
       ambiguity: :safe_retry,
       visibility: visibility(operation),
       pagination: pagination(operation)
@@ -373,8 +370,8 @@ defmodule Mix.Tasks.SpaceTraders.Gen.Operations do
       prerequisites: prerequisites,
       consequences: consequences,
       success_evidence: success_evidence,
-      waits: waits,
-      ambiguity: :reconcile_before_retry,
+      waits: mutation_waits(id, waits),
+      ambiguity: {:reconcile_before_retry, reconciliation_evidence(id)},
       visibility: visibility(operation),
       pagination: :none
     })
@@ -402,6 +399,35 @@ defmodule Mix.Tasks.SpaceTraders.Gen.Operations do
     names = MapSet.new(parameters, & &1["name"])
     if MapSet.subset?(MapSet.new(["page", "limit"]), names), do: :page_limit, else: :none
   end
+
+  defp mutation_waits("jump-ship", :transit), do: [:transit, :cooldown]
+  defp mutation_waits(_id, :none), do: []
+  defp mutation_waits(_id, wait), do: [wait]
+
+  defp reconciliation_evidence("register"), do: ["Agent existence by symbol"]
+
+  defp reconciliation_evidence(id)
+       when id in ["accept-contract", "fulfill-contract", "negotiateContract"],
+       do: ["Contract state", "Agent credits"]
+
+  defp reconciliation_evidence("deliver-contract"), do: ["Contract delivery", "Ship Cargo"]
+  defp reconciliation_evidence("supply-construction"), do: ["Construction state", "Ship Cargo"]
+  defp reconciliation_evidence("purchase-ship"), do: ["owned Fleet", "Agent credits"]
+  defp reconciliation_evidence("scrap-ship"), do: ["owned Fleet", "Agent credits"]
+
+  defp reconciliation_evidence(id)
+       when id in ["purchase-cargo", "sell-cargo", "refuel-ship"],
+       do: ["Ship state", "Agent credits"]
+
+  defp reconciliation_evidence(id)
+       when id in ["jettison", "transfer-cargo", "install-mount", "remove-mount"],
+       do: ["Ship Cargo", "Ship Readiness"]
+
+  defp reconciliation_evidence(id)
+       when id in ["install-ship-module", "remove-ship-module", "repair-ship"],
+       do: ["Ship state", "Ship Readiness"]
+
+  defp reconciliation_evidence(_id), do: ["Ship state"]
 
   defp check_no_drift(source) do
     case File.read(@target_path) do

@@ -207,59 +207,27 @@ defmodule SpaceTraders.Agent do
   """
   def import_agent(%Scope{operator: %Operator{} = operator}, agent_token, true)
       when is_binary(agent_token) and agent_token != "" do
-    result =
-      Repo.transaction(fn ->
-        pending_agent = create_pending_import!(operator, agent_token)
+    credential_ref = AgentTokenReference.temporary(agent_token)
 
-        with {:ok, %GameAgent{} = game_agent} <-
-               SpaceTraders.API.get_agent(AgentTokenReference.new(pending_agent)),
-             :ok <- ensure_agent_is_new(game_agent.symbol, pending_agent.id),
-             {:ok, imported_agent} <- create_imported_agent(pending_agent, game_agent) do
-          imported_agent
-        else
-          {:error, reason} -> Repo.rollback(reason)
-        end
-      end)
-
-    if match?({:ok, _agent}, result),
-      do: SpaceTraders.EmergencyStopAdmission.track_credential(operator.id, agent_token)
-
-    result
+    try do
+      with {:ok, %GameAgent{} = game_agent} <- SpaceTraders.API.get_agent(credential_ref),
+           :ok <- ensure_agent_is_new(game_agent.symbol) do
+        create_imported_agent(operator, game_agent, agent_token)
+      end
+    after
+      AgentTokenReference.release(credential_ref)
+    end
   end
 
   def import_agent(_scope, _agent_token, false), do: {:error, :confirmation_required}
   def import_agent(_scope, _agent_token, _confirmed), do: {:error, :agent_token_required}
 
-  defp ensure_agent_is_new(symbol, pending_agent_id) do
-    if Repo.exists?(
-         from agent in Agent, where: agent.symbol == ^symbol and agent.id != ^pending_agent_id
-       ),
-       do: {:error, :agent_already_imported},
-       else: :ok
+  defp ensure_agent_is_new(symbol) do
+    if Repo.get_by(Agent, symbol: symbol), do: {:error, :agent_already_imported}, else: :ok
   end
 
-  defp create_pending_import!(operator, agent_token) do
-    suffix = System.unique_integer([:positive, :monotonic])
-
-    %Agent{}
-    |> Ecto.Changeset.change(%{
-      symbol: "IMPORT-#{suffix}",
-      faction: "PENDING",
-      headquarters: "PENDING",
-      agent_token: agent_token,
-      operator_id: operator.id
-    })
-    |> Repo.insert!()
-  end
-
-  defp create_imported_agent(pending_agent, game_agent) do
-    case pending_agent
-         |> Agent.changeset(%{
-           symbol: game_agent.symbol,
-           faction: game_agent.starting_faction
-         })
-         |> Ecto.Changeset.put_change(:headquarters, game_agent.headquarters)
-         |> Repo.update() do
+  defp create_imported_agent(operator, game_agent, agent_token) do
+    case store_agent(operator, game_agent, agent_token, game_agent.starting_faction) do
       {:error, %Ecto.Changeset{} = changeset} ->
         if Keyword.has_key?(changeset.errors, :symbol),
           do: {:error, :agent_already_imported},

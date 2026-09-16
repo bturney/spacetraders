@@ -28,8 +28,11 @@ defmodule SpaceTraders.API.OperationInventoryTest do
       assert operation.prerequisites != []
       assert operation.consequences != []
       assert operation.success_evidence != []
-      assert operation.waits in [:none, :cooldown, :transit]
-      assert operation.ambiguity in [:safe_retry, :reconcile_before_retry]
+      assert Enum.all?(operation.waits, &(&1 in [:cooldown, :transit]))
+
+      assert operation.ambiguity == :safe_retry or
+               match?({:reconcile_before_retry, [_ | _]}, operation.ambiguity)
+
       assert operation.visibility in [:public, :agent, :ship_local, :location_dependent]
       assert operation.pagination in [:none, :page_limit]
     end
@@ -44,7 +47,7 @@ defmodule SpaceTraders.API.OperationInventoryTest do
 
         :mutation ->
           assert operation.owner in [:fleet_generation, :fleet_reconciliation, :ship_execution]
-          assert operation.ambiguity == :reconcile_before_retry
+          assert {:reconcile_before_retry, [_ | _]} = operation.ambiguity
       end
     end
   end

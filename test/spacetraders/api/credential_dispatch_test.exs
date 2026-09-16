@@ -36,6 +36,19 @@ defmodule SpaceTraders.API.CredentialDispatchTest do
     assert {:error, :agent_token_missing} = API.get_agent(reference)
   end
 
+  test "uses an opaque process-local reference while importing an AgentToken" do
+    reference = AgentTokenReference.temporary("IMPORTED_TOKEN")
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      assert get_req_header(conn, "authorization") == ["Bearer IMPORTED_TOKEN"]
+      Req.Test.json(conn, %{"data" => %{"symbol" => "IMPORTED"}})
+    end)
+
+    assert {:ok, %SpaceTraders.API.Model.Agent{symbol: "IMPORTED"}} = API.get_agent(reference)
+    refute inspect(reference) =~ "IMPORTED_TOKEN"
+    assert {:error, :agent_token_missing} = API.get_agent(reference)
+  end
+
   test "authenticated API calls reject raw AgentToken strings" do
     Req.Test.stub(SpaceTraders.API, fn _conn ->
       flunk("request dispatched with a raw AgentToken")

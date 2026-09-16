@@ -658,9 +658,17 @@ defmodule SpaceTraders.API do
   defp maybe_auth(nil), do: []
   defp maybe_auth(token), do: [auth: {:bearer, token}]
 
-  defp resolve_agent_token(%AgentTokenReference{agent_id: agent_id}) do
+  defp resolve_agent_token(%AgentTokenReference{agent_id: agent_id}) when is_integer(agent_id) do
     case Repo.get(AgentRecord, agent_id) do
       %AgentRecord{agent_token: token} when is_binary(token) and token != "" -> {:ok, token}
+      _ -> {:error, :agent_token_missing}
+    end
+  end
+
+  defp resolve_agent_token(%AgentTokenReference{temporary_id: temporary_id})
+       when is_reference(temporary_id) do
+    case Process.delete({AgentTokenReference, temporary_id}) do
+      token when is_binary(token) and token != "" -> {:ok, token}
       _ -> {:error, :agent_token_missing}
     end
   end
