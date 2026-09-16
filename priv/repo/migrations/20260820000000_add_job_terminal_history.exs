@@ -50,43 +50,25 @@ defmodule SpaceTraders.Repo.Migrations.AddJobTerminalHistory do
   end
 
   defp create_terminal_job_trigger do
-    if postgres?() do
-      execute("""
-      CREATE FUNCTION jobs_terminal_immutable_update()
-      RETURNS trigger AS $$
-      BEGIN
-        RAISE EXCEPTION 'terminal jobs are immutable';
-      END;
-      $$ LANGUAGE plpgsql
-      """)
+    execute("""
+    CREATE FUNCTION jobs_terminal_immutable_update()
+    RETURNS trigger AS $$
+    BEGIN
+      RAISE EXCEPTION 'terminal jobs are immutable';
+    END;
+    $$ LANGUAGE plpgsql
+    """)
 
-      execute("""
-      CREATE TRIGGER jobs_terminal_immutable_update
-      BEFORE UPDATE ON jobs
-      FOR EACH ROW WHEN (OLD.status IN #{@terminal_states})
-      EXECUTE FUNCTION jobs_terminal_immutable_update()
-      """)
-    else
-      execute("""
-      CREATE TRIGGER jobs_terminal_immutable_update
-      BEFORE UPDATE ON jobs
-      WHEN OLD.status IN #{@terminal_states}
-      BEGIN
-        SELECT RAISE(ABORT, 'terminal jobs are immutable');
-      END
-      """)
-    end
+    execute("""
+    CREATE TRIGGER jobs_terminal_immutable_update
+    BEFORE UPDATE ON jobs
+    FOR EACH ROW WHEN (OLD.status IN #{@terminal_states})
+    EXECUTE FUNCTION jobs_terminal_immutable_update()
+    """)
   end
 
   defp drop_terminal_job_trigger do
-    if postgres?() do
-      execute("DROP TRIGGER jobs_terminal_immutable_update ON jobs")
-      execute("DROP FUNCTION jobs_terminal_immutable_update()")
-    else
-      execute("DROP TRIGGER jobs_terminal_immutable_update")
-    end
+    execute("DROP TRIGGER jobs_terminal_immutable_update ON jobs")
+    execute("DROP FUNCTION jobs_terminal_immutable_update()")
   end
-
-  defp postgres?,
-    do: Application.fetch_env!(:spacetraders, :repo_adapter) == Ecto.Adapters.Postgres
 end

@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 # Canonical project verification gate.
 #
-# Runs `mix verify` (format check, warnings-as-errors compile, tests, and a
-# real app boot + GET /health). This is the same gate CI runs.
+# Runs the PostgreSQL-backed `mix verify` gate. This is the same gate CI runs.
 #
 # Usage: scripts/verify
 set -euo pipefail
@@ -12,6 +11,7 @@ source "$SCRIPT_DIR/_toolchain.sh"
 
 # Keep the verification boot check separate from a developer's default server.
 export PORT="${PORT:-4002}"
+export DATABASE_URL="${DATABASE_URL:-postgres://postgres:postgres@localhost/spacetraders_test}"
 
 if command -v mix >/dev/null 2>&1; then
   MIX=mix
@@ -37,4 +37,4 @@ if [ ! -d deps ] || [ -z "$(ls -A deps 2>/dev/null)" ]; then
   rm -f "$deps_log"
 fi
 
-"$MIX" verify
+MIX_ENV=test "$MIX" verify

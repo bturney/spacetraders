@@ -2,7 +2,7 @@ defmodule SpaceTraders.Repo.Migrations.PersistenceRenameTest do
   # Migrations execute DDL against the shared repo; nothing else may run
   # concurrently.
   # PostgreSQL DDL migrations run in a separate transaction and cannot nest
-  # inside the SQL sandbox owner. The DataCase keeps SQLite sandboxed.
+  # inside the SQL sandbox owner.
   use SpaceTraders.DataCase, async: false
   @moduletag :migration_test
 
@@ -21,20 +21,18 @@ defmodule SpaceTraders.Repo.Migrations.PersistenceRenameTest do
   @rename_version 2026_08_31_000000
 
   setup do
-    if postgres?() do
-      Ecto.Adapters.SQL.Sandbox.mode(Repo, :auto)
-      previous_compiler_options = Code.compiler_options()
-      Code.compiler_options(ignore_module_conflict: true)
+    Ecto.Adapters.SQL.Sandbox.mode(Repo, :auto)
+    previous_compiler_options = Code.compiler_options()
+    Code.compiler_options(ignore_module_conflict: true)
+    Ecto.Migrator.run(Repo, :up, all: true, log: false)
+    Repo.delete_all(AgentRecord)
+
+    on_exit(fn ->
       Ecto.Migrator.run(Repo, :up, all: true, log: false)
       Repo.delete_all(AgentRecord)
-
-      on_exit(fn ->
-        Ecto.Migrator.run(Repo, :up, all: true, log: false)
-        Repo.delete_all(AgentRecord)
-        Ecto.Adapters.SQL.Sandbox.mode(Repo, :manual)
-        Code.compiler_options(previous_compiler_options)
-      end)
-    end
+      Ecto.Adapters.SQL.Sandbox.mode(Repo, :manual)
+      Code.compiler_options(previous_compiler_options)
+    end)
 
     :ok
   end
@@ -287,12 +285,7 @@ defmodule SpaceTraders.Repo.Migrations.PersistenceRenameTest do
   end
 
   defp index_exists?(name) do
-    query =
-      if postgres?() do
-        "SELECT 1 FROM pg_indexes WHERE schemaname = 'public' AND indexname = $1"
-      else
-        "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?"
-      end
+    query = "SELECT 1 FROM pg_indexes WHERE schemaname = 'public' AND indexname = $1"
 
     query!(query, [name]).rows == [[1]]
   end
@@ -304,28 +297,20 @@ defmodule SpaceTraders.Repo.Migrations.PersistenceRenameTest do
   defp postgres_placeholders(statement, []), do: statement
 
   defp postgres_placeholders(statement, params) do
-    if postgres?() do
-      statement
-      |> String.replace("'[]'", "'{}'")
-      |> then(fn statement ->
-        params
-        |> Enum.with_index(1)
-        |> Enum.reduce(statement, fn {_param, index}, query ->
-          String.replace(query, "?", "$#{index}", global: false)
-        end)
+    statement
+    |> String.replace("'[]'", "'{}'")
+    |> then(fn statement ->
+      params
+      |> Enum.with_index(1)
+      |> Enum.reduce(statement, fn {_param, index}, query ->
+        String.replace(query, "?", "$#{index}", global: false)
       end)
-    else
-      statement
-    end
+    end)
   end
 
-  defp postgres?,
-    do: Application.fetch_env!(:spacetraders, :repo_adapter) == Ecto.Adapters.Postgres
+  defp json_placeholder, do: "?::jsonb"
 
-  defp json_placeholder, do: if(postgres?(), do: "?::jsonb", else: "?")
+  defp json_value(value), do: value
 
-  defp json_value(value), do: if(postgres?(), do: value, else: Jason.encode!(value))
-
-  defp active_intent_uniqueness_error,
-    do: if(postgres?(), do: Ecto.InvalidChangesetError, else: Ecto.ConstraintError)
+  defp active_intent_uniqueness_error, do: Ecto.InvalidChangesetError
 end

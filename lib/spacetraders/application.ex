@@ -63,7 +63,7 @@ defmodule SpaceTraders.Application do
   end
 
   defp skip_migrations?() do
-    # By default, sqlite migrations are run when using a release
+    # Releases run migrations through the dedicated migration service.
     System.get_env("RELEASE_NAME") == nil
   end
 end

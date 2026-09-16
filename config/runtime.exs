@@ -41,13 +41,6 @@ if config_env() == :dev do
 end
 
 if config_env() == :prod do
-  database_path =
-    System.get_env("DATABASE_PATH") ||
-      raise """
-      environment variable DATABASE_PATH is missing.
-      For example: /etc/spacetraders/spacetraders.db
-      """
-
   postgres_host =
     System.get_env("POSTGRES_HOST") ||
       raise "environment variable POSTGRES_HOST is missing"
@@ -62,12 +55,6 @@ if config_env() == :prod do
   config :spacetraders,
          SpaceTraders.Repo,
          postgres_config ++ [pool_size: String.to_integer(System.get_env("POOL_SIZE") || "5")]
-
-  # Mounted read-only by the application after cutover. Release tasks use this
-  # adapter exactly once as the pre-cutover rollback artifact.
-  config :spacetraders, SpaceTraders.LegacyRepo,
-    database: database_path,
-    pool_size: 1
 
   # The secret key base is used to sign/encrypt cookies and other secrets.
   # A default value is used in config/dev.exs and config/test.exs but you

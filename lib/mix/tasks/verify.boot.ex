@@ -58,9 +58,8 @@ defmodule Mix.Tasks.Verify.Boot do
     end
   end
 
-  # Test environments may remove their SQLite file or recreate their PostgreSQL
-  # database between test and boot. These tasks may already have run in this
-  # process, so force them.
+  # The test environment may recreate its PostgreSQL database between test and
+  # boot. These tasks may already have run in this process, so force them.
   defp ensure_migrated_db do
     if test_env?() do
       # The test leg already evaluated the migration modules in this process;
@@ -75,20 +74,11 @@ defmodule Mix.Tasks.Verify.Boot do
     end
   end
 
-  # The boot leg migrates its own PID-named SQLite test DB; remove it so verify
-  # runs leave nothing behind. PostgreSQL test database lifecycle is managed by
-  # `mix ecto.drop/create`, and the dev SQLite DB is untouched.
   defp cleanup_test_db do
-    if Mix.env() == :test do
-      db = Application.fetch_env!(:spacetraders, SpaceTraders.Repo)[:database]
-
-      for suffix <- ["", "-shm", "-wal"] do
-        File.rm(db <> suffix)
-      end
-    end
+    :ok
   end
 
-  defp test_env?, do: Mix.env() in [:test, :postgres_test]
+  defp test_env?, do: Mix.env() == :test
 
   defp health_url do
     case SpaceTradersWeb.Endpoint.server_info(:http) do

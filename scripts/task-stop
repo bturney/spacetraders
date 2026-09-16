@@ -53,12 +53,6 @@ while IFS= read -r ignored; do
   case "$path" in
     .worktree-env|.worktree-mix/|.worktree-mix/*|_build/|_build/*|deps/|deps/*|priv/static/assets/|priv/static/assets/*|priv/static/cache_manifest.json)
       ;;
-    *.db|*.db-*)
-      if [[ "$path" == */* ]]; then
-        echo "Task workspace has ignored files and will not be removed: $path" >&2
-        exit 73
-      fi
-      ;;
     *)
       echo "Task workspace has ignored files and will not be removed: $path" >&2
       exit 73

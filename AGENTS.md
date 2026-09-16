@@ -21,7 +21,7 @@ Before exploring a domain area or naming a domain concept, read `docs/agents/dom
 
 ## App
 
-Phoenix 1.8 (Bandit + LiveView), SQLite via `ecto_sqlite3`. Toolchain versions owned by `.tool-versions`.
+Phoenix 1.8 (Bandit + LiveView), PostgreSQL via `postgrex`. Toolchain versions owned by `.tool-versions`.
 
 - Use `scripts/bootstrap` in a clean checkout and `scripts/verify` before pushing. Run/test commands are in README's Development section.
 - Before starting new implementation, run `git fetch origin main` and `git merge-base --is-ancestor origin/main HEAD`; branch names do not prove freshness. Preserve local changes rather than switching or resetting a dirty checkout. Workflow policy is under review in #267.

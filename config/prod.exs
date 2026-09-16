@@ -1,6 +1,5 @@
 import Config
 
-config :spacetraders, :repo_adapter, Ecto.Adapters.Postgres
 config :spacetraders, SpaceTraders.RuntimeAuthority, enabled: true
 
 # Note we also include the path to a cache manifest

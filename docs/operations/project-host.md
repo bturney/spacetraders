@@ -7,15 +7,11 @@ Before changing deployment guarantees, read
 
 ## Authority boundary
 
-PostgreSQL is the authoritative application database. The first deployment of
-this phase refuses unfenced admitted mutations, copies retained SQLite state
-once, stops unfinished legacy work, and commits the authority marker with its
-outbox notification. Later application runtimes do not open SQLite; its volume
-remains mounted only as the pre-cutover rollback artifact.
+PostgreSQL is the authoritative application database. Deployments migrate the
+schema, then start the application only after migration succeeds.
 
 The host keeps `.env` and image-state files under
-`/srv/projects/spacetraders`. Docker retains the SQLite rollback artifact in the
-`spacetraders_spacetraders-data` volume and authoritative PostgreSQL data in the
+`/srv/projects/spacetraders`. Docker stores authoritative PostgreSQL data in the
 `spacetraders_spacetraders-postgres` volume. Versioned deployment commands send
 only committed Compose files and scripts. They do not send host secrets.
 
@@ -65,16 +61,12 @@ scripts/deploy deploy <sha|tag>
 ```
 
 PostgreSQL must pass `pg_isready` before the one-shot `migrate` service runs.
-The one-shot migration service migrates PostgreSQL and either performs the first
-SQLite transformation or verifies that PostgreSQL authority already advanced.
-It can run repeatedly without copying SQLite again. `web` starts only after it
+The migration service migrates PostgreSQL, and `web` starts only after it
 succeeds. Deployment is complete when `GET /health` returns `{"status":"ok"}`
 and the host records the application image.
 
-Before authority advances, a failed deployment makes a best-effort attempt to
-start the previous image. After authority advances, image rollback is disabled:
-fix the release and deploy forward so PostgreSQL writes are never
-reverse-transformed into SQLite.
+A failed deployment makes a best-effort attempt to start the previous image.
+Fix failed releases and deploy forward when rollback cannot recover service.
 
 ## PostgreSQL health and migration
 
@@ -120,15 +112,15 @@ table count, and row count.
 
 ## Fresh-database recovery
 
-This procedure deletes the production PostgreSQL database and the retained
-SQLite artifact. Use it only when no usable PostgreSQL backup remains. Run it on
-`project-host` from the deployment checkout:
+This procedure deletes the production PostgreSQL database. Use it only when no
+usable PostgreSQL backup remains. Run it on `project-host` from the deployment
+checkout:
 
 ```sh
 export COMPOSE_PROJECT_NAME=spacetraders
 export COMPOSE_FILE=compose.yaml:compose.production.yaml
 docker compose down
-docker volume rm spacetraders_spacetraders-data spacetraders_spacetraders-postgres
+docker volume rm spacetraders_spacetraders-postgres
 docker compose run --rm migrate
 docker compose run --rm web \
   bin/spacetraders eval 'Code.eval_file("priv/repo/seeds.exs")'

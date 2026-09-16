@@ -12,25 +12,6 @@ jobs:
   verify:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
-    env:
-      AGENT_TASK_ID: ci-${{ github.run_id }}
-      AGENT_ATTEMPT: ${{ github.run_attempt }}
-    steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-      - name: Run canonical lifecycle
-        run: scripts/agent-run
-      - name: Upload lifecycle evidence
-        if: ${{ always() }}
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
-        with:
-          name: agent-lifecycle-${{ github.run_id }}-${{ github.run_attempt }}
-          path: artifacts/
-          if-no-files-found: error
-          retention-days: 14
-
-  postgres-verify:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
     services:
       postgres:
         image: postgres:17
@@ -45,13 +26,21 @@ jobs:
           --health-retries 5
         ports:
           - 5432:5432
+    env:
+      AGENT_TASK_ID: ci-${{ github.run_id }}
+      AGENT_ATTEMPT: ${{ github.run_attempt }}
+      DATABASE_URL: postgres://postgres:postgres@localhost/spacetraders_test
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-      - name: Bootstrap dependencies
-        run: scripts/bootstrap
-      - name: Verify PostgreSQL behavior
-        run: scripts/verify-postgres
-      - name: Verify PostgreSQL deployment and recovery
-        run: |
-          test/integration/postgres_compose_test.sh
-          test/integration/postgres_migration_test.sh
+      - name: Run canonical lifecycle
+        run: scripts/agent-run
+      - name: Upload lifecycle evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: agent-lifecycle-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/
+          if-no-files-found: error
+          retention-days: 14
+      - name: Verify PostgreSQL deployment configuration
+        run: test/integration/postgres_compose_test.sh
