@@ -2,13 +2,19 @@ defmodule SpaceTradersWeb.MetricsTest do
   use SpaceTradersWeb.ConnCase
 
   alias SpaceTraders.API
+  alias SpaceTraders.API.AgentTokenReference
+
+  import SpaceTraders.AgentFixtures
 
   test "GET /metrics is public and serves Prometheus metrics", %{conn: conn} do
+    operator = operator_fixture()
+    agent = agent_fixture(operator, %{agent_token: "TOKEN"})
+
     Req.Test.stub(SpaceTraders.API, fn conn ->
       Req.Test.json(conn, %{"data" => %{}})
     end)
 
-    assert {:ok, _ship} = API.get_ship("TOKEN", "ORBITALIST-1")
+    assert {:ok, _ship} = API.get_ship(AgentTokenReference.new(agent), "ORBITALIST-1")
     assert response(get(conn, "/health"), 200)
     SpaceTraders.Repo.query!("SELECT 1")
     conn = get(conn, "/metrics")

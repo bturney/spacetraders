@@ -2,6 +2,7 @@ defmodule SpaceTraders.Listing do
   @moduledoc false
 
   alias SpaceTraders.Agent.Agent, as: AgentRecord
+  alias SpaceTraders.API.AgentTokenReference
   alias SpaceTraders.Intelligence
 
   @market_trait "MARKETPLACE"
@@ -16,18 +17,24 @@ defmodule SpaceTraders.Listing do
       when is_binary(token) and token != "" and is_list(ships) do
     ships_by_system = on_site_by_system(ships)
     headquarters_system = system_from_headquarters(headquarters)
+    credential_ref = AgentTokenReference.new(agent)
 
     %{
       markets:
         market_listings(
           agent,
-          token,
+          credential_ref,
           ships_by_system,
           headquarters_system,
           headquarters_waypoints
         ),
       shipyards:
-        shipyard_listings(token, ships_by_system, headquarters_system, headquarters_waypoints)
+        shipyard_listings(
+          credential_ref,
+          ships_by_system,
+          headquarters_system,
+          headquarters_waypoints
+        )
     }
   end
 
@@ -41,9 +48,9 @@ defmodule SpaceTraders.Listing do
     |> Enum.group_by(& &1.nav.system_symbol)
   end
 
-  defp discover_waypoints(token, systems, trait) do
+  defp discover_waypoints(credential_ref, systems, trait) do
     Enum.reduce(Enum.sort(systems), {[], false}, fn system, {waypoints, unavailable?} ->
-      case fetch_waypoint_pages(token, system, trait) do
+      case fetch_waypoint_pages(credential_ref, system, trait) do
         {:ok, found} -> {waypoints ++ Enum.filter(found, &has_trait?(&1, trait)), unavailable?}
         {:partial, found} -> {waypoints ++ Enum.filter(found, &has_trait?(&1, trait)), true}
       end
@@ -54,10 +61,16 @@ defmodule SpaceTraders.Listing do
     if unavailable?, do: {:partial, listings}, else: {:ok, listings}
   end
 
-  defp market_listings(agent, token, ships_by_system, headquarters_system, headquarters_waypoints) do
+  defp market_listings(
+         agent,
+         credential_ref,
+         ships_by_system,
+         headquarters_system,
+         headquarters_waypoints
+       ) do
     {waypoints, unavailable?} =
       discover_for_snapshot(
-        token,
+        credential_ref,
         Map.keys(ships_by_system),
         headquarters_system,
         headquarters_waypoints,
@@ -67,7 +80,11 @@ defmodule SpaceTraders.Listing do
     {listings, unavailable?} =
       Enum.reduce(on_site_waypoints(waypoints, ships_by_system), {[], unavailable?}, fn
         {waypoint, ships}, {listings, unavailable?} ->
-          case SpaceTraders.API.get_market(token, waypoint.system_symbol, waypoint.symbol) do
+          case SpaceTraders.API.get_market(
+                 credential_ref,
+                 waypoint.system_symbol,
+                 waypoint.symbol
+               ) do
             {:ok, market} ->
               record_market_observation(agent, waypoint, ships, market)
 
@@ -82,10 +99,15 @@ defmodule SpaceTraders.Listing do
     result(Enum.reverse(listings), unavailable?)
   end
 
-  defp shipyard_listings(token, ships_by_system, headquarters_system, headquarters_waypoints) do
+  defp shipyard_listings(
+         credential_ref,
+         ships_by_system,
+         headquarters_system,
+         headquarters_waypoints
+       ) do
     {waypoints, unavailable?} =
       discover_for_snapshot(
-        token,
+        credential_ref,
         Map.keys(ships_by_system),
         headquarters_system,
         headquarters_waypoints,
@@ -95,7 +117,11 @@ defmodule SpaceTraders.Listing do
     {listings, unavailable?} =
       Enum.reduce(on_site_waypoints(waypoints, ships_by_system), {[], unavailable?}, fn
         {waypoint, _ships}, {listings, unavailable?} ->
-          case SpaceTraders.API.get_shipyard(token, waypoint.system_symbol, waypoint.symbol) do
+          case SpaceTraders.API.get_shipyard(
+                 credential_ref,
+                 waypoint.system_symbol,
+                 waypoint.symbol
+               ) do
             {:ok, shipyard} ->
               {[%{waypoint: waypoint.symbol, shipyard: shipyard} | listings], unavailable?}
 
@@ -108,7 +134,7 @@ defmodule SpaceTraders.Listing do
   end
 
   defp discover_for_snapshot(
-         token,
+         credential_ref,
          systems,
          headquarters_system,
          {:ok, headquarters_waypoints},
@@ -120,13 +146,23 @@ defmodule SpaceTraders.Listing do
         else: []
 
     {other_waypoints, unavailable?} =
-      discover_waypoints(token, Enum.reject(systems, &(&1 == headquarters_system)), trait)
+      discover_waypoints(
+        credential_ref,
+        Enum.reject(systems, &(&1 == headquarters_system)),
+        trait
+      )
 
     {headquarters ++ other_waypoints, unavailable?}
   end
 
-  defp discover_for_snapshot(token, systems, _headquarters_system, _headquarters_waypoints, trait) do
-    discover_waypoints(token, systems, trait)
+  defp discover_for_snapshot(
+         credential_ref,
+         systems,
+         _headquarters_system,
+         _headquarters_waypoints,
+         trait
+       ) do
+    discover_waypoints(credential_ref, systems, trait)
   end
 
   defp on_site_waypoints(waypoints, ships_by_system) do
@@ -144,8 +180,8 @@ defmodule SpaceTraders.Listing do
     |> Enum.reject(fn {_waypoint, ships} -> ships == [] end)
   end
 
-  defp fetch_waypoint_pages(token, system, trait) do
-    case SpaceTraders.API.get_waypoints_paginated(token, system, traits: trait) do
+  defp fetch_waypoint_pages(credential_ref, system, trait) do
+    case SpaceTraders.API.get_waypoints_paginated(credential_ref, system, traits: trait) do
       {:ok, waypoints} -> {:ok, waypoints}
       {:error, _reason, waypoints} -> {:partial, waypoints}
     end

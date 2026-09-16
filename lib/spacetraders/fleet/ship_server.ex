@@ -19,6 +19,7 @@ defmodule SpaceTraders.Fleet.ShipServer do
   require Logger
 
   alias SpaceTraders.API.Model.{Cooldown, Ship, ShipNav}
+  alias SpaceTraders.API.AgentTokenReference
   alias SpaceTraders.Agent, as: AgentContext
   alias SpaceTraders.Agent.Agent
   alias SpaceTraders.Clock
@@ -39,17 +40,17 @@ defmodule SpaceTraders.Fleet.ShipServer do
   @doc """
   Ensures a ship server is running, starting one under the ship supervisor.
 
-  A running server is reused as-is; its stored agent token is the one the server
-  was started with (on boot, resolved from the database).
+  A running server is reused as-is; its AgentToken reference is resolved from
+  the database immediately before each request.
   """
   @spec ensure_started(Agent.t(), String.t()) :: {:ok, pid()}
   def ensure_started(%Agent{} = agent, ship_symbol) do
-    ensure_started(ship_symbol, agent.id, agent.agent_token)
+    ensure_started(ship_symbol, agent.id, AgentTokenReference.new(agent))
   end
 
-  @doc "Ensures a ship server is running with an explicit agent id + token."
-  @spec ensure_started(String.t(), non_neg_integer(), String.t() | nil) :: {:ok, pid()}
-  def ensure_started(ship_symbol, agent_id, agent_token) do
+  @doc "Ensures a ship server is running with an explicit agent id + credential reference."
+  @spec ensure_started(String.t(), non_neg_integer(), AgentTokenReference.t()) :: {:ok, pid()}
+  def ensure_started(ship_symbol, agent_id, credential_ref) do
     case Registry.lookup(SpaceTraders.Fleet.ShipRegistry, ship_symbol) do
       [{pid, _}] ->
         {:ok, pid}
@@ -57,7 +58,7 @@ defmodule SpaceTraders.Fleet.ShipServer do
       [] ->
         DynamicSupervisor.start_child(
           SpaceTraders.Fleet.ShipSupervisor,
-          {__MODULE__, symbol: ship_symbol, agent_id: agent_id, agent_token: agent_token}
+          {__MODULE__, symbol: ship_symbol, agent_id: agent_id, credential_ref: credential_ref}
         )
     end
   end
@@ -122,7 +123,7 @@ defmodule SpaceTraders.Fleet.ShipServer do
     state = %{
       symbol: Keyword.fetch!(opts, :symbol),
       agent_id: Keyword.fetch!(opts, :agent_id),
-      agent_token: Keyword.fetch!(opts, :agent_token),
+      credential_ref: Keyword.fetch!(opts, :credential_ref),
       pending: %{}
     }
 
@@ -256,8 +257,7 @@ defmodule SpaceTraders.Fleet.ShipServer do
   # Re-pulls the ship's real state from the game. The result is not cached — the
   # dashboard reads the live fleet through the Fleet context; this call is what
   # confirms the event is genuinely done before the ship is unblocked.
-  defp refresh(%{agent_token: agent_token, symbol: symbol} = state)
-       when is_binary(agent_token) and agent_token != "" do
+  defp refresh(%{credential_ref: credential_ref, symbol: symbol} = state) do
     # This GenServer owns a persisted retry timer; blocking it with request-level
     # backoff would make readiness calls unresponsive.
     case SpaceTraders.Repo.get(Agent, state.agent_id) do
@@ -268,11 +268,9 @@ defmodule SpaceTraders.Fleet.ShipServer do
         with :ok <- AgentContext.execution_allowed?(agent) do
           AgentContext.handle_game_result(
             agent,
-            SpaceTraders.API.get_ship(agent_token, symbol, retry: false)
+            SpaceTraders.API.get_ship(credential_ref, symbol, retry: false)
           )
         end
     end
   end
-
-  defp refresh(_state), do: {:error, :agent_token_missing}
 end

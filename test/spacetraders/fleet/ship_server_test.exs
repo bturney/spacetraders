@@ -7,6 +7,7 @@ defmodule SpaceTraders.Fleet.ShipServerTest do
   import SpaceTraders.ShipBody
 
   alias SpaceTraders.Fleet.ShipServer
+  alias SpaceTraders.API.AgentTokenReference
   alias SpaceTraders.Fleet.Ship
   alias SpaceTraders.Fleet.Job
   alias SpaceTraders.Agent.Agent
@@ -67,8 +68,13 @@ defmodule SpaceTraders.Fleet.ShipServerTest do
     end)
   end
 
-  defp start_server(symbol, token \\ "AGENT_TOKEN") do
-    start_supervised!({ShipServer, symbol: symbol, agent_id: @agent_id, agent_token: token})
+  defp start_server(symbol) do
+    start_supervised!(
+      {ShipServer,
+       symbol: symbol,
+       agent_id: @agent_id,
+       credential_ref: %AgentTokenReference{agent_id: @agent_id}}
+    )
   end
 
   defp schedule(symbol, event_type, due_at) do
@@ -131,7 +137,7 @@ defmodule SpaceTraders.Fleet.ShipServerTest do
       event = schedule(symbol, :arrival, DateTime.add(DateTime.utc_now(), -60, :second))
       Req.Test.stub(SpaceTraders.API, fn _conn -> flunk("stale timer made a game request") end)
 
-      start_server(symbol, "STALE_TOKEN")
+      start_server(symbol)
 
       Process.sleep(50)
       assert Repo.get(Event, event.id).status == "pending"

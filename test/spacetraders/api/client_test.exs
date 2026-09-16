@@ -1,11 +1,13 @@
 defmodule SpaceTraders.API.ClientTest do
-  use ExUnit.Case, async: true
+  use SpaceTraders.DataCase, async: true
 
   alias SpaceTraders.API
+  alias SpaceTraders.API.AgentTokenReference
   alias SpaceTraders.API.Model
 
   import ExUnit.CaptureLog
   import Plug.Conn, only: [get_req_header: 2]
+  import SpaceTraders.AgentFixtures
 
   describe "get_status/0" do
     test "returns raw server status from the flat root payload" do
@@ -41,7 +43,8 @@ defmodule SpaceTraders.API.ClientTest do
 
       Logger.metadata(request_id: "request-123", intent_id: 41, job_id: 29)
 
-      assert {:ok, %Model.Ship{}} = API.get_ship("AGENT_TOKEN_SECRET", "ORBITALIST-1")
+      assert {:ok, %Model.Ship{}} =
+               API.get_ship(agent_token_reference("AGENT_TOKEN_SECRET"), "ORBITALIST-1")
 
       assert_receive {:telemetry, ^event, %{count: 1}, metadata}
       assert metadata.endpoint == "/my/ships/{shipSymbol}"
@@ -71,7 +74,8 @@ defmodule SpaceTraders.API.ClientTest do
         )
       end)
 
-      assert {:error, %SpaceTraders.API.GameplayError{code: 1000}} = API.get_agent("TOKEN")
+      assert {:error, %SpaceTraders.API.GameplayError{code: 1000}} =
+               API.get_agent(agent_token_reference())
 
       assert_receive {:telemetry, ^event, %{count: 1}, metadata}, 5_000
       assert metadata.endpoint == "/my/agent"
@@ -91,7 +95,7 @@ defmodule SpaceTraders.API.ClientTest do
       end)
 
       assert {:error, %SpaceTraders.API.Error{}} =
-               API.get_ship("AGENT_TOKEN_SECRET", "SHIP-1", retry: false)
+               API.get_ship(agent_token_reference("AGENT_TOKEN_SECRET"), "SHIP-1", retry: false)
 
       assert_receive {:telemetry, ^event, %{count: 1}, metadata}
       assert metadata.status == "unknown"
@@ -117,7 +121,8 @@ defmodule SpaceTraders.API.ClientTest do
 
       log =
         capture_log(fn ->
-          assert {:ok, %Model.Agent{}} = API.get_agent("AGENT_TOKEN_SECRET")
+          assert {:ok, %Model.Agent{}} =
+                   API.get_agent(agent_token_reference("AGENT_TOKEN_SECRET"))
         end)
 
       refute log =~ "AGENT_TOKEN_SECRET"
@@ -178,7 +183,8 @@ defmodule SpaceTraders.API.ClientTest do
         Req.Test.json(conn, %{"data" => %{"symbol" => "ORBITALIST", "credits" => 42}})
       end)
 
-      assert {:ok, %Model.Agent{symbol: "ORBITALIST", credits: 42}} = API.get_agent("TOKEN")
+      assert {:ok, %Model.Agent{symbol: "ORBITALIST", credits: 42}} =
+               API.get_agent(agent_token_reference())
     end
 
     test "get_contracts/1 decodes a list of contracts" do
@@ -192,7 +198,7 @@ defmodule SpaceTraders.API.ClientTest do
       end)
 
       assert {:ok, [%Model.Contract{id: "c1"}, %Model.Contract{id: "c2"}]} =
-               API.get_contracts("TOKEN")
+               API.get_contracts(agent_token_reference())
     end
   end
 
@@ -223,7 +229,7 @@ defmodule SpaceTraders.API.ClientTest do
                 cooldown: %Model.Cooldown{remaining_seconds: 30},
                 waypoints: [%{symbol: "X1-UX81-A2"}]
               }} =
-               API.scan_waypoints("TOKEN", "ORBITALIST-1")
+               API.scan_waypoints(agent_token_reference(), "ORBITALIST-1")
     end
 
     test "create_chart/2 posts a chart and decodes the waypoint" do
@@ -245,7 +251,7 @@ defmodule SpaceTraders.API.ClientTest do
       end)
 
       assert {:ok, %{waypoint: %Model.Waypoint{symbol: "X1-UX81-A1"}}} =
-               API.create_chart("TOKEN", "ORBITALIST-1")
+               API.create_chart(agent_token_reference(), "ORBITALIST-1")
     end
 
     test "navigate_ship/3 posts the waypoint and decodes fuel + nav" do
@@ -290,7 +296,7 @@ defmodule SpaceTraders.API.ClientTest do
 
       assert {:ok,
               %{fuel: %Model.ShipFuel{current: 150}, nav: %Model.ShipNav{status: "IN_TRANSIT"}}} =
-               API.navigate_ship("TOKEN", "ORBITALIST-1", "X1-UX81-A3")
+               API.navigate_ship(agent_token_reference(), "ORBITALIST-1", "X1-UX81-A3")
     end
 
     test "warp_ship/3 posts the remote waypoint and decodes fuel + nav" do
@@ -319,7 +325,7 @@ defmodule SpaceTraders.API.ClientTest do
 
       assert {:ok,
               %{fuel: %Model.ShipFuel{current: 80}, nav: %Model.ShipNav{status: "IN_TRANSIT"}}} =
-               API.warp_ship("TOKEN", "ORBITALIST-1", "X2-UX81-A3")
+               API.warp_ship(agent_token_reference(), "ORBITALIST-1", "X2-UX81-A3")
     end
 
     test "jump_ship/3 posts the connected waypoint and decodes execution evidence" do
@@ -348,7 +354,7 @@ defmodule SpaceTraders.API.ClientTest do
                 cooldown: %Model.Cooldown{remaining_seconds: 60},
                 transaction: %Model.MarketTransaction{price_per_unit: 1_000},
                 agent: %Model.Agent{credits: 41_000}
-              }} = API.jump_ship("TOKEN", "ORBITALIST-1", "X2-UX81-A1")
+              }} = API.jump_ship(agent_token_reference(), "ORBITALIST-1", "X2-UX81-A1")
     end
 
     test "set_ship_flight_mode/3 patches the flight mode and decodes fuel + nav" do
@@ -373,7 +379,7 @@ defmodule SpaceTraders.API.ClientTest do
 
       assert {:ok,
               %{fuel: %Model.ShipFuel{current: 81}, nav: %Model.ShipNav{flight_mode: "DRIFT"}}} =
-               API.set_ship_flight_mode("TOKEN", "ORBITALIST-1", "DRIFT")
+               API.set_ship_flight_mode(agent_token_reference(), "ORBITALIST-1", "DRIFT")
     end
 
     test "extract_resources/2 decodes cooldown + extraction + cargo" do
@@ -404,7 +410,7 @@ defmodule SpaceTraders.API.ClientTest do
                 cooldown: %Model.Cooldown{remaining_seconds: 60},
                 extraction: %Model.Extraction{yield: %Model.ExtractionYield{units: 5}},
                 cargo: %Model.ShipCargo{units: 5}
-              }} = API.extract_resources("TOKEN", "ORBITALIST-2")
+              }} = API.extract_resources(agent_token_reference(), "ORBITALIST-2")
     end
 
     test "create_survey/2 posts on-site and decodes its Surveys" do
@@ -429,7 +435,7 @@ defmodule SpaceTraders.API.ClientTest do
       end)
 
       assert {:ok, %{cooldown: %Model.Cooldown{remaining_seconds: 60}, surveys: [survey]}} =
-               API.create_survey("TOKEN", "ORBITALIST-2")
+               API.create_survey(agent_token_reference(), "ORBITALIST-2")
 
       assert survey.signature == "survey-signature"
       assert [%{symbol: "IRON_ORE"}] = survey.deposits
@@ -478,7 +484,7 @@ defmodule SpaceTraders.API.ClientTest do
                 },
                 cargo: %Model.ShipCargo{units: 7},
                 events: [%Model.ShipConditionEvent{component: "ENGINE", symbol: "WEAR"}]
-              }} = API.siphon_resources("TOKEN", "ORBITALIST-2")
+              }} = API.siphon_resources(agent_token_reference(), "ORBITALIST-2")
     end
 
     test "jettison_cargo/4 posts the good and units and decodes cargo" do
@@ -492,7 +498,7 @@ defmodule SpaceTraders.API.ClientTest do
       end)
 
       assert {:ok, %{cargo: %Model.ShipCargo{units: 0}}} =
-               API.jettison_cargo("TOKEN", "ORBITALIST-1", "IRON_ORE", 3)
+               API.jettison_cargo(agent_token_reference(), "ORBITALIST-1", "IRON_ORE", 3)
     end
 
     test "install_ship_module/3 posts the module and decodes the modified readiness" do
@@ -521,7 +527,12 @@ defmodule SpaceTraders.API.ClientTest do
                 modules: [%Model.ShipModule{symbol: "MODULE_CARGO_HOLD_I"}],
                 cargo: %Model.ShipCargo{units: 12},
                 transaction: %Model.ShipModificationTransaction{total_price: 1_000}
-              }} = API.install_ship_module("TOKEN", "ORBITALIST-1", "MODULE_CARGO_HOLD_I")
+              }} =
+               API.install_ship_module(
+                 agent_token_reference(),
+                 "ORBITALIST-1",
+                 "MODULE_CARGO_HOLD_I"
+               )
     end
 
     test "transfer_cargo/5 posts the good, units, and receiving ship" do
@@ -540,7 +551,13 @@ defmodule SpaceTraders.API.ClientTest do
       end)
 
       assert {:ok, %{cargo: %Model.ShipCargo{units: 2}}} =
-               API.transfer_cargo("TOKEN", "ORBITALIST-1", "IRON_ORE", 3, "ORBITALIST-2")
+               API.transfer_cargo(
+                 agent_token_reference(),
+                 "ORBITALIST-1",
+                 "IRON_ORE",
+                 3,
+                 "ORBITALIST-2"
+               )
     end
 
     test "purchase_cargo/4 posts the good and units and decodes the transaction" do
@@ -575,7 +592,7 @@ defmodule SpaceTraders.API.ClientTest do
                 cargo: %Model.ShipCargo{units: 5},
                 transaction: %Model.MarketTransaction{total_price: 71_920}
               }} =
-               API.purchase_cargo("TOKEN", "ORBITALIST-1", "SHIP_PLATING", 5)
+               API.purchase_cargo(agent_token_reference(), "ORBITALIST-1", "SHIP_PLATING", 5)
     end
   end
 
@@ -595,7 +612,7 @@ defmodule SpaceTraders.API.ClientTest do
       end)
 
       assert {:ok, %{symbol: "X1-UX81-A1", is_complete: false}} =
-               API.get_construction("TOKEN", "X1-UX81", "X1-UX81-A1")
+               API.get_construction(agent_token_reference(), "X1-UX81", "X1-UX81-A1")
     end
 
     test "get_jump_gate/3 reads connections independently of construction" do
@@ -609,7 +626,7 @@ defmodule SpaceTraders.API.ClientTest do
       end)
 
       assert {:ok, %{symbol: "X1-UX81-A1", connections: ["X1-TEST-A1"]}} =
-               API.get_jump_gate("TOKEN", "X1-UX81", "X1-UX81-A1")
+               API.get_jump_gate(agent_token_reference(), "X1-UX81", "X1-UX81-A1")
     end
 
     test "supply_construction/6 posts the supplying ship and decodes the fresh project state" do
@@ -637,7 +654,7 @@ defmodule SpaceTraders.API.ClientTest do
 
       assert {:ok, %{construction: %{symbol: "X1-UX81-A1"}, cargo: %{units: 2}}} =
                API.supply_construction(
-                 "TOKEN",
+                 agent_token_reference(),
                  "X1-UX81",
                  "X1-UX81-A1",
                  "ORBITALIST-1",
@@ -663,7 +680,7 @@ defmodule SpaceTraders.API.ClientTest do
       end)
 
       assert {:ok, %Model.Market{symbol: "X1-UX81-A1"}} =
-               API.get_market("TOKEN", "X1-UX81", "X1-UX81-A1")
+               API.get_market(agent_token_reference(), "X1-UX81", "X1-UX81-A1")
     end
 
     test "get_waypoints/3 forwards query params" do
@@ -673,10 +690,16 @@ defmodule SpaceTraders.API.ClientTest do
       end)
 
       assert {:ok, []} =
-               API.get_waypoints("TOKEN", "X1-UX81",
+               API.get_waypoints(agent_token_reference(), "X1-UX81",
                  type: "ENGINEERED_ASTEROID",
                  limit: 50
                )
     end
+  end
+
+  defp agent_token_reference(token \\ "TOKEN") do
+    operator_fixture()
+    |> agent_fixture(%{agent_token: token})
+    |> AgentTokenReference.new()
   end
 end

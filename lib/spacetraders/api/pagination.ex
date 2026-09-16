@@ -3,14 +3,16 @@ defmodule SpaceTraders.API.Pagination do
 
   @default_limit 20
 
+  alias SpaceTraders.API.AgentTokenReference
+
   @doc "Collects every Waypoint page while preserving data collected before a failure."
-  @spec waypoints(String.t(), String.t(), keyword()) ::
+  @spec waypoints(AgentTokenReference.t(), String.t(), keyword()) ::
           {:ok, list()} | {:error, term(), list()}
-  def waypoints(token, system, params \\ []) do
+  def waypoints(credential_ref, system, params \\ []) do
     collect(
       fn page ->
         SpaceTraders.API.get_waypoints(
-          token,
+          credential_ref,
           system,
           Keyword.merge(params, limit: @default_limit, page: page)
         )

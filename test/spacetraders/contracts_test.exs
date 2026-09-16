@@ -1,13 +1,17 @@
 defmodule SpaceTraders.ContractsTest do
   use SpaceTraders.DataCase, async: false
 
-  alias SpaceTraders.Agent.Agent, as: AgentRecord
   alias SpaceTraders.API.Model.Contract
   alias SpaceTraders.Contracts
   alias SpaceTraders.Contracts.DeadlineServer
   alias SpaceTraders.Timeline
 
-  defp agent(token \\ "AGENT_TOKEN"), do: %AgentRecord{agent_token: token}
+  import SpaceTraders.AgentFixtures
+
+  defp agent(token \\ "AGENT_TOKEN") do
+    operator_fixture()
+    |> agent_fixture(%{agent_token: token})
+  end
 
   setup do
     on_exit(&DeadlineServer.stop_all/0)

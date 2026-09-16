@@ -13,6 +13,7 @@ defmodule SpaceTraders.Agent do
   alias SpaceTraders.Repo
 
   alias SpaceTraders.API.Model.Agent, as: GameAgent
+  alias SpaceTraders.API.AgentTokenReference
   alias SpaceTraders.Agent.{Agent, Operator, OperatorToken, OperatorNotifier, Scope}
   alias SpaceTraders.FleetGeneration
 
@@ -206,9 +207,15 @@ defmodule SpaceTraders.Agent do
   """
   def import_agent(%Scope{operator: %Operator{} = operator}, agent_token, true)
       when is_binary(agent_token) and agent_token != "" do
-    with {:ok, %GameAgent{} = game_agent} <- SpaceTraders.API.get_agent(agent_token),
-         :ok <- ensure_agent_is_new(game_agent.symbol) do
-      create_imported_agent(operator, game_agent, agent_token)
+    credential_ref = AgentTokenReference.temporary(agent_token)
+
+    try do
+      with {:ok, %GameAgent{} = game_agent} <- SpaceTraders.API.get_agent(credential_ref),
+           :ok <- ensure_agent_is_new(game_agent.symbol) do
+        create_imported_agent(operator, game_agent, agent_token)
+      end
+    after
+      AgentTokenReference.release(credential_ref)
     end
   end
 

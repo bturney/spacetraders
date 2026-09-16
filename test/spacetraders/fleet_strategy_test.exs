@@ -5,6 +5,7 @@ defmodule SpaceTraders.FleetStrategyTest do
 
   alias SpaceTraders.Agent
   alias SpaceTraders.Agent.Scope
+  alias SpaceTraders.API.AgentTokenReference
   alias SpaceTraders.EmergencyStopAdmission
   alias SpaceTraders.FleetAllocation
   alias SpaceTraders.Fleet
@@ -237,7 +238,7 @@ defmodule SpaceTraders.FleetStrategyTest do
              FleetStrategy.resume(scope, stopped.emergency_stop_version)
 
     assert {:error, :emergency_stopped} =
-             SpaceTraders.API.accept_contract(agent.agent_token, "contract-1")
+             SpaceTraders.API.accept_contract(AgentTokenReference.new(agent), "contract-1")
   end
 
   test "presets disclose ordered objectives, Hard Constraints, Preferences, and consequences" do

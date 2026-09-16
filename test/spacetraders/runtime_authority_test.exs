@@ -3,7 +3,10 @@ defmodule SpaceTraders.RuntimeAuthorityTest do
 
   alias SpaceTraders.Agent
   alias SpaceTraders.Agent.Agent, as: AgentRecord
+  alias SpaceTraders.API.AgentTokenReference
   alias SpaceTraders.RuntimeAuthority
+
+  import SpaceTraders.AgentFixtures
 
   @moduletag skip:
                SpaceTraders.Repo.__adapter__() != Ecto.Adapters.Postgres &&
@@ -111,6 +114,9 @@ defmodule SpaceTraders.RuntimeAuthorityTest do
   end
 
   test "lock loss suppresses new mutations" do
+    operator = operator_fixture()
+    agent = agent_fixture(operator, %{agent_token: "TOKEN"})
+
     previous = Application.get_env(:spacetraders, RuntimeAuthority)
     Application.put_env(:spacetraders, RuntimeAuthority, enabled: true)
 
@@ -134,7 +140,10 @@ defmodule SpaceTraders.RuntimeAuthorityTest do
     end)
 
     assert {:error, :runtime_authority_unavailable} =
-             SpaceTraders.API.accept_contract("TOKEN", "CONTRACT-1")
+             SpaceTraders.API.accept_contract(
+               AgentTokenReference.new(agent),
+               "CONTRACT-1"
+             )
 
     refute_received :mutation_dispatched
   end

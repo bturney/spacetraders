@@ -11,6 +11,7 @@ defmodule SpaceTraders.FleetGeneration do
   import Ecto.Query, warn: false
 
   alias SpaceTraders.API.GameplayError
+  alias SpaceTraders.API.AgentTokenReference
   alias SpaceTraders.API.Model.Agent, as: GameAgent
   alias SpaceTraders.Agent.{Agent, Operator, Scope}
   alias SpaceTraders.Fleet.{Ship, ShipServer}
@@ -163,7 +164,7 @@ defmodule SpaceTraders.FleetGeneration do
   @doc "Pulls an Agent's live game record and records definitive Server Reset evidence."
   def agent_overview(%Agent{agent_token: agent_token} = agent)
       when is_binary(agent_token) and agent_token != "" do
-    case SpaceTraders.API.get_agent(agent_token) do
+    case SpaceTraders.API.get_agent(AgentTokenReference.new(agent)) do
       {:error, %SpaceTraders.API.GameplayError{} = error} = result ->
         if server_reset_mismatch?(error) do
           mark_stale_and_replace(agent)

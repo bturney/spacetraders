@@ -3580,7 +3580,9 @@ defmodule SpaceTradersWeb.DashboardLiveTest do
       # shortly, re-pulls the real state and broadcasts so the card unblocks.
       start_supervised!(
         {SpaceTraders.Fleet.ShipServer,
-         symbol: "ORBITALIST-1", agent_id: agent_id, agent_token: agent.agent_token}
+         symbol: "ORBITALIST-1",
+         agent_id: agent_id,
+         credential_ref: SpaceTraders.API.AgentTokenReference.new(agent)}
       )
 
       assert_receive {:ship_updated, ^agent_id, "ORBITALIST-1"}, 1_000

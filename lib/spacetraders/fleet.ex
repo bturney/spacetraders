@@ -18,6 +18,7 @@ defmodule SpaceTraders.Fleet do
   require Logger
 
   alias SpaceTraders.Agent.Agent, as: AgentRecord
+  alias SpaceTraders.API.AgentTokenReference
   alias SpaceTraders.API.Model.{Market, ShipCargo, ShipNav}
 
   alias SpaceTraders.Fleet.{
@@ -135,7 +136,7 @@ defmodule SpaceTraders.Fleet do
   def list_ships(%AgentRecord{agent_token: agent_token} = agent)
       when is_binary(agent_token) and agent_token != "" do
     with :ok <- Agent.execution_allowed?(agent) do
-      Agent.handle_game_result(agent, SpaceTraders.API.get_ships(agent_token))
+      Agent.handle_game_result(agent, SpaceTraders.API.get_ships(token_reference(agent)))
     end
   end
 
@@ -349,7 +350,7 @@ defmodule SpaceTraders.Fleet do
     with :ok <- market_waypoint?(waypoint),
          %{system_symbol: system, symbol: symbol} when is_binary(system) and is_binary(symbol) <-
            waypoint do
-      case SpaceTraders.API.get_market(token, system, symbol) do
+      case SpaceTraders.API.get_market(token_reference(agent), system, symbol) do
         {:ok, market} = result ->
           record_market_observation(agent, system, market, "get_market")
           result
@@ -370,7 +371,7 @@ defmodule SpaceTraders.Fleet do
       when is_binary(token) and token != "" do
     with %{system_symbol: system, symbol: symbol} when is_binary(system) and is_binary(symbol) <-
            waypoint do
-      case SpaceTraders.API.get_construction(token, system, symbol) do
+      case SpaceTraders.API.get_construction(token_reference(agent), system, symbol) do
         {:ok, construction} = result ->
           record_construction_observation(agent, system, construction, "get_construction")
           result
@@ -397,7 +398,7 @@ defmodule SpaceTraders.Fleet do
       when is_binary(token) and token != "" do
     with %{system_symbol: system, symbol: symbol} when is_binary(system) and is_binary(symbol) <-
            waypoint do
-      case SpaceTraders.API.get_jump_gate(token, system, symbol) do
+      case SpaceTraders.API.get_jump_gate(token_reference(agent), system, symbol) do
         {:ok, gate} = result ->
           record_jump_gate_observation(agent, system, gate, "get_jump_gate")
           result
@@ -432,7 +433,7 @@ defmodule SpaceTraders.Fleet do
     agent
     |> Agent.handle_game_result(
       SpaceTraders.API.supply_construction(
-        token,
+        token_reference(agent),
         system_symbol,
         waypoint_symbol,
         ship_symbol,
@@ -612,8 +613,12 @@ defmodule SpaceTraders.Fleet do
          nil <- unfinished_job(ship.id),
          true <- is_binary(waypoint_symbol) and waypoint_symbol != "",
          {:ok, live_ship} <-
-           Agent.handle_game_result(agent, SpaceTraders.API.get_ship(token, ship_symbol)),
-         {:ok, waypoint} <- waypoint(token, live_ship.nav.system_symbol, waypoint_symbol),
+           Agent.handle_game_result(
+             agent,
+             SpaceTraders.API.get_ship(token_reference(agent), ship_symbol)
+           ),
+         {:ok, waypoint} <-
+           waypoint(token_reference(agent), live_ship.nav.system_symbol, waypoint_symbol),
          :ok <- gather_waypoint?("extract", waypoint),
          :ok <- survey_capability?(live_ship) do
       job =
@@ -654,9 +659,12 @@ defmodule SpaceTraders.Fleet do
          {:ok, ship} <- owned_ship(agent, ship_symbol),
          nil <- unfinished_job(ship.id),
          {:ok, live_ship} <-
-           Agent.handle_game_result(agent, SpaceTraders.API.get_ship(token, ship_symbol)),
+           Agent.handle_game_result(
+             agent,
+             SpaceTraders.API.get_ship(token_reference(agent), ship_symbol)
+           ),
          system when is_binary(system) <- live_ship.nav.system_symbol,
-         {:ok, waypoints} <- fetch_waypoint_pages(token, system) do
+         {:ok, waypoints} <- fetch_waypoint_pages(token_reference(agent), system) do
       Enum.each(waypoints, &record_waypoint_observation(agent, &1, "get_waypoints"))
 
       job =
@@ -699,7 +707,10 @@ defmodule SpaceTraders.Fleet do
          nil <- unfinished_job(ship.id),
          :ok <- validate_procurement_attrs(attrs),
          {:ok, live_ship} <-
-           Agent.handle_game_result(agent, SpaceTraders.API.get_ship(token, ship_symbol)),
+           Agent.handle_game_result(
+             agent,
+             SpaceTraders.API.get_ship(token_reference(agent), ship_symbol)
+           ),
          system when is_binary(system) <- live_ship.nav.system_symbol,
          {:ok, progress} <- procurement_progress(attrs, system) do
       job =
@@ -738,7 +749,10 @@ defmodule SpaceTraders.Fleet do
          {:ok, ship} <- owned_ship(agent, ship_symbol),
          nil <- unfinished_job(ship.id),
          {:ok, live_ship} <-
-           Agent.handle_game_result(agent, SpaceTraders.API.get_ship(token, ship_symbol)),
+           Agent.handle_game_result(
+             agent,
+             SpaceTraders.API.get_ship(token_reference(agent), ship_symbol)
+           ),
          system when is_binary(system) <- live_ship.nav.system_symbol,
          {:ok, progress} <- construction_supply_progress(attrs, system) do
       job =
@@ -804,7 +818,7 @@ defmodule SpaceTraders.Fleet do
     with {:ok, live_ship} <-
            Agent.handle_game_result(
              agent,
-             SpaceTraders.API.get_ship(agent.agent_token, ship_symbol)
+             SpaceTraders.API.get_ship(token_reference(agent), ship_symbol)
            ),
          system when is_binary(system) <- live_ship.nav.system_symbol do
       {:ok, system}
@@ -861,7 +875,7 @@ defmodule SpaceTraders.Fleet do
          {:ok, live_ship} <-
            Agent.handle_game_result(
              agent,
-             SpaceTraders.API.get_ship(agent.agent_token, ship_symbol)
+             SpaceTraders.API.get_ship(token_reference(agent), ship_symbol)
            ) do
       job = apply_unapplied_outfitting_purchase!(job)
 
@@ -1024,7 +1038,10 @@ defmodule SpaceTraders.Fleet do
          {:ok, live_ship} <-
            Agent.handle_game_result(
              agent,
-             SpaceTraders.API.get_ship(agent.agent_token, Repo.get!(Ship, current.ship_id).symbol)
+             SpaceTraders.API.get_ship(
+               token_reference(agent),
+               Repo.get!(Ship, current.ship_id).symbol
+             )
            ) do
       evidence = %{"operation" => intent.last_action_result, "outcome" => "confirmed"}
 
@@ -1148,7 +1165,7 @@ defmodule SpaceTraders.Fleet do
     do: {:ok, waypoints}
 
   defp outfitting_source_waypoints(agent, %{"source_system" => system}) do
-    with {:ok, waypoints} <- fetch_waypoint_pages(agent.agent_token, system) do
+    with {:ok, waypoints} <- fetch_waypoint_pages(token_reference(agent), system) do
       {:ok,
        waypoints
        |> Enum.filter(&(market_waypoint?(&1) == :ok))
@@ -1250,7 +1267,10 @@ defmodule SpaceTraders.Fleet do
          {:ok, ship} <- owned_ship(agent, ship_symbol),
          nil <- unfinished_job(ship.id),
          {:ok, live_ship} <-
-           Agent.handle_game_result(agent, SpaceTraders.API.get_ship(token, ship_symbol)),
+           Agent.handle_game_result(
+             agent,
+             SpaceTraders.API.get_ship(token_reference(agent), ship_symbol)
+           ),
          system when is_binary(system) <- live_ship.nav.system_symbol,
          {:ok, progress} <- market_trading_progress(attrs, system) do
       insert_market_trading_job(ship, progress)
@@ -1280,7 +1300,10 @@ defmodule SpaceTraders.Fleet do
            selectable_market_reconnaissance_job(agent.id, reconnaissance_job_id),
          :ok <- target_ship_available_for_reconnaissance?(ship, reconnaissance),
          {:ok, live_ship} <-
-           Agent.handle_game_result(agent, SpaceTraders.API.get_ship(token, ship_symbol)),
+           Agent.handle_game_result(
+             agent,
+             SpaceTraders.API.get_ship(token_reference(agent), ship_symbol)
+           ),
          system when is_binary(system) <- live_ship.nav.system_symbol,
          :ok <- market_system_matches?(reconnaissance.progress, live_ship),
          {:ok, candidate} <- market_trade_candidate(reconnaissance, route_index, attrs),
@@ -1331,9 +1354,12 @@ defmodule SpaceTraders.Fleet do
          {:ok, ship} <- owned_ship(agent, ship_symbol),
          nil <- unfinished_job(ship.id),
          {:ok, live_ship} <-
-           Agent.handle_game_result(agent, SpaceTraders.API.get_ship(token, ship_symbol)),
+           Agent.handle_game_result(
+             agent,
+             SpaceTraders.API.get_ship(token_reference(agent), ship_symbol)
+           ),
          system when is_binary(system) <- live_ship.nav.system_symbol,
-         {:ok, stops} <- reconnaissance_stops(attrs, token, system) do
+         {:ok, stops} <- reconnaissance_stops(attrs, token_reference(agent), system) do
       %Job{ship_id: ship.id}
       |> Job.changeset(%{
         type: "market_reconnaissance",
@@ -1369,7 +1395,7 @@ defmodule SpaceTraders.Fleet do
          {:ok, live_ship} <-
            Agent.handle_game_result(
              agent,
-             SpaceTraders.API.get_ship(agent.agent_token, ship_symbol)
+             SpaceTraders.API.get_ship(token_reference(agent), ship_symbol)
            ),
          :ok <- market_system_matches?(job.progress, live_ship) do
       job =
@@ -1394,12 +1420,12 @@ defmodule SpaceTraders.Fleet do
   def stop_market_reconnaissance_job(agent, ship_symbol),
     do: stop_job_type(agent, ship_symbol, "market_reconnaissance", "Market Reconnaissance Job")
 
-  defp reconnaissance_stops(attrs, token, system) do
+  defp reconnaissance_stops(attrs, credential_ref, system) do
     stops = attrs[:stops] || attrs["stops"] || []
 
     with true <- is_list(stops) and stops != [] and Enum.all?(stops, &is_binary/1),
          true <- Enum.uniq(stops) == stops,
-         {:ok, waypoints} <- fetch_waypoint_pages(token, system),
+         {:ok, waypoints} <- fetch_waypoint_pages(credential_ref, system),
          true <- Enum.all?(stops, &marketplace_stop?(&1, waypoints)) do
       {:ok, stops}
     else
@@ -1424,7 +1450,7 @@ defmodule SpaceTraders.Fleet do
          {:ok, live_ship} <-
            Agent.handle_game_result(
              agent,
-             SpaceTraders.API.get_ship(agent.agent_token, ship_symbol)
+             SpaceTraders.API.get_ship(token_reference(agent), ship_symbol)
            ),
          :ok <- market_system_matches?(job.progress, live_ship),
          {:ok, overview} <- Agent.agent_overview(agent) do
@@ -1508,7 +1534,7 @@ defmodule SpaceTraders.Fleet do
          {:ok, live_ship} <-
            Agent.handle_game_result(
              agent,
-             SpaceTraders.API.get_ship(agent.agent_token, ship_symbol)
+             SpaceTraders.API.get_ship(token_reference(agent), ship_symbol)
            ),
          :ok <- market_system_matches?(job.progress, live_ship),
          %Intent{} = intent <- market_trading_intent(job),
@@ -1706,10 +1732,13 @@ defmodule SpaceTraders.Fleet do
     end
   end
 
-  defp read_reconnaissance_market(%AgentRecord{agent_token: token} = agent, job, stop, live_ship) do
+  defp read_reconnaissance_market(%AgentRecord{} = agent, job, stop, live_ship) do
     system = job.progress["target_system"]
 
-    case Agent.handle_game_result(agent, SpaceTraders.API.get_market(token, system, stop)) do
+    case Agent.handle_game_result(
+           agent,
+           SpaceTraders.API.get_market(token_reference(agent), system, stop)
+         ) do
       {:ok, market} ->
         observed_at = DateTime.utc_now() |> DateTime.truncate(:second)
 
@@ -2009,7 +2038,7 @@ defmodule SpaceTraders.Fleet do
     with {:ok, live_ship} <-
            Agent.handle_game_result(
              agent,
-             SpaceTraders.API.get_ship(agent.agent_token, ship_symbol)
+             SpaceTraders.API.get_ship(token_reference(agent), ship_symbol)
            ),
          :ok <- procurement_system_matches?(job.progress, live_ship),
          {:ok, recipient} <- procurement_recipient(agent, job),
@@ -2035,7 +2064,7 @@ defmodule SpaceTraders.Fleet do
     with {:ok, live_ship} <-
            Agent.handle_game_result(
              agent,
-             SpaceTraders.API.get_ship(agent.agent_token, ship.symbol)
+             SpaceTraders.API.get_ship(token_reference(agent), ship.symbol)
            ),
          :ok <- procurement_system_matches?(job.progress, live_ship),
          %Job{} = current_job <- Repo.get(Job, job.id),
@@ -2169,7 +2198,7 @@ defmodule SpaceTraders.Fleet do
          {:ok, construction} <-
            Agent.handle_game_result(
              agent,
-             SpaceTraders.API.get_construction(agent.agent_token, system, waypoint)
+             SpaceTraders.API.get_construction(token_reference(agent), system, waypoint)
            ),
          :ok <- construction_requirement_available?(construction, job.progress["trade_symbol"]) do
       record_construction_observation(agent, system, construction, "get_construction")
@@ -2460,7 +2489,7 @@ defmodule SpaceTraders.Fleet do
              Agent.handle_game_result(
                agent,
                SpaceTraders.API.get_ship(
-                 agent.agent_token,
+                 token_reference(agent),
                  Repo.get!(Ship, current_job.ship_id).symbol
                )
              ),
@@ -2698,7 +2727,7 @@ defmodule SpaceTraders.Fleet do
     case Enum.find(systems, &(&1 != live_ship.nav.system_symbol)) do
       nil ->
         Enum.reduce_while(systems, {:error, :source_market_unavailable}, fn system, _ ->
-          with {:ok, waypoints} <- fetch_waypoint_pages(agent.agent_token, system),
+          with {:ok, waypoints} <- fetch_waypoint_pages(token_reference(agent), system),
                {:ok, source} <-
                  procurement_market_source(agent, live_ship, waypoints, progress["trade_symbol"]) do
             {:halt, {:ok, source}}
@@ -2943,7 +2972,7 @@ defmodule SpaceTraders.Fleet do
     with {:ok, live_ship} <-
            Agent.handle_game_result(
              agent,
-             SpaceTraders.API.get_ship(agent.agent_token, ship_symbol)
+             SpaceTraders.API.get_ship(token_reference(agent), ship_symbol)
            ),
          :ok <- procurement_system_matches?(job.progress, live_ship),
          {:ok, construction} <- construction_supply_construction(agent, job),
@@ -2969,7 +2998,7 @@ defmodule SpaceTraders.Fleet do
     Agent.handle_game_result(
       agent,
       SpaceTraders.API.get_construction(
-        agent.agent_token,
+        token_reference(agent),
         job.progress["construction_system"],
         job.progress["construction_waypoint"]
       )
@@ -3190,7 +3219,8 @@ defmodule SpaceTraders.Fleet do
   end
 
   defp construction_supply_source(agent, live_ship, progress) do
-    with {:ok, waypoints} <- fetch_waypoint_pages(agent.agent_token, live_ship.nav.system_symbol) do
+    with {:ok, waypoints} <-
+           fetch_waypoint_pages(token_reference(agent), live_ship.nav.system_symbol) do
       progress["requirements"]
       |> Enum.filter(fn requirement ->
         requirement["fulfilled"] + item_units(live_ship, requirement["trade_symbol"]) <
@@ -3249,7 +3279,7 @@ defmodule SpaceTraders.Fleet do
     with {:ok, live_ship} <-
            Agent.handle_game_result(
              agent,
-             SpaceTraders.API.get_ship(agent.agent_token, ship.symbol)
+             SpaceTraders.API.get_ship(token_reference(agent), ship.symbol)
            ),
          :ok <- procurement_system_matches?(job.progress, live_ship),
          %Job{} = current_job <- Repo.get(Job, job.id),
@@ -3282,7 +3312,10 @@ defmodule SpaceTraders.Fleet do
          {:ok, live_ship} <-
            Agent.handle_game_result(
              agent,
-             SpaceTraders.API.get_ship(agent.agent_token, Repo.get!(Ship, current.ship_id).symbol)
+             SpaceTraders.API.get_ship(
+               token_reference(agent),
+               Repo.get!(Ship, current.ship_id).symbol
+             )
            ),
          {:ok, construction} <- construction_supply_construction(agent, current),
          {:ok, overview} <- Agent.agent_overview(agent) do
@@ -3381,7 +3414,7 @@ defmodule SpaceTraders.Fleet do
          {:ok, live_ship} <-
            Agent.handle_game_result(
              agent,
-             SpaceTraders.API.get_ship(agent.agent_token, ship_symbol)
+             SpaceTraders.API.get_ship(token_reference(agent), ship_symbol)
            ) do
       job =
         Repo.update!(
@@ -3456,16 +3489,25 @@ defmodule SpaceTraders.Fleet do
       )
       when is_binary(token) and token != "" do
     system = get_in(job.progress || %{}, ["target_system"])
+    credential_ref = token_reference(agent)
 
     with true <- is_binary(system),
-         {:ok, job} <- scan_explorer_waypoints(agent, token, job, live_ship),
-         {:ok, waypoints} <- fetch_waypoint_pages(token, system),
+         {:ok, job} <- scan_explorer_waypoints(agent, credential_ref, job, live_ship),
+         {:ok, waypoints} <- fetch_waypoint_pages(credential_ref, system),
          :ok <- ensure_explorer_waypoints(waypoints),
-         {:ok, job} <- acquire_explorer_baseline(agent, token, job, live_ship, system, waypoints),
-         {:ok, final_waypoints} <- fetch_waypoint_pages(token, system),
+         {:ok, job} <-
+           acquire_explorer_baseline(agent, credential_ref, job, live_ship, system, waypoints),
+         {:ok, final_waypoints} <- fetch_waypoint_pages(credential_ref, system),
          :ok <- ensure_explorer_waypoints(final_waypoints),
          {:ok, job} <-
-           acquire_explorer_baseline(agent, token, job, live_ship, system, final_waypoints) do
+           acquire_explorer_baseline(
+             agent,
+             credential_ref,
+             job,
+             live_ship,
+             system,
+             final_waypoints
+           ) do
       coverage = Intelligence.waypoint_coverage(agent, system, final_waypoints)
       missing = Map.new(coverage, fn {symbol, result} -> {symbol, result.missing} end)
 
@@ -3522,7 +3564,7 @@ defmodule SpaceTraders.Fleet do
     end
   end
 
-  defp scan_explorer_waypoints(agent, token, job, live_ship) do
+  defp scan_explorer_waypoints(agent, credential_ref, job, live_ship) do
     cond do
       cooldown_active?(live_ship) ->
         {:waiting, job} = wait_for_explorer_cooldown(agent, job, live_ship, "cooldown")
@@ -3540,7 +3582,7 @@ defmodule SpaceTraders.Fleet do
 
         case Agent.handle_game_result(
                agent,
-               SpaceTraders.API.scan_waypoints(token, live_ship.symbol)
+               SpaceTraders.API.scan_waypoints(credential_ref, live_ship.symbol)
              ) do
           {:ok, %{waypoints: waypoints} = result} ->
             Enum.each(
@@ -3579,7 +3621,7 @@ defmodule SpaceTraders.Fleet do
 
   defp sensor_capability?(_), do: false
 
-  defp acquire_explorer_baseline(agent, token, job, live_ship, system, waypoints) do
+  defp acquire_explorer_baseline(agent, credential_ref, job, live_ship, system, waypoints) do
     Enum.reduce_while(waypoints, {:ok, job}, fn waypoint, {:ok, job} ->
       missing =
         get_in(Intelligence.waypoint_coverage(agent, system, [waypoint]), [
@@ -3590,12 +3632,27 @@ defmodule SpaceTraders.Fleet do
       if missing == [] do
         {:cont, {:ok, record_explorer_method(job, waypoint.symbol, "reused_public", nil)}}
       else
-        case SpaceTraders.API.get_waypoint(token, system, waypoint.symbol) do
+        case SpaceTraders.API.get_waypoint(credential_ref, system, waypoint.symbol) do
           {:ok, full_waypoint} ->
             with :ok <- observe_explorer_waypoint(agent, full_waypoint),
-                 :ok <- acquire_explorer_market(agent, token, system, live_ship, full_waypoint) do
+                 :ok <-
+                   acquire_explorer_market(
+                     agent,
+                     credential_ref,
+                     system,
+                     live_ship,
+                     full_waypoint
+                   ) do
               job = record_explorer_method(job, waypoint.symbol, "public_read", nil)
-              {:cont, maybe_chart_explorer_waypoint(agent, token, job, live_ship, full_waypoint)}
+
+              {:cont,
+               maybe_chart_explorer_waypoint(
+                 agent,
+                 credential_ref,
+                 job,
+                 live_ship,
+                 full_waypoint
+               )}
             else
               {:error, reason} ->
                 {:cont,
@@ -3619,13 +3676,16 @@ defmodule SpaceTraders.Fleet do
 
   # Charting is optional baseline enrichment, but its request changes game state.
   # Persist the exact method first so restart recovery never blindly repeats it.
-  defp maybe_chart_explorer_waypoint(agent, token, job, live_ship, waypoint) do
+  defp maybe_chart_explorer_waypoint(agent, credential_ref, job, live_ship, waypoint) do
     if live_ship.nav.status in ["DOCKED", "IN_ORBIT"] and
          live_ship.nav.waypoint_symbol == waypoint.symbol and is_nil(waypoint.chart) do
       action = %{"kind" => "chart", "waypoint" => waypoint.symbol}
       job = Repo.update!(Ecto.Changeset.change(job, in_flight_action: action))
 
-      case Agent.handle_game_result(agent, SpaceTraders.API.create_chart(token, live_ship.symbol)) do
+      case Agent.handle_game_result(
+             agent,
+             SpaceTraders.API.create_chart(credential_ref, live_ship.symbol)
+           ) do
         {:ok, %{waypoint: charted_waypoint}} ->
           :ok = observe_explorer_waypoint(agent, charted_waypoint)
 
@@ -3680,9 +3740,9 @@ defmodule SpaceTraders.Fleet do
     end
   end
 
-  defp acquire_explorer_market(agent, token, system, live_ship, waypoint) do
+  defp acquire_explorer_market(agent, credential_ref, system, live_ship, waypoint) do
     if market_waypoint?(waypoint) == :ok do
-      with {:ok, market} <- SpaceTraders.API.get_market(token, system, waypoint.symbol),
+      with {:ok, market} <- SpaceTraders.API.get_market(credential_ref, system, waypoint.symbol),
            {:ok, _observation} <-
              Intelligence.observe_market(agent, system, market,
                source: "get_market",
@@ -3826,10 +3886,10 @@ defmodule SpaceTraders.Fleet do
          {:ok, live_ship} <-
            Agent.handle_game_result(
              agent,
-             SpaceTraders.API.get_ship(agent.agent_token, ship_symbol)
+             SpaceTraders.API.get_ship(token_reference(agent), ship_symbol)
            ),
          {:ok, waypoint} <-
-           waypoint(agent.agent_token, live_ship.nav.system_symbol, job.extraction_waypoint),
+           waypoint(token_reference(agent), live_ship.nav.system_symbol, job.extraction_waypoint),
          :ok <- gather_waypoint?("extract", waypoint),
          :ok <- survey_capability?(live_ship) do
       job =
@@ -4092,12 +4152,16 @@ defmodule SpaceTraders.Fleet do
 
   defp validate_miner_job(%AgentRecord{agent_token: token} = agent, ship, config)
        when is_binary(token) and token != "" do
-    with {:ok, live_ship} <- SpaceTraders.API.get_ship(token, ship.symbol),
+    with {:ok, live_ship} <- SpaceTraders.API.get_ship(token_reference(agent), ship.symbol),
          {:ok, gather} <-
-           waypoint(token, live_ship.nav.system_symbol, config.extraction_waypoint),
+           waypoint(
+             token_reference(agent),
+             live_ship.nav.system_symbol,
+             config.extraction_waypoint
+           ),
          :ok <- gather_waypoint?(config.gather_mode, gather),
          {:ok, market_waypoint} <-
-           waypoint(token, live_ship.nav.system_symbol, config.market_waypoint),
+           waypoint(token_reference(agent), live_ship.nav.system_symbol, config.market_waypoint),
          :ok <- market_waypoint?(market_waypoint),
          {:ok, market} <- market_for_ship(agent, live_ship, config.market_waypoint),
          :ok <- market_available?(market),
@@ -4115,7 +4179,8 @@ defmodule SpaceTraders.Fleet do
 
   defp validate_miner_job(_, _, _), do: {:error, :agent_token_missing}
 
-  defp waypoint(token, system, symbol), do: SpaceTraders.API.get_waypoint(token, system, symbol)
+  defp waypoint(credential_ref, system, symbol),
+    do: SpaceTraders.API.get_waypoint(credential_ref, system, symbol)
 
   # The gather mode's Waypoint capability is checked against the game's
   # authoritative Waypoint state, not persisted trust; the game's action
@@ -4239,7 +4304,7 @@ defmodule SpaceTraders.Fleet do
     with {:ok, result} <-
            Agent.handle_game_result(
              agent,
-             SpaceTraders.API.create_survey(agent.agent_token, live_ship.symbol)
+             SpaceTraders.API.create_survey(token_reference(agent), live_ship.symbol)
            ),
          :ok <- persist_surveys(agent, result.surveys, job.extraction_waypoint, live_ship.symbol),
          :ok <- schedule_cooldown(agent, live_ship.symbol, result, job.id) do
@@ -4495,7 +4560,7 @@ defmodule SpaceTraders.Fleet do
       live_ship.nav.status == "DOCKED" ->
         case Agent.handle_game_result(
                agent,
-               SpaceTraders.API.orbit_ship(agent.agent_token, live_ship.symbol)
+               SpaceTraders.API.orbit_ship(token_reference(agent), live_ship.symbol)
              ) do
           {:ok, result} -> advance_miner_job(agent, config, %{live_ship | nav: result.nav}, mode)
           {:error, reason} -> mark_miner_job_blocked(config, reason)
@@ -4767,7 +4832,7 @@ defmodule SpaceTraders.Fleet do
   defp dock_for_market(_agent, %{nav: %{status: "DOCKED"}} = live_ship), do: {:ok, live_ship}
 
   defp dock_for_market(agent, live_ship) do
-    with {:ok, result} <- SpaceTraders.API.dock_ship(agent.agent_token, live_ship.symbol) do
+    with {:ok, result} <- SpaceTraders.API.dock_ship(token_reference(agent), live_ship.symbol) do
       {:ok, %{live_ship | nav: result.nav}}
     end
   end
@@ -5007,12 +5072,17 @@ defmodule SpaceTraders.Fleet do
   end
 
   defp jettison_cargo_for_miner_job(
-         %AgentRecord{agent_token: token},
+         %AgentRecord{} = agent,
          ship_symbol,
          trade_symbol,
          units
        ) do
-    SpaceTraders.API.jettison_cargo(token, ship_symbol, trade_symbol, units)
+    SpaceTraders.API.jettison_cargo(
+      token_reference(agent),
+      ship_symbol,
+      trade_symbol,
+      units
+    )
   end
 
   defp remove_cargo_item(cargo, symbol) do
@@ -5061,7 +5131,7 @@ defmodule SpaceTraders.Fleet do
       Repo.update!(Ecto.Changeset.change(config, status: "active", in_flight_action: action))
 
     case invalidate_market_after(
-           SpaceTraders.API.refuel_ship(agent.agent_token, live_ship.symbol),
+           SpaceTraders.API.refuel_ship(token_reference(agent), live_ship.symbol),
            agent
          ) do
       {:ok, %{fuel: fuel}} when fuel.current >= fuel.capacity ->
@@ -5255,7 +5325,10 @@ defmodule SpaceTraders.Fleet do
        )
        when is_binary(token) and token != "" do
     with {:ok, result} <-
-           Agent.handle_game_result(agent, SpaceTraders.API.extract_resources(token, ship_symbol)),
+           Agent.handle_game_result(
+             agent,
+             SpaceTraders.API.extract_resources(token_reference(agent), ship_symbol)
+           ),
          :ok <- schedule_cooldown(agent, ship_symbol, result, job_id) do
       {:ok, result}
     end
@@ -5272,7 +5345,11 @@ defmodule SpaceTraders.Fleet do
 
     case Agent.handle_game_result(
            agent,
-           SpaceTraders.API.extract_resources_with_survey(agent.agent_token, ship_symbol, payload)
+           SpaceTraders.API.extract_resources_with_survey(
+             token_reference(agent),
+             ship_symbol,
+             payload
+           )
          ) do
       {:ok, result} ->
         with :ok <- schedule_cooldown(agent, ship_symbol, result, job_id), do: {:ok, result}
@@ -5307,7 +5384,10 @@ defmodule SpaceTraders.Fleet do
        )
        when is_binary(token) and token != "" do
     with {:ok, result} <-
-           Agent.handle_game_result(agent, SpaceTraders.API.siphon_resources(token, ship_symbol)),
+           Agent.handle_game_result(
+             agent,
+             SpaceTraders.API.siphon_resources(token_reference(agent), ship_symbol)
+           ),
          :ok <- schedule_cooldown(agent, ship_symbol, result, job_id) do
       {:ok, result}
     end
@@ -5393,7 +5473,7 @@ defmodule SpaceTraders.Fleet do
   def list_waypoints(%AgentRecord{agent_token: agent_token, headquarters: headquarters} = agent)
       when is_binary(agent_token) and agent_token != "" and is_binary(headquarters) do
     with {:ok, system} <- system_from_headquarters(headquarters) do
-      case fetch_waypoint_pages(agent_token, system) do
+      case fetch_waypoint_pages(token_reference(agent), system) do
         {:ok, waypoints} = result ->
           Enum.each(waypoints, &record_waypoint_observation(agent, &1, "get_waypoints"))
           result
@@ -5406,8 +5486,8 @@ defmodule SpaceTraders.Fleet do
 
   def list_waypoints(%AgentRecord{}), do: {:error, :agent_token_missing}
 
-  defp fetch_waypoint_pages(agent_token, system) do
-    case SpaceTraders.API.get_waypoints_paginated(agent_token, system) do
+  defp fetch_waypoint_pages(credential_ref, system) do
+    case SpaceTraders.API.get_waypoints_paginated(credential_ref, system) do
       {:ok, waypoints} -> {:ok, waypoints}
       {:error, reason, _collected} -> {:error, reason}
     end
@@ -5576,7 +5656,11 @@ defmodule SpaceTraders.Fleet do
          {:ok, result} <-
            Agent.handle_game_result(
              agent,
-             SpaceTraders.API.navigate_ship(agent_token, ship_symbol, waypoint_symbol)
+             SpaceTraders.API.navigate_ship(
+               token_reference(agent),
+               ship_symbol,
+               waypoint_symbol
+             )
            ) do
       maybe_schedule_arrival(agent, ship_symbol, result)
       persist_destination_history(agent, ship_symbol, result.nav.route.destination.symbol)
@@ -5601,7 +5685,11 @@ defmodule SpaceTraders.Fleet do
          :ok <- flight_mode_change_allowed?(ship_symbol) do
       Agent.handle_game_result(
         agent,
-        SpaceTraders.API.set_ship_flight_mode(agent_token, ship_symbol, flight_mode)
+        SpaceTraders.API.set_ship_flight_mode(
+          token_reference(agent),
+          ship_symbol,
+          flight_mode
+        )
       )
       |> then(&record_command_result(agent, ship_symbol, "flight_mode", &1))
     end
@@ -5689,7 +5777,10 @@ defmodule SpaceTraders.Fleet do
       when is_binary(agent_token) and agent_token != "" do
     with :ok <- preempt_miner_job_for(agent, ship_symbol, {:manual_override, "docking"}),
          :ok <- ShipServer.ensure_ready(ship_symbol) do
-      Agent.handle_game_result(agent, SpaceTraders.API.dock_ship(agent_token, ship_symbol))
+      Agent.handle_game_result(
+        agent,
+        SpaceTraders.API.dock_ship(token_reference(agent), ship_symbol)
+      )
       |> then(&record_command_result(agent, ship_symbol, "dock", &1))
     end
   end
@@ -5701,7 +5792,10 @@ defmodule SpaceTraders.Fleet do
       when is_binary(agent_token) and agent_token != "" do
     with :ok <- preempt_miner_job_for(agent, ship_symbol, {:manual_override, "orbit"}),
          :ok <- ShipServer.ensure_ready(ship_symbol) do
-      Agent.handle_game_result(agent, SpaceTraders.API.orbit_ship(agent_token, ship_symbol))
+      Agent.handle_game_result(
+        agent,
+        SpaceTraders.API.orbit_ship(token_reference(agent), ship_symbol)
+      )
       |> then(&record_command_result(agent, ship_symbol, "orbit", &1))
     end
   end
@@ -5716,7 +5810,7 @@ defmodule SpaceTraders.Fleet do
          {:ok, result} <-
            Agent.handle_game_result(
              agent,
-             SpaceTraders.API.extract_resources(agent_token, ship_symbol)
+             SpaceTraders.API.extract_resources(token_reference(agent), ship_symbol)
            ),
          :ok <- schedule_cooldown(agent, ship_symbol, result) do
       record_command_activity(agent, ship_symbol, "extract", "Extract command completed")
@@ -5732,12 +5826,15 @@ defmodule SpaceTraders.Fleet do
     with :ok <- preempt_miner_job_for(agent, ship_symbol, {:manual_override, "siphoning"}),
          :ok <- ShipServer.ensure_ready(ship_symbol),
          {:ok, live_ship} <-
-           Agent.handle_game_result(agent, SpaceTraders.API.get_ship(agent_token, ship_symbol)),
+           Agent.handle_game_result(
+             agent,
+             SpaceTraders.API.get_ship(token_reference(agent), ship_symbol)
+           ),
          {:ok, waypoint} <-
            Agent.handle_game_result(
              agent,
              SpaceTraders.API.get_waypoint(
-               agent_token,
+               token_reference(agent),
                live_ship.nav.system_symbol,
                live_ship.nav.waypoint_symbol
              )
@@ -5747,7 +5844,7 @@ defmodule SpaceTraders.Fleet do
          {:ok, result} <-
            Agent.handle_game_result(
              agent,
-             SpaceTraders.API.siphon_resources(agent_token, ship_symbol)
+             SpaceTraders.API.siphon_resources(token_reference(agent), ship_symbol)
            ),
          :ok <- schedule_cooldown(agent, ship_symbol, result) do
       record_command_activity(agent, ship_symbol, "siphon", "Siphon command completed")
@@ -5775,7 +5872,10 @@ defmodule SpaceTraders.Fleet do
     with :ok <- preempt_miner_job_for(agent, ship_symbol, {:manual_override, "refueling"}),
          :ok <- ShipServer.ensure_ready(ship_symbol) do
       invalidate_market_after(
-        Agent.handle_game_result(agent, SpaceTraders.API.refuel_ship(agent_token, ship_symbol)),
+        Agent.handle_game_result(
+          agent,
+          SpaceTraders.API.refuel_ship(token_reference(agent), ship_symbol)
+        ),
         agent
       )
       |> then(&record_command_result(agent, ship_symbol, "refuel", &1))
@@ -5811,12 +5911,12 @@ defmodule SpaceTraders.Fleet do
   end
 
   @doc false
-  def market_for_ship(%AgentRecord{agent_token: token} = agent, live_ship, waypoint_symbol) do
+  def market_for_ship(%AgentRecord{} = agent, live_ship, waypoint_symbol) do
     system_symbol = live_ship.nav.system_symbol
 
     case Agent.handle_game_result(
            agent,
-           SpaceTraders.API.get_market(token, system_symbol, waypoint_symbol)
+           SpaceTraders.API.get_market(token_reference(agent), system_symbol, waypoint_symbol)
          ) do
       {:ok, market} = result ->
         observer = if live_ship.nav.waypoint_symbol == waypoint_symbol, do: live_ship.symbol
@@ -5845,7 +5945,12 @@ defmodule SpaceTraders.Fleet do
          :ok <- ShipServer.ensure_ready(ship_symbol) do
       Agent.handle_game_result(
         agent,
-        SpaceTraders.API.jettison_cargo(agent_token, ship_symbol, trade_symbol, units)
+        SpaceTraders.API.jettison_cargo(
+          token_reference(agent),
+          ship_symbol,
+          trade_symbol,
+          units
+        )
       )
       |> then(&record_command_result(agent, ship_symbol, "jettison", &1))
     end
@@ -5870,15 +5975,27 @@ defmodule SpaceTraders.Fleet do
     with :ok <- Agent.execution_allowed?(agent),
          :ok <- different_transfer_ships?(from_ship, to_ship),
          {:ok, source} <-
-           Agent.handle_game_result(agent, SpaceTraders.API.get_ship(token, from_ship)),
+           Agent.handle_game_result(
+             agent,
+             SpaceTraders.API.get_ship(token_reference(agent), from_ship)
+           ),
          {:ok, target} <-
-           Agent.handle_game_result(agent, SpaceTraders.API.get_ship(token, to_ship)),
+           Agent.handle_game_result(
+             agent,
+             SpaceTraders.API.get_ship(token_reference(agent), to_ship)
+           ),
          :ok <- transfer_preflight(source, target, trade_symbol, units),
          :ok <- preempt_miner_job_for(agent, from_ship, {:manual_override, "cargo transfer"}),
          :ok <- ShipServer.ensure_ready(from_ship) do
       Agent.handle_game_result(
         agent,
-        SpaceTraders.API.transfer_cargo(token, from_ship, trade_symbol, units, to_ship)
+        SpaceTraders.API.transfer_cargo(
+          token_reference(agent),
+          from_ship,
+          trade_symbol,
+          units,
+          to_ship
+        )
       )
       |> then(&record_command_result(agent, from_ship, "transfer", &1))
     end
@@ -5921,7 +6038,7 @@ defmodule SpaceTraders.Fleet do
   defp different_transfer_ships?(_from_ship, _to_ship), do: :ok
 
   @doc "Reconciles a persisted Miner Job's in-flight action after a process restart."
-  def recover_job_on_boot(ship_symbol, agent_id, agent_token) do
+  def recover_job_on_boot(ship_symbol, agent_id) do
     with %Ship{} = ship <- Repo.get_by(Ship, symbol: ship_symbol, agent_id: agent_id),
          %Job{} = config <- unfinished_job(ship.id),
          %AgentRecord{} = agent <- Repo.get(AgentRecord, agent_id),
@@ -5945,7 +6062,7 @@ defmodule SpaceTraders.Fleet do
           # retries so one authoritative read counts as one recovery attempt.
           case Agent.handle_game_result(
                  agent,
-                 SpaceTraders.API.get_ship(agent_token, ship_symbol, retry: false)
+                 SpaceTraders.API.get_ship(token_reference(agent), ship_symbol, retry: false)
                ) do
             {:ok, live_ship} when config.status == "active" and is_nil(config.in_flight_action) ->
               case config.type do
@@ -5994,7 +6111,7 @@ defmodule SpaceTraders.Fleet do
               :ok
 
             {:error, reason} ->
-              recovery_retry_or_block(agent_id, ship_symbol, reason, agent_token)
+              recovery_retry_or_block(agent_id, ship_symbol, reason)
           end
         else
           :ok
@@ -6012,7 +6129,7 @@ defmodule SpaceTraders.Fleet do
     with {:ok, live_ship} <-
            Agent.handle_game_result(
              agent,
-             SpaceTraders.API.get_ship(agent.agent_token, ship.symbol)
+             SpaceTraders.API.get_ship(token_reference(agent), ship.symbol)
            ),
          %Job{} = current_job <- Repo.get(Job, job.id),
          true <- Job.running?(current_job),
@@ -6034,7 +6151,7 @@ defmodule SpaceTraders.Fleet do
     with {:ok, live_ship} <-
            Agent.handle_game_result(
              agent,
-             SpaceTraders.API.get_ship(agent.agent_token, ship.symbol)
+             SpaceTraders.API.get_ship(token_reference(agent), ship.symbol)
            ),
          %Job{} = current_job <- Repo.get(Job, job.id),
          true <- Job.running?(current_job),
@@ -6059,7 +6176,7 @@ defmodule SpaceTraders.Fleet do
 
     case Agent.handle_game_result(
            agent,
-           SpaceTraders.API.get_ship(agent.agent_token, ship.symbol)
+           SpaceTraders.API.get_ship(token_reference(agent), ship.symbol)
          ) do
       {:ok, live_ship} ->
         # Uses the same operation reconciliation as Manual Control. Cargo
@@ -6127,7 +6244,7 @@ defmodule SpaceTraders.Fleet do
          {:ok, live_ship} <-
            Agent.handle_game_result(
              agent,
-             SpaceTraders.API.get_ship(agent.agent_token, ship_symbol, retry: false)
+             SpaceTraders.API.get_ship(token_reference(agent), ship_symbol, retry: false)
            ) do
       reconcile_in_flight(agent.id, ship, config, live_ship)
     else
@@ -6333,7 +6450,7 @@ defmodule SpaceTraders.Fleet do
     end
   end
 
-  defp recovery_retry_or_block(agent_id, ship_symbol, reason, agent_token) do
+  defp recovery_retry_or_block(agent_id, ship_symbol, reason) do
     with %Ship{} = ship <- Repo.get_by(Ship, symbol: ship_symbol, agent_id: agent_id),
          %Job{status: status} = config when status in @running_job_states <-
            unfinished_job(ship.id) do
@@ -6354,7 +6471,7 @@ defmodule SpaceTraders.Fleet do
           "transport_error"
         )
 
-        recover_job_on_boot(ship_symbol, agent_id, agent_token)
+        recover_job_on_boot(ship_symbol, agent_id)
       else
         block_recovery(agent_id, ship, config, "retry_exhausted: #{inspect(reason)}")
       end
@@ -6659,20 +6776,23 @@ defmodule SpaceTraders.Fleet do
   end
 
   @doc false
-  def ship_credentials(ship_symbol) do
+  def ship_agent(ship_symbol) do
     query =
       from(s in Ship,
         join: a in assoc(s, :agent),
         where: s.symbol == ^ship_symbol,
-        select: {a.id, a.agent_token}
+        select: a
       )
 
     case Repo.one(query) do
-      {agent_id, agent_token} when is_binary(agent_token) and agent_token != "" ->
-        {:ok, agent_id, agent_token}
+      %AgentRecord{agent_token: agent_token} = agent
+      when is_binary(agent_token) and agent_token != "" ->
+        {:ok, agent}
 
       _ ->
         :error
     end
   end
+
+  defp token_reference(%AgentRecord{} = agent), do: AgentTokenReference.new(agent)
 end

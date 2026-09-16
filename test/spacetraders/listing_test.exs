@@ -4,17 +4,16 @@ defmodule SpaceTraders.ListingTest do
   # connection and makes concurrent async tests drop out of the checkout queue.
   use SpaceTraders.DataCase, async: false
 
-  alias SpaceTraders.Agent.Agent, as: AgentRecord
   alias SpaceTraders.API.Model
   alias SpaceTraders.Listing
 
   import SpaceTraders.ShipBody
+  import SpaceTraders.AgentFixtures
 
   test "keeps prior trait-filtered Waypoints as partial after a later page fails" do
-    agent = %AgentRecord{
-      agent_token: "AGENT_TOKEN",
-      headquarters: "X1-UX81-A1"
-    }
+    agent =
+      operator_fixture()
+      |> agent_fixture(%{agent_token: "AGENT_TOKEN", headquarters: "X1-UX81-A1"})
 
     ship =
       ship_body("FLEET-SHIP", %{
