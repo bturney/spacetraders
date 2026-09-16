@@ -170,7 +170,12 @@ defmodule SpaceTraders.Fleet.ShipServer do
     case refresh(state) do
       {:ok, ship} ->
         if still_busy?(type, ship) do
-          retry(event, state, "ship is still #{busy_label(type)} after #{type}")
+          retry(
+            event,
+            state,
+            "ship is still #{busy_label(type)} after #{type}",
+            known_wait_due_at(type, ship)
+          )
         else
           {:ok, :ok} =
             SpaceTraders.Outbox.publish(
@@ -210,9 +215,12 @@ defmodule SpaceTraders.Fleet.ShipServer do
   end
 
   defp retry(event, state, reason) do
-    Logger.warning("ship #{state.symbol}: #{reason}; retrying in #{@retry_delay_ms}ms")
+    retry(event, state, reason, nil)
+  end
 
-    due_at = DateTime.add(Clock.utc_now(), @retry_delay_ms, :millisecond)
+  defp retry(event, state, reason, known_due_at) do
+    due_at = known_due_at || DateTime.add(Clock.utc_now(), @retry_delay_ms, :millisecond)
+    Logger.warning("ship #{state.symbol}: #{reason}; retrying at #{DateTime.to_iso8601(due_at)}")
 
     case Timeline.reschedule_event(event, due_at) do
       {:ok, event} ->
@@ -234,6 +242,19 @@ defmodule SpaceTraders.Fleet.ShipServer do
        do: true
 
   defp still_busy?(_type, _ship), do: false
+
+  defp known_wait_due_at(:arrival, %Ship{nav: %ShipNav{route: route}}) do
+    case Timeline.parse_arrival(route) do
+      {:ok, due_at} -> due_at
+      :error -> nil
+    end
+  end
+
+  defp known_wait_due_at(:cooldown, %Ship{cooldown: %Cooldown{remaining_seconds: seconds}})
+       when is_integer(seconds) and seconds > 0,
+       do: DateTime.add(Clock.utc_now(), seconds, :second)
+
+  defp known_wait_due_at(_type, _ship), do: nil
 
   defp busy_label(:arrival), do: "in transit"
   defp busy_label(:cooldown), do: "on cooldown"

@@ -135,7 +135,9 @@ defmodule SpaceTraders.Fleet.ShipServerTest do
 
       assert eventually(fn ->
                persisted = Repo.get!(Event, event.id)
-               persisted.status == "pending" and DateTime.compare(persisted.due_at, DateTime.utc_now()) == :gt
+
+               persisted.status == "pending" and
+                 DateTime.compare(persisted.due_at, DateTime.utc_now()) == :gt
              end)
 
       assert ShipServer.ensure_ready(symbol) == {:error, :ship_in_transit}
@@ -164,6 +166,7 @@ defmodule SpaceTraders.Fleet.ShipServerTest do
     test "does not unblock while the game still reports the ship in transit" do
       symbol = unique_symbol()
       arrival = future_iso()
+      {:ok, expected_due_at, _offset} = DateTime.from_iso8601(arrival)
       subscribe_fleet()
       stub_refresh_still_in_transit(symbol, arrival)
 
@@ -177,7 +180,7 @@ defmodule SpaceTraders.Fleet.ShipServerTest do
 
       assert eventually(fn ->
                persisted = Repo.get!(Event, event.id)
-               persisted.status == "pending" and DateTime.compare(persisted.due_at, DateTime.utc_now()) == :gt
+               persisted.status == "pending" and persisted.due_at == expected_due_at
              end)
 
       assert ShipServer.ensure_ready(symbol) == {:error, :ship_in_transit}
