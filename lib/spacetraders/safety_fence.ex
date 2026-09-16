@@ -19,6 +19,35 @@ defmodule SpaceTraders.SafetyFence do
     "unexpected_market_transaction"
   ]
 
+  import Ecto.Query
+
+  alias SpaceTraders.MutationAttempts.Attempt
+  alias SpaceTraders.Repo
+
+  @active_states ["sent_or_unknown", "ambiguous", "bounded_unknown"]
+
+  @doc "Returns whether an attempt currently suppresses dependent mutations."
+  @spec active?(Attempt.t()) :: boolean()
+  def active?(%Attempt{state: state}), do: state in @active_states
+
+  @doc "Returns active attempts whose dependency keys overlap the candidate action."
+  @spec blocking_attempts([String.t()], Ecto.UUID.t() | nil) :: [Attempt.t()]
+  def blocking_attempts(dependency_keys, excluded_attempt_id \\ nil)
+
+  def blocking_attempts([], _excluded_attempt_id), do: []
+
+  def blocking_attempts(dependency_keys, excluded_attempt_id) do
+    Attempt
+    |> where([attempt], attempt.state in ^@active_states)
+    |> where(
+      [attempt],
+      fragment("? && ?", attempt.dependency_keys, type(^dependency_keys, {:array, :string}))
+    )
+    |> maybe_exclude(excluded_attempt_id)
+    |> order_by([attempt], asc: attempt.prepared_at, asc: attempt.id)
+    |> Repo.all()
+  end
+
   def explicit?(%{
         status: "blocked",
         in_flight_action: action,
@@ -31,4 +60,7 @@ defmodule SpaceTraders.SafetyFence do
   end
 
   def explicit?(_record), do: false
+
+  defp maybe_exclude(query, nil), do: query
+  defp maybe_exclude(query, id), do: where(query, [attempt], attempt.id != ^id)
 end
