@@ -158,6 +158,41 @@ defmodule SpaceTraders.MutationAttemptsTest do
     assert evidence == %{"reason" => "response_decode_failed", "status" => 200}
   end
 
+  test "a body-carried Ship identity links execution provenance" do
+    operator = operator_fixture()
+    agent = agent_fixture(operator)
+
+    ship =
+      Repo.insert!(%Ship{agent_id: agent.id, symbol: "DELIVERY-1", ship_type: "LIGHT_HAULER"})
+
+    intent =
+      Repo.insert!(%Intent{
+        ship_id: ship.id,
+        caller: "manual",
+        type: "deliver",
+        target_waypoint: "X1-TEST-A1",
+        in_flight_action: %{"kind" => "deliver"}
+      })
+
+    Req.Test.stub(API, fn conn ->
+      Req.Test.json(conn, %{"data" => %{"contract" => %{}, "cargo" => %{}}})
+    end)
+
+    assert {:ok, _result} =
+             API.deliver_contract(
+               AgentTokenReference.new(agent),
+               "contract-1",
+               ship.symbol,
+               "IRON_ORE",
+               5
+             )
+
+    assert [attempt] = MutationAttempts.list_for_agent(agent)
+    assert attempt.provenance["ship_id"] == ship.id
+    assert attempt.provenance["ship_symbol"] == ship.symbol
+    assert attempt.provenance["intent_id"] == intent.id
+  end
+
   test "registration evidence excludes credential values" do
     operator = operator_fixture()
 

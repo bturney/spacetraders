@@ -33,7 +33,7 @@ defmodule SpaceTraders.MutationAttempts do
   @spec prepare(Operation.t(), String.t(), keyword()) :: {:ok, Attempt.t()} | {:error, term()}
   def prepare(%Operation{classification: :mutation} = operation, path, opts) do
     now = DateTime.utc_now()
-    context = context(Keyword.get(opts, :agent_id), path)
+    context = context(Keyword.get(opts, :agent_id), path, opts)
 
     prepared_evidence =
       scrub(%{
@@ -138,7 +138,7 @@ defmodule SpaceTraders.MutationAttempts do
 
   defp outcome_allowed?(_state, _classification), do: false
 
-  defp context(agent_id, path) when is_integer(agent_id) do
+  defp context(agent_id, path, opts) when is_integer(agent_id) do
     agent = Repo.get(Agent, agent_id)
 
     generation =
@@ -148,7 +148,7 @@ defmodule SpaceTraders.MutationAttempts do
           limit: 1
       )
 
-    execution = execution_context(agent_id, path)
+    execution = execution_context(agent_id, path, opts)
 
     %{
       operator_id: agent && agent.operator_id,
@@ -159,7 +159,7 @@ defmodule SpaceTraders.MutationAttempts do
     |> Map.merge(execution)
   end
 
-  defp context(_agent_id, _path) do
+  defp context(_agent_id, _path, _opts) do
     metadata = logger_metadata()
 
     %{
@@ -170,8 +170,8 @@ defmodule SpaceTraders.MutationAttempts do
     }
   end
 
-  defp execution_context(agent_id, path) do
-    with ["my", "ships", ship_symbol | _rest] <- String.split(path, "/", trim: true),
+  defp execution_context(agent_id, path, opts) do
+    with ship_symbol when is_binary(ship_symbol) <- request_ship_symbol(path, opts),
          %Ship{} = ship <- Repo.get_by(Ship, agent_id: agent_id, symbol: ship_symbol) do
       intent =
         Repo.one(
@@ -190,6 +190,13 @@ defmodule SpaceTraders.MutationAttempts do
       |> Map.reject(fn {_key, value} -> is_nil(value) end)
     else
       _ -> %{}
+    end
+  end
+
+  defp request_ship_symbol(path, opts) do
+    case String.split(path, "/", trim: true) do
+      ["my", "ships", ship_symbol | _rest] -> ship_symbol
+      _ -> get_in(opts, [:json, "shipSymbol"])
     end
   end
 
