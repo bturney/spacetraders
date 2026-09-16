@@ -29,7 +29,9 @@ defmodule SpaceTraders.API do
   alias SpaceTraders.API.RateLimiter
   alias SpaceTraders.API.Pagination
   alias SpaceTraders.API.AgentTokenReference
+  alias SpaceTraders.API.OperationInventory
   alias SpaceTraders.Agent.Agent, as: AgentRecord
+  alias SpaceTraders.MutationAttempts
   alias SpaceTraders.Repo
 
   alias SpaceTraders.API.Model.{
@@ -540,7 +542,7 @@ defmodule SpaceTraders.API do
 
       with {:ok, token} <- resolve_agent_token(credential_ref),
            :ok <- mutation_authorized?(method, token) do
-        send_request(method, path, token, opts)
+        send_request(method, path, token, Keyword.put(opts, :agent_id, credential_ref.agent_id))
       end
     end
   end
@@ -564,45 +566,76 @@ defmodule SpaceTraders.API do
   end
 
   defp send_request(method, path, token, opts) do
-    req =
-      Req.new(
-        build_options(method, path, token)
-        |> Keyword.merge(config_req_options())
-        |> maybe_put(opts, :json)
-        |> maybe_put(opts, :params)
-        |> maybe_put_retry(opts)
-      )
-      |> Req.Request.append_request_steps(
-        spacetraders_mutation_admission: fn request ->
-          authorize_dispatch(request, method, token)
-        end
-      )
+    with {:ok, attempt} <- prepare_mutation_attempt(method, path, opts) do
+      req =
+        Req.new(
+          build_options(method, path, token)
+          |> Keyword.merge(config_req_options())
+          |> maybe_put(opts, :json)
+          |> maybe_put(opts, :params)
+          |> maybe_put_retry(opts)
+        )
+        |> Req.Request.append_request_steps(
+          spacetraders_mutation_admission: fn request ->
+            authorize_dispatch(request, method, token, attempt)
+          end
+        )
 
+      request_and_record_outcome(req, attempt, path, method, token, opts)
+    else
+      {:error, reason} -> {:error, SpaceTraders.API.Error.transport(reason)}
+    end
+  end
+
+  defp request_and_record_outcome(req, attempt, path, method, token, opts) do
     case Req.request(req) do
       {:ok, %{status: status, body: body}} when status in 200..299 ->
         emit_request_metric(path, status)
 
         case decode(body, opts[:as]) do
           {:error, %SpaceTraders.API.Error{} = error} ->
-            {:error, error}
+            case record_mutation_outcome(attempt, :ambiguous, %{
+                   status: status,
+                   reason: "response_decode_failed"
+                 }) do
+              :ok -> {:error, error}
+              {:error, reason} -> {:error, SpaceTraders.API.Error.transport(reason)}
+            end
 
           decoded ->
-            {:ok, decoded}
+            case record_mutation_outcome(attempt, :succeeded, %{status: status}) do
+              :ok ->
+                {:ok, decoded}
+
+              {:error, reason} ->
+                {:error, SpaceTraders.API.Error.transport(reason)}
+            end
         end
 
       {:ok, %{status: status, body: body}} when status in 400..499 ->
-        case mutation_authorized_after_response(status, method, token) do
-          :ok ->
-            emit_request_metric(path, status)
-            {:error, gameplay_error(status, SpaceTraders.Observability.redact(body, token))}
+        emit_request_metric(path, status)
 
-          {:error, reason} ->
-            {:error, reason}
+        case record_mutation_outcome(attempt, :rejected, %{status: status}) do
+          :ok ->
+            case mutation_authorized_after_response(status, method, token) do
+              :ok ->
+                {:error, gameplay_error(status, SpaceTraders.Observability.redact(body, token))}
+
+              {:error, reason} ->
+                {:error, reason}
+            end
+
+          {:error, persistence_reason} ->
+            {:error, SpaceTraders.API.Error.transport(persistence_reason)}
         end
 
       {:ok, %{status: status}} ->
         emit_request_metric(path, status)
-        {:error, SpaceTraders.API.Error.new(status, "unexpected response")}
+
+        case record_mutation_outcome(attempt, :ambiguous, %{status: status}) do
+          :ok -> {:error, SpaceTraders.API.Error.new(status, "unexpected response")}
+          {:error, reason} -> {:error, SpaceTraders.API.Error.transport(reason)}
+        end
 
       {:error, reason} ->
         case reason do
@@ -611,17 +644,46 @@ defmodule SpaceTraders.API do
 
           reason ->
             emit_request_metric(path, "unknown")
+            redacted_reason = SpaceTraders.Observability.redact(reason, token)
 
-            {:error,
-             SpaceTraders.API.Error.transport(SpaceTraders.Observability.redact(reason, token))}
+            case record_mutation_outcome(attempt, :ambiguous, %{
+                   reason: inspect(redacted_reason)
+                 }) do
+              :ok ->
+                {:error, SpaceTraders.API.Error.transport(redacted_reason)}
+
+              {:error, persistence_reason} ->
+                {:error, SpaceTraders.API.Error.transport(persistence_reason)}
+            end
         end
     end
   end
 
-  defp authorize_dispatch(request, method, token) do
-    case mutation_authorized?(method, token) do
-      :ok -> request
+  defp authorize_dispatch(request, method, token, attempt) do
+    with :ok <- mutation_authorized?(method, token),
+         {:ok, _attempt} <- mark_mutation_sent(attempt) do
+      request
+    else
       {:error, reason} -> Req.Request.halt(request, %MutationSuppressedError{reason: reason})
+    end
+  end
+
+  defp prepare_mutation_attempt(:get, _path, _opts), do: {:ok, nil}
+
+  defp prepare_mutation_attempt(method, path, opts) do
+    operation = OperationInventory.fetch_by_request!(method, path)
+    MutationAttempts.prepare(operation, path, opts)
+  end
+
+  defp mark_mutation_sent(nil), do: {:ok, nil}
+  defp mark_mutation_sent(attempt), do: MutationAttempts.mark_sent_or_unknown(attempt)
+
+  defp record_mutation_outcome(nil, _classification, _evidence), do: :ok
+
+  defp record_mutation_outcome(attempt, classification, evidence) do
+    case MutationAttempts.record_outcome(attempt, classification, evidence) do
+      {:ok, _attempt} -> :ok
+      {:error, reason} -> {:error, reason}
     end
   end
 

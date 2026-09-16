@@ -60,6 +60,17 @@ defmodule SpaceTraders.API.OperationInventoryTest do
     end
   end
 
+  test "resolves a concrete request path to its generated operation" do
+    assert %{id: "navigate-ship", classification: :mutation} =
+             OperationInventory.fetch_by_request!(:post, "/my/ships/ORBITALIST-1/navigate")
+
+    assert %{id: "get-market", classification: :read} =
+             OperationInventory.fetch_by_request!(
+               :get,
+               "/systems/X1-TEST/waypoints/X1-TEST-A1/market"
+             )
+  end
+
   defp pinned_operation_ids do
     @spec_path
     |> File.read!()

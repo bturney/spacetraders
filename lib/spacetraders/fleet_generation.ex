@@ -87,12 +87,22 @@ defmodule SpaceTraders.FleetGeneration do
              operator,
              replacement_symbols
            ) do
-      case register_first_available(
-             account_token,
-             registration_symbols,
-             get_field(changeset, :faction),
-             operator.email
-           ) do
+      revision = active_revision(operator.id)
+
+      registration_result =
+        SpaceTraders.Observability.with_context(
+          [operator_id: operator.id, strategy_revision_id: revision && revision.id],
+          fn ->
+            register_first_available(
+              account_token,
+              registration_symbols,
+              get_field(changeset, :faction),
+              operator.email
+            )
+          end
+        )
+
+      case registration_result do
         {:ok, %{token: agent_token, agent: %GameAgent{}} = registration} ->
           replace_stale_agent_and_create(operator, registration, agent_token,
             faction: get_field(changeset, :faction),
