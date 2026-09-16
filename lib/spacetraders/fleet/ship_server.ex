@@ -245,7 +245,7 @@ defmodule SpaceTraders.Fleet.ShipServer do
 
   defp known_wait_due_at(:arrival, %Ship{nav: %ShipNav{route: route}}) do
     case Timeline.parse_arrival(route) do
-      {:ok, due_at} -> due_at
+      {:ok, due_at} -> future_due_at(due_at)
       :error -> nil
     end
   end
@@ -255,6 +255,10 @@ defmodule SpaceTraders.Fleet.ShipServer do
        do: DateTime.add(Clock.utc_now(), seconds, :second)
 
   defp known_wait_due_at(_type, _ship), do: nil
+
+  defp future_due_at(due_at) do
+    if DateTime.compare(due_at, Clock.utc_now()) == :gt, do: due_at
+  end
 
   defp busy_label(:arrival), do: "in transit"
   defp busy_label(:cooldown), do: "on cooldown"

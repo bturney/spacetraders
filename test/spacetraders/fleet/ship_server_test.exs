@@ -186,6 +186,25 @@ defmodule SpaceTraders.Fleet.ShipServerTest do
       assert ShipServer.ensure_ready(symbol) == {:error, :ship_in_transit}
     end
 
+    test "backs off when the game reports a past arrival while the ship remains in transit" do
+      symbol = unique_symbol()
+      arrival = DateTime.add(DateTime.utc_now(), -60, :second) |> DateTime.to_iso8601()
+      stub_refresh_still_in_transit(symbol, arrival)
+
+      event = schedule(symbol, :arrival, DateTime.add(DateTime.utc_now(), -60, :second))
+
+      start_server(symbol)
+
+      assert eventually(fn ->
+               persisted = Repo.get!(Event, event.id)
+
+               persisted.status == "pending" and
+                 DateTime.compare(persisted.due_at, DateTime.utc_now()) == :gt
+             end)
+
+      assert ShipServer.ensure_ready(symbol) == {:error, :ship_in_transit}
+    end
+
     test "re-arms the cooldown event type alongside an arrival" do
       symbol = unique_symbol()
       subscribe_fleet()
