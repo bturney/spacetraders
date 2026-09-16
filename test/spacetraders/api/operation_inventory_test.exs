@@ -35,6 +35,19 @@ defmodule SpaceTraders.API.OperationInventoryTest do
       assert operation.ambiguity == :safe_retry or
                match?({:reconcile_before_retry, [_ | _]}, operation.ambiguity)
 
+      assert Enum.all?(operation.fence_dependencies, fn dependency ->
+               dependency in [
+                 :agent,
+                 :agent_credits,
+                 :agent_symbol,
+                 :construction,
+                 :contract,
+                 :owned_fleet,
+                 :ship,
+                 :waypoint
+               ]
+             end)
+
       assert operation.visibility in [
                :global_game_state,
                :agent_private,
@@ -52,12 +65,23 @@ defmodule SpaceTraders.API.OperationInventoryTest do
         :read ->
           assert operation.owner == :evidence
           assert operation.ambiguity == :safe_retry
+          assert operation.fence_dependencies == []
 
         :mutation ->
           assert operation.owner in [:fleet_generation, :fleet_reconciliation, :ship_execution]
           assert {:reconcile_before_retry, [_ | _]} = operation.ambiguity
+          assert operation.fence_dependencies != []
       end
     end
+  end
+
+  test "declares dependency resources independently from human-readable evidence" do
+    assert OperationInventory.fetch!("accept-contract").fence_dependencies == [
+             :contract,
+             :agent_credits
+           ]
+
+    assert OperationInventory.fetch!("create-chart").fence_dependencies == [:waypoint]
   end
 
   test "resolves a concrete request path to its generated operation" do

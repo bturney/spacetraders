@@ -320,11 +320,15 @@ defmodule SpaceTraders.API do
   end
 
   @doc "Retries an ambiguous mutation only after authoritative absence is recorded."
-  @spec reconcile_absent_and_retry(Attempt.t(), map(), (-> result())) :: result()
-  def reconcile_absent_and_retry(%Attempt{} = attempt, evidence, callback)
-      when is_map(evidence) and is_function(callback, 0) do
+  @spec reconcile_absent_and_retry(
+          Attempt.t(),
+          [SpaceTraders.Evidence.AuthoritativeObservation.t()],
+          (-> result())
+        ) :: result()
+  def reconcile_absent_and_retry(%Attempt{} = attempt, observations, callback)
+      when is_list(observations) and is_function(callback, 0) do
     with {:ok, absent} <-
-           MutationAttempts.reconcile(attempt, :absent, evidence, action_selected: true) do
+           MutationAttempts.reconcile(attempt, :absent, observations) do
       MutationAttempts.with_retry(absent, callback)
     end
   end

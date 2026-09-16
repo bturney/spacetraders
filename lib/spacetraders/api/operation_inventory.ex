@@ -12,6 +12,7 @@ defmodule SpaceTraders.API.OperationInventory.Operation do
     :success_evidence,
     :waits,
     :ambiguity,
+    :fence_dependencies,
     :visibility,
     :pagination
   ]
@@ -43,6 +44,7 @@ defmodule SpaceTraders.API.OperationInventory do
       success_evidence: ["Agent and Contract response"],
       waits: [],
       ambiguity: {:reconcile_before_retry, ["Contract state", "Agent credits"]},
+      fence_dependencies: [:contract, :agent_credits],
       visibility: :agent_private,
       pagination: :none
     },
@@ -58,6 +60,7 @@ defmodule SpaceTraders.API.OperationInventory do
       success_evidence: ["Chart, Waypoint, and Agent response"],
       waits: [],
       ambiguity: {:reconcile_before_retry, ["Waypoint Chart", "Agent credits"]},
+      fence_dependencies: [:waypoint],
       visibility: :ship_private,
       pagination: :none
     },
@@ -73,6 +76,7 @@ defmodule SpaceTraders.API.OperationInventory do
       success_evidence: ["scanned Ships and Cooldown response"],
       waits: [:cooldown],
       ambiguity: {:reconcile_before_retry, ["Ship Cooldown", "Bounded Unknown scan results"]},
+      fence_dependencies: [:ship],
       visibility: :ship_private,
       pagination: :none
     },
@@ -88,6 +92,7 @@ defmodule SpaceTraders.API.OperationInventory do
       success_evidence: ["scanned Systems and Cooldown response"],
       waits: [:cooldown],
       ambiguity: {:reconcile_before_retry, ["Ship Cooldown", "Bounded Unknown scan results"]},
+      fence_dependencies: [:ship],
       visibility: :ship_private,
       pagination: :none
     },
@@ -103,6 +108,7 @@ defmodule SpaceTraders.API.OperationInventory do
       success_evidence: ["scanned Waypoints and Cooldown response"],
       waits: [:cooldown],
       ambiguity: {:reconcile_before_retry, ["Ship Cooldown", "Bounded Unknown scan results"]},
+      fence_dependencies: [:ship],
       visibility: :ship_private,
       pagination: :none
     },
@@ -118,6 +124,7 @@ defmodule SpaceTraders.API.OperationInventory do
       success_evidence: ["Surveys and Cooldown response"],
       waits: [:cooldown],
       ambiguity: {:reconcile_before_retry, ["Ship Cooldown", "Bounded Unknown Surveys"]},
+      fence_dependencies: [:ship],
       visibility: :ship_private,
       pagination: :none
     },
@@ -133,6 +140,7 @@ defmodule SpaceTraders.API.OperationInventory do
       success_evidence: ["Cargo and Contract response"],
       waits: [],
       ambiguity: {:reconcile_before_retry, ["Contract delivery", "Ship Cargo"]},
+      fence_dependencies: [:contract, :ship],
       visibility: :ship_private,
       pagination: :none
     },
@@ -148,6 +156,7 @@ defmodule SpaceTraders.API.OperationInventory do
       success_evidence: ["Ship nav response"],
       waits: [],
       ambiguity: {:reconcile_before_retry, ["Ship state"]},
+      fence_dependencies: [:ship],
       visibility: :ship_private,
       pagination: :none
     },
@@ -163,6 +172,7 @@ defmodule SpaceTraders.API.OperationInventory do
       success_evidence: ["Extraction, Cargo, and Cooldown response"],
       waits: [:cooldown],
       ambiguity: {:reconcile_before_retry, ["Ship state"]},
+      fence_dependencies: [:ship],
       visibility: :ship_private,
       pagination: :none
     },
@@ -178,6 +188,7 @@ defmodule SpaceTraders.API.OperationInventory do
       success_evidence: ["Extraction, Cargo, events, and Cooldown response"],
       waits: [:cooldown],
       ambiguity: {:reconcile_before_retry, ["Ship state"]},
+      fence_dependencies: [:ship],
       visibility: :ship_private,
       pagination: :none
     },
@@ -193,6 +204,7 @@ defmodule SpaceTraders.API.OperationInventory do
       success_evidence: ["Agent and Contract response"],
       waits: [],
       ambiguity: {:reconcile_before_retry, ["Contract state", "Agent credits"]},
+      fence_dependencies: [:contract, :agent_credits],
       visibility: :agent_private,
       pagination: :none
     },
@@ -208,6 +220,7 @@ defmodule SpaceTraders.API.OperationInventory do
       success_evidence: ["successful response body with observation provenance"],
       waits: [],
       ambiguity: :safe_retry,
+      fence_dependencies: [],
       visibility: :global_game_state,
       pagination: :none
     },
@@ -223,6 +236,7 @@ defmodule SpaceTraders.API.OperationInventory do
       success_evidence: ["successful response body with observation provenance"],
       waits: [],
       ambiguity: :safe_retry,
+      fence_dependencies: [],
       visibility: :global_game_state,
       pagination: :page_limit
     },
@@ -238,6 +252,7 @@ defmodule SpaceTraders.API.OperationInventory do
       success_evidence: ["successful response body with observation provenance"],
       waits: [],
       ambiguity: :safe_retry,
+      fence_dependencies: [],
       visibility: :global_game_state,
       pagination: :none
     },
@@ -253,6 +268,7 @@ defmodule SpaceTraders.API.OperationInventory do
       success_evidence: ["successful response body with observation provenance"],
       waits: [],
       ambiguity: :safe_retry,
+      fence_dependencies: [],
       visibility: :agent_private,
       pagination: :none
     },
@@ -268,6 +284,7 @@ defmodule SpaceTraders.API.OperationInventory do
       success_evidence: ["successful response body with observation provenance"],
       waits: [],
       ambiguity: :safe_retry,
+      fence_dependencies: [],
       visibility: :agent_private,
       pagination: :page_limit
     },
@@ -283,6 +300,7 @@ defmodule SpaceTraders.API.OperationInventory do
       success_evidence: ["successful response body with observation provenance"],
       waits: [],
       ambiguity: :safe_retry,
+      fence_dependencies: [],
       visibility: :global_game_state,
       pagination: :none
     },
@@ -298,6 +316,7 @@ defmodule SpaceTraders.API.OperationInventory do
       success_evidence: ["successful response body with observation provenance"],
       waits: [],
       ambiguity: :safe_retry,
+      fence_dependencies: [],
       visibility: :global_game_state,
       pagination: :page_limit
     },
@@ -313,6 +332,7 @@ defmodule SpaceTraders.API.OperationInventory do
       success_evidence: ["successful response body with observation provenance"],
       waits: [],
       ambiguity: :safe_retry,
+      fence_dependencies: [],
       visibility: :global_game_state,
       pagination: :none
     },
@@ -331,6 +351,7 @@ defmodule SpaceTraders.API.OperationInventory do
       success_evidence: ["successful response body with observation provenance"],
       waits: [],
       ambiguity: :safe_retry,
+      fence_dependencies: [],
       visibility: :location_dependent_listing,
       pagination: :none
     },
@@ -346,6 +367,7 @@ defmodule SpaceTraders.API.OperationInventory do
       success_evidence: ["successful response body with observation provenance"],
       waits: [],
       ambiguity: :safe_retry,
+      fence_dependencies: [],
       visibility: :ship_private,
       pagination: :none
     },
@@ -361,6 +383,7 @@ defmodule SpaceTraders.API.OperationInventory do
       success_evidence: ["successful response body with observation provenance"],
       waits: [],
       ambiguity: :safe_retry,
+      fence_dependencies: [],
       visibility: :agent_private,
       pagination: :none
     },
@@ -376,6 +399,7 @@ defmodule SpaceTraders.API.OperationInventory do
       success_evidence: ["successful response body with observation provenance"],
       waits: [],
       ambiguity: :safe_retry,
+      fence_dependencies: [],
       visibility: :ship_private,
       pagination: :none
     },
@@ -391,6 +415,7 @@ defmodule SpaceTraders.API.OperationInventory do
       success_evidence: ["successful response body with observation provenance"],
       waits: [],
       ambiguity: :safe_retry,
+      fence_dependencies: [],
       visibility: :ship_private,
       pagination: :none
     },
@@ -406,6 +431,7 @@ defmodule SpaceTraders.API.OperationInventory do
       success_evidence: ["successful response body with observation provenance"],
       waits: [],
       ambiguity: :safe_retry,
+      fence_dependencies: [],
       visibility: :agent_private,
       pagination: :page_limit
     },
@@ -421,6 +447,7 @@ defmodule SpaceTraders.API.OperationInventory do
       success_evidence: ["successful response body with observation provenance"],
       waits: [],
       ambiguity: :safe_retry,
+      fence_dependencies: [],
       visibility: :ship_private,
       pagination: :none
     },
@@ -436,6 +463,7 @@ defmodule SpaceTraders.API.OperationInventory do
       success_evidence: ["successful response body with observation provenance"],
       waits: [],
       ambiguity: :safe_retry,
+      fence_dependencies: [],
       visibility: :ship_private,
       pagination: :none
     },
@@ -451,6 +479,7 @@ defmodule SpaceTraders.API.OperationInventory do
       success_evidence: ["successful response body with observation provenance"],
       waits: [],
       ambiguity: :safe_retry,
+      fence_dependencies: [],
       visibility: :ship_private,
       pagination: :none
     },
@@ -466,6 +495,7 @@ defmodule SpaceTraders.API.OperationInventory do
       success_evidence: ["successful response body with observation provenance"],
       waits: [],
       ambiguity: :safe_retry,
+      fence_dependencies: [],
       visibility: :ship_private,
       pagination: :none
     },
@@ -481,6 +511,7 @@ defmodule SpaceTraders.API.OperationInventory do
       success_evidence: ["successful response body with observation provenance"],
       waits: [],
       ambiguity: :safe_retry,
+      fence_dependencies: [],
       visibility: :ship_private,
       pagination: :none
     },
@@ -499,6 +530,7 @@ defmodule SpaceTraders.API.OperationInventory do
       success_evidence: ["successful response body with observation provenance"],
       waits: [],
       ambiguity: :safe_retry,
+      fence_dependencies: [],
       visibility: :location_dependent_listing,
       pagination: :none
     },
@@ -514,6 +546,7 @@ defmodule SpaceTraders.API.OperationInventory do
       success_evidence: ["successful response body with observation provenance"],
       waits: [],
       ambiguity: :safe_retry,
+      fence_dependencies: [],
       visibility: :global_game_state,
       pagination: :none
     },
@@ -529,6 +562,7 @@ defmodule SpaceTraders.API.OperationInventory do
       success_evidence: ["successful response body with observation provenance"],
       waits: [],
       ambiguity: :safe_retry,
+      fence_dependencies: [],
       visibility: :global_game_state,
       pagination: :none
     },
@@ -544,6 +578,7 @@ defmodule SpaceTraders.API.OperationInventory do
       success_evidence: ["successful response body with observation provenance"],
       waits: [],
       ambiguity: :safe_retry,
+      fence_dependencies: [],
       visibility: :global_game_state,
       pagination: :none
     },
@@ -559,6 +594,7 @@ defmodule SpaceTraders.API.OperationInventory do
       success_evidence: ["successful response body with observation provenance"],
       waits: [],
       ambiguity: :safe_retry,
+      fence_dependencies: [],
       visibility: :global_game_state,
       pagination: :page_limit
     },
@@ -574,6 +610,7 @@ defmodule SpaceTraders.API.OperationInventory do
       success_evidence: ["successful response body with observation provenance"],
       waits: [],
       ambiguity: :safe_retry,
+      fence_dependencies: [],
       visibility: :global_game_state,
       pagination: :page_limit
     },
@@ -589,6 +626,7 @@ defmodule SpaceTraders.API.OperationInventory do
       success_evidence: ["successful response body with observation provenance"],
       waits: [],
       ambiguity: :safe_retry,
+      fence_dependencies: [],
       visibility: :global_game_state,
       pagination: :none
     },
@@ -604,6 +642,7 @@ defmodule SpaceTraders.API.OperationInventory do
       success_evidence: ["mounts, Cargo, Agent, and transaction response"],
       waits: [],
       ambiguity: {:reconcile_before_retry, ["Ship Cargo", "Ship Readiness"]},
+      fence_dependencies: [:ship],
       visibility: :ship_private,
       pagination: :none
     },
@@ -619,6 +658,7 @@ defmodule SpaceTraders.API.OperationInventory do
       success_evidence: ["modules, Cargo, Agent, and transaction response"],
       waits: [],
       ambiguity: {:reconcile_before_retry, ["Ship state", "Ship Readiness"]},
+      fence_dependencies: [:ship],
       visibility: :ship_private,
       pagination: :none
     },
@@ -634,6 +674,7 @@ defmodule SpaceTraders.API.OperationInventory do
       success_evidence: ["Cargo response"],
       waits: [],
       ambiguity: {:reconcile_before_retry, ["Ship Cargo", "Ship Readiness"]},
+      fence_dependencies: [:ship],
       visibility: :ship_private,
       pagination: :none
     },
@@ -649,6 +690,7 @@ defmodule SpaceTraders.API.OperationInventory do
       success_evidence: ["Ship nav, Agent, and Cooldown response"],
       waits: [:cooldown],
       ambiguity: {:reconcile_before_retry, ["Ship state"]},
+      fence_dependencies: [:ship],
       visibility: :ship_private,
       pagination: :none
     },
@@ -664,6 +706,7 @@ defmodule SpaceTraders.API.OperationInventory do
       success_evidence: ["Ship nav and fuel response"],
       waits: [:transit],
       ambiguity: {:reconcile_before_retry, ["Ship state"]},
+      fence_dependencies: [:ship],
       visibility: :ship_private,
       pagination: :none
     },
@@ -679,6 +722,7 @@ defmodule SpaceTraders.API.OperationInventory do
       success_evidence: ["Contract response"],
       waits: [],
       ambiguity: {:reconcile_before_retry, ["Contract state", "Agent credits"]},
+      fence_dependencies: [:contract, :agent_credits],
       visibility: :agent_private,
       pagination: :none
     },
@@ -694,6 +738,7 @@ defmodule SpaceTraders.API.OperationInventory do
       success_evidence: ["Ship nav response"],
       waits: [],
       ambiguity: {:reconcile_before_retry, ["Ship state"]},
+      fence_dependencies: [:ship],
       visibility: :ship_private,
       pagination: :none
     },
@@ -709,6 +754,7 @@ defmodule SpaceTraders.API.OperationInventory do
       success_evidence: ["Ship nav, fuel, and events response"],
       waits: [],
       ambiguity: {:reconcile_before_retry, ["Ship state"]},
+      fence_dependencies: [:ship],
       visibility: :ship_private,
       pagination: :none
     },
@@ -724,6 +770,7 @@ defmodule SpaceTraders.API.OperationInventory do
       success_evidence: ["Agent, Cargo, and transaction response"],
       waits: [],
       ambiguity: {:reconcile_before_retry, ["Ship state", "Agent credits"]},
+      fence_dependencies: [:ship, :agent_credits],
       visibility: :ship_private,
       pagination: :none
     },
@@ -739,6 +786,7 @@ defmodule SpaceTraders.API.OperationInventory do
       success_evidence: ["Agent, Ship, and transaction response"],
       waits: [],
       ambiguity: {:reconcile_before_retry, ["owned Fleet", "Agent credits"]},
+      fence_dependencies: [:owned_fleet, :agent_credits],
       visibility: :agent_private,
       pagination: :none
     },
@@ -754,6 +802,7 @@ defmodule SpaceTraders.API.OperationInventory do
       success_evidence: ["Agent, Cargo, fuel, and transaction response"],
       waits: [],
       ambiguity: {:reconcile_before_retry, ["Ship state", "Agent credits"]},
+      fence_dependencies: [:ship, :agent_credits],
       visibility: :ship_private,
       pagination: :none
     },
@@ -769,6 +818,7 @@ defmodule SpaceTraders.API.OperationInventory do
       success_evidence: ["registration response and AgentToken"],
       waits: [],
       ambiguity: {:reconcile_before_retry, ["Agent existence by symbol"]},
+      fence_dependencies: [:agent_symbol],
       visibility: :agent_private,
       pagination: :none
     },
@@ -784,6 +834,7 @@ defmodule SpaceTraders.API.OperationInventory do
       success_evidence: ["mounts, Cargo, Agent, and transaction response"],
       waits: [],
       ambiguity: {:reconcile_before_retry, ["Ship Cargo", "Ship Readiness"]},
+      fence_dependencies: [:ship],
       visibility: :ship_private,
       pagination: :none
     },
@@ -799,6 +850,7 @@ defmodule SpaceTraders.API.OperationInventory do
       success_evidence: ["modules, Cargo, Agent, and transaction response"],
       waits: [],
       ambiguity: {:reconcile_before_retry, ["Ship state", "Ship Readiness"]},
+      fence_dependencies: [:ship],
       visibility: :ship_private,
       pagination: :none
     },
@@ -818,6 +870,7 @@ defmodule SpaceTraders.API.OperationInventory do
       success_evidence: ["repaired Ship and transaction response"],
       waits: [],
       ambiguity: {:reconcile_before_retry, ["Ship state", "Ship Readiness"]},
+      fence_dependencies: [:ship],
       visibility: :ship_private,
       pagination: :none
     },
@@ -833,6 +886,7 @@ defmodule SpaceTraders.API.OperationInventory do
       success_evidence: ["Agent and scrap transaction response"],
       waits: [],
       ambiguity: {:reconcile_before_retry, ["owned Fleet", "Agent credits"]},
+      fence_dependencies: [:owned_fleet],
       visibility: :agent_private,
       pagination: :none
     },
@@ -848,6 +902,7 @@ defmodule SpaceTraders.API.OperationInventory do
       success_evidence: ["Agent, Cargo, and transaction response"],
       waits: [],
       ambiguity: {:reconcile_before_retry, ["Ship state", "Agent credits"]},
+      fence_dependencies: [:ship],
       visibility: :ship_private,
       pagination: :none
     },
@@ -863,6 +918,7 @@ defmodule SpaceTraders.API.OperationInventory do
       success_evidence: ["Cargo, Cooldown, and production response"],
       waits: [:cooldown],
       ambiguity: {:reconcile_before_retry, ["Ship state"]},
+      fence_dependencies: [:ship],
       visibility: :ship_private,
       pagination: :none
     },
@@ -878,6 +934,7 @@ defmodule SpaceTraders.API.OperationInventory do
       success_evidence: ["Siphon, Cargo, and Cooldown response"],
       waits: [:cooldown],
       ambiguity: {:reconcile_before_retry, ["Ship state"]},
+      fence_dependencies: [:ship],
       visibility: :ship_private,
       pagination: :none
     },
@@ -893,6 +950,7 @@ defmodule SpaceTraders.API.OperationInventory do
       success_evidence: ["Cargo and Construction response"],
       waits: [],
       ambiguity: {:reconcile_before_retry, ["Construction state", "Ship Cargo"]},
+      fence_dependencies: [:construction, :ship],
       visibility: :ship_private,
       pagination: :none
     },
@@ -908,6 +966,7 @@ defmodule SpaceTraders.API.OperationInventory do
       success_evidence: ["source Cargo response"],
       waits: [],
       ambiguity: {:reconcile_before_retry, ["Ship Cargo", "Ship Readiness"]},
+      fence_dependencies: [:ship],
       visibility: :ship_private,
       pagination: :none
     },
@@ -923,6 +982,7 @@ defmodule SpaceTraders.API.OperationInventory do
       success_evidence: ["Ship nav and fuel response"],
       waits: [:transit],
       ambiguity: {:reconcile_before_retry, ["Ship state"]},
+      fence_dependencies: [:ship],
       visibility: :ship_private,
       pagination: :none
     }
