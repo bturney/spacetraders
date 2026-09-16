@@ -305,6 +305,26 @@ defmodule Mix.Tasks.SpaceTraders.Gen.Operations do
         Enum.find(@operations, &(&1.id == operation_id)) ||
           raise KeyError, key: operation_id, term: __MODULE__
       end
+
+      @spec fetch_by_request!(atom(), String.t()) :: Operation.t()
+      def fetch_by_request!(method, path) do
+        Enum.find(@operations, fn operation ->
+          operation.method == method and path_matches?(operation.path, path)
+        end) || raise KeyError, key: {method, path}, term: __MODULE__
+      end
+
+      defp path_matches?(template, path) do
+        template
+        |> String.split("/", trim: true)
+        |> Enum.zip(String.split(path, "/", trim: true))
+        |> then(fn pairs ->
+          length(pairs) == length(String.split(template, "/", trim: true)) and
+            length(pairs) == length(String.split(path, "/", trim: true)) and
+            Enum.all?(pairs, fn {expected, actual} ->
+              String.starts_with?(expected, "{") or expected == actual
+            end)
+        end)
+      end
     end
     '''
     |> Code.format_string!()
