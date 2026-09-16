@@ -2,6 +2,7 @@ defmodule SpaceTraders.Contracts do
   @moduledoc "Contract lifecycle operations for an Agent."
 
   alias SpaceTraders.Agent.Agent, as: AgentRecord
+  alias SpaceTraders.API.AgentTokenReference
   alias SpaceTraders.API.Model.Contract
   alias SpaceTraders.Contracts.DeadlineServer
   alias SpaceTraders.Timeline
@@ -15,8 +16,9 @@ defmodule SpaceTraders.Contracts do
   end
 
   @doc "Returns the Agent's contracts from the game API."
-  def list_contracts(%AgentRecord{agent_token: token}) when is_binary(token) and token != "" do
-    SpaceTraders.API.get_contracts(token)
+  def list_contracts(%AgentRecord{agent_token: token} = agent)
+      when is_binary(token) and token != "" do
+    SpaceTraders.API.get_contracts(AgentTokenReference.new(agent))
   end
 
   def list_contracts(%AgentRecord{}), do: {:error, :agent_token_missing}
@@ -76,10 +78,10 @@ defmodule SpaceTraders.Contracts do
   def deadline(%Contract{}), do: nil
 
   @doc "Accepts a contract and persists its fulfillment deadline for restart recovery."
-  def accept_contract(%AgentRecord{agent_token: token}, contract_id)
+  def accept_contract(%AgentRecord{agent_token: token} = agent, contract_id)
       when is_binary(token) and token != "" do
     with {:ok, %{contract: %Contract{} = contract} = result} <-
-           SpaceTraders.API.accept_contract(token, contract_id),
+           SpaceTraders.API.accept_contract(AgentTokenReference.new(agent), contract_id),
          {:ok, deadline} <- parse_deadline(contract) do
       {:ok, _event} = Timeline.schedule_event(:contract, contract.id, :deadline, deadline)
       {:ok, _pid} = DeadlineServer.ensure_started(contract.id)
@@ -90,9 +92,9 @@ defmodule SpaceTraders.Contracts do
   def accept_contract(%AgentRecord{}, _contract_id), do: {:error, :agent_token_missing}
 
   @doc "Fetches the Agent's accepted, actionable contracts' remaining deliverables."
-  def active_deliverables(%AgentRecord{agent_token: token})
+  def active_deliverables(%AgentRecord{agent_token: token} = agent)
       when is_binary(token) and token != "" do
-    with {:ok, contracts} <- SpaceTraders.API.get_contracts(token) do
+    with {:ok, contracts} <- SpaceTraders.API.get_contracts(AgentTokenReference.new(agent)) do
       {:ok, remaining_deliverables(contracts)}
     end
   end
@@ -137,14 +139,20 @@ defmodule SpaceTraders.Contracts do
 
   @doc "Delivers goods from a Ship against an accepted contract."
   def deliver_goods(
-        %AgentRecord{agent_token: token},
+        %AgentRecord{agent_token: token} = agent,
         contract_id,
         ship_symbol,
         trade_symbol,
         units
       )
       when is_binary(token) and token != "" and is_integer(units) and units > 0 do
-    SpaceTraders.API.deliver_contract(token, contract_id, ship_symbol, trade_symbol, units)
+    SpaceTraders.API.deliver_contract(
+      AgentTokenReference.new(agent),
+      contract_id,
+      ship_symbol,
+      trade_symbol,
+      units
+    )
   end
 
   def deliver_goods(
@@ -161,9 +169,9 @@ defmodule SpaceTraders.Contracts do
     do: {:error, :invalid_units}
 
   @doc "Fulfills a contract after all delivery terms are complete."
-  def fulfill_contract(%AgentRecord{agent_token: token}, contract_id)
+  def fulfill_contract(%AgentRecord{agent_token: token} = agent, contract_id)
       when is_binary(token) and token != "" do
-    case SpaceTraders.API.fulfill_contract(token, contract_id) do
+    case SpaceTraders.API.fulfill_contract(AgentTokenReference.new(agent), contract_id) do
       {:ok, result} ->
         Timeline.cancel_events(:contract, contract_id, :deadline)
         {:ok, result}
@@ -176,9 +184,9 @@ defmodule SpaceTraders.Contracts do
   def fulfill_contract(%AgentRecord{}, _contract_id), do: {:error, :agent_token_missing}
 
   @doc "Negotiates a new contract with the faction at a Ship's current waypoint."
-  def negotiate_contract(%AgentRecord{agent_token: token}, ship_symbol)
+  def negotiate_contract(%AgentRecord{agent_token: token} = agent, ship_symbol)
       when is_binary(token) and token != "" do
-    SpaceTraders.API.negotiate_contract(token, ship_symbol)
+    SpaceTraders.API.negotiate_contract(AgentTokenReference.new(agent), ship_symbol)
   end
 
   def negotiate_contract(%AgentRecord{}, _ship_symbol), do: {:error, :agent_token_missing}

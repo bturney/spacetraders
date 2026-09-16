@@ -1,9 +1,12 @@
 defmodule SpaceTraders.API.ErrorTest do
-  use ExUnit.Case, async: true
+  use SpaceTraders.DataCase, async: true
 
   alias SpaceTraders.API
+  alias SpaceTraders.API.AgentTokenReference
   alias SpaceTraders.API.Error
   alias SpaceTraders.API.GameplayError
+
+  import SpaceTraders.AgentFixtures
 
   defp stub_error(status, error_payload) do
     Req.Test.stub(SpaceTraders.API, fn conn ->
@@ -21,7 +24,9 @@ defmodule SpaceTraders.API.ErrorTest do
         "data" => %{"authorization" => "Bearer AGENT_TOKEN_SECRET"}
       })
 
-      assert {:error, %GameplayError{} = error} = API.get_agent("AGENT_TOKEN_SECRET")
+      assert {:error, %GameplayError{} = error} =
+               API.get_agent(agent_token_reference("AGENT_TOKEN_SECRET"))
+
       refute inspect(error) =~ "AGENT_TOKEN_SECRET"
       assert error.message == "Rejected [REDACTED]"
     end
@@ -31,35 +36,35 @@ defmodule SpaceTraders.API.ErrorTest do
 
       assert {:error,
               %GameplayError{type: :in_transit, code: 4200, message: "Ship is in transit."}} =
-               API.navigate_ship("TOKEN", "SHIP-1", "X1-UX81-A2")
+               API.navigate_ship(agent_token_reference(), "SHIP-1", "X1-UX81-A2")
     end
 
     test "cooldown surfaces as %GameplayError{type: :cooldown}" do
       stub_error(409, %{"code" => 4000, "message" => "Ship is in cooldown.", "data" => %{}})
 
       assert {:error, %GameplayError{type: :cooldown}} =
-               API.extract_resources("TOKEN", "SHIP-1")
+               API.extract_resources(agent_token_reference(), "SHIP-1")
     end
 
     test "expired contract surfaces as %GameplayError{type: :contract_expired}" do
       stub_error(409, %{"code" => 4503, "message" => "Contract has expired.", "data" => %{}})
 
       assert {:error, %GameplayError{type: :contract_expired}} =
-               API.accept_contract("TOKEN", "c1")
+               API.accept_contract(agent_token_reference(), "c1")
     end
 
     test "insufficient credits surfaces as %GameplayError{type: :insufficient_credits}" do
       stub_error(400, %{"code" => 4600, "message" => "Not enough credits.", "data" => %{}})
 
       assert {:error, %GameplayError{type: :insufficient_credits}} =
-               API.sell_cargo("TOKEN", "SHIP-1", "IRON_ORE", 10)
+               API.sell_cargo(agent_token_reference(), "SHIP-1", "IRON_ORE", 10)
     end
 
     test "unknown code falls back to type :other but stays a GameplayError" do
       stub_error(400, %{"code" => 9999, "message" => "Unknown thing.", "data" => %{}})
 
       assert {:error, %GameplayError{type: :other, code: 9999}} =
-               API.get_ship("TOKEN", "SHIP-1")
+               API.get_ship(agent_token_reference(), "SHIP-1")
     end
   end
 
@@ -71,7 +76,7 @@ defmodule SpaceTraders.API.ErrorTest do
         |> Req.Test.json(%{"error" => %{"code" => 5000, "message" => "boom", "data" => %{}}})
       end)
 
-      assert {:error, %Error{status: 500}} = API.get_agent("TOKEN")
+      assert {:error, %Error{status: 500}} = API.get_agent(agent_token_reference())
     end
 
     test "transport error surfaces as %Error{} with reason" do
@@ -80,7 +85,7 @@ defmodule SpaceTraders.API.ErrorTest do
       end)
 
       assert {:error, %Error{reason: %Req.TransportError{reason: :timeout}}} =
-               API.get_agent("TOKEN")
+               API.get_agent(agent_token_reference())
     end
 
     test "4xx without an error envelope surfaces as %Error{}" do
@@ -90,7 +95,7 @@ defmodule SpaceTraders.API.ErrorTest do
         |> Req.Test.text("not found")
       end)
 
-      assert {:error, %Error{status: 404}} = API.get_agent("TOKEN")
+      assert {:error, %Error{status: 404}} = API.get_agent(agent_token_reference())
     end
 
     test "a 200 without a decodable `data` body surfaces as %Error{}, not a crash" do
@@ -98,7 +103,7 @@ defmodule SpaceTraders.API.ErrorTest do
         Req.Test.text(conn, "")
       end)
 
-      assert {:error, %Error{status: 200}} = API.get_agent("TOKEN")
+      assert {:error, %Error{status: 200}} = API.get_agent(agent_token_reference())
     end
   end
 
@@ -119,7 +124,7 @@ defmodule SpaceTraders.API.ErrorTest do
         end
       end)
 
-      assert {:ok, %{symbol: "ORBITALIST"}} = API.get_agent("TOKEN")
+      assert {:ok, %{symbol: "ORBITALIST"}} = API.get_agent(agent_token_reference())
     end
 
     test "does not replay a failed mutation" do
@@ -129,7 +134,8 @@ defmodule SpaceTraders.API.ErrorTest do
         |> Req.Test.json(%{"error" => %{"code" => 503, "message" => "unavailable"}})
       end)
 
-      assert {:error, %Error{status: 503}} = API.navigate_ship("TOKEN", "SHIP-1", "X1-UX81-A2")
+      assert {:error, %Error{status: 503}} =
+               API.navigate_ship(agent_token_reference(), "SHIP-1", "X1-UX81-A2")
     end
 
     test "retries a rate-limited mutation after Retry-After" do
@@ -147,7 +153,13 @@ defmodule SpaceTraders.API.ErrorTest do
       end)
 
       assert {:ok, %{nav: %{status: "IN_TRANSIT"}}} =
-               API.navigate_ship("TOKEN", "SHIP-1", "X1-UX81-A2")
+               API.navigate_ship(agent_token_reference(), "SHIP-1", "X1-UX81-A2")
     end
+  end
+
+  defp agent_token_reference(token \\ "TOKEN") do
+    operator_fixture()
+    |> agent_fixture(%{agent_token: token})
+    |> AgentTokenReference.new()
   end
 end

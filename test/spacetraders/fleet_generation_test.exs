@@ -5,6 +5,7 @@ defmodule SpaceTraders.FleetGenerationTest do
 
   alias SpaceTraders.Agent
   alias SpaceTraders.Agent.Scope
+  alias SpaceTraders.API.AgentTokenReference
   alias SpaceTraders.FleetGeneration
   alias SpaceTraders.Fleet.{Intent, Intents, Ship}
   alias SpaceTraders.FleetStrategy
@@ -76,8 +77,13 @@ defmodule SpaceTraders.FleetGenerationTest do
     assert {:error, :stale_agent} = FleetGeneration.agent_overview(stale_agent)
     assert_receive :stale_agent_retained
 
+    stale_token_reference =
+      operator
+      |> agent_fixture(%{agent_token: "FIRST_TOKEN"})
+      |> AgentTokenReference.new()
+
     assert {:error, :stale_agent} =
-             SpaceTraders.API.accept_contract(stale_agent.agent_token, "contract-1")
+             SpaceTraders.API.accept_contract(stale_token_reference, "contract-1")
 
     refute Repo.get(SpaceTraders.Agent.Agent, stale_agent.id)
     replacement = Repo.get_by!(SpaceTraders.Agent.Agent, symbol: "FALLBACK")
@@ -149,7 +155,7 @@ defmodule SpaceTraders.FleetGenerationTest do
     assert :ok = Agent.execution_allowed?(agent)
 
     assert {:error, :emergency_stopped} =
-             SpaceTraders.API.accept_contract(agent.agent_token, "contract-1")
+             SpaceTraders.API.accept_contract(AgentTokenReference.new(agent), "contract-1")
 
     assert {:error, :emergency_stopped} =
              FleetGeneration.mint(scope, %{symbol: "REPLACEMENT", faction: "COSMIC"})
@@ -217,7 +223,11 @@ defmodule SpaceTraders.FleetGenerationTest do
 
     request =
       Task.async(fn ->
-        SpaceTraders.API.navigate_ship(agent.agent_token, "SHIP-1", "X1-UX81-A2")
+        SpaceTraders.API.navigate_ship(
+          AgentTokenReference.new(agent),
+          "SHIP-1",
+          "X1-UX81-A2"
+        )
       end)
 
     assert_receive :mutation_attempted
@@ -249,7 +259,7 @@ defmodule SpaceTraders.FleetGenerationTest do
     assert {:ok, imported} = Agent.import_agent(scope, "IMPORTED_AGENT_TOKEN", true)
 
     assert {:error, :emergency_stopped} =
-             SpaceTraders.API.accept_contract(imported.agent_token, "contract-1")
+             SpaceTraders.API.accept_contract(AgentTokenReference.new(imported), "contract-1")
   end
 
   test "mints through a credential reference without exposing the AccountToken" do

@@ -1,14 +1,14 @@
 defmodule SpaceTraders.MarketTest do
   use SpaceTraders.DataCase, async: true
 
-  alias SpaceTraders.Agent.Agent, as: AgentRecord
   alias SpaceTraders.API.Model
   alias SpaceTraders.Market
 
   import SpaceTraders.ShipBody
+  import SpaceTraders.AgentFixtures
 
   test "lists market prices only for marketplaces where a ship is docked" do
-    agent = %AgentRecord{agent_token: "AGENT_TOKEN"}
+    agent = operator_fixture() |> agent_fixture(%{agent_token: "AGENT_TOKEN"})
 
     Req.Test.stub(SpaceTraders.API, fn conn ->
       case conn.request_path do

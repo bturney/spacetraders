@@ -104,6 +104,7 @@ defmodule SpaceTraders.MixProject do
         "compile --warnings-as-errors",
         "test",
         "space_traders.gen.models --check",
+        "space_traders.gen.operations --check",
         "verify.boot"
       ]
     ]

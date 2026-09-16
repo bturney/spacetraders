@@ -28,6 +28,9 @@ defmodule SpaceTraders.API do
 
   alias SpaceTraders.API.RateLimiter
   alias SpaceTraders.API.Pagination
+  alias SpaceTraders.API.AgentTokenReference
+  alias SpaceTraders.Agent.Agent, as: AgentRecord
+  alias SpaceTraders.Repo
 
   alias SpaceTraders.API.Model.{
     Agent,
@@ -74,7 +77,8 @@ defmodule SpaceTraders.API do
     TransferCargoRequest
   }
 
-  @type token() :: String.t()
+  @type token() :: AgentTokenReference.t()
+  @type account_token() :: String.t()
   @type result() ::
           {:ok, term()}
           | {:error, SpaceTraders.API.GameplayError.t() | SpaceTraders.API.Error.t()}
@@ -91,9 +95,9 @@ defmodule SpaceTraders.API do
   end
 
   @doc "POST /register — mint a new agent under the given account token."
-  @spec register(token(), String.t(), String.t(), String.t()) :: result()
+  @spec register(account_token(), String.t(), String.t(), String.t()) :: result()
   def register(account_token, symbol, faction, email) do
-    request(:post, "/register", account_token,
+    request_with_token(:post, "/register", account_token,
       json:
         RegisterRequest.new(%{symbol: symbol, faction: faction, email: email})
         |> RegisterRequest.to_json(),
@@ -529,7 +533,20 @@ defmodule SpaceTraders.API do
 
   ## Request plumbing
 
-  defp request(method, path, token, opts) do
+  defp request(method, path, %AgentTokenReference{} = credential_ref, opts) do
+    with :ok <- runtime_authorized?(method) do
+      RateLimiter.acquire()
+
+      with {:ok, token} <- resolve_agent_token(credential_ref),
+           :ok <- mutation_authorized?(method, token) do
+        send_request(method, path, token, opts)
+      end
+    end
+  end
+
+  defp request(method, path, nil, opts), do: request_with_token(method, path, nil, opts)
+
+  defp request_with_token(method, path, token, opts) do
     with :ok <- mutation_authorized?(method, token) do
       do_request(method, path, token, opts)
     end
@@ -616,6 +633,9 @@ defmodule SpaceTraders.API do
     end
   end
 
+  defp runtime_authorized?(:get), do: :ok
+  defp runtime_authorized?(_method), do: SpaceTraders.RuntimeAuthority.execution_allowed?()
+
   defp mutation_authorized_after_response(429, method, token),
     do: mutation_authorized?(method, token)
 
@@ -637,6 +657,13 @@ defmodule SpaceTraders.API do
 
   defp maybe_auth(nil), do: []
   defp maybe_auth(token), do: [auth: {:bearer, token}]
+
+  defp resolve_agent_token(%AgentTokenReference{agent_id: agent_id}) do
+    case Repo.get(AgentRecord, agent_id) do
+      %AgentRecord{agent_token: token} when is_binary(token) and token != "" -> {:ok, token}
+      _ -> {:error, :agent_token_missing}
+    end
+  end
 
   defp config_req_options do
     Application.get_env(:spacetraders, __MODULE__, [])

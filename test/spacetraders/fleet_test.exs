@@ -7,6 +7,7 @@ defmodule SpaceTraders.FleetTest do
   alias SpaceTraders.Agent.Operator
   alias SpaceTraders.Agent.Scope
   alias SpaceTraders.API.Model
+  alias SpaceTraders.API.AgentTokenReference
   alias SpaceTraders.Fleet
   alias SpaceTraders.Fleet.Ship
   alias SpaceTraders.Fleet.Job
@@ -218,7 +219,7 @@ defmodule SpaceTraders.FleetTest do
       end
     end)
 
-    assert {:ok, _} = Fleet.recover_job_on_boot("FLEET-SHIP", agent.id, agent.agent_token)
+    assert {:ok, _} = Fleet.recover_job_on_boot("FLEET-SHIP", agent.id)
 
     assert_receive {:api_request, "/v2/my/ships/FLEET-SHIP"}
     assert_receive {:api_request, "/v2/my/ships/FLEET-SHIP/orbit"}
@@ -251,7 +252,7 @@ defmodule SpaceTraders.FleetTest do
         })
       end)
 
-      agent = %AgentRecord{agent_token: "AGENT_TOKEN"}
+      agent = agent_fixture()
 
       assert {:ok,
               [
@@ -272,7 +273,7 @@ defmodule SpaceTraders.FleetTest do
         Req.Test.json(conn, %{"data" => []})
       end)
 
-      assert {:ok, []} = Fleet.list_ships(%AgentRecord{agent_token: "AGENT_TOKEN"})
+      assert {:ok, []} = Fleet.list_ships(agent_fixture())
     end
 
     test "returns an error when the agent has no stored token" do
@@ -287,7 +288,7 @@ defmodule SpaceTraders.FleetTest do
       end)
 
       assert {:error, %SpaceTraders.API.GameplayError{}} =
-               Fleet.list_ships(%AgentRecord{agent_token: "BAD"})
+               Fleet.list_ships(agent_fixture("BAD"))
     end
   end
 
@@ -1418,7 +1419,7 @@ defmodule SpaceTraders.FleetTest do
         end
       end)
 
-      assert {:ok, _} = Fleet.recover_job_on_boot("FLEET-SHIP", agent.id, agent.agent_token)
+      assert {:ok, _} = Fleet.recover_job_on_boot("FLEET-SHIP", agent.id)
 
       assert_receive {:api_request, "/v2/my/ships/FLEET-SHIP"}
       assert_receive {:api_request, "/v2/my/ships/FLEET-SHIP/siphon"}
@@ -1995,7 +1996,8 @@ defmodule SpaceTraders.FleetTest do
       agent_id = agent.id
 
       start_supervised!(
-        {ShipServer, symbol: "FLEET-SHIP", agent_id: agent.id, agent_token: agent.agent_token}
+        {ShipServer,
+         symbol: "FLEET-SHIP", agent_id: agent.id, credential_ref: AgentTokenReference.new(agent)}
       )
 
       assert_receive {:ship_updated, ^agent_id, "FLEET-SHIP"}, 1_000
@@ -2196,7 +2198,7 @@ defmodule SpaceTraders.FleetTest do
         })
       end)
 
-      assert {:ok, _} = Fleet.recover_job_on_boot("FLEET-SHIP", agent.id, agent.agent_token)
+      assert {:ok, _} = Fleet.recover_job_on_boot("FLEET-SHIP", agent.id)
       recovered = Fleet.ship_job(agent, "FLEET-SHIP")
       assert recovered.last_action_result == %{"kind" => "recovery", "outcome" => "confirmed"}
       assert recovered.recovery_attempts == 0
@@ -2262,7 +2264,7 @@ defmodule SpaceTraders.FleetTest do
       end)
 
       assert {:error, :miner_job_recovery_blocked} =
-               Fleet.recover_job_on_boot("FLEET-SHIP", agent.id, agent.agent_token)
+               Fleet.recover_job_on_boot("FLEET-SHIP", agent.id)
 
       recovered = Fleet.ship_job(agent, "FLEET-SHIP")
       assert recovered.status == "blocked"
@@ -3305,7 +3307,7 @@ defmodule SpaceTraders.FleetTest do
       end)
 
       assert {:ok, %Job{status: "waiting", in_flight_action: %{"kind" => "navigate"}}} =
-               Fleet.recover_job_on_boot("FLEET-SHIP", agent.id, agent.agent_token)
+               Fleet.recover_job_on_boot("FLEET-SHIP", agent.id)
 
       assert [%Activity{kind: "miner_job_recovery", message: message}] =
                Repo.all(from a in Activity, order_by: [desc: a.id], limit: 1)
