@@ -10,7 +10,9 @@ defmodule SpaceTraders.MissionControl do
 
   alias SpaceTraders.Agent.Scope
   alias SpaceTraders.Agent.Agent, as: AgentRecord
-  alias SpaceTraders.{Agent, Fleet, FleetGeneration, FleetStrategy, Intelligence}
+  alias SpaceTraders.{Agent, Fleet, FleetGeneration, FleetPlanning, FleetStrategy, Intelligence}
+
+  @market_evidence_freshness_seconds 300
 
   @evaluation_fact_keys %{
     "change" => :change,
@@ -47,6 +49,19 @@ defmodule SpaceTraders.MissionControl do
   def strategy(%Scope{} = scope) do
     FleetStrategy.get(scope)
     |> Map.put(:presets, FleetStrategy.presets())
+  end
+
+  @doc "Returns visible Market Candidate Contributions from retained Operational Intelligence."
+  def market_planning(%Scope{} = scope, as_of \\ DateTime.utc_now()) do
+    case strategy(scope).active_revision do
+      nil ->
+        []
+
+      revision ->
+        scope
+        |> agents()
+        |> Enum.flat_map(&agent_market_planning(revision, &1, as_of))
+    end
   end
 
   @doc "Returns the concise Fleet Strategy and Fleet Generation read projection."
@@ -178,6 +193,58 @@ defmodule SpaceTraders.MissionControl do
   end
 
   defp without_agent_credentials(%AgentRecord{} = agent), do: %{agent | agent_token: nil}
+
+  defp agent_market_planning(revision, agent, as_of) do
+    with {:ok, system_symbol} <- Fleet.system_from_headquarters(agent.headquarters) do
+      snapshot = %{
+        as_of: as_of,
+        freshness_seconds: @market_evidence_freshness_seconds,
+        demand_deadline_seconds: 60,
+        agent_id: agent.id,
+        markets:
+          agent
+          |> Intelligence.marketplace_waypoints(system_symbol)
+          |> Enum.map(&market_evidence(agent, system_symbol, &1, as_of))
+      }
+
+      revision.document
+      |> Map.get("objectives", [])
+      |> Enum.with_index()
+      |> Enum.map(fn {objective, objective_index} ->
+        {:ok, planning} = FleetPlanning.plan_market(revision, objective_index, snapshot)
+
+        %{
+          agent: agent,
+          objective: objective,
+          objective_index: objective_index,
+          planning: planning
+        }
+      end)
+    else
+      _ -> []
+    end
+  end
+
+  defp market_evidence(agent, system_symbol, waypoint_symbol, as_of) do
+    facts = Intelligence.subject_with_stale(agent, :market, system_symbol, waypoint_symbol)
+    current = facts.current["trade_goods"]
+    stale = facts.stale["trade_goods"]
+    fact = current || stale || latest_fact(facts)
+
+    %{
+      subject: "market:#{system_symbol}:#{waypoint_symbol}",
+      observed_at: (fact && fact.observation.observed_at) || as_of,
+      evidence_id: fact && "intelligence-observation:#{fact.observation.id}",
+      source: fact && fact.observation.source,
+      state: if(is_nil(current) and not is_nil(stale), do: :stale, else: :current),
+      trade_goods: if(current, do: current.value, else: stale && stale.value)
+    }
+  end
+
+  defp latest_fact(%{current: current, stale: stale}) do
+    (Map.values(current) ++ Map.values(stale))
+    |> Enum.max_by(& &1.observation.observed_at, DateTime, fn -> nil end)
+  end
 
   defp fleet_overview(snapshot, generations) do
     generation =

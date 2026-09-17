@@ -2,7 +2,11 @@ defmodule SpaceTradersWeb.StrategyLiveTest do
   use SpaceTradersWeb.ConnCase
 
   import Phoenix.LiveViewTest
+  alias SpaceTraders.API.Model.{Market, Waypoint}
+  alias SpaceTraders.Agent.Agent, as: AgentRecord
   alias SpaceTraders.FleetStrategy
+  alias SpaceTraders.Intelligence
+  alias SpaceTraders.Repo
 
   setup :register_and_log_in_operator
 
@@ -165,6 +169,51 @@ defmodule SpaceTradersWeb.StrategyLiveTest do
     assert render(view) =~ "Active revision 1"
   end
 
+  test "shows evidence-bound Market Candidate Contributions for an active Strategy", %{
+    conn: conn,
+    operator: operator,
+    scope: scope
+  } do
+    agent =
+      Repo.insert!(%AgentRecord{
+        operator_id: operator.id,
+        symbol: "PLANNER",
+        faction: "COSMIC",
+        headquarters: "X1-A1"
+      })
+
+    Enum.each(["X1-A1", "X1-A2"], fn symbol ->
+      waypoint =
+        Waypoint.from_json(%{
+          "symbol" => symbol,
+          "systemSymbol" => "X1",
+          "type" => "PLANET",
+          "x" => 0,
+          "y" => 0,
+          "traits" => [%{"symbol" => "MARKETPLACE"}]
+        })
+
+      assert {:ok, _} = Intelligence.observe_waypoint(agent, waypoint, source: "get_waypoint")
+    end)
+
+    observe_market(agent, "X1-A1", 10, 9)
+    observe_market(agent, "X1-A2", 25, 20)
+
+    assert {:ok, _draft} = FleetStrategy.select_preset(scope, "steady_growth")
+
+    assert {:ok, _revision} =
+             FleetStrategy.activate(scope, FleetStrategy.get(scope).draft_version)
+
+    {:ok, view, html} = live(conn, ~p"/strategy")
+
+    assert has_element?(view, "#market-candidate-contributions")
+    assert html =~ "PLANNER"
+    assert html =~ "IRON_ORE"
+    assert html =~ "X1-A1"
+    assert html =~ "X1-A2"
+    assert html =~ "200 credits"
+  end
+
   test "discard removes the persistent draft without changing active intent", %{
     conn: conn,
     scope: scope
@@ -207,5 +256,32 @@ defmodule SpaceTradersWeb.StrategyLiveTest do
     assert html =~ "cannot be enforced"
     assert html =~ "does not provide a conditional maximum price"
     assert FleetStrategy.get(scope).active_revision == nil
+  end
+
+  defp observe_market(agent, waypoint, purchase_price, sell_price) do
+    market =
+      Market.from_json(%{
+        "symbol" => waypoint,
+        "exports" => [%{"symbol" => "IRON_ORE"}],
+        "imports" => [%{"symbol" => "IRON_ORE"}],
+        "exchange" => [],
+        "tradeGoods" => [
+          %{
+            "symbol" => "IRON_ORE",
+            "type" => "EXPORT",
+            "tradeVolume" => 20,
+            "supply" => "MODERATE",
+            "activity" => "STATIC",
+            "purchasePrice" => purchase_price,
+            "sellPrice" => sell_price
+          }
+        ]
+      })
+
+    assert {:ok, _} =
+             Intelligence.observe_market(agent, "X1", market,
+               source: "get_market",
+               observing_ship_symbol: "PLANNER-1"
+             )
   end
 end

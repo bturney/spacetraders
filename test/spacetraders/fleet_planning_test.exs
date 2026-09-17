@@ -41,6 +41,7 @@ defmodule SpaceTraders.FleetPlanningTest do
              strategy_revision_id: 42,
              objective_index: 0,
              objective: %{"objective" => "Grow credits"},
+             required_roles: [%{role: :market_trader, count: 1}],
              expected_outcomes: %{
                credit_change_per_unit: 10,
                maximum_credit_change: 200,
@@ -67,6 +68,9 @@ defmodule SpaceTraders.FleetPlanningTest do
              "market:X1:X1-A1",
              "market:X1:X1-A2"
            ]
+
+    assert Enum.all?(dependencies, &is_binary(&1.evidence_id))
+    assert Enum.all?(dependencies, &(&1.source == "get_market"))
   end
 
   test "stale and insufficient Market evidence produce Observation Demands and limitations" do
@@ -126,6 +130,61 @@ defmodule SpaceTraders.FleetPlanningTest do
            end)
   end
 
+  test "Market planning explicitly limits objectives that credit growth cannot advance" do
+    revision = %Revision{
+      id: 43,
+      document: %{
+        "objectives" => [
+          %{
+            "objective" => "Chart useful waypoints",
+            "kind" => "attain",
+            "evaluation" => "Increase newly charted waypoint coverage",
+            "scope" => "fleet_generation"
+          }
+        ]
+      }
+    }
+
+    assert {:ok,
+            %{
+              candidate_contributions: [],
+              observation_demands: [],
+              limitations: [%{reason: :unsupported_market_objective}]
+            }} = FleetPlanning.plan_market(revision, 0, evidence_snapshot())
+  end
+
+  test "future, malformed, and partially malformed Market evidence is insufficient" do
+    snapshot = %{
+      evidence_snapshot()
+      | markets: [
+          market("X1-A1", ~U[2030-01-01 12:01:00Z], [good("IRON", 10, 9, 20)]),
+          market("X1-A2", @as_of, [good("IRON", 25, 20, 25), %{symbol: "COPPER"}])
+        ]
+    }
+
+    assert {:ok, result} = FleetPlanning.plan_market(revision(), 0, snapshot)
+    assert result.candidate_contributions == []
+
+    assert Enum.map(result.limitations, & &1.reason) == [
+             :inconsistent_market_evidence,
+             :insufficient_market_evidence
+           ]
+
+    assert length(result.observation_demands) == 2
+  end
+
+  test "duplicate Market observations normalize deterministically to one newest observation" do
+    older = market("X1-A1", ~U[2030-01-01 11:57:00Z], [good("IRON", 8, 7, 20)])
+    newer = market("X1-A1", ~U[2030-01-01 11:59:00Z], [good("IRON", 10, 9, 20)])
+    destination = market("X1-A2", ~U[2030-01-01 11:58:00Z], [good("IRON", 25, 20, 25)])
+
+    first = %{evidence_snapshot() | markets: [older, destination, newer]}
+    second = %{first | markets: Enum.reverse(first.markets)}
+
+    assert FleetPlanning.plan_market(revision(), 0, first) ==
+             FleetPlanning.plan_market(revision(), 0, second)
+  end
+
   defp revision do
     %Revision{
       id: 42,
@@ -165,6 +224,8 @@ defmodule SpaceTraders.FleetPlanningTest do
     %{
       subject: "market:X1:#{waypoint}",
       observed_at: observed_at,
+      evidence_id: "observation-#{waypoint}-#{DateTime.to_unix(observed_at)}",
+      source: "get_market",
       trade_goods: trade_goods
     }
   end

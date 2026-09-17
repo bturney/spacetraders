@@ -105,6 +105,70 @@ defmodule SpaceTradersWeb.StrategyLive do
           </p>
         </section>
 
+        <section
+          :if={@projection.active_revision && @market_planning != []}
+          id="market-candidate-contributions"
+          class="space-y-4"
+        >
+          <div>
+            <p class="eyebrow">Evidence-bound planning</p>
+            <h2 class="text-2xl font-bold">Market Candidate Contributions</h2>
+            <p class="mt-1 max-w-3xl text-sm opacity-70">
+              Proposals describe possible contributions only. No Ship, credits, or Cargo are claimed until Fleet Allocation accepts a portfolio.
+            </p>
+          </div>
+
+          <article
+            :for={entry <- @market_planning}
+            id={"market-planning-#{entry.agent.id}-#{entry.objective_index}"}
+            class="rounded-2xl border border-base-300 bg-base-100 p-5 shadow-sm"
+          >
+            <div class="flex flex-wrap items-start justify-between gap-2">
+              <div>
+                <p class="font-bold">{entry.objective["objective"]}</p>
+                <p class="text-sm opacity-70">{entry.agent.symbol}</p>
+              </div>
+              <span class="badge badge-ghost">Candidate only</span>
+            </div>
+
+            <div
+              :if={entry.planning.candidate_contributions != []}
+              class="mt-4 grid gap-3 lg:grid-cols-2"
+            >
+              <div
+                :for={candidate <- entry.planning.candidate_contributions}
+                id={"candidate-contribution-#{candidate.id}"}
+                class="rounded-xl border border-base-300 p-4"
+              >
+                <p class="font-semibold">
+                  {candidate.trade_symbol}: {candidate.source_waypoint} to {candidate.destination_waypoint}
+                </p>
+                <p class="mt-1 text-sm">
+                  Up to {candidate.expected_outcomes.maximum_credit_change} credits across {candidate.expected_outcomes.maximum_units} Cargo units
+                </p>
+                <p class="mt-2 text-xs opacity-60">
+                  Valid through {Calendar.strftime(
+                    candidate.validity.expires_at,
+                    "%Y-%m-%d %H:%M:%S UTC"
+                  )}; fuel and travel time remain uncertain.
+                </p>
+              </div>
+            </div>
+
+            <div
+              :if={entry.planning.candidate_contributions == []}
+              class="mt-4 rounded-xl border border-dashed border-base-300 p-4 text-sm"
+            >
+              <p class="font-semibold">No Market contribution is currently supported.</p>
+              <ul class="mt-2 list-inside list-disc opacity-70">
+                <li :for={limitation <- entry.planning.limitations}>
+                  {planning_limitation(limitation.reason)}
+                </li>
+              </ul>
+            </div>
+          </article>
+        </section>
+
         <section class="space-y-4">
           <div>
             <p class="eyebrow">Starting points</p>
@@ -382,11 +446,15 @@ defmodule SpaceTradersWeb.StrategyLive do
           {:noreply,
            socket
            |> assign(:projection, projection)
+           |> assign_market_planning()
            |> assign(:draft_stale?, true)}
 
         projection.emergency_stop_version !=
             socket.assigns.projection.emergency_stop_version ->
-          {:noreply, assign(socket, :projection, projection)}
+          {:noreply,
+           socket
+           |> assign(:projection, projection)
+           |> assign_market_planning()}
 
         true ->
           {:noreply, socket}
@@ -471,6 +539,7 @@ defmodule SpaceTradersWeb.StrategyLive do
 
     socket
     |> assign(:projection, projection)
+    |> assign_market_planning()
     |> assign(:draft_stale?, false)
     |> assign(:form_drafts, form_drafts)
     |> assign(:form, to_form(form_drafts, as: "strategy"))
@@ -480,10 +549,15 @@ defmodule SpaceTradersWeb.StrategyLive do
     Map.put(projection, :presets, socket.assigns.projection.presets)
   end
 
+  defp assign_market_planning(socket) do
+    assign(socket, :market_planning, MissionControl.market_planning(socket.assigns.current_scope))
+  end
+
   defp mark_draft_stale(socket, message) do
     socket
     |> put_flash(:error, message)
     |> assign(:projection, MissionControl.strategy(socket.assigns.current_scope))
+    |> assign_market_planning()
     |> assign(:draft_stale?, true)
   end
 
@@ -529,6 +603,23 @@ defmodule SpaceTradersWeb.StrategyLive do
   defp kind_label("maintain"), do: "Maintain"
   defp kind_label("continuous"), do: "Continuous"
   defp kind_label(_kind), do: "Kind not yet specified"
+
+  defp planning_limitation(:unsupported_market_objective),
+    do: "Market activity does not directly advance this Strategic Objective."
+
+  defp planning_limitation(:stale_market_evidence),
+    do: "Market evidence is stale; an Observation Demand is required."
+
+  defp planning_limitation(:insufficient_market_evidence),
+    do: "Market evidence is insufficient; an Observation Demand is required."
+
+  defp planning_limitation(:inconsistent_market_evidence),
+    do: "Market evidence does not belong to the current planning snapshot."
+
+  defp planning_limitation(:no_viable_market_routes),
+    do: "Fresh evidence shows no positive-spread Market route."
+
+  defp planning_limitation(_reason), do: "Market planning is currently limited."
 
   defp objective_line(objective) do
     Enum.join(

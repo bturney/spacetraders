@@ -24,6 +24,7 @@ defmodule SpaceTraders.FleetPlanning do
       :destination_waypoint,
       :expected_outcomes,
       :uncertainty,
+      :required_roles,
       :required_capabilities,
       :required_resources,
       :dependencies,
@@ -48,34 +49,56 @@ defmodule SpaceTraders.FleetPlanning do
       when is_integer(objective_index) and objective_index >= 0 and is_map(snapshot) do
     with {:ok, objective} <- objective_at(revision, objective_index),
          {:ok, normalized} <- normalize_snapshot(snapshot) do
-      {markets, demands, limitations} = classify_markets(revision, objective_index, normalized)
-
-      candidates =
-        markets
-        |> candidate_routes(revision, objective_index, objective, normalized)
-        |> add_alternatives()
-
-      limitations =
-        if candidates == [] and limitations == [] do
-          [%{subject: :market_planning, reason: :no_viable_market_routes}]
-        else
-          limitations
-        end
-
-      {:ok,
-       %{
-         strategy_revision_id: revision.id,
-         objective_index: objective_index,
-         evidence_as_of: normalized.as_of,
-         candidate_contributions: candidates,
-         observation_demands: demands,
-         limitations: limitations
-       }}
+      if market_objective?(objective) do
+        plan_market_objective(revision, objective_index, objective, normalized)
+      else
+        {:ok,
+         result(revision, objective_index, normalized,
+           limitations: [%{subject: :market_planning, reason: :unsupported_market_objective}]
+         )}
+      end
     end
   end
 
   def plan_market(%Revision{}, _objective_index, _snapshot),
     do: {:error, :invalid_market_planning_input}
+
+  defp plan_market_objective(revision, objective_index, objective, snapshot) do
+    {markets, demands, limitations} = classify_markets(revision, objective_index, snapshot)
+
+    candidates =
+      markets
+      |> candidate_routes(revision, objective_index, objective, snapshot)
+      |> add_alternatives()
+
+    limitations =
+      if candidates == [] and limitations == [] do
+        [%{subject: :market_planning, reason: :no_viable_market_routes}]
+      else
+        limitations
+      end
+
+    {:ok,
+     result(revision, objective_index, snapshot,
+       candidate_contributions: candidates,
+       observation_demands: demands,
+       limitations: limitations
+     )}
+  end
+
+  defp result(revision, objective_index, snapshot, overrides) do
+    Map.merge(
+      %{
+        strategy_revision_id: revision.id,
+        objective_index: objective_index,
+        evidence_as_of: snapshot.as_of,
+        candidate_contributions: [],
+        observation_demands: [],
+        limitations: []
+      },
+      Map.new(overrides)
+    )
+  end
 
   defp objective_at(%Revision{document: %{"objectives" => objectives}}, objective_index)
        when is_list(objectives) do
@@ -97,14 +120,15 @@ defmodule SpaceTraders.FleetPlanning do
        when is_integer(freshness_seconds) and freshness_seconds >= 0 and is_list(markets) do
     demand_deadline_seconds = Map.get(snapshot, :demand_deadline_seconds, 60)
 
-    if is_integer(demand_deadline_seconds) and demand_deadline_seconds >= 0 do
+    if is_integer(demand_deadline_seconds) and demand_deadline_seconds >= 0 and
+         Enum.all?(markets, &(valid_market_subject?(market_subject(&1)) and is_map(&1))) do
       {:ok,
        %{
          as_of: as_of,
          freshness_seconds: freshness_seconds,
          demand_deadline_seconds: demand_deadline_seconds,
          agent_id: Map.get(snapshot, :agent_id),
-         markets: Enum.sort_by(markets, &market_subject/1)
+         markets: normalize_market_observations(markets)
        }}
     else
       {:error, :invalid_market_planning_input}
@@ -112,6 +136,22 @@ defmodule SpaceTraders.FleetPlanning do
   end
 
   defp normalize_snapshot(_snapshot), do: {:error, :invalid_market_planning_input}
+
+  defp normalize_market_observations(markets) do
+    markets
+    |> Enum.group_by(&market_subject/1)
+    |> Enum.map(fn {_subject, observations} ->
+      Enum.max_by(observations, fn observation ->
+        {observed_at_sort_value(observation), Evidence.fingerprint(observation)}
+      end)
+    end)
+    |> Enum.sort_by(&market_subject/1)
+  end
+
+  defp observed_at_sort_value(%{observed_at: %DateTime{} = observed_at}),
+    do: DateTime.to_unix(observed_at, :microsecond)
+
+  defp observed_at_sort_value(_observation), do: -1
 
   defp classify_markets(revision, objective_index, snapshot) do
     snapshot.markets
@@ -144,14 +184,23 @@ defmodule SpaceTraders.FleetPlanning do
          snapshot
        )
        when is_list(trade_goods) do
-    age = max(DateTime.diff(snapshot.as_of, observed_at, :second), 0)
+    age = DateTime.diff(snapshot.as_of, observed_at, :second)
     goods = trade_goods |> Enum.map(&normalize_good/1) |> Enum.filter(&valid_good?/1)
 
     cond do
+      age < 0 ->
+        {:error, :inconsistent_market_evidence}
+
+      value(market, :state) == :stale ->
+        {:error, :stale_market_evidence}
+
       age > snapshot.freshness_seconds ->
         {:error, :stale_market_evidence}
 
-      goods == [] and trade_goods != [] ->
+      length(goods) != length(trade_goods) ->
+        {:error, :insufficient_market_evidence}
+
+      not valid_provenance?(market) ->
         {:error, :insufficient_market_evidence}
 
       true ->
@@ -161,6 +210,8 @@ defmodule SpaceTraders.FleetPlanning do
            waypoint: waypoint_from_subject(market_subject(market)),
            observed_at: observed_at,
            evidence_age_seconds: age,
+           evidence_id: value(market, :evidence_id),
+           source: value(market, :source),
            trade_goods: Enum.sort_by(goods, &good_key/1)
          }}
     end
@@ -279,6 +330,7 @@ defmodule SpaceTraders.FleetPlanning do
         destination_market_signal: market_signal(destination_good),
         unaccounted_costs: [:fuel, :travel_time]
       },
+      required_roles: [%{role: :market_trader, count: 1}],
       required_capabilities: [
         %{capability: :cargo_transport, minimum_capacity: units},
         %{
@@ -306,6 +358,8 @@ defmodule SpaceTraders.FleetPlanning do
       subject: market.subject,
       required_facts: ["trade_goods"],
       observed_at: market.observed_at,
+      evidence_id: market.evidence_id,
+      source: market.source,
       freshness_seconds: snapshot.freshness_seconds,
       valid_until: DateTime.add(market.observed_at, snapshot.freshness_seconds, :second)
     }
@@ -355,6 +409,19 @@ defmodule SpaceTraders.FleetPlanning do
 
   defp value(map, key), do: Map.get(map, key, Map.get(map, Atom.to_string(key)))
 
+  defp valid_provenance?(market) do
+    is_binary(value(market, :evidence_id)) and value(market, :evidence_id) != "" and
+      is_binary(value(market, :source)) and value(market, :source) != ""
+  end
+
+  defp market_objective?(%{"kind" => "continuous"} = objective) do
+    [objective["objective"], objective["evaluation"]]
+    |> Enum.filter(&is_binary/1)
+    |> Enum.any?(&Regex.match?(~r/\bcredits?\b/i, &1))
+  end
+
+  defp market_objective?(_objective), do: false
+
   defp good_key(good) do
     {good.symbol, good.purchase_price, good.sell_price, good.trade_volume, good.supply,
      good.activity}
@@ -365,6 +432,13 @@ defmodule SpaceTraders.FleetPlanning do
   end
 
   defp market_subject(_market), do: ""
+
+  defp valid_market_subject?(subject) do
+    case String.split(subject, ":") do
+      ["market", system, waypoint] -> system != "" and waypoint != ""
+      _ -> false
+    end
+  end
 
   defp waypoint_from_subject(subject), do: subject |> String.split(":") |> List.last()
 end
