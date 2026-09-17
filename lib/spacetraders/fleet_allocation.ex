@@ -1,12 +1,11 @@
 defmodule SpaceTraders.FleetAllocation do
   @moduledoc """
-  Applies Fleet Strategy ordering to evidence-bound candidate plans.
-
-  This module ranks candidates only. It does not create Fleet Commitments or
-  claim resources; those remain later Fleet Allocation activation work.
+  Applies Fleet Strategy ordering to evidence-bound candidate plans and selects
+  coherent Fleet Commitment portfolios without publishing command authority.
   """
 
   alias SpaceTraders.Agent.Scope
+  alias SpaceTraders.FleetPlanning.CandidateContribution
   alias SpaceTraders.FleetStrategy
 
   alias SpaceTraders.FleetStrategy.{
@@ -15,6 +14,560 @@ defmodule SpaceTraders.FleetAllocation do
     Revision,
     StandingAuthority
   }
+
+  defmodule FleetCommitment do
+    @moduledoc "An accepted Candidate Contribution and its resource protections."
+
+    @enforce_keys [
+      :id,
+      :candidate_id,
+      :objective_index,
+      :claims,
+      :reservations,
+      :pledges,
+      :dependencies,
+      :expected_value,
+      :unwind_cost,
+      :decisive_reason
+    ]
+    defstruct @enforce_keys
+  end
+
+  defmodule PortfolioCandidate do
+    @moduledoc "A typed Fleet Allocation proposal for a Candidate Contribution."
+
+    @enforce_keys [
+      :id,
+      :strategy_revision_id,
+      :objective_index,
+      :claims,
+      :reservations,
+      :pledges,
+      :dependencies,
+      :expected_value,
+      :unwind_cost
+    ]
+    defstruct @enforce_keys
+  end
+
+  @doc """
+  Selects a deterministic, coherent Fleet Commitment portfolio.
+
+  Candidate maps declare requested exclusive `:claims`, fungible
+  `:reservations`, and outcome `:pledges`. Availability declares the exclusive
+  resources and fungible capacities the Fleet may commit. Selection is pure;
+  publishing the returned protections as active authority is a separate step.
+  """
+  def select_portfolio(%Revision{} = revision, candidates, availability),
+    do: select_portfolio(revision, candidates, availability, [])
+
+  def select_portfolio(%Revision{} = revision, candidates, availability, current_commitments)
+      when is_list(candidates) and is_map(availability) and is_list(current_commitments) do
+    with {:ok, candidates} <- normalize_candidates(candidates, availability),
+         true <- valid_allocation_input?(revision, candidates, availability, current_commitments) do
+      {:ok, build_portfolio(revision, candidates, availability, current_commitments)}
+    else
+      _invalid -> {:error, :invalid_allocation_input}
+    end
+  end
+
+  def select_portfolio(_revision, _candidates, _availability, _current_commitments),
+    do: {:error, :invalid_allocation_input}
+
+  defp build_portfolio(revision, candidates, availability, current_commitments) do
+    claims = availability |> Map.get(:claims, []) |> Enum.map(&claim_id/1) |> MapSet.new()
+    reservations = Map.get(availability, :reservations, %{})
+    current = Map.new(current_commitments, &{&1.candidate_id, &1})
+
+    {commitments, rejected, _claims, _reservations} =
+      candidates
+      |> Enum.sort_by(&selection_key(&1, candidates, current, reservations))
+      |> Enum.reduce({[], [], MapSet.new(), %{}}, fn candidate,
+                                                     {accepted, denied, used_claims,
+                                                      used_reservations} ->
+        candidate = assign_claims(candidate, used_claims, current)
+
+        reasons =
+          resource_rejections(
+            candidate,
+            claims,
+            reservations,
+            used_claims,
+            used_reservations,
+            accepted,
+            availability.as_of
+          )
+
+        if reasons == [] do
+          commitment = commitment(revision, candidate)
+
+          {
+            [commitment | accepted],
+            denied,
+            MapSet.union(used_claims, MapSet.new(candidate.claims)),
+            merge_reservations(used_reservations, candidate.reservations)
+          }
+        else
+          rejection = %{
+            candidate_id: candidate.id,
+            reasons: reasons,
+            alternative: candidate.source,
+            decisive_reason:
+              rejection_explanation(candidate, accepted, current, reasons, reservations)
+          }
+
+          {accepted, [rejection | denied], used_claims, used_reservations}
+        end
+      end)
+
+    %{
+      revision_id: revision.id,
+      commitments: Enum.reverse(commitments),
+      rejected: Enum.reverse(rejected)
+    }
+  end
+
+  defp selection_key(candidate, candidates, current, capacities) do
+    switching_cost =
+      current
+      |> Map.values()
+      |> Enum.filter(&candidate_replaces?(candidate, &1, capacities))
+      |> Enum.sum_by(& &1.unwind_cost)
+
+    retained_value = candidate.expected_value - switching_cost
+
+    retained? = Enum.any?(Map.values(current), &same_commitment?(candidate, &1))
+
+    {candidate.objective_index, dependency_depth(candidate, candidates), -retained_value,
+     not retained?, candidate.id}
+  end
+
+  defp dependency_depth(candidate, candidates, seen \\ MapSet.new()) do
+    if MapSet.member?(seen, candidate.id) do
+      0
+    else
+      by_id = Map.new(candidates, &{&1.id, &1})
+
+      depths =
+        candidate.dependencies
+        |> Enum.flat_map(fn
+          %{kind: :acquisition, candidate_id: candidate_id} ->
+            case Map.fetch(by_id, candidate_id) do
+              {:ok, provider} ->
+                [dependency_depth(provider, candidates, MapSet.put(seen, candidate.id))]
+
+              :error ->
+                []
+            end
+
+          _dependency ->
+            []
+        end)
+
+      case depths do
+        [] -> 0
+        depths -> Enum.max(depths) + 1
+      end
+    end
+  end
+
+  defp normalize_candidates(candidates, availability) do
+    candidates
+    |> Enum.reduce_while({:ok, []}, fn candidate, {:ok, normalized} ->
+      case normalize_candidate(candidate, availability) do
+        {:ok, candidate} -> {:cont, {:ok, [candidate | normalized]}}
+        :error -> {:halt, :error}
+      end
+    end)
+    |> case do
+      {:ok, normalized} -> {:ok, Enum.reverse(normalized)}
+      :error -> :error
+    end
+  end
+
+  defp normalize_candidate(%CandidateContribution{} = contribution, availability) do
+    claim_options = eligible_claims(contribution, Map.get(availability, :claims, []))
+    claim_count = Map.get(contribution.required_resources, :ship_count, 0)
+
+    expected_value =
+      Map.get(
+        contribution.expected_outcomes,
+        :maximum_credit_change,
+        Map.get(contribution.expected_outcomes, :credit_change, 0)
+      )
+
+    reservations =
+      Map.drop(contribution.required_resources, [:ship_count, :cargo_capacity])
+
+    {:ok,
+     %{
+       id: contribution.id,
+       objective_index: contribution.objective_index,
+       claims: [],
+       claim_options: claim_options,
+       claim_count: claim_count,
+       reservations: reservations,
+       pledges: [],
+       pledge_amount: expected_value,
+       dependencies: contribution.dependencies,
+       validity: contribution.validity,
+       expected_value: expected_value,
+       unwind_cost: 0,
+       strategy_revision_id: contribution.strategy_revision_id,
+       source: contribution
+     }}
+  end
+
+  defp normalize_candidate(%PortfolioCandidate{} = candidate, _availability) do
+    {:ok,
+     candidate
+     |> Map.from_struct()
+     |> Map.put_new(:claim_options, nil)
+     |> Map.put_new(:claim_count, length(Map.get(candidate, :claims, [])))
+     |> Map.put_new(:validity, %{})
+     |> Map.put_new(:source, candidate)}
+  end
+
+  defp normalize_candidate(_candidate, _availability), do: :error
+
+  defp eligible_claims(contribution, claims) do
+    claims
+    |> Enum.filter(&claim_supports?(&1, contribution))
+    |> Enum.map(&claim_id/1)
+    |> Enum.sort()
+  end
+
+  defp claim_supports?(%{roles: roles, capabilities: capabilities}, contribution)
+       when is_list(roles) and is_map(capabilities) do
+    roles_satisfied? =
+      Enum.all?(contribution.required_roles, fn requirement ->
+        requirement.role in roles
+      end)
+
+    capabilities_satisfied? =
+      Enum.all?(contribution.required_capabilities, fn
+        %{capability: :cargo_transport, minimum_capacity: minimum} ->
+          Map.get(capabilities, :cargo_transport, 0) >= minimum
+
+        %{capability: :market_access, waypoints: waypoints} ->
+          MapSet.subset?(
+            MapSet.new(waypoints),
+            MapSet.new(Map.get(capabilities, :market_access, []))
+          )
+
+        %{capability: capability} = requirement ->
+          Map.get(capabilities, capability) == Map.get(requirement, :value, true)
+      end)
+
+    roles_satisfied? and capabilities_satisfied?
+  end
+
+  defp claim_supports?(_claim, _contribution), do: false
+
+  defp claim_id(%{resource: resource}), do: resource
+  defp claim_id(resource), do: resource
+
+  defp assign_claims(%{claim_options: nil} = candidate, _used_claims, _current), do: candidate
+
+  defp assign_claims(candidate, used_claims, current) do
+    retained_claims =
+      case Map.fetch(current, candidate.id) do
+        {:ok, commitment} -> commitment.claims
+        :error -> []
+      end
+
+    all_current_claims =
+      current
+      |> Map.values()
+      |> Enum.flat_map(& &1.claims)
+
+    free_claims = Enum.reject(candidate.claim_options, &(&1 in all_current_claims))
+
+    claims =
+      (retained_claims ++ free_claims ++ candidate.claim_options)
+      |> Enum.uniq()
+      |> Enum.filter(&(&1 in candidate.claim_options))
+      |> Enum.reject(&MapSet.member?(used_claims, &1))
+      |> Enum.take(candidate.claim_count)
+
+    pledges =
+      if candidate.pledge_amount > 0 and claims != [] do
+        [
+          %{
+            outcome: {:strategic_objective, candidate.objective_index},
+            amount: candidate.pledge_amount,
+            backing: {:claim, hd(claims)}
+          }
+        ]
+      else
+        []
+      end
+
+    %{candidate | claims: claims, pledges: pledges}
+  end
+
+  defp valid_allocation_input?(revision, candidates, availability, current_commitments) do
+    objectives =
+      if is_map(revision.document), do: Map.get(revision.document, "objectives", []), else: []
+
+    objective_count = if is_list(objectives), do: length(objectives), else: 0
+
+    valid_candidates? =
+      Enum.all?(candidates, &valid_candidate?(&1, revision.id, objective_count))
+
+    valid_current? =
+      Enum.all?(current_commitments, fn
+        %FleetCommitment{id: {revision_id, _candidate_id}} -> revision_id == revision.id
+        _commitment -> false
+      end)
+
+    objective_count > 0 and valid_candidates? and unique_ids?(candidates, :id) and
+      valid_availability?(availability) and valid_current? and
+      unique_ids?(current_commitments, :candidate_id)
+  end
+
+  defp unique_ids?(items, key) do
+    ids = Enum.map(items, &Map.fetch!(&1, key))
+    Enum.uniq(ids) == ids
+  end
+
+  defp valid_candidate?(candidate, revision_id, objective_count) when is_map(candidate) do
+    candidate[:strategy_revision_id] == revision_id and is_binary(candidate[:id]) and
+      candidate.id != "" and
+      is_integer(candidate[:objective_index]) and candidate.objective_index >= 0 and
+      candidate.objective_index < objective_count and is_list(candidate[:claims]) and
+      Enum.uniq(candidate.claims) == candidate.claims and is_map(candidate[:reservations]) and
+      Enum.all?(candidate.reservations, fn {_resource, amount} ->
+        is_number(amount) and amount >= 0
+      end) and is_list(candidate[:pledges]) and is_list(candidate[:dependencies]) and
+      is_number(candidate[:expected_value]) and is_number(candidate[:unwind_cost]) and
+      candidate.unwind_cost >= 0 and is_integer(candidate[:claim_count]) and
+      candidate.claim_count >= 0 and
+      (is_nil(candidate[:claim_options]) or is_list(candidate[:claim_options])) and
+      is_map(candidate[:validity])
+  end
+
+  defp valid_candidate?(_candidate, _revision_id, _objective_count), do: false
+
+  defp valid_availability?(availability) do
+    is_struct(availability[:as_of], DateTime) and is_list(availability[:claims]) and
+      is_map(availability[:reservations]) and
+      Enum.all?(availability.reservations, fn {_resource, amount} ->
+        is_number(amount) and amount >= 0
+      end)
+  end
+
+  defp rejection_explanation(candidate, accepted, current, reasons, capacities) do
+    retained_conflict =
+      Enum.find(accepted, fn commitment ->
+        Map.has_key?(current, commitment.candidate_id) and same_priority?(candidate, commitment) and
+          resources_overlap?(candidate, commitment, capacities)
+      end)
+
+    replacing_conflict =
+      Enum.find(accepted, fn commitment ->
+        Map.has_key?(current, candidate.id) and same_priority?(candidate, commitment) and
+          resources_overlap?(candidate, commitment, capacities)
+      end)
+
+    cond do
+      retained_conflict &&
+          candidate.expected_value <=
+            retained_conflict.expected_value + retained_conflict.unwind_cost ->
+        "Rejected because its expected improvement did not exceed the retained commitment's unwind cost."
+
+      replacing_conflict ->
+        "Rejected because the replacement's expected improvement exceeded this commitment's unwind cost."
+
+      :claim_conflict in reasons ->
+        "Rejected because an exclusive resource was unavailable or already claimed."
+
+      :insufficient_reservation in reasons ->
+        "Rejected because its fungible Reservations would exceed available capacity."
+
+      :unbacked_pledge in reasons ->
+        "Rejected because every Pledge must have explicit resource or acquisition backing."
+
+      :unsatisfied_dependency in reasons ->
+        "Rejected because a declared dependency is not currently satisfied."
+    end
+  end
+
+  defp same_priority?(candidate, commitment),
+    do: candidate.objective_index == commitment.objective_index
+
+  defp candidate_replaces?(candidate, commitment, capacities) do
+    same_priority?(candidate, commitment) and not same_commitment?(candidate, commitment) and
+      (candidate.id == commitment.candidate_id or
+         resources_overlap?(candidate, commitment, capacities))
+  end
+
+  defp same_commitment?(candidate, commitment) do
+    claims_match? =
+      if is_list(candidate.claim_options) do
+        length(commitment.claims) == candidate.claim_count and
+          Enum.all?(commitment.claims, &(&1 in candidate.claim_options))
+      else
+        candidate.claims == commitment.claims
+      end
+
+    pledges_match? =
+      if is_list(candidate.claim_options), do: true, else: candidate.pledges == commitment.pledges
+
+    candidate.id == commitment.candidate_id and claims_match? and
+      candidate.reservations == commitment.reservations and
+      candidate.dependencies == commitment.dependencies and pledges_match?
+  end
+
+  defp resources_overlap?(candidate, commitment, capacities) do
+    claims_overlap? =
+      if is_list(candidate.claim_options) do
+        candidate.claim_options
+        |> Enum.reject(&(&1 in commitment.claims))
+        |> length() < candidate.claim_count
+      else
+        not MapSet.disjoint?(MapSet.new(candidate.claims), MapSet.new(commitment.claims))
+      end
+
+    reservations_overlap? =
+      Enum.any?(candidate.reservations, fn {resource, amount} ->
+        amount + Map.get(commitment.reservations, resource, 0) >
+          Map.get(capacities, resource, 0)
+      end)
+
+    claims_overlap? or reservations_overlap?
+  end
+
+  defp resource_rejections(
+         candidate,
+         available_claims,
+         capacities,
+         used_claims,
+         used_reservations,
+         accepted,
+         as_of
+       ) do
+    claim_conflict? =
+      length(candidate.claims) < candidate.claim_count or
+        Enum.any?(candidate.claims, fn claim ->
+          not MapSet.member?(available_claims, claim) or MapSet.member?(used_claims, claim)
+        end)
+
+    insufficient_reservation? =
+      Enum.any?(candidate.reservations, fn {resource, amount} ->
+        amount + Map.get(used_reservations, resource, 0) > Map.get(capacities, resource, 0)
+      end)
+
+    unbacked_pledge? = not pledges_backed?(candidate)
+    unsatisfied_dependency? = not dependencies_satisfied?(candidate, accepted, as_of)
+
+    []
+    |> maybe_reject(claim_conflict?, :claim_conflict)
+    |> maybe_reject(insufficient_reservation?, :insufficient_reservation)
+    |> maybe_reject(unbacked_pledge?, :unbacked_pledge)
+    |> maybe_reject(unsatisfied_dependency?, :unsatisfied_dependency)
+  end
+
+  defp dependencies_satisfied?(candidate, accepted, as_of) do
+    candidate_valid? =
+      case Map.get(candidate.validity, :expires_at) do
+        %DateTime{} = expires_at -> DateTime.compare(expires_at, as_of) in [:eq, :gt]
+        nil -> true
+        _invalid -> false
+      end
+
+    candidate_valid? and
+      Enum.all?(candidate.dependencies, fn
+        %{kind: :acquisition, candidate_id: candidate_id, amount: amount}
+        when is_binary(candidate_id) and is_number(amount) and amount > 0 ->
+          Enum.any?(accepted, &(&1.candidate_id == candidate_id))
+
+        %{state: :satisfied} ->
+          true
+
+        %{valid_until: %DateTime{} = valid_until} ->
+          DateTime.compare(valid_until, as_of) in [:eq, :gt]
+
+        _dependency ->
+          false
+      end)
+  end
+
+  defp pledges_backed?(candidate) do
+    individually_backed? = Enum.all?(candidate.pledges, &backed_pledge?(&1, candidate))
+
+    reserved_pledges =
+      candidate.pledges
+      |> Enum.reduce(%{}, fn
+        %{amount: amount, backing: {:reservation, resource}}, totals when is_number(amount) ->
+          Map.update(totals, resource, amount, &(&1 + amount))
+
+        _pledge, totals ->
+          totals
+      end)
+
+    acquisition_pledges =
+      candidate.pledges
+      |> Enum.reduce(%{}, fn
+        %{amount: amount, backing: {:dependency, dependency_id}}, totals when is_number(amount) ->
+          Map.update(totals, dependency_id, amount, &(&1 + amount))
+
+        _pledge, totals ->
+          totals
+      end)
+
+    individually_backed? and
+      Enum.all?(reserved_pledges, fn {resource, amount} ->
+        amount <= Map.get(candidate.reservations, resource, 0)
+      end) and
+      Enum.all?(acquisition_pledges, fn {dependency_id, amount} ->
+        Enum.any?(candidate.dependencies, fn
+          %{id: ^dependency_id, kind: :acquisition, amount: available} -> amount <= available
+          _dependency -> false
+        end)
+      end)
+  end
+
+  defp backed_pledge?(%{amount: amount, backing: {:claim, resource}}, candidate)
+       when is_number(amount) and amount > 0,
+       do: resource in candidate.claims
+
+  defp backed_pledge?(%{amount: amount, backing: {:reservation, resource}}, candidate)
+       when is_number(amount) and amount > 0,
+       do: Map.get(candidate.reservations, resource, 0) > 0
+
+  defp backed_pledge?(%{amount: amount, backing: {:dependency, dependency_id}}, candidate)
+       when is_number(amount) and amount > 0 do
+    Enum.any?(candidate.dependencies, fn
+      %{id: ^dependency_id, kind: :acquisition} -> true
+      _dependency -> false
+    end)
+  end
+
+  defp backed_pledge?(_pledge, _candidate), do: false
+
+  defp maybe_reject(reasons, true, reason), do: reasons ++ [reason]
+  defp maybe_reject(reasons, false, _reason), do: reasons
+
+  defp merge_reservations(used, requested) do
+    Map.merge(used, requested, fn _resource, left, right -> left + right end)
+  end
+
+  defp commitment(revision, candidate) do
+    %FleetCommitment{
+      id: {revision.id, candidate.id},
+      candidate_id: candidate.id,
+      objective_index: candidate.objective_index,
+      claims: candidate.claims,
+      reservations: candidate.reservations,
+      pledges: candidate.pledges,
+      dependencies: candidate.dependencies,
+      expected_value: candidate.expected_value,
+      unwind_cost: candidate.unwind_cost,
+      decisive_reason:
+        "Selected as the highest-ranked feasible contribution at its Strategic Priority."
+    }
+  end
 
   def rank_plans(%Scope{} = scope, plans) do
     case FleetStrategy.get(scope).active_revision do
