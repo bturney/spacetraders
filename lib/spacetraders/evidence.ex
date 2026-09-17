@@ -213,19 +213,7 @@ defmodule SpaceTraders.Evidence do
 
   defp owned_symbol(%AgentTokenReference{}, fallback), do: fallback
 
-  defp serialize_read_value(%DateTime{} = value), do: DateTime.to_iso8601(value)
-
-  defp serialize_read_value(%_{} = value),
-    do: value |> Map.from_struct() |> serialize_read_value()
-
-  defp serialize_read_value(value) when is_map(value) do
-    Map.new(value, fn {key, nested} -> {to_string(key), serialize_read_value(nested)} end)
-  end
-
-  defp serialize_read_value(value) when is_list(value),
-    do: Enum.map(value, &serialize_read_value/1)
-
-  defp serialize_read_value(value), do: value
+  defp serialize_read_value(value), do: stringify_keys(value)
 
   defp normalize_demand_datetime(attrs) do
     Map.update(attrs, :deadline_at, nil, fn
@@ -584,6 +572,10 @@ defmodule SpaceTraders.Evidence do
       do: current,
       else: Repo.rollback(:demand_not_open)
   end
+
+  defp stringify_keys(%DateTime{} = value), do: DateTime.to_iso8601(value)
+
+  defp stringify_keys(%_{} = value), do: value |> Map.from_struct() |> stringify_keys()
 
   defp stringify_keys(value) when is_map(value) do
     Map.new(value, fn {key, nested} -> {to_string(key), stringify_keys(nested)} end)

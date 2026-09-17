@@ -10,8 +10,8 @@ defmodule SpaceTraders.API.CapacityGovernor do
   use GenServer
 
   alias SpaceTraders.API.OperationInventory.Operation
-
-  @lane_rank %{safety: 0, reconciliation: 1, standard: 2}
+  alias SpaceTraders.API.ShadowAdmission
+  alias SpaceTraders.API.ShadowAdmission.Candidate
 
   defmodule Admission do
     @moduledoc "A production API admission held until the request completes."
@@ -19,7 +19,7 @@ defmodule SpaceTraders.API.CapacityGovernor do
     defstruct @enforce_keys
   end
 
-  @doc "Starts the governor. `max_in_flight` defaults to one ordered read."
+  @doc "Starts the governor. `max_in_flight` defaults to the API burst size."
   def start_link(opts \\ []) do
     {name, opts} = Keyword.pop(opts, :name, __MODULE__)
     GenServer.start_link(__MODULE__, opts, name: name)
@@ -49,12 +49,10 @@ defmodule SpaceTraders.API.CapacityGovernor do
 
     {:ok,
      %{
-       max_in_flight: Keyword.get(opts, :max_in_flight, Keyword.get(config, :max_in_flight, 1)),
+       max_in_flight: Keyword.get(opts, :max_in_flight, Keyword.get(config, :max_in_flight, 10)),
        in_flight: %{},
        queue: [],
-       sequence: 0,
-       outage_streak: 0,
-       next_probe_at: nil
+       sequence: 0
      }}
   end
 
@@ -77,14 +75,13 @@ defmodule SpaceTraders.API.CapacityGovernor do
   end
 
   @impl true
-  def handle_cast({:complete, id, status}, state) do
+  def handle_cast({:complete, id, _status}, state) do
     state =
       case Map.pop(state.in_flight, id) do
         {nil, _in_flight} -> state
         {_request, in_flight} -> %{state | in_flight: in_flight}
       end
 
-    state = update_outage(state, status)
     {:noreply, dispatch(state)}
   end
 
@@ -124,31 +121,18 @@ defmodule SpaceTraders.API.CapacityGovernor do
   defp ordering_key(request) do
     attrs = request.attrs
 
-    [
-      lane_rank(lane(request)),
-      datetime_key(Map.get(attrs, :deadline_at)),
-      Map.get(attrs, :strategic_priority, :infinity) || :infinity,
-      descending_number(Map.get(attrs, :expected_value)),
-      not Map.get(attrs, :discovery, false),
-      request.sequence
-    ]
+    ShadowAdmission.ordering_key(%Candidate{
+      id: request.id,
+      operation_id: request.operation.id,
+      lane: lane(request),
+      deadline_at: Map.get(attrs, :deadline_at),
+      strategic_priority: Map.get(attrs, :strategic_priority),
+      expected_value: Map.get(attrs, :expected_value),
+      discovery: Map.get(attrs, :discovery, false)
+    })
   end
 
   defp lane(%{attrs: %{lane: lane}}) when is_atom(lane), do: lane
   defp lane(%{operation: %{owner: :fleet_reconciliation}}), do: :reconciliation
   defp lane(_request), do: :standard
-
-  defp lane_rank(lane), do: Map.fetch!(@lane_rank, lane)
-
-  defp datetime_key(nil), do: :infinity
-  defp datetime_key(%DateTime{} = datetime), do: DateTime.to_unix(datetime, :microsecond)
-
-  defp descending_number(nil), do: :infinity
-  defp descending_number(value) when is_number(value), do: -value
-
-  defp update_outage(state, status) when status == :unknown or status in 500..599 do
-    %{state | outage_streak: state.outage_streak + 1}
-  end
-
-  defp update_outage(state, _status), do: %{state | outage_streak: 0, next_probe_at: nil}
 end

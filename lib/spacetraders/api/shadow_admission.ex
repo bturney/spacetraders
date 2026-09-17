@@ -278,7 +278,8 @@ defmodule SpaceTraders.API.ShadowAdmission do
     Logger.info("Shadow API capacity admission", Map.to_list(metadata))
   end
 
-  defp ordering_key(%Candidate{} = candidate) do
+  @doc false
+  def ordering_key(%Candidate{} = candidate) do
     [
       Map.fetch!(@lane_rank, candidate.lane),
       datetime_key(candidate.deadline_at),

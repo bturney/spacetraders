@@ -605,8 +605,13 @@ defmodule SpaceTraders.API do
 
   defp admit_capacity(%{classification: :mutation}, _opts), do: {:ok, nil}
 
-  defp admit_capacity(operation, opts),
-    do: CapacityGovernor.admit(operation, admission_attrs(opts))
+  defp admit_capacity(operation, opts) do
+    if Keyword.has_key?(opts, :demand) do
+      CapacityGovernor.admit(operation, admission_attrs(opts))
+    else
+      {:ok, nil}
+    end
+  end
 
   defp admission_attrs(opts) do
     demand_attrs =
