@@ -5,6 +5,9 @@ defmodule SpaceTraders.API.CapacityGovernor do
   The raw rate limiter protects the protocol budget. This module protects the
   application budget by ordering waiting work by safety, reconciliation, and
   then ordinary demand before handing it to the raw limiter.
+
+  Admission is deliberately process-local: recovery starts from fresh callers
+  and does not replay queued work selected against stale state.
   """
 
   use GenServer

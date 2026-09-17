@@ -46,6 +46,63 @@ defmodule SpaceTraders.API.CapacityGovernorTest do
     assert {:ok, %CapacityGovernor.Admission{lane: :standard}} = Task.await(gameplay)
   end
 
+  test "admits deadline-critical gameplay ahead of older standard gameplay" do
+    name = unique_name()
+    {:ok, pid} = CapacityGovernor.start_link(name: name, max_in_flight: 1)
+    on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid) end)
+
+    operation = SpaceTraders.API.OperationInventory.fetch!("navigate-ship")
+
+    assert {:ok, %CapacityGovernor.Admission{id: first_id}} =
+             CapacityGovernor.admit(operation, %{}, name)
+
+    gameplay = Task.async(fn -> CapacityGovernor.admit(operation, %{}, name) end)
+
+    deadline =
+      Task.async(fn ->
+        CapacityGovernor.admit(operation, %{deadline_at: ~U[2030-01-01 00:00:00Z]}, name)
+      end)
+
+    Process.sleep(10)
+
+    assert {:ok, %CapacityGovernor.Admission{} = deadline_admission} =
+             release_and_await(first_id, deadline, name)
+
+    CapacityGovernor.complete(deadline_admission, 200, name)
+    assert {:ok, %CapacityGovernor.Admission{lane: :standard}} = Task.await(gameplay)
+  end
+
+  test "does not retain queued work after governor recovery" do
+    name = unique_name()
+    {:ok, pid} = CapacityGovernor.start_link(name: name, max_in_flight: 1)
+    on_exit(fn -> if governor = Process.whereis(name), do: GenServer.stop(governor) end)
+
+    operation = SpaceTraders.API.OperationInventory.fetch!("navigate-ship")
+    assert {:ok, %CapacityGovernor.Admission{}} = CapacityGovernor.admit(operation, %{}, name)
+
+    test_pid = self()
+
+    {:ok, _stale} =
+      Task.start(fn ->
+        result =
+          try do
+            CapacityGovernor.admit(operation, %{}, name)
+          catch
+            :exit, _reason -> :discarded
+          end
+
+        send(test_pid, {:stale_admission, result})
+      end)
+
+    Process.sleep(10)
+
+    GenServer.stop(pid)
+    assert_receive {:stale_admission, :discarded}
+
+    {:ok, _restarted} = CapacityGovernor.start_link(name: name, max_in_flight: 1)
+    assert {:ok, %CapacityGovernor.Admission{}} = CapacityGovernor.admit(operation, %{}, name)
+  end
+
   defp release_and_await(first_id, safety, name) do
     CapacityGovernor.complete(
       %CapacityGovernor.Admission{
