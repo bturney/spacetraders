@@ -603,15 +603,8 @@ defmodule SpaceTraders.API do
     {operation, ShadowAdmission.observe_request(operation, admission_attrs(opts))}
   end
 
-  defp admit_capacity(%{classification: :mutation}, _opts), do: {:ok, nil}
-
-  defp admit_capacity(operation, opts) do
-    if Keyword.has_key?(opts, :demand) do
-      CapacityGovernor.admit(operation, admission_attrs(opts))
-    else
-      {:ok, nil}
-    end
-  end
+  defp admit_capacity(operation, opts),
+    do: CapacityGovernor.admit(operation, admission_attrs(opts))
 
   defp admission_attrs(opts) do
     demand_attrs =
