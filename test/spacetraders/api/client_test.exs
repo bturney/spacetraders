@@ -107,6 +107,11 @@ defmodule SpaceTraders.API.ClientTest do
       assert actual.shadow_fingerprint == admission.fingerprint
       assert actual.status == 200
       assert actual.outcome == :ok
+
+      # The shadow observes before capacity admission and dispatch, so its
+      # correlation window opens first and closes last.
+      assert DateTime.compare(actual.requested_at, actual.dispatched_at) == :lt
+      assert DateTime.compare(actual.dispatched_at, actual.completed_at) == :lt
       assert measurements.queue_time >= 0
       assert measurements.request_time >= 0
     end

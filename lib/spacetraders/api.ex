@@ -554,13 +554,23 @@ defmodule SpaceTraders.API do
   ## Request plumbing
 
   defp request(method, path, %AgentTokenReference{} = credential_ref, opts) do
-    with :ok <- runtime_authorized?(method) do
+    with :ok <- runtime_authorized?(method),
+         {:ok, token} <- resolve_agent_token(credential_ref),
+         :ok <- mutation_authorized?(method, token),
+         {operation, shadow} <- observe_request(method, path) do
+      # Observe before waiting for capacity so shadow queue_time spans the real
+      # limiter wait, and the shadow bucket never refills during production
+      # backpressure. Dispatch rechecks authorization for every network call.
       RateLimiter.acquire()
 
-      with {:ok, token} <- resolve_agent_token(credential_ref),
-           :ok <- mutation_authorized?(method, token) do
-        send_request(method, path, token, Keyword.put(opts, :agent_id, credential_ref.agent_id))
-      end
+      send_request(
+        method,
+        path,
+        token,
+        Keyword.put(opts, :agent_id, credential_ref.agent_id),
+        operation,
+        shadow
+      )
     end
   end
 
@@ -573,19 +583,22 @@ defmodule SpaceTraders.API do
   end
 
   defp do_request(method, path, token, opts) do
-    RateLimiter.acquire()
+    with :ok <- mutation_authorized?(method, token),
+         {operation, shadow} <- observe_request(method, path) do
+      # See request/4: admission can wait for capacity, so observe first and
+      # rely on the dispatch-time recheck for authorization.
+      RateLimiter.acquire()
 
-    # Admission can wait for capacity. Recheck immediately before each network
-    # dispatch so a runtime that lost its PostgreSQL lock cannot mutate.
-    with :ok <- mutation_authorized?(method, token) do
-      send_request(method, path, token, opts)
+      send_request(method, path, token, opts, operation, shadow)
     end
   end
 
-  defp send_request(method, path, token, opts) do
+  defp observe_request(method, path) do
     operation = OperationInventory.fetch_by_request!(method, path)
-    shadow = ShadowAdmission.observe_request(operation)
+    {operation, ShadowAdmission.observe_request(operation)}
+  end
 
+  defp send_request(method, path, token, opts, operation, shadow) do
     with {:ok, attempt} <- prepare_mutation_attempt(operation, path, opts) do
       req =
         Req.new(

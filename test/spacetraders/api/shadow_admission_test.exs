@@ -134,12 +134,16 @@ defmodule SpaceTraders.API.ShadowAdmissionTest do
                       fingerprint: revised_fingerprint
                     }}
 
+    Process.sleep(15)
     ShadowAdmission.observe_dispatch(correlation_id, name)
     ShadowAdmission.observe_outcome(correlation_id, 200, :ok, name)
 
     assert_receive {:telemetry, [:spacetraders, :api, :capacity, :actual], measurements, actual}
     assert measurements.count == 1
-    assert measurements.queue_time >= 0
+
+    # queue_time spans observation to dispatch, so any capacity wait performed
+    # between observing and dispatching (the production RateLimiter) is included.
+    assert measurements.queue_time >= 15
     assert measurements.request_time >= 0
     assert actual.correlation_id == correlation_id
     assert actual.shadow_fingerprint == revised_fingerprint
