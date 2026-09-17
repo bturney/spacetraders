@@ -190,6 +190,26 @@ defmodule SpaceTraders.MutationAttempts do
     list(where(Attempt, [attempt], attempt.operator_id == ^operator_id))
   end
 
+  @doc "Returns unresolved mutation evidence for the action currently selected by an Intent."
+  @spec unresolved_for_intent(Intent.t()) :: Attempt.t() | nil
+  def unresolved_for_intent(%Intent{} = intent) do
+    provenance = %{
+      "intent_id" => intent.id,
+      "selected_action_fingerprint" => action_fingerprint(intent.in_flight_action)
+    }
+
+    Attempt
+    |> where([attempt], attempt.state in ["sent_or_unknown", "ambiguous"])
+    |> where([attempt], fragment("? @> ?", attempt.provenance, ^provenance))
+    |> order_by([attempt], desc: attempt.prepared_at, desc: attempt.id)
+    |> limit(1)
+    |> Repo.one()
+    |> case do
+      %Attempt{} = attempt -> Repo.preload(attempt, :outcomes)
+      nil -> nil
+    end
+  end
+
   @spec get!(Ecto.UUID.t()) :: Attempt.t()
   def get!(attempt_id) do
     Attempt

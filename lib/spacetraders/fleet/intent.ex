@@ -25,7 +25,7 @@ defmodule SpaceTraders.Fleet.Intent do
     field :parameters, :map, default: %{}
     field :review_revision, :integer, default: 0
     field :status, :string, default: "active"
-    embeds_one :blocker, SpaceTraders.Fleet.JobBlocker
+    embeds_one :blocker, SpaceTraders.Fleet.JobBlocker, on_replace: :delete
     field :in_flight_action, :map
     field :last_action_result, :map
     field :recovery_attempts, :integer, default: 0

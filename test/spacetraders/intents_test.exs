@@ -10,6 +10,7 @@ defmodule SpaceTraders.IntentsTest do
   alias SpaceTraders.Fleet
   alias SpaceTraders.Fleet.{Intent, Job, JobBlocker, Ship, ShipServer}
   alias SpaceTraders.Fleet.Intents
+  alias SpaceTraders.MutationAttempts
   alias SpaceTraders.Timeline
   alias SpaceTraders.Timeline.Event
 
@@ -1899,6 +1900,115 @@ defmodule SpaceTraders.IntentsTest do
       assert "refuel" in intent.blocker.corrective_actions
     end
 
+    test "navigates a Fuel-independent Ship with zero fuel" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+      test_pid = self()
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case {conn.request_path, conn.method} do
+          {"/v2/my/ships/FLEET-SHIP", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" =>
+                ship_body("FLEET-SHIP", %{
+                  "nav" => nav_body("IN_ORBIT"),
+                  "fuel" => %{"capacity" => 0, "current" => 0}
+                })
+            })
+
+          {"/v2/my/ships/FLEET-SHIP/navigate", "POST"} ->
+            send(test_pid, :navigate)
+
+            Req.Test.json(conn, %{
+              "data" => navigate_response("IN_TRANSIT", future_iso(), "X1-UX81-A2")
+            })
+        end
+      end)
+
+      assert {:ok, %Intent{status: "waiting"}} =
+               Intents.request(
+                 manual_scope(agent),
+                 agent,
+                 %Intents.ManualControl{},
+                 "FLEET-SHIP",
+                 %Intents.Navigate{waypoint: "X1-UX81-A2"}
+               )
+
+      assert_received :navigate
+    end
+
+    test "one root Navigate retains authority through constrained navigation" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+      test_pid = self()
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case {conn.request_path, conn.method} do
+          {"/v2/my/ships/FLEET-SHIP", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" =>
+                ship_body("FLEET-SHIP", %{
+                  "nav" => nav_body("DOCKED"),
+                  "fuel" => %{"capacity" => 200, "current" => 0}
+                })
+            })
+
+          {"/v2/my/ships/FLEET-SHIP/refuel", "POST"} ->
+            send(test_pid, :refuel)
+
+            Req.Test.json(conn, %{
+              "data" => %{
+                "agent" => %{"symbol" => agent.symbol, "credits" => 10_000},
+                "cargo" => %{"capacity" => 40, "units" => 0, "inventory" => []},
+                "fuel" => %{"capacity" => 200, "current" => 200},
+                "transaction" => %{"pricePerUnit" => 1, "totalPrice" => 200}
+              }
+            })
+
+          {"/v2/my/ships/FLEET-SHIP/nav", "PATCH"} ->
+            send(test_pid, {:flight_mode, conn.body_params})
+
+            Req.Test.json(conn, %{
+              "data" => %{
+                "fuel" => %{"capacity" => 200, "current" => 200},
+                "nav" => nav_body("DOCKED", flightMode: "DRIFT"),
+                "events" => []
+              }
+            })
+
+          {"/v2/my/ships/FLEET-SHIP/orbit", "POST"} ->
+            Req.Test.json(conn, %{
+              "data" => %{"nav" => nav_body("IN_ORBIT", flightMode: "DRIFT")}
+            })
+
+          {"/v2/my/ships/FLEET-SHIP/navigate", "POST"} ->
+            send(test_pid, :navigate)
+
+            Req.Test.json(conn, %{
+              "data" => navigate_response("IN_TRANSIT", future_iso(), "X1-UX81-A2")
+            })
+        end
+      end)
+
+      assert {:ok, %Intent{id: intent_id, status: "waiting"}} =
+               Intents.request(
+                 manual_scope(agent),
+                 agent,
+                 %Intents.ManualControl{},
+                 "FLEET-SHIP",
+                 %Intents.Navigate{
+                   waypoint: "X1-UX81-A2",
+                   constraints: %{"flight_mode" => "DRIFT", "refuel" => "to_capacity"}
+                 }
+               )
+
+      assert [%Intent{id: ^intent_id}] = Intents.current(agent)
+
+      assert Enum.all?(MutationAttempts.list_for_agent(agent), fn attempt ->
+               attempt.provenance["intent_id"] == intent_id
+             end)
+    end
+
     test "blocks on an authoritative insufficient-fuel rejection without retrying" do
       agent = agent_fixture()
       ship_fixture(agent, "FLEET-SHIP")
@@ -2296,6 +2406,163 @@ defmodule SpaceTraders.IntentsTest do
 
       assert [%Event{event_type: "arrival", payload: %{"intent_id" => _}}] =
                Timeline.pending_events(:ship, "FLEET-SHIP")
+    end
+
+    test "boot recovery accepts an ambiguous navigation without replaying it" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+      {:ok, state} = Agent.start_link(fn -> :before_dispatch end)
+      test_pid = self()
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case {conn.request_path, conn.method} do
+          {"/v2/my/ships/FLEET-SHIP", "GET"} ->
+            nav =
+              case Agent.get(state, & &1) do
+                :before_dispatch ->
+                  nav_body("IN_ORBIT")
+
+                :accepted ->
+                  nav_body("IN_TRANSIT", arrival: future_iso(), destination: "X1-UX81-A2")
+              end
+
+            Req.Test.json(conn, %{"data" => ship_body("FLEET-SHIP", %{"nav" => nav})})
+
+          {"/v2/my/ships/FLEET-SHIP/navigate", "POST"} ->
+            send(test_pid, :navigate)
+            Agent.update(state, fn _ -> :accepted end)
+            Req.Test.transport_error(conn, :timeout)
+
+          {path, method} ->
+            flunk("unexpected request #{method} #{path}")
+        end
+      end)
+
+      assert {:ok, %Intent{id: intent_id, status: "blocked"}} =
+               Intents.request(
+                 manual_scope(agent),
+                 agent,
+                 %Intents.ManualControl{},
+                 "FLEET-SHIP",
+                 %Intents.Navigate{waypoint: "X1-UX81-A2"}
+               )
+
+      assert_received :navigate
+      assert [attempt] = MutationAttempts.list_for_agent(agent)
+      assert attempt.state == "ambiguous"
+      assert attempt.provenance["intent_id"] == intent_id
+
+      assert {:ok, %Intent{status: "waiting"}} =
+               Intents.reconcile(agent.id, "FLEET-SHIP", nil, :boot, intent_id, nil)
+
+      refute_receive :navigate
+      assert MutationAttempts.get!(attempt.id).state == "accepted"
+    end
+
+    test "boot recovery accepts partial refueling without replaying it" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+      {:ok, refuels} = Agent.start_link(fn -> 0 end)
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case {conn.request_path, conn.method} do
+          {"/v2/my/ships/FLEET-SHIP", "GET"} ->
+            fuel =
+              if Agent.get(refuels, &(&1 > 0)),
+                do: %{"capacity" => 200, "current" => 50},
+                else: %{"capacity" => 200, "current" => 0}
+
+            Req.Test.json(conn, %{
+              "data" => ship_body("FLEET-SHIP", %{"nav" => nav_body("DOCKED"), "fuel" => fuel})
+            })
+
+          {"/v2/my/agent", "GET"} ->
+            Req.Test.json(conn, %{"data" => %{"symbol" => agent.symbol, "credits" => 9_800}})
+
+          {"/v2/my/ships/FLEET-SHIP/refuel", "POST"} ->
+            Agent.update(refuels, &(&1 + 1))
+            Req.Test.transport_error(conn, :timeout)
+
+          {"/v2/my/ships/FLEET-SHIP/orbit", "POST"} ->
+            Req.Test.json(conn, %{"data" => %{"nav" => nav_body("IN_ORBIT")}})
+
+          {"/v2/my/ships/FLEET-SHIP/navigate", "POST"} ->
+            Req.Test.json(conn, %{
+              "data" => navigate_response("IN_TRANSIT", future_iso(), "X1-UX81-A2")
+            })
+
+          {path, method} ->
+            flunk("unexpected request #{method} #{path}")
+        end
+      end)
+
+      assert {:ok, %Intent{id: intent_id, status: "blocked"}} =
+               Intents.request(
+                 manual_scope(agent),
+                 agent,
+                 %Intents.ManualControl{},
+                 "FLEET-SHIP",
+                 %Intents.Navigate{
+                   waypoint: "X1-UX81-A2",
+                   constraints: %{"refuel" => "to_capacity"}
+                 }
+               )
+
+      assert {:ok, %Intent{status: "blocked", blocker: blocker}} =
+               Intents.reconcile(agent.id, "FLEET-SHIP", nil, :boot, intent_id, nil)
+
+      assert Agent.get(refuels, & &1) == 1
+      assert blocker.reason == "refuel_incomplete"
+
+      assert [%{state: "accepted", operation_id: "refuel-ship"} | _rest] =
+               MutationAttempts.list_for_agent(agent)
+    end
+
+    test "boot recovery retries navigation only after authoritative absence" do
+      agent = agent_fixture()
+      ship_fixture(agent, "FLEET-SHIP")
+      {:ok, dispatches} = Agent.start_link(fn -> 0 end)
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case {conn.request_path, conn.method} do
+          {"/v2/my/ships/FLEET-SHIP", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => ship_body("FLEET-SHIP", %{"nav" => nav_body("IN_ORBIT")})
+            })
+
+          {"/v2/my/ships/FLEET-SHIP/navigate", "POST"} ->
+            dispatch = Agent.get_and_update(dispatches, &{&1, &1 + 1})
+
+            if dispatch == 0 do
+              Req.Test.transport_error(conn, :timeout)
+            else
+              Req.Test.json(conn, %{
+                "data" => navigate_response("IN_TRANSIT", future_iso(), "X1-UX81-A2")
+              })
+            end
+
+          {path, method} ->
+            flunk("unexpected request #{method} #{path}")
+        end
+      end)
+
+      assert {:ok, %Intent{id: intent_id, status: "blocked"}} =
+               Intents.request(
+                 manual_scope(agent),
+                 agent,
+                 %Intents.ManualControl{},
+                 "FLEET-SHIP",
+                 %Intents.Navigate{waypoint: "X1-UX81-A2"}
+               )
+
+      assert {:ok, %Intent{status: "waiting"}} =
+               Intents.reconcile(agent.id, "FLEET-SHIP", nil, :boot, intent_id, nil)
+
+      assert Agent.get(dispatches, & &1) == 2
+      assert [ambiguous, retry] = MutationAttempts.list_for_agent(agent)
+      assert ambiguous.state == "absent"
+      assert retry.state == "succeeded"
+      assert retry.retry_of_id == ambiguous.id
     end
 
     test "boot recovery completes an Intent whose Ship already sits at the target" do
