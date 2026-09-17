@@ -23,6 +23,9 @@ defmodule SpaceTraders.CredentialRedactionTest do
 
     assert :request_id in allowed_metadata
     assert :intent_id in allowed_metadata
+    assert :correlation_id in allowed_metadata
+    assert :requested_at in allowed_metadata
+    assert :request_time in allowed_metadata
     refute :account_token in allowed_metadata
     refute :agent_token in allowed_metadata
     refute :token in allowed_metadata
