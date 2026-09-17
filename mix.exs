@@ -105,6 +105,7 @@ defmodule SpaceTraders.MixProject do
         "test",
         "space_traders.gen.models --check",
         "space_traders.gen.operations --check",
+        "verify.boundary",
         "verify.boot"
       ]
     ]

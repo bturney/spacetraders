@@ -669,7 +669,17 @@ defmodule SpaceTraders.API do
           end
         )
 
-      request_and_record_outcome(req, attempt, path, method, token, opts, shadow, capacity)
+      request_and_record_outcome(
+        req,
+        attempt,
+        path,
+        method,
+        token,
+        opts,
+        operation,
+        shadow,
+        capacity
+      )
     else
       {:error, reason} ->
         complete_shadow(
@@ -682,10 +692,20 @@ defmodule SpaceTraders.API do
     end
   end
 
-  defp request_and_record_outcome(req, attempt, path, method, token, opts, shadow, capacity) do
+  defp request_and_record_outcome(
+         req,
+         attempt,
+         path,
+         method,
+         token,
+         opts,
+         operation,
+         shadow,
+         capacity
+       ) do
     case Req.request(req) do
       {:ok, %{status: status, body: body}} when status in 200..299 ->
-        emit_request_metric(path, status)
+        emit_request_metric(operation, path, status)
 
         case decode(body, opts[:as]) do
           {:error, %SpaceTraders.API.Error{} = error} ->
@@ -723,7 +743,7 @@ defmodule SpaceTraders.API do
         end
 
       {:ok, %{status: status, body: body}} when status in 400..499 ->
-        emit_request_metric(path, status)
+        emit_request_metric(operation, path, status)
 
         case record_mutation_outcome(attempt, :rejected, %{status: status}) do
           :ok ->
@@ -752,7 +772,7 @@ defmodule SpaceTraders.API do
         end
 
       {:ok, %{status: status}} ->
-        emit_request_metric(path, status)
+        emit_request_metric(operation, path, status)
 
         case record_mutation_outcome(attempt, :ambiguous, %{status: status}) do
           :ok ->
@@ -786,7 +806,7 @@ defmodule SpaceTraders.API do
             )
 
           reason ->
-            emit_request_metric(path, "unknown")
+            emit_request_metric(operation, path, "unknown")
             redacted_reason = SpaceTraders.Observability.redact(reason, token)
 
             case record_mutation_outcome(attempt, :ambiguous, %{
@@ -868,8 +888,8 @@ defmodule SpaceTraders.API do
 
   defp mutation_authorized_after_response(_status, _method, _token), do: :ok
 
-  defp emit_request_metric(path, status) do
-    SpaceTraders.Observability.api_request(path, status)
+  defp emit_request_metric(operation, path, status) do
+    SpaceTraders.Observability.api_request(operation, path, status)
   end
 
   defp build_options(method, path, token) do
@@ -929,7 +949,7 @@ defmodule SpaceTraders.API do
     if mutation_authorized?(method, token) != :ok do
       false
     else
-      emit_request_metric(path, 429)
+      emit_request_metric(operation_for_retry(path, method), path, 429)
 
       case Req.Response.get_retry_after(response) do
         delay when is_integer(delay) -> {:delay, delay}
@@ -940,16 +960,19 @@ defmodule SpaceTraders.API do
 
   defp retry(_request, %Req.Response{status: status}, path, :get, _token)
        when status in 500..599 do
-    emit_request_metric(path, status)
+    emit_request_metric(operation_for_retry(path, :get), path, status)
     true
   end
 
   defp retry(_request, %Req.TransportError{}, path, :get, _token) do
-    emit_request_metric(path, "unknown")
+    emit_request_metric(operation_for_retry(path, :get), path, "unknown")
     true
   end
 
   defp retry(_request, _response, _path, _method, _token), do: false
+
+  defp operation_for_retry(path, method),
+    do: OperationInventory.fetch_by_request!(method, path)
 
   defp base_url do
     Application.get_env(:spacetraders, __MODULE__, [])

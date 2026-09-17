@@ -29,13 +29,20 @@ defmodule SpaceTraders.Observability do
     end
   end
 
-  def api_request(path, status) do
+  def api_request(operation, path, status) do
     {endpoint, resource_metadata} = endpoint(path)
 
     metadata =
       logger_correlation()
       |> Map.merge(resource_metadata)
-      |> Map.merge(%{endpoint: endpoint, status: status, outcome: request_outcome(status)})
+      |> Map.merge(%{
+        endpoint: endpoint,
+        operation_id: operation.id,
+        operation_classification: operation.classification,
+        operation_owner: operation.owner,
+        status: status,
+        outcome: request_outcome(status)
+      })
 
     :telemetry.execute([:spacetraders, :api, :request], %{count: 1}, metadata)
     Logger.info("SpaceTraders API request", Map.to_list(metadata))
