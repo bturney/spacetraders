@@ -5,6 +5,7 @@ defmodule SpaceTraders.Contracts do
   alias SpaceTraders.API.AgentTokenReference
   alias SpaceTraders.API.Model.Contract
   alias SpaceTraders.Contracts.DeadlineServer
+  alias SpaceTraders.Evidence
   alias SpaceTraders.Timeline
 
   @doc "Re-arms every pending contract deadline after an application restart."
@@ -18,7 +19,7 @@ defmodule SpaceTraders.Contracts do
   @doc "Returns the Agent's contracts from the game API."
   def list_contracts(%AgentRecord{agent_token: token} = agent)
       when is_binary(token) and token != "" do
-    SpaceTraders.API.get_contracts(AgentTokenReference.new(agent))
+    Evidence.get_contracts(agent)
   end
 
   def list_contracts(%AgentRecord{}), do: {:error, :agent_token_missing}
@@ -94,7 +95,7 @@ defmodule SpaceTraders.Contracts do
   @doc "Fetches the Agent's accepted, actionable contracts' remaining deliverables."
   def active_deliverables(%AgentRecord{agent_token: token} = agent)
       when is_binary(token) and token != "" do
-    with {:ok, contracts} <- SpaceTraders.API.get_contracts(AgentTokenReference.new(agent)) do
+    with {:ok, contracts} <- Evidence.get_contracts(agent) do
       {:ok, remaining_deliverables(contracts)}
     end
   end

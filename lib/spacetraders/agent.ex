@@ -15,7 +15,7 @@ defmodule SpaceTraders.Agent do
   alias SpaceTraders.API.Model.Agent, as: GameAgent
   alias SpaceTraders.API.AgentTokenReference
   alias SpaceTraders.Agent.{Agent, Operator, OperatorToken, OperatorNotifier, Scope}
-  alias SpaceTraders.FleetGeneration
+  alias SpaceTraders.{Evidence, FleetGeneration}
 
   ## Database getters
 
@@ -210,7 +210,7 @@ defmodule SpaceTraders.Agent do
     credential_ref = AgentTokenReference.temporary(agent_token)
 
     try do
-      with {:ok, %GameAgent{} = game_agent} <- SpaceTraders.API.get_agent(credential_ref),
+      with {:ok, %GameAgent{} = game_agent} <- Evidence.get_agent(credential_ref),
            :ok <- ensure_agent_is_new(game_agent.symbol) do
         create_imported_agent(operator, game_agent, agent_token)
       end

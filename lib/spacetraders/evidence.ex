@@ -11,8 +11,10 @@ defmodule SpaceTraders.Evidence do
   alias SpaceTraders.Agent
   alias SpaceTraders.Agent.Agent, as: AgentRecord
   alias SpaceTraders.Agent.Scope
+  alias SpaceTraders.API
+  alias SpaceTraders.API.AgentTokenReference
   alias SpaceTraders.Clock
-  alias SpaceTraders.Evidence.{Observation, ObservationDemand}
+  alias SpaceTraders.Evidence.{Demand, Observation, ObservationDemand}
   alias SpaceTraders.Fleet
   alias SpaceTraders.FleetGeneration
   alias SpaceTraders.API.OperationInventory
@@ -20,12 +22,218 @@ defmodule SpaceTraders.Evidence do
   alias SpaceTraders.MutationAttempts.Attempt
   alias SpaceTraders.Repo
 
+  @owned_read_deadline_seconds 60
+  @owned_read_freshness_seconds 30
+
+  @doc "Reads the authoritative Agent record through a typed Observation Demand."
+  def get_agent(token_or_agent, opts \\ []) when is_list(opts) do
+    owned_read(
+      token_or_agent,
+      "agent:#{owned_symbol(token_or_agent, "unknown")}",
+      "get-my-agent",
+      ["response"],
+      opts,
+      &API.get_agent/2
+    )
+  end
+
+  @doc "Reads the authoritative owned Fleet through a typed Observation Demand."
+  def get_ships(token_or_agent, opts \\ []) when is_list(opts) do
+    owned_read(
+      token_or_agent,
+      "fleet:#{owned_symbol(token_or_agent, "unknown")}",
+      "get-my-ships",
+      ["response"],
+      opts,
+      &API.get_ships/2
+    )
+  end
+
+  @doc "Reads one authoritative Ship through a typed Observation Demand."
+  def get_ship(token_or_agent, ship_symbol, opts \\ [])
+      when is_binary(ship_symbol) and is_list(opts) do
+    owned_read(
+      token_or_agent,
+      "ship:#{ship_symbol}",
+      "get-my-ship",
+      ["response"],
+      opts,
+      fn reference, read_opts -> API.get_ship(reference, ship_symbol, read_opts) end
+    )
+  end
+
+  @doc "Reads authoritative Contracts through a typed Observation Demand."
+  def get_contracts(token_or_agent, opts \\ []) when is_list(opts) do
+    owned_read(
+      token_or_agent,
+      "contracts:#{owned_symbol(token_or_agent, "unknown")}",
+      "get-contracts",
+      ["response"],
+      opts,
+      &API.get_contracts/2
+    )
+  end
+
+  defp owned_read(token_or_agent, subject, operation_id, required_facts, opts, read) do
+    credential_ref = credential_reference(token_or_agent)
+    agent = owned_agent(credential_ref)
+    demand = typed_demand(agent, subject, required_facts, opts)
+    {persisted_demand, demand} = persist_owned_demand(agent, demand)
+    request_opts = Keyword.put(opts, :demand, demand)
+
+    result = read.(credential_ref, request_opts)
+    settle_owned_demand(result, persisted_demand, agent, subject, operation_id, demand)
+  end
+
+  defp typed_demand(agent, subject, required_facts, opts) do
+    now = Clock.utc_now()
+
+    %Demand{
+      subject: subject,
+      required_facts: required_facts,
+      owner: Keyword.get(opts, :owner, "evidence"),
+      deadline_at:
+        Keyword.get(
+          opts,
+          :deadline_at,
+          DateTime.add(now, @owned_read_deadline_seconds, :second)
+        ),
+      freshness_seconds: Keyword.get(opts, :freshness_seconds, @owned_read_freshness_seconds),
+      agent_id: agent && agent.id,
+      strategy_revision_id: nil,
+      lane: Keyword.get(opts, :lane, :standard),
+      strategic_priority: Keyword.get(opts, :strategic_priority),
+      expected_value: Keyword.get(opts, :expected_value),
+      discovery: Keyword.get(opts, :discovery, false)
+    }
+  end
+
+  defp persist_owned_demand(nil, demand), do: {nil, demand}
+
+  defp persist_owned_demand(
+         %AgentRecord{operator_id: operator_id} = agent,
+         %Demand{} = demand
+       )
+       when is_integer(operator_id) do
+    case active_revision(agent.operator_id) do
+      %Revision{} = revision ->
+        attrs = %{
+          subject: demand.subject,
+          required_facts: demand.required_facts,
+          freshness_seconds: demand.freshness_seconds,
+          deadline_at: demand.deadline_at,
+          owner: demand.owner
+        }
+
+        case request_demand(agent, revision, attrs) do
+          {:ok, persisted} ->
+            {persisted, %{demand | strategy_revision_id: revision.id}}
+
+          {:error, _reason} ->
+            {nil, demand}
+        end
+
+      nil ->
+        {nil, demand}
+    end
+  end
+
+  defp persist_owned_demand(_agent, demand), do: {nil, demand}
+
+  defp settle_owned_demand(
+         {:ok, value} = result,
+         %ObservationDemand{} = demand,
+         agent,
+         subject,
+         operation_id,
+         _typed_demand
+       ) do
+    observation =
+      authoritative_observation(
+        operation_id,
+        [subject],
+        %{response: serialize_read_value(value)},
+        Clock.utc_now()
+      )
+
+    case fulfil_demands(agent, subject, observation) do
+      {:ok, _evidence} -> result
+      {:error, _reason} -> result
+    end
+  rescue
+    _error ->
+      _ = withdraw_demand(demand)
+      result
+  end
+
+  defp settle_owned_demand(
+         result,
+         %ObservationDemand{} = demand,
+         _agent,
+         _subject,
+         _operation_id,
+         _typed_demand
+       ) do
+    _ = withdraw_demand(demand)
+    result
+  end
+
+  defp settle_owned_demand(result, nil, _agent, _subject, _operation_id, _typed_demand),
+    do: result
+
+  defp active_revision(operator_id) do
+    Revision
+    |> join(:inner, [revision], strategy in Strategy,
+      on: strategy.id == revision.fleet_strategy_id
+    )
+    |> where(
+      [revision, strategy],
+      strategy.operator_id == ^operator_id and strategy.active_revision_id == revision.id
+    )
+    |> Repo.one()
+  end
+
+  defp credential_reference(%AgentRecord{} = agent), do: AgentTokenReference.new(agent)
+  defp credential_reference(%AgentTokenReference{} = reference), do: reference
+
+  defp owned_agent(%AgentTokenReference{agent_id: agent_id}) when is_integer(agent_id),
+    do: Repo.get(AgentRecord, agent_id)
+
+  defp owned_agent(%AgentTokenReference{}), do: nil
+
+  defp owned_symbol(%AgentRecord{symbol: symbol}, _fallback), do: symbol
+
+  defp owned_symbol(%AgentTokenReference{agent_id: agent_id}, fallback)
+       when is_integer(agent_id) do
+    case Repo.get(AgentRecord, agent_id) do
+      %AgentRecord{symbol: symbol} -> symbol
+      _agent -> fallback
+    end
+  end
+
+  defp owned_symbol(%AgentTokenReference{}, fallback), do: fallback
+
+  defp serialize_read_value(value), do: stringify_keys(value)
+
+  defp normalize_demand_datetime(attrs) do
+    Map.update(attrs, :deadline_at, nil, fn
+      %DateTime{} = datetime -> microsecond_precision(datetime)
+      value -> value
+    end)
+  end
+
+  defp microsecond_precision(%DateTime{} = datetime) do
+    {usec, _precision} = datetime.microsecond
+    %{datetime | microsecond: {usec, 6}}
+  end
+
   @doc "Creates a durable Observation Demand for one Fleet Strategy consumer."
   def request_demand(%AgentRecord{} = agent, %Revision{} = revision, attrs)
       when is_map(attrs) do
     if strategy_revision_owned_by_agent?(revision, agent) do
       attrs =
         attrs
+        |> normalize_demand_datetime()
         |> Map.put(:agent_id, agent.id)
         |> Map.put(:strategy_revision_id, revision.id)
 
@@ -40,6 +248,8 @@ defmodule SpaceTraders.Evidence do
   @doc "Atomically withdraws an open demand and creates its replacement."
   def replace_demand(%ObservationDemand{} = demand, attrs, now \\ Clock.utc_now())
       when is_map(attrs) do
+    now = microsecond_precision(now)
+
     Repo.transaction(fn ->
       current = lock_open_demand!(demand.id)
 
@@ -74,6 +284,8 @@ defmodule SpaceTraders.Evidence do
 
   @doc "Withdraws an open demand without deleting its Strategy provenance."
   def withdraw_demand(%ObservationDemand{} = demand, now \\ Clock.utc_now()) do
+    now = microsecond_precision(now)
+
     Repo.transaction(fn ->
       demand.id
       |> lock_open_demand!()
@@ -84,6 +296,8 @@ defmodule SpaceTraders.Evidence do
 
   @doc "Lists active demands in deadline order."
   def list_open_demands(%AgentRecord{} = agent, now \\ Clock.utc_now()) do
+    now = microsecond_precision(now)
+
     ObservationDemand
     |> where(
       [demand],
@@ -128,6 +342,8 @@ defmodule SpaceTraders.Evidence do
         %DateTime{} = now \\ Clock.utc_now()
       )
       when is_binary(subject) do
+    now = microsecond_precision(now)
+
     with true <- valid_observation?(observation),
          true <- subject in observation.dependency_keys do
       Repo.transaction(fn ->
@@ -178,7 +394,7 @@ defmodule SpaceTraders.Evidence do
 
     %AuthoritativeObservation{
       operation_id: operation_id,
-      observed_at: observed_at,
+      observed_at: microsecond_precision(observed_at),
       dependency_keys: Enum.uniq(dependency_keys),
       facts: facts,
       response_fingerprint: fingerprint(facts)
@@ -356,6 +572,10 @@ defmodule SpaceTraders.Evidence do
       do: current,
       else: Repo.rollback(:demand_not_open)
   end
+
+  defp stringify_keys(%DateTime{} = value), do: DateTime.to_iso8601(value)
+
+  defp stringify_keys(%_{} = value), do: value |> Map.from_struct() |> stringify_keys()
 
   defp stringify_keys(value) when is_map(value) do
     Map.new(value, fn {key, nested} -> {to_string(key), stringify_keys(nested)} end)

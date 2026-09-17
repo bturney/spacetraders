@@ -27,10 +27,12 @@ defmodule SpaceTraders.API do
   """
 
   alias SpaceTraders.API.RateLimiter
+  alias SpaceTraders.API.CapacityGovernor
   alias SpaceTraders.API.ShadowAdmission
   alias SpaceTraders.API.Pagination
   alias SpaceTraders.API.AgentTokenReference
   alias SpaceTraders.API.OperationInventory
+  alias SpaceTraders.Evidence.Demand
   alias SpaceTraders.Agent.Agent, as: AgentRecord
   alias SpaceTraders.MutationAttempts
   alias SpaceTraders.MutationAttempts.Attempt
@@ -119,15 +121,15 @@ defmodule SpaceTraders.API do
   end
 
   @doc "GET /my/agent"
-  @spec get_agent(token()) :: result()
-  def get_agent(token) do
-    request(:get, "/my/agent", token, as: {:model, Agent})
+  @spec get_agent(token(), keyword()) :: result()
+  def get_agent(token, opts \\ []) when is_list(opts) do
+    request(:get, "/my/agent", token, Keyword.merge(opts, as: {:model, Agent}))
   end
 
   @doc "GET /my/contracts"
   @spec get_contracts(token()) :: result()
-  def get_contracts(token) do
-    request(:get, "/my/contracts", token, as: {:list, Contract})
+  def get_contracts(token, opts \\ []) when is_list(opts) do
+    request(:get, "/my/contracts", token, Keyword.merge(opts, as: {:list, Contract}))
   end
 
   @doc "GET /my/contracts/{id}"
@@ -176,9 +178,9 @@ defmodule SpaceTraders.API do
   end
 
   @doc "GET /my/ships"
-  @spec get_ships(token()) :: result()
-  def get_ships(token) do
-    request(:get, "/my/ships", token, as: {:list, Ship})
+  @spec get_ships(token(), keyword()) :: result()
+  def get_ships(token, opts \\ []) when is_list(opts) do
+    request(:get, "/my/ships", token, Keyword.merge(opts, as: {:list, Ship}))
   end
 
   @doc "GET /my/ships/{symbol}"
@@ -557,7 +559,8 @@ defmodule SpaceTraders.API do
     with :ok <- runtime_authorized?(method),
          {:ok, token} <- resolve_agent_token(credential_ref),
          :ok <- mutation_authorized?(method, token),
-         {operation, shadow} <- observe_request(method, path) do
+         {operation, shadow} <- observe_request(method, path, opts),
+         {:ok, capacity} <- admit_capacity(operation, opts) do
       # Observe before waiting for capacity so shadow queue_time spans the real
       # limiter wait, and the shadow bucket never refills during production
       # backpressure. Dispatch rechecks authorization for every network call.
@@ -569,7 +572,8 @@ defmodule SpaceTraders.API do
         token,
         Keyword.put(opts, :agent_id, credential_ref.agent_id),
         operation,
-        shadow
+        shadow,
+        capacity
       )
     end
   end
@@ -584,21 +588,60 @@ defmodule SpaceTraders.API do
 
   defp do_request(method, path, token, opts) do
     with :ok <- mutation_authorized?(method, token),
-         {operation, shadow} <- observe_request(method, path) do
+         {operation, shadow} <- observe_request(method, path, opts),
+         {:ok, capacity} <- admit_capacity(operation, opts) do
       # See request/4: admission can wait for capacity, so observe first and
       # rely on the dispatch-time recheck for authorization.
       RateLimiter.acquire()
 
-      send_request(method, path, token, opts, operation, shadow)
+      send_request(method, path, token, opts, operation, shadow, capacity)
     end
   end
 
-  defp observe_request(method, path) do
+  defp observe_request(method, path, opts) do
     operation = OperationInventory.fetch_by_request!(method, path)
-    {operation, ShadowAdmission.observe_request(operation)}
+    {operation, ShadowAdmission.observe_request(operation, admission_attrs(opts))}
   end
 
-  defp send_request(method, path, token, opts, operation, shadow) do
+  defp admit_capacity(%{classification: :mutation}, _opts), do: {:ok, nil}
+
+  defp admit_capacity(operation, opts) do
+    if Keyword.has_key?(opts, :demand) do
+      CapacityGovernor.admit(operation, admission_attrs(opts))
+    else
+      {:ok, nil}
+    end
+  end
+
+  defp admission_attrs(opts) do
+    demand_attrs =
+      case Keyword.get(opts, :demand) do
+        %Demand{} = demand ->
+          demand
+          |> Map.from_struct()
+          |> Map.take([:lane, :deadline_at, :strategic_priority, :expected_value, :discovery])
+
+        _ ->
+          %{}
+      end
+
+    Map.merge(logger_admission_context(), demand_attrs)
+  end
+
+  defp logger_admission_context do
+    Logger.metadata()
+    |> Map.new()
+    |> Map.take([
+      :lane,
+      :deadline_at,
+      :strategic_priority,
+      :expected_value,
+      :discovery,
+      :evidence_fingerprint
+    ])
+  end
+
+  defp send_request(method, path, token, opts, operation, shadow, capacity) do
     with {:ok, attempt} <- prepare_mutation_attempt(operation, path, opts) do
       req =
         Req.new(
@@ -614,11 +657,12 @@ defmodule SpaceTraders.API do
           end
         )
 
-      request_and_record_outcome(req, attempt, path, method, token, opts, shadow)
+      request_and_record_outcome(req, attempt, path, method, token, opts, shadow, capacity)
     else
       {:error, reason} ->
         complete_shadow(
           shadow,
+          capacity,
           :not_dispatched,
           :persistence_error,
           {:error, SpaceTraders.API.Error.transport(reason)}
@@ -626,7 +670,7 @@ defmodule SpaceTraders.API do
     end
   end
 
-  defp request_and_record_outcome(req, attempt, path, method, token, opts, shadow) do
+  defp request_and_record_outcome(req, attempt, path, method, token, opts, shadow, capacity) do
     case Req.request(req) do
       {:ok, %{status: status, body: body}} when status in 200..299 ->
         emit_request_metric(path, status)
@@ -638,11 +682,12 @@ defmodule SpaceTraders.API do
                    reason: "response_decode_failed"
                  }) do
               :ok ->
-                complete_shadow(shadow, status, :decode_error, {:error, error})
+                complete_shadow(shadow, capacity, status, :decode_error, {:error, error})
 
               {:error, reason} ->
                 complete_shadow(
                   shadow,
+                  capacity,
                   status,
                   :persistence_error,
                   {:error, SpaceTraders.API.Error.transport(reason)}
@@ -652,11 +697,12 @@ defmodule SpaceTraders.API do
           decoded ->
             case record_mutation_outcome(attempt, :succeeded, %{status: status}) do
               :ok ->
-                complete_shadow(shadow, status, :ok, {:ok, decoded})
+                complete_shadow(shadow, capacity, status, :ok, {:ok, decoded})
 
               {:error, reason} ->
                 complete_shadow(
                   shadow,
+                  capacity,
                   status,
                   :persistence_error,
                   {:error, SpaceTraders.API.Error.transport(reason)}
@@ -673,18 +719,20 @@ defmodule SpaceTraders.API do
               :ok ->
                 complete_shadow(
                   shadow,
+                  capacity,
                   status,
                   :client_error,
                   {:error, gameplay_error(status, SpaceTraders.Observability.redact(body, token))}
                 )
 
               {:error, reason} ->
-                complete_shadow(shadow, status, :suppressed, {:error, reason})
+                complete_shadow(shadow, capacity, status, :suppressed, {:error, reason})
             end
 
           {:error, persistence_reason} ->
             complete_shadow(
               shadow,
+              capacity,
               status,
               :persistence_error,
               {:error, SpaceTraders.API.Error.transport(persistence_reason)}
@@ -698,6 +746,7 @@ defmodule SpaceTraders.API do
           :ok ->
             complete_shadow(
               shadow,
+              capacity,
               status,
               shadow_outcome(status),
               {:error, SpaceTraders.API.Error.new(status, "unexpected response")}
@@ -706,6 +755,7 @@ defmodule SpaceTraders.API do
           {:error, reason} ->
             complete_shadow(
               shadow,
+              capacity,
               status,
               :persistence_error,
               {:error, SpaceTraders.API.Error.transport(reason)}
@@ -715,7 +765,13 @@ defmodule SpaceTraders.API do
       {:error, reason} ->
         case reason do
           %MutationSuppressedError{reason: suppression_reason} ->
-            complete_shadow(shadow, :not_dispatched, :suppressed, {:error, suppression_reason})
+            complete_shadow(
+              shadow,
+              capacity,
+              :not_dispatched,
+              :suppressed,
+              {:error, suppression_reason}
+            )
 
           reason ->
             emit_request_metric(path, "unknown")
@@ -727,6 +783,7 @@ defmodule SpaceTraders.API do
               :ok ->
                 complete_shadow(
                   shadow,
+                  capacity,
                   :unknown,
                   :unknown,
                   {:error, SpaceTraders.API.Error.transport(redacted_reason)}
@@ -735,6 +792,7 @@ defmodule SpaceTraders.API do
               {:error, persistence_reason} ->
                 complete_shadow(
                   shadow,
+                  capacity,
                   :unknown,
                   :persistence_error,
                   {:error, SpaceTraders.API.Error.transport(persistence_reason)}
@@ -760,7 +818,8 @@ defmodule SpaceTraders.API do
     MutationAttempts.prepare_for_dispatch(operation, path, opts)
   end
 
-  defp complete_shadow(shadow, status, outcome, result) do
+  defp complete_shadow(shadow, capacity, status, outcome, result) do
+    CapacityGovernor.complete(capacity, status)
     ShadowAdmission.observe_outcome(shadow, status, outcome)
     result
   end
