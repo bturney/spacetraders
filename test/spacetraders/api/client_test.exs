@@ -1,5 +1,5 @@
 defmodule SpaceTraders.API.ClientTest do
-  use SpaceTraders.DataCase, async: true
+  use SpaceTraders.DataCase, async: false
 
   alias SpaceTraders.API
   alias SpaceTraders.API.AgentTokenReference
@@ -196,6 +196,36 @@ defmodule SpaceTraders.API.ClientTest do
   end
 
   describe "register/3" do
+    test "holds gameplay mutation capacity until the request completes" do
+      test_pid = self()
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        send(test_pid, :mutation_dispatched)
+
+        receive do
+          :respond -> Req.Test.json(conn, %{"data" => %{}})
+        end
+      end)
+
+      task =
+        Task.async(fn ->
+          receive do
+            :admit ->
+              API.register("ACCOUNT_TOKEN", "ORBITALIST", "COSMIC", "operator@example.com")
+          end
+        end)
+
+      send(task.pid, :admit)
+
+      assert_receive :mutation_dispatched
+
+      assert %{in_flight: in_flight} = :sys.get_state(SpaceTraders.API.CapacityGovernor)
+      assert [%{operation: %{id: "register"}}] = Map.values(in_flight)
+
+      send(task.pid, :respond)
+      assert {:ok, %{}} = Task.await(task)
+    end
+
     test "posts to /register with account token and decodes the full mint result" do
       Req.Test.stub(SpaceTraders.API, fn conn ->
         assert conn.method == "POST"

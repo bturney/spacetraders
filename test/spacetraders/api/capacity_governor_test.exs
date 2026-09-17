@@ -24,6 +24,28 @@ defmodule SpaceTraders.API.CapacityGovernorTest do
     assert {:ok, %CapacityGovernor.Admission{lane: :standard}} = Task.await(standard)
   end
 
+  test "admits reconciliation mutations ahead of older standard gameplay" do
+    name = unique_name()
+    {:ok, pid} = CapacityGovernor.start_link(name: name, max_in_flight: 1)
+    on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid) end)
+
+    standard = SpaceTraders.API.OperationInventory.fetch!("navigate-ship")
+    reconciliation = SpaceTraders.API.OperationInventory.fetch!("accept-contract")
+
+    assert {:ok, %CapacityGovernor.Admission{id: first_id}} =
+             CapacityGovernor.admit(standard, %{}, name)
+
+    gameplay = Task.async(fn -> CapacityGovernor.admit(standard, %{}, name) end)
+    recovery = Task.async(fn -> CapacityGovernor.admit(reconciliation, %{}, name) end)
+    Process.sleep(10)
+
+    assert {:ok, %CapacityGovernor.Admission{lane: :reconciliation} = recovery_admission} =
+             release_and_await(first_id, recovery, name)
+
+    CapacityGovernor.complete(recovery_admission, 200, name)
+    assert {:ok, %CapacityGovernor.Admission{lane: :standard}} = Task.await(gameplay)
+  end
+
   defp release_and_await(first_id, safety, name) do
     CapacityGovernor.complete(
       %CapacityGovernor.Admission{

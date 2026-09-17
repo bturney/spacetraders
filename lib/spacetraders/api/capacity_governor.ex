@@ -1,10 +1,10 @@
 defmodule SpaceTraders.API.CapacityGovernor do
   @moduledoc """
-  Admission gate for governed API reads.
+  Admission gate for governed API reads and mutations.
 
   The raw rate limiter protects the protocol budget. This module protects the
-  application budget by ordering waiting reads by safety, reconciliation, and
-  then ordinary demand before handing them to the raw limiter.
+  application budget by ordering waiting work by safety, reconciliation, and
+  then ordinary demand before handing it to the raw limiter.
   """
 
   use GenServer
@@ -25,7 +25,7 @@ defmodule SpaceTraders.API.CapacityGovernor do
     GenServer.start_link(__MODULE__, opts, name: name)
   end
 
-  @doc "Waits until the demand is admitted, returning its completion identity."
+  @doc "Waits until the request is admitted, returning its completion identity."
   @spec admit(Operation.t(), map(), GenServer.server()) :: {:ok, Admission.t()}
   def admit(%Operation{} = operation, attrs \\ %{}, name \\ __MODULE__) when is_map(attrs) do
     case Process.whereis(name) do
