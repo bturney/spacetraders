@@ -16,6 +16,7 @@ defmodule SpaceTraders.Application do
          repos: Application.fetch_env!(:spacetraders, :ecto_repos), skip: skip_migrations?()},
         {DNSCluster, query: Application.get_env(:spacetraders, :dns_cluster_query) || :ignore},
         {Phoenix.PubSub, name: SpaceTraders.PubSub},
+        SpaceTraders.Evidence.ReadCoordinator,
         SpaceTraders.API.CapacityGovernor,
         SpaceTraders.API.ShadowAdmission,
         SpaceTraders.EmergencyStopAdmission,

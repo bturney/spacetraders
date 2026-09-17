@@ -209,4 +209,38 @@ defmodule SpaceTraders.EvidenceTest do
     assert withdrawn.withdrawn_at == now
     assert Evidence.list_open_demands(agent, now) == []
   end
+
+  test "Market reads declare freshness and persist the returned facts" do
+    operator = operator_fixture()
+    agent = agent_fixture(operator)
+    scope = Scope.for_operator(operator)
+    {:ok, strategy} = FleetStrategy.select_preset(scope, "steady_growth")
+    {:ok, _revision} = FleetStrategy.activate(scope, strategy.draft_version)
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      assert conn.request_path == "/v2/systems/X1-UX81/waypoints/X1-UX81-A1/market"
+
+      Req.Test.json(conn, %{
+        "data" => %{
+          "symbol" => "X1-UX81-A1",
+          "exports" => [%{"symbol" => "IRON_ORE"}],
+          "imports" => [],
+          "exchange" => []
+        }
+      })
+    end)
+
+    assert {:ok, %{symbol: "X1-UX81-A1"}} =
+             Evidence.get_market(agent, "X1-UX81", "X1-UX81-A1",
+               owner: "market_planning",
+               freshness_seconds: 90
+             )
+
+    assert Evidence.list_open_demands(agent) == []
+    [observation] = Repo.all(Observation)
+    assert observation.subject == "market:X1-UX81:X1-UX81-A1"
+    assert observation.operation_id == "get-market"
+    assert [%{"symbol" => "IRON_ORE"}] = observation.facts["exports"]
+    assert observation.facts["response"]["symbol"] == "X1-UX81-A1"
+  end
 end

@@ -15,6 +15,7 @@ defmodule SpaceTraders.Evidence do
   alias SpaceTraders.API.AgentTokenReference
   alias SpaceTraders.Clock
   alias SpaceTraders.Evidence.{Demand, Observation, ObservationDemand}
+  alias SpaceTraders.Evidence.ReadCoordinator
   alias SpaceTraders.Fleet
   alias SpaceTraders.FleetGeneration
   alias SpaceTraders.API.OperationInventory
@@ -24,6 +25,216 @@ defmodule SpaceTraders.Evidence do
 
   @owned_read_deadline_seconds 60
   @owned_read_freshness_seconds 30
+
+  @market_facts ~w(symbol exports imports exchange trade_goods transactions)
+  @waypoint_facts ~w(symbol system_symbol type x y orbits orbitals traits modifiers chart faction is_under_construction)
+  @construction_facts ~w(symbol is_complete materials)
+  @jump_gate_facts ~w(symbol connections)
+  @shipyard_facts ~w(symbol ship_types transactions)
+  @system_facts ~w(symbol sector type x y waypoints)
+  @market_required_facts ~w(exports imports exchange)
+  @waypoint_required_facts ~w(symbol system_symbol type traits)
+  @construction_required_facts ~w(symbol is_complete materials)
+  @jump_gate_required_facts ~w(symbol connections)
+  @shipyard_required_facts ~w(symbol ship_types)
+  @system_required_facts ~w(symbol)
+
+  @doc "Reads a System through a governed World Observation Demand."
+  def get_system(token_or_agent, system_symbol, opts \\ []) when is_binary(system_symbol) do
+    governed_read(
+      token_or_agent,
+      "system:#{system_symbol}",
+      "get-system",
+      @system_required_facts,
+      opts,
+      fn reference, read_opts -> API.get_system(reference, system_symbol, read_opts) end
+    )
+  end
+
+  @doc "Reads one page of Waypoints through a governed World Observation Demand."
+  def get_waypoints(token_or_agent, system_symbol, params \\ [], opts \\ [])
+      when is_binary(system_symbol) and is_list(params) and is_list(opts) do
+    governed_read(
+      token_or_agent,
+      "waypoints:#{system_symbol}",
+      "get-system-waypoints",
+      ["waypoints"],
+      opts,
+      fn reference, read_opts ->
+        API.get_waypoints(reference, system_symbol, params, read_opts)
+      end,
+      {:page, params}
+    )
+  end
+
+  @doc "Reads every Waypoint page through one governed World demand."
+  def get_waypoints_paginated(token_or_agent, system_symbol, params \\ [], opts \\ [])
+      when is_binary(system_symbol) and is_list(params) and is_list(opts) do
+    governed_read(
+      token_or_agent,
+      "waypoints:#{system_symbol}",
+      "get-system-waypoints",
+      ["waypoints"],
+      opts,
+      fn reference, read_opts ->
+        API.get_waypoints_paginated(reference, system_symbol, params, read_opts)
+      end,
+      {:paginated, params}
+    )
+  end
+
+  @doc "Reads a Waypoint through a governed World Observation Demand."
+  def get_waypoint(token_or_agent, system_symbol, waypoint_symbol, opts \\ [])
+      when is_binary(system_symbol) and is_binary(waypoint_symbol) do
+    governed_read(
+      token_or_agent,
+      "waypoint:#{system_symbol}:#{waypoint_symbol}",
+      "get-waypoint",
+      @waypoint_required_facts,
+      opts,
+      fn reference, read_opts ->
+        API.get_waypoint(reference, system_symbol, waypoint_symbol, read_opts)
+      end
+    )
+  end
+
+  @doc "Reads a Market through a governed Market Observation Demand."
+  def get_market(token_or_agent, system_symbol, waypoint_symbol, opts \\ [])
+      when is_binary(system_symbol) and is_binary(waypoint_symbol) do
+    governed_read(
+      token_or_agent,
+      "market:#{system_symbol}:#{waypoint_symbol}",
+      "get-market",
+      @market_required_facts,
+      opts,
+      fn reference, read_opts ->
+        API.get_market(reference, system_symbol, waypoint_symbol, read_opts)
+      end
+    )
+  end
+
+  @doc "Reads Construction state through a governed World Observation Demand."
+  def get_construction(token_or_agent, system_symbol, waypoint_symbol, opts \\ [])
+      when is_binary(system_symbol) and is_binary(waypoint_symbol) do
+    governed_read(
+      token_or_agent,
+      "construction:#{system_symbol}:#{waypoint_symbol}",
+      "get-construction",
+      @construction_required_facts,
+      opts,
+      fn reference, read_opts ->
+        API.get_construction(reference, system_symbol, waypoint_symbol, read_opts)
+      end
+    )
+  end
+
+  @doc "Reads Jump Gate state through a governed World Observation Demand."
+  def get_jump_gate(token_or_agent, system_symbol, waypoint_symbol, opts \\ [])
+      when is_binary(system_symbol) and is_binary(waypoint_symbol) do
+    governed_read(
+      token_or_agent,
+      "jump_gate:#{system_symbol}:#{waypoint_symbol}",
+      "get-jump-gate",
+      @jump_gate_required_facts,
+      opts,
+      fn reference, read_opts ->
+        API.get_jump_gate(reference, system_symbol, waypoint_symbol, read_opts)
+      end
+    )
+  end
+
+  @doc "Reads Shipyard state through a governed Market Observation Demand."
+  def get_shipyard(token_or_agent, system_symbol, waypoint_symbol, opts \\ [])
+      when is_binary(system_symbol) and is_binary(waypoint_symbol) do
+    governed_read(
+      token_or_agent,
+      "shipyard:#{system_symbol}:#{waypoint_symbol}",
+      "get-shipyard",
+      @shipyard_required_facts,
+      opts,
+      fn reference, read_opts ->
+        API.get_shipyard(reference, system_symbol, waypoint_symbol, read_opts)
+      end
+    )
+  end
+
+  defp governed_read(
+         token_or_agent,
+         subject,
+         operation_id,
+         default_facts,
+         opts,
+         read,
+         key_suffix \\ nil
+       ) do
+    credential_ref = credential_reference(token_or_agent)
+    agent = owned_agent(credential_ref)
+    required_facts = Keyword.get(opts, :required_facts, default_facts)
+    demand = typed_demand(agent, subject, required_facts, opts)
+    {persisted_demand, demand} = persist_owned_demand(agent, demand)
+    request_opts = Keyword.put(opts, :demand, demand)
+    key = {operation_id, subject, credential_ref.agent_id, key_suffix}
+
+    result = ReadCoordinator.read(key, fn -> read.(credential_ref, request_opts) end)
+    settle_governed_read(result, persisted_demand, agent, subject, operation_id)
+  end
+
+  defp settle_governed_read(
+         {:ok, value} = result,
+         %ObservationDemand{} = demand,
+         %AgentRecord{} = agent,
+         subject,
+         operation_id
+       ) do
+    demand = Repo.get!(ObservationDemand, demand.id)
+
+    if is_nil(demand.fulfilled_observation_id) do
+      facts = read_facts(operation_id, value)
+
+      observation =
+        authoritative_observation(operation_id, [subject], facts, Clock.utc_now())
+
+      _ = fulfil_demands(agent, subject, observation)
+    end
+
+    result
+  rescue
+    _error ->
+      _ = withdraw_demand(demand)
+      result
+  end
+
+  defp settle_governed_read(
+         result,
+         %ObservationDemand{} = demand,
+         _agent,
+         _subject,
+         _operation_id
+       ) do
+    _ = withdraw_demand(demand)
+    result
+  end
+
+  defp settle_governed_read(result, nil, _agent, _subject, _operation_id), do: result
+
+  defp read_facts(operation_id, value) do
+    response = serialize_read_value(value)
+
+    fields =
+      case operation_id do
+        "get-market" -> @market_facts
+        "get-waypoint" -> @waypoint_facts
+        "get-construction" -> @construction_facts
+        "get-jump-gate" -> @jump_gate_facts
+        "get-shipyard" -> @shipyard_facts
+        "get-system" -> @system_facts
+        "get-system-waypoints" -> ["waypoints"]
+        _ -> []
+      end
+
+    facts = if is_map(response), do: Map.take(response, fields), else: %{"waypoints" => response}
+    Map.merge(%{"response" => response}, facts)
+  end
 
   @doc "Reads the authoritative Agent record through a typed Observation Demand."
   def get_agent(token_or_agent, opts \\ []) when is_list(opts) do
