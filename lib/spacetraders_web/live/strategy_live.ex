@@ -146,12 +146,60 @@ defmodule SpaceTradersWeb.StrategyLive do
                 <p class="mt-1 text-sm">
                   Up to {candidate.expected_outcomes.maximum_credit_change} credits across {candidate.expected_outcomes.maximum_units} Cargo units
                 </p>
-                <p class="mt-2 text-xs opacity-60">
-                  Valid through {Calendar.strftime(
-                    candidate.validity.expires_at,
-                    "%Y-%m-%d %H:%M:%S UTC"
-                  )}; fuel and travel time remain uncertain.
-                </p>
+                <dl class="mt-3 grid gap-3 text-xs sm:grid-cols-2">
+                  <div>
+                    <dt class="font-semibold">Uncertainty</dt>
+                    <dd class="opacity-70">
+                      Evidence age: {candidate.uncertainty.source_evidence_age_seconds}s / {candidate.uncertainty.destination_evidence_age_seconds}s. Fuel and travel time are not yet accounted for. Source supply {candidate.uncertainty.source_market_signal.supply ||
+                        "unknown"}; destination supply {candidate.uncertainty.destination_market_signal.supply ||
+                        "unknown"}.
+                    </dd>
+                  </div>
+                  <div>
+                    <dt class="font-semibold">Required role and capabilities</dt>
+                    <dd class="opacity-70">
+                      One Market trader; Cargo transport for {candidate.required_resources.cargo_capacity} units and Market access at both Waypoints.
+                    </dd>
+                  </div>
+                  <div>
+                    <dt class="font-semibold">Required resources</dt>
+                    <dd class="opacity-70">
+                      {candidate.required_resources.credits} credits of exposure, {candidate.required_resources.cargo_capacity} Cargo capacity, and {candidate.required_resources.ship_count} unassigned Ship.
+                    </dd>
+                  </div>
+                  <div>
+                    <dt class="font-semibold">Validity</dt>
+                    <dd class="opacity-70">
+                      Through {Calendar.strftime(
+                        candidate.validity.expires_at,
+                        "%Y-%m-%d %H:%M:%S UTC"
+                      )}; source price {candidate.validity.conditions
+                      |> Enum.at(0)
+                      |> Map.fetch!(:value)}, destination price {candidate.validity.conditions
+                      |> Enum.at(1)
+                      |> Map.fetch!(:value)}, positive spread required.
+                    </dd>
+                  </div>
+                  <div class="sm:col-span-2">
+                    <dt class="font-semibold">Evidence dependencies</dt>
+                    <dd class="opacity-70">
+                      {Enum.map_join(candidate.dependencies, "; ", fn dependency ->
+                        "#{dependency.subject} via #{dependency.source} at #{DateTime.to_iso8601(dependency.observed_at)}"
+                      end)}
+                    </dd>
+                  </div>
+                  <div class="sm:col-span-2">
+                    <dt class="font-semibold">Alternatives</dt>
+                    <dd class="opacity-70">
+                      {if candidate.alternatives == [],
+                        do: "No other positive-spread route in this snapshot.",
+                        else:
+                          Enum.map_join(candidate.alternatives, "; ", fn alternative ->
+                            "#{alternative.trade_symbol}: #{alternative.source_waypoint} to #{alternative.destination_waypoint}"
+                          end)}
+                    </dd>
+                  </div>
+                </dl>
               </div>
             </div>
 
@@ -160,9 +208,25 @@ defmodule SpaceTradersWeb.StrategyLive do
               class="mt-4 rounded-xl border border-dashed border-base-300 p-4 text-sm"
             >
               <p class="font-semibold">No Market contribution is currently supported.</p>
+            </div>
+
+            <div
+              :if={entry.planning.limitations != []}
+              class="mt-4 rounded-xl border border-dashed border-base-300 p-4 text-sm"
+            >
+              <p class="font-semibold">Current limitations</p>
               <ul class="mt-2 list-inside list-disc opacity-70">
                 <li :for={limitation <- entry.planning.limitations}>
                   {planning_limitation(limitation.reason)}
+                </li>
+              </ul>
+            </div>
+
+            <div :if={entry.planning.observation_demands != []} class="mt-4 text-sm">
+              <p class="font-semibold">Observation Demands</p>
+              <ul class="mt-2 list-inside list-disc opacity-70">
+                <li :for={demand <- entry.planning.observation_demands}>
+                  {demand.subject}: {Enum.join(demand.required_facts, ", ")} within {demand.freshness_seconds}s freshness
                 </li>
               </ul>
             </div>

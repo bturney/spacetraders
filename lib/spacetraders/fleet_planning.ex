@@ -10,6 +10,9 @@ defmodule SpaceTraders.FleetPlanning do
   alias SpaceTraders.Evidence.Demand
   alias SpaceTraders.FleetStrategy.Revision
 
+  @market_evidence_freshness_seconds 300
+  @observation_demand_deadline_seconds 60
+
   defmodule CandidateContribution do
     @moduledoc "An objective-specific proposal that Fleet Allocation may accept or reject."
 
@@ -34,6 +37,19 @@ defmodule SpaceTraders.FleetPlanning do
     defstruct @enforce_keys
 
     @type t :: %__MODULE__{}
+  end
+
+  @doc "Builds the standard Market evidence snapshot used by Fleet Planning."
+  def market_snapshot(%DateTime{} = as_of, system_symbol, agent_id, markets)
+      when is_binary(system_symbol) and is_list(markets) do
+    %{
+      as_of: as_of,
+      system_symbol: system_symbol,
+      agent_id: agent_id,
+      freshness_seconds: @market_evidence_freshness_seconds,
+      demand_deadline_seconds: @observation_demand_deadline_seconds,
+      markets: markets
+    }
   end
 
   @doc """
@@ -73,7 +89,12 @@ defmodule SpaceTraders.FleetPlanning do
 
     limitations =
       if candidates == [] and limitations == [] do
-        [%{subject: :market_planning, reason: :no_viable_market_routes}]
+        reason =
+          if length(markets) < 2,
+            do: :insufficient_market_evidence,
+            else: :no_viable_market_routes
+
+        [%{subject: :market_planning, reason: reason}]
       else
         limitations
       end
@@ -113,18 +134,24 @@ defmodule SpaceTraders.FleetPlanning do
   defp normalize_snapshot(
          %{
            as_of: %DateTime{} = as_of,
+           system_symbol: system_symbol,
            freshness_seconds: freshness_seconds,
            markets: markets
          } = snapshot
        )
-       when is_integer(freshness_seconds) and freshness_seconds >= 0 and is_list(markets) do
+       when is_binary(system_symbol) and system_symbol != "" and is_integer(freshness_seconds) and
+              freshness_seconds >= 0 and is_list(markets) do
     demand_deadline_seconds = Map.get(snapshot, :demand_deadline_seconds, 60)
 
     if is_integer(demand_deadline_seconds) and demand_deadline_seconds >= 0 and
-         Enum.all?(markets, &(valid_market_subject?(market_subject(&1)) and is_map(&1))) do
+         Enum.all?(
+           markets,
+           &(is_map(&1) and valid_market_subject?(market_subject(&1), system_symbol))
+         ) do
       {:ok,
        %{
          as_of: as_of,
+         system_symbol: system_symbol,
          freshness_seconds: freshness_seconds,
          demand_deadline_seconds: demand_deadline_seconds,
          agent_id: Map.get(snapshot, :agent_id),
@@ -433,12 +460,17 @@ defmodule SpaceTraders.FleetPlanning do
 
   defp market_subject(_market), do: ""
 
-  defp valid_market_subject?(subject) do
+  defp valid_market_subject?(subject, expected_system) when is_binary(subject) do
     case String.split(subject, ":") do
-      ["market", system, waypoint] -> system != "" and waypoint != ""
-      _ -> false
+      ["market", ^expected_system, waypoint] ->
+        String.starts_with?(waypoint, expected_system <> "-")
+
+      _ ->
+        false
     end
   end
+
+  defp valid_market_subject?(_subject, _expected_system), do: false
 
   defp waypoint_from_subject(subject), do: subject |> String.split(":") |> List.last()
 end

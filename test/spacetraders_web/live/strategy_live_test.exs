@@ -212,6 +212,12 @@ defmodule SpaceTradersWeb.StrategyLiveTest do
     assert html =~ "X1-A1"
     assert html =~ "X1-A2"
     assert html =~ "200 credits"
+    assert html =~ "Uncertainty"
+    assert html =~ "Required role and capabilities"
+    assert html =~ "Required resources"
+    assert html =~ "Evidence dependencies"
+    assert html =~ "Validity"
+    assert html =~ "Alternatives"
   end
 
   test "discard removes the persistent draft without changing active intent", %{

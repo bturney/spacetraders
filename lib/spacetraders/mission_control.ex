@@ -12,8 +12,6 @@ defmodule SpaceTraders.MissionControl do
   alias SpaceTraders.Agent.Agent, as: AgentRecord
   alias SpaceTraders.{Agent, Fleet, FleetGeneration, FleetPlanning, FleetStrategy, Intelligence}
 
-  @market_evidence_freshness_seconds 300
-
   @evaluation_fact_keys %{
     "change" => :change,
     "current" => :current,
@@ -196,16 +194,12 @@ defmodule SpaceTraders.MissionControl do
 
   defp agent_market_planning(revision, agent, as_of) do
     with {:ok, system_symbol} <- Fleet.system_from_headquarters(agent.headquarters) do
-      snapshot = %{
-        as_of: as_of,
-        freshness_seconds: @market_evidence_freshness_seconds,
-        demand_deadline_seconds: 60,
-        agent_id: agent.id,
-        markets:
-          agent
-          |> Intelligence.marketplace_waypoints(system_symbol)
-          |> Enum.map(&market_evidence(agent, system_symbol, &1, as_of))
-      }
+      markets =
+        agent
+        |> Intelligence.marketplace_waypoints(system_symbol)
+        |> Enum.map(&market_evidence(agent, system_symbol, &1, as_of))
+
+      snapshot = FleetPlanning.market_snapshot(as_of, system_symbol, agent.id, markets)
 
       revision.document
       |> Map.get("objectives", [])

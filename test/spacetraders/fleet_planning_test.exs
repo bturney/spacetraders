@@ -185,6 +185,27 @@ defmodule SpaceTraders.FleetPlanningTest do
              FleetPlanning.plan_market(revision(), 0, second)
   end
 
+  test "fewer than two known Markets is an explicit evidence limitation" do
+    snapshot = %{evidence_snapshot() | markets: []}
+
+    assert {:ok,
+            %{
+              candidate_contributions: [],
+              limitations: [%{reason: :insufficient_market_evidence}]
+            }} = FleetPlanning.plan_market(revision(), 0, snapshot)
+  end
+
+  test "rejects malformed or cross-System Market subjects" do
+    malformed = %{evidence_snapshot() | markets: [%{subject: nil}]}
+    cross_system = %{evidence_snapshot() | markets: [market("X2-A1", @as_of, [])]}
+
+    assert {:error, :invalid_market_planning_input} =
+             FleetPlanning.plan_market(revision(), 0, malformed)
+
+    assert {:error, :invalid_market_planning_input} =
+             FleetPlanning.plan_market(revision(), 0, cross_system)
+  end
+
   defp revision do
     %Revision{
       id: 42,
@@ -204,6 +225,7 @@ defmodule SpaceTraders.FleetPlanningTest do
   defp evidence_snapshot do
     %{
       as_of: @as_of,
+      system_symbol: "X1",
       freshness_seconds: 300,
       demand_deadline_seconds: 60,
       agent_id: 7,
