@@ -22,9 +22,10 @@ defmodule SpaceTraders.Evidence.ReadCoordinator do
               try do
                 fun.()
               rescue
-                exception -> {:error, exception}
+                exception -> {:error, SpaceTraders.API.Error.transport(exception)}
               catch
-                kind, reason -> {:error, {kind, reason}}
+                kind, reason ->
+                  {:error, SpaceTraders.API.Error.transport({kind, reason})}
               end
 
             GenServer.cast(name, {:complete, key, result})
@@ -45,7 +46,10 @@ defmodule SpaceTraders.Evidence.ReadCoordinator do
   def handle_call({:begin, key}, {pid, _ref}, %{pending: pending} = state) do
     case Map.get(pending, key) do
       nil ->
-        {:reply, :owner, %{state | pending: Map.put(pending, key, %{owner: pid, waiters: []})}}
+        monitor_ref = Process.monitor(pid)
+
+        entry = %{owner: pid, monitor_ref: monitor_ref, waiters: []}
+        {:reply, :owner, %{state | pending: Map.put(pending, key, entry)}}
 
       %{waiters: waiters} = entry ->
         {:reply, :waiter,
@@ -59,9 +63,23 @@ defmodule SpaceTraders.Evidence.ReadCoordinator do
       {nil, pending} ->
         {:noreply, %{state | pending: pending}}
 
-      {%{waiters: waiters}, pending} ->
+      {%{monitor_ref: monitor_ref, waiters: waiters}, pending} ->
+        Process.demonitor(monitor_ref, [:flush])
         Enum.each(waiters, &send(&1, {:read_complete, key, result}))
         {:noreply, %{state | pending: pending}}
+    end
+  end
+
+  @impl true
+  def handle_info({:DOWN, monitor_ref, :process, _pid, reason}, %{pending: pending} = state) do
+    case Enum.find(pending, fn {_key, entry} -> entry.monitor_ref == monitor_ref end) do
+      nil ->
+        {:noreply, state}
+
+      {key, %{waiters: waiters}} ->
+        result = {:error, SpaceTraders.API.Error.transport({:read_owner_down, reason})}
+        Enum.each(waiters, &send(&1, {:read_complete, key, result}))
+        {:noreply, %{state | pending: Map.delete(pending, key)}}
     end
   end
 end
