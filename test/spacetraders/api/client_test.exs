@@ -48,6 +48,9 @@ defmodule SpaceTraders.API.ClientTest do
 
       assert_receive {:telemetry, ^event, %{count: 1}, metadata}
       assert metadata.endpoint == "/my/ships/{shipSymbol}"
+      assert metadata.operation_id == "get-my-ship"
+      assert metadata.operation_classification == :read
+      assert metadata.operation_owner == :evidence
       assert metadata.status == 200
       assert metadata.outcome == "ok"
       assert metadata.request_id == "request-123"

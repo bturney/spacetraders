@@ -82,21 +82,26 @@ defmodule SpaceTraders.API.CapacityGovernorTest do
 
     test_pid = self()
 
-    {:ok, _stale} =
-      Task.start(fn ->
-        result =
-          try do
-            CapacityGovernor.admit(operation, %{}, name)
-          catch
-            :exit, _reason -> :discarded
-          end
+    for _ <- 1..3 do
+      {:ok, _stale} =
+        Task.start(fn ->
+          result =
+            try do
+              CapacityGovernor.admit(operation, %{}, name)
+            catch
+              :exit, _reason -> :discarded
+            end
 
-        send(test_pid, {:stale_admission, result})
-      end)
+          send(test_pid, {:stale_admission, result})
+        end)
+    end
 
     Process.sleep(10)
 
     GenServer.stop(pid)
+
+    assert_receive {:stale_admission, :discarded}
+    assert_receive {:stale_admission, :discarded}
     assert_receive {:stale_admission, :discarded}
 
     {:ok, _restarted} = CapacityGovernor.start_link(name: name, max_in_flight: 1)
