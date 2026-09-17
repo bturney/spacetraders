@@ -10,6 +10,7 @@ defmodule SpaceTraders.FleetGeneration.Generation do
     field :faction, :string
     field :replacement_symbols, :map, default: %{}
     field :objective_progress, :map, default: %{}
+    field :allocation_version, :integer, default: 0
     field :strategy_capable_at, :utc_datetime_usec
     field :fenced_at, :utc_datetime_usec
     field :retired_at, :utc_datetime_usec
@@ -33,6 +34,7 @@ defmodule SpaceTraders.FleetGeneration.Generation do
       :faction,
       :replacement_symbols,
       :objective_progress,
+      :allocation_version,
       :strategy_capable_at,
       :fenced_at,
       :retired_at
