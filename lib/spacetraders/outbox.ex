@@ -13,8 +13,14 @@ defmodule SpaceTraders.Outbox do
 
   def publish(%{topic: topic, event: event} = notification, state_change)
       when is_binary(topic) and is_binary(event) and is_function(state_change, 0) do
+    publish(fn _result -> notification end, state_change)
+  end
+
+  def publish(notification_builder, state_change)
+      when is_function(notification_builder, 1) and is_function(state_change, 0) do
     case Repo.transaction(fn ->
            result = state_change.()
+           %{topic: topic, event: event} = notification = notification_builder.(result)
 
            notification =
              Repo.insert!(%Notification{
@@ -46,7 +52,20 @@ defmodule SpaceTraders.Outbox do
     |> Enum.each(&dispatch/1)
   end
 
-  defp dispatch(notification) do
+  defp dispatch(%Notification{id: notification_id}) do
+    Repo.transaction(fn ->
+      notification =
+        Repo.one(
+          from notification in Notification,
+            where: notification.id == ^notification_id and is_nil(notification.delivered_at),
+            lock: "FOR UPDATE"
+        )
+
+      if notification, do: deliver(notification)
+    end)
+  end
+
+  defp deliver(notification) do
     message =
       case notification.event do
         "ship_updated" ->

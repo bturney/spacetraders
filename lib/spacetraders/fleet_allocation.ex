@@ -4,9 +4,15 @@ defmodule SpaceTraders.FleetAllocation do
   coherent Fleet Commitment portfolios without publishing command authority.
   """
 
+  import Ecto.Query
+
   alias SpaceTraders.Agent.Scope
+  alias SpaceTraders.FleetAllocation.{Commitment, Portfolio, StrategyDecisionEpisode}
+  alias SpaceTraders.FleetGeneration.Generation
   alias SpaceTraders.FleetPlanning.CandidateContribution
   alias SpaceTraders.FleetStrategy
+  alias SpaceTraders.FleetStrategy.Strategy
+  alias SpaceTraders.{Outbox, Repo}
 
   alias SpaceTraders.FleetStrategy.{
     ObjectiveEvaluation,
@@ -55,8 +61,10 @@ defmodule SpaceTraders.FleetAllocation do
 
   Candidate maps declare requested exclusive `:claims`, fungible
   `:reservations`, and outcome `:pledges`. Availability declares the exclusive
-  resources and fungible capacities the Fleet may commit. Selection is pure;
-  publishing the returned protections as active authority is a separate step.
+  resources and fungible capacities the Fleet may commit. Availability may also
+  carry the current `:source_version`, which binds the selection to the durable
+  allocation state. Selection is pure; publishing the returned protections as
+  active authority is a separate step.
   """
   def select_portfolio(%Revision{} = revision, candidates, availability),
     do: select_portfolio(revision, candidates, availability, [])
@@ -73,6 +81,236 @@ defmodule SpaceTraders.FleetAllocation do
 
   def select_portfolio(_revision, _candidates, _availability, _current_commitments),
     do: {:error, :invalid_allocation_input}
+
+  @doc "Publishes a selected portfolio and its causal evidence against one source version."
+  def publish_portfolio(
+        %Scope{operator: %{id: operator_id}},
+        generation_id,
+        %{
+          revision_id: revision_id,
+          source_version: source_version,
+          commitments: commitments,
+          rejected: rejected
+        } = selection,
+        %{
+          evidence_references: evidence_references,
+          expectations: expectations,
+          calibration_version: calibration_version
+        }
+      )
+      when is_integer(generation_id) and is_integer(revision_id) and is_list(commitments) and
+             is_list(rejected) and is_list(evidence_references) and is_map(expectations) and
+             is_binary(calibration_version) and calibration_version != "" and
+             is_integer(source_version) and source_version >= 0 do
+    if valid_published_commitments?(commitments) do
+      notification = fn portfolio ->
+        %{
+          topic: "fleet_allocation:#{operator_id}",
+          event: "fleet_commitment_portfolio_published",
+          payload: %{
+            "portfolio_id" => portfolio.id,
+            "decision_episode_id" => portfolio.strategy_decision_episode_id,
+            "version" => portfolio.version
+          }
+        }
+      end
+
+      Outbox.publish(notification, fn ->
+        publish_selected_portfolio(
+          operator_id,
+          generation_id,
+          revision_id,
+          selection,
+          evidence_references,
+          expectations,
+          calibration_version,
+          source_version
+        )
+      end)
+    else
+      {:error, :invalid_publication}
+    end
+  end
+
+  def publish_portfolio(_scope, _generation_id, _selection, _decision),
+    do: {:error, :invalid_publication}
+
+  @doc "Returns the current complete portfolio for the authenticated Operator's active generation."
+  def current_portfolio(%Scope{operator: %{id: operator_id}}) do
+    Portfolio
+    |> join(:inner, [portfolio], generation in Generation,
+      on: generation.id == portfolio.fleet_generation_id
+    )
+    |> where(
+      [portfolio, generation],
+      portfolio.operator_id == ^operator_id and is_nil(portfolio.superseded_at) and
+        is_nil(generation.fenced_at) and is_nil(generation.retired_at)
+    )
+    |> order_by([portfolio], desc: portfolio.version)
+    |> preload([:commitments, :strategy_decision_episode])
+    |> Repo.one()
+  end
+
+  defp publish_selected_portfolio(
+         operator_id,
+         generation_id,
+         revision_id,
+         selection,
+         evidence_references,
+         expectations,
+         calibration_version,
+         expected_source_version
+       ) do
+    strategy =
+      Repo.one(
+        from strategy in Strategy,
+          where: strategy.operator_id == ^operator_id,
+          lock: "FOR SHARE"
+      )
+
+    if is_nil(strategy) or strategy.active_revision_id != revision_id do
+      Repo.rollback(:stale_source)
+    end
+
+    {updated_generations, _} =
+      Repo.update_all(
+        from(generation in Generation,
+          where:
+            generation.id == ^generation_id and generation.operator_id == ^operator_id and
+              generation.fleet_strategy_revision_id == ^revision_id and
+              generation.allocation_version == ^expected_source_version and
+              is_nil(generation.fenced_at) and is_nil(generation.retired_at)
+        ),
+        inc: [allocation_version: 1],
+        set: [updated_at: DateTime.utc_now(:second)]
+      )
+
+    if updated_generations != 1, do: Repo.rollback(:stale_source)
+
+    now = DateTime.utc_now()
+
+    current_portfolio_ids =
+      from portfolio in Portfolio,
+        where:
+          portfolio.fleet_generation_id == ^generation_id and is_nil(portfolio.superseded_at),
+        select: portfolio.id
+
+    Repo.update_all(
+      from(commitment in Commitment,
+        where: commitment.fleet_commitment_portfolio_id in subquery(current_portfolio_ids)
+      ),
+      set: [unwind_state: :released]
+    )
+
+    Repo.update_all(
+      from(portfolio in Portfolio, where: portfolio.id in subquery(current_portfolio_ids)),
+      set: [superseded_at: now]
+    )
+
+    revision = Repo.get!(Revision, revision_id)
+
+    episode =
+      Repo.insert!(%StrategyDecisionEpisode{
+        operator_id: operator_id,
+        fleet_generation_id: generation_id,
+        fleet_strategy_revision_id: revision_id,
+        source_version: expected_source_version,
+        evidence_references: json_safe(evidence_references),
+        alternatives: json_safe(selection.rejected),
+        binding_constraints: json_safe(Map.get(revision.document, "hard_constraints", [])),
+        expectations: json_safe(expectations),
+        calibration_version: calibration_version
+      })
+
+    portfolio =
+      Repo.insert!(%Portfolio{
+        operator_id: operator_id,
+        fleet_generation_id: generation_id,
+        fleet_strategy_revision_id: revision_id,
+        strategy_decision_episode_id: episode.id,
+        version: expected_source_version + 1
+      })
+
+    Enum.each(selection.commitments, fn commitment ->
+      persisted_commitment =
+        Repo.insert!(%Commitment{
+          fleet_commitment_portfolio_id: portfolio.id,
+          candidate_id: commitment.candidate_id,
+          objective_index: commitment.objective_index,
+          claims: commitment.claims,
+          reservations: json_safe(commitment.reservations),
+          pledges: json_safe(commitment.pledges),
+          dependencies: json_safe(commitment.dependencies),
+          expected_value: commitment.expected_value * 1.0,
+          unwind_cost: commitment.unwind_cost * 1.0,
+          decisive_reason: commitment.decisive_reason
+        })
+
+      claims =
+        Enum.map(commitment.claims, fn resource ->
+          %{
+            fleet_commitment_portfolio_id: portfolio.id,
+            fleet_commitment_id: persisted_commitment.id,
+            resource: resource
+          }
+        end)
+
+      if claims != [], do: Repo.insert_all("fleet_commitment_claims", claims)
+    end)
+
+    Repo.preload(portfolio, [:commitments, :strategy_decision_episode])
+  end
+
+  defp json_safe(%DateTime{} = datetime), do: DateTime.to_iso8601(datetime)
+
+  defp json_safe(%_{} = struct) do
+    struct
+    |> Map.from_struct()
+    |> json_safe()
+  end
+
+  defp json_safe(map) when is_map(map) do
+    Map.new(map, fn {key, value} -> {to_string(key), json_safe(value)} end)
+  end
+
+  defp json_safe(list) when is_list(list), do: Enum.map(list, &json_safe/1)
+  defp json_safe(tuple) when is_tuple(tuple), do: tuple |> Tuple.to_list() |> json_safe()
+  defp json_safe(atom) when is_atom(atom), do: Atom.to_string(atom)
+  defp json_safe(value), do: value
+
+  defp valid_published_commitments?(commitments) do
+    valid? =
+      Enum.all?(commitments, fn
+        %FleetCommitment{} = commitment ->
+          commitment.candidate_id != "" and commitment.objective_index >= 0 and
+            Enum.all?(commitment.claims, &(is_binary(&1) and &1 != "")) and
+            Enum.all?(commitment.reservations, fn {_resource, amount} ->
+              is_number(amount) and amount >= 0
+            end) and valid_published_pledges?(commitment.pledges)
+
+        _other ->
+          false
+      end)
+
+    if valid? do
+      claims = Enum.flat_map(commitments, & &1.claims)
+      length(claims) == MapSet.size(MapSet.new(claims))
+    else
+      false
+    end
+  end
+
+  defp valid_published_pledges?(pledges) when is_list(pledges) do
+    Enum.all?(pledges, fn
+      %{outcome: _outcome, amount: amount, backing: backing} when is_tuple(backing) ->
+        is_number(amount) and amount >= 0
+
+      _pledge ->
+        false
+    end)
+  end
+
+  defp valid_published_pledges?(_pledges), do: false
 
   defp build_portfolio(revision, candidates, availability, current_commitments) do
     claims = availability |> Map.get(:claims, []) |> Enum.map(&claim_id/1) |> MapSet.new()
@@ -122,6 +360,7 @@ defmodule SpaceTraders.FleetAllocation do
 
     %{
       revision_id: revision.id,
+      source_version: Map.get(availability, :source_version, 0),
       commitments: Enum.reverse(commitments),
       rejected: Enum.reverse(rejected)
     }
@@ -350,8 +589,10 @@ defmodule SpaceTraders.FleetAllocation do
   defp valid_candidate?(_candidate, _revision_id, _objective_count), do: false
 
   defp valid_availability?(availability) do
+    source_version = Map.get(availability, :source_version, 0)
+
     is_struct(availability[:as_of], DateTime) and is_list(availability[:claims]) and
-      is_map(availability[:reservations]) and
+      is_map(availability[:reservations]) and is_integer(source_version) and source_version >= 0 and
       Enum.all?(availability.reservations, fn {_resource, amount} ->
         is_number(amount) and amount >= 0
       end)
