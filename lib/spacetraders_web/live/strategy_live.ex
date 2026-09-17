@@ -105,6 +105,134 @@ defmodule SpaceTradersWeb.StrategyLive do
           </p>
         </section>
 
+        <section
+          :if={@projection.active_revision && @market_planning != []}
+          id="market-candidate-contributions"
+          class="space-y-4"
+        >
+          <div>
+            <p class="eyebrow">Evidence-bound planning</p>
+            <h2 class="text-2xl font-bold">Market Candidate Contributions</h2>
+            <p class="mt-1 max-w-3xl text-sm opacity-70">
+              Proposals describe possible contributions only. No Ship, credits, or Cargo are claimed until Fleet Allocation accepts a portfolio.
+            </p>
+          </div>
+
+          <article
+            :for={entry <- @market_planning}
+            id={"market-planning-#{entry.agent.id}-#{entry.objective_index}"}
+            class="rounded-2xl border border-base-300 bg-base-100 p-5 shadow-sm"
+          >
+            <div class="flex flex-wrap items-start justify-between gap-2">
+              <div>
+                <p class="font-bold">{entry.objective["objective"]}</p>
+                <p class="text-sm opacity-70">{entry.agent.symbol}</p>
+              </div>
+              <span class="badge badge-ghost">Candidate only</span>
+            </div>
+
+            <div
+              :if={entry.planning.candidate_contributions != []}
+              class="mt-4 grid gap-3 lg:grid-cols-2"
+            >
+              <div
+                :for={candidate <- entry.planning.candidate_contributions}
+                id={"candidate-contribution-#{candidate.id}"}
+                class="rounded-xl border border-base-300 p-4"
+              >
+                <p class="font-semibold">
+                  {candidate.trade_symbol}: {candidate.source_waypoint} to {candidate.destination_waypoint}
+                </p>
+                <p class="mt-1 text-sm">
+                  Up to {candidate.expected_outcomes.maximum_credit_change} credits across {candidate.expected_outcomes.maximum_units} Cargo units
+                </p>
+                <dl class="mt-3 grid gap-3 text-xs sm:grid-cols-2">
+                  <div>
+                    <dt class="font-semibold">Uncertainty</dt>
+                    <dd class="opacity-70">
+                      Evidence age: {candidate.uncertainty.source_evidence_age_seconds}s / {candidate.uncertainty.destination_evidence_age_seconds}s. Fuel and travel time are not yet accounted for. Source supply {candidate.uncertainty.source_market_signal.supply ||
+                        "unknown"}; destination supply {candidate.uncertainty.destination_market_signal.supply ||
+                        "unknown"}.
+                    </dd>
+                  </div>
+                  <div>
+                    <dt class="font-semibold">Required role and capabilities</dt>
+                    <dd class="opacity-70">
+                      One Market trader; Cargo transport for {candidate.required_resources.cargo_capacity} units and Market access at both Waypoints.
+                    </dd>
+                  </div>
+                  <div>
+                    <dt class="font-semibold">Required resources</dt>
+                    <dd class="opacity-70">
+                      {candidate.required_resources.credits} credits of exposure, {candidate.required_resources.cargo_capacity} Cargo capacity, and {candidate.required_resources.ship_count} unassigned Ship.
+                    </dd>
+                  </div>
+                  <div>
+                    <dt class="font-semibold">Validity</dt>
+                    <dd class="opacity-70">
+                      Through {Calendar.strftime(
+                        candidate.validity.expires_at,
+                        "%Y-%m-%d %H:%M:%S UTC"
+                      )}; source price {candidate.validity.conditions
+                      |> Enum.at(0)
+                      |> Map.fetch!(:value)}, destination price {candidate.validity.conditions
+                      |> Enum.at(1)
+                      |> Map.fetch!(:value)}, positive spread required.
+                    </dd>
+                  </div>
+                  <div class="sm:col-span-2">
+                    <dt class="font-semibold">Evidence dependencies</dt>
+                    <dd class="opacity-70">
+                      {Enum.map_join(candidate.dependencies, "; ", fn dependency ->
+                        "#{dependency.subject} via #{dependency.source} at #{DateTime.to_iso8601(dependency.observed_at)}"
+                      end)}
+                    </dd>
+                  </div>
+                  <div class="sm:col-span-2">
+                    <dt class="font-semibold">Alternatives</dt>
+                    <dd class="opacity-70">
+                      {if candidate.alternatives == [],
+                        do: "No other positive-spread route in this snapshot.",
+                        else:
+                          Enum.map_join(candidate.alternatives, "; ", fn alternative ->
+                            "#{alternative.trade_symbol}: #{alternative.source_waypoint} to #{alternative.destination_waypoint}"
+                          end)}
+                    </dd>
+                  </div>
+                </dl>
+              </div>
+            </div>
+
+            <div
+              :if={entry.planning.candidate_contributions == []}
+              class="mt-4 rounded-xl border border-dashed border-base-300 p-4 text-sm"
+            >
+              <p class="font-semibold">No Market contribution is currently supported.</p>
+            </div>
+
+            <div
+              :if={entry.planning.limitations != []}
+              class="mt-4 rounded-xl border border-dashed border-base-300 p-4 text-sm"
+            >
+              <p class="font-semibold">Current limitations</p>
+              <ul class="mt-2 list-inside list-disc opacity-70">
+                <li :for={limitation <- entry.planning.limitations}>
+                  {planning_limitation(limitation.reason)}
+                </li>
+              </ul>
+            </div>
+
+            <div :if={entry.planning.observation_demands != []} class="mt-4 text-sm">
+              <p class="font-semibold">Observation Demands</p>
+              <ul class="mt-2 list-inside list-disc opacity-70">
+                <li :for={demand <- entry.planning.observation_demands}>
+                  {demand.subject}: {Enum.join(demand.required_facts, ", ")} within {demand.freshness_seconds}s freshness
+                </li>
+              </ul>
+            </div>
+          </article>
+        </section>
+
         <section class="space-y-4">
           <div>
             <p class="eyebrow">Starting points</p>
@@ -382,11 +510,15 @@ defmodule SpaceTradersWeb.StrategyLive do
           {:noreply,
            socket
            |> assign(:projection, projection)
+           |> assign_market_planning()
            |> assign(:draft_stale?, true)}
 
         projection.emergency_stop_version !=
             socket.assigns.projection.emergency_stop_version ->
-          {:noreply, assign(socket, :projection, projection)}
+          {:noreply,
+           socket
+           |> assign(:projection, projection)
+           |> assign_market_planning()}
 
         true ->
           {:noreply, socket}
@@ -471,6 +603,7 @@ defmodule SpaceTradersWeb.StrategyLive do
 
     socket
     |> assign(:projection, projection)
+    |> assign_market_planning()
     |> assign(:draft_stale?, false)
     |> assign(:form_drafts, form_drafts)
     |> assign(:form, to_form(form_drafts, as: "strategy"))
@@ -480,10 +613,15 @@ defmodule SpaceTradersWeb.StrategyLive do
     Map.put(projection, :presets, socket.assigns.projection.presets)
   end
 
+  defp assign_market_planning(socket) do
+    assign(socket, :market_planning, MissionControl.market_planning(socket.assigns.current_scope))
+  end
+
   defp mark_draft_stale(socket, message) do
     socket
     |> put_flash(:error, message)
     |> assign(:projection, MissionControl.strategy(socket.assigns.current_scope))
+    |> assign_market_planning()
     |> assign(:draft_stale?, true)
   end
 
@@ -529,6 +667,23 @@ defmodule SpaceTradersWeb.StrategyLive do
   defp kind_label("maintain"), do: "Maintain"
   defp kind_label("continuous"), do: "Continuous"
   defp kind_label(_kind), do: "Kind not yet specified"
+
+  defp planning_limitation(:unsupported_market_objective),
+    do: "Market activity does not directly advance this Strategic Objective."
+
+  defp planning_limitation(:stale_market_evidence),
+    do: "Market evidence is stale; an Observation Demand is required."
+
+  defp planning_limitation(:insufficient_market_evidence),
+    do: "Market evidence is insufficient; an Observation Demand is required."
+
+  defp planning_limitation(:inconsistent_market_evidence),
+    do: "Market evidence does not belong to the current planning snapshot."
+
+  defp planning_limitation(:no_viable_market_routes),
+    do: "Fresh evidence shows no positive-spread Market route."
+
+  defp planning_limitation(_reason), do: "Market planning is currently limited."
 
   defp objective_line(objective) do
     Enum.join(
