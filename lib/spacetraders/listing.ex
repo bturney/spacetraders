@@ -80,7 +80,7 @@ defmodule SpaceTraders.Listing do
     {listings, unavailable?} =
       Enum.reduce(on_site_waypoints(waypoints, ships_by_system), {[], unavailable?}, fn
         {waypoint, ships}, {listings, unavailable?} ->
-          case SpaceTraders.API.get_market(
+          case SpaceTraders.Evidence.get_market(
                  credential_ref,
                  waypoint.system_symbol,
                  waypoint.symbol
@@ -117,7 +117,7 @@ defmodule SpaceTraders.Listing do
     {listings, unavailable?} =
       Enum.reduce(on_site_waypoints(waypoints, ships_by_system), {[], unavailable?}, fn
         {waypoint, _ships}, {listings, unavailable?} ->
-          case SpaceTraders.API.get_shipyard(
+          case SpaceTraders.Evidence.get_shipyard(
                  credential_ref,
                  waypoint.system_symbol,
                  waypoint.symbol
@@ -181,7 +181,13 @@ defmodule SpaceTraders.Listing do
   end
 
   defp fetch_waypoint_pages(credential_ref, system, trait) do
-    case SpaceTraders.API.get_waypoints_paginated(credential_ref, system, traits: trait) do
+    case SpaceTraders.Evidence.get_waypoints_paginated(
+           credential_ref,
+           system,
+           [traits: trait],
+           discovery: true,
+           expected_value: 0
+         ) do
       {:ok, waypoints} -> {:ok, waypoints}
       {:error, _reason, waypoints} -> {:partial, waypoints}
     end

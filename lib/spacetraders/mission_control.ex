@@ -124,13 +124,31 @@ defmodule SpaceTraders.MissionControl do
           waypoint.symbol
         )
 
+      market =
+        Intelligence.subject_with_stale(
+          agent,
+          :market,
+          waypoint.system_symbol,
+          waypoint.symbol
+        )
+
       waypoint_facts
       |> Map.merge(namespace_facts(construction.current, "construction"))
       |> Map.merge(namespace_facts(construction.stale, "construction_stale"))
       |> Map.merge(namespace_facts(gate.current, "jump_gate"))
       |> Map.merge(namespace_facts(gate.stale, "jump_gate_stale"))
+      |> Map.merge(namespace_facts(market.stale, "market_stale"))
     else
       %{}
+    end
+  end
+
+  @doc "Returns current and stale Market Intelligence for an Operator-owned Waypoint."
+  def market_intelligence(%Scope{} = scope, %AgentRecord{} = agent, waypoint) do
+    if owned_by?(agent, scope) do
+      Intelligence.subject_with_stale(agent, :market, waypoint.system_symbol, waypoint.symbol)
+    else
+      %{current: %{}, stale: %{}}
     end
   end
 

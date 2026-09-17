@@ -3209,7 +3209,7 @@ defmodule SpaceTraders.Fleet.Intents do
       when is_binary(system) and is_binary(waypoint) and waypoint == intent.target_waypoint ->
         case Agent.handle_game_result(
                agent,
-               SpaceTraders.API.get_construction(
+               SpaceTraders.Evidence.get_construction(
                  AgentTokenReference.new(agent),
                  system,
                  waypoint
@@ -3613,7 +3613,7 @@ defmodule SpaceTraders.Fleet.Intents do
 
   defp jump_origin_for(agent, system, destination) do
     with {:ok, waypoints} <-
-           SpaceTraders.API.get_waypoints(AgentTokenReference.new(agent), system,
+           SpaceTraders.Evidence.get_waypoints(AgentTokenReference.new(agent), system,
              type: "JUMP_GATE"
            ),
          {:ok, gate} <-
@@ -3634,7 +3634,7 @@ defmodule SpaceTraders.Fleet.Intents do
   # fail independently, so rejection remains evidence rather than omission.
   defp jump_origin_candidates(agent, system, destination) do
     with {:ok, waypoints} <-
-           SpaceTraders.API.get_waypoints(AgentTokenReference.new(agent), system,
+           SpaceTraders.Evidence.get_waypoints(AgentTokenReference.new(agent), system,
              type: "JUMP_GATE"
            ) do
       candidates =
@@ -4154,7 +4154,7 @@ defmodule SpaceTraders.Fleet.Intents do
          {:ok, market} <-
            Agent.handle_game_result(
              agent,
-             SpaceTraders.API.get_market(
+             SpaceTraders.Evidence.get_market(
                AgentTokenReference.new(agent),
                source_system,
                source_waypoint

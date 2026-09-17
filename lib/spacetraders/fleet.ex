@@ -350,9 +350,13 @@ defmodule SpaceTraders.Fleet do
     with :ok <- market_waypoint?(waypoint),
          %{system_symbol: system, symbol: symbol} when is_binary(system) and is_binary(symbol) <-
            waypoint do
-      case SpaceTraders.API.get_market(token_reference(agent), system, symbol) do
+      case SpaceTraders.Evidence.get_market(token_reference(agent), system, symbol) do
         {:ok, market} = result ->
           record_market_observation(agent, system, market, "get_market")
+          result
+
+        {:error, %SpaceTraders.API.GameplayError{}} = result ->
+          invalidate_market_facts(agent, system, symbol)
           result
 
         result ->
@@ -371,7 +375,7 @@ defmodule SpaceTraders.Fleet do
       when is_binary(token) and token != "" do
     with %{system_symbol: system, symbol: symbol} when is_binary(system) and is_binary(symbol) <-
            waypoint do
-      case SpaceTraders.API.get_construction(token_reference(agent), system, symbol) do
+      case SpaceTraders.Evidence.get_construction(token_reference(agent), system, symbol) do
         {:ok, construction} = result ->
           record_construction_observation(agent, system, construction, "get_construction")
           result
@@ -398,7 +402,7 @@ defmodule SpaceTraders.Fleet do
       when is_binary(token) and token != "" do
     with %{system_symbol: system, symbol: symbol} when is_binary(system) and is_binary(symbol) <-
            waypoint do
-      case SpaceTraders.API.get_jump_gate(token_reference(agent), system, symbol) do
+      case SpaceTraders.Evidence.get_jump_gate(token_reference(agent), system, symbol) do
         {:ok, gate} = result ->
           record_jump_gate_observation(agent, system, gate, "get_jump_gate")
           result
@@ -1737,7 +1741,10 @@ defmodule SpaceTraders.Fleet do
 
     case Agent.handle_game_result(
            agent,
-           SpaceTraders.API.get_market(token_reference(agent), system, stop)
+           SpaceTraders.Evidence.get_market(token_reference(agent), system, stop,
+             required_facts: ["trade_goods", "transactions"],
+             freshness_seconds: 60
+           )
          ) do
       {:ok, market} ->
         observed_at = DateTime.utc_now() |> DateTime.truncate(:second)
@@ -2198,7 +2205,10 @@ defmodule SpaceTraders.Fleet do
          {:ok, construction} <-
            Agent.handle_game_result(
              agent,
-             SpaceTraders.API.get_construction(token_reference(agent), system, waypoint)
+             SpaceTraders.Evidence.get_construction(token_reference(agent), system, waypoint,
+               lane: :reconciliation,
+               required_facts: ["is_complete", "materials"]
+             )
            ),
          :ok <- construction_requirement_available?(construction, job.progress["trade_symbol"]) do
       record_construction_observation(agent, system, construction, "get_construction")
@@ -2997,10 +3007,12 @@ defmodule SpaceTraders.Fleet do
   defp construction_supply_construction(agent, job) do
     Agent.handle_game_result(
       agent,
-      SpaceTraders.API.get_construction(
+      SpaceTraders.Evidence.get_construction(
         token_reference(agent),
         job.progress["construction_system"],
-        job.progress["construction_waypoint"]
+        job.progress["construction_waypoint"],
+        lane: :reconciliation,
+        required_facts: ["is_complete", "materials"]
       )
     )
   end
@@ -3632,7 +3644,7 @@ defmodule SpaceTraders.Fleet do
       if missing == [] do
         {:cont, {:ok, record_explorer_method(job, waypoint.symbol, "reused_public", nil)}}
       else
-        case SpaceTraders.API.get_waypoint(credential_ref, system, waypoint.symbol) do
+        case SpaceTraders.Evidence.get_waypoint(credential_ref, system, waypoint.symbol) do
           {:ok, full_waypoint} ->
             with :ok <- observe_explorer_waypoint(agent, full_waypoint),
                  :ok <-
@@ -3742,7 +3754,8 @@ defmodule SpaceTraders.Fleet do
 
   defp acquire_explorer_market(agent, credential_ref, system, live_ship, waypoint) do
     if market_waypoint?(waypoint) == :ok do
-      with {:ok, market} <- SpaceTraders.API.get_market(credential_ref, system, waypoint.symbol),
+      with {:ok, market} <-
+             SpaceTraders.Evidence.get_market(credential_ref, system, waypoint.symbol),
            {:ok, _observation} <-
              Intelligence.observe_market(agent, system, market,
                source: "get_market",
@@ -4180,7 +4193,7 @@ defmodule SpaceTraders.Fleet do
   defp validate_miner_job(_, _, _), do: {:error, :agent_token_missing}
 
   defp waypoint(credential_ref, system, symbol),
-    do: SpaceTraders.API.get_waypoint(credential_ref, system, symbol)
+    do: SpaceTraders.Evidence.get_waypoint(credential_ref, system, symbol)
 
   # The gather mode's Waypoint capability is checked against the game's
   # authoritative Waypoint state, not persisted trust; the game's action
@@ -5487,7 +5500,9 @@ defmodule SpaceTraders.Fleet do
   def list_waypoints(%AgentRecord{}), do: {:error, :agent_token_missing}
 
   defp fetch_waypoint_pages(credential_ref, system) do
-    case SpaceTraders.API.get_waypoints_paginated(credential_ref, system) do
+    case SpaceTraders.Evidence.get_waypoints_paginated(credential_ref, system, [],
+           discovery: true
+         ) do
       {:ok, waypoints} -> {:ok, waypoints}
       {:error, reason, _collected} -> {:error, reason}
     end
@@ -5833,7 +5848,7 @@ defmodule SpaceTraders.Fleet do
          {:ok, waypoint} <-
            Agent.handle_game_result(
              agent,
-             SpaceTraders.API.get_waypoint(
+             SpaceTraders.Evidence.get_waypoint(
                token_reference(agent),
                live_ship.nav.system_symbol,
                live_ship.nav.waypoint_symbol
@@ -5916,7 +5931,13 @@ defmodule SpaceTraders.Fleet do
 
     case Agent.handle_game_result(
            agent,
-           SpaceTraders.API.get_market(token_reference(agent), system_symbol, waypoint_symbol)
+           SpaceTraders.Evidence.get_market(
+             token_reference(agent),
+             system_symbol,
+             waypoint_symbol,
+             required_facts: ["trade_goods", "transactions"],
+             freshness_seconds: 60
+           )
          ) do
       {:ok, market} = result ->
         observer = if live_ship.nav.waypoint_symbol == waypoint_symbol, do: live_ship.symbol

@@ -454,56 +454,72 @@ defmodule SpaceTraders.API do
   end
 
   @doc "GET /systems/{symbol}"
-  @spec get_system(token(), String.t()) :: result()
-  def get_system(token, system_symbol) do
-    request(:get, "/systems/#{system_symbol}", token, as: {:model, System})
+  @spec get_system(token(), String.t(), keyword()) :: result()
+  def get_system(token, system_symbol, opts \\ []) when is_list(opts) do
+    request(:get, "/systems/#{system_symbol}", token, Keyword.merge(opts, as: {:model, System}))
   end
 
   @doc "GET /systems/{symbol}/waypoints — optional `:type`, `:traits`, `:limit`, `:page` params."
-  @spec get_waypoints(token(), String.t(), keyword()) :: result()
-  def get_waypoints(token, system_symbol, params \\ []) do
-    request(:get, "/systems/#{system_symbol}/waypoints", token,
-      params: params,
-      as: {:list, Waypoint}
+  @spec get_waypoints(token(), String.t(), keyword(), keyword()) :: result()
+  def get_waypoints(token, system_symbol, params \\ [], opts \\ [])
+      when is_list(params) and is_list(opts) do
+    request(
+      :get,
+      "/systems/#{system_symbol}/waypoints",
+      token,
+      Keyword.merge(opts, params: params, as: {:list, Waypoint})
     )
   end
 
   @doc "GET /systems/{symbol}/waypoints across every page."
-  @spec get_waypoints_paginated(token(), String.t(), keyword()) ::
+  @spec get_waypoints_paginated(token(), String.t(), keyword(), keyword()) ::
           {:ok, list()} | {:error, term(), list()}
-  def get_waypoints_paginated(token, system_symbol, params \\ []) do
-    Pagination.waypoints(token, system_symbol, params)
+  def get_waypoints_paginated(token, system_symbol, params \\ [], opts \\ [])
+      when is_list(params) and is_list(opts) do
+    Pagination.waypoints(token, system_symbol, params, opts)
   end
 
   @doc "GET /systems/{symbol}/waypoints/{waypoint}"
-  @spec get_waypoint(token(), String.t(), String.t()) :: result()
-  def get_waypoint(token, system_symbol, waypoint_symbol) do
-    request(:get, "/systems/#{system_symbol}/waypoints/#{waypoint_symbol}", token,
-      as: {:model, Waypoint}
+  @spec get_waypoint(token(), String.t(), String.t(), keyword()) :: result()
+  def get_waypoint(token, system_symbol, waypoint_symbol, opts \\ []) when is_list(opts) do
+    request(
+      :get,
+      "/systems/#{system_symbol}/waypoints/#{waypoint_symbol}",
+      token,
+      Keyword.merge(opts, as: {:model, Waypoint})
     )
   end
 
   @doc "GET /systems/{symbol}/waypoints/{waypoint}/market"
-  @spec get_market(token(), String.t(), String.t()) :: result()
-  def get_market(token, system_symbol, waypoint_symbol) do
-    request(:get, "/systems/#{system_symbol}/waypoints/#{waypoint_symbol}/market", token,
-      as: {:model, Market}
+  @spec get_market(token(), String.t(), String.t(), keyword()) :: result()
+  def get_market(token, system_symbol, waypoint_symbol, opts \\ []) when is_list(opts) do
+    request(
+      :get,
+      "/systems/#{system_symbol}/waypoints/#{waypoint_symbol}/market",
+      token,
+      Keyword.merge(opts, as: {:model, Market})
     )
   end
 
   @doc "GET /systems/{symbol}/waypoints/{waypoint}/construction"
-  @spec get_construction(token(), String.t(), String.t()) :: result()
-  def get_construction(token, system_symbol, waypoint_symbol) do
-    request(:get, "/systems/#{system_symbol}/waypoints/#{waypoint_symbol}/construction", token,
-      as: {:model, Construction}
+  @spec get_construction(token(), String.t(), String.t(), keyword()) :: result()
+  def get_construction(token, system_symbol, waypoint_symbol, opts \\ []) when is_list(opts) do
+    request(
+      :get,
+      "/systems/#{system_symbol}/waypoints/#{waypoint_symbol}/construction",
+      token,
+      Keyword.merge(opts, as: {:model, Construction})
     )
   end
 
   @doc "GET /systems/{symbol}/waypoints/{waypoint}/jump-gate"
-  @spec get_jump_gate(token(), String.t(), String.t()) :: result()
-  def get_jump_gate(token, system_symbol, waypoint_symbol) do
-    request(:get, "/systems/#{system_symbol}/waypoints/#{waypoint_symbol}/jump-gate", token,
-      as: {:model, JumpGate}
+  @spec get_jump_gate(token(), String.t(), String.t(), keyword()) :: result()
+  def get_jump_gate(token, system_symbol, waypoint_symbol, opts \\ []) when is_list(opts) do
+    request(
+      :get,
+      "/systems/#{system_symbol}/waypoints/#{waypoint_symbol}/jump-gate",
+      token,
+      Keyword.merge(opts, as: {:model, JumpGate})
     )
   end
 
@@ -534,10 +550,13 @@ defmodule SpaceTraders.API do
   end
 
   @doc "GET /systems/{symbol}/waypoints/{waypoint}/shipyard"
-  @spec get_shipyard(token(), String.t(), String.t()) :: result()
-  def get_shipyard(token, system_symbol, waypoint_symbol) do
-    request(:get, "/systems/#{system_symbol}/waypoints/#{waypoint_symbol}/shipyard", token,
-      as: {:model, Shipyard}
+  @spec get_shipyard(token(), String.t(), String.t(), keyword()) :: result()
+  def get_shipyard(token, system_symbol, waypoint_symbol, opts \\ []) when is_list(opts) do
+    request(
+      :get,
+      "/systems/#{system_symbol}/waypoints/#{waypoint_symbol}/shipyard",
+      token,
+      Keyword.merge(opts, as: {:model, Shipyard})
     )
   end
 

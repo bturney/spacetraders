@@ -2907,6 +2907,11 @@ defmodule SpaceTradersWeb.DashboardLive do
             namespace="jump_gate_stale"
             title="Stale Jump-gate connections"
           />
+          <.readiness_facts
+            facts={@intelligence}
+            namespace="market_stale"
+            title="Stale Market Intelligence"
+          />
           <%= case @market do %>
             <% {:ok, market} -> %>
               <div class="mt-4" data-waypoint-market>
@@ -2930,7 +2935,7 @@ defmodule SpaceTradersWeb.DashboardLive do
               </div>
             <% {:error, reason} -> %>
               <div class="alert alert-warning mt-4" data-waypoint-market>
-                Market data unavailable: {live_error(reason)}
+                Market intelligence unknown: {live_error(reason)}
               </div>
             <% :not_a_marketplace -> %>
             <% _ -> %>
