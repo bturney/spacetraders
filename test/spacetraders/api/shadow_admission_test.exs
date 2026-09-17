@@ -116,6 +116,7 @@ defmodule SpaceTraders.API.ShadowAdmissionTest do
                     %{
                       correlation_id: ^safety_id,
                       rank: 1,
+                      disposition: :would_admit,
                       ordering: [
                         lane: :safety,
                         deadline_at: nil,
@@ -123,6 +124,14 @@ defmodule SpaceTraders.API.ShadowAdmissionTest do
                         expected_value: nil,
                         discovery: false
                       ]
+                    }}
+
+    assert_receive {:telemetry, [:spacetraders, :api, :capacity, :admission], %{count: 1},
+                    %{
+                      correlation_id: ^correlation_id,
+                      rank: 2,
+                      disposition: :would_delay,
+                      fingerprint: revised_fingerprint
                     }}
 
     ShadowAdmission.observe_dispatch(correlation_id, name)
@@ -133,7 +142,7 @@ defmodule SpaceTraders.API.ShadowAdmissionTest do
     assert measurements.queue_time >= 0
     assert measurements.request_time >= 0
     assert actual.correlation_id == correlation_id
-    assert actual.shadow_fingerprint == admission.fingerprint
+    assert actual.shadow_fingerprint == revised_fingerprint
     assert actual.status == 200
     assert actual.outcome == :ok
 
