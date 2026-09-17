@@ -52,6 +52,26 @@ defmodule SpaceTraders.Timeline do
   end
 
   @doc """
+  Moves a pending event's due time without replacing the durable event.
+
+  Returns `{:error, :event_not_pending}` when the event was already fired or
+  cancelled.
+  """
+  @spec reschedule_event(Event.t(), DateTime.t()) ::
+          {:ok, Event.t()} | {:error, :event_not_pending}
+  def reschedule_event(%Event{id: id} = event, due_at) do
+    due_at = microsecond_precision(due_at)
+
+    Event
+    |> where([e], e.id == ^id and e.status == "pending")
+    |> Repo.update_all(set: [due_at: due_at])
+    |> case do
+      {1, _} -> {:ok, %{event | due_at: due_at}}
+      {0, _} -> {:error, :event_not_pending}
+    end
+  end
+
+  @doc """
   Marks all pending events for `owner` as cancelled.
 
   When `event_type` is given, only events of that type are cancelled.

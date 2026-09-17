@@ -90,7 +90,7 @@ defmodule SpaceTraders.AutonomousRuntimeScenarioTest do
     assert Repo.get!(Event, event.id).status == "pending"
 
     stub_api(fn conn -> Req.Test.json(conn, %{"data" => ship_body(@ship_symbol)}) end)
-    restart_runtime_processes()
+    assert :ok = ShipServer.arm(game_agent, @ship_symbol, event)
 
     assert_receive notification = {:ship_updated, agent_id, @ship_symbol}
     assert agent_id == game_agent.id

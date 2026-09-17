@@ -170,7 +170,12 @@ defmodule SpaceTraders.Fleet.ShipServer do
     case refresh(state) do
       {:ok, ship} ->
         if still_busy?(type, ship) do
-          retry(event, state, "ship is still #{busy_label(type)} after #{type}")
+          retry(
+            event,
+            state,
+            "ship is still #{busy_label(type)} after #{type}",
+            known_wait_due_at(type, ship)
+          )
         else
           {:ok, :ok} =
             SpaceTraders.Outbox.publish(
@@ -210,9 +215,20 @@ defmodule SpaceTraders.Fleet.ShipServer do
   end
 
   defp retry(event, state, reason) do
-    Logger.warning("ship #{state.symbol}: #{reason}; retrying in #{@retry_delay_ms}ms")
-    Clock.send_after(self(), {:timeline, event}, @retry_delay_ms)
-    {:noreply, state}
+    retry(event, state, reason, nil)
+  end
+
+  defp retry(event, state, reason, known_due_at) do
+    due_at = known_due_at || DateTime.add(Clock.utc_now(), @retry_delay_ms, :millisecond)
+    Logger.warning("ship #{state.symbol}: #{reason}; retrying at #{DateTime.to_iso8601(due_at)}")
+
+    case Timeline.reschedule_event(event, due_at) do
+      {:ok, event} ->
+        {:noreply, rearm(event, state)}
+
+      {:error, :event_not_pending} ->
+        {:noreply, drop_pending_event(state, event_type(event), event)}
+    end
   end
 
   # An arrival is only done once the game reports the ship out of transit, and a
@@ -227,6 +243,23 @@ defmodule SpaceTraders.Fleet.ShipServer do
 
   defp still_busy?(_type, _ship), do: false
 
+  defp known_wait_due_at(:arrival, %Ship{nav: %ShipNav{route: route}}) do
+    case Timeline.parse_arrival(route) do
+      {:ok, due_at} -> future_due_at(due_at)
+      :error -> nil
+    end
+  end
+
+  defp known_wait_due_at(:cooldown, %Ship{cooldown: %Cooldown{remaining_seconds: seconds}})
+       when is_integer(seconds) and seconds > 0,
+       do: DateTime.add(Clock.utc_now(), seconds, :second)
+
+  defp known_wait_due_at(_type, _ship), do: nil
+
+  defp future_due_at(due_at) do
+    if DateTime.compare(due_at, Clock.utc_now()) == :gt, do: due_at
+  end
+
   defp busy_label(:arrival), do: "in transit"
   defp busy_label(:cooldown), do: "on cooldown"
 
@@ -237,7 +270,7 @@ defmodule SpaceTraders.Fleet.ShipServer do
   defp rearm(%Event{} = event, state) do
     type = String.to_existing_atom(event.event_type)
 
-    if match?(%{id: id} when id == event.id, Map.get(state.pending, type)) do
+    if Map.get(state.pending, type) == %{id: event.id, due_at: event.due_at} do
       state
     else
       Clock.send_at(self(), {:timeline, event}, event.due_at)
@@ -246,6 +279,8 @@ defmodule SpaceTraders.Fleet.ShipServer do
       %{state | pending: Map.put(state.pending, type, pending_event)}
     end
   end
+
+  defp event_type(event), do: String.to_existing_atom(event.event_type)
 
   defp drop_pending_event(state, type, event) do
     case Map.get(state.pending, type) do

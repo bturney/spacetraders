@@ -119,6 +119,34 @@ defmodule SpaceTraders.TimelineTest do
     end
   end
 
+  describe "reschedule_event/2" do
+    test "moves a pending event without changing its identity or status" do
+      {:ok, event} =
+        Timeline.schedule_event(:ship, "ORBITALIST-1", :arrival, DateTime.utc_now())
+
+      due_at = DateTime.add(DateTime.utc_now(), 30, :second)
+
+      assert {:ok, rescheduled} = Timeline.reschedule_event(event, due_at)
+      assert rescheduled.id == event.id
+      assert rescheduled.status == "pending"
+      assert rescheduled.due_at == due_at
+
+      persisted = Repo.get!(Event, event.id)
+      assert persisted.status == "pending"
+      assert persisted.due_at == due_at
+    end
+
+    test "does not reschedule an event that is no longer pending" do
+      {:ok, event} =
+        Timeline.schedule_event(:ship, "ORBITALIST-1", :arrival, DateTime.utc_now())
+
+      :ok = Timeline.fire_event(event)
+
+      assert Timeline.reschedule_event(event, DateTime.add(DateTime.utc_now(), 30, :second)) ==
+               {:error, :event_not_pending}
+    end
+  end
+
   describe "pending_events/2" do
     test "returns pending events soonest first, skipping done and cancelled" do
       later = DateTime.add(DateTime.utc_now(), 300, :second)
