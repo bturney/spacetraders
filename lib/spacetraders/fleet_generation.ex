@@ -17,7 +17,7 @@ defmodule SpaceTraders.FleetGeneration do
   alias SpaceTraders.Fleet.{Ship, ShipServer}
   alias SpaceTraders.FleetGeneration.Generation
   alias SpaceTraders.FleetStrategy.{Revision, Strategy}
-  alias SpaceTraders.{FleetStrategy, Repo, Timeline}
+  alias SpaceTraders.{Evidence, FleetStrategy, Repo, Timeline}
 
   defmodule CredentialReference do
     @moduledoc "A non-secret reference to an Operator's stored AccountToken."
@@ -174,7 +174,7 @@ defmodule SpaceTraders.FleetGeneration do
   @doc "Pulls an Agent's live game record and records definitive Server Reset evidence."
   def agent_overview(%Agent{agent_token: agent_token} = agent)
       when is_binary(agent_token) and agent_token != "" do
-    case SpaceTraders.API.get_agent(AgentTokenReference.new(agent)) do
+    case Evidence.get_agent(AgentTokenReference.new(agent), lane: :safety) do
       {:error, %SpaceTraders.API.GameplayError{} = error} = result ->
         if server_reset_mismatch?(error) do
           mark_stale_and_replace(agent)

@@ -487,7 +487,7 @@ defmodule SpaceTraders.Fleet.Intents do
              :ok <- Agent.execution_allowed?(agent) do
           case Agent.handle_game_result(
                  agent,
-                 SpaceTraders.API.get_ship(AgentTokenReference.new(agent), ship_symbol)
+                 SpaceTraders.Evidence.get_ship(AgentTokenReference.new(agent), ship_symbol)
                ) do
             {:ok, fresh_ship} ->
               reconcile(agent_id, ship_symbol, fresh_ship, :boot, intent.id, expected_job_id)
@@ -874,7 +874,7 @@ defmodule SpaceTraders.Fleet.Intents do
   defp fresh_job_ship(agent, ship_symbol, _live_ship) do
     Agent.handle_game_result(
       agent,
-      SpaceTraders.API.get_ship(AgentTokenReference.new(agent), ship_symbol)
+      SpaceTraders.Evidence.get_ship(AgentTokenReference.new(agent), ship_symbol)
     )
   end
 
@@ -1151,7 +1151,7 @@ defmodule SpaceTraders.Fleet.Intents do
          {:ok, live_ship} <-
            Agent.handle_game_result(
              agent,
-             SpaceTraders.API.get_ship(AgentTokenReference.new(agent), ship.symbol)
+             SpaceTraders.Evidence.get_ship(AgentTokenReference.new(agent), ship.symbol)
            ),
          true <- remote_waypoint?(live_ship.nav.waypoint_symbol, waypoint),
          {:ok, source_system} <- Fleet.system_from_headquarters(live_ship.nav.waypoint_symbol),
@@ -1197,7 +1197,7 @@ defmodule SpaceTraders.Fleet.Intents do
          {:ok, live_ship} <-
            Agent.handle_game_result(
              agent,
-             SpaceTraders.API.get_ship(AgentTokenReference.new(agent), ship.symbol)
+             SpaceTraders.Evidence.get_ship(AgentTokenReference.new(agent), ship.symbol)
            ),
          true <-
            remote_waypoint?(live_ship.nav.waypoint_symbol, waypoint) ||
@@ -1511,7 +1511,7 @@ defmodule SpaceTraders.Fleet.Intents do
       _ ->
         Agent.handle_game_result(
           agent,
-          SpaceTraders.API.get_ship(AgentTokenReference.new(agent), ship_symbol)
+          SpaceTraders.Evidence.get_ship(AgentTokenReference.new(agent), ship_symbol)
         )
     end
   end
@@ -1540,7 +1540,7 @@ defmodule SpaceTraders.Fleet.Intents do
          {:ok, live_ship} <-
            Agent.handle_game_result(
              agent,
-             SpaceTraders.API.get_ship(AgentTokenReference.new(agent), ship_symbol)
+             SpaceTraders.Evidence.get_ship(AgentTokenReference.new(agent), ship_symbol)
            ),
          {:ok, intent} <-
            insert_module_job_intent(current_job, ship_id, type, module_symbol, parameters) do
@@ -1845,7 +1845,7 @@ defmodule SpaceTraders.Fleet.Intents do
 
     case Agent.handle_game_result(
            agent,
-           SpaceTraders.API.get_ship(AgentTokenReference.new(agent), ship.symbol)
+           SpaceTraders.Evidence.get_ship(AgentTokenReference.new(agent), ship.symbol)
          ) do
       {:ok, live_ship} -> advance_intents(agent, intent, live_ship)
       {:error, reason} -> block_intents(intent, reason)
@@ -4182,7 +4182,7 @@ defmodule SpaceTraders.Fleet.Intents do
          :ok <- Agent.execution_allowed?(agent) do
       case Agent.handle_game_result(
              agent,
-             SpaceTraders.API.get_ship(AgentTokenReference.new(agent), ship_symbol)
+             SpaceTraders.Evidence.get_ship(AgentTokenReference.new(agent), ship_symbol)
            ) do
         {:ok, live_ship} ->
           reconcile(agent.id, ship_symbol, live_ship, :boot, intent.id, nil)
@@ -4205,7 +4205,7 @@ defmodule SpaceTraders.Fleet.Intents do
       _ ->
         Agent.handle_game_result(
           agent,
-          SpaceTraders.API.get_ship(AgentTokenReference.new(agent), ship_symbol)
+          SpaceTraders.Evidence.get_ship(AgentTokenReference.new(agent), ship_symbol)
         )
     end
   end

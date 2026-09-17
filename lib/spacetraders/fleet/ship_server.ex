@@ -303,7 +303,13 @@ defmodule SpaceTraders.Fleet.ShipServer do
         with :ok <- AgentContext.execution_allowed?(agent) do
           AgentContext.handle_game_result(
             agent,
-            SpaceTraders.API.get_ship(credential_ref, symbol, retry: false)
+            SpaceTraders.Evidence.get_ship(
+              credential_ref,
+              symbol,
+              retry: false,
+              lane: :safety,
+              owner: "ship_execution"
+            )
           )
         end
     end
