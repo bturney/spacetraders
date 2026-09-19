@@ -710,9 +710,6 @@ defmodule SpaceTraders.Fleet.Intents do
         {key, refuel} when key in [:refuel, "refuel"] ->
           refuel in ["to_capacity"]
 
-        {key, methods} when key in [:allowed_methods, "allowed_methods"] ->
-          is_list(methods) and Enum.all?(methods, &(&1 in ["jump", "warp"]))
-
         _constraint ->
           false
       end)
@@ -884,7 +881,7 @@ defmodule SpaceTraders.Fleet.Intents do
              mode: :immediate
            ),
          {:ok, live_ship} <- fresh_job_ship(agent, ship_symbol, live_ship) do
-      advance_intents(agent, intent, live_ship)
+      advance_new_intent(agent, intent, live_ship)
     else
       false -> {:error, :invalid_intent_owner}
       error -> error
@@ -1378,7 +1375,7 @@ defmodule SpaceTraders.Fleet.Intents do
              end,
              mode: :immediate
            ) do
-      advance_intents(agent, intent, live_ship)
+      advance_new_intent(agent, intent, live_ship)
     else
       false -> {:error, :invalid_cargo_intent_owner}
       error -> error
@@ -1461,7 +1458,7 @@ defmodule SpaceTraders.Fleet.Intents do
                    |> Map.new(fn {key, value} -> {to_string(key), value} end)
                    |> then(&normalize_delivery_recipient("deliver", &1, waypoint))
                }) do
-          advance_intents(agent, intent, live_ship)
+          advance_new_intent(agent, intent, live_ship)
         else
           false -> {:error, :invalid_cargo_intent_owner}
           error -> error
@@ -1507,7 +1504,7 @@ defmodule SpaceTraders.Fleet.Intents do
                      |> Map.put(:units, units)
                      |> Map.new(fn {key, value} -> {to_string(key), value} end)
                  }) do
-            advance_intents(agent, intent, live_ship)
+            advance_new_intent(agent, intent, live_ship)
           else
             false -> {:error, :invalid_cargo_intent_owner}
             error -> error
@@ -1567,7 +1564,7 @@ defmodule SpaceTraders.Fleet.Intents do
            ),
          {:ok, intent} <-
            insert_module_job_intent(current_job, ship_id, type, module_symbol, parameters) do
-      advance_intents(agent, intent, live_ship)
+      advance_new_intent(agent, intent, live_ship)
     else
       false -> {:error, :invalid_module_intent}
       error -> error
@@ -1874,6 +1871,12 @@ defmodule SpaceTraders.Fleet.Intents do
         {:ok, live_ship} -> advance_intents(agent, intent, live_ship)
         {:error, reason} -> block_intents(intent, reason)
       end
+    end
+  end
+
+  defp advance_new_intent(agent, intent, live_ship) do
+    with {:ok, intent} <- bind_root_intent_authority(agent, intent) do
+      advance_intents(agent, intent, live_ship)
     end
   end
 
@@ -3930,18 +3933,28 @@ defmodule SpaceTraders.Fleet.Intents do
     with {:ok, waypoints} <-
            SpaceTraders.Evidence.get_waypoints(AgentTokenReference.new(agent), system,
              type: "JUMP_GATE"
-           ),
-         {:ok, gate} <-
-           Enum.find_value(waypoints, fn waypoint ->
-             case Fleet.waypoint_jump_gate(agent, waypoint) do
-               {:ok, %{connections: connections}} ->
-                 if destination in connections, do: {:ok, waypoint}
+           ) do
+      results =
+        Enum.map(waypoints, fn waypoint ->
+          case Fleet.waypoint_jump_gate(agent, waypoint) do
+            {:ok, %{connections: connections}} -> {:ok, waypoint, connections}
+            {:error, reason} -> {:error, reason}
+          end
+        end)
 
-               _ ->
-                 nil
-             end
-           end) || {:error, :jump_gate_connection_unavailable} do
-      {:ok, gate.symbol}
+      case Enum.find(results, fn
+             {:ok, _waypoint, connections} -> destination in connections
+             {:error, _reason} -> false
+           end) do
+        {:ok, gate, _connections} ->
+          {:ok, gate.symbol}
+
+        nil ->
+          case Enum.find(results, &match?({:error, _reason}, &1)) do
+            {:error, reason} -> {:error, reason}
+            nil -> {:error, {:jump_gate_not_connected, system, destination}}
+          end
+      end
     end
   end
 
@@ -4405,28 +4418,29 @@ defmodule SpaceTraders.Fleet.Intents do
       attempt ->
         with {:ok, observations} <- absence_observations(agent, live_ship, attempt, action),
              {:ok, absent} <- MutationAttempts.reconcile(attempt, :absent, observations),
-             :ok <- retry_claim_current(agent, intent, live_ship.symbol, action),
-             result <-
-               MutationAttempts.with_retry(absent, fn ->
-                 dispatch_claimed_action(agent, live_ship, action)
-               end),
+             {:ok, result} <- retry_under_current_claim(agent, intent, live_ship, action, absent),
              {:ok, result} <- Agent.handle_game_result(agent, result) do
           accept_retried_action(agent, intent, live_ship, action, result)
         else
-          {:error, :no_current_ship_claim} -> supersede_for_lost_claim(intent)
+          {:error, :no_current_ship_claim} -> supersede_for_lost_claim(intent, true)
           {:error, reason} -> block_intents(intent, reason)
         end
     end
   end
 
-  defp retry_claim_current(agent, intent, ship_symbol, action) do
-    with {:ok, claim} <- FleetAllocation.authorize_ship_execution(agent, ship_symbol),
-         {:ok, binding} <- bind_intent_claim(intent, claim),
-         true <- Map.merge(action, binding.action) == action do
-      :ok
-    else
-      _ -> {:error, :no_current_ship_claim}
-    end
+  defp retry_under_current_claim(agent, intent, live_ship, action, absent) do
+    Repo.transaction(fn ->
+      with {:ok, claim} <-
+             FleetAllocation.authorize_ship_execution(agent, live_ship.symbol, lock: true),
+           {:ok, binding} <- bind_intent_claim(intent, claim),
+           true <- Map.merge(action, binding.action) == action do
+        MutationAttempts.with_retry(absent, fn ->
+          dispatch_claimed_action(agent, live_ship, action)
+        end)
+      else
+        _ -> Repo.rollback(:no_current_ship_claim)
+      end
+    end)
   end
 
   defp absence_observations(agent, live_ship, attempt, %{"kind" => "refuel"}) do
@@ -4626,9 +4640,8 @@ defmodule SpaceTraders.Fleet.Intents do
 
   defp authoritative_infeasibility?({:jump_gate_not_connected, _source, _destination}), do: true
 
-  defp authoritative_infeasibility?(reason)
-       when reason in [:jump_route_unavailable, :method_not_allowed],
-       do: true
+  defp authoritative_infeasibility?(:jump_route_unavailable),
+    do: true
 
   defp authoritative_infeasibility?(_reason), do: false
 
@@ -4664,7 +4677,15 @@ defmodule SpaceTraders.Fleet.Intents do
     end)
   end
 
-  defp supersede_for_lost_claim(intent) do
+  defp supersede_for_lost_claim(intent, outcome_reconciled? \\ false) do
+    if outcome_reconciled? or not unresolved_intent_evidence?(intent) do
+      do_supersede_for_lost_claim(intent)
+    else
+      block_intents(intent, :claim_withdrawn_pending_reconciliation)
+    end
+  end
+
+  defp do_supersede_for_lost_claim(intent) do
     now = DateTime.utc_now() |> DateTime.truncate(:second)
 
     transition_intent(intent,

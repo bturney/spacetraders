@@ -228,11 +228,32 @@ defmodule SpaceTraders.IntentsTest do
               ship_body("INTENTS-INFEASIBLE-SHIP", %{
                 "nav" => %{
                   "systemSymbol" => "X1-UX81",
-                  "waypointSymbol" => "X1-UX81-A1",
+                  "waypointSymbol" => "X1-UX81-G1",
                   "status" => "IN_ORBIT",
                   "flightMode" => "CRUISE"
                 }
               })
+          })
+
+        {"/v2/systems/X1-UX81/waypoints", "GET"} ->
+          Req.Test.json(conn, %{
+            "data" => [
+              %{
+                "symbol" => "X1-UX81-G1",
+                "systemSymbol" => "X1-UX81",
+                "type" => "JUMP_GATE"
+              }
+            ]
+          })
+
+        {"/v2/systems/X1-UX81/waypoints/X1-UX81-G1/construction", "GET"} ->
+          Req.Test.json(conn, %{
+            "data" => %{"symbol" => "X1-UX81-G1", "isComplete" => true, "materials" => []}
+          })
+
+        {"/v2/systems/X1-UX81/waypoints/X1-UX81-G1/jump-gate", "GET"} ->
+          Req.Test.json(conn, %{
+            "data" => %{"symbol" => "X1-UX81-G1", "connections" => []}
           })
 
         request ->
@@ -245,7 +266,7 @@ defmodule SpaceTraders.IntentsTest do
               status: "infeasible",
               last_action_result: %{
                 "outcome" => "infeasible",
-                "evidence" => %{"reason" => "method_not_allowed"}
+                "evidence" => %{"reason" => "jump_gate_not_connected"}
               }
             }} =
              Intents.request(
@@ -253,10 +274,7 @@ defmodule SpaceTraders.IntentsTest do
                agent,
                %Intents.ManualControl{},
                "INTENTS-INFEASIBLE-SHIP",
-               %Intents.Navigate{
-                 waypoint: "X2-UX81-A1",
-                 constraints: %{allowed_methods: []}
-               }
+               %Intents.Navigate{waypoint: "X2-UX81-G1"}
              )
 
     assert %Notification{
@@ -265,7 +283,7 @@ defmodule SpaceTraders.IntentsTest do
                "ship_symbol" => "INTENTS-INFEASIBLE-SHIP",
                "commitment_id" => commitment_id,
                "portfolio_id" => portfolio_id,
-               "reason" => "method_not_allowed"
+               "reason" => "jump_gate_not_connected"
              }
            } = Repo.get_by!(Notification, event: "ship_execution_infeasible")
 

@@ -24,6 +24,8 @@ defmodule SpaceTraders.Repo.Migrations.ActivateClaimedShipExecution do
   def down do
     drop_if_exists index(:intents, [:ship_id], name: :intents_one_active_per_ship_index)
 
+    execute("UPDATE intents SET status = 'stopped' WHERE status IN ('infeasible', 'superseded')")
+
     create unique_index(:intents, [:ship_id],
              where: "status NOT IN ('completed', 'stopped')",
              name: :intents_one_active_per_ship_index
