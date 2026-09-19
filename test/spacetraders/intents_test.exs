@@ -10,7 +10,12 @@ defmodule SpaceTraders.IntentsTest do
   alias SpaceTraders.Fleet
   alias SpaceTraders.Fleet.{Intent, Job, JobBlocker, Ship, ShipServer}
   alias SpaceTraders.Fleet.Intents
+  alias SpaceTraders.FleetAllocation
+  alias SpaceTraders.FleetAllocation.PortfolioCandidate
+  alias SpaceTraders.FleetGeneration.Generation
+  alias SpaceTraders.FleetStrategy.{Revision, Strategy}
   alias SpaceTraders.MutationAttempts
+  alias SpaceTraders.Outbox.Notification
   alias SpaceTraders.Timeline
   alias SpaceTraders.Timeline.Event
 
@@ -95,6 +100,114 @@ defmodule SpaceTraders.IntentsTest do
                "INTENTS-NAV-SHIP",
                %Intents.Navigate{waypoint: " X1-UX81-A2 "}
              )
+  end
+
+  test "refuses to command a target Ship without a current matching Claim" do
+    agent = agent_fixture("INTENTS-UNCLAIMED")
+    ship_fixture(agent, "INTENTS-UNCLAIMED-SHIP")
+
+    Repo.insert!(%Generation{
+      operator_id: agent.operator_id,
+      agent_id: agent.id,
+      number: 1,
+      symbol: agent.symbol,
+      faction: agent.faction,
+      replacement_symbols: %{},
+      objective_progress: %{}
+    })
+
+    Phoenix.PubSub.subscribe(SpaceTraders.PubSub, "fleet_allocation:#{agent.operator_id}")
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      case {conn.request_path, conn.method} do
+        {"/v2/my/ships/INTENTS-UNCLAIMED-SHIP", "GET"} ->
+          Req.Test.json(conn, %{
+            "data" =>
+              ship_body("INTENTS-UNCLAIMED-SHIP", %{
+                "nav" => %{
+                  "systemSymbol" => "X1-UX81",
+                  "waypointSymbol" => "X1-UX81-A1",
+                  "status" => "IN_ORBIT",
+                  "flightMode" => "CRUISE"
+                }
+              })
+          })
+
+        request ->
+          flunk("unexpected command without a Claim: #{inspect(request)}")
+      end
+    end)
+
+    assert :ok =
+             Intents.request(
+               manual_scope(agent),
+               agent,
+               %Intents.ManualControl{},
+               "INTENTS-UNCLAIMED-SHIP",
+               %Intents.Navigate{waypoint: "X1-UX81-A2"}
+             )
+
+    assert %Intent{
+             status: "infeasible",
+             last_action_result: %{
+               "outcome" => "infeasible",
+               "evidence" => %{"reason" => "no_current_ship_claim"}
+             }
+           } = Repo.one!(Intent)
+
+    assert %Notification{
+             event: "ship_execution_infeasible",
+             payload: %{
+               "ship_symbol" => "INTENTS-UNCLAIMED-SHIP",
+               "commitment_id" => nil,
+               "reason" => "no_current_ship_claim"
+             }
+           } = Repo.one!(Notification)
+
+    assert_receive {:outbox, _, "ship_execution_infeasible", payload}
+    assert payload["ship_symbol"] == "INTENTS-UNCLAIMED-SHIP"
+  end
+
+  test "commands a target Ship under its current Claim and retains Claim provenance" do
+    agent = agent_fixture("INTENTS-CLAIMED")
+    ship_fixture(agent, "INTENTS-CLAIMED-SHIP")
+    portfolio = activate_ship_claim(agent, "INTENTS-CLAIMED-SHIP")
+    [commitment] = portfolio.commitments
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      case {conn.request_path, conn.method} do
+        {"/v2/my/ships/INTENTS-CLAIMED-SHIP", "GET"} ->
+          Req.Test.json(conn, %{
+            "data" =>
+              ship_body("INTENTS-CLAIMED-SHIP", %{
+                "nav" => %{
+                  "systemSymbol" => "X1-UX81",
+                  "waypointSymbol" => "X1-UX81-A1",
+                  "status" => "IN_ORBIT",
+                  "flightMode" => "CRUISE"
+                }
+              })
+          })
+
+        {"/v2/my/ships/INTENTS-CLAIMED-SHIP/navigate", "POST"} ->
+          Req.Test.json(conn, %{
+            "data" => navigate_response("IN_TRANSIT", future_iso(), "X1-UX81-A2")
+          })
+      end
+    end)
+
+    assert {:ok, %Intent{status: "waiting", in_flight_action: action}} =
+             Intents.request(
+               manual_scope(agent),
+               agent,
+               %Intents.ManualControl{},
+               "INTENTS-CLAIMED-SHIP",
+               %Intents.Navigate{waypoint: "X1-UX81-A2"}
+             )
+
+    assert action["fleet_commitment_id"] == commitment.id
+    assert action["fleet_commitment_portfolio_id"] == portfolio.id
+    assert action["fleet_commitment_portfolio_version"] == portfolio.version
   end
 
   test "requests a closed Buy Goods goal through Manual Control" do
@@ -1571,7 +1684,7 @@ defmodule SpaceTraders.IntentsTest do
       assert_receive {:request, "/v2/my/ships/FLEET-SHIP/jump", "POST"}
     end
 
-    test "blocks an incomplete jump-gate endpoint without dispatching a jump" do
+    test "returns infeasibility for an incomplete jump-gate endpoint without dispatching" do
       agent = agent_fixture()
       ship_fixture(agent, "FLEET-SHIP")
       test_pid = self()
@@ -1611,7 +1724,7 @@ defmodule SpaceTraders.IntentsTest do
         end
       end)
 
-      assert {:ok, %Intent{status: "blocked", blocker: blocker}} =
+      assert {:ok, %Intent{status: "infeasible"} = intent} =
                Intents.request(
                  manual_scope(agent),
                  agent,
@@ -1622,13 +1735,7 @@ defmodule SpaceTraders.IntentsTest do
                  }
                )
 
-      assert blocker.reason == "jump_gate_incomplete"
-
-      assert blocker.corrective_actions == [
-               "inspect_construction",
-               "supply_construction",
-               "resume"
-             ]
+      assert intent.last_action_result["evidence"]["reason"] == "jump_gate_incomplete"
 
       refute_received {:request, "/v2/my/ships/FLEET-SHIP/jump", "POST"}
     end
@@ -1865,7 +1972,7 @@ defmodule SpaceTraders.IntentsTest do
                Timeline.pending_events(:ship, "FLEET-SHIP")
     end
 
-    test "blocks a fuel-empty Ship without dispatching navigation" do
+    test "returns infeasibility for a fuel-empty Ship without dispatching navigation" do
       agent = agent_fixture()
       ship_fixture(agent, "FLEET-SHIP")
 
@@ -1885,7 +1992,7 @@ defmodule SpaceTraders.IntentsTest do
         end
       end)
 
-      assert {:ok, %Intent{status: "blocked"} = intent} =
+      assert {:ok, %Intent{status: "infeasible"} = intent} =
                Intents.request(
                  manual_scope(agent),
                  agent,
@@ -1896,8 +2003,7 @@ defmodule SpaceTraders.IntentsTest do
                  }
                )
 
-      assert intent.blocker.reason == "insufficient_fuel"
-      assert "refuel" in intent.blocker.corrective_actions
+      assert intent.last_action_result["evidence"]["reason"] == "insufficient_fuel"
     end
 
     test "navigates a Fuel-independent Ship with zero fuel" do
@@ -2009,7 +2115,7 @@ defmodule SpaceTraders.IntentsTest do
              end)
     end
 
-    test "blocks on an authoritative insufficient-fuel rejection without retrying" do
+    test "returns authoritative insufficient-fuel infeasibility without retrying" do
       agent = agent_fixture()
       ship_fixture(agent, "FLEET-SHIP")
       test_pid = self()
@@ -2042,7 +2148,7 @@ defmodule SpaceTraders.IntentsTest do
         end
       end)
 
-      assert {:ok, %Intent{status: "blocked"} = intent} =
+      assert {:ok, %Intent{status: "infeasible"} = intent} =
                Intents.request(
                  manual_scope(agent),
                  agent,
@@ -2055,7 +2161,7 @@ defmodule SpaceTraders.IntentsTest do
 
       assert_received :navigate
       refute_receive :navigate
-      assert intent.blocker.reason == "insufficient_fuel"
+      assert intent.last_action_result["evidence"]["reason"] == "insufficient_fuel"
     end
 
     test "replaces a pending manual outcome explicitly without cancelling accepted transit" do
@@ -2670,6 +2776,69 @@ defmodule SpaceTraders.IntentsTest do
       assert intent.status == "blocked"
       assert intent.blocker.reason == "retry_exhausted"
     end
+  end
+
+  defp activate_ship_claim(agent, ship_symbol) do
+    strategy = Repo.insert!(%Strategy{operator_id: agent.operator_id, revision_number: 1})
+
+    revision =
+      Repo.insert!(%Revision{
+        fleet_strategy_id: strategy.id,
+        number: 1,
+        document: %{"objectives" => [%{"objective" => "Exercise Ship Execution"}]},
+        source: "operator",
+        activated_at: DateTime.utc_now(:second)
+      })
+
+    strategy
+    |> Ecto.Changeset.change(active_revision_id: revision.id)
+    |> Repo.update!()
+
+    generation =
+      Repo.insert!(%Generation{
+        operator_id: agent.operator_id,
+        agent_id: agent.id,
+        fleet_strategy_revision_id: revision.id,
+        number: 1,
+        symbol: agent.symbol,
+        faction: agent.faction,
+        replacement_symbols: %{},
+        objective_progress: %{}
+      })
+
+    candidate = %PortfolioCandidate{
+      id: "ship-execution-#{ship_symbol}",
+      strategy_revision_id: revision.id,
+      objective_index: 0,
+      claims: [ship_symbol],
+      reservations: %{},
+      pledges: [],
+      dependencies: [],
+      expected_value: 1,
+      unwind_cost: 0
+    }
+
+    {:ok, selection} =
+      FleetAllocation.select_portfolio(revision, [candidate], %{
+        as_of: DateTime.utc_now(),
+        source_version: 0,
+        claims: [ship_symbol],
+        reservations: %{}
+      })
+
+    {:ok, portfolio} =
+      FleetAllocation.publish_portfolio(
+        manual_scope(agent),
+        generation.id,
+        selection,
+        %{
+          evidence_references: [],
+          expectations: %{},
+          calibration_version: "ship-execution-test-v1"
+        }
+      )
+
+    portfolio
   end
 
   defp agent_fixture(symbol \\ "FLEET-2052", operator_id \\ nil) do
