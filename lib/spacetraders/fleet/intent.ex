@@ -30,9 +30,13 @@ defmodule SpaceTraders.Fleet.Intent do
     field :last_action_result, :map
     field :recovery_attempts, :integer, default: 0
     field :finished_at, :utc_datetime
+    field :fleet_commitment_portfolio_version, :integer
 
     belongs_to :ship, SpaceTraders.Fleet.Ship
     belongs_to :job, SpaceTraders.Fleet.Job
+    belongs_to :fleet_commitment, SpaceTraders.FleetAllocation.Commitment
+
+    belongs_to :fleet_commitment_portfolio, SpaceTraders.FleetAllocation.Portfolio
 
     timestamps(type: :utc_datetime)
   end
@@ -52,7 +56,10 @@ defmodule SpaceTraders.Fleet.Intent do
       :parameters,
       :review_revision,
       :status,
-      :job_id
+      :job_id,
+      :fleet_commitment_id,
+      :fleet_commitment_portfolio_id,
+      :fleet_commitment_portfolio_version
     ])
     |> cast_embed(:blocker)
     |> validate_required([:caller, :type, :target_waypoint])

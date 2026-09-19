@@ -116,8 +116,6 @@ defmodule SpaceTraders.IntentsTest do
       objective_progress: %{}
     })
 
-    Phoenix.PubSub.subscribe(SpaceTraders.PubSub, "fleet_allocation:#{agent.operator_id}")
-
     Req.Test.stub(SpaceTraders.API, fn conn ->
       case {conn.request_path, conn.method} do
         {"/v2/my/ships/INTENTS-UNCLAIMED-SHIP", "GET"} ->
@@ -138,7 +136,7 @@ defmodule SpaceTraders.IntentsTest do
       end
     end)
 
-    assert :ok =
+    assert {:error, :no_current_ship_claim} =
              Intents.request(
                manual_scope(agent),
                agent,
@@ -147,25 +145,20 @@ defmodule SpaceTraders.IntentsTest do
                %Intents.Navigate{waypoint: "X1-UX81-A2"}
              )
 
-    assert %Intent{
-             status: "infeasible",
-             last_action_result: %{
-               "outcome" => "infeasible",
-               "evidence" => %{"reason" => "no_current_ship_claim"}
-             }
-           } = Repo.one!(Intent)
+    assert %Intent{ship_id: ship_id} =
+             refused =
+             Repo.one!(Intent)
 
-    assert %Notification{
-             event: "ship_execution_infeasible",
-             payload: %{
-               "ship_symbol" => "INTENTS-UNCLAIMED-SHIP",
-               "commitment_id" => nil,
+    assert %Intent{
+             status: "superseded",
+             last_action_result: %{
+               "outcome" => "authority_refused",
                "reason" => "no_current_ship_claim"
              }
-           } = Repo.one!(Notification)
+           } = refused
 
-    assert_receive {:outbox, _, "ship_execution_infeasible", payload}
-    assert payload["ship_symbol"] == "INTENTS-UNCLAIMED-SHIP"
+    assert %Intent{status: "active"} =
+             Repo.insert!(%Intent{ship_id: ship_id, target_waypoint: "X1-UX81-A3"})
   end
 
   test "commands a target Ship under its current Claim and retains Claim provenance" do
@@ -196,7 +189,14 @@ defmodule SpaceTraders.IntentsTest do
       end
     end)
 
-    assert {:ok, %Intent{status: "waiting", in_flight_action: action}} =
+    assert {:ok,
+            %Intent{
+              status: "waiting",
+              fleet_commitment_id: commitment_id,
+              fleet_commitment_portfolio_id: portfolio_id,
+              fleet_commitment_portfolio_version: portfolio_version,
+              in_flight_action: action
+            }} =
              Intents.request(
                manual_scope(agent),
                agent,
@@ -205,9 +205,73 @@ defmodule SpaceTraders.IntentsTest do
                %Intents.Navigate{waypoint: "X1-UX81-A2"}
              )
 
+    assert commitment_id == commitment.id
+    assert portfolio_id == portfolio.id
+    assert portfolio_version == portfolio.version
     assert action["fleet_commitment_id"] == commitment.id
     assert action["fleet_commitment_portfolio_id"] == portfolio.id
     assert action["fleet_commitment_portfolio_version"] == portfolio.version
+  end
+
+  test "returns authoritative infeasibility evidence to Fleet Allocation" do
+    agent = agent_fixture("INTENTS-INFEASIBLE")
+    ship_fixture(agent, "INTENTS-INFEASIBLE-SHIP")
+    portfolio = activate_ship_claim(agent, "INTENTS-INFEASIBLE-SHIP")
+    [commitment] = portfolio.commitments
+    Phoenix.PubSub.subscribe(SpaceTraders.PubSub, "fleet_allocation:#{agent.operator_id}")
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      case {conn.request_path, conn.method} do
+        {"/v2/my/ships/INTENTS-INFEASIBLE-SHIP", "GET"} ->
+          Req.Test.json(conn, %{
+            "data" =>
+              ship_body("INTENTS-INFEASIBLE-SHIP", %{
+                "nav" => %{
+                  "systemSymbol" => "X1-UX81",
+                  "waypointSymbol" => "X1-UX81-A1",
+                  "status" => "IN_ORBIT",
+                  "flightMode" => "CRUISE"
+                }
+              })
+          })
+
+        request ->
+          flunk("unexpected command for infeasible Intent: #{inspect(request)}")
+      end
+    end)
+
+    assert {:ok,
+            %Intent{
+              status: "infeasible",
+              last_action_result: %{
+                "outcome" => "infeasible",
+                "evidence" => %{"reason" => "method_not_allowed"}
+              }
+            }} =
+             Intents.request(
+               manual_scope(agent),
+               agent,
+               %Intents.ManualControl{},
+               "INTENTS-INFEASIBLE-SHIP",
+               %Intents.Navigate{
+                 waypoint: "X2-UX81-A1",
+                 constraints: %{allowed_methods: []}
+               }
+             )
+
+    assert %Notification{
+             event: "ship_execution_infeasible",
+             payload: %{
+               "ship_symbol" => "INTENTS-INFEASIBLE-SHIP",
+               "commitment_id" => commitment_id,
+               "portfolio_id" => portfolio_id,
+               "reason" => "method_not_allowed"
+             }
+           } = Repo.get_by!(Notification, event: "ship_execution_infeasible")
+
+    assert commitment_id == commitment.id
+    assert portfolio_id == portfolio.id
+    assert_receive {:outbox, _, "ship_execution_infeasible", _payload}
   end
 
   test "requests a closed Buy Goods goal through Manual Control" do
@@ -1684,7 +1748,7 @@ defmodule SpaceTraders.IntentsTest do
       assert_receive {:request, "/v2/my/ships/FLEET-SHIP/jump", "POST"}
     end
 
-    test "returns infeasibility for an incomplete jump-gate endpoint without dispatching" do
+    test "blocks an incomplete jump-gate endpoint without dispatching a jump" do
       agent = agent_fixture()
       ship_fixture(agent, "FLEET-SHIP")
       test_pid = self()
@@ -1724,7 +1788,7 @@ defmodule SpaceTraders.IntentsTest do
         end
       end)
 
-      assert {:ok, %Intent{status: "infeasible"} = intent} =
+      assert {:ok, %Intent{status: "blocked", blocker: blocker}} =
                Intents.request(
                  manual_scope(agent),
                  agent,
@@ -1735,7 +1799,13 @@ defmodule SpaceTraders.IntentsTest do
                  }
                )
 
-      assert intent.last_action_result["evidence"]["reason"] == "jump_gate_incomplete"
+      assert blocker.reason == "jump_gate_incomplete"
+
+      assert blocker.corrective_actions == [
+               "inspect_construction",
+               "supply_construction",
+               "resume"
+             ]
 
       refute_received {:request, "/v2/my/ships/FLEET-SHIP/jump", "POST"}
     end
@@ -1972,7 +2042,7 @@ defmodule SpaceTraders.IntentsTest do
                Timeline.pending_events(:ship, "FLEET-SHIP")
     end
 
-    test "returns infeasibility for a fuel-empty Ship without dispatching navigation" do
+    test "blocks a fuel-empty Ship without dispatching navigation" do
       agent = agent_fixture()
       ship_fixture(agent, "FLEET-SHIP")
 
@@ -1992,7 +2062,7 @@ defmodule SpaceTraders.IntentsTest do
         end
       end)
 
-      assert {:ok, %Intent{status: "infeasible"} = intent} =
+      assert {:ok, %Intent{status: "blocked"} = intent} =
                Intents.request(
                  manual_scope(agent),
                  agent,
@@ -2003,7 +2073,8 @@ defmodule SpaceTraders.IntentsTest do
                  }
                )
 
-      assert intent.last_action_result["evidence"]["reason"] == "insufficient_fuel"
+      assert intent.blocker.reason == "insufficient_fuel"
+      assert "refuel" in intent.blocker.corrective_actions
     end
 
     test "navigates a Fuel-independent Ship with zero fuel" do
@@ -2115,7 +2186,7 @@ defmodule SpaceTraders.IntentsTest do
              end)
     end
 
-    test "returns authoritative insufficient-fuel infeasibility without retrying" do
+    test "blocks on an authoritative insufficient-fuel rejection without retrying" do
       agent = agent_fixture()
       ship_fixture(agent, "FLEET-SHIP")
       test_pid = self()
@@ -2148,7 +2219,7 @@ defmodule SpaceTraders.IntentsTest do
         end
       end)
 
-      assert {:ok, %Intent{status: "infeasible"} = intent} =
+      assert {:ok, %Intent{status: "blocked"} = intent} =
                Intents.request(
                  manual_scope(agent),
                  agent,
@@ -2161,7 +2232,7 @@ defmodule SpaceTraders.IntentsTest do
 
       assert_received :navigate
       refute_receive :navigate
-      assert intent.last_action_result["evidence"]["reason"] == "insufficient_fuel"
+      assert intent.blocker.reason == "insufficient_fuel"
     end
 
     test "replaces a pending manual outcome explicitly without cancelling accepted transit" do
@@ -2671,6 +2742,46 @@ defmodule SpaceTraders.IntentsTest do
       assert retry.retry_of_id == ambiguous.id
     end
 
+    test "boot recovery does not retry proven-absent navigation after its Claim is withdrawn" do
+      agent = agent_fixture("CLAIM-RETRY")
+      ship_fixture(agent, "CLAIM-RETRY-SHIP")
+      portfolio = activate_ship_claim(agent, "CLAIM-RETRY-SHIP")
+      {:ok, dispatches} = Agent.start_link(fn -> 0 end)
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case {conn.request_path, conn.method} do
+          {"/v2/my/ships/CLAIM-RETRY-SHIP", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => ship_body("CLAIM-RETRY-SHIP", %{"nav" => nav_body("IN_ORBIT")})
+            })
+
+          {"/v2/my/ships/CLAIM-RETRY-SHIP/navigate", "POST"} ->
+            Agent.update(dispatches, &(&1 + 1))
+            Req.Test.transport_error(conn, :timeout)
+        end
+      end)
+
+      assert {:ok, %Intent{id: intent_id, status: "blocked"}} =
+               Intents.request(
+                 manual_scope(agent),
+                 agent,
+                 %Intents.ManualControl{},
+                 "CLAIM-RETRY-SHIP",
+                 %Intents.Navigate{waypoint: "X1-UX81-A2"}
+               )
+
+      supersede_ship_claim(agent, portfolio)
+
+      assert {:ok,
+              %Intent{
+                status: "superseded",
+                last_action_result: %{"outcome" => "authority_refused"}
+              }} = Intents.reconcile(agent.id, "CLAIM-RETRY-SHIP", nil, :boot, intent_id, nil)
+
+      assert Agent.get(dispatches, & &1) == 1
+      assert [%{state: "absent"}] = MutationAttempts.list_for_agent(agent)
+    end
+
     test "boot recovery completes an Intent whose Ship already sits at the target" do
       agent = agent_fixture()
       ship = ship_fixture(agent, "FLEET-SHIP")
@@ -2839,6 +2950,32 @@ defmodule SpaceTraders.IntentsTest do
       )
 
     portfolio
+  end
+
+  defp supersede_ship_claim(agent, portfolio) do
+    revision = Repo.get!(Revision, portfolio.fleet_strategy_revision_id)
+
+    {:ok, selection} =
+      FleetAllocation.select_portfolio(revision, [], %{
+        as_of: DateTime.utc_now(),
+        source_version: portfolio.version,
+        claims: [],
+        reservations: %{}
+      })
+
+    {:ok, replacement} =
+      FleetAllocation.publish_portfolio(
+        manual_scope(agent),
+        portfolio.fleet_generation_id,
+        selection,
+        %{
+          evidence_references: [],
+          expectations: %{},
+          calibration_version: "ship-execution-test-v1"
+        }
+      )
+
+    replacement
   end
 
   defp agent_fixture(symbol \\ "FLEET-2052", operator_id \\ nil) do
