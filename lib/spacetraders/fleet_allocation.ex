@@ -6,6 +6,7 @@ defmodule SpaceTraders.FleetAllocation do
 
   import Ecto.Query
 
+  alias SpaceTraders.Agent.Agent, as: AgentRecord
   alias SpaceTraders.Agent.Scope
   alias SpaceTraders.FleetAllocation.{Commitment, Portfolio, StrategyDecisionEpisode}
   alias SpaceTraders.FleetGeneration.Generation
@@ -151,6 +152,119 @@ defmodule SpaceTraders.FleetAllocation do
     |> Repo.one()
   end
 
+  @doc "Returns the current Fleet Commitment Claim authorizing one Ship."
+  def current_ship_claim(agent, ship_symbol, opts \\ [])
+
+  def current_ship_claim(
+        %AgentRecord{id: agent_id, operator_id: operator_id},
+        ship_symbol,
+        opts
+      )
+      when is_integer(operator_id) and is_binary(ship_symbol) do
+    query =
+      from claim in "fleet_commitment_claims",
+        join: commitment in Commitment,
+        on: commitment.id == claim.fleet_commitment_id,
+        join: portfolio in Portfolio,
+        on: portfolio.id == claim.fleet_commitment_portfolio_id,
+        join: generation in Generation,
+        on: generation.id == portfolio.fleet_generation_id,
+        where:
+          claim.resource == ^ship_symbol and portfolio.operator_id == ^operator_id and
+            generation.agent_id == ^agent_id and is_nil(portfolio.superseded_at) and
+            is_nil(generation.fenced_at) and is_nil(generation.retired_at) and
+            commitment.unwind_state == :not_required,
+        select: %{
+          commitment_id: commitment.id,
+          candidate_id: commitment.candidate_id,
+          portfolio_id: portfolio.id,
+          portfolio_version: portfolio.version,
+          decision_episode_id: portfolio.strategy_decision_episode_id
+        }
+
+    query = if Keyword.get(opts, :lock, false), do: lock(query, "FOR SHARE"), else: query
+
+    case Repo.one(query) do
+      nil -> {:error, :no_current_ship_claim}
+      claim -> {:ok, claim}
+    end
+  end
+
+  def current_ship_claim(_agent, _ship_symbol, _opts),
+    do: {:error, :no_current_ship_claim}
+
+  @doc false
+  def authorize_ship_execution(agent, ship_symbol, opts \\ [])
+
+  def authorize_ship_execution(
+        %AgentRecord{id: agent_id, operator_id: operator_id} = agent,
+        ship_symbol,
+        opts
+      )
+      when is_integer(operator_id) and is_binary(ship_symbol) do
+    active_generation? =
+      Repo.exists?(
+        from generation in Generation,
+          where:
+            generation.agent_id == ^agent_id and generation.operator_id == ^operator_id and
+              is_nil(generation.fenced_at) and is_nil(generation.retired_at)
+      )
+
+    if active_generation? do
+      current_ship_claim(agent, ship_symbol, opts)
+    else
+      # Legacy Jobs and Manual Control remain the sole authority until their
+      # Fleet Generation is activated onto target Ship Execution.
+      {:ok, %{commitment_id: nil, portfolio_id: nil, portfolio_version: nil}}
+    end
+  end
+
+  def authorize_ship_execution(%AgentRecord{operator_id: nil}, _ship_symbol, _opts),
+    do: {:ok, %{commitment_id: nil, portfolio_id: nil, portfolio_version: nil}}
+
+  def authorize_ship_execution(_agent, _ship_symbol, _opts),
+    do: {:error, :no_current_ship_claim}
+
+  @doc "Returns structured Ship Execution infeasibility evidence to Fleet Allocation."
+  def report_infeasibility(
+        %AgentRecord{operator_id: operator_id} = agent,
+        ship_symbol,
+        evidence,
+        state_change
+      )
+      when is_integer(operator_id) and is_binary(ship_symbol) and is_map(evidence) and
+             is_function(state_change, 0) do
+    notification = fn _result ->
+      claim =
+        case current_ship_claim(agent, ship_symbol) do
+          {:ok, claim} -> claim
+          {:error, :no_current_ship_claim} -> %{}
+        end
+
+      payload =
+        %{
+          "ship_symbol" => ship_symbol,
+          "commitment_id" => claim[:commitment_id],
+          "candidate_id" => claim[:candidate_id],
+          "portfolio_id" => claim[:portfolio_id],
+          "portfolio_version" => claim[:portfolio_version],
+          "decision_episode_id" => claim[:decision_episode_id]
+        }
+        |> Map.merge(json_safe(evidence))
+
+      %{
+        topic: "fleet_allocation:#{operator_id}",
+        event: "ship_execution_infeasible",
+        payload: payload
+      }
+    end
+
+    Outbox.publish(notification, state_change)
+  end
+
+  def report_infeasibility(_agent, _ship_symbol, _evidence, _state_change),
+    do: {:error, :invalid_infeasibility_evidence}
+
   defp publish_selected_portfolio(
          operator_id,
          generation_id,
@@ -275,6 +389,7 @@ defmodule SpaceTraders.FleetAllocation do
 
   defp json_safe(list) when is_list(list), do: Enum.map(list, &json_safe/1)
   defp json_safe(tuple) when is_tuple(tuple), do: tuple |> Tuple.to_list() |> json_safe()
+  defp json_safe(nil), do: nil
   defp json_safe(atom) when is_atom(atom), do: Atom.to_string(atom)
   defp json_safe(value), do: value
 

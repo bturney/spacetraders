@@ -15,7 +15,9 @@ defmodule SpaceTraders.FleetAllocationPublishTest do
   @as_of ~U[2030-01-01 12:00:00Z]
 
   test "publishes protections, Decision Episode, and notification as one version" do
-    %{scope: scope, generation: generation, revision: revision} = allocation_fixture()
+    %{scope: scope, agent: agent, generation: generation, revision: revision} =
+      allocation_fixture()
+
     Phoenix.PubSub.subscribe(SpaceTraders.PubSub, "fleet_allocation:#{scope.operator.id}")
 
     selection = selection(revision)
@@ -39,6 +41,10 @@ defmodule SpaceTraders.FleetAllocationPublishTest do
     assert commitment.candidate_id == "candidate-1"
     assert commitment.claims == ["SHIP-1"]
     assert commitment.reservations == %{"credits" => 50}
+    assert {:ok, claim} = FleetAllocation.current_ship_claim(agent, "SHIP-1")
+    assert claim.commitment_id == commitment.id
+    assert claim.portfolio_id == portfolio.id
+    assert claim.portfolio_version == 1
 
     assert %StrategyDecisionEpisode{} = episode = portfolio.strategy_decision_episode
     assert episode.evidence_references == decision.evidence_references
@@ -162,7 +168,7 @@ defmodule SpaceTraders.FleetAllocationPublishTest do
       })
       |> Repo.insert!()
 
-    %{scope: scope, generation: generation, revision: revision}
+    %{scope: scope, agent: agent, generation: generation, revision: revision}
   end
 
   test "rejects forged duplicate protections before publication" do

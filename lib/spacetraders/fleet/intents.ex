@@ -18,6 +18,7 @@ defmodule SpaceTraders.Fleet.Intents do
   alias SpaceTraders.API.Model.{Contract, ShipNav}
   alias SpaceTraders.Fleet.{Intent, Job, Ship}
   alias SpaceTraders.Fleet
+  alias SpaceTraders.FleetAllocation
   alias SpaceTraders.Fleet.ShipServer
   alias SpaceTraders.Repo
   alias SpaceTraders.SafetyFence.DependencyKey
@@ -880,7 +881,7 @@ defmodule SpaceTraders.Fleet.Intents do
              mode: :immediate
            ),
          {:ok, live_ship} <- fresh_job_ship(agent, ship_symbol, live_ship) do
-      advance_intents(agent, intent, live_ship)
+      advance_new_intent(agent, intent, live_ship)
     else
       false -> {:error, :invalid_intent_owner}
       error -> error
@@ -1374,7 +1375,7 @@ defmodule SpaceTraders.Fleet.Intents do
              end,
              mode: :immediate
            ) do
-      advance_intents(agent, intent, live_ship)
+      advance_new_intent(agent, intent, live_ship)
     else
       false -> {:error, :invalid_cargo_intent_owner}
       error -> error
@@ -1457,7 +1458,7 @@ defmodule SpaceTraders.Fleet.Intents do
                    |> Map.new(fn {key, value} -> {to_string(key), value} end)
                    |> then(&normalize_delivery_recipient("deliver", &1, waypoint))
                }) do
-          advance_intents(agent, intent, live_ship)
+          advance_new_intent(agent, intent, live_ship)
         else
           false -> {:error, :invalid_cargo_intent_owner}
           error -> error
@@ -1503,7 +1504,7 @@ defmodule SpaceTraders.Fleet.Intents do
                      |> Map.put(:units, units)
                      |> Map.new(fn {key, value} -> {to_string(key), value} end)
                  }) do
-            advance_intents(agent, intent, live_ship)
+            advance_new_intent(agent, intent, live_ship)
           else
             false -> {:error, :invalid_cargo_intent_owner}
             error -> error
@@ -1563,7 +1564,7 @@ defmodule SpaceTraders.Fleet.Intents do
            ),
          {:ok, intent} <-
            insert_module_job_intent(current_job, ship_id, type, module_symbol, parameters) do
-      advance_intents(agent, intent, live_ship)
+      advance_new_intent(agent, intent, live_ship)
     else
       false -> {:error, :invalid_module_intent}
       error -> error
@@ -1860,14 +1861,55 @@ defmodule SpaceTraders.Fleet.Intents do
   end
 
   defp reconcile_intents(agent, intent) do
+    with {:ok, intent} <- bind_root_intent_authority(agent, intent) do
+      ship = Repo.get!(Ship, intent.ship_id)
+
+      case Agent.handle_game_result(
+             agent,
+             SpaceTraders.Evidence.get_ship(AgentTokenReference.new(agent), ship.symbol)
+           ) do
+        {:ok, live_ship} -> advance_intents(agent, intent, live_ship)
+        {:error, reason} -> block_intents(intent, reason)
+      end
+    end
+  end
+
+  defp advance_new_intent(agent, intent, live_ship) do
+    with {:ok, intent} <- bind_root_intent_authority(agent, intent) do
+      advance_intents(agent, intent, live_ship)
+    end
+  end
+
+  defp bind_root_intent_authority(agent, intent) do
     ship = Repo.get!(Ship, intent.ship_id)
 
-    case Agent.handle_game_result(
-           agent,
-           SpaceTraders.Evidence.get_ship(AgentTokenReference.new(agent), ship.symbol)
-         ) do
-      {:ok, live_ship} -> advance_intents(agent, intent, live_ship)
-      {:error, reason} -> block_intents(intent, reason)
+    result =
+      Repo.transaction(
+        fn ->
+          current = Repo.get!(Intent, intent.id)
+
+          with {:ok, claim} <-
+                 FleetAllocation.authorize_ship_execution(agent, ship.symbol, lock: true),
+               {:ok, binding} <- bind_intent_claim(current, claim) do
+            if binding.intent == %{} do
+              current
+            else
+              update_intent!(Ecto.Changeset.change(current, binding.intent))
+            end
+          else
+            _ -> Repo.rollback(:no_current_ship_claim)
+          end
+        end,
+        mode: :immediate
+      )
+
+    case result do
+      {:ok, intent} ->
+        {:ok, intent}
+
+      {:error, :no_current_ship_claim} ->
+        supersede_for_lost_claim(intent)
+        {:error, :no_current_ship_claim}
     end
   end
 
@@ -2293,11 +2335,14 @@ defmodule SpaceTraders.Fleet.Intents do
       Fleet.cooldown_active?(live_ship) ->
         wait_for_manual_cooldown(agent, intent, live_ship)
 
-      docked?(live_ship) ->
-        orbit_for_intents(agent, intent, live_ship)
+      fuel_empty?(live_ship) and docked?(live_ship) ->
+        refuel_for_navigate(agent, intent, live_ship)
 
       fuel_empty?(live_ship) ->
-        block_cargo_intent(intent, {:insufficient_fuel, intent.target_waypoint})
+        dock_for_navigate(agent, intent, live_ship)
+
+      docked?(live_ship) ->
+        orbit_for_intents(agent, intent, live_ship)
 
       true ->
         dispatch_manual_navigate(agent, intent, live_ship)
@@ -2306,7 +2351,7 @@ defmodule SpaceTraders.Fleet.Intents do
 
   defp dock_for_cargo_intent(agent, intent, live_ship) do
     with {:ok, intent} <-
-           claim_intent_action(intent, %{
+           claim_intent_action(agent, intent, %{
              "kind" => "dock",
              "waypoint" => live_ship.nav.waypoint_symbol
            }) do
@@ -2363,7 +2408,7 @@ defmodule SpaceTraders.Fleet.Intents do
         }
         |> delivery_action_evidence(recipient, live_ship.cargo, intent.parameters["trade_symbol"])
 
-      with {:ok, intent} <- claim_intent_action(intent, action) do
+      with {:ok, intent} <- claim_intent_action(agent, intent, action) do
         execute_cargo_intent(agent, intent, live_ship, units, recipient)
       else
         {:error, _reason} -> :ok
@@ -2384,7 +2429,7 @@ defmodule SpaceTraders.Fleet.Intents do
         "cargo_before" => Fleet.item_units(live_ship.cargo, intent.parameters["trade_symbol"])
       }
 
-      with {:ok, intent} <- claim_intent_action(intent, action) do
+      with {:ok, intent} <- claim_intent_action(agent, intent, action) do
         execute_cargo_intent(agent, intent, live_ship, units, good)
       else
         {:error, _reason} -> :ok
@@ -2651,22 +2696,82 @@ defmodule SpaceTraders.Fleet.Intents do
   # Serialize the final ownership check with writing the request fingerprint.
   # A paused/replaced Job can therefore never dispatch an action from a stale
   # callback after another process changed its intent.
-  defp claim_intent_action(intent, action) do
-    Repo.transaction(
-      fn ->
-        current = Repo.get(Intent, intent.id)
+  defp claim_intent_action(agent, intent, action) do
+    result =
+      Repo.transaction(
+        fn ->
+          current = Repo.get(Intent, intent.id)
 
-        if (current && Intent.unfinished?(current)) and is_nil(current.in_flight_action) and
-             intent_owned_by_running_job_or_manual?(current) do
-          update_intent!(
-            Ecto.Changeset.change(current, status: "active", in_flight_action: action)
-          )
-        else
-          Repo.rollback(:intent_dispatch_no_longer_allowed)
-        end
-      end,
-      mode: :immediate
-    )
+          with %Intent{} = current <- current,
+               true <- Intent.unfinished?(current),
+               true <- is_nil(current.in_flight_action),
+               true <- intent_owned_by_running_job_or_manual?(current),
+               %Ship{symbol: ship_symbol} <- Repo.get(Ship, current.ship_id),
+               {:ok, claim} <-
+                 FleetAllocation.authorize_ship_execution(agent, ship_symbol, lock: true),
+               {:ok, binding} <- bind_intent_claim(current, claim) do
+            action = Map.merge(action, binding.action)
+
+            update_intent!(
+              Ecto.Changeset.change(
+                current,
+                Map.merge(binding.intent, %{status: "active", in_flight_action: action})
+              )
+            )
+          else
+            {:error, :no_current_ship_claim} -> Repo.rollback(:no_current_ship_claim)
+            {:error, :intent_claim_mismatch} -> Repo.rollback(:no_current_ship_claim)
+            _ -> Repo.rollback(:intent_dispatch_no_longer_allowed)
+          end
+        end,
+        mode: :immediate
+      )
+
+    case result do
+      {:error, :no_current_ship_claim} ->
+        supersede_for_lost_claim(intent)
+        {:error, :no_current_ship_claim}
+
+      other ->
+        other
+    end
+  end
+
+  defp bind_intent_claim(intent, %{commitment_id: nil}) do
+    if is_nil(intent.fleet_commitment_id) do
+      {:ok, %{intent: %{}, action: %{}}}
+    else
+      {:error, :intent_claim_mismatch}
+    end
+  end
+
+  defp bind_intent_claim(intent, claim) do
+    binding = %{
+      fleet_commitment_id: claim.commitment_id,
+      fleet_commitment_portfolio_id: claim.portfolio_id,
+      fleet_commitment_portfolio_version: claim.portfolio_version
+    }
+
+    current =
+      Map.take(intent, [
+        :fleet_commitment_id,
+        :fleet_commitment_portfolio_id,
+        :fleet_commitment_portfolio_version
+      ])
+
+    if is_nil(intent.fleet_commitment_id) or current == binding do
+      {:ok,
+       %{
+         intent: binding,
+         action: %{
+           "fleet_commitment_id" => claim.commitment_id,
+           "fleet_commitment_portfolio_id" => claim.portfolio_id,
+           "fleet_commitment_portfolio_version" => claim.portfolio_version
+         }
+       }}
+    else
+      {:error, :intent_claim_mismatch}
+    end
   end
 
   # Job callbacks may outlive a pause or preemption. Every durable transition
@@ -2905,7 +3010,7 @@ defmodule SpaceTraders.Fleet.Intents do
       "cargo_before" => cargo_before
     }
 
-    case claim_intent_action(intent, action) do
+    case claim_intent_action(agent, intent, action) do
       {:ok, intent} ->
         result =
           case intent.type do
@@ -3188,6 +3293,14 @@ defmodule SpaceTraders.Fleet.Intents do
   defp maybe_put_delivery(result, _response, _type), do: result
 
   defp block_cargo_intent(intent, reason) do
+    if authoritative_infeasibility?(reason) do
+      mark_infeasible(intent, reason)
+    else
+      do_block_cargo_intent(intent, reason)
+    end
+  end
+
+  defp do_block_cargo_intent(intent, reason) do
     evidence = %{
       "target" => intent.target_waypoint,
       "trade_good" => intent.parameters["trade_symbol"],
@@ -3598,7 +3711,7 @@ defmodule SpaceTraders.Fleet.Intents do
 
   defp refuel_for_navigate(agent, intent, live_ship) do
     with {:ok, intent} <-
-           claim_intent_action(intent, %{
+           claim_intent_action(agent, intent, %{
              "kind" => "refuel",
              "waypoint" => live_ship.nav.waypoint_symbol,
              "fuel_before" => live_ship.fuel.current,
@@ -3665,7 +3778,7 @@ defmodule SpaceTraders.Fleet.Intents do
     flight_mode = navigate_constraint(intent, "flight_mode")
 
     with {:ok, intent} <-
-           claim_intent_action(intent, %{
+           claim_intent_action(agent, intent, %{
              "kind" => "set_flight_mode",
              "waypoint" => live_ship.nav.waypoint_symbol,
              "flight_mode" => flight_mode,
@@ -3698,7 +3811,7 @@ defmodule SpaceTraders.Fleet.Intents do
 
   defp dock_for_navigate(agent, intent, live_ship) do
     with {:ok, intent} <-
-           claim_intent_action(intent, %{
+           claim_intent_action(agent, intent, %{
              "kind" => "dock",
              "waypoint" => live_ship.nav.waypoint_symbol,
              "expected" => %{"status" => "DOCKED"}
@@ -3726,7 +3839,7 @@ defmodule SpaceTraders.Fleet.Intents do
 
   defp orbit_for_intents(agent, intent, live_ship) do
     with {:ok, intent} <-
-           claim_intent_action(intent, %{
+           claim_intent_action(agent, intent, %{
              "kind" => "orbit",
              "waypoint" => live_ship.nav.waypoint_symbol,
              "expected" => %{"status" => "IN_ORBIT"}
@@ -3820,18 +3933,28 @@ defmodule SpaceTraders.Fleet.Intents do
     with {:ok, waypoints} <-
            SpaceTraders.Evidence.get_waypoints(AgentTokenReference.new(agent), system,
              type: "JUMP_GATE"
-           ),
-         {:ok, gate} <-
-           Enum.find_value(waypoints, fn waypoint ->
-             case Fleet.waypoint_jump_gate(agent, waypoint) do
-               {:ok, %{connections: connections}} ->
-                 if destination in connections, do: {:ok, waypoint}
+           ) do
+      results =
+        Enum.map(waypoints, fn waypoint ->
+          case Fleet.waypoint_jump_gate(agent, waypoint) do
+            {:ok, %{connections: connections}} -> {:ok, waypoint, connections}
+            {:error, reason} -> {:error, reason}
+          end
+        end)
 
-               _ ->
-                 nil
-             end
-           end) || {:error, :jump_gate_connection_unavailable} do
-      {:ok, gate.symbol}
+      case Enum.find(results, fn
+             {:ok, _waypoint, connections} -> destination in connections
+             {:error, _reason} -> false
+           end) do
+        {:ok, gate, _connections} ->
+          {:ok, gate.symbol}
+
+        nil ->
+          case Enum.find(results, &match?({:error, _reason}, &1)) do
+            {:error, reason} -> {:error, reason}
+            nil -> {:error, {:jump_gate_not_connected, system, destination}}
+          end
+      end
     end
   end
 
@@ -3914,7 +4037,7 @@ defmodule SpaceTraders.Fleet.Intents do
     destination = destination || intent.target_waypoint
 
     with {:ok, intent} <-
-           claim_intent_action(intent, %{
+           claim_intent_action(agent, intent, %{
              "kind" => "navigate",
              "waypoint" => destination,
              "expected" => %{"status" => "IN_TRANSIT", "destination" => destination}
@@ -3985,7 +4108,7 @@ defmodule SpaceTraders.Fleet.Intents do
          true <- live_ship.nav.flight_mode != "BURN" || {:error, :warp_burn_fuel_budget_unknown},
          true <- not fuel_empty?(live_ship) || {:error, :insufficient_fuel},
          {:ok, intent} <-
-           claim_intent_action(intent, %{
+           claim_intent_action(agent, intent, %{
              "kind" => "warp",
              "waypoint" => intent.target_waypoint,
              "expected" => %{"status" => "IN_TRANSIT", "destination" => intent.target_waypoint}
@@ -4054,7 +4177,7 @@ defmodule SpaceTraders.Fleet.Intents do
          {:ok, _preflight} <-
            jump_cost_preflight(agent, source_system, live_ship.nav.waypoint_symbol),
          {:ok, intent} <-
-           claim_intent_action(intent, %{
+           claim_intent_action(agent, intent, %{
              "kind" => "jump",
              "waypoint" => intent.target_waypoint,
              "expected" => %{
@@ -4140,6 +4263,14 @@ defmodule SpaceTraders.Fleet.Intents do
   defp schedule_intent_arrival(_agent, _intent, _ship_symbol, _result), do: :ok
 
   defp block_intents(intent, reason) do
+    if authoritative_infeasibility?(reason) do
+      mark_infeasible(intent, reason)
+    else
+      do_block_intents(intent, reason)
+    end
+  end
+
+  defp do_block_intents(intent, reason) do
     current = Repo.get(Intent, intent.id)
     already_blocked? = match?(%Intent{status: "blocked"}, current)
     blocker = Fleet.job_blocker(intents_block_reason(reason))
@@ -4286,16 +4417,30 @@ defmodule SpaceTraders.Fleet.Intents do
 
       attempt ->
         with {:ok, observations} <- absence_observations(agent, live_ship, attempt, action),
-             result <-
-               SpaceTraders.API.reconcile_absent_and_retry(attempt, observations, fn ->
-                 dispatch_claimed_action(agent, live_ship, action)
-               end),
+             {:ok, absent} <- MutationAttempts.reconcile(attempt, :absent, observations),
+             {:ok, result} <- retry_under_current_claim(agent, intent, live_ship, action, absent),
              {:ok, result} <- Agent.handle_game_result(agent, result) do
           accept_retried_action(agent, intent, live_ship, action, result)
         else
+          {:error, :no_current_ship_claim} -> supersede_for_lost_claim(intent, true)
           {:error, reason} -> block_intents(intent, reason)
         end
     end
+  end
+
+  defp retry_under_current_claim(agent, intent, live_ship, action, absent) do
+    Repo.transaction(fn ->
+      with {:ok, claim} <-
+             FleetAllocation.authorize_ship_execution(agent, live_ship.symbol, lock: true),
+           {:ok, binding} <- bind_intent_claim(intent, claim),
+           true <- Map.merge(action, binding.action) == action do
+        MutationAttempts.with_retry(absent, fn ->
+          dispatch_claimed_action(agent, live_ship, action)
+        end)
+      else
+        _ -> Repo.rollback(:no_current_ship_claim)
+      end
+    end)
   end
 
   defp absence_observations(agent, live_ship, attempt, %{"kind" => "refuel"}) do
@@ -4489,6 +4634,80 @@ defmodule SpaceTraders.Fleet.Intents do
   defp intents_block_reason({:refuel_incomplete, _current, _capacity}), do: :refuel_incomplete
 
   defp intents_block_reason(reason), do: reason
+
+  defp authoritative_infeasibility?(%SpaceTraders.API.GameplayError{type: :contract_expired}),
+    do: true
+
+  defp authoritative_infeasibility?({:jump_gate_not_connected, _source, _destination}), do: true
+
+  defp authoritative_infeasibility?(:jump_route_unavailable),
+    do: true
+
+  defp authoritative_infeasibility?(_reason), do: false
+
+  defp mark_infeasible(intent, reason) do
+    now = DateTime.utc_now() |> DateTime.truncate(:second)
+
+    evidence = %{
+      "intent_id" => intent.id,
+      "intent_type" => intent.type,
+      "reason" => infeasibility_reason(reason),
+      "details" => inspect(reason),
+      "target_waypoint" => intent.target_waypoint,
+      "commitment_id" => intent.fleet_commitment_id,
+      "portfolio_id" => intent.fleet_commitment_portfolio_id,
+      "portfolio_version" => intent.fleet_commitment_portfolio_version,
+      "observed_at" => DateTime.to_iso8601(now)
+    }
+
+    ship = Repo.get!(Ship, intent.ship_id)
+    agent = Repo.get!(AgentRecord, ship.agent_id)
+
+    FleetAllocation.report_infeasibility(agent, ship.symbol, evidence, fn ->
+      case transition_intent(intent,
+             status: "infeasible",
+             blocker: nil,
+             in_flight_action: nil,
+             last_action_result: %{"outcome" => "infeasible", "evidence" => evidence},
+             finished_at: now
+           ) do
+        {:ok, intent} -> intent
+        :intent_no_longer_owned -> Repo.rollback(:intent_no_longer_owned)
+      end
+    end)
+  end
+
+  defp supersede_for_lost_claim(intent, outcome_reconciled? \\ false) do
+    if outcome_reconciled? or not unresolved_intent_evidence?(intent) do
+      do_supersede_for_lost_claim(intent)
+    else
+      block_intents(intent, :claim_withdrawn_pending_reconciliation)
+    end
+  end
+
+  defp do_supersede_for_lost_claim(intent) do
+    now = DateTime.utc_now() |> DateTime.truncate(:second)
+
+    transition_intent(intent,
+      status: "superseded",
+      blocker: nil,
+      in_flight_action: nil,
+      last_action_result: %{
+        "outcome" => "authority_refused",
+        "reason" => "no_current_ship_claim"
+      },
+      finished_at: now
+    )
+  end
+
+  defp infeasibility_reason(reason) do
+    case intents_block_reason(reason) do
+      reason when is_atom(reason) -> Atom.to_string(reason)
+      {reason, _details} when is_atom(reason) -> Atom.to_string(reason)
+      {reason, _source, _destination} when is_atom(reason) -> Atom.to_string(reason)
+      reason -> inspect(reason)
+    end
+  end
 
   defp preserve_claim?(%SpaceTraders.API.GameplayError{}), do: false
   defp preserve_claim?(:stale_agent), do: false

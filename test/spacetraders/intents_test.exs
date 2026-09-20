@@ -10,7 +10,12 @@ defmodule SpaceTraders.IntentsTest do
   alias SpaceTraders.Fleet
   alias SpaceTraders.Fleet.{Intent, Job, JobBlocker, Ship, ShipServer}
   alias SpaceTraders.Fleet.Intents
+  alias SpaceTraders.FleetAllocation
+  alias SpaceTraders.FleetAllocation.PortfolioCandidate
+  alias SpaceTraders.FleetGeneration.Generation
+  alias SpaceTraders.FleetStrategy.{Revision, Strategy}
   alias SpaceTraders.MutationAttempts
+  alias SpaceTraders.Outbox.Notification
   alias SpaceTraders.Timeline
   alias SpaceTraders.Timeline.Event
 
@@ -95,6 +100,196 @@ defmodule SpaceTraders.IntentsTest do
                "INTENTS-NAV-SHIP",
                %Intents.Navigate{waypoint: " X1-UX81-A2 "}
              )
+  end
+
+  test "refuses to command a target Ship without a current matching Claim" do
+    agent = agent_fixture("INTENTS-UNCLAIMED")
+    ship_fixture(agent, "INTENTS-UNCLAIMED-SHIP")
+
+    Repo.insert!(%Generation{
+      operator_id: agent.operator_id,
+      agent_id: agent.id,
+      number: 1,
+      symbol: agent.symbol,
+      faction: agent.faction,
+      replacement_symbols: %{},
+      objective_progress: %{}
+    })
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      case {conn.request_path, conn.method} do
+        {"/v2/my/ships/INTENTS-UNCLAIMED-SHIP", "GET"} ->
+          Req.Test.json(conn, %{
+            "data" =>
+              ship_body("INTENTS-UNCLAIMED-SHIP", %{
+                "nav" => %{
+                  "systemSymbol" => "X1-UX81",
+                  "waypointSymbol" => "X1-UX81-A1",
+                  "status" => "IN_ORBIT",
+                  "flightMode" => "CRUISE"
+                }
+              })
+          })
+
+        request ->
+          flunk("unexpected command without a Claim: #{inspect(request)}")
+      end
+    end)
+
+    assert {:error, :no_current_ship_claim} =
+             Intents.request(
+               manual_scope(agent),
+               agent,
+               %Intents.ManualControl{},
+               "INTENTS-UNCLAIMED-SHIP",
+               %Intents.Navigate{waypoint: "X1-UX81-A2"}
+             )
+
+    assert %Intent{ship_id: ship_id} =
+             refused =
+             Repo.one!(Intent)
+
+    assert %Intent{
+             status: "superseded",
+             last_action_result: %{
+               "outcome" => "authority_refused",
+               "reason" => "no_current_ship_claim"
+             }
+           } = refused
+
+    assert %Intent{status: "active"} =
+             Repo.insert!(%Intent{ship_id: ship_id, target_waypoint: "X1-UX81-A3"})
+  end
+
+  test "commands a target Ship under its current Claim and retains Claim provenance" do
+    agent = agent_fixture("INTENTS-CLAIMED")
+    ship_fixture(agent, "INTENTS-CLAIMED-SHIP")
+    portfolio = activate_ship_claim(agent, "INTENTS-CLAIMED-SHIP")
+    [commitment] = portfolio.commitments
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      case {conn.request_path, conn.method} do
+        {"/v2/my/ships/INTENTS-CLAIMED-SHIP", "GET"} ->
+          Req.Test.json(conn, %{
+            "data" =>
+              ship_body("INTENTS-CLAIMED-SHIP", %{
+                "nav" => %{
+                  "systemSymbol" => "X1-UX81",
+                  "waypointSymbol" => "X1-UX81-A1",
+                  "status" => "IN_ORBIT",
+                  "flightMode" => "CRUISE"
+                }
+              })
+          })
+
+        {"/v2/my/ships/INTENTS-CLAIMED-SHIP/navigate", "POST"} ->
+          Req.Test.json(conn, %{
+            "data" => navigate_response("IN_TRANSIT", future_iso(), "X1-UX81-A2")
+          })
+      end
+    end)
+
+    assert {:ok,
+            %Intent{
+              status: "waiting",
+              fleet_commitment_id: commitment_id,
+              fleet_commitment_portfolio_id: portfolio_id,
+              fleet_commitment_portfolio_version: portfolio_version,
+              in_flight_action: action
+            }} =
+             Intents.request(
+               manual_scope(agent),
+               agent,
+               %Intents.ManualControl{},
+               "INTENTS-CLAIMED-SHIP",
+               %Intents.Navigate{waypoint: "X1-UX81-A2"}
+             )
+
+    assert commitment_id == commitment.id
+    assert portfolio_id == portfolio.id
+    assert portfolio_version == portfolio.version
+    assert action["fleet_commitment_id"] == commitment.id
+    assert action["fleet_commitment_portfolio_id"] == portfolio.id
+    assert action["fleet_commitment_portfolio_version"] == portfolio.version
+  end
+
+  test "returns authoritative infeasibility evidence to Fleet Allocation" do
+    agent = agent_fixture("INTENTS-INFEASIBLE")
+    ship_fixture(agent, "INTENTS-INFEASIBLE-SHIP")
+    portfolio = activate_ship_claim(agent, "INTENTS-INFEASIBLE-SHIP")
+    [commitment] = portfolio.commitments
+    Phoenix.PubSub.subscribe(SpaceTraders.PubSub, "fleet_allocation:#{agent.operator_id}")
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      case {conn.request_path, conn.method} do
+        {"/v2/my/ships/INTENTS-INFEASIBLE-SHIP", "GET"} ->
+          Req.Test.json(conn, %{
+            "data" =>
+              ship_body("INTENTS-INFEASIBLE-SHIP", %{
+                "nav" => %{
+                  "systemSymbol" => "X1-UX81",
+                  "waypointSymbol" => "X1-UX81-G1",
+                  "status" => "IN_ORBIT",
+                  "flightMode" => "CRUISE"
+                }
+              })
+          })
+
+        {"/v2/systems/X1-UX81/waypoints", "GET"} ->
+          Req.Test.json(conn, %{
+            "data" => [
+              %{
+                "symbol" => "X1-UX81-G1",
+                "systemSymbol" => "X1-UX81",
+                "type" => "JUMP_GATE"
+              }
+            ]
+          })
+
+        {"/v2/systems/X1-UX81/waypoints/X1-UX81-G1/construction", "GET"} ->
+          Req.Test.json(conn, %{
+            "data" => %{"symbol" => "X1-UX81-G1", "isComplete" => true, "materials" => []}
+          })
+
+        {"/v2/systems/X1-UX81/waypoints/X1-UX81-G1/jump-gate", "GET"} ->
+          Req.Test.json(conn, %{
+            "data" => %{"symbol" => "X1-UX81-G1", "connections" => []}
+          })
+
+        request ->
+          flunk("unexpected command for infeasible Intent: #{inspect(request)}")
+      end
+    end)
+
+    assert {:ok,
+            %Intent{
+              status: "infeasible",
+              last_action_result: %{
+                "outcome" => "infeasible",
+                "evidence" => %{"reason" => "jump_gate_not_connected"}
+              }
+            }} =
+             Intents.request(
+               manual_scope(agent),
+               agent,
+               %Intents.ManualControl{},
+               "INTENTS-INFEASIBLE-SHIP",
+               %Intents.Navigate{waypoint: "X2-UX81-G1"}
+             )
+
+    assert %Notification{
+             event: "ship_execution_infeasible",
+             payload: %{
+               "ship_symbol" => "INTENTS-INFEASIBLE-SHIP",
+               "commitment_id" => commitment_id,
+               "portfolio_id" => portfolio_id,
+               "reason" => "jump_gate_not_connected"
+             }
+           } = Repo.get_by!(Notification, event: "ship_execution_infeasible")
+
+    assert commitment_id == commitment.id
+    assert portfolio_id == portfolio.id
+    assert_receive {:outbox, _, "ship_execution_infeasible", _payload}
   end
 
   test "requests a closed Buy Goods goal through Manual Control" do
@@ -2565,6 +2760,46 @@ defmodule SpaceTraders.IntentsTest do
       assert retry.retry_of_id == ambiguous.id
     end
 
+    test "boot recovery does not retry proven-absent navigation after its Claim is withdrawn" do
+      agent = agent_fixture("CLAIM-RETRY")
+      ship_fixture(agent, "CLAIM-RETRY-SHIP")
+      portfolio = activate_ship_claim(agent, "CLAIM-RETRY-SHIP")
+      {:ok, dispatches} = Agent.start_link(fn -> 0 end)
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case {conn.request_path, conn.method} do
+          {"/v2/my/ships/CLAIM-RETRY-SHIP", "GET"} ->
+            Req.Test.json(conn, %{
+              "data" => ship_body("CLAIM-RETRY-SHIP", %{"nav" => nav_body("IN_ORBIT")})
+            })
+
+          {"/v2/my/ships/CLAIM-RETRY-SHIP/navigate", "POST"} ->
+            Agent.update(dispatches, &(&1 + 1))
+            Req.Test.transport_error(conn, :timeout)
+        end
+      end)
+
+      assert {:ok, %Intent{id: intent_id, status: "blocked"}} =
+               Intents.request(
+                 manual_scope(agent),
+                 agent,
+                 %Intents.ManualControl{},
+                 "CLAIM-RETRY-SHIP",
+                 %Intents.Navigate{waypoint: "X1-UX81-A2"}
+               )
+
+      supersede_ship_claim(agent, portfolio)
+
+      assert {:ok,
+              %Intent{
+                status: "superseded",
+                last_action_result: %{"outcome" => "authority_refused"}
+              }} = Intents.reconcile(agent.id, "CLAIM-RETRY-SHIP", nil, :boot, intent_id, nil)
+
+      assert Agent.get(dispatches, & &1) == 1
+      assert [%{state: "absent"}] = MutationAttempts.list_for_agent(agent)
+    end
+
     test "boot recovery completes an Intent whose Ship already sits at the target" do
       agent = agent_fixture()
       ship = ship_fixture(agent, "FLEET-SHIP")
@@ -2670,6 +2905,95 @@ defmodule SpaceTraders.IntentsTest do
       assert intent.status == "blocked"
       assert intent.blocker.reason == "retry_exhausted"
     end
+  end
+
+  defp activate_ship_claim(agent, ship_symbol) do
+    strategy = Repo.insert!(%Strategy{operator_id: agent.operator_id, revision_number: 1})
+
+    revision =
+      Repo.insert!(%Revision{
+        fleet_strategy_id: strategy.id,
+        number: 1,
+        document: %{"objectives" => [%{"objective" => "Exercise Ship Execution"}]},
+        source: "operator",
+        activated_at: DateTime.utc_now(:second)
+      })
+
+    strategy
+    |> Ecto.Changeset.change(active_revision_id: revision.id)
+    |> Repo.update!()
+
+    generation =
+      Repo.insert!(%Generation{
+        operator_id: agent.operator_id,
+        agent_id: agent.id,
+        fleet_strategy_revision_id: revision.id,
+        number: 1,
+        symbol: agent.symbol,
+        faction: agent.faction,
+        replacement_symbols: %{},
+        objective_progress: %{}
+      })
+
+    candidate = %PortfolioCandidate{
+      id: "ship-execution-#{ship_symbol}",
+      strategy_revision_id: revision.id,
+      objective_index: 0,
+      claims: [ship_symbol],
+      reservations: %{},
+      pledges: [],
+      dependencies: [],
+      expected_value: 1,
+      unwind_cost: 0
+    }
+
+    {:ok, selection} =
+      FleetAllocation.select_portfolio(revision, [candidate], %{
+        as_of: DateTime.utc_now(),
+        source_version: 0,
+        claims: [ship_symbol],
+        reservations: %{}
+      })
+
+    {:ok, portfolio} =
+      FleetAllocation.publish_portfolio(
+        manual_scope(agent),
+        generation.id,
+        selection,
+        %{
+          evidence_references: [],
+          expectations: %{},
+          calibration_version: "ship-execution-test-v1"
+        }
+      )
+
+    portfolio
+  end
+
+  defp supersede_ship_claim(agent, portfolio) do
+    revision = Repo.get!(Revision, portfolio.fleet_strategy_revision_id)
+
+    {:ok, selection} =
+      FleetAllocation.select_portfolio(revision, [], %{
+        as_of: DateTime.utc_now(),
+        source_version: portfolio.version,
+        claims: [],
+        reservations: %{}
+      })
+
+    {:ok, replacement} =
+      FleetAllocation.publish_portfolio(
+        manual_scope(agent),
+        portfolio.fleet_generation_id,
+        selection,
+        %{
+          evidence_references: [],
+          expectations: %{},
+          calibration_version: "ship-execution-test-v1"
+        }
+      )
+
+    replacement
   end
 
   defp agent_fixture(symbol \\ "FLEET-2052", operator_id \\ nil) do
