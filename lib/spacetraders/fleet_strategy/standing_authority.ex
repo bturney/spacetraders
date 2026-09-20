@@ -5,6 +5,19 @@ defmodule SpaceTraders.FleetStrategy.StandingAuthority do
 
   @conditional_price_explanation "SpaceTraders does not provide a conditional maximum price, so the guarantee cannot be enforced at mutation time. Use a worst-case exposure bound or a Preference instead."
 
+  @doc "Returns the enforceable credit floor for a Revision, or `{:error, :no_credit_floor}`."
+  def credit_floor(%Revision{document: %{"hard_constraints" => constraints}})
+      when is_list(constraints) do
+    constraints
+    |> Enum.map(&parse_constraint/1)
+    |> Enum.find_value({:error, :no_credit_floor}, fn
+      {:ok, {:credit_floor, floor, _display}} -> {:ok, floor}
+      _ -> nil
+    end)
+  end
+
+  def credit_floor(_revision), do: {:error, :no_credit_floor}
+
   def validate_constraints(constraints) when is_list(constraints) do
     Enum.reduce_while(constraints, :ok, fn constraint, :ok ->
       case parse_constraint(constraint) do
