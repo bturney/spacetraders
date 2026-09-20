@@ -10,7 +10,17 @@ defmodule SpaceTraders.MissionControl do
 
   alias SpaceTraders.Agent.Scope
   alias SpaceTraders.Agent.Agent, as: AgentRecord
-  alias SpaceTraders.{Agent, Fleet, FleetGeneration, FleetPlanning, FleetStrategy, Intelligence}
+
+  alias SpaceTraders.{
+    Agent,
+    Fleet,
+    FleetAllocation,
+    FleetExecution,
+    FleetGeneration,
+    FleetPlanning,
+    FleetStrategy,
+    Intelligence
+  }
 
   @evaluation_fact_keys %{
     "change" => :change,
@@ -72,8 +82,42 @@ defmodule SpaceTraders.MissionControl do
       strategy: strategy,
       generations: generations,
       fleets: Enum.map(snapshots, &fleet_overview(&1, generations)),
-      objectives: objective_overviews(strategy.active_revision, generations)
+      objectives: objective_overviews(strategy.active_revision, generations),
+      market_execution: market_execution(scope)
     }
+  end
+
+  @doc """
+  Returns the current Market execution report for the active Fleet Generation.
+
+  The report carries the shadow-published expectations, the realized economics
+  from the last completed round trip, the Fleet contribution, and any limitation
+  or Attention worth surfacing to the Operator.
+  """
+  def market_execution(%Scope{} = scope) do
+    case FleetAllocation.current_portfolio(scope) do
+      nil ->
+        %{
+          expected: nil,
+          realized: %{
+            completed_round_trips: 0,
+            realized_net_credit_change: 0,
+            realized_sale_value: 0
+          },
+          contribution: %{commitment_count: 0, expected_value: 0},
+          limitation: nil,
+          attention: []
+        }
+
+      portfolio ->
+        %{
+          expected: expected_economics(portfolio),
+          realized: realized_economics(portfolio),
+          contribution: contribution(portfolio),
+          limitation: limitation(portfolio),
+          attention: attention(portfolio)
+        }
+    end
   end
 
   @doc """
@@ -278,5 +322,88 @@ defmodule SpaceTraders.MissionControl do
 
   defp namespace_facts(facts, namespace) do
     Map.new(facts, fn {field, fact} -> {"#{namespace}.#{field}", fact} end)
+  end
+
+  defp expected_economics(%FleetAllocation.Portfolio{} = portfolio) do
+    episode = portfolio.strategy_decision_episode
+    expectations = if episode, do: episode.expectations, else: %{}
+
+    %{
+      expected_value: Enum.sum_by(portfolio.commitments, & &1.expected_value),
+      decision_episode_id: if(episode, do: episode.id),
+      expectations: expectations
+    }
+  end
+
+  defp realized_economics(%FleetAllocation.Portfolio{} = portfolio) do
+    trips =
+      portfolio.commitments
+      |> Enum.flat_map(fn commitment ->
+        case realized_trip(commitment) do
+          nil -> []
+          trip -> [trip]
+        end
+      end)
+
+    %{
+      completed_round_trips: length(trips),
+      realized_net_credit_change: Enum.sum_by(trips, & &1.net_credit_change),
+      realized_sale_value: Enum.sum_by(trips, & &1.sale_value)
+    }
+  end
+
+  defp realized_trip(%FleetAllocation.Commitment{} = commitment) do
+    with %{last_action_result: sell_result} <- FleetExecution.last_realized_sell(commitment),
+         %{last_action_result: buy_result} <- FleetExecution.last_realized_buy(commitment),
+         sale_value when is_integer(sale_value) <- transaction_total(sell_result),
+         purchase_value when is_integer(purchase_value) <- transaction_total(buy_result) do
+      %{net_credit_change: sale_value - purchase_value, sale_value: sale_value}
+    else
+      _ -> nil
+    end
+  end
+
+  defp transaction_total(%{"transaction" => %{"total_price" => total}})
+       when is_integer(total),
+       do: total
+
+  defp transaction_total(_result), do: nil
+
+  defp contribution(%FleetAllocation.Portfolio{} = portfolio) do
+    %{
+      commitment_count: length(portfolio.commitments),
+      expected_value: Enum.sum_by(portfolio.commitments, & &1.expected_value),
+      claims: portfolio.commitments |> Enum.flat_map(& &1.claims) |> Enum.uniq()
+    }
+  end
+
+  defp limitation(%FleetAllocation.Portfolio{} = portfolio) do
+    if portfolio.commitments == [] do
+      "No eligible Market commitment is active for this Fleet Generation."
+    end
+  end
+
+  defp attention(%FleetAllocation.Portfolio{} = portfolio) do
+    portfolio.commitments
+    |> Enum.flat_map(&commitment_attention/1)
+  end
+
+  defp commitment_attention(%FleetAllocation.Commitment{} = commitment) do
+    case FleetExecution.last_realized_sell(commitment) do
+      nil ->
+        if commitment.unwind_state == :released do
+          [
+            %{
+              candidate_id: commitment.candidate_id,
+              summary: "Commitment was released without realization"
+            }
+          ]
+        else
+          []
+        end
+
+      _intent ->
+        []
+    end
   end
 end

@@ -292,6 +292,136 @@ defmodule SpaceTraders.IntentsTest do
     assert_receive {:outbox, _, "ship_execution_infeasible", _payload}
   end
 
+  test "executes a commitment-owned buy, travel, sell round trip through governed operations" do
+    agent = agent_fixture("INTENTS-ROUND")
+    ship_fixture(agent, "INTENTS-ROUND-SHIP")
+    portfolio = activate_ship_claim(agent, "INTENTS-ROUND-SHIP")
+    [commitment] = portfolio.commitments
+
+    ship_state =
+      Elixir.Agent.start_link(fn -> :empty end)
+      |> then(fn {:ok, pid} -> pid end)
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      case {conn.request_path, conn.method} do
+        {"/v2/my/ships/INTENTS-ROUND-SHIP", "GET"} ->
+          Req.Test.json(conn, %{
+            "data" =>
+              ship_body("INTENTS-ROUND-SHIP", %{
+                "nav" => nav_body("DOCKED"),
+                "cargo" =>
+                  if(Elixir.Agent.get(ship_state, & &1) == :purchased,
+                    do: %{
+                      "capacity" => 40,
+                      "units" => 5,
+                      "inventory" => [%{"symbol" => "IRON_ORE", "units" => 5}]
+                    },
+                    else: %{"capacity" => 40, "units" => 0, "inventory" => []}
+                  )
+              })
+          })
+
+        {"/v2/my/agent", "GET"} ->
+          Req.Test.json(conn, %{"data" => %{"symbol" => agent.symbol, "credits" => 100}})
+
+        {"/v2/systems/X1-UX81/waypoints/X1-UX81-A1/market", "GET"} ->
+          Req.Test.json(conn, %{
+            "data" => %{
+              "symbol" => "X1-UX81-A1",
+              "tradeGoods" => [
+                %{
+                  "symbol" => "IRON_ORE",
+                  "purchasePrice" => 10,
+                  "sellPrice" => 20,
+                  "tradeVolume" => 5
+                }
+              ]
+            }
+          })
+
+        {"/v2/my/ships/INTENTS-ROUND-SHIP/purchase", "POST"} ->
+          Elixir.Agent.update(ship_state, fn _ -> :purchased end)
+
+          Req.Test.json(conn, %{
+            "data" => %{
+              "agent" => %{"symbol" => agent.symbol, "credits" => 50},
+              "cargo" => %{
+                "capacity" => 40,
+                "units" => 5,
+                "inventory" => [%{"symbol" => "IRON_ORE", "units" => 5}]
+              },
+              "transaction" => %{
+                "type" => "PURCHASE",
+                "shipSymbol" => "INTENTS-ROUND-SHIP",
+                "tradeSymbol" => "IRON_ORE",
+                "waypointSymbol" => "X1-UX81-A1",
+                "units" => 5,
+                "pricePerUnit" => 10,
+                "totalPrice" => 50
+              }
+            }
+          })
+
+        {"/v2/my/ships/INTENTS-ROUND-SHIP/sell", "POST"} ->
+          Req.Test.json(conn, %{
+            "data" => %{
+              "agent" => %{"symbol" => agent.symbol, "credits" => 150},
+              "cargo" => %{"capacity" => 40, "units" => 0, "inventory" => []},
+              "transaction" => %{
+                "type" => "SELL",
+                "shipSymbol" => "INTENTS-ROUND-SHIP",
+                "tradeSymbol" => "IRON_ORE",
+                "waypointSymbol" => "X1-UX81-A1",
+                "units" => 5,
+                "pricePerUnit" => 20,
+                "totalPrice" => 100
+              }
+            }
+          })
+
+        other ->
+          flunk("unexpected request: #{inspect(other)}")
+      end
+    end)
+
+    candidate = %{
+      trade_symbol: "IRON_ORE",
+      units: 5,
+      source_waypoint: "X1-UX81-A1",
+      destination_waypoint: "X1-UX81-A1",
+      purchase_price: 10,
+      sell_price: 20
+    }
+
+    assert {:ok, %{type: "buy", status: "completed"} = buy} =
+             Intents.request_commitment_round_trip(
+               agent,
+               commitment,
+               portfolio,
+               "INTENTS-ROUND-SHIP",
+               candidate
+             )
+
+    assert buy.fleet_commitment_id == commitment.id
+    assert buy.fleet_commitment_portfolio_id == portfolio.id
+
+    assert {:ok, %{type: "sell", status: "completed"} = sell} =
+             SpaceTraders.FleetExecution.continue_after_intent(
+               agent,
+               commitment,
+               portfolio,
+               buy
+             )
+
+    assert sell.fleet_commitment_id == commitment.id
+    assert sell.parameters["trade_symbol"] == "IRON_ORE"
+
+    assert [
+             %Intent{type: "sell", status: "completed"},
+             %Intent{type: "buy", status: "completed"}
+           ] = Intents.history(agent)
+  end
+
   test "requests a closed Buy Goods goal through Manual Control" do
     agent = agent_fixture("INTENTS-BUY")
     ship_fixture(agent, "INTENTS-BUY-SHIP")

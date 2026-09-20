@@ -19,10 +19,11 @@ defmodule SpaceTraders.Fleet.Intents do
   alias SpaceTraders.Fleet.{Intent, Job, Ship}
   alias SpaceTraders.Fleet
   alias SpaceTraders.FleetAllocation
+  alias SpaceTraders.FleetAllocation.{Commitment, Portfolio}
   alias SpaceTraders.Fleet.ShipServer
   alias SpaceTraders.Repo
   alias SpaceTraders.SafetyFence.DependencyKey
-  alias SpaceTraders.{Agent, Contracts, Evidence, MutationAttempts, Timeline}
+  alias SpaceTraders.{Agent, Contracts, Evidence, FleetExecution, MutationAttempts, Timeline}
 
   defmodule Navigate do
     @moduledoc "A closed Navigate goal for a Ship."
@@ -124,6 +125,11 @@ defmodule SpaceTraders.Fleet.Intents do
   defmodule JobOwner do
     @moduledoc "Job ownership for an Intent."
     defstruct [:job]
+  end
+
+  defmodule CommitmentOwner do
+    @moduledoc "Fleet Commitment ownership for a round-trip Intent."
+    defstruct [:commitment, :portfolio]
   end
 
   @unfinished_states Intent.unfinished_states()
@@ -554,6 +560,19 @@ defmodule SpaceTraders.Fleet.Intents do
                 :ok
             end
 
+          "commitment" ->
+            case Repo.get(Commitment, intent.fleet_commitment_id) do
+              %Commitment{} = commitment ->
+                portfolio = Repo.get(Portfolio, commitment.fleet_commitment_portfolio_id)
+
+                with {:ok, intent} <- advance_intents(agent, intent, live_ship) do
+                  FleetExecution.continue_after_intent(agent, commitment, portfolio, intent)
+                end
+
+              nil ->
+                :ok
+            end
+
           _ ->
             advance_intents(agent, intent, live_ship)
         end
@@ -826,6 +845,128 @@ defmodule SpaceTraders.Fleet.Intents do
     |> Ecto.Changeset.put_change(:status, "active")
     |> Repo.insert()
   end
+
+  @doc """
+  Requests the authoritative buy leg of a commitment round trip.
+
+  The intent is owned by the Fleet Commitment and only dispatches while the
+  commitment's Ship Claim remains current. The buy intent navigates to the
+  source Market, docks, and buys the admissible quantity through governed
+  operations.
+  """
+  def request_commitment_round_trip(
+        agent,
+        %Commitment{} = commitment,
+        %Portfolio{} = portfolio,
+        ship_symbol,
+        candidate
+      )
+      when is_binary(ship_symbol) and is_map(candidate) do
+    with :ok <- token_present(agent),
+         {:ok, ship} <- Fleet.owned_ship(agent, ship_symbol),
+         {:ok, live_ship} <- fresh_job_ship(agent, ship_symbol, nil),
+         {:ok, intent} <-
+           insert_commitment_intent(commitment, portfolio, ship, %{
+             type: "buy",
+             target_waypoint: candidate_source(candidate),
+             parameters: commitment_buy_parameters(candidate)
+           }) do
+      advance_new_intent(agent, intent, live_ship)
+    end
+  end
+
+  def request_commitment_round_trip(_agent, _commitment, _portfolio, _ship_symbol, _candidate),
+    do: {:error, :invalid_commitment_round_trip}
+
+  @doc """
+  Requests the authoritative sell leg of a commitment round trip at the
+  destination Market after the buy leg completes.
+  """
+  def request_commitment_round_trip_sell(
+        agent,
+        %Commitment{} = commitment,
+        %Portfolio{} = portfolio,
+        ship_symbol,
+        candidate,
+        live_ship
+      )
+      when is_binary(ship_symbol) and is_map(candidate) do
+    with :ok <- token_present(agent),
+         {:ok, ship} <- Fleet.owned_ship(agent, ship_symbol),
+         {:ok, live_ship} <- fresh_job_ship(agent, ship_symbol, live_ship),
+         {:ok, intent} <-
+           insert_commitment_intent(commitment, portfolio, ship, %{
+             type: "sell",
+             target_waypoint: candidate_destination(candidate),
+             parameters: commitment_sell_parameters(candidate)
+           }) do
+      advance_new_intent(agent, intent, live_ship)
+    end
+  end
+
+  def request_commitment_round_trip_sell(
+        _agent,
+        _commitment,
+        _portfolio,
+        _ship_symbol,
+        _candidate,
+        _live_ship
+      ),
+      do: {:error, :invalid_commitment_round_trip}
+
+  @doc false
+  def insert_commitment_intent(commitment, portfolio, ship, attrs) do
+    %Intent{
+      ship_id: ship.id,
+      caller: "commitment",
+      fleet_commitment_id: commitment.id,
+      fleet_commitment_portfolio_id: portfolio.id,
+      fleet_commitment_portfolio_version: portfolio.version
+    }
+    |> Intent.changeset(Map.put(attrs, :caller, "commitment"))
+    |> Ecto.Changeset.put_change(:status, "active")
+    |> Repo.insert()
+  end
+
+  defp commitment_buy_parameters(candidate) do
+    %{
+      "trade_symbol" => candidate_trade_symbol(candidate),
+      "units" => candidate_units(candidate),
+      "max_price" => candidate_purchase_price(candidate),
+      "reserve_credits" => 0,
+      "market_trade" => candidate
+    }
+  end
+
+  defp commitment_sell_parameters(candidate) do
+    %{
+      "trade_symbol" => candidate_trade_symbol(candidate),
+      "units" => candidate_units(candidate),
+      "min_price" => candidate_sell_price(candidate),
+      "market_trade" => candidate
+    }
+  end
+
+  defp candidate_source(candidate),
+    do: Map.get(candidate, :source_waypoint) || candidate["source_waypoint"]
+
+  defp candidate_destination(candidate),
+    do: Map.get(candidate, :destination_waypoint) || candidate["destination_waypoint"]
+
+  defp candidate_trade_symbol(candidate),
+    do: Map.get(candidate, :trade_symbol) || candidate["trade_symbol"]
+
+  defp candidate_units(candidate),
+    do:
+      Map.get(candidate, :units) ||
+        Map.get(candidate, "units") ||
+        Map.get(Map.get(candidate, :expected_outcomes, %{}), :maximum_units)
+
+  defp candidate_purchase_price(candidate),
+    do: Map.get(candidate, :purchase_price) || Map.get(candidate, "purchase_price")
+
+  defp candidate_sell_price(candidate),
+    do: Map.get(candidate, :sell_price) || Map.get(candidate, "sell_price")
 
   # Job Navigate is inserted and advanced as a Job-owned Intent. Manual Navigate
   # uses the separate path above because it may preempt a Job.

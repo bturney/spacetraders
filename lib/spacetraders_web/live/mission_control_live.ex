@@ -82,6 +82,59 @@ defmodule SpaceTradersWeb.MissionControlLive do
           </article>
         </section>
 
+        <section
+          :if={@projection.market_execution.expected}
+          id="market-execution"
+          class="rounded-2xl border border-base-300 bg-base-100 p-5"
+        >
+          <div class="flex items-start justify-between gap-3">
+            <div>
+              <p class="eyebrow">Market execution</p><h2 class="text-xl font-bold">
+                Adaptive market trading
+              </h2>
+            </div><span class="badge">
+              {market_execution_state(@projection.market_execution)}
+            </span>
+          </div>
+          <div class="mt-4 grid gap-4 sm:grid-cols-3">
+            <div>
+              <p class="text-sm opacity-70">Expected credit change</p>
+              <p class="mt-1 font-semibold">
+                {expected_label(@projection.market_execution.expected)}
+              </p>
+            </div>
+            <div>
+              <p class="text-sm opacity-70">Realized net credit change</p>
+              <p class="mt-1 font-semibold">
+                {@projection.market_execution.realized.realized_net_credit_change}
+              </p>
+            </div>
+            <div>
+              <p class="text-sm opacity-70">Fleet contribution</p>
+              <p class="mt-1 font-semibold">
+                {contribution_label(@projection.market_execution.contribution)}
+              </p>
+            </div>
+          </div>
+          <div
+            :if={@projection.market_execution.limitation}
+            class="mt-4 rounded-xl bg-warning/10 p-4 text-sm"
+          >
+            {limitation_label(@projection.market_execution.limitation)}
+          </div>
+          <div
+            :if={@projection.market_execution.attention != []}
+            class="mt-4 rounded-xl bg-warning/10 p-4"
+          >
+            <p class="font-semibold">Attention</p>
+            <ul class="mt-2 list-inside list-disc text-sm">
+              <li :for={item <- @projection.market_execution.attention}>
+                {item.summary}
+              </li>
+            </ul>
+          </div>
+        </section>
+
         <section id="objective-evaluations" class="space-y-3">
           <div>
             <p class="eyebrow">Outcome Observability</p><h2 class="text-2xl font-bold">
@@ -190,4 +243,15 @@ defmodule SpaceTradersWeb.MissionControlLive do
       "Limitation: current evidence shows this objective is not feasible. Attention is required."
 
   defp evaluation_label(_), do: "Unknown: no complete, authoritative evaluation is available yet."
+
+  defp market_execution_state(%{realized: %{completed_round_trips: 0}}), do: "Active"
+  defp market_execution_state(_execution), do: "Realized"
+
+  defp expected_label(%{expected_value: value}),
+    do: "Expected net credit change #{value}."
+
+  defp contribution_label(%{commitment_count: count}),
+    do: "#{count} Market commitment(s) contributing."
+
+  defp limitation_label(limitation), do: limitation
 end

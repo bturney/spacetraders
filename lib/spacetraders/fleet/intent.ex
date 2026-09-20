@@ -63,8 +63,9 @@ defmodule SpaceTraders.Fleet.Intent do
     ])
     |> cast_embed(:blocker)
     |> validate_required([:caller, :type, :target_waypoint])
-    |> validate_inclusion(:caller, ["manual", "job"])
+    |> validate_inclusion(:caller, ["manual", "job", "commitment"])
     |> validate_job_owner()
+    |> validate_commitment_owner()
     |> validate_inclusion(:type, [
       "navigate",
       "buy",
@@ -84,4 +85,12 @@ defmodule SpaceTraders.Fleet.Intent do
     do: validate_required(changeset, [:job_id])
 
   defp validate_job_owner(changeset), do: changeset
+
+  defp validate_commitment_owner(%Ecto.Changeset{changes: %{caller: "commitment"}} = changeset),
+    do: validate_required(changeset, [:fleet_commitment_id, :fleet_commitment_portfolio_id])
+
+  defp validate_commitment_owner(%Ecto.Changeset{data: %{caller: "commitment"}} = changeset),
+    do: validate_required(changeset, [:fleet_commitment_id, :fleet_commitment_portfolio_id])
+
+  defp validate_commitment_owner(changeset), do: changeset
 end
