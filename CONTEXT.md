@@ -256,13 +256,9 @@ An Intent to sell a requested quantity of a Trade Good at a specified Market wit
 **Deliver Goods Intent**:
 An Intent to have a requested quantity of a specified Trade Good from Cargo authoritatively accepted by a specified Contract or Construction recipient. It reconciles Cargo, physical presence, and recipient progress before delivery.
 
-**Autopilot**:
-An Operator-started, per-Ship Job to execute one configured local gather/sell loop. Its persisted configuration and execution status are Fleet state; it never resumes an action without reconciling authoritative game state. It may act only within its configured extraction Waypoint, Market, and Cargo threshold.
-_Avoid_: bot, automatic mode
-
 **Miner Job**:
-A durable Job that owns one configured local gather/sell loop for a Ship. It uses Policies and Intents to pursue the configured extraction Waypoint, Market, and Cargo threshold; it is the first concrete Job and absorbs the existing Autopilot capability.
-_Avoid_: autopilot (when referring to the Job type), mining bot
+A durable Job that owns one configured local gather/sell loop for a Ship. It uses Policies and Intents to pursue the configured extraction Waypoint, Market, and Cargo threshold; it is the first concrete Job.
+_Avoid_: mining bot
 
 **Survey Job**:
 A recurring Job that uses a survey-equipped Ship to maintain valid Surveys at one configured extraction Waypoint. It contributes Operational Intelligence without owning the Miner Jobs that may consume it.
@@ -354,21 +350,3 @@ A Ship belonging to an Agent that is neither at a Waypoint in the Agent's headqu
 
 **Deadline**:
 A time limit imposed by the game (Contract acceptance/fulfillment). Must be persisted so the app honors it across restarts.
-
-### Delivery
-
-**Coding Agent**:
-An automation participant that investigates, changes, tests, and reviews this repository. It is distinct from the in-game Agent.
-_Avoid_: Agent (when discussing repository automation)
-
-**Runner**:
-An execution process that performs repository work in a prepared Task Workspace.
-_Avoid_: Agent (when discussing task execution)
-
-**Task Workspace**:
-A repository-managed workspace dedicated to one task.
-_Avoid_: worktree (when the repository-managed lifecycle matters)
-
-**Kimaki Worktree**:
-A Kimaki-managed isolated checkout for ad-hoc work. It is distinct from a Task Workspace.
-_Avoid_: Task Workspace (when discussing Kimaki session isolation)
