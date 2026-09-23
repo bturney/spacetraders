@@ -606,6 +606,7 @@ defmodule SpaceTraders.FleetAllocation do
         on: commitment.id == intent.fleet_commitment_id,
         where:
           commitment.fleet_commitment_portfolio_id in ^portfolio_ids and
+            intent.caller == "commitment" and
             intent.status in ^Intent.unfinished_states()
       )
     )
