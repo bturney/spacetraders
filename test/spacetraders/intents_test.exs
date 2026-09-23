@@ -7,6 +7,7 @@ defmodule SpaceTraders.IntentsTest do
   alias SpaceTraders.Agent.Agent, as: AgentRecord
   alias SpaceTraders.Agent.{Operator, Scope}
   alias SpaceTraders.API.Model
+  alias SpaceTraders.API.OperationInventory
   alias SpaceTraders.Fleet
   alias SpaceTraders.Fleet.{Intent, Job, JobBlocker, Ship, ShipServer}
   alias SpaceTraders.Fleet.Intents
@@ -175,6 +176,101 @@ defmodule SpaceTraders.IntentsTest do
              )
   end
 
+  test "boot reconstructs a commitment-owned waiting Intent without a Job" do
+    agent = agent_fixture("INTENTS-RECOVER")
+    ship = ship_fixture(agent, "INTENTS-RECOVER-SHIP")
+    portfolio = activate_ship_claim(agent, ship.symbol)
+    [commitment] = portfolio.commitments
+
+    intent =
+      Repo.insert!(%Intent{
+        ship_id: ship.id,
+        caller: "commitment",
+        fleet_commitment_id: commitment.id,
+        fleet_commitment_portfolio_id: portfolio.id,
+        fleet_commitment_portfolio_version: portfolio.version,
+        type: "navigate",
+        target_waypoint: "X1-UX81-A2",
+        status: "waiting",
+        in_flight_action: %{"kind" => "navigate", "waypoint" => "X1-UX81-A2"}
+      })
+
+    {:ok, attempt} =
+      MutationAttempts.prepare(
+        OperationInventory.fetch!("navigate-ship"),
+        "/my/ships/#{ship.symbol}/navigate",
+        agent_id: agent.id,
+        json: %{"waypointSymbol" => "X1-UX81-A2"}
+      )
+
+    {:ok, attempt} = MutationAttempts.mark_sent_or_unknown(attempt)
+    test_pid = self()
+
+    Req.Test.set_req_test_to_shared(SpaceTraders.API)
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      assert {"/v2/my/ships/INTENTS-RECOVER-SHIP", "GET"} ==
+               {conn.request_path, conn.method}
+
+      send(test_pid, :recovery_observation)
+
+      Req.Test.json(conn, %{
+        "data" =>
+          ship_body(ship.symbol, %{
+            "nav" => nav_body("IN_TRANSIT", arrival: future_iso(), destination: "X1-UX81-A2")
+          })
+      })
+    end)
+
+    handler_id = "owned-intent-boot-#{System.unique_integer()}"
+
+    :ok =
+      :telemetry.attach(
+        handler_id,
+        [:spacetraders, :repo, :query],
+        &__MODULE__.handle_event/4,
+        self()
+      )
+
+    assert [ship.symbol] == Intents.rearm_owned_intents_on_boot()
+    :ok = :telemetry.detach(handler_id)
+
+    {:messages, messages} = Process.info(self(), :messages)
+
+    refute Enum.any?(messages, fn
+             {:telemetry, [:spacetraders, :repo, :query], _, %{query: query}} ->
+               String.contains?(query, ~s("jobs"))
+
+             _ ->
+               false
+           end)
+
+    assert_receive :recovery_observation
+    assert MutationAttempts.get!(attempt.id).state == "accepted"
+    assert Repo.get!(Intent, intent.id).status == "waiting"
+    assert Repo.get!(Intent, intent.id).job_id == nil
+
+    assert [%Event{event_type: "arrival", payload: %{"intent_id" => intent_id}} = event] =
+             Timeline.pending_events(:ship, ship.symbol)
+
+    assert intent_id == intent.id
+    ShipServer.stop(ship.symbol)
+    {:ok, _event} = Timeline.reschedule_event(event, DateTime.utc_now())
+    assert :ok = Intents.rearm_on_boot()
+    assert_receive :recovery_observation, 5_000
+    assert MutationAttempts.get!(attempt.id).state == "accepted"
+
+    live_ship =
+      ship_body(ship.symbol, %{
+        "nav" => nav_body("IN_TRANSIT", arrival: future_iso(), destination: "X1-UX81-A2")
+      })
+      |> Model.Ship.from_json()
+
+    assert :ok = Intents.reconcile(agent.id, ship.symbol, live_ship, :arrival, intent.id, nil)
+
+    assert Repo.get!(Intent, intent.id).status == "waiting"
+  end
+
   test "executes a commitment-owned buy, travel, sell round trip through governed operations" do
     agent = agent_fixture("INTENTS-ROUND")
     ship_fixture(agent, "INTENTS-ROUND-SHIP")
@@ -316,6 +412,185 @@ defmodule SpaceTraders.IntentsTest do
              %Intent{type: "sell", status: "completed"},
              %Intent{type: "buy", status: "completed"}
            ] = Intents.history(agent)
+  end
+
+  test "boot and arrival continue a committed buy and sell only once" do
+    agent = agent_fixture("INTENTS-RESTART-TRADE")
+    ship_fixture(agent, "INTENTS-RESTART-TRADE-SHIP")
+    portfolio = activate_ship_claim(agent, "INTENTS-RESTART-TRADE-SHIP")
+    [commitment] = portfolio.commitments
+    {:ok, calls} = Elixir.Agent.start_link(fn -> %{buy: 0, sell: 0, arrived: false} end)
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      case {conn.request_path, conn.method} do
+        {"/v2/my/ships/INTENTS-RESTART-TRADE-SHIP", "GET"} ->
+          arrived? = Elixir.Agent.get(calls, & &1.arrived)
+          purchased? = Elixir.Agent.get(calls, &(&1.buy > 0))
+
+          Req.Test.json(conn, %{
+            "data" =>
+              ship_body("INTENTS-RESTART-TRADE-SHIP", %{
+                "nav" =>
+                  if(arrived?,
+                    do: nav_body("DOCKED", waypoint: "X1-UX81-A1"),
+                    else:
+                      nav_body("IN_TRANSIT",
+                        arrival: future_iso(),
+                        destination: "X1-UX81-A1"
+                      )
+                  ),
+                "cargo" =>
+                  if(purchased?,
+                    do: %{
+                      "capacity" => 40,
+                      "units" => 5,
+                      "inventory" => [%{"symbol" => "IRON_ORE", "units" => 5}]
+                    },
+                    else: %{"capacity" => 40, "units" => 0, "inventory" => []}
+                  )
+              })
+          })
+
+        {"/v2/my/agent", "GET"} ->
+          Req.Test.json(conn, %{"data" => %{"symbol" => agent.symbol, "credits" => 100}})
+
+        {"/v2/systems/X1-UX81/waypoints/X1-UX81-A1/market", "GET"} ->
+          Req.Test.json(conn, %{
+            "data" => %{
+              "symbol" => "X1-UX81-A1",
+              "tradeGoods" => [
+                %{
+                  "symbol" => "IRON_ORE",
+                  "purchasePrice" => 10,
+                  "sellPrice" => 20,
+                  "tradeVolume" => 5
+                }
+              ]
+            }
+          })
+
+        {"/v2/my/ships/INTENTS-RESTART-TRADE-SHIP/purchase", "POST"} ->
+          Elixir.Agent.update(calls, &Map.update!(&1, :buy, fn count -> count + 1 end))
+
+          Req.Test.json(conn, %{
+            "data" => %{
+              "agent" => %{"symbol" => agent.symbol, "credits" => 50},
+              "cargo" => %{
+                "capacity" => 40,
+                "units" => 5,
+                "inventory" => [%{"symbol" => "IRON_ORE", "units" => 5}]
+              },
+              "transaction" => %{
+                "type" => "PURCHASE",
+                "shipSymbol" => "INTENTS-RESTART-TRADE-SHIP",
+                "tradeSymbol" => "IRON_ORE",
+                "waypointSymbol" => "X1-UX81-A1",
+                "units" => 5,
+                "pricePerUnit" => 10,
+                "totalPrice" => 50
+              }
+            }
+          })
+
+        {"/v2/my/ships/INTENTS-RESTART-TRADE-SHIP/sell", "POST"} ->
+          Elixir.Agent.update(calls, &Map.update!(&1, :sell, fn count -> count + 1 end))
+
+          Req.Test.json(conn, %{
+            "data" => %{
+              "agent" => %{"symbol" => agent.symbol, "credits" => 150},
+              "cargo" => %{"capacity" => 40, "units" => 0, "inventory" => []},
+              "transaction" => %{
+                "type" => "SELL",
+                "shipSymbol" => "INTENTS-RESTART-TRADE-SHIP",
+                "tradeSymbol" => "IRON_ORE",
+                "waypointSymbol" => "X1-UX81-A1",
+                "units" => 5,
+                "pricePerUnit" => 20,
+                "totalPrice" => 100
+              }
+            }
+          })
+
+        other ->
+          flunk("unexpected request: #{inspect(other)}")
+      end
+    end)
+
+    candidate = %{
+      trade_symbol: "IRON_ORE",
+      units: 5,
+      source_waypoint: "X1-UX81-A1",
+      destination_waypoint: "X1-UX81-A1",
+      purchase_price: 10,
+      sell_price: 20
+    }
+
+    ship = Repo.get_by!(Ship, symbol: "INTENTS-RESTART-TRADE-SHIP")
+
+    buy =
+      Repo.insert!(%Intent{
+        ship_id: ship.id,
+        caller: "commitment",
+        fleet_commitment_id: commitment.id,
+        fleet_commitment_portfolio_id: portfolio.id,
+        fleet_commitment_portfolio_version: portfolio.version,
+        type: "buy",
+        target_waypoint: "X1-UX81-A1",
+        status: "waiting",
+        parameters: %{
+          "trade_symbol" => "IRON_ORE",
+          "units" => 5,
+          "max_price" => 10,
+          "reserve_credits" => 0,
+          "market_trade" => candidate
+        },
+        in_flight_action: %{
+          "kind" => "navigate",
+          "waypoint" => "X1-UX81-A1",
+          "expected" => %{"status" => "IN_TRANSIT", "destination" => "X1-UX81-A1"}
+        }
+      })
+
+    {:ok, attempt} =
+      MutationAttempts.prepare(
+        OperationInventory.fetch!("navigate-ship"),
+        "/my/ships/#{ship.symbol}/navigate",
+        agent_id: agent.id,
+        json: %{"waypointSymbol" => "X1-UX81-A1"}
+      )
+
+    {:ok, attempt} = MutationAttempts.mark_sent_or_unknown(attempt)
+    ShipServer.stop("INTENTS-RESTART-TRADE-SHIP")
+
+    assert :ok = Intents.rearm_on_boot()
+    assert MutationAttempts.get!(attempt.id).state == "accepted"
+    assert Repo.get!(Intent, buy.id).status == "waiting"
+    assert Elixir.Agent.get(calls, &{&1.buy, &1.sell}) == {0, 0}
+
+    Elixir.Agent.update(calls, &%{&1 | arrived: true})
+
+    live_ship =
+      ship_body(ship.symbol, %{
+        "nav" => nav_body("DOCKED"),
+        "cargo" => %{"capacity" => 40, "units" => 0, "inventory" => []}
+      })
+      |> Model.Ship.from_json()
+
+    assert {:ok, %Intent{type: "sell", status: "completed"}} =
+             Intents.reconcile(agent.id, ship.symbol, live_ship, :arrival, buy.id, nil)
+
+    assert %Intent{status: "completed"} = Repo.get!(Intent, buy.id)
+    assert [%Intent{type: "sell", status: "completed"} = sell | _] = Intents.history(agent)
+    assert Elixir.Agent.get(calls, &{&1.buy, &1.sell}) == {1, 1}
+
+    assert :ok =
+             Intents.reconcile(agent.id, "INTENTS-RESTART-TRADE-SHIP", nil, :boot, buy.id, nil)
+
+    assert :ok =
+             Intents.reconcile(agent.id, "INTENTS-RESTART-TRADE-SHIP", nil, :arrival, buy.id, nil)
+
+    assert Repo.get!(Intent, sell.id).status == "completed"
+    assert Elixir.Agent.get(calls, &{&1.buy, &1.sell}) == {1, 1}
   end
 
   test "requests a closed Buy Goods goal through Manual Control" do
