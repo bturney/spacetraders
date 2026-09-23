@@ -130,6 +130,72 @@ defmodule SpaceTraders.FleetAllocationPublishTest do
     assert Repo.aggregate(Notification, :count) == 2
   end
 
+  test "superseding a portfolio classifies its Decision Episode with recorded economics" do
+    %{scope: scope, generation: generation, revision: revision} = allocation_fixture()
+
+    assert {:ok, first} =
+             FleetAllocation.publish_portfolio(
+               scope,
+               generation.id,
+               selection(revision),
+               decision()
+             )
+
+    assert {:ok, second} =
+             FleetAllocation.publish_portfolio(
+               scope,
+               generation.id,
+               selection(revision, 1),
+               decision()
+             )
+
+    episode = Repo.get!(StrategyDecisionEpisode, first.strategy_decision_episode_id)
+
+    assert episode.classification == :superseded
+    assert episode.expectations == %{"credit_change" => 100}
+
+    assert episode.actual_outcomes == %{
+             "credit_change" => 0,
+             "purchase_cost" => 0,
+             "sale_revenue" => 0
+           }
+
+    assert Repo.get!(Portfolio, second.id).superseded_at == nil
+
+    assert {:error, :decision_episode_not_evaluating} =
+             FleetAllocation.record_decision_outcome(
+               scope,
+               first.strategy_decision_episode_id,
+               :superseded,
+               %{credit_change: 0}
+             )
+  end
+
+  test "unwinds the current portfolio and records its uneventful realized economics" do
+    %{scope: scope, generation: generation, revision: revision} = allocation_fixture()
+
+    assert {:ok, portfolio} =
+             FleetAllocation.publish_portfolio(
+               scope,
+               generation.id,
+               selection(revision),
+               decision()
+             )
+
+    assert {:ok, unwound} = FleetAllocation.unwind_current_portfolio(scope, generation.id)
+    assert unwound.id == portfolio.id
+    assert unwound.superseded_at
+    assert is_nil(FleetAllocation.current_portfolio(scope))
+
+    assert %Commitment{unwind_state: :released} =
+             Repo.get!(Commitment, hd(portfolio.commitments).id)
+
+    assert %StrategyDecisionEpisode{classification: :superseded, actual_outcomes: outcomes} =
+             Repo.get!(StrategyDecisionEpisode, portfolio.strategy_decision_episode_id)
+
+    assert outcomes["credit_change"] == 0
+  end
+
   defp allocation_fixture do
     operator = operator_fixture()
     scope = Scope.for_operator(operator)

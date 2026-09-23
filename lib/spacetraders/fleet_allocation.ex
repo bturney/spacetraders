@@ -8,6 +8,7 @@ defmodule SpaceTraders.FleetAllocation do
 
   alias SpaceTraders.Agent.Agent, as: AgentRecord
   alias SpaceTraders.Agent.Scope
+  alias SpaceTraders.Fleet.Intent
   alias SpaceTraders.FleetAllocation.{Commitment, Portfolio, StrategyDecisionEpisode}
   alias SpaceTraders.FleetGeneration.Generation
   alias SpaceTraders.FleetPlanning.CandidateContribution
@@ -138,6 +139,18 @@ defmodule SpaceTraders.FleetAllocation do
 
   @doc "Returns the current complete portfolio for the authenticated Operator's active generation."
   def current_portfolio(%Scope{operator: %{id: operator_id}}) do
+    current_portfolio_query(operator_id)
+    |> Repo.one()
+  end
+
+  @doc "Returns the current portfolio for one Agent's active Fleet Generation."
+  def current_portfolio(%Scope{operator: %{id: operator_id}}, %AgentRecord{id: agent_id}) do
+    current_portfolio_query(operator_id)
+    |> where([_portfolio, generation], generation.agent_id == ^agent_id)
+    |> Repo.one()
+  end
+
+  defp current_portfolio_query(operator_id) do
     Portfolio
     |> join(:inner, [portfolio], generation in Generation,
       on: generation.id == portfolio.fleet_generation_id
@@ -149,8 +162,90 @@ defmodule SpaceTraders.FleetAllocation do
     )
     |> order_by([portfolio], desc: portfolio.version)
     |> preload([:commitments, :strategy_decision_episode])
-    |> Repo.one()
   end
+
+  @doc "Records confirmed outcomes and terminal classification for one Decision Episode."
+  def record_decision_outcome(
+        %Scope{operator: %{id: operator_id}},
+        episode_id,
+        classification,
+        actual_outcomes
+      )
+      when is_integer(episode_id) and
+             classification in [:realized, :partially_realized, :superseded] and
+             is_map(actual_outcomes) do
+    update_decision_outcome(episode_id, operator_id, classification, actual_outcomes)
+  end
+
+  def record_decision_outcome(_scope, _episode_id, _classification, _actual_outcomes),
+    do: {:error, :invalid_decision_outcome}
+
+  @doc false
+  def record_portfolio_outcome(%Portfolio{} = portfolio, classification, actual_outcomes)
+      when classification in [:realized, :partially_realized, :superseded] and
+             is_map(actual_outcomes) do
+    update_decision_outcome(
+      portfolio.strategy_decision_episode_id,
+      portfolio.operator_id,
+      classification,
+      actual_outcomes
+    )
+  end
+
+  @doc "Records completed Market economics left pending by a process restart."
+  def reconcile_completed_outcomes do
+    StrategyDecisionEpisode
+    |> where([episode], episode.classification == :still_evaluating)
+    |> join(:inner, [episode], portfolio in Portfolio,
+      on: portfolio.strategy_decision_episode_id == episode.id
+    )
+    |> join(:inner, [_episode, portfolio], commitment in Commitment,
+      on: commitment.fleet_commitment_portfolio_id == portfolio.id
+    )
+    |> join(:inner, [_episode, _portfolio, commitment], intent in Intent,
+      on: intent.fleet_commitment_id == commitment.id
+    )
+    |> where(
+      [_episode, _portfolio, _commitment, intent],
+      intent.type == "sell" and intent.status == "completed"
+    )
+    |> select([episode], episode)
+    |> distinct(true)
+    |> Repo.all()
+    |> Enum.each(fn episode ->
+      _ =
+        update_decision_outcome(
+          episode.id,
+          episode.operator_id,
+          :realized,
+          realized_economics(episode.id)
+        )
+    end)
+
+    :ok
+  end
+
+  @doc "Safely releases the current portfolio when no replacement remains admissible."
+  def unwind_current_portfolio(%Scope{operator: %{id: operator_id}}, generation_id)
+      when is_integer(generation_id) do
+    Outbox.publish(
+      fn portfolio ->
+        %{
+          topic: "fleet_allocation:#{operator_id}",
+          event: "fleet_commitment_portfolio_unwound",
+          payload: %{
+            "portfolio_id" => portfolio.id,
+            "decision_episode_id" => portfolio.strategy_decision_episode_id
+          }
+        }
+      end,
+      fn ->
+        do_unwind_current_portfolio(operator_id, generation_id)
+      end
+    )
+  end
+
+  def unwind_current_portfolio(_scope, _generation_id), do: {:error, :invalid_unwind}
 
   @doc "Returns the current Fleet Commitment Claim authorizing one Ship."
   def current_ship_claim(agent, ship_symbol, opts \\ [])
@@ -309,17 +404,7 @@ defmodule SpaceTraders.FleetAllocation do
           portfolio.fleet_generation_id == ^generation_id and is_nil(portfolio.superseded_at),
         select: portfolio.id
 
-    Repo.update_all(
-      from(commitment in Commitment,
-        where: commitment.fleet_commitment_portfolio_id in subquery(current_portfolio_ids)
-      ),
-      set: [unwind_state: :released]
-    )
-
-    Repo.update_all(
-      from(portfolio in Portfolio, where: portfolio.id in subquery(current_portfolio_ids)),
-      set: [superseded_at: now]
-    )
+    supersede_portfolios(current_portfolio_ids, now)
 
     revision = Repo.get!(Revision, revision_id)
 
@@ -392,6 +477,140 @@ defmodule SpaceTraders.FleetAllocation do
   defp json_safe(nil), do: nil
   defp json_safe(atom) when is_atom(atom), do: Atom.to_string(atom)
   defp json_safe(value), do: value
+
+  defp update_decision_outcome(episode_id, operator_id, classification, actual_outcomes) do
+    query =
+      StrategyDecisionEpisode
+      |> where([episode], episode.id == ^episode_id and episode.operator_id == ^operator_id)
+      |> where([episode], episode.classification == :still_evaluating)
+      |> select([episode], episode)
+
+    case Repo.update_all(
+           query,
+           [
+             set: [
+               classification: classification,
+               actual_outcomes: json_safe(actual_outcomes),
+               updated_at: DateTime.utc_now()
+             ]
+           ],
+           returning: true
+         ) do
+      {1, [episode]} -> {:ok, episode}
+      {0, []} -> {:error, :decision_episode_not_evaluating}
+    end
+  end
+
+  defp do_unwind_current_portfolio(operator_id, generation_id) do
+    now = DateTime.utc_now()
+
+    portfolio =
+      Repo.one(
+        from portfolio in Portfolio,
+          join: generation in Generation,
+          on: generation.id == portfolio.fleet_generation_id,
+          where:
+            portfolio.operator_id == ^operator_id and
+              portfolio.fleet_generation_id == ^generation_id and
+              is_nil(portfolio.superseded_at) and is_nil(generation.fenced_at) and
+              is_nil(generation.retired_at),
+          preload: [:commitments, :strategy_decision_episode],
+          lock: "FOR UPDATE"
+      )
+
+    if portfolio do
+      supersede_portfolios([portfolio.id], now)
+      %{portfolio | superseded_at: now}
+    else
+      Repo.rollback(:no_current_portfolio)
+    end
+  end
+
+  defp supersede_portfolios(portfolio_ids, now) do
+    portfolio_ids =
+      case portfolio_ids do
+        %Ecto.Query{} = query -> Repo.all(query)
+        ids -> ids
+      end
+
+    episode_ids =
+      from(portfolio in Portfolio,
+        where: portfolio.id in ^portfolio_ids,
+        select: portfolio.strategy_decision_episode_id
+      )
+      |> Repo.all()
+
+    if unresolved_commitment_intent?(portfolio_ids),
+      do: Repo.rollback(:unresolved_commitment_evidence)
+
+    Repo.update_all(
+      from(commitment in Commitment,
+        where: commitment.fleet_commitment_portfolio_id in ^portfolio_ids
+      ),
+      set: [unwind_state: :released]
+    )
+
+    Repo.update_all(
+      from(portfolio in Portfolio, where: portfolio.id in ^portfolio_ids),
+      set: [superseded_at: now]
+    )
+
+    Enum.each(episode_ids, fn episode_id ->
+      case Repo.get(StrategyDecisionEpisode, episode_id) do
+        %{classification: :still_evaluating} = episode ->
+          Repo.update!(
+            Ecto.Changeset.change(episode,
+              classification: :superseded,
+              actual_outcomes: realized_economics(episode_id),
+              updated_at: now
+            )
+          )
+
+        _episode ->
+          :ok
+      end
+    end)
+  end
+
+  defp realized_economics(episode_id) do
+    totals =
+      from(intent in Intent,
+        join: commitment in Commitment,
+        on: commitment.id == intent.fleet_commitment_id,
+        join: portfolio in Portfolio,
+        on: portfolio.id == commitment.fleet_commitment_portfolio_id,
+        where:
+          portfolio.strategy_decision_episode_id == ^episode_id and intent.status == "completed" and
+            intent.type in ["buy", "sell"],
+        select: {intent.type, intent.last_action_result}
+      )
+      |> Repo.all()
+      |> Enum.reduce(%{purchase_cost: 0, sale_revenue: 0}, fn {type, result}, totals ->
+        amount = get_in(result || %{}, ["transaction", "total_price"])
+
+        if is_number(amount) do
+          key = if type == "buy", do: :purchase_cost, else: :sale_revenue
+          Map.update!(totals, key, &(&1 + amount))
+        else
+          totals
+        end
+      end)
+
+    Map.put(totals, :credit_change, totals.sale_revenue - totals.purchase_cost)
+  end
+
+  defp unresolved_commitment_intent?(portfolio_ids) do
+    Repo.exists?(
+      from(intent in Intent,
+        join: commitment in Commitment,
+        on: commitment.id == intent.fleet_commitment_id,
+        where:
+          commitment.fleet_commitment_portfolio_id in ^portfolio_ids and
+            intent.caller == "commitment" and
+            intent.status in ^Intent.unfinished_states()
+      )
+    )
+  end
 
   defp valid_published_commitments?(commitments) do
     valid? =

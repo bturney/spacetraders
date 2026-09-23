@@ -22,6 +22,7 @@ defmodule SpaceTraders.Application do
         SpaceTraders.EmergencyStopAdmission,
         SpaceTraders.FleetGenerationAdmission
       ] ++
+        fleet_reconciler_children() ++
         runtime_authority_children() ++
         [
           {Registry, keys: :unique, name: SpaceTraders.Contracts.Registry},
@@ -55,6 +56,12 @@ defmodule SpaceTraders.Application do
     else
       []
     end
+  end
+
+  # Test processes own isolated database connections and API stubs. The
+  # production reconciler is exercised through its public entry point instead.
+  defp fleet_reconciler_children do
+    if Mix.env() == :test, do: [], else: [SpaceTraders.FleetAllocation.Reconciler]
   end
 
   # Tell Phoenix to update the endpoint configuration

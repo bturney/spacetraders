@@ -588,6 +588,17 @@ defmodule SpaceTraders.Evidence do
 
         %{observation: persisted, demands: fulfilled}
       end)
+      |> tap(fn
+        {:ok, %{observation: %{operation_id: "get-market"} = persisted}} ->
+          Phoenix.PubSub.broadcast(
+            SpaceTraders.PubSub,
+            "fleet_market_evidence",
+            {:market_evidence_observed, persisted.agent_id, persisted.subject}
+          )
+
+        _ ->
+          :ok
+      end)
     else
       false -> {:error, :authoritative_observation_required}
     end
