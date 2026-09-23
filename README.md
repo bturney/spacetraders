@@ -46,13 +46,10 @@ The canonical gate, run locally and in CI on every PR:
 scripts/verify   # == mix verify
 ```
 
-`mix verify` runs, in order:
-
-1. `format --check-formatted` — formatting gate
-2. `compile --warnings-as-errors` — warnings gate
-3. `test` — the ExUnit suite
-4. `space_traders.gen.models --check` — fail if committed API structs are stale
-5. `verify.boot` — starts the full app on a real HTTP server and asserts `GET /health` → 200
+`mix verify` runs the checks defined by the `verify` alias in `mix.exs`:
+formatting, warnings-as-errors, the ExUnit suite, generated API struct and
+operation inventory freshness, the transport-boundary check, and boot health
+(the app started on a real HTTP server with `GET /health` → 200).
 
 ### PostgreSQL
 
@@ -85,8 +82,10 @@ generated from the official OpenAPI spec bundled at `priv/spec/` (v2.3.0). On
 spec updates, regenerate and commit the output:
 
 ```sh
-mix space_traders.gen.models        # rewrite lib/spacetraders/api/models/*.ex
-mix space_traders.gen.models --check  # fail if committed structs are stale
+mix space_traders.gen.models          # rewrite lib/spacetraders/api/models/*.ex
+mix space_traders.gen.operations      # rewrite the operation inventory
+mix space_traders.gen.models --check       # fail if committed structs are stale
+mix space_traders.gen.operations --check   # fail if the inventory is stale
 ```
 
 The regenerated structs are committed, so API drift shows up as a diff. The
