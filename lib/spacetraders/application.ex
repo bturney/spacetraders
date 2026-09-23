@@ -19,6 +19,7 @@ defmodule SpaceTraders.Application do
         SpaceTraders.Evidence.ReadCoordinator,
         SpaceTraders.API.CapacityGovernor,
         SpaceTraders.API.ShadowAdmission,
+        SpaceTraders.FleetAllocation.Reconciler,
         SpaceTraders.EmergencyStopAdmission,
         SpaceTraders.FleetGenerationAdmission
       ] ++

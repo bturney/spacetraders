@@ -136,6 +136,24 @@ defmodule SpaceTraders.FleetExecution do
     end
   end
 
+  @doc false
+  def reconcile_market_evidence(
+        %Scope{} = scope,
+        %AgentRecord{} = agent,
+        %Revision{} = revision,
+        system_symbol,
+        capacity
+      )
+      when is_binary(system_symbol) do
+    availability = availability(scope, agent)
+    current = FleetAllocation.current_portfolio(scope)
+
+    with {:ok, comparison} <-
+           FleetShadow.compare_market(agent, revision, system_symbol, availability, capacity) do
+      reconcile_market_replan(scope, agent, revision, current, comparison, capacity)
+    end
+  end
+
   @doc """
   Dispatches the authoritative buy leg of the round trip on the claimed Ship.
 
