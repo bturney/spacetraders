@@ -162,28 +162,7 @@ defmodule SpaceTraders.FleetAllocation do
       when is_integer(episode_id) and
              classification in [:realized, :partially_realized, :superseded] and
              is_map(actual_outcomes) do
-    now = DateTime.utc_now()
-
-    query =
-      StrategyDecisionEpisode
-      |> where([episode], episode.id == ^episode_id and episode.operator_id == ^operator_id)
-      |> where([episode], episode.classification == :still_evaluating)
-      |> select([episode], episode)
-
-    {count, [episode]} =
-      Repo.update_all(
-        query,
-        [
-          set: [
-            classification: classification,
-            actual_outcomes: json_safe(actual_outcomes),
-            updated_at: now
-          ]
-        ],
-        returning: true
-      )
-
-    if count == 1, do: {:ok, episode}, else: {:error, :decision_episode_not_evaluating}
+    update_decision_outcome(episode_id, operator_id, classification, actual_outcomes)
   end
 
   def record_decision_outcome(_scope, _episode_id, _classification, _actual_outcomes),
@@ -193,29 +172,12 @@ defmodule SpaceTraders.FleetAllocation do
   def record_portfolio_outcome(%Portfolio{} = portfolio, classification, actual_outcomes)
       when classification in [:realized, :partially_realized, :superseded] and
              is_map(actual_outcomes) do
-    now = DateTime.utc_now()
-
-    {count, [episode]} =
-      StrategyDecisionEpisode
-      |> where(
-        [episode],
-        episode.id == ^portfolio.strategy_decision_episode_id and
-          episode.operator_id == ^portfolio.operator_id and
-          episode.classification == :still_evaluating
-      )
-      |> select([episode], episode)
-      |> Repo.update_all(
-        [
-          set: [
-            classification: classification,
-            actual_outcomes: json_safe(actual_outcomes),
-            updated_at: now
-          ]
-        ],
-        returning: true
-      )
-
-    if count == 1, do: {:ok, episode}, else: {:error, :decision_episode_not_evaluating}
+    update_decision_outcome(
+      portfolio.strategy_decision_episode_id,
+      portfolio.operator_id,
+      classification,
+      actual_outcomes
+    )
   end
 
   @doc "Returns the current Fleet Commitment Claim authorizing one Ship."
@@ -442,6 +404,29 @@ defmodule SpaceTraders.FleetAllocation do
   end
 
   defp json_safe(%DateTime{} = datetime), do: DateTime.to_iso8601(datetime)
+
+  defp update_decision_outcome(episode_id, operator_id, classification, actual_outcomes) do
+    query =
+      StrategyDecisionEpisode
+      |> where([episode], episode.id == ^episode_id and episode.operator_id == ^operator_id)
+      |> where([episode], episode.classification == :still_evaluating)
+      |> select([episode], episode)
+
+    case Repo.update_all(
+           query,
+           [
+             set: [
+               classification: classification,
+               actual_outcomes: json_safe(actual_outcomes),
+               updated_at: DateTime.utc_now()
+             ]
+           ],
+           returning: true
+         ) do
+      {1, [episode]} -> {:ok, episode}
+      {0, []} -> {:error, :decision_episode_not_evaluating}
+    end
+  end
 
   defp json_safe(%_{} = struct) do
     struct

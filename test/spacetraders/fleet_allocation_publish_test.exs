@@ -161,6 +161,14 @@ defmodule SpaceTraders.FleetAllocationPublishTest do
     assert episode.expectations == %{"credit_change" => 100}
     assert episode.actual_outcomes == %{"credit_change" => 40}
     assert Repo.get!(Portfolio, second.id).superseded_at == nil
+
+    assert {:error, :decision_episode_not_evaluating} =
+             FleetAllocation.record_decision_outcome(
+               scope,
+               first.strategy_decision_episode_id,
+               :superseded,
+               %{credit_change: 40}
+             )
   end
 
   defp allocation_fixture do

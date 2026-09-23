@@ -423,7 +423,11 @@ defmodule SpaceTraders.IntentsTest do
                "purchase_cost" => 50,
                "sale_revenue" => 100
              }
-           } = Repo.get!(SpaceTraders.FleetAllocation.StrategyDecisionEpisode, portfolio.strategy_decision_episode_id)
+           } =
+             Repo.get!(
+               SpaceTraders.FleetAllocation.StrategyDecisionEpisode,
+               portfolio.strategy_decision_episode_id
+             )
 
     assert [
              %Intent{type: "sell", status: "completed"},
