@@ -12,6 +12,7 @@ defmodule SpaceTraders.Repo.Migrations.PersistenceRenameTest do
   alias SpaceTraders.Repo.Migrations.AddCallerOwnershipToManualIntents
   alias SpaceTraders.Repo.Migrations.AddGatherModeToJobs
   alias SpaceTraders.Repo.Migrations.RenameManualIntentsToIntents
+  alias SpaceTraders.Repo.Migrations.RetireLegacyAdmission
 
   @migration AddGatherModeToJobs
   @version 2026_08_18_000000
@@ -19,12 +20,16 @@ defmodule SpaceTraders.Repo.Migrations.PersistenceRenameTest do
   @caller_ownership_version 2026_08_30_000000
   @rename_migration RenameManualIntentsToIntents
   @rename_version 2026_08_31_000000
+  @retirement_version 2026_09_24_010000
 
   setup do
     Ecto.Adapters.SQL.Sandbox.mode(Repo, :auto)
     previous_compiler_options = Code.compiler_options()
     Code.compiler_options(ignore_module_conflict: true)
     Ecto.Migrator.run(Repo, :up, all: true, log: false)
+    # This suite rolls back pre-ownership schemas. Their columns do not exist
+    # while the current admission triggers are installed.
+    Ecto.Migrator.down(Repo, @retirement_version, RetireLegacyAdmission, log: false)
     Repo.delete_all(AgentRecord)
 
     on_exit(fn ->

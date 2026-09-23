@@ -51,6 +51,8 @@ defmodule SpaceTradersWeb.Router do
       live "/operators/settings/confirm-email/:token", OperatorLive.Settings, :confirm_email
       live "/agents/new", OperatorLive.Mint, :new
       live "/mission-control", MissionControlLive, :show
+      live "/gameplay-history", GameplayHistoryLive, :index
+      live "/intervention", InterventionLive, :index
       live "/strategy", StrategyLive, :show
     end
 

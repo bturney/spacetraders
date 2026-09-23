@@ -338,6 +338,8 @@ defmodule SpaceTraders.FleetStrategy do
 
           if claimed != 1, do: Repo.rollback(:stale_draft)
 
+          :ok = SpaceTraders.LegacyRetirement.retire_for_operator!(operator_id)
+
           revision =
             %Revision{}
             |> Revision.create_changeset(%{

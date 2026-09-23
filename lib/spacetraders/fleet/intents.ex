@@ -23,7 +23,17 @@ defmodule SpaceTraders.Fleet.Intents do
   alias SpaceTraders.Fleet.ShipServer
   alias SpaceTraders.Repo
   alias SpaceTraders.SafetyFence.DependencyKey
-  alias SpaceTraders.{Agent, Contracts, Evidence, FleetExecution, MutationAttempts, Timeline}
+
+  alias SpaceTraders.{
+    Agent,
+    Contracts,
+    Evidence,
+    FleetExecution,
+    ManualIntervention,
+    MutationAttempts,
+    ShipReservation,
+    Timeline
+  }
 
   defmodule Navigate do
     @moduledoc "A closed Navigate goal for a Ship."
@@ -321,8 +331,75 @@ defmodule SpaceTraders.Fleet.Intents do
         ship_symbol,
         goal
       ) do
-    with {:ok, agent} <- scoped_agent_for_ship(current_scope, agent.id, ship_symbol) do
+    with {:ok, agent} <- scoped_agent_for_ship(current_scope, agent.id, ship_symbol),
+         :ok <- legacy_manual_allowed?(agent) do
       request_for_agent(agent, :manual, ship_symbol, goal)
+    end
+  end
+
+  @doc "Requests one exceptional Navigate outcome for an explicitly reserved Ship."
+  def intervene_navigate(%Scope{} = scope, %AgentRecord{} = agent, ship_symbol, waypoint, reason)
+      when is_binary(waypoint) and is_binary(reason) do
+    waypoint = String.trim(waypoint)
+    reason = String.trim(reason)
+
+    with :ok <- token_present(agent),
+         :ok <- validate_intent_waypoint(waypoint),
+         true <- reason != "" || {:error, :reason_required},
+         {:ok, agent} <- scoped_agent_for_ship(scope, agent.id, ship_symbol),
+         {:ok, ship} <- Fleet.owned_ship(agent, ship_symbol),
+         {:ok, intent} <-
+           Repo.transaction(fn ->
+             reservation =
+               Repo.one(
+                 from r in ShipReservation,
+                   where:
+                     r.ship_id == ^ship.id and r.operator_id == ^scope.operator.id and
+                       is_nil(r.released_at),
+                   lock: "FOR SHARE"
+               )
+
+             if is_nil(reservation), do: Repo.rollback(:ship_not_reserved)
+
+             if unfinished_intent_for_ship(ship.id), do: Repo.rollback(:ship_busy)
+
+             if match?({:ok, _}, FleetAllocation.current_ship_claim(agent, ship_symbol)) do
+               Repo.rollback(:ship_claimed)
+             end
+
+             intervention =
+               Repo.insert!(%ManualIntervention{
+                 ship_reservation_id: reservation.id,
+                 reason: reason,
+                 target_waypoint: waypoint
+               })
+
+             case replace_intents(ship, %{
+                    caller: "intervention",
+                    type: "navigate",
+                    target_waypoint: waypoint,
+                    parameters: %{}
+                  }) do
+               {:ok, intent} ->
+                 Repo.update!(Ecto.Changeset.change(intervention, intent_id: intent.id))
+                 intent
+
+               {:error, cause} ->
+                 Repo.rollback(cause)
+             end
+           end) do
+      reconcile_intents(agent, intent)
+    end
+  end
+
+  def intervene_navigate(_scope, _agent, _ship_symbol, _waypoint, _reason),
+    do: {:error, :invalid_intervention}
+
+  defp legacy_manual_allowed?(%AgentRecord{operator_id: operator_id}) do
+    if SpaceTraders.LegacyRetirement.active_for_operator?(operator_id) do
+      {:error, :legacy_gameplay_retired}
+    else
+      :ok
     end
   end
 
@@ -401,7 +478,8 @@ defmodule SpaceTraders.Fleet.Intents do
         opts
       )
       when is_map(preview) do
-    with {:ok, agent} <- scoped_agent_for_ship(current_scope, agent.id, ship_symbol) do
+    with {:ok, agent} <- scoped_agent_for_ship(current_scope, agent.id, ship_symbol),
+         :ok <- legacy_manual_allowed?(agent) do
       review_navigation_intent(agent, ship_symbol, waypoint, preview, opts)
     end
   end
@@ -418,7 +496,8 @@ defmodule SpaceTraders.Fleet.Intents do
         waypoint,
         reason
       ) do
-    with {:ok, agent} <- scoped_agent_for_ship(current_scope, agent.id, ship_symbol) do
+    with {:ok, agent} <- scoped_agent_for_ship(current_scope, agent.id, ship_symbol),
+         :ok <- legacy_manual_allowed?(agent) do
       block_jump_preview(agent, ship_symbol, waypoint, reason)
     end
   end
@@ -450,6 +529,24 @@ defmodule SpaceTraders.Fleet.Intents do
     else
       nil -> {:error, :intent_not_found}
       error -> error
+    end
+  end
+
+  @doc "Stops an authenticated exceptional intervention after in-flight evidence is safe."
+  def stop_intervention(%Scope{operator: %{id: operator_id}}, intent_id) do
+    with {%Intent{caller: "intervention"} = intent, %AgentRecord{} = agent} <-
+           owned_intent_for_operator(operator_id, intent_id),
+         true <-
+           ManualIntervention.authorized?(
+             operator_id,
+             Repo.get!(Ship, intent.ship_id).symbol,
+             intent_id
+           ) ||
+             {:error, :intervention_not_authorized} do
+      do_stop_intent(agent, intent_id, :intervention)
+    else
+      nil -> {:error, :intent_not_found}
+      _ -> {:error, :intervention_not_authorized}
     end
   end
 
@@ -838,7 +935,14 @@ defmodule SpaceTraders.Fleet.Intents do
     end
   end
 
-  defp manual_boot_intent(ship_id, _expected_intent_id), do: unfinished_manual_intent(ship_id)
+  defp manual_boot_intent(ship_id, _expected_intent_id) do
+    Repo.one(
+      from intent in Intent,
+        where:
+          intent.ship_id == ^ship_id and intent.status in ^@unfinished_states and
+            intent.caller in ["manual", "intervention"]
+    )
+  end
 
   defp validate_intent_waypoint(""), do: {:error, :invalid_waypoint}
   defp validate_intent_waypoint(_waypoint), do: :ok
@@ -1116,6 +1220,7 @@ defmodule SpaceTraders.Fleet.Intents do
     with {:ok, revision} <- parse_review_revision(review_revision),
          {%Intent{} = intent, %AgentRecord{} = agent} <-
            owned_intent_for_operator(operator_id, intent_id),
+         :ok <- legacy_manual_allowed?(agent),
          true <-
            intent.status == "awaiting_confirmation" || {:error, :intent_not_awaiting_confirmation},
          true <- intent.review_revision == revision || {:error, :review_revision_stale},
@@ -1962,6 +2067,9 @@ defmodule SpaceTraders.Fleet.Intents do
                    owner == :manual and intent.caller != "manual" ->
                      Repo.rollback(:invalid_intent_owner)
 
+                   owner == :intervention and intent.caller != "intervention" ->
+                     Repo.rollback(:invalid_intent_owner)
+
                    is_struct(owner, Job) and
                        (intent.caller != "job" or intent.job_id != owner.id) ->
                      Repo.rollback(:invalid_intent_owner)
@@ -1991,10 +2099,15 @@ defmodule SpaceTraders.Fleet.Intents do
       {:ok, %Intent{} = intent} ->
         ship = Repo.get!(Ship, intent.ship_id)
 
+        kind =
+          if owner == :intervention,
+            do: "manual_intervention_stopped",
+            else: "manual_intent_stopped"
+
         Fleet.record_activity(
           agent,
           ship,
-          "manual_intent_stopped",
+          kind,
           "Navigate to #{intent.target_waypoint} stopped"
         )
 
@@ -2034,7 +2147,10 @@ defmodule SpaceTraders.Fleet.Intents do
           current = Repo.get!(Intent, intent.id)
 
           with {:ok, claim} <-
-                 FleetAllocation.authorize_ship_execution(agent, ship.symbol, lock: true),
+                 FleetAllocation.authorize_ship_execution(agent, ship.symbol,
+                   lock: true,
+                   intent_id: current.id
+                 ),
                {:ok, binding} <- bind_intent_claim(current, claim) do
             if binding.intent == %{} do
               current
@@ -2853,7 +2969,10 @@ defmodule SpaceTraders.Fleet.Intents do
                true <- intent_owned_by_running_job_or_manual?(current),
                %Ship{symbol: ship_symbol} <- Repo.get(Ship, current.ship_id),
                {:ok, claim} <-
-                 FleetAllocation.authorize_ship_execution(agent, ship_symbol, lock: true),
+                 FleetAllocation.authorize_ship_execution(agent, ship_symbol,
+                   lock: true,
+                   intent_id: current.id
+                 ),
                {:ok, binding} <- bind_intent_claim(current, claim) do
             action = Map.merge(action, binding.action)
 
@@ -4576,7 +4695,10 @@ defmodule SpaceTraders.Fleet.Intents do
   defp retry_under_current_claim(agent, intent, live_ship, action, absent) do
     Repo.transaction(fn ->
       with {:ok, claim} <-
-             FleetAllocation.authorize_ship_execution(agent, live_ship.symbol, lock: true),
+             FleetAllocation.authorize_ship_execution(agent, live_ship.symbol,
+               lock: true,
+               intent_id: intent.id
+             ),
            {:ok, binding} <- bind_intent_claim(intent, claim),
            true <- Map.merge(action, binding.action) == action do
         MutationAttempts.with_retry(absent, fn ->

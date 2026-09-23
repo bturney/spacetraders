@@ -25,6 +25,7 @@ defmodule SpaceTraders.FleetExecution do
   alias SpaceTraders.FleetStrategy.Revision
   alias SpaceTraders.FleetStrategy.StandingAuthority
   alias SpaceTraders.Repo
+  alias SpaceTraders.ShipReservation
 
   @fuel_allowance_credits 500
   @bounded_loss_credits 250
@@ -285,9 +286,13 @@ defmodule SpaceTraders.FleetExecution do
   end
 
   defp availability_claims(agent) do
+    reserved = MapSet.new(ShipReservation.reserved_symbols(agent.id))
+
     case Fleet.list_ships(agent) do
       {:ok, ships} ->
-        Enum.map(ships, fn ship ->
+        ships
+        |> Enum.reject(&MapSet.member?(reserved, &1.symbol))
+        |> Enum.map(fn ship ->
           %{
             resource: ship.symbol,
             roles: [:market_trader],
@@ -318,9 +323,14 @@ defmodule SpaceTraders.FleetExecution do
   end
 
   defp owned_ship_symbols(%AgentRecord{} = agent) do
+    reserved = MapSet.new(ShipReservation.reserved_symbols(agent.id))
+
     case Fleet.list_ships(agent) do
-      {:ok, ships} -> MapSet.new(ships, & &1.symbol)
-      _ -> MapSet.new()
+      {:ok, ships} ->
+        ships |> Enum.reject(&MapSet.member?(reserved, &1.symbol)) |> MapSet.new(& &1.symbol)
+
+      _ ->
+        MapSet.new()
     end
   end
 

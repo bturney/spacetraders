@@ -39,7 +39,7 @@ defmodule SpaceTraders.MutationAttemptsTest do
     intent =
       Repo.insert!(%Intent{
         ship_id: ship.id,
-        caller: "manual",
+        caller: "intervention",
         type: "navigate",
         target_waypoint: "X1-TEST-B2",
         in_flight_action: %{"kind" => "navigate"}
@@ -599,7 +599,7 @@ defmodule SpaceTraders.MutationAttemptsTest do
 
     Repo.insert!(%Intent{
       ship_id: ship.id,
-      caller: "manual",
+      caller: "intervention",
       type: "navigate",
       target_waypoint: destination,
       in_flight_action: %{"kind" => "navigate", "waypoint" => destination}

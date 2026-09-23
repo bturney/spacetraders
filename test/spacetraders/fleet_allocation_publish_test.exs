@@ -4,6 +4,7 @@ defmodule SpaceTraders.FleetAllocationPublishTest do
   import SpaceTraders.AgentFixtures
 
   alias SpaceTraders.Agent.Scope
+  alias SpaceTraders.Fleet
   alias SpaceTraders.FleetAllocation
   alias SpaceTraders.FleetAllocation.{Commitment, Portfolio, StrategyDecisionEpisode}
   alias SpaceTraders.FleetAllocation.PortfolioCandidate
@@ -11,6 +12,7 @@ defmodule SpaceTraders.FleetAllocationPublishTest do
   alias SpaceTraders.FleetStrategy.{Revision, Strategy}
   alias SpaceTraders.Outbox
   alias SpaceTraders.Outbox.Notification
+  alias SpaceTraders.ShipReservation
 
   @as_of ~U[2030-01-01 12:00:00Z]
 
@@ -97,6 +99,35 @@ defmodule SpaceTraders.FleetAllocationPublishTest do
              FleetAllocation.current_portfolio(scope)
 
     assert first_id == first.id
+  end
+
+  test "an Operator reservation prevents a stale selection from claiming the Ship" do
+    %{scope: scope, agent: agent, generation: generation, revision: revision} =
+      allocation_fixture()
+
+    ship = Repo.get_by!(SpaceTraders.Fleet.Ship, agent_id: agent.id, symbol: "SHIP-1")
+    assert {:ok, _} = ShipReservation.reserve(scope, ship.id, "Recovery")
+
+    assert {:error, :ship_reserved} =
+             FleetAllocation.publish_portfolio(
+               scope,
+               generation.id,
+               selection(revision),
+               decision()
+             )
+
+    refute Repo.exists?(Portfolio)
+    assert Repo.get!(Generation, generation.id).allocation_version == 0
+
+    assert :ok = ShipReservation.release(scope, ship.id)
+
+    assert {:ok, %Portfolio{}} =
+             FleetAllocation.publish_portfolio(
+               scope,
+               generation.id,
+               selection(revision),
+               decision()
+             )
   end
 
   test "atomically supersedes the prior portfolio for readers" do
@@ -200,6 +231,7 @@ defmodule SpaceTraders.FleetAllocationPublishTest do
     operator = operator_fixture()
     scope = Scope.for_operator(operator)
     agent = agent_fixture(operator)
+    {:ok, _ship} = Fleet.record_ship(agent, "SHIP-1", "SHIP_COMMAND_FRIGATE")
 
     strategy = Repo.insert!(%Strategy{operator_id: operator.id, revision_number: 1})
 

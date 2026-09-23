@@ -63,7 +63,7 @@ defmodule SpaceTraders.Fleet.Intent do
     ])
     |> cast_embed(:blocker)
     |> validate_required([:caller, :type, :target_waypoint])
-    |> validate_inclusion(:caller, ["manual", "job", "commitment"])
+    |> validate_inclusion(:caller, ["manual", "job", "commitment", "intervention"])
     |> validate_job_owner()
     |> validate_commitment_owner()
     |> validate_inclusion(:type, [

@@ -281,8 +281,14 @@ How a Miner Job gathers on its configured extraction Waypoint: extract on minera
 _Avoid_: mining style, collection mode
 
 **Manual Control**:
-The Operator acting as an alternate caller of one-off Intents or direct game actions, not a Job or durable Ship mode. A manual command durably pauses the assigned active Job before it runs, and only one Intent actively commands a Ship. Manual execution survives app restarts; the Job remains paused afterward until explicit resume and revalidation against game truth. Outcome-level Intents are the default controls, while serialized posture-level actions remain available through progressive disclosure.
+Historical per-Ship Operator gameplay authority, retired when a Fleet Strategy Revision is activated. Its old Jobs and Intents remain readable as legacy history; it cannot admit new gameplay after activation.
 _Avoid_: Manual Mode
+
+**Manual Intervention**:
+An exceptional, authenticated, reason-bearing Operator request for one bounded Ship outcome. The Ship must first be explicitly reserved from Fleet allocation; the intervention has its own durable record and Intent, and does not create a Job or a second autonomous Claim.
+
+**Ship Reservation**:
+An explicit Operator-owned exclusion of one Ship from autonomous Fleet allocation, with a reason and durable release. It is distinct from a Fleet Commitment's fungible Reservation and remains recorded after release.
 
 **Ship Readiness**:
 The capability and condition information that determines what a Ship can do: flight mode, crew, frame, reactor, engine, modules, and mounts. It supplements, but does not replace, the Ship's immediate operational status, location, fuel, cargo, and actions.
