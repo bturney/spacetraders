@@ -96,6 +96,9 @@ defmodule SpaceTraders.API.ShadowAdmission do
     |> Enum.map(fn {demand, rank} -> decision(demand, snapshot, rank) end)
   end
 
+  @doc "Returns the current governed capacity snapshot for Fleet reconciliation."
+  def snapshot(name \\ __MODULE__), do: GenServer.call(name, :snapshot)
+
   @impl true
   def init(opts) do
     config = Application.get_env(:spacetraders, SpaceTraders.API.RateLimiter, [])
@@ -113,6 +116,21 @@ defmodule SpaceTraders.API.ShadowAdmission do
        backpressure_streak: 0,
        requests: %{}
      }}
+  end
+
+  @impl true
+  def handle_call(:snapshot, _from, state) do
+    state = refill(state, monotonic_ms())
+    now = DateTime.utc_now()
+
+    {:reply,
+     %Snapshot{
+       observed_at: now,
+       available_slots: floor(state.tokens),
+       evidence_fingerprint: "runtime",
+       next_outage_probe_at: state.next_outage_probe_at,
+       backpressure: if(state.backpressure_streak >= 2, do: :sustained, else: :none)
+     }, state}
   end
 
   @impl true

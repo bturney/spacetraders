@@ -9,6 +9,7 @@ defmodule SpaceTraders.FleetAllocation.StrategyDecisionEpisode do
     field :alternatives, {:array, :map}, default: []
     field :binding_constraints, {:array, :map}, default: []
     field :expectations, :map, default: %{}
+    field :actual_outcomes, :map, default: %{}
     field :calibration_version, :string
 
     field :classification, Ecto.Enum,
