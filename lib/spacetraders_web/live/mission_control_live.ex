@@ -30,6 +30,12 @@ defmodule SpaceTradersWeb.MissionControlLive do
             </:subtitle>
           </.header>
         </header>
+        <.link navigate={~p"/gameplay-history"} class="link link-primary text-sm">
+          Gameplay history
+        </.link>
+        <.link navigate={~p"/intervention"} class="link link-primary text-sm">
+          Reserve a Ship or intervene
+        </.link>
 
         <section
           :if={!@projection.strategy.active_revision || @projection.fleets == []}
@@ -177,7 +183,7 @@ defmodule SpaceTradersWeb.MissionControlLive do
                   {ship.symbol}: {ship.control.attention.summary}
                 </li>
               </ul>
-              <.link navigate={~p"/"} class="link link-primary mt-3 inline-block text-sm">Intervene in Fleet command</.link>
+              <.link navigate={~p"/intervention"} class="link link-primary mt-3 inline-block text-sm">Review Manual Intervention</.link>
             </div>
             <div :if={fleet.activity != []} class="mt-4 border-t border-base-300 pt-4">
               <p class="eyebrow">Activity</p><p class="mt-2 text-sm">{hd(fleet.activity).message}</p>

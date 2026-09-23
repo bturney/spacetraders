@@ -114,6 +114,30 @@ defmodule SpaceTradersWeb.DashboardLive do
   def mount(params, _session, socket) do
     socket = assign(socket, :prototype_variant, prototype_variant(params["prototype"]))
 
+    socket =
+      Phoenix.LiveView.attach_hook(socket, :retire_legacy_dashboard, :handle_event, fn
+        _event, _params, socket ->
+          if legacy_retired?(socket.assigns.current_scope) do
+            {:halt, redirect(socket, to: ~p"/mission-control")}
+          else
+            {:cont, socket}
+          end
+      end)
+
+    if legacy_retired?(socket.assigns.current_scope) do
+      {:ok, redirect(socket, to: ~p"/mission-control")}
+    else
+      mount_legacy_dashboard(socket)
+    end
+  end
+
+  defp legacy_retired?(%{operator: %{id: operator_id}}) do
+    SpaceTraders.LegacyRetirement.active_for_operator?(operator_id)
+  end
+
+  defp legacy_retired?(_scope), do: false
+
+  defp mount_legacy_dashboard(socket) do
     if socket.assigns.prototype_variant do
       {:ok, socket}
     else

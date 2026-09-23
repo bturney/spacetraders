@@ -8,13 +8,13 @@ defmodule SpaceTraders.FleetAllocation do
 
   alias SpaceTraders.Agent.Agent, as: AgentRecord
   alias SpaceTraders.Agent.Scope
-  alias SpaceTraders.Fleet.Intent
+  alias SpaceTraders.Fleet.{Intent, Ship}
   alias SpaceTraders.FleetAllocation.{Commitment, Portfolio, StrategyDecisionEpisode}
   alias SpaceTraders.FleetGeneration.Generation
   alias SpaceTraders.FleetPlanning.CandidateContribution
   alias SpaceTraders.FleetStrategy
   alias SpaceTraders.FleetStrategy.Strategy
-  alias SpaceTraders.{Outbox, Repo}
+  alias SpaceTraders.{ManualIntervention, Outbox, Repo, ShipReservation}
 
   alias SpaceTraders.FleetStrategy.{
     ObjectiveEvaluation,
@@ -305,8 +305,20 @@ defmodule SpaceTraders.FleetAllocation do
               is_nil(generation.fenced_at) and is_nil(generation.retired_at)
       )
 
-    if active_generation? do
-      current_ship_claim(agent, ship_symbol, opts)
+    active_revision? = SpaceTraders.LegacyRetirement.active_for_operator?(operator_id)
+
+    if active_generation? or active_revision? do
+      case current_ship_claim(agent, ship_symbol, opts) do
+        {:error, :no_current_ship_claim} = error ->
+          if ManualIntervention.authorized?(operator_id, ship_symbol, opts[:intent_id]) do
+            {:ok, %{commitment_id: nil, portfolio_id: nil, portfolio_version: nil}}
+          else
+            error
+          end
+
+        claim ->
+          claim
+      end
     else
       # Legacy Jobs and Manual Control remain the sole authority until their
       # Fleet Generation is activated onto target Ship Execution.
@@ -395,6 +407,33 @@ defmodule SpaceTraders.FleetAllocation do
       )
 
     if updated_generations != 1, do: Repo.rollback(:stale_source)
+
+    # Reservation and allocation serialize on the same Ship rows. A stale
+    # planning snapshot cannot claim a Ship that an Operator has reserved.
+    claimed_symbols =
+      selection.commitments
+      |> Enum.flat_map(& &1.claims)
+      |> Enum.uniq()
+      |> Enum.sort()
+
+    claimed_ships =
+      Repo.all(
+        from ship in Ship,
+          join: generation in Generation,
+          on: generation.agent_id == ship.agent_id,
+          where: generation.id == ^generation_id and ship.symbol in ^claimed_symbols,
+          order_by: ship.id,
+          lock: "FOR UPDATE OF s0",
+          select: ship.id
+      )
+
+    if length(claimed_ships) != length(claimed_symbols) or
+         Repo.exists?(
+           from reservation in ShipReservation,
+             where: reservation.ship_id in ^claimed_ships and is_nil(reservation.released_at)
+         ) do
+      Repo.rollback(:ship_reserved)
+    end
 
     now = DateTime.utc_now()
 
