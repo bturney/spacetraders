@@ -588,7 +588,7 @@ defmodule SpaceTraders.Fleet.Intents do
       when is_binary(agent_token) and agent_token != "" ->
         with %Ship{} = ship <- Repo.get_by(Ship, symbol: ship_symbol, agent_id: agent_id),
              %Intent{status: status} = intent when status != "awaiting_confirmation" <-
-               manual_boot_intent(ship.id, expected_intent_id),
+               boot_intent(ship.id, expected_intent_id),
              :ok <- Agent.execution_allowed?(agent) do
           case Agent.handle_game_result(
                  agent,
@@ -690,6 +690,53 @@ defmodule SpaceTraders.Fleet.Intents do
   that trigger; their recovery would duplicate the timer's fresh read.
   """
   def rearm_on_boot do
+    owned_symbols = rearm_owned_intents_on_boot()
+    rearm_legacy_work_on_boot(owned_symbols)
+
+    # A sell may have completed just before a process crash. Its durable Intent
+    # evidence is sufficient to classify the owning Decision Episode idempotently.
+    FleetAllocation.reconcile_completed_outcomes()
+
+    :ok
+  end
+
+  @doc "Reconstructs commitment and intervention Intents without reading legacy Jobs."
+  def rearm_owned_intents_on_boot do
+    symbols =
+      Intent
+      |> join(:inner, [i], s in Ship, on: i.ship_id == s.id)
+      |> where(
+        [i, _s],
+        i.status in ^@unfinished_states and i.caller in ["commitment", "intervention"]
+      )
+      |> select([_i, s], s.symbol)
+      |> Repo.all()
+      |> Enum.uniq()
+
+    Enum.filter(symbols, &rearm_intent_ship/1)
+  end
+
+  defp rearm_intent_ship(ship_symbol) do
+    case Fleet.ship_agent(ship_symbol) do
+      {:ok, agent} ->
+        ShipServer.ensure_started(agent, ship_symbol)
+
+        unless intents_waiting_on_timeline?(ship_symbol) do
+          reconcile(agent.id, ship_symbol, nil, :boot, nil, nil)
+        end
+
+        true
+
+      :error ->
+        Logger.warning(
+          "ship #{ship_symbol}: no stored credentials, not re-arming timeline events"
+        )
+
+        false
+    end
+  end
+
+  defp rearm_legacy_work_on_boot(owned_symbols) do
     timeline_symbols = Timeline.pending_owners(:ship) |> Enum.map(& &1.owner_id)
     running_job_states = Job.running_states()
 
@@ -709,6 +756,7 @@ defmodule SpaceTraders.Fleet.Intents do
 
     (timeline_symbols ++ job_symbols ++ intent_symbols)
     |> Enum.uniq()
+    |> Enum.reject(&(&1 in owned_symbols))
     |> Enum.each(fn ship_symbol ->
       case Fleet.ship_agent(ship_symbol) do
         {:ok, agent} ->
@@ -718,7 +766,7 @@ defmodule SpaceTraders.Fleet.Intents do
             reconcile(agent.id, ship_symbol, nil, :boot, nil, nil)
           end
 
-          unless ship_symbol in timeline_symbols do
+          unless ship_symbol in timeline_symbols or active_non_job_intent?(ship_symbol) do
             Fleet.recover_job_on_boot(ship_symbol, agent.id)
           end
 
@@ -728,12 +776,6 @@ defmodule SpaceTraders.Fleet.Intents do
           )
       end
     end)
-
-    # A sell may have completed just before a process crash. Its durable Intent
-    # evidence is sufficient to classify the owning Decision Episode idempotently.
-    FleetAllocation.reconcile_completed_outcomes()
-
-    :ok
   end
 
   defp intents_waiting_on_timeline?(ship_symbol) do
@@ -741,6 +783,15 @@ defmodule SpaceTraders.Fleet.Intents do
          %Intent{} = intent <- unfinished_intent_for_ship(ship.id) do
       Timeline.pending_events(:ship, ship_symbol)
       |> Enum.any?(&(&1.payload["intent_id"] == intent.id))
+    else
+      _ -> false
+    end
+  end
+
+  defp active_non_job_intent?(ship_symbol) do
+    with %Ship{} = ship <- Repo.get_by(Ship, symbol: ship_symbol),
+         %Intent{} = intent <- unfinished_intent_for_ship(ship.id) do
+      intent.caller != "job"
     else
       _ -> false
     end
@@ -928,21 +979,17 @@ defmodule SpaceTraders.Fleet.Intents do
     end
   end
 
-  defp manual_boot_intent(_ship_id, intent_id) when is_integer(intent_id) do
+  defp boot_intent(ship_id, intent_id) when is_integer(intent_id) do
     case Repo.get(Intent, intent_id) do
-      %Intent{status: status} = intent when status in @unfinished_states -> intent
-      _ -> nil
+      %Intent{ship_id: ^ship_id, status: status} = intent when status in @unfinished_states ->
+        intent
+
+      _ ->
+        nil
     end
   end
 
-  defp manual_boot_intent(ship_id, _expected_intent_id) do
-    Repo.one(
-      from intent in Intent,
-        where:
-          intent.ship_id == ^ship_id and intent.status in ^@unfinished_states and
-            intent.caller in ["manual", "intervention"]
-    )
-  end
+  defp boot_intent(ship_id, _expected_intent_id), do: unfinished_intent_for_ship(ship_id)
 
   defp validate_intent_waypoint(""), do: {:error, :invalid_waypoint}
   defp validate_intent_waypoint(_waypoint), do: :ok
@@ -2549,9 +2596,17 @@ defmodule SpaceTraders.Fleet.Intents do
     case intent.in_flight_action do
       %{"kind" => kind} = action when kind in ["navigate", "orbit", "dock"] ->
         if prerequisite_action_reconciled?(action, live_ship) do
-          case transition_intent(intent, in_flight_action: nil) do
-            {:ok, intent} -> advance_intents(agent, intent, live_ship)
-            :intent_no_longer_owned -> :ok
+          with :ok <-
+                 reconcile_accepted_attempt(
+                   agent,
+                   intent,
+                   live_ship,
+                   "Authoritative Ship state proves the #{kind} prerequisite outcome"
+                 ) do
+            case transition_intent(intent, in_flight_action: nil) do
+              {:ok, intent} -> advance_intents(agent, intent, live_ship)
+              :intent_no_longer_owned -> :ok
+            end
           end
         else
           block_cargo_intent(intent, {:ambiguous_operation_evidence, kind})
