@@ -31,7 +31,8 @@ defmodule SpaceTraders.FleetAllocation.Reconciler do
   def handle_info(_message, state), do: {:noreply, state}
 
   defp reconcile(agent_id, system_symbol) do
-    with %Generation{fleet_strategy_revision_id: revision_id, operator_id: operator_id} <-
+    with :ok <- SpaceTraders.RuntimeAuthority.execution_allowed?(),
+         %Generation{fleet_strategy_revision_id: revision_id, operator_id: operator_id} <-
            Repo.one(
              from generation in Generation,
                where:

@@ -139,6 +139,18 @@ defmodule SpaceTraders.FleetAllocation do
 
   @doc "Returns the current complete portfolio for the authenticated Operator's active generation."
   def current_portfolio(%Scope{operator: %{id: operator_id}}) do
+    current_portfolio_query(operator_id)
+    |> Repo.one()
+  end
+
+  @doc "Returns the current portfolio for one Agent's active Fleet Generation."
+  def current_portfolio(%Scope{operator: %{id: operator_id}}, %AgentRecord{id: agent_id}) do
+    current_portfolio_query(operator_id)
+    |> where([_portfolio, generation], generation.agent_id == ^agent_id)
+    |> Repo.one()
+  end
+
+  defp current_portfolio_query(operator_id) do
     Portfolio
     |> join(:inner, [portfolio], generation in Generation,
       on: generation.id == portfolio.fleet_generation_id
@@ -150,7 +162,6 @@ defmodule SpaceTraders.FleetAllocation do
     )
     |> order_by([portfolio], desc: portfolio.version)
     |> preload([:commitments, :strategy_decision_episode])
-    |> Repo.one()
   end
 
   @doc "Records confirmed outcomes and terminal classification for one Decision Episode."
@@ -595,7 +606,7 @@ defmodule SpaceTraders.FleetAllocation do
         on: commitment.id == intent.fleet_commitment_id,
         where:
           commitment.fleet_commitment_portfolio_id in ^portfolio_ids and
-            intent.status == "awaiting_confirmation"
+            intent.status in ^Intent.unfinished_states()
       )
     )
   end

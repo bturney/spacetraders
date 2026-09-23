@@ -120,6 +120,7 @@ defmodule SpaceTraders.API.ShadowAdmission do
 
   @impl true
   def handle_call(:snapshot, _from, state) do
+    state = refill(state, monotonic_ms())
     now = DateTime.utc_now()
 
     {:reply,

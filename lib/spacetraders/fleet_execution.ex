@@ -121,7 +121,7 @@ defmodule SpaceTraders.FleetExecution do
       )
       when is_map(previous) and is_map(snapshot) do
     availability = availability(scope, agent)
-    current = FleetAllocation.current_portfolio(scope)
+    current = FleetAllocation.current_portfolio(scope, agent)
 
     with {:ok, comparison} <-
            FleetShadow.replan(
@@ -146,7 +146,7 @@ defmodule SpaceTraders.FleetExecution do
       )
       when is_binary(system_symbol) do
     availability = availability(scope, agent)
-    current = FleetAllocation.current_portfolio(scope)
+    current = FleetAllocation.current_portfolio(scope, agent)
 
     with {:ok, comparison} <-
            FleetShadow.compare_market(agent, revision, system_symbol, availability, capacity) do
@@ -359,8 +359,10 @@ defmodule SpaceTraders.FleetExecution do
   end
 
   defp reconcile_market_replan(_scope, _agent, _revision, current, comparison, %{
-         available_slots: 0
-       }) do
+         available_slots: slots,
+         backpressure: pressure
+       })
+       when slots == 0 or pressure == :sustained do
     if current do
       # Capacity is evidence for allocation: retain a still-authorized commitment
       # rather than churn claims while the Governor cannot admit the replacement.
