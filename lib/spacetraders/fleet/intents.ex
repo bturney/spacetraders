@@ -632,6 +632,10 @@ defmodule SpaceTraders.Fleet.Intents do
       end
     end)
 
+    # A sell may have completed just before a process crash. Its durable Intent
+    # evidence is sufficient to classify the owning Decision Episode idempotently.
+    FleetAllocation.reconcile_completed_outcomes()
+
     :ok
   end
 

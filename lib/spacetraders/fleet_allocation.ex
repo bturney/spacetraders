@@ -181,6 +181,39 @@ defmodule SpaceTraders.FleetAllocation do
     )
   end
 
+  @doc "Records completed Market economics left pending by a process restart."
+  def reconcile_completed_outcomes do
+    StrategyDecisionEpisode
+    |> where([episode], episode.classification == :still_evaluating)
+    |> join(:inner, [episode], portfolio in Portfolio,
+      on: portfolio.strategy_decision_episode_id == episode.id
+    )
+    |> join(:inner, [_episode, portfolio], commitment in Commitment,
+      on: commitment.fleet_commitment_portfolio_id == portfolio.id
+    )
+    |> join(:inner, [_episode, _portfolio, commitment], intent in Intent,
+      on: intent.fleet_commitment_id == commitment.id
+    )
+    |> where(
+      [_episode, _portfolio, _commitment, intent],
+      intent.type == "sell" and intent.status == "completed"
+    )
+    |> select([episode], episode)
+    |> distinct(true)
+    |> Repo.all()
+    |> Enum.each(fn episode ->
+      _ =
+        update_decision_outcome(
+          episode.id,
+          episode.operator_id,
+          :realized,
+          realized_economics(episode.id)
+        )
+    end)
+
+    :ok
+  end
+
   @doc "Safely releases the current portfolio when no replacement remains admissible."
   def unwind_current_portfolio(%Scope{operator: %{id: operator_id}}, generation_id)
       when is_integer(generation_id) do
@@ -496,6 +529,9 @@ defmodule SpaceTraders.FleetAllocation do
       )
       |> Repo.all()
 
+    if unresolved_commitment_intent?(portfolio_ids),
+      do: Repo.rollback(:unresolved_commitment_evidence)
+
     Repo.update_all(
       from(commitment in Commitment,
         where: commitment.fleet_commitment_portfolio_id in ^portfolio_ids
@@ -550,6 +586,18 @@ defmodule SpaceTraders.FleetAllocation do
       end)
 
     Map.put(totals, :credit_change, totals.sale_revenue - totals.purchase_cost)
+  end
+
+  defp unresolved_commitment_intent?(portfolio_ids) do
+    Repo.exists?(
+      from(intent in Intent,
+        join: commitment in Commitment,
+        on: commitment.id == intent.fleet_commitment_id,
+        where:
+          commitment.fleet_commitment_portfolio_id in ^portfolio_ids and
+            intent.status == "awaiting_confirmation"
+      )
+    )
   end
 
   defp valid_published_commitments?(commitments) do
