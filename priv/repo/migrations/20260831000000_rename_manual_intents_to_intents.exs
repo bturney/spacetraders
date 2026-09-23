@@ -7,7 +7,7 @@ defmodule SpaceTraders.Repo.Migrations.RenameManualIntentsToIntents do
     execute("DROP INDEX manual_intents_one_active_per_ship_index")
 
     create unique_index(:intents, [:ship_id],
-             where: "status NOT IN ('completed', 'stopped')",
+             where: "status NOT IN ('completed', 'infeasible', 'stopped', 'superseded')",
              name: :intents_one_active_per_ship_index
            )
 
