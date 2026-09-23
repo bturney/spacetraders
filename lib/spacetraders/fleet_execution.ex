@@ -21,6 +21,7 @@ defmodule SpaceTraders.FleetExecution do
   alias SpaceTraders.FleetAllocation
   alias SpaceTraders.FleetAllocation.{Commitment, Portfolio}
   alias SpaceTraders.FleetGeneration.Generation
+  alias SpaceTraders.FleetShadow
   alias SpaceTraders.FleetStrategy.Revision
   alias SpaceTraders.FleetStrategy.StandingAuthority
   alias SpaceTraders.Repo
@@ -109,6 +110,32 @@ defmodule SpaceTraders.FleetExecution do
     end
   end
 
+  @doc "Reconciles an active Market Commitment against fresh Listings and capacity."
+  def replan_market(
+        %Scope{} = scope,
+        %AgentRecord{} = agent,
+        %Revision{} = revision,
+        previous,
+        snapshot,
+        capacity
+      )
+      when is_map(previous) and is_map(snapshot) do
+    availability = availability(scope, agent)
+    current = FleetAllocation.current_portfolio(scope)
+
+    with {:ok, comparison} <-
+           FleetShadow.replan(
+             previous,
+             snapshot,
+             revision,
+             availability,
+             capacity,
+             current_commitments: if(current, do: current.commitments, else: [])
+           ) do
+      reconcile_market_replan(scope, agent, revision, current, comparison, capacity)
+    end
+  end
+
   @doc """
   Dispatches the authoritative buy leg of the round trip on the claimed Ship.
 
@@ -189,7 +216,9 @@ defmodule SpaceTraders.FleetExecution do
     with %Generation{} = generation <- current_generation(agent) do
       selection = %{
         revision_id: revision.id,
-        source_version: Map.get(comparison, :source_version, 0),
+        # The Fleet Generation, not a stale shadow comparison, owns the CAS
+        # version for a replacement portfolio.
+        source_version: generation.allocation_version,
         commitments: [commitment],
         rejected: Map.get(comparison, :alternatives, [])
       }
@@ -297,6 +326,58 @@ defmodule SpaceTraders.FleetExecution do
     case candidate do
       %SpaceTraders.FleetPlanning.CandidateContribution{} = candidate -> {:ok, candidate}
       _ -> {:error, :market_candidate_missing}
+    end
+  end
+
+  defp reconcile_market_replan(
+         _scope,
+         _agent,
+         _revision,
+         current,
+         %{replan_trigger: :unchanged},
+         _capacity
+       ) do
+    {:ok, %{action: :retained, portfolio: current}}
+  end
+
+  defp reconcile_market_replan(_scope, _agent, _revision, current, comparison, %{
+         available_slots: 0
+       }) do
+    if current do
+      # Capacity is evidence for allocation: retain a still-authorized commitment
+      # rather than churn claims while the Governor cannot admit the replacement.
+      {:ok, %{action: :retained_for_capacity, portfolio: current, comparison: comparison}}
+    else
+      {:ok, %{action: :deferred_for_capacity, comparison: comparison}}
+    end
+  end
+
+  defp reconcile_market_replan(scope, agent, revision, current, comparison, _capacity) do
+    case eligible_market_commitment(comparison, agent, revision, availability(scope, agent)) do
+      %{candidate_id: candidate_id} when current != nil ->
+        if Enum.any?(current.commitments, &(&1.candidate_id == candidate_id)) do
+          {:ok, %{action: :retained, portfolio: current, comparison: comparison}}
+        else
+          activate_replanned_market(scope, agent, revision, current, comparison)
+        end
+
+      nil when current != nil ->
+        with {:ok, portfolio} <-
+               FleetAllocation.unwind_current_portfolio(scope, current.fleet_generation_id) do
+          {:ok, %{action: :unwound, portfolio: portfolio, comparison: comparison}}
+        end
+
+      nil ->
+        {:ok, %{action: :no_admissible_commitment, comparison: comparison}}
+
+      _commitment ->
+        activate_replanned_market(scope, agent, revision, current, comparison)
+    end
+  end
+
+  defp activate_replanned_market(scope, agent, revision, current, comparison) do
+    with {:ok, result} <- activate_market(scope, agent, revision, comparison) do
+      {:ok, Map.put(result, :action, if(current, do: :superseded, else: :activated))}
     end
   end
 
