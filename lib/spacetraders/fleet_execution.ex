@@ -139,14 +139,21 @@ defmodule SpaceTraders.FleetExecution do
     case intent do
       %{type: "buy", status: "completed", parameters: %{"market_trade" => candidate}} ->
         with {:ok, ship_symbol} <- claimed_ship_symbol(commitment) do
-          Intents.request_commitment_round_trip_sell(
-            agent,
-            commitment,
-            portfolio,
-            ship_symbol,
-            candidate,
-            nil
-          )
+          case Intents.request_commitment_round_trip_sell(
+                 agent,
+                 commitment,
+                 portfolio,
+                 ship_symbol,
+                 candidate,
+                 nil
+               ) do
+            {:ok, %{status: "completed"} = sell} = result ->
+              record_realized_economics(portfolio, intent, sell)
+              result
+
+            result ->
+              result
+          end
         end
 
       _ ->
@@ -303,5 +310,18 @@ defmodule SpaceTraders.FleetExecution do
     reservations = Map.get(availability, :reservations, %{})
 
     Map.get(reservations, "credits") || Map.get(reservations, :credits)
+  end
+
+  defp record_realized_economics(portfolio, buy, sell) do
+    purchase = get_in(buy.last_action_result, ["transaction", "total_price"])
+    sale = get_in(sell.last_action_result, ["transaction", "total_price"])
+
+    if is_number(purchase) and is_number(sale) do
+      FleetAllocation.record_portfolio_outcome(portfolio, :realized, %{
+        credit_change: sale - purchase,
+        purchase_cost: purchase,
+        sale_revenue: sale
+      })
+    end
   end
 end

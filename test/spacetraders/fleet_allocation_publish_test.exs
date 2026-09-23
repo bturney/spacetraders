@@ -130,6 +130,39 @@ defmodule SpaceTraders.FleetAllocationPublishTest do
     assert Repo.aggregate(Notification, :count) == 2
   end
 
+  test "classifies a superseded Decision Episode with confirmed actual economics" do
+    %{scope: scope, generation: generation, revision: revision} = allocation_fixture()
+
+    assert {:ok, first} =
+             FleetAllocation.publish_portfolio(
+               scope,
+               generation.id,
+               selection(revision),
+               decision()
+             )
+
+    assert {:ok, second} =
+             FleetAllocation.publish_portfolio(
+               scope,
+               generation.id,
+               selection(revision, 1),
+               decision()
+             )
+
+    assert {:ok, %StrategyDecisionEpisode{} = episode} =
+             FleetAllocation.record_decision_outcome(
+               scope,
+               first.strategy_decision_episode_id,
+               :superseded,
+               %{credit_change: 40}
+             )
+
+    assert episode.classification == :superseded
+    assert episode.expectations == %{"credit_change" => 100}
+    assert episode.actual_outcomes == %{"credit_change" => 40}
+    assert Repo.get!(Portfolio, second.id).superseded_at == nil
+  end
+
   defp allocation_fixture do
     operator = operator_fixture()
     scope = Scope.for_operator(operator)

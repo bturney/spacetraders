@@ -152,6 +152,72 @@ defmodule SpaceTraders.FleetAllocation do
     |> Repo.one()
   end
 
+  @doc "Records confirmed outcomes and terminal classification for one Decision Episode."
+  def record_decision_outcome(
+        %Scope{operator: %{id: operator_id}},
+        episode_id,
+        classification,
+        actual_outcomes
+      )
+      when is_integer(episode_id) and
+             classification in [:realized, :partially_realized, :superseded] and
+             is_map(actual_outcomes) do
+    now = DateTime.utc_now()
+
+    query =
+      StrategyDecisionEpisode
+      |> where([episode], episode.id == ^episode_id and episode.operator_id == ^operator_id)
+      |> where([episode], episode.classification == :still_evaluating)
+      |> select([episode], episode)
+
+    {count, [episode]} =
+      Repo.update_all(
+        query,
+        [
+          set: [
+            classification: classification,
+            actual_outcomes: json_safe(actual_outcomes),
+            updated_at: now
+          ]
+        ],
+        returning: true
+      )
+
+    if count == 1, do: {:ok, episode}, else: {:error, :decision_episode_not_evaluating}
+  end
+
+  def record_decision_outcome(_scope, _episode_id, _classification, _actual_outcomes),
+    do: {:error, :invalid_decision_outcome}
+
+  @doc false
+  def record_portfolio_outcome(%Portfolio{} = portfolio, classification, actual_outcomes)
+      when classification in [:realized, :partially_realized, :superseded] and
+             is_map(actual_outcomes) do
+    now = DateTime.utc_now()
+
+    {count, [episode]} =
+      StrategyDecisionEpisode
+      |> where(
+        [episode],
+        episode.id == ^portfolio.strategy_decision_episode_id and
+          episode.operator_id == ^portfolio.operator_id and
+          episode.classification == :still_evaluating
+      )
+      |> select([episode], episode)
+      |> Repo.update_all(
+        [
+          set: [
+            classification: classification,
+            actual_outcomes: json_safe(actual_outcomes),
+            updated_at: now
+          ]
+        ],
+        returning: true
+      )
+
+    if count == 1, do: {:ok, episode}, else: {:error, :decision_episode_not_evaluating}
+  end
+
   @doc "Returns the current Fleet Commitment Claim authorizing one Ship."
   def current_ship_claim(agent, ship_symbol, opts \\ [])
 
