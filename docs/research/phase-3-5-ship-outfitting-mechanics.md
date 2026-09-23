@@ -11,7 +11,11 @@ docked there, the Market currently sells that symbol, the transaction does not
 exceed `tradeVolume`, Cargo has room, and the Agent can pay. Installation then
 requires that module symbol in the same Ship's Cargo and returns the resulting
 Agent, a module array, Cargo, and modification transaction. Removal returns the
-same response fields and places the removed module in Cargo. [Purchase Cargo,
+same response fields and contractually places the removed module in Cargo. A
+maintainer reports a live-game defect: removing a symbol installed more than
+once can remove every matching module while returning only one Cargo unit. Treat
+any duplicate-module removal as an inventory-loss risk until an authoritative
+post-mutation Ship reconciliation establishes the actual result. [Purchase Cargo,
 `purchase-cargo`](../../priv/spec/SpaceTraders.json#L2904-L2978);
 [Install Ship Module, `install-ship-module`](../../priv/spec/SpaceTraders.json#L3606-L3693);
 [Remove Ship Module, `remove-ship-module`](../../priv/spec/SpaceTraders.json#L3695-L3779).
@@ -208,6 +212,14 @@ returns a module array, and places the module in Cargo. The same required
 Agent/Cargo/transaction fields make the resulting debit and Cargo state
 authoritative. [Remove request and response](../../priv/spec/SpaceTraders.json#L3695-L3779).
 
+**Reported live-game defect:** a maintainer reports that when the requested
+symbol has multiple installed copies, the game removes all copies but returns
+only one Cargo unit. This conflicts with the singular wording of the API
+contract and is not treated as intended mechanics. Until a controlled live
+observation confirms otherwise, never remove a duplicate-installed symbol under
+autonomous authority; reconcile a successful response from both its returned
+modules and Cargo, then a fresh `get-my-ship` before any dependent action.
+
 Removal has three material consequences:
 
 - At a Shipyard it is subject to the per-slot modification fee; whether every
@@ -320,6 +332,7 @@ failure vocabulary, not guaranteed endpoint mappings. [Purchase responses](../..
 | No Shipyard at location | `4246 shipMountNoShipyard` is explicitly mount-named; no module equivalent is documented. Shipyard fee includes modules, creating an unresolved omission. [Ship errors](https://docs.spacetraders.io/api-guide/response-errors#ship-error-codes); [Shipyard fee](../../priv/spec/models/Shipyard.json#L37-L40) | Unknown for module endpoints |
 | Insufficient modification credits | Transaction and Agent report actual successful debit. The official only names `4248 shipMountInsufficientCredits`, not a module-specific code. [Install response](../../priv/spec/SpaceTraders.json#L3648-L3685); [Ship errors](https://docs.spacetraders.io/api-guide/response-errors#ship-error-codes) | Shipyard fee is a contract fact; applicability and module-specific error mapping are unknown |
 | Remove symbol not installed | Remove says the operation removes a module but specifies no error response or duplicate-symbol selection behavior. [Remove](../../priv/spec/SpaceTraders.json#L3695-L3779) | Unknown error and duplicate semantics |
+| Remove a duplicate-installed symbol | Maintainer-reported live behavior removes every matching installed module but returns one Cargo unit. This is an upstream inventory-loss defect, not a contract rule; do not autonomously attempt it and reconcile authoritative Ship state after any manual attempt. | Maintainer report; unverified live observation |
 | Removal would invalidate capacity/crew/power | Removed module enters Cargo and may have provided capacity. No mutation-order or rollback rule is documented. [Remove](../../priv/spec/SpaceTraders.json#L3695-L3779); [module capacity](../../priv/spec/models/ShipModule.json#L31-L35) | Unknown |
 | Warp Drive unavailable in observed Markets | Symbols are legal but generation/availability is not promised. Absence from partial intelligence is not impossibility. [Trade symbols](../../priv/spec/models/TradeSymbol.json#L111-L120); [Market](../../priv/spec/models/Market.json#L9-L45) | Unknown until authoritative listing observation |
 | Warp attempted without installed drive | Official code `4241 shipMissingWarpDrive`; Warp operation also states the requirement. [Warp Ship](../../priv/spec/SpaceTraders.json#L2514-L2517); [Ship errors](https://docs.spacetraders.io/api-guide/response-errors#ship-error-codes) | Contract fact and first-party error vocabulary |
@@ -340,9 +353,11 @@ These are boundaries implied by the mechanics, not a Job or Operator workflow:
    aggregate power, crew, and API validation. [Official Outfitting documentation](https://docs.spacetraders.io/game-concepts/outfitting);
    [Ship Requirements](../../priv/spec/models/ShipRequirements.json#L1-L18)
 4. Never remove a module as an implicit prerequisite. Removal may incur a
-   Shipyard fee, consumes Cargo room, can remove capability/capacity, and the
-   repository's Ship Outfitting Job definition requires explicit Operator
-   permission.
+    Shipyard fee, consumes Cargo room, can remove capability/capacity, and the
+    repository's Ship Outfitting Job definition requires explicit Operator
+    permission. Do not remove a symbol with multiple installed copies because
+    reported live-game behavior can destroy all copies while returning one Cargo
+    unit.
    [Remove response](../../priv/spec/SpaceTraders.json#L3728-L3779); [domain definition](../../CONTEXT.md#L141-L143)
 5. Declare success only from authoritative installed-module state; retain
    uncertainty after ambiguous calls and reconcile with Get Ship. [Install
