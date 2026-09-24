@@ -624,7 +624,8 @@ defmodule SpaceTraders.Fleet.Intents do
             :ok
           end
 
-        nil when trigger in [:arrival, :cooldown, :survey_expiration] ->
+        nil
+        when is_nil(expected_intent_id) and trigger in [:arrival, :cooldown, :survey_expiration] ->
           Fleet.continue_job_event(agent_id, ship_symbol, live_ship, trigger, expected_job_id)
 
         _ ->

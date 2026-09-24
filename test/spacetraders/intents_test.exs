@@ -256,7 +256,7 @@ defmodule SpaceTraders.IntentsTest do
     assert intent_id == intent.id
     ShipServer.stop(ship.symbol)
     {:ok, _event} = Timeline.reschedule_event(event, DateTime.utc_now())
-    assert :ok = Intents.rearm_on_boot()
+    assert [ship.symbol] == Intents.rearm_owned_intents_on_boot()
     assert_receive :recovery_observation, 5_000
     assert MutationAttempts.get!(attempt.id).state == "accepted"
 
@@ -269,6 +269,44 @@ defmodule SpaceTraders.IntentsTest do
     assert :ok = Intents.reconcile(agent.id, ship.symbol, live_ship, :arrival, intent.id, nil)
 
     assert Repo.get!(Intent, intent.id).status == "waiting"
+  end
+
+  test "a late owned-Intent wake cannot fall through to legacy Job continuation" do
+    agent = agent_fixture("INTENTS-LATE-WAKE")
+    ship = ship_fixture(agent, "INTENTS-LATE-WAKE-SHIP")
+
+    intent =
+      Repo.insert!(%Intent{
+        ship_id: ship.id,
+        caller: "commitment",
+        type: "navigate",
+        target_waypoint: "X1-UX81-A2",
+        status: "completed"
+      })
+
+    handler_id = "late-owned-wake-#{System.unique_integer()}"
+
+    :ok =
+      :telemetry.attach(
+        handler_id,
+        [:spacetraders, :repo, :query],
+        &__MODULE__.handle_event/4,
+        self()
+      )
+
+    live_ship = ship_body(ship.symbol) |> Model.Ship.from_json()
+    assert :ok = Intents.reconcile(agent.id, ship.symbol, live_ship, :arrival, intent.id, nil)
+    :ok = :telemetry.detach(handler_id)
+
+    {:messages, messages} = Process.info(self(), :messages)
+
+    refute Enum.any?(messages, fn
+             {:telemetry, [:spacetraders, :repo, :query], _, %{query: query}} ->
+               String.contains?(query, ~s("jobs"))
+
+             _ ->
+               false
+           end)
   end
 
   test "executes a commitment-owned buy, travel, sell round trip through governed operations" do
