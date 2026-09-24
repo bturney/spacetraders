@@ -44,3 +44,5 @@ jobs:
           retention-days: 14
       - name: Verify PostgreSQL deployment configuration
         run: test/integration/postgres_compose_test.sh
+      - name: Verify production release boot
+        run: test/integration/release_boot_test.sh
