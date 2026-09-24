@@ -2,11 +2,11 @@ defmodule SpaceTraders.Fleet.Intent do
   @moduledoc """
   A durable cargo-operation Intent for one Ship.
 
-  Manual Control and Job policies are callers of a reusable outcome-level
-  Intent, not a durable Ship mode (Phase 3.5 single-Ship outcomes). The active
-  intent chain, meaningful progress, and in-flight request/response evidence
-  persist across restarts so recovery can reconcile game truth before another
-  mutation instead of blindly replaying a command.
+  Fleet Commitment and Manual Intervention callers use a reusable outcome-level
+  Intent, not a durable Ship mode. The active intent chain, meaningful progress,
+  and in-flight request/response evidence persist across restarts so recovery
+  can reconcile game truth before another mutation instead of blindly replaying
+  a command.
   """
 
   use Ecto.Schema
@@ -16,16 +16,16 @@ defmodule SpaceTraders.Fleet.Intent do
   @terminal_states ["completed", "infeasible", "stopped", "superseded"]
 
   schema "intents" do
-    # "manual" intents belong to Manual Control; "job" intents are the
-    # operation ledger for a Job policy and never preempt their owning Job.
-    field :caller, :string, default: "manual"
+    # Fleet Commitment and authenticated intervention Intents are scoped by the
+    # Fleet Commitment authorization layer before execution.
+    field :caller, :string
     field :type, :string, default: "navigate"
     field :target_waypoint, :string
     # Operation-specific target, quantity, price, and recipient constraints.
     field :parameters, :map, default: %{}
     field :review_revision, :integer, default: 0
     field :status, :string, default: "active"
-    embeds_one :blocker, SpaceTraders.Fleet.JobBlocker, on_replace: :delete
+    embeds_one :blocker, SpaceTraders.Fleet.IntentBlocker, on_replace: :delete
     field :in_flight_action, :map
     field :last_action_result, :map
     field :recovery_attempts, :integer, default: 0
@@ -33,7 +33,6 @@ defmodule SpaceTraders.Fleet.Intent do
     field :fleet_commitment_portfolio_version, :integer
 
     belongs_to :ship, SpaceTraders.Fleet.Ship
-    belongs_to :job, SpaceTraders.Fleet.Job
     belongs_to :fleet_commitment, SpaceTraders.FleetAllocation.Commitment
 
     belongs_to :fleet_commitment_portfolio, SpaceTraders.FleetAllocation.Portfolio
@@ -56,15 +55,13 @@ defmodule SpaceTraders.Fleet.Intent do
       :parameters,
       :review_revision,
       :status,
-      :job_id,
       :fleet_commitment_id,
       :fleet_commitment_portfolio_id,
       :fleet_commitment_portfolio_version
     ])
     |> cast_embed(:blocker)
     |> validate_required([:caller, :type, :target_waypoint])
-    |> validate_inclusion(:caller, ["manual", "job", "commitment", "intervention"])
-    |> validate_job_owner()
+    |> validate_inclusion(:caller, ["commitment", "intervention"])
     |> validate_commitment_owner()
     |> validate_inclusion(:type, [
       "navigate",
@@ -77,14 +74,6 @@ defmodule SpaceTraders.Fleet.Intent do
     |> validate_inclusion(:status, @unfinished_states ++ @terminal_states)
     |> unique_constraint(:ship_id, name: :intents_one_active_per_ship_index)
   end
-
-  defp validate_job_owner(%Ecto.Changeset{changes: %{caller: "job"}} = changeset),
-    do: validate_required(changeset, [:job_id])
-
-  defp validate_job_owner(%Ecto.Changeset{data: %{caller: "job"}} = changeset),
-    do: validate_required(changeset, [:job_id])
-
-  defp validate_job_owner(changeset), do: changeset
 
   defp validate_commitment_owner(%Ecto.Changeset{changes: %{caller: "commitment"}} = changeset),
     do: validate_required(changeset, [:fleet_commitment_id, :fleet_commitment_portfolio_id])

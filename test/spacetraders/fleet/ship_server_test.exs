@@ -9,7 +9,6 @@ defmodule SpaceTraders.Fleet.ShipServerTest do
   alias SpaceTraders.Fleet.ShipServer
   alias SpaceTraders.API.AgentTokenReference
   alias SpaceTraders.Fleet.Ship
-  alias SpaceTraders.Fleet.Job
   alias SpaceTraders.Agent.Agent
   alias SpaceTraders.Timeline
   alias SpaceTraders.Timeline.Event
@@ -297,31 +296,16 @@ defmodule SpaceTraders.Fleet.ShipServerTest do
     end
   end
 
-  describe "legacy Job timer" do
-    test "fires a cooldown without continuing extraction or crashing the server" do
+  describe "durable Ship timer" do
+    test "fires a cooldown without crashing the server" do
       agent = Repo.get!(Agent, @agent_id)
-      test_pid = self()
 
-      ship =
+      _ship =
         Repo.insert!(%Ship{
           symbol: "MINER-JOB-SHIP",
           ship_type: "SHIP_COMMAND_FRIGATE",
           agent_id: agent.id
         })
-
-      Repo.insert!(%Job{
-        ship_id: ship.id,
-        extraction_waypoint: "X1-UX81-A2",
-        market_waypoint: "X1-UX81-A1",
-        cargo_threshold: 30,
-        desired_mode: "active",
-        status: "waiting",
-        in_flight_action: %{"kind" => "extract"},
-        last_action_result: %{
-          "kind" => "extract",
-          "yield" => %{"symbol" => "IRON_ORE", "units" => 5}
-        }
-      })
 
       Req.Test.stub(SpaceTraders.API, fn conn ->
         case {conn.request_path, conn.method} do
@@ -336,27 +320,7 @@ defmodule SpaceTraders.Fleet.ShipServerTest do
             })
 
           {"/v2/my/ships/MINER-JOB-SHIP/extract", "POST"} ->
-            send(test_pid, :legacy_extract)
-
-            Req.Test.json(conn, %{
-              "data" => %{
-                "cooldown" => %{
-                  "shipSymbol" => "MINER-JOB-SHIP",
-                  "totalSeconds" => 60,
-                  "remainingSeconds" => 60,
-                  "expiration" => future_iso(60)
-                },
-                "extraction" => %{
-                  "shipSymbol" => "MINER-JOB-SHIP",
-                  "yield" => %{"symbol" => "IRON_ORE", "units" => 5}
-                },
-                "cargo" => %{
-                  "capacity" => 40,
-                  "units" => 5,
-                  "inventory" => [%{"symbol" => "IRON_ORE", "units" => 5}]
-                }
-              }
-            })
+            flunk("unexpected legacy extraction request")
         end
       end)
 
@@ -365,16 +329,10 @@ defmodule SpaceTraders.Fleet.ShipServerTest do
 
       assert eventually(fn -> Repo.get(Event, event.id).status == "done" end)
 
-      assert eventually(fn ->
-               config = Repo.get_by!(Job, ship_id: ship.id)
-               config.status == "waiting" and config.last_action_result["kind"] == "extract"
-             end)
-
       assert [{pid, _}] = Registry.lookup(SpaceTraders.Fleet.ShipRegistry, "MINER-JOB-SHIP")
       assert Process.alive?(pid)
 
       assert Timeline.pending_events(:ship, "MINER-JOB-SHIP") == []
-      refute_receive :legacy_extract, 100
     end
   end
 
@@ -390,6 +348,7 @@ defmodule SpaceTraders.Fleet.ShipServerTest do
       intent =
         Repo.insert!(%SpaceTraders.Fleet.Intent{
           ship_id: ship.id,
+          caller: "retired",
           type: "navigate",
           target_waypoint: "X1-UX81-A2",
           status: "waiting"
@@ -435,6 +394,7 @@ defmodule SpaceTraders.Fleet.ShipServerTest do
       intent =
         Repo.insert!(%SpaceTraders.Fleet.Intent{
           ship_id: ship.id,
+          caller: "retired",
           type: "navigate",
           target_waypoint: "X1-UX81-A2",
           status: "waiting"

@@ -8,8 +8,8 @@ defmodule SpaceTraders.FleetStrategyTest do
   alias SpaceTraders.API.AgentTokenReference
   alias SpaceTraders.EmergencyStopAdmission
   alias SpaceTraders.FleetAllocation
-  alias SpaceTraders.Fleet
-  alias SpaceTraders.Fleet.{Intent, Intents, Job, Ship}
+  alias SpaceTraders.Fleet.{Intent, Intents, Ship}
+
   alias SpaceTraders.FleetGeneration
   alias SpaceTraders.FleetStrategy
   alias SpaceTraders.FleetStrategy.Revision
@@ -130,21 +130,17 @@ defmodule SpaceTraders.FleetStrategyTest do
     in_flight_ship =
       Repo.insert!(%Ship{symbol: "IN-FLIGHT-1", ship_type: "SHIP_PROBE", agent_id: agent.id})
 
-    Repo.insert!(%Job{
-      type: "explorer",
-      status: "active",
-      extraction_waypoint: "X1-UX81-A1",
-      market_waypoint: "X1-UX81-A1",
-      cargo_threshold: 1,
-      ship_id: queued_ship.id
-    })
-
     queued_intent =
-      Repo.insert!(%Intent{ship_id: queued_ship.id, target_waypoint: "X1-UX81-A2"})
+      Repo.insert!(%Intent{
+        ship_id: queued_ship.id,
+        caller: "commitment",
+        target_waypoint: "X1-UX81-A2"
+      })
 
     in_flight_intent =
       Repo.insert!(%Intent{
         ship_id: in_flight_ship.id,
+        caller: "commitment",
         target_waypoint: "X1-UX81-A2",
         status: "waiting",
         in_flight_action: %{"kind" => "navigate"}
@@ -174,8 +170,8 @@ defmodule SpaceTraders.FleetStrategyTest do
              FleetStrategy.resume(scope, stopped.emergency_stop_version)
 
     assert FleetStrategy.get(scope).emergency_stopped_at == stopped.emergency_stopped_at
-    assert Fleet.ship_job(agent, queued_ship.symbol).status == "active"
     assert Enum.any?(Intents.current(agent), &(&1.id == queued_intent.id))
+
     assert Enum.any?(Intents.current(agent), &(&1.id == in_flight_intent.id))
 
     Repo.update!(
@@ -189,8 +185,6 @@ defmodule SpaceTraders.FleetStrategyTest do
     assert {:ok, prepared} = FleetStrategy.resume(scope, stopped.emergency_stop_version)
     assert %DateTime{} = prepared.emergency_resume_prepared_at
     assert %DateTime{} = prepared.emergency_stopped_at
-    assert Fleet.ship_job(agent, queued_ship.symbol) == nil
-    assert [%Job{status: "stopped"}] = Fleet.ship_job_history(agent, queued_ship.symbol)
 
     assert Enum.any?(
              Intents.history(agent),

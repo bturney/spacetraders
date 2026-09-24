@@ -141,7 +141,7 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
 
     assert_receive :observed
     assert MutationAttempts.get!(attempt.id).state == "accepted"
-    assert %Intent{status: "waiting", job_id: nil} = Repo.get!(Intent, intent.id)
+    assert %Intent{status: "waiting"} = Repo.get!(Intent, intent.id)
 
     assert [%Event{payload: %{"intent_id" => intent_id}}] =
              Timeline.pending_events(:ship, ship.symbol)
@@ -303,12 +303,9 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
                candidate
              )
 
-    assert buy.job_id == nil
-
     assert {:ok, %Intent{type: "sell", status: "completed"} = sell} =
              SpaceTraders.FleetExecution.continue_after_intent(agent, commitment, portfolio, buy)
 
-    assert sell.job_id == nil
     assert sell.fleet_commitment_id == commitment.id
     assert [%Intent{type: "sell"}, %Intent{type: "buy"}] = Intents.history(agent)
   end

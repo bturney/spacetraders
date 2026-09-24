@@ -16,7 +16,7 @@ defmodule SpaceTraders.Fleet.Intents do
   alias SpaceTraders.Agent.Scope
   alias SpaceTraders.API.AgentTokenReference
   alias SpaceTraders.API.Model.{Contract, ShipNav}
-  alias SpaceTraders.Fleet.{Intent, Job, Ship}
+  alias SpaceTraders.Fleet.{Intent, Ship}
   alias SpaceTraders.Fleet
   alias SpaceTraders.FleetAllocation
   alias SpaceTraders.FleetAllocation.{Commitment, Portfolio}
@@ -34,26 +34,6 @@ defmodule SpaceTraders.Fleet.Intents do
     ShipReservation,
     Timeline
   }
-
-  defmodule Navigate do
-    @moduledoc "A closed Navigate goal for a Ship."
-    defstruct [:waypoint, constraints: %{}]
-  end
-
-  defmodule BuyGoods do
-    @moduledoc "A closed Buy Goods goal for a Ship."
-    defstruct [:market, :trade_good, :quantity, constraints: %{}]
-  end
-
-  defmodule SellGoods do
-    @moduledoc "A closed Sell Goods goal for a Ship."
-    defstruct [:market, :trade_good, :quantity, constraints: %{}, parameters: %{}]
-  end
-
-  defmodule DeliverGoods do
-    @moduledoc "A closed Deliver Goods goal for a typed recipient."
-    defstruct [:recipient, :trade_good, :quantity]
-  end
 
   @doc false
   def emergency_stop_reconciled?(ship_ids) when is_list(ship_ids) do
@@ -127,16 +107,6 @@ defmodule SpaceTraders.Fleet.Intents do
     defstruct [:module_symbol, authorized_removals: %{}, parameters: %{}]
   end
 
-  defmodule ManualControl do
-    @moduledoc "Manual Control ownership for an Intent."
-    defstruct []
-  end
-
-  defmodule JobOwner do
-    @moduledoc "Job ownership for an Intent."
-    defstruct [:job]
-  end
-
   defmodule CommitmentOwner do
     @moduledoc "Fleet Commitment ownership for a round-trip Intent."
     defstruct [:commitment, :portfolio]
@@ -144,204 +114,105 @@ defmodule SpaceTraders.Fleet.Intents do
 
   @unfinished_states Intent.unfinished_states()
   @terminal_states Intent.terminal_states()
-  @job_types [
-    "miner",
-    "survey",
-    "procurement",
-    "market_trading",
-    "market_reconnaissance"
-  ]
 
-  defp legacy_job_admission(%AgentRecord{}), do: {:error, :legacy_gameplay_retired}
+  defp token_present(%AgentRecord{agent_token: token}) when is_binary(token) and token != "",
+    do: :ok
 
-  defp request_for_agent(agent, owner, ship_symbol, %BuyGoods{} = goal) do
-    with :ok <- token_present(agent),
-         {:ok, owner} <- normalize_owner(owner),
-         :ok <- valid_goal_parameters(goal.constraints),
-         {:ok, market} <- valid_goal_waypoint(goal.market),
-         {:ok, trade_good} <- valid_trade_good(goal.trade_good),
-         :ok <- valid_quantity(goal.quantity),
-         :ok <- valid_buy_constraints(goal.constraints) do
-      opts =
-        goal.constraints
-        |> Map.to_list()
-        |> Keyword.new()
+  defp token_present(_agent), do: {:error, :agent_token_missing}
 
-      opts =
-        case owner do
-          :manual -> opts
-          %JobOwner{job: %Job{id: job_id}} -> Keyword.merge(opts, caller: "job", job_id: job_id)
-        end
-
-      buy_goods_intent(agent, ship_symbol, market, trade_good, goal.quantity, opts)
+  defp scoped_agent_for_ship(
+         %Scope{operator: %{id: operator_id}},
+         agent_id,
+         ship_symbol
+       ) do
+    case Repo.one(
+           from agent in AgentRecord,
+             join: ship in Ship,
+             on: ship.agent_id == agent.id,
+             where:
+               agent.id == ^agent_id and agent.operator_id == ^operator_id and
+                 ship.symbol == ^ship_symbol,
+             select: agent
+         ) do
+      %AgentRecord{} = agent -> {:ok, agent}
+      nil -> {:error, :agent_not_owned}
     end
   end
 
-  defp request_for_agent(agent, owner, ship_symbol, %SellGoods{} = goal) do
-    with :ok <- token_present(agent),
-         {:ok, owner} <- normalize_owner(owner),
-         :ok <- valid_goal_parameters(goal.constraints),
-         :ok <- valid_goal_parameters(goal.parameters),
-         {:ok, market} <- valid_goal_waypoint(goal.market),
-         {:ok, trade_good} <- valid_trade_good(goal.trade_good),
-         :ok <- valid_quantity(goal.quantity),
-         :ok <- valid_sell_constraints(goal.constraints) do
-      opts =
-        goal.constraints
-        |> Map.to_list()
-        |> Keyword.new()
-        |> Keyword.merge(Map.to_list(goal.parameters))
+  defp scoped_agent_for_ship(_current_scope, _agent_id, _ship_symbol),
+    do: {:error, :agent_not_owned}
 
-      opts =
-        case owner do
-          :manual -> opts
-          %JobOwner{job: %Job{id: job_id}} -> Keyword.merge(opts, caller: "job", job_id: job_id)
-        end
-
-      case owner do
-        :manual ->
-          sell_goods_intent(agent, ship_symbol, market, trade_good, goal.quantity, opts)
-
-        %JobOwner{job: job} ->
-          request_job_sell_goods_intent(
-            agent,
-            job,
-            ship_symbol,
-            market,
-            trade_good,
-            goal.quantity,
-            goal.constraints,
-            goal.parameters,
-            nil
-          )
-      end
-    end
-  end
-
-  defp request_for_agent(agent, owner, ship_symbol, %DeliverGoods{} = goal) do
-    request_delivery(agent, owner, ship_symbol, goal, nil)
-  end
-
-  defp request_for_agent(agent, owner, ship_symbol, %Navigate{} = goal) do
-    with :ok <- token_present(agent),
-         {:ok, owner} <- normalize_owner(owner),
-         :ok <- valid_navigate_constraints(goal.constraints),
-         {:ok, waypoint} <- valid_goal_waypoint(goal.waypoint) do
-      case owner do
-        :manual ->
-          request_manual_navigate(agent, ship_symbol, waypoint, goal.constraints)
-
-        %JobOwner{job: %Job{type: type} = job} when type in @job_types ->
-          request_job_navigate(agent, job, ship_symbol, waypoint, goal.constraints)
-
-        %JobOwner{} ->
-          {:error, :unsupported_job_navigate}
-      end
-    end
-  end
-
-  defp request_for_agent(agent, owner, ship_symbol, %InstallModule{} = goal) do
-    request_module(
-      agent,
-      owner,
-      ship_symbol,
-      "install_module",
-      goal.module_symbol,
-      goal.parameters
+  defp owned_intent_for_operator(operator_id, intent_id) do
+    Repo.one(
+      from intent in Intent,
+        join: ship in Ship,
+        on: ship.id == intent.ship_id,
+        join: agent in AgentRecord,
+        on: agent.id == ship.agent_id,
+        where: intent.id == ^intent_id and agent.operator_id == ^operator_id,
+        select: {intent, agent}
     )
   end
 
-  defp request_for_agent(agent, owner, ship_symbol, %RemoveModule{} = goal) do
-    parameters =
-      if is_map(goal.parameters),
-        do: Map.put(goal.parameters, :authorized_removals, goal.authorized_removals),
-        else: goal.parameters
-
-    request_module(
-      agent,
-      owner,
-      ship_symbol,
-      "remove_module",
-      goal.module_symbol,
-      parameters
-    )
-  end
-
-  defp request_for_agent(_agent, _owner, _ship_symbol, _goal),
-    do: {:error, :unsupported_intent_goal}
-
-  @doc "Requests a closed operational goal for its owning Job."
-  def request(%AgentRecord{} = agent, %JobOwner{} = owner, ship_symbol, goal) do
-    with :ok <- legacy_job_admission(agent) do
-      request_for_agent(agent, owner, ship_symbol, goal)
+  defp installed_warp_drive(%{modules: modules}) do
+    case Enum.find(modules || [], &warp_drive_module?/1) do
+      nil -> {:error, :warp_drive_missing}
+      module -> {:ok, module}
     end
   end
 
-  def request(_agent, _owner, _ship_symbol, _goal), do: {:error, :invalid_intent_owner}
+  defp warp_drive_module?(%{symbol: symbol}) when is_binary(symbol),
+    do: symbol in ~w(MODULE_WARP_DRIVE_I MODULE_WARP_DRIVE_II MODULE_WARP_DRIVE_III)
 
-  def request_sell_with_live_ship(
-        agent,
-        %JobOwner{job: %Job{} = job} = owner,
-        ship_symbol,
-        %SellGoods{} = goal,
-        live_ship
-      ) do
-    with :ok <- legacy_job_admission(agent),
-         :ok <- token_present(agent),
-         {:ok, _owner} <- normalize_owner(owner),
-         :ok <- valid_goal_parameters(goal.constraints),
-         :ok <- valid_goal_parameters(goal.parameters),
-         {:ok, market} <- valid_goal_waypoint(goal.market),
-         {:ok, trade_good} <- valid_trade_good(goal.trade_good),
-         :ok <- valid_quantity(goal.quantity),
-         :ok <- valid_sell_constraints(goal.constraints) do
-      request_job_sell_goods_intent(
-        agent,
-        job,
-        ship_symbol,
-        market,
-        trade_good,
-        goal.quantity,
-        goal.constraints,
-        goal.parameters,
-        live_ship
+  defp warp_drive_module?(_), do: false
+
+  defp stringify_keys(map) when is_map(map),
+    do: Map.new(map, fn {key, value} -> {to_string(key), value} end)
+
+  defp stringify_keys(_), do: %{}
+
+  defp do_stop_intent(%AgentRecord{} = agent, intent_id, :intervention) do
+    result =
+      Repo.transaction(
+        fn ->
+          intent =
+            Repo.one(
+              from intent in Intent,
+                join: ship in Ship,
+                on: ship.id == intent.ship_id,
+                where:
+                  intent.id == ^intent_id and ship.agent_id == ^agent.id and
+                    intent.status in ^@unfinished_states
+            )
+
+          case intent do
+            %Intent{caller: "intervention"} = intent ->
+              if unresolved_cargo_action?(intent) or unresolved_module_evidence?(intent) or
+                   unresolved_jump_action?(intent) or unresolved_warp_action?(intent) or
+                   unresolved_navigation_action?(intent) do
+                Repo.rollback(:intents_reconciliation_required)
+              else
+                terminalize_intents!(intent, "stopped")
+              end
+
+            %Intent{} ->
+              Repo.rollback(:invalid_intent_owner)
+
+            nil ->
+              Repo.rollback(:intents_not_active)
+          end
+        end,
+        mode: :immediate
       )
-    end
-  end
 
-  def request(agent, %JobOwner{} = owner, ship_symbol, %Navigate{} = goal, live_ship) do
-    with :ok <- legacy_job_admission(agent),
-         {:ok, owner} <- normalize_owner(owner),
-         :ok <- token_present(agent),
-         :ok <- valid_navigate_constraints(goal.constraints),
-         {:ok, waypoint} <- valid_goal_waypoint(goal.waypoint) do
-      case owner do
-        %JobOwner{job: %Job{type: type} = job} when type in @job_types ->
-          request_job_navigate(agent, job, ship_symbol, waypoint, goal.constraints, live_ship)
+    case result do
+      {:ok, %Intent{} = intent} ->
+        ship = Repo.get!(Ship, intent.ship_id)
+        Fleet.record_activity(agent, ship, "manual_intervention_stopped", "Intervention stopped")
+        :ok
 
-        _ ->
-          {:error, :unsupported_job_navigate}
-      end
-    end
-  end
-
-  def request(agent, %JobOwner{} = owner, ship_symbol, %DeliverGoods{} = goal, live_ship) do
-    with :ok <- legacy_job_admission(agent) do
-      request_delivery(agent, owner, ship_symbol, goal, live_ship)
-    end
-  end
-
-  @doc "Requests a closed operational goal through Operator-owned Manual Control."
-  def request(
-        %Scope{} = current_scope,
-        %AgentRecord{} = agent,
-        %ManualControl{},
-        ship_symbol,
-        goal
-      ) do
-    with {:ok, agent} <- scoped_agent_for_ship(current_scope, agent.id, ship_symbol),
-         :ok <- legacy_manual_allowed?(agent) do
-      request_for_agent(agent, :manual, ship_symbol, goal)
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
@@ -403,137 +274,6 @@ defmodule SpaceTraders.Fleet.Intents do
   def intervene_navigate(_scope, _agent, _ship_symbol, _waypoint, _reason),
     do: {:error, :invalid_intervention}
 
-  defp legacy_manual_allowed?(%AgentRecord{}), do: {:error, :legacy_gameplay_retired}
-
-  defp request_delivery(agent, owner, ship_symbol, goal, live_ship) do
-    with :ok <- token_present(agent),
-         {:ok, owner} <- normalize_owner(owner),
-         {:ok, recipient, waypoint} <- valid_delivery_recipient(goal.recipient),
-         {:ok, trade_good} <- valid_trade_good(goal.trade_good),
-         :ok <- valid_quantity(goal.quantity) do
-      opts = if live_ship, do: [live_ship: live_ship], else: []
-
-      opts =
-        if owner == :manual,
-          do: opts,
-          else: Keyword.merge(opts, caller: "job", job_id: owner.job.id)
-
-      deliver_goods_intent(
-        agent,
-        ship_symbol,
-        recipient,
-        waypoint,
-        trade_good,
-        goal.quantity,
-        opts
-      )
-    end
-  end
-
-  defp request_module(agent, owner, ship_symbol, type, module_symbol, parameters)
-       when is_map(parameters) do
-    with :ok <- token_present(agent),
-         {:ok, owner} <- normalize_owner(owner),
-         :ok <- valid_module_symbol(module_symbol),
-         {:ok, parameters} <- valid_module_request(type, module_symbol, parameters, owner) do
-      case owner do
-        :manual ->
-          request_module_intent(agent, :manual, ship_symbol, type, module_symbol, parameters)
-
-        %JobOwner{job: %Job{} = job} ->
-          request_module_intent(agent, job, ship_symbol, type, module_symbol, parameters)
-      end
-    end
-  end
-
-  defp request_module(_agent, _owner, _ship_symbol, _type, _module_symbol, _parameters),
-    do: {:error, :invalid_intent_parameters}
-
-  defp valid_module_request(type, module_symbol, parameters, :manual),
-    do: valid_module_parameters(type, module_symbol, parameters)
-
-  defp valid_module_request("remove_module", module_symbol, parameters, %JobOwner{})
-       when is_map(parameters),
-       do: {:ok, Map.merge(parameters, %{"module_symbol" => module_symbol, "quantity" => 1})}
-
-  defp valid_module_request(type, module_symbol, parameters, %JobOwner{}),
-    do: valid_module_parameters(type, module_symbol, parameters)
-
-  @doc "Persists an Operator-scoped reviewed Navigate Intent without dispatching a mutation."
-  def review(
-        scope,
-        agent,
-        owner,
-        ship_symbol,
-        waypoint,
-        preview,
-        opts \\ []
-      )
-
-  def review(
-        %Scope{} = current_scope,
-        %AgentRecord{} = agent,
-        %ManualControl{},
-        ship_symbol,
-        waypoint,
-        preview,
-        opts
-      )
-      when is_map(preview) do
-    with {:ok, agent} <- scoped_agent_for_ship(current_scope, agent.id, ship_symbol),
-         :ok <- legacy_manual_allowed?(agent) do
-      review_navigation_intent(agent, ship_symbol, waypoint, preview, opts)
-    end
-  end
-
-  def review(_current_scope, _agent, _owner, _ship_symbol, _waypoint, _preview, _opts),
-    do: {:error, :unsupported_intent_review}
-
-  @doc "Persists an Operator-scoped blocked Navigate Intent after preview rejects the route."
-  def block_review(
-        %Scope{} = current_scope,
-        %AgentRecord{} = agent,
-        %ManualControl{},
-        ship_symbol,
-        waypoint,
-        reason
-      ) do
-    with {:ok, agent} <- scoped_agent_for_ship(current_scope, agent.id, ship_symbol),
-         :ok <- legacy_manual_allowed?(agent) do
-      block_jump_preview(agent, ship_symbol, waypoint, reason)
-    end
-  end
-
-  @doc "Confirms a persisted reviewed Navigate Intent by identity and revision."
-  def confirm(%Scope{} = current_scope, %ManualControl{}, intent_id, review_revision) do
-    confirm_navigation_intent(current_scope, intent_id, review_revision)
-  end
-
-  def confirm(_current_scope, _owner, _intent_id, _review_revision),
-    do: {:error, :invalid_intent_owner}
-
-  @doc "Stops one owned Intent without hiding unresolved mutation evidence."
-  def stop(%Scope{operator: %{id: operator_id}}, %ManualControl{}, intent_id) do
-    with {%Intent{} = intent, %AgentRecord{} = agent} <-
-           owned_intent_for_operator(operator_id, intent_id),
-         :ok <- owner_matches?(:manual, intent) do
-      do_stop_intent(agent, intent_id, :manual)
-    else
-      nil -> {:error, :intent_not_found}
-      error -> error
-    end
-  end
-
-  def stop(%AgentRecord{} = agent, %JobOwner{} = owner, intent_id) do
-    with %Intent{} = intent <- owned_intent(agent, intent_id),
-         :ok <- owner_matches?(owner, intent) do
-      do_stop_intent(agent, intent_id, owner)
-    else
-      nil -> {:error, :intent_not_found}
-      error -> error
-    end
-  end
-
   @doc "Stops an authenticated exceptional intervention after in-flight evidence is safe."
   def stop_intervention(%Scope{operator: %{id: operator_id}}, intent_id) do
     with {%Intent{caller: "intervention"} = intent, %AgentRecord{} = agent} <-
@@ -549,30 +289,6 @@ defmodule SpaceTraders.Fleet.Intents do
     else
       nil -> {:error, :intent_not_found}
       _ -> {:error, :intervention_not_authorized}
-    end
-  end
-
-  @doc "Stops an owned Intent after binding the request to its Ship identity."
-  def stop(%Scope{operator: %{id: operator_id}}, %ManualControl{}, ship_symbol, intent_id) do
-    with {%Intent{} = intent, %AgentRecord{} = agent} <-
-           owned_intent_for_operator(operator_id, intent_id),
-         :ok <- owner_matches?(:manual, intent),
-         :ok <- intent_ship_matches?(intent, ship_symbol) do
-      do_stop_intent(agent, intent_id, :manual)
-    else
-      nil -> {:error, :intent_not_found}
-      error -> error
-    end
-  end
-
-  def stop(%AgentRecord{} = agent, %JobOwner{} = owner, ship_symbol, intent_id) do
-    with %Intent{} = intent <- owned_intent(agent, intent_id),
-         :ok <- owner_matches?(owner, intent),
-         :ok <- intent_ship_matches?(intent, ship_symbol) do
-      do_stop_intent(agent, intent_id, owner)
-    else
-      nil -> {:error, :intent_not_found}
-      error -> error
     end
   end
 
@@ -634,19 +350,12 @@ defmodule SpaceTraders.Fleet.Intents do
     end
   end
 
-  def reconcile(agent_id, ship_symbol, live_ship, trigger, expected_intent_id, _legacy_job_id) do
-    reconcile(agent_id, ship_symbol, live_ship, trigger, expected_intent_id)
-  end
-
-  # Wake-up evidence re-enters the supported Intent engine. Historical Job
-  # Intents remain readable but cannot resume execution from a timer.
+  # Wake-up evidence re-enters the supported Intent engine. Retired timer
+  # evidence is ignored and cannot resume execution.
   defp advance_intent_for_trigger(agent, intent_id, live_ship) do
     case Repo.get(Intent, intent_id) do
       %Intent{status: status} = intent when status in ["active", "waiting", "blocked"] ->
         case intent.caller do
-          retired when retired in ["job", "manual"] ->
-            :ok
-
           "commitment" ->
             case Repo.get(Commitment, intent.fleet_commitment_id) do
               %Commitment{} = commitment ->
@@ -660,8 +369,11 @@ defmodule SpaceTraders.Fleet.Intents do
                 :ok
             end
 
-          _ ->
+          "intervention" ->
             advance_intents(agent, intent, live_ship)
+
+          _ ->
+            :ok
         end
 
       _ ->
@@ -672,10 +384,6 @@ defmodule SpaceTraders.Fleet.Intents do
   @doc "Re-enters reconciliation after boot's authoritative Ship read."
   def recover(agent, ship_symbol, live_ship, expected_intent_id) do
     reconcile(agent.id, ship_symbol, live_ship, :boot, expected_intent_id)
-  end
-
-  def recover(agent, ship_symbol, live_ship, expected_intent_id, _legacy_job_id) do
-    recover(agent, ship_symbol, live_ship, expected_intent_id)
   end
 
   @doc """
@@ -693,7 +401,7 @@ defmodule SpaceTraders.Fleet.Intents do
     :ok
   end
 
-  @doc "Reconstructs commitment and intervention Intents without reading legacy Jobs."
+  @doc "Reconstructs commitment and intervention Intents from supported ownership."
   def rearm_owned_intents_on_boot do
     symbols =
       Intent
@@ -740,29 +448,7 @@ defmodule SpaceTraders.Fleet.Intents do
   end
 
   @doc "Re-enters reconciliation for one unfinished Intent with a fresh authoritative Ship observation."
-  def advance(_agent, %Intent{caller: "job"}, _live_ship),
-    do: {:error, :legacy_gameplay_retired}
-
-  def advance(_agent, %Intent{caller: "manual"}, _live_ship),
-    do: {:error, :legacy_gameplay_retired}
-
   def advance(agent, %Intent{} = intent, live_ship), do: advance_intents(agent, intent, live_ship)
-
-  @doc false
-  def last_completed_job_intent(job_id, type \\ nil) do
-    query =
-      from intent in Intent,
-        where:
-          intent.job_id == ^job_id and intent.caller == "job" and intent.status == "completed",
-        order_by: [desc: intent.id],
-        limit: 1
-
-    if type do
-      Repo.one(where(query, [intent], intent.type == ^type))
-    else
-      Repo.one(query)
-    end
-  end
 
   @doc false
   def unfinished_intent(intent_id) do
@@ -797,136 +483,6 @@ defmodule SpaceTraders.Fleet.Intents do
     )
   end
 
-  defp normalize_owner(:manual), do: {:ok, :manual}
-  defp normalize_owner(%ManualControl{}), do: {:ok, :manual}
-  defp normalize_owner(%JobOwner{job: %Job{} = job}), do: {:ok, %JobOwner{job: job}}
-  defp normalize_owner(%Job{} = job), do: {:ok, %JobOwner{job: job}}
-  defp normalize_owner(_owner), do: {:error, :invalid_intent_owner}
-
-  defp token_present(%AgentRecord{agent_token: token}) when is_binary(token) and token != "",
-    do: :ok
-
-  defp token_present(_agent), do: {:error, :agent_token_missing}
-
-  defp valid_goal_waypoint(waypoint) when is_binary(waypoint) do
-    case String.trim(waypoint) do
-      "" -> {:error, :invalid_waypoint}
-      waypoint -> {:ok, waypoint}
-    end
-  end
-
-  defp valid_goal_waypoint(_waypoint), do: {:error, :invalid_waypoint}
-
-  defp valid_goal_parameters(parameters) when is_map(parameters), do: :ok
-  defp valid_goal_parameters(_parameters), do: {:error, :invalid_intent_parameters}
-
-  defp valid_navigate_constraints(constraints) when is_map(constraints) do
-    valid? =
-      Enum.all?(constraints, fn
-        {key, mode} when key in [:flight_mode, "flight_mode"] ->
-          mode in ["DRIFT", "STEALTH", "CRUISE", "BURN"]
-
-        {key, refuel} when key in [:refuel, "refuel"] ->
-          refuel in ["to_capacity"]
-
-        _constraint ->
-          false
-      end)
-
-    if valid?, do: :ok, else: {:error, :invalid_navigate_constraints}
-  end
-
-  defp valid_navigate_constraints(_constraints), do: {:error, :invalid_navigate_constraints}
-
-  defp valid_module_symbol(symbol) when is_binary(symbol) do
-    if String.trim(symbol) == "", do: {:error, :invalid_module_intent}, else: :ok
-  end
-
-  defp valid_module_symbol(_symbol), do: {:error, :invalid_module_intent}
-
-  defp valid_module_parameters("install_module", module_symbol, parameters) do
-    {:ok, Map.merge(parameters, %{"module_symbol" => module_symbol, "quantity" => 1})}
-  end
-
-  defp valid_module_parameters("remove_module", module_symbol, parameters) do
-    removals = parameters[:authorized_removals] || parameters["authorized_removals"] || %{}
-
-    if is_map(removals) and
-         Map.new(removals, fn {key, value} -> {to_string(key), value} end) ==
-           %{module_symbol => 1},
-       do: {:ok, Map.merge(parameters, %{"module_symbol" => module_symbol, "quantity" => 1})},
-       else: {:error, :invalid_module_intent}
-  end
-
-  defp valid_trade_good(trade_good) when is_binary(trade_good) do
-    case String.trim(trade_good) do
-      "" -> {:error, :invalid_trade_good}
-      trade_good -> {:ok, trade_good}
-    end
-  end
-
-  defp valid_trade_good(_trade_good), do: {:error, :invalid_trade_good}
-
-  defp valid_identifier(value, error) when is_binary(value) do
-    case String.trim(value) do
-      "" -> {:error, error}
-      value -> {:ok, value}
-    end
-  end
-
-  defp valid_identifier(_value, error), do: {:error, error}
-
-  defp valid_delivery_recipient(%ContractRecipient{contract_id: contract_id, waypoint: waypoint}) do
-    with {:ok, contract_id} <- valid_identifier(contract_id, :invalid_contract_id),
-         {:ok, waypoint} <- valid_goal_waypoint(waypoint) do
-      {:ok, %{type: "contract", contract_id: contract_id, waypoint: waypoint}, waypoint}
-    end
-  end
-
-  defp valid_delivery_recipient(%ConstructionRecipient{system: system, waypoint: waypoint}) do
-    with {:ok, system} <- valid_identifier(system, :invalid_system_symbol),
-         {:ok, waypoint} <- valid_goal_waypoint(waypoint) do
-      {:ok, %{type: "construction", system: system, waypoint: waypoint}, waypoint}
-    end
-  end
-
-  defp valid_delivery_recipient(_recipient), do: {:error, :invalid_delivery_recipient}
-
-  defp valid_quantity(quantity) when is_integer(quantity) and quantity > 0, do: :ok
-  defp valid_quantity(_quantity), do: {:error, :invalid_quantity}
-
-  defp valid_buy_constraints(constraints) do
-    if Enum.all?(constraints, fn {key, value} ->
-         key in [:max_price, :max_unit_price, :max_total_price, :reserve_credits] and
-           is_integer(value) and value >= 0
-       end),
-       do: :ok,
-       else: {:error, :invalid_buy_constraints}
-  end
-
-  defp valid_sell_constraints(constraints) do
-    if Enum.all?(constraints, fn {key, value} ->
-         key in [:min_price, :min_total] and is_integer(value) and value >= 0
-       end),
-       do: :ok,
-       else: {:error, :invalid_sell_constraints}
-  end
-
-  defp owner_matches?(:manual, %Intent{caller: "manual"}), do: :ok
-
-  defp owner_matches?(%JobOwner{job: %Job{id: job_id}}, %Intent{caller: "job", job_id: job_id}),
-    do: :ok
-
-  defp owner_matches?(_owner, _intent), do: {:error, :invalid_intent_owner}
-
-  defp intent_ship_matches?(%Intent{ship_id: ship_id}, ship_symbol) do
-    case Repo.get(Ship, ship_id) do
-      %Ship{symbol: ^ship_symbol} -> :ok
-      %Ship{} -> {:error, :intent_ship_mismatch}
-      nil -> {:error, :intent_not_found}
-    end
-  end
-
   defp boot_intent(ship_id, intent_id) when is_integer(intent_id) do
     case Repo.get(Intent, intent_id) do
       %Intent{ship_id: ^ship_id, caller: caller, status: status} = intent
@@ -948,11 +504,17 @@ defmodule SpaceTraders.Fleet.Intents do
   defp validate_intent_waypoint(""), do: {:error, :invalid_waypoint}
   defp validate_intent_waypoint(_waypoint), do: :ok
 
-  def insert_job_intent(_job, _attrs), do: {:error, :legacy_gameplay_retired}
+  defp fresh_ship(_agent, _ship_symbol, %SpaceTraders.API.Model.Ship{} = live_ship),
+    do: {:ok, live_ship}
+
+  defp fresh_ship(agent, ship_symbol, _live_ship) do
+    Agent.handle_game_result(
+      agent,
+      SpaceTraders.Evidence.get_ship(AgentTokenReference.new(agent), ship_symbol)
+    )
+  end
 
   @doc """
-  Requests the authoritative buy leg of a commitment round trip.
-
   The intent is owned by the Fleet Commitment and only dispatches while the
   commitment's Ship Claim remains current. The buy intent navigates to the
   source Market, docks, and buys the admissible quantity through governed
@@ -968,7 +530,7 @@ defmodule SpaceTraders.Fleet.Intents do
       when is_binary(ship_symbol) and is_map(candidate) do
     with :ok <- token_present(agent),
          {:ok, ship} <- Fleet.owned_ship(agent, ship_symbol),
-         {:ok, live_ship} <- fresh_job_ship(agent, ship_symbol, nil),
+         {:ok, live_ship} <- fresh_ship(agent, ship_symbol, nil),
          {:ok, intent} <-
            insert_commitment_intent(commitment, portfolio, ship, %{
              type: "buy",
@@ -997,7 +559,7 @@ defmodule SpaceTraders.Fleet.Intents do
       when is_binary(ship_symbol) and is_map(candidate) do
     with :ok <- token_present(agent),
          {:ok, ship} <- Fleet.owned_ship(agent, ship_symbol),
-         {:ok, live_ship} <- fresh_job_ship(agent, ship_symbol, live_ship),
+         {:ok, live_ship} <- fresh_ship(agent, ship_symbol, live_ship),
          {:ok, intent} <-
            insert_commitment_intent(commitment, portfolio, ship, %{
              type: "sell",
@@ -1072,936 +634,11 @@ defmodule SpaceTraders.Fleet.Intents do
   defp candidate_sell_price(candidate),
     do: Map.get(candidate, :sell_price) || Map.get(candidate, "sell_price")
 
-  # Job Navigate is inserted and advanced as a Job-owned Intent. Manual Navigate
-  # uses the separate path above because it may preempt a Job.
-  defp request_manual_navigate(
-         %AgentRecord{agent_token: agent_token} = agent,
-         ship_symbol,
-         waypoint,
-         parameters
-       )
-       when is_binary(agent_token) and agent_token != "" and is_map(parameters) do
-    waypoint = String.trim(waypoint || "")
-
-    with :ok <- validate_intent_waypoint(waypoint),
-         {:ok, ship} <- Fleet.owned_ship(agent, ship_symbol),
-         {:ok, intent} <-
-           replace_intents(ship, %{
-             type: "navigate",
-             target_waypoint: waypoint,
-             parameters: parameters
-           }) do
-      reconcile_intents(agent, intent)
-    else
-      {:error, %Ecto.Changeset{}} -> {:error, :intents_conflict}
-      error -> error
-    end
-  end
-
-  # A Job Policy may pass its fresh authoritative Ship observation; without one,
-  # the request performs its own authoritative read before advancing.
-  defp request_job_navigate(agent, job, ship_symbol, waypoint, parameters, live_ship \\ nil) do
-    with {:ok, ship} <- Fleet.owned_ship(agent, ship_symbol),
-         :ok <- job_navigation_allowed?(job, waypoint),
-         existing_intent <- unfinished_intent_for_ship(ship.id),
-         {:ok, intent} <-
-           Repo.transaction(
-             fn ->
-               current_job = Repo.get(Job, job.id)
-
-               if current_job && current_job.ship_id == ship.id && Job.running?(current_job) do
-                 case insert_or_reuse_job_navigation_intent(
-                        current_job,
-                        waypoint,
-                        parameters,
-                        existing_intent
-                      ) do
-                   {:ok, intent} -> intent
-                   {:error, reason} -> Repo.rollback(reason)
-                 end
-               else
-                 Repo.rollback(:invalid_intent_owner)
-               end
-             end,
-             mode: :immediate
-           ),
-         {:ok, live_ship} <- fresh_job_ship(agent, ship_symbol, live_ship) do
-      advance_new_intent(agent, intent, live_ship)
-    else
-      false -> {:error, :invalid_intent_owner}
-      error -> error
-    end
-  end
-
-  defp fresh_job_ship(_agent, _ship_symbol, %SpaceTraders.API.Model.Ship{} = live_ship),
-    do: {:ok, live_ship}
-
-  defp fresh_job_ship(agent, ship_symbol, _live_ship) do
-    Agent.handle_game_result(
-      agent,
-      SpaceTraders.Evidence.get_ship(AgentTokenReference.new(agent), ship_symbol)
-    )
-  end
-
-  defp insert_or_reuse_job_navigation_intent(job, waypoint, parameters, existing_intent) do
-    case existing_intent do
-      %Intent{caller: "job", job_id: job_id, type: "navigate"} = intent when job_id == job.id ->
-        if intent.target_waypoint == waypoint and intent.parameters == parameters,
-          do: {:ok, intent},
-          else: {:error, :intents_active}
-
-      %Intent{} ->
-        {:error, :intents_active}
-
-      nil ->
-        {:error, :legacy_gameplay_retired}
-    end
-  end
-
   def unfinished_intent_for_ship(ship_id) do
     Repo.one(
       from intent in Intent,
         where: intent.ship_id == ^ship_id and intent.status in ^@unfinished_states
     )
-  end
-
-  defp job_navigation_allowed?(
-         %Job{type: "miner", extraction_waypoint: extraction, market_waypoint: market},
-         waypoint
-       )
-       when waypoint == extraction or waypoint == market,
-       do: :ok
-
-  defp job_navigation_allowed?(%Job{type: "survey", extraction_waypoint: waypoint}, waypoint),
-    do: :ok
-
-  defp job_navigation_allowed?(%Job{type: type}, _waypoint)
-       when type in ["procurement", "market_trading", "market_reconnaissance"],
-       do: :ok
-
-  defp job_navigation_allowed?(_job, waypoint),
-    do: {:error, {:job_navigation_not_authorized, waypoint}}
-
-  defp review_navigation_intent(agent, ship_symbol, waypoint, preview, opts)
-       when is_map(preview) do
-    method = if preview[:method] == "warp", do: "warp", else: "jump"
-    review = stringify_nested_keys(preview)
-    allowed_methods = Keyword.get(opts, :allowed_methods, ["jump", "warp"])
-
-    with {:ok, ship} <- Fleet.owned_ship(agent, ship_symbol),
-         {:ok, intent} <-
-           replace_intents(ship, %{
-             type: "navigate",
-             target_waypoint: waypoint,
-             parameters: %{
-               "review_method" => method,
-               "reviewed_#{method}" => review,
-               "allowed_methods" => allowed_methods
-             },
-             status: "awaiting_confirmation",
-             review_revision: 1
-           }) do
-      {:ok, intent}
-    else
-      {:error, %Ecto.Changeset{}} -> {:error, :intents_conflict}
-      error -> error
-    end
-  end
-
-  defp confirm_navigation_intent(%Scope{operator: %{id: operator_id}}, intent_id, review_revision) do
-    with {:ok, revision} <- parse_review_revision(review_revision),
-         {%Intent{} = intent, %AgentRecord{} = agent} <-
-           owned_intent_for_operator(operator_id, intent_id),
-         :ok <- legacy_manual_allowed?(agent),
-         true <-
-           intent.status == "awaiting_confirmation" || {:error, :intent_not_awaiting_confirmation},
-         true <- intent.review_revision == revision || {:error, :review_revision_stale},
-         fresh <- fresh_navigation_review(agent, intent),
-         {:ok, intent} <- refresh_or_authorize_review(intent, fresh) do
-      case intent.status do
-        "awaiting_confirmation" -> {:ok, intent}
-        "active" -> reconcile_intents(agent, intent)
-      end
-    else
-      nil -> {:error, :intent_not_found}
-      {:error, _reason} = error -> error
-      false -> {:error, :review_revision_stale}
-    end
-  end
-
-  defp parse_review_revision(value) when is_integer(value), do: {:ok, value}
-
-  defp parse_review_revision(value) when is_binary(value) do
-    case Integer.parse(value) do
-      {revision, ""} -> {:ok, revision}
-      _ -> {:error, :review_revision_stale}
-    end
-  end
-
-  defp parse_review_revision(_value), do: {:error, :review_revision_stale}
-
-  defp owned_intent(%AgentRecord{id: agent_id}, intent_id) do
-    Repo.one(
-      from intent in Intent,
-        join: ship in Ship,
-        on: ship.id == intent.ship_id,
-        where: intent.id == ^intent_id and ship.agent_id == ^agent_id
-    )
-  end
-
-  defp owned_intent_for_operator(operator_id, intent_id) do
-    Repo.one(
-      from intent in Intent,
-        join: ship in Ship,
-        on: ship.id == intent.ship_id,
-        join: agent in AgentRecord,
-        on: agent.id == ship.agent_id,
-        where: intent.id == ^intent_id and agent.operator_id == ^operator_id,
-        select: {intent, agent}
-    )
-  end
-
-  defp scoped_agent_for_ship(
-         %Scope{operator: %{id: operator_id}},
-         agent_id,
-         ship_symbol
-       ) do
-    case Repo.one(
-           from agent in AgentRecord,
-             join: ship in Ship,
-             on: ship.agent_id == agent.id,
-             where:
-               agent.id == ^agent_id and agent.operator_id == ^operator_id and
-                 ship.symbol == ^ship_symbol,
-             select: agent
-         ) do
-      %AgentRecord{} = agent -> {:ok, agent}
-      nil -> {:error, :agent_not_owned}
-    end
-  end
-
-  defp scoped_agent_for_ship(_current_scope, _agent_id, _ship_symbol),
-    do: {:error, :agent_not_owned}
-
-  defp fresh_navigation_review(
-         agent,
-         %Intent{target_waypoint: waypoint, ship_id: ship_id} = intent
-       ) do
-    ship = Repo.get!(Ship, ship_id)
-    method = intent.parameters["review_method"]
-
-    case method do
-      "warp" -> warp_preview(agent, ship.symbol, waypoint)
-      "jump" -> jump_preview(agent, ship.symbol, waypoint)
-      _ -> {:error, :review_revision_stale}
-    end
-  end
-
-  defp refresh_or_authorize_review(intent, {:error, reason}) do
-    method = intent.parameters["review_method"]
-    key = "reviewed_#{method}"
-
-    parameters =
-      Map.put(intent.parameters, key, %{
-        "method" => method,
-        "destination_waypoint" => intent.target_waypoint,
-        "status" => "blocked",
-        "validation_error" => inspect(reason)
-      })
-
-    case Repo.update_all(
-           from(i in Intent,
-             where:
-               i.id == ^intent.id and i.status == "awaiting_confirmation" and
-                 i.review_revision == ^intent.review_revision
-           ),
-           set: [parameters: parameters, review_revision: intent.review_revision + 1]
-         ) do
-      {1, _} -> {:ok, Repo.get!(Intent, intent.id)}
-      {0, _} -> {:error, :review_revision_stale}
-    end
-  end
-
-  defp refresh_or_authorize_review(intent, {:ok, fresh}) do
-    method = intent.parameters["review_method"]
-    key = "reviewed_#{method}"
-    persisted = intent.parameters[key] || %{}
-    fresh = stringify_nested_keys(fresh)
-
-    if canonical_preview_value(review_for_comparison(method, persisted)) ==
-         canonical_preview_value(review_for_comparison(method, fresh)) do
-      case Repo.update_all(
-             from(i in Intent,
-               where:
-                 i.id == ^intent.id and i.status == "awaiting_confirmation" and
-                   i.review_revision == ^intent.review_revision
-             ),
-             set: [status: "active"]
-           ) do
-        {1, _} ->
-          updated = Repo.get!(Intent, intent.id)
-          SpaceTraders.Observability.intent_transition(intent, updated)
-          {:ok, updated}
-
-        {0, _} ->
-          {:error, :review_revision_stale}
-      end
-    else
-      case Repo.update_all(
-             from(i in Intent,
-               where:
-                 i.id == ^intent.id and i.status == "awaiting_confirmation" and
-                   i.review_revision == ^intent.review_revision
-             ),
-             set: [
-               parameters: Map.put(intent.parameters, key, fresh),
-               review_revision: intent.review_revision + 1
-             ]
-           ) do
-        {1, _} -> {:ok, Repo.get!(Intent, intent.id)}
-        {0, _} -> {:error, :review_revision_stale}
-      end
-    end
-  end
-
-  defp review_for_comparison("warp", review), do: Map.delete(review, "candidates")
-  defp review_for_comparison(_method, review), do: review
-
-  defp stringify_nested_keys(value) when is_map(value),
-    do: Map.new(value, fn {key, value} -> {to_string(key), stringify_nested_keys(value)} end)
-
-  defp stringify_nested_keys(value) when is_list(value),
-    do: Enum.map(value, &stringify_nested_keys/1)
-
-  defp stringify_nested_keys(value), do: value
-
-  defp block_jump_preview(%AgentRecord{} = agent, ship_symbol, waypoint, reason) do
-    with :ok <- validate_intent_waypoint(waypoint),
-         {:ok, ship} <- Fleet.owned_ship(agent, ship_symbol),
-         {:ok, intent} <- replace_intents(ship, waypoint) do
-      block_intents(intent, reason)
-    else
-      {:error, %Ecto.Changeset{}} -> {:error, :intents_conflict}
-      error -> error
-    end
-  end
-
-  defp canonical_preview_value(value) when is_map(value) do
-    value
-    |> Enum.map(fn {key, value} ->
-      {canonical_preview_key(key), canonical_preview_value(value)}
-    end)
-    |> Map.new()
-  end
-
-  defp canonical_preview_value(value) when is_list(value),
-    do: Enum.map(value, &canonical_preview_value/1)
-
-  defp canonical_preview_value(value), do: value
-
-  defp canonical_preview_key(key) when is_binary(key), do: key
-  defp canonical_preview_key(key) when is_atom(key), do: Atom.to_string(key)
-  defp canonical_preview_key(_key), do: "__malformed_key__"
-
-  @doc "Reads the authoritative prerequisites for a direct jump-gate route without mutation."
-  def jump_preview(%AgentRecord{agent_token: token} = agent, ship_symbol, waypoint)
-      when is_binary(token) and token != "" do
-    waypoint = String.trim(waypoint || "")
-
-    with :ok <- validate_intent_waypoint(waypoint),
-         {:ok, ship} <- Fleet.owned_ship(agent, ship_symbol),
-         {:ok, live_ship} <-
-           Agent.handle_game_result(
-             agent,
-             SpaceTraders.Evidence.get_ship(AgentTokenReference.new(agent), ship.symbol)
-           ),
-         true <- remote_waypoint?(live_ship.nav.waypoint_symbol, waypoint),
-         {:ok, source_system} <- Fleet.system_from_headquarters(live_ship.nav.waypoint_symbol),
-         {:ok, destination_system} <- Fleet.system_from_headquarters(waypoint),
-         {:ok, candidates} <- jump_origin_candidates(agent, source_system, waypoint),
-         {:ok, origin_gate} <- jump_origin_for(agent, source_system, waypoint),
-         :ok <-
-           validate_jump_route(
-             agent,
-             source_system,
-             origin_gate,
-             destination_system,
-             waypoint
-           ),
-         {:ok, preflight} <-
-           jump_cost_preflight(agent, source_system, origin_gate) do
-      {:ok,
-       Map.merge(preflight, %{
-         ship_symbol: ship.symbol,
-         current_waypoint: live_ship.nav.waypoint_symbol,
-         source_waypoint: origin_gate,
-         destination_waypoint: waypoint,
-         flight_mode: live_ship.nav.flight_mode,
-         cooldown_seconds: live_ship.cooldown.remaining_seconds,
-         candidates: candidates
-       })}
-    else
-      false -> {:error, :same_system_route}
-      {:error, _reason} = error -> error
-      error -> {:error, error}
-    end
-  end
-
-  def jump_preview(%AgentRecord{}, _ship_symbol, _waypoint), do: {:error, :agent_token_missing}
-
-  @doc "Reads authoritative Ship readiness for a direct inter-System warp without mutation."
-  def warp_preview(%AgentRecord{agent_token: token} = agent, ship_symbol, waypoint)
-      when is_binary(token) and token != "" do
-    waypoint = String.trim(waypoint || "")
-
-    with :ok <- validate_intent_waypoint(waypoint),
-         {:ok, ship} <- Fleet.owned_ship(agent, ship_symbol),
-         {:ok, live_ship} <-
-           Agent.handle_game_result(
-             agent,
-             SpaceTraders.Evidence.get_ship(AgentTokenReference.new(agent), ship.symbol)
-           ),
-         true <-
-           remote_waypoint?(live_ship.nav.waypoint_symbol, waypoint) ||
-             {:error, :same_system_route},
-         {:ok, module} <- installed_warp_drive(live_ship),
-         true <- live_ship.nav.flight_mode != "BURN" || {:error, :warp_burn_fuel_budget_unknown},
-         true <- not fuel_empty?(live_ship) || {:error, :insufficient_fuel} do
-      {:ok,
-       %{
-         method: "warp",
-         ship_symbol: ship.symbol,
-         current_waypoint: live_ship.nav.waypoint_symbol,
-         destination_waypoint: waypoint,
-         flight_mode: live_ship.nav.flight_mode,
-         fuel_current: live_ship.fuel.current,
-         fuel_capacity: live_ship.fuel.capacity,
-         warp_drive: module.symbol,
-         warp_range: module.range
-       }}
-    else
-      {:error, _reason} = error -> error
-      error -> {:error, error}
-    end
-  end
-
-  def warp_preview(%AgentRecord{}, _ship_symbol, _waypoint), do: {:error, :agent_token_missing}
-
-  @doc """
-  Evaluates both jump and warp from fresh authoritative state and returns the
-  ranked viable methods for an off-System Navigate Intent.
-
-  The selection includes the preferred method, all viable alternatives, and
-  rejection reasons for every non-viable option. When `allowed_methods` is
-  provided, only those methods may appear in the result; restricting to a
-  single method skips the other preview entirely.
-  """
-  def method_selection(agent, ship_symbol, waypoint, opts \\ [])
-
-  def method_selection(%AgentRecord{agent_token: token} = agent, ship_symbol, waypoint, opts)
-      when is_binary(token) and token != "" do
-    allowed = Keyword.get(opts, :allowed_methods, ["jump", "warp"])
-
-    jump =
-      if "jump" in allowed,
-        do: jump_preview(agent, ship_symbol, waypoint),
-        else: {:error, :method_not_allowed}
-
-    warp =
-      if "warp" in allowed,
-        do: warp_preview(agent, ship_symbol, waypoint),
-        else: {:error, :method_not_allowed}
-
-    # Both preview functions return {:error, :same_system_route} for same-system
-    # targets, which propagates here as a same_system_route error.
-    cond do
-      match?({:error, :same_system_route}, jump) ->
-        {:error, :same_system_route}
-
-      match?({:error, :same_system_route}, warp) and not match?({:ok, _}, jump) ->
-        {:error, :same_system_route}
-
-      true ->
-        viable =
-          [{"jump", jump}, {"warp", warp}]
-          |> Enum.filter(fn {_method, result} -> match?({:ok, _}, result) end)
-          |> Enum.map(fn {method, {:ok, preview}} -> {method, preview} end)
-
-        rejected =
-          [{"jump", jump}, {"warp", warp}]
-          |> Enum.filter(fn {_method, result} -> match?({:error, _}, result) end)
-          |> Enum.map(fn {method, {:error, reason}} -> {method, reason} end)
-
-        selected =
-          cond do
-            viable == [] -> nil
-            # Jump is preferred before warp unless the operator restricts it
-            List.keyfind(viable, "jump", 0) -> "jump"
-            true -> "warp"
-          end
-
-        {:ok,
-         %{
-           selected: selected,
-           viable: viable,
-           rejected: rejected,
-           allowed_methods: allowed
-         }}
-    end
-  end
-
-  def method_selection(%AgentRecord{}, _ship_symbol, _waypoint, _opts),
-    do: {:error, :agent_token_missing}
-
-  defp installed_warp_drive(%{modules: modules}) do
-    case Enum.find(modules || [], &warp_drive_module?/1) do
-      nil -> {:error, :warp_drive_missing}
-      module -> {:ok, module}
-    end
-  end
-
-  defp warp_drive_module?(%{symbol: symbol}) when is_binary(symbol),
-    do: symbol in ~w(MODULE_WARP_DRIVE_I MODULE_WARP_DRIVE_II MODULE_WARP_DRIVE_III)
-
-  defp warp_drive_module?(_), do: false
-
-  defp buy_goods_intent(agent, ship_symbol, waypoint, trade_symbol, units, opts) do
-    cargo_intent(agent, ship_symbol, "buy", waypoint, trade_symbol, units, opts)
-  end
-
-  defp sell_goods_intent(agent, ship_symbol, waypoint, trade_symbol, units, opts) do
-    cargo_intent(agent, ship_symbol, "sell", waypoint, trade_symbol, units, opts)
-  end
-
-  defp request_job_sell_goods_intent(
-         _agent,
-         _job,
-         _ship_symbol,
-         _waypoint,
-         _trade_symbol,
-         _units,
-         _constraints,
-         _parameters,
-         _live_ship
-       ),
-       do: {:error, :legacy_gameplay_retired}
-
-  defp deliver_goods_intent(
-         agent,
-         ship_symbol,
-         recipient,
-         waypoint,
-         trade_symbol,
-         units,
-         opts
-       )
-
-  defp deliver_goods_intent(
-         agent,
-         ship_symbol,
-         %{type: "construction", system: system} = recipient,
-         waypoint,
-         trade_symbol,
-         units,
-         opts
-       ) do
-    deliver_construction_goods_intent(
-      agent,
-      ship_symbol,
-      system,
-      waypoint,
-      trade_symbol,
-      units,
-      Keyword.put(opts, :recipient, recipient)
-    )
-  end
-
-  defp deliver_goods_intent(
-         agent,
-         ship_symbol,
-         %{type: "contract", contract_id: contract_id},
-         waypoint,
-         trade_symbol,
-         units,
-         opts
-       ) do
-    deliver_goods_intent(agent, ship_symbol, waypoint, contract_id, trade_symbol, units, opts)
-  end
-
-  defp deliver_goods_intent(
-         agent,
-         ship_symbol,
-         waypoint,
-         contract_id,
-         trade_symbol,
-         units,
-         opts
-       ) do
-    opts =
-      Keyword.merge(opts,
-        contract_id: contract_id,
-        recipient: %{type: "contract", contract_id: contract_id, waypoint: waypoint}
-      )
-
-    case opts[:caller] do
-      "job" ->
-        {:error, :legacy_gameplay_retired}
-
-      _ ->
-        cargo_intent(agent, ship_symbol, "deliver", waypoint, trade_symbol, units, opts)
-    end
-  end
-
-  defp deliver_construction_goods_intent(
-         agent,
-         ship_symbol,
-         system_symbol,
-         waypoint,
-         trade_symbol,
-         units,
-         opts
-       ) do
-    with {:ok, live_ship} <-
-           construction_live_ship(agent, ship_symbol, opts),
-         {:ok, ^system_symbol} <- Fleet.system_from_headquarters(waypoint),
-         true <- live_ship.nav.system_symbol == system_symbol do
-      opts =
-        Keyword.merge(opts,
-          recipient: %{type: "construction", system: system_symbol, waypoint: waypoint}
-        )
-
-      case opts[:caller] do
-        "job" ->
-          {:error, :legacy_gameplay_retired}
-
-        _ ->
-          cargo_intent(agent, ship_symbol, "deliver", waypoint, trade_symbol, units, opts)
-      end
-    else
-      false -> {:error, :remote_destination_system_unsupported}
-      {:ok, _system} -> {:error, :remote_destination_system_unsupported}
-      error -> error
-    end
-  end
-
-  defp construction_live_ship(agent, ship_symbol, opts) do
-    case opts[:live_ship] do
-      %SpaceTraders.API.Model.Ship{symbol: ^ship_symbol} = ship ->
-        {:ok, ship}
-
-      %SpaceTraders.API.Model.Ship{} ->
-        {:error, :invalid_cargo_intent_owner}
-
-      _ ->
-        Agent.handle_game_result(
-          agent,
-          SpaceTraders.Evidence.get_ship(AgentTokenReference.new(agent), ship_symbol)
-        )
-    end
-  end
-
-  defp request_module_intent(agent, :manual, ship_symbol, type, module_symbol, parameters)
-       when type in ["install_module", "remove_module"] and is_map(parameters) do
-    authorized_removals =
-      parameters[:authorized_removals] || parameters["authorized_removals"] || %{}
-
-    module_intent(agent, ship_symbol, type, module_symbol, authorized_removals)
-  end
-
-  defp request_module_intent(
-         %AgentRecord{} = agent,
-         %Job{type: "outfitting", id: job_id, ship_id: ship_id},
-         ship_symbol,
-         type,
-         module_symbol,
-         parameters
-       )
-       when type in ["install_module", "remove_module"] and is_map(parameters) do
-    with {:ok, ship} <- Fleet.owned_ship(agent, ship_symbol),
-         true <- ship.id == ship_id,
-         %Job{} = current_job <- Repo.get(Job, job_id),
-         true <- current_job.ship_id == ship_id and Job.running?(current_job),
-         {:ok, live_ship} <-
-           Agent.handle_game_result(
-             agent,
-             SpaceTraders.Evidence.get_ship(AgentTokenReference.new(agent), ship_symbol)
-           ),
-         {:ok, intent} <-
-           insert_module_job_intent(current_job, ship_id, type, module_symbol, parameters) do
-      advance_new_intent(agent, intent, live_ship)
-    else
-      false -> {:error, :invalid_module_intent}
-      error -> error
-    end
-  end
-
-  defp request_module_intent(_, _, _, _, _, _), do: {:error, :invalid_module_intent}
-
-  defp insert_module_job_intent(_job, _ship_id, _type, _module_symbol, _parameters),
-    do: {:error, :legacy_gameplay_retired}
-
-  defp module_intent(
-         %AgentRecord{agent_token: token} = agent,
-         ship_symbol,
-         type,
-         module_symbol,
-         authorized_removals
-       )
-       when is_binary(token) and token != "" do
-    parameters = %{
-      "caller" => "manual",
-      "module_symbol" => module_symbol,
-      "quantity" => 1,
-      "authorized_removals" => stringify_keys(authorized_removals)
-    }
-
-    with true <- type in ["install_module", "remove_module"],
-         true <- is_binary(module_symbol) and module_symbol != "",
-         true <- valid_module_removal?(type, module_symbol, parameters["authorized_removals"]),
-         {:ok, ship} <- Fleet.owned_ship(agent, ship_symbol) do
-      case reconcile_pending_module_intent(agent, ship, type, module_symbol) do
-        {:resolved, intent} -> {:ok, intent}
-        :ok -> start_module_intent(agent, ship, type, module_symbol, parameters)
-        error -> error
-      end
-    else
-      false -> {:error, :invalid_module_intent}
-      {:error, %Ecto.Changeset{}} -> {:error, :intents_conflict}
-      error -> error
-    end
-  end
-
-  defp module_intent(%AgentRecord{}, _ship_symbol, _type, _module_symbol, _authorized_removals),
-    do: {:error, :agent_token_missing}
-
-  defp valid_module_removal?("install_module", _module_symbol, _authorized_removals), do: true
-
-  defp valid_module_removal?("remove_module", module_symbol, authorized_removals) do
-    authorized_removals == %{module_symbol => 1}
-  end
-
-  defp stringify_keys(map) when is_map(map),
-    do: Map.new(map, fn {key, value} -> {to_string(key), value} end)
-
-  defp stringify_keys(_), do: %{}
-
-  # An unknown mutation outcome must be reconciled before a later Manual Control
-  # request can replace its durable evidence and accidentally repeat the command.
-  defp reconcile_pending_module_intent(agent, ship, requested_type, requested_module_symbol) do
-    case unfinished_manual_intent(ship.id) do
-      %Intent{type: type, in_flight_action: action} = intent
-      when type in ["install_module", "remove_module"] and is_map(action) ->
-        case reconcile_intents(agent, intent) do
-          {:ok, %Intent{in_flight_action: action}} when is_map(action) ->
-            {:error, :intents_reconciliation_required}
-
-          {:ok, intent} ->
-            if intent.type == requested_type and
-                 intent.parameters["module_symbol"] == requested_module_symbol,
-               do: {:resolved, intent},
-               else: :ok
-        end
-
-      _ ->
-        :ok
-    end
-  end
-
-  defp start_module_intent(agent, ship, type, module_symbol, parameters) do
-    with :ok <-
-           Fleet.preempt_miner_job_for(
-             agent,
-             ship.symbol,
-             {:manual_override, "module modification"}
-           ),
-         {:ok, intent} <-
-           replace_intents(ship, %{
-             type: type,
-             target_waypoint: module_symbol,
-             parameters: parameters
-           }) do
-      reconcile_intents(agent, intent)
-    else
-      {:error, %Ecto.Changeset{}} -> {:error, :intents_conflict}
-      error -> error
-    end
-  end
-
-  defp cargo_intent(
-         %AgentRecord{agent_token: token} = agent,
-         ship_symbol,
-         type,
-         waypoint,
-         trade_symbol,
-         units,
-         opts
-       )
-       when is_binary(token) and token != "" do
-    caller = opts[:caller] || "manual"
-
-    parameters =
-      opts
-      |> Map.new()
-      |> Map.put(:caller, caller)
-      |> Map.put(:trade_symbol, trade_symbol)
-      |> Map.put(:units, units)
-      |> Map.new(fn {key, value} -> {to_string(key), value} end)
-
-    parameters = normalize_delivery_recipient(type, parameters, waypoint)
-
-    with true <- type in ["buy", "sell", "deliver"],
-         :ok <- validate_intent_waypoint(waypoint),
-         true <-
-           is_binary(trade_symbol) and trade_symbol != "" and is_integer(units) and units > 0,
-         {:ok, ship} <- Fleet.owned_ship(agent, ship_symbol),
-         true <- valid_cargo_constraints?(type, parameters),
-         :ok <- validate_cargo_caller(ship, caller, parameters),
-         :ok <- preempt_for_cargo_intent(agent, ship_symbol, type, caller),
-         {:ok, intent} <-
-           replace_intents(ship, %{
-             type: type,
-             target_waypoint: waypoint,
-             parameters: parameters
-           }) do
-      reconcile_intents(agent, intent)
-    else
-      false -> {:error, :invalid_cargo_intent}
-      {:error, %Ecto.Changeset{}} -> {:error, :intents_conflict}
-      error -> error
-    end
-  end
-
-  defp cargo_intent(%AgentRecord{}, _ship_symbol, _type, _waypoint, _trade_symbol, _units, _opts),
-    do: {:error, :agent_token_missing}
-
-  defp normalize_delivery_recipient("deliver", %{"recipient" => recipient} = parameters, waypoint)
-       when is_map(recipient) do
-    Map.put(parameters, "recipient", %{
-      "type" => recipient[:type] || recipient["type"],
-      "contract_id" => recipient[:contract_id] || recipient["contract_id"],
-      "system" => recipient[:system] || recipient["system"],
-      "waypoint" => recipient[:waypoint] || recipient["waypoint"] || waypoint
-    })
-  end
-
-  defp normalize_delivery_recipient("deliver", parameters, waypoint),
-    do:
-      Map.put(parameters, "recipient", %{
-        "type" => "contract",
-        "contract_id" => parameters["contract_id"],
-        "waypoint" => waypoint
-      })
-
-  defp normalize_delivery_recipient(_type, parameters, _waypoint), do: parameters
-
-  defp preempt_for_cargo_intent(agent, ship_symbol, type, caller) do
-    if caller == "job" do
-      :ok
-    else
-      Fleet.preempt_miner_job_for(agent, ship_symbol, {:manual_override, "#{type} goods"})
-    end
-  end
-
-  defp valid_cargo_constraints?("buy", parameters) do
-    Enum.all?(["max_price", "max_unit_price", "max_total_price", "reserve_credits"], fn key ->
-      is_nil(parameters[key]) or (is_integer(parameters[key]) and parameters[key] >= 0)
-    end)
-  end
-
-  defp valid_cargo_constraints?(_type, _parameters), do: true
-
-  defp validate_cargo_caller(_ship, "manual", _parameters), do: :ok
-
-  defp validate_cargo_caller(ship, "job", %{"job_id" => job_id}) when is_integer(job_id) do
-    case Repo.get(Job, job_id) do
-      %Job{ship_id: ship_id, type: type} = job ->
-        if ship_id == ship.id and
-             type in [
-               "miner",
-               "procurement",
-               "construction_supply",
-               "outfitting",
-               "market_trading"
-             ] and Job.running?(job),
-           do: :ok,
-           else: {:error, :invalid_cargo_intent_owner}
-
-      _ ->
-        {:error, :invalid_cargo_intent_owner}
-    end
-  end
-
-  defp validate_cargo_caller(_ship, _caller, _parameters),
-    do: {:error, :invalid_cargo_intent_owner}
-
-  defp do_stop_intent(%AgentRecord{} = agent, intent_id, owner) do
-    case Repo.transaction(
-           fn ->
-             intent =
-               Repo.one(
-                 from intent in Intent,
-                   join: ship in Ship,
-                   on: ship.id == intent.ship_id,
-                   where:
-                     intent.id == ^intent_id and ship.agent_id == ^agent.id and
-                       intent.status in ^@unfinished_states
-               )
-
-             case intent do
-               %Intent{} = intent ->
-                 cond do
-                   owner == :manual and intent.caller != "manual" ->
-                     Repo.rollback(:invalid_intent_owner)
-
-                   owner == :intervention and intent.caller != "intervention" ->
-                     Repo.rollback(:invalid_intent_owner)
-
-                   is_struct(owner, Job) and
-                       (intent.caller != "job" or intent.job_id != owner.id) ->
-                     Repo.rollback(:invalid_intent_owner)
-
-                   unresolved_cargo_action?(intent) ->
-                     Repo.rollback(:cargo_operation_reconciliation_required)
-
-                   unresolved_module_evidence?(intent) ->
-                     Repo.rollback(:intents_reconciliation_required)
-
-                   unresolved_jump_action?(intent) or unresolved_warp_action?(intent) ->
-                     Repo.rollback(:intents_reconciliation_required)
-
-                   unresolved_navigation_action?(intent) ->
-                     Repo.rollback(:intents_reconciliation_required)
-
-                   true ->
-                     terminalize_intents!(intent, "stopped")
-                 end
-
-               nil ->
-                 Repo.rollback(:intents_not_active)
-             end
-           end,
-           mode: :immediate
-         ) do
-      {:ok, %Intent{} = intent} ->
-        ship = Repo.get!(Ship, intent.ship_id)
-
-        kind =
-          if owner == :intervention,
-            do: "manual_intervention_stopped",
-            else: "manual_intent_stopped"
-
-        Fleet.record_activity(
-          agent,
-          ship,
-          kind,
-          "Navigate to #{intent.target_waypoint} stopped"
-        )
-
-        :ok
-
-      {:error, reason} ->
-        {:error, reason}
-    end
   end
 
   defp reconcile_intents(agent, intent) do
@@ -2075,55 +712,12 @@ defmodule SpaceTraders.Fleet.Intents do
         Repo.rollback(:cargo_operation_reconciliation_required)
       end
 
-      case unfinished_manual_intent(ship.id) do
-        %Intent{type: type, in_flight_action: action}
-        when type in ["install_module", "remove_module"] and is_map(action) ->
-          Repo.rollback(:intents_reconciliation_required)
-
+      case unfinished_intent_for_ship(ship.id) do
         %Intent{} = predecessor ->
-          if unresolved_navigation_action?(predecessor) or
-               unresolved_jump_action?(predecessor) or unresolved_warp_action?(predecessor) do
+          if unresolved_intent_evidence?(predecessor) do
             Repo.rollback(:intents_reconciliation_required)
           else
             terminalize_intents!(predecessor, "stopped")
-          end
-
-        nil ->
-          :ok
-      end
-
-      # Manual Control owns the Ship. It explicitly supersedes an unfinished
-      # Job operation before pausing the policy, then creates the sole active
-      # operation in the same transaction.
-      case Fleet.unfinished_job(ship.id) do
-        %Job{} = job ->
-          if is_map(job.in_flight_action) and attrs[:type] not in ["buy", "sell", "deliver"] do
-            Repo.rollback(:job_action_reconciliation_required)
-          end
-
-          case unfinished_job_intent(job.id) do
-            %Intent{} = predecessor ->
-              if unresolved_intent_evidence?(predecessor) do
-                Repo.rollback(:intents_reconciliation_required)
-              else
-                terminalize_intents!(predecessor, "stopped")
-              end
-
-            nil ->
-              :ok
-          end
-
-          unless job.status == "paused" do
-            action =
-              if attrs[:type] == "navigate", do: "navigation", else: "#{attrs[:type]} goods"
-
-            Repo.update!(
-              Ecto.Changeset.change(job,
-                status: "paused",
-                blocker: nil,
-                blocked_reason: preemption_message({:manual_override, action})
-              )
-            )
           end
 
         nil ->
@@ -2138,49 +732,6 @@ defmodule SpaceTraders.Fleet.Intents do
 
       intent
     end)
-  end
-
-  @doc false
-  def unfinished_manual_intent(ship_id) do
-    Repo.one(
-      from intent in Intent,
-        where:
-          intent.ship_id == ^ship_id and intent.caller == "manual" and
-            intent.status in ^@unfinished_states
-    )
-  end
-
-  @doc false
-  def unfinished_job_intent(job_id) do
-    Repo.one(
-      from intent in Intent,
-        where:
-          intent.job_id == ^job_id and intent.caller == "job" and
-            intent.status in ^@unfinished_states
-    )
-  end
-
-  @doc false
-  def terminalize_job_intent!(job) do
-    case unfinished_job_intent(job.id) do
-      %Intent{} = intent ->
-        # A claimed prerequisite can still be accepted by the game after this
-        # process yields. Preemption must wait for its authoritative outcome,
-        # just as it does for cargo mutations.
-        cond do
-          unresolved_cargo_action?(intent) ->
-            Repo.rollback(:cargo_operation_reconciliation_required)
-
-          unresolved_intent_evidence?(intent) ->
-            Repo.rollback(:intents_reconciliation_required)
-
-          true ->
-            terminalize_intents!(intent, "stopped")
-        end
-
-      nil ->
-        :ok
-    end
   end
 
   defp unresolved_cargo_action?(intent) do
@@ -2277,9 +828,6 @@ defmodule SpaceTraders.Fleet.Intents do
        do: true
 
   defp unresolved_module_evidence?(_intent), do: false
-
-  defp preemption_message({:manual_override, action}), do: "Paused by direct #{action}"
-  defp preemption_message(reason), do: "Paused: #{inspect(reason)}"
 
   # The Navigate Intent reconcile loop. Every step derives the next API action
   # from authoritative Ship state — location, navigation state, posture, fuel,
@@ -2849,7 +1397,7 @@ defmodule SpaceTraders.Fleet.Intents do
   defp cargo_price(_, _good), do: nil
 
   # Serialize the final ownership check with writing the request fingerprint.
-  # A paused/replaced Job can therefore never dispatch an action from a stale
+  # A paused or replaced Intent can therefore never dispatch an action from a stale
   # callback after another process changed its intent.
   defp claim_intent_action(agent, intent, action) do
     result =
@@ -2860,7 +1408,7 @@ defmodule SpaceTraders.Fleet.Intents do
           with %Intent{} = current <- current,
                true <- Intent.unfinished?(current),
                true <- is_nil(current.in_flight_action),
-               true <- intent_owned_by_running_job_or_manual?(current),
+               true <- intent_owned?(current),
                %Ship{symbol: ship_symbol} <- Repo.get(Ship, current.ship_id),
                {:ok, claim} <-
                  FleetAllocation.authorize_ship_execution(agent, ship_symbol,
@@ -2932,7 +1480,7 @@ defmodule SpaceTraders.Fleet.Intents do
     end
   end
 
-  # Job callbacks may outlive a pause or preemption. Every durable transition
+  # Intent callbacks may outlive a pause or preemption. Every durable transition
   # therefore reloads both records under the write lock; manual intents retain
   # their normal unfinished-state behavior.
   @doc false
@@ -2942,7 +1490,7 @@ defmodule SpaceTraders.Fleet.Intents do
              case Repo.get(Intent, id) do
                %Intent{} = current ->
                  if Intent.unfinished?(current) and
-                      intent_owned_by_running_job_or_manual?(current) do
+                      intent_owned?(current) do
                    fun.(current)
                  else
                    Repo.rollback(:intent_no_longer_owned)
@@ -2979,14 +1527,7 @@ defmodule SpaceTraders.Fleet.Intents do
   defp emit_intent_transition(intent, updated),
     do: SpaceTraders.Observability.intent_transition(intent, updated)
 
-  defp intent_owned_by_running_job_or_manual?(%Intent{caller: "job", job_id: job_id}) do
-    case Repo.get(Job, job_id) do
-      %Job{} = job -> Job.running?(job)
-      nil -> false
-    end
-  end
-
-  defp intent_owned_by_running_job_or_manual?(%Intent{}), do: true
+  defp intent_owned?(%Intent{}), do: true
 
   defp complete_market_cargo_intent(
          agent,
@@ -3087,7 +1628,7 @@ defmodule SpaceTraders.Fleet.Intents do
     end
   end
 
-  # Cargo mutations are shared by Manual Control and Procurement. Callers persist
+  # Cargo mutations are shared by Fleet Commitment and Manual Intervention. Callers persist
   # their own in-flight evidence before dispatching, then derive completion from
   # the authoritative response appropriate to their policy.
   defp execute_cargo_operation(agent, type, live_ship, trade_symbol, units, contract_id \\ nil)
@@ -3314,7 +1855,7 @@ defmodule SpaceTraders.Fleet.Intents do
       update_intent!(
         Ecto.Changeset.change(intent,
           status: "blocked",
-          blocker: Fleet.job_blocker({:awaiting_reconciliation, reason}),
+          blocker: Fleet.intent_blocker({:awaiting_reconciliation, reason}),
           last_action_result: %{"kind" => intent.type, "error" => inspect(reason)}
         )
       )
@@ -3327,7 +1868,7 @@ defmodule SpaceTraders.Fleet.Intents do
       update_intent!(
         Ecto.Changeset.change(intent,
           status: "blocked",
-          blocker: Fleet.job_blocker(intents_block_reason(reason)),
+          blocker: Fleet.intent_blocker(intents_block_reason(reason)),
           in_flight_action: nil,
           last_action_result: %{"kind" => intent.type, "error" => inspect(reason)}
         )
@@ -3341,7 +1882,7 @@ defmodule SpaceTraders.Fleet.Intents do
       update_intent!(
         Ecto.Changeset.change(intent,
           status: "blocked",
-          blocker: Fleet.job_blocker(reason),
+          blocker: Fleet.intent_blocker(reason),
           last_action_result: %{"kind" => intent.type, "error" => inspect(reason)}
         )
       )
@@ -3468,7 +2009,7 @@ defmodule SpaceTraders.Fleet.Intents do
 
     case transition_intent(intent,
            status: "blocked",
-           blocker: %{Fleet.job_blocker(reason) | evidence: inspect(evidence)},
+           blocker: %{Fleet.intent_blocker(reason) | evidence: inspect(evidence)},
            in_flight_action:
              if(preserve_claim?(reason) and is_map(intent.in_flight_action),
                do: intent.in_flight_action,
@@ -4014,12 +2555,7 @@ defmodule SpaceTraders.Fleet.Intents do
             {:ok, intent} ->
               live_ship = %{live_ship | nav: result.nav}
 
-              if intent.caller == "job" and
-                   not remote_waypoint?(live_ship.nav.waypoint_symbol, intent.target_waypoint) do
-                dispatch_manual_navigate(agent, intent, live_ship)
-              else
-                advance_intents(agent, intent, live_ship)
-              end
+              advance_intents(agent, intent, live_ship)
 
             :intent_no_longer_owned ->
               :ok
@@ -4115,81 +2651,6 @@ defmodule SpaceTraders.Fleet.Intents do
       end
     end
   end
-
-  # Keep every discovered gate visible to Manual Control. A connection read can
-  # fail independently, so rejection remains evidence rather than omission.
-  defp jump_origin_candidates(agent, system, destination) do
-    with {:ok, waypoints} <-
-           SpaceTraders.Evidence.get_waypoints(AgentTokenReference.new(agent), system,
-             type: "JUMP_GATE"
-           ) do
-      candidates =
-        Enum.map(waypoints, fn waypoint ->
-          construction =
-            case Fleet.waypoint_construction(agent, waypoint) do
-              {:ok, %{is_complete: true}} -> "complete"
-              {:ok, _} -> "incomplete"
-              {:error, _} -> "unavailable"
-            end
-
-          case Fleet.waypoint_jump_gate(agent, waypoint) do
-            {:ok, %{connections: connections}} ->
-              connected? = destination in connections
-
-              reasons =
-                []
-                |> then(
-                  if(construction == "complete",
-                    do: & &1,
-                    else: &["construction_#{construction}" | &1]
-                  )
-                )
-                |> then(if(connected?, do: & &1, else: &["not_connected" | &1]))
-
-              %{
-                waypoint: waypoint.symbol,
-                x: waypoint.x,
-                y: waypoint.y,
-                construction: construction,
-                connection: if(connected?, do: "connected", else: "not_connected"),
-                intelligence: "available",
-                resource: "unreviewed",
-                viable: reasons == [],
-                reasons: Enum.reverse(reasons)
-              }
-
-            {:error, reason} ->
-              reasons =
-                [
-                  if(construction == "complete", do: nil, else: "construction_#{construction}"),
-                  jump_gate_rejection_reason(reason)
-                ]
-                |> Enum.reject(&is_nil/1)
-
-              %{
-                waypoint: waypoint.symbol,
-                construction: construction,
-                connection: "unknown",
-                intelligence: "unavailable",
-                resource: "unreviewed",
-                viable: false,
-                reasons: reasons
-              }
-          end
-        end)
-
-      {:ok, candidates}
-    end
-  end
-
-  defp jump_gate_rejection_reason(%SpaceTraders.API.GameplayError{type: type})
-       when is_atom(type),
-       do: "jump_gate_#{type}"
-
-  defp jump_gate_rejection_reason(%SpaceTraders.API.Error{}),
-    do: "jump_gate_intelligence_unavailable"
-
-  defp jump_gate_rejection_reason(_reason), do: "jump_gate_intelligence_unavailable"
 
   defp dispatch_manual_navigate(agent, intent, live_ship, destination \\ nil) do
     destination = destination || intent.target_waypoint
@@ -4431,7 +2892,7 @@ defmodule SpaceTraders.Fleet.Intents do
   defp do_block_intents(intent, reason) do
     current = Repo.get(Intent, intent.id)
     already_blocked? = match?(%Intent{status: "blocked"}, current)
-    blocker = Fleet.job_blocker(intents_block_reason(reason))
+    blocker = Fleet.intent_blocker(intents_block_reason(reason))
 
     in_flight_action =
       if(preserve_claim?(reason) and is_map(intent.in_flight_action),
@@ -4972,7 +3433,7 @@ defmodule SpaceTraders.Fleet.Intents do
                  update_intent!(
                    Ecto.Changeset.change(current,
                      status: "blocked",
-                     blocker: Fleet.job_blocker({:retry_exhausted, reason}),
+                     blocker: Fleet.intent_blocker({:retry_exhausted, reason}),
                      in_flight_action:
                        if(
                          unresolved_cargo_action?(current) or unresolved_jump_action?(current) or
@@ -5109,7 +3570,7 @@ defmodule SpaceTraders.Fleet.Intents do
              SpaceTraders.Evidence.get_ship(AgentTokenReference.new(agent), ship_symbol)
            ) do
         {:ok, live_ship} ->
-          reconcile(agent.id, ship_symbol, live_ship, :boot, intent.id, nil)
+          reconcile(agent.id, ship_symbol, live_ship, :boot, intent.id)
 
         {:error, reason} ->
           if reason == :stale_agent,

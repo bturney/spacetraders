@@ -30,9 +30,6 @@ defmodule SpaceTradersWeb.MissionControlLive do
             </:subtitle>
           </.header>
         </header>
-        <.link navigate={~p"/gameplay-history"} class="link link-primary text-sm">
-          Gameplay history
-        </.link>
         <.link navigate={~p"/intervention"} class="link link-primary text-sm">
           Reserve a Ship or intervene
         </.link>

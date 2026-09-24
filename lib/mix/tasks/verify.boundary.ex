@@ -2,12 +2,12 @@ defmodule Mix.Tasks.Verify.Boundary do
   @shortdoc "Verifies the gameplay API boundary"
 
   @moduledoc """
-  Verifies that gameplay traffic has one private transport boundary.
+  Verifies the gameplay transport and ADR 0010 retirement boundaries.
 
   Contexts may use the public operation adapters in `SpaceTraders.API` and
   governed evidence adapters in `SpaceTraders.Evidence`; only the API module
-  may construct or dispatch an HTTP request. This check is intentionally
-  source-based so a new transport call fails before it can reach production.
+  may construct or dispatch an HTTP request. The source scan also rejects
+  retired Job ownership, persistence, timer payloads, and entry points.
   """
 
   use Mix.Task
@@ -15,6 +15,7 @@ defmodule Mix.Tasks.Verify.Boundary do
   @transport_modules ["Req", "Finch", "HTTPoison", "Hackney"]
   @transport_functions ~w(new request post get patch put delete)a
   @approved_transport_files ["lib/spacetraders/api.ex", "lib/mix/tasks/verify.boot.ex"]
+  @boundary_file "lib/mix/tasks/verify.boundary.ex"
 
   @impl true
   def run(_args) do
@@ -30,18 +31,24 @@ defmodule Mix.Tasks.Verify.Boundary do
   @doc false
   def verify_paths(paths) do
     paths
-    |> Enum.reject(&(&1 in @approved_transport_files))
-    |> Enum.flat_map(&transport_calls/1)
+    |> Enum.reject(&(&1 in @approved_transport_files or &1 == @boundary_file))
+    |> Enum.flat_map(&violations/1)
   end
 
-  defp transport_calls(path) do
+  defp violations(path) do
+    ast = source_ast(path)
+    transport_calls(ast, path) ++ legacy_calls(ast, path)
+  end
+
+  defp source_ast(path) do
     path
     |> File.read!()
     |> Code.string_to_quoted!(file: path)
-    |> calls(path)
   rescue
     error in [SyntaxError] -> Mix.raise("Could not inspect #{path}: #{Exception.message(error)}")
   end
+
+  defp transport_calls(ast, path), do: calls(ast, path)
 
   defp calls(ast, path) do
     {_ast, violations} =
@@ -73,6 +80,78 @@ defmodule Mix.Tasks.Verify.Boundary do
 
     Enum.reverse(violations.violations)
   end
+
+  defp legacy_calls(ast, path) do
+    {_ast, violations} =
+      Macro.prewalk(ast, [], fn
+        {:defmodule, meta, [name | _]} = node, violations when is_atom(name) ->
+          if legacy_module_name?(Atom.to_string(name)) do
+            {node, ["#{path}:#{meta[:line]} legacy Job module #{name}" | violations]}
+          else
+            {node, violations}
+          end
+
+        {:__aliases__, meta, parts} = node, violations when is_list(parts) ->
+          name = parts |> List.last() |> to_string()
+
+          if legacy_module_name?(name) do
+            {node, ["#{path}:#{meta[:line]} legacy Job reference #{name}" | violations]}
+          else
+            {node, violations}
+          end
+
+        {kind, meta, [head | _]} = node, violations when kind in [:def, :defp] ->
+          name = function_name(head)
+
+          if name && legacy_entry_point?(name) do
+            {node, ["#{path}:#{meta[:line]} legacy Job entry point #{name}" | violations]}
+          else
+            {node, violations}
+          end
+
+        atom, violations when is_atom(atom) ->
+          if Atom.to_string(atom) in ["job", "job_id", "jobs", "legacy_gameplay_history"] do
+            {atom, ["#{path}: legacy Job persistence reference #{atom}" | violations]}
+          else
+            {atom, violations}
+          end
+
+        string, violations when is_binary(string) ->
+          if legacy_string?(string) do
+            {string, ["#{path}: legacy Job string reference #{inspect(string)}" | violations]}
+          else
+            {string, violations}
+          end
+
+        node, violations ->
+          {node, violations}
+      end)
+
+    Enum.reverse(violations)
+  end
+
+  defp legacy_module_name?(name) do
+    name in ["Job", "JobBlocker", "JobOwner", "JobPolicy", "LegacyGameplayHistory"] or
+      String.ends_with?(name, ".Job")
+  end
+
+  defp legacy_entry_point?(name) do
+    lower_name = String.downcase(name)
+
+    String.contains?(lower_name, "job") or
+      lower_name in ["request_for_agent", "request_manual_intent", "request_delivery"]
+  end
+
+  defp legacy_string?(value) do
+    lower_value = String.downcase(value)
+
+    String.contains?(lower_value, "job") or
+      String.contains?(lower_value, "legacy_gameplay_history")
+  end
+
+  defp function_name({name, _meta, _args}) when is_atom(name), do: Atom.to_string(name)
+  defp function_name({:when, _meta, [head | _]}), do: function_name(head)
+  defp function_name(_), do: nil
 
   defp module_name(module), do: Enum.map_join(module, ".", &Atom.to_string/1)
 

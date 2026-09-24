@@ -305,7 +305,11 @@ defmodule SpaceTraders.FleetAllocation do
               is_nil(generation.fenced_at) and is_nil(generation.retired_at)
       )
 
-    active_revision? = SpaceTraders.LegacyRetirement.active_for_operator?(operator_id)
+    active_revision? =
+      Repo.exists?(
+        from strategy in Strategy,
+          where: strategy.operator_id == ^operator_id and not is_nil(strategy.active_revision_id)
+      )
 
     if active_generation? or active_revision? do
       case current_ship_claim(agent, ship_symbol, opts) do
@@ -320,8 +324,8 @@ defmodule SpaceTraders.FleetAllocation do
           claim
       end
     else
-      # Legacy Jobs and Manual Control remain the sole authority until their
-      # Fleet Generation is activated onto target Ship Execution.
+      # Fleet Commitment and authenticated Manual Intervention remain the
+      # supported execution authorities.
       {:ok, %{commitment_id: nil, portfolio_id: nil, portfolio_version: nil}}
     end
   end

@@ -5,7 +5,7 @@ defmodule SpaceTraders.ShipReservation do
   import Ecto.Query
 
   alias SpaceTraders.Agent.Scope
-  alias SpaceTraders.Fleet.{Intent, Job, Ship}
+  alias SpaceTraders.Fleet.{Intent, Ship}
   alias SpaceTraders.FleetAllocation
   alias SpaceTraders.Repo
 
@@ -85,11 +85,6 @@ defmodule SpaceTraders.ShipReservation do
           Repo.exists?(
             from i in Intent,
               where: i.ship_id == ^ship_id and i.status in ^Intent.unfinished_states()
-          ) ->
-            Repo.rollback(:ship_busy)
-
-          Repo.exists?(
-            from j in Job, where: j.ship_id == ^ship_id and j.status in ^Job.unfinished_states()
           ) ->
             Repo.rollback(:ship_busy)
 

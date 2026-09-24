@@ -173,6 +173,7 @@ defmodule SpaceTraders.FleetGenerationTest do
     intent =
       Repo.insert!(%Intent{
         ship_id: ship.id,
+        caller: "commitment",
         target_waypoint: "X1-UX81-A2",
         status: "waiting",
         in_flight_action: %{"kind" => "navigate"}

@@ -281,7 +281,7 @@ How a Miner Job gathers on its configured extraction Waypoint: extract on minera
 _Avoid_: mining style, collection mode
 
 **Manual Control**:
-Historical per-Ship Operator gameplay authority, retired when a Fleet Strategy Revision is activated. Its old Jobs and Intents remain readable as legacy history; it cannot admit new gameplay after activation.
+Retired per-Ship Operator gameplay authority. It has no persistence, history, or admission path in the current runtime.
 _Avoid_: Manual Mode
 
 **Manual Intervention**:

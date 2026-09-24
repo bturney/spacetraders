@@ -12,60 +12,6 @@ defmodule SpaceTraders.ManualInterventionTest do
   alias SpaceTraders.Timeline
   alias SpaceTraders.{ManualIntervention, Repo, ShipReservation}
 
-  test "a reserved Ship receives one authenticated, durable intervention instead of Manual Control" do
-    operator = operator_fixture()
-    agent = agent_fixture(operator)
-    symbol = "#{agent.symbol}-1"
-    {:ok, ship} = Fleet.record_ship(agent, symbol, "SHIP_COMMAND_FRIGATE")
-    scope = Scope.for_operator(operator)
-    Repo.insert!(%Strategy{operator_id: operator.id, active_revision_id: 1})
-
-    assert {:error, :legacy_gameplay_retired} =
-             Intents.request(scope, agent, %Intents.ManualControl{}, symbol, %Intents.Navigate{
-               waypoint: "X1-UX81-A1"
-             })
-
-    assert {:error, :ship_not_reserved} =
-             Intents.intervene_navigate(scope, agent, symbol, "X1-UX81-A1", "Recover route")
-
-    assert {:ok, _reservation} = ShipReservation.reserve(scope, ship.id, "Operator recovery")
-
-    Req.Test.stub(SpaceTraders.API, fn conn ->
-      assert {"/v2/my/ships/#{symbol}", "GET"} == {conn.request_path, conn.method}
-      Req.Test.json(conn, %{"data" => ship_body(symbol)})
-    end)
-
-    assert {:ok, %Intent{caller: "intervention"} = intent} =
-             Intents.intervene_navigate(scope, agent, symbol, "X1-UX81-A1", "Recover route")
-
-    assert [%ManualIntervention{intent_id: intent_id, reason: "Recover route"}] =
-             ManualIntervention.list(scope)
-
-    assert intent_id == intent.id
-    assert intent.status == "completed"
-    assert :ok = ShipReservation.release(scope, ship.id)
-    assert ShipReservation.reserved_symbols(agent.id) == []
-
-    assert {:error, :ship_not_reserved} =
-             Intents.intervene_navigate(
-               scope,
-               agent,
-               symbol,
-               "X1-UX81-A2",
-               "Try released authority"
-             )
-
-    Repo.delete!(Repo.get!(Intent, intent.id))
-
-    assert [
-             %ManualIntervention{
-               intent_id: nil,
-               final_status: "completed",
-               target_waypoint: "X1-UX81-A1"
-             }
-           ] = ManualIntervention.list(scope)
-  end
-
   test "an exceptional Navigate mutation records its Intent and rejects overlapping intervention" do
     operator = operator_fixture()
     agent = agent_fixture(operator)
