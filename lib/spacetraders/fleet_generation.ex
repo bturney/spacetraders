@@ -312,7 +312,8 @@ defmodule SpaceTraders.FleetGeneration do
                      agent,
                      predecessor,
                      replacement_symbols,
-                     faction
+                     faction,
+                     game_agent.credits
                    )
 
                  Enum.each(
@@ -399,7 +400,14 @@ defmodule SpaceTraders.FleetGeneration do
     end)
   end
 
-  defp establish_generation!(operator, agent, predecessor, replacement_symbols, faction) do
+  defp establish_generation!(
+         operator,
+         agent,
+         predecessor,
+         replacement_symbols,
+         faction,
+         starting_credits \\ nil
+       ) do
     revision = active_revision(operator.id)
     number = next_generation_number(operator.id)
     now = DateTime.utc_now()
@@ -417,6 +425,7 @@ defmodule SpaceTraders.FleetGeneration do
       faction: faction,
       replacement_symbols: %{"symbols" => replacement_symbols},
       objective_progress: objective_progress,
+      starting_credits: starting_credits,
       strategy_capable_at: if(revision, do: now)
     })
     |> Repo.insert!()

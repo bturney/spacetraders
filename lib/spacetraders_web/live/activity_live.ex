@@ -63,7 +63,11 @@ defmodule SpaceTradersWeb.ActivityLive do
       </nav>
 
       <ol id="activity-history" class="space-y-3">
-        <li :for={entry <- filtered(@activity, @filter)} class="rounded-xl border border-base-300 p-4">
+        <li
+          :for={entry <- filtered(@activity, @filter)}
+          id={entry.id}
+          class="rounded-xl border border-base-300 p-4"
+        >
           <span class="font-semibold">{entry.type |> Atom.to_string() |> String.capitalize()}</span>
           <time class="ml-2 text-sm opacity-70" datetime={DateTime.to_iso8601(entry.at)}>{Calendar.strftime(
             entry.at,

@@ -13,7 +13,6 @@ defmodule SpaceTraders.MissionControl do
   alias SpaceTraders.Fleet.Activity
   alias SpaceTraders.FleetAllocation.StrategyDecisionEpisode
   alias SpaceTraders.FleetStrategy.Revision
-  alias SpaceTraders.MutationAttempts.{Attempt, Outcome}
   alias SpaceTraders.Repo
   import Ecto.Query, only: [from: 2]
 
@@ -26,6 +25,7 @@ defmodule SpaceTraders.MissionControl do
     FleetPlanning,
     FleetStrategy,
     Intelligence,
+    MutationAttempts,
     OperatorConditions
   }
 
@@ -89,7 +89,7 @@ defmodule SpaceTraders.MissionControl do
       strategy: strategy,
       generations: generations,
       fleets: Enum.map(snapshots, &fleet_overview(&1, generations)),
-      objectives: objective_overviews(strategy.active_revision, generations),
+      objectives: objective_overviews(strategy.active_revision, generations, snapshots),
       market_execution: market_execution(scope),
       conditions: OperatorConditions.unresolved(scope),
       notable_activity: activity(scope) |> Enum.filter(&notable_activity?/1) |> Enum.take(5)
@@ -105,14 +105,33 @@ defmodule SpaceTraders.MissionControl do
           order_by: [desc: episode.inserted_at, desc: episode.id],
           limit: 100
       )
-      |> Enum.map(fn episode ->
-        %{
+      |> Enum.flat_map(fn episode ->
+        selected = %{
           id: "decision-#{episode.id}",
           type: :decision,
           at: episode.inserted_at,
-          summary: decision_summary(episode),
-          detail: decision_detail(episode)
+          summary: "Fleet selected a new commitment portfolio",
+          detail: decision_detail(episode),
+          notable?: episode.source_version == 0 or episode.binding_constraints != []
         }
+
+        outcome =
+          if episode.classification == :still_evaluating do
+            []
+          else
+            [
+              %{
+                id: "decision-outcome-#{episode.id}",
+                type: :milestone,
+                at: episode.updated_at,
+                summary: decision_summary(episode),
+                detail:
+                  "Decision Episode #{episode.id} was classified from retained outcome evidence."
+              }
+            ]
+          end
+
+        [selected | outcome]
       end)
 
     conditions =
@@ -136,9 +155,23 @@ defmodule SpaceTraders.MissionControl do
           type: :milestone,
           at: generation.inserted_at,
           summary: "Fleet Generation #{generation.number} began with #{generation.symbol}",
-          detail:
-            "Strategy resumed: #{if generation.strategy_capable_at, do: "yes", else: "not yet confirmed"}."
+          detail: "New Agent identity and Fleet Generation established."
         }
+
+        capable =
+          if generation.strategy_capable_at do
+            [
+              %{
+                id: "capable-#{generation.id}",
+                type: :milestone,
+                at: generation.strategy_capable_at,
+                summary: "Fleet Generation #{generation.number} became Strategy-capable",
+                detail: "The active Fleet Strategy Revision can govern this Generation."
+              }
+            ]
+          else
+            []
+          end
 
         reset =
           if generation.fenced_at do
@@ -156,26 +189,17 @@ defmodule SpaceTraders.MissionControl do
             []
           end
 
-        [started | reset]
+        [started | capable ++ reset]
       end)
 
     purchases =
-      Repo.all(
-        from attempt in Attempt,
-          join: outcome in Outcome,
-          on: outcome.mutation_attempt_id == attempt.id,
-          where:
-            attempt.operator_id == ^operator_id and attempt.operation_id == "purchase-ship" and
-              outcome.classification == "succeeded",
-          order_by: [desc: outcome.recorded_at],
-          select: %{id: attempt.id, at: outcome.recorded_at}
-      )
-      |> Enum.uniq_by(& &1.id)
+      scope
+      |> MutationAttempts.confirmed_ship_purchases()
       |> Enum.map(fn purchase ->
         %{
           id: "purchase-#{purchase.id}",
           type: :milestone,
-          at: purchase.at,
+          at: purchase.recorded_at,
           summary: "Fleet acquired a Ship",
           detail: "The game confirmed the purchase."
         }
@@ -205,6 +229,8 @@ defmodule SpaceTraders.MissionControl do
     (decisions ++ conditions ++ generations ++ purchases ++ operator_events)
     |> Enum.sort_by(& &1.at, {:desc, DateTime})
   end
+
+  def notable_activity?(%{notable?: false}), do: false
 
   def notable_activity?(%{type: type})
       when type in [:decision, :milestone, :attention, :intervention],
@@ -544,9 +570,9 @@ defmodule SpaceTraders.MissionControl do
     |> Map.put(:generation, generation)
   end
 
-  defp objective_overviews(nil, _generations), do: []
+  defp objective_overviews(nil, _generations, _snapshots), do: []
 
-  defp objective_overviews(revision, generations) do
+  defp objective_overviews(revision, generations, snapshots) do
     generation =
       Enum.find(generations, fn generation ->
         generation.fleet_strategy_revision_id == revision.id and is_nil(generation.retired_at)
@@ -564,11 +590,34 @@ defmodule SpaceTraders.MissionControl do
         evaluation:
           if(is_map(facts),
             do: FleetStrategy.evaluate_objective(revision, index, atomize_keys(facts)),
-            else: {:error, :unknown}
+            else: observed_objective(objective, generation, snapshots)
           )
       }
     end)
   end
+
+  defp observed_objective(
+         %{"kind" => "continuous", "objective" => "Grow credits"},
+         %{starting_credits: start, inserted_at: started_at, agent_id: agent_id},
+         snapshots
+       )
+       when is_integer(start) do
+    case Enum.find(snapshots, &(&1.agent.id == agent_id)) do
+      %{overview: {:ok, %{credits: current}}} when is_integer(current) ->
+        elapsed = DateTime.diff(DateTime.utc_now(), started_at, :second)
+
+        if elapsed > 0 do
+          {:observed, %{change: current - start, rate: (current - start) / elapsed * 3600}}
+        else
+          {:error, :insufficient_history}
+        end
+
+      _ ->
+        {:error, :unknown}
+    end
+  end
+
+  defp observed_objective(_objective, _generation, _snapshots), do: {:error, :unknown}
 
   defp atomize_keys(facts),
     do: Map.new(facts, fn {key, value} -> {@evaluation_fact_keys[key], value} end)

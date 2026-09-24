@@ -9,7 +9,7 @@ defmodule SpaceTraders.MutationAttempts do
 
   import Ecto.Query
 
-  alias SpaceTraders.Agent.{Agent, Operator}
+  alias SpaceTraders.Agent.{Agent, Operator, Scope}
   alias SpaceTraders.API.OperationInventory.Operation
   alias SpaceTraders.Fleet.{Intent, Ship}
   alias SpaceTraders.FleetGeneration.Generation
@@ -34,6 +34,21 @@ defmodule SpaceTraders.MutationAttempts do
   ]
 
   @retry_context_key {__MODULE__, :retry_attempt_id}
+
+  @doc "Returns confirmed Ship purchases for an Operator-facing milestone projection."
+  def confirmed_ship_purchases(%Scope{operator: %{id: operator_id}}) do
+    Repo.all(
+      from attempt in Attempt,
+        join: outcome in Outcome,
+        on: outcome.mutation_attempt_id == attempt.id,
+        where:
+          attempt.operator_id == ^operator_id and attempt.operation_id == "purchase-ship" and
+            outcome.classification == "succeeded",
+        order_by: [desc: outcome.recorded_at],
+        select: %{id: attempt.id, recorded_at: outcome.recorded_at}
+    )
+    |> Enum.uniq_by(& &1.id)
+  end
 
   @spec prepare(Operation.t(), String.t(), keyword()) :: {:ok, Attempt.t()} | {:error, term()}
   def prepare(%Operation{classification: :mutation} = operation, path, opts) do

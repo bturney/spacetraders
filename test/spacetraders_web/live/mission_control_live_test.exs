@@ -39,6 +39,7 @@ defmodule SpaceTradersWeb.MissionControlLiveTest do
     assert html =~ "Revision 1"
     assert html =~ "Grow credits"
     assert html =~ "Unknown: no complete, authoritative evaluation is available yet."
+    assert html =~ "Objective status: Unknown"
   end
 
   test "identifies the active Agent, Fleet Generation, and Strategy-capable state", %{
@@ -75,6 +76,56 @@ defmodule SpaceTradersWeb.MissionControlLiveTest do
     assert html =~ "Generation 1"
     assert html =~ "Strategy-capable"
     assert html =~ "Measured outcome rate: 20.0 per horizon."
+    assert html =~ "Growing"
+  end
+
+  test "shows observed credit growth from authoritative starting and current Agent state", %{
+    conn: conn,
+    operator: operator,
+    scope: scope
+  } do
+    {:ok, _draft} = FleetStrategy.select_preset(scope, "steady_growth")
+    {:ok, revision} = FleetStrategy.activate(scope, FleetStrategy.get(scope).draft_version)
+    agent = agent_fixture(operator, %{agent_token: "AGENT_TOKEN"})
+
+    Repo.insert!(%Generation{
+      operator_id: operator.id,
+      agent_id: agent.id,
+      fleet_strategy_revision_id: revision.id,
+      number: 1,
+      symbol: agent.symbol,
+      faction: agent.faction,
+      replacement_symbols: %{"symbols" => [agent.symbol]},
+      starting_credits: 175_000,
+      strategy_capable_at: DateTime.utc_now(),
+      inserted_at: DateTime.utc_now() |> DateTime.add(-3600) |> DateTime.truncate(:second)
+    })
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      case conn.request_path do
+        "/v2/my/agent" ->
+          Req.Test.json(conn, %{
+            "data" => %{
+              "accountId" => "ACC",
+              "symbol" => agent.symbol,
+              "headquarters" => agent.headquarters,
+              "credits" => 175_120,
+              "startingFaction" => agent.faction,
+              "shipCount" => 0
+            }
+          })
+
+        "/v2/my/ships" ->
+          Req.Test.json(conn, %{"data" => []})
+
+        "/v2/my/contracts" ->
+          Req.Test.json(conn, %{"data" => []})
+      end
+    end)
+
+    {:ok, view, _html} = live(conn, ~p"/mission-control")
+    assert has_element?(view, "#objective-evaluations", "Observed net change: +120 credits")
+    assert has_element?(view, "#objective-evaluations", "Growing")
   end
 
   test "Emergency Stop takes precedence over a previously Strategy-capable Fleet", %{
@@ -200,6 +251,16 @@ defmodule SpaceTradersWeb.MissionControlLiveTest do
       actual_outcomes: %{"net_credit_change" => 250}
     })
 
+    routine_episode =
+      Repo.insert!(%StrategyDecisionEpisode{
+        operator_id: operator.id,
+        fleet_generation_id: generation.id,
+        fleet_strategy_revision_id: revision.id,
+        source_version: 1,
+        calibration_version: "v1",
+        classification: :still_evaluating
+      })
+
     now = DateTime.utc_now()
 
     attempt =
@@ -225,10 +286,12 @@ defmodule SpaceTradersWeb.MissionControlLiveTest do
     assert html =~ "250 credits"
     assert html =~ "Fleet acquired a Ship"
     assert html =~ "One-off navigation stopped"
+    assert html =~ "Fleet selected a new commitment portfolio"
     refute html =~ "API request"
 
     view |> element("nav[aria-label='Activity filters'] button", "Notable") |> render_click()
     refute render(view) =~ "One-off navigation stopped"
+    refute has_element?(view, "#activity-history li#decision-#{routine_episode.id}")
 
     {:ok, _briefing, html} = live(conn, ~p"/mission-control")
     assert html =~ "Notable activity"
@@ -287,7 +350,7 @@ defmodule SpaceTradersWeb.MissionControlLiveTest do
       actual_outcomes: %{"net_credit_change" => 250}
     })
 
-    {:ok, _view, html} = live(conn, ~p"/generations")
+    {:ok, view, html} = live(conn, ~p"/generations")
     assert html =~ "Generation 1"
     assert html =~ "Generation 2"
     assert html =~ "250 credits"
@@ -296,5 +359,7 @@ defmodule SpaceTradersWeb.MissionControlLiveTest do
     assert html =~ "Strategy revision 1"
     assert html =~ "Server Reset"
     assert html =~ "Strategy-capable"
+    assert has_element?(view, "#generation-comparison", "Generation 1")
+    assert has_element?(view, "#generation-comparison", "Generation 2")
   end
 end

@@ -106,6 +106,9 @@ defmodule SpaceTradersWeb.MissionControlLive do
             class="rounded-2xl border border-base-300 bg-base-100 p-5"
           >
             <h3 class="font-bold">{objective.priority}. {objective.objective["objective"]}</h3>
+            <p class="mt-2 font-semibold">
+              Objective status: {objective_status(objective.evaluation)}
+            </p>
             <p class="mt-1 text-sm opacity-70">{objective.objective["evaluation"]}</p>
             <p class="mt-4 text-sm">{evaluation_label(objective.evaluation)}</p>
           </article>
@@ -269,9 +272,29 @@ defmodule SpaceTradersWeb.MissionControlLive do
         "Establishing Fleet state"
 
       _ ->
-        if Enum.any?(projection.fleets, &unknown_fleet?/1),
-          do: "Fleet health unknown",
-          else: "Operating normally"
+        cond do
+          Enum.any?(projection.fleets, &unknown_fleet?/1) ->
+            "Fleet health unknown"
+
+          Enum.any?(projection.objectives, &match?({:error, _}, &1.evaluation)) ->
+            "Outcome status unknown"
+
+          Enum.any?(
+            projection.objectives,
+            &(objective_status(&1.evaluation) in [
+                "Falling behind",
+                "Infeasible",
+                "Below protected margin"
+              ])
+          ) ->
+            "Objectives limited"
+
+          Enum.any?(projection.fleets, &(not &1.control.healthy?)) ->
+            "Fleet capacity limited"
+
+          true ->
+            "Operating normally"
+        end
     end
   end
 
@@ -313,7 +336,8 @@ defmodule SpaceTradersWeb.MissionControlLive do
   defp fleet_status(_), do: "Limited"
 
   defp fleet_contribution(%{ships: {:ok, ships}}),
-    do: "#{length(ships)} Ships contributing to this Fleet Generation."
+    do:
+      "#{length(ships)} Ships in this Fleet Generation; current commitments are summarized above."
 
   defp fleet_contribution(%{ships: {:error, _}}),
     do: "Fleet contribution is unknown while authoritative Ship state is unavailable."
@@ -331,7 +355,31 @@ defmodule SpaceTradersWeb.MissionControlLive do
     do:
       "Limitation: current evidence shows this objective is not feasible. Attention is required."
 
+  defp evaluation_label({:observed, %{change: change, rate: rate}}),
+    do:
+      "Observed net change: #{if change > 0, do: "+", else: ""}#{change} credits since Generation began (#{Float.round(rate, 2)} credits/hour over that interval). Feasibility is unknown."
+
   defp evaluation_label(_), do: "Unknown: no complete, authoritative evaluation is available yet."
+
+  defp objective_status({:ok, %{feasible?: false}}), do: "Infeasible"
+  defp objective_status({:ok, %{kind: :attain, attained?: true}}), do: "Attained"
+
+  defp objective_status({:ok, %{kind: :attain, progress: progress}}) when progress > 0,
+    do: "Progressing"
+
+  defp objective_status({:ok, %{kind: :attain}}), do: "Not yet progressing"
+  defp objective_status({:ok, %{kind: :maintain, protected?: true}}), do: "Holding"
+  defp objective_status({:ok, %{kind: :maintain}}), do: "Below protected margin"
+  defp objective_status({:ok, %{kind: :continuous, rate: rate}}) when rate > 0, do: "Growing"
+
+  defp objective_status({:ok, %{kind: :continuous, rate: rate}}) when rate < 0,
+    do: "Falling behind"
+
+  defp objective_status({:ok, %{kind: :continuous}}), do: "Holding steady"
+  defp objective_status({:observed, %{change: change}}) when change > 0, do: "Growing"
+  defp objective_status({:observed, %{change: change}}) when change < 0, do: "Falling behind"
+  defp objective_status({:observed, _}), do: "Holding steady"
+  defp objective_status(_), do: "Unknown"
 
   defp market_execution_state(%{realized: %{completed_round_trips: 0}}), do: "Active"
   defp market_execution_state(_execution), do: "Realized"

@@ -61,6 +61,7 @@ defmodule SpaceTraders.FleetGenerationTest do
 
     assert [first_generation] = FleetGeneration.list_generations(scope)
     assert first_generation.fleet_strategy_revision_id == revision.id
+    assert first_generation.starting_credits == 175_000
     assert %DateTime{} = first_generation.strategy_capable_at
     first_ship = Repo.get_by!(Ship, symbol: "RESETME-1")
     assert first_ship.agent_id == stale_agent.id

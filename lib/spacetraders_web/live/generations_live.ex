@@ -7,7 +7,8 @@ defmodule SpaceTradersWeb.GenerationsLive do
 
   @impl true
   def mount(_params, _session, socket) do
-    {:ok, assign(socket, recaps: MissionControl.generation_recaps(socket.assigns.current_scope))}
+    recaps = MissionControl.generation_recaps(socket.assigns.current_scope)
+    {:ok, assign(socket, recaps: recaps, comparison: Enum.take(recaps, 2))}
   end
 
   @impl true
@@ -22,6 +23,48 @@ defmodule SpaceTradersWeb.GenerationsLive do
         </p>
       </header>
       <p :if={@recaps == []}>No Fleet Generations yet.</p>
+      <section
+        :if={length(@comparison) == 2}
+        id="generation-comparison"
+        class="mb-6 overflow-x-auto rounded-2xl border border-base-300 p-5"
+      >
+        <h2 class="mb-3 text-xl font-bold">Latest two Generations, compared</h2>
+        <table class="table table-sm w-full">
+          <thead>
+            <tr>
+              <th>Outcome</th><th :for={recap <- @comparison}>
+                Generation {recap.generation.number}
+              </th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <th>Strategy</th><td :for={recap <- @comparison}>
+                {Enum.map_join(recap.revisions, ", ", &"Revision #{&1}")}
+              </td>
+            </tr>
+            <tr>
+              <th>Starting credits</th><td :for={recap <- @comparison}>
+                {starting_credit_label(recap.generation.starting_credits)}
+              </td>
+            </tr>
+            <tr>
+              <th>Realized credit change</th><td :for={recap <- @comparison}>
+                {credit_label(recap.realized_credit_change)}
+              </td>
+            </tr>
+            <tr>
+              <th>Decision limitations</th><td :for={recap <- @comparison}>{recap.limitations}</td>
+            </tr>
+            <tr>
+              <th>Reset cause</th><td :for={recap <- @comparison}>{reset_cause(recap)}</td>
+            </tr>
+            <tr>
+              <th>Strategy resumed</th><td :for={recap <- @comparison}>{resume_label(recap)}</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
       <div class="grid gap-4 lg:grid-cols-2">
         <article
           :for={recap <- @recaps}
@@ -51,6 +94,11 @@ defmodule SpaceTradersWeb.GenerationsLive do
             </ul>
           </div>
           <dl class="mt-4 grid gap-3 sm:grid-cols-2">
+            <div>
+              <dt class="text-sm opacity-70">Starting credits</dt><dd>
+                {starting_credit_label(recap.generation.starting_credits)}
+              </dd>
+            </div>
             <div>
               <dt class="text-sm opacity-70">Realized credit change</dt><dd>
                 {credit_label(recap.realized_credit_change)}
@@ -86,6 +134,21 @@ defmodule SpaceTradersWeb.GenerationsLive do
 
   defp credit_label(nil), do: "Unknown — no realized credit evidence"
   defp credit_label(amount), do: "#{amount} credits"
+
+  defp starting_credit_label(nil), do: "Unknown — no starting snapshot"
+  defp starting_credit_label(amount), do: "#{amount} credits"
+
+  defp reset_cause(%{generation: %{fenced_at: %DateTime{}}}),
+    do: "Definitive Server Reset mismatch"
+
+  defp reset_cause(%{generation: %{retired_at: %DateTime{}}}),
+    do: "Unknown — no reset evidence recorded"
+
+  defp reset_cause(_), do: "Current Generation"
+
+  defp resume_label(%{generation: %{retired_at: nil}}), do: "Current operation"
+  defp resume_label(%{resumed?: true}), do: "Replacement Strategy-capable"
+  defp resume_label(_), do: "Not yet confirmed"
 
   defp objective_label({:ok, %{kind: :continuous, rate: rate}}),
     do: "#{Float.round(rate, 2)} per horizon"
