@@ -102,7 +102,7 @@ defmodule SpaceTradersWeb.OperatorLive.Mint do
         {:noreply,
          socket
          |> put_flash(:info, "Agent #{agent.symbol} minted.#{retired_message}")
-         |> redirect(to: ~p"/")}
+         |> redirect(to: ~p"/mission-control")}
 
       {:error, :account_token_not_linked} ->
         {:noreply,

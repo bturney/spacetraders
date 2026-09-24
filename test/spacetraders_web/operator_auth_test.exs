@@ -28,7 +28,7 @@ defmodule SpaceTradersWeb.OperatorAuthTest do
       assert get_session(conn, :live_socket_id) ==
                "operators_sessions:#{Base.url_encode64(token)}"
 
-      assert redirected_to(conn) == ~p"/"
+      assert redirected_to(conn) == ~p"/mission-control"
       assert Agent.get_operator_by_session_token(token)
     end
 
@@ -93,7 +93,7 @@ defmodule SpaceTradersWeb.OperatorAuthTest do
         |> assign(:current_scope, Scope.for_operator(operator))
         |> OperatorAuth.log_in_operator(operator)
 
-      assert redirected_to(conn) == ~p"/"
+      assert redirected_to(conn) == ~p"/mission-control"
     end
 
     test "writes a cookie if remember_me was set in previous session", %{

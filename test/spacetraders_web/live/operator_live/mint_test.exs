@@ -84,7 +84,7 @@ defmodule SpaceTradersWeb.OperatorLive.MintTest do
       refute html =~ ~s(<input type="text" name="agent[symbol]")
     end
 
-    test "mints an agent and redirects home", %{conn: conn} do
+    test "mints an agent and redirects to Mission Control", %{conn: conn} do
       operator = operator_fixture()
       {:ok, operator} = Agent.link_account_token(operator, "ACCOUNT_TOKEN")
       register_stub(minted_agent_body("MINER1"))
@@ -96,7 +96,7 @@ defmodule SpaceTradersWeb.OperatorLive.MintTest do
         lv
         |> form("#mint_form", @mint_form)
         |> render_submit()
-        |> follow_redirect(conn, ~p"/")
+        |> follow_redirect(conn, ~p"/mission-control")
 
       agent = Repo.get_by!(SpaceTraders.Agent.Agent, symbol: "MINER1")
       assert agent.operator_id == operator.id
@@ -104,7 +104,7 @@ defmodule SpaceTradersWeb.OperatorLive.MintTest do
       assert agent.headquarters == "X1-UX81-A2"
 
       assert conn.resp_body =~ "MINER1"
-      assert conn.resp_body =~ "Fleet command"
+      assert conn.resp_body =~ "Mission Control"
     end
 
     test "reports stale agents retired by a replacement mint", %{conn: conn} do
@@ -126,7 +126,7 @@ defmodule SpaceTradersWeb.OperatorLive.MintTest do
         lv
         |> form("#mint_form", @mint_form)
         |> render_submit()
-        |> follow_redirect(conn, ~p"/")
+        |> follow_redirect(conn, ~p"/mission-control")
 
       assert conn.resp_body =~ "Retired stale agents: ORBITALIST."
       refute Repo.get_by(SpaceTraders.Agent.Agent, symbol: "ORBITALIST")

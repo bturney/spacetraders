@@ -257,7 +257,7 @@ defmodule SpaceTradersWeb.OperatorAuth do
   end
 
   @doc "Returns the path to redirect to after log in."
-  def signed_in_path(_), do: ~p"/"
+  def signed_in_path(_), do: ~p"/mission-control"
 
   @doc """
   Plug for routes that require the operator to be authenticated.

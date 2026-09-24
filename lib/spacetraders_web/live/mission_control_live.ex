@@ -211,7 +211,7 @@ defmodule SpaceTradersWeb.MissionControlLive do
   defp strategy_capable_label(%{strategy_capable_at: %DateTime{}}), do: "Strategy-capable"
   defp strategy_capable_label(_), do: "Not Strategy-capable"
 
-  defp strategy_capable_detail(%{strategy_capable_at: at}),
+  defp strategy_capable_detail(%{strategy_capable_at: %DateTime{} = at}),
     do: "Available since #{Calendar.strftime(at, "%Y-%m-%d %H:%M UTC")}."
 
   defp strategy_capable_detail(nil),

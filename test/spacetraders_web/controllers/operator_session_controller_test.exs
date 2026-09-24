@@ -17,10 +17,10 @@ defmodule SpaceTradersWeb.OperatorSessionControllerTest do
         })
 
       assert get_session(conn, :operator_token)
-      assert redirected_to(conn) == ~p"/"
+      assert redirected_to(conn) == ~p"/mission-control"
 
       # Now do a logged in request and assert on the menu
-      conn = get(conn, ~p"/")
+      conn = get(conn, ~p"/mission-control")
       response = html_response(conn, 200)
       assert response =~ operator.email
       assert response =~ ~p"/operators/settings"
@@ -40,7 +40,7 @@ defmodule SpaceTradersWeb.OperatorSessionControllerTest do
         })
 
       assert conn.resp_cookies["_space_traders_web_operator_remember_me"]
-      assert redirected_to(conn) == ~p"/"
+      assert redirected_to(conn) == ~p"/mission-control"
     end
 
     test "logs the operator in with return to", %{conn: conn, operator: operator} do

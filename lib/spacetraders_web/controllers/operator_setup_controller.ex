@@ -43,7 +43,7 @@ defmodule SpaceTradersWeb.OperatorSetupController do
 
   defp redirect_unavailable(conn) do
     if conn.assigns.current_scope do
-      redirect(conn, to: ~p"/")
+      redirect(conn, to: ~p"/mission-control")
     else
       redirect(conn, to: ~p"/operators/log-in")
     end

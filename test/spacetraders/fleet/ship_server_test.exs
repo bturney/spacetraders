@@ -378,8 +378,8 @@ defmodule SpaceTraders.Fleet.ShipServerTest do
     end
   end
 
-  describe "Manual Control Intent continuation" do
-    test "arrival wakeup completes the manual Navigate Intent at its target" do
+  describe "retired Manual Control Intent wakeups" do
+    test "arrival wakeup leaves the historical manual Navigate Intent untouched" do
       agent = Repo.get!(Agent, @agent_id)
 
       symbol = unique_symbol()
@@ -421,12 +421,10 @@ defmodule SpaceTraders.Fleet.ShipServerTest do
 
       assert eventually(fn -> Repo.get(Event, event.id).status == "done" end)
 
-      assert eventually(fn ->
-               Repo.get!(SpaceTraders.Fleet.Intent, intent.id).status == "completed"
-             end)
+      assert Repo.get!(SpaceTraders.Fleet.Intent, intent.id).status == "waiting"
     end
 
-    test "cooldown wakeup dispatches a waiting manual Navigate Intent" do
+    test "cooldown wakeup cannot dispatch a waiting manual Navigate Intent" do
       agent = Repo.get!(Agent, @agent_id)
 
       symbol = unique_symbol()
@@ -458,17 +456,8 @@ defmodule SpaceTraders.Fleet.ShipServerTest do
                 })
             })
 
-          {"/v2/my/ships/" <> ^symbol <> "/navigate", "POST"} ->
-            Req.Test.json(conn, %{
-              "data" => %{
-                "fuel" => %{"capacity" => 200, "current" => 80},
-                "nav" =>
-                  nav_body("IN_TRANSIT",
-                    arrival: future_iso(60),
-                    destination: "X1-UX81-A2"
-                  )
-              }
-            })
+          {path, method} ->
+            flunk("retired Manual Control dispatched #{method} #{path}")
         end
       end)
 
@@ -485,10 +474,8 @@ defmodule SpaceTraders.Fleet.ShipServerTest do
 
       assert eventually(fn -> Repo.get(Event, event.id).status == "done" end)
 
-      assert eventually(fn ->
-               reloaded = Repo.get!(SpaceTraders.Fleet.Intent, intent.id)
-               reloaded.status == "waiting" and reloaded.last_action_result["kind"] == "navigate"
-             end)
+      assert %SpaceTraders.Fleet.Intent{status: "waiting", last_action_result: nil} =
+               Repo.get!(SpaceTraders.Fleet.Intent, intent.id)
     end
   end
 end

@@ -5,7 +5,7 @@ defmodule SpaceTraders.Fleet.Intents do
   Ship Execution and Manual Intervention request operational outcomes here; ShipServer
   timers and boot recovery re-enter the same reconciliation. The module hides
   ownership transactions, mutation claims, game calls, Timeline scheduling,
-   ShipServer arming and evidence reconciliation.
+  ShipServer arming and evidence reconciliation.
   """
 
   import Ecto.Query
@@ -152,11 +152,7 @@ defmodule SpaceTraders.Fleet.Intents do
     "market_reconnaissance"
   ]
 
-  defp legacy_job_admission(%AgentRecord{operator_id: operator_id}) do
-    if SpaceTraders.LegacyRetirement.active_for_operator?(operator_id),
-      do: {:error, :legacy_gameplay_retired},
-      else: :ok
-  end
+  defp legacy_job_admission(%AgentRecord{}), do: {:error, :legacy_gameplay_retired}
 
   defp request_for_agent(agent, owner, ship_symbol, %BuyGoods{} = goal) do
     with :ok <- token_present(agent),
@@ -407,13 +403,7 @@ defmodule SpaceTraders.Fleet.Intents do
   def intervene_navigate(_scope, _agent, _ship_symbol, _waypoint, _reason),
     do: {:error, :invalid_intervention}
 
-  defp legacy_manual_allowed?(%AgentRecord{operator_id: operator_id}) do
-    if SpaceTraders.LegacyRetirement.active_for_operator?(operator_id) do
-      {:error, :legacy_gameplay_retired}
-    else
-      :ok
-    end
-  end
+  defp legacy_manual_allowed?(%AgentRecord{}), do: {:error, :legacy_gameplay_retired}
 
   defp request_delivery(agent, owner, ship_symbol, goal, live_ship) do
     with :ok <- token_present(agent),
@@ -654,7 +644,7 @@ defmodule SpaceTraders.Fleet.Intents do
     case Repo.get(Intent, intent_id) do
       %Intent{status: status} = intent when status in ["active", "waiting", "blocked"] ->
         case intent.caller do
-          "job" ->
+          retired when retired in ["job", "manual"] ->
             :ok
 
           "commitment" ->
@@ -750,6 +740,12 @@ defmodule SpaceTraders.Fleet.Intents do
   end
 
   @doc "Re-enters reconciliation for one unfinished Intent with a fresh authoritative Ship observation."
+  def advance(_agent, %Intent{caller: "job"}, _live_ship),
+    do: {:error, :legacy_gameplay_retired}
+
+  def advance(_agent, %Intent{caller: "manual"}, _live_ship),
+    do: {:error, :legacy_gameplay_retired}
+
   def advance(agent, %Intent{} = intent, live_ship), do: advance_intents(agent, intent, live_ship)
 
   @doc false
@@ -934,7 +930,7 @@ defmodule SpaceTraders.Fleet.Intents do
   defp boot_intent(ship_id, intent_id) when is_integer(intent_id) do
     case Repo.get(Intent, intent_id) do
       %Intent{ship_id: ^ship_id, caller: caller, status: status} = intent
-      when caller in ["commitment", "intervention", "manual"] and status in @unfinished_states ->
+      when caller in ["commitment", "intervention"] and status in @unfinished_states ->
         intent
 
       _ ->
@@ -942,7 +938,12 @@ defmodule SpaceTraders.Fleet.Intents do
     end
   end
 
-  defp boot_intent(ship_id, _expected_intent_id), do: unfinished_intent_for_ship(ship_id)
+  defp boot_intent(ship_id, _expected_intent_id) do
+    case unfinished_intent_for_ship(ship_id) do
+      %Intent{caller: caller} = intent when caller in ["commitment", "intervention"] -> intent
+      _ -> nil
+    end
+  end
 
   defp validate_intent_waypoint(""), do: {:error, :invalid_waypoint}
   defp validate_intent_waypoint(_waypoint), do: :ok

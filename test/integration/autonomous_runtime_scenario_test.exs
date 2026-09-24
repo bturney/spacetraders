@@ -50,7 +50,7 @@ defmodule SpaceTraders.AutonomousRuntimeScenarioTest do
 
     {:ok, view, _html} = live(conn, ~p"/agents/new")
 
-    assert {:error, {:redirect, %{to: "/", status: 302}}} =
+    assert {:error, {:redirect, %{to: "/mission-control", status: 302}}} =
              view
              |> form("#mint_form", %{"agent" => %{"symbol" => "SCENARIO", "faction" => "COSMIC"}})
              |> render_submit()

@@ -5,8 +5,8 @@ defmodule SpaceTraders.Fleet do
   A ship's live state — location, fuel, cargo, cooldown, nav status — is pulled
   from the game through `SpaceTraders.API`. The server is the source of truth;
   the local `ships` table is the app's registry of owned ships (seeded with the
-  starter fleet) and carries no live state. The dashboard reads the live fleet
-  through this context so it stays a thin consumer with no game logic of its own.
+  starter fleet) and carries no live state. The Fleet read interfaces expose
+  live game state independently of the retired per-Ship gameplay dashboard.
 
   Ship actions here orchestrate the game call and the app's async model: after a
   successful navigate the pending arrival is persisted to the timeline and armed
@@ -49,11 +49,7 @@ defmodule SpaceTraders.Fleet do
   @max_recovery_attempts 5
   @recovery_window_seconds 15 * 60
 
-  defp legacy_job_admission(%AgentRecord{operator_id: operator_id}) do
-    if SpaceTraders.LegacyRetirement.active_for_operator?(operator_id),
-      do: {:error, :legacy_gameplay_retired},
-      else: :ok
-  end
+  defp legacy_job_admission(%AgentRecord{}), do: {:error, :legacy_gameplay_retired}
 
   @doc "Safely retires pre-stop execution state before fresh Fleet planning."
   def prepare_emergency_stop_resume(operator_id, now) do
@@ -884,7 +880,8 @@ defmodule SpaceTraders.Fleet do
 
   @doc "Starts or resumes a Ship Outfitting Job from authoritative installed modules and Cargo."
   def start_outfitting_job(%AgentRecord{} = agent, ship_symbol) do
-    with :ok <- Agent.execution_allowed?(agent),
+    with :ok <- legacy_job_admission(agent),
+         :ok <- Agent.execution_allowed?(agent),
          {:ok, ship} <- owned_ship(agent, ship_symbol),
          %Job{type: "outfitting"} = job <- unfinished_job(ship.id),
          nil <- Intents.unfinished_manual_intent(ship.id),
@@ -902,6 +899,7 @@ defmodule SpaceTraders.Fleet do
 
       advance_outfitting_job(agent, job, live_ship)
     else
+      {:error, :legacy_gameplay_retired} = error -> error
       nil -> {:error, :outfitting_job_not_configured}
       %Job{} -> {:error, :outfitting_job_not_configured}
       %Intent{} -> {:error, :intents_active}
@@ -1408,7 +1406,8 @@ defmodule SpaceTraders.Fleet do
 
   @doc "Starts or explicitly resumes a Market Reconnaissance Job."
   def start_market_reconnaissance_job(%AgentRecord{} = agent, ship_symbol) do
-    with :ok <- Agent.execution_allowed?(agent),
+    with :ok <- legacy_job_admission(agent),
+         :ok <- Agent.execution_allowed?(agent),
          {:ok, ship} <- owned_ship(agent, ship_symbol),
          %Job{type: "market_reconnaissance"} = job <- unfinished_job(ship.id),
          {:ok, live_ship} <-
@@ -1426,6 +1425,7 @@ defmodule SpaceTraders.Fleet do
     else
       nil -> {:error, :market_reconnaissance_job_not_configured}
       %Job{} -> {:error, :market_reconnaissance_job_not_configured}
+      {:error, :legacy_gameplay_retired} = error -> error
       {:error, reason} -> block_market_reconnaissance_job(agent, ship_symbol, reason)
     end
   end
@@ -1462,7 +1462,8 @@ defmodule SpaceTraders.Fleet do
 
   @doc "Starts or resumes a recurring Market Trading Job from known candidates."
   def start_market_trading_job(%AgentRecord{} = agent, ship_symbol) do
-    with :ok <- Agent.execution_allowed?(agent),
+    with :ok <- legacy_job_admission(agent),
+         :ok <- Agent.execution_allowed?(agent),
          {:ok, ship} <- owned_ship(agent, ship_symbol),
          %Job{type: "market_trading"} = job <- unfinished_job(ship.id),
          nil <- Intents.unfinished_manual_intent(ship.id),
@@ -1523,12 +1524,14 @@ defmodule SpaceTraders.Fleet do
     else
       nil -> {:error, :market_trading_job_not_configured}
       %Job{} -> {:error, :market_trading_job_not_configured}
+      {:error, :legacy_gameplay_retired} = error -> error
       {:error, reason} -> block_market_trading_job(agent, ship_symbol, reason)
     end
   end
 
   def resume_market_trading_job(%AgentRecord{} = agent, ship_symbol) do
-    with {:ok, ship} <- owned_ship(agent, ship_symbol),
+    with :ok <- legacy_job_admission(agent),
+         {:ok, ship} <- owned_ship(agent, ship_symbol),
          %Job{type: "market_trading"} = job <- unfinished_job(ship.id) do
       if Intents.unfinished_job_intent(job.id) do
         Repo.update!(
@@ -1540,13 +1543,15 @@ defmodule SpaceTraders.Fleet do
         start_market_trading_job(agent, ship_symbol)
       end
     else
+      {:error, :legacy_gameplay_retired} = error -> error
       _ -> {:error, :market_trading_job_not_configured}
     end
   end
 
   @doc "Advances a Market Trading Job from fresh authoritative Ship state."
   def advance_market_trading_job(%AgentRecord{} = agent, ship_symbol) do
-    with :ok <- Agent.execution_allowed?(agent),
+    with :ok <- legacy_job_admission(agent),
+         :ok <- Agent.execution_allowed?(agent),
          {:ok, ship} <- owned_ship(agent, ship_symbol),
          %Job{type: "market_trading"} = job <- unfinished_job(ship.id),
          nil <- Intents.unfinished_manual_intent(ship.id),
@@ -1563,6 +1568,7 @@ defmodule SpaceTraders.Fleet do
     else
       nil -> {:error, :market_trading_job_not_configured}
       %Job{} -> {:error, :market_trading_job_not_configured}
+      {:error, :legacy_gameplay_retired} = error -> error
       {:error, reason} -> block_market_trading_job(agent, ship_symbol, reason)
     end
   end
@@ -2016,7 +2022,8 @@ defmodule SpaceTraders.Fleet do
 
   @doc "Starts or resumes a Procurement Job from fresh Contract, Ship, and credit state."
   def start_procurement_job(%AgentRecord{} = agent, ship_symbol) do
-    with :ok <- Agent.execution_allowed?(agent),
+    with :ok <- legacy_job_admission(agent),
+         :ok <- Agent.execution_allowed?(agent),
          {:ok, ship} <- owned_ship(agent, ship_symbol),
          %Job{type: "procurement"} = job <- unfinished_job(ship.id),
          nil <- Intents.unfinished_manual_intent(ship.id),
@@ -2050,6 +2057,9 @@ defmodule SpaceTraders.Fleet do
 
       :cargo_operation_reconciliation_required ->
         {:error, :cargo_operation_reconciliation_required}
+
+      {:error, :legacy_gameplay_retired} = error ->
+        error
 
       {:error, reason} ->
         block_procurement_job(agent, ship_symbol, reason)
@@ -2122,7 +2132,8 @@ defmodule SpaceTraders.Fleet do
 
   @doc "Reconciles unresolved Cargo evidence for the owning Procurement Job."
   def reconcile_procurement_job(%AgentRecord{} = agent, ship_symbol) do
-    with {:ok, ship} <- owned_ship(agent, ship_symbol),
+    with :ok <- legacy_job_admission(agent),
+         {:ok, ship} <- owned_ship(agent, ship_symbol),
          %Job{type: "procurement"} = job <- unfinished_job(ship.id),
          %Intent{in_flight_action: action} = intent <- Intents.unfinished_job_intent(job.id),
          true <- is_map(action) do
@@ -2133,6 +2144,7 @@ defmodule SpaceTraders.Fleet do
 
       reconcile_procurement_intent(agent, ship, job, intent)
     else
+      {:error, :legacy_gameplay_retired} = error -> error
       _ -> {:error, :cargo_operation_reconciliation_required}
     end
   end
@@ -2928,7 +2940,8 @@ defmodule SpaceTraders.Fleet do
 
   @doc "Starts or resumes a Construction Supply Job from fresh project, Ship, and credit state."
   def start_construction_supply_job(%AgentRecord{} = agent, ship_symbol) do
-    with :ok <- Agent.execution_allowed?(agent),
+    with :ok <- legacy_job_admission(agent),
+         :ok <- Agent.execution_allowed?(agent),
          {:ok, ship} <- owned_ship(agent, ship_symbol),
          %Job{type: "construction_supply"} = job <- unfinished_job(ship.id),
          nil <- Intents.unfinished_manual_intent(ship.id),
@@ -2955,6 +2968,9 @@ defmodule SpaceTraders.Fleet do
       :cargo_operation_reconciliation_required ->
         {:error, :cargo_operation_reconciliation_required}
 
+      {:error, :legacy_gameplay_retired} = error ->
+        error
+
       {:error, reason} ->
         block_construction_supply_job(agent, ship_symbol, reason)
     end
@@ -2972,7 +2988,8 @@ defmodule SpaceTraders.Fleet do
 
   @doc "Reconciles unresolved Cargo evidence for the owning Construction Supply Job."
   def reconcile_construction_supply_job(%AgentRecord{} = agent, ship_symbol) do
-    with {:ok, ship} <- owned_ship(agent, ship_symbol),
+    with :ok <- legacy_job_admission(agent),
+         {:ok, ship} <- owned_ship(agent, ship_symbol),
          %Job{type: "construction_supply"} = job <- unfinished_job(ship.id),
          %Intent{in_flight_action: action} = intent <- Intents.unfinished_job_intent(job.id),
          true <- is_map(action) do
@@ -2983,6 +3000,7 @@ defmodule SpaceTraders.Fleet do
 
       reconcile_construction_supply_intent(agent, ship, job, intent)
     else
+      {:error, :legacy_gameplay_retired} = error -> error
       _ -> {:error, :cargo_operation_reconciliation_required}
     end
   end
@@ -3435,7 +3453,8 @@ defmodule SpaceTraders.Fleet do
 
   @doc "Starts a System Exploration Job and acquires its current public baseline."
   def start_explorer_job(%AgentRecord{} = agent, ship_symbol) do
-    with :ok <- Agent.execution_allowed?(agent),
+    with :ok <- legacy_job_admission(agent),
+         :ok <- Agent.execution_allowed?(agent),
          {:ok, ship} <- owned_ship(agent, ship_symbol),
          %Job{type: "explorer"} = job <- unfinished_job(ship.id),
          {:ok, live_ship} <-
@@ -3457,6 +3476,7 @@ defmodule SpaceTraders.Fleet do
     else
       nil -> {:error, :explorer_job_not_configured}
       %Job{} -> {:error, :explorer_job_not_configured}
+      {:error, :legacy_gameplay_retired} = error -> error
       {:error, reason} -> block_explorer_job(agent, ship_symbol, reason)
     end
   end
@@ -3907,7 +3927,8 @@ defmodule SpaceTraders.Fleet do
 
   @doc "Starts a configured Survey Job after authoritative Ship and Waypoint validation."
   def start_survey_job(%AgentRecord{} = agent, ship_symbol) do
-    with :ok <- Agent.execution_allowed?(agent),
+    with :ok <- legacy_job_admission(agent),
+         :ok <- Agent.execution_allowed?(agent),
          {:ok, ship} <- owned_ship(agent, ship_symbol),
          %Job{type: "survey"} = job <- unfinished_job(ship.id),
          nil <- Intents.unfinished_manual_intent(ship.id),
@@ -3935,6 +3956,7 @@ defmodule SpaceTraders.Fleet do
       nil -> {:error, :survey_job_not_configured}
       %Job{} -> {:error, :survey_job_not_configured}
       %Intent{} -> {:error, :intents_active}
+      {:error, :legacy_gameplay_retired} = error -> error
       {:error, reason} -> block_survey_job(agent, ship_symbol, reason)
     end
   end
@@ -3973,7 +3995,8 @@ defmodule SpaceTraders.Fleet do
 
   @doc "Starts a configured Miner Job after authoritative validation."
   def start_miner_job(%AgentRecord{} = agent, ship_symbol) do
-    with :ok <- Agent.execution_allowed?(agent),
+    with :ok <- legacy_job_admission(agent),
+         :ok <- Agent.execution_allowed?(agent),
          {:ok, ship} <- owned_ship(agent, ship_symbol),
          %Job{} = job <- unfinished_job(ship.id),
          nil <- Intents.unfinished_manual_intent(ship.id),
@@ -3997,6 +4020,7 @@ defmodule SpaceTraders.Fleet do
     else
       nil -> {:error, :miner_job_not_configured}
       %Intent{} -> {:error, :intents_active}
+      {:error, :legacy_gameplay_retired} = error -> error
       {:error, reason} -> block_miner_job(agent, ship_symbol, reason)
     end
   end
@@ -4118,7 +4142,8 @@ defmodule SpaceTraders.Fleet do
 
   @doc false
   def preempt_miner_job_for(agent, ship_symbol, reason) do
-    with :ok <- Agent.execution_allowed?(agent) do
+    with :ok <- legacy_job_admission(agent),
+         :ok <- Agent.execution_allowed?(agent) do
       case Repo.get_by(Ship, agent_id: agent.id, symbol: ship_symbol) do
         %Ship{} = ship -> preempt_miner_job(agent, ship, reason)
         nil -> :ok
@@ -5635,7 +5660,8 @@ defmodule SpaceTraders.Fleet do
   cannot be stored, with the persistence error in `:warning`.
   """
   def purchase_ship(%{agent: %AgentRecord{} = agent, shipyards: shipyards}, ship_type, waypoint) do
-    with :ok <- offered_at?(shipyards, ship_type, waypoint),
+    with :ok <- legacy_job_admission(agent),
+         :ok <- offered_at?(shipyards, ship_type, waypoint),
          {:ok, result} <- Shipyard.purchase(agent, ship_type, waypoint) do
       {:ok, Map.put(result, :warning, record_purchase(agent, result.ship, ship_type))}
     end

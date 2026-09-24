@@ -62,12 +62,12 @@ defmodule SpaceTradersWeb.Router do
   scope "/", SpaceTradersWeb do
     pipe_through [:browser]
 
+    get "/", HomeController, :index
     get "/setup", OperatorSetupController, :new
     post "/setup", OperatorSetupController, :create
 
     live_session :current_operator,
       on_mount: [{SpaceTradersWeb.OperatorAuth, :mount_current_scope}] do
-      live "/", DashboardLive, :show
       live "/operators/register", OperatorLive.Registration, :new
       live "/operators/log-in", OperatorLive.Login, :new
     end
