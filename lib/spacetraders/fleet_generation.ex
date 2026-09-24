@@ -17,7 +17,7 @@ defmodule SpaceTraders.FleetGeneration do
   alias SpaceTraders.Fleet.{Ship, ShipServer}
   alias SpaceTraders.FleetGeneration.Generation
   alias SpaceTraders.FleetStrategy.{Revision, Strategy}
-  alias SpaceTraders.{Evidence, FleetStrategy, Repo, Timeline}
+  alias SpaceTraders.{Evidence, Fleet, FleetStrategy, Repo, Timeline}
 
   defmodule CredentialReference do
     @moduledoc "A non-secret reference to an Operator's stored AccountToken."
@@ -145,6 +145,16 @@ defmodule SpaceTraders.FleetGeneration do
       ]
     )
 
+    Generation
+    |> where(
+      [generation],
+      generation.operator_id == ^operator_id and
+        is_nil(generation.fenced_at) and is_nil(generation.retired_at)
+    )
+    |> select([generation], generation.agent_id)
+    |> Repo.all()
+    |> Enum.each(&request_intelligence/1)
+
     :ok
   end
 
@@ -244,7 +254,7 @@ defmodule SpaceTraders.FleetGeneration do
     faction = Keyword.fetch!(opts, :faction)
     replacement_symbols = Keyword.fetch!(opts, :replacement_symbols)
 
-    with {:ok, {agent, _generation, retired_symbols, ship_symbols}} <-
+    with {:ok, {agent, generation, retired_symbols, ship_symbols}} <-
            Repo.transaction(fn ->
              stale_ids = stale_agent_ids(operator, game_agent.symbol)
 
@@ -292,6 +302,7 @@ defmodule SpaceTraders.FleetGeneration do
              end
            end) do
       Enum.each(ship_symbols, &ShipServer.stop/1)
+      if generation.fleet_strategy_revision_id, do: request_intelligence(agent.id)
 
       {:ok, %{agent: %{agent | agent_token: nil}, retired_symbols: retired_symbols}}
     end
@@ -382,6 +393,27 @@ defmodule SpaceTraders.FleetGeneration do
       strategy_capable_at: if(revision, do: now)
     })
     |> Repo.insert!()
+  end
+
+  defp request_intelligence(agent_id) do
+    with %Agent{} = agent <- Repo.get(Agent, agent_id),
+         true <-
+           Repo.exists?(
+             from generation in Generation,
+               where:
+                 generation.agent_id == ^agent_id and
+                   not is_nil(generation.fleet_strategy_revision_id) and
+                   is_nil(generation.fenced_at) and is_nil(generation.retired_at)
+           ),
+         {:ok, system} <- Fleet.system_from_headquarters(agent.headquarters) do
+      Phoenix.PubSub.broadcast(
+        SpaceTraders.PubSub,
+        "fleet_intelligence_evidence",
+        {:waypoint_intelligence_observed, agent.id, system}
+      )
+    end
+
+    :ok
   end
 
   defp active_revision(operator_id) do

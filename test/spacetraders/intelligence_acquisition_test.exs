@@ -407,6 +407,134 @@ defmodule SpaceTraders.IntelligenceAcquisitionTest do
     assert Elixir.Agent.get(charts, & &1) == 1
   end
 
+  test "a fresh credit-growth Fleet acquires one Market Listing through a claimed root Intent" do
+    {agent, ship, previous, _commitment} =
+      claimed_ship(%{
+        "objective" => "Grow credits",
+        "kind" => "continuous",
+        "evaluation" => "Maximize net credit growth over time"
+      })
+
+    scope = Scope.for_operator(Repo.get!(Operator, agent.operator_id))
+    revision = Repo.get!(Revision, previous.fleet_strategy_revision_id)
+
+    assert {:ok, _} =
+             FleetAllocation.unwind_current_portfolio(scope, previous.fleet_generation_id)
+
+    for {symbol, x, y, traits} <- [
+          {"X1-UX81-A1", 1, 2, []},
+          {"X1-UX81-A2", 2, 4, [%{"symbol" => "MARKETPLACE"}]},
+          {"X1-UX81-A3", 4, 4, [%{"symbol" => "MARKETPLACE"}]}
+        ] do
+      waypoint =
+        Model.Waypoint.from_json(%{
+          "symbol" => symbol,
+          "systemSymbol" => "X1-UX81",
+          "type" => "PLANET",
+          "x" => x,
+          "y" => y,
+          "traits" => traits
+        })
+
+      {:ok, _} = Intelligence.observe_waypoint(agent, waypoint, source: "get_waypoints")
+    end
+
+    ship_path = "/v2/my/ships/#{ship.symbol}"
+    orbit_path = "#{ship_path}/orbit"
+    navigate_path = "#{ship_path}/navigate"
+    market_path = "/v2/systems/X1-UX81/waypoints/X1-UX81-A2/market"
+    test_pid = self()
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      send(test_pid, {conn.method, conn.request_path})
+
+      case {conn.method, conn.request_path} do
+        {"GET", "/v2/my/agent"} ->
+          Req.Test.json(conn, %{"data" => %{"symbol" => agent.symbol, "credits" => 10_000}})
+
+        {"GET", "/v2/my/ships"} ->
+          Req.Test.json(conn, %{"data" => [ship_body(ship.symbol)]})
+
+        {"GET", ^ship_path} ->
+          Req.Test.json(conn, %{"data" => ship_body(ship.symbol)})
+
+        {"POST", ^orbit_path} ->
+          Req.Test.json(conn, %{"data" => %{"nav" => nav_body("IN_ORBIT")}})
+
+        {"POST", ^navigate_path} ->
+          Req.Test.json(conn, %{
+            "data" => %{
+              "fuel" => %{"capacity" => 200, "current" => 80},
+              "nav" =>
+                nav_body("IN_TRANSIT",
+                  arrival: DateTime.utc_now() |> DateTime.add(3600) |> DateTime.to_iso8601(),
+                  destination: "X1-UX81-A2"
+                )
+            }
+          })
+
+        {"GET", ^market_path} ->
+          Req.Test.json(conn, %{
+            "data" => %{
+              "symbol" => "X1-UX81-A2",
+              "tradeGoods" => [
+                %{
+                  "symbol" => "IRON_ORE",
+                  "type" => "EXPORT",
+                  "tradeVolume" => 20,
+                  "purchasePrice" => 10,
+                  "sellPrice" => 9
+                }
+              ]
+            }
+          })
+
+        other ->
+          flunk("unexpected game request: #{inspect(other)}")
+      end
+    end)
+
+    assert {:ok, %{intent: %Intent{status: "waiting", target_waypoint: "X1-UX81-A2"} = intent}} =
+             FleetIntelligence.reconcile(scope, agent, revision, "X1-UX81", %{
+               available_slots: 3,
+               backpressure: :none
+             })
+
+    assert_receive {"POST", ^orbit_path}
+    assert_receive {"POST", ^navigate_path}
+    refute_receive {"GET", ^market_path}
+
+    arrived =
+      ship_body(ship.symbol, %{
+        "nav" => nav_body("DOCKED", destination: "X1-UX81-A2")
+      })
+      |> Model.Ship.from_json()
+
+    assert :ok = Intents.reconcile(agent.id, ship.symbol, arrived, :arrival, intent.id)
+    assert_receive {"GET", ^market_path}
+    assert %Intent{status: "completed"} = Repo.get!(Intent, intent.id)
+
+    assert [%{subject: "market:X1-UX81:X1-UX81-A2", required_facts: ["trade_goods"]} = demand] =
+             Repo.all(
+               from demand in SpaceTraders.Evidence.ObservationDemand,
+                 where:
+                   demand.agent_id == ^agent.id and
+                     demand.subject == "market:X1-UX81:X1-UX81-A2" and
+                     is_nil(demand.withdrawn_at)
+             )
+
+    assert demand.fulfilled_observation_id
+
+    projection =
+      World.intelligence(agent, :market, "X1-UX81", "X1-UX81-A2", DateTime.utc_now(), 300)
+
+    assert projection.facts["trade_goods"].freshness == :fresh
+    assert projection.facts["trade_goods"].observing_ship_symbol == ship.symbol
+    assert projection.facts["trade_goods"].source == "Market observation"
+    assert projection.facts["transactions"].state == "unknown"
+    assert projection.facts["transactions"].value == nil
+  end
+
   test "Fleet allocation admits a valuable observation and publishes its Ship Claim before acquisition" do
     {agent, ship, old_portfolio, _commitment} = claimed_ship()
     operator = Repo.get!(Operator, agent.operator_id)

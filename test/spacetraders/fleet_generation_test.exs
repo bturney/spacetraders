@@ -109,7 +109,7 @@ defmodule SpaceTraders.FleetGenerationTest do
       Req.Test.json(conn, registration_body("READY", "READY-1", "READY_TOKEN"))
     end)
 
-    assert {:ok, _minted} =
+    assert {:ok, %{agent: agent}} =
              FleetGeneration.mint(scope, %{symbol: "READY", faction: "COSMIC"})
 
     assert [
@@ -121,8 +121,12 @@ defmodule SpaceTraders.FleetGenerationTest do
            ] =
              FleetGeneration.list_generations(scope)
 
+    Phoenix.PubSub.subscribe(SpaceTraders.PubSub, "fleet_intelligence_evidence")
+
     assert {:ok, strategy} = FleetStrategy.select_preset(scope, "steady_growth")
     assert {:ok, revision} = FleetStrategy.activate(scope, strategy.draft_version)
+    assert_receive {:waypoint_intelligence_observed, agent_id, "X1-UX81"}
+    assert agent_id == agent.id
 
     assert [%{fleet_strategy_revision_id: revision_id, strategy_capable_at: capable_at}] =
              FleetGeneration.list_generations(scope)
