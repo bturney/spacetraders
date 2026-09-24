@@ -38,7 +38,12 @@ defmodule SpaceTraders.World do
     %{
       state: fact.state,
       value: if(fact.state == "known", do: fact.value),
-      freshness: if(age >= 0 and age <= freshness_seconds, do: :fresh, else: :stale),
+      freshness:
+        cond do
+          fact.state != "known" -> :not_established
+          age >= 0 and age <= freshness_seconds -> :fresh
+          true -> :stale
+        end,
       observed_at: observation.observed_at,
       source: observation.source,
       observing_ship_symbol: observation.observing_ship_symbol
