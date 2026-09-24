@@ -4,6 +4,8 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 source scripts/_toolchain.sh
+mix local.hex --force
+mix local.rebar --force
 
 MIX_ENV=prod mix release --overwrite
 secret_key=$(openssl rand -hex 32)
