@@ -30,7 +30,6 @@ defmodule SpaceTraders.MutationAttempts do
     :commitment_id,
     :ship_id,
     :ship_symbol,
-    :job_id,
     :intent_id
   ]
 
@@ -345,7 +344,6 @@ defmodule SpaceTraders.MutationAttempts do
               ship_id: ship.id,
               ship_symbol: ship.symbol,
               intent_id: intent && intent.id,
-              job_id: intent && intent.job_id,
               selected_action_fingerprint: intent && action_fingerprint(intent.in_flight_action)
             }
             |> Map.reject(fn {_key, value} -> is_nil(value) end)

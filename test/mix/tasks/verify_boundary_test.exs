@@ -26,7 +26,22 @@ defmodule Mix.Tasks.Verify.BoundaryTest do
     on_exit(fn -> File.rm(path) end)
 
     violations = Mix.Tasks.Verify.Boundary.verify_paths([path])
+
     assert Enum.any?(violations, &String.contains?(&1, "Req.get"))
     assert Enum.any?(violations, &String.contains?(&1, "Req.Request.new"))
+  end
+
+  test "rejects legacy Job persistence and ownership references" do
+    path = Path.join(System.tmp_dir!(), "boundary-job-#{System.unique_integer()}.ex")
+
+    File.write!(
+      path,
+      "defmodule LegacyJob do\n  alias SpaceTraders.Fleet.{Intent, Job}\n  def run, do: Repo.get(Job, 1)\nend\n"
+    )
+
+    on_exit(fn -> File.rm(path) end)
+
+    assert [violation | _] = Mix.Tasks.Verify.Boundary.verify_paths([path])
+    assert violation =~ "legacy Job"
   end
 end

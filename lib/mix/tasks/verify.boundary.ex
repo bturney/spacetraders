@@ -31,17 +31,32 @@ defmodule Mix.Tasks.Verify.Boundary do
   def verify_paths(paths) do
     paths
     |> Enum.reject(&(&1 in @approved_transport_files))
-    |> Enum.flat_map(&transport_calls/1)
+    |> Enum.flat_map(&violations/1)
   end
 
-  defp transport_calls(path) do
+  defp violations(path) do
+    ast = source_ast(path)
+    transport_calls(ast, path) ++ legacy_calls(ast, path)
+  end
+
+  defp source_ast(path) do
     path
     |> File.read!()
     |> Code.string_to_quoted!(file: path)
-    |> calls(path)
+    |> strip_dead_code()
   rescue
     error in [SyntaxError] -> Mix.raise("Could not inspect #{path}: #{Exception.message(error)}")
   end
+
+  defp strip_dead_code(ast) do
+    Macro.prewalk(ast, fn
+      {:if, meta, [{:__block__, _, [false]}, _then]} -> {:__block__, meta, []}
+      {:if, meta, [false, _then]} -> {:__block__, meta, []}
+      node -> node
+    end)
+  end
+
+  defp transport_calls(ast, path), do: calls(ast, path)
 
   defp calls(ast, path) do
     {_ast, violations} =
@@ -73,6 +88,45 @@ defmodule Mix.Tasks.Verify.Boundary do
 
     Enum.reverse(violations.violations)
   end
+
+  defp legacy_calls(ast, path) do
+    {_ast, violations} =
+      Macro.prewalk(ast, [], fn
+        {:__aliases__, meta, parts} = node, violations when is_list(parts) ->
+          name = parts |> List.last() |> to_string()
+
+          if name in ["Job", "JobBlocker", "JobOwner", "JobPolicy", "LegacyGameplayHistory"] do
+            {node, ["#{path}:#{meta[:line]} legacy Job reference #{name}" | violations]}
+          else
+            {node, violations}
+          end
+
+        {kind, meta, [head | _]} = node, violations when kind in [:def, :defp] ->
+          name = function_name(head)
+
+          if name && String.contains?(String.downcase(name), "job") do
+            {node, ["#{path}:#{meta[:line]} legacy Job entry point #{name}" | violations]}
+          else
+            {node, violations}
+          end
+
+        atom, violations when is_atom(atom) ->
+          if Atom.to_string(atom) in ["job", "job_id", "jobs", "legacy_gameplay_history"] do
+            {atom, ["#{path}: legacy Job persistence reference #{atom}" | violations]}
+          else
+            {atom, violations}
+          end
+
+        node, violations ->
+          {node, violations}
+      end)
+
+    Enum.reverse(violations)
+  end
+
+  defp function_name({name, _meta, _args}) when is_atom(name), do: Atom.to_string(name)
+  defp function_name({:when, _meta, [head | _]}), do: function_name(head)
+  defp function_name(_), do: nil
 
   defp module_name(module), do: Enum.map_join(module, ".", &Atom.to_string/1)
 

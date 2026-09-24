@@ -305,7 +305,11 @@ defmodule SpaceTraders.FleetAllocation do
               is_nil(generation.fenced_at) and is_nil(generation.retired_at)
       )
 
-    active_revision? = SpaceTraders.LegacyRetirement.active_for_operator?(operator_id)
+    active_revision? =
+      Repo.exists?(
+        from strategy in Strategy,
+          where: strategy.operator_id == ^operator_id and not is_nil(strategy.active_revision_id)
+      )
 
     if active_generation? or active_revision? do
       case current_ship_claim(agent, ship_symbol, opts) do

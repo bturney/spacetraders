@@ -486,7 +486,6 @@ defmodule SpaceTraders.FleetGeneration do
 
   defp retire_stale_agent(stale_agent_id) do
     stale_agent = Repo.get!(Agent, stale_agent_id)
-    :ok = SpaceTraders.LegacyGameplayHistory.archive_agent!(stale_agent)
     :ok = SpaceTraders.ShipReservation.release_for_agent!(stale_agent.id)
 
     ship_symbols =

@@ -41,7 +41,7 @@ defmodule SpaceTraders.API.ClientTest do
         Req.Test.json(conn, %{"data" => %{}})
       end)
 
-      Logger.metadata(request_id: "request-123", intent_id: 41, job_id: 29)
+      Logger.metadata(request_id: "request-123", intent_id: 41)
 
       assert {:ok, %Model.Ship{}} =
                API.get_ship(agent_token_reference("AGENT_TOKEN_SECRET"), "ORBITALIST-1")
@@ -56,7 +56,7 @@ defmodule SpaceTraders.API.ClientTest do
       assert metadata.request_id == "request-123"
       assert metadata.ship_symbol == "ORBITALIST-1"
       assert metadata.intent_id == 41
-      assert metadata.job_id == 29
+
       refute inspect(metadata) =~ "AGENT_TOKEN_SECRET"
     end
 

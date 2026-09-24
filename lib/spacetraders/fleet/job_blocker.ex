@@ -1,11 +1,5 @@
-defmodule SpaceTraders.Fleet.JobBlocker do
-  @moduledoc """
-  A structured explanation of why a Job cannot currently progress.
-
-  Records a stable reason, evidence and observation time, who or what can
-  resolve it, the condition for another attempt, and any corrective actions
-  (see `CONTEXT.md` → Job Blocker).
-  """
+defmodule SpaceTraders.Fleet.IntentBlocker do
+  @moduledoc "A structured explanation of why an Intent cannot currently progress."
 
   use Ecto.Schema
 

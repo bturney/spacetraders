@@ -13,7 +13,6 @@ defmodule SpaceTraders.Observability do
     :commitment_id,
     :ship_id,
     :ship_symbol,
-    :job_id,
     :intent_id,
     :mutation_attempt_id
   ]
@@ -48,14 +47,11 @@ defmodule SpaceTraders.Observability do
     Logger.info("SpaceTraders API request", Map.to_list(metadata))
   end
 
-  def fleet_activity(agent, ship, job, kind, metadata) do
+  def fleet_activity(agent, ship, kind, metadata) do
     correlation = %{
       agent_id: agent.id,
       ship_id: ship.id,
       ship_symbol: ship.symbol,
-      job_id: job && job.id,
-      job_type: (job && job.type) || "none",
-      job_state: (job && job.status) || "none",
       intent_id: metadata["intent_id"] || metadata[:intent_id],
       kind: kind
     }
@@ -67,7 +63,6 @@ defmodule SpaceTraders.Observability do
   def intent_transition(intent, updated) do
     metadata = %{
       intent_id: intent.id,
-      job_id: intent.job_id,
       ship_id: intent.ship_id,
       intent_type: intent.type,
       from_state: intent.status,

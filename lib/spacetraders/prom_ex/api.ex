@@ -34,11 +34,11 @@ defmodule SpaceTraders.PromEx.API do
           description: "Production API outcomes correlated to shadow capacity decisions."
         ),
         counter(
-          [:spacetraders, :job, :activity, :total],
+          [:spacetraders, :fleet, :activity, :total],
           event_name: @fleet_activity_event,
           measurement: :count,
-          tags: [:kind, :job_type, :job_state],
-          description: "Durable gameplay activity by kind, Job type, and Job State."
+          tags: [:kind],
+          description: "Durable Fleet activity by kind."
         ),
         counter(
           [:spacetraders, :intent, :transitions, :total],
