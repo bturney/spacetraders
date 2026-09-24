@@ -175,37 +175,34 @@ defmodule SpaceTraders.Fleet.Intents do
 
   defp do_stop_intent(%AgentRecord{} = agent, intent_id, :intervention) do
     result =
-      Repo.transaction(
-        fn ->
-          intent =
-            Repo.one(
-              from intent in Intent,
-                join: ship in Ship,
-                on: ship.id == intent.ship_id,
-                where:
-                  intent.id == ^intent_id and ship.agent_id == ^agent.id and
-                    intent.status in ^@unfinished_states
-            )
+      Repo.transaction(fn ->
+        intent =
+          Repo.one(
+            from intent in Intent,
+              join: ship in Ship,
+              on: ship.id == intent.ship_id,
+              where:
+                intent.id == ^intent_id and ship.agent_id == ^agent.id and
+                  intent.status in ^@unfinished_states
+          )
 
-          case intent do
-            %Intent{caller: "intervention"} = intent ->
-              if unresolved_cargo_action?(intent) or unresolved_module_evidence?(intent) or
-                   unresolved_jump_action?(intent) or unresolved_warp_action?(intent) or
-                   unresolved_navigation_action?(intent) do
-                Repo.rollback(:intents_reconciliation_required)
-              else
-                terminalize_intents!(intent, "stopped")
-              end
+        case intent do
+          %Intent{caller: "intervention"} = intent ->
+            if unresolved_cargo_action?(intent) or unresolved_module_evidence?(intent) or
+                 unresolved_jump_action?(intent) or unresolved_warp_action?(intent) or
+                 unresolved_navigation_action?(intent) do
+              Repo.rollback(:intents_reconciliation_required)
+            else
+              terminalize_intents!(intent, "stopped")
+            end
 
-            %Intent{} ->
-              Repo.rollback(:invalid_intent_owner)
+          %Intent{} ->
+            Repo.rollback(:invalid_intent_owner)
 
-            nil ->
-              Repo.rollback(:intents_not_active)
-          end
-        end,
-        mode: :immediate
-      )
+          nil ->
+            Repo.rollback(:intents_not_active)
+        end
+      end)
 
     case result do
       {:ok, %Intent{} = intent} ->
@@ -732,27 +729,24 @@ defmodule SpaceTraders.Fleet.Intents do
     ship = Repo.get!(Ship, intent.ship_id)
 
     result =
-      Repo.transaction(
-        fn ->
-          current = Repo.get!(Intent, intent.id)
+      Repo.transaction(fn ->
+        current = Repo.get!(Intent, intent.id)
 
-          with {:ok, claim} <-
-                 FleetAllocation.authorize_ship_execution(agent, ship.symbol,
-                   lock: true,
-                   intent_id: current.id
-                 ),
-               {:ok, binding} <- bind_intent_claim(current, claim) do
-            if binding.intent == %{} do
-              current
-            else
-              update_intent!(Ecto.Changeset.change(current, binding.intent))
-            end
+        with {:ok, claim} <-
+               FleetAllocation.authorize_ship_execution(agent, ship.symbol,
+                 lock: true,
+                 intent_id: current.id
+               ),
+             {:ok, binding} <- bind_intent_claim(current, claim) do
+          if binding.intent == %{} do
+            current
           else
-            _ -> Repo.rollback(:no_current_ship_claim)
+            update_intent!(Ecto.Changeset.change(current, binding.intent))
           end
-        end,
-        mode: :immediate
-      )
+        else
+          _ -> Repo.rollback(:no_current_ship_claim)
+        end
+      end)
 
     case result do
       {:ok, intent} ->
@@ -1915,37 +1909,34 @@ defmodule SpaceTraders.Fleet.Intents do
   # callback after another process changed its intent.
   defp claim_intent_action(agent, intent, action) do
     result =
-      Repo.transaction(
-        fn ->
-          current = Repo.get(Intent, intent.id)
+      Repo.transaction(fn ->
+        current = Repo.get(Intent, intent.id)
 
-          with %Intent{} = current <- current,
-               true <- Intent.unfinished?(current),
-               true <- is_nil(current.in_flight_action),
-               true <- intent_owned?(current),
-               %Ship{symbol: ship_symbol} <- Repo.get(Ship, current.ship_id),
-               {:ok, claim} <-
-                 FleetAllocation.authorize_ship_execution(agent, ship_symbol,
-                   lock: true,
-                   intent_id: current.id
-                 ),
-               {:ok, binding} <- bind_intent_claim(current, claim) do
-            action = Map.merge(action, binding.action)
+        with %Intent{} = current <- current,
+             true <- Intent.unfinished?(current),
+             true <- is_nil(current.in_flight_action),
+             true <- intent_owned?(current),
+             %Ship{symbol: ship_symbol} <- Repo.get(Ship, current.ship_id),
+             {:ok, claim} <-
+               FleetAllocation.authorize_ship_execution(agent, ship_symbol,
+                 lock: true,
+                 intent_id: current.id
+               ),
+             {:ok, binding} <- bind_intent_claim(current, claim) do
+          action = Map.merge(action, binding.action)
 
-            update_intent!(
-              Ecto.Changeset.change(
-                current,
-                Map.merge(binding.intent, %{status: "active", in_flight_action: action})
-              )
+          update_intent!(
+            Ecto.Changeset.change(
+              current,
+              Map.merge(binding.intent, %{status: "active", in_flight_action: action})
             )
-          else
-            {:error, :no_current_ship_claim} -> Repo.rollback(:no_current_ship_claim)
-            {:error, :intent_claim_mismatch} -> Repo.rollback(:no_current_ship_claim)
-            _ -> Repo.rollback(:intent_dispatch_no_longer_allowed)
-          end
-        end,
-        mode: :immediate
-      )
+          )
+        else
+          {:error, :no_current_ship_claim} -> Repo.rollback(:no_current_ship_claim)
+          {:error, :intent_claim_mismatch} -> Repo.rollback(:no_current_ship_claim)
+          _ -> Repo.rollback(:intent_dispatch_no_longer_allowed)
+        end
+      end)
 
     case result do
       {:error, :no_current_ship_claim} ->
@@ -1999,23 +1990,20 @@ defmodule SpaceTraders.Fleet.Intents do
   # their normal unfinished-state behavior.
   @doc false
   def with_current_intent(%Intent{id: id}, fun) do
-    case Repo.transaction(
-           fn ->
-             case Repo.get(Intent, id) do
-               %Intent{} = current ->
-                 if Intent.unfinished?(current) and
-                      intent_owned?(current) do
-                   fun.(current)
-                 else
-                   Repo.rollback(:intent_no_longer_owned)
-                 end
-
-               _ ->
+    case Repo.transaction(fn ->
+           case Repo.get(Intent, id) do
+             %Intent{} = current ->
+               if Intent.unfinished?(current) and
+                    intent_owned?(current) do
+                 fun.(current)
+               else
                  Repo.rollback(:intent_no_longer_owned)
-             end
-           end,
-           mode: :immediate
-         ) do
+               end
+
+             _ ->
+               Repo.rollback(:intent_no_longer_owned)
+           end
+         end) do
       {:ok, result} -> result
       {:error, :intent_no_longer_owned} -> :intent_no_longer_owned
     end
@@ -3969,31 +3957,28 @@ defmodule SpaceTraders.Fleet.Intents do
 
       recover_owned_intent_on_boot(ship_symbol, agent_id)
     else
-      case Repo.transaction(
-             fn ->
-               current = Repo.get!(Intent, intent.id)
+      case Repo.transaction(fn ->
+             current = Repo.get!(Intent, intent.id)
 
-               if Intent.unfinished?(current) do
-                 update_intent!(
-                   Ecto.Changeset.change(current,
-                     status: "blocked",
-                     blocker: Fleet.intent_blocker({:retry_exhausted, reason}),
-                     in_flight_action:
-                       if(
-                         unresolved_cargo_action?(current) or unresolved_jump_action?(current) or
-                           unresolved_warp_action?(current) or
-                           unresolved_navigation_action?(current),
-                         do: current.in_flight_action,
-                         else: nil
-                       )
-                   )
+             if Intent.unfinished?(current) do
+               update_intent!(
+                 Ecto.Changeset.change(current,
+                   status: "blocked",
+                   blocker: Fleet.intent_blocker({:retry_exhausted, reason}),
+                   in_flight_action:
+                     if(
+                       unresolved_cargo_action?(current) or unresolved_jump_action?(current) or
+                         unresolved_warp_action?(current) or
+                         unresolved_navigation_action?(current),
+                       do: current.in_flight_action,
+                       else: nil
+                     )
                  )
-               else
-                 Repo.rollback(:intent_no_longer_unfinished)
-               end
-             end,
-             mode: :immediate
-           ) do
+               )
+             else
+               Repo.rollback(:intent_no_longer_unfinished)
+             end
+           end) do
         {:ok, blocked_intent} ->
           record_activity_by_intent(
             blocked_intent,
