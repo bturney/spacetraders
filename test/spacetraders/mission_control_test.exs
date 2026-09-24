@@ -187,8 +187,8 @@ defmodule SpaceTraders.MissionControlTest do
                expected: nil,
                realized: %{
                  completed_round_trips: 0,
-                 realized_net_credit_change: 0,
-                 realized_sale_value: 0
+                 realized_net_credit_change: nil,
+                 realized_sale_value: nil
                },
                contribution: %{commitment_count: 0, expected_value: 0},
                limitation: nil,
@@ -205,6 +205,7 @@ defmodule SpaceTraders.MissionControlTest do
       assert report.contribution.commitment_count == 1
       assert report.contribution.expected_value == 100
       assert report.contribution.claims == ["SHIP-1"]
+      assert report.realized.realized_net_credit_change == nil
       assert report.attention == []
       assert report.limitation == nil
     end
@@ -242,6 +243,30 @@ defmodule SpaceTraders.MissionControlTest do
       assert report.realized.realized_sale_value == 150
       assert report.realized.realized_net_credit_change == 100
     end
+  end
+
+  test "Attention is scoped and repeated observation does not clear acknowledgement" do
+    owner = operator_fixture()
+    other = operator_fixture()
+    owner_scope = Scope.for_operator(owner)
+    other_scope = Scope.for_operator(other)
+
+    assert {:ok, condition} =
+             MissionControl.raise_condition(owner_scope, "floor", :attention, "Credit floor infeasible")
+
+    assert MissionControl.acknowledge_condition(other_scope, condition.id) ==
+             {:error, :condition_unavailable}
+
+    assert MissionControl.unresolved_conditions(other_scope) == []
+    assert :ok = MissionControl.acknowledge_condition(owner_scope, condition.id)
+
+    assert {:ok, repeated} =
+             MissionControl.raise_condition(owner_scope, "floor", :attention, "Credit floor infeasible")
+
+    assert repeated.id == condition.id
+    assert repeated.acknowledged_at
+    assert [%{id: id}] = MissionControl.unresolved_conditions(owner_scope)
+    assert id == condition.id
   end
 
   defp execution_fixture do

@@ -10,6 +10,12 @@ defmodule SpaceTraders.MissionControl do
 
   alias SpaceTraders.Agent.Scope
   alias SpaceTraders.Agent.Agent, as: AgentRecord
+  alias SpaceTraders.Agent.Operator
+  alias SpaceTraders.MissionControl.Condition
+  alias SpaceTraders.FleetAllocation.StrategyDecisionEpisode
+  alias SpaceTraders.FleetStrategy.Revision
+  alias SpaceTraders.Repo
+  import Ecto.Query, only: [from: 2]
 
   alias SpaceTraders.{
     Agent,
@@ -83,8 +89,248 @@ defmodule SpaceTraders.MissionControl do
       generations: generations,
       fleets: Enum.map(snapshots, &fleet_overview(&1, generations)),
       objectives: objective_overviews(strategy.active_revision, generations),
-      market_execution: market_execution(scope)
+      market_execution: market_execution(scope),
+      conditions: unresolved_conditions(scope),
+      notable_activity: activity(scope) |> Enum.take(5)
     }
+  end
+
+  @doc "Records a durable, idempotent condition for an Operator; only a changed condition reopens it."
+  def raise_condition(%Scope{operator: %{id: operator_id}}, key, kind, summary)
+      when is_binary(key) and kind in [:attention, :intervention] and is_binary(summary) do
+    attrs = %{operator_id: operator_id, key: key, kind: kind, summary: summary}
+
+    result =
+      Repo.transaction(fn ->
+        Repo.one!(
+          from operator in Operator, where: operator.id == ^operator_id, lock: "FOR UPDATE"
+        )
+
+        case Repo.one(
+               from condition in Condition,
+                 where:
+                   condition.operator_id == ^operator_id and condition.key == ^key and
+                     is_nil(condition.resolved_at)
+             ) do
+          nil ->
+            %Condition{} |> Condition.changeset(attrs) |> Repo.insert!()
+
+          %{kind: ^kind, summary: ^summary} = condition ->
+            condition
+
+          condition ->
+            condition
+            |> Condition.changeset(Map.put(attrs, :acknowledged_at, nil))
+            |> Repo.update!()
+        end
+      end)
+
+    if match?({:ok, _}, result), do: notify_conditions(operator_id)
+    result
+  end
+
+  @doc "Acknowledges that the Operator saw a condition; it remains unresolved and pinned."
+  def acknowledge_condition(%Scope{operator: %{id: operator_id}}, id) when is_integer(id) do
+    {count, _} =
+      Repo.update_all(
+        from(condition in Condition,
+          where:
+            condition.id == ^id and condition.operator_id == ^operator_id and
+              is_nil(condition.resolved_at) and is_nil(condition.acknowledged_at)
+        ),
+        set: [acknowledged_at: DateTime.utc_now()]
+      )
+
+    if count == 1 or
+         Repo.exists?(
+           from c in Condition,
+             where: c.id == ^id and c.operator_id == ^operator_id and is_nil(c.resolved_at)
+         ) do
+      if count == 1, do: notify_conditions(operator_id)
+      :ok
+    else
+      {:error, :condition_unavailable}
+    end
+  end
+
+  @doc "Resolves a condition only after its producer establishes the underlying change."
+  def resolve_condition(%Scope{operator: %{id: operator_id}}, key) when is_binary(key) do
+    {count, _} =
+      Repo.update_all(
+        from(condition in Condition,
+          where:
+            condition.operator_id == ^operator_id and condition.key == ^key and
+              is_nil(condition.resolved_at)
+        ),
+        set: [resolved_at: DateTime.utc_now()]
+      )
+
+    if count > 0, do: notify_conditions(operator_id)
+    :ok
+  end
+
+  defp notify_conditions(operator_id) do
+    Phoenix.PubSub.broadcast(
+      SpaceTraders.PubSub,
+      "mission_conditions:#{operator_id}",
+      :mission_conditions_updated
+    )
+  end
+
+  @doc "Returns unresolved Operator conditions, including acknowledged ones."
+  def unresolved_conditions(%Scope{operator: %{id: operator_id}}) do
+    Repo.all(
+      from condition in Condition,
+        where: condition.operator_id == ^operator_id and is_nil(condition.resolved_at),
+        order_by: [asc: condition.inserted_at, asc: condition.id]
+    )
+  end
+
+  @doc "Chronological consequential decisions and conditions for the signed-in Operator."
+  def activity(%Scope{operator: %{id: operator_id}} = scope) do
+    decisions =
+      Repo.all(
+        from episode in StrategyDecisionEpisode,
+          where: episode.operator_id == ^operator_id,
+          order_by: [desc: episode.inserted_at, desc: episode.id],
+          limit: 100
+      )
+      |> Enum.map(fn episode ->
+        %{
+          id: "decision-#{episode.id}",
+          type: :decision,
+          at: episode.inserted_at,
+          summary: decision_summary(episode)
+        }
+      end)
+
+    conditions =
+      Repo.all(
+        from condition in Condition,
+          where: condition.operator_id == ^operator_id,
+          order_by: [desc: condition.inserted_at, desc: condition.id],
+          limit: 100
+      )
+      |> Enum.map(fn condition ->
+        %{
+          id: "condition-#{condition.id}",
+          type: condition.kind,
+          at: condition.inserted_at,
+          summary: condition.summary
+        }
+      end)
+
+    generations =
+      scope
+      |> FleetGeneration.list_generations()
+      |> Enum.map(fn generation ->
+        %{
+          id: "generation-#{generation.id}",
+          type: :milestone,
+          at: generation.inserted_at,
+          summary: "Fleet Generation #{generation.number} began with #{generation.symbol}"
+        }
+      end)
+
+    (decisions ++ conditions ++ generations)
+    |> Enum.sort_by(& &1.at, {:desc, DateTime})
+  end
+
+  defp decision_summary(%{
+         classification: :realized,
+         actual_outcomes: %{"net_credit_change" => change}
+       })
+       when is_number(change),
+       do: "Fleet decision realized #{change} credits net change"
+
+  defp decision_summary(%{classification: :partially_realized}),
+    do: "Fleet decision partially realized"
+
+  defp decision_summary(%{classification: :reset_censored}),
+    do: "Fleet decision interrupted by Server Reset"
+
+  defp decision_summary(%{classification: :superseded}), do: "Fleet decision superseded"
+  defp decision_summary(_), do: "Fleet selected a new commitment portfolio"
+
+  @doc "Comparable Fleet Generation chapters using only retained outcome evidence."
+  def generation_recaps(%Scope{operator: %{id: operator_id}} = scope) do
+    generations = FleetGeneration.list_generations(scope)
+
+    episodes =
+      Repo.all(
+        from episode in StrategyDecisionEpisode,
+          where: episode.operator_id == ^operator_id,
+          select: episode
+      )
+      |> Enum.group_by(& &1.fleet_generation_id)
+
+    revision_ids =
+      generations
+      |> Enum.map(& &1.fleet_strategy_revision_id)
+      |> Kernel.++(
+        for {_id, entries} <- episodes, entry <- entries, do: entry.fleet_strategy_revision_id
+      )
+      |> Enum.reject(&is_nil/1)
+      |> Enum.uniq()
+
+    revisions =
+      Repo.all(from revision in Revision, where: revision.id in ^revision_ids)
+      |> Map.new(&{&1.id, &1})
+
+    Enum.map(generations, fn generation ->
+      decisions = Map.get(episodes, generation.id, [])
+
+      credit_changes =
+        for %{classification: :realized, actual_outcomes: %{"net_credit_change" => change}} <-
+              decisions,
+            is_number(change),
+            do: change
+
+      next_generation = Enum.find(generations, &(&1.number == generation.number + 1))
+
+      %{
+        generation: generation,
+        revisions:
+          [
+            generation.fleet_strategy_revision_id
+            | Enum.map(decisions, & &1.fleet_strategy_revision_id)
+          ]
+          |> Enum.reject(&is_nil/1)
+          |> Enum.uniq()
+          |> Enum.map(&Map.get(revisions, &1))
+          |> Enum.reject(&is_nil/1)
+          |> Enum.map(& &1.number)
+          |> Enum.sort(),
+        objective_outcomes:
+          generation_objective_outcomes(
+            generation,
+            Map.get(revisions, generation.fleet_strategy_revision_id)
+          ),
+        realized_credit_change: if(credit_changes == [], do: nil, else: Enum.sum(credit_changes)),
+        realized_decisions: Enum.count(decisions, &(&1.classification == :realized)),
+        limitations:
+          Enum.count(decisions, &(&1.classification in [:partially_realized, :reset_censored])),
+        resumed?: next_generation && not is_nil(next_generation.strategy_capable_at)
+      }
+    end)
+  end
+
+  defp generation_objective_outcomes(_generation, nil), do: []
+
+  defp generation_objective_outcomes(generation, revision) do
+    revision.document
+    |> Map.get("objectives", [])
+    |> Enum.with_index()
+    |> Enum.map(fn {objective, index} ->
+      facts = generation.objective_progress[Integer.to_string(index)]
+
+      evaluation =
+        if is_map(facts),
+          do: FleetStrategy.evaluate_objective(revision, index, atomize_keys(facts)),
+          else: {:error, :unknown}
+
+      %{name: objective["objective"], evaluation: evaluation}
+    end)
   end
 
   @doc """
@@ -101,8 +347,8 @@ defmodule SpaceTraders.MissionControl do
           expected: nil,
           realized: %{
             completed_round_trips: 0,
-            realized_net_credit_change: 0,
-            realized_sale_value: 0
+            realized_net_credit_change: nil,
+            realized_sale_value: nil
           },
           contribution: %{commitment_count: 0, expected_value: 0},
           limitation: nil,
@@ -115,7 +361,7 @@ defmodule SpaceTraders.MissionControl do
           realized: realized_economics(portfolio),
           contribution: contribution(portfolio),
           limitation: limitation(portfolio),
-          attention: attention(portfolio)
+          attention: []
         }
     end
   end
@@ -307,6 +553,7 @@ defmodule SpaceTraders.MissionControl do
       facts = generation && Map.get(generation.objective_progress, Integer.to_string(index))
 
       %{
+        priority: index + 1,
         objective: objective,
         evaluation:
           if(is_map(facts),
@@ -347,8 +594,9 @@ defmodule SpaceTraders.MissionControl do
 
     %{
       completed_round_trips: length(trips),
-      realized_net_credit_change: Enum.sum_by(trips, & &1.net_credit_change),
-      realized_sale_value: Enum.sum_by(trips, & &1.sale_value)
+      realized_net_credit_change:
+        if(trips == [], do: nil, else: Enum.sum_by(trips, & &1.net_credit_change)),
+      realized_sale_value: if(trips == [], do: nil, else: Enum.sum_by(trips, & &1.sale_value))
     }
   end
 
@@ -380,30 +628,6 @@ defmodule SpaceTraders.MissionControl do
   defp limitation(%FleetAllocation.Portfolio{} = portfolio) do
     if portfolio.commitments == [] do
       "No eligible Market commitment is active for this Fleet Generation."
-    end
-  end
-
-  defp attention(%FleetAllocation.Portfolio{} = portfolio) do
-    portfolio.commitments
-    |> Enum.flat_map(&commitment_attention/1)
-  end
-
-  defp commitment_attention(%FleetAllocation.Commitment{} = commitment) do
-    case FleetExecution.last_realized_sell(commitment) do
-      nil ->
-        if commitment.unwind_state == :released do
-          [
-            %{
-              candidate_id: commitment.candidate_id,
-              summary: "Commitment was released without realization"
-            }
-          ]
-        else
-          []
-        end
-
-      _intent ->
-        []
     end
   end
 end

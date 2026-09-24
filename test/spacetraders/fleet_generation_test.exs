@@ -9,7 +9,31 @@ defmodule SpaceTraders.FleetGenerationTest do
   alias SpaceTraders.FleetGeneration
   alias SpaceTraders.Fleet.{Intent, Intents, Ship}
   alias SpaceTraders.FleetStrategy
+  alias SpaceTraders.MissionControl
   alias SpaceTraders.Repo
+
+  test "missing replacement authority remains a durable Intervention until authority is restored" do
+    operator = operator_fixture()
+    scope = Scope.for_operator(operator)
+
+    assert {:error, :account_token_not_linked} =
+             FleetGeneration.mint(scope, %{symbol: "NEEDSKEY", faction: "COSMIC"})
+
+    assert [%{kind: :intervention, summary: summary}] =
+             MissionControl.unresolved_conditions(scope)
+
+    assert summary =~ "AccountToken"
+
+    {:ok, operator} = Agent.link_account_token(operator, "ACCOUNT_TOKEN_SECRET")
+    scope = Scope.for_operator(operator)
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      Req.Test.json(conn, registration_body("NEEDSKEY", "NEEDSKEY-1", "TOKEN"))
+    end)
+
+    assert {:ok, _} = FleetGeneration.mint(scope, %{symbol: "NEEDSKEY", faction: "COSMIC"})
+    assert MissionControl.unresolved_conditions(scope) == []
+  end
 
   test "a definitive Server Reset activates and bootstraps a fallback Fleet Generation" do
     operator = operator_fixture()

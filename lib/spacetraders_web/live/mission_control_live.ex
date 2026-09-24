@@ -11,6 +11,7 @@ defmodule SpaceTradersWeb.MissionControlLive do
 
     if connected?(socket) do
       Phoenix.PubSub.subscribe(SpaceTraders.PubSub, "fleet_strategy:#{operator_id}")
+      Phoenix.PubSub.subscribe(SpaceTraders.PubSub, "mission_conditions:#{operator_id}")
     end
 
     {:ok, assign_projection(socket)}
@@ -49,6 +50,33 @@ defmodule SpaceTradersWeb.MissionControlLive do
             >Review Fleet Strategy</.link>
             <.link :if={@projection.fleets == []} navigate={~p"/agents/new"} class="btn btn-outline">Mint an Agent</.link>
           </div>
+        </section>
+
+        <section id="operating-health" class="rounded-2xl border border-base-300 bg-base-100 p-5">
+          <p class="eyebrow">Operating health</p>
+          <h2 class="mt-2 text-2xl font-bold">{health_label(@projection)}</h2>
+          <p class="mt-1 text-sm opacity-70">{health_detail(@projection)}</p>
+        </section>
+
+        <section id="needs-attention" class="rounded-2xl border border-base-300 bg-base-100 p-5">
+          <h2 class="text-xl font-bold">Needs attention</h2>
+          <p :if={@projection.conditions == []} class="mt-2 text-sm opacity-70">
+            No unresolved Attention or Intervention.
+          </p>
+          <ul class="mt-3 space-y-3">
+            <li :for={condition <- @projection.conditions} class="border-t border-base-300 pt-3">
+              <strong>{if condition.kind == :intervention, do: "Intervention", else: "Attention"}</strong>
+              <p>{condition.summary}</p>
+              <span :if={condition.acknowledged_at} class="text-sm opacity-70">Acknowledged · unresolved</span>
+              <button
+                :if={!condition.acknowledged_at}
+                type="button"
+                phx-click="acknowledge"
+                phx-value-id={condition.id}
+                class="btn btn-ghost btn-sm"
+              >Acknowledge</button>
+            </li>
+          </ul>
         </section>
 
         <section id="strategy-context" class="grid gap-4 lg:grid-cols-3">
@@ -109,7 +137,7 @@ defmodule SpaceTradersWeb.MissionControlLive do
             <div>
               <p class="text-sm opacity-70">Realized net credit change</p>
               <p class="mt-1 font-semibold">
-                {@projection.market_execution.realized.realized_net_credit_change}
+                {realized_label(@projection.market_execution.realized.realized_net_credit_change)}
               </p>
             </div>
             <div>
@@ -124,17 +152,6 @@ defmodule SpaceTradersWeb.MissionControlLive do
             class="mt-4 rounded-xl bg-warning/10 p-4 text-sm"
           >
             {limitation_label(@projection.market_execution.limitation)}
-          </div>
-          <div
-            :if={@projection.market_execution.attention != []}
-            class="mt-4 rounded-xl bg-warning/10 p-4"
-          >
-            <p class="font-semibold">Attention</p>
-            <ul class="mt-2 list-inside list-disc text-sm">
-              <li :for={item <- @projection.market_execution.attention}>
-                {item.summary}
-              </li>
-            </ul>
           </div>
         </section>
 
@@ -154,7 +171,7 @@ defmodule SpaceTradersWeb.MissionControlLive do
             :for={objective <- @projection.objectives}
             class="rounded-2xl border border-base-300 bg-base-100 p-5"
           >
-            <h3 class="font-bold">{objective.objective["objective"]}</h3>
+            <h3 class="font-bold">{objective.priority}. {objective.objective["objective"]}</h3>
             <p class="mt-1 text-sm opacity-70">{objective.objective["evaluation"]}</p>
             <p class="mt-4 text-sm">{evaluation_label(objective.evaluation)}</p>
           </article>
@@ -173,19 +190,24 @@ defmodule SpaceTradersWeb.MissionControlLive do
               </div><span class="badge">{fleet_status(fleet)}</span>
             </div>
             <p class="mt-3 text-sm">{fleet_contribution(fleet)}</p>
-            <div :if={fleet.control.attention != []} class="mt-4 rounded-xl bg-warning/10 p-4">
-              <p class="font-semibold">Attention</p>
-              <ul class="mt-2 list-inside list-disc text-sm">
-                <li :for={ship <- fleet.control.attention}>
-                  {ship.symbol}: {ship.control.attention.summary}
-                </li>
-              </ul>
-              <.link navigate={~p"/intervention"} class="link link-primary mt-3 inline-block text-sm">Review Manual Intervention</.link>
-            </div>
-            <div :if={fleet.activity != []} class="mt-4 border-t border-base-300 pt-4">
-              <p class="eyebrow">Activity</p><p class="mt-2 text-sm">{hd(fleet.activity).message}</p>
-            </div>
           </article>
+        </section>
+
+        <section id="notable-activity" class="rounded-2xl border border-base-300 bg-base-100 p-5">
+          <div class="flex items-center justify-between gap-3">
+            <h2 class="text-xl font-bold">Notable activity</h2>
+            <.link navigate={~p"/activity"} class="link link-primary text-sm">All Activity</.link>
+          </div>
+          <p :if={@projection.notable_activity == []} class="mt-2 text-sm opacity-70">
+            No consequential events recorded yet.
+          </p>
+          <ul class="mt-3 space-y-2 text-sm">
+            <li :for={entry <- @projection.notable_activity}>
+              <span class="font-semibold">{entry.type |> Atom.to_string() |> String.capitalize()}</span>
+              · {entry.summary}
+            </li>
+          </ul>
+          <.link navigate={~p"/generations"} class="link link-primary mt-4 inline-block text-sm">Compare Fleet Generations</.link>
         </section>
       </div>
     </Layouts.app>
@@ -193,9 +215,22 @@ defmodule SpaceTradersWeb.MissionControlLive do
   end
 
   @impl true
+  def handle_event("acknowledge", %{"id" => raw_id}, socket) do
+    with {id, ""} <- Integer.parse(raw_id),
+         :ok <- MissionControl.acknowledge_condition(socket.assigns.current_scope, id) do
+      {:noreply, assign_projection(socket)}
+    else
+      _ -> {:noreply, socket}
+    end
+  end
+
+  @impl true
   def handle_info({:fleet_strategy_updated, operator_id}, socket)
       when operator_id == socket.assigns.current_scope.operator.id,
       do: {:noreply, assign_projection(socket)}
+
+  def handle_info(:mission_conditions_updated, socket),
+    do: {:noreply, assign_projection(socket)}
 
   def handle_info(_message, socket), do: {:noreply, socket}
 
@@ -204,6 +239,44 @@ defmodule SpaceTradersWeb.MissionControlLive do
 
   defp current_generation(projection),
     do: Enum.find(projection.generations, &is_nil(&1.retired_at))
+
+  defp health_label(%{strategy: %{emergency_stopped_at: %DateTime{}}}), do: "STOPPED"
+  defp health_label(%{strategy: %{active_revision: nil}}), do: "Awaiting Fleet Strategy"
+  defp health_label(%{conditions: [_ | _]}), do: "Needs Operator attention"
+
+  defp health_label(projection) do
+    case current_generation(projection) do
+      nil ->
+        "Awaiting Fleet Generation"
+
+      %{fenced_at: %DateTime{}} ->
+        "Server Reset transition"
+
+      %{strategy_capable_at: nil} ->
+        "Establishing Fleet state"
+
+      _ ->
+        if Enum.any?(projection.fleets, &unknown_fleet?/1),
+          do: "Fleet health unknown",
+          else: "Operating normally"
+    end
+  end
+
+  defp health_detail(%{strategy: %{emergency_stopped_at: %DateTime{}}}),
+    do: "Emergency Stop suppresses every new gameplay mutation. Review Strategy to resume safely."
+
+  defp health_detail(%{conditions: [_ | _]}),
+    do: "Unresolved conditions remain pinned below, including acknowledged ones."
+
+  defp health_detail(%{fleets: fleets}) do
+    if Enum.any?(fleets, &unknown_fleet?/1),
+      do: "Authoritative Agent or Ship state is unavailable; this is not a zero measurement.",
+      else: "Review objective outcomes, Fleet contribution and recent decisions below."
+  end
+
+  defp unknown_fleet?(%{overview: {:error, _}}), do: true
+  defp unknown_fleet?(%{ships: {:error, _}}), do: true
+  defp unknown_fleet?(_), do: false
 
   defp strategy_capable_label(%{strategy_capable_at: %DateTime{}}), do: "Strategy-capable"
   defp strategy_capable_label(_), do: "Not Strategy-capable"
@@ -255,6 +328,9 @@ defmodule SpaceTradersWeb.MissionControlLive do
 
   defp contribution_label(%{commitment_count: count}),
     do: "#{count} Market commitment(s) contributing."
+
+  defp realized_label(nil), do: "Unknown — no completed round trip evidence"
+  defp realized_label(amount), do: "#{amount} credits"
 
   defp limitation_label(limitation), do: limitation
 end

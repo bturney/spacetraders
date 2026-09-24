@@ -17,7 +17,7 @@ defmodule SpaceTraders.FleetGeneration do
   alias SpaceTraders.Fleet.{Ship, ShipServer}
   alias SpaceTraders.FleetGeneration.Generation
   alias SpaceTraders.FleetStrategy.{Revision, Strategy}
-  alias SpaceTraders.{Evidence, Fleet, FleetStrategy, Repo, Timeline}
+  alias SpaceTraders.{Evidence, Fleet, FleetStrategy, MissionControl, Repo, Timeline}
 
   defmodule CredentialReference do
     @moduledoc "A non-secret reference to an Operator's stored AccountToken."
@@ -67,7 +67,34 @@ defmodule SpaceTraders.FleetGeneration do
   @doc "Mints a new Fleet Generation for the authenticated Operator."
   def mint(%Scope{operator: %Operator{id: operator_id}} = scope, attrs) do
     :global.trans({{__MODULE__, :mint, operator_id}, self()}, fn ->
-      do_mint(scope, attrs, operator_id)
+      result = do_mint(scope, attrs, operator_id)
+
+      case result do
+        {:error, :account_token_not_linked} ->
+          MissionControl.raise_condition(
+            scope,
+            "replacement-authority",
+            :intervention,
+            "AccountToken authority is unavailable. Link an AccountToken to mint a Fleet Generation."
+          )
+
+        {:error, :replacement_symbols_exhausted} ->
+          MissionControl.raise_condition(
+            scope,
+            "replacement-symbols",
+            :intervention,
+            "Replacement Agent symbols are exhausted. Revise the replacement identity choices."
+          )
+
+        {:ok, _} ->
+          MissionControl.resolve_condition(scope, "replacement-authority")
+          MissionControl.resolve_condition(scope, "replacement-symbols")
+
+        _ ->
+          :ok
+      end
+
+      result
     end)
   end
 
