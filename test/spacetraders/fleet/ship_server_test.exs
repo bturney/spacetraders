@@ -297,9 +297,10 @@ defmodule SpaceTraders.Fleet.ShipServerTest do
     end
   end
 
-  describe "Miner Job continuation" do
-    test "continues extraction after a cooldown wakeup without crashing the server" do
+  describe "legacy Job timer" do
+    test "fires a cooldown without continuing extraction or crashing the server" do
       agent = Repo.get!(Agent, @agent_id)
+      test_pid = self()
 
       ship =
         Repo.insert!(%Ship{
@@ -335,6 +336,8 @@ defmodule SpaceTraders.Fleet.ShipServerTest do
             })
 
           {"/v2/my/ships/MINER-JOB-SHIP/extract", "POST"} ->
+            send(test_pid, :legacy_extract)
+
             Req.Test.json(conn, %{
               "data" => %{
                 "cooldown" => %{
@@ -370,12 +373,8 @@ defmodule SpaceTraders.Fleet.ShipServerTest do
       assert [{pid, _}] = Registry.lookup(SpaceTraders.Fleet.ShipRegistry, "MINER-JOB-SHIP")
       assert Process.alive?(pid)
 
-      assert eventually(fn ->
-               match?(
-                 [%Event{event_type: "cooldown"}],
-                 Timeline.pending_events(:ship, "MINER-JOB-SHIP")
-               )
-             end)
+      assert Timeline.pending_events(:ship, "MINER-JOB-SHIP") == []
+      refute_receive :legacy_extract, 100
     end
   end
 

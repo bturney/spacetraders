@@ -85,7 +85,7 @@ defmodule SpaceTraders.Fleet.ShipServer do
     end
   end
 
-  @doc "Clears locally pending timers after an Operator preempts a Miner Job."
+  @doc "Clears locally pending timers after Operator preemption."
   def cancel_pending(ship_symbol) do
     case Registry.lookup(SpaceTraders.Fleet.ShipRegistry, ship_symbol) do
       [{pid, _}] -> GenServer.call(pid, :cancel_pending, 5_000)
@@ -153,7 +153,7 @@ defmodule SpaceTraders.Fleet.ShipServer do
   @impl true
   def handle_info({:timeline, %Event{} = event}, state) do
     SpaceTraders.Observability.with_context(
-      [intent_id: event.payload["intent_id"], job_id: event.payload["job_id"]],
+      [intent_id: event.payload["intent_id"]],
       fn ->
         type = String.to_existing_atom(event.event_type)
 
@@ -194,8 +194,7 @@ defmodule SpaceTraders.Fleet.ShipServer do
             state.symbol,
             ship,
             type,
-            event.payload["intent_id"],
-            event.payload["job_id"]
+            event.payload["intent_id"]
           )
 
           {:noreply, state}

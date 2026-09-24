@@ -176,6 +176,59 @@ defmodule SpaceTraders.IntentsTest do
              )
   end
 
+  test "Fleet Strategy cannot configure a legacy Job" do
+    agent = agent_fixture("INTENTS-NO-JOB")
+    ship_fixture(agent, "INTENTS-NO-JOB-SHIP")
+    activate_ship_claim(agent, "INTENTS-NO-JOB-SHIP")
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      flunk("legacy Job configuration made a game request: #{conn.request_path}")
+    end)
+
+    job_configurations = [
+      fn ->
+        Fleet.configure_miner_job(agent, "INTENTS-NO-JOB-SHIP", %{
+          extraction_waypoint: "X1-UX81-A2",
+          market_waypoint: "X1-UX81-A1",
+          cargo_threshold: 20
+        })
+      end,
+      fn -> Fleet.configure_survey_job(agent, "INTENTS-NO-JOB-SHIP", %{}) end,
+      fn -> Fleet.configure_explorer_job(agent, "INTENTS-NO-JOB-SHIP") end,
+      fn -> Fleet.configure_procurement_job(agent, "INTENTS-NO-JOB-SHIP", %{}) end,
+      fn -> Fleet.configure_construction_supply_job(agent, "INTENTS-NO-JOB-SHIP", %{}) end,
+      fn -> Fleet.configure_outfitting_job(agent, "INTENTS-NO-JOB-SHIP", %{}) end,
+      fn -> Fleet.configure_market_trading_job(agent, "INTENTS-NO-JOB-SHIP", %{}) end,
+      fn -> Fleet.configure_market_reconnaissance_job(agent, "INTENTS-NO-JOB-SHIP", %{}) end,
+      fn ->
+        Fleet.configure_market_trading_job_from_reconnaissance(
+          agent,
+          "INTENTS-NO-JOB-SHIP",
+          123,
+          0,
+          %{}
+        )
+      end
+    ]
+
+    for configure <- job_configurations do
+      assert {:error, :legacy_gameplay_retired} = configure.()
+    end
+  end
+
+  test "Fleet Strategy cannot dispatch a Job-owned Intent" do
+    agent = agent_fixture("INTENTS-NO-JOB-DISPATCH")
+    ship_fixture(agent, "INTENTS-NO-JOB-DISPATCH-SHIP")
+    activate_ship_claim(agent, "INTENTS-NO-JOB-DISPATCH-SHIP")
+
+    owner = %Intents.JobOwner{job: %Job{id: 42, type: "miner"}}
+
+    assert {:error, :legacy_gameplay_retired} =
+             Intents.request(agent, owner, "INTENTS-NO-JOB-DISPATCH-SHIP", %Intents.Navigate{
+               waypoint: "X1-UX81-A2"
+             })
+  end
+
   test "boot reconstructs a commitment-owned waiting Intent without a Job" do
     agent = agent_fixture("INTENTS-RECOVER")
     ship = ship_fixture(agent, "INTENTS-RECOVER-SHIP")
@@ -2755,6 +2808,65 @@ defmodule SpaceTraders.IntentsTest do
   end
 
   describe "trigger reconciliation" do
+    test "a Job-owned wakeup does not resume legacy execution" do
+      agent = agent_fixture()
+      ship = ship_fixture(agent, "FLEET-SHIP")
+
+      job =
+        Repo.insert!(%Job{
+          ship_id: ship.id,
+          type: "miner",
+          status: "waiting",
+          extraction_waypoint: "X1-UX81-A2",
+          market_waypoint: "X1-UX81-A1",
+          cargo_threshold: 20
+        })
+
+      intent =
+        Repo.insert!(%Intent{
+          ship_id: ship.id,
+          job_id: job.id,
+          caller: "job",
+          type: "navigate",
+          target_waypoint: "X1-UX81-A2",
+          status: "waiting"
+        })
+
+      live_ship = %Model.Ship{
+        symbol: "FLEET-SHIP",
+        nav: %Model.ShipNav{status: "DOCKED", waypoint_symbol: "X1-UX81-A2"}
+      }
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        flunk("Job wakeup made a game request: #{conn.request_path}")
+      end)
+
+      assert :ok = Intents.reconcile(agent.id, ship.symbol, live_ship, :arrival, intent.id)
+      assert Repo.get!(Intent, intent.id).status == "waiting"
+      assert Repo.get!(Job, job.id).status == "waiting"
+    end
+
+    test "boot does not recover a Job-owned Intent" do
+      agent = agent_fixture()
+      ship = ship_fixture(agent, "FLEET-SHIP")
+
+      intent =
+        Repo.insert!(%Intent{
+          ship_id: ship.id,
+          caller: "job",
+          type: "navigate",
+          target_waypoint: "X1-UX81-A2",
+          status: "waiting"
+        })
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        flunk("Job boot recovery made a game request: #{conn.request_path}")
+      end)
+
+      assert :ok = Intents.reconcile(agent.id, ship.symbol, nil, :boot, intent.id)
+      assert Repo.get!(Intent, intent.id).status == "waiting"
+    end
+
     test "arrival revalidation completes the Intent at the requested Waypoint" do
       agent = agent_fixture()
       ship = ship_fixture(agent, "FLEET-SHIP")

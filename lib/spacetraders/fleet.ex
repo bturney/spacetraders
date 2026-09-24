@@ -49,6 +49,12 @@ defmodule SpaceTraders.Fleet do
   @max_recovery_attempts 5
   @recovery_window_seconds 15 * 60
 
+  defp legacy_job_admission(%AgentRecord{operator_id: operator_id}) do
+    if SpaceTraders.LegacyRetirement.active_for_operator?(operator_id),
+      do: {:error, :legacy_gameplay_retired},
+      else: :ok
+  end
+
   @doc "Safely retires pre-stop execution state before fresh Fleet planning."
   def prepare_emergency_stop_resume(operator_id, now) do
     current_ship_ids = operator_ship_ids(operator_id, :current_generation)
@@ -596,7 +602,8 @@ defmodule SpaceTraders.Fleet do
 
   @doc "Saves a Miner Job configuration without activating it."
   def configure_miner_job(%AgentRecord{} = agent, ship_symbol, attrs) when is_map(attrs) do
-    with {:ok, ship} <- owned_ship(agent, ship_symbol),
+    with :ok <- legacy_job_admission(agent),
+         {:ok, ship} <- owned_ship(agent, ship_symbol),
          nil <- unfinished_job(ship.id),
          {:ok, job} <- insert_miner_job(ship, attrs) do
       record_activity(agent, ship, "configuration", "Miner Job configuration changed")
@@ -612,7 +619,8 @@ defmodule SpaceTraders.Fleet do
       when is_binary(token) and token != "" and is_map(attrs) do
     waypoint_symbol = attrs[:extraction_waypoint] || attrs["extraction_waypoint"]
 
-    with :ok <- Agent.execution_allowed?(agent),
+    with :ok <- legacy_job_admission(agent),
+         :ok <- Agent.execution_allowed?(agent),
          {:ok, ship} <- owned_ship(agent, ship_symbol),
          nil <- unfinished_job(ship.id),
          true <- is_binary(waypoint_symbol) and waypoint_symbol != "",
@@ -659,7 +667,8 @@ defmodule SpaceTraders.Fleet do
   @doc "Captures a Ship's authoritative current System as a paused System Exploration Job."
   def configure_explorer_job(%AgentRecord{agent_token: token} = agent, ship_symbol)
       when is_binary(token) and token != "" do
-    with :ok <- Agent.execution_allowed?(agent),
+    with :ok <- legacy_job_admission(agent),
+         :ok <- Agent.execution_allowed?(agent),
          {:ok, ship} <- owned_ship(agent, ship_symbol),
          nil <- unfinished_job(ship.id),
          {:ok, live_ship} <-
@@ -706,7 +715,8 @@ defmodule SpaceTraders.Fleet do
   @doc "Captures a paused Procurement Job for one Contract, Construction, or Market recipient."
   def configure_procurement_job(%AgentRecord{agent_token: token} = agent, ship_symbol, attrs)
       when is_binary(token) and token != "" and is_map(attrs) do
-    with :ok <- Agent.execution_allowed?(agent),
+    with :ok <- legacy_job_admission(agent),
+         :ok <- Agent.execution_allowed?(agent),
          {:ok, ship} <- owned_ship(agent, ship_symbol),
          nil <- unfinished_job(ship.id),
          :ok <- validate_procurement_attrs(attrs),
@@ -749,7 +759,8 @@ defmodule SpaceTraders.Fleet do
         attrs
       )
       when is_binary(token) and token != "" and is_map(attrs) do
-    with :ok <- Agent.execution_allowed?(agent),
+    with :ok <- legacy_job_admission(agent),
+         :ok <- Agent.execution_allowed?(agent),
          {:ok, ship} <- owned_ship(agent, ship_symbol),
          nil <- unfinished_job(ship.id),
          {:ok, live_ship} <-
@@ -787,7 +798,8 @@ defmodule SpaceTraders.Fleet do
   @doc "Captures a paused Ship Outfitting Job with its explicit readiness target and removal authority."
   def configure_outfitting_job(%AgentRecord{agent_token: token} = agent, ship_symbol, attrs)
       when is_binary(token) and token != "" and is_map(attrs) do
-    with {:ok, ship} <- owned_ship(agent, ship_symbol),
+    with :ok <- legacy_job_admission(agent),
+         {:ok, ship} <- owned_ship(agent, ship_symbol),
          nil <- unfinished_job(ship.id),
          {:ok, system} <- outfitting_source_system(agent, ship_symbol, attrs),
          {:ok, progress} <- outfitting_progress(attrs, system) do
@@ -1267,7 +1279,8 @@ defmodule SpaceTraders.Fleet do
   @doc "Captures a paused recurring Market Trading Job for the Ship's current System."
   def configure_market_trading_job(%AgentRecord{agent_token: token} = agent, ship_symbol, attrs)
       when is_binary(token) and token != "" and is_map(attrs) do
-    with :ok <- Agent.execution_allowed?(agent),
+    with :ok <- legacy_job_admission(agent),
+         :ok <- Agent.execution_allowed?(agent),
          {:ok, ship} <- owned_ship(agent, ship_symbol),
          nil <- unfinished_job(ship.id),
          {:ok, live_ship} <-
@@ -1298,7 +1311,8 @@ defmodule SpaceTraders.Fleet do
       )
       when is_binary(token) and token != "" and is_integer(reconnaissance_job_id) and
              is_integer(route_index) and is_map(attrs) do
-    with :ok <- Agent.execution_allowed?(agent),
+    with :ok <- legacy_job_admission(agent),
+         :ok <- Agent.execution_allowed?(agent),
          {:ok, ship} <- owned_ship(agent, ship_symbol),
          %Job{type: "market_reconnaissance"} = reconnaissance <-
            selectable_market_reconnaissance_job(agent.id, reconnaissance_job_id),
@@ -1354,7 +1368,8 @@ defmodule SpaceTraders.Fleet do
         attrs
       )
       when is_binary(token) and token != "" and is_map(attrs) do
-    with :ok <- Agent.execution_allowed?(agent),
+    with :ok <- legacy_job_admission(agent),
+         :ok <- Agent.execution_allowed?(agent),
          {:ok, ship} <- owned_ship(agent, ship_symbol),
          nil <- unfinished_job(ship.id),
          {:ok, live_ship} <-
@@ -4287,7 +4302,7 @@ defmodule SpaceTraders.Fleet do
       {:wait, :survey_available} ->
         survey = Intelligence.usable_survey(agent, job.extraction_waypoint)
         due_at = Timeline.parse_expiration(survey.expiration |> DateTime.to_iso8601(), 0)
-        schedule_survey_expiration_event(agent, live_ship.symbol, due_at, %{"job_id" => job.id})
+        schedule_survey_expiration_event(agent, live_ship.symbol, due_at, %{})
 
         {:ok,
          Repo.update!(
@@ -4435,11 +4450,12 @@ defmodule SpaceTraders.Fleet do
   @spec continue_job_event(non_neg_integer(), String.t(), map(), atom(), non_neg_integer() | nil) ::
           :ok | {:ok, Job.t()}
   def continue_job_event(agent_id, ship_symbol, live_ship, trigger, expected_job_id) do
-    with %Ship{} = ship <- Repo.get_by(Ship, agent_id: agent_id, symbol: ship_symbol),
+    with %AgentRecord{} = agent <- Repo.get(AgentRecord, agent_id),
+         :ok <- legacy_job_admission(agent),
+         %Ship{} = ship <- Repo.get_by(Ship, agent_id: agent_id, symbol: ship_symbol),
          %Job{} = config <- unfinished_job(ship.id),
          true <- job_matches_event?(config, expected_job_id),
          true <- config.status in @running_job_states,
-         %AgentRecord{} = agent <- Repo.get(AgentRecord, agent_id),
          :ok <- Agent.execution_allowed?(agent) do
       case trigger do
         :arrival -> job_arrival_event(agent, ship_symbol, config, live_ship)
@@ -5406,13 +5422,10 @@ defmodule SpaceTraders.Fleet do
     end
   end
 
-  defp maybe_schedule_live_cooldown(agent, %{symbol: ship_symbol, cooldown: cooldown}, job_id) do
+  defp maybe_schedule_live_cooldown(agent, %{symbol: ship_symbol, cooldown: cooldown}, _job_id) do
     due_at = Timeline.parse_expiration(cooldown.expiration, cooldown.remaining_seconds)
-    schedule_cooldown_event(agent, ship_symbol, due_at, %{"job_id" => job_id})
+    schedule_cooldown_event(agent, ship_symbol, due_at)
   end
-
-  defp maybe_put_job_id(payload, nil), do: payload
-  defp maybe_put_job_id(payload, job_id), do: Map.put(payload, "job_id", job_id)
 
   # Arms a persisted cooldown on the Ship's timer; Job policies only ever arm
   # through Timeline persistence plus ShipServer.
@@ -6060,9 +6073,10 @@ defmodule SpaceTraders.Fleet do
 
   @doc "Reconciles a persisted Miner Job's in-flight action after a process restart."
   def recover_job_on_boot(ship_symbol, agent_id) do
-    with %Ship{} = ship <- Repo.get_by(Ship, symbol: ship_symbol, agent_id: agent_id),
+    with %AgentRecord{} = agent <- Repo.get(AgentRecord, agent_id),
+         :ok <- legacy_job_admission(agent),
+         %Ship{} = ship <- Repo.get_by(Ship, symbol: ship_symbol, agent_id: agent_id),
          %Job{} = config <- unfinished_job(ship.id),
-         %AgentRecord{} = agent <- Repo.get(AgentRecord, agent_id),
          :ok <- Agent.execution_allowed?(agent) do
       if config.type in [
            "procurement",
@@ -6672,10 +6686,10 @@ defmodule SpaceTraders.Fleet do
          agent,
          ship_symbol,
          %{nav: %ShipNav{status: "IN_TRANSIT"} = nav},
-         job_id
+         _job_id
        ) do
     with {:ok, due_at} <- Timeline.parse_arrival(nav.route) do
-      payload = Timeline.arrival_payload(nav) |> maybe_put_job_id(job_id)
+      payload = Timeline.arrival_payload(nav)
 
       {:ok, event} =
         Timeline.schedule_event(:ship, ship_symbol, :arrival, due_at, payload)
@@ -6696,12 +6710,12 @@ defmodule SpaceTraders.Fleet do
 
   defp schedule_cooldown(_agent, _ship_symbol, _result), do: :ok
 
-  defp schedule_cooldown(agent, ship_symbol, result, job_id) do
+  defp schedule_cooldown(agent, ship_symbol, result, _job_id) do
     case result do
       %{cooldown: %{remaining_seconds: seconds, expiration: expiration}}
       when is_integer(seconds) and seconds > 0 ->
         due_at = Timeline.parse_expiration(expiration, seconds)
-        schedule_cooldown_event(agent, ship_symbol, due_at, %{"job_id" => job_id})
+        schedule_cooldown_event(agent, ship_symbol, due_at)
 
       _ ->
         :ok

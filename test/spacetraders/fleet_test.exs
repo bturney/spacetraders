@@ -157,18 +157,6 @@ defmodule SpaceTraders.FleetTest do
     }
   end
 
-  defp eventually(fun, attempts \\ 30)
-  defp eventually(_fun, 0), do: false
-
-  defp eventually(fun, attempts) do
-    if fun.() do
-      true
-    else
-      Process.sleep(10)
-      eventually(fun, attempts - 1)
-    end
-  end
-
   defp navigate_response(status), do: navigate_response(status, future_iso())
 
   defp navigate_response(status, arrival), do: navigate_response(status, arrival, "X1-UX81-A2")
@@ -758,10 +746,8 @@ defmodule SpaceTraders.FleetTest do
       assert {:ok, %Job{status: "waiting", in_flight_action: ^in_flight}} =
                Fleet.resume_miner_job(agent, "FLEET-SHIP")
 
-      assert [%Event{event_type: "arrival", payload: %{"job_id" => job_id}}] =
+      assert [%Event{event_type: "arrival", payload: %{"destination" => "X1-UX81-A2"}}] =
                Timeline.pending_events(:ship, "FLEET-SHIP")
-
-      assert job_id == config.id
     end
 
     test "persists a loop without starting it" do
@@ -899,15 +885,10 @@ defmodule SpaceTraders.FleetTest do
         cargo: %Model.ShipCargo{capacity: 40, units: 30, inventory: []}
       }
 
-      # The scheduled arrival trigger names the Intent; reconciliation validates
-      # the identity, completes the Intent, and continues the owning Job.
+      # The scheduled arrival trigger cannot continue the old Job.
       assert [%Intent{id: arrival_intent_id, type: "navigate"}] = Intents.current(agent)
 
-      assert {:ok,
-              %Job{
-                status: "waiting",
-                in_flight_action: %{"kind" => "navigate", "waypoint" => "X1-UX81-A1"}
-              }} =
+      assert :ok =
                Intents.reconcile(
                  agent.id,
                  "FLEET-SHIP",
@@ -1001,10 +982,8 @@ defmodule SpaceTraders.FleetTest do
                 }
               }} = Fleet.start_miner_job(agent, "FLEET-SHIP")
 
-      assert [%Event{event_type: "cooldown", payload: %{"job_id" => job_id}}] =
+      assert [%Event{event_type: "cooldown", payload: %{}}] =
                Timeline.pending_events(:ship, "FLEET-SHIP")
-
-      assert job_id == Fleet.ship_job(agent, "FLEET-SHIP").id
     end
 
     test "discards an invalid Survey signature and uses another usable Survey" do
@@ -1915,7 +1894,7 @@ defmodule SpaceTraders.FleetTest do
       assert progress == %{"last_completed" => "extract", "waypoint" => "X1-UX81-A1"}
     end
 
-    test "ShipServer arrival wakeup resumes extraction after returning from market" do
+    test "ShipServer arrival wakeup does not continue a legacy Job" do
       agent = agent_fixture()
       ship_fixture(agent, "FLEET-SHIP")
 
@@ -2004,14 +1983,10 @@ defmodule SpaceTraders.FleetTest do
 
       assert Repo.get!(Event, event.id).status == "done"
 
-      assert_receive {:api_request, "/v2/my/ships/FLEET-SHIP/extract"}, 1_000
-
-      assert eventually(fn ->
-               current = Repo.get_by!(Job, ship_id: config.ship_id)
-
-               current.status == "waiting" and
-                 current.in_flight_action["kind"] == "extract"
-             end)
+      refute_receive {:api_request, "/v2/my/ships/FLEET-SHIP/extract"}, 100
+      current = Repo.get_by!(Job, ship_id: config.ship_id)
+      assert current.status == "waiting"
+      assert current.in_flight_action["kind"] == "navigate"
     end
 
     test "blocks an invalid extraction waypoint without a game action" do
@@ -6689,7 +6664,7 @@ defmodule SpaceTraders.FleetTest do
   end
 
   describe "rearm_ships_on_boot/0" do
-    test "starts ship servers for ships with pending events" do
+    test "does not start ShipServer for ownerless legacy timer" do
       agent = agent_fixture()
       ship_fixture(agent, "FLEET-SHIP")
 
@@ -6703,10 +6678,10 @@ defmodule SpaceTraders.FleetTest do
 
       assert :ok = Intents.rearm_on_boot()
 
-      assert ShipServer.ensure_ready("FLEET-SHIP") == {:error, :ship_in_transit}
+      assert ShipServer.ensure_ready("FLEET-SHIP") == :ok
     end
 
-    test "catches up events that came due while the app was down" do
+    test "does not catch up ownerless legacy timer" do
       agent = agent_fixture()
       ship_fixture(agent, "FLEET-SHIP")
 
@@ -6736,8 +6711,8 @@ defmodule SpaceTraders.FleetTest do
 
       assert :ok = Intents.rearm_on_boot()
 
-      assert_receive {:ship_updated, ^agent_id, "FLEET-SHIP"}, 1_000
-      assert Repo.get(Event, event.id).status == "done"
+      refute_receive {:ship_updated, ^agent_id, "FLEET-SHIP"}, 100
+      assert Repo.get(Event, event.id).status == "pending"
       assert ShipServer.ensure_ready("FLEET-SHIP") == :ok
     end
 
