@@ -61,7 +61,11 @@ defmodule SpaceTraders.Application do
   # Test processes own isolated database connections and API stubs. The
   # production reconciler is exercised through its public entry point instead.
   defp fleet_reconciler_children do
-    if Mix.env() == :test, do: [], else: [SpaceTraders.FleetAllocation.Reconciler]
+    if Application.get_env(:spacetraders, :fleet_reconciler_enabled, true) do
+      [SpaceTraders.FleetAllocation.Reconciler]
+    else
+      []
+    end
   end
 
   # Tell Phoenix to update the endpoint configuration

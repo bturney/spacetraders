@@ -3,6 +3,8 @@ import Config
 # Only in tests, remove the complexity from the password hashing algorithm
 config :pbkdf2_elixir, :rounds, 1
 
+config :spacetraders, :fleet_reconciler_enabled, false
+
 # Configure your database
 #
 # The MIX_TEST_PARTITION environment variable can be used
