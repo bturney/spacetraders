@@ -93,16 +93,16 @@ and history continue.
   record extends that boundary into autonomous planning, admission, execution,
   and recovery without weakening it.
 
-Until a replacement phase is activated, existing code may continue to implement
-the superseded records as legacy behavior. That code is migration evidence, not
-the target architecture. Each delivery phase must preserve one gameplay
-authority, separate prefactoring from authority activation, remain deployable
-and observable, and define a rollback or forward-recovery boundary.
+Until a replacement phase is activated, existing code could continue to implement the
+superseded records as migration evidence. Issue 415 completed that contraction:
+the Job, Policy, and direct gameplay entry points are removed, and only the
+Fleet Commitment and authenticated Manual Intervention authorities remain.
 
 ## Consequences
 
-- Jobs, Policies, direct API paths, and current Intent execution are temporary
-  migration structures rather than permanent parallel authorities.
+- Jobs, Policies, and direct gameplay paths are retired migration structures,
+  not parallel authorities. Current runtime gameplay is owned by Fleet
+  Commitment Intents and authenticated Manual Intervention.
 - PostgreSQL migration and operation-adapter seams precede autonomous authority
   activation; the architecture does not justify a flag-day rewrite.
 - Normalized current state is paired with compact append-only causal evidence,

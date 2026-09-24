@@ -324,8 +324,8 @@ defmodule SpaceTraders.FleetAllocation do
           claim
       end
     else
-      # Legacy Jobs and Manual Control remain the sole authority until their
-      # Fleet Generation is activated onto target Ship Execution.
+      # Fleet Commitment and authenticated Manual Intervention remain the
+      # supported execution authorities.
       {:ok, %{commitment_id: nil, portfolio_id: nil, portfolio_version: nil}}
     end
   end

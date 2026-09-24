@@ -16,8 +16,8 @@ defmodule SpaceTraders.Fleet.Intent do
   @terminal_states ["completed", "infeasible", "stopped", "superseded"]
 
   schema "intents" do
-    # "manual" intents belong to Manual Control; "job" intents are the
-    # operation ledger for a Job policy and never preempt their owning Job.
+    # Fleet Commitment and authenticated intervention Intents are scoped by the
+    # Fleet Commitment authorization layer before execution.
     field :caller, :string
     field :type, :string, default: "navigate"
     field :target_waypoint, :string

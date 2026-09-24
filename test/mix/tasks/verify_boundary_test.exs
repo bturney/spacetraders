@@ -44,4 +44,33 @@ defmodule Mix.Tasks.Verify.BoundaryTest do
     assert [violation | _] = Mix.Tasks.Verify.Boundary.verify_paths([path])
     assert violation =~ "legacy Job"
   end
+
+  test "rejects legacy module declarations and string ownership" do
+    path = Path.join(System.tmp_dir!(), "boundary-job-#{System.unique_integer()}.ex")
+
+    File.write!(
+      path,
+      "defmodule Bypass do\n  defmodule Job do\n  end\n  def run, do: Repo.all(from i in Intent, where: i.caller == \"job\")\nend\n"
+    )
+
+    on_exit(fn -> File.rm(path) end)
+
+    violations = Mix.Tasks.Verify.Boundary.verify_paths([path])
+
+    assert Enum.any?(violations, &String.contains?(&1, "legacy Job"))
+    assert Enum.any?(violations, &String.contains?(&1, "legacy Job string"))
+  end
+
+  test "does not exempt dead branches from the retirement boundary" do
+    path = Path.join(System.tmp_dir!(), "boundary-dead-#{System.unique_integer()}.ex")
+
+    File.write!(
+      path,
+      "defmodule Bypass do\n  if false do\n    alias SpaceTraders.Fleet.Job\n  end\nend\n"
+    )
+
+    on_exit(fn -> File.rm(path) end)
+
+    assert [_violation | _] = Mix.Tasks.Verify.Boundary.verify_paths([path])
+  end
 end
