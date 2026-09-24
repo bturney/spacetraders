@@ -78,10 +78,49 @@ defmodule SpaceTraders.RetiredJobRuntimeTest do
     assert {:error, :legacy_gameplay_retired} =
              Intents.confirm(scope, %Intents.ManualControl{}, historical_manual_intent.id, 1)
 
-    assert :ok = Fleet.recover_job_on_boot(ship.symbol, agent.id)
-    assert :ok = Fleet.continue_job_event(agent.id, ship.symbol, %{}, :arrival, job.id)
+    assert {:error, :legacy_gameplay_retired} = Fleet.recover_job_on_boot(ship.symbol, agent.id)
+
+    assert {:error, :legacy_gameplay_retired} =
+             Fleet.continue_job_event(agent.id, ship.symbol, %{}, :arrival, job.id)
+
     assert Repo.get!(Intent, intent.id).status == "waiting"
     assert Repo.get!(Job, job.id).status == "waiting"
+  end
+
+  test "direct Job continuation, replacement, and Intent insertion are retired" do
+    agent = agent_fixture()
+    ship = ship_fixture(agent)
+    job = job_fixture(ship)
+
+    intent =
+      Repo.insert!(%Intent{
+        ship_id: ship.id,
+        job_id: job.id,
+        caller: "job",
+        type: "navigate",
+        target_waypoint: "X1-UX81-A2",
+        status: "waiting"
+      })
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      flunk("retired direct Job path made a game request: #{conn.request_path}")
+    end)
+
+    assert {:error, :legacy_gameplay_retired} = Fleet.replace_miner_job(agent, ship.symbol, %{})
+    assert {:error, :legacy_gameplay_retired} = Fleet.reconcile_miner_job(agent, ship.symbol)
+    assert {:error, :legacy_gameplay_retired} = Fleet.advance_miner_job(agent, job, %{})
+
+    assert {:error, :legacy_gameplay_retired} =
+             Fleet.advance_survey_job(agent, %{job | type: "survey"}, %{})
+
+    assert {:error, :legacy_gameplay_retired} =
+             Fleet.advance_explorer_job(agent, %{job | type: "explorer"}, %{})
+
+    assert {:error, :legacy_gameplay_retired} =
+             Fleet.continue_job_after_intent(agent, job, intent, %{})
+
+    assert {:error, :legacy_gameplay_retired} = Intents.insert_job_intent(job, %{})
+    assert Repo.get!(Intent, intent.id).status == "waiting"
   end
 
   test "historical Jobs remain readable" do

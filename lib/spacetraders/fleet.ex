@@ -3529,12 +3529,13 @@ defmodule SpaceTraders.Fleet do
     do: start_explorer_job(agent, ship_symbol)
 
   @doc "Reconciles public baseline acquisition for a System Exploration Job."
-  def advance_explorer_job(
-        %AgentRecord{agent_token: token} = agent,
-        %Job{type: "explorer"} = job,
-        live_ship
-      )
-      when is_binary(token) and token != "" do
+  def advance_explorer_job(%AgentRecord{} = agent, %Job{type: "explorer"} = job, live_ship) do
+    with :ok <- legacy_job_admission(agent) do
+      do_advance_explorer_job(agent, job, live_ship)
+    end
+  end
+
+  defp do_advance_explorer_job(agent, job, live_ship) do
     system = get_in(job.progress || %{}, ["target_system"])
     credential_ref = token_reference(agent)
 
@@ -3810,7 +3811,8 @@ defmodule SpaceTraders.Fleet do
 
   @doc "Replaces a Ship's unfinished Job and preserves the predecessor as terminal history."
   def replace_miner_job(%AgentRecord{} = agent, ship_symbol, attrs) when is_map(attrs) do
-    with {:ok, ship} <- owned_ship(agent, ship_symbol) do
+    with :ok <- legacy_job_admission(agent),
+         {:ok, ship} <- owned_ship(agent, ship_symbol) do
       case Repo.transaction(fn -> replace_miner_job_transaction(ship, attrs) end) do
         {:ok, job} ->
           record_activity(agent, ship, "configuration", "Miner Job replaced")
@@ -3867,40 +3869,46 @@ defmodule SpaceTraders.Fleet do
     end
   end
 
+  def continue_job_after_intent(%AgentRecord{} = agent, job, intent, live_ship) do
+    with :ok <- legacy_job_admission(agent) do
+      do_continue_job_after_intent(agent, job, intent, live_ship)
+    end
+  end
+
   @doc false
   @spec continue_job_after_intent(SpaceTraders.Agent.Agent.t(), Job.t(), Intent.t(), map()) ::
           term()
-  def continue_job_after_intent(
-        %AgentRecord{} = agent,
-        %Job{type: "outfitting"} = job,
-        intent,
-        _live_ship
-      ),
-      do: advance_outfitting_after_intent(agent, job, intent)
+  defp do_continue_job_after_intent(
+         %AgentRecord{} = agent,
+         %Job{type: "outfitting"} = job,
+         intent,
+         _live_ship
+       ),
+       do: advance_outfitting_after_intent(agent, job, intent)
 
-  def continue_job_after_intent(agent, %Job{type: "miner"} = job, intent, live_ship),
+  defp do_continue_job_after_intent(agent, %Job{type: "miner"} = job, intent, live_ship),
     do: advance_miner_after_intent(agent, job, intent, live_ship)
 
-  def continue_job_after_intent(agent, %Job{type: "survey"} = job, intent, live_ship),
+  defp do_continue_job_after_intent(agent, %Job{type: "survey"} = job, intent, live_ship),
     do: advance_survey_after_intent(agent, job, intent, live_ship)
 
-  def continue_job_after_intent(
-        agent,
-        %Job{type: "construction_supply"} = job,
-        intent,
-        _live_ship
-      ),
-      do: advance_construction_supply_after_intent(agent, job, intent)
+  defp do_continue_job_after_intent(
+         agent,
+         %Job{type: "construction_supply"} = job,
+         intent,
+         _live_ship
+       ),
+       do: advance_construction_supply_after_intent(agent, job, intent)
 
-  def continue_job_after_intent(
-        agent,
-        %Job{type: "market_reconnaissance"} = job,
-        %Intent{status: "completed"},
-        live_ship
-      ),
-      do: advance_market_reconnaissance_job(agent, job, live_ship)
+  defp do_continue_job_after_intent(
+         agent,
+         %Job{type: "market_reconnaissance"} = job,
+         %Intent{status: "completed"},
+         live_ship
+       ),
+       do: advance_market_reconnaissance_job(agent, job, live_ship)
 
-  def continue_job_after_intent(agent, job, intent, _live_ship),
+  defp do_continue_job_after_intent(agent, job, intent, _live_ship),
     do: advance_procurement_after_intent(agent, job, intent)
 
   @doc "Returns a Ship's durable Job, or nil."
@@ -4300,13 +4308,20 @@ defmodule SpaceTraders.Fleet do
 
   @doc "Reconciles a ready Miner Job and dispatches its next loop leg."
   def advance_miner_job(%AgentRecord{} = agent, %Job{} = config, live_ship) do
-    with :ok <- Agent.execution_allowed?(agent) do
+    with :ok <- legacy_job_admission(agent),
+         :ok <- Agent.execution_allowed?(agent) do
       Agent.handle_game_result(agent, advance_miner_job(agent, config, live_ship, :normal))
     end
   end
 
   @doc "Reconciles a Survey Job and creates Surveys only when no usable Survey remains."
   def advance_survey_job(%AgentRecord{} = agent, %Job{type: "survey"} = job, live_ship) do
+    with :ok <- legacy_job_admission(agent) do
+      do_advance_survey_job(agent, job, live_ship)
+    end
+  end
+
+  defp do_advance_survey_job(agent, job, live_ship) do
     decision =
       SurveyPolicy.decide(%{
         in_flight_arrival?: in_flight_arrival?(job, live_ship),
@@ -4473,7 +4488,7 @@ defmodule SpaceTraders.Fleet do
 
   @doc false
   @spec continue_job_event(non_neg_integer(), String.t(), map(), atom(), non_neg_integer() | nil) ::
-          :ok | {:ok, Job.t()}
+          :ok | {:ok, Job.t()} | {:error, :legacy_gameplay_retired}
   def continue_job_event(agent_id, ship_symbol, live_ship, trigger, expected_job_id) do
     with %AgentRecord{} = agent <- Repo.get(AgentRecord, agent_id),
          :ok <- legacy_job_admission(agent),
@@ -4489,6 +4504,7 @@ defmodule SpaceTraders.Fleet do
         _ -> :ok
       end
     else
+      {:error, :legacy_gameplay_retired} = error -> error
       _ -> :ok
     end
   end
@@ -6179,6 +6195,7 @@ defmodule SpaceTraders.Fleet do
         end
       end
     else
+      {:error, :legacy_gameplay_retired} = error -> error
       _ -> :ok
     end
   end
@@ -6297,7 +6314,8 @@ defmodule SpaceTraders.Fleet do
 
   @doc "Reconciles a blocked in-flight Miner Job before explicitly retrying it."
   def reconcile_miner_job(%AgentRecord{} = agent, ship_symbol) do
-    with :ok <- Agent.execution_allowed?(agent),
+    with :ok <- legacy_job_admission(agent),
+         :ok <- Agent.execution_allowed?(agent),
          {:ok, ship} <- owned_ship(agent, ship_symbol),
          %Job{status: "blocked", blocker: %JobBlocker{}, in_flight_action: action} = config
          when is_map(action) <-
@@ -6309,6 +6327,7 @@ defmodule SpaceTraders.Fleet do
            ) do
       reconcile_in_flight(agent.id, ship, config, live_ship)
     else
+      {:error, :legacy_gameplay_retired} = error -> error
       %Job{} -> {:error, :miner_job_not_blocked}
       nil -> {:error, :miner_job_not_configured}
       {:error, reason} -> {:error, reason}

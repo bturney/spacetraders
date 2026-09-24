@@ -149,6 +149,42 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
     assert intent_id == intent.id
   end
 
+  test "a commitment-owned recovery retries after an authoritative read failure" do
+    {agent, ship, _portfolio, commitment} = claimed_ship("OWNED-RETRY")
+
+    intent =
+      Repo.insert!(%Intent{
+        ship_id: ship.id,
+        caller: "commitment",
+        fleet_commitment_id: commitment.id,
+        type: "navigate",
+        target_waypoint: "X1-UX81-A2",
+        status: "waiting",
+        in_flight_action: %{"kind" => "navigate", "waypoint" => "X1-UX81-A2"}
+      })
+
+    {:ok, calls} = Elixir.Agent.start_link(fn -> 0 end)
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      assert {conn.method, conn.request_path} == {"GET", "/v2/my/ships/#{ship.symbol}"}
+
+      if Elixir.Agent.get_and_update(calls, &{&1, &1 + 1}) < 5 do
+        Req.Test.transport_error(conn, :timeout)
+      else
+        Req.Test.json(conn, %{
+          "data" =>
+            ship_body(ship.symbol, %{
+              "nav" => nav_body("IN_TRANSIT", arrival: future_iso(), destination: "X1-UX81-A2")
+            })
+        })
+      end
+    end)
+
+    assert :ok = Intents.reconcile(agent.id, ship.symbol, nil, :boot, intent.id)
+    assert Elixir.Agent.get(calls, & &1) == 6
+    assert %Intent{status: "waiting"} = Repo.get!(Intent, intent.id)
+  end
+
   test "a late commitment wake cannot resume legacy Job execution" do
     {agent, ship, _portfolio, _commitment} = claimed_ship("OWNED-LATE")
 
