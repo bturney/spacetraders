@@ -42,7 +42,7 @@ defmodule SpaceTradersWeb.Layouts do
     <div class="min-h-screen bg-grid">
       <header class="border-b border-base-300/70 bg-base-100/90 backdrop-blur">
         <div class="mx-auto flex min-h-16 max-w-[1440px] items-center justify-between gap-4 px-4 sm:px-6 lg:px-8">
-          <.link navigate={~p"/"} class="flex min-w-0 items-center gap-3">
+          <.link navigate={~p"/mission-control"} class="flex min-w-0 items-center gap-3">
             <span class="brand-mark"><img src={~p"/images/logo.svg"} width="28" height="20" /></span>
             <span class="min-w-0">
               <span class="block truncate text-sm font-bold tracking-[0.18em] text-primary">SPACETRADERS</span>

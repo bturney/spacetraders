@@ -5,8 +5,8 @@ defmodule SpaceTraders.Fleet do
   A ship's live state — location, fuel, cargo, cooldown, nav status — is pulled
   from the game through `SpaceTraders.API`. The server is the source of truth;
   the local `ships` table is the app's registry of owned ships (seeded with the
-  starter fleet) and carries no live state. The dashboard reads the live fleet
-  through this context so it stays a thin consumer with no game logic of its own.
+  starter fleet) and carries no live state. The Fleet read interfaces expose
+  live game state independently of the retired per-Ship gameplay dashboard.
 
   Ship actions here orchestrate the game call and the app's async model: after a
   successful navigate the pending arrival is persisted to the timeline and armed
@@ -48,6 +48,8 @@ defmodule SpaceTraders.Fleet do
   @running_job_states Job.running_states()
   @max_recovery_attempts 5
   @recovery_window_seconds 15 * 60
+
+  defp legacy_job_admission(%AgentRecord{}), do: {:error, :legacy_gameplay_retired}
 
   @doc "Safely retires pre-stop execution state before fresh Fleet planning."
   def prepare_emergency_stop_resume(operator_id, now) do
@@ -315,7 +317,7 @@ defmodule SpaceTraders.Fleet do
   defp activity_noise?(%{kind: kind}) when kind in ["retry", "manual_intent_waiting"], do: true
 
   defp activity_noise?(%{kind: kind, message: message})
-       when kind in ["manual_intent_recovery", "miner_job_recovery"] do
+       when kind in ["owned_intent_recovery", "miner_job_recovery"] do
     String.contains?(String.downcase(message), "retrying")
   end
 
@@ -596,7 +598,8 @@ defmodule SpaceTraders.Fleet do
 
   @doc "Saves a Miner Job configuration without activating it."
   def configure_miner_job(%AgentRecord{} = agent, ship_symbol, attrs) when is_map(attrs) do
-    with {:ok, ship} <- owned_ship(agent, ship_symbol),
+    with :ok <- legacy_job_admission(agent),
+         {:ok, ship} <- owned_ship(agent, ship_symbol),
          nil <- unfinished_job(ship.id),
          {:ok, job} <- insert_miner_job(ship, attrs) do
       record_activity(agent, ship, "configuration", "Miner Job configuration changed")
@@ -612,7 +615,8 @@ defmodule SpaceTraders.Fleet do
       when is_binary(token) and token != "" and is_map(attrs) do
     waypoint_symbol = attrs[:extraction_waypoint] || attrs["extraction_waypoint"]
 
-    with :ok <- Agent.execution_allowed?(agent),
+    with :ok <- legacy_job_admission(agent),
+         :ok <- Agent.execution_allowed?(agent),
          {:ok, ship} <- owned_ship(agent, ship_symbol),
          nil <- unfinished_job(ship.id),
          true <- is_binary(waypoint_symbol) and waypoint_symbol != "",
@@ -659,7 +663,8 @@ defmodule SpaceTraders.Fleet do
   @doc "Captures a Ship's authoritative current System as a paused System Exploration Job."
   def configure_explorer_job(%AgentRecord{agent_token: token} = agent, ship_symbol)
       when is_binary(token) and token != "" do
-    with :ok <- Agent.execution_allowed?(agent),
+    with :ok <- legacy_job_admission(agent),
+         :ok <- Agent.execution_allowed?(agent),
          {:ok, ship} <- owned_ship(agent, ship_symbol),
          nil <- unfinished_job(ship.id),
          {:ok, live_ship} <-
@@ -706,7 +711,8 @@ defmodule SpaceTraders.Fleet do
   @doc "Captures a paused Procurement Job for one Contract, Construction, or Market recipient."
   def configure_procurement_job(%AgentRecord{agent_token: token} = agent, ship_symbol, attrs)
       when is_binary(token) and token != "" and is_map(attrs) do
-    with :ok <- Agent.execution_allowed?(agent),
+    with :ok <- legacy_job_admission(agent),
+         :ok <- Agent.execution_allowed?(agent),
          {:ok, ship} <- owned_ship(agent, ship_symbol),
          nil <- unfinished_job(ship.id),
          :ok <- validate_procurement_attrs(attrs),
@@ -749,7 +755,8 @@ defmodule SpaceTraders.Fleet do
         attrs
       )
       when is_binary(token) and token != "" and is_map(attrs) do
-    with :ok <- Agent.execution_allowed?(agent),
+    with :ok <- legacy_job_admission(agent),
+         :ok <- Agent.execution_allowed?(agent),
          {:ok, ship} <- owned_ship(agent, ship_symbol),
          nil <- unfinished_job(ship.id),
          {:ok, live_ship} <-
@@ -787,7 +794,8 @@ defmodule SpaceTraders.Fleet do
   @doc "Captures a paused Ship Outfitting Job with its explicit readiness target and removal authority."
   def configure_outfitting_job(%AgentRecord{agent_token: token} = agent, ship_symbol, attrs)
       when is_binary(token) and token != "" and is_map(attrs) do
-    with {:ok, ship} <- owned_ship(agent, ship_symbol),
+    with :ok <- legacy_job_admission(agent),
+         {:ok, ship} <- owned_ship(agent, ship_symbol),
          nil <- unfinished_job(ship.id),
          {:ok, system} <- outfitting_source_system(agent, ship_symbol, attrs),
          {:ok, progress} <- outfitting_progress(attrs, system) do
@@ -872,7 +880,8 @@ defmodule SpaceTraders.Fleet do
 
   @doc "Starts or resumes a Ship Outfitting Job from authoritative installed modules and Cargo."
   def start_outfitting_job(%AgentRecord{} = agent, ship_symbol) do
-    with :ok <- Agent.execution_allowed?(agent),
+    with :ok <- legacy_job_admission(agent),
+         :ok <- Agent.execution_allowed?(agent),
          {:ok, ship} <- owned_ship(agent, ship_symbol),
          %Job{type: "outfitting"} = job <- unfinished_job(ship.id),
          nil <- Intents.unfinished_manual_intent(ship.id),
@@ -890,6 +899,7 @@ defmodule SpaceTraders.Fleet do
 
       advance_outfitting_job(agent, job, live_ship)
     else
+      {:error, :legacy_gameplay_retired} = error -> error
       nil -> {:error, :outfitting_job_not_configured}
       %Job{} -> {:error, :outfitting_job_not_configured}
       %Intent{} -> {:error, :intents_active}
@@ -1267,7 +1277,8 @@ defmodule SpaceTraders.Fleet do
   @doc "Captures a paused recurring Market Trading Job for the Ship's current System."
   def configure_market_trading_job(%AgentRecord{agent_token: token} = agent, ship_symbol, attrs)
       when is_binary(token) and token != "" and is_map(attrs) do
-    with :ok <- Agent.execution_allowed?(agent),
+    with :ok <- legacy_job_admission(agent),
+         :ok <- Agent.execution_allowed?(agent),
          {:ok, ship} <- owned_ship(agent, ship_symbol),
          nil <- unfinished_job(ship.id),
          {:ok, live_ship} <-
@@ -1298,7 +1309,8 @@ defmodule SpaceTraders.Fleet do
       )
       when is_binary(token) and token != "" and is_integer(reconnaissance_job_id) and
              is_integer(route_index) and is_map(attrs) do
-    with :ok <- Agent.execution_allowed?(agent),
+    with :ok <- legacy_job_admission(agent),
+         :ok <- Agent.execution_allowed?(agent),
          {:ok, ship} <- owned_ship(agent, ship_symbol),
          %Job{type: "market_reconnaissance"} = reconnaissance <-
            selectable_market_reconnaissance_job(agent.id, reconnaissance_job_id),
@@ -1354,7 +1366,8 @@ defmodule SpaceTraders.Fleet do
         attrs
       )
       when is_binary(token) and token != "" and is_map(attrs) do
-    with :ok <- Agent.execution_allowed?(agent),
+    with :ok <- legacy_job_admission(agent),
+         :ok <- Agent.execution_allowed?(agent),
          {:ok, ship} <- owned_ship(agent, ship_symbol),
          nil <- unfinished_job(ship.id),
          {:ok, live_ship} <-
@@ -1393,7 +1406,8 @@ defmodule SpaceTraders.Fleet do
 
   @doc "Starts or explicitly resumes a Market Reconnaissance Job."
   def start_market_reconnaissance_job(%AgentRecord{} = agent, ship_symbol) do
-    with :ok <- Agent.execution_allowed?(agent),
+    with :ok <- legacy_job_admission(agent),
+         :ok <- Agent.execution_allowed?(agent),
          {:ok, ship} <- owned_ship(agent, ship_symbol),
          %Job{type: "market_reconnaissance"} = job <- unfinished_job(ship.id),
          {:ok, live_ship} <-
@@ -1411,6 +1425,7 @@ defmodule SpaceTraders.Fleet do
     else
       nil -> {:error, :market_reconnaissance_job_not_configured}
       %Job{} -> {:error, :market_reconnaissance_job_not_configured}
+      {:error, :legacy_gameplay_retired} = error -> error
       {:error, reason} -> block_market_reconnaissance_job(agent, ship_symbol, reason)
     end
   end
@@ -1447,7 +1462,8 @@ defmodule SpaceTraders.Fleet do
 
   @doc "Starts or resumes a recurring Market Trading Job from known candidates."
   def start_market_trading_job(%AgentRecord{} = agent, ship_symbol) do
-    with :ok <- Agent.execution_allowed?(agent),
+    with :ok <- legacy_job_admission(agent),
+         :ok <- Agent.execution_allowed?(agent),
          {:ok, ship} <- owned_ship(agent, ship_symbol),
          %Job{type: "market_trading"} = job <- unfinished_job(ship.id),
          nil <- Intents.unfinished_manual_intent(ship.id),
@@ -1508,12 +1524,14 @@ defmodule SpaceTraders.Fleet do
     else
       nil -> {:error, :market_trading_job_not_configured}
       %Job{} -> {:error, :market_trading_job_not_configured}
+      {:error, :legacy_gameplay_retired} = error -> error
       {:error, reason} -> block_market_trading_job(agent, ship_symbol, reason)
     end
   end
 
   def resume_market_trading_job(%AgentRecord{} = agent, ship_symbol) do
-    with {:ok, ship} <- owned_ship(agent, ship_symbol),
+    with :ok <- legacy_job_admission(agent),
+         {:ok, ship} <- owned_ship(agent, ship_symbol),
          %Job{type: "market_trading"} = job <- unfinished_job(ship.id) do
       if Intents.unfinished_job_intent(job.id) do
         Repo.update!(
@@ -1525,13 +1543,15 @@ defmodule SpaceTraders.Fleet do
         start_market_trading_job(agent, ship_symbol)
       end
     else
+      {:error, :legacy_gameplay_retired} = error -> error
       _ -> {:error, :market_trading_job_not_configured}
     end
   end
 
   @doc "Advances a Market Trading Job from fresh authoritative Ship state."
   def advance_market_trading_job(%AgentRecord{} = agent, ship_symbol) do
-    with :ok <- Agent.execution_allowed?(agent),
+    with :ok <- legacy_job_admission(agent),
+         :ok <- Agent.execution_allowed?(agent),
          {:ok, ship} <- owned_ship(agent, ship_symbol),
          %Job{type: "market_trading"} = job <- unfinished_job(ship.id),
          nil <- Intents.unfinished_manual_intent(ship.id),
@@ -1548,6 +1568,7 @@ defmodule SpaceTraders.Fleet do
     else
       nil -> {:error, :market_trading_job_not_configured}
       %Job{} -> {:error, :market_trading_job_not_configured}
+      {:error, :legacy_gameplay_retired} = error -> error
       {:error, reason} -> block_market_trading_job(agent, ship_symbol, reason)
     end
   end
@@ -2001,7 +2022,8 @@ defmodule SpaceTraders.Fleet do
 
   @doc "Starts or resumes a Procurement Job from fresh Contract, Ship, and credit state."
   def start_procurement_job(%AgentRecord{} = agent, ship_symbol) do
-    with :ok <- Agent.execution_allowed?(agent),
+    with :ok <- legacy_job_admission(agent),
+         :ok <- Agent.execution_allowed?(agent),
          {:ok, ship} <- owned_ship(agent, ship_symbol),
          %Job{type: "procurement"} = job <- unfinished_job(ship.id),
          nil <- Intents.unfinished_manual_intent(ship.id),
@@ -2035,6 +2057,9 @@ defmodule SpaceTraders.Fleet do
 
       :cargo_operation_reconciliation_required ->
         {:error, :cargo_operation_reconciliation_required}
+
+      {:error, :legacy_gameplay_retired} = error ->
+        error
 
       {:error, reason} ->
         block_procurement_job(agent, ship_symbol, reason)
@@ -2107,7 +2132,8 @@ defmodule SpaceTraders.Fleet do
 
   @doc "Reconciles unresolved Cargo evidence for the owning Procurement Job."
   def reconcile_procurement_job(%AgentRecord{} = agent, ship_symbol) do
-    with {:ok, ship} <- owned_ship(agent, ship_symbol),
+    with :ok <- legacy_job_admission(agent),
+         {:ok, ship} <- owned_ship(agent, ship_symbol),
          %Job{type: "procurement"} = job <- unfinished_job(ship.id),
          %Intent{in_flight_action: action} = intent <- Intents.unfinished_job_intent(job.id),
          true <- is_map(action) do
@@ -2118,6 +2144,7 @@ defmodule SpaceTraders.Fleet do
 
       reconcile_procurement_intent(agent, ship, job, intent)
     else
+      {:error, :legacy_gameplay_retired} = error -> error
       _ -> {:error, :cargo_operation_reconciliation_required}
     end
   end
@@ -2913,7 +2940,8 @@ defmodule SpaceTraders.Fleet do
 
   @doc "Starts or resumes a Construction Supply Job from fresh project, Ship, and credit state."
   def start_construction_supply_job(%AgentRecord{} = agent, ship_symbol) do
-    with :ok <- Agent.execution_allowed?(agent),
+    with :ok <- legacy_job_admission(agent),
+         :ok <- Agent.execution_allowed?(agent),
          {:ok, ship} <- owned_ship(agent, ship_symbol),
          %Job{type: "construction_supply"} = job <- unfinished_job(ship.id),
          nil <- Intents.unfinished_manual_intent(ship.id),
@@ -2940,6 +2968,9 @@ defmodule SpaceTraders.Fleet do
       :cargo_operation_reconciliation_required ->
         {:error, :cargo_operation_reconciliation_required}
 
+      {:error, :legacy_gameplay_retired} = error ->
+        error
+
       {:error, reason} ->
         block_construction_supply_job(agent, ship_symbol, reason)
     end
@@ -2957,7 +2988,8 @@ defmodule SpaceTraders.Fleet do
 
   @doc "Reconciles unresolved Cargo evidence for the owning Construction Supply Job."
   def reconcile_construction_supply_job(%AgentRecord{} = agent, ship_symbol) do
-    with {:ok, ship} <- owned_ship(agent, ship_symbol),
+    with :ok <- legacy_job_admission(agent),
+         {:ok, ship} <- owned_ship(agent, ship_symbol),
          %Job{type: "construction_supply"} = job <- unfinished_job(ship.id),
          %Intent{in_flight_action: action} = intent <- Intents.unfinished_job_intent(job.id),
          true <- is_map(action) do
@@ -2968,6 +3000,7 @@ defmodule SpaceTraders.Fleet do
 
       reconcile_construction_supply_intent(agent, ship, job, intent)
     else
+      {:error, :legacy_gameplay_retired} = error -> error
       _ -> {:error, :cargo_operation_reconciliation_required}
     end
   end
@@ -3420,7 +3453,8 @@ defmodule SpaceTraders.Fleet do
 
   @doc "Starts a System Exploration Job and acquires its current public baseline."
   def start_explorer_job(%AgentRecord{} = agent, ship_symbol) do
-    with :ok <- Agent.execution_allowed?(agent),
+    with :ok <- legacy_job_admission(agent),
+         :ok <- Agent.execution_allowed?(agent),
          {:ok, ship} <- owned_ship(agent, ship_symbol),
          %Job{type: "explorer"} = job <- unfinished_job(ship.id),
          {:ok, live_ship} <-
@@ -3442,6 +3476,7 @@ defmodule SpaceTraders.Fleet do
     else
       nil -> {:error, :explorer_job_not_configured}
       %Job{} -> {:error, :explorer_job_not_configured}
+      {:error, :legacy_gameplay_retired} = error -> error
       {:error, reason} -> block_explorer_job(agent, ship_symbol, reason)
     end
   end
@@ -3494,12 +3529,13 @@ defmodule SpaceTraders.Fleet do
     do: start_explorer_job(agent, ship_symbol)
 
   @doc "Reconciles public baseline acquisition for a System Exploration Job."
-  def advance_explorer_job(
-        %AgentRecord{agent_token: token} = agent,
-        %Job{type: "explorer"} = job,
-        live_ship
-      )
-      when is_binary(token) and token != "" do
+  def advance_explorer_job(%AgentRecord{} = agent, %Job{type: "explorer"} = job, live_ship) do
+    with :ok <- legacy_job_admission(agent) do
+      do_advance_explorer_job(agent, job, live_ship)
+    end
+  end
+
+  defp do_advance_explorer_job(agent, job, live_ship) do
     system = get_in(job.progress || %{}, ["target_system"])
     credential_ref = token_reference(agent)
 
@@ -3775,7 +3811,8 @@ defmodule SpaceTraders.Fleet do
 
   @doc "Replaces a Ship's unfinished Job and preserves the predecessor as terminal history."
   def replace_miner_job(%AgentRecord{} = agent, ship_symbol, attrs) when is_map(attrs) do
-    with {:ok, ship} <- owned_ship(agent, ship_symbol) do
+    with :ok <- legacy_job_admission(agent),
+         {:ok, ship} <- owned_ship(agent, ship_symbol) do
       case Repo.transaction(fn -> replace_miner_job_transaction(ship, attrs) end) do
         {:ok, job} ->
           record_activity(agent, ship, "configuration", "Miner Job replaced")
@@ -3832,40 +3869,46 @@ defmodule SpaceTraders.Fleet do
     end
   end
 
+  def continue_job_after_intent(%AgentRecord{} = agent, job, intent, live_ship) do
+    with :ok <- legacy_job_admission(agent) do
+      do_continue_job_after_intent(agent, job, intent, live_ship)
+    end
+  end
+
   @doc false
   @spec continue_job_after_intent(SpaceTraders.Agent.Agent.t(), Job.t(), Intent.t(), map()) ::
           term()
-  def continue_job_after_intent(
-        %AgentRecord{} = agent,
-        %Job{type: "outfitting"} = job,
-        intent,
-        _live_ship
-      ),
-      do: advance_outfitting_after_intent(agent, job, intent)
+  defp do_continue_job_after_intent(
+         %AgentRecord{} = agent,
+         %Job{type: "outfitting"} = job,
+         intent,
+         _live_ship
+       ),
+       do: advance_outfitting_after_intent(agent, job, intent)
 
-  def continue_job_after_intent(agent, %Job{type: "miner"} = job, intent, live_ship),
+  defp do_continue_job_after_intent(agent, %Job{type: "miner"} = job, intent, live_ship),
     do: advance_miner_after_intent(agent, job, intent, live_ship)
 
-  def continue_job_after_intent(agent, %Job{type: "survey"} = job, intent, live_ship),
+  defp do_continue_job_after_intent(agent, %Job{type: "survey"} = job, intent, live_ship),
     do: advance_survey_after_intent(agent, job, intent, live_ship)
 
-  def continue_job_after_intent(
-        agent,
-        %Job{type: "construction_supply"} = job,
-        intent,
-        _live_ship
-      ),
-      do: advance_construction_supply_after_intent(agent, job, intent)
+  defp do_continue_job_after_intent(
+         agent,
+         %Job{type: "construction_supply"} = job,
+         intent,
+         _live_ship
+       ),
+       do: advance_construction_supply_after_intent(agent, job, intent)
 
-  def continue_job_after_intent(
-        agent,
-        %Job{type: "market_reconnaissance"} = job,
-        %Intent{status: "completed"},
-        live_ship
-      ),
-      do: advance_market_reconnaissance_job(agent, job, live_ship)
+  defp do_continue_job_after_intent(
+         agent,
+         %Job{type: "market_reconnaissance"} = job,
+         %Intent{status: "completed"},
+         live_ship
+       ),
+       do: advance_market_reconnaissance_job(agent, job, live_ship)
 
-  def continue_job_after_intent(agent, job, intent, _live_ship),
+  defp do_continue_job_after_intent(agent, job, intent, _live_ship),
     do: advance_procurement_after_intent(agent, job, intent)
 
   @doc "Returns a Ship's durable Job, or nil."
@@ -3892,7 +3935,8 @@ defmodule SpaceTraders.Fleet do
 
   @doc "Starts a configured Survey Job after authoritative Ship and Waypoint validation."
   def start_survey_job(%AgentRecord{} = agent, ship_symbol) do
-    with :ok <- Agent.execution_allowed?(agent),
+    with :ok <- legacy_job_admission(agent),
+         :ok <- Agent.execution_allowed?(agent),
          {:ok, ship} <- owned_ship(agent, ship_symbol),
          %Job{type: "survey"} = job <- unfinished_job(ship.id),
          nil <- Intents.unfinished_manual_intent(ship.id),
@@ -3920,6 +3964,7 @@ defmodule SpaceTraders.Fleet do
       nil -> {:error, :survey_job_not_configured}
       %Job{} -> {:error, :survey_job_not_configured}
       %Intent{} -> {:error, :intents_active}
+      {:error, :legacy_gameplay_retired} = error -> error
       {:error, reason} -> block_survey_job(agent, ship_symbol, reason)
     end
   end
@@ -3958,7 +4003,8 @@ defmodule SpaceTraders.Fleet do
 
   @doc "Starts a configured Miner Job after authoritative validation."
   def start_miner_job(%AgentRecord{} = agent, ship_symbol) do
-    with :ok <- Agent.execution_allowed?(agent),
+    with :ok <- legacy_job_admission(agent),
+         :ok <- Agent.execution_allowed?(agent),
          {:ok, ship} <- owned_ship(agent, ship_symbol),
          %Job{} = job <- unfinished_job(ship.id),
          nil <- Intents.unfinished_manual_intent(ship.id),
@@ -3982,6 +4028,7 @@ defmodule SpaceTraders.Fleet do
     else
       nil -> {:error, :miner_job_not_configured}
       %Intent{} -> {:error, :intents_active}
+      {:error, :legacy_gameplay_retired} = error -> error
       {:error, reason} -> block_miner_job(agent, ship_symbol, reason)
     end
   end
@@ -4103,7 +4150,8 @@ defmodule SpaceTraders.Fleet do
 
   @doc false
   def preempt_miner_job_for(agent, ship_symbol, reason) do
-    with :ok <- Agent.execution_allowed?(agent) do
+    with :ok <- legacy_job_admission(agent),
+         :ok <- Agent.execution_allowed?(agent) do
       case Repo.get_by(Ship, agent_id: agent.id, symbol: ship_symbol) do
         %Ship{} = ship -> preempt_miner_job(agent, ship, reason)
         nil -> :ok
@@ -4260,13 +4308,20 @@ defmodule SpaceTraders.Fleet do
 
   @doc "Reconciles a ready Miner Job and dispatches its next loop leg."
   def advance_miner_job(%AgentRecord{} = agent, %Job{} = config, live_ship) do
-    with :ok <- Agent.execution_allowed?(agent) do
+    with :ok <- legacy_job_admission(agent),
+         :ok <- Agent.execution_allowed?(agent) do
       Agent.handle_game_result(agent, advance_miner_job(agent, config, live_ship, :normal))
     end
   end
 
   @doc "Reconciles a Survey Job and creates Surveys only when no usable Survey remains."
   def advance_survey_job(%AgentRecord{} = agent, %Job{type: "survey"} = job, live_ship) do
+    with :ok <- legacy_job_admission(agent) do
+      do_advance_survey_job(agent, job, live_ship)
+    end
+  end
+
+  defp do_advance_survey_job(agent, job, live_ship) do
     decision =
       SurveyPolicy.decide(%{
         in_flight_arrival?: in_flight_arrival?(job, live_ship),
@@ -4287,7 +4342,7 @@ defmodule SpaceTraders.Fleet do
       {:wait, :survey_available} ->
         survey = Intelligence.usable_survey(agent, job.extraction_waypoint)
         due_at = Timeline.parse_expiration(survey.expiration |> DateTime.to_iso8601(), 0)
-        schedule_survey_expiration_event(agent, live_ship.symbol, due_at, %{"job_id" => job.id})
+        schedule_survey_expiration_event(agent, live_ship.symbol, due_at, %{})
 
         {:ok,
          Repo.update!(
@@ -4433,13 +4488,14 @@ defmodule SpaceTraders.Fleet do
 
   @doc false
   @spec continue_job_event(non_neg_integer(), String.t(), map(), atom(), non_neg_integer() | nil) ::
-          :ok | {:ok, Job.t()}
+          :ok | {:ok, Job.t()} | {:error, :legacy_gameplay_retired}
   def continue_job_event(agent_id, ship_symbol, live_ship, trigger, expected_job_id) do
-    with %Ship{} = ship <- Repo.get_by(Ship, agent_id: agent_id, symbol: ship_symbol),
+    with %AgentRecord{} = agent <- Repo.get(AgentRecord, agent_id),
+         :ok <- legacy_job_admission(agent),
+         %Ship{} = ship <- Repo.get_by(Ship, agent_id: agent_id, symbol: ship_symbol),
          %Job{} = config <- unfinished_job(ship.id),
          true <- job_matches_event?(config, expected_job_id),
          true <- config.status in @running_job_states,
-         %AgentRecord{} = agent <- Repo.get(AgentRecord, agent_id),
          :ok <- Agent.execution_allowed?(agent) do
       case trigger do
         :arrival -> job_arrival_event(agent, ship_symbol, config, live_ship)
@@ -4448,6 +4504,7 @@ defmodule SpaceTraders.Fleet do
         _ -> :ok
       end
     else
+      {:error, :legacy_gameplay_retired} = error -> error
       _ -> :ok
     end
   end
@@ -5406,13 +5463,10 @@ defmodule SpaceTraders.Fleet do
     end
   end
 
-  defp maybe_schedule_live_cooldown(agent, %{symbol: ship_symbol, cooldown: cooldown}, job_id) do
+  defp maybe_schedule_live_cooldown(agent, %{symbol: ship_symbol, cooldown: cooldown}, _job_id) do
     due_at = Timeline.parse_expiration(cooldown.expiration, cooldown.remaining_seconds)
-    schedule_cooldown_event(agent, ship_symbol, due_at, %{"job_id" => job_id})
+    schedule_cooldown_event(agent, ship_symbol, due_at)
   end
-
-  defp maybe_put_job_id(payload, nil), do: payload
-  defp maybe_put_job_id(payload, job_id), do: Map.put(payload, "job_id", job_id)
 
   # Arms a persisted cooldown on the Ship's timer; Job policies only ever arm
   # through Timeline persistence plus ShipServer.
@@ -5622,7 +5676,8 @@ defmodule SpaceTraders.Fleet do
   cannot be stored, with the persistence error in `:warning`.
   """
   def purchase_ship(%{agent: %AgentRecord{} = agent, shipyards: shipyards}, ship_type, waypoint) do
-    with :ok <- offered_at?(shipyards, ship_type, waypoint),
+    with :ok <- legacy_job_admission(agent),
+         :ok <- offered_at?(shipyards, ship_type, waypoint),
          {:ok, result} <- Shipyard.purchase(agent, ship_type, waypoint) do
       {:ok, Map.put(result, :warning, record_purchase(agent, result.ship, ship_type))}
     end
@@ -6060,9 +6115,10 @@ defmodule SpaceTraders.Fleet do
 
   @doc "Reconciles a persisted Miner Job's in-flight action after a process restart."
   def recover_job_on_boot(ship_symbol, agent_id) do
-    with %Ship{} = ship <- Repo.get_by(Ship, symbol: ship_symbol, agent_id: agent_id),
+    with %AgentRecord{} = agent <- Repo.get(AgentRecord, agent_id),
+         :ok <- legacy_job_admission(agent),
+         %Ship{} = ship <- Repo.get_by(Ship, symbol: ship_symbol, agent_id: agent_id),
          %Job{} = config <- unfinished_job(ship.id),
-         %AgentRecord{} = agent <- Repo.get(AgentRecord, agent_id),
          :ok <- Agent.execution_allowed?(agent) do
       if config.type in [
            "procurement",
@@ -6139,6 +6195,7 @@ defmodule SpaceTraders.Fleet do
         end
       end
     else
+      {:error, :legacy_gameplay_retired} = error -> error
       _ -> :ok
     end
   end
@@ -6257,7 +6314,8 @@ defmodule SpaceTraders.Fleet do
 
   @doc "Reconciles a blocked in-flight Miner Job before explicitly retrying it."
   def reconcile_miner_job(%AgentRecord{} = agent, ship_symbol) do
-    with :ok <- Agent.execution_allowed?(agent),
+    with :ok <- legacy_job_admission(agent),
+         :ok <- Agent.execution_allowed?(agent),
          {:ok, ship} <- owned_ship(agent, ship_symbol),
          %Job{status: "blocked", blocker: %JobBlocker{}, in_flight_action: action} = config
          when is_map(action) <-
@@ -6269,6 +6327,7 @@ defmodule SpaceTraders.Fleet do
            ) do
       reconcile_in_flight(agent.id, ship, config, live_ship)
     else
+      {:error, :legacy_gameplay_retired} = error -> error
       %Job{} -> {:error, :miner_job_not_blocked}
       nil -> {:error, :miner_job_not_configured}
       {:error, reason} -> {:error, reason}
@@ -6672,10 +6731,10 @@ defmodule SpaceTraders.Fleet do
          agent,
          ship_symbol,
          %{nav: %ShipNav{status: "IN_TRANSIT"} = nav},
-         job_id
+         _job_id
        ) do
     with {:ok, due_at} <- Timeline.parse_arrival(nav.route) do
-      payload = Timeline.arrival_payload(nav) |> maybe_put_job_id(job_id)
+      payload = Timeline.arrival_payload(nav)
 
       {:ok, event} =
         Timeline.schedule_event(:ship, ship_symbol, :arrival, due_at, payload)
@@ -6696,12 +6755,12 @@ defmodule SpaceTraders.Fleet do
 
   defp schedule_cooldown(_agent, _ship_symbol, _result), do: :ok
 
-  defp schedule_cooldown(agent, ship_symbol, result, job_id) do
+  defp schedule_cooldown(agent, ship_symbol, result, _job_id) do
     case result do
       %{cooldown: %{remaining_seconds: seconds, expiration: expiration}}
       when is_integer(seconds) and seconds > 0 ->
         due_at = Timeline.parse_expiration(expiration, seconds)
-        schedule_cooldown_event(agent, ship_symbol, due_at, %{"job_id" => job_id})
+        schedule_cooldown_event(agent, ship_symbol, due_at)
 
       _ ->
         :ok

@@ -6,6 +6,7 @@ defmodule SpaceTradersWeb.RetiredGameplayLiveTest do
 
   alias SpaceTraders.Fleet
   alias SpaceTraders.Fleet.{Intent, Job}
+  alias SpaceTraders.Fleet.Intents
 
   alias SpaceTraders.{
     FleetStrategy,
@@ -18,6 +19,36 @@ defmodule SpaceTradersWeb.RetiredGameplayLiveTest do
   alias SpaceTraders.Agent.Scope
 
   setup :register_and_log_in_operator
+
+  test "anonymous visitor is sent to authentication rather than gameplay" do
+    assert redirected_to(get(Phoenix.ConnTest.build_conn(), ~p"/")) == ~p"/mission-control"
+
+    assert redirected_to(get(Phoenix.ConnTest.build_conn(), ~p"/mission-control")) ==
+             ~p"/operators/log-in"
+  end
+
+  test "Operator without a Strategy lands on Mission Control and cannot request Manual Control",
+       %{
+         conn: conn,
+         operator: operator,
+         scope: scope
+       } do
+    assert redirected_to(get(conn, ~p"/")) == ~p"/mission-control"
+    assert {:ok, _view, html} = live(conn, ~p"/mission-control")
+    assert html =~ "Mission Control"
+
+    agent = agent_fixture(operator)
+    {:ok, ship} = Fleet.record_ship(agent, "#{agent.symbol}-1", "SHIP_COMMAND_FRIGATE")
+
+    assert {:error, :legacy_gameplay_retired} =
+             Intents.request(
+               scope,
+               agent,
+               %Intents.ManualControl{},
+               ship.symbol,
+               %Intents.Navigate{waypoint: "X1-UX81-A2"}
+             )
+  end
 
   test "history is authenticated and retains legacy owner and type", %{
     conn: conn,
@@ -123,7 +154,7 @@ defmodule SpaceTradersWeb.RetiredGameplayLiveTest do
     assert {:ok, _} = FleetStrategy.select_preset(scope, "steady_growth")
     assert {:ok, _} = FleetStrategy.activate(scope, FleetStrategy.get(scope).draft_version)
 
-    assert {:error, {:redirect, %{to: "/mission-control"}}} = live(conn, ~p"/")
+    assert redirected_to(get(conn, ~p"/")) == ~p"/mission-control"
 
     {:ok, view, _html} = live(conn, ~p"/intervention")
     assert has_element?(view, "#ship-reservations")

@@ -28,7 +28,7 @@ defmodule SpaceTradersWeb.OperatorSetupControllerTest do
 
     test "redirects home when already signed in", %{conn: conn} do
       conn = conn |> log_in_operator(operator_fixture()) |> get(~p"/setup")
-      assert redirected_to(conn) == ~p"/"
+      assert redirected_to(conn) == ~p"/mission-control"
     end
   end
 
@@ -37,7 +37,7 @@ defmodule SpaceTradersWeb.OperatorSetupControllerTest do
       conn = post(conn, ~p"/setup", @valid_params)
 
       assert get_session(conn, :operator_token)
-      assert redirected_to(conn) == ~p"/"
+      assert redirected_to(conn) == ~p"/mission-control"
 
       assert %Operator{confirmed_at: %DateTime{}} =
                Agent.get_operator_by_email("first@example.com")

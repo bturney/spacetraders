@@ -17,7 +17,7 @@ defmodule SpaceTradersWeb.OperatorLive.RegistrationTest do
         conn
         |> log_in_operator(operator_fixture())
         |> live(~p"/operators/register")
-        |> follow_redirect(conn, ~p"/")
+        |> follow_redirect(conn, ~p"/mission-control")
 
       assert {:ok, _conn} = result
     end
