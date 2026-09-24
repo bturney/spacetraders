@@ -176,12 +176,19 @@ defmodule SpaceTraders.FleetResources do
   defp claim(ship) do
     modes =
       [
-        {:refine, ship.modules || [], "MODULE_MINERAL_PROCESSOR"},
+        {:refine, ship.modules || [], "MODULE_"},
         {:extract, ship.mounts || [], "MOUNT_MINING_LASER"},
         {:siphon, ship.mounts || [], "MOUNT_GAS_SIPHON"}
       ]
       |> Enum.flat_map(fn {mode, parts, prefix} ->
-        if Enum.any?(parts, &String.starts_with?(&1.symbol, prefix)), do: [mode], else: []
+        if Enum.any?(parts, fn part ->
+             if mode == :refine,
+               do:
+                 part.symbol in ~w(MODULE_MINERAL_PROCESSOR_I MODULE_MICRO_REFINERY_I MODULE_ORE_REFINERY_I),
+               else: String.starts_with?(part.symbol, prefix)
+           end),
+           do: [mode],
+           else: []
       end)
 
     %{

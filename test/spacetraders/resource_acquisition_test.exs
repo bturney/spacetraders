@@ -111,6 +111,70 @@ defmodule SpaceTraders.ResourceAcquisitionTest do
              ).actual_outcomes["resource_yields"]
   end
 
+  test "active Strategy discovers a remote extraction Waypoint for a new Agent" do
+    {scope, agent, revision, ship} = generation()
+    test_pid = self()
+    ship_path = "/v2/my/ships/#{ship.symbol}"
+    orbit_path = ship_path <> "/orbit"
+    navigate_path = ship_path <> "/navigate"
+    waypoints_path = "/v2/systems/X1-UX81/waypoints"
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      send(test_pid, {conn.method, conn.request_path})
+
+      case {conn.method, conn.request_path} do
+        {"GET", "/v2/my/ships"} ->
+          Req.Test.json(conn, %{"data" => [ship_body(ship.symbol, %{"mounts" => [mount()]})]})
+
+        {"GET", "/v2/my/agent"} ->
+          Req.Test.json(conn, %{
+            "data" => %{
+              "symbol" => agent.symbol,
+              "credits" => 100_000,
+              "headquarters" => "X1-UX81-A1"
+            }
+          })
+
+        {"GET", "/v2/systems/X1-UX81/waypoints/X1-UX81-A1"} ->
+          Req.Test.json(conn, %{"data" => %{waypoint() | "type" => "PLANET"}})
+
+        {"GET", ^waypoints_path} ->
+          Req.Test.json(conn, %{
+            "data" => [
+              %{waypoint() | "type" => "PLANET"},
+              %{waypoint() | "symbol" => "X1-UX81-A2", "type" => "ASTEROID"}
+            ],
+            "meta" => %{"total" => 2, "page" => 1, "limit" => 20}
+          })
+
+        {"GET", ^ship_path} ->
+          Req.Test.json(conn, %{"data" => ship_body(ship.symbol, %{"mounts" => [mount()]})})
+
+        {"POST", ^orbit_path} ->
+          Req.Test.json(conn, %{"data" => %{"nav" => nav_body("IN_ORBIT")}})
+
+        {"POST", ^navigate_path} ->
+          Req.Test.json(conn, %{
+            "data" => %{
+              "nav" =>
+                nav_body("IN_TRANSIT",
+                  arrival: DateTime.utc_now() |> DateTime.add(3600) |> DateTime.to_iso8601(),
+                  destination: "X1-UX81-A2"
+                ),
+              "fuel" => %{"capacity" => 200, "current" => 100}
+            }
+          })
+      end
+    end)
+
+    assert {:ok, %Intent{status: "waiting", target_waypoint: "X1-UX81-A2"}} =
+             FleetResources.reconcile(scope, agent, revision, "X1-UX81", capacity())
+
+    assert_receive {"GET", ^waypoints_path}
+    assert_receive {"POST", ^orbit_path}
+    assert_receive {"POST", ^navigate_path}
+  end
+
   test "planner rejects stale Waypoint evidence, full Cargo and active cooldown" do
     {_scope, _agent, revision, _stored_ship} = generation()
     as_of = DateTime.utc_now()
@@ -199,6 +263,82 @@ defmodule SpaceTraders.ResourceAcquisitionTest do
                ships: [insufficient],
                waypoints: [resource_waypoint(as_of)]
              })
+  end
+
+  test "refining runs under a Claim and verifies produced and consumed Cargo" do
+    {scope, agent, revision, ship} = generation()
+    test_pid = self()
+    ship_path = "/v2/my/ships/#{ship.symbol}"
+    refine_path = ship_path <> "/refine"
+
+    ore_cargo = %{
+      "capacity" => 200,
+      "units" => 100,
+      "inventory" => [%{"symbol" => "IRON_ORE", "units" => 100}]
+    }
+
+    live_body =
+      ship_body(ship.symbol, %{
+        "nav" => nav_body("IN_ORBIT"),
+        "modules" => [%{"symbol" => "MODULE_ORE_REFINERY_I"}],
+        "cargo" => ore_cargo
+      })
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      send(test_pid, {conn.method, conn.request_path})
+
+      case {conn.method, conn.request_path} do
+        {"GET", "/v2/my/ships"} ->
+          Req.Test.json(conn, %{"data" => [live_body]})
+
+        {"GET", "/v2/my/agent"} ->
+          Req.Test.json(conn, %{
+            "data" => %{
+              "symbol" => agent.symbol,
+              "credits" => 100_000,
+              "headquarters" => "X1-UX81-A1"
+            }
+          })
+
+        {"GET", "/v2/systems/X1-UX81/waypoints/X1-UX81-A1"} ->
+          Req.Test.json(conn, %{"data" => waypoint()})
+
+        {"GET", ^ship_path} ->
+          Req.Test.json(conn, %{"data" => live_body})
+
+        {"POST", ^refine_path} ->
+          {:ok, body, conn} = Plug.Conn.read_body(conn)
+          assert Jason.decode!(body) == %{"produce" => "IRON"}
+
+          Req.Test.json(conn, %{
+            "data" => %{
+              "cargo" => %{
+                "capacity" => 200,
+                "units" => 10,
+                "inventory" => [%{"symbol" => "IRON", "units" => 10}]
+              },
+              "cooldown" => %{
+                "shipSymbol" => ship.symbol,
+                "remainingSeconds" => 30,
+                "totalSeconds" => 30,
+                "expiration" => DateTime.utc_now() |> DateTime.add(30) |> DateTime.to_iso8601()
+              },
+              "produced" => [%{"tradeSymbol" => "IRON", "units" => 10}],
+              "consumed" => [%{"tradeSymbol" => "IRON_ORE", "units" => 100}]
+            }
+          })
+      end
+    end)
+
+    assert {:ok,
+            %Intent{
+              status: "completed",
+              last_action_result: %{
+                "yield" => %{"produced" => [%{"tradeSymbol" => "IRON", "units" => 10}]}
+              }
+            }} = FleetResources.reconcile(scope, agent, revision, "X1-UX81", capacity())
+
+    assert_receive {"POST", ^refine_path}
   end
 
   test "a claimed Survey is retained in the root Intent and its cooldown rearms after restart" do

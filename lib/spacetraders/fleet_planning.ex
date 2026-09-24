@@ -242,7 +242,7 @@ defmodule SpaceTraders.FleetPlanning do
           do: cargo.capacity - cargo.units + 100,
           else: cargo.capacity - cargo.units
 
-      if capacity < required do
+      if capacity < required or (kind == :refine and ship.nav.waypoint_symbol != symbol) do
         nil
       else
         dependency = %{
@@ -269,7 +269,7 @@ defmodule SpaceTraders.FleetPlanning do
           destination_waypoint: symbol,
           expected_outcomes: %{
             cargo_units: if(kind == :refine, do: 10, else: 1),
-            decision_value: 1,
+            decision_value: if(ship.nav.waypoint_symbol == symbol, do: 2, else: 1),
             trade_symbol: produced
           },
           uncertainty: %{yield: :game_determined, consumed: consumed},
@@ -292,7 +292,11 @@ defmodule SpaceTraders.FleetPlanning do
   end
 
   defp resource_mode(type, mounts, modules, cargo) do
-    refinery? = Enum.any?(modules, &String.starts_with?(&1.symbol, "MODULE_MINERAL_PROCESSOR"))
+    refinery? =
+      Enum.any?(
+        modules,
+        &(&1.symbol in ~w(MODULE_MINERAL_PROCESSOR_I MODULE_MICRO_REFINERY_I MODULE_ORE_REFINERY_I))
+      )
 
     cond do
       refinery? and

@@ -1618,7 +1618,10 @@ defmodule SpaceTraders.Fleet.Intents do
     do: Enum.any?(ship.mounts || [], &String.starts_with?(&1.symbol, "MOUNT_GAS_SIPHON"))
 
   defp resource_ready?(%Intent{parameters: %{"mode" => "refine", "produce" => produce}}, ship) do
-    Enum.any?(ship.modules || [], &String.starts_with?(&1.symbol, "MODULE_MINERAL_PROCESSOR")) and
+    Enum.any?(
+      ship.modules || [],
+      &(&1.symbol in ~w(MODULE_MINERAL_PROCESSOR_I MODULE_MICRO_REFINERY_I MODULE_ORE_REFINERY_I))
+    ) and
       Fleet.item_units(ship.cargo, produce <> "_ORE") >= 100
   end
 
@@ -1706,7 +1709,11 @@ defmodule SpaceTraders.Fleet.Intents do
     with %{cargo: cargo, cooldown: cooldown} <- response,
          true <- is_map(cargo) and is_map(cooldown),
          {:ok, yield} <- resource_yield(kind, response),
+         true <- resource_yield_matches_request?(kind, yield, intent),
          true <- resource_cargo_proves?(intent.in_flight_action["cargo_before"], cargo, yield) do
+      # Keep the cooldown wakeup durable before finishing this Intent.
+      schedule_cooldown(agent, ship.symbol, response)
+
       outcome =
         transition_intent(intent,
           status: "completed",
@@ -1722,8 +1729,8 @@ defmodule SpaceTraders.Fleet.Intents do
         )
 
       if match?({:ok, _}, outcome) do
-        schedule_cooldown(agent, ship.symbol, response)
         FleetAllocation.reconcile_completed_outcomes()
+        announce_resource_ready(agent, ship, cooldown)
       end
 
       outcome
@@ -1744,12 +1751,39 @@ defmodule SpaceTraders.Fleet.Intents do
 
   defp resource_yield(_, _), do: {:error, :missing_resource_yield}
 
+  defp resource_yield_matches_request?("refine", yield, intent) do
+    produce = intent.parameters["produce"]
+
+    is_binary(produce) and
+      yield == %{
+        "produced" => [%{"tradeSymbol" => produce, "units" => 10}],
+        "consumed" => [%{"tradeSymbol" => produce <> "_ORE", "units" => 100}]
+      }
+  end
+
+  defp resource_yield_matches_request?(_, _yield, _intent), do: true
+
   defp resource_cargo_proves?(before, cargo, %{"symbol" => symbol, "units" => units})
        when is_binary(symbol) and is_integer(units) and units > 0 do
     cargo_delta(before, cargo) == %{symbol => units} and cargo.units - before["units"] == units
   end
 
   defp resource_cargo_proves?(before, cargo, %{"produced" => produced, "consumed" => consumed}) do
+    valid? =
+      Enum.all?(produced ++ consumed, fn
+        %{"tradeSymbol" => symbol, "units" => units} ->
+          is_binary(symbol) and symbol != "" and is_integer(units) and units > 0
+
+        _ ->
+          false
+      end)
+
+    if valid?, do: valid_refine_cargo?(before, cargo, produced, consumed), else: false
+  end
+
+  defp resource_cargo_proves?(_, _, _), do: false
+
+  defp valid_refine_cargo?(before, cargo, produced, consumed) do
     changes =
       Enum.reduce(produced, %{}, fn %{"tradeSymbol" => symbol, "units" => units}, acc ->
         Map.update(acc, symbol, units, &(&1 + units))
@@ -1765,8 +1799,6 @@ defmodule SpaceTraders.Fleet.Intents do
         Map.reject(changes, fn {_symbol, delta} -> delta == 0 end) and
       cargo.units - before["units"] == Enum.sum(Map.values(changes))
   end
-
-  defp resource_cargo_proves?(_, _, _), do: false
 
   defp cargo_units_evidence(%{"inventory" => items}, symbol),
     do: items |> Enum.find(%{"units" => 0}, &(&1["symbol"] == symbol)) |> Map.fetch!("units")
@@ -1834,7 +1866,7 @@ defmodule SpaceTraders.Fleet.Intents do
     end
   end
 
-  defp reconcile_resource_action(_agent, intent, ship, %{"kind" => kind, "cargo_before" => before}) do
+  defp reconcile_resource_action(agent, intent, ship, %{"kind" => kind, "cargo_before" => before}) do
     attempt = MutationAttempts.latest_for_intent(intent)
     delta = cargo_delta(before, ship.cargo)
 
@@ -1856,9 +1888,8 @@ defmodule SpaceTraders.Fleet.Intents do
 
     cond do
       (attempt && attempt.state in ["succeeded", "sent_or_unknown", "ambiguous"]) and
-        Fleet.cooldown_active?(ship) and accepted? ->
-        with {:ok, expires, _} <- DateTime.from_iso8601(ship.cooldown.expiration),
-             true <- DateTime.after?(expires, attempt.sent_or_unknown_at),
+          accepted? ->
+        with :ok <- resource_acceptance_proven?(attempt, ship),
              :ok <- reconcile_resource_attempt(attempt) do
           yield =
             if kind == "refine",
@@ -1873,17 +1904,27 @@ defmodule SpaceTraders.Fleet.Intents do
                   hd(Map.to_list(delta))
                 )
 
-          transition_intent(intent,
-            status: "completed",
-            in_flight_action: nil,
-            last_action_result: %{
-              "kind" => kind,
-              "yield" => yield,
-              "cargo" => cargo_evidence(ship.cargo),
-              "reconciled" => true
-            },
-            finished_at: DateTime.utc_now() |> DateTime.truncate(:second)
-          )
+          schedule_cooldown(agent, ship.symbol, %{cooldown: ship.cooldown})
+
+          result =
+            transition_intent(intent,
+              status: "completed",
+              in_flight_action: nil,
+              last_action_result: %{
+                "kind" => kind,
+                "yield" => yield,
+                "cargo" => cargo_evidence(ship.cargo),
+                "reconciled" => true
+              },
+              finished_at: DateTime.utc_now() |> DateTime.truncate(:second)
+            )
+
+          if match?({:ok, _}, result) do
+            FleetAllocation.reconcile_completed_outcomes()
+            announce_resource_ready(agent, ship, ship.cooldown)
+          end
+
+          result
         else
           _ -> block_intents(intent, :resource_outcome_unresolved)
         end
@@ -1906,6 +1947,29 @@ defmodule SpaceTraders.Fleet.Intents do
          ]) do
       {:ok, _} -> :ok
       error -> error
+    end
+  end
+
+  defp announce_resource_ready(agent, ship, cooldown) do
+    if not is_map(cooldown) or not is_integer(cooldown.remaining_seconds) or
+         cooldown.remaining_seconds <= 0 do
+      Phoenix.PubSub.broadcast(
+        SpaceTraders.PubSub,
+        "fleet_resource_evidence",
+        {:resource_cooldown_recovered, agent.id, ship.nav.system_symbol}
+      )
+    end
+  end
+
+  defp resource_acceptance_proven?(%{state: "succeeded"}, _ship), do: :ok
+
+  defp resource_acceptance_proven?(attempt, ship) do
+    with true <- Fleet.cooldown_active?(ship),
+         {:ok, expires, _} <- DateTime.from_iso8601(ship.cooldown.expiration),
+         true <- DateTime.after?(expires, attempt.sent_or_unknown_at) do
+      :ok
+    else
+      _ -> {:error, :resource_outcome_unresolved}
     end
   end
 
