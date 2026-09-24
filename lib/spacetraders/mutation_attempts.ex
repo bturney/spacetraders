@@ -192,13 +192,27 @@ defmodule SpaceTraders.MutationAttempts do
   @doc "Returns unresolved mutation evidence for the action currently selected by an Intent."
   @spec unresolved_for_intent(Intent.t()) :: Attempt.t() | nil
   def unresolved_for_intent(%Intent{} = intent) do
+    attempt_for_intent(intent, ["sent_or_unknown", "ambiguous"])
+  end
+
+  def latest_for_intent(%Intent{} = intent) do
+    attempt_for_intent(intent, [
+      "prepared",
+      "sent_or_unknown",
+      "ambiguous",
+      "succeeded",
+      "rejected"
+    ])
+  end
+
+  defp attempt_for_intent(%Intent{} = intent, states) do
     provenance = %{
       "intent_id" => intent.id,
       "selected_action_fingerprint" => action_fingerprint(intent.in_flight_action)
     }
 
     Attempt
-    |> where([attempt], attempt.state in ["sent_or_unknown", "ambiguous"])
+    |> where([attempt], attempt.state in ^states)
     |> where([attempt], fragment("? @> ?", attempt.provenance, ^provenance))
     |> order_by([attempt], desc: attempt.prepared_at, desc: attempt.id)
     |> limit(1)

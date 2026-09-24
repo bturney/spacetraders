@@ -22,8 +22,20 @@ defmodule SpaceTraders.Intelligence do
     :is_under_construction
   ]
   @waypoint_listing_fields [:symbol, :system_symbol, :type, :x, :y, :orbits, :orbitals, :traits]
+  @scanned_waypoint_fields [
+    :symbol,
+    :system_symbol,
+    :type,
+    :x,
+    :y,
+    :orbitals,
+    :traits,
+    :chart,
+    :faction
+  ]
   @market_composition_fields [:symbol, :exports, :imports, :exchange]
   @market_listing_fields @market_composition_fields ++ [:trade_goods, :transactions]
+  @shipyard_fields [:symbol, :ship_types, :ships, :transactions, :modifications_fee]
   @baseline_waypoint_fields [
     :symbol,
     :type,
@@ -97,9 +109,11 @@ defmodule SpaceTraders.Intelligence do
   @doc "Records one Waypoint observation without claiming omitted fields are false."
   def observe_waypoint(%AgentRecord{} = agent, waypoint, opts \\ []) do
     fields =
-      if Keyword.get(opts, :source) == "get_waypoints",
-        do: @waypoint_listing_fields,
-        else: @waypoint_fields
+      case Keyword.get(opts, :source) do
+        "get_waypoints" -> @waypoint_listing_fields
+        "scan_waypoints" -> @scanned_waypoint_fields
+        _ -> @waypoint_fields
+      end
 
     observe(
       agent,
@@ -120,6 +134,15 @@ defmodule SpaceTraders.Intelligence do
         else: @market_composition_fields
 
     observe(agent, "market", system_symbol, market.symbol, market, fields, opts)
+  end
+
+  def observe_shipyard(%AgentRecord{} = agent, system_symbol, shipyard, opts \\ []) do
+    payload =
+      if Keyword.get(opts, :offers_visible, false),
+        do: shipyard,
+        else: Map.put(shipyard, :ships, nil)
+
+    observe(agent, "shipyard", system_symbol, shipyard.symbol, payload, @shipyard_fields, opts)
   end
 
   @doc "Records authoritative Construction progress as independently refreshable facts."
@@ -171,6 +194,20 @@ defmodule SpaceTraders.Intelligence do
     facts
     |> Enum.group_by(& &1.field)
     |> Map.new(fn {field, field_facts} -> {field, usable_fact(field_facts) |> present_fact()} end)
+  end
+
+  def known_waypoints(%AgentRecord{} = agent, system_symbol) when is_binary(system_symbol) do
+    Fact
+    |> where(
+      [fact],
+      fact.agent_id == ^agent.id and fact.subject_type == "waypoint" and
+        fact.subject_system_symbol == ^system_symbol and fact.field == "symbol" and
+        fact.state == "known" and is_nil(fact.invalidated_at)
+    )
+    |> select([fact], fact.subject_symbol)
+    |> distinct(true)
+    |> Repo.all()
+    |> Enum.sort()
   end
 
   @doc "Returns known Marketplace Waypoint symbols in one System in stable order."
@@ -259,6 +296,11 @@ defmodule SpaceTraders.Intelligence do
         do: query,
         else: where(query, [fact], fact.field in ^Enum.map(fields, &to_string/1))
 
+    query =
+      if to_string(subject_type) == "waypoint",
+        do: where(query, [fact], fact.field not in ["symbol", "system_symbol"]),
+        else: query
+
     {count, _} = Repo.update_all(query, set: [invalidated_at: now()])
     {:ok, count}
   end
@@ -340,7 +382,7 @@ defmodule SpaceTraders.Intelligence do
     else
       value = Map.get(payload, field)
 
-      if not is_nil(value) or opts[:source] == "get_waypoint" do
+      if not is_nil(value) do
         {"known", normalize(value)}
       else
         {"unknown", nil}

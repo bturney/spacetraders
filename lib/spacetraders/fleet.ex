@@ -23,7 +23,7 @@ defmodule SpaceTraders.Fleet do
 
   alias SpaceTraders.Fleet.Intents
   alias SpaceTraders.Repo
-  alias SpaceTraders.{Agent, Contracts, Intelligence, Listing}
+  alias SpaceTraders.{Agent, Contracts, Intelligence, World}
 
   @doc "Safely retires pre-stop execution state before fresh Fleet planning."
   def prepare_emergency_stop_resume(operator_id, now) do
@@ -95,7 +95,7 @@ defmodule SpaceTraders.Fleet do
         ships = list_ships(agent) |> annotate_ships(agent)
 
         ships = annotate_actions(ships) |> annotate_control_state()
-        waypoints = list_waypoints(agent)
+        waypoints = retained_waypoints(agent)
         activity = recent_activity(agent) |> annotate_activity()
 
         listings =
@@ -593,6 +593,15 @@ defmodule SpaceTraders.Fleet do
       case fetch_waypoint_pages(token_reference(agent), system) do
         {:ok, waypoints} = result ->
           Enum.each(waypoints, &record_waypoint_observation(agent, &1, "get_waypoints"))
+
+          if is_integer(agent.operator_id) do
+            Phoenix.PubSub.broadcast(
+              SpaceTraders.PubSub,
+              "fleet_intelligence_evidence",
+              {:waypoint_intelligence_observed, agent.id, system}
+            )
+          end
+
           result
 
         result ->
@@ -967,8 +976,39 @@ defmodule SpaceTraders.Fleet do
     end
   end
 
-  defp snapshot_listings(agent, {:ok, ships}, waypoints),
-    do: Listing.for_ships(agent, ships, waypoints)
+  defp retained_waypoints(%AgentRecord{headquarters: headquarters} = agent)
+       when is_binary(headquarters) do
+    case system_from_headquarters(headquarters) do
+      {:ok, system} ->
+        waypoints =
+          agent
+          |> World.waypoints(system, DateTime.utc_now(), 300)
+          |> Enum.map(fn waypoint ->
+            %{
+              symbol: waypoint.symbol,
+              system_symbol: system,
+              type: fact_value(waypoint.facts["type"]),
+              x: fact_value(waypoint.facts["x"]),
+              y: fact_value(waypoint.facts["y"]),
+              traits: fact_value(waypoint.facts["traits"]),
+              modifiers: fact_value(waypoint.facts["modifiers"])
+            }
+          end)
+
+        {:ok, waypoints}
+
+      _ ->
+        {:error, :invalid_headquarters}
+    end
+  end
+
+  defp retained_waypoints(%AgentRecord{}), do: {:error, :invalid_headquarters}
+
+  defp fact_value(%{state: "known", value: value}), do: value
+  defp fact_value(_fact), do: nil
+
+  defp snapshot_listings(_agent, {:ok, _ships}, {:ok, _waypoints}),
+    do: %{shipyards: {:ok, []}, markets: {:ok, []}}
 
   defp snapshot_listings(_agent, _ships, _waypoints),
     do: %{shipyards: {:ok, []}, markets: {:ok, []}}

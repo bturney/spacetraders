@@ -24,13 +24,16 @@ defmodule SpaceTraders.API.Model.Shipyard do
       modifications_fee: json["modificationsFee"],
       ship_types:
         Enum.map(json["shipTypes"] || [], &SpaceTraders.API.Model.ShipyardShipTypes.from_json/1),
-      ships: Enum.map(json["ships"] || [], &SpaceTraders.API.Model.ShipyardShip.from_json/1),
+      ships:
+        json["ships"] &&
+          Enum.map(json["ships"] || [], &SpaceTraders.API.Model.ShipyardShip.from_json/1),
       symbol: json["symbol"],
       transactions:
-        Enum.map(
-          json["transactions"] || [],
-          &SpaceTraders.API.Model.ShipyardTransaction.from_json/1
-        )
+        json["transactions"] &&
+          Enum.map(
+            json["transactions"] || [],
+            &SpaceTraders.API.Model.ShipyardTransaction.from_json/1
+          )
     }
   end
 end
