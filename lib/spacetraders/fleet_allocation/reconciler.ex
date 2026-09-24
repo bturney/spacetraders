@@ -82,7 +82,11 @@ defmodule SpaceTraders.FleetAllocation.Reconciler do
 
   defp with_context(agent_id, callback) do
     with :ok <- SpaceTraders.RuntimeAuthority.execution_allowed?(),
-         %Generation{fleet_strategy_revision_id: revision_id, operator_id: operator_id} <-
+         %Generation{
+           fleet_strategy_revision_id: revision_id,
+           operator_id: operator_id
+         }
+         when is_integer(revision_id) <-
            Repo.one(
              from generation in Generation,
                where:

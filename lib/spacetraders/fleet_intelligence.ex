@@ -23,6 +23,7 @@ defmodule SpaceTraders.FleetIntelligence do
   @distance_cost 0.01
   @market_api_cost 5
   @market_distance_cost 1
+  @initial_market_decision_value 10.0
 
   def reconcile(
         %Scope{} = scope,
@@ -133,7 +134,9 @@ defmodule SpaceTraders.FleetIntelligence do
     market =
       case credit_objective(revision) do
         {index, _} ->
-          if(Enum.any?(waypoints, &stale_market_quote?/1), do: [{:market, index}], else: [])
+          if Enum.any?(waypoints, &market_listing_needed?/1),
+            do: [{:market, index}],
+            else: []
 
         _ ->
           []
@@ -252,18 +255,62 @@ defmodule SpaceTraders.FleetIntelligence do
             }
           }
 
-    markets =
-      Enum.flat_map(waypoints, fn waypoint ->
-        case waypoint.market.facts["trade_goods"] do
-          %{state: "known", value: goods, observed_at: observed_at} = fact
-          when is_list(goods) ->
+    existing_opportunities =
+      case FleetPlanning.plan_market(
+             revision,
+             index,
+             FleetPlanning.market_snapshot(
+               as_of,
+               system,
+               agent_id,
+               retained_markets(waypoints, system)
+             )
+             |> Map.put(:observation_costs, costs)
+           ) do
+        {:ok, %{observation_demands: demands}} ->
+          Enum.flat_map(demands, fn demand ->
+            waypoint = Enum.find(waypoints, &String.ends_with?(demand.subject, ":#{&1.symbol}"))
+            cost = costs[demand.subject]
+
+            if waypoint && cost do
+              [
+                %{
+                  subject: demand.subject,
+                  required_facts: demand.required_facts,
+                  facts: waypoint.market.facts,
+                  expected_decision_value:
+                    demand.expected_value + cost.api_capacity_cost + cost.ship_time_cost,
+                  api_capacity_cost: cost.api_capacity_cost,
+                  ship_time_cost: cost.ship_time_cost,
+                  acquisition: :on_site
+                }
+              ]
+            else
+              []
+            end
+          end)
+
+        _ ->
+          []
+      end
+
+    initial_opportunities =
+      waypoints
+      |> Enum.filter(&market_listing_needed?/1)
+      |> Enum.flat_map(fn waypoint ->
+        subject = "market:#{system}:#{waypoint.symbol}"
+
+        case costs[subject] do
+          %{api_capacity_cost: api_cost, ship_time_cost: ship_cost} ->
             [
               %{
-                subject: "market:#{system}:#{waypoint.symbol}",
-                observed_at: observed_at,
-                trade_goods: goods,
-                source: fact.source,
-                evidence_id: "intelligence-observation:#{fact.observation_id}"
+                subject: subject,
+                required_facts: ["trade_goods"],
+                facts: waypoint.market.facts,
+                expected_decision_value: @initial_market_decision_value,
+                api_capacity_cost: api_cost,
+                ship_time_cost: ship_cost,
+                acquisition: :on_site
               }
             ]
 
@@ -272,44 +319,51 @@ defmodule SpaceTraders.FleetIntelligence do
         end
       end)
 
-    snapshot =
-      FleetPlanning.market_snapshot(as_of, system, agent_id, markets)
-      |> Map.put(:observation_costs, costs)
+    Enum.uniq_by(existing_opportunities ++ initial_opportunities, & &1.subject)
+  end
 
-    case FleetPlanning.plan_market(revision, index, snapshot) do
-      {:ok, %{observation_demands: demands}} ->
-        Enum.flat_map(demands, fn demand ->
-          waypoint = Enum.find(waypoints, &String.ends_with?(demand.subject, ":#{&1.symbol}"))
-          cost = costs[demand.subject]
+  defp retained_markets(waypoints, system) do
+    Enum.flat_map(waypoints, fn waypoint ->
+      case waypoint.market.facts["trade_goods"] do
+        %{state: "known", value: goods, observed_at: observed_at} = fact
+        when is_list(goods) ->
+          [
+            %{
+              subject: "market:#{system}:#{waypoint.symbol}",
+              observed_at: observed_at,
+              trade_goods: goods,
+              source: fact.source,
+              evidence_id: "intelligence-observation:#{fact.observation_id}"
+            }
+          ]
 
-          if waypoint && cost do
-            [
-              %{
-                subject: demand.subject,
-                required_facts: demand.required_facts,
-                facts: waypoint.market.facts,
-                expected_decision_value:
-                  demand.expected_value + cost.api_capacity_cost + cost.ship_time_cost,
-                api_capacity_cost: cost.api_capacity_cost,
-                ship_time_cost: cost.ship_time_cost,
-                acquisition: :on_site
-              }
-            ]
-          else
-            []
-          end
-        end)
+        _ ->
+          []
+      end
+    end)
+  end
 
-      _ ->
-        []
+  defp market_listing_needed?(waypoint) do
+    case waypoint.market.facts["trade_goods"] do
+      nil ->
+        marketplace_waypoint?(waypoint)
+
+      %{state: "known_unavailable"} ->
+        false
+
+      fact ->
+        marketplace_waypoint?(waypoint) and fact[:freshness] != :fresh
     end
   end
 
-  defp stale_market_quote?(waypoint) do
-    match?(
-      %{state: "known", freshness: :stale, value: [_ | _]},
-      waypoint.market.facts["trade_goods"]
-    )
+  defp marketplace_waypoint?(waypoint) do
+    case waypoint.facts["traits"] do
+      %{state: "known", value: traits} when is_list(traits) ->
+        Enum.any?(traits, &(Map.get(&1, "symbol") == "MARKETPLACE"))
+
+      _ ->
+        false
+    end
   end
 
   defp chart_objective(%Revision{document: %{"objectives" => objectives}})
