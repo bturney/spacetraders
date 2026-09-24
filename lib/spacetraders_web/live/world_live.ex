@@ -1,6 +1,4 @@
 defmodule SpaceTradersWeb.WorldLive do
-  @moduledoc "Authenticated, read-only Atlas and Intelligence view of retained game facts."
-
   use SpaceTradersWeb, :live_view
 
   alias SpaceTraders.{Agent, Fleet, World}

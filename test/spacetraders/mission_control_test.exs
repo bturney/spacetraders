@@ -2,6 +2,7 @@ defmodule SpaceTraders.MissionControlTest do
   use SpaceTraders.DataCase
 
   import SpaceTraders.AgentFixtures
+  import SpaceTraders.ShipBody
 
   alias SpaceTraders.Agent.Scope
   alias SpaceTraders.MissionControl
@@ -26,6 +27,59 @@ defmodule SpaceTraders.MissionControlTest do
 
       assert [%{agent_token: nil} = agent_ref] = MissionControl.agents(scope)
       assert [%{agent: %{agent_token: nil}}] = MissionControl.dashboard(scope, [agent_ref])
+    end
+
+    test "dashboard never acquires on-site Market or Shipyard listings" do
+      operator = operator_fixture()
+      agent = agent_fixture(operator, %{headquarters: "X1-UX81-A1"})
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/v2/my/agent"} ->
+            Req.Test.json(conn, %{
+              "data" => %{
+                "accountId" => "ACC",
+                "symbol" => agent.symbol,
+                "headquarters" => "X1-UX81-A1",
+                "credits" => 50_000,
+                "startingFaction" => "COSMIC",
+                "shipCount" => 1
+              }
+            })
+
+          {"GET", "/v2/my/ships"} ->
+            Req.Test.json(conn, %{
+              "data" => [ship_body("DASH-1", %{"nav" => nav_body("DOCKED")})]
+            })
+
+          {"GET", "/v2/my/contracts"} ->
+            Req.Test.json(conn, %{"data" => []})
+
+          {"GET", "/v2/systems/X1-UX81/waypoints"} ->
+            Req.Test.json(conn, %{
+              "data" => [
+                %{
+                  "symbol" => "X1-UX81-A1",
+                  "systemSymbol" => "X1-UX81",
+                  "type" => "ORBITAL_STATION",
+                  "x" => 0,
+                  "y" => 0,
+                  "orbitals" => [],
+                  "traits" => [
+                    %{"symbol" => "MARKETPLACE"},
+                    %{"symbol" => "SHIPYARD"}
+                  ]
+                }
+              ]
+            })
+
+          request ->
+            flunk("dashboard requested on-site intelligence: #{inspect(request)}")
+        end
+      end)
+
+      assert [%{markets: {:ok, []}, shipyards: {:ok, []}}] =
+               MissionControl.dashboard(Scope.for_operator(operator))
     end
 
     test "ignores an Agent retired after its projection reference was listed" do
@@ -57,12 +111,12 @@ defmodule SpaceTraders.MissionControlTest do
       assert {:error, _reason} = projection.overview
       assert {:error, _reason} = projection.ships
       assert {:error, _reason} = projection.contracts
-      assert {:error, _reason} = projection.waypoints
+      assert {:ok, []} = projection.waypoints
 
       assert_received {:request, "GET", "/v2/my/agent"}
       assert_received {:request, "GET", "/v2/my/ships"}
       assert_received {:request, "GET", "/v2/my/contracts"}
-      assert_received {:request, "GET", "/v2/systems/X1-UX81/waypoints"}
+      refute_received {:request, "GET", "/v2/systems/X1-UX81/waypoints"}
       refute_received {:mutation_request, _method, _path}
     end
   end

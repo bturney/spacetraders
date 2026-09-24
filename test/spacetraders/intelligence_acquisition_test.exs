@@ -6,6 +6,7 @@ defmodule SpaceTraders.IntelligenceAcquisitionTest do
   alias SpaceTraders.Agent.Agent, as: AgentRecord
   alias SpaceTraders.Agent.{Operator, Scope}
   alias SpaceTraders.API.Model
+  alias SpaceTraders.API.OperationInventory
   alias SpaceTraders.Fleet.{Intent, Ship, ShipServer}
   alias SpaceTraders.Fleet.Intents
   alias SpaceTraders.FleetAllocation
@@ -16,6 +17,7 @@ defmodule SpaceTraders.IntelligenceAcquisitionTest do
   alias SpaceTraders.FleetPlanning
   alias SpaceTraders.FleetStrategy.{Revision, Strategy}
   alias SpaceTraders.Intelligence
+  alias SpaceTraders.MutationAttempts
   alias SpaceTraders.World
 
   setup do
@@ -488,27 +490,35 @@ defmodule SpaceTraders.IntelligenceAcquisitionTest do
     assert {:ok, _} =
              FleetAllocation.unwind_current_portfolio(scope, previous.fleet_generation_id)
 
-    waypoint =
-      Model.Waypoint.from_json(%{
-        "symbol" => "X1-UX81-A1",
-        "systemSymbol" => "X1-UX81",
-        "type" => "PLANET",
-        "x" => 1,
-        "y" => 2,
-        "traits" => []
-      })
-
-    {:ok, _} = Intelligence.observe_waypoint(agent, waypoint, source: "get_waypoints")
-
     ship_path = "/v2/my/ships/#{ship.symbol}"
     chart_path = "#{ship_path}/chart"
     waypoint_path = "/v2/systems/X1-UX81/waypoints/X1-UX81-A1"
 
     Req.Test.stub(SpaceTraders.API, fn conn ->
       case {conn.method, conn.request_path} do
+        {"GET", "/v2/systems/X1-UX81/waypoints"} ->
+          Req.Test.json(conn, %{
+            "data" => [
+              %{
+                "symbol" => "X1-UX81-A1",
+                "systemSymbol" => "X1-UX81",
+                "type" => "PLANET",
+                "x" => 1,
+                "y" => 2,
+                "traits" => []
+              }
+            ],
+            "meta" => %{"page" => 1, "total" => 1}
+          })
+
         {"GET", "/v2/my/ships"} ->
           Req.Test.json(conn, %{
-            "data" => [ship_body(ship.symbol, %{"nav" => nav_body("IN_ORBIT")})]
+            "data" => [
+              ship_body(ship.symbol, %{
+                "nav" => nav_body("IN_ORBIT"),
+                "mounts" => [%{"symbol" => "MOUNT_SENSOR_ARRAY_I", "name" => "Sensor"}]
+              })
+            ]
           })
 
         {"GET", "/v2/my/agent"} ->
@@ -802,6 +812,154 @@ defmodule SpaceTraders.IntelligenceAcquisitionTest do
     assert projection.facts["ship_types"].freshness == :fresh
     assert projection.facts["ships"].value == []
     assert projection.facts["ships"].observing_ship_symbol == ship.symbol
+  end
+
+  test "active lower-priority commitments are not superseded by intelligence activation" do
+    {agent, ship, portfolio, commitment} =
+      claimed_ship(%{
+        "objective" => "Chart useful waypoints",
+        "kind" => "attain",
+        "evaluation" => "Increase newly charted waypoint coverage"
+      })
+
+    revision = Repo.get!(Revision, portfolio.fleet_strategy_revision_id)
+
+    revision =
+      Repo.update!(
+        Ecto.Changeset.change(revision, %{
+          document: %{
+            "objectives" => [
+              %{
+                "objective" => "Chart useful waypoints",
+                "kind" => "attain",
+                "evaluation" => "Increase newly charted waypoint coverage"
+              },
+              %{
+                "objective" => "Grow credits",
+                "kind" => "continuous",
+                "evaluation" => "Maximize net credit growth over time"
+              }
+            ],
+            "hard_constraints" => ["Keep at least 1,000 credits available"]
+          }
+        })
+      )
+
+    commitment = Repo.update!(Ecto.Changeset.change(commitment, objective_index: 1))
+    scope = Scope.for_operator(Repo.get!(Operator, agent.operator_id))
+
+    waypoint =
+      Model.Waypoint.from_json(%{
+        "symbol" => "X1-UX81-A2",
+        "systemSymbol" => "X1-UX81",
+        "type" => "PLANET",
+        "x" => 2,
+        "y" => 2,
+        "traits" => []
+      })
+
+    {:ok, _} = Intelligence.observe_waypoint(agent, waypoint, source: "get_waypoints")
+
+    Req.Test.stub(SpaceTraders.API, fn _conn ->
+      flunk("active commitments must retain their Fleet")
+    end)
+
+    assert {:error, :no_decision_relevant_intelligence} =
+             FleetIntelligence.reconcile(scope, agent, revision, "X1-UX81", %{
+               available_slots: 3,
+               backpressure: :none
+             })
+
+    assert {:ok, %{portfolio_id: portfolio_id, commitment_id: commitment_id}} =
+             FleetAllocation.current_ship_claim(agent, ship.symbol)
+
+    assert portfolio_id == portfolio.id
+    assert commitment_id == commitment.id
+  end
+
+  test "a persisted successful chart response is reconciled without another chart request" do
+    {agent, ship, portfolio, commitment} =
+      claimed_ship(%{
+        "objective" => "Chart useful waypoints",
+        "kind" => "attain",
+        "evaluation" => "Increase newly charted waypoint coverage"
+      })
+
+    action = %{
+      "kind" => "chart",
+      "waypoint" => "X1-UX81-A1",
+      "fleet_commitment_id" => commitment.id,
+      "fleet_commitment_portfolio_id" => portfolio.id,
+      "fleet_commitment_portfolio_version" => portfolio.version
+    }
+
+    intent =
+      Repo.insert!(%Intent{
+        ship_id: ship.id,
+        caller: "commitment",
+        fleet_commitment_id: commitment.id,
+        fleet_commitment_portfolio_id: portfolio.id,
+        fleet_commitment_portfolio_version: portfolio.version,
+        type: "acquire_intelligence",
+        target_waypoint: "X1-UX81-A1",
+        parameters: %{
+          "system" => "X1-UX81",
+          "subject_type" => "waypoint",
+          "required_facts" => ["chart"],
+          "freshness_seconds" => 300
+        },
+        in_flight_action: action
+      })
+
+    {:ok, attempt} =
+      MutationAttempts.prepare(
+        OperationInventory.fetch!("create-chart"),
+        "/my/ships/#{ship.symbol}/chart",
+        agent_id: agent.id,
+        dependency_context: %{waypoint_symbol: "X1-UX81-A1"}
+      )
+
+    {:ok, attempt} = MutationAttempts.mark_sent_or_unknown(attempt)
+
+    {:ok, attempt} =
+      MutationAttempts.record_outcome(attempt, :succeeded, %{status: 200})
+
+    chart_time =
+      attempt.sent_or_unknown_at
+      |> DateTime.add(1, :second)
+      |> DateTime.to_iso8601()
+
+    ship_path = "/v2/my/ships/#{ship.symbol}"
+    waypoint_path = "/v2/systems/X1-UX81/waypoints/X1-UX81-A1"
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      case {conn.method, conn.request_path} do
+        {"GET", ^ship_path} ->
+          Req.Test.json(conn, %{"data" => ship_body(ship.symbol)})
+
+        {"GET", ^waypoint_path} ->
+          Req.Test.json(conn, %{
+            "data" => %{
+              "symbol" => "X1-UX81-A1",
+              "systemSymbol" => "X1-UX81",
+              "type" => "PLANET",
+              "traits" => [],
+              "chart" => %{
+                "waypointSymbol" => "X1-UX81-A1",
+                "submittedBy" => agent.symbol,
+                "submittedOn" => chart_time
+              }
+            }
+          })
+
+        other ->
+          flunk("unexpected replay: #{inspect(other)}")
+      end
+    end)
+
+    assert :ok = Intents.reconcile(agent.id, ship.symbol, nil, :boot, intent.id)
+    assert %Intent{status: "completed"} = Repo.get!(Intent, intent.id)
+    assert MutationAttempts.get!(attempt.id).state == "succeeded"
   end
 
   defp claimed_ship(objective \\ %{"objective" => "Acquire useful intelligence"}) do

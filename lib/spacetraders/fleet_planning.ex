@@ -168,6 +168,9 @@ defmodule SpaceTraders.FleetPlanning do
          observed when is_map(observed) <- Map.get(opportunity, :facts),
          acquisition when acquisition in [:public, :on_site] <-
            Map.get(opportunity, :acquisition),
+         capabilities when is_list(capabilities) <-
+           Map.get(opportunity, :required_capabilities, []),
+         true <- Enum.all?(capabilities, &valid_capability?/1),
          value when is_number(value) and value >= 0 <-
            Map.get(opportunity, :expected_decision_value),
          api_cost when is_number(api_cost) and api_cost >= 0 <-
@@ -179,9 +182,14 @@ defmodule SpaceTraders.FleetPlanning do
       net = value - api_cost - ship_cost
 
       cond do
-        missing == [] -> {:ok, :satisfied}
-        net <= 0 -> {:error, :acquisition_cost_exceeds_value}
-        true -> {:ok, %{net_value: net, type: type, waypoint: waypoint}}
+        missing == [] ->
+          {:ok, :satisfied}
+
+        net <= 0 ->
+          {:error, :acquisition_cost_exceeds_value}
+
+        true ->
+          {:ok, %{net_value: net, type: type, waypoint: waypoint, capabilities: capabilities}}
       end
     else
       _ -> {:error, :invalid}
@@ -190,6 +198,9 @@ defmodule SpaceTraders.FleetPlanning do
 
   defp intelligence_opportunity(_opportunity, _system, _as_of, _freshness),
     do: {:error, :invalid}
+
+  defp valid_capability?(%{capability: capability}) when is_atom(capability), do: true
+  defp valid_capability?(_capability), do: false
 
   defp fresh_intelligence?(
          %{state: "known", observed_at: %DateTime{} = observed_at},
@@ -218,7 +229,7 @@ defmodule SpaceTraders.FleetPlanning do
       expected_outcomes: %{decision_value: choice.net_value},
       uncertainty: %{decision_value_estimate: opportunity.expected_decision_value},
       required_roles: [%{role: :intelligence_scout, count: 1}],
-      required_capabilities: [],
+      required_capabilities: choice.capabilities,
       required_resources: %{ship_count: 1, credits: 0},
       dependencies: [],
       validity: %{as_of: DateTime.add(deadline, -60, :second), expires_at: deadline},

@@ -133,7 +133,7 @@ defmodule SpaceTraders.FleetExecution do
 
   defp do_activate_intelligence(scope, agent, revision, candidates, demands) do
     availability = availability(scope, agent)
-    owned_ships = owned_ship_symbols(agent)
+    owned_ships = MapSet.new(Enum.map(availability.claims, & &1.resource))
 
     with {:ok, selection} <-
            FleetAllocation.select_portfolio(revision, candidates, availability),
@@ -368,7 +368,11 @@ defmodule SpaceTraders.FleetExecution do
           %{
             resource: ship.symbol,
             roles: [:market_trader, :intelligence_scout],
-            capabilities: %{cargo_transport: cargo_capacity(ship)}
+            capabilities: %{
+              cargo_transport: cargo_capacity(ship),
+              chart: true,
+              waypoint_scan: sensor_mount?(ship)
+            }
           }
         end)
 
@@ -379,6 +383,14 @@ defmodule SpaceTraders.FleetExecution do
 
   defp cargo_capacity(%{cargo: %{capacity: capacity}}) when is_integer(capacity), do: capacity
   defp cargo_capacity(_ship), do: 0
+
+  defp sensor_mount?(%{mounts: mounts}) when is_list(mounts) do
+    Enum.any?(mounts, fn mount ->
+      is_binary(mount.symbol) and String.starts_with?(mount.symbol, "MOUNT_SENSOR_ARRAY")
+    end)
+  end
+
+  defp sensor_mount?(_ship), do: false
 
   defp availability_reservations(_operator, agent) do
     case agent_credits(agent) do

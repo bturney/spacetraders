@@ -1,6 +1,9 @@
 defmodule SpaceTraders.FleetIntelligence do
+  alias SpaceTraders.Agent, as: AgentContext
   alias SpaceTraders.Agent.Agent, as: AgentRecord
   alias SpaceTraders.Agent.Scope
+  alias SpaceTraders.API.AgentTokenReference
+  alias SpaceTraders.Evidence
   alias SpaceTraders.Fleet
   alias SpaceTraders.Fleet.Intent
   alias SpaceTraders.Fleet.Intents
@@ -8,6 +11,7 @@ defmodule SpaceTraders.FleetIntelligence do
   alias SpaceTraders.FleetExecution
   alias SpaceTraders.FleetPlanning
   alias SpaceTraders.FleetStrategy.Revision
+  alias SpaceTraders.Intelligence
   alias SpaceTraders.World
 
   alias SpaceTraders.Repo
@@ -20,7 +24,6 @@ defmodule SpaceTraders.FleetIntelligence do
   @market_api_cost 5
   @market_distance_cost 1
 
-  @doc "Plans and admits a useful chart observation for an active Fleet Generation."
   def reconcile(
         %Scope{} = scope,
         %AgentRecord{} = agent,
@@ -29,10 +32,10 @@ defmodule SpaceTraders.FleetIntelligence do
         capacity
       )
       when is_binary(system) and is_map(capacity) do
-    with waypoints = World.waypoints(agent, system, DateTime.utc_now(), @freshness_seconds),
+    with true <- capacity.available_slots > 0 and capacity.backpressure != :sustained,
+         :ok <- allocation_available(scope, agent),
+         waypoints <- waypoints_for_decision(agent, revision, system),
          {kind, index} <- next_objective(revision, waypoints),
-         :ok <- allocation_available(scope, agent, index),
-         true <- capacity.available_slots > 0 and capacity.backpressure != :sustained,
          {:ok, ships} <- Fleet.list_ships(agent),
          true <- ships != [],
          opportunities <-
@@ -51,6 +54,71 @@ defmodule SpaceTraders.FleetIntelligence do
       _ -> {:error, :no_decision_relevant_intelligence}
     end
   end
+
+  defp waypoints_for_decision(agent, revision, system) do
+    waypoints = World.waypoints(agent, system, DateTime.utc_now(), @freshness_seconds)
+
+    if waypoints == [] do
+      discover_waypoints(agent, revision, system)
+    else
+      waypoints
+    end
+  end
+
+  defp discover_waypoints(agent, revision, system) do
+    priorities =
+      [chart_objective(revision), credit_objective(revision), shipyard_objective(revision)]
+      |> Enum.reject(&is_nil/1)
+      |> Enum.map(&elem(&1, 0))
+      |> Enum.sort()
+
+    case priorities do
+      [] ->
+        []
+
+      [priority | _] ->
+        request = [
+          owner: "fleet_planning",
+          discovery: true,
+          expected_value: 1.0 - @api_cost,
+          strategic_priority: priority,
+          freshness_seconds: @freshness_seconds,
+          required_facts: ["waypoints"]
+        ]
+
+        result =
+          Evidence.get_waypoints_paginated(
+            AgentTokenReference.new(agent),
+            system,
+            [],
+            request
+          )
+
+        case AgentContext.handle_game_result(agent, result) do
+          {:ok, waypoints} ->
+            retain_waypoints(agent, waypoints)
+
+          {:error, _reason, waypoints} when is_list(waypoints) ->
+            retain_waypoints(agent, waypoints)
+
+          _ ->
+            []
+        end
+    end
+  end
+
+  defp retain_waypoints(_agent, []), do: []
+
+  defp retain_waypoints(agent, waypoints) do
+    Enum.each(waypoints, fn waypoint ->
+      Intelligence.observe_waypoint(agent, waypoint, source: "get_waypoints")
+    end)
+
+    World.waypoints(agent, waypoint_system(waypoints), DateTime.utc_now(), @freshness_seconds)
+  end
+
+  defp waypoint_system([%{system_symbol: system} | _]), do: system
+  defp waypoint_system(_), do: "unknown"
 
   defp next_objective(revision, waypoints) do
     chart =
@@ -168,22 +236,21 @@ defmodule SpaceTraders.FleetIntelligence do
     as_of = DateTime.utc_now()
 
     costs =
-      Map.new(waypoints, fn waypoint ->
-        cost =
-          ships
-          |> Enum.map(&travel_cost(&1, waypoint, waypoints))
-          |> Enum.filter(&is_number/1)
-          |> Enum.min(fn -> nil end)
-
-        {"market:#{system}:#{waypoint.symbol}",
-         if(is_number(cost),
-           do: %{
-             api_capacity_cost: @market_api_cost,
-             ship_time_cost: cost * @market_distance_cost / @distance_cost
-           },
-           else: nil
-         )}
-      end)
+      for waypoint <- waypoints,
+          cost =
+            ships
+            |> Enum.map(&travel_cost(&1, waypoint, waypoints))
+            |> Enum.filter(&is_number/1)
+            |> Enum.min(fn -> nil end),
+          is_number(cost),
+          into: %{},
+          do: {
+            "market:#{system}:#{waypoint.symbol}",
+            %{
+              api_capacity_cost: @market_api_cost,
+              ship_time_cost: cost * @market_distance_cost / @distance_cost
+            }
+          }
 
     markets =
       Enum.flat_map(waypoints, fn waypoint ->
@@ -260,17 +327,14 @@ defmodule SpaceTraders.FleetIntelligence do
 
   defp chart_objective(_revision), do: nil
 
-  defp allocation_available(scope, agent, priority) do
+  defp allocation_available(scope, agent) do
     case FleetAllocation.current_portfolio(scope, agent) do
       nil ->
         :ok
 
       %{commitments: commitments} ->
         if Intents.current(agent) != [] or
-             Enum.any?(commitments, fn commitment ->
-               commitment.objective_index <= priority and
-                 not completed_intelligence?(commitment.id)
-             end),
+             Enum.any?(commitments, &(not completed_intelligence?(&1.id))),
            do: {:error, :ship_claimed},
            else: :ok
     end
@@ -305,7 +369,8 @@ defmodule SpaceTraders.FleetIntelligence do
               expected_decision_value: 1.0,
               api_capacity_cost: @api_cost,
               ship_time_cost: ship_cost,
-              acquisition: :on_site
+              acquisition: :on_site,
+              required_capabilities: [%{capability: :waypoint_scan}, %{capability: :chart}]
             }
           ]
         else
