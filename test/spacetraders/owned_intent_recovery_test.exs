@@ -7,7 +7,7 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
   alias SpaceTraders.Agent.{Operator, Scope}
   alias SpaceTraders.API.Model
   alias SpaceTraders.API.OperationInventory
-  alias SpaceTraders.Fleet.{Intent, Ship, ShipServer}
+  alias SpaceTraders.Fleet.{Activity, Intent, Ship, ShipServer}
   alias SpaceTraders.Fleet.Intents
   alias SpaceTraders.FleetAllocation
   alias SpaceTraders.FleetAllocation.PortfolioCandidate
@@ -168,8 +168,12 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
     Req.Test.stub(SpaceTraders.API, fn conn ->
       assert {conn.method, conn.request_path} == {"GET", "/v2/my/ships/#{ship.symbol}"}
 
-      if Elixir.Agent.get_and_update(calls, &{&1, &1 + 1}) < 5 do
-        Req.Test.transport_error(conn, :timeout)
+      if Elixir.Agent.get_and_update(calls, &{&1, &1 + 1}) == 0 do
+        conn
+        |> Plug.Conn.put_status(400)
+        |> Req.Test.json(%{
+          "error" => %{"code" => 4001, "message" => "temporary recovery failure"}
+        })
       else
         Req.Test.json(conn, %{
           "data" =>
@@ -181,8 +185,16 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
     end)
 
     assert :ok = Intents.reconcile(agent.id, ship.symbol, nil, :boot, intent.id)
-    assert Elixir.Agent.get(calls, & &1) == 6
+    assert Elixir.Agent.get(calls, & &1) == 2
     assert %Intent{status: "waiting"} = Repo.get!(Intent, intent.id)
+
+    assert [
+             %Activity{
+               kind: "owned_intent_recovery",
+               message: "Authoritative recovery read failed; retrying"
+             }
+           ] =
+             Enum.filter(Repo.all(Activity), &(&1.kind == "owned_intent_recovery"))
   end
 
   test "a late commitment wake cannot resume legacy Job execution" do

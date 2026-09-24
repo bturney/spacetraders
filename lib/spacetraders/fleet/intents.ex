@@ -4957,7 +4957,7 @@ defmodule SpaceTraders.Fleet.Intents do
       Fleet.record_activity_by_id(
         agent_id,
         ship,
-        "manual_intent_recovery",
+        "owned_intent_recovery",
         "Authoritative recovery read failed; retrying",
         "transport_error"
       )
@@ -4992,8 +4992,8 @@ defmodule SpaceTraders.Fleet.Intents do
         {:ok, blocked_intent} ->
           record_activity_by_intent(
             blocked_intent,
-            "manual_intent_recovery",
-            "Manual navigate recovery blocked after retry exhaustion",
+            "owned_intent_recovery",
+            "Owned Intent recovery blocked after retry exhaustion",
             %{"outcome" => "retry_exhausted"}
           )
 

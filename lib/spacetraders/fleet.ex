@@ -317,7 +317,7 @@ defmodule SpaceTraders.Fleet do
   defp activity_noise?(%{kind: kind}) when kind in ["retry", "manual_intent_waiting"], do: true
 
   defp activity_noise?(%{kind: kind, message: message})
-       when kind in ["manual_intent_recovery", "miner_job_recovery"] do
+       when kind in ["owned_intent_recovery", "miner_job_recovery"] do
     String.contains?(String.downcase(message), "retrying")
   end
 
