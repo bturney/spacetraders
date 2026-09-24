@@ -305,6 +305,23 @@ defmodule SpaceTraders.API do
     )
   end
 
+  @doc "POST /my/ships/{symbol}/refine"
+  @spec refine_ship(token(), String.t(), String.t()) :: result()
+  def refine_ship(token, ship_symbol, produce)
+      when produce in ~w(IRON COPPER SILVER GOLD ALUMINUM PLATINUM URANITE MERITIUM FUEL) do
+    request(:post, "/my/ships/#{ship_symbol}/refine", token,
+      json: %{produce: produce},
+      as:
+        {:map,
+         %{
+           cargo: {:model, ShipCargo},
+           cooldown: {:model, Cooldown},
+           produced: :raw,
+           consumed: :raw
+         }}
+    )
+  end
+
   @doc "POST /my/ships/{symbol}/scan/waypoints"
   @spec scan_waypoints(token(), String.t()) :: result()
   def scan_waypoints(token, ship_symbol) do

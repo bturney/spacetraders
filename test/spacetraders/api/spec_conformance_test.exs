@@ -46,6 +46,7 @@ defmodule SpaceTraders.API.SpecConformanceTest do
     {:extract_resources_with_survey, :post, "/my/ships/{shipSymbol}/extract/survey", :data},
     {:siphon_resources, :post, "/my/ships/{shipSymbol}/siphon", :data},
     {:create_survey, :post, "/my/ships/{shipSymbol}/survey", :data},
+    {:refine_ship, :post, "/my/ships/{shipSymbol}/refine", :data},
     {:scan_waypoints, :post, "/my/ships/{shipSymbol}/scan/waypoints", :data},
     {:create_chart, :post, "/my/ships/{shipSymbol}/chart", :data},
     {:refuel_ship, :post, "/my/ships/{shipSymbol}/refuel", :data},
@@ -180,6 +181,7 @@ defmodule SpaceTraders.API.SpecConformanceTest do
   defp arity_of(:extract_resources_with_survey), do: 3
   defp arity_of(:siphon_resources), do: 2
   defp arity_of(:create_survey), do: 2
+  defp arity_of(:refine_ship), do: 3
   defp arity_of(:scan_waypoints), do: 2
   defp arity_of(:create_chart), do: 2
   defp arity_of(:refuel_ship), do: 2

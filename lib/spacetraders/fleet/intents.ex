@@ -608,6 +608,39 @@ defmodule SpaceTraders.Fleet.Intents do
 
   defp validate_intelligence_request(_), do: {:error, :invalid_intelligence_request}
 
+  @doc "Starts one bounded resource outcome under a current Fleet Commitment Claim."
+  def request_commitment_resources(
+        agent,
+        %Commitment{} = commitment,
+        %Portfolio{} = portfolio,
+        ship_symbol,
+        %{resource: %{mode: mode}} = candidate
+      )
+      when mode in [:extract, :siphon, :refine] do
+    with :ok <- token_present(agent),
+         {:ok, ship} <- Fleet.owned_ship(agent, ship_symbol),
+         {:ok, %{commitment_id: id, portfolio_id: portfolio_id, portfolio_version: version}} <-
+           FleetAllocation.current_ship_claim(agent, ship_symbol),
+         true <-
+           id == commitment.id and portfolio_id == portfolio.id and version == portfolio.version,
+         {:ok, live_ship} <- fresh_ship(agent, ship_symbol, nil),
+         {:ok, intent} <-
+           insert_commitment_intent(commitment, portfolio, ship, %{
+             type: "acquire_resources",
+             target_waypoint: candidate.source_waypoint,
+             parameters: %{
+               "mode" => to_string(mode),
+               "produce" => candidate.resource.produce,
+               "survey" => candidate.resource.survey
+             }
+           }) do
+      advance_new_intent(agent, intent, live_ship)
+    else
+      false -> {:error, :no_current_ship_claim}
+      error -> error
+    end
+  end
+
   @doc """
   Requests the authoritative sell leg of a commitment round trip at the
   destination Market after the buy leg completes.
@@ -797,7 +830,15 @@ defmodule SpaceTraders.Fleet.Intents do
 
   defp unresolved_cargo_action?(intent) do
     is_map(intent.in_flight_action) and
-      intent.in_flight_action["kind"] in ["buy", "sell", "deliver"]
+      intent.in_flight_action["kind"] in [
+        "buy",
+        "sell",
+        "deliver",
+        "extract",
+        "siphon",
+        "refine",
+        "survey"
+      ]
   end
 
   defp unresolved_jump_action?(intent) do
@@ -1031,6 +1072,32 @@ defmodule SpaceTraders.Fleet.Intents do
       complete_intents(agent, intent)
     else
       acquire_intelligence(agent, intent, live_ship, type, system)
+    end
+  end
+
+  defp do_advance_intents(agent, %Intent{type: "acquire_resources"} = intent, live_ship) do
+    case intent.in_flight_action do
+      %{"kind" => kind} = action when kind in ["extract", "siphon", "refine", "survey"] ->
+        reconcile_resource_action(agent, intent, live_ship, action)
+
+      %{"kind" => kind} = action when kind in ["orbit", "navigate", "dock"] ->
+        if prerequisite_action_reconciled?(action, live_ship) do
+          with :ok <-
+                 reconcile_accepted_attempt(
+                   agent,
+                   intent,
+                   live_ship,
+                   "Ship position is authoritative"
+                 ),
+               {:ok, intent} <- transition_intent(intent, in_flight_action: nil) do
+            advance_intents(agent, intent, live_ship)
+          end
+        else
+          block_intents(intent, {:ambiguous_operation_evidence, kind})
+        end
+
+      _ ->
+        advance_resource_intent(agent, intent, live_ship)
     end
   end
 
@@ -1516,6 +1583,393 @@ defmodule SpaceTraders.Fleet.Intents do
       :ok
     else
       _ -> {:error, :chart_reconciliation_failed}
+    end
+  end
+
+  defp advance_resource_intent(agent, intent, ship) do
+    cond do
+      in_transit?(ship) ->
+        wait_for_manual_arrival(agent, intent, ship)
+
+      ship.nav.waypoint_symbol != intent.target_waypoint ->
+        advance_navigation(agent, intent, ship)
+
+      Fleet.cooldown_active?(ship) ->
+        wait_for_manual_cooldown(agent, intent, ship)
+
+      docked?(ship) ->
+        orbit_for_intents(agent, intent, ship)
+
+      not resource_ready?(intent, ship) ->
+        block_intents(intent, :resource_capability_unavailable)
+
+      ship.cargo.units >= ship.cargo.capacity and intent.parameters["mode"] != "refine" ->
+        block_intents(intent, :cargo_full)
+
+      true ->
+        dispatch_resource_action(agent, intent, ship)
+    end
+  end
+
+  defp resource_ready?(%Intent{parameters: %{"mode" => "extract"}}, ship),
+    do: Enum.any?(ship.mounts || [], &String.starts_with?(&1.symbol, "MOUNT_MINING_LASER"))
+
+  defp resource_ready?(%Intent{parameters: %{"mode" => "siphon"}}, ship),
+    do: Enum.any?(ship.mounts || [], &String.starts_with?(&1.symbol, "MOUNT_GAS_SIPHON"))
+
+  defp resource_ready?(%Intent{parameters: %{"mode" => "refine", "produce" => produce}}, ship) do
+    Enum.any?(
+      ship.modules || [],
+      &(&1.symbol in ~w(MODULE_MINERAL_PROCESSOR_I MODULE_MICRO_REFINERY_I MODULE_ORE_REFINERY_I))
+    ) and
+      Fleet.item_units(ship.cargo, produce <> "_ORE") >= 100
+  end
+
+  defp dispatch_resource_action(agent, intent, ship) do
+    mode = intent.parameters["mode"]
+    survey = intent.parameters["survey"]
+    survey? = mode == "extract" and valid_survey?(survey, ship.nav.waypoint_symbol)
+
+    kind =
+      if mode == "extract" and not survey? and intent.parameters["survey_attempted"] != true and
+           Enum.any?(ship.mounts || [], &String.starts_with?(&1.symbol, "MOUNT_SURVEYOR")),
+         do: "survey",
+         else: mode
+
+    action = %{
+      "kind" => kind,
+      "cargo_before" => cargo_evidence(ship.cargo),
+      "waypoint" => ship.nav.waypoint_symbol,
+      "survey" => if(survey?, do: survey)
+    }
+
+    with {:ok, intent} <- claim_intent_action(agent, intent, action) do
+      token = AgentTokenReference.new(agent)
+
+      response =
+        case kind do
+          "survey" ->
+            SpaceTraders.API.create_survey(token, ship.symbol)
+
+          "extract" when survey? ->
+            SpaceTraders.API.extract_resources_with_survey(token, ship.symbol, survey)
+
+          "extract" ->
+            SpaceTraders.API.extract_resources(token, ship.symbol)
+
+          "siphon" ->
+            SpaceTraders.API.siphon_resources(token, ship.symbol)
+
+          "refine" ->
+            SpaceTraders.API.refine_ship(token, ship.symbol, intent.parameters["produce"])
+        end
+
+      case Agent.handle_game_result(agent, response) do
+        {:ok, response} ->
+          accept_resource_response(agent, intent, ship, kind, response)
+
+        {:error, %SpaceTraders.API.GameplayError{} = reason} ->
+          clear_claim_and_block(intent, reason)
+
+        {:error, reason} ->
+          block_intents(intent, reason)
+      end
+    end
+  end
+
+  defp valid_survey?(
+         %{"symbol" => symbol, "expiration" => expiration, "signature" => signature},
+         symbol
+       )
+       when is_binary(signature) do
+    case DateTime.from_iso8601(expiration) do
+      {:ok, at, _} -> DateTime.after?(at, DateTime.utc_now())
+      _ -> false
+    end
+  end
+
+  defp valid_survey?(_, _), do: false
+
+  defp accept_resource_response(agent, intent, ship, "survey", %{surveys: surveys} = response) do
+    survey = Enum.find(surveys || [], &(&1.symbol == ship.nav.waypoint_symbol))
+
+    parameters =
+      intent.parameters
+      |> Map.put("survey_attempted", true)
+      |> Map.put("survey", if(survey, do: resource_survey_payload(survey)))
+
+    with {:ok, intent} <- transition_intent(intent, parameters: parameters, in_flight_action: nil) do
+      if response.cooldown && response.cooldown.remaining_seconds > 0,
+        do: wait_for_manual_cooldown(agent, intent, %{ship | cooldown: response.cooldown}),
+        else: advance_intents(agent, intent, ship)
+    end
+  end
+
+  defp accept_resource_response(agent, intent, ship, kind, response) do
+    with %{cargo: cargo, cooldown: cooldown} <- response,
+         true <- is_map(cargo) and is_map(cooldown),
+         {:ok, yield} <- resource_yield(kind, response),
+         true <- resource_yield_matches_request?(kind, yield, intent),
+         true <- resource_cargo_proves?(intent.in_flight_action["cargo_before"], cargo, yield) do
+      # Keep the cooldown wakeup durable before finishing this Intent.
+      schedule_cooldown(agent, ship.symbol, response)
+
+      outcome =
+        transition_intent(intent,
+          status: "completed",
+          in_flight_action: nil,
+          last_action_result: %{
+            "kind" => kind,
+            "yield" => yield,
+            "cargo" => cargo_evidence(cargo),
+            "cooldown" => cooldown.expiration
+          },
+          blocker: nil,
+          finished_at: DateTime.utc_now() |> DateTime.truncate(:second)
+        )
+
+      if match?({:ok, _}, outcome) do
+        FleetAllocation.reconcile_completed_outcomes()
+        announce_resource_ready(agent, ship, cooldown)
+      end
+
+      outcome
+    else
+      _ -> block_intents(intent, :resource_outcome_unresolved)
+    end
+  end
+
+  defp resource_yield("extract", %{extraction: %{yield: %{symbol: symbol, units: units}}}),
+    do: {:ok, %{"symbol" => symbol, "units" => units}}
+
+  defp resource_yield("siphon", %{siphon: %{yield: %{symbol: symbol, units: units}}}),
+    do: {:ok, %{"symbol" => symbol, "units" => units}}
+
+  defp resource_yield("refine", %{produced: produced, consumed: consumed})
+       when is_list(produced) and is_list(consumed) and produced != [] and consumed != [],
+       do: {:ok, %{"produced" => produced, "consumed" => consumed}}
+
+  defp resource_yield(_, _), do: {:error, :missing_resource_yield}
+
+  defp resource_yield_matches_request?("refine", yield, intent) do
+    produce = intent.parameters["produce"]
+
+    is_binary(produce) and
+      yield == %{
+        "produced" => [%{"tradeSymbol" => produce, "units" => 10}],
+        "consumed" => [%{"tradeSymbol" => produce <> "_ORE", "units" => 100}]
+      }
+  end
+
+  defp resource_yield_matches_request?(_, _yield, _intent), do: true
+
+  defp resource_cargo_proves?(before, cargo, %{"symbol" => symbol, "units" => units})
+       when is_binary(symbol) and is_integer(units) and units > 0 do
+    cargo_delta(before, cargo) == %{symbol => units} and cargo.units - before["units"] == units
+  end
+
+  defp resource_cargo_proves?(before, cargo, %{"produced" => produced, "consumed" => consumed}) do
+    valid? =
+      Enum.all?(produced ++ consumed, fn
+        %{"tradeSymbol" => symbol, "units" => units} ->
+          is_binary(symbol) and symbol != "" and is_integer(units) and units > 0
+
+        _ ->
+          false
+      end)
+
+    if valid?, do: valid_refine_cargo?(before, cargo, produced, consumed), else: false
+  end
+
+  defp resource_cargo_proves?(_, _, _), do: false
+
+  defp valid_refine_cargo?(before, cargo, produced, consumed) do
+    changes =
+      Enum.reduce(produced, %{}, fn %{"tradeSymbol" => symbol, "units" => units}, acc ->
+        Map.update(acc, symbol, units, &(&1 + units))
+      end)
+      |> then(fn changes ->
+        Enum.reduce(consumed, changes, fn %{"tradeSymbol" => symbol, "units" => units}, acc ->
+          Map.update(acc, symbol, -units, &(&1 - units))
+        end)
+      end)
+
+    map_size(changes) > 0 and
+      cargo_delta(before, cargo) ==
+        Map.reject(changes, fn {_symbol, delta} -> delta == 0 end) and
+      cargo.units - before["units"] == Enum.sum(Map.values(changes))
+  end
+
+  defp cargo_units_evidence(%{"inventory" => items}, symbol),
+    do: items |> Enum.find(%{"units" => 0}, &(&1["symbol"] == symbol)) |> Map.fetch!("units")
+
+  defp cargo_units_evidence(cargo, symbol), do: Fleet.item_units(cargo, symbol)
+
+  defp cargo_delta(before, cargo) do
+    symbols =
+      Enum.map(before["inventory"], & &1["symbol"]) ++
+        Enum.map(cargo.inventory || [], & &1.symbol)
+
+    symbols
+    |> Enum.uniq()
+    |> Map.new(fn symbol ->
+      {symbol, cargo_units_evidence(cargo, symbol) - cargo_units_evidence(before, symbol)}
+    end)
+    |> Map.reject(fn {_symbol, delta} -> delta == 0 end)
+  end
+
+  defp resource_survey_payload(survey) do
+    %{
+      "symbol" => survey.symbol,
+      "signature" => survey.signature,
+      "expiration" => survey.expiration,
+      "size" => survey.size,
+      "deposits" => Enum.map(survey.deposits || [], &%{"symbol" => &1.symbol})
+    }
+  end
+
+  defp reconcile_resource_action(agent, intent, ship, %{"kind" => "survey"}) do
+    attempt = MutationAttempts.latest_for_intent(intent)
+
+    confirmed? =
+      case {attempt, ship.cooldown} do
+        {%{state: "succeeded"}, _} ->
+          true
+
+        {%{state: state, sent_or_unknown_at: sent}, %{expiration: expiration}}
+        when state in ["sent_or_unknown", "ambiguous"] and is_binary(expiration) ->
+          with true <- Fleet.cooldown_active?(ship),
+               {:ok, expires, _} <- DateTime.from_iso8601(expiration),
+               true <- DateTime.after?(expires, sent),
+               :ok <- reconcile_resource_attempt(attempt) do
+            true
+          else
+            _ -> false
+          end
+
+        _ ->
+          false
+      end
+
+    if confirmed? do
+      with {:ok, intent} <-
+             transition_intent(intent,
+               in_flight_action: nil,
+               parameters: Map.put(intent.parameters, "survey_attempted", true)
+             ) do
+        if Fleet.cooldown_active?(ship),
+          do: wait_for_manual_cooldown(agent, intent, ship),
+          else: advance_intents(agent, intent, ship)
+      end
+    else
+      block_intents(intent, :survey_outcome_unresolved)
+    end
+  end
+
+  defp reconcile_resource_action(agent, intent, ship, %{"kind" => kind, "cargo_before" => before}) do
+    attempt = MutationAttempts.latest_for_intent(intent)
+    delta = cargo_delta(before, ship.cargo)
+
+    accepted? =
+      case {kind, delta} do
+        {mode, %{}} when mode in ["extract", "siphon"] ->
+          map_size(delta) == 1 and Enum.all?(delta, fn {_symbol, units} -> units > 0 end) and
+            ship.cargo.units - before["units"] == Enum.sum(Map.values(delta))
+
+        {"refine", changes} ->
+          is_binary(intent.parameters["produce"]) and
+            changes[intent.parameters["produce"]] == 10 and
+            changes[intent.parameters["produce"] <> "_ORE"] == -100 and
+            map_size(changes) == 2 and ship.cargo.units - before["units"] == -90
+
+        _ ->
+          false
+      end
+
+    cond do
+      (attempt && attempt.state in ["succeeded", "sent_or_unknown", "ambiguous"]) and
+          accepted? ->
+        with :ok <- resource_acceptance_proven?(attempt, ship),
+             :ok <- reconcile_resource_attempt(attempt) do
+          yield =
+            if kind == "refine",
+              do: %{
+                "produced" => [%{"tradeSymbol" => intent.parameters["produce"], "units" => 10}],
+                "consumed" => [
+                  %{"tradeSymbol" => intent.parameters["produce"] <> "_ORE", "units" => 100}
+                ]
+              },
+              else:
+                (fn {symbol, units} -> %{"symbol" => symbol, "units" => units} end).(
+                  hd(Map.to_list(delta))
+                )
+
+          schedule_cooldown(agent, ship.symbol, %{cooldown: ship.cooldown})
+
+          result =
+            transition_intent(intent,
+              status: "completed",
+              in_flight_action: nil,
+              last_action_result: %{
+                "kind" => kind,
+                "yield" => yield,
+                "cargo" => cargo_evidence(ship.cargo),
+                "reconciled" => true
+              },
+              finished_at: DateTime.utc_now() |> DateTime.truncate(:second)
+            )
+
+          if match?({:ok, _}, result) do
+            FleetAllocation.reconcile_completed_outcomes()
+            announce_resource_ready(agent, ship, ship.cooldown)
+          end
+
+          result
+        else
+          _ -> block_intents(intent, :resource_outcome_unresolved)
+        end
+
+      true ->
+        block_intents(intent, :resource_outcome_unresolved)
+    end
+  end
+
+  defp reconcile_resource_attempt(%{state: "succeeded"}), do: :ok
+
+  defp reconcile_resource_attempt(attempt) do
+    case MutationAttempts.reconcile(attempt, :accepted, [
+           Evidence.reconciliation_observation(
+             "get-my-ship",
+             attempt,
+             :accepted,
+             "Fresh Cargo and post-dispatch cooldown prove acquisition"
+           )
+         ]) do
+      {:ok, _} -> :ok
+      error -> error
+    end
+  end
+
+  defp announce_resource_ready(agent, ship, cooldown) do
+    if not is_map(cooldown) or not is_integer(cooldown.remaining_seconds) or
+         cooldown.remaining_seconds <= 0 do
+      Phoenix.PubSub.broadcast(
+        SpaceTraders.PubSub,
+        "fleet_resource_evidence",
+        {:resource_cooldown_recovered, agent.id, ship.nav.system_symbol}
+      )
+    end
+  end
+
+  defp resource_acceptance_proven?(%{state: "succeeded"}, _ship), do: :ok
+
+  defp resource_acceptance_proven?(attempt, ship) do
+    with true <- Fleet.cooldown_active?(ship),
+         {:ok, expires, _} <- DateTime.from_iso8601(ship.cooldown.expiration),
+         true <- DateTime.after?(expires, attempt.sent_or_unknown_at) do
+      :ok
+    else
+      _ -> {:error, :resource_outcome_unresolved}
     end
   end
 
