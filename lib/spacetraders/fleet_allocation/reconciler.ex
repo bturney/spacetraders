@@ -10,6 +10,7 @@ defmodule SpaceTraders.FleetAllocation.Reconciler do
   alias SpaceTraders.Agent.Agent, as: AgentRecord
   alias SpaceTraders.FleetExecution
   alias SpaceTraders.FleetIntelligence
+  alias SpaceTraders.FleetResources
   alias SpaceTraders.FleetGeneration.Generation
   alias SpaceTraders.FleetStrategy.Revision
   alias SpaceTraders.Repo
@@ -20,6 +21,7 @@ defmodule SpaceTraders.FleetAllocation.Reconciler do
   def init(_opts) do
     Phoenix.PubSub.subscribe(SpaceTraders.PubSub, "fleet_market_evidence")
     Phoenix.PubSub.subscribe(SpaceTraders.PubSub, "fleet_intelligence_evidence")
+    Phoenix.PubSub.subscribe(SpaceTraders.PubSub, "fleet_resource_evidence")
     send(self(), :reconcile_intelligence_on_boot)
     {:ok, %{}}
   end
@@ -40,6 +42,16 @@ defmodule SpaceTraders.FleetAllocation.Reconciler do
         system_symbol,
         ShadowAdmission.snapshot()
       )
+
+      FleetResources.reconcile(scope, agent, revision, system_symbol)
+    end)
+
+    {:noreply, state}
+  end
+
+  def handle_info({:resource_cooldown_recovered, agent_id, system_symbol}, state) do
+    with_context(agent_id, fn scope, agent, revision ->
+      FleetResources.reconcile(scope, agent, revision, system_symbol)
     end)
 
     {:noreply, state}

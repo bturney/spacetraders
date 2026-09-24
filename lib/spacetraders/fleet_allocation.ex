@@ -192,7 +192,7 @@ defmodule SpaceTraders.FleetAllocation do
     )
   end
 
-  @doc "Records completed Market economics left pending by a process restart."
+  @doc "Records completed Market and resource outcomes left pending by a process restart."
   def reconcile_completed_outcomes do
     StrategyDecisionEpisode
     |> where([episode], episode.classification == :still_evaluating)
@@ -207,7 +207,7 @@ defmodule SpaceTraders.FleetAllocation do
     )
     |> where(
       [_episode, _portfolio, _commitment, intent],
-      intent.type == "sell" and intent.status == "completed"
+      intent.type in ["sell", "acquire_resources"] and intent.status == "completed"
     )
     |> select([episode], episode)
     |> distinct(true)
@@ -218,7 +218,7 @@ defmodule SpaceTraders.FleetAllocation do
           episode.id,
           episode.operator_id,
           :realized,
-          realized_economics(episode.id)
+          realized_outcomes(episode.id)
         )
     end)
 
@@ -648,6 +648,28 @@ defmodule SpaceTraders.FleetAllocation do
     Map.put(totals, :credit_change, totals.sale_revenue - totals.purchase_cost)
   end
 
+  defp realized_outcomes(episode_id) do
+    result = realized_economics(episode_id)
+
+    resource_yields =
+      Repo.all(
+        from intent in Intent,
+          join: commitment in Commitment,
+          on: commitment.id == intent.fleet_commitment_id,
+          join: portfolio in Portfolio,
+          on: portfolio.id == commitment.fleet_commitment_portfolio_id,
+          where:
+            portfolio.strategy_decision_episode_id == ^episode_id and
+              intent.status == "completed" and intent.type == "acquire_resources",
+          select: intent.last_action_result
+      )
+      |> Enum.map(fn evidence ->
+        Map.take(evidence || %{}, ["kind", "yield", "cargo", "reconciled"])
+      end)
+
+    if resource_yields == [], do: result, else: Map.put(result, :resource_yields, resource_yields)
+  end
+
   defp unresolved_commitment_intent?(portfolio_ids) do
     Repo.exists?(
       from(intent in Intent,
@@ -880,6 +902,12 @@ defmodule SpaceTraders.FleetAllocation do
             MapSet.new(waypoints),
             MapSet.new(Map.get(capabilities, :market_access, []))
           )
+
+        %{capability: :resource_ship, value: symbol} ->
+          Map.get(capabilities, :resource_ship) == symbol
+
+        %{capability: :resource_mode, value: mode} ->
+          mode in Map.get(capabilities, :resource_mode, [])
 
         %{capability: capability} = requirement ->
           Map.get(capabilities, capability) == Map.get(requirement, :value, true)

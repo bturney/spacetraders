@@ -197,6 +197,20 @@ defmodule SpaceTraders.Fleet.ShipServer do
             event.payload["intent_id"]
           )
 
+          if type == :cooldown do
+            case SpaceTraders.Fleet.system_from_headquarters(ship.nav.waypoint_symbol) do
+              {:ok, system} ->
+                Phoenix.PubSub.broadcast(
+                  SpaceTraders.PubSub,
+                  "fleet_resource_evidence",
+                  {:resource_cooldown_recovered, state.agent_id, system}
+                )
+
+              _ ->
+                :ok
+            end
+          end
+
           {:noreply, state}
         end
 

@@ -34,7 +34,7 @@ defmodule SpaceTraders.FleetPlanning do
       :validity,
       :alternatives
     ]
-    defstruct @enforce_keys
+    defstruct @enforce_keys ++ [resource: nil]
 
     @type t :: %__MODULE__{}
   end
@@ -157,6 +157,206 @@ defmodule SpaceTraders.FleetPlanning do
 
   def plan_intelligence(_revision, _objective_index, _snapshot),
     do: {:error, :invalid_intelligence_planning_input}
+
+  @doc "Proposes one bounded resource outcome per capable Ship from fresh game evidence."
+  def plan_resources(
+        %Revision{} = revision,
+        index,
+        %{
+          as_of: %DateTime{} = as_of,
+          ships: ships,
+          waypoints: waypoints
+        } = snapshot
+      )
+      when is_list(ships) and is_list(waypoints) and is_integer(index) and index >= 0 do
+    with {:ok, objective} <- objective_at(revision, index) do
+      freshness = Map.get(snapshot, :freshness_seconds, 300)
+
+      candidates =
+        for ship <- ships,
+            waypoint <- waypoints,
+            candidate <- [
+              resource_contribution(
+                revision,
+                index,
+                objective,
+                ship,
+                waypoint,
+                Map.get(snapshot, :surveys, []),
+                as_of,
+                freshness
+              )
+            ],
+            not is_nil(candidate),
+            do: candidate
+
+      {:ok, result(revision, index, %{as_of: as_of}, candidate_contributions: candidates)}
+    end
+  end
+
+  def plan_resources(_revision, _index, _snapshot), do: {:error, :invalid_resource_planning_input}
+
+  defp resource_contribution(
+         revision,
+         index,
+         objective,
+         ship,
+         waypoint,
+         surveys,
+         as_of,
+         freshness
+       ) do
+    with %{
+           symbol: ship_symbol,
+           nav: %{system_symbol: system},
+           cargo: cargo,
+           mounts: mounts,
+           modules: modules,
+           cooldown: cooldown
+         } <- ship,
+         %{
+           symbol: symbol,
+           subject: {:waypoint, ^system, waypoint_symbol},
+           facts: %{"type" => type_fact}
+         } <-
+           waypoint,
+         true <- symbol == waypoint_symbol,
+         %{
+           state: "known",
+           freshness: :fresh,
+           value: type,
+           observed_at: %DateTime{} = observed_at,
+           observation_id: evidence_id
+         } <- type_fact,
+         true <- DateTime.compare(observed_at, as_of) != :gt,
+         true <- DateTime.diff(as_of, observed_at, :second) <= freshness,
+         true <- is_integer(cargo.capacity) and is_integer(cargo.units),
+         true <- not cooldown_active?(cooldown, as_of),
+         mode when not is_nil(mode) <- resource_mode(type, mounts || [], modules || [], cargo),
+         survey <- Enum.find(surveys, &usable_survey?(&1, symbol, as_of)) do
+      {kind, produced, consumed} = mode
+      required = if kind == :refine, do: 100, else: 1
+
+      capacity =
+        if kind == :refine,
+          do: cargo.capacity - cargo.units + 100,
+          else: cargo.capacity - cargo.units
+
+      if capacity < required do
+        nil
+      else
+        dependency = %{
+          subject: "waypoint:#{ship.nav.system_symbol}:#{symbol}",
+          required_facts: ["type"],
+          observed_at: observed_at,
+          evidence_id: to_string(evidence_id),
+          source: type_fact.source,
+          valid_until: DateTime.add(observed_at, freshness, :second)
+        }
+
+        %CandidateContribution{
+          id:
+            Evidence.fingerprint(
+              {revision.id, index, ship_symbol, kind, produced, symbol, evidence_id,
+               survey && survey.signature}
+            ),
+          strategy_revision_id: revision.id,
+          objective_index: index,
+          objective: objective,
+          kind: :resource_acquisition,
+          trade_symbol: produced,
+          source_waypoint: symbol,
+          destination_waypoint: symbol,
+          expected_outcomes: %{
+            cargo_units: if(kind == :refine, do: 10, else: 1),
+            decision_value: 1,
+            trade_symbol: produced
+          },
+          uncertainty: %{yield: :game_determined, consumed: consumed},
+          required_roles: [%{role: :resource_gatherer, count: 1}],
+          required_capabilities: [
+            %{capability: :resource_mode, value: kind},
+            %{capability: :resource_ship, value: ship.symbol}
+          ],
+          required_resources: %{ship_count: 1},
+          dependencies: [dependency],
+          validity: %{as_of: as_of, expires_at: dependency.valid_until},
+          alternatives: [],
+          # The optional Survey remains evidence-bound and is rechecked at dispatch.
+          resource: %{mode: kind, produce: produced, survey: survey && survey_payload(survey)}
+        }
+      end
+    else
+      _ -> nil
+    end
+  end
+
+  defp resource_mode(type, mounts, modules, cargo) do
+    refinery? = Enum.any?(modules, &String.starts_with?(&1.symbol, "MODULE_MINERAL_PROCESSOR"))
+
+    cond do
+      refinery? and
+          Enum.any?(
+            ~w(IRON COPPER SILVER GOLD ALUMINUM PLATINUM URANITE MERITIUM),
+            &(cargo_units(cargo, &1 <> "_ORE") >= 100)
+          ) ->
+        produce =
+          Enum.find(
+            ~w(IRON COPPER SILVER GOLD ALUMINUM PLATINUM URANITE MERITIUM),
+            &(cargo_units(cargo, &1 <> "_ORE") >= 100)
+          )
+
+        {:refine, produce, produce <> "_ORE"}
+
+      type in ["ASTEROID", "ENGINEERED_ASTEROID", "ASTEROID_FIELD", "DEBRIS_FIELD"] and
+          Enum.any?(mounts, &String.starts_with?(&1.symbol, "MOUNT_MINING_LASER")) ->
+        {:extract, nil, nil}
+
+      type == "GAS_GIANT" and
+          Enum.any?(mounts, &String.starts_with?(&1.symbol, "MOUNT_GAS_SIPHON")) ->
+        {:siphon, nil, nil}
+
+      true ->
+        nil
+    end
+  end
+
+  defp cargo_units(cargo, symbol) do
+    case Enum.find(cargo.inventory || [], &(&1.symbol == symbol)) do
+      %{units: units} when is_integer(units) -> units
+      _ -> 0
+    end
+  end
+
+  defp cooldown_active?(%{remaining_seconds: seconds}, _as_of)
+       when is_integer(seconds) and seconds > 0,
+       do: true
+
+  defp cooldown_active?(_, _), do: false
+
+  defp usable_survey?(
+         %{symbol: symbol, signature: signature, expiration: expiration},
+         symbol,
+         as_of
+       )
+       when is_binary(signature) and is_binary(expiration) do
+    case DateTime.from_iso8601(expiration) do
+      {:ok, expires, _} -> DateTime.compare(expires, as_of) == :gt
+      _ -> false
+    end
+  end
+
+  defp usable_survey?(_, _, _), do: false
+
+  defp survey_payload(survey) do
+    %{
+      "symbol" => survey.symbol,
+      "signature" => survey.signature,
+      "expiration" => survey.expiration,
+      "size" => survey.size,
+      "deposits" => Enum.map(survey.deposits || [], &%{"symbol" => &1.symbol})
+    }
+  end
 
   defp intelligence_opportunity(opportunity, system, as_of, freshness) when is_map(opportunity) do
     with subject when is_binary(subject) <- Map.get(opportunity, :subject),

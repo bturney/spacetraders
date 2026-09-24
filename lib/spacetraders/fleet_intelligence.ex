@@ -68,7 +68,12 @@ defmodule SpaceTraders.FleetIntelligence do
 
   defp discover_waypoints(agent, revision, system) do
     priorities =
-      [chart_objective(revision), credit_objective(revision), shipyard_objective(revision)]
+      [
+        chart_objective(revision),
+        credit_objective(revision),
+        shipyard_objective(revision),
+        resource_objective(revision)
+      ]
       |> Enum.reject(&is_nil/1)
       |> Enum.map(&elem(&1, 0))
       |> Enum.sort()
@@ -170,6 +175,21 @@ defmodule SpaceTraders.FleetIntelligence do
   end
 
   defp credit_objective(_revision), do: nil
+
+  defp resource_objective(%Revision{document: %{"objectives" => objectives}}) do
+    objectives
+    |> Enum.with_index()
+    |> Enum.find_value(fn {objective, index} ->
+      if Enum.any?([objective["objective"], objective["evaluation"]], fn text ->
+           is_binary(text) and
+             String.match?(
+               text,
+               ~r/\bextract\b|\bsiphon\b|\bmin(e|ing)\b|\brefin(e|ing)\b|\bresources?\b/i
+             )
+         end),
+         do: {index, objective}
+    end)
+  end
 
   defp shipyard_objective(%Revision{document: %{"objectives" => objectives}})
        when is_list(objectives) do
