@@ -46,3 +46,5 @@ jobs:
         run: test/integration/postgres_compose_test.sh
       - name: Verify production release boot
         run: test/integration/release_boot_test.sh
+      - name: Verify migration repair
+        run: test/integration/migration_repair_test.sh
