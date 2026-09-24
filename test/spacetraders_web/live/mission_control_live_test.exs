@@ -350,6 +350,15 @@ defmodule SpaceTradersWeb.MissionControlLiveTest do
       actual_outcomes: %{"net_credit_change" => 250}
     })
 
+    Repo.insert!(%StrategyDecisionEpisode{
+      operator_id: operator.id,
+      fleet_generation_id: old.id,
+      fleet_strategy_revision_id: revision.id,
+      source_version: 1,
+      calibration_version: "v1",
+      classification: :partially_realized
+    })
+
     {:ok, view, html} = live(conn, ~p"/generations")
     assert html =~ "Generation 1"
     assert html =~ "Generation 2"
@@ -358,6 +367,7 @@ defmodule SpaceTradersWeb.MissionControlLiveTest do
     assert html =~ "Unknown — no realized credit evidence"
     assert html =~ "Strategy revision 1"
     assert html =~ "Server Reset"
+    assert html =~ "Decision partly realized"
     assert html =~ "Strategy-capable"
     assert has_element?(view, "#generation-comparison", "Generation 1")
     assert has_element?(view, "#generation-comparison", "Generation 2")

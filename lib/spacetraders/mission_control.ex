@@ -255,13 +255,23 @@ defmodule SpaceTraders.MissionControl do
   defp decision_summary(_), do: "Fleet selected a new commitment portfolio"
 
   defp decision_detail(episode) do
+    standing_rule =
+      Enum.find_value(episode.binding_constraints, fn rule ->
+        if is_binary(rule["rule"]), do: "Standing rule: #{rule["rule"]}"
+      end)
+
+    alternative =
+      Enum.find_value(episode.alternatives, fn option ->
+        if is_binary(option["decisive_reason"]),
+          do: "Alternative not selected: #{option["decisive_reason"]}"
+      end)
+
     [
-      "Decision Episode #{episode.id} · #{episode.classification |> Atom.to_string() |> String.replace("_", " ")}",
-      if(episode.binding_constraints != [],
-        do: "#{length(episode.binding_constraints)} binding constraints"
-      ),
-      if(episode.alternatives != [],
-        do: "#{length(episode.alternatives)} alternatives considered"
+      "Decision Episode #{episode.id}: selected feasible work under the active Strategic Priority",
+      standing_rule,
+      alternative,
+      if(episode.evidence_references != [],
+        do: "#{length(episode.evidence_references)} retained evidence references"
       )
     ]
     |> Enum.reject(&is_nil/1)
@@ -325,7 +335,12 @@ defmodule SpaceTraders.MissionControl do
         realized_credit_change: if(credit_changes == [], do: nil, else: Enum.sum(credit_changes)),
         realized_decisions: Enum.count(decisions, &(&1.classification == :realized)),
         limitations:
-          Enum.count(decisions, &(&1.classification in [:partially_realized, :reset_censored])),
+          decisions
+          |> Enum.filter(&(&1.classification in [:partially_realized, :reset_censored]))
+          |> Enum.map(fn
+            %{classification: :partially_realized} -> "Decision partly realized"
+            %{classification: :reset_censored} -> "Decision interrupted by Server Reset"
+          end),
         resumed?: next_generation && not is_nil(next_generation.strategy_capable_at)
       }
     end)

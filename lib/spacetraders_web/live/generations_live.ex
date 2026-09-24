@@ -54,7 +54,9 @@ defmodule SpaceTradersWeb.GenerationsLive do
               </td>
             </tr>
             <tr>
-              <th>Decision limitations</th><td :for={recap <- @comparison}>{recap.limitations}</td>
+              <th>Decision limitations</th><td :for={recap <- @comparison}>
+                {limitations_label(recap.limitations)}
+              </td>
             </tr>
             <tr>
               <th>Reset cause</th><td :for={recap <- @comparison}>{reset_cause(recap)}</td>
@@ -110,7 +112,9 @@ defmodule SpaceTradersWeb.GenerationsLive do
               </dd>
             </div>
             <div>
-              <dt class="text-sm opacity-70">Decision limitations</dt><dd>{recap.limitations}</dd>
+              <dt class="text-sm opacity-70">Decision limitations</dt><dd>
+                {limitations_label(recap.limitations)}
+              </dd>
             </div>
             <div>
               <dt class="text-sm opacity-70">Strategy-capable</dt><dd>
@@ -137,6 +141,9 @@ defmodule SpaceTradersWeb.GenerationsLive do
 
   defp starting_credit_label(nil), do: "Unknown — no starting snapshot"
   defp starting_credit_label(amount), do: "#{amount} credits"
+
+  defp limitations_label([]), do: "No classified decision limitations"
+  defp limitations_label(limits), do: Enum.join(limits, "; ")
 
   defp reset_cause(%{generation: %{fenced_at: %DateTime{}}}),
     do: "Definitive Server Reset mismatch"
