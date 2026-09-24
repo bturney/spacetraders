@@ -30,6 +30,7 @@ defmodule SpaceTraders.Listing do
         ),
       shipyards:
         shipyard_listings(
+          agent,
           credential_ref,
           ships_by_system,
           headquarters_system,
@@ -100,6 +101,7 @@ defmodule SpaceTraders.Listing do
   end
 
   defp shipyard_listings(
+         agent,
          credential_ref,
          ships_by_system,
          headquarters_system,
@@ -116,13 +118,19 @@ defmodule SpaceTraders.Listing do
 
     {listings, unavailable?} =
       Enum.reduce(on_site_waypoints(waypoints, ships_by_system), {[], unavailable?}, fn
-        {waypoint, _ships}, {listings, unavailable?} ->
+        {waypoint, ships}, {listings, unavailable?} ->
           case SpaceTraders.Evidence.get_shipyard(
                  credential_ref,
                  waypoint.system_symbol,
                  waypoint.symbol
                ) do
             {:ok, shipyard} ->
+              Intelligence.observe_shipyard(agent, waypoint.system_symbol, shipyard,
+                source: "get_shipyard",
+                observing_ship_symbol: hd(ships).symbol,
+                offers_visible: true
+              )
+
               {[%{waypoint: waypoint.symbol, shipyard: shipyard} | listings], unavailable?}
 
             {:error, _reason} ->

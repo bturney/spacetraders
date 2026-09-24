@@ -593,6 +593,15 @@ defmodule SpaceTraders.Fleet do
       case fetch_waypoint_pages(token_reference(agent), system) do
         {:ok, waypoints} = result ->
           Enum.each(waypoints, &record_waypoint_observation(agent, &1, "get_waypoints"))
+
+          if is_integer(agent.operator_id) do
+            Phoenix.PubSub.broadcast(
+              SpaceTraders.PubSub,
+              "fleet_intelligence_evidence",
+              {:waypoint_intelligence_observed, agent.id, system}
+            )
+          end
+
           result
 
         result ->

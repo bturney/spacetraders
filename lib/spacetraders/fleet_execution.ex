@@ -111,6 +111,78 @@ defmodule SpaceTraders.FleetExecution do
     end
   end
 
+  def activate_intelligence(
+        %Scope{} = scope,
+        %AgentRecord{} = agent,
+        %Revision{} = revision,
+        %{candidate_contributions: candidates, observation_demands: demands},
+        %{available_slots: slots, backpressure: pressure}
+      )
+      when is_list(candidates) and is_list(demands) do
+    cond do
+      slots <= 0 or pressure == :sustained ->
+        {:error, :api_capacity_unavailable}
+
+      candidates == [] ->
+        {:error, :no_decision_relevant_intelligence}
+
+      true ->
+        do_activate_intelligence(scope, agent, revision, candidates, demands)
+    end
+  end
+
+  defp do_activate_intelligence(scope, agent, revision, candidates, demands) do
+    availability = availability(scope, agent)
+    owned_ships = owned_ship_symbols(agent)
+
+    with {:ok, selection} <-
+           FleetAllocation.select_portfolio(revision, candidates, availability),
+         commitment when not is_nil(commitment) <-
+           Enum.find(selection.commitments, fn commitment ->
+             claims_owned_ship?(commitment, owned_ships) and
+               reservation_covers_exposure?(commitment, revision, availability)
+           end),
+         candidate when not is_nil(candidate) <-
+           Enum.find(candidates, &(&1.id == commitment.candidate_id)),
+         demand when not is_nil(demand) <-
+           Enum.find(
+             demands,
+             &String.ends_with?(&1.subject, ":#{candidate.destination_waypoint}")
+           ),
+         %Generation{} = generation <- current_generation(agent),
+         {:ok, portfolio} <-
+           FleetAllocation.publish_portfolio(
+             scope,
+             generation.id,
+             %{
+               revision_id: revision.id,
+               source_version: generation.allocation_version,
+               commitments: [commitment],
+               rejected: selection.rejected
+             },
+             %{
+               evidence_references: candidate.dependencies,
+               expectations: candidate.expected_outcomes,
+               calibration_version: "intelligence-v1"
+             }
+           ),
+         [persisted] <- portfolio.commitments,
+         [ship_symbol] <- persisted.claims,
+         [type, _system, _waypoint] <- String.split(demand.subject, ":"),
+         {:ok, intent} <-
+           Intents.request_commitment_intelligence(agent, persisted, portfolio, ship_symbol, %{
+             subject_type: String.to_existing_atom(type),
+             waypoint: candidate.destination_waypoint,
+             required_facts: demand.required_facts,
+             freshness_seconds: demand.freshness_seconds
+           }) do
+      {:ok, %{commitment: persisted, portfolio: portfolio, intent: intent}}
+    else
+      nil -> {:error, :no_eligible_intelligence_commitment}
+      _ -> {:error, :intelligence_activation_unavailable}
+    end
+  end
+
   @doc "Reconciles an active Market Commitment against fresh Listings and capacity."
   def replan_market(
         %Scope{} = scope,
@@ -295,7 +367,7 @@ defmodule SpaceTraders.FleetExecution do
         |> Enum.map(fn ship ->
           %{
             resource: ship.symbol,
-            roles: [:market_trader],
+            roles: [:market_trader, :intelligence_scout],
             capabilities: %{cargo_transport: cargo_capacity(ship)}
           }
         end)

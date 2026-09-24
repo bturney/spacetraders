@@ -459,7 +459,13 @@ defmodule SpaceTraders.FleetAllocation do
         source_version: expected_source_version,
         evidence_references: json_safe(evidence_references),
         alternatives: json_safe(selection.rejected),
-        binding_constraints: json_safe(Map.get(revision.document, "hard_constraints", [])),
+        binding_constraints:
+          revision.document
+          |> Map.get("hard_constraints", [])
+          |> Enum.map(fn
+            rule when is_binary(rule) -> %{"rule" => rule}
+            rule -> json_safe(rule)
+          end),
         expectations: json_safe(expectations),
         calibration_version: calibration_version
       })
@@ -809,7 +815,11 @@ defmodule SpaceTraders.FleetAllocation do
       Map.get(
         contribution.expected_outcomes,
         :maximum_credit_change,
-        Map.get(contribution.expected_outcomes, :credit_change, 0)
+        Map.get(
+          contribution.expected_outcomes,
+          :decision_value,
+          Map.get(contribution.expected_outcomes, :credit_change, 0)
+        )
       )
 
     reservations =

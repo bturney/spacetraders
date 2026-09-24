@@ -53,6 +53,7 @@ defmodule SpaceTradersWeb.Layouts do
             <%= if @current_scope do %>
               <span class="hidden max-w-44 truncate px-2 text-xs opacity-60 md:block">{@current_scope.operator.email}</span>
               <.link navigate={~p"/mission-control"} class="btn btn-sm btn-ghost">Mission Control</.link>
+              <.link navigate={~p"/world"} class="btn btn-sm btn-ghost">World</.link>
               <.link navigate={~p"/strategy"} class="btn btn-sm btn-ghost">Strategy</.link>
               <.link navigate={~p"/agents/new"} class="btn btn-sm btn-primary">Mint agent</.link>
               <.link navigate={~p"/operators/settings"} class="btn btn-sm btn-ghost">Settings</.link>

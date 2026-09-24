@@ -28,12 +28,14 @@ defmodule SpaceTraders.API.Model.Market do
       imports: Enum.map(json["imports"] || [], &SpaceTraders.API.Model.TradeGood.from_json/1),
       symbol: json["symbol"],
       trade_goods:
-        Enum.map(json["tradeGoods"] || [], &SpaceTraders.API.Model.MarketTradeGood.from_json/1),
+        json["tradeGoods"] &&
+          Enum.map(json["tradeGoods"] || [], &SpaceTraders.API.Model.MarketTradeGood.from_json/1),
       transactions:
-        Enum.map(
-          json["transactions"] || [],
-          &SpaceTraders.API.Model.MarketTransaction.from_json/1
-        )
+        json["transactions"] &&
+          Enum.map(
+            json["transactions"] || [],
+            &SpaceTraders.API.Model.MarketTransaction.from_json/1
+          )
     }
   end
 end

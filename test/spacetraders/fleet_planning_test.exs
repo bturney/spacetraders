@@ -73,7 +73,7 @@ defmodule SpaceTraders.FleetPlanningTest do
     assert Enum.all?(dependencies, &(&1.source == "get_market"))
   end
 
-  test "stale and insufficient Market evidence produce Observation Demands and limitations" do
+  test "unvalued stale and insufficient Market evidence reports limitations without consuming capacity" do
     snapshot = %{
       evidence_snapshot()
       | markets: [
@@ -89,20 +89,7 @@ defmodule SpaceTraders.FleetPlanningTest do
               limitations: limitations
             }} = FleetPlanning.plan_market(revision(), 0, snapshot)
 
-    assert Enum.map(demands, & &1.subject) == ["market:X1:X1-A1", "market:X1:X1-A2"]
-
-    assert Enum.all?(demands, fn demand ->
-             match?(
-               %Demand{
-                 owner: "fleet_planning",
-                 required_facts: ["trade_goods"],
-                 freshness_seconds: 300,
-                 strategy_revision_id: 42,
-                 strategic_priority: 0
-               },
-               demand
-             )
-           end)
+    assert demands == []
 
     assert Enum.map(limitations, & &1.reason) == [
              :stale_market_evidence,
@@ -170,7 +157,59 @@ defmodule SpaceTraders.FleetPlanningTest do
              :insufficient_market_evidence
            ]
 
-    assert length(result.observation_demands) == 2
+    assert result.observation_demands == []
+  end
+
+  test "profitable stale quotes request fresh Listings only when value covers API and Ship time" do
+    snapshot = %{
+      evidence_snapshot()
+      | markets: [
+          market("X1-A1", ~U[2030-01-01 11:50:00Z], [good("IRON", 10, 9, 20)]),
+          market("X1-A2", @as_of, [good("IRON", 25, 20, 25)])
+        ]
+    }
+
+    costs = %{
+      "market:X1:X1-A1" => %{api_capacity_cost: 5, ship_time_cost: 20}
+    }
+
+    assert {:ok, result} =
+             FleetPlanning.plan_market(
+               revision(),
+               0,
+               Map.put(snapshot, :observation_costs, costs)
+             )
+
+    assert [%Demand{subject: "market:X1:X1-A1", expected_value: 175}] =
+             result.observation_demands
+
+    expensive = %{
+      "market:X1:X1-A1" => %{api_capacity_cost: 5, ship_time_cost: 200}
+    }
+
+    assert {:ok, %{observation_demands: []}} =
+             FleetPlanning.plan_market(
+               revision(),
+               0,
+               Map.put(snapshot, :observation_costs, expensive)
+             )
+
+    destination_stale = %{
+      snapshot
+      | markets: [
+          market("X1-A1", @as_of, [good("IRON", 10, 9, 20)]),
+          market("X1-A2", ~U[2030-01-01 11:50:00Z], [good("IRON", 25, 20, 25)])
+        ]
+    }
+
+    assert {:ok, %{observation_demands: [%Demand{subject: "market:X1:X1-A2"}]}} =
+             FleetPlanning.plan_market(
+               revision(),
+               0,
+               Map.put(destination_stale, :observation_costs, %{
+                 "market:X1:X1-A2" => %{api_capacity_cost: 5, ship_time_cost: 20}
+               })
+             )
   end
 
   test "duplicate Market observations normalize deterministically to one newest observation" do
@@ -204,6 +243,56 @@ defmodule SpaceTraders.FleetPlanningTest do
 
     assert {:error, :invalid_market_planning_input} =
              FleetPlanning.plan_market(revision(), 0, cross_system)
+  end
+
+  test "intelligence acquisition uses only evidence whose expected decision value covers capacity and Ship time" do
+    snapshot = %{
+      as_of: @as_of,
+      system_symbol: "X1",
+      agent_id: 7,
+      freshness_seconds: 300,
+      opportunities: [
+        %{
+          subject: "market:X1:X1-A1",
+          required_facts: ["trade_goods"],
+          facts: %{},
+          expected_decision_value: 80,
+          api_capacity_cost: 5,
+          ship_time_cost: 20,
+          acquisition: :on_site
+        },
+        %{
+          subject: "market:X1:X1-A2",
+          required_facts: ["trade_goods"],
+          facts: %{},
+          expected_decision_value: 10,
+          api_capacity_cost: 5,
+          ship_time_cost: 20,
+          acquisition: :on_site
+        },
+        %{
+          subject: "waypoint:X1:X1-A3",
+          required_facts: ["traits"],
+          facts: %{"traits" => %{state: "known", observed_at: @as_of}},
+          expected_decision_value: 80,
+          api_capacity_cost: 5,
+          ship_time_cost: 0,
+          acquisition: :public
+        }
+      ]
+    }
+
+    assert {:ok, planning} = FleetPlanning.plan_intelligence(revision(), 0, snapshot)
+
+    assert [%Demand{subject: "market:X1:X1-A1", expected_value: 55}] =
+             planning.observation_demands
+
+    assert [%CandidateContribution{kind: :intelligence_acquisition} = candidate] =
+             planning.candidate_contributions
+
+    assert candidate.destination_waypoint == "X1-A1"
+    assert candidate.expected_outcomes.decision_value == 55
+    assert Enum.any?(planning.limitations, &(&1.reason == :acquisition_cost_exceeds_value))
   end
 
   defp revision do

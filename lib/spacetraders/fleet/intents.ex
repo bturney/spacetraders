@@ -35,6 +35,8 @@ defmodule SpaceTraders.Fleet.Intents do
     Timeline
   }
 
+  alias SpaceTraders.{Intelligence, World}
+
   @doc false
   def emergency_stop_reconciled?(ship_ids) when is_list(ship_ids) do
     unfinished_states = Intent.unfinished_states()
@@ -544,6 +546,71 @@ defmodule SpaceTraders.Fleet.Intents do
   def request_commitment_round_trip(_agent, _commitment, _portfolio, _ship_symbol, _candidate),
     do: {:error, :invalid_commitment_round_trip}
 
+  @intelligence_fields %{
+    waypoint:
+      ~w(symbol system_symbol type x y orbits orbitals traits modifiers chart faction is_under_construction),
+    market: ~w(symbol exports imports exchange trade_goods transactions),
+    shipyard: ~w(symbol ship_types ships transactions modifications_fee)
+  }
+
+  def request_commitment_intelligence(
+        %AgentRecord{} = agent,
+        %Commitment{} = commitment,
+        %Portfolio{} = portfolio,
+        ship_symbol,
+        request
+      )
+      when is_binary(ship_symbol) and is_map(request) do
+    with :ok <- token_present(agent),
+         {:ok, system} <- validate_intelligence_request(request),
+         {:ok, ship} <- Fleet.owned_ship(agent, ship_symbol),
+         {:ok,
+          %{commitment_id: commitment_id, portfolio_id: portfolio_id, portfolio_version: version}} <-
+           FleetAllocation.current_ship_claim(agent, ship_symbol),
+         true <-
+           (commitment_id == commitment.id and portfolio_id == portfolio.id and
+              version == portfolio.version) || {:error, :no_current_ship_claim},
+         {:ok, intent} <-
+           insert_commitment_intent(commitment, portfolio, ship, %{
+             type: "acquire_intelligence",
+             target_waypoint: request.waypoint,
+             parameters: %{
+               "system" => system,
+               "subject_type" => to_string(request.subject_type),
+               "required_facts" => request.required_facts,
+               "freshness_seconds" => request.freshness_seconds
+             }
+           }),
+         {:ok, live_ship} <- fresh_ship(agent, ship_symbol, nil) do
+      advance_new_intent(agent, intent, live_ship)
+    else
+      false -> {:error, :no_current_ship_claim}
+      error -> error
+    end
+  end
+
+  def request_commitment_intelligence(_agent, _commitment, _portfolio, _ship_symbol, _request),
+    do: {:error, :invalid_intelligence_request}
+
+  defp validate_intelligence_request(%{
+         subject_type: type,
+         waypoint: waypoint,
+         required_facts: fields,
+         freshness_seconds: freshness
+       })
+       when is_binary(waypoint) and is_list(fields) and fields != [] and
+              is_integer(freshness) and freshness >= 0 do
+    with allowed when is_list(allowed) <- Map.get(@intelligence_fields, type),
+         true <- Enum.all?(fields, &(&1 in allowed)),
+         [_, system] <- Regex.run(~r/^(.+)-[^-]+$/, waypoint) do
+      {:ok, system}
+    else
+      _ -> {:error, :invalid_intelligence_request}
+    end
+  end
+
+  defp validate_intelligence_request(_), do: {:error, :invalid_intelligence_request}
+
   @doc """
   Requests the authoritative sell leg of a commitment round trip at the
   destination Market after the buy leg completes.
@@ -851,9 +918,10 @@ defmodule SpaceTraders.Fleet.Intents do
 
   defp do_advance_intents(
          agent,
-         %Intent{type: "navigate", in_flight_action: %{"kind" => "jump"} = action} = intent,
+         %Intent{type: type, in_flight_action: %{"kind" => "jump"} = action} = intent,
          live_ship
-       ) do
+       )
+       when type in ["navigate", "acquire_intelligence"] do
     if arrived_at_target?(live_ship, intent.target_waypoint) do
       with :ok <-
              reconcile_accepted_attempt(
@@ -871,9 +939,10 @@ defmodule SpaceTraders.Fleet.Intents do
 
   defp do_advance_intents(
          agent,
-         %Intent{type: "navigate", in_flight_action: %{"kind" => "warp"} = action} = intent,
+         %Intent{type: type, in_flight_action: %{"kind" => "warp"} = action} = intent,
          live_ship
-       ) do
+       )
+       when type in ["navigate", "acquire_intelligence"] do
     cond do
       arrived_at_target?(live_ship, intent.target_waypoint) ->
         with :ok <-
@@ -907,10 +976,27 @@ defmodule SpaceTraders.Fleet.Intents do
 
   defp do_advance_intents(
          agent,
-         %Intent{type: "navigate", in_flight_action: action} = intent,
+         %Intent{type: "acquire_intelligence", in_flight_action: %{"kind" => "scan_waypoints"}} =
+           intent,
+         live_ship
+       ) do
+    reconcile_scan_intelligence(agent, intent, live_ship)
+  end
+
+  defp do_advance_intents(
+         agent,
+         %Intent{type: "acquire_intelligence", in_flight_action: %{"kind" => "chart"}} = intent,
+         _live_ship
+       ) do
+    reconcile_chart_intelligence(agent, intent)
+  end
+
+  defp do_advance_intents(
+         agent,
+         %Intent{type: type, in_flight_action: action} = intent,
          live_ship
        )
-       when is_map(action) do
+       when type in ["navigate", "acquire_intelligence"] and is_map(action) do
     if action["kind"] in ["navigate", "orbit", "dock", "refuel", "set_flight_mode"] do
       if prerequisite_action_reconciled?(action, live_ship) do
         with :ok <-
@@ -930,43 +1016,25 @@ defmodule SpaceTraders.Fleet.Intents do
     end
   end
 
-  defp do_advance_intents(agent, %Intent{type: "navigate"} = intent, live_ship) do
-    cond do
-      arrived_at_target?(live_ship, intent.target_waypoint) ->
-        complete_intents(agent, intent)
+  defp do_advance_intents(agent, %Intent{type: "navigate"} = intent, live_ship),
+    do: advance_navigation(agent, intent, live_ship)
 
-      in_transit?(live_ship) ->
-        wait_for_manual_arrival(agent, intent, live_ship)
+  defp do_advance_intents(agent, %Intent{type: "acquire_intelligence"} = intent, live_ship) do
+    type =
+      case intent.parameters["subject_type"] do
+        "waypoint" -> :waypoint
+        "market" -> :market
+        "shipyard" -> :shipyard
+      end
 
-      Fleet.cooldown_active?(live_ship) ->
-        wait_for_manual_cooldown(agent, intent, live_ship)
+    system = intent.parameters["system"]
+    fields = intent.parameters["required_facts"]
+    freshness = intent.parameters["freshness_seconds"]
 
-      arrived_at_intermediate_waypoint?(intent, live_ship) ->
-        case transition_intent(intent, in_flight_action: nil) do
-          {:ok, intent} -> advance_intents(agent, intent, live_ship)
-          :intent_no_longer_owned -> :ok
-        end
-
-      refuel_required?(intent, live_ship) and docked?(live_ship) ->
-        refuel_for_navigate(agent, intent, live_ship)
-
-      refuel_required?(intent, live_ship) ->
-        dock_for_navigate(agent, intent, live_ship)
-
-      flight_mode_mismatch?(intent, live_ship) ->
-        set_flight_mode_for_navigate(agent, intent, live_ship)
-
-      docked?(live_ship) ->
-        orbit_for_intents(agent, intent, live_ship)
-
-      remote_waypoint?(live_ship.nav.waypoint_symbol, intent.target_waypoint) ->
-        advance_manual_remote_route(agent, intent, live_ship)
-
-      fuel_empty?(live_ship) ->
-        block_intents(intent, {:insufficient_fuel, intent.target_waypoint})
-
-      true ->
-        dispatch_manual_navigate(agent, intent, live_ship)
+    if intelligence_satisfied?(agent, intent, type, system, fields, freshness) do
+      complete_intents(agent, intent)
+    else
+      acquire_intelligence(agent, intent, live_ship, type, system)
     end
   end
 
@@ -1008,6 +1076,403 @@ defmodule SpaceTraders.Fleet.Intents do
 
       _ ->
         advance_cargo_intent(agent, intent, live_ship)
+    end
+  end
+
+  defp advance_navigation(agent, intent, live_ship) do
+    cond do
+      arrived_at_target?(live_ship, intent.target_waypoint) ->
+        if intent.type == "acquire_intelligence",
+          do: advance_intents(agent, intent, live_ship),
+          else: complete_intents(agent, intent)
+
+      in_transit?(live_ship) ->
+        wait_for_manual_arrival(agent, intent, live_ship)
+
+      Fleet.cooldown_active?(live_ship) ->
+        wait_for_manual_cooldown(agent, intent, live_ship)
+
+      arrived_at_intermediate_waypoint?(intent, live_ship) ->
+        case transition_intent(intent, in_flight_action: nil) do
+          {:ok, intent} -> advance_intents(agent, intent, live_ship)
+          :intent_no_longer_owned -> :ok
+        end
+
+      refuel_required?(intent, live_ship) and docked?(live_ship) ->
+        refuel_for_navigate(agent, intent, live_ship)
+
+      refuel_required?(intent, live_ship) ->
+        dock_for_navigate(agent, intent, live_ship)
+
+      flight_mode_mismatch?(intent, live_ship) ->
+        set_flight_mode_for_navigate(agent, intent, live_ship)
+
+      docked?(live_ship) ->
+        orbit_for_intents(agent, intent, live_ship)
+
+      remote_waypoint?(live_ship.nav.waypoint_symbol, intent.target_waypoint) ->
+        advance_manual_remote_route(agent, intent, live_ship)
+
+      fuel_empty?(live_ship) ->
+        block_intents(intent, {:insufficient_fuel, intent.target_waypoint})
+
+      true ->
+        dispatch_manual_navigate(agent, intent, live_ship)
+    end
+  end
+
+  defp intelligence_satisfied?(agent, intent, type, system, fields, freshness) do
+    projection =
+      World.intelligence(
+        agent,
+        type,
+        system,
+        intent.target_waypoint,
+        DateTime.utc_now(),
+        freshness
+      )
+
+    Enum.all?(fields, &(get_in(projection, [:facts, &1, :freshness]) == :fresh))
+  end
+
+  defp acquire_intelligence(agent, intent, live_ship, :waypoint, system) do
+    reference = AgentTokenReference.new(agent)
+
+    case Agent.handle_game_result(
+           agent,
+           Evidence.get_waypoint(reference, system, intent.target_waypoint,
+             owner: "ship_execution",
+             required_facts: intent.parameters["required_facts"]
+           )
+         ) do
+      {:ok, waypoint} ->
+        with {:ok, _observation} <-
+               Intelligence.observe_waypoint(agent, waypoint, source: "get_waypoint") do
+          projection =
+            World.intelligence(
+              agent,
+              :waypoint,
+              system,
+              intent.target_waypoint,
+              DateTime.utc_now(),
+              intent.parameters["freshness_seconds"]
+            )
+
+          missing =
+            Enum.reject(
+              intent.parameters["required_facts"],
+              &(get_in(projection, [:facts, &1, :freshness]) == :fresh)
+            )
+
+          cond do
+            missing == [] -> complete_intents(agent, intent)
+            missing == ["chart"] -> chart_intelligence(agent, intent, live_ship)
+            true -> block_intents(intent, :intelligence_incomplete)
+          end
+        end
+
+      {:error, reason} ->
+        case reason do
+          %SpaceTraders.API.GameplayError{code: 404} ->
+            scan_intelligence(agent, intent, live_ship)
+
+          _ ->
+            block_intents(intent, reason)
+        end
+    end
+  end
+
+  defp acquire_intelligence(agent, intent, live_ship, type, system)
+       when type in [:market, :shipyard] do
+    cond do
+      live_ship.nav.waypoint_symbol != intent.target_waypoint ->
+        advance_navigation(agent, intent, live_ship)
+
+      in_transit?(live_ship) ->
+        wait_for_manual_arrival(agent, intent, live_ship)
+
+      Fleet.cooldown_active?(live_ship) ->
+        wait_for_manual_cooldown(agent, intent, live_ship)
+
+      not docked?(live_ship) ->
+        dock_for_cargo_intent(agent, intent, live_ship)
+
+      true ->
+        reference = AgentTokenReference.new(agent)
+
+        result =
+          case type do
+            :market ->
+              Evidence.get_market(reference, system, intent.target_waypoint,
+                owner: "ship_execution",
+                required_facts: intent.parameters["required_facts"]
+              )
+
+            :shipyard ->
+              Evidence.get_shipyard(reference, system, intent.target_waypoint,
+                owner: "ship_execution",
+                required_facts: intent.parameters["required_facts"]
+              )
+          end
+
+        case Agent.handle_game_result(agent, result) do
+          {:ok, listing} ->
+            opts = [source: "get_#{type}", observing_ship_symbol: live_ship.symbol]
+
+            retained =
+              case type do
+                :market ->
+                  Intelligence.observe_market(agent, system, listing, opts)
+
+                :shipyard ->
+                  Intelligence.observe_shipyard(
+                    agent,
+                    system,
+                    listing,
+                    opts ++ [offers_visible: true]
+                  )
+              end
+
+            with {:ok, _observation} <- retained do
+              if intelligence_satisfied?(
+                   agent,
+                   intent,
+                   type,
+                   system,
+                   intent.parameters["required_facts"],
+                   intent.parameters["freshness_seconds"]
+                 ) do
+                complete_intents(agent, intent)
+              else
+                block_intents(intent, :intelligence_incomplete)
+              end
+            end
+
+          {:error, reason} ->
+            block_intents(intent, reason)
+        end
+    end
+  end
+
+  defp scan_intelligence(agent, intent, live_ship) do
+    sensor? =
+      Enum.any?(live_ship.mounts || [], fn mount ->
+        is_binary(mount.symbol) and String.starts_with?(mount.symbol, "MOUNT_SENSOR_ARRAY")
+      end)
+
+    cond do
+      intent.parameters["scan_attempted"] == true and
+        "chart" in intent.parameters["required_facts"] and
+          known_intelligence_waypoint?(agent, intent) ->
+        chart_intelligence(agent, intent, live_ship)
+
+      intent.parameters["scan_attempted"] ->
+        block_intents(intent, :scan_result_unavailable)
+
+      live_ship.nav.system_symbol != intent.parameters["system"] ->
+        block_intents(intent, :scan_out_of_range)
+
+      not sensor? ->
+        block_intents(intent, :sensor_mount_missing)
+
+      Fleet.cooldown_active?(live_ship) ->
+        wait_for_manual_cooldown(agent, intent, live_ship)
+
+      true ->
+        with {:ok, intent} <-
+               claim_intent_action(agent, intent, %{
+                 "kind" => "scan_waypoints",
+                 "waypoint" => intent.target_waypoint
+               }) do
+          case Agent.handle_game_result(
+                 agent,
+                 SpaceTraders.API.scan_waypoints(AgentTokenReference.new(agent), live_ship.symbol)
+               ) do
+            {:ok, %{waypoints: waypoints}} ->
+              Enum.each(waypoints, fn waypoint ->
+                Intelligence.observe_waypoint(agent, waypoint,
+                  source: "scan_waypoints",
+                  observing_ship_symbol: live_ship.symbol
+                )
+              end)
+
+              with {:ok, intent} <-
+                     transition_intent(intent,
+                       in_flight_action: nil,
+                       parameters: Map.put(intent.parameters, "scan_attempted", true)
+                     ) do
+                cond do
+                  intelligence_satisfied?(
+                    agent,
+                    intent,
+                    :waypoint,
+                    intent.parameters["system"],
+                    intent.parameters["required_facts"],
+                    intent.parameters["freshness_seconds"]
+                  ) ->
+                    complete_intents(agent, intent)
+
+                  "chart" in intent.parameters["required_facts"] and
+                      known_intelligence_waypoint?(agent, intent) ->
+                    chart_intelligence(agent, intent, live_ship)
+
+                  true ->
+                    block_intents(intent, :scan_did_not_establish_required_facts)
+                end
+              end
+
+            {:error, reason} ->
+              block_intents(intent, reason)
+          end
+        else
+          {:error, reason} -> {:error, reason}
+        end
+    end
+  end
+
+  defp known_intelligence_waypoint?(agent, intent) do
+    World.intelligence(
+      agent,
+      :waypoint,
+      intent.parameters["system"],
+      intent.target_waypoint,
+      DateTime.utc_now(),
+      intent.parameters["freshness_seconds"]
+    ).known_existence?
+  end
+
+  defp reconcile_scan_intelligence(agent, intent, live_ship) do
+    case MutationAttempts.unresolved_for_intent(intent) do
+      nil ->
+        block_intents(intent, :scan_outcome_unresolved)
+
+      attempt ->
+        expiration = live_ship.cooldown && live_ship.cooldown.expiration
+
+        with true <- Fleet.cooldown_active?(live_ship),
+             {:ok, cooldown_at, _} <- DateTime.from_iso8601(expiration),
+             true <- DateTime.after?(cooldown_at, attempt.sent_or_unknown_at),
+             {:ok, _} <-
+               MutationAttempts.reconcile(attempt, :accepted, [
+                 Evidence.reconciliation_observation(
+                   "get-my-ship",
+                   attempt,
+                   :accepted,
+                   "Fresh Ship cooldown proves a scan occurred after its dispatch"
+                 )
+               ]),
+             {:ok, intent} <-
+               transition_intent(intent,
+                 in_flight_action: nil,
+                 parameters: Map.put(intent.parameters, "scan_attempted", true)
+               ) do
+          wait_for_manual_cooldown(agent, intent, live_ship)
+        else
+          _ -> block_intents(intent, :scan_outcome_unresolved)
+        end
+    end
+  end
+
+  defp chart_intelligence(agent, intent, live_ship) do
+    cond do
+      live_ship.nav.waypoint_symbol != intent.target_waypoint ->
+        advance_navigation(agent, intent, live_ship)
+
+      in_transit?(live_ship) ->
+        wait_for_manual_arrival(agent, intent, live_ship)
+
+      Fleet.cooldown_active?(live_ship) ->
+        wait_for_manual_cooldown(agent, intent, live_ship)
+
+      docked?(live_ship) ->
+        orbit_for_intents(agent, intent, live_ship)
+
+      true ->
+        with {:ok, intent} <-
+               claim_intent_action(agent, intent, %{
+                 "kind" => "chart",
+                 "waypoint" => intent.target_waypoint
+               }) do
+          case Agent.handle_game_result(
+                 agent,
+                 SpaceTraders.API.create_chart(
+                   AgentTokenReference.new(agent),
+                   live_ship.symbol,
+                   intent.target_waypoint
+                 )
+               ) do
+            {:ok,
+             %{chart: %{waypoint_symbol: waypoint}, waypoint: %{symbol: waypoint} = observed}}
+            when waypoint == intent.target_waypoint ->
+              with {:ok, _} <-
+                     Intelligence.observe_waypoint(agent, observed,
+                       source: "create_chart",
+                       observing_ship_symbol: live_ship.symbol
+                     ),
+                   {:ok, intent} <- transition_intent(intent, in_flight_action: nil) do
+                advance_intents(agent, intent, live_ship)
+              end
+
+            {:ok, _response} ->
+              block_intents(intent, :chart_response_incomplete)
+
+            {:error, reason} ->
+              block_intents(intent, reason)
+          end
+        else
+          {:error, reason} -> {:error, reason}
+        end
+    end
+  end
+
+  defp reconcile_chart_intelligence(agent, intent) do
+    case MutationAttempts.unresolved_for_intent(intent) do
+      nil ->
+        block_intents(intent, :chart_response_incomplete)
+
+      attempt ->
+        case Agent.handle_game_result(
+               agent,
+               Evidence.get_waypoint(
+                 AgentTokenReference.new(agent),
+                 intent.parameters["system"],
+                 intent.target_waypoint,
+                 lane: :safety,
+                 owner: "ship_execution",
+                 required_facts: ["chart"]
+               )
+             ) do
+          {:ok, %{chart: %{submitted_by: submitted_by, submitted_on: submitted_on}} = waypoint}
+          when submitted_by == agent.symbol and is_binary(submitted_on) ->
+            with {:ok, chart_time, _} <- DateTime.from_iso8601(submitted_on),
+                 true <-
+                   DateTime.compare(
+                     chart_time,
+                     DateTime.truncate(attempt.sent_or_unknown_at, :second)
+                   ) in [:eq, :gt],
+                 {:ok, _} <-
+                   MutationAttempts.reconcile(attempt, :accepted, [
+                     Evidence.reconciliation_observation(
+                       "get-waypoint",
+                       attempt,
+                       :accepted,
+                       "Fresh Waypoint chart is attributed to the Agent after dispatch"
+                     )
+                   ]),
+                 {:ok, _} <-
+                   Intelligence.observe_waypoint(agent, waypoint,
+                     source: "get_waypoint",
+                     observing_ship_symbol: Repo.get!(Ship, intent.ship_id).symbol
+                   ),
+                 {:ok, intent} <- transition_intent(intent, in_flight_action: nil) do
+              complete_intents(agent, intent)
+            else
+              _ -> block_intents(intent, :chart_outcome_unresolved)
+            end
+
+          _ ->
+            block_intents(intent, :chart_outcome_unresolved)
+        end
     end
   end
 
@@ -2296,12 +2761,15 @@ defmodule SpaceTraders.Fleet.Intents do
 
   defp complete_intents(agent, intent) do
     result =
-      if jump_evidence?(intent) or warp_evidence?(intent) do
-        (intent.last_action_result || %{"kind" => "jump", "waypoint" => intent.target_waypoint})
-        |> Map.put("kind", if(warp_evidence?(intent), do: "warp", else: "jump"))
-        |> Map.put("completion", "authoritative_ship_state")
+      if intent.type == "acquire_intelligence" do
+        %{
+          "kind" => "acquire_intelligence",
+          "subject_type" => intent.parameters["subject_type"],
+          "waypoint" => intent.target_waypoint,
+          "required_facts" => intent.parameters["required_facts"]
+        }
       else
-        %{"kind" => "navigate", "waypoint" => intent.target_waypoint}
+        navigation_completion_result(intent)
       end
 
     case transition_intent(intent,
@@ -2313,6 +2781,23 @@ defmodule SpaceTraders.Fleet.Intents do
          ) do
       {:ok, intent} ->
         ship = Repo.get!(Ship, intent.ship_id)
+
+        if intent.type == "acquire_intelligence" do
+          Phoenix.PubSub.broadcast(
+            SpaceTraders.PubSub,
+            "fleet_intelligence_evidence",
+            {:waypoint_intelligence_observed, agent.id, intent.parameters["system"]}
+          )
+
+          if intent.parameters["subject_type"] == "market" do
+            Phoenix.PubSub.broadcast(
+              SpaceTraders.PubSub,
+              "fleet_market_evidence",
+              {:market_evidence_observed, agent.id,
+               "market:#{intent.parameters["system"]}:#{intent.target_waypoint}"}
+            )
+          end
+        end
 
         if intent.caller == "manual" do
           Fleet.record_activity(
@@ -2328,6 +2813,16 @@ defmodule SpaceTraders.Fleet.Intents do
 
       :intent_no_longer_owned ->
         :ok
+    end
+  end
+
+  defp navigation_completion_result(intent) do
+    if jump_evidence?(intent) or warp_evidence?(intent) do
+      (intent.last_action_result || %{"kind" => "jump", "waypoint" => intent.target_waypoint})
+      |> Map.put("kind", if(warp_evidence?(intent), do: "warp", else: "jump"))
+      |> Map.put("completion", "authoritative_ship_state")
+    else
+      %{"kind" => "navigate", "waypoint" => intent.target_waypoint}
     end
   end
 

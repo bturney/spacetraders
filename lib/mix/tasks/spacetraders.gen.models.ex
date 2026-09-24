@@ -34,6 +34,12 @@ defmodule Mix.Tasks.SpaceTraders.Gen.Models do
     {:post, "/my/ships/{shipSymbol}/modules/install", "InstallShipModuleRequest"},
     {:post, "/my/ships/{shipSymbol}/modules/remove", "RemoveShipModuleRequest"}
   ]
+  @visibility_scoped_arrays MapSet.new([
+                              {"Market", "tradeGoods"},
+                              {"Market", "transactions"},
+                              {"Shipyard", "ships"},
+                              {"Shipyard", "transactions"}
+                            ])
 
   @impl true
   def run(args) do
@@ -313,7 +319,7 @@ defmodule Mix.Tasks.SpaceTraders.Gen.Models do
   # Decode expressions reference the exact struct module, including synthetic ones.
   defp decode_expr(
          %{"type" => "array", "items" => %{"$ref" => ref}},
-         _parent,
+         parent,
          field,
          models,
          namespace
@@ -321,7 +327,8 @@ defmodule Mix.Tasks.SpaceTraders.Gen.Models do
     target = ref_name(ref)
 
     if match?({:ok, %{"type" => "object"}}, Map.fetch(models, target)) do
-      "Enum.map(json[#{inspect(field)}] || [], &#{namespace}.#{target}.from_json/1)"
+      expression = "Enum.map(json[#{inspect(field)}] || [], &#{namespace}.#{target}.from_json/1)"
+      preserve_visibility(expression, parent, field)
     else
       "json[#{inspect(field)}] || []"
     end
@@ -330,7 +337,8 @@ defmodule Mix.Tasks.SpaceTraders.Gen.Models do
   defp decode_expr(%{"type" => "array", "items" => items}, parent, field, _models, namespace) do
     if inline_object?(items) do
       mod = "#{namespace}.#{parent}#{Macro.camelize(field)}"
-      "Enum.map(json[#{inspect(field)}] || [], &#{mod}.from_json/1)"
+      expression = "Enum.map(json[#{inspect(field)}] || [], &#{mod}.from_json/1)"
+      preserve_visibility(expression, parent, field)
     else
       "json[#{inspect(field)}] || []"
     end
@@ -353,6 +361,14 @@ defmodule Mix.Tasks.SpaceTraders.Gen.Models do
 
   defp decode_expr(_prop, _parent, field, _models, _namespace) do
     "json[#{inspect(field)}]"
+  end
+
+  defp preserve_visibility(expression, parent, field) do
+    if MapSet.member?(@visibility_scoped_arrays, {parent, field}) do
+      "json[#{inspect(field)}] && #{expression}"
+    else
+      expression
+    end
   end
 
   defp request_schema(path, method) do

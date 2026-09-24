@@ -79,6 +79,153 @@ defmodule SpaceTraders.FleetPlanning do
   def plan_market(%Revision{}, _objective_index, _snapshot),
     do: {:error, :invalid_market_planning_input}
 
+  def plan_intelligence(%Revision{} = revision, objective_index, snapshot)
+      when is_integer(objective_index) and objective_index >= 0 and is_map(snapshot) do
+    with {:ok, objective} <- objective_at(revision, objective_index),
+         %{as_of: %DateTime{} = as_of, system_symbol: system, opportunities: opportunities} <-
+           snapshot,
+         true <- is_binary(system) and is_list(opportunities) do
+      deadline = DateTime.add(as_of, 60, :second)
+      freshness = Map.get(snapshot, :freshness_seconds, 300)
+
+      opportunities
+      |> Enum.sort_by(&Map.get(&1, :subject, ""))
+      |> Enum.reduce_while({[], [], []}, fn opportunity, {candidates, demands, limitations} ->
+        case intelligence_opportunity(opportunity, system, as_of, freshness) do
+          {:ok, :satisfied} ->
+            {:cont, {candidates, demands, limitations}}
+
+          {:ok, %{net_value: net, type: type} = choice} ->
+            demand = %Demand{
+              subject: opportunity.subject,
+              required_facts: opportunity.required_facts,
+              owner: "fleet_planning",
+              deadline_at: deadline,
+              freshness_seconds: freshness,
+              agent_id: Map.get(snapshot, :agent_id),
+              strategy_revision_id: revision.id,
+              strategic_priority: objective_index,
+              expected_value: net,
+              discovery: type == "waypoint"
+            }
+
+            candidates =
+              if opportunity.acquisition == :on_site,
+                do: [
+                  intelligence_contribution(
+                    revision,
+                    objective_index,
+                    objective,
+                    choice,
+                    opportunity,
+                    deadline
+                  )
+                  | candidates
+                ],
+                else: candidates
+
+            {:cont, {candidates, [demand | demands], limitations}}
+
+          {:error, :acquisition_cost_exceeds_value} ->
+            {:cont,
+             {candidates, demands,
+              [
+                %{subject: opportunity.subject, reason: :acquisition_cost_exceeds_value}
+                | limitations
+              ]}}
+
+          {:error, :invalid} ->
+            {:halt, :invalid}
+        end
+      end)
+      |> case do
+        :invalid ->
+          {:error, :invalid_intelligence_planning_input}
+
+        {candidates, demands, limitations} ->
+          {:ok,
+           result(revision, objective_index, %{as_of: as_of},
+             candidate_contributions: Enum.reverse(candidates),
+             observation_demands: Enum.reverse(demands),
+             limitations: Enum.reverse(limitations)
+           )}
+      end
+    else
+      _ -> {:error, :invalid_intelligence_planning_input}
+    end
+  end
+
+  def plan_intelligence(_revision, _objective_index, _snapshot),
+    do: {:error, :invalid_intelligence_planning_input}
+
+  defp intelligence_opportunity(opportunity, system, as_of, freshness) when is_map(opportunity) do
+    with subject when is_binary(subject) <- Map.get(opportunity, :subject),
+         [type, ^system, waypoint] when type in ["market", "shipyard", "waypoint"] <-
+           String.split(subject, ":"),
+         true <- String.starts_with?(waypoint, system <> "-"),
+         facts when is_list(facts) and facts != [] <- Map.get(opportunity, :required_facts),
+         true <- Enum.all?(facts, &(is_binary(&1) and &1 != "")),
+         observed when is_map(observed) <- Map.get(opportunity, :facts),
+         acquisition when acquisition in [:public, :on_site] <-
+           Map.get(opportunity, :acquisition),
+         value when is_number(value) and value >= 0 <-
+           Map.get(opportunity, :expected_decision_value),
+         api_cost when is_number(api_cost) and api_cost >= 0 <-
+           Map.get(opportunity, :api_capacity_cost),
+         ship_cost when is_number(ship_cost) and ship_cost >= 0 <-
+           Map.get(opportunity, :ship_time_cost),
+         true <- is_integer(freshness) and freshness >= 0 do
+      missing = Enum.reject(facts, &fresh_intelligence?(observed[&1], as_of, freshness))
+      net = value - api_cost - ship_cost
+
+      cond do
+        missing == [] -> {:ok, :satisfied}
+        net <= 0 -> {:error, :acquisition_cost_exceeds_value}
+        true -> {:ok, %{net_value: net, type: type, waypoint: waypoint}}
+      end
+    else
+      _ -> {:error, :invalid}
+    end
+  end
+
+  defp intelligence_opportunity(_opportunity, _system, _as_of, _freshness),
+    do: {:error, :invalid}
+
+  defp fresh_intelligence?(
+         %{state: "known", observed_at: %DateTime{} = observed_at},
+         as_of,
+         freshness
+       ) do
+    age = DateTime.diff(as_of, observed_at, :second)
+    age >= 0 and age <= freshness
+  end
+
+  defp fresh_intelligence?(_fact, _as_of, _freshness), do: false
+
+  defp intelligence_contribution(revision, index, objective, choice, opportunity, deadline) do
+    %CandidateContribution{
+      id:
+        Evidence.fingerprint(
+          {revision.id, index, opportunity.subject, opportunity.required_facts}
+        ),
+      strategy_revision_id: revision.id,
+      objective_index: index,
+      objective: objective,
+      kind: :intelligence_acquisition,
+      trade_symbol: nil,
+      source_waypoint: nil,
+      destination_waypoint: choice.waypoint,
+      expected_outcomes: %{decision_value: choice.net_value},
+      uncertainty: %{decision_value_estimate: opportunity.expected_decision_value},
+      required_roles: [%{role: :intelligence_scout, count: 1}],
+      required_capabilities: [],
+      required_resources: %{ship_count: 1, credits: 0},
+      dependencies: [],
+      validity: %{as_of: DateTime.add(deadline, -60, :second), expires_at: deadline},
+      alternatives: []
+    }
+  end
+
   defp plan_market_objective(revision, objective_index, objective, snapshot) do
     {markets, demands, limitations} = classify_markets(revision, objective_index, snapshot)
 
@@ -142,8 +289,15 @@ defmodule SpaceTraders.FleetPlanning do
        when is_binary(system_symbol) and system_symbol != "" and is_integer(freshness_seconds) and
               freshness_seconds >= 0 and is_list(markets) do
     demand_deadline_seconds = Map.get(snapshot, :demand_deadline_seconds, 60)
+    observation_costs = Map.get(snapshot, :observation_costs, %{})
 
     if is_integer(demand_deadline_seconds) and demand_deadline_seconds >= 0 and
+         is_map(observation_costs) and
+         Enum.all?(observation_costs, fn {subject, cost} ->
+           is_binary(subject) and is_map(cost) and
+             is_number(cost[:api_capacity_cost]) and cost[:api_capacity_cost] >= 0 and
+             is_number(cost[:ship_time_cost]) and cost[:ship_time_cost] >= 0
+         end) and
          Enum.all?(
            markets,
            &(is_map(&1) and valid_market_subject?(market_subject(&1), system_symbol))
@@ -154,6 +308,7 @@ defmodule SpaceTraders.FleetPlanning do
          system_symbol: system_symbol,
          freshness_seconds: freshness_seconds,
          demand_deadline_seconds: demand_deadline_seconds,
+         observation_costs: observation_costs,
          agent_id: Map.get(snapshot, :agent_id),
          markets: normalize_market_observations(markets)
        }}
@@ -190,9 +345,20 @@ defmodule SpaceTraders.FleetPlanning do
           {[market | markets], demands, limitations}
 
         {:error, reason} ->
-          demand = observation_demand(revision, objective_index, snapshot, subject)
+          demands =
+            case market_demand_value(market, snapshot) do
+              value when is_number(value) and value > 0 ->
+                [
+                  observation_demand(revision, objective_index, snapshot, subject, value)
+                  | demands
+                ]
+
+              _ ->
+                demands
+            end
+
           limitation = %{subject: subject, reason: reason}
-          {markets, [demand | demands], [limitation | limitations]}
+          {markets, demands, [limitation | limitations]}
       end
     end)
     |> then(fn {markets, demands, limitations} ->
@@ -392,7 +558,51 @@ defmodule SpaceTraders.FleetPlanning do
     }
   end
 
-  defp observation_demand(revision, objective_index, snapshot, subject) do
+  defp market_demand_value(market, snapshot) do
+    subject = market_subject(market)
+
+    with %{api_capacity_cost: api_cost, ship_time_cost: ship_cost}
+         when is_number(api_cost) and api_cost >= 0 and is_number(ship_cost) and ship_cost >= 0 <-
+           snapshot.observation_costs[subject],
+         %DateTime{} = observed_at <- value(market, :observed_at),
+         true <- DateTime.compare(observed_at, snapshot.as_of) in [:eq, :lt],
+         goods when is_list(goods) <- value(market, :trade_goods),
+         true <- valid_provenance?(market) do
+      source_goods = goods |> Enum.map(&normalize_good/1) |> Enum.filter(&valid_good?/1)
+
+      gross =
+        for source_good <- source_goods,
+            other <- snapshot.markets,
+            market_subject(other) != subject,
+            other_good <- market_goods(other, snapshot.as_of),
+            destination_good = normalize_good(other_good),
+            valid_good?(destination_good),
+            source_good.symbol == destination_good.symbol do
+          max(
+            destination_good.sell_price - source_good.purchase_price,
+            source_good.sell_price - destination_good.purchase_price
+          ) *
+            min(source_good.trade_volume, destination_good.trade_volume)
+        end
+
+      Enum.max(gross, fn -> 0 end) - api_cost - ship_cost
+    else
+      _ -> nil
+    end
+  end
+
+  defp market_goods(market, as_of) do
+    observed_at = value(market, :observed_at)
+    goods = value(market, :trade_goods)
+
+    if is_struct(observed_at, DateTime) and
+         DateTime.compare(observed_at, as_of) in [:eq, :lt] and
+         valid_provenance?(market) and is_list(goods),
+       do: goods,
+       else: []
+  end
+
+  defp observation_demand(revision, objective_index, snapshot, subject, expected_value) do
     %Demand{
       subject: subject,
       required_facts: ["trade_goods"],
@@ -402,7 +612,7 @@ defmodule SpaceTraders.FleetPlanning do
       agent_id: snapshot.agent_id,
       strategy_revision_id: revision.id,
       strategic_priority: objective_index,
-      expected_value: nil,
+      expected_value: expected_value,
       discovery: false
     }
   end

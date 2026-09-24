@@ -9,6 +9,7 @@ defmodule SpaceTraders.FleetAllocation.Reconciler do
   alias SpaceTraders.Agent.Scope
   alias SpaceTraders.Agent.Agent, as: AgentRecord
   alias SpaceTraders.FleetExecution
+  alias SpaceTraders.FleetIntelligence
   alias SpaceTraders.FleetGeneration.Generation
   alias SpaceTraders.FleetStrategy.Revision
   alias SpaceTraders.Repo
@@ -18,6 +19,8 @@ defmodule SpaceTraders.FleetAllocation.Reconciler do
   @impl true
   def init(_opts) do
     Phoenix.PubSub.subscribe(SpaceTraders.PubSub, "fleet_market_evidence")
+    Phoenix.PubSub.subscribe(SpaceTraders.PubSub, "fleet_intelligence_evidence")
+    send(self(), :reconcile_intelligence_on_boot)
     {:ok, %{}}
   end
 
@@ -28,9 +31,56 @@ defmodule SpaceTraders.FleetAllocation.Reconciler do
     {:noreply, state}
   end
 
+  def handle_info({:waypoint_intelligence_observed, agent_id, system_symbol}, state) do
+    with_context(agent_id, fn scope, agent, revision ->
+      FleetIntelligence.reconcile(
+        scope,
+        agent,
+        revision,
+        system_symbol,
+        ShadowAdmission.snapshot()
+      )
+    end)
+
+    {:noreply, state}
+  end
+
+  def handle_info(:reconcile_intelligence_on_boot, state) do
+    Generation
+    |> where([generation], is_nil(generation.fenced_at) and is_nil(generation.retired_at))
+    |> select([generation], generation.agent_id)
+    |> Repo.all()
+    |> Enum.each(fn agent_id ->
+      case Repo.get(AgentRecord, agent_id) do
+        %AgentRecord{headquarters: headquarters} ->
+          case SpaceTraders.Fleet.system_from_headquarters(headquarters) do
+            {:ok, system} -> send(self(), {:waypoint_intelligence_observed, agent_id, system})
+            _ -> :ok
+          end
+
+        _ ->
+          :ok
+      end
+    end)
+
+    {:noreply, state}
+  end
+
   def handle_info(_message, state), do: {:noreply, state}
 
   defp reconcile(agent_id, system_symbol) do
+    with_context(agent_id, fn scope, agent, revision ->
+      FleetExecution.reconcile_market_evidence(
+        scope,
+        agent,
+        revision,
+        system_symbol,
+        ShadowAdmission.snapshot()
+      )
+    end)
+  end
+
+  defp with_context(agent_id, callback) do
     with :ok <- SpaceTraders.RuntimeAuthority.execution_allowed?(),
          %Generation{fleet_strategy_revision_id: revision_id, operator_id: operator_id} <-
            Repo.one(
@@ -42,14 +92,7 @@ defmodule SpaceTraders.FleetAllocation.Reconciler do
          %AgentRecord{} = agent <- Repo.get(AgentRecord, agent_id),
          %Revision{} = revision <- Repo.get(Revision, revision_id),
          %{} = operator <- Repo.get(SpaceTraders.Agent.Operator, operator_id) do
-      _ =
-        FleetExecution.reconcile_market_evidence(
-          Scope.for_operator(operator),
-          agent,
-          revision,
-          system_symbol,
-          ShadowAdmission.snapshot()
-        )
+      _ = callback.(Scope.for_operator(operator), agent, revision)
     end
   end
 end

@@ -65,6 +65,7 @@ defmodule SpaceTraders.Fleet.Intent do
     |> validate_commitment_owner()
     |> validate_inclusion(:type, [
       "navigate",
+      "acquire_intelligence",
       "buy",
       "sell",
       "deliver",
