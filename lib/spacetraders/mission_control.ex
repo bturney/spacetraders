@@ -10,10 +10,10 @@ defmodule SpaceTraders.MissionControl do
 
   alias SpaceTraders.Agent.Scope
   alias SpaceTraders.Agent.Agent, as: AgentRecord
-  alias SpaceTraders.Agent.Operator
-  alias SpaceTraders.MissionControl.Condition
+  alias SpaceTraders.Fleet.Activity
   alias SpaceTraders.FleetAllocation.StrategyDecisionEpisode
   alias SpaceTraders.FleetStrategy.Revision
+  alias SpaceTraders.MutationAttempts.{Attempt, Outcome}
   alias SpaceTraders.Repo
   import Ecto.Query, only: [from: 2]
 
@@ -25,7 +25,8 @@ defmodule SpaceTraders.MissionControl do
     FleetGeneration,
     FleetPlanning,
     FleetStrategy,
-    Intelligence
+    Intelligence,
+    OperatorConditions
   }
 
   @evaluation_fact_keys %{
@@ -90,100 +91,9 @@ defmodule SpaceTraders.MissionControl do
       fleets: Enum.map(snapshots, &fleet_overview(&1, generations)),
       objectives: objective_overviews(strategy.active_revision, generations),
       market_execution: market_execution(scope),
-      conditions: unresolved_conditions(scope),
-      notable_activity: activity(scope) |> Enum.take(5)
+      conditions: OperatorConditions.unresolved(scope),
+      notable_activity: activity(scope) |> Enum.filter(&notable_activity?/1) |> Enum.take(5)
     }
-  end
-
-  @doc "Records a durable, idempotent condition for an Operator; only a changed condition reopens it."
-  def raise_condition(%Scope{operator: %{id: operator_id}}, key, kind, summary)
-      when is_binary(key) and kind in [:attention, :intervention] and is_binary(summary) do
-    attrs = %{operator_id: operator_id, key: key, kind: kind, summary: summary}
-
-    result =
-      Repo.transaction(fn ->
-        Repo.one!(
-          from operator in Operator, where: operator.id == ^operator_id, lock: "FOR UPDATE"
-        )
-
-        case Repo.one(
-               from condition in Condition,
-                 where:
-                   condition.operator_id == ^operator_id and condition.key == ^key and
-                     is_nil(condition.resolved_at)
-             ) do
-          nil ->
-            %Condition{} |> Condition.changeset(attrs) |> Repo.insert!()
-
-          %{kind: ^kind, summary: ^summary} = condition ->
-            condition
-
-          condition ->
-            condition
-            |> Condition.changeset(Map.put(attrs, :acknowledged_at, nil))
-            |> Repo.update!()
-        end
-      end)
-
-    if match?({:ok, _}, result), do: notify_conditions(operator_id)
-    result
-  end
-
-  @doc "Acknowledges that the Operator saw a condition; it remains unresolved and pinned."
-  def acknowledge_condition(%Scope{operator: %{id: operator_id}}, id) when is_integer(id) do
-    {count, _} =
-      Repo.update_all(
-        from(condition in Condition,
-          where:
-            condition.id == ^id and condition.operator_id == ^operator_id and
-              is_nil(condition.resolved_at) and is_nil(condition.acknowledged_at)
-        ),
-        set: [acknowledged_at: DateTime.utc_now()]
-      )
-
-    if count == 1 or
-         Repo.exists?(
-           from c in Condition,
-             where: c.id == ^id and c.operator_id == ^operator_id and is_nil(c.resolved_at)
-         ) do
-      if count == 1, do: notify_conditions(operator_id)
-      :ok
-    else
-      {:error, :condition_unavailable}
-    end
-  end
-
-  @doc "Resolves a condition only after its producer establishes the underlying change."
-  def resolve_condition(%Scope{operator: %{id: operator_id}}, key) when is_binary(key) do
-    {count, _} =
-      Repo.update_all(
-        from(condition in Condition,
-          where:
-            condition.operator_id == ^operator_id and condition.key == ^key and
-              is_nil(condition.resolved_at)
-        ),
-        set: [resolved_at: DateTime.utc_now()]
-      )
-
-    if count > 0, do: notify_conditions(operator_id)
-    :ok
-  end
-
-  defp notify_conditions(operator_id) do
-    Phoenix.PubSub.broadcast(
-      SpaceTraders.PubSub,
-      "mission_conditions:#{operator_id}",
-      :mission_conditions_updated
-    )
-  end
-
-  @doc "Returns unresolved Operator conditions, including acknowledged ones."
-  def unresolved_conditions(%Scope{operator: %{id: operator_id}}) do
-    Repo.all(
-      from condition in Condition,
-        where: condition.operator_id == ^operator_id and is_nil(condition.resolved_at),
-        order_by: [asc: condition.inserted_at, asc: condition.id]
-    )
   end
 
   @doc "Chronological consequential decisions and conditions for the signed-in Operator."
@@ -200,41 +110,107 @@ defmodule SpaceTraders.MissionControl do
           id: "decision-#{episode.id}",
           type: :decision,
           at: episode.inserted_at,
-          summary: decision_summary(episode)
+          summary: decision_summary(episode),
+          detail: decision_detail(episode)
         }
       end)
 
     conditions =
-      Repo.all(
-        from condition in Condition,
-          where: condition.operator_id == ^operator_id,
-          order_by: [desc: condition.inserted_at, desc: condition.id],
-          limit: 100
-      )
+      OperatorConditions.history(scope)
       |> Enum.map(fn condition ->
         %{
           id: "condition-#{condition.id}",
           type: condition.kind,
           at: condition.inserted_at,
-          summary: condition.summary
+          summary: condition.summary,
+          detail: if(condition.resolved_at, do: "Resolved", else: "Still unresolved")
         }
       end)
 
     generations =
       scope
       |> FleetGeneration.list_generations()
-      |> Enum.map(fn generation ->
-        %{
+      |> Enum.flat_map(fn generation ->
+        started = %{
           id: "generation-#{generation.id}",
           type: :milestone,
           at: generation.inserted_at,
-          summary: "Fleet Generation #{generation.number} began with #{generation.symbol}"
+          summary: "Fleet Generation #{generation.number} began with #{generation.symbol}",
+          detail:
+            "Strategy resumed: #{if generation.strategy_capable_at, do: "yes", else: "not yet confirmed"}."
+        }
+
+        reset =
+          if generation.fenced_at do
+            [
+              %{
+                id: "reset-#{generation.id}",
+                type: :milestone,
+                at: generation.fenced_at,
+                summary: "Server Reset interrupted Fleet Generation #{generation.number}",
+                detail:
+                  "Old-generation gameplay mutations were fenced. Replacement status is in Generations."
+              }
+            ]
+          else
+            []
+          end
+
+        [started | reset]
+      end)
+
+    purchases =
+      Repo.all(
+        from attempt in Attempt,
+          join: outcome in Outcome,
+          on: outcome.mutation_attempt_id == attempt.id,
+          where:
+            attempt.operator_id == ^operator_id and attempt.operation_id == "purchase-ship" and
+              outcome.classification == "succeeded",
+          order_by: [desc: outcome.recorded_at],
+          select: %{id: attempt.id, at: outcome.recorded_at}
+      )
+      |> Enum.uniq_by(& &1.id)
+      |> Enum.map(fn purchase ->
+        %{
+          id: "purchase-#{purchase.id}",
+          type: :milestone,
+          at: purchase.at,
+          summary: "Fleet acquired a Ship",
+          detail: "The game confirmed the purchase."
         }
       end)
 
-    (decisions ++ conditions ++ generations)
+    operator_events =
+      Repo.all(
+        from event in Activity,
+          join: agent in AgentRecord,
+          on: agent.id == event.agent_id,
+          where:
+            agent.operator_id == ^operator_id and
+              event.kind in ["manual_intervention_stopped", "manual_intent_completed"],
+          order_by: [desc: event.inserted_at, desc: event.id],
+          limit: 100
+      )
+      |> Enum.map(fn event ->
+        %{
+          id: "ship-#{event.id}",
+          type: :event,
+          at: event.inserted_at,
+          summary: event.message,
+          detail: "Recorded Operator-directed Ship outcome."
+        }
+      end)
+
+    (decisions ++ conditions ++ generations ++ purchases ++ operator_events)
     |> Enum.sort_by(& &1.at, {:desc, DateTime})
   end
+
+  def notable_activity?(%{type: type})
+      when type in [:decision, :milestone, :attention, :intervention],
+      do: true
+
+  def notable_activity?(_), do: false
 
   defp decision_summary(%{
          classification: :realized,
@@ -251,6 +227,20 @@ defmodule SpaceTraders.MissionControl do
 
   defp decision_summary(%{classification: :superseded}), do: "Fleet decision superseded"
   defp decision_summary(_), do: "Fleet selected a new commitment portfolio"
+
+  defp decision_detail(episode) do
+    [
+      "Decision Episode #{episode.id} · #{episode.classification |> Atom.to_string() |> String.replace("_", " ")}",
+      if(episode.binding_constraints != [],
+        do: "#{length(episode.binding_constraints)} binding constraints"
+      ),
+      if(episode.alternatives != [],
+        do: "#{length(episode.alternatives)} alternatives considered"
+      )
+    ]
+    |> Enum.reject(&is_nil/1)
+    |> Enum.join(" · ")
+  end
 
   @doc "Comparable Fleet Generation chapters using only retained outcome evidence."
   def generation_recaps(%Scope{operator: %{id: operator_id}} = scope) do
@@ -344,6 +334,7 @@ defmodule SpaceTraders.MissionControl do
     case FleetAllocation.current_portfolio(scope) do
       nil ->
         %{
+          family: nil,
           expected: nil,
           realized: %{
             completed_round_trips: 0,
@@ -356,15 +347,30 @@ defmodule SpaceTraders.MissionControl do
         }
 
       portfolio ->
+        family = portfolio_family(portfolio.strategy_decision_episode)
+
         %{
-          expected: expected_economics(portfolio),
-          realized: realized_economics(portfolio),
+          family: family,
+          expected: if(family == :market, do: expected_economics(portfolio)),
+          realized:
+            if(family == :market,
+              do: realized_economics(portfolio),
+              else: %{
+                completed_round_trips: 0,
+                realized_net_credit_change: nil,
+                realized_sale_value: nil
+              }
+            ),
           contribution: contribution(portfolio),
           limitation: limitation(portfolio),
           attention: []
         }
     end
   end
+
+  defp portfolio_family(%{calibration_version: "market" <> _}), do: :market
+  defp portfolio_family(%{calibration_version: "resources" <> _}), do: :resources
+  defp portfolio_family(_), do: :other
 
   @doc """
   Refreshes one Operator-owned Agent in an existing dashboard projection.
@@ -626,8 +632,15 @@ defmodule SpaceTraders.MissionControl do
   end
 
   defp limitation(%FleetAllocation.Portfolio{} = portfolio) do
-    if portfolio.commitments == [] do
-      "No eligible Market commitment is active for this Fleet Generation."
+    cond do
+      portfolio.commitments == [] ->
+        "No eligible Fleet Commitment is active for this Fleet Generation."
+
+      Enum.any?(portfolio.commitments, &(&1.unwind_state == :released)) ->
+        "A Fleet Commitment was released without a confirmed outcome; allocation may select a replacement."
+
+      true ->
+        nil
     end
   end
 end

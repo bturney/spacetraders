@@ -94,7 +94,7 @@ defmodule SpaceTradersWeb.MissionControlLiveTest do
     scope: scope
   } do
     {:ok, condition} =
-      SpaceTraders.MissionControl.raise_condition(
+      SpaceTraders.OperatorConditions.raise(
         scope,
         "credit-floor",
         :attention,
@@ -113,7 +113,7 @@ defmodule SpaceTradersWeb.MissionControlLiveTest do
     assert html =~ "Protected credit floor cannot be maintained"
     assert html =~ "Acknowledged"
 
-    :ok = SpaceTraders.MissionControl.resolve_condition(scope, "credit-floor")
+    :ok = SpaceTraders.OperatorConditions.resolve(scope, "credit-floor")
     {:ok, resolved_view, _html} = live(conn, ~p"/mission-control")
 
     refute has_element?(
@@ -123,7 +123,7 @@ defmodule SpaceTradersWeb.MissionControlLiveTest do
            )
 
     {:ok, reopened} =
-      SpaceTraders.MissionControl.raise_condition(
+      SpaceTraders.OperatorConditions.raise(
         scope,
         "credit-floor",
         :attention,
@@ -143,7 +143,7 @@ defmodule SpaceTradersWeb.MissionControlLiveTest do
     {:ok, view, _html} = live(conn, ~p"/mission-control")
 
     {:ok, _} =
-      SpaceTraders.MissionControl.raise_condition(
+      SpaceTraders.OperatorConditions.raise(
         scope,
         "external-authority",
         :intervention,
@@ -182,6 +182,14 @@ defmodule SpaceTradersWeb.MissionControlLiveTest do
 
     :ok = SpaceTraders.Fleet.record_activity(agent, ship, "retry", "API request retrying")
 
+    :ok =
+      SpaceTraders.Fleet.record_activity(
+        agent,
+        ship,
+        "manual_intervention_stopped",
+        "One-off navigation stopped"
+      )
+
     Repo.insert!(%StrategyDecisionEpisode{
       operator_id: operator.id,
       fleet_generation_id: generation.id,
@@ -192,10 +200,35 @@ defmodule SpaceTradersWeb.MissionControlLiveTest do
       actual_outcomes: %{"net_credit_change" => 250}
     })
 
-    {:ok, _view, html} = live(conn, ~p"/activity")
+    now = DateTime.utc_now()
+
+    attempt =
+      Repo.insert!(%SpaceTraders.MutationAttempts.Attempt{
+        operator_id: operator.id,
+        agent_id: agent.id,
+        fleet_generation_id: generation.id,
+        operation_id: "purchase-ship",
+        operation_owner: "fleet",
+        state: "succeeded",
+        request_fingerprint: "purchase-ship-test",
+        prepared_at: now
+      })
+
+    Repo.insert!(%SpaceTraders.MutationAttempts.Outcome{
+      mutation_attempt_id: attempt.id,
+      classification: "succeeded",
+      recorded_at: now
+    })
+
+    {:ok, view, html} = live(conn, ~p"/activity")
     assert html =~ "Decision"
     assert html =~ "250 credits"
+    assert html =~ "Fleet acquired a Ship"
+    assert html =~ "One-off navigation stopped"
     refute html =~ "API request"
+
+    view |> element("nav[aria-label='Activity filters'] button", "Notable") |> render_click()
+    refute render(view) =~ "One-off navigation stopped"
 
     {:ok, _briefing, html} = live(conn, ~p"/mission-control")
     assert html =~ "Notable activity"

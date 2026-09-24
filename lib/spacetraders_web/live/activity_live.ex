@@ -3,7 +3,7 @@ defmodule SpaceTradersWeb.ActivityLive do
 
   use SpaceTradersWeb, :live_view
 
-  alias SpaceTraders.MissionControl
+  alias SpaceTraders.{MissionControl, OperatorConditions}
 
   @impl true
   def mount(_params, _session, socket) do
@@ -70,6 +70,11 @@ defmodule SpaceTradersWeb.ActivityLive do
             "%Y-%m-%d %H:%M UTC"
           )}</time>
           <p class="mt-1">{entry.summary}</p>
+          <details class="mt-2 text-sm">
+            <summary class="cursor-pointer text-primary">Why and context</summary>
+            <p class="mt-2 opacity-75">{entry.detail}</p>
+            <.link navigate={~p"/generations"} class="link link-primary mt-1 inline-block">Generation history</.link>
+          </details>
         </li>
       </ol>
     </Layouts.app>
@@ -83,7 +88,7 @@ defmodule SpaceTradersWeb.ActivityLive do
 
   def handle_event("acknowledge", %{"id" => raw_id}, socket) do
     with {id, ""} <- Integer.parse(raw_id),
-         :ok <- MissionControl.acknowledge_condition(socket.assigns.current_scope, id) do
+         :ok <- OperatorConditions.acknowledge(socket.assigns.current_scope, id) do
       {:noreply, load_activity(socket)}
     else
       _ -> {:noreply, socket}
@@ -95,10 +100,11 @@ defmodule SpaceTradersWeb.ActivityLive do
 
     assign(socket,
       activity: MissionControl.activity(scope),
-      conditions: MissionControl.unresolved_conditions(scope)
+      conditions: OperatorConditions.unresolved(scope)
     )
   end
 
-  defp filtered(entries, filter) when filter in ["all", "notable"], do: entries
+  defp filtered(entries, "all"), do: entries
+  defp filtered(entries, "notable"), do: Enum.filter(entries, &MissionControl.notable_activity?/1)
   defp filtered(entries, filter), do: Enum.filter(entries, &(Atom.to_string(&1.type) == filter))
 end

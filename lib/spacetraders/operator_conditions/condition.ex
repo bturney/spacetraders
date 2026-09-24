@@ -1,4 +1,4 @@
-defmodule SpaceTraders.MissionControl.Condition do
+defmodule SpaceTraders.OperatorConditions.Condition do
   @moduledoc "Durable Operator-facing Attention or Intervention, separate from acknowledgement."
 
   use Ecto.Schema

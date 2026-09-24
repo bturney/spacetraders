@@ -17,7 +17,7 @@ defmodule SpaceTraders.FleetGeneration do
   alias SpaceTraders.Fleet.{Ship, ShipServer}
   alias SpaceTraders.FleetGeneration.Generation
   alias SpaceTraders.FleetStrategy.{Revision, Strategy}
-  alias SpaceTraders.{Evidence, Fleet, FleetStrategy, MissionControl, Repo, Timeline}
+  alias SpaceTraders.{Evidence, Fleet, FleetStrategy, OperatorConditions, Repo, Timeline}
 
   defmodule CredentialReference do
     @moduledoc "A non-secret reference to an Operator's stored AccountToken."
@@ -71,7 +71,7 @@ defmodule SpaceTraders.FleetGeneration do
 
       case result do
         {:error, :account_token_not_linked} ->
-          MissionControl.raise_condition(
+          OperatorConditions.raise(
             scope,
             "replacement-authority",
             :intervention,
@@ -79,7 +79,7 @@ defmodule SpaceTraders.FleetGeneration do
           )
 
         {:error, :replacement_symbols_exhausted} ->
-          MissionControl.raise_condition(
+          OperatorConditions.raise(
             scope,
             "replacement-symbols",
             :intervention,
@@ -87,8 +87,8 @@ defmodule SpaceTraders.FleetGeneration do
           )
 
         {:ok, _} ->
-          MissionControl.resolve_condition(scope, "replacement-authority")
-          MissionControl.resolve_condition(scope, "replacement-symbols")
+          OperatorConditions.resolve(scope, "replacement-authority")
+          OperatorConditions.resolve(scope, "replacement-symbols")
 
         _ ->
           :ok

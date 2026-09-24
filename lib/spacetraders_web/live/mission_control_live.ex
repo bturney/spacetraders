@@ -3,7 +3,7 @@ defmodule SpaceTradersWeb.MissionControlLive do
 
   use SpaceTradersWeb, :live_view
 
-  alias SpaceTraders.MissionControl
+  alias SpaceTraders.{MissionControl, OperatorConditions}
 
   @impl true
   def mount(_params, _session, socket) do
@@ -31,9 +31,6 @@ defmodule SpaceTradersWeb.MissionControlLive do
             </:subtitle>
           </.header>
         </header>
-        <.link navigate={~p"/intervention"} class="link link-primary text-sm">
-          Reserve a Ship or intervene
-        </.link>
 
         <section
           :if={!@projection.strategy.active_revision || @projection.fleets == []}
@@ -56,27 +53,6 @@ defmodule SpaceTradersWeb.MissionControlLive do
           <p class="eyebrow">Operating health</p>
           <h2 class="mt-2 text-2xl font-bold">{health_label(@projection)}</h2>
           <p class="mt-1 text-sm opacity-70">{health_detail(@projection)}</p>
-        </section>
-
-        <section id="needs-attention" class="rounded-2xl border border-base-300 bg-base-100 p-5">
-          <h2 class="text-xl font-bold">Needs attention</h2>
-          <p :if={@projection.conditions == []} class="mt-2 text-sm opacity-70">
-            No unresolved Attention or Intervention.
-          </p>
-          <ul class="mt-3 space-y-3">
-            <li :for={condition <- @projection.conditions} class="border-t border-base-300 pt-3">
-              <strong>{if condition.kind == :intervention, do: "Intervention", else: "Attention"}</strong>
-              <p>{condition.summary}</p>
-              <span :if={condition.acknowledged_at} class="text-sm opacity-70">Acknowledged · unresolved</span>
-              <button
-                :if={!condition.acknowledged_at}
-                type="button"
-                phx-click="acknowledge"
-                phx-value-id={condition.id}
-                class="btn btn-ghost btn-sm"
-              >Acknowledge</button>
-            </li>
-          </ul>
         </section>
 
         <section id="strategy-context" class="grid gap-4 lg:grid-cols-3">
@@ -113,48 +89,6 @@ defmodule SpaceTradersWeb.MissionControlLive do
           </article>
         </section>
 
-        <section
-          :if={@projection.market_execution.expected}
-          id="market-execution"
-          class="rounded-2xl border border-base-300 bg-base-100 p-5"
-        >
-          <div class="flex items-start justify-between gap-3">
-            <div>
-              <p class="eyebrow">Market execution</p><h2 class="text-xl font-bold">
-                Adaptive market trading
-              </h2>
-            </div><span class="badge">
-              {market_execution_state(@projection.market_execution)}
-            </span>
-          </div>
-          <div class="mt-4 grid gap-4 sm:grid-cols-3">
-            <div>
-              <p class="text-sm opacity-70">Expected credit change</p>
-              <p class="mt-1 font-semibold">
-                {expected_label(@projection.market_execution.expected)}
-              </p>
-            </div>
-            <div>
-              <p class="text-sm opacity-70">Realized net credit change</p>
-              <p class="mt-1 font-semibold">
-                {realized_label(@projection.market_execution.realized.realized_net_credit_change)}
-              </p>
-            </div>
-            <div>
-              <p class="text-sm opacity-70">Fleet contribution</p>
-              <p class="mt-1 font-semibold">
-                {contribution_label(@projection.market_execution.contribution)}
-              </p>
-            </div>
-          </div>
-          <div
-            :if={@projection.market_execution.limitation}
-            class="mt-4 rounded-xl bg-warning/10 p-4 text-sm"
-          >
-            {limitation_label(@projection.market_execution.limitation)}
-          </div>
-        </section>
-
         <section id="objective-evaluations" class="space-y-3">
           <div>
             <p class="eyebrow">Outcome Observability</p><h2 class="text-2xl font-bold">
@@ -177,6 +111,81 @@ defmodule SpaceTradersWeb.MissionControlLive do
           </article>
         </section>
 
+        <section id="needs-attention" class="rounded-2xl border border-base-300 bg-base-100 p-5">
+          <h2 class="text-xl font-bold">Needs attention</h2>
+          <p :if={@projection.conditions == []} class="mt-2 text-sm opacity-70">
+            No unresolved Attention or Intervention.
+          </p>
+          <ul class="mt-3 space-y-3">
+            <li :for={condition <- @projection.conditions} class="border-t border-base-300 pt-3">
+              <strong>{if condition.kind == :intervention, do: "Intervention", else: "Attention"}</strong>
+              <p>{condition.summary}</p>
+              <span :if={condition.acknowledged_at} class="text-sm opacity-70">Acknowledged · unresolved</span>
+              <button
+                :if={!condition.acknowledged_at}
+                type="button"
+                phx-click="acknowledge"
+                phx-value-id={condition.id}
+                class="btn btn-ghost btn-sm"
+              >Acknowledge</button>
+            </li>
+          </ul>
+        </section>
+
+        <section
+          :if={@projection.market_execution.expected}
+          id="market-execution"
+          class="rounded-2xl border border-base-300 bg-base-100 p-5"
+        >
+          <div class="flex items-start justify-between gap-3">
+            <div>
+              <p class="eyebrow">Fleet contribution</p><h2 class="text-xl font-bold">
+                Adaptive market trading
+              </h2>
+            </div><span class="badge">
+              {market_execution_state(@projection.market_execution)}
+            </span>
+          </div>
+          <div class="mt-4 grid gap-4 sm:grid-cols-3">
+            <div>
+              <p class="text-sm opacity-70">Expected credit change</p>
+              <p class="mt-1 font-semibold">
+                {expected_label(@projection.market_execution.expected)}
+              </p>
+            </div>
+            <div>
+              <p class="text-sm opacity-70">Realized net credit change</p>
+              <p class="mt-1 font-semibold">
+                {realized_label(@projection.market_execution.realized.realized_net_credit_change)}
+              </p>
+            </div>
+            <div>
+              <p class="text-sm opacity-70">Current work</p>
+              <p class="mt-1 font-semibold">
+                {contribution_label(@projection.market_execution.contribution)}
+              </p>
+            </div>
+          </div>
+          <div
+            :if={@projection.market_execution.limitation}
+            class="mt-4 rounded-xl bg-warning/10 p-4 text-sm"
+          >
+            LIMITING · {limitation_label(@projection.market_execution.limitation)}
+          </div>
+        </section>
+
+        <section
+          :if={@projection.market_execution.family in [:resources, :other]}
+          id="other-contributions"
+          class="rounded-2xl border border-base-300 bg-base-100 p-5"
+        >
+          <h2 class="text-xl font-bold">Fleet contribution</h2>
+          <p class="mt-2">
+            {contribution_label(@projection.market_execution.contribution)} pursuing a non-trading outcome.
+          </p>
+          <p class="mt-1 text-sm opacity-70">Expected credit change is unknown for this work.</p>
+        </section>
+
         <section id="fleet-health" class="grid gap-4 lg:grid-cols-2">
           <article
             :for={fleet <- @projection.fleets}
@@ -190,6 +199,9 @@ defmodule SpaceTradersWeb.MissionControlLive do
               </div><span class="badge">{fleet_status(fleet)}</span>
             </div>
             <p class="mt-3 text-sm">{fleet_contribution(fleet)}</p>
+            <p :for={ship <- fleet.control.attention} class="mt-2 text-sm opacity-70">
+              LIMITING · {ship.symbol}: {ship.control.attention.summary}
+            </p>
           </article>
         </section>
 
@@ -209,6 +221,7 @@ defmodule SpaceTradersWeb.MissionControlLive do
           </ul>
           <.link navigate={~p"/generations"} class="link link-primary mt-4 inline-block text-sm">Compare Fleet Generations</.link>
         </section>
+        <.link navigate={~p"/intervention"} class="link link-primary text-sm">Exceptional Ship reservation and Manual Intervention</.link>
       </div>
     </Layouts.app>
     """
@@ -217,7 +230,7 @@ defmodule SpaceTradersWeb.MissionControlLive do
   @impl true
   def handle_event("acknowledge", %{"id" => raw_id}, socket) do
     with {id, ""} <- Integer.parse(raw_id),
-         :ok <- MissionControl.acknowledge_condition(socket.assigns.current_scope, id) do
+         :ok <- OperatorConditions.acknowledge(socket.assigns.current_scope, id) do
       {:noreply, assign_projection(socket)}
     else
       _ -> {:noreply, socket}

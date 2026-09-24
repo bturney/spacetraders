@@ -210,6 +210,19 @@ defmodule SpaceTraders.MissionControlTest do
       assert report.limitation == nil
     end
 
+    test "resource work does not present its expected value as credit profit" do
+      %{scope: scope, portfolio: portfolio} = execution_fixture()
+
+      portfolio.strategy_decision_episode
+      |> Ecto.Changeset.change(calibration_version: "resources-v1")
+      |> Repo.update!()
+
+      report = MissionControl.market_execution(scope)
+      assert report.family == :resources
+      assert report.expected == nil
+      assert report.contribution.commitment_count == 1
+    end
+
     test "reports realized net economics from completed buy and sell Intents" do
       %{scope: scope, commitment: commitment} = execution_fixture()
       ship_id = Repo.get_by!(SpaceTraders.Fleet.Ship, symbol: "SHIP-1").id
@@ -252,20 +265,30 @@ defmodule SpaceTraders.MissionControlTest do
     other_scope = Scope.for_operator(other)
 
     assert {:ok, condition} =
-             MissionControl.raise_condition(owner_scope, "floor", :attention, "Credit floor infeasible")
+             SpaceTraders.OperatorConditions.raise(
+               owner_scope,
+               "floor",
+               :attention,
+               "Credit floor infeasible"
+             )
 
-    assert MissionControl.acknowledge_condition(other_scope, condition.id) ==
+    assert SpaceTraders.OperatorConditions.acknowledge(other_scope, condition.id) ==
              {:error, :condition_unavailable}
 
-    assert MissionControl.unresolved_conditions(other_scope) == []
-    assert :ok = MissionControl.acknowledge_condition(owner_scope, condition.id)
+    assert SpaceTraders.OperatorConditions.unresolved(other_scope) == []
+    assert :ok = SpaceTraders.OperatorConditions.acknowledge(owner_scope, condition.id)
 
     assert {:ok, repeated} =
-             MissionControl.raise_condition(owner_scope, "floor", :attention, "Credit floor infeasible")
+             SpaceTraders.OperatorConditions.raise(
+               owner_scope,
+               "floor",
+               :attention,
+               "Credit floor infeasible"
+             )
 
     assert repeated.id == condition.id
     assert repeated.acknowledged_at
-    assert [%{id: id}] = MissionControl.unresolved_conditions(owner_scope)
+    assert [%{id: id}] = SpaceTraders.OperatorConditions.unresolved(owner_scope)
     assert id == condition.id
   end
 
