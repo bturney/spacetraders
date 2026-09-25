@@ -52,12 +52,23 @@ defmodule SpaceTradersWeb.Layouts do
           <nav class="flex items-center gap-1 sm:gap-2" aria-label="Operator navigation">
             <%= if @current_scope do %>
               <span class="hidden max-w-44 truncate px-2 text-xs opacity-60 md:block">{@current_scope.operator.email}</span>
-              <.link navigate={~p"/mission-control"} class="btn btn-sm btn-ghost">Mission Control</.link>
-              <.link navigate={~p"/world"} class="btn btn-sm btn-ghost">World</.link>
-              <.link navigate={~p"/strategy"} class="btn btn-sm btn-ghost">Strategy</.link>
-              <.link navigate={~p"/agents/new"} class="btn btn-sm btn-primary">Mint agent</.link>
-              <.link navigate={~p"/operators/settings"} class="btn btn-sm btn-ghost">Settings</.link>
-              <.link href={~p"/operators/log-out"} method="delete" class="btn btn-sm btn-ghost">Log out</.link>
+              <.link
+                navigate={~p"/mission-control"}
+                class="hidden btn btn-sm btn-ghost md:inline-flex"
+              >Mission Control</.link>
+              <.link navigate={~p"/world"} class="hidden btn btn-sm btn-ghost md:inline-flex">World</.link>
+              <.link navigate={~p"/strategy"} class="hidden btn btn-sm btn-ghost md:inline-flex">Strategy</.link>
+              <.link navigate={~p"/activity"} class="btn btn-sm btn-ghost md:hidden">Activity</.link>
+              <details class="dropdown dropdown-end">
+                <summary class="btn btn-sm btn-ghost">More</summary>
+                <ul class="menu dropdown-content z-20 w-52 rounded-xl border border-base-300 bg-base-100 p-2 shadow-lg">
+                  <li><.link navigate={~p"/activity"}>Activity</.link></li>
+                  <li><.link navigate={~p"/generations"}>Generations</.link></li>
+                  <li><.link navigate={~p"/agents/new"}>Mint agent</.link></li>
+                  <li><.link navigate={~p"/operators/settings"}>Settings</.link></li>
+                  <li><.link href={~p"/operators/log-out"} method="delete">Log out</.link></li>
+                </ul>
+              </details>
             <% else %>
               <.link navigate={~p"/operators/register"} class="btn btn-sm btn-ghost">Register</.link>
               <.link navigate={~p"/operators/log-in"} class="btn btn-sm btn-primary">Log in</.link>
@@ -67,7 +78,17 @@ defmodule SpaceTradersWeb.Layouts do
         </div>
       </header>
 
-      <main class="mx-auto w-full max-w-[1440px] px-4 py-8 sm:px-6 sm:py-10 lg:px-8">
+      <nav
+        :if={@current_scope}
+        class="fixed inset-x-0 bottom-0 z-20 flex justify-around border-t border-base-300 bg-base-100 p-2 md:hidden"
+        aria-label="Primary navigation"
+      >
+        <.link navigate={~p"/mission-control"} class="btn btn-ghost btn-sm">Command</.link>
+        <.link navigate={~p"/world"} class="btn btn-ghost btn-sm">World</.link>
+        <.link navigate={~p"/strategy"} class="btn btn-ghost btn-sm">Strategy</.link>
+      </nav>
+
+      <main class="mx-auto w-full max-w-[1440px] px-4 py-8 pb-24 sm:px-6 sm:py-10 md:pb-10 lg:px-8">
         <div class={[@wide && "space-y-6", !@wide && "mx-auto max-w-2xl space-y-6"]}>
           {render_slot(@inner_block)}
         </div>

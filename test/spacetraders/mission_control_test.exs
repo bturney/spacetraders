@@ -187,8 +187,8 @@ defmodule SpaceTraders.MissionControlTest do
                expected: nil,
                realized: %{
                  completed_round_trips: 0,
-                 realized_net_credit_change: 0,
-                 realized_sale_value: 0
+                 realized_net_credit_change: nil,
+                 realized_sale_value: nil
                },
                contribution: %{commitment_count: 0, expected_value: 0},
                limitation: nil,
@@ -205,8 +205,22 @@ defmodule SpaceTraders.MissionControlTest do
       assert report.contribution.commitment_count == 1
       assert report.contribution.expected_value == 100
       assert report.contribution.claims == ["SHIP-1"]
+      assert report.realized.realized_net_credit_change == nil
       assert report.attention == []
       assert report.limitation == nil
+    end
+
+    test "resource work does not present its expected value as credit profit" do
+      %{scope: scope, portfolio: portfolio} = execution_fixture()
+
+      portfolio.strategy_decision_episode
+      |> Ecto.Changeset.change(calibration_version: "resources-v1")
+      |> Repo.update!()
+
+      report = MissionControl.market_execution(scope)
+      assert report.family == :resources
+      assert report.expected == nil
+      assert report.contribution.commitment_count == 1
     end
 
     test "reports realized net economics from completed buy and sell Intents" do
@@ -242,6 +256,40 @@ defmodule SpaceTraders.MissionControlTest do
       assert report.realized.realized_sale_value == 150
       assert report.realized.realized_net_credit_change == 100
     end
+  end
+
+  test "Attention is scoped and repeated observation does not clear acknowledgement" do
+    owner = operator_fixture()
+    other = operator_fixture()
+    owner_scope = Scope.for_operator(owner)
+    other_scope = Scope.for_operator(other)
+
+    assert {:ok, condition} =
+             SpaceTraders.OperatorConditions.raise(
+               owner_scope,
+               "floor",
+               :attention,
+               "Credit floor infeasible"
+             )
+
+    assert SpaceTraders.OperatorConditions.acknowledge(other_scope, condition.id) ==
+             {:error, :condition_unavailable}
+
+    assert SpaceTraders.OperatorConditions.unresolved(other_scope) == []
+    assert :ok = SpaceTraders.OperatorConditions.acknowledge(owner_scope, condition.id)
+
+    assert {:ok, repeated} =
+             SpaceTraders.OperatorConditions.raise(
+               owner_scope,
+               "floor",
+               :attention,
+               "Credit floor infeasible"
+             )
+
+    assert repeated.id == condition.id
+    assert repeated.acknowledged_at
+    assert [%{id: id}] = SpaceTraders.OperatorConditions.unresolved(owner_scope)
+    assert id == condition.id
   end
 
   defp execution_fixture do

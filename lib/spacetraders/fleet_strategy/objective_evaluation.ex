@@ -3,6 +3,30 @@ defmodule SpaceTraders.FleetStrategy.ObjectiveEvaluation do
 
   alias SpaceTraders.FleetStrategy.Revision
 
+  @stored_fact_keys %{
+    "change" => :change,
+    "current" => :current,
+    "elapsed_seconds" => :elapsed_seconds,
+    "expected_seconds_to_target" => :expected_seconds_to_target,
+    "feasible?" => :feasible?,
+    "horizon_seconds" => :horizon_seconds,
+    "required_margin" => :required_margin,
+    "target" => :target
+  }
+
+  @doc "Evaluates only recognized facts retained with a Fleet Generation."
+  def evaluate_persisted(revision, index, facts) when is_map(facts) do
+    normalized =
+      Map.new(
+        for {key, value} <- facts,
+            atom = Map.get(@stored_fact_keys, key),
+            atom != nil,
+            do: {atom, value}
+      )
+
+    evaluate(revision, index, normalized)
+  end
+
   def evaluate(%Revision{} = revision, objective_index, facts)
       when is_integer(objective_index) and objective_index >= 0 and is_map(facts) do
     with {:ok, objective} <- objective_at(revision, objective_index),

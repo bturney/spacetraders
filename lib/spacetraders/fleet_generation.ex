@@ -16,8 +16,9 @@ defmodule SpaceTraders.FleetGeneration do
   alias SpaceTraders.Agent.{Agent, Operator, Scope}
   alias SpaceTraders.Fleet.{Ship, ShipServer}
   alias SpaceTraders.FleetGeneration.Generation
+  alias SpaceTraders.Evidence.Observation
   alias SpaceTraders.FleetStrategy.{Revision, Strategy}
-  alias SpaceTraders.{Evidence, Fleet, FleetStrategy, Repo, Timeline}
+  alias SpaceTraders.{Evidence, Fleet, FleetStrategy, OperatorConditions, Repo, Timeline}
 
   defmodule CredentialReference do
     @moduledoc "A non-secret reference to an Operator's stored AccountToken."
@@ -67,7 +68,34 @@ defmodule SpaceTraders.FleetGeneration do
   @doc "Mints a new Fleet Generation for the authenticated Operator."
   def mint(%Scope{operator: %Operator{id: operator_id}} = scope, attrs) do
     :global.trans({{__MODULE__, :mint, operator_id}, self()}, fn ->
-      do_mint(scope, attrs, operator_id)
+      result = do_mint(scope, attrs, operator_id)
+
+      case result do
+        {:error, :account_token_not_linked} ->
+          OperatorConditions.raise(
+            scope,
+            "replacement-authority",
+            :intervention,
+            "AccountToken authority is unavailable. Link an AccountToken to mint a Fleet Generation."
+          )
+
+        {:error, :replacement_symbols_exhausted} ->
+          OperatorConditions.raise(
+            scope,
+            "replacement-symbols",
+            :intervention,
+            "Replacement Agent symbols are exhausted. Revise the replacement identity choices."
+          )
+
+        {:ok, _} ->
+          OperatorConditions.resolve(scope, "replacement-authority")
+          OperatorConditions.resolve(scope, "replacement-symbols")
+
+        _ ->
+          :ok
+      end
+
+      result
     end)
   end
 
@@ -124,9 +152,210 @@ defmodule SpaceTraders.FleetGeneration do
     )
   end
 
+  @doc "Records a verified Objective evaluation for an active Fleet Generation."
+  def record_objective_progress(scope, generation_id, index, facts, opts \\ [])
+
+  def record_objective_progress(
+        %Scope{operator: %Operator{id: operator_id}} = scope,
+        generation_id,
+        index,
+        facts,
+        opts
+      )
+      when is_integer(generation_id) and is_integer(index) and index >= 0 and is_map(facts) do
+    result =
+      Repo.transaction(fn ->
+        generation =
+          Repo.one(
+            from g in Generation,
+              where:
+                g.id == ^generation_id and g.operator_id == ^operator_id and
+                  is_nil(g.fenced_at) and is_nil(g.retired_at),
+              lock: "FOR UPDATE"
+          )
+
+        revision =
+          generation && generation.fleet_strategy_revision_id &&
+            Repo.get(Revision, generation.fleet_strategy_revision_id)
+
+        evidence = facts["evidence_id"] && Repo.get(Observation, facts["evidence_id"])
+
+        case revision && FleetStrategy.evaluate_persisted_objective(revision, index, facts) do
+          {:ok, evaluation} ->
+            if objective_evidence_supports?(revision, index, generation, evidence, facts) do
+              progress =
+                Map.put(
+                  generation.objective_progress,
+                  Integer.to_string(index),
+                  Map.put(facts, "revision_id", revision.id)
+                )
+
+              updated =
+                generation
+                |> Ecto.Changeset.change(objective_progress: progress)
+                |> Repo.update!()
+
+              _ =
+                OperatorConditions.objective_evaluation(
+                  scope,
+                  updated,
+                  revision,
+                  index,
+                  evaluation,
+                  Keyword.put(opts, :notify?, false)
+                )
+
+              updated
+            else
+              Repo.rollback(:invalid_objective_progress)
+            end
+
+          _ ->
+            Repo.rollback(:invalid_objective_progress)
+        end
+      end)
+
+    case result do
+      {:ok, generation} ->
+        if Keyword.get(opts, :notify?, true), do: OperatorConditions.notify(scope)
+        {:ok, generation}
+
+      error ->
+        error
+    end
+  end
+
+  def record_objective_progress(_scope, _generation_id, _index, _facts, _opts),
+    do: {:error, :invalid_objective_progress}
+
+  @doc "Persists complete, evidence-bound Objective evaluations carried by ranked plans."
+  def record_objective_evaluations(scope, revision, plans, opts \\ [])
+
+  def record_objective_evaluations(%Scope{} = scope, %Revision{} = revision, plans, opts)
+      when is_list(plans) do
+    generation =
+      Repo.one(
+        from generation in Generation,
+          where:
+            generation.operator_id == ^scope.operator.id and
+              generation.fleet_strategy_revision_id == ^revision.id and
+              is_nil(generation.fenced_at) and is_nil(generation.retired_at),
+          order_by: [desc: generation.number],
+          limit: 1
+      )
+
+    if generation do
+      result =
+        Enum.reduce_while(plans, :ok, fn plan, :ok ->
+          evidence_id =
+            Map.get(plan, :objective_evidence_id) || Map.get(plan, "objective_evidence_id")
+
+          evaluations = Map.get(plan, :objective_evaluations, [])
+
+          if evaluations != [] and not is_binary(evidence_id) do
+            {:halt, {:error, :objective_evidence_required}}
+          else
+            plan
+            |> Map.get(:objective_evaluations, [])
+            |> Enum.with_index()
+            |> Enum.reduce_while(:ok, fn {evaluation, index}, :ok ->
+              facts =
+                %{
+                  "change" => evaluation[:change],
+                  "current" => evaluation[:current],
+                  "elapsed_seconds" => evaluation[:elapsed_seconds],
+                  "expected_seconds_to_target" => evaluation[:expected_seconds_to_target],
+                  "feasible?" => evaluation[:feasible?],
+                  "horizon_seconds" => evaluation[:horizon_seconds],
+                  "required_margin" => evaluation[:required_margin],
+                  "target" => evaluation[:target]
+                }
+                |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+                |> Map.new()
+                |> Map.put("evidence_id", evidence_id)
+
+              if is_binary(evidence_id) do
+                case record_objective_progress(scope, generation.id, index, facts, opts) do
+                  {:ok, _} -> {:cont, :ok}
+                  {:error, reason} -> {:halt, {:error, reason}}
+                end
+              else
+                {:cont, :ok}
+              end
+            end)
+          end
+          |> case do
+            :ok -> {:cont, :ok}
+            {:error, reason} -> {:halt, {:error, reason}}
+          end
+        end)
+
+      result
+    else
+      :ok
+    end
+  end
+
+  def record_objective_evaluations(_scope, _revision, _plans, _opts), do: :ok
+
+  @doc "Retains current authoritative Agent credits for Objective evidence and recaps."
+  def observe_observation(%Agent{operator_id: operator_id}, %Observation{} = evidence)
+      when is_integer(operator_id) and evidence.operation_id == "get-my-agent" do
+    generation =
+      Repo.one(
+        from generation in Generation,
+          where:
+            generation.operator_id == ^operator_id and is_nil(generation.fenced_at) and
+              is_nil(generation.retired_at),
+          order_by: [desc: generation.number],
+          limit: 1
+      )
+
+    revision =
+      generation && generation.fleet_strategy_revision_id &&
+        Repo.get(Revision, generation.fleet_strategy_revision_id)
+
+    objective_index =
+      revision &&
+        revision.document
+        |> Map.get("objectives", [])
+        |> Enum.find_index(fn objective ->
+          objective["kind"] == "continuous" and objective["objective"] == "Grow credits"
+        end)
+
+    credits = get_in(evidence.facts, ["response", "credits"])
+
+    if generation && generation.starting_credits && objective_index && is_integer(credits) &&
+         evidence.agent_id == generation.agent_id && Evidence.valid_observation?(evidence) &&
+         DateTime.compare(evidence.observed_at, generation.inserted_at) != :lt &&
+         DateTime.compare(evidence.observed_at, DateTime.utc_now()) != :gt &&
+         DateTime.diff(DateTime.utc_now(), evidence.observed_at, :second) <= 300 do
+      {count, _} =
+        Repo.update_all(
+          from(candidate in Generation,
+            where:
+              candidate.id == ^generation.id and candidate.operator_id == ^operator_id and
+                is_nil(candidate.fenced_at) and is_nil(candidate.retired_at)
+          ),
+          set: [
+            last_observed_credits: credits,
+            last_observed_at: evidence.observed_at,
+            last_observed_evidence_id: evidence.id,
+            updated_at: DateTime.truncate(DateTime.utc_now(), :second)
+          ]
+        )
+
+      if count == 1, do: :ok
+    else
+      :ok
+    end
+  end
+
+  def observe_observation(_agent, _evidence), do: :ok
+
   @doc false
   def activate_strategy(
-        %Scope{operator: %Operator{id: operator_id}},
+        %Scope{operator: %Operator{id: operator_id}} = scope,
         %Revision{id: revision_id} = revision
       ) do
     now = DateTime.utc_now()
@@ -154,6 +383,23 @@ defmodule SpaceTraders.FleetGeneration do
     |> select([generation], generation.agent_id)
     |> Repo.all()
     |> Enum.each(&request_intelligence/1)
+
+    active_generation =
+      Repo.one(
+        from generation in Generation,
+          where:
+            generation.operator_id == ^operator_id and is_nil(generation.fenced_at) and
+              is_nil(generation.retired_at),
+          order_by: [desc: generation.number],
+          limit: 1
+      )
+
+    :ok =
+      OperatorConditions.resolve_objective_conditions(
+        scope,
+        active_generation && active_generation.id,
+        revision_id
+      )
 
     :ok
   end
@@ -285,7 +531,8 @@ defmodule SpaceTraders.FleetGeneration do
                      agent,
                      predecessor,
                      replacement_symbols,
-                     faction
+                     faction,
+                     game_agent.credits
                    )
 
                  Enum.each(
@@ -304,7 +551,47 @@ defmodule SpaceTraders.FleetGeneration do
       Enum.each(ship_symbols, &ShipServer.stop/1)
       if generation.fleet_strategy_revision_id, do: request_intelligence(agent.id)
 
+      scope = Scope.for_operator(operator)
+
+      :ok =
+        OperatorConditions.resolve_objective_conditions(
+          scope,
+          generation.id,
+          generation.fleet_strategy_revision_id
+        )
+
       {:ok, %{agent: %{agent | agent_token: nil}, retired_symbols: retired_symbols}}
+    end
+  end
+
+  defp objective_evidence_supports?(
+         revision,
+         index,
+         generation,
+         evidence,
+         facts
+       ) do
+    objective = revision.document |> Map.get("objectives", []) |> Enum.at(index)
+
+    valid_current_evidence =
+      Evidence.valid_observation?(evidence) and evidence.agent_id == generation.agent_id and
+        DateTime.compare(evidence.observed_at, generation.inserted_at) != :lt and
+        DateTime.compare(evidence.observed_at, DateTime.utc_now()) != :gt and
+        DateTime.diff(DateTime.utc_now(), evidence.observed_at, :second) <= 300
+
+    cond do
+      not valid_current_evidence ->
+        false
+
+      objective["objective"] != "Grow credits" ->
+        true
+
+      true ->
+        response_credits = get_in(evidence.facts, ["response", "credits"])
+
+        is_integer(generation.starting_credits) and is_integer(response_credits) and
+          is_integer(facts["change"]) and
+          response_credits - generation.starting_credits == facts["change"]
     end
   end
 
@@ -372,7 +659,14 @@ defmodule SpaceTraders.FleetGeneration do
     end)
   end
 
-  defp establish_generation!(operator, agent, predecessor, replacement_symbols, faction) do
+  defp establish_generation!(
+         operator,
+         agent,
+         predecessor,
+         replacement_symbols,
+         faction,
+         starting_credits \\ nil
+       ) do
     revision = active_revision(operator.id)
     number = next_generation_number(operator.id)
     now = DateTime.utc_now()
@@ -390,6 +684,7 @@ defmodule SpaceTraders.FleetGeneration do
       faction: faction,
       replacement_symbols: %{"symbols" => replacement_symbols},
       objective_progress: objective_progress,
+      starting_credits: starting_credits,
       strategy_capable_at: if(revision, do: now)
     })
     |> Repo.insert!()

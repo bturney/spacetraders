@@ -572,6 +572,8 @@ defmodule SpaceTraders.Evidence do
             observed_at: observation.observed_at
           })
 
+        _ = FleetGeneration.observe_observation(agent, persisted)
+
         ids = Enum.map(demands, & &1.id)
 
         if ids != [] do
@@ -658,6 +660,16 @@ defmodule SpaceTraders.Evidence do
   end
 
   def valid_observation?(%AuthoritativeObservation{} = observation) do
+    operation = OperationInventory.fetch!(observation.operation_id)
+
+    operation.classification == :read and observation.dependency_keys != [] and
+      is_map(observation.facts) and map_size(observation.facts) > 0 and
+      observation.response_fingerprint == fingerprint(observation.facts)
+  rescue
+    KeyError -> false
+  end
+
+  def valid_observation?(%Observation{} = observation) do
     operation = OperationInventory.fetch!(observation.operation_id)
 
     operation.classification == :read and observation.dependency_keys != [] and

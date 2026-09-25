@@ -10,6 +10,7 @@ defmodule SpaceTraders.FleetAllocation do
   alias SpaceTraders.Agent.Scope
   alias SpaceTraders.Fleet.{Intent, Ship}
   alias SpaceTraders.FleetAllocation.{Commitment, Portfolio, StrategyDecisionEpisode}
+  alias SpaceTraders.FleetGeneration
   alias SpaceTraders.FleetGeneration.Generation
   alias SpaceTraders.FleetPlanning.CandidateContribution
   alias SpaceTraders.FleetStrategy
@@ -86,7 +87,7 @@ defmodule SpaceTraders.FleetAllocation do
 
   @doc "Publishes a selected portfolio and its causal evidence against one source version."
   def publish_portfolio(
-        %Scope{operator: %{id: operator_id}},
+        %Scope{operator: %{id: operator_id}} = scope,
         generation_id,
         %{
           revision_id: revision_id,
@@ -98,7 +99,7 @@ defmodule SpaceTraders.FleetAllocation do
           evidence_references: evidence_references,
           expectations: expectations,
           calibration_version: calibration_version
-        }
+        } = decision
       )
       when is_integer(generation_id) and is_integer(revision_id) and is_list(commitments) and
              is_list(rejected) and is_list(evidence_references) and is_map(expectations) and
@@ -118,16 +119,27 @@ defmodule SpaceTraders.FleetAllocation do
       end
 
       Outbox.publish(notification, fn ->
-        publish_selected_portfolio(
-          operator_id,
-          generation_id,
-          revision_id,
-          selection,
-          evidence_references,
-          expectations,
-          calibration_version,
-          source_version
-        )
+        portfolio =
+          publish_selected_portfolio(
+            operator_id,
+            generation_id,
+            revision_id,
+            selection,
+            evidence_references,
+            expectations,
+            calibration_version,
+            source_version
+          )
+
+        :ok =
+          FleetGeneration.record_objective_evaluations(
+            scope,
+            Repo.get!(Revision, revision_id),
+            [decision],
+            notify?: false
+          )
+
+        portfolio
       end)
     else
       {:error, :invalid_publication}
