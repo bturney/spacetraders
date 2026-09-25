@@ -3541,45 +3541,81 @@ defmodule SpaceTraders.Fleet.Intents do
     end
   end
 
-  defp refuel_for_navigate(agent, intent, live_ship) do
+  defp recover_insufficient_fuel(agent, intent, live_ship, reason) do
     with {:ok, intent} <-
-           claim_intent_action(agent, intent, %{
-             "kind" => "refuel",
-             "waypoint" => live_ship.nav.waypoint_symbol,
-             "fuel_before" => live_ship.fuel.current,
-             "expected" => %{"fuel_full" => true}
-           }) do
-      case Agent.handle_game_result(
-             agent,
-             SpaceTraders.API.refuel_ship(AgentTokenReference.new(agent), live_ship.symbol)
+           transition_intent(intent,
+             in_flight_action: nil,
+             last_action_result: %{
+               "kind" => "navigate",
+               "status" => "rejected",
+               "reason" => reason.message
+             }
+           ),
+         {:ok, intent} <-
+           transition_intent(intent,
+             parameters: Map.put(intent.parameters, "refuel", "to_capacity")
            ) do
-        {:ok, %{fuel: fuel} = result} when fuel.current >= fuel.capacity ->
-          invalidate_refuel_market(agent, result)
-
-          case transition_intent(intent,
-                 in_flight_action: nil,
-                 last_action_result: %{"kind" => "refuel", "fuel" => fuel.current}
-               ) do
-            {:ok, intent} ->
-              live_ship =
-                live_ship
-                |> Map.put(:fuel, fuel)
-                |> maybe_update_ship_cargo(result)
-
-              advance_intents(agent, intent, live_ship)
-
-            :intent_no_longer_owned ->
-              :ok
-          end
-
-        {:ok, %{fuel: fuel}} ->
-          clear_claim_and_block(intent, {:refuel_incomplete, fuel.current, fuel.capacity})
-
-        {:error, reason} ->
-          block_intents(intent, reason)
+      case live_ship.nav.status do
+        "DOCKED" -> refuel_for_navigate(agent, intent, live_ship)
+        "IN_ORBIT" -> dock_for_navigate(agent, intent, live_ship)
+        _ -> block_intents(intent, reason)
       end
     else
-      {:error, _reason} -> :ok
+      _ -> block_intents(intent, reason)
+    end
+  end
+
+  defp market_sells_fuel?(%{trade_goods: goods}) when is_list(goods),
+    do: Enum.any?(goods, &(&1.symbol == "FUEL"))
+
+  defp market_sells_fuel?(_market), do: false
+
+  defp refuel_for_navigate(agent, intent, live_ship) do
+    with {:ok, market} <-
+           Fleet.market_for_ship(agent, live_ship, live_ship.nav.waypoint_symbol),
+         true <- market_sells_fuel?(market) do
+      with {:ok, intent} <-
+             claim_intent_action(agent, intent, %{
+               "kind" => "refuel",
+               "waypoint" => live_ship.nav.waypoint_symbol,
+               "fuel_before" => live_ship.fuel.current,
+               "expected" => %{"fuel_full" => true}
+             }) do
+        case Agent.handle_game_result(
+               agent,
+               SpaceTraders.API.refuel_ship(AgentTokenReference.new(agent), live_ship.symbol)
+             ) do
+          {:ok, %{fuel: fuel} = result} when fuel.current >= fuel.capacity ->
+            invalidate_refuel_market(agent, result)
+
+            case transition_intent(intent,
+                   in_flight_action: nil,
+                   last_action_result: %{"kind" => "refuel", "fuel" => fuel.current}
+                 ) do
+              {:ok, intent} ->
+                live_ship =
+                  live_ship
+                  |> Map.put(:fuel, fuel)
+                  |> maybe_update_ship_cargo(result)
+
+                advance_intents(agent, intent, live_ship)
+
+              :intent_no_longer_owned ->
+                :ok
+            end
+
+          {:ok, %{fuel: fuel}} ->
+            clear_claim_and_block(intent, {:refuel_incomplete, fuel.current, fuel.capacity})
+
+          {:error, reason} ->
+            block_intents(intent, reason)
+        end
+      else
+        {:error, _reason} -> :ok
+      end
+    else
+      {:error, reason} -> block_intents(intent, reason)
+      false -> block_intents(intent, :fuel_unavailable)
     end
   end
 
@@ -3804,6 +3840,9 @@ defmodule SpaceTraders.Fleet.Intents do
            ) do
         {:ok, result} ->
           accept_navigate_result(agent, intent, live_ship, destination, result)
+
+        {:error, %SpaceTraders.API.GameplayError{type: :insufficient_fuel} = reason} ->
+          recover_insufficient_fuel(agent, intent, live_ship, reason)
 
         {:error, reason} ->
           block_intents(intent, reason)
