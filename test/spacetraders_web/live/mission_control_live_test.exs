@@ -223,6 +223,7 @@ defmodule SpaceTradersWeb.MissionControlLiveTest do
         symbol: agent.symbol,
         faction: agent.faction,
         replacement_symbols: %{"symbols" => [agent.symbol]},
+        starting_credits: 175_000,
         strategy_capable_at: DateTime.utc_now()
       })
 
@@ -235,7 +236,7 @@ defmodule SpaceTradersWeb.MissionControlLiveTest do
 
     assert {:ok, _} =
              SpaceTraders.FleetGeneration.record_objective_progress(scope, generation.id, 0, %{
-               "change" => -10,
+               "change" => 0,
                "elapsed_seconds" => 60,
                "horizon_seconds" => 3600,
                "feasible?" => false,
@@ -255,7 +256,7 @@ defmodule SpaceTradersWeb.MissionControlLiveTest do
                "elapsed_seconds" => 60,
                "horizon_seconds" => 3600,
                "feasible?" => true,
-               "evidence_id" => evidence.id
+               "evidence_id" => objective_evidence(agent, 175_020).id
              })
 
     {:ok, view, _html} = live(conn, ~p"/mission-control")
@@ -378,6 +379,7 @@ defmodule SpaceTradersWeb.MissionControlLiveTest do
         symbol: first.symbol,
         faction: first.faction,
         replacement_symbols: %{"symbols" => [first.symbol]},
+        starting_credits: 175_000,
         inserted_at: DateTime.add(now, -3600)
       })
 
@@ -387,7 +389,7 @@ defmodule SpaceTradersWeb.MissionControlLiveTest do
                "elapsed_seconds" => 5,
                "feasible?" => false,
                "horizon_seconds" => 10,
-               "evidence_id" => objective_evidence(first).id
+               "evidence_id" => objective_evidence(first, 175_010).id
              })
 
     _second_revision =
@@ -453,12 +455,12 @@ defmodule SpaceTradersWeb.MissionControlLiveTest do
     assert has_element?(view, "#generation-comparison", "Generation 2")
   end
 
-  defp objective_evidence(agent) do
+  defp objective_evidence(agent, credits \\ 175_000) do
     observation =
       SpaceTraders.Evidence.authoritative_observation(
         "get-my-agent",
         ["agent:#{agent.id}"],
-        %{"response" => %{"credits" => 175_000}}
+        %{"response" => %{"credits" => credits}}
       )
 
     %SpaceTraders.Evidence.Observation{

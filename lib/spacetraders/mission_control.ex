@@ -359,7 +359,7 @@ defmodule SpaceTraders.MissionControl do
       facts = generation.objective_progress[Integer.to_string(index)]
 
       evaluation =
-        if is_map(facts),
+        if is_map(facts) and objective_evidence_valid?(generation, facts),
           do: FleetStrategy.evaluate_persisted_objective(revision, index, facts),
           else: {:error, :unknown}
 
@@ -615,6 +615,18 @@ defmodule SpaceTraders.MissionControl do
     end)
   end
 
+  defp objective_evidence_valid?(generation, facts) do
+    evidence = facts["evidence_id"] && Repo.get(Observation, facts["evidence_id"])
+
+    Evidence.valid_observation?(evidence) and
+      DateTime.compare(evidence.observed_at, generation.inserted_at) != :lt and
+      DateTime.compare(evidence.observed_at, DateTime.utc_now()) != :gt and
+      (is_nil(generation.retired_at) or
+         DateTime.compare(evidence.observed_at, generation.retired_at) != :gt) and
+      (is_nil(generation.retired_at) or is_nil(evidence.agent_id) or
+         evidence.agent_id == generation.agent_id)
+  end
+
   defp observed_objective(
          %{"kind" => "continuous", "objective" => "Grow credits"},
          %{
@@ -631,7 +643,8 @@ defmodule SpaceTraders.MissionControl do
     evidence = evidence_id && Repo.get(Observation, evidence_id)
     elapsed = DateTime.diff(observed_at, started_at, :second)
 
-    if Evidence.valid_observation?(evidence) and evidence.agent_id == agent_id and elapsed > 0 do
+    if Evidence.valid_observation?(evidence) and evidence.agent_id == agent_id and elapsed > 0 and
+         DateTime.diff(DateTime.utc_now(), observed_at, :second) <= 300 do
       {:observed, %{change: current - start, rate: (current - start) / elapsed * 3600}}
     else
       {:error, :unknown}

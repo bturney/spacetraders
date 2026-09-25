@@ -52,7 +52,8 @@ defmodule SpaceTraders.FleetGenerationTest do
         number: 1,
         symbol: agent.symbol,
         faction: agent.faction,
-        replacement_symbols: %{"symbols" => [agent.symbol]}
+        replacement_symbols: %{"symbols" => [agent.symbol]},
+        starting_credits: 175_000
       })
 
     assert {:error, :invalid_objective_progress} =
@@ -63,7 +64,7 @@ defmodule SpaceTraders.FleetGenerationTest do
     evidence = objective_evidence(agent)
 
     facts = %{
-      "change" => -10,
+      "change" => 0,
       "elapsed_seconds" => 60,
       "horizon_seconds" => 3600,
       "feasible?" => false,
@@ -519,12 +520,12 @@ defmodule SpaceTraders.FleetGenerationTest do
     }
   end
 
-  defp objective_evidence(agent) do
+  defp objective_evidence(agent, credits \\ 175_000) do
     observation =
       SpaceTraders.Evidence.authoritative_observation(
         "get-my-agent",
         ["agent:#{agent.id}"],
-        %{"response" => %{"credits" => 175_000}}
+        %{"response" => %{"credits" => credits}}
       )
 
     %Observation{

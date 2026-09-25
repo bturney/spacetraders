@@ -71,10 +71,18 @@ defmodule SpaceTraders.OperatorConditions do
   end
 
   @doc "Supersedes conditions from the previous Fleet Generation or Strategy Revision."
-  def resolve_objective_conditions(%Scope{} = scope) do
+  def resolve_objective_conditions(%Scope{} = scope, generation_id \\ nil, revision_id \\ nil) do
+    current_prefix =
+      if generation_id && revision_id,
+        do: "objective-infeasible:#{generation_id}:#{revision_id}:",
+        else: nil
+
     scope
     |> unresolved()
-    |> Enum.filter(&String.starts_with?(&1.key, "objective-infeasible:"))
+    |> Enum.filter(fn condition ->
+      String.starts_with?(condition.key, "objective-infeasible:") and
+        (is_nil(current_prefix) or not String.starts_with?(condition.key, current_prefix))
+    end)
     |> Enum.each(&resolve(scope, &1.key))
 
     :ok
