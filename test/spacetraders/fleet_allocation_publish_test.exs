@@ -7,6 +7,7 @@ defmodule SpaceTraders.FleetAllocationPublishTest do
   alias SpaceTraders.Fleet
   alias SpaceTraders.FleetAllocation
   alias SpaceTraders.FleetAllocation.{Commitment, Portfolio, StrategyDecisionEpisode}
+  alias SpaceTraders.Fleet.Intent
   alias SpaceTraders.FleetAllocation.PortfolioCandidate
   alias SpaceTraders.FleetGeneration.Generation
   alias SpaceTraders.FleetStrategy.{Revision, Strategy}
@@ -77,6 +78,39 @@ defmodule SpaceTraders.FleetAllocationPublishTest do
 
     Outbox.dispatch_pending()
     refute_receive {:outbox, ^notification_id, "fleet_commitment_portfolio_published", _payload}
+  end
+
+  test "boot recovery leaves upstream sales for authoritative market-effect reconciliation" do
+    %{agent: agent, generation: generation, revision: revision, scope: scope} =
+      allocation_fixture()
+
+    assert {:ok, portfolio} =
+             FleetAllocation.publish_portfolio(
+               scope,
+               generation.id,
+               selection(revision),
+               decision()
+             )
+
+    ship = Repo.get_by!(SpaceTraders.Fleet.Ship, agent_id: agent.id, symbol: "SHIP-1")
+    [commitment] = portfolio.commitments
+
+    Repo.insert!(%Intent{
+      ship_id: ship.id,
+      caller: "commitment",
+      fleet_commitment_id: commitment.id,
+      fleet_commitment_portfolio_id: portfolio.id,
+      fleet_commitment_portfolio_version: portfolio.version,
+      type: "sell",
+      status: "completed",
+      target_waypoint: "X1-A3",
+      parameters: %{"market_trade" => %{"construction_upstream" => %{"part_symbol" => "IRON"}}}
+    })
+
+    assert :ok = FleetAllocation.reconcile_completed_outcomes()
+
+    assert Repo.get!(StrategyDecisionEpisode, portfolio.strategy_decision_episode_id).classification ==
+             :still_evaluating
   end
 
   test "rejects a stale source version without partially replacing the current portfolio" do

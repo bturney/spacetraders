@@ -18,6 +18,7 @@ defmodule SpaceTraders.FleetExecution do
   alias SpaceTraders.Agent.Scope
   alias SpaceTraders.Fleet
   alias SpaceTraders.FleetContracts
+  alias SpaceTraders.FleetConstruction
   alias SpaceTraders.Fleet.Intents
   alias SpaceTraders.FleetAllocation
   alias SpaceTraders.FleetAllocation.{Commitment, Portfolio}
@@ -260,6 +261,67 @@ defmodule SpaceTraders.FleetExecution do
         type: "buy",
         status: "completed",
         last_action_result: %{"units" => 0},
+        parameters: %{"market_trade" => %{"construction" => _}}
+      } ->
+        reconcile_construction(agent, portfolio)
+
+      %{
+        type: "buy",
+        status: "completed",
+        last_action_result: %{"units" => 0},
+        parameters: %{"market_trade" => %{"construction_upstream" => _}}
+      } ->
+        {:error, :upstream_purchase_unavailable}
+
+      %{
+        type: "sell",
+        status: "completed",
+        parameters: %{"market_trade" => %{"construction_upstream" => _}}
+      } ->
+        with {:ok, _episode} <-
+               FleetConstruction.reconcile_upstream_sale(agent, portfolio, intent) do
+          reconcile_construction(agent, portfolio)
+        end
+
+      %{
+        type: "buy",
+        status: "completed",
+        last_action_result: %{"units" => units},
+        parameters: %{"market_trade" => %{"construction" => project} = candidate}
+      }
+      when is_integer(units) and units > 0 ->
+        with {:ok, ship_symbol} <- claimed_ship_symbol(commitment) do
+          case Intents.request_commitment_construction_delivery(
+                 agent,
+                 commitment,
+                 portfolio,
+                 ship_symbol,
+                 %{
+                   system: project["system"],
+                   waypoint: project["waypoint"],
+                   trade_symbol: candidate["trade_symbol"],
+                   units: units
+                 }
+               ) do
+            {:ok, %{status: "completed"} = delivered} ->
+              continue_after_intent(agent, commitment, portfolio, delivered)
+
+            other ->
+              other
+          end
+        end
+
+      %{
+        type: "deliver",
+        status: "completed",
+        parameters: %{"recipient" => %{"type" => "construction"}}
+      } ->
+        reconcile_construction(agent, portfolio)
+
+      %{
+        type: "buy",
+        status: "completed",
+        last_action_result: %{"units" => 0},
         parameters: %{"market_trade" => %{"contract_id" => _}}
       } ->
         with %Revision{} = revision <- Repo.get(Revision, portfolio.fleet_strategy_revision_id),
@@ -298,6 +360,9 @@ defmodule SpaceTraders.FleetExecution do
       %{type: "buy", status: "completed", parameters: %{"market_trade" => %{"contract_id" => _}}} ->
         {:error, :invalid_purchase_evidence}
 
+      %{type: "buy", status: "completed", parameters: %{"market_trade" => %{"construction" => _}}} ->
+        {:error, :invalid_purchase_evidence}
+
       %{
         type: "deliver",
         status: "completed",
@@ -319,8 +384,12 @@ defmodule SpaceTraders.FleetExecution do
                  nil
                ) do
             {:ok, %{status: "completed"} = sell} = result ->
-              record_realized_economics(portfolio, intent, sell)
-              result
+              if Map.has_key?(candidate, "construction_upstream") do
+                continue_after_intent(agent, commitment, portfolio, sell)
+              else
+                record_realized_economics(portfolio, intent, sell)
+                result
+              end
 
             result ->
               result
@@ -329,6 +398,13 @@ defmodule SpaceTraders.FleetExecution do
 
       _ ->
         :ok
+    end
+  end
+
+  defp reconcile_construction(agent, portfolio) do
+    with %Revision{} = revision <- Repo.get(Revision, portfolio.fleet_strategy_revision_id),
+         %{} = operator <- Repo.get(SpaceTraders.Agent.Operator, agent.operator_id) do
+      FleetConstruction.reconcile(Scope.for_operator(operator), agent, revision)
     end
   end
 
@@ -520,6 +596,20 @@ defmodule SpaceTraders.FleetExecution do
   end
 
   defp reconcile_market_replan(scope, agent, revision, current, comparison, _capacity) do
+    if current &&
+         Enum.any?(current.commitments, fn commitment ->
+           Enum.any?(
+             commitment.dependencies,
+             &String.starts_with?(&1["subject"] || "", "construction:")
+           )
+         end) do
+      {:ok, %{action: :retained, portfolio: current, comparison: comparison}}
+    else
+      do_reconcile_market_replan(scope, agent, revision, current, comparison)
+    end
+  end
+
+  defp do_reconcile_market_replan(scope, agent, revision, current, comparison) do
     case eligible_market_commitment(comparison, agent, revision, availability(scope, agent)) do
       %{candidate_id: candidate_id} when current != nil ->
         if Enum.any?(current.commitments, &(&1.candidate_id == candidate_id)) do

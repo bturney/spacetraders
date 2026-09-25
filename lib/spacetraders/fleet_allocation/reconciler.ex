@@ -10,6 +10,7 @@ defmodule SpaceTraders.FleetAllocation.Reconciler do
   alias SpaceTraders.Agent.Agent, as: AgentRecord
   alias SpaceTraders.FleetExecution
   alias SpaceTraders.FleetContracts
+  alias SpaceTraders.FleetConstruction
   alias SpaceTraders.FleetIntelligence
   alias SpaceTraders.FleetResources
   alias SpaceTraders.FleetGeneration.Generation
@@ -49,6 +50,7 @@ defmodule SpaceTraders.FleetAllocation.Reconciler do
 
       FleetResources.reconcile(scope, agent, revision, system_symbol)
       FleetContracts.reconcile(scope, agent, revision)
+      FleetConstruction.reconcile(scope, agent, revision)
     end)
 
     {:noreply, state}
@@ -58,6 +60,7 @@ defmodule SpaceTraders.FleetAllocation.Reconciler do
     with_context(agent_id, fn scope, agent, revision ->
       FleetResources.reconcile(scope, agent, revision, system_symbol)
       FleetContracts.reconcile(scope, agent, revision)
+      FleetConstruction.reconcile(scope, agent, revision)
     end)
 
     {:noreply, state}
@@ -92,6 +95,7 @@ defmodule SpaceTraders.FleetAllocation.Reconciler do
     |> Enum.each(fn agent_id ->
       with_context(agent_id, fn scope, agent, revision ->
         FleetContracts.reconcile(scope, agent, revision)
+        FleetConstruction.reconcile(scope, agent, revision)
       end)
     end)
 
@@ -112,6 +116,7 @@ defmodule SpaceTraders.FleetAllocation.Reconciler do
       )
 
       FleetContracts.reconcile(scope, agent, revision)
+      FleetConstruction.reconcile(scope, agent, revision)
     end)
   end
 

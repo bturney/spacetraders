@@ -221,6 +221,11 @@ defmodule SpaceTraders.FleetAllocation do
       [_episode, _portfolio, _commitment, intent],
       intent.type in ["sell", "acquire_resources"] and intent.status == "completed"
     )
+    |> where(
+      [_episode, _portfolio, _commitment, intent],
+      intent.type != "sell" or
+        is_nil(fragment("? #> '{market_trade,construction_upstream}'", intent.parameters))
+    )
     |> select([episode], episode)
     |> distinct(true)
     |> Repo.all()
@@ -869,17 +874,26 @@ defmodule SpaceTraders.FleetAllocation do
        reservations: reservations,
        pledges: [],
        pledge_amount:
-         if(contribution.kind == :contract_delivery,
-           do: contribution.contract.units_remaining,
-           else: expected_value
-         ),
+         case contribution.kind do
+           :contract_delivery -> contribution.contract.units_remaining
+           :construction_delivery -> contribution.construction.batch_units
+           _ -> expected_value
+         end,
        pledge_outcome:
-         if(contribution.kind == :contract_delivery,
-           do:
+         case contribution.kind do
+           :contract_delivery ->
              {:contract, contribution.contract.id, contribution.destination_waypoint,
-              contribution.trade_symbol},
-           else: {:strategic_objective, contribution.objective_index}
-         ),
+              contribution.trade_symbol}
+
+           :construction_delivery ->
+             {:construction, contribution.destination_waypoint, contribution.trade_symbol}
+
+           :construction_upstream ->
+             {:strategic_objective, contribution.objective_index}
+
+           _ ->
+             {:strategic_objective, contribution.objective_index}
+         end,
        dependencies: contribution.dependencies,
        validity: contribution.validity,
        expected_value: expected_value,

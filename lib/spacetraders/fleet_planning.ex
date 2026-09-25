@@ -36,7 +36,7 @@ defmodule SpaceTraders.FleetPlanning do
       :validity,
       :alternatives
     ]
-    defstruct @enforce_keys ++ [resource: nil, contract: nil]
+    defstruct @enforce_keys ++ [resource: nil, contract: nil, construction: nil]
 
     @type t :: %__MODULE__{}
   end
@@ -307,6 +307,350 @@ defmodule SpaceTraders.FleetPlanning do
   end
 
   def plan_contracts(_revision, _index, _snapshot), do: {:error, :invalid_contract_planning_input}
+
+  @doc "Proposes Construction supply from a dated authoritative project read and fresh sourcing Listings."
+  def plan_construction(
+        %Revision{} = revision,
+        index,
+        %{
+          as_of: %DateTime{} = as_of,
+          constructions: constructions,
+          ships: ships,
+          listings: listings,
+          credits: credits
+        } = snapshot
+      )
+      when is_integer(index) and index >= 0 and is_list(constructions) and is_list(ships) and
+             is_list(listings) and is_integer(credits) and credits >= 0 do
+    with {:ok, objective} <- objective_at(revision, index) do
+      {candidates, limitations} =
+        if construction_objective?(objective) do
+          constructions
+          |> Enum.sort_by(& &1.construction.symbol)
+          |> Enum.reduce({[], []}, fn observation, {candidates, limitations} ->
+            case construction_evidence(observation, as_of) do
+              {:ok, construction, valid_until} ->
+                proposed =
+                  for %{required: required, fulfilled: fulfilled, trade_symbol: symbol} <-
+                        construction.materials || [],
+                      is_binary(symbol) and is_integer(required) and is_integer(fulfilled),
+                      remaining = max(required - fulfilled, 0),
+                      remaining > 0,
+                      ship <- ships,
+                      %{symbol: ship_symbol, cargo: %{capacity: capacity}} <- [ship],
+                      is_integer(capacity) and capacity > 0,
+                      listing <-
+                        listings ++ held_construction_cargo(ship, symbol, construction, as_of),
+                      Map.get(listing, :ship_symbol, ship_symbol) == ship_symbol,
+                      listing.trade_symbol == symbol,
+                      is_binary(listing.waypoint) and is_binary(listing.evidence_id),
+                      is_integer(listing.purchase_price) and listing.purchase_price >= 0,
+                      is_integer(listing.trade_volume) and listing.trade_volume > 0,
+                      %DateTime{} = observed_at <- [listing.observed_at],
+                      DateTime.diff(as_of, observed_at, :second) in 0..@market_evidence_freshness_seconds,
+                      batch = min(remaining, min(capacity, listing.trade_volume)),
+                      cost = batch * listing.purchase_price,
+                      cost + 750 <= credits do
+                    listing_until =
+                      DateTime.add(observed_at, @market_evidence_freshness_seconds, :second)
+
+                    expires_at = Enum.min_by([valid_until, listing_until], &DateTime.to_unix/1)
+
+                    %CandidateContribution{
+                      id:
+                        Evidence.fingerprint(
+                          {revision.id, index, construction.symbol, symbol, ship_symbol, required,
+                           fulfilled, listing.waypoint, listing.purchase_price,
+                           listing.trade_volume, Map.get(listing, :source, :market)}
+                        ),
+                      strategy_revision_id: revision.id,
+                      objective_index: index,
+                      objective: objective,
+                      kind: :construction_delivery,
+                      trade_symbol: symbol,
+                      source_waypoint: listing.waypoint,
+                      destination_waypoint: construction.symbol,
+                      expected_outcomes: %{
+                        decision_value: 1,
+                        units_remaining: remaining,
+                        batch_units: batch
+                      },
+                      uncertainty: %{shared_progress: :may_change},
+                      required_roles: [%{role: :construction_courier, count: 1}],
+                      required_capabilities: [
+                        %{capability: :cargo_transport, minimum_capacity: batch},
+                        %{capability: :resource_ship, value: ship_symbol}
+                      ],
+                      required_resources: %{ship_count: 1, credits: cost + 750},
+                      dependencies: [
+                        %{
+                          subject:
+                            "construction:#{observation.system_symbol}:#{construction.symbol}",
+                          evidence_id: observation.evidence_id,
+                          valid_until: valid_until
+                        },
+                        %{
+                          subject: "market:#{listing.waypoint}",
+                          evidence_id: listing.evidence_id,
+                          valid_until: listing_until
+                        }
+                      ],
+                      validity: %{
+                        as_of: as_of,
+                        expires_at: expires_at,
+                        conditions: [
+                          %{fact: :remaining_material, trade_symbol: symbol, minimum: batch}
+                        ]
+                      },
+                      alternatives: [],
+                      construction: %{
+                        system: observation.system_symbol,
+                        waypoint: construction.symbol,
+                        units_remaining: remaining,
+                        batch_units: batch,
+                        max_price: listing.purchase_price,
+                        source: Map.get(listing, :source, :market)
+                      }
+                    }
+                  end
+
+                upstream =
+                  upstream_contributions(
+                    revision,
+                    index,
+                    objective,
+                    observation,
+                    as_of,
+                    valid_until,
+                    ships,
+                    listings,
+                    credits,
+                    Map.get(snapshot, :upstream_opportunities, [])
+                  )
+
+                {candidates ++ proposed ++ upstream, limitations}
+
+              {:error, reason} ->
+                {candidates,
+                 limitations ++ [%{subject: observation.construction.symbol, reason: reason}]}
+            end
+          end)
+        else
+          {[], [%{subject: :construction_planning, reason: :unsupported_construction_objective}]}
+        end
+
+      {:ok,
+       result(revision, index, %{as_of: as_of},
+         candidate_contributions:
+           Enum.sort_by(
+             candidates,
+             &{if(&1.construction.source == :cargo, do: 0, else: 1), &1.id}
+           ),
+         limitations: limitations
+       )}
+    end
+  end
+
+  def plan_construction(_revision, _index, _snapshot),
+    do: {:error, :invalid_construction_planning_input}
+
+  defp construction_evidence(%{construction: %{is_complete: true}}, _as_of),
+    do: {:error, :construction_complete}
+
+  defp construction_evidence(
+         %{
+           construction: %{is_complete: false, materials: materials} = construction,
+           observed_at: %DateTime{} = observed_at,
+           evidence_id: id,
+           system_symbol: system
+         },
+         as_of
+       )
+       when is_list(materials) and is_binary(id) and id != "" and is_binary(system) do
+    if DateTime.diff(as_of, observed_at, :second) in 0..@market_evidence_freshness_seconds,
+      do:
+        {:ok, construction,
+         DateTime.add(observed_at, @market_evidence_freshness_seconds, :second)},
+      else: {:error, :stale_construction_evidence}
+  end
+
+  defp construction_evidence(_, _), do: {:error, :construction_evidence_unavailable}
+
+  defp held_construction_cargo(
+         %{symbol: ship_symbol, cargo: %{inventory: inventory}},
+         symbol,
+         construction,
+         as_of
+       )
+       when is_list(inventory) do
+    case Enum.find(inventory, &(&1.symbol == symbol)) do
+      %{units: units} when is_integer(units) and units > 0 ->
+        [
+          %{
+            waypoint: construction.symbol,
+            trade_symbol: symbol,
+            purchase_price: 0,
+            trade_volume: units,
+            observed_at: as_of,
+            ship_symbol: ship_symbol,
+            source: :cargo,
+            evidence_id: Evidence.fingerprint({ship_symbol, symbol, units})
+          }
+        ]
+
+      _ ->
+        []
+    end
+  end
+
+  defp held_construction_cargo(_, _, _, _), do: []
+
+  # A recipe is not inferred from commodity names. The caller supplies an
+  # independently observed market-effect hypothesis, whose baseline Listings
+  # and Construction progress remain explicit validity conditions.
+  defp upstream_contributions(
+         revision,
+         index,
+         objective,
+         observation,
+         as_of,
+         construction_until,
+         ships,
+         listings,
+         credits,
+         opportunities
+       ) do
+    construction = observation.construction
+
+    for hypothesis <- opportunities,
+        %{
+          part_symbol: part,
+          raw_symbol: raw,
+          source_waypoint: source,
+          destination_waypoint: destination,
+          expected_part_units: units,
+          expected_supply: supply,
+          expected_purchase_price: price,
+          evidence_id: hypothesis_id,
+          observed_at: %DateTime{} = hypothesis_at
+        } <- [hypothesis],
+        is_binary(hypothesis_id) and hypothesis_id != "" and is_binary(part) and
+          is_binary(raw) and is_binary(source) and is_binary(destination) and
+          is_binary(supply) and is_integer(price) and price >= 0 and
+          is_integer(units) and units > 0,
+        DateTime.diff(as_of, hypothesis_at, :second) in 0..@market_evidence_freshness_seconds,
+        %{required: required, fulfilled: fulfilled} <-
+          Enum.filter(construction.materials || [], &(&1.trade_symbol == part)),
+        is_integer(required) and is_integer(fulfilled) and required > fulfilled,
+        part_listing <- listings,
+        part_listing.waypoint == destination and part_listing.trade_symbol == part,
+        is_binary(part_listing.evidence_id) and is_integer(part_listing.purchase_price) and
+          (part_listing.purchase_price > price or
+             (is_binary(Map.get(part_listing, :supply)) and
+                Map.get(part_listing, :supply) != supply)),
+        %DateTime{} = part_at <- [part_listing.observed_at],
+        DateTime.diff(as_of, part_at, :second) in 0..@market_evidence_freshness_seconds,
+        raw_listing <- listings,
+        raw_listing.waypoint == source and raw_listing.trade_symbol == raw,
+        is_binary(raw_listing.evidence_id) and is_integer(raw_listing.purchase_price) and
+          raw_listing.purchase_price >= 0 and is_integer(raw_listing.trade_volume) and
+          raw_listing.trade_volume > 0,
+        %DateTime{} = raw_at <- [raw_listing.observed_at],
+        DateTime.diff(as_of, raw_at, :second) in 0..@market_evidence_freshness_seconds,
+        ship <- ships,
+        %{symbol: ship_symbol, cargo: %{capacity: capacity}} <- [ship],
+        is_integer(capacity) and capacity > 0,
+        batch = min(units, min(raw_listing.trade_volume, capacity)),
+        cost = batch * raw_listing.purchase_price,
+        cost + 750 <= credits do
+      dependencies = [
+        %{
+          subject: "construction:#{observation.system_symbol}:#{construction.symbol}",
+          evidence_id: observation.evidence_id,
+          valid_until: construction_until
+        },
+        %{
+          subject: "market:#{source}",
+          evidence_id: raw_listing.evidence_id,
+          valid_until: DateTime.add(raw_at, @market_evidence_freshness_seconds, :second)
+        },
+        %{
+          subject: "market:#{destination}",
+          evidence_id: part_listing.evidence_id,
+          valid_until: DateTime.add(part_at, @market_evidence_freshness_seconds, :second)
+        },
+        %{
+          subject: "hypothesis:#{hypothesis_id}",
+          evidence_id: hypothesis_id,
+          valid_until: DateTime.add(hypothesis_at, @market_evidence_freshness_seconds, :second)
+        }
+      ]
+
+      expires_at = dependencies |> Enum.map(& &1.valid_until) |> Enum.min_by(&DateTime.to_unix/1)
+
+      %CandidateContribution{
+        id:
+          Evidence.fingerprint(
+            {revision.id, index, construction.symbol, part, required, fulfilled, hypothesis_id,
+             raw_listing.waypoint, raw_listing.purchase_price, part_listing.waypoint,
+             part_listing.purchase_price, Map.get(part_listing, :supply), ship_symbol}
+          ),
+        strategy_revision_id: revision.id,
+        objective_index: index,
+        objective: objective,
+        kind: :construction_upstream,
+        trade_symbol: raw,
+        source_waypoint: source,
+        destination_waypoint: destination,
+        expected_outcomes: %{
+          decision_value:
+            max(
+              (part_listing.purchase_price - price) * batch,
+              if(Map.get(part_listing, :supply) != supply, do: batch, else: 0)
+            ),
+          market_effect: %{
+            part_symbol: part,
+            supply: supply,
+            purchase_price: price,
+            expected_part_units: batch
+          }
+        },
+        uncertainty: %{market_effect: :hypothesis, realized_effect: :requires_fresh_listing},
+        required_roles: [%{role: :construction_supplier, count: 1}],
+        required_capabilities: [
+          %{capability: :cargo_transport, minimum_capacity: batch},
+          %{capability: :resource_ship, value: ship_symbol}
+        ],
+        required_resources: %{ship_count: 1, credits: cost + 750},
+        dependencies: dependencies,
+        validity: %{
+          as_of: as_of,
+          expires_at: expires_at,
+          conditions: [
+            %{fact: :construction_remaining, trade_symbol: part, minimum: 1},
+            %{fact: :part_purchase_price, operator: :greater_than, value: price}
+          ]
+        },
+        alternatives: [],
+        construction: %{
+          system: observation.system_symbol,
+          waypoint: construction.symbol,
+          part_symbol: part,
+          source: :upstream,
+          batch_units: batch,
+          max_price: raw_listing.purchase_price,
+          baseline_price: part_listing.purchase_price,
+          baseline_supply: Map.get(part_listing, :supply),
+          hypothesis: hypothesis
+        }
+      }
+    end
+  end
+
+  def construction_objective?(%{"objective" => description}) when is_binary(description),
+    do: String.match?(description, ~r/\b(construction|jump gate)\b/i)
+
+  def construction_objective?(_), do: false
 
   defp held_contract_cargo(
          %{symbol: ship_symbol, cargo: %{inventory: inventory}},
