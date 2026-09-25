@@ -17,6 +17,7 @@ defmodule SpaceTraders.FleetExecution do
   alias SpaceTraders.Agent.Agent, as: AgentRecord
   alias SpaceTraders.Agent.Scope
   alias SpaceTraders.Fleet
+  alias SpaceTraders.FleetContracts
   alias SpaceTraders.Fleet.Intents
   alias SpaceTraders.FleetAllocation
   alias SpaceTraders.FleetAllocation.{Commitment, Portfolio}
@@ -255,6 +256,58 @@ defmodule SpaceTraders.FleetExecution do
   @doc "Continues a commitment-owned round trip after one leg completes."
   def continue_after_intent(agent, commitment, %Portfolio{} = portfolio, intent) do
     case intent do
+      %{
+        type: "buy",
+        status: "completed",
+        last_action_result: %{"units" => 0},
+        parameters: %{"market_trade" => %{"contract_id" => _}}
+      } ->
+        with %Revision{} = revision <- Repo.get(Revision, portfolio.fleet_strategy_revision_id),
+             %{} = operator <- Repo.get(SpaceTraders.Agent.Operator, agent.operator_id) do
+          FleetContracts.reconcile(Scope.for_operator(operator), agent, revision)
+        end
+
+      %{
+        type: "buy",
+        status: "completed",
+        last_action_result: %{"units" => units},
+        parameters: %{"market_trade" => %{"contract_id" => contract_id} = candidate}
+      }
+      when is_integer(units) and units > 0 ->
+        with {:ok, ship_symbol} <- claimed_ship_symbol(commitment) do
+          case Intents.request_commitment_contract_delivery(
+                 agent,
+                 commitment,
+                 portfolio,
+                 ship_symbol,
+                 %{
+                   contract_id: contract_id,
+                   destination_waypoint: candidate["destination_waypoint"],
+                   trade_symbol: candidate["trade_symbol"],
+                   units: units
+                 }
+               ) do
+            {:ok, %{status: "completed"} = delivered} ->
+              continue_after_intent(agent, commitment, portfolio, delivered)
+
+            other ->
+              other
+          end
+        end
+
+      %{type: "buy", status: "completed", parameters: %{"market_trade" => %{"contract_id" => _}}} ->
+        {:error, :invalid_purchase_evidence}
+
+      %{
+        type: "deliver",
+        status: "completed",
+        parameters: %{"recipient" => %{"type" => "contract", "contract_id" => _contract_id}}
+      } ->
+        with %Revision{} = revision <- Repo.get(Revision, portfolio.fleet_strategy_revision_id),
+             %{} = operator <- Repo.get(SpaceTraders.Agent.Operator, agent.operator_id) do
+          FleetContracts.reconcile(Scope.for_operator(operator), agent, revision)
+        end
+
       %{type: "buy", status: "completed", parameters: %{"market_trade" => candidate}} ->
         with {:ok, ship_symbol} <- claimed_ship_symbol(commitment) do
           case Intents.request_commitment_round_trip_sell(
