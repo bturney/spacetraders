@@ -139,6 +139,20 @@ defmodule SpaceTraders.OperatorConditions do
     )
   end
 
+  @doc "Returns the retained limiting Objective summaries for one Fleet Generation."
+  def generation_limitations(%Scope{operator: %{id: operator_id}}, generation_id)
+      when is_integer(generation_id) do
+    prefix = "objective-infeasible:#{generation_id}:%"
+
+    Repo.all(
+      from condition in Condition,
+        where: condition.operator_id == ^operator_id and like(condition.key, ^prefix),
+        order_by: [asc: condition.inserted_at],
+        select: condition.summary
+    )
+    |> Enum.uniq()
+  end
+
   @doc false
   def notify(%Scope{operator: %{id: operator_id}}), do: broadcast(operator_id)
 

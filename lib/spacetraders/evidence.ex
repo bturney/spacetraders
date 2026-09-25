@@ -667,6 +667,16 @@ defmodule SpaceTraders.Evidence do
     KeyError -> false
   end
 
+  def valid_observation?(%Observation{} = observation) do
+    operation = OperationInventory.fetch!(observation.operation_id)
+
+    operation.classification == :read and observation.dependency_keys != [] and
+      is_map(observation.facts) and map_size(observation.facts) > 0 and
+      observation.response_fingerprint == fingerprint(observation.facts)
+  rescue
+    KeyError -> false
+  end
+
   def valid_observation?(_observation), do: false
 
   def serialize(%AuthoritativeObservation{} = observation) do

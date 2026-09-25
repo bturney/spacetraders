@@ -10,6 +10,7 @@ defmodule SpaceTraders.FleetGenerationTest do
   alias SpaceTraders.Fleet.{Intent, Intents, Ship}
   alias SpaceTraders.FleetStrategy
   alias SpaceTraders.OperatorConditions
+  alias SpaceTraders.Evidence.Observation
   alias SpaceTraders.Repo
 
   test "missing replacement authority remains a durable Intervention until authority is restored" do
@@ -59,11 +60,14 @@ defmodule SpaceTraders.FleetGenerationTest do
                "feasible?" => false
              })
 
+    evidence = objective_evidence(agent)
+
     facts = %{
       "change" => -10,
       "elapsed_seconds" => 60,
       "horizon_seconds" => 3600,
-      "feasible?" => false
+      "feasible?" => false,
+      "evidence_id" => evidence.id
     }
 
     assert {:error, :invalid_objective_progress} =
@@ -107,7 +111,8 @@ defmodule SpaceTraders.FleetGenerationTest do
                "current" => 0,
                "target" => 10,
                "expected_seconds_to_target" => 500,
-               "feasible?" => false
+               "feasible?" => false,
+               "evidence_id" => objective_evidence(stale_agent).id
              })
 
     assert [%{kind: :attention}] = SpaceTraders.OperatorConditions.unresolved(scope)
@@ -512,5 +517,25 @@ defmodule SpaceTraders.FleetGenerationTest do
         ]
       }
     }
+  end
+
+  defp objective_evidence(agent) do
+    observation =
+      SpaceTraders.Evidence.authoritative_observation(
+        "get-my-agent",
+        ["agent:#{agent.id}"],
+        %{"response" => %{"credits" => 175_000}}
+      )
+
+    %Observation{
+      agent_id: agent.id,
+      subject: "agent:#{agent.id}",
+      operation_id: observation.operation_id,
+      dependency_keys: observation.dependency_keys,
+      facts: observation.facts,
+      response_fingerprint: observation.response_fingerprint,
+      observed_at: observation.observed_at
+    }
+    |> Repo.insert!()
   end
 end

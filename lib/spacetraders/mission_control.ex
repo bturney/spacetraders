@@ -13,6 +13,8 @@ defmodule SpaceTraders.MissionControl do
   alias SpaceTraders.Fleet.Activity
   alias SpaceTraders.FleetAllocation.StrategyDecisionEpisode
   alias SpaceTraders.FleetStrategy.Revision
+  alias SpaceTraders.Evidence
+  alias SpaceTraders.Evidence.Observation
   alias SpaceTraders.Repo
   import Ecto.Query, only: [from: 2]
 
@@ -279,17 +281,12 @@ defmodule SpaceTraders.MissionControl do
       )
       |> Enum.group_by(& &1.fleet_generation_id)
 
-    revision_ids =
-      generations
-      |> Enum.map(& &1.fleet_strategy_revision_id)
-      |> Kernel.++(
-        for {_id, entries} <- episodes, entry <- entries, do: entry.fleet_strategy_revision_id
-      )
-      |> Enum.reject(&is_nil/1)
-      |> Enum.uniq()
-
     revisions =
-      Repo.all(from revision in Revision, where: revision.id in ^revision_ids)
+      Repo.all(
+        from revision in Revision,
+          join: strategy in assoc(revision, :fleet_strategy),
+          where: strategy.operator_id == ^operator_id
+      )
       |> Map.new(&{&1.id, &1})
 
     Enum.map(generations, fn generation ->
@@ -302,13 +299,30 @@ defmodule SpaceTraders.MissionControl do
             do: change
 
       next_generation = Enum.find(generations, &(&1.number == generation.number + 1))
+      end_at = generation.retired_at || DateTime.utc_now()
+
+      revision_at_start =
+        revisions
+        |> Map.values()
+        |> Enum.filter(&(DateTime.compare(&1.activated_at, generation.inserted_at) != :gt))
+        |> Enum.max_by(& &1.activated_at, DateTime, fn -> nil end)
+
+      active_revisions =
+        revisions
+        |> Map.values()
+        |> Enum.filter(fn revision ->
+          DateTime.compare(revision.activated_at, generation.inserted_at) != :lt and
+            DateTime.compare(revision.activated_at, end_at) != :gt
+        end)
 
       %{
         generation: generation,
         revisions:
           [
-            generation.fleet_strategy_revision_id
-            | Enum.map(decisions, & &1.fleet_strategy_revision_id)
+            generation.fleet_strategy_revision_id,
+            revision_at_start && revision_at_start.id
+            | Enum.map(decisions, & &1.fleet_strategy_revision_id) ++
+                Enum.map(active_revisions, & &1.id)
           ]
           |> Enum.reject(&is_nil/1)
           |> Enum.uniq()
@@ -324,12 +338,12 @@ defmodule SpaceTraders.MissionControl do
         realized_credit_change: if(credit_changes == [], do: nil, else: Enum.sum(credit_changes)),
         realized_decisions: Enum.count(decisions, &(&1.classification == :realized)),
         limitations:
-          decisions
-          |> Enum.filter(&(&1.classification in [:partially_realized, :reset_censored]))
-          |> Enum.map(fn
-            %{classification: :partially_realized} -> "Decision partly realized"
-            %{classification: :reset_censored} -> "Decision interrupted by Server Reset"
-          end),
+          (decisions
+           |> Enum.filter(&(&1.classification in [:partially_realized, :reset_censored]))
+           |> Enum.map(fn
+             %{classification: :partially_realized} -> "Decision partly realized"
+             %{classification: :reset_censored} -> "Decision interrupted by Server Reset"
+           end)) ++ OperatorConditions.generation_limitations(scope, generation.id),
         resumed?: next_generation && not is_nil(next_generation.strategy_capable_at)
       }
     end)
@@ -579,7 +593,8 @@ defmodule SpaceTraders.MissionControl do
   defp objective_overviews(revision, generations, snapshots) do
     generation =
       Enum.find(generations, fn generation ->
-        generation.fleet_strategy_revision_id == revision.id and is_nil(generation.retired_at)
+        generation.fleet_strategy_revision_id == revision.id and is_nil(generation.retired_at) and
+          is_nil(generation.fenced_at)
       end)
 
     revision.document
@@ -602,22 +617,24 @@ defmodule SpaceTraders.MissionControl do
 
   defp observed_objective(
          %{"kind" => "continuous", "objective" => "Grow credits"},
-         %{starting_credits: start, inserted_at: started_at, agent_id: agent_id},
-         snapshots
+         %{
+           starting_credits: start,
+           inserted_at: started_at,
+           last_observed_credits: current,
+           last_observed_at: observed_at,
+           last_observed_evidence_id: evidence_id,
+           agent_id: agent_id
+         },
+         _snapshots
        )
-       when is_integer(start) do
-    case Enum.find(snapshots, &(&1.agent.id == agent_id)) do
-      %{overview: {:ok, %{credits: current}}} when is_integer(current) ->
-        elapsed = DateTime.diff(DateTime.utc_now(), started_at, :second)
+       when is_integer(start) and is_integer(current) do
+    evidence = evidence_id && Repo.get(Observation, evidence_id)
+    elapsed = DateTime.diff(observed_at, started_at, :second)
 
-        if elapsed > 0 do
-          {:observed, %{change: current - start, rate: (current - start) / elapsed * 3600}}
-        else
-          {:error, :insufficient_history}
-        end
-
-      _ ->
-        {:error, :unknown}
+    if Evidence.valid_observation?(evidence) and evidence.agent_id == agent_id and elapsed > 0 do
+      {:observed, %{change: current - start, rate: (current - start) / elapsed * 3600}}
+    else
+      {:error, :unknown}
     end
   end
 

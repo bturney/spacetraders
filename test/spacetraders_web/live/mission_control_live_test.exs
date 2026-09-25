@@ -229,12 +229,17 @@ defmodule SpaceTradersWeb.MissionControlLiveTest do
     {:ok, view, _html} = live(conn, ~p"/mission-control")
     refute has_element?(view, "#needs-attention", "Grow credits")
 
+    evidence = objective_evidence(agent)
+    persisted_evidence = Repo.get(SpaceTraders.Evidence.Observation, evidence.id)
+    assert SpaceTraders.Evidence.valid_observation?(persisted_evidence)
+
     assert {:ok, _} =
              SpaceTraders.FleetGeneration.record_objective_progress(scope, generation.id, 0, %{
                "change" => -10,
                "elapsed_seconds" => 60,
                "horizon_seconds" => 3600,
-               "feasible?" => false
+               "feasible?" => false,
+               "evidence_id" => evidence.id
              })
 
     assert has_element?(view, "#needs-attention", "Grow credits")
@@ -249,7 +254,8 @@ defmodule SpaceTradersWeb.MissionControlLiveTest do
                "change" => 20,
                "elapsed_seconds" => 60,
                "horizon_seconds" => 3600,
-               "feasible?" => true
+               "feasible?" => true,
+               "evidence_id" => evidence.id
              })
 
     {:ok, view, _html} = live(conn, ~p"/mission-control")
@@ -361,6 +367,8 @@ defmodule SpaceTradersWeb.MissionControlLiveTest do
     first = agent_fixture(operator, %{agent_token: nil})
     second = agent_fixture(operator, %{agent_token: nil})
 
+    now = DateTime.utc_now() |> DateTime.truncate(:second)
+
     old =
       Repo.insert!(%Generation{
         operator_id: operator.id,
@@ -370,17 +378,34 @@ defmodule SpaceTradersWeb.MissionControlLiveTest do
         symbol: first.symbol,
         faction: first.faction,
         replacement_symbols: %{"symbols" => [first.symbol]},
-        objective_progress: %{
-          "0" => %{
-            "change" => 10,
-            "elapsed_seconds" => 5,
-            "feasible?" => true,
-            "horizon_seconds" => 10
-          }
-        },
-        fenced_at: DateTime.utc_now(),
-        retired_at: DateTime.utc_now()
+        inserted_at: DateTime.add(now, -3600)
       })
+
+    assert {:ok, _} =
+             SpaceTraders.FleetGeneration.record_objective_progress(scope, old.id, 0, %{
+               "change" => 10,
+               "elapsed_seconds" => 5,
+               "feasible?" => false,
+               "horizon_seconds" => 10,
+               "evidence_id" => objective_evidence(first).id
+             })
+
+    _second_revision =
+      SpaceTraders.FleetStrategy.Revision.create_changeset(
+        %SpaceTraders.FleetStrategy.Revision{},
+        %{
+          fleet_strategy_id: revision.fleet_strategy_id,
+          number: 2,
+          document: revision.document,
+          source: "operator",
+          activated_at: DateTime.add(now, -1800)
+        }
+      )
+      |> Repo.insert!()
+
+    old
+    |> Ecto.Changeset.change(fenced_at: DateTime.utc_now(), retired_at: DateTime.utc_now())
+    |> Repo.update!()
 
     Repo.insert!(%Generation{
       operator_id: operator.id,
@@ -417,6 +442,8 @@ defmodule SpaceTradersWeb.MissionControlLiveTest do
     assert html =~ "Generation 2"
     assert html =~ "250 credits"
     assert html =~ "Grow credits: 20.0 per horizon"
+    assert html =~ "Grow credits is not feasible under current evidence."
+    assert html =~ "Strategy revision 2"
     assert html =~ "Unknown — no realized credit evidence"
     assert html =~ "Strategy revision 1"
     assert html =~ "Server Reset"
@@ -424,5 +451,25 @@ defmodule SpaceTradersWeb.MissionControlLiveTest do
     assert html =~ "Strategy-capable"
     assert has_element?(view, "#generation-comparison", "Generation 1")
     assert has_element?(view, "#generation-comparison", "Generation 2")
+  end
+
+  defp objective_evidence(agent) do
+    observation =
+      SpaceTraders.Evidence.authoritative_observation(
+        "get-my-agent",
+        ["agent:#{agent.id}"],
+        %{"response" => %{"credits" => 175_000}}
+      )
+
+    %SpaceTraders.Evidence.Observation{
+      agent_id: agent.id,
+      subject: "agent:#{agent.id}",
+      operation_id: observation.operation_id,
+      dependency_keys: observation.dependency_keys,
+      facts: observation.facts,
+      response_fingerprint: observation.response_fingerprint,
+      observed_at: observation.observed_at
+    }
+    |> Repo.insert!()
   end
 end
