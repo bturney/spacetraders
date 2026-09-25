@@ -204,6 +204,62 @@ defmodule SpaceTradersWeb.MissionControlLiveTest do
     assert render(view) =~ "AccountToken needed for replacement"
   end
 
+  test "proven objective infeasibility stays pinned after acknowledgement until evidence changes",
+       %{
+         conn: conn,
+         operator: operator,
+         scope: scope
+       } do
+    {:ok, _draft} = FleetStrategy.select_preset(scope, "steady_growth")
+    {:ok, revision} = FleetStrategy.activate(scope, FleetStrategy.get(scope).draft_version)
+    agent = agent_fixture(operator, %{agent_token: nil})
+
+    generation =
+      Repo.insert!(%Generation{
+        operator_id: operator.id,
+        agent_id: agent.id,
+        fleet_strategy_revision_id: revision.id,
+        number: 1,
+        symbol: agent.symbol,
+        faction: agent.faction,
+        replacement_symbols: %{"symbols" => [agent.symbol]},
+        strategy_capable_at: DateTime.utc_now(),
+        objective_progress: %{
+          "0" => %{
+            "change" => -10,
+            "elapsed_seconds" => 60,
+            "horizon_seconds" => 3600,
+            "feasible?" => false
+          }
+        }
+      })
+
+    {:ok, view, _html} = live(conn, ~p"/mission-control")
+    assert has_element?(view, "#needs-attention", "Grow credits")
+    [condition] = SpaceTraders.OperatorConditions.unresolved(scope)
+    view |> element("#needs-attention button[phx-value-id='#{condition.id}']") |> render_click()
+
+    {:ok, view, _html} = live(conn, ~p"/mission-control")
+    assert has_element?(view, "#needs-attention", "Acknowledged")
+
+    generation
+    |> Ecto.Changeset.change(
+      objective_progress: %{
+        "0" => %{
+          "change" => 20,
+          "elapsed_seconds" => 60,
+          "horizon_seconds" => 3600,
+          "feasible?" => true
+        }
+      }
+    )
+    |> Repo.update!()
+
+    {:ok, view, _html} = live(conn, ~p"/mission-control")
+    refute has_element?(view, "#needs-attention", "Grow credits")
+    assert SpaceTraders.OperatorConditions.unresolved(scope) == []
+  end
+
   test "Activity distinguishes decisions from routine Ship traffic", %{
     conn: conn,
     operator: operator,

@@ -12,6 +12,11 @@ defmodule SpaceTradersWeb.ActivityLive do
         SpaceTraders.PubSub,
         "mission_conditions:#{socket.assigns.current_scope.operator.id}"
       )
+
+      Phoenix.PubSub.subscribe(
+        SpaceTraders.PubSub,
+        "fleet_allocation:#{socket.assigns.current_scope.operator.id}"
+      )
     end
 
     {:ok, assign(socket, filter: "all") |> load_activity()}
@@ -19,6 +24,7 @@ defmodule SpaceTradersWeb.ActivityLive do
 
   @impl true
   def handle_info(:mission_conditions_updated, socket), do: {:noreply, load_activity(socket)}
+  def handle_info({:outbox, _id, _event, _payload}, socket), do: {:noreply, load_activity(socket)}
 
   @impl true
   def render(assigns) do
@@ -101,6 +107,7 @@ defmodule SpaceTradersWeb.ActivityLive do
 
   defp load_activity(socket) do
     scope = socket.assigns.current_scope
+    :ok = OperatorConditions.reconcile_objectives(scope)
 
     assign(socket,
       activity: MissionControl.activity(scope),

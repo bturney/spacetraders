@@ -4,6 +4,7 @@ defmodule SpaceTraders.OperatorConditions do
   import Ecto.Query
 
   alias SpaceTraders.Agent.{Operator, Scope}
+  alias SpaceTraders.{FleetGeneration, FleetStrategy}
   alias SpaceTraders.OperatorConditions.Condition
   alias SpaceTraders.Repo
 
@@ -25,20 +26,75 @@ defmodule SpaceTraders.OperatorConditions do
                      is_nil(condition.resolved_at)
              ) do
           nil ->
-            %Condition{} |> Condition.changeset(attrs) |> Repo.insert!()
+            {%Condition{} |> Condition.changeset(attrs) |> Repo.insert!(), true}
 
           %{kind: ^kind, summary: ^summary} = condition ->
-            condition
+            {condition, false}
 
           condition ->
             condition
             |> Condition.changeset(Map.put(attrs, :acknowledged_at, nil))
             |> Repo.update!()
+            |> then(&{&1, true})
         end
       end)
 
-    if match?({:ok, _}, result), do: notify(operator_id)
-    result
+    case result do
+      {:ok, {condition, changed?}} ->
+        if changed?, do: notify(operator_id)
+        {:ok, condition}
+
+      error ->
+        error
+    end
+  end
+
+  @doc "Reconciles durable Objective evaluations into pinned Attention for the active Generation."
+  def reconcile_objectives(%Scope{} = scope) do
+    revision = FleetStrategy.get(scope).active_revision
+
+    generation =
+      scope
+      |> FleetGeneration.list_generations()
+      |> Enum.find(&is_nil(&1.retired_at))
+
+    if revision && generation && generation.fleet_strategy_revision_id == revision.id do
+      current_keys =
+        revision.document
+        |> Map.get("objectives", [])
+        |> Enum.with_index()
+        |> Enum.map(fn {objective, index} ->
+          key = "objective-infeasible:#{generation.id}:#{revision.id}:#{index}"
+          facts = generation.objective_progress[Integer.to_string(index)]
+
+          case facts && FleetStrategy.evaluate_persisted_objective(revision, index, facts) do
+            {:ok, %{feasible?: false}} ->
+              {:ok, _} =
+                raise(
+                  scope,
+                  key,
+                  :attention,
+                  "#{objective["objective"]} is not feasible under current evidence."
+                )
+
+            {:ok, %{feasible?: true}} ->
+              resolve(scope, key)
+
+            _ ->
+              :ok
+          end
+
+          key
+        end)
+
+      unresolved(scope)
+      |> Enum.filter(
+        &(String.starts_with?(&1.key, "objective-infeasible:") and &1.key not in current_keys)
+      )
+      |> Enum.each(&resolve(scope, &1.key))
+    end
+
+    :ok
   end
 
   @doc "Marks a condition as seen without resolving it."

@@ -75,6 +75,10 @@ defmodule SpaceTraders.FleetStrategy do
     to: ObjectiveEvaluation,
     as: :evaluate
 
+  defdelegate evaluate_persisted_objective(revision, objective_index, facts),
+    to: ObjectiveEvaluation,
+    as: :evaluate_persisted
+
   @doc "Binds one planner-supplied score to a Preference in an immutable revision."
   defdelegate evaluate_preference(revision, preference_index, score),
     to: PreferenceEvaluation,

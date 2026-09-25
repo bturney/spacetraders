@@ -12,6 +12,7 @@ defmodule SpaceTradersWeb.MissionControlLive do
     if connected?(socket) do
       Phoenix.PubSub.subscribe(SpaceTraders.PubSub, "fleet_strategy:#{operator_id}")
       Phoenix.PubSub.subscribe(SpaceTraders.PubSub, "mission_conditions:#{operator_id}")
+      Phoenix.PubSub.subscribe(SpaceTraders.PubSub, "fleet_allocation:#{operator_id}")
     end
 
     {:ok, assign_projection(socket)}
@@ -248,10 +249,15 @@ defmodule SpaceTradersWeb.MissionControlLive do
   def handle_info(:mission_conditions_updated, socket),
     do: {:noreply, assign_projection(socket)}
 
+  def handle_info({:outbox, _id, _event, _payload}, socket),
+    do: {:noreply, assign_projection(socket)}
+
   def handle_info(_message, socket), do: {:noreply, socket}
 
-  defp assign_projection(socket),
-    do: assign(socket, :projection, MissionControl.overview(socket.assigns.current_scope))
+  defp assign_projection(socket) do
+    :ok = OperatorConditions.reconcile_objectives(socket.assigns.current_scope)
+    assign(socket, :projection, MissionControl.overview(socket.assigns.current_scope))
+  end
 
   defp current_generation(projection),
     do: Enum.find(projection.generations, &is_nil(&1.retired_at))

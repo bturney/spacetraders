@@ -29,17 +29,6 @@ defmodule SpaceTraders.MissionControl do
     OperatorConditions
   }
 
-  @evaluation_fact_keys %{
-    "change" => :change,
-    "current" => :current,
-    "elapsed_seconds" => :elapsed_seconds,
-    "expected_seconds_to_target" => :expected_seconds_to_target,
-    "feasible?" => :feasible?,
-    "horizon_seconds" => :horizon_seconds,
-    "required_margin" => :required_margin,
-    "target" => :target
-  }
-
   @doc "Returns the signed-in Operator's Agents for adapter subscriptions."
   def agents(%Scope{operator: operator}) do
     operator
@@ -357,7 +346,7 @@ defmodule SpaceTraders.MissionControl do
 
       evaluation =
         if is_map(facts),
-          do: FleetStrategy.evaluate_objective(revision, index, atomize_keys(facts)),
+          do: FleetStrategy.evaluate_persisted_objective(revision, index, facts),
           else: {:error, :unknown}
 
       %{name: objective["objective"], evaluation: evaluation}
@@ -604,7 +593,7 @@ defmodule SpaceTraders.MissionControl do
         objective: objective,
         evaluation:
           if(is_map(facts),
-            do: FleetStrategy.evaluate_objective(revision, index, atomize_keys(facts)),
+            do: FleetStrategy.evaluate_persisted_objective(revision, index, facts),
             else: observed_objective(objective, generation, snapshots)
           )
       }
@@ -633,9 +622,6 @@ defmodule SpaceTraders.MissionControl do
   end
 
   defp observed_objective(_objective, _generation, _snapshots), do: {:error, :unknown}
-
-  defp atomize_keys(facts),
-    do: Map.new(facts, fn {key, value} -> {@evaluation_fact_keys[key], value} end)
 
   defp namespace_facts(facts, namespace) do
     Map.new(facts, fn {field, fact} -> {"#{namespace}.#{field}", fact} end)
