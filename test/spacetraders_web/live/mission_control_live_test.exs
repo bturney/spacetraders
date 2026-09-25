@@ -59,12 +59,14 @@ defmodule SpaceTradersWeb.MissionControlLiveTest do
       symbol: agent.symbol,
       faction: agent.faction,
       replacement_symbols: %{"symbols" => [agent.symbol]},
+      starting_credits: 175_000,
       objective_progress: %{
         "0" => %{
           "change" => 10,
           "elapsed_seconds" => 5,
           "feasible?" => true,
-          "horizon_seconds" => 10
+          "horizon_seconds" => 10,
+          "evidence_id" => objective_evidence(agent, 175_010).id
         }
       },
       strategy_capable_at: DateTime.utc_now()

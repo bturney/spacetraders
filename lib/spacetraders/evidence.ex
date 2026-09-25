@@ -572,6 +572,8 @@ defmodule SpaceTraders.Evidence do
             observed_at: observation.observed_at
           })
 
+        _ = FleetGeneration.observe_observation(agent, persisted)
+
         ids = Enum.map(demands, & &1.id)
 
         if ids != [] do

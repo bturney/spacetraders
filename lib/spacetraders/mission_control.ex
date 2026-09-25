@@ -203,7 +203,7 @@ defmodule SpaceTraders.MissionControl do
           on: agent.id == event.agent_id,
           where:
             agent.operator_id == ^operator_id and
-              event.kind in ["manual_intervention_stopped", "manual_intent_completed"],
+              event.kind not in ["retry", "manual_intent_waiting", "owned_intent_recovery"],
           order_by: [desc: event.inserted_at, desc: event.id],
           limit: 100
       )
@@ -229,12 +229,13 @@ defmodule SpaceTraders.MissionControl do
 
   def notable_activity?(_), do: false
 
-  defp decision_summary(%{
-         classification: :realized,
-         actual_outcomes: %{"net_credit_change" => change}
-       })
-       when is_number(change),
-       do: "Fleet decision realized #{change} credits net change"
+  defp decision_summary(%{classification: :realized, actual_outcomes: outcomes})
+       when is_map(outcomes) do
+    case actual_credit_change(outcomes) do
+      nil -> "Fleet decision realized without a retained credit-change value"
+      change -> "Fleet decision realized #{change} credits net change"
+    end
+  end
 
   defp decision_summary(%{classification: :partially_realized}),
     do: "Fleet decision partially realized"
@@ -244,6 +245,10 @@ defmodule SpaceTraders.MissionControl do
 
   defp decision_summary(%{classification: :superseded}), do: "Fleet decision superseded"
   defp decision_summary(_), do: "Fleet selected a new commitment portfolio"
+
+  defp actual_credit_change(outcomes) do
+    Map.get(outcomes, "net_credit_change", Map.get(outcomes, "credit_change"))
+  end
 
   defp decision_detail(episode) do
     standing_rule =
@@ -293,8 +298,8 @@ defmodule SpaceTraders.MissionControl do
       decisions = Map.get(episodes, generation.id, [])
 
       credit_changes =
-        for %{classification: :realized, actual_outcomes: %{"net_credit_change" => change}} <-
-              decisions,
+        for %{classification: :realized, actual_outcomes: outcomes} <- decisions,
+            change = actual_credit_change(outcomes),
             is_number(change),
             do: change
 
@@ -331,10 +336,10 @@ defmodule SpaceTraders.MissionControl do
           |> Enum.map(& &1.number)
           |> Enum.sort(),
         objective_outcomes:
-          generation_objective_outcomes(
-            generation,
-            Map.get(revisions, generation.fleet_strategy_revision_id)
-          ),
+          [revision_at_start | active_revisions]
+          |> Enum.filter(& &1)
+          |> Enum.uniq_by(& &1.id)
+          |> Enum.flat_map(&generation_objective_outcomes(generation, &1)),
         realized_credit_change: if(credit_changes == [], do: nil, else: Enum.sum(credit_changes)),
         realized_decisions: Enum.count(decisions, &(&1.classification == :realized)),
         limitations:
@@ -358,12 +363,14 @@ defmodule SpaceTraders.MissionControl do
     |> Enum.map(fn {objective, index} ->
       facts = generation.objective_progress[Integer.to_string(index)]
 
+      revision_matches? = facts["revision_id"] == revision.id
+
       evaluation =
-        if is_map(facts) and objective_evidence_valid?(generation, facts),
+        if is_map(facts) and revision_matches? and objective_evidence_valid?(generation, facts),
           do: FleetStrategy.evaluate_persisted_objective(revision, index, facts),
           else: {:error, :unknown}
 
-      %{name: objective["objective"], evaluation: evaluation}
+      %{revision: revision.number, name: objective["objective"], evaluation: evaluation}
     end)
   end
 
@@ -607,7 +614,7 @@ defmodule SpaceTraders.MissionControl do
         priority: index + 1,
         objective: objective,
         evaluation:
-          if(is_map(facts),
+          if(is_map(facts) and current_objective_evidence_valid?(generation, facts),
             do: FleetStrategy.evaluate_persisted_objective(revision, index, facts),
             else: observed_objective(objective, generation, snapshots)
           )
@@ -615,16 +622,24 @@ defmodule SpaceTraders.MissionControl do
     end)
   end
 
+  defp current_objective_evidence_valid?(generation, facts) do
+    evidence = facts["evidence_id"] && Repo.get(Observation, facts["evidence_id"])
+
+    objective_evidence_valid?(generation, facts) && evidence.agent_id == generation.agent_id &&
+      DateTime.diff(DateTime.utc_now(), evidence.observed_at, :second) <= 300
+  end
+
   defp objective_evidence_valid?(generation, facts) do
     evidence = facts["evidence_id"] && Repo.get(Observation, facts["evidence_id"])
 
     Evidence.valid_observation?(evidence) and
+      evidence.agent_id == generation.agent_id and
       DateTime.compare(evidence.observed_at, generation.inserted_at) != :lt and
       DateTime.compare(evidence.observed_at, DateTime.utc_now()) != :gt and
       (is_nil(generation.retired_at) or
          DateTime.compare(evidence.observed_at, generation.retired_at) != :gt) and
-      (is_nil(generation.retired_at) or is_nil(evidence.agent_id) or
-         evidence.agent_id == generation.agent_id)
+      (is_nil(generation.retired_at) or
+         DateTime.diff(DateTime.utc_now(), evidence.observed_at, :second) <= 300)
   end
 
   defp observed_objective(
@@ -644,6 +659,7 @@ defmodule SpaceTraders.MissionControl do
     elapsed = DateTime.diff(observed_at, started_at, :second)
 
     if Evidence.valid_observation?(evidence) and evidence.agent_id == agent_id and elapsed > 0 and
+         DateTime.compare(observed_at, DateTime.utc_now()) != :gt and
          DateTime.diff(DateTime.utc_now(), observed_at, :second) <= 300 do
       {:observed, %{change: current - start, rate: (current - start) / elapsed * 3600}}
     else

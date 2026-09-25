@@ -91,7 +91,9 @@ defmodule SpaceTradersWeb.GenerationsLive do
             <h3 class="font-semibold">Strategic Objectives · last active revision</h3>
             <ul class="mt-2 space-y-1 text-sm">
               <li :for={objective <- recap.objective_outcomes}>
-                {objective.name}: {objective_label(objective.evaluation)}
+                Revision {objective.revision} · {objective.name}: {objective_label(
+                  objective.evaluation
+                )}
               </li>
             </ul>
           </div>
