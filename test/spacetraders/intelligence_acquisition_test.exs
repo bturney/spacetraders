@@ -211,6 +211,134 @@ defmodule SpaceTraders.IntelligenceAcquisitionTest do
     assert_receive {"GET", ^market_path}
   end
 
+  test "an insufficient-fuel navigation at a confirmed fuel Market refuels and continues" do
+    {agent, ship, portfolio, commitment} = claimed_ship()
+    test_pid = self()
+    ship_path = "/v2/my/ships/#{ship.symbol}"
+    navigate_path = "#{ship_path}/navigate"
+    dock_path = "#{ship_path}/dock"
+    orbit_path = "#{ship_path}/orbit"
+    refuel_path = "#{ship_path}/refuel"
+    market_path = "/v2/systems/X1-UX81/waypoints/X1-UX81-A1/market"
+    arrival = DateTime.utc_now() |> DateTime.add(3600) |> DateTime.to_iso8601()
+
+    Process.put(:fuel_test_navigate_calls, 0)
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      send(test_pid, {conn.method, conn.request_path})
+
+      case {conn.method, conn.request_path} do
+        {"GET", ^ship_path} ->
+          Req.Test.json(conn, %{
+            "data" =>
+              ship_body(ship.symbol, %{
+                "nav" => nav_body("IN_ORBIT"),
+                "fuel" => %{
+                  "capacity" => 200,
+                  "current" => 55,
+                  "consumed" => %{"amount" => 145, "timestamp" => "2026-01-01T00:00:00.000Z"}
+                }
+              })
+          })
+
+        {"GET", ^market_path} ->
+          Req.Test.json(conn, %{
+            "data" => %{
+              "symbol" => "X1-UX81-A1",
+              "exports" => [],
+              "imports" => [],
+              "exchange" => [],
+              "tradeGoods" => [
+                %{
+                  "symbol" => "FUEL",
+                  "type" => "EXCHANGE",
+                  "tradeVolume" => 10,
+                  "purchasePrice" => 72,
+                  "sellPrice" => 68,
+                  "supply" => "MODERATE"
+                }
+              ]
+            }
+          })
+
+        {"POST", ^navigate_path} ->
+          count = Process.get(:fuel_test_navigate_calls, 0)
+          Process.put(:fuel_test_navigate_calls, count + 1)
+
+          if count == 0 do
+            conn
+            |> Plug.Conn.put_status(400)
+            |> Req.Test.json(%{
+              "error" => %{
+                "code" => 4203,
+                "message" => "Navigate request failed. Ship requires 12 more fuel.",
+                "data" => %{"fuelAvailable" => 55, "fuelRequired" => 67}
+              }
+            })
+          else
+            Req.Test.json(conn, %{
+              "data" => %{
+                "fuel" => %{"capacity" => 200, "current" => 200},
+                "nav" => nav_body("IN_TRANSIT", arrival: arrival, destination: "X1-UX81-A2")
+              }
+            })
+          end
+
+        {"POST", ^dock_path} ->
+          Req.Test.json(conn, %{"data" => %{"nav" => nav_body("DOCKED")}})
+
+        {"POST", ^refuel_path} ->
+          Req.Test.json(conn, %{
+            "data" => %{
+              "agent" => %{
+                "symbol" => agent.symbol,
+                "credits" => 100_000,
+                "headquarters" => "X1-UX81-A1",
+                "shipCount" => 1,
+                "startingFaction" => "COSMIC"
+              },
+              "cargo" => %{"capacity" => 40, "units" => 0, "inventory" => []},
+              "fuel" => %{"capacity" => 200, "current" => 200},
+              "transaction" => %{
+                "shipSymbol" => ship.symbol,
+                "waypointSymbol" => "X1-UX81-A1",
+                "tradeSymbol" => "FUEL",
+                "type" => "PURCHASE",
+                "units" => 145,
+                "pricePerUnit" => 72,
+                "totalPrice" => 10_440,
+                "timestamp" => "2026-01-01T00:00:00.000Z"
+              }
+            }
+          })
+
+        {"POST", ^orbit_path} ->
+          Req.Test.json(conn, %{"data" => %{"nav" => nav_body("IN_ORBIT")}})
+
+        other ->
+          flunk("unexpected request: #{inspect(other)}")
+      end
+    end)
+
+    assert {:ok, %Intent{status: "waiting"} = intent} =
+             Intents.request_commitment_intelligence(agent, commitment, portfolio, ship.symbol, %{
+               subject_type: :market,
+               waypoint: "X1-UX81-A2",
+               required_facts: ["trade_goods"],
+               freshness_seconds: 300
+             })
+
+    assert_receive {"GET", ^ship_path}
+    assert_receive {"POST", ^navigate_path}
+    assert_receive {"POST", ^dock_path}
+    assert_receive {"GET", ^market_path}
+    assert_receive {"POST", ^refuel_path}
+    assert_receive {"POST", ^orbit_path}
+    assert_receive {"POST", ^navigate_path}
+    assert Process.get(:fuel_test_navigate_calls) == 2
+    assert %Intent{parameters: %{"refuel" => "to_capacity"}} = Repo.get!(Intent, intent.id)
+  end
+
   test "a claimed Ship charts on-site after public intelligence cannot establish chart provenance" do
     {agent, ship, portfolio, commitment} = claimed_ship()
     test_pid = self()
