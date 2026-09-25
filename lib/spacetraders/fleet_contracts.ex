@@ -461,7 +461,8 @@ defmodule SpaceTraders.FleetContracts do
     end
   end
 
-  defp sourcing_listings(agent, as_of) do
+  @doc "Returns the latest dated Market goods available for Fleet outcome sourcing."
+  def sourcing_listings(agent, as_of) do
     Observation
     |> where([observation], observation.agent_id == ^agent.id)
     |> where([observation], like(observation.subject, "market:%"))
@@ -485,7 +486,8 @@ defmodule SpaceTraders.FleetContracts do
               purchase_price: price,
               trade_volume: volume,
               observed_at: observation.observed_at,
-              evidence_id: observation.id
+              evidence_id: observation.id,
+              supply: good["supply"] || good[:supply]
             }
           ],
           else: []

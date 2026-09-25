@@ -597,6 +597,47 @@ defmodule SpaceTraders.Fleet.Intents do
   def request_commitment_contract_delivery(_agent, _commitment, _portfolio, _ship, _delivery),
     do: {:error, :invalid_contract_delivery}
 
+  @doc "Starts Construction supply only under the matching current Ship Claim."
+  def request_commitment_construction_delivery(
+        %AgentRecord{} = agent,
+        %Commitment{} = commitment,
+        %Portfolio{} = portfolio,
+        ship_symbol,
+        %{system: system, waypoint: waypoint, trade_symbol: symbol, units: units}
+      )
+      when is_binary(ship_symbol) and is_binary(system) and is_binary(waypoint) and
+             is_binary(symbol) and is_integer(units) and units > 0 do
+    with {:ok, %{commitment_id: id, portfolio_id: portfolio_id, portfolio_version: version}} <-
+           FleetAllocation.current_ship_claim(agent, ship_symbol),
+         true <-
+           id == commitment.id and portfolio_id == portfolio.id and version == portfolio.version,
+         :ok <- token_present(agent),
+         {:ok, ship} <- Fleet.owned_ship(agent, ship_symbol),
+         {:ok, live_ship} <- fresh_ship(agent, ship_symbol, nil),
+         {:ok, intent} <-
+           insert_commitment_intent(commitment, portfolio, ship, %{
+             type: "deliver",
+             target_waypoint: waypoint,
+             parameters: %{
+               "trade_symbol" => symbol,
+               "units" => units,
+               "recipient" => %{
+                 "type" => "construction",
+                 "system" => system,
+                 "waypoint" => waypoint
+               }
+             }
+           }) do
+      advance_new_intent(agent, intent, live_ship)
+    else
+      false -> {:error, :no_current_ship_claim}
+      error -> error
+    end
+  end
+
+  def request_commitment_construction_delivery(_agent, _commitment, _portfolio, _ship, _delivery),
+    do: {:error, :invalid_construction_delivery}
+
   @intelligence_fields %{
     waypoint:
       ~w(symbol system_symbol type x y orbits orbitals traits modifiers chart faction is_under_construction),
@@ -2120,6 +2161,23 @@ defmodule SpaceTraders.Fleet.Intents do
          agent,
          intent,
          live_ship,
+         {:construction, construction} = recipient
+       ) do
+    if fulfillment_remaining({:construction, construction}, intent.parameters["trade_symbol"]) ==
+         0 do
+      complete_cargo_intent(agent, intent, 0, nil, %{
+        construction: construction,
+        external_completion: true
+      })
+    else
+      dispatch_or_complete_delivery(agent, intent, live_ship, recipient)
+    end
+  end
+
+  defp dispatch_or_complete_construction(
+         agent,
+         intent,
+         live_ship,
          {:contract, contract} = recipient
        ) do
     if fulfillment_remaining(recipient, intent.parameters["trade_symbol"]) == 0 do
@@ -2188,6 +2246,33 @@ defmodule SpaceTraders.Fleet.Intents do
        )}
     else
       _ -> {:error, :recipient_unavailable}
+    end
+  end
+
+  defp contract_buy_units(agent, %Intent{
+         type: "buy",
+         parameters: %{
+           "market_trade" => %{
+             "construction" => %{
+               "system" => system,
+               "waypoint" => waypoint
+             }
+           },
+           "trade_symbol" => symbol,
+           "units" => units
+         }
+       }) do
+    with {:ok, construction} <-
+           Agent.handle_game_result(
+             agent,
+             Evidence.get_construction(AgentTokenReference.new(agent), system, waypoint)
+           ) do
+      Fleet.record_construction_observation(agent, system, construction, "get_construction")
+
+      case SpaceTraders.FleetConstruction.remaining(construction, symbol) do
+        count when is_integer(count) -> {:ok, min(units, count)}
+        :unknown -> {:error, :construction_progress_unavailable}
+      end
     end
   end
 
@@ -3295,6 +3380,35 @@ defmodule SpaceTraders.Fleet.Intents do
             :accepted,
             "Contract progress and Ship Cargo both prove accepted delivery",
             %{contract_id: contract.id, trade_symbol: intent.parameters["trade_symbol"]}
+          ),
+          Evidence.authoritative_observation(
+            "get-my-ship",
+            [DependencyKey.ship(agent.id, live_ship.symbol)],
+            %{cargo: %{units: live_ship.cargo.units}}
+          )
+        ]
+
+        case MutationAttempts.reconcile(attempt, :accepted, observations) do
+          {:ok, _attempt} -> :ok
+          error -> error
+        end
+    end
+  end
+
+  defp settle_accepted_delivery_attempt(agent, intent, live_ship, {:construction, construction}) do
+    case MutationAttempts.unresolved_for_intent(intent) do
+      nil ->
+        :ok
+
+      attempt ->
+        observations = [
+          reconciliation_observation(
+            "get-construction",
+            [DependencyKey.construction(agent.id, construction.symbol)],
+            attempt,
+            :accepted,
+            "Construction progress and Ship Cargo both prove accepted supply",
+            %{waypoint: construction.symbol, trade_symbol: intent.parameters["trade_symbol"]}
           ),
           Evidence.authoritative_observation(
             "get-my-ship",
