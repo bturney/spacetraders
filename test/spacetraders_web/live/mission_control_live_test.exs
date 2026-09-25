@@ -310,6 +310,7 @@ defmodule SpaceTradersWeb.MissionControlLiveTest do
       source_version: 0,
       calibration_version: "v1",
       classification: :realized,
+      evidence_references: [%{"kind" => "test", "id" => "observed"}],
       actual_outcomes: %{"net_credit_change" => 250}
     })
 
@@ -429,6 +430,7 @@ defmodule SpaceTradersWeb.MissionControlLiveTest do
       source_version: 0,
       calibration_version: "v1",
       classification: :realized,
+      evidence_references: [%{"kind" => "test", "id" => "observed"}],
       actual_outcomes: %{"net_credit_change" => 250}
     })
 

@@ -203,7 +203,7 @@ defmodule SpaceTraders.MissionControl do
           on: agent.id == event.agent_id,
           where:
             agent.operator_id == ^operator_id and
-              event.kind not in ["retry", "manual_intent_waiting", "owned_intent_recovery"],
+              event.kind not in ["retry", "manual_intent_waiting"],
           order_by: [desc: event.inserted_at, desc: event.id],
           limit: 100
       )
@@ -229,11 +229,15 @@ defmodule SpaceTraders.MissionControl do
 
   def notable_activity?(_), do: false
 
-  defp decision_summary(%{classification: :realized, actual_outcomes: outcomes})
+  defp decision_summary(%{classification: :realized, actual_outcomes: outcomes} = episode)
        when is_map(outcomes) do
-    case actual_credit_change(outcomes) do
-      nil -> "Fleet decision realized without a retained credit-change value"
-      change -> "Fleet decision realized #{change} credits net change"
+    if episode.evidence_references == [] do
+      "Fleet decision realized without retained outcome evidence"
+    else
+      case actual_credit_change(outcomes) do
+        nil -> "Fleet decision realized without a retained credit-change value"
+        change -> "Fleet decision realized #{change} credits net change"
+      end
     end
   end
 
@@ -298,7 +302,9 @@ defmodule SpaceTraders.MissionControl do
       decisions = Map.get(episodes, generation.id, [])
 
       credit_changes =
-        for %{classification: :realized, actual_outcomes: outcomes} <- decisions,
+        for %{classification: :realized, actual_outcomes: outcomes, evidence_references: refs} <-
+              decisions,
+            refs != [],
             change = actual_credit_change(outcomes),
             is_number(change),
             do: change
