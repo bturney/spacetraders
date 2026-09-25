@@ -527,7 +527,11 @@ defmodule SpaceTraders.Fleet.Intents do
         candidate
       )
       when is_binary(ship_symbol) and is_map(candidate) do
-    with :ok <- token_present(agent),
+    with {:ok, %{commitment_id: id, portfolio_id: portfolio_id, portfolio_version: version}} <-
+           FleetAllocation.current_ship_claim(agent, ship_symbol),
+         true <-
+           id == commitment.id and portfolio_id == portfolio.id and version == portfolio.version,
+         :ok <- token_present(agent),
          {:ok, ship} <- Fleet.owned_ship(agent, ship_symbol),
          {:ok, live_ship} <- fresh_ship(agent, ship_symbol, nil),
          {:ok, intent} <-
@@ -537,11 +541,61 @@ defmodule SpaceTraders.Fleet.Intents do
              parameters: commitment_buy_parameters(candidate)
            }) do
       advance_new_intent(agent, intent, live_ship)
+    else
+      false -> {:error, :no_current_ship_claim}
+      error -> error
     end
   end
 
   def request_commitment_round_trip(_agent, _commitment, _portfolio, _ship_symbol, _candidate),
     do: {:error, :invalid_commitment_round_trip}
+
+  @doc "Starts a Contract Deliver Goods Intent only under its published Ship Claim."
+  def request_commitment_contract_delivery(
+        %AgentRecord{} = agent,
+        %Commitment{} = commitment,
+        %Portfolio{} = portfolio,
+        ship_symbol,
+        %{
+          contract_id: contract_id,
+          destination_waypoint: waypoint,
+          trade_symbol: symbol,
+          units: units
+        }
+      )
+      when is_binary(ship_symbol) and is_binary(contract_id) and is_binary(waypoint) and
+             is_binary(symbol) and is_integer(units) and units > 0 do
+    with {:ok, %{commitment_id: id, portfolio_id: portfolio_id, portfolio_version: version}} <-
+           FleetAllocation.current_ship_claim(agent, ship_symbol),
+         true <-
+           id == commitment.id and portfolio_id == portfolio.id and version == portfolio.version,
+         :ok <- token_present(agent),
+         {:ok, ship} <- Fleet.owned_ship(agent, ship_symbol),
+         {:ok, live_ship} <- fresh_ship(agent, ship_symbol, nil),
+         {:ok, intent} <-
+           insert_commitment_intent(commitment, portfolio, ship, %{
+             type: "deliver",
+             target_waypoint: waypoint,
+             parameters: %{
+               "trade_symbol" => symbol,
+               "units" => units,
+               "recipient" => %{
+                 "type" => "contract",
+                 "contract_id" => contract_id,
+                 "waypoint" => waypoint
+               }
+             }
+           }) do
+      advance_new_intent(agent, intent, live_ship)
+    else
+      false -> {:error, :no_current_ship_claim}
+      {:error, :no_current_ship_claim} = error -> error
+      error -> error
+    end
+  end
+
+  def request_commitment_contract_delivery(_agent, _commitment, _portfolio, _ship, _delivery),
+    do: {:error, :invalid_contract_delivery}
 
   @intelligence_fields %{
     waypoint:
@@ -696,7 +750,7 @@ defmodule SpaceTraders.Fleet.Intents do
       "trade_symbol" => candidate_trade_symbol(candidate),
       "units" => candidate_units(candidate),
       "max_price" => candidate_purchase_price(candidate),
-      "reserve_credits" => 0,
+      "reserve_credits" => Map.get(candidate, :reserve_credits, 0),
       "market_trade" => candidate
     }
   end
@@ -2062,7 +2116,27 @@ defmodule SpaceTraders.Fleet.Intents do
     )
   end
 
+  defp dispatch_or_complete_construction(
+         agent,
+         intent,
+         live_ship,
+         {:contract, contract} = recipient
+       ) do
+    if fulfillment_remaining(recipient, intent.parameters["trade_symbol"]) == 0 do
+      complete_cargo_intent(agent, intent, 0, nil, %{
+        contract: contract,
+        external_completion: true
+      })
+    else
+      dispatch_or_complete_delivery(agent, intent, live_ship, recipient)
+    end
+  end
+
   defp dispatch_or_complete_construction(agent, intent, live_ship, recipient) do
+    dispatch_or_complete_delivery(agent, intent, live_ship, recipient)
+  end
+
+  defp dispatch_or_complete_delivery(agent, intent, live_ship, recipient) do
     with {:ok, units, _credits} <- executable_cargo_units(intent, live_ship, recipient, agent) do
       action =
         %{
@@ -2084,6 +2158,42 @@ defmodule SpaceTraders.Fleet.Intents do
   end
 
   defp dispatch_market_cargo_intent(agent, intent, live_ship) do
+    case contract_buy_units(agent, intent) do
+      {:ok, 0} ->
+        complete_cargo_intent(agent, intent, 0, nil, %{external_completion: true})
+
+      {:ok, units} ->
+        dispatch_market_cargo_intent_with_units(
+          agent,
+          %{intent | parameters: Map.put(intent.parameters, "units", units)},
+          live_ship
+        )
+
+      {:error, reason} ->
+        block_cargo_intent(intent, reason)
+    end
+  end
+
+  defp contract_buy_units(agent, %Intent{
+         type: "buy",
+         parameters: %{"market_trade" => %{"contract_id" => contract_id}} = parameters
+       }) do
+    with {:ok, contracts} <- Contracts.list_contracts(agent),
+         %Contract{} = contract <- Enum.find(contracts, &(&1.id == contract_id)),
+         true <- Contracts.active?(contract) or contract.fulfilled do
+      {:ok,
+       min(
+         parameters["units"],
+         fulfillment_remaining({:contract, contract}, parameters["trade_symbol"])
+       )}
+    else
+      _ -> {:error, :recipient_unavailable}
+    end
+  end
+
+  defp contract_buy_units(_agent, intent), do: {:ok, intent.parameters["units"]}
+
+  defp dispatch_market_cargo_intent_with_units(agent, intent, live_ship) do
     with {:ok, good} <- market_good_for_intent(agent, live_ship, intent),
          {:ok, units, _credits} <- executable_cargo_units(intent, live_ship, good, agent) do
       action = %{
@@ -3015,7 +3125,7 @@ defmodule SpaceTraders.Fleet.Intents do
         {:ok, contracts} ->
           case Enum.find(contracts, &(&1.id == contract_id)) do
             %Contract{} = contract ->
-              if Contracts.fulfillable?(contract),
+              if Contracts.fulfillable?(contract) or contract.fulfilled,
                 do: {:ok, contract},
                 else: {:error, :recipient_unavailable}
 
@@ -3023,24 +3133,8 @@ defmodule SpaceTraders.Fleet.Intents do
               {:error, :recipient_unavailable}
           end
 
-        {:error, _reason} ->
-          {:ok,
-           Contract.from_json(%{
-             "id" => contract_id,
-             "accepted" => true,
-             "fulfilled" => false,
-             "terms" => %{
-               "deadline" => "9999-01-01T00:00:00Z",
-               "deliver" => [
-                 %{
-                   "tradeSymbol" => intent.parameters["trade_symbol"],
-                   "destinationSymbol" => waypoint,
-                   "unitsRequired" => intent.parameters["units"],
-                   "unitsFulfilled" => 0
-                 }
-               ]
-             }
-           })}
+        {:error, reason} ->
+          {:error, reason}
       end
     else
       false -> {:error, :recipient_conflict}
@@ -3167,11 +3261,15 @@ defmodule SpaceTraders.Fleet.Intents do
            reconcile_delivery_evidence(recipient, action, live_ship.cargo, fulfilled_before) do
       case result do
         {:accepted, units} ->
-          complete_cargo_intent(agent, intent, units, nil, %{})
+          with :ok <- settle_accepted_delivery_attempt(agent, intent, live_ship, recipient) do
+            complete_cargo_intent(agent, intent, units, nil, %{})
+          else
+            {:error, reason} -> block_cargo_intent(intent, reason)
+          end
 
         :external_completion ->
           complete_cargo_intent(agent, intent, 0, nil, %{
-            construction: elem(recipient, 1),
+            elem(recipient, 0) => elem(recipient, 1),
             external_completion: true
           })
 
@@ -3182,6 +3280,37 @@ defmodule SpaceTraders.Fleet.Intents do
       _ -> block_cargo_intent(intent, {:ambiguous_operation_evidence, "deliver"})
     end
   end
+
+  defp settle_accepted_delivery_attempt(agent, intent, live_ship, {:contract, contract}) do
+    case MutationAttempts.unresolved_for_intent(intent) do
+      nil ->
+        :ok
+
+      attempt ->
+        observations = [
+          reconciliation_observation(
+            "get-contracts",
+            [DependencyKey.contract(agent.id, contract.id)],
+            attempt,
+            :accepted,
+            "Contract progress and Ship Cargo both prove accepted delivery",
+            %{contract_id: contract.id, trade_symbol: intent.parameters["trade_symbol"]}
+          ),
+          Evidence.authoritative_observation(
+            "get-my-ship",
+            [DependencyKey.ship(agent.id, live_ship.symbol)],
+            %{cargo: %{units: live_ship.cargo.units}}
+          )
+        ]
+
+        case MutationAttempts.reconcile(attempt, :accepted, observations) do
+          {:ok, _attempt} -> :ok
+          error -> error
+        end
+    end
+  end
+
+  defp settle_accepted_delivery_attempt(_agent, _intent, _live_ship, _recipient), do: :ok
 
   defp reconcile_delivery_evidence({:construction, construction}, action, cargo, fulfilled_before) do
     with trade_symbol when is_binary(trade_symbol) <- action["trade_symbol"],
@@ -3207,7 +3336,25 @@ defmodule SpaceTraders.Fleet.Intents do
     end
   end
 
-  defp reconcile_delivery_evidence({_type, recipient}, action, cargo, fulfilled_before) do
+  defp reconcile_delivery_evidence(
+         {:contract, %{fulfilled: true} = contract},
+         action,
+         cargo,
+         fulfilled_before
+       ) do
+    if is_integer(action["cargo_before"]) and
+         Fleet.item_units(cargo, action["trade_symbol"]) == action["cargo_before"] and
+         Fleet.recipient_fulfilled_units(contract, action["trade_symbol"]) >= fulfilled_before do
+      :external_completion
+    else
+      reconcile_contract_delivery_evidence(contract, action, cargo, fulfilled_before)
+    end
+  end
+
+  defp reconcile_delivery_evidence({_type, recipient}, action, cargo, fulfilled_before),
+    do: reconcile_contract_delivery_evidence(recipient, action, cargo, fulfilled_before)
+
+  defp reconcile_contract_delivery_evidence(recipient, action, cargo, fulfilled_before) do
     accepted =
       Fleet.recipient_fulfilled_units(recipient, action["trade_symbol"]) - fulfilled_before
 

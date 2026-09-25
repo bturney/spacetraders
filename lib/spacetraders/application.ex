@@ -22,8 +22,8 @@ defmodule SpaceTraders.Application do
         SpaceTraders.EmergencyStopAdmission,
         SpaceTraders.FleetGenerationAdmission
       ] ++
-        fleet_reconciler_children() ++
         runtime_authority_children() ++
+        fleet_reconciler_children() ++
         [
           {Registry, keys: :unique, name: SpaceTraders.Contracts.Registry},
           {DynamicSupervisor, strategy: :one_for_one, name: SpaceTraders.Contracts.Supervisor},

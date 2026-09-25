@@ -9,11 +9,14 @@ defmodule SpaceTraders.FleetAllocation.Reconciler do
   alias SpaceTraders.Agent.Scope
   alias SpaceTraders.Agent.Agent, as: AgentRecord
   alias SpaceTraders.FleetExecution
+  alias SpaceTraders.FleetContracts
   alias SpaceTraders.FleetIntelligence
   alias SpaceTraders.FleetResources
   alias SpaceTraders.FleetGeneration.Generation
   alias SpaceTraders.FleetStrategy.Revision
   alias SpaceTraders.Repo
+
+  @contract_refresh_ms 60_000
 
   def start_link(opts \\ []), do: GenServer.start_link(__MODULE__, opts, name: __MODULE__)
 
@@ -23,6 +26,7 @@ defmodule SpaceTraders.FleetAllocation.Reconciler do
     Phoenix.PubSub.subscribe(SpaceTraders.PubSub, "fleet_intelligence_evidence")
     Phoenix.PubSub.subscribe(SpaceTraders.PubSub, "fleet_resource_evidence")
     send(self(), :reconcile_intelligence_on_boot)
+    Process.send_after(self(), :reconcile_contracts, @contract_refresh_ms)
     {:ok, %{}}
   end
 
@@ -44,6 +48,7 @@ defmodule SpaceTraders.FleetAllocation.Reconciler do
       )
 
       FleetResources.reconcile(scope, agent, revision, system_symbol)
+      FleetContracts.reconcile(scope, agent, revision)
     end)
 
     {:noreply, state}
@@ -52,6 +57,7 @@ defmodule SpaceTraders.FleetAllocation.Reconciler do
   def handle_info({:resource_cooldown_recovered, agent_id, system_symbol}, state) do
     with_context(agent_id, fn scope, agent, revision ->
       FleetResources.reconcile(scope, agent, revision, system_symbol)
+      FleetContracts.reconcile(scope, agent, revision)
     end)
 
     {:noreply, state}
@@ -78,6 +84,21 @@ defmodule SpaceTraders.FleetAllocation.Reconciler do
     {:noreply, state}
   end
 
+  def handle_info(:reconcile_contracts, state) do
+    Generation
+    |> where([generation], is_nil(generation.fenced_at) and is_nil(generation.retired_at))
+    |> select([generation], generation.agent_id)
+    |> Repo.all()
+    |> Enum.each(fn agent_id ->
+      with_context(agent_id, fn scope, agent, revision ->
+        FleetContracts.reconcile(scope, agent, revision)
+      end)
+    end)
+
+    Process.send_after(self(), :reconcile_contracts, @contract_refresh_ms)
+    {:noreply, state}
+  end
+
   def handle_info(_message, state), do: {:noreply, state}
 
   defp reconcile(agent_id, system_symbol) do
@@ -89,6 +110,8 @@ defmodule SpaceTraders.FleetAllocation.Reconciler do
         system_symbol,
         ShadowAdmission.snapshot()
       )
+
+      FleetContracts.reconcile(scope, agent, revision)
     end)
   end
 
