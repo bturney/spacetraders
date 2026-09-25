@@ -166,7 +166,7 @@ defmodule SpaceTradersWeb.MissionControlLive do
             <div>
               <p class="text-sm opacity-70">Current work</p>
               <p class="mt-1 font-semibold">
-                {contribution_label(@projection.market_execution.contribution)}
+                {contribution_label(@projection.market_execution.contribution, :market)}
               </p>
             </div>
           </div>
@@ -185,7 +185,10 @@ defmodule SpaceTradersWeb.MissionControlLive do
         >
           <h2 class="text-xl font-bold">Fleet contribution</h2>
           <p class="mt-2">
-            {contribution_label(@projection.market_execution.contribution)} pursuing a non-trading outcome.
+            {contribution_label(
+              @projection.market_execution.contribution,
+              @projection.market_execution.family
+            )} pursuing a non-trading outcome.
           </p>
           <p class="mt-1 text-sm opacity-70">Expected credit change is unknown for this work.</p>
         </section>
@@ -255,7 +258,6 @@ defmodule SpaceTradersWeb.MissionControlLive do
   def handle_info(_message, socket), do: {:noreply, socket}
 
   defp assign_projection(socket) do
-    :ok = OperatorConditions.reconcile_objectives(socket.assigns.current_scope)
     assign(socket, :projection, MissionControl.overview(socket.assigns.current_scope))
   end
 
@@ -393,8 +395,14 @@ defmodule SpaceTradersWeb.MissionControlLive do
   defp expected_label(%{expected_value: value}),
     do: "Expected net credit change #{value}."
 
-  defp contribution_label(%{commitment_count: count}),
-    do: "#{count} Market commitment(s) contributing."
+  defp contribution_label(%{commitment_count: count}, :market),
+    do: "#{count} trading commitment(s) contributing"
+
+  defp contribution_label(%{commitment_count: count}, :resources),
+    do: "#{count} resource acquisition commitment(s)"
+
+  defp contribution_label(%{commitment_count: count}, _),
+    do: "#{count} Fleet commitment(s)"
 
   defp realized_label(nil), do: "Unknown — no completed round trip evidence"
   defp realized_label(amount), do: "#{amount} credits"

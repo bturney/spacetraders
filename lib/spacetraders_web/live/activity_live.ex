@@ -107,7 +107,6 @@ defmodule SpaceTradersWeb.ActivityLive do
 
   defp load_activity(socket) do
     scope = socket.assigns.current_scope
-    :ok = OperatorConditions.reconcile_objectives(scope)
 
     assign(socket,
       activity: MissionControl.activity(scope),

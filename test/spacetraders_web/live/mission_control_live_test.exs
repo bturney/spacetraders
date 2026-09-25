@@ -223,18 +223,20 @@ defmodule SpaceTradersWeb.MissionControlLiveTest do
         symbol: agent.symbol,
         faction: agent.faction,
         replacement_symbols: %{"symbols" => [agent.symbol]},
-        strategy_capable_at: DateTime.utc_now(),
-        objective_progress: %{
-          "0" => %{
-            "change" => -10,
-            "elapsed_seconds" => 60,
-            "horizon_seconds" => 3600,
-            "feasible?" => false
-          }
-        }
+        strategy_capable_at: DateTime.utc_now()
       })
 
     {:ok, view, _html} = live(conn, ~p"/mission-control")
+    refute has_element?(view, "#needs-attention", "Grow credits")
+
+    assert {:ok, _} =
+             SpaceTraders.FleetGeneration.record_objective_progress(scope, generation.id, 0, %{
+               "change" => -10,
+               "elapsed_seconds" => 60,
+               "horizon_seconds" => 3600,
+               "feasible?" => false
+             })
+
     assert has_element?(view, "#needs-attention", "Grow credits")
     [condition] = SpaceTraders.OperatorConditions.unresolved(scope)
     view |> element("#needs-attention button[phx-value-id='#{condition.id}']") |> render_click()
@@ -242,18 +244,13 @@ defmodule SpaceTradersWeb.MissionControlLiveTest do
     {:ok, view, _html} = live(conn, ~p"/mission-control")
     assert has_element?(view, "#needs-attention", "Acknowledged")
 
-    generation
-    |> Ecto.Changeset.change(
-      objective_progress: %{
-        "0" => %{
-          "change" => 20,
-          "elapsed_seconds" => 60,
-          "horizon_seconds" => 3600,
-          "feasible?" => true
-        }
-      }
-    )
-    |> Repo.update!()
+    assert {:ok, _} =
+             SpaceTraders.FleetGeneration.record_objective_progress(scope, generation.id, 0, %{
+               "change" => 20,
+               "elapsed_seconds" => 60,
+               "horizon_seconds" => 3600,
+               "feasible?" => true
+             })
 
     {:ok, view, _html} = live(conn, ~p"/mission-control")
     refute has_element?(view, "#needs-attention", "Grow credits")

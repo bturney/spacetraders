@@ -151,9 +151,69 @@ defmodule SpaceTraders.FleetGeneration do
     )
   end
 
+  @doc "Records a verified Objective evaluation for an active Fleet Generation."
+  def record_objective_progress(
+        %Scope{operator: %Operator{id: operator_id}} = scope,
+        generation_id,
+        index,
+        facts
+      )
+      when is_integer(generation_id) and is_integer(index) and index >= 0 and is_map(facts) do
+    result =
+      Repo.transaction(fn ->
+        generation =
+          Repo.one(
+            from g in Generation,
+              where:
+                g.id == ^generation_id and g.operator_id == ^operator_id and
+                  is_nil(g.fenced_at) and is_nil(g.retired_at),
+              lock: "FOR UPDATE"
+          )
+
+        revision = generation && Repo.get(Revision, generation.fleet_strategy_revision_id)
+
+        case revision && FleetStrategy.evaluate_persisted_objective(revision, index, facts) do
+          {:ok, evaluation} ->
+            progress = Map.put(generation.objective_progress, Integer.to_string(index), facts)
+
+            updated =
+              generation
+              |> Ecto.Changeset.change(objective_progress: progress)
+              |> Repo.update!()
+
+            _ =
+              OperatorConditions.objective_evaluation(
+                scope,
+                updated,
+                revision,
+                index,
+                evaluation,
+                notify?: false
+              )
+
+            updated
+
+          _ ->
+            Repo.rollback(:invalid_objective_progress)
+        end
+      end)
+
+    case result do
+      {:ok, generation} ->
+        OperatorConditions.notify(scope)
+        {:ok, generation}
+
+      error ->
+        error
+    end
+  end
+
+  def record_objective_progress(_scope, _generation_id, _index, _facts),
+    do: {:error, :invalid_objective_progress}
+
   @doc false
   def activate_strategy(
-        %Scope{operator: %Operator{id: operator_id}},
+        %Scope{operator: %Operator{id: operator_id}} = scope,
         %Revision{id: revision_id} = revision
       ) do
     now = DateTime.utc_now()
@@ -181,6 +241,8 @@ defmodule SpaceTraders.FleetGeneration do
     |> select([generation], generation.agent_id)
     |> Repo.all()
     |> Enum.each(&request_intelligence/1)
+
+    :ok = OperatorConditions.resolve_objective_conditions(scope)
 
     :ok
   end
@@ -331,6 +393,16 @@ defmodule SpaceTraders.FleetGeneration do
            end) do
       Enum.each(ship_symbols, &ShipServer.stop/1)
       if generation.fleet_strategy_revision_id, do: request_intelligence(agent.id)
+
+      scope = Scope.for_operator(operator)
+      :ok = OperatorConditions.resolve_objective_conditions(scope)
+
+      generation.objective_progress
+      |> Enum.each(fn {index, facts} ->
+        if is_map(facts) do
+          _ = record_objective_progress(scope, generation.id, String.to_integer(index), facts)
+        end
+      end)
 
       {:ok, %{agent: %{agent | agent_token: nil}, retired_symbols: retired_symbols}}
     end

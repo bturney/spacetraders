@@ -35,6 +35,44 @@ defmodule SpaceTraders.FleetGenerationTest do
     assert OperatorConditions.unresolved(scope) == []
   end
 
+  test "only a complete owned Objective evaluation can create Attention" do
+    owner = operator_fixture()
+    scope = Scope.for_operator(owner)
+    other_scope = Scope.for_operator(operator_fixture())
+    {:ok, _draft} = FleetStrategy.select_preset(scope, "steady_growth")
+    {:ok, revision} = FleetStrategy.activate(scope, FleetStrategy.get(scope).draft_version)
+    agent = agent_fixture(owner, %{agent_token: nil})
+
+    generation =
+      Repo.insert!(%FleetGeneration.Generation{
+        operator_id: owner.id,
+        agent_id: agent.id,
+        fleet_strategy_revision_id: revision.id,
+        number: 1,
+        symbol: agent.symbol,
+        faction: agent.faction,
+        replacement_symbols: %{"symbols" => [agent.symbol]}
+      })
+
+    assert {:error, :invalid_objective_progress} =
+             FleetGeneration.record_objective_progress(scope, generation.id, 0, %{
+               "feasible?" => false
+             })
+
+    facts = %{
+      "change" => -10,
+      "elapsed_seconds" => 60,
+      "horizon_seconds" => 3600,
+      "feasible?" => false
+    }
+
+    assert {:error, :invalid_objective_progress} =
+             FleetGeneration.record_objective_progress(other_scope, generation.id, 0, facts)
+
+    assert Repo.get!(FleetGeneration.Generation, generation.id).objective_progress == %{}
+    assert SpaceTraders.OperatorConditions.unresolved(scope) == []
+  end
+
   test "a definitive Server Reset activates and bootstraps a fallback Fleet Generation" do
     operator = operator_fixture()
     {:ok, operator} = Agent.link_account_token(operator, "ACCOUNT_TOKEN_SECRET")
@@ -63,6 +101,16 @@ defmodule SpaceTraders.FleetGenerationTest do
     assert first_generation.fleet_strategy_revision_id == revision.id
     assert first_generation.starting_credits == 175_000
     assert %DateTime{} = first_generation.strategy_capable_at
+
+    assert {:ok, _} =
+             FleetGeneration.record_objective_progress(scope, first_generation.id, 0, %{
+               "current" => 0,
+               "target" => 10,
+               "expected_seconds_to_target" => 500,
+               "feasible?" => false
+             })
+
+    assert [%{kind: :attention}] = SpaceTraders.OperatorConditions.unresolved(scope)
     first_ship = Repo.get_by!(Ship, symbol: "RESETME-1")
     assert first_ship.agent_id == stale_agent.id
     assert first_ship.ship_type == "UNKNOWN"
@@ -123,6 +171,7 @@ defmodule SpaceTraders.FleetGenerationTest do
     assert %DateTime{} = retired_generation.fenced_at
     assert %DateTime{} = retired_generation.retired_at
     assert FleetStrategy.get(scope).active_revision.id == revision.id
+    assert SpaceTraders.OperatorConditions.unresolved(scope) == []
   end
 
   test "activating Strategy makes an already bootstrapped Fleet Generation Strategy-capable" do

@@ -88,7 +88,7 @@ defmodule SpaceTradersWeb.GenerationsLive do
             {Enum.map_join(recap.revisions, ", ", &"Strategy revision #{&1}")}
           </p>
           <div class="mt-4">
-            <h3 class="font-semibold">Strategic Objectives</h3>
+            <h3 class="font-semibold">Strategic Objectives · last active revision</h3>
             <ul class="mt-2 space-y-1 text-sm">
               <li :for={objective <- recap.objective_outcomes}>
                 {objective.name}: {objective_label(objective.evaluation)}

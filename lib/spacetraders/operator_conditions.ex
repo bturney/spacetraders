@@ -4,12 +4,11 @@ defmodule SpaceTraders.OperatorConditions do
   import Ecto.Query
 
   alias SpaceTraders.Agent.{Operator, Scope}
-  alias SpaceTraders.{FleetGeneration, FleetStrategy}
   alias SpaceTraders.OperatorConditions.Condition
   alias SpaceTraders.Repo
 
   @doc "Records an idempotent condition; resolution preserves the past occurrence."
-  def raise(%Scope{operator: %{id: operator_id}}, key, kind, summary)
+  def raise(%Scope{operator: %{id: operator_id}}, key, kind, summary, opts \\ [])
       when is_binary(key) and kind in [:attention, :intervention] and is_binary(summary) do
     attrs = %{operator_id: operator_id, key: key, kind: kind, summary: summary}
 
@@ -41,7 +40,7 @@ defmodule SpaceTraders.OperatorConditions do
 
     case result do
       {:ok, {condition, changed?}} ->
-        if changed?, do: notify(operator_id)
+        if changed? and Keyword.get(opts, :notify?, true), do: broadcast(operator_id)
         {:ok, condition}
 
       error ->
@@ -49,50 +48,34 @@ defmodule SpaceTraders.OperatorConditions do
     end
   end
 
-  @doc "Reconciles durable Objective evaluations into pinned Attention for the active Generation."
-  def reconcile_objectives(%Scope{} = scope) do
-    revision = FleetStrategy.get(scope).active_revision
+  @doc "Records a verified Objective evaluation as Attention, or resolves it when feasible."
+  def objective_evaluation(%Scope{} = scope, generation, revision, index, evaluation, opts \\ [])
+      when is_integer(index) and index >= 0 do
+    key = "objective-infeasible:#{generation.id}:#{revision.id}:#{index}"
 
-    generation =
-      scope
-      |> FleetGeneration.list_generations()
-      |> Enum.find(&is_nil(&1.retired_at))
+    case evaluation do
+      %{feasible?: false} ->
+        objective = revision.document["objectives"] |> Enum.at(index)
 
-    if revision && generation && generation.fleet_strategy_revision_id == revision.id do
-      current_keys =
-        revision.document
-        |> Map.get("objectives", [])
-        |> Enum.with_index()
-        |> Enum.map(fn {objective, index} ->
-          key = "objective-infeasible:#{generation.id}:#{revision.id}:#{index}"
-          facts = generation.objective_progress[Integer.to_string(index)]
+        raise(
+          scope,
+          key,
+          :attention,
+          "#{objective["objective"]} is not feasible under current evidence.",
+          opts
+        )
 
-          case facts && FleetStrategy.evaluate_persisted_objective(revision, index, facts) do
-            {:ok, %{feasible?: false}} ->
-              {:ok, _} =
-                raise(
-                  scope,
-                  key,
-                  :attention,
-                  "#{objective["objective"]} is not feasible under current evidence."
-                )
-
-            {:ok, %{feasible?: true}} ->
-              resolve(scope, key)
-
-            _ ->
-              :ok
-          end
-
-          key
-        end)
-
-      unresolved(scope)
-      |> Enum.filter(
-        &(String.starts_with?(&1.key, "objective-infeasible:") and &1.key not in current_keys)
-      )
-      |> Enum.each(&resolve(scope, &1.key))
+      %{feasible?: true} ->
+        resolve(scope, key, opts)
     end
+  end
+
+  @doc "Supersedes conditions from the previous Fleet Generation or Strategy Revision."
+  def resolve_objective_conditions(%Scope{} = scope) do
+    scope
+    |> unresolved()
+    |> Enum.filter(&String.starts_with?(&1.key, "objective-infeasible:"))
+    |> Enum.each(&resolve(scope, &1.key))
 
     :ok
   end
@@ -114,7 +97,7 @@ defmodule SpaceTraders.OperatorConditions do
            from c in Condition,
              where: c.id == ^id and c.operator_id == ^operator_id and is_nil(c.resolved_at)
          ) do
-      if count == 1, do: notify(operator_id)
+      if count == 1, do: broadcast(operator_id)
       :ok
     else
       {:error, :condition_unavailable}
@@ -122,7 +105,7 @@ defmodule SpaceTraders.OperatorConditions do
   end
 
   @doc "Resolves the condition after its producer establishes the underlying change."
-  def resolve(%Scope{operator: %{id: operator_id}}, key) when is_binary(key) do
+  def resolve(%Scope{operator: %{id: operator_id}}, key, opts \\ []) when is_binary(key) do
     {count, _} =
       Repo.update_all(
         from(condition in Condition,
@@ -133,7 +116,7 @@ defmodule SpaceTraders.OperatorConditions do
         set: [resolved_at: DateTime.utc_now()]
       )
 
-    if count > 0, do: notify(operator_id)
+    if count > 0 and Keyword.get(opts, :notify?, true), do: broadcast(operator_id)
     :ok
   end
 
@@ -156,7 +139,10 @@ defmodule SpaceTraders.OperatorConditions do
     )
   end
 
-  defp notify(operator_id) do
+  @doc false
+  def notify(%Scope{operator: %{id: operator_id}}), do: broadcast(operator_id)
+
+  defp broadcast(operator_id) do
     Phoenix.PubSub.broadcast(
       SpaceTraders.PubSub,
       "mission_conditions:#{operator_id}",
