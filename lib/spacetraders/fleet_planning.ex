@@ -8,6 +8,8 @@ defmodule SpaceTraders.FleetPlanning do
 
   alias SpaceTraders.Evidence
   alias SpaceTraders.Evidence.Demand
+  alias SpaceTraders.API.Model.Contract
+  alias SpaceTraders.FleetContracts
   alias SpaceTraders.FleetStrategy.Revision
 
   @market_evidence_freshness_seconds 300
@@ -34,7 +36,7 @@ defmodule SpaceTraders.FleetPlanning do
       :validity,
       :alternatives
     ]
-    defstruct @enforce_keys ++ [resource: nil]
+    defstruct @enforce_keys ++ [resource: nil, contract: nil]
 
     @type t :: %__MODULE__{}
   end
@@ -195,6 +197,146 @@ defmodule SpaceTraders.FleetPlanning do
   end
 
   def plan_resources(_revision, _index, _snapshot), do: {:error, :invalid_resource_planning_input}
+
+  @doc "Proposes contract delivery from authoritative remaining work and fresh sourcing evidence."
+  def plan_contracts(%Revision{} = revision, index, %{
+        as_of: %DateTime{} = as_of,
+        contracts: contracts,
+        ships: ships,
+        listings: listings,
+        credits: credits
+      })
+      when is_list(contracts) and is_list(ships) and is_list(listings) and
+             is_integer(credits) and credits >= 0 do
+    with {:ok, objective} <- objective_at(revision, index) do
+      candidates =
+        for true <- [FleetContracts.contract_objective?(objective)],
+            %Contract{
+              accepted: true,
+              fulfilled: false,
+              terms: %{deliver: deliver, deadline: deadline}
+            } = contract <- contracts,
+            {:ok, expires_at, _} <- [DateTime.from_iso8601(deadline || "")],
+            DateTime.compare(expires_at, as_of) == :gt,
+            good <- deliver || [],
+            is_integer(good.units_required) and is_integer(good.units_fulfilled),
+            remaining = max(good.units_required - good.units_fulfilled, 0),
+            remaining > 0,
+            ship <- ships,
+            %{symbol: ship_symbol, cargo: %{capacity: capacity}} <- [ship],
+            is_integer(capacity) and capacity > 0,
+            listing <- listings ++ held_contract_cargo(ship, good, contract, as_of),
+            Map.get(listing, :ship_symbol, ship_symbol) == ship_symbol,
+            listing.trade_symbol == good.trade_symbol,
+            is_binary(listing.waypoint) and is_binary(listing.evidence_id),
+            is_integer(listing.purchase_price) and listing.purchase_price >= 0,
+            is_integer(listing.trade_volume) and listing.trade_volume > 0,
+            %DateTime{} = observed_at <- [listing.observed_at],
+            DateTime.compare(observed_at, as_of) != :gt,
+            DateTime.diff(as_of, observed_at, :second) <= @market_evidence_freshness_seconds,
+            batch = min(remaining, min(capacity, listing.trade_volume)),
+            cost = batch * listing.purchase_price,
+            cost <= credits do
+          %CandidateContribution{
+            id:
+              Evidence.fingerprint(
+                {revision.id, index, contract.id, good.destination_symbol, good.trade_symbol,
+                 ship_symbol, good.units_fulfilled, listing.evidence_id}
+              ),
+            strategy_revision_id: revision.id,
+            objective_index: index,
+            objective: objective,
+            kind: :contract_delivery,
+            trade_symbol: good.trade_symbol,
+            source_waypoint: listing.waypoint,
+            destination_waypoint: good.destination_symbol,
+            expected_outcomes: %{
+              decision_value: 1,
+              contract_id: contract.id,
+              units_remaining: remaining,
+              batch_units: batch
+            },
+            uncertainty: %{shared_progress: :may_change},
+            required_roles: [%{role: :contract_courier, count: 1}],
+            required_capabilities: [
+              %{capability: :cargo_transport, minimum_capacity: batch},
+              %{capability: :resource_ship, value: ship_symbol}
+            ],
+            required_resources: %{ship_count: 1, credits: cost},
+            dependencies: [
+              %{
+                subject: "contracts:#{contract.id}",
+                evidence_id: Evidence.fingerprint(contract),
+                valid_until: expires_at
+              },
+              %{
+                subject: "market:#{listing.waypoint}",
+                evidence_id: listing.evidence_id,
+                valid_until:
+                  DateTime.add(observed_at, @market_evidence_freshness_seconds, :second)
+              }
+            ],
+            validity: %{
+              as_of: as_of,
+              expires_at:
+                Enum.min_by(
+                  [
+                    expires_at,
+                    DateTime.add(observed_at, @market_evidence_freshness_seconds, :second)
+                  ],
+                  &DateTime.to_unix/1
+                )
+            },
+            alternatives: [],
+            contract: %{
+              id: contract.id,
+              units_remaining: remaining,
+              batch_units: batch,
+              max_price: listing.purchase_price,
+              source: Map.get(listing, :source, :market)
+            }
+          }
+        end
+
+      {:ok,
+       result(revision, index, %{as_of: as_of},
+         candidate_contributions:
+           Enum.sort_by(candidates, &{if(&1.contract.source == :cargo, do: 0, else: 1), &1.id})
+       )}
+    end
+  end
+
+  def plan_contracts(_revision, _index, _snapshot), do: {:error, :invalid_contract_planning_input}
+
+  defp held_contract_cargo(
+         %{symbol: ship_symbol, cargo: %{inventory: inventory}},
+         good,
+         contract,
+         as_of
+       )
+       when is_list(inventory) do
+    case Enum.find(inventory, &(&1.symbol == good.trade_symbol)) do
+      %{units: units} when is_integer(units) and units > 0 ->
+        [
+          %{
+            waypoint: good.destination_symbol,
+            trade_symbol: good.trade_symbol,
+            purchase_price: 0,
+            trade_volume: units,
+            observed_at: as_of,
+            evidence_id:
+              Evidence.fingerprint({contract.id, ship_symbol, good.trade_symbol, units}),
+            ship_symbol: ship_symbol,
+            source: :cargo
+          }
+        ]
+
+      _ ->
+        []
+    end
+  end
+
+  defp held_contract_cargo(_, _, _, _), do: []
 
   defp resource_contribution(
          revision,

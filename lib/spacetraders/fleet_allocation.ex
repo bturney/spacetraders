@@ -868,7 +868,18 @@ defmodule SpaceTraders.FleetAllocation do
        claim_count: claim_count,
        reservations: reservations,
        pledges: [],
-       pledge_amount: expected_value,
+       pledge_amount:
+         if(contribution.kind == :contract_delivery,
+           do: contribution.contract.units_remaining,
+           else: expected_value
+         ),
+       pledge_outcome:
+         if(contribution.kind == :contract_delivery,
+           do:
+             {:contract, contribution.contract.id, contribution.destination_waypoint,
+              contribution.trade_symbol},
+           else: {:strategic_objective, contribution.objective_index}
+         ),
        dependencies: contribution.dependencies,
        validity: contribution.validity,
        expected_value: expected_value,
@@ -960,7 +971,7 @@ defmodule SpaceTraders.FleetAllocation do
       if candidate.pledge_amount > 0 and claims != [] do
         [
           %{
-            outcome: {:strategic_objective, candidate.objective_index},
+            outcome: candidate.pledge_outcome,
             amount: candidate.pledge_amount,
             backing: {:claim, hd(claims)}
           }
