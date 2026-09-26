@@ -11,6 +11,7 @@ defmodule SpaceTraders.FleetAllocation.Reconciler do
   alias SpaceTraders.FleetExecution
   alias SpaceTraders.FleetContracts
   alias SpaceTraders.FleetConstruction
+  alias SpaceTraders.FleetAcquisition
   alias SpaceTraders.FleetIntelligence
   alias SpaceTraders.FleetResources
   alias SpaceTraders.FleetGeneration.Generation
@@ -51,6 +52,7 @@ defmodule SpaceTraders.FleetAllocation.Reconciler do
       FleetResources.reconcile(scope, agent, revision, system_symbol)
       FleetContracts.reconcile(scope, agent, revision)
       FleetConstruction.reconcile(scope, agent, revision)
+      FleetAcquisition.reconcile(scope, agent, revision, system_symbol)
     end)
 
     {:noreply, state}
@@ -61,6 +63,7 @@ defmodule SpaceTraders.FleetAllocation.Reconciler do
       FleetResources.reconcile(scope, agent, revision, system_symbol)
       FleetContracts.reconcile(scope, agent, revision)
       FleetConstruction.reconcile(scope, agent, revision)
+      FleetAcquisition.reconcile(scope, agent, revision, system_symbol)
     end)
 
     {:noreply, state}
@@ -117,6 +120,7 @@ defmodule SpaceTraders.FleetAllocation.Reconciler do
 
       FleetContracts.reconcile(scope, agent, revision)
       FleetConstruction.reconcile(scope, agent, revision)
+      FleetAcquisition.reconcile(scope, agent, revision, system_symbol)
     end)
   end
 

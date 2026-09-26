@@ -541,6 +541,26 @@ defmodule SpaceTraders.FleetAllocation do
   def record_decision_outcome(_scope, _episode_id, _classification, _actual_outcomes),
     do: {:error, :invalid_decision_outcome}
 
+  @doc "Records durable non-terminal Decision Episode evidence for recovery."
+  def record_decision_progress(%Scope{operator: %{id: operator_id}}, episode_id, outcomes)
+      when is_integer(episode_id) and is_map(outcomes) do
+    case Repo.update_all(
+           from(episode in StrategyDecisionEpisode,
+             where:
+               episode.id == ^episode_id and episode.operator_id == ^operator_id and
+                 episode.classification == :still_evaluating
+           ),
+           [set: [actual_outcomes: json_safe(outcomes), updated_at: DateTime.utc_now()]],
+           returning: true
+         ) do
+      {1, [episode]} -> {:ok, episode}
+      _ -> {:error, :decision_episode_not_evaluating}
+    end
+  end
+
+  def record_decision_progress(_scope, _episode_id, _outcomes),
+    do: {:error, :invalid_decision_progress}
+
   @doc false
   def record_portfolio_outcome(%Portfolio{} = portfolio, classification, actual_outcomes)
       when classification in [:realized, :partially_realized, :superseded] and

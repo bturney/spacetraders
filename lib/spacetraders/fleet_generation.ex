@@ -659,6 +659,22 @@ defmodule SpaceTraders.FleetGeneration do
     end)
   end
 
+  @doc "Registers a purchased Ship only after authoritative readiness reconciliation."
+  def bootstrap_ship(%Agent{} = agent, %{symbol: symbol}, ship_type)
+      when is_binary(symbol) and symbol != "" and is_binary(ship_type) and ship_type != "" do
+    now = DateTime.utc_now(:second)
+
+    ship = Repo.get_by(Ship, agent_id: agent.id, symbol: symbol)
+
+    if ship do
+      Repo.update(Ecto.Changeset.change(ship, ship_type: ship_type, updated_at: now))
+    else
+      Repo.insert(%Ship{agent_id: agent.id, symbol: symbol, ship_type: ship_type})
+    end
+  end
+
+  def bootstrap_ship(_agent, _ship, _ship_type), do: {:error, :invalid_ship_bootstrap}
+
   defp establish_generation!(
          operator,
          agent,

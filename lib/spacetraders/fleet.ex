@@ -76,31 +76,6 @@ defmodule SpaceTraders.Fleet do
 
   def list_ships(%AgentRecord{}), do: {:error, :agent_token_missing}
 
-  @doc "Registers a Ship only after an authoritative Fleet read establishes its readiness."
-  def bootstrap_ship(%AgentRecord{} = agent, %{symbol: symbol}, ship_type)
-      when is_binary(symbol) and symbol != "" and is_binary(ship_type) and ship_type != "" do
-    now = DateTime.utc_now(:second)
-
-    ship = Repo.get_by(Ship, agent_id: agent.id, symbol: symbol)
-
-    result =
-      if ship do
-        Repo.update(Ecto.Changeset.change(ship, ship_type: ship_type, updated_at: now))
-      else
-        Repo.insert(%Ship{agent_id: agent.id, symbol: symbol, ship_type: ship_type})
-      end
-
-    case result do
-      {:ok, ship} -> {:ok, ship}
-      {:error, changeset} -> {:error, changeset}
-    end
-  end
-
-  def bootstrap_ship(%AgentRecord{} = agent, %{symbol: symbol, type: ship_type}),
-    do: bootstrap_ship(agent, %{symbol: symbol}, ship_type)
-
-  def bootstrap_ship(_agent, _ship), do: {:error, :invalid_ship_bootstrap}
-
   @doc """
   Reads everything the Fleet command panel displays for an Agent.
 

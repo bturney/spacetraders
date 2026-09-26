@@ -14,6 +14,7 @@ defmodule SpaceTraders.FleetAcquisitionTest do
 
   test "purchases from a fresh Ship Offer then bootstraps readiness before the new Ship can be claimed" do
     {scope, agent, revision} = generation()
+    {:ok, readiness_once} = Elixir.Agent.start_link(fn -> :unavailable end)
 
     Intelligence.observe_waypoint(agent, Waypoint.from_json(waypoint()))
 
@@ -64,29 +65,55 @@ defmodule SpaceTraders.FleetAcquisitionTest do
           })
 
         {"GET", "/v2/my/ships/ACQUIRE-2"} ->
-          Req.Test.json(conn, %{
-            "data" =>
-              ship_body("ACQUIRE-2", %{
-                "registration" => %{
-                  "name" => "ACQUIRE-2",
-                  "factionSymbol" => "COSMIC",
-                  "role" => "HAULER"
-                }
+          case Elixir.Agent.get_and_update(readiness_once, fn
+                 :unavailable -> {:unavailable, :available}
+                 :available -> {:available, :available}
+               end) do
+            :unavailable ->
+              Req.Test.transport_error(conn, :timeout)
+
+            :available ->
+              Req.Test.json(conn, %{
+                "data" =>
+                  ship_body("ACQUIRE-2", %{
+                    "registration" => %{
+                      "name" => "ACQUIRE-2",
+                      "factionSymbol" => "COSMIC",
+                      "role" => "HAULER"
+                    }
+                  })
+                  |> Map.update!("engine", &Map.put(&1, "speed", 30))
               })
-          })
+          end
       end
     end)
 
-    assert {:ok, %{ship: %Ship{symbol: "ACQUIRE-2"}, readiness: %{engine: %{speed: 1}}}} =
+    assert {:error, {:ship_acquisition_unavailable, _}} =
+             FleetAcquisition.reconcile(scope, agent, revision, "X1-UX81")
+
+    assert {:ok, %{ship: %Ship{symbol: "ACQUIRE-2"}, readiness: %{engine: %{speed: 30}}}} =
              FleetAcquisition.reconcile(scope, agent, revision, "X1-UX81")
 
     assert {:error, :no_current_ship_claim} =
              FleetAllocation.current_ship_claim(agent, "ACQUIRE-2")
 
-    assert [%{reservations: %{"credits" => 10_000}}] =
-             FleetAllocation.current_portfolio(scope, agent).commitments
+    assert nil == FleetAllocation.current_portfolio(scope, agent)
 
-    assert [%{actual_outcomes: %{"ship_symbol" => "ACQUIRE-2"}}] =
+    assert [%{reservations: %{"credits" => 10_000}, unwind_state: :released}] =
+             Repo.all(SpaceTraders.FleetAllocation.Commitment)
+
+    assert [
+             %{
+               classification: :realized,
+               actual_outcomes: %{
+                 "purchase" => %{
+                   "ship_symbol" => "ACQUIRE-2",
+                   "ship_type" => "SHIP_LIGHT_HAULER"
+                 },
+                 "readiness" => "ready"
+               }
+             }
+           ] =
              Repo.all(SpaceTraders.FleetAllocation.StrategyDecisionEpisode)
   end
 
