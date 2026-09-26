@@ -153,7 +153,7 @@ defmodule SpaceTraders.FleetContracts do
          {:ok, overview} <- Agent.agent_overview(agent),
          %Generation{} = generation <- current_generation(agent),
          true <- generation.fleet_strategy_revision_id == revision.id || {:error, :strategy},
-         [] <- Intents.current(agent) do
+         [] <- active_contract_intents(scope, agent) do
       now = DateTime.utc_now()
       accepted = Enum.filter(contracts, &Contracts.active?/1)
 
@@ -162,39 +162,22 @@ defmodule SpaceTraders.FleetContracts do
           FleetExecution.continue_after_intent(agent, commitment, portfolio, buy)
 
         nil ->
-          cond do
-            ready = Enum.find(accepted, &Contracts.ready?/1) ->
-              fulfill_if_ready(agent, revision, ready.id)
+          case pending_transfer(scope, agent) do
+            {producer, portfolio, transfer} ->
+              FleetExecution.continue_after_intent(agent, producer, portfolio, transfer)
 
-            accepted != [] ->
-              activate_delivery(
+            nil ->
+              reconcile_contract_work(
                 scope,
                 agent,
                 revision,
                 generation,
+                contracts,
                 accepted,
                 ships,
                 overview.credits,
                 now
               )
-
-            offer = Enum.find(contracts, &Contracts.acceptable?/1) ->
-              case estimate_acceptance(
-                     offer,
-                     sourcing_listings(agent, now),
-                     ships,
-                     overview.credits,
-                     now
-                   ) do
-                {:ok, evidence} -> accept_if_admissible(agent, revision, offer.id, evidence)
-                error -> error
-              end
-
-            true ->
-              case Enum.find(ships, &(&1.nav.waypoint_symbol == agent.headquarters)) do
-                %{symbol: symbol} -> negotiate_if_available(agent, revision, symbol)
-                _ -> {:error, :no_contract_negotiator}
-              end
           end
       end
     else
@@ -202,6 +185,116 @@ defmodule SpaceTraders.FleetContracts do
       false -> {:error, :strategy}
       nil -> {:error, :generation_unavailable}
       error -> error
+    end
+  end
+
+  defp active_contract_intents(scope, agent) do
+    case FleetAllocation.current_portfolio(scope, agent) do
+      %{commitments: commitments} ->
+        contract_ids =
+          commitments
+          |> Enum.filter(&contract_commitment?/1)
+          |> MapSet.new(& &1.id)
+
+        Enum.filter(Intents.current(agent), &MapSet.member?(contract_ids, &1.fleet_commitment_id))
+
+      _ ->
+        Intents.current(agent)
+    end
+  end
+
+  defp contract_commitment?(commitment) do
+    Enum.any?(commitment.dependencies, fn dep ->
+      String.starts_with?(dep["subject"] || "", "contracts:")
+    end) or
+      Enum.any?(commitment.pledges, &match?(%{"outcome" => ["contract" | _]}, &1))
+  end
+
+  defp reconcile_contract_work(
+         scope,
+         agent,
+         revision,
+         generation,
+         contracts,
+         accepted,
+         ships,
+         credits,
+         now
+       ) do
+    cond do
+      ready = Enum.find(accepted, &Contracts.ready?/1) ->
+        fulfill_if_ready(agent, revision, ready.id)
+
+      accepted != [] ->
+        activate_delivery(
+          scope,
+          agent,
+          revision,
+          generation,
+          accepted,
+          ships,
+          credits,
+          now
+        )
+
+      offer = Enum.find(contracts, &Contracts.acceptable?/1) ->
+        case estimate_acceptance(
+               offer,
+               sourcing_listings(agent, now),
+               ships,
+               credits,
+               now
+             ) do
+          {:ok, evidence} -> accept_if_admissible(agent, revision, offer.id, evidence)
+          error -> error
+        end
+
+      true ->
+        case Enum.find(ships, &(&1.nav.waypoint_symbol == agent.headquarters)) do
+          %{symbol: symbol} -> negotiate_if_available(agent, revision, symbol)
+          _ -> {:error, :no_contract_negotiator}
+        end
+    end
+  end
+
+  defp pending_transfer(scope, agent) do
+    case FleetAllocation.current_portfolio(scope, agent) do
+      %{commitments: commitments} = portfolio ->
+        Enum.find_value(commitments, fn commitment ->
+          transfer =
+            Repo.one(
+              from intent in Intent,
+                where: intent.fleet_commitment_id == ^commitment.id and intent.type == "transfer",
+                order_by: [desc: intent.id],
+                limit: 1
+            )
+
+          case transfer do
+            %Intent{
+              status: "completed",
+              parameters: %{"transfer_delivery" => %{"type" => "contract"}}
+            } ->
+              hauler =
+                Enum.find(commitments, fn other ->
+                  Enum.any?(other.dependencies, &(&1["candidate_id"] == commitment.candidate_id))
+                end)
+
+              if hauler &&
+                   Repo.exists?(
+                     from intent in Intent,
+                       where:
+                         intent.fleet_commitment_id == ^hauler.id and intent.type == "deliver"
+                   ),
+                 do: nil,
+                 else: {commitment, portfolio, transfer}
+
+            _ ->
+              nil
+          end
+        end)
+
+      _ ->
+        nil
     end
   end
 
@@ -372,10 +465,21 @@ defmodule SpaceTraders.FleetContracts do
     listings = sourcing_listings(agent, as_of)
     objective_index = Enum.find_index(revision.document["objectives"], &contract_objective?/1)
 
-    available_ships =
-      Enum.reject(ships, &(&1.symbol in ShipReservation.reserved_symbols(agent.id)))
+    current = FleetAllocation.current_portfolio(scope, agent)
+    retained = if current, do: Enum.reject(current.commitments, &contract_commitment?/1), else: []
+    occupied = MapSet.new(Enum.flat_map(retained, & &1.claims))
 
-    with {:ok, %{candidate_contributions: [_ | _] = candidates}} <-
+    credits = max(credits - Enum.sum_by(retained, &Map.get(&1.reservations, "credits", 0)), 0)
+
+    available_ships =
+      Enum.reject(ships, fn ship ->
+        ship.symbol in ShipReservation.reserved_symbols(agent.id) or
+          MapSet.member?(occupied, ship.symbol)
+      end)
+
+    failed = FleetAllocation.failed_candidate_ids(generation.id)
+
+    with {:ok, %{candidate_contributions: proposals}} <-
            FleetPlanning.plan_contracts(revision, objective_index, %{
              as_of: as_of,
              contracts: contracts,
@@ -383,6 +487,9 @@ defmodule SpaceTraders.FleetContracts do
              listings: listings,
              credits: credits
            }),
+         candidates <-
+           Enum.reject(proposals, &MapSet.member?(failed, &1.id)),
+         [_ | _] <- candidates,
          {:ok, selection} <-
            FleetAllocation.select_portfolio(revision, candidates, %{
              as_of: as_of,
@@ -390,60 +497,79 @@ defmodule SpaceTraders.FleetContracts do
                Enum.map(available_ships, fn ship ->
                  %{
                    resource: ship.symbol,
-                   roles: [:contract_courier],
+                   roles: [:contract_courier, :cargo_producer],
                    capabilities: %{
                      cargo_transport: ship.cargo.capacity,
                      resource_ship: ship.symbol
                    }
                  }
                end),
-             reservations: %{credits: credits}
+             reservations:
+               Enum.reduce(available_ships, %{credits: credits}, fn ship, capacities ->
+                 capacities
+                 |> Map.put(
+                   "cargo_capacity:#{ship.symbol}",
+                   ship.cargo.capacity - ship.cargo.units
+                 )
+                 |> then(fn capacities ->
+                   Enum.reduce(ship.cargo.inventory || [], capacities, fn item, capacities ->
+                     Map.put(capacities, "cargo:#{ship.symbol}:#{item.symbol}", item.units)
+                   end)
+                 end)
+               end),
+             outcome_remaining:
+               candidates
+               |> Enum.filter(&(&1.kind == :contract_delivery))
+               |> Map.new(fn candidate ->
+                 {{:contract, candidate.contract.id, candidate.destination_waypoint,
+                   candidate.trade_symbol}, candidate.expected_outcomes.units_remaining}
+               end)
            }),
-         [chosen | _] <- selection.commitments,
+         [chosen | _] <- selected_delivery_commitments(selection, candidates),
          candidate <- Enum.find(candidates, &(&1.id == chosen.candidate_id)),
          {:ok, portfolio} <-
-           FleetAllocation.publish_portfolio(
+           publish_delivery_selection(
              scope,
-             generation.id,
-             %{selection | source_version: generation.allocation_version, commitments: [chosen]},
-             %{
-               evidence_references: candidate.dependencies,
-               expectations: candidate.expected_outcomes,
-               calibration_version: "contracts-v1"
-             }
+             generation,
+             revision,
+             current,
+             selection,
+             candidates,
+             candidate
            ),
-         [commitment] <- portfolio.commitments,
+         %SpaceTraders.FleetAllocation.Commitment{} = commitment <-
+           Enum.find(portfolio.commitments, &(&1.candidate_id == chosen.candidate_id)),
          [ship_symbol] <- commitment.claims do
       result =
-        if candidate.contract.source == :cargo do
-          Intents.request_commitment_contract_delivery(
-            agent,
-            commitment,
-            portfolio,
-            ship_symbol,
-            %{
-              contract_id: candidate.contract.id,
-              destination_waypoint: candidate.destination_waypoint,
-              trade_symbol: candidate.trade_symbol,
-              units: candidate.contract.batch_units
-            }
-          )
-        else
-          floor =
-            case StandingAuthority.credit_floor(revision) do
-              {:ok, amount} -> amount
-              _ -> 0
-            end
+        if candidate.kind == :cargo_transfer do
+          hauler =
+            Enum.find(portfolio.commitments, fn other ->
+              Enum.any?(other.dependencies, &(&1["candidate_id"] == candidate.id))
+            end)
 
-          Intents.request_commitment_round_trip(agent, commitment, portfolio, ship_symbol, %{
-            source_waypoint: candidate.source_waypoint,
-            destination_waypoint: candidate.destination_waypoint,
+          delivery = Enum.find(candidates, &(&1.id == hauler.candidate_id))
+
+          Intents.request_commitment_transfer(agent, commitment, hauler, portfolio, %{
+            source_ship: ship_symbol,
+            target_ship: hd(hauler.claims),
             trade_symbol: candidate.trade_symbol,
-            units: candidate.contract.batch_units,
-            purchase_price: candidate.contract.max_price,
-            reserve_credits: floor + 750,
-            contract_id: candidate.contract.id
+            units: candidate.transfer.units,
+            delivery: %{
+              type: "contract",
+              contract_id: delivery.contract.id,
+              waypoint: delivery.destination_waypoint,
+              trade_symbol: delivery.trade_symbol
+            }
           })
+        else
+          dispatch_contract_delivery(
+            agent,
+            revision,
+            portfolio,
+            commitment,
+            ship_symbol,
+            candidate
+          )
         end
 
       case result do
@@ -455,9 +581,148 @@ defmodule SpaceTraders.FleetContracts do
       end
     else
       nil -> {:error, :contract_delivery_unavailable}
-      [] -> {:error, :contract_delivery_unavailable}
+      [] -> release_failed_delivery(scope, generation, revision, current)
       {:ok, %{candidate_contributions: []}} -> {:error, :contract_sourcing_unavailable}
+      {:error, :delivery_already_committed} -> {:ok, %{action: :retained, portfolio: current}}
       error -> error
+    end
+  end
+
+  defp release_failed_delivery(scope, generation, revision, current) do
+    failed = FleetAllocation.failed_candidate_ids(generation.id)
+
+    affected =
+      if current,
+        do:
+          current.commitments
+          |> Enum.filter(&contract_commitment?/1)
+          |> Enum.map(& &1.candidate_id)
+          |> Enum.filter(&MapSet.member?(failed, &1)),
+        else: []
+
+    if affected != [] do
+      FleetAllocation.replan_subgraph(
+        scope,
+        generation.id,
+        %{
+          revision_id: revision.id,
+          source_version: generation.allocation_version,
+          commitments: [],
+          rejected: []
+        },
+        affected,
+        %{
+          evidence_references: [],
+          expectations: %{reason: :failed_contract_dependency},
+          calibration_version: "contracts-v1"
+        }
+      )
+    else
+      {:error, :contract_delivery_unavailable}
+    end
+  end
+
+  defp publish_delivery_selection(
+         scope,
+         generation,
+         _revision,
+         current,
+         selection,
+         candidates,
+         candidate
+       ) do
+    chosen = selected_delivery_commitments(selection, candidates)
+
+    if current && chosen != [] &&
+         Enum.all?(chosen, fn proposed ->
+           Enum.any?(current.commitments, &(&1.candidate_id == proposed.candidate_id))
+         end) do
+      {:error, :delivery_already_committed}
+    else
+      selection = %{
+        selection
+        | source_version: generation.allocation_version,
+          commitments: chosen
+      }
+
+      decision = %{
+        evidence_references: candidate.dependencies,
+        expectations: candidate.expected_outcomes,
+        calibration_version: "contracts-v1"
+      }
+
+      if current do
+        affected =
+          current.commitments
+          |> Enum.filter(&contract_commitment?/1)
+          |> Enum.map(& &1.candidate_id)
+
+        FleetAllocation.replan_subgraph(
+          scope,
+          generation.id,
+          selection,
+          if(affected == [], do: [candidate.id], else: affected),
+          decision
+        )
+      else
+        FleetAllocation.publish_portfolio(scope, generation.id, selection, decision)
+      end
+    end
+  end
+
+  defp selected_delivery_commitments(selection, candidates) do
+    pairs =
+      for producer <- selection.commitments,
+          Enum.any?(candidates, &(&1.id == producer.candidate_id and &1.kind == :cargo_transfer)),
+          hauler <- selection.commitments,
+          Enum.any?(hauler.dependencies, &(&1[:candidate_id] == producer.candidate_id)),
+          do: [producer, hauler]
+
+    case pairs do
+      [pair | _] ->
+        pair
+
+      [] ->
+        Enum.reject(selection.commitments, fn commitment ->
+          Enum.any?(
+            candidates,
+            &(&1.id == commitment.candidate_id and &1.kind == :cargo_transfer)
+          )
+        end)
+        |> Enum.take(1)
+    end
+  end
+
+  defp dispatch_contract_delivery(agent, revision, portfolio, commitment, ship_symbol, candidate) do
+    if candidate.contract.source == :cargo do
+      Intents.request_commitment_contract_delivery(
+        agent,
+        commitment,
+        portfolio,
+        ship_symbol,
+        %{
+          contract_id: candidate.contract.id,
+          destination_waypoint: candidate.destination_waypoint,
+          trade_symbol: candidate.trade_symbol,
+          units: candidate.contract.batch_units
+        }
+      )
+    else
+      floor =
+        case StandingAuthority.credit_floor(revision) do
+          {:ok, amount} -> amount
+          _ -> 0
+        end
+
+      Intents.request_commitment_round_trip(agent, commitment, portfolio, ship_symbol, %{
+        source_waypoint: candidate.source_waypoint,
+        destination_waypoint: candidate.destination_waypoint,
+        trade_symbol: candidate.trade_symbol,
+        units: candidate.contract.batch_units,
+        purchase_price: candidate.contract.max_price,
+        reserve_credits: floor + 750,
+        contract_id: candidate.contract.id
+      })
     end
   end
 
@@ -592,7 +857,10 @@ defmodule SpaceTraders.FleetContracts do
                 do:
                   {:cont,
                    {:ok,
-                    [%{outcome: pledge["outcome"], amount: min(amount, remaining)} | projected]}},
+                    [
+                      %{outcome: pledge["outcome"], amount: amount, remaining: remaining}
+                      | projected
+                    ]}},
                 else: {:halt, {:error, :contract_progress_unavailable}}
 
             nil ->
@@ -606,8 +874,11 @@ defmodule SpaceTraders.FleetContracts do
           {:cont, {:ok, projected}}
       end)
       |> case do
-        {:ok, projected} -> {:ok, Enum.reverse(projected)}
-        error -> error
+        {:ok, projected} ->
+          {:ok, projected |> Enum.reverse() |> FleetAllocation.project_shared_pledges()}
+
+        error ->
+          error
       end
     else
       nil -> {:ok, []}

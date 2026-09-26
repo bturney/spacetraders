@@ -258,6 +258,35 @@ defmodule SpaceTraders.FleetExecution do
   def continue_after_intent(agent, commitment, %Portfolio{} = portfolio, intent) do
     case intent do
       %{
+        type: "transfer",
+        status: "completed",
+        parameters: %{
+          "target_ship" => target_ship,
+          "transfer_delivery" => %{"type" => type} = delivery
+        },
+        last_action_result: %{"units" => units}
+      }
+      when is_integer(units) and units > 0 ->
+        with {:ok, claim} <- FleetAllocation.current_ship_claim(agent, target_ship),
+             true <- claim.portfolio_id == portfolio.id,
+             %Commitment{} = hauler <- Repo.get(Commitment, claim.commitment_id),
+             true <-
+               Enum.any?(hauler.dependencies, &(&1["candidate_id"] == commitment.candidate_id)) do
+          dispatch_transferred_delivery(
+            agent,
+            portfolio,
+            hauler,
+            target_ship,
+            intent,
+            type,
+            delivery,
+            units
+          )
+        else
+          _ -> {:error, :transfer_dependency_unavailable}
+        end
+
+      %{
         type: "buy",
         status: "completed",
         last_action_result: %{"units" => 0},
@@ -398,6 +427,66 @@ defmodule SpaceTraders.FleetExecution do
 
       _ ->
         :ok
+    end
+  end
+
+  defp dispatch_transferred_delivery(
+         agent,
+         portfolio,
+         hauler,
+         ship_symbol,
+         transfer,
+         type,
+         delivery,
+         units
+       ) do
+    ship = Repo.get_by!(SpaceTraders.Fleet.Ship, agent_id: agent.id, symbol: ship_symbol)
+
+    existing =
+      Repo.one(
+        from intent in SpaceTraders.Fleet.Intent,
+          where:
+            intent.ship_id == ^ship.id and intent.fleet_commitment_id == ^hauler.id and
+              intent.type == "deliver" and intent.inserted_at >= ^transfer.inserted_at,
+          order_by: [desc: intent.id],
+          limit: 1
+      )
+
+    if existing do
+      {:ok, existing}
+    else
+      result =
+        case type do
+          "construction" ->
+            Intents.request_commitment_construction_delivery(
+              agent,
+              hauler,
+              portfolio,
+              ship_symbol,
+              %{
+                system: delivery["system"],
+                waypoint: delivery["waypoint"],
+                trade_symbol: delivery["trade_symbol"],
+                units: units
+              }
+            )
+
+          "contract" ->
+            Intents.request_commitment_contract_delivery(agent, hauler, portfolio, ship_symbol, %{
+              contract_id: delivery["contract_id"],
+              destination_waypoint: delivery["waypoint"],
+              trade_symbol: delivery["trade_symbol"],
+              units: units
+            })
+        end
+
+      case result do
+        {:ok, %{status: "completed"} = delivered} ->
+          continue_after_intent(agent, hauler, portfolio, delivered)
+
+        other ->
+          other
+      end
     end
   end
 

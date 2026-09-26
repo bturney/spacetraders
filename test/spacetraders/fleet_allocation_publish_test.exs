@@ -80,6 +80,143 @@ defmodule SpaceTraders.FleetAllocationPublishTest do
     refute_receive {:outbox, ^notification_id, "fleet_commitment_portfolio_published", _payload}
   end
 
+  test "cannot publish a hauler Pledge after its producer is removed" do
+    %{scope: scope, generation: generation, revision: revision} = allocation_fixture()
+    selection = selection(revision)
+    [commitment] = selection.commitments
+
+    dangling = %{
+      commitment
+      | dependencies: [%{id: "cargo", kind: :acquisition, candidate_id: "producer", amount: 4}],
+        pledges: [
+          %{outcome: {:construction, "X1-A2", "IRON"}, amount: 4, backing: {:dependency, "cargo"}}
+        ]
+    }
+
+    assert {:error, :invalid_publication} =
+             FleetAllocation.publish_portfolio(
+               scope,
+               generation.id,
+               %{selection | commitments: [dangling]},
+               decision()
+             )
+
+    assert Repo.aggregate(Portfolio, :count) == 0
+  end
+
+  test "failed dependency replans only its subgraph while unrelated Ship execution stays claimed" do
+    %{scope: scope, agent: agent, generation: generation, revision: revision} =
+      allocation_fixture()
+
+    {:ok, independent_ship} = Fleet.record_ship(agent, "SHIP-2", "SHIP_PROBE")
+    {:ok, _hauler_ship} = Fleet.record_ship(agent, "SHIP-3", "SHIP_PROBE")
+    original = selection(revision)
+    [original_changed] = original.commitments
+
+    changed = %{
+      original_changed
+      | pledges: [
+          %{
+            outcome: {:cargo_transfer, "SHIP-1", "SHIP-3", "IRON"},
+            amount: 4,
+            backing: {:claim, "SHIP-1"}
+          }
+        ]
+    }
+
+    dependent = %{
+      changed
+      | id: {revision.id, "dependent"},
+        candidate_id: "dependent",
+        claims: ["SHIP-3"],
+        pledges: [
+          %{
+            outcome: {:construction, "X1-A2", "IRON"},
+            amount: 4,
+            backing: {:dependency, "cargo"}
+          }
+        ],
+        dependencies: [
+          %{id: "cargo", kind: :acquisition, candidate_id: changed.candidate_id, amount: 4}
+        ]
+    }
+
+    independent = %{
+      changed
+      | id: {revision.id, "independent"},
+        candidate_id: "independent",
+        claims: ["SHIP-2"],
+        pledges: []
+    }
+
+    assert {:ok, portfolio} =
+             FleetAllocation.publish_portfolio(
+               scope,
+               generation.id,
+               %{original | commitments: [changed, dependent, independent]},
+               decision()
+             )
+
+    retained = Enum.find(portfolio.commitments, &(&1.candidate_id == "independent"))
+
+    running =
+      Repo.insert!(%Intent{
+        ship_id: independent_ship.id,
+        caller: "commitment",
+        fleet_commitment_id: retained.id,
+        fleet_commitment_portfolio_id: portfolio.id,
+        fleet_commitment_portfolio_version: portfolio.version,
+        type: "navigate",
+        status: "waiting",
+        target_waypoint: "X1-A2"
+      })
+
+    assert {:ok, updated} =
+             FleetAllocation.replan_subgraph(
+               scope,
+               generation.id,
+               %{original | source_version: 1, commitments: [independent]},
+               [changed.candidate_id],
+               decision()
+             )
+
+    assert updated.id == portfolio.id
+    assert updated.version == portfolio.version
+    assert [%{id: retained_id}] = updated.commitments
+    assert retained_id == retained.id
+
+    assert {:ok, %{commitment_id: ^retained_id}} =
+             FleetAllocation.current_ship_claim(agent, "SHIP-2")
+
+    assert {:error, :no_current_ship_claim} = FleetAllocation.current_ship_claim(agent, "SHIP-1")
+    assert {:error, :no_current_ship_claim} = FleetAllocation.current_ship_claim(agent, "SHIP-3")
+    assert Repo.get!(Intent, running.id).status == "waiting"
+    assert Enum.count(Repo.all(Commitment), &(&1.unwind_state == :released)) == 2
+
+    assert {:ok, restored} =
+             FleetAllocation.replan_subgraph(
+               scope,
+               generation.id,
+               %{original | source_version: 2, commitments: [changed, dependent, independent]},
+               [changed.candidate_id],
+               decision()
+             )
+
+    assert Enum.sort(Enum.map(restored.commitments, & &1.candidate_id)) ==
+             ["candidate-1", "dependent", "independent"]
+
+    assert Enum.all?(
+             Enum.reject(restored.commitments, &(&1.candidate_id == "independent")),
+             fn c ->
+               %StrategyDecisionEpisode{source_version: 2} =
+                 Repo.get!(StrategyDecisionEpisode, c.replan_decision_episode_id)
+             end
+           )
+
+    assert {:ok, %{commitment_id: ^retained_id}} =
+             FleetAllocation.current_ship_claim(agent, "SHIP-2")
+  end
+
   test "boot recovery leaves upstream sales for authoritative market-effect reconciliation" do
     %{agent: agent, generation: generation, revision: revision, scope: scope} =
       allocation_fixture()

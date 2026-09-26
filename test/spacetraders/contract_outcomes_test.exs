@@ -169,6 +169,44 @@ defmodule SpaceTraders.ContractOutcomesTest do
     assert candidate.contract.source == :cargo
   end
 
+  test "Contract delivery can depend on a co-located producer's Cargo transfer" do
+    revision = %Revision{
+      id: 42,
+      document: %{"objectives" => [%{"objective" => "Fulfil contracts"}]}
+    }
+
+    nav = %{waypoint_symbol: "X1-A1", status: "DOCKED"}
+
+    ships = [
+      %{
+        symbol: "SOURCE",
+        nav: nav,
+        cargo: %{capacity: 10, units: 4, inventory: [%{symbol: "IRON_ORE", units: 4}]}
+      },
+      %{symbol: "HAULER", nav: nav, cargo: %{capacity: 5, units: 0, inventory: []}}
+    ]
+
+    assert {:ok, %{candidate_contributions: candidates}} =
+             FleetPlanning.plan_contracts(revision, 0, %{
+               as_of: @now,
+               contracts: [contract(7)],
+               ships: ships,
+               listings: [],
+               credits: 1000
+             })
+
+    assert producer = Enum.find(candidates, &(&1.kind == :cargo_transfer))
+
+    assert hauler =
+             Enum.find(
+               candidates,
+               &(&1.kind == :contract_delivery and &1.contract.source == :transfer)
+             )
+
+    assert producer.transfer.units == 3
+    assert Enum.any?(hauler.dependencies, &(Map.get(&1, :candidate_id) == producer.id))
+  end
+
   test "acceptance estimates account for repeated Cargo batches and source capacity" do
     listing = %{
       waypoint: "X1-A1",

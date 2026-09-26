@@ -62,6 +62,42 @@ defmodule SpaceTraders.ConstructionOutcomesTest do
     assert candidate.required_resources.credits == 750
   end
 
+  test "co-located producer and hauler propose an explicit transfer-backed delivery" do
+    producer =
+      Map.merge(@ship, %{
+        nav: %{waypoint_symbol: "X1-A1", status: "DOCKED"},
+        cargo: %{capacity: 20, units: 4, inventory: [%{symbol: "IRON", units: 4}]}
+      })
+
+    hauler =
+      Map.merge(@ship, %{
+        symbol: "SHIP-2",
+        nav: %{waypoint_symbol: "X1-A1", status: "DOCKED"},
+        cargo: %{capacity: 5, units: 0, inventory: []}
+      })
+
+    assert {:ok, %{candidate_contributions: candidates}} =
+             FleetPlanning.plan_construction(@revision, 0, %{
+               snapshot(7)
+               | ships: [producer, hauler],
+                 listings: []
+             })
+
+    assert transfer = Enum.find(candidates, &(&1.kind == :cargo_transfer))
+
+    assert delivery =
+             Enum.find(
+               candidates,
+               &(&1.kind == :construction_delivery and &1.construction[:source] == :transfer)
+             )
+
+    assert transfer.transfer == %{source_ship: "SHIP-1", target_ship: "SHIP-2", units: 3}
+    assert Enum.any?(delivery.dependencies, &(Map.get(&1, :candidate_id) == transfer.id))
+    assert delivery.expected_outcomes.batch_units == 3
+    assert transfer.required_resources["cargo:SHIP-1:IRON"] == 3
+    assert delivery.required_resources["cargo_capacity:SHIP-2"] == 3
+  end
+
   test "a batch pledges only what its protected Ship and credits can supply" do
     ship = %{@ship | cargo: %{capacity: 5, units: 0, inventory: []}}
 

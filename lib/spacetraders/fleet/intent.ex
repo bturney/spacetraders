@@ -70,6 +70,7 @@ defmodule SpaceTraders.Fleet.Intent do
       "buy",
       "sell",
       "deliver",
+      "transfer",
       "install_module",
       "remove_module"
     ])

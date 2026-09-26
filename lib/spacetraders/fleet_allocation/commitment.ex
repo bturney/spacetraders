@@ -17,6 +17,8 @@ defmodule SpaceTraders.FleetAllocation.Commitment do
 
     belongs_to :fleet_commitment_portfolio, SpaceTraders.FleetAllocation.Portfolio
 
+    belongs_to :replan_decision_episode, SpaceTraders.FleetAllocation.StrategyDecisionEpisode
+
     timestamps(type: :utc_datetime_usec, updated_at: false)
   end
 end
