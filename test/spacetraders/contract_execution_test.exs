@@ -776,8 +776,40 @@ defmodule SpaceTraders.ContractExecutionTest do
   end
 
   test "current Pledges shrink when another Agent advances the Contract" do
-    {agent, _ship, _portfolio, _commitment} = claimed_contract_ship()
+    {agent, _ship, portfolio, _commitment} = claimed_contract_ship()
     operator = Repo.get!(SpaceTraders.Agent.Operator, agent.operator_id)
+
+    second =
+      Repo.insert!(%Ship{symbol: "CONTRACT-HAULER", ship_type: "SHIP_PROBE", agent_id: agent.id})
+
+    other =
+      Repo.insert!(%Commitment{
+        fleet_commitment_portfolio_id: portfolio.id,
+        candidate_id: "other-hauler",
+        objective_index: 0,
+        claims: [second.symbol],
+        pledges: [
+          %{
+            "outcome" => ["contract", "ctr-1", "X1-UX81-A2", "IRON_ORE"],
+            "amount" => 1,
+            "backing" => ["claim", second.symbol]
+          }
+        ],
+        reservations: %{},
+        dependencies: [],
+        expected_value: 1.0,
+        unwind_cost: 0.0,
+        decisive_reason: "shared delivery"
+      })
+
+    Repo.insert_all("fleet_commitment_claims", [
+      %{
+        fleet_commitment_portfolio_id: portfolio.id,
+        fleet_commitment_id: other.id,
+        resource: second.symbol
+      }
+    ])
+
     {:ok, progress} = Elixir.Agent.start_link(fn -> 4 end)
 
     Req.Test.stub(SpaceTraders.API, fn conn ->
@@ -807,12 +839,12 @@ defmodule SpaceTraders.ContractExecutionTest do
       })
     end)
 
-    assert {:ok, [%{amount: 1}]} =
+    assert {:ok, [%{amount: 1}, %{amount: 0}]} =
              FleetContracts.current_pledges(Scope.for_operator(operator), agent)
 
     Elixir.Agent.update(progress, fn _ -> 5 end)
 
-    assert {:ok, [%{amount: 0}]} =
+    assert {:ok, [%{amount: 0}, %{amount: 0}]} =
              FleetContracts.current_pledges(Scope.for_operator(operator), agent)
   end
 

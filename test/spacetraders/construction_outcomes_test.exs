@@ -62,6 +62,129 @@ defmodule SpaceTraders.ConstructionOutcomesTest do
     assert candidate.required_resources.credits == 750
   end
 
+  test "co-located producer and hauler propose an explicit transfer-backed delivery" do
+    producer =
+      Map.merge(@ship, %{
+        nav: %{waypoint_symbol: "X1-A1", status: "DOCKED"},
+        cargo: %{capacity: 20, units: 4, inventory: [%{symbol: "IRON", units: 4}]}
+      })
+
+    hauler =
+      Map.merge(@ship, %{
+        symbol: "SHIP-2",
+        nav: %{waypoint_symbol: "X1-A1", status: "DOCKED"},
+        cargo: %{capacity: 5, units: 0, inventory: []}
+      })
+
+    assert {:ok, %{candidate_contributions: candidates}} =
+             FleetPlanning.plan_construction(@revision, 0, %{
+               snapshot(7)
+               | ships: [producer, hauler],
+                 listings: []
+             })
+
+    assert transfer = Enum.find(candidates, &(&1.kind == :cargo_transfer))
+
+    assert delivery =
+             Enum.find(
+               candidates,
+               &(&1.kind == :construction_delivery and &1.construction[:source] == :transfer)
+             )
+
+    assert transfer.transfer == %{source_ship: "SHIP-1", target_ship: "SHIP-2", units: 3}
+    assert Enum.any?(delivery.dependencies, &(Map.get(&1, :candidate_id) == transfer.id))
+    assert delivery.expected_outcomes.batch_units == 3
+    assert transfer.required_resources["cargo:SHIP-1:IRON"] == 3
+    assert delivery.required_resources["cargo_capacity:SHIP-2"] == 3
+  end
+
+  test "reciprocal producers do not strand direct deliveries" do
+    nav = %{waypoint_symbol: "X1-A1", status: "DOCKED"}
+
+    ships =
+      for symbol <- ["SHIP-1", "SHIP-2"] do
+        %{
+          symbol: symbol,
+          nav: nav,
+          cargo: %{capacity: 20, units: 4, inventory: [%{symbol: "IRON", units: 4}]}
+        }
+      end
+
+    assert {:ok, %{candidate_contributions: candidates}} =
+             FleetPlanning.plan_construction(@revision, 0, %{
+               snapshot(7)
+               | ships: ships,
+                 listings: []
+             })
+
+    claims =
+      Enum.map(ships, fn ship ->
+        %{
+          resource: ship.symbol,
+          roles: [:construction_courier, :cargo_producer],
+          capabilities: %{resource_ship: ship.symbol, cargo_transport: 20}
+        }
+      end)
+
+    assert {:ok, %{commitments: commitments}} =
+             FleetAllocation.select_coordinated_portfolio(@revision, candidates, %{
+               as_of: @now,
+               claims: claims,
+               reservations: %{
+                 "cargo:SHIP-1:IRON" => 4,
+                 "cargo:SHIP-2:IRON" => 4,
+                 "cargo_capacity:SHIP-1" => 16,
+                 "cargo_capacity:SHIP-2" => 16,
+                 credits: 1000
+               },
+               outcome_remaining: %{{:construction, "X1-A2", "IRON"} => 3}
+             })
+
+    assert Enum.any?(commitments, fn commitment ->
+             Enum.any?(commitment.pledges, &(&1.outcome == {:construction, "X1-A2", "IRON"}))
+           end)
+
+    refute Enum.any?(commitments, fn commitment ->
+             Enum.any?(commitment.pledges, &match?({:cargo_transfer, _, _, _}, &1.outcome))
+           end)
+  end
+
+  test "a refinery producer pledges only its known yield to a hauler" do
+    source = %{
+      symbol: "REFINER",
+      nav: %{waypoint_symbol: "X1-A1", status: "IN_ORBIT"},
+      modules: [%{symbol: "MODULE_ORE_REFINERY_I"}],
+      cargo: %{capacity: 200, units: 100, inventory: [%{symbol: "IRON_ORE", units: 100}]}
+    }
+
+    hauler = %{
+      symbol: "HAULER",
+      nav: %{waypoint_symbol: "X1-A1", status: "DOCKED"},
+      cargo: %{capacity: 20, units: 0, inventory: []}
+    }
+
+    assert {:ok, %{candidate_contributions: candidates}} =
+             FleetPlanning.plan_construction(@revision, 0, %{
+               snapshot(7)
+               | ships: [source, hauler],
+                 listings: []
+             })
+
+    assert producer = Enum.find(candidates, &(&1.kind == :cargo_transfer))
+    assert producer.resource.mode == :refine
+    assert producer.resource.produce == "IRON"
+    assert producer.transfer.units == 3
+    assert producer.required_resources["cargo:REFINER:IRON_ORE"] == 100
+
+    assert hauler_candidate =
+             Enum.find(
+               candidates,
+               &(&1.kind == :construction_delivery and &1.construction.source == :transfer)
+             )
+
+    assert Enum.any?(hauler_candidate.dependencies, &(&1[:candidate_id] == producer.id))
+  end
+
   test "a batch pledges only what its protected Ship and credits can supply" do
     ship = %{@ship | cargo: %{capacity: 5, units: 0, inventory: []}}
 

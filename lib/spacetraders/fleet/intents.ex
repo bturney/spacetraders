@@ -638,6 +638,61 @@ defmodule SpaceTraders.Fleet.Intents do
   def request_commitment_construction_delivery(_agent, _commitment, _portfolio, _ship, _delivery),
     do: {:error, :invalid_construction_delivery}
 
+  @doc "Transfers Cargo under two current Claims; dependent work waits for both authoritative Cargo reads."
+  def request_commitment_transfer(
+        %AgentRecord{} = agent,
+        %Commitment{} = producer,
+        %Commitment{} = hauler,
+        %Portfolio{} = portfolio,
+        %{source_ship: source, target_ship: target, trade_symbol: symbol, units: units} = request
+      )
+      when is_binary(source) and is_binary(target) and source != target and
+             is_binary(symbol) and is_integer(units) and units > 0 do
+    with :ok <- token_present(agent),
+         true <-
+           transfer_claims?(agent, producer, hauler, portfolio, source, target, symbol, units),
+         {:ok, ship} <- Fleet.owned_ship(agent, source),
+         {:ok, _target} <- Fleet.owned_ship(agent, target),
+         {:ok, live_source} <- fresh_ship(agent, source, nil),
+         {:ok, intent} <-
+           insert_commitment_intent(producer, portfolio, ship, %{
+             type: "transfer",
+             target_waypoint: live_source.nav.waypoint_symbol,
+             parameters: %{
+               "target_ship" => target,
+               "trade_symbol" => symbol,
+               "units" => units,
+               "transfer_delivery" => Map.get(request, :delivery)
+             }
+           }) do
+      advance_new_intent(agent, intent, live_source)
+    else
+      false -> {:error, :no_current_ship_claim}
+      error -> error
+    end
+  end
+
+  def request_commitment_transfer(_, _, _, _, _), do: {:error, :invalid_transfer}
+
+  defp transfer_claims?(agent, producer, hauler, portfolio, source, target, symbol, units) do
+    Enum.all?([{source, producer}, {target, hauler}], fn {symbol, commitment} ->
+      match?(
+        {:ok, %{commitment_id: id, portfolio_id: pid, portfolio_version: version}}
+        when id == commitment.id and pid == portfolio.id and version == portfolio.version,
+        FleetAllocation.current_ship_claim(agent, symbol)
+      )
+    end) and
+      Map.get(hauler.reservations, "cargo_capacity:#{target}", 0) >= units and
+      Enum.any?(producer.pledges, fn pledge ->
+        pledge["outcome"] == ["cargo_transfer", source, target, symbol] and
+          pledge["amount"] >= units
+      end) and
+      Enum.any?(hauler.dependencies, fn dep ->
+        dep["kind"] == "acquisition" and dep["candidate_id"] == producer.candidate_id and
+          dep["amount"] >= units
+      end)
+  end
+
   @intelligence_fields %{
     waypoint:
       ~w(symbol system_symbol type x y orbits orbitals traits modifiers chart faction is_under_construction),
@@ -723,11 +778,17 @@ defmodule SpaceTraders.Fleet.Intents do
            insert_commitment_intent(commitment, portfolio, ship, %{
              type: "acquire_resources",
              target_waypoint: candidate.source_waypoint,
-             parameters: %{
-               "mode" => to_string(mode),
-               "produce" => candidate.resource.produce,
-               "survey" => candidate.resource.survey
-             }
+             parameters:
+               %{
+                 "mode" => to_string(mode),
+                 "produce" => candidate.resource.produce,
+                 "survey" => candidate.resource.survey
+               }
+               |> then(fn parameters ->
+                 if is_map(candidate.transfer),
+                   do: Map.put(parameters, "transfer", candidate.transfer),
+                   else: parameters
+               end)
            }) do
       advance_new_intent(agent, intent, live_ship)
     else
@@ -932,7 +993,8 @@ defmodule SpaceTraders.Fleet.Intents do
         "extract",
         "siphon",
         "refine",
-        "survey"
+        "survey",
+        "transfer"
       ]
   end
 
@@ -1196,6 +1258,16 @@ defmodule SpaceTraders.Fleet.Intents do
     end
   end
 
+  defp do_advance_intents(agent, %Intent{type: "transfer"} = intent, live_source) do
+    case intent.in_flight_action do
+      %{"kind" => "transfer"} = action ->
+        reconcile_transfer(agent, intent, live_source, action)
+
+      nil ->
+        dispatch_transfer(agent, intent, live_source)
+    end
+  end
+
   defp do_advance_intents(agent, %Intent{type: type} = intent, live_ship)
        when type in ["install_module", "remove_module"] do
     case intent.in_flight_action do
@@ -1234,6 +1306,109 @@ defmodule SpaceTraders.Fleet.Intents do
 
       _ ->
         advance_cargo_intent(agent, intent, live_ship)
+    end
+  end
+
+  defp dispatch_transfer(agent, intent, source) do
+    target_symbol = intent.parameters["target_ship"]
+    symbol = intent.parameters["trade_symbol"]
+
+    with {:ok,
+          %{commitment_id: target_id, portfolio_id: portfolio_id, portfolio_version: version}} <-
+           FleetAllocation.current_ship_claim(agent, target_symbol),
+         %Commitment{fleet_commitment_portfolio_id: ^portfolio_id} <-
+           Repo.get(Commitment, target_id),
+         true <-
+           portfolio_id == intent.fleet_commitment_portfolio_id and
+             version == intent.fleet_commitment_portfolio_version,
+         {:ok, target} <- fresh_ship(agent, target_symbol, nil),
+         true <-
+           source.nav.status != "IN_TRANSIT" and target.nav.status != "IN_TRANSIT" and
+             source.nav.waypoint_symbol == target.nav.waypoint_symbol,
+         available <- Fleet.item_units(source.cargo, symbol),
+         free <- target.cargo.capacity - target.cargo.units,
+         true <- available > 0 and free > 0,
+         units <- min(intent.parameters["units"], min(available, free)),
+         {:ok, intent} <-
+           claim_intent_action(agent, intent, %{
+             "kind" => "transfer",
+             "trade_symbol" => symbol,
+             "target_ship" => target_symbol,
+             "units" => units,
+             "source_before" => available,
+             "target_before" => Fleet.item_units(target.cargo, symbol)
+           }) do
+      case Agent.handle_game_result(
+             agent,
+             SpaceTraders.API.transfer_cargo(
+               AgentTokenReference.new(agent),
+               source.symbol,
+               symbol,
+               units,
+               target_symbol
+             )
+           ) do
+        {:ok, %{cargo: cargo}} ->
+          if Fleet.item_units(cargo, symbol) == available - units do
+            reconcile_transfer(agent, intent, %{source | cargo: cargo}, intent.in_flight_action)
+          else
+            block_cargo_intent(intent, {:ambiguous_operation_evidence, "transfer"})
+          end
+
+        {:error, %SpaceTraders.API.GameplayError{} = reason} ->
+          mark_infeasible(intent, reason)
+
+        {:error, reason} ->
+          block_cargo_intent(intent, reason)
+      end
+    else
+      false -> mark_infeasible(intent, :transfer_prerequisite_unavailable)
+      {:error, reason} -> block_cargo_intent(intent, reason)
+    end
+  end
+
+  defp reconcile_transfer(agent, intent, source, action) do
+    symbol = action["trade_symbol"]
+
+    with {:ok, fresh_source} <- fresh_ship(agent, source.symbol, nil),
+         {:ok, target} <- fresh_ship(agent, action["target_ship"], nil),
+         true <-
+           Fleet.item_units(fresh_source.cargo, symbol) ==
+             action["source_before"] - action["units"] and
+             Fleet.item_units(target.cargo, symbol) == action["target_before"] + action["units"],
+         :ok <- settle_transfer_attempt(agent, intent, fresh_source, target) do
+      complete_cargo_intent(agent, intent, action["units"], nil, %{cargo: fresh_source.cargo})
+    else
+      _ ->
+        case MutationAttempts.latest_for_intent(intent) do
+          %{state: "rejected"} -> mark_infeasible(intent, :transfer_rejected)
+          _ -> block_cargo_intent(intent, {:ambiguous_operation_evidence, "transfer"})
+        end
+    end
+  end
+
+  defp settle_transfer_attempt(agent, intent, source, target) do
+    case MutationAttempts.unresolved_for_intent(intent) do
+      nil ->
+        :ok
+
+      attempt ->
+        observations =
+          for ship <- [source, target] do
+            reconciliation_observation(
+              "get-my-ship",
+              [DependencyKey.ship(agent.id, ship.symbol)],
+              attempt,
+              :accepted,
+              "Both Ships' Cargo proves the transfer",
+              %{cargo: cargo_evidence(ship.cargo)}
+            )
+          end
+
+        case MutationAttempts.reconcile(attempt, :accepted, observations) do
+          {:ok, _} -> :ok
+          error -> error
+        end
     end
   end
 
@@ -2571,6 +2746,7 @@ defmodule SpaceTraders.Fleet.Intents do
                  lock: true,
                  intent_id: current.id
                ),
+             true <- transfer_target_claim_held?(agent, current, action),
              {:ok, binding} <- bind_intent_claim(current, claim) do
           action = Map.merge(action, binding.action)
 
@@ -2594,6 +2770,20 @@ defmodule SpaceTraders.Fleet.Intents do
 
       other ->
         other
+    end
+  end
+
+  defp transfer_target_claim_held?(_agent, _intent, %{"kind" => kind}) when kind != "transfer",
+    do: true
+
+  defp transfer_target_claim_held?(agent, intent, %{"target_ship" => target}) do
+    case FleetAllocation.current_ship_claim(agent, target, lock: true) do
+      {:ok, %{portfolio_id: id, portfolio_version: version}} ->
+        id == intent.fleet_commitment_portfolio_id and
+          version == intent.fleet_commitment_portfolio_version
+
+      _ ->
+        false
     end
   end
 
@@ -2826,6 +3016,9 @@ defmodule SpaceTraders.Fleet.Intents do
            finished_at: DateTime.utc_now() |> DateTime.truncate(:second)
          ) do
       {:ok, intent} ->
+        if intent.caller == "commitment" and intent.type == "deliver",
+          do: FleetAllocation.reconcile_completed_outcomes()
+
         record_activity_by_intent(
           intent,
           "manual_intent_completed",

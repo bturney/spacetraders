@@ -41,6 +41,7 @@ defmodule SpaceTraders.ConstructionExecutionTest do
     scope = Scope.for_operator(operator)
     agent = agent_fixture(operator)
     {:ok, _ship} = Fleet.record_ship(agent, "SHIP-1", "SHIP_COMMAND_FRIGATE")
+    {:ok, _ship} = Fleet.record_ship(agent, "SHIP-2", "SHIP_COMMAND_FRIGATE")
 
     strategy = Repo.insert!(%Strategy{operator_id: operator.id, revision_number: 1})
 
@@ -78,7 +79,7 @@ defmodule SpaceTraders.ConstructionExecutionTest do
       strategy_revision_id: revision.id,
       objective_index: 0,
       claims: ["SHIP-1"],
-      reservations: %{credits: 750},
+      reservations: %{credits: 0},
       pledges: [
         %{outcome: {:construction, "X1-A2", "IRON"}, amount: 8, backing: {:claim, "SHIP-1"}}
       ],
@@ -87,10 +88,19 @@ defmodule SpaceTraders.ConstructionExecutionTest do
       unwind_cost: 0
     }
 
+    second = %{
+      candidate
+      | id: "construction-2",
+        claims: ["SHIP-2"],
+        pledges: [
+          %{outcome: {:construction, "X1-A2", "IRON"}, amount: 8, backing: {:claim, "SHIP-2"}}
+        ]
+    }
+
     assert {:ok, selection} =
-             FleetAllocation.select_portfolio(revision, [candidate], %{
+             FleetAllocation.select_portfolio(revision, [candidate, second], %{
                as_of: DateTime.utc_now(),
-               claims: ["SHIP-1"],
+               claims: ["SHIP-1", "SHIP-2"],
                reservations: %{credits: 1000}
              })
 
@@ -107,10 +117,12 @@ defmodule SpaceTraders.ConstructionExecutionTest do
              )
 
     {:ok, progress} = Elixir.Agent.start_link(fn -> {7, false} end)
+    {:ok, reads} = Elixir.Agent.start_link(fn -> 0 end)
 
     Req.Test.stub(SpaceTraders.API, fn conn ->
       assert conn.method == "GET"
       assert conn.request_path == "/v2/systems/X1/waypoints/X1-A2/construction"
+      Elixir.Agent.update(reads, &(&1 + 1))
       {fulfilled, complete} = Elixir.Agent.get(progress, & &1)
 
       Req.Test.json(conn, %{
@@ -122,11 +134,12 @@ defmodule SpaceTraders.ConstructionExecutionTest do
       })
     end)
 
-    assert {:ok, [%{outcome: ["construction", "X1-A2", "IRON"], amount: 3}]} =
-             FleetConstruction.current_pledges(scope, agent)
+    assert {:ok, pledges} = FleetConstruction.current_pledges(scope, agent)
+    assert Enum.map(pledges, & &1.amount) == [3, 0]
+    assert Elixir.Agent.get(reads, & &1) == 1
 
     Elixir.Agent.update(progress, fn _ -> {7, true} end)
-    assert {:ok, [%{amount: 0}]} = FleetConstruction.current_pledges(scope, agent)
+    assert {:ok, [%{amount: 0}, %{amount: 0}]} = FleetConstruction.current_pledges(scope, agent)
 
     Req.Test.stub(SpaceTraders.API, fn conn ->
       assert conn.method == "GET"

@@ -100,6 +100,66 @@ defmodule SpaceTraders.FleetAllocationTest do
     assert :unbacked_pledge in reasons
   end
 
+  test "transfer-dependent haulers require a selected producer and share remaining outcome" do
+    revision = revision(1)
+
+    producer =
+      candidate("producer", 0,
+        claims: ["PRODUCER"],
+        pledges: [
+          %{
+            outcome: {:cargo_transfer, "PRODUCER", "HAULER", "IRON"},
+            amount: 4,
+            backing: {:claim, "PRODUCER"}
+          }
+        ],
+        expected_value: 2
+      )
+
+    hauler =
+      candidate("hauler", 0,
+        claims: ["HAULER"],
+        dependencies: [%{id: "cargo", kind: :acquisition, candidate_id: "producer", amount: 4}],
+        pledges: [
+          %{outcome: {:construction, "X1-A2", "IRON"}, amount: 4, backing: {:dependency, "cargo"}}
+        ],
+        expected_value: 3
+      )
+
+    available = %{
+      as_of: @as_of,
+      claims: ["PRODUCER", "HAULER"],
+      reservations: %{},
+      outcome_remaining: %{{:construction, "X1-A2", "IRON"} => 4}
+    }
+
+    assert {:ok, selected} =
+             FleetAllocation.select_portfolio(revision, [hauler, producer], available)
+
+    assert Enum.map(selected.commitments, & &1.candidate_id) == ["producer", "hauler"]
+
+    assert {:ok, rejected} =
+             FleetAllocation.select_portfolio(revision, [hauler], available)
+
+    assert rejected.commitments == []
+    assert [%{reasons: [:unsatisfied_dependency]}] = rejected.rejected
+
+    second = %{hauler | id: "hauler-2", claims: ["SHIP-3"]}
+
+    assert {:ok, capped} =
+             FleetAllocation.select_portfolio(
+               revision,
+               [producer, hauler, second],
+               %{available | claims: ["PRODUCER", "HAULER", "SHIP-3"]}
+             )
+
+    assert Enum.sum_by(capped.commitments, fn commitment ->
+             commitment.pledges
+             |> Enum.filter(&(&1.outcome == {:construction, "X1-A2", "IRON"}))
+             |> Enum.sum_by(& &1.amount)
+           end) == 4
+  end
+
   test "stable tie-breaking and unwind cost retain explainable alternatives" do
     revision = revision(1)
     available = %{as_of: @as_of, claims: ["SHIP-1"], reservations: %{}}

@@ -14,6 +14,12 @@ defmodule SpaceTraders.FleetPlanning do
 
   @market_evidence_freshness_seconds 300
   @observation_demand_deadline_seconds 60
+  @refinery_modules ~w(MODULE_MINERAL_PROCESSOR_I MODULE_MICRO_REFINERY_I MODULE_ORE_REFINERY_I)
+
+  @doc "Whether the Ship's observed modules can refine ore for a known material outcome."
+  def refinery_capable?(ship) do
+    Enum.any?(Map.get(ship, :modules) || [], &(&1.symbol in @refinery_modules))
+  end
 
   defmodule CandidateContribution do
     @moduledoc "An objective-specific proposal that Fleet Allocation may accept or reject."
@@ -36,7 +42,7 @@ defmodule SpaceTraders.FleetPlanning do
       :validity,
       :alternatives
     ]
-    defstruct @enforce_keys ++ [resource: nil, contract: nil, construction: nil]
+    defstruct @enforce_keys ++ [resource: nil, contract: nil, construction: nil, transfer: nil]
 
     @type t :: %__MODULE__{}
   end
@@ -298,10 +304,48 @@ defmodule SpaceTraders.FleetPlanning do
           }
         end
 
+      transfers =
+        for true <- [FleetContracts.contract_objective?(objective)],
+            %Contract{
+              accepted: true,
+              fulfilled: false,
+              terms: %{deliver: deliver, deadline: deadline}
+            } = contract <-
+              contracts,
+            {:ok, expires_at, _} <- [DateTime.from_iso8601(deadline || "")],
+            DateTime.compare(expires_at, as_of) == :gt,
+            good <- deliver || [],
+            is_integer(good.units_required) and is_integer(good.units_fulfilled),
+            good.units_required > good.units_fulfilled,
+            candidate <-
+              transfer_contributions(
+                revision,
+                index,
+                objective,
+                :contract_delivery,
+                %{
+                  id: contract.id,
+                  waypoint: good.destination_symbol,
+                  symbol: good.trade_symbol,
+                  remaining: good.units_required - good.units_fulfilled,
+                  credits: credits,
+                  evidence: %{
+                    subject: "contracts:#{contract.id}",
+                    evidence_id: Evidence.fingerprint(contract),
+                    valid_until: expires_at
+                  }
+                },
+                ships
+              ),
+            do: candidate
+
       {:ok,
        result(revision, index, %{as_of: as_of},
          candidate_contributions:
-           Enum.sort_by(candidates, &{if(&1.contract.source == :cargo, do: 0, else: 1), &1.id})
+           Enum.sort_by(
+             candidates ++ transfers,
+             &{if(&1.contract.source == :cargo, do: 0, else: 1), &1.id}
+           )
        )}
     end
   end
@@ -428,7 +472,35 @@ defmodule SpaceTraders.FleetPlanning do
                     Map.get(snapshot, :upstream_opportunities, [])
                   )
 
-                {candidates ++ proposed ++ upstream, limitations}
+                transfers =
+                  for %{required: required, fulfilled: fulfilled, trade_symbol: symbol} <-
+                        construction.materials || [],
+                      is_binary(symbol) and is_integer(required) and is_integer(fulfilled),
+                      required > fulfilled,
+                      pair <-
+                        transfer_contributions(
+                          revision,
+                          index,
+                          objective,
+                          :construction_delivery,
+                          %{
+                            waypoint: construction.symbol,
+                            system: observation.system_symbol,
+                            symbol: symbol,
+                            remaining: required - fulfilled,
+                            credits: credits,
+                            evidence: %{
+                              subject:
+                                "construction:#{observation.system_symbol}:#{construction.symbol}",
+                              evidence_id: observation.evidence_id,
+                              valid_until: valid_until
+                            }
+                          },
+                          ships
+                        ),
+                      do: pair
+
+                {candidates ++ proposed ++ upstream ++ transfers, limitations}
 
               {:error, reason} ->
                 {candidates,
@@ -504,6 +576,156 @@ defmodule SpaceTraders.FleetPlanning do
   end
 
   defp held_construction_cargo(_, _, _, _), do: []
+
+  defp transfer_contributions(revision, index, objective, kind, recipient, ships) do
+    for source <- ships,
+        target <- ships,
+        source.symbol != target.symbol,
+        %{waypoint_symbol: waypoint, status: source_status} <- [Map.get(source, :nav)],
+        %{waypoint_symbol: ^waypoint, status: target_status} <- [Map.get(target, :nav)],
+        source_status != "IN_TRANSIT" and target_status != "IN_TRANSIT",
+        %{capacity: capacity, units: used} <- [Map.get(target, :cargo)],
+        is_integer(capacity) and is_integer(used) and capacity > used,
+        supply <- transfer_supply(source, recipient.symbol),
+        batch = min(recipient.remaining, min(supply.units, capacity - used)),
+        batch > 0,
+        recipient.credits >= 750 do
+      producer_id =
+        Evidence.fingerprint(
+          {revision.id, index, kind, recipient.waypoint, recipient.symbol, source.symbol,
+           target.symbol, recipient.remaining, batch, supply.mode,
+           Evidence.fingerprint(source.cargo)}
+        )
+
+      dependency_id = "transfer:#{producer_id}"
+      recipient_dependency = recipient.evidence
+
+      producer = %CandidateContribution{
+        id: producer_id,
+        strategy_revision_id: revision.id,
+        objective_index: index,
+        objective: objective,
+        kind: :cargo_transfer,
+        trade_symbol: recipient.symbol,
+        source_waypoint: waypoint,
+        destination_waypoint: waypoint,
+        expected_outcomes: %{decision_value: 2, batch_units: batch},
+        uncertainty: %{cargo: :authoritative_at_dispatch},
+        required_roles: [%{role: :cargo_producer, count: 1}],
+        required_capabilities:
+          [%{capability: :resource_ship, value: source.symbol}] ++
+            if(supply.mode == :refine,
+              do: [%{capability: :resource_mode, value: :refine}],
+              else: []
+            ),
+        required_resources: %{
+          "cargo:#{source.symbol}:#{supply.reserved_symbol}" =>
+            if(supply.mode == :held, do: batch, else: supply.reserved_units),
+          ship_count: 1
+        },
+        dependencies: [recipient_dependency],
+        validity: %{expires_at: recipient_dependency.valid_until},
+        alternatives: [],
+        transfer: %{source_ship: source.symbol, target_ship: target.symbol, units: batch},
+        resource: supply.resource,
+        contract: if(kind == :contract_delivery, do: %{source: :transfer}, else: nil),
+        construction: if(kind == :construction_delivery, do: %{source: :transfer}, else: nil)
+      }
+
+      delivery = %CandidateContribution{
+        id: Evidence.fingerprint({producer_id, :delivery}),
+        strategy_revision_id: revision.id,
+        objective_index: index,
+        objective: objective,
+        kind: kind,
+        trade_symbol: recipient.symbol,
+        source_waypoint: waypoint,
+        destination_waypoint: recipient.waypoint,
+        expected_outcomes: %{
+          decision_value: 2,
+          units_remaining: recipient.remaining,
+          batch_units: batch
+        },
+        uncertainty: %{shared_progress: :may_change},
+        required_roles: [
+          %{
+            role:
+              if(kind == :contract_delivery, do: :contract_courier, else: :construction_courier),
+            count: 1
+          }
+        ],
+        required_capabilities: [
+          %{capability: :resource_ship, value: target.symbol},
+          %{capability: :cargo_transport, minimum_capacity: batch}
+        ],
+        required_resources: %{
+          "cargo_capacity:#{target.symbol}" => batch,
+          ship_count: 1,
+          credits: 750
+        },
+        dependencies: [
+          recipient_dependency,
+          %{id: dependency_id, kind: :acquisition, candidate_id: producer_id, amount: batch}
+        ],
+        validity: %{expires_at: recipient_dependency.valid_until},
+        alternatives: [],
+        contract:
+          if(kind == :contract_delivery,
+            do: %{id: recipient.id, source: :transfer, batch_units: batch},
+            else: nil
+          ),
+        construction:
+          if(kind == :construction_delivery,
+            do: %{
+              system: recipient.system,
+              waypoint: recipient.waypoint,
+              source: :transfer,
+              batch_units: batch
+            },
+            else: nil
+          )
+      }
+
+      [producer, delivery]
+    end
+    |> List.flatten()
+  end
+
+  defp transfer_supply(%{cargo: %{inventory: inventory}} = ship, symbol)
+       when is_list(inventory) do
+    held =
+      for %{symbol: ^symbol, units: units} <- inventory,
+          is_integer(units) and units > 0,
+          do: %{
+            mode: :held,
+            units: units,
+            reserved_symbol: symbol,
+            reserved_units: units,
+            resource: nil
+          }
+
+    refinery? = refinery_capable?(ship)
+
+    ore = Enum.find(inventory, &(&1.symbol == symbol <> "_ORE"))
+
+    refined =
+      if (refinery? and symbol in ~w(IRON COPPER SILVER GOLD ALUMINUM PLATINUM URANITE MERITIUM) and
+            ore) && is_integer(ore.units) && ore.units >= 100,
+         do: [
+           %{
+             mode: :refine,
+             units: 10,
+             reserved_symbol: symbol <> "_ORE",
+             reserved_units: 100,
+             resource: %{mode: :refine, produce: symbol, survey: nil}
+           }
+         ],
+         else: []
+
+    held ++ refined
+  end
+
+  defp transfer_supply(_, _), do: []
 
   # A recipe is not inferred from commodity names. The caller supplies an
   # independently observed market-effect hypothesis, whose baseline Listings
