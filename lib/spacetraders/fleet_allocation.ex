@@ -85,6 +85,56 @@ defmodule SpaceTraders.FleetAllocation do
   def select_portfolio(_revision, _candidates, _availability, _current_commitments),
     do: {:error, :invalid_allocation_input}
 
+  @doc "Selects complete producer–hauler groups; orphan producer Claims cannot starve deliveries."
+  def select_coordinated_portfolio(%Revision{} = revision, candidates, availability)
+      when is_list(candidates) and is_map(availability) do
+    do_select_coordinated_portfolio(revision, candidates, availability)
+  end
+
+  defp do_select_coordinated_portfolio(revision, candidates, availability) do
+    with {:ok, selection} <- select_portfolio(revision, candidates, availability) do
+      selected = MapSet.new(Enum.map(selection.commitments, & &1.candidate_id))
+
+      orphans =
+        for %CandidateContribution{kind: :cargo_transfer, id: id} <- candidates,
+            MapSet.member?(selected, id),
+            not Enum.any?(candidates, fn dependent ->
+              MapSet.member?(selected, dependent.id) and
+                Enum.any?(dependent.dependencies, &(Map.get(&1, :candidate_id) == id))
+            end),
+            do: id
+
+      if orphans == [] do
+        {:ok, selection}
+      else
+        remaining = Enum.reject(candidates, &(&1.id in orphans))
+        do_select_coordinated_portfolio(revision, remaining, availability)
+      end
+    end
+  end
+
+  @doc "Returns one complete producer–hauler group, or one independent Commitment."
+  def coordinated_commitments(%{commitments: commitments}, candidates) do
+    pair =
+      Enum.find_value(commitments, fn producer ->
+        if Enum.any?(candidates, &(&1.id == producer.candidate_id and &1.kind == :cargo_transfer)) do
+          case Enum.find(commitments, fn hauler ->
+                 Enum.any?(hauler.dependencies, &(&1[:candidate_id] == producer.candidate_id))
+               end) do
+            nil -> nil
+            hauler -> [producer, hauler]
+          end
+        end
+      end)
+
+    pair ||
+      commitments
+      |> Enum.reject(fn commitment ->
+        Enum.any?(candidates, &(&1.id == commitment.candidate_id and &1.kind == :cargo_transfer))
+      end)
+      |> Enum.take(1)
+  end
+
   @doc "Publishes a selected portfolio and its causal evidence against one source version."
   def publish_portfolio(
         %Scope{operator: %{id: operator_id}} = scope,
@@ -277,6 +327,14 @@ defmodule SpaceTraders.FleetAllocation do
 
     if updated != 1, do: Repo.rollback(:stale_source)
 
+    new_claims =
+      for proposal <- selection.commitments,
+          not Enum.any?(retained, &(&1.candidate_id == proposal.candidate_id)),
+          claim <- proposal.claims,
+          do: claim
+
+    lock_available_ships!(generation_id, new_claims)
+
     affected_ids = for c <- active, MapSet.member?(affected, c.candidate_id), do: c.id
 
     if affected_ids != [] do
@@ -326,9 +384,23 @@ defmodule SpaceTraders.FleetAllocation do
   defp dependent_closure(commitments, affected) do
     expanded =
       Enum.reduce(commitments, affected, fn commitment, affected ->
-        if Enum.any?(commitment.dependencies, &MapSet.member?(affected, &1["candidate_id"])),
-          do: MapSet.put(affected, commitment.candidate_id),
-          else: affected
+        affected =
+          if Enum.any?(commitment.dependencies, &MapSet.member?(affected, &1["candidate_id"])),
+            do: MapSet.put(affected, commitment.candidate_id),
+            else: affected
+
+        if MapSet.member?(affected, commitment.candidate_id) do
+          Enum.reduce(commitment.dependencies, affected, fn dependency, affected ->
+            provider = Enum.find(commitments, &(&1.candidate_id == dependency["candidate_id"]))
+
+            if (dependency["kind"] == "acquisition" and provider) &&
+                 Enum.any?(provider.pledges, &match?(%{"outcome" => ["cargo_transfer" | _]}, &1)),
+               do: MapSet.put(affected, provider.candidate_id),
+               else: affected
+          end)
+        else
+          affected
+        end
       end)
 
     if expanded == affected, do: affected, else: dependent_closure(commitments, expanded)
@@ -382,6 +454,43 @@ defmodule SpaceTraders.FleetAllocation do
         distinct: true
     )
     |> MapSet.new()
+  end
+
+  @doc "Keeps active commitment components and commitments outside the requested outcome domain."
+  def protected_commitments(nil, [], _in_domain), do: []
+  def protected_commitments(nil, [_ | _], _in_domain), do: :busy
+
+  def protected_commitments(%Portfolio{commitments: commitments}, active_intents, in_domain)
+      when is_list(active_intents) and is_function(in_domain, 1) do
+    active_ids = MapSet.new(active_intents, & &1.fleet_commitment_id)
+
+    protected =
+      commitments
+      |> Enum.filter(&MapSet.member?(active_ids, &1.id))
+      |> MapSet.new(& &1.candidate_id)
+      |> connected_dependencies(commitments)
+
+    Enum.filter(commitments, fn commitment ->
+      not in_domain.(commitment) or MapSet.member?(protected, commitment.candidate_id)
+    end)
+  end
+
+  defp connected_dependencies(protected, commitments) do
+    expanded =
+      Enum.reduce(commitments, protected, fn commitment, ids ->
+        providers =
+          commitment.dependencies
+          |> Enum.map(& &1["candidate_id"])
+          |> Enum.reject(&is_nil/1)
+          |> MapSet.new()
+
+        if MapSet.member?(ids, commitment.candidate_id) or
+             not MapSet.disjoint?(providers, ids),
+           do: ids |> MapSet.put(commitment.candidate_id) |> MapSet.union(providers),
+           else: ids
+      end)
+
+    if expanded == protected, do: protected, else: connected_dependencies(expanded, commitments)
   end
 
   @doc "Caps Ship Pledges by one authoritative remaining quantity per shared outcome."
@@ -466,6 +575,12 @@ defmodule SpaceTraders.FleetAllocation do
       intent.type != "sell" or
         is_nil(fragment("? #> '{market_trade,construction_upstream}'", intent.parameters))
     )
+    |> where(
+      [_episode, _portfolio, commitment, intent],
+      is_nil(commitment.replan_decision_episode_id) and
+        (intent.type != "acquire_resources" or
+           is_nil(fragment("? -> 'transfer'", intent.parameters)))
+    )
     |> select([episode], episode)
     |> distinct(true)
     |> Repo.all()
@@ -477,6 +592,52 @@ defmodule SpaceTraders.FleetAllocation do
           :realized,
           realized_outcomes(episode.id)
         )
+    end)
+
+    StrategyDecisionEpisode
+    |> where([episode], episode.classification == :still_evaluating)
+    |> join(:inner, [episode], commitment in Commitment,
+      on: commitment.replan_decision_episode_id == episode.id
+    )
+    |> join(:inner, [_episode, commitment], intent in Intent,
+      on: intent.fleet_commitment_id == commitment.id
+    )
+    |> where(
+      [_episode, _commitment, intent],
+      intent.status == "completed" and intent.type in ["deliver", "sell", "acquire_resources"]
+    )
+    |> where(
+      [_episode, _commitment, intent],
+      (intent.type != "acquire_resources" or
+         is_nil(fragment("? -> 'transfer'", intent.parameters))) and
+        (intent.type != "sell" or
+           is_nil(fragment("? #> '{market_trade,construction_upstream}'", intent.parameters)))
+    )
+    |> select([episode], episode)
+    |> distinct(true)
+    |> Repo.all()
+    |> Enum.each(fn episode ->
+      results =
+        Repo.all(
+          from intent in Intent,
+            join: commitment in Commitment,
+            on: commitment.id == intent.fleet_commitment_id,
+            where:
+              commitment.replan_decision_episode_id == ^episode.id and
+                intent.status == "completed" and intent.type == "deliver",
+            select: intent.last_action_result
+        )
+
+      classification =
+        if results == [] or Enum.any?(results, &(&1["external_completion"] == true)),
+          do: :realized,
+          else: :partially_realized
+
+      _ =
+        update_decision_outcome(episode.id, episode.operator_id, classification, %{
+          deliveries: results,
+          basis: :authoritative_ship_intent
+        })
     end)
 
     :ok
@@ -531,7 +692,12 @@ defmodule SpaceTraders.FleetAllocation do
           candidate_id: commitment.candidate_id,
           portfolio_id: portfolio.id,
           portfolio_version: portfolio.version,
-          decision_episode_id: portfolio.strategy_decision_episode_id
+          decision_episode_id:
+            fragment(
+              "COALESCE(?, ?)",
+              commitment.replan_decision_episode_id,
+              portfolio.strategy_decision_episode_id
+            )
         }
 
     query = if Keyword.get(opts, :lock, false), do: lock(query, "FOR SHARE"), else: query
@@ -669,32 +835,7 @@ defmodule SpaceTraders.FleetAllocation do
 
     if updated_generations != 1, do: Repo.rollback(:stale_source)
 
-    # Reservation and allocation serialize on the same Ship rows. A stale
-    # planning snapshot cannot claim a Ship that an Operator has reserved.
-    claimed_symbols =
-      selection.commitments
-      |> Enum.flat_map(& &1.claims)
-      |> Enum.uniq()
-      |> Enum.sort()
-
-    claimed_ships =
-      Repo.all(
-        from ship in Ship,
-          join: generation in Generation,
-          on: generation.agent_id == ship.agent_id,
-          where: generation.id == ^generation_id and ship.symbol in ^claimed_symbols,
-          order_by: ship.id,
-          lock: "FOR UPDATE OF s0",
-          select: ship.id
-      )
-
-    if length(claimed_ships) != length(claimed_symbols) or
-         Repo.exists?(
-           from reservation in ShipReservation,
-             where: reservation.ship_id in ^claimed_ships and is_nil(reservation.released_at)
-         ) do
-      Repo.rollback(:ship_reserved)
-    end
+    lock_available_ships!(generation_id, Enum.flat_map(selection.commitments, & &1.claims))
 
     now = DateTime.utc_now()
 
@@ -739,6 +880,33 @@ defmodule SpaceTraders.FleetAllocation do
     Enum.each(selection.commitments, &insert_commitment(portfolio, &1))
 
     Repo.preload(portfolio, [:commitments, :strategy_decision_episode])
+  end
+
+  # Reservation and allocation serialize on the same Ship rows. In-place
+  # replanning must use the same check as a new Portfolio publication.
+  defp lock_available_ships!(generation_id, claimed_symbols) do
+    claimed_symbols = claimed_symbols |> Enum.uniq() |> Enum.sort()
+
+    claimed_ships =
+      Repo.all(
+        from ship in Ship,
+          join: generation in Generation,
+          on: generation.agent_id == ship.agent_id,
+          where: generation.id == ^generation_id and ship.symbol in ^claimed_symbols,
+          order_by: ship.id,
+          lock: "FOR UPDATE OF s0",
+          select: ship.id
+      )
+
+    if length(claimed_ships) != length(claimed_symbols) or
+         Repo.exists?(
+           from reservation in ShipReservation,
+             where: reservation.ship_id in ^claimed_ships and is_nil(reservation.released_at)
+         ) do
+      Repo.rollback(:ship_reserved)
+    end
+
+    :ok
   end
 
   defp insert_commitment(portfolio, commitment, replan_episode_id \\ nil) do

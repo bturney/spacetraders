@@ -14,6 +14,12 @@ defmodule SpaceTraders.FleetPlanning do
 
   @market_evidence_freshness_seconds 300
   @observation_demand_deadline_seconds 60
+  @refinery_modules ~w(MODULE_MINERAL_PROCESSOR_I MODULE_MICRO_REFINERY_I MODULE_ORE_REFINERY_I)
+
+  @doc "Whether the Ship's observed modules can refine ore for a known material outcome."
+  def refinery_capable?(ship) do
+    Enum.any?(Map.get(ship, :modules) || [], &(&1.symbol in @refinery_modules))
+  end
 
   defmodule CandidateContribution do
     @moduledoc "An objective-specific proposal that Fleet Allocation may accept or reject."
@@ -580,17 +586,15 @@ defmodule SpaceTraders.FleetPlanning do
         source_status != "IN_TRANSIT" and target_status != "IN_TRANSIT",
         %{capacity: capacity, units: used} <- [Map.get(target, :cargo)],
         is_integer(capacity) and is_integer(used) and capacity > used,
-        %{inventory: inventory} <- [Map.get(source, :cargo)],
-        is_list(inventory),
-        %{units: held} <- Enum.filter(inventory, &(&1.symbol == recipient.symbol)),
-        is_integer(held) and held > 0,
-        batch = min(recipient.remaining, min(held, capacity - used)),
+        supply <- transfer_supply(source, recipient.symbol),
+        batch = min(recipient.remaining, min(supply.units, capacity - used)),
         batch > 0,
         recipient.credits >= 750 do
       producer_id =
         Evidence.fingerprint(
           {revision.id, index, kind, recipient.waypoint, recipient.symbol, source.symbol,
-           target.symbol, recipient.remaining, batch, :producer}
+           target.symbol, recipient.remaining, batch, supply.mode,
+           Evidence.fingerprint(source.cargo)}
         )
 
       dependency_id = "transfer:#{producer_id}"
@@ -608,15 +612,22 @@ defmodule SpaceTraders.FleetPlanning do
         expected_outcomes: %{decision_value: 2, batch_units: batch},
         uncertainty: %{cargo: :authoritative_at_dispatch},
         required_roles: [%{role: :cargo_producer, count: 1}],
-        required_capabilities: [%{capability: :resource_ship, value: source.symbol}],
+        required_capabilities:
+          [%{capability: :resource_ship, value: source.symbol}] ++
+            if(supply.mode == :refine,
+              do: [%{capability: :resource_mode, value: :refine}],
+              else: []
+            ),
         required_resources: %{
-          "cargo:#{source.symbol}:#{recipient.symbol}" => batch,
+          "cargo:#{source.symbol}:#{supply.reserved_symbol}" =>
+            if(supply.mode == :held, do: batch, else: supply.reserved_units),
           ship_count: 1
         },
         dependencies: [recipient_dependency],
         validity: %{expires_at: recipient_dependency.valid_until},
         alternatives: [],
         transfer: %{source_ship: source.symbol, target_ship: target.symbol, units: batch},
+        resource: supply.resource,
         contract: if(kind == :contract_delivery, do: %{source: :transfer}, else: nil),
         construction: if(kind == :construction_delivery, do: %{source: :transfer}, else: nil)
       }
@@ -679,6 +690,42 @@ defmodule SpaceTraders.FleetPlanning do
     end
     |> List.flatten()
   end
+
+  defp transfer_supply(%{cargo: %{inventory: inventory}} = ship, symbol)
+       when is_list(inventory) do
+    held =
+      for %{symbol: ^symbol, units: units} <- inventory,
+          is_integer(units) and units > 0,
+          do: %{
+            mode: :held,
+            units: units,
+            reserved_symbol: symbol,
+            reserved_units: units,
+            resource: nil
+          }
+
+    refinery? = refinery_capable?(ship)
+
+    ore = Enum.find(inventory, &(&1.symbol == symbol <> "_ORE"))
+
+    refined =
+      if (refinery? and symbol in ~w(IRON COPPER SILVER GOLD ALUMINUM PLATINUM URANITE MERITIUM) and
+            ore) && is_integer(ore.units) && ore.units >= 100,
+         do: [
+           %{
+             mode: :refine,
+             units: 10,
+             reserved_symbol: symbol <> "_ORE",
+             reserved_units: 100,
+             resource: %{mode: :refine, produce: symbol, survey: nil}
+           }
+         ],
+         else: []
+
+    held ++ refined
+  end
+
+  defp transfer_supply(_, _), do: []
 
   # A recipe is not inferred from commodity names. The caller supplies an
   # independently observed market-effect hypothesis, whose baseline Listings

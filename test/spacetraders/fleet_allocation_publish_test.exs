@@ -215,6 +215,48 @@ defmodule SpaceTraders.FleetAllocationPublishTest do
 
     assert {:ok, %{commitment_id: ^retained_id}} =
              FleetAllocation.current_ship_claim(agent, "SHIP-2")
+
+    restored_producer = Enum.find(restored.commitments, &(&1.candidate_id == "candidate-1"))
+
+    assert {:ok, %{decision_episode_id: episode_id}} =
+             FleetAllocation.current_ship_claim(agent, "SHIP-1")
+
+    assert episode_id == restored_producer.replan_decision_episode_id
+
+    restored_hauler = Enum.find(restored.commitments, &(&1.candidate_id == "dependent"))
+    hauler_ship = Repo.get_by!(SpaceTraders.Fleet.Ship, agent_id: agent.id, symbol: "SHIP-3")
+
+    Repo.insert!(%Intent{
+      ship_id: hauler_ship.id,
+      caller: "commitment",
+      fleet_commitment_id: restored_hauler.id,
+      fleet_commitment_portfolio_id: restored.id,
+      fleet_commitment_portfolio_version: restored.version,
+      type: "deliver",
+      status: "completed",
+      target_waypoint: "X1-A2",
+      last_action_result: %{"units" => 4, "kind" => "deliver"}
+    })
+
+    assert :ok = FleetAllocation.reconcile_completed_outcomes()
+
+    assert Repo.get!(StrategyDecisionEpisode, episode_id).classification == :partially_realized
+
+    assert Repo.get!(StrategyDecisionEpisode, portfolio.strategy_decision_episode_id).classification ==
+             :still_evaluating
+
+    assert {:ok, unwound} =
+             FleetAllocation.replan_subgraph(
+               scope,
+               generation.id,
+               %{original | source_version: 3, commitments: [independent]},
+               ["dependent"],
+               decision()
+             )
+
+    assert [%{id: ^retained_id}] = unwound.commitments
+    assert {:error, :no_current_ship_claim} = FleetAllocation.current_ship_claim(agent, "SHIP-1")
+    assert {:error, :no_current_ship_claim} = FleetAllocation.current_ship_claim(agent, "SHIP-3")
   end
 
   test "boot recovery leaves upstream sales for authoritative market-effect reconciliation" do
@@ -299,6 +341,46 @@ defmodule SpaceTraders.FleetAllocationPublishTest do
                selection(revision),
                decision()
              )
+  end
+
+  test "an Operator reservation also blocks an in-place subgraph admission" do
+    %{scope: scope, agent: agent, generation: generation, revision: revision} =
+      allocation_fixture()
+
+    [original] = selection(revision).commitments
+
+    assert {:ok, portfolio} =
+             FleetAllocation.publish_portfolio(
+               scope,
+               generation.id,
+               selection(revision),
+               decision()
+             )
+
+    {:ok, ship} = Fleet.record_ship(agent, "SHIP-2", "SHIP_PROBE")
+    assert {:ok, _} = ShipReservation.reserve(scope, ship.id, "Operator intervention")
+
+    additional = %{
+      original
+      | id: {revision.id, "extra"},
+        candidate_id: "extra",
+        claims: ["SHIP-2"],
+        pledges: []
+    }
+
+    assert {:error, :ship_reserved} =
+             FleetAllocation.replan_subgraph(
+               scope,
+               generation.id,
+               %{selection(revision, 1) | commitments: [additional]},
+               ["extra"],
+               decision()
+             )
+
+    assert [%{candidate_id: "candidate-1"}] =
+             FleetAllocation.current_portfolio(scope, agent).commitments
+
+    assert Repo.get!(Generation, generation.id).allocation_version == portfolio.version
   end
 
   test "atomically supersedes the prior portfolio for readers" do

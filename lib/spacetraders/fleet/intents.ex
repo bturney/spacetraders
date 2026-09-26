@@ -778,11 +778,17 @@ defmodule SpaceTraders.Fleet.Intents do
            insert_commitment_intent(commitment, portfolio, ship, %{
              type: "acquire_resources",
              target_waypoint: candidate.source_waypoint,
-             parameters: %{
-               "mode" => to_string(mode),
-               "produce" => candidate.resource.produce,
-               "survey" => candidate.resource.survey
-             }
+             parameters:
+               %{
+                 "mode" => to_string(mode),
+                 "produce" => candidate.resource.produce,
+                 "survey" => candidate.resource.survey
+               }
+               |> then(fn parameters ->
+                 if is_map(candidate.transfer),
+                   do: Map.put(parameters, "transfer", candidate.transfer),
+                   else: parameters
+               end)
            }) do
       advance_new_intent(agent, intent, live_ship)
     else
@@ -3010,6 +3016,9 @@ defmodule SpaceTraders.Fleet.Intents do
            finished_at: DateTime.utc_now() |> DateTime.truncate(:second)
          ) do
       {:ok, intent} ->
+        if intent.caller == "commitment" and intent.type == "deliver",
+          do: FleetAllocation.reconcile_completed_outcomes()
+
         record_activity_by_intent(
           intent,
           "manual_intent_completed",
