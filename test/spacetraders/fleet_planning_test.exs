@@ -300,6 +300,7 @@ defmodule SpaceTraders.FleetPlanningTest do
       as_of: @as_of,
       credits: 20_000,
       preparation_credits: 750,
+      ships: [%{symbol: "CRUISER-1", waypoint: "X1-A1"}],
       shipyards: [
         %{
           system_symbol: "X1",
@@ -362,6 +363,92 @@ defmodule SpaceTraders.FleetPlanningTest do
                valid_until: ~U[2030-01-01 12:04:00Z]
              }
            ]
+  end
+
+  test "a Shipyard with fresh offers is inadmissible until an owned Ship is co-located" do
+    snapshot = acquisition_snapshot()
+
+    assert {:ok, %{candidate_contributions: [hauler], limitations: []}} =
+             FleetPlanning.plan_ship_acquisition(fleet_revision(), 0, snapshot)
+
+    assert hauler.source_waypoint == "X1-A1"
+
+    # Without a co-located Ship the purchase cannot dispatch, so it is not
+    # proposed at all and the unmet precondition is reported.
+    assert {:ok, %{candidate_contributions: [], limitations: [limitation]}} =
+             FleetPlanning.plan_ship_acquisition(
+               fleet_revision(),
+               0,
+               Map.put(snapshot, :ships, [%{symbol: "CRUISER-1", waypoint: "X1-A2"}])
+             )
+
+    assert %{
+             subject: "X1-A1",
+             reason: :purchase_precondition_unmet,
+             prerequisite: %{waypoint: "X1-A1", required_ship: :any_owned_ship}
+           } = limitation
+
+    assert {:ok, %{candidate_contributions: [], limitations: [_]}} =
+             FleetPlanning.plan_ship_acquisition(
+               fleet_revision(),
+               0,
+               Map.put(snapshot, :ships, [])
+             )
+  end
+
+  test "Preparation Exposure reserves the shipyard fee for every empty frame slot" do
+    snapshot = acquisition_snapshot()
+
+    assert {:ok, %{candidate_contributions: [hauler]}} =
+             FleetPlanning.plan_ship_acquisition(fleet_revision(), 0, snapshot)
+
+    # The hauler frame offers 3 module slots and 2 mounting points, and the
+    # template fills none of them, so every slot owes the shipyard's 500 fee.
+    assert hauler.expected_outcomes.preparation_credits == 2_500
+    assert hauler.required_resources == %{credits: 12_500}
+    assert hauler.ship.preparation_credits == 2_500
+  end
+
+  defp acquisition_snapshot do
+    %{
+      as_of: @as_of,
+      credits: 40_000,
+      ships: [%{symbol: "CRUISER-1", waypoint: "X1-A1"}],
+      shipyards: [
+        %{
+          system_symbol: "X1",
+          waypoint: "X1-A1",
+          observed_at: ~U[2030-01-01 11:59:00Z],
+          evidence_id: "shipyard-a1",
+          modifications_fee: 500,
+          ships: [
+            %{
+              type: "SHIP_LIGHT_HAULER",
+              purchase_price: 10_000,
+              engine: %{speed: 30},
+              frame: %{module_slots: 3, mounting_points: 2},
+              modules: [],
+              mounts: []
+            }
+          ]
+        }
+      ]
+    }
+  end
+
+  defp fleet_revision do
+    %Revision{
+      id: 42,
+      document: %{
+        "objectives" => [
+          %{
+            "objective" => "Grow the Fleet",
+            "kind" => "attain",
+            "evaluation" => "Add a capable Ship"
+          }
+        ]
+      }
+    }
   end
 
   defp revision do

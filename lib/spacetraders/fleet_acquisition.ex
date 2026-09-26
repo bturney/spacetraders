@@ -43,21 +43,19 @@ defmodule SpaceTraders.FleetAcquisition do
     with :ok <- SpaceTraders.RuntimeAuthority.execution_allowed?(),
          %Generation{} = generation <- active_generation(agent, revision),
          {:ok, overview} <- AgentContext.agent_overview(agent),
+         {:ok, ships} <- Fleet.list_ships(agent),
          as_of = DateTime.utc_now(),
-         {:ok, %{candidate_contributions: [_ | _] = candidates}} <-
+         {:ok, planning} <-
            FleetPlanning.plan_ship_acquisition(revision, acquisition_objective_index(revision), %{
              as_of: as_of,
              credits: overview.credits,
+             ships: co_locatable_ships(ships),
              shipyards: shipyard_offers(agent, system, as_of)
            }),
-         {:ok, selected} <-
-           FleetAllocation.select_portfolio(revision, candidates, %{
-             as_of: as_of,
-             claims: [],
-             reservations: %{credits: overview.credits}
-           }),
+         {:ok, selected} <- select_candidate(revision, planning, overview.credits, as_of),
          [commitment | _] <- selected.commitments,
-         candidate <- Enum.find(candidates, &(&1.id == commitment.candidate_id)),
+         candidate <-
+           Enum.find(planning.candidate_contributions, &(&1.id == commitment.candidate_id)),
          :ok <- authorize_purchase(revision, overview.credits, candidate),
          {:ok, portfolio} <-
            FleetAllocation.publish_portfolio(
@@ -78,8 +76,34 @@ defmodule SpaceTraders.FleetAcquisition do
          {:ok, result} <- dispatch(agent, portfolio, candidate) do
       {:ok, Map.put(result, :portfolio, portfolio)}
     else
-      error -> {:error, {:ship_acquisition_unavailable, error}}
+      {:ok, %{candidate_contributions: []}} ->
+        {:error, {:ship_acquisition_unavailable, :no_admissible_ship_offer}}
+
+      error ->
+        {:error, {:ship_acquisition_unavailable, error}}
     end
+  end
+
+  defp select_candidate(revision, planning, credits, as_of) do
+    case planning.candidate_contributions do
+      [] ->
+        :no_admissible_ship_offer
+
+      candidates ->
+        FleetAllocation.select_portfolio(revision, candidates, %{
+          as_of: as_of,
+          claims: [],
+          reservations: %{credits: credits}
+        })
+    end
+  end
+
+  # A purchase needs an owned Ship at the Shipyard's Waypoint, so each Ship's
+  # current position is the precondition evidence the planner needs.
+  defp co_locatable_ships(ships) do
+    Enum.map(ships, fn ship ->
+      %{symbol: ship.symbol, waypoint: ship.nav && ship.nav.waypoint_symbol}
+    end)
   end
 
   defp dispatch(agent, portfolio, candidate) do
@@ -393,6 +417,7 @@ defmodule SpaceTraders.FleetAcquisition do
             waypoint: waypoint.symbol,
             observed_at: observed_at,
             evidence_id: "intelligence-observation:#{observation_id}",
+            modifications_fee: modification_fee(waypoint.shipyard),
             ships: ships
           }
         ]
@@ -400,6 +425,18 @@ defmodule SpaceTraders.FleetAcquisition do
         _ -> []
       end
     end)
+  end
+
+  # The shipyard's per-modification fee prices the Preparation Exposure. It is
+  # only usable while the observed fact is still fresh.
+  defp modification_fee(shipyard) do
+    with facts when is_map(facts) <- shipyard.facts,
+         %{state: "known", freshness: :fresh, value: fee} when is_integer(fee) and fee >= 0 <-
+           facts["modifications_fee"] do
+      fee
+    else
+      _ -> nil
+    end
   end
 
   defp authorize_purchase(revision, credits, candidate) do
