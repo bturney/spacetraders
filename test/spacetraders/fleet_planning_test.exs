@@ -547,4 +547,259 @@ defmodule SpaceTraders.FleetPlanningTest do
       :expected_outcomes
     ])
   end
+
+  @refit_module "MODULE_SURVEY_SUITE_I"
+
+  defp refit_ship(symbol, overrides \\ %{}) do
+    body =
+      SpaceTraders.ShipBody.ship_body(symbol, %{
+        "nav" => %{"status" => "IN_ORBIT", "waypointSymbol" => "X1-UX81-A1"},
+        "modules" => [],
+        "cargo" => %{
+          "capacity" => 40,
+          "units" => 12,
+          "inventory" => [%{"symbol" => "IRON_ORE", "units" => 12}]
+        }
+      })
+
+    SpaceTraders.API.Model.Ship.from_json(Map.merge(body, Map.new(overrides)))
+  end
+
+  defp refit_revision(objective \\ "Refit the Fleet with a Survey module") do
+    %Revision{
+      id: 42,
+      document: %{
+        "objectives" => [
+          %{
+            "objective" => objective,
+            "kind" => "attain",
+            "evaluation" => "Operate a Survey-capable Ship"
+          }
+        ]
+      }
+    }
+  end
+
+  defp refit_snapshot(overrides \\ %{}) do
+    Map.merge(
+      %{
+        as_of: @as_of,
+        credits: 50_000,
+        ships: [refit_ship("FLEET-1")],
+        markets: [
+          %{
+            system_symbol: "X1-UX81",
+            waypoint: "X1-UX81-A2",
+            observed_at: ~U[2030-01-01 11:58:00Z],
+            evidence_id: "observation-X1-UX81-A2",
+            source: "get_market",
+            trade_goods: [
+              %{refit_good() | symbol: "IRON_ORE"},
+              refit_good()
+            ]
+          }
+        ],
+        targets: [%{capability: :survey, module_symbols: [@refit_module]}],
+        releases: []
+      },
+      Map.new(overrides)
+    )
+  end
+
+  defp refit_good do
+    %{
+      symbol: @refit_module,
+      purchase_price: 32_000,
+      sell_price: 24_000,
+      trade_volume: 5,
+      supply: "MODERATE",
+      activity: "STATIC"
+    }
+  end
+
+  describe "plan_ship_refit" do
+    test "propose evidence-bound install Candidates from fresh Market supply" do
+      assert {:ok, %{candidate_contributions: [candidate], limitations: []}} =
+               FleetPlanning.plan_ship_refit(refit_revision(), 0, refit_snapshot())
+
+      assert %CandidateContribution{
+               kind: :ship_refit,
+               objective_index: 0,
+               trade_symbol: @refit_module,
+               source_waypoint: "X1-UX81-A2",
+               destination_waypoint: "X1-UX81-A2",
+               required_roles: [%{role: :fleet_refit, count: 1}],
+               required_capabilities: [%{capability: :refit_ship, value: "FLEET-1"}]
+             } = candidate
+
+      assert candidate.refit.action == :install
+      assert candidate.refit.module_symbol == @refit_module
+      assert candidate.refit.capability == :survey
+      assert candidate.refit.sourcing == :purchase
+      assert candidate.refit.market == "X1-UX81-A2"
+      assert candidate.refit.purchase_price == 32_000
+      assert candidate.refit.expected_cost == 32_000
+
+      assert candidate.expected_outcomes.capability == :survey
+      assert candidate.expected_outcomes.module_symbol == @refit_module
+
+      assert [dependency] = candidate.dependencies
+      assert dependency.subject == "market:X1-UX81:X1-UX81-A2"
+      assert dependency.required_facts == ["trade_goods"]
+
+      assert candidate.validity.expires_at == ~U[2030-01-01 12:03:00Z]
+      assert candidate.alternatives == []
+    end
+
+    test "source from Cargo only with purchase or transfer evidence" do
+      ship =
+        refit_ship("FLEET-1", %{
+          "cargo" => %{
+            "capacity" => 40,
+            "units" => 13,
+            "inventory" => [
+              %{"symbol" => "IRON_ORE", "units" => 12},
+              %{"symbol" => @refit_module, "units" => 1}
+            ]
+          }
+        })
+
+      assert {:ok, %{candidate_contributions: [candidate]}} =
+               FleetPlanning.plan_ship_refit(
+                 refit_revision(),
+                 0,
+                 refit_snapshot(%{ships: [ship], markets: []})
+               )
+
+      assert candidate.refit.sourcing == :cargo
+      assert candidate.refit.purchase_price == 0
+      assert candidate.refit.expected_cost == 0
+    end
+
+    test "never assume a module is in Cargo without evidence, and require affordable supply" do
+      assert {:ok, %{candidate_contributions: [], limitations: limitations}} =
+               FleetPlanning.plan_ship_refit(refit_revision(), 0, refit_snapshot(%{credits: 100}))
+
+      assert Enum.any?(limitations, &(&1.reason == :refit_supply_unaffordable))
+    end
+
+    test "already-declared capability is the gate; planning does not expand it" do
+      ship = refit_ship("FLEET-1", %{"modules" => [%{"symbol" => @refit_module}]})
+
+      assert {:ok, %{candidate_contributions: []}} =
+               FleetPlanning.plan_ship_refit(
+                 refit_revision(),
+                 0,
+                 refit_snapshot(%{ships: [ship]})
+               )
+    end
+
+    test "proposed Candidates keep the other supply options as retained alternatives" do
+      snapshot =
+        refit_snapshot(%{
+          markets: [
+            %{
+              system_symbol: "X1-UX81",
+              waypoint: "X1-UX81-A2",
+              observed_at: ~U[2030-01-01 11:58:00Z],
+              evidence_id: "observation-X1-UX81-A2",
+              source: "get_market",
+              trade_goods: [%{refit_good() | purchase_price: 30_000}]
+            },
+            %{
+              system_symbol: "X1-UX81",
+              waypoint: "X1-UX81-A3",
+              observed_at: ~U[2030-01-01 11:58:00Z],
+              evidence_id: "observation-X1-UX81-A3",
+              source: "get_market",
+              trade_goods: [%{refit_good() | purchase_price: 35_000}]
+            }
+          ]
+        })
+
+      assert {:ok, %{candidate_contributions: [cheaper, dearer]}} =
+               FleetPlanning.plan_ship_refit(refit_revision(), 0, snapshot)
+
+      assert cheaper.refit.market == "X1-UX81-A2"
+      assert dearer.refit.market == "X1-UX81-A3"
+      assert cheaper.alternatives == [alternative(dearer)]
+      assert dearer.alternatives == [alternative(cheaper)]
+    end
+
+    test "removal is admissible only with a proven release for the installed module" do
+      ship = refit_ship("FLEET-1", %{"modules" => [%{"symbol" => @refit_module}]})
+
+      assert {:ok, %{candidate_contributions: [], limitations: limitations}} =
+               FleetPlanning.plan_ship_refit(
+                 refit_revision(),
+                 0,
+                 refit_snapshot(%{ships: [ship], markets: []})
+               )
+
+      assert Enum.any?(limitations, &(&1.reason == :refit_capability_already_met))
+
+      release = %{ship: "FLEET-1", module_symbol: @refit_module, scope: :all_matching}
+
+      assert {:ok, %{candidate_contributions: [candidate]}} =
+               FleetPlanning.plan_ship_refit(
+                 refit_revision(),
+                 0,
+                 refit_snapshot(%{ships: [ship], markets: [], releases: [release]})
+               )
+
+      assert candidate.refit.action == :remove
+      assert candidate.refit.removal_scope == :all_matching
+      assert candidate.refit.installed_before == 1
+    end
+
+    test "a release without authoritative installed evidence is never proposed" do
+      release = %{ship: "FLEET-1", module_symbol: @refit_module, scope: :all_matching}
+
+      assert {:ok, %{candidate_contributions: []}} =
+               FleetPlanning.plan_ship_refit(
+                 refit_revision(),
+                 0,
+                 refit_snapshot(%{markets: [], releases: [release]})
+               )
+    end
+
+    test "stale Market supply evidence is inadmissible" do
+      snapshot =
+        refit_snapshot(%{
+          markets: [
+            %{
+              system_symbol: "X1-UX81",
+              waypoint: "X1-UX81-A2",
+              observed_at: ~U[2030-01-01 11:00:00Z],
+              evidence_id: "observation-X1-UX81-A2",
+              source: "get_market",
+              trade_goods: [refit_good()]
+            }
+          ]
+        })
+
+      assert {:ok, %{candidate_contributions: [], limitations: limitations}} =
+               FleetPlanning.plan_ship_refit(refit_revision(), 0, snapshot)
+
+      assert Enum.any?(limitations, &(&1.reason == :refit_supply_unavailable))
+    end
+
+    test "non-refit objectives produce a limitation instead of contributions" do
+      assert {:ok, %{candidate_contributions: [], limitations: limitations}} =
+               FleetPlanning.plan_ship_refit(
+                 refit_revision("Grow credits"),
+                 0,
+                 refit_snapshot()
+               )
+
+      assert Enum.any?(limitations, &(&1.reason == :unsupported_ship_objective))
+    end
+
+    test "planning is deterministic for identical evidence" do
+      {:ok, first} = FleetPlanning.plan_ship_refit(refit_revision(), 0, refit_snapshot())
+      {:ok, second} = FleetPlanning.plan_ship_refit(refit_revision(), 0, refit_snapshot())
+
+      assert first == second
+    end
+  end
 end

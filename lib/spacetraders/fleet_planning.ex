@@ -48,7 +48,8 @@ defmodule SpaceTraders.FleetPlanning do
                   contract: nil,
                   construction: nil,
                   transfer: nil,
-                  ship: nil
+                  ship: nil,
+                  refit: nil
                 ]
 
     @type t :: %__MODULE__{}
@@ -283,6 +284,495 @@ defmodule SpaceTraders.FleetPlanning do
 
   def plan_ship_acquisition(_revision, _index, _snapshot),
     do: {:error, :invalid_ship_acquisition_planning_input}
+
+  @refit_allowance_credits 500
+
+  @doc """
+  Proposes evidence-bound Ship refit Candidates without claiming the refitting Ship.
+
+  An install Candidate sources its module either from authoritative Cargo
+  evidence or from a fresh Market Listing; it never assumes a module is in
+  Cargo without that evidence, and it is inadmissible when the Listing is
+  stale or the Agent cannot afford the purchase. A removal Candidate is
+  admissible only with a proven release: the Operator's Revision must
+  release that module on that Ship, authoritative readiness must still
+  show it installed, and Cargo must have room for the removed unit.
+
+  Because removing one module can remove every matching module, a removal
+  Candidate is only valid with an `:all_matching` release scope and declares
+  that uncertainty rather than promising a one-module outcome.
+  """
+  def plan_ship_refit(
+        %Revision{} = revision,
+        index,
+        %{
+          as_of: %DateTime{} = as_of,
+          credits: credits,
+          ships: ships,
+          markets: markets,
+          targets: targets,
+          releases: releases
+        }
+      )
+      when is_integer(index) and index >= 0 and is_integer(credits) and credits >= 0 and
+             is_list(ships) and is_list(markets) and is_list(targets) and is_list(releases) do
+    with {:ok, objective} <- objective_at(revision, index) do
+      if ship_refit_objective?(objective) do
+        fresh_markets = refit_supply(markets, as_of)
+
+        {candidates, limitations} =
+          for ship <- ships, reduce: {[], []} do
+            {candidates, limitations} ->
+              case refit_ship_candidates(
+                     revision,
+                     index,
+                     objective,
+                     as_of,
+                     credits,
+                     ship,
+                     targets,
+                     releases,
+                     fresh_markets
+                   ) do
+                {:ok, ship_candidates, ship_limitations} ->
+                  {ship_candidates ++ candidates, ship_limitations ++ limitations}
+              end
+          end
+
+        candidates =
+          candidates
+          |> Enum.sort_by(
+            &{-&1.expected_outcomes.decision_value, &1.expected_outcomes.expected_cost, &1.id}
+          )
+          |> add_ship_refit_alternatives()
+
+        {:ok,
+         result(revision, index, %{as_of: as_of},
+           candidate_contributions: candidates,
+           limitations: Enum.reverse(limitations)
+         )}
+      else
+        {:ok,
+         result(revision, index, %{as_of: as_of},
+           limitations: [%{subject: :ship_refit, reason: :unsupported_ship_objective}]
+         )}
+      end
+    end
+  end
+
+  def plan_ship_refit(_revision, _index, _snapshot),
+    do: {:error, :invalid_ship_refit_planning_input}
+
+  @doc false
+  def ship_refit_objective?(objective) when is_map(objective) do
+    Enum.any?([objective["objective"], objective["evaluation"]], fn text ->
+      is_binary(text) and String.match?(text, ~r/\brefit\b|\bmodule\b|\boutfit(ting)?\b/i)
+    end)
+  end
+
+  def ship_refit_objective?(_), do: false
+
+  # Retains only Markets whose Listing evidence is fresh at the decision time.
+  defp refit_supply(markets, as_of) do
+    Enum.flat_map(markets, fn market ->
+      with %DateTime{} = observed_at <- Map.get(market, :observed_at),
+           waypoint when is_binary(waypoint) <- Map.get(market, :waypoint),
+           evidence_id when is_binary(evidence_id) <- Map.get(market, :evidence_id),
+           goods when is_list(goods) <- Map.get(market, :trade_goods),
+           true <- fresh?(observed_at, as_of) do
+        [
+          %{
+            system_symbol: Map.get(market, :system_symbol),
+            waypoint: waypoint,
+            observed_at: observed_at,
+            evidence_id: evidence_id,
+            source: Map.get(market, :source) || "get_market",
+            trade_goods: goods,
+            valid_until: DateTime.add(observed_at, @market_evidence_freshness_seconds, :second)
+          }
+        ]
+      else
+        _ -> []
+      end
+    end)
+  end
+
+  defp fresh?(observed_at, as_of) do
+    DateTime.diff(as_of, observed_at, :second) in 0..@market_evidence_freshness_seconds
+  end
+
+  defp refit_ship_candidates(
+         revision,
+         index,
+         objective,
+         as_of,
+         credits,
+         ship,
+         targets,
+         releases,
+         fresh_markets
+       ) do
+    with {:ok, evidence} <- refit_ship_evidence(ship) do
+      {installs, install_limitations} =
+        install_candidates(targets, ship, evidence, fresh_markets, credits)
+
+      {removals, removal_limitations} =
+        removal_candidates(releases, ship, evidence, targets)
+
+      candidates =
+        Enum.map(
+          installs ++ removals,
+          &ship_refit_contribution(revision, index, objective, as_of, ship, &1)
+        )
+
+      {:ok, candidates, Enum.reverse(install_limitations ++ removal_limitations)}
+    end
+  end
+
+  defp refit_ship_evidence(ship) do
+    symbol = map_or_nil(ship, :symbol)
+    nav = map_or_nil(ship, :nav)
+    cargo = map_or_nil(ship, :cargo)
+    modules = map_or_nil(ship, :modules)
+    frame = map_or_nil(ship, :frame)
+    module_slots = frame && map_or_nil(frame, :module_slots)
+
+    cond do
+      not is_binary(symbol) ->
+        {:error, %{subject: :ship_refit, reason: :ship_identity_unavailable}}
+
+      not is_map(nav) or not is_binary(Map.get(nav, :waypoint_symbol)) ->
+        {:limitation, %{subject: symbol, reason: :ship_position_unavailable}}
+
+      not is_map(cargo) or not is_integer(Map.get(cargo, :capacity)) or
+          not is_integer(Map.get(cargo, :units)) ->
+        {:limitation, %{subject: symbol, reason: :ship_cargo_unavailable}}
+
+      not is_list(modules) or not is_integer(module_slots) ->
+        {:limitation, %{subject: symbol, reason: :ship_readiness_unavailable}}
+
+      true ->
+        {:ok, %{symbol: symbol, cargo: cargo, modules: modules, module_slots: module_slots}}
+    end
+  end
+
+  defp install_candidates(targets, ship, evidence, fresh_markets, credits) do
+    for target <- targets, is_map(target), reduce: {[], []} do
+      {candidates, limitations} ->
+        case install_candidate(target, ship, evidence, fresh_markets, credits) do
+          :satisfied ->
+            {candidates, limitations}
+
+          {:ok, target_candidates} ->
+            {Enum.reverse(target_candidates) ++ candidates, limitations}
+
+          {:limitation, limitation} ->
+            {candidates, [limitation | limitations]}
+        end
+    end
+    |> then(fn {candidates, limitations} -> {candidates, limitations} end)
+  end
+
+  defp install_candidate(target, _ship, evidence, fresh_markets, credits) do
+    module_symbols = List.wrap(Map.get(target, :module_symbols, []))
+    capability = Map.get(target, :capability)
+
+    cond do
+      module_symbols == [] or not is_atom(capability) ->
+        {:limitation, %{subject: :ship_refit, reason: :invalid_refit_target}}
+
+      Enum.any?(evidence.modules, &(&1.symbol in module_symbols)) ->
+        # The declared capability is already met. The installed module is not
+        # released, so no removal may be planned for it either.
+        {:limitation, %{subject: evidence.symbol, reason: :refit_capability_already_met}}
+
+      length(evidence.modules) >= evidence.module_slots ->
+        {:limitation, %{subject: evidence.symbol, reason: :refit_module_slots_unavailable}}
+
+      true ->
+        install_sourcing(module_symbols, capability, evidence, fresh_markets, credits)
+    end
+  end
+
+  defp install_sourcing(module_symbols, capability, evidence, fresh_markets, credits) do
+    symbol = hd(module_symbols)
+    cargo = evidence.cargo
+
+    if cargo_units(cargo, symbol) >= 1 do
+      {:ok,
+       [
+         %{
+           action: :install,
+           module_symbol: symbol,
+           capability: capability,
+           sourcing: :cargo,
+           market: nil,
+           purchase_price: 0,
+           expected_cost: 0,
+           installed_before: module_count(evidence.modules, symbol)
+         }
+       ]}
+    else
+      listings =
+        Enum.filter(fresh_markets, fn listing ->
+          Enum.any?(listing.trade_goods, &(Map.get(&1, :symbol) in module_symbols))
+        end)
+
+      cond do
+        listings == [] ->
+          {:limitation, %{subject: evidence.symbol, reason: :refit_supply_unavailable}}
+
+        free_capacity(cargo) < 1 ->
+          {:limitation, %{subject: evidence.symbol, reason: :refit_cargo_capacity_unmet}}
+
+        true ->
+          affordable =
+            listings
+            |> Enum.map(fn listing ->
+              price = listing_price(listing, module_symbols)
+
+              cond do
+                not is_integer(price) ->
+                  nil
+
+                price > credits ->
+                  {:limitation, %{subject: listing.waypoint, reason: :refit_supply_unaffordable}}
+
+                true ->
+                  %{
+                    action: :install,
+                    module_symbol: symbol,
+                    capability: capability,
+                    sourcing: :purchase,
+                    market: listing.waypoint,
+                    purchase_price: price,
+                    expected_cost: price,
+                    market_evidence: listing,
+                    installed_before: module_count(evidence.modules, symbol)
+                  }
+              end
+            end)
+            |> Enum.reject(&is_nil/1)
+
+          candidates = Enum.filter(affordable, &is_map(&1))
+
+          cond do
+            candidates != [] ->
+              {:ok, candidates}
+
+            true ->
+              hd(affordable) ||
+                {:limitation, %{subject: evidence.symbol, reason: :refit_supply_unavailable}}
+          end
+      end
+    end
+  end
+
+  defp free_capacity(cargo), do: Map.get(cargo, :capacity) - Map.get(cargo, :units)
+
+  defp listing_price(listing, module_symbols) do
+    Enum.find_value(listing.trade_goods, fn good ->
+      if map_or(good, :symbol) in module_symbols, do: map_or(good, :purchase_price)
+    end)
+  end
+
+  defp removal_candidates(releases, ship, evidence, targets) do
+    ship_symbol = map_or_nil(ship, :symbol)
+
+    {candidates, limitations} =
+      for release <- releases, is_map(release), reduce: {[], []} do
+        {candidates, limitations} ->
+          case removal_candidate(release, ship_symbol, evidence, targets) do
+            :skip -> {candidates, limitations}
+            {:ok, candidate} -> {[candidate | candidates], limitations}
+            {:limitation, limitation} -> {candidates, [limitation | limitations]}
+          end
+      end
+
+    {Enum.reverse(candidates), limitations}
+  end
+
+  defp removal_candidate(release, ship_symbol, evidence, targets) do
+    module_symbol = Map.get(release, :module_symbol)
+    released_ship = Map.get(release, :ship)
+
+    cond do
+      not is_binary(module_symbol) or not is_binary(released_ship) or released_ship != ship_symbol ->
+        :skip
+
+      Map.get(release, :scope) != :all_matching ->
+        {:limitation, %{subject: ship_symbol, reason: :refit_release_unproven}}
+
+      true ->
+        installed = module_count(evidence.modules, module_symbol)
+        capability = removal_capability(module_symbol, targets)
+
+        cond do
+          installed < 1 ->
+            {:limitation, %{subject: ship_symbol, reason: :refit_release_unproven}}
+
+          is_nil(capability) ->
+            {:limitation, %{subject: module_symbol, reason: :refit_release_unproven}}
+
+          Map.get(evidence.cargo, :capacity) - Map.get(evidence.cargo, :units) < 1 ->
+            {:limitation, %{subject: ship_symbol, reason: :refit_cargo_capacity_unmet}}
+
+          true ->
+            {:ok,
+             %{
+               action: :remove,
+               module_symbol: module_symbol,
+               capability: capability,
+               sourcing: nil,
+               market: nil,
+               purchase_price: 0,
+               expected_cost: 0,
+               removal_scope: :all_matching,
+               installed_before: installed
+             }}
+        end
+    end
+  end
+
+  defp removal_capability(module_symbol, targets) do
+    Enum.find_value(targets, fn target ->
+      if module_symbol in List.wrap(Map.get(target, :module_symbols, [])),
+        do: Map.get(target, :capability)
+    end)
+  end
+
+  defp ship_refit_contribution(revision, index, objective, as_of, ship, candidate) do
+    symbol = map_or(ship, :symbol)
+    action = candidate.action
+    module_symbol = candidate.module_symbol
+
+    {dependency, valid_until} =
+      case candidate do
+        %{market_evidence: listing} ->
+          dependency = %{
+            subject: "market:#{listing.system_symbol}:#{listing.waypoint}",
+            required_facts: ["trade_goods"],
+            observed_at: listing.observed_at,
+            evidence_id: to_string(listing.evidence_id),
+            source: listing.source,
+            valid_until: listing.valid_until
+          }
+
+          {dependency, listing.valid_until}
+
+        _ ->
+          dependency = %{
+            subject: "ship:#{symbol}",
+            required_facts: ["cargo"],
+            observed_at: as_of,
+            evidence_id: "authoritative:ship:#{symbol}",
+            source: "get_my_ship",
+            valid_until: DateTime.add(as_of, @market_evidence_freshness_seconds, :second)
+          }
+
+          {dependency, DateTime.add(as_of, @market_evidence_freshness_seconds, :second)}
+      end
+
+    refit_waypoint =
+      case candidate do
+        %{action: :install, sourcing: :purchase, market: market} when is_binary(market) ->
+          market
+
+        _ ->
+          map_or_nil(ship, :nav) && Map.get(map_or_nil(ship, :nav), :waypoint_symbol)
+      end
+
+    %CandidateContribution{
+      id:
+        Evidence.fingerprint(
+          {revision.id, index, symbol, action, module_symbol, candidate.market,
+           dependency.evidence_id}
+        ),
+      strategy_revision_id: revision.id,
+      objective_index: index,
+      objective: objective,
+      kind: :ship_refit,
+      trade_symbol: module_symbol,
+      source_waypoint: refit_waypoint,
+      destination_waypoint: refit_waypoint,
+      expected_outcomes: %{
+        action: action,
+        capability: candidate.capability,
+        module_symbol: module_symbol,
+        expected_cost: candidate.expected_cost,
+        decision_value: refit_decision_value(candidate)
+      },
+      uncertainty: refit_uncertainty(candidate),
+      required_roles: [%{role: :fleet_refit, count: 1}],
+      required_capabilities: [%{capability: :refit_ship, value: symbol}],
+      required_resources: %{
+        credits: candidate.expected_cost + refit_credits_allowance(candidate),
+        cargo_capacity: 1,
+        ship_count: 1
+      },
+      dependencies: [dependency],
+      validity: %{as_of: as_of, expires_at: valid_until},
+      alternatives: [],
+      refit:
+        Map.merge(
+          Map.take(candidate, [
+            :sourcing,
+            :market,
+            :purchase_price,
+            :expected_cost,
+            :removal_scope,
+            :installed_before
+          ]),
+          %{action: action, module_symbol: module_symbol, capability: candidate.capability}
+        )
+    }
+  end
+
+  defp refit_credits_allowance(%{action: :install, sourcing: :purchase}),
+    do: @refit_allowance_credits
+
+  defp refit_credits_allowance(_), do: 0
+
+  defp refit_decision_value(%{action: :install, sourcing: :cargo}), do: 3
+  defp refit_decision_value(%{action: :install}), do: 2
+  defp refit_decision_value(%{action: :remove}), do: 1
+
+  defp refit_uncertainty(%{action: :install, sourcing: :purchase}),
+    do: %{supply: :market_listing}
+
+  defp refit_uncertainty(%{action: :install}), do: %{supply: :authoritative_cargo}
+  defp refit_uncertainty(%{action: :remove}), do: %{removed_units: :all_matching}
+
+  defp add_ship_refit_alternatives(candidates) do
+    Enum.map(candidates, fn candidate ->
+      alternatives =
+        candidates
+        |> Enum.reject(&(&1.id == candidate.id))
+        |> Enum.map(fn alternative ->
+          %{
+            id: alternative.id,
+            trade_symbol: alternative.trade_symbol,
+            source_waypoint: alternative.source_waypoint,
+            destination_waypoint: alternative.destination_waypoint,
+            expected_outcomes: alternative.expected_outcomes
+          }
+        end)
+
+      %{candidate | alternatives: alternatives}
+    end)
+  end
+
+  defp map_or(subject, key) when is_map(subject), do: Map.get(subject, key)
+  defp map_or(_subject, _key), do: nil
+
+  defp map_or_nil(subject, key) when is_map(subject), do: Map.get(subject, key)
+  defp map_or_nil(_subject, _key), do: nil
+
+  defp module_count(modules, symbol) when is_list(modules) do
+    Enum.count(modules, &(&1.symbol == symbol))
+  end
+
+  defp module_count(_modules, _symbol), do: 0
 
   defp preparation_override_valid?(nil), do: true
   defp preparation_override_valid?(credits) when is_integer(credits) and credits >= 0, do: true

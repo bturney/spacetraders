@@ -1,0 +1,530 @@
+defmodule SpaceTraders.FleetRefitTest do
+  use SpaceTraders.DataCase, async: false
+
+  import SpaceTraders.ShipBody
+
+  alias SpaceTraders.API.Model
+  alias SpaceTraders.Agent.{Agent, Operator, Scope}
+  alias SpaceTraders.Fleet.{Intent, Ship, ShipServer}
+  alias SpaceTraders.Fleet.Intents
+  alias SpaceTraders.FleetAllocation
+  alias SpaceTraders.FleetAllocation.PortfolioCandidate
+  alias SpaceTraders.FleetAllocation.StrategyDecisionEpisode
+  alias SpaceTraders.FleetGeneration.Generation
+  alias SpaceTraders.FleetRefit
+  alias SpaceTraders.FleetStrategy.{Revision, Strategy}
+  alias SpaceTraders.Intelligence
+  alias SpaceTraders.Repo
+
+  @module "MODULE_SURVEY_SUITE_I"
+  @system "X1-UX81"
+  @home "X1-UX81-A1"
+  @supply "X1-UX81-A2"
+
+  setup do
+    on_exit(fn -> ShipServer.stop_all() end)
+    :ok
+  end
+
+  test "a purchase-sourced refit claims its Ship, buys the module, installs, and reconciles" do
+    {scope, agent, revision, ship} = generation()
+    seed_intelligence(agent)
+
+    test_pid = self()
+    ship_symbol = ship.symbol
+    ship_path = "/v2/my/ships/#{ship_symbol}"
+    navigate_path = ship_path <> "/navigate"
+    purchase_path = ship_path <> "/purchase"
+    install_path = ship_path <> "/modules/install"
+    market_path = "/v2/systems/#{@system}/waypoints/#{@supply}/market"
+
+    stub_api(test_pid, %{
+      "GET /v2/my/ships" => fn -> %{"data" => [outbound_ship_body(ship_symbol)]} end,
+      "GET /v2/my/agent" => fn ->
+        %{"data" => %{"symbol" => agent.symbol, "credits" => 50_000}}
+      end,
+      ("GET " <> ship_path) => fn ->
+        count = ship_read_count()
+
+        case count do
+          0 -> %{"data" => outbound_ship_body(ship_symbol)}
+          1 -> %{"data" => purchased_docked_body(ship_symbol)}
+          _ -> %{"data" => fitted_ship_body(ship_symbol)}
+        end
+      end,
+      ("POST " <> navigate_path) => fn -> %{"data" => %{"nav" => nav_in_transit()}} end,
+      ("POST " <> purchase_path) => fn -> %{"data" => purchase_response()} end,
+      ("POST " <> install_path) => fn -> %{"data" => install_response()} end,
+      ("GET " <> market_path) => fn -> %{"data" => market_body()} end
+    })
+
+    assert {:ok, %Intent{type: "install_module", status: "waiting", target_waypoint: @supply}} =
+             FleetRefit.reconcile(scope, agent, revision, @system)
+
+    assert [%Intent{status: "waiting"} = intent] = Intents.current(agent)
+
+    live_ship = Model.Ship.from_json(docked_awaiting_purchase_body(ship_symbol))
+
+    assert {:ok, %Intent{status: "completed", last_action_result: result}} =
+             Intents.advance(agent, intent, live_ship)
+
+    assert result["kind"] == "install_module"
+
+    assert {:ok, %{ship_symbol: ^ship_symbol, module_symbol: @module, portfolio: portfolio}} =
+             FleetRefit.reconcile(scope, agent, revision, @system)
+
+    assert FleetAllocation.current_portfolio(scope, agent) == nil
+
+    assert %StrategyDecisionEpisode{classification: :realized, actual_outcomes: outcomes} =
+             Repo.get!(StrategyDecisionEpisode, portfolio.strategy_decision_episode_id)
+
+    assert outcomes["installed_after"] == 1
+    assert outcomes["expected_cost"] == 32_000
+    assert outcomes["reconciliation"]["state"] == "succeeded"
+    assert outcomes["reconciliation"]["basis"] == "reconciled_mutation_attempt"
+  end
+
+  test "a removal affecting duplicate matching modules terminates on the authoritative read" do
+    {scope, agent, revision, ship} = generation()
+    seed_intelligence(agent)
+
+    test_pid = self()
+    ship_symbol = ship.symbol
+    ship_path = "/v2/my/ships/#{ship_symbol}"
+    remove_path = ship_path <> "/modules/remove"
+
+    {_scope, agent, _ship, portfolio, commitment} = claimed_refit_ship(agent, ship, "remove")
+
+    stub_api(test_pid, %{
+      ("GET " <> ship_path) => fn ->
+        if Keyword.get(removed_state(), :removed, false) do
+          %{"data" => removed_ship_body(ship_symbol)}
+        else
+          %{"data" => fitted_ship_body(ship_symbol, installed: 3)}
+        end
+      end,
+      ("POST " <> remove_path) => fn ->
+        :persistent_term.put({__MODULE__, :removed}, removed: true)
+        %{"data" => removal_response()}
+      end
+    })
+
+    candidate = removal_candidate(ship_symbol)
+
+    ship_symbol = ship.symbol
+
+    assert {:ok, %Intent{type: "remove_module", status: "completed", last_action_result: result}} =
+             Intents.request_commitment_refit(
+               agent,
+               commitment,
+               portfolio,
+               ship_symbol,
+               candidate
+             )
+
+    assert result["kind"] == "remove_module"
+    assert result["quantity"] == 1
+
+    assert {:ok, %{ship_symbol: ^ship_symbol, module_symbol: @module}} =
+             FleetRefit.reconcile(scope, agent, revision, @system)
+  end
+
+  test "planning never assumes a module is in Cargo without purchase evidence" do
+    {scope, agent, revision, ship} = generation()
+    seed_intelligence(agent, supply: false)
+
+    stub_api(self(), %{
+      "GET /v2/my/ships" => fn -> %{"data" => [outbound_ship_body(ship.symbol)]} end,
+      "GET /v2/my/agent" => fn ->
+        %{"data" => %{"symbol" => agent.symbol, "credits" => 50_000}}
+      end
+    })
+
+    assert {:error, :ship_refit_unavailable} =
+             FleetRefit.reconcile(scope, agent, revision, @system)
+
+    assert Intents.current(agent) == []
+  end
+
+  # -- stubbing ----------------------------------------------------------------
+
+  defp stub_api(test_pid, handlers) do
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      send(test_pid, {conn.method, conn.request_path})
+      key = conn.method <> " " <> conn.request_path
+
+      case Map.fetch(handlers, key) do
+        {:ok, handler} ->
+          Req.Test.json(conn, handler.())
+
+        :error ->
+          conn
+          |> Plug.Conn.put_status(404)
+          |> Req.Test.json(%{"error" => %{"message" => "unstubbed " <> key}})
+      end
+    end)
+  end
+
+  defp ship_read_count do
+    key = {__MODULE__, :ship_reads}
+    count = :persistent_term.get(key, 0)
+    :persistent_term.put(key, count + 1)
+    count
+  end
+
+  defp removed_state do
+    :persistent_term.get({__MODULE__, :removed}, [])
+  end
+
+  # -- fixtures ----------------------------------------------------------------
+
+  defp generation do
+    operator = Repo.insert!(%Operator{email: "refit-#{System.unique_integer()}@example.com"})
+
+    agent =
+      Repo.insert!(%Agent{
+        operator_id: operator.id,
+        symbol: "REFIT",
+        faction: "COSMIC",
+        headquarters: @home,
+        agent_token: "TOKEN"
+      })
+
+    ship = Repo.insert!(%Ship{agent_id: agent.id, symbol: "REFIT-1", ship_type: "SHIP_PROBE"})
+
+    strategy = Repo.insert!(%Strategy{operator_id: operator.id, revision_number: 1})
+
+    revision =
+      Repo.insert!(%Revision{
+        fleet_strategy_id: strategy.id,
+        number: 1,
+        source: "operator",
+        activated_at: DateTime.utc_now(:second),
+        document: %{
+          "objectives" => [
+            %{
+              "objective" => "Refit the Fleet with a Survey module",
+              "kind" => "attain",
+              "evaluation" => "Operate a Survey-capable Ship",
+              "capability" => "survey",
+              "target_modules" => [@module]
+            }
+          ],
+          "hard_constraints" => ["Keep at least 1,000 credits available"],
+          "releases" => [
+            %{"ship" => "REFIT-1", "module_symbol" => @module, "scope" => "all_matching"}
+          ]
+        }
+      })
+
+    Repo.update!(Ecto.Changeset.change(strategy, active_revision_id: revision.id))
+
+    Repo.insert!(%Generation{
+      operator_id: operator.id,
+      agent_id: agent.id,
+      fleet_strategy_revision_id: revision.id,
+      number: 1,
+      symbol: agent.symbol,
+      faction: agent.faction,
+      replacement_symbols: %{},
+      objective_progress: %{}
+    })
+
+    {Scope.for_operator(operator), agent, revision, ship}
+  end
+
+  defp claimed_refit_ship(agent, ship, action) do
+    operator = Repo.get!(Operator, agent.operator_id)
+    revision = Repo.one!(from r in Revision, order_by: [desc: r.id], limit: 1)
+
+    generation =
+      Repo.one!(
+        from generation in Generation,
+          where: generation.agent_id == ^agent.id and is_nil(generation.retired_at)
+      )
+
+    candidate = %PortfolioCandidate{
+      id: "refit-#{action}",
+      strategy_revision_id: revision.id,
+      objective_index: 0,
+      claims: [ship.symbol],
+      reservations: %{},
+      pledges: [
+        %{
+          outcome: {:strategic_objective, 0},
+          amount: 1,
+          backing: {:claim, ship.symbol}
+        }
+      ],
+      dependencies: [],
+      expected_value: 1,
+      unwind_cost: 0
+    }
+
+    {:ok, selection} =
+      FleetAllocation.select_portfolio(revision, [candidate], %{
+        as_of: DateTime.utc_now(),
+        claims: [ship.symbol],
+        reservations: %{}
+      })
+
+    {:ok, portfolio} =
+      FleetAllocation.publish_portfolio(Scope.for_operator(operator), generation.id, selection, %{
+        evidence_references: [],
+        expectations: %{
+          module_symbol: @module,
+          action: :remove,
+          capability: :survey,
+          expected_cost: 0,
+          installed_before: 3
+        },
+        calibration_version: "ship-refit-v1"
+      })
+
+    [commitment] = portfolio.commitments
+    {Scope.for_operator(operator), agent, ship, portfolio, commitment}
+  end
+
+  defp seed_intelligence(agent, opts \\ []) do
+    waypoints = [
+      %{
+        "symbol" => @supply,
+        "systemSymbol" => @system,
+        "type" => "PLANET",
+        "x" => 1,
+        "y" => 2,
+        "traits" => [%{"symbol" => "MARKETPLACE"}]
+      },
+      %{
+        "symbol" => @home,
+        "systemSymbol" => @system,
+        "type" => "PLANET",
+        "x" => 0,
+        "y" => 0,
+        "traits" => []
+      }
+    ]
+
+    Enum.each(waypoints, fn waypoint ->
+      Intelligence.observe_waypoint(agent, Model.Waypoint.from_json(waypoint), source: "test")
+    end)
+
+    if Keyword.get(opts, :supply, true) do
+      Intelligence.observe_market(
+        agent,
+        @system,
+        Model.Market.from_json(market_body()),
+        source: "get_market",
+        observing_ship_symbol: "REFIT-1"
+      )
+    end
+
+    :ok
+  end
+
+  # -- ship bodies -------------------------------------------------------------
+
+  defp outbound_ship_body(symbol) do
+    ship_body(symbol, %{
+      "nav" => nav_body("IN_ORBIT"),
+      "modules" => [],
+      "cargo" => %{
+        "capacity" => 40,
+        "units" => 12,
+        "inventory" => [%{"symbol" => "IRON_ORE", "units" => 12}]
+      }
+    })
+  end
+
+  defp docked_awaiting_purchase_body(symbol) do
+    ship_body(symbol, %{
+      "nav" => nav_body("DOCKED", destination: @supply),
+      "modules" => [],
+      "cargo" => %{
+        "capacity" => 40,
+        "units" => 12,
+        "inventory" => [%{"symbol" => "IRON_ORE", "units" => 12}]
+      }
+    })
+  end
+
+  defp purchased_docked_body(symbol) do
+    ship_body(symbol, %{
+      "nav" => nav_body("DOCKED", destination: @supply),
+      "modules" => [],
+      "cargo" => %{
+        "capacity" => 40,
+        "units" => 13,
+        "inventory" => [
+          %{"symbol" => "IRON_ORE", "units" => 12},
+          %{"symbol" => @module, "units" => 1}
+        ]
+      }
+    })
+  end
+
+  defp fitted_ship_body(symbol, opts \\ []) do
+    installed = Keyword.get(opts, :installed, 1)
+
+    modules = List.duplicate(%{"symbol" => @module}, installed)
+
+    ship_body(symbol, %{
+      "nav" => nav_body("DOCKED", destination: @supply),
+      "modules" => modules,
+      "cargo" => %{
+        "capacity" => 40,
+        "units" => 12,
+        "inventory" => [%{"symbol" => "IRON_ORE", "units" => 12}]
+      }
+    })
+  end
+
+  defp removed_ship_body(symbol) do
+    ship_body(symbol, %{
+      "nav" => nav_body("DOCKED", destination: @supply),
+      "modules" => [],
+      "cargo" => %{
+        "capacity" => 40,
+        "units" => 13,
+        "inventory" => [
+          %{"symbol" => "IRON_ORE", "units" => 12},
+          %{"symbol" => @module, "units" => 1}
+        ]
+      }
+    })
+  end
+
+  defp nav_in_transit do
+    nav_body("IN_TRANSIT",
+      destination: @supply,
+      arrival: DateTime.utc_now() |> DateTime.add(3600) |> DateTime.to_iso8601()
+    )
+  end
+
+  defp market_body do
+    %{
+      "symbol" => @supply,
+      "imports" => [],
+      "exports" => [],
+      "exchange" => [],
+      "transactions" => [],
+      "tradeGoods" => [
+        %{
+          "symbol" => @module,
+          "name" => "Survey Suite",
+          "description" => "Survey module",
+          "purchasePrice" => 32_000,
+          "sellPrice" => 24_000,
+          "tradeVolume" => 5,
+          "supply" => "MODERATE",
+          "activity" => "STATIC"
+        }
+      ]
+    }
+  end
+
+  defp purchase_response do
+    %{
+      "agent" => %{"symbol" => "REFIT", "credits" => 18_000, "headquarters" => @home},
+      "cargo" => %{
+        "capacity" => 40,
+        "units" => 13,
+        "inventory" => [
+          %{"symbol" => "IRON_ORE", "units" => 12},
+          %{"symbol" => @module, "units" => 1}
+        ]
+      },
+      "transaction" => %{
+        "waypointSymbol" => @supply,
+        "shipSymbol" => "REFIT-1",
+        "tradeSymbol" => @module,
+        "type" => "PURCHASE",
+        "units" => 1,
+        "perUnit" => 32_000,
+        "totalPrice" => 32_000,
+        "timestamp" => "2030-01-01T12:00:00.000Z"
+      }
+    }
+  end
+
+  defp install_response do
+    %{
+      "agent" => %{"symbol" => "REFIT", "credits" => 18_000, "headquarters" => @home},
+      "modules" => [%{"symbol" => @module, "name" => "Survey Suite", "capacity" => 30}],
+      "cargo" => %{
+        "capacity" => 40,
+        "units" => 12,
+        "inventory" => [%{"symbol" => "IRON_ORE", "units" => 12}]
+      },
+      "transaction" => %{
+        "waypointSymbol" => @supply,
+        "shipSymbol" => "REFIT-1",
+        "tradeSymbol" => @module,
+        "type" => "INSTALL",
+        "units" => 1,
+        "perUnit" => 0,
+        "totalPrice" => 0,
+        "timestamp" => "2030-01-01T12:00:00.000Z"
+      }
+    }
+  end
+
+  defp removal_response do
+    # The hazard response: every matching module left the Ship while the
+    # response counts only one Cargo unit.
+    %{
+      "agent" => %{"symbol" => "REFIT", "credits" => 18_000, "headquarters" => @home},
+      "modules" => [],
+      "cargo" => %{
+        "capacity" => 40,
+        "units" => 13,
+        "inventory" => [
+          %{"symbol" => "IRON_ORE", "units" => 12},
+          %{"symbol" => @module, "units" => 1}
+        ]
+      },
+      "transaction" => %{
+        "waypointSymbol" => @supply,
+        "shipSymbol" => "REFIT-1",
+        "tradeSymbol" => @module,
+        "type" => "REMOVE",
+        "units" => 1,
+        "perUnit" => 0,
+        "totalPrice" => 0,
+        "timestamp" => "2030-01-01T12:00:00.000Z"
+      }
+    }
+  end
+
+  defp removal_candidate(ship_symbol) do
+    %SpaceTraders.FleetPlanning.CandidateContribution{
+      id: "refit-remove-#{ship_symbol}",
+      strategy_revision_id: 0,
+      objective_index: 0,
+      objective: %{},
+      kind: :ship_refit,
+      trade_symbol: @module,
+      source_waypoint: ship_symbol,
+      destination_waypoint: ship_symbol,
+      expected_outcomes: %{decision_value: 1, expected_cost: 0},
+      uncertainty: %{removed_units: :all_matching},
+      required_roles: [%{role: :fleet_refit, count: 1}],
+      required_capabilities: [%{capability: :refit_ship, value: ship_symbol}],
+      required_resources: %{credits: 0, cargo_capacity: 1, ship_count: 1},
+      dependencies: [],
+      validity: %{},
+      alternatives: [],
+      refit: %{
+        action: :remove,
+        module_symbol: @module,
+        capability: :survey,
+        sourcing: nil,
+        market: nil,
+        purchase_price: 0,
+        expected_cost: 0,
+        removal_scope: :all_matching,
+        installed_before: 3
+      }
+    }
+  end
+end
