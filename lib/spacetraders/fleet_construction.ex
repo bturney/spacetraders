@@ -138,12 +138,11 @@ defmodule SpaceTraders.FleetConstruction do
         commitments
         |> Enum.flat_map(& &1.pledges)
         |> Enum.filter(&match?(%{"outcome" => ["construction" | _]}, &1))
-        |> Enum.reduce_while({:ok, []}, fn pledge, {:ok, projected} ->
+        |> Enum.reduce_while({:ok, [], %{}}, fn pledge, {:ok, projected, projects} ->
           case pledge do
             %{"outcome" => ["construction", waypoint, symbol], "amount" => amount}
             when is_integer(amount) and amount >= 0 ->
-              with {:ok, system} <- Fleet.system_from_headquarters(waypoint),
-                   {:ok, construction} <- read_project(agent, system, waypoint) do
+              with {:ok, construction} <- cached_project(agent, waypoint, projects) do
                 case remaining(construction, symbol) do
                   count when is_integer(count) ->
                     {:cont,
@@ -151,7 +150,7 @@ defmodule SpaceTraders.FleetConstruction do
                       [
                         %{outcome: pledge["outcome"], amount: amount, remaining: count}
                         | projected
-                      ]}}
+                      ], Map.put(projects, waypoint, construction)}}
 
                   :unknown ->
                     {:halt, {:error, :construction_progress_unavailable}}
@@ -165,7 +164,7 @@ defmodule SpaceTraders.FleetConstruction do
           end
         end)
         |> case do
-          {:ok, projected} ->
+          {:ok, projected, _projects} ->
             {:ok, projected |> Enum.reverse() |> FleetAllocation.project_shared_pledges()}
 
           error ->
@@ -175,6 +174,17 @@ defmodule SpaceTraders.FleetConstruction do
   end
 
   def current_pledges(_, _), do: {:error, :not_authorized}
+
+  defp cached_project(agent, waypoint, projects) do
+    case Map.fetch(projects, waypoint) do
+      {:ok, construction} ->
+        {:ok, construction}
+
+      :error ->
+        with {:ok, system} <- Fleet.system_from_headquarters(waypoint),
+             do: read_project(agent, system, waypoint)
+    end
+  end
 
   @doc "Replans remaining material work; upstream hypotheses may be supplied with their evidence."
   def reconcile(

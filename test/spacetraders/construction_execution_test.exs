@@ -117,10 +117,12 @@ defmodule SpaceTraders.ConstructionExecutionTest do
              )
 
     {:ok, progress} = Elixir.Agent.start_link(fn -> {7, false} end)
+    {:ok, reads} = Elixir.Agent.start_link(fn -> 0 end)
 
     Req.Test.stub(SpaceTraders.API, fn conn ->
       assert conn.method == "GET"
       assert conn.request_path == "/v2/systems/X1/waypoints/X1-A2/construction"
+      Elixir.Agent.update(reads, &(&1 + 1))
       {fulfilled, complete} = Elixir.Agent.get(progress, & &1)
 
       Req.Test.json(conn, %{
@@ -134,6 +136,7 @@ defmodule SpaceTraders.ConstructionExecutionTest do
 
     assert {:ok, pledges} = FleetConstruction.current_pledges(scope, agent)
     assert Enum.map(pledges, & &1.amount) == [3, 0]
+    assert Elixir.Agent.get(reads, & &1) == 1
 
     Elixir.Agent.update(progress, fn _ -> {7, true} end)
     assert {:ok, [%{amount: 0}, %{amount: 0}]} = FleetConstruction.current_pledges(scope, agent)
