@@ -409,6 +409,29 @@ defmodule SpaceTraders.FleetPlanningTest do
     assert hauler.ship.preparation_credits == 2_500
   end
 
+  test "an offer whose frame or fee is unknown is inadmissible rather than reserving nothing" do
+    # Without a frame the empty slot count is unknown, so the Preparation
+    # Exposure cannot be bounded and must not be silently treated as zero.
+    no_frame =
+      put_in(acquisition_snapshot(), [:shipyards, Access.at(0), :ships, Access.at(0)], %{
+        type: "SHIP_LIGHT_HAULER",
+        purchase_price: 10_000,
+        engine: %{speed: 30}
+      })
+
+    assert {:ok, %{candidate_contributions: [], limitations: [limitation]}} =
+             FleetPlanning.plan_ship_acquisition(fleet_revision(), 0, no_frame)
+
+    assert %{subject: "X1-A1", reason: :preparation_exposure_unknown} = limitation
+
+    no_fee = put_in(acquisition_snapshot(), [:shipyards, Access.at(0), :modifications_fee], nil)
+
+    assert {:ok, %{candidate_contributions: [], limitations: [limitation]}} =
+             FleetPlanning.plan_ship_acquisition(fleet_revision(), 0, no_fee)
+
+    assert %{subject: "X1-A1", reason: :preparation_exposure_unknown} = limitation
+  end
+
   defp acquisition_snapshot do
     %{
       as_of: @as_of,

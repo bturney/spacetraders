@@ -238,24 +238,21 @@ defmodule SpaceTraders.FleetPlanning do
       owned_ships = Map.get(snapshot, :ships, [])
 
       if preparation_override_valid?(override) do
+        context = %{
+          revision: revision,
+          index: index,
+          objective: objective,
+          as_of: as_of,
+          override: override,
+          owned_ships: owned_ships,
+          credits: credits
+        }
+
         {candidates, unmet} =
           Enum.reduce(shipyards, {[], []}, fn yard, acc ->
             case shipyard_offer_evidence(yard, as_of) do
-              {:ok, yard} ->
-                plan_offers(
-                  revision,
-                  index,
-                  objective,
-                  yard,
-                  as_of,
-                  override,
-                  owned_ships,
-                  credits,
-                  acc
-                )
-
-              :error ->
-                acc
+              {:ok, yard} -> plan_yard(context, yard, acc)
+              :error -> acc
             end
           end)
 
@@ -291,50 +288,72 @@ defmodule SpaceTraders.FleetPlanning do
   defp preparation_override_valid?(credits) when is_integer(credits) and credits >= 0, do: true
   defp preparation_override_valid?(_), do: false
 
-  defp plan_offers(revision, index, objective, yard, as_of, override, owned_ships, credits, acc) do
-    if co_located?(yard.waypoint, owned_ships) do
-      {candidates, unmet} =
-        Enum.reduce(yard.ships, acc, fn offer, {candidates, unmet} ->
-          case ship_offer(offer) do
-            {:ok, offer} ->
-              preparation = preparation_credits(override, yard, offer)
+  defp plan_yard(context, yard, {candidates, unmet}) do
+    cond do
+      not co_located?(yard.waypoint, context.owned_ships) ->
+        {candidates, [precondition_limitation(yard.waypoint) | unmet]}
 
-              if offer.purchase_price + preparation <= credits do
-                contribution =
-                  ship_acquisition_contribution(
-                    revision,
-                    index,
-                    objective,
-                    yard,
-                    offer,
-                    preparation,
-                    as_of
-                  )
-
-                {[contribution | candidates], unmet}
-              else
-                {candidates, unmet}
-              end
-
-            :error ->
-              {candidates, unmet}
-          end
-        end)
-
-      {candidates, unmet}
-    else
-      {elem(acc, 0),
-       [
-         %{
-           subject: yard.waypoint,
-           reason: :purchase_precondition_unmet,
-           prerequisite: %{waypoint: yard.waypoint, required_ship: :any_owned_ship}
-         }
-         | elem(acc, 1)
-       ]}
+      true ->
+        plan_yard_offers(context, yard, candidates, unmet)
     end
   end
 
+  defp precondition_limitation(waypoint) do
+    %{
+      subject: waypoint,
+      reason: :purchase_precondition_unmet,
+      prerequisite: %{waypoint: waypoint, required_ship: :any_owned_ship}
+    }
+  end
+
+  defp plan_yard_offers(context, yard, candidates, unmet) do
+    Enum.reduce(yard.ships, {candidates, unmet}, fn offer, {candidates, unmet} ->
+      case ship_offer(offer) do
+        {:ok, offer} -> plan_offer(context, yard, offer, candidates, unmet)
+        :error -> {candidates, unmet}
+      end
+    end)
+  end
+
+  defp plan_offer(context, yard, offer, candidates, unmet) do
+    case preparation_credits(context.override, yard, offer) do
+      {:ok, preparation} ->
+        if offer.purchase_price + preparation <= context.credits do
+          contribution =
+            ship_acquisition_contribution(
+              context.revision,
+              context.index,
+              context.objective,
+              yard,
+              offer,
+              preparation,
+              context.as_of
+            )
+
+          {[contribution | candidates], unmet}
+        else
+          {candidates, unmet}
+        end
+
+      :unknown ->
+        {candidates, [exposure_limitation(yard.waypoint) | unmet]}
+    end
+  end
+
+  defp exposure_limitation(waypoint) do
+    %{
+      subject: waypoint,
+      reason: :preparation_exposure_unknown,
+      prerequisite: %{
+        waypoint: waypoint,
+        required_evidence: ["ship_offer_frame", "shipyard_modification_fee"]
+      }
+    }
+  end
+
+  # A Ship satisfies the Purchase Precondition only while it is actually present
+  # at the Waypoint. An IN_TRANSIT Ship's waypoint_symbol names its destination,
+  # so it must not be read as a position.
   defp co_located?(waypoint, owned_ships) when is_binary(waypoint) and is_list(owned_ships),
     do: Enum.any?(owned_ships, &(Map.get(&1, :waypoint) == waypoint))
 
@@ -395,8 +414,8 @@ defmodule SpaceTraders.FleetPlanning do
          type: type,
          purchase_price: purchase_price,
          engine_speed: engine_speed,
-         module_slots: frame_value(offer, :module_slots) || 0,
-         mounting_points: frame_value(offer, :mounting_points) || 0,
+         module_slots: frame_value(offer, :module_slots),
+         mounting_points: frame_value(offer, :mounting_points),
          installed_modules: length(offer[:modules] || offer["modules"] || []),
          installed_mounts: length(offer[:mounts] || offer["mounts"] || [])
        }}
@@ -407,10 +426,16 @@ defmodule SpaceTraders.FleetPlanning do
 
   defp ship_offer(_), do: :error
 
+  # nil means the offer never carried the value, which is different from a frame
+  # that genuinely declares no slots. Preparation Exposure cannot be bounded
+  # without both, so absence must not collapse to zero.
   defp frame_value(offer, key) do
-    frame = offer[:frame] || offer["frame"] || %{}
-    value = fetch(frame, key)
-    if is_integer(value) and value >= 0, do: value, else: nil
+    frame = offer[:frame] || offer["frame"]
+
+    if is_map(frame) do
+      value = fetch(frame, key)
+      if is_integer(value) and value >= 0, do: value, else: nil
+    end
   end
 
   defp fetch(map, key) when is_map(map) do
@@ -422,20 +447,19 @@ defmodule SpaceTraders.FleetPlanning do
   # rather than a guessed per-slot price.
   defp preparation_credits(override, yard, offer) do
     case override do
-      nil -> empty_slots(offer) * modification_fee(yard)
-      credits -> credits
+      nil -> derive_preparation_exposure(yard, offer)
+      credits -> {:ok, credits}
     end
   end
 
-  defp empty_slots(offer) do
-    max(offer.module_slots - offer.installed_modules, 0) +
-      max(offer.mounting_points - offer.installed_mounts, 0)
-  end
-
-  defp modification_fee(yard) do
-    case fetch(yard, :modifications_fee) do
-      fee when is_integer(fee) and fee >= 0 -> fee
-      _unknown -> 0
+  defp derive_preparation_exposure(yard, offer) do
+    with slots when is_integer(slots) <- offer.module_slots,
+         points when is_integer(points) <- offer.mounting_points,
+         fee when is_integer(fee) and fee >= 0 <- fetch(yard, :modifications_fee) do
+      {:ok,
+       (max(slots - offer.installed_modules, 0) + max(points - offer.installed_mounts, 0)) * fee}
+    else
+      _unknown -> :unknown
     end
   end
 

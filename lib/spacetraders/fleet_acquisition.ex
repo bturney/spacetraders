@@ -64,7 +64,7 @@ defmodule SpaceTraders.FleetAcquisition do
              %{
                selected
                | commitments: [commitment],
-                 rejected: rejected_offers(selected.rejected, candidate),
+                 rejected: rejected_offers(selected.rejected, candidate, planning.limitations),
                  source_version: generation.allocation_version
              },
              %{
@@ -76,18 +76,14 @@ defmodule SpaceTraders.FleetAcquisition do
          {:ok, result} <- dispatch(agent, portfolio, candidate) do
       {:ok, Map.put(result, :portfolio, portfolio)}
     else
-      {:ok, %{candidate_contributions: []}} ->
-        {:error, {:ship_acquisition_unavailable, :no_admissible_ship_offer}}
-
-      error ->
-        {:error, {:ship_acquisition_unavailable, error}}
+      error -> {:error, {:ship_acquisition_unavailable, error}}
     end
   end
 
   defp select_candidate(revision, planning, credits, as_of) do
     case planning.candidate_contributions do
       [] ->
-        :no_admissible_ship_offer
+        {:no_admissible_ship_offer, planning.limitations}
 
       candidates ->
         FleetAllocation.select_portfolio(revision, candidates, %{
@@ -98,11 +94,19 @@ defmodule SpaceTraders.FleetAcquisition do
     end
   end
 
-  # A purchase needs an owned Ship at the Shipyard's Waypoint, so each Ship's
-  # current position is the precondition evidence the planner needs.
+  # A purchase needs an owned Ship actually present at the Shipyard's Waypoint.
+  # An IN_TRANSIT Ship's waypoint_symbol is its destination rather than a
+  # position, so it does not satisfy the precondition yet.
   defp co_locatable_ships(ships) do
-    Enum.map(ships, fn ship ->
-      %{symbol: ship.symbol, waypoint: ship.nav && ship.nav.waypoint_symbol}
+    Enum.flat_map(ships, fn ship ->
+      nav = ship.nav
+
+      if is_map(nav) and nav.status in ["DOCKED", "IN_ORBIT"] and
+           is_binary(nav.waypoint_symbol) do
+        [%{symbol: ship.symbol, waypoint: nav.waypoint_symbol}]
+      else
+        []
+      end
     end)
   end
 
@@ -360,7 +364,10 @@ defmodule SpaceTraders.FleetAcquisition do
     )
   end
 
-  defp rejected_offers(rejected, candidate) do
+  # The episode keeps the alternatives that were not chosen, the unselected
+  # offers they lost to, and any Shipyard whose Purchase Precondition or
+  # Preparation Exposure evidence was missing, so the decision stays explainable.
+  defp rejected_offers(rejected, candidate, limitations) do
     rejected ++
       Enum.map(candidate.alternatives, fn alternative ->
         %{
@@ -372,7 +379,16 @@ defmodule SpaceTraders.FleetAcquisition do
             selected_value: candidate.expected_outcomes.decision_value
           }
         }
-      end)
+      end) ++ Enum.map(limitations, &limitation_rejection/1)
+  end
+
+  defp limitation_rejection(%{subject: subject, reason: reason} = limitation) do
+    %{
+      candidate_id: nil,
+      reasons: [reason],
+      alternative: Map.get(limitation, :prerequisite),
+      decisive_reason: %{subject: subject, unmet: reason}
+    }
   end
 
   defp acquisition_expectations(candidate) do

@@ -40,10 +40,36 @@ defmodule SpaceTraders.FleetAcquisitionTest do
       end
     end)
 
-    assert {:error, {:ship_acquisition_unavailable, :no_admissible_ship_offer}} =
+    assert {:error, {:ship_acquisition_unavailable, {:no_admissible_ship_offer, [limitation]}}} =
              FleetAcquisition.reconcile(scope, agent, revision, "X1-UX81")
 
+    assert %{subject: "X1-UX81-A1", reason: :purchase_precondition_unmet} = limitation
     assert [] == Repo.all(StrategyDecisionEpisode)
+    assert [] == purchase_attempts(agent)
+  end
+
+  test "a Ship still in transit toward the Shipyard does not satisfy the precondition" do
+    {scope, agent, revision} = generation()
+    stub_shipyard(agent)
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      case {conn.method, conn.request_path} do
+        {"GET", "/v2/my/agent"} ->
+          overview(conn, agent, @credits)
+
+        {"GET", "/v2/my/ships"} ->
+          # An IN_TRANSIT Ship's waypoint_symbol is its destination, not a position.
+          Req.Test.json(conn, %{"data" => [in_transit_to("X1-UX81-A1")]})
+
+        {"POST", "/v2/my/ships"} ->
+          flunk("a Ship in transit is not co-located")
+      end
+    end)
+
+    assert {:error, {:ship_acquisition_unavailable, {:no_admissible_ship_offer, [limitation]}}} =
+             FleetAcquisition.reconcile(scope, agent, revision, "X1-UX81")
+
+    assert %{reason: :purchase_precondition_unmet} = limitation
     assert [] == purchase_attempts(agent)
   end
 
@@ -241,6 +267,10 @@ defmodule SpaceTraders.FleetAcquisitionTest do
   # planner matches on position and recovery matches on registry difference.
   defp docked(waypoint) do
     ship_body("CRUISER-1", %{"nav" => nav_body("DOCKED", destination: waypoint)})
+  end
+
+  defp in_transit_to(waypoint) do
+    ship_body("CRUISER-1", %{"nav" => nav_body("IN_TRANSIT", destination: waypoint)})
   end
 
   defp acquired(engine_speed) do
