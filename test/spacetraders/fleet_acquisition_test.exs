@@ -8,14 +8,174 @@ defmodule SpaceTraders.FleetAcquisitionTest do
   alias SpaceTraders.Fleet.Ship
   alias SpaceTraders.FleetAcquisition
   alias SpaceTraders.FleetAllocation
+  alias SpaceTraders.FleetAllocation.StrategyDecisionEpisode
   alias SpaceTraders.FleetGeneration.Generation
   alias SpaceTraders.FleetStrategy.{Revision, Strategy}
   alias SpaceTraders.Intelligence
+  alias SpaceTraders.MutationAttempts
+  alias SpaceTraders.Repo
 
-  test "purchases from a fresh Ship Offer then bootstraps readiness before the new Ship can be claimed" do
+  # The Shipyard promises engine speed 30, so a Ship that reports anything else
+  # fails the readiness gate and must never enter the registry.
+  @offered_speed 30
+  @credits 20_000
+  @price 10_000
+
+  test "registers a purchased Ship once readiness matches, then releases the portfolio" do
     {scope, agent, revision} = generation()
-    {:ok, readiness_once} = Elixir.Agent.start_link(fn -> :unavailable end)
+    stub_shipyard(agent)
 
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      case {conn.method, conn.request_path} do
+        {"GET", "/v2/my/agent"} -> overview(conn, agent, @credits)
+        {"POST", "/v2/my/ships"} -> purchase(conn, agent)
+        {"GET", "/v2/my/ships/ACQUIRE-2"} -> ship(conn, @offered_speed)
+      end
+    end)
+
+    assert {:ok, %{ship: %Ship{symbol: "ACQUIRE-2"}, readiness: %{engine: %{speed: 30}}}} =
+             FleetAcquisition.reconcile(scope, agent, revision, "X1-UX81")
+
+    assert %Ship{symbol: "ACQUIRE-2", ship_type: "SHIP_LIGHT_HAULER"} =
+             Repo.get_by(Ship, agent_id: agent.id, symbol: "ACQUIRE-2")
+
+    assert [episode] = Repo.all(StrategyDecisionEpisode)
+    assert episode.classification == :realized
+
+    assert episode.actual_outcomes == %{
+             "ship_symbol" => "ACQUIRE-2",
+             "ship_type" => "SHIP_LIGHT_HAULER",
+             "purchase_price" => @price,
+             "transaction" => %{
+               "agent_symbol" => agent.symbol,
+               "price" => @price,
+               "ship_symbol" => "ACQUIRE-2",
+               "ship_type" => "SHIP_LIGHT_HAULER",
+               "waypoint_symbol" => "X1-UX81-A1",
+               "timestamp" => "2030-01-01T12:00:00Z"
+             },
+             "readiness" => "ready"
+           }
+
+    # The portfolio is released, so a later cycle may claim the new Ship.
+    assert nil == FleetAllocation.current_portfolio(scope, agent)
+  end
+
+  test "a Ship whose readiness misses the promised capability is never registered" do
+    {scope, agent, revision} = generation()
+    stub_shipyard(agent)
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      case {conn.method, conn.request_path} do
+        {"GET", "/v2/my/agent"} -> overview(conn, agent, @credits)
+        {"POST", "/v2/my/ships"} -> purchase(conn, agent)
+        {"GET", "/v2/my/ships/ACQUIRE-2"} -> ship(conn, 5)
+      end
+    end)
+
+    assert {:error, {:ship_acquisition_unavailable, {:error, :ship_readiness_mismatch}}} =
+             FleetAcquisition.reconcile(scope, agent, revision, "X1-UX81")
+
+    assert nil == Repo.get_by(Ship, agent_id: agent.id, symbol: "ACQUIRE-2")
+
+    assert [episode] = Repo.all(StrategyDecisionEpisode)
+    assert episode.classification == :partially_realized
+    assert episode.actual_outcomes["readiness"] == "mismatch"
+  end
+
+  test "recovers a lost purchase response from authoritative Fleet and Agent evidence" do
+    {scope, agent, revision} = generation()
+    stub_shipyard(agent)
+
+    # The game accepts the purchase and deducts the price, but the response is
+    # lost in transit, so the app must discover both facts from fresh reads.
+    {:ok, spent} = Elixir.Agent.start_link(fn -> false end)
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      case {conn.method, conn.request_path} do
+        {"GET", "/v2/my/agent"} ->
+          overview(
+            conn,
+            agent,
+            if(Elixir.Agent.get(spent, & &1), do: @credits - @price, else: @credits)
+          )
+
+        {"POST", "/v2/my/ships"} ->
+          Elixir.Agent.update(spent, fn _previous -> true end)
+          Req.Test.transport_error(conn, :timeout)
+
+        {"GET", "/v2/my/ships"} ->
+          Req.Test.json(conn, %{"data" => [acquired(@offered_speed)]})
+
+        {"GET", "/v2/my/ships/ACQUIRE-2"} ->
+          ship(conn, @offered_speed)
+      end
+    end)
+
+    assert {:error, {:ship_acquisition_unavailable, _}} =
+             FleetAcquisition.reconcile(scope, agent, revision, "X1-UX81")
+
+    assert [%{state: "ambiguous"}] = purchase_attempts(agent)
+    assert nil == Repo.get_by(Ship, agent_id: agent.id, symbol: "ACQUIRE-2")
+
+    assert {:ok, %{ship: %Ship{symbol: "ACQUIRE-2"}}} =
+             FleetAcquisition.reconcile(scope, agent, revision, "X1-UX81")
+
+    # Append-only: the original ambiguity is preserved and the reconciliation
+    # is recorded as an additional outcome on the same attempt.
+    assert [%{state: "accepted", outcomes: [ambiguous, outcome]}] = purchase_attempts(agent)
+    assert ambiguous.classification == "ambiguous"
+
+    # ADR 0011: the attempt was reconciled against both fenced resources.
+    assert [credits, owned_fleet] = observation_payloads(outcome)
+
+    assert owned_fleet["operation_id"] == "get-my-ships"
+    assert owned_fleet["dependency_keys"] == ["owned_fleet:#{agent.id}"]
+    assert owned_fleet["facts"]["ships"] == [%{"symbol" => "ACQUIRE-2"}]
+
+    assert credits["operation_id"] == "get-my-agent"
+    assert credits["facts"]["credits"] == @credits - @price
+    assert credits["dependency_keys"] == ["agent_credits:#{agent.id}"]
+
+    assert [episode] = Repo.all(StrategyDecisionEpisode)
+    assert episode.classification == :realized
+  end
+
+  test "a purchase the game never performed is proven absent and released for replanning" do
+    {scope, agent, revision} = generation()
+    stub_shipyard(agent)
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      case {conn.method, conn.request_path} do
+        {"GET", "/v2/my/agent"} -> overview(conn, agent, @credits)
+        {"POST", "/v2/my/ships"} -> Req.Test.transport_error(conn, :timeout)
+        {"GET", "/v2/my/ships"} -> Req.Test.json(conn, %{"data" => []})
+      end
+    end)
+
+    assert {:error, {:ship_acquisition_unavailable, _}} =
+             FleetAcquisition.reconcile(scope, agent, revision, "X1-UX81")
+
+    assert {:error, :ship_purchase_not_completed} =
+             FleetAcquisition.reconcile(scope, agent, revision, "X1-UX81")
+
+    assert [%{state: "absent"}] = purchase_attempts(agent)
+    assert nil == Repo.get_by(Ship, agent_id: agent.id, symbol: "ACQUIRE-2")
+    assert nil == FleetAllocation.current_portfolio(scope, agent)
+  end
+
+  defp observation_payloads(outcome) do
+    outcome.evidence
+    |> Map.fetch!("observations")
+    |> Enum.sort_by(& &1["dependency_keys"])
+  end
+
+  defp purchase_attempts(agent) do
+    MutationAttempts.list_for_agent(agent)
+    |> Enum.filter(&(&1.operation_id == "purchase-ship"))
+  end
+
+  defp stub_shipyard(agent) do
     Intelligence.observe_waypoint(agent, Waypoint.from_json(waypoint()))
 
     Intelligence.observe_shipyard(
@@ -27,94 +187,52 @@ defmodule SpaceTraders.FleetAcquisitionTest do
         "ships" => [
           %{
             "type" => "SHIP_LIGHT_HAULER",
-            "purchasePrice" => 10_000,
-            "engine" => %{"speed" => 30}
+            "purchasePrice" => @price,
+            "engine" => %{"speed" => @offered_speed}
           }
         ]
       }),
       source: "get_shipyard",
       offers_visible: true
     )
+  end
 
-    Req.Test.stub(SpaceTraders.API, fn conn ->
-      case {conn.method, conn.request_path} do
-        {"GET", "/v2/my/agent"} ->
-          Req.Test.json(conn, %{"data" => %{"symbol" => agent.symbol, "credits" => 20_000}})
+  defp acquired(engine_speed) do
+    ship_body("ACQUIRE-2", %{
+      "registration" => %{
+        "name" => "ACQUIRE-2",
+        "factionSymbol" => "COSMIC",
+        "role" => "HAULER"
+      },
+      "engine" => %{"speed" => engine_speed}
+    })
+  end
 
-        {"POST", "/v2/my/ships"} ->
-          Req.Test.json(conn, %{
-            "data" => %{
-              "agent" => %{"symbol" => agent.symbol, "credits" => 10_000},
-              "ship" =>
-                ship_body("ACQUIRE-2", %{
-                  "registration" => %{
-                    "name" => "ACQUIRE-2",
-                    "factionSymbol" => "COSMIC",
-                    "role" => "HAULER"
-                  }
-                }),
-              "transaction" => %{
-                "agentSymbol" => agent.symbol,
-                "price" => 10_000,
-                "shipSymbol" => "ACQUIRE-2",
-                "shipType" => "SHIP_LIGHT_HAULER",
-                "waypointSymbol" => "X1-UX81-A1",
-                "timestamp" => "2030-01-01T12:00:00Z"
-              }
-            }
-          })
+  defp ship(conn, engine_speed),
+    do: Req.Test.json(conn, %{"data" => acquired(engine_speed)})
 
-        {"GET", "/v2/my/ships/ACQUIRE-2"} ->
-          case Elixir.Agent.get_and_update(readiness_once, fn
-                 :unavailable -> {:unavailable, :available}
-                 :available -> {:available, :available}
-               end) do
-            :unavailable ->
-              Req.Test.transport_error(conn, :timeout)
+  defp overview(conn, agent, credits),
+    do: Req.Test.json(conn, %{"data" => %{"symbol" => agent.symbol, "credits" => credits}})
 
-            :available ->
-              Req.Test.json(conn, %{
-                "data" =>
-                  ship_body("ACQUIRE-2", %{
-                    "registration" => %{
-                      "name" => "ACQUIRE-2",
-                      "factionSymbol" => "COSMIC",
-                      "role" => "HAULER"
-                    }
-                  })
-                  |> Map.update!("engine", &Map.put(&1, "speed", 30))
-              })
-          end
-      end
-    end)
+  defp purchase(conn, agent) do
+    Req.Test.json(conn, %{
+      "data" => %{
+        "agent" => %{"symbol" => agent.symbol, "credits" => @credits - @price},
+        "ship" => acquired(@offered_speed),
+        "transaction" => transaction(agent)
+      }
+    })
+  end
 
-    assert {:error, {:ship_acquisition_unavailable, _}} =
-             FleetAcquisition.reconcile(scope, agent, revision, "X1-UX81")
-
-    assert {:ok, %{ship: %Ship{symbol: "ACQUIRE-2"}, readiness: %{engine: %{speed: 30}}}} =
-             FleetAcquisition.reconcile(scope, agent, revision, "X1-UX81")
-
-    assert {:error, :no_current_ship_claim} =
-             FleetAllocation.current_ship_claim(agent, "ACQUIRE-2")
-
-    assert nil == FleetAllocation.current_portfolio(scope, agent)
-
-    assert [%{reservations: %{"credits" => 10_000}, unwind_state: :released}] =
-             Repo.all(SpaceTraders.FleetAllocation.Commitment)
-
-    assert [
-             %{
-               classification: :realized,
-               actual_outcomes: %{
-                 "purchase" => %{
-                   "ship_symbol" => "ACQUIRE-2",
-                   "ship_type" => "SHIP_LIGHT_HAULER"
-                 },
-                 "readiness" => "ready"
-               }
-             }
-           ] =
-             Repo.all(SpaceTraders.FleetAllocation.StrategyDecisionEpisode)
+  defp transaction(agent) do
+    %{
+      "agentSymbol" => agent.symbol,
+      "price" => @price,
+      "shipSymbol" => "ACQUIRE-2",
+      "shipType" => "SHIP_LIGHT_HAULER",
+      "waypointSymbol" => "X1-UX81-A1",
+      "timestamp" => "2030-01-01T12:00:00Z"
+    }
   end
 
   defp generation do
