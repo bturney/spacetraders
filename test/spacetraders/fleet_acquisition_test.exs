@@ -92,6 +92,11 @@ defmodule SpaceTraders.FleetAcquisitionTest do
     assert %Ship{symbol: "ACQUIRE-2", ship_type: "SHIP_LIGHT_HAULER"} =
              Repo.get_by(Ship, agent_id: agent.id, symbol: "ACQUIRE-2")
 
+    # Registration grants no Claim. Fleet Allocation must grant one separately,
+    # so a new Ship can never be commanded before that happens.
+    assert {:error, :no_current_ship_claim} =
+             FleetAllocation.current_ship_claim(agent, "ACQUIRE-2")
+
     # The Commitment reserved the purchase plus its Preparation Exposure.
     assert [episode] = Repo.all(StrategyDecisionEpisode)
     assert episode.classification == :realized
@@ -134,6 +139,11 @@ defmodule SpaceTraders.FleetAcquisitionTest do
              FleetAcquisition.reconcile(scope, agent, revision, "X1-UX81")
 
     assert nil == Repo.get_by(Ship, agent_id: agent.id, symbol: "ACQUIRE-2")
+
+    # Failing readiness means the Ship never enters the registry, so it cannot
+    # be claimed either.
+    assert {:error, :no_current_ship_claim} =
+             FleetAllocation.current_ship_claim(agent, "ACQUIRE-2")
 
     assert [episode] = Repo.all(StrategyDecisionEpisode)
     assert episode.classification == :partially_realized
