@@ -42,7 +42,14 @@ defmodule SpaceTraders.FleetPlanning do
       :validity,
       :alternatives
     ]
-    defstruct @enforce_keys ++ [resource: nil, contract: nil, construction: nil, transfer: nil]
+    defstruct @enforce_keys ++
+                [
+                  resource: nil,
+                  contract: nil,
+                  construction: nil,
+                  transfer: nil,
+                  ship: nil
+                ]
 
     @type t :: %__MODULE__{}
   end
@@ -203,6 +210,190 @@ defmodule SpaceTraders.FleetPlanning do
   end
 
   def plan_resources(_revision, _index, _snapshot), do: {:error, :invalid_resource_planning_input}
+
+  @doc "Proposes evidence-bound Ship Offer purchases without claiming a not-yet-owned Ship."
+  def plan_ship_acquisition(
+        %Revision{} = revision,
+        index,
+        %{as_of: %DateTime{} = as_of, credits: credits, shipyards: shipyards} = snapshot
+      )
+      when is_integer(index) and index >= 0 and is_integer(credits) and credits >= 0 and
+             is_list(shipyards) do
+    with {:ok, objective} <- objective_at(revision, index),
+         true <- ship_acquisition_objective?(objective) do
+      preparation_credits = Map.get(snapshot, :preparation_credits, 0)
+
+      if is_integer(preparation_credits) and preparation_credits >= 0 do
+        candidates =
+          for yard <- shipyards,
+              {:ok, yard} <- [shipyard_offer_evidence(yard, as_of)],
+              offer <- yard.ships,
+              {:ok, offer} <- [ship_offer(offer)],
+              total_credits = offer.purchase_price + preparation_credits,
+              total_credits <= credits do
+            ship_acquisition_contribution(
+              revision,
+              index,
+              objective,
+              yard,
+              offer,
+              preparation_credits,
+              as_of
+            )
+          end
+          |> Enum.sort_by(&{-&1.expected_outcomes.decision_value, &1.id})
+          |> add_ship_acquisition_alternatives()
+
+        {:ok, result(revision, index, %{as_of: as_of}, candidate_contributions: candidates)}
+      else
+        {:error, :invalid_ship_acquisition_planning_input}
+      end
+    else
+      false ->
+        {:ok,
+         result(revision, index, %{as_of: as_of},
+           limitations: [%{subject: :ship_acquisition, reason: :unsupported_ship_objective}]
+         )}
+
+      _ ->
+        {:error, :invalid_ship_acquisition_planning_input}
+    end
+  end
+
+  def plan_ship_acquisition(_revision, _index, _snapshot),
+    do: {:error, :invalid_ship_acquisition_planning_input}
+
+  @doc false
+  def ship_acquisition_objective?(objective) when is_map(objective) do
+    Enum.any?([objective["objective"], objective["evaluation"]], fn text ->
+      is_binary(text) and String.match?(text, ~r/\bships?\b|\bfleet growth\b/i)
+    end)
+  end
+
+  def ship_acquisition_objective?(_), do: false
+
+  defp shipyard_offer_evidence(
+         %{
+           system_symbol: system,
+           waypoint: waypoint,
+           observed_at: %DateTime{} = observed_at,
+           evidence_id: evidence_id,
+           ships: ships
+         },
+         as_of
+       )
+       when is_binary(system) and is_binary(waypoint) and is_binary(evidence_id) and
+              is_list(ships) do
+    age = DateTime.diff(as_of, observed_at, :second)
+
+    if age in 0..@market_evidence_freshness_seconds do
+      {:ok,
+       %{
+         system_symbol: system,
+         waypoint: waypoint,
+         evidence_id: evidence_id,
+         observed_at: observed_at,
+         ships: ships,
+         valid_until: DateTime.add(observed_at, @market_evidence_freshness_seconds, :second)
+       }}
+    else
+      :error
+    end
+  end
+
+  defp shipyard_offer_evidence(_, _), do: :error
+
+  defp ship_offer(offer) when is_map(offer) do
+    type = Map.get(offer, :type) || Map.get(offer, "type")
+    purchase_price = Map.get(offer, :purchase_price) || Map.get(offer, "purchase_price")
+
+    engine = Map.get(offer, :engine) || Map.get(offer, "engine") || %{}
+
+    engine_speed =
+      Map.get(offer, :engine_speed) || Map.get(offer, "engine_speed") ||
+        Map.get(engine, :speed) || Map.get(engine, "speed")
+
+    if is_binary(type) and is_integer(purchase_price) and purchase_price >= 0 and
+         is_integer(engine_speed) and engine_speed >= 0 do
+      {:ok, %{type: type, purchase_price: purchase_price, engine_speed: engine_speed}}
+    else
+      :error
+    end
+  end
+
+  defp ship_offer(_), do: :error
+
+  defp ship_acquisition_contribution(
+         revision,
+         index,
+         objective,
+         yard,
+         offer,
+         preparation_credits,
+         as_of
+       ) do
+    %CandidateContribution{
+      id:
+        Evidence.fingerprint(
+          {revision.id, index, yard.evidence_id, yard.waypoint, offer.type, offer.purchase_price,
+           preparation_credits}
+        ),
+      strategy_revision_id: revision.id,
+      objective_index: index,
+      objective: objective,
+      kind: :ship_acquisition,
+      trade_symbol: nil,
+      source_waypoint: yard.waypoint,
+      destination_waypoint: yard.waypoint,
+      expected_outcomes: %{
+        decision_value: offer.engine_speed,
+        purchase_price: offer.purchase_price,
+        preparation_credits: preparation_credits,
+        ship_type: offer.type
+      },
+      uncertainty: %{shipyard_availability: :shared_world_state},
+      required_roles: [],
+      required_capabilities: [
+        %{capability: :ship_offer, value: offer.type},
+        %{capability: :ship_readiness, value: %{engine_speed: offer.engine_speed}}
+      ],
+      required_resources: %{credits: offer.purchase_price + preparation_credits},
+      dependencies: [
+        %{
+          subject: "shipyard:#{yard.system_symbol}:#{yard.waypoint}",
+          evidence_id: yard.evidence_id,
+          valid_until: yard.valid_until
+        }
+      ],
+      validity: %{as_of: as_of, expires_at: yard.valid_until},
+      alternatives: [],
+      ship: %{
+        type: offer.type,
+        purchase_price: offer.purchase_price,
+        preparation_credits: preparation_credits,
+        readiness: %{engine_speed: offer.engine_speed}
+      }
+    }
+  end
+
+  defp add_ship_acquisition_alternatives(candidates) do
+    Enum.map(candidates, fn candidate ->
+      alternatives =
+        candidates
+        |> Enum.reject(&(&1.id == candidate.id))
+        |> Enum.map(fn alternative ->
+          %{
+            id: alternative.id,
+            ship_type: alternative.ship.type,
+            purchase_price: alternative.ship.purchase_price,
+            preparation_credits: alternative.ship.preparation_credits,
+            decision_value: alternative.expected_outcomes.decision_value
+          }
+        end)
+
+      %{candidate | alternatives: alternatives}
+    end)
+  end
 
   @doc "Proposes contract delivery from authoritative remaining work and fresh sourcing evidence."
   def plan_contracts(%Revision{} = revision, index, %{

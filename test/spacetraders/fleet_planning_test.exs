@@ -295,6 +295,75 @@ defmodule SpaceTraders.FleetPlanningTest do
     assert Enum.any?(planning.limitations, &(&1.reason == :acquisition_cost_exceeds_value))
   end
 
+  test "ship acquisition proposals retain alternatives and reserve purchase plus preparation exposure" do
+    snapshot = %{
+      as_of: @as_of,
+      credits: 20_000,
+      preparation_credits: 750,
+      shipyards: [
+        %{
+          system_symbol: "X1",
+          waypoint: "X1-A1",
+          observed_at: ~U[2030-01-01 11:59:00Z],
+          evidence_id: "shipyard-a1",
+          ships: [
+            %{type: "SHIP_LIGHT_HAULER", purchase_price: 10_000, engine_speed: 30},
+            %{type: "SHIP_LIGHT_SHUTTLE", purchase_price: 6_000, engine_speed: 15}
+          ]
+        }
+      ]
+    }
+
+    revision = %Revision{
+      id: 42,
+      document: %{
+        "objectives" => [
+          %{
+            "objective" => "Grow the Fleet",
+            "kind" => "attain",
+            "evaluation" => "Add a capable Ship"
+          }
+        ]
+      }
+    }
+
+    assert {:ok, %{candidate_contributions: [hauler, shuttle]}} =
+             FleetPlanning.plan_ship_acquisition(revision, 0, snapshot)
+
+    assert hauler.kind == :ship_acquisition
+    assert hauler.required_resources == %{credits: 10_750}
+
+    assert hauler.expected_outcomes == %{
+             decision_value: 30,
+             purchase_price: 10_000,
+             preparation_credits: 750,
+             ship_type: "SHIP_LIGHT_HAULER"
+           }
+
+    assert hauler.required_capabilities == [
+             %{capability: :ship_offer, value: "SHIP_LIGHT_HAULER"},
+             %{capability: :ship_readiness, value: %{engine_speed: 30}}
+           ]
+
+    assert hauler.alternatives == [
+             %{
+               id: shuttle.id,
+               ship_type: "SHIP_LIGHT_SHUTTLE",
+               purchase_price: 6_000,
+               preparation_credits: 750,
+               decision_value: 15
+             }
+           ]
+
+    assert hauler.dependencies == [
+             %{
+               subject: "shipyard:X1:X1-A1",
+               evidence_id: "shipyard-a1",
+               valid_until: ~U[2030-01-01 12:04:00Z]
+             }
+           ]
+  end
+
   defp revision do
     %Revision{
       id: 42,
