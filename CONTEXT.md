@@ -300,6 +300,18 @@ _Avoid_: unlimited-fuel Ship, empty Ship
 **Ship Offer**:
 A Ship configuration currently available at a Shipyard. It is evaluated before purchase using the same capability vocabulary as an owned Ship, alongside its price and availability signals.
 
+**Purchase Precondition**:
+An authoritative condition that must hold before the game will sell a Ship Offer. The game requires an owned Ship to be present at the Shipyard's Waypoint, so acquiring a Ship always depends on some Ship already being co-located. It is evidence, not a preference: without it the purchase is inadmissible rather than merely costly.
+_Avoid_: shipyard visit (the Fleet-level outcome), navigation plan
+
+**Register a purchased Ship**:
+Recording a newly purchased Ship in the Fleet's registry, only after an authoritative read establishes the capabilities the purchase promised. It is distinct from replacement-generation bootstrap, which registers the Ships a replacement mint produced. A registered Ship holds no Claim until Fleet Allocation grants one.
+_Avoid_: bootstrap (ambiguous between this and replacement bootstrap), adoption
+
+**Preparation Exposure**:
+The bounded credit and capability cost a purchase leaves for the Ship Readiness work that follows it, chiefly outfitting. It is reserved at purchase time so that acquiring a Ship cannot consume the capacity later refit, repair, or module work requires. It is a reserved share, not a committed plan.
+_Avoid_: outfitting cost (when meaning the reserved share), module budget
+
 **Ship Component Health**:
 Two distinct measures of a Ship component. Condition is repairable current state; integrity is permanent, non-repairable wear. Condition is an operational signal, while integrity and quality are lifecycle context.
 

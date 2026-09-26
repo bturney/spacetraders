@@ -77,6 +77,35 @@ defmodule SpaceTraders.Fleet do
   def list_ships(%AgentRecord{}), do: {:error, :agent_token_missing}
 
   @doc """
+  Registers a Ship in the local registry after authoritative evidence.
+
+  The `ships` table is the app's registry of owned Ships and carries no live
+  state, so a Ship may only be registered once an authoritative read has
+  established the capabilities its acquisition promised. Registration grants no
+  Claim; Fleet Allocation does that separately.
+  """
+  def register_ship(%AgentRecord{} = agent, %{symbol: symbol}, ship_type)
+      when is_binary(symbol) and symbol != "" and is_binary(ship_type) and ship_type != "" do
+    now = DateTime.utc_now(:second)
+
+    result =
+      case Repo.get_by(Ship, agent_id: agent.id, symbol: symbol) do
+        nil ->
+          Repo.insert(%Ship{agent_id: agent.id, symbol: symbol, ship_type: ship_type})
+
+        ship ->
+          Repo.update(Ecto.Changeset.change(ship, ship_type: ship_type, updated_at: now))
+      end
+
+    case result do
+      {:ok, ship} -> {:ok, ship}
+      {:error, changeset} -> {:error, changeset}
+    end
+  end
+
+  def register_ship(_agent, _ship, _ship_type), do: {:error, :invalid_ship_registration}
+
+  @doc """
   Reads everything the Fleet command panel displays for an Agent.
 
   Each live read remains independent: an unavailable Agent overview or Shipyard

@@ -42,7 +42,14 @@ defmodule SpaceTraders.FleetPlanning do
       :validity,
       :alternatives
     ]
-    defstruct @enforce_keys ++ [resource: nil, contract: nil, construction: nil, transfer: nil]
+    defstruct @enforce_keys ++
+                [
+                  resource: nil,
+                  contract: nil,
+                  construction: nil,
+                  transfer: nil,
+                  ship: nil
+                ]
 
     @type t :: %__MODULE__{}
   end
@@ -203,6 +210,330 @@ defmodule SpaceTraders.FleetPlanning do
   end
 
   def plan_resources(_revision, _index, _snapshot), do: {:error, :invalid_resource_planning_input}
+
+  @doc """
+  Proposes evidence-bound Ship Offer purchases without claiming a not-yet-owned Ship.
+
+  The game only sells a Ship when an owned Ship is already present at the
+  Shipyard's Waypoint, so a Shipyard without a co-located Ship is inadmissible
+  rather than merely expensive. Its unmet precondition is reported as a
+  limitation so the prerequisite is visible instead of dispatching a purchase
+  that cannot succeed.
+
+  Preparation Exposure is derived from the offer's own frame: every empty
+  module slot and mounting point owes the Shipyard's modification fee, and that
+  cost is reserved with the purchase so later readiness work keeps its headroom.
+  Pass `:preparation_credits` to override the derived reserve.
+  """
+  def plan_ship_acquisition(
+        %Revision{} = revision,
+        index,
+        %{as_of: %DateTime{} = as_of, credits: credits, shipyards: shipyards} = snapshot
+      )
+      when is_integer(index) and index >= 0 and is_integer(credits) and credits >= 0 and
+             is_list(shipyards) do
+    with {:ok, objective} <- objective_at(revision, index),
+         true <- ship_acquisition_objective?(objective) do
+      override = Map.get(snapshot, :preparation_credits)
+      owned_ships = Map.get(snapshot, :ships, [])
+
+      if preparation_override_valid?(override) do
+        context = %{
+          revision: revision,
+          index: index,
+          objective: objective,
+          as_of: as_of,
+          override: override,
+          owned_ships: owned_ships,
+          credits: credits
+        }
+
+        {candidates, unmet} =
+          Enum.reduce(shipyards, {[], []}, fn yard, acc ->
+            case shipyard_offer_evidence(yard, as_of) do
+              {:ok, yard} -> plan_yard(context, yard, acc)
+              :error -> acc
+            end
+          end)
+
+        candidates =
+          candidates
+          |> Enum.sort_by(&{-&1.expected_outcomes.decision_value, &1.id})
+          |> add_ship_acquisition_alternatives()
+
+        {:ok,
+         result(revision, index, %{as_of: as_of},
+           candidate_contributions: candidates,
+           limitations: Enum.reverse(unmet)
+         )}
+      else
+        {:error, :invalid_ship_acquisition_planning_input}
+      end
+    else
+      false ->
+        {:ok,
+         result(revision, index, %{as_of: as_of},
+           limitations: [%{subject: :ship_acquisition, reason: :unsupported_ship_objective}]
+         )}
+
+      _ ->
+        {:error, :invalid_ship_acquisition_planning_input}
+    end
+  end
+
+  def plan_ship_acquisition(_revision, _index, _snapshot),
+    do: {:error, :invalid_ship_acquisition_planning_input}
+
+  defp preparation_override_valid?(nil), do: true
+  defp preparation_override_valid?(credits) when is_integer(credits) and credits >= 0, do: true
+  defp preparation_override_valid?(_), do: false
+
+  defp plan_yard(context, yard, {candidates, unmet}) do
+    cond do
+      not co_located?(yard.waypoint, context.owned_ships) ->
+        {candidates, [precondition_limitation(yard.waypoint) | unmet]}
+
+      true ->
+        plan_yard_offers(context, yard, candidates, unmet)
+    end
+  end
+
+  defp precondition_limitation(waypoint) do
+    %{
+      subject: waypoint,
+      reason: :purchase_precondition_unmet,
+      prerequisite: %{waypoint: waypoint, required_ship: :any_owned_ship}
+    }
+  end
+
+  defp plan_yard_offers(context, yard, candidates, unmet) do
+    Enum.reduce(yard.ships, {candidates, unmet}, fn offer, {candidates, unmet} ->
+      case ship_offer(offer) do
+        {:ok, offer} -> plan_offer(context, yard, offer, candidates, unmet)
+        :error -> {candidates, unmet}
+      end
+    end)
+  end
+
+  defp plan_offer(context, yard, offer, candidates, unmet) do
+    case preparation_credits(context.override, yard, offer) do
+      {:ok, preparation} ->
+        if offer.purchase_price + preparation <= context.credits do
+          contribution =
+            ship_acquisition_contribution(
+              context.revision,
+              context.index,
+              context.objective,
+              yard,
+              offer,
+              preparation,
+              context.as_of
+            )
+
+          {[contribution | candidates], unmet}
+        else
+          {candidates, unmet}
+        end
+
+      :unknown ->
+        {candidates, [exposure_limitation(yard.waypoint) | unmet]}
+    end
+  end
+
+  defp exposure_limitation(waypoint) do
+    %{
+      subject: waypoint,
+      reason: :preparation_exposure_unknown,
+      prerequisite: %{
+        waypoint: waypoint,
+        required_evidence: ["ship_offer_frame", "shipyard_modification_fee"]
+      }
+    }
+  end
+
+  # A Ship satisfies the Purchase Precondition only while it is actually present
+  # at the Waypoint. An IN_TRANSIT Ship's waypoint_symbol names its destination,
+  # so it must not be read as a position.
+  defp co_located?(waypoint, owned_ships) when is_binary(waypoint) and is_list(owned_ships),
+    do: Enum.any?(owned_ships, &(Map.get(&1, :waypoint) == waypoint))
+
+  defp co_located?(_waypoint, _owned_ships), do: false
+
+  @doc false
+  def ship_acquisition_objective?(objective) when is_map(objective) do
+    Enum.any?([objective["objective"], objective["evaluation"]], fn text ->
+      is_binary(text) and String.match?(text, ~r/\bships?\b|\bfleet growth\b/i)
+    end)
+  end
+
+  def ship_acquisition_objective?(_), do: false
+
+  defp shipyard_offer_evidence(
+         %{
+           system_symbol: system,
+           waypoint: waypoint,
+           observed_at: %DateTime{} = observed_at,
+           evidence_id: evidence_id,
+           ships: ships
+         } = yard,
+         as_of
+       )
+       when is_binary(system) and is_binary(waypoint) and is_binary(evidence_id) and
+              is_list(ships) do
+    age = DateTime.diff(as_of, observed_at, :second)
+
+    if age in 0..@market_evidence_freshness_seconds do
+      {:ok,
+       %{
+         system_symbol: system,
+         waypoint: waypoint,
+         evidence_id: evidence_id,
+         observed_at: observed_at,
+         ships: ships,
+         modifications_fee: fetch(yard, :modifications_fee),
+         valid_until: DateTime.add(observed_at, @market_evidence_freshness_seconds, :second)
+       }}
+    else
+      :error
+    end
+  end
+
+  defp shipyard_offer_evidence(_, _), do: :error
+
+  defp ship_offer(offer) when is_map(offer) do
+    type = fetch(offer, :type)
+    purchase_price = fetch(offer, :purchase_price)
+
+    engine = offer[:engine] || offer["engine"] || %{}
+    engine_speed = fetch(offer, :engine_speed) || fetch(engine, :speed)
+
+    if is_binary(type) and is_integer(purchase_price) and purchase_price >= 0 and
+         is_integer(engine_speed) and engine_speed >= 0 do
+      {:ok,
+       %{
+         type: type,
+         purchase_price: purchase_price,
+         engine_speed: engine_speed,
+         module_slots: frame_value(offer, :module_slots),
+         mounting_points: frame_value(offer, :mounting_points),
+         installed_modules: length(offer[:modules] || offer["modules"] || []),
+         installed_mounts: length(offer[:mounts] || offer["mounts"] || [])
+       }}
+    else
+      :error
+    end
+  end
+
+  defp ship_offer(_), do: :error
+
+  # nil means the offer never carried the value, which is different from a frame
+  # that genuinely declares no slots. Preparation Exposure cannot be bounded
+  # without both, so absence must not collapse to zero.
+  defp frame_value(offer, key) do
+    frame = offer[:frame] || offer["frame"]
+
+    if is_map(frame) do
+      value = fetch(frame, key)
+      if is_integer(value) and value >= 0, do: value, else: nil
+    end
+  end
+
+  defp fetch(map, key) when is_map(map) do
+    Map.get(map, key) || Map.get(map, Macro.underscore(Atom.to_string(key)))
+  end
+
+  # Preparation Exposure is the shipyard's own fee for every slot the purchased
+  # template leaves empty, so the reserve is derived from observed evidence
+  # rather than a guessed per-slot price.
+  defp preparation_credits(override, yard, offer) do
+    case override do
+      nil -> derive_preparation_exposure(yard, offer)
+      credits -> {:ok, credits}
+    end
+  end
+
+  defp derive_preparation_exposure(yard, offer) do
+    with slots when is_integer(slots) <- offer.module_slots,
+         points when is_integer(points) <- offer.mounting_points,
+         fee when is_integer(fee) and fee >= 0 <- fetch(yard, :modifications_fee) do
+      {:ok,
+       (max(slots - offer.installed_modules, 0) + max(points - offer.installed_mounts, 0)) * fee}
+    else
+      _unknown -> :unknown
+    end
+  end
+
+  defp ship_acquisition_contribution(
+         revision,
+         index,
+         objective,
+         yard,
+         offer,
+         preparation_credits,
+         as_of
+       ) do
+    %CandidateContribution{
+      id:
+        Evidence.fingerprint(
+          {revision.id, index, yard.evidence_id, yard.waypoint, offer.type, offer.purchase_price,
+           preparation_credits}
+        ),
+      strategy_revision_id: revision.id,
+      objective_index: index,
+      objective: objective,
+      kind: :ship_acquisition,
+      trade_symbol: nil,
+      source_waypoint: yard.waypoint,
+      destination_waypoint: yard.waypoint,
+      expected_outcomes: %{
+        decision_value: offer.engine_speed,
+        purchase_price: offer.purchase_price,
+        preparation_credits: preparation_credits,
+        ship_type: offer.type
+      },
+      uncertainty: %{shipyard_availability: :shared_world_state},
+      required_roles: [],
+      required_capabilities: [
+        %{capability: :ship_offer, value: offer.type},
+        %{capability: :ship_readiness, value: %{engine_speed: offer.engine_speed}}
+      ],
+      required_resources: %{credits: offer.purchase_price + preparation_credits},
+      dependencies: [
+        %{
+          subject: "shipyard:#{yard.system_symbol}:#{yard.waypoint}",
+          evidence_id: yard.evidence_id,
+          valid_until: yard.valid_until
+        }
+      ],
+      validity: %{as_of: as_of, expires_at: yard.valid_until},
+      alternatives: [],
+      ship: %{
+        type: offer.type,
+        purchase_price: offer.purchase_price,
+        preparation_credits: preparation_credits,
+        readiness: %{engine_speed: offer.engine_speed}
+      }
+    }
+  end
+
+  defp add_ship_acquisition_alternatives(candidates) do
+    Enum.map(candidates, fn candidate ->
+      alternatives =
+        candidates
+        |> Enum.reject(&(&1.id == candidate.id))
+        |> Enum.map(fn alternative ->
+          %{
+            id: alternative.id,
+            ship_type: alternative.ship.type,
+            purchase_price: alternative.ship.purchase_price,
+            preparation_credits: alternative.ship.preparation_credits,
+            decision_value: alternative.expected_outcomes.decision_value
+          }
+        end)
+
+      %{candidate | alternatives: alternatives}
+    end)
+  end
 
   @doc "Proposes contract delivery from authoritative remaining work and fresh sourcing evidence."
   def plan_contracts(%Revision{} = revision, index, %{
