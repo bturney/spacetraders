@@ -240,20 +240,28 @@ defmodule Mix.Tasks.SpaceTraders.Gen.Operations do
   end
 
   @impl true
-  def run(args) do
-    source = generate_source()
+  def run(args), do: run(args, spec_path: @spec_path, target_path: @target_path)
+
+  @doc false
+  def run(args, opts) when is_list(opts) do
+    spec_path = Keyword.get(opts, :spec_path, @spec_path)
+    target_path = Keyword.get(opts, :target_path, @target_path)
+    source = spec_path |> load_spec() |> generate_source()
 
     if "--check" in args do
-      check_no_drift(source)
+      check_no_drift(source, target_path)
     else
-      File.write!(@target_path, source)
+      File.write!(target_path, source)
       Mix.shell().info("Generated operation inventory from the bundled spec")
     end
   end
 
   @doc false
-  def generate_source do
-    operations = load_operations()
+  def generate_source, do: generate_source(load_spec(@spec_path))
+
+  @doc false
+  def generate_source(spec) when is_map(spec) do
+    operations = load_operations(spec)
     assert_complete_classification!(operations)
 
     entries = Enum.map(operations, &classify/1)
@@ -334,8 +342,11 @@ defmodule Mix.Tasks.SpaceTraders.Gen.Operations do
     |> then(&(&1 <> "\n"))
   end
 
-  defp load_operations do
-    spec = @spec_path |> File.read!() |> Jason.decode!()
+  defp load_spec(path) do
+    path |> File.read!() |> Jason.decode!()
+  end
+
+  defp load_operations(spec) do
     global_security = Map.get(spec, "security", [])
 
     spec
@@ -546,13 +557,13 @@ defmodule Mix.Tasks.SpaceTraders.Gen.Operations do
   defp fence_dependencies(_id, :ship_execution), do: [:ship]
   defp fence_dependencies(_id, _owner), do: [:agent]
 
-  defp check_no_drift(source) do
-    case File.read(@target_path) do
+  defp check_no_drift(source, target_path) do
+    case File.read(target_path) do
       {:ok, ^source} ->
         Mix.shell().info("Operation inventory is up to date with the bundled spec")
 
       _ ->
-        Mix.raise("#{@target_path} is stale — run `mix space_traders.gen.operations`.")
+        Mix.raise("#{target_path} is stale — run `mix space_traders.gen.operations`.")
     end
   end
 end
