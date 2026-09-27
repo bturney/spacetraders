@@ -2,6 +2,8 @@ defmodule SpaceTradersWeb.StrategyLiveTest do
   use SpaceTradersWeb.ConnCase
 
   import Phoenix.LiveViewTest
+  import SpaceTraders.EvidenceFixtures
+  import SpaceTraders.ShipBody
   alias SpaceTraders.API.Model.{Market, Waypoint}
   alias SpaceTraders.Agent.Agent, as: AgentRecord
   alias SpaceTraders.FleetStrategy
@@ -261,12 +263,34 @@ defmodule SpaceTradersWeb.StrategyLiveTest do
         operator_id: operator.id,
         symbol: "PLANNER",
         faction: "COSMIC",
-        headquarters: "X1-A1"
+        headquarters: "X1-A1",
+        agent_token: "PLANNER_TOKEN"
       })
 
     Enum.each(["X1-A1", "X1-A2"], &observe_waypoint(agent, &1))
     observe_market(agent, "X1-A1", 10, 9)
     observe_market(agent, "X1-A2", 25, 20)
+    governed_market_observation(agent, "X1", "X1-A1", 10, 9)
+    governed_market_observation(agent, "X1", "X1-A2", 25, 20)
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      case conn.request_path do
+        "/v2/my/agent" ->
+          Req.Test.json(conn, %{
+            "data" => %{
+              "accountId" => "ACC",
+              "symbol" => agent.symbol,
+              "headquarters" => "X1-A1",
+              "credits" => 100_000,
+              "startingFaction" => "COSMIC",
+              "shipCount" => 1
+            }
+          })
+
+        "/v2/my/ships" ->
+          Req.Test.json(conn, %{"data" => [ship_body("PLANNER-1")]})
+      end
+    end)
 
     assert {:ok, _draft} = FleetStrategy.select_preset(scope, "steady_growth")
     assert {:ok, revision} = FleetStrategy.activate(scope, FleetStrategy.get(scope).draft_version)
@@ -285,7 +309,66 @@ defmodule SpaceTradersWeb.StrategyLiveTest do
     assert consequences =~ "IRON_ORE"
     assert consequences =~ "Candidate only"
 
+    commitments = render(element(view, "#draft-commitments"))
+    assert commitments =~ "Likely Fleet Commitments: 1"
+    assert commitments =~ "expected value 200 credits"
+    assert commitments =~ "Claims PLANNER-1"
+    assert commitments =~ "Active revision: 1"
+
     assert FleetStrategy.get(scope).active_revision.id == revision.id
+  end
+
+  test "evaluates a draft created after the page opens", %{
+    conn: conn,
+    operator: operator,
+    scope: scope
+  } do
+    agent =
+      Repo.insert!(%AgentRecord{
+        operator_id: operator.id,
+        symbol: "PLANNER",
+        faction: "COSMIC",
+        headquarters: "X1-A1",
+        agent_token: "PLANNER_TOKEN"
+      })
+
+    Enum.each(["X1-A1", "X1-A2"], &observe_waypoint(agent, &1))
+    observe_market(agent, "X1-A1", 10, 9)
+    observe_market(agent, "X1-A2", 25, 20)
+    governed_market_observation(agent, "X1", "X1-A1", 10, 9)
+    governed_market_observation(agent, "X1", "X1-A2", 25, 20)
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      case conn.request_path do
+        "/v2/my/agent" ->
+          Req.Test.json(conn, %{
+            "data" => %{
+              "accountId" => "ACC",
+              "symbol" => agent.symbol,
+              "headquarters" => "X1-A1",
+              "credits" => 100_000,
+              "startingFaction" => "COSMIC",
+              "shipCount" => 1
+            }
+          })
+
+        "/v2/my/ships" ->
+          Req.Test.json(conn, %{"data" => [ship_body("PLANNER-1")]})
+      end
+    end)
+
+    assert {:ok, _draft} = FleetStrategy.select_preset(scope, "steady_growth")
+
+    assert {:ok, _revision} =
+             FleetStrategy.activate(scope, FleetStrategy.get(scope).draft_version)
+
+    {:ok, view, _html} = live(conn, ~p"/strategy")
+    refute has_element?(view, "#draft-commitments")
+
+    view |> element("#select-preset-charted_expansion") |> render_click()
+
+    assert has_element?(view, "#draft-commitments")
+    assert render(element(view, "#draft-commitments")) =~ "Claims PLANNER-1"
   end
 
   test "reports no changes when the draft matches the active revision", %{

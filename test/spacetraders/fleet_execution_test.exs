@@ -2,9 +2,98 @@ defmodule SpaceTraders.FleetExecutionTest do
   use SpaceTraders.DataCase
 
   import SpaceTraders.AgentFixtures
+  import SpaceTraders.ShipBody
 
+  alias SpaceTraders.API.Model.Waypoint
   alias SpaceTraders.FleetExecution
   alias SpaceTraders.FleetStrategy.Revision
+  alias SpaceTraders.Intelligence
+
+  describe "governed_availability/1" do
+    test "claims market reach from governed waypoint evidence" do
+      operator = operator_fixture()
+      agent = agent_fixture(operator, %{headquarters: "X1-A1"})
+
+      observe_marketplace(agent, "X1-A1")
+      observe_marketplace(agent, "X1-A2")
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case conn.request_path do
+          "/v2/my/agent" ->
+            Req.Test.json(conn, %{
+              "data" => %{
+                "accountId" => "ACC",
+                "symbol" => agent.symbol,
+                "headquarters" => "X1-A1",
+                "credits" => 42_000,
+                "startingFaction" => "COSMIC",
+                "shipCount" => 1
+              }
+            })
+
+          "/v2/my/ships" ->
+            Req.Test.json(conn, %{"data" => [ship_body("SHIP-1")]})
+
+          other ->
+            flunk("unexpected request: #{inspect(other)}")
+        end
+      end)
+
+      assert {:ok, availability} = FleetExecution.governed_availability(agent)
+
+      assert [
+               %{
+                 resource: "SHIP-1",
+                 roles: [:market_trader, :intelligence_scout],
+                 capabilities: %{
+                   cargo_transport: 40,
+                   market_access: ["X1-A1", "X1-A2"]
+                 }
+               }
+             ] = availability.claims
+
+      assert availability.reservations == %{credits: 42_000}
+      assert %DateTime{} = availability.as_of
+    end
+
+    test "reports unknown rather than zero capacity when evidence cannot be established" do
+      operator = operator_fixture()
+      agent = agent_fixture(operator, %{agent_token: nil})
+
+      assert {:error, :availability_unknown} = FleetExecution.governed_availability(agent)
+    end
+
+    test "reports unknown when the Agent's credits are unavailable" do
+      operator = operator_fixture()
+      agent = agent_fixture(operator, %{headquarters: "X1-A1"})
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case conn.request_path do
+          "/v2/my/agent" ->
+            Req.Test.transport_error(conn, :timeout)
+
+          "/v2/my/ships" ->
+            Req.Test.json(conn, %{"data" => [ship_body("SHIP-1")]})
+        end
+      end)
+
+      assert {:error, :availability_unknown} = FleetExecution.governed_availability(agent)
+    end
+
+    defp observe_marketplace(agent, symbol) do
+      waypoint =
+        Waypoint.from_json(%{
+          "symbol" => symbol,
+          "systemSymbol" => "X1",
+          "type" => "PLANET",
+          "x" => 0,
+          "y" => 0,
+          "traits" => [%{"symbol" => "MARKETPLACE"}]
+        })
+
+      assert {:ok, _} = Intelligence.observe_waypoint(agent, waypoint, source: "get_waypoint")
+    end
+  end
 
   describe "worst_case_exposure/1" do
     test "covers the credit reservation, fuel allowance, and bounded-loss allowance" do

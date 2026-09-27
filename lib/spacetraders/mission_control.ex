@@ -10,10 +10,12 @@ defmodule SpaceTraders.MissionControl do
 
   alias SpaceTraders.Agent.Scope
   alias SpaceTraders.Agent.Agent, as: AgentRecord
+  alias SpaceTraders.API.ShadowAdmission
   alias SpaceTraders.FleetAllocation.Commitment
   alias SpaceTraders.FleetAllocation.Portfolio
   alias SpaceTraders.Fleet.Activity
   alias SpaceTraders.FleetAllocation.StrategyDecisionEpisode
+  alias SpaceTraders.FleetShadow
   alias SpaceTraders.FleetStrategy.Revision
   alias SpaceTraders.Evidence
   alias SpaceTraders.Evidence.Observation
@@ -192,16 +194,36 @@ defmodule SpaceTraders.MissionControl do
 
   Presets and the computed comparison of any draft against the active revision
   are included. Governed consequences for a draft are added by
-  `strategy_review/2`, so read paths that do not render the review do not run
+  `strategy_review/3`, so read paths that do not render the review do not run
   planning.
   """
   def strategy(%Scope{} = scope), do: scope |> FleetStrategy.get() |> review_fields()
 
   @doc """
+  Returns governed availability keyed by Agent id for the authenticated
+  Operator's Agents.
+
+  Availability is read from authoritative evidence so a draft's likely Fleet
+  Commitments can be shadow-evaluated. An Agent whose Ships or credits cannot
+  be established maps to `nil`, and its evaluation must state the limitation
+  rather than assume zero capacity.
+  """
+  def availability(%Scope{operator: operator}) do
+    operator
+    |> Agent.list_agents()
+    |> Map.new(fn agent ->
+      case FleetExecution.governed_availability(agent) do
+        {:ok, availability} -> {agent.id, availability}
+        {:error, _reason} -> {agent.id, nil}
+      end
+    end)
+  end
+
+  @doc """
   Returns the Strategy review projection for the authenticated Operator's
   current draft, including its governed consequences.
   """
-  def strategy_review(%Scope{} = scope), do: strategy_review(scope, FleetStrategy.get(scope))
+  def strategy_review(%Scope{} = scope), do: strategy_review(scope, FleetStrategy.get(scope), [])
 
   @doc """
   Returns the Strategy review projection for a given durable Strategy
@@ -210,10 +232,24 @@ defmodule SpaceTraders.MissionControl do
   Accepting an existing projection keeps callers from re-reading after a
   versioned draft mutation, so a concurrent draft cannot be adopted un-reviewed.
   """
-  def strategy_review(%Scope{} = scope, projection) do
+  def strategy_review(%Scope{} = scope, projection),
+    do: strategy_review(scope, projection, [])
+
+  @doc """
+  Adds a draft's governed consequences to a Strategy projection.
+
+  `:availability` carries `MissionControl.availability/1` so the review can
+  shadow-evaluate likely Fleet Commitments without re-reading authoritative
+  evidence on every draft edit.
+  """
+  def strategy_review(%Scope{} = scope, projection, opts) do
     projection
     |> review_fields()
     |> Map.put(:draft_consequences, draft_consequences(scope, projection.draft))
+    |> Map.put(
+      :draft_commitments,
+      draft_commitments(scope, projection, Keyword.get(opts, :availability, %{}))
+    )
   end
 
   defp review_fields(projection) do
@@ -730,6 +766,65 @@ defmodule SpaceTraders.MissionControl do
       end)
     end)
   end
+
+  defp draft_commitments(_scope, %{draft: draft}, _availability) when not is_map(draft), do: []
+
+  defp draft_commitments(scope, %{draft: draft, active_revision: active}, availability) do
+    capacity = ShadowAdmission.snapshot()
+
+    scope
+    |> agents()
+    |> Enum.map(fn agent ->
+      case Map.get(availability, agent.id) do
+        nil ->
+          %{agent: agent, availability: :unknown, active: nil, draft: nil}
+
+        governed ->
+          %{
+            agent: agent,
+            availability: :authoritative,
+            active: shadow_summary(agent, active, governed, capacity, :active),
+            draft: shadow_summary(agent, draft, governed, capacity, :draft)
+          }
+      end
+    end)
+  end
+
+  defp shadow_summary(_agent, nil, _availability, _capacity, _kind), do: nil
+
+  defp shadow_summary(agent, subject, availability, capacity, kind) do
+    with {:ok, system_symbol} <- Fleet.system_from_headquarters(agent.headquarters) do
+      subject
+      |> compare_shadow(agent, system_symbol, availability, capacity, kind)
+      |> summarize_shadow()
+    else
+      _ -> %{error: :system_unknown}
+    end
+  end
+
+  defp compare_shadow(revision, agent, system_symbol, availability, capacity, :active) do
+    FleetShadow.compare_market(agent, revision, system_symbol, availability, capacity)
+  end
+
+  defp compare_shadow(document, agent, system_symbol, availability, capacity, :draft) do
+    FleetShadow.compare_draft_market(agent, document, system_symbol, availability, capacity)
+  end
+
+  defp summarize_shadow({:ok, comparison}) do
+    %{
+      error: nil,
+      expectations: comparison.expectations,
+      commitments:
+        Enum.map(
+          comparison.proposed_choices,
+          &Map.take(&1, [:candidate_id, :claims, :expected_value])
+        ),
+      rejected: Enum.map(comparison.alternatives, &Map.take(&1, [:candidate_id, :reasons])),
+      limitations: Enum.flat_map(comparison.planning, & &1.limitations)
+    }
+  end
+
+  defp summarize_shadow({:error, reason}), do: %{error: reason}
 
   defp agent_market_planning(revision, agent, as_of) do
     plan_market_objectives(revision.document, agent, as_of, fn objective_index, snapshot ->

@@ -9,9 +9,14 @@ defmodule SpaceTradersWeb.StrategyLive do
   def mount(_params, _session, socket) do
     operator_id = socket.assigns.current_scope.operator.id
 
-    if connected?(socket) do
-      Phoenix.PubSub.subscribe(SpaceTraders.PubSub, "fleet_strategy:#{operator_id}")
-    end
+    socket =
+      if connected?(socket) do
+        Phoenix.PubSub.subscribe(SpaceTraders.PubSub, "fleet_strategy:#{operator_id}")
+
+        assign(socket, availability: %{}, availability_ready?: false)
+      else
+        assign(socket, availability: %{}, availability_ready?: true)
+      end
 
     {:ok, assign_projection(socket)}
   end
@@ -260,6 +265,91 @@ defmodule SpaceTradersWeb.StrategyLive do
               >
                 No governed Market evidence is available for this Operator's Agents, so no likely consequences can be shown. Nothing is inferred.
               </p>
+              <div
+                :if={@projection.draft_commitments != []}
+                id="draft-commitments"
+                class="space-y-4"
+              >
+                <div>
+                  <h4 class="text-lg font-bold">Likely Fleet Commitments</h4>
+                  <p class="mt-1 text-sm opacity-70">
+                    Shadow evaluation of Fleet Allocation against authoritative Ship and credit availability. It publishes no Claims and dispatches no gameplay; it informs and never guarantees.
+                  </p>
+                </div>
+                <article
+                  :for={evaluation <- @projection.draft_commitments}
+                  id={"draft-commitments-#{evaluation.agent.id}"}
+                  class="rounded-2xl border border-base-300 bg-base-100 p-5 shadow-sm"
+                >
+                  <p class="font-bold">{evaluation.agent.symbol}</p>
+
+                  <p
+                    :if={evaluation.availability == :unknown}
+                    class="mt-2 text-sm opacity-70"
+                  >
+                    Authoritative Ship and credit availability could not be established, so likely Fleet Commitments are unknown.
+                  </p>
+
+                  <div
+                    :if={evaluation.availability == :authoritative}
+                    class="mt-2 space-y-2 text-sm"
+                  >
+                    <p :if={evaluation.draft.error} class="opacity-70">
+                      Governed evidence is insufficient to evaluate likely Fleet Commitments.
+                    </p>
+
+                    <div :if={!evaluation.draft.error}>
+                      <p
+                        :if={
+                          evaluation.draft.commitments == [] and
+                            evaluation.draft.limitations != []
+                        }
+                        class="opacity-70"
+                      >
+                        No Fleet Commitment can be evaluated from current governed evidence.
+                      </p>
+                      <p
+                        :if={
+                          evaluation.draft.commitments == [] and
+                            evaluation.draft.limitations == []
+                        }
+                        class="opacity-70"
+                      >
+                        No Fleet Commitment is currently admissible.
+                      </p>
+                      <p :if={evaluation.draft.commitments != []}>
+                        Likely Fleet Commitments: {evaluation.draft.expectations.commitment_count} (expected value {format_credits(
+                          evaluation.draft.expectations.expected_value
+                        )} credits).
+                      </p>
+                      <p :if={evaluation.active && !evaluation.active.error}>
+                        Active revision: {evaluation.active.expectations.commitment_count} (expected value {format_credits(
+                          evaluation.active.expectations.expected_value
+                        )} credits).
+                      </p>
+                      <ul
+                        :if={evaluation.draft.commitments != []}
+                        class="mt-2 list-inside list-disc opacity-70"
+                      >
+                        <li :for={commitment <- evaluation.draft.commitments}>
+                          Claims {Enum.join(commitment.claims, ", ")} with expected value {format_credits(
+                            commitment.expected_value
+                          )} credits
+                        </li>
+                      </ul>
+                      <ul
+                        :if={evaluation.draft.rejected != []}
+                        class="mt-2 list-inside list-disc opacity-70"
+                      >
+                        <li :for={rejection <- evaluation.draft.rejected}>
+                          Rejected: {Enum.map_join(rejection.reasons, "; ", &rejection_reason/1)}
+                        </li>
+                      </ul>
+                    </div>
+                  </div>
+                </article>
+              </div>
+
               <.market_planning_entry
                 :for={entry <- @projection.draft_consequences}
                 entry={entry}
@@ -315,7 +405,7 @@ defmodule SpaceTradersWeb.StrategyLive do
         {:noreply,
          socket
          |> put_flash(:error, "Emergency Stop changed elsewhere. Review its current state.")
-         |> assign(:projection, MissionControl.strategy_review(socket.assigns.current_scope))}
+         |> assign(:projection, review_projection(nil, socket))}
 
       {:error, :authoritative_refresh_required} ->
         {:noreply,
@@ -436,7 +526,8 @@ defmodule SpaceTradersWeb.StrategyLive do
   @impl true
   def handle_info({:fleet_strategy_updated, operator_id}, socket) do
     if socket.assigns.current_scope.operator.id == operator_id do
-      projection = MissionControl.strategy_review(socket.assigns.current_scope)
+      socket = maybe_load_availability(socket)
+      projection = review_projection(nil, socket)
 
       cond do
         projection.draft_version != socket.assigns.projection.draft_version ->
@@ -715,6 +806,8 @@ defmodule SpaceTradersWeb.StrategyLive do
   end
 
   defp assign_projection(socket, form_drafts \\ nil, projection \\ nil) do
+    socket = maybe_load_availability(socket)
+
     projection =
       review_projection(projection || FleetStrategy.get(socket.assigns.current_scope), socket)
 
@@ -728,8 +821,24 @@ defmodule SpaceTradersWeb.StrategyLive do
     |> assign(:form, to_form(form_drafts, as: "strategy"))
   end
 
-  defp review_projection(projection, socket),
-    do: MissionControl.strategy_review(socket.assigns.current_scope, projection)
+  defp review_projection(projection, socket) do
+    scope = socket.assigns.current_scope
+    projection = projection || FleetStrategy.get(scope)
+
+    MissionControl.strategy_review(scope, projection, availability: socket.assigns.availability)
+  end
+
+  defp maybe_load_availability(socket) do
+    scope = socket.assigns.current_scope
+
+    if socket.assigns.availability_ready? or not is_map(FleetStrategy.get(scope).draft) do
+      socket
+    else
+      socket
+      |> assign(:availability, MissionControl.availability(scope))
+      |> assign(:availability_ready?, true)
+    end
+  end
 
   defp assign_market_planning(socket) do
     assign(socket, :market_planning, MissionControl.market_planning(socket.assigns.current_scope))
@@ -738,7 +847,7 @@ defmodule SpaceTradersWeb.StrategyLive do
   defp mark_draft_stale(socket, message) do
     socket
     |> put_flash(:error, message)
-    |> assign(:projection, MissionControl.strategy_review(socket.assigns.current_scope))
+    |> assign(:projection, review_projection(nil, socket))
     |> assign_market_planning()
     |> assign(:draft_stale?, true)
   end
@@ -815,8 +924,28 @@ defmodule SpaceTradersWeb.StrategyLive do
 
   defp planning_limitation(_reason), do: "Market planning is currently limited."
 
+  defp rejection_reason(:claim_conflict),
+    do: "no available Ship satisfies the required role and capabilities"
+
+  defp rejection_reason(:insufficient_reservation),
+    do: "credit exposure exceeds available Reservations"
+
+  defp rejection_reason(:unbacked_pledge), do: "the pledge is not backed"
+  defp rejection_reason(:unsatisfied_dependency), do: "a dependency is unsatisfied"
+  defp rejection_reason(reason), do: to_string(reason)
+
   defp candidate_contribution_count(entries) do
     Enum.sum_by(entries, &length(&1.planning.candidate_contributions))
+  end
+
+  defp format_credits(value) when is_integer(value), do: Integer.to_string(value)
+
+  defp format_credits(value) when is_float(value) do
+    if trunc(value) == value do
+      value |> trunc() |> Integer.to_string()
+    else
+      :erlang.float_to_binary(value, decimals: 2)
+    end
   end
 
   defp objective_line(objective) do

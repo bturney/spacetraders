@@ -34,6 +34,34 @@ defmodule SpaceTraders.FleetShadow do
     |> compare(revision, availability, capacity, opts)
   end
 
+  @doc """
+  Builds a shadow comparison for a not-yet-activated draft document.
+
+  The draft is evaluated with an explicit draft identity, so proposed
+  Commitments can never be mistaken for published work. Evaluation is
+  deterministic and in-memory: it publishes no Claims and dispatches no
+  gameplay.
+  """
+  def compare_draft_market(
+        %AgentRecord{} = agent,
+        document,
+        system_symbol,
+        availability,
+        %CapacitySnapshot{} = capacity,
+        opts \\ []
+      )
+      when is_map(document) and is_binary(system_symbol) and is_map(availability) and
+             is_list(opts) do
+    agent
+    |> market_snapshot(system_symbol, capacity.observed_at)
+    |> compare(
+      %Revision{id: {:draft, agent.id}, document: document},
+      availability,
+      capacity,
+      opts
+    )
+  end
+
   @doc "Builds a shadow comparison from one governed evidence and capacity snapshot."
   def compare(snapshot, revision, availability, capacity, opts \\ [])
 

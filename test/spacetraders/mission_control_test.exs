@@ -2,10 +2,12 @@ defmodule SpaceTraders.MissionControlTest do
   use SpaceTraders.DataCase
 
   import SpaceTraders.AgentFixtures
+  import SpaceTraders.EvidenceFixtures
   import SpaceTraders.ShipBody
 
   alias SpaceTraders.Agent.Scope
   alias SpaceTraders.API.Model.{Market, Waypoint}
+  alias SpaceTraders.FleetAllocation.Commitment
   alias SpaceTraders.FleetAllocation.StrategyDecisionEpisode
   alias SpaceTraders.FleetStrategy
   alias SpaceTraders.Intelligence
@@ -455,6 +457,158 @@ defmodule SpaceTraders.MissionControlTest do
 
       assert Enum.map(projection.draft_consequences, & &1.agent.id) == [agent.id, agent.id]
       assert candidate.strategy_revision_id != revision.id
+    end
+
+    test "shadow-evaluates the draft's likely Fleet Commitments under governed availability" do
+      operator = operator_fixture()
+      scope = Scope.for_operator(operator)
+      agent = agent_fixture(operator, %{headquarters: "X1-A1"})
+
+      document = %{
+        "objectives" => [
+          %{
+            "objective" => "Grow credits",
+            "kind" => "continuous",
+            "evaluation" => "Measure growth",
+            "scope" => "recurring"
+          }
+        ],
+        "hard_constraints" => ["Keep at least 50,000 credits available"],
+        "preferences" => ["Prefer lower-risk routes"],
+        "consequences" => "The Fleet may spend credits above the floor."
+      }
+
+      assert {:ok, _draft} = FleetStrategy.save_draft(scope, document, 0)
+      assert {:ok, _revision} = FleetStrategy.activate(scope, 1)
+
+      assert {:ok, _draft} =
+               FleetStrategy.save_draft(
+                 scope,
+                 Map.put(document, "consequences", "Growth may slow."),
+                 2
+               )
+
+      observe_market_pair(agent)
+      governed_market_observation(agent, "X1", "X1-A1", 10, 9)
+      governed_market_observation(agent, "X1", "X1-A2", 25, 20)
+
+      availability = %{
+        agent.id => %{
+          as_of: DateTime.utc_now(),
+          claims: [
+            %{
+              resource: "SHIP-1",
+              roles: [:market_trader],
+              capabilities: %{cargo_transport: 40, market_access: ["X1-A1", "X1-A2"]}
+            }
+          ],
+          reservations: %{credits: 100_000}
+        }
+      }
+
+      projection =
+        MissionControl.strategy_review(scope, FleetStrategy.get(scope),
+          availability: availability
+        )
+
+      assert [
+               %{
+                 agent: %{id: agent_id},
+                 availability: :authoritative,
+                 active: %{expectations: %{commitment_count: 1, expected_value: 200}},
+                 draft: %{
+                   expectations: %{commitment_count: 1, expected_value: 200},
+                   commitments: [commitment],
+                   rejected: []
+                 }
+               }
+             ] = projection.draft_commitments
+
+      assert agent_id == agent.id
+      assert commitment.claims == ["SHIP-1"]
+      assert commitment.expected_value == 200
+      assert Repo.aggregate(Commitment, :count) == 0
+    end
+
+    test "states unknown availability instead of assuming zero capacity" do
+      operator = operator_fixture()
+      scope = Scope.for_operator(operator)
+      agent = agent_fixture(operator, %{headquarters: "X1-A1"})
+
+      assert {:ok, _draft} =
+               FleetStrategy.save_draft(
+                 scope,
+                 %{
+                   "objectives" => [%{"objective" => "Grow credits"}],
+                   "hard_constraints" => ["No scrap"],
+                   "preferences" => [],
+                   "consequences" => "Not yet specified"
+                 },
+                 0
+               )
+
+      projection =
+        MissionControl.strategy_review(scope, FleetStrategy.get(scope),
+          availability: %{agent.id => nil}
+        )
+
+      assert [%{availability: :unknown, active: nil, draft: nil}] = projection.draft_commitments
+    end
+
+    test "reports insufficient governed evidence rather than a zero commitment count" do
+      operator = operator_fixture()
+      scope = Scope.for_operator(operator)
+      agent = agent_fixture(operator, %{headquarters: "X1-A1"})
+
+      assert {:ok, _draft} =
+               FleetStrategy.save_draft(
+                 scope,
+                 %{
+                   "objectives" => [
+                     %{
+                       "objective" => "Grow credits",
+                       "kind" => "continuous",
+                       "evaluation" => "Measure growth",
+                       "scope" => "recurring"
+                     }
+                   ],
+                   "hard_constraints" => ["Keep at least 50,000 credits available"],
+                   "preferences" => [],
+                   "consequences" => "The Fleet may spend credits above the floor."
+                 },
+                 0
+               )
+
+      availability = %{
+        agent.id => %{
+          as_of: DateTime.utc_now(),
+          claims: [
+            %{
+              resource: "SHIP-1",
+              roles: [:market_trader],
+              capabilities: %{cargo_transport: 40, market_access: ["X1-A1", "X1-A2"]}
+            }
+          ],
+          reservations: %{credits: 100_000}
+        }
+      }
+
+      projection =
+        MissionControl.strategy_review(scope, FleetStrategy.get(scope),
+          availability: availability
+        )
+
+      assert [
+               %{
+                 availability: :authoritative,
+                 active: nil,
+                 draft: %{
+                   commitments: [],
+                   rejected: [],
+                   limitations: [%{reason: :insufficient_market_evidence}]
+                 }
+               }
+             ] = projection.draft_commitments
     end
 
     test "reports no draft comparison until an active revision exists" do
