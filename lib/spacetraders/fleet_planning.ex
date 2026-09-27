@@ -95,6 +95,17 @@ defmodule SpaceTraders.FleetPlanning do
   def plan_market(%Revision{}, _objective_index, _snapshot),
     do: {:error, :invalid_market_planning_input}
 
+  @doc """
+  Proposes Market Candidate Contributions for a not-yet-activated draft document.
+
+  Draft planning is deterministic and evidence-bound exactly like revision
+  planning. The candidates carry no accepted Revision identity because the
+  document has not been activated.
+  """
+  def plan_draft_market(document, objective_index, snapshot) when is_map(document) do
+    plan_market(%Revision{document: document}, objective_index, snapshot)
+  end
+
   def plan_intelligence(%Revision{} = revision, objective_index, snapshot)
       when is_integer(objective_index) and objective_index >= 0 and is_map(snapshot) do
     with {:ok, objective} <- objective_at(revision, objective_index),

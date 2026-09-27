@@ -187,15 +187,44 @@ defmodule SpaceTraders.MissionControl do
     |> Enum.map(&without_credentials/1)
   end
 
-  @doc "Returns the authenticated Operator's Fleet Strategy review projection."
-  def strategy(%Scope{} = scope) do
-    FleetStrategy.get(scope)
+  @doc """
+  Returns the authenticated Operator's Fleet Strategy review projection.
+
+  Presets and the computed comparison of any draft against the active revision
+  are included. Governed consequences for a draft are added by
+  `strategy_review/2`, so read paths that do not render the review do not run
+  planning.
+  """
+  def strategy(%Scope{} = scope), do: scope |> FleetStrategy.get() |> review_fields()
+
+  @doc """
+  Returns the Strategy review projection for the authenticated Operator's
+  current draft, including its governed consequences.
+  """
+  def strategy_review(%Scope{} = scope), do: strategy_review(scope, FleetStrategy.get(scope))
+
+  @doc """
+  Returns the Strategy review projection for a given durable Strategy
+  projection, including the governed consequences of its draft.
+
+  Accepting an existing projection keeps callers from re-reading after a
+  versioned draft mutation, so a concurrent draft cannot be adopted un-reviewed.
+  """
+  def strategy_review(%Scope{} = scope, projection) do
+    projection
+    |> review_fields()
+    |> Map.put(:draft_consequences, draft_consequences(scope, projection.draft))
+  end
+
+  defp review_fields(projection) do
+    projection
     |> Map.put(:presets, FleetStrategy.presets())
+    |> Map.put(:draft_comparison, draft_comparison(projection))
   end
 
   @doc "Returns visible Market Candidate Contributions from retained Operational Intelligence."
   def market_planning(%Scope{} = scope, as_of \\ DateTime.utc_now()) do
-    case strategy(scope).active_revision do
+    case FleetStrategy.get(scope).active_revision do
       nil ->
         []
 
@@ -682,7 +711,33 @@ defmodule SpaceTraders.MissionControl do
 
   defp without_agent_credentials(%AgentRecord{} = agent), do: %{agent | agent_token: nil}
 
+  defp draft_comparison(%{draft: draft, active_revision: %Revision{document: document}})
+       when is_map(draft) and is_map(document),
+       do: FleetStrategy.compare_documents(document, draft)
+
+  defp draft_comparison(_projection), do: nil
+
+  defp draft_consequences(_scope, draft) when not is_map(draft), do: []
+
+  defp draft_consequences(scope, draft) do
+    now = DateTime.utc_now()
+
+    scope
+    |> agents()
+    |> Enum.flat_map(fn agent ->
+      plan_market_objectives(draft, agent, now, fn objective_index, snapshot ->
+        FleetPlanning.plan_draft_market(draft, objective_index, snapshot)
+      end)
+    end)
+  end
+
   defp agent_market_planning(revision, agent, as_of) do
+    plan_market_objectives(revision.document, agent, as_of, fn objective_index, snapshot ->
+      FleetPlanning.plan_market(revision, objective_index, snapshot)
+    end)
+  end
+
+  defp plan_market_objectives(document, agent, as_of, plan_objective) do
     with {:ok, system_symbol} <- Fleet.system_from_headquarters(agent.headquarters) do
       markets =
         agent
@@ -691,11 +746,11 @@ defmodule SpaceTraders.MissionControl do
 
       snapshot = FleetPlanning.market_snapshot(as_of, system_symbol, agent.id, markets)
 
-      revision.document
+      document
       |> Map.get("objectives", [])
       |> Enum.with_index()
       |> Enum.map(fn {objective, objective_index} ->
-        {:ok, planning} = FleetPlanning.plan_market(revision, objective_index, snapshot)
+        {:ok, planning} = plan_objective.(objective_index, snapshot)
 
         %{
           agent: agent,

@@ -606,6 +606,106 @@ defmodule SpaceTraders.FleetStrategyTest do
     assert reason =~ "Cannot prove that no Ship would be scrapped"
   end
 
+  test "draft comparison identifies changed objectives, ordering, constraints, preferences, and scope" do
+    active = %{
+      "objectives" => [
+        objective("Grow credits", "continuous", "recurring"),
+        objective("Chart waypoints", "attain", "fleet_generation"),
+        objective("Scout nearby", "attain", "fleet_generation")
+      ],
+      "hard_constraints" => ["Keep at least 50,000 credits available", "No scrap"],
+      "preferences" => ["Prefer lower-risk routes"],
+      "consequences" => "The Fleet may spend credits above the floor."
+    }
+
+    draft = %{
+      "objectives" => [
+        objective("Chart waypoints", "attain", "strategy_lifetime"),
+        objective("Grow credits", "maintain", "recurring"),
+        objective("Protect liquidity", "maintain", "recurring")
+      ],
+      "hard_constraints" => ["Keep at least 50,000 credits available", "No ship scrapping"],
+      "preferences" => ["Prefer lower-risk routes", "Prefer shorter routes"],
+      "consequences" => "The Fleet may spend credits and delay growth."
+    }
+
+    comparison = FleetStrategy.compare_documents(active, draft)
+
+    assert comparison.changed?
+    assert comparison.objectives.reordered?
+
+    assert [%{"objective" => "Protect liquidity"}] = comparison.objectives.added
+    assert [%{"objective" => "Scout nearby"}] = comparison.objectives.removed
+
+    assert [
+             %{
+               objective: "Chart waypoints",
+               changes: [%{field: "scope", from: "fleet_generation", to: "strategy_lifetime"}]
+             },
+             %{
+               objective: "Grow credits",
+               changes: [%{field: "kind", from: "continuous", to: "maintain"}]
+             }
+           ] = comparison.objectives.changed
+
+    assert comparison.hard_constraints.added == ["No ship scrapping"]
+    assert comparison.hard_constraints.removed == ["No scrap"]
+    assert comparison.preferences.added == ["Prefer shorter routes"]
+    assert comparison.preferences.removed == []
+
+    assert comparison.consequences == %{
+             from: "The Fleet may spend credits above the floor.",
+             to: "The Fleet may spend credits and delay growth."
+           }
+  end
+
+  test "an identical draft reports no changes from the active revision" do
+    document = document("Grow credits", "No scrap")
+
+    comparison = FleetStrategy.compare_documents(document, document)
+
+    refute comparison.changed?
+
+    assert comparison.objectives == %{
+             added: [],
+             removed: [],
+             changed: [],
+             reordered?: false
+           }
+
+    assert comparison.hard_constraints == %{added: [], removed: []}
+    assert comparison.preferences == %{added: [], removed: []}
+    assert comparison.consequences == nil
+  end
+
+  test "a pure Strategic Priority reorder is reported as a change" do
+    active = %{
+      "objectives" => [
+        objective("Grow credits", "continuous", "recurring"),
+        objective("Chart waypoints", "attain", "fleet_generation")
+      ],
+      "hard_constraints" => ["No scrap"],
+      "preferences" => [],
+      "consequences" => "Growth first."
+    }
+
+    draft = %{
+      active
+      | "objectives" => [
+          objective("Chart waypoints", "attain", "fleet_generation"),
+          objective("Grow credits", "continuous", "recurring")
+        ]
+    }
+
+    comparison = FleetStrategy.compare_documents(active, draft)
+
+    assert comparison.changed?
+    assert comparison.objectives.reordered?
+    assert comparison.objectives.added == []
+    assert comparison.objectives.removed == []
+    assert comparison.objectives.changed == []
+  end
+
   test "ranking rejects stale revision evidence and incomplete evaluation shapes" do
     scope = operator_fixture() |> Scope.for_operator()
     first = activate_document(scope, document("Grow credits", "No scrap"))

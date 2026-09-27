@@ -16,6 +16,19 @@ defmodule SpaceTradersWeb.OperatorLive.SettingsTest do
       assert html =~ "Save Password"
     end
 
+    test "keeps account and application boundaries without planner controls", %{conn: conn} do
+      {:ok, _lv, html} =
+        conn
+        |> log_in_operator(operator_fixture())
+        |> live(~p"/operators/settings")
+
+      refute html =~ "Fleet Strategy"
+      refute html =~ "Strategic Objective"
+      refute html =~ "Hard Constraint"
+      refute html =~ "Emergency Stop"
+      refute html =~ "draft"
+    end
+
     test "redirects if operator is not logged in", %{conn: conn} do
       assert {:error, redirect} = live(conn, ~p"/operators/settings")
 

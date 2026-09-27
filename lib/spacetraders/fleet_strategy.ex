@@ -24,6 +24,8 @@ defmodule SpaceTraders.FleetStrategy do
 
   alias SpaceTraders.Repo
 
+  @comparison_objective_fields ["kind", "evaluation", "scope"]
+
   @presets [
     %{
       id: "steady_growth",
@@ -276,6 +278,38 @@ defmodule SpaceTraders.FleetStrategy do
           emergency_stop_version: strategy.emergency_stop_version
         }
     end
+  end
+
+  @doc """
+  Compares the active revision's document with a draft document.
+
+  Reports added, removed, changed, and reordered Strategic Objectives, added
+  and removed Hard Constraints and Preferences, and changed consequence text.
+  A draft identical to the active revision reports no changes.
+  """
+  def compare_documents(active_document, draft_document)
+      when is_map(active_document) and is_map(draft_document) do
+    objectives =
+      compare_objectives(
+        Map.get(active_document, "objectives", []),
+        Map.get(draft_document, "objectives", [])
+      )
+
+    hard_constraints = document_list_changes(active_document, draft_document, "hard_constraints")
+    preferences = document_list_changes(active_document, draft_document, "preferences")
+    consequences = document_consequence_change(active_document, draft_document)
+
+    %{
+      changed?:
+        objectives.added != [] or objectives.removed != [] or objectives.changed != [] or
+          objectives.reordered? or hard_constraints.added != [] or
+          hard_constraints.removed != [] or preferences.added != [] or
+          preferences.removed != [] or not is_nil(consequences),
+      objectives: objectives,
+      hard_constraints: hard_constraints,
+      preferences: preferences,
+      consequences: consequences
+    }
   end
 
   @doc "Persists an Operator-authored draft without changing active intent."
@@ -599,6 +633,91 @@ defmodule SpaceTraders.FleetStrategy do
       "preferences" => preset.preferences,
       "consequences" => preset.consequences
     }
+  end
+
+  defp compare_objectives(active_objectives, draft_objectives) do
+    active_by_name = Enum.group_by(active_objectives, &comparison_objective_name/1)
+    draft_by_name = Enum.group_by(draft_objectives, &comparison_objective_name/1)
+
+    changed =
+      active_by_name
+      |> Map.keys()
+      |> Enum.filter(&Map.has_key?(draft_by_name, &1))
+      |> Enum.sort()
+      |> Enum.flat_map(fn name ->
+        active_by_name
+        |> Map.fetch!(name)
+        |> Enum.zip(Map.fetch!(draft_by_name, name))
+        |> Enum.flat_map(fn {active, draft} ->
+          case objective_field_changes(active, draft) do
+            [] -> []
+            changes -> [%{objective: name, changes: changes}]
+          end
+        end)
+      end)
+
+    %{
+      added: extra_objectives(draft_by_name, active_by_name),
+      removed: extra_objectives(active_by_name, draft_by_name),
+      changed: changed,
+      reordered?:
+        shared_names_in_order(active_objectives, draft_objectives) !=
+          shared_names_in_order(draft_objectives, active_objectives)
+    }
+  end
+
+  defp comparison_objective_name(%{"objective" => name}) when is_binary(name), do: name
+  defp comparison_objective_name(objective) when is_binary(objective), do: objective
+  defp comparison_objective_name(_objective), do: nil
+
+  defp extra_objectives(objectives_by_name, other_by_name) do
+    objectives_by_name
+    |> Enum.sort_by(&elem(&1, 0))
+    |> Enum.flat_map(fn {name, objectives} ->
+      extra = length(objectives) - length(Map.get(other_by_name, name, []))
+      Enum.take(objectives, max(extra, 0))
+    end)
+  end
+
+  defp objective_field_changes(active, draft) when is_map(active) and is_map(draft) do
+    for field <- @comparison_objective_fields,
+        from = Map.get(active, field),
+        to = Map.get(draft, field),
+        from != to do
+      %{field: field, from: from, to: to}
+    end
+  end
+
+  defp objective_field_changes(_active, _draft), do: []
+
+  defp shared_names_in_order(objectives, other_objectives) do
+    remaining = other_objectives |> Enum.map(&comparison_objective_name/1) |> Enum.frequencies()
+
+    {shared, _remaining} =
+      objectives
+      |> Enum.map(&comparison_objective_name/1)
+      |> Enum.reduce({[], remaining}, fn name, {shared, remaining} ->
+        case Map.get(remaining, name, 0) do
+          0 -> {shared, remaining}
+          count -> {[name | shared], Map.put(remaining, name, count - 1)}
+        end
+      end)
+
+    Enum.reverse(shared)
+  end
+
+  defp document_list_changes(active_document, draft_document, key) do
+    active = Map.get(active_document, key, [])
+    draft = Map.get(draft_document, key, [])
+
+    %{added: draft -- active, removed: active -- draft}
+  end
+
+  defp document_consequence_change(active_document, draft_document) do
+    from = Map.get(active_document, "consequences") || ""
+    to = Map.get(draft_document, "consequences") || ""
+
+    if from == to, do: nil, else: %{from: from, to: to}
   end
 
   defp broadcast_update(%Scope{operator: %Operator{id: operator_id}}) do

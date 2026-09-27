@@ -182,19 +182,7 @@ defmodule SpaceTradersWeb.StrategyLiveTest do
         headquarters: "X1-A1"
       })
 
-    Enum.each(["X1-A1", "X1-A2"], fn symbol ->
-      waypoint =
-        Waypoint.from_json(%{
-          "symbol" => symbol,
-          "systemSymbol" => "X1",
-          "type" => "PLANET",
-          "x" => 0,
-          "y" => 0,
-          "traits" => [%{"symbol" => "MARKETPLACE"}]
-        })
-
-      assert {:ok, _} = Intelligence.observe_waypoint(agent, waypoint, source: "get_waypoint")
-    end)
+    Enum.each(["X1-A1", "X1-A2"], &observe_waypoint(agent, &1))
 
     observe_market(agent, "X1-A1", 10, 9)
     observe_market(agent, "X1-A2", 25, 20)
@@ -229,9 +217,8 @@ defmodule SpaceTradersWeb.StrategyLiveTest do
     assert {:ok, _draft} = FleetStrategy.select_preset(scope, "charted_expansion")
 
     {:ok, view, _html} = live(conn, ~p"/strategy")
-    assert render(view) =~ "Revision changes"
-    assert render(view) =~ "Current active"
-    assert render(view) =~ "Proposed draft"
+    assert has_element?(view, "#draft-revision-changes")
+    assert render(view) =~ "Changes from active revision"
     view |> element("#discard-strategy-draft") |> render_click()
 
     projection = FleetStrategy.get(scope)
@@ -262,6 +249,156 @@ defmodule SpaceTradersWeb.StrategyLiveTest do
     assert html =~ "cannot be enforced"
     assert html =~ "does not provide a conditional maximum price"
     assert FleetStrategy.get(scope).active_revision == nil
+  end
+
+  test "compares a draft with the active revision and shows its governed consequences", %{
+    conn: conn,
+    operator: operator,
+    scope: scope
+  } do
+    agent =
+      Repo.insert!(%AgentRecord{
+        operator_id: operator.id,
+        symbol: "PLANNER",
+        faction: "COSMIC",
+        headquarters: "X1-A1"
+      })
+
+    Enum.each(["X1-A1", "X1-A2"], &observe_waypoint(agent, &1))
+    observe_market(agent, "X1-A1", 10, 9)
+    observe_market(agent, "X1-A2", 25, 20)
+
+    assert {:ok, _draft} = FleetStrategy.select_preset(scope, "steady_growth")
+    assert {:ok, revision} = FleetStrategy.activate(scope, FleetStrategy.get(scope).draft_version)
+    assert {:ok, _draft} = FleetStrategy.select_preset(scope, "charted_expansion")
+
+    {:ok, view, html} = live(conn, ~p"/strategy")
+
+    assert has_element?(view, "#draft-revision-changes")
+    assert html =~ "Chart useful waypoints"
+    assert html =~ "Keep at least 75,000 credits available"
+    assert html =~ "Keep at least 50,000 credits available"
+
+    consequences = render(element(view, "#draft-consequences"))
+    assert consequences =~ "Candidate Contributions under current evidence"
+    assert consequences =~ "Chart useful waypoints"
+    assert consequences =~ "IRON_ORE"
+    assert consequences =~ "Candidate only"
+
+    assert FleetStrategy.get(scope).active_revision.id == revision.id
+  end
+
+  test "reports no changes when the draft matches the active revision", %{
+    conn: conn,
+    scope: scope
+  } do
+    assert {:ok, _draft} = FleetStrategy.select_preset(scope, "steady_growth")
+
+    assert {:ok, _revision} =
+             FleetStrategy.activate(scope, FleetStrategy.get(scope).draft_version)
+
+    assert {:ok, _draft} = FleetStrategy.select_preset(scope, "steady_growth")
+
+    {:ok, view, html} = live(conn, ~p"/strategy")
+
+    assert has_element?(view, "#draft-revision-changes")
+    assert html =~ "matches the active revision"
+    refute html =~ "Objectives added"
+  end
+
+  test "presents a draft with no active revision as new standing intent", %{conn: conn} do
+    {:ok, view, _html} = live(conn, ~p"/strategy")
+
+    view
+    |> form("#strategy-draft-form", %{
+      "strategy" => %{
+        "objectives" => "Grow credits | continuous | Measure growth | recurring",
+        "hard_constraints" => "No scrap",
+        "preferences" => "",
+        "consequences" => "Credits may be spent"
+      }
+    })
+    |> render_change()
+
+    assert has_element?(view, "#draft-new-intent")
+    refute has_element?(view, "#draft-revision-changes")
+    assert render(view) =~ "establishes intent from scratch"
+
+    consequences = render(element(view, "#draft-consequences"))
+    assert consequences =~ "No governed Market evidence is available"
+  end
+
+  test "a recommendation opens a reviewable draft and cannot activate silently", %{
+    conn: conn,
+    operator: operator,
+    scope: scope
+  } do
+    recommendation = %{
+      "objectives" => [
+        %{
+          "objective" => "Grow credits",
+          "kind" => "continuous",
+          "evaluation" => "Maximize net credit growth",
+          "scope" => "recurring"
+        }
+      ],
+      "hard_constraints" => ["Keep at least 60,000 credits available"],
+      "preferences" => ["Prefer shorter routes"],
+      "consequences" => "The Fleet may spend credits above the floor."
+    }
+
+    assert {:ok, _draft} = FleetStrategy.recommend(scope, recommendation)
+    assert FleetStrategy.get(scope).draft_source == "recommendation"
+    assert FleetStrategy.get(scope).active_revision == nil
+
+    {:ok, view, html} = live(conn, ~p"/strategy")
+
+    assert html =~ "Review this draft before activation"
+    assert html =~ "recommendation"
+    refute has_element?(view, "#activate-strategy[disabled]")
+
+    send(view.pid, {:fleet_strategy_updated, operator.id})
+    assert FleetStrategy.get(scope).active_revision == nil
+
+    view |> element("#activate-strategy") |> render_click()
+    assert FleetStrategy.get(scope).active_revision.number == 1
+  end
+
+  test "states insufficient governed evidence instead of inventing consequences", %{
+    conn: conn,
+    operator: operator,
+    scope: scope
+  } do
+    _agent =
+      Repo.insert!(%AgentRecord{
+        operator_id: operator.id,
+        symbol: "FRESH",
+        faction: "COSMIC",
+        headquarters: "X1-A1"
+      })
+
+    assert {:ok, _draft} = FleetStrategy.select_preset(scope, "steady_growth")
+
+    {:ok, view, _html} = live(conn, ~p"/strategy")
+
+    assert has_element?(view, "#draft-consequences")
+    consequences = render(element(view, "#draft-consequences"))
+    assert consequences =~ "Observation Demand is required"
+    refute consequences =~ "candidate-contribution-draft-planning"
+  end
+
+  defp observe_waypoint(agent, symbol) do
+    waypoint =
+      Waypoint.from_json(%{
+        "symbol" => symbol,
+        "systemSymbol" => "X1",
+        "type" => "PLANET",
+        "x" => 0,
+        "y" => 0,
+        "traits" => [%{"symbol" => "MARKETPLACE"}]
+      })
+
+    assert {:ok, _} = Intelligence.observe_waypoint(agent, waypoint, source: "get_waypoint")
   end
 
   defp observe_market(agent, waypoint, purchase_price, sell_price) do
