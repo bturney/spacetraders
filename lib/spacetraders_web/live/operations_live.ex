@@ -85,9 +85,10 @@ defmodule SpaceTradersWeb.OperationsLive do
               <div class="mt-3 grid gap-3 sm:grid-cols-3">
                 <div>
                   <p class="text-sm opacity-70">Contributing Ships</p>
-                  <p class="mt-1 text-sm">
-                    {ship_label(endeavor.claims)}
-                  </p>
+                  <p :if={endeavor.claims == []} class="mt-1 text-sm">None</p>
+                  <div :for={ship <- endeavor.claims} class="mt-1 text-sm">
+                    <.link navigate={~p"/ships/#{ship}"} class="link link-primary">{ship}</.link>
+                  </div>
                 </div>
                 <div>
                   <p class="text-sm opacity-70">Reservations</p>
@@ -95,7 +96,10 @@ defmodule SpaceTradersWeb.OperationsLive do
                 </div>
                 <div>
                   <p class="text-sm opacity-70">Pledges</p>
-                  <p class="mt-1 text-sm">{pledge_label(endeavor.pledges)}</p>
+                  <p :if={endeavor.pledges == []} class="mt-1 text-sm">None</p>
+                  <div :for={pledge <- endeavor.pledges} class="mt-1 text-sm">
+                    <.pledge pledge={pledge} />
+                  </div>
                 </div>
               </div>
 
@@ -158,9 +162,6 @@ defmodule SpaceTradersWeb.OperationsLive do
 
   defp empty_contribution(_contribution), do: nil
 
-  defp ship_label([]), do: "None"
-  defp ship_label(claims), do: Enum.join(claims, ", ")
-
   defp reservation_label(reservations) when map_size(reservations) == 0, do: "None"
 
   defp reservation_label(reservations) do
@@ -169,11 +170,37 @@ defmodule SpaceTradersWeb.OperationsLive do
     |> Enum.join(", ")
   end
 
-  defp pledge_label([]), do: "None"
+  attr :pledge, :map, required: true
 
-  defp pledge_label([%{"amount" => amount} | _] = pledges) do
-    "Promises #{Enum.sum_by(pledges, & &1["amount"])} (latest #{amount})"
+  defp pledge(assigns) do
+    ~H"""
+    <%= case pledge_destination(@pledge) do %>
+      <% {:contract, contract_id} -> %>
+        <.link navigate={~p"/contracts/#{contract_id}"} class="link link-primary">Contract {contract_id}</.link>
+      <% {:construction, waypoint} -> %>
+        <.link navigate={construction_path(waypoint)} class="link link-primary">Construction at {waypoint}</.link>
+      <% nil -> %>
+        {pledge_label(@pledge)}
+    <% end %>
+    """
   end
 
-  defp pledge_label(_pledges), do: "Outcome promise recorded"
+  defp pledge_destination(%{"outcome" => ["contract", contract_id | _]})
+       when is_binary(contract_id),
+       do: {:contract, contract_id}
+
+  defp pledge_destination(%{"outcome" => ["construction", waypoint | _]})
+       when is_binary(waypoint),
+       do: {:construction, waypoint}
+
+  defp pledge_destination(_pledge), do: nil
+
+  defp pledge_label(%{"amount" => amount}) when is_number(amount), do: "Promises #{amount}"
+  defp pledge_label(_pledge), do: "Outcome promise recorded"
+
+  defp construction_path(waypoint) do
+    system = SpaceTradersWeb.EntityReference.system_from_waypoint(waypoint)
+
+    ~p"/world/systems/#{system}/waypoints/#{waypoint}/construction"
+  end
 end

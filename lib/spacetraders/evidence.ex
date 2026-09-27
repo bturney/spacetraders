@@ -51,6 +51,16 @@ defmodule SpaceTraders.Evidence do
     )
   end
 
+  @doc "Returns the latest governed observation retained for one Agent subject."
+  def latest_observation(%AgentRecord{} = agent, subject)
+      when is_binary(subject) and subject != "" do
+    Observation
+    |> where([observation], observation.agent_id == ^agent.id and observation.subject == ^subject)
+    |> order_by([observation], desc: observation.observed_at, desc: observation.id)
+    |> limit(1)
+    |> Repo.one()
+  end
+
   @doc "Reads one page of Waypoints through a governed World Observation Demand."
   def get_waypoints(token_or_agent, system_symbol, params \\ [], opts \\ [])
       when is_binary(system_symbol) and is_list(params) and is_list(opts) do

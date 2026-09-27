@@ -4,6 +4,7 @@ defmodule SpaceTradersWeb.ActivityLive do
   use SpaceTradersWeb, :live_view
 
   alias SpaceTraders.{MissionControl, OperatorConditions}
+  alias SpaceTradersWeb.EntityReference
 
   @impl true
   def mount(_params, _session, socket) do
@@ -80,6 +81,11 @@ defmodule SpaceTradersWeb.ActivityLive do
             "%Y-%m-%d %H:%M UTC"
           )}</time>
           <p class="mt-1">{entry.summary}</p>
+          <.link
+            :if={EntityReference.path(Map.get(entry, :entity_ref))}
+            navigate={EntityReference.path(Map.get(entry, :entity_ref))}
+            class="link link-primary mt-1 inline-block"
+          >{EntityReference.label(Map.get(entry, :entity_ref))}</.link>
           <details class="mt-2 text-sm">
             <summary class="cursor-pointer text-primary">Why and context</summary>
             <p class="mt-2 opacity-75">{entry.detail}</p>

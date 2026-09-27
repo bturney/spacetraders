@@ -516,7 +516,7 @@ defmodule SpaceTraders.Fleet do
     end
   end
 
-  @doc false
+  @doc "Returns a Ship's locally registered ownership record for an Agent."
   def owned_ship(agent, symbol) do
     case Repo.get_by(Ship, agent_id: agent.id, symbol: symbol) do
       nil -> {:error, :ship_not_owned}

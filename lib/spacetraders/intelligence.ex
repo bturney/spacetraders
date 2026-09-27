@@ -165,6 +165,8 @@ defmodule SpaceTraders.Intelligence do
         fields,
         opts \\ []
       ) do
+    subject_type = to_string(subject_type)
+
     observe(
       agent,
       subject_type,

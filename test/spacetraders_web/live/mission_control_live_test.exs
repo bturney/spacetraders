@@ -151,11 +151,18 @@ defmodule SpaceTradersWeb.MissionControlLiveTest do
         scope,
         "credit-floor",
         :attention,
-        "Protected credit floor cannot be maintained"
+        "Protected credit floor cannot be maintained",
+        entity_ref: "construction:X1:X1-A1"
       )
 
     {:ok, view, _html} = live(conn, ~p"/mission-control")
     assert has_element?(view, "#needs-attention", "Protected credit floor cannot be maintained")
+
+    assert has_element?(
+             view,
+             "a[href='/world/systems/X1/waypoints/X1-A1/construction']",
+             "Construction"
+           )
 
     view |> element("#needs-attention button[phx-value-id='#{condition.id}']") |> render_click()
 
@@ -185,8 +192,14 @@ defmodule SpaceTradersWeb.MissionControlLiveTest do
 
     assert reopened.id != condition.id
     assert is_nil(reopened.acknowledged_at)
-    {:ok, _activity, html} = live(conn, ~p"/activity")
+    {:ok, activity, html} = live(conn, ~p"/activity")
     assert html |> String.split("Protected credit floor cannot be maintained") |> length() == 4
+
+    assert has_element?(
+             activity,
+             "a[href='/world/systems/X1/waypoints/X1-A1/construction']",
+             "Construction"
+           )
   end
 
   test "new Intervention appears in the connected briefing without reopening the page", %{
