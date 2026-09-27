@@ -6,6 +6,7 @@ defmodule SpaceTraders.MissionControlTest do
 
   alias SpaceTraders.Agent.Scope
   alias SpaceTraders.MissionControl
+  alias SpaceTraders.FleetAllocation.StrategyDecisionEpisode
 
   describe "dashboard/1" do
     test "reads only Agents owned by the scoped Operator" do
@@ -271,6 +272,66 @@ defmodule SpaceTraders.MissionControlTest do
       assert report.realized.completed_round_trips == 1
       assert report.realized.realized_sale_value == 150
       assert report.realized.realized_net_credit_change == 100
+    end
+  end
+
+  describe "endeavors/1" do
+    test "reports no groups before Strategy and portfolio exist" do
+      scope = Scope.for_operator(operator_fixture())
+
+      assert %{
+               groups: [],
+               retired: [],
+               contribution: %{commitment_count: 0, expected_value: 0}
+             } = MissionControl.endeavors(scope)
+    end
+
+    test "groups an active Commitment under the Strategic Objective it serves" do
+      %{scope: scope, portfolio: portfolio, commitment: commitment} = execution_fixture()
+      projection = MissionControl.endeavors(scope)
+
+      assert [
+               %{
+                 priority: 1,
+                 objective: %{"objective" => "Grow credits"},
+                 endeavors: [endeavor]
+               }
+             ] = projection.groups
+
+      assert endeavor.candidate_id == commitment.candidate_id
+      assert endeavor.state == :active
+      assert endeavor.forecast == 100.0
+      assert endeavor.claims == ["SHIP-1"]
+      assert endeavor.reservations == %{"credits" => 200}
+      assert endeavor.pledges == []
+      assert endeavor.reason
+      assert endeavor.decision_episode_id == portfolio.strategy_decision_episode_id
+      assert projection.retired == []
+    end
+
+    test "reuses the same contribution summary Mission Control reports" do
+      %{scope: scope} = execution_fixture()
+
+      assert %{contribution: contribution} = MissionControl.endeavors(scope)
+      assert contribution == MissionControl.market_execution(scope).contribution
+    end
+
+    test "released Endeavors leave the active view and keep their Decision Episode reachable" do
+      %{scope: scope, commitment: commitment} = execution_fixture()
+
+      commitment
+      |> Ecto.Changeset.change(unwind_state: :released)
+      |> Repo.update!()
+
+      projection = MissionControl.endeavors(scope)
+
+      assert Enum.all?(projection.groups, &(&1.endeavors == []))
+
+      assert [%{state: :released, commitment_id: commitment_id, decision_episode_id: id}] =
+               projection.retired
+
+      assert commitment_id == commitment.id
+      assert Repo.get!(StrategyDecisionEpisode, id).id == id
     end
   end
 

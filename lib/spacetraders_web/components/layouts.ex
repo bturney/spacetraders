@@ -56,6 +56,7 @@ defmodule SpaceTradersWeb.Layouts do
                 navigate={~p"/mission-control"}
                 class="hidden btn btn-sm btn-ghost md:inline-flex"
               >Mission Control</.link>
+              <.link navigate={~p"/operations"} class="hidden btn btn-sm btn-ghost md:inline-flex">Operations</.link>
               <.link navigate={~p"/world"} class="hidden btn btn-sm btn-ghost md:inline-flex">World</.link>
               <.link navigate={~p"/strategy"} class="hidden btn btn-sm btn-ghost md:inline-flex">Strategy</.link>
               <.link navigate={~p"/activity"} class="btn btn-sm btn-ghost md:hidden">Activity</.link>
@@ -84,6 +85,7 @@ defmodule SpaceTradersWeb.Layouts do
         aria-label="Primary navigation"
       >
         <.link navigate={~p"/mission-control"} class="btn btn-ghost btn-sm">Command</.link>
+        <.link navigate={~p"/operations"} class="btn btn-ghost btn-sm">Ops</.link>
         <.link navigate={~p"/world"} class="btn btn-ghost btn-sm">World</.link>
         <.link navigate={~p"/strategy"} class="btn btn-ghost btn-sm">Strategy</.link>
       </nav>

@@ -150,6 +150,10 @@ _Avoid_: budget (when referring to committed capacity), claim
 A Fleet Commitment's promised quantity toward a divisible shared outcome, backed by sufficient claims, reservations, or explicit acquisition dependencies. Authoritative outcome progress, including progress caused outside the Fleet, reduces the remaining fulfillment rather than being treated as failure.
 _Avoid_: reservation, fixed quota
 
+**Endeavor**:
+The operations-surface presentation of one active root Fleet Commitment, grouped under the Strategic Objective it serves. It shows the Commitment's outcome, state, forecast, contributing Ships (Claims), material dependencies (Reservations, Pledges, hardware prerequisites), and a concise selection reason. Superseded or unwound work leaves the active Endeavors view while its Decision Episode evidence remains reachable by identity.
+_Avoid_: task, Job, plan
+
 **Shared World State**:
 Mutable game state that may be changed by other Agents as well as this Fleet. An observation is evidence at a point in time, not a lock; Fleet planning records assumptions about it and refreshes them only when uncertainty can materially affect admissibility, expected value, or the next irreversible action.
 _Avoid_: external interference, single-player state
