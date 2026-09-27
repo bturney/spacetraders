@@ -689,8 +689,8 @@ defmodule SpaceTraders.API.OperationInventory do
       consequences: ["relocates Ship to the connected System"],
       success_evidence: ["Ship nav, Agent, and Cooldown response"],
       waits: [:cooldown],
-      ambiguity: {:reconcile_before_retry, ["Ship state"]},
-      fence_dependencies: [:ship],
+      ambiguity: {:reconcile_before_retry, ["Ship state", "Agent credits"]},
+      fence_dependencies: [:ship, :agent_credits],
       visibility: :ship_private,
       pagination: :none
     },

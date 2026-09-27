@@ -98,6 +98,11 @@ defmodule SpaceTraders.API.OperationInventoryTest do
              :ship,
              :target_ship
            ]
+
+    assert OperationInventory.fetch!("jump-ship").fence_dependencies == [
+             :ship,
+             :agent_credits
+           ]
   end
 
   test "resolves a concrete request path to its generated operation" do
