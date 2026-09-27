@@ -23,6 +23,11 @@ When a skill names a triage role, use the matching label string:
 **PRs as a request surface: no.** Read or review a pull request only when the
 task explicitly names it.
 
+**PR authoring.** A PR that meets every acceptance criterion of its issue
+carries the closing keyword (`Closes #N`), so merging it closes the issue. A PR
+that leaves any criterion unmet references the issue plainly (`#N`). Merge
+itself requires an explicit Operator request.
+
 ## Wayfinding operations
 
 Used by `/wayfinder`. The **map** is a single issue with **child** issues as tickets.

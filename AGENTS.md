@@ -2,14 +2,14 @@
 
 ## Agent skills
 
-- Issue work (create, triage, label, close): read `docs/agents/issue-tracker.md`
-  — it also holds the triage label vocabulary.
+- Issue and PR work (create, triage, label, open PR, close): read
+  `docs/agents/issue-tracker.md` — it also holds the triage label vocabulary.
 - Domain work (explore an area, name a concept): read `docs/agents/domain.md`;
   it points at `CONTEXT.md` and the ADRs.
 - Unattended CI or runner work: read `docs/agents/readiness.md`.
 - Running or debugging the test suite: read `docs/agents/testing.md`.
 
-Merge and Issue closure require an explicit Operator request.
+Merge requires an explicit Operator request.
 
 ## Working in this repo
 
