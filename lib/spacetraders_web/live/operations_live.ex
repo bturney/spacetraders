@@ -75,7 +75,7 @@ defmodule SpaceTradersWeb.OperationsLive do
             >
               <div class="flex items-start justify-between gap-3">
                 <h3 class="font-semibold">{endeavor.outcome}</h3>
-                <span class="badge">{endeavor_state_label(endeavor.state)}</span>
+                <span class="badge">Active</span>
               </div>
               <p class="mt-2 text-sm">{endeavor.reason}</p>
               <p class="mt-1 text-sm opacity-70">
@@ -112,6 +112,25 @@ defmodule SpaceTradersWeb.OperationsLive do
             </p>
           </div>
         </section>
+
+        <section
+          :if={@projection.released != []}
+          id="released-endeavors"
+          class="rounded-2xl border border-base-300 bg-base-100 p-5"
+        >
+          <h2 class="text-xl font-bold">Released Endeavor evidence</h2>
+          <p class="mt-1 text-sm opacity-70">
+            Superseded or unwound Commitments left the active view; their Decision Episode
+            evidence remains reachable by identity.
+          </p>
+          <ul class="mt-3 space-y-3">
+            <li :for={evidence <- @projection.released} class="border-t border-base-300 pt-3">
+              <p class="font-semibold">{evidence.outcome}</p>
+              <p class="text-sm">{evidence.reason}</p>
+              <p class="text-sm opacity-70">Decision Episode {evidence.decision_episode_id}</p>
+            </li>
+          </ul>
+        </section>
       </div>
     </Layouts.app>
     """
@@ -138,9 +157,6 @@ defmodule SpaceTradersWeb.OperationsLive do
     do: "Fleet Allocation has not published an active Endeavor for this Generation."
 
   defp empty_contribution(_contribution), do: nil
-
-  defp endeavor_state_label(:active), do: "Active"
-  defp endeavor_state_label(:released), do: "Released"
 
   defp ship_label([]), do: "None"
   defp ship_label(claims), do: Enum.join(claims, ", ")

@@ -44,13 +44,14 @@ defmodule SpaceTraders.MissionControl do
   Returns Objective-grouped Endeavors for the signed-in Operator's current
   Fleet.
 
-  An Endeavor is one root Fleet Commitment of the current published
+  An Endeavor is one active root Fleet Commitment of the current published
   portfolio, presented under the Strategic Objective it serves. The projection
   pairs each Strategic Objective with the Commitments whose candidate index
   belongs to that objective so Operations and Mission Control read the same
-  durable records. Superseded or unwound Commitments leave the active grouping;
-  they are retained under `:retired` with their Decision Episode identity so
-  outcome evidence stays reachable by identity.
+  durable records. Superseded or unwound Commitments leave the Endeavors
+  grouping; they are retained under `:released` as Commitment evidence records
+  carrying their Decision Episode identity, so outcome evidence stays
+  reachable by identity.
   """
   def endeavors(%Scope{} = scope), do: endeavors(scope, FleetAllocation.current_portfolio(scope))
 
@@ -58,7 +59,7 @@ defmodule SpaceTraders.MissionControl do
     %{
       strategy: strategy(scope),
       groups: [],
-      retired: [],
+      released: [],
       contribution: %{claims: [], commitment_count: 0, expected_value: 0}
     }
   end
@@ -71,7 +72,7 @@ defmodule SpaceTraders.MissionControl do
       end
 
     commitments = Enum.sort_by(Repo.all(commitment_query(portfolio.id)), & &1.id)
-    {active, retired} = Enum.split_with(commitments, &(&1.unwind_state == :not_required))
+    {active, released} = Enum.split_with(commitments, &(&1.unwind_state == :not_required))
 
     groups =
       objectives
@@ -87,7 +88,7 @@ defmodule SpaceTraders.MissionControl do
     %{
       strategy: strategy(scope),
       groups: groups,
-      retired: Enum.map(retired, &endeavor(portfolio, &1, :released)),
+      released: Enum.map(released, &endeavor_evidence(portfolio, &1)),
       contribution: contribution(portfolio)
     }
   end
@@ -102,13 +103,16 @@ defmodule SpaceTraders.MissionControl do
     Enum.filter(commitments, &(&1.objective_index == index))
   end
 
+  defp episode_id(portfolio, %Commitment{} = commitment) do
+    commitment.replan_decision_episode_id || portfolio.strategy_decision_episode_id
+  end
+
   defp endeavor(portfolio, %Commitment{} = commitment, state) do
     %{
-      id: "endeavor-#{portfolio.id}-#{commitment.candidate_id}",
+      id: "endeavor-#{episode_id(portfolio, commitment)}-#{commitment.candidate_id}",
       candidate_id: commitment.candidate_id,
       commitment_id: commitment.id,
-      decision_episode_id:
-        commitment.replan_decision_episode_id || portfolio.strategy_decision_episode_id,
+      decision_episode_id: episode_id(portfolio, commitment),
       state: state,
       outcome: endeavor_outcome(commitment),
       forecast: commitment.expected_value,
@@ -116,6 +120,17 @@ defmodule SpaceTraders.MissionControl do
       reservations: commitment.reservations,
       pledges: commitment.pledges,
       dependencies: Enum.map(commitment.dependencies, &dependency_details/1),
+      reason: commitment.decisive_reason
+    }
+  end
+
+  defp endeavor_evidence(portfolio, %Commitment{} = commitment) do
+    %{
+      candidate_id: commitment.candidate_id,
+      commitment_id: commitment.id,
+      decision_episode_id: episode_id(portfolio, commitment),
+      state: :released,
+      outcome: endeavor_outcome(commitment),
       reason: commitment.decisive_reason
     }
   end
@@ -539,7 +554,7 @@ defmodule SpaceTraders.MissionControl do
                 realized_sale_value: nil
               }
             ),
-          contribution: contribution(portfolio),
+          contribution: endeavors(scope, portfolio).contribution,
           limitation: limitation(portfolio),
           attention: []
         }

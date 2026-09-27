@@ -281,7 +281,7 @@ defmodule SpaceTraders.MissionControlTest do
 
       assert %{
                groups: [],
-               retired: [],
+               released: [],
                contribution: %{commitment_count: 0, expected_value: 0}
              } = MissionControl.endeavors(scope)
     end
@@ -306,17 +306,23 @@ defmodule SpaceTraders.MissionControlTest do
       assert endeavor.pledges == []
       assert endeavor.reason
       assert endeavor.decision_episode_id == portfolio.strategy_decision_episode_id
-      assert projection.retired == []
+
+      assert String.contains?(
+               endeavor.id,
+               "endeavor-#{portfolio.strategy_decision_episode_id}-"
+             )
+
+      assert projection.released == []
     end
 
-    test "reuses the same contribution summary Mission Control reports" do
+    test "Mission Control reports the contribution the Endeavor projection computes" do
       %{scope: scope} = execution_fixture()
 
       assert %{contribution: contribution} = MissionControl.endeavors(scope)
       assert contribution == MissionControl.market_execution(scope).contribution
     end
 
-    test "released Endeavors leave the active view and keep their Decision Episode reachable" do
+    test "released Commitments leave the Endeavors and keep their Decision Episode evidence reachable" do
       %{scope: scope, commitment: commitment} = execution_fixture()
 
       commitment
@@ -328,7 +334,7 @@ defmodule SpaceTraders.MissionControlTest do
       assert Enum.all?(projection.groups, &(&1.endeavors == []))
 
       assert [%{state: :released, commitment_id: commitment_id, decision_episode_id: id}] =
-               projection.retired
+               projection.released
 
       assert commitment_id == commitment.id
       assert Repo.get!(StrategyDecisionEpisode, id).id == id
