@@ -508,6 +508,7 @@ defmodule Mix.Tasks.SpaceTraders.Gen.Operations do
   defp reconciliation_evidence("supply-construction"), do: ["Construction state", "Ship Cargo"]
   defp reconciliation_evidence("purchase-ship"), do: ["owned Fleet", "Agent credits"]
   defp reconciliation_evidence("scrap-ship"), do: ["owned Fleet", "Agent credits"]
+  defp reconciliation_evidence("jump-ship"), do: ["Ship state", "Agent credits"]
 
   defp reconciliation_evidence(id)
        when id in ["purchase-cargo", "sell-cargo", "refuel-ship"],
@@ -534,6 +535,7 @@ defmodule Mix.Tasks.SpaceTraders.Gen.Operations do
   defp fence_dependencies("supply-construction", _owner), do: [:construction, :ship]
   defp fence_dependencies("purchase-ship", _owner), do: [:owned_fleet, :agent_credits]
   defp fence_dependencies("scrap-ship", _owner), do: [:owned_fleet, :agent_credits]
+  defp fence_dependencies("jump-ship", _owner), do: [:ship, :agent_credits]
 
   defp fence_dependencies(id, _owner)
        when id in ["purchase-cargo", "sell-cargo", "refuel-ship"],
