@@ -68,7 +68,14 @@ defmodule SpaceTradersWeb.WorldLive do
 
         <section :for={group <- @groups} class="space-y-4" aria-label={"#{group.system} Atlas"}>
           <header class="flex flex-wrap items-baseline gap-x-3 gap-y-1 border-b border-base-300 pb-3">
-            <h2 class="text-xl font-semibold">{group.system}</h2>
+            <h2 class="text-xl font-semibold">
+              <.link
+                navigate={~p"/world/systems/#{group.system}?agent=#{group.agent.id}"}
+                class="link link-primary"
+              >
+                {group.system}
+              </.link>
+            </h2>
             <p class="text-sm opacity-70">
               {group.agent.symbol} · {length(group.waypoints)} known waypoints
             </p>
@@ -83,21 +90,28 @@ defmodule SpaceTradersWeb.WorldLive do
             class="grid gap-6 lg:grid-cols-[minmax(12rem,1fr)_minmax(0,2fr)]"
           >
             <nav aria-label={"#{group.system} known Waypoints"} class="flex flex-col gap-1">
-              <button
-                :for={waypoint <- group.waypoints}
-                id={"world-waypoint-#{waypoint.symbol}"}
-                phx-click="select"
-                phx-value-agent={group.agent.id}
-                phx-value-symbol={waypoint.symbol}
-                aria-pressed={@selected == {group.agent.id, waypoint.symbol}}
-                class={[
-                  "rounded-lg px-3 py-2 text-left focus-visible:outline-2 focus-visible:outline-primary",
-                  @selected == {group.agent.id, waypoint.symbol} && "bg-base-200 font-semibold"
-                ]}
-              >
-                <span class="block">{waypoint.symbol}</span>
-                <span class="text-xs opacity-70">Known waypoint</span>
-              </button>
+              <div :for={waypoint <- group.waypoints} class="flex items-center gap-1">
+                <button
+                  id={"world-waypoint-#{waypoint.symbol}"}
+                  phx-click="select"
+                  phx-value-agent={group.agent.id}
+                  phx-value-symbol={waypoint.symbol}
+                  aria-pressed={@selected == {group.agent.id, waypoint.symbol}}
+                  class={[
+                    "flex-1 rounded-lg px-3 py-2 text-left focus-visible:outline-2 focus-visible:outline-primary",
+                    @selected == {group.agent.id, waypoint.symbol} && "bg-base-200 font-semibold"
+                  ]}
+                >
+                  <span class="block">{waypoint.symbol}</span>
+                  <span class="text-xs opacity-70">Known waypoint</span>
+                </button>
+                <.link
+                  navigate={
+                    ~p"/world/systems/#{group.system}/waypoints/#{waypoint.symbol}?agent=#{group.agent.id}"
+                  }
+                  class="btn btn-ghost btn-sm"
+                >Open page</.link>
+              </div>
             </nav>
 
             <article
@@ -120,14 +134,39 @@ defmodule SpaceTradersWeb.WorldLive do
                   <.fact label="Chart" fact={waypoint.facts["chart"]} />
                 </section>
                 <section aria-label="Market intelligence" class="space-y-2">
-                  <h4 class="border-b border-base-300 pb-2 font-semibold">Market</h4>
+                  <h4 class="border-b border-base-300 pb-2 font-semibold">
+                    <.link
+                      navigate={
+                        ~p"/world/systems/#{group.system}/waypoints/#{waypoint.symbol}/market?agent=#{group.agent.id}"
+                      }
+                      class="link link-primary"
+                    >Market</.link>
+                  </h4>
                   <.fact label="Exports" fact={waypoint.market.facts["exports"]} />
                   <.fact label="Live Listing" fact={waypoint.market.facts["trade_goods"]} />
                 </section>
                 <section aria-label="Shipyard intelligence" class="space-y-2">
-                  <h4 class="border-b border-base-300 pb-2 font-semibold">Shipyard</h4>
+                  <h4 class="border-b border-base-300 pb-2 font-semibold">
+                    <.link
+                      navigate={
+                        ~p"/world/systems/#{group.system}/waypoints/#{waypoint.symbol}/shipyard?agent=#{group.agent.id}"
+                      }
+                      class="link link-primary"
+                    >Shipyard</.link>
+                  </h4>
                   <.fact label="Ship types" fact={waypoint.shipyard.facts["ship_types"]} />
                   <.fact label="Available Ships" fact={waypoint.shipyard.facts["ships"]} />
+                </section>
+                <section aria-label="Construction intelligence" class="space-y-2">
+                  <h4 class="border-b border-base-300 pb-2 font-semibold">
+                    <.link
+                      navigate={
+                        ~p"/world/systems/#{group.system}/waypoints/#{waypoint.symbol}/construction?agent=#{group.agent.id}"
+                      }
+                      class="link link-primary"
+                    >Construction</.link>
+                  </h4>
+                  <.fact label="Complete" fact={waypoint.construction.facts["complete"]} />
                 </section>
               </div>
             </article>

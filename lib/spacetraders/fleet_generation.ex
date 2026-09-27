@@ -202,7 +202,9 @@ defmodule SpaceTraders.FleetGeneration do
                   revision,
                   index,
                   evaluation,
-                  Keyword.put(opts, :notify?, false)
+                  opts
+                  |> Keyword.put(:notify?, false)
+                  |> Keyword.put(:entity_ref, condition_entity_ref(evidence))
                 )
 
               updated
@@ -227,6 +229,27 @@ defmodule SpaceTraders.FleetGeneration do
 
   def record_objective_progress(_scope, _generation_id, _index, _facts, _opts),
     do: {:error, :invalid_objective_progress}
+
+  defp condition_entity_ref(%Observation{subject: subject}) when is_binary(subject) do
+    case String.split(subject, ":", parts: 2) do
+      [type, _rest]
+      when type in [
+             "system",
+             "waypoint",
+             "market",
+             "shipyard",
+             "construction",
+             "ship",
+             "contract"
+           ] ->
+        subject
+
+      _ ->
+        nil
+    end
+  end
+
+  defp condition_entity_ref(_evidence), do: nil
 
   @doc "Persists complete, evidence-bound Objective evaluations carried by ranked plans."
   def record_objective_evaluations(scope, revision, plans, opts \\ [])

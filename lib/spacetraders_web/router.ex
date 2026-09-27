@@ -55,6 +55,13 @@ defmodule SpaceTradersWeb.Router do
       live "/activity", ActivityLive, :index
       live "/generations", GenerationsLive, :index
       live "/world", WorldLive, :index
+      live "/world/systems/:system", EntityLive, :system
+      live "/world/systems/:system/waypoints/:waypoint", EntityLive, :waypoint
+      live "/world/systems/:system/waypoints/:waypoint/market", EntityLive, :market
+      live "/world/systems/:system/waypoints/:waypoint/shipyard", EntityLive, :shipyard
+      live "/world/systems/:system/waypoints/:waypoint/construction", EntityLive, :construction
+      live "/contracts/:contract_id", EntityLive, :contract
+      live "/ships/:ship_symbol", EntityLive, :ship
       live "/intervention", InterventionLive, :index
 
       live "/strategy", StrategyLive, :show

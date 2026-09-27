@@ -269,6 +269,7 @@ defmodule SpaceTraders.MissionControl do
           type: condition.kind,
           at: condition.inserted_at,
           summary: condition.summary,
+          entity_ref: condition.entity_ref,
           detail: if(condition.resolved_at, do: "Resolved", else: "Still unresolved")
         }
       end)

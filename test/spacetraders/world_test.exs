@@ -96,4 +96,25 @@ defmodule SpaceTraders.WorldTest do
     assert Market.from_json(%{"symbol" => "X1-A1"}).trade_goods == nil
     assert Market.from_json(%{"symbol" => "X1-A1", "tradeGoods" => []}).trade_goods == []
   end
+
+  test "unavailable Construction evidence does not establish a Construction project" do
+    agent =
+      Repo.insert!(%AgentRecord{
+        symbol: "CONSTRUCTION-#{System.unique_integer([:positive])}",
+        faction: "COSMIC",
+        headquarters: "X1-A1"
+      })
+
+    assert {:ok, _} =
+             Intelligence.mark_unavailable(agent, :construction, "X1", "X1-A1", [:complete],
+               source: "get_construction",
+               observed_at: ~U[2030-01-01 12:00:00Z]
+             )
+
+    construction =
+      World.intelligence(agent, :construction, "X1", "X1-A1", ~U[2030-01-01 12:00:01Z], 300)
+
+    refute construction.known_existence?
+    assert construction.facts["complete"].state == "known_unavailable"
+  end
 end

@@ -10,7 +10,15 @@ defmodule SpaceTraders.OperatorConditions do
   @doc "Records an idempotent condition; resolution preserves the past occurrence."
   def raise(%Scope{operator: %{id: operator_id}}, key, kind, summary, opts \\ [])
       when is_binary(key) and kind in [:attention, :intervention] and is_binary(summary) do
-    attrs = %{operator_id: operator_id, key: key, kind: kind, summary: summary}
+    entity_ref = Keyword.get(opts, :entity_ref)
+
+    attrs = %{
+      operator_id: operator_id,
+      key: key,
+      kind: kind,
+      summary: summary,
+      entity_ref: entity_ref
+    }
 
     result =
       Repo.transaction(fn ->
@@ -27,7 +35,7 @@ defmodule SpaceTraders.OperatorConditions do
           nil ->
             {%Condition{} |> Condition.changeset(attrs) |> Repo.insert!(), true}
 
-          %{kind: ^kind, summary: ^summary} = condition ->
+          %{kind: ^kind, summary: ^summary, entity_ref: ^entity_ref} = condition ->
             {condition, false}
 
           condition ->

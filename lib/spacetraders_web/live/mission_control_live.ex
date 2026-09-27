@@ -4,6 +4,7 @@ defmodule SpaceTradersWeb.MissionControlLive do
   use SpaceTradersWeb, :live_view
 
   alias SpaceTraders.{MissionControl, OperatorConditions}
+  alias SpaceTradersWeb.EntityReference
 
   @impl true
   def mount(_params, _session, socket) do
@@ -124,6 +125,11 @@ defmodule SpaceTradersWeb.MissionControlLive do
             <li :for={condition <- @projection.conditions} class="border-t border-base-300 pt-3">
               <strong>{if condition.kind == :intervention, do: "Intervention", else: "Attention"}</strong>
               <p>{condition.summary}</p>
+              <.link
+                :if={EntityReference.path(condition.entity_ref)}
+                navigate={EntityReference.path(condition.entity_ref)}
+                class="link link-primary mt-1 inline-block"
+              >{EntityReference.label(condition.entity_ref)}</.link>
               <span :if={condition.acknowledged_at} class="text-sm opacity-70">Acknowledged · unresolved</span>
               <button
                 :if={!condition.acknowledged_at}

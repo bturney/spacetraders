@@ -17,24 +17,32 @@ defmodule SpaceTraders.World do
         :shipyard,
         intelligence(agent, :shipyard, system, symbol, as_of, freshness_seconds)
       )
+      |> Map.put(
+        :construction,
+        intelligence(agent, :construction, system, symbol, as_of, freshness_seconds)
+      )
     end)
   end
 
   def intelligence(%AgentRecord{} = agent, type, system, symbol, as_of, freshness_seconds)
-      when type in [:waypoint, :market, :shipyard] and is_binary(system) and
+      when type in [:waypoint, :market, :shipyard, :construction] and is_binary(system) and
              is_binary(symbol) and is_struct(as_of, DateTime) and
              is_integer(freshness_seconds) and freshness_seconds >= 0 do
     facts = Intelligence.subject(agent, type, system, symbol)
 
     %{
       subject: {type, system, symbol},
-      known_existence?: known_existence?(facts),
+      known_existence?: known_existence?(type, facts),
       facts:
         Map.new(facts, fn {field, fact} -> {field, project(fact, as_of, freshness_seconds)} end)
     }
   end
 
-  defp known_existence?(facts) do
+  defp known_existence?(:construction, facts) do
+    Enum.any?(facts, fn {_field, fact} -> fact.state == "known" end)
+  end
+
+  defp known_existence?(_type, facts) do
     case facts["symbol"] do
       %{state: "known", value: symbol} when is_binary(symbol) and symbol != "" -> true
       _ -> false

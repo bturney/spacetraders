@@ -57,7 +57,13 @@ defmodule SpaceTradersWeb.OperationsLiveTest do
       objective_index: 0,
       claims: ["SHIP-1"],
       reservations: %{credits: 200},
-      pledges: [],
+      pledges: [
+        %{
+          outcome: {:contract, "CONTRACT-1", "X1-A1", "IRON"},
+          amount: 1,
+          backing: {:claim, "SHIP-1"}
+        }
+      ],
       dependencies: [],
       expected_value: 100,
       unwind_cost: 0
@@ -78,13 +84,15 @@ defmodule SpaceTradersWeb.OperationsLiveTest do
         calibration_version: "market-v1"
       })
 
-    {:ok, _view, html} = live(conn, ~p"/operations")
+    {:ok, view, html} = live(conn, ~p"/operations")
 
     assert html =~ "Grow credits"
     assert html =~ "SHIP-1"
     assert html =~ "credits: 200"
     assert html =~ "Active"
     assert html =~ "Decision Episode"
+    assert has_element?(view, "a[href='/ships/SHIP-1']", "SHIP-1")
+    assert has_element?(view, "a[href='/contracts/CONTRACT-1']", "Contract CONTRACT-1")
 
     assert html =~
              "Selected as the highest-ranked feasible contribution at its Strategic Priority."

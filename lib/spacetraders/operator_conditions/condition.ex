@@ -8,6 +8,7 @@ defmodule SpaceTraders.OperatorConditions.Condition do
     field :key, :string
     field :kind, Ecto.Enum, values: [:attention, :intervention]
     field :summary, :string
+    field :entity_ref, :string
     field :acknowledged_at, :utc_datetime_usec
     field :resolved_at, :utc_datetime_usec
 
@@ -18,7 +19,15 @@ defmodule SpaceTraders.OperatorConditions.Condition do
 
   def changeset(condition, attrs) do
     condition
-    |> cast(attrs, [:operator_id, :key, :kind, :summary, :acknowledged_at, :resolved_at])
+    |> cast(attrs, [
+      :operator_id,
+      :key,
+      :kind,
+      :summary,
+      :entity_ref,
+      :acknowledged_at,
+      :resolved_at
+    ])
     |> validate_required([:operator_id, :key, :kind, :summary])
     |> unique_constraint([:operator_id, :key], name: :mission_conditions_unresolved_key_index)
   end
