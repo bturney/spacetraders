@@ -10,6 +10,8 @@ defmodule SpaceTraders.MissionControl do
 
   alias SpaceTraders.Agent.Scope
   alias SpaceTraders.Agent.Agent, as: AgentRecord
+  alias SpaceTraders.FleetAllocation.Commitment
+  alias SpaceTraders.FleetAllocation.Portfolio
   alias SpaceTraders.Fleet.Activity
   alias SpaceTraders.FleetAllocation.StrategyDecisionEpisode
   alias SpaceTraders.FleetStrategy.Revision
@@ -37,6 +39,140 @@ defmodule SpaceTraders.MissionControl do
     |> Agent.list_agents()
     |> Enum.map(&without_agent_credentials/1)
   end
+
+  @doc """
+  Returns Objective-grouped Endeavors for the signed-in Operator's current
+  Fleet.
+
+  An Endeavor is one active root Fleet Commitment of the current published
+  portfolio, presented under the Strategic Objective it serves. The projection
+  pairs each Strategic Objective with the Commitments whose candidate index
+  belongs to that objective so Operations and Mission Control read the same
+  durable records. Superseded or unwound Commitments leave the Endeavors
+  grouping; they are retained under `:released` as Commitment evidence records
+  carrying their Decision Episode identity, so outcome evidence stays
+  reachable by identity.
+  """
+  def endeavors(%Scope{} = scope), do: endeavors(scope, FleetAllocation.current_portfolio(scope))
+
+  def endeavors(%Scope{} = scope, nil) do
+    %{
+      strategy: strategy(scope),
+      groups: [],
+      released: [],
+      contribution: %{claims: [], commitment_count: 0, expected_value: 0}
+    }
+  end
+
+  def endeavors(%Scope{} = scope, %Portfolio{} = portfolio) do
+    objectives =
+      case strategy(scope).active_revision do
+        nil -> []
+        revision -> Map.get(revision.document, "objectives", [])
+      end
+
+    commitments = Enum.sort_by(Repo.all(commitment_query(portfolio.id)), & &1.id)
+    {active, released} = Enum.split_with(commitments, &(&1.unwind_state == :not_required))
+
+    groups =
+      objectives
+      |> Enum.with_index()
+      |> Enum.map(fn {objective, index} ->
+        %{
+          priority: index + 1,
+          objective: objective,
+          endeavors: Enum.map(filter_index(active, index), &endeavor(portfolio, &1, :active))
+        }
+      end)
+
+    %{
+      strategy: strategy(scope),
+      groups: groups,
+      released: Enum.map(released, &endeavor_evidence(portfolio, &1)),
+      contribution: contribution(portfolio)
+    }
+  end
+
+  defp commitment_query(portfolio_id) do
+    from c in Commitment,
+      where: c.fleet_commitment_portfolio_id == ^portfolio_id,
+      order_by: c.id
+  end
+
+  defp filter_index(commitments, index) do
+    Enum.filter(commitments, &(&1.objective_index == index))
+  end
+
+  defp episode_id(portfolio, %Commitment{} = commitment) do
+    commitment.replan_decision_episode_id || portfolio.strategy_decision_episode_id
+  end
+
+  defp endeavor(portfolio, %Commitment{} = commitment, state) do
+    %{
+      id: "endeavor-#{episode_id(portfolio, commitment)}-#{commitment.candidate_id}",
+      candidate_id: commitment.candidate_id,
+      commitment_id: commitment.id,
+      decision_episode_id: episode_id(portfolio, commitment),
+      state: state,
+      outcome: endeavor_outcome(commitment),
+      forecast: commitment.expected_value,
+      claims: commitment.claims,
+      reservations: commitment.reservations,
+      pledges: commitment.pledges,
+      dependencies: Enum.map(commitment.dependencies, &dependency_details/1),
+      reason: commitment.decisive_reason
+    }
+  end
+
+  defp endeavor_evidence(portfolio, %Commitment{} = commitment) do
+    %{
+      candidate_id: commitment.candidate_id,
+      commitment_id: commitment.id,
+      decision_episode_id: episode_id(portfolio, commitment),
+      state: :released,
+      outcome: endeavor_outcome(commitment),
+      reason: commitment.decisive_reason
+    }
+  end
+
+  defp endeavor_outcome(commitment) do
+    case commitment.pledges do
+      [%{"outcome" => ["contract", _contract_id, waypoint, trade_symbol]} | _] ->
+        "Deliver #{trade_symbol} to #{waypoint} under the Contract"
+
+      [%{"outcome" => ["construction", waypoint, trade_symbol]} | _] ->
+        "Supply #{trade_symbol} to the Construction at #{waypoint}"
+
+      [%{"outcome" => ["cargo_transfer", source_ship, target_ship, trade_symbol]} | _] ->
+        "Transfer #{trade_symbol} from #{source_ship} to #{target_ship}"
+
+      [%{"outcome" => ["strategic_objective", _index]} | _] ->
+        "Pursue this objective's outcome"
+
+      [%{"outcome" => [_ | _], "amount" => amount} | _] ->
+        "Promise #{amount} toward the declared outcome"
+
+      _ ->
+        "Support this objective without a recorded outcome pledge"
+    end
+  end
+
+  defp dependency_details(%{
+         "kind" => "acquisition",
+         "candidate_id" => candidate_id,
+         "amount" => amount
+       }),
+       do: "Hardware prerequisites: #{amount} units from #{candidate_id}"
+
+  defp dependency_details(%{"kind" => "acquisition", "id" => id}),
+    do: "Hardware prerequisites: acquisition #{id}"
+
+  defp dependency_details(%{"subject" => subject} = dependency) do
+    until = dependency["valid_until"]
+    "Evidence at #{subject}" <> if(until, do: " (valid until #{until})", else: "")
+  end
+
+  defp dependency_details(_), do: "Prerequisite"
 
   @doc "Returns the dashboard projections for the signed-in Operator's Agents."
   def dashboard(%Scope{} = scope), do: dashboard(scope, agents(scope))
@@ -418,7 +554,7 @@ defmodule SpaceTraders.MissionControl do
                 realized_sale_value: nil
               }
             ),
-          contribution: contribution(portfolio),
+          contribution: endeavors(scope, portfolio).contribution,
           limitation: limitation(portfolio),
           attention: []
         }
