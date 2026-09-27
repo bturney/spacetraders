@@ -8,6 +8,7 @@ defmodule SpaceTraders.FleetAllocation.Reconciler do
   alias SpaceTraders.API.ShadowAdmission
   alias SpaceTraders.Agent.Scope
   alias SpaceTraders.Agent.Agent, as: AgentRecord
+  alias SpaceTraders.Fleet
   alias SpaceTraders.FleetExecution
   alias SpaceTraders.FleetContracts
   alias SpaceTraders.FleetConstruction
@@ -19,7 +20,7 @@ defmodule SpaceTraders.FleetAllocation.Reconciler do
   alias SpaceTraders.FleetStrategy.Revision
   alias SpaceTraders.Repo
 
-  @contract_refresh_ms 60_000
+  @refresh_ms 60_000
 
   def start_link(opts \\ []), do: GenServer.start_link(__MODULE__, opts, name: __MODULE__)
 
@@ -29,7 +30,7 @@ defmodule SpaceTraders.FleetAllocation.Reconciler do
     Phoenix.PubSub.subscribe(SpaceTraders.PubSub, "fleet_intelligence_evidence")
     Phoenix.PubSub.subscribe(SpaceTraders.PubSub, "fleet_resource_evidence")
     send(self(), :reconcile_intelligence_on_boot)
-    Process.send_after(self(), :reconcile_contracts, @contract_refresh_ms)
+    Process.send_after(self(), :reconcile_durable_work, @refresh_ms)
     {:ok, %{}}
   end
 
@@ -93,23 +94,46 @@ defmodule SpaceTraders.FleetAllocation.Reconciler do
     {:noreply, state}
   end
 
-  def handle_info(:reconcile_contracts, state) do
-    Generation
-    |> where([generation], is_nil(generation.fenced_at) and is_nil(generation.retired_at))
-    |> select([generation], generation.agent_id)
-    |> Repo.all()
-    |> Enum.each(fn agent_id ->
-      with_context(agent_id, fn scope, agent, revision ->
-        FleetContracts.reconcile(scope, agent, revision)
-        FleetConstruction.reconcile(scope, agent, revision)
-      end)
-    end)
-
-    Process.send_after(self(), :reconcile_contracts, @contract_refresh_ms)
+  def handle_info(:reconcile_durable_work, state) do
+    reconcile_durable_work()
+    Process.send_after(self(), :reconcile_durable_work, @refresh_ms)
     {:noreply, state}
   end
 
   def handle_info(_message, state), do: {:noreply, state}
+
+  @doc """
+  Reconciles durable, due work for every active Fleet Generation.
+
+  This is the recurring durable scan. It reads durable state only: whether a
+  Market Intelligence refresh is due is derived from the age of retained Market
+  evidence, so the process timer that calls it is a disposable wakeup rather
+  than a correctness dependency. Contracts and Construction have always been
+  reconciled here; Market Intelligence is included so a Generation whose Market
+  evidence has aged out schedules a fresh observation and re-evaluates its
+  Strategy instead of sitting idle until the process restarts.
+  """
+  def reconcile_durable_work(capacity \\ ShadowAdmission.snapshot()) do
+    Generation
+    |> where([generation], is_nil(generation.fenced_at) and is_nil(generation.retired_at))
+    |> select([generation], generation.agent_id)
+    |> Repo.all()
+    |> Enum.each(&reconcile_generation(&1, capacity))
+  end
+
+  defp reconcile_generation(agent_id, capacity) do
+    with_context(agent_id, fn scope, agent, revision ->
+      reconcile_due_market_intelligence(scope, agent, revision, capacity)
+      FleetContracts.reconcile(scope, agent, revision)
+      FleetConstruction.reconcile(scope, agent, revision)
+    end)
+  end
+
+  defp reconcile_due_market_intelligence(scope, agent, revision, capacity) do
+    with {:ok, system} <- Fleet.system_from_headquarters(agent.headquarters) do
+      FleetIntelligence.reconcile(scope, agent, revision, system, capacity)
+    end
+  end
 
   defp reconcile(agent_id, system_symbol) do
     with_context(agent_id, fn scope, agent, revision ->
