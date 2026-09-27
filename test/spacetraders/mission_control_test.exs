@@ -223,6 +223,22 @@ defmodule SpaceTraders.MissionControlTest do
       assert report.contribution.commitment_count == 1
     end
 
+    test "a neutral limitation is distinct from Attention" do
+      %{scope: scope, commitment: commitment} = execution_fixture()
+
+      commitment
+      |> Ecto.Changeset.change(unwind_state: :released)
+      |> Repo.update!()
+
+      report = MissionControl.market_execution(scope)
+
+      assert report.limitation ==
+               "No eligible Fleet Commitment is active for this Fleet Generation."
+
+      assert report.attention == []
+      assert SpaceTraders.OperatorConditions.unresolved(scope) == []
+    end
+
     test "reports realized net economics from completed buy and sell Intents" do
       %{scope: scope, commitment: commitment} = execution_fixture()
       ship_id = Repo.get_by!(SpaceTraders.Fleet.Ship, symbol: "SHIP-1").id

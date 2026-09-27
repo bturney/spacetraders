@@ -347,6 +347,7 @@ defmodule SpaceTradersWeb.MissionControlLiveTest do
     {:ok, view, html} = live(conn, ~p"/activity")
     assert html =~ "Decision"
     assert html =~ "250 credits"
+    assert html =~ "retained evidence references"
     assert html =~ "Fleet acquired a Ship"
     assert html =~ "One-off navigation stopped"
     assert html =~ "Fleet selected a new commitment portfolio"
