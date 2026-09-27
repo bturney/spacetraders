@@ -2,11 +2,16 @@ defmodule SpaceTraders.MissionControlTest do
   use SpaceTraders.DataCase
 
   import SpaceTraders.AgentFixtures
+  import SpaceTraders.EvidenceFixtures
   import SpaceTraders.ShipBody
 
   alias SpaceTraders.Agent.Scope
-  alias SpaceTraders.MissionControl
+  alias SpaceTraders.API.Model.{Market, Waypoint}
+  alias SpaceTraders.FleetAllocation.Commitment
   alias SpaceTraders.FleetAllocation.StrategyDecisionEpisode
+  alias SpaceTraders.FleetStrategy
+  alias SpaceTraders.Intelligence
+  alias SpaceTraders.MissionControl
 
   describe "dashboard/1" do
     test "reads only Agents owned by the scoped Operator" do
@@ -373,6 +378,305 @@ defmodule SpaceTraders.MissionControlTest do
     assert repeated.acknowledged_at
     assert [%{id: id}] = SpaceTraders.OperatorConditions.unresolved(owner_scope)
     assert id == condition.id
+  end
+
+  describe "strategy/1" do
+    test "compares a draft with the active revision and projects governed planning consequences" do
+      operator = operator_fixture()
+      scope = Scope.for_operator(operator)
+      agent = agent_fixture(operator, %{headquarters: "X1-A1"})
+
+      active = %{
+        "objectives" => [
+          %{
+            "objective" => "Grow credits",
+            "kind" => "continuous",
+            "evaluation" => "Measure growth",
+            "scope" => "recurring"
+          }
+        ],
+        "hard_constraints" => ["Keep at least 50,000 credits available"],
+        "preferences" => ["Prefer lower-risk routes"],
+        "consequences" => "The Fleet may spend credits above the floor."
+      }
+
+      draft = %{
+        "objectives" => [
+          %{
+            "objective" => "Chart waypoints",
+            "kind" => "attain",
+            "evaluation" => "Increase coverage",
+            "scope" => "fleet_generation"
+          },
+          %{
+            "objective" => "Grow credits",
+            "kind" => "continuous",
+            "evaluation" => "Measure growth",
+            "scope" => "recurring"
+          }
+        ],
+        "hard_constraints" => ["Keep at least 75,000 credits available"],
+        "preferences" => ["Prefer lower-risk routes"],
+        "consequences" => "The Fleet may delay growth while charting."
+      }
+
+      assert {:ok, _draft} = FleetStrategy.save_draft(scope, active, 0)
+      assert {:ok, revision} = FleetStrategy.activate(scope, 1)
+      assert {:ok, _draft} = FleetStrategy.save_draft(scope, draft, 2)
+
+      observe_market_pair(agent)
+
+      projection = MissionControl.strategy_review(scope)
+
+      assert projection.draft == draft
+      assert projection.draft_comparison.changed?
+
+      assert [%{"objective" => "Chart waypoints"}] = projection.draft_comparison.objectives.added
+
+      assert projection.draft_comparison.hard_constraints.added == [
+               "Keep at least 75,000 credits available"
+             ]
+
+      assert projection.draft_comparison.hard_constraints.removed == [
+               "Keep at least 50,000 credits available"
+             ]
+
+      assert [
+               %{
+                 objective_index: 0,
+                 planning: %{
+                   candidate_contributions: [],
+                   limitations: [%{reason: :unsupported_market_objective}]
+                 }
+               },
+               %{
+                 objective_index: 1,
+                 planning: %{candidate_contributions: [candidate | _]}
+               }
+             ] = projection.draft_consequences
+
+      assert Enum.map(projection.draft_consequences, & &1.agent.id) == [agent.id, agent.id]
+      assert candidate.strategy_revision_id != revision.id
+    end
+
+    test "shadow-evaluates the draft's likely Fleet Commitments under governed availability" do
+      operator = operator_fixture()
+      scope = Scope.for_operator(operator)
+      agent = agent_fixture(operator, %{headquarters: "X1-A1"})
+
+      document = %{
+        "objectives" => [
+          %{
+            "objective" => "Grow credits",
+            "kind" => "continuous",
+            "evaluation" => "Measure growth",
+            "scope" => "recurring"
+          }
+        ],
+        "hard_constraints" => ["Keep at least 50,000 credits available"],
+        "preferences" => ["Prefer lower-risk routes"],
+        "consequences" => "The Fleet may spend credits above the floor."
+      }
+
+      assert {:ok, _draft} = FleetStrategy.save_draft(scope, document, 0)
+      assert {:ok, _revision} = FleetStrategy.activate(scope, 1)
+
+      assert {:ok, _draft} =
+               FleetStrategy.save_draft(
+                 scope,
+                 Map.put(document, "consequences", "Growth may slow."),
+                 2
+               )
+
+      observe_market_pair(agent)
+      governed_market_observation(agent, "X1", "X1-A1", 10, 9)
+      governed_market_observation(agent, "X1", "X1-A2", 25, 20)
+
+      availability = %{
+        agent.id => %{
+          as_of: DateTime.utc_now(),
+          claims: [
+            %{
+              resource: "SHIP-1",
+              roles: [:market_trader],
+              capabilities: %{cargo_transport: 40, market_access: ["X1-A1", "X1-A2"]}
+            }
+          ],
+          reservations: %{credits: 100_000}
+        }
+      }
+
+      projection =
+        MissionControl.strategy_review(scope, FleetStrategy.get(scope),
+          availability: availability
+        )
+
+      assert [
+               %{
+                 agent: %{id: agent_id},
+                 availability: :authoritative,
+                 active: %{expectations: %{commitment_count: 1, expected_value: 200}},
+                 draft: %{
+                   expectations: %{commitment_count: 1, expected_value: 200},
+                   commitments: [commitment],
+                   rejected: []
+                 }
+               }
+             ] = projection.draft_commitments
+
+      assert agent_id == agent.id
+      assert commitment.claims == ["SHIP-1"]
+      assert commitment.expected_value == 200
+      assert Repo.aggregate(Commitment, :count) == 0
+    end
+
+    test "states unknown availability instead of assuming zero capacity" do
+      operator = operator_fixture()
+      scope = Scope.for_operator(operator)
+      agent = agent_fixture(operator, %{headquarters: "X1-A1"})
+
+      assert {:ok, _draft} =
+               FleetStrategy.save_draft(
+                 scope,
+                 %{
+                   "objectives" => [%{"objective" => "Grow credits"}],
+                   "hard_constraints" => ["No scrap"],
+                   "preferences" => [],
+                   "consequences" => "Not yet specified"
+                 },
+                 0
+               )
+
+      projection =
+        MissionControl.strategy_review(scope, FleetStrategy.get(scope),
+          availability: %{agent.id => nil}
+        )
+
+      assert [%{availability: :unknown, active: nil, draft: nil}] = projection.draft_commitments
+    end
+
+    test "reports insufficient governed evidence rather than a zero commitment count" do
+      operator = operator_fixture()
+      scope = Scope.for_operator(operator)
+      agent = agent_fixture(operator, %{headquarters: "X1-A1"})
+
+      assert {:ok, _draft} =
+               FleetStrategy.save_draft(
+                 scope,
+                 %{
+                   "objectives" => [
+                     %{
+                       "objective" => "Grow credits",
+                       "kind" => "continuous",
+                       "evaluation" => "Measure growth",
+                       "scope" => "recurring"
+                     }
+                   ],
+                   "hard_constraints" => ["Keep at least 50,000 credits available"],
+                   "preferences" => [],
+                   "consequences" => "The Fleet may spend credits above the floor."
+                 },
+                 0
+               )
+
+      availability = %{
+        agent.id => %{
+          as_of: DateTime.utc_now(),
+          claims: [
+            %{
+              resource: "SHIP-1",
+              roles: [:market_trader],
+              capabilities: %{cargo_transport: 40, market_access: ["X1-A1", "X1-A2"]}
+            }
+          ],
+          reservations: %{credits: 100_000}
+        }
+      }
+
+      projection =
+        MissionControl.strategy_review(scope, FleetStrategy.get(scope),
+          availability: availability
+        )
+
+      assert [
+               %{
+                 availability: :authoritative,
+                 active: nil,
+                 draft: %{
+                   commitments: [],
+                   rejected: [],
+                   limitations: [%{reason: :insufficient_market_evidence}]
+                 }
+               }
+             ] = projection.draft_commitments
+    end
+
+    test "reports no draft comparison until an active revision exists" do
+      operator = operator_fixture()
+      scope = Scope.for_operator(operator)
+      _agent = agent_fixture(operator)
+
+      assert {:ok, _draft} =
+               FleetStrategy.save_draft(
+                 scope,
+                 %{
+                   "objectives" => [%{"objective" => "Grow credits"}],
+                   "hard_constraints" => ["No scrap"],
+                   "preferences" => [],
+                   "consequences" => "Not yet specified"
+                 },
+                 0
+               )
+
+      assert MissionControl.strategy(scope).draft_comparison == nil
+    end
+  end
+
+  defp observe_market_pair(agent) do
+    Enum.each(["X1-A1", "X1-A2"], &observe_waypoint(agent, &1))
+    observe_market(agent, "X1-A1", 10, 9)
+    observe_market(agent, "X1-A2", 25, 20)
+  end
+
+  defp observe_waypoint(agent, symbol) do
+    waypoint =
+      Waypoint.from_json(%{
+        "symbol" => symbol,
+        "systemSymbol" => "X1",
+        "type" => "PLANET",
+        "x" => 0,
+        "y" => 0,
+        "traits" => [%{"symbol" => "MARKETPLACE"}]
+      })
+
+    assert {:ok, _} = Intelligence.observe_waypoint(agent, waypoint, source: "get_waypoint")
+  end
+
+  defp observe_market(agent, waypoint, purchase_price, sell_price) do
+    market =
+      Market.from_json(%{
+        "symbol" => waypoint,
+        "exports" => [%{"symbol" => "IRON_ORE"}],
+        "imports" => [%{"symbol" => "IRON_ORE"}],
+        "exchange" => [],
+        "tradeGoods" => [
+          %{
+            "symbol" => "IRON_ORE",
+            "type" => "EXPORT",
+            "tradeVolume" => 20,
+            "supply" => "MODERATE",
+            "activity" => "STATIC",
+            "purchasePrice" => purchase_price,
+            "sellPrice" => sell_price
+          }
+        ]
+      })
+
+    assert {:ok, _} =
+             Intelligence.observe_market(agent, "X1", market,
+               source: "get_market",
+               observing_ship_symbol: "#{agent.symbol}-1"
+             )
   end
 
   defp execution_fixture do

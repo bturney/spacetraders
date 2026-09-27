@@ -146,6 +146,10 @@ _Avoid_: lock, assignment
 A Fleet Commitment's protected share of a fungible Fleet resource, such as credits, Cargo capacity, or time margin. It is bounded by amount and evidence-valid horizon and releases when its justification no longer holds.
 _Avoid_: budget (when referring to committed capacity), claim
 
+**Governed Availability**:
+The Claims and Reservations one Agent's Fleet can currently use, established from authoritative evidence rather than assumed. Fleet Allocation admits or rejects Candidate Contributions against it, and Strategy review shadow-evaluates a draft against it without publishing anything.
+_Avoid_: capacity (when referring to usable resources), inventory
+
 **Pledge**:
 A Fleet Commitment's promised quantity toward a divisible shared outcome, backed by sufficient claims, reservations, or explicit acquisition dependencies. Authoritative outcome progress, including progress caused outside the Fleet, reduces the remaining fulfillment rather than being treated as failure.
 _Avoid_: reservation, fixed quota

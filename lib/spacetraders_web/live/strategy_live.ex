@@ -9,9 +9,14 @@ defmodule SpaceTradersWeb.StrategyLive do
   def mount(_params, _session, socket) do
     operator_id = socket.assigns.current_scope.operator.id
 
-    if connected?(socket) do
-      Phoenix.PubSub.subscribe(SpaceTraders.PubSub, "fleet_strategy:#{operator_id}")
-    end
+    socket =
+      if connected?(socket) do
+        Phoenix.PubSub.subscribe(SpaceTraders.PubSub, "fleet_strategy:#{operator_id}")
+
+        assign(socket, availability: %{}, availability_ready?: false)
+      else
+        assign(socket, availability: %{}, availability_ready?: true)
+      end
 
     {:ok, assign_projection(socket)}
   end
@@ -118,119 +123,11 @@ defmodule SpaceTradersWeb.StrategyLive do
             </p>
           </div>
 
-          <article
+          <.market_planning_entry
             :for={entry <- @market_planning}
-            id={"market-planning-#{entry.agent.id}-#{entry.objective_index}"}
-            class="rounded-2xl border border-base-300 bg-base-100 p-5 shadow-sm"
-          >
-            <div class="flex flex-wrap items-start justify-between gap-2">
-              <div>
-                <p class="font-bold">{entry.objective["objective"]}</p>
-                <p class="text-sm opacity-70">{entry.agent.symbol}</p>
-              </div>
-              <span class="badge badge-ghost">Candidate only</span>
-            </div>
-
-            <div
-              :if={entry.planning.candidate_contributions != []}
-              class="mt-4 grid gap-3 lg:grid-cols-2"
-            >
-              <div
-                :for={candidate <- entry.planning.candidate_contributions}
-                id={"candidate-contribution-#{candidate.id}"}
-                class="rounded-xl border border-base-300 p-4"
-              >
-                <p class="font-semibold">
-                  {candidate.trade_symbol}: {candidate.source_waypoint} to {candidate.destination_waypoint}
-                </p>
-                <p class="mt-1 text-sm">
-                  Up to {candidate.expected_outcomes.maximum_credit_change} credits across {candidate.expected_outcomes.maximum_units} Cargo units
-                </p>
-                <dl class="mt-3 grid gap-3 text-xs sm:grid-cols-2">
-                  <div>
-                    <dt class="font-semibold">Uncertainty</dt>
-                    <dd class="opacity-70">
-                      Evidence age: {candidate.uncertainty.source_evidence_age_seconds}s / {candidate.uncertainty.destination_evidence_age_seconds}s. Fuel and travel time are not yet accounted for. Source supply {candidate.uncertainty.source_market_signal.supply ||
-                        "unknown"}; destination supply {candidate.uncertainty.destination_market_signal.supply ||
-                        "unknown"}.
-                    </dd>
-                  </div>
-                  <div>
-                    <dt class="font-semibold">Required role and capabilities</dt>
-                    <dd class="opacity-70">
-                      One Market trader; Cargo transport for {candidate.required_resources.cargo_capacity} units and Market access at both Waypoints.
-                    </dd>
-                  </div>
-                  <div>
-                    <dt class="font-semibold">Required resources</dt>
-                    <dd class="opacity-70">
-                      {candidate.required_resources.credits} credits of exposure, {candidate.required_resources.cargo_capacity} Cargo capacity, and {candidate.required_resources.ship_count} unassigned Ship.
-                    </dd>
-                  </div>
-                  <div>
-                    <dt class="font-semibold">Validity</dt>
-                    <dd class="opacity-70">
-                      Through {Calendar.strftime(
-                        candidate.validity.expires_at,
-                        "%Y-%m-%d %H:%M:%S UTC"
-                      )}; source price {candidate.validity.conditions
-                      |> Enum.at(0)
-                      |> Map.fetch!(:value)}, destination price {candidate.validity.conditions
-                      |> Enum.at(1)
-                      |> Map.fetch!(:value)}, positive spread required.
-                    </dd>
-                  </div>
-                  <div class="sm:col-span-2">
-                    <dt class="font-semibold">Evidence dependencies</dt>
-                    <dd class="opacity-70">
-                      {Enum.map_join(candidate.dependencies, "; ", fn dependency ->
-                        "#{dependency.subject} via #{dependency.source} at #{DateTime.to_iso8601(dependency.observed_at)}"
-                      end)}
-                    </dd>
-                  </div>
-                  <div class="sm:col-span-2">
-                    <dt class="font-semibold">Alternatives</dt>
-                    <dd class="opacity-70">
-                      {if candidate.alternatives == [],
-                        do: "No other positive-spread route in this snapshot.",
-                        else:
-                          Enum.map_join(candidate.alternatives, "; ", fn alternative ->
-                            "#{alternative.trade_symbol}: #{alternative.source_waypoint} to #{alternative.destination_waypoint}"
-                          end)}
-                    </dd>
-                  </div>
-                </dl>
-              </div>
-            </div>
-
-            <div
-              :if={entry.planning.candidate_contributions == []}
-              class="mt-4 rounded-xl border border-dashed border-base-300 p-4 text-sm"
-            >
-              <p class="font-semibold">No Market contribution is currently supported.</p>
-            </div>
-
-            <div
-              :if={entry.planning.limitations != []}
-              class="mt-4 rounded-xl border border-dashed border-base-300 p-4 text-sm"
-            >
-              <p class="font-semibold">Current limitations</p>
-              <ul class="mt-2 list-inside list-disc opacity-70">
-                <li :for={limitation <- entry.planning.limitations}>
-                  {planning_limitation(limitation.reason)}
-                </li>
-              </ul>
-            </div>
-
-            <div :if={entry.planning.observation_demands != []} class="mt-4 text-sm">
-              <p class="font-semibold">Observation Demands</p>
-              <ul class="mt-2 list-inside list-disc opacity-70">
-                <li :for={demand <- entry.planning.observation_demands}>
-                  {demand.subject}: {Enum.join(demand.required_facts, ", ")} within {demand.freshness_seconds}s freshness
-                </li>
-              </ul>
-            </div>
-          </article>
+            entry={entry}
+            id_prefix="market-planning"
+          />
         </section>
 
         <section class="space-y-4">
@@ -321,19 +218,145 @@ defmodule SpaceTradersWeb.StrategyLive do
           </div>
 
           <div :if={@projection.draft} class="mt-6 border-t border-base-300 pt-6">
-            <div :if={@projection.active_revision} class="mb-6 rounded-xl bg-base-200 p-4">
-              <h3 class="text-lg font-bold">Revision changes</h3>
-              <div class="mt-3 grid gap-5 lg:grid-cols-2">
-                <div>
-                  <p class="eyebrow">Current active</p>
-                  <.strategy_document document={@projection.active_revision.document} />
-                </div>
-                <div>
-                  <p class="eyebrow">Proposed draft</p>
-                  <.strategy_document document={@projection.draft} />
-                </div>
-              </div>
+            <div
+              :if={@projection.draft_comparison}
+              id="draft-revision-changes"
+              class="mb-6 rounded-xl bg-base-200 p-4"
+            >
+              <h3 class="text-lg font-bold">
+                Changes from active revision {@projection.active_revision.number}
+              </h3>
+              <p :if={!@projection.draft_comparison.changed?} class="mt-2 text-sm opacity-70">
+                This draft matches the active revision. Activating it would create an identical new revision.
+              </p>
+              <.revision_changes
+                :if={@projection.draft_comparison.changed?}
+                comparison={@projection.draft_comparison}
+              />
             </div>
+
+            <div
+              :if={is_nil(@projection.active_revision)}
+              id="draft-new-intent"
+              class="mb-6 rounded-xl bg-base-200 p-4"
+            >
+              <h3 class="text-lg font-bold">New standing intent</h3>
+              <p class="mt-2 text-sm opacity-70">
+                No active Fleet Strategy Revision exists, so nothing is being changed. Activating this draft establishes intent from scratch.
+              </p>
+            </div>
+
+            <section :if={@projection.draft} id="draft-consequences" class="mb-6 space-y-4">
+              <div>
+                <p class="eyebrow">Governed evidence</p>
+                <h3 class="text-lg font-bold">Likely consequences of this draft</h3>
+                <p class="mt-1 text-sm opacity-70">
+                  Candidate Contributions from deterministic Fleet Planning against current governed evidence. They inform the comparison; they are not Fleet Commitments and do not guarantee outcomes.
+                </p>
+                <p :if={@projection.active_revision} class="mt-2 text-sm font-semibold">
+                  Candidate Contributions under current evidence: active revision {candidate_contribution_count(
+                    @market_planning
+                  )}, draft {candidate_contribution_count(@projection.draft_consequences)}.
+                </p>
+              </div>
+              <p
+                :if={@projection.draft_consequences == []}
+                class="rounded-xl border border-dashed border-base-300 p-4 text-sm opacity-70"
+              >
+                No governed Market evidence is available for this Operator's Agents, so no likely consequences can be shown. Nothing is inferred.
+              </p>
+              <div
+                :if={@projection.draft_commitments != []}
+                id="draft-commitments"
+                class="space-y-4"
+              >
+                <div>
+                  <h4 class="text-lg font-bold">Likely Fleet Commitments</h4>
+                  <p class="mt-1 text-sm opacity-70">
+                    Shadow evaluation of Fleet Allocation against authoritative Ship and credit availability. It publishes no Claims and dispatches no gameplay; it informs and never guarantees.
+                  </p>
+                </div>
+                <article
+                  :for={evaluation <- @projection.draft_commitments}
+                  id={"draft-commitments-#{evaluation.agent.id}"}
+                  class="rounded-2xl border border-base-300 bg-base-100 p-5 shadow-sm"
+                >
+                  <p class="font-bold">{evaluation.agent.symbol}</p>
+
+                  <p
+                    :if={evaluation.availability == :unknown}
+                    class="mt-2 text-sm opacity-70"
+                  >
+                    Authoritative Ship and credit availability could not be established, so likely Fleet Commitments are unknown.
+                  </p>
+
+                  <div
+                    :if={evaluation.availability == :authoritative}
+                    class="mt-2 space-y-2 text-sm"
+                  >
+                    <p :if={evaluation.draft.error} class="opacity-70">
+                      Governed evidence is insufficient to evaluate likely Fleet Commitments.
+                    </p>
+
+                    <div :if={!evaluation.draft.error}>
+                      <p
+                        :if={
+                          evaluation.draft.commitments == [] and
+                            evaluation.draft.limitations != []
+                        }
+                        class="opacity-70"
+                      >
+                        No Fleet Commitment can be evaluated from current governed evidence.
+                      </p>
+                      <p
+                        :if={
+                          evaluation.draft.commitments == [] and
+                            evaluation.draft.limitations == []
+                        }
+                        class="opacity-70"
+                      >
+                        No Fleet Commitment is currently admissible.
+                      </p>
+                      <p :if={evaluation.draft.commitments != []}>
+                        Likely Fleet Commitments: {evaluation.draft.expectations.commitment_count} (expected value {format_credits(
+                          evaluation.draft.expectations.expected_value
+                        )} credits).
+                      </p>
+                      <p :if={evaluation.active && !evaluation.active.error}>
+                        Active revision: {evaluation.active.expectations.commitment_count} (expected value {format_credits(
+                          evaluation.active.expectations.expected_value
+                        )} credits).
+                      </p>
+                      <ul
+                        :if={evaluation.draft.commitments != []}
+                        class="mt-2 list-inside list-disc opacity-70"
+                      >
+                        <li :for={commitment <- evaluation.draft.commitments}>
+                          Claims {Enum.join(commitment.claims, ", ")} with expected value {format_credits(
+                            commitment.expected_value
+                          )} credits
+                        </li>
+                      </ul>
+                      <ul
+                        :if={evaluation.draft.rejected != []}
+                        class="mt-2 list-inside list-disc opacity-70"
+                      >
+                        <li :for={rejection <- evaluation.draft.rejected}>
+                          Rejected: {Enum.map_join(rejection.reasons, "; ", &rejection_reason/1)}
+                        </li>
+                      </ul>
+                    </div>
+                  </div>
+                </article>
+              </div>
+
+              <.market_planning_entry
+                :for={entry <- @projection.draft_consequences}
+                entry={entry}
+                id_prefix="draft-planning"
+              />
+            </section>
+
             <.strategy_document document={@projection.draft} />
             <div class="mt-6 flex flex-col-reverse gap-3 sm:flex-row sm:justify-end">
               <button id="discard-strategy-draft" phx-click="discard_draft" class="btn btn-ghost">Discard draft</button>
@@ -360,7 +383,7 @@ defmodule SpaceTradersWeb.StrategyLive do
         {:noreply,
          socket
          |> put_flash(:error, "Emergency Stop engaged. New gameplay mutations are suppressed.")
-         |> assign(:projection, with_presets(projection, socket))}
+         |> assign(:projection, review_projection(projection, socket))}
     end
   end
 
@@ -376,13 +399,13 @@ defmodule SpaceTradersWeb.StrategyLive do
            :info,
            "Authoritative state refreshed. Fresh planning must select an admissible plan before Emergency Stop clears."
          )
-         |> assign(:projection, with_presets(projection, socket))}
+         |> assign(:projection, review_projection(projection, socket))}
 
       {:error, :stale_emergency_stop} ->
         {:noreply,
          socket
          |> put_flash(:error, "Emergency Stop changed elsewhere. Review its current state.")
-         |> assign(:projection, MissionControl.strategy(socket.assigns.current_scope))}
+         |> assign(:projection, review_projection(nil, socket))}
 
       {:error, :authoritative_refresh_required} ->
         {:noreply,
@@ -405,7 +428,7 @@ defmodule SpaceTradersWeb.StrategyLive do
   def handle_event("select_preset", %{"id" => preset_id}, socket) do
     case FleetStrategy.select_preset(socket.assigns.current_scope, preset_id) do
       {:ok, projection} ->
-        {:noreply, assign_projection(socket, nil, with_presets(projection, socket))}
+        {:noreply, assign_projection(socket, nil, projection)}
 
       {:error, :draft_exists} ->
         {:noreply, put_flash(socket, :error, "Discard or activate the current draft first.")}
@@ -425,7 +448,7 @@ defmodule SpaceTradersWeb.StrategyLive do
              socket.assigns.projection.draft_version
            ) do
         {:ok, projection} ->
-          {:noreply, assign_projection(socket, params, with_presets(projection, socket))}
+          {:noreply, assign_projection(socket, params, projection)}
 
         {:error, :stale_draft} ->
           {:noreply, mark_draft_stale(socket, "The draft changed before this edit was saved.")}
@@ -442,7 +465,7 @@ defmodule SpaceTradersWeb.StrategyLive do
         {:noreply,
          socket
          |> put_flash(:info, "Draft discarded. Active intent is unchanged.")
-         |> assign_projection(nil, with_presets(projection, socket))}
+         |> assign_projection(nil, projection)}
 
       {:error, :stale_draft} ->
         {:noreply, mark_draft_stale(socket, "The draft changed before it could be discarded.")}
@@ -503,7 +526,8 @@ defmodule SpaceTradersWeb.StrategyLive do
   @impl true
   def handle_info({:fleet_strategy_updated, operator_id}, socket) do
     if socket.assigns.current_scope.operator.id == operator_id do
-      projection = MissionControl.strategy(socket.assigns.current_scope)
+      socket = maybe_load_availability(socket)
+      projection = review_projection(nil, socket)
 
       cond do
         projection.draft_version != socket.assigns.projection.draft_version ->
@@ -583,6 +607,190 @@ defmodule SpaceTradersWeb.StrategyLive do
     """
   end
 
+  attr :entry, :map, required: true
+  attr :id_prefix, :string, required: true
+
+  defp market_planning_entry(assigns) do
+    ~H"""
+    <article
+      id={"#{@id_prefix}-#{@entry.agent.id}-#{@entry.objective_index}"}
+      class="rounded-2xl border border-base-300 bg-base-100 p-5 shadow-sm"
+    >
+      <div class="flex flex-wrap items-start justify-between gap-2">
+        <div>
+          <p class="font-bold">{@entry.objective["objective"]}</p>
+          <p class="text-sm opacity-70">{@entry.agent.symbol}</p>
+        </div>
+        <span class="badge badge-ghost">Candidate only</span>
+      </div>
+
+      <div
+        :if={@entry.planning.candidate_contributions != []}
+        class="mt-4 grid gap-3 lg:grid-cols-2"
+      >
+        <div
+          :for={candidate <- @entry.planning.candidate_contributions}
+          id={"candidate-contribution-#{@id_prefix}-#{candidate.id}"}
+          class="rounded-xl border border-base-300 p-4"
+        >
+          <p class="font-semibold">
+            {candidate.trade_symbol}: {candidate.source_waypoint} to {candidate.destination_waypoint}
+          </p>
+          <p class="mt-1 text-sm">
+            Up to {candidate.expected_outcomes.maximum_credit_change} credits across {candidate.expected_outcomes.maximum_units} Cargo units
+          </p>
+          <dl class="mt-3 grid gap-3 text-xs sm:grid-cols-2">
+            <div>
+              <dt class="font-semibold">Uncertainty</dt>
+              <dd class="opacity-70">
+                Evidence age: {candidate.uncertainty.source_evidence_age_seconds}s / {candidate.uncertainty.destination_evidence_age_seconds}s. Fuel and travel time are not yet accounted for. Source supply {candidate.uncertainty.source_market_signal.supply ||
+                  "unknown"}; destination supply {candidate.uncertainty.destination_market_signal.supply ||
+                  "unknown"}.
+              </dd>
+            </div>
+            <div>
+              <dt class="font-semibold">Required role and capabilities</dt>
+              <dd class="opacity-70">
+                One Market trader; Cargo transport for {candidate.required_resources.cargo_capacity} units and Market access at both Waypoints.
+              </dd>
+            </div>
+            <div>
+              <dt class="font-semibold">Required resources</dt>
+              <dd class="opacity-70">
+                {candidate.required_resources.credits} credits of exposure, {candidate.required_resources.cargo_capacity} Cargo capacity, and {candidate.required_resources.ship_count} unassigned Ship.
+              </dd>
+            </div>
+            <div>
+              <dt class="font-semibold">Validity</dt>
+              <dd class="opacity-70">
+                Through {Calendar.strftime(
+                  candidate.validity.expires_at,
+                  "%Y-%m-%d %H:%M:%S UTC"
+                )}; source price {candidate.validity.conditions
+                |> Enum.at(0)
+                |> Map.fetch!(:value)}, destination price {candidate.validity.conditions
+                |> Enum.at(1)
+                |> Map.fetch!(:value)}, positive spread required.
+              </dd>
+            </div>
+            <div class="sm:col-span-2">
+              <dt class="font-semibold">Evidence dependencies</dt>
+              <dd class="opacity-70">
+                {Enum.map_join(candidate.dependencies, "; ", fn dependency ->
+                  "#{dependency.subject} via #{dependency.source} at #{DateTime.to_iso8601(dependency.observed_at)}"
+                end)}
+              </dd>
+            </div>
+            <div class="sm:col-span-2">
+              <dt class="font-semibold">Alternatives</dt>
+              <dd class="opacity-70">
+                {if candidate.alternatives == [],
+                  do: "No other positive-spread route in this snapshot.",
+                  else:
+                    Enum.map_join(candidate.alternatives, "; ", fn alternative ->
+                      "#{alternative.trade_symbol}: #{alternative.source_waypoint} to #{alternative.destination_waypoint}"
+                    end)}
+              </dd>
+            </div>
+          </dl>
+        </div>
+      </div>
+
+      <div
+        :if={@entry.planning.candidate_contributions == []}
+        class="mt-4 rounded-xl border border-dashed border-base-300 p-4 text-sm"
+      >
+        <p class="font-semibold">No Market contribution is currently supported.</p>
+      </div>
+
+      <div
+        :if={@entry.planning.limitations != []}
+        class="mt-4 rounded-xl border border-dashed border-base-300 p-4 text-sm"
+      >
+        <p class="font-semibold">Current limitations</p>
+        <ul class="mt-2 list-inside list-disc opacity-70">
+          <li :for={limitation <- @entry.planning.limitations}>
+            {planning_limitation(limitation.reason)}
+          </li>
+        </ul>
+      </div>
+
+      <div :if={@entry.planning.observation_demands != []} class="mt-4 text-sm">
+        <p class="font-semibold">Observation Demands</p>
+        <ul class="mt-2 list-inside list-disc opacity-70">
+          <li :for={demand <- @entry.planning.observation_demands}>
+            {demand.subject}: {Enum.join(demand.required_facts, ", ")} within {demand.freshness_seconds}s freshness
+          </li>
+        </ul>
+      </div>
+    </article>
+    """
+  end
+
+  attr :comparison, :map, required: true
+
+  defp revision_changes(assigns) do
+    ~H"""
+    <div class="mt-3 space-y-4 text-sm">
+      <div :if={@comparison.objectives.added != []}>
+        <h4 class="font-bold">Objectives added</h4>
+        <ul class="mt-1 list-inside list-disc opacity-70">
+          <li :for={objective <- @comparison.objectives.added}>{objective_name(objective)}</li>
+        </ul>
+      </div>
+
+      <div :if={@comparison.objectives.removed != []}>
+        <h4 class="font-bold">Objectives removed</h4>
+        <ul class="mt-1 list-inside list-disc opacity-70">
+          <li :for={objective <- @comparison.objectives.removed}>{objective_name(objective)}</li>
+        </ul>
+      </div>
+
+      <div :if={@comparison.objectives.changed != []}>
+        <h4 class="font-bold">Objectives changed</h4>
+        <ul class="mt-1 space-y-1">
+          <li :for={change <- @comparison.objectives.changed}>
+            <strong>{change.objective}</strong>
+            <span class="block pl-5 opacity-70">
+              {Enum.map_join(change.changes, "; ", &objective_field_change/1)}
+            </span>
+          </li>
+        </ul>
+      </div>
+
+      <div :if={@comparison.objectives.reordered?}>
+        <h4 class="font-bold">Strategic Priority order</h4>
+        <p class="mt-1 opacity-70">The draft orders shared Strategic Objectives differently.</p>
+      </div>
+
+      <.revision_choice_changes title="Hard Constraints" changes={@comparison.hard_constraints} />
+      <.revision_choice_changes title="Preferences" changes={@comparison.preferences} />
+
+      <div :if={@comparison.consequences}>
+        <h4 class="font-bold">Likely consequences</h4>
+        <p class="mt-1 opacity-70">
+          {@comparison.consequences.from} → {@comparison.consequences.to}
+        </p>
+      </div>
+    </div>
+    """
+  end
+
+  attr :title, :string, required: true
+  attr :changes, :map, required: true
+
+  defp revision_choice_changes(assigns) do
+    ~H"""
+    <div :if={@changes.added != [] or @changes.removed != []}>
+      <h4 class="font-bold">{@title}</h4>
+      <ul class="mt-1 list-inside list-disc opacity-70">
+        <li :for={choice <- @changes.added}>Added: {choice}</li>
+        <li :for={choice <- @changes.removed}>Removed: {choice}</li>
+      </ul>
+    </div>
+    """
+  end
+
   attr :title, :string, required: true
   attr :choices, :list, required: true
 
@@ -598,7 +806,11 @@ defmodule SpaceTradersWeb.StrategyLive do
   end
 
   defp assign_projection(socket, form_drafts \\ nil, projection \\ nil) do
-    projection = projection || MissionControl.strategy(socket.assigns.current_scope)
+    socket = maybe_load_availability(socket)
+
+    projection =
+      review_projection(projection || FleetStrategy.get(socket.assigns.current_scope), socket)
+
     form_drafts = form_drafts || form_values(projection.draft)
 
     socket
@@ -609,8 +821,23 @@ defmodule SpaceTradersWeb.StrategyLive do
     |> assign(:form, to_form(form_drafts, as: "strategy"))
   end
 
-  defp with_presets(projection, socket) do
-    Map.put(projection, :presets, socket.assigns.projection.presets)
+  defp review_projection(projection, socket) do
+    scope = socket.assigns.current_scope
+    projection = projection || FleetStrategy.get(scope)
+
+    MissionControl.strategy_review(scope, projection, availability: socket.assigns.availability)
+  end
+
+  defp maybe_load_availability(socket) do
+    scope = socket.assigns.current_scope
+
+    if socket.assigns.availability_ready? or not is_map(FleetStrategy.get(scope).draft) do
+      socket
+    else
+      socket
+      |> assign(:availability, MissionControl.availability(scope))
+      |> assign(:availability_ready?, true)
+    end
   end
 
   defp assign_market_planning(socket) do
@@ -620,7 +847,7 @@ defmodule SpaceTradersWeb.StrategyLive do
   defp mark_draft_stale(socket, message) do
     socket
     |> put_flash(:error, message)
-    |> assign(:projection, MissionControl.strategy(socket.assigns.current_scope))
+    |> assign(:projection, review_projection(nil, socket))
     |> assign_market_planning()
     |> assign(:draft_stale?, true)
   end
@@ -668,6 +895,18 @@ defmodule SpaceTradersWeb.StrategyLive do
   defp kind_label("continuous"), do: "Continuous"
   defp kind_label(_kind), do: "Kind not yet specified"
 
+  defp objective_field_change(%{field: "kind", from: from, to: to}),
+    do: "Kind: #{kind_label(from)} → #{kind_label(to)}"
+
+  defp objective_field_change(%{field: "scope", from: from, to: to}),
+    do: "Scope: #{scope_label(from)} → #{scope_label(to)}"
+
+  defp objective_field_change(%{field: "evaluation", from: from, to: to}),
+    do: "Evaluation: #{from} → #{to}"
+
+  defp objective_field_change(%{field: field, from: from, to: to}),
+    do: "#{field}: #{from} → #{to}"
+
   defp planning_limitation(:unsupported_market_objective),
     do: "Market activity does not directly advance this Strategic Objective."
 
@@ -684,6 +923,30 @@ defmodule SpaceTradersWeb.StrategyLive do
     do: "Fresh evidence shows no positive-spread Market route."
 
   defp planning_limitation(_reason), do: "Market planning is currently limited."
+
+  defp rejection_reason(:claim_conflict),
+    do: "no available Ship satisfies the required role and capabilities"
+
+  defp rejection_reason(:insufficient_reservation),
+    do: "credit exposure exceeds available Reservations"
+
+  defp rejection_reason(:unbacked_pledge), do: "the pledge is not backed"
+  defp rejection_reason(:unsatisfied_dependency), do: "a dependency is unsatisfied"
+  defp rejection_reason(reason), do: to_string(reason)
+
+  defp candidate_contribution_count(entries) do
+    Enum.sum_by(entries, &length(&1.planning.candidate_contributions))
+  end
+
+  defp format_credits(value) when is_integer(value), do: Integer.to_string(value)
+
+  defp format_credits(value) when is_float(value) do
+    if trunc(value) == value do
+      value |> trunc() |> Integer.to_string()
+    else
+      :erlang.float_to_binary(value, decimals: 2)
+    end
+  end
 
   defp objective_line(objective) do
     Enum.join(

@@ -26,6 +26,7 @@ defmodule SpaceTraders.FleetExecution do
   alias SpaceTraders.FleetShadow
   alias SpaceTraders.FleetStrategy.Revision
   alias SpaceTraders.FleetStrategy.StandingAuthority
+  alias SpaceTraders.Intelligence
   alias SpaceTraders.Repo
   alias SpaceTraders.ShipReservation
 
@@ -38,6 +39,33 @@ defmodule SpaceTraders.FleetExecution do
 
   @doc "Returns the credit floor for a Revision, or `{:error, :no_credit_floor}`."
   defdelegate credit_floor(revision), to: StandingAuthority
+
+  @doc """
+  Returns governed availability for one Agent from authoritative evidence.
+
+  Owned Ships become Claims carrying the Market reach of their System's
+  governed waypoint evidence, and observed credits become Reservations. Roles
+  and non-Market capabilities mirror execution availability. Returns
+  `{:error, :availability_unknown}` when Ships, credits, or the System cannot
+  be established, so a reviewer can state the limitation instead of assuming
+  zero capacity. The caller is responsible for scoping the Agent.
+  """
+  def governed_availability(%AgentRecord{} = agent) do
+    with {:ok, system_symbol} <- Fleet.system_from_headquarters(agent.headquarters),
+         {:ok, ships} <- Fleet.list_ships(agent),
+         credits when is_integer(credits) <- agent_credits(agent) do
+      markets = Intelligence.marketplace_waypoints(agent, system_symbol)
+
+      {:ok,
+       %{
+         as_of: DateTime.utc_now(),
+         claims: market_claims(agent, ships, markets),
+         reservations: %{credits: credits}
+       }}
+    else
+      _ -> {:error, :availability_unknown}
+    end
+  end
 
   @doc """
   Returns the shadow-validated eligible Market commitment for one Agent.
@@ -654,27 +682,29 @@ defmodule SpaceTraders.FleetExecution do
   end
 
   defp availability_claims(agent) do
+    case Fleet.list_ships(agent) do
+      {:ok, ships} -> market_claims(agent, ships, [])
+      _ -> []
+    end
+  end
+
+  defp market_claims(agent, ships, markets) do
     reserved = MapSet.new(ShipReservation.reserved_symbols(agent.id))
 
-    case Fleet.list_ships(agent) do
-      {:ok, ships} ->
-        ships
-        |> Enum.reject(&MapSet.member?(reserved, &1.symbol))
-        |> Enum.map(fn ship ->
-          %{
-            resource: ship.symbol,
-            roles: [:market_trader, :intelligence_scout],
-            capabilities: %{
-              cargo_transport: cargo_capacity(ship),
-              chart: true,
-              waypoint_scan: sensor_mount?(ship)
-            }
-          }
-        end)
-
-      _ ->
-        []
-    end
+    ships
+    |> Enum.reject(&MapSet.member?(reserved, &1.symbol))
+    |> Enum.map(fn ship ->
+      %{
+        resource: ship.symbol,
+        roles: [:market_trader, :intelligence_scout],
+        capabilities: %{
+          cargo_transport: cargo_capacity(ship),
+          chart: true,
+          waypoint_scan: sensor_mount?(ship),
+          market_access: markets
+        }
+      }
+    end)
   end
 
   defp cargo_capacity(%{cargo: %{capacity: capacity}}) when is_integer(capacity), do: capacity

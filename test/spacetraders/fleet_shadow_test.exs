@@ -52,6 +52,31 @@ defmodule SpaceTraders.FleetShadowTest do
     assert Repo.aggregate(Commitment, :count) == 0
   end
 
+  test "shadow-evaluates a draft document with an explicit draft identity and publishes nothing" do
+    agent = agent_fixture(operator_fixture())
+    insert_market_observation(agent, "X1-A1", 10)
+    insert_market_observation(agent, "X1-A2", 25)
+
+    draft = %{
+      "objectives" => [
+        %{
+          "objective" => "Grow credits",
+          "kind" => "continuous",
+          "evaluation" => "Maximize net credit growth over time",
+          "scope" => "recurring"
+        }
+      ]
+    }
+
+    assert {:ok, comparison} =
+             FleetShadow.compare_draft_market(agent, draft, "X1", availability(), capacity())
+
+    assert [%{candidate_id: _candidate_id, claims: ["SHIP-1"]}] = comparison.proposed_choices
+    assert [%{candidate_contributions: [candidate | _]}] = comparison.planning
+    assert candidate.strategy_revision_id == {:draft, agent.id}
+    assert Repo.aggregate(Commitment, :count) == 0
+  end
+
   test "changed Listings and API pressure deterministically trigger shadow replanning" do
     assert {:ok, previous} =
              FleetShadow.compare(snapshot(), revision(), availability(), capacity())
