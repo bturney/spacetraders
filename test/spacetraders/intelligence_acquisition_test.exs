@@ -11,6 +11,7 @@ defmodule SpaceTraders.IntelligenceAcquisitionTest do
   alias SpaceTraders.Fleet.Intents
   alias SpaceTraders.FleetAllocation
   alias SpaceTraders.FleetAllocation.PortfolioCandidate
+  alias SpaceTraders.FleetAllocation.Reconciler
   alias SpaceTraders.FleetExecution
   alias SpaceTraders.FleetGeneration.Generation
   alias SpaceTraders.FleetIntelligence
@@ -1462,6 +1463,109 @@ defmodule SpaceTraders.IntelligenceAcquisitionTest do
                available_slots: 3,
                backpressure: :none
              })
+
+    projection =
+      World.intelligence(agent, :market, "X1-UX81", "X1-UX81-A1", DateTime.utc_now(), 300)
+
+    assert projection.facts["trade_goods"].freshness == :fresh
+  end
+
+  test "the recurring durable scan re-evaluates a Generation whose Market evidence has aged out" do
+    {agent, ship, previous, _commitment} =
+      claimed_ship(%{
+        "objective" => "Grow credits",
+        "kind" => "continuous",
+        "evaluation" => "Maximize net credit growth over time"
+      })
+
+    operator = Repo.get!(Operator, agent.operator_id)
+    scope = Scope.for_operator(operator)
+
+    assert {:ok, _} =
+             FleetAllocation.unwind_current_portfolio(scope, previous.fleet_generation_id)
+
+    # Both Markets are observed, but every Listing has aged past its freshness
+    # budget. Nothing else wakes planning once the last Listing expires, so the
+    # recurring durable scan is solely responsible for re-observing and
+    # re-evaluating the Generation.
+    for {symbol, x, buy, sell} <- [{"X1-UX81-A1", 1, 10, 9}, {"X1-UX81-A2", 2, 25, 20}] do
+      waypoint =
+        Model.Waypoint.from_json(%{
+          "symbol" => symbol,
+          "systemSymbol" => "X1-UX81",
+          "type" => "PLANET",
+          "x" => x,
+          "y" => 2,
+          "traits" => [%{"symbol" => "MARKETPLACE"}]
+        })
+
+      listing =
+        Model.Market.from_json(%{
+          "symbol" => symbol,
+          "exports" => [%{"symbol" => "IRON_ORE"}],
+          "imports" => [],
+          "exchange" => [],
+          "tradeGoods" => [
+            %{
+              "symbol" => "IRON_ORE",
+              "type" => "EXPORT",
+              "tradeVolume" => 20,
+              "purchasePrice" => buy,
+              "sellPrice" => sell
+            }
+          ]
+        })
+
+      {:ok, _} = Intelligence.observe_waypoint(agent, waypoint, source: "get_waypoints")
+
+      {:ok, _} =
+        Intelligence.observe_market(agent, "X1-UX81", listing,
+          source: "get_market",
+          observing_ship_symbol: ship.symbol,
+          observed_at: DateTime.add(DateTime.utc_now(), -600, :second)
+        )
+    end
+
+    ship_path = "/v2/my/ships/#{ship.symbol}"
+    market_path = "/v2/systems/X1-UX81/waypoints/X1-UX81-A1/market"
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      case {conn.method, conn.request_path} do
+        {"GET", "/v2/my/ships"} ->
+          Req.Test.json(conn, %{"data" => [ship_body(ship.symbol)]})
+
+        {"GET", "/v2/my/agent"} ->
+          Req.Test.json(conn, %{"data" => %{"symbol" => agent.symbol, "credits" => 10_000}})
+
+        {"GET", ^ship_path} ->
+          Req.Test.json(conn, %{"data" => ship_body(ship.symbol)})
+
+        {"GET", ^market_path} ->
+          Req.Test.json(conn, %{
+            "data" => %{
+              "symbol" => "X1-UX81-A1",
+              "exports" => [%{"symbol" => "IRON_ORE"}],
+              "imports" => [],
+              "exchange" => [],
+              "tradeGoods" => [
+                %{
+                  "symbol" => "IRON_ORE",
+                  "type" => "EXPORT",
+                  "tradeVolume" => 20,
+                  "purchasePrice" => 12,
+                  "sellPrice" => 9
+                }
+              ]
+            }
+          })
+
+        other ->
+          flunk("unexpected game request: #{inspect(other)}")
+      end
+    end)
+
+    assert :ok =
+             Reconciler.reconcile_durable_work(%{available_slots: 3, backpressure: :none})
 
     projection =
       World.intelligence(agent, :market, "X1-UX81", "X1-UX81-A1", DateTime.utc_now(), 300)
