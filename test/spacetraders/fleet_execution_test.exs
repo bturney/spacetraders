@@ -4,10 +4,21 @@ defmodule SpaceTraders.FleetExecutionTest do
   import SpaceTraders.AgentFixtures
   import SpaceTraders.ShipBody
 
+  alias SpaceTraders.API.CapacityGovernor.Snapshot, as: CapacitySnapshot
   alias SpaceTraders.API.Model.Waypoint
+  alias SpaceTraders.Agent.{Operator, Scope}
+  alias SpaceTraders.Evidence.Observation
+  alias SpaceTraders.Fleet.Intent
+  alias SpaceTraders.Fleet.Ship
+  alias SpaceTraders.FleetAllocation.Commitment
+  alias SpaceTraders.FleetAllocation.Portfolio
   alias SpaceTraders.FleetExecution
-  alias SpaceTraders.FleetStrategy.Revision
+  alias SpaceTraders.FleetGeneration.Generation
+  alias SpaceTraders.FleetStrategy.{Revision, Strategy}
   alias SpaceTraders.Intelligence
+
+  @as_of ~U[2030-01-01 12:00:00Z]
+  @as_of_usec ~U[2030-01-01 12:00:00.000000Z]
 
   describe "governed_availability/1" do
     test "claims market reach from governed waypoint evidence" do
@@ -92,6 +103,249 @@ defmodule SpaceTraders.FleetExecutionTest do
         })
 
       assert {:ok, _} = Intelligence.observe_waypoint(agent, waypoint, source: "get_waypoint")
+    end
+  end
+
+  describe "reconcile_market_evidence/5" do
+    test "selects a Market Fleet Commitment from governed Market reach" do
+      {operator, agent, revision} = market_generation()
+      scope = Scope.for_operator(operator)
+
+      observe_marketplace(agent, "X1-A1")
+      observe_marketplace(agent, "X1-A2")
+      market_observation(agent, "X1-A1", 10)
+      market_observation(agent, "X1-A2", 25)
+
+      stub_market_agent(agent)
+
+      assert {:ok, %{action: :deferred_for_capacity, comparison: comparison}} =
+               FleetExecution.reconcile_market_evidence(
+                 scope,
+                 agent,
+                 revision,
+                 "X1",
+                 sustained_capacity()
+               )
+
+      assert [%{candidate_id: candidate_id, claims: ["SHIP-1"]}] = comparison.proposed_choices
+      assert is_binary(candidate_id)
+    end
+
+    test "still rejects candidates when governed evidence misses a required Marketplace" do
+      {operator, agent, revision} = market_generation()
+      scope = Scope.for_operator(operator)
+
+      observe_marketplace(agent, "X1-A1")
+      market_observation(agent, "X1-A1", 10)
+      market_observation(agent, "X1-A2", 25)
+
+      stub_market_agent(agent)
+
+      assert {:ok, %{action: :no_admissible_commitment, comparison: comparison}} =
+               FleetExecution.reconcile_market_evidence(scope, agent, revision, "X1", capacity())
+
+      assert comparison.proposed_choices == []
+
+      assert Enum.all?(comparison.alternatives, fn alternative ->
+               :claim_conflict in alternative.reasons
+             end)
+
+      assert Repo.aggregate(Portfolio, :count) == 0
+    end
+
+    test "hands the published Commitment to activation under normal API capacity" do
+      {operator, agent, revision} = market_generation()
+      scope = Scope.for_operator(operator)
+
+      observe_marketplace(agent, "X1-A1")
+      observe_marketplace(agent, "X1-A2")
+      market_observation(agent, "X1-A1", 10)
+      market_observation(agent, "X1-A2", 25)
+
+      stub_activation_agent(agent)
+
+      assert {:ok,
+              %{
+                action: :activated,
+                commitment: %Commitment{} = commitment,
+                portfolio: %Portfolio{},
+                round_trip: %Intent{} = intent
+              }} =
+               FleetExecution.reconcile_market_evidence(scope, agent, revision, "X1", capacity())
+
+      assert Repo.get!(Commitment, commitment.id) == commitment
+      assert intent.fleet_commitment_id == commitment.id
+      assert intent.type == "buy"
+      assert Repo.aggregate(Portfolio, :count) == 1
+    end
+
+    defp market_generation do
+      operator = Repo.insert!(%Operator{email: "market-#{System.unique_integer()}@example.com"})
+
+      agent =
+        Repo.insert!(%SpaceTraders.Agent.Agent{
+          symbol: "MARKETACQ",
+          faction: "COSMIC",
+          headquarters: "X1-A1",
+          agent_token: "test-agent-token",
+          operator_id: operator.id
+        })
+
+      Repo.insert!(%Ship{symbol: "SHIP-1", ship_type: "SHIP_FRIGATE", agent_id: agent.id})
+
+      strategy = Repo.insert!(%Strategy{operator_id: operator.id, revision_number: 1})
+
+      revision =
+        Repo.insert!(%Revision{
+          fleet_strategy_id: strategy.id,
+          number: 1,
+          document: %{
+            "objectives" => [
+              %{
+                "objective" => "Grow credits",
+                "kind" => "continuous",
+                "evaluation" => "Maximize net credit growth over time",
+                "scope" => "recurring"
+              }
+            ],
+            "hard_constraints" => ["Keep at least 500 credits available"]
+          },
+          source: "operator",
+          activated_at: DateTime.utc_now(:second)
+        })
+
+      Repo.insert!(%Generation{
+        operator_id: operator.id,
+        agent_id: agent.id,
+        fleet_strategy_revision_id: revision.id,
+        number: 1,
+        symbol: agent.symbol,
+        faction: agent.faction,
+        replacement_symbols: %{},
+        objective_progress: %{}
+      })
+
+      Repo.update!(Ecto.Changeset.change(strategy, active_revision_id: revision.id))
+
+      {operator, agent, revision}
+    end
+
+    defp market_observation(agent, waypoint, purchase_price) do
+      Repo.insert!(%Observation{
+        agent_id: agent.id,
+        subject: "market:X1:#{waypoint}",
+        operation_id: "get-market",
+        dependency_keys: ["market:X1:#{waypoint}"],
+        facts: %{
+          "trade_goods" => [
+            %{
+              "symbol" => "IRON",
+              "purchase_price" => purchase_price,
+              "sell_price" => purchase_price - 1,
+              "trade_volume" => 20,
+              "supply" => "MODERATE",
+              "activity" => "STATIC"
+            }
+          ]
+        },
+        response_fingerprint: "market-#{waypoint}-#{purchase_price}",
+        observed_at: @as_of_usec
+      })
+    end
+
+    defp stub_market_agent(agent) do
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/v2/my/agent"} ->
+            Req.Test.json(conn, %{
+              "data" => %{
+                "accountId" => "ACC",
+                "symbol" => agent.symbol,
+                "headquarters" => agent.headquarters,
+                "credits" => 5_000,
+                "startingFaction" => "COSMIC",
+                "shipCount" => 1
+              }
+            })
+
+          {"GET", "/v2/my/ships"} ->
+            Req.Test.json(conn, %{"data" => [ship_body("SHIP-1")]})
+
+          other ->
+            flunk("unexpected request: #{inspect(other)}")
+        end
+      end)
+    end
+
+    defp stub_activation_agent(agent) do
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/v2/my/agent"} ->
+            Req.Test.json(conn, %{
+              "data" => %{
+                "accountId" => "ACC",
+                "symbol" => agent.symbol,
+                "headquarters" => agent.headquarters,
+                "credits" => 5_000,
+                "startingFaction" => "COSMIC",
+                "shipCount" => 1
+              }
+            })
+
+          {"GET", "/v2/my/ships"} ->
+            Req.Test.json(conn, %{"data" => [ship_body("SHIP-1")]})
+
+          {"GET", "/v2/my/ships/SHIP-1"} ->
+            nav =
+              nav_body("DOCKED")
+              |> Map.put("systemSymbol", "X1")
+              |> Map.put("waypointSymbol", "X1-A1")
+
+            cargo = %{
+              "capacity" => 40,
+              "units" => 40,
+              "inventory" => [%{"symbol" => "IRON", "units" => 40}]
+            }
+
+            Req.Test.json(conn, %{
+              "data" => ship_body("SHIP-1", %{"nav" => nav, "cargo" => cargo})
+            })
+
+          {"GET", "/v2/systems/X1/waypoints/X1-A1/market"} ->
+            Req.Test.json(conn, %{
+              "data" => %{
+                "symbol" => "X1-A1",
+                "tradeGoods" => [
+                  %{
+                    "symbol" => "IRON",
+                    "purchasePrice" => 10,
+                    "sellPrice" => 9,
+                    "tradeVolume" => 20,
+                    "supply" => "MODERATE",
+                    "activity" => "STATIC"
+                  }
+                ]
+              }
+            })
+
+          other ->
+            flunk("unexpected request: #{inspect(other)}")
+        end
+      end)
+    end
+
+    defp capacity do
+      %CapacitySnapshot{
+        observed_at: @as_of,
+        available_slots: 3,
+        evidence_fingerprint: "governed-evidence",
+        next_outage_probe_at: nil,
+        backpressure: :none
+      }
+    end
+
+    defp sustained_capacity do
+      %{capacity() | available_slots: 0, backpressure: :sustained}
     end
   end
 

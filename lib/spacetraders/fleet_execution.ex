@@ -51,11 +51,9 @@ defmodule SpaceTraders.FleetExecution do
   zero capacity. The caller is responsible for scoping the Agent.
   """
   def governed_availability(%AgentRecord{} = agent) do
-    with {:ok, system_symbol} <- Fleet.system_from_headquarters(agent.headquarters),
+    with {:ok, markets} <- governed_market_access(agent),
          {:ok, ships} <- Fleet.list_ships(agent),
          credits when is_integer(credits) <- agent_credits(agent) do
-      markets = Intelligence.marketplace_waypoints(agent, system_symbol)
-
       {:ok,
        %{
          as_of: DateTime.utc_now(),
@@ -128,10 +126,11 @@ defmodule SpaceTraders.FleetExecution do
       commitment ->
         with {:ok, candidate} <- market_candidate(comparison, commitment),
              {:ok, portfolio} <- publish_eligible(scope, agent, revision, comparison, commitment),
-             {:ok, round_trip} <- activate_round_trip(agent, commitment, portfolio, candidate) do
+             {:ok, persisted} <- published_commitment(portfolio, commitment),
+             {:ok, round_trip} <- activate_round_trip(agent, persisted, portfolio, candidate) do
           {:ok,
            %{
-             commitment: commitment,
+             commitment: persisted,
              portfolio: portfolio,
              round_trip: round_trip,
              expectations: Map.get(comparison, :expectations, %{}),
@@ -657,6 +656,13 @@ defmodule SpaceTraders.FleetExecution do
     |> Enum.uniq()
   end
 
+  defp published_commitment(%Portfolio{commitments: commitments}, %{candidate_id: candidate_id}) do
+    case Enum.find(commitments, &(&1.candidate_id == candidate_id)) do
+      %Commitment{} = commitment -> {:ok, commitment}
+      _ -> {:error, :published_commitment_missing}
+    end
+  end
+
   defp contribution(%Portfolio{commitments: commitments}) do
     %{
       commitment_count: length(commitments),
@@ -674,17 +680,29 @@ defmodule SpaceTraders.FleetExecution do
   end
 
   defp availability(%Scope{operator: operator}, agent) do
+    markets =
+      case governed_market_access(agent) do
+        {:ok, markets} -> markets
+        _ -> []
+      end
+
     %{
       as_of: DateTime.utc_now(),
-      claims: availability_claims(agent),
+      claims: availability_claims(agent, markets),
       reservations: availability_reservations(operator, agent)
     }
   end
 
-  defp availability_claims(agent) do
+  defp availability_claims(agent, markets) do
     case Fleet.list_ships(agent) do
-      {:ok, ships} -> market_claims(agent, ships, [])
+      {:ok, ships} -> market_claims(agent, ships, markets)
       _ -> []
+    end
+  end
+
+  defp governed_market_access(%AgentRecord{} = agent) do
+    with {:ok, system_symbol} <- Fleet.system_from_headquarters(agent.headquarters) do
+      {:ok, Intelligence.marketplace_waypoints(agent, system_symbol)}
     end
   end
 

@@ -170,10 +170,18 @@ defmodule SpaceTraders.Fleet.Intents do
 
   defp warp_drive_module?(_), do: false
 
-  defp stringify_keys(map) when is_map(map),
-    do: Map.new(map, fn {key, value} -> {to_string(key), value} end)
+  # Intent parameters persist as JSONB, so structs and other Elixir values must
+  # become a JSON-safe, string-keyed representation before insert.
+  defp stringify_keys(%DateTime{} = value), do: DateTime.to_iso8601(value)
 
-  defp stringify_keys(_), do: %{}
+  defp stringify_keys(%_{} = value), do: value |> Map.from_struct() |> stringify_keys()
+
+  defp stringify_keys(value) when is_map(value),
+    do: Map.new(value, fn {key, nested} -> {to_string(key), stringify_keys(nested)} end)
+
+  defp stringify_keys(value) when is_list(value), do: Enum.map(value, &stringify_keys/1)
+
+  defp stringify_keys(value), do: value
 
   defp do_stop_intent(%AgentRecord{} = agent, intent_id, :intervention) do
     result =
@@ -922,7 +930,7 @@ defmodule SpaceTraders.Fleet.Intents do
       "units" => candidate_units(candidate),
       "max_price" => candidate_purchase_price(candidate),
       "reserve_credits" => Map.get(candidate, :reserve_credits, 0),
-      "market_trade" => candidate
+      "market_trade" => market_trade(candidate)
     }
   end
 
@@ -931,8 +939,17 @@ defmodule SpaceTraders.Fleet.Intents do
       "trade_symbol" => candidate_trade_symbol(candidate),
       "units" => candidate_units(candidate),
       "min_price" => candidate_sell_price(candidate),
-      "market_trade" => candidate
+      "market_trade" => market_trade(candidate)
     }
+  end
+
+  # A Candidate Contribution may be a struct or a plain map. Persist a JSON-safe,
+  # string-keyed copy and drop absent optional fields so later presence checks
+  # keep matching the same shape callers pass in memory.
+  defp market_trade(candidate) do
+    candidate
+    |> stringify_keys()
+    |> Map.reject(fn {_key, value} -> is_nil(value) end)
   end
 
   defp candidate_source(candidate),
@@ -944,11 +961,17 @@ defmodule SpaceTraders.Fleet.Intents do
   defp candidate_trade_symbol(candidate),
     do: Map.get(candidate, :trade_symbol) || candidate["trade_symbol"]
 
-  defp candidate_units(candidate),
-    do:
-      Map.get(candidate, :units) ||
-        Map.get(candidate, "units") ||
-        Map.get(Map.get(candidate, :expected_outcomes, %{}), :maximum_units)
+  defp candidate_units(candidate) do
+    Map.get(candidate, :units) ||
+      Map.get(candidate, "units") ||
+      maximum_units(Map.get(candidate, :expected_outcomes)) ||
+      maximum_units(Map.get(candidate, "expected_outcomes"))
+  end
+
+  defp maximum_units(%{} = expected_outcomes),
+    do: Map.get(expected_outcomes, :maximum_units) || Map.get(expected_outcomes, "maximum_units")
+
+  defp maximum_units(_expected_outcomes), do: nil
 
   defp candidate_purchase_price(candidate),
     do: Map.get(candidate, :purchase_price) || Map.get(candidate, "purchase_price")
