@@ -4,6 +4,9 @@ defmodule SpaceTraders.PromEx.API do
   @event [:spacetraders, :api, :request]
   @capacity_admission_event [:spacetraders, :api, :capacity, :admission]
   @capacity_actual_event [:spacetraders, :api, :capacity, :actual]
+  @governor_admission_event [:spacetraders, :api, :capacity, :governor]
+  @capacity_reject_event [:spacetraders, :api, :capacity, :reject]
+  @capacity_recovered_event [:spacetraders, :api, :capacity, :recovered]
   @fleet_activity_event [:spacetraders, :fleet, :activity]
   @intent_transition_event [:spacetraders, :intent, :transition]
 
@@ -32,6 +35,34 @@ defmodule SpaceTraders.PromEx.API do
           measurement: :count,
           tags: [:status, :outcome, :shadow_disposition],
           description: "Production API outcomes correlated to shadow capacity decisions."
+        ),
+        counter(
+          [:spacetraders, :api, :capacity, :governor, :admissions, :total],
+          event_name: @governor_admission_event,
+          measurement: :count,
+          tags: [:lane, :backpressure],
+          description:
+            "API Capacity Governor production admissions by lane and backpressure state."
+        ),
+        distribution(
+          [:spacetraders, :api, :capacity, :governor, :admission, :queue_time, :milliseconds],
+          event_name: @governor_admission_event,
+          measurement: :queue_time,
+          reporter_options: [buckets: [10, 50, 100, 250, 500, 1000, 5000]],
+          description: "Queue wait before governor production admissions."
+        ),
+        counter(
+          [:spacetraders, :api, :capacity, :rejections, :total],
+          event_name: @capacity_reject_event,
+          measurement: :count,
+          tags: [:ordinary_delayed],
+          description: "Protocol-limit rejections and Retry-After ordinary admission delays."
+        ),
+        counter(
+          [:spacetraders, :api, :capacity, :recoveries, :total],
+          event_name: @capacity_recovered_event,
+          measurement: :count,
+          description: "Recoveries from protocol backpressure after clean responses."
         ),
         counter(
           [:spacetraders, :fleet, :activity, :total],

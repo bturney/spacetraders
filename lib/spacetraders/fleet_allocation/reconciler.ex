@@ -5,7 +5,7 @@ defmodule SpaceTraders.FleetAllocation.Reconciler do
 
   import Ecto.Query
 
-  alias SpaceTraders.API.ShadowAdmission
+  alias SpaceTraders.API.CapacityGovernor
   alias SpaceTraders.Agent.Scope
   alias SpaceTraders.Agent.Agent, as: AgentRecord
   alias SpaceTraders.Fleet
@@ -48,7 +48,7 @@ defmodule SpaceTraders.FleetAllocation.Reconciler do
         agent,
         revision,
         system_symbol,
-        ShadowAdmission.snapshot()
+        CapacityGovernor.snapshot()
       )
 
       FleetResources.reconcile(scope, agent, revision, system_symbol)
@@ -113,7 +113,7 @@ defmodule SpaceTraders.FleetAllocation.Reconciler do
   evidence has aged out schedules a fresh observation and re-evaluates its
   Strategy instead of sitting idle until the process restarts.
   """
-  def reconcile_durable_work(capacity \\ ShadowAdmission.snapshot()) do
+  def reconcile_durable_work(capacity \\ CapacityGovernor.snapshot()) do
     Generation
     |> where([generation], is_nil(generation.fenced_at) and is_nil(generation.retired_at))
     |> select([generation], generation.agent_id)
@@ -142,7 +142,7 @@ defmodule SpaceTraders.FleetAllocation.Reconciler do
         agent,
         revision,
         system_symbol,
-        ShadowAdmission.snapshot()
+        CapacityGovernor.snapshot()
       )
 
       FleetContracts.reconcile(scope, agent, revision)

@@ -10,7 +10,7 @@ defmodule SpaceTraders.FleetShadow do
   import Ecto.Query
 
   alias SpaceTraders.Agent.Agent, as: AgentRecord
-  alias SpaceTraders.API.ShadowAdmission.Snapshot, as: CapacitySnapshot
+  alias SpaceTraders.API.CapacityGovernor.Snapshot, as: CapacitySnapshot
   alias SpaceTraders.Evidence
   alias SpaceTraders.Evidence.Observation
   alias SpaceTraders.FleetAllocation

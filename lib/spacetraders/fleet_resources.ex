@@ -3,7 +3,7 @@ defmodule SpaceTraders.FleetResources do
 
   alias SpaceTraders.Agent.Agent, as: AgentRecord
   alias SpaceTraders.Agent.Scope
-  alias SpaceTraders.API.ShadowAdmission
+  alias SpaceTraders.API.CapacityGovernor
   alias SpaceTraders.API.AgentTokenReference
   alias SpaceTraders.Evidence
   alias SpaceTraders.Fleet
@@ -25,7 +25,7 @@ defmodule SpaceTraders.FleetResources do
         %AgentRecord{} = agent,
         %Revision{} = revision,
         system,
-        capacity \\ ShadowAdmission.snapshot()
+        capacity \\ CapacityGovernor.snapshot()
       ) do
     with index when is_integer(index) <- objective_index(revision),
          :ok <- SpaceTraders.RuntimeAuthority.execution_allowed?(),

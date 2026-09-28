@@ -18,9 +18,12 @@ defmodule SpaceTraders.API do
 
   ## Rate limiting
 
-  Every request first calls `SpaceTraders.API.RateLimiter.acquire/0`, a token
-  bucket (3 req/s sustained, burst 10). Req's built-in retry with Retry-After
-  backoff acts as a safety net on 429 responses.
+  Every request first waits on `SpaceTraders.API.RateLimiter.acquire/0`, a
+  dual-pool token bucket modelled on the game's granted budget: 2 req/s steady
+  plus a separate pool of 30 requests per minute (≈2.5 req/s sustained
+  average). Admission is ordered by the API Capacity Governor, which also
+  delays new ordinary admissions when the game returns `Retry-After`. Req's
+  built-in 429 retry is a safety net, not the primary throughput shaper.
 
   In `test` env the client is pointed at `Req.Test` via config (`:plug`), so no
   network is touched; tests register stubs with `Req.Test.stub(SpaceTraders.API, ...)`.
@@ -967,6 +970,7 @@ defmodule SpaceTraders.API do
       false
     else
       emit_request_metric(operation_for_retry(path, method), path, 429)
+      report_protocol_rejection(response)
 
       case Req.Response.get_retry_after(response) do
         delay when is_integer(delay) -> {:delay, delay}
@@ -987,6 +991,13 @@ defmodule SpaceTraders.API do
   end
 
   defp retry(_request, _response, _path, _method, _token), do: false
+
+  defp report_protocol_rejection(response) do
+    case Req.Response.get_retry_after(response) do
+      delay when is_integer(delay) -> CapacityGovernor.protocol_rejected(delay)
+      _ -> CapacityGovernor.protocol_rejected(0)
+    end
+  end
 
   defp operation_for_retry(path, method),
     do: OperationInventory.fetch_by_request!(method, path)

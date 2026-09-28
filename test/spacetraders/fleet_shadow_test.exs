@@ -3,7 +3,7 @@ defmodule SpaceTraders.FleetShadowTest do
 
   import SpaceTraders.AgentFixtures
 
-  alias SpaceTraders.API.ShadowAdmission.Snapshot, as: CapacitySnapshot
+  alias SpaceTraders.API.CapacityGovernor.Snapshot, as: CapacitySnapshot
   alias SpaceTraders.Evidence.Observation
   alias SpaceTraders.FleetAllocation.Commitment
   alias SpaceTraders.FleetAllocation.StrategyDecisionEpisode
