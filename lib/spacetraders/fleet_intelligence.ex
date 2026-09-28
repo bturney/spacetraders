@@ -3,7 +3,8 @@ defmodule SpaceTraders.FleetIntelligence do
   alias SpaceTraders.Agent.Agent, as: AgentRecord
   alias SpaceTraders.Agent.Scope
   alias SpaceTraders.API.AgentTokenReference
-  alias SpaceTraders.Evidence
+  alias SpaceTraders.{Clock, Evidence}
+  alias SpaceTraders.Evidence.Demand
   alias SpaceTraders.Fleet
   alias SpaceTraders.Fleet.Intent
   alias SpaceTraders.Fleet.Intents
@@ -24,6 +25,91 @@ defmodule SpaceTraders.FleetIntelligence do
   @market_api_cost 5
   @market_distance_cost 1
   @initial_market_decision_value 10.0
+
+  @doc "Whether the revision declares the continuous credit-growth objective that consumes Market Listings."
+  def credit_growth_objective?(%Revision{} = revision), do: credit_objective(revision) != nil
+
+  @doc """
+  Describes one durable Market refresh demand per Marketplace with retained
+  Listing evidence, without persisting or acquiring anything.
+
+  The descriptions are typed `%Evidence.Demand{}` structs built through the
+  shared `FleetPlanning.market_refresh_demand/1` timing policy. Marketplaces
+  with no retained Listing fact are deliberately absent: first-time coverage
+  demands are reset-start baseline work, not refresh work.
+  """
+  def market_refresh_demand_specs(agent, system_symbol, now)
+      when is_binary(system_symbol) do
+    waypoints = World.waypoints(agent, system_symbol, now, @freshness_seconds)
+
+    waypoints
+    |> Enum.filter(&marketplace_waypoint?/1)
+    |> Enum.filter(&retained_listing_fact?/1)
+    |> Enum.map(fn waypoint ->
+      fact = waypoint.market.facts["trade_goods"]
+
+      fresh? =
+        match?(%{freshness: :fresh, value: goods} when is_list(goods), fact)
+
+      FleetPlanning.market_refresh_demand(%{
+        subject: "market:#{system_symbol}:#{waypoint.symbol}",
+        observed_at: fact.observed_at,
+        fresh: fresh?,
+        as_of: now,
+        freshness_seconds: @freshness_seconds
+      })
+    end)
+  end
+
+  @doc "Subjects of the currently known Marketplaces in one System."
+  def known_marketplace_subjects(agent, system_symbol, now)
+      when is_binary(system_symbol) do
+    World.waypoints(agent, system_symbol, now, @freshness_seconds)
+    |> Enum.filter(&marketplace_waypoint?/1)
+    |> Enum.map(&"market:#{system_symbol}:#{&1.symbol}")
+  end
+
+  # Refresh work covers only subjects that already carry a retained Listing
+  # fact, fresh or stale/incomplete. A bare Marketplace with no retained fact
+  # has never been observed and belongs to reset-start baseline coverage.
+  defp retained_listing_fact?(waypoint) do
+    case waypoint.market.facts["trade_goods"] do
+      %{state: "known", observed_at: %DateTime{}} -> true
+      _ -> false
+    end
+  end
+
+  @doc """
+  Synchronizes durable Market refresh Observation Demands for the active Agent
+  and Strategy Revision.
+
+  Under the continuous credit-growth objective, every Marketplace with
+  retained Listing evidence gets one open, independently attributable demand
+  per consumer: usable Listings are due at their observation time plus the
+  existing Market freshness budget, stale or incomplete evidence is due now.
+  Synchronization is idempotent and never extends an already-due demand, so
+  API backpressure leaves overdue timing unchanged.
+
+  Demands whose subject is no longer a known Marketplace have lost Strategy
+  relevance and are withdrawn with preserved provenance; a Marketplace that
+  merely lacks Listing evidence is never withdrawn, so reset-start baseline
+  coverage is untouched. This replaces the removed fixed Market polling scan
+  with real durable work.
+  """
+  def sync_market_observation_demands(agent, revision, system_symbol)
+      when is_binary(system_symbol) do
+    if credit_growth_objective?(revision) do
+      now = Clock.utc_now()
+      specs = market_refresh_demand_specs(agent, system_symbol, now)
+
+      with :ok <- Evidence.sync_runtime_demands(agent, revision, specs, now) do
+        subjects = known_marketplace_subjects(agent, system_symbol, now)
+        Evidence.withdraw_market_demands_outside_subjects(agent, revision, subjects, now)
+      end
+    else
+      :ok
+    end
+  end
 
   def reconcile(
         %Scope{} = scope,
@@ -288,7 +374,13 @@ defmodule SpaceTraders.FleetIntelligence do
              |> Map.put(:observation_costs, costs)
            ) do
         {:ok, %{observation_demands: demands}} ->
-          Enum.flat_map(demands, fn demand ->
+          demands
+          # A future refresh demand is not an acquisition opportunity yet:
+          # only demands whose earliest useful time has passed may acquire.
+          |> Enum.filter(fn demand ->
+            due_demand?(demand, as_of)
+          end)
+          |> Enum.flat_map(fn demand ->
             waypoint = Enum.find(waypoints, &String.ends_with?(demand.subject, ":#{&1.symbol}"))
             cost = costs[demand.subject]
 
@@ -341,6 +433,11 @@ defmodule SpaceTraders.FleetIntelligence do
 
     Enum.uniq_by(existing_opportunities ++ initial_opportunities, & &1.subject)
   end
+
+  defp due_demand?(%Demand{due_at: nil}, _as_of), do: true
+
+  defp due_demand?(%Demand{due_at: due_at}, as_of),
+    do: DateTime.compare(due_at, as_of) != :gt
 
   defp retained_markets(waypoints, system) do
     Enum.flat_map(waypoints, fn waypoint ->

@@ -180,14 +180,25 @@ defmodule SpaceTraders.FleetPlanningTest do
                Map.put(snapshot, :observation_costs, costs)
              )
 
-    assert [%Demand{subject: "market:X1:X1-A1", expected_value: 175}] =
-             result.observation_demands
+    # The stale quote is due now; the usable Listing carries its future
+    # refresh demand due at its observation time plus the freshness budget.
+    assert [
+             %Demand{subject: "market:X1:X1-A1", expected_value: 175, due_at: @as_of},
+             %Demand{
+               subject: "market:X1:X1-A2",
+               due_at: ~U[2030-01-01 12:05:00Z],
+               # A future refresh demand invents no latest-acceptable time.
+               deadline_at: nil
+             }
+           ] = result.observation_demands
 
     expensive = %{
       "market:X1:X1-A1" => %{api_capacity_cost: 5, ship_time_cost: 200}
     }
 
-    assert {:ok, %{observation_demands: []}} =
+    # With an unaffordable acquisition cost the stale quote proposes no
+    # demand; the usable Listing's future refresh demand remains.
+    assert {:ok, %{observation_demands: [%Demand{subject: "market:X1:X1-A2"}]}} =
              FleetPlanning.plan_market(
                revision(),
                0,
@@ -202,7 +213,13 @@ defmodule SpaceTraders.FleetPlanningTest do
         ]
     }
 
-    assert {:ok, %{observation_demands: [%Demand{subject: "market:X1:X1-A2"}]}} =
+    assert {:ok,
+            %{
+              observation_demands: [
+                %Demand{subject: "market:X1:X1-A1", due_at: ~U[2030-01-01 12:05:00Z]},
+                %Demand{subject: "market:X1:X1-A2", due_at: @as_of}
+              ]
+            }} =
              FleetPlanning.plan_market(
                revision(),
                0,
@@ -210,6 +227,41 @@ defmodule SpaceTraders.FleetPlanningTest do
                  "market:X1:X1-A2" => %{api_capacity_cost: 5, ship_time_cost: 20}
                })
              )
+  end
+
+  test "stale Market demands carry the snapshot's custom demand deadline" do
+    snapshot = %{
+      evidence_snapshot()
+      | demand_deadline_seconds: 90,
+        markets: [
+          # Fresh usable Listing: future refresh, no deadline.
+          market("X1-A1", @as_of, [good("IRON", 10, 9, 20)]),
+          # Stale Listing: due now with the snapshot's deadline.
+          market("X1-A2", ~U[2030-01-01 11:50:00Z], [good("IRON", 25, 20, 25)])
+        ]
+    }
+
+    snapshot =
+      Map.put(snapshot, :observation_costs, %{
+        "market:X1:X1-A2" => %{api_capacity_cost: 5, ship_time_cost: 20}
+      })
+
+    expected_deadline = DateTime.add(@as_of, 90, :second)
+
+    assert {:ok, %{observation_demands: demands}} =
+             FleetPlanning.plan_market(revision(), 0, snapshot)
+
+    assert [
+             %Demand{
+               subject: "market:X1:X1-A1",
+               deadline_at: nil
+             },
+             %Demand{
+               subject: "market:X1:X1-A2",
+               due_at: @as_of,
+               deadline_at: ^expected_deadline
+             }
+           ] = demands
   end
 
   test "duplicate Market observations normalize deterministically to one newest observation" do

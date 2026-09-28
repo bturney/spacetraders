@@ -1,5 +1,12 @@
 defmodule SpaceTraders.Evidence.ObservationDemand do
-  @moduledoc "A durable, revocable requirement for authoritative evidence."
+  @moduledoc """
+  A durable, revocable requirement for authoritative evidence.
+
+  `due_at` is the earliest useful acquisition time that reconstructs the
+  scheduler wakeup from durable state. `deadline_at` is optional and means that
+  missing evidence after that point materially limits a decision or Hard
+  Constraint; a missed deadline never removes an open demand.
+  """
 
   use Ecto.Schema
   import Ecto.Changeset
@@ -10,7 +17,9 @@ defmodule SpaceTraders.Evidence.ObservationDemand do
     field :subject, :string
     field :required_facts, {:array, :string}
     field :freshness_seconds, :integer
+    field :due_at, :utc_datetime_usec
     field :deadline_at, :utc_datetime_usec
+    field :deadline_missed_at, :utc_datetime_usec
     field :owner, :string
     field :withdrawn_at, :utc_datetime_usec
 
@@ -32,6 +41,7 @@ defmodule SpaceTraders.Evidence.ObservationDemand do
       :subject,
       :required_facts,
       :freshness_seconds,
+      :due_at,
       :deadline_at,
       :owner,
       :replaces_id
@@ -46,7 +56,7 @@ defmodule SpaceTraders.Evidence.ObservationDemand do
       :subject,
       :required_facts,
       :freshness_seconds,
-      :deadline_at,
+      :due_at,
       :owner
     ])
     |> validate_length(:subject, min: 1)
@@ -57,10 +67,23 @@ defmodule SpaceTraders.Evidence.ObservationDemand do
         else: [required_facts: "must contain only named facts"]
     end)
     |> validate_number(:freshness_seconds, greater_than_or_equal_to: 0)
+    |> validate_deadline_not_before_due()
     |> validate_length(:owner, min: 1)
     |> foreign_key_constraint(:agent_id)
     |> foreign_key_constraint(:strategy_revision_id)
     |> foreign_key_constraint(:replaces_id)
     |> unique_constraint(:replaces_id)
+  end
+
+  # The latest acceptable time can never precede the earliest useful time.
+  defp validate_deadline_not_before_due(changeset) do
+    due = get_field(changeset, :due_at)
+    deadline = get_field(changeset, :deadline_at)
+
+    if due && deadline && DateTime.compare(deadline, due) == :lt do
+      add_error(changeset, :deadline_at, "cannot precede the earliest useful due_at")
+    else
+      changeset
+    end
   end
 end
