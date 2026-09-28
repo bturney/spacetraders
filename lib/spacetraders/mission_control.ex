@@ -10,7 +10,7 @@ defmodule SpaceTraders.MissionControl do
 
   alias SpaceTraders.Agent.Scope
   alias SpaceTraders.Agent.Agent, as: AgentRecord
-  alias SpaceTraders.API.ShadowAdmission
+  alias SpaceTraders.API.CapacityGovernor
   alias SpaceTraders.FleetAllocation.Commitment
   alias SpaceTraders.FleetAllocation.Portfolio
   alias SpaceTraders.Fleet.Activity
@@ -852,7 +852,7 @@ defmodule SpaceTraders.MissionControl do
   defp draft_commitments(_scope, %{draft: draft}, _availability) when not is_map(draft), do: []
 
   defp draft_commitments(scope, %{draft: draft, active_revision: active}, availability) do
-    capacity = ShadowAdmission.snapshot()
+    capacity = CapacityGovernor.snapshot()
 
     scope
     |> agents()

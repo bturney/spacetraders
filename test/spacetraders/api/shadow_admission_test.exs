@@ -2,7 +2,8 @@ defmodule SpaceTraders.API.ShadowAdmissionTest do
   use ExUnit.Case, async: true
 
   alias SpaceTraders.API.ShadowAdmission
-  alias SpaceTraders.API.ShadowAdmission.{Candidate, Snapshot}
+  alias SpaceTraders.API.ShadowAdmission.Candidate
+  alias SpaceTraders.API.CapacityGovernor.Snapshot
 
   test "identical demand, capacity, and evidence snapshots produce identical explained ordering" do
     snapshot = %Snapshot{
@@ -152,6 +153,39 @@ defmodule SpaceTraders.API.ShadowAdmissionTest do
 
     ShadowAdmission.observe_dispatch(safety_id, name)
     ShadowAdmission.observe_outcome(safety_id, 200, :ok, name)
+  end
+
+  test "a single protocol rejection is reported as transient backpressure" do
+    name = :"shadow_admission_#{System.unique_integer([:positive])}"
+    {:ok, pid} = ShadowAdmission.start_link(name: name, burst: 1, rate: 0.0)
+    on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid) end)
+
+    test_pid = self()
+
+    handler_id = "shadow-transient-test-#{System.unique_integer([:positive])}"
+
+    :ok =
+      :telemetry.attach(
+        handler_id,
+        [:spacetraders, :api, :capacity, :admission],
+        fn _event, measurements, metadata, _config ->
+          send(test_pid, {:telemetry, measurements, metadata})
+        end,
+        nil
+      )
+
+    on_exit(fn -> :telemetry.detach(handler_id) end)
+
+    operation = SpaceTraders.API.OperationInventory.fetch!("get-my-agent")
+
+    first = ShadowAdmission.observe_request(operation, %{}, name)
+    ShadowAdmission.observe_dispatch(first, name)
+    ShadowAdmission.observe_outcome(first, 429, :backpressure, name)
+    Process.sleep(5)
+
+    second = ShadowAdmission.observe_request(operation, %{lane: :safety}, name)
+
+    assert_receive {:telemetry, %{count: 1}, %{correlation_id: ^second, backpressure: :transient}}
   end
 
   defp candidate(id, attrs) do

@@ -138,13 +138,18 @@ config :spacetraders, SpaceTradersWeb.GrafanaLink,
   base_url: "https://observability-host.taila148e9.ts.net"
 
 # SpaceTraders API client: base URL for the v2 API. The rate limiter budget is
-# the game's sustainable ceiling (3 req/s sustained, burst 10). Req 429 retry
-# with Retry-After acts as a safety net on top of the client-side limiter.
+# the game's granted budget: 2 requests per second plus a separate pool of 30
+# requests per minute (0.5/s continuously, capped at 30), so sustained average
+# throughput tops out around 2.5 req/s. Req 429 retry with Retry-After acts as
+# a safety net on top of the client-side limiter and capacity governor, not as
+# the primary throughput shaper.
 config :spacetraders, SpaceTraders.API, base_url: "https://api.spacetraders.io/v2"
 
 config :spacetraders, SpaceTraders.API.RateLimiter,
-  rate: 3.0,
-  burst: 10,
+  rate: 2.0,
+  burst: 2,
+  pool_rate: 0.5,
+  pool_burst: 30,
   enabled: true
 
 # Game-secret encryption (ADR 0006). Dev/test use a committed development key;

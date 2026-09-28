@@ -4,11 +4,15 @@ defmodule SpaceTraders.API.ShadowAdmission do
 
   Callers provide immutable demand, capacity, and evidence snapshots. The result
   is deterministic and explains the ordering applied before capacity and outage
-  pacing are considered.
+  pacing are considered. Production capacity state is published by
+  `SpaceTraders.API.CapacityGovernor`; this module only reuses its snapshot
+  shape for comparisons.
   """
 
   use GenServer
   require Logger
+
+  alias SpaceTraders.API.CapacityGovernor.Snapshot
 
   defmodule Candidate do
     @moduledoc "A read or mutation considered by shadow API capacity admission."
@@ -22,18 +26,6 @@ defmodule SpaceTraders.API.ShadowAdmission do
       expected_value: nil,
       discovery: false
     ]
-  end
-
-  defmodule Snapshot do
-    @moduledoc "An immutable API capacity and evidence snapshot used for comparison."
-    @enforce_keys [
-      :observed_at,
-      :available_slots,
-      :evidence_fingerprint,
-      :next_outage_probe_at,
-      :backpressure
-    ]
-    defstruct @enforce_keys
   end
 
   defmodule Decision do
@@ -96,9 +88,6 @@ defmodule SpaceTraders.API.ShadowAdmission do
     |> Enum.map(fn {demand, rank} -> decision(demand, snapshot, rank) end)
   end
 
-  @doc "Returns the current governed capacity snapshot for Fleet reconciliation."
-  def snapshot(name \\ __MODULE__), do: GenServer.call(name, :snapshot)
-
   @impl true
   def init(opts) do
     config = Application.get_env(:spacetraders, SpaceTraders.API.RateLimiter, [])
@@ -119,24 +108,9 @@ defmodule SpaceTraders.API.ShadowAdmission do
   end
 
   @impl true
-  def handle_call(:snapshot, _from, state) do
-    state = refill(state, monotonic_ms())
-    now = DateTime.utc_now()
-
-    {:reply,
-     %Snapshot{
-       observed_at: now,
-       available_slots: floor(state.tokens),
-       evidence_fingerprint: "runtime",
-       next_outage_probe_at: state.next_outage_probe_at,
-       backpressure: if(state.backpressure_streak >= 2, do: :sustained, else: :none)
-     }, state}
-  end
-
-  @impl true
   def handle_cast({:request, correlation_id, operation, attrs, requested_at, requested_ms}, state) do
     state = refill(state, requested_ms)
-    backpressure = if state.backpressure_streak >= 2, do: :sustained, else: :none
+    backpressure = backpressure_state(state.backpressure_streak)
 
     candidate = %Candidate{
       id: correlation_id,
@@ -329,6 +303,8 @@ defmodule SpaceTraders.API.ShadowAdmission do
 
   defp capacity_reason(:would_admit), do: :capacity_available
   defp capacity_reason(:would_delay), do: :backpressure
+
+  defdelegate backpressure_state(streak), to: SpaceTraders.API.CapacityGovernor
 
   defp datetime_key(nil), do: :infinity
   defp datetime_key(%DateTime{} = datetime), do: DateTime.to_unix(datetime, :microsecond)
