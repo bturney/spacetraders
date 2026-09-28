@@ -30,9 +30,8 @@ defmodule SpaceTraders.API.RateLimiterTest do
   test "configured sustained rate never exceeds the 2/s game grant" do
     rate = Application.get_env(:spacetraders, RateLimiter, []) |> Keyword.get(:rate)
 
-    if rate do
-      assert rate <= 2.0
-    end
+    assert is_number(rate)
+    assert rate <= 2.0
   end
 
   test "disabled limiter is a no-op (acquire returns immediately)" do
@@ -66,8 +65,11 @@ defmodule SpaceTraders.API.RateLimiterTest do
       end)
 
     elapsed_ms = div(time, 1000)
-    assert elapsed_ms >= 800, "expected ~1s for 2 tokens at 2 rps, got #{elapsed_ms}ms"
-    assert elapsed_ms <= 3_000, "took too long: #{elapsed_ms}ms"
+
+    assert elapsed_ms >= 1000,
+           "3 tokens past full drain should take >= ~1.5s at 2 rps, got #{elapsed_ms}ms"
+
+    assert elapsed_ms <= 3_500, "took too long: #{elapsed_ms}ms"
   end
 
   test "never grants more than 2/s steady once both pools drain" do

@@ -304,9 +304,7 @@ defmodule SpaceTraders.API.ShadowAdmission do
   defp capacity_reason(:would_admit), do: :capacity_available
   defp capacity_reason(:would_delay), do: :backpressure
 
-  defp backpressure_state(streak) when streak >= 2, do: :sustained
-  defp backpressure_state(1), do: :transient
-  defp backpressure_state(_streak), do: :none
+  defdelegate backpressure_state(streak), to: SpaceTraders.API.CapacityGovernor
 
   defp datetime_key(nil), do: :infinity
   defp datetime_key(%DateTime{} = datetime), do: DateTime.to_unix(datetime, :microsecond)

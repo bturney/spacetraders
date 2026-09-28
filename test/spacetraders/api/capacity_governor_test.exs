@@ -119,26 +119,37 @@ defmodule SpaceTraders.API.CapacityGovernorTest do
   end
 
   test "snapshot distinguishes normal, transient, and sustained protocol backpressure" do
-    name = start_governor()
+    name = start_governor(max_in_flight: 3)
+    operation = SpaceTraders.API.OperationInventory.fetch!("get-my-agent")
 
     snapshot = CapacityGovernor.snapshot(name)
     assert %CapacityGovernor.Snapshot{} = snapshot
     assert snapshot.backpressure == :none
 
-    CapacityGovernor.complete(admission("a"), 429, name)
+    {:ok, first} = CapacityGovernor.admit(operation, %{}, name)
+    {:ok, second} = CapacityGovernor.admit(operation, %{}, name)
+    queued = Task.async(fn -> CapacityGovernor.admit(operation, %{}, name) end)
+    Process.sleep(10)
+
+    CapacityGovernor.protocol_rejected(0, name)
+
     assert %CapacityGovernor.Snapshot{backpressure: :transient} = CapacityGovernor.snapshot(name)
 
-    CapacityGovernor.complete(admission("b"), 429, name)
+    CapacityGovernor.protocol_rejected(0, name)
+
     assert %CapacityGovernor.Snapshot{backpressure: :sustained} = CapacityGovernor.snapshot(name)
 
-    CapacityGovernor.complete(admission("c"), 200, name)
+    CapacityGovernor.complete(first, 200, name)
+    {:ok, third} = Task.await(queued)
+    CapacityGovernor.complete(third, 200, name)
+
     assert %CapacityGovernor.Snapshot{backpressure: :none} = CapacityGovernor.snapshot(name)
   end
 
   test "snapshot counts recent protocol rejections for calibration" do
     name = start_governor()
 
-    CapacityGovernor.complete(admission("a"), 429, name)
+    CapacityGovernor.protocol_rejected(0, name)
 
     assert %CapacityGovernor.Snapshot{protocol_rejections: 1} = CapacityGovernor.snapshot(name)
   end
@@ -182,19 +193,29 @@ defmodule SpaceTraders.API.CapacityGovernorTest do
 
   test "restart restores conservative admission that widens on clean outcomes" do
     name = start_governor(max_in_flight: 4)
+    operation = SpaceTraders.API.OperationInventory.fetch!("get-my-agent")
 
     assert %CapacityGovernor.Snapshot{admitted_capacity: 2} = CapacityGovernor.snapshot(name)
 
-    CapacityGovernor.complete(admission("a"), 200, name)
-    CapacityGovernor.complete(admission("b"), 200, name)
+    {:ok, first} = CapacityGovernor.admit(operation, %{}, name)
+    {:ok, second} = CapacityGovernor.admit(operation, %{}, name)
 
+    CapacityGovernor.complete(first, 200, name)
+    assert %CapacityGovernor.Snapshot{admitted_capacity: 3} = CapacityGovernor.snapshot(name)
+
+    CapacityGovernor.complete(second, 200, name)
     assert %CapacityGovernor.Snapshot{admitted_capacity: 4} = CapacityGovernor.snapshot(name)
 
     CapacityGovernor.protocol_rejected(0, name)
     assert %CapacityGovernor.Snapshot{admitted_capacity: 3} = CapacityGovernor.snapshot(name)
 
-    CapacityGovernor.complete(admission("c"), :unknown, name)
-    assert %CapacityGovernor.Snapshot{admitted_capacity: 2} = CapacityGovernor.snapshot(name)
+    {:ok, third} = CapacityGovernor.admit(operation, %{}, name)
+    CapacityGovernor.complete(third, :unknown, name)
+
+    assert %CapacityGovernor.Snapshot{admitted_capacity: 2, next_outage_probe_at: probe} =
+             CapacityGovernor.snapshot(name)
+
+    assert %DateTime{} = probe
   end
 
   test "emits admission telemetry measuring queue time and outcome telemetry for rejection and recovery" do
@@ -224,12 +245,14 @@ defmodule SpaceTraders.API.CapacityGovernorTest do
 
     assert q >= 0
 
-    CapacityGovernor.complete(first, 429, name)
+    CapacityGovernor.protocol_rejected(0, name)
 
-    assert_receive {:telemetry, [:spacetraders, :api, :capacity, :reject], %{count: 1}, _reject}
+    assert_receive {:telemetry, [:spacetraders, :api, :capacity, :reject],
+                    %{count: 1, protocol_rejections: rejections}, %{ordinary_delayed: false}}
 
-    assert {:ok, next} = CapacityGovernor.admit(operation, %{lane: :standard}, name)
-    CapacityGovernor.complete(next, 200, name)
+    assert rejections == 1
+
+    CapacityGovernor.complete(first, 200, name)
 
     assert_receive {:telemetry, [:spacetraders, :api, :capacity, :recovered], %{count: 1},
                     %{recovery_ms: recovery}}

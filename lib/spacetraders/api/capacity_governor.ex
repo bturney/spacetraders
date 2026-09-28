@@ -59,7 +59,7 @@ defmodule SpaceTraders.API.CapacityGovernor do
   end
 
   @restart_capacity 2
-  @four_twentynine_window_ms 60_000
+  @rejection_window_ms 60_000
 
   def start_link(opts \\ []) do
     {name, opts} = Keyword.pop(opts, :name, __MODULE__)
@@ -125,7 +125,9 @@ defmodule SpaceTraders.API.CapacityGovernor do
        backpressure_streak: 0,
        rejection_window: [],
        first_rejection_at: nil,
-       ordinary_delayed_until: nil
+       ordinary_delayed_until: nil,
+       outage_streak: 0,
+       next_outage_probe_at: nil
      }}
   end
 
@@ -155,8 +157,8 @@ defmodule SpaceTraders.API.CapacityGovernor do
        observed_at: DateTime.utc_now(),
        available_slots: max(state.admitted_capacity - map_size(state.in_flight), 0),
        evidence_fingerprint: "runtime",
-       next_outage_probe_at: nil,
-       backpressure: backpressure(state),
+       next_outage_probe_at: state.next_outage_probe_at,
+       backpressure: backpressure_state(state.backpressure_streak),
        ordinary_delayed_until: state.ordinary_delayed_until,
        admitted_capacity: state.admitted_capacity,
        protocol_rejections: recent_rejections(state)
@@ -218,14 +220,28 @@ defmodule SpaceTraders.API.CapacityGovernor do
       | backpressure_streak: 0,
         rejection_window: [],
         first_rejection_at: nil,
-        admitted_capacity: min(state.admitted_capacity + 1, state.max_in_flight)
+        admitted_capacity: min(state.admitted_capacity + 1, state.max_in_flight),
+        outage_streak: 0,
+        next_outage_probe_at: nil
     }
   end
 
-  defp record_outcome(state, 429), do: note_rejection(state, 0)
+  # Every transport-level protocol rejection is reported through
+  # protocol_rejected/2 (transparent retries included), so a 429 reaching
+  # completion here is not counted a second time.
+  defp record_outcome(state, 429), do: state
 
-  defp record_outcome(state, status) when status in 500..599 or status == :unknown,
-    do: %{state | admitted_capacity: min(@restart_capacity, state.max_in_flight)}
+  defp record_outcome(state, status) when status in 500..599 or status == :unknown do
+    outage_streak = state.outage_streak + 1
+    probe_delay_seconds = min(trunc(:math.pow(2, outage_streak - 1)), 60)
+
+    %{
+      state
+      | admitted_capacity: min(@restart_capacity, state.max_in_flight),
+        outage_streak: outage_streak,
+        next_outage_probe_at: DateTime.add(DateTime.utc_now(), probe_delay_seconds, :second)
+    }
+  end
 
   defp record_outcome(state, _status), do: state
 
@@ -236,11 +252,10 @@ defmodule SpaceTraders.API.CapacityGovernor do
 
     :telemetry.execute(
       [:spacetraders, :api, :capacity, :reject],
-      %{count: 1},
+      %{count: 1, protocol_rejections: recent_rejection_count(rejection_window)},
       %{
         retry_after_seconds: retry_after_seconds,
-        ordinary_delayed: not is_nil(ordinary_delayed_until),
-        protocol_rejections: recent_rejection_count(rejection_window)
+        ordinary_delayed: not is_nil(ordinary_delayed_until)
       }
     )
 
@@ -310,7 +325,7 @@ defmodule SpaceTraders.API.CapacityGovernor do
         %{
           operation_id: request.operation.id,
           lane: admission.lane,
-          backpressure: backpressure(state),
+          backpressure: backpressure_state(state.backpressure_streak),
           ordinary_delayed_until: state.ordinary_delayed_until
         }
       )
@@ -371,16 +386,17 @@ defmodule SpaceTraders.API.CapacityGovernor do
 
   defp lane(_request), do: :standard
 
-  defp backpressure(state) when state.backpressure_streak >= 2, do: :sustained
-  defp backpressure(state) when state.backpressure_streak == 1, do: :transient
-  defp backpressure(_state), do: :none
+  @doc "Protocol backpressure state for a streak of recent 429 rejections."
+  def backpressure_state(streak) when streak >= 2, do: :sustained
+  def backpressure_state(1), do: :transient
+  def backpressure_state(_streak), do: :none
 
   defp recent_rejections(state) do
     recent_rejection_count(state.rejection_window)
   end
 
   defp recent_rejection_count(rejection_window) do
-    cutoff = monotonic_ms() - @four_twentynine_window_ms
+    cutoff = monotonic_ms() - @rejection_window_ms
 
     Enum.count(rejection_window, &(&1 >= cutoff))
   end

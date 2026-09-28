@@ -58,6 +58,19 @@ defmodule SpaceTraders.PromEx.API do
           tags: [:ordinary_delayed],
           description: "Protocol-limit rejections and Retry-After ordinary admission delays."
         ),
+        last_value(
+          [:spacetraders, :api, :capacity, :rejections, :window],
+          event_name: @capacity_reject_event,
+          measurement: :protocol_rejections,
+          description: "Protocol-limit rejections inside the governor calibration window."
+        ),
+        distribution(
+          [:spacetraders, :api, :capacity, :rejections, :retry_after, :seconds],
+          event_name: @capacity_reject_event,
+          measurement: :retry_after_seconds,
+          reporter_options: [buckets: [1, 2, 5, 10, 30, 60]],
+          description: "Retry-After delays the game granted on protocol rejections."
+        ),
         counter(
           [:spacetraders, :api, :capacity, :recoveries, :total],
           event_name: @capacity_recovered_event,

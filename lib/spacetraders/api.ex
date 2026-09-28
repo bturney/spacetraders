@@ -970,7 +970,7 @@ defmodule SpaceTraders.API do
       false
     else
       emit_request_metric(operation_for_retry(path, method), path, 429)
-      report_protocol_rejection(response)
+      report_protocol_rejection(Req.Response.get_retry_after(response))
 
       case Req.Response.get_retry_after(response) do
         delay when is_integer(delay) -> {:delay, delay}
@@ -992,12 +992,11 @@ defmodule SpaceTraders.API do
 
   defp retry(_request, _response, _path, _method, _token), do: false
 
-  defp report_protocol_rejection(response) do
-    case Req.Response.get_retry_after(response) do
-      delay when is_integer(delay) -> CapacityGovernor.protocol_rejected(delay)
-      _ -> CapacityGovernor.protocol_rejected(0)
-    end
-  end
+  defp report_protocol_rejection(delay_seconds)
+       when is_integer(delay_seconds) and delay_seconds > 0,
+       do: CapacityGovernor.protocol_rejected(delay_seconds)
+
+  defp report_protocol_rejection(_delay), do: CapacityGovernor.protocol_rejected(0)
 
   defp operation_for_retry(path, method),
     do: OperationInventory.fetch_by_request!(method, path)
