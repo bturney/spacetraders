@@ -4,7 +4,7 @@ defmodule SpaceTradersWeb.MissionControlLive do
   use SpaceTradersWeb, :live_view
 
   alias SpaceTraders.{MissionControl, OperatorConditions}
-  alias SpaceTradersWeb.EntityReference
+  alias SpaceTradersWeb.{EntityReference, GrafanaLink}
 
   @impl true
   def mount(_params, _session, socket) do
@@ -113,6 +113,13 @@ defmodule SpaceTradersWeb.MissionControlLive do
             </p>
             <p class="mt-1 text-sm opacity-70">{objective.objective["evaluation"]}</p>
             <p class="mt-4 text-sm">{evaluation_label(objective.evaluation)}</p>
+            <a
+              :if={objective_grafana_url(@projection)}
+              href={objective_grafana_url(@projection)}
+              target="_blank"
+              rel="noreferrer"
+              class="link link-primary mt-3 inline-block text-sm"
+            >Inspect Strategy outcomes</a>
           </article>
         </section>
 
@@ -130,6 +137,12 @@ defmodule SpaceTradersWeb.MissionControlLive do
                 navigate={EntityReference.path(condition.entity_ref)}
                 class="link link-primary mt-1 inline-block"
               >{EntityReference.label(condition.entity_ref)}</.link>
+              <a
+                href={GrafanaLink.condition_url(condition)}
+                target="_blank"
+                rel="noreferrer"
+                class="link link-primary mt-1 block text-sm"
+              >Inspect {GrafanaLink.family_label(GrafanaLink.family_for_condition(condition))}</a>
               <span :if={condition.acknowledged_at} class="text-sm opacity-70">Acknowledged · unresolved</span>
               <button
                 :if={!condition.acknowledged_at}
@@ -414,4 +427,28 @@ defmodule SpaceTradersWeb.MissionControlLive do
   defp realized_label(amount), do: "#{amount} credits"
 
   defp limitation_label(limitation), do: limitation
+
+  defp objective_grafana_url(%{
+         strategy: %{active_revision: revision},
+         generations: generations
+       }) do
+    case Enum.find(
+           generations,
+           &(&1.fleet_strategy_revision_id == revision.id and is_nil(&1.fenced_at) and
+               is_nil(&1.retired_at))
+         ) do
+      nil ->
+        nil
+
+      generation ->
+        GrafanaLink.url(:strategy_outcomes,
+          fleet_generation: generation.id,
+          strategy_revision: revision.id,
+          from: DateTime.add(generation.inserted_at, -300),
+          to: :now
+        )
+    end
+  end
+
+  defp objective_grafana_url(_projection), do: nil
 end

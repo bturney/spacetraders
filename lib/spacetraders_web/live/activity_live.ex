@@ -4,7 +4,7 @@ defmodule SpaceTradersWeb.ActivityLive do
   use SpaceTradersWeb, :live_view
 
   alias SpaceTraders.{MissionControl, OperatorConditions}
-  alias SpaceTradersWeb.EntityReference
+  alias SpaceTradersWeb.{EntityReference, GrafanaLink}
 
   @impl true
   def mount(_params, _session, socket) do
@@ -89,6 +89,18 @@ defmodule SpaceTradersWeb.ActivityLive do
           <details class="mt-2 text-sm">
             <summary class="cursor-pointer text-primary">Why and context</summary>
             <p class="mt-2 opacity-75">{entry.detail}</p>
+            <.link
+              :if={Map.get(entry, :decision_episode_id)}
+              navigate={~p"/decision-episodes/#{Map.get(entry, :decision_episode_id)}"}
+              class="link link-primary mt-1 block"
+            >Decision Episode {Map.get(entry, :decision_episode_id)}</.link>
+            <a
+              :if={Map.get(entry, :condition_key)}
+              href={GrafanaLink.condition_url(entry)}
+              target="_blank"
+              rel="noreferrer"
+              class="link link-primary mt-1 block"
+            >Inspect {GrafanaLink.family_label(GrafanaLink.family_for_condition(entry))}</a>
             <.link navigate={~p"/generations"} class="link link-primary mt-1 inline-block">Generation history</.link>
           </details>
         </li>

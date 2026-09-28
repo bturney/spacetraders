@@ -77,7 +77,7 @@ defmodule SpaceTradersWeb.OperationsLiveTest do
         reservations: %{credits: 200}
       })
 
-    {:ok, _portfolio} =
+    {:ok, portfolio} =
       SpaceTraders.FleetAllocation.publish_portfolio(scope, generation.id, selection, %{
         evidence_references: [],
         expectations: %{},
@@ -91,6 +91,12 @@ defmodule SpaceTradersWeb.OperationsLiveTest do
     assert html =~ "credits: 200"
     assert html =~ "Active"
     assert html =~ "Decision Episode"
+
+    assert has_element?(
+             view,
+             "a[href='/decision-episodes/#{portfolio.strategy_decision_episode_id}']"
+           )
+
     assert has_element?(view, "a[href='/ships/SHIP-1']", "SHIP-1")
     assert has_element?(view, "a[href='/contracts/CONTRACT-1']", "Contract CONTRACT-1")
 
@@ -160,9 +166,14 @@ defmodule SpaceTradersWeb.OperationsLiveTest do
     |> Ecto.Changeset.change(unwind_state: :released)
     |> Repo.update!()
 
-    {:ok, _view, html} = live(conn, ~p"/operations")
+    {:ok, view, html} = live(conn, ~p"/operations")
 
     assert html =~ "Released Endeavor evidence"
     assert html =~ "Decision Episode #{portfolio.strategy_decision_episode_id}"
+
+    assert has_element?(
+             view,
+             "a[href='/decision-episodes/#{portfolio.strategy_decision_episode_id}']"
+           )
   end
 end

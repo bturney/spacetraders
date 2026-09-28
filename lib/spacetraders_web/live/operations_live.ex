@@ -79,7 +79,10 @@ defmodule SpaceTradersWeb.OperationsLive do
               </div>
               <p class="mt-2 text-sm">{endeavor.reason}</p>
               <p class="mt-1 text-sm opacity-70">
-                Expected value {endeavor.forecast}. Decision Episode {endeavor.decision_episode_id}.
+                Expected value {endeavor.forecast}. <.link
+                  navigate={~p"/decision-episodes/#{endeavor.decision_episode_id}"}
+                  class="link link-primary"
+                >Decision Episode {endeavor.decision_episode_id}</.link>.
               </p>
 
               <div class="mt-3 grid gap-3 sm:grid-cols-3">
@@ -131,7 +134,10 @@ defmodule SpaceTradersWeb.OperationsLive do
             <li :for={evidence <- @projection.released} class="border-t border-base-300 pt-3">
               <p class="font-semibold">{evidence.outcome}</p>
               <p class="text-sm">{evidence.reason}</p>
-              <p class="text-sm opacity-70">Decision Episode {evidence.decision_episode_id}</p>
+              <.link
+                navigate={~p"/decision-episodes/#{evidence.decision_episode_id}"}
+                class="link link-primary text-sm"
+              >Decision Episode {evidence.decision_episode_id}</.link>
             </li>
           </ul>
         </section>

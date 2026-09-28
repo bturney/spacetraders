@@ -19,9 +19,11 @@ only committed Compose files and scripts. They do not send host secrets.
 
 The host `.env` must define `PHX_HOST`, `SECRET_KEY_BASE`, `ENCRYPTION_KEY`, and
 `POSTGRES_PASSWORD`. `POSTGRES_DB` and `POSTGRES_USER` default to
-`spacetraders`. `PHX_CHECK_ORIGINS` is an optional comma-separated Phoenix
-origin allowlist. Use scheme-relative origins with the non-default port. Add
-both Tailscale names when Operators use both, for example:
+`spacetraders`. `GRAFANA_BASE_URL` optionally overrides the tailnet-only
+observability URL used by contextual links; it contains no credentials.
+`PHX_CHECK_ORIGINS` is an optional comma-separated Phoenix origin allowlist.
+Use scheme-relative origins with the non-default port. Add both Tailscale names
+when Operators use both, for example:
 
 ```text
 //project-host:4000,//project-host.<tailnet>.ts.net:4000

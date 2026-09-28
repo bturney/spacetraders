@@ -134,6 +134,9 @@ config :spacetraders, SpaceTraders.PromEx,
   manual_metrics_start_delay: :no_delay,
   drop_metrics_groups: []
 
+config :spacetraders, SpaceTradersWeb.GrafanaLink,
+  base_url: "https://observability-host.taila148e9.ts.net"
+
 # SpaceTraders API client: base URL for the v2 API. The rate limiter budget is
 # the game's sustainable ceiling (3 req/s sustained, burst 10). Req 429 retry
 # with Retry-After acts as a safety net on top of the client-side limiter.

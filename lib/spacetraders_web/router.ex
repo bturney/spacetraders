@@ -54,6 +54,7 @@ defmodule SpaceTradersWeb.Router do
       live "/operations", OperationsLive, :index
       live "/activity", ActivityLive, :index
       live "/generations", GenerationsLive, :index
+      live "/decision-episodes/:id", DecisionEpisodeLive, :show
       live "/world", WorldLive, :index
       live "/world/systems/:system", EntityLive, :system
       live "/world/systems/:system/waypoints/:waypoint", EntityLive, :waypoint

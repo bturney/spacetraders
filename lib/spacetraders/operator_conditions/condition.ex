@@ -13,6 +13,11 @@ defmodule SpaceTraders.OperatorConditions.Condition do
     field :resolved_at, :utc_datetime_usec
 
     belongs_to :operator, SpaceTraders.Agent.Operator
+    belongs_to :fleet_generation, SpaceTraders.FleetGeneration.Generation
+    belongs_to :fleet_strategy_revision, SpaceTraders.FleetStrategy.Revision
+
+    belongs_to :strategy_decision_episode,
+               SpaceTraders.FleetAllocation.StrategyDecisionEpisode
 
     timestamps(type: :utc_datetime_usec)
   end
@@ -25,6 +30,9 @@ defmodule SpaceTraders.OperatorConditions.Condition do
       :kind,
       :summary,
       :entity_ref,
+      :fleet_generation_id,
+      :fleet_strategy_revision_id,
+      :strategy_decision_episode_id,
       :acknowledged_at,
       :resolved_at
     ])
