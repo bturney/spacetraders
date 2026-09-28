@@ -779,6 +779,9 @@ defmodule SpaceTraders.FleetGeneration do
     |> Ecto.Changeset.change(retired_at: retired_at)
     |> Repo.update!()
 
+    # A retired Generation's Strategy no longer makes its demands relevant.
+    Evidence.withdraw_agent_demands(generation.agent_id)
+
     :ok
   end
 
@@ -864,6 +867,8 @@ defmodule SpaceTraders.FleetGeneration do
         ),
         set: [fenced_at: now, updated_at: DateTime.truncate(now, :second)]
       )
+
+      Evidence.withdraw_agent_demands(agent.id, DateTime.truncate(now, :second))
 
       stale_agent
     end)

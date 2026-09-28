@@ -2097,14 +2097,46 @@ defmodule SpaceTraders.FleetPlanning do
 
       case usable_market(market, snapshot) do
         {:ok, market} ->
+          # A currently usable retained Listing still needs its future refresh
+          # demand, due at the observation time plus the existing freshness
+          # budget. It carries no deadline: inventing one would place a latest
+          # acceptable time before the earliest useful time.
+          demands = [
+            market_refresh_demand(%{
+              subject: subject,
+              observed_at: market.observed_at,
+              fresh: true,
+              as_of: snapshot.as_of,
+              freshness_seconds: snapshot.freshness_seconds,
+              expected_value: market_demand_value(market, snapshot),
+              objective_index: objective_index,
+              agent_id: snapshot.agent_id,
+              strategy_revision_id: revision.id
+            })
+            | demands
+          ]
+
           {[market | markets], demands, limitations}
 
         {:error, reason} ->
+          # Stale or missing evidence is due now and keeps the existing
+          # immediate decision deadline.
           demands =
             case market_demand_value(market, snapshot) do
               value when is_number(value) and value > 0 ->
                 [
-                  observation_demand(revision, objective_index, snapshot, subject, value)
+                  market_refresh_demand(%{
+                    subject: subject,
+                    observed_at: value_observed_at(market, snapshot),
+                    fresh: false,
+                    as_of: snapshot.as_of,
+                    freshness_seconds: snapshot.freshness_seconds,
+                    deadline_seconds: snapshot.demand_deadline_seconds,
+                    expected_value: value,
+                    objective_index: objective_index,
+                    agent_id: snapshot.agent_id,
+                    strategy_revision_id: revision.id
+                  })
                   | demands
                 ]
 
@@ -2346,6 +2378,8 @@ defmodule SpaceTraders.FleetPlanning do
     end
   end
 
+  defp value_observed_at(market, _snapshot), do: market.observed_at
+
   defp market_goods(market, as_of) do
     observed_at = value(market, :observed_at)
     goods = value(market, :trade_goods)
@@ -2357,17 +2391,46 @@ defmodule SpaceTraders.FleetPlanning do
        else: []
   end
 
-  defp observation_demand(revision, objective_index, snapshot, subject, expected_value) do
+  @doc """
+  One Market refresh Observation Demand description for one retained Listing,
+  shared by pure Fleet Planning and runtime synchronization.
+
+  A usable (fresh) retained Listing is due at its observation time plus the
+  freshness budget and carries no deadline. A stale or incomplete retained
+  Listing is due now with the existing immediate decision deadline. This is
+  the single timing policy for Market refresh demands; no caller invents its
+  own duration or deadline.
+  """
+  def market_refresh_demand(
+        %{
+          subject: subject,
+          observed_at: observed_at,
+          fresh: fresh?,
+          as_of: as_of,
+          freshness_seconds: freshness_seconds
+        } = attrs
+      )
+      when is_binary(subject) and is_struct(observed_at, DateTime) do
+    deadline_seconds = Map.get(attrs, :deadline_seconds, @observation_demand_deadline_seconds)
+
+    {due_at, deadline_at} =
+      if fresh? do
+        {DateTime.add(observed_at, freshness_seconds, :second), nil}
+      else
+        {as_of, DateTime.add(as_of, deadline_seconds, :second)}
+      end
+
     %Demand{
       subject: subject,
       required_facts: ["trade_goods"],
       owner: "fleet_planning",
-      deadline_at: DateTime.add(snapshot.as_of, snapshot.demand_deadline_seconds, :second),
-      freshness_seconds: snapshot.freshness_seconds,
-      agent_id: snapshot.agent_id,
-      strategy_revision_id: revision.id,
-      strategic_priority: objective_index,
-      expected_value: expected_value,
+      deadline_at: deadline_at,
+      freshness_seconds: freshness_seconds,
+      due_at: due_at,
+      agent_id: attrs[:agent_id],
+      strategy_revision_id: attrs[:strategy_revision_id],
+      strategic_priority: attrs[:objective_index],
+      expected_value: attrs[:expected_value],
       discovery: false
     }
   end

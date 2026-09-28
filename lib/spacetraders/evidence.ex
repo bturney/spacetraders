@@ -1,4 +1,5 @@
 defmodule SpaceTraders.Evidence do
+  @demand_topic "observation_demands"
   @moduledoc """
   Owns durable Observation Demands and authoritative evidence provenance.
 
@@ -313,6 +314,7 @@ defmodule SpaceTraders.Evidence do
       subject: subject,
       required_facts: required_facts,
       owner: Keyword.get(opts, :owner, "evidence"),
+      due_at: now,
       deadline_at:
         Keyword.get(
           opts,
@@ -342,6 +344,7 @@ defmodule SpaceTraders.Evidence do
           subject: demand.subject,
           required_facts: demand.required_facts,
           freshness_seconds: demand.freshness_seconds,
+          due_at: demand.due_at,
           deadline_at: demand.deadline_at,
           owner: demand.owner
         }
@@ -437,7 +440,12 @@ defmodule SpaceTraders.Evidence do
   defp serialize_read_value(value), do: stringify_keys(value)
 
   defp normalize_demand_datetime(attrs) do
-    Map.update(attrs, :deadline_at, nil, fn
+    attrs
+    |> Map.update(:due_at, nil, fn
+      %DateTime{} = datetime -> microsecond_precision(datetime)
+      value -> value
+    end)
+    |> Map.update(:deadline_at, nil, fn
       %DateTime{} = datetime -> microsecond_precision(datetime)
       value -> value
     end)
@@ -461,6 +469,10 @@ defmodule SpaceTraders.Evidence do
       %ObservationDemand{}
       |> ObservationDemand.create_changeset(attrs)
       |> Repo.insert()
+      |> tap(fn
+        {:ok, _demand} -> notify_demand_change(agent.id)
+        _error -> :ok
+      end)
     else
       {:error, :strategy_provenance_mismatch}
     end
@@ -484,13 +496,21 @@ defmodule SpaceTraders.Evidence do
           :subject,
           :required_facts,
           :freshness_seconds,
+          :due_at,
           :deadline_at,
           :owner,
           :agent_id,
           :strategy_revision_id
         ])
         |> Map.merge(
-          Map.take(attrs, [:subject, :required_facts, :freshness_seconds, :deadline_at, :owner])
+          Map.take(attrs, [
+            :subject,
+            :required_facts,
+            :freshness_seconds,
+            :due_at,
+            :deadline_at,
+            :owner
+          ])
         )
         |> Map.put(:replaces_id, current.id)
 
@@ -500,6 +520,10 @@ defmodule SpaceTraders.Evidence do
         {:ok, replacement} -> replacement
         {:error, changeset} -> Repo.rollback(changeset)
       end
+    end)
+    |> tap(fn
+      {:ok, replacement} -> notify_demand_change(replacement.agent_id)
+      _error -> :ok
     end)
   end
 
@@ -513,20 +537,312 @@ defmodule SpaceTraders.Evidence do
       |> Ecto.Changeset.change(withdrawn_at: now)
       |> Repo.update!()
     end)
+    |> tap(fn {:ok, withdrawn} -> notify_demand_change(withdrawn.agent_id) end)
   end
 
-  @doc "Lists active demands in deadline order."
-  def list_open_demands(%AgentRecord{} = agent, now \\ Clock.utc_now()) do
+  @doc """
+  Lists open demands in earliest-useful-time order.
+
+  Open means not withdrawn and not fulfilled. A missed `deadline_at` never
+  removes a demand from this query: overdue work stays durably visible as a
+  decision limitation instead of silently disappearing.
+  """
+  def list_open_demands(%AgentRecord{} = agent) do
+    ObservationDemand
+    |> where(
+      [demand],
+      demand.agent_id == ^agent.id and is_nil(demand.withdrawn_at) and
+        is_nil(demand.fulfilled_observation_id)
+    )
+    |> order_by([demand], asc: demand.due_at, asc: demand.inserted_at, asc: demand.id)
+    |> Repo.all()
+  end
+
+  @doc """
+  Returns the earliest useful time among all open demands, or `nil`.
+
+  This is the durable ground truth from which the scheduler reconstructs its
+  one earliest due wakeup on boot and after every demand change; process timer
+  memory is only a wakeup optimization.
+  """
+  def earliest_due_at do
+    ObservationDemand
+    |> where(
+      [demand],
+      not is_nil(demand.agent_id) and is_nil(demand.withdrawn_at) and
+        is_nil(demand.fulfilled_observation_id)
+    )
+    |> select([demand], min(demand.due_at))
+    |> Repo.one()
+  end
+
+  @doc """
+  Returns every open demand whose earliest useful time has passed, soonest first.
+  """
+  def due_demands(now \\ Clock.utc_now()) do
     now = microsecond_precision(now)
 
     ObservationDemand
     |> where(
       [demand],
-      demand.agent_id == ^agent.id and is_nil(demand.withdrawn_at) and
-        is_nil(demand.fulfilled_observation_id) and demand.deadline_at >= ^now
+      not is_nil(demand.agent_id) and is_nil(demand.withdrawn_at) and
+        is_nil(demand.fulfilled_observation_id) and
+        demand.due_at <= ^now
     )
-    |> order_by([demand], asc: demand.deadline_at, asc: demand.inserted_at, asc: demand.id)
+    |> order_by([demand], asc: demand.due_at, asc: demand.inserted_at, asc: demand.id)
     |> Repo.all()
+  end
+
+  @doc """
+  Withdraws every open demand owned by one Agent without deleting its Strategy
+  provenance.
+
+  Fleet Generation retirement and fencing use this to retire a lost Strategy's
+  demands: the rows stay durably attributed to their Strategy revision and
+  owner, and simply stop participating in scheduling and demand queries.
+  """
+  def withdraw_agent_demands(agent_id, now \\ Clock.utc_now()) when is_integer(agent_id) do
+    now = microsecond_precision(now)
+
+    {withdrawn, _} =
+      ObservationDemand
+      |> where(
+        [demand],
+        demand.agent_id == ^agent_id and is_nil(demand.withdrawn_at) and
+          is_nil(demand.fulfilled_observation_id)
+      )
+      |> Repo.update_all(set: [withdrawn_at: now, updated_at: now])
+
+    if withdrawn > 0, do: notify_demand_change(agent_id)
+    :ok
+  end
+
+  @doc """
+  Persists one future Observation Demand per runtime planning description,
+  idempotently, with at most one open demand per consumer (`owner`) and
+  subject for the active Agent and Strategy Revision.
+
+  For each description:
+
+  - an open demand whose `due_at` matches is left untouched;
+  - an open demand whose `due_at` is already due or overdue keeps its timing,
+    so API backpressure cannot silently extend the requirement;
+  - an open future demand is replaced (provenance preserved through
+    `replaces_id`) only when the description moves to a later useful time,
+    which happens when newer evidence was retained;
+  - with no open demand, a new one is created and, when a previous demand for
+    the same consumer and subject exists, chained to it through `replaces_id`;
+  - duplicate open demands for the same consumer and subject are consolidated:
+    the newest is retained or replaced, older strays are withdrawn.
+
+  Fail-fast: returns the first error and stops; descriptions before it may
+  have been persisted. Invalid descriptions (non-map values or rejected
+  changesets) return `{:error, term}` instead of silently claiming success.
+  """
+  def sync_runtime_demands(
+        %AgentRecord{} = agent,
+        %Revision{} = revision,
+        specs,
+        now \\ Clock.utc_now()
+      )
+      when is_list(specs) do
+    now = microsecond_precision(now)
+
+    Enum.reduce_while(specs, :ok, fn
+      spec, acc when is_map(spec) ->
+        case sync_one_runtime_demand(agent, revision, spec, now) do
+          :ok -> {:cont, acc}
+          {:ok, _demand} -> {:cont, acc}
+          {:error, _} = error -> {:halt, error}
+        end
+
+      _spec, _acc ->
+        {:halt, {:error, :invalid_runtime_demand_spec}}
+    end)
+  end
+
+  defp sync_one_runtime_demand(agent, revision, spec, now) do
+    opens =
+      ObservationDemand
+      |> where(
+        [demand],
+        demand.agent_id == ^agent.id and demand.subject == ^spec.subject and
+          demand.strategy_revision_id == ^revision.id and demand.owner == ^spec.owner and
+          is_nil(demand.withdrawn_at) and is_nil(demand.fulfilled_observation_id)
+      )
+      |> order_by([demand], desc: demand.inserted_at, desc: demand.id)
+      |> Repo.all()
+
+    due_at = microsecond_precision(spec.due_at)
+
+    case opens do
+      [] ->
+        create_runtime_demand(agent, revision, spec, due_at)
+
+      # One open demand per consumer and subject: consolidate owner-scoped
+      # strays first, then retain or replace the single current row.
+      [newest | strays] ->
+        Enum.each(strays, fn stray ->
+          _ = withdraw_demand(stray, now)
+        end)
+
+        cond do
+          # The description matches the currently armed demand: idempotent
+          # no-op.
+          DateTime.compare(due_at, newest.due_at) == :eq ->
+            {:ok, newest}
+
+          # API backpressure: an already-due or overdue demand keeps its timing
+          # when the description would only move it later. A description that
+          # becomes due now or earlier supersedes it instead.
+          DateTime.compare(newest.due_at, now) != :gt and
+              DateTime.compare(due_at, newest.due_at) == :gt ->
+            {:ok, newest}
+
+          # The description supersedes the retained future demand (due now or
+          # earlier), or newer evidence moved a future useful time forward:
+          # replace through provenance with the full desired timing, clearing
+          # any deadline the new description does not carry.
+          true ->
+            replace_demand(
+              newest,
+              %{
+                required_facts: spec.required_facts,
+                freshness_seconds: spec.freshness_seconds,
+                due_at: due_at,
+                deadline_at: Map.get(spec, :deadline_at)
+              },
+              now
+            )
+        end
+    end
+  end
+
+  defp create_runtime_demand(agent, revision, spec, due_at) do
+    # Replacement provenance chains only within the same consumer and the same
+    # Strategy Revision: a new owner or a superseding Revision starts fresh.
+    predecessor =
+      ObservationDemand
+      |> where(
+        [demand],
+        demand.agent_id == ^agent.id and demand.subject == ^spec.subject and
+          demand.strategy_revision_id == ^revision.id and demand.owner == ^spec.owner
+      )
+      |> order_by([demand], desc: demand.inserted_at, desc: demand.id)
+      |> limit(1)
+      |> Repo.one()
+
+    attrs =
+      %{
+        subject: spec.subject,
+        required_facts: spec.required_facts,
+        freshness_seconds: spec.freshness_seconds,
+        due_at: due_at,
+        deadline_at: Map.get(spec, :deadline_at),
+        owner: spec.owner
+      }
+      |> maybe_put_replaces(predecessor)
+
+    case request_demand(agent, revision, attrs) do
+      {:ok, demand} -> {:ok, demand}
+      {:error, _changeset} -> {:error, :runtime_demand_not_created}
+    end
+  end
+
+  defp maybe_put_replaces(attrs, nil), do: attrs
+  defp maybe_put_replaces(attrs, predecessor), do: Map.put(attrs, :replaces_id, predecessor.id)
+
+  @doc """
+  Withdraws every open demand pinned to a superseded Strategy Revision of one
+  Operator, preserving the rows and their Strategy provenance.
+  """
+  def withdraw_superseded_demands(operator_id, active_revision_id)
+      when is_integer(operator_id) and is_integer(active_revision_id) do
+    now = Clock.utc_now()
+
+    {withdrawn, agent_ids} =
+      ObservationDemand
+      |> join(:inner, [demand], revision in Revision,
+        on: revision.id == demand.strategy_revision_id
+      )
+      |> join(:inner, [demand, revision], strategy in Strategy,
+        on: strategy.id == revision.fleet_strategy_id
+      )
+      |> where(
+        [demand, revision, strategy],
+        strategy.operator_id == ^operator_id and
+          demand.strategy_revision_id != ^active_revision_id and
+          is_nil(demand.withdrawn_at) and is_nil(demand.fulfilled_observation_id)
+      )
+      |> select([demand], demand.agent_id)
+      |> Repo.update_all(set: [withdrawn_at: now, updated_at: now])
+
+    if withdrawn > 0 do
+      agent_ids
+      |> List.wrap()
+      |> Enum.uniq()
+      |> Enum.filter(&is_integer/1)
+      |> Enum.each(&notify_demand_change/1)
+    end
+
+    :ok
+  end
+
+  @doc """
+  Withdraws open `fleet_planning` Market refresh demands whose subject is no
+  longer a known Marketplace under the active Strategy Revision, preserving
+  rows and provenance.
+
+  Subjects still known — including never-observed Marketplaces that merely
+  lack Listing evidence — are never withdrawn here: first-time coverage is
+  reset-start baseline work, and missing evidence alone is not lost relevance.
+  """
+  def withdraw_market_demands_outside_subjects(
+        %AgentRecord{} = agent,
+        %Revision{} = revision,
+        subjects,
+        now \\ Clock.utc_now()
+      )
+      when is_list(subjects) do
+    now = microsecond_precision(now)
+
+    {withdrawn, _} =
+      ObservationDemand
+      |> where(
+        [demand],
+        demand.agent_id == ^agent.id and
+          demand.strategy_revision_id == ^revision.id and
+          demand.owner == "fleet_planning" and like(demand.subject, "market:%") and
+          demand.subject not in ^subjects and
+          is_nil(demand.withdrawn_at) and is_nil(demand.fulfilled_observation_id)
+      )
+      |> Repo.update_all(set: [withdrawn_at: now, updated_at: now])
+
+    if withdrawn > 0, do: notify_demand_change(agent.id)
+    :ok
+  end
+
+  @doc """
+  Marks open demands whose optional `deadline_at` has passed with the durable
+  `deadline_missed_at` limitation instant.
+
+  The demands remain open and late authoritative evidence may still fulfil
+  them; the marker only preserves the historical limitation. Idempotent.
+  """
+  def mark_missed_deadlines(now \\ Clock.utc_now()) do
+    now = microsecond_precision(now)
+
+    {marked, _} =
+      ObservationDemand
+      |> where(
+        [demand],
+        not is_nil(demand.deadline_at) and is_nil(demand.deadline_missed_at) and
+          demand.deadline_at < ^now and
+          is_nil(demand.withdrawn_at) and is_nil(demand.fulfilled_observation_id)
+      )
+      |> Repo.update_all(set: [deadline_missed_at: now])
+
+    {:ok, marked}
   end
 
   @doc "Returns the durable authoritative evidence that fulfilled a demand."
@@ -610,6 +926,10 @@ defmodule SpaceTraders.Evidence do
 
         _ ->
           :ok
+      end)
+      |> tap(fn
+        {:ok, %{observation: persisted}} -> notify_demand_change(persisted.agent_id)
+        _error -> :ok
       end)
     else
       false -> {:error, :authoritative_observation_required}
@@ -766,9 +1086,12 @@ defmodule SpaceTraders.Evidence do
     ObservationDemand
     |> where(
       [demand],
+      # An optional or already-missed deadline never blocks fulfillment;
+      # only evidence acquired before the demand's earliest useful time is
+      # not useful to it.
       demand.agent_id == ^agent.id and demand.subject == ^subject and
         is_nil(demand.withdrawn_at) and is_nil(demand.fulfilled_observation_id) and
-        demand.deadline_at >= ^now
+        demand.due_at <= ^observation.observed_at
     )
     |> lock("FOR UPDATE")
     |> Repo.all()
@@ -792,6 +1115,16 @@ defmodule SpaceTraders.Evidence do
        do: false
 
   defp established_fact?(_value), do: true
+
+  defp notify_demand_change(agent_id) when is_integer(agent_id) do
+    Phoenix.PubSub.broadcast(
+      SpaceTraders.PubSub,
+      @demand_topic,
+      {:observation_demands_changed, agent_id}
+    )
+  end
+
+  defp notify_demand_change(_agent_id), do: :ok
 
   defp strategy_revision_owned_by_agent?(revision_record, agent) do
     Revision

@@ -4,6 +4,7 @@ defmodule SpaceTraders.IntelligenceAcquisitionTest do
   import SpaceTraders.ShipBody
 
   alias SpaceTraders.Agent.Agent, as: AgentRecord
+  alias SpaceTraders.Evidence
   alias SpaceTraders.Agent.{Operator, Scope}
   alias SpaceTraders.API.Model
   alias SpaceTraders.API.OperationInventory
@@ -1470,7 +1471,7 @@ defmodule SpaceTraders.IntelligenceAcquisitionTest do
     assert projection.facts["trade_goods"].freshness == :fresh
   end
 
-  test "the recurring durable scan re-evaluates a Generation whose Market evidence has aged out" do
+  test "a due Observation Demand wakes Market reconciliation without a recurring scan" do
     {agent, ship, previous, _commitment} =
       claimed_ship(%{
         "objective" => "Grow credits",
@@ -1485,9 +1486,8 @@ defmodule SpaceTraders.IntelligenceAcquisitionTest do
              FleetAllocation.unwind_current_portfolio(scope, previous.fleet_generation_id)
 
     # Both Markets are observed, but every Listing has aged past its freshness
-    # budget. Nothing else wakes planning once the last Listing expires, so the
-    # recurring durable scan is solely responsible for re-observing and
-    # re-evaluating the Generation.
+    # budget. A durable due Observation Demand is what wakes planning: the
+    # fixed recurring Market scan is no longer required for progress.
     for {symbol, x, buy, sell} <- [{"X1-UX81-A1", 1, 10, 9}, {"X1-UX81-A2", 2, 25, 20}] do
       waypoint =
         Model.Waypoint.from_json(%{
@@ -1564,13 +1564,143 @@ defmodule SpaceTraders.IntelligenceAcquisitionTest do
       end
     end)
 
+    revision = Repo.get!(Revision, previous.fleet_strategy_revision_id)
+
+    assert {:ok, demand} =
+             Evidence.request_demand(agent, revision, %{
+               subject: "market:X1-UX81:X1-UX81-A1",
+               required_facts: ["trade_goods"],
+               freshness_seconds: 300,
+               due_at: DateTime.add(DateTime.utc_now(), -1, :second),
+               owner: "fleet_planning"
+             })
+
+    # The durable scheduler announces due Observation Demands; Strategy
+    # reconciliation wakes from that announcement without any recurring scan.
     assert :ok =
-             Reconciler.reconcile_durable_work(%{available_slots: 3, backpressure: :none})
+             Reconciler.wake_due_demands(agent.id, %{
+               available_slots: 3,
+               backpressure: :none
+             })
+
+    eventually(fn ->
+      projection =
+        World.intelligence(agent, :market, "X1-UX81", "X1-UX81-A1", DateTime.utc_now(), 300)
+
+      projection.facts["trade_goods"].freshness == :fresh
+    end)
+
+    # The due demand is never deleted: governed evidence fulfils it, and its
+    # row keeps the durable attribution either way.
+    reloaded = Repo.reload!(demand)
+
+    if is_nil(reloaded.fulfilled_observation_id) and is_nil(reloaded.withdrawn_at) do
+      assert length(Evidence.list_open_demands(agent)) >= 1
+    end
+  end
+
+  test "API backpressure defers a due Observation Demand without deleting or fulfilling it" do
+    {agent, _ship, previous, _commitment} =
+      claimed_ship(%{
+        "objective" => "Grow credits",
+        "kind" => "continuous",
+        "evaluation" => "Maximize net credit growth over time"
+      })
+
+    scope = Scope.for_operator(Repo.get!(Operator, agent.operator_id))
+    revision = Repo.get!(Revision, previous.fleet_strategy_revision_id)
+
+    assert {:ok, _} =
+             FleetAllocation.unwind_current_portfolio(scope, previous.fleet_generation_id)
+
+    waypoint =
+      Model.Waypoint.from_json(%{
+        "symbol" => "X1-UX81-A1",
+        "systemSymbol" => "X1-UX81",
+        "type" => "PLANET",
+        "x" => 1,
+        "y" => 2,
+        "traits" => [%{"symbol" => "MARKETPLACE"}]
+      })
+
+    listing =
+      Model.Market.from_json(%{
+        "symbol" => "X1-UX81-A1",
+        "exports" => [%{"symbol" => "IRON_ORE"}],
+        "imports" => [],
+        "exchange" => [],
+        "tradeGoods" => [
+          %{
+            "symbol" => "IRON_ORE",
+            "type" => "EXPORT",
+            "tradeVolume" => 20,
+            "purchasePrice" => 12,
+            "sellPrice" => 9
+          }
+        ]
+      })
+
+    {:ok, _} = Intelligence.observe_waypoint(agent, waypoint, source: "get_waypoints")
+
+    {:ok, _} =
+      Intelligence.observe_market(agent, "X1-UX81", listing,
+        source: "get_market",
+        observing_ship_symbol: "INTELACQ-1",
+        observed_at: DateTime.add(DateTime.utc_now(), -600, :second)
+      )
+
+    assert {:ok, demand} =
+             Evidence.request_demand(agent, revision, %{
+               subject: "market:X1-UX81:X1-UX81-A1",
+               required_facts: ["trade_goods"],
+               freshness_seconds: 300,
+               due_at: DateTime.add(DateTime.utc_now(), -1, :second),
+               owner: "fleet_planning"
+             })
+
+    # The governor's published snapshot carries sustained API pressure; the
+    # wakeup runs but admission is refused.
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      case {conn.method, conn.request_path} do
+        {"GET", "/v2/my/agent"} ->
+          Req.Test.json(conn, %{
+            "data" => %{"symbol" => agent.symbol, "credits" => 10_000}
+          })
+
+        _ ->
+          conn |> Plug.Conn.put_status(404) |> Req.Test.json(%{"error" => %{"code" => 404}})
+      end
+    end)
+
+    assert :ok =
+             Reconciler.wake_due_demands(agent.id, %{
+               available_slots: 0,
+               backpressure: :sustained
+             })
+
+    # The wakeup ran, but sustained API pressure refuses admission: no fresh
+    # evidence is acquired and the demand is neither deleted nor fulfilled.
+    Process.sleep(100)
 
     projection =
       World.intelligence(agent, :market, "X1-UX81", "X1-UX81-A1", DateTime.utc_now(), 300)
 
-    assert projection.facts["trade_goods"].freshness == :fresh
+    assert projection.facts["trade_goods"].freshness == :stale
+
+    assert %{withdrawn_at: nil, fulfilled_observation_id: nil} = Repo.reload!(demand)
+  end
+
+  defp eventually(fun, attempts \\ 100)
+
+  defp eventually(_fun, 0), do: flunk("condition did not become true")
+
+  defp eventually(fun, attempts) do
+    if fun.() do
+      :ok
+    else
+      Process.sleep(10)
+      eventually(fun, attempts - 1)
+    end
   end
 
   test "Fleet growth objective acquires on-site Shipyard offers through a claimed Intent" do
@@ -1902,5 +2032,168 @@ defmodule SpaceTraders.IntelligenceAcquisitionTest do
 
     [commitment] = portfolio.commitments
     {agent, ship, portfolio, commitment}
+  end
+
+  defp unclaimed_intelligence_fixture(objective) do
+    operator =
+      Repo.insert!(%Operator{email: "demand-e2e-#{System.unique_integer()}@example.com"})
+
+    agent =
+      Repo.insert!(%AgentRecord{
+        symbol: "INTELACQ",
+        faction: "COSMIC",
+        headquarters: "X1-UX81-A1",
+        agent_token: "AGENT_TOKEN",
+        operator_id: operator.id
+      })
+
+    ship = Repo.insert!(%Ship{symbol: "INTELACQ-1", ship_type: "SHIP_PROBE", agent_id: agent.id})
+    strategy = Repo.insert!(%Strategy{operator_id: operator.id, revision_number: 1})
+
+    revision =
+      Repo.insert!(%Revision{
+        fleet_strategy_id: strategy.id,
+        number: 1,
+        document: %{
+          "objectives" => [objective],
+          "hard_constraints" => ["Keep at least 1,000 credits available"]
+        },
+        source: "operator",
+        activated_at: DateTime.utc_now(:second)
+      })
+
+    Repo.update!(Ecto.Changeset.change(strategy, active_revision_id: revision.id))
+
+    {agent, ship, revision, operator}
+  end
+
+  defp observe_stale_market(agent, ship, waypoint_symbol, observed_at) do
+    listing =
+      Model.Market.from_json(%{
+        "symbol" => waypoint_symbol,
+        "exports" => [%{"symbol" => "IRON_ORE"}],
+        "imports" => [],
+        "exchange" => [],
+        "tradeGoods" => [
+          %{
+            "symbol" => "IRON_ORE",
+            "type" => "EXPORT",
+            "tradeVolume" => 20,
+            "purchasePrice" => 12,
+            "sellPrice" => 9
+          }
+        ]
+      })
+
+    Intelligence.observe_market(agent, "X1-UX81", listing,
+      source: "get_market",
+      observing_ship_symbol: ship.symbol,
+      observed_at: observed_at
+    )
+  end
+
+  test "runtime Market refresh demands cover only subjects with retained Listing evidence" do
+    operator =
+      Repo.insert!(%Operator{email: "refresh-scope-#{System.unique_integer()}@example.com"})
+
+    agent =
+      Repo.insert!(%AgentRecord{
+        symbol: "REFRESHSCOPE",
+        faction: "COSMIC",
+        headquarters: "X1-UX81-A1",
+        agent_token: "AGENT_TOKEN",
+        operator_id: operator.id
+      })
+
+    never_observed =
+      Model.Waypoint.from_json(%{
+        "symbol" => "X1-UX81-A1",
+        "systemSymbol" => "X1-UX81",
+        "type" => "PLANET",
+        "x" => 1,
+        "y" => 2,
+        "traits" => [%{"symbol" => "MARKETPLACE"}]
+      })
+
+    observed =
+      Model.Waypoint.from_json(%{
+        "symbol" => "X1-UX81-A2",
+        "systemSymbol" => "X1-UX81",
+        "type" => "PLANET",
+        "x" => 3,
+        "y" => 4,
+        "traits" => [%{"symbol" => "MARKETPLACE"}]
+      })
+
+    {:ok, _} = Intelligence.observe_waypoint(agent, never_observed, source: "get_waypoints")
+    {:ok, _} = Intelligence.observe_waypoint(agent, observed, source: "get_waypoints")
+
+    {:ok, _} =
+      observe_stale_market(agent, agent, "X1-UX81-A2", DateTime.add(DateTime.utc_now(), -600))
+
+    now = DateTime.utc_now()
+    specs = FleetIntelligence.market_refresh_demand_specs(agent, "X1-UX81", now)
+
+    # The never-observed Marketplace gets no runtime refresh demand: first-time
+    # coverage is reset-start baseline work. The stale retained Listing is due
+    # now.
+    assert [%{subject: "market:X1-UX81:X1-UX81-A2", due_at: due_at, owner: "fleet_planning"}] =
+             specs
+
+    assert DateTime.compare(due_at, now) != :gt
+  end
+
+  test "runtime sync withdraws a Market refresh demand that lost Marketplace relevance" do
+    {agent, ship, revision, _operator} =
+      unclaimed_intelligence_fixture(%{
+        "objective" => "Grow credits",
+        "kind" => "continuous",
+        "evaluation" => "Maximize net credit growth over time"
+      })
+
+    marketplace =
+      Model.Waypoint.from_json(%{
+        "symbol" => "X1-UX81-A1",
+        "systemSymbol" => "X1-UX81",
+        "type" => "PLANET",
+        "x" => 1,
+        "y" => 2,
+        "traits" => [%{"symbol" => "MARKETPLACE"}]
+      })
+
+    {:ok, _} = Intelligence.observe_waypoint(agent, marketplace, source: "get_waypoints")
+
+    {:ok, _} =
+      observe_stale_market(agent, ship, "X1-UX81-A1", DateTime.add(DateTime.utc_now(), -600))
+
+    assert :ok = FleetIntelligence.sync_market_observation_demands(agent, revision, "X1-UX81")
+
+    assert [demand] =
+             Evidence.list_open_demands(agent)
+             |> Enum.filter(&(&1.subject == "market:X1-UX81:X1-UX81-A1"))
+
+    # Newer Waypoint intelligence reclassifies the Waypoint: it is no longer a
+    # known Marketplace, so the refresh demand loses Strategy relevance.
+    reclassified =
+      Model.Waypoint.from_json(%{
+        "symbol" => "X1-UX81-A1",
+        "systemSymbol" => "X1-UX81",
+        "type" => "PLANET",
+        "x" => 1,
+        "y" => 2,
+        "traits" => [%{"symbol" => "SHIPYARD"}]
+      })
+
+    {:ok, _} = Intelligence.observe_waypoint(agent, reclassified, source: "get_waypoints")
+
+    assert :ok = FleetIntelligence.sync_market_observation_demands(agent, revision, "X1-UX81")
+
+    # Withdrawn, never deleted, with its Strategy provenance preserved.
+    reloaded = Repo.reload!(demand)
+    assert reloaded.withdrawn_at
+    assert reloaded.strategy_revision_id == revision.id
+    assert reloaded.subject == "market:X1-UX81:X1-UX81-A1"
+    assert reloaded.owner == "fleet_planning"
+    assert Evidence.list_open_demands(agent) == []
   end
 end

@@ -404,6 +404,12 @@ defmodule SpaceTraders.FleetStrategy do
     if match?({:ok, %Revision{}}, result) do
       {:ok, revision} = result
       :ok = SpaceTraders.FleetGeneration.activate_strategy(scope, revision)
+
+      # Revision supersession on a live Generation: the previous revision's
+      # open Observation Demands lose relevance with it. Their rows and
+      # Strategy provenance stay durably visible.
+      :ok = Evidence.withdraw_superseded_demands(scope.operator.id, revision.id)
+
       broadcast_update(scope)
     end
 

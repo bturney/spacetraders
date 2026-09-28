@@ -24,6 +24,7 @@ defmodule SpaceTraders.Application do
       ] ++
         runtime_authority_children() ++
         fleet_reconciler_children() ++
+        demand_scheduler_children() ++
         [
           {Registry, keys: :unique, name: SpaceTraders.Contracts.Registry},
           {DynamicSupervisor, strategy: :one_for_one, name: SpaceTraders.Contracts.Supervisor},
@@ -37,6 +38,16 @@ defmodule SpaceTraders.Application do
     # for other strategies and supported options
     opts = [strategy: :one_for_one, name: SpaceTraders.Supervisor]
     Supervisor.start_link(children, opts)
+  end
+
+  # The durable Observation Demand scheduler runs in dev/prod; scenario tests
+  # start their own instance to prove restart reconstruction from durable state.
+  defp demand_scheduler_children do
+    if Application.get_env(:spacetraders, :demand_scheduler_enabled, true) do
+      [SpaceTraders.Evidence.DemandScheduler]
+    else
+      []
+    end
   end
 
   # The API rate limiter is a child of the app in dev/prod but disabled in test
