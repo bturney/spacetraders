@@ -8,6 +8,8 @@
   it points at `CONTEXT.md` and the ADRs.
 - Unattended CI or runner work: read `docs/agents/readiness.md`.
 - Running or debugging the test suite: read `docs/agents/testing.md`.
+- Diagnosing Strategy outcomes or following Grafana drill-downs: read
+  `docs/agents/observability.md`.
 
 Merge requires an explicit Operator request.
 

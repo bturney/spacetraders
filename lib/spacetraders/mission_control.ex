@@ -22,6 +22,8 @@ defmodule SpaceTraders.MissionControl do
   alias SpaceTraders.Repo
   import Ecto.Query, only: [from: 2]
 
+  @decision_episode_comparison_limit 100
+
   alias SpaceTraders.{
     Agent,
     Fleet,
@@ -304,6 +306,7 @@ defmodule SpaceTraders.MissionControl do
           at: episode.inserted_at,
           summary: "Fleet selected a new commitment portfolio",
           detail: decision_detail(episode),
+          decision_episode_id: episode.id,
           notable?: episode.source_version == 0 or episode.binding_constraints != []
         }
 
@@ -317,6 +320,7 @@ defmodule SpaceTraders.MissionControl do
                 type: :milestone,
                 at: episode.updated_at,
                 summary: decision_summary(episode),
+                decision_episode_id: episode.id,
                 detail:
                   "Decision Episode #{episode.id} was classified from retained outcome evidence."
               }
@@ -335,6 +339,12 @@ defmodule SpaceTraders.MissionControl do
           at: condition.inserted_at,
           summary: condition.summary,
           entity_ref: condition.entity_ref,
+          condition_key: condition.key,
+          fleet_generation_id: condition.fleet_generation_id,
+          fleet_strategy_revision_id: condition.fleet_strategy_revision_id,
+          strategy_decision_episode_id: condition.strategy_decision_episode_id,
+          inserted_at: condition.inserted_at,
+          resolved_at: condition.resolved_at,
           detail: if(condition.resolved_at, do: "Resolved", else: "Still unresolved")
         }
       end)
@@ -501,7 +511,7 @@ defmodule SpaceTraders.MissionControl do
       |> Map.new(&{&1.id, &1})
 
     Enum.map(generations, fn generation ->
-      decisions = Map.get(episodes, generation.id, [])
+      decisions = episodes |> Map.get(generation.id, []) |> Enum.sort_by(& &1.id, :desc)
 
       credit_changes =
         for %{classification: :realized, actual_outcomes: outcomes, evidence_references: refs} <-
@@ -560,6 +570,78 @@ defmodule SpaceTraders.MissionControl do
         resumed?: next_generation && not is_nil(next_generation.strategy_capable_at)
       }
     end)
+  end
+
+  @doc "Returns one Decision Episode scoped to the authenticated Operator."
+  def decision_episode(%Scope{operator: %{id: operator_id}}, id) when is_integer(id) do
+    Repo.one(
+      from episode in StrategyDecisionEpisode,
+        join: generation in assoc(episode, :fleet_generation),
+        join: revision in assoc(episode, :fleet_strategy_revision),
+        where: episode.operator_id == ^operator_id and episode.id == ^id,
+        select: {episode, generation, revision}
+    )
+    |> case do
+      {episode, generation, revision} ->
+        decision_episode_projection(episode, generation, revision)
+
+      nil ->
+        nil
+    end
+  end
+
+  def decision_episode(%Scope{}, _id), do: nil
+
+  @doc "Returns a bounded, newest-first Decision Episode comparison across Fleet Generations."
+  def decision_episode_comparison(
+        %Scope{operator: %{id: operator_id}},
+        limit \\ @decision_episode_comparison_limit
+      )
+      when is_integer(limit) and limit > 0 do
+    Repo.all(
+      from episode in StrategyDecisionEpisode,
+        join: generation in assoc(episode, :fleet_generation),
+        join: revision in assoc(episode, :fleet_strategy_revision),
+        where: episode.operator_id == ^operator_id,
+        order_by: [desc: episode.inserted_at, desc: episode.id],
+        limit: ^limit,
+        select: {episode, generation, revision}
+    )
+    |> Enum.map(fn {episode, generation, revision} ->
+      %{
+        id: episode.id,
+        fleet_generation_id: episode.fleet_generation_id,
+        fleet_generation_number: generation.number,
+        fleet_strategy_revision_id: episode.fleet_strategy_revision_id,
+        fleet_strategy_revision_number: revision.number,
+        expectations: episode.expectations,
+        actual_outcomes: episode.actual_outcomes,
+        evidence_reference_count: length(episode.evidence_references),
+        calibration_version: episode.calibration_version,
+        classification: episode.classification
+      }
+    end)
+  end
+
+  defp decision_episode_projection(episode, generation, revision) do
+    %{
+      id: episode.id,
+      fleet_generation_id: episode.fleet_generation_id,
+      fleet_generation_number: generation.number,
+      fleet_generation_symbol: generation.symbol,
+      fleet_strategy_revision_id: episode.fleet_strategy_revision_id,
+      fleet_strategy_revision_number: revision && revision.number,
+      source_version: episode.source_version,
+      evidence_references: episode.evidence_references,
+      alternatives: episode.alternatives,
+      binding_constraints: episode.binding_constraints,
+      expectations: episode.expectations,
+      actual_outcomes: episode.actual_outcomes,
+      calibration_version: episode.calibration_version,
+      classification: episode.classification,
+      inserted_at: episode.inserted_at,
+      updated_at: episode.updated_at
+    }
   end
 
   defp generation_objective_outcomes(_generation, nil), do: []

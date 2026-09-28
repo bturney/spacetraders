@@ -12,13 +12,15 @@ defmodule SpaceTraders.OperatorConditions do
       when is_binary(key) and kind in [:attention, :intervention] and is_binary(summary) do
     entity_ref = Keyword.get(opts, :entity_ref)
 
-    attrs = %{
-      operator_id: operator_id,
-      key: key,
-      kind: kind,
-      summary: summary,
-      entity_ref: entity_ref
-    }
+    attrs =
+      %{
+        operator_id: operator_id,
+        key: key,
+        kind: kind,
+        summary: summary,
+        entity_ref: entity_ref
+      }
+      |> put_context(opts)
 
     result =
       Repo.transaction(fn ->
@@ -60,6 +62,11 @@ defmodule SpaceTraders.OperatorConditions do
   def objective_evaluation(%Scope{} = scope, generation, revision, index, evaluation, opts \\ [])
       when is_integer(index) and index >= 0 do
     key = "objective-infeasible:#{generation.id}:#{revision.id}:#{index}"
+
+    opts =
+      opts
+      |> Keyword.put(:fleet_generation_id, generation.id)
+      |> Keyword.put(:fleet_strategy_revision_id, revision.id)
 
     case evaluation do
       %{feasible?: false} ->
@@ -171,6 +178,19 @@ defmodule SpaceTraders.OperatorConditions do
 
   @doc false
   def notify(%Scope{operator: %{id: operator_id}}), do: broadcast(operator_id)
+
+  defp put_context(attrs, opts) do
+    Enum.reduce(
+      [:fleet_generation_id, :fleet_strategy_revision_id, :strategy_decision_episode_id],
+      attrs,
+      fn key, context ->
+        case Keyword.fetch(opts, key) do
+          {:ok, value} -> Map.put(context, key, value)
+          :error -> context
+        end
+      end
+    )
+  end
 
   defp broadcast(operator_id) do
     Phoenix.PubSub.broadcast(

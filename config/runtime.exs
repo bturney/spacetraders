@@ -91,6 +91,13 @@ if config_env() == :prod do
 
   config :spacetraders, :dns_cluster_query, System.get_env("DNS_CLUSTER_QUERY")
 
+  config :spacetraders, SpaceTradersWeb.GrafanaLink,
+    base_url:
+      System.get_env(
+        "GRAFANA_BASE_URL",
+        "https://observability-host.taila148e9.ts.net"
+      )
+
   config :spacetraders, SpaceTradersWeb.Endpoint,
     url: [host: host, port: 443, scheme: "https"],
     check_origin: check_origin,

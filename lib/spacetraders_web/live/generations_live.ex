@@ -4,11 +4,18 @@ defmodule SpaceTradersWeb.GenerationsLive do
   use SpaceTradersWeb, :live_view
 
   alias SpaceTraders.MissionControl
+  alias SpaceTradersWeb.DecisionEvidence
 
   @impl true
   def mount(_params, _session, socket) do
     recaps = MissionControl.generation_recaps(socket.assigns.current_scope)
-    {:ok, assign(socket, recaps: recaps, comparison: Enum.take(recaps, 2))}
+
+    {:ok,
+     assign(socket,
+       recaps: recaps,
+       comparison: Enum.take(recaps, 2),
+       episodes: MissionControl.decision_episode_comparison(socket.assigns.current_scope)
+     )}
   end
 
   @impl true
@@ -63,6 +70,44 @@ defmodule SpaceTradersWeb.GenerationsLive do
             </tr>
             <tr>
               <th>Strategy resumed</th><td :for={recap <- @comparison}>{resume_label(recap)}</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+      <section
+        :if={@episodes != []}
+        id="decision-episode-comparison"
+        class="mb-6 overflow-x-auto rounded-2xl border border-base-300 p-5"
+      >
+        <div class="max-w-3xl">
+          <p class="eyebrow">Longitudinal optimization</p>
+          <h2 class="text-xl font-bold">Decision Episodes across Generations</h2>
+          <p class="mt-1 text-sm opacity-70">
+            Expected and actual outcomes stay beside their calibration version and retained evidence.
+          </p>
+        </div>
+        <table class="table table-sm mt-3 w-full">
+          <thead>
+            <tr>
+              <th>Generation</th><th>Episode</th><th>Revision</th><th>Calibration</th><th>
+                Expected
+              </th><th>Actual</th><th>Evidence</th><th>Classification</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr :for={episode <- @episodes} id={"episode-comparison-#{episode.id}"}>
+              <td>Generation {episode.fleet_generation_number}</td>
+              <td>
+                <.link navigate={~p"/decision-episodes/#{episode.id}"} class="link link-primary">
+                  Episode {episode.id}
+                </.link>
+              </td>
+              <td>Revision {episode.fleet_strategy_revision_number}</td>
+              <td>{episode.calibration_version}</td>
+              <td>{DecisionEvidence.outcome_label(episode.expectations)}</td>
+              <td>{DecisionEvidence.outcome_label(episode.actual_outcomes)}</td>
+              <td>{episode.evidence_reference_count} reference(s)</td>
+              <td>{DecisionEvidence.classification_label(episode.classification)}</td>
             </tr>
           </tbody>
         </table>
