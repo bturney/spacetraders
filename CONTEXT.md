@@ -58,7 +58,7 @@ Observed facts about the game world that a Policy combines with authoritative Ag
 _Avoid_: operational knowledge, world state
 
 **Observation Demand**:
-A revocable requirement for authoritative evidence, including its subject, required facts, acceptable freshness, deadline or expiry, and Fleet Strategy provenance. It may request Operational Intelligence or the immediate state of an owned entity. Compatible demands share one observation; it describes the evidence needed rather than prescribing an API request.
+A revocable requirement for authoritative evidence, including its subject, required facts, acceptable freshness, earliest useful observation time, latest acceptable deadline or expiry, and Fleet Strategy provenance. It may request Operational Intelligence or the immediate state of an owned entity. Compatible demands share one observation; it describes the evidence needed rather than prescribing an API request.
 _Avoid_: poll, refresh job, API request
 
 **API Capacity Governor**:
@@ -112,7 +112,7 @@ _Avoid_: fleet objective (for the complete strategic direction), automation
 An immutable snapshot of the outcome-level choices the Operator accepted for a Fleet Strategy, whether selected directly or through a preset. Each current Fleet has at most one active Fleet Strategy Revision. The active revision applies automatically to replacement Fleet Generations; recommendations and product changes never alter it silently.
 
 **Strategy Decision Episode**:
-A durable account of one Fleet Strategy reconciliation decision. It receives a stable identity when a plan is selected, preserves its original evidence references, compact provenance, and expectations, and accumulates outcome evidence until it is explicitly classified as realized, partially realized, superseded, reset-censored, or still evaluating. It connects the active Fleet Strategy Revision and objective evaluations to the evidence considered, admissible alternatives, binding constraints, selected plan, expected and actual outcomes, calibration version, and any later supersession. It is the causal join point for explanation and optimization, not a gameplay action or long-lived plan.
+A durable account of one Fleet Strategy reconciliation decision. It receives a stable identity when allocation selects a plan or deliberately selects a neutral wait, preserves its original evidence references, compact provenance, and expectations, and accumulates outcome evidence until it is explicitly classified as realized, partially realized, superseded, reset-censored, or still evaluating. It connects the active Fleet Strategy Revision and objective evaluations to the evidence considered, admissible alternatives, binding constraints or limitations, selected plan or neutral result, expected and actual outcomes, calibration version, and any later supersession. It is the causal join point for explanation and optimization, not a gameplay action or long-lived plan.
 
 **Outcome Observability**:
 Evidence of whether a Fleet Strategy is achieving its Strategic Objectives, including progress, economics, Fleet productivity, leaderboard movement, constraints, and expected-versus-actual outcomes. Mission Control summarizes it for the Operator; deeper analysis may use the observability platform.
@@ -122,6 +122,18 @@ Evidence of how the autonomous software behaves and performs, including planning
 
 **Strategy-capable Time**:
 Time during which the system can safely make progress on at least one Strategic Objective. It distinguishes useful autonomous availability from process uptime and excludes periods when faults or unavailable dependencies prevent all Strategy progress.
+
+**Neutral Wait**:
+A deliberate Fleet Allocation result when no worthwhile admissible Candidate Contribution currently exists and the evidence needed for re-evaluation has a durable future observation time. It requires no Operator action and remains one Strategy Decision Episode while its selected result and binding limitation are unchanged. It is distinct from objective infeasibility, Degraded Operation, and Intervention. Only Fleet Allocation reconciliation may establish one.
+_Avoid_: idle, stalled, blocked
+
+**Unallocated**:
+The read-projection state of a registered Ship with no active Claim in its current Fleet Generation. During a Neutral Wait it carries a causal link to the wait's Strategy Decision Episode. It is derived state, never a durable per-Ship record.
+_Avoid_: idle Ship, free Ship, unclaimed (when the wait linkage matters)
+
+**Attention**:
+An Operator-facing summary that some Fleet condition needs Operator judgment: objective infeasibility, Degraded Operation, or Intervention. Deliberate Neutral Wait, healthy progress, and capacity deferral never raise it.
+_Avoid_: alert, error, alarm
 
 **Strategic Objective**:
 One measurable outcome in a Fleet Strategy, with an ordered Strategic Priority, an evaluation rule, and a Fleet Generation, Strategy-lifetime, or recurring scope. An attain objective minimizes time to a target, a maintain objective protects a target with sufficient margin, and a continuous objective maximizes its outcome rate over a horizon.
@@ -133,6 +145,10 @@ _Avoid_: request score, task priority
 **Candidate Contribution**:
 An objective-specific planner's evidence-bound proposal for advancing a Strategic Objective. It declares expected outcomes, uncertainty, required roles and resources, dependencies, validity conditions, and alternatives without assigning Ships or acquiring resources. Fleet allocation accepts or rejects it as part of the whole commitment portfolio.
 _Avoid_: task, request, Ship assignment
+
+**Coverage Contribution**:
+A bounded Candidate Contribution over an explicit finite, named set of open Observation Demands, proposed to unlock a Strategic Objective's decisions while coverage is incomplete. It carries the portfolio outcome rather than per-subject profit; partial coverage may admit positive work, and only complete coverage (fulfilled or proven infeasible) supports a negative conclusion. Its supersession leaves unfulfilled Demands open.
+_Avoid_: sweep, scan script, coverage plan
 
 **Fleet Commitment**:
 An accepted, evidence-bound promise to pursue an outcome contribution using declared claims, reservations, pledges, and dependencies. Fleet allocation maintains Fleet Commitments as a coherent portfolio; a commitment may coordinate one Ship, multiple Ships, or preparatory work, and is retained, superseded, or safely unwound at reconciliation boundaries.

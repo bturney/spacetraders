@@ -18,6 +18,11 @@ Issues and PRDs for this repo live as GitHub issues. Use the `gh` CLI.
 When a skill names a triage role, use the matching label string:
 `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`.
 
+Non-actionable program and scoped-spec containers use `tracking` instead of a
+triage state label. A tracking issue must own native sub-issues; executable work
+lives in its leaves. Exclude `tracking` issues from the agent frontier, which is
+open, unblocked, unassigned `ready-for-agent` work.
+
 ## Pull requests
 
 **PRs as a request surface: no.** Read or review a pull request only when the
