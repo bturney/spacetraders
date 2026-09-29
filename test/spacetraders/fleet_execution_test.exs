@@ -153,6 +153,65 @@ defmodule SpaceTraders.FleetExecutionTest do
       assert Repo.aggregate(Portfolio, :count) == 0
     end
 
+    test "proposes a profitable route from partial evidence while baseline coverage stays open" do
+      {operator, agent, revision} = market_generation()
+      scope = Scope.for_operator(operator)
+
+      observe_marketplace(agent, "X1-A1")
+      observe_marketplace(agent, "X1-A2")
+      # A known third Marketplace without Listing evidence never blocks the
+      # route the sufficient partial evidence supports.
+      observe_marketplace(agent, "X1-A3")
+      market_observation(agent, "X1-A1", 10)
+      market_observation(agent, "X1-A2", 25)
+
+      stub_market_agent(agent)
+
+      assert {:ok, %{action: :deferred_for_capacity, comparison: comparison}} =
+               FleetExecution.reconcile_market_evidence(
+                 scope,
+                 agent,
+                 revision,
+                 "X1",
+                 sustained_capacity()
+               )
+
+      assert [%{candidate_id: _candidate_id, claims: ["SHIP-1"]}] = comparison.proposed_choices
+
+      refute Enum.any?(
+               Enum.flat_map(comparison.planning, & &1.limitations),
+               &(&1.reason == :no_viable_market_routes)
+             )
+    end
+
+    test "incomplete coverage reports unresolved subjects instead of an invalid negative conclusion" do
+      {operator, agent, revision} = market_generation()
+      scope = Scope.for_operator(operator)
+
+      observe_marketplace(agent, "X1-A1")
+      observe_marketplace(agent, "X1-A2")
+      observe_marketplace(agent, "X1-A3")
+      # Identical quotes leave no spread, and the never-observed A3 keeps the
+      # baseline target incomplete.
+      market_observation(agent, "X1-A1", 10)
+      market_observation(agent, "X1-A2", 10)
+
+      stub_market_agent(agent)
+
+      assert {:ok, %{action: :no_admissible_commitment, comparison: comparison}} =
+               FleetExecution.reconcile_market_evidence(scope, agent, revision, "X1", capacity())
+
+      limitations = Enum.flat_map(comparison.planning, & &1.limitations)
+
+      refute Enum.any?(limitations, &(&1.reason == :no_viable_market_routes))
+
+      assert %{
+               subject: :market_planning,
+               reason: :incomplete_market_coverage,
+               subjects: ["market:X1:X1-A3"]
+             } = Enum.find(limitations, &(&1.reason == :incomplete_market_coverage))
+    end
+
     test "hands the published Commitment to activation under normal API capacity" do
       {operator, agent, revision} = market_generation()
       scope = Scope.for_operator(operator)

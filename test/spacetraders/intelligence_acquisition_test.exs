@@ -2143,6 +2143,140 @@ defmodule SpaceTraders.IntelligenceAcquisitionTest do
     assert DateTime.compare(due_at, now) != :gt
   end
 
+  test "baseline demand specs cover only Marketplaces without retained Listing evidence" do
+    {agent, ship, _revision, _operator} =
+      unclaimed_intelligence_fixture(%{
+        "objective" => "Grow credits",
+        "kind" => "continuous",
+        "evaluation" => "Maximize net credit growth over time"
+      })
+
+    never_observed =
+      Model.Waypoint.from_json(%{
+        "symbol" => "X1-UX81-A1",
+        "systemSymbol" => "X1-UX81",
+        "type" => "PLANET",
+        "x" => 1,
+        "y" => 2,
+        "traits" => [%{"symbol" => "MARKETPLACE"}]
+      })
+
+    observed =
+      Model.Waypoint.from_json(%{
+        "symbol" => "X1-UX81-A2",
+        "systemSymbol" => "X1-UX81",
+        "type" => "PLANET",
+        "x" => 3,
+        "y" => 4,
+        "traits" => [%{"symbol" => "MARKETPLACE"}]
+      })
+
+    {:ok, _} = Intelligence.observe_waypoint(agent, never_observed, source: "get_waypoints")
+    {:ok, _} = Intelligence.observe_waypoint(agent, observed, source: "get_waypoints")
+
+    {:ok, _} =
+      observe_stale_market(agent, ship, "X1-UX81-A2", DateTime.add(DateTime.utc_now(), -600))
+
+    now = DateTime.utc_now()
+    specs = FleetIntelligence.baseline_market_demand_specs(agent, "X1-UX81", now)
+
+    # Exactly the never-observed Marketplace: refresh work stays with the
+    # refresh demand set.
+    assert [
+             %{
+               subject: "market:X1-UX81:X1-UX81-A1",
+               required_facts: ["trade_goods"],
+               owner: "fleet_planning",
+               due_at: due_at
+             }
+           ] = specs
+
+    assert DateTime.compare(due_at, now) != :gt
+  end
+
+  test "baseline coverage keeps exactly one open demand due now and stays idempotent" do
+    {agent, _ship, revision, _operator} =
+      unclaimed_intelligence_fixture(%{
+        "objective" => "Grow credits",
+        "kind" => "continuous",
+        "evaluation" => "Maximize net credit growth over time"
+      })
+
+    marketplace =
+      Model.Waypoint.from_json(%{
+        "symbol" => "X1-UX81-A1",
+        "systemSymbol" => "X1-UX81",
+        "type" => "PLANET",
+        "x" => 1,
+        "y" => 2,
+        "traits" => [%{"symbol" => "MARKETPLACE"}]
+      })
+
+    {:ok, _} = Intelligence.observe_waypoint(agent, marketplace, source: "get_waypoints")
+
+    assert :ok = FleetIntelligence.sync_market_observation_demands(agent, revision, "X1-UX81")
+
+    assert [demand] = Evidence.list_open_demands(agent)
+    assert demand.subject == "market:X1-UX81:X1-UX81-A1"
+    assert demand.owner == "fleet_planning"
+    assert demand.strategy_revision_id == revision.id
+    assert DateTime.compare(demand.due_at, DateTime.utc_now()) != :gt
+
+    # Repeated synchronization never duplicates or replaces the durable
+    # baseline demand: the persisted row remains the scheduled wakeup.
+    assert :ok = FleetIntelligence.sync_market_observation_demands(agent, revision, "X1-UX81")
+
+    assert [demand] = Evidence.list_open_demands(agent)
+
+    assert Evidence.due_demands() |> Enum.map(& &1.subject) == ["market:X1-UX81:X1-UX81-A1"]
+  end
+
+  test "a newly discovered Marketplace expands the open baseline demand set" do
+    {agent, _ship, revision, _operator} =
+      unclaimed_intelligence_fixture(%{
+        "objective" => "Grow credits",
+        "kind" => "continuous",
+        "evaluation" => "Maximize net credit growth over time"
+      })
+
+    first =
+      Model.Waypoint.from_json(%{
+        "symbol" => "X1-UX81-A1",
+        "systemSymbol" => "X1-UX81",
+        "type" => "PLANET",
+        "x" => 1,
+        "y" => 2,
+        "traits" => [%{"symbol" => "MARKETPLACE"}]
+      })
+
+    {:ok, _} = Intelligence.observe_waypoint(agent, first, source: "get_waypoints")
+    assert :ok = FleetIntelligence.sync_market_observation_demands(agent, revision, "X1-UX81")
+
+    assert [%{id: first_demand_id, subject: "market:X1-UX81:X1-UX81-A1"}] =
+             Evidence.list_open_demands(agent)
+
+    second =
+      Model.Waypoint.from_json(%{
+        "symbol" => "X1-UX81-A2",
+        "systemSymbol" => "X1-UX81",
+        "type" => "PLANET",
+        "x" => 3,
+        "y" => 4,
+        "traits" => [%{"symbol" => "MARKETPLACE"}]
+      })
+
+    {:ok, _} = Intelligence.observe_waypoint(agent, second, source: "get_waypoints")
+    assert :ok = FleetIntelligence.sync_market_observation_demands(agent, revision, "X1-UX81")
+
+    subjects = Evidence.list_open_demands(agent) |> Enum.map(& &1.subject) |> Enum.sort()
+    assert subjects == ["market:X1-UX81:X1-UX81-A1", "market:X1-UX81:X1-UX81-A2"]
+
+    # Authoritative Waypoint evidence expanded the set without touching the
+    # first Marketplace's durable demand.
+    expanded = Enum.find(Evidence.list_open_demands(agent), &(&1.id == first_demand_id))
+    assert expanded.subject == "market:X1-UX81:X1-UX81-A1"
+  end
+
   test "runtime sync withdraws a Market refresh demand that lost Marketplace relevance" do
     {agent, ship, revision, _operator} =
       unclaimed_intelligence_fixture(%{

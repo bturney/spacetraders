@@ -916,12 +916,19 @@ defmodule SpaceTraders.MissionControl do
 
   defp plan_market_objectives(document, agent, as_of, plan_objective) do
     with {:ok, system_symbol} <- Fleet.system_from_headquarters(agent.headquarters) do
+      marketplace_symbols = Intelligence.marketplace_waypoints(agent, system_symbol)
+
       markets =
-        agent
-        |> Intelligence.marketplace_waypoints(system_symbol)
+        marketplace_symbols
         |> Enum.map(&market_evidence(agent, system_symbol, &1, as_of))
 
-      snapshot = FleetPlanning.market_snapshot(as_of, system_symbol, agent.id, markets)
+      # The authoritative Market coverage target is every known Marketplace of
+      # the headquarters System, including never-observed Waypoints.
+      baseline = Enum.map(marketplace_symbols, &"market:#{system_symbol}:#{&1}")
+
+      snapshot =
+        FleetPlanning.market_snapshot(as_of, system_symbol, agent.id, markets)
+        |> Map.merge(FleetPlanning.baseline_coverage(baseline))
 
       document
       |> Map.get("objectives", [])

@@ -286,6 +286,127 @@ defmodule SpaceTraders.FleetPlanningTest do
             }} = FleetPlanning.plan_market(revision(), 0, snapshot)
   end
 
+  describe "baseline Market coverage" do
+    test "partial evidence proposes a profitable route while the baseline target is incomplete" do
+      # The never-observed third Marketplace stays unresolved: planning may
+      # still propose the profitable route the partial evidence supports.
+      snapshot =
+        coverage_snapshot(["market:X1:X1-A1", "market:X1:X1-A2", "market:X1:X1-A3"])
+
+      assert {:ok,
+              %{
+                candidate_contributions: [candidate | _],
+                limitations: [],
+                observation_demands: demands
+              }} = FleetPlanning.plan_market(revision(), 0, snapshot)
+
+      assert candidate.kind == :market_trade
+
+      assert [%Demand{subject: "market:X1:X1-A1"}, %Demand{subject: "market:X1:X1-A2"}] =
+               demands
+    end
+
+    test "no route with incomplete coverage reports the unresolved subjects instead of a negative System conclusion" do
+      # Both usable Listings quote identical prices, so no spread exists.
+      snapshot =
+        coverage_snapshot(["market:X1:X1-A1", "market:X1:X1-A2", "market:X1:X1-A3"])
+        |> Map.update!(:markets, fn [source, destination] ->
+          [
+            source,
+            %{destination | trade_goods: [good("IRON", 10, 9, 25)]}
+          ]
+        end)
+
+      assert {:ok,
+              %{
+                candidate_contributions: [],
+                limitations: [
+                  %{
+                    subject: :market_planning,
+                    reason: :incomplete_market_coverage,
+                    subjects: ["market:X1:X1-A3"]
+                  }
+                ]
+              }} = FleetPlanning.plan_market(revision(), 0, snapshot)
+    end
+
+    test "complete coverage with no profitable route is the only negative System conclusion" do
+      snapshot =
+        coverage_snapshot(["market:X1:X1-A1", "market:X1:X1-A2"])
+        |> Map.update!(:markets, fn markets ->
+          Enum.map(markets, &%{&1 | trade_goods: [good("IRON", 10, 9, 20)]})
+        end)
+
+      assert {:ok,
+              %{
+                candidate_contributions: [],
+                limitations: [%{subject: :market_planning, reason: :no_viable_market_routes}]
+              }} = FleetPlanning.plan_market(revision(), 0, snapshot)
+    end
+
+    test "unreachable coverage stays distinct from an unprofitable System and from pending coverage" do
+      snapshot =
+        coverage_snapshot([
+          "market:X1:X1-A1",
+          "market:X1:X1-A2",
+          "market:X1:X1-A3",
+          "market:X1:X1-A4"
+        ])
+        |> Map.put(:unreachable_subjects, ["market:X1:X1-A4"])
+        |> Map.update!(:markets, fn markets ->
+          Enum.map(markets, &%{&1 | trade_goods: [good("IRON", 10, 9, 20)]})
+        end)
+
+      assert {:ok,
+              %{
+                candidate_contributions: [],
+                limitations: [
+                  %{
+                    subject: :market_planning,
+                    reason: :incomplete_market_coverage,
+                    subjects: ["market:X1:X1-A3"]
+                  },
+                  %{
+                    subject: :market_planning,
+                    reason: :unreachable_market_coverage,
+                    subjects: ["market:X1:X1-A4"]
+                  }
+                ]
+              }} = FleetPlanning.plan_market(revision(), 0, snapshot)
+    end
+
+    test "an empty authoritative target reports insufficient evidence instead of a negative conclusion" do
+      snapshot = %{coverage_snapshot([]) | markets: []}
+
+      assert {:ok,
+              %{
+                candidate_contributions: [],
+                limitations: [%{subject: :market_planning, reason: :insufficient_market_evidence}]
+              }} = FleetPlanning.plan_market(revision(), 0, snapshot)
+    end
+
+    test "rejects malformed, cross-System, or non-subset coverage input" do
+      cross_system =
+        coverage_snapshot(["market:X1:X1-A1"]) |> Map.put(:baseline_subjects, ["market:X2:X2-A1"])
+
+      assert {:error, :invalid_market_planning_input} =
+               FleetPlanning.plan_market(revision(), 0, cross_system)
+
+      not_subset =
+        coverage_snapshot(["market:X1:X1-A1"])
+        |> Map.put(:unreachable_subjects, ["market:X1:X1-A2"])
+
+      assert {:error, :invalid_market_planning_input} =
+               FleetPlanning.plan_market(revision(), 0, not_subset)
+
+      malformed =
+        coverage_snapshot(["market:X1:X1-A1"]) |> Map.put(:baseline_subjects, ["market"])
+
+      assert {:error, :invalid_market_planning_input} =
+               FleetPlanning.plan_market(revision(), 0, malformed)
+    end
+  end
+
   test "rejects malformed or cross-System Market subjects" do
     malformed = %{evidence_snapshot() | markets: [%{subject: nil}]}
     cross_system = %{evidence_snapshot() | markets: [market("X2-A1", @as_of, [])]}
@@ -560,6 +681,18 @@ defmodule SpaceTraders.FleetPlanningTest do
         ])
       ]
     }
+  end
+
+  # One authoritative baseline target plus the fresh usable Listing pair it
+  # names first: A1 sells cheap, A2 buys dear.
+  defp coverage_snapshot(baseline_subjects) do
+    evidence_snapshot()
+    |> Map.put(:baseline_subjects, baseline_subjects)
+    |> Map.put(:unreachable_subjects, [])
+    |> Map.put(:markets, [
+      market("X1-A1", ~U[2030-01-01 11:59:00Z], [good("IRON", 10, 9, 20)]),
+      market("X1-A2", ~U[2030-01-01 11:58:00Z], [good("IRON", 25, 20, 25)])
+    ])
   end
 
   defp market(waypoint, observed_at, trade_goods) do

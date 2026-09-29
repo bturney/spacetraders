@@ -69,6 +69,22 @@ defmodule SpaceTraders.FleetPlanning do
   end
 
   @doc """
+  Baseline Market coverage input for one planning snapshot.
+
+  `baseline_subjects` is the authoritative Market coverage target: every
+  currently known Marketplace of the Fleet Generation's headquarters System.
+  A subject in `unreachable_subjects` has no admissible acquisition path
+  under current capability evidence; it stays unresolved coverage and can
+  never support a negative System-wide Market conclusion. Without coverage
+  input a snapshot targets its own Market subjects, which keeps legacy
+  callers' conclusions unchanged.
+  """
+  def baseline_coverage(baseline_subjects, unreachable_subjects \\ [])
+      when is_list(baseline_subjects) and is_list(unreachable_subjects) do
+    %{baseline_subjects: baseline_subjects, unreachable_subjects: unreachable_subjects}
+  end
+
+  @doc """
   Proposes Market Candidate Contributions for one Strategic Objective.
 
   The snapshot fixes the decision time with `:as_of` and supplies
@@ -1989,17 +2005,7 @@ defmodule SpaceTraders.FleetPlanning do
       |> candidate_routes(revision, objective_index, objective, snapshot)
       |> add_alternatives()
 
-    limitations =
-      if candidates == [] and limitations == [] do
-        reason =
-          if length(markets) < 2,
-            do: :insufficient_market_evidence,
-            else: :no_viable_market_routes
-
-        [%{subject: :market_planning, reason: reason}]
-      else
-        limitations
-      end
+    limitations = market_planning_limitations(markets, snapshot, limitations, candidates)
 
     {:ok,
      result(revision, objective_index, snapshot,
@@ -2007,6 +2013,68 @@ defmodule SpaceTraders.FleetPlanning do
        observation_demands: demands,
        limitations: limitations
      )}
+  end
+
+  # A negative System-wide Market conclusion requires complete authoritative
+  # baseline coverage: unresolved subjects — including unreachable ones — keep
+  # the conclusion open and are reported explicitly instead of
+  # `no viable Market route`. Legacy snapshots without coverage input keep
+  # their previous limitations and conclusions unchanged.
+  defp market_planning_limitations(markets, snapshot, limitations, candidates) do
+    unresolved = unresolved_baseline_subjects(markets, snapshot)
+
+    cond do
+      candidates != [] ->
+        limitations
+
+      MapSet.size(unresolved) > 0 ->
+        limitations ++ coverage_limitations(unresolved, snapshot)
+
+      limitations != [] ->
+        limitations
+
+      snapshot.baseline_subjects != [] ->
+        # Complete baseline coverage with no admissible route is the only
+        # negative System-wide Market conclusion.
+        [%{subject: :market_planning, reason: :no_viable_market_routes}]
+
+      true ->
+        [%{subject: :market_planning, reason: :insufficient_market_evidence}]
+    end
+  end
+
+  defp unresolved_baseline_subjects(markets, %{coverage_authoritative: true} = snapshot) do
+    snapshot.baseline_subjects
+    |> MapSet.new()
+    |> MapSet.difference(MapSet.new(markets, & &1.subject))
+  end
+
+  defp unresolved_baseline_subjects(_markets, _snapshot), do: MapSet.new()
+
+  defp coverage_limitations(unresolved, snapshot) do
+    unreachable = MapSet.new(snapshot.unreachable_subjects)
+
+    [
+      subject_coverage_limitation(
+        :incomplete_market_coverage,
+        MapSet.difference(unresolved, unreachable)
+      ),
+      subject_coverage_limitation(
+        :unreachable_market_coverage,
+        MapSet.intersection(unresolved, unreachable)
+      )
+    ]
+    |> Enum.reject(&is_nil/1)
+  end
+
+  defp subject_coverage_limitation(reason, subjects) do
+    case MapSet.to_list(subjects) do
+      [] ->
+        nil
+
+      subjects ->
+        %{subject: :market_planning, reason: reason, subjects: Enum.sort(subjects)}
+    end
   end
 
   defp result(revision, objective_index, snapshot, overrides) do
@@ -2057,22 +2125,65 @@ defmodule SpaceTraders.FleetPlanning do
            markets,
            &(is_map(&1) and valid_market_subject?(market_subject(&1), system_symbol))
          ) do
-      {:ok,
-       %{
-         as_of: as_of,
-         system_symbol: system_symbol,
-         freshness_seconds: freshness_seconds,
-         demand_deadline_seconds: demand_deadline_seconds,
-         observation_costs: observation_costs,
-         agent_id: Map.get(snapshot, :agent_id),
-         markets: normalize_market_observations(markets)
-       }}
+      with {:ok, baseline_subjects, unreachable_subjects} <-
+             normalize_coverage(markets, snapshot, system_symbol) do
+        {:ok,
+         %{
+           as_of: as_of,
+           system_symbol: system_symbol,
+           freshness_seconds: freshness_seconds,
+           demand_deadline_seconds: demand_deadline_seconds,
+           observation_costs: observation_costs,
+           agent_id: Map.get(snapshot, :agent_id),
+           coverage_authoritative: Map.has_key?(snapshot, :baseline_subjects),
+           baseline_subjects: baseline_subjects,
+           unreachable_subjects: unreachable_subjects,
+           markets: normalize_market_observations(markets)
+         }}
+      end
     else
       {:error, :invalid_market_planning_input}
     end
   end
 
   defp normalize_snapshot(_snapshot), do: {:error, :invalid_market_planning_input}
+
+  # Without an explicit authoritative baseline the snapshot's own Market
+  # subjects are the target set, so legacy callers keep their conclusions
+  # unchanged and no unresolved coverage is invented from absent evidence.
+  defp normalize_coverage(markets, snapshot, system_symbol) do
+    with {:ok, baseline} <-
+           baseline_subjects(Map.get(snapshot, :baseline_subjects), markets, system_symbol),
+         {:ok, unreachable} <-
+           listed_subjects(Map.get(snapshot, :unreachable_subjects, []), system_symbol),
+         :ok <- coverage_subset_check(unreachable, baseline) do
+      {:ok, baseline, unreachable}
+    end
+  end
+
+  defp coverage_subset_check(unreachable, baseline) do
+    if MapSet.subset?(MapSet.new(unreachable), MapSet.new(baseline)),
+      do: :ok,
+      else: {:error, :invalid_market_planning_input}
+  end
+
+  defp baseline_subjects(nil, markets, _system_symbol) do
+    {:ok, markets |> Enum.map(&market_subject/1) |> Enum.uniq() |> Enum.sort()}
+  end
+
+  defp baseline_subjects(subjects, _markets, system_symbol) do
+    listed_subjects(subjects, system_symbol)
+  end
+
+  defp listed_subjects(subjects, system_symbol) when is_list(subjects) do
+    if Enum.all?(subjects, &valid_market_subject?(&1, system_symbol)) do
+      {:ok, subjects |> Enum.uniq() |> Enum.sort()}
+    else
+      {:error, :invalid_market_planning_input}
+    end
+  end
+
+  defp listed_subjects(_subjects, _system_symbol), do: {:error, :invalid_market_planning_input}
 
   defp normalize_market_observations(markets) do
     markets

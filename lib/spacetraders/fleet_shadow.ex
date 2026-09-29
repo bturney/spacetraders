@@ -17,6 +17,7 @@ defmodule SpaceTraders.FleetShadow do
   alias SpaceTraders.FleetAllocation.StrategyDecisionEpisode
   alias SpaceTraders.FleetPlanning
   alias SpaceTraders.FleetStrategy.Revision
+  alias SpaceTraders.Intelligence
   alias SpaceTraders.Repo
 
   @doc "Builds a shadow comparison from persisted governed Market evidence."
@@ -129,23 +130,35 @@ defmodule SpaceTraders.FleetShadow do
   defp market_snapshot(agent, system_symbol, as_of) do
     subject_prefix = "market:#{system_symbol}:"
 
-    Observation
-    |> where([observation], observation.agent_id == ^agent.id)
-    |> where([observation], like(observation.subject, ^"#{subject_prefix}%"))
-    |> where([observation], observation.observed_at <= ^as_of)
-    |> order_by([observation], desc: observation.observed_at, desc: observation.id)
-    |> Repo.all()
-    |> Enum.uniq_by(& &1.subject)
-    |> Enum.map(fn observation ->
-      %{
-        subject: observation.subject,
-        observed_at: observation.observed_at,
-        evidence_id: observation.id,
-        source: observation.operation_id,
-        trade_goods: observation.facts["trade_goods"]
-      }
-    end)
-    |> then(&FleetPlanning.market_snapshot(as_of, system_symbol, agent.id, &1))
+    markets =
+      Observation
+      |> where([observation], observation.agent_id == ^agent.id)
+      |> where([observation], like(observation.subject, ^"#{subject_prefix}%"))
+      |> where([observation], observation.observed_at <= ^as_of)
+      |> order_by([observation], desc: observation.observed_at, desc: observation.id)
+      |> Repo.all()
+      |> Enum.uniq_by(& &1.subject)
+      |> Enum.map(fn observation ->
+        %{
+          subject: observation.subject,
+          observed_at: observation.observed_at,
+          evidence_id: observation.id,
+          source: observation.operation_id,
+          trade_goods: observation.facts["trade_goods"]
+        }
+      end)
+
+    # The authoritative Market coverage target is every known Marketplace of
+    # the headquarters System, including never-observed ones the retained
+    # Listing query cannot see.
+    baseline =
+      agent
+      |> Intelligence.marketplace_waypoints(system_symbol)
+      |> Enum.map(&"market:#{system_symbol}:#{&1}")
+
+    as_of
+    |> FleetPlanning.market_snapshot(system_symbol, agent.id, markets)
+    |> Map.merge(FleetPlanning.baseline_coverage(baseline))
   end
 
   defp plan(revision, snapshot) do

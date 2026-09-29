@@ -36,12 +36,16 @@ defmodule SpaceTraders.FleetIntelligence do
   The descriptions are typed `%Evidence.Demand{}` structs built through the
   shared `FleetPlanning.market_refresh_demand/1` timing policy. Marketplaces
   with no retained Listing fact are deliberately absent: first-time coverage
-  demands are reset-start baseline work, not refresh work.
+  demands are reset-start baseline work described by
+  `baseline_market_demand_specs/3`.
   """
   def market_refresh_demand_specs(agent, system_symbol, now)
       when is_binary(system_symbol) do
     waypoints = World.waypoints(agent, system_symbol, now, @freshness_seconds)
+    refresh_demand_specs(waypoints, system_symbol, now)
+  end
 
+  defp refresh_demand_specs(waypoints, system_symbol, now) do
     waypoints
     |> Enum.filter(&marketplace_waypoint?/1)
     |> Enum.filter(&retained_listing_fact?/1)
@@ -61,12 +65,49 @@ defmodule SpaceTraders.FleetIntelligence do
     end)
   end
 
+  @doc """
+  Describes one durable reset-start baseline Observation Demand per known
+  Marketplace that has no retained Listing fact, without persisting or
+  acquiring anything.
+
+  A never-observed Marketplace is incomplete evidence for the Market decision
+  that is already pending, so the shared `FleetPlanning.market_refresh_demand/1`
+  timing policy makes each baseline subject due now with the immediate
+  decision deadline. No timing is invented here.
+  """
+  def baseline_market_demand_specs(agent, system_symbol, now)
+      when is_binary(system_symbol) do
+    waypoints = World.waypoints(agent, system_symbol, now, @freshness_seconds)
+    baseline_demand_specs(waypoints, system_symbol, now)
+  end
+
+  defp baseline_demand_specs(waypoints, system_symbol, now) do
+    waypoints
+    |> Enum.filter(&marketplace_waypoint?/1)
+    |> Enum.reject(&retained_listing_fact?/1)
+    |> Enum.map(fn waypoint ->
+      FleetPlanning.market_refresh_demand(%{
+        subject: "market:#{system_symbol}:#{waypoint.symbol}",
+        observed_at: now,
+        fresh: false,
+        as_of: now,
+        freshness_seconds: @freshness_seconds
+      })
+    end)
+  end
+
   @doc "Subjects of the currently known Marketplaces in one System."
   def known_marketplace_subjects(agent, system_symbol, now)
       when is_binary(system_symbol) do
     World.waypoints(agent, system_symbol, now, @freshness_seconds)
+    |> marketplace_subjects(system_symbol)
+  end
+
+  defp marketplace_subjects(waypoints, system_symbol) do
+    waypoints
     |> Enum.filter(&marketplace_waypoint?/1)
     |> Enum.map(&"market:#{system_symbol}:#{&1.symbol}")
+    |> Enum.sort()
   end
 
   # Refresh work covers only subjects that already carry a retained Listing
@@ -83,27 +124,38 @@ defmodule SpaceTraders.FleetIntelligence do
   Synchronizes durable Market refresh Observation Demands for the active Agent
   and Strategy Revision.
 
-  Under the continuous credit-growth objective, every Marketplace with
-  retained Listing evidence gets one open, independently attributable demand
-  per consumer: usable Listings are due at their observation time plus the
-  existing Market freshness budget, stale or incomplete evidence is due now.
+  Under the continuous credit-growth objective, synchronization establishes
+  the durable demand set for every currently known Marketplace:
+
+  - every Marketplace with retained Listing evidence gets one open,
+    independently attributable refresh demand per consumer: usable Listings
+    are due at their observation time plus the existing Market freshness
+    budget, stale or incomplete evidence is due now;
+  - every known Marketplace without retained Listing evidence keeps exactly
+    one open reset-start baseline demand due now, so first-time coverage
+    survives restart and never depends on a Market polling scan.
+
   Synchronization is idempotent and never extends an already-due demand, so
   API backpressure leaves overdue timing unchanged.
 
   Demands whose subject is no longer a known Marketplace have lost Strategy
   relevance and are withdrawn with preserved provenance; a Marketplace that
   merely lacks Listing evidence is never withdrawn, so reset-start baseline
-  coverage is untouched. This replaces the removed fixed Market polling scan
-  with real durable work.
+  coverage is untouched.
   """
   def sync_market_observation_demands(agent, revision, system_symbol)
       when is_binary(system_symbol) do
     if credit_growth_objective?(revision) do
       now = Clock.utc_now()
-      specs = market_refresh_demand_specs(agent, system_symbol, now)
+      waypoints = World.waypoints(agent, system_symbol, now, @freshness_seconds)
+      subjects = marketplace_subjects(waypoints, system_symbol)
+
+      specs =
+        (refresh_demand_specs(waypoints, system_symbol, now) ++
+           baseline_demand_specs(waypoints, system_symbol, now))
+        |> Enum.uniq_by(& &1.subject)
 
       with :ok <- Evidence.sync_runtime_demands(agent, revision, specs, now) do
-        subjects = known_marketplace_subjects(agent, system_symbol, now)
         Evidence.withdraw_market_demands_outside_subjects(agent, revision, subjects, now)
       end
     else
@@ -372,6 +424,9 @@ defmodule SpaceTraders.FleetIntelligence do
                retained_markets(waypoints, system)
              )
              |> Map.put(:observation_costs, costs)
+             |> Map.merge(
+               FleetPlanning.baseline_coverage(marketplace_subjects(waypoints, system))
+             )
            ) do
         {:ok, %{observation_demands: demands}} ->
           demands
