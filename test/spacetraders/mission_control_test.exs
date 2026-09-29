@@ -632,6 +632,78 @@ defmodule SpaceTraders.MissionControlTest do
     end
   end
 
+  describe "market_planning/2" do
+    test "projects a profitable route from partial evidence while baseline coverage stays incomplete" do
+      {scope, agent} = credit_growth_fixture()
+
+      observe_market_pair(agent)
+      # A known third Marketplace without Listing evidence stays unresolved.
+      observe_waypoint(agent, "X1-A3")
+
+      assert [%{objective_index: 0, planning: planning}] = MissionControl.market_planning(scope)
+
+      assert planning.candidate_contributions != []
+
+      refute Enum.any?(planning.limitations, &(&1.reason == :no_viable_market_routes))
+
+      assert Enum.any?(planning.limitations, fn limitation ->
+               limitation.reason == :insufficient_market_evidence and
+                 limitation.subject == "market:X1:X1-A3"
+             end)
+    end
+
+    test "projects incomplete coverage as an explicit limitation instead of an invalid negative conclusion" do
+      {scope, agent} = credit_growth_fixture()
+
+      Enum.each(["X1-A1", "X1-A2", "X1-A3"], &observe_waypoint(agent, &1))
+      # Identical quotes leave no spread, and the never-observed A3 keeps the
+      # baseline target incomplete.
+      observe_market(agent, "X1-A1", 10, 9)
+      observe_market(agent, "X1-A2", 10, 9)
+
+      assert [%{objective_index: 0, planning: planning}] = MissionControl.market_planning(scope)
+
+      assert planning.candidate_contributions == []
+
+      refute Enum.any?(planning.limitations, &(&1.reason == :no_viable_market_routes))
+
+      assert %{
+               subject: :market_planning,
+               reason: :incomplete_market_coverage,
+               subjects: ["market:X1:X1-A3"]
+             } = Enum.find(planning.limitations, &(&1.reason == :incomplete_market_coverage))
+    end
+  end
+
+  defp credit_growth_fixture do
+    operator = operator_fixture()
+    scope = Scope.for_operator(operator)
+    agent = agent_fixture(operator, %{headquarters: "X1-A1"})
+
+    assert {:ok, _draft} =
+             FleetStrategy.save_draft(
+               scope,
+               %{
+                 "objectives" => [
+                   %{
+                     "objective" => "Grow credits",
+                     "kind" => "continuous",
+                     "evaluation" => "Measure growth",
+                     "scope" => "recurring"
+                   }
+                 ],
+                 "hard_constraints" => ["Keep at least 50,000 credits available"],
+                 "preferences" => [],
+                 "consequences" => "The Fleet may spend credits above the floor."
+               },
+               0
+             )
+
+    assert {:ok, _revision} = FleetStrategy.activate(scope, 1)
+
+    {scope, agent}
+  end
+
   defp observe_market_pair(agent) do
     Enum.each(["X1-A1", "X1-A2"], &observe_waypoint(agent, &1))
     observe_market(agent, "X1-A1", 10, 9)

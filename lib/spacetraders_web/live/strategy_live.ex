@@ -922,6 +922,14 @@ defmodule SpaceTradersWeb.StrategyLive do
   defp planning_limitation(:no_viable_market_routes),
     do: "Fresh evidence shows no positive-spread Market route."
 
+  defp planning_limitation(%{reason: :incomplete_market_coverage, subjects: subjects}),
+    do:
+      "Baseline Market coverage is incomplete; #{length(subjects)} Marketplace(s) still need Listing evidence."
+
+  defp planning_limitation(%{reason: :unreachable_market_coverage, subjects: subjects}),
+    do:
+      "#{length(subjects)} baseline Marketplace(s) cannot currently be reached by the Fleet; coverage stays unresolved."
+
   defp planning_limitation(_reason), do: "Market planning is currently limited."
 
   defp rejection_reason(:claim_conflict),

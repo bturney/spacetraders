@@ -14,6 +14,7 @@ defmodule SpaceTraders.ObservationDemandSchedulerScenarioTest do
   alias SpaceTraders.Fleet.Ship
   alias SpaceTraders.FleetAllocation.Reconciler
   alias SpaceTraders.FleetGeneration.Generation
+  alias SpaceTraders.FleetIntelligence
   alias SpaceTraders.FleetStrategy
   alias SpaceTraders.FleetStrategy.{Revision, Strategy}
   alias SpaceTraders.Intelligence
@@ -62,6 +63,46 @@ defmodule SpaceTraders.ObservationDemandSchedulerScenarioTest do
     # Boot reconstructs one earliest due wakeup from durable state alone.
     start_supervised!({DemandScheduler, []})
     assert_receive {:observation_demand_due, ^agent_id, ["market:X1-UX81:X1-UX81-A1"]}
+  end
+
+  test "persisted baseline Market coverage demands stay scheduled across a scheduler restart", %{
+    agent: agent,
+    agent_id: agent_id,
+    revision: revision
+  } do
+    waypoint =
+      Model.Waypoint.from_json(%{
+        "symbol" => "X1-UX81-A1",
+        "systemSymbol" => "X1-UX81",
+        "type" => "PLANET",
+        "x" => 1,
+        "y" => 2,
+        "traits" => [%{"symbol" => "MARKETPLACE"}]
+      })
+
+    {:ok, _} = Intelligence.observe_waypoint(agent, waypoint, source: "get_waypoints")
+
+    # One durable reset-start baseline demand, due now, for the never-observed
+    # Marketplace. No API stub exists in this test: any Market polling would
+    # fail the test.
+    assert :ok = FleetIntelligence.sync_market_observation_demands(agent, revision, "X1-UX81")
+
+    assert [demand] = Evidence.list_open_demands(agent)
+    assert demand.subject == "market:X1-UX81:X1-UX81-A1"
+    assert demand.owner == "fleet_planning"
+    assert DateTime.compare(demand.due_at, SpaceTraders.Clock.utc_now()) != :gt
+
+    # The demand was persisted before any scheduler process existed. A fresh
+    # scheduler boot reconstructs the due wakeup from durable state alone, so
+    # a process restart is never an autonomy trigger and no Market polling is
+    # required to keep the coverage work scheduled.
+    start_supervised!({DemandScheduler, []})
+    assert_receive {:observation_demand_due, ^agent_id, ["market:X1-UX81:X1-UX81-A1"]}
+
+    # The wake never acquires evidence itself, so incomplete coverage keeps
+    # the baseline demand durably open.
+    assert [%{id: open_id}] = Evidence.list_open_demands(agent)
+    assert open_id == demand.id
   end
 
   test "one governed wakeup selects each demand at its earliest useful time and rearms", %{
