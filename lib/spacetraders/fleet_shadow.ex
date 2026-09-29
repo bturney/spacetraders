@@ -15,9 +15,9 @@ defmodule SpaceTraders.FleetShadow do
   alias SpaceTraders.Evidence.Observation
   alias SpaceTraders.FleetAllocation
   alias SpaceTraders.FleetAllocation.StrategyDecisionEpisode
+  alias SpaceTraders.FleetIntelligence
   alias SpaceTraders.FleetPlanning
   alias SpaceTraders.FleetStrategy.Revision
-  alias SpaceTraders.Intelligence
   alias SpaceTraders.Repo
 
   @doc "Builds a shadow comparison from persisted governed Market evidence."
@@ -151,10 +151,7 @@ defmodule SpaceTraders.FleetShadow do
     # The authoritative Market coverage target is every known Marketplace of
     # the headquarters System, including never-observed ones the retained
     # Listing query cannot see.
-    baseline =
-      agent
-      |> Intelligence.marketplace_waypoints(system_symbol)
-      |> Enum.map(&"market:#{system_symbol}:#{&1}")
+    baseline = FleetIntelligence.known_marketplace_subjects(agent, system_symbol, as_of)
 
     as_of
     |> FleetPlanning.market_snapshot(system_symbol, agent.id, markets)

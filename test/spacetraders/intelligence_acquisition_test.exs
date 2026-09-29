@@ -17,6 +17,7 @@ defmodule SpaceTraders.IntelligenceAcquisitionTest do
   alias SpaceTraders.FleetGeneration.Generation
   alias SpaceTraders.FleetIntelligence
   alias SpaceTraders.FleetPlanning
+  alias SpaceTraders.FleetStrategy
   alias SpaceTraders.FleetStrategy.{Revision, Strategy}
   alias SpaceTraders.Intelligence
   alias SpaceTraders.MutationAttempts
@@ -2275,6 +2276,65 @@ defmodule SpaceTraders.IntelligenceAcquisitionTest do
     # first Marketplace's durable demand.
     expanded = Enum.find(Evidence.list_open_demands(agent), &(&1.id == first_demand_id))
     assert expanded.subject == "market:X1-UX81:X1-UX81-A1"
+  end
+
+  test "a superseding Strategy Revision withdraws baseline demands with preserved provenance" do
+    {agent, _ship, revision, operator} =
+      unclaimed_intelligence_fixture(%{
+        "objective" => "Grow credits",
+        "kind" => "continuous",
+        "evaluation" => "Maximize net credit growth over time"
+      })
+
+    marketplace =
+      Model.Waypoint.from_json(%{
+        "symbol" => "X1-UX81-A1",
+        "systemSymbol" => "X1-UX81",
+        "type" => "PLANET",
+        "x" => 1,
+        "y" => 2,
+        "traits" => [%{"symbol" => "MARKETPLACE"}]
+      })
+
+    {:ok, _} = Intelligence.observe_waypoint(agent, marketplace, source: "get_waypoints")
+
+    assert :ok = FleetIntelligence.sync_market_observation_demands(agent, revision, "X1-UX81")
+
+    assert [%{id: demand_id}] = Evidence.list_open_demands(agent)
+
+    scope = Scope.for_operator(operator)
+
+    assert {:ok, _} =
+             FleetStrategy.save_draft(
+               scope,
+               %{
+                 "objectives" => [
+                   %{
+                     "objective" => "Grow credits",
+                     "kind" => "continuous",
+                     "evaluation" => "Maximize net credit growth over time",
+                     "scope" => "recurring"
+                   }
+                 ],
+                 "hard_constraints" => ["Keep at least 1,000 credits available"],
+                 "preferences" => [],
+                 "consequences" => "The Fleet may trade above the credit floor."
+               },
+               0
+             )
+
+    updated = FleetStrategy.get(scope)
+    assert {:ok, _superseding} = FleetStrategy.activate(scope, updated.draft_version)
+
+    # The baseline demand was withdrawn, never deleted, with its durable
+    # Strategy provenance preserved.
+    reloaded = Repo.get!(Evidence.ObservationDemand, demand_id)
+
+    assert reloaded.withdrawn_at
+    assert reloaded.strategy_revision_id == revision.id
+    assert reloaded.subject == "market:X1-UX81:X1-UX81-A1"
+    assert reloaded.owner == "fleet_planning"
+    assert Evidence.list_open_demands(agent) == []
   end
 
   test "runtime sync withdraws a Market refresh demand that lost Marketplace relevance" do

@@ -30,6 +30,7 @@ defmodule SpaceTraders.MissionControl do
     FleetAllocation,
     FleetExecution,
     FleetGeneration,
+    FleetIntelligence,
     FleetPlanning,
     FleetStrategy,
     Intelligence,
@@ -924,7 +925,8 @@ defmodule SpaceTraders.MissionControl do
 
       # The authoritative Market coverage target is every known Marketplace of
       # the headquarters System, including never-observed Waypoints.
-      baseline = Enum.map(marketplace_symbols, &"market:#{system_symbol}:#{&1}")
+      baseline =
+        Enum.map(marketplace_symbols, &FleetIntelligence.market_subject(system_symbol, &1))
 
       snapshot =
         FleetPlanning.market_snapshot(as_of, system_symbol, agent.id, markets)

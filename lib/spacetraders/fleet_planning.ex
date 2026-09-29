@@ -2020,6 +2020,8 @@ defmodule SpaceTraders.FleetPlanning do
   # the conclusion open and are reported explicitly instead of
   # `no viable Market route`. Legacy snapshots without coverage input keep
   # their previous limitations and conclusions unchanged.
+  defp market_planning_limitations(markets, snapshot, limitations, candidates)
+
   defp market_planning_limitations(markets, snapshot, limitations, candidates) do
     unresolved = unresolved_baseline_subjects(markets, snapshot)
 
@@ -2033,13 +2035,19 @@ defmodule SpaceTraders.FleetPlanning do
       limitations != [] ->
         limitations
 
-      snapshot.baseline_subjects != [] ->
+      snapshot.coverage_authoritative and snapshot.baseline_subjects != [] ->
         # Complete baseline coverage with no admissible route is the only
         # negative System-wide Market conclusion.
         [%{subject: :market_planning, reason: :no_viable_market_routes}]
 
-      true ->
+      snapshot.coverage_authoritative ->
         [%{subject: :market_planning, reason: :insufficient_market_evidence}]
+
+      length(markets) < 2 ->
+        [%{subject: :market_planning, reason: :insufficient_market_evidence}]
+
+      true ->
+        [%{subject: :market_planning, reason: :no_viable_market_routes}]
     end
   end
 

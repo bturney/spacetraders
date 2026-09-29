@@ -56,7 +56,7 @@ defmodule SpaceTraders.FleetIntelligence do
         match?(%{freshness: :fresh, value: goods} when is_list(goods), fact)
 
       FleetPlanning.market_refresh_demand(%{
-        subject: "market:#{system_symbol}:#{waypoint.symbol}",
+        subject: market_subject(system_symbol, waypoint.symbol),
         observed_at: fact.observed_at,
         fresh: fresh?,
         as_of: now,
@@ -87,7 +87,7 @@ defmodule SpaceTraders.FleetIntelligence do
     |> Enum.reject(&retained_listing_fact?/1)
     |> Enum.map(fn waypoint ->
       FleetPlanning.market_refresh_demand(%{
-        subject: "market:#{system_symbol}:#{waypoint.symbol}",
+        subject: market_subject(system_symbol, waypoint.symbol),
         observed_at: now,
         fresh: false,
         as_of: now,
@@ -103,10 +103,16 @@ defmodule SpaceTraders.FleetIntelligence do
     |> marketplace_subjects(system_symbol)
   end
 
+  @doc "Market Observation Demand subject for one Waypoint."
+  def market_subject(system_symbol, waypoint_symbol)
+      when is_binary(system_symbol) and is_binary(waypoint_symbol) do
+    "market:#{system_symbol}:#{waypoint_symbol}"
+  end
+
   defp marketplace_subjects(waypoints, system_symbol) do
     waypoints
     |> Enum.filter(&marketplace_waypoint?/1)
-    |> Enum.map(&"market:#{system_symbol}:#{&1.symbol}")
+    |> Enum.map(&market_subject(system_symbol, &1.symbol))
     |> Enum.sort()
   end
 

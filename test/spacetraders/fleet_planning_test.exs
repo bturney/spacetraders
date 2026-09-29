@@ -286,6 +286,19 @@ defmodule SpaceTraders.FleetPlanningTest do
             }} = FleetPlanning.plan_market(revision(), 0, snapshot)
   end
 
+  test "a single usable Market without coverage input still reports insufficient evidence" do
+    snapshot = %{
+      evidence_snapshot()
+      | markets: [market("X1-A1", @as_of, [good("IRON", 10, 9, 20)])]
+    }
+
+    assert {:ok,
+            %{
+              candidate_contributions: [],
+              limitations: [%{reason: :insufficient_market_evidence}]
+            }} = FleetPlanning.plan_market(revision(), 0, snapshot)
+  end
+
   describe "baseline Market coverage" do
     test "partial evidence proposes a profitable route while the baseline target is incomplete" do
       # The never-observed third Marketplace stays unresolved: planning may
