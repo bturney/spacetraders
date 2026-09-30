@@ -30,7 +30,8 @@ defmodule SpaceTraders.FleetAllocation.NeutralWait do
   import Ecto.Query
 
   alias SpaceTraders.Evidence.ObservationDemand
-  alias SpaceTraders.FleetAllocation.AllocationWaitPointer
+  alias SpaceTraders.FleetAllocation.AllocationResultPointer
+  alias SpaceTraders.FleetAllocation.JsonEvidence
   alias SpaceTraders.FleetAllocation.StrategyDecisionEpisode
   alias SpaceTraders.FleetGeneration.Generation
   alias SpaceTraders.FleetStrategy.Revision
@@ -160,7 +161,7 @@ defmodule SpaceTraders.FleetAllocation.NeutralWait do
   @spec clear(integer()) :: :ok
   def clear(generation_id) when is_integer(generation_id) do
     case pointer_query(generation_id) do
-      %AllocationWaitPointer{} = pointer ->
+      %AllocationResultPointer{} = pointer ->
         supersede_episode!(pointer.strategy_decision_episode_id)
         Repo.delete!(pointer)
 
@@ -174,16 +175,11 @@ defmodule SpaceTraders.FleetAllocation.NeutralWait do
   @doc "The `inserted_at` of the current Neutral Wait, or nil when the fleet is not waiting."
   @spec current_since(integer()) :: DateTime.t() | nil
   def current_since(generation_id) when is_integer(generation_id) do
-    pointer = Repo.get_by(AllocationWaitPointer, fleet_generation_id: generation_id)
+    pointer = Repo.get_by(AllocationResultPointer, fleet_generation_id: generation_id)
 
-    if pointer && pointer.selection_kind == :neutral_wait do
-      case Repo.get(StrategyDecisionEpisode, pointer.strategy_decision_episode_id) do
-        %{selection_kind: :neutral_wait, classification: :still_evaluating} = episode ->
-          episode.inserted_at
-
-        _other ->
-          nil
-      end
+    case pointer && current_episode(pointer) do
+      %StrategyDecisionEpisode{inserted_at: inserted_at} -> inserted_at
+      _no_current_wait -> nil
     end
   end
 
@@ -199,7 +195,7 @@ defmodule SpaceTraders.FleetAllocation.NeutralWait do
 
   # The pointer is the O(1) source for the allocation scope's current result;
   # an unreferenced historical wait must never be revived by a later refresh.
-  defp current_episode(%AllocationWaitPointer{
+  defp current_episode(%AllocationResultPointer{
          selection_kind: :neutral_wait,
          strategy_decision_episode_id: episode_id
        })
@@ -230,7 +226,7 @@ defmodule SpaceTraders.FleetAllocation.NeutralWait do
       )
 
       stale_pointers =
-        from(pointer in AllocationWaitPointer,
+        from(pointer in AllocationResultPointer,
           where:
             pointer.selection_kind == :neutral_wait and
               pointer.strategy_decision_episode_id in ^episode_ids
@@ -326,7 +322,7 @@ defmodule SpaceTraders.FleetAllocation.NeutralWait do
   defp episode_evidence_references(selection, demands) do
     (Map.get(selection, :evidence_references, []) ++
        Enum.map(demands, &observation_demand_reference/1))
-    |> json_safe()
+    |> JsonEvidence.dump()
     |> Enum.uniq()
   end
 
@@ -340,12 +336,15 @@ defmodule SpaceTraders.FleetAllocation.NeutralWait do
   end
 
   defp episode_alternatives(selection) do
-    %{
-      "candidates" => selection |> Map.get(:candidates, []) |> Enum.map(&json_safe/1),
-      "rejections" => selection |> Map.get(:rejections, []) |> Enum.map(&json_safe/1),
-      "reconciled_subjects" =>
-        Enum.map(Map.get(selection, :reconciled_subjects, []), &to_string/1)
-    }
+    [
+      %{
+        "kind" => StrategyDecisionEpisode.neutral_wait_bundle(),
+        "candidates" => selection |> Map.get(:candidates, []) |> Enum.map(&JsonEvidence.dump/1),
+        "rejections" => selection |> Map.get(:rejections, []) |> Enum.map(&JsonEvidence.dump/1),
+        "reconciled_subjects" =>
+          Enum.map(Map.get(selection, :reconciled_subjects, []), &to_string/1)
+      }
+    ]
   end
 
   defp episode_binding_constraints(selection, revision) do
@@ -354,15 +353,15 @@ defmodule SpaceTraders.FleetAllocation.NeutralWait do
        |> Map.get("hard_constraints", [])
        |> Enum.map(fn
          rule when is_binary(rule) -> %{"rule" => rule}
-         rule -> json_safe(rule)
+         rule -> JsonEvidence.dump(rule)
        end))
-    |> json_safe()
+    |> JsonEvidence.dump()
   end
 
   defp episode_expectations(selection, next_observation_at, limitation_kind) do
     %{
       "action" => "no_admissible_commitment",
-      "binding_limitation" => json_safe(Map.fetch!(selection, :binding_limitation)),
+      "binding_limitation" => JsonEvidence.dump(Map.fetch!(selection, :binding_limitation)),
       "limitation_kind" => Atom.to_string(limitation_kind),
       "producer" => @producer,
       "basis" => @basis,
@@ -484,33 +483,13 @@ defmodule SpaceTraders.FleetAllocation.NeutralWait do
 
   defp limitation_reason(_reason), do: nil
 
-  # Mirrors the JSON-safe serialization used when persisting published portfolio
-  # evidence: datetimes become ISO8601 strings, structs become plain maps.
-  defp json_safe(%DateTime{} = datetime), do: DateTime.to_iso8601(datetime)
-
-  defp json_safe(%_{} = struct) do
-    struct
-    |> Map.from_struct()
-    |> json_safe()
-  end
-
-  defp json_safe(map) when is_map(map) do
-    Map.new(map, fn {key, value} -> {to_string(key), json_safe(value)} end)
-  end
-
-  defp json_safe(list) when is_list(list), do: Enum.map(list, &json_safe/1)
-  defp json_safe(tuple) when is_tuple(tuple), do: tuple |> Tuple.to_list() |> json_safe()
-  defp json_safe(nil), do: nil
-  defp json_safe(atom) when is_atom(atom), do: Atom.to_string(atom)
-  defp json_safe(value), do: value
-
   ##
   ## The O(1) pointer, transactionally consistent with the episode
   ##
 
   defp lock_or_create_pointer!(%Generation{} = generation, operator_id, revision_id) do
     Repo.insert!(
-      %AllocationWaitPointer{
+      %AllocationResultPointer{
         fleet_generation_id: generation.id,
         operator_id: operator_id,
         fleet_strategy_revision_id: revision_id,
@@ -524,7 +503,7 @@ defmodule SpaceTraders.FleetAllocation.NeutralWait do
   end
 
   defp pointer_query(generation_id) do
-    AllocationWaitPointer
+    AllocationResultPointer
     |> where([pointer], pointer.fleet_generation_id == ^generation_id)
     |> lock("FOR UPDATE")
     |> Repo.one()

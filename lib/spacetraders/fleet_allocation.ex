@@ -11,8 +11,9 @@ defmodule SpaceTraders.FleetAllocation do
   alias SpaceTraders.Fleet.{Intent, Ship}
 
   alias SpaceTraders.FleetAllocation.{
-    AllocationWaitPointer,
+    AllocationResultPointer,
     Commitment,
+    JsonEvidence,
     NeutralWait,
     Portfolio,
     StrategyDecisionEpisode
@@ -922,7 +923,7 @@ defmodule SpaceTraders.FleetAllocation do
          selection_kind
        ) do
     Repo.insert!(
-      %AllocationWaitPointer{
+      %AllocationResultPointer{
         fleet_generation_id: generation_id,
         operator_id: operator_id,
         fleet_strategy_revision_id: revision_id,
@@ -999,23 +1000,7 @@ defmodule SpaceTraders.FleetAllocation do
     persisted_commitment
   end
 
-  defp json_safe(%DateTime{} = datetime), do: DateTime.to_iso8601(datetime)
-
-  defp json_safe(%_{} = struct) do
-    struct
-    |> Map.from_struct()
-    |> json_safe()
-  end
-
-  defp json_safe(map) when is_map(map) do
-    Map.new(map, fn {key, value} -> {to_string(key), json_safe(value)} end)
-  end
-
-  defp json_safe(list) when is_list(list), do: Enum.map(list, &json_safe/1)
-  defp json_safe(tuple) when is_tuple(tuple), do: tuple |> Tuple.to_list() |> json_safe()
-  defp json_safe(nil), do: nil
-  defp json_safe(atom) when is_atom(atom), do: Atom.to_string(atom)
-  defp json_safe(value), do: value
+  defp json_safe(value), do: JsonEvidence.dump(value)
 
   defp update_decision_outcome(episode_id, operator_id, classification, actual_outcomes) do
     query =

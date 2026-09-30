@@ -13,7 +13,7 @@ defmodule SpaceTraders.NeutralWaitScenarioTest do
   alias SpaceTraders.Evidence.DemandScheduler
   alias SpaceTraders.Fleet.Ship
   alias SpaceTraders.FleetAllocation
-  alias SpaceTraders.FleetAllocation.{AllocationWaitPointer, Commitment, Portfolio, Reconciler}
+  alias SpaceTraders.FleetAllocation.{AllocationResultPointer, Commitment, Portfolio, Reconciler}
   alias SpaceTraders.FleetAllocation.StrategyDecisionEpisode
   alias SpaceTraders.FleetExecution
   alias SpaceTraders.FleetGeneration.Generation
@@ -149,7 +149,7 @@ defmodule SpaceTraders.NeutralWaitScenarioTest do
       assert is_list(episode.evidence_references) and episode.evidence_references != []
 
       pointer =
-        Repo.get_by!(AllocationWaitPointer, fleet_generation_id: episode.fleet_generation_id)
+        Repo.get_by!(AllocationResultPointer, fleet_generation_id: episode.fleet_generation_id)
 
       assert pointer.selection_kind == :neutral_wait
       assert pointer.strategy_decision_episode_id == episode.id

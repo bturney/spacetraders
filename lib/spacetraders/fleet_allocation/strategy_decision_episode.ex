@@ -1,23 +1,3 @@
-defmodule SpaceTraders.FleetAllocation.JsonDocument do
-  @moduledoc false
-
-  use Ecto.Type
-
-  # Selected-plan episodes retain the rejected alternatives list; Neutral Wait
-  # episodes retain one candidate-bundle map. Both are JSON documents in the
-  # same jsonb column, so the type passes either shape through untouched.
-  def type, do: :map
-
-  def cast(value) when is_map(value) or is_list(value), do: {:ok, value}
-  def cast(_value), do: :error
-
-  def load(value) when is_map(value) or is_list(value), do: {:ok, value}
-  def load(_value), do: :error
-
-  def dump(value) when is_map(value) or is_list(value), do: {:ok, value}
-  def dump(_value), do: :error
-end
-
 defmodule SpaceTraders.FleetAllocation.StrategyDecisionEpisode do
   @moduledoc false
 
@@ -35,10 +15,13 @@ defmodule SpaceTraders.FleetAllocation.StrategyDecisionEpisode do
   schema "strategy_decision_episodes" do
     field :source_version, :integer
     field :evidence_references, {:array, :map}, default: []
-    # Selected-plan episodes retain the rejected alternatives list; Neutral
-    # Wait episodes retain one candidate-bundle map (candidates, rejection
-    # reasons, reconciled subjects). Both are JSON documents.
-    field :alternatives, SpaceTraders.FleetAllocation.JsonDocument, default: []
+
+    # The admissible alternatives this episode considered and did not select.
+    # A selected plan records the rejected candidates; a Neutral Wait records
+    # one tagged candidate bundle, since nothing was admissible to reject
+    # against a chosen portfolio.
+    field :alternatives, {:array, :map}, default: []
+
     field :binding_constraints, {:array, :map}, default: []
     field :expectations, :map, default: %{}
     field :actual_outcomes, :map, default: %{}
@@ -66,4 +49,12 @@ defmodule SpaceTraders.FleetAllocation.StrategyDecisionEpisode do
 
   @doc "The closed limitation-kind vocabulary used by wait metrics and labels."
   def limitation_kinds, do: @limitation_kinds
+
+  @doc """
+  The tag identifying the single candidate bundle a Neutral Wait retained.
+
+  Selected-plan episodes carry rejected candidates instead, so the tag is what
+  distinguishes "nothing was admissible" from "these were not selected".
+  """
+  def neutral_wait_bundle, do: "neutral_wait_candidates"
 end

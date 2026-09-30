@@ -1,4 +1,4 @@
-defmodule SpaceTraders.FleetAllocation.AllocationWaitPointer do
+defmodule SpaceTraders.FleetAllocation.AllocationResultPointer do
   @moduledoc false
 
   use Ecto.Schema

@@ -17,34 +17,6 @@ defmodule SpaceTraders.Repo.Migrations.AddNeutralWaitRepresentation do
       add :next_observation_at, :utc_datetime_usec
     end
 
-    # Neutral Wait episodes retain one candidate-bundle map where selected-plan
-    # episodes retain the rejected alternatives list. Widen the column from a
-    # jsonb array to jsonb; `to_jsonb` preserves every existing list as the
-    # same JSON array value.
-    execute(
-      "ALTER TABLE strategy_decision_episodes ALTER COLUMN alternatives DROP DEFAULT",
-      "ALTER TABLE strategy_decision_episodes ALTER COLUMN alternatives DROP DEFAULT"
-    )
-
-    execute(
-      """
-      ALTER TABLE strategy_decision_episodes
-        ALTER COLUMN alternatives TYPE jsonb USING to_jsonb(alternatives)
-      """,
-      """
-      ALTER TABLE strategy_decision_episodes
-        ALTER COLUMN alternatives TYPE jsonb[] USING CASE
-          WHEN jsonb_typeof(alternatives) = 'array'
-            THEN (SELECT array_agg(element) FROM jsonb_array_elements(alternatives) element)
-          ELSE ARRAY[]::jsonb[] END
-      """
-    )
-
-    execute(
-      "ALTER TABLE strategy_decision_episodes ALTER COLUMN alternatives SET DEFAULT '[]'::jsonb",
-      "ALTER TABLE strategy_decision_episodes ALTER COLUMN alternatives SET DEFAULT '{}'::jsonb[]"
-    )
-
     create constraint(:strategy_decision_episodes, :selection_kind_allowed,
              check: "selection_kind IN ('selected_plan', 'neutral_wait')"
            )
@@ -92,32 +64,9 @@ defmodule SpaceTraders.Repo.Migrations.AddNeutralWaitRepresentation do
              """
            )
 
-    # Existing current portfolios remain selected allocation results after this
-    # additive migration, so make their O(1) pointers available immediately.
-    execute(
-      """
-      INSERT INTO allocation_result_pointers (
-        fleet_generation_id,
-        operator_id,
-        fleet_strategy_revision_id,
-        selection_kind,
-        strategy_decision_episode_id,
-        inserted_at
-      )
-      SELECT
-        fleet_generation_id,
-        operator_id,
-        fleet_strategy_revision_id,
-        'selected_plan',
-        strategy_decision_episode_id,
-        inserted_at
-      FROM fleet_commitment_portfolios
-      WHERE superseded_at IS NULL
-      ON CONFLICT (fleet_generation_id) DO NOTHING
-      """,
-      "DELETE FROM allocation_result_pointers"
-    )
-
+    # Deleting an episode clears the pointer that references it, so a pointer
+    # can never outlive the Neutral Wait it names and no longer violate the
+    # constraint above.
     execute(
       """
       CREATE FUNCTION clear_wait_pointer_for_episode()

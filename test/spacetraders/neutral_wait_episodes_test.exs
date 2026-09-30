@@ -6,7 +6,7 @@ defmodule SpaceTraders.NeutralWaitEpisodesTest do
   alias SpaceTraders.Agent.Scope
   alias SpaceTraders.Evidence
   alias SpaceTraders.FleetAllocation
-  alias SpaceTraders.FleetAllocation.AllocationWaitPointer
+  alias SpaceTraders.FleetAllocation.AllocationResultPointer
   alias SpaceTraders.FleetAllocation.StrategyDecisionEpisode
   alias SpaceTraders.FleetGeneration.Generation
   alias SpaceTraders.FleetStrategy.Revision
@@ -77,8 +77,12 @@ defmodule SpaceTraders.NeutralWaitEpisodesTest do
                }
              ]
 
-      # Candidates and rejection reasons are retained in alternatives.
-      assert episode.alternatives == %{
+      # Candidates and rejection reasons are retained as one tagged bundle,
+      # distinguishing "nothing was admissible" from "these were not selected".
+      assert [bundle] = episode.alternatives
+
+      assert bundle == %{
+               "kind" => "neutral_wait_candidates",
                "candidates" => @candidates,
                "rejections" => @rejections,
                "reconciled_subjects" => Enum.sort(@reconciled_subjects)
@@ -90,7 +94,7 @@ defmodule SpaceTraders.NeutralWaitEpisodesTest do
       assert episode.calibration_version == @calibration_version
 
       # O(1) current-result pointer: the wait is discoverable per generation.
-      pointer = Repo.get_by!(AllocationWaitPointer, fleet_generation_id: generation.id)
+      pointer = Repo.get_by!(AllocationResultPointer, fleet_generation_id: generation.id)
       assert pointer.strategy_decision_episode_id == episode.id
       assert pointer.selection_kind == :neutral_wait
 
@@ -144,7 +148,7 @@ defmodule SpaceTraders.NeutralWaitEpisodesTest do
       assert DateTime.diff(refreshed.updated_at, first_updated_at, :microsecond) >= 0
 
       # Exactly one current wait pointer remains.
-      assert Repo.aggregate(AllocationWaitPointer, :count) == 1
+      assert Repo.aggregate(AllocationResultPointer, :count) == 1
     end
 
     test "changed re-evaluation detail with the same limitation kind refreshes in place" do
@@ -266,7 +270,7 @@ defmodule SpaceTraders.NeutralWaitEpisodesTest do
       assert Repo.reload!(episode).classification == :superseded
       assert Repo.reload!(superseded_by).classification == :still_evaluating
 
-      pointer = Repo.get_by!(AllocationWaitPointer, fleet_generation_id: generation.id)
+      pointer = Repo.get_by!(AllocationResultPointer, fleet_generation_id: generation.id)
       assert pointer.strategy_decision_episode_id == superseded_by.id
     end
 
@@ -305,7 +309,7 @@ defmodule SpaceTraders.NeutralWaitEpisodesTest do
 
       assert :ok = SpaceTraders.FleetGeneration.activate_strategy(scope, revision_two)
       assert Repo.reload!(episode).classification == :superseded
-      assert Repo.get_by(AllocationWaitPointer, fleet_generation_id: generation.id) == nil
+      assert Repo.get_by(AllocationResultPointer, fleet_generation_id: generation.id) == nil
 
       {:ok, _new_demand} =
         request_future_demand(agent, revision_two, "market:X1:X1-A3", 600)
@@ -322,7 +326,7 @@ defmodule SpaceTraders.NeutralWaitEpisodesTest do
       assert Repo.reload!(episode).classification == :superseded
       assert Repo.reload!(second).classification == :still_evaluating
 
-      pointer = Repo.get_by!(AllocationWaitPointer, fleet_generation_id: generation.id)
+      pointer = Repo.get_by!(AllocationResultPointer, fleet_generation_id: generation.id)
       assert pointer.strategy_decision_episode_id == second.id
       assert pointer.fleet_strategy_revision_id == revision_two.id
     end
@@ -423,7 +427,7 @@ defmodule SpaceTraders.NeutralWaitEpisodesTest do
       assert portfolio.strategy_decision_episode_id != episode.id
       assert Repo.reload!(portfolio.strategy_decision_episode).selection_kind == :selected_plan
 
-      pointer = Repo.get_by!(AllocationWaitPointer, fleet_generation_id: generation.id)
+      pointer = Repo.get_by!(AllocationResultPointer, fleet_generation_id: generation.id)
       assert pointer.strategy_decision_episode_id == portfolio.strategy_decision_episode_id
       assert pointer.selection_kind == :selected_plan
 
@@ -444,7 +448,7 @@ defmodule SpaceTraders.NeutralWaitEpisodesTest do
                )
 
       assert Repo.aggregate(StrategyDecisionEpisode, :count) == 0
-      assert Repo.aggregate(AllocationWaitPointer, :count) == 0
+      assert Repo.aggregate(AllocationResultPointer, :count) == 0
     end
 
     test "a non-zero-admissible action never records a Neutral Wait" do
@@ -463,7 +467,7 @@ defmodule SpaceTraders.NeutralWaitEpisodesTest do
       end
 
       assert Repo.aggregate(StrategyDecisionEpisode, :count) == 0
-      assert Repo.aggregate(AllocationWaitPointer, :count) == 0
+      assert Repo.aggregate(AllocationResultPointer, :count) == 0
     end
 
     test "records the no_admissible_candidate limitation kind without pending coverage" do
