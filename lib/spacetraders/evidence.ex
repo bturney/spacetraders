@@ -559,6 +559,28 @@ defmodule SpaceTraders.Evidence do
   end
 
   @doc """
+  Returns strategy-provenanced Market Demand subjects durably settled by
+  fulfillment or withdrawal.
+  """
+  def settled_demand_subjects(%AgentRecord{} = agent, revision_id, subjects)
+      when is_integer(revision_id) and is_list(subjects) do
+    ObservationDemand
+    |> where(
+      [demand],
+      demand.agent_id == ^agent.id and demand.strategy_revision_id == ^revision_id and
+        demand.owner == "fleet_planning" and demand.subject in ^subjects
+    )
+    |> where(
+      [demand],
+      not is_nil(demand.fulfilled_observation_id) or not is_nil(demand.withdrawn_at)
+    )
+    |> select([demand], demand.subject)
+    |> distinct(true)
+    |> Repo.all()
+    |> MapSet.new()
+  end
+
+  @doc """
   Returns the earliest useful time among all open demands, or `nil`.
 
   This is the durable ground truth from which the scheduler reconstructs its

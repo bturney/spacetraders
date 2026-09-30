@@ -13,9 +13,10 @@ defmodule SpaceTraders.FleetExecution do
 
   import Ecto.Query
 
-  alias SpaceTraders.Agent
+  alias SpaceTraders.{Agent, Clock}
   alias SpaceTraders.Agent.Agent, as: AgentRecord
   alias SpaceTraders.Agent.Scope
+  alias SpaceTraders.Evidence
   alias SpaceTraders.Fleet
   alias SpaceTraders.FleetContracts
   alias SpaceTraders.FleetConstruction
@@ -56,7 +57,7 @@ defmodule SpaceTraders.FleetExecution do
          credits when is_integer(credits) <- agent_credits(agent) do
       {:ok,
        %{
-         as_of: DateTime.utc_now(),
+         as_of: Clock.utc_now(),
          claims: market_claims(agent, ships, markets),
          reservations: %{credits: credits}
        }}
@@ -190,11 +191,7 @@ defmodule SpaceTraders.FleetExecution do
            end),
          candidate when not is_nil(candidate) <-
            Enum.find(candidates, &(&1.id == commitment.candidate_id)),
-         demand when not is_nil(demand) <-
-           Enum.find(
-             demands,
-             &String.ends_with?(&1.subject, ":#{candidate.destination_waypoint}")
-           ),
+         {:ok, {waypoint, demand}} <- current_observation_subject(agent, candidate, demands),
          %Generation{} = generation <- current_generation(agent),
          {:ok, portfolio} <-
            FleetAllocation.publish_portfolio(
@@ -218,16 +215,74 @@ defmodule SpaceTraders.FleetExecution do
          {:ok, intent} <-
            Intents.request_commitment_intelligence(agent, persisted, portfolio, ship_symbol, %{
              subject_type: String.to_existing_atom(type),
-             waypoint: candidate.destination_waypoint,
+             waypoint: waypoint,
              required_facts: demand.required_facts,
              freshness_seconds: demand.freshness_seconds
            }) do
       {:ok, %{commitment: persisted, portfolio: portfolio, intent: intent}}
     else
-      nil -> {:error, :no_eligible_intelligence_commitment}
-      _ -> {:error, :intelligence_activation_unavailable}
+      {:error, :current_observation_demand_unavailable} ->
+        {:error, :intelligence_activation_unavailable}
+
+      nil ->
+        {:error, :no_eligible_intelligence_commitment}
+
+      _ ->
+        {:error, :intelligence_activation_unavailable}
     end
   end
+
+  defp current_observation_subject(agent, candidate, demands) do
+    case selected_observation_subject(agent, candidate, demands) do
+      nil -> {:error, :current_observation_demand_unavailable}
+      selection -> {:ok, selection}
+    end
+  end
+
+  # Execution revalidates one next observation at a time against the current
+  # strategy-provenanced Demands. Settled subjects are skipped in the planner's
+  # fixed order; an unexplained missing Demand stops execution rather than
+  # acquiring unsupported evidence.
+  defp selected_observation_subject(
+         agent,
+         %{
+           kind: :market_coverage,
+           strategy_revision_id: revision_id,
+           coverage: %{subjects: subjects}
+         },
+         _demands
+       ) do
+    open_demands =
+      agent
+      |> Evidence.list_open_demands()
+      |> Enum.filter(fn demand ->
+        demand.owner == "fleet_planning" and demand.strategy_revision_id == revision_id and
+          demand.subject in subjects
+      end)
+      |> Map.new(&{&1.subject, &1})
+
+    settled = Evidence.settled_demand_subjects(agent, revision_id, subjects)
+
+    subjects
+    |> Enum.reduce_while(nil, fn subject, _selection ->
+      case Map.fetch(open_demands, subject) do
+        {:ok, demand} ->
+          {:halt, {waypoint_from_subject(subject), demand}}
+
+        :error ->
+          if MapSet.member?(settled, subject), do: {:cont, nil}, else: {:halt, nil}
+      end
+    end)
+  end
+
+  defp selected_observation_subject(_agent, candidate, demands) do
+    case Enum.find(demands, &String.ends_with?(&1.subject, ":#{candidate.destination_waypoint}")) do
+      nil -> nil
+      demand -> {candidate.destination_waypoint, demand}
+    end
+  end
+
+  defp waypoint_from_subject(subject), do: subject |> String.split(":") |> List.last()
 
   @doc "Reconciles an active Market Commitment against fresh Listings and capacity."
   def replan_market(
@@ -724,7 +779,8 @@ defmodule SpaceTraders.FleetExecution do
 
   # A missing live Ship, credit, or Market-reach fact is unknown availability,
   # not zero availability. Treating it as zero would let a transient API error
-  # manufacture a Neutral Wait from a non-authoritative allocation result.
+  # manufacture a Neutral Wait from a non-authoritative allocation result, and
+  # would let coverage acquisition proceed against fabricated capacity.
   defp allocation_availability(agent) do
     with {:ok, availability} <- governed_availability(agent),
          %Generation{} = generation <- current_generation(agent) do

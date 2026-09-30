@@ -26,6 +26,7 @@ defmodule SpaceTraders.Fleet.Intents do
 
   alias SpaceTraders.{
     Agent,
+    Clock,
     Contracts,
     Evidence,
     FleetExecution,
@@ -1627,7 +1628,7 @@ defmodule SpaceTraders.Fleet.Intents do
         type,
         system,
         intent.target_waypoint,
-        DateTime.utc_now(),
+        Clock.utc_now(),
         freshness
       )
 
@@ -1653,7 +1654,7 @@ defmodule SpaceTraders.Fleet.Intents do
               :waypoint,
               system,
               intent.target_waypoint,
-              DateTime.utc_now(),
+              Clock.utc_now(),
               intent.parameters["freshness_seconds"]
             )
 

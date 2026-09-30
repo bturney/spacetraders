@@ -28,6 +28,7 @@ defmodule SpaceTraders.API.CapacityGovernor do
   alias SpaceTraders.API.OperationInventory.Operation
   alias SpaceTraders.API.ShadowAdmission
   alias SpaceTraders.API.ShadowAdmission.Candidate
+  alias SpaceTraders.Clock
 
   defmodule Admission do
     @moduledoc "A production API admission held until the request completes."
@@ -154,7 +155,7 @@ defmodule SpaceTraders.API.CapacityGovernor do
   def handle_call(:snapshot, _from, state) do
     {:reply,
      %Snapshot{
-       observed_at: DateTime.utc_now(),
+       observed_at: Clock.utc_now(),
        available_slots: max(state.admitted_capacity - map_size(state.in_flight), 0),
        evidence_fingerprint: "runtime",
        next_outage_probe_at: state.next_outage_probe_at,

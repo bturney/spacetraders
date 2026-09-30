@@ -98,7 +98,14 @@ defmodule SpaceTraders.NeutralWaitScenarioTest do
       # boundary.
       assert_eventually(fn ->
         projection =
-          World.intelligence(agent, :market, @system, "X1-UX81-A1", DateTime.utc_now(), 300)
+          World.intelligence(
+            agent,
+            :market,
+            @system,
+            "X1-UX81-A1",
+            SpaceTraders.Clock.utc_now(),
+            300
+          )
 
         projection.facts["trade_goods"].freshness == :fresh
       end)

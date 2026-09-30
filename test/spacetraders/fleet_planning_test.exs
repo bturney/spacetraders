@@ -481,6 +481,54 @@ defmodule SpaceTraders.FleetPlanningTest do
     assert Enum.any?(planning.limitations, &(&1.reason == :acquisition_cost_exceeds_value))
   end
 
+  test "distant initial Marketplaces form one structural Coverage Contribution in fixed order" do
+    snapshot = %{
+      as_of: @as_of,
+      system_symbol: "X1",
+      agent_id: 7,
+      freshness_seconds: 300,
+      opportunities: [
+        %{
+          subject: "market:X1:X1-A3",
+          required_facts: ["trade_goods"],
+          facts: %{},
+          expected_decision_value: 1,
+          api_capacity_cost: 5,
+          ship_time_cost: 500,
+          acquisition: :on_site,
+          coverage: true
+        },
+        %{
+          subject: "market:X1:X1-A2",
+          required_facts: ["trade_goods"],
+          facts: %{},
+          expected_decision_value: 1,
+          api_capacity_cost: 5,
+          ship_time_cost: 500,
+          acquisition: :on_site,
+          coverage: true
+        }
+      ]
+    }
+
+    assert {:ok, %{candidate_contributions: [coverage], observation_demands: demands}} =
+             FleetPlanning.plan_intelligence(revision(), 0, snapshot)
+
+    assert %CandidateContribution{
+             kind: :market_coverage,
+             coverage: %{subjects: ["market:X1:X1-A2", "market:X1:X1-A3"]},
+             expected_outcomes: %{
+               coverage: "baseline_marketplaces",
+               subjects: ["market:X1:X1-A2", "market:X1:X1-A3"]
+             }
+           } = coverage
+
+    assert Enum.map(demands, &{&1.subject, &1.expected_value}) == [
+             {"market:X1:X1-A2", nil},
+             {"market:X1:X1-A3", nil}
+           ]
+  end
+
   test "ship acquisition proposals retain alternatives and reserve purchase plus preparation exposure" do
     snapshot = %{
       as_of: @as_of,
