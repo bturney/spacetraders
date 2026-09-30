@@ -474,7 +474,7 @@ defmodule SpaceTraders.MissionControl do
       end)
 
     alternative =
-      Enum.find_value(episode.alternatives, fn option ->
+      Enum.find_value(List.wrap(episode.alternatives), fn option ->
         if is_binary(option["decisive_reason"]),
           do: "Alternative not selected: #{option["decisive_reason"]}"
       end)

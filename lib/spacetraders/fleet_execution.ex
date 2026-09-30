@@ -117,8 +117,18 @@ defmodule SpaceTraders.FleetExecution do
         comparison
       )
       when is_map(comparison) do
-    availability = availability(scope, agent)
+    with {:ok, availability} <- allocation_availability(agent) do
+      activate_market(scope, agent, revision, comparison, availability)
+    end
+  end
 
+  defp activate_market(
+         %Scope{} = scope,
+         %AgentRecord{} = agent,
+         %Revision{} = revision,
+         comparison,
+         availability
+       ) do
     case eligible_market_commitment(comparison, agent, revision, availability) do
       nil ->
         {:error, :no_eligible_market_commitment}
@@ -161,7 +171,14 @@ defmodule SpaceTraders.FleetExecution do
   end
 
   defp do_activate_intelligence(scope, agent, revision, candidates, demands) do
-    availability = availability(scope, agent)
+    with {:ok, availability} <- allocation_availability(agent) do
+      do_activate_intelligence(scope, agent, revision, candidates, demands, availability)
+    else
+      _ -> {:error, :intelligence_activation_unavailable}
+    end
+  end
+
+  defp do_activate_intelligence(scope, agent, revision, candidates, demands, availability) do
     owned_ships = MapSet.new(Enum.map(availability.claims, & &1.resource))
 
     with {:ok, selection} <-
@@ -222,19 +239,32 @@ defmodule SpaceTraders.FleetExecution do
         capacity
       )
       when is_map(previous) and is_map(snapshot) do
-    availability = availability(scope, agent)
     current = FleetAllocation.current_portfolio(scope, agent)
 
-    with {:ok, comparison} <-
-           FleetShadow.replan(
-             previous,
-             snapshot,
-             revision,
-             availability,
-             capacity,
-             current_commitments: if(current, do: current.commitments, else: [])
-           ) do
-      reconcile_market_replan(scope, agent, revision, current, comparison, capacity)
+    case allocation_availability(agent) do
+      {:ok, availability} ->
+        with {:ok, comparison} <-
+               FleetShadow.replan(
+                 previous,
+                 snapshot,
+                 revision,
+                 availability,
+                 capacity,
+                 current_commitments: if(current, do: current.commitments, else: [])
+               ) do
+          reconcile_market_replan(
+            scope,
+            agent,
+            revision,
+            current,
+            comparison,
+            capacity,
+            availability
+          )
+        end
+
+      {:error, :availability_unknown} = error ->
+        capacity_deferral_or_error(current, capacity, error)
     end
   end
 
@@ -247,12 +277,25 @@ defmodule SpaceTraders.FleetExecution do
         capacity
       )
       when is_binary(system_symbol) do
-    availability = availability(scope, agent)
     current = FleetAllocation.current_portfolio(scope, agent)
 
-    with {:ok, comparison} <-
-           FleetShadow.compare_market(agent, revision, system_symbol, availability, capacity) do
-      reconcile_market_replan(scope, agent, revision, current, comparison, capacity)
+    case allocation_availability(agent) do
+      {:ok, availability} ->
+        with {:ok, comparison} <-
+               FleetShadow.compare_market(agent, revision, system_symbol, availability, capacity) do
+          reconcile_market_replan(
+            scope,
+            agent,
+            revision,
+            current,
+            comparison,
+            capacity,
+            availability
+          )
+        end
+
+      {:error, :availability_unknown} = error ->
+        capacity_deferral_or_error(current, capacity, error)
     end
   end
 
@@ -679,26 +722,35 @@ defmodule SpaceTraders.FleetExecution do
     )
   end
 
-  defp availability(%Scope{operator: operator}, agent) do
-    markets =
-      case governed_market_access(agent) do
-        {:ok, markets} -> markets
-        _ -> []
-      end
-
-    %{
-      as_of: DateTime.utc_now(),
-      claims: availability_claims(agent, markets),
-      reservations: availability_reservations(operator, agent)
-    }
-  end
-
-  defp availability_claims(agent, markets) do
-    case Fleet.list_ships(agent) do
-      {:ok, ships} -> market_claims(agent, ships, markets)
-      _ -> []
+  # A missing live Ship, credit, or Market-reach fact is unknown availability,
+  # not zero availability. Treating it as zero would let a transient API error
+  # manufacture a Neutral Wait from a non-authoritative allocation result.
+  defp allocation_availability(agent) do
+    with {:ok, availability} <- governed_availability(agent),
+         %Generation{} = generation <- current_generation(agent) do
+      {:ok, Map.put(availability, :source_version, generation.allocation_version)}
+    else
+      _ -> {:error, :availability_unknown}
     end
   end
+
+  # The Governor's explicit deferral wins over availability collection. It is
+  # not authoritative evidence of an empty portfolio, so it cannot mint or
+  # disturb a Neutral Wait.
+  defp capacity_deferral_or_error(
+         current,
+         %{available_slots: slots, backpressure: pressure},
+         _error
+       )
+       when slots <= 0 or pressure == :sustained do
+    if current do
+      {:ok, %{action: :retained_for_capacity, portfolio: current}}
+    else
+      {:ok, %{action: :deferred_for_capacity}}
+    end
+  end
+
+  defp capacity_deferral_or_error(_current, _capacity, error), do: error
 
   defp governed_market_access(%AgentRecord{} = agent) do
     with {:ok, system_symbol} <- Fleet.system_from_headquarters(agent.headquarters) do
@@ -735,13 +787,6 @@ defmodule SpaceTraders.FleetExecution do
   end
 
   defp sensor_mount?(_ship), do: false
-
-  defp availability_reservations(_operator, agent) do
-    case agent_credits(agent) do
-      credits when is_integer(credits) -> %{credits: credits}
-      _ -> %{credits: 0}
-    end
-  end
 
   defp agent_credits(%AgentRecord{} = agent) do
     case Agent.agent_overview(agent) do
@@ -791,15 +836,24 @@ defmodule SpaceTraders.FleetExecution do
          _revision,
          current,
          %{replan_trigger: :unchanged},
-         _capacity
+         _capacity,
+         _availability
        ) do
     {:ok, %{action: :retained, portfolio: current}}
   end
 
-  defp reconcile_market_replan(_scope, _agent, _revision, current, comparison, %{
-         available_slots: slots,
-         backpressure: pressure
-       })
+  defp reconcile_market_replan(
+         _scope,
+         _agent,
+         _revision,
+         current,
+         comparison,
+         %{
+           available_slots: slots,
+           backpressure: pressure
+         },
+         _availability
+       )
        when slots == 0 or pressure == :sustained do
     if current do
       # Capacity is evidence for allocation: retain a still-authorized commitment
@@ -810,7 +864,15 @@ defmodule SpaceTraders.FleetExecution do
     end
   end
 
-  defp reconcile_market_replan(scope, agent, revision, current, comparison, _capacity) do
+  defp reconcile_market_replan(
+         scope,
+         agent,
+         revision,
+         current,
+         comparison,
+         _capacity,
+         availability
+       ) do
     if current &&
          Enum.any?(current.commitments, fn commitment ->
            Enum.any?(
@@ -820,17 +882,17 @@ defmodule SpaceTraders.FleetExecution do
          end) do
       {:ok, %{action: :retained, portfolio: current, comparison: comparison}}
     else
-      do_reconcile_market_replan(scope, agent, revision, current, comparison)
+      do_reconcile_market_replan(scope, agent, revision, current, comparison, availability)
     end
   end
 
-  defp do_reconcile_market_replan(scope, agent, revision, current, comparison) do
-    case eligible_market_commitment(comparison, agent, revision, availability(scope, agent)) do
+  defp do_reconcile_market_replan(scope, agent, revision, current, comparison, availability) do
+    case eligible_market_commitment(comparison, agent, revision, availability) do
       %{candidate_id: candidate_id} when current != nil ->
         if Enum.any?(current.commitments, &(&1.candidate_id == candidate_id)) do
           {:ok, %{action: :retained, portfolio: current, comparison: comparison}}
         else
-          activate_replanned_market(scope, agent, revision, current, comparison)
+          activate_replanned_market(scope, agent, revision, current, comparison, availability)
         end
 
       nil when current != nil ->
@@ -840,15 +902,100 @@ defmodule SpaceTraders.FleetExecution do
         end
 
       nil ->
-        {:ok, %{action: :no_admissible_commitment, comparison: comparison}}
+        # The single Neutral Wait mint site (ADR 0012): the authoritative
+        # zero-admissible result plus durable future evidence for its
+        # unresolved subjects records the wait. Every other producer outcome —
+        # unknown availability, capacity deferral, infeasibility — never
+        # reaches it, and a reconciliation without future evidence fails
+        # closed: the result stands, no wait is minted.
+        mint_neutral_wait(scope, agent, revision, comparison)
 
       _commitment ->
-        activate_replanned_market(scope, agent, revision, current, comparison)
+        activate_replanned_market(scope, agent, revision, current, comparison, availability)
     end
   end
 
-  defp activate_replanned_market(scope, agent, revision, current, comparison) do
-    with {:ok, result} <- activate_market(scope, agent, revision, comparison) do
+  defp mint_neutral_wait(scope, agent, revision, comparison) do
+    selection = neutral_wait_selection(comparison)
+
+    with %Generation{} = generation <- current_generation(agent),
+         {:ok, _episode} <-
+           FleetAllocation.record_neutral_wait(scope, generation, revision, selection) do
+      {:ok, %{action: :no_admissible_commitment, comparison: comparison}}
+    else
+      _not_a_wait ->
+        {:ok, %{action: :no_admissible_commitment, comparison: comparison}}
+    end
+  end
+
+  # The reconciliation's enumerated result binding for the mint: the planning
+  # entries' unresolved limitations and Observation Demands carry the binding
+  # limitation, the re-evaluation evidence, and the candidate record detail.
+  defp neutral_wait_selection(comparison) do
+    planning = Map.get(comparison, :planning, [])
+
+    demands =
+      planning
+      |> Enum.flat_map(&Map.get(&1, :observation_demands, []))
+      |> Enum.reject(&is_nil(Map.get(&1, :subject)))
+      |> Enum.uniq_by(&Map.get(&1, :subject))
+
+    %{
+      action: :no_admissible_commitment,
+      source_version: Map.get(comparison, :source_version, 0),
+      planning: planning,
+      reconciled_subjects: Map.get(comparison, :reconciled_subjects, []),
+      observation_demands: demands,
+      binding_limitation: binding_limitation(planning),
+      evidence_references: observation_references(demands),
+      candidates: Enum.flat_map(planning, &Map.get(&1, :candidate_contributions, [])),
+      rejections: Map.get(comparison, :alternatives, []),
+      calibration_version: Map.get(comparison, :calibration_version)
+    }
+  end
+
+  defp binding_limitation(planning) do
+    planning
+    |> Enum.flat_map(&Map.get(&1, :limitations, []))
+    |> Enum.find(&neutral_wait_limitation?/1)
+    |> case do
+      nil -> %{}
+      limitation -> limitation
+    end
+  end
+
+  defp neutral_wait_limitation?(%{reason: reason})
+       when reason in [
+              :incomplete_market_coverage,
+              :unreachable_market_coverage,
+              :no_viable_market_routes,
+              :insufficient_market_evidence
+            ],
+       do: true
+
+  defp neutral_wait_limitation?(%{"reason" => reason})
+       when reason in [
+              "incomplete_market_coverage",
+              "unreachable_market_coverage",
+              "no_viable_market_routes",
+              "insufficient_market_evidence"
+            ],
+       do: true
+
+  defp neutral_wait_limitation?(_limitation), do: false
+
+  defp observation_references(demands) do
+    Enum.map(demands, fn demand ->
+      %{
+        "kind" => "observation",
+        "subject" => to_string(demand.subject),
+        "operation_id" => "get-market"
+      }
+    end)
+  end
+
+  defp activate_replanned_market(scope, agent, revision, current, comparison, availability) do
+    with {:ok, result} <- activate_market(scope, agent, revision, comparison, availability) do
       {:ok, Map.put(result, :action, if(current, do: :superseded, else: :activated))}
     end
   end

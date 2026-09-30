@@ -9,7 +9,15 @@ defmodule SpaceTraders.FleetAllocation do
   alias SpaceTraders.Agent.Agent, as: AgentRecord
   alias SpaceTraders.Agent.Scope
   alias SpaceTraders.Fleet.{Intent, Ship}
-  alias SpaceTraders.FleetAllocation.{Commitment, Portfolio, StrategyDecisionEpisode}
+
+  alias SpaceTraders.FleetAllocation.{
+    AllocationWaitPointer,
+    Commitment,
+    NeutralWait,
+    Portfolio,
+    StrategyDecisionEpisode
+  }
+
   alias SpaceTraders.FleetGeneration
   alias SpaceTraders.FleetGeneration.Generation
   alias SpaceTraders.FleetPlanning.CandidateContribution
@@ -58,6 +66,21 @@ defmodule SpaceTraders.FleetAllocation do
     ]
     defstruct @enforce_keys
   end
+
+  @doc """
+  Records the Neutral Wait for one authoritative zero-admissible allocation
+  result at the single mint site fixed by ADR 0012.
+
+  `selection` is the reconciliation's enumerated result binding. Fails closed:
+  a non-wait action or a missing future due Observation Demand for the
+  unresolved subjects records nothing.
+  """
+  defdelegate record_neutral_wait(scope, generation, revision, selection),
+    to: NeutralWait,
+    as: :record
+
+  @doc "The `inserted_at` of the current Neutral Wait, or nil when the fleet is not waiting."
+  defdelegate current_neutral_wait_since(generation_id), to: NeutralWait, as: :current_since
 
   @doc """
   Selects a deterministic, coherent Fleet Commitment portfolio.
@@ -847,6 +870,10 @@ defmodule SpaceTraders.FleetAllocation do
 
     supersede_portfolios(current_portfolio_ids, now)
 
+    # A selected plan is a changed result: every current Neutral Wait in this
+    # Operator's allocation scope supersedes before this result takes over.
+    NeutralWait.supersede_for_operator(operator_id)
+
     revision = Repo.get!(Revision, revision_id)
 
     episode =
@@ -868,6 +895,8 @@ defmodule SpaceTraders.FleetAllocation do
         calibration_version: calibration_version
       })
 
+    upsert_result_pointer(generation_id, operator_id, revision_id, episode.id, :selected_plan)
+
     portfolio =
       Repo.insert!(%Portfolio{
         operator_id: operator_id,
@@ -880,6 +909,37 @@ defmodule SpaceTraders.FleetAllocation do
     Enum.each(selection.commitments, &insert_commitment(portfolio, &1))
 
     Repo.preload(portfolio, [:commitments, :strategy_decision_episode])
+  end
+
+  # The per-Fleet-Generation current-result pointer (ADR 0012): it references
+  # the current episode and copies no facts. Selected-plan publication points
+  # it at the new episode; the wait record points it at the wait episode.
+  defp upsert_result_pointer(
+         generation_id,
+         operator_id,
+         revision_id,
+         episode_id,
+         selection_kind
+       ) do
+    Repo.insert!(
+      %AllocationWaitPointer{
+        fleet_generation_id: generation_id,
+        operator_id: operator_id,
+        fleet_strategy_revision_id: revision_id,
+        selection_kind: selection_kind,
+        strategy_decision_episode_id: episode_id
+      },
+      on_conflict: [
+        set: [
+          selection_kind: selection_kind,
+          strategy_decision_episode_id: episode_id,
+          fleet_strategy_revision_id: revision_id
+        ]
+      ],
+      conflict_target: :fleet_generation_id
+    )
+
+    :ok
   end
 
   # Reservation and allocation serialize on the same Ship rows. In-place
@@ -999,6 +1059,7 @@ defmodule SpaceTraders.FleetAllocation do
 
     if portfolio do
       supersede_portfolios([portfolio.id], now)
+      NeutralWait.clear(generation_id)
       %{portfolio | superseded_at: now}
     else
       Repo.rollback(:no_current_portfolio)
