@@ -5,7 +5,7 @@ defmodule SpaceTraders.Intelligence do
 
   alias SpaceTraders.Agent.Agent, as: AgentRecord
   alias SpaceTraders.Intelligence.{Fact, Observation, Survey}
-  alias SpaceTraders.Repo
+  alias SpaceTraders.{Clock, Repo}
 
   @waypoint_fields [
     :symbol,
@@ -425,5 +425,5 @@ defmodule SpaceTraders.Intelligence do
 
   defp parse_datetime(value) when is_binary(value), do: DateTime.from_iso8601(value) |> elem(1)
 
-  defp now, do: DateTime.utc_now() |> DateTime.truncate(:second)
+  defp now, do: Clock.utc_now() |> DateTime.truncate(:second)
 end

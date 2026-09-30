@@ -49,7 +49,8 @@ defmodule SpaceTraders.FleetPlanning do
                   construction: nil,
                   transfer: nil,
                   ship: nil,
-                  refit: nil
+                  refit: nil,
+                  coverage: nil
                 ]
 
     @type t :: %__MODULE__{}
@@ -133,10 +134,20 @@ defmodule SpaceTraders.FleetPlanning do
 
       opportunities
       |> Enum.sort_by(&Map.get(&1, :subject, ""))
-      |> Enum.reduce_while({[], [], []}, fn opportunity, {candidates, demands, limitations} ->
+      |> Enum.reduce_while({[], [], [], []}, fn opportunity,
+                                                {candidates, demands, limitations, coverage} ->
         case intelligence_opportunity(opportunity, system, as_of, freshness) do
           {:ok, :satisfied} ->
-            {:cont, {candidates, demands, limitations}}
+            {:cont, {candidates, demands, limitations, coverage}}
+
+          {:ok, %{coverage: true} = choice} ->
+            # One bounded Coverage Contribution collects every open initial
+            # Marketplace subject; each contributes one Observation Demand so
+            # the subjects stay independently attributable.
+            demand =
+              coverage_demand(revision, objective_index, snapshot, choice, as_of, freshness)
+
+            {:cont, {candidates, [demand | demands], limitations, [choice | coverage]}}
 
           {:ok, %{net_value: net, type: type} = choice} ->
             demand = %Demand{
@@ -167,7 +178,7 @@ defmodule SpaceTraders.FleetPlanning do
                 ],
                 else: candidates
 
-            {:cont, {candidates, [demand | demands], limitations}}
+            {:cont, {candidates, [demand | demands], limitations, coverage}}
 
           {:error, :acquisition_cost_exceeds_value} ->
             {:cont,
@@ -175,7 +186,7 @@ defmodule SpaceTraders.FleetPlanning do
               [
                 %{subject: opportunity.subject, reason: :acquisition_cost_exceeds_value}
                 | limitations
-              ]}}
+              ], coverage}}
 
           {:error, :invalid} ->
             {:halt, :invalid}
@@ -185,7 +196,13 @@ defmodule SpaceTraders.FleetPlanning do
         :invalid ->
           {:error, :invalid_intelligence_planning_input}
 
-        {candidates, demands, limitations} ->
+        {candidates, demands, limitations, coverage} ->
+          candidates =
+            case coverage_contribution(revision, objective_index, objective, coverage, as_of) do
+              nil -> candidates
+              contribution -> [contribution | candidates]
+            end
+
           {:ok,
            result(revision, objective_index, %{as_of: as_of},
              candidate_contributions: Enum.reverse(candidates),
@@ -1931,25 +1948,20 @@ defmodule SpaceTraders.FleetPlanning do
          capabilities when is_list(capabilities) <-
            Map.get(opportunity, :required_capabilities, []),
          true <- Enum.all?(capabilities, &valid_capability?/1),
-         value when is_number(value) and value >= 0 <-
-           Map.get(opportunity, :expected_decision_value),
-         api_cost when is_number(api_cost) and api_cost >= 0 <-
-           Map.get(opportunity, :api_capacity_cost),
-         ship_cost when is_number(ship_cost) and ship_cost >= 0 <-
-           Map.get(opportunity, :ship_time_cost),
          true <- is_integer(freshness) and freshness >= 0 do
       missing = Enum.reject(facts, &fresh_intelligence?(observed[&1], as_of, freshness))
-      net = value - api_cost - ship_cost
 
       cond do
         missing == [] ->
           {:ok, :satisfied}
 
-        net <= 0 ->
-          {:error, :acquisition_cost_exceeds_value}
+        coverage_subject?(opportunity) and type == "market" and facts == ["trade_goods"] ->
+          # #482: baseline coverage unlocks later decisions without assigning
+          # a per-Waypoint economic score or charging this subject's travel.
+          {:ok, %{coverage: true, subject: opportunity.subject, waypoint: waypoint}}
 
         true ->
-          {:ok, %{net_value: net, type: type, waypoint: waypoint, capabilities: capabilities}}
+          intelligence_opportunity_with_value(opportunity, type, waypoint, capabilities)
       end
     else
       _ -> {:error, :invalid}
@@ -1958,6 +1970,83 @@ defmodule SpaceTraders.FleetPlanning do
 
   defp intelligence_opportunity(_opportunity, _system, _as_of, _freshness),
     do: {:error, :invalid}
+
+  defp coverage_subject?(%{coverage: true}), do: true
+  defp coverage_subject?(_opportunity), do: false
+
+  # One open coverage Observation Demand per subject, due now through the
+  # shared Market timing policy. Structural value admits the bounded
+  # contribution but does not invent a numeric per-subject estimate.
+  defp coverage_demand(revision, objective_index, snapshot, choice, as_of, freshness) do
+    market_refresh_demand(%{
+      subject: choice.subject,
+      observed_at: as_of,
+      fresh: false,
+      as_of: as_of,
+      freshness_seconds: freshness,
+      objective_index: objective_index,
+      agent_id: Map.get(snapshot, :agent_id),
+      strategy_revision_id: revision.id
+    })
+  end
+
+  # One bounded Coverage Contribution over the explicit finite, named set of
+  # open coverage Demands. The sorted subject order is the planner's fixed
+  # order; the named set bounds scope and the fixed order bounds churn. The
+  # contribution carries the portfolio outcome — observe these subjects —
+  # rather than per-subject profit, and leaves no standing promise: it is
+  # re-proposed at every Strategy reconciliation for the subjects still open.
+  defp coverage_contribution(_revision, _index, _objective, [], _as_of), do: nil
+
+  defp coverage_contribution(revision, index, objective, coverage, as_of) do
+    coverage = Enum.reverse(coverage)
+    subjects = Enum.map(coverage, & &1.subject)
+    waypoints = Enum.map(coverage, & &1.waypoint)
+    deadline = DateTime.add(as_of, @observation_demand_deadline_seconds, :second)
+
+    %CandidateContribution{
+      id: Evidence.fingerprint({revision.id, index, :market_coverage, subjects}),
+      strategy_revision_id: revision.id,
+      objective_index: index,
+      objective: objective,
+      kind: :market_coverage,
+      trade_symbol: nil,
+      source_waypoint: nil,
+      destination_waypoint: hd(waypoints),
+      expected_outcomes: %{
+        coverage: "baseline_marketplaces",
+        subjects: subjects
+      },
+      uncertainty: %{baseline: :structural_coverage_value},
+      required_roles: [%{role: :intelligence_scout, count: 1}],
+      required_capabilities: [%{capability: :market_access, waypoints: Enum.sort(waypoints)}],
+      required_resources: %{ship_count: 1, credits: 0},
+      dependencies:
+        Enum.map(subjects, fn subject ->
+          %{subject: subject, required_facts: ["trade_goods"], valid_until: deadline}
+        end),
+      validity: %{as_of: as_of, expires_at: deadline},
+      alternatives: [],
+      coverage: %{subjects: subjects}
+    }
+  end
+
+  defp intelligence_opportunity_with_value(opportunity, type, waypoint, capabilities) do
+    with value when is_number(value) and value >= 0 <-
+           Map.get(opportunity, :expected_decision_value),
+         api_cost when is_number(api_cost) and api_cost >= 0 <-
+           Map.get(opportunity, :api_capacity_cost),
+         ship_cost when is_number(ship_cost) and ship_cost >= 0 <-
+           Map.get(opportunity, :ship_time_cost) do
+      net = value - api_cost - ship_cost
+
+      if net > 0,
+        do: {:ok, %{net_value: net, type: type, waypoint: waypoint, capabilities: capabilities}},
+        else: {:error, :acquisition_cost_exceeds_value}
+    else
+      _ -> {:error, :invalid}
+    end
+  end
 
   defp valid_capability?(%{capability: capability}) when is_atom(capability), do: true
   defp valid_capability?(_capability), do: false
