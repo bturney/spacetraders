@@ -12,6 +12,7 @@ defmodule SpaceTraders.FleetExecutionTest do
   alias SpaceTraders.Fleet.Ship
   alias SpaceTraders.FleetAllocation.Commitment
   alias SpaceTraders.FleetAllocation.Portfolio
+  alias SpaceTraders.FleetAllocation.StrategyDecisionEpisode
   alias SpaceTraders.FleetExecution
   alias SpaceTraders.FleetGeneration.Generation
   alias SpaceTraders.FleetStrategy.{Revision, Strategy}
@@ -210,6 +211,29 @@ defmodule SpaceTraders.FleetExecutionTest do
                reason: :incomplete_market_coverage,
                subjects: ["market:X1:X1-A3"]
              } = Enum.find(limitations, &(&1.reason == :incomplete_market_coverage))
+    end
+
+    test "unknown governed availability reports its own disposition without a Neutral Wait" do
+      {operator, agent, revision} = market_generation()
+      scope = Scope.for_operator(operator)
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case conn.request_path do
+          "/v2/my/ships" ->
+            Req.Test.json(conn, %{"data" => [ship_body("SHIP-1")]})
+
+          "/v2/my/agent" ->
+            Req.Test.transport_error(conn, :timeout)
+
+          other ->
+            flunk("unexpected request: #{inspect(other)}")
+        end
+      end)
+
+      assert {:error, :availability_unknown} =
+               FleetExecution.reconcile_market_evidence(scope, agent, revision, "X1", capacity())
+
+      assert Repo.aggregate(StrategyDecisionEpisode, :count) == 0
     end
 
     test "hands the published Commitment to activation under normal API capacity" do
