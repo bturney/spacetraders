@@ -180,6 +180,7 @@ defmodule SpaceTraders.FleetIntelligence do
     with true <- capacity.available_slots > 0 and capacity.backpressure != :sustained,
          :ok <- allocation_available(scope, agent),
          waypoints <- waypoints_for_decision(agent, revision, system),
+         :ok <- sync_market_observation_demands(agent, revision, system),
          {kind, index} <- next_objective(revision, waypoints),
          {:ok, ships} <- Fleet.list_ships(agent),
          true <- ships != [],
@@ -188,7 +189,7 @@ defmodule SpaceTraders.FleetIntelligence do
          true <- opportunities != [],
          {:ok, planning} <-
            FleetPlanning.plan_intelligence(revision, index, %{
-             as_of: DateTime.utc_now(),
+             as_of: Clock.utc_now(),
              system_symbol: system,
              agent_id: agent.id,
              freshness_seconds: @freshness_seconds,
@@ -201,7 +202,7 @@ defmodule SpaceTraders.FleetIntelligence do
   end
 
   defp waypoints_for_decision(agent, revision, system) do
-    waypoints = World.waypoints(agent, system, DateTime.utc_now(), @freshness_seconds)
+    waypoints = World.waypoints(agent, system, Clock.utc_now(), @freshness_seconds)
 
     if waypoints == [] do
       discover_waypoints(agent, revision, system)
@@ -264,7 +265,7 @@ defmodule SpaceTraders.FleetIntelligence do
       Intelligence.observe_waypoint(agent, waypoint, source: "get_waypoints")
     end)
 
-    World.waypoints(agent, waypoint_system(waypoints), DateTime.utc_now(), @freshness_seconds)
+    World.waypoints(agent, waypoint_system(waypoints), Clock.utc_now(), @freshness_seconds)
   end
 
   defp waypoint_system([%{system_symbol: system} | _]), do: system
@@ -400,7 +401,7 @@ defmodule SpaceTraders.FleetIntelligence do
   end
 
   defp opportunities(:market, revision, index, waypoints, ships, system, agent_id) do
-    as_of = DateTime.utc_now()
+    as_of = Clock.utc_now()
 
     costs =
       for waypoint <- waypoints,
@@ -475,16 +476,24 @@ defmodule SpaceTraders.FleetIntelligence do
 
         case costs[subject] do
           %{api_capacity_cost: api_cost, ship_time_cost: ship_cost} ->
+            coverage? = not retained_listing_fact?(waypoint)
+
+            opportunity = %{
+              subject: subject,
+              required_facts: ["trade_goods"],
+              facts: waypoint.market.facts,
+              api_capacity_cost: api_cost,
+              ship_time_cost: ship_cost,
+              acquisition: :on_site,
+              coverage: coverage?
+            }
+
             [
-              %{
-                subject: subject,
-                required_facts: ["trade_goods"],
-                facts: waypoint.market.facts,
-                expected_decision_value: @initial_market_decision_value,
-                api_capacity_cost: api_cost,
-                ship_time_cost: ship_cost,
-                acquisition: :on_site
-              }
+              if(coverage?,
+                do: opportunity,
+                else:
+                  Map.put(opportunity, :expected_decision_value, @initial_market_decision_value)
+              )
             ]
 
           _ ->

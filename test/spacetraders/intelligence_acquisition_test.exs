@@ -1118,6 +1118,7 @@ defmodule SpaceTraders.IntelligenceAcquisitionTest do
                  where:
                    demand.agent_id == ^agent.id and
                      demand.subject == "market:X1-UX81:X1-UX81-A2" and
+                     demand.owner == "fleet_planning" and
                      is_nil(demand.withdrawn_at)
              )
 
@@ -1199,6 +1200,79 @@ defmodule SpaceTraders.IntelligenceAcquisitionTest do
              FleetAllocation.current_ship_claim(agent, ship.symbol)
 
     assert commitment_id == commitment.id
+  end
+
+  test "Coverage Contribution activation requires its current open Observation Demand" do
+    {agent, ship, previous, _commitment} =
+      claimed_ship(%{
+        "objective" => "Grow credits",
+        "kind" => "continuous",
+        "evaluation" => "Maximize net credit growth over time"
+      })
+
+    scope = Scope.for_operator(Repo.get!(Operator, agent.operator_id))
+    revision = Repo.get!(Revision, previous.fleet_strategy_revision_id)
+
+    assert {:ok, _} =
+             FleetAllocation.unwind_current_portfolio(scope, previous.fleet_generation_id)
+
+    waypoint =
+      Model.Waypoint.from_json(%{
+        "symbol" => "X1-UX81-A1",
+        "systemSymbol" => "X1-UX81",
+        "type" => "PLANET",
+        "x" => 1,
+        "y" => 2,
+        "traits" => [%{"symbol" => "MARKETPLACE"}]
+      })
+
+    assert {:ok, _} = Intelligence.observe_waypoint(agent, waypoint, source: "get_waypoints")
+
+    assert {:ok, planning} =
+             FleetPlanning.plan_intelligence(revision, 0, %{
+               as_of: DateTime.utc_now(),
+               system_symbol: "X1-UX81",
+               agent_id: agent.id,
+               opportunities: [
+                 %{
+                   subject: "market:X1-UX81:X1-UX81-A1",
+                   required_facts: ["trade_goods"],
+                   facts: %{},
+                   expected_decision_value: 1,
+                   api_capacity_cost: 5,
+                   ship_time_cost: 500,
+                   acquisition: :on_site,
+                   coverage: true
+                 }
+               ]
+             })
+
+    test_pid = self()
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      send(test_pid, {conn.method, conn.request_path})
+
+      case conn.request_path do
+        "/v2/my/agent" ->
+          Req.Test.json(conn, %{"data" => %{"symbol" => agent.symbol, "credits" => 10_000}})
+
+        "/v2/my/ships" ->
+          Req.Test.json(conn, %{"data" => [ship_body(ship.symbol)]})
+
+        other ->
+          flunk("Coverage without an open Demand made an unexpected request: #{other}")
+      end
+    end)
+
+    assert {:error, :intelligence_activation_unavailable} =
+             FleetExecution.activate_intelligence(scope, agent, revision, planning, %{
+               available_slots: 3,
+               backpressure: :none
+             })
+
+    assert_receive {"GET", "/v2/my/agent"}
+    assert_receive {"GET", "/v2/my/ships"}
+    assert Intents.current(agent) == []
   end
 
   test "chart objective autonomously selects an on-site uncharted Waypoint from retained evidence" do
@@ -2227,7 +2301,8 @@ defmodule SpaceTraders.IntelligenceAcquisitionTest do
     # baseline demand: the persisted row remains the scheduled wakeup.
     assert :ok = FleetIntelligence.sync_market_observation_demands(agent, revision, "X1-UX81")
 
-    assert [demand] = Evidence.list_open_demands(agent)
+    assert [%{id: demand_id}] = Evidence.list_open_demands(agent)
+    assert demand_id == demand.id
 
     assert Evidence.due_demands() |> Enum.map(& &1.subject) == ["market:X1-UX81:X1-UX81-A1"]
   end
