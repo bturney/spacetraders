@@ -11,6 +11,18 @@ defmodule SpaceTraders.TestClock do
     Agent.get(__MODULE__, & &1.now)
   end
 
+  @doc "The next scheduled wake of a live process, for runtime scenario time control."
+  def next_due_at do
+    Agent.get(__MODULE__, fn state ->
+      state.timers
+      |> Enum.filter(fn {_due_at, destination, _message} ->
+        is_pid(destination) and Process.alive?(destination)
+      end)
+      |> Enum.map(fn {due_at, _destination, _message} -> due_at end)
+      |> Enum.min(DateTime, fn -> nil end)
+    end)
+  end
+
   def send_at(destination, message, due_at) do
     reference = make_ref()
 
