@@ -119,9 +119,8 @@ admin_url="${url_one%/*}/postgres"
 
 database_exists() {
   [ -n "$1" ] || return 1
-  [ "$(psql "$admin_url" --no-psqlrc --tuples-only --no-align \
-    --set=database_name="$1" \
-    --command "SELECT 1 FROM pg_database WHERE datname = :'database_name'" 2>/dev/null || true)" = "1" ]
+  psql "$admin_url" --no-psqlrc --tuples-only --no-align \
+    --command "SELECT datname FROM pg_database" 2>/dev/null | grep -Fxq "$1"
 }
 
 setup_worktree "$WORKTREE_THREE" integration-three >"$TEMP_ROOT/three.log" 2>&1
