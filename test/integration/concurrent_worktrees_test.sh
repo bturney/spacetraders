@@ -85,10 +85,69 @@ if [ "$port_one" = "$port_two" ]; then
   exit 1
 fi
 
+# The gate drops and recreates its database on every run, so two concurrent
+# gates sharing one name destroy each other mid-run. Assert the databases
+# differ here rather than inferring it from the two-gate run below: this is the
+# cheap check that fails the moment allocation is removed, and it names the
+# cause instead of surfacing as an unrelated_table or OwnershipError.
+database_url() {
+  local value
+  value="$(sed -n 's/^export DATABASE_URL=//p' "$1" | head -n 1)"
+  # worktree-setup writes the value with printf %q, so strip one quote layer.
+  printf '%s\n' "${value#\"}"
+}
+
+url_one="$(database_url "$WORKTREE_ONE/.worktree-env")"
+url_two="$(database_url "$WORKTREE_TWO/.worktree-env")"
+
+if [ -z "$url_one" ] || [ -z "$url_two" ]; then
+  echo "Worktree setup did not allocate a database." >&2
+  grep -H . "$TEMP_ROOT"/one.log "$TEMP_ROOT"/two.log >&2 || true
+  exit 1
+fi
+
+database_one="${url_one##*/}"
+database_two="${url_two##*/}"
+
+if [ "$database_one" = "$database_two" ] || [ "$url_one" = "$url_two" ]; then
+  echo "Distinct task IDs received the same database: $url_one" >&2
+  grep -H . "$TEMP_ROOT"/one.log "$TEMP_ROOT"/two.log >&2 || true
+  exit 1
+fi
+
+admin_url="${url_one%/*}/postgres"
+
+database_exists() {
+  [ -n "$1" ] || return 1
+  psql "$admin_url" --no-psqlrc --tuples-only --no-align \
+    --command "SELECT datname FROM pg_database" 2>/dev/null | grep -Fxq "$1"
+}
+
 setup_worktree "$WORKTREE_THREE" integration-three >"$TEMP_ROOT/three.log" 2>&1
 grep -q '^Restored warm cache ' "$TEMP_ROOT/three.log"
 
+# Read the name before teardown, which removes the task environment file.
+three_database="$(database_url "$WORKTREE_THREE/.worktree-env")"
+three_database="${three_database##*/}"
+
 (cd "$WORKTREE_THREE" && scripts/teardown)
+
+# Teardown releases the task's database, so repeated setup/teardown cycles do
+# not accumulate one database per task.
+if [ -z "$three_database" ] || [ "$three_database" = "$database_one" ] || [ "$three_database" = "$database_two" ]; then
+  echo "Teardown of a worktree owned a database another task also owns: '$three_database'" >&2
+  exit 1
+fi
+
+for attempt in 1 2 3 4 5; do
+  database_exists "$three_database" || break
+  sleep 1
+done
+
+if database_exists "$three_database"; then
+  echo "Teardown did not drop the task's database: $three_database" >&2
+  exit 1
+fi
 
 printf '\n# dirty cache bypass\n' >> "$WORKTREE_DIRTY/README.md"
 setup_worktree "$WORKTREE_DIRTY" integration-dirty >"$TEMP_ROOT/dirty.log" 2>&1
@@ -99,7 +158,10 @@ if setup_worktree "$WORKTREE_THREE" integration-one >"$TEMP_ROOT/duplicate.log" 
   exit 1
 fi
 
-PORT=49999 setup_worktree "$WORKTREE_THREE" integration-one >"$TEMP_ROOT/override.log" 2>&1
+# A distinct task ID: the database is named after the task, so reusing
+# `integration-one` here would hand this worktree the database the gate
+# worktree owns, and its teardown would drop it out from under that gate.
+PORT=49999 setup_worktree "$WORKTREE_THREE" integration-override >"$TEMP_ROOT/override.log" 2>&1
 
 (
   cd "$WORKTREE_ONE"
@@ -128,6 +190,18 @@ PIDS=()
 for port in "$port_one" "$port_two"; do
   if ! grep -q "boot verify: GET http://127.0.0.1:$port/health -> 200 ok" "$TEMP_ROOT"/server-*.log; then
     grep -H 'boot verify:' "$TEMP_ROOT"/server-*.log >&2 || true
+    exit 1
+  fi
+done
+
+# The strongest form of the same property: each gate actually created and used
+# its own database, so nothing about the shared name survived. This is the
+# assertion that fails if the two gates resolve to one database again, and it
+# fails immediately after the run rather than only on the next one.
+for database in "$database_one" "$database_two"; do
+  if ! database_exists "$database"; then
+    echo "A gate did not use its allocated database: $database" >&2
+    grep -H . "$TEMP_ROOT"/server-*.log >&2 || true
     exit 1
   fi
 done
