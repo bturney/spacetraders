@@ -48,3 +48,38 @@ jobs:
         run: test/integration/release_boot_test.sh
       - name: Verify migration repair
         run: test/integration/migration_repair_test.sh
+
+  # Two full gates run simultaneously inside this test, in real worktrees on
+  # separate ports. It is its own job so those two gates stay concurrent; a step
+  # inside the gate job would serialise them and defeat the assertion.
+  #
+  # KNOWN RED until #515. The job-level DATABASE_URL below defeats the
+  # MIX_TEST_PARTITION/System.pid() partition in config/test.exs, so both gates
+  # resolve to one database and drop it under each other. Measured 1 pass in 5
+  # runs; #515 fixes the shared database, not this job. Do not delete this job
+  # and do not add continue-on-error: the coverage is the point.
+  concurrent-worktrees:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_DB: spacetraders_test
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+        options: >-
+          --health-cmd "pg_isready -U postgres -d spacetraders_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+    env:
+      DATABASE_URL: postgres://postgres:postgres@localhost/spacetraders_test
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: Exercise concurrent worktree isolation
+        run: test/integration/concurrent_worktrees_test.sh
+      - name: Exercise task workspace lifecycle
+        run: test/integration/task_workspaces_test.sh
