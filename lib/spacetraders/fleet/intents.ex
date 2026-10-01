@@ -15,6 +15,7 @@ defmodule SpaceTraders.Fleet.Intents do
   alias SpaceTraders.Agent.Agent, as: AgentRecord
   alias SpaceTraders.Agent.Scope
   alias SpaceTraders.API.AgentTokenReference
+  alias SpaceTraders.API.RecordedDispatch
   alias SpaceTraders.API.Model.{Contract, ShipNav}
   alias SpaceTraders.Fleet.{Intent, Ship}
   alias SpaceTraders.Fleet
@@ -65,6 +66,7 @@ defmodule SpaceTraders.Fleet.Intents do
         set: [
           status: "superseded",
           in_flight_action: nil,
+          mutation_attempt_id: nil,
           last_action_result: %{"outcome" => "reset_censored"},
           finished_at: now,
           updated_at: now
@@ -2926,11 +2928,7 @@ defmodule SpaceTraders.Fleet.Intents do
   end
 
   defp bind_intent_claim(intent, claim) do
-    binding = %{
-      fleet_commitment_id: claim.commitment_id,
-      fleet_commitment_portfolio_id: claim.portfolio_id,
-      fleet_commitment_portfolio_version: claim.portfolio_version
-    }
+    binding = FleetAllocation.ship_claim_binding(claim)
 
     current =
       Map.take(intent, [
@@ -2939,16 +2937,8 @@ defmodule SpaceTraders.Fleet.Intents do
         :fleet_commitment_portfolio_version
       ])
 
-    if is_nil(intent.fleet_commitment_id) or current == binding do
-      {:ok,
-       %{
-         intent: binding,
-         action: %{
-           "fleet_commitment_id" => claim.commitment_id,
-           "fleet_commitment_portfolio_id" => claim.portfolio_id,
-           "fleet_commitment_portfolio_version" => claim.portfolio_version
-         }
-       }}
+    if is_nil(intent.fleet_commitment_id) or current == binding.intent do
+      {:ok, binding}
     else
       {:error, :intent_claim_mismatch}
     end
@@ -2981,13 +2971,21 @@ defmodule SpaceTraders.Fleet.Intents do
   @doc false
   def transition_intent(intent, attrs) do
     with_current_intent(intent, fn current ->
-      updated = Repo.update!(Ecto.Changeset.change(current, attrs))
-      emit_intent_transition(current, updated)
+      updated = update_intent!(Ecto.Changeset.change(current, attrs))
       {:ok, updated}
     end)
   end
 
   defp update_intent!(%Ecto.Changeset{data: intent} = changeset) do
+    # A cleared action has no selected attempt. Legacy action replacement must
+    # also shed any prior recorded linkage so its own ledger evidence stays
+    # discoverable until its caller adopts recorded dispatch (#505).
+    changeset =
+      if is_nil(Ecto.Changeset.get_field(changeset, :in_flight_action)) or
+           Map.has_key?(changeset.changes, :in_flight_action),
+         do: Ecto.Changeset.put_change(changeset, :mutation_attempt_id, nil),
+         else: changeset
+
     updated = Repo.update!(changeset)
     emit_intent_transition(intent, updated)
     updated
@@ -4381,15 +4379,15 @@ defmodule SpaceTraders.Fleet.Intents do
   end
 
   defp orbit_for_intents(agent, intent, live_ship) do
-    with {:ok, intent} <-
-           claim_intent_action(agent, intent, %{
+    with {:ok, %{intent: intent, attempt: attempt}} <-
+           RecordedDispatch.prepare(agent, intent, %{
              "kind" => "orbit",
              "waypoint" => live_ship.nav.waypoint_symbol,
              "expected" => %{"status" => "IN_ORBIT"}
            }) do
       case Agent.handle_game_result(
              agent,
-             SpaceTraders.API.orbit_ship(AgentTokenReference.new(agent), live_ship.symbol)
+             SpaceTraders.API.dispatch_recorded(attempt)
            ) do
         {:ok, result} ->
           case transition_intent(intent,
@@ -4817,9 +4815,8 @@ defmodule SpaceTraders.Fleet.Intents do
           current
           |> Ecto.Changeset.change(status: "blocked", in_flight_action: in_flight_action)
           |> Ecto.Changeset.put_embed(:blocker, blocker_changeset)
-          |> Repo.update!()
+          |> update_intent!()
 
-        emit_intent_transition(current, updated)
         {:ok, updated}
       end)
 
@@ -4942,6 +4939,12 @@ defmodule SpaceTraders.Fleet.Intents do
           {:error, :no_current_ship_claim} -> supersede_for_lost_claim(intent, true)
           {:error, reason} -> block_intents(intent, reason)
         end
+    end
+  end
+
+  defp retry_under_current_claim(agent, intent, _live_ship, %{"kind" => "orbit"}, absent) do
+    with {:ok, retry} <- RecordedDispatch.prepare_retry(agent, intent, absent) do
+      {:ok, SpaceTraders.API.dispatch_recorded(retry)}
     end
   end
 
@@ -5110,9 +5113,6 @@ defmodule SpaceTraders.Fleet.Intents do
         live_ship.symbol,
         waypoint
       )
-
-  defp dispatch_claimed_action(agent, live_ship, %{"kind" => "orbit"}),
-    do: SpaceTraders.API.orbit_ship(AgentTokenReference.new(agent), live_ship.symbol)
 
   defp dispatch_claimed_action(agent, live_ship, %{"kind" => "dock"}),
     do: SpaceTraders.API.dock_ship(AgentTokenReference.new(agent), live_ship.symbol)

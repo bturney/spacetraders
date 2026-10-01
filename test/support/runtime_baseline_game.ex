@@ -30,12 +30,16 @@ defmodule SpaceTraders.RuntimeBaselineGame do
         status: "DOCKED",
         arrival: nil,
         requests: [],
+        orbit_rejection: Keyword.get(opts, :orbit_rejection, false),
         orbit_timeout: Keyword.get(opts, :orbit_timeout, false)
       }
     end)
   end
 
   def snapshot(game), do: Agent.get(game, & &1)
+
+  def change_posture(game, status) when status in ["DOCKED", "IN_ORBIT"],
+    do: Agent.update(game, &%{&1 | status: status})
 
   def call(game, conn) do
     Agent.get_and_update(game, fn state ->
@@ -59,6 +63,9 @@ defmodule SpaceTraders.RuntimeBaselineGame do
   def reply(conn, {:ok, data, meta}), do: Req.Test.json(conn, %{"data" => data, "meta" => meta})
   def reply(conn, {:ok, data}), do: Req.Test.json(conn, %{"data" => data})
   def reply(conn, {:timeout, _}), do: Req.Test.transport_error(conn, :timeout)
+
+  def reply(conn, {:rejected, error}),
+    do: conn |> Plug.Conn.put_status(400) |> Req.Test.json(%{"error" => error})
 
   defp respond(state, "POST", "/v2/register", %{"symbol" => @symbol}, _) do
     {{:ok,
@@ -97,6 +104,17 @@ defmodule SpaceTraders.RuntimeBaselineGame do
       [symbol] -> {{:ok, waypoint(symbol)}, state}
     end
   end
+
+  defp respond(
+         %{orbit_rejection: true} = state,
+         "POST",
+         "/v2/my/ships/" <> @ship <> "/orbit",
+         _,
+         _
+       ),
+       do:
+         {{:rejected, %{"code" => 4204, "message" => "Ship cannot orbit"}},
+          %{state | orbit_rejection: false}}
 
   defp respond(
          %{orbit_timeout: true} = state,

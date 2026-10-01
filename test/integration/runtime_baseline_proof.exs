@@ -4,9 +4,9 @@ defmodule SpaceTraders.RuntimeBaselineProof do
 
       mix test test/integration/runtime_baseline_proof.exs --seed 0 --trace
 
-  #503 records current failures without authorizing recovery implementation.
-  The filename deliberately leaves these unmet contracts out of the ordinary
-  `_test.exs` suite; there are no skip tags or substituted coordinators.
+  Trading remains an opt-in, inconsistent qualification. The satisfied #504
+  dispatch proof now lives in recorded_ship_dispatch_test.exs and is discovered
+  by the canonical suite. No skip tags or substituted coordinators are used.
   """
 
   use SpaceTraders.ScenarioCase
@@ -158,152 +158,6 @@ defmodule SpaceTraders.RuntimeBaselineProof do
            )
 
     assert Enum.any?(intents, fn {type, status, _} -> type == "sell" and status == "completed" end)
-  end
-
-  test "C04: a retry's sent evidence survives sender death and is independently visible", %{
-    conn: conn
-  } do
-    game = start_supervised!({Game, orbit_timeout: true})
-    test_pid = self()
-    orbit_path = "/v2/my/ships/BASELINE-1/orbit"
-
-    stub_api(fn conn ->
-      reply = Game.call(game, conn)
-
-      if conn.request_path == orbit_path and reply != {:timeout, :not_applied} do
-        # The controlled game accepted this request. Pause before delivering its
-        # response; the ledger is read through another actual pool connection.
-        [[backend]] = Repo.query!("SELECT pg_backend_pid()").rows
-        send(test_pid, {:retry_sent, self(), backend, Repo.in_transaction?()})
-
-        receive do
-          :deliver_response -> :ok
-        after
-          10_000 -> raise("dispatch interruption was not released")
-        end
-      end
-
-      Game.reply(conn, reply)
-    end)
-
-    allow_game_runtime()
-    start_runtime()
-    {_conn, agent} = activate_fresh_generation(conn)
-
-    assert_eventually(
-      fn ->
-        Repo.exists?(
-          from a in Attempt,
-            where:
-              a.agent_id == ^agent.id and a.operation_id == "orbit-ship" and
-                a.state == "ambiguous"
-        )
-      end,
-      500
-    )
-
-    original =
-      Repo.one!(
-        from a in Attempt, where: a.agent_id == ^agent.id and a.operation_id == "orbit-ship"
-      )
-
-    assert :ok = stop_supervised!(DemandScheduler)
-    assert :ok = stop_supervised!(Reconciler)
-
-    # Hold a nontransactional observer connection before starting the sender.
-    # Independence must still hold once dispatch no longer holds a transaction.
-    observer =
-      start_supervised!(
-        {Task,
-         fn ->
-           :ok = Ecto.Adapters.SQL.Sandbox.checkout(Repo, sandbox: false)
-
-           try do
-             [[backend]] = Repo.query!("SELECT pg_backend_pid()").rows
-             send(test_pid, {:observer_ready, self(), backend})
-
-             for _ <- 1..2 do
-               receive do
-                 {:observe_attempts, agent} ->
-                   send(test_pid, {:attempt_states, self(), attempt_states(agent)})
-               after
-                 10_000 -> raise("independent observation was not requested")
-               end
-             end
-           after
-             Ecto.Adapters.SQL.Sandbox.checkin(Repo)
-           end
-         end}
-      )
-
-    assert_receive {:observer_ready, ^observer, observing_backend}
-
-    # Re-enter through the production boot owner, not the Intent executor or a
-    # hand-assembled retry. The controlled game's unchanged posture proves the
-    # first timed-out action absent.
-    {boot_caller, monitor} = spawn_monitor(fn -> ShipServerBoot.start_link([]) end)
-    on_exit(fn -> if Process.alive?(boot_caller), do: Process.exit(boot_caller, :kill) end)
-    assert_receive {:retry_sent, sender, sending_backend, inside_transaction}, 10_000
-    assert observing_backend != sending_backend
-
-    visible_at_send = observe_attempts(observer, agent)
-    assert Game.snapshot(game).status == "IN_ORBIT"
-    sender_monitor = Process.monitor(sender)
-    Process.exit(sender, :kill)
-    assert_receive {:DOWN, ^sender_monitor, :process, ^sender, :killed}
-    assert_receive {:DOWN, ^monitor, :process, ^boot_caller, _reason}
-
-    # A new query after rollback cannot see the killed sender's transaction.
-    visible_after_death = observe_attempts(observer, agent)
-    persisted_intent = Repo.get!(Intent, original.provenance["intent_id"])
-
-    IO.inspect(
-      %{
-        inside_transaction: inside_transaction,
-        sending_backend: sending_backend,
-        observing_backend: observing_backend,
-        at_send: visible_at_send,
-        after_death: visible_after_death,
-        in_flight_action: persisted_intent.in_flight_action,
-        game_posture: Game.snapshot(game).status
-      },
-      label: "C04 dispatch baseline",
-      limit: :infinity
-    )
-
-    # This is the failing recovery contract. A nested Repo.transaction returning
-    # successfully must not be mistaken for independently committed evidence.
-    refute inside_transaction
-
-    assert Enum.any?(
-             visible_at_send,
-             &(&1.retry_of_id == original.id and &1.state == "sent_or_unknown")
-           )
-
-    assert Enum.any?(
-             visible_after_death,
-             &(&1.retry_of_id == original.id and &1.state == "sent_or_unknown")
-           )
-  end
-
-  defp observe_attempts(observer, agent) do
-    send(observer, {:observe_attempts, agent})
-    assert_receive {:attempt_states, ^observer, states}, 5_000
-    states
-  end
-
-  defp attempt_states(agent) do
-    Repo.all(
-      from a in Attempt,
-        where: a.agent_id == ^agent.id and a.operation_id == "orbit-ship",
-        order_by: a.prepared_at,
-        select: %{
-          id: a.id,
-          state: a.state,
-          retry_of_id: a.retry_of_id,
-          retry_authorized: a.retry_authorized
-        }
-    )
   end
 
   defp activate_fresh_generation(conn) do

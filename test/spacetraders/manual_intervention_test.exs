@@ -8,7 +8,6 @@ defmodule SpaceTraders.ManualInterventionTest do
   alias SpaceTraders.API.Model
   alias SpaceTraders.Fleet
   alias SpaceTraders.Fleet.{Intent, Intents, ShipServer}
-  alias SpaceTraders.FleetStrategy.Strategy
   alias SpaceTraders.Timeline
   alias SpaceTraders.{ManualIntervention, Repo, ShipReservation}
 
@@ -18,7 +17,7 @@ defmodule SpaceTraders.ManualInterventionTest do
     symbol = "#{agent.symbol}-1"
     {:ok, ship} = Fleet.record_ship(agent, symbol, "SHIP_COMMAND_FRIGATE")
     scope = Scope.for_operator(operator)
-    Repo.insert!(%Strategy{operator_id: operator.id, active_revision_id: 1})
+    activate_generation(scope, agent)
     assert {:ok, _} = ShipReservation.reserve(scope, ship.id, "Recovery")
     ship_path = "/v2/my/ships/#{symbol}"
     navigate_path = "#{ship_path}/navigate"
@@ -114,7 +113,7 @@ defmodule SpaceTraders.ManualInterventionTest do
     symbol = "#{agent.symbol}-1"
     {:ok, ship} = Fleet.record_ship(agent, symbol, "SHIP_COMMAND_FRIGATE")
     scope = Scope.for_operator(operator)
-    Repo.insert!(%Strategy{operator_id: operator.id, active_revision_id: 1})
+    activate_generation(scope, agent)
     assert {:ok, _reservation} = ShipReservation.reserve(scope, ship.id, "Recovery")
 
     ship_path = "/v2/my/ships/#{symbol}"
@@ -201,6 +200,20 @@ defmodule SpaceTraders.ManualInterventionTest do
 
     assert [%ManualIntervention{intent_id: nil, final_status: "completed"}] =
              ManualIntervention.list(scope)
+  end
+
+  defp activate_generation(scope, agent) do
+    {:ok, strategy} = SpaceTraders.FleetStrategy.select_preset(scope, "steady_growth")
+    {:ok, revision} = SpaceTraders.FleetStrategy.activate(scope, strategy.draft_version)
+
+    Repo.insert!(%SpaceTraders.FleetGeneration.Generation{
+      operator_id: scope.operator.id,
+      agent_id: agent.id,
+      fleet_strategy_revision_id: revision.id,
+      number: 1,
+      symbol: agent.symbol,
+      faction: agent.faction
+    })
   end
 
   def capture_query(_event, _measurements, metadata, test_pid),

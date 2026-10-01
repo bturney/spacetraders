@@ -167,6 +167,11 @@ defmodule SpaceTraders.MutationAttempts do
     append_outcome(attempt, classification, evidence)
   end
 
+  @doc "Records suppression before transport; a prepared attempt was never sent."
+  def record_not_sent(%Attempt{} = attempt, reason) do
+    append_outcome(attempt, :not_sent, %{reason: reason})
+  end
+
   @spec reconcile(Attempt.t(), atom(), [AuthoritativeObservation.t()], keyword()) ::
           {:ok, Attempt.t()} | {:error, term()}
   def reconcile(attempt, resolution, observations, opts \\ [])
@@ -213,6 +218,7 @@ defmodule SpaceTraders.MutationAttempts do
   def latest_for_intent(%Intent{} = intent) do
     attempt_for_intent(intent, [
       "prepared",
+      "not_sent",
       "sent_or_unknown",
       "ambiguous",
       "succeeded",
@@ -229,6 +235,7 @@ defmodule SpaceTraders.MutationAttempts do
     Attempt
     |> where([attempt], attempt.state in ^states)
     |> where([attempt], fragment("? @> ?", attempt.provenance, ^provenance))
+    |> linked_attempt(intent.mutation_attempt_id)
     |> order_by([attempt], desc: attempt.prepared_at, desc: attempt.id)
     |> limit(1)
     |> Repo.one()
@@ -237,6 +244,9 @@ defmodule SpaceTraders.MutationAttempts do
       nil -> nil
     end
   end
+
+  defp linked_attempt(query, nil), do: query
+  defp linked_attempt(query, id), do: where(query, [attempt], attempt.id == ^id)
 
   @spec get!(Ecto.UUID.t()) :: Attempt.t()
   def get!(attempt_id) do
@@ -278,6 +288,8 @@ defmodule SpaceTraders.MutationAttempts do
        when classification in [:succeeded, :rejected, :ambiguous],
        do: true
 
+  defp outcome_allowed?("prepared", :not_sent), do: true
+
   defp outcome_allowed?(state, classification)
        when state in ["sent_or_unknown", "ambiguous"] and
               classification in [:accepted, :absent, :bounded_unknown],
@@ -299,10 +311,13 @@ defmodule SpaceTraders.MutationAttempts do
     admitted_bounded_unknown_ids = admitted_bounded_unknown_ids(opts)
 
     prepared_evidence =
-      scrub(%{
-        "request" => %{"path" => path, "body" => opts[:json], "query" => opts[:params]},
-        "preconditions" => operation.prerequisites
-      })
+      scrub(
+        %{
+          "request" => %{"path" => path, "body" => opts[:json], "query" => opts[:params]},
+          "preconditions" => operation.prerequisites
+        }
+        |> maybe_put_selected_evidence(opts)
+      )
 
     %Attempt{
       operation_id: operation.id,
@@ -341,6 +356,7 @@ defmodule SpaceTraders.MutationAttempts do
       fleet_generation_id: generation && generation.id,
       strategy_revision_id: generation && generation.fleet_strategy_revision_id
     }
+    |> Map.merge(Keyword.get(opts, :dispatch_context, %{}))
     |> Map.merge(execution)
   end
 
@@ -356,6 +372,34 @@ defmodule SpaceTraders.MutationAttempts do
   end
 
   defp execution_context(agent_id, path, opts) do
+    case Keyword.get(opts, :selected_intent) do
+      %Intent{} = intent ->
+        ship = Repo.get!(Ship, intent.ship_id)
+
+        %{
+          ship_id: ship.id,
+          ship_symbol: ship.symbol,
+          intent_id: intent.id,
+          intent_caller: intent.caller,
+          selected_action_fingerprint: action_fingerprint(intent.in_flight_action),
+          commitment_id: intent.fleet_commitment_id,
+          portfolio_id: intent.fleet_commitment_portfolio_id,
+          portfolio_version: intent.fleet_commitment_portfolio_version
+        }
+
+      nil ->
+        inferred_execution_context(agent_id, path, opts)
+    end
+  end
+
+  defp maybe_put_selected_evidence(evidence, opts) do
+    case opts[:selected_intent] do
+      %Intent{in_flight_action: action} -> Map.put(evidence, "selected_action", action)
+      nil -> evidence
+    end
+  end
+
+  defp inferred_execution_context(agent_id, path, opts) do
     case request_ship_symbol(path, opts) do
       ship_symbol when is_binary(ship_symbol) ->
         case Repo.get_by(Ship, agent_id: agent_id, symbol: ship_symbol) do
