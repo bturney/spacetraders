@@ -736,6 +736,22 @@ defmodule SpaceTraders.FleetAllocation do
     do: {:error, :no_current_ship_claim}
 
   @doc false
+  def ship_claim_binding(claim) do
+    binding = %{
+      fleet_commitment_id: claim.commitment_id,
+      fleet_commitment_portfolio_id: claim.portfolio_id,
+      fleet_commitment_portfolio_version: claim.portfolio_version
+    }
+
+    action =
+      if is_nil(claim.commitment_id),
+        do: %{},
+        else: Map.new(binding, fn {key, value} -> {Atom.to_string(key), value} end)
+
+    %{intent: binding, action: action}
+  end
+
+  @doc false
   def authorize_ship_execution(agent, ship_symbol, opts \\ [])
 
   def authorize_ship_execution(

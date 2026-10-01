@@ -35,6 +35,7 @@ defmodule SpaceTraders.API do
   alias SpaceTraders.API.Pagination
   alias SpaceTraders.API.AgentTokenReference
   alias SpaceTraders.API.OperationInventory
+  alias SpaceTraders.API.RecordedDispatch
   alias SpaceTraders.Evidence.Demand
   alias SpaceTraders.Agent.Agent, as: AgentRecord
   alias SpaceTraders.MutationAttempts
@@ -253,6 +254,30 @@ defmodule SpaceTraders.API do
   @spec orbit_ship(token(), String.t()) :: result()
   def orbit_ship(token, ship_symbol) do
     request(:post, "/my/ships/#{ship_symbol}/orbit", token, as: {:map, %{nav: {:model, ShipNav}}})
+  end
+
+  @doc "Sends a recorded orbit attempt after independently committed admission."
+  def dispatch_recorded(%Attempt{id: id}) do
+    with :ok <- RecordedDispatch.require_commit_boundary() do
+      attempt = MutationAttempts.get!(id)
+
+      with "orbit-ship" <- attempt.operation_id,
+           {:ok, token} <- resolve_agent_token(%AgentTokenReference{agent_id: attempt.agent_id}) do
+        path = attempt.prepared_evidence["request"]["path"]
+
+        opts = [
+          agent_id: attempt.agent_id,
+          recorded_attempt: attempt,
+          retry: false,
+          as: {:map, %{nav: {:model, ShipNav}}}
+        ]
+
+        admit_and_send(:post, path, token, opts)
+      else
+        {:error, reason} -> {:error, reason}
+        _ -> {:error, :recorded_operation_not_activated}
+      end
+    end
   end
 
   @doc "POST /my/ships/{symbol}/extract"
@@ -597,23 +622,8 @@ defmodule SpaceTraders.API do
   defp request(method, path, %AgentTokenReference{} = credential_ref, opts) do
     with :ok <- runtime_authorized?(method),
          {:ok, token} <- resolve_agent_token(credential_ref),
-         :ok <- mutation_authorized?(method, token),
-         {operation, shadow} <- observe_request(method, path, opts),
-         {:ok, capacity} <- admit_capacity(operation, opts) do
-      # Observe before waiting for capacity so shadow queue_time spans the real
-      # limiter wait, and the shadow bucket never refills during production
-      # backpressure. Dispatch rechecks authorization for every network call.
-      RateLimiter.acquire()
-
-      send_request(
-        method,
-        path,
-        token,
-        Keyword.put(opts, :agent_id, credential_ref.agent_id),
-        operation,
-        shadow,
-        capacity
-      )
+         :ok <- mutation_authorized?(method, token) do
+      admit_and_send(method, path, token, Keyword.put(opts, :agent_id, credential_ref.agent_id))
     end
   end
 
@@ -626,11 +636,16 @@ defmodule SpaceTraders.API do
   end
 
   defp do_request(method, path, token, opts) do
-    with :ok <- mutation_authorized?(method, token),
-         {operation, shadow} <- observe_request(method, path, opts),
+    with :ok <- mutation_authorized?(method, token) do
+      admit_and_send(method, path, token, opts)
+    end
+  end
+
+  defp admit_and_send(method, path, token, opts) do
+    with {operation, shadow} <- observe_request(method, path, opts),
          {:ok, capacity} <- admit_capacity(operation, opts) do
-      # See request/4: admission can wait for capacity, so observe first and
-      # rely on the dispatch-time recheck for authorization.
+      # Observe before waiting for capacity so shadow queue_time spans the real
+      # limiter wait. Recorded and legacy dispatch recheck authorization at send.
       RateLimiter.acquire()
 
       send_request(method, path, token, opts, operation, shadow, capacity)
@@ -685,7 +700,7 @@ defmodule SpaceTraders.API do
         )
         |> Req.Request.append_request_steps(
           spacetraders_mutation_admission: fn request ->
-            authorize_dispatch(request, method, token, attempt, shadow)
+            authorize_dispatch(request, method, token, attempt, shadow, opts)
           end
         )
 
@@ -854,7 +869,22 @@ defmodule SpaceTraders.API do
     end
   end
 
-  defp authorize_dispatch(request, method, token, attempt, shadow) do
+  defp authorize_dispatch(request, method, token, attempt, shadow, opts) do
+    if opts[:recorded_attempt] do
+      case RecordedDispatch.admit_send(attempt) do
+        {:ok, _attempt} ->
+          ShadowAdmission.observe_dispatch(shadow)
+          request
+
+        {:error, reason} ->
+          Req.Request.halt(request, %MutationSuppressedError{reason: reason})
+      end
+    else
+      authorize_unrecorded_dispatch(request, method, token, attempt, shadow)
+    end
+  end
+
+  defp authorize_unrecorded_dispatch(request, method, token, attempt, shadow) do
     with :ok <- mutation_authorized?(method, token),
          {:ok, _attempt} <- mark_mutation_sent(attempt) do
       ShadowAdmission.observe_dispatch(shadow)
@@ -867,7 +897,10 @@ defmodule SpaceTraders.API do
   defp prepare_mutation_attempt(%{classification: :read}, _path, _opts), do: {:ok, nil}
 
   defp prepare_mutation_attempt(operation, path, opts) do
-    MutationAttempts.prepare_for_dispatch(operation, path, opts)
+    case opts[:recorded_attempt] do
+      %Attempt{} = attempt -> {:ok, attempt}
+      nil -> MutationAttempts.prepare_for_dispatch(operation, path, opts)
+    end
   end
 
   defp complete_shadow(shadow, capacity, status, outcome, result) do

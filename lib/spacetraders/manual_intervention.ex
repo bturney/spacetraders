@@ -30,8 +30,14 @@ defmodule SpaceTraders.ManualIntervention do
   end
 
   @doc "Checks that the pending or active Intent still owns its reserved Ship."
-  def authorized?(operator_id, ship_symbol, intent_id) when is_integer(intent_id) do
-    Repo.exists?(
+  def authorized?(operator_id, ship_symbol, intent_id),
+    do: match?({:ok, _}, authorization(operator_id, ship_symbol, intent_id))
+
+  @doc "Returns current authenticated Intervention provenance, optionally under admission locks."
+  def authorization(operator_id, ship_symbol, intent_id, opts \\ [])
+
+  def authorization(operator_id, ship_symbol, intent_id, opts) when is_integer(intent_id) do
+    query =
       from intervention in __MODULE__,
         join: reservation in ShipReservation,
         on: reservation.id == intervention.ship_reservation_id,
@@ -43,9 +49,17 @@ defmodule SpaceTraders.ManualIntervention do
           reservation.operator_id == ^operator_id and is_nil(reservation.released_at) and
             ship.symbol == ^ship_symbol and
             intent.id == ^intent_id and intent.ship_id == ship.id and
-            intent.caller == "intervention" and intent.status in ^Intent.unfinished_states()
-    )
+            intent.caller == "intervention" and intent.status in ^Intent.unfinished_states(),
+        select: %{intervention_id: intervention.id, ship_reservation_id: reservation.id}
+
+    query = if Keyword.get(opts, :lock, false), do: lock(query, "FOR SHARE"), else: query
+
+    case Repo.one(query) do
+      nil -> {:error, :intervention_not_authorized}
+      authority -> {:ok, authority}
+    end
   end
 
-  def authorized?(_operator_id, _ship_symbol, _intent_id), do: false
+  def authorization(_operator_id, _ship_symbol, _intent_id, _opts),
+    do: {:error, :intervention_not_authorized}
 end

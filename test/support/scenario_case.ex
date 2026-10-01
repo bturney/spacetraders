@@ -5,6 +5,10 @@ defmodule SpaceTraders.ScenarioCase do
   Scenarios control game responses and time, restart reconstructable runtime
   processes, observe notifications and telemetry, and inspect durable state
   through `SpaceTraders.Repo`.
+
+  `@tag committed: true` opts a synchronous scenario into real commits and
+  independent pool connections. Such scenarios must delete their own fixtures
+  after stopping runtime processes; sandbox rollback does not clean them up.
   """
 
   use ExUnit.CaseTemplate
@@ -33,7 +37,21 @@ defmodule SpaceTraders.ScenarioCase do
   end
 
   setup tags do
-    SpaceTraders.DataCase.setup_sandbox(tags)
+    if tags[:committed] do
+      if tags[:async], do: raise("committed scenarios must run synchronously")
+
+      # Crash/dispatch proofs need real commits and separate connections. Shared
+      # sandbox visibility would let an uncommitted attempt look durable.
+      :ok = Ecto.Adapters.SQL.Sandbox.mode(SpaceTraders.Repo, :auto)
+
+      on_exit(fn ->
+        SpaceTraders.EmergencyStopAdmission.clear()
+        SpaceTraders.FleetGenerationAdmission.clear()
+        Ecto.Adapters.SQL.Sandbox.mode(SpaceTraders.Repo, :manual)
+      end)
+    else
+      SpaceTraders.DataCase.setup_sandbox(tags)
+    end
 
     now = Map.get(tags, :now, ~U[2026-09-14 12:00:00Z])
     start_supervised!({SpaceTraders.TestClock, now})

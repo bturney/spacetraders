@@ -27,6 +27,7 @@ defmodule SpaceTraders.Fleet.Intent do
     field :status, :string, default: "active"
     embeds_one :blocker, SpaceTraders.Fleet.IntentBlocker, on_replace: :delete
     field :in_flight_action, :map
+    belongs_to :mutation_attempt, SpaceTraders.MutationAttempts.Attempt, type: :binary_id
     field :last_action_result, :map
     field :recovery_attempts, :integer, default: 0
     field :finished_at, :utc_datetime
