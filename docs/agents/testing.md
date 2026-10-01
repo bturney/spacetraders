@@ -20,10 +20,22 @@ suite uses the Ecto `Sandbox` pool; treat a clean exit as the signal.
 
 ## Database
 
-The test database is partitioned per run: `MIX_TEST_PARTITION`, else
-`System.pid()` (`config/test.exs`). `SpaceTraders.RuntimeAuthority` opens a
-direct connection to the base database and can terminate backends, which
-produces full-suite-only failures and garbled constraint errors.
+Worktree setup names a test database after the task and writes the resulting
+`DATABASE_URL` into the task environment, so two concurrent gates in separate
+worktrees drop and recreate different databases. `scripts/teardown` drops the
+task's database, the same way it releases the task's port.
+
+A bare `scripts/verify` in an ordinary checkout uses the single database name
+it has always used. Only when no `DATABASE_URL` is set at all does the config
+fall back to a per-run partition — `MIX_TEST_PARTITION`, else `System.pid()`.
+That fallback is per *run*, and the `test` alias drops the database at the start
+of a run and never at the end, so a bare `mix test` with no `DATABASE_URL` leaves
+its partitioned database behind permanently. Set `DATABASE_URL`, or work in a
+worktree.
+
+`SpaceTraders.RuntimeAuthority` opens a direct connection to the base database
+and can terminate backends, which produces full-suite-only failures and garbled
+constraint errors.
 
 When a test fails only in the full suite, compare against a clean
 `origin/main` checkout before blaming the change — the failure may be
