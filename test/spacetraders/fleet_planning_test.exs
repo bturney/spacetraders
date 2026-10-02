@@ -351,10 +351,10 @@ defmodule SpaceTraders.FleetPlanningTest do
           good("IRON", 25, 20, 25)
         ])
 
-      after = %{before | markets: [source, destination]}
+      with_destination = %{before | markets: [source, destination]}
 
       assert {:ok, %{candidate_contributions: [trade | _], limitations: []}} =
-               FleetPlanning.plan_market(revision(), 0, after)
+               FleetPlanning.plan_market(revision(), 0, with_destination)
 
       assert %CandidateContribution{
                kind: :market_trade,
