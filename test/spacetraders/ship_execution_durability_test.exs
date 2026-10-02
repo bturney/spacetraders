@@ -144,8 +144,7 @@ defmodule SpaceTraders.ShipExecutionDurabilityTest do
 
     game =
       start_supervised!(
-        {Elixir.Agent,
-         fn -> %{mode: :initial, posture: "DOCKED", orbits: 0, navigations: 0} end}
+        {Elixir.Agent, fn -> %{mode: :initial, posture: "DOCKED", orbits: 0, navigations: 0} end}
       )
 
     Req.Test.stub(SpaceTraders.API, fn conn ->
