@@ -1,11 +1,13 @@
 defmodule SpaceTraders.FleetGenerationTest do
-  use SpaceTraders.DataCase
+  # Admission caches are shared and DataCase clears them after each sandbox closes.
+  use SpaceTraders.DataCase, async: false
 
   import SpaceTraders.AgentFixtures
 
   alias SpaceTraders.Agent
   alias SpaceTraders.Agent.Scope
   alias SpaceTraders.API.AgentTokenReference
+  alias SpaceTraders.Fleet
   alias SpaceTraders.FleetGeneration
   alias SpaceTraders.Fleet.{Intent, Intents, Ship}
   alias SpaceTraders.FleetStrategy
@@ -78,106 +80,168 @@ defmodule SpaceTraders.FleetGenerationTest do
     assert SpaceTraders.OperatorConditions.unresolved(scope) == []
   end
 
-  test "a definitive Server Reset activates and bootstraps a fallback Fleet Generation" do
-    operator = operator_fixture()
-    {:ok, operator} = Agent.link_account_token(operator, "ACCOUNT_TOKEN_SECRET")
-    scope = Scope.for_operator(operator)
+  describe "Server Reset" do
+    setup do
+      operator = operator_fixture()
+      {:ok, operator} = Agent.link_account_token(operator, "ACCOUNT_TOKEN_SECRET")
+      scope = Scope.for_operator(operator)
+      {:ok, strategy} = FleetStrategy.select_preset(scope, "charted_expansion")
+      {:ok, revision} = FleetStrategy.activate(scope, strategy.draft_version)
 
-    assert {:ok, strategy} = FleetStrategy.select_preset(scope, "charted_expansion")
-    assert {:ok, revision} = FleetStrategy.activate(scope, strategy.draft_version)
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        assert {conn.method, conn.request_path, conn.body_params["symbol"]} ==
+                 {"POST", "/v2/register", "RESETME"}
 
-    test_pid = self()
+        Req.Test.json(conn, registration_body("RESETME", "RESETME-1", "FIRST_TOKEN"))
+      end)
 
-    Req.Test.stub(SpaceTraders.API, fn conn ->
-      case {conn.method, conn.request_path, conn.body_params["symbol"]} do
-        {"POST", "/v2/register", "RESETME"} ->
-          Req.Test.json(conn, registration_body("RESETME", "RESETME-1", "FIRST_TOKEN"))
-      end
-    end)
+      {:ok, %{agent: minted}} =
+        FleetGeneration.mint(scope, %{
+          symbol: "RESETME",
+          faction: "COSMIC",
+          replacement_symbols: ["RESETME", "FALLBACK"]
+        })
 
-    assert {:ok, %{agent: stale_agent}} =
-             FleetGeneration.mint(scope, %{
-               symbol: "RESETME",
-               faction: "COSMIC",
-               replacement_symbols: ["RESETME", "FALLBACK"]
-             })
+      %{scope: scope, revision: revision, agent: Agent.get_agent(scope, minted.id)}
+    end
 
-    assert [first_generation] = FleetGeneration.list_generations(scope)
-    assert first_generation.fleet_strategy_revision_id == revision.id
-    assert first_generation.starting_credits == 175_000
-    assert %DateTime{} = first_generation.strategy_capable_at
+    test "the active Fleet Strategy Revision carries forward to a bootstrapped fallback Generation",
+         %{scope: scope, revision: revision, agent: agent} do
+      assert [first_generation] = FleetGeneration.list_generations(scope)
+      assert first_generation.fleet_strategy_revision_id == revision.id
+      assert first_generation.starting_credits == 175_000
+      assert %DateTime{} = first_generation.strategy_capable_at
+      assert {:ok, %{ship_type: "UNKNOWN"}} = Fleet.owned_ship(agent, "RESETME-1")
 
-    assert {:ok, _} =
-             FleetGeneration.record_objective_progress(scope, first_generation.id, 0, %{
-               "current" => 0,
-               "target" => 10,
-               "expected_seconds_to_target" => 500,
-               "feasible?" => false,
-               "evidence_id" => objective_evidence(stale_agent).id
-             })
+      assert {:ok, _} =
+               FleetGeneration.record_objective_progress(scope, first_generation.id, 0, %{
+                 "current" => 0,
+                 "target" => 10,
+                 "expected_seconds_to_target" => 500,
+                 "feasible?" => false,
+                 "evidence_id" => objective_evidence(agent).id
+               })
 
-    assert [%{kind: :attention}] = SpaceTraders.OperatorConditions.unresolved(scope)
-    first_ship = Repo.get_by!(Ship, symbol: "RESETME-1")
-    assert first_ship.agent_id == stale_agent.id
-    assert first_ship.ship_type == "UNKNOWN"
-    stale_agent = Repo.get!(SpaceTraders.Agent.Agent, stale_agent.id)
+      assert [%{kind: :attention}] = OperatorConditions.unresolved(scope)
+      assert {:ok, draft} = FleetStrategy.select_preset(scope, "steady_growth")
 
-    Req.Test.stub(SpaceTraders.API, fn conn ->
-      case {conn.method, conn.request_path, conn.body_params["symbol"]} do
-        {"GET", "/v2/my/agent", nil} ->
-          conn
-          |> Map.put(:status, 401)
-          |> Req.Test.json(%{
-            "error" => %{
-              "code" => 4113,
-              "message" =>
-                "Failed to parse token. Token reset_date does not match the server. Server resets happen on a weekly to bi-weekly frequency during alpha. After a reset, you should re-register your agent. Expected: 2026-09-15, Actual: 2026-09-01"
-            }
-          })
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        if conn.method == "POST" do
+          assert retained = Agent.get_agent(scope, agent.id)
+          assert FleetGeneration.stale?(retained)
+          assert {:error, :stale_agent} = FleetGeneration.execution_allowed?(retained)
+          assert [%{retired_at: nil}] = FleetGeneration.list_generations(scope)
+        end
 
-        {"POST", "/v2/register", "RESETME"} ->
-          fenced = Repo.get!(SpaceTraders.Agent.Agent, stale_agent.id)
-          assert %DateTime{} = fenced.stale_at
-          assert {:error, :stale_agent} = FleetGeneration.execution_allowed?(fenced)
-          send(test_pid, :stale_agent_retained)
+        reset_then_fallback_response(conn)
+      end)
 
-          conn
-          |> Map.put(:status, 400)
-          |> Req.Test.json(%{
-            "error" => %{"code" => 4103, "message" => "Symbol is already in use"}
-          })
+      assert {:error, :stale_agent} = FleetGeneration.agent_overview(agent)
+      refute Agent.get_agent(scope, agent.id)
+      assert [replacement] = Agent.list_agents(scope.operator)
+      assert replacement.symbol == "FALLBACK"
+      assert {:ok, _ship} = Fleet.owned_ship(replacement, "FALLBACK-1")
+      assert {:error, :ship_not_owned} = Fleet.owned_ship(agent, "RESETME-1")
 
-        {"POST", "/v2/register", "FALLBACK"} ->
-          assert Repo.get(SpaceTraders.Agent.Agent, stale_agent.id)
-          Req.Test.json(conn, registration_body("FALLBACK", "FALLBACK-1", "SECOND_TOKEN"))
-      end
-    end)
+      assert [second_generation, retired_generation] = FleetGeneration.list_generations(scope)
+      assert second_generation.number == 2
+      assert second_generation.symbol == "FALLBACK"
+      assert second_generation.agent_id == replacement.id
+      assert second_generation.fleet_strategy_revision_id == revision.id
+      assert %DateTime{} = second_generation.strategy_capable_at
+      assert retired_generation.id == first_generation.id
+      assert %DateTime{} = retired_generation.fenced_at
+      assert %DateTime{} = retired_generation.retired_at
+      assert FleetStrategy.get(scope).active_revision == revision
+      assert FleetStrategy.get(scope).draft == draft.draft
+      assert OperatorConditions.unresolved(scope) == []
 
-    assert {:error, :stale_agent} = FleetGeneration.agent_overview(stale_agent)
-    assert_receive :stale_agent_retained
+      stale_token_reference =
+        scope.operator
+        |> agent_fixture(%{agent_token: "FIRST_TOKEN"})
+        |> AgentTokenReference.new()
 
-    stale_token_reference =
-      operator
-      |> agent_fixture(%{agent_token: "FIRST_TOKEN"})
-      |> AgentTokenReference.new()
+      assert {:error, :stale_agent} =
+               SpaceTraders.API.accept_contract(stale_token_reference, "contract-1")
+    end
 
-    assert {:error, :stale_agent} =
-             SpaceTraders.API.accept_contract(stale_token_reference, "contract-1")
+    test "failed replacement retains the fenced Stale Agent until a successful mint",
+         %{scope: scope, revision: revision, agent: agent} do
+      assert [original] = FleetGeneration.list_generations(scope)
 
-    refute Repo.get(SpaceTraders.Agent.Agent, stale_agent.id)
-    replacement = Repo.get_by!(SpaceTraders.Agent.Agent, symbol: "FALLBACK")
-    assert Repo.get_by!(Ship, symbol: "FALLBACK-1").agent_id == replacement.id
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case {conn.method, conn.request_path, conn.body_params["symbol"]} do
+          {"GET", "/v2/my/agent", nil} ->
+            reset_mismatch(conn)
 
-    assert [second_generation, retired_generation] = FleetGeneration.list_generations(scope)
-    assert second_generation.number == 2
-    assert second_generation.agent_id == replacement.id
-    assert second_generation.fleet_strategy_revision_id == revision.id
-    assert %DateTime{} = second_generation.strategy_capable_at
-    assert retired_generation.id == first_generation.id
-    assert %DateTime{} = retired_generation.fenced_at
-    assert %DateTime{} = retired_generation.retired_at
-    assert FleetStrategy.get(scope).active_revision.id == revision.id
-    assert SpaceTraders.OperatorConditions.unresolved(scope) == []
+          {"POST", "/v2/register", symbol} when symbol in ["RESETME", "FALLBACK"] ->
+            symbol_unavailable(conn)
+        end
+      end)
+
+      assert {:error, :stale_agent} = FleetGeneration.agent_overview(agent)
+      assert retained = Agent.get_agent(scope, agent.id)
+      assert FleetGeneration.stale?(retained)
+      assert {:error, :stale_agent} = FleetGeneration.execution_allowed?(retained)
+      assert {:error, :replacement_required} = FleetGeneration.retire_stale_agents(scope)
+      assert [fenced] = FleetGeneration.list_generations(scope)
+      assert fenced.id == original.id
+      assert %DateTime{} = fenced.fenced_at
+      assert is_nil(fenced.retired_at)
+      assert FleetStrategy.get(scope).active_revision == revision
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        assert conn.method == "POST"
+        assert Agent.get_agent(scope, agent.id)
+        reset_then_fallback_response(conn)
+      end)
+
+      assert {:ok, [%{agent: replacement, retired_symbols: ["RESETME"]}]} =
+               FleetGeneration.replace_stale_agents(scope)
+
+      assert replacement.symbol == "FALLBACK"
+      refute Agent.get_agent(scope, agent.id)
+      assert [current, retired] = FleetGeneration.list_generations(scope)
+      assert current.agent_id == replacement.id
+      assert current.fleet_strategy_revision_id == revision.id
+      assert %DateTime{} = current.strategy_capable_at
+      assert retired.id == original.id
+      assert %DateTime{} = retired.retired_at
+    end
+
+    test "Emergency Stop suppresses the next replacement while preserving the active Strategy",
+         %{scope: scope, revision: revision, agent: agent} do
+      Req.Test.stub(SpaceTraders.API, &reset_then_fallback_response/1)
+
+      assert {:error, :stale_agent} = FleetGeneration.agent_overview(agent)
+      assert [replacement] = Agent.list_agents(scope.operator)
+      assert replacement.symbol == "FALLBACK"
+      assert [second_generation, retired] = FleetGeneration.list_generations(scope)
+      assert second_generation.number == 2
+      assert second_generation.fleet_strategy_revision_id == revision.id
+      assert %DateTime{} = retired.retired_at
+      assert {:ok, stopped} = FleetStrategy.engage_emergency_stop(scope)
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        assert {conn.method, conn.request_path} == {"GET", "/v2/my/agent"}
+        assert Plug.Conn.get_req_header(conn, "authorization") == ["Bearer SECOND_TOKEN"]
+        reset_mismatch(conn)
+      end)
+
+      assert {:error, :stale_agent} = FleetGeneration.agent_overview(replacement)
+      assert {:error, :emergency_stopped} = FleetGeneration.replace_stale_agents(scope)
+      assert [retained] = Agent.list_agents(scope.operator)
+      assert retained.id == replacement.id
+      assert FleetGeneration.stale?(retained)
+      assert [fenced, still_retired] = FleetGeneration.list_generations(scope)
+      assert fenced.id == second_generation.id
+      assert %DateTime{} = fenced.fenced_at
+      assert is_nil(fenced.retired_at)
+      assert still_retired == retired
+      assert FleetStrategy.get(scope).active_revision == revision
+      assert FleetStrategy.get(scope).emergency_stopped_at == stopped.emergency_stopped_at
+      assert FleetStrategy.get(scope).emergency_stop_version == stopped.emergency_stop_version
+    end
   end
 
   test "activating Strategy makes an already bootstrapped Fleet Generation Strategy-capable" do
@@ -263,17 +327,7 @@ defmodule SpaceTraders.FleetGenerationTest do
         in_flight_action: %{"kind" => "navigate"}
       })
 
-    Req.Test.stub(SpaceTraders.API, fn conn ->
-      conn
-      |> Map.put(:status, 401)
-      |> Req.Test.json(%{
-        "error" => %{
-          "code" => 4113,
-          "message" =>
-            "Failed to parse token. Token reset_date does not match the server. Server resets happen on a weekly to bi-weekly frequency during alpha. After a reset, you should re-register your agent. Expected: 2026-09-15, Actual: 2026-09-01"
-        }
-      })
-    end)
+    Req.Test.stub(SpaceTraders.API, &reset_mismatch/1)
 
     assert {:ok, stopped} = FleetStrategy.engage_emergency_stop(scope)
     assert {:error, :stale_agent} = FleetGeneration.agent_overview(agent)
@@ -517,6 +571,37 @@ defmodule SpaceTraders.FleetGenerationTest do
         ]
       }
     }
+  end
+
+  defp reset_then_fallback_response(conn) do
+    case {conn.method, conn.request_path, conn.body_params["symbol"]} do
+      {"GET", "/v2/my/agent", nil} ->
+        reset_mismatch(conn)
+
+      {"POST", "/v2/register", "RESETME"} ->
+        symbol_unavailable(conn)
+
+      {"POST", "/v2/register", "FALLBACK"} ->
+        Req.Test.json(conn, registration_body("FALLBACK", "FALLBACK-1", "SECOND_TOKEN"))
+    end
+  end
+
+  defp reset_mismatch(conn) do
+    conn
+    |> Plug.Conn.put_status(401)
+    |> Req.Test.json(%{
+      "error" => %{
+        "code" => 4113,
+        "message" =>
+          "Failed to parse token. Token reset_date does not match the server. Server resets happen on a weekly to bi-weekly frequency during alpha. After a reset, you should re-register your agent. Expected: 2026-09-15, Actual: 2026-09-01"
+      }
+    })
+  end
+
+  defp symbol_unavailable(conn) do
+    conn
+    |> Plug.Conn.put_status(400)
+    |> Req.Test.json(%{"error" => %{"code" => 4103, "message" => "Symbol is already in use"}})
   end
 
   defp objective_evidence(agent, credits \\ 175_000) do
