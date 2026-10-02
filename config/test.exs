@@ -5,8 +5,8 @@ config :pbkdf2_elixir, :rounds, 1
 
 config :spacetraders, :fleet_reconciler_enabled, false
 
-# The Observation Demand scheduler is exercised by scenario tests that start it
-# explicitly so a fresh boot reconstructs wakeups from durable state on camera.
+# Evidence scheduling tests start their own scheduler to prove wakeup recovery
+# from persisted demands with a controlled clock.
 config :spacetraders, :demand_scheduler_enabled, false
 
 # Configure your database
