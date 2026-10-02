@@ -319,6 +319,50 @@ defmodule SpaceTraders.FleetPlanningTest do
                demands
     end
 
+    test "new authoritative Listing evidence changes incomplete coverage into an admissible trade" do
+      baseline = ["market:X1:X1-A1", "market:X1:X1-A2", "market:X1:X1-A3"]
+
+      source =
+        market("X1-A1", ~U[2030-01-01 11:59:00Z], [
+          good("IRON", 10, 9, 20)
+        ])
+
+      before =
+        coverage_snapshot(baseline)
+        |> Map.put(:markets, [source])
+
+      assert {:ok,
+              %{
+                candidate_contributions: [],
+                limitations: [
+                  %{
+                    subject: :market_planning,
+                    reason: :incomplete_market_coverage,
+                    subjects: ["market:X1:X1-A2", "market:X1:X1-A3"]
+                  }
+                ]
+              }} = FleetPlanning.plan_market(revision(), 0, before)
+
+      # A2 arrives as new authoritative Listing evidence while A3 remains
+      # unobserved. Planning changes immediately from unresolved coverage to
+      # the admissible trade supported by the evidence it now has.
+      destination =
+        market("X1-A2", ~U[2030-01-01 12:00:00Z], [
+          good("IRON", 25, 20, 25)
+        ])
+
+      with_destination = %{before | markets: [source, destination]}
+
+      assert {:ok, %{candidate_contributions: [trade | _], limitations: []}} =
+               FleetPlanning.plan_market(revision(), 0, with_destination)
+
+      assert %CandidateContribution{
+               kind: :market_trade,
+               source_waypoint: "X1-A1",
+               destination_waypoint: "X1-A2"
+             } = trade
+    end
+
     test "no route with incomplete coverage reports the unresolved subjects instead of a negative System conclusion" do
       # Both usable Listings quote identical prices, so no spread exists.
       snapshot =
