@@ -40,7 +40,7 @@ defmodule SpaceTraders.Application do
     Supervisor.start_link(children, opts)
   end
 
-  # The durable Observation Demand scheduler runs in dev/prod; scenario tests
+  # The durable Observation Demand scheduler runs in dev/prod; Evidence tests
   # start their own instance to prove restart reconstruction from durable state.
   defp demand_scheduler_children do
     if Application.get_env(:spacetraders, :demand_scheduler_enabled, true) do

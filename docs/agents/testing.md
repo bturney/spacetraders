@@ -51,3 +51,13 @@ assumption that the owner survives teardown.
 
 In test env the API transport is stubbed with `Req.Test` and the rate limiter is
 disabled (`config/test.exs`).
+
+## Evidence scheduling
+
+Persisted Observation Demand scheduling lives in
+`test/spacetraders/evidence_scheduling_test.exs`: `DataCase`, real PostgreSQL,
+and locally supervised `TestClock` and `DemandScheduler`. Assert public Evidence
+queries and due notifications. Restart proofs discard clock timers as well as the
+scheduler; PostgreSQL alone retains the requirement. The case is synchronous
+because clock configuration is application-wide; ExUnit supervision owns process
+shutdown before sandbox cleanup.
