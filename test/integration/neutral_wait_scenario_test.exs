@@ -88,7 +88,7 @@ defmodule SpaceTraders.NeutralWaitScenarioTest do
       # Process timer memory is not correctness state: the scheduler dies
       # before the demand comes due and the due instant passes while it is
       # down. A fresh boot reconstructs the wakeup from durable state alone.
-      assert :ok = stop_supervised!(DemandScheduler)
+      assert :ok = stop_demand_scheduler()
       advance_time(60)
       start_supervised!({DemandScheduler, []})
 
@@ -175,7 +175,7 @@ defmodule SpaceTraders.NeutralWaitScenarioTest do
       # The wait survives a scheduler restart from durable state alone: the
       # timer holder dies and a fresh boot re-arms from persisted demands
       # without disturbing the episode, while the successor stays future.
-      assert :ok = stop_supervised!(DemandScheduler)
+      assert :ok = stop_demand_scheduler()
       start_supervised!({DemandScheduler, []})
 
       advance_time(240)
@@ -275,6 +275,15 @@ defmodule SpaceTraders.NeutralWaitScenarioTest do
 
       assert neutral_wait_count() == 0
     end
+  end
+
+  defp stop_demand_scheduler do
+    # Stop at a callback boundary: killing an in-flight reader destroys the
+    # shared sandbox transaction and leaves the restarted scheduler unowned.
+    # Suspension waits for the current callback and prevents another DB read;
+    # the new process must still reconstruct its timers from durable demands.
+    :ok = :sys.suspend(Process.whereis(DemandScheduler))
+    stop_supervised!(DemandScheduler)
   end
 
   defp current_wait do
