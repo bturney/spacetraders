@@ -1,84 +1,116 @@
-defmodule SpaceTraders.OpenApiCapabilityCoverageScenarioTest do
-  use SpaceTraders.ScenarioCase
+defmodule SpaceTraders.GameplayMutationTest do
+  use SpaceTraders.DataCase
 
   import SpaceTraders.AgentFixtures
   import SpaceTraders.ShipBody
 
-  alias SpaceTraders.Agent.Scope
+  alias SpaceTraders.API
   alias SpaceTraders.Fleet.Ship
   alias SpaceTraders.FleetAllocation.Reconciler
   alias SpaceTraders.FleetContracts
   alias SpaceTraders.FleetGeneration.Generation
   alias SpaceTraders.FleetStrategy.{Revision, Strategy}
   alias SpaceTraders.MutationAttempts
+  alias SpaceTraders.SafetyFence
 
-  test "Fleet reconciliation records a successful negotiate-contract mutation" do
-    {_scope, agent, revision, ship, game} = negotiating_scenario(:success)
+  test "a successful gameplay mutation retains its successful outcome" do
+    {agent, revision, ship, game} = negotiating_fleet(:success)
 
     assert {:ok, %{id: "negotiated-contract"}} =
              FleetContracts.negotiate_if_available(agent, revision, ship.symbol)
 
-    assert [%{state: "succeeded"}] = negotiation_attempts(agent)
+    assert [%{state: "succeeded", outcomes: [%{classification: "succeeded"}]} = attempt] =
+             negotiation_attempts(agent)
+
+    refute SafetyFence.active?(attempt)
     assert Elixir.Agent.get(game, & &1.negotiations) == 1
   end
 
-  test "Fleet reconciliation records a rejected negotiate-contract mutation" do
-    {_scope, agent, revision, ship, game} = negotiating_scenario(:rejected)
+  test "a rejected gameplay mutation is definitive and permits a fresh attempt" do
+    {agent, revision, ship, game} = negotiating_fleet(:rejected)
 
-    assert {:error, _reason} = FleetContracts.negotiate_if_available(agent, revision, ship.symbol)
-    assert [%{state: "rejected"}] = negotiation_attempts(agent)
-    assert Elixir.Agent.get(game, & &1.negotiations) == 1
+    assert {:error, %API.GameplayError{code: 4000}} =
+             FleetContracts.negotiate_if_available(agent, revision, ship.symbol)
+
+    assert [%{state: "rejected", outcomes: [%{classification: "rejected"}]} = rejected] =
+             negotiation_attempts(agent)
+
+    refute SafetyFence.active?(rejected)
+
+    Elixir.Agent.update(game, &%{&1 | outcome: :success})
+
+    assert {:ok, %{id: "negotiated-contract"}} =
+             FleetContracts.negotiate_if_available(agent, revision, ship.symbol)
+
+    assert [retained, %{state: "succeeded"}] = negotiation_attempts(agent)
+    assert retained == rejected
+    assert Elixir.Agent.get(game, & &1.negotiations) == 2
   end
 
   test "an API outage fences negotiate-contract instead of replaying it" do
-    {_scope, agent, revision, ship, game} = negotiating_scenario(:outage)
+    {agent, revision, ship, game} = negotiating_fleet(:outage)
 
     assert {:error, _reason} = FleetContracts.negotiate_if_available(agent, revision, ship.symbol)
-    assert [%{state: "ambiguous"}] = negotiation_attempts(agent)
 
-    assert {:error, %{reason: {:safety_fenced, _attempt_ids}}} =
+    assert [%{state: "ambiguous", outcomes: [%{classification: "ambiguous"}]} = attempt] =
+             negotiation_attempts(agent)
+
+    assert SafetyFence.active?(attempt)
+    attempt_id = attempt.id
+
+    assert {:error, %{reason: {:safety_fenced, [^attempt_id]}}} =
              FleetContracts.negotiate_if_available(agent, revision, ship.symbol)
 
     assert Elixir.Agent.get(game, & &1.negotiations) == 1
+    assert [^attempt] = negotiation_attempts(agent)
   end
 
   test "a lost negotiate-contract response remains fenced after the reconciler restarts" do
     Req.Test.set_req_test_to_shared(SpaceTraders.API)
-    start_supervised!(Reconciler)
+    previous_reconciler = start_supervised!(Reconciler)
+    # Drain boot reconstruction before creating this test's Fleet Generation.
+    :sys.get_state(previous_reconciler)
 
-    {_scope, agent, revision, ship, game} = negotiating_scenario(:lost_response)
+    {agent, revision, ship, game} = negotiating_fleet(:lost_response)
 
     assert {:error, _reason} = FleetContracts.negotiate_if_available(agent, revision, ship.symbol)
-    assert [%{state: "ambiguous"} = attempt] = negotiation_attempts(agent)
 
-    previous_reconciler = Process.whereis(Reconciler)
-    Process.exit(previous_reconciler, :kill)
+    assert [%{state: "ambiguous", outcomes: [%{classification: "ambiguous"}]} = attempt] =
+             negotiation_attempts(agent)
 
-    assert_eventually(fn ->
-      case Process.whereis(Reconciler) do
-        replacement when is_pid(replacement) -> replacement != previous_reconciler
-        nil -> false
-      end
-    end)
+    assert SafetyFence.active?(attempt)
+    assert Elixir.Agent.get(game, & &1.applied)
+    attempt_id = attempt.id
 
-    assert {:error, %{reason: {:safety_fenced, _attempt_ids}}} =
+    stop_supervised!(Reconciler)
+    replacement = start_supervised!(Reconciler)
+    assert replacement != previous_reconciler
+    # Boot queues a Fleet wakeup; drain it as well as the initial boot message.
+    :sys.get_state(replacement)
+    :sys.get_state(replacement)
+
+    assert {:error, %{reason: {:safety_fenced, [^attempt_id]}}} =
              FleetContracts.negotiate_if_available(agent, revision, ship.symbol)
 
-    assert %{state: "ambiguous"} = MutationAttempts.get!(attempt.id)
+    assert [^attempt] = negotiation_attempts(agent)
+    assert SafetyFence.active?(MutationAttempts.get!(attempt.id))
 
     assert Elixir.Agent.get(game, & &1.negotiations) == 1
   end
 
-  defp negotiating_scenario(outcome) do
-    {scope, agent, revision, ship} = negotiating_fleet()
+  defp negotiating_fleet(outcome) do
+    {agent, revision, ship} = fleet_fixture()
 
-    {:ok, game} =
-      Elixir.Agent.start_link(fn -> %{offered: false, negotiations: 0, outcome: outcome} end)
+    game =
+      start_supervised!(
+        {Elixir.Agent,
+         fn -> %{offered: false, applied: false, negotiations: 0, outcome: outcome} end}
+      )
 
     ship_path = "/v2/my/ships/#{ship.symbol}"
     negotiate_path = ship_path <> "/negotiate/contract"
 
-    stub_api(fn conn ->
+    Req.Test.stub(API, fn conn ->
       case {conn.method, conn.request_path} do
         {"GET", "/v2/my/contracts"} ->
           contracts = if Elixir.Agent.get(game, & &1.offered), do: [offered_contract()], else: []
@@ -115,7 +147,10 @@ defmodule SpaceTraders.OpenApiCapabilityCoverageScenarioTest do
           outcome =
             Elixir.Agent.get_and_update(game, fn state ->
               offered = state.outcome == :success
-              {state.outcome, %{state | offered: offered, negotiations: state.negotiations + 1}}
+              applied = state.outcome in [:success, :lost_response]
+
+              {state.outcome,
+               %{state | offered: offered, applied: applied, negotiations: state.negotiations + 1}}
             end)
 
           case outcome do
@@ -139,10 +174,10 @@ defmodule SpaceTraders.OpenApiCapabilityCoverageScenarioTest do
       end
     end)
 
-    {scope, agent, revision, ship, game}
+    {agent, revision, ship, game}
   end
 
-  defp negotiating_fleet do
+  defp fleet_fixture do
     operator = operator_fixture()
     agent = agent_fixture(operator)
     ship = Repo.insert!(%Ship{symbol: "NEGOTIATOR", ship_type: "SHIP_PROBE", agent_id: agent.id})
@@ -173,7 +208,7 @@ defmodule SpaceTraders.OpenApiCapabilityCoverageScenarioTest do
       objective_progress: %{}
     })
 
-    {Scope.for_operator(operator), agent, revision, ship}
+    {agent, revision, ship}
   end
 
   defp offered_contract do
