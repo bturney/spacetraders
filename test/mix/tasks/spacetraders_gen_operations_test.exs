@@ -78,8 +78,8 @@ defmodule Mix.Tasks.SpaceTraders.Gen.OperationsTest do
     end
   end
 
-  test "the canonical verification alias checks the operation inventory" do
-    assert "space_traders.gen.operations --check" in Mix.Project.config()[:aliases][:verify]
+  test "the canonical verification gate checks the operation inventory" do
+    assert {"space_traders.gen.operations", ["--check"]} in Mix.Tasks.Verify.required_checks()
   end
 
   defp pinned_spec do

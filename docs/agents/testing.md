@@ -5,8 +5,13 @@ looks environment-related.
 
 ## The gate
 
-`scripts/verify` (== `mix verify`) is the canonical gate. Its steps are the
-`verify` alias in `mix.exs`; read it rather than trusting a list elsewhere.
+`scripts/verify` (== `mix verify`) is the canonical gate. Its checks are
+`Mix.Tasks.Verify.required_checks/0` in `lib/mix/tasks/verify.ex`; read it
+rather than trusting a list elsewhere.
+
+The gate stops at the first failing check, so a red run means the named check
+is the one to fix. Its exit status is the verdict: a failure is never recovered
+from, and no check's output is parsed to decide the result.
 
 The gate prints a lot. Inline tool output can truncate mid-run and leave the
 result unknown: redirect it to a file and read the tail, or rely on the

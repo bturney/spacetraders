@@ -99,15 +99,9 @@ defmodule SpaceTraders.MixProject do
         "phx.digest"
       ],
       precommit: ["compile --warnings-as-errors", "deps.unlock --unused", "format", "test"],
-      verify: [
-        "format --check-formatted",
-        "compile --warnings-as-errors",
-        "test",
-        "space_traders.gen.models --check",
-        "space_traders.gen.operations --check",
-        "verify.boundary",
-        "verify.boot"
-      ]
+      # The compile leg repeats `Mix.Tasks.Verify`'s first required check so that
+      # it runs before Mix compiles the project on its own. See that task.
+      verify: ["compile --warnings-as-errors", "verify"]
     ]
   end
 end
