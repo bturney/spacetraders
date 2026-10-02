@@ -5,6 +5,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 requested_port="${PORT:-}"
+requested_database="${SPACETRADERS_TEST_DATABASE:-}"
 if [ -f "$PROJECT_ROOT/.worktree-env" ]; then
   echo "This worktree already has task configuration. Run scripts/teardown before configuring it again." >&2
   exit 73
@@ -22,6 +23,40 @@ if [[ ! "$task_id" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
   echo "Task ID must begin with a letter or digit and may then contain periods, underscores, or hyphens." >&2
   exit 64
 fi
+
+# The gate drops and recreates its database on every run, so two concurrent
+# gates sharing one name destroy each other. Each task gets its own, named
+# after the task so the same task reuses it and teardown can release it.
+#
+# `spacetraders_test_` + the task ID is injective: the task ID already admits
+# only [A-Za-z0-9._-], every one of which PostgreSQL accepts in an unquoted
+# database name and none of which carry meaning in a connection URL. The only
+# remaining constraint is PostgreSQL's 63-byte identifier limit.
+readonly DATABASE_PREFIX="spacetraders_test_"
+readonly DATABASE_MAX_BYTES=63
+readonly TASK_ID_MAX_BYTES=$((DATABASE_MAX_BYTES - ${#DATABASE_PREFIX}))
+
+if [ -n "$requested_database" ]; then
+  if [ "${#requested_database}" -gt "$DATABASE_MAX_BYTES" ] ||
+    [[ ! "$requested_database" =~ ^[A-Za-z_][A-Za-z0-9_.-]*$ ]]; then
+    echo "SPACETRADERS_TEST_DATABASE must be a PostgreSQL identifier of at most $DATABASE_MAX_BYTES bytes, beginning with a letter or underscore." >&2
+    exit 64
+  fi
+  database="$requested_database"
+else
+  if [ "${#task_id}" -gt "$TASK_ID_MAX_BYTES" ]; then
+    echo "Task ID must be at most $TASK_ID_MAX_BYTES bytes so its test database name fits PostgreSQL's $DATABASE_MAX_BYTES-byte identifier limit." >&2
+    exit 64
+  fi
+  database="$DATABASE_PREFIX$task_id"
+fi
+
+# Only the database name is per-task. Host, port, and credentials come from the
+# caller's DATABASE_URL when it has one — CI pins a job-level value — so this
+# changes which database is used, never which server. A bare checkout without
+# DATABASE_URL keeps the gate's own default.
+database_url="${DATABASE_URL:-postgres://postgres:postgres@localhost/spacetraders_test}"
+database_url="${database_url%/*}/$database"
 
 if ! command -v flock >/dev/null 2>&1; then
   echo "Missing runner prerequisite: flock (util-linux) is required for worktree setup." >&2
@@ -78,6 +113,11 @@ allocate_port() {
 port="$(allocate_port)"
 port_lease=1
 if [ -n "$requested_port" ]; then port_lease=0; fi
+# An explicitly named database belongs to whoever named it, not to this task's
+# lease, so teardown leaves it alone — the same rule the requested-port
+# override follows.
+database_lease=1
+if [ -n "$requested_database" ]; then database_lease=0; fi
 setup_complete=0
 
 # Bootstrap and compile are slow and chatty; stream a single progress line and
@@ -160,14 +200,17 @@ fi
 
 {
   printf 'export AGENT_TASK_ID=%q\n' "$task_id"
+  printf 'export DATABASE_URL=%q\n' "$database_url"
   printf 'export MIX_DEPS_PATH=%q\n' "$PROJECT_ROOT/deps"
   printf 'export MIX_BUILD_PATH=%q\n' "$PROJECT_ROOT/_build"
   printf 'export MIX_HOME=%q\n' "$PROJECT_ROOT/.worktree-mix"
   printf 'export PORT=%q\n' "$port"
   printf 'export WORKTREE_PORT_LEASE=%q\n' "$port_lease"
+  printf 'export WORKTREE_DATABASE=%q\n' "$database"
+  printf 'export WORKTREE_DATABASE_LEASE=%q\n' "$database_lease"
   printf 'export SPACETRADERS_WORKTREE_CACHE_DIR=%q\n' "$cache_root"
   printf 'export SPACETRADERS_PORT_REGISTRY_DIR=%q\n' "$port_root"
 } > "$PROJECT_ROOT/.worktree-env"
 
-echo "Task $task_id is ready on port $port."
+echo "Task $task_id is ready on port $port with database $database."
 setup_complete=1
