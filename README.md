@@ -77,15 +77,16 @@ DATABASE_URL=postgres://postgres:postgres@localhost/spacetraders_test \
   mix test test/spacetraders/ship_execution_durability_test.exs
 ```
 
-Autonomous runtime scenarios use `SpaceTraders.ScenarioCase`. The case drives
-authenticated Phoenix interfaces while providing controlled SpaceTraders API
-responses, a shared fake clock, runtime process restarts, durable
-`SpaceTraders.Repo` inspection, and captured telemetry and Fleet notifications.
-Run the representative scenario directly with:
+Whole-runtime qualification is diagnostic-only and stays outside ordinary
+`mix test` and `scripts/verify`. Run it explicitly when checking autonomous
+runtime composition across a restart:
 
 ```sh
-mix test test/integration/autonomous_runtime_scenario_test.exs
+mix test test/diagnostics/runtime_qualification.exs --seed 0 --trace
 ```
+
+Its retained scope and the deterministic seam-level owners are documented in
+`docs/agents/testing.md`.
 
 ### Game API client & codegen
 
