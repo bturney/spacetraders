@@ -148,6 +148,89 @@ defmodule SpaceTraders.FleetRefitTest do
 
   # -- stubbing ----------------------------------------------------------------
 
+  for rejection <- [:purchase, :purchase_observation] do
+    @rejection rejection
+    test "a refit #{@rejection} 429 resumes from its durable wake after ShipServer restart" do
+      install_test_clock()
+      {scope, agent, revision, ship} = generation()
+      seed_intelligence(agent)
+      state = stub_refit_rejection(agent, ship, @rejection)
+      purchase_path = "/v2/my/ships/#{ship.symbol}/purchase"
+
+      assert {:ok, %Intent{status: "waiting", blocker: blocker} = intent} =
+               FleetRefit.reconcile(scope, agent, revision, @system)
+
+      assert blocker.reason == "api_capacity_deferred"
+      assert_received {"POST", ^purchase_path}
+      refute_received {"POST", ^purchase_path}
+
+      [event] = SpaceTraders.Timeline.pending_events(:ship, ship.symbol)
+      assert event.event_type == "intent_retry"
+      assert event.payload["intent_id"] == intent.id
+
+      [first] = SpaceTraders.MutationAttempts.list_for_agent(agent)
+
+      if @rejection == :purchase do
+        assert first.state == "rejected"
+        assert intent.in_flight_action == nil
+        assert intent.mutation_attempt_id == nil
+      else
+        assert first.state == "succeeded"
+        assert intent.in_flight_action["kind"] == "buy"
+        assert intent.mutation_attempt_id == first.id
+      end
+
+      :ok = ShipServer.stop(ship.symbol)
+
+      assert eventually(fn ->
+               Registry.lookup(SpaceTraders.Fleet.ShipRegistry, ship.symbol) == []
+             end)
+
+      {:ok, pid} = ShipServer.ensure_started(agent, ship.symbol)
+      :sys.get_state(pid)
+      SpaceTraders.TestClock.advance(1)
+
+      install_path = "/v2/my/ships/#{ship.symbol}/modules/install"
+      assert_receive {"POST", ^install_path}, 1_000
+      :sys.get_state(pid)
+      assert Repo.get!(Intent, intent.id).status == "completed"
+      assert SpaceTraders.Timeline.pending_events(:ship, ship.symbol) == []
+
+      expected_purchases = if @rejection == :purchase, do: 2, else: 1
+      assert Elixir.Agent.get(state, & &1.purchases) == expected_purchases
+
+      attempts = SpaceTraders.MutationAttempts.list_for_agent(agent)
+      assert length(attempts) == expected_purchases + 1
+      assert List.last(attempts).state == "succeeded"
+      assert List.last(attempts).operation_id == "install-ship-module"
+      assert Enum.all?(attempts, &(&1.provenance["intent_id"] == intent.id))
+    end
+  end
+
+  test "a deferred refit wake cannot send after its Claim is withdrawn" do
+    install_test_clock()
+    {scope, agent, revision, ship} = generation()
+    seed_intelligence(agent)
+    state = stub_refit_rejection(agent, ship, :purchase)
+
+    assert {:ok, %Intent{status: "waiting"} = intent} =
+             FleetRefit.reconcile(scope, agent, revision, @system)
+
+    portfolio = FleetAllocation.current_portfolio(scope, agent)
+    [commitment] = portfolio.commitments
+    Repo.update!(Ecto.Changeset.change(commitment, unwind_state: :released))
+
+    {:ok, pid} = ShipServer.ensure_started(agent, ship.symbol)
+    :sys.get_state(pid)
+    SpaceTraders.TestClock.advance(1)
+    assert_receive {:retry_ship_read, _}, 1_000
+    :sys.get_state(pid)
+
+    assert Elixir.Agent.get(state, & &1.purchases) == 1
+    assert Repo.get!(Intent, intent.id).status == "superseded"
+    assert [%{state: "rejected"}] = SpaceTraders.MutationAttempts.list_for_agent(agent)
+  end
+
   test "protocol backpressure defers a module removal instead of proving it infeasible" do
     {_scope, agent, _revision, ship} = generation()
     {_scope, _agent, _ship, portfolio, commitment} = claimed_refit_ship(agent, ship, "remove")
@@ -169,7 +252,7 @@ defmodule SpaceTraders.FleetRefitTest do
       end
     end)
 
-    assert {:ok, %Intent{status: "blocked", blocker: blocker}} =
+    assert {:ok, %Intent{status: "waiting", blocker: blocker}} =
              Intents.request_commitment_refit(
                agent,
                commitment,
@@ -257,6 +340,111 @@ defmodule SpaceTraders.FleetRefitTest do
           |> Req.Test.json(%{"error" => %{"message" => "unstubbed " <> key}})
       end
     end)
+  end
+
+  defp install_test_clock do
+    start_supervised!({SpaceTraders.TestClock, DateTime.utc_now()})
+    previous = Application.get_env(:spacetraders, :clock)
+    Application.put_env(:spacetraders, :clock, SpaceTraders.TestClock)
+
+    on_exit(fn ->
+      ShipServer.stop_all()
+
+      if previous,
+        do: Application.put_env(:spacetraders, :clock, previous),
+        else: Application.delete_env(:spacetraders, :clock)
+    end)
+  end
+
+  defp stub_refit_rejection(agent, ship, rejection) do
+    test_pid = self()
+
+    {:ok, state} =
+      Elixir.Agent.start_link(fn ->
+        %{purchases: 0, purchased: false, installed: false, read_rejections: 0}
+      end)
+
+    ship_path = "/v2/my/ships/#{ship.symbol}"
+    purchase_path = ship_path <> "/purchase"
+    install_path = ship_path <> "/modules/install"
+    market_path = "/v2/systems/#{@system}/waypoints/#{@supply}/market"
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      send(test_pid, {conn.method, conn.request_path})
+
+      case {conn.method, conn.request_path} do
+        {"GET", "/v2/my/ships"} ->
+          Req.Test.json(conn, %{"data" => [docked_awaiting_purchase_body(ship.symbol)]})
+
+        {"GET", "/v2/my/agent"} ->
+          Req.Test.json(conn, %{"data" => %{"symbol" => agent.symbol, "credits" => 50_000}})
+
+        {"GET", ^market_path} ->
+          Req.Test.json(conn, %{"data" => market_body()})
+
+        {"GET", ^ship_path} ->
+          game = Elixir.Agent.get(state, & &1)
+
+          cond do
+            rejection == :purchase_observation and game.purchased and game.read_rejections < 4 ->
+              Elixir.Agent.update(state, &%{&1 | read_rejections: &1.read_rejections + 1})
+              protocol_rejection(conn)
+
+            game.installed ->
+              Req.Test.json(conn, %{"data" => fitted_ship_body(ship.symbol)})
+
+            game.purchased ->
+              Req.Test.json(conn, %{"data" => purchased_docked_body(ship.symbol)})
+
+            true ->
+              if game.purchases > 0, do: send(test_pid, {:retry_ship_read, ship.symbol})
+              Req.Test.json(conn, %{"data" => docked_awaiting_purchase_body(ship.symbol)})
+          end
+
+        {"POST", ^purchase_path} ->
+          count =
+            Elixir.Agent.get_and_update(
+              state,
+              &{&1.purchases, %{&1 | purchases: &1.purchases + 1}}
+            )
+
+          if rejection == :purchase and count == 0 do
+            protocol_rejection(conn)
+          else
+            Elixir.Agent.update(state, &%{&1 | purchased: true})
+            Req.Test.json(conn, %{"data" => purchase_response()})
+          end
+
+        {"POST", ^install_path} ->
+          Elixir.Agent.update(state, &%{&1 | installed: true})
+          Req.Test.json(conn, %{"data" => install_response()})
+
+        request ->
+          flunk("unexpected refit request: #{inspect(request)}")
+      end
+    end)
+
+    Req.Test.set_req_test_to_shared(SpaceTraders.API)
+    state
+  end
+
+  defp protocol_rejection(conn) do
+    conn
+    |> Plug.Conn.put_resp_header("retry-after", "0")
+    |> Plug.Conn.put_status(429)
+    |> Req.Test.json(%{"error" => %{"code" => 429, "message" => "rate limited"}})
+  end
+
+  defp eventually(fun, attempts \\ 30)
+  defp eventually(_fun, 0), do: false
+
+  defp eventually(fun, attempts) do
+    if fun.() do
+      true
+    else
+      Process.sleep(10)
+      eventually(fun, attempts - 1)
+    end
   end
 
   defp ship_read_count do

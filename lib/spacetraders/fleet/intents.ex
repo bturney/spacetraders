@@ -307,8 +307,8 @@ defmodule SpaceTraders.Fleet.Intents do
   @doc """
   Re-enters the one shared Intent reconciliation for a typed trigger.
 
-  `:arrival` and `:cooldown` carry the expected Intent identity and ShipServer's
-  fresh authoritative Ship observation. `:boot` with no observation performs the
+  `:arrival`, `:cooldown`, and `:intent_retry` carry the expected Intent identity
+  and ShipServer's fresh authoritative Ship observation. `:boot` with no observation performs the
   fresh authoritative read itself before any progress. Stale events that name a
   replaced Intent are ignored idempotently and cannot advance replacement work.
   """
@@ -1821,7 +1821,7 @@ defmodule SpaceTraders.Fleet.Intents do
               block_intents(intent, reason)
           end
         else
-          {:error, reason} -> {:error, reason}
+          {:error, reason} -> block_preparation_refusal(intent, reason)
         end
     end
   end
@@ -1923,7 +1923,7 @@ defmodule SpaceTraders.Fleet.Intents do
               block_intents(intent, reason)
           end
         else
-          {:error, reason} -> {:error, reason}
+          {:error, reason} -> block_preparation_refusal(intent, reason)
         end
     end
   end
@@ -2069,6 +2069,8 @@ defmodule SpaceTraders.Fleet.Intents do
         {:error, reason} ->
           block_intents(intent, reason)
       end
+    else
+      {:error, reason} -> block_preparation_refusal(intent, reason)
     end
   end
 
@@ -2407,7 +2409,7 @@ defmodule SpaceTraders.Fleet.Intents do
           block_cargo_intent(intent, reason)
       end
     else
-      {:error, _reason} -> :ok
+      {:error, reason} -> block_preparation_refusal(intent, reason)
     end
   end
 
@@ -2486,7 +2488,7 @@ defmodule SpaceTraders.Fleet.Intents do
       with {:ok, %{intent: intent}} <- prepare_recorded_action(agent, intent, action) do
         execute_cargo_intent(agent, intent, live_ship, units, recipient)
       else
-        {:error, _reason} -> :ok
+        {:error, reason} -> block_preparation_refusal(intent, reason)
       end
     else
       {:error, reason} -> block_cargo_intent(intent, reason)
@@ -2570,7 +2572,7 @@ defmodule SpaceTraders.Fleet.Intents do
       with {:ok, %{intent: intent}} <- prepare_recorded_action(agent, intent, action) do
         execute_cargo_intent(agent, intent, live_ship, units, good)
       else
-        {:error, _reason} -> :ok
+        {:error, reason} -> block_preparation_refusal(intent, reason)
       end
     else
       {:error, :listing_missing_trade_good} ->
@@ -2885,6 +2887,20 @@ defmodule SpaceTraders.Fleet.Intents do
         result
     end
   end
+
+  defp block_preparation_refusal(_intent, reason)
+       when reason in [:no_current_ship_claim, :intent_dispatch_no_longer_allowed],
+       do: :ok
+
+  defp block_preparation_refusal(%Intent{type: type} = intent, reason)
+       when type in ["install_module", "remove_module"],
+       do: block_module_intent(intent, reason)
+
+  defp block_preparation_refusal(%Intent{type: type} = intent, reason)
+       when type in ["buy", "sell", "deliver", "transfer"],
+       do: block_cargo_intent(intent, reason)
+
+  defp block_preparation_refusal(intent, reason), do: block_intents(intent, reason)
 
   defp update_intent!(%Ecto.Changeset{data: intent} = changeset) do
     # A cleared action has no selected attempt. Legacy action replacement must
@@ -3241,7 +3257,7 @@ defmodule SpaceTraders.Fleet.Intents do
         :ok
 
       {:error, reason} ->
-        block_module_intent(intent, reason)
+        block_preparation_refusal(intent, reason)
     end
   end
 
@@ -3377,6 +3393,9 @@ defmodule SpaceTraders.Fleet.Intents do
     {:ok, intent}
   end
 
+  defp block_module_intent(intent, %SpaceTraders.API.GameplayError{code: 429}),
+    do: defer_for_api_capacity(intent)
+
   defp block_module_intent(intent, reason) do
     intent =
       update_intent!(
@@ -3504,6 +3523,9 @@ defmodule SpaceTraders.Fleet.Intents do
   end
 
   defp maybe_put_delivery(result, _response, _type), do: result
+
+  defp block_cargo_intent(intent, %SpaceTraders.API.GameplayError{code: 429}),
+    do: defer_for_api_capacity(intent)
 
   defp block_cargo_intent(intent, reason) do
     if authoritative_infeasibility?(reason) do
@@ -4079,7 +4101,7 @@ defmodule SpaceTraders.Fleet.Intents do
             block_intents(intent, reason)
         end
       else
-        {:error, _reason} -> :ok
+        {:error, reason} -> block_preparation_refusal(intent, reason)
       end
     else
       {:error, %SpaceTraders.API.GameplayError{}} ->
@@ -4200,7 +4222,7 @@ defmodule SpaceTraders.Fleet.Intents do
           block_intents(intent, reason)
       end
     else
-      {:error, _reason} -> :ok
+      {:error, reason} -> block_preparation_refusal(intent, reason)
     end
   end
 
@@ -4228,7 +4250,7 @@ defmodule SpaceTraders.Fleet.Intents do
           block_intents(intent, reason)
       end
     else
-      {:error, _reason} -> :ok
+      {:error, reason} -> block_preparation_refusal(intent, reason)
     end
   end
 
@@ -4261,7 +4283,7 @@ defmodule SpaceTraders.Fleet.Intents do
           block_intents(intent, reason)
       end
     else
-      {:error, _reason} -> :ok
+      {:error, reason} -> block_preparation_refusal(intent, reason)
     end
   end
 
@@ -4396,7 +4418,7 @@ defmodule SpaceTraders.Fleet.Intents do
           block_intents(intent, reason)
       end
     else
-      {:error, _reason} -> :ok
+      {:error, reason} -> block_preparation_refusal(intent, reason)
     end
   end
 
@@ -4625,6 +4647,9 @@ defmodule SpaceTraders.Fleet.Intents do
   end
 
   defp schedule_intent_arrival(_agent, _intent, _ship_symbol, _result), do: :ok
+
+  defp block_intents(intent, %SpaceTraders.API.GameplayError{code: 429}),
+    do: defer_for_api_capacity(intent)
 
   defp block_intents(intent, reason) do
     if authoritative_infeasibility?(reason) do
@@ -5011,13 +5036,62 @@ defmodule SpaceTraders.Fleet.Intents do
 
   defp intents_block_reason(reason), do: reason
 
-  # Protocol backpressure proves the game rejected the request before applying
-  # it. That is a wait on Shared World State, never authoritative infeasibility:
-  # Fleet Allocation re-selects the outcome and prepares a new recorded attempt.
+  # A 429 is a durable wait. On wake the shared engine revalidates authority and
+  # observes game state before selecting another recorded action. Only the ledger
+  # can prove that the selected mutation was rejected: a read's 429 must not clear
+  # a successful or unresolved mutation awaiting its authoritative observation.
   defp block_protocol_backpressure(intent, %SpaceTraders.API.GameplayError{code: 429}),
-    do: block_cargo_intent(intent, :api_capacity_deferred)
+    do: defer_for_api_capacity(intent)
 
   defp block_protocol_backpressure(intent, reason), do: mark_infeasible(intent, reason)
+
+  defp defer_for_api_capacity(intent) do
+    earliest = DateTime.add(Clock.utc_now(), 1, :second)
+
+    due_at =
+      case SpaceTraders.API.CapacityGovernor.snapshot() do
+        %{ordinary_delayed_until: %DateTime{} = until} -> Enum.max([earliest, until], DateTime)
+        _ -> earliest
+      end
+
+    ship = Repo.get!(Ship, intent.ship_id)
+    agent = Repo.get!(AgentRecord, ship.agent_id)
+
+    result =
+      with_current_intent(intent, fn current ->
+        attrs = %{
+          status: "waiting",
+          blocker: Fleet.intent_blocker(:api_capacity_deferred)
+        }
+
+        attrs =
+          case MutationAttempts.latest_for_intent(current) do
+            %{id: id, state: "rejected"} when id == current.mutation_attempt_id ->
+              Map.put(attrs, :in_flight_action, nil)
+
+            _ ->
+              attrs
+          end
+
+        updated = update_intent!(Ecto.Changeset.change(current, attrs))
+
+        {:ok, event} =
+          Timeline.schedule_event(:ship, ship.symbol, :intent_retry, due_at, %{
+            "intent_id" => updated.id
+          })
+
+        {:ok, updated, event}
+      end)
+
+    case result do
+      {:ok, updated, event} ->
+        ShipServer.arm(agent, ship.symbol, event)
+        {:ok, updated}
+
+      :intent_no_longer_owned ->
+        :ok
+    end
+  end
 
   defp authoritative_infeasibility?(%SpaceTraders.API.GameplayError{type: :contract_expired}),
     do: true
