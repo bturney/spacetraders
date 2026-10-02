@@ -185,6 +185,115 @@ defmodule SpaceTraders.RecordedShipDispatchTest do
     end
   end
 
+  for navigation_retry? <- [false, true] do
+    @navigation_retry? navigation_retry?
+    test "#{if navigation_retry?, do: "production boot navigation retry", else: "selected navigation"} send evidence is independently visible and survives sender death",
+         %{
+           conn: conn
+         } do
+      game = start_supervised!({Game, navigate_timeout: @navigation_retry?})
+      test_pid = self()
+
+      stub_api(fn conn ->
+        reply = Game.call(game, conn)
+
+        if String.ends_with?(conn.request_path, "/navigate") and reply != {:timeout, :not_applied} do
+          Repo.checkout(fn ->
+            [[backend]] = Repo.query!("SELECT pg_backend_pid()").rows
+            send(test_pid, {:navigation_accepted, self(), backend, Repo.in_transaction?()})
+
+            receive do
+              :deliver_response -> :ok
+            after
+              10_000 -> raise("navigation interruption was not released")
+            end
+          end)
+        end
+
+        Game.reply(conn, reply)
+      end)
+
+      allow_game_runtime()
+      observer = start_observer()
+      start_runtime()
+      {_conn, agent} = activate_fresh_generation(conn)
+
+      original =
+        if @navigation_retry? do
+          assert_eventually(
+            fn ->
+              Repo.exists?(
+                from a in Attempt,
+                  where:
+                    a.agent_id == ^agent.id and a.operation_id == "navigate-ship" and
+                      a.state == "ambiguous"
+              )
+            end,
+            500
+          )
+
+          attempt =
+            Repo.one!(
+              from a in Attempt,
+                where: a.agent_id == ^agent.id and a.operation_id == "navigate-ship"
+            )
+
+          assert :ok = stop_supervised!(DemandScheduler)
+          assert :ok = stop_supervised!(Reconciler)
+          {caller, _} = spawn_monitor(fn -> ShipServerBoot.start_link([]) end)
+          on_exit(fn -> if Process.alive?(caller), do: Process.exit(caller, :kill) end)
+          attempt
+        end
+
+      assert_receive {:navigation_accepted, sender, backend, false}, 10_000
+      at_send = observe(observer, agent, "navigate-ship")
+      assert at_send.backend != backend
+      assert Game.snapshot(game).status == "IN_TRANSIT"
+      attempt = List.last(at_send.attempts)
+
+      if @navigation_retry? do
+        assert [absent, ^attempt] = at_send.attempts
+        assert absent.id == original.id
+        assert absent.state == "absent"
+        refute absent.retry_authorized
+        assert attempt.retry_of_id == absent.id
+      else
+        assert [^attempt] = at_send.attempts
+        assert is_nil(attempt.retry_of_id)
+      end
+
+      assert attempt.state == "sent_or_unknown"
+      assert %DateTime{} = attempt.sent_or_unknown_at
+      assert [intent] = at_send.intents
+      assert intent.in_flight_action["kind"] == "navigate"
+      assert intent.mutation_attempt_id == attempt.id
+
+      assert attempt.provenance["selected_action_fingerprint"] ==
+               SpaceTraders.Evidence.fingerprint(intent.in_flight_action)
+
+      assert attempt.prepared_evidence["request"]["body"] == %{
+               "waypointSymbol" => intent.in_flight_action["waypoint"]
+             }
+
+      kill_sender(sender)
+      assert at_send == observe(observer, agent, "navigate-ship")
+
+      IO.inspect(
+        %{
+          operation: "navigate-ship",
+          retry: @navigation_retry?,
+          sending_backend: backend,
+          observing_backend: at_send.backend,
+          attempt_id: attempt.id,
+          state_at_send: attempt.state,
+          state_after_death: "sent_or_unknown",
+          inside_transaction: false
+        },
+        label: "#505 independently committed navigation dispatch"
+      )
+    end
+  end
+
   test "death inside preparation rolls back both the selected action and its attempt", %{
     conn: conn
   } do
@@ -276,7 +385,7 @@ defmodule SpaceTraders.RecordedShipDispatchTest do
     on_exit(fn -> :telemetry.detach(handler) end)
   end
 
-  test "rejected recorded orbit does not hide a later ambiguous legacy navigation attempt", %{
+  test "rejected orbit is followed by linked recorded navigation evidence", %{
     conn: conn
   } do
     game = start_supervised!({Game, orbit_rejection: true})
@@ -328,10 +437,10 @@ defmodule SpaceTraders.RecordedShipDispatchTest do
     assert_receive {:DOWN, ^monitor, :process, ^caller, :normal}
     assert [intent] = SpaceTraders.Fleet.Intents.current(agent)
 
-    assert %Attempt{operation_id: "navigate-ship", state: "ambiguous"} =
+    assert %Attempt{id: attempt_id, operation_id: "navigate-ship", state: "ambiguous"} =
              SpaceTraders.MutationAttempts.unresolved_for_intent(intent)
 
-    assert is_nil(intent.mutation_attempt_id)
+    assert intent.mutation_attempt_id == attempt_id
     assert intent.in_flight_action["kind"] == "navigate"
     assert Game.snapshot(game).status == "IN_TRANSIT"
   end
@@ -621,11 +730,11 @@ defmodule SpaceTraders.RecordedShipDispatchTest do
 
   defp observe_loop(test_pid, backend) do
     receive do
-      {:observe, agent} ->
+      {:observe, agent, operation_id} ->
         attempts =
           Repo.all(
             from a in Attempt,
-              where: a.agent_id == ^agent.id and a.operation_id == "orbit-ship",
+              where: a.agent_id == ^agent.id and a.operation_id == ^operation_id,
               order_by: a.prepared_at
           )
 
@@ -646,8 +755,8 @@ defmodule SpaceTraders.RecordedShipDispatchTest do
     end
   end
 
-  defp observe(observer, agent) do
-    send(observer, {:observe, agent})
+  defp observe(observer, agent, operation_id \\ "orbit-ship") do
+    send(observer, {:observe, agent, operation_id})
     assert_receive {:snapshot, ^observer, snapshot}, 5_000
     snapshot
   end

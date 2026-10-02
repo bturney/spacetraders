@@ -148,6 +148,100 @@ defmodule SpaceTraders.FleetRefitTest do
 
   # -- stubbing ----------------------------------------------------------------
 
+  test "protocol backpressure defers a module removal instead of proving it infeasible" do
+    {_scope, agent, _revision, ship} = generation()
+    {_scope, _agent, _ship, portfolio, commitment} = claimed_refit_ship(agent, ship, "remove")
+    remove_path = "/v2/my/ships/#{ship.symbol}/modules/remove"
+    test_pid = self()
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      send(test_pid, {conn.method, conn.request_path})
+
+      case {conn.method, conn.request_path} do
+        {"GET", "/v2/my/ships/" <> _} ->
+          Req.Test.json(conn, %{"data" => fitted_ship_body(ship.symbol, installed: 3)})
+
+        {"POST", ^remove_path} ->
+          conn
+          |> Plug.Conn.put_resp_header("retry-after", "0")
+          |> Plug.Conn.put_status(429)
+          |> Req.Test.json(%{"error" => %{"code" => 429, "message" => "rate limited"}})
+      end
+    end)
+
+    assert {:ok, %Intent{status: "blocked", blocker: blocker}} =
+             Intents.request_commitment_refit(
+               agent,
+               commitment,
+               portfolio,
+               ship.symbol,
+               removal_candidate(ship.symbol)
+             )
+
+    assert blocker.reason == "api_capacity_deferred"
+    assert blocker.summary =~ "rejected before it applied"
+
+    assert [%{state: "rejected", operation_id: "remove-ship-module"}] =
+             SpaceTraders.MutationAttempts.list_for_agent(agent)
+
+    assert FleetAllocation.failed_candidate_ids(portfolio.fleet_generation_id) == MapSet.new()
+    assert_received {"POST", ^remove_path}
+    refute_received {"POST", ^remove_path}
+  end
+
+  for refusal <- [:safety_fence, :emergency_stop] do
+    @refusal refusal
+    test "module preparation #{@refusal} after Readiness observation refuses safely" do
+      {scope, agent, _revision, ship} = generation()
+      {_scope, _agent, _ship, portfolio, commitment} = claimed_refit_ship(agent, ship, "remove")
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        assert conn.method == "GET"
+        assert conn.request_path == "/v2/my/ships/#{ship.symbol}"
+
+        case @refusal do
+          :emergency_stop ->
+            assert {:ok, _} = SpaceTraders.FleetStrategy.engage_emergency_stop(scope)
+
+          :safety_fence ->
+            {:ok, pending} =
+              SpaceTraders.MutationAttempts.prepare(
+                SpaceTraders.API.OperationInventory.fetch!("purchase-cargo"),
+                "/my/ships/#{ship.symbol}/purchase",
+                agent_id: agent.id,
+                json: %{"symbol" => @module, "units" => 1}
+              )
+
+            {:ok, pending} = SpaceTraders.MutationAttempts.mark_sent_or_unknown(pending)
+
+            {:ok, _} =
+              SpaceTraders.MutationAttempts.record_outcome(pending, :ambiguous, %{
+                reason: "old unresolved purchase"
+              })
+        end
+
+        Req.Test.json(conn, %{"data" => fitted_ship_body(ship.symbol, installed: 3)})
+      end)
+
+      assert {:ok, %Intent{status: "blocked", in_flight_action: nil, mutation_attempt_id: nil}} =
+               Intents.request_commitment_refit(
+                 agent,
+                 commitment,
+                 portfolio,
+                 ship.symbol,
+                 removal_candidate(ship.symbol)
+               )
+
+      attempts = SpaceTraders.MutationAttempts.list_for_agent(agent)
+
+      if @refusal == :safety_fence do
+        assert [%{state: "ambiguous", operation_id: "purchase-cargo"}] = attempts
+      else
+        assert attempts == []
+      end
+    end
+  end
+
   defp stub_api(test_pid, handlers) do
     Req.Test.stub(SpaceTraders.API, fn conn ->
       send(test_pid, {conn.method, conn.request_path})

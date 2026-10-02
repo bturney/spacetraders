@@ -31,7 +31,8 @@ defmodule SpaceTraders.RuntimeBaselineGame do
         arrival: nil,
         requests: [],
         orbit_rejection: Keyword.get(opts, :orbit_rejection, false),
-        orbit_timeout: Keyword.get(opts, :orbit_timeout, false)
+        orbit_timeout: Keyword.get(opts, :orbit_timeout, false),
+        navigate_timeout: Keyword.get(opts, :navigate_timeout, false)
       }
     end)
   end
@@ -135,6 +136,18 @@ defmodule SpaceTraders.RuntimeBaselineGame do
     require_stationary!(state)
     next = %{state | status: "DOCKED"}
     {{:ok, %{"nav" => ship_json(next)["nav"]}}, next}
+  end
+
+  defp respond(
+         %{navigate_timeout: true} = state,
+         "POST",
+         "/v2/my/ships/" <> @ship <> "/navigate",
+         _body,
+         _
+       ) do
+    require_stationary!(state)
+    if state.status != "IN_ORBIT", do: raise("navigation requires orbit")
+    {{:timeout, :not_applied}, %{state | navigate_timeout: false}}
   end
 
   defp respond(state, "POST", "/v2/my/ships/" <> @ship <> "/navigate", body, _) do

@@ -107,12 +107,9 @@ defmodule SpaceTraders.ContractsTest do
     assert DateTime.compare(due_at, DateTime.from_iso8601(deadline) |> elem(1)) == :eq
   end
 
-  test "delivering goods and fulfilling a contract delegate to the API" do
+  test "Contract fulfillment remains Fleet-owned while direct Ship delivery is removed" do
     Req.Test.stub(SpaceTraders.API, fn conn ->
       case conn.request_path do
-        "/v2/my/contracts/ctr-1/deliver" ->
-          Req.Test.json(conn, %{"data" => %{"contract" => contract_body(), "cargo" => %{}}})
-
         "/v2/my/contracts/ctr-1/fulfill" ->
           Req.Test.json(conn, %{
             "data" => %{"agent" => %{}, "contract" => contract_body(%{"fulfilled" => true})}
@@ -120,10 +117,8 @@ defmodule SpaceTraders.ContractsTest do
       end
     end)
 
-    assert {:ok, %{contract: _}} =
-             Contracts.deliver_goods(agent(), "ctr-1", "SHIP-1", "IRON_ORE", 10)
-
     assert {:ok, %{contract: _}} = Contracts.fulfill_contract(agent(), "ctr-1")
+    refute function_exported?(Contracts, :deliver_goods, 5)
   end
 
   test "negotiating a contract delegates to the API" do
@@ -139,8 +134,7 @@ defmodule SpaceTraders.ContractsTest do
   test "returns readable local errors for missing credentials and invalid units" do
     assert {:error, :agent_token_missing} = Contracts.list_contracts(agent(nil))
 
-    assert {:error, :invalid_units} =
-             Contracts.deliver_goods(agent(), "ctr-1", "SHIP-1", "IRON_ORE", 0)
+    refute function_exported?(Contracts, :deliver_goods, 5)
   end
 
   test "flattens active contracts into remaining deliverable terms" do

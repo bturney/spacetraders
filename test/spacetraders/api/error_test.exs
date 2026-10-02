@@ -7,6 +7,7 @@ defmodule SpaceTraders.API.ErrorTest do
   alias SpaceTraders.API.GameplayError
 
   import SpaceTraders.AgentFixtures
+  import SpaceTraders.RecordedDispatchFixtures
 
   defp stub_error(status, error_payload) do
     Req.Test.stub(SpaceTraders.API, fn conn ->
@@ -36,14 +37,14 @@ defmodule SpaceTraders.API.ErrorTest do
 
       assert {:error,
               %GameplayError{type: :in_transit, code: 4200, message: "Ship is in transit."}} =
-               API.navigate_ship(agent_token_reference(), "SHIP-1", "X1-UX81-A2")
+               dispatch_action("SHIP-1", %{"kind" => "navigate", "waypoint" => "X1-UX81-A2"})
     end
 
     test "cooldown surfaces as %GameplayError{type: :cooldown}" do
       stub_error(409, %{"code" => 4000, "message" => "Ship is in cooldown.", "data" => %{}})
 
       assert {:error, %GameplayError{type: :cooldown}} =
-               API.extract_resources(agent_token_reference(), "SHIP-1")
+               dispatch_action("SHIP-1", %{"kind" => "extract"})
     end
 
     test "expired contract surfaces as %GameplayError{type: :contract_expired}" do
@@ -57,7 +58,11 @@ defmodule SpaceTraders.API.ErrorTest do
       stub_error(400, %{"code" => 4600, "message" => "Not enough credits.", "data" => %{}})
 
       assert {:error, %GameplayError{type: :insufficient_credits}} =
-               API.sell_cargo(agent_token_reference(), "SHIP-1", "IRON_ORE", 10)
+               dispatch_action("SHIP-1", %{
+                 "kind" => "sell",
+                 "trade_symbol" => "IRON_ORE",
+                 "units" => 10
+               })
     end
 
     test "unknown code falls back to type :other but stays a GameplayError" do
@@ -135,25 +140,40 @@ defmodule SpaceTraders.API.ErrorTest do
       end)
 
       assert {:error, %Error{status: 503}} =
-               API.navigate_ship(agent_token_reference(), "SHIP-1", "X1-UX81-A2")
+               dispatch_action("SHIP-1", %{"kind" => "navigate", "waypoint" => "X1-UX81-A2"})
     end
 
-    test "retries a rate-limited mutation after Retry-After" do
-      Req.Test.expect(SpaceTraders.API, 2, fn conn ->
-        retries = Map.get(conn.private, :req_private, %{})[:req_retry_count] || 0
+    test "a rate-limited Ship action defers under one committed attempt without a private retry" do
+      agent = operator_fixture() |> agent_fixture()
 
-        if retries > 0 do
-          Req.Test.json(conn, %{"data" => %{"nav" => %{"status" => "IN_TRANSIT"}}})
-        else
-          conn
-          |> Plug.Conn.put_resp_header("retry-after", "0")
-          |> Plug.Conn.put_status(429)
-          |> Req.Test.json(%{"error" => %{"code" => 429, "message" => "rate limited"}})
-        end
+      %{intent: intent, attempt: attempt} =
+        prepare_action(agent, "SHIP-1", %{"kind" => "navigate", "waypoint" => "X1-UX81-A2"})
+
+      test_pid = self()
+
+      Req.Test.expect(SpaceTraders.API, 1, fn conn ->
+        attempts = SpaceTraders.MutationAttempts.list_for_agent(agent)
+        send(test_pid, {conn.request_path, attempts})
+
+        conn
+        |> Plug.Conn.put_resp_header("retry-after", "0")
+        |> Plug.Conn.put_status(429)
+        |> Req.Test.json(%{"error" => %{"code" => 429, "message" => "rate limited"}})
       end)
 
-      assert {:ok, %{nav: %{status: "IN_TRANSIT"}}} =
-               API.navigate_ship(agent_token_reference(), "SHIP-1", "X1-UX81-A2")
+      assert {:error, %GameplayError{code: 429}} = API.dispatch_recorded(attempt)
+
+      assert_received {path, [%{state: "sent_or_unknown", id: attempt_id}]}
+      assert path == "/v2/my/ships/SHIP-1/navigate"
+      assert attempt_id == attempt.id
+      assert Repo.get!(SpaceTraders.Fleet.Intent, intent.id).mutation_attempt_id == attempt.id
+
+      assert [%{state: "rejected", sent_or_unknown_at: sent, retry_authorized: false}] =
+               SpaceTraders.MutationAttempts.list_for_agent(agent)
+
+      assert %DateTime{} = sent
+      assert SpaceTraders.API.CapacityGovernor.snapshot().protocol_rejections >= 1
+      assert Repo.get!(SpaceTraders.Fleet.Intent, intent.id).mutation_attempt_id == attempt.id
     end
   end
 

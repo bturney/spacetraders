@@ -191,6 +191,21 @@ defmodule SpaceTraders.API.CapacityGovernorTest do
     assert {:ok, %CapacityGovernor.Admission{}} = Task.await(ordinary, 10_000)
   end
 
+  test "ordinary demand admitted after a rejection still releases when its window closes" do
+    name = start_governor(max_in_flight: 1)
+    operation = SpaceTraders.API.OperationInventory.fetch!("get-my-agent")
+
+    assert {:ok, first} = CapacityGovernor.admit(operation, %{lane: :standard}, name)
+    CapacityGovernor.protocol_rejected(1, name)
+    CapacityGovernor.complete(first, 429, name)
+
+    # Nothing was queued when the window opened, so admission below is the first
+    # ordinary demand the Retry-After window applies to.
+    later = Task.async(fn -> CapacityGovernor.admit(operation, %{lane: :standard}, name) end)
+
+    assert {:ok, %CapacityGovernor.Admission{}} = Task.await(later, 10_000)
+  end
+
   test "restart restores conservative admission that widens on clean outcomes" do
     name = start_governor(max_in_flight: 4)
     operation = SpaceTraders.API.OperationInventory.fetch!("get-my-agent")

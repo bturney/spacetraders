@@ -65,10 +65,10 @@ defmodule SpaceTraders.FleetIntentsTest do
 
         {"POST", ^purchase_path} ->
           Elixir.Agent.update(purchased, fn _ -> true end)
-          Req.Test.json(conn, %{"data" => trade_response(agent, ship, "PURCHASE", 10, 90, 5)})
+          Req.Test.json(conn, %{"data" => trade_response(agent, ship, "PURCHASE", 10, 50, 5)})
 
         {"POST", ^sell_path} ->
-          Req.Test.json(conn, %{"data" => trade_response(agent, ship, "SELL", 20, 190, 0)})
+          Req.Test.json(conn, %{"data" => trade_response(agent, ship, "SELL", 20, 150, 0)})
 
         request ->
           flunk("unexpected request: #{inspect(request)}")
@@ -137,6 +137,23 @@ defmodule SpaceTraders.FleetIntentsTest do
 
     assert sell_market_trade["destination_waypoint"] == "X1-UX81-A1"
     assert get_in(sell_market_trade, ["expected_outcomes", "maximum_units"]) == 5
+
+    [purchase, sale] = SpaceTraders.MutationAttempts.list_for_agent(agent)
+    assert Enum.map([purchase, sale], & &1.operation_id) == ["purchase-cargo", "sell-cargo"]
+
+    for {attempt, intent} <- [{purchase, buy}, {sale, sell}] do
+      assert attempt.state == "succeeded"
+      assert attempt.provenance["intent_id"] == intent.id
+      assert attempt.provenance["commitment_id"] == commitment.id
+      assert attempt.provenance["decision_episode_id"] == portfolio.strategy_decision_episode_id
+      assert attempt.fleet_generation_id == portfolio.fleet_generation_id
+      assert attempt.strategy_revision_id == portfolio.fleet_strategy_revision_id
+      assert attempt.prepared_evidence["selected_action"]["selection_id"]
+      assert [%{classification: "succeeded"}] = attempt.outcomes
+    end
+
+    assert buy.last_action_result["transaction"]["total_price"] == 50
+    assert sell.last_action_result["transaction"]["total_price"] == 100
   end
 
   defp trade_response(agent, ship, kind, price, credits, cargo_units) do

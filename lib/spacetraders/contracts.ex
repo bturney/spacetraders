@@ -138,37 +138,6 @@ defmodule SpaceTraders.Contracts do
     })
   end
 
-  @doc "Delivers goods from a Ship against an accepted contract."
-  def deliver_goods(
-        %AgentRecord{agent_token: token} = agent,
-        contract_id,
-        ship_symbol,
-        trade_symbol,
-        units
-      )
-      when is_binary(token) and token != "" and is_integer(units) and units > 0 do
-    SpaceTraders.API.deliver_contract(
-      AgentTokenReference.new(agent),
-      contract_id,
-      ship_symbol,
-      trade_symbol,
-      units
-    )
-  end
-
-  def deliver_goods(
-        %AgentRecord{agent_token: token},
-        _contract_id,
-        _ship_symbol,
-        _trade_symbol,
-        _units
-      )
-      when not is_binary(token) or token == "",
-      do: {:error, :agent_token_missing}
-
-  def deliver_goods(%AgentRecord{}, _contract_id, _ship_symbol, _trade_symbol, _units),
-    do: {:error, :invalid_units}
-
   @doc "Fulfills a contract after all delivery terms are complete."
   def fulfill_contract(%AgentRecord{agent_token: token} = agent, contract_id)
       when is_binary(token) and token != "" do
