@@ -46,16 +46,39 @@ When a test fails only in the full suite, compare against a clean
 `origin/main` checkout before blaming the change — the failure may be
 environment flakiness. Run one file directly to isolate a real regression.
 
-## Scenario tests
+## ScenarioCase lifecycle
 
-`SpaceTraders.ScenarioCase` drives authenticated Phoenix interfaces with
-controlled API responses, a shared fake clock, and process restarts. Its
-teardown calls `ShipServer.stop_all()` (`test/support/scenario_case.ex`), after
-which the shared sandbox owner is no longer usable. Do not build a fix on the
-assumption that the owner survives teardown.
+`SpaceTraders.ScenarioCase` provides controlled API responses, a shared fake
+clock, process restarts, and PostgreSQL access for the remaining integration
+scenarios and the explicit runtime qualification. Its teardown calls
+`ShipServer.stop_all()` (`test/support/scenario_case.ex`), after which the
+shared sandbox owner is no longer usable. Treat teardown as the end of sandbox
+ownership.
 
 In test env the API transport is stubbed with `Req.Test` and the rate limiter is
 disabled (`config/test.exs`).
+
+## Runtime qualification
+
+`test/diagnostics/runtime_qualification.exs` is a timing-sensitive diagnostic,
+not merge verification. It retains one cross-seam question: can fresh
+authenticated Strategy activation compose the production runtime into a
+profitable distant trade across a runtime restart and surface the result in
+Mission Control?
+
+Run it only when that whole-runtime composition is the subject:
+
+```sh
+mix test test/diagnostics/runtime_qualification.exs --seed 0 --trace
+```
+
+The file deliberately does not end in `_test.exs`, so ordinary `mix test` and
+`scripts/verify` do not discover it. Keep seam-level regression assertions in
+their deterministic owners instead: Observation Demand restart in
+`test/spacetraders/evidence_scheduling_test.exs`, incomplete Market coverage
+planning in `test/spacetraders/fleet_planning_test.exs`, and first/lost-response
+Ship dispatch recovery in
+`test/spacetraders/ship_execution_durability_test.exs`.
 
 ## Fleet Generation resets
 

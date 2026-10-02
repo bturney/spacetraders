@@ -1,6 +1,6 @@
 defmodule SpaceTraders.RuntimeBaselineGame do
   @moduledoc """
-  Stateful transport fixture for #503's accepted runtime proof seam.
+  Stateful transport fixture for the explicit runtime qualification and recorded-dispatch scenarios.
 
   This owns only game state and transport receipts, never application work.
   Listings require physical presence; navigation costs fuel and takes time;

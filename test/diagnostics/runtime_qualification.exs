@@ -1,12 +1,22 @@
-defmodule SpaceTraders.RuntimeBaselineProof do
+defmodule SpaceTraders.RuntimeQualification do
   @moduledoc """
-  Opt-in qualification, not a green regression claim. Run explicitly:
+  Explicit diagnostic qualification for whole-runtime composition.
 
-      mix test test/integration/runtime_baseline_proof.exs --seed 0 --trace
+  This retains one behavior that cheaper seams do not prove: a fresh authenticated
+  Strategy activation composes production reconciliation, Evidence, Fleet Planning,
+  Fleet Allocation, Ship Execution, runtime restart, and Mission Control into a
+  profitable distant trade.
 
-  Trading remains an opt-in, inconsistent qualification. The satisfied #504
-  dispatch proof now lives in recorded_ship_dispatch_test.exs and is discovered
-  by the canonical suite. No skip tags or substituted coordinators are used.
+  Seam-level correctness belongs to the deterministic merge suite instead:
+  Observation Demand restart in `evidence_scheduling_test.exs`, incomplete Market
+  coverage planning in `fleet_planning_test.exs`, and first/lost-response Ship
+  dispatch recovery in `ship_execution_durability_test.exs`.
+
+  This file intentionally does not end in `_test.exs`; ordinary `mix test` and
+  `scripts/verify` do not discover it. Run the timing-sensitive qualification only
+  when whole-runtime composition is the question:
+
+      mix test test/diagnostics/runtime_qualification.exs --seed 0 --trace
   """
 
   use SpaceTraders.ScenarioCase
@@ -16,7 +26,6 @@ defmodule SpaceTraders.RuntimeBaselineProof do
 
   alias SpaceTraders.Agent.{Agent, Operator}
   alias SpaceTraders.Evidence.DemandScheduler
-  alias SpaceTraders.Fleet.Intent
   alias SpaceTraders.Fleet.ShipServerBoot
   alias SpaceTraders.FleetAllocation.Reconciler
   alias SpaceTraders.MutationAttempts.{Attempt, Outcome}
@@ -63,7 +72,7 @@ defmodule SpaceTraders.RuntimeBaselineProof do
     :ok
   end
 
-  test "C05/C06: fresh Strategy activation discovers and realizes a profitable distant trade", %{
+  test "fresh Strategy activation completes a profitable distant trade across runtime restart", %{
     conn: conn
   } do
     game = start_supervised!({Game, []})
@@ -75,15 +84,10 @@ defmodule SpaceTraders.RuntimeBaselineProof do
     assert_eventually(fn -> Game.snapshot(game).status == "IN_TRANSIT" end, 500)
     settle_runtime()
 
-    assert Repo.exists?(
-             from e in SpaceTraders.Timeline.Event,
-               where:
-                 e.owner_id == "BASELINE-1" and e.status == "pending" and
-                   e.event_type == "arrival"
-           )
-
-    # The game clock passes arrival while the runtime processes are down. The
-    # production boot and scheduler reconstruct authority and the overdue wait.
+    # Cross-seam qualification only: interrupt the production runtime while the
+    # trade is in flight, then let production boot reconstruct enough work for
+    # the same Strategy activation to finish. Narrow tests own the individual
+    # scheduling, dispatch, and recovery guarantees exercised underneath.
     assert :ok = stop_supervised!(DemandScheduler)
     assert :ok = stop_supervised!(Reconciler)
     assert :ok = SpaceTraders.Fleet.ShipServer.stop("BASELINE-1")
@@ -91,9 +95,6 @@ defmodule SpaceTraders.RuntimeBaselineProof do
     start_runtime()
     start_supervised!({ShipServerBoot, []})
 
-    # Advance registered production wakes, including the demand scheduler's
-    # capacity-deferral wake. Neither fixed fast-forward ticks nor only advancing
-    # arrivals models that clock correctly. This controls time, not coordination.
     Enum.reduce_while(1..20, :ok, fn _, :ok ->
       settle_runtime()
       Process.sleep(20)
@@ -116,7 +117,6 @@ defmodule SpaceTraders.RuntimeBaselineProof do
 
     settle_runtime()
     state = Game.snapshot(game)
-    intents = Repo.all(from i in Intent, order_by: i.id, select: {i.type, i.status, i.blocker})
     counts = Enum.frequencies_by(state.requests, & &1.path)
 
     IO.inspect(
@@ -124,22 +124,9 @@ defmodule SpaceTraders.RuntimeBaselineProof do
         credits: state.credits,
         fuel: state.fuel,
         requests: Enum.map(state.requests, &{&1.method, &1.path, &1.reply, &1.at}),
-        intents: intents,
-        as_of: SpaceTraders.Clock.utc_now(),
-        listings:
-          Enum.map(["X1-UX81-A1", "X1-UX81-A2"], fn waypoint ->
-            {waypoint,
-             SpaceTraders.World.intelligence(
-               agent,
-               :market,
-               "X1-UX81",
-               waypoint,
-               SpaceTraders.Clock.utc_now(),
-               300
-             ).facts["trade_goods"]}
-          end)
+        as_of: SpaceTraders.Clock.utc_now()
       },
-      label: "C05/C06 baseline",
+      label: "runtime qualification",
       limit: :infinity
     )
 
@@ -150,14 +137,6 @@ defmodule SpaceTraders.RuntimeBaselineProof do
     assert Map.get(counts, "/v2/my/ships/BASELINE-1/sell", 0) == 1
     assert state.credits == 175_800
     assert state.units == 0
-    refute Enum.any?(state.requests, &String.ends_with?(&1.path, "X1-UX81-A3/market"))
-
-    assert Enum.any?(
-             SpaceTraders.Evidence.list_open_demands(agent),
-             &(&1.subject == "market:X1-UX81:X1-UX81-A3" and &1.owner == "fleet_planning")
-           )
-
-    assert Enum.any?(intents, fn {type, status, _} -> type == "sell" and status == "completed" end)
   end
 
   defp activate_fresh_generation(conn) do
