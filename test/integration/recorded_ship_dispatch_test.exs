@@ -76,12 +76,10 @@ defmodule SpaceTraders.RecordedShipDispatchTest do
     :ok
   end
 
-  for retry? <- [false, true] do
-    @retry? retry?
-    test "#{if retry?, do: "R2 production boot retry", else: "first dispatch"}: sent evidence is independently visible and survives sender death",
+  describe "R2 production boot retry" do
+    test "sent evidence is independently visible and survives sender death",
          %{conn: conn} do
-      retry? = @retry?
-      game = start_supervised!({Game, orbit_timeout: retry?})
+      game = start_supervised!({Game, orbit_timeout: true})
       test_pid = self()
 
       stub_api(fn conn ->
@@ -108,31 +106,27 @@ defmodule SpaceTraders.RecordedShipDispatchTest do
       start_runtime()
       {_conn, agent} = activate_fresh_generation(conn)
 
-      original =
-        if retry? do
-          assert_eventually(
-            fn ->
-              Repo.exists?(
-                from a in Attempt,
-                  where:
-                    a.agent_id == ^agent.id and a.operation_id == "orbit-ship" and
-                      a.state == "ambiguous"
-              )
-            end,
-            500
+      assert_eventually(
+        fn ->
+          Repo.exists?(
+            from a in Attempt,
+              where:
+                a.agent_id == ^agent.id and a.operation_id == "orbit-ship" and
+                  a.state == "ambiguous"
           )
+        end,
+        500
+      )
 
-          original =
-            Repo.one!(
-              from a in Attempt, where: a.agent_id == ^agent.id and a.operation_id == "orbit-ship"
-            )
+      original =
+        Repo.one!(
+          from a in Attempt, where: a.agent_id == ^agent.id and a.operation_id == "orbit-ship"
+        )
 
-          assert :ok = stop_supervised!(DemandScheduler)
-          assert :ok = stop_supervised!(Reconciler)
-          {boot_caller, _monitor} = spawn_monitor(fn -> ShipServerBoot.start_link([]) end)
-          on_exit(fn -> if Process.alive?(boot_caller), do: Process.exit(boot_caller, :kill) end)
-          original
-        end
+      assert :ok = stop_supervised!(DemandScheduler)
+      assert :ok = stop_supervised!(Reconciler)
+      {boot_caller, _monitor} = spawn_monitor(fn -> ShipServerBoot.start_link([]) end)
+      on_exit(fn -> if Process.alive?(boot_caller), do: Process.exit(boot_caller, :kill) end)
 
       assert_receive {:effect_accepted, sender, backend, inside_transaction}, 10_000
       visible_at_send = observe(observer, agent)
@@ -152,25 +146,20 @@ defmodule SpaceTraders.RecordedShipDispatchTest do
       assert attempt.provenance["selected_action_fingerprint"] ==
                SpaceTraders.Evidence.fingerprint(intent.in_flight_action)
 
-      if retry? do
-        assert [absent, retry] = visible_after_death.attempts
-        assert absent.id == original.id
-        assert absent.state == "absent"
-        refute absent.retry_authorized
-        assert retry.retry_of_id == absent.id
+      assert [absent, retry] = visible_after_death.attempts
+      assert absent.id == original.id
+      assert absent.state == "absent"
+      refute absent.retry_authorized
+      assert retry.retry_of_id == absent.id
 
-        assert Enum.map(
-                 SpaceTraders.MutationAttempts.get!(absent.id).outcomes,
-                 & &1.classification
-               ) == ["ambiguous", "absent"]
-      else
-        assert [^attempt] = visible_after_death.attempts
-        assert is_nil(attempt.retry_of_id)
-      end
+      assert Enum.map(
+               SpaceTraders.MutationAttempts.get!(absent.id).outcomes,
+               & &1.classification
+             ) == ["ambiguous", "absent"]
 
       IO.inspect(
         %{
-          retry: retry?,
+          retry: true,
           sending_backend: backend,
           observing_backend: visible_at_send.backend,
           inside_transaction: inside_transaction,

@@ -66,6 +66,17 @@ scripts/verify
 
 Set `DATABASE_URL` to use another PostgreSQL instance.
 
+First Ship dispatch durability is tested directly through the claimed Intent
+execution seam in `test/spacetraders/ship_execution_durability_test.exs`. The test
+uses real commits and a separate, pinned PostgreSQL connection to observe mutation
+evidence before and after killing the sender, without starting Fleet coordination
+or the Operator interface. Run the narrow proof with:
+
+```sh
+DATABASE_URL=postgres://postgres:postgres@localhost/spacetraders_test \
+  mix test test/spacetraders/ship_execution_durability_test.exs
+```
+
 Autonomous runtime scenarios use `SpaceTraders.ScenarioCase`. The case drives
 authenticated Phoenix interfaces while providing controlled SpaceTraders API
 responses, a shared fake clock, runtime process restarts, durable
