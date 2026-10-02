@@ -1,30 +1,26 @@
 defmodule SpaceTraders.ScenarioCase do
   @moduledoc """
-  PostgreSQL scenario boundary for production Operator and autonomous runtime interfaces.
+  Shared setup for the remaining runtime integration proofs.
 
-  Scenarios control game responses and time, restart reconstructable runtime
-  processes, observe notifications and telemetry, and inspect durable state
-  through `SpaceTraders.Repo`.
+  Recorded dispatch tests and the explicit runtime qualification use this case
+  for PostgreSQL sandbox mode, a shared TestClock, a Phoenix connection, and
+  controlled SpaceTraders API responses. Process-specific admission and
+  observation helpers stay in the test that needs them rather than accumulating
+  here as a general scenario framework.
 
-  `@tag committed: true` opts a synchronous scenario into real commits and
-  independent pool connections. Such scenarios must delete their own fixtures
+  `@tag committed: true` opts a synchronous proof into real commits and
+  independent pool connections. Such proofs must delete their own fixtures
   after stopping runtime processes; sandbox rollback does not clean them up.
   """
 
   use ExUnit.CaseTemplate
-
-  @telemetry_events [
-    [:spacetraders, :api, :request],
-    [:spacetraders, :fleet, :activity],
-    [:spacetraders, :intent, :transition]
-  ]
 
   using do
     quote do
       @endpoint SpaceTradersWeb.Endpoint
       @moduletag skip:
                    SpaceTraders.Repo.__adapter__() != Ecto.Adapters.Postgres &&
-                     "autonomous runtime scenarios require PostgreSQL"
+                     "runtime integration proofs require PostgreSQL"
 
       use SpaceTradersWeb, :verified_routes
 
@@ -59,19 +55,9 @@ defmodule SpaceTraders.ScenarioCase do
     previous_clock = Application.get_env(:spacetraders, :clock)
     Application.put_env(:spacetraders, :clock, SpaceTraders.TestClock)
 
-    handler_id = "scenario-signals-#{System.unique_integer([:positive])}"
-
-    Enum.each(@telemetry_events, fn event ->
-      :ok = :telemetry.attach(handler_id <> inspect(event), event, &__MODULE__.capture/4, self())
-    end)
-
     on_exit(fn ->
       SpaceTraders.Fleet.ShipServer.stop_all()
       SpaceTraders.Contracts.DeadlineServer.stop_all()
-
-      Enum.each(@telemetry_events, fn event ->
-        :telemetry.detach(handler_id <> inspect(event))
-      end)
 
       if previous_clock do
         Application.put_env(:spacetraders, :clock, previous_clock)
@@ -91,23 +77,6 @@ defmodule SpaceTraders.ScenarioCase do
     SpaceTraders.TestClock.advance(amount, unit)
   end
 
-  def allow_runtime_api do
-    test_pid = self()
-
-    Req.Test.allow(SpaceTraders.API, test_pid, fn ->
-      SpaceTraders.Fleet.ShipSupervisor
-      |> DynamicSupervisor.which_children()
-      |> Enum.flat_map(fn
-        {_id, pid, _type, _modules} when is_pid(pid) -> [pid]
-        _ -> []
-      end)
-    end)
-  end
-
-  def subscribe_to_notifications(%SpaceTraders.Agent.Agent{id: agent_id}) do
-    Phoenix.PubSub.subscribe(SpaceTraders.PubSub, "fleet:#{agent_id}")
-  end
-
   def assert_eventually(fun, attempts \\ 100)
   def assert_eventually(_fun, 0), do: flunk("condition did not become true")
 
@@ -118,19 +87,5 @@ defmodule SpaceTraders.ScenarioCase do
       Process.sleep(10)
       assert_eventually(fun, attempts - 1)
     end
-  end
-
-  def drain_external_signals(acc \\ []) do
-    receive do
-      {:scenario_telemetry, _, _, _} = signal -> drain_external_signals([signal | acc])
-      {:ship_updated, _, _} = signal -> drain_external_signals([signal | acc])
-    after
-      0 -> Enum.reverse(acc)
-    end
-  end
-
-  @doc false
-  def capture(event, measurements, metadata, test_pid) do
-    send(test_pid, {:scenario_telemetry, event, measurements, metadata})
   end
 end
