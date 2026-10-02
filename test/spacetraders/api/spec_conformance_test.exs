@@ -20,6 +20,7 @@ defmodule SpaceTraders.API.SpecConformanceTest do
 
   alias SpaceTraders.API
   alias SpaceTraders.API.Request
+  alias SpaceTraders.API.{OperationInventory, ShipAction}
 
   @spec_path "priv/spec/SpaceTraders.json"
 
@@ -140,9 +141,31 @@ defmodule SpaceTraders.API.SpecConformanceTest do
     test "public functions exist for every declared endpoint" do
       Code.ensure_loaded!(API)
 
-      for {endpoint, _method, _path, _envelope} <- @endpoints do
-        assert function_exported?(API, endpoint, arity_of(endpoint)),
-               "expected SpaceTraders.API.#{endpoint}/#{arity_of(endpoint)} to exist"
+      for {endpoint, method, path, _envelope} <- @endpoints do
+        operation = OperationInventory.fetch_by_request!(method, path)
+
+        if operation.owner == :ship_execution do
+          assert operation.id in ShipAction.implemented_operations()
+          assert {:ok, {:map, _}} = ShipAction.response_schema(operation.id)
+
+          refute function_exported?(API, endpoint, arity_of(endpoint)),
+                 "token-only Ship mutation entry point #{endpoint} must be removed"
+        else
+          assert function_exported?(API, endpoint, arity_of(endpoint)),
+                 "expected SpaceTraders.API.#{endpoint}/#{arity_of(endpoint)} to exist"
+        end
+      end
+
+      for id <- ShipAction.implemented_operations() do
+        operation = OperationInventory.fetch!(id)
+        assert {:ok, {:map, fields}} = ShipAction.response_schema(id)
+        data = success_schema(operation.path, operation.method)["data"]["properties"]
+        assert data
+
+        for field <- Map.keys(fields) do
+          assert Map.has_key?(data, camelize_key(field)),
+                 "#{id} decodes a field absent from its bundled response schema: #{field}"
+        end
       end
     end
   end
@@ -205,6 +228,11 @@ defmodule SpaceTraders.API.SpecConformanceTest do
 
   defp spec_paths do
     @spec_path |> File.read!() |> Jason.decode!() |> Map.fetch!("paths")
+  end
+
+  defp camelize_key(field) do
+    [first | rest] = String.split(Atom.to_string(field), "_")
+    first <> Enum.map_join(rest, &String.capitalize/1)
   end
 
   defp success_schema(path, method) do

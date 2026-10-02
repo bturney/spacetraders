@@ -296,8 +296,10 @@ defmodule SpaceTraders.API.CapacityGovernor do
       case eligible do
         [] ->
           # Ordinary demand still waits out the Retry-After window; kept in
-          # queue without resorting eligible work ahead of it.
-          state
+          # queue without resorting eligible work ahead of it. Demand that
+          # arrives after the window opened needs its own release, or it would
+          # wait for a timer that already fired.
+          schedule_ordinary_release(state)
 
         _ ->
           dispatch_selected(%{state | queue: eligible}, available)

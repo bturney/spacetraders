@@ -33,8 +33,6 @@ defmodule SpaceTraders.MutationAttempts do
     :intent_id
   ]
 
-  @retry_context_key {__MODULE__, :retry_attempt_id}
-
   @doc "Returns confirmed Ship purchases for an Operator-facing milestone projection."
   def confirmed_ship_purchases(%Scope{operator: %{id: operator_id}}) do
     Repo.all(
@@ -62,38 +60,6 @@ defmodule SpaceTraders.MutationAttempts do
          ) do
       [] -> Repo.insert(attempt)
       blocking -> {:error, {:safety_fenced, Enum.map(blocking, & &1.id)}}
-    end
-  end
-
-  @doc false
-  def prepare_for_dispatch(%Operation{} = operation, path, opts) do
-    case Process.get(@retry_context_key) do
-      nil ->
-        prepare(operation, path, opts)
-
-      {:pending, attempt_id} ->
-        Process.put(@retry_context_key, :consumed)
-        prepare_retry(get!(attempt_id), operation, path, opts)
-
-      :consumed ->
-        {:error, :retry_already_dispatched}
-    end
-  end
-
-  @doc false
-  def with_retry(%Attempt{id: attempt_id}, callback) when is_function(callback, 0) do
-    case Process.get(@retry_context_key) do
-      nil ->
-        Process.put(@retry_context_key, {:pending, attempt_id})
-
-        try do
-          callback.()
-        after
-          Process.delete(@retry_context_key)
-        end
-
-      _attempt_id ->
-        {:error, :nested_mutation_retry}
     end
   end
 

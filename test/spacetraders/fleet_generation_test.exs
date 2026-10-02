@@ -306,14 +306,13 @@ defmodule SpaceTraders.FleetGenerationTest do
       |> Req.Test.json(%{"error" => %{"code" => 429, "message" => "rate limited"}})
     end)
 
-    request =
-      Task.async(fn ->
-        SpaceTraders.API.navigate_ship(
-          AgentTokenReference.new(agent),
-          "SHIP-1",
-          "X1-UX81-A2"
-        )
-      end)
+    %{attempt: attempt} =
+      SpaceTraders.RecordedDispatchFixtures.prepare_action(agent, "SHIP-1", %{
+        "kind" => "navigate",
+        "waypoint" => "X1-UX81-A2"
+      })
+
+    request = Task.async(fn -> SpaceTraders.API.dispatch_recorded(attempt) end)
 
     assert_receive :mutation_attempted
     assert {:ok, _stop} = FleetStrategy.engage_emergency_stop(scope)

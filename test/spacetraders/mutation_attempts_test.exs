@@ -2,10 +2,11 @@ defmodule SpaceTraders.MutationAttemptsTest do
   use SpaceTraders.DataCase, async: true
 
   import SpaceTraders.AgentFixtures
+  import SpaceTraders.RecordedDispatchFixtures
 
   alias SpaceTraders.Agent.Scope
   alias SpaceTraders.API
-  alias SpaceTraders.API.AgentTokenReference
+  alias SpaceTraders.API.RecordedDispatch
   alias SpaceTraders.API.OperationInventory
   alias SpaceTraders.Evidence
   alias SpaceTraders.Fleet.{Intent, Ship}
@@ -82,7 +83,15 @@ defmodule SpaceTraders.MutationAttemptsTest do
       SpaceTraders.Observability.with_context(
         [decision_episode_id: 17],
         fn ->
-          API.navigate_ship(AgentTokenReference.new(agent), agent.symbol, "X1-TEST-B2")
+          %{attempt: selected} =
+            prepare_action(
+              agent,
+              agent.symbol,
+              %{"kind" => "navigate", "waypoint" => "X1-TEST-B2"},
+              intent: intent
+            )
+
+          API.dispatch_recorded(selected)
         end
       )
 
@@ -102,15 +111,22 @@ defmodule SpaceTraders.MutationAttemptsTest do
 
     Req.Test.stub(API, fn conn -> Req.Test.transport_error(conn, :timeout) end)
 
-    assert {:error, %API.Error{}} =
-             API.navigate_ship(AgentTokenReference.new(agent), agent.symbol, "X1-TEST-B2")
+    %{attempt: selected} =
+      prepare_action(agent, agent.symbol, %{"kind" => "navigate", "waypoint" => "X1-TEST-B2"})
+
+    assert {:error, %API.Error{}} = API.dispatch_recorded(selected)
 
     assert [attempt] = MutationAttempts.list_for_agent(agent)
     assert attempt.state == "ambiguous"
     assert [%{classification: "ambiguous"}] = attempt.outcomes
 
-    assert {:error, %API.Error{reason: {:safety_fenced, [blocking_id]}}} =
-             API.navigate_ship(AgentTokenReference.new(agent), agent.symbol, "X1-TEST-C3")
+    assert {:error, {:safety_fenced, [blocking_id]}} =
+             MutationAttempts.prepare(
+               OperationInventory.fetch!("navigate-ship"),
+               "/my/ships/#{agent.symbol}/navigate",
+               agent_id: agent.id,
+               json: %{"waypointSymbol" => "X1-TEST-C3"}
+             )
 
     assert blocking_id == attempt.id
 
@@ -371,9 +387,13 @@ defmodule SpaceTraders.MutationAttemptsTest do
   test "the API reconciliation path dispatches exactly one authorized retry" do
     operator = operator_fixture()
     agent = agent_fixture(operator)
-    operation = OperationInventory.fetch!("navigate-ship")
-    attempt = ambiguous_attempt(agent, operation, "API-RETRY-1", "X1-TEST-B2")
-    test_pid = self()
+
+    %{intent: intent, attempt: attempt} =
+      prepare_action(agent, "API-RETRY-1", %{"kind" => "navigate", "waypoint" => "X1-TEST-B2"})
+
+    Req.Test.stub(API, fn conn -> Req.Test.transport_error(conn, :timeout) end)
+    assert {:error, %API.Error{}} = API.dispatch_recorded(attempt)
+    attempt = MutationAttempts.get!(attempt.id)
 
     Req.Test.stub(API, fn conn ->
       Req.Test.json(conn, %{
@@ -390,32 +410,10 @@ defmodule SpaceTraders.MutationAttemptsTest do
       })
     end)
 
-    assert {:ok, %{}} =
-             API.reconcile_absent_and_retry(
-               attempt,
-               [observation(attempt)],
-               fn ->
-                 result =
-                   API.navigate_ship(
-                     AgentTokenReference.new(agent),
-                     "API-RETRY-1",
-                     "X1-TEST-B2"
-                   )
-
-                 send(
-                   test_pid,
-                   API.navigate_ship(
-                     AgentTokenReference.new(agent),
-                     "API-RETRY-1",
-                     "X1-TEST-B2"
-                   )
-                 )
-
-                 result
-               end
-             )
-
-    assert_receive {:error, %API.Error{reason: :retry_already_dispatched}}
+    assert {:ok, absent} = MutationAttempts.reconcile(attempt, :absent, [observation(attempt)])
+    assert {:ok, retry} = RecordedDispatch.prepare_retry(agent, intent, absent)
+    assert {:ok, %{}} = API.dispatch_recorded(retry)
+    assert {:error, :attempt_already_dispatched} = API.dispatch_recorded(retry)
 
     assert [original, retry] = MutationAttempts.list_for_agent(agent)
     assert original.state == "absent"
@@ -504,8 +502,10 @@ defmodule SpaceTraders.MutationAttemptsTest do
       |> Req.Test.json(%{"error" => %{"code" => 4204, "message" => "Ship is in transit"}})
     end)
 
-    assert {:error, %API.GameplayError{code: 4204}} =
-             API.navigate_ship(AgentTokenReference.new(agent), agent.symbol, "X1-TEST-B2")
+    %{attempt: selected} =
+      prepare_action(agent, agent.symbol, %{"kind" => "navigate", "waypoint" => "X1-TEST-B2"})
+
+    assert {:error, %API.GameplayError{code: 4204}} = API.dispatch_recorded(selected)
 
     assert [attempt] = MutationAttempts.list_for_agent(agent)
     assert attempt.state == "rejected"
@@ -518,8 +518,10 @@ defmodule SpaceTraders.MutationAttemptsTest do
 
     Req.Test.stub(API, fn conn -> Req.Test.json(conn, %{"unexpected" => true}) end)
 
-    assert {:error, %API.Error{}} =
-             API.navigate_ship(AgentTokenReference.new(agent), agent.symbol, "X1-TEST-B2")
+    %{attempt: selected} =
+      prepare_action(agent, agent.symbol, %{"kind" => "navigate", "waypoint" => "X1-TEST-B2"})
+
+    assert {:error, %API.Error{}} = API.dispatch_recorded(selected)
 
     assert [attempt] = MutationAttempts.list_for_agent(agent)
     assert attempt.state == "ambiguous"
@@ -548,14 +550,20 @@ defmodule SpaceTraders.MutationAttemptsTest do
       Req.Test.json(conn, %{"data" => %{"contract" => %{}, "cargo" => %{}}})
     end)
 
-    assert {:ok, _result} =
-             API.deliver_contract(
-               AgentTokenReference.new(agent),
-               "contract-1",
-               ship.symbol,
-               "IRON_ORE",
-               5
-             )
+    %{attempt: selected} =
+      prepare_action(
+        agent,
+        ship.symbol,
+        %{
+          "kind" => "deliver",
+          "trade_symbol" => "IRON_ORE",
+          "units" => 5,
+          "recipient" => %{"type" => "contract", "contract_id" => "contract-1"}
+        },
+        intent: intent
+      )
+
+    assert {:ok, _result} = API.dispatch_recorded(selected)
 
     assert [attempt] = MutationAttempts.list_for_agent(agent)
     assert attempt.provenance["ship_id"] == ship.id

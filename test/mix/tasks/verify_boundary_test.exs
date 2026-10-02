@@ -73,4 +73,27 @@ defmodule Mix.Tasks.Verify.BoundaryTest do
 
     assert [_violation | _] = Mix.Tasks.Verify.Boundary.verify_paths([path])
   end
+
+  test "rejects retired Ship sends and caller-owned attempt admission, including grouped aliases" do
+    path = Path.join(System.tmp_dir!(), "boundary-ship-#{System.unique_integer()}.ex")
+
+    File.write!(path, """
+    defmodule Bypass do
+      alias SpaceTraders.{API, MutationAttempts}
+      def run do
+        API.navigate_ship(:token, "SHIP", "WAYPOINT")
+        MutationAttempts.with_retry(:attempt, fn -> :send end)
+        MutationAttempts.prepare(:operation, :path, [])
+        MutationAttempts.mark_sent_or_unknown(:attempt)
+      end
+    end
+    """)
+
+    on_exit(fn -> File.rm(path) end)
+    violations = Mix.Tasks.Verify.Boundary.verify_paths([path])
+    assert Enum.any?(violations, &String.contains?(&1, "navigate_ship"))
+    assert Enum.any?(violations, &String.contains?(&1, "with_retry"))
+    assert Enum.any?(violations, &String.contains?(&1, "prepare"))
+    assert Enum.any?(violations, &String.contains?(&1, "mark_sent_or_unknown"))
+  end
 end

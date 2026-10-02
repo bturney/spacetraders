@@ -287,8 +287,22 @@ defmodule SpaceTraders.IntelligenceTest do
       |> Req.Test.json(%{"error" => %{"code" => 4218, "message" => "Insufficient cargo"}})
     end)
 
+    %{attempt: attempt, agent: agent} =
+      SpaceTraders.RecordedDispatchFixtures.prepare_action(agent, "INTEL-1", %{
+        "kind" => "deliver",
+        "trade_symbol" => "IRON_ORE",
+        "units" => 5,
+        "recipient" => %{
+          "type" => "construction",
+          "system" => "X1-UX81",
+          "waypoint" => "X1-UX81-A1"
+        }
+      })
+
+    result = SpaceTraders.API.dispatch_recorded(attempt)
+
     assert {:error, %SpaceTraders.API.GameplayError{type: :insufficient_cargo}} =
-             Fleet.supply_construction(agent, "X1-UX81", "X1-UX81-A1", "INTEL-1", "IRON_ORE", 5)
+             Fleet.record_construction_result(result, agent, "X1-UX81", "X1-UX81-A1", "INTEL-1")
 
     assert Intelligence.subject(agent, :construction, "X1-UX81", "X1-UX81-A1") == %{}
 

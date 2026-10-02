@@ -8,8 +8,9 @@ defmodule SpaceTraders.Timeline do
   owns its own `Process.send_after` timer. On boot the app re-arms owners from
   the table and catches up events that came due while it was down.
 
-   Event types are atoms (`:arrival`, `:cooldown`, `:survey_expiration`, `:deadline`) and are stored
-  as their string form. An owner has at most one pending event per type:
+  Event types are atoms (`:arrival`, `:cooldown`, `:intent_retry`,
+  `:survey_expiration`, `:deadline`) stored as their string form.
+  An owner has at most one pending event per type:
   scheduling a new event for the same owner+type cancels the outstanding one.
   """
 
@@ -20,7 +21,7 @@ defmodule SpaceTraders.Timeline do
   alias SpaceTraders.{Clock, Repo}
   alias SpaceTraders.API.Model.{ShipNav, ShipNavRoute}
   alias SpaceTraders.Timeline.Event
-  @event_types [:arrival, :cooldown, :survey_expiration, :deadline]
+  @event_types [:arrival, :cooldown, :intent_retry, :survey_expiration, :deadline]
 
   @typedoc "The pending-event statuses stored in `timeline_events.status`."
   @type status :: :pending | :done | :cancelled

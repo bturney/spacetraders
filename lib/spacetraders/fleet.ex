@@ -350,44 +350,6 @@ defmodule SpaceTraders.Fleet do
 
   def waypoint_jump_gate(%AgentRecord{}, _waypoint), do: {:error, :agent_token_missing}
 
-  @doc "Supplies a Construction project and refreshes or invalidates its authoritative facts."
-  def supply_construction(
-        %AgentRecord{agent_token: token} = agent,
-        system_symbol,
-        waypoint_symbol,
-        ship_symbol,
-        trade_symbol,
-        units
-      )
-      when is_binary(token) and token != "" and is_integer(units) and units > 0 do
-    agent
-    |> Agent.handle_game_result(
-      SpaceTraders.API.supply_construction(
-        token_reference(agent),
-        system_symbol,
-        waypoint_symbol,
-        ship_symbol,
-        trade_symbol,
-        units
-      )
-    )
-    |> refresh_construction_after(agent, system_symbol, waypoint_symbol, ship_symbol)
-  end
-
-  def supply_construction(
-        %AgentRecord{agent_token: token},
-        _system,
-        _waypoint,
-        _ship,
-        _trade,
-        _units
-      )
-      when not is_binary(token) or token == "",
-      do: {:error, :agent_token_missing}
-
-  def supply_construction(%AgentRecord{}, _system, _waypoint, _ship, _trade, _units),
-    do: {:error, :invalid_units}
-
   @doc "Returns recent local events for an Agent, newest first."
   def recent_activity(%AgentRecord{} = agent) do
     Activity
@@ -712,13 +674,14 @@ defmodule SpaceTraders.Fleet do
 
   defp record_jump_gate_observation(_agent, _system, _gate, _source), do: :ok
 
-  defp refresh_construction_after(
-         {:ok, %{construction: construction}} = result,
-         agent,
-         system_symbol,
-         _waypoint_symbol,
-         ship_symbol
-       ) do
+  @doc "Retains or invalidates Construction facts from a recorded Ship action result."
+  def record_construction_result(
+        {:ok, %{construction: construction}} = result,
+        agent,
+        system_symbol,
+        _waypoint_symbol,
+        ship_symbol
+      ) do
     Intelligence.observe_construction(agent, system_symbol, construction,
       source: "supply_construction",
       observing_ship_symbol: ship_symbol
@@ -734,13 +697,13 @@ defmodule SpaceTraders.Fleet do
       result
   end
 
-  defp refresh_construction_after(
-         {:error, %SpaceTraders.API.GameplayError{}} = result,
-         agent,
-         system_symbol,
-         waypoint_symbol,
-         _ship_symbol
-       ) do
+  def record_construction_result(
+        {:error, %SpaceTraders.API.GameplayError{}} = result,
+        agent,
+        system_symbol,
+        waypoint_symbol,
+        _ship_symbol
+      ) do
     Intelligence.invalidate(agent, :construction, system_symbol, waypoint_symbol)
     result
   rescue
@@ -752,7 +715,7 @@ defmodule SpaceTraders.Fleet do
       result
   end
 
-  defp refresh_construction_after(result, _agent, _system, _waypoint, _ship), do: result
+  def record_construction_result(result, _agent, _system, _waypoint, _ship), do: result
 
   def recipient_fulfilled_units(%{terms: terms}, trade_symbol) do
     case Enum.find(terms.deliver || [], &(&1.trade_symbol == trade_symbol)) do
@@ -895,6 +858,9 @@ defmodule SpaceTraders.Fleet do
   defp blocker_summary("ambiguous"),
     do: "The game did not confirm whether the in-flight action completed."
 
+  defp blocker_summary(:api_capacity_deferred),
+    do: "The game asked the Fleet to wait; the action was rejected before it applied."
+
   defp blocker_summary("retry_exhausted" <> _),
     do: "Authoritative recovery could not complete within its retry budget."
 
@@ -926,6 +892,9 @@ defmodule SpaceTraders.Fleet do
 
   defp blocker_resolution(reason) do
     case {blocker_reason(reason), reason} do
+      {"api_capacity_deferred", _reason} ->
+        {"game_state", "api_capacity_available", ["resume"]}
+
       {code, _reason}
       when code in [
              "invalid_extraction_waypoint",

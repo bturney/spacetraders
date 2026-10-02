@@ -36,6 +36,7 @@ defmodule SpaceTraders.API do
   alias SpaceTraders.API.AgentTokenReference
   alias SpaceTraders.API.OperationInventory
   alias SpaceTraders.API.RecordedDispatch
+  alias SpaceTraders.API.ShipAction
   alias SpaceTraders.Evidence.Demand
   alias SpaceTraders.Agent.Agent, as: AgentRecord
   alias SpaceTraders.MutationAttempts
@@ -44,28 +45,15 @@ defmodule SpaceTraders.API do
 
   alias SpaceTraders.API.Model.{
     Agent,
-    Chart,
     Construction,
     Contract,
-    Cooldown,
-    Extraction,
     Faction,
     JumpGate,
     Market,
-    Ship,
-    ShipConditionEvent,
-    Siphon,
-    Survey,
-    ScannedWaypoint
+    Ship
   }
 
   alias SpaceTraders.API.Model.{
-    MarketTransaction,
-    ShipCargo,
-    ShipFuel,
-    ShipModificationTransaction,
-    ShipModule,
-    ShipNav,
     Shipyard,
     ShipyardTransaction,
     System,
@@ -73,18 +61,8 @@ defmodule SpaceTraders.API do
   }
 
   alias SpaceTraders.API.Request.{
-    DeliverContractRequest,
-    InstallShipModuleRequest,
-    JettisonCargoRequest,
-    NavigateRequest,
-    PurchaseCargoRequest,
     PurchaseShipRequest,
-    RegisterRequest,
-    RemoveShipModuleRequest,
-    SellCargoRequest,
-    ShipNavRequest,
-    SupplyConstructionRequest,
-    TransferCargoRequest
+    RegisterRequest
   }
 
   @type token() :: AgentTokenReference.t()
@@ -150,21 +128,6 @@ defmodule SpaceTraders.API do
     )
   end
 
-  @doc "POST /my/contracts/{id}/deliver"
-  @spec deliver_contract(token(), String.t(), String.t(), String.t(), pos_integer()) :: result()
-  def deliver_contract(token, contract_id, ship_symbol, trade_symbol, units) do
-    request(:post, "/my/contracts/#{contract_id}/deliver", token,
-      json:
-        DeliverContractRequest.new(%{
-          ship_symbol: ship_symbol,
-          trade_symbol: trade_symbol,
-          units: units
-        })
-        |> DeliverContractRequest.to_json(),
-      as: {:map, %{contract: {:model, Contract}, cargo: {:model, ShipCargo}}}
-    )
-  end
-
   @doc "POST /my/contracts/{id}/fulfill"
   @spec fulfill_contract(token(), String.t()) :: result()
   def fulfill_contract(token, contract_id) do
@@ -199,272 +162,46 @@ defmodule SpaceTraders.API do
     )
   end
 
-  @doc "POST /my/ships/{symbol}/navigate"
-  @spec navigate_ship(token(), String.t(), String.t()) :: result()
-  def navigate_ship(token, ship_symbol, waypoint_symbol) do
-    request(:post, "/my/ships/#{ship_symbol}/navigate", token,
-      json: NavigateRequest.new(%{waypoint_symbol: waypoint_symbol}) |> NavigateRequest.to_json(),
-      as: {:map, %{fuel: {:model, ShipFuel}, nav: {:model, ShipNav}}}
-    )
-  end
+  @doc "Sends one linked recorded Ship attempt after independently committed admission."
+  def dispatch_recorded(%SpaceTraders.Fleet.Intent{mutation_attempt_id: id}) when is_binary(id),
+    do: dispatch_recorded(%Attempt{id: id})
 
-  @doc "POST /my/ships/{symbol}/warp"
-  @spec warp_ship(token(), String.t(), String.t()) :: result()
-  def warp_ship(token, ship_symbol, waypoint_symbol) do
-    request(:post, "/my/ships/#{ship_symbol}/warp", token,
-      json: NavigateRequest.new(%{waypoint_symbol: waypoint_symbol}) |> NavigateRequest.to_json(),
-      as: {:map, %{fuel: {:model, ShipFuel}, nav: {:model, ShipNav}}}
-    )
-  end
+  def dispatch_recorded(%SpaceTraders.Fleet.Intent{}), do: {:error, :recorded_dispatch_required}
 
-  @doc "POST /my/ships/{symbol}/jump"
-  @spec jump_ship(token(), String.t(), String.t()) :: result()
-  def jump_ship(token, ship_symbol, waypoint_symbol) do
-    request(:post, "/my/ships/#{ship_symbol}/jump", token,
-      json: NavigateRequest.new(%{waypoint_symbol: waypoint_symbol}) |> NavigateRequest.to_json(),
-      as:
-        {:map,
-         %{
-           agent: {:model, Agent},
-           cooldown: {:model, Cooldown},
-           nav: {:model, ShipNav},
-           transaction: {:model, MarketTransaction}
-         }}
-    )
-  end
-
-  @doc "PATCH /my/ships/{symbol}/nav — updates a ship's flight mode."
-  @spec set_ship_flight_mode(token(), String.t(), String.t()) :: result()
-  def set_ship_flight_mode(token, ship_symbol, flight_mode) do
-    request(:patch, "/my/ships/#{ship_symbol}/nav", token,
-      json: ShipNavRequest.new(%{flight_mode: flight_mode}) |> ShipNavRequest.to_json(),
-      as:
-        {:map,
-         %{fuel: {:model, ShipFuel}, nav: {:model, ShipNav}, events: {:list, ShipConditionEvent}}}
-    )
-  end
-
-  @doc "POST /my/ships/{symbol}/dock"
-  @spec dock_ship(token(), String.t()) :: result()
-  def dock_ship(token, ship_symbol) do
-    request(:post, "/my/ships/#{ship_symbol}/dock", token, as: {:map, %{nav: {:model, ShipNav}}})
-  end
-
-  @doc "POST /my/ships/{symbol}/orbit"
-  @spec orbit_ship(token(), String.t()) :: result()
-  def orbit_ship(token, ship_symbol) do
-    request(:post, "/my/ships/#{ship_symbol}/orbit", token, as: {:map, %{nav: {:model, ShipNav}}})
-  end
-
-  @doc "Sends a recorded orbit attempt after independently committed admission."
   def dispatch_recorded(%Attempt{id: id}) do
     with :ok <- RecordedDispatch.require_commit_boundary() do
       attempt = MutationAttempts.get!(id)
 
-      with "orbit-ship" <- attempt.operation_id,
+      with {:ok, schema} <- ShipAction.response_schema(attempt.operation_id),
            {:ok, token} <- resolve_agent_token(%AgentTokenReference{agent_id: attempt.agent_id}) do
-        path = attempt.prepared_evidence["request"]["path"]
+        operation = OperationInventory.fetch!(attempt.operation_id)
+        request = attempt.prepared_evidence["request"]
 
         opts = [
           agent_id: attempt.agent_id,
           recorded_attempt: attempt,
           retry: false,
-          as: {:map, %{nav: {:model, ShipNav}}}
+          as: schema
         ]
 
-        admit_and_send(:post, path, token, opts)
+        opts =
+          if is_nil(request["body"]), do: opts, else: Keyword.put(opts, :json, request["body"])
+
+        context =
+          Map.new(
+            ~w(request_id operator_id agent_id fleet_generation_id strategy_revision_id decision_episode_id commitment_id ship_id ship_symbol intent_id)a,
+            fn key -> {key, attempt.provenance[Atom.to_string(key)]} end
+          )
+          |> Map.reject(fn {_key, value} -> is_nil(value) end)
+
+        SpaceTraders.Observability.with_context(Map.to_list(context), fn ->
+          admit_and_send(operation.method, request["path"], token, opts)
+        end)
       else
         {:error, reason} -> {:error, reason}
         _ -> {:error, :recorded_operation_not_activated}
       end
     end
-  end
-
-  @doc "POST /my/ships/{symbol}/extract"
-  @spec extract_resources(token(), String.t()) :: result()
-  def extract_resources(token, ship_symbol) do
-    request(:post, "/my/ships/#{ship_symbol}/extract", token,
-      as:
-        {:map,
-         %{
-           cooldown: {:model, Cooldown},
-           extraction: {:model, Extraction},
-           cargo: {:model, ShipCargo}
-         }}
-    )
-  end
-
-  @doc "POST /my/ships/{symbol}/extract/survey"
-  @spec extract_resources_with_survey(token(), String.t(), map()) :: result()
-  def extract_resources_with_survey(token, ship_symbol, survey) when is_map(survey) do
-    request(:post, "/my/ships/#{ship_symbol}/extract/survey", token,
-      json: survey,
-      as:
-        {:map,
-         %{
-           cooldown: {:model, Cooldown},
-           extraction: {:model, Extraction},
-           cargo: {:model, ShipCargo},
-           events: {:list, ShipConditionEvent}
-         }}
-    )
-  end
-
-  @doc "POST /my/ships/{symbol}/survey"
-  @spec create_survey(token(), String.t()) :: result()
-  def create_survey(token, ship_symbol) do
-    request(:post, "/my/ships/#{ship_symbol}/survey", token,
-      as: {:map, %{cooldown: {:model, Cooldown}, surveys: {:list, Survey}}}
-    )
-  end
-
-  @doc "POST /my/ships/{symbol}/siphon"
-  @spec siphon_resources(token(), String.t()) :: result()
-  def siphon_resources(token, ship_symbol) do
-    request(:post, "/my/ships/#{ship_symbol}/siphon", token,
-      as:
-        {:map,
-         %{
-           cooldown: {:model, Cooldown},
-           siphon: {:model, Siphon},
-           cargo: {:model, ShipCargo},
-           events: {:list, ShipConditionEvent}
-         }}
-    )
-  end
-
-  @doc "POST /my/ships/{symbol}/refine"
-  @spec refine_ship(token(), String.t(), String.t()) :: result()
-  def refine_ship(token, ship_symbol, produce)
-      when produce in ~w(IRON COPPER SILVER GOLD ALUMINUM PLATINUM URANITE MERITIUM FUEL) do
-    request(:post, "/my/ships/#{ship_symbol}/refine", token,
-      json: %{produce: produce},
-      as:
-        {:map,
-         %{
-           cargo: {:model, ShipCargo},
-           cooldown: {:model, Cooldown},
-           produced: :raw,
-           consumed: :raw
-         }}
-    )
-  end
-
-  @doc "POST /my/ships/{symbol}/scan/waypoints"
-  @spec scan_waypoints(token(), String.t()) :: result()
-  def scan_waypoints(token, ship_symbol) do
-    request(:post, "/my/ships/#{ship_symbol}/scan/waypoints", token,
-      as: {:map, %{cooldown: {:model, Cooldown}, waypoints: {:list, ScannedWaypoint}}}
-    )
-  end
-
-  @doc "POST /my/ships/{symbol}/chart"
-  @spec create_chart(token(), String.t(), String.t() | nil) :: result()
-  def create_chart(token, ship_symbol, waypoint_symbol \\ nil) do
-    request(:post, "/my/ships/#{ship_symbol}/chart", token,
-      as: {:map, %{chart: {:model, Chart}, waypoint: {:model, Waypoint}, agent: {:model, Agent}}},
-      dependency_context: %{waypoint_symbol: waypoint_symbol}
-    )
-  end
-
-  @doc "Retries an ambiguous mutation only after authoritative absence is recorded."
-  @spec reconcile_absent_and_retry(
-          Attempt.t(),
-          [SpaceTraders.Evidence.AuthoritativeObservation.t()],
-          (-> result())
-        ) :: result()
-  def reconcile_absent_and_retry(%Attempt{} = attempt, observations, callback)
-      when is_list(observations) and is_function(callback, 0) do
-    with {:ok, absent} <-
-           MutationAttempts.reconcile(attempt, :absent, observations) do
-      MutationAttempts.with_retry(absent, callback)
-    end
-  end
-
-  @doc "POST /my/ships/{symbol}/refuel"
-  @spec refuel_ship(token(), String.t()) :: result()
-  def refuel_ship(token, ship_symbol) do
-    request(:post, "/my/ships/#{ship_symbol}/refuel", token,
-      as:
-        {:map,
-         %{
-           agent: {:model, Agent},
-           cargo: {:model, ShipCargo},
-           fuel: {:model, ShipFuel},
-           transaction: {:model, MarketTransaction}
-         }}
-    )
-  end
-
-  @doc "POST /my/ships/{symbol}/sell"
-  @spec sell_cargo(token(), String.t(), String.t(), pos_integer()) :: result()
-  def sell_cargo(token, ship_symbol, trade_symbol, units) do
-    request(:post, "/my/ships/#{ship_symbol}/sell", token,
-      json:
-        SellCargoRequest.new(%{symbol: trade_symbol, units: units}) |> SellCargoRequest.to_json(),
-      as:
-        {:map,
-         %{
-           agent: {:model, Agent},
-           cargo: {:model, ShipCargo},
-           transaction: {:model, MarketTransaction}
-         }}
-    )
-  end
-
-  @doc "POST /my/ships/{symbol}/purchase — buys cargo from a market the ship is docked at."
-  @spec purchase_cargo(token(), String.t(), String.t(), pos_integer()) :: result()
-  def purchase_cargo(token, ship_symbol, trade_symbol, units) do
-    request(:post, "/my/ships/#{ship_symbol}/purchase", token,
-      json:
-        PurchaseCargoRequest.new(%{symbol: trade_symbol, units: units})
-        |> PurchaseCargoRequest.to_json(),
-      as:
-        {:map,
-         %{
-           agent: {:model, Agent},
-           cargo: {:model, ShipCargo},
-           transaction: {:model, MarketTransaction}
-         }}
-    )
-  end
-
-  @doc "POST /my/ships/{symbol}/jettison — discards cargo from a ship's hold."
-  @spec jettison_cargo(token(), String.t(), String.t(), pos_integer()) :: result()
-  def jettison_cargo(token, ship_symbol, trade_symbol, units) do
-    request(:post, "/my/ships/#{ship_symbol}/jettison", token,
-      json:
-        JettisonCargoRequest.new(%{symbol: trade_symbol, units: units})
-        |> JettisonCargoRequest.to_json(),
-      as: {:map, %{cargo: {:model, ShipCargo}}}
-    )
-  end
-
-  @doc "POST /my/ships/{symbol}/modules/install — installs one module from Cargo."
-  @spec install_ship_module(token(), String.t(), String.t()) :: result()
-  def install_ship_module(token, ship_symbol, module_symbol) do
-    modify_ship_module(token, ship_symbol, "install", module_symbol, InstallShipModuleRequest)
-  end
-
-  @doc "POST /my/ships/{symbol}/modules/remove — removes one installed module into Cargo."
-  @spec remove_ship_module(token(), String.t(), String.t()) :: result()
-  def remove_ship_module(token, ship_symbol, module_symbol) do
-    modify_ship_module(token, ship_symbol, "remove", module_symbol, RemoveShipModuleRequest)
-  end
-
-  @doc "POST /my/ships/{symbol}/transfer — transfers cargo to another ship."
-  @spec transfer_cargo(token(), String.t(), String.t(), pos_integer(), String.t()) :: result()
-  def transfer_cargo(token, ship_symbol, trade_symbol, units, target_ship_symbol) do
-    request(:post, "/my/ships/#{ship_symbol}/transfer", token,
-      json:
-        TransferCargoRequest.new(%{
-          trade_symbol: trade_symbol,
-          units: units,
-          ship_symbol: target_ship_symbol
-        })
-        |> TransferCargoRequest.to_json(),
-      as: {:map, %{cargo: {:model, ShipCargo}}}
-    )
   end
 
   @doc "POST /my/ships — purchase a ship at a shipyard waypoint."
@@ -480,20 +217,6 @@ defmodule SpaceTraders.API do
            agent: {:model, Agent},
            ship: {:model, Ship},
            transaction: {:model, ShipyardTransaction}
-         }}
-    )
-  end
-
-  defp modify_ship_module(token, ship_symbol, operation, module_symbol, request_module) do
-    request(:post, "/my/ships/#{ship_symbol}/modules/#{operation}", token,
-      json: request_module.new(%{symbol: module_symbol}) |> request_module.to_json(),
-      as:
-        {:map,
-         %{
-           agent: {:model, Agent},
-           modules: {:list, ShipModule},
-           cargo: {:model, ShipCargo},
-           transaction: {:model, ShipModificationTransaction}
          }}
     )
   end
@@ -565,32 +288,6 @@ defmodule SpaceTraders.API do
       "/systems/#{system_symbol}/waypoints/#{waypoint_symbol}/jump-gate",
       token,
       Keyword.merge(opts, as: {:model, JumpGate})
-    )
-  end
-
-  @doc "POST /systems/{symbol}/waypoints/{waypoint}/construction/supply"
-  @spec supply_construction(
-          token(),
-          String.t(),
-          String.t(),
-          String.t(),
-          String.t(),
-          pos_integer()
-        ) ::
-          result()
-  def supply_construction(token, system_symbol, waypoint_symbol, ship_symbol, trade_symbol, units) do
-    request(
-      :post,
-      "/systems/#{system_symbol}/waypoints/#{waypoint_symbol}/construction/supply",
-      token,
-      json:
-        SupplyConstructionRequest.new(%{
-          ship_symbol: ship_symbol,
-          trade_symbol: trade_symbol,
-          units: units
-        })
-        |> SupplyConstructionRequest.to_json(),
-      as: {:map, %{construction: {:model, Construction}, cargo: {:model, ShipCargo}}}
     )
   end
 
@@ -777,13 +474,20 @@ defmodule SpaceTraders.API do
             end
         end
 
-      {:ok, %{status: status, body: body}} when status in 400..499 ->
+      {:ok, %{status: status, body: body} = response} when status in 400..499 ->
         emit_request_metric(operation, path, status)
 
         case record_mutation_outcome(attempt, :rejected, %{status: status}) do
           :ok ->
             case mutation_authorized_after_response(status, method, token) do
               :ok ->
+                # A still-authorized protocol rejection is a real capacity signal.
+                # Our own suppression is not, so the Governor never records a
+                # Retry-After window for a request it did not have to run.
+                if status == 429 and opts[:recorded_attempt] do
+                  report_protocol_rejection(Req.Response.get_retry_after(response))
+                end
+
                 complete_shadow(
                   shadow,
                   capacity,
@@ -896,10 +600,17 @@ defmodule SpaceTraders.API do
 
   defp prepare_mutation_attempt(%{classification: :read}, _path, _opts), do: {:ok, nil}
 
+  defp prepare_mutation_attempt(%{owner: :ship_execution}, _path, opts) do
+    case opts[:recorded_attempt] do
+      %Attempt{} = attempt -> {:ok, attempt}
+      _ -> {:error, :recorded_dispatch_required}
+    end
+  end
+
   defp prepare_mutation_attempt(operation, path, opts) do
     case opts[:recorded_attempt] do
       %Attempt{} = attempt -> {:ok, attempt}
-      nil -> MutationAttempts.prepare_for_dispatch(operation, path, opts)
+      nil -> MutationAttempts.prepare(operation, path, opts)
     end
   end
 

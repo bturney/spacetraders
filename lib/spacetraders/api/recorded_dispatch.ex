@@ -4,18 +4,21 @@ defmodule SpaceTraders.API.RecordedDispatch do
   outcome; this boundary commits its identity and the sole MutationAttempts
   ledger together, then commits send admission before transport can run.
 
-  Orbit is the initial activated adapter. No network callback runs under these
-  transactions. Legacy selected actions without linkage remain unknown.
+  All implemented Ship adapters share this protocol. No network callback runs
+  under these transactions. Legacy selected actions without linkage remain unknown.
+  Existing spending eligibility belongs to the selected outcome; this adoption
+  does not turn observed prices into guaranteed spending bounds (#502).
   """
 
   import Ecto.Query
 
   alias SpaceTraders.Agent.Agent
-  alias SpaceTraders.API.OperationInventory
+  alias SpaceTraders.API.ShipAction
   alias SpaceTraders.Evidence
   alias SpaceTraders.Fleet.{Intent, Ship}
   alias SpaceTraders.FleetAllocation
   alias SpaceTraders.FleetAllocation.Portfolio
+  alias SpaceTraders.FleetAllocation.Commitment
   alias SpaceTraders.FleetGeneration.Generation
   alias SpaceTraders.FleetStrategy.{Revision, Strategy}
   alias SpaceTraders.ManualIntervention
@@ -27,23 +30,25 @@ defmodule SpaceTraders.API.RecordedDispatch do
   def prepare(
         %Agent{} = agent,
         %Intent{} = intent,
-        %{"kind" => "orbit", "waypoint" => waypoint, "expected" => %{"status" => "IN_ORBIT"}} =
-          action
-      )
-      when is_binary(waypoint) and waypoint != "" do
+        %{"kind" => _kind} = action
+      ) do
     with :ok <- require_commit_boundary() do
       Repo.transaction(fn ->
         current = locked_intent(intent.id)
 
-        with true <- Intent.unfinished?(current) and is_nil(current.in_flight_action),
+        with %Intent{} <- current,
+             true <- Intent.unfinished?(current) and is_nil(current.in_flight_action),
              {:ok, authority} <- authority(agent.id, current),
-             :ok <- claim_matches(current, authority.claim) do
+             :ok <- claim_matches(current, authority.claim),
+             {:ok, action} <- bind_transfer(authority, current, action),
+             {:ok, request} <- ShipAction.request(authority.ship.symbol, action) do
           selected =
             action
             |> Map.merge(action_binding(authority.claim))
             |> Map.put("selection_id", Ecto.UUID.generate())
 
-          {:ok, attempt} = prepare_attempt(authority, %{current | in_flight_action: selected})
+          {:ok, attempt} =
+            prepare_attempt(authority, %{current | in_flight_action: selected}, request)
 
           selected =
             current
@@ -76,8 +81,10 @@ defmodule SpaceTraders.API.RecordedDispatch do
              true <- current.mutation_attempt_id == absent.id,
              {:ok, authority} <- authority(agent.id, current),
              :ok <- claim_matches(current, authority.claim),
-             true <- current.in_flight_action["kind"] == "orbit",
-             {:ok, retry} <- prepare_attempt(authority, current, absent) do
+             {:ok, action} <- bind_transfer(authority, current, current.in_flight_action),
+             true <- action == current.in_flight_action,
+             {:ok, request} <- ShipAction.request(authority.ship.symbol, action),
+             {:ok, retry} <- prepare_attempt(authority, current, request, absent) do
           current
           |> Ecto.Changeset.change(mutation_attempt_id: retry.id)
           |> Repo.update!()
@@ -106,9 +113,13 @@ defmodule SpaceTraders.API.RecordedDispatch do
                Evidence.fingerprint(current.in_flight_action) ==
                  attempt.provenance["selected_action_fingerprint"],
              {:ok, authority} <- authority(attempt.agent_id, current),
-             true <- authority.generation.id == attempt.fleet_generation_id,
-             true <- authority.revision.id == attempt.strategy_revision_id,
+             true <- generation_id(authority.generation) == attempt.fleet_generation_id,
+             true <- revision_id(authority.revision) == attempt.strategy_revision_id,
              :ok <- claim_matches(current, authority.claim),
+             {:ok, action} <- bind_transfer(authority, current, current.in_flight_action),
+             true <- action == current.in_flight_action,
+             {:ok, request} <- ShipAction.request(authority.ship.symbol, action),
+             true <- request_matches?(attempt, request, action),
              true <-
                Map.merge(current.in_flight_action, action_binding(authority.claim)) ==
                  current.in_flight_action do
@@ -143,27 +154,26 @@ defmodule SpaceTraders.API.RecordedDispatch do
       else: :ok
   end
 
-  defp prepare_attempt(authority, intent, original \\ nil) do
-    operation = OperationInventory.fetch!("orbit-ship")
-    path = "/my/ships/#{authority.ship.symbol}/orbit"
-
-    opts = [
-      agent_id: authority.agent.id,
-      selected_intent: intent,
-      dispatch_context: %{
-        operator_id: authority.agent.operator_id,
-        fleet_generation_id: authority.generation.id,
-        strategy_revision_id: authority.revision.id,
-        decision_episode_id: authority.claim[:decision_episode_id],
-        intervention_id: authority.claim[:intervention_id],
-        ship_reservation_id: authority.claim[:ship_reservation_id]
-      }
-    ]
+  defp prepare_attempt(authority, intent, request, original \\ nil) do
+    opts =
+      request.opts ++
+        [
+          agent_id: authority.agent.id,
+          selected_intent: intent,
+          dispatch_context: %{
+            operator_id: authority.agent.operator_id,
+            fleet_generation_id: generation_id(authority.generation),
+            strategy_revision_id: revision_id(authority.revision),
+            decision_episode_id: authority.claim[:decision_episode_id],
+            intervention_id: authority.claim[:intervention_id],
+            ship_reservation_id: authority.claim[:ship_reservation_id]
+          }
+        ]
 
     result =
       if original,
-        do: MutationAttempts.prepare_retry(original, operation, path, opts),
-        else: MutationAttempts.prepare(operation, path, opts)
+        do: MutationAttempts.prepare_retry(original, request.operation, request.path, opts),
+        else: MutationAttempts.prepare(request.operation, request.path, opts)
 
     case result do
       {:ok, attempt} -> {:ok, attempt}
@@ -191,68 +201,122 @@ defmodule SpaceTraders.API.RecordedDispatch do
     )
   end
 
-  defp locked_intent(id) do
+  defp locked_intent(id) when is_integer(id) do
     Repo.one(from i in Intent, where: i.id == ^id, lock: "FOR UPDATE")
   end
+
+  defp locked_intent(_id), do: nil
 
   defp authority(agent_id, intent) do
     agent = Repo.get!(Agent, agent_id)
     ship = Repo.get!(Ship, intent.ship_id)
-
-    strategy =
-      Repo.one(from s in Strategy, where: s.operator_id == ^agent.operator_id, lock: "FOR SHARE")
-
-    generation =
-      Repo.one(
-        from g in Generation,
-          where: g.agent_id == ^agent_id and is_nil(g.retired_at),
-          lock: "FOR SHARE"
-      )
 
     with :ok <- SpaceTraders.RuntimeAuthority.execution_allowed?(),
          :ok <- SpaceTraders.EmergencyStopAdmission.mutation_allowed?(agent.agent_token),
          :ok <- SpaceTraders.FleetGenerationAdmission.mutation_allowed?(agent.agent_token),
          true <- is_nil(agent.stale_at) and ship.agent_id == agent.id,
          true <- Intent.unfinished?(intent),
-         %Strategy{emergency_stopped_at: nil, active_revision_id: revision_id}
-         when not is_nil(revision_id) <- strategy,
-         %Generation{fenced_at: nil, fleet_strategy_revision_id: ^revision_id} <- generation,
-         %Revision{} = revision <- Repo.get(Revision, revision_id),
-         {:ok, claim} <- owner(agent, ship, intent, generation, revision),
-         :ok <- posture_consequence_authorized(revision) do
-      {:ok, %{agent: agent, ship: ship, generation: generation, revision: revision, claim: claim}}
+         {:ok, owned} <- owner(agent, ship, intent),
+         :ok <- supported_constraints(owned.revision) do
+      {:ok, Map.merge(owned, %{agent: agent, ship: ship})}
     else
       {:error, reason} -> {:error, reason}
       _ -> {:error, :recorded_dispatch_authority_stale}
     end
   end
 
-  defp owner(agent, ship, %Intent{caller: "commitment"}, generation, revision) do
-    with {:ok, claim} <- FleetAllocation.current_ship_claim(agent, ship.symbol, lock: true),
-         %Portfolio{fleet_generation_id: generation_id, fleet_strategy_revision_id: revision_id} <-
-           Repo.get(Portfolio, claim.portfolio_id),
-         true <- generation_id == generation.id and revision_id == revision.id do
-      {:ok, claim}
-    else
-      _ -> {:error, :no_current_ship_claim}
-    end
-  end
+  # Authenticated Manual Intervention remains a supported execution authority
+  # before the Fleet has an active Revision, so it needs no Strategy Revision.
+  defp owner(agent, ship, %Intent{caller: "intervention"} = intent) do
+    strategy =
+      Repo.one(from s in Strategy, where: s.operator_id == ^agent.operator_id, lock: "FOR SHARE")
 
-  defp owner(agent, ship, %Intent{caller: "intervention"} = intent, _generation, _revision) do
     with {:ok, authority} <-
            ManualIntervention.authorization(agent.operator_id, ship.symbol, intent.id, lock: true) do
+      claim =
+        Map.merge(authority, %{commitment_id: nil, portfolio_id: nil, portfolio_version: nil})
+
       {:ok,
-       Map.merge(authority, %{commitment_id: nil, portfolio_id: nil, portfolio_version: nil})}
+       %{
+         claim: claim,
+         generation: current_generation(agent.id),
+         revision: optional_revision(strategy),
+         decision_episode_id: authority[:decision_episode_id],
+         intervention_id: authority[:intervention_id],
+         ship_reservation_id: authority[:ship_reservation_id]
+       }}
     end
   end
 
-  defp owner(_agent, _ship, _intent, _generation, _revision),
-    do: {:error, :invalid_intent_owner}
+  defp owner(agent, ship, %Intent{caller: "commitment"}) do
+    strategy =
+      Repo.one(from s in Strategy, where: s.operator_id == ^agent.operator_id, lock: "FOR SHARE")
 
-  # Orbit changes posture only: it cannot spend credits or scrap a Ship. Validate
-  # the revision's enforceable rules rather than importing gameplay price bounds
-  # or a second operational interpretation of Strategy prose.
-  defp posture_consequence_authorized(revision) do
+    generation = current_generation(agent.id)
+
+    cond do
+      is_nil(generation) ->
+        {:error, :fleet_generation_absent}
+
+      not is_nil(generation.fenced_at) ->
+        {:error, :fleet_generation_fenced}
+
+      true ->
+        commitment_claim(agent, ship, strategy, generation)
+    end
+  end
+
+  defp owner(_agent, _ship, _intent), do: {:error, :invalid_intent_owner}
+
+  defp active_revision(%Strategy{emergency_stopped_at: nil, active_revision_id: revision_id})
+       when not is_nil(revision_id),
+       do: {:ok, revision_id}
+
+  defp active_revision(%Strategy{emergency_stopped_at: stopped}) when not is_nil(stopped),
+    do: {:error, :emergency_stopped}
+
+  defp active_revision(_strategy), do: {:error, :strategy_revision_absent}
+
+  defp commitment_claim(agent, ship, strategy, generation) do
+    with {:ok, revision_id} <- active_revision(strategy),
+         %Revision{} = revision <- Repo.get(Revision, revision_id),
+         {:ok, claim} <- FleetAllocation.current_ship_claim(agent, ship.symbol, lock: true),
+         %Portfolio{fleet_generation_id: generation_id, fleet_strategy_revision_id: ^revision_id} <-
+           Repo.get(Portfolio, claim.portfolio_id),
+         true <- generation_id == generation.id do
+      {:ok, %{claim: claim, generation: generation, revision: revision}}
+    else
+      false -> {:error, :no_current_ship_claim}
+      {:error, reason} -> {:error, reason}
+      nil -> {:error, :no_current_ship_claim}
+      _ -> {:error, :strategy_revision_absent}
+    end
+  end
+
+  defp generation_id(nil), do: nil
+  defp generation_id(generation), do: generation.id
+
+  defp revision_id(nil), do: nil
+  defp revision_id(revision), do: revision.id
+
+  defp optional_revision(%Strategy{active_revision_id: revision_id}) when not is_nil(revision_id),
+    do: Repo.get(Revision, revision_id)
+
+  defp optional_revision(_strategy), do: nil
+
+  defp current_generation(agent_id) do
+    Repo.one(
+      from g in Generation,
+        where: g.agent_id == ^agent_id and is_nil(g.retired_at),
+        lock: "FOR SHARE"
+    )
+  end
+
+  # The selected outcomes retain their existing spending preflights. Validate
+  # supported Strategy rules here without introducing a new economic authority.
+  defp supported_constraints(nil), do: :ok
+
+  defp supported_constraints(revision) do
     SpaceTraders.FleetStrategy.StandingAuthority.validate_constraints(
       Map.get(revision.document, "hard_constraints", [])
     )
@@ -267,4 +331,34 @@ defmodule SpaceTraders.API.RecordedDispatch do
   end
 
   defp action_binding(claim), do: FleetAllocation.ship_claim_binding(claim).action
+
+  defp request_matches?(attempt, request, action) do
+    attempt.operation_owner == "ship_execution" and
+      attempt.operation_id == request.operation.id and
+      attempt.prepared_evidence["selected_action"] == action and
+      is_binary(action["selection_id"]) and
+      attempt.prepared_evidence["request"] == %{
+        "path" => request.path,
+        "body" => request.opts[:json],
+        "query" => request.opts[:params]
+      }
+  end
+
+  defp bind_transfer(authority, intent, %{"kind" => "transfer", "target_ship" => target} = action) do
+    with {:ok, claim} <- FleetAllocation.current_ship_claim(authority.agent, target, lock: true),
+         true <- target != authority.ship.symbol,
+         true <-
+           claim.portfolio_id == intent.fleet_commitment_portfolio_id and
+             claim.portfolio_version == intent.fleet_commitment_portfolio_version,
+         %Commitment{} = receiver <- Repo.get(Commitment, claim.commitment_id),
+         units when is_integer(units) and units > 0 <- action["units"],
+         true <- Map.get(receiver.reservations, "cargo_capacity:#{target}", 0) >= units do
+      {:ok, Map.put(action, "target_claim", action_binding(claim))}
+    else
+      _ -> {:error, :transfer_authority_unavailable}
+    end
+  end
+
+  defp bind_transfer(_authority, _intent, %{} = action), do: {:ok, action}
+  defp bind_transfer(_, _, _), do: {:error, :invalid_recorded_action}
 end

@@ -65,41 +65,17 @@ defmodule SpaceTraders.FleetIntentsTest do
 
         {"POST", ^purchase_path} ->
           Elixir.Agent.update(purchased, fn _ -> true end)
-          Req.Test.json(conn, %{"data" => trade_response(agent, ship, "PURCHASE", 10, 90, 5)})
+          Req.Test.json(conn, %{"data" => trade_response(agent, ship, "PURCHASE", 10, 50, 5)})
 
         {"POST", ^sell_path} ->
-          Req.Test.json(conn, %{"data" => trade_response(agent, ship, "SELL", 20, 190, 0)})
+          Req.Test.json(conn, %{"data" => trade_response(agent, ship, "SELL", 20, 150, 0)})
 
         request ->
           flunk("unexpected request: #{inspect(request)}")
       end
     end)
 
-    candidate = %CandidateContribution{
-      id: "market-candidate-#{System.unique_integer([:positive])}",
-      strategy_revision_id: portfolio.fleet_strategy_revision_id,
-      objective_index: 0,
-      objective: %{"kind" => "continuous", "objective" => "Grow credits"},
-      kind: :market_trade,
-      trade_symbol: "IRON_ORE",
-      source_waypoint: "X1-UX81-A1",
-      destination_waypoint: "X1-UX81-A1",
-      expected_outcomes: %{
-        credit_change_per_unit: 10,
-        maximum_credit_change: 50,
-        maximum_units: 5
-      },
-      uncertainty: %{unaccounted_costs: [:fuel, :travel_time]},
-      required_roles: [%{role: :market_trader, count: 1}],
-      required_capabilities: [
-        %{capability: :cargo_transport, minimum_capacity: 5},
-        %{capability: :market_access, waypoints: ["X1-UX81-A1"]}
-      ],
-      required_resources: %{credits: 50, cargo_capacity: 5, ship_count: 1},
-      dependencies: [],
-      validity: %{as_of: ~U[2030-01-01 12:00:00Z], conditions: []},
-      alternatives: []
-    }
+    candidate = market_candidate(portfolio)
 
     assert {:ok, %Intent{type: "buy", status: "completed"} = buy} =
              Intents.request_commitment_round_trip(
@@ -137,6 +113,121 @@ defmodule SpaceTraders.FleetIntentsTest do
 
     assert sell_market_trade["destination_waypoint"] == "X1-UX81-A1"
     assert get_in(sell_market_trade, ["expected_outcomes", "maximum_units"]) == 5
+
+    [purchase, sale] = SpaceTraders.MutationAttempts.list_for_agent(agent)
+    assert Enum.map([purchase, sale], & &1.operation_id) == ["purchase-cargo", "sell-cargo"]
+
+    for {attempt, intent} <- [{purchase, buy}, {sale, sell}] do
+      assert attempt.state == "succeeded"
+      assert attempt.provenance["intent_id"] == intent.id
+      assert attempt.provenance["commitment_id"] == commitment.id
+      assert attempt.provenance["decision_episode_id"] == portfolio.strategy_decision_episode_id
+      assert attempt.fleet_generation_id == portfolio.fleet_generation_id
+      assert attempt.strategy_revision_id == portfolio.fleet_strategy_revision_id
+      assert attempt.prepared_evidence["selected_action"]["selection_id"]
+      assert [%{classification: "succeeded"}] = attempt.outcomes
+    end
+
+    assert buy.last_action_result["transaction"]["total_price"] == 50
+    assert sell.last_action_result["transaction"]["total_price"] == 100
+  end
+
+  test "a sibling credit fence reaches the Market Intent's blocker without preparing a send" do
+    {agent, ship, portfolio, commitment} = claimed_ship("INTENTS-FENCED")
+
+    sibling =
+      Repo.insert!(%Ship{
+        agent_id: agent.id,
+        symbol: "#{agent.symbol}-SIBLING",
+        ship_type: "SHIP_PROBE"
+      })
+
+    {:ok, pending} =
+      SpaceTraders.MutationAttempts.prepare(
+        SpaceTraders.API.OperationInventory.fetch!("purchase-cargo"),
+        "/my/ships/#{sibling.symbol}/purchase",
+        agent_id: agent.id,
+        json: %{"symbol" => "IRON_ORE", "units" => 1}
+      )
+
+    {:ok, pending} = SpaceTraders.MutationAttempts.mark_sent_or_unknown(pending)
+    {:ok, _} = SpaceTraders.MutationAttempts.record_outcome(pending, :ambiguous, %{})
+
+    ship_path = "/v2/my/ships/#{ship.symbol}"
+    market_path = "/v2/systems/X1-UX81/waypoints/X1-UX81-A1/market"
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      case {conn.method, conn.request_path} do
+        {"GET", ^ship_path} ->
+          Req.Test.json(conn, %{
+            "data" => ship_body(ship.symbol, %{"nav" => nav_body("DOCKED")})
+          })
+
+        {"GET", "/v2/my/agent"} ->
+          Req.Test.json(conn, %{"data" => %{"symbol" => agent.symbol, "credits" => 100}})
+
+        {"GET", ^market_path} ->
+          Req.Test.json(conn, %{
+            "data" => %{
+              "symbol" => "X1-UX81-A1",
+              "tradeGoods" => [
+                %{
+                  "symbol" => "IRON_ORE",
+                  "purchasePrice" => 10,
+                  "sellPrice" => 20,
+                  "tradeVolume" => 5
+                }
+              ]
+            }
+          })
+
+        request ->
+          flunk("fenced purchase made a request: #{inspect(request)}")
+      end
+    end)
+
+    assert {:ok,
+            %Intent{status: "blocked", in_flight_action: nil, mutation_attempt_id: nil} = intent} =
+             Intents.request_commitment_round_trip(
+               agent,
+               commitment,
+               portfolio,
+               ship.symbol,
+               market_candidate(portfolio)
+             )
+
+    assert intent.blocker.reason == "safety_fenced"
+    assert intent.blocker.evidence =~ pending.id
+    assert [%{id: id, state: "ambiguous"}] = SpaceTraders.MutationAttempts.list_for_agent(agent)
+    assert id == pending.id
+  end
+
+  defp market_candidate(portfolio) do
+    %CandidateContribution{
+      id: "market-candidate-#{System.unique_integer([:positive])}",
+      strategy_revision_id: portfolio.fleet_strategy_revision_id,
+      objective_index: 0,
+      objective: %{"kind" => "continuous", "objective" => "Grow credits"},
+      kind: :market_trade,
+      trade_symbol: "IRON_ORE",
+      source_waypoint: "X1-UX81-A1",
+      destination_waypoint: "X1-UX81-A1",
+      expected_outcomes: %{
+        credit_change_per_unit: 10,
+        maximum_credit_change: 50,
+        maximum_units: 5
+      },
+      uncertainty: %{unaccounted_costs: [:fuel, :travel_time]},
+      required_roles: [%{role: :market_trader, count: 1}],
+      required_capabilities: [
+        %{capability: :cargo_transport, minimum_capacity: 5},
+        %{capability: :market_access, waypoints: ["X1-UX81-A1"]}
+      ],
+      required_resources: %{credits: 50, cargo_capacity: 5, ship_count: 1},
+      dependencies: [],
+      validity: %{as_of: ~U[2030-01-01 12:00:00Z], conditions: []},
+      alternatives: []
+    }
   end
 
   defp trade_response(agent, ship, kind, price, credits, cargo_units) do
