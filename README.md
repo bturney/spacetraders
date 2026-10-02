@@ -46,10 +46,11 @@ The canonical gate, run locally and in CI on every PR:
 scripts/verify   # == mix verify
 ```
 
-`mix verify` runs the checks defined by the `verify` alias in `mix.exs`:
-formatting, warnings-as-errors, the ExUnit suite, generated API struct and
-operation inventory freshness, the transport-boundary check, and boot health
-(the app started on a real HTTP server with `GET /health` → 200).
+`mix verify` runs the checks required by the product gate, in order, stopping
+at the first failure: warnings-as-errors compilation, formatting, the ExUnit
+suite, generated API struct and operation inventory freshness, the
+transport-boundary check, and boot health (the app started on a real HTTP server
+with `GET /health` → 200). The exit status is the verdict.
 
 ### PostgreSQL
 
