@@ -48,15 +48,39 @@ environment flakiness. Run one file directly to isolate a real regression.
 
 ## ScenarioCase lifecycle
 
-`SpaceTraders.ScenarioCase` provides controlled API responses, a shared fake
-clock, process restarts, and PostgreSQL access for the remaining integration
-scenarios and the explicit runtime qualification. Its teardown calls
-`ShipServer.stop_all()` (`test/support/scenario_case.ex`), after which the
-shared sandbox owner is no longer usable. Treat teardown as the end of sandbox
-ownership.
+`SpaceTraders.ScenarioCase` is shared setup for the recorded-dispatch
+integration tests and the explicit runtime qualification. It provides
+PostgreSQL sandbox mode, `TestClock`, a Phoenix connection, and API stubbing;
+process-specific admission and observation helpers belong in the individual
+proof that needs them.
 
-In test env the API transport is stubbed with `Req.Test` and the rate limiter is
-disabled (`config/test.exs`).
+Its teardown calls `ShipServer.stop_all()` (`test/support/scenario_case.ex`),
+after which the shared sandbox owner is no longer usable. Treat teardown as the
+end of sandbox ownership. In test env the API transport is stubbed with
+`Req.Test` and the rate limiter is disabled (`config/test.exs`).
+
+## Runtime coverage ownership
+
+The broad autonomous-runtime regression is retired. Put each contract at its
+smallest public seam:
+
+- first-operator AccountToken persistence:
+  `test/spacetraders_web/controllers/operator_setup_controller_test.exs`
+- authenticated Agent minting:
+  `test/spacetraders_web/live/operator_live/mint_test.exs`
+- API outcome telemetry and token redaction:
+  `test/spacetraders/api/client_test.exs`
+- Ship arrival retry/rearm behavior:
+  `test/spacetraders/fleet/ship_server_test.exs`
+- Server Reset and Fleet Strategy continuity:
+  `test/spacetraders/fleet_generation_test.exs`
+- Mission Control briefing and truthful unknown state:
+  `test/spacetraders_web/live/mission_control_briefing_test.exs`
+- first dispatch durability and ambiguous recovery:
+  `test/spacetraders/ship_execution_durability_test.exs`
+
+Whole-runtime composition is the one retained non-merge concern; use the
+diagnostic below for that question.
 
 ## Runtime qualification
 
