@@ -52,6 +52,13 @@ assumption that the owner survives teardown.
 In test env the API transport is stubbed with `Req.Test` and the rate limiter is
 disabled (`config/test.exs`).
 
+## Fleet Generation resets
+
+Server Reset continuity lives in `test/spacetraders/fleet_generation_test.exs`:
+transactional `DataCase`, public Fleet Generation and Fleet Strategy interfaces,
+and `Req.Test` at the game HTTP boundary. Observe retention through Agent queries
+and Generation history. Admission-cache cleanup requires synchronous execution.
+
 ## Evidence scheduling
 
 Persisted Observation Demand scheduling lives in
