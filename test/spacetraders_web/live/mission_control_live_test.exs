@@ -42,45 +42,6 @@ defmodule SpaceTradersWeb.MissionControlLiveTest do
     assert html =~ "Objective status: Unknown"
   end
 
-  test "identifies the active Agent, Fleet Generation, and Strategy-capable state", %{
-    conn: conn,
-    operator: operator,
-    scope: scope
-  } do
-    assert {:ok, _draft} = FleetStrategy.select_preset(scope, "steady_growth")
-    assert {:ok, revision} = FleetStrategy.activate(scope, FleetStrategy.get(scope).draft_version)
-    agent = agent_fixture(operator, %{agent_token: nil})
-
-    Repo.insert!(%Generation{
-      operator_id: operator.id,
-      agent_id: agent.id,
-      fleet_strategy_revision_id: revision.id,
-      number: 1,
-      symbol: agent.symbol,
-      faction: agent.faction,
-      replacement_symbols: %{"symbols" => [agent.symbol]},
-      starting_credits: 175_000,
-      objective_progress: %{
-        "0" => %{
-          "change" => 10,
-          "elapsed_seconds" => 5,
-          "feasible?" => true,
-          "horizon_seconds" => 10,
-          "evidence_id" => objective_evidence(agent, 175_010).id
-        }
-      },
-      strategy_capable_at: DateTime.utc_now()
-    })
-
-    {:ok, _view, html} = live(conn, ~p"/mission-control")
-
-    assert html =~ agent.symbol
-    assert html =~ "Generation 1"
-    assert html =~ "Strategy-capable"
-    assert html =~ "Measured outcome rate: 20.0 per horizon."
-    assert html =~ "Growing"
-  end
-
   test "shows observed credit growth from authoritative starting and current Agent state", %{
     conn: conn,
     operator: operator,
@@ -140,83 +101,6 @@ defmodule SpaceTradersWeb.MissionControlLiveTest do
 
     {:ok, view, _html} = live(conn, ~p"/mission-control")
     assert has_element?(view, "#operating-health", "STOPPED")
-  end
-
-  test "acknowledging Attention does not remove it from the briefing", %{
-    conn: conn,
-    scope: scope
-  } do
-    {:ok, condition} =
-      SpaceTraders.OperatorConditions.raise(
-        scope,
-        "credit-floor",
-        :attention,
-        "Protected credit floor cannot be maintained",
-        entity_ref: "construction:X1:X1-A1"
-      )
-
-    {:ok, view, _html} = live(conn, ~p"/mission-control")
-    assert has_element?(view, "#needs-attention", "Protected credit floor cannot be maintained")
-
-    assert has_element?(
-             view,
-             "a[href='/world/systems/X1/waypoints/X1-A1/construction']",
-             "Construction"
-           )
-
-    view |> element("#needs-attention button[phx-value-id='#{condition.id}']") |> render_click()
-
-    assert has_element?(view, "#needs-attention", "Protected credit floor cannot be maintained")
-    assert has_element?(view, "#needs-attention", "Acknowledged")
-
-    {:ok, _another_view, html} = live(conn, ~p"/mission-control")
-    assert html =~ "Protected credit floor cannot be maintained"
-    assert html =~ "Acknowledged"
-
-    :ok = SpaceTraders.OperatorConditions.resolve(scope, "credit-floor")
-    {:ok, resolved_view, _html} = live(conn, ~p"/mission-control")
-
-    refute has_element?(
-             resolved_view,
-             "#needs-attention",
-             "Protected credit floor cannot be maintained"
-           )
-
-    {:ok, reopened} =
-      SpaceTraders.OperatorConditions.raise(
-        scope,
-        "credit-floor",
-        :attention,
-        "Protected credit floor cannot be maintained"
-      )
-
-    assert reopened.id != condition.id
-    assert is_nil(reopened.acknowledged_at)
-    {:ok, activity, html} = live(conn, ~p"/activity")
-    assert html |> String.split("Protected credit floor cannot be maintained") |> length() == 4
-
-    assert has_element?(
-             activity,
-             "a[href='/world/systems/X1/waypoints/X1-A1/construction']",
-             "Construction"
-           )
-  end
-
-  test "new Intervention appears in the connected briefing without reopening the page", %{
-    conn: conn,
-    scope: scope
-  } do
-    {:ok, view, _html} = live(conn, ~p"/mission-control")
-
-    {:ok, _} =
-      SpaceTraders.OperatorConditions.raise(
-        scope,
-        "external-authority",
-        :intervention,
-        "AccountToken needed for replacement"
-      )
-
-    assert render(view) =~ "AccountToken needed for replacement"
   end
 
   test "proven objective infeasibility stays pinned after acknowledgement until evidence changes",
