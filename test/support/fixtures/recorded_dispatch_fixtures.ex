@@ -1,7 +1,8 @@
 defmodule SpaceTraders.RecordedDispatchFixtures do
   @moduledoc """
   Valid durable authority for lower public API adapter tests. These fixtures do
-  not claim authenticated Fleet autonomy; runtime proofs use ScenarioCase.
+  not claim authenticated Fleet autonomy; higher-level runtime proofs provide
+  their own authority fixtures at the seam they exercise.
   """
 
   import SpaceTraders.AgentFixtures
