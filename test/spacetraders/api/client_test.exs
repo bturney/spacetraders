@@ -1,5 +1,6 @@
 defmodule SpaceTraders.API.ClientTest do
-  use SpaceTraders.DataCase, async: true
+  # Capacity and shadow-correlation assertions observe application-wide request state.
+  use SpaceTraders.DataCase, async: false
 
   alias SpaceTraders.API
   alias SpaceTraders.API.AgentTokenReference

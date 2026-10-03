@@ -1,5 +1,6 @@
 defmodule SpaceTraders.API.RecordedDispatchTest do
-  use SpaceTraders.DataCase, async: true
+  # Emergency Stop dispatch admission is backed by an application-wide cache.
+  use SpaceTraders.DataCase, async: false
 
   import SpaceTraders.AgentFixtures
   import SpaceTraders.RecordedDispatchFixtures
