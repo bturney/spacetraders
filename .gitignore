@@ -14,10 +14,8 @@ erl_crash.dump
 /tmp/
 spacetraders-*.tar
 
-# Task-scoped proof transcripts from scripts/agent-run.
+# Historical local runner output; product verification does not consume it.
 /artifacts/
-/.agent-deps/
-/.agent-mix/
 /.worktree-env
 /.worktree-mix/
 
