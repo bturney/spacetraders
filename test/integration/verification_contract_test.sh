@@ -11,6 +11,9 @@ import sys
 from pathlib import Path
 
 workflow = Path(sys.argv[1]).read_text()
+if re.search(r"(?m)^  push:\s*$", workflow):
+    raise SystemExit("Verification should not rerun after protected main merges")
+
 jobs = {}
 current_job = None
 
