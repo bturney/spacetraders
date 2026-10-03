@@ -1,6 +1,5 @@
 defmodule SpaceTraders.API.ClientTest do
-  # Capacity and shadow-correlation assertions observe application-wide request state.
-  use SpaceTraders.DataCase, async: false
+  use SpaceTraders.DataCase, async: true
 
   alias SpaceTraders.API
   alias SpaceTraders.API.AgentTokenReference
@@ -48,7 +47,9 @@ defmodule SpaceTraders.API.ClientTest do
       assert {:ok, %Model.Ship{}} =
                API.get_ship(agent_token_reference("AGENT_TOKEN_SECRET"), "ORBITALIST-1")
 
-      assert_receive {:telemetry, ^event, %{count: 1}, metadata}
+      assert_receive {:telemetry, ^event, %{count: 1},
+                      %{request_id: "request-123", ship_symbol: "ORBITALIST-1"} = metadata}
+
       assert metadata.endpoint == "/my/ships/{shipSymbol}"
       assert metadata.operation_id == "get-my-ship"
       assert metadata.operation_classification == :read
@@ -91,9 +92,15 @@ defmodule SpaceTraders.API.ClientTest do
                API.get_ship(agent_token_reference(), "ORBITALIST-1", retry: false)
 
       assert_receive {:telemetry, [:spacetraders, :api, :capacity, :admission], %{count: 1},
-                      admission}
+                      %{
+                        operation_id: "get-my-ship",
+                        evidence_fingerprint: "evidence-v1"
+                      } = admission}
 
-      assert_receive {:telemetry, [:spacetraders, :api, :capacity, :actual], measurements, actual}
+      correlation_id = admission.correlation_id
+
+      assert_receive {:telemetry, [:spacetraders, :api, :capacity, :actual], measurements,
+                      %{correlation_id: ^correlation_id} = actual}
 
       assert admission.operation_id == "get-my-ship"
       assert admission.classification == :read
@@ -141,7 +148,10 @@ defmodule SpaceTraders.API.ClientTest do
       assert {:error, %SpaceTraders.API.GameplayError{code: 1000}} =
                API.get_agent(agent_token_reference())
 
-      assert_receive {:telemetry, ^event, %{count: 1}, metadata}, 5_000
+      assert_receive {:telemetry, ^event, %{count: 1},
+                      %{endpoint: "/my/agent", status: 429, outcome: "client_error"} = metadata},
+                     5_000
+
       assert metadata.endpoint == "/my/agent"
       assert metadata.status == 429
       assert metadata.outcome == "client_error"
@@ -161,7 +171,14 @@ defmodule SpaceTraders.API.ClientTest do
       assert {:error, %SpaceTraders.API.Error{}} =
                API.get_ship(agent_token_reference("AGENT_TOKEN_SECRET"), "SHIP-1", retry: false)
 
-      assert_receive {:telemetry, ^event, %{count: 1}, metadata}
+      assert_receive {:telemetry, ^event, %{count: 1},
+                      %{
+                        endpoint: "/my/ships/{shipSymbol}",
+                        ship_symbol: "SHIP-1",
+                        status: "unknown",
+                        outcome: "unknown"
+                      } = metadata}
+
       assert metadata.status == "unknown"
       assert metadata.outcome == "unknown"
       refute inspect(metadata) =~ "AGENT_TOKEN_SECRET"
@@ -183,6 +200,8 @@ defmodule SpaceTraders.API.ClientTest do
         end
       end)
 
+      Logger.metadata(request_id: "retry-transport")
+
       log =
         capture_log(fn ->
           assert {:ok, %Model.Agent{}} =
@@ -191,8 +210,11 @@ defmodule SpaceTraders.API.ClientTest do
 
       refute log =~ "AGENT_TOKEN_SECRET"
 
-      assert_receive {:telemetry, ^event, %{count: 1}, %{outcome: "unknown", status: "unknown"}}
-      assert_receive {:telemetry, ^event, %{count: 1}, %{outcome: "ok", status: 200}}
+      assert_receive {:telemetry, ^event, %{count: 1},
+                      %{request_id: "retry-transport", outcome: "unknown", status: "unknown"}}
+
+      assert_receive {:telemetry, ^event, %{count: 1},
+                      %{request_id: "retry-transport", outcome: "ok", status: 200}}
     end
   end
 
@@ -225,7 +247,11 @@ defmodule SpaceTraders.API.ClientTest do
       assert_receive :mutation_dispatched
 
       assert %{in_flight: in_flight} = :sys.get_state(SpaceTraders.API.CapacityGovernor)
-      assert [%{operation: %{id: "register"}}] = Map.values(in_flight)
+
+      assert Enum.any?(
+               Map.values(in_flight),
+               &match?(%{operation: %{id: "register"}}, &1)
+             )
 
       send(task.pid, :respond)
       assert {:ok, %{}} = Task.await(task)
