@@ -280,8 +280,24 @@ defmodule SpaceTraders.Evidence do
       "get-my-ship",
       ["response"],
       opts,
-      fn reference, read_opts -> API.get_ship(reference, ship_symbol, read_opts) end
+      fn reference, read_opts ->
+        with {:ok, ship} <- API.get_ship(reference, ship_symbol, read_opts),
+             :ok <- SpaceTraders.Evidence.ShipObservation.validate(ship, ship_symbol) do
+          {:ok, ship}
+        end
+      end
     )
+  end
+
+  @doc "Validates a supplied Ship against its fresh retained authoritative read, or reads anew."
+  def recovery_ship(%AgentRecord{} = agent, symbol, supplied, since \\ nil) do
+    observation = latest_observation(agent, "ship:#{symbol}")
+
+    if SpaceTraders.Evidence.ShipObservation.matches?(observation, supplied, symbol, since) do
+      {:ok, supplied}
+    else
+      get_ship(agent, symbol, lane: :safety, owner: "ship_execution")
+    end
   end
 
   @doc "Reads authoritative Contracts through a typed Observation Demand."
@@ -402,8 +418,47 @@ defmodule SpaceTraders.Evidence do
     result
   end
 
+  defp settle_owned_demand(
+         {:ok, value} = result,
+         nil,
+         %AgentRecord{} = agent,
+         subject,
+         operation_id,
+         _typed_demand
+       ) do
+    observation =
+      authoritative_observation(
+        operation_id,
+        [subject],
+        %{response: serialize_read_value(value)},
+        Clock.utc_now()
+      )
+
+    case fulfil_demands(agent, subject, observation) do
+      {:ok, _} -> result
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
   defp settle_owned_demand(result, nil, _agent, _subject, _operation_id, _typed_demand),
     do: result
+
+  @doc false
+  def recovery_observed_at(agent_id, operation_id, dependencies, fallback) do
+    agent = Repo.get!(AgentRecord, agent_id)
+
+    subject =
+      SpaceTraders.SafetyFence.DependencyKey.observation_subject(
+        operation_id,
+        dependencies,
+        agent.symbol
+      )
+
+    case subject && latest_observation(agent, subject) do
+      %Observation{operation_id: ^operation_id, observed_at: observed_at} -> observed_at
+      _ -> DateTime.add(fallback, -1, :microsecond)
+    end
+  end
 
   defp active_revision(operator_id) do
     Revision

@@ -483,29 +483,38 @@ defmodule SpaceTraders.ContractExecutionTest do
       })
 
     Req.Test.stub(SpaceTraders.API, fn conn ->
-      assert {conn.method, conn.request_path} == {"GET", "/v2/my/contracts"}
+      if conn.request_path == "/v2/my/ships/#{ship.symbol}" do
+        Req.Test.json(conn, %{
+          "data" =>
+            ship_body(ship.symbol, %{
+              "nav" => nav_body("DOCKED", destination: "X1-UX81-A2")
+            })
+        })
+      else
+        assert {conn.method, conn.request_path} == {"GET", "/v2/my/contracts"}
 
-      Req.Test.json(conn, %{
-        "data" => [
-          %{
-            "id" => "ctr-1",
-            "accepted" => true,
-            "fulfilled" => true,
-            "terms" => %{
-              "deadline" => "2099-01-01T00:00:00Z",
-              "deliver" => [
-                %{
-                  "tradeSymbol" => "IRON_ORE",
-                  "destinationSymbol" => "X1-UX81-A2",
-                  "unitsRequired" => 5,
-                  "unitsFulfilled" => 5
-                }
-              ],
-              "payment" => %{}
+        Req.Test.json(conn, %{
+          "data" => [
+            %{
+              "id" => "ctr-1",
+              "accepted" => true,
+              "fulfilled" => true,
+              "terms" => %{
+                "deadline" => "2099-01-01T00:00:00Z",
+                "deliver" => [
+                  %{
+                    "tradeSymbol" => "IRON_ORE",
+                    "destinationSymbol" => "X1-UX81-A2",
+                    "unitsRequired" => 5,
+                    "unitsFulfilled" => 5
+                  }
+                ],
+                "payment" => %{}
+              }
             }
-          }
-        ]
-      })
+          ]
+        })
+      end
     end)
 
     live_ship =
@@ -556,29 +565,43 @@ defmodule SpaceTraders.ContractExecutionTest do
     {:ok, _} = MutationAttempts.record_outcome(attempt, :ambiguous, %{reason: "timeout"})
 
     Req.Test.stub(SpaceTraders.API, fn conn ->
-      assert {conn.method, conn.request_path} == {"GET", "/v2/my/contracts"}
+      if conn.request_path == "/v2/my/ships/#{ship.symbol}" do
+        Req.Test.json(conn, %{
+          "data" =>
+            ship_body(ship.symbol, %{
+              "nav" => nav_body("DOCKED", destination: "X1-UX81-A2"),
+              "cargo" => %{
+                "capacity" => 40,
+                "units" => 11,
+                "inventory" => [%{"symbol" => "IRON_ORE", "units" => 11}]
+              }
+            })
+        })
+      else
+        assert {conn.method, conn.request_path} == {"GET", "/v2/my/contracts"}
 
-      Req.Test.json(conn, %{
-        "data" => [
-          %{
-            "id" => "ctr-1",
-            "accepted" => true,
-            "fulfilled" => false,
-            "terms" => %{
-              "deadline" => "2099-01-01T00:00:00Z",
-              "deliver" => [
-                %{
-                  "tradeSymbol" => "IRON_ORE",
-                  "destinationSymbol" => "X1-UX81-A2",
-                  "unitsRequired" => 5,
-                  "unitsFulfilled" => 5
-                }
-              ],
-              "payment" => %{}
+        Req.Test.json(conn, %{
+          "data" => [
+            %{
+              "id" => "ctr-1",
+              "accepted" => true,
+              "fulfilled" => false,
+              "terms" => %{
+                "deadline" => "2099-01-01T00:00:00Z",
+                "deliver" => [
+                  %{
+                    "tradeSymbol" => "IRON_ORE",
+                    "destinationSymbol" => "X1-UX81-A2",
+                    "unitsRequired" => 5,
+                    "unitsFulfilled" => 5
+                  }
+                ],
+                "payment" => %{}
+              }
             }
-          }
-        ]
-      })
+          ]
+        })
+      end
     end)
 
     live_ship =
@@ -624,29 +647,38 @@ defmodule SpaceTraders.ContractExecutionTest do
       })
 
     Req.Test.stub(SpaceTraders.API, fn conn ->
-      assert {conn.method, conn.request_path} == {"GET", "/v2/my/contracts"}
+      if conn.request_path == "/v2/my/ships/#{ship.symbol}" do
+        Req.Test.json(conn, %{
+          "data" =>
+            ship_body(ship.symbol, %{
+              "nav" => nav_body("DOCKED", destination: "X1-UX81-A2")
+            })
+        })
+      else
+        assert {conn.method, conn.request_path} == {"GET", "/v2/my/contracts"}
 
-      Req.Test.json(conn, %{
-        "data" => [
-          %{
-            "id" => "ctr-1",
-            "accepted" => true,
-            "fulfilled" => false,
-            "terms" => %{
-              "deadline" => "2099-01-01T00:00:00Z",
-              "deliver" => [
-                %{
-                  "tradeSymbol" => "IRON_ORE",
-                  "destinationSymbol" => "X1-UX81-A2",
-                  "unitsRequired" => 5,
-                  "unitsFulfilled" => 5
-                }
-              ],
-              "payment" => %{}
+        Req.Test.json(conn, %{
+          "data" => [
+            %{
+              "id" => "ctr-1",
+              "accepted" => true,
+              "fulfilled" => false,
+              "terms" => %{
+                "deadline" => "2099-01-01T00:00:00Z",
+                "deliver" => [
+                  %{
+                    "tradeSymbol" => "IRON_ORE",
+                    "destinationSymbol" => "X1-UX81-A2",
+                    "unitsRequired" => 5,
+                    "unitsFulfilled" => 5
+                  }
+                ],
+                "payment" => %{}
+              }
             }
-          }
-        ]
-      })
+          ]
+        })
+      end
     end)
 
     live_ship =

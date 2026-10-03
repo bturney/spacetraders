@@ -320,6 +320,8 @@ defmodule SpaceTraders.Fleet.Intents do
              %Intent{status: status} = intent when status != "awaiting_confirmation" <-
                boot_intent(ship.id, expected_intent_id),
              :ok <- Agent.execution_allowed?(agent) do
+          intent = recover_selected_evidence(intent, agent.id)
+
           case Agent.handle_game_result(
                  agent,
                  SpaceTraders.Evidence.get_ship(AgentTokenReference.new(agent), ship_symbol)
@@ -342,14 +344,25 @@ defmodule SpaceTraders.Fleet.Intents do
     end
   end
 
-  def reconcile(agent_id, ship_symbol, live_ship, _trigger, expected_intent_id) do
+  def reconcile(agent_id, ship_symbol, live_ship, trigger, expected_intent_id) do
     with %Ship{} = ship <- Repo.get_by(Ship, agent_id: agent_id, symbol: ship_symbol),
          %AgentRecord{} = agent <- Repo.get(AgentRecord, agent_id),
          :ok <- Agent.execution_allowed?(agent) do
       case unfinished_intent_for_ship(ship.id) do
         %Intent{} = intent ->
           if intent_matches_event?(intent, expected_intent_id) do
-            advance_intent_for_trigger(agent, intent.id, live_ship)
+            {intent, evidence} = recovery_evidence(agent, intent, live_ship)
+
+            case evidence do
+              {:ok, fresh} ->
+                advance_intent_for_trigger(agent, intent.id, fresh)
+
+              {:error, reason} when trigger == :boot ->
+                intent_recovery_retry_or_block(ship, intent, agent_id, reason)
+
+              {:error, reason} ->
+                block_intents(intent, {:awaiting_reconciliation, reason})
+            end
           else
             :ok
           end
@@ -364,6 +377,19 @@ defmodule SpaceTraders.Fleet.Intents do
 
   # Wake-up evidence re-enters the supported Intent engine. Retired timer
   # evidence is ignored and cannot resume execution.
+  defp recover_selected_evidence(
+         %Intent{mutation_attempt_id: nil, in_flight_action: action} = intent,
+         agent_id
+       )
+       when is_map(action) do
+    case MutationAttempts.recover_legacy(intent, agent_id) do
+      {:ok, recovered} -> recovered
+      {:error, _} -> intent
+    end
+  end
+
+  defp recover_selected_evidence(intent, _agent_id), do: intent
+
   defp advance_intent_for_trigger(agent, intent_id, live_ship) do
     case Repo.get(Intent, intent_id) do
       %Intent{status: status} = intent when status in ["active", "waiting", "blocked"] ->
@@ -460,7 +486,25 @@ defmodule SpaceTraders.Fleet.Intents do
   end
 
   @doc "Re-enters reconciliation for one unfinished Intent with a fresh authoritative Ship observation."
-  def advance(agent, %Intent{} = intent, live_ship), do: advance_intents(agent, intent, live_ship)
+  def advance(agent, %Intent{} = intent, live_ship) do
+    {intent, evidence} = recovery_evidence(agent, intent, live_ship)
+
+    case evidence do
+      {:ok, fresh} -> advance_intents(agent, intent, fresh)
+      {:error, reason} -> block_intents(intent, {:awaiting_reconciliation, reason})
+    end
+  end
+
+  defp recovery_evidence(agent, intent, supplied) do
+    intent = Repo.get!(Intent, intent.id)
+    ship = Repo.get!(Ship, intent.ship_id)
+    intent = recover_selected_evidence(intent, agent.id)
+    attempt = MutationAttempts.latest_for_intent(intent)
+    since = attempt && (attempt.sent_or_unknown_at || attempt.prepared_at)
+
+    {intent,
+     Agent.handle_game_result(agent, Evidence.recovery_ship(agent, ship.symbol, supplied, since))}
+  end
 
   @doc false
   def unfinished_intent(intent_id) do
@@ -1188,7 +1232,63 @@ defmodule SpaceTraders.Fleet.Intents do
   # arrival, and cooldown — so recovery can resume from game truth instead of
   # replaying a fixed script.
   defp advance_intents(agent, intent, live_ship) do
-    do_advance_intents(agent, intent, live_ship)
+    result =
+      case MutationAttempts.latest_for_intent(intent) do
+        nil when is_map(intent.in_flight_action) ->
+          block_intents(intent, {:ambiguous_operation_evidence, intent.in_flight_action["kind"]})
+
+        %{state: "prepared"} when is_map(intent.in_flight_action) ->
+          resume_prepared_action(agent, intent, live_ship)
+
+        %{state: "absent", retry_authorized: true} = absent
+        when is_map(intent.in_flight_action) ->
+          if prerequisite_action_reconciled?(intent.in_flight_action, live_ship) do
+            with {:ok, observations} <-
+                   accepted_observations(
+                     agent,
+                     live_ship,
+                     absent,
+                     intent.in_flight_action,
+                     "Fresh evidence satisfies the selected outcome before retry"
+                   ),
+                 {:ok, _} <- MutationAttempts.withdraw_retry(absent, observations) do
+              do_advance_intents(agent, intent, live_ship)
+            end
+          else
+            retry_absent_action(agent, intent, live_ship, intent.in_flight_action, absent)
+          end
+
+        _ ->
+          do_advance_intents(agent, intent, live_ship)
+      end
+
+    case result do
+      {:error, reason} -> block_intents(intent, {:awaiting_reconciliation, reason})
+      result -> result
+    end
+  end
+
+  defp resume_prepared_action(agent, intent, live_ship) do
+    if prerequisite_action_reconciled?(intent.in_flight_action, live_ship) do
+      attempt = MutationAttempts.latest_for_intent(intent)
+
+      with {:ok, _} <-
+             MutationAttempts.record_not_sent(
+               attempt,
+               "Authoritative state already satisfies the selected outcome"
+             ) do
+        do_advance_intents(agent, intent, live_ship)
+      end
+    else
+      case Agent.handle_game_result(agent, SpaceTraders.API.dispatch_recorded(intent)) do
+        {:ok, _result} ->
+          # Recovery re-enters from owned facts, not an assumed response effect.
+          reconcile(agent.id, live_ship.symbol, nil, :intent_retry, intent.id)
+
+        {:error, reason} ->
+          block_intents(intent, {:awaiting_reconciliation, reason})
+      end
+    end
   end
 
   defp do_advance_intents(
@@ -1850,7 +1950,8 @@ defmodule SpaceTraders.Fleet.Intents do
             else: block_intents(intent, :scan_result_unavailable)
         end
 
-      attempt when not is_nil(attempt) and attempt.state in ["sent_or_unknown", "ambiguous"] ->
+      %{sent_or_unknown_at: %DateTime{}} = attempt
+      when attempt.state in ["sent_or_unknown", "ambiguous", "bounded_unknown"] ->
         expiration = live_ship.cooldown && live_ship.cooldown.expiration
 
         with true <- Fleet.cooldown_active?(live_ship),
@@ -1862,7 +1963,13 @@ defmodule SpaceTraders.Fleet.Intents do
                    "get-my-ship",
                    attempt,
                    :accepted,
-                   "Fresh Ship cooldown proves a scan occurred after its dispatch"
+                   "Fresh Ship cooldown proves a scan occurred after its dispatch",
+                   Evidence.recovery_observed_at(
+                     attempt.agent_id,
+                     "get-my-ship",
+                     attempt.dependency_keys,
+                     attempt.prepared_at
+                   )
                  )
                ]),
              {:ok, intent} <-
@@ -1971,6 +2078,8 @@ defmodule SpaceTraders.Fleet.Intents do
     end
   end
 
+  defp chart_after_dispatch?(_chart_time, %{sent_or_unknown_at: nil}), do: false
+
   defp chart_after_dispatch?(chart_time, %{state: state, sent_or_unknown_at: sent_at})
        when state == "succeeded",
        do: DateTime.compare(chart_time, DateTime.truncate(sent_at, :second)) in [:eq, :gt]
@@ -1991,7 +2100,13 @@ defmodule SpaceTraders.Fleet.Intents do
                "get-waypoint",
                attempt,
                :accepted,
-               "Fresh Waypoint chart is attributed to the Agent after dispatch"
+               "Fresh Waypoint chart is attributed to the Agent after dispatch",
+               Evidence.recovery_observed_at(
+                 attempt.agent_id,
+                 "get-waypoint",
+                 attempt.dependency_keys,
+                 attempt.prepared_at
+               )
              )
            ]) do
       :ok
@@ -2233,8 +2348,9 @@ defmodule SpaceTraders.Fleet.Intents do
         {%{state: "succeeded"}, _} ->
           true
 
-        {%{state: state, sent_or_unknown_at: sent}, %{expiration: expiration}}
-        when state in ["sent_or_unknown", "ambiguous"] and is_binary(expiration) ->
+        {%{state: state, sent_or_unknown_at: %DateTime{} = sent}, %{expiration: expiration}}
+        when state in ["sent_or_unknown", "ambiguous", "bounded_unknown"] and
+               is_binary(expiration) ->
           with true <- Fleet.cooldown_active?(ship),
                {:ok, expires, _} <- DateTime.from_iso8601(expiration),
                true <- DateTime.after?(expires, sent),
@@ -2284,7 +2400,8 @@ defmodule SpaceTraders.Fleet.Intents do
       end
 
     cond do
-      (attempt && attempt.state in ["succeeded", "sent_or_unknown", "ambiguous"]) and
+      (attempt &&
+         attempt.state in ["succeeded", "sent_or_unknown", "ambiguous", "bounded_unknown"]) and
           accepted? ->
         with :ok <- resource_acceptance_proven?(attempt, ship),
              :ok <- reconcile_resource_attempt(attempt) do
@@ -2339,7 +2456,13 @@ defmodule SpaceTraders.Fleet.Intents do
              "get-my-ship",
              attempt,
              :accepted,
-             "Fresh Cargo and post-dispatch cooldown prove acquisition"
+             "Fresh Cargo and post-dispatch cooldown prove acquisition",
+             Evidence.recovery_observed_at(
+               attempt.agent_id,
+               "get-my-ship",
+               attempt.dependency_keys,
+               attempt.prepared_at
+             )
            )
          ]) do
       {:ok, _} -> :ok
@@ -2359,6 +2482,9 @@ defmodule SpaceTraders.Fleet.Intents do
   end
 
   defp resource_acceptance_proven?(%{state: "succeeded"}, _ship), do: :ok
+
+  defp resource_acceptance_proven?(%{sent_or_unknown_at: nil}, _ship),
+    do: {:error, :historical_action_unresolved}
 
   defp resource_acceptance_proven?(attempt, ship) do
     with true <- Fleet.cooldown_active?(ship),
@@ -3169,16 +3295,12 @@ defmodule SpaceTraders.Fleet.Intents do
         :ok
 
       attempt ->
-        with {:ok, game_agent} <-
-               Agent.handle_game_result(
-                 agent,
-                 Evidence.get_agent(AgentTokenReference.new(agent), lane: :safety)
-               ),
+        with {:ok, game_agent} <- recovery_agent(agent),
              {:ok, _attempt} <-
                MutationAttempts.reconcile(
                  attempt,
                  :accepted,
-                 ship_purchase_observations(agent, intent, fresh, game_agent)
+                 ship_purchase_observations(agent, attempt, fresh, game_agent)
                ) do
           :ok
         end
@@ -3765,7 +3887,13 @@ defmodule SpaceTraders.Fleet.Intents do
           Evidence.authoritative_observation(
             "get-my-ship",
             [DependencyKey.ship(agent.id, live_ship.symbol)],
-            %{cargo: %{units: live_ship.cargo.units}}
+            %{cargo: %{units: live_ship.cargo.units}},
+            Evidence.recovery_observed_at(
+              agent.id,
+              "get-my-ship",
+              [DependencyKey.ship(agent.id, live_ship.symbol)],
+              attempt.prepared_at
+            )
           )
         ]
 
@@ -3794,7 +3922,13 @@ defmodule SpaceTraders.Fleet.Intents do
           Evidence.authoritative_observation(
             "get-my-ship",
             [DependencyKey.ship(agent.id, live_ship.symbol)],
-            %{cargo: %{units: live_ship.cargo.units}}
+            %{cargo: %{units: live_ship.cargo.units}},
+            Evidence.recovery_observed_at(
+              agent.id,
+              "get-my-ship",
+              [DependencyKey.ship(agent.id, live_ship.symbol)],
+              attempt.prepared_at
+            )
           )
         ]
 
@@ -4742,7 +4876,11 @@ defmodule SpaceTraders.Fleet.Intents do
   defp reconcile_accepted_attempt(agent, intent, live_ship, basis) do
     case MutationAttempts.unresolved_for_intent(intent) do
       nil ->
-        :ok
+        case MutationAttempts.latest_for_intent(intent) do
+          %{state: state} when state in ["accepted", "succeeded", "not_sent"] -> :ok
+          %{state: "absent", retry_authorized: false} -> :ok
+          _ -> {:error, :historical_action_unresolved}
+        end
 
       attempt ->
         with {:ok, observations} <-
@@ -4798,14 +4936,22 @@ defmodule SpaceTraders.Fleet.Intents do
 
       attempt ->
         with {:ok, observations} <- absence_observations(agent, live_ship, attempt, action),
-             {:ok, absent} <- MutationAttempts.reconcile(attempt, :absent, observations),
-             {:ok, result} <- retry_under_current_claim(agent, intent, live_ship, action, absent),
-             {:ok, result} <- Agent.handle_game_result(agent, result) do
-          accept_retried_action(agent, intent, live_ship, action, result)
+             {:ok, absent} <- MutationAttempts.reconcile(attempt, :absent, observations) do
+          retry_absent_action(agent, intent, live_ship, action, absent)
         else
-          {:error, :no_current_ship_claim} -> supersede_for_lost_claim(intent, true)
-          {:error, reason} -> block_intents(intent, reason)
+          {:error, reason} -> block_intents(intent, {:awaiting_reconciliation, reason})
         end
+    end
+  end
+
+  defp retry_absent_action(agent, intent, live_ship, action, absent) do
+    with {:ok, result} <- retry_under_current_claim(agent, intent, live_ship, action, absent),
+         {:ok, result} <- Agent.handle_game_result(agent, result) do
+      # Retry preparation changed the linked identity; continuation uses that row.
+      accept_retried_action(agent, Repo.get!(Intent, intent.id), live_ship, action, result)
+    else
+      {:error, :no_current_ship_claim} -> supersede_for_lost_claim(intent, true)
+      {:error, reason} -> block_intents(intent, {:awaiting_reconciliation, reason})
     end
   end
 
@@ -4818,11 +4964,7 @@ defmodule SpaceTraders.Fleet.Intents do
   defp absence_observations(agent, live_ship, attempt, %{"kind" => "refuel"}) do
     with fuel_before when is_integer(fuel_before) <- intent_fuel_before(attempt),
          true <- live_ship.fuel.current == fuel_before,
-         {:ok, game_agent} <-
-           Agent.handle_game_result(
-             agent,
-             Evidence.get_agent(AgentTokenReference.new(agent), lane: :safety)
-           ) do
+         {:ok, game_agent} <- recovery_agent(agent) do
       {:ok,
        [
          reconciliation_observation(
@@ -4891,11 +5033,7 @@ defmodule SpaceTraders.Fleet.Intents do
          ship_facts,
          credit_basis
        ) do
-    with {:ok, game_agent} <-
-           Agent.handle_game_result(
-             agent,
-             Evidence.get_agent(AgentTokenReference.new(agent), lane: :safety)
-           ) do
+    with {:ok, game_agent} <- recovery_agent(agent) do
       {:ok,
        [
          reconciliation_observation(
@@ -4922,6 +5060,22 @@ defmodule SpaceTraders.Fleet.Intents do
     Enum.any?(observations, fn facts ->
       match?(%{credits: ^credits_before}, Map.get(facts, :facts))
     end)
+  end
+
+  defp recovery_agent(agent) do
+    with {:ok, game_agent} <-
+           Agent.handle_game_result(
+             agent,
+             Evidence.get_agent(AgentTokenReference.new(agent), lane: :safety)
+           ),
+         true <-
+           game_agent.symbol == agent.symbol and is_integer(game_agent.credits) and
+             game_agent.credits >= 0 do
+      {:ok, game_agent}
+    else
+      false -> {:error, :authoritative_credit_facts_required}
+      error -> error
+    end
   end
 
   defp intent_fuel_before(attempt) do
@@ -4951,7 +5105,13 @@ defmodule SpaceTraders.Fleet.Intents do
         request_fingerprint: attempt.request_fingerprint,
         outcome: Atom.to_string(outcome),
         basis: basis
-      })
+      }),
+      Evidence.recovery_observed_at(
+        attempt.agent_id,
+        operation_id,
+        dependency_keys,
+        attempt.prepared_at
+      )
     )
   end
 
@@ -5411,14 +5571,7 @@ defmodule SpaceTraders.Fleet.Intents do
                  Ecto.Changeset.change(current,
                    status: "blocked",
                    blocker: Fleet.intent_blocker({:retry_exhausted, reason}),
-                   in_flight_action:
-                     if(
-                       unresolved_cargo_action?(current) or unresolved_jump_action?(current) or
-                         unresolved_warp_action?(current) or
-                         unresolved_navigation_action?(current),
-                       do: current.in_flight_action,
-                       else: nil
-                     )
+                   in_flight_action: current.in_flight_action
                  )
                )
              else

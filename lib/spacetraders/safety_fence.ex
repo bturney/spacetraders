@@ -41,6 +41,13 @@ defmodule SpaceTraders.SafetyFence do
   def blocking_attempts([], _excluded_attempt_id, _admitted_bounded_unknown_ids), do: []
 
   def blocking_attempts(dependency_keys, excluded_attempt_id, admitted_bounded_unknown_ids) do
+    # An opaque historical action may have lost the recipient identity. Its
+    # Agent-scoped protection also covers that Agent's typed resource keys.
+    dependency_keys =
+      Enum.uniq(
+        dependency_keys ++ SpaceTraders.SafetyFence.DependencyKey.agent_scopes(dependency_keys)
+      )
+
     Attempt
     |> where([attempt], attempt.state in ^@active_states)
     |> where(

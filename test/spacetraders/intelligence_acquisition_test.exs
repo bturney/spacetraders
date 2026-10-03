@@ -151,6 +151,7 @@ defmodule SpaceTraders.IntelligenceAcquisitionTest do
 
   test "Market acquisition navigates within its claimed root Intent and waits for arrival" do
     {agent, ship, portfolio, commitment} = claimed_ship()
+    arrival = start_supervised!({Elixir.Agent, fn -> false end})
     test_pid = self()
     ship_path = "/v2/my/ships/#{ship.symbol}"
     orbit_path = "#{ship_path}/orbit"
@@ -163,7 +164,12 @@ defmodule SpaceTraders.IntelligenceAcquisitionTest do
 
       case {conn.method, conn.request_path} do
         {"GET", ^ship_path} ->
-          Req.Test.json(conn, %{"data" => ship_body(ship.symbol)})
+          nav =
+            if Elixir.Agent.get(arrival, & &1),
+              do: nav_body("DOCKED", destination: "X1-UX81-A2"),
+              else: nav_body("DOCKED")
+
+          Req.Test.json(conn, %{"data" => ship_body(ship.symbol, %{"nav" => nav})})
 
         {"POST", ^orbit_path} ->
           Req.Test.json(conn, %{"data" => %{"nav" => nav_body("IN_ORBIT")}})
@@ -223,6 +229,7 @@ defmodule SpaceTraders.IntelligenceAcquisitionTest do
       })
       |> Model.Ship.from_json()
 
+    Elixir.Agent.update(arrival, fn _ -> true end)
     assert :ok = Intents.reconcile(agent.id, ship.symbol, arrived, :arrival, intent.id)
     assert %Intent{status: "completed"} = Repo.get!(Intent, intent.id)
     assert_receive {"GET", ^market_path}
@@ -1007,6 +1014,8 @@ defmodule SpaceTraders.IntelligenceAcquisitionTest do
   end
 
   test "a fresh credit-growth Fleet acquires one Market Listing through a claimed root Intent" do
+    arrival = start_supervised!({Elixir.Agent, fn -> false end})
+
     {agent, ship, previous, _commitment} =
       claimed_ship(%{
         "objective" => "Grow credits",
@@ -1055,7 +1064,12 @@ defmodule SpaceTraders.IntelligenceAcquisitionTest do
           Req.Test.json(conn, %{"data" => [ship_body(ship.symbol)]})
 
         {"GET", ^ship_path} ->
-          Req.Test.json(conn, %{"data" => ship_body(ship.symbol)})
+          nav =
+            if Elixir.Agent.get(arrival, & &1),
+              do: nav_body("DOCKED", destination: "X1-UX81-A2"),
+              else: nav_body("DOCKED")
+
+          Req.Test.json(conn, %{"data" => ship_body(ship.symbol, %{"nav" => nav})})
 
         {"POST", ^orbit_path} ->
           Req.Test.json(conn, %{"data" => %{"nav" => nav_body("IN_ORBIT")}})
@@ -1109,6 +1123,7 @@ defmodule SpaceTraders.IntelligenceAcquisitionTest do
       })
       |> Model.Ship.from_json()
 
+    Elixir.Agent.update(arrival, fn _ -> true end)
     assert :ok = Intents.reconcile(agent.id, ship.symbol, arrived, :arrival, intent.id)
     assert_receive {"GET", ^market_path}
     assert %Intent{status: "completed"} = Repo.get!(Intent, intent.id)
