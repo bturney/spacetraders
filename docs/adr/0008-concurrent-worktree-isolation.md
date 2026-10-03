@@ -8,7 +8,7 @@ The database is a per-task name rather than a per-run partition on purpose. Ordi
 
 ## Consequences
 
-The cache is pruned explicitly, retaining entries for at most 30 days and 10 GiB by default. The worktree and Task Workspace integration scripts remain available for manual diagnosis, but are not a required CI gate; their maintenance cost and overlap with the canonical lifecycle outweighed the signal from running them on every change.
+The cache is pruned explicitly, retaining entries for at most 30 days and 10 GiB by default. The worktree and Task Workspace integration scripts were removed by #538 pending a separate first-principles decision about whether workspace orchestration should exist and what guarantees it should own. Their former maintenance cost and overlap with the canonical lifecycle outweighed the signal from running them on every change.
 
 A bare gate invocation in an ordinary checkout prepares the stable default test database before running checks. Only a task with an allocated worktree environment gets its own database, so the gate command has one behaviour and the isolation is explicit rather than inferred from the environment.
 
