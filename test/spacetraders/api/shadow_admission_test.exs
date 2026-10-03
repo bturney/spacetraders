@@ -107,6 +107,7 @@ defmodule SpaceTraders.API.ShadowAdmissionTest do
 
     assert_receive {:telemetry, [:spacetraders, :api, :capacity, :admission], %{count: 1},
                     %{correlation_id: ^correlation_id} = admission}
+
     assert admission.disposition == :would_admit
 
     safety_id = ShadowAdmission.observe_request(operation, %{lane: :safety}, name)
