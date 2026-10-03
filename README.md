@@ -77,9 +77,9 @@ DATABASE_URL=postgres://postgres:postgres@localhost/spacetraders_test \
   mix test test/spacetraders/ship_execution_durability_test.exs
 ```
 
-Whole-runtime qualification is diagnostic-only and stays outside ordinary
-`mix test` and `scripts/verify`. Run it explicitly when checking autonomous
-runtime composition across a restart:
+Whole-runtime qualification is a standalone diagnostic outside ordinary
+`mix test` and `scripts/verify`. It owns its setup and teardown directly. Run it
+explicitly when checking autonomous runtime composition across a restart:
 
 ```sh
 mix test test/diagnostics/runtime_qualification.exs --seed 0 --trace

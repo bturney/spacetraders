@@ -46,23 +46,15 @@ When a test fails only in the full suite, compare against a clean
 `origin/main` checkout before blaming the change — the failure may be
 environment flakiness. Run one file directly to isolate a real regression.
 
-## ScenarioCase lifecycle
+## Regression workflow
 
-`SpaceTraders.ScenarioCase` is shared setup for the recorded-dispatch
-integration tests and the explicit runtime qualification. It provides
-PostgreSQL sandbox mode, `TestClock`, a Phoenix connection, and API stubbing;
-process-specific admission and observation helpers belong in the individual
-proof that needs them.
+Put each behavioral contract at its smallest supported seam and give each test
+only the setup it needs. Use `DataCase` for transactional persistence tests;
+tests of independent durability use synchronous ExUnit cases, real PostgreSQL
+commits, and a separately checked-out observer. Stub the game boundary with
+`Req.Test`; test env disables API rate limiting.
 
-Its teardown calls `ShipServer.stop_all()` (`test/support/scenario_case.ex`),
-after which the shared sandbox owner is no longer usable. Treat teardown as the
-end of sandbox ownership. In test env the API transport is stubbed with
-`Req.Test` and the rate limiter is disabled (`config/test.exs`).
-
-## Runtime coverage ownership
-
-The broad autonomous-runtime regression is retired. Put each contract at its
-smallest public seam:
+Current seam owners:
 
 - first-operator AccountToken persistence:
   `test/spacetraders_web/controllers/operator_setup_controller_test.exs`
@@ -79,16 +71,17 @@ smallest public seam:
 - first dispatch durability and ambiguous recovery:
   `test/spacetraders/ship_execution_durability_test.exs`
 
-Whole-runtime composition is the one retained non-merge concern; use the
-diagnostic below for that question.
+- whole-runtime composition across runtime restart:
+  `test/diagnostics/runtime_qualification.exs` (diagnostic only)
 
 ## Runtime qualification
 
-`test/diagnostics/runtime_qualification.exs` is a timing-sensitive diagnostic,
-not merge verification. It retains one cross-seam question: can fresh
-authenticated Strategy activation compose the production runtime into a
-profitable distant trade across a runtime restart and surface the result in
-Mission Control?
+`test/diagnostics/runtime_qualification.exs` is a timing-sensitive, standalone
+diagnostic, not merge verification. It asks whether fresh authenticated Strategy
+activation composes the production runtime into a profitable distant trade
+across a runtime restart and surfaces the result in Mission Control. Its clock,
+API stub, PostgreSQL mode, authenticated connection, and teardown are local to
+that diagnostic; it does not introduce a shared test lifecycle.
 
 Run it only when that whole-runtime composition is the subject:
 
@@ -97,8 +90,8 @@ mix test test/diagnostics/runtime_qualification.exs --seed 0 --trace
 ```
 
 The file deliberately does not end in `_test.exs`, so ordinary `mix test` and
-`scripts/verify` do not discover it. Keep seam-level regression assertions in
-their deterministic owners instead: Observation Demand restart in
+`scripts/verify` do not discover it. Keep seam-level assertions in their
+deterministic owners: Observation Demand restart in
 `test/spacetraders/evidence_scheduling_test.exs`, incomplete Market coverage
 planning in `test/spacetraders/fleet_planning_test.exs`, and first/lost-response
 Ship dispatch recovery in

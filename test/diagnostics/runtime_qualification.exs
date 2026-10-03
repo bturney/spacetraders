@@ -19,21 +19,51 @@ defmodule SpaceTraders.RuntimeQualification do
       mix test test/diagnostics/runtime_qualification.exs --seed 0 --trace
   """
 
-  use SpaceTraders.ScenarioCase
+  use ExUnit.Case, async: false
+
+  @endpoint SpaceTradersWeb.Endpoint
+
+  use SpaceTradersWeb, :verified_routes
 
   import Ecto.Query
   import Phoenix.LiveViewTest
+  import Phoenix.ConnTest
+  import Plug.Conn
 
   alias SpaceTraders.Agent.{Agent, Operator}
   alias SpaceTraders.Evidence.DemandScheduler
   alias SpaceTraders.Fleet.ShipServerBoot
   alias SpaceTraders.FleetAllocation.Reconciler
   alias SpaceTraders.MutationAttempts.{Attempt, Outcome}
+  alias SpaceTraders.Repo
   alias SpaceTraders.RuntimeBaselineGame, as: Game
+  alias SpaceTraders.TestClock
+  alias Ecto.Adapters.SQL.Sandbox
 
   @moduletag committed: true
+  @moduletag skip: Repo.__adapter__() != Ecto.Adapters.Postgres && "requires PostgreSQL"
 
   setup do
+    :ok = Sandbox.mode(Repo, :auto)
+    start_supervised!({TestClock, ~U[2026-09-14 12:00:00Z]})
+
+    previous_clock = Application.get_env(:spacetraders, :clock)
+    Application.put_env(:spacetraders, :clock, TestClock)
+
+    on_exit(fn ->
+      SpaceTraders.Fleet.ShipServer.stop_all()
+      SpaceTraders.Contracts.DeadlineServer.stop_all()
+      SpaceTraders.EmergencyStopAdmission.clear()
+      SpaceTraders.FleetGenerationAdmission.clear()
+      Sandbox.mode(Repo, :manual)
+
+      if previous_clock do
+        Application.put_env(:spacetraders, :clock, previous_clock)
+      else
+        Application.delete_env(:spacetraders, :clock)
+      end
+    end)
+
     advance_time(
       DateTime.diff(DateTime.utc_now(), SpaceTraders.Clock.utc_now(), :microsecond),
       :microsecond
@@ -69,7 +99,22 @@ defmodule SpaceTraders.RuntimeQualification do
       Repo.delete_all(from e in SpaceTraders.Timeline.Event, where: e.owner_id == "BASELINE-1")
     end)
 
-    :ok
+    {:ok, conn: Phoenix.ConnTest.build_conn()}
+  end
+
+  defp stub_api(handler), do: Req.Test.stub(SpaceTraders.API, handler)
+
+  defp advance_time(amount, unit \\ :second), do: TestClock.advance(amount, unit)
+
+  defp assert_eventually(_fun, 0), do: flunk("condition did not become true")
+
+  defp assert_eventually(fun, attempts) do
+    if fun.() do
+      :ok
+    else
+      Process.sleep(10)
+      assert_eventually(fun, attempts - 1)
+    end
   end
 
   test "fresh Strategy activation completes a profitable distant trade across runtime restart", %{
