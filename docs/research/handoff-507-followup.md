@@ -2,17 +2,20 @@
 
 Branch `feature/507-recorded-ship-qualification`, pushed. PR:
 https://github.com/bturney/spacetraders/pull/558
-Commits: `4ce4da3` (original increment), `9c27ef7` (PR feedback follow-up).
+Key commits: `4ce4da3` (original increment), `9c27ef7` (PR feedback follow-up),
+`cfdd32f` (deterministic ResourceAcquisition reproduction), and `a902732`
+(causal-time fix).
 Base: `c97fc58d6c4e3986b80dbacfe4998cf395449811`.
 Report: `docs/research/recorded-ship-qualification-507.md`.
 Evidence: https://gist.github.com/bturney/d1416360b9b5a74ea07ab554ccfa068a
 
 ## Read this first
 
-**The canonical gate is red at HEAD: 806 tests, 1 failure.** Log:
-`/tmp/opencode/507-feedback-canonical.log`. Everything else passes. The failing
-case is *not* a qualification regression — see "Known failure" below. Do not treat
-CI green as the current state; rerun the gate after fixing it.
+**The handoff failure has been reproduced deterministically and corrected.**
+Executable revision `a902732d0c71c35b3632d8bbede142dd3c2c972b` passed the
+canonical GitHub Actions product gate with **806 tests, 0 failures** (seed 1697)
+and release-deployment verification. See "Resolved handoff failure" below for the
+red/green proof.
 
 Operator PR feedback is addressed and reviewed. Parent #502 stays open. No
 production deployment, migration, merge, or Emergency Stop operation was performed.
@@ -46,34 +49,37 @@ production deployment, migration, merge, or Emergency Stop operation was perform
 - Rollout/compatibility readiness report, including the forward-only cutover the
   existing `scripts/deploy-host` already enforces.
 
-## Known failure — investigate first
+## Resolved handoff failure
 
-```
-1) test active Strategy discovers a remote extraction Waypoint for a new Agent
-   (SpaceTraders.ResourceAcquisitionTest)  test/spacetraders/resource_acquisition_test.exs:115
-   expected {:ok, %Intent{status: "waiting", target_waypoint: "X1-UX81-A2"}}
-   actual   {:error, :resource_acquisition_unavailable}
-```
+The repeated `ResourceAcquisitionTest` failure was a causal-time race, not a
+retained ReadCoordinator, CapacityGovernor, Sandbox, or ShipServer state leak.
 
-It appears only on the **second** run of that file inside one child VM, in
-`test/diagnostics/recorded_ship_fixture_order.exs`. Standalone, in the first
-ordered run, and in `/tmp/opencode/507-stop-repro-1.log` the same file passes.
-`FleetResources.reconcile/5` collapses every failing guard into that one atom, so
-the receipt does not name the cause.
+Failure-only diagnostics on GitHub Actions run 37157861527 showed that the test
+successfully completed `GET /v2/my/ships`, Agent overview, local Waypoint read,
+and paginated Waypoint discovery, then failed before any Ship-specific read or
+mutation. At that point CapacityGovernor had available admission, the
+ReadCoordinator pending map was empty, and no ShipServer was needed to explain
+the failure.
 
-Prime suspect: a seeded remainder a same-VM repeat run does not clear —
-`Evidence.read/3` coalesces concurrent identical reads through the globally named
-`SpaceTraders.Evidence.ReadCoordinator`; `DataCase` only rolls back the
-transaction. Also check retained Observation/ObservationDemand rows and
-CapacityGovernor state. Cheapest next step: instrument the `with` in
-`lib/spacetraders/fleet_resources.ex` to log the failing guard, then run
-`mix test test/spacetraders/recorded_ship_fixture_order_test.exs --seed 0 --trace`
-until it fails.
+`FleetResources.reconcile/5` captured its planning `as_of` before discovery.
+New Waypoint evidence is persisted with the application clock, while
+`FleetPlanning.plan_resources/3` correctly rejects evidence whose
+`observed_at` is later than the decision `as_of`. Crossing the next second
+during discovery could therefore make the newly discovered Asteroid ineligible,
+yielding the generic `{:error, :resource_acquisition_unavailable}`.
 
-Two earlier CI attempts also failed once each in unchanged code
-(ResourceAcquisition at seed 522169; DemandScheduler Sandbox ownership at seed
-392303). Clean `c97fc58` passed its 774-test suite at both seeds. Those causes
-are unestablished and **not** claimed to be the same issue.
+Commit `cfdd32f214c6d549a3a482c728cc5f21f6fefde4` made this deterministic by
+advancing `TestClock` five seconds during the paginated Waypoint response.
+GitHub Actions run 37158317387 failed 806 tests with two instances of that same
+case (ordered child proof plus outer suite). Commit
+`a902732d0c71c35b3632d8bbede142dd3c2c972b` then made FleetResources use the
+application `Clock` consistently and capture the planning/allocation `as_of`
+after discovery. Run 37158344191 passed 806 tests, 0 failures; the ordered
+lifecycle proof passed both orders twice and release-deployment verification
+also passed.
+
+The planner invariant was not relaxed: evidence still may not post-date the
+decision snapshot. The caller now supplies the correct post-discovery snapshot.
 
 ## Commands
 
@@ -82,7 +88,7 @@ source scripts/_toolchain.sh
 MIX_ENV=test mix ecto.create && MIX_ENV=test mix ecto.migrate   # once
 mix test test/spacetraders/recorded_ship_runtime_test.exs --seed 0 --trace
 mix test test/spacetraders/recorded_ship_fixture_order_test.exs --seed 0 --trace
-scripts/verify                                                    # currently red
+scripts/verify                                                    # green at a902732
 ```
 
 Test DB: `postgres://postgres:postgres@localhost/spacetraders_test`. No separate
@@ -98,5 +104,6 @@ belong to #400.
 
 ## Next boundary
 
-Fix the open failure, rerun `scripts/verify`, then update the report's receipts.
-Merge and deployment still need explicit Operator authorization.
+The handoff failure is fixed and its red/green evidence is recorded in the
+qualification report. Merge and deployment still need explicit Operator
+authorization. Parent #502 remains open for the broader gates listed above.
