@@ -20,6 +20,91 @@ defmodule SpaceTraders.MutationAttempts do
   alias SpaceTraders.SafetyFence
   alias SpaceTraders.SafetyFence.DependencyKey
 
+  @doc "Links historical selected work to explicit unknown evidence, never to proof of non-send."
+  def recover_legacy(%Intent{} = intent, agent_id) do
+    Repo.transaction(fn ->
+      current = Repo.one!(from i in Intent, where: i.id == ^intent.id, lock: "FOR UPDATE")
+
+      case latest_for_intent(current) do
+        %Attempt{} = attempt ->
+          current
+          |> Ecto.Changeset.change(mutation_attempt_id: attempt.id)
+          |> Repo.update!()
+
+        nil ->
+          ship = Repo.get!(Ship, current.ship_id)
+
+          if Intent.unfinished?(current) and is_map(current.in_flight_action) and
+               map_size(current.in_flight_action) > 0 do
+            attempt = historical_attempt(current, ship, agent_id)
+
+            evidence =
+              Map.put(attempt.prepared_evidence, "legacy_unknown", %{
+                "intent_inserted_at" => DateTime.to_iso8601(current.inserted_at),
+                "intent_updated_at" => DateTime.to_iso8601(current.updated_at),
+                "last_action_result" => current.last_action_result
+              })
+
+            attempt =
+              Repo.insert!(%{
+                attempt
+                | state: "ambiguous",
+                  prepared_evidence: evidence,
+                  prepared_at: %{current.inserted_at | microsecond: {0, 6}}
+              })
+
+            Repo.insert!(%Outcome{
+              mutation_attempt_id: attempt.id,
+              classification: "ambiguous",
+              evidence: %{"reason" => "historical send state unknown"},
+              recorded_at: DateTime.utc_now()
+            })
+
+            current |> Ecto.Changeset.change(mutation_attempt_id: attempt.id) |> Repo.update!()
+          else
+            Repo.rollback(:historical_action_unresolved)
+          end
+      end
+    end)
+  end
+
+  defp historical_attempt(intent, ship, agent_id) do
+    case SpaceTraders.API.ShipAction.request(ship.symbol, intent.in_flight_action) do
+      {:ok, request} ->
+        opts = request.opts ++ [agent_id: agent_id, selected_intent: intent]
+
+        build_attempt(
+          request.operation,
+          request.path,
+          opts,
+          context(agent_id, request.path, opts)
+        )
+
+      {:error, _} ->
+        # Missing historical parameters cannot identify every affected resource.
+        # This is evidence of unknown history, not a dispatchable operation.
+        opts = [agent_id: agent_id, selected_intent: intent]
+        context = context(agent_id, "", opts)
+        evidence = scrub(%{"selected_action" => intent.in_flight_action})
+        keys = [DependencyKey.agent(agent_id), DependencyKey.ship(agent_id, ship.symbol)]
+
+        %Attempt{
+          operation_id: "historical-ship-action",
+          operation_owner: "ship_execution",
+          prepared_evidence: evidence,
+          request_fingerprint: fingerprint("historical-ship-action", evidence, keys),
+          expected_effects: ["historical effects unknown"],
+          consequence_bounds: ["affected resources unknown"],
+          dependency_keys: keys,
+          provenance: provenance(context),
+          operator_id: context.operator_id,
+          agent_id: agent_id,
+          fleet_generation_id: context.fleet_generation_id,
+          strategy_revision_id: context.strategy_revision_id
+        }
+    end
+  end
+
   @correlation_keys [
     :request_id,
     :operator_id,
@@ -51,6 +136,7 @@ defmodule SpaceTraders.MutationAttempts do
   @spec prepare(Operation.t(), String.t(), keyword()) :: {:ok, Attempt.t()} | {:error, term()}
   def prepare(%Operation{classification: :mutation} = operation, path, opts) do
     context = context(Keyword.get(opts, :agent_id), path, opts)
+    protect_historical_actions(context)
     attempt = build_attempt(operation, path, opts, context)
 
     case SafetyFence.blocking_attempts(
@@ -62,6 +148,27 @@ defmodule SpaceTraders.MutationAttempts do
       blocking -> {:error, {:safety_fenced, Enum.map(blocking, & &1.id)}}
     end
   end
+
+  defp protect_historical_actions(%{agent_id: agent_id} = context) when is_integer(agent_id) do
+    Intent
+    |> join(:inner, [intent], ship in Ship, on: ship.id == intent.ship_id)
+    |> where(
+      [intent, ship],
+      ship.agent_id == ^agent_id and is_nil(intent.mutation_attempt_id) and
+        not is_nil(intent.in_flight_action) and intent.in_flight_action != ^%{} and
+        intent.status in ^Intent.unfinished_states()
+    )
+    |> Repo.all()
+    |> Enum.reject(&(&1.id == context[:intent_id]))
+    |> Enum.each(fn intent ->
+      case recover_legacy(intent, agent_id) do
+        {:ok, _} -> :ok
+        {:error, reason} -> raise "historical mutation protection failed: #{inspect(reason)}"
+      end
+    end)
+  end
+
+  defp protect_historical_actions(_), do: :ok
 
   @doc "Prepares the one retry authorized by authoritative non-occurrence evidence."
   @spec prepare_retry(Attempt.t(), Operation.t(), String.t(), keyword()) ::
@@ -165,6 +272,30 @@ defmodule SpaceTraders.MutationAttempts do
     end
   end
 
+  @doc "Consumes an unused retry when fresh dependent evidence already satisfies its selected outcome."
+  def withdraw_retry(%Attempt{} = attempt, observations) do
+    with {:ok, evidence} <- validate_reconciliation_evidence(attempt, :accepted, observations, []) do
+      Repo.transaction(fn ->
+        current = locked_attempt(attempt.id)
+
+        unless current.state == "absent" and current.retry_authorized and
+                 action_remains_selected?(current),
+               do: Repo.rollback(:retry_not_authorized)
+
+        updated = current |> Ecto.Changeset.change(retry_authorized: false) |> Repo.update!()
+
+        Repo.insert!(%Outcome{
+          mutation_attempt_id: current.id,
+          classification: "absent",
+          evidence: scrub(Map.put(evidence, "retry_disposition", "selected_outcome_satisfied")),
+          recorded_at: DateTime.utc_now()
+        })
+
+        Repo.preload(updated, :outcomes, force: true)
+      end)
+    end
+  end
+
   @spec list_for_agent(Agent.t()) :: [Attempt.t()]
   def list_for_agent(%Agent{id: agent_id}) do
     list(where(Attempt, [attempt], attempt.agent_id == ^agent_id))
@@ -178,7 +309,7 @@ defmodule SpaceTraders.MutationAttempts do
   @doc "Returns unresolved mutation evidence for the action currently selected by an Intent."
   @spec unresolved_for_intent(Intent.t()) :: Attempt.t() | nil
   def unresolved_for_intent(%Intent{} = intent) do
-    attempt_for_intent(intent, ["sent_or_unknown", "ambiguous"])
+    attempt_for_intent(intent, ["sent_or_unknown", "ambiguous", "bounded_unknown"])
   end
 
   def latest_for_intent(%Intent{} = intent) do
@@ -188,7 +319,10 @@ defmodule SpaceTraders.MutationAttempts do
       "sent_or_unknown",
       "ambiguous",
       "succeeded",
-      "rejected"
+      "rejected",
+      "accepted",
+      "absent",
+      "bounded_unknown"
     ])
   end
 
@@ -257,7 +391,7 @@ defmodule SpaceTraders.MutationAttempts do
   defp outcome_allowed?("prepared", :not_sent), do: true
 
   defp outcome_allowed?(state, classification)
-       when state in ["sent_or_unknown", "ambiguous"] and
+       when state in ["sent_or_unknown", "ambiguous", "bounded_unknown"] and
               classification in [:accepted, :absent, :bounded_unknown],
        do: true
 
@@ -534,12 +668,18 @@ defmodule SpaceTraders.MutationAttempts do
   end
 
   defp validate_observations(attempt, resolution, observations) do
+    since = attempt.sent_or_unknown_at || attempt.prepared_at
+    now = SpaceTraders.Clock.utc_now()
+
+    fresh? = fn observation ->
+      Evidence.valid_observation?(observation) and match?(%DateTime{}, observation.observed_at) and
+        DateTime.compare(observation.observed_at, since) != :lt and
+        DateTime.diff(now, observation.observed_at, :millisecond) in 0..30_000
+    end
+
     covered_dependencies =
       observations
-      |> Enum.filter(&Evidence.valid_observation?/1)
-      |> Enum.filter(
-        &(DateTime.compare(&1.observed_at, attempt.sent_or_unknown_at) in [:eq, :gt])
-      )
+      |> Enum.filter(fresh?)
       |> Enum.flat_map(& &1.dependency_keys)
       |> MapSet.new()
 
@@ -547,7 +687,8 @@ defmodule SpaceTraders.MutationAttempts do
       Enum.any?(observations, &observation_proves?(&1, attempt, resolution))
 
     if length(observations) > 0 and proves_outcome? and
-         Enum.all?(observations, &Evidence.valid_observation?/1) and
+         Enum.all?(observations, fresh?) and
+         not (resolution == :absent and Map.has_key?(attempt.prepared_evidence, "legacy_unknown")) and
          MapSet.subset?(MapSet.new(attempt.dependency_keys), covered_dependencies) do
       :ok
     else

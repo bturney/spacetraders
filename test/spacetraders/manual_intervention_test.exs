@@ -127,7 +127,12 @@ defmodule SpaceTraders.ManualInterventionTest do
 
       case {conn.method, conn.request_path} do
         {"GET", ^ship_path} ->
-          Req.Test.json(conn, %{"data" => ship_body(symbol)})
+          nav =
+            if state.phase == :initial,
+              do: nav_body("DOCKED"),
+              else: nav_body("IN_ORBIT", destination: "X1-UX81-A2")
+
+          Req.Test.json(conn, %{"data" => ship_body(symbol, %{"nav" => nav})})
 
         {"POST", ^orbit_path} ->
           if state.phase != :initial, do: flunk("replayed intervention orbit")

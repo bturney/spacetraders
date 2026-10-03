@@ -135,6 +135,92 @@ defmodule SpaceTraders.ShipExecutionDurabilityTest do
     assert Elixir.Agent.get(game, & &1) == "IN_ORBIT"
   end
 
+  test "boot after an accepted retry interruption resolves the committed effect without a second retry" do
+    {agent, ship, portfolio, commitment} = claimed_ship()
+    Req.Test.set_req_test_to_shared(SpaceTraders.API)
+
+    intent =
+      Repo.insert!(%Intent{
+        ship_id: ship.id,
+        caller: "commitment",
+        type: "navigate",
+        target_waypoint: "X1-UX81-A1",
+        fleet_commitment_id: commitment.id,
+        fleet_commitment_portfolio_id: portfolio.id,
+        fleet_commitment_portfolio_version: portfolio.version
+      })
+
+    {:ok, %{intent: intent, attempt: original}} =
+      SpaceTraders.API.RecordedDispatch.prepare(agent, intent, %{
+        "kind" => "orbit",
+        "waypoint" => "X1-UX81-A1"
+      })
+
+    {:ok, original} = SpaceTraders.MutationAttempts.mark_sent_or_unknown(original)
+    test_pid = self()
+    game = start_supervised!({Elixir.Agent, fn -> %{status: "DOCKED", sends: 0} end})
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      case conn.method do
+        "GET" ->
+          Req.Test.json(conn, %{
+            "data" =>
+              ship_body(ship.symbol, %{
+                "nav" => nav_body(Elixir.Agent.get(game, & &1.status))
+              })
+          })
+
+        "POST" ->
+          assert conn.request_path == "/v2/my/ships/#{ship.symbol}/orbit"
+          Elixir.Agent.update(game, &%{status: "IN_ORBIT", sends: &1.sends + 1})
+
+          Repo.checkout(fn ->
+            [[backend]] = Repo.query!("SELECT pg_backend_pid()").rows
+            send(test_pid, {:retry_accepted, self(), backend, Repo.in_transaction?()})
+
+            receive do
+              :deliver -> Req.Test.json(conn, %{"data" => %{"nav" => nav_body("IN_ORBIT")}})
+            after
+              10_000 -> flunk("accepted retry sender was not interrupted")
+            end
+          end)
+      end
+    end)
+
+    sender =
+      start_supervised!(
+        {Task,
+         fn ->
+           Intents.reconcile(agent.id, ship.symbol, nil, :boot, intent.id)
+         end}
+      )
+
+    monitor = Process.monitor(sender)
+    assert_receive {:retry_accepted, ^sender, sender_backend, inside_transaction}, 5_000
+    refute inside_transaction
+    [[observer_backend]] = Repo.query!("SELECT pg_backend_pid()").rows
+    refute sender_backend == observer_backend
+    assert [absent, retry] = attempts(agent)
+    assert absent.id == original.id
+    assert absent.state == "absent"
+    refute absent.retry_authorized
+    assert retry.retry_of_id == original.id
+    assert retry.state == "sent_or_unknown"
+    assert %DateTime{} = retry.sent_or_unknown_at
+    assert Repo.get!(Intent, intent.id).mutation_attempt_id == retry.id
+
+    Process.exit(sender, :kill)
+    assert_receive {:DOWN, ^monitor, :process, ^sender, :killed}
+    assert [^absent, ^retry] = attempts(agent)
+    restart_capacity_governor()
+    assert :ok = Intents.rearm_on_boot()
+    assert Repo.get!(Intent, intent.id).status == "completed"
+    assert SpaceTraders.MutationAttempts.get!(retry.id).state == "accepted"
+    refute SafetyFence.active?(SpaceTraders.MutationAttempts.get!(retry.id))
+    assert length(attempts(agent)) == 2
+    assert Elixir.Agent.get(game, & &1.sends) == 1
+  end
+
   test "ambiguous Ship mutation stays fenced across sender death until authoritative recovery" do
     {agent, ship, portfolio, commitment} = claimed_ship()
     Req.Test.set_req_test_to_shared(SpaceTraders.API)

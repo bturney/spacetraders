@@ -23,6 +23,417 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
     :ok
   end
 
+  for trigger <- [:boot, :arrival, :cooldown, :intent_retry] do
+    test "#{trigger} rejects a malformed owned read without resolving or clearing selected evidence" do
+      {agent, ship, portfolio, commitment} = claimed_ship("INVALID-#{unquote(trigger)}")
+      {intent, attempt} = selected_orbit(agent, ship, portfolio, commitment)
+      {:ok, attempt} = MutationAttempts.mark_sent_or_unknown(attempt)
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        assert conn.method == "GET"
+
+        Req.Test.json(conn, %{"data" => %{"symbol" => ship.symbol, "nav" => nav_body("IN_ORBIT")}})
+      end)
+
+      supplied =
+        ship_body(ship.symbol, %{"nav" => nav_body("IN_ORBIT")}) |> Model.Ship.from_json()
+
+      _ = Intents.reconcile(agent.id, ship.symbol, supplied, unquote(trigger), intent.id)
+
+      assert MutationAttempts.get!(attempt.id).state == "sent_or_unknown"
+      retained = Repo.get!(Intent, intent.id)
+      assert retained.status == "blocked"
+      assert retained.in_flight_action == intent.in_flight_action
+      assert retained.mutation_attempt_id == attempt.id
+      assert SpaceTraders.SafetyFence.active?(MutationAttempts.get!(attempt.id))
+    end
+  end
+
+  test "prepared work resumes its original attempt; sent work is observed without duplicate dispatch" do
+    {agent, ship, portfolio, commitment} = claimed_ship("PREPARED-RECOVERY")
+    {intent, attempt} = selected_orbit(agent, ship, portfolio, commitment)
+    game = start_supervised!({Elixir.Agent, fn -> %{status: "DOCKED", calls: 0} end})
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      case conn.method do
+        "GET" ->
+          Req.Test.json(conn, %{
+            "data" =>
+              ship_body(ship.symbol, %{
+                "nav" => nav_body(Elixir.Agent.get(game, & &1.status))
+              })
+          })
+
+        "POST" ->
+          Elixir.Agent.update(game, &%{status: "IN_ORBIT", calls: &1.calls + 1})
+          Req.Test.json(conn, %{"data" => %{"nav" => nav_body("IN_ORBIT")}})
+      end
+    end)
+
+    _ = Intents.reconcile(agent.id, ship.symbol, nil, :boot, intent.id)
+    assert MutationAttempts.get!(attempt.id).state == "succeeded"
+    assert Repo.get!(Intent, intent.id).status == "completed"
+    _ = Intents.reconcile(agent.id, ship.symbol, nil, :boot, intent.id)
+    assert Elixir.Agent.get(game, & &1.calls) == 1
+    assert [only] = MutationAttempts.list_for_agent(agent)
+    assert only.id == attempt.id
+  end
+
+  test "a crash after absence classification consumes retry authority exactly once" do
+    {agent, ship, portfolio, commitment} = claimed_ship("ABSENT-RECOVERY")
+    {intent, attempt} = selected_orbit(agent, ship, portfolio, commitment)
+    {:ok, attempt} = MutationAttempts.mark_sent_or_unknown(attempt)
+
+    {:ok, _} =
+      MutationAttempts.reconcile(attempt, :absent, [
+        SpaceTraders.Evidence.reconciliation_observation(
+          "get-my-ship",
+          attempt,
+          :absent,
+          "Authoritative Ship remains docked"
+        )
+      ])
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      case conn.method do
+        "GET" -> Req.Test.json(conn, %{"data" => ship_body(ship.symbol)})
+        "POST" -> Req.Test.json(conn, %{"data" => %{"nav" => nav_body("IN_ORBIT")}})
+      end
+    end)
+
+    _ = Intents.reconcile(agent.id, ship.symbol, nil, :boot, intent.id)
+    _ = Intents.reconcile(agent.id, ship.symbol, nil, :boot, intent.id)
+    assert [original, retry] = MutationAttempts.list_for_agent(agent)
+    assert original.id == attempt.id
+    refute original.retry_authorized
+    assert retry.retry_of_id == original.id
+    assert retry.state == "succeeded"
+  end
+
+  test "legacy refuel without an attempt retains historical evidence and shared credit protection" do
+    {agent, ship, portfolio, commitment} = claimed_ship("LEGACY-RECOVERY")
+    action = %{"kind" => "refuel", "waypoint" => "X1-UX81-A1", "fuel_before" => 150}
+    intent = owned_intent(ship, portfolio, commitment, in_flight_action: action)
+    original_result = %{"reason" => "response lost before upgrade"}
+    intent = Repo.update!(Ecto.Changeset.change(intent, last_action_result: original_result))
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      assert conn.method == "GET"
+
+      case conn.request_path do
+        "/v2/my/agent" ->
+          Req.Test.json(conn, %{"data" => %{"symbol" => agent.symbol, "credits" => 1000}})
+
+        _ ->
+          Req.Test.json(conn, %{"data" => ship_body(ship.symbol)})
+      end
+    end)
+
+    _ = Intents.reconcile(agent.id, ship.symbol, nil, :boot, intent.id)
+    retained = Repo.get!(Intent, intent.id)
+    assert retained.status == "blocked"
+    assert retained.in_flight_action == action
+    assert retained.last_action_result == original_result
+    attempt = MutationAttempts.get!(retained.mutation_attempt_id)
+    assert attempt.state == "ambiguous"
+    assert is_nil(attempt.sent_or_unknown_at)
+    refute attempt.retry_authorized
+    assert attempt.prepared_evidence["legacy_unknown"]["last_action_result"] == original_result
+
+    assert [blocking] =
+             SpaceTraders.SafetyFence.blocking_attempts([
+               SpaceTraders.SafetyFence.DependencyKey.agent_credits(agent.id)
+             ])
+
+    assert blocking.id == attempt.id
+
+    assert [] ==
+             SpaceTraders.SafetyFence.blocking_attempts([
+               SpaceTraders.SafetyFence.DependencyKey.ship(agent.id, "INDEPENDENT-SHIP")
+             ])
+  end
+
+  test "accepted legacy posture resolves through authoritative facts without replay" do
+    {agent, ship, portfolio, commitment} = claimed_ship("LEGACY-ACCEPTED")
+
+    intent =
+      owned_intent(ship, portfolio, commitment,
+        in_flight_action: %{"kind" => "orbit", "waypoint" => "X1-UX81-A1"}
+      )
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      assert conn.method == "GET"
+      Req.Test.json(conn, %{"data" => ship_body(ship.symbol, %{"nav" => nav_body("IN_ORBIT")})})
+    end)
+
+    _ = Intents.reconcile(agent.id, ship.symbol, nil, :boot, intent.id)
+    assert Repo.get!(Intent, intent.id).status == "completed"
+    assert [%{state: "accepted"} = attempt] = MutationAttempts.list_for_agent(agent)
+    assert Enum.map(attempt.outcomes, & &1.classification) == ["ambiguous", "accepted"]
+  end
+
+  test "a stale event identity cannot even adopt or read replacement work" do
+    {agent, ship, portfolio, commitment} = claimed_ship("STALE-RECOVERY")
+
+    intent =
+      owned_intent(ship, portfolio, commitment,
+        in_flight_action: %{"kind" => "orbit", "waypoint" => "X1-UX81-A1"}
+      )
+
+    Req.Test.stub(SpaceTraders.API, fn _ -> flunk("stale event reached evidence acquisition") end)
+    assert :ok = Intents.reconcile(agent.id, ship.symbol, nil, :arrival, intent.id + 1)
+    assert Repo.get!(Intent, intent.id) == intent
+    assert [] == MutationAttempts.list_for_agent(agent)
+  end
+
+  test "legacy survey cooldown is not fabricated into historical send evidence" do
+    {agent, ship, portfolio, commitment} = claimed_ship("LEGACY-SURVEY")
+
+    intent =
+      owned_intent(ship, portfolio, commitment,
+        type: "acquire_resources",
+        in_flight_action: %{"kind" => "survey"}
+      )
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      assert conn.method == "GET"
+
+      Req.Test.json(conn, %{
+        "data" =>
+          ship_body(ship.symbol, %{
+            "cooldown" => %{
+              "shipSymbol" => ship.symbol,
+              "totalSeconds" => 60,
+              "remainingSeconds" => 60,
+              "expiration" => future_iso()
+            }
+          })
+      })
+    end)
+
+    _ = Intents.reconcile(agent.id, ship.symbol, nil, :boot, intent.id)
+    retained = Repo.get!(Intent, intent.id)
+    assert retained.status == "blocked"
+    assert retained.in_flight_action == intent.in_flight_action
+    attempt = MutationAttempts.get!(retained.mutation_attempt_id)
+    assert attempt.state == "ambiguous"
+    assert attempt.sent_or_unknown_at == nil
+  end
+
+  defp owned_intent(ship, portfolio, commitment, attrs) do
+    Repo.insert!(
+      struct(
+        Intent,
+        [
+          ship_id: ship.id,
+          caller: "commitment",
+          fleet_commitment_id: commitment.id,
+          fleet_commitment_portfolio_id: portfolio.id,
+          fleet_commitment_portfolio_version: portfolio.version,
+          type: "navigate",
+          target_waypoint: "X1-UX81-A1"
+        ] ++ attrs
+      )
+    )
+  end
+
+  test "a legacy action with missing recipient parameters protects dependencies before new admission" do
+    {agent, ship, portfolio, commitment} = claimed_ship("LEGACY-INCOMPLETE")
+    action = %{"kind" => "deliver", "trade_symbol" => "IRON_ORE", "units" => 1}
+    intent = owned_intent(ship, portfolio, commitment, type: "deliver", in_flight_action: action)
+
+    assert {:error, {:safety_fenced, [id]}} =
+             MutationAttempts.prepare(
+               OperationInventory.fetch!("purchase-cargo"),
+               "/my/ships/OTHER-SHIP/purchase",
+               agent_id: agent.id,
+               json: %{"symbol" => "FUEL", "units" => 1}
+             )
+
+    attempt = MutationAttempts.get!(id)
+    assert attempt.operation_id == "historical-ship-action"
+    assert attempt.state == "ambiguous"
+    assert attempt.prepared_evidence["selected_action"] == action
+    assert Repo.get!(Intent, intent.id).in_flight_action == action
+    assert attempt.sent_or_unknown_at == nil
+  end
+
+  for fuel <- [150, 200] do
+    test "malformed credits cannot settle refuel with #{fuel} fuel or release its shared fence" do
+      {agent, ship, portfolio, commitment} = claimed_ship("MALFORMED-CREDITS")
+      intent = owned_intent(ship, portfolio, commitment, [])
+
+      {:ok, %{intent: intent, attempt: attempt}} =
+        SpaceTraders.API.RecordedDispatch.prepare(
+          agent,
+          intent,
+          %{"kind" => "refuel", "waypoint" => "X1-UX81-A1", "fuel_before" => 150}
+        )
+
+      {:ok, _} = MutationAttempts.mark_sent_or_unknown(attempt)
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        assert conn.method == "GET"
+
+        if conn.request_path == "/v2/my/agent" do
+          Req.Test.json(conn, %{"data" => %{"symbol" => agent.symbol}})
+        else
+          Req.Test.json(conn, %{
+            "data" =>
+              ship_body(
+                ship.symbol,
+                %{"fuel" => %{"current" => unquote(fuel), "capacity" => 200}}
+              )
+          })
+        end
+      end)
+
+      _ = Intents.reconcile(agent.id, ship.symbol, nil, :boot, intent.id)
+      assert Repo.get!(Intent, intent.id).status == "blocked"
+      assert Repo.get!(Intent, intent.id).in_flight_action == intent.in_flight_action
+      assert MutationAttempts.get!(attempt.id).state == "sent_or_unknown"
+    end
+  end
+
+  test "persisted absence does not dispatch a retry when restart evidence already satisfies the outcome" do
+    {agent, ship, portfolio, commitment} = claimed_ship("SATISFIED-ABSENCE")
+    {intent, attempt} = selected_orbit(agent, ship, portfolio, commitment)
+    {:ok, attempt} = MutationAttempts.mark_sent_or_unknown(attempt)
+
+    {:ok, _} =
+      MutationAttempts.reconcile(attempt, :absent, [
+        SpaceTraders.Evidence.reconciliation_observation(
+          "get-my-ship",
+          attempt,
+          :absent,
+          "Ship remains docked"
+        )
+      ])
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      assert conn.method == "GET"
+      Req.Test.json(conn, %{"data" => ship_body(ship.symbol, %{"nav" => nav_body("IN_ORBIT")})})
+    end)
+
+    _ = Intents.reconcile(agent.id, ship.symbol, nil, :boot, intent.id)
+    original = MutationAttempts.get!(attempt.id)
+    assert original.state == "absent"
+    refute original.retry_authorized
+    assert List.last(original.outcomes).classification == "absent"
+
+    assert List.last(original.outcomes).evidence["retry_disposition"] ==
+             "selected_outcome_satisfied"
+
+    assert Repo.get!(Intent, intent.id).status == "completed"
+    assert length(MutationAttempts.list_for_agent(agent)) == 1
+  end
+
+  test "a Ship observation expiring during dependent acquisition is not restamped fresh" do
+    {agent, ship, portfolio, commitment} = claimed_ship("EXPIRED-DEPENDENCY")
+    intent = owned_intent(ship, portfolio, commitment, [])
+
+    {:ok, %{intent: intent, attempt: attempt}} =
+      SpaceTraders.API.RecordedDispatch.prepare(
+        agent,
+        intent,
+        %{"kind" => "refuel", "fuel_before" => 150, "waypoint" => "X1-UX81-A1"}
+      )
+
+    {:ok, _} = MutationAttempts.mark_sent_or_unknown(attempt)
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      assert conn.method == "GET"
+
+      if conn.request_path == "/v2/my/agent" do
+        observation = SpaceTraders.Evidence.latest_observation(agent, "ship:#{ship.symbol}")
+
+        Repo.update!(
+          Ecto.Changeset.change(observation, observed_at: DateTime.add(DateTime.utc_now(), -31))
+        )
+
+        Req.Test.json(conn, %{"data" => %{"symbol" => agent.symbol, "credits" => 1000}})
+      else
+        Req.Test.json(conn, %{
+          "data" =>
+            ship_body(
+              ship.symbol,
+              %{"fuel" => %{"current" => 200, "capacity" => 200}}
+            )
+        })
+      end
+    end)
+
+    _ = Intents.reconcile(agent.id, ship.symbol, nil, :boot, intent.id)
+    assert MutationAttempts.get!(attempt.id).state == "sent_or_unknown"
+    assert Repo.get!(Intent, intent.id).status == "blocked"
+    assert Repo.get!(Intent, intent.id).in_flight_action == intent.in_flight_action
+  end
+
+  test "changed authority suppresses prepared recovery durably before transport" do
+    {agent, ship, portfolio, commitment} = claimed_ship("CHANGED-AUTHORITY")
+    {intent, attempt} = selected_orbit(agent, ship, portfolio, commitment)
+    strategy = Repo.get_by!(Strategy, operator_id: agent.operator_id)
+    Repo.update!(Ecto.Changeset.change(strategy, emergency_stopped_at: DateTime.utc_now()))
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      assert conn.method == "GET"
+      Req.Test.json(conn, %{"data" => ship_body(ship.symbol)})
+    end)
+
+    _ = Intents.reconcile(agent.id, ship.symbol, nil, :boot, intent.id)
+    assert %{state: "not_sent", sent_or_unknown_at: nil} = MutationAttempts.get!(attempt.id)
+    assert Repo.get!(Intent, intent.id).in_flight_action == intent.in_flight_action
+  end
+
+  test "runtime re-entry can resolve Bounded Unknown while retaining its original accounting" do
+    {agent, ship, portfolio, commitment} = claimed_ship("BOUNDED-RUNTIME")
+    {intent, attempt} = selected_orbit(agent, ship, portfolio, commitment)
+    {:ok, attempt} = MutationAttempts.mark_sent_or_unknown(attempt)
+
+    {:ok, _} =
+      MutationAttempts.reconcile(
+        attempt,
+        :bounded_unknown,
+        [
+          SpaceTraders.Evidence.reconciliation_observation(
+            "get-my-ship",
+            attempt,
+            :bounded_unknown,
+            "At most one posture change"
+          )
+        ],
+        constraint_accounting:
+          SpaceTraders.Evidence.constraint_accounting("at most one posture change", [])
+      )
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      assert conn.method == "GET"
+      Req.Test.json(conn, %{"data" => ship_body(ship.symbol, %{"nav" => nav_body("IN_ORBIT")})})
+    end)
+
+    _ = Intents.reconcile(agent.id, ship.symbol, nil, :boot, intent.id)
+    accepted = MutationAttempts.get!(attempt.id)
+    assert accepted.state == "accepted"
+    assert Enum.map(accepted.outcomes, & &1.classification) == ["bounded_unknown", "accepted"]
+
+    assert hd(accepted.outcomes).evidence["constraint_accounting"]["consequence_bound"] ==
+             "at most one posture change"
+
+    assert Repo.get!(Intent, intent.id).status == "completed"
+  end
+
+  defp selected_orbit(agent, ship, portfolio, commitment) do
+    intent = owned_intent(ship, portfolio, commitment, [])
+
+    {:ok, %{intent: intent, attempt: attempt}} =
+      SpaceTraders.API.RecordedDispatch.prepare(agent, intent, %{
+        "kind" => "orbit",
+        "waypoint" => "X1-UX81-A1"
+      })
+
+    {intent, attempt}
+  end
+
   test "Intent lifecycle transitions keep their correlation identifier" do
     {_agent, ship, _portfolio, _commitment} = claimed_ship("OWNED-TELEMETRY")
 

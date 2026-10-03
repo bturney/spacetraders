@@ -290,6 +290,61 @@ defmodule SpaceTraders.MutationAttemptsTest do
     assert admitted.admitted_bounded_unknown_ids == [bounded_unknown.id]
   end
 
+  test "stale, future and pre-send conclusions cannot release a mutation fence" do
+    operator = operator_fixture()
+    agent = agent_fixture(operator)
+    attempt = ambiguous_attempt(agent, OperationInventory.fetch!("navigate-ship"), "FRESHNESS-1")
+    now = DateTime.utc_now()
+
+    for observed_at <- [
+          DateTime.add(now, -31),
+          DateTime.add(now, 31),
+          DateTime.add(attempt.sent_or_unknown_at, -1, :microsecond)
+        ] do
+      evidence =
+        Evidence.reconciliation_observation(
+          "get-my-ship",
+          attempt,
+          :accepted,
+          "Ship reached its destination",
+          observed_at
+        )
+
+      assert {:error, :authoritative_evidence_required} =
+               MutationAttempts.reconcile(attempt, :accepted, [evidence])
+
+      assert SafetyFence.active?(MutationAttempts.get!(attempt.id))
+    end
+  end
+
+  test "Bounded Unknown remains recoverable without dropping conservative protection" do
+    operator = operator_fixture()
+    agent = agent_fixture(operator)
+
+    attempt =
+      ambiguous_attempt(agent, OperationInventory.fetch!("navigate-ship"), "BOUNDED-RECOVERY")
+
+    {:ok, bounded} =
+      MutationAttempts.reconcile(
+        attempt,
+        :bounded_unknown,
+        [observation(attempt, :bounded_unknown)],
+        constraint_accounting: Evidence.constraint_accounting("at most one transit", [])
+      )
+
+    intent = Repo.get!(Intent, bounded.provenance["intent_id"])
+    assert MutationAttempts.unresolved_for_intent(intent).id == attempt.id
+    assert SafetyFence.active?(bounded)
+
+    assert {:ok, accepted} =
+             MutationAttempts.reconcile(bounded, :accepted, [observation(bounded, :accepted)])
+
+    refute SafetyFence.active?(accepted)
+
+    assert Enum.map(accepted.outcomes, & &1.classification) ==
+             ["ambiguous", "bounded_unknown", "accepted"]
+  end
+
   test "retry requires authoritative absence, continued selection, and the same action" do
     operator = operator_fixture()
     agent = agent_fixture(operator)
