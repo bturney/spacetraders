@@ -275,6 +275,161 @@ defmodule SpaceTraders.ShipExecutionDurabilityTest do
              Elixir.Agent.get(game, &Map.take(&1, [:orbits, :navigations]))
   end
 
+  for loss <- [
+        :claim,
+        :generation,
+        :revision,
+        :selection,
+        :singleton,
+        :intervention,
+        :portfolio_version
+      ] do
+    @loss loss
+    test "#{@loss} authority lost after preparation prevents Ship dispatch" do
+      {agent, ship, portfolio, commitment} = claimed_ship()
+      test_pid = self()
+      ship_path = "/v2/my/ships/#{ship.symbol}"
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", ^ship_path} ->
+            Req.Test.json(conn, %{"data" => ship_body(ship.symbol)})
+
+          {"GET", "/v2/systems/X1-UX81/waypoints/X1-UX81-A2"} ->
+            Req.Test.json(conn, %{
+              "data" => %{
+                "symbol" => "X1-UX81-A2",
+                "systemSymbol" => "X1-UX81",
+                "type" => "PLANET",
+                "x" => 2,
+                "y" => 2,
+                "traits" => [%{"symbol" => "MARKETPLACE"}]
+              }
+            })
+
+          {"POST", _path} ->
+            flunk("Ship mutation dispatched after #{@loss} authority was lost")
+
+          request ->
+            flunk("unexpected Ship Execution request: #{inspect(request)}")
+        end
+      end)
+
+      handler = "lost-authority-#{@loss}-#{System.unique_integer([:positive])}"
+
+      :ok =
+        :telemetry.attach(
+          handler,
+          [:spacetraders, :recorded_dispatch, :prepared],
+          &pause_dispatch/4,
+          test_pid
+        )
+
+      on_exit(fn -> :telemetry.detach(handler) end)
+
+      sender =
+        start_supervised!(
+          {Task,
+           fn ->
+             receive do
+               :dispatch ->
+                 result =
+                   Intents.request_commitment_intelligence(
+                     agent,
+                     commitment,
+                     portfolio,
+                     ship.symbol,
+                     %{
+                       subject_type: :market,
+                       waypoint: "X1-UX81-A2",
+                       required_facts: ["trade_goods"],
+                       freshness_seconds: 300
+                     }
+                   )
+
+                 send(test_pid, {:dispatch_result, self(), result})
+             end
+           end}
+        )
+
+      Req.Test.allow(SpaceTraders.API, self(), sender)
+      monitor = Process.monitor(sender)
+      send(sender, :dispatch)
+      assert_receive {:prepared_dispatch, ^sender, attempt_id}, 5_000
+
+      revoke_authority(@loss, agent, Repo.get_by!(Intent, ship_id: ship.id))
+      send(sender, :continue_dispatch)
+      assert_receive {:dispatch_result, ^sender, _result}, 5_000
+      assert_receive {:DOWN, ^monitor, :process, ^sender, :normal}, 5_000
+
+      assert [%Attempt{state: "not_sent", sent_or_unknown_at: nil, id: ^attempt_id} = attempt] =
+               attempts(agent)
+
+      assert [%{classification: "not_sent"}] =
+               SpaceTraders.MutationAttempts.get!(attempt.id).outcomes
+    end
+  end
+
+  defp pause_dispatch(_event, _measurements, metadata, test_pid) do
+    send(test_pid, {:prepared_dispatch, self(), metadata.attempt_id})
+
+    receive do
+      :continue_dispatch -> :ok
+    after
+      10_000 -> flunk("prepared Ship dispatch was not released")
+    end
+  end
+
+  defp revoke_authority(:claim, _agent, intent) do
+    Repo.get!(SpaceTraders.FleetAllocation.Portfolio, intent.fleet_commitment_portfolio_id)
+    |> Ecto.Changeset.change(superseded_at: DateTime.utc_now())
+    |> Repo.update!()
+  end
+
+  defp revoke_authority(:generation, agent, _intent) do
+    Repo.get_by!(Generation, agent_id: agent.id)
+    |> Ecto.Changeset.change(fenced_at: DateTime.utc_now())
+    |> Repo.update!()
+  end
+
+  defp revoke_authority(:revision, agent, _intent) do
+    scope = Scope.for_operator(Repo.get!(SpaceTraders.Agent.Operator, agent.operator_id))
+    {:ok, strategy} = SpaceTraders.FleetStrategy.select_preset(scope, "steady_growth")
+    assert {:ok, _revision} = SpaceTraders.FleetStrategy.activate(scope, strategy.draft_version)
+  end
+
+  defp revoke_authority(:selection, _agent, intent) do
+    intent |> Ecto.Changeset.change(in_flight_action: nil) |> Repo.update!()
+  end
+
+  defp revoke_authority(:singleton, _agent, _intent) do
+    previous = Application.get_env(:spacetraders, SpaceTraders.RuntimeAuthority)
+    Application.put_env(:spacetraders, SpaceTraders.RuntimeAuthority, enabled: true)
+    on_exit(fn -> Application.put_env(:spacetraders, SpaceTraders.RuntimeAuthority, previous) end)
+
+    assert {:error, :runtime_authority_unavailable} =
+             SpaceTraders.RuntimeAuthority.execution_allowed?()
+  end
+
+  defp revoke_authority(:intervention, _agent, intent) do
+    intent
+    |> Ecto.Changeset.change(
+      caller: "intervention",
+      fleet_commitment_id: nil,
+      fleet_commitment_portfolio_id: nil,
+      fleet_commitment_portfolio_version: nil
+    )
+    |> Repo.update!()
+  end
+
+  defp revoke_authority(:portfolio_version, _agent, intent) do
+    intent
+    |> Ecto.Changeset.change(
+      fleet_commitment_portfolio_version: intent.fleet_commitment_portfolio_version + 1
+    )
+    |> Repo.update!()
+  end
+
   defp attempts(agent) do
     Repo.all(from a in Attempt, where: a.agent_id == ^agent.id, order_by: a.prepared_at)
   end
