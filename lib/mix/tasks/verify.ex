@@ -1,9 +1,10 @@
 defmodule Mix.Tasks.Verify do
-  @shortdoc "Runs the required deterministic product checks and fails fast"
+  @shortdoc "Runs the required product correctness checks and fails fast"
 
   @moduledoc """
-  Runs the required deterministic product checks in a fixed order and stops at
-  the first failure.
+  Runs the required product correctness checks in a fixed order and stops at the
+  first failure. Release packaging and deployment-topology checks live in the
+  separate `release-deployment-verification` CI contract.
 
   This is the authoritative product gate behind `scripts/verify` and `mix
   verify`. It only sequences checks: it does not prepare an environment, choose
