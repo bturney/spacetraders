@@ -1,5 +1,5 @@
 defmodule SpaceTradersWeb.OperatorSetupControllerTest do
-  use SpaceTradersWeb.ConnCase
+  use SpaceTradersWeb.ConnCase, async: true
 
   import SpaceTraders.AgentFixtures
 

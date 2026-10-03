@@ -1,5 +1,5 @@
 defmodule SpaceTraders.API.ClientTest do
-  use SpaceTraders.DataCase, async: false
+  use SpaceTraders.DataCase, async: true
 
   alias SpaceTraders.API
   alias SpaceTraders.API.AgentTokenReference

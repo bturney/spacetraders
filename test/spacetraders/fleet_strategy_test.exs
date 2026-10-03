@@ -1,5 +1,6 @@
 defmodule SpaceTraders.FleetStrategyTest do
-  use SpaceTraders.DataCase
+  # Emergency Stop state lives in the application-wide admission server.
+  use SpaceTraders.DataCase, async: false
 
   import SpaceTraders.AgentFixtures
 

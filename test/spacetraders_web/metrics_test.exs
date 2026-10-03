@@ -1,5 +1,5 @@
 defmodule SpaceTradersWeb.MetricsTest do
-  use SpaceTradersWeb.ConnCase
+  use SpaceTradersWeb.ConnCase, async: true
 
   alias SpaceTraders.API
   alias SpaceTraders.API.AgentTokenReference

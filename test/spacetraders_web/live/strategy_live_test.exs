@@ -1,5 +1,6 @@
 defmodule SpaceTradersWeb.StrategyLiveTest do
-  use SpaceTradersWeb.ConnCase
+  # Emergency Stop interactions use the application-wide admission server.
+  use SpaceTradersWeb.ConnCase, async: false
 
   import Phoenix.LiveViewTest
   import SpaceTraders.EvidenceFixtures

@@ -1,5 +1,5 @@
 defmodule SpaceTradersWeb.HealthControllerTest do
-  use SpaceTradersWeb.ConnCase
+  use SpaceTradersWeb.ConnCase, async: true
 
   test "GET /health responds 200 with status ok", %{conn: conn} do
     conn = get(conn, ~p"/health")

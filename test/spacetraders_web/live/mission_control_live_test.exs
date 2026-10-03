@@ -1,5 +1,6 @@
 defmodule SpaceTradersWeb.MissionControlLiveTest do
-  use SpaceTradersWeb.ConnCase
+  # Emergency Stop status is backed by the application-wide admission server.
+  use SpaceTradersWeb.ConnCase, async: false
 
   import Phoenix.LiveViewTest
   import SpaceTraders.AgentFixtures

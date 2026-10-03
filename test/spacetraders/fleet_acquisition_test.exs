@@ -1,5 +1,5 @@
 defmodule SpaceTraders.FleetAcquisitionTest do
-  use SpaceTraders.DataCase, async: false
+  use SpaceTraders.DataCase, async: true
 
   import SpaceTraders.ShipBody
 

@@ -1,5 +1,5 @@
 defmodule SpaceTradersWeb.OperatorAuthTest do
-  use SpaceTradersWeb.ConnCase
+  use SpaceTradersWeb.ConnCase, async: true
 
   alias Phoenix.LiveView
   alias SpaceTraders.Agent

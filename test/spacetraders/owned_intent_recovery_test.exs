@@ -1,4 +1,5 @@
 defmodule SpaceTraders.OwnedIntentRecoveryTest do
+  # Recovery boots shared ShipServer runtime and switches Req.Test to shared mode.
   use SpaceTraders.DataCase, async: false
 
   import SpaceTraders.ShipBody

@@ -1,4 +1,5 @@
 defmodule SpaceTraders.IntentTransactionTest do
+  # This proof opens an unboxed PostgreSQL transaction outside the SQL sandbox.
   use ExUnit.Case, async: false
 
   alias SpaceTraders.Fleet.{Intent, Intents}

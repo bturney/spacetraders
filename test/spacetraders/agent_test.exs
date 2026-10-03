@@ -1,5 +1,6 @@
 defmodule SpaceTraders.AgentTest do
-  use SpaceTraders.DataCase
+  # Reset flows fence shared admission state and own ShipServer registry entries.
+  use SpaceTraders.DataCase, async: false
 
   alias SpaceTraders.Agent
   alias SpaceTraders.FleetGeneration

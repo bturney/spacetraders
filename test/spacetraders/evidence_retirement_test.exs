@@ -1,4 +1,5 @@
 defmodule SpaceTraders.EvidenceRetirementTest do
+  # Fleet Generation retirement fences the application-wide generation admission cache.
   use SpaceTraders.DataCase, async: false
 
   import SpaceTraders.AgentFixtures

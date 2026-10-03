@@ -1,5 +1,6 @@
 defmodule SpaceTradersWeb.OperatorLive.MintTest do
-  use SpaceTradersWeb.ConnCase
+  # Minting tests mutate application-wide RuntimeAuthority configuration.
+  use SpaceTradersWeb.ConnCase, async: false
 
   import Phoenix.LiveViewTest
   import SpaceTraders.AgentFixtures
