@@ -58,10 +58,15 @@ scripts/verify
 `mix verify` runs the checks required by the product gate, in order, stopping
 at the first failure: warnings-as-errors compilation, formatting, the ExUnit
 suite, generated API struct and operation inventory freshness, the
-transport-boundary check, and boot health (the app started on a real HTTP server
-with `GET /health` → 200). `scripts/verify` and direct `mix verify` run the same
-product checks and expect an already-prepared database. The exit status is the
+transport-boundary check, and application health (`GET /health` → 200 from a
+real HTTP server). `scripts/verify` and direct `mix verify` run the same product
+checks and expect an already-prepared test database. The exit status is the
 verdict.
+
+CI keeps release/deployment verification in the separate
+`release-deployment-verification` job. It checks PostgreSQL Compose topology,
+production release boot, and migration repair. These operational checks protect
+merges without adding release or deployment infrastructure to the product gate.
 
 ### PostgreSQL
 
@@ -78,6 +83,21 @@ scripts/verify
 ```
 
 Set `DATABASE_URL` to use another PostgreSQL instance.
+
+### Release and deployment verification
+
+CI runs these operational checks separately from `scripts/verify`:
+
+```sh
+test/integration/postgres_compose_test.sh
+test/integration/release_boot_test.sh
+test/integration/migration_repair_test.sh
+```
+
+They require Docker Compose, the pinned toolchain and dependencies, and a running
+PostgreSQL test database. `release_boot_test.sh` builds and boots the production
+release; `migration_repair_test.sh` creates and removes its own temporary
+database. The product gate does not invoke these checks.
 
 Direct targeted or full `mix test` runs reuse the prepared database; provision it
 once before the first run:

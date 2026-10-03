@@ -9,6 +9,11 @@ looks environment-related.
 `Mix.Tasks.Verify.required_checks/0` in `lib/mix/tasks/verify.ex`; read it
 rather than trusting a list elsewhere.
 
+Release packaging and deployment verification run under the separate CI
+`release-deployment-verification` contract. For its commands and prerequisites,
+read the README's **Release and deployment verification** section; these checks
+are outside the product gate.
+
 CI prepares the pinned toolchain, dependencies, and migrated test database,
 then invokes `scripts/verify` directly. Local runs use the same gate after
 preparing those prerequisites; no runner identity variables are required.

@@ -2,14 +2,12 @@ name: Verify
 
 on:
   pull_request:
-  push:
-    branches: [main]
 
 permissions:
   contents: read
 
 jobs:
-  verify:
+  product-verification:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     services:
@@ -40,16 +38,46 @@ jobs:
         run: |
           source scripts/_toolchain.sh
           scripts/verify
+      - name: Verify prepared test database reuse
+        run: test/integration/prepared_test_database_test.sh
+      - name: Verify product gate uses prepared prerequisites
+        run: bash test/integration/product_gate_test.sh
+      - name: Verify verification contracts are separate
+        run: bash test/integration/verification_contract_test.sh
+
+  release-deployment-verification:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_DB: spacetraders_test
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+        options: >-
+          --health-cmd "pg_isready -U postgres -d spacetraders_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+    env:
+      DATABASE_URL: postgres://postgres:postgres@localhost/spacetraders_test
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: Prepare release and migration verification prerequisites
+        run: |
+          scripts/bootstrap
+          source scripts/_toolchain.sh
+          MIX_ENV=test mix ecto.create
+          MIX_ENV=test mix ecto.migrate
       - name: Verify PostgreSQL deployment configuration
         run: test/integration/postgres_compose_test.sh
       - name: Verify production release boot
         run: test/integration/release_boot_test.sh
       - name: Verify migration repair
         run: test/integration/migration_repair_test.sh
-      - name: Verify prepared test database reuse
-        run: test/integration/prepared_test_database_test.sh
-      - name: Verify product gate uses prepared prerequisites
-        run: bash test/integration/product_gate_test.sh
 
   # Two full gates run simultaneously in real worktrees on separate ports and
   # database allocations. Keep this job separate so the gates stay concurrent.
