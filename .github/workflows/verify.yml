@@ -27,21 +27,19 @@ jobs:
         ports:
           - 5432:5432
     env:
-      AGENT_TASK_ID: ci-${{ github.run_id }}
-      AGENT_ATTEMPT: ${{ github.run_attempt }}
       DATABASE_URL: postgres://postgres:postgres@localhost/spacetraders_test
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-      - name: Run canonical lifecycle
-        run: scripts/agent-run
-      - name: Upload lifecycle evidence
-        if: ${{ always() }}
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
-        with:
-          name: agent-lifecycle-${{ github.run_id }}-${{ github.run_attempt }}
-          path: artifacts/
-          if-no-files-found: error
-          retention-days: 14
+      - name: Prepare product verification prerequisites
+        run: |
+          scripts/bootstrap
+          source scripts/_toolchain.sh
+          MIX_ENV=test mix ecto.create
+          MIX_ENV=test mix ecto.migrate
+      - name: Run product verification
+        run: |
+          source scripts/_toolchain.sh
+          scripts/verify
       - name: Verify PostgreSQL deployment configuration
         run: test/integration/postgres_compose_test.sh
       - name: Verify production release boot

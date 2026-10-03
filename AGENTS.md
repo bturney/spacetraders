@@ -6,7 +6,6 @@
   `docs/agents/issue-tracker.md` — it also holds the triage label vocabulary.
 - Domain work (explore an area, name a concept): read `docs/agents/domain.md`;
   it points at `CONTEXT.md` and the ADRs.
-- Unattended CI or runner work: read `docs/agents/readiness.md`.
 - Running or debugging the test suite: read `docs/agents/testing.md`.
 - Diagnosing Strategy outcomes or following Grafana drill-downs: read
   `docs/agents/observability.md`.
