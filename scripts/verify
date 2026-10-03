@@ -1,42 +1,19 @@
 #!/usr/bin/env bash
 # Canonical project verification gate.
 #
-# Runs the PostgreSQL-backed `mix verify` gate. This is the same gate CI runs.
+# Runs the PostgreSQL-backed `mix verify` product gate.
 #
+# Prerequisites: activate the project toolchain, fetch dependencies, and prepare
+# the test database before running this command.
 # Usage: scripts/verify
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "$SCRIPT_DIR/_toolchain.sh"
-
 # Keep the verification boot check separate from a developer's default server.
 export PORT="${PORT:-4002}"
-export DATABASE_URL="${DATABASE_URL:-postgres://postgres:postgres@localhost/spacetraders_test}"
 
-if command -v mix >/dev/null 2>&1; then
-  MIX=mix
-elif [ -x "$ELIXIR_DIR/bin/mix" ]; then
-  MIX="$ELIXIR_DIR/bin/mix"
-  export PATH="$ELIXIR_DIR/bin:$OTP_DIR/bin:$PATH"
-else
-  echo "No Elixir toolchain found. Run scripts/bootstrap first." >&2
+if ! command -v mix >/dev/null 2>&1; then
+  echo "mix is not available on PATH. Activate the project toolchain before running scripts/verify." >&2
   exit 1
 fi
 
-# Cheap insurance for a fresh or partial checkout: fetch deps only when they are
-# missing so steady-state runs stay quiet (deps.get lists every locked package
-# and its security advisories). On failure the resolver output is surfaced.
-if [ ! -d deps ] || [ -z "$(ls -A deps 2>/dev/null)" ]; then
-  deps_log="$(mktemp)"
-  if ! "$MIX" deps.get >"$deps_log" 2>&1; then
-    echo "mix deps.get failed:" >&2
-    cat "$deps_log" >&2
-    rm -f "$deps_log"
-    exit 1
-  fi
-  rm -f "$deps_log"
-fi
-
-MIX_ENV=test "$MIX" ecto.create --quiet
-MIX_ENV=test "$MIX" ecto.migrate --quiet
-MIX_ENV=test "$MIX" verify
+exec env MIX_ENV=test mix verify

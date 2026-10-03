@@ -85,8 +85,8 @@ if [ "$port_one" = "$port_two" ]; then
   exit 1
 fi
 
-# Worktrees retain separate database allocations. The test alias reuses each
-# prepared database, while teardown releases only the task-owned allocation.
+# Worktrees retain separate database allocations. Setup prepares each database,
+# the product gate reuses it, and teardown releases only the task-owned one.
 database_url() {
   local value
   value="$(sed -n 's/^export DATABASE_URL=//p' "$1" | head -n 1)"
@@ -119,6 +119,21 @@ database_exists() {
   psql "$admin_url" --no-psqlrc --tuples-only --no-align \
     --command "SELECT datname FROM pg_database" 2>/dev/null | grep -Fxq "$1"
 }
+
+for database in "$database_one" "$database_two"; do
+  if ! database_exists "$database"; then
+    echo "Worktree setup did not prepare its allocated test database: $database" >&2
+    exit 1
+  fi
+done
+
+for url in "$url_one" "$url_two"; do
+  if ! psql "$url" --no-psqlrc --tuples-only --no-align --quiet \
+    --set=ON_ERROR_STOP=1 --command "SELECT 1 FROM schema_migrations LIMIT 1" >/dev/null 2>&1; then
+    echo "Worktree setup did not migrate its allocated test database." >&2
+    exit 1
+  fi
+done
 
 setup_worktree "$WORKTREE_THREE" integration-three >"$TEMP_ROOT/three.log" 2>&1
 grep -q '^Restored warm cache ' "$TEMP_ROOT/three.log"

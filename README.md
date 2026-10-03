@@ -31,6 +31,13 @@ Installs the pinned Erlang/Elixir toolchain (no sudo required) and fetches deps:
 scripts/bootstrap
 ```
 
+Activate the installed toolchain in each shell before running `mix` commands or
+the product gate:
+
+```sh
+source scripts/_toolchain.sh
+```
+
 Single-checkout development uses the installed dependency directory. Parallel
 ticket work uses a private writable dependency/build copy restored from an
 immutable cache instead.
@@ -40,8 +47,9 @@ Scripts use the pinned installation at `$HOME/.local/opt/spacetraders-toolchain`
 
 ### Verify
 
-The canonical gate wrapper, run locally and in CI on every PR. It prepares the
-test database before invoking `mix verify`:
+The product gate runs locally and in CI on every PR. It requires the toolchain,
+dependencies, and test database to be prepared first; `scripts/verify` only runs
+`mix verify`:
 
 ```sh
 scripts/verify
@@ -51,25 +59,26 @@ scripts/verify
 at the first failure: warnings-as-errors compilation, formatting, the ExUnit
 suite, generated API struct and operation inventory freshness, the
 transport-boundary check, and boot health (the app started on a real HTTP server
-with `GET /health` → 200). Run `scripts/verify` when the test database needs to
-be created and migrated first; direct `mix verify` expects a prepared database.
-The exit status is the verdict.
+with `GET /health` → 200). `scripts/verify` and direct `mix verify` run the same
+product checks and expect an already-prepared database. The exit status is the
+verdict.
 
 ### PostgreSQL
 
 PostgreSQL is the application store and the verification database. Start a local
-instance, then run the same canonical gate used by CI:
+instance, prepare the test database once, then run the product gate:
 
 ```sh
 docker run --rm --name spacetraders-postgres -p 5432:5432 \
   -e POSTGRES_DB=spacetraders_test -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=postgres \
   postgres:17
+MIX_ENV=test mix ecto.create
+MIX_ENV=test mix ecto.migrate
 scripts/verify
 ```
 
 Set `DATABASE_URL` to use another PostgreSQL instance.
 
-`scripts/verify` creates and migrates the test database before running the gate.
 Direct targeted or full `mix test` runs reuse the prepared database; provision it
 once before the first run:
 

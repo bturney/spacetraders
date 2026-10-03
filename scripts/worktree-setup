@@ -153,7 +153,8 @@ ensure_mix_home() {
 }
 
 cleanup_failed_setup() {
-  if [ "$setup_complete" -eq 0 ] && [ "$port_lease" -eq 1 ]; then
+  if [ "$setup_complete" -eq 0 ] && [ "$port_lease" -eq 1 ] &&
+    [ ! -f "$PROJECT_ROOT/.worktree-env" ]; then
     "$SCRIPT_DIR/worktree-release-port" "$task_id"
   fi
 }
@@ -197,6 +198,10 @@ else
   quiet_bootstrap "$cache_root/setup-$task_id.log" "Dirty worktree: compiling privately"
 fi
 
+# Bootstrap may install the toolchain in its own subprocess; make it available
+# in this setup process for database preparation and later lifecycle commands.
+export PATH="$ELIXIR_DIR/bin:$OTP_DIR/bin:$PATH"
+
 {
   printf 'export AGENT_TASK_ID=%q\n' "$task_id"
   printf 'export DATABASE_URL=%q\n' "$database_url"
@@ -210,6 +215,18 @@ fi
   printf 'export SPACETRADERS_WORKTREE_CACHE_DIR=%q\n' "$cache_root"
   printf 'export SPACETRADERS_PORT_REGISTRY_DIR=%q\n' "$port_root"
 } > "$PROJECT_ROOT/.worktree-env"
+
+# Test database allocation is part of workspace preparation, not product
+# verification. The gate receives an already-created and migrated database.
+if ! (
+  source "$PROJECT_ROOT/.worktree-env"
+  MIX_ENV=test "$ELIXIR_DIR/bin/mix" ecto.create --quiet &&
+    MIX_ENV=test "$ELIXIR_DIR/bin/mix" ecto.migrate --quiet
+); then
+  echo "Could not prepare the allocated test database: $database" >&2
+  echo "Run scripts/teardown to release this workspace's allocations." >&2
+  exit 1
+fi
 
 echo "Task $task_id is ready on port $port with database $database."
 setup_complete=1

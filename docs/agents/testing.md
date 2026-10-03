@@ -25,16 +25,16 @@ suite uses the Ecto `Sandbox` pool; treat a clean exit as the signal.
 
 ## Database
 
-`mix test` assumes a prepared, migrated PostgreSQL database. The test alias
-never creates, drops, or migrates it; `DataCase` transactions provide ordinary
-test isolation. For a direct targeted run, prepare the database once with
-`MIX_ENV=test mix ecto.create` and `MIX_ENV=test mix ecto.migrate`. `scripts/verify`
-performs those provisioning steps before running the canonical gate.
+`mix test` assumes a prepared, migrated PostgreSQL database. The test alias and
+`scripts/verify` never create, drop, or migrate it; `DataCase` transactions
+provide ordinary test isolation. Prepare the database once with
+`MIX_ENV=test mix ecto.create` and `MIX_ENV=test mix ecto.migrate` before a
+targeted test run or the canonical gate.
 
 The default test URL is the stable
 `postgres://postgres:postgres@localhost/spacetraders_test`; set `DATABASE_URL`
-to select another prepared database. Worktree setup allocates a task-named URL,
-and `scripts/teardown` drops that task's database as it releases the task's port.
+to select another prepared database. Worktree setup allocates and prepares a
+task-named database; `scripts/teardown` drops it as it releases the task's port.
 Do not use `MIX_TEST_PARTITION` to select databases; provision and select each
 database explicitly with `DATABASE_URL`.
 
