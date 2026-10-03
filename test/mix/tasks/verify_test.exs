@@ -1,6 +1,10 @@
 defmodule Mix.Tasks.VerifyTest do
   use ExUnit.Case, async: true
 
+  test "the test alias uses the prepared database without lifecycle tasks" do
+    assert Mix.Project.config()[:aliases][:test] == ["test"]
+  end
+
   test "the gate keeps the cheap deterministic invariants and the product suite" do
     assert Mix.Tasks.Verify.required_checks() == [
              {"compile", ["--warnings-as-errors"]},

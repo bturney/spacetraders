@@ -11,17 +11,8 @@ config :spacetraders, :demand_scheduler_enabled, false
 
 # Configure your database
 #
-# The MIX_TEST_PARTITION environment variable can be used
-# to provide built-in test partitioning in CI environment.
-# Run `mix help test` for more information.
-test_partition = System.get_env("MIX_TEST_PARTITION") || System.pid()
-
 config :spacetraders, SpaceTraders.Repo,
-  url:
-    System.get_env(
-      "DATABASE_URL",
-      "postgres://postgres:postgres@localhost/spacetraders_test#{test_partition}"
-    ),
+  url: System.get_env("DATABASE_URL", "postgres://postgres:postgres@localhost/spacetraders_test"),
   pool_size: 10,
   pool: Ecto.Adapters.SQL.Sandbox
 

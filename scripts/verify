@@ -37,4 +37,6 @@ if [ ! -d deps ] || [ -z "$(ls -A deps 2>/dev/null)" ]; then
   rm -f "$deps_log"
 fi
 
+MIX_ENV=test "$MIX" ecto.create --quiet
+MIX_ENV=test "$MIX" ecto.migrate --quiet
 MIX_ENV=test "$MIX" verify

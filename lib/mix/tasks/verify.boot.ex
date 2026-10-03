@@ -17,11 +17,8 @@ defmodule Mix.Tasks.Verify.Boot do
   @impl Mix.Task
   def run(_args) do
     # The test suite's Repo may still be running (the alias chain keeps the app
-    # alive), holding the PID-named test DB file that test/test_helper.exs
-    # removed after the suite. Stop it first so Ecto creates and migrates a
-    # fresh DB instead of reusing the stale connection.
+    # alive). Stop it before starting the full application for the health check.
     stop_app_if_started()
-    ensure_migrated_db()
 
     endpoint_config =
       :spacetraders
@@ -30,16 +27,12 @@ defmodule Mix.Tasks.Verify.Boot do
 
     Application.put_env(:spacetraders, SpaceTradersWeb.Endpoint, endpoint_config)
 
-    try do
-      case Application.ensure_all_started(:spacetraders) do
-        {:ok, _started} ->
-          check_health(health_url())
+    case Application.ensure_all_started(:spacetraders) do
+      {:ok, _started} ->
+        check_health(health_url())
 
-        {:error, reason} ->
-          Mix.raise("boot verify failed: application did not start: #{inspect(reason)}")
-      end
-    after
-      cleanup_test_db()
+      {:error, reason} ->
+        Mix.raise("boot verify failed: application did not start: #{inspect(reason)}")
     end
   end
 
@@ -57,28 +50,6 @@ defmodule Mix.Tasks.Verify.Boot do
       end
     end
   end
-
-  # The test environment may recreate its PostgreSQL database between test and
-  # boot. These tasks may already have run in this process, so force them.
-  defp ensure_migrated_db do
-    if test_env?() do
-      # The test leg already evaluated the migration modules in this process;
-      # silence Ecto's "redefining module" warnings when they are re-evaluated.
-      previous = Code.compiler_options()[:ignore_module_conflict]
-      Code.compiler_options(ignore_module_conflict: true)
-
-      Mix.Task.rerun("ecto.create", ["--quiet"])
-      Mix.Task.rerun("ecto.migrate", ["--quiet"])
-
-      Code.compiler_options(ignore_module_conflict: previous)
-    end
-  end
-
-  defp cleanup_test_db do
-    :ok
-  end
-
-  defp test_env?, do: Mix.env() == :test
 
   defp health_url do
     case SpaceTradersWeb.Endpoint.server_info(:http) do

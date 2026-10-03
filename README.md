@@ -40,17 +40,20 @@ Scripts use the pinned installation at `$HOME/.local/opt/spacetraders-toolchain`
 
 ### Verify
 
-The canonical gate, run locally and in CI on every PR:
+The canonical gate wrapper, run locally and in CI on every PR. It prepares the
+test database before invoking `mix verify`:
 
 ```sh
-scripts/verify   # == mix verify
+scripts/verify
 ```
 
 `mix verify` runs the checks required by the product gate, in order, stopping
 at the first failure: warnings-as-errors compilation, formatting, the ExUnit
 suite, generated API struct and operation inventory freshness, the
 transport-boundary check, and boot health (the app started on a real HTTP server
-with `GET /health` → 200). The exit status is the verdict.
+with `GET /health` → 200). Run `scripts/verify` when the test database needs to
+be created and migrated first; direct `mix verify` expects a prepared database.
+The exit status is the verdict.
 
 ### PostgreSQL
 
@@ -65,6 +68,16 @@ scripts/verify
 ```
 
 Set `DATABASE_URL` to use another PostgreSQL instance.
+
+`scripts/verify` creates and migrates the test database before running the gate.
+Direct targeted or full `mix test` runs reuse the prepared database; provision it
+once before the first run:
+
+```sh
+MIX_ENV=test mix ecto.create
+MIX_ENV=test mix ecto.migrate
+mix test test/spacetraders/agent_test.exs
+```
 
 First Ship dispatch durability is tested directly through the claimed Intent
 execution seam in `test/spacetraders/ship_execution_durability_test.exs`. The test
