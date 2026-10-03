@@ -47,5 +47,16 @@ for check in operational_checks:
     if check in product:
         raise SystemExit(f"Product job must not run operational check {check}")
 
+workspace_checks = (
+    "test/integration/concurrent_worktrees_test.sh",
+    "test/integration/task_workspaces_test.sh",
+)
+for check in workspace_checks:
+    if check in workflow:
+        raise SystemExit(f"Workspace diagnostic must not run as a CI check: {check}")
+
+if "concurrent-worktrees" in jobs:
+    raise SystemExit("Workspace orchestration must not have a required CI job")
+
 print("Product and release/deployment CI contracts are separate.")
 PY
