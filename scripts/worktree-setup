@@ -198,6 +198,10 @@ else
   quiet_bootstrap "$cache_root/setup-$task_id.log" "Dirty worktree: compiling privately"
 fi
 
+# Bootstrap may install the toolchain in its own subprocess; make it available
+# in this setup process for database preparation and later lifecycle commands.
+export PATH="$ELIXIR_DIR/bin:$OTP_DIR/bin:$PATH"
+
 {
   printf 'export AGENT_TASK_ID=%q\n' "$task_id"
   printf 'export DATABASE_URL=%q\n' "$database_url"
