@@ -13,7 +13,7 @@ defmodule SpaceTraders.FleetResources do
   alias SpaceTraders.FleetPlanning
   alias SpaceTraders.FleetStrategy.{Revision, StandingAuthority}
   alias SpaceTraders.Intelligence
-  alias SpaceTraders.{Repo, ShipReservation, World}
+  alias SpaceTraders.{Clock, Repo, ShipReservation, World}
 
   import Ecto.Query
 
@@ -41,7 +41,7 @@ defmodule SpaceTraders.FleetResources do
            StandingAuthority.authorize(revision, %{
              revision_id: revision.id,
              evidence_id: Evidence.fingerprint({agent.id, overview.credits}),
-             observed_at: DateTime.utc_now(),
+             observed_at: Clock.utc_now(),
              bounds: %{minimum_credits: overview.credits, scraps_ship: false}
            }),
          %Generation{fleet_strategy_revision_id: revision_id} = generation <-
@@ -52,9 +52,9 @@ defmodule SpaceTraders.FleetResources do
                    is_nil(g.fenced_at) and is_nil(g.retired_at)
            ),
          true <- revision_id == revision.id,
-         as_of = DateTime.utc_now(),
-         :ok <- refresh_local_waypoints(agent, system, ships, as_of),
-         waypoints = discover_resource_waypoints(agent, revision, system, as_of),
+         :ok <- refresh_local_waypoints(agent, system, ships, Clock.utc_now()),
+         waypoints = discover_resource_waypoints(agent, revision, system, Clock.utc_now()),
+         as_of = Clock.utc_now(),
          {:ok, %{candidate_contributions: [_ | _] = candidates}} <-
            FleetPlanning.plan_resources(revision, index, %{
              as_of: as_of,
@@ -145,7 +145,7 @@ defmodule SpaceTraders.FleetResources do
            ) do
         {:ok, waypoints} ->
           Enum.each(waypoints, &Intelligence.observe_waypoint(agent, &1, source: "get_waypoints"))
-          World.waypoints(agent, system, DateTime.utc_now(), @freshness_seconds)
+          World.waypoints(agent, system, Clock.utc_now(), @freshness_seconds)
 
         _ ->
           known
