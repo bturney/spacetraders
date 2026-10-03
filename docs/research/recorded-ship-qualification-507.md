@@ -70,26 +70,35 @@ red receipt: `507-feedback-lifecycle-red.log`. Controlled-clock red receipt:
 `507-feedback-rate-red.log`. The 799-test results below identify the earlier
 revision.
 
-**Intermittent ResourceAcquisition failure retained as unresolved evidence.**
-The handoff's local canonical run recorded 806 tests with one failure inside the
-ordered-suite proof: a repeated `ResourceAcquisitionTest` returned
-`{:error, :resource_acquisition_unavailable}` for "active Strategy discovers a
-remote extraction Waypoint for a new Agent", expecting a `waiting` Intent.
-That failure is not treated as repaired or as a qualification regression.
+**ResourceAcquisition repeat-run failure — root cause corrected.**
+The handoff's local canonical run recorded 806 tests with one intermittent
+failure in "active Strategy discovers a remote extraction Waypoint for a new
+Agent". Failure-only instrumentation then reproduced it in GitHub Actions run
+37157861527. The request reached both waypoint reads but never reached the
+Ship-specific read or mutation; CapacityGovernor was healthy, ReadCoordinator
+had no pending entry, and no ShipServer was required to explain the failure.
 
-At source revision `b0a316d7eeb3d99cf9207bd43385ef9e3c782976`, GitHub Actions
-run 37157320174 executed the canonical `scripts/verify` path twice without
-source changes. Both executions passed **806 tests, 0 failures**; ExUnit seeds
-were 437642 and 271515. In each execution the same-VM lifecycle diagnostic ran
-the qualification, EvidenceScheduling and ResourceAcquisition suites in both
-orders, repeated twice, and every child suite passed.
+The cause was a causal-time mismatch in `FleetResources.reconcile/5`.
+Reconciliation captured its planning `as_of` **before** refreshing/discovering
+Waypoint evidence. `Intelligence.observe_waypoint/3` stamps newly persisted
+evidence from the application clock, while `FleetPlanning.plan_resources/3`
+correctly rejects a fact whose `observed_at` is later than the decision
+`as_of`. If discovery crossed the next clock second, the just-discovered
+Asteroid therefore disappeared from the candidate set and the caller collapsed
+that guard failure to `{:error, :resource_acquisition_unavailable}`.
 
-Because the earlier local failure has not recurred, its cause remains
-unestablished. The failing ResourceAcquisition assertion now preserves its
-contract but, on failure only, reports the API request prefix plus
-CapacityGovernor, Evidence.ReadCoordinator and ShipServer state. This gives the
-next recurrence enough evidence to localize the failing guard without changing
-production behavior or weakening the assertion.
+Commit `cfdd32f214c6d549a3a482c728cc5f21f6fefde4` turns that timing race into a
+deterministic regression: the test installs `TestClock` and advances it five
+seconds during the paginated Waypoint response. GitHub Actions run 37158317387
+failed **806 tests, 2 failures** because the same deterministic case is exercised
+once inside the ordered-child diagnostic and once in the outer suite.
+
+Commit `a902732d0c71c35b3632d8bbede142dd3c2c972b` corrects the caller rather than
+weakening the planner invariant. `FleetResources` now uses the application
+`Clock` consistently and captures the planning/allocation `as_of` only after
+discovery has persisted its evidence. GitHub Actions run 37158344191 then passed
+**806 tests, 0 failures** at seed 1697; the same-VM lifecycle proof passed both
+orders repeated twice, and release-deployment verification also passed.
 
 Feedback two-axis review: Standards found no actionable findings. Spec identified
 that a pending Stop task was not itself proof of row-lock contention. The overlap
@@ -101,12 +110,12 @@ Implementation revision: the commit containing this report on
 `feature/507-recorded-ship-qualification`. The retained patch and command logs
 identify the qualified source independently of the branch name.
 
-Qualified source revision before this report-only receipt update:
-`b0a316d7eeb3d99cf9207bd43385ef9e3c782976`. The PR-feedback implementation is
+Qualified executable source revision before this report-only receipt update:
+`a902732d0c71c35b3632d8bbede142dd3c2c972b`. The PR-feedback implementation is
 retained in `9c27ef72a6a2ab041bfd55d305c4925434cd40bb`; later source changes add
-the handoff record and failure-only ResourceAcquisition diagnostics. No
-production behavior or test assertion was weakened after that implementation
-revision. The retained source patch reconstructs the reviewed runtime/test
+the handoff record, failure-only diagnostics, deterministic time-race regression,
+and the scoped FleetResources causal-time correction. No verification assertion
+was weakened. The retained source patch reconstructs the reviewed runtime/test
 change against the exact base above.
 
 [Durable report, source patch and complete terminal transcripts](https://gist.github.com/bturney/d1416360b9b5a74ea07ab554ccfa068a)
@@ -266,7 +275,9 @@ Verbose transcripts are retained; the command exit status is the verdict.
 | Reviewed runtime file | Exit 0; 23 tests, 0 failures | `507-reviewed-runtime.log` |
 | Refit response snapshot / runtime / rate limiter | Exit 0; 37 tests, 0 failures | `507-refit-timing-green.log` |
 | Canonical `scripts/verify` | **Exit 0; 799 tests, 0 failures; seed 710537; 106.7 seconds ExUnit.** Compile, formatting, 95 models, operation inventory, transport boundary and `/health` HTTP 200 pass. | `507-canonical-confirmed.log` |
-| Current-head CI canonical `scripts/verify` | **Two unchanged-source passes; 806 tests, 0 failures; seeds 437642 and 271515.** Same-VM lifecycle diagnostic passed every ordered child suite in both executions; release-deployment verification also passed. | GitHub Actions run 37157320174 |
+| Instrumented pre-reproducer CI canonical `scripts/verify` | **Two unchanged-source passes; 806 tests, 0 failures; seeds 437642 and 271515.** Same-VM lifecycle diagnostic passed every ordered child suite in both executions. | GitHub Actions run 37157320174 |
+| Deterministic ResourceAcquisition time-race reproduction | **Exit 2; 806 tests, 2 failures.** Controlled time advances during Waypoint discovery; the resource case fails in the ordered child suite and outer suite without reaching Ship transport. | GitHub Actions run 37158317387 |
+| Corrected current executable `scripts/verify` | **Exit 0; 806 tests, 0 failures; seed 1697.** Ordered lifecycle proof passed both orders twice; release-deployment verification passed. | GitHub Actions run 37158344191 |
 
 Earlier gate attempts are retained too. The first reported 799 tests and three
 failures: two refit 429-wait assertions exposed the stale pre-selection snapshot
