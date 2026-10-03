@@ -21,6 +21,8 @@ defmodule SpaceTraders.ShipExecutionDurabilityTest do
   alias SpaceTraders.MutationAttempts.{Attempt, Outcome}
   alias SpaceTraders.Repo
   alias SpaceTraders.SafetyFence
+  alias SpaceTraders.API.RecordedDispatch
+  alias SpaceTraders.MutationAttempts
 
   setup do
     :ok = Sandbox.mode(Repo, :auto)
@@ -457,6 +459,165 @@ defmodule SpaceTraders.ShipExecutionDurabilityTest do
     end
   end
 
+  test "concurrent retry preparation and dispatch consume one permission and one transport effect" do
+    {agent, ship, portfolio, commitment} = claimed_ship()
+    intent = owned_navigation(ship, portfolio, commitment)
+
+    {:ok, %{intent: intent, attempt: original}} =
+      RecordedDispatch.prepare(agent, intent, %{"kind" => "orbit", "waypoint" => "X1-UX81-A1"})
+
+    {:ok, original} = MutationAttempts.mark_sent_or_unknown(original)
+    game = start_supervised!({Elixir.Agent, fn -> %{status: "DOCKED", sends: 0} end})
+    Req.Test.set_req_test_to_shared(SpaceTraders.API)
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      case conn.method do
+        "GET" ->
+          Req.Test.json(conn, %{
+            "data" =>
+              ship_body(ship.symbol, %{"nav" => nav_body(Elixir.Agent.get(game, & &1.status))})
+          })
+
+        "POST" ->
+          assert conn.request_path == "/v2/my/ships/#{ship.symbol}/orbit"
+          Elixir.Agent.update(game, &%{status: "IN_ORBIT", sends: &1.sends + 1})
+          Req.Test.json(conn, %{"data" => %{"nav" => nav_body("IN_ORBIT")}})
+      end
+    end)
+
+    assert {:ok, _} =
+             SpaceTraders.Evidence.get_ship(
+               SpaceTraders.API.AgentTokenReference.new(agent),
+               ship.symbol
+             )
+
+    {:ok, absent} =
+      MutationAttempts.reconcile(original, :absent, [
+        SpaceTraders.Evidence.reconciliation_observation(
+          "get-my-ship",
+          original,
+          :absent,
+          "Fresh governed observation proves the original orbit absent"
+        )
+      ])
+
+    results = concurrent(8, fn -> RecordedDispatch.prepare_retry(agent, intent, absent) end)
+    assert [{:ok, retry}] = Enum.filter(results, &match?({:ok, _}, &1))
+    assert Enum.count(results, &match?({:error, _}, &1)) == 7
+    results = concurrent(8, fn -> SpaceTraders.API.dispatch_recorded(retry) end)
+    assert Enum.count(results, &match?({:ok, _}, &1)) == 1
+    assert Enum.count(results, &match?({:error, _}, &1)) == 7
+    assert Elixir.Agent.get(game, & &1.sends) == 1
+    assert [original, retried] = MutationAttempts.list_for_agent(agent)
+    refute original.retry_authorized
+    assert retried.id == retry.id
+    assert retried.retry_of_id == original.id
+    assert retried.state == "succeeded"
+    assert :ok = Intents.rearm_on_boot()
+    assert :ok = Intents.rearm_on_boot()
+    assert Elixir.Agent.get(game, & &1.sends) == 1
+  end
+
+  test "unresolved shared credits fence dependent spending while independently claimed Ship execution continues" do
+    {agent, source, portfolio, commitment} = claimed_ship(3)
+
+    [_, dependent, independent] =
+      Repo.all(from s in Ship, where: s.agent_id == ^agent.id, order_by: s.symbol)
+
+    source_intent = owned_navigation(source, portfolio, commitment)
+
+    spending = %{
+      "kind" => "buy",
+      "waypoint" => "X1-UX81-A1",
+      "trade_symbol" => "IRON_ORE",
+      "units" => 5,
+      "listing_price" => 10
+    }
+
+    {:ok, %{attempt: unknown}} = RecordedDispatch.prepare(agent, source_intent, spending)
+    {:ok, unknown} = MutationAttempts.mark_sent_or_unknown(unknown)
+
+    assert Enum.sort(unknown.dependency_keys) ==
+             Enum.sort(["ship:#{agent.id}:#{source.symbol}", "agent_credits:#{agent.id}"])
+
+    dependent_commitment = Enum.find(portfolio.commitments, &(dependent.symbol in &1.claims))
+    dependent_intent = owned_navigation(dependent, portfolio, dependent_commitment)
+
+    assert {:error, {:safety_fenced, [blocked]}} =
+             RecordedDispatch.prepare(agent, dependent_intent, spending)
+
+    assert blocked == unknown.id
+    assert Repo.get!(Intent, dependent_intent.id).in_flight_action == nil
+
+    independent_commitment = Enum.find(portfolio.commitments, &(independent.symbol in &1.claims))
+    independent_intent = owned_navigation(independent, portfolio, independent_commitment)
+
+    {:ok, _} =
+      RecordedDispatch.prepare(agent, independent_intent, %{
+        "kind" => "orbit",
+        "waypoint" => "X1-UX81-A1"
+      })
+
+    independent_path = "/v2/my/ships/#{independent.symbol}"
+    orbit_path = independent_path <> "/orbit"
+    game = start_supervised!({Elixir.Agent, fn -> %{status: "DOCKED", sends: []} end})
+    Req.Test.set_req_test_to_shared(SpaceTraders.API)
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      case {conn.method, conn.request_path} do
+        {"GET", ^independent_path} ->
+          Req.Test.json(conn, %{
+            "data" =>
+              ship_body(independent.symbol, %{
+                "nav" => nav_body(Elixir.Agent.get(game, & &1.status))
+              })
+          })
+
+        {"POST", ^orbit_path} ->
+          Elixir.Agent.update(game, &%{status: "IN_ORBIT", sends: &1.sends ++ [orbit_path]})
+          Req.Test.json(conn, %{"data" => %{"nav" => nav_body("IN_ORBIT")}})
+
+        request ->
+          flunk("fenced dependent reached transport: #{inspect(request)}")
+      end
+    end)
+
+    _ = Intents.reconcile(agent.id, independent.symbol, nil, :boot, independent_intent.id)
+
+    assert Elixir.Agent.get(game, & &1.sends) == ["/v2/my/ships/#{independent.symbol}/orbit"]
+    assert MutationAttempts.get!(unknown.id).state == "sent_or_unknown"
+    assert SafetyFence.active?(MutationAttempts.get!(unknown.id))
+    assert [%{id: ^blocked}] = SafetyFence.blocking_attempts(["agent_credits:#{agent.id}"])
+    assert SafetyFence.blocking_attempts(["ship:#{agent.id}:#{independent.symbol}"]) == []
+  end
+
+  defp concurrent(count, fun) do
+    tasks =
+      for _ <- 1..count,
+          do:
+            Task.async(fn ->
+              receive do
+                :go -> fun.()
+              end
+            end)
+
+    Enum.each(tasks, &send(&1.pid, :go))
+    Enum.map(tasks, &Task.await(&1, 5_000))
+  end
+
+  defp owned_navigation(ship, portfolio, commitment) do
+    Repo.insert!(%Intent{
+      ship_id: ship.id,
+      caller: "commitment",
+      type: "navigate",
+      status: "active",
+      target_waypoint: "X1-UX81-A1",
+      fleet_commitment_id: commitment.id,
+      fleet_commitment_portfolio_id: portfolio.id,
+      fleet_commitment_portfolio_version: portfolio.version
+    })
+  end
+
   defp pause_dispatch(_event, _measurements, metadata, test_pid) do
     send(test_pid, {:prepared_dispatch, self(), metadata.attempt_id})
 
@@ -530,7 +691,7 @@ defmodule SpaceTraders.ShipExecutionDurabilityTest do
     :ok
   end
 
-  defp claimed_ship do
+  defp claimed_ship(count \\ 1) do
     unique = System.unique_integer([:positive])
     operator = operator_fixture()
     agent = agent_fixture(operator, %{symbol: "DISPATCH#{unique}", agent_token: "TOKEN#{unique}"})
@@ -542,8 +703,22 @@ defmodule SpaceTraders.ShipExecutionDurabilityTest do
         ship_type: "SHIP_PROBE"
       })
 
+    ships = [
+      ship
+      | for(
+          n <- 2..count//1,
+          do:
+            Repo.insert!(%Ship{
+              agent_id: agent.id,
+              symbol: "#{agent.symbol}-#{n}",
+              ship_type: "SHIP_PROBE"
+            })
+        )
+    ]
+
     on_exit(fn ->
       ShipServer.stop(ship.symbol)
+      Enum.each(ships, &ShipServer.stop(&1.symbol))
 
       Sandbox.unboxed_run(Repo, fn ->
         attempt_ids = Repo.all(from a in Attempt, where: a.agent_id == ^agent.id, select: a.id)
@@ -600,11 +775,14 @@ defmodule SpaceTraders.ShipExecutionDurabilityTest do
       unwind_cost: 0
     }
 
+    candidates =
+      Enum.map(ships, fn s -> %{candidate | id: "dispatch-#{s.symbol}", claims: [s.symbol]} end)
+
     {:ok, selection} =
-      FleetAllocation.select_portfolio(revision, [candidate], %{
+      FleetAllocation.select_portfolio(revision, candidates, %{
         as_of: DateTime.utc_now(),
         source_version: generation.allocation_version,
-        claims: [ship.symbol],
+        claims: Enum.map(ships, & &1.symbol),
         reservations: %{}
       })
 
@@ -615,7 +793,7 @@ defmodule SpaceTraders.ShipExecutionDurabilityTest do
         calibration_version: "first-dispatch"
       })
 
-    [commitment] = portfolio.commitments
+    commitment = Enum.find(portfolio.commitments, &(ship.symbol in &1.claims))
     {agent, ship, portfolio, commitment}
   end
 end

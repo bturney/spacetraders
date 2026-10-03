@@ -296,6 +296,28 @@ defmodule SpaceTraders.MutationAttempts do
     end
   end
 
+  @doc "Retires unused proven-absence retry permission when its owner remains Emergency Stopped."
+  def retire_stopped_retry(%Attempt{} = attempt) do
+    Repo.transaction(fn ->
+      current = locked_attempt(attempt.id)
+
+      unless current.state == "absent" and current.retry_authorized and
+               action_remains_selected?(current),
+             do: Repo.rollback(:retry_not_authorized)
+
+      updated = current |> Ecto.Changeset.change(retry_authorized: false) |> Repo.update!()
+
+      Repo.insert!(%Outcome{
+        mutation_attempt_id: current.id,
+        classification: "absent",
+        evidence: %{"retry_disposition" => "retired_while_emergency_stopped"},
+        recorded_at: DateTime.utc_now()
+      })
+
+      Repo.preload(updated, :outcomes, force: true)
+    end)
+  end
+
   @spec list_for_agent(Agent.t()) :: [Attempt.t()]
   def list_for_agent(%Agent{id: agent_id}) do
     list(where(Attempt, [attempt], attempt.agent_id == ^agent_id))
