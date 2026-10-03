@@ -2,7 +2,7 @@ defmodule SpaceTraders.RecordedShipRuntimeTest do
   @moduledoc """
   Recorded dispatch qualification through authenticated Strategy activation and
   production coordination/boot. The game owns transport receipts; a separate
-  PostgreSQL session observes committed evidence. SQL telemetry only interrupts
+  PostgreSQL session observes committed evidence. Semantic telemetry only interrupts
   the running sender; it never supplies a selection or recovery decision.
   """
   use ExUnit.Case, async: false
@@ -26,8 +26,8 @@ defmodule SpaceTraders.RecordedShipRuntimeTest do
   setup do
     :ok = Sandbox.mode(Repo, :auto)
     start_supervised!({TestClock, DateTime.utc_now()})
-    previous_clock = Application.get_env(:spacetraders, :clock)
-    previous_authority = Application.get_env(:spacetraders, RuntimeAuthority)
+    previous_clock = Application.fetch_env(:spacetraders, :clock)
+    previous_authority = Application.fetch_env(:spacetraders, RuntimeAuthority)
     Application.put_env(:spacetraders, :clock, TestClock)
     Application.put_env(:spacetraders, RuntimeAuthority, enabled: true)
     start_supervised!({RuntimeAuthority, lock_key: System.unique_integer([:positive])})
@@ -53,7 +53,17 @@ defmodule SpaceTraders.RecordedShipRuntimeTest do
       end
     end)
 
-    Req.Test.set_req_test_to_shared(SpaceTraders.API)
+    Req.Test.allow(SpaceTraders.API, self(), fn ->
+      ships =
+        DynamicSupervisor.which_children(SpaceTraders.Fleet.ShipSupervisor)
+        |> Enum.map(fn {_, pid, _, _} -> pid end)
+
+      Enum.filter(
+        [Process.whereis(Reconciler), Process.whereis(ShipServerBoot) | ships],
+        &is_pid/1
+      )
+    end)
+
     restart_capacity()
 
     on_exit(fn ->
@@ -83,8 +93,8 @@ defmodule SpaceTraders.RecordedShipRuntimeTest do
       end)
 
       restart_capacity()
-      Application.put_env(:spacetraders, :clock, previous_clock)
-      Application.put_env(:spacetraders, RuntimeAuthority, previous_authority)
+      restore_env(:clock, previous_clock)
+      restore_env(RuntimeAuthority, previous_authority)
       Sandbox.mode(Repo, :manual)
     end)
 
@@ -93,12 +103,88 @@ defmodule SpaceTraders.RecordedShipRuntimeTest do
     {:ok, conn: conn, agent: agent, game: game, observer: observer, barrier: barrier, gate: gate}
   end
 
+  test "Emergency Stop overlaps a checked final authorization transaction; admitted work completes once",
+       context do
+    install_barrier(:transport_authorization_checked, context)
+    activate(context.conn)
+
+    assert_receive {:boundary, sender, :transport_authorization_checked, authorization_backend},
+                   5_000
+
+    assert_receive {:authorization_transaction, true}
+    assert orbit_count(context.game) == 0
+    scope = Scope.for_operator(Repo.get!(Operator, context.agent.operator_id))
+    owner = self()
+
+    stop =
+      Task.async(fn ->
+        Repo.checkout(fn ->
+          [[backend]] = Repo.query!("SELECT pg_backend_pid()").rows
+          send(owner, {:stop_backend, backend})
+          SpaceTraders.FleetStrategy.engage_emergency_stop(scope)
+        end)
+      end)
+
+    assert_receive {:stop_backend, stop_backend}, 5_000
+
+    eventually(
+      fn ->
+        SpaceTraders.EmergencyStopAdmission.mutation_allowed?(context.agent.agent_token) ==
+          {:error, :emergency_stopped}
+      end,
+      500,
+      context
+    )
+
+    assert authorization_backend != stop_backend
+
+    eventually(
+      fn ->
+        Postgrex.query!(context.observer, "SELECT $1::int = ANY(pg_blocking_pids($2::int))", [
+          authorization_backend,
+          stop_backend
+        ]).rows == [[true]]
+      end,
+      500,
+      context
+    )
+
+    # The stop's durable write waits behind final authorization's Strategy lock.
+    send(sender, :continue)
+    assert {:ok, _} = Task.await(stop, 5_000)
+    eventually(fn -> orbit_count(context.game) == 1 end, 500, context)
+
+    eventually(
+      fn ->
+        Enum.any?(
+          SpaceTraders.MutationAttempts.list_for_agent(context.agent),
+          &(&1.operation_id == "orbit-ship" and &1.state == "succeeded")
+        )
+      end,
+      500,
+      context
+    )
+
+    assert [[id, "succeeded", _]] = observe_attempts(context.observer, context.agent.id)
+    stop_supervised(DemandScheduler)
+    stop_supervised(Reconciler)
+    ShipServer.stop_all()
+    restart_runtime()
+    assert orbit_count(context.game) == 1
+
+    refute Enum.any?(
+             SpaceTraders.MutationAttempts.list_for_agent(context.agent),
+             &(&1.retry_of_id == id)
+           )
+  end
+
   for {phase, committed_state, accepted} <- [
         {:before_preparation, nil, false},
         {:preparation_write, nil, false},
         {:prepared, "prepared", false},
         {:marker_write, "prepared", false},
         {:marker_committed, "sent_or_unknown", false},
+        {:transport_authorized, "sent_or_unknown", false},
         {:transport_before_accept, "sent_or_unknown", false},
         {:accepted, "sent_or_unknown", true},
         {:response_delivered, "sent_or_unknown", true},
@@ -160,6 +246,46 @@ defmodule SpaceTraders.RecordedShipRuntimeTest do
         },
         label: "507 interruption receipt"
       )
+    end
+  end
+
+  for winner <- [:revocation, :authorization], loss <- [:emergency_stop, :claim] do
+    @winner winner
+    @loss loss
+    test "#{@loss} race: #{@winner} linearizes first and boot never adds a send", context do
+      phase = if @winner == :revocation, do: :marker_committed, else: :transport_authorized
+      install_barrier(phase, context)
+      activate(context.conn)
+      assert_receive {:boundary, sender, ^phase, _}, 5_000
+      assert [[id, "sent_or_unknown", _]] = observe_attempts(context.observer, context.agent.id)
+      original = Repo.get_by!(Intent, mutation_attempt_id: id)
+      revoke(@loss, context, original)
+      assert orbit_count(context.game) == 0
+      send(sender, :continue)
+      expected_state = if @winner == :revocation, do: "ambiguous", else: "succeeded"
+
+      eventually(
+        fn -> SpaceTraders.MutationAttempts.get!(id).state == expected_state end,
+        500,
+        context
+      )
+
+      expected_count = if @winner == :revocation, do: 0, else: 1
+      assert orbit_count(context.game) == expected_count
+      stop_supervised(DemandScheduler)
+      stop_supervised(Reconciler)
+      ShipServer.stop_all()
+      restart_runtime()
+
+      for {_, pid, _, _} <- DynamicSupervisor.which_children(SpaceTraders.Fleet.ShipSupervisor),
+          do: :sys.get_state(pid)
+
+      assert orbit_count(context.game) == expected_count
+
+      refute Enum.any?(
+               SpaceTraders.MutationAttempts.list_for_agent(context.agent),
+               &(&1.retry_of_id == id)
+             )
     end
   end
 
@@ -401,7 +527,13 @@ defmodule SpaceTraders.RecordedShipRuntimeTest do
         id,
         [
           [:spacetraders, :recorded_dispatch, :prepared],
-          [:space_traders, :repo, :query],
+          [:spacetraders, :recorded_dispatch, :preparation_written],
+          [:spacetraders, :recorded_dispatch, :marker_written],
+          [:spacetraders, :recorded_dispatch, :marker_committed],
+          [:spacetraders, :recorded_dispatch, :transport_authorized],
+          [:spacetraders, :recorded_dispatch, :transport_authorization_checked],
+          [:spacetraders, :mutation_attempts, :outcome_written],
+          [:spacetraders, :mutation_attempts, :outcome_committed],
           [:spacetraders, :api, :request]
         ],
         &boundary/4,
@@ -411,45 +543,22 @@ defmodule SpaceTraders.RecordedShipRuntimeTest do
     on_exit(fn -> :telemetry.detach(id) end)
   end
 
-  defp boundary([:spacetraders, :recorded_dispatch, :prepared], _, _, {owner, :prepared, gate}) do
-    pause_once(owner, :prepared, gate)
-  end
+  defp boundary(
+         [:spacetraders, owner_module, event],
+         _,
+         %{operation_id: "orbit-ship"} = metadata,
+         {owner, phase, gate}
+       )
+       when owner_module in [:recorded_dispatch, :mutation_attempts] do
+    matches = %{
+      preparation_write: :preparation_written,
+      marker_write: :marker_written,
+      outcome_write: :outcome_written
+    }
 
-  defp boundary([:space_traders, :repo, :query], _, metadata, {owner, phase, gate}) do
-    query = String.downcase(metadata.query)
-
-    if String.starts_with?(query, "insert into \"mutation_attempts\"") and
-         "orbit-ship" in metadata.params,
-       do: Process.put({__MODULE__, :orbit_sender}, true)
-
-    if Process.get({__MODULE__, :orbit_sender}) do
-      cond do
-        phase == :preparation_write and
-            String.starts_with?(query, "insert into \"mutation_attempts\"") ->
-          pause_once(owner, phase, gate)
-
-        String.starts_with?(query, "update \"mutation_attempts\"") and
-            "sent_or_unknown" in metadata.params ->
-          Process.put({__MODULE__, :marker_written}, true)
-          if phase == :marker_write, do: pause_once(owner, phase, gate)
-
-        phase == :marker_committed and query == "commit" and
-            Process.get({__MODULE__, :marker_written}) ->
-          pause_once(owner, phase, gate)
-
-        String.starts_with?(query, "insert into \"mutation_attempt_outcomes\"") and
-            "succeeded" in metadata.params ->
-          Process.put({__MODULE__, :outcome_written}, true)
-          if phase == :outcome_write, do: pause_once(owner, phase, gate)
-
-        phase == :outcome_committed and query == "commit" and
-            Process.get({__MODULE__, :outcome_written}) ->
-          pause_once(owner, phase, gate)
-
-        true ->
-          :ok
-      end
-    end
+    if event == Map.get(matches, phase, phase) and
+         Map.get(metadata, :classification, :succeeded) == :succeeded,
+       do: pause_once(owner, phase, gate)
   end
 
   defp boundary([:spacetraders, :api, :request], _, metadata, {owner, :response_delivered, gate}) do
@@ -457,6 +566,9 @@ defmodule SpaceTraders.RecordedShipRuntimeTest do
   end
 
   defp boundary(_, _, _, _), do: :ok
+
+  defp restore_env(key, {:ok, value}), do: Application.put_env(:spacetraders, key, value)
+  defp restore_env(key, :error), do: Application.delete_env(:spacetraders, key)
 
   defp transport_barrier(owner, phase, barrier, gate) do
     if :ets.lookup(barrier, :phase) == [{:phase, phase}], do: pause_once(owner, phase, gate)
@@ -467,6 +579,9 @@ defmodule SpaceTraders.RecordedShipRuntimeTest do
   end
 
   defp pause(owner, phase) do
+    if phase == :transport_authorization_checked,
+      do: send(owner, {:authorization_transaction, Repo.in_transaction?()})
+
     [[backend]] = Repo.query!("SELECT pg_backend_pid()").rows
     send(owner, {:boundary, self(), phase, backend})
 

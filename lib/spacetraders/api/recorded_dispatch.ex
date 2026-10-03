@@ -50,6 +50,8 @@ defmodule SpaceTraders.API.RecordedDispatch do
           {:ok, attempt} =
             prepare_attempt(authority, %{current | in_flight_action: selected}, request)
 
+          emit_phase(:preparation_written, attempt)
+
           selected =
             current
             |> Ecto.Changeset.change(
@@ -108,7 +110,14 @@ defmodule SpaceTraders.API.RecordedDispatch do
 
         with "prepared" <- attempt.state,
              :ok <- selected_authority(current, attempt) do
-          MutationAttempts.mark_sent_or_unknown(attempt)
+          result = MutationAttempts.mark_sent_or_unknown(attempt)
+
+          case result do
+            {:ok, admitted} -> emit_phase(:marker_written, admitted)
+            _ -> :ok
+          end
+
+          result
         else
           state when is_binary(state) -> {:error, :attempt_already_dispatched}
           {:error, reason} -> suppress(attempt, reason)
@@ -116,13 +125,24 @@ defmodule SpaceTraders.API.RecordedDispatch do
         end
       end)
       |> case do
-        {:ok, result} -> result
-        {:error, reason} -> {:error, reason}
+        {:ok, {:ok, admitted} = result} ->
+          emit_phase(:marker_committed, admitted)
+          result
+
+        {:ok, result} ->
+          result
+
+        {:error, reason} ->
+          {:error, reason}
       end
     end
   end
 
-  @doc "Rechecks authority after the send marker commits and immediately before transport."
+  @doc """
+  Rechecks authority after the send marker commits. Successful completion of
+  this transaction is final transport admission: a later revocation cannot
+  recall that one admitted request. Transport runs outside all transactions.
+  """
   def authorize_transport(%Attempt{} = attempt) do
     with :ok <- require_commit_boundary() do
       Repo.transaction(fn ->
@@ -131,6 +151,7 @@ defmodule SpaceTraders.API.RecordedDispatch do
 
         with "sent_or_unknown" <- attempt.state,
              :ok <- selected_authority(current, attempt) do
+          emit_phase(:transport_authorization_checked, attempt)
           :ok
         else
           {:error, reason} -> suppress_admitted(attempt, reason)
@@ -138,8 +159,15 @@ defmodule SpaceTraders.API.RecordedDispatch do
         end
       end)
       |> case do
-        {:ok, result} -> result
-        {:error, reason} -> {:error, reason}
+        {:ok, :ok} ->
+          emit_phase(:transport_authorized, attempt)
+          :ok
+
+        {:ok, result} ->
+          result
+
+        {:error, reason} ->
+          {:error, reason}
       end
     end
   end
@@ -226,23 +254,27 @@ defmodule SpaceTraders.API.RecordedDispatch do
     end
   end
 
-  defp preparation_committed({:ok, %{intent: intent, attempt: attempt}} = result) do
-    emit_prepared(intent.id, attempt.id)
+  defp preparation_committed({:ok, %{attempt: attempt}} = result) do
+    emit_phase(:prepared, attempt)
     result
   end
 
   defp preparation_committed({:ok, %Attempt{} = attempt} = result) do
-    emit_prepared(attempt.provenance["intent_id"], attempt.id)
+    emit_phase(:prepared, attempt)
     result
   end
 
   defp preparation_committed(result), do: result
 
-  defp emit_prepared(intent_id, attempt_id) do
+  defp emit_phase(phase, attempt) do
     :telemetry.execute(
-      [:spacetraders, :recorded_dispatch, :prepared],
+      [:spacetraders, :recorded_dispatch, phase],
       %{count: 1},
-      %{intent_id: intent_id, attempt_id: attempt_id}
+      %{
+        intent_id: attempt.provenance["intent_id"],
+        attempt_id: attempt.id,
+        operation_id: attempt.operation_id
+      }
     )
   end
 

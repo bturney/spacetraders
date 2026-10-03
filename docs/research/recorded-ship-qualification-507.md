@@ -8,6 +8,90 @@ Fleet Allocation, net profitable trading, C02/C05/C06, or reset-to-reset autonom
 The parent [#502](https://github.com/bturney/spacetraders/issues/502) remains open.
 No production operations were performed.
 
+## PR review follow-up: admission and deterministic qualification
+
+This section supersedes the original phase-hook and timing descriptions below.
+Follow-up source base: `4ce4da31a54a322caedf91b496d1dcf8e8357956`.
+
+**Final transport admission linearizes at successful completion of
+`RecordedDispatch.authorize_transport/1`'s transaction.** The earlier
+sent-or-unknown marker is durable uncertainty, not this final permission. A
+completed revocation before final authorization prevents transport. If final
+authorization wins first, its one request is already admitted and may reach the
+adapter or complete after Emergency Stop. That request cannot be recalled;
+restart still reconciles its marker from game evidence instead of blindly
+sending it again. Stop/drain rollout language refers to this exact boundary.
+
+Four deterministic ordering cases cover Emergency Stop and Claim revocation
+winning before authorization or losing to completed authorization. A fifth
+overlap case pauses **inside** the final transaction after authority validation,
+starts Emergency Stop, observes its pending cache suppression, and proves its
+durable Strategy write waits behind authorization's shared row lock using the
+independent observer's `pg_blocking_pids` check of both pinned backends. Releasing
+authorization permits exactly one orbit; production boot adds none. These
+cases deliberately orchestrate concurrency rather than depending on scheduler
+luck to reproduce a race.
+
+The interruption matrix now consumes named semantic telemetry in
+RecordedDispatch and MutationAttempts. `preparation_written`, `marker_written`
+and `outcome_written` are pre-commit phases. `prepared`, `marker_committed`,
+`transport_authorized` and `outcome_committed` are post-commit phases. Outcome
+publication never labels a nested caller transaction committed. The independent
+PostgreSQL observer still verifies actual durability; no Ecto SQL/parameter
+strings select the interruption phase.
+
+RateLimiter accepts a local monotonic-millisecond clock with `now/0` and
+`sleep/1` callbacks, defaulting to the existing System/Process implementation.
+Its public `acquire/1` tests use controlled time: the complete 32-token initial
+grant, blocking after drain, no grant one millisecond before each refill, and
+grants at 500/1000/1500ms. No correctness assertion depends on wall-clock elapsed
+time or the limiter's rounded proposed sleep duration.
+
+Ordinary regression coverage runs the actual qualification, EvidenceScheduling
+and ResourceAcquisition ExUnit files consecutively **in the same child VM**, in
+both file orders, repeated twice. Twelve suite runs execute 164 cases and use
+the genuine setup/on_exit lifecycle. After every suite it verifies exact clock
+and RuntimeAuthority config restoration, no owned runtime/Ship processes, fresh
+shared Sandbox ownership for a new observer and private Req ownership. After
+qualification it also checks admission caches and empty volatile API admissions.
+
+This proof failed against the unchanged original PR: all 23 runtime cases
+passed, but teardown changed absent `:clock` configuration into `{:ok, nil}`.
+The fixture now restores key absence as well as values. It no longer switches
+Req into global shared mode; explicit allowances cover only its runtime actors.
+The repeated-order proof then passes. This establishes and corrects a real
+global-state leak; it **does not claim** that the leak caused either historical
+CI ResourceAcquisition or Sandbox-ownership failure. Neither failure was
+reproduced in this controlled proof.
+
+Feedback targeted receipt: `507-feedback-deterministic-green.log`, 35 outer
+tests, 0 failures, plus the 164 ordered child cases. Original-source lifecycle
+red receipt: `507-feedback-lifecycle-red.log`. Controlled-clock red receipt:
+`507-feedback-rate-red.log`. The 799-test results below identify the earlier
+revision.
+
+**Known open failure on this revision.** The canonical gate is red at this
+revision: `507-feedback-canonical.log`, 806 tests, 1 failure. It is not a
+qualification regression. Inside the ordered-suite proof, the **second** run of
+`ResourceAcquisitionTest` in one child VM returns
+`{:error, :resource_acquisition_unavailable}` for "active Strategy discovers a
+remote extraction Waypoint for a new Agent", expecting a `waiting` Intent.
+`FleetResources.reconcile/5` collapses every failure into that atom, so the
+receipt does not name the failing guard. The same file passes standalone, in the
+first ordered run, and in `507-stop-repro-1.log`. Prime suspect: one seeded
+remainder — a retained Observation/ObservationDemand, a live
+`SpaceTraders.Evidence.ReadCoordinator` dedup entry, or CapacityGovernor state —
+that a same-VM repeat run does not clear and that makes `FleetResources.reconcile`
+see unavailable inputs. `Evidence.read/3` coalesces concurrent identical reads
+through a globally named coordinator, and `DataCase` only rolls back the
+transaction, so this is the first place to instrument. Do not widen the search
+to unrelated flaky tests; see the handoff.
+
+Feedback two-axis review: Standards found no actionable findings. Spec identified
+that a pending Stop task was not itself proof of row-lock contention. The overlap
+test now observes the actual PostgreSQL blocking relationship before releasing
+authorization, rather than depending on a zero-time task yield.
+
 Source base: `c97fc58d6c4e3986b80dbacfe4998cf395449811` (merged #506).
 Implementation revision: the commit containing this report on
 `feature/507-recorded-ship-qualification`. The retained patch and command logs
@@ -39,7 +123,7 @@ injected into these scenarios. The fixture owns only game state and actual
 transport receipts. The scenario starts the real PostgreSQL singleton authority.
 
 An independent Postgrex session has a different backend from the sender and sees
-committed action/attempt evidence. SQL and API telemetry interrupt execution at
+committed action/attempt evidence. Semantic and API telemetry interrupt execution at
 the specified boundary; they never provide work or recovery decisions. Restart
 discards Reconciler, DemandScheduler, ShipServers and volatile Capacity Governor
 admissions, then invokes production coordination and ShipServerBoot. Controlled

@@ -237,7 +237,19 @@ defmodule SpaceTraders.MutationAttempts do
   @spec record_outcome(Attempt.t(), atom(), map()) :: {:ok, Attempt.t()} | {:error, term()}
   def record_outcome(%Attempt{} = attempt, classification, evidence)
       when classification in [:succeeded, :rejected, :ambiguous] and is_map(evidence) do
-    append_outcome(attempt, classification, evidence)
+    result = append_outcome(attempt, classification, evidence)
+
+    case result do
+      {:ok, recorded} ->
+        # Nested callers have not committed yet; never label their write committed.
+        unless Repo.in_transaction?(),
+          do: emit_outcome(:outcome_committed, recorded, classification)
+
+      _ ->
+        :ok
+    end
+
+    result
   end
 
   @doc "Records suppression before transport; a prepared attempt was never sent."
@@ -402,8 +414,19 @@ defmodule SpaceTraders.MutationAttempts do
       }
       |> Repo.insert!()
 
+      emit_outcome(:outcome_written, attempt, classification)
+
       Repo.preload(attempt, :outcomes, force: true)
     end)
+  end
+
+  defp emit_outcome(phase, attempt, classification) do
+    :telemetry.execute([:spacetraders, :mutation_attempts, phase], %{count: 1}, %{
+      attempt_id: attempt.id,
+      operation_id: attempt.operation_id,
+      classification: classification,
+      intent_id: attempt.provenance["intent_id"]
+    })
   end
 
   defp outcome_allowed?("sent_or_unknown", classification)

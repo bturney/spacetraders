@@ -11,16 +11,21 @@ defmodule SpaceTraders.API.RateLimiterTest do
   @pool_rate 0.5
   @pool_burst 30
 
-  defp start_limiter do
+  defp start_limiter(opts) do
     name = :"rate_limiter_#{System.unique_integer([:positive])}"
 
     {:ok, pid} =
       RateLimiter.start_link(
-        name: name,
-        rate: @rate,
-        burst: @burst,
-        pool_rate: @pool_rate,
-        pool_burst: @pool_burst
+        Keyword.merge(
+          [
+            name: name,
+            rate: @rate,
+            burst: @burst,
+            pool_rate: @pool_rate,
+            pool_burst: @pool_burst
+          ],
+          opts
+        )
       )
 
     on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid) end)
@@ -39,57 +44,96 @@ defmodule SpaceTraders.API.RateLimiterTest do
   end
 
   test "burst: the steady grant plus drained overflow pool let many requests through immediately" do
-    name = start_limiter()
+    {name, _time} = controlled_limiter()
 
-    {time, :ok} =
-      :timer.tc(fn ->
-        Enum.map(1..@pool_burst, fn _ ->
-          Task.async(fn -> RateLimiter.acquire(name) end)
-        end)
-        |> Enum.each(&Task.await/1)
-      end)
+    tasks =
+      for _ <- 1..(@burst + @pool_burst), do: Task.async(fn -> RateLimiter.acquire(name) end)
 
-    assert time < 500_000, "expected pool-sized burst under 500ms, took #{div(time, 1000)}ms"
+    assert Enum.map(tasks, &Task.await/1) == List.duplicate(:ok, 32)
+    refute_received {:waiting, _, _}
+    extra = Task.async(fn -> RateLimiter.acquire(name) end)
+    assert_receive {:waiting, pid, 500}
+    assert pid == extra.pid
+    Task.shutdown(extra, :brutal_kill)
   end
 
   test "steady: after draining both pools, requests refill at the 2/s grant" do
-    name = start_limiter()
+    {name, time} = controlled_limiter()
+    owner = self()
 
     # Drain the steady grant and the overflow pool.
     Enum.each(1..(@burst + @pool_burst), fn _ -> RateLimiter.acquire(name) end)
 
-    # Two more tokens should take ~1 second (2 req/s).
-    {time, :ok} =
-      :timer.tc(fn ->
-        Enum.each(1..2, fn _ -> RateLimiter.acquire(name) end)
+    caller =
+      Task.async(fn ->
+        RateLimiter.acquire(name)
+        send(owner, :first_grant)
+        RateLimiter.acquire(name)
+        :two_grants
       end)
 
-    elapsed_ms = div(time, 1000)
-
-    assert elapsed_ms >= 1000,
-           "3 tokens past full drain should take >= ~1.5s at 2 rps, got #{elapsed_ms}ms"
-
-    assert elapsed_ms <= 3_500, "took too long: #{elapsed_ms}ms"
+    assert_receive {:waiting, pid, 500}
+    assert pid == caller.pid
+    Agent.update(time, fn _ -> 499 end)
+    send(pid, :wake)
+    assert_receive {:waiting, ^pid, _remaining_delay}
+    refute_received :first_grant
+    Agent.update(time, fn _ -> 500 end)
+    send(pid, :wake)
+    assert_receive :first_grant
+    assert_receive {:waiting, ^pid, 500}
+    Agent.update(time, fn _ -> 1000 end)
+    send(pid, :wake)
+    assert Task.await(caller) == :two_grants
   end
 
   test "never grants more than 2/s steady once both pools drain" do
-    name = start_limiter()
+    {name, time} = controlled_limiter()
 
     # Drain the steady grant and the whole overflow pool instantly.
     Enum.each(1..(@burst + @pool_burst), fn _ -> RateLimiter.acquire(name) end)
 
-    # Three more tokens: two refill at 2 rps (~0.5s), the third waits for the
-    # next steady token (~1s) because the overflow pool refills slower.
-    {time, :ok} =
-      :timer.tc(fn ->
-        Enum.each(1..3, fn _ -> RateLimiter.acquire(name) end)
+    owner = self()
+
+    task =
+      Task.async(fn ->
+        for n <- 1..3 do
+          :ok = RateLimiter.acquire(name)
+          send(owner, {:grant, n})
+        end
       end)
 
-    elapsed_ms = div(time, 1000)
+    pid = task.pid
 
-    assert elapsed_ms >= 700,
-           "3 tokens past full drain should take >= ~1s at 2 rps, got #{elapsed_ms}ms"
+    for {n, at} <- [{1, 500}, {2, 1000}, {3, 1500}] do
+      assert_receive {:waiting, ^pid, 500}
+      Agent.update(time, fn _ -> at - 1 end)
+      send(pid, :wake)
+      assert_receive {:waiting, ^pid, _remaining_delay}
+      refute_received {:grant, ^n}
+      Agent.update(time, fn _ -> at end)
+      send(pid, :wake)
+      assert_receive {:grant, ^n}
+    end
 
-    assert elapsed_ms <= 3_000, "took too long: #{elapsed_ms}ms"
+    Task.await(task)
+  end
+
+  defp controlled_limiter do
+    time = start_supervised!({Agent, fn -> 0 end})
+    owner = self()
+
+    clock = %{
+      now: fn -> Agent.get(time, & &1) end,
+      sleep: fn ms ->
+        send(owner, {:waiting, self(), ms})
+
+        receive do
+          :wake -> :ok
+        end
+      end
+    }
+
+    {start_limiter(clock: clock), time}
   end
 end
