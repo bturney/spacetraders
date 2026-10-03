@@ -6,7 +6,6 @@ defmodule SpaceTraders.API.RecordedDispatchTest do
 
   alias SpaceTraders.API
   alias SpaceTraders.API.{AgentTokenReference, OperationInventory, RecordedDispatch, ShipAction}
-  alias SpaceTraders.Agent.{Operator, Scope}
   alias SpaceTraders.Fleet.Intent
   alias SpaceTraders.FleetAllocation.Commitment
   alias SpaceTraders.FleetGeneration.Generation
