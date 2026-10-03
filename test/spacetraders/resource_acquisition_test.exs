@@ -113,6 +113,7 @@ defmodule SpaceTraders.ResourceAcquisitionTest do
   end
 
   test "active Strategy discovers a remote extraction Waypoint for a new Agent" do
+    install_test_clock(DateTime.utc_now())
     {scope, agent, revision, ship} = generation()
     test_pid = self()
     ship_path = "/v2/my/ships/#{ship.symbol}"
@@ -140,6 +141,8 @@ defmodule SpaceTraders.ResourceAcquisitionTest do
           Req.Test.json(conn, %{"data" => %{waypoint() | "type" => "PLANET"}})
 
         {"GET", ^waypoints_path} ->
+          SpaceTraders.TestClock.advance(5, :second)
+
           Req.Test.json(conn, %{
             "data" => [
               %{waypoint() | "type" => "PLANET"},
@@ -521,6 +524,19 @@ defmodule SpaceTraders.ResourceAcquisitionTest do
     })
 
     {Scope.for_operator(operator), agent, revision, ship}
+  end
+
+  defp install_test_clock(now) do
+    start_supervised!({SpaceTraders.TestClock, now})
+    previous = Application.fetch_env(:spacetraders, :clock)
+    Application.put_env(:spacetraders, :clock, SpaceTraders.TestClock)
+
+    on_exit(fn ->
+      case previous do
+        {:ok, clock} -> Application.put_env(:spacetraders, :clock, clock)
+        :error -> Application.delete_env(:spacetraders, :clock)
+      end
+    end)
   end
 
   defp assert_remote_resource_waiting(
