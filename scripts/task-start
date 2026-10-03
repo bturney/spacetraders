@@ -55,7 +55,7 @@ rollback() {
   status=$?
 
   if [ "$created_workspace" -eq 1 ] && [ "$configured" -eq 0 ]; then
-    if [ "$setup_complete" -eq 1 ]; then
+    if [ "$setup_complete" -eq 1 ] || [ -f "$workspace/.worktree-env" ]; then
       (cd "$workspace" && ./scripts/teardown) || true
     fi
     git -C "$PROJECT_ROOT" worktree remove --force "$workspace" 2>/dev/null || true

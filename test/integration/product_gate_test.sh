@@ -10,8 +10,7 @@ mkdir -p "$TEMP_ROOT/bin"
 cat > "$TEMP_ROOT/bin/mix" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-printf 'MIX_ENV=%s\nDATABASE_URL=%s\n' "$MIX_ENV" "$DATABASE_URL" > "$GATE_CALL"
-printf '%s\n' "$*" >> "$GATE_CALL"
+printf 'MIX_ENV=%s\nDATABASE_URL=%s\nARGS=%s\n' "$MIX_ENV" "$DATABASE_URL" "$*" >> "$GATE_CALL"
 EOF
 chmod +x "$TEMP_ROOT/bin/mix"
 
@@ -21,7 +20,7 @@ PATH="$TEMP_ROOT/bin:$PATH" bash "$ROOT_DIR/scripts/verify"
 
 expected="MIX_ENV=test
 DATABASE_URL=$DATABASE_URL
-verify"
+ARGS=verify"
 actual="$(<"$GATE_CALL")"
 if [[ "$actual" != "$expected" ]]; then
   printf 'Expected product gate to invoke only mix verify with caller configuration.\n' >&2

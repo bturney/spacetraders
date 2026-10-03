@@ -33,8 +33,8 @@ targeted test run or the canonical gate.
 
 The default test URL is the stable
 `postgres://postgres:postgres@localhost/spacetraders_test`; set `DATABASE_URL`
-to select another prepared database. Worktree setup allocates a task-named URL,
-and `scripts/teardown` drops that task's database as it releases the task's port.
+to select another prepared database. Worktree setup allocates and prepares a
+task-named database; `scripts/teardown` drops it as it releases the task's port.
 Do not use `MIX_TEST_PARTITION` to select databases; provision and select each
 database explicitly with `DATABASE_URL`.
 
