@@ -25,18 +25,18 @@ suite uses the Ecto `Sandbox` pool; treat a clean exit as the signal.
 
 ## Database
 
-Worktree setup names a test database after the task and writes the resulting
-`DATABASE_URL` into the task environment, so two concurrent gates in separate
-worktrees drop and recreate different databases. `scripts/teardown` drops the
-task's database, the same way it releases the task's port.
+`mix test` assumes a prepared, migrated PostgreSQL database. The test alias
+never creates, drops, or migrates it; `DataCase` transactions provide ordinary
+test isolation. For a direct targeted run, prepare the database once with
+`MIX_ENV=test mix ecto.create` and `MIX_ENV=test mix ecto.migrate`. `scripts/verify`
+performs those provisioning steps before running the canonical gate.
 
-A bare `scripts/verify` in an ordinary checkout uses the single database name
-it has always used. Only when no `DATABASE_URL` is set at all does the config
-fall back to a per-run partition — `MIX_TEST_PARTITION`, else `System.pid()`.
-That fallback is per *run*, and the `test` alias drops the database at the start
-of a run and never at the end, so a bare `mix test` with no `DATABASE_URL` leaves
-its partitioned database behind permanently. Set `DATABASE_URL`, or work in a
-worktree.
+The default test URL is the stable
+`postgres://postgres:postgres@localhost/spacetraders_test`; set `DATABASE_URL`
+to select another prepared database. Worktree setup allocates a task-named URL,
+and `scripts/teardown` drops that task's database as it releases the task's port.
+Do not use `MIX_TEST_PARTITION` to select databases; provision and select each
+database explicitly with `DATABASE_URL`.
 
 `SpaceTraders.RuntimeAuthority` opens a direct connection to the base database
 and can terminate backends, which produces full-suite-only failures and garbled

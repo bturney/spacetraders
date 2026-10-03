@@ -85,11 +85,8 @@ if [ "$port_one" = "$port_two" ]; then
   exit 1
 fi
 
-# The gate drops and recreates its database on every run, so two concurrent
-# gates sharing one name destroy each other mid-run. Assert the databases
-# differ here rather than inferring it from the two-gate run below: this is the
-# cheap check that fails the moment allocation is removed, and it names the
-# cause instead of surfacing as an unrelated_table or OwnershipError.
+# Worktrees retain separate database allocations. The test alias reuses each
+# prepared database, while teardown releases only the task-owned allocation.
 database_url() {
   local value
   value="$(sed -n 's/^export DATABASE_URL=//p' "$1" | head -n 1)"
@@ -158,9 +155,7 @@ if setup_worktree "$WORKTREE_THREE" integration-one >"$TEMP_ROOT/duplicate.log" 
   exit 1
 fi
 
-# A distinct task ID: the database is named after the task, so reusing
-# `integration-one` here would hand this worktree the database the gate
-# worktree owns, and its teardown would drop it out from under that gate.
+# A distinct task ID keeps teardown ownership scoped to this worktree.
 PORT=49999 setup_worktree "$WORKTREE_THREE" integration-override >"$TEMP_ROOT/override.log" 2>&1
 
 (
@@ -194,10 +189,8 @@ for port in "$port_one" "$port_two"; do
   fi
 done
 
-# The strongest form of the same property: each gate actually created and used
-# its own database, so nothing about the shared name survived. This is the
-# assertion that fails if the two gates resolve to one database again, and it
-# fails immediately after the run rather than only on the next one.
+# Both gates prepared and used their task-owned database, which remains present
+# until teardown.
 for database in "$database_one" "$database_two"; do
   if ! database_exists "$database"; then
     echo "A gate did not use its allocated database: $database" >&2

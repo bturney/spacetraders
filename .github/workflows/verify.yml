@@ -48,16 +48,11 @@ jobs:
         run: test/integration/release_boot_test.sh
       - name: Verify migration repair
         run: test/integration/migration_repair_test.sh
+      - name: Verify prepared test database reuse
+        run: test/integration/prepared_test_database_test.sh
 
-  # Two full gates run simultaneously inside this test, in real worktrees on
-  # separate ports. It is its own job so those two gates stay concurrent; a step
-  # inside the gate job would serialise them and defeat the assertion.
-  #
-  # KNOWN RED until #515. The job-level DATABASE_URL below defeats the
-  # MIX_TEST_PARTITION/System.pid() partition in config/test.exs, so both gates
-  # resolve to one database and drop it under each other. Measured 1 pass in 5
-  # runs; #515 fixes the shared database, not this job. Do not delete this job
-  # and do not add continue-on-error: the coverage is the point.
+  # Two full gates run simultaneously in real worktrees on separate ports and
+  # database allocations. Keep this job separate so the gates stay concurrent.
   concurrent-worktrees:
     runs-on: ubuntu-24.04
     timeout-minutes: 20

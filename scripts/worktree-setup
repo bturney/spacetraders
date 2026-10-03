@@ -24,9 +24,8 @@ if [[ ! "$task_id" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
   exit 64
 fi
 
-# The gate drops and recreates its database on every run, so two concurrent
-# gates sharing one name destroy each other. Each task gets its own, named
-# after the task so the same task reuses it and teardown can release it.
+# Each task gets a database allocation named after the task, so concurrent
+# checkouts remain isolated and teardown can release the task's allocation.
 #
 # `spacetraders_test_` + the task ID is injective: the task ID already admits
 # only [A-Za-z0-9._-], every one of which PostgreSQL accepts in an unquoted

@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 # Release the test database worktree-setup allocated for this task.
 #
-# The gate drops and recreates its database on every run, so an allocated one
-# outlives nothing: it is dropped when the task's checkout is torn down, the
+# An allocated database is released when the task's checkout is torn down, the
 # same way the task's port lease is released. Idempotent, and a no-op unless
 # this task holds the database lease.
 set -euo pipefail
