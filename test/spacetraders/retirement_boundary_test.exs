@@ -1,5 +1,5 @@
 defmodule SpaceTraders.RetirementBoundaryTest do
-  use SpaceTraders.DataCase, async: false
+  use SpaceTraders.DataCase, async: true
 
   alias SpaceTraders.Repo
 

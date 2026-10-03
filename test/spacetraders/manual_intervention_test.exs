@@ -1,5 +1,6 @@
 defmodule SpaceTraders.ManualInterventionTest do
-  use SpaceTraders.DataCase
+  # Intervention recovery owns the shared ShipServer lifecycle.
+  use SpaceTraders.DataCase, async: false
 
   import SpaceTraders.AgentFixtures
   import SpaceTraders.ShipBody

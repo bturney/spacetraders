@@ -1,4 +1,5 @@
 defmodule SpaceTraders.ContractsTest do
+  # DeadlineServer is an application-wide runtime process stopped by this case.
   use SpaceTraders.DataCase, async: false
 
   alias SpaceTraders.API.Model.Contract

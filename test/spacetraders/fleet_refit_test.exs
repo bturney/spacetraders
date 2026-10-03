@@ -1,4 +1,5 @@
 defmodule SpaceTraders.FleetRefitTest do
+  # These cases share ShipServer lifecycle and the application-wide test clock.
   use SpaceTraders.DataCase, async: false
 
   import SpaceTraders.ShipBody

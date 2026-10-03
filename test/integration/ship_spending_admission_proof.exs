@@ -7,6 +7,7 @@ defmodule SpaceTraders.ShipSpendingAdmissionProof do
   Run explicitly; the unresolved Hard Constraint assertion deliberately fails.
   """
 
+  # This diagnostic owns shared ShipServer and admission state while it runs.
   use SpaceTraders.DataCase, async: false
 
   import SpaceTraders.AgentFixtures

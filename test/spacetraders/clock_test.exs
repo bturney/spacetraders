@@ -1,4 +1,5 @@
 defmodule SpaceTraders.ClockTest do
+  # The selected clock lives in application-wide configuration.
   use ExUnit.Case, async: false
 
   alias SpaceTraders.Clock

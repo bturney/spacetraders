@@ -1,5 +1,5 @@
 defmodule SpaceTraders.OutboxTest do
-  use SpaceTraders.DataCase
+  use SpaceTraders.DataCase, async: true
 
   alias SpaceTraders.Agent.Operator
   alias SpaceTraders.Outbox

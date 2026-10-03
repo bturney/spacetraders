@@ -1,4 +1,5 @@
 defmodule SpaceTraders.ResourceAcquisitionTest do
+  # ShipServer processes share the application registry and are stopped by this case.
   use SpaceTraders.DataCase, async: false
 
   import SpaceTraders.ShipBody

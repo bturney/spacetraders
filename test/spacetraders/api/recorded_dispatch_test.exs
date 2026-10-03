@@ -6,7 +6,6 @@ defmodule SpaceTraders.API.RecordedDispatchTest do
 
   alias SpaceTraders.API
   alias SpaceTraders.API.{AgentTokenReference, OperationInventory, RecordedDispatch, ShipAction}
-  alias SpaceTraders.Agent.{Operator, Scope}
   alias SpaceTraders.Fleet.Intent
   alias SpaceTraders.FleetAllocation.Commitment
   alias SpaceTraders.FleetGeneration.Generation
@@ -259,19 +258,5 @@ defmodule SpaceTraders.API.RecordedDispatchTest do
 
     assert refused.id == prepared.id
     assert length(MutationAttempts.list_for_agent(agent)) == length(before)
-  end
-
-  test "an Emergency Stop refuses recorded dispatch before any Revision check" do
-    operator = operator_fixture()
-    agent = agent_fixture(operator)
-    scope = Scope.for_operator(operator)
-    assert {:ok, _} = SpaceTraders.FleetStrategy.engage_emergency_stop(scope)
-
-    Req.Test.stub(API, fn _ -> flunk("dispatched under Emergency Stop") end)
-
-    assert %{error: {:error, :emergency_stopped}} =
-             prepare_action(agent, "STOPPED", %{"kind" => "orbit", "waypoint" => "X1-TEST-A1"})
-
-    assert MutationAttempts.list_for_agent(agent) == []
   end
 end

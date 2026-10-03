@@ -106,9 +106,8 @@ defmodule SpaceTraders.API.ShadowAdmissionTest do
     correlation_id = ShadowAdmission.observe_request(operation, %{}, name)
 
     assert_receive {:telemetry, [:spacetraders, :api, :capacity, :admission], %{count: 1},
-                    admission}
+                    %{correlation_id: ^correlation_id} = admission}
 
-    assert admission.correlation_id == correlation_id
     assert admission.disposition == :would_admit
 
     safety_id = ShadowAdmission.observe_request(operation, %{lane: :safety}, name)
@@ -139,7 +138,9 @@ defmodule SpaceTraders.API.ShadowAdmissionTest do
     ShadowAdmission.observe_dispatch(correlation_id, name)
     ShadowAdmission.observe_outcome(correlation_id, 200, :ok, name)
 
-    assert_receive {:telemetry, [:spacetraders, :api, :capacity, :actual], measurements, actual}
+    assert_receive {:telemetry, [:spacetraders, :api, :capacity, :actual], measurements,
+                    %{correlation_id: ^correlation_id} = actual}
+
     assert measurements.count == 1
 
     # queue_time spans observation to dispatch, so any capacity wait performed

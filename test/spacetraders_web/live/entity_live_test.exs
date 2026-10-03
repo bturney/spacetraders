@@ -1,5 +1,5 @@
 defmodule SpaceTradersWeb.EntityLiveTest do
-  use SpaceTradersWeb.ConnCase
+  use SpaceTradersWeb.ConnCase, async: true
 
   import Phoenix.LiveViewTest
 

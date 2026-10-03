@@ -1,5 +1,5 @@
 defmodule SpaceTradersWeb.OperatorLive.SettingsTest do
-  use SpaceTradersWeb.ConnCase
+  use SpaceTradersWeb.ConnCase, async: true
 
   alias SpaceTraders.Agent
   import Phoenix.LiveViewTest

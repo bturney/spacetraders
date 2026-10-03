@@ -1,5 +1,6 @@
 defmodule SpaceTraders.GameplayMutationTest do
-  use SpaceTraders.DataCase
+  # Runtime mutation cases share Req.Test and restart the application Reconciler.
+  use SpaceTraders.DataCase, async: false
 
   import SpaceTraders.AgentFixtures
   import SpaceTraders.ShipBody

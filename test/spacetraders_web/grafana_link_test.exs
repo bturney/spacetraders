@@ -1,4 +1,5 @@
 defmodule SpaceTradersWeb.GrafanaLinkTest do
+  # GrafanaLink configuration is application-wide and is mutated by this case.
   use ExUnit.Case, async: false
 
   alias SpaceTradersWeb.GrafanaLink

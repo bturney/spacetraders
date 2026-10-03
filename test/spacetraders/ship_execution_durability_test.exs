@@ -4,6 +4,7 @@ defmodule SpaceTraders.ShipExecutionDurabilityTest do
   SpaceTraders boundary, and independently committed PostgreSQL evidence.
   """
 
+  # These proofs switch SQL Sandbox mode and observe independently committed state.
   use ExUnit.Case, async: false
 
   import Ecto.Query

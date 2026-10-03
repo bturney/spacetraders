@@ -1,5 +1,6 @@
 defmodule SpaceTraders.RuntimeAuthorityTest do
-  use SpaceTraders.DataCase
+  # Tests mutate RuntimeAuthority application config and singleton ownership.
+  use SpaceTraders.DataCase, async: false
 
   alias SpaceTraders.Agent
   alias SpaceTraders.Agent.Agent, as: AgentRecord

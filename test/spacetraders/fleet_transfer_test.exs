@@ -1,5 +1,5 @@
 defmodule SpaceTraders.FleetTransferTest do
-  use SpaceTraders.DataCase
+  use SpaceTraders.DataCase, async: true
 
   import SpaceTraders.AgentFixtures
   import SpaceTraders.ShipBody
