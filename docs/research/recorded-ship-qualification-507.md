@@ -70,22 +70,26 @@ red receipt: `507-feedback-lifecycle-red.log`. Controlled-clock red receipt:
 `507-feedback-rate-red.log`. The 799-test results below identify the earlier
 revision.
 
-**Known open failure on this revision.** The canonical gate is red at this
-revision: `507-feedback-canonical.log`, 806 tests, 1 failure. It is not a
-qualification regression. Inside the ordered-suite proof, the **second** run of
-`ResourceAcquisitionTest` in one child VM returns
+**Intermittent ResourceAcquisition failure retained as unresolved evidence.**
+The handoff's local canonical run recorded 806 tests with one failure inside the
+ordered-suite proof: a repeated `ResourceAcquisitionTest` returned
 `{:error, :resource_acquisition_unavailable}` for "active Strategy discovers a
 remote extraction Waypoint for a new Agent", expecting a `waiting` Intent.
-`FleetResources.reconcile/5` collapses every failure into that atom, so the
-receipt does not name the failing guard. The same file passes standalone, in the
-first ordered run, and in `507-stop-repro-1.log`. Prime suspect: one seeded
-remainder — a retained Observation/ObservationDemand, a live
-`SpaceTraders.Evidence.ReadCoordinator` dedup entry, or CapacityGovernor state —
-that a same-VM repeat run does not clear and that makes `FleetResources.reconcile`
-see unavailable inputs. `Evidence.read/3` coalesces concurrent identical reads
-through a globally named coordinator, and `DataCase` only rolls back the
-transaction, so this is the first place to instrument. Do not widen the search
-to unrelated flaky tests; see the handoff.
+That failure is not treated as repaired or as a qualification regression.
+
+At source revision `b0a316d7eeb3d99cf9207bd43385ef9e3c782976`, GitHub Actions
+run 37157320174 executed the canonical `scripts/verify` path twice without
+source changes. Both executions passed **806 tests, 0 failures**; ExUnit seeds
+were 437642 and 271515. In each execution the same-VM lifecycle diagnostic ran
+the qualification, EvidenceScheduling and ResourceAcquisition suites in both
+orders, repeated twice, and every child suite passed.
+
+Because the earlier local failure has not recurred, its cause remains
+unestablished. The failing ResourceAcquisition assertion now preserves its
+contract but, on failure only, reports the API request prefix plus
+CapacityGovernor, Evidence.ReadCoordinator and ShipServer state. This gives the
+next recurrence enough evidence to localize the failing guard without changing
+production behavior or weakening the assertion.
 
 Feedback two-axis review: Standards found no actionable findings. Spec identified
 that a pending Stop task was not itself proof of row-lock contention. The overlap
@@ -97,11 +101,13 @@ Implementation revision: the commit containing this report on
 `feature/507-recorded-ship-qualification`. The retained patch and command logs
 identify the qualified source independently of the branch name.
 
-The final gate records staged source tree
-`33bf88ac6bd0f5b8f576f7a796e11ca50f838587`. Runtime and test blobs in that tree
-are the delivered implementation; subsequent report-only edits add the final
-receipts and evidence URL. The retained source patch reconstructs the reviewed
-runtime/test change against the exact base above.
+Qualified source revision before this report-only receipt update:
+`b0a316d7eeb3d99cf9207bd43385ef9e3c782976`. The PR-feedback implementation is
+retained in `9c27ef72a6a2ab041bfd55d305c4925434cd40bb`; later source changes add
+the handoff record and failure-only ResourceAcquisition diagnostics. No
+production behavior or test assertion was weakened after that implementation
+revision. The retained source patch reconstructs the reviewed runtime/test
+change against the exact base above.
 
 [Durable report, source patch and complete terminal transcripts](https://gist.github.com/bturney/d1416360b9b5a74ea07ab554ccfa068a)
 contain both red reproductions and the final passing results.
@@ -260,6 +266,7 @@ Verbose transcripts are retained; the command exit status is the verdict.
 | Reviewed runtime file | Exit 0; 23 tests, 0 failures | `507-reviewed-runtime.log` |
 | Refit response snapshot / runtime / rate limiter | Exit 0; 37 tests, 0 failures | `507-refit-timing-green.log` |
 | Canonical `scripts/verify` | **Exit 0; 799 tests, 0 failures; seed 710537; 106.7 seconds ExUnit.** Compile, formatting, 95 models, operation inventory, transport boundary and `/health` HTTP 200 pass. | `507-canonical-confirmed.log` |
+| Current-head CI canonical `scripts/verify` | **Two unchanged-source passes; 806 tests, 0 failures; seeds 437642 and 271515.** Same-VM lifecycle diagnostic passed every ordered child suite in both executions; release-deployment verification also passed. | GitHub Actions run 37157320174 |
 
 Earlier gate attempts are retained too. The first reported 799 tests and three
 failures: two refit 429-wait assertions exposed the stale pre-selection snapshot
