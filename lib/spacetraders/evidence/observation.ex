@@ -12,6 +12,7 @@ defmodule SpaceTraders.Evidence.Observation do
     field :facts, :map
     field :response_fingerprint, :string
     field :observed_at, :utc_datetime_usec
+    field :fleet_generation_id, :integer
 
     belongs_to :agent, SpaceTraders.Agent.Agent
 
