@@ -36,7 +36,8 @@ defmodule SpaceTraders.API.RateLimiter do
           pool_tokens: float(),
           pool_burst: non_neg_integer(),
           pool_rate: float(),
-          last_refill: integer()
+          last_refill: integer(),
+          clock: %{now: (-> integer()), sleep: (non_neg_integer() -> term())}
         }
 
   defstruct tokens: 0,
@@ -45,9 +46,10 @@ defmodule SpaceTraders.API.RateLimiter do
             pool_tokens: 0,
             pool_burst: 0,
             pool_rate: 0.0,
-            last_refill: 0
+            last_refill: 0,
+            clock: nil
 
-  @doc "Starts the limiter. Options: `:name`, `:rate`, `:burst`, `:pool_rate`, `:pool_burst`."
+  @doc "Starts the limiter. Options: `:name`, `:rate`, `:burst`, `:pool_rate`, `:pool_burst`, and a `:clock` with monotonic-millisecond `now/0` and `sleep/1` callbacks."
   def start_link(opts \\ []) do
     {name, opts} = Keyword.pop(opts, :name, __MODULE__)
     GenServer.start_link(__MODULE__, opts, name: name)
@@ -72,8 +74,8 @@ defmodule SpaceTraders.API.RateLimiter do
       :ok ->
         :ok
 
-      {:wait, ms} ->
-        Process.sleep(ms)
+      {:wait, ms, sleep} ->
+        sleep.(ms)
         acquire_from(pid)
     end
   end
@@ -86,6 +88,12 @@ defmodule SpaceTraders.API.RateLimiter do
     pool_rate = Keyword.get(opts, :pool_rate, Keyword.get(config, :pool_rate, 0.5))
     pool_burst = Keyword.get(opts, :pool_burst, Keyword.get(config, :pool_burst, 30))
 
+    clock =
+      Keyword.get(opts, :clock, %{
+        now: fn -> System.monotonic_time(:millisecond) end,
+        sleep: &Process.sleep/1
+      })
+
     {:ok,
      %__MODULE__{
        tokens: burst * 1.0,
@@ -94,7 +102,8 @@ defmodule SpaceTraders.API.RateLimiter do
        pool_tokens: pool_burst * 1.0,
        pool_burst: pool_burst,
        pool_rate: pool_rate,
-       last_refill: now()
+       last_refill: clock.now.(),
+       clock: clock
      }}
   end
 
@@ -110,12 +119,12 @@ defmodule SpaceTraders.API.RateLimiter do
         {:reply, :ok, %{state | pool_tokens: state.pool_tokens - 1}}
 
       true ->
-        {:reply, {:wait, wait_ms(state)}, state}
+        {:reply, {:wait, wait_ms(state), state.clock.sleep}, state}
     end
   end
 
   defp refill(%__MODULE__{} = state) do
-    now = now()
+    now = state.clock.now.()
     elapsed_sec = (now - state.last_refill) / 1000
 
     %{
@@ -127,6 +136,4 @@ defmodule SpaceTraders.API.RateLimiter do
   end
 
   defp wait_ms(%__MODULE__{tokens: tokens, rate: rate}), do: ceil((1 - tokens) / rate * 1000)
-
-  defp now, do: System.monotonic_time(:millisecond)
 end

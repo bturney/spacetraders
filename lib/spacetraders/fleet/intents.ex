@@ -2973,12 +2973,13 @@ defmodule SpaceTraders.Fleet.Intents do
   # therefore reloads both records under the write lock; manual intents retain
   # their normal unfinished-state behavior.
   @doc false
-  def with_current_intent(%Intent{id: id}, fun) do
+  def with_current_intent(%Intent{id: id} = expected, fun) do
     case Repo.transaction(fn ->
-           case Repo.get(Intent, id) do
+           case Repo.one(from i in Intent, where: i.id == ^id, lock: "FOR UPDATE") do
              %Intent{} = current ->
                if Intent.unfinished?(current) and
-                    intent_owned?(current) do
+                    intent_owned?(current) and
+                    current.in_flight_action == expected.in_flight_action do
                  fun.(current)
                else
                  Repo.rollback(:intent_no_longer_owned)
@@ -3245,11 +3246,25 @@ defmodule SpaceTraders.Fleet.Intents do
              "units" => 1,
              "listing_price" => good.purchase_price,
              "cargo_before" => Fleet.item_units(live_ship.cargo, module_symbol)
-           }),
-         {:ok, result} <-
-           Agent.handle_game_result(agent, SpaceTraders.API.dispatch_recorded(intent)) do
-      reconcile_refit_buy(agent, intent, live_ship, result)
+           }) do
+      dispatch_selected_refit_buy(agent, intent, live_ship)
     else
+      {:error, %SpaceTraders.API.GameplayError{} = reason} ->
+        block_protocol_backpressure(intent, reason)
+
+      {:error, reason} ->
+        block_cargo_intent(intent, reason)
+    end
+  end
+
+  # A `with`'s else cannot see its rebound selected Intent. Handle the response
+  # with that committed snapshot so a legitimate 429 can persist its durable wait
+  # without weakening the stale-selection transition guard.
+  defp dispatch_selected_refit_buy(agent, intent, live_ship) do
+    case Agent.handle_game_result(agent, SpaceTraders.API.dispatch_recorded(intent)) do
+      {:ok, result} ->
+        reconcile_refit_buy(agent, intent, live_ship, result)
+
       {:error, %SpaceTraders.API.GameplayError{} = reason} ->
         block_protocol_backpressure(intent, reason)
 
@@ -4951,8 +4966,19 @@ defmodule SpaceTraders.Fleet.Intents do
       accept_retried_action(agent, Repo.get!(Intent, intent.id), live_ship, action, result)
     else
       {:error, :no_current_ship_claim} -> supersede_for_lost_claim(intent, true)
+      {:error, :emergency_stopped} -> retire_stopped_absence(intent, absent)
       {:error, reason} -> block_intents(intent, {:awaiting_reconciliation, reason})
     end
+  end
+
+  defp retire_stopped_absence(intent, absent) do
+    with_current_intent(intent, fn current ->
+      with {:ok, _} <- MutationAttempts.retire_stopped_retry(absent) do
+        {:ok, update_intent!(Ecto.Changeset.change(current, in_flight_action: nil))}
+      else
+        {:error, _reason} -> Repo.rollback(:intent_no_longer_owned)
+      end
+    end)
   end
 
   defp retry_under_current_claim(agent, intent, _live_ship, _action, absent) do

@@ -50,6 +50,8 @@ defmodule SpaceTraders.API.RecordedDispatch do
           {:ok, attempt} =
             prepare_attempt(authority, %{current | in_flight_action: selected}, request)
 
+          emit_phase(:preparation_written, attempt)
+
           selected =
             current
             |> Ecto.Changeset.change(
@@ -107,23 +109,15 @@ defmodule SpaceTraders.API.RecordedDispatch do
         attempt = Repo.one!(from a in Attempt, where: a.id == ^attempt.id, lock: "FOR UPDATE")
 
         with "prepared" <- attempt.state,
-             %Intent{} <- current,
-             true <- current.mutation_attempt_id == attempt.id,
-             true <-
-               Evidence.fingerprint(current.in_flight_action) ==
-                 attempt.provenance["selected_action_fingerprint"],
-             {:ok, authority} <- authority(attempt.agent_id, current),
-             true <- generation_id(authority.generation) == attempt.fleet_generation_id,
-             true <- revision_id(authority.revision) == attempt.strategy_revision_id,
-             :ok <- claim_matches(current, authority.claim),
-             {:ok, action} <- bind_transfer(authority, current, current.in_flight_action),
-             true <- action == current.in_flight_action,
-             {:ok, request} <- ShipAction.request(authority.ship.symbol, action),
-             true <- request_matches?(attempt, request, action),
-             true <-
-               Map.merge(current.in_flight_action, action_binding(authority.claim)) ==
-                 current.in_flight_action do
-          MutationAttempts.mark_sent_or_unknown(attempt)
+             :ok <- selected_authority(current, attempt) do
+          result = MutationAttempts.mark_sent_or_unknown(attempt)
+
+          case result do
+            {:ok, admitted} -> emit_phase(:marker_written, admitted)
+            _ -> :ok
+          end
+
+          result
         else
           state when is_binary(state) -> {:error, :attempt_already_dispatched}
           {:error, reason} -> suppress(attempt, reason)
@@ -131,11 +125,90 @@ defmodule SpaceTraders.API.RecordedDispatch do
         end
       end)
       |> case do
-        {:ok, result} -> result
-        {:error, reason} -> {:error, reason}
+        {:ok, {:ok, admitted} = result} ->
+          emit_phase(:marker_committed, admitted)
+          result
+
+        {:ok, result} ->
+          result
+
+        {:error, reason} ->
+          {:error, reason}
       end
     end
   end
+
+  @doc """
+  Rechecks authority after the send marker commits. Successful completion of
+  this transaction is final transport admission: a later revocation cannot
+  recall that one admitted request. Transport runs outside all transactions.
+  """
+  def authorize_transport(%Attempt{} = attempt) do
+    with :ok <- require_commit_boundary() do
+      Repo.transaction(fn ->
+        current = locked_intent(attempt.provenance["intent_id"])
+        attempt = Repo.one!(from a in Attempt, where: a.id == ^attempt.id, lock: "FOR UPDATE")
+
+        with "sent_or_unknown" <- attempt.state,
+             :ok <- selected_authority(current, attempt) do
+          emit_phase(:transport_authorization_checked, attempt)
+          :ok
+        else
+          {:error, reason} -> suppress_admitted(attempt, reason)
+          _ -> {:error, :attempt_already_dispatched}
+        end
+      end)
+      |> case do
+        {:ok, :ok} ->
+          emit_phase(:transport_authorized, attempt)
+          :ok
+
+        {:ok, result} ->
+          result
+
+        {:error, reason} ->
+          {:error, reason}
+      end
+    end
+  end
+
+  # A committed marker cannot be erased. If authority disappears before transport,
+  # retain it conservatively and record why this sender did not send. Recovery
+  # still needs authoritative observations before it can release dependencies.
+  defp suppress_admitted(attempt, reason) do
+    case MutationAttempts.record_outcome(attempt, :ambiguous, %{
+           reason: inspect_reason(reason),
+           transport_disposition: "suppressed_before_transport"
+         }) do
+      {:ok, _} -> {:error, reason}
+      {:error, persistence_reason} -> {:error, persistence_reason}
+    end
+  end
+
+  defp selected_authority(%Intent{} = current, attempt) do
+    with true <- current.mutation_attempt_id == attempt.id,
+         true <-
+           Evidence.fingerprint(current.in_flight_action) ==
+             attempt.provenance["selected_action_fingerprint"],
+         {:ok, authority} <- authority(attempt.agent_id, current),
+         true <- generation_id(authority.generation) == attempt.fleet_generation_id,
+         true <- revision_id(authority.revision) == attempt.strategy_revision_id,
+         :ok <- claim_matches(current, authority.claim),
+         {:ok, action} <- bind_transfer(authority, current, current.in_flight_action),
+         true <- action == current.in_flight_action,
+         {:ok, request} <- ShipAction.request(authority.ship.symbol, action),
+         true <- request_matches?(attempt, request, action),
+         true <-
+           Map.merge(current.in_flight_action, action_binding(authority.claim)) ==
+             current.in_flight_action do
+      :ok
+    else
+      {:error, reason} -> {:error, reason}
+      _ -> {:error, :recorded_action_no_longer_selected}
+    end
+  end
+
+  defp selected_authority(_, _), do: {:error, :recorded_action_no_longer_selected}
 
   defp suppress(attempt, reason) do
     case MutationAttempts.record_not_sent(attempt, inspect_reason(reason)) do
@@ -181,23 +254,27 @@ defmodule SpaceTraders.API.RecordedDispatch do
     end
   end
 
-  defp preparation_committed({:ok, %{intent: intent, attempt: attempt}} = result) do
-    emit_prepared(intent.id, attempt.id)
+  defp preparation_committed({:ok, %{attempt: attempt}} = result) do
+    emit_phase(:prepared, attempt)
     result
   end
 
   defp preparation_committed({:ok, %Attempt{} = attempt} = result) do
-    emit_prepared(attempt.provenance["intent_id"], attempt.id)
+    emit_phase(:prepared, attempt)
     result
   end
 
   defp preparation_committed(result), do: result
 
-  defp emit_prepared(intent_id, attempt_id) do
+  defp emit_phase(phase, attempt) do
     :telemetry.execute(
-      [:spacetraders, :recorded_dispatch, :prepared],
+      [:spacetraders, :recorded_dispatch, phase],
       %{count: 1},
-      %{intent_id: intent_id, attempt_id: attempt_id}
+      %{
+        intent_id: attempt.provenance["intent_id"],
+        attempt_id: attempt.id,
+        operation_id: attempt.operation_id
+      }
     )
   end
 

@@ -130,6 +130,16 @@ mix test test/diagnostics/runtime_qualification.exs --seed 0 --trace
 Its retained scope and the deterministic seam-level owners are documented in
 `docs/agents/testing.md`.
 
+Recorded Ship dispatch also has authenticated production-runtime interruption
+and authority-loss qualification in ordinary regression coverage:
+
+```sh
+mix test test/spacetraders/recorded_ship_runtime_test.exs --seed 0 --trace
+```
+
+See [the qualification and rollout boundary](docs/research/recorded-ship-qualification-507.md)
+for independently observed evidence, compatibility and readiness scope.
+
 ### Game API client & codegen
 
 The thin `SpaceTraders.API` Req client (structs in `SpaceTraders.API.Model.*`) is

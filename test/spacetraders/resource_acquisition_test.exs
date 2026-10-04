@@ -113,6 +113,7 @@ defmodule SpaceTraders.ResourceAcquisitionTest do
   end
 
   test "active Strategy discovers a remote extraction Waypoint for a new Agent" do
+    install_test_clock(DateTime.utc_now())
     {scope, agent, revision, ship} = generation()
     test_pid = self()
     ship_path = "/v2/my/ships/#{ship.symbol}"
@@ -140,6 +141,8 @@ defmodule SpaceTraders.ResourceAcquisitionTest do
           Req.Test.json(conn, %{"data" => %{waypoint() | "type" => "PLANET"}})
 
         {"GET", ^waypoints_path} ->
+          SpaceTraders.TestClock.advance(5, :second)
+
           Req.Test.json(conn, %{
             "data" => [
               %{waypoint() | "type" => "PLANET"},
@@ -168,8 +171,8 @@ defmodule SpaceTraders.ResourceAcquisitionTest do
       end
     end)
 
-    assert {:ok, %Intent{status: "waiting", target_waypoint: "X1-UX81-A2"}} =
-             FleetResources.reconcile(scope, agent, revision, "X1-UX81", capacity())
+    FleetResources.reconcile(scope, agent, revision, "X1-UX81", capacity())
+    |> assert_remote_resource_waiting()
 
     assert_receive {"GET", ^waypoints_path}
     assert_receive {"POST", ^orbit_path}
@@ -521,6 +524,51 @@ defmodule SpaceTraders.ResourceAcquisitionTest do
     })
 
     {Scope.for_operator(operator), agent, revision, ship}
+  end
+
+  defp install_test_clock(now) do
+    start_supervised!({SpaceTraders.TestClock, now})
+    previous = Application.fetch_env(:spacetraders, :clock)
+    Application.put_env(:spacetraders, :clock, SpaceTraders.TestClock)
+
+    on_exit(fn ->
+      case previous do
+        {:ok, clock} -> Application.put_env(:spacetraders, :clock, clock)
+        :error -> Application.delete_env(:spacetraders, :clock)
+      end
+    end)
+  end
+
+  defp assert_remote_resource_waiting(
+         {:ok, %Intent{status: "waiting", target_waypoint: "X1-UX81-A2"}}
+       ),
+       do: :ok
+
+  defp assert_remote_resource_waiting(other) do
+    requests = drain_request_trace([])
+
+    coordinator =
+      case Process.whereis(SpaceTraders.Evidence.ReadCoordinator) do
+        nil -> :not_running
+        _pid -> :sys.get_state(SpaceTraders.Evidence.ReadCoordinator)
+      end
+
+    flunk("""
+    remote resource reconciliation failed: #{inspect(other)}
+    requests observed before failure: #{inspect(requests)}
+    capacity governor: #{inspect(SpaceTraders.API.CapacityGovernor.snapshot())}
+    read coordinator: #{inspect(coordinator)}
+    ship servers: #{inspect(DynamicSupervisor.which_children(SpaceTraders.Fleet.ShipSupervisor))}
+    """)
+  end
+
+  defp drain_request_trace(acc) do
+    receive do
+      {method, path} when is_binary(method) and is_binary(path) ->
+        drain_request_trace([{method, path} | acc])
+    after
+      0 -> Enum.reverse(acc)
+    end
   end
 
   defp capacity, do: %{available_slots: 10, backpressure: :none}

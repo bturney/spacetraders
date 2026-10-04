@@ -237,7 +237,19 @@ defmodule SpaceTraders.MutationAttempts do
   @spec record_outcome(Attempt.t(), atom(), map()) :: {:ok, Attempt.t()} | {:error, term()}
   def record_outcome(%Attempt{} = attempt, classification, evidence)
       when classification in [:succeeded, :rejected, :ambiguous] and is_map(evidence) do
-    append_outcome(attempt, classification, evidence)
+    result = append_outcome(attempt, classification, evidence)
+
+    case result do
+      {:ok, recorded} ->
+        # Nested callers have not committed yet; never label their write committed.
+        unless Repo.in_transaction?(),
+          do: emit_outcome(:outcome_committed, recorded, classification)
+
+      _ ->
+        :ok
+    end
+
+    result
   end
 
   @doc "Records suppression before transport; a prepared attempt was never sent."
@@ -294,6 +306,28 @@ defmodule SpaceTraders.MutationAttempts do
         Repo.preload(updated, :outcomes, force: true)
       end)
     end
+  end
+
+  @doc "Retires unused proven-absence retry permission when its owner remains Emergency Stopped."
+  def retire_stopped_retry(%Attempt{} = attempt) do
+    Repo.transaction(fn ->
+      current = locked_attempt(attempt.id)
+
+      unless current.state == "absent" and current.retry_authorized and
+               action_remains_selected?(current),
+             do: Repo.rollback(:retry_not_authorized)
+
+      updated = current |> Ecto.Changeset.change(retry_authorized: false) |> Repo.update!()
+
+      Repo.insert!(%Outcome{
+        mutation_attempt_id: current.id,
+        classification: "absent",
+        evidence: %{"retry_disposition" => "retired_while_emergency_stopped"},
+        recorded_at: DateTime.utc_now()
+      })
+
+      Repo.preload(updated, :outcomes, force: true)
+    end)
   end
 
   @spec list_for_agent(Agent.t()) :: [Attempt.t()]
@@ -380,8 +414,19 @@ defmodule SpaceTraders.MutationAttempts do
       }
       |> Repo.insert!()
 
+      emit_outcome(:outcome_written, attempt, classification)
+
       Repo.preload(attempt, :outcomes, force: true)
     end)
+  end
+
+  defp emit_outcome(phase, attempt, classification) do
+    :telemetry.execute([:spacetraders, :mutation_attempts, phase], %{count: 1}, %{
+      attempt_id: attempt.id,
+      operation_id: attempt.operation_id,
+      classification: classification,
+      intent_id: attempt.provenance["intent_id"]
+    })
   end
 
   defp outcome_allowed?("sent_or_unknown", classification)

@@ -576,9 +576,15 @@ defmodule SpaceTraders.API do
   defp authorize_dispatch(request, method, token, attempt, shadow, opts) do
     if opts[:recorded_attempt] do
       case RecordedDispatch.admit_send(attempt) do
-        {:ok, _attempt} ->
-          ShadowAdmission.observe_dispatch(shadow)
-          request
+        {:ok, admitted} ->
+          case RecordedDispatch.authorize_transport(admitted) do
+            :ok ->
+              ShadowAdmission.observe_dispatch(shadow)
+              request
+
+            {:error, reason} ->
+              Req.Request.halt(request, %MutationSuppressedError{reason: reason})
+          end
 
         {:error, reason} ->
           Req.Request.halt(request, %MutationSuppressedError{reason: reason})
