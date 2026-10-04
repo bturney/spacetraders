@@ -60,9 +60,13 @@ passed, but teardown changed absent `:clock` configuration into `{:ok, nil}`.
 The fixture now restores key absence as well as values. It no longer switches
 Req into global shared mode; explicit allowances cover only its runtime actors.
 The repeated-order proof then passes. This establishes and corrects a real
-global-state leak; it **does not claim** that the leak caused either historical
-CI ResourceAcquisition or Sandbox-ownership failure. Neither failure was
-reproduced in this controlled proof.
+global-state leak. It did not by itself establish the causes of the historical
+CI ResourceAcquisition or Sandbox-ownership failures. The ResourceAcquisition
+failure was later reproduced deterministically and corrected below. The
+Sandbox-ownership failure was subsequently reproduced independently in
+EvidenceScheduling and traced to that test killing DemandScheduler after its due
+broadcast but before the callback's final database query completed; that
+separate test-lifecycle race is recorded below.
 
 Feedback targeted receipt: `507-feedback-deterministic-green.log`, 35 outer
 tests, 0 failures, plus the 164 ordered child cases. Original-source lifecycle
@@ -100,6 +104,33 @@ discovery has persisted its evidence. GitHub Actions run 37158344191 then passed
 **806 tests, 0 failures** at seed 1697; the same-VM lifecycle proof passed both
 orders repeated twice, and release-deployment verification also passed.
 
+**Additional handoff suite races — root causes corrected.** Continuing from the
+handoff reproduced the historical EvidenceScheduling Sandbox-ownership failure.
+`DemandScheduler.wake_due/1` broadcasts a due demand before its final
+`Evidence.earliest_due_at/0` query. The deadline-downtime test received that
+broadcast and immediately stopped the scheduler, so under unlucky scheduling it
+killed the process while it was using the shared Sandbox connection. That
+disconnected the owner and the replacement scheduler started against reverted
+`:manual` ownership. Commit
+`572803659d7203ac48ab698143563743e2a445bc` synchronizes on
+`:sys.get_state/1` before simulating downtime, proving the callback is quiescent
+without changing production behavior.
+
+The next full gate exposed a separate `API.ErrorTest` race: the module was
+`async: true` while asserting the application-wide CapacityGovernor rejection
+window. A concurrent successful API request can legitimately clear that global
+window before the assertion observes it. Commit
+`30da78395475dce24e584603c27d582345039235` runs that global-state test module
+synchronously; dedicated CapacityGovernor concurrency tests continue to use
+private named instances.
+
+GitHub Actions run 37164225616 showed the ownership/lifecycle diagnostic green in
+both orders repeated twice, then failed only on that asynchronous governor
+assertion. The first full run of the corrected head, 37164549577, passed
+**806 tests, 0 failures** at seed 888514; the repeated same-VM lifecycle proof
+also passed and release-deployment verification was green. These fixes address
+specific reproduced races rather than treating a rerun as a repair.
+
 Feedback two-axis review: Standards found no actionable findings. Spec identified
 that a pending Stop task was not itself proof of row-lock contention. The overlap
 test now observes the actual PostgreSQL blocking relationship before releasing
@@ -110,8 +141,8 @@ Implementation revision: the commit containing this report on
 `feature/507-recorded-ship-qualification`. The retained patch and command logs
 identify the qualified source independently of the branch name.
 
-Qualified executable source revision before this report-only receipt update:
-`a902732d0c71c35b3632d8bbede142dd3c2c972b`. The PR-feedback implementation is
+Qualified executable source revision before this report receipt update:
+`30da78395475dce24e584603c27d582345039235`. The PR-feedback implementation is
 retained in `9c27ef72a6a2ab041bfd55d305c4925434cd40bb`; later source changes add
 the handoff record, failure-only diagnostics, deterministic time-race regression,
 and the scoped FleetResources causal-time correction. No verification assertion
@@ -277,7 +308,9 @@ Verbose transcripts are retained; the command exit status is the verdict.
 | Canonical `scripts/verify` | **Exit 0; 799 tests, 0 failures; seed 710537; 106.7 seconds ExUnit.** Compile, formatting, 95 models, operation inventory, transport boundary and `/health` HTTP 200 pass. | `507-canonical-confirmed.log` |
 | Instrumented pre-reproducer CI canonical `scripts/verify` | **Two unchanged-source passes; 806 tests, 0 failures; seeds 437642 and 271515.** Same-VM lifecycle diagnostic passed every ordered child suite in both executions. | GitHub Actions run 37157320174 |
 | Deterministic ResourceAcquisition time-race reproduction | **Exit 2; 806 tests, 2 failures.** Controlled time advances during Waypoint discovery; the resource case fails in the ordered child suite and outer suite without reaching Ship transport. | GitHub Actions run 37158317387 |
-| Corrected current executable `scripts/verify` | **Exit 0; 806 tests, 0 failures; seed 1697.** Ordered lifecycle proof passed both orders twice; release-deployment verification passed. | GitHub Actions run 37158344191 |
+| ResourceAcquisition-corrected executable `scripts/verify` | **Exit 0; 806 tests, 0 failures; seed 1697.** Ordered lifecycle proof passed both orders twice; release-deployment verification passed. | GitHub Actions run 37158344191 |
+| Post-Sandbox-fix diagnostic gate | **Exit 2; 806 tests, 1 failure.** Ordered lifecycle proof passed both orders twice; the remaining failure was the async application-wide CapacityGovernor assertion described above. | GitHub Actions run 37164225616 |
+| Current handoff-complete executable `scripts/verify` | **Exit 0; 806 tests, 0 failures; seed 888514.** Ordered lifecycle proof passed both orders twice; generated inventory, gameplay boundary, `/health` HTTP 200, focused verification contracts, and release-deployment verification all passed. | GitHub Actions run 37164549577 |
 
 Earlier gate attempts are retained too. The first reported 799 tests and three
 failures: two refit 429-wait assertions exposed the stale pre-selection snapshot
