@@ -485,21 +485,21 @@ defmodule SpaceTraders.ShipExecutionDurabilityTest do
       end
     end)
 
-    assert {:ok, _} =
-             SpaceTraders.Evidence.get_ship(
+    assert {:ok, binding} =
+             SpaceTraders.Evidence.get_ship_binding(
                SpaceTraders.API.AgentTokenReference.new(agent),
                ship.symbol
              )
 
-    {:ok, absent} =
-      MutationAttempts.reconcile(original, :absent, [
-        SpaceTraders.Evidence.reconciliation_observation(
-          "get-my-ship",
-          original,
-          :absent,
-          "Fresh governed observation proves the original orbit absent"
-        )
-      ])
+    {:ok, proof} =
+      SpaceTraders.Evidence.recovery_proof(
+        original,
+        :absent,
+        "Fresh governed observation proves the original orbit absent",
+        [binding]
+      )
+
+    {:ok, absent} = MutationAttempts.reconcile(original, :absent, proof)
 
     results = concurrent(8, fn -> RecordedDispatch.prepare_retry(agent, intent, absent) end)
     assert [{:ok, retry}] = Enum.filter(results, &match?({:ok, _}, &1))

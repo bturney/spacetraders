@@ -15,7 +15,7 @@ defmodule SpaceTraders.Fleet.Intents do
   alias SpaceTraders.Agent.Agent, as: AgentRecord
   alias SpaceTraders.Agent.Scope
   alias SpaceTraders.API.AgentTokenReference
-  alias SpaceTraders.API.RecordedDispatch
+  alias SpaceTraders.Fleet.Intents.RecordedAction
   alias SpaceTraders.API.Model.{Contract, ShipNav}
   alias SpaceTraders.Fleet.{Intent, Ship}
   alias SpaceTraders.Fleet
@@ -320,21 +320,7 @@ defmodule SpaceTraders.Fleet.Intents do
              %Intent{status: status} = intent when status != "awaiting_confirmation" <-
                boot_intent(ship.id, expected_intent_id),
              :ok <- Agent.execution_allowed?(agent) do
-          intent = recover_selected_evidence(intent, agent.id)
-
-          case Agent.handle_game_result(
-                 agent,
-                 SpaceTraders.Evidence.get_ship(AgentTokenReference.new(agent), ship_symbol)
-               ) do
-            {:ok, fresh_ship} ->
-              reconcile(agent_id, ship_symbol, fresh_ship, :boot, intent.id)
-
-            {:error, :stale_agent} ->
-              :ok
-
-            {:error, reason} ->
-              intent_recovery_retry_or_block(ship, intent, agent_id, reason)
-          end
+          reconcile_selected(agent, ship, intent, nil, :boot)
         else
           _ -> :ok
         end
@@ -351,18 +337,7 @@ defmodule SpaceTraders.Fleet.Intents do
       case unfinished_intent_for_ship(ship.id) do
         %Intent{} = intent ->
           if intent_matches_event?(intent, expected_intent_id) do
-            {intent, evidence} = recovery_evidence(agent, intent, live_ship)
-
-            case evidence do
-              {:ok, fresh} ->
-                advance_intent_for_trigger(agent, intent.id, fresh)
-
-              {:error, reason} when trigger == :boot ->
-                intent_recovery_retry_or_block(ship, intent, agent_id, reason)
-
-              {:error, reason} ->
-                block_intents(intent, {:awaiting_reconciliation, reason})
-            end
+            reconcile_selected(agent, ship, intent, live_ship, trigger)
           else
             :ok
           end
@@ -372,6 +347,24 @@ defmodule SpaceTraders.Fleet.Intents do
       end
     else
       _ -> :ok
+    end
+  end
+
+  defp reconcile_selected(agent, ship, intent, supplied, trigger) do
+    {intent, evidence} = recovery_evidence(agent, intent, supplied)
+
+    case evidence do
+      {:ok, fresh} ->
+        advance_intent_for_trigger(agent, intent.id, fresh)
+
+      {:error, :stale_agent} ->
+        :ok
+
+      {:error, reason} when trigger == :boot ->
+        intent_recovery_retry_or_block(ship, intent, agent.id, reason)
+
+      {:error, reason} ->
+        block_intents(intent, {:awaiting_reconciliation, reason})
     end
   end
 
@@ -502,8 +495,17 @@ defmodule SpaceTraders.Fleet.Intents do
     attempt = MutationAttempts.latest_for_intent(intent)
     since = attempt && (attempt.sent_or_unknown_at || attempt.prepared_at)
 
+    result =
+      Agent.handle_game_result(
+        agent,
+        Evidence.recovery_ship_binding(agent, ship.symbol, supplied, since)
+      )
+
     {intent,
-     Agent.handle_game_result(agent, Evidence.recovery_ship(agent, ship.symbol, supplied, since))}
+     case result do
+       {:ok, binding} -> {:ok, Evidence.bound_ship(binding)}
+       error -> error
+     end}
   end
 
   @doc false
@@ -1039,9 +1041,9 @@ defmodule SpaceTraders.Fleet.Intents do
 
       case Agent.handle_game_result(
              agent,
-             SpaceTraders.Evidence.get_ship(AgentTokenReference.new(agent), ship.symbol)
+             SpaceTraders.Evidence.get_ship_binding(AgentTokenReference.new(agent), ship.symbol)
            ) do
-        {:ok, live_ship} -> advance_intents(agent, intent, live_ship)
+        {:ok, binding} -> advance_intents(agent, intent, Evidence.bound_ship(binding))
         {:error, reason} -> block_intents(intent, reason)
       end
     end
@@ -1280,13 +1282,13 @@ defmodule SpaceTraders.Fleet.Intents do
         do_advance_intents(agent, intent, live_ship)
       end
     else
-      case Agent.handle_game_result(agent, SpaceTraders.API.dispatch_recorded(intent)) do
-        {:ok, _result} ->
-          # Recovery re-enters from owned facts, not an assumed response effect.
-          reconcile(agent.id, live_ship.symbol, nil, :intent_retry, intent.id)
-
-        {:error, reason} ->
-          block_intents(intent, {:awaiting_reconciliation, reason})
+      if navigation_action?(intent.in_flight_action) do
+        send_selected_action(agent, intent, live_ship)
+      else
+        case Agent.handle_game_result(agent, SpaceTraders.API.dispatch_recorded(intent)) do
+          {:ok, _result} -> reconcile(agent.id, live_ship.symbol, nil, :intent_retry, intent.id)
+          {:error, reason} -> block_intents(intent, {:awaiting_reconciliation, reason})
+        end
       end
     end
   end
@@ -2979,7 +2981,8 @@ defmodule SpaceTraders.Fleet.Intents do
              %Intent{} = current ->
                if Intent.unfinished?(current) and
                     intent_owned?(current) and
-                    current.in_flight_action == expected.in_flight_action do
+                    current.in_flight_action == expected.in_flight_action and
+                    current.mutation_attempt_id == expected.mutation_attempt_id do
                  fun.(current)
                else
                  Repo.rollback(:intent_no_longer_owned)
@@ -3005,13 +3008,44 @@ defmodule SpaceTraders.Fleet.Intents do
   # A withdrawn Claim supersedes the Intent, matching the retired caller seam.
   # Any other refusal keeps the Intent's own blocker and evidence handling.
   defp prepare_recorded_action(agent, intent, action) do
-    case RecordedDispatch.prepare(agent, intent, action) do
+    case RecordedAction.prepare(agent, intent, action) do
       {:error, :no_current_ship_claim} ->
         supersede_for_lost_claim(intent)
         {:error, :no_current_ship_claim}
 
       result ->
         result
+    end
+  end
+
+  @doc "Executes a selected navigation/posture outcome through the same progression used on re-entry."
+  def execute_action(agent, intent, live_ship, action) do
+    with true <- navigation_action?(action),
+         {:ok, %{intent: selected}} <- prepare_recorded_action(agent, intent, action) do
+      send_selected_action(agent, selected, live_ship)
+    else
+      false -> {:error, :unsupported_navigation_action}
+      {:error, reason} -> block_preparation_refusal(intent, reason)
+    end
+  end
+
+  defp navigation_action?(%{"kind" => kind}),
+    do: kind in ["navigate", "warp", "orbit", "dock", "set_flight_mode"]
+
+  defp navigation_action?(_), do: false
+
+  defp send_selected_action(agent, selected, live_ship) do
+    case Agent.handle_game_result(agent, SpaceTraders.API.dispatch_recorded(selected)) do
+      {:ok, result} ->
+        continue_selected_response(agent, selected, live_ship, selected.in_flight_action, result)
+
+      {:error, %SpaceTraders.API.GameplayError{type: :insufficient_fuel} = reason} ->
+        if selected.in_flight_action["kind"] == "navigate",
+          do: recover_insufficient_fuel(agent, selected, live_ship, reason),
+          else: block_intents(selected, reason)
+
+      {:error, reason} ->
+        block_intents(selected, reason)
     end
   end
 
@@ -4347,93 +4381,28 @@ defmodule SpaceTraders.Fleet.Intents do
   defp set_flight_mode_for_navigate(agent, intent, live_ship) do
     flight_mode = navigate_constraint(intent, "flight_mode")
 
-    with {:ok, %{intent: intent}} <-
-           prepare_recorded_action(agent, intent, %{
-             "kind" => "set_flight_mode",
-             "waypoint" => live_ship.nav.waypoint_symbol,
-             "flight_mode" => flight_mode,
-             "expected" => %{"flight_mode" => flight_mode}
-           }) do
-      case Agent.handle_game_result(
-             agent,
-             SpaceTraders.API.dispatch_recorded(intent)
-           ) do
-        {:ok, %{nav: nav, fuel: fuel}} ->
-          case transition_intent(intent,
-                 in_flight_action: nil,
-                 last_action_result: %{"kind" => "set_flight_mode", "flight_mode" => flight_mode}
-               ) do
-            {:ok, intent} -> advance_intents(agent, intent, %{live_ship | nav: nav, fuel: fuel})
-            :intent_no_longer_owned -> :ok
-          end
-
-        {:error, reason} ->
-          block_intents(intent, reason)
-      end
-    else
-      {:error, reason} -> block_preparation_refusal(intent, reason)
-    end
+    execute_action(agent, intent, live_ship, %{
+      "kind" => "set_flight_mode",
+      "waypoint" => live_ship.nav.waypoint_symbol,
+      "flight_mode" => flight_mode,
+      "expected" => %{"flight_mode" => flight_mode}
+    })
   end
 
   defp dock_for_navigate(agent, intent, live_ship) do
-    with {:ok, %{intent: intent}} <-
-           prepare_recorded_action(agent, intent, %{
-             "kind" => "dock",
-             "waypoint" => live_ship.nav.waypoint_symbol,
-             "expected" => %{"status" => "DOCKED"}
-           }) do
-      case Agent.handle_game_result(
-             agent,
-             SpaceTraders.API.dispatch_recorded(intent)
-           ) do
-        {:ok, result} ->
-          case transition_intent(intent,
-                 in_flight_action: nil,
-                 last_action_result: %{"kind" => "dock", "status" => result.nav.status}
-               ) do
-            {:ok, intent} -> advance_intents(agent, intent, %{live_ship | nav: result.nav})
-            :intent_no_longer_owned -> :ok
-          end
-
-        {:error, reason} ->
-          block_intents(intent, reason)
-      end
-    else
-      {:error, reason} -> block_preparation_refusal(intent, reason)
-    end
+    execute_action(agent, intent, live_ship, %{
+      "kind" => "dock",
+      "waypoint" => live_ship.nav.waypoint_symbol,
+      "expected" => %{"status" => "DOCKED"}
+    })
   end
 
   defp orbit_for_intents(agent, intent, live_ship) do
-    with {:ok, %{intent: intent, attempt: attempt}} <-
-           prepare_recorded_action(agent, intent, %{
-             "kind" => "orbit",
-             "waypoint" => live_ship.nav.waypoint_symbol,
-             "expected" => %{"status" => "IN_ORBIT"}
-           }) do
-      case Agent.handle_game_result(
-             agent,
-             SpaceTraders.API.dispatch_recorded(attempt)
-           ) do
-        {:ok, result} ->
-          case transition_intent(intent,
-                 in_flight_action: nil,
-                 last_action_result: %{"kind" => "orbit", "status" => result.nav.status}
-               ) do
-            {:ok, intent} ->
-              live_ship = %{live_ship | nav: result.nav}
-
-              advance_intents(agent, intent, live_ship)
-
-            :intent_no_longer_owned ->
-              :ok
-          end
-
-        {:error, reason} ->
-          block_intents(intent, reason)
-      end
-    else
-      {:error, reason} -> block_preparation_refusal(intent, reason)
-    end
+    execute_action(agent, intent, live_ship, %{
+      "kind" => "orbit",
+      "waypoint" => live_ship.nav.waypoint_symbol,
+      "expected" => %{"status" => "IN_ORBIT"}
+    })
   end
 
   defp advance_manual_jump_route(agent, intent, live_ship) do
@@ -4547,28 +4516,11 @@ defmodule SpaceTraders.Fleet.Intents do
   defp dispatch_manual_navigate(agent, intent, live_ship, destination \\ nil) do
     destination = destination || intent.target_waypoint
 
-    with {:ok, %{intent: intent}} <-
-           prepare_recorded_action(agent, intent, %{
-             "kind" => "navigate",
-             "waypoint" => destination,
-             "expected" => %{"status" => "IN_TRANSIT", "destination" => destination}
-           }) do
-      case Agent.handle_game_result(
-             agent,
-             SpaceTraders.API.dispatch_recorded(intent)
-           ) do
-        {:ok, result} ->
-          accept_navigate_result(agent, intent, live_ship, destination, result)
-
-        {:error, %SpaceTraders.API.GameplayError{type: :insufficient_fuel} = reason} ->
-          recover_insufficient_fuel(agent, intent, live_ship, reason)
-
-        {:error, reason} ->
-          block_intents(intent, reason)
-      end
-    else
-      {:error, reason} -> block_preparation_refusal(intent, reason)
-    end
+    execute_action(agent, intent, live_ship, %{
+      "kind" => "navigate",
+      "waypoint" => destination,
+      "expected" => %{"status" => "IN_TRANSIT", "destination" => destination}
+    })
   end
 
   defp accept_navigate_result(agent, intent, live_ship, destination, result) do
@@ -4614,23 +4566,12 @@ defmodule SpaceTraders.Fleet.Intents do
 
   defp dispatch_manual_warp(agent, intent, live_ship) do
     with {:ok, module} <- installed_warp_drive(live_ship),
-         :ok <- warp_route_preflight(agent, intent, live_ship, module),
-         {:ok, %{intent: intent}} <-
-           prepare_recorded_action(agent, intent, %{
-             "kind" => "warp",
-             "waypoint" => intent.target_waypoint,
-             "expected" => %{"status" => "IN_TRANSIT", "destination" => intent.target_waypoint}
-           }) do
-      case Agent.handle_game_result(
-             agent,
-             SpaceTraders.API.dispatch_recorded(intent)
-           ) do
-        {:ok, result} ->
-          accept_warp_result(agent, intent, live_ship, result)
-
-        {:error, reason} ->
-          block_intents(intent, reason)
-      end
+         :ok <- warp_route_preflight(agent, intent, live_ship, module) do
+      execute_action(agent, intent, live_ship, %{
+        "kind" => "warp",
+        "waypoint" => intent.target_waypoint,
+        "expected" => %{"status" => "IN_TRANSIT", "destination" => intent.target_waypoint}
+      })
     else
       {:refuel, required} ->
         parameters =
@@ -4931,17 +4872,7 @@ defmodule SpaceTraders.Fleet.Intents do
   end
 
   defp accepted_observations(agent, live_ship, attempt, _action, basis) do
-    {:ok,
-     [
-       reconciliation_observation(
-         "get-my-ship",
-         [DependencyKey.ship(agent.id, live_ship.symbol)],
-         attempt,
-         :accepted,
-         basis,
-         %{nav: ship_nav_facts(live_ship.nav)}
-       )
-     ]}
+    ship_recovery_proof(agent, live_ship, attempt, :accepted, basis)
   end
 
   defp reconcile_absent_and_retry(agent, intent, live_ship, action) do
@@ -4960,10 +4891,11 @@ defmodule SpaceTraders.Fleet.Intents do
   end
 
   defp retry_absent_action(agent, intent, live_ship, action, absent) do
-    with {:ok, result} <- retry_under_current_claim(agent, intent, live_ship, action, absent),
+    with {:ok, %{intent: selected, result: result}} <-
+           retry_under_current_claim(agent, intent, live_ship, action, absent),
          {:ok, result} <- Agent.handle_game_result(agent, result) do
-      # Retry preparation changed the linked identity; continuation uses that row.
-      accept_retried_action(agent, Repo.get!(Intent, intent.id), live_ship, action, result)
+      # Carry the admitted retry's identity; never substitute a newer callback owner.
+      continue_selected_response(agent, selected, live_ship, action, result)
     else
       {:error, :no_current_ship_claim} -> supersede_for_lost_claim(intent, true)
       {:error, :emergency_stopped} -> retire_stopped_absence(intent, absent)
@@ -4982,8 +4914,9 @@ defmodule SpaceTraders.Fleet.Intents do
   end
 
   defp retry_under_current_claim(agent, intent, _live_ship, _action, absent) do
-    with {:ok, retry} <- RecordedDispatch.prepare_retry(agent, intent, absent) do
-      {:ok, SpaceTraders.API.dispatch_recorded(retry)}
+    with {:ok, retry} <- RecordedAction.prepare_retry(agent, intent, absent) do
+      selected = %{intent | mutation_attempt_id: retry.id}
+      {:ok, %{intent: selected, result: SpaceTraders.API.dispatch_recorded(retry)}}
     end
   end
 
@@ -5037,17 +4970,20 @@ defmodule SpaceTraders.Fleet.Intents do
   end
 
   defp absence_observations(agent, live_ship, attempt, action) do
-    {:ok,
-     [
-       reconciliation_observation(
-         "get-my-ship",
-         [DependencyKey.ship(agent.id, live_ship.symbol)],
-         attempt,
-         :absent,
-         "Fresh Ship state does not contain the expected #{action["kind"]} effect",
-         %{nav: ship_nav_facts(live_ship.nav)}
-       )
-     ]}
+    ship_recovery_proof(
+      agent,
+      live_ship,
+      attempt,
+      :absent,
+      "Fresh Ship state does not contain the expected #{action["kind"]} effect"
+    )
+  end
+
+  defp ship_recovery_proof(_agent, live_ship, attempt, outcome, basis) do
+    case Evidence.recovery_proof(attempt, outcome, basis, [Map.get(live_ship, :evidence_binding)]) do
+      {:ok, observations} -> {:ok, observations}
+      {:incomplete, gap} -> {:error, {:incomplete_recovery_evidence, gap.missing}}
+    end
   end
 
   defp ship_and_credit_observations(
@@ -5141,7 +5077,7 @@ defmodule SpaceTraders.Fleet.Intents do
     )
   end
 
-  defp accept_retried_action(
+  defp continue_selected_response(
          agent,
          intent,
          live_ship,
@@ -5150,13 +5086,13 @@ defmodule SpaceTraders.Fleet.Intents do
        ),
        do: accept_navigate_result(agent, intent, live_ship, destination, result)
 
-  defp accept_retried_action(agent, intent, live_ship, %{"kind" => "warp"}, result),
+  defp continue_selected_response(agent, intent, live_ship, %{"kind" => "warp"}, result),
     do: accept_warp_result(agent, intent, live_ship, result)
 
-  defp accept_retried_action(agent, intent, live_ship, %{"kind" => "jump"}, result),
+  defp continue_selected_response(agent, intent, live_ship, %{"kind" => "jump"}, result),
     do: accept_jump_result(agent, intent, live_ship, result)
 
-  defp accept_retried_action(agent, intent, live_ship, %{"kind" => kind}, %{nav: nav})
+  defp continue_selected_response(agent, intent, live_ship, %{"kind" => kind}, %{nav: nav})
        when kind in ["orbit", "dock"] do
     case transition_intent(intent,
            in_flight_action: nil,
@@ -5167,7 +5103,7 @@ defmodule SpaceTraders.Fleet.Intents do
     end
   end
 
-  defp accept_retried_action(
+  defp continue_selected_response(
          agent,
          intent,
          live_ship,
@@ -5183,7 +5119,7 @@ defmodule SpaceTraders.Fleet.Intents do
     end
   end
 
-  defp accept_retried_action(
+  defp continue_selected_response(
          agent,
          intent,
          live_ship,
@@ -5206,8 +5142,8 @@ defmodule SpaceTraders.Fleet.Intents do
     end
   end
 
-  defp accept_retried_action(_agent, intent, _live_ship, %{"kind" => "refuel"}, %{fuel: fuel}),
-    do: clear_claim_and_block(intent, {:refuel_incomplete, fuel.current, fuel.capacity})
+  defp continue_selected_response(_agent, intent, _live_ship, %{"kind" => "refuel"}, %{fuel: fuel}),
+       do: clear_claim_and_block(intent, {:refuel_incomplete, fuel.current, fuel.capacity})
 
   # Typed game rejections become stable blocker reasons; transport failures
   # keep their struct evidence.
@@ -5713,26 +5649,6 @@ defmodule SpaceTraders.Fleet.Intents do
   # A restarted owned Intent re-enters the same reconciliation from boot's fresh
   # observation; recovery never replays a stored mutation.
   defp recover_owned_intent_on_boot(ship_symbol, agent_id) do
-    with %Ship{} = ship <- Repo.get_by(Ship, symbol: ship_symbol, agent_id: agent_id),
-         %Intent{status: status, caller: caller} = intent
-         when status != "awaiting_confirmation" and caller in ["commitment", "intervention"] <-
-           unfinished_intent_for_ship(ship.id),
-         %AgentRecord{} = agent <- Repo.get(AgentRecord, agent_id),
-         :ok <- Agent.execution_allowed?(agent) do
-      case Agent.handle_game_result(
-             agent,
-             SpaceTraders.Evidence.get_ship(AgentTokenReference.new(agent), ship_symbol)
-           ) do
-        {:ok, live_ship} ->
-          reconcile(agent.id, ship_symbol, live_ship, :boot, intent.id)
-
-        {:error, reason} ->
-          if reason == :stale_agent,
-            do: :ok,
-            else: intent_recovery_retry_or_block(ship, intent, agent_id, reason)
-      end
-    else
-      _ -> :ok
-    end
+    reconcile(agent_id, ship_symbol, nil, :boot, nil)
   end
 end

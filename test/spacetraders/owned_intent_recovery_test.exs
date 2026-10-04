@@ -23,7 +23,275 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
     :ok
   end
 
+  test "recovery keeps the exact retained Ship source when identical newer facts replace latest" do
+    {agent, ship, portfolio, commitment} = claimed_ship("EXACT-SOURCE")
+    {_intent, attempt} = selected_orbit(agent, ship, portfolio, commitment)
+    {:ok, attempt} = MutationAttempts.mark_sent_or_unknown(attempt)
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      assert conn.method == "GET"
+      Req.Test.json(conn, %{"data" => ship_body(ship.symbol, %{"nav" => nav_body("IN_ORBIT")})})
+    end)
+
+    {:ok, binding} = SpaceTraders.Evidence.get_ship_binding(agent, ship.symbol)
+    original = binding.observation
+    {:ok, newer} = SpaceTraders.Evidence.get_ship_binding(agent, ship.symbol)
+    refute newer.observation.id == original.id
+    Req.Test.stub(SpaceTraders.API, fn _ -> flunk("restart reuse acquired replacement facts") end)
+    {:ok, binding} = SpaceTraders.Evidence.retained_ship_binding(agent, original.id)
+
+    assert {:ok, [proof]} =
+             SpaceTraders.Evidence.recovery_proof(
+               attempt,
+               :accepted,
+               "Ship is in orbit",
+               [binding]
+             )
+
+    assert proof.source.id == original.id
+    assert proof.observed_at == original.observed_at
+    assert {:ok, accepted} = MutationAttempts.reconcile(attempt, :accepted, [proof])
+
+    assert List.last(accepted.outcomes).evidence["observations"]
+           |> hd()
+           |> Map.fetch!("source")
+           |> Map.fetch!("id") == original.id
+  end
+
+  test "final ledger validation rejects stripped or falsely widened retained sources" do
+    {agent, ship, portfolio, commitment} = claimed_ship("FALSE-SOURCE")
+    {_intent, attempt} = selected_orbit(agent, ship, portfolio, commitment)
+    {:ok, attempt} = MutationAttempts.mark_sent_or_unknown(attempt)
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      Req.Test.json(conn, %{"data" => ship_body(ship.symbol, %{"nav" => nav_body("IN_ORBIT")})})
+    end)
+
+    {:ok, binding} = SpaceTraders.Evidence.get_ship_binding(agent, ship.symbol)
+
+    {:ok, [proof]} =
+      SpaceTraders.Evidence.recovery_proof(attempt, :accepted, "In orbit", [binding])
+
+    assert {:error, :authoritative_evidence_required} =
+             MutationAttempts.reconcile(attempt, :accepted, [%{proof | source: nil}])
+
+    assert {:error, :authoritative_evidence_required} =
+             MutationAttempts.reconcile(attempt, :accepted, [
+               %{proof | dependency_keys: attempt.dependency_keys ++ ["fake"]}
+             ])
+
+    assert SpaceTraders.SafetyFence.active?(MutationAttempts.get!(attempt.id))
+  end
+
+  test "navigation ledger invariants require retained evidence even without selection metadata" do
+    {agent, ship, _portfolio, _commitment} = claimed_ship("LEDGER-SOURCE")
+
+    {:ok, attempt} =
+      MutationAttempts.prepare(
+        OperationInventory.fetch!("orbit-ship"),
+        "/my/ships/#{ship.symbol}/orbit",
+        agent_id: agent.id
+      )
+
+    {:ok, attempt} = MutationAttempts.mark_sent_or_unknown(attempt)
+
+    forged =
+      SpaceTraders.Evidence.reconciliation_observation(
+        "get-my-ship",
+        attempt,
+        :accepted,
+        "Caller asserts orbit without retention"
+      )
+
+    assert {:error, :authoritative_evidence_required} =
+             MutationAttempts.reconcile(attempt, :accepted, [forged])
+
+    assert SpaceTraders.SafetyFence.active?(MutationAttempts.get!(attempt.id))
+  end
+
+  test "final validation uses durable dependency scope rather than a caller's attempt snapshot" do
+    {agent, ship, portfolio, commitment} = claimed_ship("DURABLE-SCOPE")
+    {_intent, attempt} = selected_orbit(agent, ship, portfolio, commitment)
+    {:ok, attempt} = MutationAttempts.mark_sent_or_unknown(attempt)
+    other_symbol = "OTHER-SOURCE-SHIP"
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      Req.Test.json(conn, %{"data" => ship_body(other_symbol, %{"nav" => nav_body("IN_ORBIT")})})
+    end)
+
+    {:ok, other} = SpaceTraders.Evidence.get_ship_binding(agent, other_symbol)
+
+    forged = %{
+      attempt
+      | dependency_keys: [SpaceTraders.SafetyFence.DependencyKey.ship(agent.id, other_symbol)]
+    }
+
+    {:ok, proof} =
+      SpaceTraders.Evidence.recovery_proof(forged, :accepted, "Other Ship is in orbit", [other])
+
+    assert {:error, :authoritative_evidence_required} =
+             MutationAttempts.reconcile(forged, :accepted, proof)
+
+    assert SpaceTraders.SafetyFence.active?(MutationAttempts.get!(attempt.id))
+  end
+
+  test "unretained Ship facts cannot resolve recovery or release its Safety Fence" do
+    {agent, ship, portfolio, commitment} = claimed_ship("RETENTION-GAP")
+    {intent, attempt} = selected_orbit(agent, ship, portfolio, commitment)
+    {:ok, _} = MutationAttempts.mark_sent_or_unknown(attempt)
+    # Fail the real retention write, while the governed game read still succeeds.
+    Repo.query!(
+      "ALTER TABLE authoritative_observations ADD CONSTRAINT retention_gap CHECK (subject <> 'ship:#{ship.symbol}')"
+    )
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      assert conn.method == "GET"
+      Req.Test.json(conn, %{"data" => ship_body(ship.symbol, %{"nav" => nav_body("IN_ORBIT")})})
+    end)
+
+    assert {:error, :evidence_not_retained} =
+             SpaceTraders.Evidence.get_ship_binding(agent, ship.symbol)
+
+    _ = Intents.reconcile(agent.id, ship.symbol, nil, :arrival, intent.id)
+    assert MutationAttempts.get!(attempt.id).state == "sent_or_unknown"
+    assert SpaceTraders.SafetyFence.active?(MutationAttempts.get!(attempt.id))
+    assert Repo.get!(Intent, intent.id).in_flight_action == intent.in_flight_action
+  end
+
+  test "partial expiry preserves usable exact bindings without reads and a newer source cannot restamp age" do
+    {agent, ship, portfolio, commitment} = claimed_ship("PARTIAL-BINDING")
+    {_intent, attempt} = selected_orbit(agent, ship, portfolio, commitment)
+    {:ok, attempt} = MutationAttempts.mark_sent_or_unknown(attempt)
+    now = DateTime.add(attempt.sent_or_unknown_at, 1, :second)
+    previous = Application.fetch_env(:spacetraders, :clock)
+    start_supervised!({SpaceTraders.TestClock, now})
+    Application.put_env(:spacetraders, :clock, SpaceTraders.TestClock)
+
+    on_exit(fn ->
+      case previous do
+        {:ok, value} -> Application.put_env(:spacetraders, :clock, value)
+        :error -> Application.delete_env(:spacetraders, :clock)
+      end
+    end)
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      Req.Test.json(conn, %{"data" => ship_body(ship.symbol, %{"nav" => nav_body("IN_ORBIT")})})
+    end)
+
+    {:ok, original} = SpaceTraders.Evidence.get_ship_binding(agent, ship.symbol)
+
+    {:ok, original_proof} =
+      SpaceTraders.Evidence.recovery_proof(attempt, :accepted, "In orbit", [original])
+
+    SpaceTraders.TestClock.advance(31)
+    {:ok, replacement} = SpaceTraders.Evidence.get_ship_binding(agent, ship.symbol)
+    Req.Test.stub(SpaceTraders.API, fn _ -> flunk("proof assembly acquired hidden evidence") end)
+
+    assert {:error, :authoritative_evidence_required} =
+             MutationAttempts.reconcile(attempt, :accepted, original_proof)
+
+    assert {:incomplete, %{usable: [^replacement], unusable: [^original]}} =
+             SpaceTraders.Evidence.recovery_proof(attempt, :accepted, "In orbit", [
+               original,
+               replacement
+             ])
+
+    assert {:incomplete, %{missing: missing}} =
+             SpaceTraders.Evidence.recovery_proof(attempt, :accepted, "In orbit", [original])
+
+    assert missing == attempt.dependency_keys
+
+    assert {:ok, [proof]} =
+             SpaceTraders.Evidence.recovery_proof(attempt, :accepted, "In orbit", [replacement])
+
+    assert {:error, :authoritative_evidence_required} =
+             MutationAttempts.reconcile(attempt, :accepted, [
+               %{proof | source: original.observation}
+             ])
+
+    assert {:ok, _} = MutationAttempts.reconcile(attempt, :accepted, [proof])
+  end
+
+  test "exact evidence rejects wrong Generation, pre-dispatch and future acquisitions" do
+    {agent, ship, portfolio, commitment} = claimed_ship("SCOPED-BINDING")
+    {_intent, prepared} = selected_orbit(agent, ship, portfolio, commitment)
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      Req.Test.json(conn, %{"data" => ship_body(ship.symbol)})
+    end)
+
+    {:ok, before_send} = SpaceTraders.Evidence.get_ship_binding(agent, ship.symbol)
+
+    {:ok, before_send_proof} =
+      SpaceTraders.Evidence.recovery_proof(prepared, :absent, "Still docked", [before_send])
+
+    {:ok, attempt} = MutationAttempts.mark_sent_or_unknown(prepared)
+
+    assert {:error, :authoritative_evidence_required} =
+             MutationAttempts.reconcile(attempt, :absent, before_send_proof)
+
+    assert {:incomplete, _} =
+             SpaceTraders.Evidence.recovery_proof(attempt, :absent, "Still docked", [before_send])
+
+    {:ok, binding} = SpaceTraders.Evidence.get_ship_binding(agent, ship.symbol)
+
+    {:ok, valid_proof} =
+      SpaceTraders.Evidence.recovery_proof(attempt, :absent, "Still docked", [binding])
+
+    wrong_generation = %{attempt | fleet_generation_id: attempt.fleet_generation_id + 1}
+
+    assert {:incomplete, _} =
+             SpaceTraders.Evidence.recovery_proof(wrong_generation, :absent, "Still docked", [
+               binding
+             ])
+
+    previous = Application.fetch_env(:spacetraders, :clock)
+    start_supervised!({SpaceTraders.TestClock, DateTime.add(binding.observation.observed_at, -1)})
+    Application.put_env(:spacetraders, :clock, SpaceTraders.TestClock)
+
+    on_exit(fn ->
+      case previous do
+        {:ok, value} -> Application.put_env(:spacetraders, :clock, value)
+        :error -> Application.delete_env(:spacetraders, :clock)
+      end
+    end)
+
+    assert {:incomplete, _} =
+             SpaceTraders.Evidence.recovery_proof(attempt, :absent, "Still docked", [binding])
+
+    assert {:error, :authoritative_evidence_required} =
+             MutationAttempts.reconcile(attempt, :absent, valid_proof)
+
+    assert SpaceTraders.SafetyFence.active?(MutationAttempts.get!(attempt.id))
+  end
+
   for trigger <- [:boot, :arrival, :cooldown, :intent_retry] do
+    test "#{trigger} preserves the original bound source through replacement and recovery re-entry" do
+      {agent, ship, portfolio, commitment} = claimed_ship("BOUND-#{unquote(trigger)}")
+      {intent, attempt} = selected_orbit(agent, ship, portfolio, commitment)
+      {:ok, _} = MutationAttempts.mark_sent_or_unknown(attempt)
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        assert conn.method == "GET"
+        Req.Test.json(conn, %{"data" => ship_body(ship.symbol, %{"nav" => nav_body("IN_ORBIT")})})
+      end)
+
+      {:ok, original} = SpaceTraders.Evidence.get_ship_binding(agent, ship.symbol)
+      {:ok, _newer} = SpaceTraders.Evidence.get_ship_binding(agent, ship.symbol)
+      _ = Intents.reconcile(agent.id, ship.symbol, original, unquote(trigger), intent.id)
+      accepted = MutationAttempts.get!(attempt.id)
+      assert accepted.state == "accepted"
+
+      assert get_in(List.last(accepted.outcomes).evidence, [
+               "observations",
+               Access.at(0),
+               "source",
+               "id"
+             ]) == original.observation.id
+
+      assert Repo.get!(Intent, intent.id).status == "completed"
+    end
+
     test "#{trigger} rejects a malformed owned read without resolving or clearing selected evidence" do
       {agent, ship, portfolio, commitment} = claimed_ship("INVALID-#{unquote(trigger)}")
       {intent, attempt} = selected_orbit(agent, ship, portfolio, commitment)
@@ -86,12 +354,7 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
 
     {:ok, _} =
       MutationAttempts.reconcile(attempt, :absent, [
-        SpaceTraders.Evidence.reconciliation_observation(
-          "get-my-ship",
-          attempt,
-          :absent,
-          "Authoritative Ship remains docked"
-        )
+        retained_ship_proof(agent, ship, attempt, :absent, "Authoritative Ship remains docked")
       ])
 
     Req.Test.stub(SpaceTraders.API, fn conn ->
@@ -108,6 +371,23 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
     refute original.retry_authorized
     assert retry.retry_of_id == original.id
     assert retry.state == "succeeded"
+  end
+
+  test "an obsolete callback cannot clear a newer retry of the same selection" do
+    {agent, ship, portfolio, commitment} = claimed_ship("STALE-RETRY-CALLBACK")
+    {selected, attempt} = selected_orbit(agent, ship, portfolio, commitment)
+    {:ok, attempt} = MutationAttempts.mark_sent_or_unknown(attempt)
+    proof = retained_ship_proof(agent, ship, attempt, :absent, "Ship remains docked")
+    {:ok, absent} = MutationAttempts.reconcile(attempt, :absent, [proof])
+
+    {:ok, retry} =
+      SpaceTraders.Fleet.Intents.RecordedAction.prepare_retry(agent, selected, absent)
+
+    assert :intent_no_longer_owned = Intents.transition_intent(selected, in_flight_action: nil)
+    current = Repo.get!(Intent, selected.id)
+    assert current.in_flight_action == selected.in_flight_action
+    assert current.mutation_attempt_id == retry.id
+    assert MutationAttempts.get!(retry.id).state == "prepared"
   end
 
   test "legacy refuel without an attempt retains historical evidence and shared credit protection" do
@@ -302,12 +582,7 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
 
     {:ok, _} =
       MutationAttempts.reconcile(attempt, :absent, [
-        SpaceTraders.Evidence.reconciliation_observation(
-          "get-my-ship",
-          attempt,
-          :absent,
-          "Ship remains docked"
-        )
+        retained_ship_proof(agent, ship, attempt, :absent, "Ship remains docked")
       ])
 
     Req.Test.stub(SpaceTraders.API, fn conn ->
@@ -395,8 +670,9 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
         attempt,
         :bounded_unknown,
         [
-          SpaceTraders.Evidence.reconciliation_observation(
-            "get-my-ship",
+          retained_ship_proof(
+            agent,
+            ship,
             attempt,
             :bounded_unknown,
             "At most one posture change"
@@ -432,6 +708,17 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
       })
 
     {intent, attempt}
+  end
+
+  defp retained_ship_proof(agent, ship, attempt, outcome, basis) do
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      assert conn.method == "GET"
+      Req.Test.json(conn, %{"data" => ship_body(ship.symbol)})
+    end)
+
+    {:ok, binding} = SpaceTraders.Evidence.get_ship_binding(agent, ship.symbol)
+    {:ok, [proof]} = SpaceTraders.Evidence.recovery_proof(attempt, outcome, basis, [binding])
+    proof
   end
 
   test "Intent lifecycle transitions keep their correlation identifier" do
