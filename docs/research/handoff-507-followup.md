@@ -3,19 +3,22 @@
 Branch `feature/507-recorded-ship-qualification`, pushed. PR:
 https://github.com/bturney/spacetraders/pull/558
 Key commits: `4ce4da3` (original increment), `9c27ef7` (PR feedback follow-up),
-`cfdd32f` (deterministic ResourceAcquisition reproduction), and `a902732`
-(causal-time fix).
+`cfdd32f` (deterministic ResourceAcquisition reproduction), `a902732`
+(causal-time fix), `5728036` (DemandScheduler downtime-test synchronization),
+and `30da783` (global CapacityGovernor assertion isolation).
 Base: `c97fc58d6c4e3986b80dbacfe4998cf395449811`.
 Report: `docs/research/recorded-ship-qualification-507.md`.
 Evidence: https://gist.github.com/bturney/d1416360b9b5a74ea07ab554ccfa068a
 
 ## Read this first
 
-**The handoff failure has been reproduced deterministically and corrected.**
-Executable revision `a902732d0c71c35b3632d8bbede142dd3c2c972b` passed the
-canonical GitHub Actions product gate with **806 tests, 0 failures** (seed 1697)
-and release-deployment verification. See "Resolved handoff failure" below for the
-red/green proof.
+**The handoff failures have been reproduced or isolated to concrete races and
+corrected.** Executable revision
+`30da78395475dce24e584603c27d582345039235` passed the canonical GitHub Actions
+product gate with **806 tests, 0 failures** (seed 888514), the same-VM lifecycle
+proof in both orders repeated twice, and release-deployment verification. See
+"Resolved handoff failure" and "Additional suite races" below for the red/green
+proof.
 
 Operator PR feedback is addressed and reviewed. Parent #502 stays open. No
 production deployment, migration, merge, or Emergency Stop operation was performed.
@@ -81,6 +84,26 @@ also passed.
 The planner invariant was not relaxed: evidence still may not post-date the
 decision snapshot. The caller now supplies the correct post-discovery snapshot.
 
+## Additional suite races
+
+Continuing the handoff reproduced the historical EvidenceScheduling
+Sandbox-ownership failure. The deadline-downtime test stopped DemandScheduler
+immediately after receiving its due broadcast, but `wake_due/1` still performs
+its final durable rearm query after broadcasting. Killing the scheduler in that
+window could disconnect the shared Sandbox owner; the replacement scheduler then
+failed in `:manual` mode. Commit `5728036` waits for the scheduler callback to
+finish with `:sys.get_state/1` before simulating downtime. The repeated
+same-VM lifecycle diagnostic subsequently passed every EvidenceScheduling and
+ResourceAcquisition run in both orders twice.
+
+The next gate exposed a separate test-isolation issue in `API.ErrorTest`. It ran
+asynchronously while asserting the application-wide CapacityGovernor rejection
+window, which another concurrent successful API request may clear. Commit
+`30da783` makes that module synchronous because it intentionally observes global
+governor state. GitHub Actions run 37164225616 retained the red assertion; run
+37164549577 passed the complete 806-test product gate and release verification on
+the first run of the corrected head.
+
 ## Commands
 
 ```sh
@@ -88,7 +111,7 @@ source scripts/_toolchain.sh
 MIX_ENV=test mix ecto.create && MIX_ENV=test mix ecto.migrate   # once
 mix test test/spacetraders/recorded_ship_runtime_test.exs --seed 0 --trace
 mix test test/spacetraders/recorded_ship_fixture_order_test.exs --seed 0 --trace
-scripts/verify                                                    # green at a902732
+scripts/verify                                                    # green at 30da783
 ```
 
 Test DB: `postgres://postgres:postgres@localhost/spacetraders_test`. No separate
@@ -104,6 +127,8 @@ belong to #400.
 
 ## Next boundary
 
-The handoff failure is fixed and its red/green evidence is recorded in the
-qualification report. Merge and deployment still need explicit Operator
-authorization. Parent #502 remains open for the broader gates listed above.
+The handoff failures are fixed and their red/green evidence is recorded in the
+qualification report. Current executable head `30da783` has a clean canonical
+product and release verification receipt. Merge and deployment still need
+explicit Operator authorization. Parent #502 remains open for the broader gates
+listed above.
