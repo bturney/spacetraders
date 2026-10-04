@@ -117,6 +117,22 @@ A durable account of one Fleet Strategy reconciliation decision. It receives a s
 **Outcome Observability**:
 Evidence of whether a Fleet Strategy is achieving its Strategic Objectives, including progress, economics, Fleet productivity, leaderboard movement, constraints, and expected-versus-actual outcomes. Mission Control summarizes it for the Operator; deeper analysis may use the observability platform.
 
+**Episode Cash Flow**:
+The credit receipts minus expenditures attributable to one Strategy Decision Episode, including supporting costs and rewards whether or not its selected work finishes. Proven amounts and unknown amounts remain distinct; it is not completed-trade profit.
+_Avoid_: realized profit, trade margin (when meaning episode-wide cash flow)
+
+**Completed Round Trip**:
+One bounded trade whose causally linked goods acquisitions have been fully disposed of through sales, including multiple purchases, partial sales, or transfers between Ships. Its Trade Margin may remain unknown even when its quantities and completion are proven.
+_Avoid_: latest buy/sell pair, completed sale (when meaning the whole trade)
+
+**Trade Margin**:
+The sale receipts minus goods-acquisition cost of one causally linked Completed Round Trip. It excludes supporting fuel, refit, and other costs and is unknown when required monetary evidence is incomplete.
+_Avoid_: all-in profit, Episode Cash Flow
+
+**Net Earnings**:
+The revenue of a bounded outcome contribution minus its attributable goods and supporting costs, including fuel where applicable. An exact result requires complete monetary evidence and supported cost attribution; it is distinct from Episode Cash Flow when money movements span unfinished work or multiple contributions.
+_Avoid_: Trade Margin (when supporting costs are deducted), Agent balance change
+
 **System Observability**:
 Evidence of how the autonomous software behaves and performs, including planning, execution, API pressure, errors, latency, recovery, and resource use. It supports diagnosis and optimization and becomes Operator-facing only when it materially affects Fleet Strategy.
 
