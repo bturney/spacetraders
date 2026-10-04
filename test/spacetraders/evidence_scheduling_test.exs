@@ -200,10 +200,14 @@ defmodule SpaceTraders.EvidenceSchedulingTest do
                Map.merge(@demand, %{due_at: @now, deadline_at: DateTime.add(@now, 30, :second)})
              )
 
-    start_supervised!({DemandScheduler, []})
+    scheduler = start_supervised!({DemandScheduler, []})
     assert_receive {:observation_demand_due, ^agent_id, [@subject]}, 1_000
     assert [%{deadline_missed_at: nil}] = Evidence.list_open_demands(agent)
 
+    # The due broadcast happens before wake_due/1 finishes rearming from durable
+    # Evidence. Wait for that callback to finish before simulating downtime so
+    # we never kill a scheduler while it is using the shared Sandbox connection.
+    _state = :sys.get_state(scheduler)
     assert :ok = stop_supervised!(DemandScheduler)
     assert :ok = stop_supervised!(TestClock)
     start_supervised!({TestClock, DateTime.add(@now, 60, :second)})
