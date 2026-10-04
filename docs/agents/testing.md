@@ -9,11 +9,6 @@ looks environment-related.
 `Mix.Tasks.Verify.required_checks/0` in `lib/mix/tasks/verify.ex`; read it
 rather than trusting a list elsewhere.
 
-Release packaging and deployment verification run under the separate CI
-`release-deployment-verification` contract. For its commands and prerequisites,
-read the README's **Release and deployment verification** section; these checks
-are outside the product gate.
-
 CI prepares the pinned toolchain, dependencies, and migrated test database,
 then invokes `scripts/verify` directly. Local runs use the same gate after
 preparing those prerequisites; no runner identity variables are required.
@@ -25,6 +20,23 @@ from, and no check's output is parsed to decide the result.
 The gate prints a lot. Inline tool output can truncate mid-run and leave the
 result unknown: redirect it to a file and read the tail, or rely on the
 command's exit status.
+
+## Release and deployment verification
+
+Outside the product gate, CI runs these under the separate
+`release-deployment-verification` job. They are operational checks that protect
+merges:
+
+```sh
+test/integration/postgres_compose_test.sh
+test/integration/release_boot_test.sh
+test/integration/migration_repair_test.sh
+```
+
+They require Docker Compose, the pinned toolchain and dependencies, and a
+running PostgreSQL test database. `release_boot_test.sh` builds and boots the
+production release; `migration_repair_test.sh` creates and removes its own
+temporary database.
 
 ## Expected noise
 

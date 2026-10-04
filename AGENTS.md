@@ -14,8 +14,9 @@ Merge requires an explicit Operator request.
 
 ## Working in this repo
 
-- Setup, run, and test commands: `README.md`'s Development section is the source
-  of truth. `scripts/verify` is the pre-push gate.
+- Setup, run, and the product gate: `README.md`'s Development section is the
+  source of truth. `scripts/verify` is the pre-push gate; release and deployment
+  verification is outside it, and `docs/agents/testing.md` holds those commands.
 - The pinned toolchain is not on PATH. In every fresh shell, source it first:
   `source scripts/_toolchain.sh`
 - Before starting new implementation, run `git fetch origin main` and
