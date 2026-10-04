@@ -1,5 +1,7 @@
 defmodule SpaceTraders.API.ErrorTest do
-  use SpaceTraders.DataCase, async: true
+  # This module asserts application-wide CapacityGovernor state after protocol
+  # responses, so concurrent API tests could erase the rejection window.
+  use SpaceTraders.DataCase, async: false
 
   alias SpaceTraders.API
   alias SpaceTraders.API.AgentTokenReference
