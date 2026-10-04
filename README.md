@@ -4,7 +4,8 @@ SpaceTraders bot + dashboard — a programmable API game (https://spacetraders.i
 
 ## Program roadmap
 
-Phases 1–5 of the play effort, with status and per-phase maps, live on the always-open GitHub issue:
+Phases 1–5 of the play effort, with status and per-phase maps, live on the
+always-open GitHub issue:
 
 **https://github.com/bturney/spacetraders/issues/8** (SpaceTraders — Program Roadmap)
 
@@ -20,58 +21,32 @@ gameplay authority boundary.
 
 ## Development
 
-Phoenix 1.8 app (Bandit + LiveView) with PostgreSQL via `postgrex`. Erlang/OTP
-27.3.4 + Elixir 1.18.4 (see `.tool-versions`).
+Phoenix 1.8 app (Bandit + LiveView) with PostgreSQL via `postgrex`.
+Erlang/OTP 27.3.4 + Elixir 1.18.4 (see `.tool-versions`).
 
-### Bootstrap
+Steps 1–3 are the sequence from a fresh checkout to a green **product gate**.
+The rest are reference: reach for the one that matches your branch. Each step
+states its completion criterion, because the gate's exit status is the only
+verdict.
 
-Installs the pinned Erlang/Elixir toolchain (no sudo required) and fetches deps:
+### 1. Bootstrap
 
 ```sh
 scripts/bootstrap
-```
-
-Activate the installed toolchain in each shell before running `mix` commands or
-the product gate:
-
-```sh
 source scripts/_toolchain.sh
 ```
 
-Single-checkout development uses the installed dependency directory. Parallel
-ticket work uses a private writable dependency/build copy restored from an
-immutable cache instead.
+`scripts/bootstrap` installs the pinned Erlang/Elixir toolchain (no sudo
+required) and fetches dependencies. The pinned toolchain is not on `PATH`, so
+every fresh shell needs `scripts/_toolchain.sh` sourced before any `mix`
+command.
 
-Scripts use the pinned installation at `$HOME/.local/opt/spacetraders-toolchain`
-(override with `SPACETRADERS_TOOLCHAIN_DIR`).
+Done when `mix --version` reports the pinned toolchain.
 
-### Verify
+### 2. Database
 
-The product gate runs locally and in CI on every PR. It requires the toolchain,
-dependencies, and test database to be prepared first; `scripts/verify` only runs
-`mix verify`:
-
-```sh
-scripts/verify
-```
-
-`mix verify` runs the checks required by the product gate, in order, stopping
-at the first failure: warnings-as-errors compilation, formatting, the ExUnit
-suite, generated API struct and operation inventory freshness, the
-transport-boundary check, and application health (`GET /health` → 200 from a
-real HTTP server). `scripts/verify` and direct `mix verify` run the same product
-checks and expect an already-prepared test database. The exit status is the
-verdict.
-
-CI keeps release/deployment verification in the separate
-`release-deployment-verification` job. It checks PostgreSQL Compose topology,
-production release boot, and migration repair. These operational checks protect
-merges without adding release or deployment infrastructure to the product gate.
-
-### PostgreSQL
-
-PostgreSQL is the application store and the verification database. Start a local
-instance, prepare the test database once, then run the product gate:
+PostgreSQL is both the application store and the verification database. Start an
+instance, then prepare its test database once:
 
 ```sh
 docker run --rm --name spacetraders-postgres -p 5432:5432 \
@@ -79,83 +54,75 @@ docker run --rm --name spacetraders-postgres -p 5432:5432 \
   postgres:17
 MIX_ENV=test mix ecto.create
 MIX_ENV=test mix ecto.migrate
+```
+
+`mix test` and the gate reuse that prepared database; neither creates, drops, nor
+migrates it. Set `DATABASE_URL` to select another instance.
+
+Done when `MIX_ENV=test mix ecto.migrate` exits 0.
+
+### 3. Product gate
+
+```sh
 scripts/verify
 ```
 
-Set `DATABASE_URL` to use another PostgreSQL instance.
+The gate runs locally and in CI on every PR. It runs its checks in order and
+stops at the first failure, so a red run names the check to fix. It reports its
+verdict as the exit status — never recovered from, never inferred from output.
+Its checks are `Mix.Tasks.Verify.required_checks/0` in
+`lib/mix/tasks/verify.ex`; read that for the current list rather than trusting
+one written down here.
 
-### Release and deployment verification
+It prints a lot: redirect to a file and read the tail, or trust the exit
+status.
 
-CI runs these operational checks separately from `scripts/verify`:
+Release packaging and deployment verification sit outside this gate, under
+their own CI job; `docs/agents/testing.md` has their commands.
+
+Done when `scripts/verify` exits 0.
+
+### Testing beyond the gate
+
+The gate is the merge condition. Single-file runs, failures that look
+environment-related, which seam owns which contract, and the standalone runtime
+qualification diagnostic are documented in
+[`docs/agents/testing.md`](docs/agents/testing.md) — read it before debugging a
+failure or adding coverage.
+
+Three runs sit outside the gate and are worth naming here:
 
 ```sh
-test/integration/postgres_compose_test.sh
-test/integration/release_boot_test.sh
-test/integration/migration_repair_test.sh
-```
-
-They require Docker Compose, the pinned toolchain and dependencies, and a running
-PostgreSQL test database. `release_boot_test.sh` builds and boots the production
-release; `migration_repair_test.sh` creates and removes its own temporary
-database. The product gate does not invoke these checks.
-
-Direct targeted or full `mix test` runs reuse the prepared database; provision it
-once before the first run:
-
-```sh
-MIX_ENV=test mix ecto.create
-MIX_ENV=test mix ecto.migrate
+# One file, against the prepared database
 mix test test/spacetraders/agent_test.exs
-```
 
-First Ship dispatch durability is tested directly through the claimed Intent
-execution seam in `test/spacetraders/ship_execution_durability_test.exs`. The test
-uses real commits and a separate, pinned PostgreSQL connection to observe mutation
-evidence before and after killing the sender, without starting Fleet coordination
-or the Operator interface. Run the narrow proof with:
-
-```sh
-DATABASE_URL=postgres://postgres:postgres@localhost/spacetraders_test \
-  mix test test/spacetraders/ship_execution_durability_test.exs
-```
-
-Whole-runtime qualification is a standalone diagnostic outside ordinary
-`mix test` and `scripts/verify`. It owns its setup and teardown directly. Run it
-explicitly when checking autonomous runtime composition across a restart:
-
-```sh
+# Whole-runtime composition across a restart (diagnostic, owns its own setup)
 mix test test/diagnostics/runtime_qualification.exs --seed 0 --trace
-```
 
-Its retained scope and the deterministic seam-level owners are documented in
-`docs/agents/testing.md`.
-
-Recorded Ship dispatch also has authenticated production-runtime interruption
-and authority-loss qualification in ordinary regression coverage:
-
-```sh
+# Recorded Ship dispatch under interruption and authority loss
 mix test test/spacetraders/recorded_ship_runtime_test.exs --seed 0 --trace
 ```
 
-See [the qualification and rollout boundary](docs/research/recorded-ship-qualification-507.md)
-for independently observed evidence, compatibility and readiness scope.
+See [the qualification and rollout
+boundary](docs/research/recorded-ship-qualification-507.md) for independently
+observed evidence, compatibility and readiness scope.
 
 ### Game API client & codegen
 
 The thin `SpaceTraders.API` Req client (structs in `SpaceTraders.API.Model.*`) is
-generated from the official OpenAPI spec bundled at `priv/spec/` (v2.3.0). On
-spec updates, regenerate and commit the output:
+generated from the official OpenAPI spec bundled at `priv/spec/` (v2.3.0). The
+regenerated structs are committed, so API drift shows up as a diff. On spec
+updates, regenerate and commit the output:
 
 ```sh
-mix space_traders.gen.models          # rewrite lib/spacetraders/api/models/*.ex
-mix space_traders.gen.operations      # rewrite the operation inventory
+mix space_traders.gen.models               # rewrite lib/spacetraders/api/models/*.ex
+mix space_traders.gen.operations           # rewrite the operation inventory
 mix space_traders.gen.models --check       # fail if committed structs are stale
 mix space_traders.gen.operations --check   # fail if the inventory is stale
 ```
 
-The regenerated structs are committed, so API drift shows up as a diff. The
-client is rate-limited (3 req/s, burst 10) and stubbed with `Req.Test` in test
-env; see `test/spacetraders/api/`.
+The client is rate-limited (3 req/s, burst 10) and stubbed with `Req.Test` in
+test env; see `test/spacetraders/api/`.
 
 ### Run the app
 
@@ -164,28 +131,30 @@ source scripts/_toolchain.sh
 mix phx.server   # http://localhost:4000, GET /health returns {"status":"ok"}
 ```
 
-### Optional isolated work
+First boot redirects to `/setup` — create the first operator (email + password,
+optionally linking your my.spacetraders.io AccountToken to mint agents). Routes
+live in `lib/spacetraders_web/router.ex`; the nav exposes sign-in, mint, and
+settings.
 
-Routine work uses the current checkout. For concurrent or explicitly isolated
-work, create a Task Workspace from current `origin/main` rather than assuming a
-local branch is current:
+### Isolated work
+
+Routine work uses the current checkout. `scripts/_toolchain.sh` points
+`MIX_DEPS_PATH` at a dependency directory shared across checkouts, so concurrent
+work needs a private writable build: `scripts/task-start` creates a Task
+Workspace from current `origin/main`, on branch `feature/<task-id>` with its own
+build and port (see [ADR
+0008](docs/adr/0008-concurrent-worktree-isolation.md)).
 
 ```sh
 git fetch origin main
 scripts/task-start 28 --base origin/main
 ```
 
-The workspace uses `feature/<task-id>`, a private build, and an allocated port.
-Stop it after its changes are committed or removed:
+Stop it once its changes are committed or removed:
 
 ```sh
 scripts/task-stop 28
 ```
-
-First boot redirects to `/setup` — create the first operator (email + password,
-optionally linking your my.spacetraders.io AccountToken to mint agents). Routes
-live in `lib/spacetraders_web/router.ex`; the nav exposes sign-in, mint, and
-settings.
 
 ### Game secrets (AccountToken / AgentToken)
 
@@ -222,6 +191,6 @@ scripts/teardown
 ### Project-host deployment
 
 Production runs on the Tailscale machine `project-host` with PostgreSQL as the
-authoritative database.
-Read the [project-host runbook](docs/operations/project-host.md) before changing
-or running deployment, migration, backup, restore, or fresh-database recovery.
+authoritative database. Read the
+[project-host runbook](docs/operations/project-host.md) before changing or
+running deployment, migration, backup, restore, or fresh-database recovery.
