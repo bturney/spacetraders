@@ -49,6 +49,71 @@ defmodule SpaceTraders.TransferRecoveryTest do
     assert Elixir.Agent.get(sends, & &1) == 1
   end
 
+  test "confirmed accepted transfer completes once after the receiver's Cargo moved on" do
+    %{agent: agent, intent: intent} = transfer_fixture()
+
+    {:ok, %{intent: selected, attempt: attempt}} =
+      RecordedAction.prepare(agent, intent, prepared_action(agent))
+
+    {:ok, attempt} = MutationAttempts.mark_sent_or_unknown(attempt)
+    {:ok, sends} = Elixir.Agent.start_link(fn -> 1 end)
+    stub_transfer(sends)
+    {:ok, source} = Evidence.get_ship_binding(agent, "PRODUCER")
+    {:ok, target} = Evidence.get_ship_binding(agent, "HAULER")
+
+    {:ok, proof} =
+      Evidence.recovery_proof(attempt, :accepted, "Both Ships' Cargo proves the transfer", [
+        source,
+        target
+      ])
+
+    {:ok, accepted} = MutationAttempts.reconcile(attempt, :accepted, proof)
+
+    # The continuation died; the unfenced receiver then loaded more Cargo.
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      assert conn.method == "GET"
+
+      units =
+        if conn.request_path == "/v2/my/ships/PRODUCER", do: 8, else: 10
+
+      symbol = conn.request_path |> String.split("/") |> List.last()
+      Req.Test.json(conn, %{"data" => ship_body(symbol, %{"cargo" => cargo(units)})})
+    end)
+
+    assert {:ok, %Intent{status: "completed"}} = Intents.advance(agent, selected, nil)
+    assert MutationAttempts.get!(accepted.id).state == "accepted"
+    assert length(MutationAttempts.list_for_agent(agent)) == 1
+  end
+
+  test "protocol backpressure on transfer recovery reads defers instead of awaiting reconciliation" do
+    %{agent: agent, intent: intent} = transfer_fixture()
+
+    {:ok, %{intent: selected, attempt: attempt}} =
+      RecordedAction.prepare(agent, intent, prepared_action(agent))
+
+    {:ok, _} = MutationAttempts.mark_sent_or_unknown(attempt)
+
+    # The acting Ship's read succeeds; the receiver's recovery read is throttled.
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      case {conn.method, conn.request_path} do
+        {"GET", "/v2/my/ships/PRODUCER"} ->
+          Req.Test.json(conn, %{"data" => ship_body("PRODUCER", %{"cargo" => cargo(12)})})
+
+        {"GET", "/v2/my/ships/HAULER"} ->
+          conn
+          |> Plug.Conn.put_status(429)
+          |> Req.Test.json(%{"error" => %{"code" => 429, "message" => "rate limited"}})
+      end
+    end)
+
+    _ = Intents.advance(agent, selected, nil)
+    current = Repo.get!(Intent, selected.id)
+    assert current.status == "waiting"
+    assert current.blocker.reason == "api_capacity_deferred"
+    assert current.in_flight_action == selected.in_flight_action
+    assert MutationAttempts.get!(attempt.id).state == "sent_or_unknown"
+  end
+
   test "lost receiver Claim retires proven absence without erasing the historical verdict" do
     %{agent: agent, intent: intent, portfolio: portfolio} = transfer_fixture()
 

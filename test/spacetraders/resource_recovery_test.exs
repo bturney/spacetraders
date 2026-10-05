@@ -52,6 +52,29 @@ defmodule SpaceTraders.ResourceRecoveryTest do
     assert Repo.get!(Intent, intent.id).in_flight_action == intent.in_flight_action
   end
 
+  for kind <- ["extract", "survey"] do
+    test "#{kind} unchanged Ship blocks as unprovable absence without sending" do
+      {agent, ship, intent, attempt} = selected_resource(unquote(kind))
+      {:ok, _} = MutationAttempts.mark_sent_or_unknown(attempt)
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        assert conn.method == "GET"
+
+        Req.Test.json(conn, %{
+          "data" => ship_body(ship.symbol, %{"cargo" => intent.in_flight_action["cargo_before"]})
+        })
+      end)
+
+      _ = Intents.reconcile(agent.id, ship.symbol, nil, :boot, intent.id)
+      current = Repo.get!(Intent, intent.id)
+      assert current.status == "blocked"
+      assert current.blocker.evidence =~ ~s({:absence_unprovable, "#{unquote(kind)}"})
+      assert current.in_flight_action == intent.in_flight_action
+      assert SpaceTraders.SafetyFence.active?(MutationAttempts.get!(attempt.id))
+      assert [_only] = MutationAttempts.list_for_agent(agent)
+    end
+  end
+
   test "legacy jettison without a send marker cannot turn a Cargo decrement into attribution" do
     {agent, ship, intent, attempt} = selected_resource("jettison")
     {:ok, _} = MutationAttempts.record_not_sent(attempt, "Unused fixture preparation")
