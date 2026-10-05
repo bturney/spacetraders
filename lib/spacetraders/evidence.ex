@@ -1248,8 +1248,8 @@ defmodule SpaceTraders.Evidence do
   def valid_recovery_source?(%AuthoritativeObservation{source: nil}, attempt) do
     kind = get_in(attempt.prepared_evidence, ["selected_action", "kind"])
 
-    attempt.operation_id not in ~w(navigate-ship warp-ship orbit-ship dock-ship patch-ship-nav) and
-      kind not in ["navigate", "warp", "orbit", "dock", "set_flight_mode"]
+    attempt.operation_id not in ~w(navigate-ship warp-ship orbit-ship dock-ship patch-ship-nav transfer-cargo) and
+      kind not in ["navigate", "warp", "orbit", "dock", "set_flight_mode", "transfer"]
   end
 
   def valid_recovery_source?(_, _), do: false
