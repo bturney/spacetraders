@@ -66,6 +66,30 @@ defmodule SpaceTraders.Evidence do
     _ -> {:error, :evidence_not_retained}
   end
 
+  @doc "Restores an exact retained Contract-list or Construction read without reacquiring facts."
+  def retained_recipient_binding(%AgentRecord{} = agent, observation_id) do
+    with %Observation{agent_id: agent_id} = source <- Repo.get(Observation, observation_id),
+         true <- agent_id == agent.id do
+      value =
+        case source.operation_id do
+          "get-contracts" ->
+            Enum.map(
+              source.facts["response"],
+              &SpaceTraders.API.Model.Contract.from_json(api_keys(&1))
+            )
+
+          "get-construction" ->
+            SpaceTraders.API.Model.Construction.from_json(api_keys(source.facts["response"]))
+        end
+
+      {:ok, %Binding{value: value, observation: source}}
+    else
+      _ -> {:error, :evidence_not_retained}
+    end
+  rescue
+    _ -> {:error, :evidence_not_retained}
+  end
+
   @doc "Reuses an exact binding when still usable, otherwise acquires one governed replacement."
   def recovery_ship_binding(agent, symbol, supplied, since \\ nil) do
     binding =
@@ -339,6 +363,7 @@ defmodule SpaceTraders.Evidence do
          read,
          key_suffix \\ nil
        ) do
+    {bind?, opts} = Keyword.pop(opts, :bind, false)
     credential_ref = credential_reference(token_or_agent)
     agent = owned_agent(credential_ref)
     required_facts = Keyword.get(opts, :required_facts, default_facts)
@@ -348,7 +373,10 @@ defmodule SpaceTraders.Evidence do
     key = {operation_id, subject, credential_ref.agent_id, key_suffix}
 
     result = ReadCoordinator.read(key, fn -> read.(credential_ref, request_opts) end)
-    settle_governed_read(result, persisted_demand, agent, subject, operation_id)
+
+    if bind?,
+      do: retain_binding(result, agent, subject, operation_id),
+      else: settle_governed_read(result, persisted_demand, agent, subject, operation_id)
   end
 
   defp settle_governed_read(
@@ -495,7 +523,7 @@ defmodule SpaceTraders.Evidence do
       authoritative_observation(
         operation_id,
         [subject],
-        %{response: serialize_read_value(value)},
+        read_facts(operation_id, value),
         Clock.utc_now()
       )
 
@@ -1345,7 +1373,7 @@ defmodule SpaceTraders.Evidence do
   def valid_recovery_source?(%AuthoritativeObservation{source: nil}, attempt) do
     kind = get_in(attempt.prepared_evidence, ["selected_action", "kind"])
 
-    attempt.operation_id not in ~w(purchase-ship navigate-ship warp-ship orbit-ship dock-ship patch-ship-nav refuel-ship jump-ship transfer-cargo) and
+    attempt.operation_id not in ~w(purchase-ship navigate-ship warp-ship orbit-ship dock-ship patch-ship-nav refuel-ship jump-ship transfer-cargo deliver-contract supply-construction) and
       kind not in [
         "navigate",
         "warp",
@@ -1354,7 +1382,8 @@ defmodule SpaceTraders.Evidence do
         "set_flight_mode",
         "refuel",
         "jump",
-        "transfer"
+        "transfer",
+        "deliver"
       ]
   end
 
@@ -1406,6 +1435,36 @@ defmodule SpaceTraders.Evidence do
   end
 
   defp source_dependencies(
+         %Observation{operation_id: "get-contracts", subject: "contracts:" <> _} = source
+       ) do
+    case source.facts["response"] do
+      contracts when is_list(contracts) ->
+        for contract <- contracts,
+            valid_contract_progress?(contract),
+            do: SpaceTraders.SafetyFence.DependencyKey.contract(source.agent_id, contract["id"])
+
+      _ ->
+        []
+    end
+  end
+
+  defp source_dependencies(
+         %Observation{operation_id: "get-construction", subject: "construction:" <> _} = source
+       ) do
+    case source.facts["response"] do
+      %{"symbol" => symbol, "is_complete" => complete, "materials" => materials}
+      when is_binary(symbol) and symbol != "" and is_boolean(complete) and is_list(materials) ->
+        if String.ends_with?(source.subject, ":" <> symbol) and
+             Enum.all?(materials, &valid_material_progress?/1),
+           do: [SpaceTraders.SafetyFence.DependencyKey.construction(source.agent_id, symbol)],
+           else: []
+
+      _ ->
+        []
+    end
+  end
+
+  defp source_dependencies(
          %Observation{operation_id: "get-my-agent", subject: "agent:" <> symbol} = source
        ) do
     facts = source.facts["response"]
@@ -1433,6 +1492,44 @@ defmodule SpaceTraders.Evidence do
   end
 
   defp source_dependencies(_), do: []
+
+  defp valid_contract_progress?(%{
+         "id" => id,
+         "accepted" => accepted,
+         "fulfilled" => fulfilled,
+         "terms" => %{"deliver" => goods}
+       })
+       when is_binary(id) and id != "" and is_boolean(accepted) and is_boolean(fulfilled) and
+              is_list(goods) do
+    Enum.all?(goods, fn
+      %{
+        "trade_symbol" => symbol,
+        "destination_symbol" => waypoint,
+        "units_required" => required,
+        "units_fulfilled" => delivered
+      }
+      when is_binary(symbol) and symbol != "" and is_binary(waypoint) and waypoint != "" and
+             is_integer(required) and required >= 0 and is_integer(delivered) and delivered >= 0 and
+             delivered <= required ->
+        true
+
+      _ ->
+        false
+    end)
+  end
+
+  defp valid_contract_progress?(_), do: false
+
+  defp valid_material_progress?(%{
+         "trade_symbol" => symbol,
+         "required" => required,
+         "fulfilled" => fulfilled
+       })
+       when is_binary(symbol) and symbol != "" and is_integer(required) and required >= 0 and
+              is_integer(fulfilled) and fulfilled >= 0 and fulfilled <= required,
+       do: true
+
+  defp valid_material_progress?(_), do: false
 
   defp owned_subject?(source, kind) do
     case Repo.get(AgentRecord, source.agent_id) do
