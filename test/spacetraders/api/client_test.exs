@@ -4,6 +4,7 @@ defmodule SpaceTraders.API.ClientTest do
   alias SpaceTraders.API
   alias SpaceTraders.API.AgentTokenReference
   alias SpaceTraders.API.Model
+  alias SpaceTraders.API.ShadowAdmission
 
   import ExUnit.CaptureLog
   import Plug.Conn, only: [get_req_header: 2]
@@ -70,7 +71,12 @@ defmodule SpaceTraders.API.ClientTest do
       ]
 
       handler_id = "api-capacity-shadow-#{System.unique_integer()}"
-      :telemetry.attach_many(handler_id, events, &__MODULE__.handle_event/4, self())
+
+      :telemetry.attach_many(handler_id, events, &__MODULE__.handle_shadow_event/4, {
+        self(),
+        Process.whereis(ShadowAdmission)
+      })
+
       on_exit(fn -> :telemetry.detach(handler_id) end)
 
       Req.Test.stub(SpaceTraders.API, fn conn ->
@@ -97,10 +103,7 @@ defmodule SpaceTraders.API.ClientTest do
                         evidence_fingerprint: "evidence-v1"
                       } = admission}
 
-      correlation_id = admission.correlation_id
-
-      assert_receive {:telemetry, [:spacetraders, :api, :capacity, :actual], measurements,
-                      %{correlation_id: ^correlation_id} = actual}
+      {final_admission, measurements, actual} = receive_shadow_outcome(admission)
 
       assert admission.operation_id == "get-my-ship"
       assert admission.classification == :read
@@ -116,7 +119,9 @@ defmodule SpaceTraders.API.ClientTest do
 
       assert admission.evidence_fingerprint == "evidence-v1"
       assert actual.correlation_id == admission.correlation_id
-      assert actual.shadow_fingerprint == admission.fingerprint
+      assert actual.shadow_fingerprint == final_admission.fingerprint
+      assert final_admission.correlation_id == admission.correlation_id
+      assert actual.shadow_disposition == final_admission.disposition
       assert actual.status == 200
       assert actual.outcome == :ok
 
@@ -126,6 +131,57 @@ defmodule SpaceTraders.API.ClientTest do
       assert DateTime.compare(actual.dispatched_at, actual.completed_at) == :lt
       assert measurements.queue_time >= 0
       assert measurements.request_time >= 0
+    end
+
+    test "correlates an outcome with the final published revision even when evidence changes" do
+      name = :"client_shadow_revision_#{System.unique_integer([:positive])}"
+      shadow = start_supervised!({ShadowAdmission, name: name, burst: 1, rate: 0.0})
+      handler_id = "client-shadow-revision-#{System.unique_integer()}"
+
+      :telemetry.attach_many(
+        handler_id,
+        [
+          [:spacetraders, :api, :capacity, :admission],
+          [:spacetraders, :api, :capacity, :actual]
+        ],
+        &__MODULE__.handle_shadow_event/4,
+        {self(), shadow}
+      )
+
+      on_exit(fn -> :telemetry.detach(handler_id) end)
+      operation = SpaceTraders.API.OperationInventory.fetch!("get-my-ship")
+
+      correlation_id =
+        ShadowAdmission.observe_request(operation, %{evidence_fingerprint: "initial"}, name)
+
+      assert_receive {:telemetry, [:spacetraders, :api, :capacity, :admission], %{count: 1},
+                      %{correlation_id: ^correlation_id} = admission}
+
+      safety_id =
+        ShadowAdmission.observe_request(
+          operation,
+          %{lane: :safety, evidence_fingerprint: "revised"},
+          name
+        )
+
+      ShadowAdmission.observe_dispatch(correlation_id, name)
+      ShadowAdmission.observe_outcome(correlation_id, 200, :ok, name)
+      {final_admission, measurements, actual} = receive_shadow_outcome(admission)
+
+      assert admission.evidence_fingerprint == "initial"
+      assert admission.disposition == :would_admit
+      assert final_admission.evidence_fingerprint == "revised"
+      assert final_admission.disposition == :would_delay
+      refute final_admission.fingerprint == admission.fingerprint
+      assert actual.correlation_id == correlation_id
+      assert actual.shadow_fingerprint == final_admission.fingerprint
+      assert actual.shadow_disposition == final_admission.disposition
+      assert actual.status == 200
+      assert actual.outcome == :ok
+      assert measurements.count == 1
+
+      ShadowAdmission.observe_dispatch(safety_id, name)
+      ShadowAdmission.observe_outcome(safety_id, 200, :ok, name)
     end
 
     test "emits a 429 API request metric after rate-limit retries" do
@@ -220,6 +276,33 @@ defmodule SpaceTraders.API.ClientTest do
 
   def handle_event(event, measurements, metadata, test_pid) do
     send(test_pid, {:telemetry, event, measurements, metadata})
+  end
+
+  def handle_shadow_event(event, measurements, metadata, {test_pid, observer}) do
+    if self() == observer, do: handle_event(event, measurements, metadata, test_pid)
+  end
+
+  defp receive_shadow_outcome(admission) do
+    receive_shadow_outcome(admission, System.monotonic_time(:millisecond) + 1_000)
+  end
+
+  defp receive_shadow_outcome(admission, deadline) do
+    correlation_id = admission.correlation_id
+    timeout = max(deadline - System.monotonic_time(:millisecond), 0)
+
+    # Admissions and the actual outcome come from the pinned observer, in order.
+    # A pending request can be revised under another request's evidence snapshot.
+    receive do
+      {:telemetry, [:spacetraders, :api, :capacity, :admission], %{count: 1},
+       %{correlation_id: ^correlation_id} = revision} ->
+        receive_shadow_outcome(revision, deadline)
+
+      {:telemetry, [:spacetraders, :api, :capacity, :actual], measurements,
+       %{correlation_id: ^correlation_id} = actual} ->
+        {admission, measurements, actual}
+    after
+      timeout -> flunk("No shadow outcome for correlation #{correlation_id}")
+    end
   end
 
   describe "register/3" do

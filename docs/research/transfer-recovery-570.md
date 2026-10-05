@@ -80,3 +80,33 @@ covers the two actual Ship dependencies; unrelated Ships remain admissible.
 Other capability adoption, #575 contraction, #576 combined qualification, the
 separate worst-case spending-authority question and parent #502 Gates 2–5/live
 trial remain their respective owners' work. No production/gameplay trial occurred.
+
+## Current integration and final verification
+
+Preserved the initial ticket implementation in `4ad83c8`, then merged integration
+`01da1de90d6676e8982022da6f660ff8a7205a67` into this ticket branch. Integration
+includes #567's Agent composite seam, #574's Fleet binding adoption and the
+fail-fast gate (`mix test --raise`). This session did not modify integration.
+
+Resolved the two shared conflicts by retaining the adopted-outcome documentation
+and the union of direct retained-source requirements: navigation, refuel/jump,
+Fleet purchase and transfer. #567's navigation action set and Agent-credit
+binding/coverage, plus #574's Fleet source coverage and owner options, remain on
+their established Evidence and Ship Execution seams. No second binding or proof
+authority was added during the merge.
+
+| Final post-merge command | Actual result | Complete log under `/tmp/opencode/` |
+| --- | --- | --- |
+| `mix test` the nine files below, `--raise --seed 0 --trace` | **172 tests, 0 failures; COMMAND_EXIT=0** | `570-integrated-targeted.log` |
+| `scripts/verify` | **859 tests, 0 failures; 204.5 seconds ExUnit; COMMAND_EXIT=0**. Compile, format, both generator drift checks, transport boundary and port-4570 health boot pass. | `570-integrated-canonical.log` |
+
+Targeted files under `test/spacetraders/`: `transfer_recovery_test.exs`,
+`fleet_transfer_test.exs`, `owned_intent_recovery_test.exs`,
+`fleet_acquisition_test.exs`, `fleet_intents_test.exs`,
+`mutation_attempts_test.exs`, `recorded_ship_runtime_test.exs`,
+`ship_execution_durability_test.exs`, and `api/recorded_dispatch_test.exs`.
+
+No known #570 acceptance gap remains. Conservative unknown outcomes with
+unproven active Hard Constraints remain fenced; this is not a claim to solve the
+parent's separate spending-bound protocol or certify Gates 2–5. Combined
+all-family qualification stays with #576.
