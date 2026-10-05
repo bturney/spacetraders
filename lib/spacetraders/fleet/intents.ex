@@ -1382,11 +1382,7 @@ defmodule SpaceTraders.Fleet.Intents do
          } = intent,
          live_ship
        ) do
-    if intelligence_satisfied_intent?(agent, intent) do
-      complete_intents(agent, intent)
-    else
-      reconcile_scan_intelligence(agent, intent, live_ship)
-    end
+    reconcile_scan_intelligence(agent, intent, live_ship)
   end
 
   defp do_advance_intents(
@@ -1394,11 +1390,7 @@ defmodule SpaceTraders.Fleet.Intents do
          %Intent{type: "acquire_intelligence", in_flight_action: %{"kind" => "chart"}} = intent,
          _live_ship
        ) do
-    if intelligence_satisfied_intent?(agent, intent) do
-      complete_intents(agent, intent)
-    else
-      reconcile_chart_intelligence(agent, intent)
-    end
+    reconcile_chart_intelligence(agent, intent)
   end
 
   defp do_advance_intents(
@@ -1989,54 +1981,10 @@ defmodule SpaceTraders.Fleet.Intents do
         wait_for_manual_cooldown(agent, intent, live_ship)
 
       true ->
-        with {:ok, %{intent: intent}} <-
-               prepare_recorded_action(agent, intent, %{
-                 "kind" => "scan_waypoints",
-                 "waypoint" => intent.target_waypoint
-               }) do
-          case Agent.handle_game_result(
-                 agent,
-                 SpaceTraders.API.dispatch_recorded(intent)
-               ) do
-            {:ok, %{waypoints: waypoints}} ->
-              Enum.each(waypoints, fn waypoint ->
-                Intelligence.observe_waypoint(agent, waypoint,
-                  source: "scan_waypoints",
-                  observing_ship_symbol: live_ship.symbol
-                )
-              end)
-
-              with {:ok, intent} <-
-                     transition_intent(intent,
-                       in_flight_action: nil,
-                       parameters: Map.put(intent.parameters, "scan_attempted", true)
-                     ) do
-                cond do
-                  intelligence_satisfied?(
-                    agent,
-                    intent,
-                    :waypoint,
-                    intent.parameters["system"],
-                    intent.parameters["required_facts"],
-                    intent.parameters["freshness_seconds"]
-                  ) ->
-                    complete_intents(agent, intent)
-
-                  "chart" in intent.parameters["required_facts"] and
-                      known_intelligence_waypoint?(agent, intent) ->
-                    chart_intelligence(agent, intent, live_ship)
-
-                  true ->
-                    block_intents(intent, :scan_did_not_establish_required_facts)
-                end
-              end
-
-            {:error, reason} ->
-              block_intents(intent, reason)
-          end
-        else
-          {:error, reason} -> block_preparation_refusal(intent, reason)
-        end
+        execute_action(agent, intent, live_ship, %{
+          "kind" => "scan_waypoints",
+          "waypoint" => intent.target_waypoint
+        })
     end
   end
 
@@ -2052,52 +2000,38 @@ defmodule SpaceTraders.Fleet.Intents do
   end
 
   defp reconcile_scan_intelligence(agent, intent, live_ship) do
-    case MutationAttempts.latest_for_intent(intent) do
-      %SpaceTraders.MutationAttempts.Attempt{state: "succeeded"} ->
-        with {:ok, intent} <-
-               transition_intent(intent,
-                 in_flight_action: nil,
-                 parameters: Map.put(intent.parameters, "scan_attempted", true)
-               ) do
-          if Fleet.cooldown_active?(live_ship),
-            do: wait_for_manual_cooldown(agent, intent, live_ship),
-            else: block_intents(intent, :scan_result_unavailable)
-        end
+    with :ok <-
+           reconcile_selected_attempt(intent, fn attempt ->
+             expiration = live_ship.cooldown && live_ship.cooldown.expiration
 
-      %{sent_or_unknown_at: %DateTime{}} = attempt
-      when attempt.state in ["sent_or_unknown", "ambiguous", "bounded_unknown"] ->
-        expiration = live_ship.cooldown && live_ship.cooldown.expiration
-
-        with true <- Fleet.cooldown_active?(live_ship),
-             {:ok, cooldown_at, _} <- DateTime.from_iso8601(expiration),
-             true <- DateTime.after?(cooldown_at, attempt.sent_or_unknown_at),
-             {:ok, _} <-
-               MutationAttempts.reconcile(attempt, :accepted, [
-                 Evidence.reconciliation_observation(
-                   "get-my-ship",
-                   attempt,
-                   :accepted,
-                   "Fresh Ship cooldown proves a scan occurred after its dispatch",
-                   Evidence.recovery_observed_at(
-                     attempt.agent_id,
-                     "get-my-ship",
-                     attempt.dependency_keys,
-                     attempt.prepared_at
-                   )
-                 )
-               ]),
-             {:ok, intent} <-
-               transition_intent(intent,
-                 in_flight_action: nil,
-                 parameters: Map.put(intent.parameters, "scan_attempted", true)
-               ) do
-          wait_for_manual_cooldown(agent, intent, live_ship)
-        else
-          _ -> block_intents(intent, :scan_outcome_unresolved)
-        end
-
-      _ ->
-        block_intents(intent, :scan_outcome_unresolved)
+             with true <- Fleet.cooldown_active?(live_ship),
+                  {:ok, cooldown_at, _} <- DateTime.from_iso8601(expiration),
+                  %DateTime{} = sent_at <- attempt.sent_or_unknown_at,
+                  true <- DateTime.after?(cooldown_at, sent_at) do
+               ship_recovery_proof(
+                 agent,
+                 live_ship,
+                 attempt,
+                 :accepted,
+                 "Retained Ship cooldown proves a scan occurred after its dispatch"
+               )
+             else
+               _ -> {:error, :scan_outcome_unresolved}
+             end
+           end),
+         {:ok, intent} <-
+           transition_intent(intent,
+             in_flight_action: nil,
+             parameters: Map.put(intent.parameters, "scan_attempted", true)
+           ) do
+      cond do
+        intelligence_satisfied_intent?(agent, intent) -> complete_intents(agent, intent)
+        Fleet.cooldown_active?(live_ship) -> wait_for_manual_cooldown(agent, intent, live_ship)
+        true -> block_intents(intent, :scan_result_unavailable)
+      end
+    else
+      :intent_no_longer_owned -> :ok
+      _ -> block_intents(intent, :scan_outcome_unresolved)
     end
   end
 
@@ -2116,50 +2050,16 @@ defmodule SpaceTraders.Fleet.Intents do
         orbit_for_intents(agent, intent, live_ship)
 
       true ->
-        with {:ok, %{intent: intent}} <-
-               prepare_recorded_action(agent, intent, %{
-                 "kind" => "chart",
-                 "waypoint" => intent.target_waypoint
-               }) do
-          case Agent.handle_game_result(
-                 agent,
-                 SpaceTraders.API.dispatch_recorded(intent)
-               ) do
-            {:ok,
-             %{chart: %{waypoint_symbol: waypoint}, waypoint: %{symbol: waypoint} = observed}}
-            when waypoint == intent.target_waypoint ->
-              with {:ok, _} <-
-                     Intelligence.observe_waypoint(agent, observed,
-                       source: "create_chart",
-                       observing_ship_symbol: live_ship.symbol
-                     ),
-                   {:ok, intent} <- transition_intent(intent, in_flight_action: nil) do
-                advance_intents(agent, intent, live_ship)
-              end
-
-            {:ok, _response} ->
-              block_intents(intent, :chart_response_incomplete)
-
-            {:error, reason} ->
-              block_intents(intent, reason)
-          end
-        else
-          {:error, reason} -> block_preparation_refusal(intent, reason)
-        end
+        execute_action(agent, intent, live_ship, %{
+          "kind" => "chart",
+          "waypoint" => intent.target_waypoint
+        })
     end
   end
 
   defp reconcile_chart_intelligence(agent, intent) do
     attempt = MutationAttempts.latest_for_intent(intent)
 
-    if attempt && attempt.state in ["sent_or_unknown", "ambiguous", "succeeded"] do
-      reconcile_chart_observation(agent, intent, attempt)
-    else
-      block_intents(intent, :chart_response_incomplete)
-    end
-  end
-
-  defp reconcile_chart_observation(agent, intent, attempt) do
     case Agent.handle_game_result(
            agent,
            Evidence.get_waypoint(
@@ -2168,14 +2068,25 @@ defmodule SpaceTraders.Fleet.Intents do
              intent.target_waypoint,
              lane: :safety,
              owner: "ship_execution",
-             required_facts: ["chart"]
+             required_facts: ["chart"],
+             bind: true
            )
          ) do
-      {:ok, %{chart: %{submitted_by: submitted_by, submitted_on: submitted_on}} = waypoint}
+      {:ok,
+       %Evidence.Binding{
+         value: %{chart: %{submitted_by: submitted_by, submitted_on: submitted_on}} = waypoint
+       } = binding}
       when submitted_by == agent.symbol and is_binary(submitted_on) ->
         with {:ok, chart_time, _} <- DateTime.from_iso8601(submitted_on),
              true <- chart_after_dispatch?(chart_time, attempt),
-             :ok <- reconcile_successful_chart(attempt),
+             {:ok, proof} <-
+               Evidence.recovery_proof(
+                 attempt,
+                 :accepted,
+                 "Retained Waypoint chart is attributed to the Agent after dispatch",
+                 [binding]
+               ),
+             :ok <- reconcile_selected_attempt(intent, fn _attempt -> {:ok, proof} end),
              {:ok, _} <-
                Intelligence.observe_waypoint(agent, waypoint,
                  source: "get_waypoint",
@@ -2184,6 +2095,7 @@ defmodule SpaceTraders.Fleet.Intents do
              {:ok, intent} <- transition_intent(intent, in_flight_action: nil) do
           complete_intents(agent, intent)
         else
+          :intent_no_longer_owned -> :ok
           _ -> block_intents(intent, :chart_outcome_unresolved)
         end
 
@@ -2192,42 +2104,12 @@ defmodule SpaceTraders.Fleet.Intents do
     end
   end
 
-  defp chart_after_dispatch?(_chart_time, %{sent_or_unknown_at: nil}), do: false
-
-  defp chart_after_dispatch?(chart_time, %{state: state, sent_or_unknown_at: sent_at})
-       when state == "succeeded",
-       do: DateTime.compare(chart_time, DateTime.truncate(sent_at, :second)) in [:eq, :gt]
-
-  defp chart_after_dispatch?(chart_time, attempt),
+  defp chart_after_dispatch?(chart_time, %{sent_or_unknown_at: %DateTime{} = sent_at}),
     do:
-      DateTime.compare(chart_time, DateTime.truncate(attempt.sent_or_unknown_at, :second)) in [
-        :eq,
-        :gt
-      ]
+      DateTime.compare(chart_time, DateTime.truncate(sent_at, :second)) in [:eq, :gt] and
+        DateTime.compare(chart_time, Clock.utc_now()) != :gt
 
-  defp reconcile_successful_chart(%{state: "succeeded"}), do: :ok
-
-  defp reconcile_successful_chart(attempt) do
-    with {:ok, _} <-
-           MutationAttempts.reconcile(attempt, :accepted, [
-             Evidence.reconciliation_observation(
-               "get-waypoint",
-               attempt,
-               :accepted,
-               "Fresh Waypoint chart is attributed to the Agent after dispatch",
-               Evidence.recovery_observed_at(
-                 attempt.agent_id,
-                 "get-waypoint",
-                 attempt.dependency_keys,
-                 attempt.prepared_at
-               )
-             )
-           ]) do
-      :ok
-    else
-      _ -> {:error, :chart_reconciliation_failed}
-    end
-  end
+  defp chart_after_dispatch?(_chart_time, _attempt), do: false
 
   defp advance_resource_intent(agent, intent, ship) do
     cond do
@@ -3040,7 +2922,18 @@ defmodule SpaceTraders.Fleet.Intents do
   end
 
   defp navigation_action?(%{"kind" => kind}),
-    do: kind in ["navigate", "warp", "orbit", "dock", "set_flight_mode", "refuel", "jump"]
+    do:
+      kind in [
+        "navigate",
+        "warp",
+        "orbit",
+        "dock",
+        "set_flight_mode",
+        "refuel",
+        "jump",
+        "scan_waypoints",
+        "chart"
+      ]
 
   defp navigation_action?(_), do: false
 
@@ -4847,6 +4740,12 @@ defmodule SpaceTraders.Fleet.Intents do
   end
 
   defp reconcile_accepted_attempt(agent, intent, live_ship, basis) do
+    reconcile_selected_attempt(intent, fn attempt ->
+      accepted_observations(agent, live_ship, attempt, intent.in_flight_action, basis)
+    end)
+  end
+
+  defp reconcile_selected_attempt(intent, assemble_proof) do
     case MutationAttempts.unresolved_for_intent(intent) do
       nil ->
         case MutationAttempts.latest_for_intent(intent) do
@@ -4857,7 +4756,7 @@ defmodule SpaceTraders.Fleet.Intents do
 
       attempt ->
         with {:ok, observations} <-
-               accepted_observations(agent, live_ship, attempt, intent.in_flight_action, basis),
+               assemble_proof.(attempt),
              {:ok, _attempt} <- MutationAttempts.reconcile(attempt, :accepted, observations) do
           :ok
         end
@@ -5040,6 +4939,59 @@ defmodule SpaceTraders.Fleet.Intents do
     )
   end
 
+  defp continue_selected_response(agent, intent, live_ship, %{"kind" => "scan_waypoints"}, %{
+         waypoints: waypoints
+       }) do
+    with :ok <- retain_scanned_waypoints(agent, live_ship.symbol, waypoints),
+         {:ok, intent} <-
+           transition_intent(intent,
+             in_flight_action: nil,
+             parameters: Map.put(intent.parameters, "scan_attempted", true)
+           ) do
+      cond do
+        intelligence_satisfied_intent?(agent, intent) ->
+          complete_intents(agent, intent)
+
+        "chart" in intent.parameters["required_facts"] and
+            known_intelligence_waypoint?(agent, intent) ->
+          chart_intelligence(agent, intent, live_ship)
+
+        true ->
+          block_intents(intent, :scan_did_not_establish_required_facts)
+      end
+    else
+      :intent_no_longer_owned -> :ok
+      {:error, reason} -> block_intents(intent, reason)
+    end
+  end
+
+  defp continue_selected_response(agent, intent, live_ship, %{"kind" => "chart"}, %{
+         chart: %{waypoint_symbol: waypoint, submitted_by: submitted_by},
+         waypoint:
+           %{symbol: waypoint, chart: %{submitted_by: submitted_by, submitted_on: submitted_on}} =
+             observed
+       })
+       when waypoint == intent.target_waypoint and submitted_by == agent.symbol and
+              is_binary(submitted_on) do
+    with {:ok, chart_time, _} <- DateTime.from_iso8601(submitted_on),
+         true <- DateTime.compare(chart_time, Clock.utc_now()) != :gt,
+         {:ok, _} <-
+           Intelligence.observe_waypoint(agent, observed,
+             source: "create_chart",
+             observing_ship_symbol: live_ship.symbol
+           ),
+         {:ok, intent} <- transition_intent(intent, in_flight_action: nil) do
+      advance_intents(agent, intent, live_ship)
+    else
+      :intent_no_longer_owned -> :ok
+      false -> block_intents(intent, :chart_response_incomplete)
+      {:error, reason} -> block_intents(intent, reason)
+    end
+  end
+
+  defp continue_selected_response(_agent, intent, _live_ship, %{"kind" => "chart"}, _result),
+    do: block_intents(intent, :chart_response_incomplete)
+
   defp continue_selected_response(
          agent,
          intent,
@@ -5152,6 +5104,18 @@ defmodule SpaceTraders.Fleet.Intents do
 
   defp continue_selected_response(_agent, intent, _live_ship, %{"kind" => "refuel"}, %{fuel: fuel}),
        do: clear_claim_and_block(intent, {:refuel_incomplete, fuel.current, fuel.capacity})
+
+  defp retain_scanned_waypoints(agent, symbol, waypoints) do
+    Enum.reduce_while(waypoints, :ok, fn waypoint, :ok ->
+      case Intelligence.observe_waypoint(agent, waypoint,
+             source: "scan_waypoints",
+             observing_ship_symbol: symbol
+           ) do
+        {:ok, _} -> {:cont, :ok}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
 
   defp validate_delivery_recipient(intent, :contract, contract) do
     if is_boolean(contract.accepted) and is_boolean(contract.fulfilled),

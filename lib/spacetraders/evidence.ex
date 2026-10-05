@@ -66,6 +66,23 @@ defmodule SpaceTraders.Evidence do
     _ -> {:error, :evidence_not_retained}
   end
 
+  @doc "Restores one exact retained Waypoint acquisition without another game read."
+  def retained_waypoint_binding(%AgentRecord{} = agent, observation_id) do
+    case Repo.get(Observation, observation_id) do
+      %Observation{agent_id: agent_id, operation_id: "get-waypoint"} = source
+      when agent_id == agent.id ->
+        waypoint =
+          source.facts["response"] |> api_keys() |> SpaceTraders.API.Model.Waypoint.from_json()
+
+        {:ok, %Binding{value: waypoint, observation: source}}
+
+      _ ->
+        {:error, :evidence_not_retained}
+    end
+  rescue
+    _ -> {:error, :evidence_not_retained}
+  end
+
   @doc "Restores an exact retained Contract-list or Construction read without reacquiring facts."
   def retained_recipient_binding(%AgentRecord{} = agent, observation_id) do
     with %Observation{agent_id: agent_id} = source <- Repo.get(Observation, observation_id),
@@ -372,11 +389,17 @@ defmodule SpaceTraders.Evidence do
     request_opts = Keyword.put(opts, :demand, demand)
     key = {operation_id, subject, credential_ref.agent_id, key_suffix}
 
-    result = ReadCoordinator.read(key, fn -> read.(credential_ref, request_opts) end)
-
-    if bind?,
-      do: retain_binding(result, agent, subject, operation_id),
-      else: settle_governed_read(result, persisted_demand, agent, subject, operation_id)
+    if bind? do
+      # Coalesced recovery callers share the acquisition's retained source, not
+      # separately timestamped copies of one response. Keep result shapes apart.
+      ReadCoordinator.read({key, :binding}, fn ->
+        read.(credential_ref, request_opts)
+        |> retain_binding(agent, subject, operation_id)
+      end)
+    else
+      result = ReadCoordinator.read(key, fn -> read.(credential_ref, request_opts) end)
+      settle_governed_read(result, persisted_demand, agent, subject, operation_id)
+    end
   end
 
   defp settle_governed_read(
@@ -1373,13 +1396,15 @@ defmodule SpaceTraders.Evidence do
   def valid_recovery_source?(%AuthoritativeObservation{source: nil}, attempt) do
     kind = get_in(attempt.prepared_evidence, ["selected_action", "kind"])
 
-    attempt.operation_id not in ~w(purchase-ship navigate-ship warp-ship orbit-ship dock-ship patch-ship-nav refuel-ship jump-ship transfer-cargo deliver-contract supply-construction) and
+    attempt.operation_id not in ~w(purchase-ship navigate-ship warp-ship orbit-ship dock-ship patch-ship-nav refuel-ship jump-ship transfer-cargo deliver-contract supply-construction create-chart create-ship-waypoint-scan) and
       kind not in [
         "navigate",
         "warp",
         "orbit",
         "dock",
         "set_flight_mode",
+        "chart",
+        "scan_waypoints",
         "refuel",
         "jump",
         "transfer",
@@ -1430,6 +1455,31 @@ defmodule SpaceTraders.Evidence do
     if SpaceTraders.Evidence.ShipObservation.validate(ship, symbol) == :ok,
       do: [SpaceTraders.SafetyFence.DependencyKey.ship(source.agent_id, symbol)],
       else: []
+  rescue
+    _ -> []
+  end
+
+  defp source_dependencies(
+         %Observation{operation_id: "get-waypoint", subject: "waypoint:" <> subject} = source
+       ) do
+    response = source.facts["response"]
+
+    with [system, symbol] <- String.split(subject, ":"),
+         %{
+           "system_symbol" => ^system,
+           "symbol" => ^symbol,
+           "chart" => %{
+             "waypoint_symbol" => ^symbol,
+             "submitted_by" => by,
+             "submitted_on" => submitted_on
+           }
+         } <- response,
+         true <- is_binary(by) and by != "",
+         {:ok, _, _} <- DateTime.from_iso8601(submitted_on) do
+      [SpaceTraders.SafetyFence.DependencyKey.waypoint(source.agent_id, symbol)]
+    else
+      _ -> []
+    end
   rescue
     _ -> []
   end

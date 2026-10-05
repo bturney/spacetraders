@@ -23,6 +23,345 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
     :ok
   end
 
+  test "scan recovery after restart keeps the cooldown's original retained source" do
+    {agent, ship, portfolio, commitment} = claimed_ship("SCAN-SOURCE")
+
+    {intent, attempt} =
+      selected_intelligence(agent, ship, portfolio, commitment, "scan_waypoints")
+
+    {:ok, attempt} = MutationAttempts.mark_sent_or_unknown(attempt)
+    expiration = DateTime.add(attempt.sent_or_unknown_at, 60) |> DateTime.to_iso8601()
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      assert conn.method == "GET"
+
+      Req.Test.json(conn, %{
+        "data" =>
+          ship_body(ship.symbol, %{
+            "cooldown" => %{
+              "shipSymbol" => ship.symbol,
+              "totalSeconds" => 60,
+              "remainingSeconds" => 60,
+              "expiration" => expiration
+            }
+          })
+      })
+    end)
+
+    {:ok, original} = SpaceTraders.Evidence.get_ship_binding(agent, ship.symbol)
+    {:ok, newer} = SpaceTraders.Evidence.get_ship_binding(agent, ship.symbol)
+    refute original.observation.id == newer.observation.id
+    ShipServer.stop(ship.symbol)
+
+    Req.Test.stub(SpaceTraders.API, fn _ -> flunk("recovery replaced retained cooldown facts") end)
+
+    {:ok, restored} = SpaceTraders.Evidence.retained_ship_binding(agent, original.observation.id)
+
+    _ =
+      Intents.reconcile(
+        agent.id,
+        ship.symbol,
+        SpaceTraders.Evidence.bound_ship(restored),
+        :boot,
+        intent.id
+      )
+
+    accepted = MutationAttempts.get!(attempt.id)
+    assert accepted.state == "accepted"
+    proof = List.last(accepted.outcomes).evidence["observations"] |> hd()
+    assert proof["source"]["id"] == original.observation.id
+    assert proof["observed_at"] == DateTime.to_iso8601(original.observation.observed_at)
+    assert %Intent{status: "waiting", in_flight_action: nil} = Repo.get!(Intent, intent.id)
+  end
+
+  test "chart proof reuses its exact Waypoint acquisition across identical replacement and restart" do
+    {agent, ship, portfolio, commitment} = claimed_ship("CHART-SOURCE")
+    {_intent, attempt} = selected_intelligence(agent, ship, portfolio, commitment, "chart")
+    {:ok, attempt} = MutationAttempts.mark_sent_or_unknown(attempt)
+    chart_time = DateTime.to_iso8601(attempt.sent_or_unknown_at)
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      assert conn.method == "GET"
+
+      Req.Test.json(conn, %{
+        "data" => %{
+          "symbol" => "X1-UX81-A1",
+          "systemSymbol" => "X1-UX81",
+          "type" => "PLANET",
+          "traits" => [],
+          "chart" => %{
+            "waypointSymbol" => "X1-UX81-A1",
+            "submittedBy" => agent.symbol,
+            "submittedOn" => chart_time
+          }
+        }
+      })
+    end)
+
+    {:ok, original} =
+      SpaceTraders.Evidence.get_waypoint(agent, "X1-UX81", "X1-UX81-A1", bind: true)
+
+    assert %SpaceTraders.Evidence.Binding{} = original
+    {:ok, newer} = SpaceTraders.Evidence.get_waypoint(agent, "X1-UX81", "X1-UX81-A1", bind: true)
+    refute original.observation.id == newer.observation.id
+    Req.Test.stub(SpaceTraders.API, fn _ -> flunk("binding restoration made a game read") end)
+
+    {:ok, restored} =
+      SpaceTraders.Evidence.retained_waypoint_binding(agent, original.observation.id)
+
+    assert {:ok, [proof]} =
+             SpaceTraders.Evidence.recovery_proof(
+               attempt,
+               :accepted,
+               "Chart is attributed to this Agent after dispatch",
+               [restored]
+             )
+
+    assert proof.source.id == original.observation.id
+    assert proof.observed_at == original.observation.observed_at
+
+    assert {:error, :authoritative_evidence_required} =
+             MutationAttempts.reconcile(attempt, :accepted, [%{proof | source: nil}])
+
+    assert {:ok, accepted} = MutationAttempts.reconcile(attempt, :accepted, [proof])
+    refute SpaceTraders.SafetyFence.active?(accepted)
+  end
+
+  test "coalesced chart recovery reads share one exact retained acquisition" do
+    {agent, _ship, _portfolio, _commitment} = claimed_ship("CHART-COALESCED")
+    parent = self()
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      send(parent, {:chart_read_started, self()})
+      receive do: (:release_chart_read -> :ok)
+
+      Req.Test.json(conn, %{
+        "data" => chart_waypoint(agent.symbol, DateTime.to_iso8601(DateTime.utc_now()))
+      })
+    end)
+
+    first =
+      Task.async(fn ->
+        SpaceTraders.Evidence.get_waypoint(agent, "X1-UX81", "X1-UX81-A1", bind: true)
+      end)
+
+    assert_receive {:chart_read_started, reader}, 5_000
+
+    second =
+      Task.async(fn ->
+        SpaceTraders.Evidence.get_waypoint(agent, "X1-UX81", "X1-UX81-A1", bind: true)
+      end)
+
+    wait_for_coalesced_read(second.pid)
+    send(reader, :release_chart_read)
+    {:ok, original} = Task.await(first)
+    {:ok, shared} = Task.await(second)
+    assert original.observation.id == shared.observation.id
+    assert original.observation.observed_at == shared.observation.observed_at
+    refute_receive {:chart_read_started, _}
+  end
+
+  test "prepared scan boot and live dispatch retain the same returned Intelligence exactly once" do
+    for trigger <- [:boot, :live] do
+      {agent, ship, portfolio, commitment} = claimed_ship("SCAN-PREPARED-#{trigger}")
+
+      {intent, attempt} =
+        selected_intelligence(
+          agent,
+          ship,
+          portfolio,
+          commitment,
+          "scan_waypoints",
+          trigger == :boot
+        )
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case conn.method do
+          "GET" ->
+            Req.Test.json(conn, %{"data" => ship_body(ship.symbol)})
+
+          "POST" ->
+            send(self(), {:scan_dispatch, trigger})
+
+            Req.Test.json(conn, %{
+              "data" => %{
+                "waypoints" => [
+                  %{
+                    "symbol" => "X1-UX81-A1",
+                    "systemSymbol" => "X1-UX81",
+                    "type" => "PLANET",
+                    "x" => 0,
+                    "y" => 0,
+                    "traits" => [],
+                    "orbitals" => []
+                  }
+                ]
+              }
+            })
+        end
+      end)
+
+      if trigger == :boot do
+        _ = Intents.reconcile(agent.id, ship.symbol, nil, :boot, intent.id)
+      else
+        {:ok, binding} = SpaceTraders.Evidence.get_ship_binding(agent, ship.symbol)
+
+        _ =
+          Intents.execute_action(agent, intent, SpaceTraders.Evidence.bound_ship(binding), %{
+            "kind" => "scan_waypoints",
+            "waypoint" => intent.target_waypoint
+          })
+      end
+
+      assert %Intent{status: "completed", in_flight_action: nil} = Repo.get!(Intent, intent.id)
+      [completed_attempt] = MutationAttempts.list_for_agent(agent)
+      assert completed_attempt.state == "succeeded"
+      if attempt, do: assert(completed_attempt.id == attempt.id)
+      assert_receive {:scan_dispatch, ^trigger}
+      _ = Intents.reconcile(agent.id, ship.symbol, nil, :boot, intent.id)
+      refute_receive {:scan_dispatch, ^trigger}
+    end
+  end
+
+  test "durably successful scan reentry does not require its expired cooldown or replay" do
+    {agent, ship, portfolio, commitment} = claimed_ship("SCAN-COMMITTED")
+
+    {intent, attempt} =
+      selected_intelligence(agent, ship, portfolio, commitment, "scan_waypoints")
+
+    {:ok, attempt} = MutationAttempts.mark_sent_or_unknown(attempt)
+    {:ok, _} = MutationAttempts.record_outcome(attempt, :succeeded, %{status: 200})
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      assert conn.method == "GET"
+      Req.Test.json(conn, %{"data" => ship_body(ship.symbol)})
+    end)
+
+    _ = Intents.reconcile(agent.id, ship.symbol, nil, :boot, intent.id)
+
+    assert %Intent{
+             status: "blocked",
+             in_flight_action: nil,
+             parameters: %{"scan_attempted" => true}
+           } = Repo.get!(Intent, intent.id)
+
+    assert MutationAttempts.get!(attempt.id).state == "succeeded"
+  end
+
+  test "chart callback lacking required provenance keeps its selection without a second chart" do
+    {agent, ship, portfolio, commitment} = claimed_ship("CHART-INCOMPLETE")
+    {intent, _} = selected_intelligence(agent, ship, portfolio, commitment, "chart", false)
+    {:ok, binding} = retained_scan_ship(agent, ship)
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      assert conn.method == "POST"
+      send(self(), :chart_dispatch)
+
+      Req.Test.json(conn, %{
+        "data" => %{
+          "chart" => %{"waypointSymbol" => intent.target_waypoint},
+          "waypoint" => %{
+            "symbol" => intent.target_waypoint,
+            "systemSymbol" => "X1-UX81",
+            "type" => "PLANET",
+            "traits" => []
+          }
+        }
+      })
+    end)
+
+    _ =
+      Intents.execute_action(agent, intent, SpaceTraders.Evidence.bound_ship(binding), %{
+        "kind" => "chart",
+        "waypoint" => intent.target_waypoint
+      })
+
+    assert %Intent{status: "blocked", in_flight_action: %{"kind" => "chart"}} =
+             Repo.get!(Intent, intent.id)
+
+    assert_receive :chart_dispatch
+    refute_receive :chart_dispatch
+  end
+
+  test "failed chart evidence retention preserves its attempt and fence even with satisfied Intelligence" do
+    {agent, ship, portfolio, commitment} = claimed_ship("CHART-RETENTION")
+    {intent, attempt} = selected_intelligence(agent, ship, portfolio, commitment, "chart")
+    {:ok, attempt} = MutationAttempts.mark_sent_or_unknown(attempt)
+    body = chart_waypoint(agent.symbol, DateTime.to_iso8601(attempt.sent_or_unknown_at))
+
+    {:ok, _} =
+      SpaceTraders.Intelligence.observe_waypoint(agent, Model.Waypoint.from_json(body),
+        source: "get_waypoint",
+        observing_ship_symbol: ship.symbol
+      )
+
+    Repo.query!(
+      "ALTER TABLE authoritative_observations ADD CONSTRAINT chart_retention_gap CHECK (operation_id <> 'get-waypoint')"
+    )
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      assert conn.method == "GET"
+
+      data =
+        if conn.request_path == "/v2/my/ships/#{ship.symbol}",
+          do: ship_body(ship.symbol),
+          else: body
+
+      Req.Test.json(conn, %{"data" => data})
+    end)
+
+    _ = Intents.reconcile(agent.id, ship.symbol, nil, :boot, intent.id)
+
+    assert %Intent{
+             status: "blocked",
+             mutation_attempt_id: id,
+             in_flight_action: %{"kind" => "chart"}
+           } = Repo.get!(Intent, intent.id)
+
+    assert id == attempt.id
+    assert MutationAttempts.get!(attempt.id).state == "sent_or_unknown"
+    assert SpaceTraders.SafetyFence.active?(MutationAttempts.get!(attempt.id))
+  end
+
+  for chart_fact <- [:other_agent, :before_dispatch, :future, :missing] do
+    test "chart recovery rejects #{chart_fact} provenance despite a fresh retained acquisition" do
+      {agent, ship, portfolio, commitment} = claimed_ship("CHART-REJECT-#{unquote(chart_fact)}")
+      {intent, attempt} = selected_intelligence(agent, ship, portfolio, commitment, "chart")
+      {:ok, attempt} = MutationAttempts.mark_sent_or_unknown(attempt)
+
+      {by, time} =
+        case unquote(chart_fact) do
+          :other_agent -> {"OTHER-AGENT", attempt.sent_or_unknown_at}
+          :before_dispatch -> {agent.symbol, DateTime.add(attempt.sent_or_unknown_at, -60)}
+          :future -> {agent.symbol, DateTime.add(attempt.sent_or_unknown_at, 60)}
+          :missing -> {nil, attempt.sent_or_unknown_at}
+        end
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        assert conn.method == "GET"
+
+        data =
+          if conn.request_path == "/v2/my/ships/#{ship.symbol}",
+            do: ship_body(ship.symbol),
+            else: chart_waypoint(by, DateTime.to_iso8601(time))
+
+        Req.Test.json(conn, %{"data" => data})
+      end)
+
+      _ = Intents.reconcile(agent.id, ship.symbol, nil, :boot, intent.id)
+
+      assert %Intent{
+               status: "blocked",
+               mutation_attempt_id: id,
+               in_flight_action: %{"kind" => "chart"}
+             } = Repo.get!(Intent, intent.id)
+
+      assert id == attempt.id
+      assert MutationAttempts.get!(attempt.id).state == "sent_or_unknown"
+      assert SpaceTraders.SafetyFence.active?(MutationAttempts.get!(attempt.id))
+    end
+  end
+
   test "Contract recovery covers only retained Cargo and recipient facts with exact lineage" do
     {agent, ship, _portfolio, _commitment} = claimed_ship("DELIVERY-SOURCE")
 
@@ -1746,6 +2085,74 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
       })
 
     {intent, attempt}
+  end
+
+  defp selected_intelligence(agent, ship, portfolio, commitment, kind, prepare? \\ true) do
+    intent =
+      Repo.insert!(%Intent{
+        ship_id: ship.id,
+        caller: "commitment",
+        fleet_commitment_id: commitment.id,
+        fleet_commitment_portfolio_id: portfolio.id,
+        fleet_commitment_portfolio_version: portfolio.version,
+        type: "acquire_intelligence",
+        target_waypoint: "X1-UX81-A1",
+        parameters: %{
+          "system" => "X1-UX81",
+          "subject_type" => "waypoint",
+          "required_facts" => [if(kind == "chart", do: "chart", else: "traits")],
+          "freshness_seconds" => 300
+        }
+      })
+
+    if prepare? do
+      {:ok, %{intent: selected, attempt: attempt}} =
+        SpaceTraders.Fleet.Intents.RecordedAction.prepare(agent, intent, %{
+          "kind" => kind,
+          "waypoint" => intent.target_waypoint
+        })
+
+      {selected, attempt}
+    else
+      {intent, nil}
+    end
+  end
+
+  defp retained_scan_ship(agent, ship) do
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      Req.Test.json(conn, %{"data" => ship_body(ship.symbol, %{"nav" => nav_body("IN_ORBIT")})})
+    end)
+
+    SpaceTraders.Evidence.get_ship_binding(agent, ship.symbol)
+  end
+
+  defp chart_waypoint(submitted_by, submitted_on) do
+    %{
+      "symbol" => "X1-UX81-A1",
+      "systemSymbol" => "X1-UX81",
+      "type" => "PLANET",
+      "traits" => [],
+      "chart" => %{
+        "waypointSymbol" => "X1-UX81-A1",
+        "submittedBy" => submitted_by,
+        "submittedOn" => submitted_on
+      }
+    }
+  end
+
+  # Synchronize the two callers before releasing transport; source identity and
+  # time are asserted only through the public Evidence binding result.
+  defp wait_for_coalesced_read(pid) do
+    pending = :sys.get_state(SpaceTraders.Evidence.ReadCoordinator).pending
+
+    if Enum.any?(pending, fn {_key, entry} -> pid in entry.waiters end) do
+      :ok
+    else
+      receive do
+      after
+        1 -> wait_for_coalesced_read(pid)
+      end
+    end
   end
 
   defp retained_ship_proof(agent, ship, attempt, outcome, basis) do

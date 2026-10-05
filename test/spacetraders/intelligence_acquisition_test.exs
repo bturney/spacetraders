@@ -1974,7 +1974,6 @@ defmodule SpaceTraders.IntelligenceAcquisitionTest do
 
     chart_time =
       attempt.sent_or_unknown_at
-      |> DateTime.add(1, :second)
       |> DateTime.to_iso8601()
 
     ship_path = "/v2/my/ships/#{ship.symbol}"
