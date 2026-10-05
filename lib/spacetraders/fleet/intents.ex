@@ -1183,6 +1183,10 @@ defmodule SpaceTraders.Fleet.Intents do
        ),
        do: arrived_at_target?(live_ship, waypoint) or in_transit_to?(live_ship, waypoint)
 
+  defp prerequisite_action_reconciled?(%{"kind" => kind} = action, live_ship)
+       when kind in ["buy", "sell"],
+       do: market_cargo_delta?(action, live_ship.cargo, action["units"])
+
   defp prerequisite_action_reconciled?(_action, _live_ship), do: false
 
   defp in_transit_to?(
@@ -1508,8 +1512,7 @@ defmodule SpaceTraders.Fleet.Intents do
         reconcile_deliver_cargo_intent(agent, intent, live_ship, action)
 
       action when is_map(action) ->
-        # Ship cargo alone cannot correlate a Market sale to this command.
-        block_cargo_intent(intent, {:ambiguous_operation_evidence, type})
+        progress_market_cargo(agent, intent, live_ship, action)
 
       _ ->
         advance_cargo_intent(agent, intent, live_ship)
@@ -2683,20 +2686,17 @@ defmodule SpaceTraders.Fleet.Intents do
 
   defp dispatch_market_cargo_intent_with_units(agent, intent, live_ship) do
     with {:ok, good} <- market_good_for_intent(agent, live_ship, intent),
-         {:ok, units, _credits} <- executable_cargo_units(intent, live_ship, good, agent) do
+         {:ok, units, credits} <- executable_cargo_units(intent, live_ship, good, agent) do
       action = %{
         "kind" => intent.type,
         "trade_symbol" => intent.parameters["trade_symbol"],
         "units" => units,
         "listing_price" => cargo_price(intent.type, good),
-        "cargo_before" => Fleet.item_units(live_ship.cargo, intent.parameters["trade_symbol"])
+        "cargo_before" => Fleet.item_units(live_ship.cargo, intent.parameters["trade_symbol"]),
+        "credits_before" => credits
       }
 
-      with {:ok, %{intent: intent}} <- prepare_recorded_action(agent, intent, action) do
-        execute_cargo_intent(agent, intent, live_ship, units, good)
-      else
-        {:error, reason} -> block_preparation_refusal(intent, reason)
-      end
+      execute_action(agent, intent, live_ship, action)
     else
       {:error, :listing_missing_trade_good} ->
         block_cargo_intent(
@@ -2768,7 +2768,7 @@ defmodule SpaceTraders.Fleet.Intents do
          %Intent{type: "sell", parameters: parameters},
          live_ship,
          good,
-         _agent
+         agent
        ) do
     price = good.sell_price
     min_price = parameters["min_price"]
@@ -2794,7 +2794,9 @@ defmodule SpaceTraders.Fleet.Intents do
             {:error, {:sale_value_constraint, price * units, parameters["min_total"]}}
 
           true ->
-            {:ok, units, nil}
+            with {:ok, overview} <- Agent.agent_overview(agent) do
+              {:ok, units, overview.credits}
+            end
         end
     end
   end
@@ -2818,26 +2820,6 @@ defmodule SpaceTraders.Fleet.Intents do
   def affordable_cargo_units(_credits, 0), do: :infinity
   @doc false
   def affordable_cargo_units(credits, price), do: div(credits, price)
-
-  defp execute_cargo_intent(agent, %Intent{type: "buy"} = intent, _live_ship, units, good) do
-    case Agent.handle_game_result(agent, SpaceTraders.API.dispatch_recorded(intent)) do
-      {:ok, result} ->
-        complete_market_cargo_intent(agent, intent, units, good.purchase_price, result)
-
-      {:error, reason} ->
-        block_cargo_intent(intent, reason)
-    end
-  end
-
-  defp execute_cargo_intent(agent, %Intent{type: "sell"} = intent, _live_ship, units, good) do
-    case Agent.handle_game_result(agent, SpaceTraders.API.dispatch_recorded(intent)) do
-      {:ok, result} ->
-        complete_market_cargo_intent(agent, intent, units, good.sell_price, result)
-
-      {:error, reason} ->
-        block_cargo_intent(intent, reason)
-    end
-  end
 
   defp cargo_price("buy", good), do: good.purchase_price
   defp cargo_price("sell", good), do: good.sell_price
@@ -2948,6 +2930,7 @@ defmodule SpaceTraders.Fleet.Intents do
 
   defp unified_action?(%{"kind" => "transfer"}), do: true
   defp unified_action?(%{"kind" => "deliver"}), do: true
+  defp unified_action?(%{"kind" => kind}) when kind in ["buy", "sell"], do: true
   defp unified_action?(action), do: navigation_action?(action)
 
   defp send_selected_action(agent, selected, live_ship) do
@@ -3086,6 +3069,12 @@ defmodule SpaceTraders.Fleet.Intents do
 
   defp market_cargo_evidence?(%Intent{type: type, in_flight_action: action}, cargo, units)
        when type in ["buy", "sell"] and is_map(action) and is_map(cargo) do
+    market_cargo_delta?(action, cargo, units)
+  end
+
+  defp market_cargo_evidence?(_intent, _cargo, _units), do: false
+
+  defp market_cargo_delta?(%{"kind" => type} = action, cargo, units) do
     with cargo_before when is_integer(cargo_before) <- action["cargo_before"],
          trade_symbol when is_binary(trade_symbol) <- Map.get(action, "trade_symbol"),
          cargo_now when is_integer(cargo_now) <- Fleet.item_units(cargo, trade_symbol),
@@ -3097,7 +3086,31 @@ defmodule SpaceTraders.Fleet.Intents do
     end
   end
 
-  defp market_cargo_evidence?(_intent, _cargo, _units), do: false
+  # Cargo attribution and Market eligibility belong to Ship Execution; shared
+  # progression owns the attempt verdict, retry admission and exact proof.
+  defp progress_market_cargo(agent, intent, ship, action) do
+    cond do
+      market_cargo_evidence?(intent, ship.cargo, action["units"]) ->
+        with :ok <-
+               reconcile_accepted_attempt(
+                 agent,
+                 intent,
+                 ship,
+                 "Selected Market Cargo delta and attributable Agent credits prove the effect"
+               ) do
+          # Recovery proves quantity, not a transaction price or trade margin.
+          if intent.type == "buy" and action["units"] != intent.parameters["units"],
+            do: block_cargo_intent(intent, :ambiguous_operation_evidence),
+            else: complete_cargo_intent(agent, intent, action["units"], nil, %{})
+        end
+
+      selected_effect_confirmed?(intent) ->
+        block_cargo_intent(intent, {:ambiguous_operation_evidence, action["kind"]})
+
+      true ->
+        reconcile_absent_and_retry(agent, intent, ship, action)
+    end
+  end
 
   defp validate_market_transaction(intent, transaction, units) do
     expected_type = if intent.type == "buy", do: "PURCHASE", else: "SELL"
@@ -4786,6 +4799,20 @@ defmodule SpaceTraders.Fleet.Intents do
     end
   end
 
+  defp accepted_observations(agent, live_ship, attempt, %{"kind" => kind} = action, basis)
+       when kind in ["buy", "sell"] do
+    with before when is_integer(before) <- action["credits_before"],
+         {:ok, credits} <-
+           Agent.handle_game_result(agent, Evidence.recovery_agent_binding(agent, attempt)),
+         after_credits when is_integer(after_credits) <- credits.value.credits,
+         true <- after_credits >= 0 and market_credit_effect?(kind, before, after_credits, action) do
+      composite_recovery_proof(live_ship, credits, attempt, :accepted, basis)
+    else
+      {:error, reason} -> {:error, reason}
+      _ -> {:error, :market_credit_outcome_unresolved}
+    end
+  end
+
   defp accepted_observations(agent, live_ship, attempt, %{"kind" => kind}, basis)
        when kind in ["refuel", "jump"] do
     with {:ok, credits} <-
@@ -4797,6 +4824,12 @@ defmodule SpaceTraders.Fleet.Intents do
   defp accepted_observations(agent, live_ship, attempt, _action, basis) do
     ship_recovery_proof(agent, live_ship, attempt, :accepted, basis)
   end
+
+  defp market_credit_effect?("buy", before, after_credits, action),
+    do: after_credits < before or (action["listing_price"] == 0 and after_credits == before)
+
+  defp market_credit_effect?("sell", before, after_credits, action),
+    do: after_credits > before or (action["listing_price"] == 0 and after_credits == before)
 
   defp reconcile_absent_and_retry(agent, intent, live_ship, action) do
     case MutationAttempts.unresolved_for_intent(intent) do
@@ -4814,7 +4847,9 @@ defmodule SpaceTraders.Fleet.Intents do
   end
 
   defp retry_absent_action(agent, intent, live_ship, action, absent, opts \\ []) do
-    with {:ok, %{intent: selected, result: result}} <-
+    with :ok <- RecordedAction.retry_authority(agent, intent, absent),
+         :ok <- selected_action_admissible?(agent, intent, live_ship, action),
+         {:ok, %{intent: selected, result: result}} <-
            retry_under_current_claim(agent, intent, live_ship, action, absent, opts),
          {:ok, result} <- Agent.handle_game_result(agent, result) do
       # Carry the admitted retry's identity; never substitute a newer callback owner.
@@ -4830,6 +4865,23 @@ defmodule SpaceTraders.Fleet.Intents do
         block_intents(intent, {:awaiting_reconciliation, reason})
     end
   end
+
+  # Eligibility remains a capability judgment, including current Market and
+  # spending checks. An observed listing is not a worst-case expenditure bound.
+  defp selected_action_admissible?(agent, intent, ship, %{"kind" => kind, "units" => units})
+       when kind in ["buy", "sell"] and kind == intent.type do
+    with true <-
+           ship.nav.status == "DOCKED" and ship.nav.waypoint_symbol == intent.target_waypoint,
+         {:ok, good} <- market_good_for_intent(agent, ship, intent),
+         {:ok, ^units, _} <- executable_cargo_units(intent, ship, good, agent) do
+      :ok
+    else
+      {:error, reason} -> {:error, reason}
+      _ -> {:error, :market_selection_no_longer_admissible}
+    end
+  end
+
+  defp selected_action_admissible?(_agent, _intent, _ship, _action), do: :ok
 
   defp retire_stopped_absence(intent, absent) do
     with_current_intent(intent, fn current ->
@@ -4900,6 +4952,27 @@ defmodule SpaceTraders.Fleet.Intents do
     end
   end
 
+  defp absence_observations(agent, live_ship, attempt, %{"kind" => kind} = action)
+       when kind in ["buy", "sell"] do
+    with before when is_integer(before) <- action["credits_before"],
+         cargo_before when is_integer(cargo_before) <- action["cargo_before"],
+         true <- Fleet.item_units(live_ship.cargo, action["trade_symbol"]) == cargo_before,
+         {:ok, credits} <-
+           Agent.handle_game_result(agent, Evidence.recovery_agent_binding(agent, attempt)),
+         true <- credits.value.credits == before do
+      composite_recovery_proof(
+        live_ship,
+        credits,
+        attempt,
+        :absent,
+        "Selected Market Cargo and Agent credits are unchanged from pre-dispatch"
+      )
+    else
+      {:error, reason} -> {:error, reason}
+      _ -> {:error, :market_outcome_unresolved}
+    end
+  end
+
   defp absence_observations(agent, live_ship, attempt, action) do
     ship_recovery_proof(
       agent,
@@ -4961,6 +5034,26 @@ defmodule SpaceTraders.Fleet.Intents do
       )
     )
   end
+
+  defp continue_selected_response(
+         agent,
+         %Intent{type: type} = intent,
+         _ship,
+         %{"kind" => kind} = action,
+         response
+       )
+       when kind in ["buy", "sell"] and kind == type,
+       do:
+         complete_market_cargo_intent(
+           agent,
+           intent,
+           action["units"],
+           action["listing_price"],
+           response
+         )
+
+  defp continue_selected_response(agent, intent, live_ship, %{"kind" => "buy"}, response),
+    do: reconcile_refit_buy(agent, intent, live_ship, response)
 
   defp continue_selected_response(agent, intent, live_ship, %{"kind" => kind}, response)
        when kind in ["extract", "siphon", "refine", "survey", "jettison"],
