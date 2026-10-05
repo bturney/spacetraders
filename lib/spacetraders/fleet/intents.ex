@@ -21,6 +21,7 @@ defmodule SpaceTraders.Fleet.Intents do
   alias SpaceTraders.Fleet
   alias SpaceTraders.FleetAllocation
   alias SpaceTraders.FleetAllocation.{Commitment, Portfolio}
+  alias SpaceTraders.FleetStrategy.Revision
   alias SpaceTraders.Fleet.ShipServer
   alias SpaceTraders.Repo
   alias SpaceTraders.SafetyFence.DependencyKey
@@ -1249,20 +1250,25 @@ defmodule SpaceTraders.Fleet.Intents do
 
         %{state: "absent", retry_authorized: true} = absent
         when is_map(intent.in_flight_action) ->
-          if prerequisite_action_reconciled?(intent.in_flight_action, live_ship) do
-            with {:ok, observations} <-
-                   accepted_observations(
-                     agent,
-                     live_ship,
-                     absent,
-                     intent.in_flight_action,
-                     "Fresh evidence satisfies the selected outcome before retry"
-                   ),
-                 {:ok, _} <- MutationAttempts.withdraw_retry(absent, observations) do
+          cond do
+            intent.in_flight_action["kind"] == "transfer" ->
               do_advance_intents(agent, intent, live_ship)
-            end
-          else
-            retry_absent_action(agent, intent, live_ship, intent.in_flight_action, absent)
+
+            prerequisite_action_reconciled?(intent.in_flight_action, live_ship) ->
+              with {:ok, observations} <-
+                     accepted_observations(
+                       agent,
+                       live_ship,
+                       absent,
+                       intent.in_flight_action,
+                       "Fresh evidence satisfies the selected outcome before retry"
+                     ),
+                   {:ok, _} <- MutationAttempts.withdraw_retry(absent, observations) do
+                do_advance_intents(agent, intent, live_ship)
+              end
+
+            true ->
+              retry_absent_action(agent, intent, live_ship, intent.in_flight_action, absent)
           end
 
         _ ->
@@ -1287,8 +1293,7 @@ defmodule SpaceTraders.Fleet.Intents do
         do_advance_intents(agent, intent, live_ship)
       end
     else
-      if navigation_action?(intent.in_flight_action) or
-           intent.in_flight_action["kind"] == "deliver" do
+      if unified_action?(intent.in_flight_action) do
         send_selected_action(agent, intent, live_ship)
       else
         case Agent.handle_game_result(agent, SpaceTraders.API.dispatch_recorded(intent)) do
@@ -1461,7 +1466,7 @@ defmodule SpaceTraders.Fleet.Intents do
   defp do_advance_intents(agent, %Intent{type: "transfer"} = intent, live_source) do
     case intent.in_flight_action do
       %{"kind" => "transfer"} = action ->
-        reconcile_transfer(agent, intent, live_source, action)
+        progress_transfer(agent, intent, live_source, action)
 
       nil ->
         dispatch_transfer(agent, intent, live_source)
@@ -1545,90 +1550,191 @@ defmodule SpaceTraders.Fleet.Intents do
          true <-
            portfolio_id == intent.fleet_commitment_portfolio_id and
              version == intent.fleet_commitment_portfolio_version,
-         {:ok, target} <- fresh_ship(agent, target_symbol, nil),
+         {:ok, source_binding} <- Evidence.recovery_ship_binding(agent, source.symbol, source),
+         source <- Evidence.bound_ship(source_binding),
+         {:ok, target_binding} <- Evidence.get_ship_binding(agent, target_symbol),
+         target <- target_binding.value,
          true <-
            source.nav.status != "IN_TRANSIT" and target.nav.status != "IN_TRANSIT" and
              source.nav.waypoint_symbol == target.nav.waypoint_symbol,
          available <- Fleet.item_units(source.cargo, symbol),
          free <- target.cargo.capacity - target.cargo.units,
          true <- available > 0 and free > 0,
-         units <- min(intent.parameters["units"], min(available, free)),
-         {:ok, %{intent: intent}} <-
-           prepare_recorded_action(agent, intent, %{
-             "kind" => "transfer",
-             "trade_symbol" => symbol,
-             "target_ship" => target_symbol,
-             "units" => units,
-             "source_before" => available,
-             "target_before" => Fleet.item_units(target.cargo, symbol)
-           }) do
-      case Agent.handle_game_result(
-             agent,
-             SpaceTraders.API.dispatch_recorded(intent)
-           ) do
-        {:ok, %{cargo: cargo}} ->
-          if Fleet.item_units(cargo, symbol) == available - units do
-            reconcile_transfer(agent, intent, %{source | cargo: cargo}, intent.in_flight_action)
-          else
-            block_cargo_intent(intent, {:ambiguous_operation_evidence, "transfer"})
-          end
-
-        {:error, %SpaceTraders.API.GameplayError{} = reason} ->
-          block_protocol_backpressure(intent, reason)
-
-        {:error, reason} ->
-          block_cargo_intent(intent, reason)
-      end
+         units <- min(intent.parameters["units"], min(available, free)) do
+      execute_action(agent, intent, source, %{
+        "kind" => "transfer",
+        "trade_symbol" => symbol,
+        "target_ship" => target_symbol,
+        "units" => units,
+        "source_before" => available,
+        "target_before" => Fleet.item_units(target.cargo, symbol),
+        "source_observation_id" => source_binding.observation.id,
+        "target_observation_id" => target_binding.observation.id
+      })
     else
       false -> mark_infeasible(intent, :transfer_prerequisite_unavailable)
       {:error, reason} -> block_cargo_intent(intent, reason)
     end
   end
 
-  defp reconcile_transfer(agent, intent, source, action) do
-    symbol = action["trade_symbol"]
-
-    with {:ok, fresh_source} <- fresh_ship(agent, source.symbol, nil),
-         {:ok, target} <- fresh_ship(agent, action["target_ship"], nil),
-         true <-
-           Fleet.item_units(fresh_source.cargo, symbol) ==
-             action["source_before"] - action["units"] and
-             Fleet.item_units(target.cargo, symbol) == action["target_before"] + action["units"],
-         :ok <- settle_transfer_attempt(agent, intent, fresh_source, target) do
-      complete_cargo_intent(agent, intent, action["units"], nil, %{cargo: fresh_source.cargo})
-    else
-      _ ->
-        case MutationAttempts.latest_for_intent(intent) do
-          %{state: "rejected"} -> mark_infeasible(intent, :transfer_rejected)
-          _ -> block_cargo_intent(intent, {:ambiguous_operation_evidence, "transfer"})
-        end
-    end
-  end
-
-  defp settle_transfer_attempt(agent, intent, source, target) do
-    case MutationAttempts.unresolved_for_intent(intent) do
-      nil ->
-        :ok
+  # Transfer judgment is resource-specific; exact proof and retry are owned by
+  # the selected root progression, including live responses and boot re-entry.
+  defp progress_transfer(agent, intent, supplied, action) do
+    case MutationAttempts.latest_for_intent(intent) do
+      %{state: "accepted"} ->
+        complete_cargo_intent(agent, intent, action["units"], nil, %{})
 
       attempt ->
-        observations =
-          for ship <- [source, target] do
-            reconciliation_observation(
-              "get-my-ship",
-              [DependencyKey.ship(agent.id, ship.symbol)],
-              attempt,
-              :accepted,
-              "Both Ships' Cargo proves the transfer",
-              %{cargo: cargo_evidence(ship.cargo)}
-            )
-          end
-
-        case MutationAttempts.reconcile(attempt, :accepted, observations) do
-          {:ok, _} -> :ok
-          error -> error
-        end
+        do_progress_transfer(agent, intent, supplied, action, attempt)
     end
   end
+
+  defp do_progress_transfer(agent, intent, supplied, action, attempt) do
+    since = attempt && (attempt.sent_or_unknown_at || attempt.prepared_at)
+
+    with {:ok, source} <-
+           Evidence.recovery_ship_binding(agent, ship_symbol(intent), supplied, since),
+         {:ok, target} <- Evidence.recovery_ship_binding(agent, action["target_ship"], nil, since) do
+      live_source = Evidence.bound_ship(source)
+      outcome = transfer_outcome(action, source.value, target.value)
+
+      case {attempt, outcome} do
+        {%{state: state}, :accepted} when state in ["succeeded", "not_sent"] ->
+          case Evidence.recovery_proof(attempt, :accepted, transfer_basis(:accepted), [
+                 source,
+                 target
+               ]) do
+            {:ok, _} ->
+              complete_cargo_intent(agent, intent, action["units"], nil, %{
+                cargo: source.value.cargo
+              })
+
+            gap ->
+              block_cargo_intent(intent, {:awaiting_reconciliation, gap})
+          end
+
+        {%{state: state}, outcome}
+        when state in ["sent_or_unknown", "ambiguous", "bounded_unknown"] and
+               outcome in [:accepted, :absent] ->
+          with {:ok, proof} <-
+                 Evidence.recovery_proof(attempt, outcome, transfer_basis(outcome), [
+                   source,
+                   target
+                 ]),
+               {:ok, resolved} <- MutationAttempts.reconcile(attempt, outcome, proof) do
+            case outcome do
+              :accepted ->
+                complete_cargo_intent(agent, intent, action["units"], nil, %{
+                  cargo: source.value.cargo
+                })
+
+              :absent ->
+                retry_absent_action(agent, intent, live_source, action, resolved,
+                  transfer_bindings: [source, target]
+                )
+            end
+          else
+            gap -> block_cargo_intent(intent, {:awaiting_reconciliation, gap})
+          end
+
+        {%{state: "absent", retry_authorized: true}, :absent} ->
+          with {:ok, _} <-
+                 Evidence.recovery_proof(attempt, :absent, transfer_basis(:absent), [
+                   source,
+                   target
+                 ]) do
+            retry_absent_action(agent, intent, live_source, action, attempt,
+              transfer_bindings: [source, target]
+            )
+          else
+            gap -> block_cargo_intent(intent, {:awaiting_reconciliation, gap})
+          end
+
+        {%{state: "absent", retry_authorized: true}, :accepted} ->
+          with {:ok, proof} <-
+                 Evidence.recovery_proof(attempt, :accepted, transfer_basis(:accepted), [
+                   source,
+                   target
+                 ]),
+               {:ok, _} <- MutationAttempts.withdraw_retry(attempt, proof) do
+            complete_cargo_intent(agent, intent, action["units"], nil, %{
+              cargo: source.value.cargo
+            })
+          else
+            gap -> block_cargo_intent(intent, {:awaiting_reconciliation, gap})
+          end
+
+        {%{state: "rejected"}, _} ->
+          mark_infeasible(intent, :transfer_rejected)
+
+        {%{state: state}, :unknown} when state in ["sent_or_unknown", "ambiguous"] ->
+          with {:ok, accounting} <- transfer_constraint_accounting(attempt, action),
+               {:ok, proof} <-
+                 Evidence.recovery_proof(
+                   attempt,
+                   :bounded_unknown,
+                   "The two Cargo observations cannot attribute the selected transfer",
+                   [source, target]
+                 ),
+               {:ok, _} <-
+                 MutationAttempts.reconcile(attempt, :bounded_unknown, proof,
+                   constraint_accounting: accounting
+                 ) do
+            block_cargo_intent(intent, {:ambiguous_operation_evidence, "transfer"})
+          else
+            _ -> block_cargo_intent(intent, {:ambiguous_operation_evidence, "transfer"})
+          end
+
+        _ ->
+          block_cargo_intent(intent, {:ambiguous_operation_evidence, "transfer"})
+      end
+    else
+      gap -> block_cargo_intent(intent, {:awaiting_reconciliation, gap})
+    end
+  end
+
+  defp transfer_outcome(action, source, target) do
+    source_units = Fleet.item_units(source.cargo, action["trade_symbol"])
+    target_units = Fleet.item_units(target.cargo, action["trade_symbol"])
+
+    cond do
+      source_units == action["source_before"] - action["units"] and
+          target_units == action["target_before"] + action["units"] ->
+        :accepted
+
+      source_units == action["source_before"] and target_units == action["target_before"] ->
+        :absent
+
+      true ->
+        :unknown
+    end
+  end
+
+  defp transfer_basis(:accepted), do: "Both Ships' Cargo proves the selected transfer"
+
+  defp transfer_basis(:absent),
+    do: "Both Ships' Cargo is unchanged from the selected transfer preflight"
+
+  # The endpoint can move at most the selected quantity and spends no credits.
+  # Do not assert satisfaction of an active Hard Constraint from Cargo alone.
+  defp transfer_constraint_accounting(attempt, action) do
+    case attempt.strategy_revision_id && Repo.get(Revision, attempt.strategy_revision_id) do
+      %Revision{document: document} ->
+        if Map.get(document, "hard_constraints", []) == [],
+          do:
+            {:ok,
+             Evidence.constraint_accounting(
+               "At most #{action["units"]} #{action["trade_symbol"]} moves between the two selected Ships; no credits are spent",
+               []
+             )},
+          else: {:error, :hard_constraint_accounting_required}
+
+      _ ->
+        {:error, :hard_constraint_accounting_required}
+    end
+  end
+
+  defp ship_symbol(intent), do: Repo.get!(Ship, intent.ship_id).symbol
 
   defp advance_navigation(agent, intent, live_ship) do
     cond do
@@ -2922,9 +3028,9 @@ defmodule SpaceTraders.Fleet.Intents do
     end
   end
 
-  @doc "Executes a selected outcome through the same progression used on re-entry."
+  @doc "Executes an adopted selected outcome through the same progression used on re-entry."
   def execute_action(agent, intent, live_ship, action) do
-    with true <- navigation_action?(action) or action["kind"] == "deliver",
+    with true <- unified_action?(action),
          {:ok, %{intent: selected}} <- prepare_recorded_action(agent, intent, action) do
       send_selected_action(agent, selected, live_ship)
     else
@@ -2934,9 +3040,13 @@ defmodule SpaceTraders.Fleet.Intents do
   end
 
   defp navigation_action?(%{"kind" => kind}),
-    do: kind in ["navigate", "warp", "orbit", "dock", "set_flight_mode"]
+    do: kind in ["navigate", "warp", "orbit", "dock", "set_flight_mode", "refuel", "jump"]
 
   defp navigation_action?(_), do: false
+
+  defp unified_action?(%{"kind" => "transfer"}), do: true
+  defp unified_action?(%{"kind" => "deliver"}), do: true
+  defp unified_action?(action), do: navigation_action?(action)
 
   defp send_selected_action(agent, selected, live_ship) do
     case Agent.handle_game_result(agent, SpaceTraders.API.dispatch_recorded(selected)) do
@@ -2944,8 +3054,15 @@ defmodule SpaceTraders.Fleet.Intents do
         continue_selected_response(agent, selected, live_ship, selected.in_flight_action, result)
 
       {:error, %SpaceTraders.API.GameplayError{type: :insufficient_fuel} = reason} ->
-        if selected.in_flight_action["kind"] == "navigate",
-          do: recover_insufficient_fuel(agent, selected, live_ship, reason),
+        case selected.in_flight_action["kind"] do
+          "navigate" -> recover_insufficient_fuel(agent, selected, live_ship, reason)
+          "jump" -> clear_jump_claim_and_block(selected, reason)
+          _ -> block_intents(selected, reason)
+        end
+
+      {:error, %SpaceTraders.API.GameplayError{} = reason} ->
+        if selected.in_flight_action["kind"] == "jump",
+          do: clear_jump_claim_and_block(selected, reason),
           else: block_intents(selected, reason)
 
       {:error, reason} ->
@@ -4199,41 +4316,12 @@ defmodule SpaceTraders.Fleet.Intents do
   defp refuel_for_navigate(agent, intent, live_ship) do
     with {:ok, market} <- fresh_refuel_market(agent, live_ship),
          true <- market_sells_fuel?(market) do
-      with {:ok, %{intent: intent}} <-
-             prepare_recorded_action(agent, intent, %{
-               "kind" => "refuel",
-               "waypoint" => live_ship.nav.waypoint_symbol,
-               "fuel_before" => live_ship.fuel.current,
-               "expected" => %{"fuel_full" => true}
-             }) do
-        case Agent.handle_game_result(
-               agent,
-               SpaceTraders.API.dispatch_recorded(intent)
-             ) do
-          {:ok, %{fuel: fuel} = result} when fuel.current >= fuel.capacity ->
-            invalidate_refuel_market(agent, result)
-
-            with {:ok, fresh_ship} <- fresh_ship(agent, live_ship.symbol, nil) do
-              case transition_intent(intent,
-                     in_flight_action: nil,
-                     last_action_result: %{"kind" => "refuel", "fuel" => fuel.current}
-                   ) do
-                {:ok, intent} -> advance_intents(agent, intent, fresh_ship)
-                :intent_no_longer_owned -> :ok
-              end
-            else
-              {:error, reason} -> block_intents(intent, reason)
-            end
-
-          {:ok, %{fuel: fuel}} ->
-            clear_claim_and_block(intent, {:refuel_incomplete, fuel.current, fuel.capacity})
-
-          {:error, reason} ->
-            block_intents(intent, reason)
-        end
-      else
-        {:error, reason} -> block_preparation_refusal(intent, reason)
-      end
+      execute_action(agent, intent, live_ship, %{
+        "kind" => "refuel",
+        "waypoint" => live_ship.nav.waypoint_symbol,
+        "fuel_before" => live_ship.fuel.current,
+        "expected" => %{"fuel_full" => true}
+      })
     else
       {:error, %SpaceTraders.API.GameplayError{}} ->
         route_to_confirmed_fuel_stop(agent, intent, live_ship)
@@ -4302,11 +4390,6 @@ defmodule SpaceTraders.Fleet.Intents do
       {:error, reason} -> block_intents(intent, reason)
     end
   end
-
-  defp maybe_update_ship_cargo(live_ship, %{cargo: cargo}) when not is_nil(cargo),
-    do: %{live_ship | cargo: cargo}
-
-  defp maybe_update_ship_cargo(live_ship, _result), do: live_ship
 
   defp invalidate_refuel_market(
          agent,
@@ -4600,32 +4683,18 @@ defmodule SpaceTraders.Fleet.Intents do
              destination
            ),
          {:ok, preflight} <-
-           jump_cost_preflight(agent, source_system, live_ship.nav.waypoint_symbol),
-         {:ok, %{intent: intent}} <-
-           prepare_recorded_action(agent, intent, %{
-             "kind" => "jump",
-             "waypoint" => destination,
-             "credits_before" => preflight.credits,
-             "antimatter_cost" => preflight.antimatter_cost,
-             "expected" => %{
-               "status" => "IN_ORBIT",
-               "waypoint" => destination,
-               "system" => destination_system
-             }
-           }) do
-      case Agent.handle_game_result(
-             agent,
-             SpaceTraders.API.dispatch_recorded(intent)
-           ) do
-        {:ok, result} ->
-          accept_jump_result(agent, intent, live_ship, result)
-
-        {:error, %SpaceTraders.API.GameplayError{} = reason} ->
-          clear_jump_claim_and_block(intent, reason)
-
-        {:error, reason} ->
-          block_intents(intent, reason)
-      end
+           jump_cost_preflight(agent, source_system, live_ship.nav.waypoint_symbol) do
+      execute_action(agent, intent, live_ship, %{
+        "kind" => "jump",
+        "waypoint" => destination,
+        "credits_before" => preflight.credits,
+        "antimatter_cost" => preflight.antimatter_cost,
+        "expected" => %{
+          "status" => "IN_ORBIT",
+          "waypoint" => destination,
+          "system" => destination_system
+        }
+      })
     else
       {:error, reason} -> block_intents(intent, reason)
     end
@@ -4795,28 +4864,12 @@ defmodule SpaceTraders.Fleet.Intents do
     end
   end
 
-  defp accepted_observations(agent, live_ship, attempt, %{"kind" => "refuel"}, basis) do
-    ship_and_credit_observations(
-      agent,
-      live_ship,
-      attempt,
-      :accepted,
-      basis,
-      %{fuel: %{current: live_ship.fuel.current, capacity: live_ship.fuel.capacity}},
-      "Fresh Agent credits accompany the accepted refuel outcome"
-    )
-  end
-
-  defp accepted_observations(agent, live_ship, attempt, %{"kind" => "jump"}, basis) do
-    ship_and_credit_observations(
-      agent,
-      live_ship,
-      attempt,
-      :accepted,
-      basis,
-      %{nav: ship_nav_facts(live_ship.nav)},
-      "Fresh Agent credits accompany the accepted jump outcome"
-    )
+  defp accepted_observations(agent, live_ship, attempt, %{"kind" => kind}, basis)
+       when kind in ["refuel", "jump"] do
+    with {:ok, credits} <-
+           Agent.handle_game_result(agent, Evidence.recovery_agent_binding(agent, attempt)) do
+      composite_recovery_proof(live_ship, credits, attempt, :accepted, basis)
+    end
   end
 
   defp accepted_observations(agent, live_ship, attempt, _action, basis) do
@@ -4838,16 +4891,21 @@ defmodule SpaceTraders.Fleet.Intents do
     end
   end
 
-  defp retry_absent_action(agent, intent, live_ship, action, absent) do
+  defp retry_absent_action(agent, intent, live_ship, action, absent, opts \\ []) do
     with {:ok, %{intent: selected, result: result}} <-
-           retry_under_current_claim(agent, intent, live_ship, action, absent),
+           retry_under_current_claim(agent, intent, live_ship, action, absent, opts),
          {:ok, result} <- Agent.handle_game_result(agent, result) do
       # Carry the admitted retry's identity; never substitute a newer callback owner.
-      continue_selected_response(agent, selected, live_ship, action, result)
+      continue_selected_response(agent, selected, live_ship, selected.in_flight_action, result)
     else
-      {:error, :no_current_ship_claim} -> supersede_for_lost_claim(intent, true)
-      {:error, :emergency_stopped} -> retire_stopped_absence(intent, absent)
-      {:error, reason} -> block_intents(intent, {:awaiting_reconciliation, reason})
+      {:error, reason} when reason in [:no_current_ship_claim, :transfer_authority_unavailable] ->
+        retire_unavailable_absence(intent, absent)
+
+      {:error, :emergency_stopped} ->
+        retire_stopped_absence(intent, absent)
+
+      {:error, reason} ->
+        block_intents(intent, {:awaiting_reconciliation, reason})
     end
   end
 
@@ -4861,36 +4919,41 @@ defmodule SpaceTraders.Fleet.Intents do
     end)
   end
 
-  defp retry_under_current_claim(agent, intent, _live_ship, _action, absent) do
-    with {:ok, retry} <- RecordedAction.prepare_retry(agent, intent, absent) do
-      selected = %{intent | mutation_attempt_id: retry.id}
+  defp retire_unavailable_absence(intent, absent) do
+    with_current_intent(intent, fn current ->
+      with {:ok, _} <-
+             MutationAttempts.retire_unused_retry(absent, "retired_authority_unavailable") do
+        do_supersede_for_lost_claim(current)
+      else
+        {:error, _reason} -> Repo.rollback(:intent_no_longer_owned)
+      end
+    end)
+  end
+
+  defp retry_under_current_claim(agent, intent, _live_ship, _action, absent, opts) do
+    with {:ok, retry} <- RecordedAction.prepare_retry(agent, intent, absent, opts) do
+      selected = %{
+        intent
+        | mutation_attempt_id: retry.id,
+          in_flight_action: retry.prepared_evidence["selected_action"]
+      }
+
       {:ok, %{intent: selected, result: SpaceTraders.API.dispatch_recorded(retry)}}
     end
   end
 
-  defp absence_observations(agent, live_ship, attempt, %{"kind" => "refuel"}) do
-    with fuel_before when is_integer(fuel_before) <- intent_fuel_before(attempt),
+  defp absence_observations(agent, live_ship, attempt, %{"kind" => "refuel"} = action) do
+    with fuel_before when is_integer(fuel_before) <- action["fuel_before"],
          true <- live_ship.fuel.current == fuel_before,
-         {:ok, game_agent} <- recovery_agent(agent) do
-      {:ok,
-       [
-         reconciliation_observation(
-           "get-my-ship",
-           [DependencyKey.ship(agent.id, live_ship.symbol)],
-           attempt,
-           :absent,
-           "Ship fuel is unchanged from the pre-dispatch observation",
-           %{fuel: %{current: live_ship.fuel.current, capacity: live_ship.fuel.capacity}}
-         ),
-         reconciliation_observation(
-           "get-my-agent",
-           [DependencyKey.agent_credits(agent.id)],
-           attempt,
-           :absent,
-           "Fresh Agent credits accompany the unchanged Ship fuel",
-           %{credits: game_agent.credits}
-         )
-       ]}
+         {:ok, credits} <-
+           Agent.handle_game_result(agent, Evidence.recovery_agent_binding(agent, attempt)) do
+      composite_recovery_proof(
+        live_ship,
+        credits,
+        attempt,
+        :absent,
+        "Ship fuel is unchanged from pre-dispatch; authoritative Agent credits accompany it"
+      )
     else
       false -> {:error, :refuel_outcome_unresolved}
       nil -> {:error, :refuel_outcome_unresolved}
@@ -4900,18 +4963,16 @@ defmodule SpaceTraders.Fleet.Intents do
 
   defp absence_observations(agent, live_ship, attempt, %{"kind" => "jump"} = action) do
     with credits_before when is_integer(credits_before) <- action["credits_before"],
-         {:ok, observations} <-
-           ship_and_credit_observations(
-             agent,
-             live_ship,
-             attempt,
-             :absent,
-             "Ship navigation does not contain the expected jump effect",
-             %{nav: ship_nav_facts(live_ship.nav)},
-             "Agent credits are unchanged from the jump preflight"
-           ),
-         true <- observed_credits_unchanged?(observations, credits_before) do
-      {:ok, observations}
+         {:ok, credits} <-
+           Agent.handle_game_result(agent, Evidence.recovery_agent_binding(agent, attempt)),
+         true <- credits.value.credits == credits_before do
+      composite_recovery_proof(
+        live_ship,
+        credits,
+        attempt,
+        :absent,
+        "Ship navigation lacks the expected jump effect and Agent credits are unchanged from preflight"
+      )
     else
       _ -> {:error, :jump_outcome_unresolved}
     end
@@ -4934,42 +4995,14 @@ defmodule SpaceTraders.Fleet.Intents do
     end
   end
 
-  defp ship_and_credit_observations(
-         agent,
-         live_ship,
-         attempt,
-         outcome,
-         ship_basis,
-         ship_facts,
-         credit_basis
-       ) do
-    with {:ok, game_agent} <- recovery_agent(agent) do
-      {:ok,
-       [
-         reconciliation_observation(
-           "get-my-ship",
-           [DependencyKey.ship(agent.id, live_ship.symbol)],
-           attempt,
-           outcome,
-           ship_basis,
-           ship_facts
-         ),
-         reconciliation_observation(
-           "get-my-agent",
-           [DependencyKey.agent_credits(agent.id)],
-           attempt,
-           outcome,
-           credit_basis,
-           %{credits: game_agent.credits}
-         )
-       ]}
+  defp composite_recovery_proof(live_ship, credits, attempt, outcome, basis) do
+    case Evidence.recovery_proof(attempt, outcome, basis, [
+           Map.get(live_ship, :evidence_binding),
+           credits
+         ]) do
+      {:ok, observations} -> {:ok, observations}
+      {:incomplete, gap} -> {:error, {:incomplete_recovery_evidence, gap}}
     end
-  end
-
-  defp observed_credits_unchanged?(observations, credits_before) do
-    Enum.any?(observations, fn facts ->
-      match?(%{credits: ^credits_before}, Map.get(facts, :facts))
-    end)
   end
 
   defp recovery_agent(agent) do
@@ -4986,24 +5019,6 @@ defmodule SpaceTraders.Fleet.Intents do
       false -> {:error, :authoritative_credit_facts_required}
       error -> error
     end
-  end
-
-  defp intent_fuel_before(attempt) do
-    with intent_id when is_integer(intent_id) <- attempt.provenance["intent_id"],
-         %Intent{in_flight_action: action} when is_map(action) <- Repo.get(Intent, intent_id) do
-      action["fuel_before"]
-    end
-  end
-
-  defp ship_nav_facts(nav) do
-    %{
-      status: nav.status,
-      waypoint_symbol: nav.waypoint_symbol,
-      system_symbol: nav.system_symbol,
-      flight_mode: nav.flight_mode,
-      destination:
-        get_in(nav, [Access.key(:route), Access.key(:destination), Access.key(:symbol)])
-    }
   end
 
   defp reconciliation_observation(operation_id, dependency_keys, attempt, outcome, basis, facts) do
@@ -5080,6 +5095,11 @@ defmodule SpaceTraders.Fleet.Intents do
   defp continue_selected_response(agent, intent, live_ship, %{"kind" => "jump"}, result),
     do: accept_jump_result(agent, intent, live_ship, result)
 
+  defp continue_selected_response(agent, intent, _live_ship, %{"kind" => "transfer"} = action, %{
+         cargo: _cargo
+       }),
+       do: progress_transfer(agent, intent, nil, action)
+
   defp continue_selected_response(agent, intent, live_ship, %{"kind" => kind}, %{nav: nav})
        when kind in ["orbit", "dock"] do
     case transition_intent(intent,
@@ -5117,16 +5137,16 @@ defmodule SpaceTraders.Fleet.Intents do
        when fuel.current >= fuel.capacity do
     invalidate_refuel_market(agent, result)
 
-    case transition_intent(intent,
-           in_flight_action: nil,
-           last_action_result: %{"kind" => "refuel", "fuel" => fuel.current}
-         ) do
-      {:ok, intent} ->
-        live_ship = live_ship |> Map.put(:fuel, fuel) |> maybe_update_ship_cargo(result)
-        advance_intents(agent, intent, live_ship)
-
-      :intent_no_longer_owned ->
-        :ok
+    with {:ok, fresh_ship} <- fresh_ship(agent, live_ship.symbol, nil) do
+      case transition_intent(intent,
+             in_flight_action: nil,
+             last_action_result: %{"kind" => "refuel", "fuel" => fuel.current}
+           ) do
+        {:ok, intent} -> advance_intents(agent, intent, fresh_ship)
+        :intent_no_longer_owned -> :ok
+      end
+    else
+      {:error, reason} -> block_intents(intent, reason)
     end
   end
 

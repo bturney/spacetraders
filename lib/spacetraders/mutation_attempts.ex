@@ -321,7 +321,12 @@ defmodule SpaceTraders.MutationAttempts do
   end
 
   @doc "Retires unused proven-absence retry permission when its owner remains Emergency Stopped."
-  def retire_stopped_retry(%Attempt{} = attempt) do
+  def retire_stopped_retry(%Attempt{} = attempt),
+    do: retire_unused_retry(attempt, "retired_while_emergency_stopped")
+
+  @doc "Retires unused absence permission after the selected owner's admission refuses authority."
+  def retire_unused_retry(%Attempt{} = attempt, disposition)
+      when disposition in ["retired_while_emergency_stopped", "retired_authority_unavailable"] do
     Repo.transaction(fn ->
       current = locked_attempt(attempt.id)
 
@@ -334,7 +339,7 @@ defmodule SpaceTraders.MutationAttempts do
       Repo.insert!(%Outcome{
         mutation_attempt_id: current.id,
         classification: "absent",
-        evidence: %{"retry_disposition" => "retired_while_emergency_stopped"},
+        evidence: %{"retry_disposition" => disposition},
         recorded_at: DateTime.utc_now()
       })
 
@@ -706,6 +711,17 @@ defmodule SpaceTraders.MutationAttempts do
   end
 
   defp fingerprint(operation_id, prepared_evidence, dependency_keys) do
+    # Replacement preflight observations do not change a transfer request.
+    # Selection provenance separately binds the exact admitted action/evidence.
+    prepared_evidence =
+      if operation_id == "transfer-cargo" and is_map(prepared_evidence["selected_action"]) do
+        Map.update!(prepared_evidence, "selected_action", fn action ->
+          Map.drop(action, ~w(source_observation_id target_observation_id))
+        end)
+      else
+        prepared_evidence
+      end
+
     Evidence.fingerprint({operation_id, prepared_evidence, dependency_keys})
   end
 
