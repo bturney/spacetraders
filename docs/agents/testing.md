@@ -95,6 +95,8 @@ Current seam owners:
   `test/spacetraders/resource_recovery_test.exs`
 - recorded runtime interruption, authority races, and boot recovery:
   `test/spacetraders/recorded_ship_runtime_test.exs`
+- per-family interruption phase matrix and authority loss (every recorded Ship
+  family): `test/spacetraders/recorded_family_interruption_test.exs`
 - recorded admission boundary and Ship operation coverage:
   `test/spacetraders/api/recorded_dispatch_test.exs`
 

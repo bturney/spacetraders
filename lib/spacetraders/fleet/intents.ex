@@ -1283,9 +1283,9 @@ defmodule SpaceTraders.Fleet.Intents do
   defp do_advance_intents(
          agent,
          %Intent{type: "acquire_intelligence", in_flight_action: %{"kind" => "chart"}} = intent,
-         _live_ship
+         live_ship
        ) do
-    reconcile_chart_intelligence(agent, intent)
+    reconcile_chart_intelligence(agent, intent, live_ship)
   end
 
   defp do_advance_intents(
@@ -1430,18 +1430,24 @@ defmodule SpaceTraders.Fleet.Intents do
         complete_cargo_intent(agent, intent, action["units"], nil, %{cargo: source.value.cargo})
       end
 
+      # A recovered accepted verdict already proved both Ships' Cargo; the
+      # unfenced receiver may have moved on since. A delivered response still
+      # waits for both Ships' authoritative Cargo.
       judgement =
-        case transfer_outcome(action, source.value, target.value) do
-          :accepted ->
+        case {ledger_position(attempt), transfer_outcome(action, source.value, target.value)} do
+          {_position, outcome} when attempt.state == "accepted" or outcome == :accepted ->
             {:accepted, "Both Ships' Cargo proves the selected transfer", complete}
 
-          :absent ->
+          {_position, :absent} ->
             {:absent, "Both Ships' Cargo is unchanged from the selected transfer preflight"}
 
-          :unknown ->
+          {:open, :unknown} ->
             {:unknown, {:ambiguous_operation_evidence, "transfer"},
              {"The two Cargo observations cannot attribute the selected transfer",
               transfer_constraint_accounting(attempt, action)}}
+
+          {_position, :unknown} ->
+            {:unknown, {:ambiguous_operation_evidence, "transfer"}}
         end
 
       progress_selected(agent, intent, Evidence.bound_ship(source), action, judgement,
@@ -1450,7 +1456,11 @@ defmodule SpaceTraders.Fleet.Intents do
         on_rejected: fn -> mark_infeasible(intent, :transfer_rejected) end
       )
     else
-      gap -> block_cargo_intent(intent, {:awaiting_reconciliation, gap})
+      {:error, %SpaceTraders.API.GameplayError{code: 429} = reason} ->
+        block_cargo_intent(intent, reason)
+
+      gap ->
+        block_cargo_intent(intent, {:awaiting_reconciliation, gap})
     end
   end
 
@@ -1772,8 +1782,7 @@ defmodule SpaceTraders.Fleet.Intents do
       live_ship,
       intent.in_flight_action,
       {:accepted, "Retained Ship cooldown proves a scan occurred after its dispatch",
-       fn -> continue_after_scan_recovery(agent, intent, live_ship) end},
-      block: fn intent, _reason -> block_intents(intent, :scan_outcome_unresolved) end
+       fn -> continue_after_scan_recovery(agent, intent, live_ship) end}
     )
   end
 
@@ -1816,7 +1825,7 @@ defmodule SpaceTraders.Fleet.Intents do
     end
   end
 
-  defp reconcile_chart_intelligence(agent, intent) do
+  defp reconcile_chart_intelligence(agent, intent, live_ship) do
     attempt = MutationAttempts.latest_for_intent(intent)
 
     case Agent.handle_game_result(
@@ -1845,9 +1854,19 @@ defmodule SpaceTraders.Fleet.Intents do
             _ -> {:unknown, :chart_outcome_unresolved}
           end
 
-        progress_selected(agent, intent, nil, intent.in_flight_action, judgement,
-          sources: [binding],
-          block: fn intent, _reason -> block_intents(intent, :chart_outcome_unresolved) end
+        progress_selected(agent, intent, live_ship, intent.in_flight_action, judgement,
+          sources: [binding]
+        )
+
+      # A Waypoint is charted once; a retained uncharted read proves absence.
+      {:ok, %Evidence.Binding{value: %{chart: nil}} = binding} ->
+        progress_selected(
+          agent,
+          intent,
+          live_ship,
+          intent.in_flight_action,
+          {:absent, "Retained Waypoint remains uncharted after dispatch"},
+          sources: [binding]
         )
 
       _ ->

@@ -161,6 +161,28 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
     refute_receive {:chart_read_started, _}
   end
 
+  test "scan without post-dispatch cooldown blocks as unprovable absence without sending" do
+    {agent, ship, portfolio, commitment} = claimed_ship("SCAN-UNPROVABLE")
+
+    {intent, attempt} =
+      selected_intelligence(agent, ship, portfolio, commitment, "scan_waypoints")
+
+    {:ok, attempt} = MutationAttempts.mark_sent_or_unknown(attempt)
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      assert conn.method == "GET"
+      Req.Test.json(conn, %{"data" => ship_body(ship.symbol)})
+    end)
+
+    _ = Intents.reconcile(agent.id, ship.symbol, nil, :boot, intent.id)
+    current = Repo.get!(Intent, intent.id)
+    assert current.status == "blocked"
+    assert current.blocker.evidence =~ ~s({:absence_unprovable, "scan_waypoints"})
+    assert current.in_flight_action["kind"] == "scan_waypoints"
+    assert MutationAttempts.get!(attempt.id).state == "sent_or_unknown"
+    assert SpaceTraders.SafetyFence.active?(MutationAttempts.get!(attempt.id))
+  end
+
   test "prepared scan boot and live dispatch retain the same returned Intelligence exactly once" do
     for trigger <- [:boot, :live] do
       {agent, ship, portfolio, commitment} = claimed_ship("SCAN-PREPARED-#{trigger}")
@@ -1336,6 +1358,114 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
   end
 
   @tag :market_recovery
+  # {intent attrs, selected action, unchanged Ship, contradictory Ship}
+  for kind <- ["buy", "install_module", "refuel"] do
+    test "#{kind} pending retry with contradictory evidence blocks without sending" do
+      kind = unquote(kind)
+      {agent, ship, portfolio, commitment} = claimed_ship("PENDING-CONTRADICTION-#{kind}")
+      {attrs, action, unchanged, contradictory} = pending_contradiction(kind, ship)
+      intent = owned_intent(ship, portfolio, commitment, attrs)
+
+      {:ok, %{intent: intent, attempt: attempt}} =
+        SpaceTraders.Fleet.Intents.RecordedAction.prepare(agent, intent, action)
+
+      {:ok, attempt} = MutationAttempts.mark_sent_or_unknown(attempt)
+      test_pid = self()
+
+      stub = fn body ->
+        Req.Test.stub(SpaceTraders.API, fn conn ->
+          case {conn.method, conn.request_path} do
+            {"GET", "/v2/my/agent"} ->
+              Req.Test.json(conn, %{"data" => %{"symbol" => agent.symbol, "credits" => 1000}})
+
+            {"GET", _path} ->
+              Req.Test.json(conn, %{"data" => body})
+
+            {"POST", path} ->
+              send(test_pid, {:retry_sent, path})
+              Req.Test.json(conn, %{"data" => %{}})
+          end
+        end)
+      end
+
+      stub.(unchanged)
+      {:ok, ship_binding} = SpaceTraders.Evidence.get_ship_binding(agent, ship.symbol)
+      {:ok, credits} = SpaceTraders.Evidence.get_agent_binding(agent)
+
+      {:ok, proof} =
+        SpaceTraders.Evidence.recovery_proof(attempt, :absent, "Unchanged selected effect", [
+          ship_binding,
+          credits
+        ])
+
+      {:ok, absent} = MutationAttempts.reconcile(attempt, :absent, proof)
+      assert absent.retry_authorized
+
+      stub.(contradictory)
+      _ = Intents.reconcile(agent.id, ship.symbol, nil, :boot, intent.id)
+
+      current = Repo.get!(Intent, intent.id)
+      assert current.status == "blocked"
+      assert current.mutation_attempt_id == attempt.id
+      refute_received {:retry_sent, _}
+      assert [pending] = MutationAttempts.list_for_agent(agent)
+      assert pending.state == "absent"
+      assert pending.retry_authorized
+    end
+  end
+
+  defp pending_contradiction("buy", ship) do
+    {[type: "buy", parameters: %{"trade_symbol" => "IRON_ORE", "units" => 5}],
+     %{
+       "kind" => "buy",
+       "trade_symbol" => "IRON_ORE",
+       "units" => 5,
+       "listing_price" => 10,
+       "cargo_before" => 0,
+       "credits_before" => 1000
+     }, market_ship_body(ship, 0), market_ship_body(ship, 3)}
+  end
+
+  defp pending_contradiction("install_module", ship) do
+    module = "MODULE_SURVEY_SUITE_I"
+
+    body = fn installed, cargo ->
+      ship_body(ship.symbol, %{
+        "modules" => List.duplicate(%{"symbol" => module}, installed),
+        "cargo" => %{
+          "capacity" => 40,
+          "units" => cargo,
+          "inventory" => if(cargo > 0, do: [%{"symbol" => module, "units" => cargo}], else: [])
+        }
+      })
+    end
+
+    # Fitted without consuming the Cargo unit contradicts the selected install.
+    {[type: "install_module", parameters: %{"module_symbol" => module}],
+     %{
+       "kind" => "install_module",
+       "module_symbol" => module,
+       "quantity" => 1,
+       "installed_before" => 0,
+       "cargo_before" => 1
+     }, body.(0, 1), body.(1, 1)}
+  end
+
+  defp pending_contradiction("refuel", ship) do
+    body = fn fuel ->
+      ship_body(ship.symbol, %{"fuel" => %{"current" => fuel, "capacity" => 200}})
+    end
+
+    # Less fuel than before neither proves the refuel nor its absence.
+    {[],
+     %{
+       "kind" => "refuel",
+       "waypoint" => "X1-UX81-A1",
+       "fuel_before" => 150,
+       "credits_before" => 1000
+     }, body.(150), body.(100)}
+  end
+
   test "recovered partial buy records the effect without declaring the requested quantity complete" do
     {agent, ship, portfolio, commitment} = claimed_ship("MARKET-PARTIAL-BUY")
     {intent, action} = market_selection(ship, portfolio, commitment, "buy")
