@@ -66,8 +66,16 @@ Decoded facts paired with the exact retained observation that produced them. Rec
 _Avoid_: cached read, snapshot
 
 **API Capacity Governor**:
-The Fleet-wide authority that admits and orders reads and mutations when API capacity is scarce. It combines compatible Observation Demands, protects safety and recovery work, applies Strategic Priority, and reports backpressure for Fleet reallocation. It is distinct from the raw rate limiter, which only enforces the API's protocol limits.
+The Fleet-wide authority that allocates scarce API request capacity to useful game progress by admitting and ordering reads and mutations according to Strategic Priority and the value of the work they support, including safety and recovery. It reports capacity limitations for Fleet reallocation and is distinct from the raw rate limiter, which enforces protocol limits.
 _Avoid_: rate limiter, request queue
+
+**Capacity Disposition**:
+The API Capacity Governor's point-in-time interpretation of whether work may proceed toward API admission or must be deferred. It neither reserves API capacity nor grants gameplay authority; actual requests remain subject to admission.
+_Avoid_: Admission, reserved slot, planning decision
+
+**Capacity Deferral**:
+A temporary inability to admit work because of API capacity, distinct from absence of worthwhile work, objective infeasibility, and Neutral Wait. It does not itself require Operator judgment or establish whether existing work remains authorized.
+_Avoid_: Neutral Wait, objective infeasibility, no worthwhile contribution
 
 **Waypoint Intelligence**:
 Operational Intelligence about one Waypoint beyond its location and immediate navigability: construction status, modifiers, controlling faction, and chart provenance. Construction status and modifiers are operational state; faction and chart provenance are secondary context.
