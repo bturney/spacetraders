@@ -6,7 +6,7 @@ defmodule SpaceTraders.MutationAttemptsTest do
 
   alias SpaceTraders.Agent.Scope
   alias SpaceTraders.API
-  alias SpaceTraders.API.RecordedDispatch
+  alias SpaceTraders.Fleet.Intents.RecordedAction
   alias SpaceTraders.API.OperationInventory
   alias SpaceTraders.Evidence
   alias SpaceTraders.Fleet.{Intent, Ship}
@@ -473,7 +473,7 @@ defmodule SpaceTraders.MutationAttemptsTest do
     end)
 
     assert {:ok, absent} = MutationAttempts.reconcile(attempt, :absent, [absence_proof])
-    assert {:ok, retry} = RecordedDispatch.prepare_retry(agent, intent, absent)
+    assert {:ok, retry} = RecordedAction.prepare_retry(agent, intent, absent)
     assert {:ok, %{}} = API.dispatch_recorded(retry)
     assert {:error, :attempt_already_dispatched} = API.dispatch_recorded(retry)
 

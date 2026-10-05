@@ -35,7 +35,7 @@ defmodule SpaceTraders.API do
   alias SpaceTraders.API.Pagination
   alias SpaceTraders.API.AgentTokenReference
   alias SpaceTraders.API.OperationInventory
-  alias SpaceTraders.API.RecordedDispatch
+  alias SpaceTraders.Fleet.Intents.RecordedAction
   alias SpaceTraders.API.ShipAction
   alias SpaceTraders.Evidence.Demand
   alias SpaceTraders.Agent.Agent, as: AgentRecord
@@ -169,7 +169,7 @@ defmodule SpaceTraders.API do
   def dispatch_recorded(%SpaceTraders.Fleet.Intent{}), do: {:error, :recorded_dispatch_required}
 
   def dispatch_recorded(%Attempt{id: id}) do
-    with :ok <- RecordedDispatch.require_commit_boundary() do
+    with :ok <- RecordedAction.require_commit_boundary() do
       attempt = MutationAttempts.get!(id)
 
       with {:ok, schema} <- ShipAction.response_schema(attempt.operation_id),
@@ -575,9 +575,9 @@ defmodule SpaceTraders.API do
 
   defp authorize_dispatch(request, method, token, attempt, shadow, opts) do
     if opts[:recorded_attempt] do
-      case RecordedDispatch.admit_send(attempt) do
+      case RecordedAction.admit_send(attempt) do
         {:ok, admitted} ->
-          case RecordedDispatch.authorize_transport(admitted) do
+          case RecordedAction.authorize_transport(admitted) do
             :ok ->
               ShadowAdmission.observe_dispatch(shadow)
               request

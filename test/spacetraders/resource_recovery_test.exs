@@ -102,6 +102,50 @@ defmodule SpaceTraders.ResourceRecoveryTest do
     assert Repo.get!(Intent, intent.id).blocker.reason == "insufficient_fuel"
   end
 
+  for trigger <- [:boot, :cooldown] do
+    test "#{trigger} resource retry applies the same rejection continuation as first dispatch" do
+      {agent, ship, intent, attempt} = selected_resource("extract")
+      {:ok, attempt} = MutationAttempts.mark_sent_or_unknown(attempt)
+      before = ship_body(ship.symbol, %{"cargo" => intent.in_flight_action["cargo_before"]})
+      Req.Test.stub(SpaceTraders.API, &Req.Test.json(&1, %{"data" => before}))
+      {:ok, binding} = Evidence.get_ship_binding(agent, ship.symbol)
+
+      {:ok, proof} =
+        Evidence.recovery_proof(attempt, :absent, "Controlled owner absence proof", [binding])
+
+      {:ok, _} = MutationAttempts.reconcile(attempt, :absent, proof)
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        assert conn.method == "POST"
+
+        conn
+        |> Plug.Conn.put_status(400)
+        |> Req.Test.json(%{"error" => %{"code" => 4203, "message" => "Rejected by game"}})
+      end)
+
+      _ = Intents.reconcile(agent.id, ship.symbol, binding, unquote(trigger), intent.id)
+      current = Repo.get!(Intent, intent.id)
+      assert current.in_flight_action == nil
+      assert current.blocker.reason == "insufficient_fuel"
+      attempts = MutationAttempts.list_for_agent(agent)
+      assert length(attempts) == 2
+      original = Enum.find(attempts, &(&1.id == attempt.id))
+      retry = Enum.find(attempts, &(&1.retry_of_id == attempt.id))
+      assert original.id == attempt.id
+      assert original.state == "absent"
+      refute original.retry_authorized
+      assert retry.retry_of_id == original.id
+      assert retry.state == "rejected"
+
+      Req.Test.stub(SpaceTraders.API, fn _ ->
+        flunk("obsolete callback replayed a rejected retry")
+      end)
+
+      assert :ok =
+               Intents.reconcile(agent.id, ship.symbol, binding, unquote(trigger), intent.id + 1)
+    end
+  end
+
   for stopped? <- [false, true] do
     test "persisted resource absence #{if stopped?, do: "retires under Stop", else: "consumes exactly one retry"}" do
       {agent, ship, intent, attempt} = selected_resource("extract")
