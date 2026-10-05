@@ -5,12 +5,13 @@ defmodule SpaceTradersWeb.InterventionLive do
   import Ecto.Query, only: [from: 2]
 
   alias SpaceTraders.Agent.Agent, as: AgentRecord
-  alias SpaceTraders.Fleet.{Intents, Ship}
+  alias SpaceTraders.Fleet
+  alias SpaceTraders.Fleet.{Intents, Ship, TravelEstimate}
   alias SpaceTraders.{ManualIntervention, Repo, ShipReservation}
 
   @impl true
   def mount(_params, _session, socket) do
-    {:ok, socket |> assign(form_drafts: %{}) |> load_state()}
+    {:ok, socket |> assign(form_drafts: %{}, estimates: %{}) |> load_state()}
   end
 
   @impl true
@@ -44,6 +45,7 @@ defmodule SpaceTradersWeb.InterventionLive do
                 aria-label="Destination Waypoint"
                 placeholder="Destination Waypoint"
                 value={get_in(@form_drafts, [ship.id, "waypoint"])}
+                phx-debounce="500"
                 class="input input-bordered"
                 required
               />
@@ -55,8 +57,35 @@ defmodule SpaceTradersWeb.InterventionLive do
                 class="input input-bordered"
                 required
               />
+              <select name="method" aria-label="Estimate method" class="select select-bordered">
+                <option
+                  :for={method <- TravelEstimate.methods()}
+                  value={method}
+                  selected={draft_value(@form_drafts, ship.id, "method", "navigate") == method}
+                >
+                  {method}
+                </option>
+              </select>
+              <select
+                name="flight_mode"
+                aria-label="Estimate Flight Mode"
+                class="select select-bordered"
+              >
+                <option
+                  :for={mode <- TravelEstimate.flight_modes()}
+                  value={mode}
+                  selected={draft_value(@form_drafts, ship.id, "flight_mode", "CRUISE") == mode}
+                >
+                  {mode}
+                </option>
+              </select>
               <button type="submit" class="btn btn-warning">Request intervention</button>
             </form>
+            <.travel_estimate
+              :if={@estimates[ship.id]}
+              ship_id={ship.id}
+              estimate={@estimates[ship.id]}
+            />
             <button
               type="button"
               phx-click="release"
@@ -107,18 +136,89 @@ defmodule SpaceTradersWeb.InterventionLive do
     """
   end
 
+  attr :ship_id, :integer, required: true
+  attr :estimate, :any, required: true
+
+  defp travel_estimate(%{estimate: {:ok, est}} = assigns) do
+    assigns = assign(assigns, :est, est)
+
+    ~H"""
+    <section
+      id={"travel-estimate-#{@ship_id}"}
+      aria-label="Travel estimate"
+      class="mt-3 space-y-1 rounded-lg border border-base-300 p-3 text-sm"
+    >
+      <h4 class="font-semibold">Travel estimate (not dispatched)</h4>
+      <dl class="grid grid-cols-2 gap-x-4">
+        <dt>Method</dt>
+        <dd data-field="method">{@est.method}</dd>
+        <dt>Flight Mode</dt>
+        <dd data-field="flight_mode">{@est.flight_mode}</dd>
+        <dt>Distance</dt>
+        <dd data-field="distance">{format_distance(@est.distance)}</dd>
+        <dt>Current fuel</dt>
+        <dd data-field="current_fuel">{@est.current_fuel || "unknown"}</dd>
+        <dt>Estimated fuel</dt>
+        <dd data-field="fuel_cost">{@est.fuel_cost || "unknown"}</dd>
+        <dt>Fuel after leg</dt>
+        <dd data-field="remaining_fuel">{@est.remaining_fuel || "unknown"}</dd>
+        <dt>Fits tank</dt>
+        <dd data-field="fits_tank">{fits_label(@est.fits_tank?)}</dd>
+        <dt>Duration</dt>
+        <dd data-field="duration">{format_duration(@est.seconds)}</dd>
+      </dl>
+      <p :if={@est.status == :insufficient_fuel} role="alert" class="font-semibold text-error">
+        Blocked: estimated fuel exceeds the current tank.
+      </p>
+      <ul class="list-disc pl-5">
+        <li :for={warning <- @est.warnings}>{warning}</li>
+      </ul>
+      <p class="opacity-70">Estimate only; the game response at dispatch is final.</p>
+    </section>
+    """
+  end
+
+  defp travel_estimate(%{estimate: {:error, cause}} = assigns) do
+    assigns = assign(assigns, :cause, cause)
+
+    ~H"""
+    <section
+      id={"travel-estimate-#{@ship_id}"}
+      aria-label="Travel estimate"
+      class="mt-3 rounded-lg border border-base-300 p-3 text-sm"
+    >
+      Estimate unavailable ({inspect(@cause)}). The game decides at dispatch.
+    </section>
+    """
+  end
+
+  defp draft_value(drafts, ship_id, key, default),
+    do: get_in(drafts, [ship_id, key]) || default
+
+  defp format_distance(nil), do: "unknown"
+  defp format_distance(distance), do: :erlang.float_to_binary(distance * 1.0, decimals: 1)
+
+  defp format_duration(nil), do: "unknown"
+  defp format_duration(seconds), do: "#{seconds} s"
+
+  defp fits_label(true), do: "yes"
+  defp fits_label(false), do: "no"
+  defp fits_label(nil), do: "unknown"
+
   @impl true
   def handle_event("draft", %{"ship_id" => raw_id} = params, socket) do
     with {:ok, ship_id} <- parse_id(raw_id),
          true <- Map.has_key?(socket.assigns.ship_ids, ship_id) do
-      draft = Map.take(params, ["reason", "waypoint"])
+      draft = Map.take(params, ["reason", "waypoint", "method", "flight_mode"])
 
-      {:noreply,
-       update(
-         socket,
-         :form_drafts,
-         &Map.update(&1, ship_id, draft, fn old -> Map.merge(old, draft) end)
-       )}
+      socket =
+        update(
+          socket,
+          :form_drafts,
+          &Map.update(&1, ship_id, draft, fn old -> Map.merge(old, draft) end)
+        )
+
+      {:noreply, refresh_estimate(socket, ship_id)}
     else
       _ -> {:noreply, socket}
     end
@@ -175,6 +275,30 @@ defmodule SpaceTradersWeb.InterventionLive do
       _ ->
         {:noreply, put_flash(socket, :error, "Ship unavailable.")}
     end
+  end
+
+  # Recomputed from live Ship and retained Waypoint state on every draft change;
+  # the estimate never feeds the dispatch path.
+  defp refresh_estimate(socket, ship_id) do
+    draft = socket.assigns.form_drafts[ship_id] || %{}
+    waypoint = String.trim(draft["waypoint"] || "")
+    method = draft["method"] || "navigate"
+    mode = draft["flight_mode"] || "CRUISE"
+    ship = socket.assigns.ship_ids[ship_id]
+
+    estimates =
+      if waypoint != "" and method in TravelEstimate.methods() and
+           mode in TravelEstimate.flight_modes() do
+        Map.put(
+          socket.assigns.estimates,
+          ship_id,
+          Fleet.travel_estimate(ship.agent, ship.symbol, waypoint, method, mode)
+        )
+      else
+        Map.delete(socket.assigns.estimates, ship_id)
+      end
+
+    assign(socket, :estimates, estimates)
   end
 
   defp parse_id(value) when is_binary(value) do

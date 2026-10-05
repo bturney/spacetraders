@@ -19,7 +19,7 @@ defmodule SpaceTraders.Fleet do
 
   alias SpaceTraders.Agent.Agent, as: AgentRecord
   alias SpaceTraders.API.AgentTokenReference
-  alias SpaceTraders.Fleet.{Activity, IntentBlocker, Ship, ShipDestination}
+  alias SpaceTraders.Fleet.{Activity, IntentBlocker, Ship, ShipDestination, TravelEstimate}
 
   alias SpaceTraders.Fleet.Intents
   alias SpaceTraders.Repo
@@ -104,6 +104,64 @@ defmodule SpaceTraders.Fleet do
   end
 
   def register_ship(_agent, _ship, _ship_type), do: {:error, :invalid_ship_registration}
+
+  @doc """
+  Estimates fuel and travel time for a Ship leg before the Operator dispatches it.
+
+  Re-reads the live Ship and the retained destination Waypoint every call, so
+  the estimate follows destination, method, Flight Mode, and Ship state changes.
+  It never dispatches; the game response to the real action stays authoritative.
+  Returns `{:ok, estimate}` (see `SpaceTraders.Fleet.TravelEstimate`) or an error
+  when the Ship or Agent cannot be read.
+  """
+  def travel_estimate(%AgentRecord{} = agent, ship_symbol, waypoint_symbol, method, flight_mode)
+      when is_binary(ship_symbol) and is_binary(waypoint_symbol) do
+    with {:ok, ships} <- list_ships(agent),
+         {:ok, ship} <- find_ship(ships, ship_symbol) do
+      target = estimate_target(agent, String.trim(waypoint_symbol))
+      {:ok, TravelEstimate.estimate(ship, target, method, flight_mode)}
+    end
+  end
+
+  defp find_ship(ships, symbol) do
+    case Enum.find(ships, &(&1.symbol == symbol)) do
+      nil -> {:error, :ship_not_found}
+      ship -> {:ok, ship}
+    end
+  end
+
+  defp estimate_target(agent, waypoint_symbol) do
+    system =
+      case system_from_headquarters(waypoint_symbol) do
+        {:ok, system} -> system
+        _ -> nil
+      end
+
+    waypoint =
+      if system do
+        agent
+        |> World.intelligence(:waypoint, system, waypoint_symbol, DateTime.utc_now(), 300)
+        |> Map.fetch!(:facts)
+      else
+        %{}
+      end
+
+    x = Map.get(waypoint, "x", %{})
+    y = Map.get(waypoint, "y", %{})
+
+    %{
+      symbol: waypoint_symbol,
+      system_symbol: system,
+      x: x[:value],
+      y: y[:value],
+      freshness: coordinate_freshness(x, y)
+    }
+  end
+
+  defp coordinate_freshness(%{freshness: :fresh}, %{freshness: :fresh}), do: :fresh
+  defp coordinate_freshness(%{freshness: :stale}, _), do: :stale
+  defp coordinate_freshness(_, %{freshness: :stale}), do: :stale
+  defp coordinate_freshness(_, _), do: :not_established
 
   @doc """
   Reads everything the Fleet command panel displays for an Agent.
