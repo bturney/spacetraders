@@ -16,6 +16,7 @@ defmodule SpaceTraders.Fleet.Intents.RecordedAction do
   alias SpaceTraders.API.ShipAction
   alias SpaceTraders.Evidence
   alias SpaceTraders.Fleet.{Intent, Ship}
+  alias SpaceTraders.Fleet.Intents.Recovery
   alias SpaceTraders.FleetAllocation
   alias SpaceTraders.FleetAllocation.Portfolio
   alias SpaceTraders.FleetAllocation.Commitment
@@ -103,14 +104,11 @@ defmodule SpaceTraders.Fleet.Intents.RecordedAction do
              true <- current.mutation_attempt_id == absent.id,
              {:ok, authority} <- authority(agent.id, current),
              :ok <- claim_matches(current, authority.claim),
-             action <- refresh_transfer_evidence(current.in_flight_action, opts),
+             action <- refresh_evidence_references(current.in_flight_action, opts[:evidence]),
              {:ok, action} <- bind_transfer(authority, current, action),
              true <-
-               Map.drop(action, ~w(source_observation_id target_observation_id)) ==
-                 Map.drop(
-                   current.in_flight_action,
-                   ~w(source_observation_id target_observation_id)
-                 ),
+               Recovery.request_identity(action) ==
+                 Recovery.request_identity(current.in_flight_action),
              {:ok, request} <- ShipAction.request(authority.ship.symbol, action),
              {:ok, retry} <-
                prepare_attempt(authority, %{current | in_flight_action: action}, request, absent) do
@@ -271,6 +269,7 @@ defmodule SpaceTraders.Fleet.Intents.RecordedAction do
         [
           agent_id: authority.agent.id,
           selected_intent: intent,
+          evidence_references: Recovery.describe(intent.in_flight_action).evidence_references,
           dispatch_context: %{
             operator_id: authority.agent.operator_id,
             fleet_generation_id: generation_id(authority.generation),
@@ -479,19 +478,24 @@ defmodule SpaceTraders.Fleet.Intents.RecordedAction do
   defp bind_transfer(_authority, _intent, %{} = action), do: {:ok, action}
   defp bind_transfer(_, _, _), do: {:error, :invalid_recorded_action}
 
-  defp refresh_transfer_evidence(%{"kind" => "transfer"} = action, opts) do
-    case opts[:transfer_bindings] do
-      [%Evidence.Binding{} = source, %Evidence.Binding{} = target] ->
-        action
-        |> Map.put("source_observation_id", source.observation.id)
-        |> Map.put("target_observation_id", target.observation.id)
+  # A retry may replace expired preflight sources with the newly judged ones,
+  # in the order the kind's Recovery description names its references.
+  defp refresh_evidence_references(action, bindings) when is_list(bindings) do
+    references = Recovery.describe(action).evidence_references
 
-      _ ->
-        action
+    if references != [] and length(references) == length(bindings) and
+         Enum.all?(bindings, &match?(%Evidence.Binding{}, &1)) do
+      references
+      |> Enum.zip(bindings)
+      |> Enum.reduce(action, fn {key, binding}, action ->
+        Map.put(action, key, binding.observation.id)
+      end)
+    else
+      action
     end
   end
 
-  defp refresh_transfer_evidence(action, _opts), do: action
+  defp refresh_evidence_references(action, _bindings), do: action
 
   defp transfer_evidence(authority, action) do
     with {:ok, source} <-
