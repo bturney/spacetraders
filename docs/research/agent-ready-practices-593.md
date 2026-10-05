@@ -241,25 +241,12 @@ tokens ([Anthropic, writing tools](https://www.anthropic.com/engineering/writing
 
 ## 7. Parallel isolation (touches #591's parallel model)
 
-Claude Code worktrees isolate files only; "a worktree is a fresh checkout, so
-initialize your development environment there", `.worktreeinclude` copies
-gitignored files, and worktrees under `.claude/worktrees/` are swept
-automatically ([worktrees](https://code.claude.com/docs/en/worktrees)). DBs,
-ports, and containers are the repo's problem. The 13 leftover per-branch
-Postgres containers suggest: one shared Postgres server, one database per
-worktree (+ per partition), named deterministically and droppable, rather than
-one container per branch. Port collision is already handled by `PORT=4002`
-only for the boot check.
-
-## Overkill for a single-maintainer repo
-
-- Merge queue (also unavailable on a user-owned repo).
-- Stop hook that runs the full gate every turn.
-- Git pre-commit hooks duplicating agent hooks/CI; at most an opt-in pre-push.
-- `usage_rules` syncing every dependency's rules into always-loaded context.
-- Custom ExUnit formatter for digests.
-- Multi-runner CI sharding before caching and local partitions land.
-- Many small project skills; one workflow skill plus `docs/agents/*` suffices.
+Claude Code worktrees isolate files only ("a worktree is a fresh checkout, so
+initialize your development environment there";
+[worktrees](https://code.claude.com/docs/en/worktrees)); DBs, ports and
+containers are the repo's problem. The 13 leftover containers argue for one
+shared Postgres server with a deterministic, droppable database per worktree
+(and per partition) instead of one container per branch.
 
 ## Open questions for the target design
 
@@ -269,27 +256,3 @@ only for the boot check.
 3. Does the Operator's merge request become "arm auto-merge"?
 4. Inner-loop entry point: plain `mix test` flags in `AGENTS.md`, or a
    `scripts/check` wrapper that also formats and prints quiet output?
-
-## Sources
-
-- AGENTS.md convention — https://agents.md/
-- OpenAI Codex AGENTS.md discovery — https://learn.chatgpt.com/docs/agent-configuration/agents-md
-- Claude Code best practices — https://code.claude.com/docs/en/best-practices
-- Claude Code memory / AGENTS.md — https://code.claude.com/docs/en/memory
-- Claude Code skills — https://code.claude.com/docs/en/skills
-- Agent Skills standard — https://agentskills.io
-- Claude Code hooks guide — https://code.claude.com/docs/en/hooks-guide
-- Claude Code worktrees — https://code.claude.com/docs/en/worktrees
-- Anthropic, effective context engineering — https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents
-- Anthropic, writing tools for agents — https://www.anthropic.com/engineering/writing-tools-for-agents
-- HumanLayer, context-efficient backpressure — https://www.humanlayer.dev/blog/context-efficient-backpressure
-- `mix test` 1.18.4 — https://mix.hexdocs.pm/1.18.4/Mix.Tasks.Test.html
-- Elixir 1.19 release — https://elixir-lang.org/blog/2025/10/16/elixir-v1-19-0-released/
-- Phoenix testing guide (partitions) — https://github.com/phoenixframework/phoenix/blob/main/guides/testing/testing.md
-- Phoenix generated agent rules — https://github.com/phoenixframework/phoenix/blob/main/installer/templates/usage-rules/project.md
-- Ecto SQL Sandbox — https://ecto-sql.hexdocs.pm/Ecto.Adapters.SQL.Sandbox.html
-- Fly.io, GitHub Actions for Elixir CI — https://fly.io/phoenix-files/github-actions-for-elixir-ci/
-- erlef/setup-beam — https://github.com/erlef/setup-beam/
-- GitHub auto-merge — https://docs.github.com/en/pull-requests/collaborating-with-pull-requests/incorporating-changes-from-a-pull-request/automatically-merging-a-pull-request
-- GitHub merge queue — https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/configuring-pull-request-merges/managing-a-merge-queue
-- GitHub merge queue GA / availability — https://github.blog/changelog/2023-07-12-pull-request-merge-queue-is-now-generally-available/
