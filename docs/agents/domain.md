@@ -4,11 +4,11 @@ How the engineering skills should consume this repo's domain documentation when 
 
 ## Before exploring
 
-Read the repo-root `CONTEXT.md`, then read the ADRs in `docs/adr/` that touch the area of work.
+Read the repo-root `GLOSSARY.md`, then read the ADRs in `docs/adr/` that touch the area of work.
 
 ## Use the glossary's vocabulary
 
-When your output names a domain concept (in an issue title, a refactor proposal, a hypothesis, a test name), use the term as defined in `CONTEXT.md`. Don't drift to synonyms the glossary explicitly avoids.
+When your output names a domain concept (in an issue title, a refactor proposal, a hypothesis, a test name), use the term as defined in `GLOSSARY.md`. Don't drift to synonyms the glossary explicitly avoids.
 
 If the concept you need isn't in the glossary yet, that's a signal — either you're inventing language the project doesn't use (reconsider) or there's a real gap (note it for `/domain-modeling`).
 

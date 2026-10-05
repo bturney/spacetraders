@@ -358,7 +358,7 @@ These are boundaries implied by the mechanics, not a Job or Operator workflow:
     permission. Do not remove a symbol with multiple installed copies because
     reported live-game behavior can destroy all copies while returning one Cargo
     unit.
-   [Remove response](../../priv/spec/SpaceTraders.json#L3728-L3779); [domain definition](../../CONTEXT.md#L141-L143)
+   [Remove response](../../priv/spec/SpaceTraders.json#L3728-L3779); [domain definition](../../GLOSSARY.md)
 5. Declare success only from authoritative installed-module state; retain
    uncertainty after ambiguous calls and reconcile with Get Ship. [Install
    response](../../priv/spec/SpaceTraders.json#L3639-L3691); [Get Ship](../../priv/spec/SpaceTraders.json#L1524-L1565)
