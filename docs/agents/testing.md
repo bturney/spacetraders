@@ -89,6 +89,14 @@ Current seam owners:
   `test/spacetraders_web/live/mission_control_briefing_test.exs`
 - first dispatch durability and ambiguous recovery:
   `test/spacetraders/ship_execution_durability_test.exs`
+- recorded Ship recovery per family (exact Bindings, verdicts, one retry):
+  `test/spacetraders/owned_intent_recovery_test.exs`,
+  `test/spacetraders/transfer_recovery_test.exs`,
+  `test/spacetraders/resource_recovery_test.exs`
+- recorded runtime interruption, authority races, and boot recovery:
+  `test/spacetraders/recorded_ship_runtime_test.exs`
+- recorded admission boundary and Ship operation coverage:
+  `test/spacetraders/api/recorded_dispatch_test.exs`
 
 - whole-runtime composition across runtime restart:
   `test/diagnostics/runtime_qualification.exs` (diagnostic only)

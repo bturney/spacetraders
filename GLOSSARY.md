@@ -61,6 +61,10 @@ _Avoid_: operational knowledge, world state
 A revocable requirement for authoritative evidence, including its subject, required facts, acceptable freshness, earliest useful observation time, latest acceptable deadline or expiry, and Fleet Strategy provenance. It may request Operational Intelligence or the immediate state of an owned entity. Compatible demands share one observation; it describes the evidence needed rather than prescribing an API request.
 _Avoid_: poll, refresh job, API request
 
+**Binding**:
+Decoded facts paired with the exact retained observation that produced them. Recovery proof cites a Binding's original acquisition and time; reusing it never re-reads the game or restamps its age, and facts whose retention failed are not a Binding.
+_Avoid_: cached read, snapshot
+
 **API Capacity Governor**:
 The Fleet-wide authority that admits and orders reads and mutations when API capacity is scarce. It combines compatible Observation Demands, protects safety and recovery work, applies Strategic Priority, and reports backpressure for Fleet reallocation. It is distinct from the raw rate limiter, which only enforces the API's protocol limits.
 _Avoid_: rate limiter, request queue
