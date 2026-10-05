@@ -85,3 +85,77 @@ Runner: `576-run.py`.
 - Nothing here implies coherent allocation, profitable autonomy,
   Market/resource snapshot consolidation, capacity deepening, outcome-ledger
   completion, or any of Gates 2–5.
+
+## Review fix
+
+Fixes the spec #502 integration review (findings S1–S8, T1–T6) on
+`opencode/kimaki-spec-502-review-fix`, from integration tip `b2de51c`.
+
+Fixed:
+
+- **S1:** Evidence admitted caller-built observations for any operation
+  missing from a deny-list, so Market `purchase-cargo`/`sell-cargo` recovery
+  accepted unretained conclusions. Red test first: 2 failures in
+  `owned_intent_recovery_test.exs` `--only market_recovery`. The fix replaces
+  the deny-list with an allow-list: only `accept-contract`/`fulfill-contract`
+  may use unretained conclusions.
+- **T1, S2, S3, S6:** `Fleet.Intents.Recovery` is now the one per-kind
+  description. It holds the credit rules, attribution (`:sent`/`:cooldown`),
+  provable vs unprovable absence, and replaceable evidence references. One
+  root progression, `progress_selected`, reads it for every ledger state,
+  verdict, retry, withdrawal and retirement. Every recorded family now
+  supplies only its effect judgement and continuation: navigation, jump,
+  warp, refuel, scan, chart, resource, jettison, Market Cargo, refit,
+  module, transfer and delivery. Deleted:
+  - the accepted/absence proof cascades;
+  - the delivery settle/retire helpers;
+  - the transfer ledger-state cascade;
+  - the `advance_intents` absent/retry bypass.
+
+  `MutationAttempts` and admission now drop owner-named evidence references
+  instead of special-casing `transfer-cargo`. Resource and scan absence stays
+  unprovable by declaration (#572), so they wait for owner-proven ledger
+  absence before retrying.
+- **T2–T5, S8:**
+  - One `Evidence.retained_binding/2` replaces the four per-read restore
+    functions, which removes the test-only public variants.
+  - One helper serves the Agent and Fleet recovery queries.
+  - The source field list and the 30-second window each have one
+    definition, and `MutationAttempts` reuses `Evidence.recovery_fresh?/2`.
+  - Proof gaps have one shape, and the unused `_agent` parameter is gone.
+  - Subjects come from `DependencyKey.observation_subject/3`.
+  - Broad rescues in the new code are replaced by guards or narrowed to
+    malformed-data and storage-refusal errors.
+  - The unused `recovery_observed_at/4` is deleted.
+- **T6:** added `Binding` to `GLOSSARY.md` and the recovery seam owners to
+  `docs/agents/testing.md`.
+
+Skipped:
+
+- **S3, Contract/Construction progress parsing:** #561 assigns source-derived
+  coverage to Evidence. This parsing only checks the read's shape before
+  granting a dependency key. The delivery judgement stays in Ship Execution.
+  Moving the parsing would make Evidence call back into Fleet.
+- **S4:** the `api.ex` → `RecordedAction` call is the final authority-check
+  admission between marker commit and transport, which #562 requires
+  preserved. Transfer receiver binding is admission authority that is
+  rechecked at that boundary. `RecordedAction` is 530 lines.
+- **S5:** the remaining mechanics tests fall in categories #562 says to
+  preserve: #507 protocol, durability, ledger invariants and capability
+  judgement. Deleting any of them safely needs a line-by-line equivalence
+  audit, which this pass did not do.
+- **S7:** extending the interruption matrix beyond orbit needs the runtime
+  baseline game to drive each family, which is not cheap. All families now
+  go through the same `progress_selected` ledger branches that the orbit
+  matrix exercises. The #576 logs remain only under `/tmp/opencode/` and are
+  not committed.
+
+Gate: `scripts/verify` exit 0, 956 tests, 0 failures. Generated drift,
+boundary and boot `/health` 200 all passed. Targeted recovery suites: 380
+tests, 0 failures. The environment matches the #576 runs above, except:
+`MIX_BUILD_PATH=/tmp/opencode/fix-build`,
+`DATABASE_URL=postgres://postgres:postgres@localhost:5576/spacetraders_fix`
+(container `spec-502-576-postgres`) and `PORT=4591`. Logs:
+`/tmp/opencode/fix-s1-red.log`, `fix-s1-green.log`, `fix-t1-targeted.log`,
+`fix-t2-targeted.log`, `fix-t2-recheck.log`, `fix-verify.log`, each with a
+`.status` sibling. Runner: `fix-run.py`.
