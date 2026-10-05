@@ -73,6 +73,26 @@ defmodule SpaceTraders.Fleet.Intents.RecordedAction do
 
   def prepare(_agent, _intent, _action), do: {:error, :invalid_recorded_action}
 
+  @doc "Checks retry authority before capability reads; preparation and final admission recheck it."
+  def retry_authority(
+        %Agent{id: agent_id},
+        %Intent{} = intent,
+        %Attempt{agent_id: agent_id} = absent
+      ) do
+    with :ok <- require_commit_boundary() do
+      Repo.transaction(fn ->
+        case selected_owner_authority(locked_intent(intent.id), absent) do
+          {:ok, _authority} -> :ok
+          error -> error
+        end
+      end)
+      |> case do
+        {:ok, result} -> result
+        {:error, reason} -> {:error, reason}
+      end
+    end
+  end
+
   @doc "Consumes proven absence and links its one retry under the current owner."
   def prepare_retry(%Agent{} = agent, %Intent{} = intent, %Attempt{} = absent, opts \\ []) do
     with :ok <- require_commit_boundary() do
@@ -193,14 +213,7 @@ defmodule SpaceTraders.Fleet.Intents.RecordedAction do
   end
 
   defp selected_authority(%Intent{} = current, attempt) do
-    with true <- current.mutation_attempt_id == attempt.id,
-         true <-
-           Evidence.fingerprint(current.in_flight_action) ==
-             attempt.provenance["selected_action_fingerprint"],
-         {:ok, authority} <- authority(attempt.agent_id, current),
-         true <- generation_id(authority.generation) == attempt.fleet_generation_id,
-         true <- revision_id(authority.revision) == attempt.strategy_revision_id,
-         :ok <- claim_matches(current, authority.claim),
+    with {:ok, authority} <- selected_owner_authority(current, attempt),
          {:ok, action} <- bind_transfer(authority, current, current.in_flight_action),
          true <- action == current.in_flight_action,
          {:ok, request} <- ShipAction.request(authority.ship.symbol, action),
@@ -216,6 +229,24 @@ defmodule SpaceTraders.Fleet.Intents.RecordedAction do
   end
 
   defp selected_authority(_, _), do: {:error, :recorded_action_no_longer_selected}
+
+  defp selected_owner_authority(%Intent{} = current, attempt) do
+    with true <- current.mutation_attempt_id == attempt.id,
+         true <-
+           Evidence.fingerprint(current.in_flight_action) ==
+             attempt.provenance["selected_action_fingerprint"],
+         {:ok, authority} <- authority(attempt.agent_id, current),
+         true <- generation_id(authority.generation) == attempt.fleet_generation_id,
+         true <- revision_id(authority.revision) == attempt.strategy_revision_id,
+         :ok <- claim_matches(current, authority.claim) do
+      {:ok, authority}
+    else
+      {:error, reason} -> {:error, reason}
+      _ -> {:error, :recorded_action_no_longer_selected}
+    end
+  end
+
+  defp selected_owner_authority(_, _), do: {:error, :recorded_action_no_longer_selected}
 
   defp suppress(attempt, reason) do
     case MutationAttempts.record_not_sent(attempt, inspect_reason(reason)) do

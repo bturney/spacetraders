@@ -940,6 +940,414 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
     end)
   end
 
+  for kind <- ["buy", "sell"] do
+    @tag :market_recovery
+    test "#{kind} recovery advances once with exact retained Cargo and credit sources" do
+      {agent, ship, portfolio, commitment} = claimed_ship("MARKET-SOURCE-#{unquote(kind)}")
+      {intent, action} = market_selection(ship, portfolio, commitment, unquote(kind))
+
+      {:ok, %{intent: intent, attempt: attempt}} =
+        SpaceTraders.API.RecordedDispatch.prepare(agent, intent, action)
+
+      {:ok, _} = MutationAttempts.mark_sent_or_unknown(attempt)
+      after_units = if unquote(kind) == "buy", do: 5, else: 0
+      after_credits = if unquote(kind) == "buy", do: 950, else: 1050
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        assert conn.method == "GET"
+
+        data =
+          if conn.request_path == "/v2/my/agent",
+            do: %{"symbol" => agent.symbol, "credits" => after_credits},
+            else: market_ship_body(ship, after_units)
+
+        Req.Test.json(conn, %{"data" => data})
+      end)
+
+      {:ok, original_ship} = SpaceTraders.Evidence.get_ship_binding(agent, ship.symbol)
+      {:ok, original_credits} = SpaceTraders.Evidence.get_agent_binding(agent)
+      {:ok, newer_ship} = SpaceTraders.Evidence.get_ship_binding(agent, ship.symbol)
+      refute original_ship.observation.id == newer_ship.observation.id
+      ShipServer.stop(ship.symbol)
+      Req.Test.stub(SpaceTraders.API, fn _ -> flunk("recovery must reuse retained evidence") end)
+
+      {:ok, restored} =
+        SpaceTraders.Evidence.retained_ship_binding(agent, original_ship.observation.id)
+
+      live = SpaceTraders.Evidence.bound_ship(restored)
+      _ = Intents.reconcile(agent.id, ship.symbol, live, :boot, intent.id)
+      _ = Intents.reconcile(agent.id, ship.symbol, live, :arrival, intent.id)
+      accepted = MutationAttempts.get!(attempt.id)
+      assert accepted.state == "accepted"
+      proofs = List.last(accepted.outcomes).evidence["observations"]
+
+      assert Enum.map(proofs, & &1["source"]["id"]) ==
+               [original_ship.observation.id, original_credits.observation.id]
+
+      assert Enum.map(proofs, & &1["observed_at"]) ==
+               Enum.map(
+                 [original_ship, original_credits],
+                 &DateTime.to_iso8601(&1.observation.observed_at)
+               )
+
+      assert %Intent{status: "completed", in_flight_action: nil, last_action_result: result} =
+               Repo.get!(Intent, intent.id)
+
+      assert result["units"] == 5
+      refute Map.has_key?(result, "price")
+      assert length(MutationAttempts.list_for_agent(agent)) == 1
+    end
+
+    @tag :market_recovery
+    test "#{kind} proven absence consumes one retry through boot and live wakes" do
+      {agent, ship, portfolio, commitment} = claimed_ship("MARKET-RETRY-#{unquote(kind)}")
+      {intent, action} = market_selection(ship, portfolio, commitment, unquote(kind))
+
+      {:ok, %{intent: intent, attempt: attempt}} =
+        SpaceTraders.API.RecordedDispatch.prepare(agent, intent, action)
+
+      {:ok, _} = MutationAttempts.mark_sent_or_unknown(attempt)
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/v2/my/agent"} ->
+            Req.Test.json(conn, %{"data" => %{"symbol" => agent.symbol, "credits" => 1000}})
+
+          {"GET", "/v2/systems/X1-UX81/waypoints/X1-UX81-A1/market"} ->
+            Req.Test.json(conn, %{
+              "data" => %{
+                "symbol" => "X1-UX81-A1",
+                "tradeGoods" => [
+                  %{
+                    "symbol" => "IRON_ORE",
+                    "purchasePrice" => 10,
+                    "sellPrice" => 10,
+                    "tradeVolume" => 10,
+                    "supply" => "HIGH",
+                    "type" => "EXPORT"
+                  }
+                ]
+              }
+            })
+
+          {"GET", _} ->
+            Req.Test.json(conn, %{"data" => market_ship_body(ship, action["cargo_before"])})
+
+          {"POST", _} ->
+            send(self(), :market_retry_sent)
+            type = if unquote(kind) == "buy", do: "PURCHASE", else: "SELL"
+            units = if unquote(kind) == "buy", do: 5, else: 0
+            Req.Test.json(conn, %{"data" => trade_response(agent, ship, type, 10, 1000, units)})
+        end
+      end)
+
+      _ = Intents.reconcile(agent.id, ship.symbol, nil, :boot, intent.id)
+      _ = Intents.reconcile(agent.id, ship.symbol, nil, :arrival, intent.id)
+      _ = Intents.reconcile(agent.id, ship.symbol, nil, :boot, intent.id)
+      assert %Intent{status: "completed", in_flight_action: nil} = Repo.get!(Intent, intent.id)
+      original = MutationAttempts.get!(attempt.id)
+      assert original.state == "absent"
+      refute original.retry_authorized
+
+      assert Enum.count(MutationAttempts.list_for_agent(agent), &(&1.retry_of_id == attempt.id)) ==
+               1
+
+      assert_receive :market_retry_sent
+      refute_receive :market_retry_sent
+    end
+  end
+
+  for kind <- ["buy", "sell"] do
+    @tag :market_recovery
+    test "#{kind} satisfied Cargo before an unused retry withdraws permission without sending" do
+      {agent, ship, portfolio, commitment} = claimed_ship("MARKET-WITHDRAW-#{unquote(kind)}")
+      {intent, action} = market_selection(ship, portfolio, commitment, unquote(kind))
+
+      {:ok, %{intent: intent, attempt: attempt}} =
+        SpaceTraders.API.RecordedDispatch.prepare(agent, intent, action)
+
+      {:ok, attempt} = MutationAttempts.mark_sent_or_unknown(attempt)
+      previous_clock = Application.fetch_env(:spacetraders, :clock)
+      start_supervised!({SpaceTraders.TestClock, DateTime.add(attempt.sent_or_unknown_at, 1)})
+      Application.put_env(:spacetraders, :clock, SpaceTraders.TestClock)
+
+      on_exit(fn ->
+        case previous_clock do
+          {:ok, clock} -> Application.put_env(:spacetraders, :clock, clock)
+          :error -> Application.delete_env(:spacetraders, :clock)
+        end
+      end)
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        assert conn.method == "GET"
+
+        data =
+          if conn.request_path == "/v2/my/agent",
+            do: %{"symbol" => agent.symbol, "credits" => 1000},
+            else: market_ship_body(ship, action["cargo_before"])
+
+        Req.Test.json(conn, %{"data" => data})
+      end)
+
+      {:ok, before_ship} = SpaceTraders.Evidence.get_ship_binding(agent, ship.symbol)
+      {:ok, before_credits} = SpaceTraders.Evidence.get_agent_binding(agent)
+
+      {:ok, proof} =
+        SpaceTraders.Evidence.recovery_proof(attempt, :absent, "Unchanged Market effects", [
+          before_ship,
+          before_credits
+        ])
+
+      {:ok, _} = MutationAttempts.reconcile(attempt, :absent, proof)
+      SpaceTraders.TestClock.advance(1)
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        assert conn.method == "GET"
+
+        assert conn.request_path == "/v2/my/agent" or
+                 conn.request_path == "/v2/my/ships/#{ship.symbol}"
+
+        data =
+          if conn.request_path == "/v2/my/agent",
+            do: %{
+              "symbol" => agent.symbol,
+              "credits" => if(unquote(kind) == "buy", do: 950, else: 1050)
+            },
+            else: market_ship_body(ship, if(unquote(kind) == "buy", do: 5, else: 0))
+
+        Req.Test.json(conn, %{"data" => data})
+      end)
+
+      # Retained unchanged credits are still usable evidence; replacement is a
+      # genuinely new acquisition, not a restamp of that prior conclusion.
+      {:ok, _} = SpaceTraders.Evidence.get_agent_binding(agent)
+      _ = Intents.reconcile(agent.id, ship.symbol, nil, :boot, intent.id)
+      assert %Intent{status: "completed", in_flight_action: nil} = Repo.get!(Intent, intent.id)
+      refute MutationAttempts.get!(attempt.id).retry_authorized
+      assert length(MutationAttempts.list_for_agent(agent)) == 1
+    end
+
+    @tag :market_recovery
+    test "#{kind} stopped absence retires without needing Market eligibility or sending" do
+      {agent, ship, portfolio, commitment} = claimed_ship("MARKET-STOP-#{unquote(kind)}")
+      {intent, action} = market_selection(ship, portfolio, commitment, unquote(kind))
+
+      {:ok, %{intent: intent, attempt: attempt}} =
+        SpaceTraders.API.RecordedDispatch.prepare(agent, intent, action)
+
+      {:ok, _} = MutationAttempts.mark_sent_or_unknown(attempt)
+      strategy = Repo.get_by!(Strategy, operator_id: agent.operator_id)
+      Repo.update!(Ecto.Changeset.change(strategy, emergency_stopped_at: DateTime.utc_now()))
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        assert conn.method == "GET"
+        assert conn.request_path in ["/v2/my/agent", "/v2/my/ships/#{ship.symbol}"]
+
+        data =
+          if conn.request_path == "/v2/my/agent",
+            do: %{"symbol" => agent.symbol, "credits" => 1000},
+            else: market_ship_body(ship, action["cargo_before"])
+
+        Req.Test.json(conn, %{"data" => data})
+      end)
+
+      _ = Intents.reconcile(agent.id, ship.symbol, nil, :boot, intent.id)
+      assert Repo.get!(Intent, intent.id).in_flight_action == nil
+      absent = MutationAttempts.get!(attempt.id)
+      assert absent.state == "absent"
+      refute absent.retry_authorized
+      assert length(MutationAttempts.list_for_agent(agent)) == 1
+    end
+
+    @tag :market_recovery
+    test "#{kind} live and prepared boot callbacks advance the same selection only once" do
+      for trigger <- [:live, :boot] do
+        {agent, ship, portfolio, commitment} =
+          claimed_ship("MARKET-PREPARED-#{unquote(kind)}-#{trigger}")
+
+        {intent, action} = market_selection(ship, portfolio, commitment, unquote(kind))
+
+        selected =
+          if trigger == :boot do
+            {:ok, %{intent: selected}} =
+              SpaceTraders.API.RecordedDispatch.prepare(agent, intent, action)
+
+            selected
+          else
+            intent
+          end
+
+        Req.Test.stub(SpaceTraders.API, fn conn ->
+          case conn.method do
+            "GET" ->
+              Req.Test.json(conn, %{"data" => market_ship_body(ship, action["cargo_before"])})
+
+            "POST" ->
+              send(self(), {:market_sent, trigger})
+              type = if unquote(kind) == "buy", do: "PURCHASE", else: "SELL"
+              units = if unquote(kind) == "buy", do: 5, else: 0
+              Req.Test.json(conn, %{"data" => trade_response(agent, ship, type, 10, 1000, units)})
+          end
+        end)
+
+        if trigger == :boot do
+          _ = Intents.reconcile(agent.id, ship.symbol, nil, :boot, intent.id)
+        else
+          {:ok, binding} = SpaceTraders.Evidence.get_ship_binding(agent, ship.symbol)
+
+          _ =
+            Intents.execute_action(
+              agent,
+              selected,
+              SpaceTraders.Evidence.bound_ship(binding),
+              action
+            )
+
+          # Obsolete callers cannot select another action after completion.
+          _ =
+            Intents.execute_action(
+              agent,
+              selected,
+              SpaceTraders.Evidence.bound_ship(binding),
+              action
+            )
+        end
+
+        _ = Intents.reconcile(agent.id, ship.symbol, nil, :arrival, intent.id)
+        assert %Intent{status: "completed", in_flight_action: nil} = Repo.get!(Intent, intent.id)
+        assert [attempt] = MutationAttempts.list_for_agent(agent)
+        assert attempt.state == "succeeded"
+        assert_receive {:market_sent, ^trigger}
+        refute_receive {:market_sent, ^trigger}
+      end
+    end
+
+    @tag :market_recovery
+    test "#{kind} missing retained credit source leaves the narrow fence and selection effective" do
+      {agent, ship, portfolio, commitment} = claimed_ship("MARKET-RETENTION-#{unquote(kind)}")
+      {intent, action} = market_selection(ship, portfolio, commitment, unquote(kind))
+
+      {:ok, %{intent: intent, attempt: attempt}} =
+        SpaceTraders.API.RecordedDispatch.prepare(agent, intent, action)
+
+      {:ok, _} = MutationAttempts.mark_sent_or_unknown(attempt)
+
+      Repo.query!(
+        "ALTER TABLE authoritative_observations ADD CONSTRAINT market_credit_retention_gap CHECK (operation_id <> 'get-my-agent')"
+      )
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        assert conn.method == "GET"
+
+        data =
+          if conn.request_path == "/v2/my/agent",
+            do: %{
+              "symbol" => agent.symbol,
+              "credits" => if(unquote(kind) == "buy", do: 950, else: 1050)
+            },
+            else: market_ship_body(ship, if(unquote(kind) == "buy", do: 5, else: 0))
+
+        Req.Test.json(conn, %{"data" => data})
+      end)
+
+      _ = Intents.reconcile(agent.id, ship.symbol, nil, :boot, intent.id)
+      _ = Intents.reconcile(agent.id, ship.symbol, nil, :arrival, intent.id)
+
+      assert %Intent{status: "blocked", mutation_attempt_id: id, in_flight_action: selected} =
+               Repo.get!(Intent, intent.id)
+
+      assert id == attempt.id
+      assert selected == intent.in_flight_action
+      assert SpaceTraders.SafetyFence.active?(MutationAttempts.get!(attempt.id))
+      assert MutationAttempts.get!(attempt.id).state == "sent_or_unknown"
+      assert length(MutationAttempts.list_for_agent(agent)) == 1
+    end
+
+    @tag :market_recovery
+    test "#{kind} changed credits with unchanged Cargo cannot authorize replay" do
+      {agent, ship, portfolio, commitment} = claimed_ship("MARKET-AMBIGUOUS-#{unquote(kind)}")
+      {intent, action} = market_selection(ship, portfolio, commitment, unquote(kind))
+
+      {:ok, %{intent: intent, attempt: attempt}} =
+        SpaceTraders.API.RecordedDispatch.prepare(agent, intent, action)
+
+      {:ok, _} = MutationAttempts.mark_sent_or_unknown(attempt)
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        assert conn.method == "GET"
+
+        data =
+          if conn.request_path == "/v2/my/agent",
+            do: %{"symbol" => agent.symbol, "credits" => 999},
+            else: market_ship_body(ship, action["cargo_before"])
+
+        Req.Test.json(conn, %{"data" => data})
+      end)
+
+      _ = Intents.reconcile(agent.id, ship.symbol, nil, :boot, intent.id)
+      assert SpaceTraders.SafetyFence.active?(MutationAttempts.get!(attempt.id))
+      assert MutationAttempts.get!(attempt.id).state == "sent_or_unknown"
+      assert length(MutationAttempts.list_for_agent(agent)) == 1
+    end
+  end
+
+  defp market_selection(ship, portfolio, commitment, kind) do
+    intent =
+      owned_intent(ship, portfolio, commitment,
+        type: kind,
+        parameters: %{"trade_symbol" => "IRON_ORE", "units" => 5}
+      )
+
+    {intent,
+     %{
+       "kind" => kind,
+       "trade_symbol" => "IRON_ORE",
+       "units" => 5,
+       "listing_price" => 10,
+       "cargo_before" => if(kind == "buy", do: 0, else: 5),
+       "credits_before" => 1000
+     }}
+  end
+
+  @tag :market_recovery
+  test "recovered partial buy records the effect without declaring the requested quantity complete" do
+    {agent, ship, portfolio, commitment} = claimed_ship("MARKET-PARTIAL-BUY")
+    {intent, action} = market_selection(ship, portfolio, commitment, "buy")
+    action = Map.put(action, "units", 2)
+
+    {:ok, %{intent: intent, attempt: attempt}} =
+      SpaceTraders.API.RecordedDispatch.prepare(agent, intent, action)
+
+    {:ok, _} = MutationAttempts.mark_sent_or_unknown(attempt)
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      assert conn.method == "GET"
+
+      data =
+        if conn.request_path == "/v2/my/agent",
+          do: %{"symbol" => agent.symbol, "credits" => 980},
+          else: market_ship_body(ship, 2)
+
+      Req.Test.json(conn, %{"data" => data})
+    end)
+
+    _ = Intents.reconcile(agent.id, ship.symbol, nil, :boot, intent.id)
+    assert MutationAttempts.get!(attempt.id).state == "accepted"
+    assert Repo.get!(Intent, intent.id).status == "blocked"
+    assert length(MutationAttempts.list_for_agent(agent)) == 1
+  end
+
+  defp market_ship_body(ship, units) do
+    ship_body(ship.symbol, %{
+      "nav" => nav_body("DOCKED"),
+      "cargo" => %{
+        "capacity" => 40,
+        "units" => units,
+        "inventory" => if(units == 0, do: [], else: [%{"symbol" => "IRON_ORE", "units" => units}])
+      }
+    })
+  end
+
   test "composite refuel proof preserves exact Ship and credit sources across restart" do
     {agent, ship, portfolio, commitment} = claimed_ship("COMPOSITE-SOURCE")
     intent = owned_intent(ship, portfolio, commitment, [])
