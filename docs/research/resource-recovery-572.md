@@ -80,6 +80,8 @@ Complete logs are retained under `/tmp/opencode/`.
 | Intermediate `scripts/verify` | Exit 0; 840 tests, 0 failures; 280.3 seconds ExUnit; generated drift, transport boundary and HTTP 200 boot pass | `572-canonical-final.log` (`COMMAND_EXIT=0`) |
 | Legacy jettison attribution | Red: 23 tests, 1 failure (markerless historical decrement accepted); green: 23 tests, 0 failures | `572-legacy-jettison-red.log`, `572-legacy-jettison-green.log` |
 | Final resource-only `scripts/verify` | **Exit 0; 841 tests, 0 failures; 201.4 seconds ExUnit; generated drift, transport boundary and HTTP 200 boot pass** | `572-canonical-authoritative.log` (`COMMAND_EXIT=0`) |
+| Post-integration targeted command (same seven files, `--seed 0 --trace`) | **Exit 0; 203 tests, 0 failures** | `572-integration-targeted.log` (`COMMAND_EXIT=0`) |
+| Post-integration `scripts/verify` | **Exit 0; 920 tests, 0 failures; generated drift, transport boundary and HTTP 200 boot pass** | `572-integration-canonical.log` (`COMMAND_EXIT=0`) |
 
 The initial prepared test fixture incorrectly had 100 Cargo units in capacity 40;
 `572-prepared-red.log` records that fixture failure. The corrected independent
@@ -87,6 +89,17 @@ behavioral red is `572-prepared-behavior-red.log`. Initial Stop coverage edited 
 Strategy row directly instead of invoking the public admission-owning Stop;
 `572-complete-targeted.log` retains that fixture failure. The corrected case uses
 `FleetStrategy.engage_emergency_stop/1` and cleans up its own admission cache entry.
+
+## Current integration merge
+
+Resource implementation commit: `f3be4eb`. Merged integration
+`aa3c272b74dbd9c18966b3e8a50e1b4be3c43118` into the resource branch before handoff.
+Bounded conflicts were the adopted-action predicate, response-continuation clauses,
+typed rejection handling and required-source allowlist. Resolution adopts
+integration's `unified_action?/1`, adds the resource kinds there, retains all other
+family continuations and unions every existing exact-source guard. Integration's
+`reconcile_selected_attempt/2` now also supplies resource accepted reconciliation.
+Post-integration verification above ran against this resolved tree.
 
 ## Limits
 
