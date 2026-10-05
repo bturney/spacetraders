@@ -1135,6 +1135,7 @@ defmodule SpaceTraders.Fleet.Intents do
         "siphon",
         "refine",
         "survey",
+        "jettison",
         "transfer"
       ]
   end
@@ -1282,7 +1283,7 @@ defmodule SpaceTraders.Fleet.Intents do
         do_advance_intents(agent, intent, live_ship)
       end
     else
-      if navigation_action?(intent.in_flight_action) do
+      if lifecycle_action?(intent.in_flight_action) do
         send_selected_action(agent, intent, live_ship)
       else
         case Agent.handle_game_result(agent, SpaceTraders.API.dispatch_recorded(intent)) do
@@ -1428,24 +1429,9 @@ defmodule SpaceTraders.Fleet.Intents do
 
   defp do_advance_intents(agent, %Intent{type: "acquire_resources"} = intent, live_ship) do
     case intent.in_flight_action do
-      %{"kind" => kind} = action when kind in ["extract", "siphon", "refine", "survey"] ->
+      %{"kind" => kind} = action
+      when kind in ["extract", "siphon", "refine", "survey", "jettison"] ->
         reconcile_resource_action(agent, intent, live_ship, action)
-
-      %{"kind" => kind} = action when kind in ["orbit", "navigate", "dock"] ->
-        if prerequisite_action_reconciled?(action, live_ship) do
-          with :ok <-
-                 reconcile_accepted_attempt(
-                   agent,
-                   intent,
-                   live_ship,
-                   "Ship position is authoritative"
-                 ),
-               {:ok, intent} <- transition_intent(intent, in_flight_action: nil) do
-            advance_intents(agent, intent, live_ship)
-          end
-        else
-          block_intents(intent, {:ambiguous_operation_evidence, kind})
-        end
 
       _ ->
         advance_resource_intent(agent, intent, live_ship)
@@ -2175,20 +2161,7 @@ defmodule SpaceTraders.Fleet.Intents do
       "produce" => intent.parameters["produce"]
     }
 
-    with {:ok, %{intent: intent}} <- prepare_recorded_action(agent, intent, action) do
-      case Agent.handle_game_result(agent, SpaceTraders.API.dispatch_recorded(intent)) do
-        {:ok, response} ->
-          accept_resource_response(agent, intent, ship, kind, response)
-
-        {:error, %SpaceTraders.API.GameplayError{} = reason} ->
-          clear_claim_and_block(intent, reason)
-
-        {:error, reason} ->
-          block_intents(intent, reason)
-      end
-    else
-      {:error, reason} -> block_preparation_refusal(intent, reason)
-    end
+    execute_action(agent, intent, ship, action)
   end
 
   defp valid_survey?(
@@ -2216,6 +2189,26 @@ defmodule SpaceTraders.Fleet.Intents do
       if response.cooldown && response.cooldown.remaining_seconds > 0,
         do: wait_for_manual_cooldown(agent, intent, %{ship | cooldown: response.cooldown}),
         else: advance_intents(agent, intent, ship)
+    end
+  end
+
+  defp accept_resource_response(_agent, intent, _ship, "jettison", %{cargo: cargo}) do
+    action = intent.in_flight_action
+
+    if jettison_cargo_proves?(action, cargo) do
+      transition_intent(intent,
+        status: "completed",
+        in_flight_action: nil,
+        last_action_result: %{
+          "kind" => "jettison",
+          "units" => action["units"],
+          "cargo" => cargo_evidence(cargo)
+        },
+        blocker: nil,
+        finished_at: DateTime.utc_now() |> DateTime.truncate(:second)
+      )
+    else
+      block_intents(intent, :resource_outcome_unresolved)
     end
   end
 
@@ -2252,6 +2245,21 @@ defmodule SpaceTraders.Fleet.Intents do
       _ -> block_intents(intent, :resource_outcome_unresolved)
     end
   end
+
+  defp jettison_cargo_proves?(
+         %{
+           "cargo_before" => %{"inventory" => inventory, "units" => before_units} = before,
+           "trade_symbol" => symbol,
+           "units" => units
+         },
+         cargo
+       )
+       when is_list(inventory) and is_integer(before_units) and is_binary(symbol) and
+              is_integer(units) and units > 0 do
+    cargo_delta(before, cargo) == %{symbol => -units} and cargo.units - before_units == -units
+  end
+
+  defp jettison_cargo_proves?(_, _), do: false
 
   defp resource_yield("extract", %{extraction: %{yield: %{symbol: symbol, units: units}}}),
     do: {:ok, %{"symbol" => symbol, "units" => units}}
@@ -2343,46 +2351,45 @@ defmodule SpaceTraders.Fleet.Intents do
   end
 
   defp reconcile_resource_action(agent, intent, ship, %{"kind" => "survey"}) do
-    attempt = MutationAttempts.latest_for_intent(intent)
-
-    confirmed? =
-      case {attempt, ship.cooldown} do
-        {%{state: "succeeded"}, _} ->
-          true
-
-        {%{state: state, sent_or_unknown_at: %DateTime{} = sent}, %{expiration: expiration}}
-        when state in ["sent_or_unknown", "ambiguous", "bounded_unknown"] and
-               is_binary(expiration) ->
-          with true <- Fleet.cooldown_active?(ship),
-               {:ok, expires, _} <- DateTime.from_iso8601(expiration),
-               true <- DateTime.after?(expires, sent),
-               :ok <- reconcile_resource_attempt(attempt) do
-            true
-          else
-            _ -> false
-          end
-
-        _ ->
-          false
-      end
-
-    if confirmed? do
-      with {:ok, intent} <-
-             transition_intent(intent,
-               in_flight_action: nil,
-               parameters: Map.put(intent.parameters, "survey_attempted", true)
-             ) do
-        if Fleet.cooldown_active?(ship),
-          do: wait_for_manual_cooldown(agent, intent, ship),
-          else: advance_intents(agent, intent, ship)
-      end
+    with :ok <- resource_acceptance_proven?(intent, ship),
+         :ok <-
+           reconcile_accepted_attempt(
+             agent,
+             intent,
+             ship,
+             "Fresh post-dispatch cooldown proves survey"
+           ),
+         {:ok, intent} <-
+           transition_intent(intent,
+             in_flight_action: nil,
+             parameters: Map.put(intent.parameters, "survey_attempted", true)
+           ) do
+      if Fleet.cooldown_active?(ship),
+        do: wait_for_manual_cooldown(agent, intent, ship),
+        else: advance_intents(agent, intent, ship)
     else
-      block_intents(intent, :survey_outcome_unresolved)
+      :intent_no_longer_owned -> :ok
+      _ -> block_intents(intent, :survey_outcome_unresolved)
+    end
+  end
+
+  defp reconcile_resource_action(agent, intent, ship, %{"kind" => "jettison"} = action) do
+    with true <- jettison_cargo_proves?(action, ship.cargo),
+         :ok <- resource_acceptance_proven?(intent, ship),
+         :ok <-
+           reconcile_accepted_attempt(
+             agent,
+             intent,
+             ship,
+             "Exact Cargo decrement proves the selected jettison"
+           ) do
+      accept_resource_response(agent, intent, ship, "jettison", %{cargo: ship.cargo})
+    else
+      _ -> block_intents(intent, :resource_outcome_unresolved)
     end
   end
 
   defp reconcile_resource_action(agent, intent, ship, %{"kind" => kind, "cargo_before" => before}) do
-    attempt = MutationAttempts.latest_for_intent(intent)
     delta = cargo_delta(before, ship.cargo)
 
     accepted? =
@@ -2402,11 +2409,15 @@ defmodule SpaceTraders.Fleet.Intents do
       end
 
     cond do
-      (attempt &&
-         attempt.state in ["succeeded", "sent_or_unknown", "ambiguous", "bounded_unknown"]) and
-          accepted? ->
-        with :ok <- resource_acceptance_proven?(attempt, ship),
-             :ok <- reconcile_resource_attempt(attempt) do
+      accepted? ->
+        with :ok <- resource_acceptance_proven?(intent, ship),
+             :ok <-
+               reconcile_accepted_attempt(
+                 agent,
+                 intent,
+                 ship,
+                 "Fresh Cargo and post-dispatch cooldown prove acquisition"
+               ) do
           yield =
             if kind == "refine",
               do: %{
@@ -2450,28 +2461,6 @@ defmodule SpaceTraders.Fleet.Intents do
     end
   end
 
-  defp reconcile_resource_attempt(%{state: "succeeded"}), do: :ok
-
-  defp reconcile_resource_attempt(attempt) do
-    case MutationAttempts.reconcile(attempt, :accepted, [
-           Evidence.reconciliation_observation(
-             "get-my-ship",
-             attempt,
-             :accepted,
-             "Fresh Cargo and post-dispatch cooldown prove acquisition",
-             Evidence.recovery_observed_at(
-               attempt.agent_id,
-               "get-my-ship",
-               attempt.dependency_keys,
-               attempt.prepared_at
-             )
-           )
-         ]) do
-      {:ok, _} -> :ok
-      error -> error
-    end
-  end
-
   defp announce_resource_ready(agent, ship, cooldown) do
     if not is_map(cooldown) or not is_integer(cooldown.remaining_seconds) or
          cooldown.remaining_seconds <= 0 do
@@ -2483,18 +2472,34 @@ defmodule SpaceTraders.Fleet.Intents do
     end
   end
 
-  defp resource_acceptance_proven?(%{state: "succeeded"}, _ship), do: :ok
-
-  defp resource_acceptance_proven?(%{sent_or_unknown_at: nil}, _ship),
-    do: {:error, :historical_action_unresolved}
-
-  defp resource_acceptance_proven?(attempt, ship) do
-    with true <- Fleet.cooldown_active?(ship),
-         {:ok, expires, _} <- DateTime.from_iso8601(ship.cooldown.expiration),
-         true <- DateTime.after?(expires, attempt.sent_or_unknown_at) do
+  defp resource_acceptance_proven?(
+         %Intent{in_flight_action: %{"kind" => "jettison"}} = intent,
+         _ship
+       ) do
+    if selected_effect_confirmed?(intent) do
       :ok
     else
-      _ -> {:error, :resource_outcome_unresolved}
+      case MutationAttempts.latest_for_intent(intent) do
+        %{sent_or_unknown_at: %DateTime{}} -> :ok
+        _ -> {:error, :historical_action_unresolved}
+      end
+    end
+  end
+
+  defp resource_acceptance_proven?(intent, ship) do
+    if selected_effect_confirmed?(intent) do
+      :ok
+    else
+      attempt = MutationAttempts.latest_for_intent(intent)
+
+      with %{sent_or_unknown_at: %DateTime{} = sent} <- attempt,
+           true <- Fleet.cooldown_active?(ship),
+           {:ok, expires, _} <- DateTime.from_iso8601(ship.cooldown.expiration),
+           true <- DateTime.after?(expires, sent) do
+        :ok
+      else
+        _ -> {:error, :resource_outcome_unresolved}
+      end
     end
   end
 
@@ -3018,9 +3023,9 @@ defmodule SpaceTraders.Fleet.Intents do
     end
   end
 
-  @doc "Executes a selected navigation/posture outcome through the same progression used on re-entry."
+  @doc "Executes a selected navigation, posture or resource outcome through the re-entry progression."
   def execute_action(agent, intent, live_ship, action) do
-    with true <- navigation_action?(action),
+    with true <- lifecycle_action?(action),
          {:ok, %{intent: selected}} <- prepare_recorded_action(agent, intent, action) do
       send_selected_action(agent, selected, live_ship)
     else
@@ -3029,10 +3034,22 @@ defmodule SpaceTraders.Fleet.Intents do
     end
   end
 
-  defp navigation_action?(%{"kind" => kind}),
-    do: kind in ["navigate", "warp", "orbit", "dock", "set_flight_mode"]
+  defp lifecycle_action?(%{"kind" => kind}),
+    do:
+      kind in [
+        "navigate",
+        "warp",
+        "orbit",
+        "dock",
+        "set_flight_mode",
+        "extract",
+        "siphon",
+        "refine",
+        "survey",
+        "jettison"
+      ]
 
-  defp navigation_action?(_), do: false
+  defp lifecycle_action?(_), do: false
 
   defp send_selected_action(agent, selected, live_ship) do
     case Agent.handle_game_result(agent, SpaceTraders.API.dispatch_recorded(selected)) do
@@ -3043,6 +3060,17 @@ defmodule SpaceTraders.Fleet.Intents do
         if selected.in_flight_action["kind"] == "navigate",
           do: recover_insufficient_fuel(agent, selected, live_ship, reason),
           else: block_intents(selected, reason)
+
+      {:error, %SpaceTraders.API.GameplayError{} = reason} ->
+        if selected.in_flight_action["kind"] in [
+             "extract",
+             "siphon",
+             "refine",
+             "survey",
+             "jettison"
+           ],
+           do: clear_claim_and_block(selected, reason),
+           else: block_intents(selected, reason)
 
       {:error, reason} ->
         block_intents(selected, reason)
@@ -4829,6 +4857,13 @@ defmodule SpaceTraders.Fleet.Intents do
     end
   end
 
+  defp selected_effect_confirmed?(intent) do
+    case MutationAttempts.latest_for_intent(intent) do
+      %{state: state} when state in ["accepted", "succeeded"] -> true
+      _ -> false
+    end
+  end
+
   defp reconcile_accepted_attempt(agent, intent, live_ship, basis) do
     case MutationAttempts.unresolved_for_intent(intent) do
       nil ->
@@ -5076,6 +5111,10 @@ defmodule SpaceTraders.Fleet.Intents do
       )
     )
   end
+
+  defp continue_selected_response(agent, intent, live_ship, %{"kind" => kind}, response)
+       when kind in ["extract", "siphon", "refine", "survey", "jettison"],
+       do: accept_resource_response(agent, intent, live_ship, kind, response)
 
   defp continue_selected_response(
          agent,
