@@ -10,7 +10,7 @@ defmodule SpaceTraders.ManualInterventionTest do
   alias SpaceTraders.Fleet
   alias SpaceTraders.Fleet.{Intent, Intents, ShipServer}
   alias SpaceTraders.Timeline
-  alias SpaceTraders.{ManualIntervention, Repo, ShipReservation}
+  alias SpaceTraders.{ManualIntervention, MutationAttempts, Repo, ShipReservation}
 
   test "an exceptional Navigate mutation records its Intent and rejects overlapping intervention" do
     operator = operator_fixture()
@@ -207,6 +207,75 @@ defmodule SpaceTraders.ManualInterventionTest do
     assert [%ManualIntervention{intent_id: nil, final_status: "completed"}] =
              ManualIntervention.list(scope)
   end
+
+  for trigger <- [:boot, :arrival] do
+    test "#{trigger} recovers a lost intervention Navigate response from retained evidence without replay" do
+      on_exit(fn -> ShipServer.stop_all() end)
+
+      operator = operator_fixture()
+      agent = agent_fixture(operator)
+      symbol = "#{agent.symbol}-1"
+      {:ok, ship} = Fleet.record_ship(agent, symbol, "SHIP_COMMAND_FRIGATE")
+      scope = Scope.for_operator(operator)
+      activate_generation(scope, agent)
+      assert {:ok, _reservation} = ShipReservation.reserve(scope, ship.id, "Recovery")
+
+      ship_path = "/v2/my/ships/#{symbol}"
+      in_transit = nav_body("IN_TRANSIT", arrival: future_arrival(), destination: "X1-UX81-A2")
+      game = start_supervised!({Elixir.Agent, fn -> %{nav: nav_body("DOCKED"), posts: []} end})
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", ^ship_path} ->
+            nav = Elixir.Agent.get(game, & &1.nav)
+            Req.Test.json(conn, %{"data" => ship_body(symbol, %{"nav" => nav})})
+
+          {"POST", path} ->
+            kind = Path.basename(path)
+            Elixir.Agent.update(game, &%{&1 | posts: &1.posts ++ [kind]})
+
+            case kind do
+              "orbit" ->
+                Elixir.Agent.update(game, &%{&1 | nav: nav_body("IN_ORBIT")})
+                Req.Test.json(conn, %{"data" => %{"nav" => nav_body("IN_ORBIT")}})
+
+              "navigate" ->
+                # The game accepts the request, but its response never arrives.
+                Elixir.Agent.update(game, &%{&1 | nav: in_transit})
+                Req.Test.transport_error(conn, :timeout)
+            end
+        end
+      end)
+
+      _ = Intents.intervene_navigate(scope, agent, symbol, "X1-UX81-A2", "Correct course")
+
+      assert Elixir.Agent.get(game, & &1.posts) == ["orbit", "navigate"]
+      assert [%ManualIntervention{intent_id: intent_id}] = ManualIntervention.list(scope)
+      selected = Repo.get!(Intent, intent_id)
+      assert selected.in_flight_action["kind"] == "navigate"
+      lost = MutationAttempts.get!(selected.mutation_attempt_id)
+      assert lost.state in ["sent_or_unknown", "ambiguous"]
+      assert SpaceTraders.SafetyFence.active?(lost)
+
+      ShipServer.stop(symbol)
+      _ = Intents.reconcile(agent.id, symbol, nil, unquote(trigger), intent_id)
+
+      assert Elixir.Agent.get(game, & &1.posts) == ["orbit", "navigate"]
+      recovered = MutationAttempts.get!(lost.id)
+      assert recovered.state == "accepted"
+      refute SpaceTraders.SafetyFence.active?(recovered)
+
+      assert [%{"source" => %{"id" => _source_id}}] =
+               List.last(recovered.outcomes).evidence["observations"]
+
+      assert %Intent{status: "waiting", in_flight_action: nil} = Repo.get!(Intent, intent_id)
+      assert length(MutationAttempts.list_for_agent(agent)) == 2
+      assert [%ManualIntervention{intent_id: ^intent_id}] = ManualIntervention.list(scope)
+    end
+  end
+
+  defp future_arrival,
+    do: DateTime.utc_now() |> DateTime.add(3600) |> DateTime.to_iso8601()
 
   defp activate_generation(scope, agent) do
     {:ok, strategy} = SpaceTraders.FleetStrategy.select_preset(scope, "steady_growth")

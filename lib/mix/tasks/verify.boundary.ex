@@ -16,9 +16,10 @@ defmodule Mix.Tasks.Verify.Boundary do
   @transport_functions ~w(new request post get patch put delete)a
   @approved_transport_files ["lib/spacetraders/api.ex", "lib/mix/tasks/verify.boot.ex"]
   @boundary_file "lib/mix/tasks/verify.boundary.ex"
+  @intent_execution_file "lib/spacetraders/fleet/intents.ex"
   @attempt_admission_files [
     "lib/spacetraders/api.ex",
-    "lib/spacetraders/api/recorded_dispatch.ex",
+    "lib/spacetraders/fleet/intents/recorded_action.ex",
     "lib/spacetraders/mutation_attempts.ex"
   ]
   @retired_ship_sends ~w(navigate_ship warp_ship jump_ship set_ship_flight_mode dock_ship orbit_ship extract_resources extract_resources_with_survey create_survey siphon_resources refine_ship scan_waypoints create_chart refuel_ship sell_cargo purchase_cargo jettison_cargo install_ship_module remove_ship_module transfer_cargo deliver_contract supply_construction reconcile_absent_and_retry)a
@@ -127,6 +128,20 @@ defmodule Mix.Tasks.Verify.Boundary do
       module == "SpaceTraders.API" and function in @retired_ship_sends ->
         "retired unrecorded Ship send (ADR 0010; #505)"
 
+      module == "SpaceTraders.API" and function == :dispatch_recorded and
+          path not in [@intent_execution_file, "lib/spacetraders/api.ex"] ->
+        "recorded transport bypasses root Intent progression (#575)"
+
+      module == "SpaceTraders.API.RecordedDispatch" ->
+        "retired recorded coordination; use root Intent progression (#575)"
+
+      module == "SpaceTraders.Fleet.Intents.RecordedAction" and
+          ((function in [:prepare, :prepare_retry, :retry_authority] and
+              path != @intent_execution_file) or
+             (function in [:admit_send, :authorize_transport, :require_commit_boundary] and
+                path != "lib/spacetraders/api.ex")) ->
+        "caller-owned recorded admission; use root Intent progression (#575)"
+
       module == "SpaceTraders.Contracts" and function == :deliver_goods ->
         "Ship delivery must use recorded dispatch"
 
@@ -140,7 +155,7 @@ defmodule Mix.Tasks.Verify.Boundary do
       module == "SpaceTraders.MutationAttempts" and
         function in [:prepare, :prepare_retry, :mark_sent_or_unknown] and
           path not in @attempt_admission_files ->
-        "caller-owned attempt admission; use RecordedDispatch"
+        "caller-owned attempt admission; use root Intent recorded progression"
 
       true ->
         nil

@@ -32,6 +32,7 @@ defmodule SpaceTraders.SafetyFence.DependencyKey do
   end
 
   def observation_subject("get-my-agent", _keys, symbol), do: "agent:#{symbol}"
+  def observation_subject("get-my-ships", _keys, symbol), do: "fleet:#{symbol}"
   def observation_subject("get-contracts", _keys, symbol), do: "contracts:#{symbol}"
 
   def observation_subject("get-construction", [key], _symbol) do

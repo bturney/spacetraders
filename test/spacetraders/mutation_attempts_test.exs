@@ -6,7 +6,7 @@ defmodule SpaceTraders.MutationAttemptsTest do
 
   alias SpaceTraders.Agent.Scope
   alias SpaceTraders.API
-  alias SpaceTraders.API.RecordedDispatch
+  alias SpaceTraders.Fleet.Intents.RecordedAction
   alias SpaceTraders.API.OperationInventory
   alias SpaceTraders.Evidence
   alias SpaceTraders.Fleet.{Intent, Ship}
@@ -295,20 +295,25 @@ defmodule SpaceTraders.MutationAttemptsTest do
     agent = agent_fixture(operator)
     attempt = ambiguous_attempt(agent, OperationInventory.fetch!("navigate-ship"), "FRESHNESS-1")
     now = DateTime.utc_now()
+    valid = observation(attempt, :accepted)
 
     for observed_at <- [
           DateTime.add(now, -31),
           DateTime.add(now, 31),
           DateTime.add(attempt.sent_or_unknown_at, -1, :microsecond)
         ] do
-      evidence =
-        Evidence.reconciliation_observation(
+      retained =
+        Evidence.authoritative_observation(
           "get-my-ship",
-          attempt,
-          :accepted,
-          "Ship reached its destination",
+          [valid.source.subject],
+          valid.source.facts,
           observed_at
         )
+
+      {:ok, %{observation: source}} =
+        Evidence.fulfil_demands(agent, valid.source.subject, retained)
+
+      evidence = %{valid | source: source, observed_at: source.observed_at}
 
       assert {:error, :authoritative_evidence_required} =
                MutationAttempts.reconcile(attempt, :accepted, [evidence])
@@ -450,6 +455,8 @@ defmodule SpaceTraders.MutationAttemptsTest do
     assert {:error, %API.Error{}} = API.dispatch_recorded(attempt)
     attempt = MutationAttempts.get!(attempt.id)
 
+    absence_proof = observation(attempt)
+
     Req.Test.stub(API, fn conn ->
       Req.Test.json(conn, %{
         "data" => %{
@@ -465,8 +472,8 @@ defmodule SpaceTraders.MutationAttemptsTest do
       })
     end)
 
-    assert {:ok, absent} = MutationAttempts.reconcile(attempt, :absent, [observation(attempt)])
-    assert {:ok, retry} = RecordedDispatch.prepare_retry(agent, intent, absent)
+    assert {:ok, absent} = MutationAttempts.reconcile(attempt, :absent, [absence_proof])
+    assert {:ok, retry} = RecordedAction.prepare_retry(agent, intent, absent)
     assert {:ok, %{}} = API.dispatch_recorded(retry)
     assert {:error, :attempt_already_dispatched} = API.dispatch_recorded(retry)
 
@@ -680,12 +687,24 @@ defmodule SpaceTraders.MutationAttemptsTest do
   end
 
   defp observation(attempt, outcome \\ :absent) do
-    Evidence.reconciliation_observation(
-      "get-my-ship",
-      attempt,
-      outcome,
-      "Fresh Ship state proves the requested effect #{outcome}.",
-      DateTime.add(attempt.sent_or_unknown_at, 1, :microsecond)
-    )
+    agent = Repo.get!(SpaceTraders.Agent.Agent, attempt.agent_id)
+    symbol = attempt.provenance["ship_symbol"]
+
+    Req.Test.stub(API, fn conn ->
+      assert conn.method == "GET"
+      Req.Test.json(conn, %{"data" => SpaceTraders.ShipBody.ship_body(symbol)})
+    end)
+
+    {:ok, binding} = Evidence.get_ship_binding(agent, symbol)
+
+    {:ok, [proof]} =
+      Evidence.recovery_proof(
+        attempt,
+        outcome,
+        "Fresh Ship state proves the requested effect #{outcome}.",
+        [binding]
+      )
+
+    proof
   end
 end

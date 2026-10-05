@@ -1,4 +1,4 @@
-defmodule SpaceTraders.API.RecordedDispatch do
+defmodule SpaceTraders.Fleet.Intents.RecordedAction do
   @moduledoc """
   Admission of recorded Ship actions. Ship Execution supplies the selected
   outcome; this boundary commits its identity and the sole MutationAttempts
@@ -16,6 +16,7 @@ defmodule SpaceTraders.API.RecordedDispatch do
   alias SpaceTraders.API.ShipAction
   alias SpaceTraders.Evidence
   alias SpaceTraders.Fleet.{Intent, Ship}
+  alias SpaceTraders.Fleet.Intents.Recovery
   alias SpaceTraders.FleetAllocation
   alias SpaceTraders.FleetAllocation.Portfolio
   alias SpaceTraders.FleetAllocation.Commitment
@@ -73,8 +74,28 @@ defmodule SpaceTraders.API.RecordedDispatch do
 
   def prepare(_agent, _intent, _action), do: {:error, :invalid_recorded_action}
 
+  @doc "Checks retry authority before capability reads; preparation and final admission recheck it."
+  def retry_authority(
+        %Agent{id: agent_id},
+        %Intent{} = intent,
+        %Attempt{agent_id: agent_id} = absent
+      ) do
+    with :ok <- require_commit_boundary() do
+      Repo.transaction(fn ->
+        case selected_owner_authority(locked_intent(intent.id), absent) do
+          {:ok, _authority} -> :ok
+          error -> error
+        end
+      end)
+      |> case do
+        {:ok, result} -> result
+        {:error, reason} -> {:error, reason}
+      end
+    end
+  end
+
   @doc "Consumes proven absence and links its one retry under the current owner."
-  def prepare_retry(%Agent{} = agent, %Intent{} = intent, %Attempt{} = absent) do
+  def prepare_retry(%Agent{} = agent, %Intent{} = intent, %Attempt{} = absent, opts \\ []) do
     with :ok <- require_commit_boundary() do
       Repo.transaction(fn ->
         current = locked_intent(intent.id)
@@ -83,12 +104,16 @@ defmodule SpaceTraders.API.RecordedDispatch do
              true <- current.mutation_attempt_id == absent.id,
              {:ok, authority} <- authority(agent.id, current),
              :ok <- claim_matches(current, authority.claim),
-             {:ok, action} <- bind_transfer(authority, current, current.in_flight_action),
-             true <- action == current.in_flight_action,
+             action <- refresh_evidence_references(current.in_flight_action, opts[:evidence]),
+             {:ok, action} <- bind_transfer(authority, current, action),
+             true <-
+               Recovery.request_identity(action) ==
+                 Recovery.request_identity(current.in_flight_action),
              {:ok, request} <- ShipAction.request(authority.ship.symbol, action),
-             {:ok, retry} <- prepare_attempt(authority, current, request, absent) do
+             {:ok, retry} <-
+               prepare_attempt(authority, %{current | in_flight_action: action}, request, absent) do
           current
-          |> Ecto.Changeset.change(mutation_attempt_id: retry.id)
+          |> Ecto.Changeset.change(mutation_attempt_id: retry.id, in_flight_action: action)
           |> Repo.update!()
 
           retry
@@ -186,14 +211,7 @@ defmodule SpaceTraders.API.RecordedDispatch do
   end
 
   defp selected_authority(%Intent{} = current, attempt) do
-    with true <- current.mutation_attempt_id == attempt.id,
-         true <-
-           Evidence.fingerprint(current.in_flight_action) ==
-             attempt.provenance["selected_action_fingerprint"],
-         {:ok, authority} <- authority(attempt.agent_id, current),
-         true <- generation_id(authority.generation) == attempt.fleet_generation_id,
-         true <- revision_id(authority.revision) == attempt.strategy_revision_id,
-         :ok <- claim_matches(current, authority.claim),
+    with {:ok, authority} <- selected_owner_authority(current, attempt),
          {:ok, action} <- bind_transfer(authority, current, current.in_flight_action),
          true <- action == current.in_flight_action,
          {:ok, request} <- ShipAction.request(authority.ship.symbol, action),
@@ -209,6 +227,24 @@ defmodule SpaceTraders.API.RecordedDispatch do
   end
 
   defp selected_authority(_, _), do: {:error, :recorded_action_no_longer_selected}
+
+  defp selected_owner_authority(%Intent{} = current, attempt) do
+    with true <- current.mutation_attempt_id == attempt.id,
+         true <-
+           Evidence.fingerprint(current.in_flight_action) ==
+             attempt.provenance["selected_action_fingerprint"],
+         {:ok, authority} <- authority(attempt.agent_id, current),
+         true <- generation_id(authority.generation) == attempt.fleet_generation_id,
+         true <- revision_id(authority.revision) == attempt.strategy_revision_id,
+         :ok <- claim_matches(current, authority.claim) do
+      {:ok, authority}
+    else
+      {:error, reason} -> {:error, reason}
+      _ -> {:error, :recorded_action_no_longer_selected}
+    end
+  end
+
+  defp selected_owner_authority(_, _), do: {:error, :recorded_action_no_longer_selected}
 
   defp suppress(attempt, reason) do
     case MutationAttempts.record_not_sent(attempt, inspect_reason(reason)) do
@@ -233,6 +269,7 @@ defmodule SpaceTraders.API.RecordedDispatch do
         [
           agent_id: authority.agent.id,
           selected_intent: intent,
+          evidence_references: Recovery.describe(intent.in_flight_action).evidence_references,
           dispatch_context: %{
             operator_id: authority.agent.operator_id,
             fleet_generation_id: generation_id(authority.generation),
@@ -429,13 +466,65 @@ defmodule SpaceTraders.API.RecordedDispatch do
              claim.portfolio_version == intent.fleet_commitment_portfolio_version,
          %Commitment{} = receiver <- Repo.get(Commitment, claim.commitment_id),
          units when is_integer(units) and units > 0 <- action["units"],
-         true <- Map.get(receiver.reservations, "cargo_capacity:#{target}", 0) >= units do
+         true <- Map.get(receiver.reservations, "cargo_capacity:#{target}", 0) >= units,
+         :ok <- transfer_evidence(authority, action) do
       {:ok, Map.put(action, "target_claim", action_binding(claim))}
     else
+      {:error, :transfer_evidence_unavailable} = gap -> gap
       _ -> {:error, :transfer_authority_unavailable}
     end
   end
 
   defp bind_transfer(_authority, _intent, %{} = action), do: {:ok, action}
   defp bind_transfer(_, _, _), do: {:error, :invalid_recorded_action}
+
+  # A retry may replace expired preflight sources with the newly judged ones,
+  # in the order the kind's Recovery description names its references.
+  defp refresh_evidence_references(action, bindings) when is_list(bindings) do
+    references = Recovery.describe(action).evidence_references
+
+    if references != [] and length(references) == length(bindings) and
+         Enum.all?(bindings, &match?(%Evidence.Binding{}, &1)) do
+      references
+      |> Enum.zip(bindings)
+      |> Enum.reduce(action, fn {key, binding}, action ->
+        Map.put(action, key, binding.observation.id)
+      end)
+    else
+      action
+    end
+  end
+
+  defp refresh_evidence_references(action, _bindings), do: action
+
+  defp transfer_evidence(authority, action) do
+    with {:ok, source} <-
+           Evidence.retained_ship_binding(authority.agent, action["source_observation_id"]),
+         {:ok, target} <-
+           Evidence.retained_ship_binding(authority.agent, action["target_observation_id"]),
+         true <-
+           Enum.all?(
+             [{source, authority.ship.symbol}, {target, action["target_ship"]}],
+             fn {binding, symbol} ->
+               binding.observation.fleet_generation_id == generation_id(authority.generation) and
+                 SpaceTraders.Evidence.ShipObservation.matches?(
+                   binding.observation,
+                   binding.value,
+                   symbol,
+                   nil
+                 )
+             end
+           ),
+         true <-
+           source.value.nav.status != "IN_TRANSIT" and target.value.nav.status != "IN_TRANSIT",
+         true <- source.value.nav.waypoint_symbol == target.value.nav.waypoint_symbol,
+         true <-
+           SpaceTraders.Fleet.item_units(source.value.cargo, action["trade_symbol"]) >=
+             action["units"],
+         true <- target.value.cargo.capacity - target.value.cargo.units >= action["units"] do
+      :ok
+    else
+      _ -> {:error, :transfer_evidence_unavailable}
+    end
+  end
 end

@@ -74,6 +74,28 @@ defmodule Mix.Tasks.Verify.BoundaryTest do
     assert [_violation | _] = Mix.Tasks.Verify.Boundary.verify_paths([path])
   end
 
+  test "rejects bypassing root Intent progression through recorded transport or admission helpers" do
+    path = Path.join(System.tmp_dir!(), "boundary-progression-#{System.unique_integer()}.ex")
+
+    File.write!(path, """
+    defmodule Bypass do
+      alias SpaceTraders.API
+      alias SpaceTraders.Fleet.Intents.RecordedAction, as: Admission
+      def run do
+        API.dispatch_recorded(:attempt)
+        Admission.prepare(:agent, :intent, :action)
+        Admission.prepare_retry(:agent, :intent, :absent)
+        Admission.admit_send(:attempt)
+      end
+    end
+    """)
+
+    on_exit(fn -> File.rm(path) end)
+    violations = Mix.Tasks.Verify.Boundary.verify_paths([path])
+    assert length(violations) == 4
+    assert Enum.all?(violations, &String.contains?(&1, "root Intent"))
+  end
+
   test "rejects retired Ship sends and caller-owned attempt admission, including grouped aliases" do
     path = Path.join(System.tmp_dir!(), "boundary-ship-#{System.unique_integer()}.ex")
 

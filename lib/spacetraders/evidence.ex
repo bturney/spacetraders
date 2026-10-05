@@ -23,9 +23,14 @@ defmodule SpaceTraders.Evidence do
   alias SpaceTraders.FleetStrategy.{Revision, Strategy}
   alias SpaceTraders.MutationAttempts.Attempt
   alias SpaceTraders.Repo
+  alias SpaceTraders.SafetyFence.DependencyKey
 
   @owned_read_deadline_seconds 60
   @owned_read_freshness_seconds 30
+  @unretained_conclusion_operations ~w(accept-contract fulfill-contract)
+  # Recovery evidence must be acquired after dispatch and at most this old.
+  @recovery_window_ms 30_000
+  @source_fields ~w(id agent_id fleet_generation_id subject operation_id facts response_fingerprint observed_at dependency_keys)a
 
   @market_facts ~w(symbol exports imports exchange trade_goods transactions)
   @waypoint_facts ~w(symbol system_symbol type x y orbits orbitals traits modifiers chart faction is_under_construction)
@@ -39,6 +44,176 @@ defmodule SpaceTraders.Evidence do
   @jump_gate_required_facts ~w(symbol connections)
   @shipyard_required_facts ~w(symbol ship_types)
   @system_required_facts ~w(symbol)
+
+  defmodule Binding do
+    @moduledoc "Decoded facts paired with their exact retained acquisition, reusable without restamping."
+    @enforce_keys [:value, :observation]
+    defstruct @enforce_keys
+  end
+
+  @doc "Reads a Ship and returns its exact persisted source; failed retention is an evidence gap."
+  def get_ship_binding(agent, symbol, opts \\ []) do
+    get_ship(agent, symbol, Keyword.put(opts, :bind, true))
+  end
+
+  @doc "Recovers one retained Ship acquisition by identity after restart, without another game read."
+  def retained_ship_binding(%AgentRecord{} = agent, observation_id) do
+    case retained_binding(agent, observation_id) do
+      {:ok, %Binding{observation: %Observation{operation_id: "get-my-ship"}}} = binding -> binding
+      _ -> {:error, :evidence_not_retained}
+    end
+  end
+
+  @doc """
+  Restores one exact retained acquisition by identity without another game
+  read or restamping. Its facts decode by the read that produced them.
+  """
+  def retained_binding(%AgentRecord{} = agent, observation_id) do
+    with {:ok, id} <- Ecto.UUID.cast(observation_id),
+         %Observation{} = source <- Repo.get(Observation, id),
+         {:ok, binding} <- bind_source(agent, source) do
+      {:ok, binding}
+    else
+      _ -> {:error, :evidence_not_retained}
+    end
+  end
+
+  defp bind_source(%AgentRecord{id: agent_id} = agent, %Observation{agent_id: agent_id} = source) do
+    with true <- retained_subject?(agent, source),
+         {:ok, value} <- decode_retained(source.operation_id, source.facts["response"]) do
+      {:ok, %Binding{value: value, observation: source}}
+    else
+      _ -> {:error, :evidence_not_retained}
+    end
+  end
+
+  defp bind_source(_agent, _source), do: {:error, :evidence_not_retained}
+
+  # Owned whole-Agent reads must name this Agent; other subjects carry their own identity.
+  defp retained_subject?(agent, %Observation{operation_id: operation_id} = source)
+       when operation_id in ["get-my-agent", "get-my-ships"],
+       do: source.subject == DependencyKey.observation_subject(operation_id, [], agent.symbol)
+
+  defp retained_subject?(_agent, _source), do: true
+
+  @retained_models %{
+    "get-my-ship" => SpaceTraders.API.Model.Ship,
+    "get-waypoint" => SpaceTraders.API.Model.Waypoint,
+    "get-construction" => SpaceTraders.API.Model.Construction,
+    "get-my-agent" => SpaceTraders.API.Model.Agent
+  }
+  @retained_lists %{
+    "get-contracts" => SpaceTraders.API.Model.Contract,
+    "get-my-ships" => SpaceTraders.API.Model.Ship
+  }
+
+  # Retained facts were validated when acquired; a row that no longer decodes
+  # is unusable evidence. Only malformed-data errors are classified that way.
+  defp decode_retained(operation_id, response) do
+    cond do
+      model = @retained_models[operation_id] ->
+        {:ok, model.from_json(api_keys(response))}
+
+      (model = @retained_lists[operation_id]) && is_list(response) ->
+        {:ok, Enum.map(response, &model.from_json(api_keys(&1)))}
+
+      true ->
+        :error
+    end
+  rescue
+    error in [ArgumentError, BadMapError, FunctionClauseError, KeyError, Protocol.UndefinedError] ->
+      _ = error
+      :error
+  end
+
+  @doc "Reuses an exact binding when still usable, otherwise acquires one governed replacement."
+  def recovery_ship_binding(agent, symbol, supplied, since \\ nil) do
+    binding =
+      case supplied do
+        %Binding{} = binding -> binding
+        %{evidence_binding: %Binding{} = binding} -> binding
+        _ -> nil
+      end
+
+    supplied_matches? =
+      case supplied do
+        %{evidence_binding: %Binding{value: value}} ->
+          Map.delete(supplied, :evidence_binding) == value
+
+        %Binding{} ->
+          true
+
+        _ ->
+          false
+      end
+
+    if supplied_matches? && binding && binding.observation.agent_id == agent.id &&
+         persisted_source?(binding.observation) &&
+         SpaceTraders.Evidence.ShipObservation.matches?(
+           binding.observation,
+           binding.value,
+           symbol,
+           since
+         ) do
+      {:ok, binding}
+    else
+      get_ship_binding(agent, symbol, lane: :safety, owner: "ship_execution")
+    end
+  end
+
+  @doc false
+  def bound_ship(%Binding{value: ship} = binding), do: Map.put(ship, :evidence_binding, binding)
+
+  @doc "Reads Agent facts with their exact retained source; unretained facts are not proof."
+  def get_agent_binding(agent, opts \\ []), do: get_agent(agent, Keyword.put(opts, :bind, true))
+
+  @doc "Reuses usable retained Agent-credit facts, or explicitly acquires one governed replacement."
+  def recovery_agent_binding(%AgentRecord{} = agent, %Attempt{} = attempt, opts \\ []) do
+    case retained_recovery_binding(agent, attempt, "get-my-agent") do
+      %Binding{} = binding ->
+        {:ok, binding}
+
+      nil ->
+        get_agent_binding(agent,
+          lane: :safety,
+          owner: Keyword.get(opts, :owner, "ship_execution")
+        )
+    end
+  end
+
+  @doc "Reuses an eligible retained owned Fleet, or acquires one governed replacement."
+  def recovery_fleet_binding(%AgentRecord{} = agent, %Attempt{} = attempt) do
+    case retained_recovery_binding(agent, attempt, "get-my-ships") do
+      %Binding{} = binding -> {:ok, binding}
+      nil -> get_ships(agent, bind: true, lane: :safety, owner: "fleet_reconciliation")
+    end
+  end
+
+  # The newest retained whole-Agent read still inside the attempt's recovery window.
+  defp retained_recovery_binding(agent, attempt, operation_id) do
+    now = Clock.utc_now()
+    oldest = DateTime.add(now, -@recovery_window_ms, :millisecond)
+    since = recovery_since(attempt)
+    subject = DependencyKey.observation_subject(operation_id, [], agent.symbol)
+
+    from(source in Observation,
+      where:
+        source.agent_id == ^agent.id and source.subject == ^subject and
+          source.operation_id == ^operation_id and source.observed_at >= ^since and
+          source.observed_at >= ^oldest and source.observed_at <= ^now,
+      order_by: [desc: source.observed_at, desc: source.id]
+    )
+    |> Repo.all()
+    |> Enum.find_value(fn source ->
+      with {:ok, binding} <- bind_source(agent, source),
+           true <- usable_binding?(binding, attempt),
+           [_ | _] <- source_dependencies(source) do
+        binding
+      else
+        _ -> nil
+      end
+    end)
+  end
 
   @doc "Reads a System through a governed World Observation Demand."
   def get_system(token_or_agent, system_symbol, opts \\ []) when is_binary(system_symbol) do
@@ -178,6 +353,7 @@ defmodule SpaceTraders.Evidence do
          read,
          key_suffix \\ nil
        ) do
+    {bind?, opts} = Keyword.pop(opts, :bind, false)
     credential_ref = credential_reference(token_or_agent)
     agent = owned_agent(credential_ref)
     required_facts = Keyword.get(opts, :required_facts, default_facts)
@@ -186,8 +362,17 @@ defmodule SpaceTraders.Evidence do
     request_opts = Keyword.put(opts, :demand, demand)
     key = {operation_id, subject, credential_ref.agent_id, key_suffix}
 
-    result = ReadCoordinator.read(key, fn -> read.(credential_ref, request_opts) end)
-    settle_governed_read(result, persisted_demand, agent, subject, operation_id)
+    if bind? do
+      # Coalesced recovery callers share the acquisition's retained source, not
+      # separately timestamped copies of one response. Keep result shapes apart.
+      ReadCoordinator.read({key, :binding}, fn ->
+        read.(credential_ref, request_opts)
+        |> retain_binding(agent, subject, operation_id)
+      end)
+    else
+      result = ReadCoordinator.read(key, fn -> read.(credential_ref, request_opts) end)
+      settle_governed_read(result, persisted_demand, agent, subject, operation_id)
+    end
   end
 
   defp settle_governed_read(
@@ -251,7 +436,11 @@ defmodule SpaceTraders.Evidence do
   def get_agent(token_or_agent, opts \\ []) when is_list(opts) do
     owned_read(
       token_or_agent,
-      "agent:#{owned_symbol(token_or_agent, "unknown")}",
+      DependencyKey.observation_subject(
+        "get-my-agent",
+        [],
+        owned_symbol(token_or_agent, "unknown")
+      ),
       "get-my-agent",
       ["response"],
       opts,
@@ -263,7 +452,11 @@ defmodule SpaceTraders.Evidence do
   def get_ships(token_or_agent, opts \\ []) when is_list(opts) do
     owned_read(
       token_or_agent,
-      "fleet:#{owned_symbol(token_or_agent, "unknown")}",
+      DependencyKey.observation_subject(
+        "get-my-ships",
+        [],
+        owned_symbol(token_or_agent, "unknown")
+      ),
       "get-my-ships",
       ["response"],
       opts,
@@ -313,6 +506,7 @@ defmodule SpaceTraders.Evidence do
   end
 
   defp owned_read(token_or_agent, subject, operation_id, required_facts, opts, read) do
+    {bind?, opts} = Keyword.pop(opts, :bind, false)
     credential_ref = credential_reference(token_or_agent)
     agent = owned_agent(credential_ref)
     demand = typed_demand(agent, subject, required_facts, opts)
@@ -320,8 +514,36 @@ defmodule SpaceTraders.Evidence do
     request_opts = Keyword.put(opts, :demand, demand)
 
     result = read.(credential_ref, request_opts)
-    settle_owned_demand(result, persisted_demand, agent, subject, operation_id, demand)
+
+    if bind? do
+      retain_binding(result, agent, subject, operation_id)
+    else
+      settle_owned_demand(result, persisted_demand, agent, subject, operation_id, demand)
+    end
   end
+
+  defp retain_binding({:ok, value}, %AgentRecord{} = agent, subject, operation_id) do
+    observation =
+      authoritative_observation(
+        operation_id,
+        [subject],
+        read_facts(operation_id, value),
+        Clock.utc_now()
+      )
+
+    case fulfil_demands(agent, subject, observation) do
+      {:ok, %{observation: source}} -> {:ok, %Binding{value: value, observation: source}}
+      {:error, reason} -> {:error, {:evidence_not_retained, reason}}
+    end
+  rescue
+    # Failed retention (storage refusal or loss) is an evidence gap, never proof.
+    error in [Postgrex.Error, DBConnection.ConnectionError, Ecto.ConstraintError] ->
+      _ = error
+      {:error, :evidence_not_retained}
+  end
+
+  defp retain_binding({:error, _} = error, _agent, _subject, _operation_id), do: error
+  defp retain_binding(_, _, _, _), do: {:error, :evidence_not_retained}
 
   defp typed_demand(agent, subject, required_facts, opts) do
     now = Clock.utc_now()
@@ -442,23 +664,6 @@ defmodule SpaceTraders.Evidence do
 
   defp settle_owned_demand(result, nil, _agent, _subject, _operation_id, _typed_demand),
     do: result
-
-  @doc false
-  def recovery_observed_at(agent_id, operation_id, dependencies, fallback) do
-    agent = Repo.get!(AgentRecord, agent_id)
-
-    subject =
-      SpaceTraders.SafetyFence.DependencyKey.observation_subject(
-        operation_id,
-        dependencies,
-        agent.symbol
-      )
-
-    case subject && latest_observation(agent, subject) do
-      %Observation{operation_id: ^operation_id, observed_at: observed_at} -> observed_at
-      _ -> DateTime.add(fallback, -1, :microsecond)
-    end
-  end
 
   defp active_revision(operator_id) do
     Revision
@@ -935,7 +1140,7 @@ defmodule SpaceTraders.Evidence do
   defmodule AuthoritativeObservation do
     @moduledoc "A successful authoritative read with the facts used for reconciliation."
     @enforce_keys [:operation_id, :observed_at, :dependency_keys, :facts, :response_fingerprint]
-    defstruct @enforce_keys
+    defstruct @enforce_keys ++ [source: nil]
 
     @type t :: %__MODULE__{}
   end
@@ -972,7 +1177,8 @@ defmodule SpaceTraders.Evidence do
             dependency_keys: observation.dependency_keys,
             facts: persisted_facts,
             response_fingerprint: fingerprint(persisted_facts),
-            observed_at: observation.observed_at
+            observed_at: observation.observed_at,
+            fleet_generation_id: observation_generation(agent.id)
           })
 
         _ = FleetGeneration.observe_observation(agent, persisted)
@@ -1088,10 +1294,269 @@ defmodule SpaceTraders.Evidence do
 
   def valid_observation?(_observation), do: false
 
+  @doc "Assembles source-derived coverage without acquiring evidence or contributing conclusion coverage."
+  def recovery_proof(%Attempt{} = attempt, outcome, basis, bindings)
+      when outcome in [:accepted, :absent, :bounded_unknown] and is_binary(basis) and basis != "" do
+    {usable, unusable} = Enum.split_with(bindings, &usable_binding?(&1, attempt))
+
+    observations =
+      Enum.map(usable, fn %Binding{observation: source} ->
+        %AuthoritativeObservation{
+          operation_id: source.operation_id,
+          observed_at: source.observed_at,
+          dependency_keys: source_dependencies(source),
+          source: source,
+          facts:
+            Map.put(source.facts, "reconciliation", %{
+              "mutation_attempt_id" => attempt.id,
+              "request_fingerprint" => attempt.request_fingerprint,
+              "outcome" => Atom.to_string(outcome),
+              "basis" => basis
+            }),
+          response_fingerprint: ""
+        }
+        |> then(fn observation ->
+          %{observation | response_fingerprint: fingerprint(observation.facts)}
+        end)
+      end)
+
+    covered = Enum.flat_map(observations, & &1.dependency_keys)
+    missing = attempt.dependency_keys -- covered
+
+    if missing == [] and unusable == [] and observations != [],
+      do: {:ok, observations},
+      else: {:incomplete, %{usable: usable, missing: missing, unusable: unusable}}
+  end
+
+  defp usable_binding?(%Binding{value: value, observation: %Observation{} = source}, attempt) do
+    source.facts["response"] == serialize_read_value(value) and
+      valid_recovery_source?(source, attempt)
+  end
+
+  defp usable_binding?(_, _), do: false
+
+  @doc false
+  def valid_recovery_source?(%Observation{} = source, attempt) do
+    source.agent_id == attempt.agent_id and
+      source.fleet_generation_id == attempt.fleet_generation_id and
+      recovery_fresh?(source.observed_at, attempt) and persisted_source?(source) and
+      valid_observation?(source)
+  end
+
+  def valid_recovery_source?(
+        %AuthoritativeObservation{source: %Observation{} = source} = proof,
+        attempt
+      ) do
+    valid_recovery_source?(source, attempt) and proof.operation_id == source.operation_id and
+      proof.observed_at == source.observed_at and
+      proof.dependency_keys == source_dependencies(source) and
+      Map.delete(stringify_keys(proof.facts), "reconciliation") == source.facts
+  end
+
+  # Contract acceptance and fulfilment still settle from a caller-assembled
+  # Contract read; every other operation must cite an exact retained source.
+  def valid_recovery_source?(%AuthoritativeObservation{source: nil}, attempt),
+    do: attempt.operation_id in @unretained_conclusion_operations
+
+  def valid_recovery_source?(_, _), do: false
+
+  @doc "Whether an observation time falls in an attempt's post-dispatch recovery window."
+  def recovery_fresh?(%DateTime{} = observed_at, attempt) do
+    DateTime.compare(observed_at, recovery_since(attempt)) != :lt and
+      DateTime.diff(Clock.utc_now(), observed_at, :millisecond) in 0..@recovery_window_ms
+  end
+
+  def recovery_fresh?(_observed_at, _attempt), do: false
+
+  defp recovery_since(attempt), do: attempt.sent_or_unknown_at || attempt.prepared_at
+
+  defp persisted_source?(%Observation{id: id} = source) when is_binary(id) do
+    with {:ok, id} <- Ecto.UUID.cast(id),
+         %Observation{} = retained <- Repo.get(Observation, id) do
+      Map.take(retained, @source_fields) == Map.take(source, @source_fields)
+    else
+      _ -> false
+    end
+  end
+
+  defp persisted_source?(_), do: false
+
+  defp source_dependencies(
+         %Observation{operation_id: "get-my-ship", subject: "ship:" <> symbol} = source
+       ) do
+    with {:ok, ship} <- decode_retained("get-my-ship", source.facts["response"]),
+         :ok <- SpaceTraders.Evidence.ShipObservation.validate(ship, symbol) do
+      [DependencyKey.ship(source.agent_id, symbol)]
+    else
+      _ -> []
+    end
+  end
+
+  defp source_dependencies(
+         %Observation{operation_id: "get-waypoint", subject: "waypoint:" <> subject} = source
+       ) do
+    response = source.facts["response"]
+
+    with [system, symbol] <- String.split(subject, ":"),
+         %{"system_symbol" => ^system, "symbol" => ^symbol, "chart" => chart} <- response,
+         true <- chart_state?(chart, symbol) do
+      [DependencyKey.waypoint(source.agent_id, symbol)]
+    else
+      _ -> []
+    end
+  end
+
+  defp source_dependencies(
+         %Observation{operation_id: "get-contracts", subject: "contracts:" <> _} = source
+       ) do
+    case source.facts["response"] do
+      contracts when is_list(contracts) ->
+        for contract <- contracts,
+            valid_contract_progress?(contract),
+            do: DependencyKey.contract(source.agent_id, contract["id"])
+
+      _ ->
+        []
+    end
+  end
+
+  defp source_dependencies(
+         %Observation{operation_id: "get-construction", subject: "construction:" <> _} = source
+       ) do
+    case source.facts["response"] do
+      %{"symbol" => symbol, "is_complete" => complete, "materials" => materials}
+      when is_binary(symbol) and symbol != "" and is_boolean(complete) and is_list(materials) ->
+        if String.ends_with?(source.subject, ":" <> symbol) and
+             Enum.all?(materials, &valid_material_progress?/1),
+           do: [DependencyKey.construction(source.agent_id, symbol)],
+           else: []
+
+      _ ->
+        []
+    end
+  end
+
+  defp source_dependencies(
+         %Observation{operation_id: "get-my-agent", subject: "agent:" <> symbol} = source
+       ) do
+    case source.facts["response"] do
+      %{"symbol" => ^symbol, "credits" => credits}
+      when is_integer(credits) and credits >= 0 ->
+        if match?(%AgentRecord{symbol: ^symbol}, Repo.get(AgentRecord, source.agent_id)),
+          do: [DependencyKey.agent_credits(source.agent_id)],
+          else: []
+
+      _ ->
+        []
+    end
+  end
+
+  defp source_dependencies(
+         %Observation{operation_id: "get-my-ships", subject: "fleet:" <> _} = source
+       ) do
+    ships = source.facts["response"]
+
+    if owned_subject?(source, "fleet") and is_list(ships) and
+         Enum.all?(ships, fn
+           %{"symbol" => symbol} when is_binary(symbol) and symbol != "" -> true
+           _ -> false
+         end) and length(Enum.uniq_by(ships, & &1["symbol"])) == length(ships),
+       do: [DependencyKey.owned_fleet(source.agent_id)],
+       else: []
+  end
+
+  defp source_dependencies(_), do: []
+
+  # A Waypoint's chart state is either uncharted or one complete attribution.
+  defp chart_state?(nil, _symbol), do: true
+
+  defp chart_state?(
+         %{"waypoint_symbol" => symbol, "submitted_by" => by, "submitted_on" => submitted_on},
+         symbol
+       )
+       when is_binary(by) and by != "" and is_binary(submitted_on),
+       do: match?({:ok, _, _}, DateTime.from_iso8601(submitted_on))
+
+  defp chart_state?(_chart, _symbol), do: false
+
+  defp valid_contract_progress?(%{
+         "id" => id,
+         "accepted" => accepted,
+         "fulfilled" => fulfilled,
+         "terms" => %{"deliver" => goods}
+       })
+       when is_binary(id) and id != "" and is_boolean(accepted) and is_boolean(fulfilled) and
+              is_list(goods) do
+    Enum.all?(goods, fn
+      %{
+        "trade_symbol" => symbol,
+        "destination_symbol" => waypoint,
+        "units_required" => required,
+        "units_fulfilled" => delivered
+      }
+      when is_binary(symbol) and symbol != "" and is_binary(waypoint) and waypoint != "" and
+             is_integer(required) and required >= 0 and is_integer(delivered) and delivered >= 0 and
+             delivered <= required ->
+        true
+
+      _ ->
+        false
+    end)
+  end
+
+  defp valid_contract_progress?(_), do: false
+
+  defp valid_material_progress?(%{
+         "trade_symbol" => symbol,
+         "required" => required,
+         "fulfilled" => fulfilled
+       })
+       when is_binary(symbol) and symbol != "" and is_integer(required) and required >= 0 and
+              is_integer(fulfilled) and fulfilled >= 0 and fulfilled <= required,
+       do: true
+
+  defp valid_material_progress?(_), do: false
+
+  defp owned_subject?(source, kind) do
+    case Repo.get(AgentRecord, source.agent_id) do
+      %AgentRecord{symbol: symbol} -> source.subject == "#{kind}:#{symbol}"
+      _ -> false
+    end
+  end
+
+  # Retained decoded facts use snake_case; generated models consume API camelCase.
+  defp api_keys(value) when is_map(value) do
+    Map.new(value, fn {key, nested} ->
+      [first | rest] = String.split(key, "_")
+      {first <> Enum.map_join(rest, &String.capitalize/1), api_keys(nested)}
+    end)
+  end
+
+  defp api_keys(value) when is_list(value), do: Enum.map(value, &api_keys/1)
+  defp api_keys(value), do: value
+
+  defp observation_generation(agent_id) do
+    Repo.one(
+      from generation in SpaceTraders.FleetGeneration.Generation,
+        where: generation.agent_id == ^agent_id and is_nil(generation.retired_at),
+        select: generation.id
+    )
+  end
+
   def serialize(%AuthoritativeObservation{} = observation) do
     observation
     |> Map.from_struct()
     |> Map.update!(:observed_at, &DateTime.to_iso8601/1)
+    |> Map.update!(:source, fn
+      nil ->
+        nil
+
+      source ->
+        source
+        |> Map.from_struct()
+        |> Map.take(@source_fields -- [:dependency_keys])
+        |> Map.update!(:observed_at, &DateTime.to_iso8601/1)
+    end)
   end
 
   def serialize(%ConstraintAccounting{} = accounting), do: Map.from_struct(accounting)
@@ -1229,7 +1694,8 @@ defmodule SpaceTraders.Evidence do
 
   defp stringify_keys(%DateTime{} = value), do: DateTime.to_iso8601(value)
 
-  defp stringify_keys(%_{} = value), do: value |> Map.from_struct() |> stringify_keys()
+  defp stringify_keys(%_{} = value),
+    do: value |> Map.from_struct() |> Map.delete(:evidence_binding) |> stringify_keys()
 
   defp stringify_keys(value) when is_map(value) do
     Map.new(value, fn {key, nested} -> {to_string(key), stringify_keys(nested)} end)

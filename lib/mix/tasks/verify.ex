@@ -30,7 +30,7 @@ defmodule Mix.Tasks.Verify do
   @required_checks [
     {"compile", ["--warnings-as-errors"]},
     {"format", ["--check-formatted"]},
-    {"test", []},
+    {"test", ["--raise"]},
     {"space_traders.gen.models", ["--check"]},
     {"space_traders.gen.operations", ["--check"]},
     {"verify.boundary", []},

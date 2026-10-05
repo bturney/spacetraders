@@ -263,53 +263,70 @@ defmodule SpaceTraders.MutationAttempts do
 
   def reconcile(%Attempt{} = attempt, resolution, observations, opts)
       when resolution in [:accepted, :absent, :bounded_unknown] and is_list(observations) do
-    with {:ok, evidence} <-
-           validate_reconciliation_evidence(attempt, resolution, observations, opts) do
-      action_selected = resolution == :absent and action_remains_selected?(attempt)
+    Repo.transaction(fn ->
+      current = locked_attempt(attempt.id)
 
-      append_outcome(
-        attempt,
-        resolution,
-        if(resolution == :absent,
-          do:
-            Map.put(evidence, :action_selection, %{
-              selected: action_selected,
-              intent_id: attempt.provenance["intent_id"],
-              fingerprint: attempt.provenance["selected_action_fingerprint"]
-            }),
-          else: evidence
-        ),
-        retry_authorized: action_selected
-      )
+      with {:ok, evidence} <-
+             validate_reconciliation_evidence(current, resolution, observations, opts) do
+        action_selected = resolution == :absent and action_remains_selected?(current)
+
+        append_outcome(
+          current,
+          resolution,
+          if(resolution == :absent,
+            do:
+              Map.put(evidence, :action_selection, %{
+                selected: action_selected,
+                intent_id: current.provenance["intent_id"],
+                fingerprint: current.provenance["selected_action_fingerprint"]
+              }),
+            else: evidence
+          ),
+          retry_authorized: action_selected
+        )
+      end
+    end)
+    |> case do
+      {:ok, result} -> result
+      {:error, reason} -> {:error, reason}
     end
   end
 
   @doc "Consumes an unused retry when fresh dependent evidence already satisfies its selected outcome."
   def withdraw_retry(%Attempt{} = attempt, observations) do
-    with {:ok, evidence} <- validate_reconciliation_evidence(attempt, :accepted, observations, []) do
-      Repo.transaction(fn ->
-        current = locked_attempt(attempt.id)
+    Repo.transaction(fn ->
+      current = locked_attempt(attempt.id)
 
-        unless current.state == "absent" and current.retry_authorized and
-                 action_remains_selected?(current),
-               do: Repo.rollback(:retry_not_authorized)
+      evidence =
+        case validate_reconciliation_evidence(current, :accepted, observations, []) do
+          {:ok, evidence} -> evidence
+          {:error, reason} -> Repo.rollback(reason)
+        end
 
-        updated = current |> Ecto.Changeset.change(retry_authorized: false) |> Repo.update!()
+      unless current.state == "absent" and current.retry_authorized and
+               action_remains_selected?(current),
+             do: Repo.rollback(:retry_not_authorized)
 
-        Repo.insert!(%Outcome{
-          mutation_attempt_id: current.id,
-          classification: "absent",
-          evidence: scrub(Map.put(evidence, "retry_disposition", "selected_outcome_satisfied")),
-          recorded_at: DateTime.utc_now()
-        })
+      updated = current |> Ecto.Changeset.change(retry_authorized: false) |> Repo.update!()
 
-        Repo.preload(updated, :outcomes, force: true)
-      end)
-    end
+      Repo.insert!(%Outcome{
+        mutation_attempt_id: current.id,
+        classification: "absent",
+        evidence: scrub(Map.put(evidence, "retry_disposition", "selected_outcome_satisfied")),
+        recorded_at: DateTime.utc_now()
+      })
+
+      Repo.preload(updated, :outcomes, force: true)
+    end)
   end
 
   @doc "Retires unused proven-absence retry permission when its owner remains Emergency Stopped."
-  def retire_stopped_retry(%Attempt{} = attempt) do
+  def retire_stopped_retry(%Attempt{} = attempt),
+    do: retire_unused_retry(attempt, "retired_while_emergency_stopped")
+
+  @doc "Retires unused absence permission after the selected owner's admission refuses authority."
+  def retire_unused_retry(%Attempt{} = attempt, disposition)
+      when disposition in ["retired_while_emergency_stopped", "retired_authority_unavailable"] do
     Repo.transaction(fn ->
       current = locked_attempt(attempt.id)
 
@@ -322,7 +339,7 @@ defmodule SpaceTraders.MutationAttempts do
       Repo.insert!(%Outcome{
         mutation_attempt_id: current.id,
         classification: "absent",
-        evidence: %{"retry_disposition" => "retired_while_emergency_stopped"},
+        evidence: %{"retry_disposition" => disposition},
         recorded_at: DateTime.utc_now()
       })
 
@@ -468,7 +485,13 @@ defmodule SpaceTraders.MutationAttempts do
       operation_id: operation.id,
       operation_owner: Atom.to_string(operation.owner),
       state: "prepared",
-      request_fingerprint: fingerprint(operation.id, prepared_evidence, dependency_keys),
+      request_fingerprint:
+        fingerprint(
+          operation.id,
+          prepared_evidence,
+          dependency_keys,
+          Keyword.get(opts, :evidence_references, [])
+        ),
       prepared_evidence: prepared_evidence,
       expected_effects: operation.success_evidence,
       consequence_bounds: operation.consequences,
@@ -693,7 +716,15 @@ defmodule SpaceTraders.MutationAttempts do
     |> Map.take(@correlation_keys)
   end
 
-  defp fingerprint(operation_id, prepared_evidence, dependency_keys) do
+  # The owner names selected-action keys that only reference replaceable
+  # preflight observations; they do not change the request a retry repeats.
+  # Selection provenance separately binds the exact admitted action/evidence.
+  defp fingerprint(operation_id, prepared_evidence, dependency_keys, evidence_references \\ []) do
+    prepared_evidence =
+      if is_map(prepared_evidence["selected_action"]),
+        do: Map.update!(prepared_evidence, "selected_action", &Map.drop(&1, evidence_references)),
+        else: prepared_evidence
+
     Evidence.fingerprint({operation_id, prepared_evidence, dependency_keys})
   end
 
@@ -713,13 +744,10 @@ defmodule SpaceTraders.MutationAttempts do
   end
 
   defp validate_observations(attempt, resolution, observations) do
-    since = attempt.sent_or_unknown_at || attempt.prepared_at
-    now = SpaceTraders.Clock.utc_now()
-
     fresh? = fn observation ->
-      Evidence.valid_observation?(observation) and match?(%DateTime{}, observation.observed_at) and
-        DateTime.compare(observation.observed_at, since) != :lt and
-        DateTime.diff(now, observation.observed_at, :millisecond) in 0..30_000
+      Evidence.valid_observation?(observation) and
+        Evidence.valid_recovery_source?(observation, attempt) and
+        Evidence.recovery_fresh?(observation.observed_at, attempt)
     end
 
     covered_dependencies =

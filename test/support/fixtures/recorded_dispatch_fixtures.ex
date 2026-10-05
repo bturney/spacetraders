@@ -9,12 +9,13 @@ defmodule SpaceTraders.RecordedDispatchFixtures do
   import Ecto.Query
 
   alias SpaceTraders.Agent.{Agent, Operator, Scope}
-  alias SpaceTraders.API.RecordedDispatch
+  alias SpaceTraders.Fleet.Intents.RecordedAction
   alias SpaceTraders.Fleet.{Intent, Ship}
   alias SpaceTraders.FleetAllocation
   alias SpaceTraders.FleetAllocation.PortfolioCandidate
   alias SpaceTraders.FleetGeneration.Generation
   alias SpaceTraders.FleetStrategy.{Revision, Strategy}
+  alias SpaceTraders.SafetyFence.DependencyKey
   alias SpaceTraders.{ManualIntervention, Repo, ShipReservation}
 
   def dispatch_action(ship_symbol, action, token \\ "TOKEN") do
@@ -46,7 +47,12 @@ defmodule SpaceTraders.RecordedDispatchFixtures do
         intervention_intent(agent, ship, action, opts[:intent])
       end
 
-    case RecordedDispatch.prepare(agent, intent, action) do
+    action =
+      if action["kind"] == "transfer",
+        do: transfer_evidence(agent, ship_symbol, action),
+        else: action
+
+    case RecordedAction.prepare(agent, intent, action) do
       {:ok, selected} ->
         Map.merge(selected, %{agent: agent, ship: ship})
 
@@ -54,6 +60,56 @@ defmodule SpaceTraders.RecordedDispatchFixtures do
         %{agent: agent, ship: ship, intent: intent, error: {:error, reason}}
     end
   end
+
+  # Lower adapter tests supply controlled retained preflight facts, not network
+  # recovery. Runtime/transfer-owner tests acquire their own governed bindings.
+  defp transfer_evidence(agent, symbol, action) do
+    Enum.reduce(
+      [
+        {symbol, "source_observation_id", action["units"]},
+        {action["target_ship"], "target_observation_id", 0}
+      ],
+      action,
+      fn {ship_symbol, key, units}, selected ->
+        cargo = %{
+          "capacity" => 40,
+          "units" => units,
+          "inventory" =>
+            if(units > 0, do: [%{"symbol" => action["trade_symbol"], "units" => units}], else: [])
+        }
+
+        ship =
+          SpaceTraders.ShipBody.ship_body(ship_symbol, %{"cargo" => cargo})
+          |> SpaceTraders.API.Model.Ship.from_json()
+          |> read_facts()
+
+        subject =
+          DependencyKey.observation_subject(
+            "get-my-ship",
+            [DependencyKey.ship(agent.id, ship_symbol)],
+            agent.symbol
+          )
+
+        observation =
+          SpaceTraders.Evidence.authoritative_observation("get-my-ship", [subject], %{
+            response: ship
+          })
+
+        {:ok, %{observation: source}} =
+          SpaceTraders.Evidence.fulfil_demands(agent, subject, observation)
+
+        Map.put(selected, key, source.id)
+      end
+    )
+  end
+
+  defp read_facts(%_{} = value), do: value |> Map.from_struct() |> read_facts()
+
+  defp read_facts(value) when is_map(value),
+    do: Map.new(value, fn {key, nested} -> {to_string(key), read_facts(nested)} end)
+
+  defp read_facts(value) when is_list(value), do: Enum.map(value, &read_facts/1)
+  defp read_facts(value), do: value
 
   defp ensure_operator(%Agent{operator_id: id} = agent) when is_integer(id), do: agent
 

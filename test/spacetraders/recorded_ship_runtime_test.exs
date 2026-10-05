@@ -325,7 +325,7 @@ defmodule SpaceTraders.RecordedShipRuntimeTest do
 
       if SpaceTraders.MutationAttempts.get!(id).retry_authorized do
         assert {:error, _} =
-                 SpaceTraders.API.RecordedDispatch.prepare_retry(
+                 SpaceTraders.Fleet.Intents.RecordedAction.prepare_retry(
                    context.agent,
                    original,
                    SpaceTraders.MutationAttempts.get!(id)

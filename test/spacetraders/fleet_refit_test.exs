@@ -27,6 +27,336 @@ defmodule SpaceTraders.FleetRefitTest do
     :ok
   end
 
+  for kind <- ["install_module", "remove_module"] do
+    @tag :refit_progression
+    test "#{kind} live, prepared boot, and absent boot share one effect and continuation" do
+      for entry <- [:live, :prepared, :absent] do
+        {_scope, agent, _revision, ship} = generation("REFIT-#{entry}")
+        {intent, action} = selected_refit(agent, ship, unquote(kind))
+
+        {:ok, game} =
+          start_supervised({Elixir.Agent, fn -> false end}, id: {unquote(kind), entry})
+
+        test_pid = self()
+
+        Req.Test.stub(SpaceTraders.API, fn conn ->
+          case {conn.method, conn.request_path} do
+            {"GET", "/v2/my/agent"} ->
+              Req.Test.json(conn, %{"data" => %{"symbol" => agent.symbol, "credits" => 18_000}})
+
+            {"GET", _} ->
+              body =
+                if Elixir.Agent.get(game, & &1),
+                  do: refit_after_body(ship.symbol, unquote(kind)),
+                  else: refit_before_body(ship.symbol, unquote(kind))
+
+              Req.Test.json(conn, %{"data" => body})
+
+            {"POST", path} ->
+              assert path ==
+                       "/v2/my/ships/#{ship.symbol}/modules/#{if unquote(kind) == "install_module", do: "install", else: "remove"}"
+
+              refute Elixir.Agent.get_and_update(game, &{&1, true})
+              send(test_pid, {:refit_sent, entry})
+
+              response =
+                if unquote(kind) == "install_module",
+                  do: install_response(),
+                  else: removal_response()
+
+              Req.Test.json(conn, %{"data" => response})
+          end
+        end)
+
+        attempt =
+          if entry == :live do
+            {:ok, before} = SpaceTraders.Evidence.get_ship_binding(agent, ship.symbol)
+
+            _ =
+              Intents.execute_action(
+                agent,
+                intent,
+                SpaceTraders.Evidence.bound_ship(before),
+                action
+              )
+
+            nil
+          else
+            {:ok, %{attempt: attempt}} =
+              SpaceTraders.Fleet.Intents.RecordedAction.prepare(agent, intent, action)
+
+            if entry == :absent, do: SpaceTraders.MutationAttempts.mark_sent_or_unknown(attempt)
+            _ = Intents.reconcile(agent.id, ship.symbol, nil, :boot, intent.id)
+            attempt
+          end
+
+        assert %Intent{status: "completed", in_flight_action: nil} = Repo.get!(Intent, intent.id)
+        _ = Intents.reconcile(agent.id, ship.symbol, nil, :boot, intent.id)
+        assert_receive {:refit_sent, ^entry}
+        refute_receive {:refit_sent, ^entry}
+        attempts = SpaceTraders.MutationAttempts.list_for_agent(agent)
+
+        if entry == :absent do
+          original = SpaceTraders.MutationAttempts.get!(attempt.id)
+          assert original.state == "absent"
+          refute original.retry_authorized
+          assert Enum.count(attempts, &(&1.retry_of_id == attempt.id)) == 1
+        else
+          assert [%{state: "succeeded"} = succeeded] = attempts
+          if attempt, do: assert(succeeded.id == attempt.id)
+        end
+      end
+    end
+
+    @tag :refit_progression
+    test "#{kind} bounded historical effect reconciles during Stop without restoring authority" do
+      {scope, agent, _revision, ship} = generation()
+      {intent, action} = selected_refit(agent, ship, unquote(kind))
+
+      {:ok, %{intent: intent, attempt: attempt}} =
+        SpaceTraders.Fleet.Intents.RecordedAction.prepare(agent, intent, action)
+
+      {:ok, attempt} = SpaceTraders.MutationAttempts.mark_sent_or_unknown(attempt)
+      stub_refit_facts(agent, ship, refit_before_body(ship.symbol, unquote(kind)))
+      {:ok, before} = SpaceTraders.Evidence.get_ship_binding(agent, ship.symbol)
+      {:ok, credits} = SpaceTraders.Evidence.get_agent_binding(agent)
+
+      {:ok, proof} =
+        SpaceTraders.Evidence.recovery_proof(
+          attempt,
+          :bounded_unknown,
+          "Controlled fixture accounting, not a production spending bound",
+          [before, credits]
+        )
+
+      {:ok, _} =
+        SpaceTraders.MutationAttempts.reconcile(attempt, :bounded_unknown, proof,
+          constraint_accounting:
+            SpaceTraders.Evidence.constraint_accounting(
+              "fixture accounts for one historical refit",
+              [
+                %{
+                  constraint: "Keep at least 1,000 credits available",
+                  satisfied: true,
+                  evidence:
+                    "Controlled game charges zero for this historical module mutation; 18,000 credits retained"
+                }
+              ]
+            )
+        )
+
+      {:ok, _} = SpaceTraders.FleetStrategy.engage_emergency_stop(scope)
+      stub_refit_facts(agent, ship, refit_after_body(ship.symbol, unquote(kind)))
+      _ = Intents.reconcile(agent.id, ship.symbol, nil, :boot, intent.id)
+      _ = Intents.reconcile(agent.id, ship.symbol, nil, :arrival, intent.id)
+      assert SpaceTraders.MutationAttempts.get!(attempt.id).state == "accepted"
+      assert %Intent{status: "completed", in_flight_action: nil} = Repo.get!(Intent, intent.id)
+      assert length(SpaceTraders.MutationAttempts.list_for_agent(agent)) == 1
+    end
+
+    @tag :refit_progression
+    test "#{kind} absence during Stop retires retry and leaves resume unblocked" do
+      {scope, agent, _revision, ship} = generation()
+      {intent, action} = selected_refit(agent, ship, unquote(kind))
+
+      {:ok, %{attempt: attempt}} =
+        SpaceTraders.Fleet.Intents.RecordedAction.prepare(agent, intent, action)
+
+      {:ok, _} = SpaceTraders.MutationAttempts.mark_sent_or_unknown(attempt)
+      {:ok, _} = SpaceTraders.FleetStrategy.engage_emergency_stop(scope)
+      stub_refit_facts(agent, ship, refit_before_body(ship.symbol, unquote(kind)))
+      _ = Intents.reconcile(agent.id, ship.symbol, nil, :boot, intent.id)
+      original = SpaceTraders.MutationAttempts.get!(attempt.id)
+      assert original.state == "absent"
+      refute original.retry_authorized
+      assert Repo.get!(Intent, intent.id).in_flight_action == nil
+      refute SpaceTraders.SafetyFence.active?(original)
+
+      assert :ok =
+               SpaceTraders.Fleet.prepare_emergency_stop_resume(
+                 agent.operator_id,
+                 DateTime.utc_now()
+               )
+
+      assert length(SpaceTraders.MutationAttempts.list_for_agent(agent)) == 1
+    end
+
+    @tag :refit_withdraw
+    test "#{kind} newly observed effect withdraws unused absence permission without replay" do
+      {_scope, agent, _revision, ship} = generation()
+      {intent, action} = selected_refit(agent, ship, unquote(kind))
+
+      {:ok, %{intent: intent, attempt: attempt}} =
+        SpaceTraders.Fleet.Intents.RecordedAction.prepare(agent, intent, action)
+
+      {:ok, attempt} = SpaceTraders.MutationAttempts.mark_sent_or_unknown(attempt)
+      stub_refit_facts(agent, ship, refit_before_body(ship.symbol, unquote(kind)))
+      {:ok, before} = SpaceTraders.Evidence.get_ship_binding(agent, ship.symbol)
+      {:ok, credits} = SpaceTraders.Evidence.get_agent_binding(agent)
+
+      {:ok, proof} =
+        SpaceTraders.Evidence.recovery_proof(
+          attempt,
+          :absent,
+          "Modules and inventory unchanged",
+          [before, credits]
+        )
+
+      {:ok, _} = SpaceTraders.MutationAttempts.reconcile(attempt, :absent, proof)
+      stub_refit_facts(agent, ship, refit_after_body(ship.symbol, unquote(kind)))
+      {:ok, after_binding} = SpaceTraders.Evidence.get_ship_binding(agent, ship.symbol)
+      Req.Test.stub(SpaceTraders.API, fn _ -> flunk("satisfied refit must not replay") end)
+
+      _ =
+        Intents.reconcile(
+          agent.id,
+          ship.symbol,
+          SpaceTraders.Evidence.bound_ship(after_binding),
+          :boot,
+          intent.id
+        )
+
+      assert %Intent{status: "completed", in_flight_action: nil} = Repo.get!(Intent, intent.id)
+      original = SpaceTraders.MutationAttempts.get!(attempt.id)
+      assert original.state == "absent"
+      refute original.retry_authorized
+      assert length(SpaceTraders.MutationAttempts.list_for_agent(agent)) == 1
+    end
+
+    @tag :refit_source
+    test "#{kind} ledger rejects unretained conclusions even without selected metadata" do
+      {_scope, agent, _revision, ship} = generation()
+
+      operation =
+        if unquote(kind) == "install_module",
+          do: "install-ship-module",
+          else: "remove-ship-module"
+
+      {:ok, attempt} =
+        SpaceTraders.MutationAttempts.prepare(
+          SpaceTraders.API.OperationInventory.fetch!(operation),
+          "/my/ships/#{ship.symbol}/modules/#{if unquote(kind) == "install_module", do: "install", else: "remove"}",
+          agent_id: agent.id,
+          json: %{"symbol" => @module}
+        )
+
+      {:ok, attempt} = SpaceTraders.MutationAttempts.mark_sent_or_unknown(attempt)
+
+      for verdict <- [:accepted, :absent, :bounded_unknown] do
+        forged =
+          SpaceTraders.Evidence.reconciliation_observation(
+            "get-my-ship",
+            attempt,
+            verdict,
+            "Caller claims refit and credits without retained sources"
+          )
+
+        opts =
+          if verdict == :bounded_unknown,
+            do: [
+              constraint_accounting:
+                SpaceTraders.Evidence.constraint_accounting("fixture accounting only", [])
+            ],
+            else: []
+
+        assert {:error, :authoritative_evidence_required} =
+                 SpaceTraders.MutationAttempts.reconcile(attempt, verdict, [forged], opts)
+      end
+
+      assert SpaceTraders.SafetyFence.active?(SpaceTraders.MutationAttempts.get!(attempt.id))
+    end
+
+    @tag :refit_recovery
+    test "#{kind} boot recovery retains exact Ship and credit sources across replacement" do
+      {_scope, agent, _revision, ship} = generation()
+      {intent, action} = selected_refit(agent, ship, unquote(kind))
+
+      {:ok, %{intent: intent, attempt: attempt}} =
+        SpaceTraders.Fleet.Intents.RecordedAction.prepare(agent, intent, action)
+
+      {:ok, _} = SpaceTraders.MutationAttempts.mark_sent_or_unknown(attempt)
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        assert conn.method == "GET"
+
+        data =
+          if conn.request_path == "/v2/my/agent",
+            do: %{"symbol" => agent.symbol, "credits" => 18_000},
+            else: refit_after_body(ship.symbol, unquote(kind))
+
+        Req.Test.json(conn, %{"data" => data})
+      end)
+
+      {:ok, original} = SpaceTraders.Evidence.get_ship_binding(agent, ship.symbol)
+      {:ok, credits} = SpaceTraders.Evidence.get_agent_binding(agent)
+      {:ok, newer} = SpaceTraders.Evidence.get_ship_binding(agent, ship.symbol)
+      refute original.observation.id == newer.observation.id
+      :ok = ShipServer.stop(ship.symbol)
+      Req.Test.stub(SpaceTraders.API, fn _ -> flunk("recovery replaced exact retained facts") end)
+
+      {:ok, restored} =
+        SpaceTraders.Evidence.retained_ship_binding(agent, original.observation.id)
+
+      live = SpaceTraders.Evidence.bound_ship(restored)
+      _ = Intents.reconcile(agent.id, ship.symbol, live, :boot, intent.id)
+      _ = Intents.reconcile(agent.id, ship.symbol, live, :arrival, intent.id)
+
+      accepted = SpaceTraders.MutationAttempts.get!(attempt.id)
+      assert accepted.state == "accepted"
+      proofs = List.last(accepted.outcomes).evidence["observations"]
+
+      assert Enum.map(proofs, & &1["source"]["id"]) ==
+               [original.observation.id, credits.observation.id]
+
+      assert Enum.map(proofs, & &1["observed_at"]) ==
+               Enum.map([original, credits], &DateTime.to_iso8601(&1.observation.observed_at))
+
+      assert %Intent{status: "completed", in_flight_action: nil} = Repo.get!(Intent, intent.id)
+      assert length(SpaceTraders.MutationAttempts.list_for_agent(agent)) == 1
+    end
+  end
+
+  defp selected_refit(agent, ship, kind) do
+    {_scope, _agent, _ship, portfolio, commitment} = claimed_refit_ship(agent, ship, "remove")
+
+    {:ok, intent} =
+      Intents.insert_commitment_intent(commitment, portfolio, ship, %{
+        type: kind,
+        target_waypoint: @supply,
+        parameters: %{"module_symbol" => @module}
+      })
+
+    action = %{
+      "kind" => kind,
+      "module_symbol" => @module,
+      "quantity" => 1,
+      "installed_before" => if(kind == "install_module", do: 0, else: 3),
+      "cargo_before" => if(kind == "install_module", do: 1, else: 0)
+    }
+
+    {intent, action}
+  end
+
+  defp refit_after_body(symbol, "install_module"), do: fitted_ship_body(symbol)
+  defp refit_after_body(symbol, "remove_module"), do: removed_ship_body(symbol)
+
+  defp refit_before_body(symbol, "install_module"), do: purchased_docked_body(symbol)
+  defp refit_before_body(symbol, "remove_module"), do: fitted_ship_body(symbol, installed: 3)
+
+  defp stub_refit_facts(agent, ship, body) do
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      assert conn.method == "GET"
+      assert conn.request_path in ["/v2/my/agent", "/v2/my/ships/#{ship.symbol}"]
+
+      data =
+        if conn.request_path == "/v2/my/agent",
+          do: %{"symbol" => agent.symbol, "credits" => 18_000},
+          else: body
+
+      Req.Test.json(conn, %{"data" => data})
+    end)
+  end
+
   test "a purchase-sourced refit claims its Ship, buys the module, installs, and reconciles" do
     {scope, agent, revision, ship} = generation()
     seed_intelligence(agent)
@@ -461,19 +791,19 @@ defmodule SpaceTraders.FleetRefitTest do
 
   # -- fixtures ----------------------------------------------------------------
 
-  defp generation do
+  defp generation(symbol \\ "REFIT") do
     operator = Repo.insert!(%Operator{email: "refit-#{System.unique_integer()}@example.com"})
 
     agent =
       Repo.insert!(%Agent{
         operator_id: operator.id,
-        symbol: "REFIT",
+        symbol: symbol,
         faction: "COSMIC",
         headquarters: @home,
         agent_token: "TOKEN"
       })
 
-    ship = Repo.insert!(%Ship{agent_id: agent.id, symbol: "REFIT-1", ship_type: "SHIP_PROBE"})
+    ship = Repo.insert!(%Ship{agent_id: agent.id, symbol: "#{symbol}-1", ship_type: "SHIP_PROBE"})
 
     strategy = Repo.insert!(%Strategy{operator_id: operator.id, revision_number: 1})
 

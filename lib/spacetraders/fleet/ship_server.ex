@@ -314,16 +314,22 @@ defmodule SpaceTraders.Fleet.ShipServer do
 
       agent ->
         with :ok <- AgentContext.execution_allowed?(agent) do
-          AgentContext.handle_game_result(
-            agent,
-            SpaceTraders.Evidence.get_ship(
-              credential_ref,
-              symbol,
-              retry: false,
-              lane: :safety,
-              owner: "ship_execution"
+          result =
+            AgentContext.handle_game_result(
+              agent,
+              SpaceTraders.Evidence.get_ship_binding(
+                credential_ref,
+                symbol,
+                retry: false,
+                lane: :safety,
+                owner: "ship_execution"
+              )
             )
-          )
+
+          case result do
+            {:ok, binding} -> {:ok, SpaceTraders.Evidence.bound_ship(binding)}
+            error -> error
+          end
         end
     end
   end

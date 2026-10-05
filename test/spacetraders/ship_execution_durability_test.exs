@@ -21,7 +21,7 @@ defmodule SpaceTraders.ShipExecutionDurabilityTest do
   alias SpaceTraders.MutationAttempts.{Attempt, Outcome}
   alias SpaceTraders.Repo
   alias SpaceTraders.SafetyFence
-  alias SpaceTraders.API.RecordedDispatch
+  alias SpaceTraders.Fleet.Intents.RecordedAction
   alias SpaceTraders.MutationAttempts
 
   setup do
@@ -153,7 +153,7 @@ defmodule SpaceTraders.ShipExecutionDurabilityTest do
       })
 
     {:ok, %{intent: intent, attempt: original}} =
-      SpaceTraders.API.RecordedDispatch.prepare(agent, intent, %{
+      RecordedAction.prepare(agent, intent, %{
         "kind" => "orbit",
         "waypoint" => "X1-UX81-A1"
       })
@@ -464,7 +464,7 @@ defmodule SpaceTraders.ShipExecutionDurabilityTest do
     intent = owned_navigation(ship, portfolio, commitment)
 
     {:ok, %{intent: intent, attempt: original}} =
-      RecordedDispatch.prepare(agent, intent, %{"kind" => "orbit", "waypoint" => "X1-UX81-A1"})
+      RecordedAction.prepare(agent, intent, %{"kind" => "orbit", "waypoint" => "X1-UX81-A1"})
 
     {:ok, original} = MutationAttempts.mark_sent_or_unknown(original)
     game = start_supervised!({Elixir.Agent, fn -> %{status: "DOCKED", sends: 0} end})
@@ -485,23 +485,23 @@ defmodule SpaceTraders.ShipExecutionDurabilityTest do
       end
     end)
 
-    assert {:ok, _} =
-             SpaceTraders.Evidence.get_ship(
+    assert {:ok, binding} =
+             SpaceTraders.Evidence.get_ship_binding(
                SpaceTraders.API.AgentTokenReference.new(agent),
                ship.symbol
              )
 
-    {:ok, absent} =
-      MutationAttempts.reconcile(original, :absent, [
-        SpaceTraders.Evidence.reconciliation_observation(
-          "get-my-ship",
-          original,
-          :absent,
-          "Fresh governed observation proves the original orbit absent"
-        )
-      ])
+    {:ok, proof} =
+      SpaceTraders.Evidence.recovery_proof(
+        original,
+        :absent,
+        "Fresh governed observation proves the original orbit absent",
+        [binding]
+      )
 
-    results = concurrent(8, fn -> RecordedDispatch.prepare_retry(agent, intent, absent) end)
+    {:ok, absent} = MutationAttempts.reconcile(original, :absent, proof)
+
+    results = concurrent(8, fn -> RecordedAction.prepare_retry(agent, intent, absent) end)
     assert [{:ok, retry}] = Enum.filter(results, &match?({:ok, _}, &1))
     assert Enum.count(results, &match?({:error, _}, &1)) == 7
     results = concurrent(8, fn -> SpaceTraders.API.dispatch_recorded(retry) end)
@@ -534,7 +534,7 @@ defmodule SpaceTraders.ShipExecutionDurabilityTest do
       "listing_price" => 10
     }
 
-    {:ok, %{attempt: unknown}} = RecordedDispatch.prepare(agent, source_intent, spending)
+    {:ok, %{attempt: unknown}} = RecordedAction.prepare(agent, source_intent, spending)
     {:ok, unknown} = MutationAttempts.mark_sent_or_unknown(unknown)
 
     assert Enum.sort(unknown.dependency_keys) ==
@@ -544,7 +544,7 @@ defmodule SpaceTraders.ShipExecutionDurabilityTest do
     dependent_intent = owned_navigation(dependent, portfolio, dependent_commitment)
 
     assert {:error, {:safety_fenced, [blocked]}} =
-             RecordedDispatch.prepare(agent, dependent_intent, spending)
+             RecordedAction.prepare(agent, dependent_intent, spending)
 
     assert blocked == unknown.id
     assert Repo.get!(Intent, dependent_intent.id).in_flight_action == nil
@@ -553,7 +553,7 @@ defmodule SpaceTraders.ShipExecutionDurabilityTest do
     independent_intent = owned_navigation(independent, portfolio, independent_commitment)
 
     {:ok, _} =
-      RecordedDispatch.prepare(agent, independent_intent, %{
+      RecordedAction.prepare(agent, independent_intent, %{
         "kind" => "orbit",
         "waypoint" => "X1-UX81-A1"
       })

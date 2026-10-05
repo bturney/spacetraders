@@ -482,6 +482,16 @@ defmodule SpaceTraders.ContractExecutionTest do
         }
       })
 
+    {:ok, attempt} =
+      MutationAttempts.prepare(
+        OperationInventory.fetch!("deliver-contract"),
+        "/my/contracts/ctr-1/deliver",
+        agent_id: agent.id,
+        json: %{"shipSymbol" => ship.symbol, "tradeSymbol" => "IRON_ORE", "units" => 1}
+      )
+
+    {:ok, attempt} = MutationAttempts.mark_sent_or_unknown(attempt)
+
     Req.Test.stub(SpaceTraders.API, fn conn ->
       if conn.request_path == "/v2/my/ships/#{ship.symbol}" do
         Req.Test.json(conn, %{
@@ -524,6 +534,9 @@ defmodule SpaceTraders.ContractExecutionTest do
 
     assert {:ok, %{status: "completed", last_action_result: %{"external_completion" => true}}} =
              Intents.advance(agent, intent, live_ship)
+
+    assert MutationAttempts.get!(attempt.id).state == "absent"
+    refute MutationAttempts.get!(attempt.id).retry_authorized
   end
 
   test "an ambiguous claimed delivery settles its mutation attempt from Cargo and Contract evidence" do
