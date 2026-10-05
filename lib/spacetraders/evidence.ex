@@ -129,7 +129,7 @@ defmodule SpaceTraders.Evidence do
   end
 
   @doc "Reuses usable retained Agent-credit facts, or explicitly acquires one governed replacement."
-  def recovery_agent_binding(%AgentRecord{} = agent, %Attempt{} = attempt) do
+  def recovery_agent_binding(%AgentRecord{} = agent, %Attempt{} = attempt, opts \\ []) do
     now = Clock.utc_now()
     oldest = DateTime.add(now, -30)
     since = attempt.sent_or_unknown_at || attempt.prepared_at
@@ -155,8 +155,49 @@ defmodule SpaceTraders.Evidence do
       end)
 
     case binding do
+      %Binding{} ->
+        {:ok, binding}
+
+      nil ->
+        get_agent_binding(agent,
+          lane: :safety,
+          owner: Keyword.get(opts, :owner, "ship_execution")
+        )
+    end
+  end
+
+  @doc "Reuses an eligible retained owned Fleet, or acquires one governed replacement."
+  def recovery_fleet_binding(%AgentRecord{} = agent, %Attempt{} = attempt) do
+    now = Clock.utc_now()
+    oldest = DateTime.add(now, -30)
+    since = attempt.sent_or_unknown_at || attempt.prepared_at
+    subject = "fleet:#{agent.symbol}"
+
+    binding =
+      from(source in Observation,
+        where:
+          source.agent_id == ^agent.id and source.subject == ^subject and
+            source.operation_id == "get-my-ships" and source.observed_at >= ^since and
+            source.observed_at >= ^oldest and source.observed_at <= ^now,
+        order_by: [desc: source.observed_at, desc: source.id]
+      )
+      |> Repo.all()
+      |> Enum.find_value(fn source ->
+        if valid_recovery_source?(source, attempt) and source_dependencies(source) != [] do
+          value =
+            Enum.map(
+              source.facts["response"],
+              &(&1 |> api_keys() |> SpaceTraders.API.Model.Ship.from_json())
+            )
+
+          binding = %Binding{value: value, observation: source}
+          if usable_binding?(binding, attempt), do: binding
+        end
+      end)
+
+    case binding do
       %Binding{} -> {:ok, binding}
-      nil -> get_agent_binding(agent, lane: :safety, owner: "ship_execution")
+      nil -> get_ships(agent, bind: true, lane: :safety, owner: "fleet_reconciliation")
     end
   end
 
@@ -1304,7 +1345,7 @@ defmodule SpaceTraders.Evidence do
   def valid_recovery_source?(%AuthoritativeObservation{source: nil}, attempt) do
     kind = get_in(attempt.prepared_evidence, ["selected_action", "kind"])
 
-    attempt.operation_id not in ~w(navigate-ship warp-ship orbit-ship dock-ship patch-ship-nav refuel-ship jump-ship) and
+    attempt.operation_id not in ~w(purchase-ship navigate-ship warp-ship orbit-ship dock-ship patch-ship-nav refuel-ship jump-ship) and
       kind not in ["navigate", "warp", "orbit", "dock", "set_flight_mode", "refuel", "jump"]
   end
 
@@ -1368,7 +1409,28 @@ defmodule SpaceTraders.Evidence do
     _ -> []
   end
 
+  defp source_dependencies(
+         %Observation{operation_id: "get-my-ships", subject: "fleet:" <> _} = source
+       ) do
+    ships = source.facts["response"]
+
+    if owned_subject?(source, "fleet") and is_list(ships) and
+         Enum.all?(ships, fn
+           %{"symbol" => symbol} when is_binary(symbol) and symbol != "" -> true
+           _ -> false
+         end) and length(Enum.uniq_by(ships, & &1["symbol"])) == length(ships),
+       do: [SpaceTraders.SafetyFence.DependencyKey.owned_fleet(source.agent_id)],
+       else: []
+  end
+
   defp source_dependencies(_), do: []
+
+  defp owned_subject?(source, kind) do
+    case Repo.get(AgentRecord, source.agent_id) do
+      %AgentRecord{symbol: symbol} -> source.subject == "#{kind}:#{symbol}"
+      _ -> false
+    end
+  end
 
   # Retained decoded facts use snake_case; generated models consume API camelCase.
   defp api_keys(value) when is_map(value) do
