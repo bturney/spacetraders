@@ -26,6 +26,7 @@ defmodule SpaceTraders.Evidence do
 
   @owned_read_deadline_seconds 60
   @owned_read_freshness_seconds 30
+  @unretained_conclusion_operations ~w(accept-contract fulfill-contract)
 
   @market_facts ~w(symbol exports imports exchange trade_goods transactions)
   @waypoint_facts ~w(symbol system_symbol type x y orbits orbitals traits modifiers chart faction is_under_construction)
@@ -1393,31 +1394,10 @@ defmodule SpaceTraders.Evidence do
       Map.delete(stringify_keys(proof.facts), "reconciliation") == source.facts
   end
 
-  def valid_recovery_source?(%AuthoritativeObservation{source: nil}, attempt) do
-    kind = get_in(attempt.prepared_evidence, ["selected_action", "kind"])
-
-    attempt.operation_id not in ~w(purchase-ship navigate-ship warp-ship orbit-ship dock-ship patch-ship-nav refuel-ship jump-ship transfer-cargo deliver-contract supply-construction create-chart create-ship-waypoint-scan extract-resources extract-resources-with-survey siphon-resources create-survey ship-refine jettison install-ship-module remove-ship-module) and
-      kind not in [
-        "navigate",
-        "warp",
-        "orbit",
-        "dock",
-        "set_flight_mode",
-        "extract",
-        "siphon",
-        "survey",
-        "refine",
-        "jettison",
-        "install_module",
-        "remove_module",
-        "chart",
-        "scan_waypoints",
-        "refuel",
-        "jump",
-        "transfer",
-        "deliver"
-      ]
-  end
+  # Contract acceptance and fulfilment still settle from a caller-assembled
+  # Contract read; every other operation must cite an exact retained source.
+  def valid_recovery_source?(%AuthoritativeObservation{source: nil}, attempt),
+    do: attempt.operation_id in @unretained_conclusion_operations
 
   def valid_recovery_source?(_, _), do: false
 

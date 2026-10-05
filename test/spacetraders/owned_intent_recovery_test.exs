@@ -999,6 +999,32 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
     end
 
     @tag :market_recovery
+    test "#{kind} ledger rejects an unretained caller-built Market Cargo conclusion" do
+      {agent, ship, portfolio, commitment} = claimed_ship("MARKET-FORGED-#{unquote(kind)}")
+      {intent, action} = market_selection(ship, portfolio, commitment, unquote(kind))
+
+      {:ok, %{attempt: attempt}} =
+        SpaceTraders.Fleet.Intents.RecordedAction.prepare(agent, intent, action)
+
+      {:ok, attempt} = MutationAttempts.mark_sent_or_unknown(attempt)
+
+      for verdict <- [:accepted, :absent] do
+        forged =
+          SpaceTraders.Evidence.reconciliation_observation(
+            "get-my-ship",
+            attempt,
+            verdict,
+            "Caller claims Market Cargo and credits without retained observations"
+          )
+
+        assert {:error, :authoritative_evidence_required} =
+                 MutationAttempts.reconcile(attempt, verdict, [forged])
+      end
+
+      assert SpaceTraders.SafetyFence.active?(MutationAttempts.get!(attempt.id))
+    end
+
+    @tag :market_recovery
     test "#{kind} proven absence consumes one retry through boot and live wakes" do
       {agent, ship, portfolio, commitment} = claimed_ship("MARKET-RETRY-#{unquote(kind)}")
       {intent, action} = market_selection(ship, portfolio, commitment, unquote(kind))
