@@ -1283,9 +1283,9 @@ defmodule SpaceTraders.Fleet.Intents do
   defp do_advance_intents(
          agent,
          %Intent{type: "acquire_intelligence", in_flight_action: %{"kind" => "chart"}} = intent,
-         _live_ship
+         live_ship
        ) do
-    reconcile_chart_intelligence(agent, intent)
+    reconcile_chart_intelligence(agent, intent, live_ship)
   end
 
   defp do_advance_intents(
@@ -1816,7 +1816,7 @@ defmodule SpaceTraders.Fleet.Intents do
     end
   end
 
-  defp reconcile_chart_intelligence(agent, intent) do
+  defp reconcile_chart_intelligence(agent, intent, live_ship) do
     attempt = MutationAttempts.latest_for_intent(intent)
 
     case Agent.handle_game_result(
@@ -1845,7 +1845,19 @@ defmodule SpaceTraders.Fleet.Intents do
             _ -> {:unknown, :chart_outcome_unresolved}
           end
 
-        progress_selected(agent, intent, nil, intent.in_flight_action, judgement,
+        progress_selected(agent, intent, live_ship, intent.in_flight_action, judgement,
+          sources: [binding],
+          block: fn intent, _reason -> block_intents(intent, :chart_outcome_unresolved) end
+        )
+
+      # A Waypoint is charted once; a retained uncharted read proves absence.
+      {:ok, %Evidence.Binding{value: %{chart: nil}} = binding} ->
+        progress_selected(
+          agent,
+          intent,
+          live_ship,
+          intent.in_flight_action,
+          {:absent, "Retained Waypoint remains uncharted after dispatch"},
           sources: [binding],
           block: fn intent, _reason -> block_intents(intent, :chart_outcome_unresolved) end
         )

@@ -1398,17 +1398,8 @@ defmodule SpaceTraders.Evidence do
     response = source.facts["response"]
 
     with [system, symbol] <- String.split(subject, ":"),
-         %{
-           "system_symbol" => ^system,
-           "symbol" => ^symbol,
-           "chart" => %{
-             "waypoint_symbol" => ^symbol,
-             "submitted_by" => by,
-             "submitted_on" => submitted_on
-           }
-         } <- response,
-         true <- is_binary(by) and by != "" and is_binary(submitted_on),
-         {:ok, _, _} <- DateTime.from_iso8601(submitted_on) do
+         %{"system_symbol" => ^system, "symbol" => ^symbol, "chart" => chart} <- response,
+         true <- chart_state?(chart, symbol) do
       [DependencyKey.waypoint(source.agent_id, symbol)]
     else
       _ -> []
@@ -1475,6 +1466,18 @@ defmodule SpaceTraders.Evidence do
   end
 
   defp source_dependencies(_), do: []
+
+  # A Waypoint's chart state is either uncharted or one complete attribution.
+  defp chart_state?(nil, _symbol), do: true
+
+  defp chart_state?(
+         %{"waypoint_symbol" => symbol, "submitted_by" => by, "submitted_on" => submitted_on},
+         symbol
+       )
+       when is_binary(by) and by != "" and is_binary(submitted_on),
+       do: match?({:ok, _, _}, DateTime.from_iso8601(submitted_on))
+
+  defp chart_state?(_chart, _symbol), do: false
 
   defp valid_contract_progress?(%{
          "id" => id,
