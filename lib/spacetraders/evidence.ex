@@ -66,6 +66,23 @@ defmodule SpaceTraders.Evidence do
     _ -> {:error, :evidence_not_retained}
   end
 
+  @doc "Restores one exact retained Waypoint acquisition without another game read."
+  def retained_waypoint_binding(%AgentRecord{} = agent, observation_id) do
+    case Repo.get(Observation, observation_id) do
+      %Observation{agent_id: agent_id, operation_id: "get-waypoint"} = source
+      when agent_id == agent.id ->
+        waypoint =
+          source.facts["response"] |> api_keys() |> SpaceTraders.API.Model.Waypoint.from_json()
+
+        {:ok, %Binding{value: waypoint, observation: source}}
+
+      _ ->
+        {:error, :evidence_not_retained}
+    end
+  rescue
+    _ -> {:error, :evidence_not_retained}
+  end
+
   @doc "Reuses an exact binding when still usable, otherwise acquires one governed replacement."
   def recovery_ship_binding(agent, symbol, supplied, since \\ nil) do
     binding =
@@ -242,6 +259,7 @@ defmodule SpaceTraders.Evidence do
          read,
          key_suffix \\ nil
        ) do
+    {bind?, opts} = Keyword.pop(opts, :bind, false)
     credential_ref = credential_reference(token_or_agent)
     agent = owned_agent(credential_ref)
     required_facts = Keyword.get(opts, :required_facts, default_facts)
@@ -250,8 +268,17 @@ defmodule SpaceTraders.Evidence do
     request_opts = Keyword.put(opts, :demand, demand)
     key = {operation_id, subject, credential_ref.agent_id, key_suffix}
 
-    result = ReadCoordinator.read(key, fn -> read.(credential_ref, request_opts) end)
-    settle_governed_read(result, persisted_demand, agent, subject, operation_id)
+    if bind? do
+      # Coalesced recovery callers share the acquisition's retained source, not
+      # separately timestamped copies of one response. Keep result shapes apart.
+      ReadCoordinator.read({key, :binding}, fn ->
+        read.(credential_ref, request_opts)
+        |> retain_binding(agent, subject, operation_id)
+      end)
+    else
+      result = ReadCoordinator.read(key, fn -> read.(credential_ref, request_opts) end)
+      settle_governed_read(result, persisted_demand, agent, subject, operation_id)
+    end
   end
 
   defp settle_governed_read(
@@ -398,7 +425,7 @@ defmodule SpaceTraders.Evidence do
       authoritative_observation(
         operation_id,
         [subject],
-        %{response: serialize_read_value(value)},
+        read_facts(operation_id, value),
         Clock.utc_now()
       )
 
@@ -1248,8 +1275,16 @@ defmodule SpaceTraders.Evidence do
   def valid_recovery_source?(%AuthoritativeObservation{source: nil}, attempt) do
     kind = get_in(attempt.prepared_evidence, ["selected_action", "kind"])
 
-    attempt.operation_id not in ~w(navigate-ship warp-ship orbit-ship dock-ship patch-ship-nav) and
-      kind not in ["navigate", "warp", "orbit", "dock", "set_flight_mode"]
+    attempt.operation_id not in ~w(navigate-ship warp-ship orbit-ship dock-ship patch-ship-nav create-chart create-ship-waypoint-scan) and
+      kind not in [
+        "navigate",
+        "warp",
+        "orbit",
+        "dock",
+        "set_flight_mode",
+        "chart",
+        "scan_waypoints"
+      ]
   end
 
   def valid_recovery_source?(_, _), do: false
@@ -1295,6 +1330,31 @@ defmodule SpaceTraders.Evidence do
     if SpaceTraders.Evidence.ShipObservation.validate(ship, symbol) == :ok,
       do: [SpaceTraders.SafetyFence.DependencyKey.ship(source.agent_id, symbol)],
       else: []
+  rescue
+    _ -> []
+  end
+
+  defp source_dependencies(
+         %Observation{operation_id: "get-waypoint", subject: "waypoint:" <> subject} = source
+       ) do
+    response = source.facts["response"]
+
+    with [system, symbol] <- String.split(subject, ":"),
+         %{
+           "system_symbol" => ^system,
+           "symbol" => ^symbol,
+           "chart" => %{
+             "waypoint_symbol" => ^symbol,
+             "submitted_by" => by,
+             "submitted_on" => submitted_on
+           }
+         } <- response,
+         true <- is_binary(by) and by != "",
+         {:ok, _, _} <- DateTime.from_iso8601(submitted_on) do
+      [SpaceTraders.SafetyFence.DependencyKey.waypoint(source.agent_id, symbol)]
+    else
+      _ -> []
+    end
   rescue
     _ -> []
   end
