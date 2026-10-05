@@ -23,7 +23,6 @@ defmodule SpaceTraders.FleetAcquisition do
   alias SpaceTraders.FleetStrategy.{Revision, StandingAuthority}
   alias SpaceTraders.MutationAttempts
   alias SpaceTraders.MutationAttempts.Attempt
-  alias SpaceTraders.SafetyFence.DependencyKey
   alias SpaceTraders.{Repo, World}
 
   @freshness_seconds 300
@@ -154,7 +153,7 @@ defmodule SpaceTraders.FleetAcquisition do
       nil ->
         {:error, :no_purchase_attempt}
 
-      %Attempt{state: "succeeded"} ->
+      %Attempt{state: state} when state in ["succeeded", "accepted"] ->
         identify(agent, expectations)
 
       %Attempt{state: state} = attempt when state in ["sent_or_unknown", "ambiguous"] ->
@@ -173,21 +172,23 @@ defmodule SpaceTraders.FleetAcquisition do
   end
 
   defp reconcile_purchase(scope, agent, portfolio, attempt, expectations) do
-    with {:ok, ships} <- Fleet.list_ships(agent),
-         {:ok, overview} <- AgentContext.agent_overview(agent) do
-      settle_attempt(scope, agent, portfolio, attempt, expectations, ships, overview.credits)
+    with {:ok, fleet} <-
+           AgentContext.handle_game_result(agent, Evidence.recovery_fleet_binding(agent, attempt)),
+         {:ok, credits} <-
+           AgentContext.handle_game_result(agent, Evidence.recovery_agent_binding(agent, attempt)) do
+      settle_attempt(scope, agent, portfolio, attempt, expectations, fleet, credits)
     end
   end
 
-  defp settle_attempt(scope, agent, portfolio, attempt, expectations, ships, credits) do
-    case purchased(agent, ships) do
+  defp settle_attempt(scope, agent, portfolio, attempt, expectations, fleet, credits) do
+    case purchased(agent, fleet.value) do
       {:ok, symbol} ->
-        with {:ok, _attempt} <- reconcile_attempt(agent, attempt, ships, credits, :accepted) do
+        with {:ok, _attempt} <- reconcile_attempt(attempt, fleet, credits, :accepted) do
           {:ok, purchase(symbol, expectations)}
         end
 
       :absent ->
-        with {:ok, _attempt} <- reconcile_attempt(agent, attempt, ships, credits, :absent),
+        with {:ok, _attempt} <- reconcile_attempt(attempt, fleet, credits, :absent),
              {:ok, _portfolio} <-
                FleetAllocation.unwind_current_portfolio(scope, portfolio.fleet_generation_id) do
           {:error, :ship_purchase_not_completed}
@@ -198,11 +199,11 @@ defmodule SpaceTraders.FleetAcquisition do
     end
   end
 
-  defp reconcile_attempt(agent, attempt, ships, credits, resolution) do
-    MutationAttempts.reconcile(attempt, resolution, [
-      owned_fleet_observation(agent, attempt, ships, resolution),
-      credit_observation(agent, attempt, credits, resolution)
-    ])
+  defp reconcile_attempt(attempt, fleet, credits, resolution) do
+    with {:ok, proof} <-
+           Evidence.recovery_proof(attempt, resolution, fleet_basis(resolution), [fleet, credits]) do
+      MutationAttempts.reconcile(attempt, resolution, proof)
+    end
   end
 
   defp purchase(symbol, expectations) do
@@ -238,40 +239,8 @@ defmodule SpaceTraders.FleetAcquisition do
     |> Enum.find(fn attempt ->
       attempt.operation_id == "purchase-ship" and
         attempt.provenance["decision_episode_id"] == episode_id and
-        attempt.state in ["sent_or_unknown", "ambiguous", "succeeded"]
+        attempt.state in ["sent_or_unknown", "ambiguous", "succeeded", "accepted"]
     end)
-  end
-
-  defp owned_fleet_observation(agent, attempt, ships, resolution) do
-    Evidence.authoritative_observation(
-      "get-my-ships",
-      [DependencyKey.owned_fleet(agent.id)],
-      %{
-        ships: Enum.map(ships, &%{symbol: &1.symbol}),
-        unregistered: length(ships) - length(registered_symbols(agent)),
-        reconciliation: conclusion(attempt, resolution, fleet_basis(resolution))
-      }
-    )
-  end
-
-  defp credit_observation(agent, attempt, credits, resolution) do
-    Evidence.authoritative_observation(
-      "get-my-agent",
-      [DependencyKey.agent_credits(agent.id)],
-      %{
-        credits: credits,
-        reconciliation: conclusion(attempt, resolution, credit_basis(resolution))
-      }
-    )
-  end
-
-  defp conclusion(attempt, resolution, basis) do
-    %{
-      mutation_attempt_id: attempt.id,
-      request_fingerprint: attempt.request_fingerprint,
-      outcome: Atom.to_string(resolution),
-      basis: basis
-    }
   end
 
   defp fleet_basis(:accepted),
@@ -279,12 +248,6 @@ defmodule SpaceTraders.FleetAcquisition do
 
   defp fleet_basis(:absent),
     do: "Authoritative owned Fleet contains no Ship the registry has not recorded"
-
-  defp credit_basis(:accepted),
-    do: "Authoritative Agent credits account for the purchase"
-
-  defp credit_basis(:absent),
-    do: "Authoritative Agent credits are consistent with no purchase having occurred"
 
   # Registers the Ship, then records the terminal Decision Episode outcome and
   # releases the portfolio so a later cycle can claim the new Ship.

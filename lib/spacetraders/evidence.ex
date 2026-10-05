@@ -104,6 +104,51 @@ defmodule SpaceTraders.Evidence do
   @doc false
   def bound_ship(%Binding{value: ship} = binding), do: Map.put(ship, :evidence_binding, binding)
 
+  @doc "Reuses eligible retained Agent credits, or acquires one governed replacement."
+  def recovery_agent_binding(%AgentRecord{} = agent, %Attempt{} = attempt) do
+    recovery_owned_binding(agent, attempt, "agent:#{agent.symbol}", "get-my-agent", fn ->
+      get_agent(agent, bind: true, lane: :safety, owner: "fleet_reconciliation")
+    end)
+  end
+
+  @doc "Reuses an eligible retained owned Fleet, or acquires one governed replacement."
+  def recovery_fleet_binding(%AgentRecord{} = agent, %Attempt{} = attempt) do
+    recovery_owned_binding(agent, attempt, "fleet:#{agent.symbol}", "get-my-ships", fn ->
+      get_ships(agent, bind: true, lane: :safety, owner: "fleet_reconciliation")
+    end)
+  end
+
+  defp recovery_owned_binding(agent, attempt, subject, operation, acquire) do
+    binding =
+      Observation
+      |> where(
+        [source],
+        source.agent_id == ^agent.id and source.subject == ^subject and
+          source.operation_id == ^operation
+      )
+      |> order_by([source], desc: source.observed_at, desc: source.id)
+      |> Repo.all()
+      |> Enum.find_value(fn source ->
+        with true <- valid_recovery_source?(source, attempt),
+             [_ | _] <- source_dependencies(source),
+             {:ok, value} <- owned_source_value(source) do
+          %Binding{value: value, observation: source}
+        else
+          _ -> nil
+        end
+      end)
+
+    if binding, do: {:ok, binding}, else: acquire.()
+  end
+
+  defp owned_source_value(%Observation{operation_id: "get-my-agent", facts: facts}),
+    do: {:ok, facts["response"] |> api_keys() |> SpaceTraders.API.Model.Agent.from_json()}
+
+  defp owned_source_value(%Observation{operation_id: "get-my-ships", facts: facts}),
+    do:
+      {:ok,
+       Enum.map(facts["response"], &(&1 |> api_keys() |> SpaceTraders.API.Model.Ship.from_json()))}
+
   @doc "Reads a System through a governed World Observation Demand."
   def get_system(token_or_agent, system_symbol, opts \\ []) when is_binary(system_symbol) do
     governed_read(
@@ -1248,7 +1293,7 @@ defmodule SpaceTraders.Evidence do
   def valid_recovery_source?(%AuthoritativeObservation{source: nil}, attempt) do
     kind = get_in(attempt.prepared_evidence, ["selected_action", "kind"])
 
-    attempt.operation_id not in ~w(navigate-ship warp-ship orbit-ship dock-ship patch-ship-nav) and
+    attempt.operation_id not in ~w(purchase-ship navigate-ship warp-ship orbit-ship dock-ship patch-ship-nav) and
       kind not in ["navigate", "warp", "orbit", "dock", "set_flight_mode"]
   end
 
@@ -1299,7 +1344,42 @@ defmodule SpaceTraders.Evidence do
     _ -> []
   end
 
+  defp source_dependencies(
+         %Observation{operation_id: "get-my-agent", subject: "agent:" <> symbol} = source
+       ) do
+    case source.facts["response"] do
+      %{"symbol" => ^symbol, "credits" => credits} when is_integer(credits) and credits >= 0 ->
+        if owned_subject?(source, "agent"),
+          do: [SpaceTraders.SafetyFence.DependencyKey.agent_credits(source.agent_id)],
+          else: []
+
+      _ ->
+        []
+    end
+  end
+
+  defp source_dependencies(
+         %Observation{operation_id: "get-my-ships", subject: "fleet:" <> _} = source
+       ) do
+    ships = source.facts["response"]
+
+    if owned_subject?(source, "fleet") and is_list(ships) and
+         Enum.all?(ships, fn
+           %{"symbol" => symbol} when is_binary(symbol) and symbol != "" -> true
+           _ -> false
+         end) and length(Enum.uniq_by(ships, & &1["symbol"])) == length(ships),
+       do: [SpaceTraders.SafetyFence.DependencyKey.owned_fleet(source.agent_id)],
+       else: []
+  end
+
   defp source_dependencies(_), do: []
+
+  defp owned_subject?(source, kind) do
+    case Repo.get(AgentRecord, source.agent_id) do
+      %AgentRecord{symbol: symbol} -> source.subject == "#{kind}:#{symbol}"
+      _ -> false
+    end
+  end
 
   # Retained decoded facts use snake_case; generated models consume API camelCase.
   defp api_keys(value) when is_map(value) do
