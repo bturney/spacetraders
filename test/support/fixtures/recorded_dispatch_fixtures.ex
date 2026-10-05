@@ -52,6 +52,10 @@ defmodule SpaceTraders.RecordedDispatchFixtures do
         do: transfer_evidence(agent, ship_symbol, action),
         else: action
 
+    if action["kind"] == "buy" and opts[:live_quote] != true do
+      retain_purchase_preflight(agent, intent.target_waypoint, action)
+    end
+
     case RecordedAction.prepare(agent, intent, action) do
       {:ok, selected} ->
         Map.merge(selected, %{agent: agent, ship: ship})
@@ -59,6 +63,46 @@ defmodule SpaceTraders.RecordedDispatchFixtures do
       {:error, reason} ->
         %{agent: agent, ship: ship, intent: intent, error: {:error, reason}}
     end
+  end
+
+  # Adapter tests provide actual retained Evidence at the public acquisition
+  # seam. Production preparation/admission still validate that same source.
+  def retain_purchase_preflight(agent, waypoint, action) do
+    system = waypoint |> String.split("-") |> Enum.take(2) |> Enum.join("-")
+    market_subject = "market:#{system}:#{waypoint}"
+    agent_subject = DependencyKey.observation_subject("get-my-agent", [], agent.symbol)
+
+    Enum.each(
+      [
+        {"get-market", market_subject,
+         %{
+           "symbol" => waypoint,
+           "exports" => [],
+           "imports" => [],
+           "exchange" => [],
+           "trade_goods" => [
+             %{
+               "symbol" => action["trade_symbol"],
+               "purchase_price" => action["listing_price"] || 10,
+               "trade_volume" => action["units"]
+             }
+           ]
+         }},
+        {"get-my-agent", agent_subject,
+         %{"symbol" => agent.symbol, "credits" => action["credits_before"] || 1_000_000}}
+      ],
+      fn {operation, subject, response} ->
+        observation =
+          SpaceTraders.Evidence.authoritative_observation(
+            operation,
+            [subject],
+            %{response: response},
+            SpaceTraders.Clock.utc_now()
+          )
+
+        {:ok, _} = SpaceTraders.Evidence.fulfil_demands(agent, subject, observation)
+      end
+    )
   end
 
   # Lower adapter tests supply controlled retained preflight facts, not network

@@ -45,6 +45,16 @@ defmodule SpaceTraders.FleetAllocation.Reconciler do
     {:noreply, state}
   end
 
+  def handle_info(
+        {:outbox, _id, "market_purchase_withdrawn",
+         %{"agent_id" => agent_id, "waypoint" => waypoint}},
+        state
+      ) do
+    system = waypoint |> String.split("-") |> Enum.take(2) |> Enum.join("-")
+    reconcile(agent_id, system)
+    {:noreply, state}
+  end
+
   def handle_info({:waypoint_intelligence_observed, agent_id, system_symbol}, state) do
     with_context(agent_id, fn scope, agent, revision ->
       FleetIntelligence.reconcile(
@@ -190,6 +200,26 @@ defmodule SpaceTraders.FleetAllocation.Reconciler do
   progress.
   """
   def reconcile_durable_work do
+    # Owning Intents retain withdrawals. A missed notification or restart does
+    # not strand the released Commitment while its Portfolio remains current.
+    from(i in SpaceTraders.Fleet.Intent,
+      join: c in SpaceTraders.FleetAllocation.Commitment,
+      on: c.id == i.fleet_commitment_id,
+      join: p in SpaceTraders.FleetAllocation.Portfolio,
+      on: p.id == c.fleet_commitment_portfolio_id,
+      join: s in SpaceTraders.Fleet.Ship,
+      on: s.id == i.ship_id,
+      where:
+        i.status == "superseded" and is_nil(p.superseded_at) and
+          fragment("?->>'outcome' = 'spending_replan_required'", i.last_action_result),
+      select: {s.agent_id, i.target_waypoint},
+      distinct: true
+    )
+    |> Repo.all()
+    |> Enum.each(fn {agent_id, waypoint} ->
+      reconcile(agent_id, waypoint |> String.split("-") |> Enum.take(2) |> Enum.join("-"))
+    end)
+
     Generation
     |> where([generation], is_nil(generation.fenced_at) and is_nil(generation.retired_at))
     |> select([generation], generation.agent_id)

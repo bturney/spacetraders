@@ -178,6 +178,7 @@ defmodule SpaceTraders.MutationAttempts do
     retry = build_attempt(operation, path, opts, context)
 
     Repo.transaction(fn ->
+      SpaceTraders.MarketSpending.lock_agent(original)
       current = locked_attempt(original.id)
 
       cond do
@@ -212,6 +213,7 @@ defmodule SpaceTraders.MutationAttempts do
   @spec mark_sent_or_unknown(Attempt.t()) :: {:ok, Attempt.t()} | {:error, term()}
   def mark_sent_or_unknown(%Attempt{state: "prepared"} = attempt) do
     Repo.transaction(fn ->
+      SpaceTraders.MarketSpending.lock_agent(attempt)
       lock_dependencies(attempt.dependency_keys)
       current = locked_attempt(attempt.id)
 
@@ -264,6 +266,7 @@ defmodule SpaceTraders.MutationAttempts do
   def reconcile(%Attempt{} = attempt, resolution, observations, opts)
       when resolution in [:accepted, :absent, :bounded_unknown] and is_list(observations) do
     Repo.transaction(fn ->
+      SpaceTraders.MarketSpending.lock_agent(attempt)
       current = locked_attempt(attempt.id)
 
       with {:ok, evidence} <-
@@ -295,6 +298,7 @@ defmodule SpaceTraders.MutationAttempts do
   @doc "Consumes an unused retry when fresh dependent evidence already satisfies its selected outcome."
   def withdraw_retry(%Attempt{} = attempt, observations) do
     Repo.transaction(fn ->
+      SpaceTraders.MarketSpending.lock_agent(attempt)
       current = locked_attempt(attempt.id)
 
       evidence =
@@ -328,6 +332,7 @@ defmodule SpaceTraders.MutationAttempts do
   def retire_unused_retry(%Attempt{} = attempt, disposition)
       when disposition in ["retired_while_emergency_stopped", "retired_authority_unavailable"] do
     Repo.transaction(fn ->
+      SpaceTraders.MarketSpending.lock_agent(attempt)
       current = locked_attempt(attempt.id)
 
       unless current.state == "absent" and current.retry_authorized and
@@ -410,6 +415,7 @@ defmodule SpaceTraders.MutationAttempts do
     now = DateTime.utc_now()
 
     Repo.transaction(fn ->
+      SpaceTraders.MarketSpending.lock_agent(attempt)
       current = locked_attempt(attempt.id)
 
       unless outcome_allowed?(current.state, classification) do
@@ -479,6 +485,9 @@ defmodule SpaceTraders.MutationAttempts do
           "preconditions" => operation.prerequisites
         }
         |> maybe_put_selected_evidence(opts)
+        |> then(fn evidence ->
+          if opts[:spending], do: Map.put(evidence, "spending", opts[:spending]), else: evidence
+        end)
       )
 
     %Attempt{
@@ -720,6 +729,10 @@ defmodule SpaceTraders.MutationAttempts do
   # preflight observations; they do not change the request a retry repeats.
   # Selection provenance separately binds the exact admitted action/evidence.
   defp fingerprint(operation_id, prepared_evidence, dependency_keys, evidence_references \\ []) do
+    # Quote attribution is retained with each attempt, not part of the exact
+    # request identity an absence-authorized retry must repeat.
+    prepared_evidence = Map.delete(prepared_evidence, "spending")
+
     prepared_evidence =
       if is_map(prepared_evidence["selected_action"]),
         do: Map.update!(prepared_evidence, "selected_action", &Map.drop(&1, evidence_references)),

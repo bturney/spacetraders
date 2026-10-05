@@ -2485,7 +2485,7 @@ defmodule SpaceTraders.FleetPlanning do
       |> Enum.sort_by(& &1.subject)
 
     required_resources = %{
-      credits: source_good.purchase_price * units,
+      credits: SpaceTraders.MarketSpending.worst_case_exposure(source_good.purchase_price, units),
       cargo_capacity: units,
       ship_count: 1
     }

@@ -1276,7 +1276,7 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
       {:ok, _} = MutationAttempts.mark_sent_or_unknown(attempt)
 
       Repo.query!(
-        "ALTER TABLE authoritative_observations ADD CONSTRAINT market_credit_retention_gap CHECK (operation_id <> 'get-my-agent')"
+        "ALTER TABLE authoritative_observations ADD CONSTRAINT market_credit_retention_gap CHECK (operation_id <> 'get-my-agent') NOT VALID"
       )
 
       Req.Test.stub(SpaceTraders.API, fn conn ->
@@ -2539,20 +2539,38 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
   end
 
   defp owned_intent(ship, portfolio, commitment, attrs) do
-    Repo.insert!(
-      struct(
-        Intent,
-        [
-          ship_id: ship.id,
-          caller: "commitment",
-          fleet_commitment_id: commitment.id,
-          fleet_commitment_portfolio_id: portfolio.id,
-          fleet_commitment_portfolio_version: portfolio.version,
-          type: "navigate",
-          target_waypoint: "X1-UX81-A1"
-        ] ++ attrs
+    intent =
+      Repo.insert!(
+        struct(
+          Intent,
+          [
+            ship_id: ship.id,
+            caller: "commitment",
+            fleet_commitment_id: commitment.id,
+            fleet_commitment_portfolio_id: portfolio.id,
+            fleet_commitment_portfolio_version: portfolio.version,
+            type: "navigate",
+            target_waypoint: "X1-UX81-A1"
+          ] ++ attrs
+        )
       )
-    )
+
+    if intent.type == "buy" do
+      agent = Repo.get!(SpaceTraders.Agent.Agent, ship.agent_id)
+
+      SpaceTraders.RecordedDispatchFixtures.retain_purchase_preflight(
+        agent,
+        intent.target_waypoint,
+        %{
+          "trade_symbol" => intent.parameters["trade_symbol"] || "IRON_ORE",
+          "units" => intent.parameters["units"] || 5,
+          "listing_price" => 10,
+          "credits_before" => 1000
+        }
+      )
+    end
+
+    intent
   end
 
   test "a legacy action with missing recipient parameters protects dependencies before new admission" do

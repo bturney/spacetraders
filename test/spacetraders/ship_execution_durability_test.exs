@@ -535,6 +535,12 @@ defmodule SpaceTraders.ShipExecutionDurabilityTest do
       "listing_price" => 10
     }
 
+    SpaceTraders.RecordedDispatchFixtures.retain_purchase_preflight(
+      agent,
+      source_intent.target_waypoint,
+      spending
+    )
+
     {:ok, %{attempt: unknown}} = RecordedAction.prepare(agent, source_intent, spending)
     {:ok, unknown} = MutationAttempts.mark_sent_or_unknown(unknown)
 
@@ -590,6 +596,97 @@ defmodule SpaceTraders.ShipExecutionDurabilityTest do
     assert SafetyFence.active?(MutationAttempts.get!(unknown.id))
     assert [%{id: ^blocked}] = SafetyFence.blocking_attempts(["agent_credits:#{agent.id}"])
     assert SafetyFence.blocking_attempts(["ship:#{agent.id}:#{independent.symbol}"]) == []
+  end
+
+  @tag :spending
+  test "two independent purchase admissions serialize against headroom for only one" do
+    {agent, first_ship, portfolio, _commitment} = claimed_ship(2)
+    ships = Repo.all(from s in Ship, where: s.agent_id == ^agent.id, order_by: s.symbol)
+
+    action = %{
+      "kind" => "buy",
+      "trade_symbol" => "IRON_ORE",
+      "units" => 5,
+      "listing_price" => 10,
+      "credits_before" => 63
+    }
+
+    SpaceTraders.RecordedDispatchFixtures.retain_purchase_preflight(
+      agent,
+      agent.headquarters,
+      action
+    )
+
+    prepared =
+      Enum.map(ships, fn ship ->
+        commitment = Enum.find(portfolio.commitments, &(ship.symbol in &1.claims))
+        intent = owned_navigation(ship, portfolio, commitment)
+        {:ok, %{attempt: attempt}} = RecordedAction.prepare(agent, intent, action)
+        attempt
+      end)
+
+    parent = self()
+
+    tasks =
+      Enum.map(prepared, fn attempt ->
+        Task.async(fn ->
+          send(parent, {:admission_ready, self()})
+
+          receive do
+            :admit -> RecordedAction.admit_send(attempt)
+          end
+        end)
+      end)
+
+    Enum.each(tasks, fn task ->
+      pid = task.pid
+      assert_receive {:admission_ready, ^pid}
+    end)
+
+    Enum.each(tasks, &send(&1.pid, :admit))
+    results = Enum.map(tasks, &Task.await(&1, 5_000))
+    assert Enum.count(results, &match?({:ok, _}, &1)) == 1
+    assert Enum.count(results, &(&1 == {:error, :insufficient_unreserved_headroom})) == 1
+    retained = MutationAttempts.list_for_agent(agent)
+    assert Enum.count(retained, &(&1.state == "sent_or_unknown")) == 1
+    assert Enum.count(retained, &(&1.state == "not_sent" and is_nil(&1.sent_or_unknown_at))) == 1
+    assert Enum.all?(retained, &(&1.prepared_evidence["request"]["body"]["units"] == 5))
+    assert first_ship.symbol in Enum.flat_map(portfolio.commitments, & &1.claims)
+  end
+
+  @tag :spending
+  test "non-spending admission proceeds while the Agent credit row is locked elsewhere" do
+    {agent, ship, portfolio, commitment} = claimed_ship()
+    intent = owned_navigation(ship, portfolio, commitment)
+    {:ok, %{attempt: attempt}} = RecordedAction.prepare(agent, intent, %{"kind" => "orbit"})
+    parent = self()
+
+    holder =
+      Task.async(fn ->
+        Repo.transaction(fn ->
+          Repo.one!(
+            from a in SpaceTraders.Agent.Agent, where: a.id == ^agent.id, lock: "FOR UPDATE"
+          )
+
+          send(parent, :agent_credit_locked)
+
+          receive do
+            :release -> :ok
+          after
+            5_000 -> flunk("Agent lock was not released")
+          end
+        end)
+      end)
+
+    assert_receive :agent_credit_locked
+
+    try do
+      sender = Task.async(fn -> RecordedAction.admit_send(attempt) end)
+      assert {:ok, %{state: "sent_or_unknown"}} = Task.await(sender, 1_000)
+    after
+      send(holder.pid, :release)
+      Task.await(holder, 5_000)
+    end
   end
 
   defp concurrent(count, fun) do
@@ -736,6 +833,14 @@ defmodule SpaceTraders.ShipExecutionDurabilityTest do
 
         topics = ["fleet:#{agent.id}", "fleet_allocation:#{operator.id}"]
         Repo.delete_all(from n in SpaceTraders.Outbox.Notification, where: n.topic in ^topics)
+
+        Repo.delete_all(
+          from n in SpaceTraders.Outbox.Notification,
+            where:
+              n.event == "market_purchase_withdrawn" and
+                fragment("?->>'agent_id'", n.payload) == ^to_string(agent.id)
+        )
+
         Repo.delete_all(from e in SpaceTraders.Timeline.Event, where: e.owner_id == ^ship.symbol)
         Repo.delete!(operator)
       end)

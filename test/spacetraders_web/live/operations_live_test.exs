@@ -74,7 +74,7 @@ defmodule SpaceTradersWeb.OperationsLiveTest do
         as_of: DateTime.utc_now(),
         source_version: 0,
         claims: ["SHIP-1"],
-        reservations: %{credits: 200}
+        reservations: %{credits: 175_000}
       })
 
     {:ok, portfolio} =
@@ -150,7 +150,7 @@ defmodule SpaceTradersWeb.OperationsLiveTest do
         as_of: DateTime.utc_now(),
         source_version: 0,
         claims: ["SHIP-1"],
-        reservations: %{credits: 200}
+        reservations: %{credits: 175_000}
       })
 
     {:ok, portfolio} =

@@ -2543,7 +2543,10 @@ defmodule SpaceTraders.Fleet.Intents do
           units =
             min(
               parameters["units"],
-              min(good.trade_volume, min(free, affordable_cargo_units(total_budget, price)))
+              min(
+                good.trade_volume,
+                min(free, SpaceTraders.MarketSpending.affordable_units(total_budget, price))
+              )
             )
 
           if units > 0, do: {:ok, units, overview.credits}, else: {:error, :buy_unavailable}
@@ -2643,6 +2646,11 @@ defmodule SpaceTraders.Fleet.Intents do
   @doc false
   def with_current_intent(%Intent{id: id} = expected, fun) do
     case Repo.transaction(fn ->
+           if get_in(expected.in_flight_action || %{}, ["kind"]) == "buy" do
+             ship = Repo.get!(Ship, expected.ship_id)
+             SpaceTraders.MarketSpending.lock_agent(ship.agent_id)
+           end
+
            case Repo.one(from i in Intent, where: i.id == ^id, lock: "FOR UPDATE") do
              %Intent{} = current ->
                if Intent.unfinished?(current) and

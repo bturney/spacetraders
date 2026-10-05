@@ -433,9 +433,10 @@ defmodule SpaceTraders.FleetExecutionTest do
   end
 
   describe "worst_case_exposure/1" do
-    test "covers the credit reservation, fuel allowance, and bounded-loss allowance" do
-      assert FleetExecution.worst_case_exposure(0) == 750
-      assert FleetExecution.worst_case_exposure(1_000) == 1_750
+    test "calibrates the quoted purchase with the approved initial margin" do
+      assert FleetExecution.worst_case_exposure(0) == 0
+      assert FleetExecution.worst_case_exposure(1_000) == 1_250
+      assert FleetExecution.worst_case_exposure(50) == 63
     end
   end
 
@@ -536,7 +537,7 @@ defmodule SpaceTraders.FleetExecutionTest do
 
     test "returns nil when the proposed choice's reservation crosses the floor" do
       agent = agent_fixture(operator_fixture())
-      choice = %{claims: ["SHIP-1"], reservations: %{credits: 900}}
+      choice = %{claims: ["SHIP-1"], reservations: %{credits: 1_501}}
       revision = revision(%{"hard_constraints" => ["Keep at least 500 credits available"]})
 
       Req.Test.stub(SpaceTraders.API, fn conn ->
