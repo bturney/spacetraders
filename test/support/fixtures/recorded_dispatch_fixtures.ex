@@ -15,6 +15,7 @@ defmodule SpaceTraders.RecordedDispatchFixtures do
   alias SpaceTraders.FleetAllocation.PortfolioCandidate
   alias SpaceTraders.FleetGeneration.Generation
   alias SpaceTraders.FleetStrategy.{Revision, Strategy}
+  alias SpaceTraders.SafetyFence.DependencyKey
   alias SpaceTraders.{ManualIntervention, Repo, ShipReservation}
 
   def dispatch_action(ship_symbol, action, token \\ "TOKEN") do
@@ -82,15 +83,20 @@ defmodule SpaceTraders.RecordedDispatchFixtures do
           |> SpaceTraders.API.Model.Ship.from_json()
           |> read_facts()
 
-        observation =
-          SpaceTraders.Evidence.authoritative_observation(
+        subject =
+          DependencyKey.observation_subject(
             "get-my-ship",
-            ["ship:#{ship_symbol}"],
-            %{response: ship}
+            [DependencyKey.ship(agent.id, ship_symbol)],
+            agent.symbol
           )
 
+        observation =
+          SpaceTraders.Evidence.authoritative_observation("get-my-ship", [subject], %{
+            response: ship
+          })
+
         {:ok, %{observation: source}} =
-          SpaceTraders.Evidence.fulfil_demands(agent, "ship:#{ship_symbol}", observation)
+          SpaceTraders.Evidence.fulfil_demands(agent, subject, observation)
 
         Map.put(selected, key, source.id)
       end

@@ -744,15 +744,10 @@ defmodule SpaceTraders.MutationAttempts do
   end
 
   defp validate_observations(attempt, resolution, observations) do
-    since = attempt.sent_or_unknown_at || attempt.prepared_at
-    now = SpaceTraders.Clock.utc_now()
-
     fresh? = fn observation ->
       Evidence.valid_observation?(observation) and
         Evidence.valid_recovery_source?(observation, attempt) and
-        match?(%DateTime{}, observation.observed_at) and
-        DateTime.compare(observation.observed_at, since) != :lt and
-        DateTime.diff(now, observation.observed_at, :millisecond) in 0..30_000
+        Evidence.recovery_fresh?(observation.observed_at, attempt)
     end
 
     covered_dependencies =
