@@ -362,6 +362,1044 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
     end
   end
 
+  test "Contract recovery covers only retained Cargo and recipient facts with exact lineage" do
+    {agent, ship, _portfolio, _commitment} = claimed_ship("DELIVERY-SOURCE")
+
+    {:ok, attempt} =
+      MutationAttempts.prepare(
+        OperationInventory.fetch!("deliver-contract"),
+        "/my/contracts/ctr-source/deliver",
+        agent_id: agent.id,
+        json: %{"shipSymbol" => ship.symbol, "tradeSymbol" => "IRON_ORE", "units" => 1}
+      )
+
+    {:ok, attempt} = MutationAttempts.mark_sent_or_unknown(attempt)
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      data =
+        if conn.request_path == "/v2/my/contracts",
+          do: [delivery_contract_body()],
+          else: ship_body(ship.symbol)
+
+      Req.Test.json(conn, %{"data" => data})
+    end)
+
+    {:ok, cargo} = SpaceTraders.Evidence.get_ship_binding(agent, ship.symbol)
+    {:ok, recipient} = SpaceTraders.Evidence.get_contracts(agent, bind: true)
+    {:ok, newer} = SpaceTraders.Evidence.get_contracts(agent, bind: true)
+    refute newer.observation.id == recipient.observation.id
+
+    assert {:incomplete, %{missing: [_]}} =
+             SpaceTraders.Evidence.recovery_proof(attempt, :accepted, "Delivery accepted", [cargo])
+
+    assert {:incomplete, %{missing: [_]}} =
+             SpaceTraders.Evidence.recovery_proof(attempt, :accepted, "Delivery accepted", [
+               recipient
+             ])
+
+    assert {:ok, proof} =
+             SpaceTraders.Evidence.recovery_proof(
+               attempt,
+               :accepted,
+               "Cargo and Contract progress agree",
+               [cargo, recipient]
+             )
+
+    assert Enum.map(proof, & &1.source.id) == [cargo.observation.id, recipient.observation.id]
+
+    assert Enum.map(proof, & &1.observed_at) == [
+             cargo.observation.observed_at,
+             recipient.observation.observed_at
+           ]
+
+    assert {:error, :authoritative_evidence_required} =
+             MutationAttempts.reconcile(attempt, :accepted, Enum.map(proof, &%{&1 | source: nil}))
+
+    assert {:ok, accepted} = MutationAttempts.reconcile(attempt, :accepted, proof)
+    assert accepted.state == "accepted"
+  end
+
+  test "Construction binding survives restart without widening Cargo coverage" do
+    {agent, ship, _portfolio, _commitment} = claimed_ship("CONSTRUCTION-SOURCE")
+
+    {:ok, attempt} =
+      MutationAttempts.prepare(
+        OperationInventory.fetch!("supply-construction"),
+        "/systems/X1-UX81/waypoints/X1-UX81-A1/construction/supply",
+        agent_id: agent.id,
+        json: %{"shipSymbol" => ship.symbol, "tradeSymbol" => "IRON_ORE", "units" => 1}
+      )
+
+    {:ok, attempt} = MutationAttempts.mark_sent_or_unknown(attempt)
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      data =
+        if String.ends_with?(conn.request_path, "/construction"),
+          do: %{
+            "symbol" => "X1-UX81-A1",
+            "isComplete" => false,
+            "materials" => [%{"tradeSymbol" => "IRON_ORE", "required" => 5, "fulfilled" => 1}]
+          },
+          else: ship_body(ship.symbol)
+
+      Req.Test.json(conn, %{"data" => data})
+    end)
+
+    {:ok, cargo} = SpaceTraders.Evidence.get_ship_binding(agent, ship.symbol)
+
+    {:ok, %SpaceTraders.Evidence.Binding{} = recipient} =
+      SpaceTraders.Evidence.get_construction(agent, "X1-UX81", "X1-UX81-A1", bind: true)
+
+    Req.Test.stub(SpaceTraders.API, fn _ ->
+      flunk("retained restart binding acquired evidence")
+    end)
+
+    assert {:ok, restored} =
+             SpaceTraders.Evidence.retained_recipient_binding(agent, recipient.observation.id)
+
+    assert restored == recipient
+
+    assert {:incomplete, %{missing: [_]}} =
+             SpaceTraders.Evidence.recovery_proof(attempt, :accepted, "Supply accepted", [
+               restored
+             ])
+
+    assert {:ok, proof} =
+             SpaceTraders.Evidence.recovery_proof(
+               attempt,
+               :accepted,
+               "Cargo and Construction agree",
+               [cargo, restored]
+             )
+
+    assert {:ok, _} = MutationAttempts.reconcile(attempt, :accepted, proof)
+  end
+
+  defp delivery_contract_body do
+    %{
+      "id" => "ctr-source",
+      "accepted" => true,
+      "fulfilled" => false,
+      "terms" => %{
+        "deadline" => "2099-01-01T00:00:00Z",
+        "payment" => %{},
+        "deliver" => [
+          %{
+            "tradeSymbol" => "IRON_ORE",
+            "destinationSymbol" => "X1-UX81-A1",
+            "unitsRequired" => 5,
+            "unitsFulfilled" => 1
+          }
+        ]
+      }
+    }
+  end
+
+  test "Construction recovery settles from exact retained Cargo and recipient sources" do
+    {agent, ship, portfolio, commitment} = claimed_ship("SUPPLY-RECOVERY")
+    {intent, attempt} = selected_delivery(agent, ship, portfolio, commitment, "construction")
+    {:ok, attempt} = MutationAttempts.mark_sent_or_unknown(attempt)
+    stub_delivery(ship, "construction", 11, 5)
+    _ = Intents.reconcile(agent.id, ship.symbol, nil, :boot, intent.id)
+    accepted = MutationAttempts.get!(attempt.id)
+    assert accepted.state == "accepted"
+    assert Repo.get!(Intent, intent.id).last_action_result["units"] == 1
+    observations = List.last(accepted.outcomes).evidence["observations"]
+    assert Enum.all?(observations, &is_binary(get_in(&1, ["source", "id"])))
+    assert Enum.map(observations, & &1["operation_id"]) == ["get-my-ship", "get-construction"]
+  end
+
+  test "delivery runtime keeps supplied Cargo lineage when identical newer Cargo replaces latest" do
+    {agent, ship, portfolio, commitment} = claimed_ship("DELIVERY-EXACT-RUNTIME")
+    {intent, attempt} = selected_delivery(agent, ship, portfolio, commitment, "contract")
+    {:ok, attempt} = MutationAttempts.mark_sent_or_unknown(attempt)
+    stub_delivery(ship, "contract", 11, 5)
+    {:ok, original} = SpaceTraders.Evidence.get_ship_binding(agent, ship.symbol)
+    {:ok, newer} = SpaceTraders.Evidence.get_ship_binding(agent, ship.symbol)
+    refute original.observation.id == newer.observation.id
+
+    assert {:ok, %{status: "completed"}} =
+             Intents.advance(agent, intent, SpaceTraders.Evidence.bound_ship(original))
+
+    observations = List.last(MutationAttempts.get!(attempt.id).outcomes).evidence["observations"]
+    assert hd(observations)["source"]["id"] == original.observation.id
+
+    assert hd(observations)["observed_at"] ==
+             DateTime.to_iso8601(original.observation.observed_at)
+
+    assert SpaceTraders.Evidence.latest_observation(agent, "ship:#{ship.symbol}").id ==
+             newer.observation.id
+  end
+
+  for family <- ["contract", "construction"] do
+    test "#{family} recipient progress completed externally retires absence without Fleet-earned quantity" do
+      family = unquote(family)
+      {agent, ship, portfolio, commitment} = claimed_ship("EXTERNAL-" <> family)
+      {intent, attempt} = selected_delivery(agent, ship, portfolio, commitment, family)
+      {:ok, attempt} = MutationAttempts.mark_sent_or_unknown(attempt)
+      stub_delivery(ship, family, 12, 5)
+      _ = Intents.reconcile(agent.id, ship.symbol, nil, :boot, intent.id)
+      result = Repo.get!(Intent, intent.id)
+      assert result.status == "completed"
+      assert result.last_action_result["external_completion"]
+      assert result.last_action_result["units"] == 0
+      absent = MutationAttempts.get!(attempt.id)
+      assert absent.state == "absent"
+      refute absent.retry_authorized
+      refute Enum.any?(absent.outcomes, &(&1.classification in ["accepted", "succeeded"]))
+    end
+  end
+
+  defp selected_delivery(agent, ship, portfolio, commitment, family) do
+    recipient =
+      if family == "contract",
+        do: %{"type" => "contract", "contract_id" => "ctr-source", "waypoint" => "X1-UX81-A1"},
+        else: %{"type" => "construction", "system" => "X1-UX81", "waypoint" => "X1-UX81-A1"}
+
+    intent =
+      owned_intent(ship, portfolio, commitment,
+        type: "deliver",
+        target_waypoint: "X1-UX81-A1",
+        parameters: %{"trade_symbol" => "IRON_ORE", "units" => 1, "recipient" => recipient}
+      )
+
+    {:ok, %{intent: intent, attempt: attempt}} =
+      SpaceTraders.Fleet.Intents.RecordedAction.prepare(agent, intent, %{
+        "kind" => "deliver",
+        "trade_symbol" => "IRON_ORE",
+        "units" => 1,
+        "cargo_before" => 12,
+        "fulfilled_before" => 4,
+        "recipient" => recipient
+      })
+
+    {intent, attempt}
+  end
+
+  test "persisted delivery absence rechecks recipient completion before consuming a retry" do
+    {agent, ship, portfolio, commitment} = claimed_ship("DELIVERY-RETRY-COMPLETED")
+    {intent, attempt} = selected_delivery(agent, ship, portfolio, commitment, "construction")
+    {:ok, attempt} = MutationAttempts.mark_sent_or_unknown(attempt)
+    stub_delivery(ship, "construction", 12, 4)
+    {:ok, cargo} = SpaceTraders.Evidence.get_ship_binding(agent, ship.symbol)
+
+    {:ok, recipient} =
+      SpaceTraders.Evidence.get_construction(agent, "X1-UX81", "X1-UX81-A1", bind: true)
+
+    {:ok, proof} =
+      SpaceTraders.Evidence.recovery_proof(attempt, :absent, "Unchanged Cargo and progress", [
+        cargo,
+        recipient
+      ])
+
+    {:ok, absent} = MutationAttempts.reconcile(attempt, :absent, proof)
+    assert absent.retry_authorized
+    stub_delivery(ship, "construction", 12, 5)
+    _ = Intents.reconcile(agent.id, ship.symbol, nil, :intent_retry, intent.id)
+    assert Repo.get!(Intent, intent.id).status == "completed"
+    refute MutationAttempts.get!(attempt.id).retry_authorized
+    assert MutationAttempts.get!(attempt.id).state == "absent"
+  end
+
+  test "prepared Construction delivery resumes its original attempt and completed response only once" do
+    {agent, ship, portfolio, commitment} = claimed_ship("PREPARED-SUPPLY")
+    {intent, attempt} = selected_delivery(agent, ship, portfolio, commitment, "construction")
+    calls = start_supervised!({Elixir.Agent, fn -> 0 end})
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      data =
+        case conn.method do
+          "GET" ->
+            ship_body(ship.symbol, %{"nav" => nav_body("DOCKED")})
+
+          "POST" ->
+            assert String.ends_with?(conn.request_path, "/construction/supply")
+            Elixir.Agent.update(calls, &(&1 + 1))
+
+            %{
+              "cargo" => %{
+                "capacity" => 40,
+                "units" => 11,
+                "inventory" => [%{"symbol" => "IRON_ORE", "units" => 11}]
+              },
+              "construction" => %{
+                "symbol" => "X1-UX81-A1",
+                "isComplete" => false,
+                "materials" => [%{"tradeSymbol" => "IRON_ORE", "required" => 5, "fulfilled" => 5}]
+              }
+            }
+        end
+
+      Req.Test.json(conn, %{"data" => data})
+    end)
+
+    _ = Intents.reconcile(agent.id, ship.symbol, nil, :boot, intent.id)
+    _ = Intents.reconcile(agent.id, ship.symbol, nil, :boot, intent.id)
+    assert Elixir.Agent.get(calls, & &1) == 1
+    assert MutationAttempts.get!(attempt.id).state == "succeeded"
+    assert [only] = MutationAttempts.list_for_agent(agent)
+    assert only.id == attempt.id
+    assert Repo.get!(Intent, intent.id).last_action_result["units"] == 1
+  end
+
+  test "a delivery callback cannot clear the newer retry of its same selected action" do
+    {agent, ship, portfolio, commitment} = claimed_ship("DELIVERY-STALE-RETRY")
+    {intent, attempt} = selected_delivery(agent, ship, portfolio, commitment, "contract")
+    {:ok, attempt} = MutationAttempts.mark_sent_or_unknown(attempt)
+    stub_delivery(ship, "contract", 12, 4)
+    {:ok, cargo} = SpaceTraders.Evidence.get_ship_binding(agent, ship.symbol)
+    {:ok, recipient} = SpaceTraders.Evidence.get_contracts(agent, bind: true)
+
+    {:ok, proof} =
+      SpaceTraders.Evidence.recovery_proof(attempt, :absent, "Unchanged Cargo and recipient", [
+        cargo,
+        recipient
+      ])
+
+    {:ok, absent} = MutationAttempts.reconcile(attempt, :absent, proof)
+    {:ok, retry} = SpaceTraders.Fleet.Intents.RecordedAction.prepare_retry(agent, intent, absent)
+
+    assert :intent_no_longer_owned =
+             Intents.transition_intent(intent, status: "completed", in_flight_action: nil)
+
+    current = Repo.get!(Intent, intent.id)
+    assert current.in_flight_action == intent.in_flight_action
+    assert current.mutation_attempt_id == retry.id
+    assert MutationAttempts.get!(retry.id).state == "prepared"
+  end
+
+  test "missing Construction material progress cannot resolve supply or release its fence" do
+    {agent, ship, portfolio, commitment} = claimed_ship("MISSING-MATERIAL")
+    {intent, attempt} = selected_delivery(agent, ship, portfolio, commitment, "construction")
+    {:ok, attempt} = MutationAttempts.mark_sent_or_unknown(attempt)
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      assert conn.method == "GET"
+
+      data =
+        if String.ends_with?(conn.request_path, "/construction"),
+          do: %{"symbol" => "X1-UX81-A1", "isComplete" => true, "materials" => []},
+          else: ship_body(ship.symbol, %{"nav" => nav_body("DOCKED")})
+
+      Req.Test.json(conn, %{"data" => data})
+    end)
+
+    _ = Intents.reconcile(agent.id, ship.symbol, nil, :boot, intent.id)
+    assert MutationAttempts.get!(attempt.id).state == "sent_or_unknown"
+    assert SpaceTraders.SafetyFence.active?(MutationAttempts.get!(attempt.id))
+    assert Repo.get!(Intent, intent.id).in_flight_action == intent.in_flight_action
+  end
+
+  test "a durable successful response cannot advance delivery from malformed recovery facts" do
+    {agent, ship, portfolio, commitment} = claimed_ship("DELIVERY-SUCCESS-GAP")
+    {intent, attempt} = selected_delivery(agent, ship, portfolio, commitment, "construction")
+    {:ok, attempt} = MutationAttempts.mark_sent_or_unknown(attempt)
+    {:ok, _} = MutationAttempts.record_outcome(attempt, :succeeded, %{status: 200})
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      assert conn.method == "GET"
+
+      data =
+        if String.ends_with?(conn.request_path, "/construction"),
+          do: %{
+            "symbol" => "X1-UX81-A1",
+            "isComplete" => nil,
+            "materials" => [%{"tradeSymbol" => "IRON_ORE", "required" => 5, "fulfilled" => 5}]
+          },
+          else:
+            ship_body(ship.symbol, %{
+              "nav" => nav_body("DOCKED"),
+              "cargo" => %{
+                "capacity" => 40,
+                "units" => 11,
+                "inventory" => [%{"symbol" => "IRON_ORE", "units" => 11}]
+              }
+            })
+
+      Req.Test.json(conn, %{"data" => data})
+    end)
+
+    _ = Intents.reconcile(agent.id, ship.symbol, nil, :boot, intent.id)
+    assert Repo.get!(Intent, intent.id).status == "blocked"
+    assert Repo.get!(Intent, intent.id).in_flight_action == intent.in_flight_action
+    assert MutationAttempts.get!(attempt.id).state == "succeeded"
+  end
+
+  for family <- ["contract", "construction"] do
+    test "#{family} partial acquisition expiry preserves exact usable recipient and never restamps Cargo" do
+      family = unquote(family)
+      {agent, ship, portfolio, commitment} = claimed_ship("DELIVERY-EXPIRY-#{family}")
+      {_intent, attempt} = selected_delivery(agent, ship, portfolio, commitment, family)
+      {:ok, attempt} = MutationAttempts.mark_sent_or_unknown(attempt)
+      previous = Application.fetch_env(:spacetraders, :clock)
+
+      start_supervised!(
+        {SpaceTraders.TestClock, DateTime.add(attempt.sent_or_unknown_at, 1, :second)}
+      )
+
+      Application.put_env(:spacetraders, :clock, SpaceTraders.TestClock)
+
+      on_exit(fn ->
+        case previous do
+          {:ok, value} -> Application.put_env(:spacetraders, :clock, value)
+          :error -> Application.delete_env(:spacetraders, :clock)
+        end
+      end)
+
+      stub_delivery(ship, family, 11, 5)
+      {:ok, cargo} = SpaceTraders.Evidence.get_ship_binding(agent, ship.symbol)
+      SpaceTraders.TestClock.advance(31)
+
+      {:ok, recipient} =
+        if family == "contract",
+          do: SpaceTraders.Evidence.get_contracts(agent, bind: true),
+          else: SpaceTraders.Evidence.get_construction(agent, "X1-UX81", "X1-UX81-A1", bind: true)
+
+      assert {:incomplete, %{usable: [^recipient], unusable: [^cargo], missing: [_]}} =
+               SpaceTraders.Evidence.recovery_proof(attempt, :accepted, "Progress agrees", [
+                 cargo,
+                 recipient
+               ])
+
+      {:ok, replacement} = SpaceTraders.Evidence.get_ship_binding(agent, ship.symbol)
+
+      assert {:ok, restored} =
+               SpaceTraders.Evidence.retained_recipient_binding(agent, recipient.observation.id)
+
+      assert restored == recipient
+      assert replacement.value == cargo.value
+      refute replacement.observation.id == cargo.observation.id
+
+      {:ok, observations} =
+        SpaceTraders.Evidence.recovery_proof(
+          attempt,
+          :accepted,
+          "Replacement Cargo and original recipient agree",
+          [replacement, restored]
+        )
+
+      assert {:ok, _} = MutationAttempts.reconcile(attempt, :accepted, observations)
+
+      assert SpaceTraders.Evidence.retained_ship_binding(agent, cargo.observation.id) ==
+               {:ok, cargo}
+    end
+  end
+
+  for family <- ["contract", "construction"],
+      trigger <- [:boot, :arrival, :cooldown, :intent_retry] do
+    test "#{family} accepted delivery reenters the selected action on #{trigger}" do
+      family = unquote(family)
+      trigger = unquote(trigger)
+      {agent, ship, portfolio, commitment} = claimed_ship("DELIVERY-#{family}-#{trigger}")
+      {intent, attempt} = selected_delivery(agent, ship, portfolio, commitment, family)
+      {:ok, attempt} = MutationAttempts.mark_sent_or_unknown(attempt)
+      stub_delivery(ship, family, 11, 5)
+      _ = Intents.reconcile(agent.id, ship.symbol, nil, trigger, intent.id)
+      _ = Intents.reconcile(agent.id, ship.symbol, nil, trigger, intent.id)
+      assert MutationAttempts.get!(attempt.id).state == "accepted"
+      assert Repo.get!(Intent, intent.id).status == "completed"
+      assert Repo.get!(Intent, intent.id).last_action_result["units"] == 1
+      assert [only] = MutationAttempts.list_for_agent(agent)
+      assert only.id == attempt.id
+    end
+  end
+
+  for family <- ["contract", "construction"], gap <- [:cargo, :recipient] do
+    operation =
+      if gap == :cargo,
+        do: "get-my-ship",
+        else: if(family == "contract", do: "get-contracts", else: "get-construction")
+
+    test "#{family} #{gap} retention failure retains the selected attempt and Safety Fence" do
+      family = unquote(family)
+      gap = unquote(gap)
+      {agent, ship, portfolio, commitment} = claimed_ship("DELIVERY-GAP-#{family}-#{gap}")
+      {intent, attempt} = selected_delivery(agent, ship, portfolio, commitment, family)
+      {:ok, attempt} = MutationAttempts.mark_sent_or_unknown(attempt)
+
+      operation = unquote(operation)
+
+      Repo.query!(
+        "ALTER TABLE authoritative_observations ADD CONSTRAINT delivery_retention_gap CHECK (operation_id <> '#{operation}')"
+      )
+
+      stub_delivery(ship, family, 11, 5)
+      _ = Intents.reconcile(agent.id, ship.symbol, nil, :boot, intent.id)
+      assert MutationAttempts.get!(attempt.id).state == "sent_or_unknown"
+      assert SpaceTraders.SafetyFence.active?(MutationAttempts.get!(attempt.id))
+      assert Repo.get!(Intent, intent.id).in_flight_action == intent.in_flight_action
+    end
+  end
+
+  for family <- ["contract", "construction"] do
+    test "#{family} proven absence retries once through the same live response continuation" do
+      family = unquote(family)
+      {agent, ship, portfolio, commitment} = claimed_ship("DELIVERY-ABSENT-#{family}")
+      {intent, attempt} = selected_delivery(agent, ship, portfolio, commitment, family)
+      {:ok, attempt} = MutationAttempts.mark_sent_or_unknown(attempt)
+      calls = start_supervised!({Elixir.Agent, fn -> 0 end})
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        cargo = %{
+          "capacity" => 40,
+          "units" => 11,
+          "inventory" => [%{"symbol" => "IRON_ORE", "units" => 11}]
+        }
+
+        before =
+          delivery_contract_body()
+          |> put_in(["terms", "deliver", Access.at(0), "unitsFulfilled"], 4)
+
+        construction = %{
+          "symbol" => "X1-UX81-A1",
+          "isComplete" => false,
+          "materials" => [%{"tradeSymbol" => "IRON_ORE", "required" => 5, "fulfilled" => 4}]
+        }
+
+        data =
+          case {conn.method, conn.request_path} do
+            {"GET", "/v2/my/ships/" <> _} ->
+              ship_body(ship.symbol, %{"nav" => nav_body("DOCKED")})
+
+            {"GET", "/v2/my/contracts"} ->
+              [before]
+
+            {"GET", "/v2/systems/X1-UX81/waypoints/X1-UX81-A1/construction"} ->
+              construction
+
+            {"POST", _} ->
+              Elixir.Agent.update(calls, &(&1 + 1))
+
+              if family == "contract",
+                do: %{
+                  "cargo" => cargo,
+                  "contract" =>
+                    put_in(before, ["terms", "deliver", Access.at(0), "unitsFulfilled"], 5)
+                },
+                else: %{
+                  "cargo" => cargo,
+                  "construction" =>
+                    put_in(construction, ["materials", Access.at(0), "fulfilled"], 5)
+                }
+          end
+
+        Req.Test.json(conn, %{"data" => data})
+      end)
+
+      _ = Intents.reconcile(agent.id, ship.symbol, nil, :boot, intent.id)
+      _ = Intents.reconcile(agent.id, ship.symbol, nil, :intent_retry, intent.id)
+      assert Elixir.Agent.get(calls, & &1) == 1
+      assert Repo.get!(Intent, intent.id).status == "completed"
+      assert Repo.get!(Intent, intent.id).last_action_result["units"] == 1
+      assert [original, retry] = MutationAttempts.list_for_agent(agent)
+      assert original.id == attempt.id
+      assert original.state == "absent"
+      refute original.retry_authorized
+      assert retry.retry_of_id == original.id
+      assert retry.state == "succeeded"
+      assert :intent_no_longer_owned = Intents.transition_intent(intent, in_flight_action: nil)
+    end
+  end
+
+  defp stub_delivery(ship, family, cargo, fulfilled, complete \\ false) do
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      assert conn.method == "GET"
+
+      data =
+        case conn.request_path do
+          "/v2/my/ships/" <> _ ->
+            ship_body(ship.symbol, %{
+              "nav" => nav_body("DOCKED"),
+              "cargo" => %{
+                "capacity" => 40,
+                "units" => cargo,
+                "inventory" => [%{"symbol" => "IRON_ORE", "units" => cargo}]
+              }
+            })
+
+          "/v2/my/contracts" ->
+            [
+              delivery_contract_body()
+              |> Map.put("fulfilled", complete)
+              |> put_in(["terms", "deliver", Access.at(0), "unitsFulfilled"], fulfilled)
+            ]
+
+          "/v2/systems/X1-UX81/waypoints/X1-UX81-A1/construction" ->
+            assert family == "construction"
+
+            %{
+              "symbol" => "X1-UX81-A1",
+              "isComplete" => complete,
+              "materials" => [
+                %{"tradeSymbol" => "IRON_ORE", "required" => 5, "fulfilled" => fulfilled}
+              ]
+            }
+        end
+
+      Req.Test.json(conn, %{"data" => data})
+    end)
+  end
+
+  test "composite refuel proof preserves exact Ship and credit sources across restart" do
+    {agent, ship, portfolio, commitment} = claimed_ship("COMPOSITE-SOURCE")
+    intent = owned_intent(ship, portfolio, commitment, [])
+
+    {:ok, %{attempt: attempt}} =
+      SpaceTraders.API.RecordedDispatch.prepare(agent, intent, %{
+        "kind" => "refuel",
+        "waypoint" => "X1-UX81-A1",
+        "fuel_before" => 150
+      })
+
+    {:ok, attempt} = MutationAttempts.mark_sent_or_unknown(attempt)
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      data =
+        if conn.request_path == "/v2/my/agent",
+          do: %{"symbol" => agent.symbol, "credits" => 1000},
+          else: ship_body(ship.symbol, %{"fuel" => %{"current" => 200, "capacity" => 200}})
+
+      Req.Test.json(conn, %{"data" => data})
+    end)
+
+    {:ok, ship_source} = SpaceTraders.Evidence.get_ship_binding(agent, ship.symbol)
+    {:ok, credit_source} = SpaceTraders.Evidence.get_agent(agent, bind: true)
+    {:ok, _newer} = SpaceTraders.Evidence.get_agent_binding(agent)
+
+    Req.Test.stub(SpaceTraders.API, fn _ ->
+      flunk("exact-source restoration must not read the game")
+    end)
+
+    {:ok, ship_source} =
+      SpaceTraders.Evidence.retained_ship_binding(agent, ship_source.observation.id)
+
+    {:ok, restored_credits} =
+      SpaceTraders.Evidence.retained_agent_binding(agent, credit_source.observation.id)
+
+    assert restored_credits == credit_source
+
+    assert {:ok, proofs} =
+             SpaceTraders.Evidence.recovery_proof(
+               attempt,
+               :accepted,
+               "Fuel restored; authoritative credits retained",
+               [ship_source, credit_source]
+             )
+
+    assert Enum.map(proofs, & &1.source.id) == [
+             ship_source.observation.id,
+             credit_source.observation.id
+           ]
+
+    assert Enum.map(proofs, & &1.observed_at) == [
+             ship_source.observation.observed_at,
+             credit_source.observation.observed_at
+           ]
+
+    assert {:ok, _} = MutationAttempts.reconcile(attempt, :accepted, proofs)
+  end
+
+  for kind <- ["refuel", "jump"] do
+    test "#{kind} restart reuses usable credits when a newer retained acquisition is malformed" do
+      {agent, ship, portfolio, commitment} = claimed_ship("REUSABLE-CREDIT-#{unquote(kind)}")
+      intent = owned_intent(ship, portfolio, commitment, [])
+
+      {:ok, %{attempt: attempt}} =
+        SpaceTraders.API.RecordedDispatch.prepare(agent, intent, %{
+          "kind" => unquote(kind),
+          "waypoint" => "X1-UX81-A1",
+          "fuel_before" => 150,
+          "credits_before" => 1000
+        })
+
+      {:ok, attempt} = MutationAttempts.mark_sent_or_unknown(attempt)
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        Req.Test.json(conn, %{"data" => %{"symbol" => agent.symbol, "credits" => 900}})
+      end)
+
+      {:ok, usable} = SpaceTraders.Evidence.get_agent_binding(agent)
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        Req.Test.json(conn, %{"data" => %{"symbol" => agent.symbol}})
+      end)
+
+      {:ok, malformed} = SpaceTraders.Evidence.get_agent_binding(agent)
+      refute malformed.observation.id == usable.observation.id
+
+      Req.Test.stub(SpaceTraders.API, fn _ ->
+        flunk("usable retained credit facts must not be reacquired")
+      end)
+
+      assert {:ok, restored} = SpaceTraders.Evidence.recovery_agent_binding(agent, attempt)
+      assert restored == usable
+    end
+
+    test "#{kind} Bounded Unknown retains exact composite proof and reconciles under Emergency Stop" do
+      {agent, ship, portfolio, commitment} = claimed_ship("BOUNDED-CREDIT-#{unquote(kind)}")
+      intent = owned_intent(ship, portfolio, commitment, [])
+
+      {:ok, %{intent: intent, attempt: attempt}} =
+        SpaceTraders.API.RecordedDispatch.prepare(agent, intent, %{
+          "kind" => unquote(kind),
+          "waypoint" => "X1-UX81-A1",
+          "fuel_before" => 150,
+          "credits_before" => 1000
+        })
+
+      {:ok, attempt} = MutationAttempts.mark_sent_or_unknown(attempt)
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        assert conn.method == "GET"
+
+        data =
+          if conn.request_path == "/v2/my/agent",
+            do: %{"symbol" => agent.symbol, "credits" => 900},
+            else: ship_body(ship.symbol)
+
+        Req.Test.json(conn, %{"data" => data})
+      end)
+
+      {:ok, ship_source} = SpaceTraders.Evidence.get_ship_binding(agent, ship.symbol)
+      {:ok, credits} = SpaceTraders.Evidence.get_agent_binding(agent)
+
+      {:ok, proofs} =
+        SpaceTraders.Evidence.recovery_proof(
+          attempt,
+          :bounded_unknown,
+          "Controlled-game fixture bounds this historical request",
+          [ship_source, credits]
+        )
+
+      # Ledger accounting fixture only: this is not a production worst-case price rule.
+      {:ok, _} =
+        MutationAttempts.reconcile(attempt, :bounded_unknown, proofs,
+          constraint_accounting:
+            SpaceTraders.Evidence.constraint_accounting(
+              "fixture-only expenditure bound of 100 credits",
+              []
+            )
+        )
+
+      strategy = Repo.get_by!(Strategy, operator_id: agent.operator_id)
+      Repo.update!(Ecto.Changeset.change(strategy, emergency_stopped_at: DateTime.utc_now()))
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        assert conn.method == "GET"
+
+        data =
+          if conn.request_path == "/v2/my/agent",
+            do: %{"symbol" => agent.symbol, "credits" => 900},
+            else: ship_body(ship.symbol, %{"fuel" => %{"current" => 200, "capacity" => 200}})
+
+        Req.Test.json(conn, %{"data" => data})
+      end)
+
+      _ = Intents.reconcile(agent.id, ship.symbol, nil, :boot, intent.id)
+      accepted = MutationAttempts.get!(attempt.id)
+      assert accepted.state == "accepted"
+      assert Enum.map(accepted.outcomes, & &1.classification) == ["bounded_unknown", "accepted"]
+
+      assert hd(accepted.outcomes).evidence["observations"] |> Enum.map(& &1["source"]["id"]) ==
+               [ship_source.observation.id, credits.observation.id]
+
+      assert length(MutationAttempts.list_for_agent(agent)) == 1
+      refute accepted.retry_authorized
+    end
+
+    test "#{kind} composite proof reports partial expiry without acquiring or widening coverage" do
+      {agent, ship, portfolio, commitment} = claimed_ship("PARTIAL-CREDIT-#{unquote(kind)}")
+      intent = owned_intent(ship, portfolio, commitment, [])
+
+      {:ok, %{attempt: attempt}} =
+        SpaceTraders.API.RecordedDispatch.prepare(agent, intent, %{
+          "kind" => unquote(kind),
+          "waypoint" => "X1-UX81-A1",
+          "fuel_before" => 150,
+          "credits_before" => 1000
+        })
+
+      {:ok, attempt} = MutationAttempts.mark_sent_or_unknown(attempt)
+      previous = Application.fetch_env(:spacetraders, :clock)
+      start_supervised!({SpaceTraders.TestClock, DateTime.add(attempt.sent_or_unknown_at, 1)})
+      Application.put_env(:spacetraders, :clock, SpaceTraders.TestClock)
+
+      on_exit(fn ->
+        case previous do
+          {:ok, value} -> Application.put_env(:spacetraders, :clock, value)
+          :error -> Application.delete_env(:spacetraders, :clock)
+        end
+      end)
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        data =
+          if conn.request_path == "/v2/my/agent",
+            do: %{"symbol" => agent.symbol, "credits" => 1000},
+            else: ship_body(ship.symbol)
+
+        Req.Test.json(conn, %{"data" => data})
+      end)
+
+      {:ok, old_ship} = SpaceTraders.Evidence.get_ship_binding(agent, ship.symbol)
+      SpaceTraders.TestClock.advance(20)
+      {:ok, credits} = SpaceTraders.Evidence.get_agent_binding(agent)
+      SpaceTraders.TestClock.advance(11)
+
+      Req.Test.stub(SpaceTraders.API, fn _ ->
+        flunk("assembly must not acquire missing evidence")
+      end)
+
+      assert {:incomplete, %{usable: [^credits], unusable: [^old_ship], missing: [ship_key]}} =
+               SpaceTraders.Evidence.recovery_proof(
+                 attempt,
+                 :absent,
+                 "Fuel/navigation unchanged",
+                 [old_ship, credits]
+               )
+
+      assert ship_key == SpaceTraders.SafetyFence.DependencyKey.ship(agent.id, ship.symbol)
+
+      {:ok, restored} =
+        SpaceTraders.Evidence.retained_agent_binding(agent, credits.observation.id)
+
+      assert restored.observation.observed_at == credits.observation.observed_at
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        Req.Test.json(conn, %{"data" => ship_body(ship.symbol)})
+      end)
+
+      {:ok, fresh_ship} = SpaceTraders.Evidence.get_ship_binding(agent, ship.symbol)
+
+      {:ok, proofs} =
+        SpaceTraders.Evidence.recovery_proof(attempt, :absent, "Fuel/navigation unchanged", [
+          fresh_ship,
+          restored
+        ])
+
+      assert {:error, :authoritative_evidence_required} =
+               MutationAttempts.reconcile(
+                 attempt,
+                 :absent,
+                 Enum.map(proofs, &%{&1 | dependency_keys: attempt.dependency_keys})
+               )
+
+      assert {:error, :authoritative_evidence_required} =
+               MutationAttempts.reconcile(
+                 attempt,
+                 :absent,
+                 Enum.map(proofs, &%{&1 | source: nil})
+               )
+
+      assert {:ok, absent} = MutationAttempts.reconcile(attempt, :absent, proofs)
+      assert absent.retry_authorized
+    end
+
+    test "#{kind} proven absence consumes only one retry through repeated boot and live wakes" do
+      {agent, ship, portfolio, commitment} = claimed_ship("COMPOSITE-RETRY-#{unquote(kind)}")
+      destination = if unquote(kind) == "jump", do: "X1-UX81-A2", else: "X1-UX81-A1"
+      intent = owned_intent(ship, portfolio, commitment, target_waypoint: destination)
+
+      {:ok, %{intent: intent, attempt: attempt}} =
+        SpaceTraders.API.RecordedDispatch.prepare(agent, intent, %{
+          "kind" => unquote(kind),
+          "waypoint" => destination,
+          "fuel_before" => 150,
+          "credits_before" => 1000
+        })
+
+      {:ok, _} = MutationAttempts.mark_sent_or_unknown(attempt)
+      {:ok, calls} = Elixir.Agent.start_link(fn -> 0 end)
+      on_exit(fn -> if Process.alive?(calls), do: Elixir.Agent.stop(calls) end)
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/v2/my/agent"} ->
+            Req.Test.json(conn, %{"data" => %{"symbol" => agent.symbol, "credits" => 1000}})
+
+          {"GET", _} ->
+            sent = Elixir.Agent.get(calls, & &1) > 0
+            nav = nav_body("DOCKED", destination: if(sent, do: destination, else: "X1-UX81-A1"))
+
+            Req.Test.json(conn, %{
+              "data" =>
+                ship_body(ship.symbol, %{
+                  "nav" => nav,
+                  "fuel" => %{"current" => if(sent, do: 200, else: 150), "capacity" => 200}
+                })
+            })
+
+          {"POST", _} ->
+            Elixir.Agent.update(calls, &(&1 + 1))
+
+            Req.Test.json(conn, %{
+              "data" => %{
+                "agent" => %{"symbol" => agent.symbol, "credits" => 900},
+                "transaction" => %{
+                  "type" => "PURCHASE",
+                  "shipSymbol" => ship.symbol,
+                  "tradeSymbol" => "FUEL",
+                  "waypointSymbol" => "X1-UX81-A1",
+                  "units" => 50,
+                  "pricePerUnit" => 2,
+                  "totalPrice" => 100
+                },
+                "cooldown" => %{
+                  "shipSymbol" => ship.symbol,
+                  "remainingSeconds" => 0,
+                  "totalSeconds" => 0
+                },
+                "nav" => nav_body("DOCKED", destination: destination),
+                "fuel" => %{"current" => 200, "capacity" => 200}
+              }
+            })
+        end
+      end)
+
+      _ = Intents.reconcile(agent.id, ship.symbol, nil, :boot, intent.id)
+      _ = Intents.reconcile(agent.id, ship.symbol, nil, :arrival, intent.id)
+      _ = Intents.reconcile(agent.id, ship.symbol, nil, :boot, intent.id)
+      assert Elixir.Agent.get(calls, & &1) == 1
+      assert Repo.get!(Intent, intent.id).status == "completed"
+      original = MutationAttempts.get!(attempt.id)
+      assert original.state == "absent"
+      refute original.retry_authorized
+
+      assert Enum.count(MutationAttempts.list_for_agent(agent), &(&1.retry_of_id == attempt.id)) ==
+               1
+
+      proofs = List.last(original.outcomes).evidence["observations"]
+      assert Enum.all?(proofs, &is_binary(&1["source"]["id"]))
+    end
+
+    test "#{kind} ledger rejects unretained composite conclusions for every recovery verdict" do
+      {agent, ship, _portfolio, _commitment} = claimed_ship("UNBOUND-#{unquote(kind)}")
+      operation = if unquote(kind) == "jump", do: "jump-ship", else: "refuel-ship"
+
+      {:ok, attempt} =
+        MutationAttempts.prepare(
+          OperationInventory.fetch!(operation),
+          "/my/ships/#{ship.symbol}/#{unquote(kind)}",
+          agent_id: agent.id
+        )
+
+      {:ok, attempt} = MutationAttempts.mark_sent_or_unknown(attempt)
+
+      for verdict <- [:accepted, :absent, :bounded_unknown] do
+        forged =
+          SpaceTraders.Evidence.reconciliation_observation(
+            "get-my-ship",
+            attempt,
+            verdict,
+            "Caller claims fuel/navigation and credits without retained observations"
+          )
+
+        opts =
+          if verdict == :bounded_unknown,
+            do: [
+              constraint_accounting:
+                SpaceTraders.Evidence.constraint_accounting("one historical effect", [])
+            ],
+            else: []
+
+        assert {:error, :authoritative_evidence_required} =
+                 MutationAttempts.reconcile(attempt, verdict, [forged], opts)
+      end
+
+      assert SpaceTraders.SafetyFence.active?(MutationAttempts.get!(attempt.id))
+    end
+
+    test "#{kind} recovery retains the supplied exact Ship source and retained credits" do
+      {agent, ship, portfolio, commitment} = claimed_ship("COMPOSITE-#{unquote(kind)}")
+      intent = owned_intent(ship, portfolio, commitment, [])
+
+      action = %{
+        "kind" => unquote(kind),
+        "waypoint" => "X1-UX81-A1",
+        "fuel_before" => 150,
+        "credits_before" => 1000
+      }
+
+      {:ok, %{intent: intent, attempt: attempt}} =
+        SpaceTraders.API.RecordedDispatch.prepare(agent, intent, action)
+
+      {:ok, _} = MutationAttempts.mark_sent_or_unknown(attempt)
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        assert conn.method == "GET"
+
+        data =
+          if conn.request_path == "/v2/my/agent",
+            do: %{"symbol" => agent.symbol, "credits" => 900},
+            else: ship_body(ship.symbol, %{"fuel" => %{"current" => 200, "capacity" => 200}})
+
+        Req.Test.json(conn, %{"data" => data})
+      end)
+
+      {:ok, original} = SpaceTraders.Evidence.get_ship_binding(agent, ship.symbol)
+      {:ok, credits} = SpaceTraders.Evidence.get_agent(agent, bind: true)
+      {:ok, _replacement} = SpaceTraders.Evidence.get_ship_binding(agent, ship.symbol)
+
+      Req.Test.stub(SpaceTraders.API, fn _ ->
+        flunk("eligible retained components must be reused")
+      end)
+
+      _ =
+        Intents.reconcile(
+          agent.id,
+          ship.symbol,
+          SpaceTraders.Evidence.bound_ship(original),
+          :boot,
+          intent.id
+        )
+
+      accepted = MutationAttempts.get!(attempt.id)
+      assert accepted.state == "accepted"
+      proofs = List.last(accepted.outcomes).evidence["observations"]
+
+      assert Enum.map(proofs, & &1["source"]["id"]) == [
+               original.observation.id,
+               credits.observation.id
+             ]
+
+      assert Repo.get!(Intent, intent.id).status == "completed"
+    end
+
+    test "#{kind} recovery cannot settle a retained Ship when credit retention fails" do
+      {agent, ship, portfolio, commitment} = claimed_ship("CREDIT-GAP-#{unquote(kind)}")
+      intent = owned_intent(ship, portfolio, commitment, [])
+
+      {:ok, %{intent: intent, attempt: attempt}} =
+        SpaceTraders.API.RecordedDispatch.prepare(agent, intent, %{
+          "kind" => unquote(kind),
+          "waypoint" => "X1-UX81-A1",
+          "fuel_before" => 150,
+          "credits_before" => 1000
+        })
+
+      {:ok, _} = MutationAttempts.mark_sent_or_unknown(attempt)
+
+      Repo.query!(
+        "ALTER TABLE authoritative_observations ADD CONSTRAINT credit_retention_gap CHECK (operation_id <> 'get-my-agent')"
+      )
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        assert conn.method == "GET"
+
+        data =
+          if conn.request_path == "/v2/my/agent",
+            do: %{"symbol" => agent.symbol, "credits" => 900},
+            else: ship_body(ship.symbol, %{"fuel" => %{"current" => 200, "capacity" => 200}})
+
+        Req.Test.json(conn, %{"data" => data})
+      end)
+
+      _ = Intents.reconcile(agent.id, ship.symbol, nil, :boot, intent.id)
+      assert MutationAttempts.get!(attempt.id).state == "sent_or_unknown"
+      assert SpaceTraders.SafetyFence.active?(MutationAttempts.get!(attempt.id))
+      assert Repo.get!(Intent, intent.id).in_flight_action == intent.in_flight_action
+    end
+  end
+
   test "recovery keeps the exact retained Ship source when identical newer facts replace latest" do
     {agent, ship, portfolio, commitment} = claimed_ship("EXACT-SOURCE")
     {_intent, attempt} = selected_orbit(agent, ship, portfolio, commitment)

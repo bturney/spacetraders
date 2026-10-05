@@ -4,6 +4,12 @@ Base: fresh `origin/main` at `f36a20781c99f8849e75debac11355d61c0a8b4d`,
 with #566 integrated at `17b28af` on `opencode/kimaki-spec-502-integration`.
 This receipt belongs to its containing commit on `opencode/kimaki-spec-502-571`.
 
+Ticket implementation was committed at `6e5b95c` before merging integration
+`4dbf28ff227e54184b1a406e072ae1c9ec338b97` into this ticket branch. Merge
+resolution preserves all integrated #567 credit, #569 recipient, #570 transfer,
+#574 Fleet source guards and family tests, plus the fail-fast canonical gate.
+The delta against that integration remains confined to the five #571 files.
+
 ## Adopted interfaces and deletion
 
 Scan Waypoints and Chart now select through `Fleet.Intents.execute_action/4`.
@@ -74,7 +80,8 @@ Container: `spec-502-571-postgres`; boot `PORT=4571`.
 | Prepared scan continuation, expired successful scan, incomplete chart callback | Each red: 1 selected failure; final targeted run passes all | `571-progression-red.log`, `571-scan-committed-red.log`, `571-chart-incomplete-red.log` |
 | Coalesced exact-source tracer | Red: exit 2, 1 selected failure, two retained IDs for one read; green: exit 0, 78 tests, 0 failures including owned recovery and Intelligence acquisition | `571-coalesced-source-red-final.log`, `571-coalesced-source-green.log` |
 | Owned recovery + Intelligence acquisition + recorded runtime + Ship durability, `mix test ... --seed 0 --trace` | Exit 0; 118 tests, 0 failures (before final coalesced-source case) | `571-targeted-final.log` |
-| Final `scripts/verify` | **Exit 0; 829 tests, 0 failures; 229.4 seconds ExUnit.** Compile, format, generated models/inventory, gameplay boundary and boot `/health` 200 pass | `571-canonical-authoritative.log` (`COMMAND_EXIT=0`) |
+| Pre-integration `scripts/verify` | Exit 0; 829 tests, 0 failures; 229.4 seconds ExUnit. Compile, format, generated models/inventory, gameplay boundary and boot `/health` 200 pass | `571-canonical-authoritative.log` (`COMMAND_EXIT=0`) |
+| Final integration `scripts/verify` | **Exit 0; 897 tests, 0 failures; seed 425815; 207.4 seconds ExUnit.** Compile, format, generated models/inventory, gameplay boundary and boot `/health` 200 pass | `571-integration-canonical.log` (`COMMAND_EXIT=0`) |
 
 Earlier diagnostics remain retained: `571-progression-green.log` (two exposed
 fixture/continuation gaps), `571-targeted.log` (one completed-Intent ledger lookup
