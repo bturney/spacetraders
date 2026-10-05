@@ -1400,6 +1400,45 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
            )
   end
 
+  @tag :market_recovery
+  test "a game-rejected market cargo dock blocks its selection without trading or replay" do
+    {agent, ship, portfolio, commitment} = claimed_ship("MARKET-DOCK-REJECTED")
+    {intent, _action} = market_selection(ship, portfolio, commitment, "buy")
+    game = start_supervised!({Elixir.Agent, fn -> [] end})
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      case conn.method do
+        "GET" ->
+          body = put_in(market_ship_body(ship, 0)["nav"], nav_body("IN_ORBIT"))
+          Req.Test.json(conn, %{"data" => body})
+
+        "POST" ->
+          Elixir.Agent.update(game, &(&1 ++ [Path.basename(conn.request_path)]))
+
+          conn
+          |> Plug.Conn.put_status(400)
+          |> Req.Test.json(%{"error" => %{"code" => 4214, "message" => "Ship is in transit"}})
+      end
+    end)
+
+    _ = Intents.reconcile(agent.id, ship.symbol, nil, :boot, intent.id)
+
+    assert Elixir.Agent.get(game, & &1) == ["dock"]
+    current = Repo.get!(Intent, intent.id)
+    assert %Intent{status: "blocked", in_flight_action: nil} = current
+    assert current.blocker.reason == "in_transit"
+
+    assert [%{state: "rejected"} = attempt] = MutationAttempts.list_for_agent(agent)
+    assert attempt.prepared_evidence["selected_action"]["kind"] == "dock"
+
+    Req.Test.stub(SpaceTraders.API, fn _ ->
+      flunk("obsolete callback replayed a rejected dock")
+    end)
+
+    assert :ok = Intents.reconcile(agent.id, ship.symbol, nil, :boot, intent.id + 1)
+    assert length(MutationAttempts.list_for_agent(agent)) == 1
+  end
+
   defp market_ship_body(ship, units) do
     ship_body(ship.symbol, %{
       "nav" => nav_body("DOCKED"),
