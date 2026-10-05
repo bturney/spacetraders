@@ -1396,7 +1396,7 @@ defmodule SpaceTraders.Evidence do
   def valid_recovery_source?(%AuthoritativeObservation{source: nil}, attempt) do
     kind = get_in(attempt.prepared_evidence, ["selected_action", "kind"])
 
-    attempt.operation_id not in ~w(purchase-ship navigate-ship warp-ship orbit-ship dock-ship patch-ship-nav refuel-ship jump-ship transfer-cargo deliver-contract supply-construction create-chart create-ship-waypoint-scan extract-resources extract-resources-with-survey siphon-resources create-survey ship-refine jettison) and
+    attempt.operation_id not in ~w(purchase-ship navigate-ship warp-ship orbit-ship dock-ship patch-ship-nav refuel-ship jump-ship transfer-cargo deliver-contract supply-construction create-chart create-ship-waypoint-scan extract-resources extract-resources-with-survey siphon-resources create-survey ship-refine jettison install-ship-module remove-ship-module) and
       kind not in [
         "navigate",
         "warp",
@@ -1408,6 +1408,8 @@ defmodule SpaceTraders.Evidence do
         "survey",
         "refine",
         "jettison",
+        "install_module",
+        "remove_module",
         "chart",
         "scan_waypoints",
         "refuel",
