@@ -104,50 +104,102 @@ defmodule SpaceTraders.Evidence do
   @doc false
   def bound_ship(%Binding{value: ship} = binding), do: Map.put(ship, :evidence_binding, binding)
 
-  @doc "Reuses eligible retained Agent credits, or acquires one governed replacement."
-  def recovery_agent_binding(%AgentRecord{} = agent, %Attempt{} = attempt) do
-    recovery_owned_binding(agent, attempt, "agent:#{agent.symbol}", "get-my-agent", fn ->
-      get_agent(agent, bind: true, lane: :safety, owner: "fleet_reconciliation")
-    end)
+  @doc "Reads Agent facts with their exact retained source; unretained facts are not proof."
+  def get_agent_binding(agent, opts \\ []), do: get_agent(agent, Keyword.put(opts, :bind, true))
+
+  @doc "Restores one exact Agent acquisition without reading the game or restamping it."
+  def retained_agent_binding(%AgentRecord{} = agent, observation_id) do
+    case Repo.get(Observation, observation_id) do
+      %Observation{agent_id: agent_id, operation_id: "get-my-agent", subject: subject} = source
+      when agent_id == agent.id ->
+        if subject == "agent:#{agent.symbol}" do
+          value =
+            source.facts["response"] |> api_keys() |> SpaceTraders.API.Model.Agent.from_json()
+
+          {:ok, %Binding{value: value, observation: source}}
+        else
+          {:error, :evidence_not_retained}
+        end
+
+      _ ->
+        {:error, :evidence_not_retained}
+    end
+  rescue
+    _ -> {:error, :evidence_not_retained}
   end
 
-  @doc "Reuses an eligible retained owned Fleet, or acquires one governed replacement."
-  def recovery_fleet_binding(%AgentRecord{} = agent, %Attempt{} = attempt) do
-    recovery_owned_binding(agent, attempt, "fleet:#{agent.symbol}", "get-my-ships", fn ->
-      get_ships(agent, bind: true, lane: :safety, owner: "fleet_reconciliation")
-    end)
-  end
+  @doc "Reuses usable retained Agent-credit facts, or explicitly acquires one governed replacement."
+  def recovery_agent_binding(%AgentRecord{} = agent, %Attempt{} = attempt, opts \\ []) do
+    now = Clock.utc_now()
+    oldest = DateTime.add(now, -30)
+    since = attempt.sent_or_unknown_at || attempt.prepared_at
+    subject = "agent:#{agent.symbol}"
 
-  defp recovery_owned_binding(agent, attempt, subject, operation, acquire) do
     binding =
-      Observation
-      |> where(
-        [source],
-        source.agent_id == ^agent.id and source.subject == ^subject and
-          source.operation_id == ^operation
+      from(source in Observation,
+        where:
+          source.agent_id == ^agent.id and source.subject == ^subject and
+            source.operation_id == "get-my-agent" and source.observed_at >= ^since and
+            source.observed_at >= ^oldest and source.observed_at <= ^now,
+        order_by: [desc: source.observed_at, desc: source.id]
       )
-      |> order_by([source], desc: source.observed_at, desc: source.id)
       |> Repo.all()
       |> Enum.find_value(fn source ->
-        with true <- valid_recovery_source?(source, attempt),
-             [_ | _] <- source_dependencies(source),
-             {:ok, value} <- owned_source_value(source) do
-          %Binding{value: value, observation: source}
+        with {:ok, binding} <- retained_agent_binding(agent, source.id),
+             true <- usable_binding?(binding, attempt),
+             [_] <- source_dependencies(source) do
+          binding
         else
           _ -> nil
         end
       end)
 
-    if binding, do: {:ok, binding}, else: acquire.()
+    case binding do
+      %Binding{} ->
+        {:ok, binding}
+
+      nil ->
+        get_agent_binding(agent,
+          lane: :safety,
+          owner: Keyword.get(opts, :owner, "ship_execution")
+        )
+    end
   end
 
-  defp owned_source_value(%Observation{operation_id: "get-my-agent", facts: facts}),
-    do: {:ok, facts["response"] |> api_keys() |> SpaceTraders.API.Model.Agent.from_json()}
+  @doc "Reuses an eligible retained owned Fleet, or acquires one governed replacement."
+  def recovery_fleet_binding(%AgentRecord{} = agent, %Attempt{} = attempt) do
+    now = Clock.utc_now()
+    oldest = DateTime.add(now, -30)
+    since = attempt.sent_or_unknown_at || attempt.prepared_at
+    subject = "fleet:#{agent.symbol}"
 
-  defp owned_source_value(%Observation{operation_id: "get-my-ships", facts: facts}),
-    do:
-      {:ok,
-       Enum.map(facts["response"], &(&1 |> api_keys() |> SpaceTraders.API.Model.Ship.from_json()))}
+    binding =
+      from(source in Observation,
+        where:
+          source.agent_id == ^agent.id and source.subject == ^subject and
+            source.operation_id == "get-my-ships" and source.observed_at >= ^since and
+            source.observed_at >= ^oldest and source.observed_at <= ^now,
+        order_by: [desc: source.observed_at, desc: source.id]
+      )
+      |> Repo.all()
+      |> Enum.find_value(fn source ->
+        if valid_recovery_source?(source, attempt) and source_dependencies(source) != [] do
+          value =
+            Enum.map(
+              source.facts["response"],
+              &(&1 |> api_keys() |> SpaceTraders.API.Model.Ship.from_json())
+            )
+
+          binding = %Binding{value: value, observation: source}
+          if usable_binding?(binding, attempt), do: binding
+        end
+      end)
+
+    case binding do
+      %Binding{} -> {:ok, binding}
+      nil -> get_ships(agent, bind: true, lane: :safety, owner: "fleet_reconciliation")
+    end
+  end
 
   @doc "Reads a System through a governed World Observation Demand."
   def get_system(token_or_agent, system_symbol, opts \\ []) when is_binary(system_symbol) do
@@ -1293,8 +1345,8 @@ defmodule SpaceTraders.Evidence do
   def valid_recovery_source?(%AuthoritativeObservation{source: nil}, attempt) do
     kind = get_in(attempt.prepared_evidence, ["selected_action", "kind"])
 
-    attempt.operation_id not in ~w(purchase-ship navigate-ship warp-ship orbit-ship dock-ship patch-ship-nav) and
-      kind not in ["navigate", "warp", "orbit", "dock", "set_flight_mode"]
+    attempt.operation_id not in ~w(purchase-ship navigate-ship warp-ship orbit-ship dock-ship patch-ship-nav refuel-ship jump-ship) and
+      kind not in ["navigate", "warp", "orbit", "dock", "set_flight_mode", "refuel", "jump"]
   end
 
   def valid_recovery_source?(_, _), do: false
@@ -1347,15 +1399,14 @@ defmodule SpaceTraders.Evidence do
   defp source_dependencies(
          %Observation{operation_id: "get-my-agent", subject: "agent:" <> symbol} = source
        ) do
-    case source.facts["response"] do
-      %{"symbol" => ^symbol, "credits" => credits} when is_integer(credits) and credits >= 0 ->
-        if owned_subject?(source, "agent"),
-          do: [SpaceTraders.SafetyFence.DependencyKey.agent_credits(source.agent_id)],
-          else: []
+    facts = source.facts["response"]
 
-      _ ->
-        []
-    end
+    if facts["symbol"] == symbol and is_integer(facts["credits"]) and facts["credits"] >= 0 and
+         match?(%AgentRecord{symbol: ^symbol}, Repo.get(AgentRecord, source.agent_id)),
+       do: [SpaceTraders.SafetyFence.DependencyKey.agent_credits(source.agent_id)],
+       else: []
+  rescue
+    _ -> []
   end
 
   defp source_dependencies(

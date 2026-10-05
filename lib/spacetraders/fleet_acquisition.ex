@@ -175,7 +175,10 @@ defmodule SpaceTraders.FleetAcquisition do
     with {:ok, fleet} <-
            AgentContext.handle_game_result(agent, Evidence.recovery_fleet_binding(agent, attempt)),
          {:ok, credits} <-
-           AgentContext.handle_game_result(agent, Evidence.recovery_agent_binding(agent, attempt)) do
+           AgentContext.handle_game_result(
+             agent,
+             Evidence.recovery_agent_binding(agent, attempt, owner: "fleet_reconciliation")
+           ) do
       settle_attempt(scope, agent, portfolio, attempt, expectations, fleet, credits)
     end
   end

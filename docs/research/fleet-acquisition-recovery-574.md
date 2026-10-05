@@ -22,7 +22,7 @@ do not invent purchase attribution or a Bounded Unknown consequence bound.
 Recorded transport/admission implementation is unchanged and Fleet acquisition
 does not enter the Ship-scoped lifecycle.
 
-`Evidence.recovery_fleet_binding/2` and `recovery_agent_binding/2` reuse eligible
+`Evidence.recovery_fleet_binding/2` and `recovery_agent_binding/2,3` reuse eligible
 retained components, preserving identity and acquisition time. Missing or
 unusable components use the existing governed safety reads with retention
 required. Proof assembly performs no reads. If a component expires while another
@@ -79,3 +79,31 @@ or purchase consequence bound is introduced. The ledger Bounded Unknown test
 uses an explicit test-only constraint accounting example, not a production
 worst-case exposure guarantee. Combined #576 qualification and parent #502
 Gates 2–5, including the approved live trial, remain separate obligations.
+
+## Current integration adoption and final receipt
+
+Committed the ticket implementation as `e1baa67`, then merged current integration
+`01702ee6a331e07d79cb9fc067a30b39fe5ccc5b`, including #567 and the canonical
+verification gate correction, into this ticket branch. Integration itself was
+not modified by this session.
+
+Resolved the shared Evidence conflict onto #567's existing
+`get_agent_binding/2`, `retained_agent_binding/2`, `recovery_agent_binding/2`
+and Agent-credit coverage implementation. Deleted the parallel Agent decoding
+and generic owned-component helper from #574. The shared recovery method now
+also accepts optional owner options as `recovery_agent_binding/3`; existing
+Ship callers retain their `ship_execution` default and Fleet acquisition
+explicitly passes `owner: "fleet_reconciliation"`. Both families retain their
+governed read ownership. Fleet binding uses the same eligible temporal query
+pattern and the existing proof/source validation, without a new acquisition
+workflow. Direct retained-source enforcement includes the union of navigation,
+refuel/jump and purchase operations.
+
+| Post-merge check | Actual result | Full log under `/tmp/opencode/` |
+| --- | --- | --- |
+| `mix test` acquisition, owned recovery, ledger, runtime, durability, Intents and RecordedDispatch files, `--seed 0 --trace` | **Exit 0; 155 tests, 0 failures**; 62.1 seconds | `574-integrated-targeted.log`, `COMMAND_EXIT=0` |
+| `scripts/verify` | **Exit 0; 846 tests, 0 failures**, seed 109241; 204.8 seconds ExUnit; compile, format, generated models/inventory, transport boundary and boot pass | `574-integrated-canonical.log`, `COMMAND_EXIT=0` |
+
+No known #574 acceptance gap remains. These receipts do not certify the combined
+all-family qualification, production worst-case spending exposure, or later
+parent gates.
