@@ -485,7 +485,13 @@ defmodule SpaceTraders.MutationAttempts do
       operation_id: operation.id,
       operation_owner: Atom.to_string(operation.owner),
       state: "prepared",
-      request_fingerprint: fingerprint(operation.id, prepared_evidence, dependency_keys),
+      request_fingerprint:
+        fingerprint(
+          operation.id,
+          prepared_evidence,
+          dependency_keys,
+          Keyword.get(opts, :evidence_references, [])
+        ),
       prepared_evidence: prepared_evidence,
       expected_effects: operation.success_evidence,
       consequence_bounds: operation.consequences,
@@ -710,17 +716,14 @@ defmodule SpaceTraders.MutationAttempts do
     |> Map.take(@correlation_keys)
   end
 
-  defp fingerprint(operation_id, prepared_evidence, dependency_keys) do
-    # Replacement preflight observations do not change a transfer request.
-    # Selection provenance separately binds the exact admitted action/evidence.
+  # The owner names selected-action keys that only reference replaceable
+  # preflight observations; they do not change the request a retry repeats.
+  # Selection provenance separately binds the exact admitted action/evidence.
+  defp fingerprint(operation_id, prepared_evidence, dependency_keys, evidence_references \\ []) do
     prepared_evidence =
-      if operation_id == "transfer-cargo" and is_map(prepared_evidence["selected_action"]) do
-        Map.update!(prepared_evidence, "selected_action", fn action ->
-          Map.drop(action, ~w(source_observation_id target_observation_id))
-        end)
-      else
-        prepared_evidence
-      end
+      if is_map(prepared_evidence["selected_action"]),
+        do: Map.update!(prepared_evidence, "selected_action", &Map.drop(&1, evidence_references)),
+        else: prepared_evidence
 
     Evidence.fingerprint({operation_id, prepared_evidence, dependency_keys})
   end
@@ -741,15 +744,10 @@ defmodule SpaceTraders.MutationAttempts do
   end
 
   defp validate_observations(attempt, resolution, observations) do
-    since = attempt.sent_or_unknown_at || attempt.prepared_at
-    now = SpaceTraders.Clock.utc_now()
-
     fresh? = fn observation ->
       Evidence.valid_observation?(observation) and
         Evidence.valid_recovery_source?(observation, attempt) and
-        match?(%DateTime{}, observation.observed_at) and
-        DateTime.compare(observation.observed_at, since) != :lt and
-        DateTime.diff(now, observation.observed_at, :millisecond) in 0..30_000
+        Evidence.recovery_fresh?(observation.observed_at, attempt)
     end
 
     covered_dependencies =

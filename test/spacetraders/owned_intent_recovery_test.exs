@@ -107,7 +107,7 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
     Req.Test.stub(SpaceTraders.API, fn _ -> flunk("binding restoration made a game read") end)
 
     {:ok, restored} =
-      SpaceTraders.Evidence.retained_waypoint_binding(agent, original.observation.id)
+      SpaceTraders.Evidence.retained_binding(agent, original.observation.id)
 
     assert {:ok, [proof]} =
              SpaceTraders.Evidence.recovery_proof(
@@ -455,7 +455,7 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
     end)
 
     assert {:ok, restored} =
-             SpaceTraders.Evidence.retained_recipient_binding(agent, recipient.observation.id)
+             SpaceTraders.Evidence.retained_binding(agent, recipient.observation.id)
 
     assert restored == recipient
 
@@ -764,7 +764,7 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
       {:ok, replacement} = SpaceTraders.Evidence.get_ship_binding(agent, ship.symbol)
 
       assert {:ok, restored} =
-               SpaceTraders.Evidence.retained_recipient_binding(agent, recipient.observation.id)
+               SpaceTraders.Evidence.retained_binding(agent, recipient.observation.id)
 
       assert restored == recipient
       assert replacement.value == cargo.value
@@ -996,6 +996,32 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
       assert result["units"] == 5
       refute Map.has_key?(result, "price")
       assert length(MutationAttempts.list_for_agent(agent)) == 1
+    end
+
+    @tag :market_recovery
+    test "#{kind} ledger rejects an unretained caller-built Market Cargo conclusion" do
+      {agent, ship, portfolio, commitment} = claimed_ship("MARKET-FORGED-#{unquote(kind)}")
+      {intent, action} = market_selection(ship, portfolio, commitment, unquote(kind))
+
+      {:ok, %{attempt: attempt}} =
+        SpaceTraders.Fleet.Intents.RecordedAction.prepare(agent, intent, action)
+
+      {:ok, attempt} = MutationAttempts.mark_sent_or_unknown(attempt)
+
+      for verdict <- [:accepted, :absent] do
+        forged =
+          SpaceTraders.Evidence.reconciliation_observation(
+            "get-my-ship",
+            attempt,
+            verdict,
+            "Caller claims Market Cargo and credits without retained observations"
+          )
+
+        assert {:error, :authoritative_evidence_required} =
+                 MutationAttempts.reconcile(attempt, verdict, [forged])
+      end
+
+      assert SpaceTraders.SafetyFence.active?(MutationAttempts.get!(attempt.id))
     end
 
     @tag :market_recovery
@@ -1484,7 +1510,7 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
       SpaceTraders.Evidence.retained_ship_binding(agent, ship_source.observation.id)
 
     {:ok, restored_credits} =
-      SpaceTraders.Evidence.retained_agent_binding(agent, credit_source.observation.id)
+      SpaceTraders.Evidence.retained_binding(agent, credit_source.observation.id)
 
     assert restored_credits == credit_source
 
@@ -1670,7 +1696,7 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
       assert ship_key == SpaceTraders.SafetyFence.DependencyKey.ship(agent.id, ship.symbol)
 
       {:ok, restored} =
-        SpaceTraders.Evidence.retained_agent_binding(agent, credits.observation.id)
+        SpaceTraders.Evidence.retained_binding(agent, credits.observation.id)
 
       assert restored.observation.observed_at == credits.observation.observed_at
 
