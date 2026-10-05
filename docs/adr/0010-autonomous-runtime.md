@@ -24,7 +24,7 @@ backed by PostgreSQL. One active runtime owns autonomous coordination. Durable
 application state is reconstructable from PostgreSQL; BEAM processes provide
 serialization, wakeups, and fault isolation, not hidden persistence. The names
 below identify architecture boundaries; domain records crossing those
-boundaries use the vocabulary in `CONTEXT.md`.
+boundaries use the vocabulary in `GLOSSARY.md`.
 
 The runtime has these authority boundaries:
 

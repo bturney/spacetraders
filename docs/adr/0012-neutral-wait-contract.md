@@ -7,7 +7,7 @@ Date: 2026-09-28
 ## Context
 
 Issue 487 defines the Neutral Wait contract before issues 488, 489, 490, and 491
-implement it. `CONTEXT.md` defines Neutral Wait as a deliberate Fleet Allocation
+implement it. `GLOSSARY.md` defines Neutral Wait as a deliberate Fleet Allocation
 result: no worthwhile admissible Candidate Contribution exists, and the evidence
 needed for re-evaluation has a durable future Observation Demand. Three look-alike
 conditions must never manufacture one: unknown Governed Availability, API-capacity
