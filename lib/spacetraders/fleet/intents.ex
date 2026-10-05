@@ -24,7 +24,6 @@ defmodule SpaceTraders.Fleet.Intents do
   alias SpaceTraders.FleetStrategy.Revision
   alias SpaceTraders.Fleet.ShipServer
   alias SpaceTraders.Repo
-  alias SpaceTraders.SafetyFence.DependencyKey
 
   alias SpaceTraders.{
     Agent,
@@ -1187,6 +1186,10 @@ defmodule SpaceTraders.Fleet.Intents do
        when kind in ["buy", "sell"],
        do: market_cargo_delta?(action, live_ship.cargo, action["units"])
 
+  defp prerequisite_action_reconciled?(%{"kind" => kind} = action, live_ship)
+       when kind in ["install_module", "remove_module"],
+       do: module_action_evidence?(action, live_ship)
+
   defp prerequisite_action_reconciled?(_action, _live_ship), do: false
 
   defp in_transit_to?(
@@ -1459,10 +1462,16 @@ defmodule SpaceTraders.Fleet.Intents do
        when type in ["install_module", "remove_module"] do
     case intent.in_flight_action do
       %{"kind" => ^type} ->
-        confirm_module_mutation(agent, intent, live_ship)
+        progress_module_mutation(agent, intent, live_ship)
 
       %{"kind" => "buy"} = action ->
-        reconcile_refit_buy(agent, intent, live_ship, action)
+        if market_cargo_delta?(action, live_ship.cargo, 1) do
+          reconcile_refit_buy(agent, intent, live_ship, action)
+        else
+          if selected_effect_confirmed?(intent),
+            do: block_intents(intent, {:ambiguous_operation_evidence, "buy"}),
+            else: reconcile_absent_and_retry(agent, intent, live_ship, action)
+        end
 
       %{"kind" => kind} = action when kind in ["navigate", "orbit", "dock"] ->
         if prerequisite_action_reconciled?(action, live_ship) do
@@ -2931,6 +2940,10 @@ defmodule SpaceTraders.Fleet.Intents do
   defp unified_action?(%{"kind" => "transfer"}), do: true
   defp unified_action?(%{"kind" => "deliver"}), do: true
   defp unified_action?(%{"kind" => kind}) when kind in ["buy", "sell"], do: true
+
+  defp unified_action?(%{"kind" => kind}) when kind in ["install_module", "remove_module"],
+    do: true
+
   defp unified_action?(action), do: navigation_action?(action)
 
   defp send_selected_action(agent, selected, live_ship) do
@@ -2952,6 +2965,12 @@ defmodule SpaceTraders.Fleet.Intents do
 
           kind when kind in ["extract", "siphon", "refine", "survey", "jettison"] ->
             clear_claim_and_block(selected, reason)
+
+          "buy" when selected.type in ["install_module", "remove_module"] ->
+            block_protocol_backpressure(selected, reason)
+
+          kind when kind in ["install_module", "remove_module"] ->
+            block_module_intent(selected, reason)
 
           _ ->
             block_intents(selected, reason)
@@ -3216,32 +3235,20 @@ defmodule SpaceTraders.Fleet.Intents do
              {:error, {:price_constraint, good.purchase_price, max_price}},
          true <-
            live_ship.cargo.capacity - live_ship.cargo.units >= 1 || {:error, :cargo_full},
-         {:ok, %{intent: intent}} <-
-           prepare_recorded_action(agent, intent, %{
-             "kind" => "buy",
-             "trade_symbol" => module_symbol,
-             "units" => 1,
-             "listing_price" => good.purchase_price,
-             "cargo_before" => Fleet.item_units(live_ship.cargo, module_symbol)
-           }) do
-      dispatch_selected_refit_buy(agent, intent, live_ship)
+         {:ok, credits} <- Agent.handle_game_result(agent, Evidence.get_agent_binding(agent)),
+         true <-
+           (is_integer(credits.value.credits) and credits.value.credits >= 0 and
+              credits.value.symbol == agent.symbol) ||
+             {:error, :authoritative_credit_facts_required} do
+      execute_action(agent, intent, live_ship, %{
+        "kind" => "buy",
+        "trade_symbol" => module_symbol,
+        "units" => 1,
+        "listing_price" => good.purchase_price,
+        "credits_before" => credits.value.credits,
+        "cargo_before" => Fleet.item_units(live_ship.cargo, module_symbol)
+      })
     else
-      {:error, %SpaceTraders.API.GameplayError{} = reason} ->
-        block_protocol_backpressure(intent, reason)
-
-      {:error, reason} ->
-        block_cargo_intent(intent, reason)
-    end
-  end
-
-  # A `with`'s else cannot see its rebound selected Intent. Handle the response
-  # with that committed snapshot so a legitimate 429 can persist its durable wait
-  # without weakening the stale-selection transition guard.
-  defp dispatch_selected_refit_buy(agent, intent, live_ship) do
-    case Agent.handle_game_result(agent, SpaceTraders.API.dispatch_recorded(intent)) do
-      {:ok, result} ->
-        reconcile_refit_buy(agent, intent, live_ship, result)
-
       {:error, %SpaceTraders.API.GameplayError{} = reason} ->
         block_protocol_backpressure(intent, reason)
 
@@ -3252,15 +3259,20 @@ defmodule SpaceTraders.Fleet.Intents do
 
   # The purchase outcome is a controlled observation: only a fresh authoritative
   # Cargo read proving the module aboard lets dependent refit work continue.
-  defp reconcile_refit_buy(agent, intent, live_ship, _result) do
-    with {:ok, fresh} <- fresh_ship(agent, live_ship.symbol, nil),
-         module_symbol = intent.parameters["module_symbol"],
+  defp reconcile_refit_buy(agent, intent, fresh, _result) do
+    with module_symbol = intent.parameters["module_symbol"],
          action = intent.in_flight_action,
          cargo_now = Fleet.item_units(fresh.cargo, module_symbol),
          true <-
            cargo_now == action["cargo_before"] + 1 ||
              {:error, {:ambiguous_operation_evidence, "buy"}},
-         :ok <- settle_module_attempt(agent, intent, fresh),
+         :ok <-
+           reconcile_accepted_attempt(
+             agent,
+             intent,
+             fresh,
+             "Authoritative Cargo and attributable Agent credits prove the module purchase"
+           ),
          {:ok, intent} <-
            transition_intent(intent,
              in_flight_action: nil,
@@ -3279,50 +3291,6 @@ defmodule SpaceTraders.Fleet.Intents do
     end
   end
 
-  # ADR 0011: purchase-cargo fences on ship AND agent credits, so the buy
-  # attempt's reconciliation must present both authoritative observations.
-  defp settle_module_attempt(agent, intent, fresh) do
-    case MutationAttempts.unresolved_for_intent(intent) do
-      nil ->
-        :ok
-
-      attempt ->
-        with {:ok, game_agent} <- recovery_agent(agent),
-             {:ok, _attempt} <-
-               MutationAttempts.reconcile(
-                 attempt,
-                 :accepted,
-                 ship_purchase_observations(agent, attempt, fresh, game_agent)
-               ) do
-          :ok
-        end
-    end
-  end
-
-  defp ship_purchase_observations(agent, intent, fresh, game_agent) do
-    [
-      reconciliation_observation(
-        "get-my-ship",
-        [DependencyKey.ship(agent.id, fresh.symbol)],
-        intent,
-        :accepted,
-        "Authoritative Ship Cargo proves the module purchase",
-        %{
-          cargo: cargo_evidence(fresh.cargo),
-          modules: Enum.map(fresh.modules || [], &module_evidence/1)
-        }
-      ),
-      reconciliation_observation(
-        "get-my-agent",
-        [DependencyKey.agent_credits(agent.id)],
-        intent,
-        :accepted,
-        "Fresh Agent credits accompany the accepted module purchase",
-        %{credits: game_agent.credits}
-      )
-    ]
-  end
-
   defp dispatch_module_request(agent, intent, live_ship) do
     module_symbol = intent.parameters["module_symbol"]
     installed_before = module_count(live_ship.modules, module_symbol)
@@ -3336,43 +3304,7 @@ defmodule SpaceTraders.Fleet.Intents do
       "cargo_before" => cargo_before
     }
 
-    case prepare_recorded_action(agent, intent, action) do
-      {:ok, %{intent: intent}} ->
-        result = SpaceTraders.API.dispatch_recorded(intent)
-
-        case Agent.handle_game_result(agent, result) do
-          {:ok, result} ->
-            if intent.type == "remove_module" do
-              # A removal can affect multiple matching modules; the response
-              # count alone never decides the outcome. The authoritative
-              # post-removal read does.
-              confirm_module_mutation(agent, intent, live_ship)
-            else
-              if module_modification_evidence?(intent, result.modules, result.cargo) do
-                with :ok <- settle_module_attempt(agent, intent, live_ship) do
-                  complete_module_intent(intent, result)
-                end
-              else
-                confirm_module_mutation(agent, intent, live_ship)
-              end
-            end
-
-          {:error, %SpaceTraders.API.Error{} = reason} ->
-            await_module_reconciliation(intent, reason)
-
-          {:error, %SpaceTraders.API.GameplayError{} = reason} ->
-            block_module_intent(intent, reason)
-
-          {:error, reason} ->
-            await_module_reconciliation(intent, reason)
-        end
-
-      {:error, :intent_dispatch_no_longer_allowed} ->
-        :ok
-
-      {:error, reason} ->
-        block_preparation_refusal(intent, reason)
-    end
+    execute_action(agent, intent, live_ship, action)
   end
 
   defp module_mutation_allowed?(%Intent{type: type} = intent, live_ship) do
@@ -3417,34 +3349,39 @@ defmodule SpaceTraders.Fleet.Intents do
   # The controlled observation that decides every module mutation: a fresh
   # authoritative Ship read. A removal that could affect multiple matching
   # modules terminates on this read, never on the response count alone.
-  defp confirm_module_mutation(agent, intent, live_ship) do
-    case fresh_ship(agent, live_ship.symbol, nil) do
-      {:ok, fresh} ->
-        if module_mutation_evidence?(intent, fresh) do
-          with :ok <- settle_module_attempt(agent, intent, fresh) do
-            complete_module_intent(intent, %{modules: fresh.modules, cargo: fresh.cargo})
-          end
-        else
-          case MutationAttempts.latest_for_intent(intent) do
-            %{state: "rejected"} -> mark_infeasible(intent, :module_mutation_rejected)
-            _ -> block_module_intent_preserving_evidence(intent, :ambiguous_module_modification)
-          end
+  defp progress_module_mutation(agent, intent, ship) do
+    cond do
+      module_mutation_evidence?(intent, ship) ->
+        with :ok <-
+               reconcile_accepted_attempt(
+                 agent,
+                 intent,
+                 ship,
+                 "Authoritative installed modules and Cargo prove the selected refit effect"
+               ) do
+          complete_module_intent(intent, %{modules: ship.modules, cargo: ship.cargo})
         end
 
-      {:error, reason} ->
-        await_module_reconciliation(intent, reason)
+      selected_effect_confirmed?(intent) ->
+        block_intents(intent, :ambiguous_module_modification)
+
+      true ->
+        reconcile_absent_and_retry(agent, intent, ship, intent.in_flight_action)
     end
   end
 
   defp module_mutation_evidence?(intent, ship) do
-    action = intent.in_flight_action
+    module_action_evidence?(intent.in_flight_action, ship)
+  end
+
+  defp module_action_evidence?(action, ship) do
     module_symbol = action["module_symbol"]
     installed_before = action["installed_before"]
     cargo_before = action["cargo_before"]
     installed_now = module_count(ship.modules, module_symbol)
     cargo_now = Fleet.item_units(ship.cargo, module_symbol)
 
-    case intent.type do
+    case action["kind"] do
       "install_module" ->
         installed_now == installed_before + 1 and cargo_now == cargo_before - 1
 
@@ -3458,25 +3395,26 @@ defmodule SpaceTraders.Fleet.Intents do
   defp complete_module_intent(intent, result) do
     module_symbol = intent.parameters["module_symbol"]
 
-    intent =
-      update_intent!(
-        Ecto.Changeset.change(intent,
-          status: "completed",
-          blocker: nil,
-          in_flight_action: nil,
-          last_action_result: module_result(intent.type, module_symbol, result),
-          finished_at: DateTime.utc_now() |> DateTime.truncate(:second)
+    case transition_intent(intent,
+           status: "completed",
+           blocker: nil,
+           in_flight_action: nil,
+           last_action_result: module_result(intent.type, module_symbol, result),
+           finished_at: DateTime.utc_now() |> DateTime.truncate(:second)
+         ) do
+      {:ok, intent} ->
+        record_activity_by_intent(
+          intent,
+          "manual_intent_completed",
+          "#{module_intent_verb(intent.type)} #{module_symbol} complete",
+          intent.last_action_result
         )
-      )
 
-    record_activity_by_intent(
-      intent,
-      "manual_intent_completed",
-      "#{module_intent_verb(intent.type)} #{module_symbol} complete",
-      intent.last_action_result
-    )
+        {:ok, intent}
 
-    {:ok, intent}
+      :intent_no_longer_owned ->
+        :ok
+    end
   end
 
   defp module_result(type, module_symbol, nil),
@@ -3494,67 +3432,22 @@ defmodule SpaceTraders.Fleet.Intents do
   defp maybe_put_module_transaction(result, transaction),
     do: Map.put(result, "transaction", module_transaction_evidence(transaction))
 
-  defp await_module_reconciliation(intent, reason) do
-    intent =
-      update_intent!(
-        Ecto.Changeset.change(intent,
-          status: "blocked",
-          blocker: Fleet.intent_blocker({:awaiting_reconciliation, reason}),
-          last_action_result: %{"kind" => intent.type, "error" => inspect(reason)}
-        )
-      )
-
-    {:ok, intent}
-  end
-
   defp block_module_intent(intent, %SpaceTraders.API.GameplayError{code: 429}),
     do: defer_for_api_capacity(intent)
 
   defp block_module_intent(intent, reason) do
-    intent =
-      update_intent!(
-        Ecto.Changeset.change(intent,
-          status: "blocked",
-          blocker: Fleet.intent_blocker(intents_block_reason(reason)),
-          in_flight_action: nil,
-          last_action_result: %{"kind" => intent.type, "error" => inspect(reason)}
-        )
-      )
-
-    {:ok, intent}
-  end
-
-  defp block_module_intent_preserving_evidence(intent, reason) do
-    intent =
-      update_intent!(
-        Ecto.Changeset.change(intent,
-          status: "blocked",
-          blocker: Fleet.intent_blocker(reason),
-          last_action_result: %{"kind" => intent.type, "error" => inspect(reason)}
-        )
-      )
-
-    {:ok, intent}
+    transition_intent(intent,
+      status: "blocked",
+      blocker: Fleet.intent_blocker(intents_block_reason(reason)),
+      in_flight_action: nil,
+      last_action_result: %{"kind" => intent.type, "error" => inspect(reason)}
+    )
   end
 
   @doc false
   def module_count(modules, symbol), do: Enum.count(modules || [], &(&1.symbol == symbol))
   defp module_intent_verb("install_module"), do: "Install"
   defp module_intent_verb("remove_module"), do: "Remove"
-
-  defp module_modification_evidence?(intent, modules, cargo) do
-    action = intent.in_flight_action
-    module_symbol = action["module_symbol"]
-    installed_before = action["installed_before"]
-    cargo_before = action["cargo_before"]
-    installed_now = module_count(modules, module_symbol)
-    cargo_now = Fleet.item_units(cargo, module_symbol)
-
-    case intent.type do
-      "install_module" -> installed_now == installed_before + 1 and cargo_now == cargo_before - 1
-      "remove_module" -> installed_now == installed_before - 1 and cargo_now == cargo_before + 1
-    end
-  end
 
   defp module_evidence(module) do
     %{
@@ -4814,7 +4707,7 @@ defmodule SpaceTraders.Fleet.Intents do
   end
 
   defp accepted_observations(agent, live_ship, attempt, %{"kind" => kind}, basis)
-       when kind in ["refuel", "jump"] do
+       when kind in ["refuel", "jump", "install_module", "remove_module"] do
     with {:ok, credits} <-
            Agent.handle_game_result(agent, Evidence.recovery_agent_binding(agent, attempt)) do
       composite_recovery_proof(live_ship, credits, attempt, :accepted, basis)
@@ -4878,6 +4771,28 @@ defmodule SpaceTraders.Fleet.Intents do
     else
       {:error, reason} -> {:error, reason}
       _ -> {:error, :market_selection_no_longer_admissible}
+    end
+  end
+
+  defp selected_action_admissible?(_agent, intent, ship, %{"kind" => kind})
+       when kind in ["install_module", "remove_module"],
+       do: module_mutation_allowed?(intent, ship)
+
+  defp selected_action_admissible?(agent, intent, ship, %{"kind" => "buy"})
+       when intent.type == "install_module" do
+    with true <- docked?(ship) and ship.nav.waypoint_symbol == intent.target_waypoint,
+         {:ok, market} <- Fleet.market_for_ship(agent, ship, intent.target_waypoint),
+         good when not is_nil(good) <-
+           Enum.find(market.trade_goods || [], &(&1.symbol == intent.parameters["module_symbol"])),
+         max_price = get_in(intent.parameters, ["refit", "max_unit_price"]),
+         true <-
+           is_nil(max_price) or
+             (is_integer(good.purchase_price) and good.purchase_price <= max_price),
+         true <- ship.cargo.capacity - ship.cargo.units >= 1 do
+      :ok
+    else
+      {:error, reason} -> {:error, reason}
+      _ -> {:error, :refit_purchase_no_longer_admissible}
     end
   end
 
@@ -4973,6 +4888,27 @@ defmodule SpaceTraders.Fleet.Intents do
     end
   end
 
+  defp absence_observations(agent, live_ship, attempt, %{"kind" => kind} = action)
+       when kind in ["install_module", "remove_module"] do
+    with true <-
+           module_count(live_ship.modules, action["module_symbol"]) == action["installed_before"],
+         true <-
+           Fleet.item_units(live_ship.cargo, action["module_symbol"]) == action["cargo_before"],
+         {:ok, credits} <-
+           Agent.handle_game_result(agent, Evidence.recovery_agent_binding(agent, attempt)) do
+      composite_recovery_proof(
+        live_ship,
+        credits,
+        attempt,
+        :absent,
+        "Installed modules and Cargo are unchanged; authoritative Agent credits accompany them"
+      )
+    else
+      {:error, reason} -> {:error, reason}
+      _ -> {:error, :module_outcome_unresolved}
+    end
+  end
+
   defp absence_observations(agent, live_ship, attempt, action) do
     ship_recovery_proof(
       agent,
@@ -5000,41 +4936,6 @@ defmodule SpaceTraders.Fleet.Intents do
     end
   end
 
-  defp recovery_agent(agent) do
-    with {:ok, game_agent} <-
-           Agent.handle_game_result(
-             agent,
-             Evidence.get_agent(AgentTokenReference.new(agent), lane: :safety)
-           ),
-         true <-
-           game_agent.symbol == agent.symbol and is_integer(game_agent.credits) and
-             game_agent.credits >= 0 do
-      {:ok, game_agent}
-    else
-      false -> {:error, :authoritative_credit_facts_required}
-      error -> error
-    end
-  end
-
-  defp reconciliation_observation(operation_id, dependency_keys, attempt, outcome, basis, facts) do
-    Evidence.authoritative_observation(
-      operation_id,
-      dependency_keys,
-      Map.put(facts, :reconciliation, %{
-        mutation_attempt_id: attempt.id,
-        request_fingerprint: attempt.request_fingerprint,
-        outcome: Atom.to_string(outcome),
-        basis: basis
-      }),
-      Evidence.recovery_observed_at(
-        attempt.agent_id,
-        operation_id,
-        dependency_keys,
-        attempt.prepared_at
-      )
-    )
-  end
-
   defp continue_selected_response(
          agent,
          %Intent{type: type} = intent,
@@ -5052,8 +4953,22 @@ defmodule SpaceTraders.Fleet.Intents do
            response
          )
 
-  defp continue_selected_response(agent, intent, live_ship, %{"kind" => "buy"}, response),
-    do: reconcile_refit_buy(agent, intent, live_ship, response)
+  defp continue_selected_response(agent, intent, live_ship, %{"kind" => "buy"}, response) do
+    with {:ok, fresh} <- fresh_ship(agent, live_ship.symbol, nil) do
+      reconcile_refit_buy(agent, intent, fresh, response)
+    else
+      {:error, reason} -> block_intents(intent, reason)
+    end
+  end
+
+  defp continue_selected_response(agent, intent, live_ship, %{"kind" => kind}, _response)
+       when kind in ["install_module", "remove_module"] do
+    with {:ok, fresh} <- fresh_ship(agent, live_ship.symbol, nil) do
+      progress_module_mutation(agent, intent, fresh)
+    else
+      {:error, reason} -> block_intents(intent, reason)
+    end
+  end
 
   defp continue_selected_response(agent, intent, live_ship, %{"kind" => kind}, response)
        when kind in ["extract", "siphon", "refine", "survey", "jettison"],
