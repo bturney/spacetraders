@@ -191,8 +191,15 @@ defmodule SpaceTraders.FleetAcquisitionTest do
 
     # Append-only: the original ambiguity is preserved and the reconciliation
     # is recorded as an additional outcome on the same attempt.
-    assert [%{state: "accepted", outcomes: [ambiguous, outcome]}] = purchase_attempts(agent)
+    assert [%{state: "accepted", outcomes: [ambiguous, outcome]} = attempt] =
+             purchase_attempts(agent)
+
     assert ambiguous.classification == "ambiguous"
+
+    # Fleet-level ownership: recovery never enters the Ship-scoped lifecycle.
+    assert [attempt.id] == Enum.map(MutationAttempts.list_for_agent(agent), & &1.id)
+    assert attempt.prepared_evidence["selected_action"] == nil
+    assert Repo.aggregate(SpaceTraders.Fleet.Intent, :count) == 0
 
     # The attempt was reconciled against both fenced resources.
     assert [credits, owned_fleet] = observation_payloads(outcome)
