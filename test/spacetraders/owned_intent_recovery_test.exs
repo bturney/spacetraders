@@ -947,7 +947,7 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
       {intent, action} = market_selection(ship, portfolio, commitment, unquote(kind))
 
       {:ok, %{intent: intent, attempt: attempt}} =
-        SpaceTraders.API.RecordedDispatch.prepare(agent, intent, action)
+        SpaceTraders.Fleet.Intents.RecordedAction.prepare(agent, intent, action)
 
       {:ok, _} = MutationAttempts.mark_sent_or_unknown(attempt)
       after_units = if unquote(kind) == "buy", do: 5, else: 0
@@ -1004,7 +1004,7 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
       {intent, action} = market_selection(ship, portfolio, commitment, unquote(kind))
 
       {:ok, %{intent: intent, attempt: attempt}} =
-        SpaceTraders.API.RecordedDispatch.prepare(agent, intent, action)
+        SpaceTraders.Fleet.Intents.RecordedAction.prepare(agent, intent, action)
 
       {:ok, _} = MutationAttempts.mark_sent_or_unknown(attempt)
 
@@ -1064,7 +1064,7 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
       {intent, action} = market_selection(ship, portfolio, commitment, unquote(kind))
 
       {:ok, %{intent: intent, attempt: attempt}} =
-        SpaceTraders.API.RecordedDispatch.prepare(agent, intent, action)
+        SpaceTraders.Fleet.Intents.RecordedAction.prepare(agent, intent, action)
 
       {:ok, attempt} = MutationAttempts.mark_sent_or_unknown(attempt)
       previous_clock = Application.fetch_env(:spacetraders, :clock)
@@ -1133,7 +1133,7 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
       {intent, action} = market_selection(ship, portfolio, commitment, unquote(kind))
 
       {:ok, %{intent: intent, attempt: attempt}} =
-        SpaceTraders.API.RecordedDispatch.prepare(agent, intent, action)
+        SpaceTraders.Fleet.Intents.RecordedAction.prepare(agent, intent, action)
 
       {:ok, _} = MutationAttempts.mark_sent_or_unknown(attempt)
       strategy = Repo.get_by!(Strategy, operator_id: agent.operator_id)
@@ -1170,7 +1170,7 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
         selected =
           if trigger == :boot do
             {:ok, %{intent: selected}} =
-              SpaceTraders.API.RecordedDispatch.prepare(agent, intent, action)
+              SpaceTraders.Fleet.Intents.RecordedAction.prepare(agent, intent, action)
 
             selected
           else
@@ -1228,7 +1228,7 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
       {intent, action} = market_selection(ship, portfolio, commitment, unquote(kind))
 
       {:ok, %{intent: intent, attempt: attempt}} =
-        SpaceTraders.API.RecordedDispatch.prepare(agent, intent, action)
+        SpaceTraders.Fleet.Intents.RecordedAction.prepare(agent, intent, action)
 
       {:ok, _} = MutationAttempts.mark_sent_or_unknown(attempt)
 
@@ -1269,7 +1269,7 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
       {intent, action} = market_selection(ship, portfolio, commitment, unquote(kind))
 
       {:ok, %{intent: intent, attempt: attempt}} =
-        SpaceTraders.API.RecordedDispatch.prepare(agent, intent, action)
+        SpaceTraders.Fleet.Intents.RecordedAction.prepare(agent, intent, action)
 
       {:ok, _} = MutationAttempts.mark_sent_or_unknown(attempt)
 
@@ -1316,7 +1316,7 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
     action = Map.put(action, "units", 2)
 
     {:ok, %{intent: intent, attempt: attempt}} =
-      SpaceTraders.API.RecordedDispatch.prepare(agent, intent, action)
+      SpaceTraders.Fleet.Intents.RecordedAction.prepare(agent, intent, action)
 
     {:ok, _} = MutationAttempts.mark_sent_or_unknown(attempt)
 
@@ -1337,6 +1337,69 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
     assert length(MutationAttempts.list_for_agent(agent)) == 1
   end
 
+  @tag :market_recovery
+  test "market cargo docks through the same recorded progression as its trade" do
+    {agent, ship, portfolio, commitment} = claimed_ship("MARKET-DOCK-PROGRESSION")
+    {intent, _action} = market_selection(ship, portfolio, commitment, "buy")
+    game = start_supervised!({Elixir.Agent, fn -> %{status: "IN_ORBIT", posts: []} end})
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      case {conn.method, conn.request_path} do
+        {"GET", "/v2/my/agent"} ->
+          Req.Test.json(conn, %{"data" => %{"symbol" => agent.symbol, "credits" => 1000}})
+
+        {"GET", "/v2/systems/X1-UX81/waypoints/X1-UX81-A1/market"} ->
+          Req.Test.json(conn, %{
+            "data" => %{
+              "symbol" => "X1-UX81-A1",
+              "tradeGoods" => [
+                %{
+                  "symbol" => "IRON_ORE",
+                  "purchasePrice" => 10,
+                  "sellPrice" => 10,
+                  "tradeVolume" => 10,
+                  "supply" => "HIGH",
+                  "type" => "EXPORT"
+                }
+              ]
+            }
+          })
+
+        {"GET", _} ->
+          status = Elixir.Agent.get(game, & &1.status)
+          body = put_in(market_ship_body(ship, 0)["nav"], nav_body(status))
+          Req.Test.json(conn, %{"data" => body})
+
+        {"POST", path} ->
+          Elixir.Agent.update(game, &%{&1 | posts: &1.posts ++ [Path.basename(path)]})
+
+          if String.ends_with?(path, "/dock") do
+            Elixir.Agent.update(game, &%{&1 | status: "DOCKED"})
+            Req.Test.json(conn, %{"data" => %{"nav" => nav_body("DOCKED")}})
+          else
+            Req.Test.json(conn, %{"data" => trade_response(agent, ship, "PURCHASE", 10, 950, 5)})
+          end
+      end
+    end)
+
+    _ = Intents.reconcile(agent.id, ship.symbol, nil, :boot, intent.id)
+
+    assert Elixir.Agent.get(game, & &1.posts) == ["dock", "purchase"]
+    assert %Intent{status: "completed", in_flight_action: nil} = Repo.get!(Intent, intent.id)
+
+    attempts = MutationAttempts.list_for_agent(agent)
+
+    assert Enum.map(attempts, & &1.prepared_evidence["selected_action"]["kind"]) |> Enum.sort() ==
+             ["buy", "dock"]
+
+    assert Enum.all?(attempts, &(&1.state in ["accepted", "succeeded"]))
+
+    assert Enum.all?(
+             attempts,
+             &is_binary(&1.prepared_evidence["selected_action"]["selection_id"])
+           )
+  end
+
   defp market_ship_body(ship, units) do
     ship_body(ship.symbol, %{
       "nav" => nav_body("DOCKED"),
@@ -1353,7 +1416,7 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
     intent = owned_intent(ship, portfolio, commitment, [])
 
     {:ok, %{attempt: attempt}} =
-      SpaceTraders.API.RecordedDispatch.prepare(agent, intent, %{
+      SpaceTraders.Fleet.Intents.RecordedAction.prepare(agent, intent, %{
         "kind" => "refuel",
         "waypoint" => "X1-UX81-A1",
         "fuel_before" => 150
@@ -1413,7 +1476,7 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
       intent = owned_intent(ship, portfolio, commitment, [])
 
       {:ok, %{attempt: attempt}} =
-        SpaceTraders.API.RecordedDispatch.prepare(agent, intent, %{
+        SpaceTraders.Fleet.Intents.RecordedAction.prepare(agent, intent, %{
           "kind" => unquote(kind),
           "waypoint" => "X1-UX81-A1",
           "fuel_before" => 150,
@@ -1448,7 +1511,7 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
       intent = owned_intent(ship, portfolio, commitment, [])
 
       {:ok, %{intent: intent, attempt: attempt}} =
-        SpaceTraders.API.RecordedDispatch.prepare(agent, intent, %{
+        SpaceTraders.Fleet.Intents.RecordedAction.prepare(agent, intent, %{
           "kind" => unquote(kind),
           "waypoint" => "X1-UX81-A1",
           "fuel_before" => 150,
@@ -1520,7 +1583,7 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
       intent = owned_intent(ship, portfolio, commitment, [])
 
       {:ok, %{attempt: attempt}} =
-        SpaceTraders.API.RecordedDispatch.prepare(agent, intent, %{
+        SpaceTraders.Fleet.Intents.RecordedAction.prepare(agent, intent, %{
           "kind" => unquote(kind),
           "waypoint" => "X1-UX81-A1",
           "fuel_before" => 150,
@@ -1608,7 +1671,7 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
       intent = owned_intent(ship, portfolio, commitment, target_waypoint: destination)
 
       {:ok, %{intent: intent, attempt: attempt}} =
-        SpaceTraders.API.RecordedDispatch.prepare(agent, intent, %{
+        SpaceTraders.Fleet.Intents.RecordedAction.prepare(agent, intent, %{
           "kind" => unquote(kind),
           "waypoint" => destination,
           "fuel_before" => 150,
@@ -1728,7 +1791,7 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
       }
 
       {:ok, %{intent: intent, attempt: attempt}} =
-        SpaceTraders.API.RecordedDispatch.prepare(agent, intent, action)
+        SpaceTraders.Fleet.Intents.RecordedAction.prepare(agent, intent, action)
 
       {:ok, _} = MutationAttempts.mark_sent_or_unknown(attempt)
 
@@ -1777,7 +1840,7 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
       intent = owned_intent(ship, portfolio, commitment, [])
 
       {:ok, %{intent: intent, attempt: attempt}} =
-        SpaceTraders.API.RecordedDispatch.prepare(agent, intent, %{
+        SpaceTraders.Fleet.Intents.RecordedAction.prepare(agent, intent, %{
           "kind" => unquote(kind),
           "waypoint" => "X1-UX81-A1",
           "fuel_before" => 150,
@@ -2329,7 +2392,7 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
       intent = owned_intent(ship, portfolio, commitment, [])
 
       {:ok, %{intent: intent, attempt: attempt}} =
-        SpaceTraders.API.RecordedDispatch.prepare(
+        SpaceTraders.Fleet.Intents.RecordedAction.prepare(
           agent,
           intent,
           %{"kind" => "refuel", "waypoint" => "X1-UX81-A1", "fuel_before" => 150}
@@ -2393,7 +2456,7 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
     intent = owned_intent(ship, portfolio, commitment, [])
 
     {:ok, %{intent: intent, attempt: attempt}} =
-      SpaceTraders.API.RecordedDispatch.prepare(
+      SpaceTraders.Fleet.Intents.RecordedAction.prepare(
         agent,
         intent,
         %{"kind" => "refuel", "fuel_before" => 150, "waypoint" => "X1-UX81-A1"}
@@ -2487,7 +2550,7 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
     intent = owned_intent(ship, portfolio, commitment, [])
 
     {:ok, %{intent: intent, attempt: attempt}} =
-      SpaceTraders.API.RecordedDispatch.prepare(agent, intent, %{
+      SpaceTraders.Fleet.Intents.RecordedAction.prepare(agent, intent, %{
         "kind" => "orbit",
         "waypoint" => "X1-UX81-A1"
       })

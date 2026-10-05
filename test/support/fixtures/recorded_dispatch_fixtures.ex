@@ -9,7 +9,7 @@ defmodule SpaceTraders.RecordedDispatchFixtures do
   import Ecto.Query
 
   alias SpaceTraders.Agent.{Agent, Operator, Scope}
-  alias SpaceTraders.API.RecordedDispatch
+  alias SpaceTraders.Fleet.Intents.RecordedAction
   alias SpaceTraders.Fleet.{Intent, Ship}
   alias SpaceTraders.FleetAllocation
   alias SpaceTraders.FleetAllocation.PortfolioCandidate
@@ -51,7 +51,7 @@ defmodule SpaceTraders.RecordedDispatchFixtures do
         do: transfer_evidence(agent, ship_symbol, action),
         else: action
 
-    case RecordedDispatch.prepare(agent, intent, action) do
+    case RecordedAction.prepare(agent, intent, action) do
       {:ok, selected} ->
         Map.merge(selected, %{agent: agent, ship: ship})
 

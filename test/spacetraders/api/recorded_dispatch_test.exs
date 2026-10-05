@@ -5,7 +5,8 @@ defmodule SpaceTraders.API.RecordedDispatchTest do
   import SpaceTraders.RecordedDispatchFixtures
 
   alias SpaceTraders.API
-  alias SpaceTraders.API.{AgentTokenReference, OperationInventory, RecordedDispatch, ShipAction}
+  alias SpaceTraders.API.{AgentTokenReference, OperationInventory, ShipAction}
+  alias SpaceTraders.Fleet.Intents.RecordedAction
   alias SpaceTraders.Fleet.Intent
   alias SpaceTraders.FleetAllocation.Commitment
   alias SpaceTraders.FleetGeneration.Generation
@@ -114,10 +115,10 @@ defmodule SpaceTraders.API.RecordedDispatchTest do
                           API.dispatch_recorded(intent)
 
                  assert {:error, :recorded_dispatch_requires_commit} =
-                          RecordedDispatch.prepare(agent, intent, @action)
+                          RecordedAction.prepare(agent, intent, @action)
 
                  assert {:error, :recorded_dispatch_requires_commit} =
-                          RecordedDispatch.prepare_retry(agent, intent, attempt)
+                          RecordedAction.prepare_retry(agent, intent, attempt)
 
                  Repo.rollback(:caller_rollback)
                end)
