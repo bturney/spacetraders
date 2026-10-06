@@ -28,7 +28,7 @@ defmodule SpaceTraders.RecordedFamilyInterruptionTest do
   alias SpaceTraders.FleetStrategy.{Revision, Strategy}
   alias SpaceTraders.MutationAttempts
   alias SpaceTraders.MutationAttempts.{Attempt, Outcome}
-  alias SpaceTraders.{Repo, SafetyFence}
+  alias SpaceTraders.{Repo, RuntimeDeath, SafetyFence}
 
   # {boundary, committed attempt state, game effect applied}
   @phases [
@@ -89,7 +89,7 @@ defmodule SpaceTraders.RecordedFamilyInterruptionTest do
 
       assert sends(game, spec) == if(@accepted, do: 1, else: 0)
 
-      Process.exit(sender, :kill)
+      RuntimeDeath.kill(sender, sender_backend)
       assert_receive {:DOWN, ^monitor, :process, ^sender, :killed}
       assert observe(observer, spec) == before
 

@@ -63,11 +63,15 @@ defmodule SpaceTraders.Fleet.ShipServer do
     end
   end
 
-  @doc "Stops the running server for one ship, if any."
+  @doc """
+  Stops the running server for one ship, if any. Used by tests.
+
+  Like `stop_all/0`, it never stops a server holding a database connection.
+  """
   @spec stop(String.t()) :: :ok
   def stop(ship_symbol) do
     case Registry.lookup(SpaceTraders.Fleet.ShipRegistry, ship_symbol) do
-      [{pid, _}] -> DynamicSupervisor.terminate_child(SpaceTraders.Fleet.ShipSupervisor, pid)
+      [{pid, _}] -> stop_quiesced(pid)
       [] -> :ok
     end
   end
@@ -102,20 +106,29 @@ defmodule SpaceTraders.Fleet.ShipServer do
     end
   end
 
-  @doc "Terminates every running ship server. Used by tests between cases."
+  @doc """
+  Terminates every running ship server. Used by tests between cases.
+
+  Each server stops while it holds no database connection
+  (`SpaceTraders.Quiesce`), never mid-transaction.
+  """
   @spec stop_all() :: :ok
   def stop_all do
     SpaceTraders.Fleet.ShipSupervisor
     |> DynamicSupervisor.which_children()
     |> Enum.each(fn
-      {_id, pid, _type, _modules} when is_pid(pid) ->
-        DynamicSupervisor.terminate_child(SpaceTraders.Fleet.ShipSupervisor, pid)
-
-      _ ->
-        :ok
+      {_id, pid, _type, _modules} when is_pid(pid) -> stop_quiesced(pid)
+      _ -> :ok
     end)
 
     :ok
+  end
+
+  defp stop_quiesced(pid) do
+    SpaceTraders.Quiesce.stop(
+      pid,
+      &DynamicSupervisor.terminate_child(SpaceTraders.Fleet.ShipSupervisor, &1)
+    )
   end
 
   @impl true

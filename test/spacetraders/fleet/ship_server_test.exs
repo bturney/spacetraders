@@ -7,6 +7,7 @@ defmodule SpaceTraders.Fleet.ShipServerTest do
   import SpaceTraders.ShipBody
 
   alias SpaceTraders.Fleet.ShipServer
+  alias SpaceTraders.Quiesced
   alias SpaceTraders.API.AgentTokenReference
   alias SpaceTraders.Fleet.Ship
   alias SpaceTraders.Agent.Agent
@@ -67,12 +68,15 @@ defmodule SpaceTraders.Fleet.ShipServerTest do
     end)
   end
 
+  # Quiesced: teardown never stops a server mid-transaction (#398).
   defp start_server(symbol) do
     start_supervised!(
-      {ShipServer,
-       symbol: symbol,
-       agent_id: @agent_id,
-       credential_ref: %AgentTokenReference{agent_id: @agent_id}}
+      Quiesced.child_spec(
+        {ShipServer,
+         symbol: symbol,
+         agent_id: @agent_id,
+         credential_ref: %AgentTokenReference{agent_id: @agent_id}}
+      )
     )
   end
 
@@ -117,8 +121,9 @@ defmodule SpaceTraders.Fleet.ShipServerTest do
 
       event = schedule(symbol, :arrival, DateTime.add(DateTime.utc_now(), 100, :millisecond))
 
-      pid = start_server(symbol)
-      :ok = GenServer.stop(pid)
+      start_server(symbol)
+      :ok = stop_supervised(ShipServer)
+      start_server(symbol)
 
       assert_receive {:ship_updated, @agent_id, ^symbol}, 1_000
       assert Repo.get(Event, event.id).status == "done"

@@ -20,7 +20,7 @@ defmodule SpaceTraders.RecordedShipRuntimeTest do
   alias SpaceTraders.Fleet.{Intent, ShipServer, ShipServerBoot}
   alias SpaceTraders.FleetAllocation.Reconciler
   alias SpaceTraders.MutationAttempts.{Attempt, Outcome}
-  alias SpaceTraders.{Repo, RuntimeAuthority, TestClock}
+  alias SpaceTraders.{Quiesced, Repo, RuntimeAuthority, RuntimeDeath, TestClock}
   alias SpaceTraders.RuntimeBaselineGame, as: Game
 
   setup_all do
@@ -40,11 +40,15 @@ defmodule SpaceTraders.RecordedShipRuntimeTest do
 
     observer = start_supervised!({Postgrex, connection_options()})
     game = start_supervised!({Game, []})
-    barrier = :ets.new(:qualification_barrier, [:public, :set])
     gate = :atomics.new(1, [])
     owner = self()
 
-    Req.Test.stub(SpaceTraders.API, fn conn ->
+    # The game process owns the barrier table and the API stub, so both outlive
+    # the test process until the quiesced runtime has stopped (#398).
+    barrier =
+      Elixir.Agent.get(game, fn _ -> :ets.new(:qualification_barrier, [:public, :set]) end)
+
+    stub = fn conn ->
       if conn.method == "POST" and String.ends_with?(conn.request_path, "/orbit") do
         transport_barrier(owner, :transport_before_accept, barrier, gate)
         reply = Game.call(game, conn)
@@ -56,9 +60,12 @@ defmodule SpaceTraders.RecordedShipRuntimeTest do
 
         Game.reply(conn, Game.call(game, conn))
       end
-    end)
+    end
 
-    Req.Test.allow(SpaceTraders.API, self(), fn ->
+    :ok = Elixir.Agent.get(game, fn _ -> Req.Test.stub(SpaceTraders.API, stub) end)
+    Req.Test.allow(SpaceTraders.API, game, self())
+
+    Req.Test.allow(SpaceTraders.API, game, fn ->
       ships =
         DynamicSupervisor.which_children(SpaceTraders.Fleet.ShipSupervisor)
         |> Enum.map(fn {_, pid, _, _} -> pid end)
@@ -215,7 +222,7 @@ defmodule SpaceTraders.RecordedShipRuntimeTest do
       end
 
       assert orbit_count(context.game) == if(@accepted, do: 1, else: 0)
-      kill_runtime(sender)
+      kill_runtime(sender, sender_backend)
       assert observe_attempts(context.observer, context.agent.id) == before
       restart_runtime()
       eventually(fn -> orbit_count(context.game) == 1 end, 500, context)
@@ -462,15 +469,14 @@ defmodule SpaceTraders.RecordedShipRuntimeTest do
     assert render(strategy) =~ "Active revision 1"
   end
 
+  # Quiesced: teardown never stops them mid-transaction (#398).
   defp start_runtime do
-    start_supervised!(Supervisor.child_spec({Reconciler, []}, restart: :temporary))
-    start_supervised!(Supervisor.child_spec({DemandScheduler, []}, restart: :temporary))
+    start_supervised!(Quiesced.child_spec({Reconciler, []}))
+    start_supervised!(Quiesced.child_spec({DemandScheduler, []}))
   end
 
-  defp kill_runtime(sender) do
-    monitor = Process.monitor(sender)
-    Process.exit(sender, :kill)
-    assert_receive {:DOWN, ^monitor, :process, ^sender, :killed}
+  defp kill_runtime(sender, sender_backend) do
+    RuntimeDeath.kill(sender, sender_backend)
     stop_supervised(DemandScheduler)
     stop_supervised(Reconciler)
     ShipServer.stop_all()

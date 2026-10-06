@@ -40,11 +40,17 @@ running PostgreSQL test database. `release_boot_test.sh` builds and boots the
 production release; `migration_repair_test.sh` creates and removes its own
 temporary database.
 
-## Expected noise
+## Postgrex disconnects
 
-Postgrex `admin_shutdown` disconnect lines during a full run are sandbox
-teardown noise, not failures. `config/test.exs` sets `logger: :error`, and the
-suite uses the Ecto `Sandbox` pool; treat a clean exit as the signal.
+A passing run prints no Postgrex disconnect lines; one in output is a real
+problem. A process killed while it holds a sandbox connection makes the
+ownership proxy disconnect it and log an error (#398). So:
+
+- Runtime processes a test starts: `start_supervised!(Quiesced.child_spec(child))`;
+  teardown waits out any open checkout before stopping them.
+  `ShipServer.stop_all/0` does the same via `SpaceTraders.Quiesce`.
+- Killing a sender mid-transaction on purpose: `RuntimeDeath.kill/3` asserts
+  the disconnect instead of printing it.
 
 ## Database
 
