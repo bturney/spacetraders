@@ -289,7 +289,7 @@ not safe gameplay or Strategy outcomes.
 
 ## Verification receipts
 
-Commands source `scripts/_toolchain.sh` and use the prepared PostgreSQL database
+Commands use the prepared PostgreSQL database
 `spacetraders_test`. Elixir has no configured separate typechecker;
 `MIX_ENV=test mix compile --warnings-as-errors` ran after each runtime correction.
 Verbose transcripts are retained; the command exit status is the verdict.

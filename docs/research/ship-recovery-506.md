@@ -47,7 +47,6 @@ This is a Ship Execution recovery proof; it makes no profitable-loop claim.
 Final command:
 
 ```sh
-source scripts/_toolchain.sh
 DATABASE_URL=postgres://postgres:postgres@localhost/spacetraders_test_506 scripts/verify
 ```
 

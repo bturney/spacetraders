@@ -26,7 +26,6 @@ jobs:
           - 5432:5432
     env:
       DATABASE_URL: postgres://postgres:postgres@localhost/spacetraders_test
-      MIX_DEPS_PATH: ${{ github.workspace }}/deps
       MISE_ERLANG_PRECOMPILED_OS: ubuntu-24.04
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -71,7 +70,6 @@ jobs:
           - 5432:5432
     env:
       DATABASE_URL: postgres://postgres:postgres@localhost/spacetraders_test
-      MIX_DEPS_PATH: ${{ github.workspace }}/deps
       MISE_ERLANG_PRECOMPILED_OS: ubuntu-24.04
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6

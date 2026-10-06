@@ -3,7 +3,6 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
-source scripts/_toolchain.sh
 
 command -v psql >/dev/null || {
   echo "psql is required to simulate schema drift" >&2

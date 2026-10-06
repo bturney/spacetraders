@@ -54,7 +54,7 @@ missing legacy attempt. Legacy action-without-attempt records are not backfilled
 ## Proof and verification receipt
 
 Full terminal evidence is retained under `/tmp/opencode/504-*.log`. Commands
-source `scripts/_toolchain.sh`; Elixir has no separate configured typechecker,
+use the pinned toolchain; Elixir has no separate configured typechecker,
 so regular compilation uses warnings-as-errors. The final commit identifies the
 qualified source tree; these receipts distinguish canonical and opt-in results.
 

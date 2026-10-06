@@ -16,8 +16,6 @@ spacetraders-*.tar
 
 # Historical local runner output; product verification does not consume it.
 /artifacts/
-/.worktree-env
-/.worktree-mix/
 
 # Produced assets
 /priv/static/assets/
