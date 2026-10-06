@@ -2,6 +2,8 @@ name: Verify
 
 on:
   pull_request:
+  push:
+    branches: [impl/607-615]
 
 permissions:
   contents: read
