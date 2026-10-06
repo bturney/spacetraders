@@ -104,7 +104,7 @@ mix test test/spacetraders/recorded_ship_runtime_test.exs --seed 0 --trace
 ```
 
 See [the qualification and rollout
-boundary](docs/research/recorded-ship-qualification-507.md) for independently
+boundary](https://github.com/bturney/spacetraders/blob/0c972572c7cb24981f5e145fb40945bd36df464b/docs/research/recorded-ship-qualification-507.md) for independently
 observed evidence, compatibility and readiness scope.
 
 ### Game API client & codegen
