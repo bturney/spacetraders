@@ -1,5 +1,7 @@
 import Config
 
+Code.require_file("checkout_db.exs", __DIR__)
+
 # Only in tests, remove the complexity from the password hashing algorithm
 config :pbkdf2_elixir, :rounds, 1
 
@@ -12,7 +14,7 @@ config :spacetraders, :demand_scheduler_enabled, false
 # Configure your database
 #
 config :spacetraders, SpaceTraders.Repo,
-  url: System.get_env("DATABASE_URL", "postgres://postgres:postgres@localhost/spacetraders_test"),
+  url: SpaceTraders.CheckoutDb.url(:test),
   pool_size: 10,
   pool: Ecto.Adapters.SQL.Sandbox
 

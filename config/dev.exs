@@ -1,8 +1,10 @@
 import Config
 
+Code.require_file("checkout_db.exs", __DIR__)
+
 # Configure your database
 config :spacetraders, SpaceTraders.Repo,
-  url: System.get_env("DATABASE_URL", "postgres://postgres:postgres@localhost/spacetraders_dev"),
+  url: SpaceTraders.CheckoutDb.url(:dev),
   pool_size: 5,
   stacktrace: true,
   show_sensitive_data_on_connection_error: true
