@@ -12,8 +12,9 @@ set -euo pipefail
 export PORT="${PORT:-4002}"
 
 if ! command -v mix >/dev/null 2>&1; then
-  echo "mix is not available on PATH. Activate the project toolchain before running scripts/verify." >&2
-  exit 1
+  echo "verify: environment: mix not on PATH" >&2
+  echo "verify: fix: mise install (Debian hosts: set erlang.precompiled_os=ubuntu-24.04)" >&2
+  exit 2
 fi
 
 exec env MIX_ENV=test mix verify
