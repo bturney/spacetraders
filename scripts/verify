@@ -8,9 +8,6 @@
 # Usage: scripts/verify
 set -euo pipefail
 
-# Keep the verification boot check separate from a developer's default server.
-export PORT="${PORT:-4002}"
-
 if ! command -v mix >/dev/null 2>&1; then
   echo "verify: environment: mix not on PATH" >&2
   echo "verify: fix: mise install (Debian hosts: set erlang.precompiled_os=ubuntu-24.04)" >&2
