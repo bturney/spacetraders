@@ -56,7 +56,9 @@ ownership proxy disconnect it and log an error (#398). So:
 
 One shared Postgres (`docker compose -f compose.dev.yaml up -d`, 127.0.0.1:5432)
 serves all checkouts. `DataCase` transactions provide ordinary test isolation.
-The `mix test` alias runs `ecto.create` and `ecto.migrate` (quiet) first, so a
+The `mix test` alias first seeds `deps/` and `_build/test` from the main checkout
+when absent (`seed_from_main/1` in `mix.exs`; needs the main checkout built;
+cold ~12s, warm ~2s), then runs `ecto.create` and `ecto.migrate` (quiet), so a
 fresh checkout needs no setup.
 
 The database name derives from the checkout (`config/checkout_db.exs`): main
