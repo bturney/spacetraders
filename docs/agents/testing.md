@@ -64,8 +64,13 @@ ownership proxy disconnect it and log an error (#398). So:
 
 One shared Postgres (`docker compose -f compose.dev.yaml up -d`, 127.0.0.1:5432)
 serves all checkouts. `DataCase` transactions provide ordinary test isolation.
-The `mix test` alias runs `ecto.create` and `ecto.migrate` (quiet) first, so a
-fresh checkout needs no setup.
+The `mix test` alias first seeds `deps/` and `_build/test` from the main checkout
+when absent (`seed_from_main/1` in `mix.exs`; needs the main checkout built;
+cold ~12s, warm ~2s), then runs `ecto.create` and `ecto.migrate` (quiet), so a
+fresh checkout needs no setup. Seeding also runs `scripts/prune` (removes clean,
+idle, merged, unlocked worktrees and orphan checkout databases; lists the rest;
+`--dry-run` previews). Run it by hand any time; a prune failure never fails
+`mix test`.
 
 The database name derives from the checkout (`config/checkout_db.exs`): main
 checkout `spacetraders_test`; a worktree `spacetraders_test_<dir>_<hash6>`. Set

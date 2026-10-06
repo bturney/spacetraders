@@ -90,7 +90,7 @@ defmodule SpaceTraders.MixProject do
       setup: ["deps.get", "ecto.setup", "assets.setup", "assets.build"],
       "ecto.setup": ["ecto.create", "ecto.migrate", "run priv/repo/seeds.exs"],
       "ecto.reset": ["ecto.drop", "ecto.setup"],
-      test: ["ecto.create --quiet", "ecto.migrate --quiet", "test"],
+      test: [&seed_from_main/1, "ecto.create --quiet", "ecto.migrate --quiet", "test"],
       "assets.setup": ["tailwind.install --if-missing", "esbuild.install --if-missing"],
       "assets.build": ["compile", "tailwind spacetraders", "esbuild spacetraders"],
       "assets.deploy": [
@@ -103,4 +103,57 @@ defmodule SpaceTraders.MixProject do
       verify: ["compile --warnings-as-errors", "verify"]
     ]
   end
+
+  # A fresh worktree has no deps/ or _build/. Mix runs a function alias before it
+  # loads or checks deps, so this copy lands first: `mix test <file>` works with
+  # no setup, recompiling only app files. Copies only what is absent, and only
+  # from a main checkout that has it; the main checkout is never written.
+  # Seeding means a new worktree (so a new database follows): then `scripts/prune`
+  # clears finished work. Prune failing or hanging never fails `mix test`.
+  defp seed_from_main(_args) do
+    case System.cmd("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"],
+           stderr_to_stdout: true
+         ) do
+      {common_dir, 0} ->
+        main = common_dir |> String.trim() |> Path.dirname()
+
+        if Path.expand(main) != Path.expand(File.cwd!()) do
+          seeded =
+            for rel <- ["deps", Path.join("_build", to_string(Mix.env()))] do
+              seed(Path.join(main, rel), rel)
+            end
+
+          if true in seeded, do: prune()
+        end
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp seed(source, dest) do
+    if File.dir?(source) and not File.exists?(dest) do
+      Mix.shell().info("Seeding #{dest} from #{source}")
+      File.mkdir_p!(Path.dirname(dest))
+      File.cp_r!(source, dest)
+      true
+    else
+      false
+    end
+  end
+
+  defp prune do
+    case System.cmd("timeout", ["60", "scripts/prune"], stderr_to_stdout: true) do
+      {out, 0} ->
+        if out != "", do: Mix.shell().info(String.trim_trailing(out))
+
+      {out, status} ->
+        prune_warning("exit #{status}: #{out |> String.trim() |> String.slice(0, 120)}")
+    end
+  rescue
+    e -> prune_warning(Exception.message(e))
+  end
+
+  defp prune_warning(reason),
+    do: Mix.shell().info("prune: warning: skipped (#{String.replace(reason, "\n", " ")})")
 end
