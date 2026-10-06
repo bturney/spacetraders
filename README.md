@@ -45,21 +45,20 @@ Done when `mix --version` reports the pinned toolchain.
 
 ### 2. Database
 
-PostgreSQL is both the application store and the verification database. Start an
-instance, then prepare its test database once:
+PostgreSQL is both the application store and the verification database. One
+shared instance serves every checkout; start it once (it restarts itself):
 
 ```sh
-docker run --rm --name spacetraders-postgres -p 5432:5432 \
-  -e POSTGRES_DB=spacetraders_test -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=postgres \
-  postgres:17
-MIX_ENV=test mix ecto.create
-MIX_ENV=test mix ecto.migrate
+docker compose -f compose.dev.yaml up -d
 ```
 
-`mix test` and the gate reuse that prepared database; neither creates, drops, nor
-migrates it. Set `DATABASE_URL` to select another instance.
+Each checkout gets its own database: the main checkout uses
+`spacetraders_dev`/`spacetraders_test`; a worktree uses
+`spacetraders_<env>_<dir>_<hash6>` (`config/checkout_db.exs`). `mix test`
+creates and migrates it quietly before running. Set `DATABASE_URL` to select
+another database.
 
-Done when `MIX_ENV=test mix ecto.migrate` exits 0.
+Done when `mix test <file>` passes with no other setup.
 
 ### 3. Product gate
 
@@ -96,7 +95,7 @@ failure or adding coverage.
 Three runs sit outside the gate and are worth naming here:
 
 ```sh
-# One file, against the prepared database
+# One file, against this checkout's database
 mix test test/spacetraders/agent_test.exs
 
 # Whole-runtime composition across a restart (diagnostic, owns its own setup)

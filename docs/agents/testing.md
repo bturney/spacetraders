@@ -48,16 +48,14 @@ suite uses the Ecto `Sandbox` pool; treat a clean exit as the signal.
 
 ## Database
 
-`mix test` assumes a prepared, migrated PostgreSQL database. The test alias and
-`scripts/verify` never create, drop, or migrate it; `DataCase` transactions
-provide ordinary test isolation. Prepare the database once with
-`MIX_ENV=test mix ecto.create` and `MIX_ENV=test mix ecto.migrate` before a
-targeted test run or the canonical gate.
+One shared Postgres (`docker compose -f compose.dev.yaml up -d`, 127.0.0.1:5432)
+serves all checkouts. `DataCase` transactions provide ordinary test isolation.
+The `mix test` alias runs `ecto.create` and `ecto.migrate` (quiet) first, so a
+fresh checkout needs no setup.
 
-The default test URL is the stable
-`postgres://postgres:postgres@localhost/spacetraders_test`; set `DATABASE_URL`
-to select another prepared database. Do not use `MIX_TEST_PARTITION` to select
-databases; provision and select each database explicitly with `DATABASE_URL`.
+The database name derives from the checkout (`config/checkout_db.exs`): main
+checkout `spacetraders_test`; a worktree `spacetraders_test_<dir>_<hash6>`. Set
+`DATABASE_URL` to override. Do not use `MIX_TEST_PARTITION` to select databases.
 
 `SpaceTraders.RuntimeAuthority` opens a direct connection to the base database
 and can terminate backends, which produces full-suite-only failures and garbled
