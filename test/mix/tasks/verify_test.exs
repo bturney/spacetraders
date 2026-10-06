@@ -22,8 +22,10 @@ defmodule Mix.Tasks.VerifyTest do
       else: {"", 0}
   end
 
-  test "the test alias uses the prepared database without lifecycle tasks" do
-    assert Mix.Project.config()[:aliases][:test] == ["test"]
+  test "the test alias creates and migrates the checkout database quietly before testing" do
+    assert Mix.Project.config()[:aliases][:test] ==
+             ["ecto.create --quiet", "ecto.migrate --quiet", "test"]
+
     refute Mix.Project.config()[:aliases][:precommit]
   end
 
@@ -101,6 +103,80 @@ defmodule Mix.Tasks.VerifyTest do
     lines = messages()
     assert "verify: reformatted 2 files: commit before push" in lines
     assert List.last(lines) =~ "verify: PASS 1/1"
+  end
+
+  describe "preflight" do
+    test "reports every problem as cause then fix, runs no check, and exits 2" do
+      parent = self()
+
+      problems = fn ->
+        [
+          {"Postgres unreachable at 127.0.0.1:5432", "docker compose -f compose.dev.yaml up -d"},
+          {"dependencies missing: phoenix", "mix setup"}
+        ]
+      end
+
+      runner = fn task, _ ->
+        send(parent, {:ran, task})
+        {"", 0}
+      end
+
+      assert {:shutdown, 2} =
+               catch_exit(
+                 Verify.run_checks(Verify.required_checks(true),
+                   preflight: problems,
+                   run_check: runner
+                 )
+               )
+
+      refute_received {:ran, _}
+
+      assert messages() == [
+               "verify: environment: Postgres unreachable at 127.0.0.1:5432",
+               "verify: fix: docker compose -f compose.dev.yaml up -d",
+               "verify: environment: dependencies missing: phoenix",
+               "verify: fix: mix setup"
+             ]
+    end
+
+    test "a clean preflight prints nothing and the gate proceeds" do
+      assert :ok =
+               Verify.run_checks([{"compile", []}],
+                 preflight: fn -> [] end,
+                 run_check: &passing/2
+               )
+
+      assert length(messages()) == 2
+    end
+
+    test "a product failure still raises, so it exits 1" do
+      assert_raise Mix.Error, fn ->
+        Verify.run_checks([{"compile", []}],
+          preflight: fn -> [] end,
+          run_check: fn _, _ -> {"bad", 1} end
+        )
+      end
+    end
+
+    test "the default preflight finds nothing wrong in a working checkout" do
+      assert Verify.preflight() == []
+    end
+
+    test "an unreachable Postgres is a problem naming the compose fix" do
+      {:ok, l} = :gen_tcp.listen(0, [])
+      {:ok, port} = :inet.port(l)
+      :gen_tcp.close(l)
+
+      assert [{cause, "docker compose -f compose.dev.yaml up -d"}] =
+               Verify.preflight("postgres://u:p@127.0.0.1:#{port}/db", [])
+
+      assert cause =~ "127.0.0.1:#{port}"
+    end
+
+    test "missing dependency directories are a problem fixed by mix setup" do
+      assert [{cause, "mix setup"}] = Verify.preflight(nil, ["/nonexistent/deps/phoenix"])
+      assert cause =~ "phoenix"
+    end
   end
 
   test "an unchanged tree prints no reformat line, and CI mode never snapshots" do

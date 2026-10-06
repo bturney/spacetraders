@@ -20,8 +20,19 @@ When a skill names a triage role, use the matching label string:
 
 Non-actionable program and scoped-spec containers use `tracking` instead of a
 triage state label. A tracking issue must own native sub-issues; executable work
-lives in its leaves. Exclude `tracking` issues from the agent frontier, which is
-open, unblocked, unassigned `ready-for-agent` work.
+lives in its leaves.
+
+## Model tiers
+
+Agent labels hint at the model tier required to resolve the issue. Dispatchers pick the implementer's model from the label.
+
+| Tier | Claude (Claude Code only) | OpenAI (OpenCode / Codex) |
+|---|---|---|
+| `agent:mechanical` | Haiku 4.5 | GPT-6 Luna, medium |
+| `agent:bounded` | Sonnet 5.5, medium | GPT-6.1 Sol, medium |
+| `agent:deep` | Opus 5.5, high | GPT-6.1 Sol, high |
+
+**Escalation rule:** When an agent hits an unresolvable blocker or `scripts/verify` fails twice on the same cause, re-dispatch one tier up. The label remains unchanged.
 
 ## Pull requests
 
