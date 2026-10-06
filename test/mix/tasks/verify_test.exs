@@ -22,8 +22,10 @@ defmodule Mix.Tasks.VerifyTest do
       else: {"", 0}
   end
 
-  test "the test alias uses the prepared database without lifecycle tasks" do
-    assert Mix.Project.config()[:aliases][:test] == ["test"]
+  test "the test alias creates and migrates the checkout database quietly before testing" do
+    assert Mix.Project.config()[:aliases][:test] ==
+             ["ecto.create --quiet", "ecto.migrate --quiet", "test"]
+
     refute Mix.Project.config()[:aliases][:precommit]
   end
 
