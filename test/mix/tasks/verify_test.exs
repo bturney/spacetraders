@@ -23,8 +23,11 @@ defmodule Mix.Tasks.VerifyTest do
   end
 
   test "the test alias creates and migrates the checkout database quietly before testing" do
-    assert Mix.Project.config()[:aliases][:test] ==
-             ["ecto.create --quiet", "ecto.migrate --quiet", "test"]
+    # The leading step seeds deps/ and _build from the main checkout (#619).
+    assert [seed, "ecto.create --quiet", "ecto.migrate --quiet", "test"] =
+             Mix.Project.config()[:aliases][:test]
+
+    assert is_function(seed, 1)
 
     refute Mix.Project.config()[:aliases][:precommit]
   end
