@@ -6,20 +6,22 @@ looks environment-related.
 ## The gate
 
 `scripts/verify` (== `mix verify`) is the canonical gate. Its checks are
-`Mix.Tasks.Verify.required_checks/0` in `lib/mix/tasks/verify.ex`; read it
+`Mix.Tasks.Verify.required_checks/1` in `lib/mix/tasks/verify.ex`; read it
 rather than trusting a list elsewhere.
 
 CI prepares the pinned toolchain, dependencies, and migrated test database,
 then invokes `scripts/verify` directly. Local runs use the same gate after
 preparing those prerequisites; no runner identity variables are required.
+Local gate edits working tree: `mix format` fixes files. CI (`CI` set) runs
+`--check-formatted`.
 
 The gate stops at the first failing check, so a red run means the named check
 is the one to fix. Its exit status is the verdict: a failure is never recovered
 from, and no check's output is parsed to decide the result.
 
-The gate prints a lot. Inline tool output can truncate mid-run and leave the
-result unknown: redirect it to a file and read the tail, or rely on the
-command's exit status.
+Output contract (PASS/FAIL footer, rerun command, `--max-failures 5`) lives in
+the `Mix.Tasks.Verify` moduledoc. Red run: fix the check named in
+`verify: FAIL at <check>`, rerun the command it prints.
 
 ## Release and deployment verification
 
