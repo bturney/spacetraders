@@ -107,7 +107,6 @@ the first run of the corrected head.
 ## Commands
 
 ```sh
-source scripts/_toolchain.sh
 MIX_ENV=test mix ecto.create && MIX_ENV=test mix ecto.migrate   # once
 mix test test/spacetraders/recorded_ship_runtime_test.exs --seed 0 --trace
 mix test test/spacetraders/recorded_ship_fixture_order_test.exs --seed 0 --trace

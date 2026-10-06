@@ -56,7 +56,7 @@ preserves the inherited evidence and separate tooling work.
 
 ## 2. Commands and terminal results
 
-Every shell sourced `scripts/_toolchain.sh`. No live-game or production-host
+Every shell used the pinned toolchain. No live-game or production-host
 commands were used. The canonical gate uses the alias in `mix.exs`; it is not
 replaced by a subset of tests.
 

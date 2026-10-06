@@ -112,7 +112,7 @@ it no longer blocks the caller migration.
 ## Initial investigation receipt
 
 Production source qualified: `dfd5691b38dbec8d6a08b3da465d92bb05cf5cab` plus
-the added report and opt-in proof. Every command sources `scripts/_toolchain.sh`.
+the added report and opt-in proof.
 Elixir has no separate configured typechecker; use warnings-as-errors compilation.
 Full terminal logs are retained under `/tmp/opencode/505-*.log`.
 
