@@ -14,6 +14,11 @@ defmodule SpaceTraders.ResourceAcquisitionTest do
   alias SpaceTraders.FleetStrategy.{Revision, Strategy}
   alias SpaceTraders.Timeline
 
+  setup_all do
+    baseline = SpaceTraders.FixtureLeakProbe.baseline()
+    on_exit(fn -> SpaceTraders.FixtureLeakProbe.assert_clean!(baseline) end)
+  end
+
   setup do
     on_exit(fn -> ShipServer.stop_all() end)
     :ok
