@@ -139,26 +139,6 @@ optionally linking your my.spacetraders.io AccountToken to mint agents). Routes
 live in `lib/spacetraders_web/router.ex`; the nav exposes sign-in, mint, and
 settings.
 
-### Isolated work
-
-Routine work uses the current checkout. `scripts/_toolchain.sh` points
-`MIX_DEPS_PATH` at a dependency directory shared across checkouts, so concurrent
-work needs a private writable build: `scripts/task-start` creates a Task
-Workspace from current `origin/main`, on branch `feature/<task-id>` with its own
-build and port (see [ADR
-0008](docs/adr/0008-concurrent-worktree-isolation.md)).
-
-```sh
-git fetch origin main
-scripts/task-start 28 --base origin/main
-```
-
-Stop it once its changes are committed or removed:
-
-```sh
-scripts/task-stop 28
-```
-
 ### Game secrets (AccountToken / AgentToken)
 
 AccountTokens and AgentTokens are stored in the database, encrypted with
