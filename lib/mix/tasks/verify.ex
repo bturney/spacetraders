@@ -23,6 +23,21 @@ defmodule Mix.Tasks.Verify do
   `verify: reformatted <n> files: commit before push` on pass. When the `CI` env
   var is set it keeps `--check-formatted`.
 
+  ## Stray output
+
+  A passing test run must print nothing beyond ExUnit formatter output: progress
+  markers, the seed and tag lines, and the summary. Anything else (a debug dump,
+  a log line, a compile warning in a test file) fails the test check, naming the
+  first offending line. There is no opt-out tag: a test that prints on purpose
+  asserts on it with `capture_io`/`capture_log`. Compiler output before the
+  `Running ExUnit` line belongs to the compile check and is ignored.
+
+  ## Preflight and exit codes
+
+  Before any check, preflight collects every environment problem (Postgres
+  unreachable, missing deps) and prints two lines each (cause, then fix
+  command), then exits 2. A product failure exits 1.
+
   ## The verdict is the exit status
 
   Each check runs as its own `mix` command and fails by exiting non-zero.
@@ -39,7 +54,7 @@ defmodule Mix.Tasks.Verify do
   @max_failures "5"
 
   @impl true
-  def run(_args), do: run_checks(required_checks())
+  def run(_args), do: run_checks(required_checks(), preflight: &preflight/0)
 
   @doc """
   The required product checks, in the order the gate runs them.
@@ -68,6 +83,8 @@ defmodule Mix.Tasks.Verify do
 
     * `:run_check` - `(task, args -> {output, exit_status})`; defaults to
       running `mix task args` in a subprocess.
+    * `:preflight` - `(-> [{cause, fix}])` environment problems found before any
+      check; defaults to none. Any problem prints two lines each and exits 2.
     * `:snapshot` - `(-> %{path => hash})` of working-tree files, compared
       around the local `format` check to count reformatted files.
 
@@ -81,6 +98,9 @@ defmodule Mix.Tasks.Verify do
     total = length(checks)
     started = now()
 
+    problems = Keyword.get(opts, :preflight, fn -> [] end).()
+    halt_on_problems(problems)
+
     reformatted =
       Enum.reduce(checks, 0, fn {task, args} = check, reformatted ->
         fixing_format? = task == "format" and "--check-formatted" not in args
@@ -89,6 +109,7 @@ defmodule Mix.Tasks.Verify do
         {output, status} = run_check.(task, args)
 
         if status != 0, do: fail(check, output)
+        if task == "test", do: check_stray_output(check, output)
 
         Mix.shell().info("verify: #{task} ok #{elapsed(t0)}")
         if task == "test", do: Enum.each(summary_lines(output), &Mix.shell().info/1)
@@ -104,7 +125,97 @@ defmodule Mix.Tasks.Verify do
     :ok
   end
 
-  defp fail({task, args}, output) do
+  @doc """
+  Environment problems as `{cause, fix}` pairs, all collected. Defaults to the
+  configured Repo URL and the project's dependency directories.
+  """
+  @spec preflight(String.t() | nil, [Path.t()]) :: [{String.t(), String.t()}]
+  def preflight(url \\ repo_url(), dep_paths \\ dep_paths()) do
+    postgres(url) ++ deps(dep_paths)
+  end
+
+  defp repo_url, do: Application.get_env(:spacetraders, SpaceTraders.Repo, [])[:url]
+
+  defp dep_paths, do: Map.values(Mix.Project.deps_paths())
+
+  defp postgres(nil), do: []
+
+  defp postgres(url) do
+    %URI{host: host, port: port} = URI.parse(url)
+    port = port || 5432
+
+    case :gen_tcp.connect(String.to_charlist(host), port, [], 1_000) do
+      {:ok, socket} ->
+        :gen_tcp.close(socket)
+        []
+
+      {:error, _} ->
+        [{"Postgres unreachable at #{host}:#{port}", "docker compose -f compose.dev.yaml up -d"}]
+    end
+  end
+
+  defp deps(paths) do
+    case Enum.reject(paths, &File.dir?/1) do
+      [] ->
+        []
+
+      missing ->
+        [{"dependencies missing: #{Enum.map_join(missing, ", ", &Path.basename/1)}", "mix setup"}]
+    end
+  end
+
+  defp halt_on_problems([]), do: :ok
+
+  defp halt_on_problems(problems) do
+    for {cause, fix} <- problems do
+      Mix.shell().info("verify: environment: #{cause}")
+      Mix.shell().info("verify: fix: #{fix}")
+    end
+
+    exit({:shutdown, 2})
+  end
+
+  defp check_stray_output(check, output) do
+    case stray_lines(output) do
+      [] ->
+        :ok
+
+      [first | _] = stray ->
+        fail(
+          check,
+          "verify: stray output: #{length(stray)} lines in a passing test run, " <>
+            "first: #{String.trim(first)}",
+          "mix test"
+        )
+    end
+  end
+
+  # ExUnit's own shapes, anchored at both ends (cli_formatter.ex, formatter.ex), so
+  # a stray line that merely resembles a summary still fails.
+  @counts_line ~r/^(?:\d+ doctests?, )?(?:\d+ propert(?:y|ies), )?\d+ tests?, \d+ failures?(?:, \d+ excluded)?(?:, \d+ invalid)?(?:, \d+ skipped)?$/
+  @finished_line ~r/^Finished in [\d.]+ seconds .*$/
+  @formatter_line ~r/^(?:Running ExUnit with seed: .*|(?:Excluding|Including) tags: .*)$/
+
+  defp stray_lines(output) do
+    # Compiler output before "Running ExUnit" belongs to the compile check, and
+    # progress dots (".", "*") share a line with dumps, so only the dots are stripped.
+    run =
+      case String.split(output, ~r/^Running ExUnit with seed: .*\n/m, parts: 2) do
+        [_compile, run] -> run
+        [all] -> all
+      end
+
+    run
+    |> String.split("\n")
+    |> Enum.reject(&(String.trim(&1) == "" or formatter_line?(&1)))
+    |> Enum.map(&String.replace(&1, ~r/^[.*]+/, ""))
+    |> Enum.reject(&(String.trim(&1) == ""))
+  end
+
+  defp formatter_line?(line),
+    do: Enum.any?([@formatter_line, @counts_line, @finished_line], &Regex.match?(&1, line))
+
+  defp fail({task, args}, output, rerun \\ nil) do
     Mix.shell().info(String.trim_trailing(output))
     Mix.shell().info("verify: FAIL at #{task}")
 
@@ -112,7 +223,7 @@ defmodule Mix.Tasks.Verify do
       Mix.shell().info("verify: stopped at --max-failures #{@max_failures}; more may exist")
     end
 
-    Mix.shell().info("verify: rerun with: #{rerun(task, args)}")
+    Mix.shell().info("verify: rerun with: #{rerun || rerun(task, args)}")
     Mix.raise("verify: FAIL at #{task}")
   end
 
@@ -120,9 +231,9 @@ defmodule Mix.Tasks.Verify do
   defp rerun(task, args), do: Enum.join(["mix", task | args], " ")
 
   defp summary_lines(output) do
-    ~r/^(?:Finished in .*|\d+ (?:doctests?|properties|tests?),.*)$/m
-    |> Regex.scan(output)
-    |> Enum.map(&hd/1)
+    output
+    |> String.split("\n")
+    |> Enum.filter(&(Regex.match?(@finished_line, &1) or Regex.match?(@counts_line, &1)))
   end
 
   defp failure_count(output) do

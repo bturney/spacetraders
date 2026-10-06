@@ -7,6 +7,7 @@ defmodule SpaceTraders.RuntimeAuthorityTest do
   alias SpaceTraders.API.AgentTokenReference
   alias SpaceTraders.RuntimeAuthority
 
+  import ExUnit.CaptureLog
   import SpaceTraders.AgentFixtures
 
   @moduletag skip:
@@ -98,20 +99,27 @@ defmodule SpaceTraders.RuntimeAuthorityTest do
         [lock_key]
       )
 
-    Repo.query!("SELECT pg_terminate_backend($1)", [backend_pid])
+    # Terminating the session is the subject: its disconnect is asserted, not printed.
+    {:ok, log} =
+      with_log(fn ->
+        Repo.query!("SELECT pg_terminate_backend($1)", [backend_pid])
 
-    assert_eventually(fn ->
-      RuntimeAuthority.execution_allowed?(:replacement_authority) == :ok
-    end)
+        assert_eventually(fn ->
+          RuntimeAuthority.execution_allowed?(:replacement_authority) == :ok
+        end)
 
-    assert {:error, :runtime_authority_unavailable} =
-             RuntimeAuthority.execution_allowed?(:reconnecting_authority)
+        assert {:error, :runtime_authority_unavailable} =
+                 RuntimeAuthority.execution_allowed?(:reconnecting_authority)
 
-    stop_supervised!(:replacement_authority)
+        stop_supervised!(:replacement_authority)
 
-    assert_eventually(fn ->
-      RuntimeAuthority.execution_allowed?(:reconnecting_authority) == :ok
-    end)
+        # Reacquiring requires a reconnect, which follows the logged disconnect.
+        assert_eventually(fn ->
+          RuntimeAuthority.execution_allowed?(:reconnecting_authority) == :ok
+        end)
+      end)
+
+    assert log =~ "FATAL 57P01 (admin_shutdown)"
   end
 
   test "lock loss suppresses new mutations" do

@@ -23,7 +23,7 @@ defmodule SpaceTraders.FleetRefitTest do
   @supply "X1-UX81-A2"
 
   setup do
-    on_exit(fn -> ShipServer.stop_all() end)
+    on_exit(fn -> SpaceTraders.Quiesced.stop_all_ships() end)
     :ok
   end
 
@@ -291,7 +291,7 @@ defmodule SpaceTraders.FleetRefitTest do
       {:ok, credits} = SpaceTraders.Evidence.get_agent_binding(agent)
       {:ok, newer} = SpaceTraders.Evidence.get_ship_binding(agent, ship.symbol)
       refute original.observation.id == newer.observation.id
-      :ok = ShipServer.stop(ship.symbol)
+      :ok = SpaceTraders.Quiesced.stop_ship(ship.symbol)
       Req.Test.stub(SpaceTraders.API, fn _ -> flunk("recovery replaced exact retained facts") end)
 
       {:ok, restored} =
@@ -511,7 +511,7 @@ defmodule SpaceTraders.FleetRefitTest do
         assert intent.mutation_attempt_id == first.id
       end
 
-      :ok = ShipServer.stop(ship.symbol)
+      :ok = SpaceTraders.Quiesced.stop_ship(ship.symbol)
 
       assert eventually(fn ->
                Registry.lookup(SpaceTraders.Fleet.ShipRegistry, ship.symbol) == []
@@ -679,7 +679,7 @@ defmodule SpaceTraders.FleetRefitTest do
     Application.put_env(:spacetraders, :clock, SpaceTraders.TestClock)
 
     on_exit(fn ->
-      ShipServer.stop_all()
+      SpaceTraders.Quiesced.stop_all_ships()
 
       if previous,
         do: Application.put_env(:spacetraders, :clock, previous),

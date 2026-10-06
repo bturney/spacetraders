@@ -17,8 +17,7 @@ Merge requires an explicit Operator request.
 - Setup, run, and the product gate: `README.md`'s Development section is the
   source of truth. `scripts/verify` is the pre-push gate; release and deployment
   verification is outside it, and `docs/agents/testing.md` holds those commands.
-- The pinned toolchain is not on PATH. In every fresh shell, source it first:
-  `source scripts/_toolchain.sh`
+- Toolchain: mise pins it via `.tool-versions`; use `mix` straight from PATH.
 - Before starting new implementation, run `git fetch origin main` and
   `git merge-base --is-ancestor origin/main HEAD`; branch names do not prove
   freshness. Preserve local changes rather than switching or resetting a dirty

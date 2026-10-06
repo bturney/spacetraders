@@ -13,13 +13,14 @@ defmodule SpaceTraders.ShipExecutionDurabilityTest do
 
   alias Ecto.Adapters.SQL.Sandbox
   alias SpaceTraders.Agent.Scope
-  alias SpaceTraders.Fleet.{Intent, Intents, Ship, ShipServer}
+  alias SpaceTraders.Fleet.{Intent, Intents, Ship}
   alias SpaceTraders.FleetAllocation
   alias SpaceTraders.FleetAllocation.PortfolioCandidate
   alias SpaceTraders.FleetGeneration.Generation
   alias SpaceTraders.FleetStrategy.{Revision, Strategy}
   alias SpaceTraders.MutationAttempts.{Attempt, Outcome}
   alias SpaceTraders.Repo
+  alias SpaceTraders.RuntimeDeath
   alias SpaceTraders.SafetyFence
   alias SpaceTraders.Fleet.Intents.RecordedAction
   alias SpaceTraders.MutationAttempts
@@ -129,7 +130,7 @@ defmodule SpaceTraders.ShipExecutionDurabilityTest do
     assert attempt.provenance["selected_action_fingerprint"] ==
              SpaceTraders.Evidence.fingerprint(intent.in_flight_action)
 
-    Process.exit(sender, :kill)
+    RuntimeDeath.kill(sender, sender_backend)
     assert_receive {:DOWN, ^monitor, :process, ^sender, :killed}
 
     assert [^attempt] = attempts(agent)
@@ -211,7 +212,7 @@ defmodule SpaceTraders.ShipExecutionDurabilityTest do
     assert %DateTime{} = retry.sent_or_unknown_at
     assert Repo.get!(Intent, intent.id).mutation_attempt_id == retry.id
 
-    Process.exit(sender, :kill)
+    RuntimeDeath.kill(sender, sender_backend)
     assert_receive {:DOWN, ^monitor, :process, ^sender, :killed}
     assert [^absent, ^retry] = attempts(agent)
     restart_capacity_governor()
@@ -717,8 +718,8 @@ defmodule SpaceTraders.ShipExecutionDurabilityTest do
     ]
 
     on_exit(fn ->
-      ShipServer.stop(ship.symbol)
-      Enum.each(ships, &ShipServer.stop(&1.symbol))
+      SpaceTraders.Quiesced.stop_ship(ship.symbol)
+      Enum.each(ships, &SpaceTraders.Quiesced.stop_ship(&1.symbol))
 
       Sandbox.unboxed_run(Repo, fn ->
         attempt_ids = Repo.all(from a in Attempt, where: a.agent_id == ^agent.id, select: a.id)

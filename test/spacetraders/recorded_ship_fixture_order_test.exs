@@ -31,7 +31,7 @@ defmodule SpaceTraders.RecordedShipFixtureOrderTest do
   test "a leaked ShipServer is named", %{baseline: baseline} do
     {:ok, pid} = Agent.start_link(fn -> :ok end)
     {:ok, _} = DynamicSupervisor.start_child(SpaceTraders.Fleet.ShipSupervisor, child(pid))
-    on_exit(&SpaceTraders.Fleet.ShipServer.stop_all/0)
+    on_exit(&SpaceTraders.Quiesced.stop_all_ships/0)
 
     assert FixtureLeakProbe.leaks(baseline) == ["ShipServers left running"]
   end

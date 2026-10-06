@@ -17,10 +17,10 @@ defmodule SpaceTraders.RecordedShipRuntimeTest do
   alias Ecto.Adapters.SQL.Sandbox
   alias SpaceTraders.Agent.{Agent, Operator, Scope}
   alias SpaceTraders.Evidence.DemandScheduler
-  alias SpaceTraders.Fleet.{Intent, ShipServer, ShipServerBoot}
+  alias SpaceTraders.Fleet.{Intent, ShipServerBoot}
   alias SpaceTraders.FleetAllocation.Reconciler
   alias SpaceTraders.MutationAttempts.{Attempt, Outcome}
-  alias SpaceTraders.{Repo, RuntimeAuthority, TestClock}
+  alias SpaceTraders.{Quiesced, Repo, RuntimeAuthority, RuntimeDeath, TestClock}
   alias SpaceTraders.RuntimeBaselineGame, as: Game
 
   setup_all do
@@ -40,11 +40,15 @@ defmodule SpaceTraders.RecordedShipRuntimeTest do
 
     observer = start_supervised!({Postgrex, connection_options()})
     game = start_supervised!({Game, []})
-    barrier = :ets.new(:qualification_barrier, [:public, :set])
     gate = :atomics.new(1, [])
     owner = self()
 
-    Req.Test.stub(SpaceTraders.API, fn conn ->
+    # The game process owns the barrier table and the API stub, so both outlive
+    # the test process until the quiesced runtime has stopped (#398).
+    barrier =
+      Elixir.Agent.get(game, fn _ -> :ets.new(:qualification_barrier, [:public, :set]) end)
+
+    stub = fn conn ->
       if conn.method == "POST" and String.ends_with?(conn.request_path, "/orbit") do
         transport_barrier(owner, :transport_before_accept, barrier, gate)
         reply = Game.call(game, conn)
@@ -56,9 +60,12 @@ defmodule SpaceTraders.RecordedShipRuntimeTest do
 
         Game.reply(conn, Game.call(game, conn))
       end
-    end)
+    end
 
-    Req.Test.allow(SpaceTraders.API, self(), fn ->
+    :ok = Elixir.Agent.get(game, fn _ -> Req.Test.stub(SpaceTraders.API, stub) end)
+    Req.Test.allow(SpaceTraders.API, game, self())
+
+    Req.Test.allow(SpaceTraders.API, game, fn ->
       ships =
         DynamicSupervisor.which_children(SpaceTraders.Fleet.ShipSupervisor)
         |> Enum.map(fn {_, pid, _, _} -> pid end)
@@ -72,7 +79,7 @@ defmodule SpaceTraders.RecordedShipRuntimeTest do
     restart_capacity()
 
     on_exit(fn ->
-      ShipServer.stop_all()
+      SpaceTraders.Quiesced.stop_all_ships()
       SpaceTraders.Contracts.DeadlineServer.stop_all()
       SpaceTraders.EmergencyStopAdmission.clear()
       SpaceTraders.FleetGenerationAdmission.clear()
@@ -173,7 +180,7 @@ defmodule SpaceTraders.RecordedShipRuntimeTest do
     assert [[id, "succeeded", _]] = observe_attempts(context.observer, context.agent.id)
     stop_supervised(DemandScheduler)
     stop_supervised(Reconciler)
-    ShipServer.stop_all()
+    SpaceTraders.Quiesced.stop_all_ships()
     restart_runtime()
     assert orbit_count(context.game) == 1
 
@@ -215,7 +222,7 @@ defmodule SpaceTraders.RecordedShipRuntimeTest do
       end
 
       assert orbit_count(context.game) == if(@accepted, do: 1, else: 0)
-      kill_runtime(sender)
+      kill_runtime(sender, sender_backend)
       assert observe_attempts(context.observer, context.agent.id) == before
       restart_runtime()
       eventually(fn -> orbit_count(context.game) == 1 end, 500, context)
@@ -238,19 +245,6 @@ defmodule SpaceTraders.RecordedShipRuntimeTest do
         |> Enum.filter(&(&1.operation_id == "orbit-ship"))
 
       assert_retry_history(orbits, @committed_state, @accepted)
-
-      IO.inspect(
-        %{
-          phase: @phase,
-          observer_backend: observer_backend(context.observer),
-          sender_backend: sender_backend,
-          before: before,
-          after: Enum.map(orbits, &{&1.id, &1.state, &1.retry_of_id}),
-          expected_orbits: 1,
-          actual_orbits: orbit_count(context.game)
-        },
-        label: "507 interruption receipt"
-      )
     end
   end
 
@@ -279,7 +273,7 @@ defmodule SpaceTraders.RecordedShipRuntimeTest do
       assert orbit_count(context.game) == expected_count
       stop_supervised(DemandScheduler)
       stop_supervised(Reconciler)
-      ShipServer.stop_all()
+      SpaceTraders.Quiesced.stop_all_ships()
       restart_runtime()
 
       for {_, pid, _, _} <- DynamicSupervisor.which_children(SpaceTraders.Fleet.ShipSupervisor),
@@ -317,7 +311,7 @@ defmodule SpaceTraders.RecordedShipRuntimeTest do
       # Re-entry under lost authority cannot release the captured obsolete action.
       stop_supervised(DemandScheduler)
       stop_supervised(Reconciler)
-      ShipServer.stop_all()
+      SpaceTraders.Quiesced.stop_all_ships()
 
       advance_observation_clock_to_now()
 
@@ -336,17 +330,6 @@ defmodule SpaceTraders.RecordedShipRuntimeTest do
                    SpaceTraders.MutationAttempts.get!(id)
                  )
       end
-
-      IO.inspect(
-        %{
-          loss: @loss,
-          phase: @phase,
-          disposition: expected,
-          expected_orbits: 0,
-          actual_orbits: orbit_count(context.game)
-        },
-        label: "507 authority receipt"
-      )
     end
   end
 
@@ -462,18 +445,17 @@ defmodule SpaceTraders.RecordedShipRuntimeTest do
     assert render(strategy) =~ "Active revision 1"
   end
 
+  # Quiesced: teardown never stops them mid-transaction (#398).
   defp start_runtime do
-    start_supervised!(Supervisor.child_spec({Reconciler, []}, restart: :temporary))
-    start_supervised!(Supervisor.child_spec({DemandScheduler, []}, restart: :temporary))
+    start_supervised!(Quiesced.child_spec({Reconciler, []}))
+    start_supervised!(Quiesced.child_spec({DemandScheduler, []}))
   end
 
-  defp kill_runtime(sender) do
-    monitor = Process.monitor(sender)
-    Process.exit(sender, :kill)
-    assert_receive {:DOWN, ^monitor, :process, ^sender, :killed}
+  defp kill_runtime(sender, sender_backend) do
+    RuntimeDeath.kill(sender, sender_backend)
     stop_supervised(DemandScheduler)
     stop_supervised(Reconciler)
-    ShipServer.stop_all()
+    SpaceTraders.Quiesced.stop_all_ships()
   end
 
   defp restart_runtime do
@@ -607,17 +589,7 @@ defmodule SpaceTraders.RecordedShipRuntimeTest do
   defp eventually(fun, attempts, context)
 
   defp eventually(_fun, 0, context) do
-    if context do
-      IO.inspect(SpaceTraders.MutationAttempts.list_for_agent(context.agent),
-        label: "failed runtime attempts",
-        limit: :infinity
-      )
-
-      IO.inspect(Repo.all(Intent), label: "failed runtime intents", limit: :infinity)
-      IO.inspect(Game.snapshot(context.game), label: "failed runtime game", limit: :infinity)
-    end
-
-    flunk("production runtime did not reach expected state")
+    flunk("production runtime did not reach expected state" <> diagnostics(context))
   end
 
   defp eventually(fun, attempts, context) do
@@ -628,5 +600,17 @@ defmodule SpaceTraders.RecordedShipRuntimeTest do
           Process.sleep(10)
           eventually(fun, attempts - 1, context)
         )
+  end
+
+  defp diagnostics(nil), do: ""
+
+  defp diagnostics(context) do
+    opts = [limit: :infinity]
+
+    "\n\nattempts: " <>
+      inspect(SpaceTraders.MutationAttempts.list_for_agent(context.agent), opts) <>
+      "\n\nintents: " <>
+      inspect(Repo.all(Intent), opts) <>
+      "\n\ngame: " <> inspect(Game.snapshot(context.game), opts)
   end
 end

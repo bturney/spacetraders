@@ -29,37 +29,34 @@ The rest are reference: reach for the one that matches your branch. Each step
 states its completion criterion, because the gate's exit status is the only
 verdict.
 
-### 1. Bootstrap
+### 1. Toolchain and dependencies
 
 ```sh
-scripts/bootstrap
-source scripts/_toolchain.sh
+mise install
+mix setup
 ```
 
-`scripts/bootstrap` installs the pinned Erlang/Elixir toolchain (no sudo
-required) and fetches dependencies. The pinned toolchain is not on `PATH`, so
-every fresh shell needs `scripts/_toolchain.sh` sourced before any `mix`
-command.
+`mise install` installs the pinned Erlang/Elixir from `.tool-versions`;
+`mix setup` fetches dependencies.
 
 Done when `mix --version` reports the pinned toolchain.
 
 ### 2. Database
 
-PostgreSQL is both the application store and the verification database. Start an
-instance, then prepare its test database once:
+PostgreSQL is both the application store and the verification database. One
+shared instance serves every checkout; start it once (it restarts itself):
 
 ```sh
-docker run --rm --name spacetraders-postgres -p 5432:5432 \
-  -e POSTGRES_DB=spacetraders_test -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=postgres \
-  postgres:17
-MIX_ENV=test mix ecto.create
-MIX_ENV=test mix ecto.migrate
+docker compose -f compose.dev.yaml up -d
 ```
 
-`mix test` and the gate reuse that prepared database; neither creates, drops, nor
-migrates it. Set `DATABASE_URL` to select another instance.
+Each checkout gets its own database: the main checkout uses
+`spacetraders_dev`/`spacetraders_test`; a worktree uses
+`spacetraders_<env>_<dir>_<hash6>` (`config/checkout_db.exs`). `mix test`
+creates and migrates it quietly before running. Set `DATABASE_URL` to select
+another database.
 
-Done when `MIX_ENV=test mix ecto.migrate` exits 0.
+Done when `mix test <file>` passes with no other setup.
 
 ### 3. Product gate
 
@@ -96,7 +93,7 @@ failure or adding coverage.
 Three runs sit outside the gate and are worth naming here:
 
 ```sh
-# One file, against the prepared database
+# One file, against this checkout's database
 mix test test/spacetraders/agent_test.exs
 
 # Whole-runtime composition across a restart (diagnostic, owns its own setup)
@@ -107,7 +104,7 @@ mix test test/spacetraders/recorded_ship_runtime_test.exs --seed 0 --trace
 ```
 
 See [the qualification and rollout
-boundary](docs/research/recorded-ship-qualification-507.md) for independently
+boundary](https://github.com/bturney/spacetraders/blob/0c972572c7cb24981f5e145fb40945bd36df464b/docs/research/recorded-ship-qualification-507.md) for independently
 observed evidence, compatibility and readiness scope.
 
 ### Game API client & codegen
@@ -130,7 +127,6 @@ test env; see `test/spacetraders/api/`.
 ### Run the app
 
 ```sh
-source scripts/_toolchain.sh
 mix phx.server   # http://localhost:4000, GET /health returns {"status":"ok"}
 ```
 
@@ -138,26 +134,6 @@ First boot redirects to `/setup` — create the first operator (email + password
 optionally linking your my.spacetraders.io AccountToken to mint agents). Routes
 live in `lib/spacetraders_web/router.ex`; the nav exposes sign-in, mint, and
 settings.
-
-### Isolated work
-
-Routine work uses the current checkout. `scripts/_toolchain.sh` points
-`MIX_DEPS_PATH` at a dependency directory shared across checkouts, so concurrent
-work needs a private writable build: `scripts/task-start` creates a Task
-Workspace from current `origin/main`, on branch `feature/<task-id>` with its own
-build and port (see [ADR
-0008](docs/adr/0008-concurrent-worktree-isolation.md)).
-
-```sh
-git fetch origin main
-scripts/task-start 28 --base origin/main
-```
-
-Stop it once its changes are committed or removed:
-
-```sh
-scripts/task-stop 28
-```
 
 ### Game secrets (AccountToken / AgentToken)
 
@@ -180,15 +156,6 @@ stored:
 ```sh
 mix run priv/repo/seeds.exs                 # placeholder token
 SPACETRADERS_AGENT_TOKEN=<token> mix run priv/repo/seeds.exs   # real token
-```
-
-### Teardown
-
-Stops a running server rooted at this checkout and removes build artifacts
-(deps are shared across checkouts and left in place):
-
-```sh
-scripts/teardown
 ```
 
 ### Project-host deployment

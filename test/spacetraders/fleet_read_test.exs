@@ -13,7 +13,7 @@ defmodule SpaceTraders.FleetReadTest do
   alias SpaceTraders.Timeline.Event
 
   setup do
-    on_exit(fn -> ShipServer.stop_all() end)
+    on_exit(fn -> SpaceTraders.Quiesced.stop_all_ships() end)
     :ok
   end
 

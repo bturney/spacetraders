@@ -20,7 +20,7 @@ defmodule SpaceTraders.ResourceAcquisitionTest do
   end
 
   setup do
-    on_exit(fn -> ShipServer.stop_all() end)
+    on_exit(fn -> SpaceTraders.Quiesced.stop_all_ships() end)
     :ok
   end
 
@@ -459,7 +459,7 @@ defmodule SpaceTraders.ResourceAcquisitionTest do
              Timeline.pending_events(:ship, ship.symbol)
 
     assert id == intent.id
-    assert :ok = ShipServer.stop(ship.symbol)
+    assert :ok = SpaceTraders.Quiesced.stop_ship(ship.symbol)
     assert {:ok, _pid} = ShipServer.ensure_started(agent, ship.symbol)
     assert {:error, :cooldown_active} = ShipServer.ensure_ready(ship.symbol)
 

@@ -7,7 +7,6 @@ defmodule SpaceTraders.API.RecordedDispatchTest do
   alias SpaceTraders.API
   alias SpaceTraders.API.{AgentTokenReference, OperationInventory, ShipAction}
   alias SpaceTraders.Fleet.Intents.RecordedAction
-  alias SpaceTraders.Fleet.Intent
   alias SpaceTraders.FleetAllocation.Commitment
   alias SpaceTraders.FleetGeneration.Generation
   alias SpaceTraders.FleetStrategy.Strategy
@@ -193,10 +192,10 @@ defmodule SpaceTraders.API.RecordedDispatchTest do
 
   test "neither raw credentials nor callback retries are Ship dispatch entry points" do
     Req.Test.stub(API, fn _ -> flunk("unrecorded mutation reached transport") end)
-    assert_raise FunctionClauseError, fn -> API.dispatch_recorded("TOKEN") end
+    assert_raise FunctionClauseError, fn -> apply(API, :dispatch_recorded, ["TOKEN"]) end
 
     assert_raise FunctionClauseError, fn ->
-      API.dispatch_recorded(%AgentTokenReference{agent_id: 1})
+      apply(API, :dispatch_recorded, [%AgentTokenReference{agent_id: 1}])
     end
 
     refute function_exported?(API, :reconcile_absent_and_retry, 3)
@@ -224,7 +223,7 @@ defmodule SpaceTraders.API.RecordedDispatchTest do
       faction: agent.faction
     })
 
-    %{agent: agent, attempt: attempt} =
+    %{attempt: attempt} =
       prepare_action(agent, "INTERVENTION-1", %{
         "kind" => "orbit",
         "waypoint" => "X1-TEST-A1",

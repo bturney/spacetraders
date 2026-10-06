@@ -63,11 +63,13 @@ defmodule SpaceTraders.Fleet.ShipServer do
     end
   end
 
-  @doc "Stops the running server for one ship, if any."
+  @doc """
+  Stops the running server for one ship, if any.
+  """
   @spec stop(String.t()) :: :ok
   def stop(ship_symbol) do
     case Registry.lookup(SpaceTraders.Fleet.ShipRegistry, ship_symbol) do
-      [{pid, _}] -> DynamicSupervisor.terminate_child(SpaceTraders.Fleet.ShipSupervisor, pid)
+      [{pid, _}] -> terminate(pid)
       [] -> :ok
     end
   end
@@ -93,6 +95,11 @@ defmodule SpaceTraders.Fleet.ShipServer do
     end
   end
 
+  defp terminate(pid) do
+    _ = DynamicSupervisor.terminate_child(SpaceTraders.Fleet.ShipSupervisor, pid)
+    :ok
+  end
+
   @doc "Arms a timer for an already-persisted event on the ship's server."
   @spec arm(Agent.t(), String.t(), Event.t()) :: :ok | {:error, term()}
   def arm(%Agent{} = agent, ship_symbol, %Event{} = event) do
@@ -100,22 +107,6 @@ defmodule SpaceTraders.Fleet.ShipServer do
       GenServer.cast(pid, {:arm, event})
       :ok
     end
-  end
-
-  @doc "Terminates every running ship server. Used by tests between cases."
-  @spec stop_all() :: :ok
-  def stop_all do
-    SpaceTraders.Fleet.ShipSupervisor
-    |> DynamicSupervisor.which_children()
-    |> Enum.each(fn
-      {_id, pid, _type, _modules} when is_pid(pid) ->
-        DynamicSupervisor.terminate_child(SpaceTraders.Fleet.ShipSupervisor, pid)
-
-      _ ->
-        :ok
-    end)
-
-    :ok
   end
 
   @impl true

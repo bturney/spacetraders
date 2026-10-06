@@ -127,7 +127,7 @@ defmodule SpaceTraders.API.CapacityGovernorTest do
     assert snapshot.backpressure == :none
 
     {:ok, first} = CapacityGovernor.admit(operation, %{}, name)
-    {:ok, second} = CapacityGovernor.admit(operation, %{}, name)
+    {:ok, _second} = CapacityGovernor.admit(operation, %{}, name)
     queued = Task.async(fn -> CapacityGovernor.admit(operation, %{}, name) end)
     Process.sleep(10)
 

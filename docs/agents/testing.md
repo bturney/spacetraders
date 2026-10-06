@@ -40,24 +40,41 @@ running PostgreSQL test database. `release_boot_test.sh` builds and boots the
 production release; `migration_repair_test.sh` creates and removes its own
 temporary database.
 
-## Expected noise
+## Stray output
 
-Postgrex `admin_shutdown` disconnect lines during a full run are sandbox
-teardown noise, not failures. `config/test.exs` sets `logger: :error`, and the
-suite uses the Ecto `Sandbox` pool; treat a clean exit as the signal.
+`capture_log: true` is suite-wide. The gate's test check fails a passing run
+that prints anything beyond ExUnit formatter output (after the `Running
+ExUnit` line), naming the first stray line. No opt-out tag. A test that prints
+on purpose asserts with `capture_io`/`capture_log`. Never `IO.inspect`/`IO.puts`
+in tests; put diagnostics in the assertion or `flunk` message.
+
+## Postgrex disconnects
+
+A passing run prints no Postgrex disconnect lines; one in output is a real
+problem. A process killed while it holds a sandbox connection makes the
+ownership proxy disconnect it and log an error (#398). So:
+
+- Runtime processes a test starts: `start_supervised!(Quiesced.child_spec(child))`;
+  teardown waits out any open checkout before stopping them.
+  Ship servers: `Quiesced.stop_ship/1` and `Quiesced.stop_all_ships/0`, never `ShipServer.stop/1`.
+- Killing a sender mid-transaction on purpose: `RuntimeDeath.kill/2` asserts
+  the disconnect instead of printing it.
 
 ## Database
 
-`mix test` assumes a prepared, migrated PostgreSQL database. The test alias and
-`scripts/verify` never create, drop, or migrate it; `DataCase` transactions
-provide ordinary test isolation. Prepare the database once with
-`MIX_ENV=test mix ecto.create` and `MIX_ENV=test mix ecto.migrate` before a
-targeted test run or the canonical gate.
+One shared Postgres (`docker compose -f compose.dev.yaml up -d`, 127.0.0.1:5432)
+serves all checkouts. `DataCase` transactions provide ordinary test isolation.
+The `mix test` alias first seeds `deps/` and `_build/test` from the main checkout
+when absent (`seed_from_main/1` in `mix.exs`; needs the main checkout built;
+cold ~12s, warm ~2s), then runs `ecto.create` and `ecto.migrate` (quiet), so a
+fresh checkout needs no setup. Seeding also runs `scripts/prune` (removes clean,
+idle, merged, unlocked worktrees and orphan checkout databases; lists the rest;
+`--dry-run` previews). Run it by hand any time; a prune failure never fails
+`mix test`.
 
-The default test URL is the stable
-`postgres://postgres:postgres@localhost/spacetraders_test`; set `DATABASE_URL`
-to select another prepared database. Do not use `MIX_TEST_PARTITION` to select
-databases; provision and select each database explicitly with `DATABASE_URL`.
+The database name derives from the checkout (`config/checkout_db.exs`): main
+checkout `spacetraders_test`; a worktree `spacetraders_test_<dir>_<hash6>`. Set
+`DATABASE_URL` to override. Do not use `MIX_TEST_PARTITION` to select databases.
 
 `SpaceTraders.RuntimeAuthority` opens a direct connection to the base database
 and can terminate backends, which produces full-suite-only failures and garbled

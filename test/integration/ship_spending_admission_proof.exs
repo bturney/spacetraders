@@ -87,7 +87,7 @@ defmodule SpaceTraders.ShipSpendingAdmissionProof do
 
     [commitment] = portfolio.commitments
     game = start_supervised!({Agent, fn -> %{credits: 2_000, units: 0, purchases: 0} end})
-    on_exit(fn -> SpaceTraders.Fleet.ShipServer.stop_all() end)
+    on_exit(fn -> SpaceTraders.Quiesced.stop_all_ships() end)
     ship_path = "/v2/my/ships/#{ship.symbol}"
     market_path = "/v2/systems/X1-UX81/waypoints/X1-UX81-A1/market"
 

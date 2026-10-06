@@ -20,7 +20,7 @@ defmodule SpaceTraders.RecordedFamilyInterruptionTest do
   alias Ecto.Adapters.SQL.Sandbox
   alias SpaceTraders.Agent.Scope
   alias SpaceTraders.Evidence
-  alias SpaceTraders.Fleet.{Intent, Intents, Ship, ShipServer}
+  alias SpaceTraders.Fleet.{Intent, Intents, Ship}
   alias SpaceTraders.Fleet.Intents.Recovery
   alias SpaceTraders.FleetAllocation
   alias SpaceTraders.FleetAllocation.PortfolioCandidate
@@ -28,7 +28,7 @@ defmodule SpaceTraders.RecordedFamilyInterruptionTest do
   alias SpaceTraders.FleetStrategy.{Revision, Strategy}
   alias SpaceTraders.MutationAttempts
   alias SpaceTraders.MutationAttempts.{Attempt, Outcome}
-  alias SpaceTraders.{Repo, SafetyFence}
+  alias SpaceTraders.{Repo, RuntimeDeath, SafetyFence}
 
   # {boundary, committed attempt state, game effect applied}
   @phases [
@@ -55,7 +55,7 @@ defmodule SpaceTraders.RecordedFamilyInterruptionTest do
     observer = start_supervised!({Postgrex, connection_options()})
 
     on_exit(fn ->
-      ShipServer.stop_all()
+      SpaceTraders.Quiesced.stop_all_ships()
       restart_capacity_governor()
       SpaceTraders.EmergencyStopAdmission.clear()
       SpaceTraders.FleetGenerationAdmission.clear()
@@ -89,7 +89,7 @@ defmodule SpaceTraders.RecordedFamilyInterruptionTest do
 
       assert sends(game, spec) == if(@accepted, do: 1, else: 0)
 
-      Process.exit(sender, :kill)
+      RuntimeDeath.kill(sender, sender_backend)
       assert_receive {:DOWN, ^monitor, :process, ^sender, :killed}
       assert observe(observer, spec) == before
 
@@ -981,7 +981,7 @@ defmodule SpaceTraders.RecordedFamilyInterruptionTest do
   # -- runtime --------------------------------------------------------------------
 
   defp restart_runtime do
-    ShipServer.stop_all()
+    SpaceTraders.Quiesced.stop_all_ships()
     restart_capacity_governor()
   end
 
@@ -1028,7 +1028,7 @@ defmodule SpaceTraders.RecordedFamilyInterruptionTest do
       )
 
     on_exit(fn ->
-      ShipServer.stop_all()
+      SpaceTraders.Quiesced.stop_all_ships()
 
       Sandbox.unboxed_run(Repo, fn ->
         attempt_ids = Repo.all(from a in Attempt, where: a.agent_id == ^agent.id, select: a.id)

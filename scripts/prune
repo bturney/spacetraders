@@ -1,0 +1,140 @@
+#!/usr/bin/env bash
+# Clears finished work: removes clean merged worktrees, drops orphan databases,
+# lists everything else it will not touch. Also runs from the `mix test` seed
+# hook (mix.exs) whenever a new worktree is seeded.
+#
+# Usage: scripts/prune [--dry-run]
+#   PRUNE_MIN_AGE_MIN  minutes a worktree must be idle before removal (default 60)
+#   PRUNE_DATABASE_URL admin connection (default postgres://postgres:postgres@127.0.0.1:5432/postgres)
+#
+# Output: nothing for items kept silently (main, current worktree, databases of
+# live worktrees); one line per removal, drop, or listed item.
+#
+# Guards (a worktree must pass all to be removed):
+#   - never the main checkout or the current worktree
+#   - never a locked worktree (the agent harness locks active ones); listed
+#   - branch checked out, tip a strict ancestor of local origin/main (no fetch)
+#   - clean: no changes, no untracked files (ignored files do not count)
+#   - idle at least PRUNE_MIN_AGE_MIN (a fresh worktree on an old main looks merged)
+#   - `git worktree remove` without --force; the branch itself is kept
+# Databases: only names matching ^spacetraders_(dev|test)_.+_<hash6>$ that
+# config/checkout_db.exs does not derive for a live worktree. Never
+# spacetraders_dev or spacetraders_test. DROP DATABASE without FORCE.
+# Containers named *-postgres are listed with a removal command, never removed.
+# No -e: best-effort. One failed removal or drop must not stop the rest.
+set -uo pipefail
+
+dry=0
+for arg in "$@"; do
+  case "$arg" in
+    --dry-run) dry=1 ;;
+    *) echo "usage: scripts/prune [--dry-run]" >&2; exit 2 ;;
+  esac
+done
+
+cd "$(dirname "$0")/.." || exit 1
+warn() { echo "prune: warning: $*" >&2; }
+
+common=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || {
+  echo "prune: error: not inside a git checkout" >&2
+  exit 1
+}
+main=$(dirname "$common")
+current=$(git rev-parse --show-toplevel)
+if ! git rev-parse --verify -q refs/remotes/origin/main >/dev/null; then
+  echo "prune: error: no origin/main ref; run git fetch origin main" >&2
+  exit 1
+fi
+origin_main=$(git rev-parse refs/remotes/origin/main)
+min_age=$(( ${PRUNE_MIN_AGE_MIN:-60} * 60 ))
+now=$(date +%s)
+
+# One line per worktree: path|branch|state. state: ok, locked, prunable, detached.
+list_worktrees() {
+  git worktree list --porcelain | awk -v RS= -F'\n' '{
+    path = ""; branch = ""; state = "ok"
+    for (i = 1; i <= NF; i++) {
+      if ($i ~ /^worktree /) path = substr($i, 10)
+      else if ($i ~ /^branch /) branch = substr($i, 19)
+      else if ($i == "detached") state = "detached"
+      else if ($i ~ /^locked/) state = "locked"
+      else if ($i ~ /^prunable/ && state != "locked") state = "prunable"
+    }
+    print path "|" branch "|" state
+  }'
+}
+
+mtime() { stat -c %Y "$1" 2>/dev/null || echo 0; }
+
+while IFS='|' read -r path branch state; do
+  [[ "$path" == "$main" || "$path" == "$current" ]] && continue
+  case "$state" in
+    locked) echo "prune: kept $path (locked)"; continue ;;
+    prunable) continue ;; # directory gone; `git worktree prune` below clears it
+    detached) echo "prune: kept $path (detached HEAD)"; continue ;;
+  esac
+  if [[ -n "$(git -C "$path" status --porcelain 2>/dev/null)" ]]; then
+    echo "prune: kept $path (dirty: $branch)"; continue
+  fi
+  tip=$(git rev-parse --verify -q "refs/heads/$branch")
+  if [[ -z "$tip" || "$tip" == "$origin_main" ]] \
+    || ! git merge-base --is-ancestor "$tip" "$origin_main"; then
+    echo "prune: kept $path (unmerged: $branch)"; continue
+  fi
+  gitdir=$(git -C "$path" rev-parse --absolute-git-dir 2>/dev/null) || continue
+  last=$(mtime "$gitdir/HEAD"); logs=$(mtime "$gitdir/logs/HEAD")
+  (( logs > last )) && last=$logs
+  if (( now - last < min_age )); then
+    echo "prune: kept $path (recent: $branch)"; continue
+  fi
+  if (( dry )); then
+    echo "prune: would remove worktree $path ($branch)"
+  elif git worktree remove "$path" 2>/dev/null; then
+    echo "prune: removed worktree $path ($branch)"
+  else
+    warn "could not remove $path"
+  fi
+done < <(list_worktrees)
+
+(( dry )) || git worktree prune 2>/dev/null || warn "git worktree prune failed"
+
+# Databases whose checkout is gone.
+url=${PRUNE_DATABASE_URL:-postgres://postgres:postgres@127.0.0.1:5432/postgres}
+if ! command -v psql >/dev/null 2>&1 || ! command -v elixir >/dev/null 2>&1; then
+  warn "psql or elixir missing; skipping database drop"
+else
+  live=$(list_worktrees | cut -d'|' -f1)
+  keep=$(printf '%s\n' "$live" | PRUNE_MAIN="$main" elixir -r config/checkout_db.exs -e '
+    paths = IO.read(:stdio, :eof) |> String.split("\n", trim: true)
+    main = System.fetch_env!("PRUNE_MAIN")
+    for p <- paths, env <- [:dev, :test], do: IO.puts(SpaceTraders.CheckoutDb.name(env, p, main))
+  ' 2>/dev/null)
+  pat='^spacetraders_(dev|test)_.+_[0-9a-f]{6}$'
+  if [[ -z "$live" || -z "$keep" ]]; then
+    warn "could not derive live database names; skipping database drop"
+  elif ! dbs=$(PGCONNECT_TIMEOUT=5 timeout 20 psql -X -At -q "$url" \
+      -c "select datname from pg_database where datname like 'spacetraders\_%'" 2>/dev/null); then
+    warn "postgres unreachable; skipping database drop"
+  else
+    while IFS= read -r db; do
+      [[ "$db" =~ $pat ]] || continue
+      grep -qxF "$db" <<<"$keep" && continue
+      if (( dry )); then
+        echo "prune: would drop database $db"
+      elif PGCONNECT_TIMEOUT=5 timeout 20 psql -X -q "$url" -c "DROP DATABASE \"$db\"" >/dev/null 2>&1; then
+        echo "prune: dropped database $db"
+      else
+        warn "could not drop $db (in use?)"
+      fi
+    done <<<"$dbs"
+  fi
+fi
+
+# Leftover containers: listed only.
+if command -v docker >/dev/null 2>&1; then
+  while IFS=$'\t' read -r name status; do
+    [[ "$name" == *-postgres ]] || continue
+    echo "prune: container $name ($status): docker rm -f $name"
+  done < <(timeout 20 docker ps -a --format '{{.Names}}'$'\t''{{.Status}}' 2>/dev/null)
+fi
+exit 0
