@@ -17,6 +17,11 @@ defmodule SpaceTraders.EvidenceSchedulingTest do
     owner: "fleet_planning"
   }
 
+  setup_all do
+    baseline = SpaceTraders.FixtureLeakProbe.baseline()
+    on_exit(fn -> SpaceTraders.FixtureLeakProbe.assert_clean!(baseline) end)
+  end
+
   setup do
     start_supervised!({TestClock, @now})
     previous_clock = Application.get_env(:spacetraders, :clock)

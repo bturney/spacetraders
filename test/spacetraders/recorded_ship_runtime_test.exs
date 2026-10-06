@@ -23,6 +23,11 @@ defmodule SpaceTraders.RecordedShipRuntimeTest do
   alias SpaceTraders.{Repo, RuntimeAuthority, TestClock}
   alias SpaceTraders.RuntimeBaselineGame, as: Game
 
+  setup_all do
+    baseline = SpaceTraders.FixtureLeakProbe.baseline()
+    on_exit(fn -> SpaceTraders.FixtureLeakProbe.assert_clean!(baseline, capacity: true) end)
+  end
+
   setup do
     :ok = Sandbox.mode(Repo, :auto)
     start_supervised!({TestClock, DateTime.utc_now()})
