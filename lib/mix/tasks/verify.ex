@@ -23,6 +23,12 @@ defmodule Mix.Tasks.Verify do
   `verify: reformatted <n> files: commit before push` on pass. When the `CI` env
   var is set it keeps `--check-formatted`.
 
+  ## Preflight and exit codes
+
+  Before any check, preflight collects every environment problem (Postgres
+  unreachable, missing deps) and prints two lines each (cause, then fix
+  command), then exits 2. A product failure exits 1.
+
   ## The verdict is the exit status
 
   Each check runs as its own `mix` command and fails by exiting non-zero.
@@ -39,7 +45,7 @@ defmodule Mix.Tasks.Verify do
   @max_failures "5"
 
   @impl true
-  def run(_args), do: run_checks(required_checks())
+  def run(_args), do: run_checks(required_checks(), preflight: &preflight/0)
 
   @doc """
   The required product checks, in the order the gate runs them.
@@ -68,6 +74,8 @@ defmodule Mix.Tasks.Verify do
 
     * `:run_check` - `(task, args -> {output, exit_status})`; defaults to
       running `mix task args` in a subprocess.
+    * `:preflight` - `(-> [{cause, fix}])` environment problems found before any
+      check; defaults to none. Any problem prints two lines each and exits 2.
     * `:snapshot` - `(-> %{path => hash})` of working-tree files, compared
       around the local `format` check to count reformatted files.
 
@@ -80,6 +88,9 @@ defmodule Mix.Tasks.Verify do
     snapshot = Keyword.get(opts, :snapshot, &worktree_snapshot/0)
     total = length(checks)
     started = now()
+
+    problems = Keyword.get(opts, :preflight, fn -> [] end).()
+    halt_on_problems(problems)
 
     reformatted =
       Enum.reduce(checks, 0, fn {task, args} = check, reformatted ->
@@ -102,6 +113,56 @@ defmodule Mix.Tasks.Verify do
 
     Mix.shell().info("verify: PASS #{total}/#{total} #{elapsed(started)}")
     :ok
+  end
+
+  @doc """
+  Environment problems as `{cause, fix}` pairs, all collected. Defaults to the
+  configured Repo URL and the project's dependency directories.
+  """
+  @spec preflight(String.t() | nil, [Path.t()]) :: [{String.t(), String.t()}]
+  def preflight(url \\ repo_url(), dep_paths \\ dep_paths()) do
+    postgres(url) ++ deps(dep_paths)
+  end
+
+  defp repo_url, do: Application.get_env(:spacetraders, SpaceTraders.Repo, [])[:url]
+
+  defp dep_paths, do: Map.values(Mix.Project.deps_paths())
+
+  defp postgres(nil), do: []
+
+  defp postgres(url) do
+    %URI{host: host, port: port} = URI.parse(url)
+    port = port || 5432
+
+    case :gen_tcp.connect(String.to_charlist(host), port, [], 1_000) do
+      {:ok, socket} ->
+        :gen_tcp.close(socket)
+        []
+
+      {:error, _} ->
+        [{"Postgres unreachable at #{host}:#{port}", "docker compose -f compose.dev.yaml up -d"}]
+    end
+  end
+
+  defp deps(paths) do
+    case Enum.reject(paths, &File.dir?/1) do
+      [] ->
+        []
+
+      missing ->
+        [{"dependencies missing: #{Enum.map_join(missing, ", ", &Path.basename/1)}", "mix setup"}]
+    end
+  end
+
+  defp halt_on_problems([]), do: :ok
+
+  defp halt_on_problems(problems) do
+    for {cause, fix} <- problems do
+      Mix.shell().info("verify: environment: #{cause}")
+      Mix.shell().info("verify: fix: #{fix}")
+    end
+
+    exit({:shutdown, 2})
   end
 
   defp fail({task, args}, output) do
