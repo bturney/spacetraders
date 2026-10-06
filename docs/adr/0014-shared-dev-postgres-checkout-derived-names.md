@@ -29,3 +29,13 @@ unattended in other agents' worktrees, it never removes a locked worktree, the
 main checkout, or the current worktree, and it drops only databases that
 `config/checkout_db.exs` does not derive for a live worktree. A prune failure
 warns on one line and never fails `mix test`.
+
+### Deviations from spec #607
+
+- Database drops match only `spacetraders_(dev|test)_<name>_<hash6>`, narrower
+  than the spec, so legacy `spacetraders_task_*` orphans are never dropped
+  automatically; the Operator removes them by hand:
+  `psql "$URL" -Atc "select format('drop database %I;', datname) from pg_database where datname like 'spacetraders\_task\_%'" | psql "$URL"`.
+- The locked, strict-ancestor and 60-minute-idle guards exist because harness
+  worktrees start at `origin/main`, so a brand-new worktree would otherwise look
+  merged and be removed.

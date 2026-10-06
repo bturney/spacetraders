@@ -51,7 +51,7 @@ defmodule SpaceTraders.RuntimeQualification do
     Application.put_env(:spacetraders, :clock, TestClock)
 
     on_exit(fn ->
-      SpaceTraders.Fleet.ShipServer.stop_all()
+      SpaceTraders.Quiesced.stop_all_ships()
       SpaceTraders.Contracts.DeadlineServer.stop_all()
       SpaceTraders.EmergencyStopAdmission.clear()
       SpaceTraders.FleetGenerationAdmission.clear()
@@ -70,7 +70,7 @@ defmodule SpaceTraders.RuntimeQualification do
     )
 
     on_exit(fn ->
-      SpaceTraders.Fleet.ShipServer.stop_all()
+      SpaceTraders.Quiesced.stop_all_ships()
 
       operator_ids =
         Repo.all(from o in Operator, where: like(o.email, "baseline-503-%"), select: o.id)
@@ -135,7 +135,7 @@ defmodule SpaceTraders.RuntimeQualification do
     # scheduling, dispatch, and recovery guarantees exercised underneath.
     assert :ok = stop_supervised!(DemandScheduler)
     assert :ok = stop_supervised!(Reconciler)
-    assert :ok = SpaceTraders.Fleet.ShipServer.stop("BASELINE-1")
+    assert :ok = SpaceTraders.Quiesced.stop_ship("BASELINE-1")
     advance_time(60)
     start_runtime()
     start_supervised!({ShipServerBoot, []})

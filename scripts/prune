@@ -21,10 +21,16 @@
 # config/checkout_db.exs does not derive for a live worktree. Never
 # spacetraders_dev or spacetraders_test. DROP DATABASE without FORCE.
 # Containers named *-postgres are listed with a removal command, never removed.
+# No -e: best-effort. One failed removal or drop must not stop the rest.
 set -uo pipefail
 
 dry=0
-[[ "${1:-}" == "--dry-run" ]] && dry=1
+for arg in "$@"; do
+  case "$arg" in
+    --dry-run) dry=1 ;;
+    *) echo "usage: scripts/prune [--dry-run]" >&2; exit 2 ;;
+  esac
+done
 
 cd "$(dirname "$0")/.." || exit 1
 warn() { echo "prune: warning: $*" >&2; }

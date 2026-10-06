@@ -18,7 +18,7 @@ defmodule SpaceTraders.RuntimeDeath do
 
   @spec kill(pid(), integer()) :: {:disconnected | :idle, String.t()}
   def kill(sender, backend) do
-    holds_connection? = SpaceTraders.Quiesce.holds_connection?(sender)
+    holds_connection? = SpaceTraders.Quiesced.holds_connection?(sender)
 
     {:ok, log} =
       ExUnit.CaptureLog.with_log(fn ->

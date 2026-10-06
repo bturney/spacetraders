@@ -18,7 +18,7 @@ defmodule Mix.Tasks.VerifyTest do
 
   defp exunit(body) do
     "Running ExUnit with seed: 1, max_cases: 8\n\n" <>
-      body <> "\nFinished in 1.0 seconds\n3 tests, 0 failures\n"
+      body <> "\nFinished in 1.0 seconds (0.5s async, 0.5s sync)\n3 tests, 0 failures\n"
   end
 
   defp passing(task, _args) do
@@ -59,7 +59,7 @@ defmodule Mix.Tasks.VerifyTest do
     lines = messages()
     assert length(lines) == 7 + 2 + 1
     assert "verify: compile ok 0s" in lines
-    assert "Finished in 1.0 seconds" in lines
+    assert "Finished in 1.0 seconds (0.5s async, 0.5s sync)" in lines
     assert "3 tests, 0 failures" in lines
     assert List.last(lines) =~ ~r/^verify: PASS 7\/7 \d+s$/
     refute Enum.any?(lines, &(&1 =~ "Compiling"))
@@ -126,6 +126,32 @@ defmodule Mix.Tasks.VerifyTest do
 
     test "formatter output alone passes, including skipped markers and excluded tags" do
       assert :ok = gate_with(exunit("Excluding tags: [:slow]\n\n..*.\n.\n"))
+    end
+
+    test "a stray line that merely looks like a summary still fails" do
+      for line <- [
+            "5 tests, 0 failures, and then some debug",
+            "12 tests, 0 failures, 4 widgets",
+            "Finished in 3 minutes",
+            "Finished in 1.0 seconds"
+          ] do
+        assert_raise Mix.Error, fn -> gate_with(exunit(".\n#{line}\n.\n")) end
+        assert Enum.any?(messages(), &(&1 =~ "stray output" and &1 =~ line))
+      end
+    end
+
+    test "every real ExUnit summary shape passes" do
+      for counts <- [
+            "1 test, 0 failures",
+            "1 doctest, 1 property, 3 tests, 0 failures",
+            "2 doctests, 2 properties, 3 tests, 0 failures, 1 excluded, 2 skipped"
+          ] do
+        out =
+          "Running ExUnit with seed: 1, max_cases: 8\n\n.\n" <>
+            "Finished in 0.1 seconds (0.00s async, 0.1s sync)\n#{counts}\n"
+
+        assert :ok = gate_with(out)
+      end
     end
 
     test "there is no opt-out: the check has no tag to skip it" do
