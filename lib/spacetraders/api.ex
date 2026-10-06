@@ -732,15 +732,24 @@ defmodule SpaceTraders.API do
   defp retry(_request, %Req.Response{status: status}, path, :get, _token)
        when status in 500..599 do
     emit_request_metric(operation_for_retry(path, :get), path, status)
-    true
+    transient_retry()
   end
 
   defp retry(_request, %Req.TransportError{}, path, :get, _token) do
     emit_request_metric(operation_for_retry(path, :get), path, "unknown")
-    true
+    transient_retry()
   end
 
   defp retry(_request, _response, _path, _method, _token), do: false
+
+  # Retries for transient GET failures use Req's default backoff unless the
+  # environment pins a delay (test config), so 429 handling is unaffected.
+  defp transient_retry do
+    case Application.get_env(:spacetraders, __MODULE__, [])[:transient_retry_delay_ms] do
+      delay when is_integer(delay) -> {:delay, delay}
+      _ -> true
+    end
+  end
 
   defp report_protocol_rejection(delay_seconds)
        when is_integer(delay_seconds) and delay_seconds > 0,

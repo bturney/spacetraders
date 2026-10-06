@@ -35,7 +35,11 @@ config :logger, level: :error
 
 # Game API client: stub the HTTP transport with Req.Test in test env, and
 # disable the token-bucket rate limiter so API tests are not throttled.
-config :spacetraders, SpaceTraders.API, plug: {Req.Test, SpaceTraders.API}
+# Transient GET 5xx/transport retries skip Req's 1s/2s/4s backoff; 429 retries
+# are unaffected.
+config :spacetraders, SpaceTraders.API,
+  plug: {Req.Test, SpaceTraders.API},
+  transient_retry_delay_ms: 0
 
 config :spacetraders, SpaceTraders.API.RateLimiter, enabled: false
 
