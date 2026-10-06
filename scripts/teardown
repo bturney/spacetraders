@@ -26,13 +26,6 @@ sleep 1
 rm -rf "$PROJECT_ROOT/_build" "$PROJECT_ROOT/deps"
 rm -rf "$PROJECT_ROOT/priv/static/assets"
 
-if [ "${WORKTREE_PORT_LEASE:-0}" = 1 ] && [ -n "${AGENT_TASK_ID:-}" ]; then
-  "$SCRIPT_DIR/worktree-release-port" "$AGENT_TASK_ID"
-fi
-
-# Runs before .worktree-env is removed, so it still sees the task's database.
-"$SCRIPT_DIR/worktree-drop-database"
-
 rm -f "$PROJECT_ROOT/.worktree-env"
 rm -rf "$PROJECT_ROOT/.worktree-mix"
 
