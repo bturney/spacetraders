@@ -11,18 +11,17 @@ rather than trusting a list elsewhere.
 
 CI prepares the pinned toolchain, dependencies, and migrated test database,
 then invokes `scripts/verify` directly. Local runs use the same gate after
-preparing those prerequisites; no runner identity variables are required. The
-one difference: locally `mix format` fixes files (the gate edits your working
-tree and says so), while CI (`CI` env var set) runs `--check-formatted`.
+preparing those prerequisites; no runner identity variables are required.
+Local gate edits working tree: `mix format` fixes files. CI (`CI` set) runs
+`--check-formatted`.
 
 The gate stops at the first failing check, so a red run means the named check
 is the one to fix. Its exit status is the verdict: a failure is never recovered
 from, and no check's output is parsed to decide the result.
 
-Output is short: `verify: <check> ok <s>` per check, the ExUnit summary, then
-`verify: PASS 7/7 <s>`. On failure the failing check's native output is shown
-(tests stop at `--max-failures 5`), then `verify: FAIL at <check>` and the
-rerun command. Still rely on the exit status for the verdict.
+Output contract (PASS/FAIL footer, rerun command, `--max-failures 5`) lives in
+the `Mix.Tasks.Verify` moduledoc. Red run: fix the check named in
+`verify: FAIL at <check>`, rerun the command it prints.
 
 ## Release and deployment verification
 
