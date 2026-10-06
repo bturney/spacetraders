@@ -24,6 +24,8 @@ defmodule Mix.Tasks.Verify.Boot do
       :spacetraders
       |> Application.get_env(SpaceTradersWeb.Endpoint, [])
       |> Keyword.put(:server, true)
+      # Port 0 lets the OS pick a free port, so concurrent gates never collide.
+      |> Keyword.update(:http, [port: 0], &Keyword.put(&1, :port, 0))
 
     Application.put_env(:spacetraders, SpaceTradersWeb.Endpoint, endpoint_config)
 
