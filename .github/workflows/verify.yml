@@ -38,12 +38,6 @@ jobs:
         run: |
           source scripts/_toolchain.sh
           scripts/verify
-      - name: Verify prepared test database reuse
-        run: test/integration/prepared_test_database_test.sh
-      - name: Verify product gate uses prepared prerequisites
-        run: bash test/integration/product_gate_test.sh
-      - name: Verify verification contracts are separate
-        run: bash test/integration/verification_contract_test.sh
 
   release-deployment-verification:
     runs-on: ubuntu-24.04

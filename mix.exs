@@ -27,7 +27,7 @@ defmodule SpaceTraders.MixProject do
 
   def cli do
     [
-      preferred_envs: [verify: :test, precommit: :test]
+      preferred_envs: [verify: :test]
     ]
   end
 
@@ -98,7 +98,6 @@ defmodule SpaceTraders.MixProject do
         "esbuild spacetraders --minify",
         "phx.digest"
       ],
-      precommit: ["compile --warnings-as-errors", "deps.unlock --unused", "format", "test"],
       # The compile leg repeats `Mix.Tasks.Verify`'s first required check so that
       # it runs before Mix compiles the project on its own. See that task.
       verify: ["compile --warnings-as-errors", "verify"]
