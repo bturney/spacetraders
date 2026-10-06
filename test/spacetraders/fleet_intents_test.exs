@@ -6,7 +6,7 @@ defmodule SpaceTraders.FleetIntentsTest do
 
   alias SpaceTraders.Agent.Agent, as: AgentRecord
   alias SpaceTraders.Agent.{Operator, Scope}
-  alias SpaceTraders.Fleet.{Intent, Ship, ShipServer}
+  alias SpaceTraders.Fleet.{Intent, Ship}
   alias SpaceTraders.Fleet.Intents
   alias SpaceTraders.FleetAllocation
   alias SpaceTraders.FleetAllocation.PortfolioCandidate
@@ -16,7 +16,7 @@ defmodule SpaceTraders.FleetIntentsTest do
   alias SpaceTraders.FleetStrategy.{Revision, Strategy}
 
   setup do
-    on_exit(fn -> ShipServer.stop_all() end)
+    on_exit(fn -> SpaceTraders.Quiesced.stop_all_ships() end)
     :ok
   end
 

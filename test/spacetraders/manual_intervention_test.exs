@@ -8,7 +8,7 @@ defmodule SpaceTraders.ManualInterventionTest do
   alias SpaceTraders.Agent.Scope
   alias SpaceTraders.API.Model
   alias SpaceTraders.Fleet
-  alias SpaceTraders.Fleet.{Intent, Intents, ShipServer}
+  alias SpaceTraders.Fleet.{Intent, Intents}
   alias SpaceTraders.Timeline
   alias SpaceTraders.{ManualIntervention, MutationAttempts, Repo, ShipReservation}
 
@@ -56,7 +56,7 @@ defmodule SpaceTraders.ManualInterventionTest do
 
     assert {:error, :intervention_in_progress} = ShipReservation.release(scope, ship.id)
 
-    ShipServer.stop(symbol)
+    SpaceTraders.Quiesced.stop_ship(symbol)
 
     for event <- Timeline.pending_events(:ship, symbol), do: Timeline.fire_event(event)
 
@@ -107,7 +107,7 @@ defmodule SpaceTraders.ManualInterventionTest do
   end
 
   test "an intervention-owned Navigate Intent completes exactly once after restart rearming" do
-    on_exit(fn -> ShipServer.stop_all() end)
+    on_exit(fn -> SpaceTraders.Quiesced.stop_all_ships() end)
 
     operator = operator_fixture()
     agent = agent_fixture(operator)
@@ -163,7 +163,7 @@ defmodule SpaceTraders.ManualInterventionTest do
 
     assert Elixir.Agent.get(calls, & &1.mutations) == 1
     Elixir.Agent.update(calls, &%{&1 | phase: :restart, mutations: 0})
-    ShipServer.stop(symbol)
+    SpaceTraders.Quiesced.stop_ship(symbol)
 
     handler_id = "intervention-restart-#{System.unique_integer()}"
 
@@ -210,7 +210,7 @@ defmodule SpaceTraders.ManualInterventionTest do
 
   for trigger <- [:boot, :arrival] do
     test "#{trigger} recovers a lost intervention Navigate response from retained evidence without replay" do
-      on_exit(fn -> ShipServer.stop_all() end)
+      on_exit(fn -> SpaceTraders.Quiesced.stop_all_ships() end)
 
       operator = operator_fixture()
       agent = agent_fixture(operator)
@@ -257,7 +257,7 @@ defmodule SpaceTraders.ManualInterventionTest do
       assert lost.state in ["sent_or_unknown", "ambiguous"]
       assert SpaceTraders.SafetyFence.active?(lost)
 
-      ShipServer.stop(symbol)
+      SpaceTraders.Quiesced.stop_ship(symbol)
       _ = Intents.reconcile(agent.id, symbol, nil, unquote(trigger), intent_id)
 
       assert Elixir.Agent.get(game, & &1.posts) == ["orbit", "navigate"]

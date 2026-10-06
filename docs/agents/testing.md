@@ -56,7 +56,7 @@ ownership proxy disconnect it and log an error (#398). So:
 
 - Runtime processes a test starts: `start_supervised!(Quiesced.child_spec(child))`;
   teardown waits out any open checkout before stopping them.
-  `ShipServer.stop_all/0` does the same via `SpaceTraders.Quiesce`.
+  Ship servers: `Quiesced.stop_ship/1` and `Quiesced.stop_all_ships/0`, never `ShipServer.stop/1`.
 - Killing a sender mid-transaction on purpose: `RuntimeDeath.kill/2` asserts
   the disconnect instead of printing it.
 

@@ -87,7 +87,14 @@ defmodule SpaceTraders.MixProject do
   # See the documentation for `Mix` for more info on aliases.
   defp aliases do
     [
-      setup: ["deps.get", "ecto.setup", "assets.setup", "assets.build"],
+      setup: [
+        "local.hex --force",
+        "local.rebar --force",
+        "deps.get",
+        "ecto.setup",
+        "assets.setup",
+        "assets.build"
+      ],
       "ecto.setup": ["ecto.create", "ecto.migrate", "run priv/repo/seeds.exs"],
       "ecto.reset": ["ecto.drop", "ecto.setup"],
       test: [&seed_from_main/1, "ecto.create --quiet", "ecto.migrate --quiet", "test"],

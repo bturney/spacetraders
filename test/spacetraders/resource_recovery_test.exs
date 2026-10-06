@@ -6,11 +6,11 @@ defmodule SpaceTraders.ResourceRecoveryTest do
   import SpaceTraders.ShipBody
 
   alias SpaceTraders.Evidence
-  alias SpaceTraders.Fleet.{Intent, Intents, ShipServer}
+  alias SpaceTraders.Fleet.{Intent, Intents}
   alias SpaceTraders.MutationAttempts
 
   setup do
-    on_exit(fn -> ShipServer.stop_all() end)
+    on_exit(fn -> SpaceTraders.Quiesced.stop_all_ships() end)
     :ok
   end
 

@@ -17,7 +17,7 @@ defmodule SpaceTraders.RecordedShipRuntimeTest do
   alias Ecto.Adapters.SQL.Sandbox
   alias SpaceTraders.Agent.{Agent, Operator, Scope}
   alias SpaceTraders.Evidence.DemandScheduler
-  alias SpaceTraders.Fleet.{Intent, ShipServer, ShipServerBoot}
+  alias SpaceTraders.Fleet.{Intent, ShipServerBoot}
   alias SpaceTraders.FleetAllocation.Reconciler
   alias SpaceTraders.MutationAttempts.{Attempt, Outcome}
   alias SpaceTraders.{Quiesced, Repo, RuntimeAuthority, RuntimeDeath, TestClock}
@@ -79,7 +79,7 @@ defmodule SpaceTraders.RecordedShipRuntimeTest do
     restart_capacity()
 
     on_exit(fn ->
-      ShipServer.stop_all()
+      SpaceTraders.Quiesced.stop_all_ships()
       SpaceTraders.Contracts.DeadlineServer.stop_all()
       SpaceTraders.EmergencyStopAdmission.clear()
       SpaceTraders.FleetGenerationAdmission.clear()
@@ -180,7 +180,7 @@ defmodule SpaceTraders.RecordedShipRuntimeTest do
     assert [[id, "succeeded", _]] = observe_attempts(context.observer, context.agent.id)
     stop_supervised(DemandScheduler)
     stop_supervised(Reconciler)
-    ShipServer.stop_all()
+    SpaceTraders.Quiesced.stop_all_ships()
     restart_runtime()
     assert orbit_count(context.game) == 1
 
@@ -273,7 +273,7 @@ defmodule SpaceTraders.RecordedShipRuntimeTest do
       assert orbit_count(context.game) == expected_count
       stop_supervised(DemandScheduler)
       stop_supervised(Reconciler)
-      ShipServer.stop_all()
+      SpaceTraders.Quiesced.stop_all_ships()
       restart_runtime()
 
       for {_, pid, _, _} <- DynamicSupervisor.which_children(SpaceTraders.Fleet.ShipSupervisor),
@@ -311,7 +311,7 @@ defmodule SpaceTraders.RecordedShipRuntimeTest do
       # Re-entry under lost authority cannot release the captured obsolete action.
       stop_supervised(DemandScheduler)
       stop_supervised(Reconciler)
-      ShipServer.stop_all()
+      SpaceTraders.Quiesced.stop_all_ships()
 
       advance_observation_clock_to_now()
 
@@ -455,7 +455,7 @@ defmodule SpaceTraders.RecordedShipRuntimeTest do
     RuntimeDeath.kill(sender, sender_backend)
     stop_supervised(DemandScheduler)
     stop_supervised(Reconciler)
-    ShipServer.stop_all()
+    SpaceTraders.Quiesced.stop_all_ships()
   end
 
   defp restart_runtime do

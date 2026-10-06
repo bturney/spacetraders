@@ -25,7 +25,7 @@ defmodule SpaceTraders.Fleet.ShipServerTest do
       agent_token: "AGENT_TOKEN"
     })
 
-    on_exit(fn -> ShipServer.stop_all() end)
+    on_exit(fn -> SpaceTraders.Quiesced.stop_all_ships() end)
     :ok
   end
 

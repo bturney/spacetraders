@@ -190,9 +190,15 @@ defmodule Mix.Tasks.Verify do
     end
   end
 
-  @formatter_line ~r/^(?:Running ExUnit with seed: .*|(?:Excluding|Including) tags: .*|Finished in .*|\d+ (?:doctests?|properties|tests?),.*)$/
+  # ExUnit's own shapes, anchored at both ends (cli_formatter.ex, formatter.ex), so
+  # a stray line that merely resembles a summary still fails.
+  @counts_line ~r/^(?:\d+ doctests?, )?(?:\d+ propert(?:y|ies), )?\d+ tests?, \d+ failures?(?:, \d+ excluded)?(?:, \d+ invalid)?(?:, \d+ skipped)?$/
+  @finished_line ~r/^Finished in [\d.]+ seconds .*$/
+  @formatter_line ~r/^(?:Running ExUnit with seed: .*|(?:Excluding|Including) tags: .*)$/
 
   defp stray_lines(output) do
+    # Compiler output before "Running ExUnit" belongs to the compile check, and
+    # progress dots (".", "*") share a line with dumps, so only the dots are stripped.
     run =
       case String.split(output, ~r/^Running ExUnit with seed: .*\n/m, parts: 2) do
         [_compile, run] -> run
@@ -201,10 +207,13 @@ defmodule Mix.Tasks.Verify do
 
     run
     |> String.split("\n")
-    |> Enum.reject(&(String.trim(&1) == "" or Regex.match?(@formatter_line, &1)))
+    |> Enum.reject(&(String.trim(&1) == "" or formatter_line?(&1)))
     |> Enum.map(&String.replace(&1, ~r/^[.*]+/, ""))
     |> Enum.reject(&(String.trim(&1) == ""))
   end
+
+  defp formatter_line?(line),
+    do: Enum.any?([@formatter_line, @counts_line, @finished_line], &Regex.match?(&1, line))
 
   defp fail({task, args}, output, rerun \\ nil) do
     Mix.shell().info(String.trim_trailing(output))
@@ -222,9 +231,9 @@ defmodule Mix.Tasks.Verify do
   defp rerun(task, args), do: Enum.join(["mix", task | args], " ")
 
   defp summary_lines(output) do
-    ~r/^(?:Finished in .*|\d+ (?:doctests?|properties|tests?),.*)$/m
-    |> Regex.scan(output)
-    |> Enum.map(&hd/1)
+    output
+    |> String.split("\n")
+    |> Enum.filter(&(Regex.match?(@finished_line, &1) or Regex.match?(@counts_line, &1)))
   end
 
   defp failure_count(output) do

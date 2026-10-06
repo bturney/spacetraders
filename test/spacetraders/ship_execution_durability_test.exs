@@ -13,7 +13,7 @@ defmodule SpaceTraders.ShipExecutionDurabilityTest do
 
   alias Ecto.Adapters.SQL.Sandbox
   alias SpaceTraders.Agent.Scope
-  alias SpaceTraders.Fleet.{Intent, Intents, Ship, ShipServer}
+  alias SpaceTraders.Fleet.{Intent, Intents, Ship}
   alias SpaceTraders.FleetAllocation
   alias SpaceTraders.FleetAllocation.PortfolioCandidate
   alias SpaceTraders.FleetGeneration.Generation
@@ -718,8 +718,8 @@ defmodule SpaceTraders.ShipExecutionDurabilityTest do
     ]
 
     on_exit(fn ->
-      ShipServer.stop(ship.symbol)
-      Enum.each(ships, &ShipServer.stop(&1.symbol))
+      SpaceTraders.Quiesced.stop_ship(ship.symbol)
+      Enum.each(ships, &SpaceTraders.Quiesced.stop_ship(&1.symbol))
 
       Sandbox.unboxed_run(Repo, fn ->
         attempt_ids = Repo.all(from a in Attempt, where: a.agent_id == ^agent.id, select: a.id)

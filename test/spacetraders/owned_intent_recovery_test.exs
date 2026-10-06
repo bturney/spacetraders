@@ -8,7 +8,7 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
   alias SpaceTraders.Agent.{Operator, Scope}
   alias SpaceTraders.API.Model
   alias SpaceTraders.API.OperationInventory
-  alias SpaceTraders.Fleet.{Activity, Intent, Ship, ShipServer}
+  alias SpaceTraders.Fleet.{Activity, Intent, Ship}
   alias SpaceTraders.Fleet.Intents
   alias SpaceTraders.FleetAllocation
   alias SpaceTraders.FleetAllocation.PortfolioCandidate
@@ -19,7 +19,7 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
   alias SpaceTraders.Timeline.Event
 
   setup do
-    on_exit(fn -> ShipServer.stop_all() end)
+    on_exit(fn -> SpaceTraders.Quiesced.stop_all_ships() end)
     :ok
   end
 
@@ -51,7 +51,7 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
     {:ok, original} = SpaceTraders.Evidence.get_ship_binding(agent, ship.symbol)
     {:ok, newer} = SpaceTraders.Evidence.get_ship_binding(agent, ship.symbol)
     refute original.observation.id == newer.observation.id
-    ShipServer.stop(ship.symbol)
+    SpaceTraders.Quiesced.stop_ship(ship.symbol)
 
     Req.Test.stub(SpaceTraders.API, fn _ -> flunk("recovery replaced retained cooldown facts") end)
 
@@ -990,7 +990,7 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
       {:ok, original_credits} = SpaceTraders.Evidence.get_agent_binding(agent)
       {:ok, newer_ship} = SpaceTraders.Evidence.get_ship_binding(agent, ship.symbol)
       refute original_ship.observation.id == newer_ship.observation.id
-      ShipServer.stop(ship.symbol)
+      SpaceTraders.Quiesced.stop_ship(ship.symbol)
       Req.Test.stub(SpaceTraders.API, fn _ -> flunk("recovery must reuse retained evidence") end)
 
       {:ok, restored} =
@@ -3223,7 +3223,7 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
       )
 
     {:ok, attempt} = MutationAttempts.mark_sent_or_unknown(attempt)
-    ShipServer.stop(ship.symbol)
+    SpaceTraders.Quiesced.stop_ship(ship.symbol)
 
     assert :ok = Intents.rearm_on_boot()
     assert MutationAttempts.get!(attempt.id).state == "accepted"

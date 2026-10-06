@@ -9,7 +9,7 @@ defmodule SpaceTraders.IntelligenceAcquisitionTest do
   alias SpaceTraders.Agent.{Operator, Scope}
   alias SpaceTraders.API.Model
   alias SpaceTraders.API.OperationInventory
-  alias SpaceTraders.Fleet.{Intent, Ship, ShipServer}
+  alias SpaceTraders.Fleet.{Intent, Ship}
   alias SpaceTraders.Fleet.Intents
   alias SpaceTraders.FleetAllocation
   alias SpaceTraders.FleetAllocation.PortfolioCandidate
@@ -25,7 +25,7 @@ defmodule SpaceTraders.IntelligenceAcquisitionTest do
   alias SpaceTraders.World
 
   setup do
-    on_exit(fn -> ShipServer.stop_all() end)
+    on_exit(fn -> SpaceTraders.Quiesced.stop_all_ships() end)
     :ok
   end
 
@@ -659,7 +659,7 @@ defmodule SpaceTraders.IntelligenceAcquisitionTest do
 
     assert_receive {"POST", ^warp_path, %{"waypointSymbol" => "X2-UX81-A3"}}
 
-    ShipServer.stop(ship.symbol)
+    SpaceTraders.Quiesced.stop_ship(ship.symbol)
     assert :ok = Intents.reconcile(agent.id, ship.symbol, nil, :boot, intent.id)
     assert %Intent{status: "waiting"} = Repo.get!(Intent, intent.id)
     refute_receive {"POST", ^warp_path, _body}
