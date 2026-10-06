@@ -16,9 +16,14 @@ defmodule Mix.Tasks.VerifyTest do
     end
   end
 
+  defp exunit(body) do
+    "Running ExUnit with seed: 1, max_cases: 8\n\n" <>
+      body <> "\nFinished in 1.0 seconds\n3 tests, 0 failures\n"
+  end
+
   defp passing(task, _args) do
     if task == "test",
-      do: {"noise\nFinished in 1.0 seconds\n3 tests, 0 failures\n", 0},
+      do: {"Compiling 2 files (.ex)\n" <> exunit("...\n.\n"), 0},
       else: {"", 0}
   end
 
@@ -57,7 +62,7 @@ defmodule Mix.Tasks.VerifyTest do
     assert "Finished in 1.0 seconds" in lines
     assert "3 tests, 0 failures" in lines
     assert List.last(lines) =~ ~r/^verify: PASS 7\/7 \d+s$/
-    refute Enum.any?(lines, &(&1 =~ "noise"))
+    refute Enum.any?(lines, &(&1 =~ "Compiling"))
   end
 
   test "a failing check stops the gate with native output, FAIL footer and rerun command" do
@@ -85,6 +90,47 @@ defmodule Mix.Tasks.VerifyTest do
     assert Enum.any?(lines, &(&1 =~ "stopped at --max-failures 5"))
     assert "verify: rerun with: mix test --failed" in lines
     refute Enum.any?(lines, &(&1 =~ "PASS"))
+  end
+
+  describe "stray output" do
+    defp gate_with(test_output) do
+      runner = fn
+        "test", _ -> {test_output, 0}
+        task, args -> passing(task, args)
+      end
+
+      Verify.run_checks(Verify.required_checks(true), run_check: runner)
+    end
+
+    test "a passing test run with a debug dump fails the gate naming the dump" do
+      assert_raise Mix.Error, "verify: FAIL at test", fn ->
+        gate_with(exunit("..\n507 interruption receipt: %{a: 1}\n.\n"))
+      end
+
+      lines = messages()
+      assert Enum.any?(lines, &(&1 =~ "stray output" and &1 =~ "507 interruption receipt"))
+      assert "verify: rerun with: mix test" in lines
+      refute Enum.any?(lines, &(&1 =~ "PASS"))
+    end
+
+    test "a dump printed on a line of progress dots is caught" do
+      assert_raise Mix.Error, fn -> gate_with(exunit("....hello\n..\n")) end
+      assert Enum.any?(messages(), &(&1 =~ "stray output" and &1 =~ "hello"))
+    end
+
+    test "a compile warning in a test file is stray output" do
+      assert_raise Mix.Error, fn ->
+        gate_with(exunit(".\n    warning: unused alias Intent\n.\n"))
+      end
+    end
+
+    test "formatter output alone passes, including skipped markers and excluded tags" do
+      assert :ok = gate_with(exunit("Excluding tags: [:slow]\n\n..*.\n.\n"))
+    end
+
+    test "there is no opt-out: the check has no tag to skip it" do
+      refute Enum.any?(Verify.required_checks(true), fn {_, args} -> "--exclude" in args end)
+    end
   end
 
   test "a failing non-test check reruns that exact task" do
