@@ -52,7 +52,7 @@ config :phoenix_live_view,
 # at the `config/runtime.exs`.
 config :spacetraders, SpaceTraders.Mailer, adapter: Swoosh.Adapters.Local
 
-deps_path = System.get_env("MIX_DEPS_PATH") || Path.expand("../deps", __DIR__)
+deps_path = Path.expand("../deps", __DIR__)
 
 # Configure esbuild (the version is required)
 config :esbuild,

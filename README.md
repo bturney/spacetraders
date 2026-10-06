@@ -29,17 +29,15 @@ The rest are reference: reach for the one that matches your branch. Each step
 states its completion criterion, because the gate's exit status is the only
 verdict.
 
-### 1. Bootstrap
+### 1. Toolchain and dependencies
 
 ```sh
-scripts/bootstrap
-source scripts/_toolchain.sh
+mise install
+mix setup
 ```
 
-`scripts/bootstrap` installs the pinned Erlang/Elixir toolchain (no sudo
-required) and fetches dependencies. The pinned toolchain is not on `PATH`, so
-every fresh shell needs `scripts/_toolchain.sh` sourced before any `mix`
-command.
+`mise install` installs the pinned Erlang/Elixir from `.tool-versions`;
+`mix setup` fetches dependencies.
 
 Done when `mix --version` reports the pinned toolchain.
 
@@ -129,7 +127,6 @@ test env; see `test/spacetraders/api/`.
 ### Run the app
 
 ```sh
-source scripts/_toolchain.sh
 mix phx.server   # http://localhost:4000, GET /health returns {"status":"ok"}
 ```
 
@@ -159,15 +156,6 @@ stored:
 ```sh
 mix run priv/repo/seeds.exs                 # placeholder token
 SPACETRADERS_AGENT_TOKEN=<token> mix run priv/repo/seeds.exs   # real token
-```
-
-### Teardown
-
-Stops a running server rooted at this checkout and removes build artifacts
-(deps are shared across checkouts and left in place):
-
-```sh
-scripts/teardown
 ```
 
 ### Project-host deployment
