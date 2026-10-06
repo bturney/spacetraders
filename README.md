@@ -70,12 +70,15 @@ scripts/verify
 The gate runs locally and in CI on every PR. It runs its checks in order and
 stops at the first failure, so a red run names the check to fix. It reports its
 verdict as the exit status — never recovered from, never inferred from output.
-Its checks are `Mix.Tasks.Verify.required_checks/0` in
+Its checks are `Mix.Tasks.Verify.required_checks/1` in
 `lib/mix/tasks/verify.ex`; read that for the current list rather than trusting
 one written down here.
 
-It prints a lot: redirect to a file and read the tail, or trust the exit
-status.
+Output is short: one line per check, the ExUnit summary, then
+`verify: PASS 7/7 <s>`. On failure it shows the failing check's output, then
+`verify: FAIL at <check>` and the rerun command. Locally `mix format` runs in
+fix mode and the gate edits files (`verify: reformatted <n> files: commit
+before push`); under `CI` it uses `--check-formatted`.
 
 Release packaging and deployment verification sit outside this gate, under
 their own CI job; `docs/agents/testing.md` has their commands.

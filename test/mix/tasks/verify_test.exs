@@ -77,7 +77,7 @@ defmodule Mix.Tasks.VerifyTest do
     lines = messages()
     assert "1) test boom\n6 tests, 5 failures" in lines
     assert "verify: FAIL at test" in lines
-    assert Enum.any?(lines, &(&1 =~ "5 failures counted"))
+    assert Enum.any?(lines, &(&1 =~ "stopped at --max-failures 5"))
     assert "verify: rerun with: mix test --failed" in lines
     refute Enum.any?(lines, &(&1 =~ "PASS"))
   end

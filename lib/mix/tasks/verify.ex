@@ -34,6 +34,8 @@ defmodule Mix.Tasks.Verify do
 
   use Mix.Task
 
+  # The `verify` alias in mix.exs repeats the compile leg ahead of this task so
+  # it is the first thing Mix compiles; inside the task it costs nothing.
   @max_failures "5"
 
   @impl true
@@ -106,12 +108,8 @@ defmodule Mix.Tasks.Verify do
     Mix.shell().info(String.trim_trailing(output))
     Mix.shell().info("verify: FAIL at #{task}")
 
-    case failure_count(output) do
-      nil ->
-        :ok
-
-      n ->
-        Mix.shell().info("verify: #{n} failures counted; output shows at most #{@max_failures}")
+    if task == "test" and (failure_count(output) || 0) >= String.to_integer(@max_failures) do
+      Mix.shell().info("verify: stopped at --max-failures #{@max_failures}; more may exist")
     end
 
     Mix.shell().info("verify: rerun with: #{rerun(task, args)}")
