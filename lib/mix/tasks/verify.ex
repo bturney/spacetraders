@@ -23,6 +23,15 @@ defmodule Mix.Tasks.Verify do
   `verify: reformatted <n> files: commit before push` on pass. When the `CI` env
   var is set it keeps `--check-formatted`.
 
+  ## Stray output
+
+  A passing test run must print nothing beyond ExUnit formatter output: progress
+  markers, the seed and tag lines, and the summary. Anything else (a debug dump,
+  a log line, a compile warning in a test file) fails the test check, naming the
+  first offending line. There is no opt-out tag: a test that prints on purpose
+  asserts on it with `capture_io`/`capture_log`. Compiler output before the
+  `Running ExUnit` line belongs to the compile check and is ignored.
+
   ## Preflight and exit codes
 
   Before any check, preflight collects every environment problem (Postgres
@@ -100,6 +109,7 @@ defmodule Mix.Tasks.Verify do
         {output, status} = run_check.(task, args)
 
         if status != 0, do: fail(check, output)
+        if task == "test", do: check_stray_output(check, output)
 
         Mix.shell().info("verify: #{task} ok #{elapsed(t0)}")
         if task == "test", do: Enum.each(summary_lines(output), &Mix.shell().info/1)
@@ -165,7 +175,38 @@ defmodule Mix.Tasks.Verify do
     exit({:shutdown, 2})
   end
 
-  defp fail({task, args}, output) do
+  defp check_stray_output(check, output) do
+    case stray_lines(output) do
+      [] ->
+        :ok
+
+      [first | _] = stray ->
+        fail(
+          check,
+          "verify: stray output: #{length(stray)} lines in a passing test run, " <>
+            "first: #{String.trim(first)}",
+          "mix test"
+        )
+    end
+  end
+
+  @formatter_line ~r/^(?:Running ExUnit with seed: .*|(?:Excluding|Including) tags: .*|Finished in .*|\d+ (?:doctests?|properties|tests?),.*)$/
+
+  defp stray_lines(output) do
+    run =
+      case String.split(output, ~r/^Running ExUnit with seed: .*\n/m, parts: 2) do
+        [_compile, run] -> run
+        [all] -> all
+      end
+
+    run
+    |> String.split("\n")
+    |> Enum.reject(&(String.trim(&1) == "" or Regex.match?(@formatter_line, &1)))
+    |> Enum.map(&String.replace(&1, ~r/^[.*]+/, ""))
+    |> Enum.reject(&(String.trim(&1) == ""))
+  end
+
+  defp fail({task, args}, output, rerun \\ nil) do
     Mix.shell().info(String.trim_trailing(output))
     Mix.shell().info("verify: FAIL at #{task}")
 
@@ -173,7 +214,7 @@ defmodule Mix.Tasks.Verify do
       Mix.shell().info("verify: stopped at --max-failures #{@max_failures}; more may exist")
     end
 
-    Mix.shell().info("verify: rerun with: #{rerun(task, args)}")
+    Mix.shell().info("verify: rerun with: #{rerun || rerun(task, args)}")
     Mix.raise("verify: FAIL at #{task}")
   end
 

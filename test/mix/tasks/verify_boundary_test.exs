@@ -2,7 +2,9 @@ defmodule Mix.Tasks.Verify.BoundaryTest do
   use ExUnit.Case, async: true
 
   test "the repository transport boundary passes" do
-    assert Mix.Tasks.Verify.Boundary.run([]) == :ok
+    assert ExUnit.CaptureIO.capture_io(fn ->
+             assert Mix.Tasks.Verify.Boundary.run([]) == :ok
+           end) =~ "intact"
   end
 
   test "rejects a transport call outside the approved adapters" do

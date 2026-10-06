@@ -245,19 +245,6 @@ defmodule SpaceTraders.RecordedShipRuntimeTest do
         |> Enum.filter(&(&1.operation_id == "orbit-ship"))
 
       assert_retry_history(orbits, @committed_state, @accepted)
-
-      IO.inspect(
-        %{
-          phase: @phase,
-          observer_backend: observer_backend(context.observer),
-          sender_backend: sender_backend,
-          before: before,
-          after: Enum.map(orbits, &{&1.id, &1.state, &1.retry_of_id}),
-          expected_orbits: 1,
-          actual_orbits: orbit_count(context.game)
-        },
-        label: "507 interruption receipt"
-      )
     end
   end
 
@@ -343,17 +330,6 @@ defmodule SpaceTraders.RecordedShipRuntimeTest do
                    SpaceTraders.MutationAttempts.get!(id)
                  )
       end
-
-      IO.inspect(
-        %{
-          loss: @loss,
-          phase: @phase,
-          disposition: expected,
-          expected_orbits: 0,
-          actual_orbits: orbit_count(context.game)
-        },
-        label: "507 authority receipt"
-      )
     end
   end
 
@@ -613,17 +589,7 @@ defmodule SpaceTraders.RecordedShipRuntimeTest do
   defp eventually(fun, attempts, context)
 
   defp eventually(_fun, 0, context) do
-    if context do
-      IO.inspect(SpaceTraders.MutationAttempts.list_for_agent(context.agent),
-        label: "failed runtime attempts",
-        limit: :infinity
-      )
-
-      IO.inspect(Repo.all(Intent), label: "failed runtime intents", limit: :infinity)
-      IO.inspect(Game.snapshot(context.game), label: "failed runtime game", limit: :infinity)
-    end
-
-    flunk("production runtime did not reach expected state")
+    flunk("production runtime did not reach expected state" <> diagnostics(context))
   end
 
   defp eventually(fun, attempts, context) do
@@ -634,5 +600,17 @@ defmodule SpaceTraders.RecordedShipRuntimeTest do
           Process.sleep(10)
           eventually(fun, attempts - 1, context)
         )
+  end
+
+  defp diagnostics(nil), do: ""
+
+  defp diagnostics(context) do
+    opts = [limit: :infinity]
+
+    "\n\nattempts: " <>
+      inspect(SpaceTraders.MutationAttempts.list_for_agent(context.agent), opts) <>
+      "\n\nintents: " <>
+      inspect(Repo.all(Intent), opts) <>
+      "\n\ngame: " <> inspect(Game.snapshot(context.game), opts)
   end
 end

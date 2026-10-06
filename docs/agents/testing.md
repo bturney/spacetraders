@@ -40,6 +40,14 @@ running PostgreSQL test database. `release_boot_test.sh` builds and boots the
 production release; `migration_repair_test.sh` creates and removes its own
 temporary database.
 
+## Stray output
+
+`capture_log: true` is suite-wide. The gate's test check fails a passing run
+that prints anything beyond ExUnit formatter output (after the `Running
+ExUnit` line), naming the first stray line. No opt-out tag. A test that prints
+on purpose asserts with `capture_io`/`capture_log`. Never `IO.inspect`/`IO.puts`
+in tests; put diagnostics in the assertion or `flunk` message.
+
 ## Postgrex disconnects
 
 A passing run prints no Postgrex disconnect lines; one in output is a real
