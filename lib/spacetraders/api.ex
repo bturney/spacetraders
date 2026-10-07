@@ -39,6 +39,7 @@ defmodule SpaceTraders.API do
   alias SpaceTraders.API.ShipAction
   alias SpaceTraders.Evidence.Demand
   alias SpaceTraders.Agent.Agent, as: AgentRecord
+  alias SpaceTraders.FleetAcquisition
   alias SpaceTraders.MutationAttempts
   alias SpaceTraders.MutationAttempts.Attempt
   alias SpaceTraders.Repo
@@ -205,9 +206,10 @@ defmodule SpaceTraders.API do
   end
 
   @doc "POST /my/ships — purchase a ship at a shipyard waypoint."
-  @spec purchase_ship(token(), String.t(), String.t()) :: result()
-  def purchase_ship(token, ship_type, waypoint_symbol) do
+  @spec purchase_ship(token(), String.t(), String.t(), keyword()) :: result()
+  def purchase_ship(token, ship_type, waypoint_symbol, opts \\ []) do
     request(:post, "/my/ships", token,
+      spending: opts[:spending],
       json:
         PurchaseShipRequest.new(%{ship_type: ship_type, waypoint_symbol: waypoint_symbol})
         |> PurchaseShipRequest.to_json(),
@@ -636,6 +638,10 @@ defmodule SpaceTraders.API do
   defp shadow_outcome(_status), do: :unknown
 
   defp mark_mutation_sent(nil), do: {:ok, nil}
+
+  defp mark_mutation_sent(%Attempt{operation_id: "purchase-ship"} = attempt),
+    do: FleetAcquisition.admit_send(attempt)
+
   defp mark_mutation_sent(attempt), do: MutationAttempts.mark_sent_or_unknown(attempt)
 
   defp record_mutation_outcome(nil, _classification, _evidence), do: :ok

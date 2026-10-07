@@ -4,10 +4,10 @@ defmodule SpaceTraders.MarketSpending do
   import Ecto.Query
 
   alias SpaceTraders.Agent.Agent
-  alias SpaceTraders.{Clock, Evidence, Repo}
+  alias SpaceTraders.{Clock, Evidence, Repo, World}
   alias SpaceTraders.FleetAllocation.{Commitment, Portfolio}
   alias SpaceTraders.FleetGeneration.Generation
-  alias SpaceTraders.FleetStrategy.StandingAuthority
+  alias SpaceTraders.FleetStrategy.{Revision, StandingAuthority}
   alias SpaceTraders.MutationAttempts.Attempt
   alias SpaceTraders.SafetyFence.DependencyKey
 
@@ -15,6 +15,7 @@ defmodule SpaceTraders.MarketSpending do
   @margin 25
   @minimum_margin 10
   @freshness_seconds 30
+  @shipyard_freshness_seconds 300
   @credit_operations ~w(purchase-cargo purchase-ship refuel-ship jump-ship install-ship-module remove-ship-module install-ship-mount remove-ship-mount repair-ship)
 
   def worst_case_exposure(price, units, margin \\ @margin)
@@ -75,7 +76,61 @@ defmodule SpaceTraders.MarketSpending do
 
   def acquire(_agent, _intent, _action), do: {:ok, nil}
 
-  def lock_agent(%Attempt{operation_id: "purchase-cargo", agent_id: id}), do: lock_agent(id)
+  @doc """
+  Prices one Fleet Ship acquisition from the fresh Shipyard offer evidence the
+  candidate was selected on. Missing or stale evidence yields an error rather
+  than an invented bound.
+  """
+  def acquire_ship_purchase(agent, %{source_waypoint: waypoint, ship: %{type: type}}) do
+    with {:ok, price} <- shipyard_price(agent, waypoint, type),
+         {:ok, credits} <- acquire_credits(agent),
+         true <-
+           credits.value.symbol == agent.symbol and is_integer(credits.value.credits) and
+             credits.value.credits >= 0 do
+      {:ok,
+       %{
+         "kind" => "ship",
+         "credit_observation_id" => credits.observation.id,
+         "waypoint" => waypoint,
+         "ship_type" => type,
+         "unit_price" => price,
+         "units" => 1,
+         "calibration_version" => @version,
+         "margin_percent" => @margin,
+         "worst_case_exposure" => worst_case_exposure(price, 1)
+       }}
+    else
+      {:error, reason} -> {:error, reason}
+      _ -> {:error, :authoritative_credit_facts_required}
+    end
+  end
+
+  defp shipyard_price(agent, waypoint, type) do
+    system = waypoint |> String.split("-") |> Enum.take(2) |> Enum.join("-")
+
+    fact =
+      World.intelligence(
+        agent,
+        :shipyard,
+        system,
+        waypoint,
+        Clock.utc_now(),
+        @shipyard_freshness_seconds
+      ).facts["ships"]
+
+    with %{state: "known", freshness: :fresh, value: offers} when is_list(offers) <- fact,
+         price when is_integer(price) and price >= 0 <-
+           offers |> Enum.find(&(offer_field(&1, :type) == type)) |> offer_field(:purchase_price) do
+      {:ok, price}
+    else
+      _ -> {:error, :ship_offer_evidence_unavailable}
+    end
+  end
+
+  def lock_agent(%Attempt{operation_id: operation, agent_id: id})
+      when operation in ["purchase-cargo", "purchase-ship"],
+      do: lock_agent(id)
+
   def lock_agent(%Attempt{}), do: :ok
 
   def lock_agent(id) when is_integer(id),
@@ -88,7 +143,33 @@ defmodule SpaceTraders.MarketSpending do
     with :ok <- validate_quote(agent, attempt, spending),
          {:ok, credits} <- current_credits(agent),
          {:ok, floor} <- credit_floor(revision),
-         {:ok, other_exposure} <- other_exposure(agent, intent, attempt, credits.observation),
+         {:ok, other_exposure} <-
+           other_exposure(agent, intent.fleet_commitment_id, attempt, credits.observation),
+         true <- credits.value.credits - other_exposure - spending["worst_case_exposure"] >= floor do
+      :ok
+    else
+      false -> {:error, :insufficient_unreserved_headroom}
+      {:error, _} = error -> error
+    end
+  end
+
+  # Fleet Ship acquisition has no Intent. Its own Commitment is named by the
+  # attempt's provenance, and its Revision by the attempt itself.
+  def admit(%Attempt{operation_id: "purchase-ship"} = attempt, nil, _revision) do
+    agent = Repo.get!(Agent, attempt.agent_id)
+    spending = attempt.prepared_evidence["spending"]
+    revision = attempt.strategy_revision_id && Repo.get(Revision, attempt.strategy_revision_id)
+
+    with :ok <- validate_offer(agent, attempt, spending),
+         {:ok, credits} <- current_credits(agent),
+         {:ok, floor} <- credit_floor(revision),
+         {:ok, other_exposure} <-
+           other_exposure(
+             agent,
+             attempt.provenance["commitment_id"],
+             attempt,
+             credits.observation
+           ),
          true <- credits.value.credits - other_exposure - spending["worst_case_exposure"] >= floor do
       :ok
     else
@@ -128,6 +209,26 @@ defmodule SpaceTraders.MarketSpending do
   end
 
   defp validate_quote(_agent, _attempt, _spending), do: {:error, :market_quote_stale_or_missing}
+
+  defp offer_field(nil, _key), do: nil
+  defp offer_field(offer, key), do: Map.get(offer, key) || Map.get(offer, Atom.to_string(key))
+
+  defp validate_offer(agent, attempt, %{"waypoint" => waypoint} = spending) do
+    body = attempt.prepared_evidence["request"]["body"]
+
+    with true <- body["waypointSymbol"] == waypoint and body["shipType"] == spending["ship_type"],
+         {:ok, price} <- shipyard_price(agent, waypoint, spending["ship_type"]),
+         true <- spending["unit_price"] == price and spending["units"] == 1,
+         true <-
+           spending["calibration_version"] == @version and spending["margin_percent"] == @margin,
+         true <- spending["worst_case_exposure"] == worst_case_exposure(price, 1) do
+      :ok
+    else
+      _ -> {:error, :ship_offer_evidence_unavailable}
+    end
+  end
+
+  defp validate_offer(_agent, _attempt, _spending), do: {:error, :ship_offer_evidence_unavailable}
 
   defp acquire_credits(agent) do
     case current_credits(agent) do
@@ -189,7 +290,7 @@ defmodule SpaceTraders.MarketSpending do
 
   # A Reservation and its admitted attempts protect the same work. Charge the
   # larger protection, never both. The current action consumes its own share.
-  defp other_exposure(agent, intent, attempt, balance_source) do
+  defp other_exposure(agent, own_commitment_id, attempt, balance_source) do
     reservations =
       Repo.all(
         from c in Commitment,
@@ -203,7 +304,7 @@ defmodule SpaceTraders.MarketSpending do
           select: {c.id, c.reservations}
       )
       |> Map.new(fn {id, resources} -> {id, Map.get(resources, "credits", 0)} end)
-      |> Map.delete(intent.fleet_commitment_id)
+      |> Map.delete(own_commitment_id)
 
     attempts =
       Repo.all(

@@ -21,6 +21,7 @@ defmodule SpaceTraders.FleetAcquisition do
   alias SpaceTraders.FleetGeneration.Generation
   alias SpaceTraders.FleetPlanning
   alias SpaceTraders.FleetStrategy.{Revision, StandingAuthority}
+  alias SpaceTraders.MarketSpending
   alias SpaceTraders.MutationAttempts
   alias SpaceTraders.MutationAttempts.Attempt
   alias SpaceTraders.{Repo, World}
@@ -72,7 +73,8 @@ defmodule SpaceTraders.FleetAcquisition do
                calibration_version: "ship-acquisition-v1"
              }
            ),
-         {:ok, result} <- dispatch(agent, portfolio, candidate) do
+         {:ok, spending} <- MarketSpending.acquire_ship_purchase(agent, candidate),
+         {:ok, result} <- dispatch(agent, portfolio, candidate, spending) do
       {:ok, Map.put(result, :portfolio, portfolio)}
     else
       error -> {:error, {:ship_acquisition_unavailable, error}}
@@ -109,7 +111,7 @@ defmodule SpaceTraders.FleetAcquisition do
     end)
   end
 
-  defp dispatch(agent, portfolio, candidate) do
+  defp dispatch(agent, portfolio, candidate, spending) do
     observe(portfolio, agent, fn ->
       with {:ok, %{ship: purchased, transaction: transaction}} <-
              AgentContext.handle_game_result(
@@ -117,7 +119,8 @@ defmodule SpaceTraders.FleetAcquisition do
                SpaceTraders.API.purchase_ship(
                  AgentTokenReference.new(agent),
                  candidate.ship.type,
-                 candidate.source_waypoint
+                 candidate.source_waypoint,
+                 spending: spending
                )
              ) do
         settle(
@@ -134,6 +137,38 @@ defmodule SpaceTraders.FleetAcquisition do
         )
       end
     end)
+  end
+
+  @doc """
+  Spending checkpoint for a prepared Ship purchase, run at the send boundary.
+
+  Takes the Agent credit lock first (Agent -> Attempt, as for recorded Ship
+  spending), revalidates offer evidence, credits, other Reservations and
+  admitted exposure, then writes the send marker in the same transaction. A
+  refusal records `not_sent` on this same Attempt; no second ledger exists.
+  """
+  def admit_send(%Attempt{} = attempt) do
+    Repo.transaction(fn ->
+      MarketSpending.lock_agent(attempt)
+      current = Repo.one!(from a in Attempt, where: a.id == ^attempt.id, lock: "FOR UPDATE")
+
+      with "prepared" <- current.state,
+           :ok <- MarketSpending.admit(current, nil, nil),
+           {:ok, sent} <- MutationAttempts.mark_sent_or_unknown(current) do
+        sent
+      else
+        state when is_binary(state) -> Repo.rollback(:attempt_already_dispatched)
+        {:error, reason} -> Repo.rollback(reason)
+      end
+    end)
+    |> case do
+      {:error, reason} when reason != :attempt_already_dispatched ->
+        MutationAttempts.record_not_sent(attempt, inspect(reason))
+        {:error, reason}
+
+      result ->
+        result
+    end
   end
 
   defp resume(scope, agent, portfolio) do
