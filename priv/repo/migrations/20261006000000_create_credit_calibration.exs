@@ -29,7 +29,10 @@ defmodule SpaceTraders.Repo.Migrations.CreateCreditCalibration do
       add :margin_percent, :integer, null: false
       add :basis, :string, null: false
       add :previous_version_id, references(:credit_calibration_versions, on_delete: :restrict)
-      add :mutation_attempt_id, references(:mutation_attempts, type: :uuid, on_delete: :nilify_all)
+
+      add :mutation_attempt_id,
+          references(:mutation_attempts, type: :uuid, on_delete: :nilify_all)
+
       add :evidence, :map, null: false, default: %{}
 
       timestamps(type: :utc_datetime_usec, updated_at: false)
@@ -50,7 +53,9 @@ defmodule SpaceTraders.Repo.Migrations.CreateCreditCalibration do
     create table(:credit_shortfalls) do
       add :agent_id, references(:agents, on_delete: :nilify_all)
       add :kind, :string, null: false
-      add :mutation_attempt_id, references(:mutation_attempts, type: :uuid, on_delete: :nilify_all)
+
+      add :mutation_attempt_id,
+          references(:mutation_attempts, type: :uuid, on_delete: :nilify_all)
 
       add :calibration_version_id,
           references(:credit_calibration_versions, on_delete: :restrict)
@@ -81,8 +86,7 @@ defmodule SpaceTraders.Repo.Migrations.CreateCreditCalibration do
            )
 
     create constraint(:credit_shortfalls, :credit_shortfall_miss_attribution,
-             check:
-               "kind <> 'pricing_model_miss' OR realized_charge > worst_case_exposure"
+             check: "kind <> 'pricing_model_miss' OR realized_charge > worst_case_exposure"
            )
 
     create table(:credit_realizations) do
