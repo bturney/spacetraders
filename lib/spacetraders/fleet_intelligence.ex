@@ -431,6 +431,10 @@ defmodule SpaceTraders.FleetIntelligence do
                retained_markets(waypoints, system)
              )
              |> Map.put(:observation_costs, costs)
+             |> Map.put(
+               :credit_margin_percent,
+               SpaceTraders.CreditCalibration.active().margin_percent
+             )
              |> Map.merge(
                FleetPlanning.baseline_coverage(marketplace_subjects(waypoints, system))
              )

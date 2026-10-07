@@ -29,6 +29,8 @@ defmodule SpaceTraders.API do
   network is touched; tests register stubs with `Req.Test.stub(SpaceTraders.API, ...)`.
   """
 
+  require Logger
+
   alias SpaceTraders.API.RateLimiter
   alias SpaceTraders.API.CapacityGovernor
   alias SpaceTraders.API.ShadowAdmission
@@ -198,6 +200,7 @@ defmodule SpaceTraders.API do
         SpaceTraders.Observability.with_context(Map.to_list(context), fn ->
           admit_and_send(operation.method, request["path"], token, opts)
         end)
+        |> record_realized_charge(attempt)
       else
         {:error, reason} -> {:error, reason}
         _ -> {:error, :recorded_operation_not_activated}
@@ -637,6 +640,25 @@ defmodule SpaceTraders.API do
     do: FleetAcquisition.admit_send(attempt)
 
   defp mark_mutation_sent(attempt), do: MutationAttempts.mark_sent_or_unknown(attempt)
+
+  # The decoded success response is the only evidence attributing a realized
+  # charge to exactly this attempt; its absence leaves calibration untouched.
+  defp record_realized_charge({:ok, response} = result, %Attempt{} = attempt)
+       when is_map(response) do
+    # The send already happened; a failed evidence write must not discard the
+    # response the caller still needs to settle the selected outcome.
+    with true <- is_map(attempt.prepared_evidence["spending"]),
+         {:error, reason} <- SpaceTraders.CreditCalibration.record_realization(attempt, response) do
+      Logger.error("credit realization not recorded",
+        mutation_attempt_id: attempt.id,
+        reason: inspect(reason)
+      )
+    end
+
+    result
+  end
+
+  defp record_realized_charge(result, _attempt), do: result
 
   defp record_mutation_outcome(nil, _classification, _evidence), do: :ok
 

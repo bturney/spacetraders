@@ -4,30 +4,33 @@ defmodule SpaceTraders.MarketSpending do
   import Ecto.Query
 
   alias SpaceTraders.Agent.Agent
-  alias SpaceTraders.{Clock, Evidence, Repo, World}
+  alias SpaceTraders.{Clock, CreditCalibration, Evidence, Repo, World}
   alias SpaceTraders.FleetAllocation.{Commitment, Portfolio}
   alias SpaceTraders.FleetGeneration.Generation
   alias SpaceTraders.FleetStrategy.{Revision, StandingAuthority}
   alias SpaceTraders.MutationAttempts.Attempt
   alias SpaceTraders.SafetyFence.DependencyKey
 
-  @version "market-purchase-v1-25pct"
-  @margin 25
+  # Pure planning callers without a calibration read use the initial model;
+  # runtime callers pass `CreditCalibration.active/0`'s margin.
+  @initial_margin 25
   @minimum_margin 10
   @freshness_seconds 30
   @shipyard_freshness_seconds 300
   @credit_operations ~w(purchase-cargo purchase-ship refuel-ship jump-ship install-ship-module remove-ship-module install-ship-mount remove-ship-mount repair-ship)
 
-  def worst_case_exposure(price, units, margin \\ @margin)
+  def worst_case_exposure(price, units, margin \\ @initial_margin)
       when is_integer(price) and price >= 0 and is_integer(units) and units >= 0 and
              is_integer(margin) and margin >= @minimum_margin do
     div(price * units * (100 + margin) + 99, 100)
   end
 
-  def affordable_units(credits, price) when is_integer(price) and price > 0,
-    do: div(max(credits, 0) * 100, price * (100 + @margin))
+  def affordable_units(credits, price, margin \\ @initial_margin)
 
-  def affordable_units(_credits, 0), do: :infinity
+  def affordable_units(credits, price, margin) when is_integer(price) and price > 0,
+    do: div(max(credits, 0) * 100, price * (100 + margin))
+
+  def affordable_units(_credits, 0, _margin), do: :infinity
 
   @fuel_per_market_unit 100
 
@@ -96,6 +99,7 @@ defmodule SpaceTraders.MarketSpending do
     %{waypoint: waypoint, symbol: symbol, units: units} = request
     system = waypoint |> String.split("-") |> Enum.take(2) |> Enum.join("-")
     subject = "market:#{system}:#{waypoint}"
+    calibration = CreditCalibration.active()
 
     with {:ok, quote} <-
            retained_or_read(agent, subject, fn ->
@@ -127,9 +131,10 @@ defmodule SpaceTraders.MarketSpending do
          "trade_symbol" => symbol,
          "unit_price" => good.purchase_price,
          "units" => units,
-         "calibration_version" => @version,
-         "margin_percent" => @margin,
-         "worst_case_exposure" => worst_case_exposure(good.purchase_price, units)
+         "calibration_version" => calibration.version,
+         "margin_percent" => calibration.margin_percent,
+         "worst_case_exposure" =>
+           worst_case_exposure(good.purchase_price, units, calibration.margin_percent)
        })}
     else
       {:error, reason} -> {:error, reason}
@@ -145,6 +150,8 @@ defmodule SpaceTraders.MarketSpending do
   than an invented bound.
   """
   def acquire_ship_purchase(agent, %{source_waypoint: waypoint, ship: %{type: type}}) do
+    calibration = CreditCalibration.active()
+
     with {:ok, price} <- shipyard_price(agent, waypoint, type),
          {:ok, credits} <- acquire_credits(agent),
          true <-
@@ -158,9 +165,9 @@ defmodule SpaceTraders.MarketSpending do
          "ship_type" => type,
          "unit_price" => price,
          "units" => 1,
-         "calibration_version" => @version,
-         "margin_percent" => @margin,
-         "worst_case_exposure" => worst_case_exposure(price, 1)
+         "calibration_version" => calibration.version,
+         "margin_percent" => calibration.margin_percent,
+         "worst_case_exposure" => worst_case_exposure(price, 1, calibration.margin_percent)
        }}
     else
       {:error, reason} -> {:error, reason}
@@ -199,12 +206,39 @@ defmodule SpaceTraders.MarketSpending do
   def lock_agent(id) when is_integer(id),
     do: Repo.one!(from a in Agent, where: a.id == ^id, lock: "FOR UPDATE")
 
+  @doc "Credit-bearing operation ids governed by spending admission."
+  def credit_operations, do: @credit_operations
+
+  # Every credit-bearing family honours the Agent's spending pause first; a
+  # paused Agent never spends through the floor, recovery purposes included.
   def admit(%Attempt{operation_id: operation} = attempt, intent, revision)
-      when operation in @spending_operations do
+      when operation in @credit_operations do
     agent = Repo.get!(Agent, attempt.agent_id)
+    # Fleet Ship acquisition has no Intent; its Revision is the attempt's own.
+    revision = if is_nil(intent), do: attempt_revision(attempt), else: revision
+
+    credits =
+      case current_credits(agent) do
+        {:ok, binding} -> binding
+        _ -> nil
+      end
+
+    with {:ok, floor} <- credit_floor(revision),
+         :ok <- CreditCalibration.spending_pause(agent, credits, floor, revision) do
+      admit_spend(attempt, agent, intent, revision)
+    end
+  end
+
+  def admit(_attempt, _intent, _revision), do: :ok
+
+  # Market purchase, refuel and jump/antimatter share one admission rule; the
+  # prepared request defines the good and units each one bills.
+  defp admit_spend(%Attempt{operation_id: operation} = attempt, agent, intent, revision)
+       when operation in @spending_operations do
     spending = attempt.prepared_evidence["spending"]
 
-    with :ok <- validate_quote(agent, attempt, spending),
+    with :ok <- current_calibration(spending),
+         :ok <- validate_quote(agent, attempt, spending),
          {:ok, credits} <- current_credits(agent),
          {:ok, floor} <- credit_floor(revision),
          {:ok, other_exposure} <-
@@ -217,14 +251,12 @@ defmodule SpaceTraders.MarketSpending do
     end
   end
 
-  # Fleet Ship acquisition has no Intent. Its own Commitment is named by the
-  # attempt's provenance, and its Revision by the attempt itself.
-  def admit(%Attempt{operation_id: "purchase-ship"} = attempt, nil, _revision) do
-    agent = Repo.get!(Agent, attempt.agent_id)
+  # Fleet Ship acquisition's own Commitment is named by the attempt's provenance.
+  defp admit_spend(%Attempt{operation_id: "purchase-ship"} = attempt, agent, nil, revision) do
     spending = attempt.prepared_evidence["spending"]
-    revision = attempt.strategy_revision_id && Repo.get(Revision, attempt.strategy_revision_id)
 
     with :ok <- validate_offer(agent, attempt, spending),
+         :ok <- current_calibration(spending),
          {:ok, credits} <- current_credits(agent),
          {:ok, floor} <- credit_floor(revision),
          {:ok, other_exposure} <-
@@ -242,7 +274,10 @@ defmodule SpaceTraders.MarketSpending do
     end
   end
 
-  def admit(_attempt, _intent, _revision), do: :ok
+  defp admit_spend(_attempt, _agent, _intent, _revision), do: :ok
+
+  defp attempt_revision(%Attempt{strategy_revision_id: nil}), do: nil
+  defp attempt_revision(%Attempt{strategy_revision_id: id}), do: Repo.get(Revision, id)
 
   defp validate_quote(agent, attempt, spending) when is_map(spending) do
     with {:ok, expected} <- expected_purchase(attempt),
@@ -262,10 +297,8 @@ defmodule SpaceTraders.MarketSpending do
            spending["trade_symbol"] == expected.symbol and spending["units"] == expected.units,
          true <- spending["unit_price"] == good.purchase_price,
          true <-
-           spending["calibration_version"] == @version and spending["margin_percent"] == @margin,
-         true <-
            spending["worst_case_exposure"] ==
-             worst_case_exposure(good.purchase_price, expected.units) do
+             worst_case_exposure(good.purchase_price, expected.units, spending["margin_percent"]) do
       :ok
     else
       _ -> {:error, :market_quote_stale_or_missing}
@@ -303,6 +336,16 @@ defmodule SpaceTraders.MarketSpending do
     {:ok, %{waypoint: action["source_waypoint"], symbol: "ANTIMATTER", units: 1}}
   end
 
+  # A bound prepared under a superseded margin is replanned, never resized.
+  defp current_calibration(%{"calibration_version" => version, "margin_percent" => margin}) do
+    case CreditCalibration.active() do
+      %{version: ^version, margin_percent: ^margin} -> :ok
+      _ -> {:error, :credit_calibration_superseded}
+    end
+  end
+
+  defp current_calibration(_spending), do: {:error, :market_quote_stale_or_missing}
+
   defp offer_field(nil, _key), do: nil
   defp offer_field(offer, key), do: Map.get(offer, key) || Map.get(offer, Atom.to_string(key))
 
@@ -313,8 +356,8 @@ defmodule SpaceTraders.MarketSpending do
          {:ok, price} <- shipyard_price(agent, waypoint, spending["ship_type"]),
          true <- spending["unit_price"] == price and spending["units"] == 1,
          true <-
-           spending["calibration_version"] == @version and spending["margin_percent"] == @margin,
-         true <- spending["worst_case_exposure"] == worst_case_exposure(price, 1) do
+           spending["worst_case_exposure"] ==
+             worst_case_exposure(price, 1, spending["margin_percent"]) do
       :ok
     else
       _ -> {:error, :ship_offer_evidence_unavailable}

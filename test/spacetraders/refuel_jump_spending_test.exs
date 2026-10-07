@@ -87,7 +87,7 @@ defmodule SpaceTraders.RefuelJumpSpendingTest do
 
       assert %Intent{status: "blocked", blocker: blocker} = Repo.get!(Intent, intent.id)
       assert blocker.resolver == "operator"
-      assert blocker.reason == "insufficient_unreserved_headroom"
+      assert blocker.reason == "credit_spending_paused"
 
       assert [%{state: "not_sent", sent_or_unknown_at: nil}] =
                agent

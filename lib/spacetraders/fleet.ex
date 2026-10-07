@@ -880,7 +880,12 @@ defmodule SpaceTraders.Fleet do
     do: "System exploration cannot progress: target system waypoints are unavailable."
 
   defp blocker_summary(reason)
-       when reason in [:insufficient_unreserved_headroom, :authoritative_credit_facts_required],
+       when reason in [
+              :insufficient_unreserved_headroom,
+              :authoritative_credit_facts_required,
+              :credit_spending_paused,
+              :credit_calibration_superseded
+            ],
        do:
          "Spending stays paused: credits cannot cover this fuel or antimatter purchase above the credit floor."
 
@@ -922,7 +927,12 @@ defmodule SpaceTraders.Fleet do
         {"game_state", "fuel_observation_available", ["refresh_ship", "refuel"]}
 
       {code, _reason}
-      when code in ["insufficient_unreserved_headroom", "authoritative_credit_facts_required"] ->
+      when code in [
+             "insufficient_unreserved_headroom",
+             "authoritative_credit_facts_required",
+             "credit_spending_paused",
+             "credit_calibration_superseded"
+           ] ->
         {"operator", "credits_above_floor_with_headroom", ["acquire_credits", "resume"]}
 
       {code, _reason}

@@ -156,6 +156,7 @@ defmodule SpaceTraders.FleetShadow do
     as_of
     |> FleetPlanning.market_snapshot(system_symbol, agent.id, markets)
     |> Map.merge(FleetPlanning.baseline_coverage(baseline))
+    |> Map.put(:credit_margin_percent, SpaceTraders.CreditCalibration.active().margin_percent)
   end
 
   defp plan(revision, snapshot) do
