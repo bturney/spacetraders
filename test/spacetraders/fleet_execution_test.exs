@@ -4,7 +4,7 @@ defmodule SpaceTraders.FleetExecutionTest do
   import SpaceTraders.AgentFixtures
   import SpaceTraders.ShipBody
 
-  alias SpaceTraders.API.CapacityGovernor.Snapshot, as: CapacitySnapshot
+  alias SpaceTraders.Test.CapacityDispositions
   alias SpaceTraders.API.Model.Waypoint
   alias SpaceTraders.Agent.{Operator, Scope}
   alias SpaceTraders.Evidence.Observation
@@ -417,18 +417,10 @@ defmodule SpaceTraders.FleetExecutionTest do
       end)
     end
 
-    defp capacity do
-      %CapacitySnapshot{
-        observed_at: @as_of,
-        available_slots: 3,
-        evidence_fingerprint: "governed-evidence",
-        next_outage_probe_at: nil,
-        backpressure: :none
-      }
-    end
+    defp capacity, do: CapacityDispositions.proceed(@as_of)
 
     defp sustained_capacity do
-      %{capacity() | available_slots: 0, backpressure: :sustained}
+      CapacityDispositions.defer(@as_of)
     end
   end
 

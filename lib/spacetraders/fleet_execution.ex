@@ -22,6 +22,7 @@ defmodule SpaceTraders.FleetExecution do
   alias SpaceTraders.FleetConstruction
   alias SpaceTraders.Fleet.Intents
   alias SpaceTraders.FleetAllocation
+  alias SpaceTraders.FleetCapacity
   alias SpaceTraders.FleetAllocation.{Commitment, Portfolio}
   alias SpaceTraders.FleetGeneration.Generation
   alias SpaceTraders.FleetShadow
@@ -153,11 +154,11 @@ defmodule SpaceTraders.FleetExecution do
         %AgentRecord{} = agent,
         %Revision{} = revision,
         %{candidate_contributions: candidates, observation_demands: demands},
-        %{available_slots: slots, backpressure: pressure}
+        capacity
       )
       when is_list(candidates) and is_list(demands) do
     cond do
-      slots <= 0 or pressure == :sustained ->
+      not FleetCapacity.proceed?(capacity) ->
         {:error, :api_capacity_unavailable}
 
       candidates == [] ->
@@ -790,20 +791,13 @@ defmodule SpaceTraders.FleetExecution do
   # The Governor's explicit deferral wins over availability collection. It is
   # not authoritative evidence of an empty portfolio, so it cannot mint or
   # disturb a Neutral Wait.
-  defp capacity_deferral_or_error(
-         current,
-         %{available_slots: slots, backpressure: pressure},
-         _error
-       )
-       when slots <= 0 or pressure == :sustained do
-    if current do
-      {:ok, %{action: :retained_for_capacity, portfolio: current}}
-    else
-      {:ok, %{action: :deferred_for_capacity}}
+  defp capacity_deferral_or_error(current, capacity, error) do
+    cond do
+      FleetCapacity.proceed?(capacity) -> error
+      current -> {:ok, %{action: :retained_for_capacity, portfolio: current}}
+      true -> {:ok, %{action: :deferred_for_capacity}}
     end
   end
-
-  defp capacity_deferral_or_error(_current, _capacity, error), do: error
 
   defp governed_market_access(%AgentRecord{} = agent) do
     with {:ok, system_symbol} <- Fleet.system_from_headquarters(agent.headquarters) do
@@ -896,36 +890,29 @@ defmodule SpaceTraders.FleetExecution do
   end
 
   defp reconcile_market_replan(
-         _scope,
-         _agent,
-         _revision,
-         current,
-         comparison,
-         %{
-           available_slots: slots,
-           backpressure: pressure
-         },
-         _availability
-       )
-       when slots == 0 or pressure == :sustained do
-    if current do
-      # Capacity is evidence for allocation: retain a still-authorized commitment
-      # rather than churn claims while the Governor cannot admit the replacement.
-      {:ok, %{action: :retained_for_capacity, portfolio: current, comparison: comparison}}
-    else
-      {:ok, %{action: :deferred_for_capacity, comparison: comparison}}
-    end
-  end
-
-  defp reconcile_market_replan(
          scope,
          agent,
          revision,
          current,
          comparison,
-         _capacity,
+         capacity,
          availability
        ) do
+    cond do
+      not FleetCapacity.proceed?(capacity) and current ->
+        # Capacity is evidence for allocation: retain a still-authorized commitment
+        # rather than churn claims while the Governor cannot admit the replacement.
+        {:ok, %{action: :retained_for_capacity, portfolio: current, comparison: comparison}}
+
+      not FleetCapacity.proceed?(capacity) ->
+        {:ok, %{action: :deferred_for_capacity, comparison: comparison}}
+
+      true ->
+        replan_market_commitments(scope, agent, revision, current, comparison, availability)
+    end
+  end
+
+  defp replan_market_commitments(scope, agent, revision, current, comparison, availability) do
     if current &&
          Enum.any?(current.commitments, fn commitment ->
            Enum.any?(

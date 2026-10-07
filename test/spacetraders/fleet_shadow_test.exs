@@ -3,7 +3,7 @@ defmodule SpaceTraders.FleetShadowTest do
 
   import SpaceTraders.AgentFixtures
 
-  alias SpaceTraders.API.CapacityGovernor.Snapshot, as: CapacitySnapshot
+  alias SpaceTraders.Test.CapacityDispositions
   alias SpaceTraders.Evidence.Observation
   alias SpaceTraders.FleetAllocation.Commitment
   alias SpaceTraders.FleetAllocation.StrategyDecisionEpisode
@@ -77,7 +77,7 @@ defmodule SpaceTraders.FleetShadowTest do
     assert Repo.aggregate(Commitment, :count) == 0
   end
 
-  test "changed Listings and API pressure deterministically trigger shadow replanning" do
+  test "changed Listings and capacity disposition deterministically trigger shadow replanning" do
     assert {:ok, previous} =
              FleetShadow.compare(snapshot(), revision(), availability(), capacity())
 
@@ -92,13 +92,13 @@ defmodule SpaceTraders.FleetShadowTest do
                capacity()
              )
 
-    assert {:ok, %{replan_trigger: :api_pressure_changed} = second} =
+    assert {:ok, %{replan_trigger: :capacity_disposition_changed} = second} =
              FleetShadow.replan(
                first,
                changed_listings,
                revision(),
                availability(),
-               capacity(:sustained)
+               capacity(:defer)
              )
 
     assert {:ok, %{replan_trigger: :unchanged}} =
@@ -107,7 +107,7 @@ defmodule SpaceTraders.FleetShadowTest do
                changed_listings,
                revision(),
                availability(),
-               capacity(:sustained)
+               capacity(:defer)
              )
   end
 
@@ -150,14 +150,11 @@ defmodule SpaceTraders.FleetShadowTest do
     }
   end
 
-  defp capacity(backpressure \\ :none) do
-    %CapacitySnapshot{
-      observed_at: @as_of,
-      available_slots: 1,
-      evidence_fingerprint: "governed-evidence",
-      next_outage_probe_at: nil,
-      backpressure: backpressure
-    }
+  defp capacity(status \\ :proceed) do
+    case status do
+      :proceed -> CapacityDispositions.proceed(@as_of)
+      :defer -> CapacityDispositions.defer(@as_of)
+    end
   end
 
   defp market(waypoint, purchase_price) do
