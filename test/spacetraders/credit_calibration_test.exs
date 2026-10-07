@@ -3,7 +3,7 @@ defmodule SpaceTraders.CreditCalibrationTest do
 
   import Ecto.Query
   import SpaceTraders.CreditSpendingFixtures
-  import SpaceTraders.RecordedDispatchFixtures, only: [prepare_action: 3]
+  import SpaceTraders.RecordedDispatchFixtures, only: [prepare_action: 3, prepare_action: 4]
 
   alias SpaceTraders.API
   alias SpaceTraders.Agent.Scope
@@ -153,13 +153,35 @@ defmodule SpaceTraders.CreditCalibrationTest do
     %{attempt: dock} = prepare_action(agent, "PILOT-1", %{"kind" => "dock"})
     assert {:ok, %{state: "sent_or_unknown"}} = RecordedAction.admit_send(dock)
 
+    # The retained Market at HQ quotes Cargo; Refuel reads a FUEL quote elsewhere.
+    Req.Test.stub(API, fn
+      %{request_path: "/v2/my/agent"} = conn ->
+        Req.Test.json(conn, %{"data" => %{"symbol" => agent.symbol, "credits" => 993}})
+
+      conn ->
+        Req.Test.json(conn, %{
+          "data" => %{
+            "symbol" => "X1-UX81-B2",
+            "exports" => [],
+            "imports" => [],
+            "exchange" => [],
+            "tradeGoods" => [%{"symbol" => "FUEL", "purchasePrice" => 10, "tradeVolume" => 100}]
+          }
+        })
+    end)
+
     %{attempt: refuel} =
-      prepare_action(agent, "PILOT-2", %{
-        "kind" => "refuel",
-        "waypoint" => agent.headquarters,
-        "units" => 20,
-        "fuel_before" => 20
-      })
+      prepare_action(
+        agent,
+        "PILOT-2",
+        %{
+          "kind" => "refuel",
+          "waypoint" => "X1-UX81-B2",
+          "units" => 20,
+          "fuel_before" => 20
+        },
+        live_quote: true
+      )
 
     assert {:error, :credit_spending_paused} = RecordedAction.admit_send(refuel)
     assert %{state: "not_sent", sent_or_unknown_at: nil} = MutationAttempts.get!(refuel.id)
