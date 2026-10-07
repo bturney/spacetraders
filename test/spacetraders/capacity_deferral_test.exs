@@ -325,6 +325,75 @@ defmodule SpaceTraders.CapacityDeferralTest do
     end
   end
 
+  describe "Ship runtime wakeup" do
+    setup do
+      governor = :"capacity_deferral_runtime_#{System.unique_integer([:positive])}"
+      start_supervised!({CapacityGovernor, name: governor})
+      previous = Application.fetch_env(:spacetraders, CapacityDeferral)
+      Application.put_env(:spacetraders, CapacityDeferral, governor: governor)
+
+      on_exit(fn ->
+        case previous do
+          {:ok, value} -> Application.put_env(:spacetraders, CapacityDeferral, value)
+          :error -> Application.delete_env(:spacetraders, CapacityDeferral)
+        end
+      end)
+
+      %{governor: governor}
+    end
+
+    test "a deferred wakeup asks capacity before the Ship runtime spends any read", %{
+      governor: governor
+    } do
+      %{agent: agent, intent: intent} = transfer_fixture()
+
+      {:ok, %{intent: selected, attempt: attempt}} =
+        RecordedAction.prepare(agent, intent, prepared_action(agent))
+
+      CapacityGovernor.protocol_rejected(30, governor)
+      stub_throttled_reads()
+      _ = Intents.advance(agent, selected, nil)
+      first = wakeup_event()
+
+      {:ok, requests} = Elixir.Agent.start_link(fn -> [] end)
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        Elixir.Agent.update(requests, &[conn.request_path | &1])
+        Req.Test.json(conn, %{"data" => ship_body("PRODUCER")})
+      end)
+
+      ship_server =
+        GenServer.whereis({:via, Registry, {SpaceTraders.Fleet.ShipRegistry, "PRODUCER"}})
+
+      Req.Test.allow(SpaceTraders.API, self(), ship_server)
+      {:ok, due} = Timeline.reschedule_event(first, SpaceTraders.Clock.utc_now())
+      :ok = SpaceTraders.Fleet.ShipServer.arm(agent, "PRODUCER", due)
+
+      assert eventually(fn ->
+               Elixir.Agent.get(requests, & &1) != [] or
+                 Enum.any?(pending_wakeups(), &(&1.id != first.id))
+             end)
+
+      assert Elixir.Agent.get(requests, & &1) == []
+      assert Repo.get!(Intent, selected.id).blocker.reason == "api_capacity_deferred"
+      assert MutationAttempts.get!(attempt.id).state == "prepared"
+      SpaceTraders.Quiesced.stop_ship("PRODUCER")
+    end
+  end
+
+  defp pending_wakeups do
+    Timeline.pending_events(:ship, "PRODUCER")
+    |> Enum.filter(&(&1.event_type == "intent_retry"))
+  end
+
+  defp eventually(fun, attempts \\ 200) do
+    cond do
+      fun.() -> true
+      attempts == 0 -> false
+      true -> Process.sleep(10) && eventually(fun, attempts - 1)
+    end
+  end
+
   defp wakeup_event do
     assert [event] =
              Timeline.pending_events(:ship, "PRODUCER")

@@ -45,6 +45,11 @@ config :spacetraders, SpaceTraders.API,
 
 config :spacetraders, SpaceTraders.API.RateLimiter, enabled: false
 
+# Shared-suite failures and 429s must not pace unrelated async tests for
+# seconds: the app-wide governor probes without backoff delay. Isolated
+# governor tests pass their own probe timing.
+config :spacetraders, SpaceTraders.API.CapacityGovernor, probe_base_ms: 0
+
 # An explicit :test_disabled governor target may bypass admission in tests.
 # A missing governor still fails closed; production builds exclude this path.
 config :spacetraders, :capacity_test_disabled_allowed, true

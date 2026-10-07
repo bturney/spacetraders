@@ -157,6 +157,24 @@ defmodule SpaceTraders.Fleet.ShipServer do
     )
   end
 
+  # A Capacity Deferral wakeup carries no Ship state to confirm. The Intent
+  # engine asks for capacity before it reads, so the runtime spends no read of
+  # its own on a wakeup that may still be deferred.
+  defp handle_pending_event(:intent_retry, event, state) do
+    :ok = Timeline.fire_event(event)
+    state = drop_pending_event(state, :intent_retry, event)
+
+    SpaceTraders.Fleet.Intents.reconcile(
+      state.agent_id,
+      state.symbol,
+      nil,
+      :intent_retry,
+      event.payload["intent_id"]
+    )
+
+    {:noreply, state}
+  end
+
   defp handle_pending_event(type, event, state) do
     case refresh(state) do
       {:ok, ship} ->

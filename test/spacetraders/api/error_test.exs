@@ -134,6 +134,21 @@ defmodule SpaceTraders.API.ErrorTest do
       assert {:ok, %{symbol: "ORBITALIST"}} = API.get_agent(agent_token_reference())
     end
 
+    test "a 429 on a read that cannot retry still reports protocol pressure to the governor" do
+      Req.Test.expect(SpaceTraders.API, 1, fn conn ->
+        conn
+        |> Plug.Conn.put_status(429)
+        |> Req.Test.json(%{"error" => %{"code" => 429, "message" => "rate limited"}})
+      end)
+
+      assert {:error, %GameplayError{code: 429}} =
+               API.get_ship(agent_token_reference(), "SHIP-1", retry: false)
+
+      assert %{protocol_rejections: rejections} = SpaceTraders.API.CapacityGovernor.diagnostics()
+
+      assert rejections >= 1
+    end
+
     test "does not replay a failed mutation" do
       Req.Test.expect(SpaceTraders.API, 1, fn conn ->
         conn
@@ -174,7 +189,7 @@ defmodule SpaceTraders.API.ErrorTest do
                SpaceTraders.MutationAttempts.list_for_agent(agent)
 
       assert %DateTime{} = sent
-      assert SpaceTraders.API.CapacityGovernor.snapshot().protocol_rejections >= 1
+      assert SpaceTraders.API.CapacityGovernor.diagnostics().protocol_rejections >= 1
       assert Repo.get!(SpaceTraders.Fleet.Intent, intent.id).mutation_attempt_id == attempt.id
     end
   end

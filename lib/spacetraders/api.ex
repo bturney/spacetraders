@@ -495,7 +495,9 @@ defmodule SpaceTraders.API do
                 # A still-authorized protocol rejection is a real capacity signal.
                 # Our own suppression is not, so the Governor never records a
                 # Retry-After window for a request it did not have to run.
-                if status == 429 and opts[:recorded_attempt] do
+                # Requests that do not retry never reach the transport retry
+                # hook, which reports every retried rejection itself.
+                if status == 429 and opts[:retry] == false do
                   report_protocol_rejection(Req.Response.get_retry_after(response))
                 end
 

@@ -129,6 +129,11 @@ Current seam owners:
 - root Intent Capacity Deferral (recovery-read 429, bounded governor-guided
   wakeup, restart, wake revalidation, mutation-response Evidence reuse):
   `test/spacetraders/capacity_deferral_test.exs`
+- API Capacity Governor lifecycle (Retry-After bound, protected probe pacing,
+  scoped vs Fleet-wide outage, abandoned callers, restart, diagnostics):
+  `test/spacetraders/api/capacity_governor_test.exs`. The app-wide test
+  governor probes with no backoff delay (`probe_base_ms: 0` in
+  `config/test.exs`); isolated governors pass their own timing.
 
 - whole-runtime composition across runtime restart:
   `test/diagnostics/runtime_qualification.exs` (diagnostic only)

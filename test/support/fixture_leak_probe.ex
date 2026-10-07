@@ -53,15 +53,15 @@ defmodule SpaceTraders.FixtureLeakProbe do
   end
 
   defp capacity_leaks do
-    capacity = SpaceTraders.API.CapacityGovernor.snapshot()
+    capacity = SpaceTraders.API.CapacityGovernor.diagnostics()
 
     admissions =
       SpaceTraders.EmergencyStopAdmission.mutation_allowed?("BASELINE_AGENT_TOKEN") == :ok and
         SpaceTraders.FleetGenerationAdmission.mutation_allowed?("BASELINE_AGENT_TOKEN") == :ok
 
-    if admissions and capacity.available_slots == capacity.admitted_capacity and
-         capacity.ordinary_delayed_until == nil and capacity.next_outage_probe_at == nil and
-         capacity.protocol_rejections == 0,
+    if admissions and capacity.in_flight == 0 and capacity.deferred == %{} and
+         capacity.retry_after_until == nil and capacity.outage == nil and
+         capacity.scoped_failures == [] and capacity.protocol_rejections == 0,
        do: [],
        else: ["volatile API admissions"]
   end
