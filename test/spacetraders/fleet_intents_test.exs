@@ -15,11 +15,6 @@ defmodule SpaceTraders.FleetIntentsTest do
   alias SpaceTraders.FleetPlanning.CandidateContribution
   alias SpaceTraders.FleetStrategy.{Revision, Strategy}
 
-  setup do
-    on_exit(fn -> SpaceTraders.Quiesced.stop_all_ships() end)
-    :ok
-  end
-
   test "a Market round trip persists and reloads JSON-safe market_trade data" do
     {agent, ship, portfolio, commitment} = claimed_ship("INTENTS-MARKET")
     ship_path = "/v2/my/ships/#{ship.symbol}"

@@ -12,11 +12,6 @@ defmodule SpaceTraders.FleetReadTest do
   alias SpaceTraders.Timeline
   alias SpaceTraders.Timeline.Event
 
-  setup do
-    on_exit(fn -> SpaceTraders.Quiesced.stop_all_ships() end)
-    :ok
-  end
-
   test "reads live Ships using the owning Agent's credentials" do
     Req.Test.stub(SpaceTraders.API, fn conn ->
       assert conn.method == "GET"

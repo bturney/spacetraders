@@ -27,6 +27,11 @@ defmodule SpaceTraders.DataCase do
   setup tags do
     unless tags[:migration_test], do: SpaceTraders.DataCase.setup_sandbox(tags)
 
+    # Registered after the sandbox so it runs first on exit (reverse order),
+    # while the test still owns its connection. Async tests share the
+    # supervisor with concurrent tests and must not sweep.
+    unless tags[:async], do: on_exit(&SpaceTraders.Quiesced.stop_all_ships/0)
+
     :ok
   end
 
