@@ -7,7 +7,7 @@ defmodule SpaceTraders.FleetAllocation.Reconciler do
 
   import Ecto.Query
 
-  alias SpaceTraders.API.CapacityGovernor
+  alias SpaceTraders.FleetCapacity
   alias SpaceTraders.Agent.Scope
   alias SpaceTraders.Agent.Agent, as: AgentRecord
   alias SpaceTraders.Fleet
@@ -62,7 +62,7 @@ defmodule SpaceTraders.FleetAllocation.Reconciler do
         agent,
         revision,
         system_symbol,
-        CapacityGovernor.snapshot()
+        FleetCapacity.disposition("get-market")
       )
 
       # Boot and Waypoint evidence changes materialize durable Market demands
@@ -139,7 +139,7 @@ defmodule SpaceTraders.FleetAllocation.Reconciler do
   decides what is worth acquiring — and demands deferred by API backpressure
   stay open for the next wakeup instead of being dropped or fulfilled.
   """
-  def wake_due_demands(agent_id, capacity \\ CapacityGovernor.snapshot())
+  def wake_due_demands(agent_id, capacity \\ FleetCapacity.disposition("get-market"))
       when is_integer(agent_id) and is_map(capacity) do
     with_context(agent_id, fn scope, agent, revision ->
       system = system_for(agent)
@@ -239,7 +239,7 @@ defmodule SpaceTraders.FleetAllocation.Reconciler do
         agent,
         revision,
         system_symbol,
-        CapacityGovernor.snapshot()
+        FleetCapacity.disposition("get-market")
       )
 
       # Governed Market evidence just landed: establish the next future

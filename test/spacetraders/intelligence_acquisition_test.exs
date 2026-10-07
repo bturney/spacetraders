@@ -4,6 +4,7 @@ defmodule SpaceTraders.IntelligenceAcquisitionTest do
 
   import SpaceTraders.ShipBody
 
+  alias SpaceTraders.Test.CapacityDispositions
   alias SpaceTraders.Agent.Agent, as: AgentRecord
   alias SpaceTraders.Evidence
   alias SpaceTraders.Agent.{Operator, Scope}
@@ -1106,10 +1107,13 @@ defmodule SpaceTraders.IntelligenceAcquisitionTest do
     end)
 
     assert {:ok, %{intent: %Intent{status: "waiting", target_waypoint: "X1-UX81-A2"} = intent}} =
-             FleetIntelligence.reconcile(scope, agent, revision, "X1-UX81", %{
-               available_slots: 3,
-               backpressure: :none
-             })
+             FleetIntelligence.reconcile(
+               scope,
+               agent,
+               revision,
+               "X1-UX81",
+               CapacityDispositions.proceed()
+             )
 
     assert_receive {"POST", ^orbit_path}
     assert_receive {"POST", ^navigate_path}
@@ -1203,10 +1207,13 @@ defmodule SpaceTraders.IntelligenceAcquisitionTest do
              })
 
     assert {:ok, %{intent: %Intent{status: "completed"}, commitment: commitment}} =
-             FleetExecution.activate_intelligence(scope, agent, revision, planning, %{
-               available_slots: 3,
-               backpressure: :none
-             })
+             FleetExecution.activate_intelligence(
+               scope,
+               agent,
+               revision,
+               planning,
+               CapacityDispositions.proceed()
+             )
 
     assert commitment.claims == [ship.symbol]
 
@@ -1279,10 +1286,13 @@ defmodule SpaceTraders.IntelligenceAcquisitionTest do
     end)
 
     assert {:error, :intelligence_activation_unavailable} =
-             FleetExecution.activate_intelligence(scope, agent, revision, planning, %{
-               available_slots: 3,
-               backpressure: :none
-             })
+             FleetExecution.activate_intelligence(
+               scope,
+               agent,
+               revision,
+               planning,
+               CapacityDispositions.proceed()
+             )
 
     assert_receive {"GET", "/v2/my/agent"}
     assert_receive {"GET", "/v2/my/ships"}
@@ -1380,16 +1390,22 @@ defmodule SpaceTraders.IntelligenceAcquisitionTest do
     end)
 
     assert {:ok, %{intent: %Intent{status: "completed"}}} =
-             FleetIntelligence.reconcile(scope, agent, revision, "X1-UX81", %{
-               available_slots: 3,
-               backpressure: :none
-             })
+             FleetIntelligence.reconcile(
+               scope,
+               agent,
+               revision,
+               "X1-UX81",
+               CapacityDispositions.proceed()
+             )
 
     assert {:error, :no_decision_relevant_intelligence} =
-             FleetIntelligence.reconcile(scope, agent, revision, "X1-UX81", %{
-               available_slots: 3,
-               backpressure: :none
-             })
+             FleetIntelligence.reconcile(
+               scope,
+               agent,
+               revision,
+               "X1-UX81",
+               CapacityDispositions.proceed()
+             )
   end
 
   test "a lost scan response waits for its cooldown and never blindly scans again" do
@@ -1549,10 +1565,13 @@ defmodule SpaceTraders.IntelligenceAcquisitionTest do
     end)
 
     assert {:ok, %{intent: %Intent{status: "completed"}}} =
-             FleetIntelligence.reconcile(scope, agent, revision, "X1-UX81", %{
-               available_slots: 3,
-               backpressure: :none
-             })
+             FleetIntelligence.reconcile(
+               scope,
+               agent,
+               revision,
+               "X1-UX81",
+               CapacityDispositions.proceed()
+             )
 
     projection =
       World.intelligence(agent, :market, "X1-UX81", "X1-UX81-A1", DateTime.utc_now(), 300)
@@ -1667,10 +1686,7 @@ defmodule SpaceTraders.IntelligenceAcquisitionTest do
     # The durable scheduler announces due Observation Demands; Strategy
     # reconciliation wakes from that announcement without any recurring scan.
     assert :ok =
-             Reconciler.wake_due_demands(agent.id, %{
-               available_slots: 3,
-               backpressure: :none
-             })
+             Reconciler.wake_due_demands(agent.id, CapacityDispositions.proceed())
 
     eventually(fn ->
       projection =
@@ -1762,10 +1778,7 @@ defmodule SpaceTraders.IntelligenceAcquisitionTest do
     end)
 
     assert :ok =
-             Reconciler.wake_due_demands(agent.id, %{
-               available_slots: 0,
-               backpressure: :sustained
-             })
+             Reconciler.wake_due_demands(agent.id, CapacityDispositions.defer())
 
     # The wakeup ran, but sustained API pressure refuses admission: no fresh
     # evidence is acquired and the demand is neither deleted nor fulfilled.
@@ -1847,10 +1860,13 @@ defmodule SpaceTraders.IntelligenceAcquisitionTest do
     end)
 
     assert {:ok, %{intent: %Intent{status: "completed"}}} =
-             FleetIntelligence.reconcile(scope, agent, revision, "X1-UX81", %{
-               available_slots: 3,
-               backpressure: :none
-             })
+             FleetIntelligence.reconcile(
+               scope,
+               agent,
+               revision,
+               "X1-UX81",
+               CapacityDispositions.proceed()
+             )
 
     projection =
       World.intelligence(agent, :shipyard, "X1-UX81", "X1-UX81-A1", DateTime.utc_now(), 300)
@@ -1911,10 +1927,13 @@ defmodule SpaceTraders.IntelligenceAcquisitionTest do
     end)
 
     assert {:error, :no_decision_relevant_intelligence} =
-             FleetIntelligence.reconcile(scope, agent, revision, "X1-UX81", %{
-               available_slots: 3,
-               backpressure: :none
-             })
+             FleetIntelligence.reconcile(
+               scope,
+               agent,
+               revision,
+               "X1-UX81",
+               CapacityDispositions.proceed()
+             )
 
     assert {:ok, %{portfolio_id: portfolio_id, commitment_id: commitment_id}} =
              FleetAllocation.current_ship_claim(agent, ship.symbol)

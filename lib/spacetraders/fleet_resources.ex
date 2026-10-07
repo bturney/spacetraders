@@ -3,12 +3,12 @@ defmodule SpaceTraders.FleetResources do
 
   alias SpaceTraders.Agent.Agent, as: AgentRecord
   alias SpaceTraders.Agent.Scope
-  alias SpaceTraders.API.CapacityGovernor
   alias SpaceTraders.API.AgentTokenReference
   alias SpaceTraders.Evidence
   alias SpaceTraders.Fleet
   alias SpaceTraders.Fleet.Intents
   alias SpaceTraders.FleetAllocation
+  alias SpaceTraders.FleetCapacity
   alias SpaceTraders.FleetGeneration.Generation
   alias SpaceTraders.FleetPlanning
   alias SpaceTraders.FleetStrategy.{Revision, StandingAuthority}
@@ -25,12 +25,15 @@ defmodule SpaceTraders.FleetResources do
         %AgentRecord{} = agent,
         %Revision{} = revision,
         system,
-        capacity \\ CapacityGovernor.snapshot()
+        capacity \\ nil
       ) do
     with index when is_integer(index) <- objective_index(revision),
          :ok <- SpaceTraders.RuntimeAuthority.execution_allowed?(),
-         %{available_slots: slots, backpressure: pressure} <- capacity,
-         true <- slots > 0 and pressure != :sustained,
+         true <-
+           FleetCapacity.proceed?(
+             capacity ||
+               FleetCapacity.disposition("extract-resources", %{strategic_priority: index})
+           ),
          true <- Intents.current(agent) == [],
          {:ok, ships} <- Fleet.list_ships(agent),
          ships <- Enum.reject(ships, &(&1.symbol in ShipReservation.reserved_symbols(agent.id))),

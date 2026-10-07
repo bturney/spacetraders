@@ -10,7 +10,7 @@ defmodule SpaceTraders.FleetShadow do
   import Ecto.Query
 
   alias SpaceTraders.Agent.Agent, as: AgentRecord
-  alias SpaceTraders.API.CapacityGovernor.Snapshot, as: CapacitySnapshot
+  alias SpaceTraders.API.CapacityGovernor.Disposition
   alias SpaceTraders.Evidence
   alias SpaceTraders.Evidence.Observation
   alias SpaceTraders.FleetAllocation
@@ -26,7 +26,7 @@ defmodule SpaceTraders.FleetShadow do
         %Revision{} = revision,
         system_symbol,
         availability,
-        %CapacitySnapshot{} = capacity,
+        %Disposition{} = capacity,
         opts \\ []
       )
       when is_binary(system_symbol) and is_map(availability) and is_list(opts) do
@@ -48,7 +48,7 @@ defmodule SpaceTraders.FleetShadow do
         document,
         system_symbol,
         availability,
-        %CapacitySnapshot{} = capacity,
+        %Disposition{} = capacity,
         opts \\ []
       )
       when is_map(document) and is_binary(system_symbol) and is_map(availability) and
@@ -70,7 +70,7 @@ defmodule SpaceTraders.FleetShadow do
         snapshot,
         %Revision{} = revision,
         availability,
-        %CapacitySnapshot{} = capacity,
+        %Disposition{} = capacity,
         opts
       )
       when is_map(snapshot) and is_map(availability) and is_list(opts) do
@@ -85,7 +85,7 @@ defmodule SpaceTraders.FleetShadow do
       {:ok,
        %{
          listings_fingerprint: listings_fingerprint(snapshot),
-         api_pressure: capacity.backpressure,
+         capacity_status: capacity.status,
          planning: planning,
          proposed_choices: portfolio.commitments,
          alternatives: portfolio.rejected,
@@ -109,7 +109,7 @@ defmodule SpaceTraders.FleetShadow do
         snapshot,
         %Revision{} = revision,
         availability,
-        %CapacitySnapshot{} = capacity,
+        %Disposition{} = capacity,
         opts
       )
       when is_map(previous) and is_map(snapshot) and is_map(availability) and is_list(opts) do
@@ -211,7 +211,7 @@ defmodule SpaceTraders.FleetShadow do
   defp replan_trigger(previous, snapshot, capacity) do
     cond do
       previous[:listings_fingerprint] != listings_fingerprint(snapshot) -> :listings_changed
-      previous[:api_pressure] != capacity.backpressure -> :api_pressure_changed
+      previous[:capacity_status] != capacity.status -> :capacity_disposition_changed
       true -> :unchanged
     end
   end

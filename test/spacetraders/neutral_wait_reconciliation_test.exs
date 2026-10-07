@@ -4,7 +4,7 @@ defmodule SpaceTraders.NeutralWaitReconciliationTest do
   import SpaceTraders.AgentFixtures
   import SpaceTraders.ShipBody
 
-  alias SpaceTraders.API.CapacityGovernor.Snapshot, as: CapacitySnapshot
+  alias SpaceTraders.Test.CapacityDispositions
   alias SpaceTraders.API.Model.Waypoint
   alias SpaceTraders.Agent.Scope
   alias SpaceTraders.{Clock, Evidence, FleetAllocation, FleetExecution, Intelligence}
@@ -67,12 +67,7 @@ defmodule SpaceTraders.NeutralWaitReconciliationTest do
     observe_market(agent, as_of)
     stub_availability(ship, %{"symbol" => agent.symbol, "credits" => 10_000})
 
-    capacity = %CapacitySnapshot{
-      observed_at: as_of,
-      available_slots: 10,
-      evidence_fingerprint: "neutral-wait-reconciliation",
-      backpressure: :normal
-    }
+    capacity = CapacityDispositions.proceed(as_of)
 
     %{
       agent: agent,
@@ -214,8 +209,8 @@ defmodule SpaceTraders.NeutralWaitReconciliationTest do
     _demand = request_market_demand(agent, revision, DateTime.add(capacity.observed_at, 300))
 
     for deferred <- [
-          %{capacity | available_slots: 0},
-          %{capacity | backpressure: :sustained}
+          CapacityDispositions.defer(capacity.observed_at),
+          CapacityDispositions.unavailable(capacity.observed_at)
         ] do
       assert {:ok, %{action: :deferred_for_capacity}} =
                FleetExecution.reconcile_market_evidence(scope, agent, revision, @system, deferred)
