@@ -200,7 +200,6 @@ defmodule SpaceTraders.API do
         SpaceTraders.Observability.with_context(Map.to_list(context), fn ->
           admit_and_send(operation.method, request["path"], token, opts)
         end)
-        |> record_realized_charge(attempt)
       else
         {:error, reason} -> {:error, reason}
         _ -> {:error, :recorded_operation_not_activated}
@@ -423,6 +422,7 @@ defmodule SpaceTraders.API do
         shadow,
         capacity
       )
+      |> record_realized_charge(attempt)
     else
       {:error, reason} ->
         complete_shadow(

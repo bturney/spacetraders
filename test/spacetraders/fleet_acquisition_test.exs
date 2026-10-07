@@ -123,6 +123,53 @@ defmodule SpaceTraders.FleetAcquisitionTest do
     assert nil == FleetAllocation.current_portfolio(scope, agent)
   end
 
+  test "a Ship charged above its recorded bound is a pricing-model breach that widens calibration" do
+    {scope, agent, revision} = generation()
+    initial = SpaceTraders.CreditCalibration.active()
+    stub_shipyard(agent)
+
+    # Offered at 10,000 (bound 12,500); the game charges 13,000.
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      case {conn.method, conn.request_path} do
+        {"GET", "/v2/my/agent"} -> overview(conn, agent, @credits)
+        {"GET", "/v2/my/ships"} -> Req.Test.json(conn, %{"data" => [docked("X1-UX81-A1")]})
+        {"POST", "/v2/my/ships"} -> purchase(conn, agent, 13_000)
+        {"GET", "/v2/my/ships/ACQUIRE-2"} -> ship(conn, @offered_speed)
+      end
+    end)
+
+    assert {:ok, %{ship: %Ship{symbol: "ACQUIRE-2"}}} =
+             FleetAcquisition.reconcile(scope, agent, revision, "X1-UX81")
+
+    assert [attempt] = purchase_attempts(agent)
+
+    assert [
+             %{
+               kind: "pricing_model_miss",
+               mutation_attempt_id: attempt_id,
+               worst_case_exposure: 12_500,
+               realized_charge: 13_000,
+               released_at: nil
+             }
+           ] = SpaceTraders.CreditCalibration.shortfalls(agent)
+
+    assert attempt_id == attempt.id
+
+    assert %{within_bound: false, operation_id: "purchase-ship", units: 1, unit_price: @price} =
+             SpaceTraders.CreditCalibration.realization(attempt)
+
+    # 13,000 is 30% over the 10,000 offer; widening clears it by one step.
+    assert %{margin_percent: 40, previous_version_id: previous} =
+             SpaceTraders.CreditCalibration.active()
+
+    assert previous == initial.id
+
+    assert [%{kind: :attention, summary: summary}] =
+             SpaceTraders.OperatorConditions.unresolved(scope)
+
+    assert summary =~ "Degraded Operation: a Ship purchase charged 13000 credits"
+  end
+
   test "a Ship whose readiness misses the promised capability is never registered" do
     {scope, agent, revision} = generation()
     stub_shipyard(agent)
@@ -843,14 +890,14 @@ defmodule SpaceTraders.FleetAcquisitionTest do
   defp overview(conn, agent, credits),
     do: Req.Test.json(conn, %{"data" => %{"symbol" => agent.symbol, "credits" => credits}})
 
-  defp purchase(conn, agent) do
+  defp purchase(conn, agent, price \\ @price) do
     Req.Test.json(conn, %{
       "data" => %{
-        "agent" => %{"symbol" => agent.symbol, "credits" => @credits - @price},
+        "agent" => %{"symbol" => agent.symbol, "credits" => @credits - price},
         "ship" => acquired(@offered_speed),
         "transaction" => %{
           "agentSymbol" => agent.symbol,
-          "price" => @price,
+          "price" => price,
           "shipSymbol" => "ACQUIRE-2",
           "shipType" => "SHIP_LIGHT_HAULER",
           "waypointSymbol" => "X1-UX81-A1",
