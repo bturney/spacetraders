@@ -148,6 +148,23 @@ defmodule SpaceTraders.CreditCalibration do
     end
   end
 
+  # A Shipyard transaction charges `price` for exactly the offered Ship type.
+  defp attributable(%{"kind" => "ship"} = spending, %{
+         transaction: %{} = transaction,
+         agent: %{} = agent
+       }) do
+    with bound when is_integer(bound) <- spending["worst_case_exposure"],
+         price when is_integer(price) <- spending["unit_price"],
+         1 <- spending["units"],
+         true <- Map.get(transaction, :ship_type) == spending["ship_type"],
+         charge when is_integer(charge) and charge >= 0 <- Map.get(transaction, :price),
+         credits when is_integer(credits) <- Map.get(agent, :credits) do
+      {:ok, %{bound: bound, unit_price: price, units: 1, charge: charge, credits: credits}}
+    else
+      _ -> :error
+    end
+  end
+
   defp attributable(spending, %{transaction: %{} = transaction, agent: %{} = agent}) do
     with bound when is_integer(bound) <- spending["worst_case_exposure"],
          price when is_integer(price) <- spending["unit_price"],
