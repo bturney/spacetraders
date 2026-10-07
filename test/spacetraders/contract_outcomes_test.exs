@@ -271,7 +271,7 @@ defmodule SpaceTraders.ContractOutcomesTest do
 
     ship = %{cargo: %{capacity: 5}, nav: %{system_symbol: "X1", status: "DOCKED"}}
 
-    assert {:ok, %{estimated_seconds: 108_000, worst_case_cost: 3850}} =
+    assert {:ok, %{estimated_seconds: 108_000, worst_case_cost: 125}} =
              FleetContracts.estimate_acceptance(contract(0), [listing], [ship], 10_000, @now)
 
     assert {:error, :contract_sourcing_unavailable} =

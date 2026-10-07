@@ -2653,7 +2653,7 @@ defmodule SpaceTraders.Fleet.Intents do
   @doc false
   def with_current_intent(%Intent{id: id} = expected, fun) do
     case Repo.transaction(fn ->
-           if get_in(expected.in_flight_action || %{}, ["kind"]) == "buy" do
+           if get_in(expected.in_flight_action || %{}, ["kind"]) in ["buy", "refuel", "jump"] do
              ship = Repo.get!(Ship, expected.ship_id)
              SpaceTraders.MarketSpending.lock_agent(ship.agent_id)
            end
@@ -3840,6 +3840,7 @@ defmodule SpaceTraders.Fleet.Intents do
       execute_action(agent, intent, live_ship, %{
         "kind" => "refuel",
         "waypoint" => live_ship.nav.waypoint_symbol,
+        "units" => live_ship.fuel.capacity - live_ship.fuel.current,
         "fuel_before" => live_ship.fuel.current,
         "expected" => %{"fuel_full" => true}
       })
@@ -4208,6 +4209,7 @@ defmodule SpaceTraders.Fleet.Intents do
       execute_action(agent, intent, live_ship, %{
         "kind" => "jump",
         "waypoint" => destination,
+        "source_waypoint" => live_ship.nav.waypoint_symbol,
         "credits_before" => preflight.credits,
         "antimatter_cost" => preflight.antimatter_cost,
         "expected" => %{

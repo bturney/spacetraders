@@ -269,6 +269,9 @@ defmodule SpaceTraders.IntelligenceAcquisitionTest do
             "data" => ship_body(ship.symbol, %{"nav" => nav, "fuel" => fuel})
           })
 
+        {"GET", "/v2/my/agent"} ->
+          Req.Test.json(conn, %{"data" => %{"symbol" => agent.symbol, "credits" => 100_000}})
+
         {"GET", ^market_path} ->
           Req.Test.json(conn, %{
             "data" => %{

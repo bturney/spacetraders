@@ -23,7 +23,7 @@ defmodule SpaceTraders.ConstructionOutcomesTest do
   }
 
   test "Construction pledges and batches follow authoritative remaining material progress" do
-    for {fulfilled, remaining} <- [{2, 8}, {7, 3}] do
+    for {fulfilled, remaining, reserved} <- [{2, 8, 100}, {7, 3, 38}] do
       assert {:ok, %{candidate_contributions: [candidate]}} =
                FleetPlanning.plan_construction(@revision, 0, snapshot(fulfilled))
 
@@ -38,7 +38,7 @@ defmodule SpaceTraders.ConstructionOutcomesTest do
                commitment.pledges
 
       assert commitment.claims == ["SHIP-1"]
-      assert commitment.reservations.credits == remaining * 10 + 750
+      assert commitment.reservations.credits == reserved
     end
   end
 
@@ -59,7 +59,7 @@ defmodule SpaceTraders.ConstructionOutcomesTest do
 
     assert candidate.construction.source == :cargo
     assert candidate.construction.batch_units == 3
-    assert candidate.required_resources.credits == 750
+    assert candidate.required_resources.credits == 0
   end
 
   test "co-located producer and hauler propose an explicit transfer-backed delivery" do
@@ -207,7 +207,7 @@ defmodule SpaceTraders.ConstructionOutcomesTest do
              })
 
     assert [%{amount: 5}] = commitment.pledges
-    assert commitment.reservations.credits == 800
+    assert commitment.reservations.credits == 63
   end
 
   test "unproven or stale Construction state cannot sponsor a Pledge" do
@@ -269,7 +269,7 @@ defmodule SpaceTraders.ConstructionOutcomesTest do
              expected_part_units: 2
            }
 
-    assert candidate.required_resources.credits == 756
+    assert candidate.required_resources.credits == 8
     assert candidate.uncertainty.market_effect == :hypothesis
     assert length(candidate.dependencies) == 4
 

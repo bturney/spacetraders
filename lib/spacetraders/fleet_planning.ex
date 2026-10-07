@@ -10,6 +10,7 @@ defmodule SpaceTraders.FleetPlanning do
   alias SpaceTraders.Evidence.Demand
   alias SpaceTraders.API.Model.Contract
   alias SpaceTraders.FleetContracts
+  alias SpaceTraders.MarketSpending
   alias SpaceTraders.FleetStrategy.Revision
 
   @market_evidence_freshness_seconds 300
@@ -328,8 +329,6 @@ defmodule SpaceTraders.FleetPlanning do
 
   def plan_ship_acquisition(_revision, _index, _snapshot),
     do: {:error, :invalid_ship_acquisition_planning_input}
-
-  @refit_allowance_credits 500
 
   @doc """
   Proposes evidence-bound Ship refit Candidates without claiming the refitting Ship.
@@ -750,7 +749,7 @@ defmodule SpaceTraders.FleetPlanning do
       required_roles: [%{role: :fleet_refit, count: 1}],
       required_capabilities: [%{capability: :refit_ship, value: symbol}],
       required_resources: %{
-        credits: candidate.expected_cost + refit_credits_allowance(candidate),
+        credits: refit_credits(candidate),
         cargo_capacity: 1,
         ship_count: 1
       },
@@ -772,10 +771,12 @@ defmodule SpaceTraders.FleetPlanning do
     }
   end
 
-  defp refit_credits_allowance(%{action: :install, sourcing: :purchase}),
-    do: @refit_allowance_credits
+  # A purchased module is a one-unit Market buy; reserve its calibrated worst case.
+  defp refit_credits(%{action: :install, sourcing: :purchase, purchase_price: price})
+       when is_integer(price) and price >= 0,
+       do: MarketSpending.worst_case_exposure(price, 1)
 
-  defp refit_credits_allowance(_), do: 0
+  defp refit_credits(candidate), do: candidate.expected_cost
 
   defp refit_decision_value(%{action: :install, sourcing: :cargo}), do: 3
   defp refit_decision_value(%{action: :install}), do: 2
@@ -1258,8 +1259,8 @@ defmodule SpaceTraders.FleetPlanning do
                       %DateTime{} = observed_at <- [listing.observed_at],
                       DateTime.diff(as_of, observed_at, :second) in 0..@market_evidence_freshness_seconds,
                       batch = min(remaining, min(capacity, listing.trade_volume)),
-                      cost = batch * listing.purchase_price,
-                      cost + 750 <= credits do
+                      cost = MarketSpending.worst_case_exposure(listing.purchase_price, batch),
+                      cost <= credits do
                     listing_until =
                       DateTime.add(observed_at, @market_evidence_freshness_seconds, :second)
 
@@ -1290,7 +1291,7 @@ defmodule SpaceTraders.FleetPlanning do
                         %{capability: :cargo_transport, minimum_capacity: batch},
                         %{capability: :resource_ship, value: ship_symbol}
                       ],
-                      required_resources: %{ship_count: 1, credits: cost + 750},
+                      required_resources: %{ship_count: 1, credits: cost},
                       dependencies: [
                         %{
                           subject:
@@ -1648,8 +1649,8 @@ defmodule SpaceTraders.FleetPlanning do
         %{symbol: ship_symbol, cargo: %{capacity: capacity}} <- [ship],
         is_integer(capacity) and capacity > 0,
         batch = min(units, min(raw_listing.trade_volume, capacity)),
-        cost = batch * raw_listing.purchase_price,
-        cost + 750 <= credits do
+        cost = MarketSpending.worst_case_exposure(raw_listing.purchase_price, batch),
+        cost <= credits do
       dependencies = [
         %{
           subject: "construction:#{observation.system_symbol}:#{construction.symbol}",
@@ -1708,7 +1709,7 @@ defmodule SpaceTraders.FleetPlanning do
           %{capability: :cargo_transport, minimum_capacity: batch},
           %{capability: :resource_ship, value: ship_symbol}
         ],
-        required_resources: %{ship_count: 1, credits: cost + 750},
+        required_resources: %{ship_count: 1, credits: cost},
         dependencies: dependencies,
         validity: %{
           as_of: as_of,

@@ -32,9 +32,71 @@ defmodule SpaceTraders.MarketSpending do
 
   def affordable_units(_credits, 0, _margin), do: :infinity
 
+  @fuel_per_market_unit 100
+
+  @doc "Market units the game charges for an explicit amount of ship fuel."
+  def fuel_market_units(fuel_units) when is_integer(fuel_units) and fuel_units > 0,
+    do: div(fuel_units + @fuel_per_market_unit - 1, @fuel_per_market_unit)
+
   # Reads run before the Intent/Attempt transaction. Reuse preserves original age.
-  def acquire(agent, intent, %{"kind" => "buy", "units" => units} = action) do
-    waypoint = intent.target_waypoint
+  def acquire(agent, intent, action) do
+    case purchase_request(intent, action) do
+      {:ok, request} -> acquire_quote(agent, request)
+      :none -> {:ok, nil}
+      {:error, _} = error -> error
+    end
+  end
+
+  # One selected credit-bearing action names its Market, good and billed units.
+  defp purchase_request(intent, %{"kind" => "buy", "units" => units} = action),
+    do:
+      {:ok,
+       %{
+         waypoint: intent.target_waypoint,
+         symbol: action["trade_symbol"],
+         units: units,
+         depth_limited?: true,
+         extra: %{}
+       }}
+
+  defp purchase_request(_intent, %{"kind" => "refuel"} = action) do
+    case {action["waypoint"], action["units"]} do
+      {waypoint, units} when is_binary(waypoint) and is_integer(units) and units > 0 ->
+        {:ok,
+         %{
+           waypoint: waypoint,
+           symbol: "FUEL",
+           units: fuel_market_units(units),
+           depth_limited?: false,
+           extra: %{"fuel_units" => units}
+         }}
+
+      _ ->
+        {:error, :invalid_recorded_action}
+    end
+  end
+
+  defp purchase_request(_intent, %{"kind" => "jump"} = action) do
+    case action["source_waypoint"] do
+      waypoint when is_binary(waypoint) ->
+        {:ok,
+         %{
+           waypoint: waypoint,
+           symbol: "ANTIMATTER",
+           units: 1,
+           depth_limited?: false,
+           extra: %{}
+         }}
+
+      _ ->
+        {:error, :invalid_recorded_action}
+    end
+  end
+
+  defp purchase_request(_intent, _action), do: :none
+
+  defp acquire_quote(agent, request) do
+    %{waypoint: waypoint, symbol: symbol, units: units} = request
     system = waypoint |> String.split("-") |> Enum.take(2) |> Enum.join("-")
     subject = "market:#{system}:#{waypoint}"
     calibration = CreditCalibration.active()
@@ -50,36 +112,37 @@ defmodule SpaceTraders.MarketSpending do
          true <- quote.value.symbol == waypoint and fresh?(quote.observation.observed_at),
          true <- Evidence.valid_observation?(quote.observation),
          good when not is_nil(good) <-
-           Enum.find(quote.value.trade_goods || [], &(&1.symbol == action["trade_symbol"])),
+           Enum.find(quote.value.trade_goods || [], &(&1.symbol == symbol)),
          true <- is_integer(good.purchase_price) and good.purchase_price >= 0,
          true <-
-           is_integer(units) and units > 0 and is_integer(good.trade_volume) and
-             units <= good.trade_volume,
+           is_integer(units) and units > 0 and
+             (not request.depth_limited? or
+                (is_integer(good.trade_volume) and units <= good.trade_volume)),
          {:ok, credits} <- acquire_credits(agent),
          true <-
            credits.value.symbol == agent.symbol and is_integer(credits.value.credits) and
              credits.value.credits >= 0 do
       {:ok,
-       %{
+       Map.merge(request.extra, %{
          "quote_observation_id" => quote.observation.id,
          "quote_observed_at" => DateTime.to_iso8601(quote.observation.observed_at),
          "credit_observation_id" => credits.observation.id,
          "waypoint" => waypoint,
-         "trade_symbol" => action["trade_symbol"],
+         "trade_symbol" => symbol,
          "unit_price" => good.purchase_price,
          "units" => units,
          "calibration_version" => calibration.version,
          "margin_percent" => calibration.margin_percent,
          "worst_case_exposure" =>
            worst_case_exposure(good.purchase_price, units, calibration.margin_percent)
-       }}
+       })}
     else
       {:error, reason} -> {:error, reason}
       _ -> {:error, :market_quote_unavailable}
     end
   end
 
-  def acquire(_agent, _intent, _action), do: {:ok, nil}
+  @spending_operations ~w(purchase-cargo refuel-ship jump-ship)
 
   @doc """
   Prices one Fleet Ship acquisition from the fresh Shipyard offer evidence the
@@ -135,7 +198,7 @@ defmodule SpaceTraders.MarketSpending do
   end
 
   def lock_agent(%Attempt{operation_id: operation, agent_id: id})
-      when operation in ["purchase-cargo", "purchase-ship"],
+      when operation in ["purchase-ship" | @spending_operations],
       do: lock_agent(id)
 
   def lock_agent(%Attempt{}), do: :ok
@@ -168,7 +231,10 @@ defmodule SpaceTraders.MarketSpending do
 
   def admit(_attempt, _intent, _revision), do: :ok
 
-  defp admit_spend(%Attempt{operation_id: "purchase-cargo"} = attempt, agent, intent, revision) do
+  # Market purchase, refuel and jump/antimatter share one admission rule; the
+  # prepared request defines the good and units each one bills.
+  defp admit_spend(%Attempt{operation_id: operation} = attempt, agent, intent, revision)
+       when operation in @spending_operations do
     spending = attempt.prepared_evidence["spending"]
 
     with :ok <- current_calibration(spending),
@@ -214,25 +280,25 @@ defmodule SpaceTraders.MarketSpending do
   defp attempt_revision(%Attempt{strategy_revision_id: id}), do: Repo.get(Revision, id)
 
   defp validate_quote(agent, attempt, spending) when is_map(spending) do
-    body = attempt.prepared_evidence["request"]["body"]
-
-    with {:ok, quote} <- Evidence.retained_binding(agent, spending["quote_observation_id"]),
+    with {:ok, expected} <- expected_purchase(attempt),
+         {:ok, quote} <- Evidence.retained_binding(agent, spending["quote_observation_id"]),
          true <- quote.observation.operation_id == "get-market",
          true <- Evidence.valid_observation?(quote.observation),
          true <- quote.observation.fleet_generation_id == attempt.fleet_generation_id,
          true <- quote.value.symbol == spending["waypoint"],
+         true <- spending["waypoint"] == expected.waypoint,
          true <-
            DateTime.to_iso8601(quote.observation.observed_at) == spending["quote_observed_at"],
          true <- fresh?(quote.observation.observed_at),
          good when not is_nil(good) <-
-           Enum.find(quote.value.trade_goods || [], &(&1.symbol == body["symbol"])),
+           Enum.find(quote.value.trade_goods || [], &(&1.symbol == expected.symbol)),
          true <- is_integer(good.purchase_price) and good.purchase_price >= 0,
          true <-
-           spending["trade_symbol"] == body["symbol"] and spending["units"] == body["units"],
+           spending["trade_symbol"] == expected.symbol and spending["units"] == expected.units,
          true <- spending["unit_price"] == good.purchase_price,
          true <-
            spending["worst_case_exposure"] ==
-             worst_case_exposure(good.purchase_price, body["units"], spending["margin_percent"]) do
+             worst_case_exposure(good.purchase_price, expected.units, spending["margin_percent"]) do
       :ok
     else
       _ -> {:error, :market_quote_stale_or_missing}
@@ -240,6 +306,35 @@ defmodule SpaceTraders.MarketSpending do
   end
 
   defp validate_quote(_agent, _attempt, _spending), do: {:error, :market_quote_stale_or_missing}
+
+  # The prepared request, not the spending record, defines what will be billed.
+  defp expected_purchase(%Attempt{operation_id: "purchase-cargo"} = attempt) do
+    body = attempt.prepared_evidence["request"]["body"]
+
+    {:ok,
+     %{
+       waypoint: attempt.prepared_evidence["spending"]["waypoint"],
+       symbol: body["symbol"],
+       units: body["units"]
+     }}
+  end
+
+  defp expected_purchase(%Attempt{operation_id: "refuel-ship"} = attempt) do
+    action = attempt.prepared_evidence["selected_action"]
+    fuel_units = attempt.prepared_evidence["request"]["body"]["units"]
+
+    if is_integer(fuel_units) and fuel_units > 0 and action["units"] == fuel_units and
+         attempt.prepared_evidence["spending"]["fuel_units"] == fuel_units do
+      {:ok, %{waypoint: action["waypoint"], symbol: "FUEL", units: fuel_market_units(fuel_units)}}
+    else
+      :error
+    end
+  end
+
+  defp expected_purchase(%Attempt{operation_id: "jump-ship"} = attempt) do
+    action = attempt.prepared_evidence["selected_action"]
+    {:ok, %{waypoint: action["source_waypoint"], symbol: "ANTIMATTER", units: 1}}
+  end
 
   # A bound prepared under a superseded margin is replanned, never resized.
   defp current_calibration(%{"calibration_version" => version, "margin_percent" => margin}) do

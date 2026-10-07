@@ -476,7 +476,9 @@ defmodule SpaceTraders.FleetContracts do
 
   defp begin_estimate(remaining, listing, batch) do
     trips = div(remaining + batch - 1, batch)
-    {remaining * listing.purchase_price + 750 * trips, 21_600 * trips, listing.evidence_id}
+
+    {SpaceTraders.MarketSpending.worst_case_exposure(listing.purchase_price, remaining),
+     21_600 * trips, listing.evidence_id}
   end
 
   defp waypoint_system(waypoint) when is_binary(waypoint) do
@@ -780,7 +782,7 @@ defmodule SpaceTraders.FleetContracts do
         trade_symbol: candidate.trade_symbol,
         units: candidate.contract.batch_units,
         purchase_price: candidate.contract.max_price,
-        reserve_credits: floor + 750,
+        reserve_credits: floor,
         contract_id: candidate.contract.id
       })
     end

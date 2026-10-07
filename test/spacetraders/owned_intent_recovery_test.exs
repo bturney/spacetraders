@@ -581,7 +581,7 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
       )
 
     {:ok, %{intent: intent, attempt: attempt}} =
-      SpaceTraders.Fleet.Intents.RecordedAction.prepare(agent, intent, %{
+      prepare_recorded(agent, intent, %{
         "kind" => "deliver",
         "trade_symbol" => "IRON_ORE",
         "units" => 1,
@@ -964,7 +964,7 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
       {intent, action} = market_selection(ship, portfolio, commitment, unquote(kind))
 
       {:ok, %{intent: intent, attempt: attempt}} =
-        SpaceTraders.Fleet.Intents.RecordedAction.prepare(agent, intent, action)
+        prepare_recorded(agent, intent, action)
 
       {:ok, _} = MutationAttempts.mark_sent_or_unknown(attempt)
       after_units = if unquote(kind) == "buy", do: 5, else: 0
@@ -1021,7 +1021,7 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
       {intent, action} = market_selection(ship, portfolio, commitment, unquote(kind))
 
       {:ok, %{attempt: attempt}} =
-        SpaceTraders.Fleet.Intents.RecordedAction.prepare(agent, intent, action)
+        prepare_recorded(agent, intent, action)
 
       {:ok, attempt} = MutationAttempts.mark_sent_or_unknown(attempt)
 
@@ -1047,7 +1047,7 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
       {intent, action} = market_selection(ship, portfolio, commitment, unquote(kind))
 
       {:ok, %{intent: intent, attempt: attempt}} =
-        SpaceTraders.Fleet.Intents.RecordedAction.prepare(agent, intent, action)
+        prepare_recorded(agent, intent, action)
 
       {:ok, _} = MutationAttempts.mark_sent_or_unknown(attempt)
 
@@ -1107,7 +1107,7 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
       {intent, action} = market_selection(ship, portfolio, commitment, unquote(kind))
 
       {:ok, %{intent: intent, attempt: attempt}} =
-        SpaceTraders.Fleet.Intents.RecordedAction.prepare(agent, intent, action)
+        prepare_recorded(agent, intent, action)
 
       {:ok, attempt} = MutationAttempts.mark_sent_or_unknown(attempt)
       previous_clock = Application.fetch_env(:spacetraders, :clock)
@@ -1176,7 +1176,7 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
       {intent, action} = market_selection(ship, portfolio, commitment, unquote(kind))
 
       {:ok, %{intent: intent, attempt: attempt}} =
-        SpaceTraders.Fleet.Intents.RecordedAction.prepare(agent, intent, action)
+        prepare_recorded(agent, intent, action)
 
       {:ok, _} = MutationAttempts.mark_sent_or_unknown(attempt)
       strategy = Repo.get_by!(Strategy, operator_id: agent.operator_id)
@@ -1213,7 +1213,7 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
         selected =
           if trigger == :boot do
             {:ok, %{intent: selected}} =
-              SpaceTraders.Fleet.Intents.RecordedAction.prepare(agent, intent, action)
+              prepare_recorded(agent, intent, action)
 
             selected
           else
@@ -1271,7 +1271,7 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
       {intent, action} = market_selection(ship, portfolio, commitment, unquote(kind))
 
       {:ok, %{intent: intent, attempt: attempt}} =
-        SpaceTraders.Fleet.Intents.RecordedAction.prepare(agent, intent, action)
+        prepare_recorded(agent, intent, action)
 
       {:ok, _} = MutationAttempts.mark_sent_or_unknown(attempt)
 
@@ -1312,7 +1312,7 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
       {intent, action} = market_selection(ship, portfolio, commitment, unquote(kind))
 
       {:ok, %{intent: intent, attempt: attempt}} =
-        SpaceTraders.Fleet.Intents.RecordedAction.prepare(agent, intent, action)
+        prepare_recorded(agent, intent, action)
 
       {:ok, _} = MutationAttempts.mark_sent_or_unknown(attempt)
 
@@ -1362,7 +1362,7 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
       intent = owned_intent(ship, portfolio, commitment, attrs)
 
       {:ok, %{intent: intent, attempt: attempt}} =
-        SpaceTraders.Fleet.Intents.RecordedAction.prepare(agent, intent, action)
+        prepare_recorded(agent, intent, action)
 
       {:ok, attempt} = MutationAttempts.mark_sent_or_unknown(attempt)
       test_pid = self()
@@ -1467,7 +1467,7 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
     action = Map.put(action, "units", 2)
 
     {:ok, %{intent: intent, attempt: attempt}} =
-      SpaceTraders.Fleet.Intents.RecordedAction.prepare(agent, intent, action)
+      prepare_recorded(agent, intent, action)
 
     {:ok, _} = MutationAttempts.mark_sent_or_unknown(attempt)
 
@@ -1606,7 +1606,7 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
     intent = owned_intent(ship, portfolio, commitment, [])
 
     {:ok, %{attempt: attempt}} =
-      SpaceTraders.Fleet.Intents.RecordedAction.prepare(agent, intent, %{
+      prepare_recorded(agent, intent, %{
         "kind" => "refuel",
         "waypoint" => "X1-UX81-A1",
         "fuel_before" => 150
@@ -1666,7 +1666,7 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
       intent = owned_intent(ship, portfolio, commitment, [])
 
       {:ok, %{attempt: attempt}} =
-        SpaceTraders.Fleet.Intents.RecordedAction.prepare(agent, intent, %{
+        prepare_recorded(agent, intent, %{
           "kind" => unquote(kind),
           "waypoint" => "X1-UX81-A1",
           "fuel_before" => 150,
@@ -1701,7 +1701,7 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
       intent = owned_intent(ship, portfolio, commitment, [])
 
       {:ok, %{intent: intent, attempt: attempt}} =
-        SpaceTraders.Fleet.Intents.RecordedAction.prepare(agent, intent, %{
+        prepare_recorded(agent, intent, %{
           "kind" => unquote(kind),
           "waypoint" => "X1-UX81-A1",
           "fuel_before" => 150,
@@ -1773,7 +1773,7 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
       intent = owned_intent(ship, portfolio, commitment, [])
 
       {:ok, %{attempt: attempt}} =
-        SpaceTraders.Fleet.Intents.RecordedAction.prepare(agent, intent, %{
+        prepare_recorded(agent, intent, %{
           "kind" => unquote(kind),
           "waypoint" => "X1-UX81-A1",
           "fuel_before" => 150,
@@ -1861,7 +1861,7 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
       intent = owned_intent(ship, portfolio, commitment, target_waypoint: destination)
 
       {:ok, %{intent: intent, attempt: attempt}} =
-        SpaceTraders.Fleet.Intents.RecordedAction.prepare(agent, intent, %{
+        prepare_recorded(agent, intent, %{
           "kind" => unquote(kind),
           "waypoint" => destination,
           "fuel_before" => 150,
@@ -1981,7 +1981,7 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
       }
 
       {:ok, %{intent: intent, attempt: attempt}} =
-        SpaceTraders.Fleet.Intents.RecordedAction.prepare(agent, intent, action)
+        prepare_recorded(agent, intent, action)
 
       {:ok, _} = MutationAttempts.mark_sent_or_unknown(attempt)
 
@@ -2030,7 +2030,7 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
       intent = owned_intent(ship, portfolio, commitment, [])
 
       {:ok, %{intent: intent, attempt: attempt}} =
-        SpaceTraders.Fleet.Intents.RecordedAction.prepare(agent, intent, %{
+        prepare_recorded(agent, intent, %{
           "kind" => unquote(kind),
           "waypoint" => "X1-UX81-A1",
           "fuel_before" => 150,
@@ -2040,7 +2040,7 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
       {:ok, _} = MutationAttempts.mark_sent_or_unknown(attempt)
 
       Repo.query!(
-        "ALTER TABLE authoritative_observations ADD CONSTRAINT credit_retention_gap CHECK (operation_id <> 'get-my-agent')"
+        "ALTER TABLE authoritative_observations ADD CONSTRAINT credit_retention_gap CHECK (operation_id <> 'get-my-agent') NOT VALID"
       )
 
       Req.Test.stub(SpaceTraders.API, fn conn ->
@@ -2538,6 +2538,27 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
     assert attempt.sent_or_unknown_at == nil
   end
 
+  # Refuel and jump spending needs an explicit bound and a retained quote.
+  defp prepare_recorded(agent, intent, %{"kind" => kind} = action)
+       when kind in ["refuel", "jump"] do
+    action =
+      Map.merge(
+        if(kind == "jump", do: %{"source_waypoint" => "X1-UX81-A1"}, else: %{"units" => 50}),
+        action
+      )
+
+    SpaceTraders.RecordedDispatchFixtures.retain_purchase_preflight(
+      agent,
+      intent.target_waypoint,
+      action
+    )
+
+    SpaceTraders.Fleet.Intents.RecordedAction.prepare(agent, intent, action)
+  end
+
+  defp prepare_recorded(agent, intent, action),
+    do: SpaceTraders.Fleet.Intents.RecordedAction.prepare(agent, intent, action)
+
   defp owned_intent(ship, portfolio, commitment, attrs) do
     intent =
       Repo.insert!(
@@ -2600,7 +2621,7 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
       intent = owned_intent(ship, portfolio, commitment, [])
 
       {:ok, %{intent: intent, attempt: attempt}} =
-        SpaceTraders.Fleet.Intents.RecordedAction.prepare(
+        prepare_recorded(
           agent,
           intent,
           %{"kind" => "refuel", "waypoint" => "X1-UX81-A1", "fuel_before" => 150}
@@ -2664,7 +2685,7 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
     intent = owned_intent(ship, portfolio, commitment, [])
 
     {:ok, %{intent: intent, attempt: attempt}} =
-      SpaceTraders.Fleet.Intents.RecordedAction.prepare(
+      prepare_recorded(
         agent,
         intent,
         %{"kind" => "refuel", "fuel_before" => 150, "waypoint" => "X1-UX81-A1"}
@@ -2758,7 +2779,7 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
     intent = owned_intent(ship, portfolio, commitment, [])
 
     {:ok, %{intent: intent, attempt: attempt}} =
-      SpaceTraders.Fleet.Intents.RecordedAction.prepare(agent, intent, %{
+      prepare_recorded(agent, intent, %{
         "kind" => "orbit",
         "waypoint" => "X1-UX81-A1"
       })
@@ -2786,7 +2807,7 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
 
     if prepare? do
       {:ok, %{intent: selected, attempt: attempt}} =
-        SpaceTraders.Fleet.Intents.RecordedAction.prepare(agent, intent, %{
+        prepare_recorded(agent, intent, %{
           "kind" => kind,
           "waypoint" => intent.target_waypoint
         })

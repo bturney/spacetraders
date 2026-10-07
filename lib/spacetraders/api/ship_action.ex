@@ -140,6 +140,14 @@ defmodule SpaceTraders.API.ShipAction do
 
   def request(_, _), do: {:error, :invalid_recorded_action}
 
+  # Refuel always names the fuel it authorizes; the game's fill-to-capacity default
+  # would be an unbounded spend.
+  defp parameters(_ship, %{"kind" => "refuel", "units" => units})
+       when is_integer(units) and units > 0,
+       do: {:ok, "refuel-ship", %{"units" => units}, %{}}
+
+  # A unit-less refuel only identifies historical work for recovery. Preparation
+  # refuses it (`MarketSpending.acquire/3`), so it can never be dispatched.
   defp parameters(_ship, %{"kind" => kind})
        when kind in ["orbit", "dock", "refuel", "scan_waypoints", "survey", "siphon"] do
     id =

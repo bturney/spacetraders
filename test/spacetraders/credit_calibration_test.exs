@@ -154,7 +154,12 @@ defmodule SpaceTraders.CreditCalibrationTest do
     assert {:ok, %{state: "sent_or_unknown"}} = RecordedAction.admit_send(dock)
 
     %{attempt: refuel} =
-      prepare_action(agent, "PILOT-2", %{"kind" => "refuel", "fuel_before" => 20})
+      prepare_action(agent, "PILOT-2", %{
+        "kind" => "refuel",
+        "waypoint" => agent.headquarters,
+        "units" => 20,
+        "fuel_before" => 20
+      })
 
     assert {:error, :credit_spending_paused} = RecordedAction.admit_send(refuel)
     assert %{state: "not_sent", sent_or_unknown_at: nil} = MutationAttempts.get!(refuel.id)
