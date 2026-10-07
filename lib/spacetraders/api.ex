@@ -344,13 +344,19 @@ defmodule SpaceTraders.API do
   end
 
   defp admit_and_send(method, path, token, opts) do
-    with {operation, shadow} <- observe_request(method, path, opts),
-         {:ok, capacity} <- admit_capacity(operation, opts) do
-      # Observe before waiting for capacity so shadow queue_time spans the real
-      # limiter wait. Recorded and legacy dispatch recheck authorization at send.
-      RateLimiter.acquire()
+    {operation, shadow} = observe_request(method, path, opts)
 
-      send_request(method, path, token, opts, operation, shadow, capacity)
+    # Observe before waiting for capacity so shadow queue_time spans the real
+    # limiter wait. Recorded and legacy dispatch recheck authorization at send.
+    # Missing governor authority fails closed before any transport.
+    case admit_capacity(operation, opts) do
+      {:ok, capacity} ->
+        RateLimiter.acquire()
+        send_request(method, path, token, opts, operation, shadow, capacity)
+
+      {:error, reason} ->
+        ShadowAdmission.observe_outcome(shadow, :not_dispatched, :suppressed)
+        {:error, reason}
     end
   end
 

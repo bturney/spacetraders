@@ -45,6 +45,10 @@ config :spacetraders, SpaceTraders.API,
 
 config :spacetraders, SpaceTraders.API.RateLimiter, enabled: false
 
+# An explicit :test_disabled governor target may bypass admission in tests.
+# A missing governor still fails closed; production builds exclude this path.
+config :spacetraders, :capacity_test_disabled_allowed, true
+
 # Initialize plugs at runtime for faster test compilation
 config :phoenix, :plug_init_mode, :runtime
 
