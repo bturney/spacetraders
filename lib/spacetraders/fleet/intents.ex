@@ -12,10 +12,12 @@ defmodule SpaceTraders.Fleet.Intents do
 
   require Logger
 
+  import SpaceTraders.Fleet.Intents.CapacityDeferral, only: [capacity_pressure: 1]
+
   alias SpaceTraders.Agent.Agent, as: AgentRecord
   alias SpaceTraders.Agent.Scope
   alias SpaceTraders.API.AgentTokenReference
-  alias SpaceTraders.Fleet.Intents.{RecordedAction, Recovery}
+  alias SpaceTraders.Fleet.Intents.{CapacityDeferral, RecordedAction, Recovery}
   alias SpaceTraders.API.Model.{Contract, ShipNav}
   alias SpaceTraders.Fleet.{Intent, Ship}
   alias SpaceTraders.Fleet
@@ -320,7 +322,9 @@ defmodule SpaceTraders.Fleet.Intents do
         when caller in ["commitment", "intervention"] and status != "awaiting_confirmation" ->
           if (trigger == :boot and is_nil(expected_intent_id)) or
                intent_matches_event?(intent, expected_intent_id) do
-            reconcile_selected(agent, ship, intent, live_ship, trigger)
+            reconsider_capacity(intent, fn ->
+              reconcile_selected(agent, ship, intent, live_ship, trigger)
+            end)
           else
             :ok
           end
@@ -333,6 +337,21 @@ defmodule SpaceTraders.Fleet.Intents do
     end
   end
 
+  # A Capacity-Deferred Intent woken after authority and identity revalidation
+  # asks for live capacity before spending any read; still-deferred work only
+  # reschedules its bounded wakeup.
+  defp reconsider_capacity(
+         %Intent{status: "waiting", blocker: %{reason: "api_capacity_deferred"}} = intent,
+         proceed
+       ) do
+    case CapacityDeferral.disposition(MutationAttempts.latest_for_intent(intent)) do
+      %{status: :proceed} -> proceed.()
+      _deferred -> defer_for_api_capacity(intent)
+    end
+  end
+
+  defp reconsider_capacity(_intent, proceed), do: proceed.()
+
   defp reconcile_selected(agent, ship, intent, supplied, trigger) do
     {intent, evidence} = recovery_evidence(agent, intent, supplied)
 
@@ -342,6 +361,9 @@ defmodule SpaceTraders.Fleet.Intents do
 
       {:error, :stale_agent} ->
         :ok
+
+      {:error, reason} when capacity_pressure(reason) ->
+        defer_for_api_capacity(intent)
 
       {:error, reason} when trigger == :boot ->
         intent_recovery_retry_or_block(ship, intent, agent.id, reason)
@@ -1456,7 +1478,7 @@ defmodule SpaceTraders.Fleet.Intents do
         on_rejected: fn -> mark_infeasible(intent, :transfer_rejected) end
       )
     else
-      {:error, %SpaceTraders.API.GameplayError{code: 429} = reason} ->
+      {:error, reason} when capacity_pressure(reason) ->
         block_cargo_intent(intent, reason)
 
       gap ->
@@ -2711,6 +2733,14 @@ defmodule SpaceTraders.Fleet.Intents do
   defp send_selected_action(agent, selected, live_ship) do
     case Agent.handle_game_result(agent, SpaceTraders.API.dispatch_recorded(selected)) do
       {:ok, result} ->
+        # Delivered facts the response wholly proves spare a later redundant read.
+        {:ok, _coverage} =
+          Evidence.retain_mutation_response(
+            agent,
+            MutationAttempts.get!(selected.mutation_attempt_id),
+            result
+          )
+
         continue_selected_response(agent, selected, live_ship, selected.in_flight_action, result)
 
       {:error, %SpaceTraders.API.GameplayError{type: :insufficient_fuel} = reason} ->
@@ -3209,7 +3239,7 @@ defmodule SpaceTraders.Fleet.Intents do
   defp maybe_put_module_transaction(result, transaction),
     do: Map.put(result, "transaction", module_transaction_evidence(transaction))
 
-  defp block_module_intent(intent, %SpaceTraders.API.GameplayError{code: 429}),
+  defp block_module_intent(intent, reason) when capacity_pressure(reason),
     do: defer_for_api_capacity(intent)
 
   defp block_module_intent(intent, reason) do
@@ -3308,7 +3338,7 @@ defmodule SpaceTraders.Fleet.Intents do
 
   defp maybe_put_delivery(result, _response, _type), do: result
 
-  defp block_cargo_intent(intent, %SpaceTraders.API.GameplayError{code: 429}),
+  defp block_cargo_intent(intent, reason) when capacity_pressure(reason),
     do: defer_for_api_capacity(intent)
 
   defp block_cargo_intent(intent, reason) do
@@ -4278,7 +4308,7 @@ defmodule SpaceTraders.Fleet.Intents do
 
   defp schedule_intent_arrival(_agent, _intent, _ship_symbol, _result), do: :ok
 
-  defp block_intents(intent, %SpaceTraders.API.GameplayError{code: 429}),
+  defp block_intents(intent, reason) when capacity_pressure(reason),
     do: defer_for_api_capacity(intent)
 
   defp block_intents(intent, reason) do
@@ -4474,10 +4504,6 @@ defmodule SpaceTraders.Fleet.Intents do
         retry_absent_action(agent, intent, live_ship, action, absent, evidence: opts[:sources])
 
       {:block, reason} ->
-        block.(intent, reason)
-
-      # Protocol backpressure on a recovery read is a durable wait, not a verdict.
-      {:error, %SpaceTraders.API.GameplayError{code: 429} = reason} ->
         block.(intent, reason)
 
       {:error, reason} ->
@@ -4887,9 +4913,6 @@ defmodule SpaceTraders.Fleet.Intents do
        when is_atom(type) and type != :other,
        do: type
 
-  defp intents_block_reason(%SpaceTraders.API.GameplayError{code: 429}),
-    do: :api_capacity_deferred
-
   defp intents_block_reason({:refuel_incomplete, _current, _capacity}), do: :refuel_incomplete
 
   defp intents_block_reason(reason), do: reason
@@ -4898,19 +4921,17 @@ defmodule SpaceTraders.Fleet.Intents do
   # observes game state before selecting another recorded action. Only the ledger
   # can prove that the selected mutation was rejected: a read's 429 must not clear
   # a successful or unresolved mutation awaiting its authoritative observation.
-  defp block_protocol_backpressure(intent, %SpaceTraders.API.GameplayError{code: 429}),
+  defp block_protocol_backpressure(intent, reason) when capacity_pressure(reason),
     do: defer_for_api_capacity(intent)
 
   defp block_protocol_backpressure(intent, reason), do: mark_infeasible(intent, reason)
 
   defp defer_for_api_capacity(intent) do
-    earliest = DateTime.add(Clock.utc_now(), 1, :second)
-
     due_at =
-      case SpaceTraders.API.CapacityGovernor.snapshot() do
-        %{ordinary_delayed_until: %DateTime{} = until} -> Enum.max([earliest, until], DateTime)
-        _ -> earliest
-      end
+      intent
+      |> MutationAttempts.latest_for_intent()
+      |> CapacityDeferral.disposition()
+      |> CapacityDeferral.wake_at(Clock.utc_now())
 
     ship = Repo.get!(Ship, intent.ship_id)
     agent = Repo.get!(AgentRecord, ship.agent_id)

@@ -126,6 +126,9 @@ Current seam owners:
 - credit calibration versions, realized-versus-quoted evidence, shortfall
   classification, and spending pause/release:
   `test/spacetraders/credit_calibration_test.exs`
+- root Intent Capacity Deferral (recovery-read 429, bounded governor-guided
+  wakeup, restart, wake revalidation, mutation-response Evidence reuse):
+  `test/spacetraders/capacity_deferral_test.exs`
 
 - whole-runtime composition across runtime restart:
   `test/diagnostics/runtime_qualification.exs` (diagnostic only)

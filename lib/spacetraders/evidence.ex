@@ -182,6 +182,52 @@ defmodule SpaceTraders.Evidence do
     end
   end
 
+  @doc """
+  Retains the fresh attributable facts a delivered recorded mutation returned,
+  so compatible recovery needs and open Observation Demands reuse them before
+  another read is admitted.
+
+  Only complete facts are retained: a delivered response's whole Agent record
+  (it proves credits). Recorded Ship responses carry only part of a Ship, so the
+  acting Ship stays an explicit gap that still needs its own read. Facts from an
+  unresolved send or naming another Agent are not attributable.
+  """
+  def retain_mutation_response(%AgentRecord{} = agent, %Attempt{} = attempt, response)
+      when is_map(response) do
+    subject = DependencyKey.observation_subject("get-my-agent", [], agent.symbol)
+
+    retained =
+      with true <- attempt.state == "succeeded" and attempt.agent_id == agent.id,
+           %API.Model.Agent{} = value <- Map.get(response, :agent),
+           true <- value.symbol == agent.symbol and is_integer(value.credits),
+           observation =
+             authoritative_observation(
+               "get-my-agent",
+               [subject],
+               %{
+                 "response" => serialize_read_value(value),
+                 "mutation_response" => %{
+                   "mutation_attempt_id" => attempt.id,
+                   "operation_id" => attempt.operation_id
+                 }
+               },
+               Clock.utc_now()
+             ),
+           {:ok, _evidence} <- fulfil_demands(agent, subject, observation) do
+        [subject]
+      else
+        _ -> []
+      end
+
+    gaps =
+      case attempt.provenance["ship_symbol"] do
+        symbol when is_binary(symbol) and symbol != "" -> ["ship:" <> symbol]
+        _ -> []
+      end
+
+    {:ok, %{retained: retained, gaps: gaps}}
+  end
+
   @doc "Reuses an eligible retained owned Fleet, or acquires one governed replacement."
   def recovery_fleet_binding(%AgentRecord{} = agent, %Attempt{} = attempt) do
     case retained_recovery_binding(agent, attempt, "get-my-ships") do
