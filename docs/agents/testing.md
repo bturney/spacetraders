@@ -118,6 +118,9 @@ Current seam owners:
   family): `test/spacetraders/recorded_family_interruption_test.exs`
 - recorded admission boundary and Ship operation coverage:
   `test/spacetraders/api/recorded_dispatch_test.exs`
+- concurrent and restart-safe credit admission (Agent lock contention,
+  Reservations, reconstructed exposure, quote aging across restart):
+  `test/spacetraders/market_spending_qualification_test.exs`
 
 - whole-runtime composition across runtime restart:
   `test/diagnostics/runtime_qualification.exs` (diagnostic only)
