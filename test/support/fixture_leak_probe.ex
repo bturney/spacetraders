@@ -2,8 +2,10 @@ defmodule SpaceTraders.FixtureLeakProbe do
   @moduledoc """
   In-VM probe of what a stateful fixture must leave behind. Suites that touch
   application-wide state call `baseline/0` in `setup_all` and `assert_clean!/2`
-  from that `setup_all`'s `on_exit`, so a leak fails the leaking suite itself,
-  whatever order the suites run in.
+  from that `setup_all`'s `on_exit`, so a leak fails the suite that called the
+  probe. Suites that never call it are not checked: their leaks surface in the
+  next probed suite, so the ShipServer check is a backstop. `DataCase` stops
+  ShipServers after every non-async test, so they should not leak.
   """
 
   @env_keys [:clock, SpaceTraders.RuntimeAuthority]

@@ -24,11 +24,6 @@ defmodule SpaceTraders.IntelligenceAcquisitionTest do
   alias SpaceTraders.MutationAttempts
   alias SpaceTraders.World
 
-  setup do
-    on_exit(fn -> SpaceTraders.Quiesced.stop_all_ships() end)
-    :ok
-  end
-
   test "a claimed root Intent acquires publicly available Waypoint facts without moving the Ship" do
     {agent, ship, portfolio, commitment} = claimed_ship()
     test_pid = self()

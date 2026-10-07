@@ -9,11 +9,6 @@ defmodule SpaceTraders.ResourceRecoveryTest do
   alias SpaceTraders.Fleet.{Intent, Intents}
   alias SpaceTraders.MutationAttempts
 
-  setup do
-    on_exit(fn -> SpaceTraders.Quiesced.stop_all_ships() end)
-    :ok
-  end
-
   test "failed resource observation retention leaves the selected mutation and narrow fence unresolved" do
     {agent, ship, intent, attempt} = selected_resource("extract")
     {:ok, _} = MutationAttempts.mark_sent_or_unknown(attempt)

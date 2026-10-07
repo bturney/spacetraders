@@ -107,8 +107,6 @@ defmodule SpaceTraders.ManualInterventionTest do
   end
 
   test "an intervention-owned Navigate Intent completes exactly once after restart rearming" do
-    on_exit(fn -> SpaceTraders.Quiesced.stop_all_ships() end)
-
     operator = operator_fixture()
     agent = agent_fixture(operator)
     symbol = "#{agent.symbol}-1"
@@ -210,8 +208,6 @@ defmodule SpaceTraders.ManualInterventionTest do
 
   for trigger <- [:boot, :arrival] do
     test "#{trigger} recovers a lost intervention Navigate response from retained evidence without replay" do
-      on_exit(fn -> SpaceTraders.Quiesced.stop_all_ships() end)
-
       operator = operator_fixture()
       agent = agent_fixture(operator)
       symbol = "#{agent.symbol}-1"

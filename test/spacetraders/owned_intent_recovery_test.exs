@@ -18,11 +18,6 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
   alias SpaceTraders.Timeline
   alias SpaceTraders.Timeline.Event
 
-  setup do
-    on_exit(fn -> SpaceTraders.Quiesced.stop_all_ships() end)
-    :ok
-  end
-
   test "scan recovery after restart keeps the cooldown's original retained source" do
     {agent, ship, portfolio, commitment} = claimed_ship("SCAN-SOURCE")
 

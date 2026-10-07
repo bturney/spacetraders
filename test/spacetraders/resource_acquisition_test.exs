@@ -19,11 +19,6 @@ defmodule SpaceTraders.ResourceAcquisitionTest do
     on_exit(fn -> SpaceTraders.FixtureLeakProbe.assert_clean!(baseline) end)
   end
 
-  setup do
-    on_exit(fn -> SpaceTraders.Quiesced.stop_all_ships() end)
-    :ok
-  end
-
   test "fresh Strategy reconciliation claims a miner and counts one proven Cargo yield" do
     {scope, agent, revision, ship} = generation()
     test_pid = self()

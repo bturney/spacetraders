@@ -22,11 +22,6 @@ defmodule SpaceTraders.FleetRefitTest do
   @home "X1-UX81-A1"
   @supply "X1-UX81-A2"
 
-  setup do
-    on_exit(fn -> SpaceTraders.Quiesced.stop_all_ships() end)
-    :ok
-  end
-
   for kind <- ["install_module", "remove_module"] do
     @tag :refit_progression
     test "#{kind} live, prepared boot, and absent boot share one effect and continuation" do
@@ -679,8 +674,6 @@ defmodule SpaceTraders.FleetRefitTest do
     Application.put_env(:spacetraders, :clock, SpaceTraders.TestClock)
 
     on_exit(fn ->
-      SpaceTraders.Quiesced.stop_all_ships()
-
       if previous,
         do: Application.put_env(:spacetraders, :clock, previous),
         else: Application.delete_env(:spacetraders, :clock)
