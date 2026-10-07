@@ -1276,7 +1276,7 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
       {:ok, _} = MutationAttempts.mark_sent_or_unknown(attempt)
 
       Repo.query!(
-        "ALTER TABLE authoritative_observations ADD CONSTRAINT market_credit_retention_gap CHECK (operation_id <> 'get-my-agent')"
+        "ALTER TABLE authoritative_observations ADD CONSTRAINT market_credit_retention_gap CHECK (operation_id <> 'get-my-agent') NOT VALID"
       )
 
       Req.Test.stub(SpaceTraders.API, fn conn ->
