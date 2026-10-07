@@ -19,6 +19,7 @@ defmodule Mix.Tasks.Verify.Boundary do
   @intent_execution_file "lib/spacetraders/fleet/intents.ex"
   @attempt_admission_files [
     "lib/spacetraders/api.ex",
+    "lib/spacetraders/fleet_acquisition.ex",
     "lib/spacetraders/fleet/intents/recorded_action.ex",
     "lib/spacetraders/mutation_attempts.ex"
   ]

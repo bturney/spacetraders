@@ -13,6 +13,7 @@ defmodule SpaceTraders.MarketSpendingQualificationTest do
   alias SpaceTraders.Agent.Scope
   alias SpaceTraders.Fleet.Intent
   alias SpaceTraders.Fleet.Intents.RecordedAction
+  alias SpaceTraders.FleetAcquisition
   alias SpaceTraders.FleetAllocation
   alias SpaceTraders.FleetAllocation.PortfolioCandidate
   alias SpaceTraders.FleetGeneration.Generation
@@ -123,6 +124,73 @@ defmodule SpaceTraders.MarketSpendingQualificationTest do
     assert loser.sent_or_unknown_at == nil
     Req.Test.stub(API, fn _ -> flunk("losing admission reached transport") end)
     assert {:error, :attempt_already_dispatched} = API.dispatch_recorded(loser)
+  end
+
+  test "Fleet Ship acquisition and recorded spending queue on the same Agent lock", ctx do
+    [cargo] = prepare(ctx, [0], 1_100)
+
+    ship =
+      Repo.insert!(%MutationAttempts.Attempt{
+        operator_id: ctx.operator.id,
+        agent_id: ctx.agent.id,
+        fleet_generation_id: cargo.fleet_generation_id,
+        operation_id: "purchase-ship",
+        operation_owner: "fleet_reconciliation",
+        state: "prepared",
+        request_fingerprint: "queue-ship-#{System.unique_integer([:positive])}",
+        prepared_at: DateTime.utc_now(),
+        prepared_evidence: %{"spending" => %{"worst_case_exposure" => 12_500}}
+      })
+
+    owner = self()
+
+    holder =
+      Task.async(fn ->
+        Repo.transaction(fn ->
+          Repo.query!("SELECT id FROM agents WHERE id = $1 FOR UPDATE", [ctx.agent.id])
+          [[backend]] = Repo.query!("SELECT pg_backend_pid()").rows
+          send(owner, {:holder, backend})
+          receive do: (:release -> :ok)
+        end)
+      end)
+
+    assert_receive {:holder, holder_backend}, 5_000
+
+    callers =
+      Enum.map([&FleetAcquisition.admit_send/1, &RecordedAction.admit_send/1], fn admit ->
+        attempt = if admit == (&RecordedAction.admit_send/1), do: cargo, else: ship
+
+        Task.async(fn ->
+          Repo.checkout(fn ->
+            [[backend]] = Repo.query!("SELECT pg_backend_pid()").rows
+            send(owner, {:caller, backend})
+            admit.(attempt)
+          end)
+        end)
+      end)
+
+    assert_receive {:caller, first_backend}, 5_000
+    assert_receive {:caller, second_backend}, 5_000
+    await_blocked(first_backend, holder_backend)
+    await_blocked(second_backend, holder_backend)
+
+    # Acquisition waits on Agent first: its Attempt row is not yet locked.
+    assert {:ok, :ok} =
+             Repo.transaction(fn ->
+               Repo.all(
+                 from a in MutationAttempts.Attempt,
+                   where: a.id in ^[ship.id, cargo.id],
+                   lock: "FOR UPDATE NOWAIT"
+               )
+
+               :ok
+             end)
+
+    send(holder.pid, :release)
+    assert {:ok, :ok} = Task.await(holder, 5_000)
+    results = Enum.map(callers, &Task.await(&1, 5_000))
+    assert {:error, :ship_offer_evidence_unavailable} in results
+    assert Enum.any?(results, &match?({:ok, %{state: "sent_or_unknown"}}, &1))
   end
 
   test "lower priority arriving first cannot consume the higher priority Reservation", ctx do
