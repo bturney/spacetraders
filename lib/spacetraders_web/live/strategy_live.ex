@@ -4,6 +4,7 @@ defmodule SpaceTradersWeb.StrategyLive do
   use SpaceTradersWeb, :live_view
 
   alias SpaceTraders.{FleetStrategy, MissionControl}
+  alias SpaceTraders.FleetStrategy.{Revision, StandingAuthority}
 
   @impl true
   def mount(_params, _session, socket) do
@@ -98,6 +99,11 @@ defmodule SpaceTradersWeb.StrategyLive do
             <span class="badge badge-success">Immutable</span>
           </div>
           <.strategy_document document={@projection.active_revision.document} />
+          <.credit_floor_protection
+            id="active-credit-floor-protection"
+            document={@projection.active_revision.document}
+            margin_percent={@projection[:credit_margin_percent]}
+          />
         </section>
 
         <section
@@ -358,6 +364,11 @@ defmodule SpaceTradersWeb.StrategyLive do
             </section>
 
             <.strategy_document document={@projection.draft} />
+            <.credit_floor_protection
+              id="draft-credit-floor-protection"
+              document={@projection.draft}
+              margin_percent={@projection[:credit_margin_percent]}
+            />
             <div class="mt-6 flex flex-col-reverse gap-3 sm:flex-row sm:justify-end">
               <button id="discard-strategy-draft" phx-click="discard_draft" class="btn btn-ghost">Discard draft</button>
               <button
@@ -604,6 +615,34 @@ defmodule SpaceTradersWeb.StrategyLive do
         <strong>Likely consequences:</strong> {@document["consequences"]}
       </p>
     </div>
+    """
+  end
+
+  attr :id, :string, required: true
+  attr :document, :map, required: true
+  attr :margin_percent, :integer, default: nil
+
+  # ADR 0013 truthful review: the floor is a calibrated bound, not a price cap.
+  defp credit_floor_protection(assigns) do
+    assigns =
+      assign(
+        assigns,
+        :floor,
+        case StandingAuthority.credit_floor(%Revision{document: assigns.document}) do
+          {:ok, floor} -> floor
+          _ -> nil
+        end
+      )
+
+    ~H"""
+    <p :if={@floor} id={@id} class="mt-4 rounded-xl bg-base-200 p-4 text-sm">
+      <strong>Credit floor protection:</strong>
+      each credit-bearing action is admitted only if a fresh quote plus a calibrated worst-case
+      margin{if @margin_percent, do: " (currently #{@margin_percent}%)"} keeps credits at or above the floor,
+      counting every other reserved, in-flight, or unresolved spend.
+      SpaceTraders cannot cap execution prices, so a charge can still exceed that bound.
+      Any breach is recorded, widens the margin, and pauses new spending until the balance recovers.
+    </p>
     """
   end
 

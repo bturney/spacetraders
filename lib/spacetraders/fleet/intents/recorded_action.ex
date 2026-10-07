@@ -32,7 +32,9 @@ defmodule SpaceTraders.Fleet.Intents.RecordedAction do
     :market_quote_stale_or_missing,
     :insufficient_unreserved_headroom,
     :authoritative_credit_facts_required,
-    :unbounded_purchase_exposure
+    :unbounded_purchase_exposure,
+    :credit_calibration_superseded,
+    :credit_spending_paused
   ]
 
   @doc "Commits one selected outcome and its prepared attempt, without sending."
@@ -312,6 +314,12 @@ defmodule SpaceTraders.Fleet.Intents.RecordedAction do
       {:error, persistence_reason} -> {:error, persistence_reason}
     end
   end
+
+  # A paused Agent keeps non-purchase spending (fuel, antimatter) selected but
+  # unsent: the Operator resolves the floor, not a recovery-spend exception.
+  defp suppress_before_send(_current, %Attempt{operation_id: operation} = attempt, reason)
+       when reason == :credit_spending_paused and operation != "purchase-cargo",
+       do: suppress(attempt, reason)
 
   defp suppress_before_send(current, attempt, reason)
        when reason in @spending_replan_reasons do

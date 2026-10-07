@@ -390,6 +390,44 @@ defmodule SpaceTradersWeb.StrategyLiveTest do
     refute html =~ "Objectives added"
   end
 
+  test "credit-floor review states calibrated worst-case protection and no game price cap", %{
+    conn: conn
+  } do
+    {:ok, view, _html} = live(conn, ~p"/strategy")
+
+    view
+    |> form("#strategy-draft-form", %{
+      "strategy" => %{
+        "objectives" => "Grow credits | continuous | Measure growth | recurring",
+        "hard_constraints" => "Keep at least 1,000 credits available",
+        "preferences" => "",
+        "consequences" => "Credits may be spent above the floor"
+      }
+    })
+    |> render_change()
+
+    protection = render(element(view, "#draft-credit-floor-protection"))
+    assert protection =~ "calibrated worst-case"
+    assert protection =~ "25%"
+    assert protection =~ "SpaceTraders cannot cap execution prices"
+    assert protection =~ "recorded"
+    assert protection =~ "pauses new spending"
+    refute protection =~ "guarantee"
+
+    view
+    |> form("#strategy-draft-form", %{
+      "strategy" => %{
+        "objectives" => "Grow credits | continuous | Measure growth | recurring",
+        "hard_constraints" => "No scrap",
+        "preferences" => "",
+        "consequences" => ""
+      }
+    })
+    |> render_change()
+
+    refute has_element?(view, "#draft-credit-floor-protection")
+  end
+
   test "presents a draft with no active revision as new standing intent", %{conn: conn} do
     {:ok, view, _html} = live(conn, ~p"/strategy")
 

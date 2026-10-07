@@ -32,6 +32,16 @@ defmodule SpaceTraders.FleetPlanningTest do
     assert copper.alternatives == [alternative(iron)]
   end
 
+  test "a widened calibration margin in the snapshot widens the selection-time credit Reservation" do
+    snapshot = Map.put(evidence_snapshot(), :credit_margin_percent, 50)
+
+    assert {:ok, %{candidate_contributions: [candidate | _]}} =
+             FleetPlanning.plan_market(revision(), 0, snapshot)
+
+    # 20 units at 10 credits with a 50% margin, versus 250 at the initial 25%.
+    assert candidate.required_resources.credits == 300
+  end
+
   test "contributions declare outcomes, uncertainty, needs, dependencies, validity, and alternatives" do
     assert {:ok, %{candidate_contributions: [candidate | _]}} =
              FleetPlanning.plan_market(revision(), 0, evidence_snapshot())

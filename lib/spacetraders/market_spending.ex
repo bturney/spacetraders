@@ -4,35 +4,39 @@ defmodule SpaceTraders.MarketSpending do
   import Ecto.Query
 
   alias SpaceTraders.Agent.Agent
-  alias SpaceTraders.{Clock, Evidence, Repo}
+  alias SpaceTraders.{Clock, CreditCalibration, Evidence, Repo}
   alias SpaceTraders.FleetAllocation.{Commitment, Portfolio}
   alias SpaceTraders.FleetGeneration.Generation
   alias SpaceTraders.FleetStrategy.StandingAuthority
   alias SpaceTraders.MutationAttempts.Attempt
   alias SpaceTraders.SafetyFence.DependencyKey
 
-  @version "market-purchase-v1-25pct"
-  @margin 25
+  # Pure planning callers without a calibration read use the initial model;
+  # runtime callers pass `CreditCalibration.active/0`'s margin.
+  @initial_margin 25
   @minimum_margin 10
   @freshness_seconds 30
   @credit_operations ~w(purchase-cargo purchase-ship refuel-ship jump-ship install-ship-module remove-ship-module install-ship-mount remove-ship-mount repair-ship)
 
-  def worst_case_exposure(price, units, margin \\ @margin)
+  def worst_case_exposure(price, units, margin \\ @initial_margin)
       when is_integer(price) and price >= 0 and is_integer(units) and units >= 0 and
              is_integer(margin) and margin >= @minimum_margin do
     div(price * units * (100 + margin) + 99, 100)
   end
 
-  def affordable_units(credits, price) when is_integer(price) and price > 0,
-    do: div(max(credits, 0) * 100, price * (100 + @margin))
+  def affordable_units(credits, price, margin \\ @initial_margin)
 
-  def affordable_units(_credits, 0), do: :infinity
+  def affordable_units(credits, price, margin) when is_integer(price) and price > 0,
+    do: div(max(credits, 0) * 100, price * (100 + margin))
+
+  def affordable_units(_credits, 0, _margin), do: :infinity
 
   # Reads run before the Intent/Attempt transaction. Reuse preserves original age.
   def acquire(agent, intent, %{"kind" => "buy", "units" => units} = action) do
     waypoint = intent.target_waypoint
     system = waypoint |> String.split("-") |> Enum.take(2) |> Enum.join("-")
     subject = "market:#{system}:#{waypoint}"
+    calibration = CreditCalibration.active()
 
     with {:ok, quote} <-
            retained_or_read(agent, subject, fn ->
@@ -63,9 +67,10 @@ defmodule SpaceTraders.MarketSpending do
          "trade_symbol" => action["trade_symbol"],
          "unit_price" => good.purchase_price,
          "units" => units,
-         "calibration_version" => @version,
-         "margin_percent" => @margin,
-         "worst_case_exposure" => worst_case_exposure(good.purchase_price, units)
+         "calibration_version" => calibration.version,
+         "margin_percent" => calibration.margin_percent,
+         "worst_case_exposure" =>
+           worst_case_exposure(good.purchase_price, units, calibration.margin_percent)
        }}
     else
       {:error, reason} -> {:error, reason}
@@ -81,11 +86,34 @@ defmodule SpaceTraders.MarketSpending do
   def lock_agent(id) when is_integer(id),
     do: Repo.one!(from a in Agent, where: a.id == ^id, lock: "FOR UPDATE")
 
-  def admit(%Attempt{operation_id: "purchase-cargo"} = attempt, intent, revision) do
+  @doc "Credit-bearing operation ids governed by spending admission."
+  def credit_operations, do: @credit_operations
+
+  # Every credit-bearing family honours the Agent's spending pause first; a
+  # paused Agent never spends through the floor, recovery purposes included.
+  def admit(%Attempt{operation_id: operation} = attempt, intent, revision)
+      when operation in @credit_operations do
     agent = Repo.get!(Agent, attempt.agent_id)
+
+    credits =
+      case current_credits(agent) do
+        {:ok, binding} -> binding
+        _ -> nil
+      end
+
+    with {:ok, floor} <- credit_floor(revision),
+         :ok <- CreditCalibration.spending_pause(agent, credits, floor, revision) do
+      admit_spend(attempt, agent, intent, revision)
+    end
+  end
+
+  def admit(_attempt, _intent, _revision), do: :ok
+
+  defp admit_spend(%Attempt{operation_id: "purchase-cargo"} = attempt, agent, intent, revision) do
     spending = attempt.prepared_evidence["spending"]
 
-    with :ok <- validate_quote(agent, attempt, spending),
+    with :ok <- current_calibration(spending),
+         :ok <- validate_quote(agent, attempt, spending),
          {:ok, credits} <- current_credits(agent),
          {:ok, floor} <- credit_floor(revision),
          {:ok, other_exposure} <- other_exposure(agent, intent, attempt, credits.observation),
@@ -97,7 +125,7 @@ defmodule SpaceTraders.MarketSpending do
     end
   end
 
-  def admit(_attempt, _intent, _revision), do: :ok
+  defp admit_spend(_attempt, _agent, _intent, _revision), do: :ok
 
   defp validate_quote(agent, attempt, spending) when is_map(spending) do
     body = attempt.prepared_evidence["request"]["body"]
@@ -117,10 +145,8 @@ defmodule SpaceTraders.MarketSpending do
            spending["trade_symbol"] == body["symbol"] and spending["units"] == body["units"],
          true <- spending["unit_price"] == good.purchase_price,
          true <-
-           spending["calibration_version"] == @version and spending["margin_percent"] == @margin,
-         true <-
            spending["worst_case_exposure"] ==
-             worst_case_exposure(good.purchase_price, body["units"]) do
+             worst_case_exposure(good.purchase_price, body["units"], spending["margin_percent"]) do
       :ok
     else
       _ -> {:error, :market_quote_stale_or_missing}
@@ -128,6 +154,16 @@ defmodule SpaceTraders.MarketSpending do
   end
 
   defp validate_quote(_agent, _attempt, _spending), do: {:error, :market_quote_stale_or_missing}
+
+  # A bound prepared under a superseded margin is replanned, never resized.
+  defp current_calibration(%{"calibration_version" => version, "margin_percent" => margin}) do
+    case CreditCalibration.active() do
+      %{version: ^version, margin_percent: ^margin} -> :ok
+      _ -> {:error, :credit_calibration_superseded}
+    end
+  end
+
+  defp current_calibration(_spending), do: {:error, :market_quote_stale_or_missing}
 
   defp acquire_credits(agent) do
     case current_credits(agent) do

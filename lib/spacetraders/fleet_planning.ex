@@ -2210,8 +2210,11 @@ defmodule SpaceTraders.FleetPlanning do
               freshness_seconds >= 0 and is_list(markets) do
     demand_deadline_seconds = Map.get(snapshot, :demand_deadline_seconds, 60)
     observation_costs = Map.get(snapshot, :observation_costs, %{})
+    # Callers pass CreditCalibration's active margin; pure callers get the initial model.
+    credit_margin_percent = Map.get(snapshot, :credit_margin_percent, 25)
 
     if is_integer(demand_deadline_seconds) and demand_deadline_seconds >= 0 and
+         is_integer(credit_margin_percent) and credit_margin_percent >= 10 and
          is_map(observation_costs) and
          Enum.all?(observation_costs, fn {subject, cost} ->
            is_binary(subject) and is_map(cost) and
@@ -2231,6 +2234,7 @@ defmodule SpaceTraders.FleetPlanning do
            freshness_seconds: freshness_seconds,
            demand_deadline_seconds: demand_deadline_seconds,
            observation_costs: observation_costs,
+           credit_margin_percent: credit_margin_percent,
            agent_id: Map.get(snapshot, :agent_id),
            coverage_authoritative: Map.has_key?(snapshot, :baseline_subjects),
            baseline_subjects: baseline_subjects,
@@ -2485,7 +2489,12 @@ defmodule SpaceTraders.FleetPlanning do
       |> Enum.sort_by(& &1.subject)
 
     required_resources = %{
-      credits: SpaceTraders.MarketSpending.worst_case_exposure(source_good.purchase_price, units),
+      credits:
+        SpaceTraders.MarketSpending.worst_case_exposure(
+          source_good.purchase_price,
+          units,
+          snapshot.credit_margin_percent
+        ),
       cargo_capacity: units,
       ship_count: 1
     }

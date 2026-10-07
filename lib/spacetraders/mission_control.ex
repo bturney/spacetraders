@@ -259,6 +259,7 @@ defmodule SpaceTraders.MissionControl do
     projection
     |> Map.put(:presets, FleetStrategy.presets())
     |> Map.put(:draft_comparison, draft_comparison(projection))
+    |> Map.put(:credit_margin_percent, SpaceTraders.CreditCalibration.active().margin_percent)
   end
 
   @doc "Returns visible Market Candidate Contributions from retained Operational Intelligence."
@@ -931,6 +932,7 @@ defmodule SpaceTraders.MissionControl do
       snapshot =
         FleetPlanning.market_snapshot(as_of, system_symbol, agent.id, markets)
         |> Map.merge(FleetPlanning.baseline_coverage(baseline))
+        |> Map.put(:credit_margin_percent, SpaceTraders.CreditCalibration.active().margin_percent)
 
       document
       |> Map.get("objectives", [])

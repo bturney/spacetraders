@@ -2545,7 +2545,14 @@ defmodule SpaceTraders.Fleet.Intents do
               parameters["units"],
               min(
                 good.trade_volume,
-                min(free, SpaceTraders.MarketSpending.affordable_units(total_budget, price))
+                min(
+                  free,
+                  SpaceTraders.MarketSpending.affordable_units(
+                    total_budget,
+                    price,
+                    SpaceTraders.CreditCalibration.active().margin_percent
+                  )
+                )
               )
             )
 
