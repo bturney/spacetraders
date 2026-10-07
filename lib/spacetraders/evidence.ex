@@ -97,6 +97,7 @@ defmodule SpaceTraders.Evidence do
   defp retained_subject?(_agent, _source), do: true
 
   @retained_models %{
+    "get-market" => SpaceTraders.API.Model.Market,
     "get-my-ship" => SpaceTraders.API.Model.Ship,
     "get-waypoint" => SpaceTraders.API.Model.Waypoint,
     "get-construction" => SpaceTraders.API.Model.Construction,

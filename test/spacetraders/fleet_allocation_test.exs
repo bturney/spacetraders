@@ -8,6 +8,29 @@ defmodule SpaceTraders.FleetAllocationTest do
 
   @as_of ~U[2030-01-01 12:00:00Z]
 
+  test "selection protects the floor against the combined calibrated Reservations" do
+    revision = %{
+      revision(2)
+      | document: %{
+          "objectives" => [%{}, %{}],
+          "hard_constraints" => ["Keep at least 1,000 credits available"]
+        }
+    }
+
+    higher = candidate("higher", 0, claims: ["SHIP-1"], reservations: %{credits: 63})
+    lower = candidate("lower", 1, claims: ["SHIP-2"], reservations: %{credits: 63})
+
+    assert {:ok, portfolio} =
+             FleetAllocation.select_portfolio(revision, [lower, higher], %{
+               as_of: @as_of,
+               claims: ["SHIP-1", "SHIP-2"],
+               reservations: %{credits: 1_125}
+             })
+
+    assert [%{candidate_id: "higher"}] = portfolio.commitments
+    assert [%{candidate_id: "lower", reasons: [:insufficient_reservation]}] = portfolio.rejected
+  end
+
   test "protects higher Strategic Priority before committing remaining resources" do
     revision = revision(2)
 

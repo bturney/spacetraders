@@ -6,8 +6,8 @@ defmodule SpaceTraders.Fleet.Intents.RecordedAction do
 
   All implemented Ship adapters share this protocol. No network callback runs
   under these transactions. Legacy selected actions without linkage remain unknown.
-  Existing spending eligibility belongs to the selected outcome; this adoption
-  does not turn observed prices into guaranteed spending bounds (#502).
+  Market purchases retain calibrated quote exposure before preparation and
+  revalidate Fleet spending authority before the send marker.
   """
 
   import Ecto.Query
@@ -23,9 +23,17 @@ defmodule SpaceTraders.Fleet.Intents.RecordedAction do
   alias SpaceTraders.FleetGeneration.Generation
   alias SpaceTraders.FleetStrategy.{Revision, Strategy}
   alias SpaceTraders.ManualIntervention
+  alias SpaceTraders.MarketSpending
   alias SpaceTraders.MutationAttempts
   alias SpaceTraders.MutationAttempts.Attempt
   alias SpaceTraders.Repo
+
+  @spending_replan_reasons [
+    :market_quote_stale_or_missing,
+    :insufficient_unreserved_headroom,
+    :authoritative_credit_facts_required,
+    :unbounded_purchase_exposure
+  ]
 
   @doc "Commits one selected outcome and its prepared attempt, without sending."
   def prepare(
@@ -33,8 +41,11 @@ defmodule SpaceTraders.Fleet.Intents.RecordedAction do
         %Intent{} = intent,
         %{"kind" => _kind} = action
       ) do
-    with :ok <- require_commit_boundary() do
+    with :ok <- require_commit_boundary(),
+         :ok <- purchase_preparation_authority(agent, intent, action),
+         {:ok, spending} <- MarketSpending.acquire(agent, intent, action) do
       Repo.transaction(fn ->
+        if spending, do: MarketSpending.lock_agent(agent.id)
         current = locked_intent(intent.id)
 
         with %Intent{} <- current,
@@ -49,7 +60,13 @@ defmodule SpaceTraders.Fleet.Intents.RecordedAction do
             |> Map.put("selection_id", Ecto.UUID.generate())
 
           {:ok, attempt} =
-            prepare_attempt(authority, %{current | in_flight_action: selected}, request)
+            prepare_attempt(
+              authority,
+              %{current | in_flight_action: selected},
+              request,
+              nil,
+              spending
+            )
 
           emit_phase(:preparation_written, attempt)
 
@@ -74,6 +91,28 @@ defmodule SpaceTraders.Fleet.Intents.RecordedAction do
 
   def prepare(_agent, _intent, _action), do: {:error, :invalid_recorded_action}
 
+  defp purchase_preparation_authority(agent, intent, %{"kind" => "buy"}) do
+    Repo.transaction(fn ->
+      MarketSpending.lock_agent(agent.id)
+
+      with %Intent{} = current <- locked_intent(intent.id),
+           true <- Intent.unfinished?(current) and is_nil(current.in_flight_action),
+           {:ok, owner} <- authority(agent.id, current),
+           :ok <- claim_matches(current, owner.claim) do
+        :ok
+      else
+        {:error, _} = error -> error
+        _ -> {:error, :intent_dispatch_no_longer_allowed}
+      end
+    end)
+    |> case do
+      {:ok, result} -> result
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp purchase_preparation_authority(_agent, _intent, _action), do: :ok
+
   @doc "Checks retry authority before capability reads; preparation and final admission recheck it."
   def retry_authority(
         %Agent{id: agent_id},
@@ -82,6 +121,8 @@ defmodule SpaceTraders.Fleet.Intents.RecordedAction do
       ) do
     with :ok <- require_commit_boundary() do
       Repo.transaction(fn ->
+        MarketSpending.lock_agent(absent)
+
         case selected_owner_authority(locked_intent(intent.id), absent) do
           {:ok, _authority} -> :ok
           error -> error
@@ -96,8 +137,11 @@ defmodule SpaceTraders.Fleet.Intents.RecordedAction do
 
   @doc "Consumes proven absence and links its one retry under the current owner."
   def prepare_retry(%Agent{} = agent, %Intent{} = intent, %Attempt{} = absent, opts \\ []) do
-    with :ok <- require_commit_boundary() do
+    with :ok <- require_commit_boundary(),
+         :ok <- retry_authority(agent, intent, absent),
+         {:ok, spending} <- MarketSpending.acquire(agent, intent, intent.in_flight_action) do
       Repo.transaction(fn ->
+        if spending, do: MarketSpending.lock_agent(agent.id)
         current = locked_intent(intent.id)
 
         with %Intent{} <- current,
@@ -111,7 +155,13 @@ defmodule SpaceTraders.Fleet.Intents.RecordedAction do
                  Recovery.request_identity(current.in_flight_action),
              {:ok, request} <- ShipAction.request(authority.ship.symbol, action),
              {:ok, retry} <-
-               prepare_attempt(authority, %{current | in_flight_action: action}, request, absent) do
+               prepare_attempt(
+                 authority,
+                 %{current | in_flight_action: action},
+                 request,
+                 absent,
+                 spending
+               ) do
           current
           |> Ecto.Changeset.change(mutation_attempt_id: retry.id, in_flight_action: action)
           |> Repo.update!()
@@ -130,11 +180,13 @@ defmodule SpaceTraders.Fleet.Intents.RecordedAction do
   def admit_send(%Attempt{} = attempt) do
     with :ok <- require_commit_boundary() do
       Repo.transaction(fn ->
+        MarketSpending.lock_agent(attempt)
         current = locked_intent(attempt.provenance["intent_id"])
         attempt = Repo.one!(from a in Attempt, where: a.id == ^attempt.id, lock: "FOR UPDATE")
 
         with "prepared" <- attempt.state,
-             :ok <- selected_authority(current, attempt) do
+             {:ok, owner} <- selected_authority(current, attempt),
+             :ok <- MarketSpending.admit(attempt, current, owner.revision) do
           result = MutationAttempts.mark_sent_or_unknown(attempt)
 
           case result do
@@ -145,7 +197,7 @@ defmodule SpaceTraders.Fleet.Intents.RecordedAction do
           result
         else
           state when is_binary(state) -> {:error, :attempt_already_dispatched}
-          {:error, reason} -> suppress(attempt, reason)
+          {:error, reason} -> suppress_before_send(current, attempt, reason)
           _ -> suppress(attempt, :recorded_action_no_longer_selected)
         end
       end)
@@ -155,6 +207,13 @@ defmodule SpaceTraders.Fleet.Intents.RecordedAction do
           result
 
         {:ok, result} ->
+          if match?(
+               {:error, reason}
+               when reason in @spending_replan_reasons,
+               result
+             ),
+             do: SpaceTraders.Outbox.dispatch_pending()
+
           result
 
         {:error, reason} ->
@@ -171,11 +230,12 @@ defmodule SpaceTraders.Fleet.Intents.RecordedAction do
   def authorize_transport(%Attempt{} = attempt) do
     with :ok <- require_commit_boundary() do
       Repo.transaction(fn ->
+        MarketSpending.lock_agent(attempt)
         current = locked_intent(attempt.provenance["intent_id"])
         attempt = Repo.one!(from a in Attempt, where: a.id == ^attempt.id, lock: "FOR UPDATE")
 
         with "sent_or_unknown" <- attempt.state,
-             :ok <- selected_authority(current, attempt) do
+             {:ok, _owner} <- selected_authority(current, attempt) do
           emit_phase(:transport_authorization_checked, attempt)
           :ok
         else
@@ -219,7 +279,7 @@ defmodule SpaceTraders.Fleet.Intents.RecordedAction do
          true <-
            Map.merge(current.in_flight_action, action_binding(authority.claim)) ==
              current.in_flight_action do
-      :ok
+      {:ok, authority}
     else
       {:error, reason} -> {:error, reason}
       _ -> {:error, :recorded_action_no_longer_selected}
@@ -253,6 +313,37 @@ defmodule SpaceTraders.Fleet.Intents.RecordedAction do
     end
   end
 
+  defp suppress_before_send(current, attempt, reason)
+       when reason in @spending_replan_reasons do
+    with {:ok, _} <- MutationAttempts.record_not_sent(attempt, inspect_reason(reason)) do
+      current
+      |> Ecto.Changeset.change(
+        status: "superseded",
+        in_flight_action: nil,
+        mutation_attempt_id: nil,
+        finished_at: DateTime.utc_now(:second),
+        blocker: nil,
+        last_action_result: %{
+          "outcome" => "spending_replan_required",
+          "reason" => inspect_reason(reason),
+          "mutation_attempt_id" => attempt.id
+        }
+      )
+      |> Repo.update!()
+
+      FleetAllocation.return_purchase_for_replanning(
+        Repo.get!(Agent, attempt.agent_id),
+        current,
+        attempt,
+        reason
+      )
+
+      {:error, reason}
+    end
+  end
+
+  defp suppress_before_send(_current, attempt, reason), do: suppress(attempt, reason)
+
   defp inspect_reason(reason) when is_atom(reason), do: Atom.to_string(reason)
   defp inspect_reason(reason), do: inspect(reason)
 
@@ -263,12 +354,13 @@ defmodule SpaceTraders.Fleet.Intents.RecordedAction do
       else: :ok
   end
 
-  defp prepare_attempt(authority, intent, request, original \\ nil) do
+  defp prepare_attempt(authority, intent, request, original, spending) do
     opts =
       request.opts ++
         [
           agent_id: authority.agent.id,
           selected_intent: intent,
+          spending: spending,
           evidence_references: Recovery.describe(intent.in_flight_action).evidence_references,
           dispatch_context: %{
             operator_id: authority.agent.operator_id,

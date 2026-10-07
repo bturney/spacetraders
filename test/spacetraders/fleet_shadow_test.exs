@@ -146,7 +146,7 @@ defmodule SpaceTraders.FleetShadowTest do
           capabilities: %{cargo_transport: 20, market_access: ["X1-A1", "X1-A2"]}
         }
       ],
-      reservations: %{credits: 200}
+      reservations: %{credits: 250}
     }
   end
 

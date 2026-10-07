@@ -4,7 +4,7 @@ defmodule SpaceTraders.FleetExecution do
 
   Only a shadow-validated eligible Market commitment may activate Ship
   execution. Eligibility requires that the commitment's Credit Reservations
-  cover the worst-case purchase, fuel, and bounded-loss exposure without
+  cover calibrated Market purchase exposure without
   crossing the Hard Constraint credit floor. Activation publishes the selected
   portfolio atomically (Claim + Reservations + Strategy Decision Episode), then
   dispatches the authoritative buy, travel, sell round trip on the claimed Ship
@@ -31,12 +31,9 @@ defmodule SpaceTraders.FleetExecution do
   alias SpaceTraders.Repo
   alias SpaceTraders.ShipReservation
 
-  @fuel_allowance_credits 500
-  @bounded_loss_credits 250
-
-  @doc "Returns the worst-case credit exposure allowance for one Market commitment."
-  def worst_case_exposure(credit_reservation) when is_number(credit_reservation),
-    do: credit_reservation + @fuel_allowance_credits + @bounded_loss_credits
+  @doc "Returns calibrated exposure for a quoted Market purchase cost."
+  def worst_case_exposure(quoted_cost) when is_integer(quoted_cost),
+    do: SpaceTraders.MarketSpending.worst_case_exposure(quoted_cost, 1)
 
   @doc "Returns the credit floor for a Revision, or `{:error, :no_credit_floor}`."
   defdelegate credit_floor(revision), to: StandingAuthority
@@ -70,8 +67,8 @@ defmodule SpaceTraders.FleetExecution do
   Returns the shadow-validated eligible Market commitment for one Agent.
 
   A proposed choice is eligible only when it carries a Claim on a Ship the
-  Agent owns and its Credit Reservations cover the worst-case purchase, fuel,
-  and bounded-loss exposure without crossing the Hard Constraint credit floor.
+  Agent owns and its Credit Reservations cover calibrated purchase exposure
+  without crossing the Hard Constraint credit floor.
   """
   def eligible_market_commitment(
         comparison,
@@ -99,7 +96,7 @@ defmodule SpaceTraders.FleetExecution do
     with {:ok, floor} <- StandingAuthority.credit_floor(revision),
          true <- is_number(reservation) and reservation >= 0,
          true <- is_number(available) and available >= 0 do
-      available - worst_case_exposure(reservation) >= floor
+      available - reservation >= floor
     else
       _ -> false
     end

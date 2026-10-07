@@ -54,7 +54,7 @@ defmodule SpaceTraders.FleetPlanningTest do
                destination_market_signal: %{supply: "LIMITED", activity: "GROWING"}
              },
              required_capabilities: capabilities,
-             required_resources: %{credits: 200, cargo_capacity: 20, ship_count: 1},
+             required_resources: %{credits: 250, cargo_capacity: 20, ship_count: 1},
              dependencies: dependencies,
              validity: %{as_of: @as_of, expires_at: ~U[2030-01-01 12:03:00Z]},
              alternatives: [_]

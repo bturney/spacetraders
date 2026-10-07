@@ -100,6 +100,7 @@ defmodule SpaceTraders.FleetAllocation do
       when is_list(candidates) and is_map(availability) and is_list(current_commitments) do
     with {:ok, candidates} <- normalize_candidates(candidates, availability),
          true <- valid_allocation_input?(revision, candidates, availability, current_commitments) do
+      availability = protect_credit_floor(revision, availability)
       {:ok, build_portfolio(revision, candidates, availability, current_commitments)}
     else
       _invalid -> {:error, :invalid_allocation_input}
@@ -108,6 +109,18 @@ defmodule SpaceTraders.FleetAllocation do
 
   def select_portfolio(_revision, _candidates, _availability, _current_commitments),
     do: {:error, :invalid_allocation_input}
+
+  defp protect_credit_floor(revision, availability) do
+    case SpaceTraders.FleetStrategy.StandingAuthority.credit_floor(revision) do
+      {:ok, floor} ->
+        Map.update!(availability, :reservations, fn resources ->
+          Map.update(resources, :credits, 0, &max(&1 - floor, 0))
+        end)
+
+      _ ->
+        availability
+    end
+  end
 
   @doc "Selects complete producer–hauler groups; orphan producer Claims cannot starve deliveries."
   def select_coordinated_portfolio(%Revision{} = revision, candidates, availability)
@@ -292,6 +305,8 @@ defmodule SpaceTraders.FleetAllocation do
          changed,
          decision
        ) do
+    lock_generation_agent!(generation_id)
+
     portfolio =
       Repo.one(
         from p in Portfolio,
@@ -849,6 +864,8 @@ defmodule SpaceTraders.FleetAllocation do
          calibration_version,
          expected_source_version
        ) do
+    lock_generation_agent!(generation_id)
+
     strategy =
       Repo.one(
         from strategy in Strategy,
@@ -1042,6 +1059,7 @@ defmodule SpaceTraders.FleetAllocation do
   end
 
   defp do_unwind_current_portfolio(operator_id, generation_id) do
+    lock_generation_agent!(generation_id)
     now = DateTime.utc_now()
 
     portfolio =
@@ -1111,6 +1129,43 @@ defmodule SpaceTraders.FleetAllocation do
           :ok
       end
     end)
+  end
+
+  defp lock_generation_agent!(generation_id) do
+    generation = Repo.get!(Generation, generation_id)
+    SpaceTraders.MarketSpending.lock_agent(generation.agent_id)
+  end
+
+  @doc "Returns an unsent purchase to Allocation without releasing any other unfinished owner's protections."
+  def return_purchase_for_replanning(agent, intent, attempt, reason) do
+    if intent.fleet_commitment_id &&
+         not Repo.exists?(
+           from i in Intent,
+             where:
+               i.fleet_commitment_id == ^intent.fleet_commitment_id and
+                 i.id != ^intent.id and i.status in ^Intent.unfinished_states()
+         ) do
+      Repo.update_all(from(c in Commitment, where: c.id == ^intent.fleet_commitment_id),
+        set: [unwind_state: :released]
+      )
+
+      Repo.delete_all(
+        from c in "fleet_commitment_claims",
+          where: c.fleet_commitment_id == ^intent.fleet_commitment_id
+      )
+    end
+
+    Repo.insert!(%SpaceTraders.Outbox.Notification{
+      topic: "fleet_market_evidence",
+      event: "market_purchase_withdrawn",
+      payload: %{
+        "agent_id" => agent.id,
+        "waypoint" => intent.target_waypoint,
+        "intent_id" => intent.id,
+        "mutation_attempt_id" => attempt.id,
+        "reason" => to_string(reason)
+      }
+    })
   end
 
   defp realized_economics(episode_id) do
