@@ -558,7 +558,11 @@ defmodule SpaceTraders.API.ClientTest do
                 transaction: %Model.MarketTransaction{price_per_unit: 1_000},
                 agent: %Model.Agent{credits: 41_000}
               }} =
-               dispatch_action("ORBITALIST-1", %{"kind" => "jump", "waypoint" => "X2-UX81-A1"})
+               dispatch_action("ORBITALIST-1", %{
+                 "kind" => "jump",
+                 "waypoint" => "X2-UX81-A1",
+                 "source_waypoint" => "X1-UX81-A1"
+               })
     end
 
     test "set_ship_flight_mode/3 patches the flight mode and decodes fuel + nav" do

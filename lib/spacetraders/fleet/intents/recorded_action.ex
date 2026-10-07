@@ -91,7 +91,8 @@ defmodule SpaceTraders.Fleet.Intents.RecordedAction do
 
   def prepare(_agent, _intent, _action), do: {:error, :invalid_recorded_action}
 
-  defp purchase_preparation_authority(agent, intent, %{"kind" => "buy"}) do
+  defp purchase_preparation_authority(agent, intent, %{"kind" => kind})
+       when kind in ["buy", "refuel", "jump"] do
     Repo.transaction(fn ->
       MarketSpending.lock_agent(agent.id)
 
@@ -313,7 +314,9 @@ defmodule SpaceTraders.Fleet.Intents.RecordedAction do
     end
   end
 
-  defp suppress_before_send(current, attempt, reason)
+  # Only a Market purchase can be re-planned with fresh evidence. Refuel and jump
+  # spending stays paused: the Intent blocks and the Operator decides.
+  defp suppress_before_send(current, %Attempt{operation_id: "purchase-cargo"} = attempt, reason)
        when reason in @spending_replan_reasons do
     with {:ok, _} <- MutationAttempts.record_not_sent(attempt, inspect_reason(reason)) do
       current

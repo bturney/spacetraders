@@ -715,7 +715,7 @@ defmodule SpaceTraders.FleetConstruction do
            trade_symbol: candidate.trade_symbol,
            units: candidate.construction.batch_units,
            purchase_price: candidate.construction.max_price,
-           reserve_credits: floor + 750,
+           reserve_credits: floor,
            construction: %{
              system: candidate.construction.system,
              waypoint: candidate.construction.waypoint
@@ -749,7 +749,7 @@ defmodule SpaceTraders.FleetConstruction do
       trade_symbol: candidate.trade_symbol,
       units: candidate.construction.batch_units,
       purchase_price: candidate.construction.max_price,
-      reserve_credits: floor + 750,
+      reserve_credits: floor,
       construction_upstream: %{
         system: candidate.construction.system,
         waypoint: candidate.construction.waypoint,

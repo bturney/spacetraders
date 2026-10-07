@@ -112,6 +112,8 @@ Current seam owners:
   `test/spacetraders/owned_intent_recovery_test.exs`,
   `test/spacetraders/transfer_recovery_test.exs`,
   `test/spacetraders/resource_recovery_test.exs`
+- refuel and jump/antimatter credit authority through the root Intent lifecycle:
+  `test/spacetraders/refuel_jump_spending_test.exs`
 - recorded runtime interruption, authority races, and boot recovery:
   `test/spacetraders/recorded_ship_runtime_test.exs`
 - per-family interruption phase matrix and authority loss (every recorded Ship

@@ -52,7 +52,7 @@ defmodule SpaceTraders.RecordedDispatchFixtures do
         do: transfer_evidence(agent, ship_symbol, action),
         else: action
 
-    if action["kind"] == "buy" and opts[:live_quote] != true do
+    if action["kind"] in ["buy", "refuel", "jump"] and opts[:live_quote] != true do
       retain_purchase_preflight(agent, intent.target_waypoint, action)
     end
 
@@ -68,6 +68,7 @@ defmodule SpaceTraders.RecordedDispatchFixtures do
   # Adapter tests provide actual retained Evidence at the public acquisition
   # seam. Production preparation/admission still validate that same source.
   def retain_purchase_preflight(agent, waypoint, action) do
+    {waypoint, trade_symbol, volume} = quoted_good(waypoint, action)
     system = waypoint |> String.split("-") |> Enum.take(2) |> Enum.join("-")
     market_subject = "market:#{system}:#{waypoint}"
     agent_subject = DependencyKey.observation_subject("get-my-agent", [], agent.symbol)
@@ -82,9 +83,9 @@ defmodule SpaceTraders.RecordedDispatchFixtures do
            "exchange" => [],
            "trade_goods" => [
              %{
-               "symbol" => action["trade_symbol"],
+               "symbol" => trade_symbol,
                "purchase_price" => action["listing_price"] || 10,
-               "trade_volume" => action["units"]
+               "trade_volume" => volume
              }
            ]
          }},
@@ -104,6 +105,14 @@ defmodule SpaceTraders.RecordedDispatchFixtures do
       end
     )
   end
+
+  defp quoted_good(waypoint, %{"kind" => "refuel"} = action),
+    do: {action["waypoint"] || waypoint, "FUEL", 1_000}
+
+  defp quoted_good(waypoint, %{"kind" => "jump"} = action),
+    do: {action["source_waypoint"] || waypoint, "ANTIMATTER", 1_000}
+
+  defp quoted_good(waypoint, action), do: {waypoint, action["trade_symbol"], action["units"]}
 
   # Lower adapter tests supply controlled retained preflight facts, not network
   # recovery. Runtime/transfer-owner tests acquire their own governed bindings.

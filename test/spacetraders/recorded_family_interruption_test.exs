@@ -232,17 +232,39 @@ defmodule SpaceTraders.RecordedFamilyInterruptionTest do
     %{agent: agent, ship: ship} = fixture
 
     Map.merge(fixture, %{
-      action: %{
-        "kind" => kind,
-        "waypoint" => destination,
-        "fuel_before" => 150,
-        "credits_before" => 1000
-      },
+      action:
+        Map.merge(
+          %{
+            "kind" => kind,
+            "waypoint" => destination,
+            "fuel_before" => 150,
+            "credits_before" => 1000
+          },
+          if(kind == "jump",
+            do: %{"source_waypoint" => "X1-UX81-A1"},
+            else: %{"units" => 50}
+          )
+        ),
       operation_id: if(kind == "jump", do: "jump-ship", else: "refuel-ship"),
       post_path: ship_path(ship) <> "/" <> kind,
       get: fn
         "/v2/my/agent", state ->
           %{"symbol" => agent.symbol, "credits" => if(state.applied_at, do: 900, else: 1000)}
+
+        "/v2/systems/X1-UX81/waypoints/X1-UX81-A1/market", _state ->
+          %{
+            "symbol" => "X1-UX81-A1",
+            "tradeGoods" => [
+              %{
+                "symbol" => if(kind == "jump", do: "ANTIMATTER", else: "FUEL"),
+                "purchasePrice" => 2,
+                "sellPrice" => 2,
+                "tradeVolume" => 100,
+                "supply" => "HIGH",
+                "type" => "EXPORT"
+              }
+            ]
+          }
 
         path, state ->
           if path == ship_path(ship) do
