@@ -3,10 +3,10 @@ defmodule SpaceTraders.API.ShadowAdmissionTest do
 
   alias SpaceTraders.API.ShadowAdmission
   alias SpaceTraders.API.ShadowAdmission.Candidate
-  alias SpaceTraders.API.CapacityGovernor.Snapshot
+  alias SpaceTraders.API.ShadowAdmission.Capacity
 
   test "identical demand, capacity, and evidence snapshots produce identical explained ordering" do
-    snapshot = %Snapshot{
+    snapshot = %Capacity{
       observed_at: ~U[2030-01-01 00:00:00Z],
       available_slots: 3,
       evidence_fingerprint: "evidence-v1",
@@ -65,7 +65,7 @@ defmodule SpaceTraders.API.ShadowAdmissionTest do
   end
 
   test "outage pacing and sustained backpressure are reported without admitting demand" do
-    snapshot = %Snapshot{
+    snapshot = %Capacity{
       observed_at: ~U[2030-01-01 00:00:00Z],
       available_slots: 5,
       evidence_fingerprint: "evidence-v2",
@@ -77,6 +77,35 @@ defmodule SpaceTraders.API.ShadowAdmissionTest do
     assert decision.disposition == :would_delay
     assert decision.reason == :outage_pacing
     assert decision.backpressure == :sustained
+  end
+
+  test "shadow lanes share the governor's protection meaning, so unknown lanes cannot crash it" do
+    name = :"shadow_admission_#{System.unique_integer([:positive])}"
+    {:ok, pid} = ShadowAdmission.start_link(name: name, burst: 1, rate: 0.0)
+    on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid) end)
+
+    handler_id = "shadow-admission-lanes-#{System.unique_integer([:positive])}"
+    test_pid = self()
+
+    :ok =
+      :telemetry.attach(
+        handler_id,
+        [:spacetraders, :api, :capacity, :admission],
+        fn _event, _measurements, metadata, _config ->
+          send(test_pid, {:shadow, metadata.correlation_id, metadata.lane})
+        end,
+        nil
+      )
+
+    on_exit(fn -> :telemetry.detach(handler_id) end)
+    operation = SpaceTraders.API.OperationInventory.fetch!("get-my-agent")
+
+    invented = ShadowAdmission.observe_request(operation, %{lane: :invented}, name)
+    assert_receive {:shadow, ^invented, :standard}
+
+    recovery = ShadowAdmission.observe_request(operation, %{purpose: :recovery}, name)
+    assert_receive {:shadow, ^recovery, :reconciliation}
+    assert Process.alive?(pid)
   end
 
   test "shadow output is correlated with actual request timing and outcomes" do

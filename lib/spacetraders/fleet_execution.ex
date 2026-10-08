@@ -4,7 +4,7 @@ defmodule SpaceTraders.FleetExecution do
 
   Only a shadow-validated eligible Market commitment may activate Ship
   execution. Eligibility requires that the commitment's Credit Reservations
-  cover the worst-case purchase, fuel, and bounded-loss exposure without
+  cover calibrated Market purchase exposure without
   crossing the Hard Constraint credit floor. Activation publishes the selected
   portfolio atomically (Claim + Reservations + Strategy Decision Episode), then
   dispatches the authoritative buy, travel, sell round trip on the claimed Ship
@@ -22,6 +22,7 @@ defmodule SpaceTraders.FleetExecution do
   alias SpaceTraders.FleetConstruction
   alias SpaceTraders.Fleet.Intents
   alias SpaceTraders.FleetAllocation
+  alias SpaceTraders.FleetCapacity
   alias SpaceTraders.FleetAllocation.{Commitment, Portfolio}
   alias SpaceTraders.FleetGeneration.Generation
   alias SpaceTraders.FleetShadow
@@ -30,13 +31,6 @@ defmodule SpaceTraders.FleetExecution do
   alias SpaceTraders.Intelligence
   alias SpaceTraders.Repo
   alias SpaceTraders.ShipReservation
-
-  @fuel_allowance_credits 500
-  @bounded_loss_credits 250
-
-  @doc "Returns the worst-case credit exposure allowance for one Market commitment."
-  def worst_case_exposure(credit_reservation) when is_number(credit_reservation),
-    do: credit_reservation + @fuel_allowance_credits + @bounded_loss_credits
 
   @doc "Returns the credit floor for a Revision, or `{:error, :no_credit_floor}`."
   defdelegate credit_floor(revision), to: StandingAuthority
@@ -70,8 +64,8 @@ defmodule SpaceTraders.FleetExecution do
   Returns the shadow-validated eligible Market commitment for one Agent.
 
   A proposed choice is eligible only when it carries a Claim on a Ship the
-  Agent owns and its Credit Reservations cover the worst-case purchase, fuel,
-  and bounded-loss exposure without crossing the Hard Constraint credit floor.
+  Agent owns and its Credit Reservations cover calibrated purchase exposure
+  without crossing the Hard Constraint credit floor.
   """
   def eligible_market_commitment(
         comparison,
@@ -99,7 +93,7 @@ defmodule SpaceTraders.FleetExecution do
     with {:ok, floor} <- StandingAuthority.credit_floor(revision),
          true <- is_number(reservation) and reservation >= 0,
          true <- is_number(available) and available >= 0 do
-      available - worst_case_exposure(reservation) >= floor
+      available - reservation >= floor
     else
       _ -> false
     end
@@ -156,11 +150,11 @@ defmodule SpaceTraders.FleetExecution do
         %AgentRecord{} = agent,
         %Revision{} = revision,
         %{candidate_contributions: candidates, observation_demands: demands},
-        %{available_slots: slots, backpressure: pressure}
+        capacity
       )
       when is_list(candidates) and is_list(demands) do
     cond do
-      slots <= 0 or pressure == :sustained ->
+      not FleetCapacity.proceed?(capacity) ->
         {:error, :api_capacity_unavailable}
 
       candidates == [] ->
@@ -793,20 +787,13 @@ defmodule SpaceTraders.FleetExecution do
   # The Governor's explicit deferral wins over availability collection. It is
   # not authoritative evidence of an empty portfolio, so it cannot mint or
   # disturb a Neutral Wait.
-  defp capacity_deferral_or_error(
-         current,
-         %{available_slots: slots, backpressure: pressure},
-         _error
-       )
-       when slots <= 0 or pressure == :sustained do
-    if current do
-      {:ok, %{action: :retained_for_capacity, portfolio: current}}
-    else
-      {:ok, %{action: :deferred_for_capacity}}
+  defp capacity_deferral_or_error(current, capacity, error) do
+    cond do
+      FleetCapacity.proceed?(capacity) -> error
+      current -> {:ok, %{action: :retained_for_capacity, portfolio: current}}
+      true -> {:ok, %{action: :deferred_for_capacity}}
     end
   end
-
-  defp capacity_deferral_or_error(_current, _capacity, error), do: error
 
   defp governed_market_access(%AgentRecord{} = agent) do
     with {:ok, system_symbol} <- Fleet.system_from_headquarters(agent.headquarters) do
@@ -899,36 +886,29 @@ defmodule SpaceTraders.FleetExecution do
   end
 
   defp reconcile_market_replan(
-         _scope,
-         _agent,
-         _revision,
-         current,
-         comparison,
-         %{
-           available_slots: slots,
-           backpressure: pressure
-         },
-         _availability
-       )
-       when slots == 0 or pressure == :sustained do
-    if current do
-      # Capacity is evidence for allocation: retain a still-authorized commitment
-      # rather than churn claims while the Governor cannot admit the replacement.
-      {:ok, %{action: :retained_for_capacity, portfolio: current, comparison: comparison}}
-    else
-      {:ok, %{action: :deferred_for_capacity, comparison: comparison}}
-    end
-  end
-
-  defp reconcile_market_replan(
          scope,
          agent,
          revision,
          current,
          comparison,
-         _capacity,
+         capacity,
          availability
        ) do
+    cond do
+      not FleetCapacity.proceed?(capacity) and current ->
+        # Capacity is evidence for allocation: retain a still-authorized commitment
+        # rather than churn claims while the Governor cannot admit the replacement.
+        {:ok, %{action: :retained_for_capacity, portfolio: current, comparison: comparison}}
+
+      not FleetCapacity.proceed?(capacity) ->
+        {:ok, %{action: :deferred_for_capacity, comparison: comparison}}
+
+      true ->
+        replan_market_commitments(scope, agent, revision, current, comparison, availability)
+    end
+  end
+
+  defp replan_market_commitments(scope, agent, revision, current, comparison, availability) do
     if current &&
          Enum.any?(current.commitments, fn commitment ->
            Enum.any?(

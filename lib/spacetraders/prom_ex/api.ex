@@ -9,6 +9,7 @@ defmodule SpaceTraders.PromEx.API do
   @capacity_recovered_event [:spacetraders, :api, :capacity, :recovered]
   @fleet_activity_event [:spacetraders, :fleet, :activity]
   @intent_transition_event [:spacetraders, :intent, :transition]
+  @capacity_deferral_event [:spacetraders, :intent, :capacity_deferral]
 
   @impl PromEx.Plugin
   def event_metrics(_opts) do
@@ -83,6 +84,21 @@ defmodule SpaceTraders.PromEx.API do
           measurement: :count,
           tags: [:kind],
           description: "Durable Fleet activity by kind."
+        ),
+        counter(
+          [:spacetraders, :intent, :capacity_deferrals, :total],
+          event_name: @capacity_deferral_event,
+          measurement: :count,
+          tags: [:reason, :work],
+          description: "Root Intent Capacity Deferrals by governor reason and resumed work."
+        ),
+        distribution(
+          [:spacetraders, :intent, :capacity_deferral, :waited, :seconds],
+          event_name: @capacity_deferral_event,
+          measurement: :deferred_seconds,
+          tags: [:work],
+          reporter_options: [buckets: [1, 10, 60, 300, 900, 3600]],
+          description: "How long deferred Intent work has waited on API capacity."
         ),
         counter(
           [:spacetraders, :intent, :transitions, :total],

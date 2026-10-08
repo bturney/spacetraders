@@ -52,6 +52,19 @@ defmodule SpaceTraders.RecordedDispatchFixtures do
         do: transfer_evidence(agent, ship_symbol, action),
         else: action
 
+    if action["kind"] in ["buy", "refuel", "jump"] and opts[:live_quote] != true do
+      retain_purchase_preflight(agent, intent.target_waypoint, action)
+    end
+
+    action =
+      if action["kind"] in ["install_module", "remove_module"] and opts[:live_quote] != true do
+        action = Map.put_new(action, "waypoint", intent.target_waypoint)
+        retain_modification_preflight(agent, action["waypoint"])
+        action
+      else
+        action
+      end
+
     case RecordedAction.prepare(agent, intent, action) do
       {:ok, selected} ->
         Map.merge(selected, %{agent: agent, ship: ship})
@@ -60,6 +73,80 @@ defmodule SpaceTraders.RecordedDispatchFixtures do
         %{agent: agent, ship: ship, intent: intent, error: {:error, reason}}
     end
   end
+
+  # Adapter tests provide actual retained Evidence at the public acquisition
+  # seam. Production preparation/admission still validate that same source.
+  def retain_purchase_preflight(agent, waypoint, action) do
+    {waypoint, trade_symbol, volume} = quoted_good(waypoint, action)
+    system = waypoint |> String.split("-") |> Enum.take(2) |> Enum.join("-")
+    market_subject = "market:#{system}:#{waypoint}"
+    agent_subject = DependencyKey.observation_subject("get-my-agent", [], agent.symbol)
+
+    Enum.each(
+      [
+        {"get-market", market_subject,
+         %{
+           "symbol" => waypoint,
+           "exports" => [],
+           "imports" => [],
+           "exchange" => [],
+           "trade_goods" => [
+             %{
+               "symbol" => trade_symbol,
+               "purchase_price" => action["listing_price"] || 10,
+               "trade_volume" => volume
+             }
+           ]
+         }},
+        {"get-my-agent", agent_subject,
+         %{"symbol" => agent.symbol, "credits" => action["credits_before"] || 1_000_000}}
+      ],
+      fn {operation, subject, response} ->
+        observation =
+          SpaceTraders.Evidence.authoritative_observation(
+            operation,
+            [subject],
+            %{response: response},
+            SpaceTraders.Clock.utc_now()
+          )
+
+        {:ok, _} = SpaceTraders.Evidence.fulfil_demands(agent, subject, observation)
+      end
+    )
+  end
+
+  # A module install or removal is bounded by the docked Shipyard's fee.
+  def retain_modification_preflight(agent, waypoint) do
+    system = waypoint |> String.split("-") |> Enum.take(2) |> Enum.join("-")
+    agent_subject = DependencyKey.observation_subject("get-my-agent", [], agent.symbol)
+
+    Enum.each(
+      [
+        {"get-shipyard", "shipyard:#{system}:#{waypoint}",
+         %{"symbol" => waypoint, "ship_types" => [], "modifications_fee" => 1_000}},
+        {"get-my-agent", agent_subject, %{"symbol" => agent.symbol, "credits" => 1_000_000}}
+      ],
+      fn {operation, subject, response} ->
+        observation =
+          SpaceTraders.Evidence.authoritative_observation(
+            operation,
+            [subject],
+            %{response: response},
+            SpaceTraders.Clock.utc_now()
+          )
+
+        {:ok, _} = SpaceTraders.Evidence.fulfil_demands(agent, subject, observation)
+      end
+    )
+  end
+
+  defp quoted_good(waypoint, %{"kind" => "refuel"} = action),
+    do: {action["waypoint"] || waypoint, "FUEL", 1_000}
+
+  defp quoted_good(waypoint, %{"kind" => "jump"} = action),
+    do: {action["source_waypoint"] || waypoint, "ANTIMATTER", 1_000}
+
+  defp quoted_good(waypoint, action), do: {waypoint, action["trade_symbol"], action["units"]}
 
   # Lower adapter tests supply controlled retained preflight facts, not network
   # recovery. Runtime/transfer-owner tests acquire their own governed bindings.

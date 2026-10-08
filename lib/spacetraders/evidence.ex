@@ -97,9 +97,11 @@ defmodule SpaceTraders.Evidence do
   defp retained_subject?(_agent, _source), do: true
 
   @retained_models %{
+    "get-market" => SpaceTraders.API.Model.Market,
     "get-my-ship" => SpaceTraders.API.Model.Ship,
     "get-waypoint" => SpaceTraders.API.Model.Waypoint,
     "get-construction" => SpaceTraders.API.Model.Construction,
+    "get-shipyard" => SpaceTraders.API.Model.Shipyard,
     "get-my-agent" => SpaceTraders.API.Model.Agent
   }
   @retained_lists %{
@@ -179,6 +181,52 @@ defmodule SpaceTraders.Evidence do
           owner: Keyword.get(opts, :owner, "ship_execution")
         )
     end
+  end
+
+  @doc """
+  Retains the fresh attributable facts a delivered recorded mutation returned,
+  so compatible recovery needs and open Observation Demands reuse them before
+  another read is admitted.
+
+  Only complete facts are retained: a delivered response's whole Agent record
+  (it proves credits). Recorded Ship responses carry only part of a Ship, so the
+  acting Ship stays an explicit gap that still needs its own read. Facts from an
+  unresolved send or naming another Agent are not attributable.
+  """
+  def retain_mutation_response(%AgentRecord{} = agent, %Attempt{} = attempt, response)
+      when is_map(response) do
+    subject = DependencyKey.observation_subject("get-my-agent", [], agent.symbol)
+
+    retained =
+      with true <- attempt.state == "succeeded" and attempt.agent_id == agent.id,
+           %API.Model.Agent{} = value <- Map.get(response, :agent),
+           true <- value.symbol == agent.symbol and is_integer(value.credits),
+           observation =
+             authoritative_observation(
+               "get-my-agent",
+               [subject],
+               %{
+                 "response" => serialize_read_value(value),
+                 "mutation_response" => %{
+                   "mutation_attempt_id" => attempt.id,
+                   "operation_id" => attempt.operation_id
+                 }
+               },
+               Clock.utc_now()
+             ),
+           {:ok, _evidence} <- fulfil_demands(agent, subject, observation) do
+        [subject]
+      else
+        _ -> []
+      end
+
+    gaps =
+      case attempt.provenance["ship_symbol"] do
+        symbol when is_binary(symbol) and symbol != "" -> ["ship:" <> symbol]
+        _ -> []
+      end
+
+    {:ok, %{retained: retained, gaps: gaps}}
   end
 
   @doc "Reuses an eligible retained owned Fleet, or acquires one governed replacement."
@@ -840,6 +888,15 @@ defmodule SpaceTraders.Evidence do
     |> MapSet.new()
   end
 
+  # Agent, Fleet, Ship and Contract demands are persisted by owned reads, which
+  # acquire their own evidence and settle the demand themselves; their due_at is
+  # the read's request time. Scheduling them while the read is in flight woke
+  # reconciliation into the same reads again (a Neutral Wait read loop), so they
+  # become due only once overdue past any in-flight read. A read that failed
+  # leaves its demand open, and that overdue demand is then scheduled.
+  @owned_read_subject_patterns ["agent:%", "fleet:%", "ship:%", "contracts:%"]
+  @owned_read_in_flight_seconds 60
+
   @doc """
   Returns the earliest useful time among all open demands, or `nil`.
 
@@ -848,14 +905,44 @@ defmodule SpaceTraders.Evidence do
   memory is only a wakeup optimization.
   """
   def earliest_due_at do
-    ObservationDemand
-    |> where(
-      [demand],
-      not is_nil(demand.agent_id) and is_nil(demand.withdrawn_at) and
-        is_nil(demand.fulfilled_observation_id)
-    )
-    |> select([demand], min(demand.due_at))
-    |> Repo.one()
+    open =
+      where(
+        ObservationDemand,
+        [demand],
+        not is_nil(demand.agent_id) and is_nil(demand.withdrawn_at) and
+          is_nil(demand.fulfilled_observation_id)
+      )
+
+    scheduled =
+      open
+      |> where(^not_owned_read())
+      |> select([d], type(min(d.due_at), :utc_datetime_usec))
+      |> Repo.one()
+
+    owned =
+      case open
+           |> where(^owned_read())
+           |> select([d], type(min(d.due_at), :utc_datetime_usec))
+           |> Repo.one() do
+        nil -> nil
+        due_at -> DateTime.add(due_at, @owned_read_in_flight_seconds, :second)
+      end
+
+    [scheduled, owned] |> Enum.reject(&is_nil/1) |> Enum.min(DateTime, fn -> nil end)
+  end
+
+  defp owned_read do
+    Enum.reduce(@owned_read_subject_patterns, dynamic(false), fn pattern, owned ->
+      dynamic([demand], ^owned or like(demand.subject, ^pattern))
+    end)
+  end
+
+  defp not_owned_read, do: dynamic(not (^owned_read()))
+
+  defp scheduled(query, now) do
+    settled_cutoff = DateTime.add(now, -@owned_read_in_flight_seconds, :second)
+    overdue = dynamic([demand], demand.due_at <= ^settled_cutoff)
+    where(query, ^dynamic(^not_owned_read() or ^overdue))
   end
 
   @doc """
@@ -865,6 +952,7 @@ defmodule SpaceTraders.Evidence do
     now = microsecond_precision(now)
 
     ObservationDemand
+    |> scheduled(now)
     |> where(
       [demand],
       not is_nil(demand.agent_id) and is_nil(demand.withdrawn_at) and

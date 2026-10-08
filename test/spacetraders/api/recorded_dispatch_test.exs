@@ -24,11 +24,12 @@ defmodule SpaceTraders.API.RecordedDispatchTest do
      %{
        "kind" => "jump",
        "waypoint" => "X2-TEST-A1",
-       "credits_before" => 2000,
-       "antimatter_cost" => 50
+       "source_waypoint" => "X1-TEST-A1",
+       "credits_before" => 2000
      }},
     {"patch-ship-nav", %{"kind" => "set_flight_mode", "flight_mode" => "DRIFT"}},
-    {"refuel-ship", %{"kind" => "refuel", "fuel_before" => 20}},
+    {"refuel-ship",
+     %{"kind" => "refuel", "waypoint" => "X1-TEST-A1", "units" => 20, "fuel_before" => 20}},
     {"purchase-cargo",
      %{"kind" => "buy", "trade_symbol" => "IRON_ORE", "units" => 5, "listing_price" => 10}},
     {"sell-cargo", %{"kind" => "sell", "trade_symbol" => "IRON_ORE", "units" => 5}},

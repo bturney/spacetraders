@@ -56,6 +56,52 @@ defmodule SpaceTraders.ContractOutcomesTest do
     end
   end
 
+  test "Contract sourcing reserves the calibrated worst case, not the bare quote" do
+    revision = %Revision{
+      id: 1,
+      document: %{"objectives" => [%{"objective" => "Fulfil contracts"}]}
+    }
+
+    snapshot = %{
+      as_of: @now,
+      contracts: [contract(2)],
+      ships: [%{symbol: "SHIP-1", cargo: %{capacity: 20, units: 0, inventory: []}}],
+      listings: [
+        %{
+          waypoint: "X1-A1",
+          trade_symbol: "IRON_ORE",
+          purchase_price: 10,
+          trade_volume: 20,
+          observed_at: @now,
+          evidence_id: "listing-1"
+        }
+      ],
+      credits: 1000
+    }
+
+    # 8 units at 10 credits: 100 at the initial 25% margin, 120 at 50%.
+    assert {:ok, %{candidate_contributions: [initial]}} =
+             FleetPlanning.plan_contracts(revision, 0, snapshot)
+
+    assert initial.required_resources.credits == 100
+
+    assert {:ok, %{candidate_contributions: [widened]}} =
+             FleetPlanning.plan_contracts(
+               revision,
+               0,
+               Map.put(snapshot, :credit_margin_percent, 50)
+             )
+
+    assert widened.required_resources.credits == 120
+
+    # A widened margin also prices Contract acceptance exposure.
+    ship = %{cargo: %{capacity: 5}, nav: %{system_symbol: "X1", status: "DOCKED"}}
+    [listing] = snapshot.listings
+
+    assert {:ok, %{worst_case_cost: 120}} =
+             FleetContracts.estimate_acceptance(contract(2), [listing], [ship], 10_000, @now, 50)
+  end
+
   test "acceptance needs strategy authority, both deadlines, feasible duration, and safe consequences" do
     revision = %Revision{
       id: 42,
@@ -271,11 +317,11 @@ defmodule SpaceTraders.ContractOutcomesTest do
 
     ship = %{cargo: %{capacity: 5}, nav: %{system_symbol: "X1", status: "DOCKED"}}
 
-    assert {:ok, %{estimated_seconds: 108_000, worst_case_cost: 3850}} =
-             FleetContracts.estimate_acceptance(contract(0), [listing], [ship], 10_000, @now)
+    assert {:ok, %{estimated_seconds: 108_000, worst_case_cost: 125}} =
+             FleetContracts.estimate_acceptance(contract(0), [listing], [ship], 10_000, @now, 25)
 
     assert {:error, :contract_sourcing_unavailable} =
-             FleetContracts.estimate_acceptance(contract(0), [listing], [], 10_000, @now)
+             FleetContracts.estimate_acceptance(contract(0), [listing], [], 10_000, @now, 25)
   end
 
   defp contract(fulfilled) do

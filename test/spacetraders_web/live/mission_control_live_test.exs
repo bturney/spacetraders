@@ -164,6 +164,64 @@ defmodule SpaceTradersWeb.MissionControlLiveTest do
     assert SpaceTraders.OperatorConditions.unresolved(scope) == []
   end
 
+  test "a pricing-model breach is Degraded Attention that acknowledgement does not resolve", %{
+    conn: conn,
+    operator: operator,
+    scope: scope
+  } do
+    {agent, [intent], _portfolio} =
+      SpaceTraders.CreditSpendingFixtures.claimed_purchases([0], operator: operator)
+
+    SpaceTraders.CreditSpendingFixtures.stub_quote(agent, 10, 1_063)
+
+    {:ok, %{attempt: attempt}} =
+      SpaceTraders.Fleet.Intents.RecordedAction.prepare(
+        agent,
+        intent,
+        SpaceTraders.CreditSpendingFixtures.buy()
+      )
+
+    SpaceTraders.CreditSpendingFixtures.stub_purchase(agent, "BUYER-0", 14, 993)
+    assert {:ok, _} = SpaceTraders.API.dispatch_recorded(attempt)
+    stub_fleet_reads(agent, 993)
+
+    {:ok, view, _html} = live(conn, ~p"/mission-control")
+    assert has_element?(view, "#needs-attention", "Degraded Operation")
+    assert has_element?(view, "#needs-attention", "pricing-model breach")
+    assert has_element?(view, "#needs-attention", "charged 70 credits")
+    assert has_element?(view, "#needs-attention", "worst-case bound of 63")
+    assert has_element?(view, "#operating-health", "Needs Operator attention")
+
+    [condition] = SpaceTraders.OperatorConditions.unresolved(scope)
+    refute condition.summary =~ ~r/acknowledg/i
+    view |> element("#needs-attention button[phx-value-id='#{condition.id}']") |> render_click()
+
+    {:ok, view, _html} = live(conn, ~p"/mission-control")
+    assert has_element?(view, "#needs-attention", "Degraded Operation")
+    assert has_element?(view, "#needs-attention", "Acknowledged · unresolved")
+    assert has_element?(view, "#operating-health", "Needs Operator attention")
+
+    assert [%{kind: "pricing_model_miss", released_at: nil}] =
+             SpaceTraders.CreditCalibration.shortfalls(agent)
+  end
+
+  defp stub_fleet_reads(agent, credits) do
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      assert conn.method == "GET"
+
+      case conn.request_path do
+        "/v2/my/agent" ->
+          Req.Test.json(conn, %{"data" => %{"symbol" => agent.symbol, "credits" => credits}})
+
+        _ ->
+          Req.Test.json(conn, %{
+            "data" => [],
+            "meta" => %{"total" => 0, "page" => 1, "limit" => 20}
+          })
+      end
+    end)
+  end
+
   test "Activity distinguishes decisions from routine Ship traffic", %{
     conn: conn,
     operator: operator,

@@ -22,12 +22,14 @@ defmodule SpaceTraders.API do
   dual-pool token bucket modelled on the game's granted budget: 2 req/s steady
   plus a separate pool of 30 requests per minute (≈2.5 req/s sustained
   average). Admission is ordered by the API Capacity Governor, which also
-  delays new ordinary admissions when the game returns `Retry-After`. Req's
+  delays all new admissions when the game returns `Retry-After`. Req's
   built-in 429 retry is a safety net, not the primary throughput shaper.
 
   In `test` env the client is pointed at `Req.Test` via config (`:plug`), so no
   network is touched; tests register stubs with `Req.Test.stub(SpaceTraders.API, ...)`.
   """
+
+  require Logger
 
   alias SpaceTraders.API.RateLimiter
   alias SpaceTraders.API.CapacityGovernor
@@ -39,6 +41,7 @@ defmodule SpaceTraders.API do
   alias SpaceTraders.API.ShipAction
   alias SpaceTraders.Evidence.Demand
   alias SpaceTraders.Agent.Agent, as: AgentRecord
+  alias SpaceTraders.FleetAcquisition
   alias SpaceTraders.MutationAttempts
   alias SpaceTraders.MutationAttempts.Attempt
   alias SpaceTraders.Repo
@@ -205,9 +208,10 @@ defmodule SpaceTraders.API do
   end
 
   @doc "POST /my/ships — purchase a ship at a shipyard waypoint."
-  @spec purchase_ship(token(), String.t(), String.t()) :: result()
-  def purchase_ship(token, ship_type, waypoint_symbol) do
+  @spec purchase_ship(token(), String.t(), String.t(), keyword()) :: result()
+  def purchase_ship(token, ship_type, waypoint_symbol, opts \\ []) do
     request(:post, "/my/ships", token,
+      spending: opts[:spending],
       json:
         PurchaseShipRequest.new(%{ship_type: ship_type, waypoint_symbol: waypoint_symbol})
         |> PurchaseShipRequest.to_json(),
@@ -339,13 +343,19 @@ defmodule SpaceTraders.API do
   end
 
   defp admit_and_send(method, path, token, opts) do
-    with {operation, shadow} <- observe_request(method, path, opts),
-         {:ok, capacity} <- admit_capacity(operation, opts) do
-      # Observe before waiting for capacity so shadow queue_time spans the real
-      # limiter wait. Recorded and legacy dispatch recheck authorization at send.
-      RateLimiter.acquire()
+    {operation, shadow} = observe_request(method, path, opts)
 
-      send_request(method, path, token, opts, operation, shadow, capacity)
+    # Observe before waiting for capacity so shadow queue_time spans the real
+    # limiter wait. Recorded and legacy dispatch recheck authorization at send.
+    # Missing governor authority fails closed before any transport.
+    case admit_capacity(operation, opts) do
+      {:ok, capacity} ->
+        RateLimiter.acquire()
+        send_request(method, path, token, opts, operation, shadow, capacity)
+
+      {:error, reason} ->
+        ShadowAdmission.observe_outcome(shadow, :not_dispatched, :suppressed)
+        {:error, reason}
     end
   end
 
@@ -412,6 +422,7 @@ defmodule SpaceTraders.API do
         shadow,
         capacity
       )
+      |> record_realized_charge(attempt)
     else
       {:error, reason} ->
         complete_shadow(
@@ -484,7 +495,9 @@ defmodule SpaceTraders.API do
                 # A still-authorized protocol rejection is a real capacity signal.
                 # Our own suppression is not, so the Governor never records a
                 # Retry-After window for a request it did not have to run.
-                if status == 429 and opts[:recorded_attempt] do
+                # Requests that do not retry never reach the transport retry
+                # hook, which reports every retried rejection itself.
+                if status == 429 and opts[:retry] == false do
                   report_protocol_rejection(Req.Response.get_retry_after(response))
                 end
 
@@ -630,7 +643,30 @@ defmodule SpaceTraders.API do
   defp shadow_outcome(_status), do: :unknown
 
   defp mark_mutation_sent(nil), do: {:ok, nil}
+
+  defp mark_mutation_sent(%Attempt{operation_id: "purchase-ship"} = attempt),
+    do: FleetAcquisition.admit_send(attempt)
+
   defp mark_mutation_sent(attempt), do: MutationAttempts.mark_sent_or_unknown(attempt)
+
+  # The decoded success response is the only evidence attributing a realized
+  # charge to exactly this attempt; its absence leaves calibration untouched.
+  defp record_realized_charge({:ok, response} = result, %Attempt{} = attempt)
+       when is_map(response) do
+    # The send already happened; a failed evidence write must not discard the
+    # response the caller still needs to settle the selected outcome.
+    with true <- is_map(attempt.prepared_evidence["spending"]),
+         {:error, reason} <- SpaceTraders.CreditCalibration.record_realization(attempt, response) do
+      Logger.error("credit realization not recorded",
+        mutation_attempt_id: attempt.id,
+        reason: inspect(reason)
+      )
+    end
+
+    result
+  end
+
+  defp record_realized_charge(result, _attempt), do: result
 
   defp record_mutation_outcome(nil, _classification, _evidence), do: :ok
 
@@ -751,9 +787,11 @@ defmodule SpaceTraders.API do
     end
   end
 
-  defp report_protocol_rejection(delay_seconds)
-       when is_integer(delay_seconds) and delay_seconds > 0,
-       do: CapacityGovernor.protocol_rejected(delay_seconds)
+  # Req.Response.get_retry_after/1 returns milliseconds; the governor takes
+  # whole seconds, rounded up so a sub-second window still defers.
+  defp report_protocol_rejection(delay_ms)
+       when is_integer(delay_ms) and delay_ms > 0,
+       do: CapacityGovernor.protocol_rejected(div(delay_ms + 999, 1_000))
 
   defp report_protocol_rejection(_delay), do: CapacityGovernor.protocol_rejected(0)
 

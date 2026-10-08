@@ -4,12 +4,13 @@ defmodule SpaceTraders.FleetExecutionTest do
   import SpaceTraders.AgentFixtures
   import SpaceTraders.ShipBody
 
-  alias SpaceTraders.API.CapacityGovernor.Snapshot, as: CapacitySnapshot
+  alias SpaceTraders.Test.CapacityDispositions
   alias SpaceTraders.API.Model.Waypoint
   alias SpaceTraders.Agent.{Operator, Scope}
   alias SpaceTraders.Evidence.Observation
   alias SpaceTraders.Fleet.Intent
   alias SpaceTraders.Fleet.Ship
+  alias SpaceTraders.FleetAllocation
   alias SpaceTraders.FleetAllocation.Commitment
   alias SpaceTraders.FleetAllocation.Portfolio
   alias SpaceTraders.FleetAllocation.StrategyDecisionEpisode
@@ -19,7 +20,6 @@ defmodule SpaceTraders.FleetExecutionTest do
   alias SpaceTraders.Intelligence
 
   @as_of ~U[2030-01-01 12:00:00Z]
-  @as_of_usec ~U[2030-01-01 12:00:00.000000Z]
 
   describe "governed_availability/1" do
     test "claims market reach from governed waypoint evidence" do
@@ -262,6 +262,63 @@ defmodule SpaceTraders.FleetExecutionTest do
       assert Repo.aggregate(Portfolio, :count) == 1
     end
 
+    # #589 runtime finding: a completed buy commits before its round trip
+    # requests the sell leg. A Market re-observation landing in that window
+    # fingerprinted a new candidate and superseded the Commitment, so the sell
+    # leg was refused and the bought Cargo stayed aboard.
+    test "keeps a Commitment between its completed buy and its sell leg" do
+      {operator, agent, revision} = market_generation()
+      scope = Scope.for_operator(operator)
+
+      observe_marketplace(agent, "X1-A1")
+      observe_marketplace(agent, "X1-A2")
+      market_observation(agent, "X1-A1", 10)
+      market_observation(agent, "X1-A2", 25)
+      stub_activation_agent(agent)
+
+      assert {:ok, %{action: :activated, portfolio: portfolio, round_trip: buy}} =
+               FleetExecution.reconcile_market_evidence(scope, agent, revision, "X1", capacity())
+
+      Repo.update!(
+        Ecto.Changeset.change(buy, status: "completed", finished_at: DateTime.utc_now(:second))
+      )
+
+      market_observation(agent, "X1-A1", 10, "refreshed")
+
+      assert {:error, :unresolved_commitment_evidence} =
+               FleetExecution.reconcile_market_evidence(scope, agent, revision, "X1", capacity())
+
+      assert %Portfolio{id: id, superseded_at: nil} =
+               FleetAllocation.current_portfolio(scope, agent)
+
+      assert id == portfolio.id
+    end
+
+    # The handoff guard is bounded: a completed buy whose next leg never
+    # appeared cannot hold the Portfolio against replanning indefinitely.
+    test "a completed buy stops protecting its Commitment once the leg handoff window passes" do
+      {operator, agent, revision} = market_generation()
+      scope = Scope.for_operator(operator)
+
+      observe_marketplace(agent, "X1-A1")
+      observe_marketplace(agent, "X1-A2")
+      market_observation(agent, "X1-A1", 10)
+      market_observation(agent, "X1-A2", 25)
+      stub_activation_agent(agent)
+
+      assert {:ok, %{action: :activated, portfolio: portfolio, round_trip: buy}} =
+               FleetExecution.reconcile_market_evidence(scope, agent, revision, "X1", capacity())
+
+      stale = DateTime.utc_now(:second) |> DateTime.add(-600, :second)
+      Repo.update!(Ecto.Changeset.change(buy, status: "completed", finished_at: stale))
+      market_observation(agent, "X1-A1", 10, "refreshed")
+
+      assert {:ok, _} =
+               FleetExecution.reconcile_market_evidence(scope, agent, revision, "X1", capacity())
+
+      assert %Portfolio{superseded_at: %DateTime{}} = Repo.get!(Portfolio, portfolio.id)
+    end
+
     defp market_generation do
       operator = Repo.insert!(%Operator{email: "market-#{System.unique_integer()}@example.com"})
 
@@ -313,7 +370,7 @@ defmodule SpaceTraders.FleetExecutionTest do
       {operator, agent, revision}
     end
 
-    defp market_observation(agent, waypoint, purchase_price) do
+    defp market_observation(agent, waypoint, purchase_price, variant \\ "") do
       Repo.insert!(%Observation{
         agent_id: agent.id,
         subject: "market:X1:#{waypoint}",
@@ -331,8 +388,8 @@ defmodule SpaceTraders.FleetExecutionTest do
             }
           ]
         },
-        response_fingerprint: "market-#{waypoint}-#{purchase_price}",
-        observed_at: @as_of_usec
+        response_fingerprint: "market-#{waypoint}-#{purchase_price}#{variant}",
+        observed_at: SpaceTraders.Clock.utc_now()
       })
     end
 
@@ -417,25 +474,10 @@ defmodule SpaceTraders.FleetExecutionTest do
       end)
     end
 
-    defp capacity do
-      %CapacitySnapshot{
-        observed_at: @as_of,
-        available_slots: 3,
-        evidence_fingerprint: "governed-evidence",
-        next_outage_probe_at: nil,
-        backpressure: :none
-      }
-    end
+    defp capacity, do: CapacityDispositions.proceed(@as_of)
 
     defp sustained_capacity do
-      %{capacity() | available_slots: 0, backpressure: :sustained}
-    end
-  end
-
-  describe "worst_case_exposure/1" do
-    test "covers the credit reservation, fuel allowance, and bounded-loss allowance" do
-      assert FleetExecution.worst_case_exposure(0) == 750
-      assert FleetExecution.worst_case_exposure(1_000) == 1_750
+      CapacityDispositions.defer(@as_of)
     end
   end
 
@@ -536,7 +578,7 @@ defmodule SpaceTraders.FleetExecutionTest do
 
     test "returns nil when the proposed choice's reservation crosses the floor" do
       agent = agent_fixture(operator_fixture())
-      choice = %{claims: ["SHIP-1"], reservations: %{credits: 900}}
+      choice = %{claims: ["SHIP-1"], reservations: %{credits: 1_501}}
       revision = revision(%{"hard_constraints" => ["Keep at least 500 credits available"]})
 
       Req.Test.stub(SpaceTraders.API, fn conn ->

@@ -329,6 +329,7 @@ defmodule SpaceTraders.FleetConstruction do
     with {:ok, planning} <-
            FleetPlanning.plan_construction(revision, index, %{
              as_of: now,
+             credit_margin_percent: SpaceTraders.CreditCalibration.active().margin_percent,
              constructions: constructions,
              ships: available,
              listings: FleetContracts.sourcing_listings(agent, now),
@@ -715,7 +716,7 @@ defmodule SpaceTraders.FleetConstruction do
            trade_symbol: candidate.trade_symbol,
            units: candidate.construction.batch_units,
            purchase_price: candidate.construction.max_price,
-           reserve_credits: floor + 750,
+           reserve_credits: floor,
            construction: %{
              system: candidate.construction.system,
              waypoint: candidate.construction.waypoint
@@ -749,7 +750,7 @@ defmodule SpaceTraders.FleetConstruction do
       trade_symbol: candidate.trade_symbol,
       units: candidate.construction.batch_units,
       purchase_price: candidate.construction.max_price,
-      reserve_credits: floor + 750,
+      reserve_credits: floor,
       construction_upstream: %{
         system: candidate.construction.system,
         waypoint: candidate.construction.waypoint,

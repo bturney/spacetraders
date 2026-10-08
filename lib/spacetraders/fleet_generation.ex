@@ -466,6 +466,11 @@ defmodule SpaceTraders.FleetGeneration do
           result
         end
 
+      {:ok, _overview} = result ->
+        # Any authoritative balance below the floor pauses spending at once.
+        _ = SpaceTraders.CreditFloorWatch.observe(agent)
+        result
+
       result ->
         result
     end

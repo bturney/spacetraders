@@ -7,7 +7,7 @@ defmodule SpaceTraders.FleetAllocation.Reconciler do
 
   import Ecto.Query
 
-  alias SpaceTraders.API.CapacityGovernor
+  alias SpaceTraders.FleetCapacity
   alias SpaceTraders.Agent.Scope
   alias SpaceTraders.Agent.Agent, as: AgentRecord
   alias SpaceTraders.Fleet
@@ -45,6 +45,16 @@ defmodule SpaceTraders.FleetAllocation.Reconciler do
     {:noreply, state}
   end
 
+  def handle_info(
+        {:outbox, _id, "market_purchase_withdrawn",
+         %{"agent_id" => agent_id, "waypoint" => waypoint}},
+        state
+      ) do
+    system = waypoint |> String.split("-") |> Enum.take(2) |> Enum.join("-")
+    reconcile(agent_id, system)
+    {:noreply, state}
+  end
+
   def handle_info({:waypoint_intelligence_observed, agent_id, system_symbol}, state) do
     with_context(agent_id, fn scope, agent, revision ->
       FleetIntelligence.reconcile(
@@ -52,7 +62,7 @@ defmodule SpaceTraders.FleetAllocation.Reconciler do
         agent,
         revision,
         system_symbol,
-        CapacityGovernor.snapshot()
+        FleetCapacity.disposition("get-market")
       )
 
       # Boot and Waypoint evidence changes materialize durable Market demands
@@ -129,7 +139,7 @@ defmodule SpaceTraders.FleetAllocation.Reconciler do
   decides what is worth acquiring — and demands deferred by API backpressure
   stay open for the next wakeup instead of being dropped or fulfilled.
   """
-  def wake_due_demands(agent_id, capacity \\ CapacityGovernor.snapshot())
+  def wake_due_demands(agent_id, capacity \\ FleetCapacity.disposition("get-market"))
       when is_integer(agent_id) and is_map(capacity) do
     with_context(agent_id, fn scope, agent, revision ->
       system = system_for(agent)
@@ -190,6 +200,26 @@ defmodule SpaceTraders.FleetAllocation.Reconciler do
   progress.
   """
   def reconcile_durable_work do
+    # Owning Intents retain withdrawals. A missed notification or restart does
+    # not strand the released Commitment while its Portfolio remains current.
+    from(i in SpaceTraders.Fleet.Intent,
+      join: c in SpaceTraders.FleetAllocation.Commitment,
+      on: c.id == i.fleet_commitment_id,
+      join: p in SpaceTraders.FleetAllocation.Portfolio,
+      on: p.id == c.fleet_commitment_portfolio_id,
+      join: s in SpaceTraders.Fleet.Ship,
+      on: s.id == i.ship_id,
+      where:
+        i.status == "superseded" and is_nil(p.superseded_at) and
+          fragment("?->>'outcome' = 'spending_replan_required'", i.last_action_result),
+      select: {s.agent_id, i.target_waypoint},
+      distinct: true
+    )
+    |> Repo.all()
+    |> Enum.each(fn {agent_id, waypoint} ->
+      reconcile(agent_id, waypoint |> String.split("-") |> Enum.take(2) |> Enum.join("-"))
+    end)
+
     Generation
     |> where([generation], is_nil(generation.fenced_at) and is_nil(generation.retired_at))
     |> select([generation], generation.agent_id)
@@ -209,7 +239,7 @@ defmodule SpaceTraders.FleetAllocation.Reconciler do
         agent,
         revision,
         system_symbol,
-        CapacityGovernor.snapshot()
+        FleetCapacity.disposition("get-market")
       )
 
       # Governed Market evidence just landed: establish the next future

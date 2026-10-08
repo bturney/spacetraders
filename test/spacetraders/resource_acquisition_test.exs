@@ -4,6 +4,7 @@ defmodule SpaceTraders.ResourceAcquisitionTest do
 
   import SpaceTraders.ShipBody
 
+  alias SpaceTraders.Test.CapacityDispositions
   alias SpaceTraders.Agent.{Agent, Operator, Scope}
   alias SpaceTraders.API.Model
   alias SpaceTraders.Fleet.{Intent, Ship, ShipServer}
@@ -556,7 +557,7 @@ defmodule SpaceTraders.ResourceAcquisitionTest do
     flunk("""
     remote resource reconciliation failed: #{inspect(other)}
     requests observed before failure: #{inspect(requests)}
-    capacity governor: #{inspect(SpaceTraders.API.CapacityGovernor.snapshot())}
+    capacity governor: #{inspect(SpaceTraders.API.CapacityGovernor.diagnostics())}
     read coordinator: #{inspect(coordinator)}
     ship servers: #{inspect(DynamicSupervisor.which_children(SpaceTraders.Fleet.ShipSupervisor))}
     """)
@@ -571,7 +572,7 @@ defmodule SpaceTraders.ResourceAcquisitionTest do
     end
   end
 
-  defp capacity, do: %{available_slots: 10, backpressure: :none}
+  defp capacity, do: CapacityDispositions.proceed()
 
   defp waypoint,
     do: %{

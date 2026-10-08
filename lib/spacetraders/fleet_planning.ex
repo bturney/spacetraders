@@ -10,6 +10,8 @@ defmodule SpaceTraders.FleetPlanning do
   alias SpaceTraders.Evidence.Demand
   alias SpaceTraders.API.Model.Contract
   alias SpaceTraders.FleetContracts
+  alias SpaceTraders.CreditCalibration.Version
+  alias SpaceTraders.CreditSpending
   alias SpaceTraders.FleetStrategy.Revision
 
   @market_evidence_freshness_seconds 300
@@ -290,7 +292,8 @@ defmodule SpaceTraders.FleetPlanning do
           as_of: as_of,
           override: override,
           owned_ships: owned_ships,
-          credits: credits
+          credits: credits,
+          margin: credit_margin(snapshot)
         }
 
         {candidates, unmet} =
@@ -329,8 +332,6 @@ defmodule SpaceTraders.FleetPlanning do
   def plan_ship_acquisition(_revision, _index, _snapshot),
     do: {:error, :invalid_ship_acquisition_planning_input}
 
-  @refit_allowance_credits 500
-
   @doc """
   Proposes evidence-bound Ship refit Candidates without claiming the refitting Ship.
 
@@ -356,7 +357,7 @@ defmodule SpaceTraders.FleetPlanning do
           markets: markets,
           targets: targets,
           releases: releases
-        }
+        } = snapshot
       )
       when is_integer(index) and index >= 0 and is_integer(credits) and credits >= 0 and
              is_list(ships) and is_list(markets) and is_list(targets) and is_list(releases) do
@@ -372,7 +373,7 @@ defmodule SpaceTraders.FleetPlanning do
                      index,
                      objective,
                      as_of,
-                     credits,
+                     {credits, credit_margin(snapshot)},
                      ship,
                      targets,
                      releases,
@@ -441,6 +442,12 @@ defmodule SpaceTraders.FleetPlanning do
     end)
   end
 
+  # Runtime callers pass `CreditCalibration.active/0`'s margin so selection
+  # charges the bound spending admission will revalidate; pure planning
+  # callers without a calibration read get the initial model.
+  defp credit_margin(snapshot),
+    do: Map.get(snapshot, :credit_margin_percent, Version.initial_margin())
+
   defp fresh?(observed_at, as_of) do
     DateTime.diff(as_of, observed_at, :second) in 0..@market_evidence_freshness_seconds
   end
@@ -450,7 +457,7 @@ defmodule SpaceTraders.FleetPlanning do
          index,
          objective,
          as_of,
-         credits,
+         budget,
          ship,
          targets,
          releases,
@@ -458,7 +465,7 @@ defmodule SpaceTraders.FleetPlanning do
        ) do
     with {:ok, evidence} <- refit_ship_evidence(ship) do
       {installs, install_limitations} =
-        install_candidates(targets, ship, evidence, fresh_markets, credits)
+        install_candidates(targets, ship, evidence, fresh_markets, budget)
 
       {removals, removal_limitations} =
         removal_candidates(releases, ship, evidence, targets)
@@ -500,10 +507,10 @@ defmodule SpaceTraders.FleetPlanning do
     end
   end
 
-  defp install_candidates(targets, ship, evidence, fresh_markets, credits) do
+  defp install_candidates(targets, ship, evidence, fresh_markets, budget) do
     for target <- targets, is_map(target), reduce: {[], []} do
       {candidates, limitations} ->
-        case install_candidate(target, ship, evidence, fresh_markets, credits) do
+        case install_candidate(target, ship, evidence, fresh_markets, budget) do
           :satisfied ->
             {candidates, limitations}
 
@@ -517,7 +524,7 @@ defmodule SpaceTraders.FleetPlanning do
     |> then(fn {candidates, limitations} -> {candidates, limitations} end)
   end
 
-  defp install_candidate(target, _ship, evidence, fresh_markets, credits) do
+  defp install_candidate(target, _ship, evidence, fresh_markets, budget) do
     module_symbols = List.wrap(Map.get(target, :module_symbols, []))
     capability = Map.get(target, :capability)
 
@@ -534,11 +541,12 @@ defmodule SpaceTraders.FleetPlanning do
         {:limitation, %{subject: evidence.symbol, reason: :refit_module_slots_unavailable}}
 
       true ->
-        install_sourcing(module_symbols, capability, evidence, fresh_markets, credits)
+        install_sourcing(module_symbols, capability, evidence, fresh_markets, budget)
     end
   end
 
-  defp install_sourcing(module_symbols, capability, evidence, fresh_markets, credits) do
+  defp install_sourcing(module_symbols, capability, evidence, fresh_markets, budget) do
+    {credits, margin} = budget
     symbol = hd(module_symbols)
     cargo = evidence.cargo
 
@@ -576,10 +584,10 @@ defmodule SpaceTraders.FleetPlanning do
               price = listing_price(listing, module_symbols)
 
               cond do
-                not is_integer(price) ->
+                not is_integer(price) or price < 0 ->
                   nil
 
-                price > credits ->
+                CreditSpending.worst_case_exposure(price, 1, margin) > credits ->
                   {:limitation, %{subject: listing.waypoint, reason: :refit_supply_unaffordable}}
 
                 true ->
@@ -591,6 +599,7 @@ defmodule SpaceTraders.FleetPlanning do
                     market: listing.waypoint,
                     purchase_price: price,
                     expected_cost: price,
+                    credit_exposure: CreditSpending.worst_case_exposure(price, 1, margin),
                     market_evidence: listing,
                     installed_before: module_count(evidence.modules, symbol)
                   }
@@ -750,7 +759,7 @@ defmodule SpaceTraders.FleetPlanning do
       required_roles: [%{role: :fleet_refit, count: 1}],
       required_capabilities: [%{capability: :refit_ship, value: symbol}],
       required_resources: %{
-        credits: candidate.expected_cost + refit_credits_allowance(candidate),
+        credits: refit_credits(candidate),
         cargo_capacity: 1,
         ship_count: 1
       },
@@ -772,10 +781,11 @@ defmodule SpaceTraders.FleetPlanning do
     }
   end
 
-  defp refit_credits_allowance(%{action: :install, sourcing: :purchase}),
-    do: @refit_allowance_credits
+  # A purchased module is a one-unit Market buy; reserve its calibrated worst case.
+  defp refit_credits(%{action: :install, sourcing: :purchase, credit_exposure: exposure}),
+    do: exposure
 
-  defp refit_credits_allowance(_), do: 0
+  defp refit_credits(candidate), do: candidate.expected_cost
 
   defp refit_decision_value(%{action: :install, sourcing: :cargo}), do: 3
   defp refit_decision_value(%{action: :install}), do: 2
@@ -852,7 +862,15 @@ defmodule SpaceTraders.FleetPlanning do
   defp plan_offer(context, yard, offer, candidates, unmet) do
     case preparation_credits(context.override, yard, offer) do
       {:ok, preparation} ->
-        if offer.purchase_price + preparation <= context.credits do
+        # Reserve the same calibrated bound purchase admission will charge.
+        offer =
+          Map.put(
+            offer,
+            :credit_exposure,
+            CreditSpending.worst_case_exposure(offer.purchase_price, 1, context.margin)
+          )
+
+        if offer.credit_exposure + preparation <= context.credits do
           contribution =
             ship_acquisition_contribution(
               context.revision,
@@ -1031,7 +1049,7 @@ defmodule SpaceTraders.FleetPlanning do
         %{capability: :ship_offer, value: offer.type},
         %{capability: :ship_readiness, value: %{engine_speed: offer.engine_speed}}
       ],
-      required_resources: %{credits: offer.purchase_price + preparation_credits},
+      required_resources: %{credits: offer.credit_exposure + preparation_credits},
       dependencies: [
         %{
           subject: "shipyard:#{yard.system_symbol}:#{yard.waypoint}",
@@ -1070,13 +1088,17 @@ defmodule SpaceTraders.FleetPlanning do
   end
 
   @doc "Proposes contract delivery from authoritative remaining work and fresh sourcing evidence."
-  def plan_contracts(%Revision{} = revision, index, %{
-        as_of: %DateTime{} = as_of,
-        contracts: contracts,
-        ships: ships,
-        listings: listings,
-        credits: credits
-      })
+  def plan_contracts(
+        %Revision{} = revision,
+        index,
+        %{
+          as_of: %DateTime{} = as_of,
+          contracts: contracts,
+          ships: ships,
+          listings: listings,
+          credits: credits
+        } = snapshot
+      )
       when is_list(contracts) and is_list(ships) and is_list(listings) and
              is_integer(credits) and credits >= 0 do
     with {:ok, objective} <- objective_at(revision, index) do
@@ -1106,7 +1128,12 @@ defmodule SpaceTraders.FleetPlanning do
             DateTime.compare(observed_at, as_of) != :gt,
             DateTime.diff(as_of, observed_at, :second) <= @market_evidence_freshness_seconds,
             batch = min(remaining, min(capacity, listing.trade_volume)),
-            cost = batch * listing.purchase_price,
+            cost =
+              CreditSpending.worst_case_exposure(
+                listing.purchase_price,
+                batch,
+                credit_margin(snapshot)
+              ),
             cost <= credits do
           %CandidateContribution{
             id:
@@ -1258,8 +1285,13 @@ defmodule SpaceTraders.FleetPlanning do
                       %DateTime{} = observed_at <- [listing.observed_at],
                       DateTime.diff(as_of, observed_at, :second) in 0..@market_evidence_freshness_seconds,
                       batch = min(remaining, min(capacity, listing.trade_volume)),
-                      cost = batch * listing.purchase_price,
-                      cost + 750 <= credits do
+                      cost =
+                        CreditSpending.worst_case_exposure(
+                          listing.purchase_price,
+                          batch,
+                          credit_margin(snapshot)
+                        ),
+                      cost <= credits do
                     listing_until =
                       DateTime.add(observed_at, @market_evidence_freshness_seconds, :second)
 
@@ -1290,7 +1322,7 @@ defmodule SpaceTraders.FleetPlanning do
                         %{capability: :cargo_transport, minimum_capacity: batch},
                         %{capability: :resource_ship, value: ship_symbol}
                       ],
-                      required_resources: %{ship_count: 1, credits: cost + 750},
+                      required_resources: %{ship_count: 1, credits: cost},
                       dependencies: [
                         %{
                           subject:
@@ -1333,7 +1365,7 @@ defmodule SpaceTraders.FleetPlanning do
                     valid_until,
                     ships,
                     listings,
-                    credits,
+                    {credits, credit_margin(snapshot)},
                     Map.get(snapshot, :upstream_opportunities, [])
                   )
 
@@ -1604,7 +1636,7 @@ defmodule SpaceTraders.FleetPlanning do
          construction_until,
          ships,
          listings,
-         credits,
+         {credits, margin},
          opportunities
        ) do
     construction = observation.construction
@@ -1648,8 +1680,8 @@ defmodule SpaceTraders.FleetPlanning do
         %{symbol: ship_symbol, cargo: %{capacity: capacity}} <- [ship],
         is_integer(capacity) and capacity > 0,
         batch = min(units, min(raw_listing.trade_volume, capacity)),
-        cost = batch * raw_listing.purchase_price,
-        cost + 750 <= credits do
+        cost = CreditSpending.worst_case_exposure(raw_listing.purchase_price, batch, margin),
+        cost <= credits do
       dependencies = [
         %{
           subject: "construction:#{observation.system_symbol}:#{construction.symbol}",
@@ -1708,7 +1740,7 @@ defmodule SpaceTraders.FleetPlanning do
           %{capability: :cargo_transport, minimum_capacity: batch},
           %{capability: :resource_ship, value: ship_symbol}
         ],
-        required_resources: %{ship_count: 1, credits: cost + 750},
+        required_resources: %{ship_count: 1, credits: cost},
         dependencies: dependencies,
         validity: %{
           as_of: as_of,
@@ -2211,7 +2243,10 @@ defmodule SpaceTraders.FleetPlanning do
     demand_deadline_seconds = Map.get(snapshot, :demand_deadline_seconds, 60)
     observation_costs = Map.get(snapshot, :observation_costs, %{})
 
+    credit_margin_percent = credit_margin(snapshot)
+
     if is_integer(demand_deadline_seconds) and demand_deadline_seconds >= 0 and
+         is_integer(credit_margin_percent) and credit_margin_percent >= Version.hard_lower_bound() and
          is_map(observation_costs) and
          Enum.all?(observation_costs, fn {subject, cost} ->
            is_binary(subject) and is_map(cost) and
@@ -2231,6 +2266,7 @@ defmodule SpaceTraders.FleetPlanning do
            freshness_seconds: freshness_seconds,
            demand_deadline_seconds: demand_deadline_seconds,
            observation_costs: observation_costs,
+           credit_margin_percent: credit_margin_percent,
            agent_id: Map.get(snapshot, :agent_id),
            coverage_authoritative: Map.has_key?(snapshot, :baseline_subjects),
            baseline_subjects: baseline_subjects,
@@ -2485,7 +2521,12 @@ defmodule SpaceTraders.FleetPlanning do
       |> Enum.sort_by(& &1.subject)
 
     required_resources = %{
-      credits: source_good.purchase_price * units,
+      credits:
+        SpaceTraders.CreditSpending.worst_case_exposure(
+          source_good.purchase_price,
+          units,
+          snapshot.credit_margin_percent
+        ),
       cargo_capacity: units,
       ship_count: 1
     }

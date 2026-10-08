@@ -32,6 +32,16 @@ defmodule SpaceTraders.FleetPlanningTest do
     assert copper.alternatives == [alternative(iron)]
   end
 
+  test "a widened calibration margin in the snapshot widens the selection-time credit Reservation" do
+    snapshot = Map.put(evidence_snapshot(), :credit_margin_percent, 50)
+
+    assert {:ok, %{candidate_contributions: [candidate | _]}} =
+             FleetPlanning.plan_market(revision(), 0, snapshot)
+
+    # 20 units at 10 credits with a 50% margin, versus 250 at the initial 25%.
+    assert candidate.required_resources.credits == 300
+  end
+
   test "contributions declare outcomes, uncertainty, needs, dependencies, validity, and alternatives" do
     assert {:ok, %{candidate_contributions: [candidate | _]}} =
              FleetPlanning.plan_market(revision(), 0, evidence_snapshot())
@@ -54,7 +64,7 @@ defmodule SpaceTraders.FleetPlanningTest do
                destination_market_signal: %{supply: "LIMITED", activity: "GROWING"}
              },
              required_capabilities: capabilities,
-             required_resources: %{credits: 200, cargo_capacity: 20, ship_count: 1},
+             required_resources: %{credits: 250, cargo_capacity: 20, ship_count: 1},
              dependencies: dependencies,
              validity: %{as_of: @as_of, expires_at: ~U[2030-01-01 12:03:00Z]},
              alternatives: [_]
@@ -610,7 +620,8 @@ defmodule SpaceTraders.FleetPlanningTest do
              FleetPlanning.plan_ship_acquisition(revision, 0, snapshot)
 
     assert hauler.kind == :ship_acquisition
-    assert hauler.required_resources == %{credits: 10_750}
+    # The 10,000 offer at the initial 25% margin, plus the 750 preparation reserve.
+    assert hauler.required_resources == %{credits: 13_250}
 
     assert hauler.expected_outcomes == %{
              decision_value: 30,
@@ -683,7 +694,8 @@ defmodule SpaceTraders.FleetPlanningTest do
     # The hauler frame offers 3 module slots and 2 mounting points, and the
     # template fills none of them, so every slot owes the shipyard's 500 fee.
     assert hauler.expected_outcomes.preparation_credits == 2_500
-    assert hauler.required_resources == %{credits: 12_500}
+    # The 10,000 offer reserves its 12,500 calibrated bound plus the 2,500 fee.
+    assert hauler.required_resources == %{credits: 15_000}
     assert hauler.ship.preparation_credits == 2_500
   end
 
@@ -964,6 +976,28 @@ defmodule SpaceTraders.FleetPlanningTest do
       assert candidate.refit.sourcing == :cargo
       assert candidate.refit.purchase_price == 0
       assert candidate.refit.expected_cost == 0
+    end
+
+    test "a purchased module reserves and is afforded at the active calibration margin" do
+      assert {:ok, %{candidate_contributions: [candidate]}} =
+               FleetPlanning.plan_ship_refit(
+                 refit_revision(),
+                 0,
+                 refit_snapshot(%{credit_margin_percent: 50})
+               )
+
+      # 32,000 at a 50% margin.
+      assert candidate.required_resources.credits == 48_000
+
+      # 45,000 covers the bare quote and the 25% bound, but not the 50% bound.
+      assert {:ok, %{candidate_contributions: [], limitations: limitations}} =
+               FleetPlanning.plan_ship_refit(
+                 refit_revision(),
+                 0,
+                 refit_snapshot(%{credit_margin_percent: 50, credits: 45_000})
+               )
+
+      assert Enum.any?(limitations, &(&1.reason == :refit_supply_unaffordable))
     end
 
     test "never assume a module is in Cargo without evidence, and require affordable supply" do

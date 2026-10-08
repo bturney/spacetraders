@@ -221,6 +221,22 @@ A suppression of new mutations whose admissibility depends on unresolved evidenc
 **Bounded Unknown**:
 An ambiguous mutation outcome whose worst possible consequence can be accounted for and remains inside every Hard Constraint. It may be retained as unresolved evidence without preventing unrelated or provably admissible work.
 
+**Credit Calibration**:
+The versioned worst-case price margin applied to a quoted spend to bound its credit consequence. It is model calibration, never Operator intent: it widens only after an attributable Pricing-model Breach and never narrows below its hard lower bound.
+_Avoid_: margin setting, spending allowance
+
+**Realization**:
+The realized-versus-quoted evidence for one credit-bearing action whose charge can be attributed to it: the quoted price and units, its worst-case bound, the realized charge, and the credits left after.
+_Avoid_: actual cost, receipt
+
+**Shortfall**:
+An authoritative credit balance below the active credit floor, or a realized charge above its worst-case bound. While unreleased it pauses new credit-bearing actions for its Agent; only a newer balance at or above the floor releases it.
+_Avoid_: deficit, overdraft
+
+**Pricing-model Breach**:
+A Shortfall caused by one action's realized charge exceeding its own worst-case bound. Only this kind widens Credit Calibration and raises Degraded Attention; a Shortfall from a raised floor, unattributable concurrent spends, or anything else pauses spending without recalibrating.
+_Avoid_: overspend, price miss
+
 **Degraded Operation**:
 Continued autonomous operation while a failing capability or API scope is quarantined. Unaffected planning, timers, telemetry, and admissible gameplay continue while recovery is retried at a sustainable rate.
 

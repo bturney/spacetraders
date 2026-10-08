@@ -123,6 +123,53 @@ defmodule SpaceTraders.FleetAcquisitionTest do
     assert nil == FleetAllocation.current_portfolio(scope, agent)
   end
 
+  test "a Ship charged above its recorded bound is a pricing-model breach that widens calibration" do
+    {scope, agent, revision} = generation()
+    initial = SpaceTraders.CreditCalibration.active()
+    stub_shipyard(agent)
+
+    # Offered at 10,000 (bound 12,500); the game charges 13,000.
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      case {conn.method, conn.request_path} do
+        {"GET", "/v2/my/agent"} -> overview(conn, agent, @credits)
+        {"GET", "/v2/my/ships"} -> Req.Test.json(conn, %{"data" => [docked("X1-UX81-A1")]})
+        {"POST", "/v2/my/ships"} -> purchase(conn, agent, 13_000)
+        {"GET", "/v2/my/ships/ACQUIRE-2"} -> ship(conn, @offered_speed)
+      end
+    end)
+
+    assert {:ok, %{ship: %Ship{symbol: "ACQUIRE-2"}}} =
+             FleetAcquisition.reconcile(scope, agent, revision, "X1-UX81")
+
+    assert [attempt] = purchase_attempts(agent)
+
+    assert [
+             %{
+               kind: "pricing_model_miss",
+               mutation_attempt_id: attempt_id,
+               worst_case_exposure: 12_500,
+               realized_charge: 13_000,
+               released_at: nil
+             }
+           ] = SpaceTraders.CreditCalibration.shortfalls(agent)
+
+    assert attempt_id == attempt.id
+
+    assert %{within_bound: false, operation_id: "purchase-ship", units: 1, unit_price: @price} =
+             SpaceTraders.CreditCalibration.realization(attempt)
+
+    # 13,000 is 30% over the 10,000 offer; widening clears it by one step.
+    assert %{margin_percent: 40, previous_version_id: previous} =
+             SpaceTraders.CreditCalibration.active()
+
+    assert previous == initial.id
+
+    assert [%{kind: :attention, summary: summary}] =
+             SpaceTraders.OperatorConditions.unresolved(scope)
+
+    assert summary =~ "Degraded Operation: a Ship purchase charged 13000 credits"
+  end
+
   test "a Ship whose readiness misses the promised capability is never registered" do
     {scope, agent, revision} = generation()
     stub_shipyard(agent)
@@ -149,6 +196,201 @@ defmodule SpaceTraders.FleetAcquisitionTest do
     assert [episode] = Repo.all(StrategyDecisionEpisode)
     assert episode.classification == :partially_realized
     assert episode.actual_outcomes["readiness"] == "mismatch"
+  end
+
+  test "admitted exposure from recorded Ship spending blocks an otherwise affordable purchase" do
+    {scope, agent, revision} = generation()
+    stub_shipyard(agent)
+    other_spend(agent, "sent_or_unknown", 9_000)
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      case {conn.method, conn.request_path} do
+        {"GET", "/v2/my/agent"} -> overview(conn, agent, @credits)
+        {"GET", "/v2/my/ships"} -> Req.Test.json(conn, %{"data" => [docked("X1-UX81-A1")]})
+        {"POST", "/v2/my/ships"} -> flunk("exposed headroom must prevent the purchase")
+      end
+    end)
+
+    # 20,000 credits cover the 12,500 worst case alone, but not beside 9,000 in flight.
+    assert {:error, {:ship_acquisition_unavailable, {:error, :insufficient_unreserved_headroom}}} =
+             FleetAcquisition.reconcile(scope, agent, revision, "X1-UX81")
+
+    assert [%{state: "not_sent", sent_or_unknown_at: nil}] = purchase_attempts(agent)
+    assert nil == Repo.get_by(Ship, agent_id: agent.id, symbol: "ACQUIRE-2")
+  end
+
+  test "an unbounded historical purchase fails closed instead of guessing a bound" do
+    {scope, agent, revision} = generation()
+    stub_shipyard(agent)
+    other_spend(agent, "ambiguous", nil)
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      case {conn.method, conn.request_path} do
+        {"GET", "/v2/my/agent"} -> overview(conn, agent, @credits)
+        {"GET", "/v2/my/ships"} -> Req.Test.json(conn, %{"data" => [docked("X1-UX81-A1")]})
+        {"POST", "/v2/my/ships"} -> flunk("unbounded exposure must prevent the purchase")
+      end
+    end)
+
+    assert {:error, {:ship_acquisition_unavailable, {:error, :unbounded_purchase_exposure}}} =
+             FleetAcquisition.reconcile(scope, agent, revision, "X1-UX81")
+  end
+
+  test "a purchase prepared without retained offer evidence is never sent" do
+    {_scope, agent, _revision} = generation()
+    Req.Test.stub(SpaceTraders.API, fn _conn -> flunk("no bound, no dispatch") end)
+
+    assert {:error, _} =
+             SpaceTraders.API.purchase_ship(
+               SpaceTraders.API.AgentTokenReference.new(agent),
+               "SHIP_LIGHT_HAULER",
+               "X1-UX81-A1"
+             )
+
+    assert [%{state: "not_sent", sent_or_unknown_at: nil}] = purchase_attempts(agent)
+  end
+
+  test "the ambiguous purchase Attempt itself retains the durable spending bound" do
+    {scope, agent, revision} = generation()
+    stub_shipyard(agent)
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      case {conn.method, conn.request_path} do
+        {"GET", "/v2/my/agent"} -> overview(conn, agent, @credits)
+        {"GET", "/v2/my/ships"} -> Req.Test.json(conn, %{"data" => [docked("X1-UX81-A1")]})
+        {"POST", "/v2/my/ships"} -> Req.Test.transport_error(conn, :timeout)
+      end
+    end)
+
+    assert {:error, {:ship_acquisition_unavailable, _}} =
+             FleetAcquisition.reconcile(scope, agent, revision, "X1-UX81")
+
+    assert [%{state: "ambiguous", prepared_evidence: %{"spending" => spending}}] =
+             purchase_attempts(agent)
+
+    assert %{"unit_price" => @price, "worst_case_exposure" => 12_500, "margin_percent" => 25} =
+             spending
+
+    # Exposure is the ceiling of price * 125%, with no speculative offset applied.
+    assert 12_500 == SpaceTraders.CreditSpending.worst_case_exposure(@price, 1, 25)
+  end
+
+  test "the acquisition Reservation charges the same active calibrated bound admission uses" do
+    {scope, agent, revision} = generation()
+    {:ok, _} = SpaceTraders.CreditCalibration.supersede(50, "test_widening", %{})
+    stub_shipyard(agent)
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      case {conn.method, conn.request_path} do
+        {"GET", "/v2/my/agent"} -> overview(conn, agent, @credits)
+        {"GET", "/v2/my/ships"} -> Req.Test.json(conn, %{"data" => [docked("X1-UX81-A1")]})
+        {"POST", "/v2/my/ships"} -> Req.Test.transport_error(conn, :timeout)
+      end
+    end)
+
+    assert {:error, {:ship_acquisition_unavailable, _}} =
+             FleetAcquisition.reconcile(scope, agent, revision, "X1-UX81")
+
+    assert [%{prepared_evidence: %{"spending" => %{"worst_case_exposure" => 15_000}}}] =
+             purchase_attempts(agent)
+
+    # 10,000 at the active 50% margin, plus the 2,500 outfitting reserve.
+    assert %{commitments: [commitment]} =
+             scope |> FleetAllocation.current_portfolio(agent) |> Repo.preload(:commitments)
+
+    assert commitment.reservations["credits"] == 15_000 + @preparation_exposure
+  end
+
+  test "a purchase prepared under a superseded Strategy revision is never sent" do
+    {_scope, agent, revision} = generation()
+    stub_shipyard(agent)
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      case {conn.method, conn.request_path} do
+        {"GET", "/v2/my/agent"} -> overview(conn, agent, @credits)
+        {"POST", "/v2/my/ships"} -> flunk("superseded authority must not dispatch")
+      end
+    end)
+
+    assert {:ok, offer} = SpaceTraders.CreditSpending.acquire_ship_purchase(agent, candidate())
+
+    # The Operator activates a newer revision before the purchase's send marker.
+    newer =
+      Repo.insert!(%Revision{
+        fleet_strategy_id: revision.fleet_strategy_id,
+        number: 2,
+        source: "operator",
+        activated_at: DateTime.utc_now(:second),
+        document: revision.document
+      })
+
+    Repo.update_all(from(s in Strategy, where: s.id == ^revision.fleet_strategy_id),
+      set: [active_revision_id: newer.id]
+    )
+
+    assert {:error, :strategy_revision_superseded} =
+             SpaceTraders.Observability.with_context(
+               [
+                 operator_id: agent.operator_id,
+                 agent_id: agent.id,
+                 strategy_revision_id: revision.id
+               ],
+               fn ->
+                 SpaceTraders.API.purchase_ship(
+                   SpaceTraders.API.AgentTokenReference.new(agent),
+                   "SHIP_LIGHT_HAULER",
+                   "X1-UX81-A1",
+                   spending: offer
+                 )
+               end
+             )
+
+    assert [%{state: "not_sent", sent_or_unknown_at: nil, strategy_revision_id: id}] =
+             purchase_attempts(agent)
+
+    assert id == revision.id
+  end
+
+  test "Shipyard evidence that ages before the send marker prevents the purchase" do
+    {_scope, agent, _revision} = generation()
+    start_supervised!({SpaceTraders.TestClock, DateTime.utc_now()})
+    previous = Application.fetch_env(:spacetraders, :clock)
+    Application.put_env(:spacetraders, :clock, SpaceTraders.TestClock)
+
+    on_exit(fn ->
+      case previous do
+        {:ok, clock} -> Application.put_env(:spacetraders, :clock, clock)
+        :error -> Application.delete_env(:spacetraders, :clock)
+      end
+    end)
+
+    stub_shipyard(agent)
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      case {conn.method, conn.request_path} do
+        {"GET", "/v2/my/agent"} -> overview(conn, agent, @credits)
+        {"POST", "/v2/my/ships"} -> flunk("stale offer evidence must not dispatch")
+      end
+    end)
+
+    assert {:ok, _} =
+             SpaceTraders.Evidence.get_agent(SpaceTraders.API.AgentTokenReference.new(agent))
+
+    assert {:ok, offer} = SpaceTraders.CreditSpending.acquire_ship_purchase(agent, candidate())
+    SpaceTraders.TestClock.advance(301)
+    # Credits are fresh again, so only the aged Shipyard evidence can refuse.
+    assert {:ok, _} =
+             SpaceTraders.Evidence.get_agent(SpaceTraders.API.AgentTokenReference.new(agent))
+
+    assert {:error, :ship_offer_evidence_unavailable} =
+             SpaceTraders.API.purchase_ship(
+               SpaceTraders.API.AgentTokenReference.new(agent),
+               "SHIP_LIGHT_HAULER",
+               "X1-UX81-A1",
+               spending: offer
+             )
+
+    assert [%{state: "not_sent", sent_or_unknown_at: nil}] = purchase_attempts(agent)
   end
 
   test "recovers a lost purchase response from authoritative Fleet and Agent evidence" do
@@ -644,6 +886,28 @@ defmodule SpaceTraders.FleetAcquisitionTest do
     assert Repo.get_by!(Generation, agent_id: agent.id).fenced_at
   end
 
+  defp candidate,
+    do: %{source_waypoint: "X1-UX81-A1", ship: %{type: "SHIP_LIGHT_HAULER"}}
+
+  # A recorded Ship purchase another caller already admitted for this Agent.
+  defp other_spend(agent, state, bound) do
+    generation = Repo.get_by!(Generation, agent_id: agent.id)
+
+    Repo.insert!(%SpaceTraders.MutationAttempts.Attempt{
+      operator_id: agent.operator_id,
+      agent_id: agent.id,
+      fleet_generation_id: generation.id,
+      operation_id: "purchase-cargo",
+      operation_owner: "ship_execution",
+      state: state,
+      request_fingerprint: "other-spend-#{System.unique_integer([:positive])}",
+      prepared_at: DateTime.utc_now(),
+      sent_or_unknown_at: DateTime.utc_now(),
+      prepared_evidence:
+        if(bound, do: %{"spending" => %{"worst_case_exposure" => bound}}, else: %{})
+    })
+  end
+
   defp purchase_attempts(agent) do
     MutationAttempts.list_for_agent(agent)
     |> Enum.filter(&(&1.operation_id == "purchase-ship"))
@@ -702,14 +966,14 @@ defmodule SpaceTraders.FleetAcquisitionTest do
   defp overview(conn, agent, credits),
     do: Req.Test.json(conn, %{"data" => %{"symbol" => agent.symbol, "credits" => credits}})
 
-  defp purchase(conn, agent) do
+  defp purchase(conn, agent, price \\ @price) do
     Req.Test.json(conn, %{
       "data" => %{
-        "agent" => %{"symbol" => agent.symbol, "credits" => @credits - @price},
+        "agent" => %{"symbol" => agent.symbol, "credits" => @credits - price},
         "ship" => acquired(@offered_speed),
         "transaction" => %{
           "agentSymbol" => agent.symbol,
-          "price" => @price,
+          "price" => price,
           "shipSymbol" => "ACQUIRE-2",
           "shipType" => "SHIP_LIGHT_HAULER",
           "waypointSymbol" => "X1-UX81-A1",

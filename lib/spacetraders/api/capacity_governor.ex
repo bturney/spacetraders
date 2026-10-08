@@ -4,17 +4,50 @@ defmodule SpaceTraders.API.CapacityGovernor do
   of global API capacity.
 
   The raw rate limiter protects the protocol budget. This module protects the
-  application budget by ordering waiting work by safety, reconciliation, and
-  then ordinary demand before handing it to the raw limiter. Fleet planning and
-  allocation consume the published `Snapshot` under ADR-0010; the governor
-  alone owns API policy — callers never tune it or infer capacity state for
-  themselves.
+  application budget by ordering waiting work before handing it to the raw
+  limiter; the governor alone owns API policy — callers never tune it or infer
+  capacity state for themselves.
 
-  `Retry-After` reported by the raw transport delays new *ordinary*
-  admissions until the window closes. Safety, reconciliation, and
-  deadline-critical work is never delayed by the gate; a small, measured
-  protocol-rejection rate is acceptable calibration ground truth, so the gate
-  stays partially open on purpose.
+  Three distinct surfaces:
+
+    * `disposition/3` — advisory `Disposition` (proceed, defer with retry
+      guidance, or unavailable). Point-in-time; reserves nothing.
+    * `admit/3` — live admission immediately before transport. It applies the
+      same policy as `disposition/3` against current state, so it may still
+      wait after an earlier advisory proceed; the raw limiter then paces every
+      admitted request.
+    * `diagnostics/1` — bounded diagnostic projection for operators and tests;
+      never a decision input.
+
+  Owners supply ordering context; the governor interprets it. Recognized
+  `purpose` (`:safety`, `:recovery`/`:reconciliation`, or `:deadline_critical`
+  together with a genuine `deadline_at`) is protected; the legacy `:safety` and
+  `:reconciliation` lanes remain recognized during migration. Arbitrary lane
+  names or a timestamp alone confer no protection. Within a protection class,
+  lower `strategic_priority` precedes higher, then earlier deadline, then
+  higher numeric `expected_value`.
+
+  Pressure is interpreted here, bounded, and never left to callers:
+
+    * `Retry-After` defers all work (honored up to 60 seconds): the limit is
+      account-wide. At expiry protected work may send one probe; sustained
+      rejection backs protected probes off exponentially past Retry-After, one
+      in flight at a time.
+    * A 5xx or transport failure paces only its own request family (operation)
+      with bounded probes. Failures spanning several families with no clean
+      response between them are a Fleet-wide outage: all work, protected work
+      included, waits for one bounded probe at a time.
+    * A caller that dies while queued or holding an admission releases its
+      place; no outcome is recorded for it.
+
+  Ordinary work progresses only when capacity and higher-priority demand
+  permit; there is no unconditional liveness promise. Prolonged deferral is
+  observable through `diagnostics/1`.
+
+  Missing governor authority fails closed: `admit/3` returns
+  `{:error, :capacity_unavailable}` and `disposition/3` reports unavailable.
+  Tests that intentionally bypass admission pass the `:test_disabled` server,
+  which only builds with `:capacity_test_disabled_allowed` compiled in.
 
   Admission is deliberately process-local: recovery starts from fresh callers
   and does not replay queued work selected against stale state. On restart the
@@ -26,9 +59,6 @@ defmodule SpaceTraders.API.CapacityGovernor do
   require Logger
 
   alias SpaceTraders.API.OperationInventory.Operation
-  alias SpaceTraders.API.ShadowAdmission
-  alias SpaceTraders.API.ShadowAdmission.Candidate
-  alias SpaceTraders.Clock
 
   defmodule Admission do
     @moduledoc "A production API admission held until the request completes."
@@ -36,52 +66,127 @@ defmodule SpaceTraders.API.CapacityGovernor do
     defstruct @enforce_keys
   end
 
-  defmodule Snapshot do
+  defmodule Disposition do
     @moduledoc """
-    An immutable API capacity snapshot consumed by Fleet Planning and Fleet
-    Allocation. Point-in-time view of the governor's admission state; the
-    governor owns API policy so consumers never take it from elsewhere.
+    Advisory capacity meaning: never a reservation, never gameplay authority.
+
+    `reason` is one of `:capacity_available`, `:contention`, `:retry_after`,
+    `:scoped_failure`, `:outage`, `:authority_unavailable`, or `:test_disabled`. `retry_at` is the governor's
+    reconsideration guidance for `:defer` and `:unavailable`.
+    """
+    @enforce_keys [:status, :reason, :observed_at]
+    defstruct @enforce_keys ++ [retry_at: nil]
+
+    @type t :: %__MODULE__{
+            status: :proceed | :defer | :unavailable,
+            reason:
+              :capacity_available
+              | :contention
+              | :retry_after
+              | :scoped_failure
+              | :outage
+              | :authority_unavailable
+              | :test_disabled,
+            observed_at: DateTime.t(),
+            retry_at: DateTime.t() | nil
+          }
+  end
+
+  defmodule Diagnostics do
+    @moduledoc """
+    Bounded diagnostic projection of the governor's state for operators and
+    tests. It explains pressure and prolonged deferral; it is not a decision
+    interface: work asks `SpaceTraders.API.CapacityGovernor.disposition/3`.
+
+    `deferred` maps each waiting protection class to its queued count and the
+    longest wait so far in seconds. `outage` is the next Fleet-wide probe time,
+    and `scoped_failures` the request families currently paced on their own.
     """
 
-    @enforce_keys [
-      :observed_at,
-      :available_slots,
-      :evidence_fingerprint,
-      :backpressure
-    ]
-
+    @enforce_keys [:observed_at, :admitted_capacity, :in_flight, :deferred, :backpressure]
     defstruct @enforce_keys ++
                 [
-                  next_outage_probe_at: nil,
-                  ordinary_delayed_until: nil,
-                  admitted_capacity: nil,
-                  protocol_rejections: 0
+                  protocol_rejections: 0,
+                  retry_after_until: nil,
+                  outage: nil,
+                  scoped_failures: []
                 ]
   end
 
   @restart_capacity 2
+  @probe_base_ms 1_000
+  @probe_max_ms 60_000
+  @outage_families 2
+  @max_retry_after_seconds 60
   @rejection_window_ms 60_000
+  @reconsider_seconds 1
+  @protection_rank %{safety: 0, reconciliation: 1, deadline_critical: 2, standard: 3}
+  @test_disabled_allowed Application.compile_env(
+                           :spacetraders,
+                           :capacity_test_disabled_allowed,
+                           false
+                         )
 
   def start_link(opts \\ []) do
     {name, opts} = Keyword.pop(opts, :name, __MODULE__)
     GenServer.start_link(__MODULE__, opts, name: name)
   end
 
-  @doc "The durable global API capacity snapshot for Fleet evidence."
-  def snapshot(name \\ __MODULE__) do
+  @doc "Bounded diagnostic projection; `nil` without a governor. Never a decision input."
+  def diagnostics(name \\ __MODULE__) do
     case Process.whereis(name) do
       nil -> nil
-      _pid -> GenServer.call(name, :snapshot)
+      _pid -> GenServer.call(name, :diagnostics)
+    end
+  end
+
+  @doc "Advises whether work may approach live admission; reserves no capacity."
+  @spec disposition(Operation.t(), map(), GenServer.server()) :: Disposition.t()
+  def disposition(%Operation{} = operation, attrs \\ %{}, name \\ __MODULE__)
+      when is_map(attrs) do
+    case capacity_call(name, {:disposition, operation, attrs}) do
+      {:error, :capacity_unavailable} ->
+        unavailable()
+
+      :test_disabled ->
+        %Disposition{status: :proceed, reason: :test_disabled, observed_at: DateTime.utc_now()}
+
+      %Disposition{} = disposition ->
+        disposition
     end
   end
 
   @doc "Waits until the request is admitted, returning its completion identity."
-  @spec admit(Operation.t(), map(), GenServer.server()) :: {:ok, Admission.t() | nil}
+  @spec admit(Operation.t(), map(), GenServer.server()) ::
+          {:ok, Admission.t() | nil} | {:error, :capacity_unavailable}
   def admit(%Operation{} = operation, attrs \\ %{}, name \\ __MODULE__) when is_map(attrs) do
-    case Process.whereis(name) do
-      nil -> {:ok, nil}
-      _pid -> GenServer.call(name, {:admit, operation, attrs}, :infinity)
+    case capacity_call(name, {:admit, operation, attrs}) do
+      :test_disabled -> {:ok, nil}
+      result -> result
     end
+  end
+
+  # The test-only bypass is a distinct, compile-time path; missing production
+  # authority never borrows it. Calls racing governor shutdown fail closed.
+  defp capacity_call(:test_disabled, _message) do
+    if @test_disabled_allowed, do: :test_disabled, else: {:error, :capacity_unavailable}
+  end
+
+  defp capacity_call(name, message) do
+    GenServer.call(name, message, :infinity)
+  catch
+    :exit, _reason -> {:error, :capacity_unavailable}
+  end
+
+  defp unavailable do
+    now = DateTime.utc_now()
+
+    %Disposition{
+      status: :unavailable,
+      reason: :authority_unavailable,
+      observed_at: now,
+      retry_at: DateTime.add(now, @reconsider_seconds, :second)
+    }
   end
 
   @doc "Releases an admission and reports the request outcome to the governor."
@@ -127,19 +232,34 @@ defmodule SpaceTraders.API.CapacityGovernor do
        rejection_window: [],
        first_rejection_at: nil,
        ordinary_delayed_until: nil,
-       outage_streak: 0,
-       next_outage_probe_at: nil
+       pressure_probe_at: nil,
+       failures: %{},
+       failing_families: MapSet.new(),
+       outage: nil,
+       probe_base_ms: setting(opts, config, :probe_base_ms, @probe_base_ms),
+       probe_max_ms: setting(opts, config, :probe_max_ms, @probe_max_ms),
+       now: Keyword.get(opts, :now, &DateTime.utc_now/0)
      }}
   end
 
+  defp setting(opts, config, key, default),
+    do: Keyword.get(opts, key, Keyword.get(config, key, default))
+
   @impl true
-  def handle_call({:admit, operation, attrs}, from, state) do
+  def handle_call({:disposition, operation, attrs}, _from, state) do
+    {:reply, interpret(%{operation: operation, attrs: attrs}, state), state}
+  end
+
+  # Each caller is monitored: one that dies while queued or holding an
+  # admission releases its place without any outcome being recorded.
+  def handle_call({:admit, operation, attrs}, {caller, _tag} = from, state) do
     request = %{
       from: from,
+      monitor: Process.monitor(caller),
       operation: operation,
       attrs: attrs,
       id: Integer.to_string(state.sequence + 1),
-      requested_at: DateTime.utc_now(),
+      requested_at: now(state),
       requested_ms: monotonic_ms(),
       sequence: state.sequence + 1
     }
@@ -151,44 +271,68 @@ defmodule SpaceTraders.API.CapacityGovernor do
     |> then(&{:noreply, &1})
   end
 
-  @impl true
-  def handle_call(:snapshot, _from, state) do
+  def handle_call(:diagnostics, _from, state) do
+    now = now(state)
+
+    deferred =
+      state.queue
+      |> Enum.group_by(&protection/1)
+      |> Map.new(fn {class, requests} ->
+        oldest = Enum.min_by(requests, & &1.requested_at, DateTime)
+
+        {class,
+         %{count: length(requests), longest_seconds: DateTime.diff(now, oldest.requested_at)}}
+      end)
+
     {:reply,
-     %Snapshot{
-       observed_at: Clock.utc_now(),
-       available_slots: max(state.admitted_capacity - map_size(state.in_flight), 0),
-       evidence_fingerprint: "runtime",
-       next_outage_probe_at: state.next_outage_probe_at,
-       backpressure: backpressure_state(state.backpressure_streak),
-       ordinary_delayed_until: state.ordinary_delayed_until,
+     %Diagnostics{
+       observed_at: now,
        admitted_capacity: state.admitted_capacity,
-       protocol_rejections: recent_rejections(state)
+       in_flight: map_size(state.in_flight),
+       deferred: deferred,
+       backpressure: backpressure_state(state.backpressure_streak),
+       protocol_rejections: recent_rejections(state),
+       retry_after_until: state.ordinary_delayed_until,
+       outage: state.outage && state.outage.probe_at,
+       scoped_failures: state.failures |> Map.keys() |> Enum.sort()
      }, state}
   end
 
   @impl true
   def handle_cast({:complete, id, status}, state) do
-    state =
-      case Map.pop(state.in_flight, id) do
-        {nil, _in_flight} -> state
-        {_request, in_flight} -> %{state | in_flight: in_flight}
-      end
+    case Map.pop(state.in_flight, id) do
+      {nil, _in_flight} ->
+        {:noreply, state}
 
-    {:noreply, dispatch(record_outcome(state, status))}
+      {request, in_flight} ->
+        Process.demonitor(request.monitor, [:flush])
+        {:noreply, dispatch(record_outcome(%{state | in_flight: in_flight}, request, status))}
+    end
   end
 
   def handle_cast({:protocol_rejected, retry_after_seconds}, state) do
     state =
       state
       |> note_rejection(retry_after_seconds)
-      |> schedule_ordinary_release()
+      |> schedule_reconsideration()
 
     {:noreply, dispatch(state)}
   end
 
   @impl true
-  def handle_info(:ordinary_window_expired, state) do
-    now = DateTime.utc_now()
+  def handle_info({:DOWN, monitor, :process, _caller, _reason}, state) do
+    abandoned? = &(&1.monitor == monitor)
+
+    {:noreply,
+     dispatch(%{
+       state
+       | queue: Enum.reject(state.queue, abandoned?),
+         in_flight: Map.reject(state.in_flight, fn {_id, request} -> abandoned?.(request) end)
+     })}
+  end
+
+  def handle_info(:reconsider, state) do
+    now = now(state)
 
     ordinary_delayed_until =
       case state.ordinary_delayed_until do
@@ -199,7 +343,7 @@ defmodule SpaceTraders.API.CapacityGovernor do
     {:noreply, dispatch(%{state | ordinary_delayed_until: ordinary_delayed_until})}
   end
 
-  defp record_outcome(state, status)
+  defp record_outcome(state, request, status)
        when status in 200..299 or (status in 400..499 and status != 429) do
     if state.backpressure_streak > 0 do
       :telemetry.execute(
@@ -221,35 +365,73 @@ defmodule SpaceTraders.API.CapacityGovernor do
       | backpressure_streak: 0,
         rejection_window: [],
         first_rejection_at: nil,
+        pressure_probe_at: nil,
         admitted_capacity: min(state.admitted_capacity + 1, state.max_in_flight),
-        outage_streak: 0,
-        next_outage_probe_at: nil
+        failures: Map.delete(state.failures, request.operation.id),
+        failing_families: MapSet.new(),
+        outage: nil
     }
   end
 
   # Every transport-level protocol rejection is reported through
   # protocol_rejected/2 (transparent retries included), so a 429 reaching
   # completion here is not counted a second time.
-  defp record_outcome(state, 429), do: state
+  defp record_outcome(state, _request, 429), do: state
 
-  defp record_outcome(state, status) when status in 500..599 or status == :unknown do
-    outage_streak = state.outage_streak + 1
-    probe_delay_seconds = min(trunc(:math.pow(2, outage_streak - 1)), 60)
+  # A failure paces only its own request family. Failures spanning several
+  # families with no clean response between them are a Fleet-wide outage:
+  # everything, protected work included, waits for one bounded probe at a time.
+  defp record_outcome(state, request, status) when status in 500..599 or status == :unknown do
+    family = request.operation.id
+    streak = get_in(state.failures, [family, :streak]) || 0
+    failure = %{streak: streak + 1, probe_at: probe_at(state, streak + 1)}
+    families = MapSet.put(state.failing_families, family)
 
-    %{
+    state = %{
       state
-      | admitted_capacity: min(@restart_capacity, state.max_in_flight),
-        outage_streak: outage_streak,
-        next_outage_probe_at: DateTime.add(DateTime.utc_now(), probe_delay_seconds, :second)
+      | failures: Map.put(state.failures, family, failure),
+        failing_families: families
     }
+
+    if MapSet.size(families) >= @outage_families do
+      streak = if state.outage, do: state.outage.streak + 1, else: 1
+
+      %{
+        state
+        | admitted_capacity: min(@restart_capacity, state.max_in_flight),
+          outage: %{streak: streak, probe_at: probe_at(state, streak)}
+      }
+    else
+      state
+    end
   end
 
-  defp record_outcome(state, _status), do: state
+  # Not dispatched or abandoned: no protocol evidence either way.
+  defp record_outcome(state, _request, _status), do: state
+
+  # Protocol pressure: the rate limit is account-wide, so protected probes wait
+  # out the (bounded) Retry-After window — an earlier probe only earns another
+  # 429; sustained rejection backs probes off further, whichever is later.
+  defp pressure_probe_at(state, streak, retry_after_until) do
+    backoff_ms = if streak == 1, do: 0, else: backoff_ms(state, streak - 1)
+    backoff_at = DateTime.add(now(state), backoff_ms, :millisecond)
+
+    if future?(retry_after_until, backoff_at), do: retry_after_until, else: backoff_at
+  end
+
+  defp backoff_ms(state, streak),
+    do: min(state.probe_base_ms * Integer.pow(2, streak - 1), state.probe_max_ms)
+
+  defp probe_at(state, streak) do
+    DateTime.add(now(state), backoff_ms(state, streak), :millisecond)
+  end
 
   defp note_rejection(state, retry_after_seconds) do
     now_ms = monotonic_ms()
     rejection_window = [now_ms | state.rejection_window]
-    ordinary_delayed_until = delayed_until(retry_after_seconds, state.ordinary_delayed_until)
+
+    ordinary_delayed_until =
+      delayed_until(retry_after_seconds, state.ordinary_delayed_until, state)
 
     :telemetry.execute(
       [:spacetraders, :api, :capacity, :reject],
@@ -266,9 +448,12 @@ defmodule SpaceTraders.API.CapacityGovernor do
       protocol_rejections: recent_rejection_count(rejection_window)
     )
 
+    streak = state.backpressure_streak + 1
+
     %{
       state
-      | backpressure_streak: state.backpressure_streak + 1,
+      | backpressure_streak: streak,
+        pressure_probe_at: pressure_probe_at(state, streak, ordinary_delayed_until),
         rejection_window: rejection_window,
         first_rejection_at: state.first_rejection_at || now_ms,
         admitted_capacity: max(state.admitted_capacity - 1, 1),
@@ -276,118 +461,199 @@ defmodule SpaceTraders.API.CapacityGovernor do
     }
   end
 
-  defp schedule_ordinary_release(%{ordinary_delayed_until: nil} = state), do: state
+  # Admits the best eligible request one at a time: each admission can change
+  # what the policy allows next (a probe in flight, contention).
+  defp dispatch(state) do
+    state.queue
+    |> Enum.sort_by(&ordering_key/1)
+    |> Enum.find(&(interpret(&1, state).status == :proceed))
+    |> case do
+      # Deferred demand stays queued. Demand that arrives after a window
+      # opened needs its own reconsideration, or it would wait for a timer
+      # that already fired.
+      nil -> schedule_reconsideration(state)
+      request -> state |> admit_request(request) |> dispatch()
+    end
+  end
 
-  defp schedule_ordinary_release(%{ordinary_delayed_until: until, queue: queue} = state) do
-    if Enum.any?(queue, &ordinary_request?/1) do
-      ms = max(DateTime.diff(until, DateTime.utc_now(), :millisecond), 0)
-      Process.send_after(self(), :ordinary_window_expired, ms + 1)
+  defp admit_request(state, request) do
+    admission = %Admission{
+      id: request.id,
+      operation_id: request.operation.id,
+      lane: protection(request),
+      requested_at: request.requested_at
+    }
+
+    :telemetry.execute(
+      [:spacetraders, :api, :capacity, :governor],
+      %{count: 1, queue_time: max(monotonic_ms() - request.requested_ms, 0)},
+      %{
+        operation_id: request.operation.id,
+        lane: admission.lane,
+        backpressure: backpressure_state(state.backpressure_streak),
+        ordinary_delayed_until: state.ordinary_delayed_until
+      }
+    )
+
+    GenServer.reply(request.from, {:ok, admission})
+    in_flight = Map.put(request, :probe, probe_kind(request, state))
+
+    %{
+      state
+      | queue: List.delete(state.queue, request),
+        in_flight: Map.put(state.in_flight, request.id, in_flight)
+    }
+  end
+
+  # Under outage, an admitted request is the probe that tests recovery.
+  defp probe_kind(_request, %{outage: %{}}), do: :outage
+
+  defp probe_kind(request, state) do
+    cond do
+      Map.has_key?(state.failures, request.operation.id) -> {:scoped, request.operation.id}
+      state.backpressure_streak > 0 -> :protocol
+      true -> nil
+    end
+  end
+
+  defp probe_in_flight?(state, kind),
+    do: Enum.any?(state.in_flight, fn {_id, request} -> request.probe == kind end)
+
+  defp schedule_reconsideration(state) do
+    retry_at =
+      state.queue
+      |> Enum.map(&interpret(&1, state).retry_at)
+      |> Enum.reject(&is_nil/1)
+      |> Enum.min(DateTime, fn -> nil end)
+
+    if retry_at do
+      ms = max(DateTime.diff(retry_at, now(state), :millisecond), 0)
+      Process.send_after(self(), :reconsider, ms + 1)
     end
 
     state
   end
 
-  defp dispatch(state) do
-    available = state.admitted_capacity - map_size(state.in_flight)
+  # The one policy both advisory disposition and live dispatch apply.
+  defp interpret(request, state) do
+    observed_at = now(state)
 
-    if available > 0 and state.queue != [] do
-      {eligible, delayed} = partition_delayed(state.queue, state.ordinary_delayed_until)
+    {reason, retry_at} =
+      cond do
+        state.outage &&
+            (probe_in_flight?(state, :outage) or future?(state.outage.probe_at, observed_at)) ->
+          {:outage,
+           later(
+             state.outage.probe_at,
+             DateTime.add(observed_at, @reconsider_seconds, :second),
+             observed_at
+           )}
 
-      case eligible do
-        [] ->
-          # Ordinary demand still waits out the Retry-After window; kept in
-          # queue without resorting eligible work ahead of it. Demand that
-          # arrives after the window opened needs its own release, or it would
-          # wait for a timer that already fired.
-          schedule_ordinary_release(state)
+        scoped_failure_pending?(request, state, observed_at) ->
+          failure = Map.fetch!(state.failures, request.operation.id)
 
-        _ ->
-          dispatch_selected(%{state | queue: eligible}, available)
-          |> then(fn dispatched -> %{dispatched | queue: dispatched.queue ++ delayed} end)
+          {:scoped_failure,
+           later(
+             failure.probe_at,
+             DateTime.add(observed_at, @reconsider_seconds, :second),
+             observed_at
+           )}
+
+        # The probe never precedes Retry-After, so its time is the earliest
+        # anything may go while protocol pressure lasts.
+        state.backpressure_streak > 0 and
+            (probe_in_flight?(state, :protocol) or future?(state.pressure_probe_at, observed_at)) ->
+          {:retry_after,
+           later(
+             state.pressure_probe_at,
+             DateTime.add(observed_at, @reconsider_seconds, :second),
+             observed_at
+           )}
+
+        # Retry-After is account-wide: no purpose sends work into it, even
+        # after a clean response from work already in flight.
+        future?(state.ordinary_delayed_until, observed_at) ->
+          {:retry_after, state.ordinary_delayed_until}
+
+        map_size(state.in_flight) >= state.admitted_capacity ->
+          {:contention, DateTime.add(observed_at, @reconsider_seconds, :second)}
+
+        true ->
+          {:capacity_available, nil}
       end
-    else
-      state
+
+    %Disposition{
+      status: if(is_nil(retry_at), do: :proceed, else: :defer),
+      reason: reason,
+      observed_at: observed_at,
+      retry_at: retry_at
+    }
+  end
+
+  defp scoped_failure_pending?(request, state, now) do
+    family = request.operation.id
+
+    case state.failures do
+      %{^family => failure} ->
+        probe_in_flight?(state, {:scoped, family}) or future?(failure.probe_at, now)
+
+      _ ->
+        false
     end
   end
 
-  defp dispatch_selected(state, available) do
-    {selected, remaining} = take_best(state.queue, available)
-    now = monotonic_ms()
+  # Reconsideration guidance: the probe time while it is ahead, else a short
+  # reconsideration while a probe is out.
+  defp later(probe_at, fallback, now),
+    do: if(future?(probe_at, now), do: probe_at, else: fallback)
 
-    Enum.each(selected, fn request ->
-      admission = %Admission{
-        id: request.id,
-        operation_id: request.operation.id,
-        lane: lane(request),
-        requested_at: request.requested_at
-      }
-
-      :telemetry.execute(
-        [:spacetraders, :api, :capacity, :governor],
-        %{count: 1, queue_time: max(now - request.requested_ms, 0)},
-        %{
-          operation_id: request.operation.id,
-          lane: admission.lane,
-          backpressure: backpressure_state(state.backpressure_streak),
-          ordinary_delayed_until: state.ordinary_delayed_until
-        }
-      )
-
-      GenServer.reply(request.from, {:ok, admission})
-    end)
-
-    in_flight =
-      Enum.reduce(selected, state.in_flight, fn request, acc ->
-        Map.put(acc, request.id, request)
-      end)
-
-    %{state | queue: remaining, in_flight: in_flight}
-  end
-
-  defp partition_delayed(queue, nil), do: {queue, []}
-
-  defp partition_delayed(queue, until) do
-    Enum.split_with(queue, &eligible_now?(&1, until))
-  end
-
-  defp eligible_now?(request, until) do
-    bypasses_ordinary_delay?(request) or not DateTime.before?(DateTime.utc_now(), until)
-  end
-
-  defp bypasses_ordinary_delay?(%{operation: %{owner: :fleet_reconciliation}}), do: true
-
-  defp bypasses_ordinary_delay?(%{attrs: %{lane: lane}}) when is_atom(lane) and lane != :standard,
-    do: true
-
-  defp bypasses_ordinary_delay?(%{attrs: %{deadline_at: %DateTime{}}}), do: true
-
-  defp bypasses_ordinary_delay?(_request), do: false
-
-  defp ordinary_request?(request), do: not bypasses_ordinary_delay?(request)
-
-  defp take_best(queue, count) do
-    queue = Enum.sort_by(queue, &ordering_key/1)
-    Enum.split(queue, count)
-  end
+  defp future?(nil, _now), do: false
+  defp future?(until, now), do: DateTime.after?(until, now)
 
   defp ordering_key(request) do
     attrs = request.attrs
+    protection = protection(request)
 
-    ShadowAdmission.ordering_key(%Candidate{
-      id: request.id,
-      operation_id: request.operation.id,
-      lane: lane(request),
-      deadline_at: Map.get(attrs, :deadline_at),
-      strategic_priority: Map.get(attrs, :strategic_priority),
-      expected_value: Map.get(attrs, :expected_value),
-      discovery: Map.get(attrs, :discovery, false)
-    })
+    [
+      Map.fetch!(@protection_rank, protection),
+      Map.get(attrs, :strategic_priority) || :infinity,
+      deadline_key(attrs),
+      value_key(Map.get(attrs, :expected_value)),
+      not Map.get(attrs, :discovery, false),
+      request.sequence
+    ]
   end
 
-  defp lane(%{attrs: %{lane: lane}}) when is_atom(lane), do: lane
-  defp lane(%{operation: %{owner: :fleet_reconciliation}}), do: :reconciliation
+  defp deadline_key(%{deadline_at: %DateTime{} = deadline_at}),
+    do: DateTime.to_unix(deadline_at, :microsecond)
 
-  defp lane(_request), do: :standard
+  defp deadline_key(_attrs), do: :infinity
+
+  defp value_key(value) when is_number(value), do: -value
+  defp value_key(_value), do: :infinity
+
+  @doc """
+  The protection class the governor recognizes for work: `:safety`,
+  `:reconciliation`, `:deadline_critical`, or `:standard`. Shared explanatory
+  meaning for diagnostics and shadow review; it grants no admission.
+  """
+  def protection_class(%Operation{} = operation, attrs) when is_map(attrs),
+    do: protection(%{operation: operation, attrs: attrs})
+
+  # Protection is recognized from purpose, never from an arbitrary lane name
+  # or the mere presence of a timestamp.
+  defp protection(%{attrs: %{purpose: :safety}}), do: :safety
+
+  defp protection(%{attrs: %{purpose: purpose}}) when purpose in [:recovery, :reconciliation],
+    do: :reconciliation
+
+  defp protection(%{attrs: %{purpose: :deadline_critical, deadline_at: %DateTime{}}}),
+    do: :deadline_critical
+
+  # Legacy lanes recognized during the expand phase.
+  defp protection(%{attrs: %{lane: lane}}) when lane in [:safety, :reconciliation], do: lane
+  defp protection(%{operation: %{owner: :fleet_reconciliation}}), do: :reconciliation
+  defp protection(_request), do: :standard
 
   @doc "Protocol backpressure state for a streak of recent 429 rejections."
   def backpressure_state(streak) when streak >= 2, do: :sustained
@@ -404,10 +670,16 @@ defmodule SpaceTraders.API.CapacityGovernor do
     Enum.count(rejection_window, &(&1 >= cutoff))
   end
 
-  defp delayed_until(seconds, _current) when is_integer(seconds) and seconds > 0,
-    do: DateTime.add(DateTime.utc_now(), seconds, :second)
+  # The server's Retry-After is honored up to a bound, so one extreme header
+  # cannot strand ordinary work beyond the governor's own probe horizon.
+  defp delayed_until(seconds, current, state) when is_integer(seconds) and seconds > 0 do
+    proposed = DateTime.add(now(state), min(seconds, @max_retry_after_seconds), :second)
+    if future?(current, proposed), do: current, else: proposed
+  end
 
-  defp delayed_until(_seconds, current), do: current
+  defp delayed_until(_seconds, current, _state), do: current
+
+  defp now(state), do: state.now.()
 
   defp monotonic_ms, do: System.monotonic_time(:millisecond)
 end

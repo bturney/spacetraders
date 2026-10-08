@@ -232,7 +232,8 @@ defmodule SpaceTraders.FleetContracts do
                sourcing_listings(agent, now),
                ships,
                credits,
-               now
+               now,
+               SpaceTraders.CreditCalibration.active().margin_percent
              ) do
           {:ok, evidence} -> accept_if_admissible(agent, revision, offer.id, evidence)
           error -> error
@@ -418,16 +419,20 @@ defmodule SpaceTraders.FleetContracts do
     end
   end
 
-  @doc "Estimates acquisition exposure and delivery time from fresh sources and capable Ships."
+  @doc """
+  Estimates acquisition exposure and delivery time from fresh sources and
+  capable Ships, charging the caller's active calibration margin.
+  """
   def estimate_acceptance(
         %Contract{terms: %{deliver: deliver}} = contract,
         listings,
         ships,
         credits,
-        as_of
+        as_of,
+        margin
       )
       when is_list(deliver) and deliver != [] and is_list(listings) and is_list(ships) and
-             is_integer(credits) and is_struct(as_of, DateTime) do
+             is_integer(credits) and is_struct(as_of, DateTime) and is_integer(margin) do
     estimates =
       Enum.map(deliver, fn good ->
         matches =
@@ -453,7 +458,13 @@ defmodule SpaceTraders.FleetContracts do
           {listing, batch} ->
             if is_integer(good.units_required) and is_integer(good.units_fulfilled) and
                  good.units_required > good.units_fulfilled,
-               do: begin_estimate(good.units_required - good.units_fulfilled, listing, batch),
+               do:
+                 begin_estimate(
+                   good.units_required - good.units_fulfilled,
+                   listing,
+                   batch,
+                   margin
+                 ),
                else: nil
         end
       end)
@@ -472,11 +483,13 @@ defmodule SpaceTraders.FleetContracts do
     end
   end
 
-  def estimate_acceptance(_, _, _, _, _), do: {:error, :contract_sourcing_unavailable}
+  def estimate_acceptance(_, _, _, _, _, _), do: {:error, :contract_sourcing_unavailable}
 
-  defp begin_estimate(remaining, listing, batch) do
+  defp begin_estimate(remaining, listing, batch, margin) do
     trips = div(remaining + batch - 1, batch)
-    {remaining * listing.purchase_price + 750 * trips, 21_600 * trips, listing.evidence_id}
+
+    {SpaceTraders.CreditSpending.worst_case_exposure(listing.purchase_price, remaining, margin),
+     21_600 * trips, listing.evidence_id}
   end
 
   defp waypoint_system(waypoint) when is_binary(waypoint) do
@@ -546,6 +559,7 @@ defmodule SpaceTraders.FleetContracts do
     with {:ok, %{candidate_contributions: proposals}} <-
            FleetPlanning.plan_contracts(revision, objective_index, %{
              as_of: as_of,
+             credit_margin_percent: SpaceTraders.CreditCalibration.active().margin_percent,
              contracts: contracts,
              ships: available_ships,
              listings: listings,
@@ -780,7 +794,7 @@ defmodule SpaceTraders.FleetContracts do
         trade_symbol: candidate.trade_symbol,
         units: candidate.contract.batch_units,
         purchase_price: candidate.contract.max_price,
-        reserve_credits: floor + 750,
+        reserve_credits: floor,
         contract_id: candidate.contract.id
       })
     end

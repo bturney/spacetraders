@@ -32,7 +32,7 @@ defmodule SpaceTraders.Evidence.DemandScheduler do
   def init(_opts) do
     Phoenix.PubSub.subscribe(SpaceTraders.PubSub, @topic)
 
-    {:ok, arm(%{wake_at: nil, wake_token: 0})}
+    {:ok, arm(%{wake_at: nil, wake_token: 0, announced: nil})}
   end
 
   @impl true
@@ -44,6 +44,18 @@ defmodule SpaceTraders.Evidence.DemandScheduler do
   # this timer was scheduled. Ignore it; the currently armed wake is effective.
   def handle_info({:wake, _stale_token}, state) do
     {:noreply, state}
+  end
+
+  # Overdue work already announced waits for its bounded retry: a change that
+  # makes nothing newly due must not re-announce it, or each consumer wakeup
+  # that touches demands would wake that consumer again without bound.
+  def handle_info({:observation_demands_changed, _agent_id}, %{announced: announced} = state)
+      when is_map(announced) do
+    due = MapSet.new(Evidence.due_demands(), & &1.id)
+
+    if MapSet.subset?(due, announced),
+      do: {:noreply, state},
+      else: {:noreply, arm(%{state | wake_at: nil, announced: nil})}
   end
 
   def handle_info({:observation_demands_changed, _agent_id}, state) do
@@ -60,8 +72,9 @@ defmodule SpaceTraders.Evidence.DemandScheduler do
     # schedule. They stay open and late evidence may still fulfil them.
     {:ok, _marked} = Evidence.mark_missed_deadlines(now)
 
-    now
-    |> Evidence.due_demands()
+    due = Evidence.due_demands(now)
+
+    due
     |> Enum.group_by(& &1.agent_id)
     |> Enum.each(fn {agent_id, demands} ->
       subjects = Enum.map(demands, & &1.subject)
@@ -77,16 +90,17 @@ defmodule SpaceTraders.Evidence.DemandScheduler do
     # wakeup interval instead of spinning on a due time already in the past.
     case Evidence.earliest_due_at() do
       nil ->
-        {:noreply, %{state | wake_at: nil}}
+        {:noreply, %{state | wake_at: nil, announced: nil}}
 
       earliest ->
         if due_in_future?(earliest, now) do
-          {:noreply, arm(%{state | wake_at: nil})}
+          {:noreply, arm(%{state | wake_at: nil, announced: nil})}
         else
           token = state.wake_token + 1
           wake_at = DateTime.add(now, @deferred_wake_ms, :millisecond)
           Clock.send_at(self(), {:wake, token}, wake_at)
-          {:noreply, %{state | wake_at: wake_at, wake_token: token}}
+          announced = MapSet.new(due, & &1.id)
+          {:noreply, %{state | wake_at: wake_at, wake_token: token, announced: announced}}
         end
     end
   end

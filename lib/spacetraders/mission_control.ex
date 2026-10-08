@@ -10,7 +10,7 @@ defmodule SpaceTraders.MissionControl do
 
   alias SpaceTraders.Agent.Scope
   alias SpaceTraders.Agent.Agent, as: AgentRecord
-  alias SpaceTraders.API.CapacityGovernor
+  alias SpaceTraders.FleetCapacity
   alias SpaceTraders.FleetAllocation.Commitment
   alias SpaceTraders.FleetAllocation.Portfolio
   alias SpaceTraders.Fleet.Activity
@@ -259,6 +259,7 @@ defmodule SpaceTraders.MissionControl do
     projection
     |> Map.put(:presets, FleetStrategy.presets())
     |> Map.put(:draft_comparison, draft_comparison(projection))
+    |> Map.put(:credit_margin_percent, SpaceTraders.CreditCalibration.active().margin_percent)
   end
 
   @doc "Returns visible Market Candidate Contributions from retained Operational Intelligence."
@@ -853,7 +854,7 @@ defmodule SpaceTraders.MissionControl do
   defp draft_commitments(_scope, %{draft: draft}, _availability) when not is_map(draft), do: []
 
   defp draft_commitments(scope, %{draft: draft, active_revision: active}, availability) do
-    capacity = CapacityGovernor.snapshot()
+    capacity = FleetCapacity.disposition("get-market")
 
     scope
     |> agents()
@@ -931,6 +932,7 @@ defmodule SpaceTraders.MissionControl do
       snapshot =
         FleetPlanning.market_snapshot(as_of, system_symbol, agent.id, markets)
         |> Map.merge(FleetPlanning.baseline_coverage(baseline))
+        |> Map.put(:credit_margin_percent, SpaceTraders.CreditCalibration.active().margin_percent)
 
       document
       |> Map.get("objectives", [])

@@ -68,6 +68,9 @@ defmodule SpaceTraders.FleetAllocation do
     defstruct @enforce_keys
   end
 
+  # How long a completed buy keeps its Commitment while its next leg is created.
+  @leg_handoff_seconds 120
+
   @doc """
   Records the Neutral Wait for one authoritative zero-admissible allocation
   result at the single mint site fixed by ADR 0012.
@@ -100,6 +103,7 @@ defmodule SpaceTraders.FleetAllocation do
       when is_list(candidates) and is_map(availability) and is_list(current_commitments) do
     with {:ok, candidates} <- normalize_candidates(candidates, availability),
          true <- valid_allocation_input?(revision, candidates, availability, current_commitments) do
+      availability = protect_credit_floor(revision, availability)
       {:ok, build_portfolio(revision, candidates, availability, current_commitments)}
     else
       _invalid -> {:error, :invalid_allocation_input}
@@ -108,6 +112,18 @@ defmodule SpaceTraders.FleetAllocation do
 
   def select_portfolio(_revision, _candidates, _availability, _current_commitments),
     do: {:error, :invalid_allocation_input}
+
+  defp protect_credit_floor(revision, availability) do
+    case SpaceTraders.FleetStrategy.StandingAuthority.credit_floor(revision) do
+      {:ok, floor} ->
+        Map.update!(availability, :reservations, fn resources ->
+          Map.update(resources, :credits, 0, &max(&1 - floor, 0))
+        end)
+
+      _ ->
+        availability
+    end
+  end
 
   @doc "Selects complete producer–hauler groups; orphan producer Claims cannot starve deliveries."
   def select_coordinated_portfolio(%Revision{} = revision, candidates, availability)
@@ -292,6 +308,8 @@ defmodule SpaceTraders.FleetAllocation do
          changed,
          decision
        ) do
+    lock_generation_agent!(generation_id)
+
     portfolio =
       Repo.one(
         from p in Portfolio,
@@ -849,6 +867,8 @@ defmodule SpaceTraders.FleetAllocation do
          calibration_version,
          expected_source_version
        ) do
+    lock_generation_agent!(generation_id)
+
     strategy =
       Repo.one(
         from strategy in Strategy,
@@ -1042,6 +1062,7 @@ defmodule SpaceTraders.FleetAllocation do
   end
 
   defp do_unwind_current_portfolio(operator_id, generation_id) do
+    lock_generation_agent!(generation_id)
     now = DateTime.utc_now()
 
     portfolio =
@@ -1113,6 +1134,11 @@ defmodule SpaceTraders.FleetAllocation do
     end)
   end
 
+  defp lock_generation_agent!(generation_id) do
+    generation = Repo.get!(Generation, generation_id)
+    SpaceTraders.CreditSpending.lock_agent(generation.agent_id)
+  end
+
   defp realized_economics(episode_id) do
     totals =
       from(intent in Intent,
@@ -1162,15 +1188,34 @@ defmodule SpaceTraders.FleetAllocation do
     if resource_yields == [], do: result, else: Map.put(result, :resource_yields, resource_yields)
   end
 
+  # One statement, so a leg that finishes or starts mid-check is still seen.
+  # A completed buy commits before its round trip requests the next leg; until
+  # that leg exists the bought Cargo is still the Commitment's work, and
+  # superseding it would refuse the sell leg and strand the Cargo aboard. The
+  # round trip requests that leg straight after the buy, so the guard lasts
+  # only @leg_handoff_seconds: a leg that never appears cannot hold the
+  # Portfolio against replanning or revision activation indefinitely.
   defp unresolved_commitment_intent?(portfolio_ids) do
+    handoff_cutoff = DateTime.add(DateTime.utc_now(:second), -@leg_handoff_seconds, :second)
+
     Repo.exists?(
       from(intent in Intent,
+        as: :intent,
         join: commitment in Commitment,
         on: commitment.id == intent.fleet_commitment_id,
         where:
           commitment.fleet_commitment_portfolio_id in ^portfolio_ids and
             intent.caller == "commitment" and
-            intent.status in ^Intent.unfinished_states()
+            (intent.status in ^Intent.unfinished_states() or
+               (intent.type == "buy" and intent.status == "completed" and
+                  intent.finished_at >= ^handoff_cutoff and
+                  not exists(
+                    from(later in Intent,
+                      where:
+                        later.fleet_commitment_id == parent_as(:intent).fleet_commitment_id and
+                          later.id > parent_as(:intent).id
+                    )
+                  )))
       )
     )
   end

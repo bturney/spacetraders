@@ -879,6 +879,16 @@ defmodule SpaceTraders.Fleet do
   defp blocker_summary(:target_system_waypoints_unavailable),
     do: "System exploration cannot progress: target system waypoints are unavailable."
 
+  defp blocker_summary(reason)
+       when reason in [
+              :insufficient_unreserved_headroom,
+              :authoritative_credit_facts_required,
+              :credit_spending_paused,
+              :credit_calibration_superseded
+            ],
+       do:
+         "Spending stays paused: credits cannot cover this fuel or antimatter purchase above the credit floor."
+
   defp blocker_summary(reason), do: "Ship action cannot progress: #{blocker_reason(reason)}."
 
   defp blocker_reason(reason) when is_atom(reason), do: Atom.to_string(reason)
@@ -915,6 +925,23 @@ defmodule SpaceTraders.Fleet do
 
       {"fuel_unavailable", _reason} ->
         {"game_state", "fuel_observation_available", ["refresh_ship", "refuel"]}
+
+      {code, _reason}
+      when code in [
+             "insufficient_unreserved_headroom",
+             "authoritative_credit_facts_required",
+             "credit_spending_paused",
+             "credit_calibration_superseded"
+           ] ->
+        {"operator", "credits_above_floor_with_headroom", ["acquire_credits", "resume"]}
+
+      {code, _reason}
+      when code in ["market_quote_stale_or_missing", "market_quote_unavailable"] ->
+        {"game_state", "fresh_market_quote_available", ["refresh_market", "resume"]}
+
+      {code, _reason}
+      when code in ["modification_fee_stale_or_missing", "modification_fee_unavailable"] ->
+        {"game_state", "fresh_shipyard_fee_available", ["refresh_shipyard", "resume"]}
 
       {code, _reason} when code in ["insufficient_credits", "antimatter_unavailable"] ->
         {"operator", "jump_resources_available", ["acquire_credits", "buy_antimatter", "resume"]}

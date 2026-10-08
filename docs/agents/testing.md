@@ -112,14 +112,37 @@ Current seam owners:
   `test/spacetraders/owned_intent_recovery_test.exs`,
   `test/spacetraders/transfer_recovery_test.exs`,
   `test/spacetraders/resource_recovery_test.exs`
+- refuel and jump/antimatter credit authority through the root Intent lifecycle:
+  `test/spacetraders/refuel_jump_spending_test.exs`
 - recorded runtime interruption, authority races, and boot recovery:
   `test/spacetraders/recorded_ship_runtime_test.exs`
 - per-family interruption phase matrix and authority loss (every recorded Ship
   family): `test/spacetraders/recorded_family_interruption_test.exs`
 - recorded admission boundary and Ship operation coverage:
   `test/spacetraders/api/recorded_dispatch_test.exs`
+- concurrent and restart-safe credit admission (Agent lock contention,
+  Reservations, reconstructed exposure, quote aging across restart):
+  `test/spacetraders/credit_spending_qualification_test.exs`
+- credit calibration versions, realized-versus-quoted evidence, shortfall
+  classification, and spending pause/release:
+  `test/spacetraders/credit_calibration_test.exs`
+- eager floor revalidation (below-floor balance read, revision activation):
+  `test/spacetraders/credit_floor_watch_test.exs`
+- root Intent Capacity Deferral (recovery-read 429, bounded governor-guided
+  wakeup, restart, wake revalidation, mutation-response Evidence reuse, deferral
+  metric): `test/spacetraders/capacity_deferral_test.exs`. Fleet capacity
+  callers (`FleetCapacity.disposition/2`, used by `CapacityDeferral`) ask an
+  isolated governor only through the explicit test seam
+  `Application.put_env(:spacetraders, SpaceTraders.FleetCapacity, governor: name)`;
+  restore it in `on_exit`. Production sets nothing.
+- API Capacity Governor lifecycle (Retry-After bound, protected probe pacing,
+  scoped vs Fleet-wide outage, abandoned callers, restart, diagnostics):
+  `test/spacetraders/api/capacity_governor_test.exs`. The app-wide test
+  governor probes with no backoff delay (`probe_base_ms: 0` in
+  `config/test.exs`); isolated governors pass their own timing.
 
-- whole-runtime composition across runtime restart:
+- whole-runtime composition across runtime restart, and Gate 1 spending and
+  capacity authority through Strategy activation ("Gate 1 authority" describe):
   `test/diagnostics/runtime_qualification.exs` (diagnostic only)
 
 ## Runtime qualification

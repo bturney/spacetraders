@@ -3,7 +3,7 @@ defmodule SpaceTraders.FleetShadowTest do
 
   import SpaceTraders.AgentFixtures
 
-  alias SpaceTraders.API.CapacityGovernor.Snapshot, as: CapacitySnapshot
+  alias SpaceTraders.Test.CapacityDispositions
   alias SpaceTraders.Evidence.Observation
   alias SpaceTraders.FleetAllocation.Commitment
   alias SpaceTraders.FleetAllocation.StrategyDecisionEpisode
@@ -46,10 +46,33 @@ defmodule SpaceTraders.FleetShadowTest do
     insert_market_observation(agent, "X1-A1", 30, DateTime.add(@as_of_usec, 1, :second))
 
     assert {:ok, comparison} =
-             FleetShadow.compare_market(agent, revision(), "X1", availability(), capacity())
+             FleetShadow.compare_market(agent, revision(), "X1", availability(), capacity(),
+               as_of: @as_of
+             )
 
     assert [%{candidate_id: _candidate_id, claims: ["SHIP-1"]}] = comparison.proposed_choices
     assert Repo.aggregate(Commitment, :count) == 0
+  end
+
+  test "plans at the application clock, not the capacity disposition's governor timestamp" do
+    # The governor stamps advice with its own clock. Evidence the runtime
+    # observed after that advice must still bind the planning decision.
+    agent = agent_fixture(operator_fixture())
+    now = SpaceTraders.Clock.utc_now()
+    insert_market_observation(agent, "X1-A1", 10, now)
+    insert_market_observation(agent, "X1-A2", 25, now)
+    governor_advice = CapacityDispositions.proceed(DateTime.add(now, -5, :second))
+
+    assert {:ok, comparison} =
+             FleetShadow.compare_market(
+               agent,
+               revision(),
+               "X1",
+               availability(now),
+               governor_advice
+             )
+
+    assert [%{candidate_id: _candidate_id, claims: ["SHIP-1"]}] = comparison.proposed_choices
   end
 
   test "shadow-evaluates a draft document with an explicit draft identity and publishes nothing" do
@@ -69,7 +92,9 @@ defmodule SpaceTraders.FleetShadowTest do
     }
 
     assert {:ok, comparison} =
-             FleetShadow.compare_draft_market(agent, draft, "X1", availability(), capacity())
+             FleetShadow.compare_draft_market(agent, draft, "X1", availability(), capacity(),
+               as_of: @as_of
+             )
 
     assert [%{candidate_id: _candidate_id, claims: ["SHIP-1"]}] = comparison.proposed_choices
     assert [%{candidate_contributions: [candidate | _]}] = comparison.planning
@@ -77,7 +102,7 @@ defmodule SpaceTraders.FleetShadowTest do
     assert Repo.aggregate(Commitment, :count) == 0
   end
 
-  test "changed Listings and API pressure deterministically trigger shadow replanning" do
+  test "changed Listings and capacity disposition deterministically trigger shadow replanning" do
     assert {:ok, previous} =
              FleetShadow.compare(snapshot(), revision(), availability(), capacity())
 
@@ -92,13 +117,13 @@ defmodule SpaceTraders.FleetShadowTest do
                capacity()
              )
 
-    assert {:ok, %{replan_trigger: :api_pressure_changed} = second} =
+    assert {:ok, %{replan_trigger: :capacity_disposition_changed} = second} =
              FleetShadow.replan(
                first,
                changed_listings,
                revision(),
                availability(),
-               capacity(:sustained)
+               capacity(:defer)
              )
 
     assert {:ok, %{replan_trigger: :unchanged}} =
@@ -107,7 +132,7 @@ defmodule SpaceTraders.FleetShadowTest do
                changed_listings,
                revision(),
                availability(),
-               capacity(:sustained)
+               capacity(:defer)
              )
   end
 
@@ -136,9 +161,9 @@ defmodule SpaceTraders.FleetShadowTest do
     }
   end
 
-  defp availability do
+  defp availability(as_of \\ @as_of) do
     %{
-      as_of: @as_of,
+      as_of: as_of,
       claims: [
         %{
           resource: "SHIP-1",
@@ -146,18 +171,15 @@ defmodule SpaceTraders.FleetShadowTest do
           capabilities: %{cargo_transport: 20, market_access: ["X1-A1", "X1-A2"]}
         }
       ],
-      reservations: %{credits: 200}
+      reservations: %{credits: 250}
     }
   end
 
-  defp capacity(backpressure \\ :none) do
-    %CapacitySnapshot{
-      observed_at: @as_of,
-      available_slots: 1,
-      evidence_fingerprint: "governed-evidence",
-      next_outage_probe_at: nil,
-      backpressure: backpressure
-    }
+  defp capacity(status \\ :proceed) do
+    case status do
+      :proceed -> CapacityDispositions.proceed(@as_of)
+      :defer -> CapacityDispositions.defer(@as_of)
+    end
   end
 
   defp market(waypoint, purchase_price) do

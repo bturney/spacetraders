@@ -10,8 +10,9 @@ defmodule SpaceTraders.FleetShadow do
   import Ecto.Query
 
   alias SpaceTraders.Agent.Agent, as: AgentRecord
-  alias SpaceTraders.API.CapacityGovernor.Snapshot, as: CapacitySnapshot
+  alias SpaceTraders.API.CapacityGovernor.Disposition
   alias SpaceTraders.Evidence
+  alias SpaceTraders.Clock
   alias SpaceTraders.Evidence.Observation
   alias SpaceTraders.FleetAllocation
   alias SpaceTraders.FleetAllocation.StrategyDecisionEpisode
@@ -26,12 +27,12 @@ defmodule SpaceTraders.FleetShadow do
         %Revision{} = revision,
         system_symbol,
         availability,
-        %CapacitySnapshot{} = capacity,
+        %Disposition{} = capacity,
         opts \\ []
       )
       when is_binary(system_symbol) and is_map(availability) and is_list(opts) do
     agent
-    |> market_snapshot(system_symbol, capacity.observed_at)
+    |> market_snapshot(system_symbol, decision_time(opts))
     |> compare(revision, availability, capacity, opts)
   end
 
@@ -48,13 +49,13 @@ defmodule SpaceTraders.FleetShadow do
         document,
         system_symbol,
         availability,
-        %CapacitySnapshot{} = capacity,
+        %Disposition{} = capacity,
         opts \\ []
       )
       when is_map(document) and is_binary(system_symbol) and is_map(availability) and
              is_list(opts) do
     agent
-    |> market_snapshot(system_symbol, capacity.observed_at)
+    |> market_snapshot(system_symbol, decision_time(opts))
     |> compare(
       %Revision{id: {:draft, agent.id}, document: document},
       availability,
@@ -70,7 +71,7 @@ defmodule SpaceTraders.FleetShadow do
         snapshot,
         %Revision{} = revision,
         availability,
-        %CapacitySnapshot{} = capacity,
+        %Disposition{} = capacity,
         opts
       )
       when is_map(snapshot) and is_map(availability) and is_list(opts) do
@@ -85,7 +86,7 @@ defmodule SpaceTraders.FleetShadow do
       {:ok,
        %{
          listings_fingerprint: listings_fingerprint(snapshot),
-         api_pressure: capacity.backpressure,
+         capacity_status: capacity.status,
          planning: planning,
          proposed_choices: portfolio.commitments,
          alternatives: portfolio.rejected,
@@ -109,7 +110,7 @@ defmodule SpaceTraders.FleetShadow do
         snapshot,
         %Revision{} = revision,
         availability,
-        %CapacitySnapshot{} = capacity,
+        %Disposition{} = capacity,
         opts
       )
       when is_map(previous) and is_map(snapshot) and is_map(availability) and is_list(opts) do
@@ -126,6 +127,11 @@ defmodule SpaceTraders.FleetShadow do
 
   def replan(_previous, _snapshot, _revision, _availability, _capacity, _opts),
     do: {:error, :invalid_shadow_input}
+
+  # Planning binds evidence at the application clock. A Capacity Disposition
+  # is advisory capacity meaning stamped by the governor's own clock; it never
+  # fixes decision time.
+  defp decision_time(opts), do: Keyword.get_lazy(opts, :as_of, &Clock.utc_now/0)
 
   defp market_snapshot(agent, system_symbol, as_of) do
     subject_prefix = "market:#{system_symbol}:"
@@ -156,6 +162,7 @@ defmodule SpaceTraders.FleetShadow do
     as_of
     |> FleetPlanning.market_snapshot(system_symbol, agent.id, markets)
     |> Map.merge(FleetPlanning.baseline_coverage(baseline))
+    |> Map.put(:credit_margin_percent, SpaceTraders.CreditCalibration.active().margin_percent)
   end
 
   defp plan(revision, snapshot) do
@@ -210,7 +217,7 @@ defmodule SpaceTraders.FleetShadow do
   defp replan_trigger(previous, snapshot, capacity) do
     cond do
       previous[:listings_fingerprint] != listings_fingerprint(snapshot) -> :listings_changed
-      previous[:api_pressure] != capacity.backpressure -> :api_pressure_changed
+      previous[:capacity_status] != capacity.status -> :capacity_disposition_changed
       true -> :unchanged
     end
   end

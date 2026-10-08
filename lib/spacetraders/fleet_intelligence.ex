@@ -9,6 +9,7 @@ defmodule SpaceTraders.FleetIntelligence do
   alias SpaceTraders.Fleet.Intent
   alias SpaceTraders.Fleet.Intents
   alias SpaceTraders.FleetAllocation
+  alias SpaceTraders.FleetCapacity
   alias SpaceTraders.FleetExecution
   alias SpaceTraders.FleetPlanning
   alias SpaceTraders.FleetStrategy.Revision
@@ -176,8 +177,8 @@ defmodule SpaceTraders.FleetIntelligence do
         system,
         capacity
       )
-      when is_binary(system) and is_map(capacity) do
-    with true <- capacity.available_slots > 0 and capacity.backpressure != :sustained,
+      when is_binary(system) do
+    with true <- FleetCapacity.proceed?(capacity),
          :ok <- allocation_available(scope, agent),
          waypoints <- waypoints_for_decision(agent, revision, system),
          :ok <- sync_market_observation_demands(agent, revision, system),
@@ -431,6 +432,10 @@ defmodule SpaceTraders.FleetIntelligence do
                retained_markets(waypoints, system)
              )
              |> Map.put(:observation_costs, costs)
+             |> Map.put(
+               :credit_margin_percent,
+               SpaceTraders.CreditCalibration.active().margin_percent
+             )
              |> Map.merge(
                FleetPlanning.baseline_coverage(marketplace_subjects(waypoints, system))
              )

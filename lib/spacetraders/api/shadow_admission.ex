@@ -4,15 +4,21 @@ defmodule SpaceTraders.API.ShadowAdmission do
 
   Callers provide immutable demand, capacity, and evidence snapshots. The result
   is deterministic and explains the ordering applied before capacity and outage
-  pacing are considered. Production capacity state is published by
-  `SpaceTraders.API.CapacityGovernor`; this module only reuses its snapshot
-  shape for comparisons.
+  pacing are considered. Lanes are the governor's shared protection classes
+  (`SpaceTraders.API.CapacityGovernor.protection_class/2`); the shadow never
+  acquires capacity or feeds a decision back to production admission.
   """
 
   use GenServer
   require Logger
 
-  alias SpaceTraders.API.CapacityGovernor.Snapshot
+  alias SpaceTraders.API.CapacityGovernor
+
+  defmodule Capacity do
+    @moduledoc "The hypothetical capacity a shadow comparison is made against."
+    @enforce_keys [:observed_at, :available_slots, :evidence_fingerprint, :backpressure]
+    defstruct @enforce_keys ++ [next_outage_probe_at: nil]
+  end
 
   defmodule Candidate do
     @moduledoc "A read or mutation considered by shadow API capacity admission."
@@ -47,7 +53,7 @@ defmodule SpaceTraders.API.ShadowAdmission do
     defstruct @enforce_keys
   end
 
-  @lane_rank %{safety: 0, reconciliation: 1, standard: 2}
+  @lane_rank %{safety: 0, reconciliation: 1, deadline_critical: 2, standard: 3}
 
   def start_link(opts \\ []) do
     {name, opts} = Keyword.pop(opts, :name, __MODULE__)
@@ -81,7 +87,7 @@ defmodule SpaceTraders.API.ShadowAdmission do
   end
 
   @doc "Returns explained shadow decisions in deterministic admission order."
-  def compare(candidates, %Snapshot{} = snapshot) when is_list(candidates) do
+  def compare(candidates, %Capacity{} = snapshot) when is_list(candidates) do
     candidates
     |> Enum.sort_by(&ordering_key/1)
     |> Enum.with_index(1)
@@ -115,14 +121,14 @@ defmodule SpaceTraders.API.ShadowAdmission do
     candidate = %Candidate{
       id: correlation_id,
       operation_id: operation.id,
-      lane: Map.get(attrs, :lane, operation_lane(operation)),
+      lane: CapacityGovernor.protection_class(operation, attrs),
       deadline_at: Map.get(attrs, :deadline_at),
       strategic_priority: Map.get(attrs, :strategic_priority),
       expected_value: Map.get(attrs, :expected_value),
       discovery: Map.get(attrs, :discovery, false)
     }
 
-    snapshot = %Snapshot{
+    snapshot = %Capacity{
       observed_at: requested_at,
       available_slots: floor(state.tokens),
       evidence_fingerprint: Map.get(attrs, :evidence_fingerprint, "unavailable"),
@@ -304,7 +310,7 @@ defmodule SpaceTraders.API.ShadowAdmission do
   defp capacity_reason(:would_admit), do: :capacity_available
   defp capacity_reason(:would_delay), do: :backpressure
 
-  defdelegate backpressure_state(streak), to: SpaceTraders.API.CapacityGovernor
+  defdelegate backpressure_state(streak), to: CapacityGovernor
 
   defp datetime_key(nil), do: :infinity
   defp datetime_key(%DateTime{} = datetime), do: DateTime.to_unix(datetime, :microsecond)
@@ -318,14 +324,12 @@ defmodule SpaceTraders.API.ShadowAdmission do
     |> Base.encode16(case: :lower)
   end
 
-  defp operation_lane(%{owner: :fleet_reconciliation}), do: :reconciliation
-  defp operation_lane(_operation), do: :standard
-
   defp logger_admission_context do
     Logger.metadata()
     |> Map.new()
     |> Map.take([
       :lane,
+      :purpose,
       :deadline_at,
       :strategic_priority,
       :expected_value,
