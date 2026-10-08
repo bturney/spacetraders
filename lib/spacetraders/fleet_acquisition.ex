@@ -180,7 +180,8 @@ defmodule SpaceTraders.FleetAcquisition do
     operator_id = Repo.one!(from a in Agent, where: a.id == ^agent_id, select: a.operator_id)
 
     strategy =
-      Repo.one(from s in Strategy, where: s.operator_id == ^operator_id, lock: "FOR SHARE")
+      operator_id &&
+        Repo.one(from s in Strategy, where: s.operator_id == ^operator_id, lock: "FOR SHARE")
 
     case strategy do
       %Strategy{emergency_stopped_at: stopped} when not is_nil(stopped) ->
@@ -191,8 +192,12 @@ defmodule SpaceTraders.FleetAcquisition do
           do: {:ok, Repo.get!(Revision, id)},
           else: {:error, :strategy_revision_superseded}
 
+      # No active Strategy: only a purchase that never claimed one may proceed,
+      # still bounded by its offer evidence and Fleet-wide exposure.
       _ ->
-        {:error, :strategy_revision_absent}
+        if is_nil(attempt.strategy_revision_id),
+          do: {:ok, nil},
+          else: {:error, :strategy_revision_absent}
     end
   end
 

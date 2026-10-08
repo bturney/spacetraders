@@ -405,6 +405,11 @@ defmodule SpaceTraders.FleetStrategy do
       {:ok, revision} = result
       :ok = SpaceTraders.FleetGeneration.activate_strategy(scope, revision)
 
+      # ADR 0013: the new floor applies now. A balance below it pauses spending
+      # as a revision shortfall; unsent work is refused at its send boundary
+      # and old Reservations are released when Allocation supersedes them.
+      :ok = SpaceTraders.CreditFloorWatch.revalidate_operator(scope.operator.id)
+
       # Revision supersession on a live Generation: the previous revision's
       # open Observation Demands lose relevance with it. Their rows and
       # Strategy provenance stay durably visible.

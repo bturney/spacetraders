@@ -237,7 +237,7 @@ defmodule SpaceTraders.MarketSpending do
     agent = Repo.get!(Agent, attempt.agent_id)
 
     credits =
-      case current_credits(agent) do
+      case authoritative_credits(agent) do
         {:ok, binding} -> binding
         _ -> nil
       end
@@ -258,7 +258,7 @@ defmodule SpaceTraders.MarketSpending do
 
     with :ok <- current_calibration(spending),
          :ok <- validate_quote(agent, attempt, spending),
-         {:ok, credits} <- current_credits(agent),
+         {:ok, credits} <- authoritative_credits(agent),
          {:ok, floor} <- credit_floor(revision),
          {:ok, other_exposure} <-
            other_exposure(agent, intent.fleet_commitment_id, attempt, credits.observation),
@@ -276,7 +276,7 @@ defmodule SpaceTraders.MarketSpending do
 
     with :ok <- validate_offer(agent, attempt, spending),
          :ok <- current_calibration(spending),
-         {:ok, credits} <- current_credits(agent),
+         {:ok, credits} <- authoritative_credits(agent),
          {:ok, floor} <- credit_floor(revision),
          {:ok, other_exposure} <-
            other_exposure(
@@ -383,7 +383,7 @@ defmodule SpaceTraders.MarketSpending do
   defp validate_offer(_agent, _attempt, _spending), do: {:error, :ship_offer_evidence_unavailable}
 
   defp acquire_credits(agent) do
-    case current_credits(agent) do
+    case authoritative_credits(agent) do
       {:ok, binding} ->
         if Repo.exists?(
              from a in Attempt,
@@ -400,7 +400,8 @@ defmodule SpaceTraders.MarketSpending do
     end
   end
 
-  defp current_credits(agent) do
+  @doc "The latest fresh, retained authoritative Agent credits binding."
+  def authoritative_credits(agent) do
     subject = DependencyKey.observation_subject("get-my-agent", [], agent.symbol)
 
     with %{id: id} <- Evidence.latest_observation(agent, subject),
