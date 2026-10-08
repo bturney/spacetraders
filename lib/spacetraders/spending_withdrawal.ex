@@ -1,7 +1,8 @@
 defmodule SpaceTraders.SpendingWithdrawal do
   @moduledoc """
-  Returns a Market purchase refused at its pre-marker spending checkpoint to
-  Allocation for fresh planning (ADR 0013, #579).
+  Returns a Market purchase or module install/removal refused at its
+  pre-marker spending checkpoint to Allocation for fresh planning (ADR 0013,
+  #579).
 
   The prepared request is never resized in the send window: the attempt is
   recorded not sent, its Intent is superseded, and the never-sent
@@ -21,8 +22,11 @@ defmodule SpaceTraders.SpendingWithdrawal do
   alias SpaceTraders.MutationAttempts.Attempt
   alias SpaceTraders.Repo
 
+  @modification_operations SpaceTraders.CreditSpending.ModificationFee.operations()
+
   @replan_reasons [
     :market_quote_stale_or_missing,
+    :modification_fee_stale_or_missing,
     :insufficient_unreserved_headroom,
     :authoritative_credit_facts_required,
     :unbounded_purchase_exposure,
@@ -34,7 +38,10 @@ defmodule SpaceTraders.SpendingWithdrawal do
   def replan_reason?(reason), do: reason in @replan_reasons
 
   @doc "Whether this refused attempt is withdrawn for replanning rather than suppressed."
-  def replannable?(%Attempt{operation_id: "purchase-cargo"}, reason), do: replan_reason?(reason)
+  def replannable?(%Attempt{operation_id: operation}, reason)
+      when operation in ["purchase-cargo" | @modification_operations],
+      do: replan_reason?(reason)
+
   def replannable?(_attempt, _reason), do: false
 
   @doc "Withdraws the still-prepared purchase and returns its work to Allocation."

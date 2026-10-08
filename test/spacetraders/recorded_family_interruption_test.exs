@@ -756,6 +756,7 @@ defmodule SpaceTraders.RecordedFamilyInterruptionTest do
         "kind" => kind,
         "module_symbol" => module,
         "quantity" => 1,
+        "waypoint" => "X1-UX81-A2",
         "installed_before" => if(install, do: 0, else: 1),
         "cargo_before" => if(install, do: 1, else: 0)
       },
@@ -764,6 +765,10 @@ defmodule SpaceTraders.RecordedFamilyInterruptionTest do
       get: fn
         "/v2/my/agent", _state ->
           %{"symbol" => agent.symbol, "credits" => 18_000}
+
+        # The Shipyard fee bounds the modification charge.
+        "/v2/systems/X1-UX81/waypoints/X1-UX81-A2/shipyard", _state ->
+          %{"symbol" => "X1-UX81-A2", "shipTypes" => [], "modificationsFee" => 0}
 
         path, state ->
           # Installing fits the module from Cargo; removal returns it to Cargo.

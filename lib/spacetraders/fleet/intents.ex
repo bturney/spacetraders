@@ -3101,10 +3101,12 @@ defmodule SpaceTraders.Fleet.Intents do
     installed_before = module_count(live_ship.modules, module_symbol)
     cargo_before = Fleet.item_units(live_ship.cargo, module_symbol)
 
+    # The docked Waypoint names the Shipyard whose fee bounds the charge.
     action = %{
       "kind" => intent.type,
       "module_symbol" => module_symbol,
       "quantity" => 1,
+      "waypoint" => live_ship.nav.waypoint_symbol,
       "installed_before" => installed_before,
       "cargo_before" => cargo_before
     }

@@ -101,6 +101,7 @@ defmodule SpaceTraders.Evidence do
     "get-my-ship" => SpaceTraders.API.Model.Ship,
     "get-waypoint" => SpaceTraders.API.Model.Waypoint,
     "get-construction" => SpaceTraders.API.Model.Construction,
+    "get-shipyard" => SpaceTraders.API.Model.Shipyard,
     "get-my-agent" => SpaceTraders.API.Model.Agent
   }
   @retained_lists %{

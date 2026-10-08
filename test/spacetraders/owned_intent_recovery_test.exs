@@ -2556,6 +2556,18 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
     SpaceTraders.Fleet.Intents.RecordedAction.prepare(agent, intent, action)
   end
 
+  defp prepare_recorded(agent, intent, %{"kind" => kind} = action)
+       when kind in ["install_module", "remove_module"] do
+    action = Map.put_new(action, "waypoint", intent.target_waypoint)
+
+    SpaceTraders.RecordedDispatchFixtures.retain_modification_preflight(
+      agent,
+      action["waypoint"]
+    )
+
+    SpaceTraders.Fleet.Intents.RecordedAction.prepare(agent, intent, action)
+  end
+
   defp prepare_recorded(agent, intent, action),
     do: SpaceTraders.Fleet.Intents.RecordedAction.prepare(agent, intent, action)
 
