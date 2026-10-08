@@ -14,9 +14,8 @@ defmodule SpaceTraders.Fleet.Intents.CapacityDeferral do
   process-local state is lost on restart.
   """
 
-  alias SpaceTraders.API.CapacityGovernor
   alias SpaceTraders.API.CapacityGovernor.Disposition
-  alias SpaceTraders.API.OperationInventory
+  alias SpaceTraders.FleetCapacity
   alias SpaceTraders.MutationAttempts.Attempt
 
   @minimum_seconds 1
@@ -66,12 +65,7 @@ defmodule SpaceTraders.Fleet.Intents.CapacityDeferral do
   @spec disposition(Attempt.t() | nil) :: Disposition.t()
   def disposition(attempt) do
     {operation_id, attrs} = resumed_work(attempt)
-
-    CapacityGovernor.disposition(
-      OperationInventory.fetch!(operation_id),
-      attrs,
-      Keyword.get(Application.get_env(:spacetraders, __MODULE__, []), :governor, CapacityGovernor)
-    )
+    FleetCapacity.disposition(operation_id, attrs)
   end
 
   @doc """

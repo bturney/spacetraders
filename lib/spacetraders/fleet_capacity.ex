@@ -20,7 +20,14 @@ defmodule SpaceTraders.FleetCapacity do
   """
   @spec disposition(String.t(), map()) :: Disposition.t()
   def disposition(operation_id, attrs \\ %{}) when is_binary(operation_id) and is_map(attrs),
-    do: CapacityGovernor.disposition(OperationInventory.fetch!(operation_id), attrs)
+    do: CapacityGovernor.disposition(OperationInventory.fetch!(operation_id), attrs, governor())
+
+  # Test seam only: `config :spacetraders, SpaceTraders.FleetCapacity,
+  # governor: name` points Fleet callers at an isolated governor instance.
+  # Production configures nothing and always asks the application governor.
+  defp governor do
+    Keyword.get(Application.get_env(:spacetraders, __MODULE__, []), :governor, CapacityGovernor)
+  end
 
   @doc "True only for an explicit `:proceed` disposition."
   @spec proceed?(term()) :: boolean()

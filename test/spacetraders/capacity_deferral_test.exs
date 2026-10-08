@@ -199,13 +199,13 @@ defmodule SpaceTraders.CapacityDeferralTest do
     setup do
       governor = :"capacity_deferral_governor_#{System.unique_integer([:positive])}"
       start_supervised!({CapacityGovernor, name: governor})
-      previous = Application.fetch_env(:spacetraders, CapacityDeferral)
-      Application.put_env(:spacetraders, CapacityDeferral, governor: governor)
+      previous = Application.fetch_env(:spacetraders, SpaceTraders.FleetCapacity)
+      Application.put_env(:spacetraders, SpaceTraders.FleetCapacity, governor: governor)
 
       on_exit(fn ->
         case previous do
-          {:ok, value} -> Application.put_env(:spacetraders, CapacityDeferral, value)
-          :error -> Application.delete_env(:spacetraders, CapacityDeferral)
+          {:ok, value} -> Application.put_env(:spacetraders, SpaceTraders.FleetCapacity, value)
+          :error -> Application.delete_env(:spacetraders, SpaceTraders.FleetCapacity)
         end
       end)
 
@@ -329,13 +329,13 @@ defmodule SpaceTraders.CapacityDeferralTest do
     setup do
       governor = :"capacity_deferral_observed_#{System.unique_integer([:positive])}"
       start_supervised!({CapacityGovernor, name: governor})
-      previous = Application.fetch_env(:spacetraders, CapacityDeferral)
-      Application.put_env(:spacetraders, CapacityDeferral, governor: governor)
+      previous = Application.fetch_env(:spacetraders, SpaceTraders.FleetCapacity)
+      Application.put_env(:spacetraders, SpaceTraders.FleetCapacity, governor: governor)
 
       on_exit(fn ->
         case previous do
-          {:ok, value} -> Application.put_env(:spacetraders, CapacityDeferral, value)
-          :error -> Application.delete_env(:spacetraders, CapacityDeferral)
+          {:ok, value} -> Application.put_env(:spacetraders, SpaceTraders.FleetCapacity, value)
+          :error -> Application.delete_env(:spacetraders, SpaceTraders.FleetCapacity)
         end
       end)
 
@@ -394,13 +394,13 @@ defmodule SpaceTraders.CapacityDeferralTest do
     setup do
       governor = :"capacity_deferral_runtime_#{System.unique_integer([:positive])}"
       start_supervised!({CapacityGovernor, name: governor})
-      previous = Application.fetch_env(:spacetraders, CapacityDeferral)
-      Application.put_env(:spacetraders, CapacityDeferral, governor: governor)
+      previous = Application.fetch_env(:spacetraders, SpaceTraders.FleetCapacity)
+      Application.put_env(:spacetraders, SpaceTraders.FleetCapacity, governor: governor)
 
       on_exit(fn ->
         case previous do
-          {:ok, value} -> Application.put_env(:spacetraders, CapacityDeferral, value)
-          :error -> Application.delete_env(:spacetraders, CapacityDeferral)
+          {:ok, value} -> Application.put_env(:spacetraders, SpaceTraders.FleetCapacity, value)
+          :error -> Application.delete_env(:spacetraders, SpaceTraders.FleetCapacity)
         end
       end)
 

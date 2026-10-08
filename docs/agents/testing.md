@@ -126,9 +126,15 @@ Current seam owners:
 - credit calibration versions, realized-versus-quoted evidence, shortfall
   classification, and spending pause/release:
   `test/spacetraders/credit_calibration_test.exs`
+- eager floor revalidation (below-floor balance read, revision activation):
+  `test/spacetraders/credit_floor_watch_test.exs`
 - root Intent Capacity Deferral (recovery-read 429, bounded governor-guided
-  wakeup, restart, wake revalidation, mutation-response Evidence reuse):
-  `test/spacetraders/capacity_deferral_test.exs`
+  wakeup, restart, wake revalidation, mutation-response Evidence reuse, deferral
+  metric): `test/spacetraders/capacity_deferral_test.exs`. Fleet capacity
+  callers (`FleetCapacity.disposition/2`, used by `CapacityDeferral`) ask an
+  isolated governor only through the explicit test seam
+  `Application.put_env(:spacetraders, SpaceTraders.FleetCapacity, governor: name)`;
+  restore it in `on_exit`. Production sets nothing.
 - API Capacity Governor lifecycle (Retry-After bound, protected probe pacing,
   scoped vs Fleet-wide outage, abandoned callers, restart, diagnostics):
   `test/spacetraders/api/capacity_governor_test.exs`. The app-wide test
