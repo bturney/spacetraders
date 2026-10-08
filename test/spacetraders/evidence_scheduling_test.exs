@@ -168,6 +168,68 @@ defmodule SpaceTraders.EvidenceSchedulingTest do
     refute_receive {:observation_demand_due, _, _}
   end
 
+  # #589: an overdue demand nobody can acquire yet (no reachable Ship, spending
+  # paused) was announced again on every unrelated demand change. Each
+  # announcement woke reconciliation, whose owned reads changed demands again:
+  # a read loop that bypassed the bounded retry interval.
+  test "unrelated demand changes do not re-announce overdue work before its bounded retry",
+       %{agent: agent, agent_id: agent_id, revision: revision} do
+    assert {:ok, _overdue} =
+             Evidence.request_demand(agent, revision, Map.put(@demand, :due_at, @now))
+
+    start_supervised!({DemandScheduler, []})
+    assert_receive {:observation_demand_due, ^agent_id, [@subject]}, 1_000
+
+    Phoenix.PubSub.broadcast(
+      SpaceTraders.PubSub,
+      "observation_demands",
+      {:observation_demands_changed, agent_id}
+    )
+
+    refute_receive {:observation_demand_due, _, _}, 200
+
+    # Newly due work is still announced promptly, alongside the overdue work.
+    other = "market:X1-UX81:X1-UX81-A2"
+
+    assert {:ok, _new} =
+             Evidence.request_demand(
+               agent,
+               revision,
+               Map.merge(@demand, %{subject: other, due_at: Clock.utc_now()})
+             )
+
+    assert_receive {:observation_demand_due, ^agent_id, subjects}, 1_000
+    assert Enum.sort(subjects) == Enum.sort([@subject, other])
+
+    TestClock.advance(30)
+    assert_receive {:observation_demand_due, ^agent_id, [_, _]}, 1_000
+  end
+
+  # #589: an owned read persists its Observation Demand and acquires it itself.
+  # Scheduling it announced in-flight Agent/Fleet reads as new due work, which
+  # woke reconciliation into the same reads again: a Neutral Wait read loop.
+  test "an owned read's own Observation Demand is never scheduled as due work",
+       %{agent: agent} do
+    test_pid = self()
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      send(test_pid, {:during_read, Evidence.due_demands(), Evidence.earliest_due_at()})
+
+      Req.Test.json(conn, %{
+        "data" => %{
+          "symbol" => agent.symbol,
+          "credits" => 175_000,
+          "headquarters" => "X1-UX81-A1",
+          "startingFaction" => "COSMIC",
+          "shipCount" => 1
+        }
+      })
+    end)
+
+    assert {:ok, _agent} = Evidence.get_agent(agent)
+    assert_received {:during_read, [], nil}
+  end
+
   test "replacing a requirement moves its useful time without an early announcement",
        %{agent: agent, agent_id: agent_id, revision: revision} do
     assert {:ok, original} =

@@ -896,6 +896,7 @@ defmodule SpaceTraders.Evidence do
   """
   def earliest_due_at do
     ObservationDemand
+    |> scheduled()
     |> where(
       [demand],
       not is_nil(demand.agent_id) and is_nil(demand.withdrawn_at) and
@@ -905,6 +906,18 @@ defmodule SpaceTraders.Evidence do
     |> Repo.one()
   end
 
+  # Agent, Fleet, Ship and Contract demands are only ever persisted by owned
+  # reads, which acquire their own evidence and settle the demand themselves.
+  # Scheduling them announced in-flight reads as new due work and woke
+  # reconciliation into the same reads again (a Neutral Wait read loop).
+  @owned_read_subject_patterns ["agent:%", "fleet:%", "ship:%", "contracts:%"]
+
+  defp scheduled(query) do
+    Enum.reduce(@owned_read_subject_patterns, query, fn pattern, query ->
+      where(query, [demand], not like(demand.subject, ^pattern))
+    end)
+  end
+
   @doc """
   Returns every open demand whose earliest useful time has passed, soonest first.
   """
@@ -912,6 +925,7 @@ defmodule SpaceTraders.Evidence do
     now = microsecond_precision(now)
 
     ObservationDemand
+    |> scheduled()
     |> where(
       [demand],
       not is_nil(demand.agent_id) and is_nil(demand.withdrawn_at) and
