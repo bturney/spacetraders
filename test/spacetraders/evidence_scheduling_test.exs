@@ -208,7 +208,7 @@ defmodule SpaceTraders.EvidenceSchedulingTest do
   # #589: an owned read persists its Observation Demand and acquires it itself.
   # Scheduling it announced in-flight Agent/Fleet reads as new due work, which
   # woke reconciliation into the same reads again: a Neutral Wait read loop.
-  test "an owned read's own Observation Demand is never scheduled as due work",
+  test "an owned read's own Observation Demand is not scheduled while its read is in flight",
        %{agent: agent} do
     test_pid = self()
 
@@ -227,7 +227,23 @@ defmodule SpaceTraders.EvidenceSchedulingTest do
     end)
 
     assert {:ok, _agent} = Evidence.get_agent(agent)
-    assert_received {:during_read, [], nil}
+    # Only a bounded retry wake past the in-flight window is armed.
+    assert_received {:during_read, [], ~U[2030-01-01 00:01:00.000000Z]}
+  end
+
+  # The in-flight exclusion is bounded: an owned read that failed leaves its
+  # demand open, and that overdue demand must still be scheduled for retry.
+  test "an owned read's unsettled Observation Demand stays overdue and is scheduled after its read",
+       %{agent: agent} do
+    Req.Test.stub(SpaceTraders.API, fn conn -> Req.Test.transport_error(conn, :econnrefused) end)
+
+    assert {:error, _} = Evidence.get_agent_binding(agent)
+    subject = "agent:#{agent.symbol}"
+    assert Evidence.due_demands() == []
+    assert DateTime.compare(Evidence.earliest_due_at(), @now) == :gt
+
+    TestClock.advance(61)
+    assert [%{subject: ^subject}] = Evidence.due_demands()
   end
 
   test "replacing a requirement moves its useful time without an early announcement",

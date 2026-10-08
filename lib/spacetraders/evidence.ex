@@ -887,6 +887,15 @@ defmodule SpaceTraders.Evidence do
     |> MapSet.new()
   end
 
+  # Agent, Fleet, Ship and Contract demands are persisted by owned reads, which
+  # acquire their own evidence and settle the demand themselves; their due_at is
+  # the read's request time. Scheduling them while the read is in flight woke
+  # reconciliation into the same reads again (a Neutral Wait read loop), so they
+  # become due only once overdue past any in-flight read. A read that failed
+  # leaves its demand open, and that overdue demand is then scheduled.
+  @owned_read_subject_patterns ["agent:%", "fleet:%", "ship:%", "contracts:%"]
+  @owned_read_in_flight_seconds 60
+
   @doc """
   Returns the earliest useful time among all open demands, or `nil`.
 
@@ -895,27 +904,44 @@ defmodule SpaceTraders.Evidence do
   memory is only a wakeup optimization.
   """
   def earliest_due_at do
-    ObservationDemand
-    |> scheduled()
-    |> where(
-      [demand],
-      not is_nil(demand.agent_id) and is_nil(demand.withdrawn_at) and
-        is_nil(demand.fulfilled_observation_id)
-    )
-    |> select([demand], min(demand.due_at))
-    |> Repo.one()
+    open =
+      where(
+        ObservationDemand,
+        [demand],
+        not is_nil(demand.agent_id) and is_nil(demand.withdrawn_at) and
+          is_nil(demand.fulfilled_observation_id)
+      )
+
+    scheduled =
+      open
+      |> where(^not_owned_read())
+      |> select([d], type(min(d.due_at), :utc_datetime_usec))
+      |> Repo.one()
+
+    owned =
+      case open
+           |> where(^owned_read())
+           |> select([d], type(min(d.due_at), :utc_datetime_usec))
+           |> Repo.one() do
+        nil -> nil
+        due_at -> DateTime.add(due_at, @owned_read_in_flight_seconds, :second)
+      end
+
+    [scheduled, owned] |> Enum.reject(&is_nil/1) |> Enum.min(DateTime, fn -> nil end)
   end
 
-  # Agent, Fleet, Ship and Contract demands are only ever persisted by owned
-  # reads, which acquire their own evidence and settle the demand themselves.
-  # Scheduling them announced in-flight reads as new due work and woke
-  # reconciliation into the same reads again (a Neutral Wait read loop).
-  @owned_read_subject_patterns ["agent:%", "fleet:%", "ship:%", "contracts:%"]
-
-  defp scheduled(query) do
-    Enum.reduce(@owned_read_subject_patterns, query, fn pattern, query ->
-      where(query, [demand], not like(demand.subject, ^pattern))
+  defp owned_read do
+    Enum.reduce(@owned_read_subject_patterns, dynamic(false), fn pattern, owned ->
+      dynamic([demand], ^owned or like(demand.subject, ^pattern))
     end)
+  end
+
+  defp not_owned_read, do: dynamic(not (^owned_read()))
+
+  defp scheduled(query, now) do
+    settled_cutoff = DateTime.add(now, -@owned_read_in_flight_seconds, :second)
+    overdue = dynamic([demand], demand.due_at <= ^settled_cutoff)
+    where(query, ^dynamic(^not_owned_read() or ^overdue))
   end
 
   @doc """
@@ -925,7 +951,7 @@ defmodule SpaceTraders.Evidence do
     now = microsecond_precision(now)
 
     ObservationDemand
-    |> scheduled()
+    |> scheduled(now)
     |> where(
       [demand],
       not is_nil(demand.agent_id) and is_nil(demand.withdrawn_at) and
