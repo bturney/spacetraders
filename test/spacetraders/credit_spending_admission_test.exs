@@ -1,4 +1,4 @@
-defmodule SpaceTraders.MarketSpendingAdmissionTest do
+defmodule SpaceTraders.CreditSpendingAdmissionTest do
   use SpaceTraders.DataCase, async: false
 
   import SpaceTraders.AgentFixtures
@@ -31,13 +31,13 @@ defmodule SpaceTraders.MarketSpendingAdmissionTest do
   end
 
   test "worst-case exposure rounds the margin-loaded quote up and refuses a margin below the hard bound" do
-    assert SpaceTraders.MarketSpending.worst_case_exposure(0, 1, 25) == 0
-    assert SpaceTraders.MarketSpending.worst_case_exposure(1_000, 1, 25) == 1_250
-    assert SpaceTraders.MarketSpending.worst_case_exposure(50, 1, 25) == 63
-    assert SpaceTraders.MarketSpending.worst_case_exposure(50, 3, 50) == 225
+    assert SpaceTraders.CreditSpending.worst_case_exposure(0, 1, 25) == 0
+    assert SpaceTraders.CreditSpending.worst_case_exposure(1_000, 1, 25) == 1_250
+    assert SpaceTraders.CreditSpending.worst_case_exposure(50, 1, 25) == 63
+    assert SpaceTraders.CreditSpending.worst_case_exposure(50, 3, 50) == 225
 
     assert_raise FunctionClauseError, fn ->
-      SpaceTraders.MarketSpending.worst_case_exposure(50, 1, 9)
+      SpaceTraders.CreditSpending.worst_case_exposure(50, 1, 9)
     end
   end
 
@@ -47,20 +47,20 @@ defmodule SpaceTraders.MarketSpendingAdmissionTest do
     for operation <-
           ~w(purchase-cargo refuel-ship jump-ship install-ship-module remove-ship-module) do
       assert %SpaceTraders.Agent.Agent{} =
-               SpaceTraders.MarketSpending.lock_agent(%SpaceTraders.MutationAttempts.Attempt{
+               SpaceTraders.CreditSpending.lock_agent(%SpaceTraders.MutationAttempts.Attempt{
                  operation_id: operation,
                  agent_id: agent.id
                })
     end
 
     for kind <- ~w(buy refuel jump install_module remove_module) do
-      assert SpaceTraders.MarketSpending.credit_bearing_action?(%{"kind" => kind})
+      assert SpaceTraders.CreditSpending.credit_bearing_action?(%{"kind" => kind})
     end
 
-    refute SpaceTraders.MarketSpending.credit_bearing_action?(%{"kind" => "sell"})
+    refute SpaceTraders.CreditSpending.credit_bearing_action?(%{"kind" => "sell"})
 
     assert :ok =
-             SpaceTraders.MarketSpending.lock_agent(%SpaceTraders.MutationAttempts.Attempt{
+             SpaceTraders.CreditSpending.lock_agent(%SpaceTraders.MutationAttempts.Attempt{
                operation_id: "sell-cargo",
                agent_id: agent.id
              })

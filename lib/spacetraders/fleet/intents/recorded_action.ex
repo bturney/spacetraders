@@ -23,7 +23,7 @@ defmodule SpaceTraders.Fleet.Intents.RecordedAction do
   alias SpaceTraders.FleetGeneration.Generation
   alias SpaceTraders.FleetStrategy.{Revision, Strategy}
   alias SpaceTraders.ManualIntervention
-  alias SpaceTraders.MarketSpending
+  alias SpaceTraders.CreditSpending
   alias SpaceTraders.MutationAttempts
   alias SpaceTraders.MutationAttempts.Attempt
   alias SpaceTraders.Repo
@@ -37,9 +37,9 @@ defmodule SpaceTraders.Fleet.Intents.RecordedAction do
       ) do
     with :ok <- require_commit_boundary(),
          :ok <- purchase_preparation_authority(agent, intent, action),
-         {:ok, spending} <- MarketSpending.acquire(agent, intent, action) do
+         {:ok, spending} <- CreditSpending.acquire(agent, intent, action) do
       Repo.transaction(fn ->
-        if MarketSpending.credit_bearing_action?(action), do: MarketSpending.lock_agent(agent.id)
+        if CreditSpending.credit_bearing_action?(action), do: CreditSpending.lock_agent(agent.id)
         current = locked_intent(intent.id)
 
         with %Intent{} <- current,
@@ -87,14 +87,14 @@ defmodule SpaceTraders.Fleet.Intents.RecordedAction do
 
   # Spending authority is checked before any quote read, under the Agent lock.
   defp purchase_preparation_authority(agent, intent, action) do
-    if MarketSpending.credit_bearing_action?(action),
+    if CreditSpending.credit_bearing_action?(action),
       do: locked_preparation_authority(agent, intent),
       else: :ok
   end
 
   defp locked_preparation_authority(agent, intent) do
     Repo.transaction(fn ->
-      MarketSpending.lock_agent(agent.id)
+      CreditSpending.lock_agent(agent.id)
 
       with %Intent{} = current <- locked_intent(intent.id),
            true <- Intent.unfinished?(current) and is_nil(current.in_flight_action),
@@ -120,7 +120,7 @@ defmodule SpaceTraders.Fleet.Intents.RecordedAction do
       ) do
     with :ok <- require_commit_boundary() do
       Repo.transaction(fn ->
-        MarketSpending.lock_agent(absent)
+        CreditSpending.lock_agent(absent)
 
         case selected_owner_authority(locked_intent(intent.id), absent) do
           {:ok, _authority} -> :ok
@@ -138,10 +138,10 @@ defmodule SpaceTraders.Fleet.Intents.RecordedAction do
   def prepare_retry(%Agent{} = agent, %Intent{} = intent, %Attempt{} = absent, opts \\ []) do
     with :ok <- require_commit_boundary(),
          :ok <- retry_authority(agent, intent, absent),
-         {:ok, spending} <- MarketSpending.acquire(agent, intent, intent.in_flight_action) do
+         {:ok, spending} <- CreditSpending.acquire(agent, intent, intent.in_flight_action) do
       Repo.transaction(fn ->
-        if MarketSpending.credit_bearing_action?(intent.in_flight_action),
-          do: MarketSpending.lock_agent(agent.id)
+        if CreditSpending.credit_bearing_action?(intent.in_flight_action),
+          do: CreditSpending.lock_agent(agent.id)
 
         current = locked_intent(intent.id)
 
@@ -181,13 +181,13 @@ defmodule SpaceTraders.Fleet.Intents.RecordedAction do
   def admit_send(%Attempt{} = attempt) do
     with :ok <- require_commit_boundary() do
       Repo.transaction(fn ->
-        MarketSpending.lock_agent(attempt)
+        CreditSpending.lock_agent(attempt)
         current = locked_intent(attempt.provenance["intent_id"])
         attempt = Repo.one!(from a in Attempt, where: a.id == ^attempt.id, lock: "FOR UPDATE")
 
         with "prepared" <- attempt.state,
              {:ok, owner} <- selected_authority(current, attempt),
-             :ok <- MarketSpending.admit(attempt, current, owner.revision) do
+             :ok <- CreditSpending.admit(attempt, current, owner.revision) do
           result = MutationAttempts.mark_sent_or_unknown(attempt)
 
           case result do
@@ -230,7 +230,7 @@ defmodule SpaceTraders.Fleet.Intents.RecordedAction do
   def authorize_transport(%Attempt{} = attempt) do
     with :ok <- require_commit_boundary() do
       Repo.transaction(fn ->
-        MarketSpending.lock_agent(attempt)
+        CreditSpending.lock_agent(attempt)
         current = locked_intent(attempt.provenance["intent_id"])
         attempt = Repo.one!(from a in Attempt, where: a.id == ^attempt.id, lock: "FOR UPDATE")
 

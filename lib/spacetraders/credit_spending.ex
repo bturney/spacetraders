@@ -1,5 +1,10 @@
-defmodule SpaceTraders.MarketSpending do
-  @moduledoc "Quote-backed Market purchase exposure shared by selection and recorded admission."
+defmodule SpaceTraders.CreditSpending do
+  @moduledoc """
+  Credit-bearing spending authority (ADR 0013): the one worst-case exposure
+  calculation and the quote-backed admission shared by selection-time
+  Reservations, recorded Ship spending (Market purchase, refuel, jump) and
+  Fleet Ship purchase.
+  """
 
   import Ecto.Query
 

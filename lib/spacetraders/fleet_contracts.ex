@@ -488,7 +488,7 @@ defmodule SpaceTraders.FleetContracts do
   defp begin_estimate(remaining, listing, batch, margin) do
     trips = div(remaining + batch - 1, batch)
 
-    {SpaceTraders.MarketSpending.worst_case_exposure(listing.purchase_price, remaining, margin),
+    {SpaceTraders.CreditSpending.worst_case_exposure(listing.purchase_price, remaining, margin),
      21_600 * trips, listing.evidence_id}
   end
 

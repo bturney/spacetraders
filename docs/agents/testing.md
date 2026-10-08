@@ -122,7 +122,7 @@ Current seam owners:
   `test/spacetraders/api/recorded_dispatch_test.exs`
 - concurrent and restart-safe credit admission (Agent lock contention,
   Reservations, reconstructed exposure, quote aging across restart):
-  `test/spacetraders/market_spending_qualification_test.exs`
+  `test/spacetraders/credit_spending_qualification_test.exs`
 - credit calibration versions, realized-versus-quoted evidence, shortfall
   classification, and spending pause/release:
   `test/spacetraders/credit_calibration_test.exs`

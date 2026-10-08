@@ -18,7 +18,7 @@ defmodule SpaceTraders.CreditCalibration do
   import Ecto.Query
 
   alias SpaceTraders.Agent.{Agent, Operator, Scope}
-  alias SpaceTraders.{Clock, MarketSpending, OperatorConditions, Repo}
+  alias SpaceTraders.{Clock, CreditSpending, OperatorConditions, Repo}
   alias SpaceTraders.CreditCalibration.{Realization, Shortfall, Version}
   alias SpaceTraders.FleetStrategy.{Revision, StandingAuthority}
   alias SpaceTraders.MutationAttempts.Attempt
@@ -83,7 +83,7 @@ defmodule SpaceTraders.CreditCalibration do
     with %{} = spending <- attempt.prepared_evidence["spending"],
          {:ok, facts} <- attributable(spending, response) do
       Repo.transaction(fn ->
-        MarketSpending.lock_agent(attempt.agent_id)
+        CreditSpending.lock_agent(attempt.agent_id)
 
         if Repo.exists?(from r in Realization, where: r.mutation_attempt_id == ^attempt.id),
           do: Repo.rollback(:already_realized),
@@ -317,7 +317,7 @@ defmodule SpaceTraders.CreditCalibration do
       from a in Attempt,
         where:
           a.agent_id == ^agent_id and a.state in @unresolved_states and
-            a.operation_id in ^MarketSpending.credit_operations()
+            a.operation_id in ^CreditSpending.credit_operations()
 
     query = if except_id, do: where(query, [a], a.id != ^except_id), else: query
     Repo.exists?(query)

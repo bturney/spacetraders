@@ -2569,7 +2569,7 @@ defmodule SpaceTraders.Fleet.Intents do
                 good.trade_volume,
                 min(
                   free,
-                  SpaceTraders.MarketSpending.affordable_units(
+                  SpaceTraders.CreditSpending.affordable_units(
                     total_budget,
                     price,
                     SpaceTraders.CreditCalibration.active().margin_percent
@@ -2675,9 +2675,9 @@ defmodule SpaceTraders.Fleet.Intents do
   @doc false
   def with_current_intent(%Intent{id: id} = expected, fun) do
     case Repo.transaction(fn ->
-           if SpaceTraders.MarketSpending.credit_bearing_action?(expected.in_flight_action) do
+           if SpaceTraders.CreditSpending.credit_bearing_action?(expected.in_flight_action) do
              ship = Repo.get!(Ship, expected.ship_id)
-             SpaceTraders.MarketSpending.lock_agent(ship.agent_id)
+             SpaceTraders.CreditSpending.lock_agent(ship.agent_id)
            end
 
            case Repo.one(from i in Intent, where: i.id == ^id, lock: "FOR UPDATE") do

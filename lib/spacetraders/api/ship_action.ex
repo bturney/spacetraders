@@ -147,7 +147,7 @@ defmodule SpaceTraders.API.ShipAction do
        do: {:ok, "refuel-ship", %{"units" => units}, %{}}
 
   # A unit-less refuel only identifies historical work for recovery. Preparation
-  # refuses it (`MarketSpending.acquire/3`), so it can never be dispatched.
+  # refuses it (`CreditSpending.acquire/3`), so it can never be dispatched.
   defp parameters(_ship, %{"kind" => kind})
        when kind in ["orbit", "dock", "refuel", "scan_waypoints", "survey", "siphon"] do
     id =

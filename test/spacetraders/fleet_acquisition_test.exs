@@ -272,7 +272,7 @@ defmodule SpaceTraders.FleetAcquisitionTest do
              spending
 
     # Exposure is the ceiling of price * 125%, with no speculative offset applied.
-    assert 12_500 == SpaceTraders.MarketSpending.worst_case_exposure(@price, 1, 25)
+    assert 12_500 == SpaceTraders.CreditSpending.worst_case_exposure(@price, 1, 25)
   end
 
   test "the acquisition Reservation charges the same active calibrated bound admission uses" do
@@ -312,7 +312,7 @@ defmodule SpaceTraders.FleetAcquisitionTest do
       end
     end)
 
-    assert {:ok, offer} = SpaceTraders.MarketSpending.acquire_ship_purchase(agent, candidate())
+    assert {:ok, offer} = SpaceTraders.CreditSpending.acquire_ship_purchase(agent, candidate())
 
     # The Operator activates a newer revision before the purchase's send marker.
     newer =
@@ -376,7 +376,7 @@ defmodule SpaceTraders.FleetAcquisitionTest do
     assert {:ok, _} =
              SpaceTraders.Evidence.get_agent(SpaceTraders.API.AgentTokenReference.new(agent))
 
-    assert {:ok, offer} = SpaceTraders.MarketSpending.acquire_ship_purchase(agent, candidate())
+    assert {:ok, offer} = SpaceTraders.CreditSpending.acquire_ship_purchase(agent, candidate())
     SpaceTraders.TestClock.advance(301)
     # Credits are fresh again, so only the aged Shipyard evidence can refuse.
     assert {:ok, _} =

@@ -1,4 +1,4 @@
-defmodule SpaceTraders.MarketSpendingQualificationTest do
+defmodule SpaceTraders.CreditSpendingQualificationTest do
   @moduledoc """
   #581 qualification at the spec-approved concurrent RecordedAction admission
   seam. Real commits, independent PostgreSQL backends and discarded sender/clock
@@ -444,7 +444,7 @@ defmodule SpaceTraders.MarketSpendingQualificationTest do
       Task.async(fn ->
         Repo.transaction(fn ->
           Repo.query!("SET LOCAL lock_timeout = '5s'")
-          SpaceTraders.MarketSpending.lock_agent(ctx.agent.id)
+          SpaceTraders.CreditSpending.lock_agent(ctx.agent.id)
           send(owner, :agent_locked)
           receive do: (:update_generation -> :ok)
 

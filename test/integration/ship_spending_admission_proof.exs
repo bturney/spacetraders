@@ -168,7 +168,7 @@ defmodule SpaceTraders.ShipSpendingAdmissionProof do
         initial_credits: 2_000,
         credit_floor: 1_000,
         reserved_purchase_credits: 50,
-        eligible_exposure_credits: SpaceTraders.MarketSpending.worst_case_exposure(50, 1, 25),
+        eligible_exposure_credits: SpaceTraders.CreditSpending.worst_case_exposure(50, 1, 25),
         observed_unit_price: 10,
         charged_unit_price: 220,
         requested_units: 5,

@@ -15,7 +15,7 @@ defmodule SpaceTraders.CreditFloorWatch do
   import Ecto.Query
 
   alias SpaceTraders.Agent.Agent
-  alias SpaceTraders.{CreditCalibration, MarketSpending, Repo}
+  alias SpaceTraders.{CreditCalibration, CreditSpending, Repo}
   alias SpaceTraders.FleetGeneration.Generation
   alias SpaceTraders.FleetStrategy.{Revision, StandingAuthority, Strategy}
 
@@ -44,10 +44,10 @@ defmodule SpaceTraders.CreditFloorWatch do
   defp revalidate(agent) do
     {:ok, result} =
       Repo.transaction(fn ->
-        MarketSpending.lock_agent(agent.id)
+        CreditSpending.lock_agent(agent.id)
 
         with %Revision{} = revision <- active_revision(agent),
-             {:ok, credits} <- MarketSpending.authoritative_credits(agent) do
+             {:ok, credits} <- CreditSpending.authoritative_credits(agent) do
           CreditCalibration.spending_pause(agent, credits, credit_floor(revision), revision)
         else
           _ -> :no_authoritative_floor

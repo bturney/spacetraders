@@ -1136,7 +1136,7 @@ defmodule SpaceTraders.FleetAllocation do
 
   defp lock_generation_agent!(generation_id) do
     generation = Repo.get!(Generation, generation_id)
-    SpaceTraders.MarketSpending.lock_agent(generation.agent_id)
+    SpaceTraders.CreditSpending.lock_agent(generation.agent_id)
   end
 
   defp realized_economics(episode_id) do

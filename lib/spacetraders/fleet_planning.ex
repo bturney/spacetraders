@@ -11,7 +11,7 @@ defmodule SpaceTraders.FleetPlanning do
   alias SpaceTraders.API.Model.Contract
   alias SpaceTraders.FleetContracts
   alias SpaceTraders.CreditCalibration.Version
-  alias SpaceTraders.MarketSpending
+  alias SpaceTraders.CreditSpending
   alias SpaceTraders.FleetStrategy.Revision
 
   @market_evidence_freshness_seconds 300
@@ -587,7 +587,7 @@ defmodule SpaceTraders.FleetPlanning do
                 not is_integer(price) or price < 0 ->
                   nil
 
-                MarketSpending.worst_case_exposure(price, 1, margin) > credits ->
+                CreditSpending.worst_case_exposure(price, 1, margin) > credits ->
                   {:limitation, %{subject: listing.waypoint, reason: :refit_supply_unaffordable}}
 
                 true ->
@@ -599,7 +599,7 @@ defmodule SpaceTraders.FleetPlanning do
                     market: listing.waypoint,
                     purchase_price: price,
                     expected_cost: price,
-                    credit_exposure: MarketSpending.worst_case_exposure(price, 1, margin),
+                    credit_exposure: CreditSpending.worst_case_exposure(price, 1, margin),
                     market_evidence: listing,
                     installed_before: module_count(evidence.modules, symbol)
                   }
@@ -867,7 +867,7 @@ defmodule SpaceTraders.FleetPlanning do
           Map.put(
             offer,
             :credit_exposure,
-            MarketSpending.worst_case_exposure(offer.purchase_price, 1, context.margin)
+            CreditSpending.worst_case_exposure(offer.purchase_price, 1, context.margin)
           )
 
         if offer.credit_exposure + preparation <= context.credits do
@@ -1129,7 +1129,7 @@ defmodule SpaceTraders.FleetPlanning do
             DateTime.diff(as_of, observed_at, :second) <= @market_evidence_freshness_seconds,
             batch = min(remaining, min(capacity, listing.trade_volume)),
             cost =
-              MarketSpending.worst_case_exposure(
+              CreditSpending.worst_case_exposure(
                 listing.purchase_price,
                 batch,
                 credit_margin(snapshot)
@@ -1286,7 +1286,7 @@ defmodule SpaceTraders.FleetPlanning do
                       DateTime.diff(as_of, observed_at, :second) in 0..@market_evidence_freshness_seconds,
                       batch = min(remaining, min(capacity, listing.trade_volume)),
                       cost =
-                        MarketSpending.worst_case_exposure(
+                        CreditSpending.worst_case_exposure(
                           listing.purchase_price,
                           batch,
                           credit_margin(snapshot)
@@ -1680,7 +1680,7 @@ defmodule SpaceTraders.FleetPlanning do
         %{symbol: ship_symbol, cargo: %{capacity: capacity}} <- [ship],
         is_integer(capacity) and capacity > 0,
         batch = min(units, min(raw_listing.trade_volume, capacity)),
-        cost = MarketSpending.worst_case_exposure(raw_listing.purchase_price, batch, margin),
+        cost = CreditSpending.worst_case_exposure(raw_listing.purchase_price, batch, margin),
         cost <= credits do
       dependencies = [
         %{
@@ -2522,7 +2522,7 @@ defmodule SpaceTraders.FleetPlanning do
 
     required_resources = %{
       credits:
-        SpaceTraders.MarketSpending.worst_case_exposure(
+        SpaceTraders.CreditSpending.worst_case_exposure(
           source_good.purchase_price,
           units,
           snapshot.credit_margin_percent

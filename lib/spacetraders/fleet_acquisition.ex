@@ -21,7 +21,7 @@ defmodule SpaceTraders.FleetAcquisition do
   alias SpaceTraders.FleetGeneration.Generation
   alias SpaceTraders.FleetPlanning
   alias SpaceTraders.FleetStrategy.{Revision, StandingAuthority, Strategy}
-  alias SpaceTraders.MarketSpending
+  alias SpaceTraders.CreditSpending
   alias SpaceTraders.MutationAttempts
   alias SpaceTraders.MutationAttempts.Attempt
   alias SpaceTraders.{Repo, World}
@@ -74,7 +74,7 @@ defmodule SpaceTraders.FleetAcquisition do
                calibration_version: "ship-acquisition-v1"
              }
            ),
-         {:ok, spending} <- MarketSpending.acquire_ship_purchase(agent, candidate),
+         {:ok, spending} <- CreditSpending.acquire_ship_purchase(agent, candidate),
          {:ok, result} <- dispatch(agent, portfolio, candidate, spending) do
       {:ok, Map.put(result, :portfolio, portfolio)}
     else
@@ -150,12 +150,12 @@ defmodule SpaceTraders.FleetAcquisition do
   """
   def admit_send(%Attempt{} = attempt) do
     Repo.transaction(fn ->
-      MarketSpending.lock_agent(attempt)
+      CreditSpending.lock_agent(attempt)
       current = Repo.one!(from a in Attempt, where: a.id == ^attempt.id, lock: "FOR UPDATE")
 
       with "prepared" <- current.state,
            {:ok, revision} <- current_purchase_authority(current),
-           :ok <- MarketSpending.admit(current, nil, revision),
+           :ok <- CreditSpending.admit(current, nil, revision),
            {:ok, sent} <- MutationAttempts.mark_sent_or_unknown(current) do
         sent
       else
