@@ -1217,15 +1217,28 @@ defmodule SpaceTraders.FleetAllocation do
     if resource_yields == [], do: result, else: Map.put(result, :resource_yields, resource_yields)
   end
 
+  # One statement, so a leg that finishes or starts mid-check is still seen.
+  # A completed buy commits before its round trip requests the next leg; until
+  # that leg exists the bought Cargo is still the Commitment's work, and
+  # superseding it would refuse the sell leg and strand the Cargo aboard.
   defp unresolved_commitment_intent?(portfolio_ids) do
     Repo.exists?(
       from(intent in Intent,
+        as: :intent,
         join: commitment in Commitment,
         on: commitment.id == intent.fleet_commitment_id,
         where:
           commitment.fleet_commitment_portfolio_id in ^portfolio_ids and
             intent.caller == "commitment" and
-            intent.status in ^Intent.unfinished_states()
+            (intent.status in ^Intent.unfinished_states() or
+               (intent.type == "buy" and intent.status == "completed" and
+                  not exists(
+                    from(later in Intent,
+                      where:
+                        later.fleet_commitment_id == parent_as(:intent).fleet_commitment_id and
+                          later.id > parent_as(:intent).id
+                    )
+                  )))
       )
     )
   end

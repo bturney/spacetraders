@@ -10,6 +10,7 @@ defmodule SpaceTraders.FleetExecutionTest do
   alias SpaceTraders.Evidence.Observation
   alias SpaceTraders.Fleet.Intent
   alias SpaceTraders.Fleet.Ship
+  alias SpaceTraders.FleetAllocation
   alias SpaceTraders.FleetAllocation.Commitment
   alias SpaceTraders.FleetAllocation.Portfolio
   alias SpaceTraders.FleetAllocation.StrategyDecisionEpisode
@@ -261,6 +262,35 @@ defmodule SpaceTraders.FleetExecutionTest do
       assert Repo.aggregate(Portfolio, :count) == 1
     end
 
+    # #589 runtime finding: a completed buy commits before its round trip
+    # requests the sell leg. A Market re-observation landing in that window
+    # fingerprinted a new candidate and superseded the Commitment, so the sell
+    # leg was refused and the bought Cargo stayed aboard.
+    test "keeps a Commitment between its completed buy and its sell leg" do
+      {operator, agent, revision} = market_generation()
+      scope = Scope.for_operator(operator)
+
+      observe_marketplace(agent, "X1-A1")
+      observe_marketplace(agent, "X1-A2")
+      market_observation(agent, "X1-A1", 10)
+      market_observation(agent, "X1-A2", 25)
+      stub_activation_agent(agent)
+
+      assert {:ok, %{action: :activated, portfolio: portfolio, round_trip: buy}} =
+               FleetExecution.reconcile_market_evidence(scope, agent, revision, "X1", capacity())
+
+      Repo.update!(Ecto.Changeset.change(buy, status: "completed"))
+      market_observation(agent, "X1-A1", 10, "refreshed")
+
+      assert {:error, :unresolved_commitment_evidence} =
+               FleetExecution.reconcile_market_evidence(scope, agent, revision, "X1", capacity())
+
+      assert %Portfolio{id: id, superseded_at: nil} =
+               FleetAllocation.current_portfolio(scope, agent)
+
+      assert id == portfolio.id
+    end
+
     defp market_generation do
       operator = Repo.insert!(%Operator{email: "market-#{System.unique_integer()}@example.com"})
 
@@ -312,7 +342,7 @@ defmodule SpaceTraders.FleetExecutionTest do
       {operator, agent, revision}
     end
 
-    defp market_observation(agent, waypoint, purchase_price) do
+    defp market_observation(agent, waypoint, purchase_price, variant \\ "") do
       Repo.insert!(%Observation{
         agent_id: agent.id,
         subject: "market:X1:#{waypoint}",
@@ -330,7 +360,7 @@ defmodule SpaceTraders.FleetExecutionTest do
             }
           ]
         },
-        response_fingerprint: "market-#{waypoint}-#{purchase_price}",
+        response_fingerprint: "market-#{waypoint}-#{purchase_price}#{variant}",
         observed_at: SpaceTraders.Clock.utc_now()
       })
     end
