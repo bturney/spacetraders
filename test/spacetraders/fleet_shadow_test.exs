@@ -46,10 +46,33 @@ defmodule SpaceTraders.FleetShadowTest do
     insert_market_observation(agent, "X1-A1", 30, DateTime.add(@as_of_usec, 1, :second))
 
     assert {:ok, comparison} =
-             FleetShadow.compare_market(agent, revision(), "X1", availability(), capacity())
+             FleetShadow.compare_market(agent, revision(), "X1", availability(), capacity(),
+               as_of: @as_of
+             )
 
     assert [%{candidate_id: _candidate_id, claims: ["SHIP-1"]}] = comparison.proposed_choices
     assert Repo.aggregate(Commitment, :count) == 0
+  end
+
+  test "plans at the application clock, not the capacity disposition's governor timestamp" do
+    # The governor stamps advice with its own clock. Evidence the runtime
+    # observed after that advice must still bind the planning decision.
+    agent = agent_fixture(operator_fixture())
+    now = SpaceTraders.Clock.utc_now()
+    insert_market_observation(agent, "X1-A1", 10, now)
+    insert_market_observation(agent, "X1-A2", 25, now)
+    governor_advice = CapacityDispositions.proceed(DateTime.add(now, -5, :second))
+
+    assert {:ok, comparison} =
+             FleetShadow.compare_market(
+               agent,
+               revision(),
+               "X1",
+               availability(now),
+               governor_advice
+             )
+
+    assert [%{candidate_id: _candidate_id, claims: ["SHIP-1"]}] = comparison.proposed_choices
   end
 
   test "shadow-evaluates a draft document with an explicit draft identity and publishes nothing" do
@@ -69,7 +92,9 @@ defmodule SpaceTraders.FleetShadowTest do
     }
 
     assert {:ok, comparison} =
-             FleetShadow.compare_draft_market(agent, draft, "X1", availability(), capacity())
+             FleetShadow.compare_draft_market(agent, draft, "X1", availability(), capacity(),
+               as_of: @as_of
+             )
 
     assert [%{candidate_id: _candidate_id, claims: ["SHIP-1"]}] = comparison.proposed_choices
     assert [%{candidate_contributions: [candidate | _]}] = comparison.planning
@@ -136,9 +161,9 @@ defmodule SpaceTraders.FleetShadowTest do
     }
   end
 
-  defp availability do
+  defp availability(as_of \\ @as_of) do
     %{
-      as_of: @as_of,
+      as_of: as_of,
       claims: [
         %{
           resource: "SHIP-1",

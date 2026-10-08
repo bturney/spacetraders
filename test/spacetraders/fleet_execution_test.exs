@@ -19,7 +19,6 @@ defmodule SpaceTraders.FleetExecutionTest do
   alias SpaceTraders.Intelligence
 
   @as_of ~U[2030-01-01 12:00:00Z]
-  @as_of_usec ~U[2030-01-01 12:00:00.000000Z]
 
   describe "governed_availability/1" do
     test "claims market reach from governed waypoint evidence" do
@@ -332,7 +331,7 @@ defmodule SpaceTraders.FleetExecutionTest do
           ]
         },
         response_fingerprint: "market-#{waypoint}-#{purchase_price}",
-        observed_at: @as_of_usec
+        observed_at: SpaceTraders.Clock.utc_now()
       })
     end
 
