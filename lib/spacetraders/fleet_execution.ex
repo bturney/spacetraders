@@ -32,10 +32,6 @@ defmodule SpaceTraders.FleetExecution do
   alias SpaceTraders.Repo
   alias SpaceTraders.ShipReservation
 
-  @doc "Returns calibrated exposure for a quoted Market purchase cost."
-  def worst_case_exposure(quoted_cost) when is_integer(quoted_cost),
-    do: SpaceTraders.MarketSpending.worst_case_exposure(quoted_cost, 1)
-
   @doc "Returns the credit floor for a Revision, or `{:error, :no_credit_floor}`."
   defdelegate credit_floor(revision), to: StandingAuthority
 

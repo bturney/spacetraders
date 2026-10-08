@@ -329,6 +329,7 @@ defmodule SpaceTraders.FleetConstruction do
     with {:ok, planning} <-
            FleetPlanning.plan_construction(revision, index, %{
              as_of: now,
+             credit_margin_percent: SpaceTraders.CreditCalibration.active().margin_percent,
              constructions: constructions,
              ships: available,
              listings: FleetContracts.sourcing_listings(agent, now),

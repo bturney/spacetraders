@@ -4,6 +4,9 @@ defmodule SpaceTraders.CreditCalibration.Version do
   use Ecto.Schema
   import Ecto.Changeset
 
+  # Operator-approved constants (#579): the initial worst-case margin and the
+  # hard lower bound no narrowing may cross. This module is their one source.
+  @initial_margin 25
   @hard_lower_bound 10
 
   schema "credit_calibration_versions" do
@@ -18,6 +21,7 @@ defmodule SpaceTraders.CreditCalibration.Version do
     timestamps(type: :utc_datetime_usec, updated_at: false)
   end
 
+  def initial_margin, do: @initial_margin
   def hard_lower_bound, do: @hard_lower_bound
 
   def changeset(version, attrs) do

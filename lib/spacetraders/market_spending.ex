@@ -5,27 +5,31 @@ defmodule SpaceTraders.MarketSpending do
 
   alias SpaceTraders.Agent.Agent
   alias SpaceTraders.{Clock, CreditCalibration, Evidence, Repo, World}
+  alias SpaceTraders.CreditCalibration.Version
   alias SpaceTraders.FleetAllocation.{Commitment, Portfolio}
   alias SpaceTraders.FleetGeneration.Generation
   alias SpaceTraders.FleetStrategy.{Revision, StandingAuthority}
   alias SpaceTraders.MutationAttempts.Attempt
   alias SpaceTraders.SafetyFence.DependencyKey
 
-  # Pure planning callers without a calibration read use the initial model;
-  # runtime callers pass `CreditCalibration.active/0`'s margin.
-  @initial_margin 25
-  @minimum_margin 10
+  @minimum_margin Version.hard_lower_bound()
   @freshness_seconds 30
   @shipyard_freshness_seconds 300
   @credit_operations ~w(purchase-cargo purchase-ship refuel-ship jump-ship install-ship-module remove-ship-module install-ship-mount remove-ship-mount repair-ship)
 
-  def worst_case_exposure(price, units, margin \\ @initial_margin)
+  @doc """
+  The one worst-case exposure calculation (ADR 0013), shared by selection-time
+  Reservations and pre-dispatch spending admission. The margin is required:
+  every caller names the calibration margin it charges, so the two
+  checkpoints cannot silently use different models.
+  """
+  def worst_case_exposure(price, units, margin)
       when is_integer(price) and price >= 0 and is_integer(units) and units >= 0 and
              is_integer(margin) and margin >= @minimum_margin do
     div(price * units * (100 + margin) + 99, 100)
   end
 
-  def affordable_units(credits, price, margin \\ @initial_margin)
+  def affordable_units(credits, price, margin)
 
   def affordable_units(credits, price, margin) when is_integer(price) and price > 0,
     do: div(max(credits, 0) * 100, price * (100 + margin))

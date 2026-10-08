@@ -272,7 +272,33 @@ defmodule SpaceTraders.FleetAcquisitionTest do
              spending
 
     # Exposure is the ceiling of price * 125%, with no speculative offset applied.
-    assert 12_500 == SpaceTraders.MarketSpending.worst_case_exposure(@price, 1)
+    assert 12_500 == SpaceTraders.MarketSpending.worst_case_exposure(@price, 1, 25)
+  end
+
+  test "the acquisition Reservation charges the same active calibrated bound admission uses" do
+    {scope, agent, revision} = generation()
+    {:ok, _} = SpaceTraders.CreditCalibration.supersede(50, "test_widening", %{})
+    stub_shipyard(agent)
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      case {conn.method, conn.request_path} do
+        {"GET", "/v2/my/agent"} -> overview(conn, agent, @credits)
+        {"GET", "/v2/my/ships"} -> Req.Test.json(conn, %{"data" => [docked("X1-UX81-A1")]})
+        {"POST", "/v2/my/ships"} -> Req.Test.transport_error(conn, :timeout)
+      end
+    end)
+
+    assert {:error, {:ship_acquisition_unavailable, _}} =
+             FleetAcquisition.reconcile(scope, agent, revision, "X1-UX81")
+
+    assert [%{prepared_evidence: %{"spending" => %{"worst_case_exposure" => 15_000}}}] =
+             purchase_attempts(agent)
+
+    # 10,000 at the active 50% margin, plus the 2,500 outfitting reserve.
+    assert %{commitments: [commitment]} =
+             scope |> FleetAllocation.current_portfolio(agent) |> Repo.preload(:commitments)
+
+    assert commitment.reservations["credits"] == 15_000 + @preparation_exposure
   end
 
   test "Shipyard evidence that ages before the send marker prevents the purchase" do

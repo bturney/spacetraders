@@ -48,6 +48,7 @@ defmodule SpaceTraders.FleetAcquisition do
          {:ok, planning} <-
            FleetPlanning.plan_ship_acquisition(revision, acquisition_objective_index(revision), %{
              as_of: as_of,
+             credit_margin_percent: SpaceTraders.CreditCalibration.active().margin_percent,
              credits: overview.credits,
              ships: co_locatable_ships(ships),
              shipyards: shipyard_offers(agent, system, as_of)

@@ -42,6 +42,16 @@ defmodule SpaceTraders.ConstructionOutcomesTest do
     end
   end
 
+  test "Construction Reservations charge the active calibration margin admission revalidates" do
+    snapshot = Map.put(snapshot(2), :credit_margin_percent, 50)
+
+    assert {:ok, %{candidate_contributions: [candidate]}} =
+             FleetPlanning.plan_construction(@revision, 0, snapshot)
+
+    # 8 units at 10 credits, widened to a 50% margin.
+    assert candidate.required_resources.credits == 120
+  end
+
   test "completed Construction never creates more supply, even when materials remain" do
     assert {:ok, %{candidate_contributions: []}} =
              FleetPlanning.plan_construction(@revision, 0, snapshot(2, true))

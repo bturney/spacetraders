@@ -60,6 +60,7 @@ defmodule SpaceTraders.FleetRefit do
          {:ok, planning} <-
            FleetPlanning.plan_ship_refit(revision, index, %{
              as_of: as_of,
+             credit_margin_percent: SpaceTraders.CreditCalibration.active().margin_percent,
              credits: overview.credits,
              ships: ships,
              markets: market_supply(agent, system, as_of),

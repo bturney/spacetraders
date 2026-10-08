@@ -30,6 +30,17 @@ defmodule SpaceTraders.MarketSpendingAdmissionTest do
     :ok
   end
 
+  test "worst-case exposure rounds the margin-loaded quote up and refuses a margin below the hard bound" do
+    assert SpaceTraders.MarketSpending.worst_case_exposure(0, 1, 25) == 0
+    assert SpaceTraders.MarketSpending.worst_case_exposure(1_000, 1, 25) == 1_250
+    assert SpaceTraders.MarketSpending.worst_case_exposure(50, 1, 25) == 63
+    assert SpaceTraders.MarketSpending.worst_case_exposure(50, 3, 50) == 225
+
+    assert_raise FunctionClauseError, fn ->
+      SpaceTraders.MarketSpending.worst_case_exposure(50, 1, 9)
+    end
+  end
+
   test "purchase preparation retains the acquired quote and calibrated exposure before any marker" do
     agent = operator_fixture() |> agent_fixture()
     stub_quote(agent, 10, 2_000)
