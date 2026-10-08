@@ -69,6 +69,9 @@ defmodule SpaceTraders.RuntimeQualification do
       :microsecond
     )
 
+    calibration_floor_id =
+      Repo.one(from v in SpaceTraders.CreditCalibration.Version, select: max(v.id))
+
     on_exit(fn ->
       SpaceTraders.Quiesced.stop_all_ships()
 
@@ -82,6 +85,19 @@ defmodule SpaceTraders.RuntimeQualification do
 
       attempt_ids =
         Repo.all(from a in Attempt, where: a.operator_id in ^operator_ids, select: a.id)
+
+      # Gate 1 scenarios write global calibration and per-Agent credit evidence.
+      Repo.delete_all(
+        from r in SpaceTraders.CreditCalibration.Realization, where: r.agent_id in ^agent_ids
+      )
+
+      Repo.delete_all(
+        from s in SpaceTraders.CreditCalibration.Shortfall, where: s.agent_id in ^agent_ids
+      )
+
+      Repo.delete_all(
+        from v in SpaceTraders.CreditCalibration.Version, where: v.id > ^calibration_floor_id
+      )
 
       Repo.delete_all(from o in Outcome, where: o.mutation_attempt_id in ^attempt_ids)
       Repo.delete_all(from a in Attempt, where: a.id in ^attempt_ids)
@@ -183,6 +199,243 @@ defmodule SpaceTraders.RuntimeQualification do
     assert state.credits == 175_800
     assert state.units == 0
   end
+
+  # Gate 1 (#589): spending and capacity authority through the same seam.
+  # Each scenario starts from authenticated Strategy activation (the Steady
+  # Growth preset keeps a 50,000 credit floor) and lets the production runtime
+  # plan, allocate, admit, and execute against the stateful game.
+  describe "Gate 1 authority" do
+    test "the credit floor bounds a Market purchase's worst-case exposure", %{conn: conn} do
+      # 300 credits of headroom: at the 25% margin a 10-credit quote funds at
+      # most 24 units, never the full 40-unit hold.
+      game = start_game(credits: 50_300)
+      {_conn, _agent} = activate_fresh_generation(conn)
+      drive(game, &sold?/1)
+
+      state = Game.snapshot(game)
+      purchases = requests(state, "/v2/my/ships/BASELINE-1/purchase")
+
+      # Planning may size the purchase down or decline it; either way no
+      # purchase whose worst case exceeds the headroom leaves transport.
+      assert state.low_credits >= 50_000
+      assert Enum.all?(purchases, &(&1.body["units"] * 10 * 125 <= 300 * 100))
+    end
+
+    # #589 finding: owned Agent/Fleet reads persisted Observation Demands that
+    # the scheduler announced as due at once, waking reconciliation into the
+    # same reads again; overdue unacquirable Market work re-announced on every
+    # demand change. Together they spun reads for as long as the wait lasted.
+    test "a Neutral Wait holds without spinning Agent and Fleet reads", %{conn: conn} do
+      game = start_game(credits: 50_300)
+      {_conn, _agent} = activate_fresh_generation(conn)
+      drive(game, fn _state -> false end, 8)
+      Process.sleep(1_000)
+
+      state = Game.snapshot(game)
+      before = length(state.requests)
+      Process.sleep(1_000)
+      during_wait = length(Game.snapshot(game).requests) - before
+
+      assert during_wait == 0,
+             "#{during_wait} game requests in one second of frozen-clock Neutral Wait"
+    end
+
+    test "a pricing-model breach records evidence, widens calibration, and pauses only spending",
+         %{conn: conn} do
+      initial = SpaceTraders.CreditCalibration.active()
+      # The game charges 15 per unit against a 10-credit quote: 600 against a
+      # 500-credit worst-case bound for 40 units.
+      game = start_game(purchase_charge: 15)
+      {_conn, agent} = activate_fresh_generation(conn)
+      drive(game, &sold?/1)
+
+      state = Game.snapshot(game)
+      assert [_one] = requests(state, "/v2/my/ships/BASELINE-1/purchase")
+      # Non-spending work continues: the purchased Cargo is still sold.
+      assert [_sale] = requests(state, "/v2/my/ships/BASELINE-1/sell")
+
+      assert [%{kind: "pricing_model_miss"} | _] =
+               SpaceTraders.CreditCalibration.shortfalls(agent)
+
+      widened = SpaceTraders.CreditCalibration.active()
+      assert widened.margin_percent > initial.margin_percent
+      assert widened.basis == "pricing_model_miss"
+
+      assert Repo.exists?(
+               from c in SpaceTraders.OperatorConditions.Condition,
+                 where:
+                   c.operator_id == ^agent.operator_id and
+                     c.key == ^"credit-pricing-breach:#{agent.id}" and c.kind == :attention
+             )
+    end
+
+    test "API Retry-After defers Market reads without Attention and the trade completes",
+         %{conn: conn} do
+      game = start_game(throttled_market_reads: 3)
+      {_conn, agent} = activate_fresh_generation(conn)
+      drive(game, &sold?/1)
+
+      state = Game.snapshot(game)
+      assert Enum.count(state.requests, &(&1.reply == :throttled)) == 3
+      assert length(requests(state, "/v2/my/ships/BASELINE-1/purchase")) == 1, trace(state)
+      assert length(requests(state, "/v2/my/ships/BASELINE-1/sell")) == 1, trace(state)
+      assert state.credits == 175_800
+
+      refute Repo.exists?(
+               from c in SpaceTraders.OperatorConditions.Condition,
+                 where: c.operator_id == ^agent.operator_id and c.kind == :attention
+             )
+
+      # Capacity Deferral never becomes Attention or objective infeasibility.
+      # (A later trade may be infeasible for fuel; that is not capacity.)
+      outcomes =
+        Repo.all(
+          from i in SpaceTraders.Fleet.Intent,
+            join: ship in SpaceTraders.Fleet.Ship,
+            on: ship.id == i.ship_id,
+            where: ship.agent_id == ^agent.id and i.status in ["blocked", "infeasible"],
+            select: {i.status, i.blocker, i.last_action_result}
+        )
+
+      refute Enum.any?(outcomes, &(inspect(&1) =~ ~r/capacity|429|retry/i)), inspect(outcomes)
+    end
+
+    test "below the floor no fuel or Market spending leaves transport", %{conn: conn} do
+      # Credits already below the 50,000 floor and too little fuel to reach the
+      # distant Market: there is no recovery-spend exception.
+      game = start_game(credits: 49_000, fuel: 30)
+      {_conn, _agent} = activate_fresh_generation(conn)
+      drive(game, fn _state -> false end, 6)
+
+      state = Game.snapshot(game)
+      assert requests(state, "/v2/my/ships/BASELINE-1/purchase") == []
+      assert requests(state, "/v2/my/ships/BASELINE-1/refuel") == []
+      assert state.low_credits == 49_000
+    end
+
+    # A pricing-model breach on the purchase leaves credits below the floor.
+    # The trade then needs fuel the Ship cannot buy: no recovery-spend
+    # exception, so the Ship's work blocks for the Operator instead.
+    test "below-floor fuel stranding raises Attention instead of refuelling", %{conn: conn} do
+      # 500 credits of headroom funds the 40-unit hold at the 25% margin; the
+      # game charges 15 per unit (600), leaving 49,900 below the floor. 130
+      # fuel covers surveying the distant Market and returning (60 + 60), not
+      # the second 60-fuel leg to sell.
+      game = start_game(credits: 50_500, purchase_charge: 15, fuel: 130, fuel_price: 72)
+      {conn, agent} = activate_fresh_generation(conn)
+      drive(game, fn _state -> false end, 10)
+
+      state = Game.snapshot(game)
+      assert [_purchase] = requests(state, "/v2/my/ships/BASELINE-1/purchase")
+      assert state.credits == 49_900
+      assert requests(state, "/v2/my/ships/BASELINE-1/refuel") == []
+
+      # The Cargo stays aboard: the Ship never leaves for the selling Market.
+      after_purchase =
+        Enum.drop_while(state.requests, &(&1.path != "/v2/my/ships/BASELINE-1/purchase"))
+
+      refute Enum.any?(after_purchase, &(&1.path == "/v2/my/ships/BASELINE-1/navigate"))
+      assert state.units == 40
+
+      blocked =
+        Repo.all(
+          from i in SpaceTraders.Fleet.Intent,
+            join: ship in SpaceTraders.Fleet.Ship,
+            on: ship.id == i.ship_id,
+            where: ship.agent_id == ^agent.id and i.status == "blocked",
+            select: i.blocker
+        )
+
+      assert Enum.any?(blocked, &(&1 && &1.reason == "credit_spending_paused")),
+             "no stranding Attention: blocked=#{inspect(blocked)} #{inspect(paths(state))}"
+
+      {:ok, _view, html} = live(conn, ~p"/mission-control")
+      assert html =~ "Spending stays paused"
+    end
+  end
+
+  defp start_game(opts) do
+    game = start_supervised!({Game, opts})
+    stub_api(fn conn -> Game.reply(conn, Game.call(game, conn)) end)
+    allow_game_runtime()
+    start_runtime()
+    game
+  end
+
+  # Advances controllable time to each next durable wakeup until the game
+  # reaches the expected state or the rounds run out.
+  defp drive(game, done?, rounds \\ 20) do
+    Enum.reduce_while(1..rounds, :ok, fn _, :ok ->
+      settle_or_busy()
+      Process.sleep(20)
+      settle_or_busy()
+
+      if done?.(Game.snapshot(game)) do
+        {:halt, :ok}
+      else
+        await_governor_window()
+
+        case SpaceTraders.TestClock.next_due_at() do
+          %DateTime{} = due_at ->
+            advance_time(
+              max(DateTime.diff(due_at, SpaceTraders.Clock.utc_now(), :microsecond), 0),
+              :microsecond
+            )
+
+            {:cont, :ok}
+
+          nil ->
+            {:halt, :ok}
+        end
+      end
+    end)
+
+    settle_or_busy()
+  end
+
+  # The governor paces Retry-After on wall time while the runtime schedules on
+  # the controllable clock. Synchronization only: let a server-imposed window
+  # pass before waking deferred work, so rounds are not spent on early wakeups.
+  defp await_governor_window do
+    case SpaceTraders.API.CapacityGovernor.diagnostics() do
+      %{retry_after_until: %DateTime{} = until} ->
+        wait = DateTime.diff(until, DateTime.utc_now(), :millisecond)
+        if wait > 0, do: Process.sleep(min(wait + 10, 2_000))
+
+      _ ->
+        :ok
+    end
+  end
+
+  # Like settle_runtime/0, but a runtime process that stays busy (a blocking
+  # Retry-After wait, or a Neutral Wait read loop) is reported by the
+  # scenario's outcome assertions instead of aborting the drive.
+  defp settle_or_busy do
+    settle_runtime()
+  catch
+    :exit, {:timeout, _call} -> :busy
+  end
+
+  defp sold?(state), do: requests(state, "/v2/my/ships/BASELINE-1/sell") != []
+
+  defp requests(state, path), do: Enum.filter(state.requests, &(&1.path == path))
+
+  # Failure message only: the game transcript and the Agent's Intents.
+  defp trace(state) do
+    intents =
+      Repo.all(
+        from i in SpaceTraders.Fleet.Intent,
+          join: ship in SpaceTraders.Fleet.Ship,
+          on: ship.id == i.ship_id,
+          where: ship.symbol == "BASELINE-1",
+          order_by: i.id,
+          select: {i.id, i.type, i.status, i.fleet_commitment_id, i.last_action_result}
+      )
+
+    inspect(%{requests: paths(state), intents: intents}, limit: :infinity, pretty: true)
+  end
+
+  defp paths(state), do: Enum.map(state.requests, &{&1.method, &1.path, &1.reply})
 
   defp activate_fresh_generation(conn) do
     email = "baseline-503-#{System.unique_integer([:positive])}@example.com"

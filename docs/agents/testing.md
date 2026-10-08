@@ -135,7 +135,8 @@ Current seam owners:
   governor probes with no backoff delay (`probe_base_ms: 0` in
   `config/test.exs`); isolated governors pass their own timing.
 
-- whole-runtime composition across runtime restart:
+- whole-runtime composition across runtime restart, and Gate 1 spending and
+  capacity authority through Strategy activation ("Gate 1 authority" describe):
   `test/diagnostics/runtime_qualification.exs` (diagnostic only)
 
 ## Runtime qualification
