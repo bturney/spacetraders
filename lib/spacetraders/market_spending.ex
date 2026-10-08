@@ -203,8 +203,13 @@ defmodule SpaceTraders.MarketSpending do
 
   def lock_agent(%Attempt{}), do: :ok
 
+  # FOR NO KEY UPDATE serializes spending admissions on the Agent but, unlike
+  # FOR UPDATE, never excludes the FOR KEY SHARE a non-spending MutationAttempt
+  # insert takes for its agent_id foreign key. Allocation publication holds this
+  # lock before the Generation while recorded preparation holds the Generation
+  # before referencing the Agent; FOR UPDATE deadlocked the two.
   def lock_agent(id) when is_integer(id),
-    do: Repo.one!(from a in Agent, where: a.id == ^id, lock: "FOR UPDATE")
+    do: Repo.one!(from a in Agent, where: a.id == ^id, lock: "FOR NO KEY UPDATE")
 
   @doc "Credit-bearing operation ids governed by spending admission."
   def credit_operations, do: @credit_operations

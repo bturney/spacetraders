@@ -416,6 +416,67 @@ defmodule SpaceTraders.MarketSpendingQualificationTest do
              )
   end
 
+  # #589 runtime finding: Allocation publication takes the Agent spending lock
+  # and then updates the Generation, while non-spending recorded preparation
+  # holds the Generation FOR SHARE and then inserts its MutationAttempt, whose
+  # foreign key needs FOR KEY SHARE on the same Agent. The spending lock must
+  # not exclude that key-share, or the two deadlock.
+  test "the Agent spending lock never blocks a non-spending preparation's Agent reference",
+       ctx do
+    generation =
+      Repo.insert!(%Generation{
+        operator_id: ctx.operator.id,
+        agent_id: ctx.agent.id,
+        number: 1,
+        symbol: ctx.agent.symbol,
+        faction: ctx.agent.faction,
+        replacement_symbols: %{},
+        objective_progress: %{}
+      })
+
+    on_exit(fn ->
+      Sandbox.unboxed_run(Repo, fn -> Repo.delete!(generation) end)
+    end)
+
+    owner = self()
+
+    publisher =
+      Task.async(fn ->
+        Repo.transaction(fn ->
+          Repo.query!("SET LOCAL lock_timeout = '5s'")
+          SpaceTraders.MarketSpending.lock_agent(ctx.agent.id)
+          send(owner, :agent_locked)
+          receive do: (:update_generation -> :ok)
+
+          Repo.query!(
+            "UPDATE fleet_generations SET allocation_version = allocation_version + 1 WHERE id = $1",
+            [generation.id]
+          )
+        end)
+      end)
+
+    assert_receive :agent_locked, 5_000
+
+    preparer =
+      Task.async(fn ->
+        Repo.transaction(fn ->
+          Repo.query!("SET LOCAL lock_timeout = '5s'")
+          Repo.query!("SELECT id FROM fleet_generations WHERE id = $1 FOR SHARE", [generation.id])
+          send(owner, :generation_shared)
+          receive do: (:reference_agent -> :ok)
+          # The lock a MutationAttempt insert's agent_id foreign key takes.
+          Repo.query!("SELECT id FROM agents WHERE id = $1 FOR KEY SHARE", [ctx.agent.id])
+        end)
+      end)
+
+    assert_receive :generation_shared, 5_000
+    send(publisher.pid, :update_generation)
+    send(preparer.pid, :reference_agent)
+
+    assert {:ok, _} = Task.await(preparer, 10_000)
+    assert {:ok, _} = Task.await(publisher, 10_000)
+  end
+
   defp restart_runtime(seconds) do
     now = SpaceTraders.Clock.utc_now() |> DateTime.add(seconds, :second)
     stop_supervised!(TestClock)
