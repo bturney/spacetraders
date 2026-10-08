@@ -22,7 +22,7 @@ defmodule SpaceTraders.API do
   dual-pool token bucket modelled on the game's granted budget: 2 req/s steady
   plus a separate pool of 30 requests per minute (≈2.5 req/s sustained
   average). Admission is ordered by the API Capacity Governor, which also
-  delays new ordinary admissions when the game returns `Retry-After`. Req's
+  delays all new admissions when the game returns `Retry-After`. Req's
   built-in 429 retry is a safety net, not the primary throughput shaper.
 
   In `test` env the client is pointed at `Req.Test` via config (`:plug`), so no

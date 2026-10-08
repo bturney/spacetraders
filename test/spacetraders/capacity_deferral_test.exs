@@ -235,7 +235,7 @@ defmodule SpaceTraders.CapacityDeferralTest do
       assert_in_delay(wakeup_event().due_at, before, deferred, 30)
     end
 
-    test "unresolved mutation recovery is protected from ordinary Retry-After", %{
+    test "unresolved mutation recovery waits out the account-wide Retry-After too", %{
       governor: governor
     } do
       %{agent: agent, intent: intent} = transfer_fixture()
@@ -252,7 +252,7 @@ defmodule SpaceTraders.CapacityDeferralTest do
       deferred = DateTime.utc_now()
 
       assert_capacity_deferred(selected, attempt)
-      assert_in_delay(wakeup_event().due_at, before, deferred, 1)
+      assert_in_delay(wakeup_event().due_at, before, deferred, 30)
     end
 
     test "deferred work survives runtime and governor restart on its durable wakeup", %{

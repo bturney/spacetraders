@@ -29,9 +29,10 @@ defmodule SpaceTraders.API.CapacityGovernor do
 
   Pressure is interpreted here, bounded, and never left to callers:
 
-    * `Retry-After` defers ordinary work (honored up to 60 seconds). Protected
-      work may send one immediate probe after a rejection; sustained rejection
-      backs protected probes off exponentially, one in flight at a time.
+    * `Retry-After` defers all work (honored up to 60 seconds): the limit is
+      account-wide. At expiry protected work may send one probe; sustained
+      rejection backs protected probes off exponentially past Retry-After, one
+      in flight at a time.
     * A 5xx or transport failure paces only its own request family (operation)
       with bounded probes. Failures spanning several families with no clean
       response between them are a Fleet-wide outage: all work, protected work
@@ -408,17 +409,14 @@ defmodule SpaceTraders.API.CapacityGovernor do
   # Not dispatched or abandoned: no protocol evidence either way.
   defp record_outcome(state, _request, _status), do: state
 
-  # Protocol pressure: the first rejection allows one immediate probe; sustained
-  # rejection backs probes off, never past the server's own Retry-After.
-  defp pressure_probe_at(state, streak, retry_after_seconds) do
+  # Protocol pressure: the rate limit is account-wide, so protected probes wait
+  # out the (bounded) Retry-After window — an earlier probe only earns another
+  # 429; sustained rejection backs probes off further, whichever is later.
+  defp pressure_probe_at(state, streak, retry_after_until) do
     backoff_ms = if streak == 1, do: 0, else: backoff_ms(state, streak - 1)
+    backoff_at = DateTime.add(now(state), backoff_ms, :millisecond)
 
-    delay_ms =
-      if is_integer(retry_after_seconds) and retry_after_seconds > 0,
-        do: min(backoff_ms, retry_after_seconds * 1000),
-        else: backoff_ms
-
-    DateTime.add(now(state), delay_ms, :millisecond)
+    if future?(retry_after_until, backoff_at), do: retry_after_until, else: backoff_at
   end
 
   defp backoff_ms(state, streak),
@@ -455,7 +453,7 @@ defmodule SpaceTraders.API.CapacityGovernor do
     %{
       state
       | backpressure_streak: streak,
-        pressure_probe_at: pressure_probe_at(state, streak, retry_after_seconds),
+        pressure_probe_at: pressure_probe_at(state, streak, ordinary_delayed_until),
         rejection_window: rejection_window,
         first_rejection_at: state.first_rejection_at || now_ms,
         admitted_capacity: max(state.admitted_capacity - 1, 1),
@@ -561,9 +559,8 @@ defmodule SpaceTraders.API.CapacityGovernor do
              observed_at
            )}
 
-        protection(request) == :standard and future?(state.ordinary_delayed_until, observed_at) ->
-          {:retry_after, state.ordinary_delayed_until}
-
+        # The probe never precedes Retry-After, so its time is the earliest
+        # anything may go while protocol pressure lasts.
         state.backpressure_streak > 0 and
             (probe_in_flight?(state, :protocol) or future?(state.pressure_probe_at, observed_at)) ->
           {:retry_after,
@@ -572,6 +569,11 @@ defmodule SpaceTraders.API.CapacityGovernor do
              DateTime.add(observed_at, @reconsider_seconds, :second),
              observed_at
            )}
+
+        # Retry-After is account-wide: no purpose sends work into it, even
+        # after a clean response from work already in flight.
+        future?(state.ordinary_delayed_until, observed_at) ->
+          {:retry_after, state.ordinary_delayed_until}
 
         map_size(state.in_flight) >= state.admitted_capacity ->
           {:contention, DateTime.add(observed_at, @reconsider_seconds, :second)}

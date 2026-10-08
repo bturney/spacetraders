@@ -26,18 +26,22 @@ defmodule SpaceTraders.API.CapacityGovernorTest do
 
   defp unique_name, do: String.to_atom("capacity_governor_#{System.unique_integer([:positive])}")
 
-  test "live admission withholds Retry-After-deferred ordinary work that an arbitrary lane cannot unlock" do
+  test "when Retry-After expires the one probe goes to protected work, not an arbitrary lane" do
     name = start_governor(max_in_flight: 2)
     operation = SpaceTraders.API.OperationInventory.fetch!("get-my-agent")
-    CapacityGovernor.protocol_rejected(30, name)
+    CapacityGovernor.protocol_rejected(1, name)
 
     invented = Task.async(fn -> CapacityGovernor.admit(operation, %{lane: :invented}, name) end)
-    assert Task.yield(invented, 20) == nil
+    await_queue(name, 1)
 
-    assert {:ok, %CapacityGovernor.Admission{lane: :reconciliation}} =
+    # Queued after the arbitrary lane, yet admitted first, and alone.
+    assert {:ok, %CapacityGovernor.Admission{lane: :reconciliation} = probe} =
              CapacityGovernor.admit(operation, %{purpose: :recovery}, name)
 
-    Task.shutdown(invented, :brutal_kill)
+    assert Task.yield(invented, 50) == nil
+
+    CapacityGovernor.complete(probe, 200, name)
+    assert {:ok, %CapacityGovernor.Admission{lane: :standard}} = Task.await(invented, 5_000)
   end
 
   test "owner priority outranks value and value breaks ties without timestamp protection" do
@@ -94,30 +98,32 @@ defmodule SpaceTraders.API.CapacityGovernorTest do
              CapacityGovernor.disposition(operation, %{}, :test_disabled)
   end
 
-  test "Retry-After guidance uses recognized purpose, never arbitrary lanes or timestamps" do
+  test "Retry-After defers every request to its expiry, recognized purpose included" do
     now = ~U[2026-10-05 12:00:00Z]
     name = start_governor(now: fn -> now end)
     operation = SpaceTraders.API.OperationInventory.fetch!("get-my-agent")
+    {:ok, earlier} = CapacityGovernor.admit(operation, %{}, name)
     CapacityGovernor.protocol_rejected(30, name)
 
-    for attrs <- [%{}, %{lane: :invented}, %{deadline_at: DateTime.add(now, 1)}] do
-      assert %{status: :defer, reason: :retry_after, observed_at: ^now, retry_at: retry} =
-               CapacityGovernor.disposition(operation, attrs, name)
-
-      assert retry == ~U[2026-10-05 12:00:30Z]
-    end
+    # A clean response from work already in flight does not reopen the window.
+    CapacityGovernor.complete(earlier, 200, name)
 
     for attrs <- [
+          %{},
+          %{lane: :invented},
+          %{deadline_at: DateTime.add(now, 1)},
           %{purpose: :safety},
           %{purpose: :recovery},
           %{lane: :reconciliation},
           %{purpose: :deadline_critical, deadline_at: DateTime.add(now, 1)}
         ] do
-      assert %{status: :proceed} = CapacityGovernor.disposition(operation, attrs, name)
+      assert %{
+               status: :defer,
+               reason: :retry_after,
+               observed_at: ^now,
+               retry_at: ~U[2026-10-05 12:00:30Z]
+             } = CapacityGovernor.disposition(operation, attrs, name)
     end
-
-    assert %{status: :defer} =
-             CapacityGovernor.disposition(operation, %{purpose: :deadline_critical}, name)
   end
 
   defp start_governor(opts \\ []) do
@@ -269,7 +275,7 @@ defmodule SpaceTraders.API.CapacityGovernorTest do
              CapacityGovernor.diagnostics(name)
   end
 
-  test "Retry-After delays new ordinary admissions without starving protected lanes" do
+  test "after Retry-After expires protected lanes are admitted ahead of ordinary work" do
     name = start_governor(max_in_flight: 1)
     operation = SpaceTraders.API.OperationInventory.fetch!("get-my-agent")
 
@@ -482,29 +488,34 @@ defmodule SpaceTraders.API.CapacityGovernorTest do
       agent = op("get-my-agent")
       recovery = %{purpose: :recovery}
 
-      # One rejection: protected work may probe now; ordinary waits out Retry-After.
-      CapacityGovernor.protocol_rejected(30, name)
-      assert %{status: :proceed} = CapacityGovernor.disposition(agent, recovery, name)
+      # The limit is account-wide: protected work waits out Retry-After too,
+      # since an earlier probe would only earn another rejection.
+      CapacityGovernor.protocol_rejected(2, name)
 
-      assert %{status: :defer, reason: :retry_after, retry_at: ~U[2026-10-07 12:00:30Z]} =
-               CapacityGovernor.disposition(agent, %{}, name)
+      for attrs <- [recovery, %{}] do
+        assert %{status: :defer, reason: :retry_after, retry_at: ~U[2026-10-07 12:00:02Z]} =
+                 CapacityGovernor.disposition(agent, attrs, name)
+      end
 
+      # At expiry protected work sends one probe; nothing else follows it out.
+      advance(clock, 2)
       {:ok, probe} = CapacityGovernor.admit(agent, recovery, name)
 
       assert %{status: :defer, reason: :retry_after} =
                CapacityGovernor.disposition(agent, recovery, name)
 
-      # Sustained rejection backs protected probes off instead of retrying at once.
-      rejected(name, probe)
+      # Sustained rejection: the next probe waits for the later of the server's
+      # Retry-After and the bounded backoff.
+      rejected(name, probe, 5)
 
-      assert %{status: :defer, reason: :retry_after, retry_at: ~U[2026-10-07 12:00:01.000Z]} =
+      assert %{status: :defer, reason: :retry_after, retry_at: ~U[2026-10-07 12:00:07Z]} =
                CapacityGovernor.disposition(agent, recovery, name)
 
-      advance(clock, 1)
+      advance(clock, 5)
       {:ok, probe} = CapacityGovernor.admit(agent, recovery, name)
-      rejected(name, probe)
+      rejected(name, probe, 1)
 
-      assert %{status: :defer, reason: :retry_after, retry_at: ~U[2026-10-07 12:00:03.000Z]} =
+      assert %{status: :defer, reason: :retry_after, retry_at: ~U[2026-10-07 12:00:09.000Z]} =
                CapacityGovernor.disposition(agent, recovery, name)
 
       advance(clock, 2)
@@ -512,9 +523,6 @@ defmodule SpaceTraders.API.CapacityGovernorTest do
       CapacityGovernor.complete(probe, 200, name)
 
       assert %{status: :proceed} = CapacityGovernor.disposition(agent, recovery, name)
-
-      assert %{status: :defer, reason: :retry_after} =
-               CapacityGovernor.disposition(agent, %{}, name)
     end
 
     test "abandoned callers release capacity without reporting any outcome" do
@@ -593,8 +601,8 @@ defmodule SpaceTraders.API.CapacityGovernorTest do
     end
   end
 
-  defp rejected(name, admission) do
-    CapacityGovernor.protocol_rejected(30, name)
+  defp rejected(name, admission, retry_after_seconds) do
+    CapacityGovernor.protocol_rejected(retry_after_seconds, name)
     CapacityGovernor.complete(admission, 429, name)
   end
 
