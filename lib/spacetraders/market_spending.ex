@@ -8,7 +8,7 @@ defmodule SpaceTraders.MarketSpending do
   alias SpaceTraders.CreditCalibration.Version
   alias SpaceTraders.FleetAllocation.{Commitment, Portfolio}
   alias SpaceTraders.FleetGeneration.Generation
-  alias SpaceTraders.FleetStrategy.{Revision, StandingAuthority}
+  alias SpaceTraders.FleetStrategy.StandingAuthority
   alias SpaceTraders.MutationAttempts.Attempt
   alias SpaceTraders.SafetyFence.DependencyKey
 
@@ -235,8 +235,6 @@ defmodule SpaceTraders.MarketSpending do
   def admit(%Attempt{operation_id: operation} = attempt, intent, revision)
       when operation in @credit_operations do
     agent = Repo.get!(Agent, attempt.agent_id)
-    # Fleet Ship acquisition has no Intent; its Revision is the attempt's own.
-    revision = if is_nil(intent), do: attempt_revision(attempt), else: revision
 
     credits =
       case current_credits(agent) do
@@ -296,9 +294,6 @@ defmodule SpaceTraders.MarketSpending do
   end
 
   defp admit_spend(_attempt, _agent, _intent, _revision), do: :ok
-
-  defp attempt_revision(%Attempt{strategy_revision_id: nil}), do: nil
-  defp attempt_revision(%Attempt{strategy_revision_id: id}), do: Repo.get(Revision, id)
 
   defp validate_quote(agent, attempt, spending) when is_map(spending) do
     with {:ok, expected} <- expected_purchase(attempt),

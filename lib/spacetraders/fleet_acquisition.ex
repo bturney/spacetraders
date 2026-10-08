@@ -20,7 +20,7 @@ defmodule SpaceTraders.FleetAcquisition do
   alias SpaceTraders.FleetAllocation
   alias SpaceTraders.FleetGeneration.Generation
   alias SpaceTraders.FleetPlanning
-  alias SpaceTraders.FleetStrategy.{Revision, StandingAuthority}
+  alias SpaceTraders.FleetStrategy.{Revision, StandingAuthority, Strategy}
   alias SpaceTraders.MarketSpending
   alias SpaceTraders.MutationAttempts
   alias SpaceTraders.MutationAttempts.Attempt
@@ -154,7 +154,8 @@ defmodule SpaceTraders.FleetAcquisition do
       current = Repo.one!(from a in Attempt, where: a.id == ^attempt.id, lock: "FOR UPDATE")
 
       with "prepared" <- current.state,
-           :ok <- MarketSpending.admit(current, nil, nil),
+           {:ok, revision} <- current_purchase_authority(current),
+           :ok <- MarketSpending.admit(current, nil, revision),
            {:ok, sent} <- MutationAttempts.mark_sent_or_unknown(current) do
         sent
       else
@@ -169,6 +170,29 @@ defmodule SpaceTraders.FleetAcquisition do
 
       result ->
         result
+    end
+  end
+
+  # Current authority, not the authority the purchase was prepared under: the
+  # active, un-stopped Revision supplies the floor, and a purchase prepared
+  # under any other Revision is withdrawn rather than sent.
+  defp current_purchase_authority(%Attempt{agent_id: agent_id} = attempt) do
+    operator_id = Repo.one!(from a in Agent, where: a.id == ^agent_id, select: a.operator_id)
+
+    strategy =
+      Repo.one(from s in Strategy, where: s.operator_id == ^operator_id, lock: "FOR SHARE")
+
+    case strategy do
+      %Strategy{emergency_stopped_at: stopped} when not is_nil(stopped) ->
+        {:error, :emergency_stopped}
+
+      %Strategy{active_revision_id: id} when not is_nil(id) ->
+        if attempt.strategy_revision_id in [nil, id],
+          do: {:ok, Repo.get!(Revision, id)},
+          else: {:error, :strategy_revision_superseded}
+
+      _ ->
+        {:error, :strategy_revision_absent}
     end
   end
 

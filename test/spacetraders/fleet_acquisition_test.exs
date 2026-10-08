@@ -301,6 +301,56 @@ defmodule SpaceTraders.FleetAcquisitionTest do
     assert commitment.reservations["credits"] == 15_000 + @preparation_exposure
   end
 
+  test "a purchase prepared under a superseded Strategy revision is never sent" do
+    {_scope, agent, revision} = generation()
+    stub_shipyard(agent)
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      case {conn.method, conn.request_path} do
+        {"GET", "/v2/my/agent"} -> overview(conn, agent, @credits)
+        {"POST", "/v2/my/ships"} -> flunk("superseded authority must not dispatch")
+      end
+    end)
+
+    assert {:ok, offer} = SpaceTraders.MarketSpending.acquire_ship_purchase(agent, candidate())
+
+    # The Operator activates a newer revision before the purchase's send marker.
+    newer =
+      Repo.insert!(%Revision{
+        fleet_strategy_id: revision.fleet_strategy_id,
+        number: 2,
+        source: "operator",
+        activated_at: DateTime.utc_now(:second),
+        document: revision.document
+      })
+
+    Repo.update_all(from(s in Strategy, where: s.id == ^revision.fleet_strategy_id),
+      set: [active_revision_id: newer.id]
+    )
+
+    assert {:error, :strategy_revision_superseded} =
+             SpaceTraders.Observability.with_context(
+               [
+                 operator_id: agent.operator_id,
+                 agent_id: agent.id,
+                 strategy_revision_id: revision.id
+               ],
+               fn ->
+                 SpaceTraders.API.purchase_ship(
+                   SpaceTraders.API.AgentTokenReference.new(agent),
+                   "SHIP_LIGHT_HAULER",
+                   "X1-UX81-A1",
+                   spending: offer
+                 )
+               end
+             )
+
+    assert [%{state: "not_sent", sent_or_unknown_at: nil, strategy_revision_id: id}] =
+             purchase_attempts(agent)
+
+    assert id == revision.id
+  end
+
   test "Shipyard evidence that ages before the send marker prevents the purchase" do
     {_scope, agent, _revision} = generation()
     start_supervised!({SpaceTraders.TestClock, DateTime.utc_now()})
