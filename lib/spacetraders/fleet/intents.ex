@@ -4927,21 +4927,24 @@ defmodule SpaceTraders.Fleet.Intents do
   defp block_protocol_backpressure(intent, reason), do: mark_infeasible(intent, reason)
 
   defp defer_for_api_capacity(intent) do
-    due_at =
-      intent
-      |> MutationAttempts.latest_for_intent()
-      |> CapacityDeferral.disposition()
-      |> CapacityDeferral.wake_at(Clock.utc_now())
+    attempt = MutationAttempts.latest_for_intent(intent)
+    disposition = CapacityDeferral.disposition(attempt)
+    due_at = CapacityDeferral.wake_at(disposition, Clock.utc_now())
 
     ship = Repo.get!(Ship, intent.ship_id)
     agent = Repo.get!(AgentRecord, ship.agent_id)
 
     result =
       with_current_intent(intent, fn current ->
-        attrs = %{
-          status: "waiting",
-          blocker: Fleet.intent_blocker(:api_capacity_deferred)
-        }
+        # A re-deferral keeps the original blocker, so its observation time
+        # says how long the work has been waiting on capacity.
+        blocker =
+          case current.blocker do
+            %{reason: "api_capacity_deferred"} = waiting -> waiting
+            _ -> Fleet.intent_blocker(:api_capacity_deferred)
+          end
+
+        attrs = %{status: "waiting", blocker: blocker}
 
         attrs =
           case MutationAttempts.latest_for_intent(current) do
@@ -4964,6 +4967,7 @@ defmodule SpaceTraders.Fleet.Intents do
 
     case result do
       {:ok, updated, event} ->
+        CapacityDeferral.observe(disposition, attempt, updated.blocker.observed_at)
         ShipServer.arm(agent, ship.symbol, event)
         {:ok, updated}
 

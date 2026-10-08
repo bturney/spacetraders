@@ -325,6 +325,71 @@ defmodule SpaceTraders.CapacityDeferralTest do
     end
   end
 
+  describe "prolonged deferral observability" do
+    setup do
+      governor = :"capacity_deferral_observed_#{System.unique_integer([:positive])}"
+      start_supervised!({CapacityGovernor, name: governor})
+      previous = Application.fetch_env(:spacetraders, CapacityDeferral)
+      Application.put_env(:spacetraders, CapacityDeferral, governor: governor)
+
+      on_exit(fn ->
+        case previous do
+          {:ok, value} -> Application.put_env(:spacetraders, CapacityDeferral, value)
+          :error -> Application.delete_env(:spacetraders, CapacityDeferral)
+        end
+      end)
+
+      handler = "capacity-deferral-#{System.unique_integer([:positive])}"
+      test_pid = self()
+
+      :ok =
+        :telemetry.attach(
+          handler,
+          [:spacetraders, :intent, :capacity_deferral],
+          fn _event, measurements, metadata, _config ->
+            send(test_pid, {:capacity_deferral, measurements, metadata})
+          end,
+          nil
+        )
+
+      on_exit(fn -> :telemetry.detach(handler) end)
+      %{governor: governor}
+    end
+
+    test "each re-deferral reports how long the work has waited, with bounded labels only", %{
+      governor: governor
+    } do
+      %{agent: agent, intent: intent} = transfer_fixture()
+
+      {:ok, %{intent: selected}} = RecordedAction.prepare(agent, intent, prepared_action(agent))
+
+      CapacityGovernor.protocol_rejected(30, governor)
+      stub_throttled_reads()
+      _ = Intents.advance(agent, selected, nil)
+
+      assert_receive {:capacity_deferral, %{count: 1, deferred_seconds: first}, metadata}
+      assert first < 5
+      assert metadata == %{reason: :retry_after, work: :ordinary}
+
+      # The work has already been waiting for two minutes when it is re-deferred.
+      current = Repo.get!(Intent, selected.id)
+      waited_since = DateTime.add(current.blocker.observed_at, -120, :second)
+
+      current
+      |> Ecto.Changeset.change()
+      |> Ecto.Changeset.put_embed(:blocker, %{current.blocker | observed_at: waited_since})
+      |> Repo.update!()
+
+      :ok = Timeline.fire_event(wakeup_event())
+      _ = Intents.reconcile(agent.id, "PRODUCER", nil, :intent_retry, selected.id)
+
+      assert_receive {:capacity_deferral, %{deferred_seconds: prolonged}, %{work: :ordinary}}
+      assert prolonged >= 120
+      assert Repo.get!(Intent, selected.id).blocker.observed_at == waited_since
+      SpaceTraders.Quiesced.stop_ship("PRODUCER")
+    end
+  end
+
   describe "Ship runtime wakeup" do
     setup do
       governor = :"capacity_deferral_runtime_#{System.unique_integer([:positive])}"

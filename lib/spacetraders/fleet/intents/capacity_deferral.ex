@@ -74,6 +74,27 @@ defmodule SpaceTraders.Fleet.Intents.CapacityDeferral do
     )
   end
 
+  @doc """
+  Reports one (re-)deferral with bounded labels only: the governor's reason
+  and whether the resumed work is protected recovery or ordinary work.
+  `deferred_seconds` is how long the work has been waiting since `since`.
+  """
+  @spec observe(Disposition.t(), Attempt.t() | nil, DateTime.t()) :: :ok
+  def observe(%Disposition{reason: reason}, attempt, %DateTime{} = since) do
+    :telemetry.execute(
+      [:spacetraders, :intent, :capacity_deferral],
+      %{count: 1, deferred_seconds: max(DateTime.diff(DateTime.utc_now(), since), 0)},
+      %{reason: reason, work: work(attempt)}
+    )
+  end
+
+  defp work(attempt) do
+    case resumed_work(attempt) do
+      {_operation, %{purpose: :recovery}} -> :recovery
+      _ -> :ordinary
+    end
+  end
+
   defp resumed_work(%Attempt{state: state})
        when state in ["sent_or_unknown", "ambiguous", "bounded_unknown"],
        do: {"get-my-ship", %{purpose: :recovery}}
