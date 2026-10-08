@@ -7,6 +7,7 @@ defmodule SpaceTraders.EvidenceSchedulingTest do
   alias SpaceTraders.Agent.Scope
   alias SpaceTraders.{Clock, Evidence, FleetStrategy, TestClock}
   alias SpaceTraders.Evidence.DemandScheduler
+  alias SpaceTraders.Quiesced
 
   @now ~U[2030-01-01 00:00:00.000000Z]
   @subject "market:X1-UX81:X1-UX81-A1"
@@ -70,7 +71,7 @@ defmodule SpaceTraders.EvidenceSchedulingTest do
     assert persisted.id == demand.id
     assert persisted.due_at == due_at
 
-    start_supervised!({DemandScheduler, []})
+    start_supervised!(Quiesced.child_spec({DemandScheduler, []}))
     assert_receive {:observation_demand_due, ^agent_id, [@subject]}, 1_000
     assert [%{id: open_id}] = Evidence.list_open_demands(agent)
     assert open_id == demand.id
@@ -84,7 +85,7 @@ defmodule SpaceTraders.EvidenceSchedulingTest do
     assert {:ok, demand} =
              Evidence.request_demand(agent, revision, Map.put(@demand, :due_at, due_at))
 
-    start_supervised!({DemandScheduler, []})
+    start_supervised!(Quiesced.child_spec({DemandScheduler, []}))
 
     assert :ok = stop_supervised!(DemandScheduler)
     assert :ok = stop_supervised!(TestClock)
@@ -92,7 +93,7 @@ defmodule SpaceTraders.EvidenceSchedulingTest do
 
     assert Evidence.earliest_due_at() == due_at
     assert Evidence.due_demands() == []
-    start_supervised!({DemandScheduler, []})
+    start_supervised!(Quiesced.child_spec({DemandScheduler, []}))
 
     TestClock.advance(29)
     refute_receive {:observation_demand_due, _, _}
@@ -124,7 +125,7 @@ defmodule SpaceTraders.EvidenceSchedulingTest do
                })
              )
 
-    start_supervised!({DemandScheduler, []})
+    start_supervised!(Quiesced.child_spec({DemandScheduler, []}))
     TestClock.advance(30)
     assert_receive {:observation_demand_due, ^agent_id, [@subject]}, 1_000
 
@@ -141,7 +142,7 @@ defmodule SpaceTraders.EvidenceSchedulingTest do
     assert {:ok, demand} =
              Evidence.request_demand(agent, revision, Map.put(@demand, :due_at, @now))
 
-    start_supervised!({DemandScheduler, []})
+    start_supervised!(Quiesced.child_spec({DemandScheduler, []}))
     assert_receive {:observation_demand_due, ^agent_id, [@subject]}, 1_000
 
     TestClock.advance(30)
@@ -177,7 +178,7 @@ defmodule SpaceTraders.EvidenceSchedulingTest do
     assert {:ok, _overdue} =
              Evidence.request_demand(agent, revision, Map.put(@demand, :due_at, @now))
 
-    start_supervised!({DemandScheduler, []})
+    start_supervised!(Quiesced.child_spec({DemandScheduler, []}))
     assert_receive {:observation_demand_due, ^agent_id, [@subject]}, 1_000
 
     Phoenix.PubSub.broadcast(
@@ -255,7 +256,7 @@ defmodule SpaceTraders.EvidenceSchedulingTest do
                Map.put(@demand, :due_at, DateTime.add(@now, 60, :second))
              )
 
-    start_supervised!({DemandScheduler, []})
+    start_supervised!(Quiesced.child_spec({DemandScheduler, []}))
 
     assert {:ok, replacement} =
              Evidence.replace_demand(original, %{due_at: DateTime.add(@now, 120, :second)})
@@ -294,7 +295,7 @@ defmodule SpaceTraders.EvidenceSchedulingTest do
     assert :ok = stop_supervised!(DemandScheduler)
     assert :ok = stop_supervised!(TestClock)
     start_supervised!({TestClock, DateTime.add(@now, 60, :second)})
-    start_supervised!({DemandScheduler, []})
+    start_supervised!(Quiesced.child_spec({DemandScheduler, []}))
 
     assert_receive {:observation_demand_due, ^agent_id, [@subject]}, 1_000
     assert [persisted] = Evidence.list_open_demands(agent)
