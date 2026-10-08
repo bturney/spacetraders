@@ -149,6 +149,27 @@ defmodule SpaceTraders.API.ErrorTest do
       assert rejections >= 1
     end
 
+    # #589: Req reports Retry-After in milliseconds; passing that to the
+    # governor as seconds turned a 2-second window into the 60-second clamp.
+    test "the governor defers ordinary work for the server's Retry-After seconds" do
+      Req.Test.expect(SpaceTraders.API, 1, fn conn ->
+        conn
+        |> Plug.Conn.put_resp_header("retry-after", "2")
+        |> Plug.Conn.put_status(429)
+        |> Req.Test.json(%{"error" => %{"code" => 429, "message" => "rate limited"}})
+      end)
+
+      before = DateTime.utc_now()
+
+      assert {:error, %GameplayError{code: 429}} =
+               API.get_ship(agent_token_reference(), "SHIP-1", retry: false)
+
+      assert %{retry_after_until: %DateTime{} = until} =
+               SpaceTraders.API.CapacityGovernor.diagnostics()
+
+      assert DateTime.diff(until, before, :millisecond) in 1_000..3_000
+    end
+
     test "does not replay a failed mutation" do
       Req.Test.expect(SpaceTraders.API, 1, fn conn ->
         conn

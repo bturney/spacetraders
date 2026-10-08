@@ -787,9 +787,11 @@ defmodule SpaceTraders.API do
     end
   end
 
-  defp report_protocol_rejection(delay_seconds)
-       when is_integer(delay_seconds) and delay_seconds > 0,
-       do: CapacityGovernor.protocol_rejected(delay_seconds)
+  # Req.Response.get_retry_after/1 returns milliseconds; the governor takes
+  # whole seconds, rounded up so a sub-second window still defers.
+  defp report_protocol_rejection(delay_ms)
+       when is_integer(delay_ms) and delay_ms > 0,
+       do: CapacityGovernor.protocol_rejected(div(delay_ms + 999, 1_000))
 
   defp report_protocol_rejection(_delay), do: CapacityGovernor.protocol_rejected(0)
 
