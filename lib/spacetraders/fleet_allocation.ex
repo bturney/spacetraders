@@ -68,6 +68,9 @@ defmodule SpaceTraders.FleetAllocation do
     defstruct @enforce_keys
   end
 
+  # How long a completed buy keeps its Commitment while its next leg is created.
+  @leg_handoff_seconds 120
+
   @doc """
   Records the Neutral Wait for one authoritative zero-admissible allocation
   result at the single mint site fixed by ADR 0012.
@@ -1136,38 +1139,6 @@ defmodule SpaceTraders.FleetAllocation do
     SpaceTraders.MarketSpending.lock_agent(generation.agent_id)
   end
 
-  @doc "Returns an unsent purchase to Allocation without releasing any other unfinished owner's protections."
-  def return_purchase_for_replanning(agent, intent, attempt, reason) do
-    if intent.fleet_commitment_id &&
-         not Repo.exists?(
-           from i in Intent,
-             where:
-               i.fleet_commitment_id == ^intent.fleet_commitment_id and
-                 i.id != ^intent.id and i.status in ^Intent.unfinished_states()
-         ) do
-      Repo.update_all(from(c in Commitment, where: c.id == ^intent.fleet_commitment_id),
-        set: [unwind_state: :released]
-      )
-
-      Repo.delete_all(
-        from c in "fleet_commitment_claims",
-          where: c.fleet_commitment_id == ^intent.fleet_commitment_id
-      )
-    end
-
-    Repo.insert!(%SpaceTraders.Outbox.Notification{
-      topic: "fleet_market_evidence",
-      event: "market_purchase_withdrawn",
-      payload: %{
-        "agent_id" => agent.id,
-        "waypoint" => intent.target_waypoint,
-        "intent_id" => intent.id,
-        "mutation_attempt_id" => attempt.id,
-        "reason" => to_string(reason)
-      }
-    })
-  end
-
   defp realized_economics(episode_id) do
     totals =
       from(intent in Intent,
@@ -1220,8 +1191,13 @@ defmodule SpaceTraders.FleetAllocation do
   # One statement, so a leg that finishes or starts mid-check is still seen.
   # A completed buy commits before its round trip requests the next leg; until
   # that leg exists the bought Cargo is still the Commitment's work, and
-  # superseding it would refuse the sell leg and strand the Cargo aboard.
+  # superseding it would refuse the sell leg and strand the Cargo aboard. The
+  # round trip requests that leg straight after the buy, so the guard lasts
+  # only @leg_handoff_seconds: a leg that never appears cannot hold the
+  # Portfolio against replanning or revision activation indefinitely.
   defp unresolved_commitment_intent?(portfolio_ids) do
+    handoff_cutoff = DateTime.add(DateTime.utc_now(:second), -@leg_handoff_seconds, :second)
+
     Repo.exists?(
       from(intent in Intent,
         as: :intent,
@@ -1232,6 +1208,7 @@ defmodule SpaceTraders.FleetAllocation do
             intent.caller == "commitment" and
             (intent.status in ^Intent.unfinished_states() or
                (intent.type == "buy" and intent.status == "completed" and
+                  intent.finished_at >= ^handoff_cutoff and
                   not exists(
                     from(later in Intent,
                       where:

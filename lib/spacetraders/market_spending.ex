@@ -15,7 +15,16 @@ defmodule SpaceTraders.MarketSpending do
   @minimum_margin Version.hard_lower_bound()
   @freshness_seconds 30
   @shipyard_freshness_seconds 300
-  @credit_operations ~w(purchase-cargo purchase-ship refuel-ship jump-ship install-ship-module remove-ship-module install-ship-mount remove-ship-mount repair-ship)
+  # The one list of credit-bearing families. Quote-bounded operations bill one
+  # Market good in explicit units; Ship purchase bills a Shipyard offer. Module
+  # and mount changes and repair owe Shipyard fees with no retained quote yet:
+  # they serialize and honour the spending pause, and while unresolved their
+  # unknown charge fails other spending closed rather than inventing a bound.
+  @spending_operations ~w(purchase-cargo refuel-ship jump-ship)
+  @credit_operations ["purchase-ship" | @spending_operations] ++
+                       ~w(install-ship-module remove-ship-module install-mount remove-mount repair-ship)
+  # Selected Ship action kinds whose recorded operation is credit-bearing.
+  @credit_action_kinds ~w(buy refuel jump install_module remove_module)
 
   @doc """
   The one worst-case exposure calculation (ADR 0013), shared by selection-time
@@ -146,8 +155,6 @@ defmodule SpaceTraders.MarketSpending do
     end
   end
 
-  @spending_operations ~w(purchase-cargo refuel-ship jump-ship)
-
   @doc """
   Prices one Fleet Ship acquisition from the fresh Shipyard offer evidence the
   candidate was selected on. Missing or stale evidence yields an error rather
@@ -201,8 +208,13 @@ defmodule SpaceTraders.MarketSpending do
     end
   end
 
+  @doc "Whether a selected Ship action is credit-bearing (Agent-serialized)."
+  def credit_bearing_action?(%{"kind" => kind}), do: kind in @credit_action_kinds
+  def credit_bearing_action?(_action), do: false
+
+  # Lock order for every spending writer: Agent -> Intent -> MutationAttempt.
   def lock_agent(%Attempt{operation_id: operation, agent_id: id})
-      when operation in ["purchase-ship" | @spending_operations],
+      when operation in @credit_operations,
       do: lock_agent(id)
 
   def lock_agent(%Attempt{}), do: :ok

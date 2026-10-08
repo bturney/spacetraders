@@ -2675,7 +2675,7 @@ defmodule SpaceTraders.Fleet.Intents do
   @doc false
   def with_current_intent(%Intent{id: id} = expected, fun) do
     case Repo.transaction(fn ->
-           if get_in(expected.in_flight_action || %{}, ["kind"]) in ["buy", "refuel", "jump"] do
+           if SpaceTraders.MarketSpending.credit_bearing_action?(expected.in_flight_action) do
              ship = Repo.get!(Ship, expected.ship_id)
              SpaceTraders.MarketSpending.lock_agent(ship.agent_id)
            end

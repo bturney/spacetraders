@@ -41,6 +41,31 @@ defmodule SpaceTraders.MarketSpendingAdmissionTest do
     end
   end
 
+  test "every credit-bearing Ship action, module refits included, serializes on the Agent" do
+    agent = operator_fixture() |> agent_fixture()
+
+    for operation <-
+          ~w(purchase-cargo refuel-ship jump-ship install-ship-module remove-ship-module) do
+      assert %SpaceTraders.Agent.Agent{} =
+               SpaceTraders.MarketSpending.lock_agent(%SpaceTraders.MutationAttempts.Attempt{
+                 operation_id: operation,
+                 agent_id: agent.id
+               })
+    end
+
+    for kind <- ~w(buy refuel jump install_module remove_module) do
+      assert SpaceTraders.MarketSpending.credit_bearing_action?(%{"kind" => kind})
+    end
+
+    refute SpaceTraders.MarketSpending.credit_bearing_action?(%{"kind" => "sell"})
+
+    assert :ok =
+             SpaceTraders.MarketSpending.lock_agent(%SpaceTraders.MutationAttempts.Attempt{
+               operation_id: "sell-cargo",
+               agent_id: agent.id
+             })
+  end
+
   test "purchase preparation retains the acquired quote and calibrated exposure before any marker" do
     agent = operator_fixture() |> agent_fixture()
     stub_quote(agent, 10, 2_000)

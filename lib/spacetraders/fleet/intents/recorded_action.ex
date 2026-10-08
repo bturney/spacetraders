@@ -27,15 +27,7 @@ defmodule SpaceTraders.Fleet.Intents.RecordedAction do
   alias SpaceTraders.MutationAttempts
   alias SpaceTraders.MutationAttempts.Attempt
   alias SpaceTraders.Repo
-
-  @spending_replan_reasons [
-    :market_quote_stale_or_missing,
-    :insufficient_unreserved_headroom,
-    :authoritative_credit_facts_required,
-    :unbounded_purchase_exposure,
-    :credit_calibration_superseded,
-    :credit_spending_paused
-  ]
+  alias SpaceTraders.SpendingWithdrawal
 
   @doc "Commits one selected outcome and its prepared attempt, without sending."
   def prepare(
@@ -47,7 +39,7 @@ defmodule SpaceTraders.Fleet.Intents.RecordedAction do
          :ok <- purchase_preparation_authority(agent, intent, action),
          {:ok, spending} <- MarketSpending.acquire(agent, intent, action) do
       Repo.transaction(fn ->
-        if spending, do: MarketSpending.lock_agent(agent.id)
+        if MarketSpending.credit_bearing_action?(action), do: MarketSpending.lock_agent(agent.id)
         current = locked_intent(intent.id)
 
         with %Intent{} <- current,
@@ -93,8 +85,14 @@ defmodule SpaceTraders.Fleet.Intents.RecordedAction do
 
   def prepare(_agent, _intent, _action), do: {:error, :invalid_recorded_action}
 
-  defp purchase_preparation_authority(agent, intent, %{"kind" => kind})
-       when kind in ["buy", "refuel", "jump"] do
+  # Spending authority is checked before any quote read, under the Agent lock.
+  defp purchase_preparation_authority(agent, intent, action) do
+    if MarketSpending.credit_bearing_action?(action),
+      do: locked_preparation_authority(agent, intent),
+      else: :ok
+  end
+
+  defp locked_preparation_authority(agent, intent) do
     Repo.transaction(fn ->
       MarketSpending.lock_agent(agent.id)
 
@@ -113,8 +111,6 @@ defmodule SpaceTraders.Fleet.Intents.RecordedAction do
       {:error, reason} -> {:error, reason}
     end
   end
-
-  defp purchase_preparation_authority(_agent, _intent, _action), do: :ok
 
   @doc "Checks retry authority before capability reads; preparation and final admission recheck it."
   def retry_authority(
@@ -144,7 +140,9 @@ defmodule SpaceTraders.Fleet.Intents.RecordedAction do
          :ok <- retry_authority(agent, intent, absent),
          {:ok, spending} <- MarketSpending.acquire(agent, intent, intent.in_flight_action) do
       Repo.transaction(fn ->
-        if spending, do: MarketSpending.lock_agent(agent.id)
+        if MarketSpending.credit_bearing_action?(intent.in_flight_action),
+          do: MarketSpending.lock_agent(agent.id)
+
         current = locked_intent(intent.id)
 
         with %Intent{} <- current,
@@ -209,14 +207,13 @@ defmodule SpaceTraders.Fleet.Intents.RecordedAction do
           emit_phase(:marker_committed, admitted)
           result
 
-        {:ok, result} ->
-          if match?(
-               {:error, reason}
-               when reason in @spending_replan_reasons,
-               result
-             ),
-             do: SpaceTraders.Outbox.dispatch_pending()
+        {:ok, {:error, reason} = result} ->
+          if SpendingWithdrawal.replan_reason?(reason),
+            do: SpaceTraders.Outbox.dispatch_pending()
 
+          result
+
+        {:ok, result} ->
           result
 
         {:error, reason} ->
@@ -318,36 +315,11 @@ defmodule SpaceTraders.Fleet.Intents.RecordedAction do
 
   # Only a Market purchase can be re-planned with fresh evidence. Refuel and jump
   # spending stays paused: the Intent blocks and the Operator decides.
-  defp suppress_before_send(current, %Attempt{operation_id: "purchase-cargo"} = attempt, reason)
-       when reason in @spending_replan_reasons do
-    with {:ok, _} <- MutationAttempts.record_not_sent(attempt, inspect_reason(reason)) do
-      current
-      |> Ecto.Changeset.change(
-        status: "superseded",
-        in_flight_action: nil,
-        mutation_attempt_id: nil,
-        finished_at: DateTime.utc_now(:second),
-        blocker: nil,
-        last_action_result: %{
-          "outcome" => "spending_replan_required",
-          "reason" => inspect_reason(reason),
-          "mutation_attempt_id" => attempt.id
-        }
-      )
-      |> Repo.update!()
-
-      FleetAllocation.return_purchase_for_replanning(
-        Repo.get!(Agent, attempt.agent_id),
-        current,
-        attempt,
-        reason
-      )
-
-      {:error, reason}
-    end
+  defp suppress_before_send(current, attempt, reason) do
+    if SpendingWithdrawal.replannable?(attempt, reason),
+      do: SpendingWithdrawal.withdraw(current, attempt, reason),
+      else: suppress(attempt, reason)
   end
-
-  defp suppress_before_send(_current, attempt, reason), do: suppress(attempt, reason)
 
   defp inspect_reason(reason) when is_atom(reason), do: Atom.to_string(reason)
   defp inspect_reason(reason), do: inspect(reason)

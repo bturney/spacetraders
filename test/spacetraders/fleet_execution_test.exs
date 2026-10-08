@@ -279,7 +279,10 @@ defmodule SpaceTraders.FleetExecutionTest do
       assert {:ok, %{action: :activated, portfolio: portfolio, round_trip: buy}} =
                FleetExecution.reconcile_market_evidence(scope, agent, revision, "X1", capacity())
 
-      Repo.update!(Ecto.Changeset.change(buy, status: "completed"))
+      Repo.update!(
+        Ecto.Changeset.change(buy, status: "completed", finished_at: DateTime.utc_now(:second))
+      )
+
       market_observation(agent, "X1-A1", 10, "refreshed")
 
       assert {:error, :unresolved_commitment_evidence} =
@@ -289,6 +292,31 @@ defmodule SpaceTraders.FleetExecutionTest do
                FleetAllocation.current_portfolio(scope, agent)
 
       assert id == portfolio.id
+    end
+
+    # The handoff guard is bounded: a completed buy whose next leg never
+    # appeared cannot hold the Portfolio against replanning indefinitely.
+    test "a completed buy stops protecting its Commitment once the leg handoff window passes" do
+      {operator, agent, revision} = market_generation()
+      scope = Scope.for_operator(operator)
+
+      observe_marketplace(agent, "X1-A1")
+      observe_marketplace(agent, "X1-A2")
+      market_observation(agent, "X1-A1", 10)
+      market_observation(agent, "X1-A2", 25)
+      stub_activation_agent(agent)
+
+      assert {:ok, %{action: :activated, portfolio: portfolio, round_trip: buy}} =
+               FleetExecution.reconcile_market_evidence(scope, agent, revision, "X1", capacity())
+
+      stale = DateTime.utc_now(:second) |> DateTime.add(-600, :second)
+      Repo.update!(Ecto.Changeset.change(buy, status: "completed", finished_at: stale))
+      market_observation(agent, "X1-A1", 10, "refreshed")
+
+      assert {:ok, _} =
+               FleetExecution.reconcile_market_evidence(scope, agent, revision, "X1", capacity())
+
+      assert %Portfolio{superseded_at: %DateTime{}} = Repo.get!(Portfolio, portfolio.id)
     end
 
     defp market_generation do
