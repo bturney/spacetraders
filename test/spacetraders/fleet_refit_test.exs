@@ -21,6 +21,7 @@ defmodule SpaceTraders.FleetRefitTest do
   @system "X1-UX81"
   @home "X1-UX81-A1"
   @supply "X1-UX81-A2"
+  @shipyard_path "/v2/systems/X1-UX81/waypoints/X1-UX81-A2/shipyard"
 
   for kind <- ["install_module", "remove_module"] do
     @tag :refit_progression
@@ -38,6 +39,9 @@ defmodule SpaceTraders.FleetRefitTest do
           case {conn.method, conn.request_path} do
             {"GET", "/v2/my/agent"} ->
               Req.Test.json(conn, %{"data" => %{"symbol" => agent.symbol, "credits" => 18_000}})
+
+            {"GET", @shipyard_path} ->
+              Req.Test.json(conn, %{"data" => shipyard_body()})
 
             {"GET", _} ->
               body =
@@ -325,12 +329,30 @@ defmodule SpaceTraders.FleetRefitTest do
       "kind" => kind,
       "module_symbol" => @module,
       "quantity" => 1,
+      "waypoint" => @supply,
       "installed_before" => if(kind == "install_module", do: 0, else: 3),
       "cargo_before" => if(kind == "install_module", do: 1, else: 0)
     }
 
+    stub_modification_quote(agent)
     {intent, action}
   end
+
+  # Module preparation quotes the Shipyard fee and reads authoritative credits.
+  defp stub_modification_quote(agent) do
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      case {conn.method, conn.request_path} do
+        {"GET", "/v2/my/agent"} ->
+          Req.Test.json(conn, %{"data" => %{"symbol" => agent.symbol, "credits" => 18_000}})
+
+        {"GET", @shipyard_path} ->
+          Req.Test.json(conn, %{"data" => shipyard_body()})
+      end
+    end)
+  end
+
+  defp shipyard_body,
+    do: %{"symbol" => @supply, "shipTypes" => [], "modificationsFee" => 100}
 
   defp refit_after_body(symbol, "install_module"), do: fitted_ship_body(symbol)
   defp refit_after_body(symbol, "remove_module"), do: removed_ship_body(symbol)
@@ -381,7 +403,8 @@ defmodule SpaceTraders.FleetRefitTest do
       ("POST " <> navigate_path) => fn -> %{"data" => %{"nav" => nav_in_transit()}} end,
       ("POST " <> purchase_path) => fn -> %{"data" => purchase_response()} end,
       ("POST " <> install_path) => fn -> %{"data" => install_response()} end,
-      ("GET " <> market_path) => fn -> %{"data" => market_body()} end
+      ("GET " <> market_path) => fn -> %{"data" => market_body()} end,
+      ("GET " <> @shipyard_path) => fn -> %{"data" => shipyard_body()} end
     })
 
     assert {:ok, %Intent{type: "install_module", status: "waiting", target_waypoint: @supply}} =
@@ -432,7 +455,11 @@ defmodule SpaceTraders.FleetRefitTest do
       ("POST " <> remove_path) => fn ->
         :persistent_term.put({__MODULE__, :removed}, removed: true)
         %{"data" => removal_response()}
-      end
+      end,
+      "GET /v2/my/agent" => fn ->
+        %{"data" => %{"symbol" => agent.symbol, "credits" => 50_000}}
+      end,
+      ("GET " <> @shipyard_path) => fn -> %{"data" => shipyard_body()} end
     })
 
     candidate = removal_candidate(ship_symbol)
@@ -570,6 +597,12 @@ defmodule SpaceTraders.FleetRefitTest do
         {"GET", "/v2/my/ships/" <> _} ->
           Req.Test.json(conn, %{"data" => fitted_ship_body(ship.symbol, installed: 3)})
 
+        {"GET", "/v2/my/agent"} ->
+          Req.Test.json(conn, %{"data" => %{"symbol" => agent.symbol, "credits" => 50_000}})
+
+        {"GET", @shipyard_path} ->
+          Req.Test.json(conn, %{"data" => shipyard_body()})
+
         {"POST", ^remove_path} ->
           conn
           |> Plug.Conn.put_resp_header("retry-after", "0")
@@ -705,6 +738,9 @@ defmodule SpaceTraders.FleetRefitTest do
 
         {"GET", ^market_path} ->
           Req.Test.json(conn, %{"data" => market_body()})
+
+        {"GET", @shipyard_path} ->
+          Req.Test.json(conn, %{"data" => shipyard_body()})
 
         {"GET", ^ship_path} ->
           game = Elixir.Agent.get(state, & &1)

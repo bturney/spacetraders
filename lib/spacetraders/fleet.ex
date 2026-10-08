@@ -939,6 +939,10 @@ defmodule SpaceTraders.Fleet do
       when code in ["market_quote_stale_or_missing", "market_quote_unavailable"] ->
         {"game_state", "fresh_market_quote_available", ["refresh_market", "resume"]}
 
+      {code, _reason}
+      when code in ["modification_fee_stale_or_missing", "modification_fee_unavailable"] ->
+        {"game_state", "fresh_shipyard_fee_available", ["refresh_shipyard", "resume"]}
+
       {code, _reason} when code in ["insufficient_credits", "antimatter_unavailable"] ->
         {"operator", "jump_resources_available", ["acquire_credits", "buy_antimatter", "resume"]}
 

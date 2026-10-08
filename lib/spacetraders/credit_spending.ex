@@ -2,8 +2,8 @@ defmodule SpaceTraders.CreditSpending do
   @moduledoc """
   Credit-bearing spending authority (ADR 0013): the one worst-case exposure
   calculation and the quote-backed admission shared by selection-time
-  Reservations, recorded Ship spending (Market purchase, refuel, jump) and
-  Fleet Ship purchase.
+  Reservations, recorded Ship spending (Market purchase, refuel, jump, module
+  install/removal fee) and Fleet Ship purchase.
   """
 
   import Ecto.Query
@@ -11,6 +11,7 @@ defmodule SpaceTraders.CreditSpending do
   alias SpaceTraders.Agent.Agent
   alias SpaceTraders.{Clock, CreditCalibration, Evidence, Repo, World}
   alias SpaceTraders.CreditCalibration.Version
+  alias SpaceTraders.CreditSpending.ModificationFee
   alias SpaceTraders.FleetAllocation.{Commitment, Portfolio}
   alias SpaceTraders.FleetGeneration.Generation
   alias SpaceTraders.FleetStrategy.StandingAuthority
@@ -21,13 +22,15 @@ defmodule SpaceTraders.CreditSpending do
   @freshness_seconds 30
   @shipyard_freshness_seconds 300
   # The one list of credit-bearing families. Quote-bounded operations bill one
-  # Market good in explicit units; Ship purchase bills a Shipyard offer. Module
-  # and mount changes and repair owe Shipyard fees with no retained quote yet:
-  # they serialize and honour the spending pause, and while unresolved their
-  # unknown charge fails other spending closed rather than inventing a bound.
-  @spending_operations ~w(purchase-cargo refuel-ship jump-ship)
+  # Market good in explicit units, or one Shipyard modification fee; Ship
+  # purchase bills a Shipyard offer. Mount changes and repair have no adapter
+  # and no retained quote yet: they serialize and honour the spending pause,
+  # and while unresolved their unknown charge fails other spending closed
+  # rather than inventing a bound.
+  @market_operations ~w(purchase-cargo refuel-ship jump-ship)
+  @spending_operations @market_operations ++ ModificationFee.operations()
   @credit_operations ["purchase-ship" | @spending_operations] ++
-                       ~w(install-ship-module remove-ship-module install-mount remove-mount repair-ship)
+                       ~w(install-mount remove-mount repair-ship)
   # Selected Ship action kinds whose recorded operation is credit-bearing.
   @credit_action_kinds ~w(buy refuel jump install_module remove_module)
 
@@ -58,6 +61,12 @@ defmodule SpaceTraders.CreditSpending do
 
   # Reads run before the Intent/Attempt transaction. Reuse preserves original age.
   def acquire(agent, intent, action) do
+    if ModificationFee.action?(action),
+      do: acquire_modification(agent, action),
+      else: acquire_market(agent, intent, action)
+  end
+
+  defp acquire_market(agent, intent, action) do
     case purchase_request(intent, action) do
       {:ok, request} -> acquire_quote(agent, request)
       :none -> {:ok, nil}
@@ -160,6 +169,35 @@ defmodule SpaceTraders.CreditSpending do
     end
   end
 
+  # One module install or removal bills the Shipyard fee once.
+  defp acquire_modification(agent, action) do
+    calibration = CreditCalibration.active()
+
+    with {:ok, quote} <- ModificationFee.acquire(agent, action["waypoint"]),
+         {:ok, credits} <- acquire_credits(agent),
+         true <-
+           credits.value.symbol == agent.symbol and is_integer(credits.value.credits) and
+             credits.value.credits >= 0 do
+      {:ok,
+       %{
+         "kind" => "modification",
+         "quote_observation_id" => quote.observation.id,
+         "quote_observed_at" => DateTime.to_iso8601(quote.observation.observed_at),
+         "credit_observation_id" => credits.observation.id,
+         "waypoint" => action["waypoint"],
+         "module_symbol" => action["module_symbol"],
+         "unit_price" => quote.fee,
+         "units" => 1,
+         "calibration_version" => calibration.version,
+         "margin_percent" => calibration.margin_percent,
+         "worst_case_exposure" => worst_case_exposure(quote.fee, 1, calibration.margin_percent)
+       }}
+    else
+      {:error, reason} -> {:error, reason}
+      _ -> {:error, :authoritative_credit_facts_required}
+    end
+  end
+
   @doc """
   Prices one Fleet Ship acquisition from the fresh Shipyard offer evidence the
   candidate was selected on. Missing or stale evidence yields an error rather
@@ -255,14 +293,14 @@ defmodule SpaceTraders.CreditSpending do
 
   def admit(_attempt, _intent, _revision), do: :ok
 
-  # Market purchase, refuel and jump/antimatter share one admission rule; the
-  # prepared request defines the good and units each one bills.
+  # Market purchase, refuel, jump/antimatter and module fees share one
+  # admission rule; the prepared request defines what each one bills.
   defp admit_spend(%Attempt{operation_id: operation} = attempt, agent, intent, revision)
        when operation in @spending_operations do
     spending = attempt.prepared_evidence["spending"]
 
     with :ok <- current_calibration(spending),
-         :ok <- validate_quote(agent, attempt, spending),
+         :ok <- validate_bound(agent, attempt, spending),
          {:ok, credits} <- authoritative_credits(agent),
          {:ok, floor} <- credit_floor(revision),
          {:ok, other_exposure} <-
@@ -299,6 +337,13 @@ defmodule SpaceTraders.CreditSpending do
   end
 
   defp admit_spend(_attempt, _agent, _intent, _revision), do: :ok
+
+  defp validate_bound(agent, %Attempt{operation_id: operation} = attempt, spending)
+       when operation in @market_operations,
+       do: validate_quote(agent, attempt, spending)
+
+  defp validate_bound(agent, attempt, spending),
+    do: ModificationFee.validate(agent, attempt, spending, &worst_case_exposure(&1, 1, &2))
 
   defp validate_quote(agent, attempt, spending) when is_map(spending) do
     with {:ok, expected} <- expected_purchase(attempt),

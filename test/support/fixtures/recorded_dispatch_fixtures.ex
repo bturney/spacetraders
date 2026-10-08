@@ -56,6 +56,15 @@ defmodule SpaceTraders.RecordedDispatchFixtures do
       retain_purchase_preflight(agent, intent.target_waypoint, action)
     end
 
+    action =
+      if action["kind"] in ["install_module", "remove_module"] and opts[:live_quote] != true do
+        action = Map.put_new(action, "waypoint", intent.target_waypoint)
+        retain_modification_preflight(agent, action["waypoint"])
+        action
+      else
+        action
+      end
+
     case RecordedAction.prepare(agent, intent, action) do
       {:ok, selected} ->
         Map.merge(selected, %{agent: agent, ship: ship})
@@ -91,6 +100,31 @@ defmodule SpaceTraders.RecordedDispatchFixtures do
          }},
         {"get-my-agent", agent_subject,
          %{"symbol" => agent.symbol, "credits" => action["credits_before"] || 1_000_000}}
+      ],
+      fn {operation, subject, response} ->
+        observation =
+          SpaceTraders.Evidence.authoritative_observation(
+            operation,
+            [subject],
+            %{response: response},
+            SpaceTraders.Clock.utc_now()
+          )
+
+        {:ok, _} = SpaceTraders.Evidence.fulfil_demands(agent, subject, observation)
+      end
+    )
+  end
+
+  # A module install or removal is bounded by the docked Shipyard's fee.
+  def retain_modification_preflight(agent, waypoint) do
+    system = waypoint |> String.split("-") |> Enum.take(2) |> Enum.join("-")
+    agent_subject = DependencyKey.observation_subject("get-my-agent", [], agent.symbol)
+
+    Enum.each(
+      [
+        {"get-shipyard", "shipyard:#{system}:#{waypoint}",
+         %{"symbol" => waypoint, "ship_types" => [], "modifications_fee" => 1_000}},
+        {"get-my-agent", agent_subject, %{"symbol" => agent.symbol, "credits" => 1_000_000}}
       ],
       fn {operation, subject, response} ->
         observation =
