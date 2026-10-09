@@ -1,5 +1,13 @@
 defmodule SpaceTraders.Outcomes do
-  @moduledoc "Fail-soft outcome projections of retained authoritative facts."
+  @moduledoc """
+  One fail-soft worker for all outcome metrics from retained authoritative facts.
+
+  Credits, Contracts and transaction deltas publish in this mailbox. Fleet and
+  chart DB projections share its 2000 ms event-coalescing window. Gameplay only
+  enqueues facts or post-commit notifications; it never waits for the worker.
+  Scrapes collect coherent metric bytes here, then the HTTP request process sends
+  its own response. No Plug.Conn or adapter callback enters this process.
+  """
 
   use GenServer
 
@@ -13,7 +21,7 @@ defmodule SpaceTraders.Outcomes do
   @intent_types ~w(navigate acquire_intelligence acquire_resources buy sell deliver transfer install_module remove_module)
   @transaction_operations ~w(buy sell refuel jump install_module remove_module)
 
-  def start_link(opts), do: GenServer.start_link(__MODULE__, opts, name: __MODULE__)
+  def start_link(opts \\ []), do: GenServer.start_link(__MODULE__, opts, name: __MODULE__)
 
   # The read only enqueues already-retained facts. No database access, polling,
   # or wait on the exporter is introduced into gameplay.
@@ -60,10 +68,19 @@ defmodule SpaceTraders.Outcomes do
   end
 
   @impl true
-  def init(_opts) do
+  def init(opts) do
     # PromEx can outlive this process. Invalidate any retained previous pair
     # on restart; a timestamp of zero is unknown, never an observation.
     credit_pair(nil)
+
+    projections =
+      if Keyword.get(
+           opts,
+           :db_projections,
+           Application.get_env(:spacetraders, :outcome_db_projections_enabled, true)
+         ) do
+        SpaceTraders.Outcomes.Fleet.init(opts)
+      end
 
     {:ok,
      %{
@@ -71,15 +88,33 @@ defmodule SpaceTraders.Outcomes do
        previous: nil,
        contracts_at: nil,
        transactions_at: nil,
-       started_at: SpaceTraders.Clock.utc_now()
+       started_at: SpaceTraders.Clock.utc_now(),
+       projections: projections
      }}
   end
 
   @impl true
   def handle_call({:metrics, prom_ex_module}, _from, state) do
-    # Exposition and credit publication share this mailbox: the four values
-    # cannot be scraped halfway through updating an authoritative pair.
+    # Every metric publication shares this mailbox. Return bytes only; adapter
+    # functions must stay in the request process that owns the HTTP stream.
     {:reply, PromEx.get_metrics(prom_ex_module), state}
+  end
+
+  @impl true
+  def handle_info(_message, %{projections: nil} = state), do: {:noreply, state}
+
+  def handle_info({:dirty, change}, state) do
+    {:noreply,
+     %{state | projections: SpaceTraders.Outcomes.Fleet.dirty(change, state.projections)}}
+  end
+
+  def handle_info(:recompute, state) do
+    {:noreply, %{state | projections: SpaceTraders.Outcomes.Fleet.recompute(state.projections)}}
+  end
+
+  @impl true
+  def terminate(_reason, %{projections: projections}) do
+    if projections, do: SpaceTraders.Outcomes.Fleet.detach()
   end
 
   @impl true

@@ -8,7 +8,7 @@ defmodule SpaceTradersWeb.ChartOutcomeMetricsTest do
 
   alias Ecto.Adapters.SQL.Sandbox
   alias SpaceTraders.{Intelligence, Quiesced, Repo}
-  alias SpaceTraders.Outcomes.Fleet, as: Worker
+  alias SpaceTraders.Outcomes, as: Worker
 
   @endpoint SpaceTradersWeb.Endpoint
   @projection [:spacetraders, :outcome, :fleet, :projection]
@@ -16,6 +16,8 @@ defmodule SpaceTradersWeb.ChartOutcomeMetricsTest do
   @scan [:spacetraders, :outcome, :scan]
 
   setup do
+    :ok = Supervisor.terminate_child(SpaceTraders.Supervisor, Worker)
+    on_exit(fn -> {:ok, _} = Supervisor.restart_child(SpaceTraders.Supervisor, Worker) end)
     :ok = Sandbox.mode(Repo, :auto)
     :ok = Sandbox.checkout(Repo, sandbox: false)
     operator = operator_fixture()
@@ -232,7 +234,7 @@ defmodule SpaceTradersWeb.ChartOutcomeMetricsTest do
 
   test "production window waits a couple seconds before the DB baseline", %{agent: agent} do
     observe(agent, "X1-BOOT", "A1", "scan_waypoints")
-    start_supervised!(Quiesced.child_spec({Worker, []}))
+    start_supervised!(Quiesced.child_spec({Worker, [db_projections: true]}))
     refute_receive {:projection, :chart, _}, 1_500
     assert_chart(1)
     refute_receive {:scans, _}, 100
@@ -249,7 +251,9 @@ defmodule SpaceTradersWeb.ChartOutcomeMetricsTest do
   def handle_event(_event, _measurements, _metadata, _pid), do: :ok
 
   defp start_worker(opts \\ []) do
-    start_supervised!(Quiesced.child_spec({Worker, Keyword.merge([coalesce_ms: 30], opts)}))
+    start_supervised!(
+      Quiesced.child_spec({Worker, Keyword.merge([db_projections: true, coalesce_ms: 30], opts)})
+    )
   end
 
   defp observe(agent, system, suffix, source) do

@@ -17,13 +17,15 @@ defmodule SpaceTradersWeb.FleetOutcomeMetricsTest do
   alias SpaceTraders.{Evidence, ShipReservation, MutationAttempts}
   alias SpaceTraders.FleetGeneration.Generation
   alias SpaceTraders.FleetStrategy.{Revision, Strategy}
-  alias SpaceTraders.Outcomes.Fleet, as: FleetOutcomes
+  alias SpaceTraders.Outcomes, as: FleetOutcomes
 
   @endpoint SpaceTradersWeb.Endpoint
   @projection [:spacetraders, :outcome, :fleet, :projection]
   @failure [:spacetraders, :outcome, :fleet, :projection_failed]
 
   setup do
+    :ok = Supervisor.terminate_child(SpaceTraders.Supervisor, FleetOutcomes)
+    on_exit(fn -> {:ok, _} = Supervisor.restart_child(SpaceTraders.Supervisor, FleetOutcomes) end)
     :ok = Sandbox.mode(Repo, :auto)
     :ok = Sandbox.checkout(Repo, sandbox: false)
     operator = operator_fixture()
@@ -168,6 +170,78 @@ defmodule SpaceTradersWeb.FleetOutcomeMetricsTest do
     assert observed >= before
     refute_receive {:projection, _, _, _}, 150
     assert metric_value(~s(spacetraders_outcome_observed_at_seconds{family="fleet"})) == observed
+  end
+
+  test "a real Bandit HTTP scrape sends coherent metric bytes from one outcome worker", %{
+    agent: agent
+  } do
+    events = [
+      [:spacetraders, :outcome, :agent],
+      [:spacetraders, :outcome, :contracts],
+      [:spacetraders, :outcome, :transaction],
+      @projection,
+      [:spacetraders, :outcome, :chart],
+      [:spacetraders, :outcome, :scan]
+    ]
+
+    handler = {__MODULE__, :publishers, make_ref()}
+    :ok = :telemetry.attach_many(handler, events, &__MODULE__.capture_publisher/4, self())
+    on_exit(fn -> :telemetry.detach(handler) end)
+    start_worker()
+    baseline()
+    owner = Process.whereis(FleetOutcomes)
+    assert is_pid(owner)
+    assert Process.whereis(SpaceTraders.Outcomes.Fleet) == nil
+
+    stub_owned_reads(agent, 100)
+    assert {:ok, _} = Evidence.get_agent(agent)
+    stub_owned_reads(agent, 80)
+    assert {:ok, _} = Evidence.get_agent(agent)
+    assert {:ok, []} = Evidence.get_contracts(agent)
+    FleetOutcomes.transaction("navigate", "refuel", 17)
+
+    assert {:ok, _} =
+             SpaceTraders.Intelligence.observe_waypoint(
+               agent,
+               %{symbol: "X1-HTTP-A1", system_symbol: "X1-HTTP", x: 1, y: 2, traits: []},
+               source: "scan_waypoints"
+             )
+
+    assert_receive {:chart_published, 1}, 2_000
+
+    for event <- events do
+      assert_receive {:metric_publisher, ^event, ^owner}, 2_000
+    end
+
+    server =
+      start_supervised!(
+        {Bandit, plug: @endpoint, ip: {127, 0, 0, 1}, port: 0, startup_log: false}
+      )
+
+    assert {:ok, {_address, port}} = ThousandIsland.listener_info(server)
+
+    log =
+      capture_log(fn ->
+        response = Req.get!("http://127.0.0.1:#{port}/metrics", retry: false)
+        assert response.status == 200
+
+        assert response.body =~
+                 ~s(spacetraders_outcome_ships_total{claim="free",intent_state="",nav_status=""} 1\n)
+
+        assert response.body =~ ~s(spacetraders_outcome_observed_at_seconds{family="fleet"})
+        assert response.body =~ "spacetraders_outcome_agent_credits 80\n"
+        assert response.body =~ "spacetraders_outcome_agent_credits_previous 100\n"
+        assert response.body =~ ~s(spacetraders_outcome_contracts{status="active"} 0\n)
+        assert response.body =~ "spacetraders_outcome_systems_charted 1\n"
+
+        for family <- ~w(credits contracts transactions chart) do
+          assert response.body =~ ~s(spacetraders_outcome_observed_at_seconds{family="#{family}"})
+        end
+
+        assert_metric_pair(response.body)
+      end)
+
+    refute log =~ "Adapter functions must be called by stream owner"
   end
 
   test "Claim publication and unwind bursts replace the full vector once", context do
@@ -335,6 +409,13 @@ defmodule SpaceTradersWeb.FleetOutcomeMetricsTest do
     allocation = allocation_fixture(context)
     start_worker()
     baseline()
+
+    server =
+      start_supervised!(
+        {Bandit, plug: @endpoint, ip: {127, 0, 0, 1}, port: 0, startup_log: false}
+      )
+
+    {:ok, {_address, port}} = ThousandIsland.listener_info(server)
     handler = {__MODULE__, :pause, make_ref()}
 
     :ok =
@@ -350,7 +431,14 @@ defmodule SpaceTradersWeb.FleetOutcomeMetricsTest do
     # Gameplay returns independently of the deliberately paused publisher.
     publish_claim(allocation)
     assert_receive {:vector_paused, publisher}, 2_000
-    scrape = Task.async(fn -> build_conn() |> get("/metrics") |> response(200) end)
+
+    scrape =
+      Task.async(fn ->
+        response = Req.get!("http://127.0.0.1:#{port}/metrics", retry: false)
+        assert response.status == 200
+        response.body
+      end)
+
     partial = Task.yield(scrape, 100)
     send(publisher, :resume_vector)
     body = if partial, do: elem(partial, 1), else: Task.await(scrape)
@@ -411,6 +499,19 @@ defmodule SpaceTradersWeb.FleetOutcomeMetricsTest do
 
   def handle_query(_event, _measurements, _metadata, _pid), do: :ok
 
+  def capture_publisher(
+        [:spacetraders, :outcome, :chart] = event,
+        %{count: count},
+        _metadata,
+        pid
+      ) do
+    send(pid, {:metric_publisher, event, self()})
+    send(pid, {:chart_published, count})
+  end
+
+  def capture_publisher(event, _measurements, _metadata, pid),
+    do: send(pid, {:metric_publisher, event, self()})
+
   def pause_vector(_event, %{count: 1}, %{claim: "claimed"}, parent) do
     send(parent, {:vector_paused, self()})
 
@@ -425,7 +526,9 @@ defmodule SpaceTradersWeb.FleetOutcomeMetricsTest do
 
   defp start_worker(opts \\ []) do
     start_supervised!(
-      Quiesced.child_spec({FleetOutcomes, Keyword.merge([coalesce_ms: 30], opts)})
+      Quiesced.child_spec(
+        {FleetOutcomes, Keyword.merge([db_projections: true, coalesce_ms: 30], opts)}
+      )
     )
   end
 
@@ -433,6 +536,40 @@ defmodule SpaceTradersWeb.FleetOutcomeMetricsTest do
     assert_projection(:claim, %{"claimed" => 0, "free" => 1})
     assert_projection(:intent_state, %{"none" => 1})
     assert_projection(:nav_status, %{"unknown" => 1})
+  end
+
+  defp stub_owned_reads(agent, credits) do
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      case conn.request_path do
+        "/v2/my/agent" ->
+          Req.Test.json(conn, %{"data" => %{"symbol" => agent.symbol, "credits" => credits}})
+
+        "/v2/my/contracts" ->
+          Req.Test.json(conn, %{"data" => []})
+
+        path ->
+          flunk("Unexpected owned read #{path}")
+      end
+    end)
+  end
+
+  defp assert_metric_pair(body) do
+    [_, current] =
+      Regex.run(
+        ~r/^spacetraders_outcome_observed_at_seconds\{family="credits"\} ([^\n]+)$/m,
+        body
+      )
+
+    [_, previous] =
+      Regex.run(
+        ~r/^spacetraders_outcome_agent_credits_previous_observed_at_seconds ([^\n]+)$/m,
+        body
+      )
+
+    {current, ""} = Float.parse(current)
+    {previous, ""} = Float.parse(previous)
+    assert previous > 0
+    assert current > previous
   end
 
   defp allocation_fixture(%{operator: operator, agent: agent} = context) do

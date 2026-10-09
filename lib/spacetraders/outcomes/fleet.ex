@@ -1,6 +1,6 @@
 defmodule SpaceTraders.Outcomes.Fleet do
   @moduledoc """
-  Event-driven, fail-soft projections of the registered current Fleet and chart coverage.
+  DB projection and post-commit tap functions run by the single Outcomes worker.
 
   Every projection publishes its entire bounded vector, including zeroes. The
   independent dimensions share `ships_total`; unused dimension labels are empty.
@@ -34,7 +34,6 @@ defmodule SpaceTraders.Outcomes.Fleet do
   them away. Boot never backfills this counter or invents a zero history; metrics
   history starts at instrumentation. Events still count if chart recompute fails.
   """
-  use GenServer
   require Logger
 
   alias SpaceTraders.Repo
@@ -55,8 +54,6 @@ defmodule SpaceTraders.Outcomes.Fleet do
   @handler {__MODULE__, :durable_changes}
   @pending {__MODULE__, :pending}
 
-  def start_link(opts \\ []), do: GenServer.start_link(__MODULE__, opts, name: __MODULE__)
-
   @doc false
   # Retain just the bounded authoritative nav fact in the existing mutation
   # ledger. Its recorded_at supplies ordering against subsequent owned reads.
@@ -66,21 +63,6 @@ defmodule SpaceTraders.Outcomes.Fleet do
   def nav_evidence(_), do: %{}
 
   @doc false
-  # Exposition shares the publisher mailbox; a scrape sees a complete vector.
-  # Gameplay only sends notifications and never enters this synchronous seam.
-  def expose(fun) when is_function(fun, 0) do
-    case Process.whereis(__MODULE__) do
-      nil -> fun.()
-      pid -> GenServer.call(pid, {:expose, fun})
-    end
-  catch
-    :exit, _ -> :projection_down
-  end
-
-  @impl true
-  def handle_call({:expose, fun}, _from, state), do: {:reply, fun.(), state}
-
-  @impl true
   def init(opts) do
     # Ecto emits query telemetry in the writer process, including transaction
     # management. Buffer only bounded family names there; send after COMMIT so
@@ -97,13 +79,12 @@ defmodule SpaceTraders.Outcomes.Fleet do
 
     Process.send_after(self(), :recompute, Keyword.get(opts, :coalesce_ms, @coalesce_ms))
 
-    {:ok,
-     %{
-       dirty: MapSet.new(@families),
-       scans: 0,
-       coalesce_ms: Keyword.get(opts, :coalesce_ms, @coalesce_ms),
-       repo: Keyword.get(opts, :repo, Repo)
-     }}
+    %{
+      dirty: MapSet.new(@families),
+      scans: 0,
+      coalesce_ms: Keyword.get(opts, :coalesce_ms, @coalesce_ms),
+      repo: Keyword.get(opts, :repo, Repo)
+    }
   end
 
   @doc false
@@ -219,28 +200,27 @@ defmodule SpaceTraders.Outcomes.Fleet do
     if MapSet.size(families) > 0 or scans > 0, do: send(worker, {:dirty, change})
   end
 
-  @impl true
-  def handle_info({:dirty, change}, state) do
+  @doc false
+  def dirty(change, state) do
     if MapSet.size(state.dirty) == 0,
       do: Process.send_after(self(), :recompute, state.coalesce_ms)
 
-    {:noreply,
-     %{
-       state
-       | dirty: MapSet.union(state.dirty, change.families),
-         scans: state.scans + change.scans
-     }}
+    %{
+      state
+      | dirty: MapSet.union(state.dirty, change.families),
+        scans: state.scans + change.scans
+    }
   end
 
-  @impl true
-  def handle_info(:recompute, state) do
+  @doc false
+  def recompute(state) do
     publish_scans(state.scans)
     Enum.each(state.dirty, &project(&1, state.repo))
-    {:noreply, %{state | dirty: MapSet.new(), scans: 0}}
+    %{state | dirty: MapSet.new(), scans: 0}
   end
 
-  @impl true
-  def terminate(_reason, _state), do: :telemetry.detach(@handler)
+  @doc false
+  def detach, do: :telemetry.detach(@handler)
 
   defp publish_scans(0), do: :ok
 

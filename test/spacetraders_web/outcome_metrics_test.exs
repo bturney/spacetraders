@@ -356,7 +356,8 @@ defmodule SpaceTradersWeb.OutcomeMetricsTest do
     log =
       capture_log(fn ->
         assert {:ok, %{credits: 321_654}} = Evidence.get_agent(agent)
-        assert_receive {:outcome, @observed_event, _, %{family: "credits"}}
+        # Publication is out of band and includes subscriber-failure logging.
+        assert_receive {:outcome, @observed_event, _, %{family: "credits"}}, 2_000
       end)
 
     assert log =~ "has failed and has been detached"
