@@ -809,8 +809,10 @@ defmodule SpaceTraders.FleetExecution do
     |> Enum.map(fn ship ->
       %{
         resource: ship.symbol,
-        roles: [:market_trader, :intelligence_scout],
+        roles: ship_roles(ship),
         capabilities: %{
+          frame: frame_symbol(ship),
+          operating_cost: operating_cost(ship),
           cargo_transport: cargo_capacity(ship),
           chart: true,
           waypoint_scan: sensor_mount?(ship),
@@ -819,6 +821,22 @@ defmodule SpaceTraders.FleetExecution do
       }
     end)
   end
+
+  # Roles follow capability: only a Ship with a hold can trade; any Ship can
+  # scout. Allocation then picks the cheapest capable Ship per role.
+  defp ship_roles(ship) do
+    if cargo_capacity(ship) > 0,
+      do: [:market_trader, :intelligence_scout],
+      else: [:intelligence_scout]
+  end
+
+  defp frame_symbol(%{frame: %{symbol: symbol}}), do: symbol
+  defp frame_symbol(_ship), do: nil
+
+  # Fuel tank size stands in for fuel use per leg; solar-powered probes carry
+  # none and so cost nothing to move.
+  defp operating_cost(%{fuel: %{capacity: capacity}}) when is_integer(capacity), do: capacity
+  defp operating_cost(_ship), do: 0
 
   defp cargo_capacity(%{cargo: %{capacity: capacity}}) when is_integer(capacity), do: capacity
   defp cargo_capacity(_ship), do: 0

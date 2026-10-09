@@ -75,6 +75,8 @@ defmodule SpaceTraders.FleetShadow do
         opts
       )
       when is_map(snapshot) and is_map(availability) and is_list(opts) do
+    snapshot = put_claimable_ships(snapshot, availability)
+
     with {:ok, planning} <- plan(revision, snapshot),
          {:ok, portfolio} <-
            FleetAllocation.select_portfolio(
@@ -163,6 +165,32 @@ defmodule SpaceTraders.FleetShadow do
     |> FleetPlanning.market_snapshot(system_symbol, agent.id, markets)
     |> Map.merge(FleetPlanning.baseline_coverage(baseline))
     |> Map.put(:credit_margin_percent, SpaceTraders.CreditCalibration.active().margin_percent)
+  end
+
+  # Trade quantity is bounded by the holds of Ships the Fleet can actually
+  # claim for trading, taken from the same availability Allocation uses so
+  # planning and selection cannot disagree. Evidence the caller already
+  # supplied is kept.
+  defp put_claimable_ships(%{ships: _} = snapshot, _availability), do: snapshot
+
+  defp put_claimable_ships(snapshot, availability) do
+    ships =
+      availability
+      |> Map.get(:claims, [])
+      |> Enum.flat_map(fn
+        %{resource: symbol, roles: roles, capabilities: %{cargo_transport: capacity}}
+        when is_list(roles) and is_integer(capacity) ->
+          if :market_trader in roles,
+            do: [%{symbol: symbol, cargo: %{capacity: capacity, units: 0}}],
+            else: []
+
+        _ ->
+          []
+      end)
+
+    # No trade-capable Claim leaves sizing at Market depth; Allocation then
+    # rejects the Candidate for lack of a capable Claim.
+    if ships == [], do: snapshot, else: Map.put(snapshot, :ships, ships)
   end
 
   defp plan(revision, snapshot) do

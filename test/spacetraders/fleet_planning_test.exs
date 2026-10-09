@@ -32,6 +32,88 @@ defmodule SpaceTraders.FleetPlanningTest do
     assert copper.alternatives == [alternative(iron)]
   end
 
+  describe "Ship-feasible Market sizing" do
+    defp deep_snapshot(extra) do
+      Map.merge(
+        %{
+          as_of: @as_of,
+          system_symbol: "X1",
+          freshness_seconds: 300,
+          agent_id: 7,
+          markets: [
+            market("X1-A1", ~U[2030-01-01 11:59:00Z], [good("IRON", 10, 9, 60)]),
+            market("X1-A2", ~U[2030-01-01 11:58:00Z], [good("IRON", 25, 20, 60)])
+          ]
+        },
+        extra
+      )
+    end
+
+    defp ship(symbol, capacity, units \\ 0),
+      do: %{symbol: symbol, cargo: %{capacity: capacity, units: units}}
+
+    test "a route deeper than the only hold is bounded to the hold and recomputed" do
+      snapshot = deep_snapshot(%{ships: [ship("FRIGATE-1", 40)]})
+
+      assert {:ok, %{candidate_contributions: [candidate]}} =
+               FleetPlanning.plan_market(revision(), 0, snapshot)
+
+      assert candidate.expected_outcomes.maximum_units == 40
+      assert candidate.expected_outcomes.maximum_credit_change == 400
+      assert candidate.required_resources.cargo_capacity == 40
+      assert candidate.required_resources.credits == 500
+
+      assert %{capability: :cargo_transport, minimum_capacity: 40} in candidate.required_capabilities
+    end
+
+    test "free Cargo reduces the quantity below the hold" do
+      snapshot = deep_snapshot(%{ships: [ship("FRIGATE-1", 40, 15)]})
+
+      assert {:ok, %{candidate_contributions: [candidate]}} =
+               FleetPlanning.plan_market(revision(), 0, snapshot)
+
+      assert candidate.expected_outcomes.maximum_units == 25
+      assert candidate.required_resources.cargo_capacity == 25
+    end
+
+    test "credit headroom reduces the quantity below the hold" do
+      # 10 credits per unit at the 25% initial margin is 12.5 -> 8 units per 100.
+      snapshot = deep_snapshot(%{ships: [ship("FRIGATE-1", 40)], credit_headroom: 100})
+
+      assert {:ok, %{candidate_contributions: [candidate]}} =
+               FleetPlanning.plan_market(revision(), 0, snapshot)
+
+      assert candidate.expected_outcomes.maximum_units == 8
+      assert candidate.required_resources.credits <= 100
+    end
+
+    test "the largest claimable hold bounds the route regardless of Ship order" do
+      ships = [ship("A-SMALL", 10), ship("B-BIG", 40), ship("C-FULL", 80, 80)]
+
+      results =
+        for order <- [ships, Enum.reverse(ships)] do
+          assert {:ok, %{candidate_contributions: [candidate]}} =
+                   FleetPlanning.plan_market(revision(), 0, deep_snapshot(%{ships: order}))
+
+          candidate
+        end
+
+      assert [%{expected_outcomes: %{maximum_units: 40}}, _] = results
+      assert Enum.at(results, 0) == Enum.at(results, 1)
+    end
+
+    test "no claimable hold or affordable unit leaves no actionable candidate" do
+      for extra <- [
+            %{ships: [ship("PROBE-1", 0)]},
+            %{ships: [ship("FULL-1", 40, 40)]},
+            %{ships: [ship("FRIGATE-1", 40)], credit_headroom: 5}
+          ] do
+        assert {:ok, %{candidate_contributions: []}} =
+                 FleetPlanning.plan_market(revision(), 0, deep_snapshot(extra))
+      end
+    end
+  end
+
   test "a widened calibration margin in the snapshot widens the selection-time credit Reservation" do
     snapshot = Map.put(evidence_snapshot(), :credit_margin_percent, 50)
 
