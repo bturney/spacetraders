@@ -150,19 +150,17 @@ Current seam owners:
 
 ## Native outcome HTTP diagnostic
 
-Ordinary test discovery binds no port (ADR 0014). Socket-free endpoint and
-publication coverage lives in `test/spacetraders_web/fleet_outcome_metrics_test.exs`
-and `test/spacetraders_web/outcome_metrics_test.exs`. The explicit native adapter
-diagnostic starts Bandit on a loopback ephemeral port, drives committed domain
-observations, and proves HTTP 200 with all outcome families, one publisher, and
-coherent bytes while a Fleet vector publication is held open:
+Run when changing native `/metrics` response ownership or HTTP scrape coherence:
 
 ```sh
 mix test test/diagnostics/outcome_http.exs --seed 0 --trace
 ```
 
-Its filename deliberately omits `_test.exs`; neither ordinary `mix test` nor
-`scripts/verify` discovers it. It owns its listener and real-commit DB cleanup.
+Done: HTTP 200 after committed domain observations; one publisher; coherent
+bytes during held-open Fleet publication. The diagnostic owns its loopback
+ephemeral listener and real-commit DB cleanup. Explicit run only: ordinary test
+discovery and `scripts/verify` bind no port (ADR 0014). Socket-free seams remain
+in `test/spacetraders_web/{fleet_outcome_metrics,outcome_metrics}_test.exs`.
 
 ## Runtime qualification
 
