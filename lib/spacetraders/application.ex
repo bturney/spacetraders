@@ -26,6 +26,7 @@ defmodule SpaceTraders.Application do
         runtime_authority_children() ++
         fleet_reconciler_children() ++
         demand_scheduler_children() ++
+        fleet_outcome_children() ++
         [
           {Registry, keys: :unique, name: SpaceTraders.Contracts.Registry},
           {DynamicSupervisor, strategy: :one_for_one, name: SpaceTraders.Contracts.Supervisor},
@@ -46,6 +47,14 @@ defmodule SpaceTraders.Application do
   defp demand_scheduler_children do
     if Application.get_env(:spacetraders, :demand_scheduler_enabled, true) do
       [SpaceTraders.Evidence.DemandScheduler]
+    else
+      []
+    end
+  end
+
+  defp fleet_outcome_children do
+    if Application.get_env(:spacetraders, :fleet_outcomes_enabled, true) do
+      [SpaceTraders.Outcomes.Fleet]
     else
       []
     end

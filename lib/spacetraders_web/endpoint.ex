@@ -40,7 +40,9 @@ defmodule SpaceTradersWeb.Endpoint do
     param_key: "request_logger",
     cookie_key: "request_logger"
 
-  plug SpaceTradersWeb.OutcomeMetrics, prom_ex_module: SpaceTraders.PromEx
+  plug SpaceTradersWeb.FleetOutcomeMetrics,
+    prom_ex_module: SpaceTraders.PromEx,
+    inner_plug: SpaceTradersWeb.OutcomeMetrics
 
   plug Plug.RequestId
   plug Plug.Telemetry, event_prefix: [:phoenix, :endpoint]
