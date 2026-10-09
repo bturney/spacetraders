@@ -6,9 +6,7 @@ defmodule SpaceTraders.FleetIntelligence do
   alias SpaceTraders.{Clock, Evidence}
   alias SpaceTraders.Evidence.Demand
   alias SpaceTraders.Fleet
-  alias SpaceTraders.Fleet.Intent
-  alias SpaceTraders.Fleet.Intents
-  alias SpaceTraders.FleetAllocation
+  alias SpaceTraders.Fleet.Ship
   alias SpaceTraders.FleetCapacity
   alias SpaceTraders.FleetExecution
   alias SpaceTraders.FleetPlanning
@@ -184,12 +182,14 @@ defmodule SpaceTraders.FleetIntelligence do
     # One decision time fixes Waypoint projection, Market interpretation,
     # demand timing and intelligence planning alike.
     with true <- FleetCapacity.proceed?(capacity),
-         :ok <- allocation_available(scope, agent),
+         %{occupied: occupied} <- FleetExecution.intelligence_occupancy(scope, agent),
          {now, waypoints} <- waypoints_for_decision(agent, revision, system),
          market = FleetShadow.market_input(agent, system, now),
          :ok <- sync_market_demands(agent, revision, market),
          {kind, index} <- next_objective(revision, waypoints, market),
+         true <- free_ship_known?(agent, occupied),
          {:ok, ships} <- Fleet.list_ships(agent),
+         ships <- Enum.reject(ships, &(&1.symbol in occupied)),
          true <- ships != [],
          opportunities <- opportunities(kind, revision, index, waypoints, ships, system, market),
          true <- opportunities != [],
@@ -534,26 +534,11 @@ defmodule SpaceTraders.FleetIntelligence do
 
   defp chart_objective(_revision), do: nil
 
-  defp allocation_available(scope, agent) do
-    case FleetAllocation.current_portfolio(scope, agent) do
-      nil ->
-        :ok
-
-      %{commitments: commitments} ->
-        if Intents.current(agent) != [] or
-             Enum.any?(commitments, &(not completed_intelligence?(&1.id))),
-           do: {:error, :ship_claimed},
-           else: :ok
-    end
-  end
-
-  defp completed_intelligence?(commitment_id) do
-    Repo.exists?(
-      from intent in Intent,
-        where:
-          intent.fleet_commitment_id == ^commitment_id and
-            intent.type == "acquire_intelligence" and intent.status == "completed"
-    )
+  # Occupancy is local state: when every known Ship is fenced there is nothing
+  # to plan for, so no game request is spent finding that out.
+  defp free_ship_known?(agent, occupied) do
+    symbols = Repo.all(from ship in Ship, where: ship.agent_id == ^agent.id, select: ship.symbol)
+    symbols == [] or Enum.any?(symbols, &(&1 not in occupied))
   end
 
   defp chart_opportunities(waypoints, ships, system) do

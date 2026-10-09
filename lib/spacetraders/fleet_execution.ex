@@ -20,7 +20,7 @@ defmodule SpaceTraders.FleetExecution do
   alias SpaceTraders.Fleet
   alias SpaceTraders.FleetContracts
   alias SpaceTraders.FleetConstruction
-  alias SpaceTraders.Fleet.Intents
+  alias SpaceTraders.Fleet.{Intent, Intents, Ship}
   alias SpaceTraders.FleetAllocation
   alias SpaceTraders.FleetCapacity
   alias SpaceTraders.FleetAllocation.{Commitment, Portfolio}
@@ -167,13 +167,103 @@ defmodule SpaceTraders.FleetExecution do
 
   defp do_activate_intelligence(scope, agent, revision, candidates, demands) do
     with {:ok, availability} <- allocation_availability(agent) do
-      do_activate_intelligence(scope, agent, revision, candidates, demands, availability)
+      occupancy = intelligence_occupancy(scope, agent)
+
+      availability = %{
+        availability
+        | claims: Enum.reject(availability.claims, &(&1.resource in occupancy.occupied))
+      }
+
+      case Enum.reject(candidates, &conflicts_with_retained?(&1, occupancy)) do
+        [] ->
+          {:error, :no_decision_relevant_intelligence}
+
+        candidates ->
+          do_activate_intelligence(
+            scope,
+            agent,
+            revision,
+            candidates,
+            demands,
+            availability,
+            occupancy
+          )
+      end
     else
       _ -> {:error, :intelligence_activation_unavailable}
     end
   end
 
-  defp do_activate_intelligence(scope, agent, revision, candidates, demands, availability) do
+  @doc """
+  Describes what the current portfolio and unfinished Intents occupy.
+
+  An unfinished Intent fences only its own Ship; a retained Commitment fences
+  only the Ships it claims. Completed Intelligence Commitments occupy nothing
+  and are released when a new Commitment is published beside retained work.
+  Returns `retained` (unreleased, not completed-intelligence Commitments),
+  `completed` (completed-intelligence Commitments), and `occupied`, the set of
+  Ship symbols that cannot accept new work.
+  """
+  def intelligence_occupancy(%Scope{} = scope, %AgentRecord{} = agent) do
+    current = FleetAllocation.current_portfolio(scope, agent)
+
+    commitments =
+      case current do
+        nil ->
+          []
+
+        %{commitments: commitments} ->
+          Enum.filter(commitments, &(&1.unwind_state == :not_required))
+      end
+
+    {completed, retained} = Enum.split_with(commitments, &completed_intelligence?(&1.id))
+
+    intent_ship_ids = agent |> Intents.current() |> Enum.map(& &1.ship_id)
+
+    intent_ships =
+      Repo.all(from ship in Ship, where: ship.id in ^intent_ship_ids, select: ship.symbol)
+
+    %{
+      current: current,
+      retained: retained,
+      completed: completed,
+      occupied: MapSet.new(Enum.flat_map(retained, & &1.claims) ++ intent_ships)
+    }
+  end
+
+  defp completed_intelligence?(commitment_id) do
+    Repo.exists?(
+      from intent in Intent,
+        where:
+          intent.fleet_commitment_id == ^commitment_id and
+            intent.type == "acquire_intelligence" and intent.status == "completed"
+    )
+  end
+
+  # The established single-scout policy: one retained Coverage Commitment (it
+  # depends on Marketplace subjects) admits no second coverage Candidate, and
+  # a Candidate a retained Commitment already pursues is never duplicated.
+  defp conflicts_with_retained?(candidate, %{retained: retained}) do
+    retained_ids = MapSet.new(retained, & &1.candidate_id)
+
+    coverage_retained? =
+      Enum.any?(retained, fn commitment ->
+        Enum.any?(commitment.dependencies, &match?(%{"subject" => "market:" <> _}, &1))
+      end)
+
+    MapSet.member?(retained_ids, candidate.id) or
+      (coverage_retained? and candidate.kind == :market_coverage)
+  end
+
+  defp do_activate_intelligence(
+         scope,
+         agent,
+         revision,
+         candidates,
+         demands,
+         availability,
+         occupancy
+       ) do
     owned_ships = MapSet.new(Enum.map(availability.claims, & &1.resource))
 
     with {:ok, selection} <-
@@ -188,22 +278,17 @@ defmodule SpaceTraders.FleetExecution do
          {:ok, {waypoint, demand}} <- current_observation_subject(agent, candidate, demands),
          %Generation{} = generation <- current_generation(agent),
          {:ok, portfolio} <-
-           FleetAllocation.publish_portfolio(
+           publish_intelligence(
              scope,
-             generation.id,
-             %{
-               revision_id: revision.id,
-               source_version: generation.allocation_version,
-               commitments: [commitment],
-               rejected: selection.rejected
-             },
-             %{
-               evidence_references: candidate.dependencies,
-               expectations: candidate.expected_outcomes,
-               calibration_version: "intelligence-v1"
-             }
+             generation,
+             revision,
+             commitment,
+             selection,
+             candidate,
+             occupancy
            ),
-         [persisted] <- portfolio.commitments,
+         persisted when not is_nil(persisted) <-
+           Enum.find(portfolio.commitments, &(&1.candidate_id == commitment.candidate_id)),
          [ship_symbol] <- persisted.claims,
          [type, _system, _waypoint] <- String.split(demand.subject, ":"),
          {:ok, intent} <-
@@ -784,6 +869,63 @@ defmodule SpaceTraders.FleetExecution do
     end
   end
 
+  # Beside retained work the new Commitment joins the current portfolio in
+  # place, so unrelated Claims and unfinished Intents keep their identity;
+  # completed Intelligence Commitments are released with it. Without retained
+  # work the selection publishes a fresh portfolio.
+  defp publish_intelligence(
+         scope,
+         generation,
+         revision,
+         commitment,
+         selection,
+         candidate,
+         %{retained: []}
+       ) do
+    FleetAllocation.publish_portfolio(
+      scope,
+      generation.id,
+      %{
+        revision_id: revision.id,
+        source_version: generation.allocation_version,
+        commitments: [commitment],
+        rejected: selection.rejected
+      },
+      intelligence_decision(candidate)
+    )
+  end
+
+  defp publish_intelligence(
+         scope,
+         generation,
+         revision,
+         commitment,
+         selection,
+         candidate,
+         %{completed: completed}
+       ) do
+    FleetAllocation.replan_subgraph(
+      scope,
+      generation.id,
+      %{
+        revision_id: revision.id,
+        source_version: generation.allocation_version,
+        commitments: [commitment],
+        rejected: selection.rejected
+      },
+      [commitment.candidate_id | Enum.map(completed, & &1.candidate_id)],
+      intelligence_decision(candidate)
+    )
+  end
+
+  defp intelligence_decision(candidate) do
+    %{
+      evidence_references: candidate.dependencies,
+      expectations: candidate.expected_outcomes,
+      calibration_version: "intelligence-v1"
+    }
+  end
+
   # The Governor's explicit deferral wins over availability collection. It is
   # not authoritative evidence of an empty portfolio, so it cannot mint or
   # disturb a Neutral Wait.
@@ -809,8 +951,10 @@ defmodule SpaceTraders.FleetExecution do
     |> Enum.map(fn ship ->
       %{
         resource: ship.symbol,
-        roles: [:market_trader, :intelligence_scout],
+        roles: ship_roles(ship),
         capabilities: %{
+          frame: frame_symbol(ship),
+          operating_cost: operating_cost(ship),
           cargo_transport: cargo_capacity(ship),
           chart: true,
           waypoint_scan: sensor_mount?(ship),
@@ -819,6 +963,22 @@ defmodule SpaceTraders.FleetExecution do
       }
     end)
   end
+
+  # Roles follow capability: only a Ship with a hold can trade; any Ship can
+  # scout. Allocation then picks the cheapest capable Ship per role.
+  defp ship_roles(ship) do
+    if cargo_capacity(ship) > 0,
+      do: [:market_trader, :intelligence_scout],
+      else: [:intelligence_scout]
+  end
+
+  defp frame_symbol(%{frame: %{symbol: symbol}}), do: symbol
+  defp frame_symbol(_ship), do: nil
+
+  # Fuel tank size stands in for fuel use per leg; solar-powered probes carry
+  # none and so cost nothing to move.
+  defp operating_cost(%{fuel: %{capacity: capacity}}) when is_integer(capacity), do: capacity
+  defp operating_cost(_ship), do: 0
 
   defp cargo_capacity(%{cargo: %{capacity: capacity}}) when is_integer(capacity), do: capacity
   defp cargo_capacity(_ship), do: 0

@@ -2239,6 +2239,7 @@ defmodule SpaceTraders.FleetPlanning do
 
     if is_integer(demand_deadline_seconds) and demand_deadline_seconds >= 0 and
          is_integer(credit_margin_percent) and credit_margin_percent >= Version.hard_lower_bound() and
+         valid_headroom?(Map.get(snapshot, :credit_headroom)) and
          is_map(observation_costs) and
          Enum.all?(observation_costs, fn {subject, cost} ->
            is_binary(subject) and is_map(cost) and
@@ -2259,6 +2260,8 @@ defmodule SpaceTraders.FleetPlanning do
            demand_deadline_seconds: demand_deadline_seconds,
            observation_costs: observation_costs,
            credit_margin_percent: credit_margin_percent,
+           claimable_hold: claimable_hold(Map.get(snapshot, :ships)),
+           credit_headroom: Map.get(snapshot, :credit_headroom),
            agent_id: Map.get(snapshot, :agent_id),
            coverage_authoritative: Map.has_key?(snapshot, :baseline_subjects),
            baseline_subjects: baseline_subjects,
@@ -2272,6 +2275,49 @@ defmodule SpaceTraders.FleetPlanning do
   end
 
   defp normalize_snapshot(_snapshot), do: {:error, :invalid_market_planning_input}
+
+  defp valid_headroom?(nil), do: true
+  defp valid_headroom?(credits), do: is_integer(credits) and credits >= 0
+
+  # The largest free Cargo any claimable Ship offers, or `nil` when the
+  # snapshot carries no Ship evidence (legacy callers keep Market-depth
+  # sizing). Order-independent: a maximum, never a first match.
+  defp claimable_hold(ships) when is_list(ships) do
+    ships
+    |> Enum.map(fn
+      %{cargo: %{capacity: capacity, units: units}}
+      when is_integer(capacity) and is_integer(units) ->
+        max(capacity - units, 0)
+
+      _ ->
+        0
+    end)
+    |> Enum.max(fn -> 0 end)
+  end
+
+  defp claimable_hold(_ships), do: nil
+
+  # Units a Ship can actually carry and the Agent can actually buy: Market
+  # depth, claimable hold, then credit headroom at the calibrated margin.
+  defp tradable_units(source_good, destination_good, snapshot) do
+    depth = min(source_good.trade_volume, destination_good.trade_volume)
+    held = if snapshot.claimable_hold, do: min(depth, snapshot.claimable_hold), else: depth
+
+    case snapshot.credit_headroom do
+      nil ->
+        held
+
+      headroom ->
+        case CreditSpending.affordable_units(
+               headroom,
+               source_good.purchase_price,
+               snapshot.credit_margin_percent
+             ) do
+          :infinity -> held
+          affordable -> min(held, affordable)
+        end
+    end
+  end
 
   # Without an explicit authoritative baseline the snapshot's own Market
   # subjects are the target set, so legacy callers keep their conclusions
@@ -2466,7 +2512,9 @@ defmodule SpaceTraders.FleetPlanning do
           source_good <- source.trade_goods,
           destination_good <- destination.trade_goods,
           source_good.symbol == destination_good.symbol,
-          destination_good.sell_price > source_good.purchase_price do
+          destination_good.sell_price > source_good.purchase_price,
+          units = tradable_units(source_good, destination_good, snapshot),
+          units > 0 do
         contribution(
           revision,
           objective_index,
@@ -2475,7 +2523,8 @@ defmodule SpaceTraders.FleetPlanning do
           source_good,
           destination,
           destination_good,
-          snapshot
+          snapshot,
+          units
         )
       end
 
@@ -2501,9 +2550,9 @@ defmodule SpaceTraders.FleetPlanning do
          source_good,
          destination,
          destination_good,
-         snapshot
+         snapshot,
+         units
        ) do
-    units = min(source_good.trade_volume, destination_good.trade_volume)
     spread = destination_good.sell_price - source_good.purchase_price
 
     expected_outcomes = %{

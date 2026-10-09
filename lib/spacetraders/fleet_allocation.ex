@@ -1472,9 +1472,26 @@ defmodule SpaceTraders.FleetAllocation do
   defp eligible_claims(contribution, claims) do
     claims
     |> Enum.filter(&claim_supports?(&1, contribution))
+    |> Enum.sort_by(&{role_cost(&1, contribution), claim_id(&1)})
     |> Enum.map(&claim_id/1)
-    |> Enum.sort()
   end
+
+  # Cheapest capable Ship first: operating cost (fuel use and travel, as the
+  # claim reports it), then capability the role does not need, so a probe
+  # takes scouting and the hold-bearing Ship stays free for a trade. The
+  # symbol only breaks exact ties, so input order and alphabet never decide.
+  defp role_cost(%{capabilities: capabilities}, contribution) do
+    needed =
+      Enum.find_value(contribution.required_capabilities, 0, fn
+        %{capability: :cargo_transport, minimum_capacity: minimum} -> minimum
+        _ -> nil
+      end)
+
+    {Map.get(capabilities, :operating_cost, 0),
+     max(Map.get(capabilities, :cargo_transport, 0) - needed, 0)}
+  end
+
+  defp role_cost(_claim, _contribution), do: {0, 0}
 
   defp claim_supports?(%{roles: roles, capabilities: capabilities}, contribution)
        when is_list(roles) and is_map(capabilities) do
