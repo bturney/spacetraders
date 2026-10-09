@@ -9,7 +9,9 @@ defmodule SpaceTraders.PromEx do
       PromEx.Plugins.PhoenixLiveView,
       PromEx.Plugins.Ecto,
       PromEx.Plugins.Beam,
-      SpaceTraders.PromEx.API
+      SpaceTraders.PromEx.API,
+      SpaceTraders.PromEx.Outcome,
+      SpaceTraders.PromEx.FleetOutcome
     ]
   end
 

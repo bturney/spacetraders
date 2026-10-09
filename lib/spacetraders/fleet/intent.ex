@@ -14,6 +14,7 @@ defmodule SpaceTraders.Fleet.Intent do
 
   @unfinished_states ["active", "waiting", "awaiting_confirmation", "blocked"]
   @terminal_states ["completed", "infeasible", "stopped", "superseded"]
+  @types ~w(navigate acquire_intelligence acquire_resources buy sell deliver transfer install_module remove_module)
 
   schema "intents" do
     # Fleet Commitment and authenticated intervention Intents are scoped by the
@@ -43,6 +44,7 @@ defmodule SpaceTraders.Fleet.Intent do
 
   def unfinished_states, do: @unfinished_states
   def terminal_states, do: @terminal_states
+  def types, do: @types
 
   def unfinished?(%__MODULE__{status: status}), do: status in @unfinished_states
   def unfinished?(_intent), do: false
@@ -64,17 +66,7 @@ defmodule SpaceTraders.Fleet.Intent do
     |> validate_required([:caller, :type, :target_waypoint])
     |> validate_inclusion(:caller, ["commitment", "intervention"])
     |> validate_commitment_owner()
-    |> validate_inclusion(:type, [
-      "navigate",
-      "acquire_intelligence",
-      "acquire_resources",
-      "buy",
-      "sell",
-      "deliver",
-      "transfer",
-      "install_module",
-      "remove_module"
-    ])
+    |> validate_inclusion(:type, @types)
     |> validate_inclusion(:status, @unfinished_states ++ @terminal_states)
     |> unique_constraint(:ship_id, name: :intents_one_active_per_ship_index)
   end

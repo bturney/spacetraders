@@ -14,6 +14,7 @@ defmodule SpaceTraders.Application do
         SpaceTraders.Repo,
         {Ecto.Migrator,
          repos: Application.fetch_env!(:spacetraders, :ecto_repos), skip: skip_migrations?()},
+        SpaceTraders.Outcomes,
         {DNSCluster, query: Application.get_env(:spacetraders, :dns_cluster_query) || :ignore},
         {Phoenix.PubSub, name: SpaceTraders.PubSub},
         SpaceTraders.Evidence.ReadCoordinator,

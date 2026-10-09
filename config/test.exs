@@ -7,6 +7,9 @@ config :pbkdf2_elixir, :rounds, 1
 
 config :spacetraders, :fleet_reconciler_enabled, false
 
+# Outcome projection tests start the single worker over independently committed state.
+config :spacetraders, :outcome_db_projections_enabled, false
+
 # Evidence scheduling tests start their own scheduler to prove wakeup recovery
 # from persisted demands with a controlled clock.
 config :spacetraders, :demand_scheduler_enabled, false

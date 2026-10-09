@@ -1285,6 +1285,7 @@ defmodule SpaceTraders.Evidence do
           |> order_by([demand], asc: demand.inserted_at, asc: demand.id)
           |> Repo.all()
 
+        SpaceTraders.Outcomes.PostCommit.observe(persisted)
         %{observation: persisted, demands: fulfilled}
       end)
       |> tap(fn

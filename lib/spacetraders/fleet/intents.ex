@@ -2733,11 +2733,14 @@ defmodule SpaceTraders.Fleet.Intents do
   defp send_selected_action(agent, selected, live_ship) do
     case Agent.handle_game_result(agent, SpaceTraders.API.dispatch_recorded(selected)) do
       {:ok, result} ->
+        attempt = MutationAttempts.get!(selected.mutation_attempt_id)
+        publish_supporting_receipt(selected, attempt)
+
         # Delivered facts the response wholly proves spare a later redundant read.
         {:ok, _coverage} =
           Evidence.retain_mutation_response(
             agent,
-            MutationAttempts.get!(selected.mutation_attempt_id),
+            attempt,
             result
           )
 
@@ -2771,6 +2774,31 @@ defmodule SpaceTraders.Fleet.Intents do
       {:error, reason} ->
         block_intents(selected, reason)
     end
+  end
+
+  # Root Market Cargo confirms its own transaction below. For supporting
+  # purchases/refuels/refits, the API's existing CreditCalibration path has
+  # already validated attribution and retained the total. Consume that proven
+  # charge, never the merely decoded receipt or a newly derived amount.
+  defp publish_supporting_receipt(selected, attempt) do
+    operation = selected.in_flight_action["kind"]
+
+    if operation in ~w(buy refuel jump install_module remove_module) and
+         (selected.type != operation or operation != "buy") do
+      case SpaceTraders.CreditCalibration.realization(attempt) do
+        %{realized_charge: total} ->
+          SpaceTraders.Outcomes.transaction(selected.type, operation, total)
+
+        nil ->
+          :ok
+      end
+    end
+
+    :ok
+  rescue
+    _ -> Logger.error("Outcome metric emission failed; dropping supporting receipt")
+  catch
+    _, _ -> Logger.error("Outcome metric emission failed; dropping supporting receipt")
   end
 
   defp block_preparation_refusal(_intent, reason)
@@ -2956,6 +2984,14 @@ defmodule SpaceTraders.Fleet.Intents do
            finished_at: DateTime.utc_now() |> DateTime.truncate(:second)
          ) do
       {:ok, intent} ->
+        if intent.type in ["buy", "sell"],
+          do:
+            SpaceTraders.Outcomes.transaction(
+              intent.type,
+              intent.type,
+              get_in(result, ["transaction", "total_price"])
+            )
+
         if intent.caller == "commitment" and intent.type == "deliver",
           do: FleetAllocation.reconcile_completed_outcomes()
 

@@ -470,7 +470,10 @@ defmodule SpaceTraders.API do
             end
 
           decoded ->
-            case record_mutation_outcome(attempt, :succeeded, %{status: status}) do
+            evidence =
+              Map.merge(%{status: status}, SpaceTraders.Outcomes.PostCommit.nav_evidence(decoded))
+
+            case record_mutation_outcome(attempt, :succeeded, evidence) do
               :ok ->
                 complete_shadow(shadow, capacity, status, :ok, {:ok, decoded})
 

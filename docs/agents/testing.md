@@ -145,6 +145,23 @@ Current seam owners:
   capacity authority through Strategy activation ("Gate 1 authority" describe):
   `test/diagnostics/runtime_qualification.exs` (diagnostic only)
 
+- native Bandit outcome exporter ownership and coherent HTTP scrapes:
+  `test/diagnostics/outcome_http.exs` (diagnostic only)
+
+## Native outcome HTTP diagnostic
+
+Run when changing native `/metrics` response ownership or HTTP scrape coherence:
+
+```sh
+mix test test/diagnostics/outcome_http.exs --seed 0 --trace
+```
+
+Done: HTTP 200 after committed domain observations; one publisher; coherent
+bytes during held-open Fleet publication. The diagnostic owns its loopback
+ephemeral listener and real-commit DB cleanup. Explicit run only: ordinary test
+discovery and `scripts/verify` bind no port (ADR 0014). Socket-free seams remain
+in `test/spacetraders_web/{fleet_outcome_metrics,outcome_metrics}_test.exs`.
+
 ## Runtime qualification
 
 `test/diagnostics/runtime_qualification.exs` is a timing-sensitive, standalone
