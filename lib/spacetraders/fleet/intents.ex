@@ -3987,10 +3987,17 @@ defmodule SpaceTraders.Fleet.Intents do
        )
        when is_binary(waypoint_symbol) do
     with {:ok, system_symbol} <- Fleet.system_from_headquarters(waypoint_symbol) do
-      SpaceTraders.Intelligence.invalidate(agent, :market, system_symbol, waypoint_symbol, [
-        :trade_goods,
-        :transactions
-      ])
+      # The FUEL transaction is receipt evidence, not a replacement Listing.
+      # Only the retained transaction history is contradicted; Listings keep
+      # their original observation time and validity.
+      SpaceTraders.Intelligence.invalidate(
+        agent,
+        :market,
+        system_symbol,
+        waypoint_symbol,
+        [:transactions],
+        cause: :refuel_receipt
+      )
     end
   rescue
     exception ->
