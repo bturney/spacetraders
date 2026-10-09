@@ -7,11 +7,26 @@ defmodule SpaceTradersWeb.OutcomeMetricsTest do
   alias SpaceTraders.Evidence
   alias SpaceTraders.FleetStrategy
   alias SpaceTraders.Agent.Scope
+  alias SpaceTraders.TestClock
 
   @agent_event [:spacetraders, :outcome, :agent]
   @contracts_event [:spacetraders, :outcome, :contracts]
+  @observed_event [:spacetraders, :outcome, :observed]
+  @now ~U[2030-01-01 00:00:00.000000Z]
 
   setup do
+    restart_outcomes()
+    on_exit(&restart_outcomes/0)
+    start_supervised!({TestClock, @now})
+    previous_clock = Application.get_env(:spacetraders, :clock)
+    Application.put_env(:spacetraders, :clock, TestClock)
+
+    on_exit(fn ->
+      if previous_clock,
+        do: Application.put_env(:spacetraders, :clock, previous_clock),
+        else: Application.delete_env(:spacetraders, :clock)
+    end)
+
     operator = operator_fixture()
     agent = agent_fixture(operator, %{agent_token: "OUTCOME_TOKEN"})
     handler = {__MODULE__, make_ref()}
@@ -19,13 +34,274 @@ defmodule SpaceTradersWeb.OutcomeMetricsTest do
     :ok =
       :telemetry.attach_many(
         handler,
-        [@agent_event, @contracts_event],
+        [@agent_event, @contracts_event, @observed_event],
         &__MODULE__.handle_event/4,
         self()
       )
 
     on_exit(fn -> :telemetry.detach(handler) end)
     %{agent: agent, operator: operator}
+  end
+
+  test "family timestamps track authoritative observation time, including equal balances", %{
+    agent: agent
+  } do
+    stub_agent(agent, 1000)
+    assert {:ok, _} = Evidence.get_agent(agent)
+
+    assert_receive {:outcome, @observed_event, %{observed_at_seconds: 1_893_456_000.0},
+                    %{family: "credits"}}
+
+    assert_metric(~s(spacetraders_outcome_observed_at_seconds{family="credits"}), 1_893_456_000)
+
+    TestClock.advance(60)
+    assert {:ok, _} = Evidence.get_agent(agent)
+
+    assert_receive {:outcome, @observed_event, %{observed_at_seconds: 1_893_456_060.0},
+                    %{family: "credits"}}
+
+    assert_metric(~s(spacetraders_outcome_observed_at_seconds{family="credits"}), 1_893_456_060)
+
+    TestClock.advance(30)
+    stub_contracts([])
+    assert {:ok, []} = Evidence.get_contracts(agent)
+
+    assert_receive {:outcome, @observed_event, %{observed_at_seconds: 1_893_456_090.0},
+                    %{family: "contracts"}}
+
+    assert_metric(~s(spacetraders_outcome_observed_at_seconds{family="contracts"}), 1_893_456_090)
+    assert_metric(~s(spacetraders_outcome_observed_at_seconds{family="credits"}), 1_893_456_060)
+
+    TestClock.advance(600)
+    assert_metric(~s(spacetraders_outcome_observed_at_seconds{family="credits"}), 1_893_456_060)
+    assert_metric(~s(spacetraders_outcome_observed_at_seconds{family="contracts"}), 1_893_456_090)
+    refute_receive {:outcome, @observed_event, _, _}
+  end
+
+  test "distinct equal-balance observations form a zero interval, losses stay negative and idle retains the pair",
+       %{
+         agent: agent
+       } do
+    stub_agent(agent, 1000)
+    assert {:ok, _} = Evidence.get_agent(agent)
+    assert_receive {:outcome, @observed_event, _, %{family: "credits"}}
+    assert_metric("spacetraders_outcome_agent_credits_previous_observed_at_seconds", 0)
+    assert last_interval_rate() == :unknown
+
+    TestClock.advance(60)
+    assert {:ok, _} = Evidence.get_agent(agent)
+    assert_receive {:outcome, @observed_event, _, %{family: "credits"}}
+    assert_metric("spacetraders_outcome_agent_credits_previous", 1000)
+
+    assert_metric(
+      "spacetraders_outcome_agent_credits_previous_observed_at_seconds",
+      1_893_456_000
+    )
+
+    assert last_interval_rate() == 0
+
+    TestClock.advance(600)
+    stub_agent(agent, 900)
+    assert {:ok, _} = Evidence.get_agent(agent)
+    assert_receive {:outcome, @observed_event, _, %{family: "credits"}}
+    assert_metric("spacetraders_outcome_agent_credits_previous", 1000)
+
+    assert_metric(
+      "spacetraders_outcome_agent_credits_previous_observed_at_seconds",
+      1_893_456_060
+    )
+
+    assert last_interval_rate() == -600
+
+    TestClock.advance(3600)
+    assert last_interval_rate() == -600
+    assert_metric(~s(spacetraders_outcome_observed_at_seconds{family="credits"}), 1_893_456_660)
+    refute_receive {:outcome, @observed_event, _, _}
+  end
+
+  test "retained fact reuse and replay never advance timestamps or produce a new credit interval",
+       %{
+         agent: agent
+       } do
+    stub_agent(agent, 1000)
+    assert {:ok, first} = Evidence.get_agent_binding(agent)
+    assert_receive {:outcome, @observed_event, _, %{family: "credits"}}
+    TestClock.advance(60)
+    stub_agent(agent, 900)
+    assert {:ok, second} = Evidence.get_agent_binding(agent)
+    assert_receive {:outcome, @observed_event, _, %{family: "credits"}}
+
+    TestClock.advance(600)
+    assert {:ok, _} = Evidence.retained_binding(agent, first.observation.id)
+    replay(agent, first)
+    replay(agent, second)
+    assert last_interval_rate() == -6000
+    assert_metric(~s(spacetraders_outcome_observed_at_seconds{family="credits"}), 1_893_456_060)
+
+    assert_metric(
+      "spacetraders_outcome_agent_credits_previous_observed_at_seconds",
+      1_893_456_000
+    )
+
+    refute_receive {:outcome, @observed_event, _, _}
+  end
+
+  test "same-time distinct reads keep current gauges truthful without a zero-duration credit pair",
+       %{
+         agent: agent
+       } do
+    stub_agent(agent, 1000)
+    assert {:ok, _} = Evidence.get_agent(agent)
+    assert_receive {:outcome, @observed_event, _, %{family: "credits"}}
+
+    TestClock.advance(60)
+    stub_agent(agent, 900)
+    assert {:ok, _} = Evidence.get_agent(agent)
+    assert_receive {:outcome, @observed_event, _, %{family: "credits"}}
+
+    stub_agent(agent, 800)
+    assert {:ok, _} = Evidence.get_agent(agent)
+    assert_metric("spacetraders_outcome_agent_credits", 800)
+    assert_metric("spacetraders_outcome_agent_credits_previous", 1000)
+    assert last_interval_rate() == -12_000
+
+    stub_contracts([contract("active", true, false, 4)])
+    assert {:ok, [_]} = Evidence.get_contracts(agent)
+    assert_metric(~s(spacetraders_outcome_contracts{status="active"}), 1)
+    stub_contracts([])
+    assert {:ok, []} = Evidence.get_contracts(agent)
+    assert_metric(~s(spacetraders_outcome_contracts{status="active"}), 0)
+  end
+
+  test "a scrape cannot mix the current credits with an unfinished observation pair", %{
+    agent: agent
+  } do
+    stub_agent(agent, 1000)
+    assert {:ok, _} = Evidence.get_agent(agent)
+    assert_receive {:outcome, @observed_event, _, %{family: "credits"}}
+
+    handler = {__MODULE__, :pause, make_ref()}
+    :ok = :telemetry.attach(handler, @agent_event, &__MODULE__.pause_publication/4, self())
+    on_exit(fn -> :telemetry.detach(handler) end)
+
+    TestClock.advance(60)
+    stub_agent(agent, 900)
+    # Gameplay returns despite the metrics subscriber being paused.
+    assert {:ok, _} = Evidence.get_agent(agent)
+    assert_receive {:publication_paused, publisher}
+    parent = self()
+
+    scrape =
+      Task.async(fn ->
+        send(parent, :scrape_started)
+        build_conn() |> get("/metrics") |> response(200)
+      end)
+
+    assert_receive :scrape_started
+    assert Task.yield(scrape, 20) == nil
+    send(publisher, :continue_publication)
+    body = Task.await(scrape)
+    assert metric_value(body, "spacetraders_outcome_agent_credits") == 900
+    assert metric_value(body, "spacetraders_outcome_agent_credits_previous") == 1000
+
+    assert metric_value(body, ~s(spacetraders_outcome_observed_at_seconds{family="credits"})) ==
+             1_893_456_060
+
+    assert metric_value(body, "spacetraders_outcome_agent_credits_previous_observed_at_seconds") ==
+             1_893_456_000
+  end
+
+  test "Agent identity changes invalidate the previous interval", %{
+    agent: first_agent
+  } do
+    stub_agent(first_agent, 1000)
+    assert {:ok, _} = Evidence.get_agent(first_agent)
+    assert_receive {:outcome, @observed_event, _, %{family: "credits"}}
+    TestClock.advance(60)
+    stub_agent(first_agent, 900)
+    assert {:ok, _} = Evidence.get_agent(first_agent)
+    assert_receive {:outcome, @observed_event, _, %{family: "credits"}}
+    assert last_interval_rate() == -6000
+
+    second_agent = agent_fixture(operator_fixture())
+    TestClock.advance(60)
+    stub_agent(second_agent, 175_000)
+    assert {:ok, _} = Evidence.get_agent(second_agent)
+    assert_receive {:outcome, @observed_event, _, %{family: "credits"}}
+    assert last_interval_rate() == :unknown
+    assert_metric("spacetraders_outcome_agent_credits", 175_000)
+
+    TestClock.advance(60)
+    stub_agent(second_agent, 175_010)
+    assert {:ok, _} = Evidence.get_agent(second_agent)
+    assert_receive {:outcome, @observed_event, _, %{family: "credits"}}
+    assert last_interval_rate() == 600
+    assert_metric("spacetraders_outcome_agent_credits_previous", 175_000)
+  end
+
+  test "establishing a Fleet Generation invalidates the unscoped credit interval", %{
+    agent: agent,
+    operator: operator
+  } do
+    stub_agent(agent, 1000)
+    assert {:ok, _} = Evidence.get_agent(agent)
+    assert_receive {:outcome, @observed_event, _, %{family: "credits"}}
+    TestClock.advance(60)
+    assert {:ok, _} = Evidence.get_agent(agent)
+    assert_receive {:outcome, @observed_event, _, %{family: "credits"}}
+    assert last_interval_rate() == 0
+
+    SpaceTraders.Repo.insert!(%SpaceTraders.FleetGeneration.Generation{
+      operator_id: operator.id,
+      agent_id: agent.id,
+      number: 1,
+      symbol: agent.symbol,
+      faction: agent.faction
+    })
+
+    TestClock.advance(60)
+    assert {:ok, _} = Evidence.get_agent(agent)
+    assert_receive {:outcome, @observed_event, _, %{family: "credits"}}
+    assert last_interval_rate() == :unknown
+
+    TestClock.advance(60)
+    assert {:ok, _} = Evidence.get_agent(agent)
+    assert_receive {:outcome, @observed_event, _, %{family: "credits"}}
+    assert last_interval_rate() == 0
+  end
+
+  test "projection restart leaves rate unknown until two new observations and ignores pre-restart replays",
+       %{
+         agent: agent
+       } do
+    stub_agent(agent, 1000)
+    assert {:ok, first} = Evidence.get_agent_binding(agent)
+    assert_receive {:outcome, @observed_event, _, %{family: "credits"}}
+    TestClock.advance(60)
+    stub_agent(agent, 900)
+    assert {:ok, _} = Evidence.get_agent(agent)
+    assert_receive {:outcome, @observed_event, _, %{family: "credits"}}
+    assert last_interval_rate() == -6000
+
+    TestClock.advance(600)
+    restart_outcomes()
+    assert last_interval_rate() == :unknown
+    assert_metric("spacetraders_outcome_agent_credits", 900)
+    replay(agent, first)
+    refute_receive {:outcome, @observed_event, _, %{family: "credits"}}
+    assert_metric("spacetraders_outcome_agent_credits", 900)
+
+    stub_agent(agent, 800)
+    assert {:ok, _} = Evidence.get_agent(agent)
+    assert_receive {:outcome, @observed_event, _, %{family: "credits"}}
+    assert last_interval_rate() == :unknown
+
+    TestClock.advance(60)
+    stub_agent(agent, 700)
+    assert {:ok, _} = Evidence.get_agent(agent)
+    assert_receive {:outcome, @observed_event, _, %{family: "credits"}}
+    assert last_interval_rate() == -6000
+    assert_metric("spacetraders_outcome_agent_credits_previous", 800)
   end
 
   test "owned Agent reads publish authoritative credits, including zero and Binding reads", %{
@@ -39,6 +315,7 @@ defmodule SpaceTradersWeb.OutcomeMetricsTest do
     assert_metric("spacetraders_outcome_agent_credits", 123_456)
 
     stub_agent(agent, 0)
+    TestClock.advance(1)
     assert {:ok, %Evidence.Binding{value: %{credits: 0}}} = Evidence.get_agent_binding(agent)
     assert_receive {:outcome, @agent_event, %{credits: 0}, %{}}
     assert_metric("spacetraders_outcome_agent_credits", 0)
@@ -55,6 +332,8 @@ defmodule SpaceTradersWeb.OutcomeMetricsTest do
       capture_log(fn ->
         assert {:ok, %Evidence.Binding{value: %{credits: "invalid credits"}}} =
                  Evidence.get_agent_binding(agent)
+
+        refute_receive {:outcome, @agent_event, _, _}
       end)
 
     assert log =~ "Outcome metric emission failed; dropping observation"
@@ -62,6 +341,7 @@ defmodule SpaceTradersWeb.OutcomeMetricsTest do
     assert_metric("spacetraders_outcome_agent_credits", 765_432)
 
     stub_agent(agent, 654_321)
+    TestClock.advance(1)
     assert {:ok, _} = Evidence.get_agent(agent)
     assert_receive {:outcome, @agent_event, %{credits: 654_321}, %{}}
     assert_metric("spacetraders_outcome_agent_credits", 654_321)
@@ -76,6 +356,7 @@ defmodule SpaceTradersWeb.OutcomeMetricsTest do
     log =
       capture_log(fn ->
         assert {:ok, %{credits: 321_654}} = Evidence.get_agent(agent)
+        assert_receive {:outcome, @observed_event, _, %{family: "credits"}}
       end)
 
     assert log =~ "has failed and has been detached"
@@ -101,6 +382,7 @@ defmodule SpaceTradersWeb.OutcomeMetricsTest do
     log =
       capture_log(fn ->
         assert {:ok, [_, _]} = Evidence.get_contracts(agent)
+        refute_receive {:outcome, @contracts_event, _, _}
       end)
 
     assert log =~ "Outcome metric emission failed; dropping observation"
@@ -151,6 +433,7 @@ defmodule SpaceTradersWeb.OutcomeMetricsTest do
     end
 
     stub_contracts([])
+    TestClock.advance(1)
     assert {:ok, %Evidence.Binding{value: []}} = Evidence.get_contracts(agent, bind: true)
 
     for status <- ~w(pending active near_delivery completed expired) do
@@ -164,6 +447,14 @@ defmodule SpaceTradersWeb.OutcomeMetricsTest do
   end
 
   def broken_handler(_event, _measurements, _metadata, _config), do: raise("broken subscriber")
+
+  def pause_publication(_event, _measurements, _metadata, pid) do
+    send(pid, {:publication_paused, self()})
+
+    receive do
+      :continue_publication -> :ok
+    end
+  end
 
   defp stub_agent(agent, credits) do
     Req.Test.stub(SpaceTraders.API, fn conn ->
@@ -203,8 +494,52 @@ defmodule SpaceTradersWeb.OutcomeMetricsTest do
 
   defp assert_metric(series, value) do
     body = build_conn() |> get("/metrics") |> response(200)
-    assert body =~ "#{series} #{value}\n"
+    assert metric_value(body, series) == value
     refute body =~ "OUTCOME_TOKEN"
     body
+  end
+
+  defp metric_value(body, series) do
+    assert [_, sample] = Regex.run(~r/^#{Regex.escape(series)} ([^\n]+)$/m, body)
+    assert {actual, ""} = Float.parse(sample)
+    actual
+  end
+
+  defp last_interval_rate do
+    body = build_conn() |> get("/metrics") |> response(200)
+
+    current_at =
+      metric_value(body, ~s(spacetraders_outcome_observed_at_seconds{family="credits"}))
+
+    previous_at =
+      metric_value(body, "spacetraders_outcome_agent_credits_previous_observed_at_seconds")
+
+    if previous_at > 0 and current_at > previous_at do
+      current = metric_value(body, "spacetraders_outcome_agent_credits")
+      previous = metric_value(body, "spacetraders_outcome_agent_credits_previous")
+      3600 * (current - previous) / (current_at - previous_at)
+    else
+      :unknown
+    end
+  end
+
+  defp replay(agent, binding) do
+    source = binding.observation
+
+    fact =
+      Evidence.authoritative_observation(
+        source.operation_id,
+        source.dependency_keys,
+        source.facts,
+        source.observed_at
+      )
+
+    assert {:ok, _} = Evidence.fulfil_demands(agent, source.subject, fact)
+  end
+
+  defp restart_outcomes do
+    :ok = Supervisor.terminate_child(SpaceTraders.Supervisor, SpaceTraders.Outcomes)
+    {:ok, _pid} = Supervisor.restart_child(SpaceTraders.Supervisor, SpaceTraders.Outcomes)
+    :ok
   end
 end

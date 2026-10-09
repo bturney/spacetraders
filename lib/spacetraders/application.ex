@@ -11,6 +11,7 @@ defmodule SpaceTraders.Application do
       [
         SpaceTradersWeb.Telemetry,
         SpaceTraders.PromEx,
+        SpaceTraders.Outcomes,
         SpaceTraders.Repo,
         {Ecto.Migrator,
          repos: Application.fetch_env!(:spacetraders, :ecto_repos), skip: skip_migrations?()},
