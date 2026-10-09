@@ -10,6 +10,8 @@ defmodule SpaceTraders.Outcomes do
   alias SpaceTraders.Contracts
 
   @contract_statuses ~w(pending active near_delivery completed expired)
+  @intent_types ~w(navigate acquire_intelligence acquire_resources buy sell deliver transfer install_module remove_module)
+  @transaction_operations ~w(buy sell refuel jump install_module remove_module)
 
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts, name: __MODULE__)
 
@@ -22,6 +24,33 @@ defmodule SpaceTraders.Outcomes do
 
     :ok
   end
+
+  @doc "Enqueues an already-proven transaction total, without deriving an amount."
+  def transaction(intent_type, operation, credits)
+      when intent_type in @intent_types and operation in @transaction_operations and
+             is_integer(credits) and credits >= 0 do
+    if Process.whereis(__MODULE__) do
+      GenServer.cast(
+        __MODULE__,
+        {:transaction, intent_type, operation, credits, SpaceTraders.Clock.utc_now()}
+      )
+    else
+      log_failure(%{operation_id: operation})
+    end
+
+    :ok
+  rescue
+    _error ->
+      log_failure(%{operation_id: operation})
+      :ok
+  catch
+    _kind, _reason ->
+      log_failure(%{operation_id: operation})
+      :ok
+  end
+
+  # Unknown monetary evidence stays unknown; never manufacture a zero series.
+  def transaction(_intent_type, _operation, _credits), do: :ok
 
   @doc false
   def metrics(prom_ex_module) do
@@ -37,7 +66,13 @@ defmodule SpaceTraders.Outcomes do
     credit_pair(nil)
 
     {:ok,
-     %{credit: nil, previous: nil, contracts_at: nil, started_at: SpaceTraders.Clock.utc_now()}}
+     %{
+       credit: nil,
+       previous: nil,
+       contracts_at: nil,
+       transactions_at: nil,
+       started_at: SpaceTraders.Clock.utc_now()
+     }}
   end
 
   @impl true
@@ -61,6 +96,32 @@ defmodule SpaceTraders.Outcomes do
   catch
     _kind, _reason ->
       log_failure(observation)
+      {:noreply, state}
+  end
+
+  def handle_cast({:transaction, intent_type, operation, credits, observed_at}, state) do
+    :telemetry.execute(
+      [:spacetraders, :outcome, :transaction],
+      %{credits: credits},
+      %{intent_type: intent_type, operation: operation}
+    )
+
+    # Amounts are individual deltas, never coalesced or replayed aggregate totals.
+    # Reordered confirmations still count, but cannot move freshness backwards.
+    latest =
+      if state.transactions_at && DateTime.compare(observed_at, state.transactions_at) == :lt,
+        do: state.transactions_at,
+        else: observed_at
+
+    observed("transactions", %{observed_at: latest})
+    {:noreply, %{state | transactions_at: latest}}
+  rescue
+    _error ->
+      log_failure(%{operation_id: operation})
+      {:noreply, state}
+  catch
+    _kind, _reason ->
+      log_failure(%{operation_id: operation})
       {:noreply, state}
   end
 

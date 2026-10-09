@@ -17,6 +17,14 @@ defmodule SpaceTraders.PromEx.Outcome do
         tags: [:status],
         description: "Current Contract counts by bounded status from the latest owned read."
       ),
+      sum(
+        [:spacetraders, :outcome, :credits, :transactions, :total],
+        event_name: [:spacetraders, :outcome, :transaction],
+        measurement: :credits,
+        tags: [:intent_type, :operation],
+        description:
+          "Gross confirmed transaction credits by bounded root Intent type and operation."
+      ),
       last_value(
         [:spacetraders, :outcome, :observed_at, :seconds],
         event_name: [:spacetraders, :outcome, :observed],

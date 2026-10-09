@@ -2733,6 +2733,18 @@ defmodule SpaceTraders.Fleet.Intents do
   defp send_selected_action(agent, selected, live_ship) do
     case Agent.handle_game_result(agent, SpaceTraders.API.dispatch_recorded(selected)) do
       {:ok, result} ->
+        # Root Market Cargo confirms its own transaction below. Supporting
+        # purchases/refuels/refits already carry a decoded transaction total;
+        # record that receipt once here, before subsequent reads discard it.
+        case {selected.type, selected.in_flight_action["kind"], result} do
+          {type, operation, %{transaction: %{total_price: total}}}
+          when type != operation or operation not in ["buy", "sell"] ->
+            SpaceTraders.Outcomes.transaction(type, operation, total)
+
+          _ ->
+            :ok
+        end
+
         # Delivered facts the response wholly proves spare a later redundant read.
         {:ok, _coverage} =
           Evidence.retain_mutation_response(
@@ -2956,6 +2968,14 @@ defmodule SpaceTraders.Fleet.Intents do
            finished_at: DateTime.utc_now() |> DateTime.truncate(:second)
          ) do
       {:ok, intent} ->
+        if intent.type in ["buy", "sell"],
+          do:
+            SpaceTraders.Outcomes.transaction(
+              intent.type,
+              intent.type,
+              get_in(result, ["transaction", "total_price"])
+            )
+
         if intent.caller == "commitment" and intent.type == "deliver",
           do: FleetAllocation.reconcile_completed_outcomes()
 
