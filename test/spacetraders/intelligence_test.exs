@@ -120,6 +120,65 @@ defmodule SpaceTraders.IntelligenceTest do
     assert Intelligence.subject(agent, :market, "X1-UX81", "X1-UX81-A1") == %{}
   end
 
+  test "invalidating one contradicted field keeps unrelated Listings at their original observation" do
+    agent = agent()
+    handler = "invalidation-#{System.unique_integer([:positive])}"
+    test_pid = self()
+
+    :telemetry.attach(
+      handler,
+      [:spacetraders, :intelligence, :invalidation],
+      fn _event, measurements, metadata, _ ->
+        send(test_pid, {:invalidated, measurements, metadata})
+      end,
+      nil
+    )
+
+    on_exit(fn -> :telemetry.detach(handler) end)
+
+    market =
+      Market.from_json(%{
+        "symbol" => "X1-UX81-A1",
+        "exports" => [],
+        "imports" => [],
+        "exchange" => [],
+        "tradeGoods" => [
+          %{
+            "symbol" => "DIAMONDS",
+            "type" => "EXPORT",
+            "tradeVolume" => 10,
+            "purchasePrice" => 90,
+            "sellPrice" => 80,
+            "supply" => "MODERATE"
+          }
+        ],
+        "transactions" => []
+      })
+
+    assert {:ok, observation} =
+             Intelligence.observe_market(agent, "X1-UX81", market,
+               source: "get_market",
+               observing_ship_symbol: "INTEL-1",
+               observed_at: ~U[2026-01-01 00:00:00Z]
+             )
+
+    assert {:ok, 1} =
+             Intelligence.invalidate(agent, :market, "X1-UX81", "X1-UX81-A1", [:transactions],
+               cause: :refuel_receipt
+             )
+
+    facts = Intelligence.subject(agent, :market, "X1-UX81", "X1-UX81-A1")
+    refute Map.has_key?(facts, "transactions")
+    assert facts["trade_goods"].observation.id == observation.id
+    assert facts["trade_goods"].observation.observed_at == ~U[2026-01-01 00:00:00Z]
+    assert [%{"symbol" => "DIAMONDS"}] = facts["trade_goods"].value
+
+    assert_receive {:invalidated, %{facts: 1, requested_fields: 1},
+                    %{cause: :refuel_receipt, subject_type: "market"} = metadata}
+
+    assert Map.keys(metadata) |> Enum.sort() == [:cause, :subject_type]
+  end
+
   test "records known-unavailable facts without turning them into negative values" do
     agent = agent()
 
