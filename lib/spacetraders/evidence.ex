@@ -1302,6 +1302,10 @@ defmodule SpaceTraders.Evidence do
         {:ok, %{observation: persisted}} -> notify_demand_change(persisted.agent_id)
         _error -> :ok
       end)
+      |> tap(fn
+        {:ok, %{observation: persisted}} -> SpaceTraders.Outcomes.observe(persisted)
+        _error -> :ok
+      end)
     else
       false -> {:error, :authoritative_observation_required}
     end
