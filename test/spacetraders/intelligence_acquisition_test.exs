@@ -373,6 +373,11 @@ defmodule SpaceTraders.IntelligenceAcquisitionTest do
     assert_receive {"POST", ^navigate_path}
     assert Process.get(:fuel_test_navigate_calls) == 1
     assert %Intent{parameters: %{"refuel" => "to_capacity"}} = Repo.get!(Intent, intent.id)
+
+    # The FUEL receipt is not a replacement Listing: the observed Market's
+    # Listings stay current after a to-capacity refuel.
+    assert %{state: "known", value: [%{"symbol" => "FUEL"}]} =
+             Intelligence.subject(agent, :market, "X1-UX81", "X1-UX81-A1")["trade_goods"]
   end
 
   test "a fuel-independent Ship navigates without refueling" do

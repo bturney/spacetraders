@@ -3,6 +3,8 @@ defmodule SpaceTraders.Intelligence do
 
   import Ecto.Query
 
+  require Logger
+
   alias SpaceTraders.Agent.Agent, as: AgentRecord
   alias SpaceTraders.Intelligence.{Fact, Observation, Survey}
   alias SpaceTraders.{Clock, Repo}
@@ -283,7 +285,14 @@ defmodule SpaceTraders.Intelligence do
   end
 
   @doc "Marks mutable facts for a subject stale after a confirmed mutation or precondition conflict."
-  def invalidate(%AgentRecord{} = agent, subject_type, system_symbol, symbol, fields \\ :all) do
+  def invalidate(
+        %AgentRecord{} = agent,
+        subject_type,
+        system_symbol,
+        symbol,
+        fields \\ :all,
+        opts \\ []
+      ) do
     query =
       Fact
       |> where(
@@ -304,7 +313,30 @@ defmodule SpaceTraders.Intelligence do
         else: query
 
     {count, _} = Repo.update_all(query, set: [invalidated_at: now()])
+    emit_invalidation(agent, subject_type, system_symbol, symbol, fields, count, opts)
     {:ok, count}
+  end
+
+  # Bounded cause and counts only. Agent and subject identities are log
+  # metadata, never telemetry metadata that could become metric labels.
+  defp emit_invalidation(agent, subject_type, system_symbol, symbol, fields, count, opts) do
+    cause = Keyword.get(opts, :cause, :unspecified)
+    field_count = if fields == :all, do: 0, else: length(fields)
+
+    :telemetry.execute(
+      [:spacetraders, :intelligence, :invalidation],
+      %{facts: count, requested_fields: field_count},
+      %{cause: cause, subject_type: to_string(subject_type)}
+    )
+
+    Logger.info("Intelligence facts invalidated",
+      cause: cause,
+      invalidated_facts: count,
+      agent_id: agent.id,
+      subject_type: to_string(subject_type),
+      system_symbol: system_symbol,
+      subject_symbol: symbol
+    )
   end
 
   defp observe(agent, subject_type, system, symbol, payload, fields, opts) do
