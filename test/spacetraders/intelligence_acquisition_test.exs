@@ -143,6 +143,16 @@ defmodule SpaceTraders.IntelligenceAcquisitionTest do
 
     assert [%{"symbol" => "IRON_ORE"}] = projection.facts["trade_goods"].value
     assert projection.facts["trade_goods"].observing_ship_symbol == ship.symbol
+
+    # The retained Listing is linked to the exact governed acquisition and
+    # keeps that acquisition's time.
+    source = Evidence.latest_observation(agent, "market:X1-UX81:X1-UX81-A1")
+
+    assert [%{state: :current, evidence_id: evidence_id, observed_at: observed_at}] =
+             Intelligence.market_interpretation(agent, "X1-UX81", DateTime.utc_now()).markets
+
+    assert evidence_id == "evidence-observation:#{source.id}"
+    assert DateTime.compare(observed_at, source.observed_at) == :eq
   end
 
   test "Market acquisition navigates within its claimed root Intent and waits for arrival" do
@@ -2253,6 +2263,55 @@ defmodule SpaceTraders.IntelligenceAcquisitionTest do
              specs
 
     assert DateTime.compare(due_at, now) != :gt
+  end
+
+  test "runtime refresh timing follows the shared interpretation, not raw fact age" do
+    {agent, ship, _revision, _operator} =
+      unclaimed_intelligence_fixture(%{
+        "objective" => "Grow credits",
+        "kind" => "continuous",
+        "evaluation" => "Maximize net credit growth over time"
+      })
+
+    for {symbol, x} <- [{"X1-UX81-A1", 1}, {"X1-UX81-A2", 3}] do
+      {:ok, _} =
+        Intelligence.observe_waypoint(
+          agent,
+          Model.Waypoint.from_json(%{
+            "symbol" => symbol,
+            "systemSymbol" => "X1-UX81",
+            "type" => "PLANET",
+            "x" => x,
+            "y" => 2,
+            "traits" => [%{"symbol" => "MARKETPLACE"}]
+          }),
+          source: "get_waypoints"
+        )
+    end
+
+    now = DateTime.utc_now()
+    observed_at = DateTime.add(now, -60)
+
+    # A1: governed, linked and current. A2: an equally recent legacy Listing
+    # without lineage, which can justify re-observation only.
+    SpaceTraders.EvidenceFixtures.governed_market_observation(
+      agent,
+      "X1-UX81",
+      "X1-UX81-A1",
+      9,
+      12,
+      observed_at: observed_at
+    )
+
+    {:ok, _} = observe_stale_market(agent, ship, "X1-UX81-A2", observed_at)
+
+    specs =
+      agent
+      |> FleetIntelligence.market_refresh_demand_specs("X1-UX81", now)
+      |> Map.new(&{&1.subject, &1.due_at})
+
+    assert DateTime.compare(specs["market:X1-UX81:X1-UX81-A1"], DateTime.add(now, 200)) == :gt
+    assert DateTime.compare(specs["market:X1-UX81:X1-UX81-A2"], now) != :gt
   end
 
   test "baseline demand specs cover only Marketplaces without retained Listing evidence" do

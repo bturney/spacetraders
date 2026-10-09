@@ -107,6 +107,32 @@ defmodule SpaceTraders.FleetPlanningTest do
            ]
   end
 
+  test "only current interpreted Listings support trades; each other state keeps its own reason" do
+    expected = %{
+      stale: :stale_market_evidence,
+      invalidated: :invalidated_market_evidence,
+      untraceable: :untraceable_market_evidence,
+      wrong_generation: :wrong_generation_market_evidence,
+      malformed: :malformed_market_evidence,
+      unavailable: :unavailable_market_evidence,
+      future: :inconsistent_market_evidence
+    }
+
+    for {state, reason} <- expected do
+      snapshot =
+        Map.update!(evidence_snapshot(), :markets, fn [source, destination] ->
+          [Map.put(source, :state, state), Map.put(destination, :state, :current)]
+        end)
+
+      assert {:ok, %{candidate_contributions: [], limitations: limitations}} =
+               FleetPlanning.plan_market(revision(), 0, snapshot)
+
+      assert %{subject: "market:X1:X1-A1", reason: ^reason} =
+               Enum.find(limitations, &(&1.subject == "market:X1:X1-A1")),
+             "#{state} must limit with #{reason}"
+    end
+  end
+
   test "planning returns proposals and demands without allocation or execution records" do
     assert {:ok, result} = FleetPlanning.plan_market(revision(), 0, evidence_snapshot())
 

@@ -16,6 +16,17 @@ defmodule SpaceTraders.FleetPlanning do
 
   @market_evidence_freshness_seconds 300
   @observation_demand_deadline_seconds 60
+  # Operational Intelligence Market interpretation states that can never
+  # support a trade, each kept as its own planning limitation.
+  @unsupported_market_states %{
+    stale: :stale_market_evidence,
+    invalidated: :invalidated_market_evidence,
+    untraceable: :untraceable_market_evidence,
+    wrong_generation: :wrong_generation_market_evidence,
+    malformed: :malformed_market_evidence,
+    unavailable: :unavailable_market_evidence,
+    future: :inconsistent_market_evidence
+  }
   @refinery_modules ~w(MODULE_MINERAL_PROCESSOR_I MODULE_MICRO_REFINERY_I MODULE_ORE_REFINERY_I)
 
   @doc "Whether the Ship's observed modules can refine ore for a known material outcome."
@@ -58,43 +69,24 @@ defmodule SpaceTraders.FleetPlanning do
     @type t :: %__MODULE__{}
   end
 
-  @doc "Builds the standard Market evidence snapshot used by Fleet Planning."
-  def market_snapshot(%DateTime{} = as_of, system_symbol, agent_id, markets)
-      when is_binary(system_symbol) and is_list(markets) do
-    %{
-      as_of: as_of,
-      system_symbol: system_symbol,
-      agent_id: agent_id,
-      freshness_seconds: @market_evidence_freshness_seconds,
-      demand_deadline_seconds: @observation_demand_deadline_seconds,
-      markets: markets
-    }
-  end
-
-  @doc """
-  Baseline Market coverage input for one planning snapshot.
-
-  `baseline_subjects` is the authoritative Market coverage target: every
-  currently known Marketplace of the Fleet Generation's headquarters System.
-  A subject in `unreachable_subjects` has no admissible acquisition path
-  under current capability evidence; it stays unresolved coverage and can
-  never support a negative System-wide Market conclusion. Without coverage
-  input a snapshot targets its own Market subjects, which keeps legacy
-  callers' conclusions unchanged.
-  """
-  def baseline_coverage(baseline_subjects, unreachable_subjects \\ [])
-      when is_list(baseline_subjects) and is_list(unreachable_subjects) do
-    %{baseline_subjects: baseline_subjects, unreachable_subjects: unreachable_subjects}
-  end
-
   @doc """
   Proposes Market Candidate Contributions for one Strategic Objective.
 
   The snapshot fixes the decision time with `:as_of` and supplies
-  `:freshness_seconds` plus a list of Markets. Each Market has an evidence
-  `:subject`, `:observed_at`, and `:trade_goods`. Optional `:agent_id` and
+  `:freshness_seconds` plus a list of Markets. Runtime and review callers
+  pass `Intelligence.market_interpretation/3`. Each Market has an evidence
+  `:subject`, `:observed_at`, `:evidence_id`, `:source`, `:trade_goods` and
+  an optional interpretation `:state`; only a stateless or `:current`
+  Market can support a trade. Optional `:agent_id` and
   `:demand_deadline_seconds` values are copied into proposed Observation
   Demands. The function performs no persistence or gameplay calls.
+
+  `:baseline_subjects` is the authoritative Market coverage target: every
+  known Marketplace of the headquarters System. A subject in
+  `:unreachable_subjects` has no admissible acquisition path; it stays
+  unresolved coverage and can never support a negative System-wide Market
+  conclusion. Without coverage input a snapshot targets its own Market
+  subjects.
   """
   def plan_market(%Revision{} = revision, objective_index, snapshot)
       when is_integer(objective_index) and objective_index >= 0 and is_map(snapshot) do
@@ -2415,8 +2407,8 @@ defmodule SpaceTraders.FleetPlanning do
       age < 0 ->
         {:error, :inconsistent_market_evidence}
 
-      value(market, :state) == :stale ->
-        {:error, :stale_market_evidence}
+      unsupported = @unsupported_market_states[value(market, :state)] ->
+        {:error, unsupported}
 
       age > snapshot.freshness_seconds ->
         {:error, :stale_market_evidence}
@@ -2440,6 +2432,10 @@ defmodule SpaceTraders.FleetPlanning do
          }}
     end
   end
+
+  defp usable_market(%{state: state}, _snapshot)
+       when is_map_key(@unsupported_market_states, state),
+       do: {:error, Map.fetch!(@unsupported_market_states, state)}
 
   defp usable_market(_market, _snapshot), do: {:error, :insufficient_market_evidence}
 
@@ -2713,8 +2709,10 @@ defmodule SpaceTraders.FleetPlanning do
 
   defp value(map, key), do: Map.get(map, key, Map.get(map, Atom.to_string(key)))
 
+  # Another Fleet Generation's evidence cannot even value an observation.
   defp valid_provenance?(market) do
-    is_binary(value(market, :evidence_id)) and value(market, :evidence_id) != "" and
+    value(market, :state) != :wrong_generation and
+      is_binary(value(market, :evidence_id)) and value(market, :evidence_id) != "" and
       is_binary(value(market, :source)) and value(market, :source) != ""
   end
 

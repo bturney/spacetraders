@@ -2,9 +2,11 @@ defmodule SpaceTraders.FleetShadowTest do
   use SpaceTraders.DataCase, async: true
 
   import SpaceTraders.AgentFixtures
+  import SpaceTraders.EvidenceFixtures
 
   alias SpaceTraders.Test.CapacityDispositions
   alias SpaceTraders.Evidence.Observation
+  alias SpaceTraders.Intelligence
   alias SpaceTraders.FleetAllocation.Commitment
   alias SpaceTraders.FleetAllocation.StrategyDecisionEpisode
   alias SpaceTraders.FleetShadow
@@ -52,6 +54,58 @@ defmodule SpaceTraders.FleetShadowTest do
 
     assert [%{candidate_id: _candidate_id, claims: ["SHIP-1"]}] = comparison.proposed_choices
     assert Repo.aggregate(Commitment, :count) == 0
+  end
+
+  test "shadow honors explicit Listing invalidation instead of raw Evidence rows" do
+    agent = agent_fixture(operator_fixture())
+    now = SpaceTraders.Clock.utc_now()
+    insert_market_observation(agent, "X1-A1", 10, now)
+    insert_market_observation(agent, "X1-A2", 25, now)
+
+    # A refuel receipt contradicts only transaction history; the trade stays.
+    assert {:ok, _} =
+             Intelligence.invalidate(agent, :market, "X1", "X1-A1", [:transactions],
+               cause: :refuel_receipt
+             )
+
+    assert {:ok, %{proposed_choices: [_]}} =
+             FleetShadow.compare_market(agent, revision(), "X1", availability(now), capacity())
+
+    assert {:ok, _} = Intelligence.invalidate(agent, :market, "X1", "X1-A1", [:trade_goods])
+    later = DateTime.add(SpaceTraders.Clock.utc_now(), 1, :second)
+
+    assert {:ok, %{proposed_choices: [], planning: [planning]}} =
+             FleetShadow.compare_market(agent, revision(), "X1", availability(later), capacity(),
+               as_of: later
+             )
+
+    assert %{reason: :invalidated_market_evidence} =
+             Enum.find(planning.limitations, &(&1.subject == "market:X1:X1-A1"))
+  end
+
+  test "a governed Evidence row without retained Listing lineage supports nothing" do
+    agent = agent_fixture(operator_fixture())
+
+    for {waypoint, price} <- [{"X1-A1", 10}, {"X1-A2", 25}] do
+      Repo.insert!(%Observation{
+        agent_id: agent.id,
+        subject: "market:X1:#{waypoint}",
+        operation_id: "get-market",
+        dependency_keys: ["market:X1:#{waypoint}"],
+        facts: %{
+          "trade_goods" => [
+            Map.new(market_good(price), fn {key, value} -> {to_string(key), value} end)
+          ]
+        },
+        response_fingerprint: "market-#{waypoint}",
+        observed_at: @as_of_usec
+      })
+    end
+
+    assert {:ok, %{proposed_choices: []}} =
+             FleetShadow.compare_market(agent, revision(), "X1", availability(), capacity(),
+               as_of: @as_of
+             )
   end
 
   test "plans at the application clock, not the capacity disposition's governor timestamp" do
@@ -202,25 +256,19 @@ defmodule SpaceTraders.FleetShadowTest do
   end
 
   defp insert_market_observation(agent, waypoint, purchase_price, observed_at \\ @as_of_usec) do
-    Repo.insert!(%Observation{
-      agent_id: agent.id,
-      subject: "market:X1:#{waypoint}",
-      operation_id: "get-market",
-      dependency_keys: ["market:X1:#{waypoint}"],
-      facts: %{"trade_goods" => [market_good(purchase_price)]},
-      response_fingerprint: "market-#{waypoint}-#{purchase_price}",
+    retained_market_listing(agent, "X1", waypoint, [market_good(purchase_price)],
       observed_at: observed_at
-    })
+    )
   end
 
   defp market_good(purchase_price) do
     %{
-      "symbol" => "IRON",
-      "purchase_price" => purchase_price,
-      "sell_price" => purchase_price - 1,
-      "trade_volume" => 20,
-      "supply" => "MODERATE",
-      "activity" => "STATIC"
+      symbol: "IRON",
+      purchase_price: purchase_price,
+      sell_price: purchase_price - 1,
+      trade_volume: 20,
+      supply: "MODERATE",
+      activity: "STATIC"
     }
   end
 end
