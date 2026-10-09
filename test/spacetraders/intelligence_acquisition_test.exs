@@ -2072,6 +2072,178 @@ defmodule SpaceTraders.IntelligenceAcquisitionTest do
     }
   end
 
+  describe "an unfinished Intent fences only its own Ship" do
+    @credit_objective %{
+      "objective" => "Grow credits",
+      "kind" => "continuous",
+      "evaluation" => "Maximize net credit growth over time"
+    }
+
+    test "an independent Ship receives admitted work while another Ship's Intent is unfinished" do
+      {agent, ship_a, portfolio, commitment} = claimed_ship(@credit_objective)
+      busy_intent = unfinished_intent(ship_a, commitment, portfolio)
+
+      ship_b =
+        Repo.insert!(%Ship{symbol: "INTELACQ-2", ship_type: "SHIP_PROBE", agent_id: agent.id})
+
+      scope = Scope.for_operator(Repo.get!(Operator, agent.operator_id))
+      revision = Repo.get!(Revision, portfolio.fleet_strategy_revision_id)
+      observe_marketplaces(agent)
+      stub_ships(agent, [ship_a, ship_b])
+
+      assert {:ok, %{intent: %Intent{} = intent, commitment: new_commitment}} =
+               FleetIntelligence.reconcile(
+                 scope,
+                 agent,
+                 revision,
+                 "X1-UX81",
+                 CapacityDispositions.proceed()
+               )
+
+      assert new_commitment.claims == [ship_b.symbol]
+      assert intent.ship_id == ship_b.id
+
+      # Ship A keeps its Claim and its unfinished Intent untouched.
+      assert {:ok, %{commitment_id: commitment_id}} =
+               FleetAllocation.current_ship_claim(agent, ship_a.symbol)
+
+      assert commitment_id == commitment.id
+      assert %Intent{status: "waiting"} = Repo.get!(Intent, busy_intent.id)
+    end
+
+    test "the busy Ship itself accepts no conflicting work" do
+      {agent, ship_a, portfolio, commitment} = claimed_ship(@credit_objective)
+      busy_intent = unfinished_intent(ship_a, commitment, portfolio)
+      scope = Scope.for_operator(Repo.get!(Operator, agent.operator_id))
+      revision = Repo.get!(Revision, portfolio.fleet_strategy_revision_id)
+      observe_marketplaces(agent)
+
+      Req.Test.stub(SpaceTraders.API, fn _conn ->
+        flunk("a fenced Ship must not trigger game traffic")
+      end)
+
+      assert {:error, :no_decision_relevant_intelligence} =
+               FleetIntelligence.reconcile(
+                 scope,
+                 agent,
+                 revision,
+                 "X1-UX81",
+                 CapacityDispositions.proceed()
+               )
+
+      assert [%Intent{id: id}] = Intents.current(agent)
+      assert id == busy_intent.id
+    end
+
+    test "a second scout never receives a conflicting coverage Intent" do
+      {agent, ship_a, portfolio, _commitment} = claimed_ship(@credit_objective)
+      scope = Scope.for_operator(Repo.get!(Operator, agent.operator_id))
+      revision = Repo.get!(Revision, portfolio.fleet_strategy_revision_id)
+
+      assert {:ok, _} =
+               FleetAllocation.unwind_current_portfolio(scope, portfolio.fleet_generation_id)
+
+      observe_marketplaces(agent)
+      stub_ships(agent, [ship_a])
+
+      assert {:ok, %{intent: %Intent{} = coverage_intent}} =
+               FleetIntelligence.reconcile(
+                 scope,
+                 agent,
+                 revision,
+                 "X1-UX81",
+                 CapacityDispositions.proceed()
+               )
+
+      ship_b =
+        Repo.insert!(%Ship{symbol: "INTELACQ-2", ship_type: "SHIP_PROBE", agent_id: agent.id})
+
+      stub_ships(agent, [ship_a, ship_b])
+
+      assert {:error, :no_decision_relevant_intelligence} =
+               FleetIntelligence.reconcile(
+                 scope,
+                 agent,
+                 revision,
+                 "X1-UX81",
+                 CapacityDispositions.proceed()
+               )
+
+      assert [%Intent{id: id}] = Intents.current(agent)
+      assert id == coverage_intent.id
+    end
+  end
+
+  defp unfinished_intent(ship, commitment, portfolio) do
+    Repo.insert!(%Intent{
+      ship_id: ship.id,
+      caller: "commitment",
+      fleet_commitment_id: commitment.id,
+      fleet_commitment_portfolio_id: portfolio.id,
+      fleet_commitment_portfolio_version: portfolio.version,
+      type: "acquire_intelligence",
+      target_waypoint: "X1-UX81-A1",
+      status: "waiting",
+      parameters: %{}
+    })
+  end
+
+  defp observe_marketplaces(agent) do
+    for {symbol, x, y, traits} <- [
+          {"X1-UX81-A1", 1, 2, []},
+          {"X1-UX81-A2", 2, 4, [%{"symbol" => "MARKETPLACE"}]},
+          {"X1-UX81-A3", 4, 4, [%{"symbol" => "MARKETPLACE"}]}
+        ] do
+      waypoint =
+        Model.Waypoint.from_json(%{
+          "symbol" => symbol,
+          "systemSymbol" => "X1-UX81",
+          "type" => "PLANET",
+          "x" => x,
+          "y" => y,
+          "traits" => traits
+        })
+
+      {:ok, _} = Intelligence.observe_waypoint(agent, waypoint, source: "get_waypoints")
+    end
+  end
+
+  defp stub_ships(agent, ships) do
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      ship =
+        Enum.find(ships, &String.starts_with?(conn.request_path, "/v2/my/ships/#{&1.symbol}"))
+
+      cond do
+        conn.method == "GET" and conn.request_path == "/v2/my/agent" ->
+          Req.Test.json(conn, %{"data" => %{"symbol" => agent.symbol, "credits" => 10_000}})
+
+        conn.method == "GET" and conn.request_path == "/v2/my/ships" ->
+          Req.Test.json(conn, %{"data" => Enum.map(ships, &ship_body(&1.symbol))})
+
+        ship && conn.method == "GET" ->
+          Req.Test.json(conn, %{"data" => ship_body(ship.symbol)})
+
+        ship && String.ends_with?(conn.request_path, "/orbit") ->
+          Req.Test.json(conn, %{"data" => %{"nav" => nav_body("IN_ORBIT")}})
+
+        ship && String.ends_with?(conn.request_path, "/navigate") ->
+          Req.Test.json(conn, %{
+            "data" => %{
+              "fuel" => %{"capacity" => 200, "current" => 80},
+              "nav" =>
+                nav_body("IN_TRANSIT",
+                  arrival: DateTime.utc_now() |> DateTime.add(3600) |> DateTime.to_iso8601(),
+                  destination: "X1-UX81-A2"
+                )
+            }
+          })
+
+        true ->
+          flunk("unexpected game request: #{conn.method} #{conn.request_path}")
+      end
+    end)
+  end
+
   defp claimed_ship(objective \\ %{"objective" => "Acquire useful intelligence"}) do
     operator =
       Repo.insert!(%Operator{email: "intelligence-#{System.unique_integer()}@example.com"})
