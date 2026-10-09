@@ -281,7 +281,7 @@ defmodule SpaceTradersWeb.FleetOutcomeMetricsTest do
     assert_projection(:claim, %{"free" => 30, "claimed" => 0})
     assert_projection(:intent_state, %{"none" => 30})
     assert_projection(:nav_status, %{"DOCKED" => 29, "IN_ORBIT" => 1, "unknown" => 0})
-    for _ <- 1..3, do: assert_receive(:projection_query)
+    for _ <- 1..4, do: assert_receive(:projection_query)
     refute_receive :projection_query, 100
     assert_metric(:nav_status, "DOCKED", 29)
 
@@ -395,6 +395,9 @@ defmodule SpaceTradersWeb.FleetOutcomeMetricsTest do
     assert_projection(:claim, %{"claimed" => 1, "free" => 0})
     assert_metric(:claim, "claimed", 1)
   end
+
+  # The shared worker also projects Chart state; this file owns Fleet axes.
+  def handle_event(_event, _measurements, %{family: :chart}, _pid), do: :ok
 
   def handle_event(@failure, _measurements, metadata, pid),
     do: send(pid, {:projection_failed, metadata.family})

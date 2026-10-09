@@ -26,6 +26,20 @@ defmodule SpaceTraders.PromEx.Outcome do
           "Gross confirmed transaction credits by bounded root Intent type and operation."
       ),
       last_value(
+        [:spacetraders, :outcome, :systems, :charted],
+        event_name: [:spacetraders, :outcome, :chart],
+        measurement: :count,
+        description:
+          "Distinct Systems with a known durable scanned-Waypoint identity for non-stale Agents."
+      ),
+      sum(
+        [:spacetraders, :outcome, :waypoints, :scanned, :total],
+        event_name: [:spacetraders, :outcome, :scan],
+        measurement: :count,
+        description:
+          "Committed waypoint scan observations since instrumentation; repeated waypoints count again."
+      ),
+      last_value(
         [:spacetraders, :outcome, :observed_at, :seconds],
         event_name: [:spacetraders, :outcome, :observed],
         measurement: :observed_at_seconds,

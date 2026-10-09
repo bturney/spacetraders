@@ -1,6 +1,6 @@
 defmodule SpaceTraders.Outcomes.Fleet do
   @moduledoc """
-  Event-driven, fail-soft projections of the registered current Fleet.
+  Event-driven, fail-soft projections of the registered current Fleet and chart coverage.
 
   Every projection publishes its entire bounded vector, including zeroes. The
   independent dimensions share `ships_total`; unused dimension labels are empty.
@@ -13,12 +13,26 @@ defmodule SpaceTraders.Outcomes.Fleet do
   successful recorded mutation nav fact; missing or unsupported facts are
   `unknown`. A complete vector always clears previously nonzero state counts.
 
-  Boot reconstructs all three vectors. Successful durable lifecycle writes
-  enqueue bounded family names only after their outer transaction commits.
-  Events within the default 50 ms window share one aggregate SQL query per dirty
+  Chart coverage counts distinct Systems with a known, non-invalidated Waypoint
+  identity fact from a `scan_waypoints` Intelligence observation for a non-stale
+  Agent. Cached coordinates, public Waypoint reads/listings, unknown facts and
+  unavailable facts do not establish scanned coverage. Repeated scans of the
+  same System do not increase this gauge; a Server Reset clears its old coverage.
+
+  Boot reconstructs all vectors from the DB, including chart's deployment-time
+  baseline. Successful durable lifecycle writes enqueue bounded family names
+  and scan-event counts only after their outer transaction commits.
+  Events within the default 2000 ms window share one aggregate SQL query per dirty
   family. Errors log and drop; the next real change or worker boot can reconstruct
-  again. There is no periodic recompute and no game API access. Fleet freshness
-  is the epoch of the latest successful recompute, and remains fixed during idle.
+  again. There is no periodic recompute and no game API access. Each family's
+  freshness is the epoch of its latest successful recompute, fixed during idle.
+
+  `waypoints_scanned_total` counts committed per-Waypoint Intelligence observations
+  with source `scan_waypoints`, not scan HTTP requests, unique Waypoints, or fields.
+  A scan response containing N retained Waypoints adds N; observing a previously
+  scanned Waypoint adds another event. Bursts sum their events without coalescing
+  them away. Boot never backfills this counter or invents a zero history; metrics
+  history starts at instrumentation. Events still count if chart recompute fails.
   """
   use GenServer
   require Logger
@@ -26,7 +40,9 @@ defmodule SpaceTraders.Outcomes.Fleet do
   alias SpaceTraders.Repo
   alias SpaceTraders.Fleet.Intent
 
-  @families [:claim, :intent_state, :nav_status]
+  @fleet_families [:claim, :intent_state, :nav_status]
+  @families @fleet_families ++ [:chart]
+  @coalesce_ms 2_000
   @states %{
     claim: ~w(claimed free),
     intent_state: ["none", "unknown"] ++ Intent.unfinished_states() ++ Intent.terminal_states(),
@@ -79,12 +95,13 @@ defmodule SpaceTraders.Outcomes.Fleet do
         self()
       )
 
-    Process.send_after(self(), :recompute, Keyword.get(opts, :coalesce_ms, 50))
+    Process.send_after(self(), :recompute, Keyword.get(opts, :coalesce_ms, @coalesce_ms))
 
     {:ok,
      %{
        dirty: MapSet.new(@families),
-       coalesce_ms: Keyword.get(opts, :coalesce_ms, 50),
+       scans: 0,
+       coalesce_ms: Keyword.get(opts, :coalesce_ms, @coalesce_ms),
        repo: Keyword.get(opts, :repo, Repo)
      }}
   end
@@ -93,21 +110,24 @@ defmodule SpaceTraders.Outcomes.Fleet do
   def durable_change(_event, _measurements, metadata, worker) do
     case metadata do
       %{query: "begin", result: {:ok, _}} ->
-        Process.put(@pending, MapSet.new())
+        Process.put(@pending, %{families: MapSet.new(), scans: 0})
 
       %{query: "commit", result: {:ok, _}} ->
-        notify(worker, Process.delete(@pending) || MapSet.new())
+        if pending = Process.delete(@pending), do: notify(worker, pending)
 
       %{query: "rollback"} ->
         Process.delete(@pending)
 
       %{result: {:ok, %{command: command, num_rows: rows}}}
       when command in [:insert, :update, :delete] and rows > 0 ->
-        families = changed_families(metadata, command)
+        change = %{
+          families: MapSet.new(changed_families(metadata, command)),
+          scans: scan_events(metadata, command, rows)
+        }
 
         case Process.get(@pending) do
-          nil -> notify(worker, MapSet.new(families))
-          pending -> Process.put(@pending, Enum.reduce(families, pending, &MapSet.put(&2, &1)))
+          nil -> notify(worker, change)
+          pending -> Process.put(@pending, merge_changes(pending, change))
         end
 
       _ ->
@@ -121,7 +141,7 @@ defmodule SpaceTraders.Outcomes.Fleet do
     _, _ -> Logger.error("Fleet outcome notification failed; dropping change")
   end
 
-  defp changed_families(%{source: "ships"}, _), do: @families
+  defp changed_families(%{source: "ships"}, _), do: @fleet_families
 
   defp changed_families(%{source: source}, command)
        when source in ["agents", "fleet_generations"] and command in [:insert, :delete],
@@ -143,6 +163,19 @@ defmodule SpaceTraders.Outcomes.Fleet do
        do: [:claim]
 
   defp changed_families(%{source: "intents"}, _), do: [:intent_state]
+
+  defp changed_families(%{source: "intelligence_observations"} = metadata, :insert) do
+    if scan_events(metadata, :insert, 1) > 0, do: [:chart], else: []
+  end
+
+  defp changed_families(%{source: "intelligence_facts"} = metadata, :update) do
+    if "waypoint" in (metadata.cast_params || metadata.params), do: [:chart], else: []
+  end
+
+  defp changed_families(%{source: source}, command)
+       when source in ["intelligence_facts", "intelligence_observations"] and
+              command in [:update, :delete],
+       do: [:chart]
 
   defp changed_families(%{source: source}, :delete)
        when source in ["authoritative_observations", "mutation_attempt_outcomes"],
@@ -168,26 +201,72 @@ defmodule SpaceTraders.Outcomes.Fleet do
 
   defp changed_families(_, _), do: []
 
-  defp notify(worker, families) do
-    if MapSet.size(families) > 0, do: send(worker, {:dirty, families})
+  defp scan_events(%{source: "intelligence_observations"} = metadata, :insert, rows) do
+    params = metadata.cast_params || metadata.params
+    if "scan_waypoints" in params and "waypoint" in params, do: rows, else: 0
+  end
+
+  defp scan_events(_, _, _), do: 0
+
+  defp merge_changes(first, second) do
+    %{
+      families: MapSet.union(first.families, second.families),
+      scans: first.scans + second.scans
+    }
+  end
+
+  defp notify(worker, %{families: families, scans: scans} = change) do
+    if MapSet.size(families) > 0 or scans > 0, do: send(worker, {:dirty, change})
   end
 
   @impl true
-  def handle_info({:dirty, families}, state) do
+  def handle_info({:dirty, change}, state) do
     if MapSet.size(state.dirty) == 0,
       do: Process.send_after(self(), :recompute, state.coalesce_ms)
 
-    {:noreply, %{state | dirty: MapSet.union(state.dirty, families)}}
+    {:noreply,
+     %{
+       state
+       | dirty: MapSet.union(state.dirty, change.families),
+         scans: state.scans + change.scans
+     }}
   end
 
   @impl true
   def handle_info(:recompute, state) do
+    publish_scans(state.scans)
     Enum.each(state.dirty, &project(&1, state.repo))
-    {:noreply, %{state | dirty: MapSet.new()}}
+    {:noreply, %{state | dirty: MapSet.new(), scans: 0}}
   end
 
   @impl true
   def terminate(_reason, _state), do: :telemetry.detach(@handler)
+
+  defp publish_scans(0), do: :ok
+
+  defp publish_scans(count) do
+    :telemetry.execute([:spacetraders, :outcome, :scan], %{count: count}, %{})
+  rescue
+    _ -> Logger.error("Chart outcome scan emission failed; dropping events")
+  catch
+    _, _ -> Logger.error("Chart outcome scan emission failed; dropping events")
+  end
+
+  defp project(:chart, repo) do
+    [[count]] = repo.query!(query(:chart)).rows
+    :telemetry.execute([:spacetraders, :outcome, :chart], %{count: count}, %{})
+    observed("chart")
+
+    :telemetry.execute(
+      [:spacetraders, :outcome, :fleet, :projection],
+      %{counts: %{"systems_charted" => count}, recomputes: 1},
+      %{family: :chart}
+    )
+  rescue
+    _ -> drop(:chart)
+  catch
+    _, _ -> drop(:chart)
+  end
 
   defp project(family, repo) do
     counts = Map.new(@states[family], &{&1, 0})
@@ -204,14 +283,7 @@ defmodule SpaceTraders.Outcomes.Fleet do
       :telemetry.execute([:spacetraders, :outcome, :fleet, :ships], %{count: count}, metadata)
     end)
 
-    :telemetry.execute(
-      [:spacetraders, :outcome, :observed],
-      %{
-        observed_at_seconds:
-          DateTime.to_unix(SpaceTraders.Clock.utc_now(), :microsecond) / 1_000_000
-      },
-      %{family: "fleet"}
-    )
+    observed("fleet")
 
     :telemetry.execute(
       [:spacetraders, :outcome, :fleet, :projection],
@@ -230,6 +302,29 @@ defmodule SpaceTraders.Outcomes.Fleet do
     :telemetry.execute([:spacetraders, :outcome, :fleet, :projection_failed], %{count: 1}, %{
       family: family
     })
+  end
+
+  defp observed(family) do
+    :telemetry.execute(
+      [:spacetraders, :outcome, :observed],
+      %{
+        observed_at_seconds:
+          DateTime.to_unix(SpaceTraders.Clock.utc_now(), :microsecond) / 1_000_000
+      },
+      %{family: family}
+    )
+  end
+
+  defp query(:chart) do
+    """
+    SELECT count(DISTINCT f.subject_system_symbol)
+    FROM intelligence_facts f
+    JOIN intelligence_observations o ON o.id = f.observation_id
+    JOIN agents a ON a.id = f.agent_id
+    WHERE f.subject_type = 'waypoint' AND f.field = 'symbol'
+      AND f.state = 'known' AND f.invalidated_at IS NULL
+      AND o.source = 'scan_waypoints' AND a.stale_at IS NULL
+    """
   end
 
   defp query(:claim) do
