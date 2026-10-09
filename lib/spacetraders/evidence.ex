@@ -1285,6 +1285,7 @@ defmodule SpaceTraders.Evidence do
           |> order_by([demand], asc: demand.inserted_at, asc: demand.id)
           |> Repo.all()
 
+        SpaceTraders.Outcomes.PostCommit.observe(persisted)
         %{observation: persisted, demands: fulfilled}
       end)
       |> tap(fn
@@ -1300,10 +1301,6 @@ defmodule SpaceTraders.Evidence do
       end)
       |> tap(fn
         {:ok, %{observation: persisted}} -> notify_demand_change(persisted.agent_id)
-        _error -> :ok
-      end)
-      |> tap(fn
-        {:ok, %{observation: persisted}} -> SpaceTraders.Outcomes.observe(persisted)
         _error -> :ok
       end)
     else

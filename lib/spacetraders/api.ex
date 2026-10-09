@@ -471,7 +471,7 @@ defmodule SpaceTraders.API do
 
           decoded ->
             evidence =
-              Map.merge(%{status: status}, SpaceTraders.Outcomes.Fleet.nav_evidence(decoded))
+              Map.merge(%{status: status}, SpaceTraders.Outcomes.PostCommit.nav_evidence(decoded))
 
             case record_mutation_outcome(attempt, :succeeded, evidence) do
               :ok ->

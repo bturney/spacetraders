@@ -1,6 +1,6 @@
 defmodule SpaceTraders.Outcomes.Fleet do
   @moduledoc """
-  DB projection and post-commit tap functions run by the single Outcomes worker.
+  DB projection functions run by the single Outcomes worker.
 
   Every projection publishes its entire bounded vector, including zeroes. The
   independent dimensions share `ships_total`; unused dimension labels are empty.
@@ -51,32 +51,8 @@ defmodule SpaceTraders.Outcomes.Fleet do
   SELECT s.id, s.symbol, s.agent_id FROM ships s
   JOIN agents a ON a.id = s.agent_id WHERE a.stale_at IS NULL
   """
-  @handler {__MODULE__, :durable_changes}
-  @pending {__MODULE__, :pending}
-
-  @doc false
-  # Retain just the bounded authoritative nav fact in the existing mutation
-  # ledger. Its recorded_at supplies ordering against subsequent owned reads.
-  def nav_evidence(%{nav: %{status: status}}) when status in ~w(DOCKED IN_ORBIT IN_TRANSIT),
-    do: %{nav_status: status}
-
-  def nav_evidence(_), do: %{}
-
   @doc false
   def init(opts) do
-    # Ecto emits query telemetry in the writer process, including transaction
-    # management. Buffer only bounded family names there; send after COMMIT so
-    # an independent worker never races uncommitted facts. No extra writer SQL.
-    :telemetry.detach(@handler)
-
-    :ok =
-      :telemetry.attach(
-        @handler,
-        Repo.config()[:telemetry_prefix] ++ [:query],
-        &__MODULE__.durable_change/4,
-        self()
-      )
-
     Process.send_after(self(), :recompute, Keyword.get(opts, :coalesce_ms, @coalesce_ms))
 
     %{
@@ -85,119 +61,6 @@ defmodule SpaceTraders.Outcomes.Fleet do
       coalesce_ms: Keyword.get(opts, :coalesce_ms, @coalesce_ms),
       repo: Keyword.get(opts, :repo, Repo)
     }
-  end
-
-  @doc false
-  def durable_change(_event, _measurements, metadata, worker) do
-    case metadata do
-      %{query: "begin", result: {:ok, _}} ->
-        Process.put(@pending, %{families: MapSet.new(), scans: 0})
-
-      %{query: "commit", result: {:ok, _}} ->
-        if pending = Process.delete(@pending), do: notify(worker, pending)
-
-      %{query: "rollback"} ->
-        Process.delete(@pending)
-
-      %{result: {:ok, %{command: command, num_rows: rows}}}
-      when command in [:insert, :update, :delete] and rows > 0 ->
-        change = %{
-          families: MapSet.new(changed_families(metadata, command)),
-          scans: scan_events(metadata, command, rows)
-        }
-
-        case Process.get(@pending) do
-          nil -> notify(worker, change)
-          pending -> Process.put(@pending, merge_changes(pending, change))
-        end
-
-      _ ->
-        :ok
-    end
-
-    :ok
-  rescue
-    _ -> Logger.error("Fleet outcome notification failed; dropping change")
-  catch
-    _, _ -> Logger.error("Fleet outcome notification failed; dropping change")
-  end
-
-  defp changed_families(%{source: "ships"}, _), do: @fleet_families
-
-  defp changed_families(%{source: source}, command)
-       when source in ["agents", "fleet_generations"] and command in [:insert, :delete],
-       do: @families
-
-  defp changed_families(%{source: source, query: query}, :update)
-       when source in ["agents", "fleet_generations"] do
-    if String.contains?(query, ["\"stale_at\"", "\"fenced_at\"", "\"retired_at\"", "\"agent_id\""]),
-       do: @families,
-       else: []
-  end
-
-  defp changed_families(%{source: source}, _)
-       when source in [
-              "fleet_commitment_claims",
-              "fleet_commitments",
-              "fleet_commitment_portfolios"
-            ],
-       do: [:claim]
-
-  defp changed_families(%{source: "intents"}, _), do: [:intent_state]
-
-  defp changed_families(%{source: "intelligence_observations"} = metadata, :insert) do
-    if scan_events(metadata, :insert, 1) > 0, do: [:chart], else: []
-  end
-
-  defp changed_families(%{source: "intelligence_facts"} = metadata, :update) do
-    if "waypoint" in (metadata.cast_params || metadata.params), do: [:chart], else: []
-  end
-
-  defp changed_families(%{source: source}, command)
-       when source in ["intelligence_facts", "intelligence_observations"] and
-              command in [:update, :delete],
-       do: [:chart]
-
-  defp changed_families(%{source: source}, :delete)
-       when source in ["authoritative_observations", "mutation_attempt_outcomes"],
-       do: [:nav_status]
-
-  defp changed_families(%{source: "authoritative_observations"} = metadata, _) do
-    if Enum.any?(
-         metadata.cast_params || metadata.params,
-         &(&1 in ["get-my-ship", "get-my-ships"])
-       ),
-       do: [:nav_status],
-       else: []
-  end
-
-  defp changed_families(%{source: "mutation_attempt_outcomes"} = metadata, _) do
-    if Enum.any?(metadata.cast_params || metadata.params, fn
-         %{"nav_status" => status} -> status in ~w(DOCKED IN_ORBIT IN_TRANSIT)
-         _ -> false
-       end),
-       do: [:nav_status],
-       else: []
-  end
-
-  defp changed_families(_, _), do: []
-
-  defp scan_events(%{source: "intelligence_observations"} = metadata, :insert, rows) do
-    params = metadata.cast_params || metadata.params
-    if "scan_waypoints" in params and "waypoint" in params, do: rows, else: 0
-  end
-
-  defp scan_events(_, _, _), do: 0
-
-  defp merge_changes(first, second) do
-    %{
-      families: MapSet.union(first.families, second.families),
-      scans: first.scans + second.scans
-    }
-  end
-
-  defp notify(worker, %{families: families, scans: scans} = change) do
-    if MapSet.size(families) > 0 or scans > 0, do: send(worker, {:dirty, change})
   end
 
   @doc false
@@ -218,9 +81,6 @@ defmodule SpaceTraders.Outcomes.Fleet do
     Enum.each(state.dirty, &project(&1, state.repo))
     %{state | dirty: MapSet.new(), scans: 0}
   end
-
-  @doc false
-  def detach, do: :telemetry.detach(@handler)
 
   defp publish_scans(0), do: :ok
 

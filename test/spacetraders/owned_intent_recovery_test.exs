@@ -1077,7 +1077,7 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
                 "shipSymbol" => ship.symbol,
                 "tradeSymbol" => "FUEL",
                 "waypointSymbol" => "X1-UX81-A1",
-                "units" => 50,
+                "units" => 1,
                 "pricePerUnit" => 1,
                 "totalPrice" => 35
               }
@@ -1098,8 +1098,109 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
     assert metadata == %{intent_type: "navigate", operation: "refuel"}
   end
 
+  test "supporting refuel receipts with mismatched goods, units or missing credits remain unknown" do
+    start_transaction_metrics()
+
+    for {field, value} <- [{"tradeSymbol", "IRON_ORE"}, {"units", 49}, {"credits", nil}] do
+      {agent, ship, portfolio, commitment} = claimed_ship("OUTCOME-REFUEL-#{field}")
+      intent = owned_intent(ship, portfolio, commitment, [])
+
+      action = %{
+        "kind" => "refuel",
+        "waypoint" => "X1-UX81-A1",
+        "units" => 50,
+        "fuel_before" => 150
+      }
+
+      live = Model.Ship.from_json(ship_body(ship.symbol))
+
+      SpaceTraders.RecordedDispatchFixtures.retain_purchase_preflight(
+        agent,
+        intent.target_waypoint,
+        action
+      )
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        data =
+          case {conn.method, conn.request_path} do
+            {"GET", "/v2/my/agent"} ->
+              %{"symbol" => agent.symbol, "credits" => 965}
+
+            {"GET", _} ->
+              ship_body(ship.symbol, %{"fuel" => %{"current" => 200, "capacity" => 200}})
+
+            {"POST", _} ->
+              receipt = %{
+                "agent" => %{"symbol" => agent.symbol, "credits" => 965},
+                "fuel" => %{"current" => 200, "capacity" => 200},
+                "transaction" => %{
+                  "type" => "PURCHASE",
+                  "shipSymbol" => ship.symbol,
+                  "tradeSymbol" => "FUEL",
+                  "waypointSymbol" => "X1-UX81-A1",
+                  "units" => 1,
+                  "pricePerUnit" => 1,
+                  "totalPrice" => 35
+                }
+              }
+
+              if field == "credits",
+                do: put_in(receipt, ["agent", field], value),
+                else: put_in(receipt, ["transaction", field], value)
+          end
+
+        Req.Test.json(conn, %{"data" => data})
+      end)
+
+      _ = Intents.execute_action(agent, intent, live, action)
+      assert [attempt] = MutationAttempts.list_for_agent(agent)
+      assert attempt.state == "succeeded"
+      assert SpaceTraders.CreditCalibration.realization(attempt) == nil
+      refute transaction_metrics() =~ "spacetraders_outcome_credits_transactions_total"
+
+      refute transaction_metrics() =~
+               ~s(spacetraders_outcome_observed_at_seconds{family="transactions"})
+
+      refute_receive {:telemetry, [:spacetraders, :outcome, :transaction], _, _}
+    end
+  end
+
   test "a module modification receipt remains counted after the root completes from a Ship read" do
     start_transaction_metrics()
+    {agent, ship, intent} = execute_module_receipt("MODULE_SURVEY_SUITE_I")
+    assert Repo.get!(Intent, intent.id).status == "completed"
+
+    assert transaction_metrics() =~
+             ~s(spacetraders_outcome_credits_transactions_total{intent_type="install_module",operation="install_module"} 125\n)
+
+    assert_receive {:telemetry, [:spacetraders, :outcome, :transaction], %{credits: 125},
+                    metadata}
+
+    assert metadata == %{intent_type: "install_module", operation: "install_module"}
+
+    Req.Test.stub(SpaceTraders.API, fn _ -> flunk("completed modification acquired new facts") end)
+
+    _ = Intents.reconcile(agent.id, ship.symbol, nil, :boot, intent.id)
+
+    assert transaction_metrics() =~
+             ~s(spacetraders_outcome_credits_transactions_total{intent_type="install_module",operation="install_module"} 125\n)
+  end
+
+  test "a receipt for another module cannot count despite authoritative root completion" do
+    start_transaction_metrics()
+    {agent, _ship, intent} = execute_module_receipt("MODULE_MINERAL_PROCESSOR_I")
+    assert Repo.get!(Intent, intent.id).status == "completed"
+    assert [attempt] = MutationAttempts.list_for_agent(agent)
+    assert SpaceTraders.CreditCalibration.realization(attempt) == nil
+    refute transaction_metrics() =~ "spacetraders_outcome_credits_transactions_total"
+
+    refute transaction_metrics() =~
+             ~s(spacetraders_outcome_observed_at_seconds{family="transactions"})
+
+    refute_receive {:telemetry, [:spacetraders, :outcome, :transaction], _, _}
+  end
+
+  defp execute_module_receipt(receipt_module) do
     {agent, ship, portfolio, commitment} = claimed_ship("OUTCOME-MODULE")
     module = "MODULE_SURVEY_SUITE_I"
 
@@ -1151,7 +1252,7 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
               "cargo" => after_body["cargo"],
               "transaction" => %{
                 "shipSymbol" => ship.symbol,
-                "tradeSymbol" => module,
+                "tradeSymbol" => receipt_module,
                 "waypointSymbol" => "X1-UX81-A1",
                 "totalPrice" => 125
               }
@@ -1162,22 +1263,7 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
     end)
 
     _ = Intents.execute_action(agent, intent, Model.Ship.from_json(before), action)
-    assert Repo.get!(Intent, intent.id).status == "completed"
-
-    assert transaction_metrics() =~
-             ~s(spacetraders_outcome_credits_transactions_total{intent_type="install_module",operation="install_module"} 125\n)
-
-    assert_receive {:telemetry, [:spacetraders, :outcome, :transaction], %{credits: 125},
-                    metadata}
-
-    assert metadata == %{intent_type: "install_module", operation: "install_module"}
-
-    Req.Test.stub(SpaceTraders.API, fn _ -> flunk("completed modification acquired new facts") end)
-
-    _ = Intents.reconcile(agent.id, ship.symbol, nil, :boot, intent.id)
-
-    assert transaction_metrics() =~
-             ~s(spacetraders_outcome_credits_transactions_total{intent_type="install_module",operation="install_module"} 125\n)
+    {agent, ship, intent}
   end
 
   test "rejected or unattributed receipts and price-unknown recovery create no transaction series" do

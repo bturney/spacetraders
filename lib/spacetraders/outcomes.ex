@@ -18,7 +18,7 @@ defmodule SpaceTraders.Outcomes do
   alias SpaceTraders.Contracts
 
   @contract_statuses ~w(pending active near_delivery completed expired)
-  @intent_types ~w(navigate acquire_intelligence acquire_resources buy sell deliver transfer install_module remove_module)
+  @intent_types SpaceTraders.Fleet.Intent.types()
   @transaction_operations ~w(buy sell refuel jump install_module remove_module)
 
   def start_link(opts \\ []), do: GenServer.start_link(__MODULE__, opts, name: __MODULE__)
@@ -69,6 +69,7 @@ defmodule SpaceTraders.Outcomes do
 
   @impl true
   def init(opts) do
+    :ok = SpaceTraders.Outcomes.PostCommit.attach(self())
     # PromEx can outlive this process. Invalidate any retained previous pair
     # on restart; a timestamp of zero is unknown, never an observation.
     credit_pair(nil)
@@ -113,9 +114,7 @@ defmodule SpaceTraders.Outcomes do
   end
 
   @impl true
-  def terminate(_reason, %{projections: projections}) do
-    if projections, do: SpaceTraders.Outcomes.Fleet.detach()
-  end
+  def terminate(_reason, _state), do: SpaceTraders.Outcomes.PostCommit.detach()
 
   @impl true
   def handle_cast({:observe, observation}, state) do

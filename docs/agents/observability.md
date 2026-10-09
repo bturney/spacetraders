@@ -116,6 +116,7 @@ not provide Fleet Generation-normalized performance or replace durable evidence.
 Exporter definitions: `lib/spacetraders/prom_ex/outcome.ex` and
 `lib/spacetraders/prom_ex/fleet_outcome.ex`. Publication and projection rules:
 `lib/spacetraders/outcomes.ex` and `lib/spacetraders/outcomes/fleet.ex`.
+Writer-side transaction notifications live in `lib/spacetraders/outcomes/post_commit.ex`.
 Labels below are exporter labels; Prometheus adds scrape labels such as `job`
 and `instance`. Epochs and amounts are values; Agent, Ship, System, Waypoint,
 Fleet Generation, and durable record identities remain outside metric labels.
@@ -154,6 +155,13 @@ amounts stay absent, including recovery that proves quantity alone. Contract
 rewards have no existing instrumented total site; no inferred acceptance or
 fulfillment payouts or Contract-income decomposition.
 
+Supporting purchase/refuel/jump/module totals come from the existing retained
+Credit Calibration Realization, after its attribution checks against the prepared
+spend. A decoded receipt for different goods, module, or units, or without the
+required post-charge credits, is not a proven amount and produces no counter or
+transaction epoch. Root buy/sell totals retain their Market transaction validation.
+The Intent domain owns the closed type vocabulary used by the exporter.
+
 Ship series populate exactly one of the three labels; the other two are `""`.
 Sum one axis only (for example `claim!=""`), or each Ship is counted three times.
 
@@ -183,7 +191,11 @@ historical acquisition; counters can reset with the metrics process.
 ### Publication and failure isolation
 
 One supervised `SpaceTraders.Outcomes` asynchronous worker owns all outcome
-publications. `Outcomes.Fleet` is its DB projection helper, not a second worker.
+publications. `Outcomes.Fleet` is its DB projection helper. `Outcomes.PostCommit`
+owns the SQL telemetry bridge and writer-side transaction buffers; neither helper
+is a worker. Owned credits and Contracts observations queue inside their retention
+transaction, publish only after the true outer commit, and are discarded on
+rollback, including their epochs and previous-credit pairs.
 Gameplay enqueues already-retained authoritative facts, confirmed transaction
 deltas, or post-commit dirty notifications and continues without waiting for
 metrics. Telemetry publication and aggregate SQL run out of band; outcome
