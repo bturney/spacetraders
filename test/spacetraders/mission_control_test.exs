@@ -6,7 +6,7 @@ defmodule SpaceTraders.MissionControlTest do
   import SpaceTraders.ShipBody
 
   alias SpaceTraders.Agent.Scope
-  alias SpaceTraders.API.Model.{Market, Waypoint}
+  alias SpaceTraders.API.Model.Waypoint
   alias SpaceTraders.FleetAllocation.Commitment
   alias SpaceTraders.FleetAllocation.StrategyDecisionEpisode
   alias SpaceTraders.FleetStrategy
@@ -489,8 +489,6 @@ defmodule SpaceTraders.MissionControlTest do
                )
 
       observe_market_pair(agent)
-      governed_market_observation(agent, "X1", "X1-A1", 10, 9)
-      governed_market_observation(agent, "X1", "X1-A2", 25, 20)
 
       availability = %{
         agent.id => %{
@@ -646,10 +644,13 @@ defmodule SpaceTraders.MissionControlTest do
 
       refute Enum.any?(planning.limitations, &(&1.reason == :no_viable_market_routes))
 
-      assert Enum.any?(planning.limitations, fn limitation ->
-               limitation.reason == :insufficient_market_evidence and
-                 limitation.subject == "market:X1:X1-A3"
-             end)
+      # The never-observed Marketplace stays an explicit gap of the shared
+      # interpretation the projection planned from.
+      assert %{reason: :never_observed} =
+               agent
+               |> Intelligence.market_interpretation("X1", DateTime.utc_now())
+               |> Map.fetch!(:coverage_gaps)
+               |> Enum.find(&(&1.subject == "market:X1:X1-A3"))
     end
 
     test "projects incomplete coverage as an explicit limitation instead of an invalid negative conclusion" do
@@ -725,30 +726,7 @@ defmodule SpaceTraders.MissionControlTest do
   end
 
   defp observe_market(agent, waypoint, purchase_price, sell_price) do
-    market =
-      Market.from_json(%{
-        "symbol" => waypoint,
-        "exports" => [%{"symbol" => "IRON_ORE"}],
-        "imports" => [%{"symbol" => "IRON_ORE"}],
-        "exchange" => [],
-        "tradeGoods" => [
-          %{
-            "symbol" => "IRON_ORE",
-            "type" => "EXPORT",
-            "tradeVolume" => 20,
-            "supply" => "MODERATE",
-            "activity" => "STATIC",
-            "purchasePrice" => purchase_price,
-            "sellPrice" => sell_price
-          }
-        ]
-      })
-
-    assert {:ok, _} =
-             Intelligence.observe_market(agent, "X1", market,
-               source: "get_market",
-               observing_ship_symbol: "#{agent.symbol}-1"
-             )
+    governed_market_observation(agent, "X1", waypoint, purchase_price, sell_price)
   end
 
   defp execution_fixture do

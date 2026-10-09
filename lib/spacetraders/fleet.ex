@@ -560,13 +560,18 @@ defmodule SpaceTraders.Fleet do
              system_symbol,
              waypoint_symbol,
              required_facts: ["trade_goods", "transactions"],
-             freshness_seconds: 60
+             freshness_seconds: 60,
+             bind: true
            )
          ) do
-      {:ok, market} = result ->
+      {:ok, %SpaceTraders.Evidence.Binding{value: market, observation: source}} ->
         observer = if live_ship.nav.waypoint_symbol == waypoint_symbol, do: live_ship.symbol
-        record_market_observation(agent, system_symbol, market, "get_market", observer)
-        result
+
+        record_market_observation(agent, system_symbol, market, "get_market", observer,
+          evidence: source
+        )
+
+        {:ok, market}
 
       {:error, %SpaceTraders.API.GameplayError{}} = result ->
         invalidate_market_facts(agent, system_symbol, waypoint_symbol)
@@ -773,18 +778,37 @@ defmodule SpaceTraders.Fleet do
     end
   end
 
-  defp record_market_observation(%AgentRecord{id: id} = agent, system, market, source, observer)
+  defp record_market_observation(
+         agent,
+         system,
+         market,
+         source,
+         observer,
+         lineage \\ []
+       )
+
+  defp record_market_observation(
+         %AgentRecord{id: id} = agent,
+         system,
+         market,
+         source,
+         observer,
+         lineage
+       )
        when is_integer(id) do
-    Intelligence.observe_market(agent, system, market,
-      source: source,
-      observing_ship_symbol: observer
+    Intelligence.observe_market(
+      agent,
+      system,
+      market,
+      [source: source, observing_ship_symbol: observer] ++ lineage
     )
   rescue
     exception ->
       Logger.warning("Could not persist market intelligence: #{Exception.message(exception)}")
   end
 
-  defp record_market_observation(_agent, _system, _market, _source, _observer), do: :ok
+  defp record_market_observation(_agent, _system, _market, _source, _observer, _lineage),
+    do: :ok
 
   defp record_market_observation(%AgentRecord{id: id} = agent, system, market, source)
        when is_integer(id),

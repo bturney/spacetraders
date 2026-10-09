@@ -7,19 +7,13 @@ defmodule SpaceTraders.FleetShadow do
   gameplay mutations.
   """
 
-  import Ecto.Query
-
   alias SpaceTraders.Agent.Agent, as: AgentRecord
   alias SpaceTraders.API.CapacityGovernor.Disposition
-  alias SpaceTraders.Evidence
-  alias SpaceTraders.Clock
-  alias SpaceTraders.Evidence.Observation
+  alias SpaceTraders.{Clock, CreditCalibration, Evidence, Intelligence}
   alias SpaceTraders.FleetAllocation
   alias SpaceTraders.FleetAllocation.StrategyDecisionEpisode
-  alias SpaceTraders.FleetIntelligence
   alias SpaceTraders.FleetPlanning
   alias SpaceTraders.FleetStrategy.Revision
-  alias SpaceTraders.Repo
 
   @doc "Builds a shadow comparison from persisted governed Market evidence."
   def compare_market(
@@ -32,7 +26,7 @@ defmodule SpaceTraders.FleetShadow do
       )
       when is_binary(system_symbol) and is_map(availability) and is_list(opts) do
     agent
-    |> market_snapshot(system_symbol, decision_time(opts))
+    |> market_input(system_symbol, decision_time(opts))
     |> compare(revision, availability, capacity, opts)
   end
 
@@ -55,7 +49,7 @@ defmodule SpaceTraders.FleetShadow do
       when is_map(document) and is_binary(system_symbol) and is_map(availability) and
              is_list(opts) do
     agent
-    |> market_snapshot(system_symbol, decision_time(opts))
+    |> market_input(system_symbol, decision_time(opts))
     |> compare(
       %Revision{id: {:draft, agent.id}, document: document},
       availability,
@@ -135,36 +129,17 @@ defmodule SpaceTraders.FleetShadow do
   # fixes decision time.
   defp decision_time(opts), do: Keyword.get_lazy(opts, :as_of, &Clock.utc_now/0)
 
-  defp market_snapshot(agent, system_symbol, as_of) do
-    subject_prefix = "market:#{system_symbol}:"
-
-    markets =
-      Observation
-      |> where([observation], observation.agent_id == ^agent.id)
-      |> where([observation], like(observation.subject, ^"#{subject_prefix}%"))
-      |> where([observation], observation.observed_at <= ^as_of)
-      |> order_by([observation], desc: observation.observed_at, desc: observation.id)
-      |> Repo.all()
-      |> Enum.uniq_by(& &1.subject)
-      |> Enum.map(fn observation ->
-        %{
-          subject: observation.subject,
-          observed_at: observation.observed_at,
-          evidence_id: observation.id,
-          source: observation.operation_id,
-          trade_goods: observation.facts["trade_goods"]
-        }
-      end)
-
-    # The authoritative Market coverage target is every known Marketplace of
-    # the headquarters System, including never-observed ones the retained
-    # Listing query cannot see.
-    baseline = FleetIntelligence.known_marketplace_subjects(agent, system_symbol, as_of)
-
-    as_of
-    |> FleetPlanning.market_snapshot(system_symbol, agent.id, markets)
-    |> Map.merge(FleetPlanning.baseline_coverage(baseline))
-    |> Map.put(:credit_margin_percent, SpaceTraders.CreditCalibration.active().margin_percent)
+  @doc """
+  The Fleet Planning Market input for one Agent System at one decision time:
+  the shared Operational Intelligence Market interpretation plus the active
+  credit calibration margin. Runtime planning, coverage and Strategy review
+  all plan from this input.
+  """
+  def market_input(%AgentRecord{} = agent, system_symbol, %DateTime{} = decision_time)
+      when is_binary(system_symbol) do
+    agent
+    |> Intelligence.market_interpretation(system_symbol, decision_time)
+    |> Map.put(:credit_margin_percent, CreditCalibration.active().margin_percent)
   end
 
   # Trade quantity is bounded by the holds of Ships the Fleet can actually

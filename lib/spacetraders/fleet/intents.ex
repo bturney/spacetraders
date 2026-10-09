@@ -1703,7 +1703,8 @@ defmodule SpaceTraders.Fleet.Intents do
             :market ->
               Evidence.get_market(reference, system, intent.target_waypoint,
                 owner: "ship_execution",
-                required_facts: intent.parameters["required_facts"]
+                required_facts: intent.parameters["required_facts"],
+                bind: true
               )
 
             :shipyard ->
@@ -1714,8 +1715,11 @@ defmodule SpaceTraders.Fleet.Intents do
           end
 
         case Agent.handle_game_result(agent, result) do
-          {:ok, listing} ->
-            opts = [source: "get_#{type}", observing_ship_symbol: live_ship.symbol]
+          {:ok, acquired} ->
+            {listing, lineage} = acquired_listing(acquired)
+
+            opts =
+              [source: "get_#{type}", observing_ship_symbol: live_ship.symbol] ++ lineage
 
             retained =
               case type do
@@ -1751,6 +1755,13 @@ defmodule SpaceTraders.Fleet.Intents do
         end
     end
   end
+
+  # A bound governed read carries its exact retained source; Intelligence
+  # links the Listing to it so the Market interpretation can trace it.
+  defp acquired_listing(%Evidence.Binding{value: listing, observation: source}),
+    do: {listing, [evidence: source]}
+
+  defp acquired_listing(listing), do: {listing, []}
 
   defp scan_intelligence(agent, intent, live_ship) do
     sensor? =
@@ -3932,16 +3943,21 @@ defmodule SpaceTraders.Fleet.Intents do
            agent,
            Evidence.get_market(AgentTokenReference.new(agent), system, waypoint,
              required_facts: ["trade_goods", "transactions"],
-             freshness_seconds: 0
+             freshness_seconds: 0,
+             bind: true
            )
          ) do
-      {:ok, market} = result ->
-        Intelligence.observe_market(agent, system, market,
-          source: "get_market",
-          observing_ship_symbol: live_ship.symbol
+      {:ok, acquired} ->
+        {market, lineage} = acquired_listing(acquired)
+
+        Intelligence.observe_market(
+          agent,
+          system,
+          market,
+          [source: "get_market", observing_ship_symbol: live_ship.symbol] ++ lineage
         )
 
-        result
+        {:ok, market}
 
       error ->
         error

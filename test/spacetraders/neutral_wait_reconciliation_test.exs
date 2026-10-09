@@ -320,7 +320,19 @@ defmodule SpaceTraders.NeutralWaitReconciliationTest do
         as_of
       )
 
-    assert {:ok, _} = Evidence.fulfil_demands(agent, @market_subject, observation, as_of)
+    assert {:ok, %{observation: source}} =
+             Evidence.fulfil_demands(agent, @market_subject, observation, as_of)
+
+    # Operational Intelligence retains the Listing linked to that source.
+    assert {:ok, _} =
+             Intelligence.observe_market(
+               agent,
+               @system,
+               %{symbol: @waypoint, trade_goods: observation.facts.trade_goods},
+               source: "get_market",
+               observing_ship_symbol: "#{agent.symbol}-1",
+               evidence: source
+             )
   end
 
   defp stub_availability(ship, agent_payload) do

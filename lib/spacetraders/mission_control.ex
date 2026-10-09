@@ -30,7 +30,6 @@ defmodule SpaceTraders.MissionControl do
     FleetAllocation,
     FleetExecution,
     FleetGeneration,
-    FleetIntelligence,
     FleetPlanning,
     FleetStrategy,
     Intelligence,
@@ -918,21 +917,7 @@ defmodule SpaceTraders.MissionControl do
 
   defp plan_market_objectives(document, agent, as_of, plan_objective) do
     with {:ok, system_symbol} <- Fleet.system_from_headquarters(agent.headquarters) do
-      marketplace_symbols = Intelligence.marketplace_waypoints(agent, system_symbol)
-
-      markets =
-        marketplace_symbols
-        |> Enum.map(&market_evidence(agent, system_symbol, &1, as_of))
-
-      # The authoritative Market coverage target is every known Marketplace of
-      # the headquarters System, including never-observed Waypoints.
-      baseline =
-        Enum.map(marketplace_symbols, &FleetIntelligence.market_subject(system_symbol, &1))
-
-      snapshot =
-        FleetPlanning.market_snapshot(as_of, system_symbol, agent.id, markets)
-        |> Map.merge(FleetPlanning.baseline_coverage(baseline))
-        |> Map.put(:credit_margin_percent, SpaceTraders.CreditCalibration.active().margin_percent)
+      snapshot = FleetShadow.market_input(agent, system_symbol, as_of)
 
       document
       |> Map.get("objectives", [])
@@ -950,27 +935,6 @@ defmodule SpaceTraders.MissionControl do
     else
       _ -> []
     end
-  end
-
-  defp market_evidence(agent, system_symbol, waypoint_symbol, as_of) do
-    facts = Intelligence.subject_with_stale(agent, :market, system_symbol, waypoint_symbol)
-    current = facts.current["trade_goods"]
-    stale = facts.stale["trade_goods"]
-    fact = current || stale || latest_fact(facts)
-
-    %{
-      subject: "market:#{system_symbol}:#{waypoint_symbol}",
-      observed_at: (fact && fact.observation.observed_at) || as_of,
-      evidence_id: fact && "intelligence-observation:#{fact.observation.id}",
-      source: fact && fact.observation.source,
-      state: if(is_nil(current) and not is_nil(stale), do: :stale, else: :current),
-      trade_goods: if(current, do: current.value, else: stale && stale.value)
-    }
-  end
-
-  defp latest_fact(%{current: current, stale: stale}) do
-    (Map.values(current) ++ Map.values(stale))
-    |> Enum.max_by(& &1.observation.observed_at, DateTime, fn -> nil end)
   end
 
   defp fleet_overview(snapshot, generations) do

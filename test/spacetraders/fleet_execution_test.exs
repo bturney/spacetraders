@@ -2,12 +2,12 @@ defmodule SpaceTraders.FleetExecutionTest do
   use SpaceTraders.DataCase, async: true
 
   import SpaceTraders.AgentFixtures
+  import SpaceTraders.EvidenceFixtures
   import SpaceTraders.ShipBody
 
   alias SpaceTraders.Test.CapacityDispositions
   alias SpaceTraders.API.Model.Waypoint
   alias SpaceTraders.Agent.{Operator, Scope}
-  alias SpaceTraders.Evidence.Observation
   alias SpaceTraders.Fleet.Intent
   alias SpaceTraders.Fleet.Ship
   alias SpaceTraders.FleetAllocation
@@ -283,7 +283,7 @@ defmodule SpaceTraders.FleetExecutionTest do
         Ecto.Changeset.change(buy, status: "completed", finished_at: DateTime.utc_now(:second))
       )
 
-      market_observation(agent, "X1-A1", 10, "refreshed")
+      market_observation(agent, "X1-A1", 10)
 
       assert {:error, :unresolved_commitment_evidence} =
                FleetExecution.reconcile_market_evidence(scope, agent, revision, "X1", capacity())
@@ -311,7 +311,7 @@ defmodule SpaceTraders.FleetExecutionTest do
 
       stale = DateTime.utc_now(:second) |> DateTime.add(-600, :second)
       Repo.update!(Ecto.Changeset.change(buy, status: "completed", finished_at: stale))
-      market_observation(agent, "X1-A1", 10, "refreshed")
+      market_observation(agent, "X1-A1", 10)
 
       assert {:ok, _} =
                FleetExecution.reconcile_market_evidence(scope, agent, revision, "X1", capacity())
@@ -370,27 +370,25 @@ defmodule SpaceTraders.FleetExecutionTest do
       {operator, agent, revision}
     end
 
-    defp market_observation(agent, waypoint, purchase_price, variant \\ "") do
-      Repo.insert!(%Observation{
-        agent_id: agent.id,
-        subject: "market:X1:#{waypoint}",
-        operation_id: "get-market",
-        dependency_keys: ["market:X1:#{waypoint}"],
-        facts: %{
-          "trade_goods" => [
-            %{
-              "symbol" => "IRON",
-              "purchase_price" => purchase_price,
-              "sell_price" => purchase_price - 1,
-              "trade_volume" => 20,
-              "supply" => "MODERATE",
-              "activity" => "STATIC"
-            }
-          ]
-        },
-        response_fingerprint: "market-#{waypoint}-#{purchase_price}#{variant}",
+    # Each call is a distinct governed acquisition, so a re-observation with
+    # equal prices still carries new evidence identity.
+    defp market_observation(agent, waypoint, purchase_price) do
+      retained_market_listing(
+        agent,
+        "X1",
+        waypoint,
+        [
+          %{
+            symbol: "IRON",
+            purchase_price: purchase_price,
+            sell_price: purchase_price - 1,
+            trade_volume: 20,
+            supply: "MODERATE",
+            activity: "STATIC"
+          }
+        ],
         observed_at: SpaceTraders.Clock.utc_now()
-      })
+      )
     end
 
     defp stub_market_agent(agent) do

@@ -11,6 +11,8 @@ defmodule SpaceTraders.Intelligence.Observation do
     field :observed_at, :utc_datetime
 
     belongs_to :agent, SpaceTraders.Agent.Agent
+
+    belongs_to :evidence_observation, SpaceTraders.Evidence.Observation, type: :binary_id
     has_many :facts, SpaceTraders.Intelligence.Fact
 
     timestamps(type: :utc_datetime)
@@ -25,7 +27,8 @@ defmodule SpaceTraders.Intelligence.Observation do
       :subject_type,
       :subject_system_symbol,
       :subject_symbol,
-      :observed_at
+      :observed_at,
+      :evidence_observation_id
     ])
     |> validate_required([:agent_id, :source, :subject_type, :subject_symbol, :observed_at])
   end
