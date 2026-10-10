@@ -61,7 +61,7 @@ defmodule SpaceTraders.FleetAllocationTest do
           frame: if(cargo > 0, do: "FRAME_FRIGATE", else: "FRAME_PROBE"),
           cargo_transport: cargo,
           chart: true,
-          operating_cost: cost,
+          fuel_capacity: cost,
           market_access: ["X1-A1", "X1-A2"]
         }
       }

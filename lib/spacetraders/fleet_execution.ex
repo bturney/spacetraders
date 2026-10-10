@@ -1049,7 +1049,7 @@ defmodule SpaceTraders.FleetExecution do
         roles: ship_roles(ship),
         capabilities: %{
           frame: frame_symbol(ship),
-          operating_cost: operating_cost(ship),
+          fuel_capacity: fuel_capacity(ship),
           cargo_transport: cargo_capacity(ship),
           chart: true,
           waypoint_scan: sensor_mount?(ship),
@@ -1072,8 +1072,8 @@ defmodule SpaceTraders.FleetExecution do
 
   # Fuel tank size stands in for fuel use per leg; solar-powered probes carry
   # none and so cost nothing to move.
-  defp operating_cost(%{fuel: %{capacity: capacity}}) when is_integer(capacity), do: capacity
-  defp operating_cost(_ship), do: 0
+  defp fuel_capacity(%{fuel: %{capacity: capacity}}) when is_integer(capacity), do: capacity
+  defp fuel_capacity(_ship), do: 0
 
   defp cargo_capacity(%{cargo: %{capacity: capacity}}) when is_integer(capacity), do: capacity
   defp cargo_capacity(_ship), do: 0
