@@ -31,6 +31,130 @@ defmodule SpaceTraders.FleetAllocationTest do
     assert [%{candidate_id: "lower", reasons: [:insufficient_reservation]}] = portfolio.rejected
   end
 
+  describe "role and Claim matching by Ship capability and operating cost" do
+    defp role_contribution(id, role, capabilities, objective_index \\ 0) do
+      %CandidateContribution{
+        id: id,
+        strategy_revision_id: 42,
+        objective_index: objective_index,
+        objective: %{"objective" => "Grow credits"},
+        kind: :market_trade,
+        trade_symbol: "IRON",
+        source_waypoint: "X1-A1",
+        destination_waypoint: "X1-A2",
+        expected_outcomes: %{maximum_credit_change: 100},
+        uncertainty: %{},
+        required_roles: [%{role: role, count: 1}],
+        required_capabilities: capabilities,
+        required_resources: %{ship_count: 1},
+        dependencies: [%{valid_until: ~U[2030-01-01 12:05:00Z], evidence_id: "e"}],
+        validity: %{as_of: @as_of, expires_at: ~U[2030-01-01 12:05:00Z]},
+        alternatives: []
+      }
+    end
+
+    defp ship_claim(symbol, roles, cargo, cost) do
+      %{
+        resource: symbol,
+        roles: roles,
+        capabilities: %{
+          frame: if(cargo > 0, do: "FRAME_FRIGATE", else: "FRAME_PROBE"),
+          cargo_transport: cargo,
+          chart: true,
+          fuel_capacity: cost,
+          market_access: ["X1-A1", "X1-A2"]
+        }
+      }
+    end
+
+    defp select(candidates, claims) do
+      FleetAllocation.select_portfolio(revision(2), candidates, %{
+        as_of: @as_of,
+        claims: claims,
+        reservations: %{credits: 1_000}
+      })
+    end
+
+    test "scouting takes the capable cheaper probe even when the frigate sorts first" do
+      scout = role_contribution("scout", :intelligence_scout, [%{capability: :chart}])
+
+      claims = [
+        ship_claim("A-FRIGATE", [:market_trader, :intelligence_scout], 40, 90),
+        ship_claim("Z-PROBE", [:intelligence_scout], 0, 5)
+      ]
+
+      for order <- [claims, Enum.reverse(claims)] do
+        assert {:ok, %{commitments: [commitment]}} = select([scout], order)
+        assert commitment.claims == ["Z-PROBE"]
+      end
+    end
+
+    test "the frigate stays free for the trade after scouting takes the probe" do
+      scout = role_contribution("scout", :intelligence_scout, [%{capability: :chart}], 0)
+
+      trade =
+        role_contribution(
+          "trade",
+          :market_trader,
+          [%{capability: :cargo_transport, minimum_capacity: 40}],
+          1
+        )
+
+      claims = [
+        ship_claim("A-FRIGATE", [:market_trader, :intelligence_scout], 40, 90),
+        ship_claim("Z-PROBE", [:intelligence_scout], 0, 5)
+      ]
+
+      assert {:ok, %{commitments: commitments, rejected: []}} = select([trade, scout], claims)
+
+      assert Map.new(commitments, &{&1.candidate_id, &1.claims}) ==
+               %{"scout" => ["Z-PROBE"], "trade" => ["A-FRIGATE"]}
+    end
+
+    test "a materially cheaper later symbol beats alphabetical precedence for equal capability" do
+      scout = role_contribution("scout", :intelligence_scout, [%{capability: :chart}])
+
+      claims = [
+        ship_claim("SHIP-1", [:intelligence_scout], 10, 50),
+        ship_claim("SHIP-2", [:intelligence_scout], 10, 20)
+      ]
+
+      assert {:ok, %{commitments: [%{claims: ["SHIP-2"]}]}} = select([scout], claims)
+    end
+
+    test "a trade is claimed only by a Ship Planning found able to reach it on fuel" do
+      trade =
+        role_contribution("trade", :market_trader, [
+          %{capability: :cargo_transport, minimum_capacity: 10},
+          %{capability: :fuel_reach, ships: ["Z-FUELED"]}
+        ])
+
+      # A-STRANDED is cheaper and sorts first, but cannot reach the source.
+      claims = [
+        ship_claim("A-STRANDED", [:market_trader], 40, 5),
+        ship_claim("Z-FUELED", [:market_trader], 40, 90)
+      ]
+
+      for order <- [claims, Enum.reverse(claims)] do
+        assert {:ok, %{commitments: [commitment]}} = select([trade], order)
+        assert commitment.claims == ["Z-FUELED"]
+      end
+
+      assert {:ok, %{commitments: [], rejected: [%{reasons: [:claim_conflict]}]}} =
+               select([trade], [hd(claims)])
+    end
+
+    test "an incapable Ship is never assigned and the Candidate is rejected with a reason" do
+      trade =
+        role_contribution("trade", :market_trader, [
+          %{capability: :cargo_transport, minimum_capacity: 40}
+        ])
+
+      assert {:ok, %{commitments: [], rejected: [%{reasons: [:claim_conflict]}]}} =
+               select([trade], [ship_claim("PROBE-1", [:intelligence_scout], 0, 5)])
+    end
+  end
+
   test "protects higher Strategic Priority before committing remaining resources" do
     revision = revision(2)
 

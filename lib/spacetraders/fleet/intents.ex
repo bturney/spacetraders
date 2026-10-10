@@ -19,7 +19,7 @@ defmodule SpaceTraders.Fleet.Intents do
   alias SpaceTraders.API.AgentTokenReference
   alias SpaceTraders.Fleet.Intents.{CapacityDeferral, RecordedAction, Recovery}
   alias SpaceTraders.API.Model.{Contract, ShipNav}
-  alias SpaceTraders.Fleet.{Intent, Ship}
+  alias SpaceTraders.Fleet.{FuelReach, Intent, Ship}
   alias SpaceTraders.Fleet
   alias SpaceTraders.FleetAllocation
   alias SpaceTraders.FleetAllocation.{Commitment, Portfolio}
@@ -1004,8 +1004,27 @@ defmodule SpaceTraders.Fleet.Intents do
 
   defp maximum_units(_expected_outcomes), do: nil
 
+  # The quote the decision was planned on bounds the last-chance purchase: the
+  # live quote is re-read before the buy, and one above the planned source
+  # price is refused rather than spent against a reservation sized for the
+  # planned price.
   defp candidate_purchase_price(candidate),
-    do: Map.get(candidate, :purchase_price) || Map.get(candidate, "purchase_price")
+    do:
+      Map.get(candidate, :purchase_price) || Map.get(candidate, "purchase_price") ||
+        planned_condition(candidate, :source_purchase_price)
+
+  defp planned_condition(candidate, fact) do
+    conditions =
+      case Map.get(candidate, :validity) || Map.get(candidate, "validity") do
+        %{} = validity -> Map.get(validity, :conditions) || Map.get(validity, "conditions")
+        _none -> nil
+      end
+
+    Enum.find_value(List.wrap(conditions), fn condition ->
+      if to_string(Map.get(condition, :fact) || Map.get(condition, "fact")) == to_string(fact),
+        do: Map.get(condition, :value) || Map.get(condition, "value")
+    end)
+  end
 
   defp candidate_sell_price(candidate),
     do: Map.get(candidate, :sell_price) || Map.get(candidate, "sell_price")
@@ -1630,8 +1649,26 @@ defmodule SpaceTraders.Fleet.Intents do
         freshness
       )
 
-    Enum.all?(fields, &(get_in(projection, [:facts, &1, :freshness]) == :fresh))
+    Enum.all?(fields, &(get_in(projection, [:facts, &1, :freshness]) == :fresh)) and
+      authorizing_listing?(agent, type, system, intent.target_waypoint, fields)
   end
+
+  # A retained Listing the shared Market interpretation cannot use (legacy with
+  # no exact source, another Fleet Generation, future-dated) must not satisfy a
+  # coverage Intent, or the Marketplace would never be read again and the
+  # evidence gap could never close. Only a governed new read replaces it.
+  defp authorizing_listing?(agent, :market, system, waypoint, fields) do
+    if "trade_goods" in fields do
+      subject = "market:#{system}:#{waypoint}"
+      interpretation = Intelligence.market_interpretation(agent, system, Clock.utc_now())
+
+      Enum.any?(interpretation.markets, &(&1.subject == subject and &1.state == :current))
+    else
+      true
+    end
+  end
+
+  defp authorizing_listing?(_agent, _type, _system, _waypoint, _fields), do: true
 
   defp acquire_intelligence(agent, intent, live_ship, :waypoint, system) do
     reference = AgentTokenReference.new(agent)
@@ -1703,7 +1740,8 @@ defmodule SpaceTraders.Fleet.Intents do
             :market ->
               Evidence.get_market(reference, system, intent.target_waypoint,
                 owner: "ship_execution",
-                required_facts: intent.parameters["required_facts"]
+                required_facts: intent.parameters["required_facts"],
+                bind: true
               )
 
             :shipyard ->
@@ -1714,8 +1752,11 @@ defmodule SpaceTraders.Fleet.Intents do
           end
 
         case Agent.handle_game_result(agent, result) do
-          {:ok, listing} ->
-            opts = [source: "get_#{type}", observing_ship_symbol: live_ship.symbol]
+          {:ok, acquired} ->
+            {listing, lineage} = acquired_listing(acquired)
+
+            opts =
+              [source: "get_#{type}", observing_ship_symbol: live_ship.symbol] ++ lineage
 
             retained =
               case type do
@@ -1751,6 +1792,13 @@ defmodule SpaceTraders.Fleet.Intents do
         end
     end
   end
+
+  # A bound governed read carries its exact retained source; Intelligence
+  # links the Listing to it so the Market interpretation can trace it.
+  defp acquired_listing(%Evidence.Binding{value: listing, observation: source}),
+    do: {listing, [evidence: source]}
+
+  defp acquired_listing(listing), do: {listing, []}
 
   defp scan_intelligence(agent, intent, live_ship) do
     sensor? =
@@ -3379,6 +3427,16 @@ defmodule SpaceTraders.Fleet.Intents do
   defp block_cargo_intent(intent, reason) when capacity_pressure(reason),
     do: defer_for_api_capacity(intent)
 
+  # A Commitment's purchase refused because the live price crossed the planned
+  # maximum has lost the plan's validity condition. Nothing was bought, so it
+  # ends as infeasible instead of holding the Ship in a blocked state nobody
+  # resolves, and Fleet Allocation replans from the fresh evidence.
+  defp block_cargo_intent(
+         %Intent{caller: "commitment", type: "buy"} = intent,
+         {:price_constraint, _price, _max_price} = reason
+       ),
+       do: mark_infeasible(intent, reason)
+
   defp block_cargo_intent(intent, reason) do
     if authoritative_infeasibility?(reason) do
       mark_infeasible(intent, reason)
@@ -3932,16 +3990,21 @@ defmodule SpaceTraders.Fleet.Intents do
            agent,
            Evidence.get_market(AgentTokenReference.new(agent), system, waypoint,
              required_facts: ["trade_goods", "transactions"],
-             freshness_seconds: 0
+             freshness_seconds: 0,
+             bind: true
            )
          ) do
-      {:ok, market} = result ->
-        Intelligence.observe_market(agent, system, market,
-          source: "get_market",
-          observing_ship_symbol: live_ship.symbol
+      {:ok, acquired} ->
+        {market, lineage} = acquired_listing(acquired)
+
+        Intelligence.observe_market(
+          agent,
+          system,
+          market,
+          [source: "get_market", observing_ship_symbol: live_ship.symbol] ++ lineage
         )
 
-        result
+        {:ok, market}
 
       error ->
         error
@@ -3952,17 +4015,10 @@ defmodule SpaceTraders.Fleet.Intents do
     with {:ok, source} <- current_route_waypoint(live_ship),
          {:ok, system} <- Fleet.system_from_headquarters(intent.target_waypoint),
          {:ok, target} <- navigation_target_waypoint(agent, system, intent.target_waypoint),
-         {:ok, target_required} <-
+         {:ok, _required} <-
            estimated_navigation_fuel(source, target, live_ship.nav.flight_mode),
          {:ok, waypoint} <-
-           confirmed_reachable_fuel_stop(
-             agent,
-             intent,
-             live_ship,
-             source,
-             target,
-             target_required
-           ) do
+           confirmed_reachable_fuel_stop(agent, intent, live_ship, source, target) do
       visited = [waypoint | intent.parameters["visited_fuel_stops"] || []] |> Enum.uniq()
 
       parameters =
@@ -3987,10 +4043,17 @@ defmodule SpaceTraders.Fleet.Intents do
        )
        when is_binary(waypoint_symbol) do
     with {:ok, system_symbol} <- Fleet.system_from_headquarters(waypoint_symbol) do
-      SpaceTraders.Intelligence.invalidate(agent, :market, system_symbol, waypoint_symbol, [
-        :trade_goods,
-        :transactions
-      ])
+      # The FUEL transaction is receipt evidence, not a replacement Listing.
+      # Only the retained transaction history is contradicted; Listings keep
+      # their original observation time and validity.
+      SpaceTraders.Intelligence.invalidate(
+        agent,
+        :market,
+        system_symbol,
+        waypoint_symbol,
+        [:transactions],
+        cause: :refuel_receipt
+      )
     end
   rescue
     exception ->
@@ -5168,7 +5231,7 @@ defmodule SpaceTraders.Fleet.Intents do
             {:navigate_fuel_stop, destination}
 
           required > live_ship.fuel.capacity and destination == intent.target_waypoint ->
-            case confirmed_reachable_fuel_stop(agent, intent, live_ship, source, target, required) do
+            case confirmed_reachable_fuel_stop(agent, intent, live_ship, source, target) do
               {:ok, waypoint} -> {:navigate_fuel_stop, waypoint}
               :none -> {:error, :no_confirmed_reachable_refuel_stop}
             end
@@ -5186,37 +5249,28 @@ defmodule SpaceTraders.Fleet.Intents do
     end
   end
 
-  defp confirmed_reachable_fuel_stop(agent, intent, live_ship, source, target, target_required) do
+  # The same stop choice Fleet Planning simulates (`FuelReach`), over the
+  # same confirmed fuel stops (`World.fuel_stops/3`).
+  defp confirmed_reachable_fuel_stop(agent, intent, live_ship, source, target) do
     {:ok, system} = Fleet.system_from_headquarters(live_ship.nav.waypoint_symbol)
-    visited = MapSet.new(intent.parameters["visited_fuel_stops"] || [])
 
-    candidates =
-      agent
-      |> World.waypoints(system, DateTime.utc_now(), 300)
-      |> Enum.flat_map(fn waypoint ->
-        with false <- waypoint.symbol == live_ship.nav.waypoint_symbol,
-             false <- MapSet.member?(visited, waypoint.symbol),
-             %{freshness: :fresh, value: x} when is_integer(x) <- waypoint.facts["x"],
-             %{freshness: :fresh, value: y} when is_integer(y) <- waypoint.facts["y"],
-             %{freshness: :fresh, value: goods} when is_list(goods) <-
-               waypoint.market.facts["trade_goods"],
-             true <- Enum.any?(goods, &(Map.get(&1, "symbol") == "FUEL")),
-             candidate = %{symbol: waypoint.symbol, x: x, y: y},
-             {:ok, fuel_required} <-
-               estimated_navigation_fuel(source, candidate, live_ship.nav.flight_mode),
-             true <- fuel_required <= live_ship.fuel.current,
-             {:ok, remaining_required} <-
-               estimated_navigation_fuel(candidate, target, live_ship.nav.flight_mode),
-             true <- remaining_required < target_required do
-          [{fuel_required, waypoint.symbol}]
-        else
-          _ -> []
-        end
-      end)
+    reach =
+      FuelReach.new(
+        live_ship.fuel.capacity,
+        live_ship.nav.flight_mode,
+        World.waypoint_coordinates(agent, system),
+        World.fuel_stops(agent, system, Clock.utc_now())
+      )
 
-    case Enum.min_by(candidates, & &1, fn -> nil end) do
-      {_required, waypoint} -> {:ok, waypoint}
-      nil -> :none
+    case FuelReach.fuel_stop(
+           reach,
+           source,
+           live_ship.fuel.current,
+           target,
+           intent.parameters["visited_fuel_stops"] || []
+         ) do
+      {:ok, waypoint, _required} -> {:ok, waypoint}
+      :none -> :none
     end
   end
 
@@ -5245,31 +5299,10 @@ defmodule SpaceTraders.Fleet.Intents do
     end
   end
 
-  defp current_route_waypoint(%{nav: %{waypoint_symbol: waypoint, route: route}}) do
-    case Enum.find([route.destination, route.origin], &(&1.symbol == waypoint)) do
-      %{x: x, y: y} = current when is_integer(x) and is_integer(y) -> {:ok, current}
-      _ -> {:error, :current_coordinates_unavailable}
-    end
-  end
+  defp current_route_waypoint(live_ship), do: FuelReach.position(live_ship)
 
-  defp estimated_navigation_fuel(%{x: x1, y: y1}, %{x: x2, y: y2}, flight_mode)
-       when is_integer(x1) and is_integer(y1) and is_integer(x2) and is_integer(y2) do
-    distance = :math.sqrt(:math.pow(x1 - x2, 2) + :math.pow(y1 - y2, 2)) |> round()
-
-    case flight_mode do
-      mode when mode in ["CRUISE", "STEALTH"] -> {:ok, max(1, distance)}
-      "DRIFT" -> {:ok, 1}
-      "BURN" -> {:ok, max(2, distance * 2)}
-      _ -> {:error, :flight_mode_unavailable}
-    end
-  end
-
-  defp estimated_navigation_fuel(_source, _target, _flight_mode),
-    do: {:error, :navigation_coordinates_unavailable}
-
-  @doc false
-  def navigation_fuel_estimate(source, target, flight_mode),
-    do: estimated_navigation_fuel(source, target, flight_mode)
+  defp estimated_navigation_fuel(source, target, flight_mode),
+    do: FuelReach.estimate(source, target, flight_mode)
 
   defp flight_mode_mismatch?(intent, live_ship) do
     case navigate_constraint(intent, "flight_mode") do

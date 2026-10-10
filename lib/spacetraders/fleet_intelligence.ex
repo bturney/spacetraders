@@ -1,24 +1,15 @@
 defmodule SpaceTraders.FleetIntelligence do
   alias SpaceTraders.Agent, as: AgentContext
   alias SpaceTraders.Agent.Agent, as: AgentRecord
-  alias SpaceTraders.Agent.Scope
   alias SpaceTraders.API.AgentTokenReference
   alias SpaceTraders.{Clock, Evidence}
   alias SpaceTraders.Evidence.Demand
   alias SpaceTraders.Fleet
-  alias SpaceTraders.Fleet.Intent
-  alias SpaceTraders.Fleet.Intents
-  alias SpaceTraders.FleetAllocation
-  alias SpaceTraders.FleetCapacity
-  alias SpaceTraders.FleetExecution
   alias SpaceTraders.FleetPlanning
+  alias SpaceTraders.FleetShadow
   alias SpaceTraders.FleetStrategy.Revision
   alias SpaceTraders.Intelligence
   alias SpaceTraders.World
-
-  alias SpaceTraders.Repo
-
-  import Ecto.Query
 
   @freshness_seconds 300
   @api_cost 0.1
@@ -42,26 +33,23 @@ defmodule SpaceTraders.FleetIntelligence do
   """
   def market_refresh_demand_specs(agent, system_symbol, now)
       when is_binary(system_symbol) do
-    waypoints = World.waypoints(agent, system_symbol, now, @freshness_seconds)
-    refresh_demand_specs(waypoints, system_symbol, now)
+    agent
+    |> Intelligence.market_interpretation(system_symbol, now)
+    |> refresh_demand_specs()
   end
 
-  defp refresh_demand_specs(waypoints, system_symbol, now) do
-    waypoints
-    |> Enum.filter(&marketplace_waypoint?/1)
-    |> Enum.filter(&retained_listing_fact?/1)
-    |> Enum.map(fn waypoint ->
-      fact = waypoint.market.facts["trade_goods"]
-
-      fresh? =
-        match?(%{freshness: :fresh, value: goods} when is_list(goods), fact)
-
+  # Only a `:current` interpreted Listing waits for its freshness budget;
+  # every other retained Listing is due now for replacement evidence.
+  defp refresh_demand_specs(interpretation) do
+    interpretation
+    |> retained_marketplace_listings()
+    |> Enum.map(fn market ->
       FleetPlanning.market_refresh_demand(%{
-        subject: market_subject(system_symbol, waypoint.symbol),
-        observed_at: fact.observed_at,
-        fresh: fresh?,
-        as_of: now,
-        freshness_seconds: @freshness_seconds
+        subject: market.subject,
+        observed_at: market.observed_at,
+        fresh: market.state == :current,
+        as_of: interpretation.as_of,
+        freshness_seconds: interpretation.freshness_seconds
       })
     end)
   end
@@ -78,54 +66,49 @@ defmodule SpaceTraders.FleetIntelligence do
   """
   def baseline_market_demand_specs(agent, system_symbol, now)
       when is_binary(system_symbol) do
-    waypoints = World.waypoints(agent, system_symbol, now, @freshness_seconds)
-    baseline_demand_specs(waypoints, system_symbol, now)
+    agent
+    |> Intelligence.market_interpretation(system_symbol, now)
+    |> baseline_demand_specs()
   end
 
-  defp baseline_demand_specs(waypoints, system_symbol, now) do
-    waypoints
-    |> Enum.filter(&marketplace_waypoint?/1)
-    |> Enum.reject(&retained_listing_fact?/1)
-    |> Enum.map(fn waypoint ->
+  defp baseline_demand_specs(interpretation) do
+    interpretation
+    |> baseline_gap_subjects()
+    |> Enum.map(fn subject ->
       FleetPlanning.market_refresh_demand(%{
-        subject: market_subject(system_symbol, waypoint.symbol),
-        observed_at: now,
+        subject: subject,
+        observed_at: interpretation.as_of,
         fresh: false,
-        as_of: now,
-        freshness_seconds: @freshness_seconds
+        as_of: interpretation.as_of,
+        freshness_seconds: interpretation.freshness_seconds
       })
     end)
   end
 
-  @doc "Subjects of the currently known Marketplaces in one System."
-  def known_marketplace_subjects(agent, system_symbol, now)
-      when is_binary(system_symbol) do
-    World.waypoints(agent, system_symbol, now, @freshness_seconds)
-    |> marketplace_subjects(system_symbol)
+  # Refresh work covers only known Marketplaces whose interpreted Listing has
+  # its own retained acquisition time, whatever its state. A known
+  # Marketplace without one (never observed, invalidated, future-only or
+  # unreadable) belongs to reset-start baseline coverage.
+  defp retained_marketplace_listings(interpretation) do
+    baseline = MapSet.new(interpretation.baseline_subjects)
+
+    Enum.filter(
+      interpretation.markets,
+      &(MapSet.member?(baseline, &1.subject) and retained_listing?(&1))
+    )
   end
 
-  @doc "Market Observation Demand subject for one Waypoint."
-  def market_subject(system_symbol, waypoint_symbol)
-      when is_binary(system_symbol) and is_binary(waypoint_symbol) do
-    "market:#{system_symbol}:#{waypoint_symbol}"
+  defp baseline_gap_subjects(interpretation) do
+    retained =
+      interpretation
+      |> retained_marketplace_listings()
+      |> MapSet.new(& &1.subject)
+
+    Enum.reject(interpretation.baseline_subjects, &MapSet.member?(retained, &1))
   end
 
-  defp marketplace_subjects(waypoints, system_symbol) do
-    waypoints
-    |> Enum.filter(&marketplace_waypoint?/1)
-    |> Enum.map(&market_subject(system_symbol, &1.symbol))
-    |> Enum.sort()
-  end
-
-  # Refresh work covers only subjects that already carry a retained Listing
-  # fact, fresh or stale/incomplete. A bare Marketplace with no retained fact
-  # has never been observed and belongs to reset-start baseline coverage.
-  defp retained_listing_fact?(waypoint) do
-    case waypoint.market.facts["trade_goods"] do
-      %{state: "known", observed_at: %DateTime{}} -> true
-      _ -> false
-    end
-  end
+  defp retained_listing?(%{observed_at: %DateTime{}}), do: true
+  defp retained_listing?(_market), do: false
 
   @doc """
   Synchronizes durable Market refresh Observation Demands for the active Agent
@@ -152,63 +135,104 @@ defmodule SpaceTraders.FleetIntelligence do
   """
   def sync_market_observation_demands(agent, revision, system_symbol)
       when is_binary(system_symbol) do
+    sync_market_demands(
+      agent,
+      revision,
+      Intelligence.market_interpretation(agent, system_symbol, Clock.utc_now())
+    )
+  end
+
+  defp sync_market_demands(agent, revision, interpretation) do
     if credit_growth_objective?(revision) do
-      now = Clock.utc_now()
-      waypoints = World.waypoints(agent, system_symbol, now, @freshness_seconds)
-      subjects = marketplace_subjects(waypoints, system_symbol)
+      now = interpretation.as_of
 
       specs =
-        (refresh_demand_specs(waypoints, system_symbol, now) ++
-           baseline_demand_specs(waypoints, system_symbol, now))
+        (refresh_demand_specs(interpretation) ++ baseline_demand_specs(interpretation))
         |> Enum.uniq_by(& &1.subject)
 
       with :ok <- Evidence.sync_runtime_demands(agent, revision, specs, now) do
-        Evidence.withdraw_market_demands_outside_subjects(agent, revision, subjects, now)
+        Evidence.withdraw_market_demands_outside_subjects(
+          agent,
+          revision,
+          interpretation.baseline_subjects,
+          now
+        )
       end
     else
       :ok
     end
   end
 
-  def reconcile(
-        %Scope{} = scope,
-        %AgentRecord{} = agent,
-        %Revision{} = revision,
-        system,
-        capacity
-      )
+  @doc """
+  Plans the evidence half of the Market pilot domain at one decision time.
+
+  Waypoint discovery (when nothing is retained) runs first so the decision
+  time follows it; the shared Market input is then fixed at that time,
+  durable Market Observation Demands are synchronized from it, and the
+  highest-priority intelligence objective is planned for Ships outside
+  `occupied`. Returns `{:ok, %{as_of, market, intelligence}}`, where
+  `intelligence` is the Fleet Planning result or nil when no intelligence
+  objective has work. Selects, claims and publishes nothing: Fleet
+  Allocation compares these candidates with Market trade in one decision.
+  """
+  def plan_contributions(%AgentRecord{} = agent, %Revision{} = revision, system, occupied)
       when is_binary(system) do
-    with true <- FleetCapacity.proceed?(capacity),
-         :ok <- allocation_available(scope, agent),
-         waypoints <- waypoints_for_decision(agent, revision, system),
-         :ok <- sync_market_observation_demands(agent, revision, system),
-         {kind, index} <- next_objective(revision, waypoints),
+    {now, waypoints} = waypoints_for_decision(agent, revision, system)
+
+    market =
+      agent
+      |> FleetShadow.market_input(system, now)
+      # The coordinates and fuel stops Ship Execution flies by, so Fleet
+      # Planning offers a trade only to a Ship that can reach it.
+      |> Map.merge(%{
+        waypoint_coordinates: World.waypoint_coordinates(agent, system),
+        fuel_stops: World.fuel_stops(agent, system, now)
+      })
+
+    with :ok <- sync_market_demands(agent, revision, market) do
+      {:ok,
+       %{
+         as_of: now,
+         market: market,
+         intelligence: intelligence_planning(agent, revision, system, waypoints, market, occupied)
+       }}
+    end
+  end
+
+  defp intelligence_planning(agent, revision, system, waypoints, market, occupied) do
+    with {kind, index} <- next_objective(revision, waypoints, market),
          {:ok, ships} <- Fleet.list_ships(agent),
+         ships = Enum.reject(ships, &(&1.symbol in occupied)),
          true <- ships != [],
-         opportunities <-
-           opportunities(kind, revision, index, waypoints, ships, system, agent.id),
+         opportunities = opportunities(kind, revision, index, waypoints, ships, system, market),
          true <- opportunities != [],
          {:ok, planning} <-
            FleetPlanning.plan_intelligence(revision, index, %{
-             as_of: Clock.utc_now(),
+             as_of: market.as_of,
              system_symbol: system,
              agent_id: agent.id,
              freshness_seconds: @freshness_seconds,
              opportunities: opportunities
            }) do
-      FleetExecution.activate_intelligence(scope, agent, revision, planning, capacity)
+      planning
     else
-      _ -> {:error, :no_decision_relevant_intelligence}
+      _ -> nil
     end
   end
 
+  # The decision time follows any Waypoint discovery, so discovered
+  # Marketplaces are retained before the interpretation reads them.
   defp waypoints_for_decision(agent, revision, system) do
-    waypoints = World.waypoints(agent, system, Clock.utc_now(), @freshness_seconds)
+    now = Clock.utc_now()
 
-    if waypoints == [] do
-      discover_waypoints(agent, revision, system)
-    else
-      waypoints
+    case World.waypoints(agent, system, now, @freshness_seconds) do
+      [] ->
+        discover_waypoints(agent, revision, system)
+        now = Clock.utc_now()
+        {now, World.waypoints(agent, system, now, @freshness_seconds)}
+
+      waypoints ->
+        {now, waypoints}
     end
   end
 
@@ -226,7 +250,7 @@ defmodule SpaceTraders.FleetIntelligence do
 
     case priorities do
       [] ->
-        []
+        :ok
 
       [priority | _] ->
         request = [
@@ -254,25 +278,18 @@ defmodule SpaceTraders.FleetIntelligence do
             retain_waypoints(agent, waypoints)
 
           _ ->
-            []
+            :ok
         end
     end
   end
-
-  defp retain_waypoints(_agent, []), do: []
 
   defp retain_waypoints(agent, waypoints) do
     Enum.each(waypoints, fn waypoint ->
       Intelligence.observe_waypoint(agent, waypoint, source: "get_waypoints")
     end)
-
-    World.waypoints(agent, waypoint_system(waypoints), Clock.utc_now(), @freshness_seconds)
   end
 
-  defp waypoint_system([%{system_symbol: system} | _]), do: system
-  defp waypoint_system(_), do: "unknown"
-
-  defp next_objective(revision, waypoints) do
+  defp next_objective(revision, waypoints, market_input) do
     chart =
       case chart_objective(revision) do
         {index, _} ->
@@ -285,7 +302,7 @@ defmodule SpaceTraders.FleetIntelligence do
     market =
       case credit_objective(revision) do
         {index, _} ->
-          if Enum.any?(waypoints, &market_listing_needed?/1),
+          if listing_gaps(market_input) != [],
             do: [{:market, index}],
             else: []
 
@@ -401,8 +418,8 @@ defmodule SpaceTraders.FleetIntelligence do
     end)
   end
 
-  defp opportunities(:market, revision, index, waypoints, ships, system, agent_id) do
-    as_of = Clock.utc_now()
+  defp opportunities(:market, revision, index, waypoints, ships, system, market_input) do
+    as_of = market_input.as_of
 
     costs =
       for waypoint <- waypoints,
@@ -421,24 +438,13 @@ defmodule SpaceTraders.FleetIntelligence do
             }
           }
 
+    markets = Map.new(market_input.markets, &{&1.subject, &1})
+
     existing_opportunities =
       case FleetPlanning.plan_market(
              revision,
              index,
-             FleetPlanning.market_snapshot(
-               as_of,
-               system,
-               agent_id,
-               retained_markets(waypoints, system)
-             )
-             |> Map.put(:observation_costs, costs)
-             |> Map.put(
-               :credit_margin_percent,
-               SpaceTraders.CreditCalibration.active().margin_percent
-             )
-             |> Map.merge(
-               FleetPlanning.baseline_coverage(marketplace_subjects(waypoints, system))
-             )
+             Map.put(market_input, :observation_costs, costs)
            ) do
         {:ok, %{observation_demands: demands}} ->
           demands
@@ -448,24 +454,23 @@ defmodule SpaceTraders.FleetIntelligence do
             due_demand?(demand, as_of)
           end)
           |> Enum.flat_map(fn demand ->
-            waypoint = Enum.find(waypoints, &String.ends_with?(demand.subject, ":#{&1.symbol}"))
-            cost = costs[demand.subject]
+            case costs[demand.subject] do
+              %{} = cost ->
+                [
+                  %{
+                    subject: demand.subject,
+                    required_facts: demand.required_facts,
+                    facts: listing_facts(markets[demand.subject]),
+                    expected_decision_value:
+                      demand.expected_value + cost.api_capacity_cost + cost.ship_time_cost,
+                    api_capacity_cost: cost.api_capacity_cost,
+                    ship_time_cost: cost.ship_time_cost,
+                    acquisition: :on_site
+                  }
+                ]
 
-            if waypoint && cost do
-              [
-                %{
-                  subject: demand.subject,
-                  required_facts: demand.required_facts,
-                  facts: waypoint.market.facts,
-                  expected_decision_value:
-                    demand.expected_value + cost.api_capacity_cost + cost.ship_time_cost,
-                  api_capacity_cost: cost.api_capacity_cost,
-                  ship_time_cost: cost.ship_time_cost,
-                  acquisition: :on_site
-                }
-              ]
-            else
-              []
+              nil ->
+                []
             end
           end)
 
@@ -474,19 +479,17 @@ defmodule SpaceTraders.FleetIntelligence do
       end
 
     initial_opportunities =
-      waypoints
-      |> Enum.filter(&market_listing_needed?/1)
-      |> Enum.flat_map(fn waypoint ->
-        subject = "market:#{system}:#{waypoint.symbol}"
-
+      market_input
+      |> listing_gaps()
+      |> Enum.flat_map(fn subject ->
         case costs[subject] do
           %{api_capacity_cost: api_cost, ship_time_cost: ship_cost} ->
-            coverage? = not retained_listing_fact?(waypoint)
+            coverage? = not retained_listing?(Map.get(markets, subject, %{}))
 
             opportunity = %{
               subject: subject,
               required_facts: ["trade_goods"],
-              facts: waypoint.market.facts,
+              facts: listing_facts(markets[subject]),
               api_capacity_cost: api_cost,
               ship_time_cost: ship_cost,
               acquisition: :on_site,
@@ -514,49 +517,20 @@ defmodule SpaceTraders.FleetIntelligence do
   defp due_demand?(%Demand{due_at: due_at}, as_of),
     do: DateTime.compare(due_at, as_of) != :gt
 
-  defp retained_markets(waypoints, system) do
-    Enum.flat_map(waypoints, fn waypoint ->
-      case waypoint.market.facts["trade_goods"] do
-        %{state: "known", value: goods, observed_at: observed_at} = fact
-        when is_list(goods) ->
-          [
-            %{
-              subject: "market:#{system}:#{waypoint.symbol}",
-              observed_at: observed_at,
-              trade_goods: goods,
-              source: fact.source,
-              evidence_id: "intelligence-observation:#{fact.observation_id}"
-            }
-          ]
-
-        _ ->
-          []
-      end
-    end)
+  # Known Marketplaces whose Listing the interpretation does not hold as
+  # current. A Listing the game declared unreadable is not re-acquired.
+  defp listing_gaps(market_input) do
+    for %{subject: subject, reason: reason} <- market_input.coverage_gaps,
+        reason != :unavailable,
+        do: subject
   end
 
-  defp market_listing_needed?(waypoint) do
-    case waypoint.market.facts["trade_goods"] do
-      nil ->
-        marketplace_waypoint?(waypoint)
+  # Only a current interpreted Listing satisfies an observation; every other
+  # state leaves the fact to acquire.
+  defp listing_facts(%{state: :current, observed_at: observed_at}),
+    do: %{"trade_goods" => %{state: "known", observed_at: observed_at}}
 
-      %{state: "known_unavailable"} ->
-        false
-
-      fact ->
-        marketplace_waypoint?(waypoint) and fact[:freshness] != :fresh
-    end
-  end
-
-  defp marketplace_waypoint?(waypoint) do
-    case waypoint.facts["traits"] do
-      %{state: "known", value: traits} when is_list(traits) ->
-        Enum.any?(traits, &(Map.get(&1, "symbol") == "MARKETPLACE"))
-
-      _ ->
-        false
-    end
-  end
+  defp listing_facts(_market), do: %{}
 
   defp chart_objective(%Revision{document: %{"objectives" => objectives}})
        when is_list(objectives) do
@@ -572,28 +546,6 @@ defmodule SpaceTraders.FleetIntelligence do
   end
 
   defp chart_objective(_revision), do: nil
-
-  defp allocation_available(scope, agent) do
-    case FleetAllocation.current_portfolio(scope, agent) do
-      nil ->
-        :ok
-
-      %{commitments: commitments} ->
-        if Intents.current(agent) != [] or
-             Enum.any?(commitments, &(not completed_intelligence?(&1.id))),
-           do: {:error, :ship_claimed},
-           else: :ok
-    end
-  end
-
-  defp completed_intelligence?(commitment_id) do
-    Repo.exists?(
-      from intent in Intent,
-        where:
-          intent.fleet_commitment_id == ^commitment_id and
-            intent.type == "acquire_intelligence" and intent.status == "completed"
-    )
-  end
 
   defp chart_opportunities(waypoints, ships, system) do
     Enum.flat_map(waypoints, fn waypoint ->

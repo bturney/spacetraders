@@ -63,6 +63,70 @@ defmodule SpaceTraders.WorldTest do
     assert known.facts["traits"] == nil
   end
 
+  # #662: Fleet Planning and Ship Execution judge fuel reach from this one
+  # answer, so a stop one accepts the other cannot refuse.
+  test "fuel stops: static coordinates of any age, FUEL only on a fresh Listing" do
+    agent =
+      Repo.insert!(%AgentRecord{
+        symbol: "FUEL-#{System.unique_integer([:positive])}",
+        faction: "COSMIC",
+        headquarters: "X1-A1"
+      })
+
+    old = ~U[2030-01-01 09:00:00Z]
+    now = ~U[2030-01-01 12:00:00Z]
+
+    for {symbol, x, listed_at} <- [
+          {"X1-FRESH", 10, ~U[2030-01-01 11:58:00Z]},
+          {"X1-STALE", 20, ~U[2030-01-01 11:00:00Z]}
+        ] do
+      waypoint =
+        Waypoint.from_json(%{
+          "symbol" => symbol,
+          "systemSymbol" => "X1",
+          "type" => "PLANET",
+          "x" => x,
+          "y" => 0,
+          "traits" => [%{"symbol" => "MARKETPLACE"}]
+        })
+
+      assert {:ok, _} =
+               Intelligence.observe_waypoint(agent, waypoint,
+                 source: "get_waypoints",
+                 observed_at: old
+               )
+
+      market =
+        Market.from_json(%{
+          "symbol" => symbol,
+          "exchange" => [%{"symbol" => "FUEL"}],
+          "tradeGoods" => [
+            %{
+              "symbol" => "FUEL",
+              "type" => "EXCHANGE",
+              "tradeVolume" => 10,
+              "purchasePrice" => 72,
+              "sellPrice" => 68
+            }
+          ]
+        })
+
+      assert {:ok, _} =
+               Intelligence.observe_market(agent, "X1", market,
+                 source: "get_market",
+                 observing_ship_symbol: "FUEL-1",
+                 observed_at: listed_at
+               )
+    end
+
+    assert World.fuel_stops(agent, "X1", now) == ["X1-FRESH"]
+
+    assert World.waypoint_coordinates(agent, "X1") == %{
+             "X1-FRESH" => %{x: 10, y: 0},
+             "X1-STALE" => %{x: 20, y: 0}
+           }
+  end
+
   test "Shipyard offerings retain the observing Ship and do not imply absent data" do
     agent =
       Repo.insert!(%AgentRecord{

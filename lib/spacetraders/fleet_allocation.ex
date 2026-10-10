@@ -6,6 +6,8 @@ defmodule SpaceTraders.FleetAllocation do
 
   import Ecto.Query
 
+  require Logger
+
   alias SpaceTraders.Agent.Agent, as: AgentRecord
   alias SpaceTraders.Agent.Scope
   alias SpaceTraders.Fleet.{Intent, Ship}
@@ -16,7 +18,8 @@ defmodule SpaceTraders.FleetAllocation do
     JsonEvidence,
     NeutralWait,
     Portfolio,
-    StrategyDecisionEpisode
+    StrategyDecisionEpisode,
+    TradeProgress
   }
 
   alias SpaceTraders.FleetGeneration
@@ -70,6 +73,9 @@ defmodule SpaceTraders.FleetAllocation do
 
   # How long a completed buy keeps its Commitment while its next leg is created.
   @leg_handoff_seconds 120
+
+  @doc "The calibration version recorded on Market pilot-domain decisions."
+  def market_calibration_version, do: "market-v1"
 
   @doc """
   Records the Neutral Wait for one authoritative zero-admissible allocation
@@ -231,8 +237,9 @@ defmodule SpaceTraders.FleetAllocation do
 
         portfolio
       end)
+      |> observe_publication(:publish, operator_id, generation_id)
     else
-      {:error, :invalid_publication}
+      observe_publication({:error, :invalid_publication}, :publish, operator_id, generation_id)
     end
   end
 
@@ -292,8 +299,9 @@ defmodule SpaceTraders.FleetAllocation do
         {:ok, %{portfolio: portfolio}} -> {:ok, portfolio}
         error -> error
       end
+      |> observe_publication(:replan, operator_id, generation_id)
     else
-      {:error, :invalid_publication}
+      observe_publication({:error, :invalid_publication}, :replan, operator_id, generation_id)
     end
   end
 
@@ -309,6 +317,8 @@ defmodule SpaceTraders.FleetAllocation do
          decision
        ) do
     lock_generation_agent!(generation_id)
+
+    lock_generations(from(g in Generation, where: g.id == ^generation_id), :update)
 
     portfolio =
       Repo.one(
@@ -567,6 +577,33 @@ defmodule SpaceTraders.FleetAllocation do
     ])
   end
 
+  @doc """
+  Receipt-backed trade progress of one Decision Episode.
+
+  Derived from the Episode's completed buy/sell Intents on every call; amounts
+  the receipts do not prove are `"unknown"` and Net Earnings is never inferred.
+  """
+  defdelegate trade_progress(episode_id), to: TradeProgress, as: :for_episode
+
+  @doc """
+  Classifies a Portfolio's Decision Episode from its trade receipts after a
+  sale completes; it keeps evaluating while another Commitment still trades.
+  """
+  def record_trade_outcome(%Portfolio{} = portfolio) do
+    record_market_outcome(
+      portfolio.strategy_decision_episode_id,
+      portfolio.operator_id,
+      realized_outcomes(portfolio.strategy_decision_episode_id)
+    )
+  end
+
+  defp record_market_outcome(episode_id, operator_id, outcomes) do
+    case TradeProgress.classification(outcomes) do
+      :still_evaluating -> {:ok, :still_evaluating}
+      classification -> update_decision_outcome(episode_id, operator_id, classification, outcomes)
+    end
+  end
+
   @doc "Records confirmed outcomes and terminal classification for one Decision Episode."
   def record_decision_outcome(
         %Scope{operator: %{id: operator_id}},
@@ -627,13 +664,7 @@ defmodule SpaceTraders.FleetAllocation do
     |> distinct(true)
     |> Repo.all()
     |> Enum.each(fn episode ->
-      _ =
-        update_decision_outcome(
-          episode.id,
-          episode.operator_id,
-          :realized,
-          realized_outcomes(episode.id)
-        )
+      _ = record_market_outcome(episode.id, episode.operator_id, realized_outcomes(episode.id))
     end)
 
     StrategyDecisionEpisode
@@ -703,9 +734,134 @@ defmodule SpaceTraders.FleetAllocation do
         do_unwind_current_portfolio(operator_id, generation_id)
       end
     )
+    |> observe_publication(:unwind, operator_id, generation_id)
   end
 
   def unwind_current_portfolio(_scope, _generation_id), do: {:error, :invalid_unwind}
+
+  @doc """
+  Records a decision whose publication Fleet Allocation refused.
+
+  The rolled-back transaction left nothing behind, so this durable Strategy
+  Decision Episode is the inspectable outcome: it keeps the evidence, the
+  Commitments that would have been published and the rejected alternatives,
+  with the bounded `reason`. It never becomes the current allocation result
+  and is classified superseded because it never took effect.
+  """
+  def record_publication_rejection(
+        %Scope{operator: %{id: operator_id}},
+        generation_id,
+        %{revision_id: revision_id, source_version: source_version} = selection,
+        %{evidence_references: references, expectations: expectations} = decision,
+        reason
+      )
+      when is_integer(generation_id) and is_integer(revision_id) do
+    unpublished =
+      selection
+      |> Map.get(:commitments, [])
+      |> Enum.map(fn commitment ->
+        %{
+          candidate_id: commitment.candidate_id,
+          claims: commitment.claims,
+          reasons: [:publication_rejected],
+          decisive_reason:
+            "Selected, but Fleet Allocation rejected its publication: #{reason_label(reason)}."
+        }
+      end)
+
+    episode =
+      Repo.insert!(%StrategyDecisionEpisode{
+        operator_id: operator_id,
+        fleet_generation_id: generation_id,
+        fleet_strategy_revision_id: revision_id,
+        source_version: source_version,
+        evidence_references: json_safe(references),
+        alternatives: json_safe(unpublished ++ Map.get(selection, :rejected, [])),
+        expectations: json_safe(expectations),
+        calibration_version:
+          Map.get(decision, :calibration_version, market_calibration_version()),
+        selection_kind: :publication_rejected,
+        rejection_reason: reason_label(reason),
+        classification: :superseded
+      })
+
+    {:ok, episode}
+  end
+
+  defp observe_publication(result, operation, operator_id, generation_id) do
+    {outcome, reason} =
+      case result do
+        {:ok, _} -> {:published, nil}
+        {:error, reason} -> {:rejected, bounded_reason(reason)}
+      end
+
+    :telemetry.execute(
+      [:spacetraders, :fleet_allocation, :publication],
+      %{count: 1},
+      %{operation: operation, result: outcome, reason: reason}
+    )
+
+    Logger.info("Fleet Allocation publication",
+      operation: operation,
+      result: outcome,
+      reason: reason,
+      operator_id: operator_id,
+      fleet_generation_id: generation_id
+    )
+
+    result
+  end
+
+  @doc false
+  def bounded_reason(reason) when is_atom(reason), do: reason
+  def bounded_reason(_reason), do: :other
+
+  defp reason_label(reason), do: reason |> bounded_reason() |> Atom.to_string()
+
+  @doc """
+  Ids of the portfolio's Commitments whose recorded Intents leave their work
+  unresolved: an unfinished Intent, or a completed buy still inside the
+  bounded leg handoff. Such Commitments are retained work that no replan may
+  release.
+  """
+  def unresolved_commitment_ids(portfolio_id) when is_integer(portfolio_id) do
+    portfolio_id
+    |> List.wrap()
+    |> unresolved_intents_query()
+    |> select([intent], intent.fleet_commitment_id)
+    |> distinct(true)
+    |> Repo.all()
+    |> MapSet.new()
+  end
+
+  @doc """
+  Completed buy Intents of the portfolio's Commitments that are inside the
+  bounded leg handoff and have no later Intent: their selected sell leg has
+  not been requested yet. A buy whose effect is unconfirmed is not
+  `completed`, so it is never listed here.
+  """
+  def awaiting_sell_buys(portfolio_id) when is_integer(portfolio_id) do
+    Repo.all(
+      from intent in Intent,
+        as: :intent,
+        join: commitment in Commitment,
+        on: commitment.id == intent.fleet_commitment_id,
+        where:
+          commitment.fleet_commitment_portfolio_id == ^portfolio_id and
+            intent.caller == "commitment" and intent.type == "buy" and
+            intent.status == "completed" and intent.finished_at >= ^handoff_cutoff() and
+            not exists(
+              from(later in Intent,
+                where:
+                  later.fleet_commitment_id == parent_as(:intent).fleet_commitment_id and
+                    later.id > parent_as(:intent).id
+              )
+            ),
+        order_by: intent.id
+    )
+  end
+
+  defp handoff_cutoff, do: DateTime.add(DateTime.utc_now(:second), -@leg_handoff_seconds, :second)
 
   @doc "Returns the current Fleet Commitment Claim authorizing one Ship."
   def current_ship_claim(agent, ship_symbol, opts \\ [])
@@ -742,7 +898,17 @@ defmodule SpaceTraders.FleetAllocation do
             )
         }
 
-    query = if Keyword.get(opts, :lock, false), do: lock(query, "FOR SHARE"), else: query
+    query =
+      if Keyword.get(opts, :lock, false) do
+        lock_generations(
+          from(g in Generation, where: g.agent_id == ^agent_id and g.operator_id == ^operator_id),
+          :share
+        )
+
+        lock(query, "FOR SHARE")
+      else
+        query
+      end
 
     case Repo.one(query) do
       nil -> {:error, :no_current_ship_claim}
@@ -1123,7 +1289,7 @@ defmodule SpaceTraders.FleetAllocation do
           Repo.update!(
             Ecto.Changeset.change(episode,
               classification: :superseded,
-              actual_outcomes: realized_economics(episode_id),
+              actual_outcomes: json_safe(TradeProgress.for_episode(episode_id)),
               updated_at: now
             )
           )
@@ -1134,40 +1300,22 @@ defmodule SpaceTraders.FleetAllocation do
     end)
   end
 
+  # The one lock order, as publication does: Generation rows before any
+  # Portfolio or Commitment. A replan (:update) and a Ship's locked authority
+  # check (:share) take it here, so they cannot deadlock against each other.
+  defp lock_generations(query, :update),
+    do: Repo.all(from(g in query, order_by: g.id, lock: "FOR NO KEY UPDATE", select: g.id))
+
+  defp lock_generations(query, :share),
+    do: Repo.all(from(g in query, order_by: g.id, lock: "FOR SHARE", select: g.id))
+
   defp lock_generation_agent!(generation_id) do
     generation = Repo.get!(Generation, generation_id)
     SpaceTraders.CreditSpending.lock_agent(generation.agent_id)
   end
 
-  defp realized_economics(episode_id) do
-    totals =
-      from(intent in Intent,
-        join: commitment in Commitment,
-        on: commitment.id == intent.fleet_commitment_id,
-        join: portfolio in Portfolio,
-        on: portfolio.id == commitment.fleet_commitment_portfolio_id,
-        where:
-          portfolio.strategy_decision_episode_id == ^episode_id and intent.status == "completed" and
-            intent.type in ["buy", "sell"],
-        select: {intent.type, intent.last_action_result}
-      )
-      |> Repo.all()
-      |> Enum.reduce(%{purchase_cost: 0, sale_revenue: 0}, fn {type, result}, totals ->
-        amount = get_in(result || %{}, ["transaction", "total_price"])
-
-        if is_number(amount) do
-          key = if type == "buy", do: :purchase_cost, else: :sale_revenue
-          Map.update!(totals, key, &(&1 + amount))
-        else
-          totals
-        end
-      end)
-
-    Map.put(totals, :credit_change, totals.sale_revenue - totals.purchase_cost)
-  end
-
   defp realized_outcomes(episode_id) do
-    result = realized_economics(episode_id)
+    result = TradeProgress.for_episode(episode_id)
 
     resource_yields =
       Repo.all(
@@ -1195,28 +1343,29 @@ defmodule SpaceTraders.FleetAllocation do
   # round trip requests that leg straight after the buy, so the guard lasts
   # only @leg_handoff_seconds: a leg that never appears cannot hold the
   # Portfolio against replanning or revision activation indefinitely.
-  defp unresolved_commitment_intent?(portfolio_ids) do
-    handoff_cutoff = DateTime.add(DateTime.utc_now(:second), -@leg_handoff_seconds, :second)
+  defp unresolved_commitment_intent?(portfolio_ids),
+    do: portfolio_ids |> unresolved_intents_query() |> Repo.exists?()
 
-    Repo.exists?(
-      from(intent in Intent,
-        as: :intent,
-        join: commitment in Commitment,
-        on: commitment.id == intent.fleet_commitment_id,
-        where:
-          commitment.fleet_commitment_portfolio_id in ^portfolio_ids and
-            intent.caller == "commitment" and
-            (intent.status in ^Intent.unfinished_states() or
-               (intent.type == "buy" and intent.status == "completed" and
-                  intent.finished_at >= ^handoff_cutoff and
-                  not exists(
-                    from(later in Intent,
-                      where:
-                        later.fleet_commitment_id == parent_as(:intent).fleet_commitment_id and
-                          later.id > parent_as(:intent).id
-                    )
-                  )))
-      )
+  defp unresolved_intents_query(portfolio_ids) do
+    handoff_cutoff = handoff_cutoff()
+
+    from(intent in Intent,
+      as: :intent,
+      join: commitment in Commitment,
+      on: commitment.id == intent.fleet_commitment_id,
+      where:
+        commitment.fleet_commitment_portfolio_id in ^portfolio_ids and
+          intent.caller == "commitment" and
+          (intent.status in ^Intent.unfinished_states() or
+             (intent.type == "buy" and intent.status == "completed" and
+                intent.finished_at >= ^handoff_cutoff and
+                not exists(
+                  from(later in Intent,
+                    where:
+                      later.fleet_commitment_id == parent_as(:intent).fleet_commitment_id and
+                        later.id > parent_as(:intent).id
+                  )
+                )))
     )
   end
 
@@ -1472,11 +1621,28 @@ defmodule SpaceTraders.FleetAllocation do
   defp eligible_claims(contribution, claims) do
     claims
     |> Enum.filter(&claim_supports?(&1, contribution))
+    |> Enum.sort_by(&{role_cost(&1, contribution), claim_id(&1)})
     |> Enum.map(&claim_id/1)
-    |> Enum.sort()
   end
 
-  defp claim_supports?(%{roles: roles, capabilities: capabilities}, contribution)
+  # Cheapest capable Ship first: fuel capacity (a proxy for fuel use; a probe
+  # carries none), then capability the role does not need, so a probe
+  # takes scouting and the hold-bearing Ship stays free for a trade. The
+  # symbol only breaks exact ties, so input order and alphabet never decide.
+  defp role_cost(%{capabilities: capabilities}, contribution) do
+    needed =
+      Enum.find_value(contribution.required_capabilities, 0, fn
+        %{capability: :cargo_transport, minimum_capacity: minimum} -> minimum
+        _ -> nil
+      end)
+
+    {Map.get(capabilities, :fuel_capacity, 0),
+     max(Map.get(capabilities, :cargo_transport, 0) - needed, 0)}
+  end
+
+  defp role_cost(_claim, _contribution), do: {0, 0}
+
+  defp claim_supports?(%{roles: roles, capabilities: capabilities} = claim, contribution)
        when is_list(roles) and is_map(capabilities) do
     roles_satisfied? =
       Enum.all?(contribution.required_roles, fn requirement ->
@@ -1493,6 +1659,9 @@ defmodule SpaceTraders.FleetAllocation do
             MapSet.new(waypoints),
             MapSet.new(Map.get(capabilities, :market_access, []))
           )
+
+        %{capability: :fuel_reach, ships: ships} ->
+          claim_id(claim) in ships
 
         %{capability: :resource_ship, value: symbol} ->
           Map.get(capabilities, :resource_ship) == symbol

@@ -171,6 +171,16 @@ across a runtime restart and surfaces the result in Mission Control. Its clock,
 API stub, PostgreSQL mode, authenticated connection, and teardown are local to
 that diagnostic; it does not introduce a shared test lifecycle.
 
+The `Gate 2A partial-coverage handoff` describe (#675) runs the same seam
+against `test/support/runtime_fleet_game.ex`, a two-Ship (FRAME_FRIGATE hold 40,
+FRAME_PROBE no hold/tank) located, fuel-consuming game with route depth 60 and
+unobserved Marketplaces. Scenarios never publish, select or execute directly;
+the production runtime does, including buy and sell against the stub: trade before
+coverage completes, restart with Cargo in flight, source price move, unusable
+retained evidence (stale, untraceable, invalidated, wrong-Generation, future),
+Capacity Deferral, swapped event order, and bounded telemetry. Run one with
+`--only describe:"Gate 2A partial-coverage handoff"`.
+
 Run it only when that whole-runtime composition is the subject:
 
 ```sh

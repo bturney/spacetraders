@@ -7,62 +7,13 @@ defmodule SpaceTraders.FleetShadow do
   gameplay mutations.
   """
 
-  import Ecto.Query
-
   alias SpaceTraders.Agent.Agent, as: AgentRecord
   alias SpaceTraders.API.CapacityGovernor.Disposition
-  alias SpaceTraders.Evidence
-  alias SpaceTraders.Clock
-  alias SpaceTraders.Evidence.Observation
+  alias SpaceTraders.{CreditCalibration, Evidence, Intelligence}
   alias SpaceTraders.FleetAllocation
   alias SpaceTraders.FleetAllocation.StrategyDecisionEpisode
-  alias SpaceTraders.FleetIntelligence
   alias SpaceTraders.FleetPlanning
-  alias SpaceTraders.FleetStrategy.Revision
-  alias SpaceTraders.Repo
-
-  @doc "Builds a shadow comparison from persisted governed Market evidence."
-  def compare_market(
-        %AgentRecord{} = agent,
-        %Revision{} = revision,
-        system_symbol,
-        availability,
-        %Disposition{} = capacity,
-        opts \\ []
-      )
-      when is_binary(system_symbol) and is_map(availability) and is_list(opts) do
-    agent
-    |> market_snapshot(system_symbol, decision_time(opts))
-    |> compare(revision, availability, capacity, opts)
-  end
-
-  @doc """
-  Builds a shadow comparison for a not-yet-activated draft document.
-
-  The draft is evaluated with an explicit draft identity, so proposed
-  Commitments can never be mistaken for published work. Evaluation is
-  deterministic and in-memory: it publishes no Claims and dispatches no
-  gameplay.
-  """
-  def compare_draft_market(
-        %AgentRecord{} = agent,
-        document,
-        system_symbol,
-        availability,
-        %Disposition{} = capacity,
-        opts \\ []
-      )
-      when is_map(document) and is_binary(system_symbol) and is_map(availability) and
-             is_list(opts) do
-    agent
-    |> market_snapshot(system_symbol, decision_time(opts))
-    |> compare(
-      %Revision{id: {:draft, agent.id}, document: document},
-      availability,
-      capacity,
-      opts
-    )
-  end
+  alias SpaceTraders.FleetStrategy.{Revision, StandingAuthority}
 
   @doc "Builds a shadow comparison from one governed evidence and capacity snapshot."
   def compare(snapshot, revision, availability, capacity, opts \\ [])
@@ -75,7 +26,7 @@ defmodule SpaceTraders.FleetShadow do
         opts
       )
       when is_map(snapshot) and is_map(availability) and is_list(opts) do
-    with {:ok, planning} <- plan(revision, snapshot),
+    with {:ok, planning} <- plan_market(snapshot, revision, availability),
          {:ok, portfolio} <-
            FleetAllocation.select_portfolio(
              revision,
@@ -102,67 +53,92 @@ defmodule SpaceTraders.FleetShadow do
   def compare(_snapshot, _revision, _availability, _capacity, _opts),
     do: {:error, :invalid_shadow_input}
 
-  @doc "Re-evaluates only when Listings or API pressure have materially changed."
-  def replan(previous, snapshot, revision, availability, capacity, opts \\ [])
+  @doc """
+  The Fleet Planning Market input for one Agent System at one decision time:
+  the shared Operational Intelligence Market interpretation plus the active
+  credit calibration margin. Runtime planning, coverage and Strategy review
+  all plan from this input.
+  """
+  def market_input(%AgentRecord{} = agent, system_symbol, %DateTime{} = decision_time)
+      when is_binary(system_symbol) do
+    agent
+    |> Intelligence.market_interpretation(system_symbol, decision_time)
+    |> Map.put(:credit_margin_percent, CreditCalibration.active().margin_percent)
+  end
 
-  def replan(
-        previous,
-        snapshot,
-        %Revision{} = revision,
-        availability,
-        %Disposition{} = capacity,
-        opts
-      )
-      when is_map(previous) and is_map(snapshot) and is_map(availability) and is_list(opts) do
-    case replan_trigger(previous, snapshot, capacity) do
-      :unchanged ->
-        {:ok, Map.put(previous, :replan_trigger, :unchanged)}
+  @doc """
+  Pure Fleet Planning of Market trade Candidate Contributions for every
+  Strategic Objective of `revision`, sized to the trade-capable Claims in
+  `availability`. Selects, claims and publishes nothing.
+  """
+  def plan_market(market_input, %Revision{} = revision, availability)
+      when is_map(market_input) and is_map(availability) do
+    snapshot =
+      market_input
+      |> put_claimable_ships(availability)
+      |> put_credit_headroom(revision, availability)
 
-      trigger ->
-        with {:ok, comparison} <- compare(snapshot, revision, availability, capacity, opts) do
-          {:ok, Map.put(comparison, :replan_trigger, trigger)}
-        end
+    plan(revision, snapshot)
+  end
+
+  # Purchases are sized to the credits spending admission would allow: the
+  # observed balance above the Strategy credit floor (the calibrated margin is
+  # applied by sizing). Without both, sizing stays at Cargo and Market depth
+  # and spending admission still bounds the actual purchase.
+  defp put_credit_headroom(%{credit_headroom: _} = snapshot, _revision, _availability),
+    do: snapshot
+
+  defp put_credit_headroom(snapshot, revision, availability) do
+    credits = get_in(availability, [:reservations, :credits])
+
+    case StandingAuthority.credit_floor(revision) do
+      {:ok, floor} when is_integer(credits) ->
+        Map.put(snapshot, :credit_headroom, max(credits - floor, 0))
+
+      _ ->
+        snapshot
     end
   end
 
-  def replan(_previous, _snapshot, _revision, _availability, _capacity, _opts),
-    do: {:error, :invalid_shadow_input}
+  # Trade quantity is bounded by the holds of Ships the Fleet can actually
+  # claim for trading, taken from the same availability Allocation uses so
+  # planning and selection cannot disagree. Evidence the caller already
+  # supplied is kept.
+  defp put_claimable_ships(%{ships: _} = snapshot, _availability), do: snapshot
 
-  # Planning binds evidence at the application clock. A Capacity Disposition
-  # is advisory capacity meaning stamped by the governor's own clock; it never
-  # fixes decision time.
-  defp decision_time(opts), do: Keyword.get_lazy(opts, :as_of, &Clock.utc_now/0)
+  defp put_claimable_ships(snapshot, availability) do
+    ships =
+      availability
+      |> Map.get(:claims, [])
+      |> Enum.flat_map(fn
+        %{resource: symbol, roles: roles, capabilities: %{cargo_transport: capacity} = caps}
+        when is_list(roles) and is_integer(capacity) ->
+          if :market_trader in roles,
+            do: [trade_ship(symbol, capacity, caps)],
+            else: []
 
-  defp market_snapshot(agent, system_symbol, as_of) do
-    subject_prefix = "market:#{system_symbol}:"
-
-    markets =
-      Observation
-      |> where([observation], observation.agent_id == ^agent.id)
-      |> where([observation], like(observation.subject, ^"#{subject_prefix}%"))
-      |> where([observation], observation.observed_at <= ^as_of)
-      |> order_by([observation], desc: observation.observed_at, desc: observation.id)
-      |> Repo.all()
-      |> Enum.uniq_by(& &1.subject)
-      |> Enum.map(fn observation ->
-        %{
-          subject: observation.subject,
-          observed_at: observation.observed_at,
-          evidence_id: observation.id,
-          source: observation.operation_id,
-          trade_goods: observation.facts["trade_goods"]
-        }
+        _ ->
+          []
       end)
 
-    # The authoritative Market coverage target is every known Marketplace of
-    # the headquarters System, including never-observed ones the retained
-    # Listing query cannot see.
-    baseline = FleetIntelligence.known_marketplace_subjects(agent, system_symbol, as_of)
+    # No trade-capable Claim leaves sizing at Market depth; Allocation then
+    # rejects the Candidate for lack of a capable Claim.
+    if ships == [], do: snapshot, else: Map.put(snapshot, :ships, ships)
+  end
 
-    as_of
-    |> FleetPlanning.market_snapshot(system_symbol, agent.id, markets)
-    |> Map.merge(FleetPlanning.baseline_coverage(baseline))
-    |> Map.put(:credit_margin_percent, SpaceTraders.CreditCalibration.active().margin_percent)
+  # Fuel and position, when the Claim evidences them, let planning offer
+  # the trade only to a Ship that can reach it.
+  defp trade_ship(symbol, capacity, capabilities) do
+    position = Map.get(capabilities, :position) || %{}
+
+    %{
+      symbol: symbol,
+      cargo: %{capacity: capacity, units: 0},
+      fuel: Map.get(capabilities, :fuel),
+      waypoint: Map.get(position, :waypoint),
+      flight_mode: Map.get(position, :flight_mode),
+      position: Map.take(position, [:x, :y])
+    }
   end
 
   defp plan(revision, snapshot) do
@@ -212,13 +188,5 @@ defmodule SpaceTraders.FleetShadow do
     |> Enum.map(&Map.take(&1, [:subject, :trade_goods]))
     |> Enum.sort_by(& &1.subject)
     |> Evidence.fingerprint()
-  end
-
-  defp replan_trigger(previous, snapshot, capacity) do
-    cond do
-      previous[:listings_fingerprint] != listings_fingerprint(snapshot) -> :listings_changed
-      previous[:capacity_status] != capacity.status -> :capacity_disposition_changed
-      true -> :unchanged
-    end
   end
 end

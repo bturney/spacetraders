@@ -6,7 +6,7 @@ defmodule SpaceTraders.MissionControlTest do
   import SpaceTraders.ShipBody
 
   alias SpaceTraders.Agent.Scope
-  alias SpaceTraders.API.Model.{Market, Waypoint}
+  alias SpaceTraders.API.Model.Waypoint
   alias SpaceTraders.FleetAllocation.Commitment
   alias SpaceTraders.FleetAllocation.StrategyDecisionEpisode
   alias SpaceTraders.FleetStrategy
@@ -193,7 +193,7 @@ defmodule SpaceTraders.MissionControlTest do
                expected: nil,
                realized: %{
                  completed_round_trips: 0,
-                 realized_net_credit_change: nil,
+                 realized_trade_margin: nil,
                  realized_sale_value: nil
                },
                contribution: %{commitment_count: 0, expected_value: 0},
@@ -211,7 +211,7 @@ defmodule SpaceTraders.MissionControlTest do
       assert report.contribution.commitment_count == 1
       assert report.contribution.expected_value == 100
       assert report.contribution.claims == ["SHIP-1"]
-      assert report.realized.realized_net_credit_change == nil
+      assert report.realized.realized_trade_margin == nil
       assert report.attention == []
       assert report.limitation == nil
     end
@@ -258,7 +258,9 @@ defmodule SpaceTraders.MissionControlTest do
         fleet_commitment_id: commitment.id,
         fleet_commitment_portfolio_id: commitment.fleet_commitment_portfolio_id,
         fleet_commitment_portfolio_version: 1,
-        last_action_result: %{"transaction" => %{"total_price" => 50}}
+        last_action_result: %{
+          "transaction" => %{"total_price" => 50, "units" => 10, "trade_symbol" => "IRON_ORE"}
+        }
       })
 
       Repo.insert!(%SpaceTraders.Fleet.Intent{
@@ -270,13 +272,16 @@ defmodule SpaceTraders.MissionControlTest do
         fleet_commitment_id: commitment.id,
         fleet_commitment_portfolio_id: commitment.fleet_commitment_portfolio_id,
         fleet_commitment_portfolio_version: 1,
-        last_action_result: %{"transaction" => %{"total_price" => 150}}
+        last_action_result: %{
+          "transaction" => %{"total_price" => 150, "units" => 10, "trade_symbol" => "IRON_ORE"}
+        }
       })
 
       report = MissionControl.market_execution(scope)
       assert report.realized.completed_round_trips == 1
       assert report.realized.realized_sale_value == 150
-      assert report.realized.realized_net_credit_change == 100
+      assert report.realized.realized_trade_margin == 100
+      assert Enum.any?(report.realized.unknown, &(&1.item == "net_earnings"))
     end
   end
 
@@ -489,8 +494,6 @@ defmodule SpaceTraders.MissionControlTest do
                )
 
       observe_market_pair(agent)
-      governed_market_observation(agent, "X1", "X1-A1", 10, 9)
-      governed_market_observation(agent, "X1", "X1-A2", 25, 20)
 
       availability = %{
         agent.id => %{
@@ -646,10 +649,13 @@ defmodule SpaceTraders.MissionControlTest do
 
       refute Enum.any?(planning.limitations, &(&1.reason == :no_viable_market_routes))
 
-      assert Enum.any?(planning.limitations, fn limitation ->
-               limitation.reason == :insufficient_market_evidence and
-                 limitation.subject == "market:X1:X1-A3"
-             end)
+      # The never-observed Marketplace stays an explicit gap of the shared
+      # interpretation the projection planned from.
+      assert %{reason: :never_observed} =
+               agent
+               |> Intelligence.market_interpretation("X1", DateTime.utc_now())
+               |> Map.fetch!(:coverage_gaps)
+               |> Enum.find(&(&1.subject == "market:X1:X1-A3"))
     end
 
     test "projects incomplete coverage as an explicit limitation instead of an invalid negative conclusion" do
@@ -672,6 +678,138 @@ defmodule SpaceTraders.MissionControlTest do
                reason: :incomplete_market_coverage,
                subjects: ["market:X1:X1-A3"]
              } = Enum.find(planning.limitations, &(&1.reason == :incomplete_market_coverage))
+    end
+  end
+
+  describe "captured Market decision" do
+    setup do
+      {scope, agent} = credit_growth_fixture()
+      active = FleetStrategy.get(scope).active_revision.document
+
+      assert {:ok, _draft} = FleetStrategy.save_draft(scope, active, 2)
+      observe_market_pair(agent)
+
+      availability = %{
+        agent.id => %{
+          as_of: DateTime.utc_now(),
+          claims: [
+            %{
+              resource: "SHIP-1",
+              roles: [:market_trader],
+              capabilities: %{cargo_transport: 40, market_access: ["X1-A1", "X1-A2"]}
+            }
+          ],
+          reservations: %{credits: 100_000}
+        }
+      }
+
+      %{scope: scope, agent: agent, availability: availability}
+    end
+
+    test "active, draft and planning evaluate one captured input after later evidence", ctx do
+      %{scope: scope, agent: agent, availability: availability} = ctx
+
+      capture = MissionControl.capture_market_decision(scope, availability: availability)
+
+      review =
+        MissionControl.strategy_review(scope, FleetStrategy.get(scope), market_decision: capture)
+
+      planning = MissionControl.market_planning(scope, capture)
+
+      # A newer observation arrives after capture; the captured evaluation
+      # must not see it.
+      observe_market(agent, "X1-A1", 90, 89)
+
+      later_review =
+        MissionControl.strategy_review(scope, FleetStrategy.get(scope), market_decision: capture)
+
+      assert later_review.draft_commitments == review.draft_commitments
+      assert later_review.draft_consequences == review.draft_consequences
+      assert MissionControl.market_planning(scope, capture) == planning
+
+      # An unchanged draft equals the active revision, so both sides of the
+      # comparison interpret the same facts identically.
+      assert [%{active: active_side, draft: draft_side}] = review.draft_commitments
+      # Candidate identities embed the (draft vs active) revision identity.
+      strip =
+        &update_in(&1.commitments, fn cs ->
+          Enum.map(cs, fn c -> Map.delete(c, :candidate_id) end)
+        end)
+
+      assert strip.(active_side) == strip.(draft_side)
+      assert active_side.expectations.commitment_count == 1
+    end
+
+    test "keeps original observation time instead of the review clock", %{scope: scope} = ctx do
+      capture = MissionControl.capture_market_decision(scope, availability: ctx.availability)
+
+      assert [%{market_input: input}] = capture.agents
+      assert input.as_of == capture.as_of
+      assert [_ | _] = input.markets
+
+      for market <- input.markets, market.state == :current do
+        assert DateTime.compare(market.observed_at, capture.as_of) == :lt
+      end
+    end
+
+    test "review captures and plans without gameplay requests or published work", ctx do
+      %{scope: scope, availability: availability} = ctx
+      test_pid = self()
+      Req.Test.stub(SpaceTraders.API, fn conn -> send(test_pid, :gameplay_request) && conn end)
+
+      counts = fn ->
+        Enum.map(
+          [
+            SpaceTraders.Evidence.ObservationDemand,
+            SpaceTraders.FleetAllocation.Commitment,
+            SpaceTraders.FleetAllocation.Portfolio,
+            SpaceTraders.FleetAllocation.StrategyDecisionEpisode,
+            SpaceTraders.ShipReservation,
+            SpaceTraders.Evidence.Observation
+          ],
+          &Repo.aggregate(&1, :count)
+        )
+      end
+
+      before = counts.()
+
+      capture = MissionControl.capture_market_decision(scope, availability: availability)
+
+      _ =
+        MissionControl.strategy_review(scope, FleetStrategy.get(scope), market_decision: capture)
+
+      _ = MissionControl.market_planning(scope, capture)
+
+      assert counts.() == before
+      refute_received :gameplay_request
+    end
+
+    test "a captured decision is stale after a changed observation or Fleet Generation", ctx do
+      %{scope: scope, agent: agent, availability: availability} = ctx
+
+      capture = MissionControl.capture_market_decision(scope, availability: availability)
+      assert MissionControl.market_decision_current?(scope, capture)
+
+      observe_market(agent, "X1-A1", 90, 89)
+      refute MissionControl.market_decision_current?(scope, capture)
+
+      recaptured = MissionControl.capture_market_decision(scope, availability: availability)
+      assert MissionControl.market_decision_current?(scope, recaptured)
+
+      revision = FleetStrategy.get(scope).active_revision
+
+      Repo.insert!(%SpaceTraders.FleetGeneration.Generation{
+        operator_id: scope.operator.id,
+        agent_id: agent.id,
+        fleet_strategy_revision_id: revision.id,
+        number: 1,
+        symbol: agent.symbol,
+        faction: agent.faction,
+        replacement_symbols: %{},
+        objective_progress: %{}
+      })
+
+      refute MissionControl.market_decision_current?(scope, recaptured)
     end
   end
 
@@ -725,30 +863,7 @@ defmodule SpaceTraders.MissionControlTest do
   end
 
   defp observe_market(agent, waypoint, purchase_price, sell_price) do
-    market =
-      Market.from_json(%{
-        "symbol" => waypoint,
-        "exports" => [%{"symbol" => "IRON_ORE"}],
-        "imports" => [%{"symbol" => "IRON_ORE"}],
-        "exchange" => [],
-        "tradeGoods" => [
-          %{
-            "symbol" => "IRON_ORE",
-            "type" => "EXPORT",
-            "tradeVolume" => 20,
-            "supply" => "MODERATE",
-            "activity" => "STATIC",
-            "purchasePrice" => purchase_price,
-            "sellPrice" => sell_price
-          }
-        ]
-      })
-
-    assert {:ok, _} =
-             Intelligence.observe_market(agent, "X1", market,
-               source: "get_market",
-               observing_ship_symbol: "#{agent.symbol}-1"
-             )
+    governed_market_observation(agent, "X1", waypoint, purchase_price, sell_price)
   end
 
   defp execution_fixture do

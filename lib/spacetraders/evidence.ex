@@ -413,15 +413,27 @@ defmodule SpaceTraders.Evidence do
     if bind? do
       # Coalesced recovery callers share the acquisition's retained source, not
       # separately timestamped copies of one response. Keep result shapes apart.
-      ReadCoordinator.read({key, :binding}, fn ->
+      {key, :binding}
+      |> ReadCoordinator.read(fn ->
         read.(credential_ref, request_opts)
         |> retain_binding(agent, subject, operation_id)
       end)
+      |> settle_bound_read(persisted_demand)
     else
       result = ReadCoordinator.read(key, fn -> read.(credential_ref, request_opts) end)
       settle_governed_read(result, persisted_demand, agent, subject, operation_id)
     end
   end
+
+  # A failed bound read leaves no open demand behind, like an unbound one.
+  defp settle_bound_read({:ok, %Binding{}} = result, _demand), do: result
+
+  defp settle_bound_read(result, %ObservationDemand{} = demand) do
+    _ = withdraw_demand(demand)
+    result
+  end
+
+  defp settle_bound_read(result, nil), do: result
 
   defp settle_governed_read(
          {:ok, value} = result,

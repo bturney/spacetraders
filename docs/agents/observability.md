@@ -63,6 +63,21 @@ labels or Loki stream labels. Prometheus metrics keep bounded dimensions such
 as endpoint, outcome, lane, owner, activity kind, Intent type, and Intent
 state.
 
+## Fleet Allocation pilot metrics
+
+Market trade vs coverage pilot (#671); bounded labels only, IDs in logs:
+
+- G1 `spacetraders_fleet_allocation_publication_total{operation,result,reason}`:
+  every publish/replan/unwind outcome; log `Fleet Allocation publication`.
+- G2 `spacetraders_fleet_allocation_market_domain_decisions_total{result,decisive_reason}`
+  plus `..._trade_candidates_total`, `..._coverage_candidates_total`,
+  `..._claimable_ships_total`, `..._selected_total` sums; log
+  `Fleet Allocation Market domain decision` (warning when rejected/error).
+- Rejected publication: durable episode `selection_kind = publication_rejected`,
+  `rejection_reason` set, would-be Commitments in `alternatives`.
+- G3 rejected Ship-role alternatives: episode `alternatives` entries with
+  `kind = ship_role_alternative`.
+
 ## Family routing
 
 | Originating question | Dashboard family |

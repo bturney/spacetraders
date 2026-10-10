@@ -12,10 +12,22 @@ defmodule SpaceTraders.FleetPlanning do
   alias SpaceTraders.FleetContracts
   alias SpaceTraders.CreditCalibration.Version
   alias SpaceTraders.CreditSpending
+  alias SpaceTraders.Fleet.FuelReach
   alias SpaceTraders.FleetStrategy.Revision
 
   @market_evidence_freshness_seconds 300
   @observation_demand_deadline_seconds 60
+  # Operational Intelligence Market interpretation states that can never
+  # support a trade, each kept as its own planning limitation.
+  @unsupported_market_states %{
+    stale: :stale_market_evidence,
+    invalidated: :invalidated_market_evidence,
+    untraceable: :untraceable_market_evidence,
+    wrong_generation: :wrong_generation_market_evidence,
+    malformed: :malformed_market_evidence,
+    unavailable: :unavailable_market_evidence,
+    future: :inconsistent_market_evidence
+  }
   @refinery_modules ~w(MODULE_MINERAL_PROCESSOR_I MODULE_MICRO_REFINERY_I MODULE_ORE_REFINERY_I)
 
   @doc "Whether the Ship's observed modules can refine ore for a known material outcome."
@@ -58,43 +70,24 @@ defmodule SpaceTraders.FleetPlanning do
     @type t :: %__MODULE__{}
   end
 
-  @doc "Builds the standard Market evidence snapshot used by Fleet Planning."
-  def market_snapshot(%DateTime{} = as_of, system_symbol, agent_id, markets)
-      when is_binary(system_symbol) and is_list(markets) do
-    %{
-      as_of: as_of,
-      system_symbol: system_symbol,
-      agent_id: agent_id,
-      freshness_seconds: @market_evidence_freshness_seconds,
-      demand_deadline_seconds: @observation_demand_deadline_seconds,
-      markets: markets
-    }
-  end
-
-  @doc """
-  Baseline Market coverage input for one planning snapshot.
-
-  `baseline_subjects` is the authoritative Market coverage target: every
-  currently known Marketplace of the Fleet Generation's headquarters System.
-  A subject in `unreachable_subjects` has no admissible acquisition path
-  under current capability evidence; it stays unresolved coverage and can
-  never support a negative System-wide Market conclusion. Without coverage
-  input a snapshot targets its own Market subjects, which keeps legacy
-  callers' conclusions unchanged.
-  """
-  def baseline_coverage(baseline_subjects, unreachable_subjects \\ [])
-      when is_list(baseline_subjects) and is_list(unreachable_subjects) do
-    %{baseline_subjects: baseline_subjects, unreachable_subjects: unreachable_subjects}
-  end
-
   @doc """
   Proposes Market Candidate Contributions for one Strategic Objective.
 
   The snapshot fixes the decision time with `:as_of` and supplies
-  `:freshness_seconds` plus a list of Markets. Each Market has an evidence
-  `:subject`, `:observed_at`, and `:trade_goods`. Optional `:agent_id` and
+  `:freshness_seconds` plus a list of Markets. Runtime and review callers
+  pass `Intelligence.market_interpretation/3`. Each Market has an evidence
+  `:subject`, `:observed_at`, `:evidence_id`, `:source`, `:trade_goods` and
+  an optional interpretation `:state`; only a stateless or `:current`
+  Market can support a trade. Optional `:agent_id` and
   `:demand_deadline_seconds` values are copied into proposed Observation
   Demands. The function performs no persistence or gameplay calls.
+
+  `:baseline_subjects` is the authoritative Market coverage target: every
+  known Marketplace of the headquarters System. A subject in
+  `:unreachable_subjects` has no admissible acquisition path; it stays
+  unresolved coverage and can never support a negative System-wide Market
+  conclusion. Without coverage input a snapshot targets its own Market
+  subjects.
   """
   def plan_market(%Revision{} = revision, objective_index, snapshot)
       when is_integer(objective_index) and objective_index >= 0 and is_map(snapshot) do
@@ -2247,6 +2240,7 @@ defmodule SpaceTraders.FleetPlanning do
 
     if is_integer(demand_deadline_seconds) and demand_deadline_seconds >= 0 and
          is_integer(credit_margin_percent) and credit_margin_percent >= Version.hard_lower_bound() and
+         valid_headroom?(Map.get(snapshot, :credit_headroom)) and
          is_map(observation_costs) and
          Enum.all?(observation_costs, fn {subject, cost} ->
            is_binary(subject) and is_map(cost) and
@@ -2267,6 +2261,10 @@ defmodule SpaceTraders.FleetPlanning do
            demand_deadline_seconds: demand_deadline_seconds,
            observation_costs: observation_costs,
            credit_margin_percent: credit_margin_percent,
+           claimable_ships: claimable_ships(Map.get(snapshot, :ships)),
+           waypoint_coordinates: waypoint_coordinates(Map.get(snapshot, :waypoint_coordinates)),
+           fuel_stops: List.wrap(Map.get(snapshot, :fuel_stops)),
+           credit_headroom: Map.get(snapshot, :credit_headroom),
            agent_id: Map.get(snapshot, :agent_id),
            coverage_authoritative: Map.has_key?(snapshot, :baseline_subjects),
            baseline_subjects: baseline_subjects,
@@ -2280,6 +2278,104 @@ defmodule SpaceTraders.FleetPlanning do
   end
 
   defp normalize_snapshot(_snapshot), do: {:error, :invalid_market_planning_input}
+
+  defp valid_headroom?(nil), do: true
+  defp valid_headroom?(credits), do: is_integer(credits) and credits >= 0
+
+  # Claimable Ships with their free Cargo and, when evidenced, fuel and
+  # position; `nil` when the snapshot carries no Ship evidence (legacy
+  # callers keep Market-depth sizing and no fuel check).
+  defp claimable_ships(ships) when is_list(ships) do
+    ships
+    |> Enum.map(fn ship ->
+      %{
+        symbol: Map.get(ship, :symbol),
+        free_cargo: free_cargo(ship),
+        fuel: Map.get(ship, :fuel),
+        waypoint: Map.get(ship, :waypoint),
+        position: Map.get(ship, :position),
+        flight_mode: Map.get(ship, :flight_mode)
+      }
+    end)
+    |> Enum.sort_by(&to_string(&1.symbol))
+  end
+
+  defp claimable_ships(_ships), do: nil
+
+  defp free_cargo(%{cargo: %{capacity: capacity, units: units}})
+       when is_integer(capacity) and is_integer(units),
+       do: max(capacity - units, 0)
+
+  defp free_cargo(_ship), do: 0
+
+  defp waypoint_coordinates(coordinates) when is_map(coordinates), do: coordinates
+  defp waypoint_coordinates(_coordinates), do: %{}
+
+  # Units a Ship can actually carry and the Agent can actually buy: Market
+  # depth, the largest free hold among the Ships that can reach the route,
+  # then credit headroom at the calibrated margin.
+  defp tradable_units(source_good, destination_good, snapshot, reaching) do
+    depth = min(source_good.trade_volume, destination_good.trade_volume)
+
+    held =
+      case reaching do
+        nil -> depth
+        ships -> min(depth, ships |> Enum.map(& &1.free_cargo) |> Enum.max(fn -> 0 end))
+      end
+
+    case snapshot.credit_headroom do
+      nil ->
+        held
+
+      headroom ->
+        case CreditSpending.affordable_units(
+               headroom,
+               source_good.purchase_price,
+               snapshot.credit_margin_percent
+             ) do
+          :infinity -> held
+          affordable -> min(held, affordable)
+        end
+    end
+  end
+
+  # The claimable Ships that can fly from where they are to the source, then
+  # on to the destination, the way Ship Execution flies (`FuelReach`), with
+  # the fuel stops Execution searches (`World.fuel_stops/3`). Proposing a
+  # trade Execution refuses would only fail and re-plan.
+  defp reaching_ships(nil, _source, _destination, _snapshot), do: nil
+
+  defp reaching_ships(ships, source, destination, snapshot) do
+    Enum.filter(ships, &reaches?(&1, source, destination, snapshot))
+  end
+
+  defp reaches?(
+         %{fuel: %{current: current, capacity: capacity}, waypoint: waypoint} = ship,
+         source,
+         destination,
+         snapshot
+       )
+       when is_integer(current) and is_integer(capacity) and is_binary(waypoint) do
+    coordinates =
+      case ship.position do
+        %{x: x, y: y} when is_integer(x) and is_integer(y) ->
+          Map.put(snapshot.waypoint_coordinates, waypoint, %{x: x, y: y})
+
+        _ ->
+          snapshot.waypoint_coordinates
+      end
+
+    reach = FuelReach.new(capacity, ship.flight_mode, coordinates, snapshot.fuel_stops)
+
+    case FuelReach.arrival_fuel(reach, waypoint, current, source) do
+      :unreachable -> false
+      :unknown -> true
+      fuel -> FuelReach.arrival_fuel(reach, source, fuel, destination) != :unreachable
+    end
+  end
+
+  # No fuel evidence: fuel cannot rule the Ship out.
+  defp reaches?(_ship, _source, _destination, _snapshot), do: true
 
   # Without an explicit authoritative baseline the snapshot's own Market
   # subjects are the target set, so legacy callers keep their conclusions
@@ -2415,8 +2511,8 @@ defmodule SpaceTraders.FleetPlanning do
       age < 0 ->
         {:error, :inconsistent_market_evidence}
 
-      value(market, :state) == :stale ->
-        {:error, :stale_market_evidence}
+      unsupported = @unsupported_market_states[value(market, :state)] ->
+        {:error, unsupported}
 
       age > snapshot.freshness_seconds ->
         {:error, :stale_market_evidence}
@@ -2440,6 +2536,10 @@ defmodule SpaceTraders.FleetPlanning do
          }}
     end
   end
+
+  defp usable_market(%{state: state}, _snapshot)
+       when is_map_key(@unsupported_market_states, state),
+       do: {:error, Map.fetch!(@unsupported_market_states, state)}
 
   defp usable_market(_market, _snapshot), do: {:error, :insufficient_market_evidence}
 
@@ -2467,10 +2567,21 @@ defmodule SpaceTraders.FleetPlanning do
       for source <- markets,
           destination <- markets,
           source.subject != destination.subject,
+          # A generator, not a filter: `nil` (no Ship evidence) is a value.
+          reaching <- [
+            reaching_ships(
+              snapshot.claimable_ships,
+              source.waypoint,
+              destination.waypoint,
+              snapshot
+            )
+          ],
           source_good <- source.trade_goods,
           destination_good <- destination.trade_goods,
           source_good.symbol == destination_good.symbol,
-          destination_good.sell_price > source_good.purchase_price do
+          destination_good.sell_price > source_good.purchase_price,
+          units = tradable_units(source_good, destination_good, snapshot, reaching),
+          units > 0 do
         contribution(
           revision,
           objective_index,
@@ -2479,7 +2590,9 @@ defmodule SpaceTraders.FleetPlanning do
           source_good,
           destination,
           destination_good,
-          snapshot
+          snapshot,
+          units,
+          reaching
         )
       end
 
@@ -2505,9 +2618,10 @@ defmodule SpaceTraders.FleetPlanning do
          source_good,
          destination,
          destination_good,
-         snapshot
+         snapshot,
+         units,
+         reaching
        ) do
-    units = min(source_good.trade_volume, destination_good.trade_volume)
     spread = destination_good.sell_price - source_good.purchase_price
 
     expected_outcomes = %{
@@ -2560,13 +2674,14 @@ defmodule SpaceTraders.FleetPlanning do
         unaccounted_costs: [:fuel, :travel_time]
       },
       required_roles: [%{role: :market_trader, count: 1}],
-      required_capabilities: [
-        %{capability: :cargo_transport, minimum_capacity: units},
-        %{
-          capability: :market_access,
-          waypoints: Enum.sort([source.waypoint, destination.waypoint])
-        }
-      ],
+      required_capabilities:
+        [
+          %{capability: :cargo_transport, minimum_capacity: units},
+          %{
+            capability: :market_access,
+            waypoints: Enum.sort([source.waypoint, destination.waypoint])
+          }
+        ] ++ fuel_reach(reaching),
       required_resources: required_resources,
       dependencies: dependencies,
       validity: %{
@@ -2581,6 +2696,10 @@ defmodule SpaceTraders.FleetPlanning do
       alternatives: []
     }
   end
+
+  # Allocation may claim only a Ship Planning found able to reach the route.
+  defp fuel_reach(nil), do: []
+  defp fuel_reach(ships), do: [%{capability: :fuel_reach, ships: Enum.map(ships, & &1.symbol)}]
 
   defp dependency(market, snapshot) do
     %{
@@ -2713,8 +2832,10 @@ defmodule SpaceTraders.FleetPlanning do
 
   defp value(map, key), do: Map.get(map, key, Map.get(map, Atom.to_string(key)))
 
+  # Another Fleet Generation's evidence cannot even value an observation.
   defp valid_provenance?(market) do
-    is_binary(value(market, :evidence_id)) and value(market, :evidence_id) != "" and
+    value(market, :state) != :wrong_generation and
+      is_binary(value(market, :evidence_id)) and value(market, :evidence_id) != "" and
       is_binary(value(market, :source)) and value(market, :source) != ""
   end
 

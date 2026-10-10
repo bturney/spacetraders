@@ -394,7 +394,7 @@ defmodule SpaceTradersWeb.StrategyLive do
         {:noreply,
          socket
          |> put_flash(:error, "Emergency Stop engaged. New gameplay mutations are suppressed.")
-         |> assign(:projection, review_projection(projection, socket))}
+         |> assign_review(projection)}
     end
   end
 
@@ -410,13 +410,13 @@ defmodule SpaceTradersWeb.StrategyLive do
            :info,
            "Authoritative state refreshed. Fresh planning must select an admissible plan before Emergency Stop clears."
          )
-         |> assign(:projection, review_projection(projection, socket))}
+         |> assign_review(projection)}
 
       {:error, :stale_emergency_stop} ->
         {:noreply,
          socket
          |> put_flash(:error, "Emergency Stop changed elsewhere. Review its current state.")
-         |> assign(:projection, review_projection(nil, socket))}
+         |> assign_review()}
 
       {:error, :authoritative_refresh_required} ->
         {:noreply,
@@ -491,46 +491,63 @@ defmodule SpaceTradersWeb.StrategyLive do
     if socket.assigns.draft_stale? do
       {:noreply, put_flash(socket, :error, "Review the latest durable draft before activation.")}
     else
-      case FleetStrategy.activate(
-             socket.assigns.current_scope,
-             socket.assigns.projection.draft_version
-           ) do
-        {:ok, revision} ->
-          projection = %{
-            socket.assigns.projection
-            | draft: nil,
-              draft_source: nil,
-              draft_version: socket.assigns.projection.draft_version + 1,
-              active_revision: revision
-          }
-
-          {:noreply,
-           socket
-           |> put_flash(:info, "Fleet Strategy Revision #{revision.number} activated.")
-           |> assign_projection(nil, projection)}
-
-        {:error, :invalid_document} ->
-          {:noreply,
-           put_flash(socket, :error, "Add at least one Strategic Objective before activation.")}
-
-        {:error, {:unenforceable_hard_constraint, constraint, explanation}} ->
-          {:noreply,
-           put_flash(
-             socket,
-             :error,
-             "Hard Constraint '#{constraint}' cannot be enforced. #{explanation}"
-           )}
-
-        {:error, :draft_not_found} ->
-          {:noreply, put_flash(socket, :error, "There is no draft to activate.")}
-
-        {:error, :stale_draft} ->
-          {:noreply,
-           mark_draft_stale(
-             socket,
-             "The draft changed. Review the latest version before activation."
-           )}
+      if MissionControl.market_decision_current?(
+           socket.assigns.current_scope,
+           socket.assigns.market_decision
+         ) do
+        activate_draft(socket)
+      else
+        {:noreply,
+         socket
+         |> put_flash(
+           :error,
+           "Market evidence changed since this comparison. Review the refreshed comparison before activation."
+         )
+         |> assign_review()}
       end
+    end
+  end
+
+  defp activate_draft(socket) do
+    case FleetStrategy.activate(
+           socket.assigns.current_scope,
+           socket.assigns.projection.draft_version
+         ) do
+      {:ok, revision} ->
+        projection = %{
+          socket.assigns.projection
+          | draft: nil,
+            draft_source: nil,
+            draft_version: socket.assigns.projection.draft_version + 1,
+            active_revision: revision
+        }
+
+        {:noreply,
+         socket
+         |> put_flash(:info, "Fleet Strategy Revision #{revision.number} activated.")
+         |> assign_projection(nil, projection)}
+
+      {:error, :invalid_document} ->
+        {:noreply,
+         put_flash(socket, :error, "Add at least one Strategic Objective before activation.")}
+
+      {:error, {:unenforceable_hard_constraint, constraint, explanation}} ->
+        {:noreply,
+         put_flash(
+           socket,
+           :error,
+           "Hard Constraint '#{constraint}' cannot be enforced. #{explanation}"
+         )}
+
+      {:error, :draft_not_found} ->
+        {:noreply, put_flash(socket, :error, "There is no draft to activate.")}
+
+      {:error, :stale_draft} ->
+        {:noreply,
+         mark_draft_stale(
+           socket,
+           "The draft changed. Review the latest version before activation."
+         )}
     end
   end
 
@@ -538,22 +555,16 @@ defmodule SpaceTradersWeb.StrategyLive do
   def handle_info({:fleet_strategy_updated, operator_id}, socket) do
     if socket.assigns.current_scope.operator.id == operator_id do
       socket = maybe_load_availability(socket)
-      projection = review_projection(nil, socket)
+      previous = socket.assigns.projection
+      reviewed = assign_review(socket)
+      projection = reviewed.assigns.projection
 
       cond do
-        projection.draft_version != socket.assigns.projection.draft_version ->
-          {:noreply,
-           socket
-           |> assign(:projection, projection)
-           |> assign_market_planning()
-           |> assign(:draft_stale?, true)}
+        projection.draft_version != previous.draft_version ->
+          {:noreply, assign(reviewed, :draft_stale?, true)}
 
-        projection.emergency_stop_version !=
-            socket.assigns.projection.emergency_stop_version ->
-          {:noreply,
-           socket
-           |> assign(:projection, projection)
-           |> assign_market_planning()}
+        projection.emergency_stop_version != previous.emergency_stop_version ->
+          {:noreply, reviewed}
 
         true ->
           {:noreply, socket}
@@ -846,25 +857,32 @@ defmodule SpaceTradersWeb.StrategyLive do
 
   defp assign_projection(socket, form_drafts \\ nil, projection \\ nil) do
     socket = maybe_load_availability(socket)
-
-    projection =
-      review_projection(projection || FleetStrategy.get(socket.assigns.current_scope), socket)
-
-    form_drafts = form_drafts || form_values(projection.draft)
+    socket = assign_review(socket, projection)
+    form_drafts = form_drafts || form_values(socket.assigns.projection.draft)
 
     socket
-    |> assign(:projection, projection)
-    |> assign_market_planning()
     |> assign(:draft_stale?, false)
     |> assign(:form_drafts, form_drafts)
     |> assign(:form, to_form(form_drafts, as: "strategy"))
   end
 
-  defp review_projection(projection, socket) do
+  # One captured Market decision per review: the displayed projection and
+  # market planning interpret the same fixed local inputs.
+  defp assign_review(socket, projection \\ nil) do
     scope = socket.assigns.current_scope
-    projection = projection || FleetStrategy.get(scope)
 
-    MissionControl.strategy_review(scope, projection, availability: socket.assigns.availability)
+    capture =
+      MissionControl.capture_market_decision(scope, availability: socket.assigns.availability)
+
+    projection =
+      MissionControl.strategy_review(scope, projection || FleetStrategy.get(scope),
+        market_decision: capture
+      )
+
+    socket
+    |> assign(:market_decision, capture)
+    |> assign(:projection, projection)
+    |> assign(:market_planning, MissionControl.market_planning(scope, capture))
   end
 
   defp maybe_load_availability(socket) do
@@ -879,15 +897,10 @@ defmodule SpaceTradersWeb.StrategyLive do
     end
   end
 
-  defp assign_market_planning(socket) do
-    assign(socket, :market_planning, MissionControl.market_planning(socket.assigns.current_scope))
-  end
-
   defp mark_draft_stale(socket, message) do
     socket
     |> put_flash(:error, message)
-    |> assign(:projection, review_projection(nil, socket))
-    |> assign_market_planning()
+    |> assign_review()
     |> assign(:draft_stale?, true)
   end
 

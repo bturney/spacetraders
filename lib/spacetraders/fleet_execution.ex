@@ -1,17 +1,21 @@
 defmodule SpaceTraders.FleetExecution do
   @moduledoc """
-  Activates one eligible Market Fleet Commitment into governed Ship execution.
+  Runtime activation of Fleet Allocation decisions into governed Ship
+  execution.
 
-  Only a shadow-validated eligible Market commitment may activate Ship
-  execution. Eligibility requires that the commitment's Credit Reservations
-  cover calibrated Market purchase exposure without
-  crossing the Hard Constraint credit floor. Activation publishes the selected
-  portfolio atomically (Claim + Reservations + Strategy Decision Episode), then
-  dispatches the authoritative buy, travel, sell round trip on the claimed Ship
-  through governed operations.
+  `reconcile_market_domain/5` is the single runtime entry for the Market
+  pilot domain (Market trade, Marketplace coverage and compatible retained
+  Commitments). It gathers governed availability, planning and occupancy and
+  admits dispatchable Candidates; Fleet Allocation
+  (`SpaceTraders.FleetAllocation.MarketDomain`) selects one versioned
+  portfolio and publishes it atomically with its Strategy Decision Episode.
+  Only then does this module dispatch the root Intents: buy, travel, sell
+  round trips and intelligence acquisitions through governed operations.
   """
 
   import Ecto.Query
+
+  require Logger
 
   alias SpaceTraders.{Agent, Clock}
   alias SpaceTraders.Agent.Agent, as: AgentRecord
@@ -20,11 +24,14 @@ defmodule SpaceTraders.FleetExecution do
   alias SpaceTraders.Fleet
   alias SpaceTraders.FleetContracts
   alias SpaceTraders.FleetConstruction
-  alias SpaceTraders.Fleet.Intents
+  alias SpaceTraders.Fleet.{Intent, Intents, Ship}
   alias SpaceTraders.FleetAllocation
   alias SpaceTraders.FleetCapacity
-  alias SpaceTraders.FleetAllocation.{Commitment, Portfolio}
+
+  @coverage_kinds [:market_coverage, :intelligence_acquisition]
+  alias SpaceTraders.FleetAllocation.{Commitment, MarketDomain, Portfolio}
   alias SpaceTraders.FleetGeneration.Generation
+  alias SpaceTraders.FleetIntelligence
   alias SpaceTraders.FleetShadow
   alias SpaceTraders.FleetStrategy.Revision
   alias SpaceTraders.FleetStrategy.StandingAuthority
@@ -60,178 +67,401 @@ defmodule SpaceTraders.FleetExecution do
     end
   end
 
-  @doc """
-  Returns the shadow-validated eligible Market commitment for one Agent.
+  @doc "Returns true when Credit Reservations cover worst-case exposure within the floor."
+  defdelegate reservation_covers_exposure?(commitment, revision, availability),
+    to: MarketDomain
 
-  A proposed choice is eligible only when it carries a Claim on a Ship the
-  Agent owns and its Credit Reservations cover calibrated purchase exposure
-  without crossing the Hard Constraint credit floor.
+  @doc """
+  The one Fleet Allocation decision for the Market pilot domain: Market
+  trade, Marketplace coverage (and the other intelligence the Strategy wants)
+  and compatible retained Fleet Commitments.
+
+  Every evidence boundary of the domain (Market evidence, Waypoint
+  intelligence, due Observation Demands, withdrawn purchases) calls this one
+  entry, so callback order cannot preempt the comparison. At one decision
+  time it plans trade and intelligence Candidate Contributions from the same
+  shared Market input, retains busy or unrelated Commitments (an unfinished
+  Intent or a completed buy inside its leg handoff fences only its own
+  Ship), releases finished pilot work, and asks Fleet Allocation for one
+  versioned portfolio. The selected Commitments publish together beside the
+  retained work, then their root Intents dispatch.
+
+  Every outcome is explicit: a published portfolio, retained work, an API
+  capacity deferral, unknown availability, a Neutral Wait minted only by
+  Fleet Allocation, or a rejected publication recorded as a durable Strategy
+  Decision Episode with its reason. Each emits bounded G2 telemetry.
   """
-  def eligible_market_commitment(
-        comparison,
+  def reconcile_market_domain(
+        %Scope{} = scope,
         %AgentRecord{} = agent,
         %Revision{} = revision,
-        availability
+        system_symbol,
+        capacity
       )
-      when is_map(comparison) and is_map(availability) do
-    owned_ship_symbols = owned_ship_symbols(agent)
+      when is_binary(system_symbol) do
+    current = FleetAllocation.current_portfolio(scope, agent)
 
-    comparison
-    |> Map.get(:proposed_choices, [])
-    |> Enum.find(fn commitment ->
-      claims_owned_ship?(commitment, owned_ship_symbols) and
-        reservation_covers_exposure?(commitment, revision, availability)
+    {result, counts} =
+      if FleetCapacity.proceed?(capacity) do
+        allocate_market_domain(scope, agent, revision, system_symbol, current)
+      else
+        {capacity_deferral(agent, capacity, current), %{}}
+      end
+
+    observe_market_domain(agent, result, counts)
+  end
+
+  # The Governor's explicit deferral is not authoritative evidence of an empty
+  # portfolio, so it never mints or disturbs a Neutral Wait.
+  # The result carries the Governor's advisory retry time and the Agent's
+  # still-open Observation Demands, whose durable due times a deferral never
+  # moves, so the missing evidence is explicitly deferred, not infeasible.
+  defp capacity_deferral(agent, capacity, current) do
+    deferral = %{
+      reason: :capacity_deferred,
+      retry_at: Map.get(capacity || %{}, :retry_at),
+      pending_demands: Evidence.list_open_demands(agent)
+    }
+
+    if current,
+      do: {:ok, Map.merge(deferral, %{action: :retained_for_capacity, portfolio: current})},
+      else: {:ok, Map.put(deferral, :action, :deferred_for_capacity)}
+  end
+
+  defp allocate_market_domain(scope, agent, revision, system, current) do
+    resume_awaiting_sells(agent, current)
+    occupancy = domain_occupancy(agent, current)
+
+    if no_free_ship?(agent, occupancy.occupied) do
+      # Occupancy is local state: with every known Ship fenced there is
+      # nothing to allocate, so no game request is spent finding that out.
+      {{:ok, %{action: :retained, portfolio: current, reason: :all_ships_occupied}}, %{}}
+    else
+      with {:ok, availability} <- allocation_availability(agent),
+           free = free_claims(availability, occupancy.occupied),
+           {:ok, planned} <-
+             FleetIntelligence.plan_contributions(
+               agent,
+               revision,
+               system,
+               MapSet.to_list(occupancy.occupied)
+             ),
+           {:ok, trade} <-
+             FleetShadow.plan_market(planned.market, revision, %{availability | claims: free}) do
+        planning = trade ++ List.wrap(planned.intelligence)
+
+        demands =
+          if planned.intelligence, do: planned.intelligence.observation_demands, else: []
+
+        decide(scope, agent, revision, current, occupancy, availability, free, planning, demands)
+      else
+        {:error, reason} -> {{:error, reason}, %{}}
+      end
+    end
+  end
+
+  defp decide(scope, agent, revision, current, occupancy, availability, free, planning, demands) do
+    candidates = Enum.flat_map(planning, & &1.candidate_contributions)
+    planned_ids = MapSet.new(candidates, & &1.id)
+
+    # Finished or idle pilot work is re-proposed by planning or released; a
+    # re-proposed Commitment keeps its identity instead of churning.
+    {kept, released} =
+      Enum.split_with(occupancy.releasable, fn commitment ->
+        MapSet.member?(planned_ids, commitment.candidate_id) and
+          not MapSet.member?(occupancy.completed_intelligence, commitment.id)
+      end)
+
+    retained = occupancy.retained ++ kept
+    kept_ships = MapSet.new(Enum.flat_map(kept, & &1.claims))
+    claims = Enum.reject(free, &MapSet.member?(kept_ships, &1.resource))
+
+    {candidates, dispatch, unavailable} =
+      admissible_candidates(agent, candidates, retained, demands)
+
+    counts = %{
+      trade_candidates: Enum.count(candidates, &(&1.kind == :market_trade)),
+      coverage_candidates: Enum.count(candidates, &(&1.kind in @coverage_kinds)),
+      claimable_ships: length(claims)
+    }
+
+    case MarketDomain.select(revision, candidates, availability, claims, unavailable) do
+      {:ok, selection} ->
+        plan = %{
+          retained: retained,
+          released: released,
+          selection: selection,
+          decision: domain_decision(planning, candidates, selection.commitments),
+          dispatch: dispatch,
+          planning: planning
+        }
+
+        result =
+          case MarketDomain.publish(scope, agent, revision, current, plan) do
+            {:published, portfolio} -> published(portfolio, agent, plan)
+            other -> other
+          end
+
+        {result, Map.put(counts, :selected, length(selection.commitments))}
+
+      {:error, reason} ->
+        {{:error, reason}, counts}
+    end
+  end
+
+  # A Candidate a retained Commitment already pursues is never duplicated; one
+  # retained Coverage Commitment admits no second coverage Candidate (the
+  # single-scout policy); an intelligence Candidate without its current open
+  # Observation Demand cannot dispatch and is rejected with that reason.
+  defp admissible_candidates(agent, candidates, retained, demands) do
+    retained_ids = MapSet.new(retained, & &1.candidate_id)
+    coverage_retained? = Enum.any?(retained, &coverage_commitment?/1)
+
+    {admitted, dispatch, unavailable} =
+      candidates
+      |> Enum.reject(fn candidate ->
+        MapSet.member?(retained_ids, candidate.id) or
+          (coverage_retained? and candidate.kind == :market_coverage)
+      end)
+      |> Enum.reduce({[], %{}, []}, fn candidate, {admitted, dispatch, unavailable} ->
+        case dispatch_spec(agent, candidate, demands) do
+          nil ->
+            rejection = %{
+              candidate_id: candidate.id,
+              reasons: [:observation_demand_unavailable],
+              decisive_reason:
+                "Rejected because its current open Observation Demand is unavailable."
+            }
+
+            {admitted, dispatch, [rejection | unavailable]}
+
+          spec ->
+            {[candidate | admitted], Map.put(dispatch, candidate.id, spec), unavailable}
+        end
+      end)
+
+    {Enum.reverse(admitted), dispatch, Enum.reverse(unavailable)}
+  end
+
+  defp dispatch_spec(_agent, %{kind: :market_trade} = candidate, _demands),
+    do: {:trade, candidate}
+
+  defp dispatch_spec(agent, %{kind: kind} = candidate, demands) when kind in @coverage_kinds do
+    case selected_observation_subject(agent, candidate, demands) do
+      nil -> nil
+      {waypoint, demand} -> {:intelligence, waypoint, demand}
+    end
+  end
+
+  defp dispatch_spec(_agent, _candidate, _demands), do: nil
+
+  defp coverage_commitment?(commitment) do
+    Enum.any?(commitment.dependencies, fn dependency ->
+      match?(%{"subject" => "market:" <> _}, dependency) and
+        not Map.has_key?(dependency, "evidence_id")
     end)
   end
 
-  @doc "Returns true when Credit Reservations cover worst-case exposure within the floor."
-  def reservation_covers_exposure?(commitment, %Revision{} = revision, availability)
-      when is_map(commitment) and is_map(availability) do
-    reservation = credit_reservation(commitment)
-    available = available_credits(availability)
+  defp domain_decision(planning, candidates, selected) do
+    selected_ids = MapSet.new(selected, & &1.candidate_id)
 
-    with {:ok, floor} <- StandingAuthority.credit_floor(revision),
-         true <- is_number(reservation) and reservation >= 0,
-         true <- is_number(available) and available >= 0 do
-      available - reservation >= floor
+    trade_selected? =
+      Enum.any?(candidates, &(&1.kind == :market_trade and MapSet.member?(selected_ids, &1.id)))
+
+    %{
+      evidence_references: domain_evidence_references(planning),
+      expectations: %{
+        expected_value: Enum.sum_by(selected, & &1.expected_value),
+        commitment_count: length(selected)
+      },
+      calibration_version:
+        if(trade_selected?,
+          do: FleetAllocation.market_calibration_version(),
+          else: "intelligence-v1"
+        )
+    }
+  end
+
+  defp domain_evidence_references(planning) do
+    planning
+    |> Enum.flat_map(&Map.get(&1, :candidate_contributions, []))
+    |> Enum.flat_map(&Map.get(&1, :dependencies, []))
+    |> Enum.flat_map(fn
+      %{evidence_id: id} when is_binary(id) ->
+        [%{"kind" => "market", "id" => id}]
+
+      %{subject: subject} when is_binary(subject) ->
+        [%{"kind" => "observation", "subject" => subject, "operation_id" => "get-market"}]
+
+      _dependency ->
+        []
+    end)
+    |> Enum.uniq()
+  end
+
+  # The published portfolio's newly selected Commitments dispatch their root
+  # Intents; retained Commitments keep the work they already hold.
+  defp published(portfolio, agent, plan) do
+    commitments =
+      for proposal <- plan.selection.commitments,
+          persisted <- portfolio.commitments,
+          persisted.candidate_id == proposal.candidate_id,
+          do: persisted
+
+    dispatched =
+      Map.new(commitments, fn commitment ->
+        spec = Map.fetch!(plan.dispatch, commitment.candidate_id)
+        {commitment.candidate_id, dispatch(agent, portfolio, commitment, spec)}
+      end)
+
+    {:ok,
+     %{
+       action: if(commitments == [], do: :released, else: :published),
+       portfolio: portfolio,
+       commitments: commitments,
+       dispatched: dispatched,
+       selection: plan.selection,
+       planning: plan.planning
+     }}
+  end
+
+  # Dispatch failures stay in the result (and the Reconciler's log): the
+  # published Commitment and its Episode are already the durable decision.
+  defp dispatch(agent, portfolio, commitment, {:trade, candidate}),
+    do: activate_round_trip(agent, commitment, portfolio, candidate)
+
+  defp dispatch(agent, portfolio, commitment, {:intelligence, waypoint, demand}) do
+    with {:ok, ship_symbol} <- claimed_ship_symbol(commitment),
+         [type, _system, _waypoint] <- String.split(demand.subject, ":") do
+      Intents.request_commitment_intelligence(agent, commitment, portfolio, ship_symbol, %{
+        subject_type: String.to_existing_atom(type),
+        waypoint: waypoint,
+        required_facts: demand.required_facts,
+        freshness_seconds: demand.freshness_seconds
+      })
     else
-      _ -> false
+      _ -> {:error, :invalid_observation_subject}
     end
   end
 
-  @doc """
-  Publishes one eligible Market commitment and activates its round trip.
+  # Current Commitments split into retained work (busy: an unresolved Intent
+  # or leg handoff; or outside the pilot domain) and releasable pilot work.
+  # `occupied` holds the Ships retained work or any unfinished Intent fences.
+  defp domain_occupancy(agent, current) do
+    commitments = if current, do: current.commitments, else: []
+    ids = Enum.map(commitments, & &1.id)
 
-  Returns `{:error, :no_eligible_market_commitment}` when the shadow-validated
-  comparison proposes no eligible commitment for the Agent.
-  """
-  def activate_market(
-        %Scope{} = scope,
-        %AgentRecord{} = agent,
-        %Revision{} = revision,
-        comparison
+    unresolved =
+      if current, do: FleetAllocation.unresolved_commitment_ids(current.id), else: MapSet.new()
+
+    intelligence =
+      Repo.all(
+        from intent in Intent,
+          where: intent.fleet_commitment_id in ^ids and intent.type == "acquire_intelligence",
+          select: {intent.fleet_commitment_id, intent.status}
       )
-      when is_map(comparison) do
-    with {:ok, availability} <- allocation_availability(agent) do
-      activate_market(scope, agent, revision, comparison, availability)
+
+    completed_intelligence = for {id, "completed"} <- intelligence, into: MapSet.new(), do: id
+    intelligence_ids = MapSet.new(intelligence, &elem(&1, 0))
+
+    {releasable, retained} =
+      Enum.split_with(commitments, fn commitment ->
+        not MapSet.member?(unresolved, commitment.id) and
+          (MapSet.member?(intelligence_ids, commitment.id) or market_commitment?(commitment))
+      end)
+
+    intent_ship_ids = agent |> Intents.current() |> Enum.map(& &1.ship_id)
+
+    intent_ships =
+      Repo.all(from ship in Ship, where: ship.id in ^intent_ship_ids, select: ship.symbol)
+
+    %{
+      retained: retained,
+      releasable: releasable,
+      completed_intelligence: completed_intelligence,
+      occupied: MapSet.new(Enum.flat_map(retained, & &1.claims) ++ intent_ships)
+    }
+  end
+
+  defp market_commitment?(commitment),
+    do: Enum.any?(commitment.dependencies, &match?(%{"subject" => "market:" <> _}, &1))
+
+  # A completed buy whose selected sell was never requested (the sender died
+  # between the two legs, or the sell leg was refused) continues here at the
+  # next Market boundary or boot. Only `completed` buys inside the bounded
+  # handoff qualify and only when no later Intent exists, so an unconfirmed
+  # purchase is never replayed and a leg is never requested twice. The sell
+  # itself still passes the Intent engine's quote and authority checks.
+  defp resume_awaiting_sells(_agent, nil), do: :ok
+
+  defp resume_awaiting_sells(agent, %Portfolio{} = portfolio) do
+    for buy <- FleetAllocation.awaiting_sell_buys(portfolio.id),
+        %Commitment{} = commitment <- [Repo.get(Commitment, buy.fleet_commitment_id)] do
+      continue_after_intent(agent, commitment, portfolio, buy)
+    end
+
+    :ok
+  end
+
+  defp no_free_ship?(agent, occupied) do
+    symbols = Repo.all(from ship in Ship, where: ship.agent_id == ^agent.id, select: ship.symbol)
+    symbols != [] and Enum.all?(symbols, &MapSet.member?(occupied, &1))
+  end
+
+  defp free_claims(availability, occupied),
+    do: Enum.reject(availability.claims, &MapSet.member?(occupied, &1.resource))
+
+  # G2: one bounded record per domain decision. Ids stay log metadata only.
+  defp observe_market_domain(agent, result, counts) do
+    {kind, reason} = domain_outcome(result)
+
+    :telemetry.execute(
+      [:spacetraders, :fleet_allocation, :market_domain],
+      Map.merge(
+        %{count: 1, trade_candidates: 0, coverage_candidates: 0, claimable_ships: 0, selected: 0},
+        counts
+      ),
+      %{result: kind, decisive_reason: reason}
+    )
+
+    level = if kind in [:error, :publication_rejected], do: :warning, else: :info
+
+    Logger.log(level, "Fleet Allocation Market domain decision",
+      result: kind,
+      decisive_reason: reason,
+      agent_id: agent.id
+    )
+
+    result
+  end
+
+  defp domain_outcome({:error, reason}), do: {:error, FleetAllocation.bounded_reason(reason)}
+
+  defp domain_outcome({:ok, %{action: :publication_rejected, reason: reason}}),
+    do: {:publication_rejected, FleetAllocation.bounded_reason(reason)}
+
+  defp domain_outcome({:ok, %{action: :published, selection: selection}}),
+    do: {:published, selected_reason(selection.commitments)}
+
+  defp domain_outcome({:ok, %{action: action} = result}),
+    do: {action, FleetAllocation.bounded_reason(Map.get(result, :reason, action))}
+
+  defp selected_reason(selected) do
+    kinds =
+      selected
+      |> Enum.map(&if(trade_proposal?(&1), do: :trade, else: :coverage))
+      |> Enum.uniq()
+      |> Enum.sort()
+
+    case kinds do
+      [:coverage, :trade] -> :trade_and_coverage_selected
+      [:trade] -> :trade_selected
+      _ -> :coverage_selected
     end
   end
 
-  defp activate_market(
-         %Scope{} = scope,
-         %AgentRecord{} = agent,
-         %Revision{} = revision,
-         comparison,
-         availability
-       ) do
-    case eligible_market_commitment(comparison, agent, revision, availability) do
-      nil ->
-        {:error, :no_eligible_market_commitment}
-
-      commitment ->
-        with {:ok, candidate} <- market_candidate(comparison, commitment),
-             {:ok, portfolio} <- publish_eligible(scope, agent, revision, comparison, commitment),
-             {:ok, persisted} <- published_commitment(portfolio, commitment),
-             {:ok, round_trip} <- activate_round_trip(agent, persisted, portfolio, candidate) do
-          {:ok,
-           %{
-             commitment: persisted,
-             portfolio: portfolio,
-             round_trip: round_trip,
-             expectations: Map.get(comparison, :expectations, %{}),
-             contribution: contribution(portfolio)
-           }}
-        end
-    end
-  end
-
-  def activate_intelligence(
-        %Scope{} = scope,
-        %AgentRecord{} = agent,
-        %Revision{} = revision,
-        %{candidate_contributions: candidates, observation_demands: demands},
-        capacity
-      )
-      when is_list(candidates) and is_list(demands) do
-    cond do
-      not FleetCapacity.proceed?(capacity) ->
-        {:error, :api_capacity_unavailable}
-
-      candidates == [] ->
-        {:error, :no_decision_relevant_intelligence}
-
-      true ->
-        do_activate_intelligence(scope, agent, revision, candidates, demands)
-    end
-  end
-
-  defp do_activate_intelligence(scope, agent, revision, candidates, demands) do
-    with {:ok, availability} <- allocation_availability(agent) do
-      do_activate_intelligence(scope, agent, revision, candidates, demands, availability)
-    else
-      _ -> {:error, :intelligence_activation_unavailable}
-    end
-  end
-
-  defp do_activate_intelligence(scope, agent, revision, candidates, demands, availability) do
-    owned_ships = MapSet.new(Enum.map(availability.claims, & &1.resource))
-
-    with {:ok, selection} <-
-           FleetAllocation.select_portfolio(revision, candidates, availability),
-         commitment when not is_nil(commitment) <-
-           Enum.find(selection.commitments, fn commitment ->
-             claims_owned_ship?(commitment, owned_ships) and
-               reservation_covers_exposure?(commitment, revision, availability)
-           end),
-         candidate when not is_nil(candidate) <-
-           Enum.find(candidates, &(&1.id == commitment.candidate_id)),
-         {:ok, {waypoint, demand}} <- current_observation_subject(agent, candidate, demands),
-         %Generation{} = generation <- current_generation(agent),
-         {:ok, portfolio} <-
-           FleetAllocation.publish_portfolio(
-             scope,
-             generation.id,
-             %{
-               revision_id: revision.id,
-               source_version: generation.allocation_version,
-               commitments: [commitment],
-               rejected: selection.rejected
-             },
-             %{
-               evidence_references: candidate.dependencies,
-               expectations: candidate.expected_outcomes,
-               calibration_version: "intelligence-v1"
-             }
-           ),
-         [persisted] <- portfolio.commitments,
-         [ship_symbol] <- persisted.claims,
-         [type, _system, _waypoint] <- String.split(demand.subject, ":"),
-         {:ok, intent} <-
-           Intents.request_commitment_intelligence(agent, persisted, portfolio, ship_symbol, %{
-             subject_type: String.to_existing_atom(type),
-             waypoint: waypoint,
-             required_facts: demand.required_facts,
-             freshness_seconds: demand.freshness_seconds
-           }) do
-      {:ok, %{commitment: persisted, portfolio: portfolio, intent: intent}}
-    else
-      {:error, :current_observation_demand_unavailable} ->
-        {:error, :intelligence_activation_unavailable}
-
-      nil ->
-        {:error, :no_eligible_intelligence_commitment}
-
-      _ ->
-        {:error, :intelligence_activation_unavailable}
-    end
-  end
-
-  defp current_observation_subject(agent, candidate, demands) do
-    case selected_observation_subject(agent, candidate, demands) do
-      nil -> {:error, :current_observation_demand_unavailable}
-      selection -> {:ok, selection}
-    end
-  end
+  defp trade_proposal?(%{dependencies: dependencies}),
+    do: Enum.any?(dependencies, &match?(%{evidence_id: id} when is_binary(id), &1))
 
   # Execution revalidates one next observation at a time against the current
   # strategy-provenanced Demands. Settled subjects are skipped in the planner's
@@ -277,76 +507,6 @@ defmodule SpaceTraders.FleetExecution do
   end
 
   defp waypoint_from_subject(subject), do: subject |> String.split(":") |> List.last()
-
-  @doc "Reconciles an active Market Commitment against fresh Listings and capacity."
-  def replan_market(
-        %Scope{} = scope,
-        %AgentRecord{} = agent,
-        %Revision{} = revision,
-        previous,
-        snapshot,
-        capacity
-      )
-      when is_map(previous) and is_map(snapshot) do
-    current = FleetAllocation.current_portfolio(scope, agent)
-
-    case allocation_availability(agent) do
-      {:ok, availability} ->
-        with {:ok, comparison} <-
-               FleetShadow.replan(
-                 previous,
-                 snapshot,
-                 revision,
-                 availability,
-                 capacity,
-                 current_commitments: if(current, do: current.commitments, else: [])
-               ) do
-          reconcile_market_replan(
-            scope,
-            agent,
-            revision,
-            current,
-            comparison,
-            capacity,
-            availability
-          )
-        end
-
-      {:error, :availability_unknown} = error ->
-        capacity_deferral_or_error(current, capacity, error)
-    end
-  end
-
-  @doc false
-  def reconcile_market_evidence(
-        %Scope{} = scope,
-        %AgentRecord{} = agent,
-        %Revision{} = revision,
-        system_symbol,
-        capacity
-      )
-      when is_binary(system_symbol) do
-    current = FleetAllocation.current_portfolio(scope, agent)
-
-    case allocation_availability(agent) do
-      {:ok, availability} ->
-        with {:ok, comparison} <-
-               FleetShadow.compare_market(agent, revision, system_symbol, availability, capacity) do
-          reconcile_market_replan(
-            scope,
-            agent,
-            revision,
-            current,
-            comparison,
-            capacity,
-            availability
-          )
-        end
-
-      {:error, :availability_unknown} = error ->
-        capacity_deferral_or_error(current, capacity, error)
-    end
-  end
 
   @doc """
   Dispatches the authoritative buy leg of the round trip on the claimed Ship.
@@ -566,7 +726,7 @@ defmodule SpaceTraders.FleetExecution do
               if Map.has_key?(candidate, "construction_upstream") do
                 continue_after_intent(agent, commitment, portfolio, sell)
               else
-                record_realized_economics(portfolio, intent, sell)
+                FleetAllocation.record_trade_outcome(portfolio)
                 result
               end
 
@@ -574,6 +734,11 @@ defmodule SpaceTraders.FleetExecution do
               result
           end
         end
+
+      # The sell leg finished on a later Ship arrival, not inline with the buy.
+      %{type: "sell", status: "completed", parameters: %{"market_trade" => _}} ->
+        _ = FleetAllocation.record_trade_outcome(portfolio)
+        :ok
 
       _ ->
         :ok
@@ -694,74 +859,6 @@ defmodule SpaceTraders.FleetExecution do
     end
   end
 
-  @doc "Returns the last completed sell Intent for a commitment, or nil."
-  def last_realized_sell(%Commitment{} = commitment) do
-    Repo.one(
-      from intent in SpaceTraders.Fleet.Intent,
-        where:
-          intent.fleet_commitment_id == ^commitment.id and intent.type == "sell" and
-            intent.status == "completed",
-        order_by: [desc: intent.id],
-        limit: 1
-    )
-  end
-
-  @doc "Returns the last completed buy Intent for a commitment, or nil."
-  def last_realized_buy(%Commitment{} = commitment) do
-    Repo.one(
-      from intent in SpaceTraders.Fleet.Intent,
-        where:
-          intent.fleet_commitment_id == ^commitment.id and intent.type == "buy" and
-            intent.status == "completed",
-        order_by: [desc: intent.id],
-        limit: 1
-    )
-  end
-
-  defp publish_eligible(scope, agent, revision, comparison, commitment) do
-    with %Generation{} = generation <- current_generation(agent) do
-      selection = %{
-        revision_id: revision.id,
-        # The Fleet Generation, not a stale shadow comparison, owns the CAS
-        # version for a replacement portfolio.
-        source_version: generation.allocation_version,
-        commitments: [commitment],
-        rejected: Map.get(comparison, :alternatives, [])
-      }
-
-      decision = %{
-        evidence_references: evidence_references(comparison),
-        expectations: Map.get(comparison, :expectations, %{}),
-        calibration_version: Map.get(comparison, :calibration_version, "market-v1")
-      }
-
-      FleetAllocation.publish_portfolio(scope, generation.id, selection, decision)
-    end
-  end
-
-  defp evidence_references(comparison) do
-    comparison
-    |> Map.get(:planning, [])
-    |> Enum.flat_map(&Map.get(&1, :candidate_contributions, []))
-    |> Enum.flat_map(&Map.get(&1, :dependencies, []))
-    |> Enum.map(&%{"kind" => "market", "id" => &1.evidence_id})
-    |> Enum.uniq()
-  end
-
-  defp published_commitment(%Portfolio{commitments: commitments}, %{candidate_id: candidate_id}) do
-    case Enum.find(commitments, &(&1.candidate_id == candidate_id)) do
-      %Commitment{} = commitment -> {:ok, commitment}
-      _ -> {:error, :published_commitment_missing}
-    end
-  end
-
-  defp contribution(%Portfolio{commitments: commitments}) do
-    %{
-      commitment_count: length(commitments),
-      expected_value: Enum.sum_by(commitments, & &1.expected_value)
-    }
-  end
-
   defp current_generation(%AgentRecord{id: agent_id}) do
     Repo.one(
       from generation in Generation,
@@ -784,17 +881,6 @@ defmodule SpaceTraders.FleetExecution do
     end
   end
 
-  # The Governor's explicit deferral wins over availability collection. It is
-  # not authoritative evidence of an empty portfolio, so it cannot mint or
-  # disturb a Neutral Wait.
-  defp capacity_deferral_or_error(current, capacity, error) do
-    cond do
-      FleetCapacity.proceed?(capacity) -> error
-      current -> {:ok, %{action: :retained_for_capacity, portfolio: current}}
-      true -> {:ok, %{action: :deferred_for_capacity}}
-    end
-  end
-
   defp governed_market_access(%AgentRecord{} = agent) do
     with {:ok, system_symbol} <- Fleet.system_from_headquarters(agent.headquarters) do
       {:ok, Intelligence.marketplace_waypoints(agent, system_symbol)}
@@ -809,8 +895,12 @@ defmodule SpaceTraders.FleetExecution do
     |> Enum.map(fn ship ->
       %{
         resource: ship.symbol,
-        roles: [:market_trader, :intelligence_scout],
+        roles: ship_roles(ship),
         capabilities: %{
+          frame: frame_symbol(ship),
+          fuel_capacity: fuel_capacity(ship),
+          fuel: fuel(ship),
+          position: position(ship),
           cargo_transport: cargo_capacity(ship),
           chart: true,
           waypoint_scan: sensor_mount?(ship),
@@ -819,6 +909,42 @@ defmodule SpaceTraders.FleetExecution do
       }
     end)
   end
+
+  # Roles follow capability: only a Ship with a hold can trade; any Ship can
+  # scout. Allocation then picks the cheapest capable Ship per role.
+  defp ship_roles(ship) do
+    if cargo_capacity(ship) > 0,
+      do: [:market_trader, :intelligence_scout],
+      else: [:intelligence_scout]
+  end
+
+  defp frame_symbol(%{frame: %{symbol: symbol}}), do: symbol
+  defp frame_symbol(_ship), do: nil
+
+  # Fuel tank size stands in for fuel use per leg; solar-powered probes carry
+  # none and so cost nothing to move.
+  defp fuel_capacity(%{fuel: %{capacity: capacity}}) when is_integer(capacity), do: capacity
+  defp fuel_capacity(_ship), do: 0
+
+  # Fuel in the tank and where the Ship is: Fleet Planning offers a trade
+  # only to a Ship that can reach it with known fuel stops.
+  defp fuel(%{fuel: %{current: current, capacity: capacity}})
+       when is_integer(current) and is_integer(capacity),
+       do: %{current: current, capacity: capacity}
+
+  defp fuel(_ship), do: nil
+
+  defp position(%{nav: %{waypoint_symbol: waypoint} = nav} = ship) when is_binary(waypoint) do
+    point =
+      case SpaceTraders.Fleet.FuelReach.position(ship) do
+        {:ok, %{x: x, y: y}} -> %{x: x, y: y}
+        {:error, _reason} -> %{}
+      end
+
+    Map.merge(point, %{waypoint: waypoint, flight_mode: Map.get(nav, :flight_mode)})
+  end
+
+  defp position(_ship), do: nil
 
   defp cargo_capacity(%{cargo: %{capacity: capacity}}) when is_integer(capacity), do: capacity
   defp cargo_capacity(_ship), do: 0
@@ -838,226 +964,8 @@ defmodule SpaceTraders.FleetExecution do
     end
   end
 
-  defp owned_ship_symbols(%AgentRecord{} = agent) do
-    reserved = MapSet.new(ShipReservation.reserved_symbols(agent.id))
-
-    case Fleet.list_ships(agent) do
-      {:ok, ships} ->
-        ships |> Enum.reject(&MapSet.member?(reserved, &1.symbol)) |> MapSet.new(& &1.symbol)
-
-      _ ->
-        MapSet.new()
-    end
-  end
-
-  defp claims_owned_ship?(%{claims: claims}, owned) when is_list(claims),
-    do: Enum.any?(claims, &MapSet.member?(owned, &1))
-
-  defp claims_owned_ship?(_commitment, _owned), do: false
-
   defp claimed_ship_symbol(%{claims: [ship_symbol | _]}) when is_binary(ship_symbol),
     do: {:ok, ship_symbol}
 
   defp claimed_ship_symbol(_commitment), do: {:error, :no_claimed_ship}
-
-  defp market_candidate(comparison, commitment) do
-    candidate =
-      comparison
-      |> Map.get(:planning, [])
-      |> Enum.flat_map(&Map.get(&1, :candidate_contributions, []))
-      |> Enum.find(&(&1.id == commitment.candidate_id))
-
-    case candidate do
-      %SpaceTraders.FleetPlanning.CandidateContribution{} = candidate -> {:ok, candidate}
-      _ -> {:error, :market_candidate_missing}
-    end
-  end
-
-  defp reconcile_market_replan(
-         _scope,
-         _agent,
-         _revision,
-         current,
-         %{replan_trigger: :unchanged},
-         _capacity,
-         _availability
-       ) do
-    {:ok, %{action: :retained, portfolio: current}}
-  end
-
-  defp reconcile_market_replan(
-         scope,
-         agent,
-         revision,
-         current,
-         comparison,
-         capacity,
-         availability
-       ) do
-    cond do
-      not FleetCapacity.proceed?(capacity) and current ->
-        # Capacity is evidence for allocation: retain a still-authorized commitment
-        # rather than churn claims while the Governor cannot admit the replacement.
-        {:ok, %{action: :retained_for_capacity, portfolio: current, comparison: comparison}}
-
-      not FleetCapacity.proceed?(capacity) ->
-        {:ok, %{action: :deferred_for_capacity, comparison: comparison}}
-
-      true ->
-        replan_market_commitments(scope, agent, revision, current, comparison, availability)
-    end
-  end
-
-  defp replan_market_commitments(scope, agent, revision, current, comparison, availability) do
-    if current &&
-         Enum.any?(current.commitments, fn commitment ->
-           Enum.any?(
-             commitment.dependencies,
-             &String.starts_with?(&1["subject"] || "", "construction:")
-           )
-         end) do
-      {:ok, %{action: :retained, portfolio: current, comparison: comparison}}
-    else
-      do_reconcile_market_replan(scope, agent, revision, current, comparison, availability)
-    end
-  end
-
-  defp do_reconcile_market_replan(scope, agent, revision, current, comparison, availability) do
-    case eligible_market_commitment(comparison, agent, revision, availability) do
-      %{candidate_id: candidate_id} when current != nil ->
-        if Enum.any?(current.commitments, &(&1.candidate_id == candidate_id)) do
-          {:ok, %{action: :retained, portfolio: current, comparison: comparison}}
-        else
-          activate_replanned_market(scope, agent, revision, current, comparison, availability)
-        end
-
-      nil when current != nil ->
-        with {:ok, portfolio} <-
-               FleetAllocation.unwind_current_portfolio(scope, current.fleet_generation_id) do
-          {:ok, %{action: :unwound, portfolio: portfolio, comparison: comparison}}
-        end
-
-      nil ->
-        # The single Neutral Wait mint site (ADR 0012): the authoritative
-        # zero-admissible result plus durable future evidence for its
-        # unresolved subjects records the wait. Every other producer outcome —
-        # unknown availability, capacity deferral, infeasibility — never
-        # reaches it, and a reconciliation without future evidence fails
-        # closed: the result stands, no wait is minted.
-        mint_neutral_wait(scope, agent, revision, comparison)
-
-      _commitment ->
-        activate_replanned_market(scope, agent, revision, current, comparison, availability)
-    end
-  end
-
-  defp mint_neutral_wait(scope, agent, revision, comparison) do
-    selection = neutral_wait_selection(comparison)
-
-    with %Generation{} = generation <- current_generation(agent),
-         {:ok, _episode} <-
-           FleetAllocation.record_neutral_wait(scope, generation, revision, selection) do
-      {:ok, %{action: :no_admissible_commitment, comparison: comparison}}
-    else
-      _not_a_wait ->
-        {:ok, %{action: :no_admissible_commitment, comparison: comparison}}
-    end
-  end
-
-  # The reconciliation's enumerated result binding for the mint: the planning
-  # entries' unresolved limitations and Observation Demands carry the binding
-  # limitation, the re-evaluation evidence, and the candidate record detail.
-  defp neutral_wait_selection(comparison) do
-    planning = Map.get(comparison, :planning, [])
-
-    demands =
-      planning
-      |> Enum.flat_map(&Map.get(&1, :observation_demands, []))
-      |> Enum.reject(&is_nil(Map.get(&1, :subject)))
-      |> Enum.uniq_by(&Map.get(&1, :subject))
-
-    %{
-      action: :no_admissible_commitment,
-      source_version: Map.get(comparison, :source_version, 0),
-      planning: planning,
-      reconciled_subjects: Map.get(comparison, :reconciled_subjects, []),
-      observation_demands: demands,
-      binding_limitation: binding_limitation(planning),
-      evidence_references: observation_references(demands),
-      candidates: Enum.flat_map(planning, &Map.get(&1, :candidate_contributions, [])),
-      rejections: Map.get(comparison, :alternatives, []),
-      calibration_version: Map.get(comparison, :calibration_version)
-    }
-  end
-
-  defp binding_limitation(planning) do
-    planning
-    |> Enum.flat_map(&Map.get(&1, :limitations, []))
-    |> Enum.find(&neutral_wait_limitation?/1)
-    |> case do
-      nil -> %{}
-      limitation -> limitation
-    end
-  end
-
-  defp neutral_wait_limitation?(%{reason: reason})
-       when reason in [
-              :incomplete_market_coverage,
-              :unreachable_market_coverage,
-              :no_viable_market_routes,
-              :insufficient_market_evidence
-            ],
-       do: true
-
-  defp neutral_wait_limitation?(%{"reason" => reason})
-       when reason in [
-              "incomplete_market_coverage",
-              "unreachable_market_coverage",
-              "no_viable_market_routes",
-              "insufficient_market_evidence"
-            ],
-       do: true
-
-  defp neutral_wait_limitation?(_limitation), do: false
-
-  defp observation_references(demands) do
-    Enum.map(demands, fn demand ->
-      %{
-        "kind" => "observation",
-        "subject" => to_string(demand.subject),
-        "operation_id" => "get-market"
-      }
-    end)
-  end
-
-  defp activate_replanned_market(scope, agent, revision, current, comparison, availability) do
-    with {:ok, result} <- activate_market(scope, agent, revision, comparison, availability) do
-      {:ok, Map.put(result, :action, if(current, do: :superseded, else: :activated))}
-    end
-  end
-
-  defp credit_reservation(commitment) do
-    reservations = Map.get(commitment, :reservations, %{})
-
-    Map.get(reservations, "credits") || Map.get(reservations, :credits)
-  end
-
-  defp available_credits(availability) do
-    reservations = Map.get(availability, :reservations, %{})
-
-    Map.get(reservations, "credits") || Map.get(reservations, :credits)
-  end
-
-  defp record_realized_economics(portfolio, buy, sell) do
-    purchase = get_in(buy.last_action_result, ["transaction", "total_price"])
-    sale = get_in(sell.last_action_result, ["transaction", "total_price"])
-
-    if is_number(purchase) and is_number(sale) do
-      FleetAllocation.record_portfolio_outcome(portfolio, :realized, %{
-        credit_change: sale - purchase,
-        purchase_cost: purchase,
-        sale_revenue: sale
-      })
-    end
-  end
 end

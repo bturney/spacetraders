@@ -49,6 +49,13 @@ Generation holds the current allocation result for O(1) lookup of "is the fleet
 waiting right now". The pointer references the episode and copies no facts (ADR
 0011 rule: one authority per fact).
 
+Amended 2026-10-10 (issue 662): a decision that Fleet Allocation selected but
+then refused to publish is also durable decision evidence. Its episode carries a
+third episode kind, `publication_rejected`, with a bounded rejection reason. It is
+not a selection kind: the pointer never references it, and the current allocation
+result stays `selected_plan` or `neutral_wait`. Recording the refusal as its own
+kind keeps it from being read as a selected plan that never ran or as a wait.
+
 Metrics use a closed limitation kind vocabulary: `incomplete_coverage`,
 `no_admissible_candidate`, `below_economic_threshold`,
 `awaiting_scheduled_evidence`. Identity-rich detail (candidates, rejections,

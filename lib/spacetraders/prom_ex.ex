@@ -11,7 +11,8 @@ defmodule SpaceTraders.PromEx do
       PromEx.Plugins.Beam,
       SpaceTraders.PromEx.API,
       SpaceTraders.PromEx.Outcome,
-      SpaceTraders.PromEx.FleetOutcome
+      SpaceTraders.PromEx.FleetOutcome,
+      SpaceTraders.PromEx.FleetAllocation
     ]
   end
 

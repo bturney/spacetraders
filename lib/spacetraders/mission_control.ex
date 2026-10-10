@@ -26,11 +26,11 @@ defmodule SpaceTraders.MissionControl do
 
   alias SpaceTraders.{
     Agent,
+    Clock,
     Fleet,
     FleetAllocation,
     FleetExecution,
     FleetGeneration,
-    FleetIntelligence,
     FleetPlanning,
     FleetStrategy,
     Intelligence,
@@ -241,19 +241,96 @@ defmodule SpaceTraders.MissionControl do
   @doc """
   Adds a draft's governed consequences to a Strategy projection.
 
-  `:availability` carries `MissionControl.availability/1` so the review can
-  shadow-evaluate likely Fleet Commitments without re-reading authoritative
-  evidence on every draft edit.
+  `:market_decision` carries one `capture_market_decision/2`, so active and
+  draft consequences and shadow commitments all interpret the same captured
+  inputs. Without it the review captures once itself, from `:availability`
+  (`MissionControl.availability/1`), so it can shadow-evaluate likely Fleet
+  Commitments without re-reading authoritative evidence on every draft edit.
+  Review is read-only: it acquires no evidence and publishes no Demands,
+  Claims, Reservations or Commitments.
   """
   def strategy_review(%Scope{} = scope, projection, opts) do
+    capture =
+      Keyword.get_lazy(opts, :market_decision, fn ->
+        capture_market_decision(scope, availability: Keyword.get(opts, :availability, %{}))
+      end)
+
     projection
     |> review_fields()
-    |> Map.put(:draft_consequences, draft_consequences(scope, projection.draft))
-    |> Map.put(
-      :draft_commitments,
-      draft_commitments(scope, projection, Keyword.get(opts, :availability, %{}))
-    )
+    |> Map.put(:market_decision, Map.take(capture, [:as_of, :version]))
+    |> Map.put(:draft_consequences, draft_consequences(capture, projection.draft))
+    |> Map.put(:draft_commitments, draft_commitments(capture, projection))
   end
+
+  @doc """
+  Captures, once, the fixed local inputs of a Market decision evaluation: one
+  decision time, the shared Operational Intelligence Market interpretation
+  (original evidence references and explicit coverage gaps), Governed
+  Availability and the advisory Capacity Disposition, per Agent.
+
+  Active and draft comparison and market planning evaluate the capture and
+  never rebuild prices, provenance, coverage or observation time. It is
+  conditional on retained local evidence, not an atomic view of the game.
+  Capturing is read-only. `:availability` is `availability/1`; `:as_of` an
+  explicit decision time.
+  """
+  def capture_market_decision(%Scope{} = scope, opts \\ []) do
+    as_of = Keyword.get_lazy(opts, :as_of, &Clock.utc_now/0)
+    availability = Keyword.get(opts, :availability, %{})
+
+    agents =
+      scope
+      |> agents()
+      |> Enum.flat_map(fn agent ->
+        case Fleet.system_from_headquarters(agent.headquarters) do
+          {:ok, system_symbol} ->
+            input = FleetShadow.market_input(agent, system_symbol, as_of)
+
+            [
+              %{
+                agent: agent,
+                system_symbol: system_symbol,
+                market_input: input,
+                availability: Map.get(availability, agent.id),
+                version: market_input_version(input)
+              }
+            ]
+
+          _ ->
+            []
+        end
+      end)
+
+    %{
+      as_of: as_of,
+      capacity: FleetCapacity.disposition("get-market"),
+      agents: agents,
+      version: Enum.map(agents, &{&1.agent.id, &1.version})
+    }
+  end
+
+  @doc """
+  True while a captured Market decision still matches the retained local
+  evidence: no relevant Market observation, invalidation or Fleet Generation
+  change since capture. A stale capture must not be shown as current;
+  activation never dispatches it and plans afresh.
+  """
+  def market_decision_current?(%Scope{} = scope, %{version: version}),
+    do: capture_market_decision(scope).version == version
+
+  # Source version of a captured interpretation: Fleet Generation and the
+  # persisted evidence identity of every Marketplace, never the review clock.
+  # Ageing from current to stale is not a source change.
+  defp market_input_version(input) do
+    Evidence.fingerprint({
+      input.fleet_generation_id,
+      Enum.map(input.markets, &{&1.subject, version_state(&1.state), &1.evidence_id}),
+      input.baseline_subjects
+    })
+  end
+
+  defp version_state(state) when state in [:current, :stale], do: :retained
+  defp version_state(state), do: state
 
   defp review_fields(projection) do
     projection
@@ -262,16 +339,25 @@ defmodule SpaceTraders.MissionControl do
     |> Map.put(:credit_margin_percent, SpaceTraders.CreditCalibration.active().margin_percent)
   end
 
-  @doc "Returns visible Market Candidate Contributions from retained Operational Intelligence."
-  def market_planning(%Scope{} = scope, as_of \\ DateTime.utc_now()) do
+  @doc """
+  Returns visible Market Candidate Contributions from retained Operational
+  Intelligence, planned from `capture` (`capture_market_decision/2`) so it
+  shares inputs with the Strategy review; omitted, it captures at the current
+  time.
+  """
+  def market_planning(%Scope{} = scope, capture \\ nil) do
     case FleetStrategy.get(scope).active_revision do
       nil ->
         []
 
       revision ->
-        scope
-        |> agents()
-        |> Enum.flat_map(&agent_market_planning(revision, &1, as_of))
+        capture = capture || capture_market_decision(scope)
+
+        Enum.flat_map(capture.agents, fn entry ->
+          plan_market_objectives(revision.document, entry, fn objective_index, snapshot ->
+            FleetPlanning.plan_market(revision, objective_index, snapshot)
+          end)
+        end)
     end
   end
 
@@ -306,7 +392,7 @@ defmodule SpaceTraders.MissionControl do
           id: "decision-#{episode.id}",
           type: :decision,
           at: episode.inserted_at,
-          summary: "Fleet selected a new commitment portfolio",
+          summary: selection_summary(episode),
           detail: decision_detail(episode),
           decision_episode_id: episode.id,
           notable?: episode.source_version == 0 or episode.binding_constraints != []
@@ -443,6 +529,15 @@ defmodule SpaceTraders.MissionControl do
 
   def notable_activity?(_), do: false
 
+  defp decision_summary(%{
+         classification: :realized,
+         actual_outcomes: %{"trade_margin" => margin}
+       }) do
+    if is_integer(margin),
+      do: "Fleet decision realized #{margin} credits trade margin; net earnings unknown",
+      else: "Fleet decision realized; trade margin and net earnings unknown"
+  end
+
   defp decision_summary(%{classification: :realized, actual_outcomes: outcomes} = episode)
        when is_map(outcomes) do
     if episode.evidence_references == [] do
@@ -491,6 +586,11 @@ defmodule SpaceTraders.MissionControl do
     |> Enum.reject(&is_nil/1)
     |> Enum.join(" · ")
   end
+
+  defp selection_summary(%{selection_kind: :publication_rejected, rejection_reason: reason}),
+    do: "Fleet Allocation rejected a portfolio publication: #{reason}"
+
+  defp selection_summary(_episode), do: "Fleet selected a new commitment portfolio"
 
   @doc "Comparable Fleet Generation chapters using only retained outcome evidence."
   def generation_recaps(%Scope{operator: %{id: operator_id}} = scope) do
@@ -681,7 +781,7 @@ defmodule SpaceTraders.MissionControl do
           expected: nil,
           realized: %{
             completed_round_trips: 0,
-            realized_net_credit_change: nil,
+            realized_trade_margin: nil,
             realized_sale_value: nil
           },
           contribution: %{commitment_count: 0, expected_value: 0},
@@ -700,7 +800,7 @@ defmodule SpaceTraders.MissionControl do
               do: realized_economics(portfolio),
               else: %{
                 completed_round_trips: 0,
-                realized_net_credit_change: nil,
+                realized_trade_margin: nil,
                 realized_sale_value: nil
               }
             ),
@@ -837,61 +937,44 @@ defmodule SpaceTraders.MissionControl do
 
   defp draft_comparison(_projection), do: nil
 
-  defp draft_consequences(_scope, draft) when not is_map(draft), do: []
+  defp draft_consequences(_capture, draft) when not is_map(draft), do: []
 
-  defp draft_consequences(scope, draft) do
-    now = DateTime.utc_now()
-
-    scope
-    |> agents()
-    |> Enum.flat_map(fn agent ->
-      plan_market_objectives(draft, agent, now, fn objective_index, snapshot ->
+  defp draft_consequences(capture, draft) do
+    Enum.flat_map(capture.agents, fn entry ->
+      plan_market_objectives(draft, entry, fn objective_index, snapshot ->
         FleetPlanning.plan_draft_market(draft, objective_index, snapshot)
       end)
     end)
   end
 
-  defp draft_commitments(_scope, %{draft: draft}, _availability) when not is_map(draft), do: []
+  defp draft_commitments(_capture, %{draft: draft}) when not is_map(draft), do: []
 
-  defp draft_commitments(scope, %{draft: draft, active_revision: active}, availability) do
-    capacity = FleetCapacity.disposition("get-market")
+  defp draft_commitments(capture, %{draft: draft, active_revision: active}) do
+    Enum.map(capture.agents, fn
+      %{availability: nil} = entry ->
+        %{agent: entry.agent, availability: :unknown, active: nil, draft: nil}
 
-    scope
-    |> agents()
-    |> Enum.map(fn agent ->
-      case Map.get(availability, agent.id) do
-        nil ->
-          %{agent: agent, availability: :unknown, active: nil, draft: nil}
-
-        governed ->
-          %{
-            agent: agent,
-            availability: :authoritative,
-            active: shadow_summary(agent, active, governed, capacity, :active),
-            draft: shadow_summary(agent, draft, governed, capacity, :draft)
-          }
-      end
+      entry ->
+        %{
+          agent: entry.agent,
+          availability: :authoritative,
+          active: shadow_summary(entry, capture.capacity, active),
+          draft:
+            shadow_summary(
+              entry,
+              capture.capacity,
+              %Revision{id: {:draft, entry.agent.id}, document: draft}
+            )
+        }
     end)
   end
 
-  defp shadow_summary(_agent, nil, _availability, _capacity, _kind), do: nil
+  defp shadow_summary(_entry, _capacity, nil), do: nil
 
-  defp shadow_summary(agent, subject, availability, capacity, kind) do
-    with {:ok, system_symbol} <- Fleet.system_from_headquarters(agent.headquarters) do
-      subject
-      |> compare_shadow(agent, system_symbol, availability, capacity, kind)
-      |> summarize_shadow()
-    else
-      _ -> %{error: :system_unknown}
-    end
-  end
-
-  defp compare_shadow(revision, agent, system_symbol, availability, capacity, :active) do
-    FleetShadow.compare_market(agent, revision, system_symbol, availability, capacity)
-  end
-
-  defp compare_shadow(document, agent, system_symbol, availability, capacity, :draft) do
-    FleetShadow.compare_draft_market(agent, document, system_symbol, availability, capacity)
+  defp shadow_summary(entry, capacity, %Revision{} = revision) do
+    entry.market_input
+    |> FleetShadow.compare(revision, entry.availability, capacity)
+    |> summarize_shadow()
   end
 
   defp summarize_shadow({:ok, comparison}) do
@@ -910,67 +993,20 @@ defmodule SpaceTraders.MissionControl do
 
   defp summarize_shadow({:error, reason}), do: %{error: reason}
 
-  defp agent_market_planning(revision, agent, as_of) do
-    plan_market_objectives(revision.document, agent, as_of, fn objective_index, snapshot ->
-      FleetPlanning.plan_market(revision, objective_index, snapshot)
+  defp plan_market_objectives(document, %{agent: agent, market_input: snapshot}, plan_objective) do
+    document
+    |> Map.get("objectives", [])
+    |> Enum.with_index()
+    |> Enum.map(fn {objective, objective_index} ->
+      {:ok, planning} = plan_objective.(objective_index, snapshot)
+
+      %{
+        agent: agent,
+        objective: objective,
+        objective_index: objective_index,
+        planning: planning
+      }
     end)
-  end
-
-  defp plan_market_objectives(document, agent, as_of, plan_objective) do
-    with {:ok, system_symbol} <- Fleet.system_from_headquarters(agent.headquarters) do
-      marketplace_symbols = Intelligence.marketplace_waypoints(agent, system_symbol)
-
-      markets =
-        marketplace_symbols
-        |> Enum.map(&market_evidence(agent, system_symbol, &1, as_of))
-
-      # The authoritative Market coverage target is every known Marketplace of
-      # the headquarters System, including never-observed Waypoints.
-      baseline =
-        Enum.map(marketplace_symbols, &FleetIntelligence.market_subject(system_symbol, &1))
-
-      snapshot =
-        FleetPlanning.market_snapshot(as_of, system_symbol, agent.id, markets)
-        |> Map.merge(FleetPlanning.baseline_coverage(baseline))
-        |> Map.put(:credit_margin_percent, SpaceTraders.CreditCalibration.active().margin_percent)
-
-      document
-      |> Map.get("objectives", [])
-      |> Enum.with_index()
-      |> Enum.map(fn {objective, objective_index} ->
-        {:ok, planning} = plan_objective.(objective_index, snapshot)
-
-        %{
-          agent: agent,
-          objective: objective,
-          objective_index: objective_index,
-          planning: planning
-        }
-      end)
-    else
-      _ -> []
-    end
-  end
-
-  defp market_evidence(agent, system_symbol, waypoint_symbol, as_of) do
-    facts = Intelligence.subject_with_stale(agent, :market, system_symbol, waypoint_symbol)
-    current = facts.current["trade_goods"]
-    stale = facts.stale["trade_goods"]
-    fact = current || stale || latest_fact(facts)
-
-    %{
-      subject: "market:#{system_symbol}:#{waypoint_symbol}",
-      observed_at: (fact && fact.observation.observed_at) || as_of,
-      evidence_id: fact && "intelligence-observation:#{fact.observation.id}",
-      source: fact && fact.observation.source,
-      state: if(is_nil(current) and not is_nil(stale), do: :stale, else: :current),
-      trade_goods: if(current, do: current.value, else: stale && stale.value)
-    }
-  end
-
-  defp latest_fact(%{current: current, stale: stale}) do
-    (Map.values(current) ++ Map.values(stale))
-    |> Enum.max_by(& &1.observation.observed_at, DateTime, fn -> nil end)
   end
 
   defp fleet_overview(snapshot, generations) do
@@ -1070,40 +1106,27 @@ defmodule SpaceTraders.MissionControl do
     }
   end
 
+  # Receipt-backed and per Completed Round Trip; Net Earnings is never
+  # derived here, so only the goods-only Trade Margin is reported.
   defp realized_economics(%FleetAllocation.Portfolio{} = portfolio) do
-    trips =
-      portfolio.commitments
-      |> Enum.flat_map(fn commitment ->
-        case realized_trip(commitment) do
-          nil -> []
-          trip -> [trip]
-        end
-      end)
+    progress = FleetAllocation.TradeProgress.for_portfolio(portfolio.id)
 
     %{
-      completed_round_trips: length(trips),
-      realized_net_credit_change:
-        if(trips == [], do: nil, else: Enum.sum_by(trips, & &1.net_credit_change)),
-      realized_sale_value: if(trips == [], do: nil, else: Enum.sum_by(trips, & &1.sale_value))
+      completed_round_trips: progress.completed_round_trips,
+      realized_trade_margin: FleetAllocation.TradeProgress.trade_margin(progress),
+      realized_sale_value:
+        if(progress.completed_round_trips == 0,
+          do: nil,
+          else: Enum.sum_by(progress.round_trips, & &1.sale_revenue)
+        ),
+      credits_spent: known(progress.credits_spent),
+      credits_received: known(progress.credits_received),
+      unknown: progress.unknown
     }
   end
 
-  defp realized_trip(%FleetAllocation.Commitment{} = commitment) do
-    with %{last_action_result: sell_result} <- FleetExecution.last_realized_sell(commitment),
-         %{last_action_result: buy_result} <- FleetExecution.last_realized_buy(commitment),
-         sale_value when is_integer(sale_value) <- transaction_total(sell_result),
-         purchase_value when is_integer(purchase_value) <- transaction_total(buy_result) do
-      %{net_credit_change: sale_value - purchase_value, sale_value: sale_value}
-    else
-      _ -> nil
-    end
-  end
-
-  defp transaction_total(%{"transaction" => %{"total_price" => total}})
-       when is_integer(total),
-       do: total
-
-  defp transaction_total(_result), do: nil
+  defp known(value) when is_integer(value), do: value
+  defp known(_unknown), do: nil
 
   defp contribution(%FleetAllocation.Portfolio{} = portfolio) do
     %{

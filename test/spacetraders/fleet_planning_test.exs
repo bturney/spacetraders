@@ -32,6 +32,240 @@ defmodule SpaceTraders.FleetPlanningTest do
     assert copper.alternatives == [alternative(iron)]
   end
 
+  describe "Ship-feasible Market sizing" do
+    defp deep_snapshot(extra) do
+      Map.merge(
+        %{
+          as_of: @as_of,
+          system_symbol: "X1",
+          freshness_seconds: 300,
+          agent_id: 7,
+          markets: [
+            market("X1-A1", ~U[2030-01-01 11:59:00Z], [good("IRON", 10, 9, 60)]),
+            market("X1-A2", ~U[2030-01-01 11:58:00Z], [good("IRON", 25, 20, 60)])
+          ]
+        },
+        extra
+      )
+    end
+
+    defp ship(symbol, capacity, units \\ 0),
+      do: %{symbol: symbol, cargo: %{capacity: capacity, units: units}}
+
+    test "a route deeper than the only hold is bounded to the hold and recomputed" do
+      snapshot = deep_snapshot(%{ships: [ship("FRIGATE-1", 40)]})
+
+      assert {:ok, %{candidate_contributions: [candidate]}} =
+               FleetPlanning.plan_market(revision(), 0, snapshot)
+
+      assert candidate.expected_outcomes.maximum_units == 40
+      assert candidate.expected_outcomes.maximum_credit_change == 400
+      assert candidate.required_resources.cargo_capacity == 40
+      assert candidate.required_resources.credits == 500
+
+      assert %{capability: :cargo_transport, minimum_capacity: 40} in candidate.required_capabilities
+    end
+
+    test "free Cargo reduces the quantity below the hold" do
+      snapshot = deep_snapshot(%{ships: [ship("FRIGATE-1", 40, 15)]})
+
+      assert {:ok, %{candidate_contributions: [candidate]}} =
+               FleetPlanning.plan_market(revision(), 0, snapshot)
+
+      assert candidate.expected_outcomes.maximum_units == 25
+      assert candidate.required_resources.cargo_capacity == 25
+    end
+
+    test "credit headroom reduces the quantity below the hold" do
+      # 10 credits per unit at the 25% initial margin is 12.5 -> 8 units per 100.
+      snapshot = deep_snapshot(%{ships: [ship("FRIGATE-1", 40)], credit_headroom: 100})
+
+      assert {:ok, %{candidate_contributions: [candidate]}} =
+               FleetPlanning.plan_market(revision(), 0, snapshot)
+
+      assert candidate.expected_outcomes.maximum_units == 8
+      assert candidate.required_resources.credits <= 100
+    end
+
+    test "runtime planning sizes by observed credits above the Strategy credit floor" do
+      revision =
+        put_in(revision().document["hard_constraints"], [
+          "Keep at least 1,000 credits available"
+        ])
+
+      availability = %{
+        claims: [
+          %{
+            resource: "FRIGATE-1",
+            roles: [:market_trader],
+            capabilities: %{cargo_transport: 40}
+          }
+        ],
+        reservations: %{credits: 1_100}
+      }
+
+      assert {:ok, [%{candidate_contributions: [candidate]}]} =
+               SpaceTraders.FleetShadow.plan_market(deep_snapshot(%{}), revision, availability)
+
+      # 100 credits of headroom at 10 per unit and the 25% initial margin.
+      assert candidate.expected_outcomes.maximum_units == 8
+    end
+
+    test "the largest claimable hold bounds the route regardless of Ship order" do
+      ships = [ship("A-SMALL", 10), ship("B-BIG", 40), ship("C-FULL", 80, 80)]
+
+      results =
+        for order <- [ships, Enum.reverse(ships)] do
+          assert {:ok, %{candidate_contributions: [candidate]}} =
+                   FleetPlanning.plan_market(revision(), 0, deep_snapshot(%{ships: order}))
+
+          candidate
+        end
+
+      assert [%{expected_outcomes: %{maximum_units: 40}}, _] = results
+      assert Enum.at(results, 0) == Enum.at(results, 1)
+    end
+
+    test "no claimable hold or affordable unit leaves no actionable candidate" do
+      for extra <- [
+            %{ships: [ship("PROBE-1", 0)]},
+            %{ships: [ship("FULL-1", 40, 40)]},
+            %{ships: [ship("FRIGATE-1", 40)], credit_headroom: 5}
+          ] do
+        assert {:ok, %{candidate_contributions: []}} =
+                 FleetPlanning.plan_market(revision(), 0, deep_snapshot(extra))
+      end
+    end
+  end
+
+  # #662 finding: a Ship stranded at the destination without fuel for the
+  # source was still offered the trade; every buy ended infeasible and each
+  # failed buy's refuel Market read re-planned it under a new candidate id.
+  describe "Ship-feasible Market reach" do
+    # X1-A1 sells IRON at x=0, X1-A2 buys it at x=60. X1-A3 (x=50) and X1-A4
+    # (x=75) are possible fuel stops. `fuel_stops` is the shared
+    # `World.fuel_stops/3` answer Ship Execution also searches.
+    defp reach_snapshot(ships, extra \\ %{}) do
+      Map.merge(
+        %{
+          as_of: @as_of,
+          system_symbol: "X1",
+          freshness_seconds: 300,
+          agent_id: 7,
+          markets: [
+            market("X1-A1", ~U[2030-01-01 11:59:00Z], [good("IRON", 10, 9, 40)]),
+            market("X1-A2", ~U[2030-01-01 11:58:00Z], [good("IRON", 25, 20, 40)])
+          ],
+          waypoint_coordinates: %{
+            "X1-A1" => %{x: 0, y: 0},
+            "X1-A2" => %{x: 60, y: 0},
+            "X1-A3" => %{x: 50, y: 0},
+            "X1-A4" => %{x: 75, y: 0}
+          },
+          fuel_stops: [],
+          ships: ships
+        },
+        extra
+      )
+    end
+
+    defp fueled(symbol, waypoint, current, capacity \\ 200) do
+      %{
+        symbol: symbol,
+        cargo: %{capacity: 40, units: 0},
+        waypoint: waypoint,
+        flight_mode: "CRUISE",
+        fuel: %{current: current, capacity: capacity}
+      }
+    end
+
+    defp trades(snapshot) do
+      assert {:ok, %{candidate_contributions: candidates}} =
+               FleetPlanning.plan_market(revision(), 0, snapshot)
+
+      candidates
+    end
+
+    test "a Ship that cannot reach the source with known fuel stops gets no actionable trade" do
+      assert [] = trades(reach_snapshot([fueled("STRANDED-1", "X1-A2", 20)]))
+    end
+
+    test "a Ship that cannot carry the cargo from source to destination gets no trade" do
+      assert [] = trades(reach_snapshot([fueled("SHORT-1", "X1-A1", 50)]))
+    end
+
+    test "enough fuel, a refuel at the Ship's fuel stop, or a nearer fuel stop reaches it" do
+      assert [_] = trades(reach_snapshot([fueled("FULL-1", "X1-A2", 200)]))
+
+      stranded = [fueled("STRANDED-1", "X1-A2", 20)]
+      assert [_] = trades(reach_snapshot(stranded, %{fuel_stops: ["X1-A2"]}))
+      assert [_] = trades(reach_snapshot(stranded, %{fuel_stops: ["X1-A3"]}))
+    end
+
+    # Ship Execution refuels in place only where it can buy FUEL, and detours
+    # only to a stop it can reach now that is nearer the target.
+    test "a refuel or fuel stop Ship Execution would not use does not make a trade reachable" do
+      stranded = [fueled("STRANDED-1", "X1-A2", 20)]
+
+      # FUEL on the Ship's own Listing that the shared stop predicate rejected
+      # (a stale Listing) is no refuel, whatever the Market input carries.
+      fuel_listing = %{
+        markets: [
+          market("X1-A1", ~U[2030-01-01 11:59:00Z], [good("IRON", 10, 9, 40)]),
+          market("X1-A2", ~U[2030-01-01 11:58:00Z], [
+            good("IRON", 25, 20, 40),
+            good("FUEL", 2, 1, 100)
+          ])
+        ]
+      }
+
+      assert [] = trades(reach_snapshot(stranded, fuel_listing))
+
+      # X1-A4 is reachable on 20 fuel but farther from X1-A1 than the Ship is.
+      assert [] = trades(reach_snapshot(stranded, %{fuel_stops: ["X1-A4"]}))
+    end
+
+    test "a Ship that needs no fuel, or unknown coordinates or flight mode, does not block" do
+      assert [_] = trades(reach_snapshot([fueled("PROBE-1", "X1-A2", 0, 0)]))
+      assert [_] = trades(reach_snapshot([fueled("STRANDED-1", "X1-UNKNOWN", 20)]))
+
+      assert [_] =
+               trades(reach_snapshot([%{fueled("STRANDED-1", "X1-A2", 20) | flight_mode: nil}]))
+    end
+
+    test "fuel changes that keep the route reachable keep the candidate identity" do
+      assert [first] = trades(reach_snapshot([fueled("SHIP-1", "X1-A2", 200)]))
+      assert [second] = trades(reach_snapshot([fueled("SHIP-1", "X1-A2", 150)]))
+      assert first.id == second.id
+    end
+
+    test "re-observing the same Markets mints no trade for the same stranded Ship" do
+      ship = fueled("STRANDED-1", "X1-A2", 20)
+
+      reobserved =
+        reach_snapshot([ship], %{
+          as_of: ~U[2030-01-01 12:00:30Z],
+          markets: [
+            market("X1-A1", ~U[2030-01-01 11:59:00Z], [good("IRON", 10, 9, 40)]),
+            market("X1-A2", ~U[2030-01-01 12:00:30Z], [good("IRON", 25, 20, 40)])
+          ]
+        })
+
+      assert [] = trades(reach_snapshot([ship]))
+      assert [] = trades(reobserved)
+    end
+
+    test "the trade names only the Ships that can reach it and sizes to their hold" do
+      big_stranded = put_in(fueled("BIG-1", "X1-A2", 20).cargo.capacity, 80)
+      small_ready = put_in(fueled("SMALL-1", "X1-A2", 200).cargo.capacity, 10)
+
+      assert [candidate] = trades(reach_snapshot([big_stranded, small_ready]))
+      assert candidate.expected_outcomes.maximum_units == 10
+
+      assert %{capability: :fuel_reach, ships: ["SMALL-1"]} in candidate.required_capabilities
+    end
+  end
+
   test "a widened calibration margin in the snapshot widens the selection-time credit Reservation" do
     snapshot = Map.put(evidence_snapshot(), :credit_margin_percent, 50)
 
@@ -105,6 +339,32 @@ defmodule SpaceTraders.FleetPlanningTest do
              :stale_market_evidence,
              :insufficient_market_evidence
            ]
+  end
+
+  test "only current interpreted Listings support trades; each other state keeps its own reason" do
+    expected = %{
+      stale: :stale_market_evidence,
+      invalidated: :invalidated_market_evidence,
+      untraceable: :untraceable_market_evidence,
+      wrong_generation: :wrong_generation_market_evidence,
+      malformed: :malformed_market_evidence,
+      unavailable: :unavailable_market_evidence,
+      future: :inconsistent_market_evidence
+    }
+
+    for {state, reason} <- expected do
+      snapshot =
+        Map.update!(evidence_snapshot(), :markets, fn [source, destination] ->
+          [Map.put(source, :state, state), Map.put(destination, :state, :current)]
+        end)
+
+      assert {:ok, %{candidate_contributions: [], limitations: limitations}} =
+               FleetPlanning.plan_market(revision(), 0, snapshot)
+
+      assert %{subject: "market:X1:X1-A1", reason: ^reason} =
+               Enum.find(limitations, &(&1.subject == "market:X1:X1-A1")),
+             "#{state} must limit with #{reason}"
+    end
   end
 
   test "planning returns proposals and demands without allocation or execution records" do

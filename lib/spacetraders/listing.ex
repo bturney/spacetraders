@@ -83,10 +83,11 @@ defmodule SpaceTraders.Listing do
           case SpaceTraders.Evidence.get_market(
                  credential_ref,
                  waypoint.system_symbol,
-                 waypoint.symbol
+                 waypoint.symbol,
+                 bind: true
                ) do
-            {:ok, market} ->
-              record_market_observation(agent, waypoint, ships, market)
+            {:ok, %SpaceTraders.Evidence.Binding{value: market, observation: source}} ->
+              record_market_observation(agent, waypoint, ships, market, source)
 
               {[%{waypoint: waypoint.symbol, market: market, ships: ships} | listings],
                unavailable?}
@@ -217,13 +218,20 @@ defmodule SpaceTraders.Listing do
 
   defp system_from_headquarters(_), do: nil
 
-  defp record_market_observation(%AgentRecord{id: id} = agent, waypoint, [ship | _], market)
+  defp record_market_observation(
+         %AgentRecord{id: id} = agent,
+         waypoint,
+         [ship | _],
+         market,
+         source
+       )
        when is_integer(id) do
     Intelligence.observe_market(agent, waypoint.system_symbol, market,
       source: "get_market",
-      observing_ship_symbol: ship.symbol
+      observing_ship_symbol: ship.symbol,
+      evidence: source
     )
   end
 
-  defp record_market_observation(_agent, _waypoint, _ships, _market), do: :ok
+  defp record_market_observation(_agent, _waypoint, _ships, _market, _source), do: :ok
 end

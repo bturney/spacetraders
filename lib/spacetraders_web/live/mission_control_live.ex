@@ -177,9 +177,9 @@ defmodule SpaceTradersWeb.MissionControlLive do
               </p>
             </div>
             <div>
-              <p class="text-sm opacity-70">Realized net credit change</p>
+              <p class="text-sm opacity-70">Realized trade margin (net earnings unknown)</p>
               <p class="mt-1 font-semibold">
-                {realized_label(@projection.market_execution.realized.realized_net_credit_change)}
+                {realized_label(@projection.market_execution.realized.realized_trade_margin)}
               </p>
             </div>
             <div>

@@ -2,12 +2,12 @@ defmodule SpaceTraders.FleetExecutionTest do
   use SpaceTraders.DataCase, async: true
 
   import SpaceTraders.AgentFixtures
+  import SpaceTraders.EvidenceFixtures
   import SpaceTraders.ShipBody
 
   alias SpaceTraders.Test.CapacityDispositions
   alias SpaceTraders.API.Model.Waypoint
   alias SpaceTraders.Agent.{Operator, Scope}
-  alias SpaceTraders.Evidence.Observation
   alias SpaceTraders.Fleet.Intent
   alias SpaceTraders.Fleet.Ship
   alias SpaceTraders.FleetAllocation
@@ -107,8 +107,8 @@ defmodule SpaceTraders.FleetExecutionTest do
     end
   end
 
-  describe "reconcile_market_evidence/5" do
-    test "selects a Market Fleet Commitment from governed Market reach" do
+  describe "reconcile_market_domain/5" do
+    test "an API-capacity deferral publishes nothing and claims nothing" do
       {operator, agent, revision} = market_generation()
       scope = Scope.for_operator(operator)
 
@@ -117,10 +117,12 @@ defmodule SpaceTraders.FleetExecutionTest do
       market_observation(agent, "X1-A1", 10)
       market_observation(agent, "X1-A2", 25)
 
-      stub_market_agent(agent)
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        flunk("a capacity deferral sends no game request: #{conn.request_path}")
+      end)
 
-      assert {:ok, %{action: :deferred_for_capacity, comparison: comparison}} =
-               FleetExecution.reconcile_market_evidence(
+      assert {:ok, %{action: :deferred_for_capacity}} =
+               FleetExecution.reconcile_market_domain(
                  scope,
                  agent,
                  revision,
@@ -128,8 +130,7 @@ defmodule SpaceTraders.FleetExecutionTest do
                  sustained_capacity()
                )
 
-      assert [%{candidate_id: candidate_id, claims: ["SHIP-1"]}] = comparison.proposed_choices
-      assert is_binary(candidate_id)
+      assert Repo.aggregate(Portfolio, :count) == 0
     end
 
     test "still rejects candidates when governed evidence misses a required Marketplace" do
@@ -142,19 +143,20 @@ defmodule SpaceTraders.FleetExecutionTest do
 
       stub_market_agent(agent)
 
-      assert {:ok, %{action: :no_admissible_commitment, comparison: comparison}} =
-               FleetExecution.reconcile_market_evidence(scope, agent, revision, "X1", capacity())
+      assert {:ok, %{action: :no_admissible_commitment, selection: selection}} =
+               FleetExecution.reconcile_market_domain(scope, agent, revision, "X1", capacity())
 
-      assert comparison.proposed_choices == []
+      assert selection.commitments == []
+      assert selection.rejected != []
 
-      assert Enum.all?(comparison.alternatives, fn alternative ->
+      assert Enum.all?(selection.rejected, fn alternative ->
                :claim_conflict in alternative.reasons
              end)
 
       assert Repo.aggregate(Portfolio, :count) == 0
     end
 
-    test "proposes a profitable route from partial evidence while baseline coverage stays open" do
+    test "a profitable route from partial evidence wins while baseline coverage stays open" do
       {operator, agent, revision} = market_generation()
       scope = Scope.for_operator(operator)
 
@@ -166,21 +168,16 @@ defmodule SpaceTraders.FleetExecutionTest do
       market_observation(agent, "X1-A1", 10)
       market_observation(agent, "X1-A2", 25)
 
-      stub_market_agent(agent)
+      stub_activation_agent(agent)
 
-      assert {:ok, %{action: :deferred_for_capacity, comparison: comparison}} =
-               FleetExecution.reconcile_market_evidence(
-                 scope,
-                 agent,
-                 revision,
-                 "X1",
-                 sustained_capacity()
-               )
+      assert {:ok, %{action: :published, commitments: [commitment], planning: planning}} =
+               FleetExecution.reconcile_market_domain(scope, agent, revision, "X1", capacity())
 
-      assert [%{candidate_id: _candidate_id, claims: ["SHIP-1"]}] = comparison.proposed_choices
+      assert commitment.claims == ["SHIP-1"]
+      assert Enum.any?(commitment.dependencies, &Map.has_key?(&1, "evidence_id"))
 
       refute Enum.any?(
-               Enum.flat_map(comparison.planning, & &1.limitations),
+               Enum.flat_map(planning, & &1.limitations),
                &(&1.reason == :no_viable_market_routes)
              )
     end
@@ -197,12 +194,13 @@ defmodule SpaceTraders.FleetExecutionTest do
       market_observation(agent, "X1-A1", 10)
       market_observation(agent, "X1-A2", 10)
 
-      stub_market_agent(agent)
+      stub_lenient_agent(agent)
 
-      assert {:ok, %{action: :no_admissible_commitment, comparison: comparison}} =
-               FleetExecution.reconcile_market_evidence(scope, agent, revision, "X1", capacity())
+      assert {:ok, %{action: :published, commitments: [coverage], planning: planning}} =
+               FleetExecution.reconcile_market_domain(scope, agent, revision, "X1", capacity())
 
-      limitations = Enum.flat_map(comparison.planning, & &1.limitations)
+      refute Enum.any?(coverage.dependencies, &Map.has_key?(&1, "evidence_id"))
+      limitations = Enum.flat_map(planning, & &1.limitations)
 
       refute Enum.any?(limitations, &(&1.reason == :no_viable_market_routes))
 
@@ -231,7 +229,7 @@ defmodule SpaceTraders.FleetExecutionTest do
       end)
 
       assert {:error, :availability_unknown} =
-               FleetExecution.reconcile_market_evidence(scope, agent, revision, "X1", capacity())
+               FleetExecution.reconcile_market_domain(scope, agent, revision, "X1", capacity())
 
       assert Repo.aggregate(StrategyDecisionEpisode, :count) == 0
     end
@@ -249,13 +247,14 @@ defmodule SpaceTraders.FleetExecutionTest do
 
       assert {:ok,
               %{
-                action: :activated,
-                commitment: %Commitment{} = commitment,
+                action: :published,
+                commitments: [%Commitment{} = commitment],
                 portfolio: %Portfolio{},
-                round_trip: %Intent{} = intent
+                dispatched: dispatched
               }} =
-               FleetExecution.reconcile_market_evidence(scope, agent, revision, "X1", capacity())
+               FleetExecution.reconcile_market_domain(scope, agent, revision, "X1", capacity())
 
+      assert {:ok, %Intent{} = intent} = dispatched[commitment.candidate_id]
       assert Repo.get!(Commitment, commitment.id) == commitment
       assert intent.fleet_commitment_id == commitment.id
       assert intent.type == "buy"
@@ -276,26 +275,29 @@ defmodule SpaceTraders.FleetExecutionTest do
       market_observation(agent, "X1-A2", 25)
       stub_activation_agent(agent)
 
-      assert {:ok, %{action: :activated, portfolio: portfolio, round_trip: buy}} =
-               FleetExecution.reconcile_market_evidence(scope, agent, revision, "X1", capacity())
+      assert {:ok, %{action: :published, portfolio: portfolio, commitments: [commitment]}} =
+               FleetExecution.reconcile_market_domain(scope, agent, revision, "X1", capacity())
+
+      buy = Repo.get_by!(Intent, fleet_commitment_id: commitment.id, type: "buy")
 
       Repo.update!(
         Ecto.Changeset.change(buy, status: "completed", finished_at: DateTime.utc_now(:second))
       )
 
-      market_observation(agent, "X1-A1", 10, "refreshed")
+      market_observation(agent, "X1-A1", 10)
 
-      assert {:error, :unresolved_commitment_evidence} =
-               FleetExecution.reconcile_market_evidence(scope, agent, revision, "X1", capacity())
+      assert {:ok, %{action: :retained}} =
+               FleetExecution.reconcile_market_domain(scope, agent, revision, "X1", capacity())
 
       assert %Portfolio{id: id, superseded_at: nil} =
-               FleetAllocation.current_portfolio(scope, agent)
+               current = FleetAllocation.current_portfolio(scope, agent)
 
       assert id == portfolio.id
+      assert Enum.map(current.commitments, & &1.id) == [commitment.id]
     end
 
     # The handoff guard is bounded: a completed buy whose next leg never
-    # appeared cannot hold the Portfolio against replanning indefinitely.
+    # appeared cannot hold its Commitment against replanning indefinitely.
     test "a completed buy stops protecting its Commitment once the leg handoff window passes" do
       {operator, agent, revision} = market_generation()
       scope = Scope.for_operator(operator)
@@ -306,17 +308,19 @@ defmodule SpaceTraders.FleetExecutionTest do
       market_observation(agent, "X1-A2", 25)
       stub_activation_agent(agent)
 
-      assert {:ok, %{action: :activated, portfolio: portfolio, round_trip: buy}} =
-               FleetExecution.reconcile_market_evidence(scope, agent, revision, "X1", capacity())
+      assert {:ok, %{action: :published, commitments: [commitment]}} =
+               FleetExecution.reconcile_market_domain(scope, agent, revision, "X1", capacity())
 
+      buy = Repo.get_by!(Intent, fleet_commitment_id: commitment.id, type: "buy")
       stale = DateTime.utc_now(:second) |> DateTime.add(-600, :second)
       Repo.update!(Ecto.Changeset.change(buy, status: "completed", finished_at: stale))
-      market_observation(agent, "X1-A1", 10, "refreshed")
+      market_observation(agent, "X1-A1", 10)
 
-      assert {:ok, _} =
-               FleetExecution.reconcile_market_evidence(scope, agent, revision, "X1", capacity())
+      assert {:ok, %{action: :published, commitments: [replacement]}} =
+               FleetExecution.reconcile_market_domain(scope, agent, revision, "X1", capacity())
 
-      assert %Portfolio{superseded_at: %DateTime{}} = Repo.get!(Portfolio, portfolio.id)
+      assert replacement.candidate_id != commitment.candidate_id
+      assert %Commitment{unwind_state: :released} = Repo.get!(Commitment, commitment.id)
     end
 
     defp market_generation do
@@ -370,27 +374,25 @@ defmodule SpaceTraders.FleetExecutionTest do
       {operator, agent, revision}
     end
 
-    defp market_observation(agent, waypoint, purchase_price, variant \\ "") do
-      Repo.insert!(%Observation{
-        agent_id: agent.id,
-        subject: "market:X1:#{waypoint}",
-        operation_id: "get-market",
-        dependency_keys: ["market:X1:#{waypoint}"],
-        facts: %{
-          "trade_goods" => [
-            %{
-              "symbol" => "IRON",
-              "purchase_price" => purchase_price,
-              "sell_price" => purchase_price - 1,
-              "trade_volume" => 20,
-              "supply" => "MODERATE",
-              "activity" => "STATIC"
-            }
-          ]
-        },
-        response_fingerprint: "market-#{waypoint}-#{purchase_price}#{variant}",
+    # Each call is a distinct governed acquisition, so a re-observation with
+    # equal prices still carries new evidence identity.
+    defp market_observation(agent, waypoint, purchase_price) do
+      retained_market_listing(
+        agent,
+        "X1",
+        waypoint,
+        [
+          %{
+            symbol: "IRON",
+            purchase_price: purchase_price,
+            sell_price: purchase_price - 1,
+            trade_volume: 20,
+            supply: "MODERATE",
+            activity: "STATIC"
+          }
+        ],
         observed_at: SpaceTraders.Clock.utc_now()
-      })
+      )
     end
 
     defp stub_market_agent(agent) do
@@ -415,6 +417,43 @@ defmodule SpaceTraders.FleetExecutionTest do
             flunk("unexpected request: #{inspect(other)}")
         end
       end)
+    end
+
+    # Fleet reads answer; Ship execution beyond them is refused, which leaves
+    # dispatched Intents blocked without changing the allocation result.
+    defp stub_lenient_agent(agent) do
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/v2/my/agent"} ->
+            Req.Test.json(conn, %{
+              "data" => %{
+                "accountId" => "ACC",
+                "symbol" => agent.symbol,
+                "headquarters" => agent.headquarters,
+                "credits" => 5_000,
+                "startingFaction" => "COSMIC",
+                "shipCount" => 1
+              }
+            })
+
+          {"GET", "/v2/my/ships"} ->
+            Req.Test.json(conn, %{"data" => [ship_body("SHIP-1", %{"nav" => nav_at_a1()})]})
+
+          {"GET", "/v2/my/ships/SHIP-1"} ->
+            Req.Test.json(conn, %{"data" => ship_body("SHIP-1", %{"nav" => nav_at_a1()})})
+
+          _other ->
+            conn
+            |> Plug.Conn.put_status(400)
+            |> Req.Test.json(%{"error" => %{"code" => 4000, "message" => "refused by test"}})
+        end
+      end)
+    end
+
+    defp nav_at_a1 do
+      nav_body("DOCKED")
+      |> Map.put("systemSymbol", "X1")
+      |> Map.put("waypointSymbol", "X1-A1")
     end
 
     defp stub_activation_agent(agent) do
@@ -515,89 +554,6 @@ defmodule SpaceTraders.FleetExecutionTest do
       refute FleetExecution.reservation_covers_exposure?(commitment, revision(%{}), %{
                reservations: %{credits: 1_000}
              })
-    end
-  end
-
-  describe "eligible_market_commitment/4" do
-    test "returns the shadow-validated proposed choice that claims an owned Ship" do
-      agent = agent_fixture(operator_fixture())
-      owned = %{claims: ["SHIP-1"], reservations: %{credits: 200}, candidate_id: "candidate-1"}
-
-      other = %{
-        claims: ["SHIP-OTHER"],
-        reservations: %{credits: 200},
-        candidate_id: "candidate-2"
-      }
-
-      revision = revision(%{"hard_constraints" => ["Keep at least 500 credits available"]})
-
-      Req.Test.stub(SpaceTraders.API, fn conn ->
-        case conn.request_path do
-          "/v2/my/ships" ->
-            Req.Test.json(conn, %{"data" => [%{"symbol" => "SHIP-1"}]})
-
-          other ->
-            flunk("unexpected request: #{inspect(other)}")
-        end
-      end)
-
-      comparison = %{proposed_choices: [other, owned]}
-
-      assert %{claims: ["SHIP-1"]} =
-               FleetExecution.eligible_market_commitment(
-                 comparison,
-                 agent,
-                 revision,
-                 %{reservations: %{credits: 2_000}}
-               )
-    end
-
-    test "returns nil when no proposed choice claims an owned Ship" do
-      agent = agent_fixture(operator_fixture())
-      other = %{claims: ["SHIP-OTHER"], reservations: %{credits: 200}}
-      revision = revision(%{"hard_constraints" => ["Keep at least 500 credits available"]})
-
-      Req.Test.stub(SpaceTraders.API, fn conn ->
-        case conn.request_path do
-          "/v2/my/ships" ->
-            Req.Test.json(conn, %{"data" => [%{"symbol" => "SHIP-1"}]})
-
-          other ->
-            flunk("unexpected request: #{inspect(other)}")
-        end
-      end)
-
-      assert nil ==
-               FleetExecution.eligible_market_commitment(
-                 %{proposed_choices: [other]},
-                 agent,
-                 revision,
-                 %{reservations: %{credits: 2_000}}
-               )
-    end
-
-    test "returns nil when the proposed choice's reservation crosses the floor" do
-      agent = agent_fixture(operator_fixture())
-      choice = %{claims: ["SHIP-1"], reservations: %{credits: 1_501}}
-      revision = revision(%{"hard_constraints" => ["Keep at least 500 credits available"]})
-
-      Req.Test.stub(SpaceTraders.API, fn conn ->
-        case conn.request_path do
-          "/v2/my/ships" ->
-            Req.Test.json(conn, %{"data" => [%{"symbol" => "SHIP-1"}]})
-
-          other ->
-            flunk("unexpected request: #{inspect(other)}")
-        end
-      end)
-
-      assert nil ==
-               FleetExecution.eligible_market_commitment(
-                 %{proposed_choices: [choice]},
-                 agent,
-                 revision,
-                 %{reservations: %{credits: 2_000}}
-               )
     end
   end
 

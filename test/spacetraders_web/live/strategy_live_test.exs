@@ -5,7 +5,7 @@ defmodule SpaceTradersWeb.StrategyLiveTest do
   import Phoenix.LiveViewTest
   import SpaceTraders.EvidenceFixtures
   import SpaceTraders.ShipBody
-  alias SpaceTraders.API.Model.{Market, Waypoint}
+  alias SpaceTraders.API.Model.Waypoint
   alias SpaceTraders.Agent.Agent, as: AgentRecord
   alias SpaceTraders.FleetStrategy
   alias SpaceTraders.Intelligence
@@ -211,6 +211,38 @@ defmodule SpaceTradersWeb.StrategyLiveTest do
     assert html =~ "Alternatives"
   end
 
+  test "activation refuses a comparison captured before a Market observation changed", %{
+    conn: conn,
+    operator: operator,
+    scope: scope
+  } do
+    agent =
+      Repo.insert!(%AgentRecord{
+        operator_id: operator.id,
+        symbol: "PLANNER",
+        faction: "COSMIC",
+        headquarters: "X1-A1"
+      })
+
+    Enum.each(["X1-A1", "X1-A2"], &observe_waypoint(agent, &1))
+    observe_market(agent, "X1-A1", 10, 9)
+    observe_market(agent, "X1-A2", 25, 20)
+
+    assert {:ok, _draft} = FleetStrategy.select_preset(scope, "steady_growth")
+    {:ok, view, _html} = live(conn, ~p"/strategy")
+
+    observe_market(agent, "X1-A1", 12, 11)
+
+    html = render_click(view, "activate", %{})
+
+    assert html =~ "Market evidence changed"
+    assert FleetStrategy.get(scope).active_revision == nil
+
+    # The refreshed comparison is current, so the next activation proceeds.
+    render_click(view, "activate", %{})
+    assert FleetStrategy.get(scope).active_revision.number == 1
+  end
+
   test "discard removes the persistent draft without changing active intent", %{
     conn: conn,
     scope: scope
@@ -271,8 +303,6 @@ defmodule SpaceTradersWeb.StrategyLiveTest do
     Enum.each(["X1-A1", "X1-A2"], &observe_waypoint(agent, &1))
     observe_market(agent, "X1-A1", 10, 9)
     observe_market(agent, "X1-A2", 25, 20)
-    governed_market_observation(agent, "X1", "X1-A1", 10, 9)
-    governed_market_observation(agent, "X1", "X1-A2", 25, 20)
 
     Req.Test.stub(SpaceTraders.API, fn conn ->
       case conn.request_path do
@@ -336,8 +366,6 @@ defmodule SpaceTradersWeb.StrategyLiveTest do
     Enum.each(["X1-A1", "X1-A2"], &observe_waypoint(agent, &1))
     observe_market(agent, "X1-A1", 10, 9)
     observe_market(agent, "X1-A2", 25, 20)
-    governed_market_observation(agent, "X1", "X1-A1", 10, 9)
-    governed_market_observation(agent, "X1", "X1-A2", 25, 20)
 
     Req.Test.stub(SpaceTraders.API, fn conn ->
       case conn.request_path do
@@ -524,29 +552,6 @@ defmodule SpaceTradersWeb.StrategyLiveTest do
   end
 
   defp observe_market(agent, waypoint, purchase_price, sell_price) do
-    market =
-      Market.from_json(%{
-        "symbol" => waypoint,
-        "exports" => [%{"symbol" => "IRON_ORE"}],
-        "imports" => [%{"symbol" => "IRON_ORE"}],
-        "exchange" => [],
-        "tradeGoods" => [
-          %{
-            "symbol" => "IRON_ORE",
-            "type" => "EXPORT",
-            "tradeVolume" => 20,
-            "supply" => "MODERATE",
-            "activity" => "STATIC",
-            "purchasePrice" => purchase_price,
-            "sellPrice" => sell_price
-          }
-        ]
-      })
-
-    assert {:ok, _} =
-             Intelligence.observe_market(agent, "X1", market,
-               source: "get_market",
-               observing_ship_symbol: "PLANNER-1"
-             )
+    governed_market_observation(agent, "X1", waypoint, purchase_price, sell_price)
   end
 end
