@@ -542,6 +542,25 @@ defmodule SpaceTraders.FleetAllocationPublishTest do
       assert Enum.any?(progress.unknown, &(&1.reason == "no sale receipt yet"))
     end
 
+    test "an unproven trip keeps per-trip margins and leaves the Episode margin unknown" do
+      %{agent: agent, scope: scope, generation: generation, revision: revision} =
+        allocation_fixture()
+
+      portfolio = publish_two!(agent, scope, generation, revision)
+      [first, second] = Enum.sort_by(portfolio.commitments, & &1.candidate_id)
+
+      trade_intent!(portfolio, first, "buy", 50, 10)
+      trade_intent!(portfolio, first, "sell", 150, 10)
+      trade_intent!(portfolio, second, "buy", 40, 10)
+      trade_intent!(portfolio, second, "sell", nil, 10)
+
+      progress = FleetAllocation.trade_progress(portfolio.strategy_decision_episode_id)
+
+      assert [%{commitment_id: first_id, trade_margin: 100}] = progress.round_trips
+      assert first_id == first.id
+      assert progress.trade_margin == "unknown"
+    end
+
     test "a completed sale without a receipt manufactures no amount" do
       %{scope: scope, generation: generation, revision: revision} = allocation_fixture()
       portfolio = publish!(scope, generation, revision)

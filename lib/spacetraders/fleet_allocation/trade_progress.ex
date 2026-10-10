@@ -107,8 +107,9 @@ defmodule SpaceTraders.FleetAllocation.TradeProgress do
   # Trade Margin is per Completed Round Trip; an Episode-wide figure is shown
   # only when every traded Commitment proved its round trip.
   defp aggregate_margin(trips) do
-    proven = for {:ok, trip} <- trips, do: trip
-    if proven == [], do: @unknown, else: Enum.sum_by(proven, & &1.trade_margin)
+    if trips != [] and Enum.all?(trips, &match?({:ok, _}, &1)),
+      do: Enum.sum_by(trips, fn {:ok, trip} -> trip.trade_margin end),
+      else: @unknown
   end
 
   defp open_commitments(intents) do
