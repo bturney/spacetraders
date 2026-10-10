@@ -171,6 +171,217 @@ defmodule SpaceTraders.MarketDomainAllocationTest do
     end
   end
 
+  describe "Observation Demand retention through Allocation" do
+    test "a selected trade leaves never-observed coverage open with its original timing, then coverage resumes" do
+      fleet = fleet([@frigate])
+
+      :ok =
+        SpaceTraders.FleetIntelligence.sync_market_observation_demands(
+          fleet.agent,
+          fleet.revision,
+          @system
+        )
+
+      before = open_market_demands(fleet)
+      assert Map.has_key?(before, "market:X1:X1-A3"), inspect(Map.keys(before))
+
+      assert {:ok, %{action: :published}} = reconcile(fleet)
+      assert %{"market_trade" => [@frigate]} = published_work(fleet)
+
+      # The trade did not withdraw, refresh or re-time the unfulfilled Demand.
+      assert open_market_demands(fleet)["market:X1:X1-A3"] == before["market:X1:X1-A3"]
+
+      # Valid retained evidence is not reacquired: its refresh waits for the
+      # freshness budget instead of being due now.
+      {_id, due_at, _deadline, _revision} = open_market_demands(fleet)["market:X1:X1-A1"]
+      assert DateTime.compare(due_at, DateTime.utc_now()) == :gt
+
+      # The trade finishes and its spread disappears: the one capable Ship is
+      # free for the coverage the Demand still asks for.
+      finish_intents(commitment_for(fleet, @frigate), DateTime.add(DateTime.utc_now(), -600))
+      listing(fleet.agent, "X1-A2", 10, 9)
+
+      assert {:ok, %{action: :published, dispatched: dispatched}} = reconcile(fleet)
+      assert %{"market_coverage" => [@frigate]} = published_work(fleet)
+      assert [{:ok, _intent}] = Map.values(dispatched)
+      assert Map.has_key?(open_market_demands(fleet), "market:X1:X1-A3")
+    end
+  end
+
+  describe "capacity deferral and missing evidence" do
+    test "a capacity-deferred request names its retry time and keeps the Demand's earliest-useful time" do
+      fleet = fleet([@frigate, @probe])
+
+      :ok =
+        SpaceTraders.FleetIntelligence.sync_market_observation_demands(
+          fleet.agent,
+          fleet.revision,
+          @system
+        )
+
+      before = open_market_demands(fleet)
+      deferral = CapacityDispositions.defer()
+
+      assert {:ok,
+              %{
+                action: :deferred_for_capacity,
+                retry_at: retry_at,
+                reason: :capacity_deferred,
+                pending_demands: pending
+              }} =
+               FleetExecution.reconcile_market_domain(
+                 fleet.scope,
+                 fleet.agent,
+                 fleet.revision,
+                 @system,
+                 deferral
+               )
+
+      assert retry_at == deferral.retry_at
+      assert Enum.any?(pending, &(&1.subject == "market:X1:X1-A3"))
+      assert open_market_demands(fleet) == before
+      assert Repo.aggregate(StrategyDecisionEpisode, :count) == 0
+    end
+
+    test "invalid evidence is explained as a Market evidence limitation, not capacity or infeasibility" do
+      fleet = fleet([@frigate])
+
+      Repo.update_all(SpaceTraders.Intelligence.Fact, set: [invalidated_at: DateTime.utc_now()])
+
+      assert {:ok,
+              %{
+                action: :no_admissible_commitment,
+                reason: :market_evidence_unusable,
+                neutral_wait: nil,
+                evidence_limitations: limitations
+              } = result} = reconcile(fleet)
+
+      refute Map.has_key?(result, :retry_at)
+      assert Enum.all?(limitations, &(&1.reason == :invalidated_market_evidence))
+
+      # Neither a Neutral Wait nor an infeasibility verdict is recorded.
+      assert Repo.aggregate(StrategyDecisionEpisode, :count) == 0
+    end
+  end
+
+  describe "price and source changes" do
+    test "a changed price replans the affected trade and keeps unrelated retained Commitments" do
+      fleet = fleet([@frigate, @probe])
+
+      assert {:ok, %{action: :published}} = reconcile(fleet)
+      trade = commitment_for(fleet, @frigate)
+      coverage = commitment_for(fleet, @probe)
+      %Portfolio{id: portfolio_id} = FleetAllocation.current_portfolio(fleet.scope, fleet.agent)
+
+      # The trade leg finished long ago; the scout is still working.
+      finish_intents(trade, DateTime.add(DateTime.utc_now(), -600))
+      listing(fleet.agent, "X1-A1", 10, 9)
+      listing(fleet.agent, "X1-A2", 40, 35)
+
+      assert {:ok, %{action: :published, commitments: [replanned]}} = reconcile(fleet)
+
+      current = FleetAllocation.current_portfolio(fleet.scope, fleet.agent)
+      assert current.id == portfolio_id
+      kept = Enum.find(current.commitments, &(&1.id == coverage.id))
+      assert kept.claims == coverage.claims
+      assert kept.reservations == coverage.reservations
+
+      assert replanned.claims == trade.claims
+      assert replanned.dependencies != trade.dependencies
+      assert replanned.reservations["credits"] > 0
+
+      claims = Enum.flat_map(current.commitments, & &1.claims)
+      assert claims == Enum.uniq(claims)
+    end
+  end
+
+  describe "buy-to-sell continuation" do
+    test "a completed buy whose sell was never requested sells on the next Market boundary, once" do
+      fleet = fleet([@frigate])
+
+      assert {:ok, %{action: :published}} = reconcile(fleet)
+      trade = commitment_for(fleet, @frigate)
+      complete_buy(trade, "completed")
+
+      # A new Market observation (or a restart) reaches the same entry.
+      listing(fleet.agent, "X1-A2", 30, 25)
+      assert {:ok, %{action: :retained}} = reconcile(fleet)
+
+      assert %{"buy" => 1, "sell" => 1} = intent_counts(trade)
+      assert %Intent{} = Repo.get_by!(Intent, fleet_commitment_id: trade.id, type: "sell")
+
+      # A later boundary neither buys nor sells again.
+      assert {:ok, %{action: :retained}} = reconcile(fleet)
+      assert %{"buy" => 1, "sell" => 1} = intent_counts(trade)
+    end
+
+    test "a buy whose effect is unconfirmed is never replayed or continued" do
+      fleet = fleet([@frigate])
+
+      assert {:ok, %{action: :published}} = reconcile(fleet)
+      trade = commitment_for(fleet, @frigate)
+      complete_buy(trade, "awaiting_confirmation")
+
+      listing(fleet.agent, "X1-A2", 30, 25)
+      assert {:ok, %{action: :retained}} = reconcile(fleet)
+
+      assert %{"buy" => 1} = counts = intent_counts(trade)
+      refute Map.has_key?(counts, "sell")
+    end
+  end
+
+  defp complete_buy(commitment, status) do
+    Repo.update_all(
+      from(intent in Intent,
+        where: intent.fleet_commitment_id == ^commitment.id and intent.type == "buy"
+      ),
+      set: [
+        status: status,
+        finished_at: DateTime.utc_now(:second),
+        last_action_result: %{"units" => 40, "transaction" => %{"total_price" => 400}}
+      ]
+    )
+  end
+
+  defp intent_counts(commitment) do
+    Repo.all(
+      from intent in Intent,
+        where: intent.fleet_commitment_id == ^commitment.id,
+        group_by: intent.type,
+        select: {intent.type, count(intent.id)}
+    )
+    |> Map.new()
+  end
+
+  describe "last-chance authority" do
+    test "publication is refused when a newer Market observation superseded the planned evidence" do
+      fleet = fleet([@frigate])
+      assert {:ok, %{action: :published, commitments: [trade]}} = reconcile(fleet)
+
+      listing(fleet.agent, "X1-A1", 10, 9)
+      listing(fleet.agent, "X1-A2", 40, 35)
+
+      assert {:error, :stale_evidence} =
+               FleetExecution.revalidate_trade_evidence(fleet.agent, [trade])
+    end
+
+    test "the dispatched buy cannot spend above the quote the decision was planned on" do
+      fleet = fleet([@frigate])
+
+      assert {:ok, %{action: :published}} = reconcile(fleet)
+      trade = commitment_for(fleet, @frigate)
+
+      buy = Repo.get_by!(Intent, fleet_commitment_id: trade.id, type: "buy")
+      assert buy.parameters["max_price"] == 10
+    end
+  end
+
+  defp open_market_demands(fleet) do
+    fleet.agent
+    |> SpaceTraders.Evidence.list_open_demands()
+    |> Map.new(&{&1.subject, {&1.id, &1.due_at, &1.deadline_at, &1.strategy_revision_id}})
+  end
+
   defp reconcile(fleet) do
     FleetExecution.reconcile_market_domain(
       fleet.scope,
@@ -232,10 +443,10 @@ defmodule SpaceTraders.MarketDomainAllocationTest do
     |> Enum.find(&(&1.claims == ["#{fleet.agent.symbol}-#{ship_symbol}"]))
   end
 
-  defp finish_intents(commitment) do
+  defp finish_intents(commitment, finished_at \\ DateTime.utc_now()) do
     Repo.update_all(
       from(intent in Intent, where: intent.fleet_commitment_id == ^commitment.id),
-      set: [status: "completed", finished_at: DateTime.utc_now(:second)]
+      set: [status: "completed", finished_at: DateTime.truncate(finished_at, :second)]
     )
   end
 
