@@ -3427,6 +3427,16 @@ defmodule SpaceTraders.Fleet.Intents do
   defp block_cargo_intent(intent, reason) when capacity_pressure(reason),
     do: defer_for_api_capacity(intent)
 
+  # A Commitment's purchase refused because the live price crossed the planned
+  # maximum has lost the plan's validity condition. Nothing was bought, so it
+  # ends as infeasible instead of holding the Ship in a blocked state nobody
+  # resolves, and Fleet Allocation replans from the fresh evidence.
+  defp block_cargo_intent(
+         %Intent{caller: "commitment", type: "buy"} = intent,
+         {:price_constraint, _price, _max_price} = reason
+       ),
+       do: mark_infeasible(intent, reason)
+
   defp block_cargo_intent(intent, reason) do
     if authoritative_infeasibility?(reason) do
       mark_infeasible(intent, reason)

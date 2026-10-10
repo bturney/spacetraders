@@ -450,6 +450,115 @@ defmodule SpaceTraders.RuntimeQualification do
       assert Enum.any?(open_gaps, &(&1.subject =~ "A4"))
     end
 
+    test "a runtime restart with Cargo in flight neither duplicates the buy nor strands the Cargo",
+         %{conn: conn} do
+      game = start_fleet_game()
+      {_conn, agent} = activate_fresh_generation(conn)
+      drive(game, &frigate_hauling?/1, 12)
+      assert frigate_hauling?(FleetGame.snapshot(game)), fleet_trace(FleetGame.snapshot(game))
+      settle_runtime()
+
+      # Scouting is still owed when the runtime goes down.
+      owed = open_demand_subjects()
+      assert "market:X1-UX81:X1-UX81-A4" in owed
+      before_restart = length(FleetGame.snapshot(game).requests)
+
+      # Cross-seam qualification: interrupt the production runtime while the
+      # frigate is in flight, then let production boot rebuild the work.
+      assert :ok = stop_supervised!(DemandScheduler)
+      assert :ok = stop_supervised!(Reconciler)
+      SpaceTraders.Quiesced.stop_all_ships()
+      advance_time(60)
+      start_runtime()
+      start_supervised!({ShipServerBoot, []})
+
+      drive(game, &fleet_sold?/1, 30)
+      state = FleetGame.snapshot(game)
+      assert fleet_sold?(state), fleet_trace(state)
+      {before_sale, [sale | _]} = Enum.split_while(state.requests, &(not sale?(&1)))
+
+      # One purchase for that Commitment, all of it sold: nothing was bought
+      # again after the restart and no Cargo was stranded or lost.
+      assert [purchase] = Enum.filter(before_sale, &ship_post?(&1, "BASELINE-1", "purchase"))
+      assert purchase.transaction["units"] == 40
+      assert sale.transaction["units"] == 40
+      assert Enum.take(state.requests, before_restart) |> Enum.count(&sale?/1) == 0
+
+      # No Neutral Wait was invented and nothing was rejected without a reason.
+      refute Repo.exists?(
+               from e in SpaceTraders.FleetAllocation.StrategyDecisionEpisode,
+                 where: e.selection_kind == :neutral_wait
+             )
+
+      # The unrelated scouting Commitment survived: the Marketplace owed an
+      # observation before the restart is eventually observed.
+      drive(game, fn s -> Enum.any?(s.requests, &market_read?(&1, "A4")) end, 30)
+      assert Enum.any?(FleetGame.snapshot(game).requests, &market_read?(&1, "A4"))
+
+      refute Enum.any?(
+               market_interpretation(agent).coverage_gaps,
+               &(&1.reason == :never_observed)
+             )
+    end
+
+    test "a source price that moves after planning is refused and replanned from fresh evidence",
+         %{conn: conn} do
+      game = start_fleet_game()
+      {_conn, _agent} = activate_fresh_generation(conn)
+      drive(game, &probe_departed?/1, 6)
+      assert probe_departed?(FleetGame.snapshot(game))
+
+      # The source Market reprices while the probe is still travelling: every
+      # retained Listing still says 10, the game now asks 14 (still profitable).
+      FleetGame.set_good(game, "X1-UX81-A1", "IRON_ORE", purchase_price: 14)
+
+      drive(game, &fleet_sold?/1, 30)
+      state = FleetGame.snapshot(game)
+      assert fleet_sold?(state), fleet_trace(state)
+      {before_sale, [sale | _]} = Enum.split_while(state.requests, &(not sale?(&1)))
+
+      # Nothing was bought at the planned price: the refused purchase never
+      # reached transport, and the replanned one pays the fresh price.
+      assert [purchase] = Enum.filter(before_sale, &ship_post?(&1, "BASELINE-1", "purchase"))
+      assert purchase.transaction["pricePerUnit"] == 14
+
+      # The refused Intent ended with its reason; the Commitment replanned
+      # instead of holding the Ship in a blocked state nobody resolves.
+      assert [
+               {"infeasible", %{"evidence" => %{"reason" => "price_constraint"}}},
+               {"completed", _}
+             ] =
+               buy_intents() |> Enum.take(2)
+
+      # Compatible work was retained: the probe kept scouting throughout.
+      assert "BASELINE-2" in ship_symbols_of("acquire_intelligence")
+      assert Enum.any?(before_sale, &market_read?(&1, "A3"))
+
+      progress = FleetAllocation.trade_progress(first_trade_episode_id())
+      assert {progress.credits_spent, progress.credits_received} == {40 * 14, 40 * 30}
+      assert progress.trade_margin == 40 * (30 - 14)
+      assert sale.transaction["totalPrice"] == 1200
+    end
+
+    test "a source price that makes the route unprofitable buys nothing and keeps scouting",
+         %{conn: conn} do
+      game = start_fleet_game()
+      {_conn, _agent} = activate_fresh_generation(conn)
+      drive(game, &probe_departed?/1, 6)
+      FleetGame.set_good(game, "X1-UX81-A1", "IRON_ORE", purchase_price: 35)
+
+      drive(game, fn s -> Enum.any?(s.requests, &market_read?(&1, "A4")) end, 30)
+      state = FleetGame.snapshot(game)
+
+      # The repriced route loses money, so no IRON_ORE was bought at any price
+      # and the refused Intent is not left blocking the Ship. (The Fleet may
+      # still find the unrelated COPPER_ORE route; that is useful work.)
+      refute Enum.any?(purchases(state), &(&1.body["symbol"] == "IRON_ORE"))
+      assert Enum.any?(state.requests, &market_read?(&1, "A4"))
+      assert [{"infeasible", _} | _] = buy_intents()
+      refute Repo.exists?(from i in SpaceTraders.Fleet.Intent, where: i.status == "blocked")
+    end
+
     # The source Listing was observed while the probe set out for the distant
     # Market. Each fact below is one way that retained evidence stops being able
     # to authorize a purchase before the distant observation completes the
@@ -489,6 +598,28 @@ defmodule SpaceTraders.RuntimeQualification do
         assert [_one] = Enum.filter(before_sale, &ship_post?(&1, "BASELINE-1", "purchase"))
       end
     end
+  end
+
+  defp frigate_hauling?(state) do
+    frigate = state.ships["BASELINE-1"]
+    frigate.status == "IN_TRANSIT" and map_size(frigate.cargo) > 0
+  end
+
+  defp market_interpretation(agent) do
+    SpaceTraders.Intelligence.market_interpretation(
+      agent,
+      FleetGame.system(),
+      SpaceTraders.Clock.utc_now()
+    )
+  end
+
+  defp buy_intents do
+    Repo.all(
+      from i in SpaceTraders.Fleet.Intent,
+        where: i.type == "buy",
+        order_by: i.id,
+        select: {i.status, i.last_action_result}
+    )
   end
 
   defp probe_departed?(state),
@@ -653,7 +784,7 @@ defmodule SpaceTraders.RuntimeQualification do
       Repo.all(
         from i in SpaceTraders.Fleet.Intent,
           order_by: i.id,
-          select: {i.id, i.type, i.status, i.target_waypoint}
+          select: {i.id, i.type, i.status, i.target_waypoint, i.blocker}
       )
 
     inspect(
