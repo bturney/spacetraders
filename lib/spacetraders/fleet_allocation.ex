@@ -1642,7 +1642,7 @@ defmodule SpaceTraders.FleetAllocation do
 
   defp role_cost(_claim, _contribution), do: {0, 0}
 
-  defp claim_supports?(%{roles: roles, capabilities: capabilities}, contribution)
+  defp claim_supports?(%{roles: roles, capabilities: capabilities} = claim, contribution)
        when is_list(roles) and is_map(capabilities) do
     roles_satisfied? =
       Enum.all?(contribution.required_roles, fn requirement ->
@@ -1659,6 +1659,9 @@ defmodule SpaceTraders.FleetAllocation do
             MapSet.new(waypoints),
             MapSet.new(Map.get(capabilities, :market_access, []))
           )
+
+        %{capability: :fuel_reach, ships: ships} ->
+          claim_id(claim) in ships
 
         %{capability: :resource_ship, value: symbol} ->
           Map.get(capabilities, :resource_ship) == symbol

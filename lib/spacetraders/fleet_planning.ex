@@ -2260,7 +2260,8 @@ defmodule SpaceTraders.FleetPlanning do
            demand_deadline_seconds: demand_deadline_seconds,
            observation_costs: observation_costs,
            credit_margin_percent: credit_margin_percent,
-           claimable_hold: claimable_hold(Map.get(snapshot, :ships)),
+           claimable_ships: claimable_ships(Map.get(snapshot, :ships)),
+           waypoint_coordinates: waypoint_coordinates(Map.get(snapshot, :waypoint_coordinates)),
            credit_headroom: Map.get(snapshot, :credit_headroom),
            agent_id: Map.get(snapshot, :agent_id),
            coverage_authoritative: Map.has_key?(snapshot, :baseline_subjects),
@@ -2279,29 +2280,46 @@ defmodule SpaceTraders.FleetPlanning do
   defp valid_headroom?(nil), do: true
   defp valid_headroom?(credits), do: is_integer(credits) and credits >= 0
 
-  # The largest free Cargo any claimable Ship offers, or `nil` when the
-  # snapshot carries no Ship evidence (legacy callers keep Market-depth
-  # sizing). Order-independent: a maximum, never a first match.
-  defp claimable_hold(ships) when is_list(ships) do
+  # Claimable Ships with their free Cargo and, when evidenced, fuel and
+  # position; `nil` when the snapshot carries no Ship evidence (legacy
+  # callers keep Market-depth sizing and no fuel check).
+  defp claimable_ships(ships) when is_list(ships) do
     ships
-    |> Enum.map(fn
-      %{cargo: %{capacity: capacity, units: units}}
-      when is_integer(capacity) and is_integer(units) ->
-        max(capacity - units, 0)
-
-      _ ->
-        0
+    |> Enum.map(fn ship ->
+      %{
+        symbol: Map.get(ship, :symbol),
+        free_cargo: free_cargo(ship),
+        fuel: Map.get(ship, :fuel),
+        waypoint: Map.get(ship, :waypoint),
+        position: Map.get(ship, :position),
+        flight_mode: Map.get(ship, :flight_mode) || "CRUISE"
+      }
     end)
-    |> Enum.max(fn -> 0 end)
+    |> Enum.sort_by(&to_string(&1.symbol))
   end
 
-  defp claimable_hold(_ships), do: nil
+  defp claimable_ships(_ships), do: nil
+
+  defp free_cargo(%{cargo: %{capacity: capacity, units: units}})
+       when is_integer(capacity) and is_integer(units),
+       do: max(capacity - units, 0)
+
+  defp free_cargo(_ship), do: 0
+
+  defp waypoint_coordinates(coordinates) when is_map(coordinates), do: coordinates
+  defp waypoint_coordinates(_coordinates), do: %{}
 
   # Units a Ship can actually carry and the Agent can actually buy: Market
-  # depth, claimable hold, then credit headroom at the calibrated margin.
-  defp tradable_units(source_good, destination_good, snapshot) do
+  # depth, the largest free hold among the Ships that can reach the route,
+  # then credit headroom at the calibrated margin.
+  defp tradable_units(source_good, destination_good, snapshot, reaching) do
     depth = min(source_good.trade_volume, destination_good.trade_volume)
-    held = if snapshot.claimable_hold, do: min(depth, snapshot.claimable_hold), else: depth
+
+    held =
+      case reaching do
+        nil -> depth
+        ships -> min(depth, ships |> Enum.map(& &1.free_cargo) |> Enum.max(fn -> 0 end))
+      end
 
     case snapshot.credit_headroom do
       nil ->
@@ -2317,6 +2335,114 @@ defmodule SpaceTraders.FleetPlanning do
           affordable -> min(held, affordable)
         end
     end
+  end
+
+  # The claimable Ships that can fly from where they are to the source, then
+  # on to the destination, refuelling only at Markets known to sell FUEL.
+  # Execution refuses the same trade with `no_confirmed_reachable_refuel_stop`
+  # from the same facts, so proposing it would only fail and re-plan.
+  defp reaching_ships(nil, _source, _destination, _snapshot, _stops), do: nil
+
+  defp reaching_ships(ships, source, destination, snapshot, stops) do
+    Enum.filter(ships, &reaches?(&1, source, destination, snapshot.waypoint_coordinates, stops))
+  end
+
+  defp fuel_stops(markets) do
+    for market <- markets,
+        Enum.any?(market.trade_goods, &(&1.symbol == "FUEL")),
+        into: MapSet.new(),
+        do: market.waypoint
+  end
+
+  defp reaches?(
+         %{fuel: %{current: current, capacity: capacity}, waypoint: waypoint} = ship,
+         source,
+         destination,
+         coordinates,
+         stops
+       )
+       when is_integer(current) and is_integer(capacity) and capacity > 0 and
+              is_binary(waypoint) do
+    coordinates =
+      case ship.position do
+        %{x: x, y: y} when is_integer(x) and is_integer(y) ->
+          Map.put(coordinates, waypoint, %{x: x, y: y})
+
+        _ ->
+          coordinates
+      end
+
+    leg = &arrival_fuel(&1, &2, &3, capacity, ship.flight_mode, coordinates, stops)
+
+    case leg.(waypoint, source, current) do
+      :unreachable -> false
+      :unknown -> true
+      fuel -> leg.(source, destination, fuel) != :unreachable
+    end
+  end
+
+  # No tank (a solar probe) or no fuel evidence: fuel cannot rule it out.
+  defp reaches?(_ship, _source, _destination, _coordinates, _stops), do: true
+
+  # The most fuel a Ship can hold on arriving at `to` from `from`, refuelling
+  # to capacity at any known FUEL Market on the way; `:unknown` without the
+  # coordinates or flight mode to estimate a leg.
+  defp arrival_fuel(from, to, fuel, capacity, mode, coordinates, stops) do
+    fuel = if MapSet.member?(stops, from), do: capacity, else: fuel
+
+    with %{} = origin <- coordinates[from],
+         %{} = target <- coordinates[to],
+         {:ok, direct} <- leg_fuel(origin, target, from == to, mode) do
+      via =
+        for stop <- reachable_stops(from, origin, fuel, capacity, mode, coordinates, stops),
+            {:ok, cost} <- [leg_fuel(coordinates[stop], target, stop == to, mode)],
+            cost <= capacity,
+            do: capacity - cost
+
+      [if(direct <= fuel, do: fuel - direct) | via]
+      |> Enum.reject(&is_nil/1)
+      |> Enum.max(fn -> :unreachable end)
+    else
+      _ -> :unknown
+    end
+  end
+
+  defp leg_fuel(_origin, _target, true, _mode), do: {:ok, 0}
+
+  defp leg_fuel(origin, target, false, mode),
+    do: SpaceTraders.Fleet.Intents.navigation_fuel_estimate(origin, target, mode)
+
+  # Known FUEL Markets reachable from `from`: the first hop on the fuel in
+  # the tank, every later hop on a full tank.
+  defp reachable_stops(from, origin, fuel, capacity, mode, coordinates, stops) do
+    located =
+      for stop <- stops, stop != from, %{} = point <- [coordinates[stop]], do: {stop, point}
+
+    first =
+      for {stop, point} <- located,
+          {:ok, cost} <- [leg_fuel(origin, point, false, mode)],
+          cost <= fuel,
+          into: MapSet.new(),
+          do: stop
+
+    expand_stops(first, MapSet.to_list(first), located, capacity, mode)
+  end
+
+  defp expand_stops(reached, [], _located, _capacity, _mode), do: reached
+
+  defp expand_stops(reached, frontier, located, capacity, mode) do
+    points = Map.new(located)
+
+    next =
+      for stop <- frontier,
+          {other, point} <- located,
+          not MapSet.member?(reached, other),
+          {:ok, cost} <- [leg_fuel(points[stop], point, false, mode)],
+          cost <= capacity,
+          uniq: true,
+          do: other
+
+    expand_stops(MapSet.union(reached, MapSet.new(next)), next, located, capacity, mode)
   end
 
   # Without an explicit authoritative baseline the snapshot's own Market
@@ -2505,15 +2631,27 @@ defmodule SpaceTraders.FleetPlanning do
   end
 
   defp candidate_routes(markets, revision, objective_index, objective, snapshot) do
+    stops = fuel_stops(markets)
+
     candidates =
       for source <- markets,
           destination <- markets,
           source.subject != destination.subject,
+          # A generator, not a filter: `nil` (no Ship evidence) is a value.
+          reaching <- [
+            reaching_ships(
+              snapshot.claimable_ships,
+              source.waypoint,
+              destination.waypoint,
+              snapshot,
+              stops
+            )
+          ],
           source_good <- source.trade_goods,
           destination_good <- destination.trade_goods,
           source_good.symbol == destination_good.symbol,
           destination_good.sell_price > source_good.purchase_price,
-          units = tradable_units(source_good, destination_good, snapshot),
+          units = tradable_units(source_good, destination_good, snapshot, reaching),
           units > 0 do
         contribution(
           revision,
@@ -2524,7 +2662,8 @@ defmodule SpaceTraders.FleetPlanning do
           destination,
           destination_good,
           snapshot,
-          units
+          units,
+          reaching
         )
       end
 
@@ -2551,7 +2690,8 @@ defmodule SpaceTraders.FleetPlanning do
          destination,
          destination_good,
          snapshot,
-         units
+         units,
+         reaching
        ) do
     spread = destination_good.sell_price - source_good.purchase_price
 
@@ -2605,13 +2745,14 @@ defmodule SpaceTraders.FleetPlanning do
         unaccounted_costs: [:fuel, :travel_time]
       },
       required_roles: [%{role: :market_trader, count: 1}],
-      required_capabilities: [
-        %{capability: :cargo_transport, minimum_capacity: units},
-        %{
-          capability: :market_access,
-          waypoints: Enum.sort([source.waypoint, destination.waypoint])
-        }
-      ],
+      required_capabilities:
+        [
+          %{capability: :cargo_transport, minimum_capacity: units},
+          %{
+            capability: :market_access,
+            waypoints: Enum.sort([source.waypoint, destination.waypoint])
+          }
+        ] ++ fuel_reach(reaching),
       required_resources: required_resources,
       dependencies: dependencies,
       validity: %{
@@ -2626,6 +2767,10 @@ defmodule SpaceTraders.FleetPlanning do
       alternatives: []
     }
   end
+
+  # Allocation may claim only a Ship Planning found able to reach the route.
+  defp fuel_reach(nil), do: []
+  defp fuel_reach(ships), do: [%{capability: :fuel_reach, ships: Enum.map(ships, & &1.symbol)}]
 
   defp dependency(market, snapshot) do
     %{

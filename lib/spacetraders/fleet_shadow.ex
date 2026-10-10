@@ -111,10 +111,10 @@ defmodule SpaceTraders.FleetShadow do
       availability
       |> Map.get(:claims, [])
       |> Enum.flat_map(fn
-        %{resource: symbol, roles: roles, capabilities: %{cargo_transport: capacity}}
+        %{resource: symbol, roles: roles, capabilities: %{cargo_transport: capacity} = caps}
         when is_list(roles) and is_integer(capacity) ->
           if :market_trader in roles,
-            do: [%{symbol: symbol, cargo: %{capacity: capacity, units: 0}}],
+            do: [trade_ship(symbol, capacity, caps)],
             else: []
 
         _ ->
@@ -124,6 +124,21 @@ defmodule SpaceTraders.FleetShadow do
     # No trade-capable Claim leaves sizing at Market depth; Allocation then
     # rejects the Candidate for lack of a capable Claim.
     if ships == [], do: snapshot, else: Map.put(snapshot, :ships, ships)
+  end
+
+  # Fuel and position, when the Claim evidences them, let planning offer
+  # the trade only to a Ship that can reach it.
+  defp trade_ship(symbol, capacity, capabilities) do
+    position = Map.get(capabilities, :position) || %{}
+
+    %{
+      symbol: symbol,
+      cargo: %{capacity: capacity, units: 0},
+      fuel: Map.get(capabilities, :fuel),
+      waypoint: Map.get(position, :waypoint),
+      flight_mode: Map.get(position, :flight_mode),
+      position: Map.take(position, [:x, :y])
+    }
   end
 
   defp plan(revision, snapshot) do

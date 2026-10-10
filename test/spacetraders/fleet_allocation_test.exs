@@ -122,6 +122,28 @@ defmodule SpaceTraders.FleetAllocationTest do
       assert {:ok, %{commitments: [%{claims: ["SHIP-2"]}]}} = select([scout], claims)
     end
 
+    test "a trade is claimed only by a Ship Planning found able to reach it on fuel" do
+      trade =
+        role_contribution("trade", :market_trader, [
+          %{capability: :cargo_transport, minimum_capacity: 10},
+          %{capability: :fuel_reach, ships: ["Z-FUELED"]}
+        ])
+
+      # A-STRANDED is cheaper and sorts first, but cannot reach the source.
+      claims = [
+        ship_claim("A-STRANDED", [:market_trader], 40, 5),
+        ship_claim("Z-FUELED", [:market_trader], 40, 90)
+      ]
+
+      for order <- [claims, Enum.reverse(claims)] do
+        assert {:ok, %{commitments: [commitment]}} = select([trade], order)
+        assert commitment.claims == ["Z-FUELED"]
+      end
+
+      assert {:ok, %{commitments: [], rejected: [%{reasons: [:claim_conflict]}]}} =
+               select([trade], [hd(claims)])
+    end
+
     test "an incapable Ship is never assigned and the Candidate is rejected with a reason" do
       trade =
         role_contribution("trade", :market_trader, [
