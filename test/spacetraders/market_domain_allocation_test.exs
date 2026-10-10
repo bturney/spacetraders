@@ -362,7 +362,9 @@ defmodule SpaceTraders.MarketDomainAllocationTest do
       listing(fleet.agent, "X1-A2", 40, 35)
 
       assert {:error, :stale_evidence} =
-               FleetExecution.revalidate_trade_evidence(fleet.agent, [trade])
+               SpaceTraders.FleetAllocation.MarketDomain.revalidate_trade_evidence(fleet.agent, [
+                 trade
+               ])
     end
 
     test "the dispatched buy cannot spend above the quote the decision was planned on" do
