@@ -276,10 +276,10 @@ defmodule SpaceTraders.Fleet do
     with :ok <- market_waypoint?(waypoint),
          %{system_symbol: system, symbol: symbol} when is_binary(system) and is_binary(symbol) <-
            waypoint do
-      case SpaceTraders.Evidence.get_market(token_reference(agent), system, symbol) do
-        {:ok, market} = result ->
-          record_market_observation(agent, system, market, "get_market")
-          result
+      case SpaceTraders.Evidence.get_market(token_reference(agent), system, symbol, bind: true) do
+        {:ok, %SpaceTraders.Evidence.Binding{value: market, observation: source}} ->
+          record_market_observation(agent, system, market, "get_market", nil, evidence: source)
+          {:ok, market}
 
         {:error, %SpaceTraders.API.GameplayError{}} = result ->
           invalidate_market_facts(agent, system, symbol)
@@ -779,15 +779,6 @@ defmodule SpaceTraders.Fleet do
   end
 
   defp record_market_observation(
-         agent,
-         system,
-         market,
-         source,
-         observer,
-         lineage \\ []
-       )
-
-  defp record_market_observation(
          %AgentRecord{id: id} = agent,
          system,
          market,
@@ -809,12 +800,6 @@ defmodule SpaceTraders.Fleet do
 
   defp record_market_observation(_agent, _system, _market, _source, _observer, _lineage),
     do: :ok
-
-  defp record_market_observation(%AgentRecord{id: id} = agent, system, market, source)
-       when is_integer(id),
-       do: record_market_observation(agent, system, market, source, nil)
-
-  defp record_market_observation(_agent, _system, _market, _source), do: :ok
 
   defp invalidate_market_facts(agent, system_symbol, waypoint_symbol) do
     Intelligence.invalidate(agent, :market, system_symbol, waypoint_symbol, [
