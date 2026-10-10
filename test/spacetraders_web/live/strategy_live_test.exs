@@ -211,6 +211,38 @@ defmodule SpaceTradersWeb.StrategyLiveTest do
     assert html =~ "Alternatives"
   end
 
+  test "activation refuses a comparison captured before a Market observation changed", %{
+    conn: conn,
+    operator: operator,
+    scope: scope
+  } do
+    agent =
+      Repo.insert!(%AgentRecord{
+        operator_id: operator.id,
+        symbol: "PLANNER",
+        faction: "COSMIC",
+        headquarters: "X1-A1"
+      })
+
+    Enum.each(["X1-A1", "X1-A2"], &observe_waypoint(agent, &1))
+    observe_market(agent, "X1-A1", 10, 9)
+    observe_market(agent, "X1-A2", 25, 20)
+
+    assert {:ok, _draft} = FleetStrategy.select_preset(scope, "steady_growth")
+    {:ok, view, _html} = live(conn, ~p"/strategy")
+
+    observe_market(agent, "X1-A1", 12, 11)
+
+    html = render_click(view, "activate", %{})
+
+    assert html =~ "Market evidence changed"
+    assert FleetStrategy.get(scope).active_revision == nil
+
+    # The refreshed comparison is current, so the next activation proceeds.
+    render_click(view, "activate", %{})
+    assert FleetStrategy.get(scope).active_revision.number == 1
+  end
+
   test "discard removes the persistent draft without changing active intent", %{
     conn: conn,
     scope: scope
