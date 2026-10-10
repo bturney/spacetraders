@@ -177,18 +177,11 @@ defmodule SpaceTraders.Fleet.Intents.RecordedAction do
     end
   end
 
-  # Authority checks share-lock the Claim's Commitment, Portfolio and Generation
-  # rows. An Allocation replan or publication holds the Agent lock before any of
-  # them, so a non-spending send takes that lock first as well (Agent -> Intent
-  # -> MutationAttempt); otherwise the two deadlock.
-  defp lock_agent_for_authority(%Attempt{agent_id: agent_id}),
-    do: CreditSpending.lock_agent(agent_id)
-
   @doc "Commits current authority and sent-or-unknown admission before bytes leave."
   def admit_send(%Attempt{} = attempt) do
     with :ok <- require_commit_boundary() do
       Repo.transaction(fn ->
-        lock_agent_for_authority(attempt)
+        CreditSpending.lock_agent(attempt)
         current = locked_intent(attempt.provenance["intent_id"])
         attempt = Repo.one!(from a in Attempt, where: a.id == ^attempt.id, lock: "FOR UPDATE")
 
@@ -237,7 +230,7 @@ defmodule SpaceTraders.Fleet.Intents.RecordedAction do
   def authorize_transport(%Attempt{} = attempt) do
     with :ok <- require_commit_boundary() do
       Repo.transaction(fn ->
-        lock_agent_for_authority(attempt)
+        CreditSpending.lock_agent(attempt)
         current = locked_intent(attempt.provenance["intent_id"])
         attempt = Repo.one!(from a in Attempt, where: a.id == ^attempt.id, lock: "FOR UPDATE")
 

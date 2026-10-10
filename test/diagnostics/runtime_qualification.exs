@@ -114,7 +114,10 @@ defmodule SpaceTraders.RuntimeQualification do
 
       Repo.delete_all(from n in SpaceTraders.Outbox.Notification, where: n.topic in ^topics)
       Repo.delete_all(from o in Operator, where: o.id in ^operator_ids)
-      Repo.delete_all(from e in SpaceTraders.Timeline.Event, where: e.owner_id == "BASELINE-1")
+
+      Repo.delete_all(
+        from e in SpaceTraders.Timeline.Event, where: e.owner_id in ["BASELINE-1", "BASELINE-2"]
+      )
     end)
 
     {:ok, conn: Phoenix.ConnTest.build_conn()}
