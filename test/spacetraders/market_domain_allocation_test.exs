@@ -20,6 +20,7 @@ defmodule SpaceTraders.MarketDomainAllocationTest do
   }
 
   alias SpaceTraders.FleetExecution
+  alias SpaceTraders.FleetGeneration
   alias SpaceTraders.FleetGeneration.Generation
   alias SpaceTraders.FleetStrategy.{Revision, Strategy}
   alias SpaceTraders.Intelligence
@@ -534,6 +535,62 @@ defmodule SpaceTraders.MarketDomainAllocationTest do
     end
   end
 
+  describe "Revision activation and decision logs" do
+    test "every activation logs its decisive ids, with or without a live Generation" do
+      fleet = fleet([@frigate, @probe])
+      assert {:ok, %{action: :published}} = reconcile(fleet)
+      old = FleetAllocation.current_portfolio(fleet.scope, fleet.agent)
+      newer = newer_revision(fleet)
+
+      log = capture_info(fn -> :ok = FleetGeneration.activate_strategy(fleet.scope, newer) end)
+
+      assert log =~ "Fleet Strategy Revision activated"
+      assert log =~ "agent_id=#{fleet.agent.id}"
+      assert log =~ "previous_revision_id=#{fleet.revision.id}"
+      assert log =~ "active_revision_id=#{newer.id}"
+      assert log =~ "portfolio_id=#{old.id}"
+      assert log =~ "decision_episode_id=#{old.strategy_decision_episode_id}"
+      assert log =~ "commitment_ids=#{Enum.map_join(old.commitments, ",", & &1.id)}"
+
+      # No live Generation: the activation is still logged, and says so.
+      Repo.update_all(Generation, set: [retired_at: DateTime.utc_now()])
+      newest = newer_revision(fleet)
+      log = capture_info(fn -> :ok = FleetGeneration.activate_strategy(fleet.scope, newest) end)
+
+      assert log =~ "Fleet Strategy Revision activated"
+      assert log =~ "active_revision_id=#{newest.id}"
+      assert log =~ "disposition=no_live_generation"
+    end
+
+    test "every Market decision logs its Generation, even with no Portfolio" do
+      fleet = fleet([@frigate, @probe])
+      generation = Repo.get_by!(Generation, agent_id: fleet.agent.id)
+
+      log =
+        capture_info(fn ->
+          FleetExecution.reconcile_market_domain(
+            fleet.scope,
+            fleet.agent,
+            fleet.revision,
+            @system,
+            CapacityDispositions.defer()
+          )
+        end)
+
+      assert log =~ "Fleet Allocation Market domain decision"
+      assert log =~ "fleet_generation_id=#{generation.id}"
+      assert log =~ "active_revision_id=#{fleet.revision.id}"
+      assert log =~ "result=deferred_for_capacity"
+      assert log =~ "decisive_reason=capacity_deferred"
+
+      log = capture_info(fn -> assert {:ok, %{action: :published}} = reconcile(fleet) end)
+      portfolio = FleetAllocation.current_portfolio(fleet.scope, fleet.agent)
+      assert log =~ "result=published"
+      assert log =~ "portfolio_id=#{portfolio.id}"
+      assert log =~ "decision_episode_id=#{portfolio.strategy_decision_episode_id}"
+    end
+  end
+
   describe "structural stall disposition" do
     test "an unchanged stall observed 500 times is one durable Episode until it changes" do
       fleet = fleet([@frigate, @probe])
@@ -898,6 +955,24 @@ defmodule SpaceTraders.MarketDomainAllocationTest do
 
     on_exit(fn -> :telemetry.detach(handler) end)
     handler
+  end
+
+  # A new Revision of the Fleet's Strategy, not yet active.
+  defp newer_revision(fleet) do
+    strategy = Repo.get!(Strategy, fleet.revision.fleet_strategy_id)
+
+    number =
+      Repo.one(
+        from r in Revision, where: r.fleet_strategy_id == ^strategy.id, select: max(r.number)
+      )
+
+    Repo.insert!(%Revision{
+      fleet_strategy_id: strategy.id,
+      number: number + 1,
+      document: fleet.revision.document,
+      source: "operator",
+      activated_at: DateTime.utc_now(:second)
+    })
   end
 
   defp supersede_revision(fleet) do

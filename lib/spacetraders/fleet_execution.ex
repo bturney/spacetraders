@@ -120,7 +120,7 @@ defmodule SpaceTraders.FleetExecution do
     stall =
       StructuralStall.observe(agent, revision, portfolio, %{result: result, counts: counts})
 
-    observe_market_domain(agent, revision, portfolio, stall, result, counts)
+    observe_market_domain(agent, generation, revision, portfolio, stall, result, counts)
   end
 
   # The Governor's explicit deferral is not authoritative evidence of an empty
@@ -400,8 +400,8 @@ defmodule SpaceTraders.FleetExecution do
           portfolio_revision_id: portfolio.fleet_strategy_revision_id,
           active_revision_id: active,
           decision_episode_id: portfolio.strategy_decision_episode_id,
-          commitment_ids: retired.released,
-          settling: Enum.map(retired.settling, &{&1.commitment_id, &1.reason})
+          commitment_ids: FleetAllocation.log_ids(retired.released),
+          settling: Enum.map_join(retired.settling, ",", &"#{&1.commitment_id}:#{&1.reason}")
         )
 
         :ok
@@ -521,7 +521,7 @@ defmodule SpaceTraders.FleetExecution do
 
   # G2: one bounded record per domain decision, unchanged repeats included.
   # Ids stay log metadata only, never metric labels.
-  defp observe_market_domain(agent, revision, portfolio, stall, result, counts) do
+  defp observe_market_domain(agent, generation, revision, portfolio, stall, result, counts) do
     {kind, reason} = domain_outcome(result)
 
     :telemetry.execute(
@@ -544,11 +544,12 @@ defmodule SpaceTraders.FleetExecution do
         result: kind,
         decisive_reason: reason,
         agent_id: agent.id,
-        fleet_generation_id: portfolio && portfolio.fleet_generation_id,
+        fleet_generation_id: generation && generation.id,
         active_revision_id: revision.id,
         portfolio_revision_id: portfolio && portfolio.fleet_strategy_revision_id,
         portfolio_id: portfolio && portfolio.id,
-        commitment_ids: portfolio && Enum.map(portfolio.commitments, & &1.id),
+        commitment_ids:
+          portfolio && FleetAllocation.log_ids(Enum.map(portfolio.commitments, & &1.id)),
         decision_episode_id: decision_episode_id(result, portfolio)
       ] ++ stall_metadata(stall)
     )

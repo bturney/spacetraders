@@ -1092,6 +1092,9 @@ defmodule SpaceTraders.FleetAllocation do
     result
   end
 
+  @doc "Ids as one comma-separated log metadata value (both log formatters print it)."
+  def log_ids(ids) when is_list(ids), do: Enum.map_join(ids, ",", &to_string/1)
+
   @doc false
   def bounded_reason(reason) when is_atom(reason), do: reason
   def bounded_reason(_reason), do: :other
