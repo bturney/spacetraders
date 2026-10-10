@@ -899,6 +899,8 @@ defmodule SpaceTraders.FleetExecution do
         capabilities: %{
           frame: frame_symbol(ship),
           fuel_capacity: fuel_capacity(ship),
+          fuel: fuel(ship),
+          position: position(ship),
           cargo_transport: cargo_capacity(ship),
           chart: true,
           waypoint_scan: sensor_mount?(ship),
@@ -923,6 +925,27 @@ defmodule SpaceTraders.FleetExecution do
   # none and so cost nothing to move.
   defp fuel_capacity(%{fuel: %{capacity: capacity}}) when is_integer(capacity), do: capacity
   defp fuel_capacity(_ship), do: 0
+
+  # Fuel in the tank and where the Ship is: Fleet Planning offers a trade
+  # only to a Ship that can reach it with known fuel stops.
+  defp fuel(%{fuel: %{current: current, capacity: capacity}})
+       when is_integer(current) and is_integer(capacity),
+       do: %{current: current, capacity: capacity}
+
+  defp fuel(_ship), do: nil
+
+  defp position(%{nav: %{waypoint_symbol: waypoint} = nav}) when is_binary(waypoint) do
+    point =
+      case nav do
+        %{route: %{destination: %{symbol: ^waypoint, x: x, y: y}}} -> %{x: x, y: y}
+        %{route: %{origin: %{symbol: ^waypoint, x: x, y: y}}} -> %{x: x, y: y}
+        _ -> %{}
+      end
+
+    Map.merge(point, %{waypoint: waypoint, flight_mode: Map.get(nav, :flight_mode)})
+  end
+
+  defp position(_ship), do: nil
 
   defp cargo_capacity(%{cargo: %{capacity: capacity}}) when is_integer(capacity), do: capacity
   defp cargo_capacity(_ship), do: 0
