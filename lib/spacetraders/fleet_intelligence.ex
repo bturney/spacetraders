@@ -182,7 +182,12 @@ defmodule SpaceTraders.FleetIntelligence do
     market =
       agent
       |> FleetShadow.market_input(system, now)
-      |> Map.put(:waypoint_coordinates, waypoint_coordinates(waypoints))
+      # The coordinates and fuel stops Ship Execution flies by, so Fleet
+      # Planning offers a trade only to a Ship that can reach it.
+      |> Map.merge(%{
+        waypoint_coordinates: World.waypoint_coordinates(agent, system),
+        fuel_stops: World.fuel_stops(agent, system, now)
+      })
 
     with :ok <- sync_market_demands(agent, revision, market) do
       {:ok,
@@ -192,16 +197,6 @@ defmodule SpaceTraders.FleetIntelligence do
          intelligence: intelligence_planning(agent, revision, system, waypoints, market, occupied)
        }}
     end
-  end
-
-  # Known Waypoint coordinates (they do not age) so Fleet Planning can tell
-  # whether a Ship can reach a trade on fuel.
-  defp waypoint_coordinates(waypoints) do
-    for waypoint <- waypoints,
-        %{state: "known", value: x} when is_integer(x) <- [waypoint.facts["x"]],
-        %{state: "known", value: y} when is_integer(y) <- [waypoint.facts["y"]],
-        into: %{},
-        do: {waypoint.symbol, %{x: x, y: y}}
   end
 
   defp intelligence_planning(agent, revision, system, waypoints, market, occupied) do
