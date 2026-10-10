@@ -56,7 +56,7 @@ not a selection kind: the pointer never references it, and the current allocatio
 result stays `selected_plan` or `neutral_wait`. Recording the refusal as its own
 kind keeps it from being read as a selected plan that never ran or as a wait.
 
-Amended 2026-10-11 (issues 684, 686): a structurally stalled Market allocation is
+Amended 2026-10-10 (issues 684, 686): a structurally stalled Market allocation is
 durable evidence too. Its episode carries a fourth episode kind,
 `structural_stall`, with a closed reason (`stale_revision_portfolio`,
 `authority_blocked_intent`, `overdue_demands_without_coverage`) and the stalled
