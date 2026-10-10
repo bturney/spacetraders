@@ -99,7 +99,7 @@ defmodule SpaceTraders.FleetExecution do
         capacity
       )
       when is_binary(system_symbol) do
-    generation = current_generation(agent)
+    generation = FleetAllocation.active_generation(agent)
     reconciled = reconcile_revision_change(scope, revision, generation)
     current = FleetAllocation.current_portfolio(scope, agent)
 
@@ -429,7 +429,8 @@ defmodule SpaceTraders.FleetExecution do
   defp log_settled(released, generation, active) do
     {level, message} =
       if released.undisposed_units > 0,
-        do: {:warning, "Fleet Allocation released a settled Commitment with inherited Cargo aboard"},
+        do:
+          {:warning, "Fleet Allocation released a settled Commitment with inherited Cargo aboard"},
         else: {:info, "Fleet Allocation released a settled Commitment"}
 
     Logger.log(level, message,
@@ -477,10 +478,7 @@ defmodule SpaceTraders.FleetExecution do
       retained: retained,
       releasable: releasable,
       completed_intelligence: completed_intelligence,
-      occupied:
-        MapSet.new(
-          Enum.flat_map(retained ++ settling, & &1.claims) ++ intent_ships
-        )
+      occupied: MapSet.new(Enum.flat_map(retained ++ settling, & &1.claims) ++ intent_ships)
     }
   end
 
@@ -992,22 +990,13 @@ defmodule SpaceTraders.FleetExecution do
     end
   end
 
-  defp current_generation(%AgentRecord{id: agent_id}) do
-    Repo.one(
-      from generation in Generation,
-        where:
-          generation.agent_id == ^agent_id and is_nil(generation.fenced_at) and
-            is_nil(generation.retired_at)
-    )
-  end
-
   # A missing live Ship, credit, or Market-reach fact is unknown availability,
   # not zero availability. Treating it as zero would let a transient API error
   # manufacture a Neutral Wait from a non-authoritative allocation result, and
   # would let coverage acquisition proceed against fabricated capacity.
   defp allocation_availability(agent) do
     with {:ok, availability} <- governed_availability(agent),
-         %Generation{} = generation <- current_generation(agent) do
+         %Generation{} = generation <- FleetAllocation.active_generation(agent) do
       {:ok, Map.put(availability, :source_version, generation.allocation_version)}
     else
       _ -> {:error, :availability_unknown}

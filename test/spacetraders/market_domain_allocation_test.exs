@@ -489,7 +489,11 @@ defmodule SpaceTraders.MarketDomainAllocationTest do
       )
 
       portfolio_id = Repo.get!(Commitment, trade.id).fleet_commitment_portfolio_id
-      assert MapSet.member?(FleetAllocation.inherited_cargo_commitment_ids(portfolio_id), trade.id)
+
+      assert MapSet.member?(
+               FleetAllocation.inherited_cargo_commitment_ids(portfolio_id),
+               trade.id
+             )
 
       # The sale ended: nothing is under way, so the fence ends and the units
       # left aboard are reported, never hidden.
@@ -565,6 +569,40 @@ defmodule SpaceTraders.MarketDomainAllocationTest do
 
       assert {:stalled, %{stall_reason: :overdue_demands_without_coverage}} =
                StructuralStall.observe(fleet.agent, fleet.revision, nil, decision)
+    end
+
+    test "an errored decision or one without candidate counts explains nothing" do
+      fleet = fleet([@frigate, @probe])
+      overdue_market_demand(fleet)
+
+      # Unknown availability is not a decisive reason: the stall is visible.
+      assert {:stalled, %{stall_reason: :overdue_demands_without_coverage} = stall} =
+               StructuralStall.observe(fleet.agent, fleet.revision, nil, %{
+                 result: {:error, :availability_unknown},
+                 counts: %{}
+               })
+
+      # Missing counts are not "no claimable Ship": the same stall refreshes.
+      assert {:stalled, %{id: id, observation_count: 2}} =
+               StructuralStall.observe(fleet.agent, fleet.revision, nil, %{
+                 result: {:ok, %{action: :retained}},
+                 counts: %{}
+               })
+
+      assert id == stall.id
+    end
+
+    test "a recorded Neutral Wait is a decisive reason, not a stall" do
+      fleet = fleet([@frigate, @probe])
+      overdue_market_demand(fleet)
+
+      assert :healthy =
+               StructuralStall.observe(fleet.agent, fleet.revision, nil, %{
+                 result:
+                   {:ok,
+                    %{action: :no_admissible_commitment, neutral_wait: %StrategyDecisionEpisode{}}},
+                 counts: %{coverage_candidates: 0, claimable_ships: 1}
+               })
     end
 
     test "a Ship trading under the active Revision with overdue Demands is busy, not stalled" do

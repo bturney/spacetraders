@@ -480,6 +480,16 @@ defmodule SpaceTraders.FleetAllocation do
     )
   end
 
+  @doc "The Agent's active (neither fenced nor retired) Fleet Generation, or nil."
+  def active_generation(%AgentRecord{id: agent_id}) do
+    Repo.one(
+      from generation in Generation,
+        where:
+          generation.agent_id == ^agent_id and is_nil(generation.fenced_at) and
+            is_nil(generation.retired_at)
+    )
+  end
+
   @doc "Returns the current complete portfolio for the authenticated Operator's active generation."
   def current_portfolio(%Scope{operator: %{id: operator_id}}) do
     current_portfolio_query(operator_id)

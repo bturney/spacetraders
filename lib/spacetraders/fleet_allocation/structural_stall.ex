@@ -1,32 +1,36 @@
 defmodule SpaceTraders.FleetAllocation.StructuralStall do
   @moduledoc """
   Durable, deduplicated structural stall disposition for the Market pilot
-  domain (#684; ADR 0012 amendment).
+  domain (#684, #686; ADR 0012 amendment).
 
   After each Market allocation decision Fleet Allocation asks whether the
   Fleet is structurally unable to progress, and why, in precedence order:
 
     1. `:stale_revision_portfolio` - the current Portfolio belongs to an older
-       Revision than the active one;
+       Revision than the active one (its retirement failed this boundary);
     2. `:authority_blocked_intent` - a current Commitment's Intent is blocked
        on execution authority;
     3. `:overdue_demands_without_coverage` - active-Revision Market
        Observation Demands are overdue, the decision admitted zero coverage
        candidates, and no valid current-Revision reason explains it.
 
-  Valid reasons for (3) are the decision's own dispositions, read from
-  authoritative state: retained current-Revision coverage (single-scout),
-  no claimable Ship because valid work occupies them, API Capacity Deferral,
-  or an open credit Shortfall; a decision that selected work is busy too.
-  They are busy, deferred or a spending pause,
-  never a stall.
+  Only decisive dispositions explain (3), read from the decision and
+  authoritative state: work selected or coverage admitted, every Ship
+  occupied by valid work (counted, or the decision's own
+  `:all_ships_occupied`), retained current-Revision coverage (single-scout),
+  API Capacity Deferral, a recorded Neutral Wait, or an open credit
+  Shortfall. An errored decision or missing candidate counts explain
+  nothing, so they cannot hide a stall.
 
   A stall is one `structural_stall` Strategy Decision Episode per Fleet
   Generation, keyed by Revision, reason and stalled Portfolio. An unchanged
-  stall refreshes that Episode in place; a changed one resolves it and opens
-  its successor; recovery resolves it. It is never a selection kind, a
-  Neutral Wait or a recovery authority, and the allocation result pointer
-  never references it.
+  stall refreshes that Episode in place; a changed one closes it and opens
+  its successor; recovery closes it. Closing records `resolved_at` and
+  classifies it superseded: a later decision, healthy or another stall,
+  superseded it. Observation is serialized per Generation by the Generation
+  row lock, so the one open stall is never inserted twice. It is never a
+  selection kind, a Neutral Wait or a recovery authority, and the allocation
+  result pointer never references it.
   """
 
   import Ecto.Query
@@ -35,9 +39,8 @@ defmodule SpaceTraders.FleetAllocation.StructuralStall do
   alias SpaceTraders.Clock
   alias SpaceTraders.CreditCalibration.Shortfall
   alias SpaceTraders.Evidence
-  alias SpaceTraders.Fleet.Intent
   alias SpaceTraders.FleetAllocation
-  alias SpaceTraders.FleetAllocation.{Commitment, JsonEvidence, Portfolio}
+  alias SpaceTraders.FleetAllocation.{JsonEvidence, Portfolio}
   alias SpaceTraders.FleetAllocation.StrategyDecisionEpisode, as: Episode
   alias SpaceTraders.FleetGeneration.Generation
   alias SpaceTraders.FleetStrategy.Revision
@@ -61,12 +64,10 @@ defmodule SpaceTraders.FleetAllocation.StructuralStall do
   Returns `{:stalled, episode}` or `:healthy`.
   """
   def observe(%AgentRecord{} = agent, %Revision{} = revision, portfolio, decision) do
-    case current_generation(agent) do
+    case FleetAllocation.active_generation(agent) do
       %Generation{} = generation ->
-        case diagnose(agent, revision, portfolio, decision) do
-          nil -> resolve(generation)
-          stall -> record(generation, revision, stall)
-        end
+        stall = diagnose(agent, revision, portfolio, decision)
+        record(generation, revision, stall)
 
       nil ->
         :healthy
@@ -86,7 +87,7 @@ defmodule SpaceTraders.FleetAllocation.StructuralStall do
         stall(
           :authority_blocked_intent,
           portfolio,
-          Enum.map(blocked, &%{"kind" => "intent", "id" => &1.id, "reason" => &1.reason})
+          Enum.map(blocked, &%{"kind" => "intent", "id" => &1.id, "reason" => &1.blocker.reason})
         )
 
       (overdue = unexplained_overdue_demands(agent, active, portfolio, decision)) != [] ->
@@ -105,18 +106,12 @@ defmodule SpaceTraders.FleetAllocation.StructuralStall do
     do: %{reason: reason, portfolio: portfolio, references: references}
 
   defp authority_blocked_intents(%Portfolio{id: portfolio_id}) do
-    Repo.all(
-      from intent in Intent,
-        join: commitment in Commitment,
-        on: commitment.id == intent.fleet_commitment_id,
-        where:
-          commitment.fleet_commitment_portfolio_id == ^portfolio_id and
-            intent.caller == "commitment" and intent.status == "blocked",
-        order_by: intent.id,
-        select: intent
+    portfolio_id
+    |> FleetAllocation.unfinished_commitment_intents()
+    |> Enum.filter(
+      &(&1.status == "blocked" and &1.blocker != nil and
+          &1.blocker.reason in @authority_blockers)
     )
-    |> Enum.filter(&(&1.blocker && &1.blocker.reason in @authority_blockers))
-    |> Enum.map(&%{id: &1.id, reason: &1.blocker.reason})
   end
 
   defp authority_blocked_intents(_portfolio), do: []
@@ -139,23 +134,22 @@ defmodule SpaceTraders.FleetAllocation.StructuralStall do
     end
   end
 
-  # The decision's own disposition explains zero coverage candidates.
-  defp explained?(agent, active, portfolio, result, counts) do
-    case result do
-      {:error, _reason} ->
-        true
+  # Only the decision's own decisive disposition explains zero coverage
+  # candidates. An error or an absent count is not one.
+  defp explained?(_agent, _active, _portfolio, {:error, _reason}, _counts), do: false
 
-      {:ok, %{action: action}} when action in @deferral_actions ->
-        true
-
-      _decided ->
-        Map.get(counts, :coverage_candidates, 0) > 0 or
-          Map.get(counts, :selected, 0) > 0 or
-          Map.get(counts, :claimable_ships, 0) == 0 or
-          current_coverage?(portfolio, active) or
-          open_shortfall?(agent)
-    end
+  defp explained?(agent, active, portfolio, {:ok, decided}, counts) do
+    Map.get(decided, :action) in @deferral_actions or
+      Map.get(decided, :reason) == :all_ships_occupied or
+      match?(%Episode{}, Map.get(decided, :neutral_wait)) or
+      positive?(counts, :coverage_candidates) or
+      positive?(counts, :selected) or
+      Map.fetch(counts, :claimable_ships) == {:ok, 0} or
+      current_coverage?(portfolio, active) or
+      open_shortfall?(agent)
   end
+
+  defp positive?(counts, key), do: Map.get(counts, key, 0) > 0
 
   defp current_coverage?(%Portfolio{fleet_strategy_revision_id: active} = portfolio, active) do
     Enum.any?(portfolio.commitments, fn commitment ->
@@ -173,53 +167,65 @@ defmodule SpaceTraders.FleetAllocation.StructuralStall do
   end
 
   defp record(generation, revision, stall) do
-    now = Clock.utc_now()
-    portfolio_id = stall.portfolio && stall.portfolio.id
-    references = JsonEvidence.dump(stall.references)
-
-    {:ok, episode} =
+    {:ok, result} =
       Repo.transaction(fn ->
-        case open_stall(generation.id) do
-          %Episode{
-            fleet_strategy_revision_id: revision_id,
-            stall_reason: reason,
-            stalled_portfolio_id: ^portfolio_id
-          } = open
-          when revision_id == revision.id and reason == stall.reason ->
-            open
-            |> Ecto.Changeset.change(
-              last_observed_at: now,
-              observation_count: open.observation_count + 1,
-              evidence_references: references
-            )
-            |> Repo.update!()
+        # One observer per Generation at a time: Generation before Episode.
+        Repo.one!(from g in Generation, where: g.id == ^generation.id, lock: "FOR NO KEY UPDATE")
+        now = Clock.utc_now()
+        open = open_stall(generation.id)
 
-          open ->
+        cond do
+          is_nil(stall) ->
             if open, do: close!(open, now)
+            :healthy
 
-            Repo.insert!(%Episode{
-              operator_id: generation.operator_id,
-              fleet_generation_id: generation.id,
-              fleet_strategy_revision_id: revision.id,
-              source_version: generation.allocation_version,
-              calibration_version: FleetAllocation.market_calibration_version(),
-              selection_kind: :structural_stall,
-              stall_reason: stall.reason,
-              stalled_portfolio_id: portfolio_id,
-              evidence_references: references,
-              last_observed_at: now,
-              observation_count: 1
-            })
+          unchanged?(open, revision, stall) ->
+            {:stalled, refresh!(open, stall, now)}
+
+          true ->
+            if open, do: close!(open, now)
+            {:stalled, open!(generation, revision, stall, now)}
         end
       end)
 
-    {:stalled, episode}
+    result
   end
 
-  defp resolve(generation) do
-    if open = open_stall(generation.id), do: close!(open, Clock.utc_now())
-    :healthy
+  defp unchanged?(nil, _revision, _stall), do: false
+
+  defp unchanged?(open, revision, stall) do
+    open.fleet_strategy_revision_id == revision.id and open.stall_reason == stall.reason and
+      open.stalled_portfolio_id == portfolio_id(stall)
   end
+
+  defp refresh!(open, stall, now) do
+    open
+    |> Ecto.Changeset.change(
+      last_observed_at: now,
+      observation_count: open.observation_count + 1,
+      evidence_references: JsonEvidence.dump(stall.references)
+    )
+    |> Repo.update!()
+  end
+
+  defp open!(generation, revision, stall, now) do
+    Repo.insert!(%Episode{
+      operator_id: generation.operator_id,
+      fleet_generation_id: generation.id,
+      fleet_strategy_revision_id: revision.id,
+      source_version: generation.allocation_version,
+      calibration_version: FleetAllocation.market_calibration_version(),
+      selection_kind: :structural_stall,
+      stall_reason: stall.reason,
+      stalled_portfolio_id: portfolio_id(stall),
+      evidence_references: JsonEvidence.dump(stall.references),
+      last_observed_at: now,
+      observation_count: 1
+    })
+  end
+
+  defp portfolio_id(%{portfolio: %Portfolio{id: id}}), do: id
+  defp portfolio_id(_stall), do: nil
 
   defp close!(episode, now) do
     episode
@@ -232,17 +238,7 @@ defmodule SpaceTraders.FleetAllocation.StructuralStall do
       from episode in Episode,
         where:
           episode.fleet_generation_id == ^generation_id and
-            episode.selection_kind == :structural_stall and is_nil(episode.resolved_at),
-        lock: "FOR UPDATE"
-    )
-  end
-
-  defp current_generation(%AgentRecord{id: agent_id}) do
-    Repo.one(
-      from generation in Generation,
-        where:
-          generation.agent_id == ^agent_id and is_nil(generation.fenced_at) and
-            is_nil(generation.retired_at)
+            episode.selection_kind == :structural_stall and is_nil(episode.resolved_at)
     )
   end
 end

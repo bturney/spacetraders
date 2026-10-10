@@ -12,7 +12,11 @@ defmodule SpaceTraders.FleetAllocation.Commitment do
     field :dependencies, {:array, :map}, default: []
     field :expected_value, :float
     field :unwind_cost, :float
-    field :unwind_state, Ecto.Enum, values: [:not_required, :settling, :released], default: :not_required
+
+    field :unwind_state, Ecto.Enum,
+      values: [:not_required, :settling, :released],
+      default: :not_required
+
     field :decisive_reason, :string
 
     belongs_to :fleet_commitment_portfolio, SpaceTraders.FleetAllocation.Portfolio

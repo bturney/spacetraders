@@ -886,7 +886,12 @@ defmodule SpaceTraders.RuntimeQualification do
              "no current-Revision coverage of #{destination}\n" <> report.text
 
       assert fleet_sold?(state), "no current-Revision trade completed\n" <> report.text
-      assert report.current_portfolio_revision == new_revision, report.text
+      # Every decision since activation is the active Revision's; once its
+      # work finished it may rightly be a Neutral Wait with no Portfolio.
+      assert report.current_portfolio_revision in [nil, new_revision], report.text
+
+      assert Enum.all?(report.episodes_since_activation, &(elem(&1, 2) == new_revision)),
+             report.text
 
       [sale] = Enum.filter(state.requests, &sale?/1)
       [purchase] = Enum.filter(state.requests, &ship_post?(&1, "BASELINE-1", "purchase"))
@@ -895,7 +900,8 @@ defmodule SpaceTraders.RuntimeQualification do
 
       # Reconciliation is busy work, not a structural stall, and no rejected
       # publication is recorded per reconciliation tick.
-      assert stall_episodes_since(episode_floor) == [], report.text
+      assert stall_episodes_since(episode_floor) == [],
+             inspect(stall_episodes_since(episode_floor))
 
       refute Enum.any?(
                report.episodes_since_activation,
@@ -905,13 +911,16 @@ defmodule SpaceTraders.RuntimeQualification do
     end
   end
 
-  # The old Portfolio's scout Commitment (BASELINE-2), whatever its state.
+  # The old Portfolio's in-transit scout Commitment (BASELINE-2's latest),
+  # whatever its state.
   defp settling_scout(old_portfolio) do
     Repo.all(
       from c in SpaceTraders.FleetAllocation.Commitment,
         where:
           c.fleet_commitment_portfolio_id == ^old_portfolio.id and
-            fragment("? = ANY(?)", "BASELINE-2", c.claims)
+            fragment("? = ANY(?)", "BASELINE-2", c.claims),
+        order_by: [desc: c.id],
+        limit: 1
     )
   end
 
