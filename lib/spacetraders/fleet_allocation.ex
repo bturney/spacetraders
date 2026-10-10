@@ -6,6 +6,8 @@ defmodule SpaceTraders.FleetAllocation do
 
   import Ecto.Query
 
+  require Logger
+
   alias SpaceTraders.Agent.Agent, as: AgentRecord
   alias SpaceTraders.Agent.Scope
   alias SpaceTraders.Fleet.{Intent, Ship}
@@ -231,8 +233,9 @@ defmodule SpaceTraders.FleetAllocation do
 
         portfolio
       end)
+      |> observe_publication(:publish, operator_id, generation_id)
     else
-      {:error, :invalid_publication}
+      observe_publication({:error, :invalid_publication}, :publish, operator_id, generation_id)
     end
   end
 
@@ -292,8 +295,9 @@ defmodule SpaceTraders.FleetAllocation do
         {:ok, %{portfolio: portfolio}} -> {:ok, portfolio}
         error -> error
       end
+      |> observe_publication(:replan, operator_id, generation_id)
     else
-      {:error, :invalid_publication}
+      observe_publication({:error, :invalid_publication}, :replan, operator_id, generation_id)
     end
   end
 
@@ -703,9 +707,104 @@ defmodule SpaceTraders.FleetAllocation do
         do_unwind_current_portfolio(operator_id, generation_id)
       end
     )
+    |> observe_publication(:unwind, operator_id, generation_id)
   end
 
   def unwind_current_portfolio(_scope, _generation_id), do: {:error, :invalid_unwind}
+
+  @doc """
+  Records a decision whose publication Fleet Allocation refused.
+
+  The rolled-back transaction left nothing behind, so this durable Strategy
+  Decision Episode is the inspectable outcome: it keeps the evidence, the
+  Commitments that would have been published and the rejected alternatives,
+  with the bounded `reason`. It never becomes the current allocation result
+  and is classified superseded because it never took effect.
+  """
+  def record_publication_rejection(
+        %Scope{operator: %{id: operator_id}},
+        generation_id,
+        %{revision_id: revision_id, source_version: source_version} = selection,
+        %{evidence_references: references, expectations: expectations} = decision,
+        reason
+      )
+      when is_integer(generation_id) and is_integer(revision_id) do
+    unpublished =
+      selection
+      |> Map.get(:commitments, [])
+      |> Enum.map(fn commitment ->
+        %{
+          candidate_id: commitment.candidate_id,
+          claims: commitment.claims,
+          reasons: [:publication_rejected],
+          decisive_reason:
+            "Selected, but Fleet Allocation rejected its publication: #{reason_label(reason)}."
+        }
+      end)
+
+    episode =
+      Repo.insert!(%StrategyDecisionEpisode{
+        operator_id: operator_id,
+        fleet_generation_id: generation_id,
+        fleet_strategy_revision_id: revision_id,
+        source_version: source_version,
+        evidence_references: json_safe(references),
+        alternatives: json_safe(unpublished ++ Map.get(selection, :rejected, [])),
+        expectations: json_safe(expectations),
+        calibration_version: Map.get(decision, :calibration_version, "market-v1"),
+        selection_kind: :publication_rejected,
+        rejection_reason: reason_label(reason),
+        classification: :superseded
+      })
+
+    {:ok, episode}
+  end
+
+  defp observe_publication(result, operation, operator_id, generation_id) do
+    {outcome, reason} =
+      case result do
+        {:ok, _} -> {:published, nil}
+        {:error, reason} -> {:rejected, bounded_reason(reason)}
+      end
+
+    :telemetry.execute(
+      [:spacetraders, :fleet_allocation, :publication],
+      %{count: 1},
+      %{operation: operation, result: outcome, reason: reason}
+    )
+
+    Logger.info("Fleet Allocation publication",
+      operation: operation,
+      result: outcome,
+      reason: reason,
+      operator_id: operator_id,
+      fleet_generation_id: generation_id
+    )
+
+    result
+  end
+
+  @doc false
+  def bounded_reason(reason) when is_atom(reason), do: reason
+  def bounded_reason(_reason), do: :other
+
+  defp reason_label(reason), do: reason |> bounded_reason() |> Atom.to_string()
+
+  @doc """
+  Ids of the portfolio's Commitments whose recorded Intents leave their work
+  unresolved: an unfinished Intent, or a completed buy still inside the
+  bounded leg handoff. Such Commitments are retained work that no replan may
+  release.
+  """
+  def unresolved_commitment_ids(portfolio_id) when is_integer(portfolio_id) do
+    portfolio_id
+    |> List.wrap()
+    |> unresolved_intents_query()
+    |> select([intent], intent.fleet_commitment_id)
+    |> distinct(true)
+    |> Repo.all()
+    |> MapSet.new()
+  end
 
   @doc "Returns the current Fleet Commitment Claim authorizing one Ship."
   def current_ship_claim(agent, ship_symbol, opts \\ [])
@@ -1195,28 +1294,29 @@ defmodule SpaceTraders.FleetAllocation do
   # round trip requests that leg straight after the buy, so the guard lasts
   # only @leg_handoff_seconds: a leg that never appears cannot hold the
   # Portfolio against replanning or revision activation indefinitely.
-  defp unresolved_commitment_intent?(portfolio_ids) do
+  defp unresolved_commitment_intent?(portfolio_ids),
+    do: portfolio_ids |> unresolved_intents_query() |> Repo.exists?()
+
+  defp unresolved_intents_query(portfolio_ids) do
     handoff_cutoff = DateTime.add(DateTime.utc_now(:second), -@leg_handoff_seconds, :second)
 
-    Repo.exists?(
-      from(intent in Intent,
-        as: :intent,
-        join: commitment in Commitment,
-        on: commitment.id == intent.fleet_commitment_id,
-        where:
-          commitment.fleet_commitment_portfolio_id in ^portfolio_ids and
-            intent.caller == "commitment" and
-            (intent.status in ^Intent.unfinished_states() or
-               (intent.type == "buy" and intent.status == "completed" and
-                  intent.finished_at >= ^handoff_cutoff and
-                  not exists(
-                    from(later in Intent,
-                      where:
-                        later.fleet_commitment_id == parent_as(:intent).fleet_commitment_id and
-                          later.id > parent_as(:intent).id
-                    )
-                  )))
-      )
+    from(intent in Intent,
+      as: :intent,
+      join: commitment in Commitment,
+      on: commitment.id == intent.fleet_commitment_id,
+      where:
+        commitment.fleet_commitment_portfolio_id in ^portfolio_ids and
+          intent.caller == "commitment" and
+          (intent.status in ^Intent.unfinished_states() or
+             (intent.type == "buy" and intent.status == "completed" and
+                intent.finished_at >= ^handoff_cutoff and
+                not exists(
+                  from(later in Intent,
+                    where:
+                      later.fleet_commitment_id == parent_as(:intent).fleet_commitment_id and
+                        later.id > parent_as(:intent).id
+                  )
+                )))
     )
   end
 

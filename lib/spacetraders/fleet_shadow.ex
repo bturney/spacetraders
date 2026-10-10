@@ -69,9 +69,7 @@ defmodule SpaceTraders.FleetShadow do
         opts
       )
       when is_map(snapshot) and is_map(availability) and is_list(opts) do
-    snapshot = put_claimable_ships(snapshot, availability)
-
-    with {:ok, planning} <- plan(revision, snapshot),
+    with {:ok, planning} <- plan_market(snapshot, revision, availability),
          {:ok, portfolio} <-
            FleetAllocation.select_portfolio(
              revision,
@@ -98,32 +96,6 @@ defmodule SpaceTraders.FleetShadow do
   def compare(_snapshot, _revision, _availability, _capacity, _opts),
     do: {:error, :invalid_shadow_input}
 
-  @doc "Re-evaluates only when Listings or API pressure have materially changed."
-  def replan(previous, snapshot, revision, availability, capacity, opts \\ [])
-
-  def replan(
-        previous,
-        snapshot,
-        %Revision{} = revision,
-        availability,
-        %Disposition{} = capacity,
-        opts
-      )
-      when is_map(previous) and is_map(snapshot) and is_map(availability) and is_list(opts) do
-    case replan_trigger(previous, snapshot, capacity) do
-      :unchanged ->
-        {:ok, Map.put(previous, :replan_trigger, :unchanged)}
-
-      trigger ->
-        with {:ok, comparison} <- compare(snapshot, revision, availability, capacity, opts) do
-          {:ok, Map.put(comparison, :replan_trigger, trigger)}
-        end
-    end
-  end
-
-  def replan(_previous, _snapshot, _revision, _availability, _capacity, _opts),
-    do: {:error, :invalid_shadow_input}
-
   # Planning binds evidence at the application clock. A Capacity Disposition
   # is advisory capacity meaning stamped by the governor's own clock; it never
   # fixes decision time.
@@ -140,6 +112,16 @@ defmodule SpaceTraders.FleetShadow do
     agent
     |> Intelligence.market_interpretation(system_symbol, decision_time)
     |> Map.put(:credit_margin_percent, CreditCalibration.active().margin_percent)
+  end
+
+  @doc """
+  Pure Fleet Planning of Market trade Candidate Contributions for every
+  Strategic Objective of `revision`, sized to the trade-capable Claims in
+  `availability`. Selects, claims and publishes nothing.
+  """
+  def plan_market(market_input, %Revision{} = revision, availability)
+      when is_map(market_input) and is_map(availability) do
+    plan(revision, put_claimable_ships(market_input, availability))
   end
 
   # Trade quantity is bounded by the holds of Ships the Fleet can actually
@@ -215,13 +197,5 @@ defmodule SpaceTraders.FleetShadow do
     |> Enum.map(&Map.take(&1, [:subject, :trade_goods]))
     |> Enum.sort_by(& &1.subject)
     |> Evidence.fingerprint()
-  end
-
-  defp replan_trigger(previous, snapshot, capacity) do
-    cond do
-      previous[:listings_fingerprint] != listings_fingerprint(snapshot) -> :listings_changed
-      previous[:capacity_status] != capacity.status -> :capacity_disposition_changed
-      true -> :unchanged
-    end
   end
 end

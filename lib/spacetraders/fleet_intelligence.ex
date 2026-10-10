@@ -1,23 +1,15 @@
 defmodule SpaceTraders.FleetIntelligence do
   alias SpaceTraders.Agent, as: AgentContext
   alias SpaceTraders.Agent.Agent, as: AgentRecord
-  alias SpaceTraders.Agent.Scope
   alias SpaceTraders.API.AgentTokenReference
   alias SpaceTraders.{Clock, Evidence}
   alias SpaceTraders.Evidence.Demand
   alias SpaceTraders.Fleet
-  alias SpaceTraders.Fleet.Ship
-  alias SpaceTraders.FleetCapacity
-  alias SpaceTraders.FleetExecution
   alias SpaceTraders.FleetPlanning
   alias SpaceTraders.FleetShadow
   alias SpaceTraders.FleetStrategy.Revision
   alias SpaceTraders.Intelligence
   alias SpaceTraders.World
-
-  alias SpaceTraders.Repo
-
-  import Ecto.Query
 
   @freshness_seconds 300
   @api_cost 0.1
@@ -171,39 +163,51 @@ defmodule SpaceTraders.FleetIntelligence do
     end
   end
 
-  def reconcile(
-        %Scope{} = scope,
-        %AgentRecord{} = agent,
-        %Revision{} = revision,
-        system,
-        capacity
-      )
+  @doc """
+  Plans the evidence half of the Market pilot domain at one decision time.
+
+  Waypoint discovery (when nothing is retained) runs first so the decision
+  time follows it; the shared Market input is then fixed at that time,
+  durable Market Observation Demands are synchronized from it, and the
+  highest-priority intelligence objective is planned for Ships outside
+  `occupied`. Returns `{:ok, %{as_of, market, intelligence}}`, where
+  `intelligence` is the Fleet Planning result or nil when no intelligence
+  objective has work. Selects, claims and publishes nothing: Fleet
+  Allocation compares these candidates with Market trade in one decision.
+  """
+  def plan_contributions(%AgentRecord{} = agent, %Revision{} = revision, system, occupied)
       when is_binary(system) do
-    # One decision time fixes Waypoint projection, Market interpretation,
-    # demand timing and intelligence planning alike.
-    with true <- FleetCapacity.proceed?(capacity),
-         %{occupied: occupied} <- FleetExecution.intelligence_occupancy(scope, agent),
-         {now, waypoints} <- waypoints_for_decision(agent, revision, system),
-         market = FleetShadow.market_input(agent, system, now),
-         :ok <- sync_market_demands(agent, revision, market),
-         {kind, index} <- next_objective(revision, waypoints, market),
-         true <- free_ship_known?(agent, occupied),
+    {now, waypoints} = waypoints_for_decision(agent, revision, system)
+    market = FleetShadow.market_input(agent, system, now)
+
+    with :ok <- sync_market_demands(agent, revision, market) do
+      {:ok,
+       %{
+         as_of: now,
+         market: market,
+         intelligence: intelligence_planning(agent, revision, system, waypoints, market, occupied)
+       }}
+    end
+  end
+
+  defp intelligence_planning(agent, revision, system, waypoints, market, occupied) do
+    with {kind, index} <- next_objective(revision, waypoints, market),
          {:ok, ships} <- Fleet.list_ships(agent),
-         ships <- Enum.reject(ships, &(&1.symbol in occupied)),
+         ships = Enum.reject(ships, &(&1.symbol in occupied)),
          true <- ships != [],
-         opportunities <- opportunities(kind, revision, index, waypoints, ships, system, market),
+         opportunities = opportunities(kind, revision, index, waypoints, ships, system, market),
          true <- opportunities != [],
          {:ok, planning} <-
            FleetPlanning.plan_intelligence(revision, index, %{
-             as_of: now,
+             as_of: market.as_of,
              system_symbol: system,
              agent_id: agent.id,
              freshness_seconds: @freshness_seconds,
              opportunities: opportunities
            }) do
-      FleetExecution.activate_intelligence(scope, agent, revision, planning, capacity)
+      planning
     else
-      _ -> {:error, :no_decision_relevant_intelligence}
+      _ -> nil
     end
   end
 
@@ -533,13 +537,6 @@ defmodule SpaceTraders.FleetIntelligence do
   end
 
   defp chart_objective(_revision), do: nil
-
-  # Occupancy is local state: when every known Ship is fenced there is nothing
-  # to plan for, so no game request is spent finding that out.
-  defp free_ship_known?(agent, occupied) do
-    symbols = Repo.all(from ship in Ship, where: ship.agent_id == ^agent.id, select: ship.symbol)
-    symbols == [] or Enum.any?(symbols, &(&1 not in occupied))
-  end
 
   defp chart_opportunities(waypoints, ships, system) do
     Enum.flat_map(waypoints, fn waypoint ->

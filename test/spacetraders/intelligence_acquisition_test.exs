@@ -18,7 +18,6 @@ defmodule SpaceTraders.IntelligenceAcquisitionTest do
   alias SpaceTraders.FleetExecution
   alias SpaceTraders.FleetGeneration.Generation
   alias SpaceTraders.FleetIntelligence
-  alias SpaceTraders.FleetPlanning
   alias SpaceTraders.FleetStrategy
   alias SpaceTraders.FleetStrategy.{Revision, Strategy}
   alias SpaceTraders.Intelligence
@@ -1122,13 +1121,7 @@ defmodule SpaceTraders.IntelligenceAcquisitionTest do
     end)
 
     assert {:ok, %{intent: %Intent{status: "waiting", target_waypoint: "X1-UX81-A2"} = intent}} =
-             FleetIntelligence.reconcile(
-               scope,
-               agent,
-               revision,
-               "X1-UX81",
-               CapacityDispositions.proceed()
-             )
+             reconcile_domain(scope, agent, revision)
 
     assert_receive {"POST", ^orbit_path}
     assert_receive {"POST", ^navigate_path}
@@ -1165,153 +1158,6 @@ defmodule SpaceTraders.IntelligenceAcquisitionTest do
     assert projection.facts["trade_goods"].source == "Market observation"
     assert projection.facts["transactions"].state == "unknown"
     assert projection.facts["transactions"].value == nil
-  end
-
-  test "Fleet allocation admits a valuable observation and publishes its Ship Claim before acquisition" do
-    {agent, ship, old_portfolio, _commitment} = claimed_ship()
-    operator = Repo.get!(Operator, agent.operator_id)
-    scope = Scope.for_operator(operator)
-    revision = Repo.get!(Revision, old_portfolio.fleet_strategy_revision_id)
-    ship_path = "/v2/my/ships/#{ship.symbol}"
-
-    assert {:ok, _} =
-             FleetAllocation.unwind_current_portfolio(scope, old_portfolio.fleet_generation_id)
-
-    Req.Test.stub(SpaceTraders.API, fn conn ->
-      case {conn.method, conn.request_path} do
-        {"GET", "/v2/my/agent"} ->
-          Req.Test.json(conn, %{"data" => %{"symbol" => agent.symbol, "credits" => 10_000}})
-
-        {"GET", "/v2/my/ships"} ->
-          Req.Test.json(conn, %{"data" => [ship_body(ship.symbol)]})
-
-        {"GET", ^ship_path} ->
-          Req.Test.json(conn, %{"data" => ship_body(ship.symbol)})
-
-        {"GET", "/v2/systems/X1-UX81/waypoints/X1-UX81-A2"} ->
-          Req.Test.json(conn, %{
-            "data" => %{
-              "symbol" => "X1-UX81-A2",
-              "systemSymbol" => "X1-UX81",
-              "type" => "PLANET",
-              "traits" => [%{"symbol" => "MARKETPLACE"}]
-            }
-          })
-
-        other ->
-          flunk("unexpected game request: #{inspect(other)}")
-      end
-    end)
-
-    assert {:ok, planning} =
-             FleetPlanning.plan_intelligence(revision, 0, %{
-               as_of: DateTime.utc_now(),
-               system_symbol: "X1-UX81",
-               agent_id: agent.id,
-               opportunities: [
-                 %{
-                   subject: "waypoint:X1-UX81:X1-UX81-A2",
-                   required_facts: ["traits"],
-                   facts: %{},
-                   expected_decision_value: 100,
-                   api_capacity_cost: 5,
-                   ship_time_cost: 10,
-                   acquisition: :on_site
-                 }
-               ]
-             })
-
-    assert {:ok, %{intent: %Intent{status: "completed"}, commitment: commitment}} =
-             FleetExecution.activate_intelligence(
-               scope,
-               agent,
-               revision,
-               planning,
-               CapacityDispositions.proceed()
-             )
-
-    assert commitment.claims == [ship.symbol]
-
-    assert {:ok, %{commitment_id: commitment_id}} =
-             FleetAllocation.current_ship_claim(agent, ship.symbol)
-
-    assert commitment_id == commitment.id
-  end
-
-  test "Coverage Contribution activation requires its current open Observation Demand" do
-    {agent, ship, previous, _commitment} =
-      claimed_ship(%{
-        "objective" => "Grow credits",
-        "kind" => "continuous",
-        "evaluation" => "Maximize net credit growth over time"
-      })
-
-    scope = Scope.for_operator(Repo.get!(Operator, agent.operator_id))
-    revision = Repo.get!(Revision, previous.fleet_strategy_revision_id)
-
-    assert {:ok, _} =
-             FleetAllocation.unwind_current_portfolio(scope, previous.fleet_generation_id)
-
-    waypoint =
-      Model.Waypoint.from_json(%{
-        "symbol" => "X1-UX81-A1",
-        "systemSymbol" => "X1-UX81",
-        "type" => "PLANET",
-        "x" => 1,
-        "y" => 2,
-        "traits" => [%{"symbol" => "MARKETPLACE"}]
-      })
-
-    assert {:ok, _} = Intelligence.observe_waypoint(agent, waypoint, source: "get_waypoints")
-
-    assert {:ok, planning} =
-             FleetPlanning.plan_intelligence(revision, 0, %{
-               as_of: DateTime.utc_now(),
-               system_symbol: "X1-UX81",
-               agent_id: agent.id,
-               opportunities: [
-                 %{
-                   subject: "market:X1-UX81:X1-UX81-A1",
-                   required_facts: ["trade_goods"],
-                   facts: %{},
-                   expected_decision_value: 1,
-                   api_capacity_cost: 5,
-                   ship_time_cost: 500,
-                   acquisition: :on_site,
-                   coverage: true
-                 }
-               ]
-             })
-
-    test_pid = self()
-
-    Req.Test.stub(SpaceTraders.API, fn conn ->
-      send(test_pid, {conn.method, conn.request_path})
-
-      case conn.request_path do
-        "/v2/my/agent" ->
-          Req.Test.json(conn, %{"data" => %{"symbol" => agent.symbol, "credits" => 10_000}})
-
-        "/v2/my/ships" ->
-          Req.Test.json(conn, %{"data" => [ship_body(ship.symbol)]})
-
-        other ->
-          flunk("Coverage without an open Demand made an unexpected request: #{other}")
-      end
-    end)
-
-    assert {:error, :intelligence_activation_unavailable} =
-             FleetExecution.activate_intelligence(
-               scope,
-               agent,
-               revision,
-               planning,
-               CapacityDispositions.proceed()
-             )
-
-    assert_receive {"GET", "/v2/my/agent"}
-    assert_receive {"GET", "/v2/my/ships"}
-    assert Intents.current(agent) == []
   end
 
   test "chart objective autonomously selects an on-site uncharted Waypoint from retained evidence" do
@@ -1405,22 +1251,14 @@ defmodule SpaceTraders.IntelligenceAcquisitionTest do
     end)
 
     assert {:ok, %{intent: %Intent{status: "completed"}}} =
-             FleetIntelligence.reconcile(
-               scope,
-               agent,
-               revision,
-               "X1-UX81",
-               CapacityDispositions.proceed()
-             )
+             reconcile_domain(scope, agent, revision)
 
-    assert {:error, :no_decision_relevant_intelligence} =
-             FleetIntelligence.reconcile(
-               scope,
-               agent,
-               revision,
-               "X1-UX81",
-               CapacityDispositions.proceed()
-             )
+    # Charting is complete: the finished Commitment is released and nothing
+    # admissible remains, without inventing a Neutral Wait.
+    assert {:ok, %{action: :no_admissible_commitment, neutral_wait: nil}} =
+             reconcile_domain(scope, agent, revision)
+
+    assert FleetAllocation.current_portfolio(scope, agent) == nil
   end
 
   test "a lost scan response waits for its cooldown and never blindly scans again" do
@@ -1580,13 +1418,7 @@ defmodule SpaceTraders.IntelligenceAcquisitionTest do
     end)
 
     assert {:ok, %{intent: %Intent{status: "completed"}}} =
-             FleetIntelligence.reconcile(
-               scope,
-               agent,
-               revision,
-               "X1-UX81",
-               CapacityDispositions.proceed()
-             )
+             reconcile_domain(scope, agent, revision)
 
     projection =
       World.intelligence(agent, :market, "X1-UX81", "X1-UX81-A1", DateTime.utc_now(), 300)
@@ -1875,13 +1707,7 @@ defmodule SpaceTraders.IntelligenceAcquisitionTest do
     end)
 
     assert {:ok, %{intent: %Intent{status: "completed"}}} =
-             FleetIntelligence.reconcile(
-               scope,
-               agent,
-               revision,
-               "X1-UX81",
-               CapacityDispositions.proceed()
-             )
+             reconcile_domain(scope, agent, revision)
 
     projection =
       World.intelligence(agent, :shipyard, "X1-UX81", "X1-UX81-A1", DateTime.utc_now(), 300)
@@ -1941,14 +1767,8 @@ defmodule SpaceTraders.IntelligenceAcquisitionTest do
       flunk("active commitments must retain their Fleet")
     end)
 
-    assert {:error, :no_decision_relevant_intelligence} =
-             FleetIntelligence.reconcile(
-               scope,
-               agent,
-               revision,
-               "X1-UX81",
-               CapacityDispositions.proceed()
-             )
+    assert {:ok, %{action: :retained}} =
+             reconcile_domain(scope, agent, revision)
 
     assert {:ok, %{portfolio_id: portfolio_id, commitment_id: commitment_id}} =
              FleetAllocation.current_ship_claim(agent, ship.symbol)
@@ -2102,13 +1922,7 @@ defmodule SpaceTraders.IntelligenceAcquisitionTest do
       stub_ships(agent, [ship_a, ship_b])
 
       assert {:ok, %{intent: %Intent{} = intent, commitment: new_commitment}} =
-               FleetIntelligence.reconcile(
-                 scope,
-                 agent,
-                 revision,
-                 "X1-UX81",
-                 CapacityDispositions.proceed()
-               )
+               reconcile_domain(scope, agent, revision)
 
       assert new_commitment.claims == [ship_b.symbol]
       assert intent.ship_id == ship_b.id
@@ -2132,14 +1946,8 @@ defmodule SpaceTraders.IntelligenceAcquisitionTest do
         flunk("a fenced Ship must not trigger game traffic")
       end)
 
-      assert {:error, :no_decision_relevant_intelligence} =
-               FleetIntelligence.reconcile(
-                 scope,
-                 agent,
-                 revision,
-                 "X1-UX81",
-                 CapacityDispositions.proceed()
-               )
+      assert {:ok, %{action: :retained}} =
+               reconcile_domain(scope, agent, revision)
 
       assert [%Intent{id: id}] = Intents.current(agent)
       assert id == busy_intent.id
@@ -2157,30 +1965,37 @@ defmodule SpaceTraders.IntelligenceAcquisitionTest do
       stub_ships(agent, [ship_a])
 
       assert {:ok, %{intent: %Intent{} = coverage_intent}} =
-               FleetIntelligence.reconcile(
-                 scope,
-                 agent,
-                 revision,
-                 "X1-UX81",
-                 CapacityDispositions.proceed()
-               )
+               reconcile_domain(scope, agent, revision)
 
       ship_b =
         Repo.insert!(%Ship{symbol: "INTELACQ-2", ship_type: "SHIP_PROBE", agent_id: agent.id})
 
       stub_ships(agent, [ship_a, ship_b])
 
-      assert {:error, :no_decision_relevant_intelligence} =
-               FleetIntelligence.reconcile(
-                 scope,
-                 agent,
-                 revision,
-                 "X1-UX81",
-                 CapacityDispositions.proceed()
-               )
+      assert {:ok, %{action: :retained}} =
+               reconcile_domain(scope, agent, revision)
 
       assert [%Intent{id: id}] = Intents.current(agent)
       assert id == coverage_intent.id
+    end
+  end
+
+  # The one Market pilot-domain Allocation decision; a single published
+  # Commitment is returned with the root Intent it dispatched.
+  defp reconcile_domain(scope, agent, revision) do
+    case FleetExecution.reconcile_market_domain(
+           scope,
+           agent,
+           revision,
+           "X1-UX81",
+           CapacityDispositions.proceed()
+         ) do
+      {:ok, %{action: :published, commitments: [commitment], dispatched: dispatched}} ->
+        {:ok, intent} = Map.fetch!(dispatched, commitment.candidate_id)
+        {:ok, %{intent: intent, commitment: commitment}}
+
+      other ->
+        other
     end
   end
 

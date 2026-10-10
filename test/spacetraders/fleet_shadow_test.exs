@@ -156,40 +156,6 @@ defmodule SpaceTraders.FleetShadowTest do
     assert Repo.aggregate(Commitment, :count) == 0
   end
 
-  test "changed Listings and capacity disposition deterministically trigger shadow replanning" do
-    assert {:ok, previous} =
-             FleetShadow.compare(snapshot(), revision(), availability(), capacity())
-
-    changed_listings = put_in(snapshot().markets, [market("X1-A1", 8), market("X1-A2", 25)])
-
-    assert {:ok, %{replan_trigger: :listings_changed} = first} =
-             FleetShadow.replan(
-               previous,
-               changed_listings,
-               revision(),
-               availability(),
-               capacity()
-             )
-
-    assert {:ok, %{replan_trigger: :capacity_disposition_changed} = second} =
-             FleetShadow.replan(
-               first,
-               changed_listings,
-               revision(),
-               availability(),
-               capacity(:defer)
-             )
-
-    assert {:ok, %{replan_trigger: :unchanged}} =
-             FleetShadow.replan(
-               second,
-               changed_listings,
-               revision(),
-               availability(),
-               capacity(:defer)
-             )
-  end
-
   defp revision do
     %Revision{
       id: 42,

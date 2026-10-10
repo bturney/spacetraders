@@ -89,8 +89,8 @@ defmodule SpaceTraders.NeutralWaitReconciliationTest do
        } do
     demand = request_market_demand(agent, revision, DateTime.add(capacity.observed_at, 300))
 
-    assert {:ok, %{action: :no_admissible_commitment, comparison: %{proposed_choices: []}}} =
-             FleetExecution.reconcile_market_evidence(scope, agent, revision, @system, capacity)
+    assert {:ok, %{action: :no_admissible_commitment, selection: %{commitments: []}}} =
+             FleetExecution.reconcile_market_domain(scope, agent, revision, @system, capacity)
 
     # Durable identity and current-result linkage are the persistence contract.
     assert [%StrategyDecisionEpisode{} = episode] = decision_episodes(generation)
@@ -125,21 +125,25 @@ defmodule SpaceTraders.NeutralWaitReconciliationTest do
     demand = request_market_demand(agent, revision, DateTime.add(capacity.observed_at, 300))
 
     assert {:ok, %{action: :no_admissible_commitment}} =
-             FleetExecution.reconcile_market_evidence(scope, agent, revision, @system, capacity)
+             FleetExecution.reconcile_market_domain(scope, agent, revision, @system, capacity)
 
     assert [original] = decision_episodes(generation)
 
     assert {:ok, %{action: :no_admissible_commitment}} =
-             FleetExecution.reconcile_market_evidence(scope, agent, revision, @system, capacity)
+             FleetExecution.reconcile_market_domain(scope, agent, revision, @system, capacity)
 
     assert [%{id: same_id}] = decision_episodes(generation)
     assert same_id == original.id
 
-    assert {:ok, replacement} =
+    assert {:ok, _replacement} =
              Evidence.replace_demand(demand, %{due_at: DateTime.add(capacity.observed_at, 600)})
 
     assert {:ok, %{action: :no_admissible_commitment}} =
-             FleetExecution.reconcile_market_evidence(scope, agent, revision, @system, capacity)
+             FleetExecution.reconcile_market_domain(scope, agent, revision, @system, capacity)
+
+    # The decision synchronizes durable Market demands at its own decision
+    # time first; the wait binds whichever open demand that left.
+    replacement = open_market_demand(agent)
 
     assert [refreshed] = decision_episodes(generation)
     assert refreshed.id == original.id
@@ -158,7 +162,9 @@ defmodule SpaceTraders.NeutralWaitReconciliationTest do
     assert pointer.strategy_decision_episode_id == original.id
   end
 
-  test "zero admissible contributions without durable future evidence do not create a wait",
+  # Fail-closed minting without future evidence is covered at the Neutral
+  # Wait seam; here the decision itself persists its refresh evidence first.
+  test "the decision persists durable refresh evidence before Allocation records a wait",
        %{
          agent: agent,
          scope: scope,
@@ -166,17 +172,13 @@ defmodule SpaceTraders.NeutralWaitReconciliationTest do
          generation: generation,
          capacity: capacity
        } do
-    assert {:ok, %{action: :no_admissible_commitment}} =
-             FleetExecution.reconcile_market_evidence(scope, agent, revision, @system, capacity)
+    assert {:ok, %{action: :no_admissible_commitment, neutral_wait: %StrategyDecisionEpisode{}}} =
+             FleetExecution.reconcile_market_domain(scope, agent, revision, @system, capacity)
 
-    assert_no_wait(scope, agent, generation)
-
-    _already_due = request_market_demand(agent, revision, capacity.observed_at)
-
-    assert {:ok, %{action: :no_admissible_commitment}} =
-             FleetExecution.reconcile_market_evidence(scope, agent, revision, @system, capacity)
-
-    assert_no_wait(scope, agent, generation)
+    demand = open_market_demand(agent)
+    assert DateTime.compare(demand.due_at, capacity.observed_at) == :gt
+    assert [episode] = decision_episodes(generation)
+    assert episode.next_observation_at == demand.due_at
   end
 
   test "unknown Governed Availability stays distinct even with future due evidence",
@@ -193,7 +195,7 @@ defmodule SpaceTraders.NeutralWaitReconciliationTest do
     stub_availability(ship, %{"symbol" => agent.symbol})
 
     assert {:error, :availability_unknown} =
-             FleetExecution.reconcile_market_evidence(scope, agent, revision, @system, capacity)
+             FleetExecution.reconcile_market_domain(scope, agent, revision, @system, capacity)
 
     assert_no_wait(scope, agent, generation)
   end
@@ -213,7 +215,7 @@ defmodule SpaceTraders.NeutralWaitReconciliationTest do
           CapacityDispositions.unavailable(capacity.observed_at)
         ] do
       assert {:ok, %{action: :deferred_for_capacity}} =
-               FleetExecution.reconcile_market_evidence(scope, agent, revision, @system, deferred)
+               FleetExecution.reconcile_market_domain(scope, agent, revision, @system, deferred)
 
       assert_no_wait(scope, agent, generation)
     end
@@ -274,6 +276,12 @@ defmodule SpaceTraders.NeutralWaitReconciliationTest do
              })
 
     demand
+  end
+
+  defp open_market_demand(agent) do
+    agent
+    |> Evidence.list_open_demands()
+    |> Enum.find(&(&1.subject == @market_subject))
   end
 
   defp decision_episodes(generation) do

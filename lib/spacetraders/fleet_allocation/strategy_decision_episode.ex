@@ -5,6 +5,10 @@ defmodule SpaceTraders.FleetAllocation.StrategyDecisionEpisode do
 
   @selection_kinds [:selected_plan, :neutral_wait]
 
+  # A rejected publication is durable decision evidence but never the current
+  # allocation result, so it stays outside the pointer's selection kinds.
+  @episode_kinds @selection_kinds ++ [:publication_rejected]
+
   @limitation_kinds [
     :incomplete_coverage,
     :no_admissible_candidate,
@@ -27,7 +31,10 @@ defmodule SpaceTraders.FleetAllocation.StrategyDecisionEpisode do
     field :actual_outcomes, :map, default: %{}
     field :calibration_version, :string
 
-    field :selection_kind, Ecto.Enum, values: @selection_kinds, default: :selected_plan
+    field :selection_kind, Ecto.Enum, values: @episode_kinds, default: :selected_plan
+
+    # Why Fleet Allocation refused to publish this decision (bounded reason).
+    field :rejection_reason, :string
 
     field :binding_limitation_kind, Ecto.Enum, values: @limitation_kinds
 
