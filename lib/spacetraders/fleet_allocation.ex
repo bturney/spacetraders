@@ -584,14 +584,24 @@ defmodule SpaceTraders.FleetAllocation do
   """
   defdelegate trade_progress(episode_id), to: TradeProgress, as: :for_episode
 
-  @doc false
-  def record_trade_outcome(%Portfolio{} = portfolio),
-    do:
-      record_portfolio_outcome(
-        portfolio,
-        :realized,
-        TradeProgress.for_episode(portfolio.strategy_decision_episode_id)
-      )
+  @doc """
+  Classifies a Portfolio's Decision Episode from its trade receipts after a
+  sale completes; it keeps evaluating while another Commitment still trades.
+  """
+  def record_trade_outcome(%Portfolio{} = portfolio) do
+    record_market_outcome(
+      portfolio.strategy_decision_episode_id,
+      portfolio.operator_id,
+      realized_outcomes(portfolio.strategy_decision_episode_id)
+    )
+  end
+
+  defp record_market_outcome(episode_id, operator_id, outcomes) do
+    case TradeProgress.classification(outcomes) do
+      :still_evaluating -> {:ok, :still_evaluating}
+      classification -> update_decision_outcome(episode_id, operator_id, classification, outcomes)
+    end
+  end
 
   @doc "Records confirmed outcomes and terminal classification for one Decision Episode."
   def record_decision_outcome(
@@ -653,13 +663,7 @@ defmodule SpaceTraders.FleetAllocation do
     |> distinct(true)
     |> Repo.all()
     |> Enum.each(fn episode ->
-      _ =
-        update_decision_outcome(
-          episode.id,
-          episode.operator_id,
-          :realized,
-          realized_outcomes(episode.id)
-        )
+      _ = record_market_outcome(episode.id, episode.operator_id, realized_outcomes(episode.id))
     end)
 
     StrategyDecisionEpisode

@@ -558,37 +558,133 @@ defmodule SpaceTraders.FleetAllocationPublishTest do
     end
   end
 
-  defp publish!(scope, generation, revision) do
+  describe "Market Decision Episode classification" do
+    test "one completed sale leaves the Episode evaluating while another Commitment trades" do
+      %{agent: agent, scope: scope, generation: generation, revision: revision} =
+        allocation_fixture()
+
+      portfolio = publish_two!(agent, scope, generation, revision)
+      [first, second] = Enum.sort_by(portfolio.commitments, & &1.candidate_id)
+      episode_id = portfolio.strategy_decision_episode_id
+
+      trade_intent!(portfolio, first, "buy", 50, 10)
+      trade_intent!(portfolio, first, "sell", 150, 10)
+      trade_intent!(portfolio, second, "buy", 40, 10)
+      open_sell = trade_intent!(portfolio, second, "sell", nil, 10, status: "waiting")
+
+      FleetAllocation.record_trade_outcome(portfolio)
+
+      assert Repo.get!(StrategyDecisionEpisode, episode_id).classification == :still_evaluating
+
+      open_sell
+      |> Ecto.Changeset.change(status: "completed", last_action_result: receipt("sell", 100, 10))
+      |> Repo.update!()
+
+      FleetAllocation.record_trade_outcome(portfolio)
+
+      assert %{classification: :realized, actual_outcomes: outcomes} =
+               Repo.get!(StrategyDecisionEpisode, episode_id)
+
+      assert outcomes["completed_round_trips"] == 2
+    end
+
+    test "a finished Commitment without a proven round trip classifies the Episode partial" do
+      %{agent: agent, scope: scope, generation: generation, revision: revision} =
+        allocation_fixture()
+
+      portfolio = publish_two!(agent, scope, generation, revision)
+      [first, second] = Enum.sort_by(portfolio.commitments, & &1.candidate_id)
+
+      trade_intent!(portfolio, first, "buy", 50, 10)
+      trade_intent!(portfolio, first, "sell", 150, 10)
+      trade_intent!(portfolio, second, "buy", 40, 10)
+      trade_intent!(portfolio, second, "sell", nil, 10, status: "infeasible")
+
+      FleetAllocation.record_trade_outcome(portfolio)
+
+      assert Repo.get!(StrategyDecisionEpisode, portfolio.strategy_decision_episode_id).classification ==
+               :partially_realized
+    end
+
+    test "boot reconciliation applies the same classification" do
+      %{agent: agent, scope: scope, generation: generation, revision: revision} =
+        allocation_fixture()
+
+      portfolio = publish_two!(agent, scope, generation, revision)
+      [first, second] = Enum.sort_by(portfolio.commitments, & &1.candidate_id)
+
+      trade_intent!(portfolio, first, "buy", 50, 10)
+      trade_intent!(portfolio, first, "sell", 150, 10)
+      trade_intent!(portfolio, second, "buy", 40, 10, status: "active")
+
+      assert :ok = FleetAllocation.reconcile_completed_outcomes()
+
+      assert Repo.get!(StrategyDecisionEpisode, portfolio.strategy_decision_episode_id).classification ==
+               :still_evaluating
+    end
+  end
+
+  defp publish_two!(agent, scope, generation, revision) do
+    {:ok, _ship} = Fleet.record_ship(agent, "SHIP-2", "SHIP_PROBE")
+    original = selection(revision)
+    [commitment] = original.commitments
+
+    second = %{
+      commitment
+      | id: {revision.id, "candidate-b"},
+        candidate_id: "candidate-b",
+        claims: ["SHIP-2"],
+        reservations: %{},
+        pledges: []
+    }
+
     assert {:ok, portfolio} =
-             FleetAllocation.publish_portfolio(scope, generation.id, selection(revision), decision())
+             FleetAllocation.publish_portfolio(
+               scope,
+               generation.id,
+               %{original | commitments: [commitment, second]},
+               decision()
+             )
 
     portfolio
   end
 
-  defp trade_intent!(portfolio, commitment, type, total, units) do
-    ship = Repo.get_by!(Fleet.Ship, symbol: "SHIP-1")
+  defp receipt(type, total, units) do
+    %{
+      "transaction" => %{
+        "type" => String.upcase(type),
+        "trade_symbol" => "IRON_ORE",
+        "ship_symbol" => "SHIP-1",
+        "waypoint_symbol" => "X1-A-#{type}",
+        "units" => units,
+        "price_per_unit" => div(total, units),
+        "total_price" => total
+      }
+    }
+  end
 
-    result =
-      if total,
-        do: %{
-          "transaction" => %{
-            "type" => String.upcase(type),
-            "trade_symbol" => "IRON_ORE",
-            "ship_symbol" => "SHIP-1",
-            "waypoint_symbol" => "X1-A-#{type}",
-            "units" => units,
-            "price_per_unit" => div(total, units),
-            "total_price" => total
-          }
-        },
-        else: %{"kind" => type}
+  defp publish!(scope, generation, revision) do
+    assert {:ok, portfolio} =
+             FleetAllocation.publish_portfolio(
+               scope,
+               generation.id,
+               selection(revision),
+               decision()
+             )
+
+    portfolio
+  end
+
+  defp trade_intent!(portfolio, commitment, type, total, units, opts \\ []) do
+    ship = Repo.get_by!(Fleet.Ship, symbol: "SHIP-1")
+    result = if total, do: receipt(type, total, units), else: %{"kind" => type}
 
     Repo.insert!(%Intent{
       ship_id: ship.id,
       caller: "commitment",
       type: type,
       target_waypoint: "X1-A-#{type}",
-      status: "completed",
+      status: Keyword.get(opts, :status, "completed"),
       fleet_commitment_id: commitment.id,
       fleet_commitment_portfolio_id: portfolio.id,
       fleet_commitment_portfolio_version: portfolio.version,

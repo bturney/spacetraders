@@ -41,9 +41,16 @@ defmodule SpaceTraders.FleetAllocation.TradeProgress do
     |> build()
   end
 
-  @doc "Builds the projection from completed buy/sell Intents (pure)."
-  def build(intents) when is_list(intents) do
-    intents = Enum.sort_by(intents, & &1.id)
+  @doc """
+  Builds the projection from buy/sell Intents of any status (pure).
+
+  Only completed Intents contribute receipts. `open_commitments` names each
+  Commitment whose trade is still under way: an unfinished buy or sell, or a
+  completed buy whose sell leg has not been requested yet.
+  """
+  def build(all_intents) when is_list(all_intents) do
+    all_intents = Enum.sort_by(all_intents, & &1.id)
+    intents = Enum.filter(all_intents, &(&1.status == "completed"))
     {receipts, receipt_less} = split_receipts(intents)
     trips = round_trips(intents, receipts)
     proven = for {:ok, trip} <- trips, do: trip
@@ -57,7 +64,8 @@ defmodule SpaceTraders.FleetAllocation.TradeProgress do
       credits_received: sum(receipts, "sell", :total_price),
       completed_round_trips: length(proven),
       round_trips: proven,
-      trade_margin: if(proven == [], do: @unknown, else: Enum.sum_by(proven, & &1.trade_margin)),
+      trade_margin: aggregate_margin(trips),
+      open_commitments: open_commitments(all_intents),
       net_earnings: @unknown,
       unknown:
         [%{item: "net_earnings", reason: @supporting_costs_reason}] ++
@@ -70,15 +78,49 @@ defmodule SpaceTraders.FleetAllocation.TradeProgress do
   def trade_margin(%{"trade_margin" => margin}) when is_integer(margin), do: margin
   def trade_margin(_progress), do: nil
 
+  @doc """
+  The terminal classification the receipts support, or `:still_evaluating`.
+
+  While any Commitment's trade is still under way the Episode keeps
+  evaluating. Once none is, it is `:realized` when every traded Commitment
+  proved a Completed Round Trip, else `:partially_realized`.
+  """
+  def classification(%{open_commitments: [_ | _]}), do: :still_evaluating
+
+  def classification(%{unknown: unknown}) do
+    if Enum.any?(unknown, &(&1.item == "completed_round_trip")),
+      do: :partially_realized,
+      else: :realized
+  end
+
   defp base_query do
     from(intent in Intent,
       join: commitment in Commitment,
       on: commitment.id == intent.fleet_commitment_id,
       join: portfolio in Portfolio,
       on: portfolio.id == commitment.fleet_commitment_portfolio_id,
-      where: intent.status == "completed" and intent.type in ["buy", "sell"],
+      where: intent.type in ["buy", "sell"],
       order_by: intent.id
     )
+  end
+
+  # Trade Margin is per Completed Round Trip; an Episode-wide figure is shown
+  # only when every traded Commitment proved its round trip.
+  defp aggregate_margin(trips) do
+    proven = for {:ok, trip} <- trips, do: trip
+    if proven == [], do: @unknown, else: Enum.sum_by(proven, & &1.trade_margin)
+  end
+
+  defp open_commitments(intents) do
+    intents
+    |> Enum.group_by(& &1.fleet_commitment_id)
+    |> Enum.filter(fn {_commitment_id, mine} ->
+      Enum.any?(mine, &Intent.unfinished?/1) or
+        (Enum.any?(mine, &(&1.type == "buy" and &1.status == "completed")) and
+           not Enum.any?(mine, &(&1.type == "sell")))
+    end)
+    |> Enum.map(&elem(&1, 0))
+    |> Enum.sort()
   end
 
   defp split_receipts(intents) do

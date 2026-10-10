@@ -51,7 +51,9 @@ defmodule SpaceTraders.Repo.Migrations.RecordRejectedAllocationPublications do
   end
 
   def down do
-    execute("DELETE FROM strategy_decision_episodes WHERE selection_kind = 'publication_rejected'")
+    execute(
+      "DELETE FROM strategy_decision_episodes WHERE selection_kind = 'publication_rejected'"
+    )
 
     drop constraint(:strategy_decision_episodes, :selection_kind_allowed)
     drop constraint(:strategy_decision_episodes, :neutral_wait_fields_match_selection)
