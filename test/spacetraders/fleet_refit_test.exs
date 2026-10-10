@@ -499,6 +499,23 @@ defmodule SpaceTraders.FleetRefitTest do
     assert Intents.current(agent) == []
   end
 
+  test "planning never sources a module from an untraceable Market Listing" do
+    {scope, agent, revision, ship} = generation()
+    seed_intelligence(agent, supply: :untraceable)
+
+    stub_api(self(), %{
+      "GET /v2/my/ships" => fn -> %{"data" => [outbound_ship_body(ship.symbol)]} end,
+      "GET /v2/my/agent" => fn ->
+        %{"data" => %{"symbol" => agent.symbol, "credits" => 50_000}}
+      end
+    })
+
+    assert {:error, :ship_refit_unavailable} =
+             FleetRefit.reconcile(scope, agent, revision, @system)
+
+    assert Intents.current(agent) == []
+  end
+
   # -- stubbing ----------------------------------------------------------------
 
   for rejection <- [:purchase, :purchase_observation] do
@@ -951,14 +968,37 @@ defmodule SpaceTraders.FleetRefitTest do
       Intelligence.observe_waypoint(agent, Model.Waypoint.from_json(waypoint), source: "test")
     end)
 
-    if Keyword.get(opts, :supply, true) do
-      Intelligence.observe_market(
-        agent,
-        @system,
-        Model.Market.from_json(market_body()),
-        source: "get_market",
-        observing_ship_symbol: "REFIT-1"
-      )
+    case Keyword.get(opts, :supply, :governed) do
+      :governed ->
+        SpaceTraders.EvidenceFixtures.retained_market_listing(
+          agent,
+          @system,
+          @supply,
+          [
+            %{
+              symbol: @module,
+              purchase_price: 32_000,
+              sell_price: 24_000,
+              trade_volume: 5,
+              supply: "MODERATE",
+              activity: "STATIC"
+            }
+          ],
+          observing_ship_symbol: "REFIT-1"
+        )
+
+      # A legacy Listing with no linked governed source.
+      :untraceable ->
+        Intelligence.observe_market(
+          agent,
+          @system,
+          Model.Market.from_json(market_body()),
+          source: "get_market",
+          observing_ship_symbol: "REFIT-1"
+        )
+
+      false ->
+        :ok
     end
 
     :ok

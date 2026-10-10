@@ -445,6 +445,9 @@ defmodule SpaceTraders.FleetAcquisition do
 
   defp acquisition_objective_index(_revision), do: nil
 
+  # Shipyard offers, not Market Listings: the shared Market interpretation does
+  # not cover them, so this reads World freshness. It does not yet filter
+  # untraceable, wrong-Generation or future Shipyard evidence.
   defp shipyard_offers(agent, system, as_of) do
     World.waypoints(agent, system, as_of, @freshness_seconds)
     |> Enum.flat_map(fn waypoint ->
