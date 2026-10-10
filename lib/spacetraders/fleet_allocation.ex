@@ -18,7 +18,8 @@ defmodule SpaceTraders.FleetAllocation do
     JsonEvidence,
     NeutralWait,
     Portfolio,
-    StrategyDecisionEpisode
+    StrategyDecisionEpisode,
+    TradeProgress
   }
 
   alias SpaceTraders.FleetGeneration
@@ -570,6 +571,23 @@ defmodule SpaceTraders.FleetAllocation do
       commitments: ^from(c in Commitment, where: c.unwind_state == :not_required)
     ])
   end
+
+  @doc """
+  Receipt-backed trade progress of one Decision Episode.
+
+  Derived from the Episode's completed buy/sell Intents on every call; amounts
+  the receipts do not prove are `"unknown"` and Net Earnings is never inferred.
+  """
+  defdelegate trade_progress(episode_id), to: TradeProgress, as: :for_episode
+
+  @doc false
+  def record_trade_outcome(%Portfolio{} = portfolio),
+    do:
+      record_portfolio_outcome(
+        portfolio,
+        :realized,
+        TradeProgress.for_episode(portfolio.strategy_decision_episode_id)
+      )
 
   @doc "Records confirmed outcomes and terminal classification for one Decision Episode."
   def record_decision_outcome(
@@ -1251,7 +1269,7 @@ defmodule SpaceTraders.FleetAllocation do
           Repo.update!(
             Ecto.Changeset.change(episode,
               classification: :superseded,
-              actual_outcomes: realized_economics(episode_id),
+              actual_outcomes: json_safe(TradeProgress.for_episode(episode_id)),
               updated_at: now
             )
           )
@@ -1267,35 +1285,8 @@ defmodule SpaceTraders.FleetAllocation do
     SpaceTraders.CreditSpending.lock_agent(generation.agent_id)
   end
 
-  defp realized_economics(episode_id) do
-    totals =
-      from(intent in Intent,
-        join: commitment in Commitment,
-        on: commitment.id == intent.fleet_commitment_id,
-        join: portfolio in Portfolio,
-        on: portfolio.id == commitment.fleet_commitment_portfolio_id,
-        where:
-          portfolio.strategy_decision_episode_id == ^episode_id and intent.status == "completed" and
-            intent.type in ["buy", "sell"],
-        select: {intent.type, intent.last_action_result}
-      )
-      |> Repo.all()
-      |> Enum.reduce(%{purchase_cost: 0, sale_revenue: 0}, fn {type, result}, totals ->
-        amount = get_in(result || %{}, ["transaction", "total_price"])
-
-        if is_number(amount) do
-          key = if type == "buy", do: :purchase_cost, else: :sale_revenue
-          Map.update!(totals, key, &(&1 + amount))
-        else
-          totals
-        end
-      end)
-
-    Map.put(totals, :credit_change, totals.sale_revenue - totals.purchase_cost)
-  end
-
   defp realized_outcomes(episode_id) do
-    result = realized_economics(episode_id)
+    result = TradeProgress.for_episode(episode_id)
 
     resource_yields =
       Repo.all(

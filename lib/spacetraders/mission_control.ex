@@ -529,6 +529,12 @@ defmodule SpaceTraders.MissionControl do
 
   def notable_activity?(_), do: false
 
+  defp decision_summary(%{classification: :realized, actual_outcomes: %{"trade_margin" => margin}}) do
+    if is_integer(margin),
+      do: "Fleet decision realized #{margin} credits trade margin; net earnings unknown",
+      else: "Fleet decision realized; trade margin and net earnings unknown"
+  end
+
   defp decision_summary(%{classification: :realized, actual_outcomes: outcomes} = episode)
        when is_map(outcomes) do
     if episode.evidence_references == [] do
@@ -772,7 +778,7 @@ defmodule SpaceTraders.MissionControl do
           expected: nil,
           realized: %{
             completed_round_trips: 0,
-            realized_net_credit_change: nil,
+            realized_trade_margin: nil,
             realized_sale_value: nil
           },
           contribution: %{commitment_count: 0, expected_value: 0},
@@ -791,7 +797,7 @@ defmodule SpaceTraders.MissionControl do
               do: realized_economics(portfolio),
               else: %{
                 completed_round_trips: 0,
-                realized_net_credit_change: nil,
+                realized_trade_margin: nil,
                 realized_sale_value: nil
               }
             ),
@@ -1097,40 +1103,27 @@ defmodule SpaceTraders.MissionControl do
     }
   end
 
+  # Receipt-backed and per Completed Round Trip; Net Earnings is never
+  # derived here, so only the goods-only Trade Margin is reported.
   defp realized_economics(%FleetAllocation.Portfolio{} = portfolio) do
-    trips =
-      portfolio.commitments
-      |> Enum.flat_map(fn commitment ->
-        case realized_trip(commitment) do
-          nil -> []
-          trip -> [trip]
-        end
-      end)
+    progress = FleetAllocation.TradeProgress.for_portfolio(portfolio.id)
 
     %{
-      completed_round_trips: length(trips),
-      realized_net_credit_change:
-        if(trips == [], do: nil, else: Enum.sum_by(trips, & &1.net_credit_change)),
-      realized_sale_value: if(trips == [], do: nil, else: Enum.sum_by(trips, & &1.sale_value))
+      completed_round_trips: progress.completed_round_trips,
+      realized_trade_margin: FleetAllocation.TradeProgress.trade_margin(progress),
+      realized_sale_value:
+        if(progress.completed_round_trips == 0,
+          do: nil,
+          else: Enum.sum_by(progress.round_trips, & &1.sale_revenue)
+        ),
+      credits_spent: known(progress.credits_spent),
+      credits_received: known(progress.credits_received),
+      unknown: progress.unknown
     }
   end
 
-  defp realized_trip(%FleetAllocation.Commitment{} = commitment) do
-    with %{last_action_result: sell_result} <- FleetExecution.last_realized_sell(commitment),
-         %{last_action_result: buy_result} <- FleetExecution.last_realized_buy(commitment),
-         sale_value when is_integer(sale_value) <- transaction_total(sell_result),
-         purchase_value when is_integer(purchase_value) <- transaction_total(buy_result) do
-      %{net_credit_change: sale_value - purchase_value, sale_value: sale_value}
-    else
-      _ -> nil
-    end
-  end
-
-  defp transaction_total(%{"transaction" => %{"total_price" => total}})
-       when is_integer(total),
-       do: total
-
-  defp transaction_total(_result), do: nil
+  defp known(value) when is_integer(value), do: value
+  defp known(_unknown), do: nil
 
   defp contribution(%FleetAllocation.Portfolio{} = portfolio) do
     %{
