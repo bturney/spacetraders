@@ -39,7 +39,6 @@ defmodule SpaceTraders.FleetAllocation.NeutralWait do
 
   @producer "fleet_allocation_market_reconciliation"
   @basis "fleet_allocation_reconciliation"
-  @default_calibration_version "market-v1"
 
   @limitation_kind_by_reason %{
     incomplete_market_coverage: :incomplete_coverage,
@@ -88,7 +87,8 @@ defmodule SpaceTraders.FleetAllocation.NeutralWait do
          {:ok, limitation_kind} <- limitation_kind(binding_limitation),
          :ok <- valid_source_version?(selection) do
       calibration_version =
-        Map.get(selection, :calibration_version) || @default_calibration_version
+        Map.get(selection, :calibration_version) ||
+          SpaceTraders.FleetAllocation.market_calibration_version()
 
       Repo.transaction(fn ->
         with {:ok, generation} <-

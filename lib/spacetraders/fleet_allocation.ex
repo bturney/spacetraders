@@ -74,6 +74,9 @@ defmodule SpaceTraders.FleetAllocation do
   # How long a completed buy keeps its Commitment while its next leg is created.
   @leg_handoff_seconds 120
 
+  @doc "The calibration version recorded on Market pilot-domain decisions."
+  def market_calibration_version, do: "market-v1"
+
   @doc """
   Records the Neutral Wait for one authoritative zero-admissible allocation
   result at the single mint site fixed by ADR 0012.
@@ -775,7 +778,8 @@ defmodule SpaceTraders.FleetAllocation do
         evidence_references: json_safe(references),
         alternatives: json_safe(unpublished ++ Map.get(selection, :rejected, [])),
         expectations: json_safe(expectations),
-        calibration_version: Map.get(decision, :calibration_version, "market-v1"),
+        calibration_version:
+          Map.get(decision, :calibration_version, market_calibration_version()),
         selection_kind: :publication_rejected,
         rejection_reason: reason_label(reason),
         classification: :superseded

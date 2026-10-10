@@ -332,7 +332,11 @@ defmodule SpaceTraders.FleetExecution do
         expected_value: Enum.sum_by(selected, & &1.expected_value),
         commitment_count: length(selected)
       },
-      calibration_version: if(trade_selected?, do: "market-v1", else: "intelligence-v1")
+      calibration_version:
+        if(trade_selected?,
+          do: FleetAllocation.market_calibration_version(),
+          else: "intelligence-v1"
+        )
     }
   end
 
