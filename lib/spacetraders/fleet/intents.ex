@@ -1004,8 +1004,27 @@ defmodule SpaceTraders.Fleet.Intents do
 
   defp maximum_units(_expected_outcomes), do: nil
 
+  # The quote the decision was planned on bounds the last-chance purchase: the
+  # live quote is re-read before the buy, and one above the planned source
+  # price is refused rather than spent against a reservation sized for the
+  # planned price.
   defp candidate_purchase_price(candidate),
-    do: Map.get(candidate, :purchase_price) || Map.get(candidate, "purchase_price")
+    do:
+      Map.get(candidate, :purchase_price) || Map.get(candidate, "purchase_price") ||
+        planned_condition(candidate, :source_purchase_price)
+
+  defp planned_condition(candidate, fact) do
+    conditions =
+      case Map.get(candidate, :validity) || Map.get(candidate, "validity") do
+        %{} = validity -> Map.get(validity, :conditions) || Map.get(validity, "conditions")
+        _none -> nil
+      end
+
+    Enum.find_value(List.wrap(conditions), fn condition ->
+      if to_string(Map.get(condition, :fact) || Map.get(condition, "fact")) == to_string(fact),
+        do: Map.get(condition, :value) || Map.get(condition, "value")
+    end)
+  end
 
   defp candidate_sell_price(candidate),
     do: Map.get(candidate, :sell_price) || Map.get(candidate, "sell_price")

@@ -114,7 +114,7 @@ defmodule SpaceTraders.FleetExecution do
       if FleetCapacity.proceed?(capacity) do
         allocate_market_domain(scope, agent, revision, system_symbol, current)
       else
-        {capacity_deferral(current), %{}}
+        {capacity_deferral(agent, capacity, current), %{}}
       end
 
     observe_market_domain(agent, result, counts)
@@ -122,12 +122,23 @@ defmodule SpaceTraders.FleetExecution do
 
   # The Governor's explicit deferral is not authoritative evidence of an empty
   # portfolio, so it never mints or disturbs a Neutral Wait.
-  defp capacity_deferral(nil), do: {:ok, %{action: :deferred_for_capacity}}
+  # The result carries the Governor's advisory retry time and the Agent's
+  # still-open Observation Demands, whose durable due times a deferral never
+  # moves, so the missing evidence is explicitly deferred, not infeasible.
+  defp capacity_deferral(agent, capacity, current) do
+    deferral = %{
+      reason: :capacity_deferred,
+      retry_at: Map.get(capacity || %{}, :retry_at),
+      pending_demands: Evidence.list_open_demands(agent)
+    }
 
-  defp capacity_deferral(current),
-    do: {:ok, %{action: :retained_for_capacity, portfolio: current}}
+    if current,
+      do: {:ok, Map.merge(deferral, %{action: :retained_for_capacity, portfolio: current})},
+      else: {:ok, Map.put(deferral, :action, :deferred_for_capacity)}
+  end
 
   defp allocate_market_domain(scope, agent, revision, system, current) do
+    resume_awaiting_sells(agent, current)
     occupancy = domain_occupancy(agent, current)
 
     if no_free_ship?(agent, occupancy.occupied) do
@@ -350,6 +361,9 @@ defmodule SpaceTraders.FleetExecution do
       same_revision? = current != nil and current.fleet_strategy_revision_id == revision.id
 
       cond do
+        revalidate_trade_evidence(agent, new) != :ok ->
+          reject_publication(scope, generation, plan, :stale_evidence)
+
         new == [] and is_nil(current) ->
           mint_neutral_wait(scope, agent, revision, plan)
 
@@ -377,6 +391,42 @@ defmodule SpaceTraders.FleetExecution do
       end
     else
       _ -> {:error, :no_current_generation}
+    end
+  end
+
+  # Last-chance check immediately before publication: every Market evidence
+  # version a selected trade was planned on must still be the Listing's
+  # current interpretation. A newer or invalidated observation that landed
+  # since planning rejects the publication with its reason (recorded as a
+  # Strategy Decision Episode); that observation's own boundary replans the
+  # affected work from the new version.
+  @doc false
+  def revalidate_trade_evidence(%AgentRecord{} = agent, commitments) do
+    planned =
+      for commitment <- commitments,
+          dependency <- commitment.dependencies,
+          "market:" <> tail <- [dependency[:subject] || dependency["subject"]],
+          id = dependency[:evidence_id] || dependency["evidence_id"],
+          is_binary(id),
+          do: {tail, id}
+
+    case planned |> Enum.map(fn {tail, _id} -> hd(String.split(tail, ":")) end) |> Enum.uniq() do
+      [] ->
+        :ok
+
+      systems ->
+        now = Clock.utc_now()
+
+        current =
+          for system <- systems,
+              market <- Intelligence.market_interpretation(agent, system, now).markets,
+              market.state == :current,
+              into: MapSet.new(),
+              do: {String.replace_prefix(market.subject, "market:", ""), market.evidence_id}
+
+        if Enum.all?(planned, &MapSet.member?(current, &1)),
+          do: :ok,
+          else: {:error, :stale_evidence}
     end
   end
 
@@ -486,6 +536,23 @@ defmodule SpaceTraders.FleetExecution do
 
   defp market_commitment?(commitment),
     do: Enum.any?(commitment.dependencies, &match?(%{"subject" => "market:" <> _}, &1))
+
+  # A completed buy whose selected sell was never requested (the sender died
+  # between the two legs, or the sell leg was refused) continues here at the
+  # next Market boundary or boot. Only `completed` buys inside the bounded
+  # handoff qualify and only when no later Intent exists, so an unconfirmed
+  # purchase is never replayed and a leg is never requested twice. The sell
+  # itself still passes the Intent engine's quote and authority checks.
+  defp resume_awaiting_sells(_agent, nil), do: :ok
+
+  defp resume_awaiting_sells(agent, %Portfolio{} = portfolio) do
+    for buy <- FleetAllocation.awaiting_sell_buys(portfolio.id),
+        %Commitment{} = commitment <- [Repo.get(Commitment, buy.fleet_commitment_id)] do
+      continue_after_intent(agent, commitment, portfolio, buy)
+    end
+
+    :ok
+  end
 
   defp no_free_ship?(agent, occupied) do
     symbols = Repo.all(from ship in Ship, where: ship.agent_id == ^agent.id, select: ship.symbol)
@@ -1079,10 +1146,41 @@ defmodule SpaceTraders.FleetExecution do
            ) do
       {:ok, Map.put(result, :neutral_wait, episode)}
     else
-      {:error, reason} -> {:ok, Map.merge(result, %{neutral_wait: nil, reason: reason})}
+      {:error, reason} -> {:ok, Map.merge(result, unrecorded_wait(reason, plan.planning))}
       _ -> {:ok, Map.merge(result, %{neutral_wait: nil, reason: :no_current_generation})}
     end
   end
+
+  # Incomplete or unusable Market evidence is not infeasibility: when no wait
+  # is recordable because the binding limitation is an evidence state, the
+  # result names that state (invalidated, stale, untraceable, ...) itself.
+  @evidence_limitations [
+    :stale_market_evidence,
+    :invalidated_market_evidence,
+    :untraceable_market_evidence,
+    :wrong_generation_market_evidence,
+    :malformed_market_evidence,
+    :unavailable_market_evidence,
+    :inconsistent_market_evidence
+  ]
+
+  defp unrecorded_wait(:invalid_binding_limitation, planning) do
+    case planning
+         |> Enum.flat_map(&Map.get(&1, :limitations, []))
+         |> Enum.filter(&(Map.get(&1, :reason) in @evidence_limitations)) do
+      [] ->
+        %{neutral_wait: nil, reason: :invalid_binding_limitation}
+
+      limitations ->
+        %{
+          neutral_wait: nil,
+          reason: :market_evidence_unusable,
+          evidence_limitations: limitations
+        }
+    end
+  end
+
+  defp unrecorded_wait(reason, _planning), do: %{neutral_wait: nil, reason: reason}
 
   # The reconciliation's enumerated result binding for the mint: the planning
   # entries' unresolved limitations and Observation Demands carry the binding

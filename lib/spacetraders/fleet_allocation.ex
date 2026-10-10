@@ -806,6 +806,35 @@ defmodule SpaceTraders.FleetAllocation do
     |> MapSet.new()
   end
 
+  @doc """
+  Completed buy Intents of the portfolio's Commitments that are inside the
+  bounded leg handoff and have no later Intent: their selected sell leg has
+  not been requested yet. A buy whose effect is unconfirmed is not
+  `completed`, so it is never listed here.
+  """
+  def awaiting_sell_buys(portfolio_id) when is_integer(portfolio_id) do
+    Repo.all(
+      from intent in Intent,
+        as: :intent,
+        join: commitment in Commitment,
+        on: commitment.id == intent.fleet_commitment_id,
+        where:
+          commitment.fleet_commitment_portfolio_id == ^portfolio_id and
+            intent.caller == "commitment" and intent.type == "buy" and
+            intent.status == "completed" and intent.finished_at >= ^handoff_cutoff() and
+            not exists(
+              from(later in Intent,
+                where:
+                  later.fleet_commitment_id == parent_as(:intent).fleet_commitment_id and
+                    later.id > parent_as(:intent).id
+              )
+            ),
+        order_by: intent.id
+    )
+  end
+
+  defp handoff_cutoff, do: DateTime.add(DateTime.utc_now(:second), -@leg_handoff_seconds, :second)
+
   @doc "Returns the current Fleet Commitment Claim authorizing one Ship."
   def current_ship_claim(agent, ship_symbol, opts \\ [])
 
@@ -1298,7 +1327,7 @@ defmodule SpaceTraders.FleetAllocation do
     do: portfolio_ids |> unresolved_intents_query() |> Repo.exists?()
 
   defp unresolved_intents_query(portfolio_ids) do
-    handoff_cutoff = DateTime.add(DateTime.utc_now(:second), -@leg_handoff_seconds, :second)
+    handoff_cutoff = handoff_cutoff()
 
     from(intent in Intent,
       as: :intent,
