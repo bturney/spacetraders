@@ -33,10 +33,12 @@ defmodule SpaceTraders.RuntimeQualification do
   alias SpaceTraders.Agent.{Agent, Operator}
   alias SpaceTraders.Evidence.DemandScheduler
   alias SpaceTraders.Fleet.ShipServerBoot
+  alias SpaceTraders.FleetAllocation
   alias SpaceTraders.FleetAllocation.Reconciler
   alias SpaceTraders.MutationAttempts.{Attempt, Outcome}
   alias SpaceTraders.Repo
   alias SpaceTraders.RuntimeBaselineGame, as: Game
+  alias SpaceTraders.RuntimeFleetGame, as: FleetGame
   alias SpaceTraders.TestClock
   alias Ecto.Adapters.SQL.Sandbox
 
@@ -352,6 +354,320 @@ defmodule SpaceTraders.RuntimeQualification do
       {:ok, _view, html} = live(conn, ~p"/mission-control")
       assert html =~ "Spending stays paused"
     end
+  end
+
+  # Gate 2A (#675): the multi-Ship partial-coverage trading handoff, through the
+  # same seam. Nothing here selects, publishes or executes: the Operator
+  # activates Strategy and the production runtime does the rest against a
+  # physically located, fuel-consuming two-Ship game.
+  describe "Gate 2A partial-coverage handoff" do
+    test "a distant trade completes before coverage does", %{conn: conn} do
+      game = start_fleet_game()
+      {_conn, agent} = activate_fresh_generation(conn)
+      drive(game, &fleet_sold?/1, 30)
+
+      state = FleetGame.snapshot(game)
+      assert fleet_sold?(state), fleet_trace(state)
+      {before_sale, [sale | _]} = Enum.split_while(state.requests, &(not sale?(&1)))
+
+      # The 60-unit route depth is capped to the frigate's 40-unit hold: one
+      # purchase, by the cargo Ship, before the sale, at the planned price.
+      assert [purchase] = Enum.filter(before_sale, &ship_post?(&1, "BASELINE-1", "purchase"))
+      assert purchase.body == %{"symbol" => "IRON_ORE", "units" => 40}
+      assert purchase.transaction["totalPrice"] == 400
+      assert sale.transaction["shipSymbol"] == "BASELINE-1"
+      assert {sale.transaction["units"], sale.transaction["totalPrice"]} == {40, 1200}
+
+      # The evidence that made the route admissible came from a coverage
+      # observation at the distant Market, taken before the purchase, while a
+      # known Marketplace (A4) was still never observed.
+      assert index_of(before_sale, &market_read?(&1, "A2")) <
+               index_of(before_sale, &(&1 == purchase))
+
+      refute Enum.any?(before_sale, &market_read?(&1, "A4"))
+
+      # The probe, not the cargo Ship, did the scouting: the frigate only
+      # trades, and only the probe ever left for an unobserved Marketplace.
+      assert [%{body: %{"waypointSymbol" => "X1-UX81-A2"}}] =
+               Enum.filter(before_sale, &ship_post?(&1, "BASELINE-1", "navigate"))
+
+      assert Enum.any?(before_sale, &ship_post?(&1, "BASELINE-2", "navigate"))
+      refute Enum.any?(state.requests, &ship_post?(&1, "BASELINE-2", "purchase"))
+
+      scouts = ship_symbols_of("acquire_intelligence")
+      assert "BASELINE-2" in scouts
+      refute "BASELINE-1" in scouts
+      assert Enum.uniq(ship_symbols_of("buy") ++ ship_symbols_of("sell")) == ["BASELINE-1"]
+
+      # The refuel topped the tank up at the observed source Market, the FUEL
+      # transaction is the only supporting cost the game supplied, and the
+      # source Listing survives it at its original observation time.
+      assert [refuel] = Enum.filter(state.requests, &ship_post?(&1, "BASELINE-1", "refuel"))
+      assert refuel.body == %{"units" => 170}
+      fuel_cost = refuel.transaction["totalPrice"]
+      assert fuel_cost == 144
+
+      interpretation =
+        SpaceTraders.Intelligence.market_interpretation(
+          agent,
+          FleetGame.system(),
+          SpaceTraders.Clock.utc_now()
+        )
+
+      assert %{state: :current, observed_at: observed_at, trade_goods: goods} =
+               Enum.find(interpretation.markets, &(&1.subject == "market:X1-UX81:X1-UX81-A1"))
+
+      assert "IRON_ORE" in Enum.map(goods, & &1["symbol"])
+      assert DateTime.compare(observed_at, refuel.at) != :gt
+      open_gaps = interpretation.coverage_gaps
+
+      # Realized economics are receipt-backed: the trade margin is proven from
+      # the buy and sell transaction receipts, the supporting fuel cost is known
+      # to the game fixture but not retained against the Episode, so Net
+      # Earnings is reported unknown, never exact.
+      progress = FleetAllocation.trade_progress(first_trade_episode_id())
+      assert progress.completed_round_trips == 1
+      assert {progress.units_bought, progress.units_sold} == {40, 40}
+      assert {progress.credits_spent, progress.credits_received} == {400, 1200}
+      assert progress.trade_margin == 1200 - 400
+      assert progress.net_earnings == "unknown"
+
+      # Every send is one recorded Mutation Attempt with a confirmed outcome:
+      # one purchase, one refuel and one sale reached transport, none unknown.
+      attempts = attempt_summary(agent)
+      assert Enum.all?(attempts, &match?({_, _, "succeeded", "succeeded"}, &1))
+
+      assert Enum.frequencies_by(attempts, &elem(&1, 0))
+             |> Map.take(~w(purchase-cargo refuel-ship sell-cargo)) ==
+               %{"purchase-cargo" => 1, "refuel-ship" => 1, "sell-cargo" => 1}
+
+      assert 1200 - 400 - fuel_cost > 0
+      assert 1200 - 400 - fuel_cost > 0
+
+      # Outstanding Demand survives the trade selection: the unobserved
+      # Marketplace is still owed an observation.
+      assert Enum.any?(open_demand_subjects(), &(&1 == "market:X1-UX81:X1-UX81-A4"))
+      assert Enum.any?(open_gaps, &(&1.subject =~ "A4"))
+    end
+
+    # The source Listing was observed while the probe set out for the distant
+    # Market. Each fact below is one way that retained evidence stops being able
+    # to authorize a purchase before the distant observation completes the
+    # route. The Fleet must report the actual gap and re-observe the source
+    # first, never buy against it, and never conclude there is no opportunity.
+    for {kind, label} <- [
+          stale: "aged past the Market freshness window",
+          untraceable: "legacy without an exact retained source",
+          invalidated: "invalidated by the game",
+          wrong_generation: "from another Fleet Generation",
+          future: "dated after the decision time"
+        ] do
+      test "a source Listing #{label} is re-observed before any purchase", %{conn: conn} do
+        kind = unquote(kind)
+        game = start_fleet_game()
+        {_conn, agent} = activate_fresh_generation(conn)
+        drive(game, &probe_departed?/1, 6)
+        assert probe_departed?(FleetGame.snapshot(game)), fleet_trace(FleetGame.snapshot(game))
+        assert purchases(FleetGame.snapshot(game)) == []
+
+        tamper_source_listing(agent, kind)
+        tampered_at = length(FleetGame.snapshot(game).requests)
+
+        assert %{state: ^kind} = source_listing(agent)
+
+        drive(game, &fleet_sold?/1, 30)
+        state = FleetGame.snapshot(game)
+        assert fleet_sold?(state), fleet_trace(state)
+
+        {before_sale, _sale} = Enum.split_while(state.requests, &(not sale?(&1)))
+        after_tamper = Enum.drop(before_sale, tampered_at)
+
+        # The first purchase follows a fresh read of the source Market.
+        assert index_of(after_tamper, &market_read?(&1, "A1")) <
+                 index_of(after_tamper, &ship_post?(&1, "BASELINE-1", "purchase"))
+
+        assert [_one] = Enum.filter(before_sale, &ship_post?(&1, "BASELINE-1", "purchase"))
+      end
+    end
+  end
+
+  defp probe_departed?(state),
+    do: state.ships["BASELINE-2"].status == "IN_TRANSIT"
+
+  defp purchases(state),
+    do: Enum.filter(state.requests, &(&1.path =~ ~r{/purchase$} and &1.reply == :ok))
+
+  defp source_listing(agent) do
+    interpretation =
+      SpaceTraders.Intelligence.market_interpretation(
+        agent,
+        FleetGame.system(),
+        SpaceTraders.Clock.utc_now()
+      )
+
+    Enum.find(interpretation.markets, &(&1.subject == "market:X1-UX81:X1-UX81-A1"))
+  end
+
+  # Changes only what the retained evidence says about the source Marketplace,
+  # never a Commitment, Portfolio or Ship action.
+  defp tamper_source_listing(agent, kind) do
+    now = SpaceTraders.Clock.utc_now()
+    subject = "market:X1-UX81:X1-UX81-A1"
+
+    evidence =
+      from o in SpaceTraders.Evidence.Observation,
+        where: o.agent_id == ^agent.id and o.subject == ^subject
+
+    case kind do
+      :stale ->
+        aged = DateTime.add(now, -400)
+        Repo.update_all(evidence, set: [observed_at: aged])
+
+      :future ->
+        Repo.update_all(evidence, set: [observed_at: DateTime.add(now, 86_400)])
+
+      :wrong_generation ->
+        Repo.update_all(evidence, set: [fleet_generation_id: nil])
+
+      :untraceable ->
+        Repo.update_all(
+          from(o in SpaceTraders.Intelligence.Observation,
+            where: o.agent_id == ^agent.id and o.subject_symbol == "X1-UX81-A1"
+          ),
+          set: [evidence_observation_id: nil]
+        )
+
+      :invalidated ->
+        Repo.update_all(
+          from(f in SpaceTraders.Intelligence.Fact,
+            where:
+              f.agent_id == ^agent.id and f.subject_symbol == "X1-UX81-A1" and
+                f.field == "trade_goods"
+          ),
+          set: [invalidated_at: DateTime.add(now, -1) |> DateTime.truncate(:second)]
+        )
+    end
+  end
+
+  defp start_fleet_game(opts \\ []) do
+    game = start_supervised!({FleetGame, opts})
+    stub_api(fn conn -> FleetGame.reply(conn, FleetGame.call(game, conn)) end)
+    allow_game_runtime()
+    start_runtime()
+    game
+  end
+
+  defp fleet_sold?(state), do: Enum.any?(state.requests, &sale?/1)
+
+  defp sale?(request), do: request.path =~ ~r{/sell$} and request.reply == :ok
+
+  defp ship_post?(request, ship, action),
+    do: request.method == "POST" and request.path == "/v2/my/ships/#{ship}/#{action}"
+
+  defp market_read?(request, suffix),
+    do:
+      request.method == "GET" and
+        request.path == "/v2/systems/X1-UX81/waypoints/X1-UX81-#{suffix}/market"
+
+  defp index_of(requests, fun), do: Enum.find_index(requests, fun) || flunk("no such request")
+
+  defp ship_symbols_of(type) do
+    Repo.all(
+      from i in SpaceTraders.Fleet.Intent,
+        join: ship in SpaceTraders.Fleet.Ship,
+        on: ship.id == i.ship_id,
+        where: i.type == ^type,
+        distinct: true,
+        order_by: ship.symbol,
+        select: ship.symbol
+    )
+  end
+
+  # The Decision Episode that published the first completed sell's Commitment.
+  defp first_trade_episode_id do
+    Repo.one!(
+      from i in SpaceTraders.Fleet.Intent,
+        join: c in SpaceTraders.FleetAllocation.Commitment,
+        on: c.id == i.fleet_commitment_id,
+        join: p in SpaceTraders.FleetAllocation.Portfolio,
+        on: p.id == c.fleet_commitment_portfolio_id,
+        where: i.type == "sell" and i.status == "completed",
+        order_by: i.id,
+        limit: 1,
+        select: p.strategy_decision_episode_id
+    )
+  end
+
+  defp attempt_summary(agent) do
+    Repo.all(
+      from a in Attempt,
+        left_join: o in Outcome,
+        on: o.mutation_attempt_id == a.id,
+        where: a.agent_id == ^agent.id,
+        order_by: [a.inserted_at, o.recorded_at],
+        select: {a.operation_id, a.operation_owner, a.state, o.classification}
+    )
+  end
+
+  defp open_demand_subjects do
+    Repo.all(
+      from d in SpaceTraders.Evidence.ObservationDemand,
+        where: is_nil(d.withdrawn_at) and like(d.subject, "market:%"),
+        select: d.subject
+    )
+  end
+
+  # Failure message only: the actions the game saw (idle Agent/Fleet reads
+  # elided), then what the Fleet decided and why.
+  defp fleet_trace(state) do
+    actions =
+      for r <- state.requests, r.path not in ["/v2/my/agent", "/v2/my/ships"] do
+        {String.slice(r.method, 0, 1), r.path |> String.replace("/v2/", ""), r.reply,
+         Calendar.strftime(r.at, "%H:%M:%S")}
+      end
+
+    episodes =
+      Repo.all(
+        from e in SpaceTraders.FleetAllocation.StrategyDecisionEpisode,
+          order_by: e.id,
+          select:
+            {e.id, e.selection_kind, e.rejection_reason, e.binding_limitation_kind,
+             e.classification, e.alternatives}
+      )
+
+    commitments =
+      Repo.all(
+        from c in SpaceTraders.FleetAllocation.Commitment,
+          order_by: c.id,
+          select: {c.id, c.candidate_id, c.claims, c.decisive_reason}
+      )
+
+    demands =
+      Repo.all(
+        from d in SpaceTraders.Evidence.ObservationDemand,
+          order_by: d.id,
+          select: {d.subject, d.due_at, d.withdrawn_at}
+      )
+
+    intents =
+      Repo.all(
+        from i in SpaceTraders.Fleet.Intent,
+          order_by: i.id,
+          select: {i.id, i.type, i.status, i.target_waypoint}
+      )
+
+    inspect(
+      %{
+        actions: actions,
+        episodes: episodes,
+        commitments: commitments,
+        intents: intents,
+        demands: demands
+      },
+      limit: :infinity,
+      pretty: true,
+      width: 120
+    )
   end
 
   defp start_game(opts) do

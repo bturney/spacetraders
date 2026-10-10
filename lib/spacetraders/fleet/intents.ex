@@ -1649,8 +1649,26 @@ defmodule SpaceTraders.Fleet.Intents do
         freshness
       )
 
-    Enum.all?(fields, &(get_in(projection, [:facts, &1, :freshness]) == :fresh))
+    Enum.all?(fields, &(get_in(projection, [:facts, &1, :freshness]) == :fresh)) and
+      authorizing_listing?(agent, type, system, intent.target_waypoint, fields)
   end
+
+  # A retained Listing the shared Market interpretation cannot use (legacy with
+  # no exact source, another Fleet Generation, future-dated) must not satisfy a
+  # coverage Intent, or the Marketplace would never be read again and the
+  # evidence gap could never close. Only a governed new read replaces it.
+  defp authorizing_listing?(agent, :market, system, waypoint, fields) do
+    if "trade_goods" in fields do
+      subject = "market:#{system}:#{waypoint}"
+      interpretation = Intelligence.market_interpretation(agent, system, Clock.utc_now())
+
+      Enum.any?(interpretation.markets, &(&1.subject == subject and &1.state == :current))
+    else
+      true
+    end
+  end
+
+  defp authorizing_listing?(_agent, _type, _system, _waypoint, _fields), do: true
 
   defp acquire_intelligence(agent, intent, live_ship, :waypoint, system) do
     reference = AgentTokenReference.new(agent)
