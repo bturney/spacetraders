@@ -305,7 +305,7 @@ defmodule SpaceTraders.MissionControl do
           id: "decision-#{episode.id}",
           type: :decision,
           at: episode.inserted_at,
-          summary: "Fleet selected a new commitment portfolio",
+          summary: selection_summary(episode),
           detail: decision_detail(episode),
           decision_episode_id: episode.id,
           notable?: episode.source_version == 0 or episode.binding_constraints != []
@@ -490,6 +490,11 @@ defmodule SpaceTraders.MissionControl do
     |> Enum.reject(&is_nil/1)
     |> Enum.join(" · ")
   end
+
+  defp selection_summary(%{selection_kind: :publication_rejected, rejection_reason: reason}),
+    do: "Fleet Allocation rejected a portfolio publication: #{reason}"
+
+  defp selection_summary(_episode), do: "Fleet selected a new commitment portfolio"
 
   @doc "Comparable Fleet Generation chapters using only retained outcome evidence."
   def generation_recaps(%Scope{operator: %{id: operator_id}} = scope) do

@@ -5,7 +5,6 @@ defmodule SpaceTraders.FleetCapacityTest do
   alias SpaceTraders.Agent.Scope
   alias SpaceTraders.FleetCapacity
   alias SpaceTraders.FleetExecution
-  alias SpaceTraders.FleetIntelligence
   alias SpaceTraders.FleetStrategy.Revision
   alias SpaceTraders.Test.CapacityDispositions
 
@@ -25,22 +24,11 @@ defmodule SpaceTraders.FleetCapacityTest do
           unavailable: quote(do: CapacityDispositions.unavailable()),
           missing: nil
         ] do
-      test "intelligence activation is suppressed on #{label} capacity" do
-        assert {:error, :api_capacity_unavailable} =
-                 FleetExecution.activate_intelligence(
-                   %Scope{},
-                   %AgentRecord{},
-                   %Revision{},
-                   %{candidate_contributions: [], observation_demands: []},
-                   unquote(disposition)
-                 )
-      end
-
-      test "intelligence reconciliation is suppressed on #{label} capacity" do
-        assert {:error, :no_decision_relevant_intelligence} =
-                 FleetIntelligence.reconcile(
-                   %Scope{},
-                   %AgentRecord{},
+      test "the Market pilot-domain decision is suppressed on #{label} capacity" do
+        assert {:ok, %{action: :deferred_for_capacity}} =
+                 FleetExecution.reconcile_market_domain(
+                   %Scope{operator: %{id: -1}},
+                   %AgentRecord{id: -1},
                    %Revision{},
                    "X1",
                    unquote(disposition)
