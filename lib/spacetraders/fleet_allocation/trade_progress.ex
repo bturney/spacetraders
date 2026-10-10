@@ -170,9 +170,12 @@ defmodule SpaceTraders.FleetAllocation.TradeProgress do
     end
   end
 
-  # A Completed Round Trip is proven only when one Commitment holds exactly one
-  # receipted acquisition and one receipted disposal of the same Trade Good and
+  # Pilot limitation, not the GLOSSARY definition: this projection proves a
+  # Completed Round Trip only when one Commitment holds exactly one receipted
+  # acquisition followed by one receipted disposal of the same Trade Good and
   # quantity, and none of its completed trade Intents lacks a receipt.
+  # Multiple purchases, partial sales and transfers stay unproven ("unknown")
+  # until causal linkage between them is retained.
   defp round_trips(intents, receipts) do
     intents
     |> Enum.group_by(& &1.fleet_commitment_id)
@@ -195,15 +198,30 @@ defmodule SpaceTraders.FleetAllocation.TradeProgress do
           {:unproven, commitment_id, "no sale receipt yet"}
 
         {false, [buy], [sell]} ->
-          if buy.trade_symbol == sell.trade_symbol and buy.units == sell.units,
-            do: {:ok, trip(commitment_id, buy, sell)},
-            else: {:unproven, commitment_id, "purchase and sale quantity or Trade Good differ"}
+          cond do
+            buy.trade_symbol != sell.trade_symbol or buy.units != sell.units ->
+              {:unproven, commitment_id, "purchase and sale quantity or Trade Good differ"}
+
+            not sold_after_purchase?(buy, sell) ->
+              {:unproven, commitment_id, "the sale does not follow the purchase"}
+
+            true ->
+              {:ok, trip(commitment_id, buy, sell)}
+          end
 
         {false, _, _} ->
           {:unproven, commitment_id,
            "multiple acquisitions or disposals are not causally linked by a receipt"}
       end
     end)
+  end
+
+  # The sell leg is requested only after the buy completes, so its Intent is
+  # later; a recorded finish time never precedes the purchase's.
+  defp sold_after_purchase?(buy, sell) do
+    sell.intent_id > buy.intent_id and
+      (is_nil(buy.finished_at) or is_nil(sell.finished_at) or
+         DateTime.compare(sell.finished_at, buy.finished_at) != :lt)
   end
 
   defp trip(commitment_id, buy, sell) do

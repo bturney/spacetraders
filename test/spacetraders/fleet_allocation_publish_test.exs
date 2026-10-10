@@ -561,6 +561,20 @@ defmodule SpaceTraders.FleetAllocationPublishTest do
       assert progress.trade_margin == "unknown"
     end
 
+    test "a sale that precedes its purchase proves no round trip" do
+      %{scope: scope, generation: generation, revision: revision} = allocation_fixture()
+      portfolio = publish!(scope, generation, revision)
+      commitment = hd(portfolio.commitments)
+      trade_intent!(portfolio, commitment, "sell", 150, 10)
+      trade_intent!(portfolio, commitment, "buy", 50, 10)
+
+      progress = FleetAllocation.trade_progress(portfolio.strategy_decision_episode_id)
+
+      assert progress.completed_round_trips == 0
+      assert progress.trade_margin == "unknown"
+      assert Enum.any?(progress.unknown, &(&1.reason == "the sale does not follow the purchase"))
+    end
+
     test "a completed sale without a receipt manufactures no amount" do
       %{scope: scope, generation: generation, revision: revision} = allocation_fixture()
       portfolio = publish!(scope, generation, revision)
