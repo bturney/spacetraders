@@ -394,6 +394,16 @@ defmodule SpaceTraders.RuntimeQualification do
       assert Enum.any?(before_sale, &ship_post?(&1, "BASELINE-2", "navigate"))
       refute Enum.any?(state.requests, &ship_post?(&1, "BASELINE-2", "purchase"))
 
+      # Independent admitted work continued while the frigate's Intent was
+      # unfinished: the probe set out for another Marketplace after the frigate
+      # had left, and before the frigate's sale.
+      frigate_left = index_of(before_sale, &ship_post?(&1, "BASELINE-1", "navigate"))
+
+      assert Enum.any?(
+               Enum.drop(before_sale, frigate_left),
+               &ship_post?(&1, "BASELINE-2", "navigate")
+             )
+
       scouts = ship_symbols_of("acquire_intelligence")
       assert "BASELINE-2" in scouts
       refute "BASELINE-1" in scouts
@@ -559,6 +569,164 @@ defmodule SpaceTraders.RuntimeQualification do
       refute Repo.exists?(from i in SpaceTraders.Fleet.Intent, where: i.status == "blocked")
     end
 
+    test "API Retry-After defers Market reads without Attention or a Neutral Wait and the trade completes",
+         %{conn: conn} do
+      game = start_fleet_game(throttled_market_reads: 3)
+      {_conn, agent} = activate_fresh_generation(conn)
+      drive(game, &fleet_sold?/1, 40)
+
+      state = FleetGame.snapshot(game)
+      assert fleet_sold?(state), fleet_trace(state)
+      assert Enum.count(state.requests, &(&1.reply == :throttled)) == 3
+
+      # Capacity Deferral is advisory timing, never an Operator condition, a
+      # false infeasibility or a wait minted by the Fleet.
+      refute Repo.exists?(
+               from c in SpaceTraders.OperatorConditions.Condition,
+                 where: c.operator_id == ^agent.operator_id and c.kind == :attention
+             )
+
+      refute Repo.exists?(
+               from e in SpaceTraders.FleetAllocation.StrategyDecisionEpisode,
+                 where: e.selection_kind == :neutral_wait
+             )
+
+      refute Repo.exists?(
+               from i in SpaceTraders.Fleet.Intent,
+                 where: i.status in ["blocked", "infeasible"]
+             )
+
+      # Due scouting survived the deferral: the owed Marketplace is observed.
+      drive(game, fn s -> Enum.any?(s.requests, &market_read?(&1, "A4")) end, 40)
+      assert Enum.any?(FleetGame.snapshot(game).requests, &market_read?(&1, "A4"))
+    end
+
+    # The coverage completion boundary announces itself twice: a Waypoint
+    # intelligence event and a Market evidence event. Capture the production
+    # announcements while the Reconciler is down, then hand them to the restarted
+    # Reconciler in each order. Both orders must reach the same one decision.
+    for order <- [:market_first, :coverage_first] do
+      test "swapped coverage and Market event order (#{order}) selects the same single trade",
+           %{conn: conn} do
+        order = unquote(order)
+        game = start_fleet_game()
+        {_conn, _agent} = activate_fresh_generation(conn)
+        drive(game, &probe_departed?/1, 6)
+        assert probe_departed?(FleetGame.snapshot(game))
+        settle_runtime()
+
+        Phoenix.PubSub.subscribe(SpaceTraders.PubSub, "fleet_market_evidence")
+        Phoenix.PubSub.subscribe(SpaceTraders.PubSub, "fleet_intelligence_evidence")
+        assert :ok = stop_supervised!(DemandScheduler)
+        assert :ok = stop_supervised!(Reconciler)
+        flush_fleet_events()
+
+        advance_time(60)
+
+        assert_eventually(
+          fn -> Enum.any?(FleetGame.snapshot(game).requests, &market_read?(&1, "A2")) end,
+          500
+        )
+
+        settle_ships()
+        events = flush_fleet_events()
+        market = Enum.filter(events, &match?({:market_evidence_observed, _, _}, &1))
+        coverage = Enum.filter(events, &match?({:waypoint_intelligence_observed, _, _}, &1))
+        assert market != [] and coverage != [], inspect(events)
+
+        assert purchases(FleetGame.snapshot(game)) == []
+        start_runtime()
+        reconciler = Process.whereis(Reconciler)
+
+        for event <-
+              if(Atom.to_string(order) == "market_first",
+                do: market ++ coverage,
+                else: coverage ++ market
+              ),
+            do: send(reconciler, event)
+
+        drive(game, &fleet_sold?/1, 30)
+        state = FleetGame.snapshot(game)
+        assert fleet_sold?(state), fleet_trace(state)
+        {before_sale, [sale | _]} = Enum.split_while(state.requests, &(not sale?(&1)))
+
+        assert [purchase] = Enum.filter(before_sale, &ship_post?(&1, "BASELINE-1", "purchase"))
+        assert {purchase.transaction["units"], sale.transaction["units"]} == {40, 40}
+
+        refute Repo.exists?(
+                 from e in SpaceTraders.FleetAllocation.StrategyDecisionEpisode,
+                   where:
+                     e.selection_kind == :neutral_wait or
+                       e.selection_kind == :publication_rejected
+               )
+      end
+    end
+
+    test "the pilot emits bounded allocation and invalidation telemetry without identities",
+         %{conn: conn} do
+      test_pid = self()
+      handler = "q675-#{System.unique_integer([:positive])}"
+
+      :telemetry.attach_many(
+        handler,
+        [
+          [:spacetraders, :fleet_allocation, :publication],
+          [:spacetraders, :fleet_allocation, :market_domain],
+          [:spacetraders, :intelligence, :invalidation]
+        ],
+        fn event, measurements, metadata, _ ->
+          send(test_pid, {:telemetry, event, measurements, metadata})
+        end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler) end)
+
+      game = start_fleet_game()
+      {_conn, _agent} = activate_fresh_generation(conn)
+      drive(game, &fleet_sold?/1, 30)
+      assert fleet_sold?(FleetGame.snapshot(game))
+
+      events = collect_telemetry()
+      by_event = Enum.group_by(events, &elem(&1, 0))
+
+      # G1: every publication outcome; G2: every trade-versus-coverage decision.
+      assert [_ | _] = by_event[[:spacetraders, :fleet_allocation, :publication]]
+      assert [_ | _] = decisions = by_event[[:spacetraders, :fleet_allocation, :market_domain]]
+
+      assert Enum.any?(decisions, fn {_, m, meta} ->
+               m.trade_candidates > 0 and meta.result == :published
+             end)
+
+      # G4: the refuel invalidated by cause, with counts only.
+      assert [_ | _] = invalidations = by_event[[:spacetraders, :intelligence, :invalidation]]
+
+      assert Enum.all?(invalidations, fn {_, _, meta} ->
+               Map.keys(meta) |> Enum.sort() == [:cause, :subject_type]
+             end)
+
+      # Identities never ride telemetry metadata, so they cannot become labels.
+      for {_event, _measurements, meta} <- events,
+          key <- Map.keys(meta),
+          do: refute(key in [:agent_id, :operator_id, :ship_symbol, :subject, :candidate_id])
+
+      # Every rejected publication left a durable, inspectable Episode.
+      rejected =
+        Enum.count(by_event[[:spacetraders, :fleet_allocation, :publication]], fn {_, _, meta} ->
+          meta.result == :rejected
+        end)
+
+      recorded =
+        Repo.aggregate(
+          from(e in SpaceTraders.FleetAllocation.StrategyDecisionEpisode,
+            where: e.selection_kind == :publication_rejected
+          ),
+          :count
+        )
+
+      assert recorded >= rejected
+    end
+
     # The source Listing was observed while the probe set out for the distant
     # Market. Each fact below is one way that retained evidence stops being able
     # to authorize a purchase before the distant observation completes the
@@ -620,6 +788,34 @@ defmodule SpaceTraders.RuntimeQualification do
         order_by: i.id,
         select: {i.status, i.last_action_result}
     )
+  end
+
+  defp flush_fleet_events(acc \\ []) do
+    receive do
+      {kind, _agent_id, _subject} = event
+      when kind in [:market_evidence_observed, :waypoint_intelligence_observed] ->
+        flush_fleet_events([event | acc])
+    after
+      0 -> Enum.reverse(acc)
+    end
+  end
+
+  defp settle_ships do
+    for {_id, pid, _type, _modules} <-
+          DynamicSupervisor.which_children(SpaceTraders.Fleet.ShipSupervisor) do
+      :sys.get_state(pid)
+    end
+
+    :ok
+  end
+
+  defp collect_telemetry(acc \\ []) do
+    receive do
+      {:telemetry, event, measurements, metadata} ->
+        collect_telemetry([{event, measurements, metadata} | acc])
+    after
+      0 -> Enum.reverse(acc)
+    end
   end
 
   defp probe_departed?(state),
