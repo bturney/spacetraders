@@ -877,7 +877,7 @@ defmodule SpaceTraders.FleetExecution do
               if Map.has_key?(candidate, "construction_upstream") do
                 continue_after_intent(agent, commitment, portfolio, sell)
               else
-                record_realized_economics(portfolio, intent, sell)
+                FleetAllocation.record_trade_outcome(portfolio)
                 result
               end
 
@@ -1003,30 +1003,6 @@ defmodule SpaceTraders.FleetExecution do
          %{} = operator <- Repo.get(SpaceTraders.Agent.Operator, agent.operator_id) do
       FleetConstruction.reconcile(Scope.for_operator(operator), agent, revision)
     end
-  end
-
-  @doc "Returns the last completed sell Intent for a commitment, or nil."
-  def last_realized_sell(%Commitment{} = commitment) do
-    Repo.one(
-      from intent in SpaceTraders.Fleet.Intent,
-        where:
-          intent.fleet_commitment_id == ^commitment.id and intent.type == "sell" and
-            intent.status == "completed",
-        order_by: [desc: intent.id],
-        limit: 1
-    )
-  end
-
-  @doc "Returns the last completed buy Intent for a commitment, or nil."
-  def last_realized_buy(%Commitment{} = commitment) do
-    Repo.one(
-      from intent in SpaceTraders.Fleet.Intent,
-        where:
-          intent.fleet_commitment_id == ^commitment.id and intent.type == "buy" and
-            intent.status == "completed",
-        order_by: [desc: intent.id],
-        limit: 1
-    )
   end
 
   defp current_generation(%AgentRecord{id: agent_id}) do
@@ -1258,18 +1234,5 @@ defmodule SpaceTraders.FleetExecution do
     reservations = Map.get(availability, :reservations, %{})
 
     Map.get(reservations, "credits") || Map.get(reservations, :credits)
-  end
-
-  defp record_realized_economics(portfolio, buy, sell) do
-    purchase = get_in(buy.last_action_result, ["transaction", "total_price"])
-    sale = get_in(sell.last_action_result, ["transaction", "total_price"])
-
-    if is_number(purchase) and is_number(sale) do
-      FleetAllocation.record_portfolio_outcome(portfolio, :realized, %{
-        credit_change: sale - purchase,
-        purchase_cost: purchase,
-        sale_revenue: sale
-      })
-    end
   end
 end

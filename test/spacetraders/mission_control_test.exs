@@ -193,7 +193,7 @@ defmodule SpaceTraders.MissionControlTest do
                expected: nil,
                realized: %{
                  completed_round_trips: 0,
-                 realized_net_credit_change: nil,
+                 realized_trade_margin: nil,
                  realized_sale_value: nil
                },
                contribution: %{commitment_count: 0, expected_value: 0},
@@ -211,7 +211,7 @@ defmodule SpaceTraders.MissionControlTest do
       assert report.contribution.commitment_count == 1
       assert report.contribution.expected_value == 100
       assert report.contribution.claims == ["SHIP-1"]
-      assert report.realized.realized_net_credit_change == nil
+      assert report.realized.realized_trade_margin == nil
       assert report.attention == []
       assert report.limitation == nil
     end
@@ -258,7 +258,9 @@ defmodule SpaceTraders.MissionControlTest do
         fleet_commitment_id: commitment.id,
         fleet_commitment_portfolio_id: commitment.fleet_commitment_portfolio_id,
         fleet_commitment_portfolio_version: 1,
-        last_action_result: %{"transaction" => %{"total_price" => 50}}
+        last_action_result: %{
+          "transaction" => %{"total_price" => 50, "units" => 10, "trade_symbol" => "IRON_ORE"}
+        }
       })
 
       Repo.insert!(%SpaceTraders.Fleet.Intent{
@@ -270,13 +272,16 @@ defmodule SpaceTraders.MissionControlTest do
         fleet_commitment_id: commitment.id,
         fleet_commitment_portfolio_id: commitment.fleet_commitment_portfolio_id,
         fleet_commitment_portfolio_version: 1,
-        last_action_result: %{"transaction" => %{"total_price" => 150}}
+        last_action_result: %{
+          "transaction" => %{"total_price" => 150, "units" => 10, "trade_symbol" => "IRON_ORE"}
+        }
       })
 
       report = MissionControl.market_execution(scope)
       assert report.realized.completed_round_trips == 1
       assert report.realized.realized_sale_value == 150
-      assert report.realized.realized_net_credit_change == 100
+      assert report.realized.realized_trade_margin == 100
+      assert Enum.any?(report.realized.unknown, &(&1.item == "net_earnings"))
     end
   end
 

@@ -1,0 +1,183 @@
+defmodule SpaceTraders.FleetAllocation.TradeProgress do
+  @moduledoc """
+  Receipt-backed trade progress for one Strategy Decision Episode or Portfolio.
+
+  Reads the completed buy and sell Intents that Fleet Commitments already
+  recorded and reports only what their retained transaction receipts prove:
+  receipt references, quantities, credits spent and received, and a Trade Margin
+  for each Completed Round Trip whose acquisition and disposal are causally
+  linked. Nothing here is a ledger: every figure is re-derived from the
+  Intents on each read, so repeated reconciliation, restart and supersession
+  report the same receipts once.
+
+  Anything the receipts do not prove is the string `"unknown"`, with a reason in
+  `unknown`: a missing receipt is never zero, and Net Earnings stays unknown
+  because supporting costs (fuel and others) are not retained against the
+  Episode. Estimates never enter this projection.
+  """
+
+  import Ecto.Query
+
+  alias SpaceTraders.Fleet.Intent
+  alias SpaceTraders.FleetAllocation.{Commitment, Portfolio}
+  alias SpaceTraders.Repo
+
+  @unknown "unknown"
+  @supporting_costs_reason "supporting costs such as fuel are not retained against this decision's receipts"
+
+  @doc "Progress from the receipts of every completed trade Intent of one Episode."
+  def for_episode(episode_id) when is_integer(episode_id) do
+    base_query()
+    |> where([_i, _c, portfolio], portfolio.strategy_decision_episode_id == ^episode_id)
+    |> Repo.all()
+    |> build()
+  end
+
+  @doc "Progress from the receipts of every completed trade Intent of one Portfolio."
+  def for_portfolio(portfolio_id) when is_integer(portfolio_id) do
+    base_query()
+    |> where([_i, _c, portfolio], portfolio.id == ^portfolio_id)
+    |> Repo.all()
+    |> build()
+  end
+
+  @doc "Builds the projection from completed buy/sell Intents (pure)."
+  def build(intents) when is_list(intents) do
+    intents = Enum.sort_by(intents, & &1.id)
+    {receipts, receipt_less} = split_receipts(intents)
+    trips = round_trips(intents, receipts)
+    proven = for {:ok, trip} <- trips, do: trip
+
+    %{
+      receipts: receipts,
+      receipt_less_intents: Enum.map(receipt_less, & &1.id),
+      units_bought: sum(receipts, "buy", :units),
+      units_sold: sum(receipts, "sell", :units),
+      credits_spent: sum(receipts, "buy", :total_price),
+      credits_received: sum(receipts, "sell", :total_price),
+      completed_round_trips: length(proven),
+      round_trips: proven,
+      trade_margin: if(proven == [], do: @unknown, else: Enum.sum_by(proven, & &1.trade_margin)),
+      net_earnings: @unknown,
+      unknown:
+        [%{item: "net_earnings", reason: @supporting_costs_reason}] ++
+          for({:unproven, commitment_id, reason} <- trips, do: gap(commitment_id, reason))
+    }
+  end
+
+  @doc "The proven integer Trade Margin of a stored or built projection, else nil."
+  def trade_margin(%{trade_margin: margin}) when is_integer(margin), do: margin
+  def trade_margin(%{"trade_margin" => margin}) when is_integer(margin), do: margin
+  def trade_margin(_progress), do: nil
+
+  defp base_query do
+    from(intent in Intent,
+      join: commitment in Commitment,
+      on: commitment.id == intent.fleet_commitment_id,
+      join: portfolio in Portfolio,
+      on: portfolio.id == commitment.fleet_commitment_portfolio_id,
+      where: intent.status == "completed" and intent.type in ["buy", "sell"],
+      order_by: intent.id
+    )
+  end
+
+  defp split_receipts(intents) do
+    {receipts, missing} =
+      Enum.reduce(intents, {[], []}, fn intent, {receipts, missing} ->
+        case receipt(intent) do
+          {:ok, receipt} -> {[receipt | receipts], missing}
+          :none -> {receipts, [intent | missing]}
+        end
+      end)
+
+    {Enum.reverse(receipts), Enum.reverse(missing)}
+  end
+
+  defp receipt(%Intent{last_action_result: %{"transaction" => transaction}} = intent)
+       when is_map(transaction) do
+    total = transaction["total_price"]
+    units = transaction["units"]
+
+    if is_integer(total) and total >= 0 and is_integer(units) and units > 0 do
+      {:ok,
+       %{
+         intent_id: intent.id,
+         commitment_id: intent.fleet_commitment_id,
+         type: intent.type,
+         ship_symbol: transaction["ship_symbol"],
+         waypoint_symbol: transaction["waypoint_symbol"] || intent.target_waypoint,
+         trade_symbol: transaction["trade_symbol"],
+         units: units,
+         price_per_unit: transaction["price_per_unit"],
+         total_price: total,
+         mutation_attempt_id: intent.mutation_attempt_id,
+         finished_at: intent.finished_at
+       }}
+    else
+      :none
+    end
+  end
+
+  defp receipt(_intent), do: :none
+
+  defp sum(receipts, type, field) do
+    case Enum.filter(receipts, &(&1.type == type)) do
+      [] -> @unknown
+      matching -> Enum.sum_by(matching, &Map.fetch!(&1, field))
+    end
+  end
+
+  # A Completed Round Trip is proven only when one Commitment holds exactly one
+  # receipted acquisition and one receipted disposal of the same Trade Good and
+  # quantity, and none of its completed trade Intents lacks a receipt.
+  defp round_trips(intents, receipts) do
+    intents
+    |> Enum.group_by(& &1.fleet_commitment_id)
+    |> Enum.sort_by(&elem(&1, 0))
+    |> Enum.map(fn {commitment_id, commitment_intents} ->
+      mine = Enum.filter(receipts, &(&1.commitment_id == commitment_id))
+      receipted = MapSet.new(mine, & &1.intent_id)
+      receipt_less? = Enum.any?(commitment_intents, &(&1.id not in receipted))
+      buys = Enum.filter(mine, &(&1.type == "buy"))
+      sells = Enum.filter(mine, &(&1.type == "sell"))
+
+      case {receipt_less?, buys, sells} do
+        {true, _, _} ->
+          {:unproven, commitment_id, "a completed trade Intent has no transaction receipt"}
+
+        {false, [], _} ->
+          {:unproven, commitment_id, "no purchase receipt"}
+
+        {false, _, []} ->
+          {:unproven, commitment_id, "no sale receipt yet"}
+
+        {false, [buy], [sell]} ->
+          if buy.trade_symbol == sell.trade_symbol and buy.units == sell.units,
+            do: {:ok, trip(commitment_id, buy, sell)},
+            else: {:unproven, commitment_id, "purchase and sale quantity or Trade Good differ"}
+
+        {false, _, _} ->
+          {:unproven, commitment_id,
+           "multiple acquisitions or disposals are not causally linked by a receipt"}
+      end
+    end)
+  end
+
+  defp trip(commitment_id, buy, sell) do
+    %{
+      commitment_id: commitment_id,
+      trade_symbol: buy.trade_symbol,
+      units: buy.units,
+      source_waypoint: buy.waypoint_symbol,
+      destination_waypoint: sell.waypoint_symbol,
+      purchase_intent_id: buy.intent_id,
+      sale_intent_id: sell.intent_id,
+      purchase_cost: buy.total_price,
+      sale_revenue: sell.total_price,
+      trade_margin: sell.total_price - buy.total_price
+    }
+  end
+
+  defp gap(commitment_id, reason),
+    do: %{item: "completed_round_trip", commitment_id: commitment_id, reason: reason}
+end

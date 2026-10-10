@@ -438,11 +438,12 @@ defmodule SpaceTraders.FleetAllocationPublishTest do
     assert episode.classification == :superseded
     assert episode.expectations == %{"credit_change" => 100}
 
-    assert episode.actual_outcomes == %{
-             "credit_change" => 0,
-             "purchase_cost" => 0,
-             "sale_revenue" => 0
-           }
+    assert episode.actual_outcomes["receipts"] == []
+    assert episode.actual_outcomes["credits_spent"] == "unknown"
+    assert episode.actual_outcomes["credits_received"] == "unknown"
+    assert episode.actual_outcomes["trade_margin"] == "unknown"
+    assert episode.actual_outcomes["net_earnings"] == "unknown"
+    refute Map.has_key?(episode.actual_outcomes, "credit_change")
 
     assert Repo.get!(Portfolio, second.id).superseded_at == nil
 
@@ -477,7 +478,122 @@ defmodule SpaceTraders.FleetAllocationPublishTest do
     assert %StrategyDecisionEpisode{classification: :superseded, actual_outcomes: outcomes} =
              Repo.get!(StrategyDecisionEpisode, portfolio.strategy_decision_episode_id)
 
-    assert outcomes["credit_change"] == 0
+    assert outcomes["credits_spent"] == "unknown"
+    assert outcomes["net_earnings"] == "unknown"
+  end
+
+  describe "receipt-backed trade progress" do
+    test "reports receipts, known subtotals and a margin, never a net" do
+      %{scope: scope, generation: generation, revision: revision} = allocation_fixture()
+      portfolio = publish!(scope, generation, revision)
+      commitment = hd(portfolio.commitments)
+
+      buy = trade_intent!(portfolio, commitment, "buy", 50, 10)
+      sell = trade_intent!(portfolio, commitment, "sell", 150, 10)
+
+      assert {:ok, _} = FleetAllocation.unwind_current_portfolio(scope, generation.id)
+
+      episode = Repo.get!(StrategyDecisionEpisode, portfolio.strategy_decision_episode_id)
+      outcomes = episode.actual_outcomes
+
+      assert [%{"intent_id" => buy_id, "type" => "buy"}, %{"intent_id" => sell_id}] =
+               outcomes["receipts"]
+
+      assert {buy_id, sell_id} == {buy.id, sell.id}
+      assert outcomes["credits_spent"] == 50
+      assert outcomes["credits_received"] == 150
+      assert outcomes["units_bought"] == 10
+      assert outcomes["units_sold"] == 10
+      assert outcomes["completed_round_trips"] == 1
+      assert outcomes["trade_margin"] == 100
+      assert outcomes["net_earnings"] == "unknown"
+      assert Enum.any?(outcomes["unknown"], &(&1["item"] == "net_earnings"))
+      assert episode.evidence_references == decision().evidence_references
+    end
+
+    test "repeated reads never double-count a receipt" do
+      %{scope: scope, generation: generation, revision: revision} = allocation_fixture()
+      portfolio = publish!(scope, generation, revision)
+      commitment = hd(portfolio.commitments)
+      trade_intent!(portfolio, commitment, "buy", 50, 10)
+      trade_intent!(portfolio, commitment, "sell", 150, 10)
+      episode_id = portfolio.strategy_decision_episode_id
+
+      first = FleetAllocation.trade_progress(episode_id)
+      FleetAllocation.reconcile_completed_outcomes()
+      FleetAllocation.reconcile_completed_outcomes()
+
+      assert FleetAllocation.trade_progress(episode_id) == first
+      assert first.credits_spent == 50
+      assert Repo.get!(StrategyDecisionEpisode, episode_id).actual_outcomes["credits_spent"] == 50
+    end
+
+    test "a purchase without a sale reports spend and leaves margin unknown" do
+      %{scope: scope, generation: generation, revision: revision} = allocation_fixture()
+      portfolio = publish!(scope, generation, revision)
+      trade_intent!(portfolio, hd(portfolio.commitments), "buy", 50, 10)
+
+      progress = FleetAllocation.trade_progress(portfolio.strategy_decision_episode_id)
+
+      assert progress.credits_spent == 50
+      assert progress.credits_received == "unknown"
+      assert progress.trade_margin == "unknown"
+      assert progress.completed_round_trips == 0
+      assert Enum.any?(progress.unknown, &(&1.reason == "no sale receipt yet"))
+    end
+
+    test "a completed sale without a receipt manufactures no amount" do
+      %{scope: scope, generation: generation, revision: revision} = allocation_fixture()
+      portfolio = publish!(scope, generation, revision)
+      commitment = hd(portfolio.commitments)
+      trade_intent!(portfolio, commitment, "buy", 50, 10)
+      sell = trade_intent!(portfolio, commitment, "sell", nil, 10)
+
+      progress = FleetAllocation.trade_progress(portfolio.strategy_decision_episode_id)
+
+      assert progress.receipt_less_intents == [sell.id]
+      assert progress.credits_received == "unknown"
+      assert progress.trade_margin == "unknown"
+      assert progress.completed_round_trips == 0
+    end
+  end
+
+  defp publish!(scope, generation, revision) do
+    assert {:ok, portfolio} =
+             FleetAllocation.publish_portfolio(scope, generation.id, selection(revision), decision())
+
+    portfolio
+  end
+
+  defp trade_intent!(portfolio, commitment, type, total, units) do
+    ship = Repo.get_by!(Fleet.Ship, symbol: "SHIP-1")
+
+    result =
+      if total,
+        do: %{
+          "transaction" => %{
+            "type" => String.upcase(type),
+            "trade_symbol" => "IRON_ORE",
+            "ship_symbol" => "SHIP-1",
+            "waypoint_symbol" => "X1-A-#{type}",
+            "units" => units,
+            "price_per_unit" => div(total, units),
+            "total_price" => total
+          }
+        },
+        else: %{"kind" => type}
+
+    Repo.insert!(%Intent{
+      ship_id: ship.id,
+      caller: "commitment",
+      type: type,
+      target_waypoint: "X1-A-#{type}",
+      status: "completed",
+      fleet_commitment_id: commitment.id,
+      fleet_commitment_portfolio_id: portfolio.id,
+      fleet_commitment_portfolio_version: portfolio.version,
+      last_action_result: result
+    })
   end
 
   defp allocation_fixture do
