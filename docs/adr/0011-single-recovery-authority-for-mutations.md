@@ -30,5 +30,14 @@ Consequences:
 - When a new mutation owner is added, it reuses this authority rather than
   extending the pattern that preceded it.
 
+Bounded deviation (issue 662): Market trade progress
+(`SpaceTraders.FleetAllocation.TradeProgress`) reads transaction receipts from
+the completed buy/sell Intent's `last_action_result`, because a succeeded
+`purchase-cargo`/`sell-cargo` attempt outcome retains only status and nav
+evidence, not the transaction. The Intent is completed only after its attempt is
+reconciled, and each receipt carries the Intent's `mutation_attempt_id` as the
+link. The projection is re-derived on every read and never decides recovery.
+Retaining the transaction in the attempt outcome would remove the deviation.
+
 Related: [ADR 0010](0010-autonomous-runtime.md) assigns each mutation exactly
 one owner; this record assigns each mutation exactly one recovery record.

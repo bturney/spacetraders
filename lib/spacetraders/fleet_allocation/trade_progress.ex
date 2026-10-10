@@ -14,6 +14,11 @@ defmodule SpaceTraders.FleetAllocation.TradeProgress do
   `unknown`: a missing receipt is never zero, and Net Earnings stays unknown
   because supporting costs (fuel and others) are not retained against the
   Episode. Estimates never enter this projection.
+
+  Receipts come from the completed Intent's `last_action_result`, linked to
+  its reconciled MutationAttempt by `mutation_attempt_id`: the bounded
+  deviation recorded in ADR 0011, since attempt outcomes do not retain the
+  transaction.
   """
 
   import Ecto.Query
