@@ -226,24 +226,7 @@ defmodule SpaceTraders.FleetAllocation.Reconciler do
         capacity \\ FleetCapacity.disposition("get-market")
       )
       when is_integer(agent_id) and is_binary(system_symbol) do
-    with_context(agent_id, fn scope, agent, revision ->
-      FleetExecution.reconcile_market_domain(scope, agent, revision, system_symbol, capacity)
-
-      # Governed Market evidence just landed: establish the next future
-      # refresh demand for the still-relevant Strategy.
-      enforce_sync_result!(
-        agent.id,
-        agent_id,
-        FleetIntelligence.sync_market_observation_demands(agent, revision, system_symbol)
-      )
-
-      FleetContracts.reconcile(scope, agent, revision)
-      FleetConstruction.reconcile(scope, agent, revision)
-      FleetAcquisition.reconcile(scope, agent, revision, system_symbol)
-      FleetRefit.reconcile(scope, agent, revision, system_symbol)
-    end)
-
-    :ok
+    reconcile_market_boundary(agent_id, system_symbol, capacity, false)
   end
 
   @doc """
@@ -252,7 +235,7 @@ defmodule SpaceTraders.FleetAllocation.Reconciler do
 
   It enters the same single Market pilot-domain decision as Market evidence,
   so the order in which the two announcements arrive cannot change the
-  selected portfolio.
+  selected portfolio. Resource work also reconciles on Waypoint evidence.
   """
   def observe_waypoint_intelligence(
         agent_id,
@@ -260,18 +243,23 @@ defmodule SpaceTraders.FleetAllocation.Reconciler do
         capacity \\ FleetCapacity.disposition("get-market")
       )
       when is_integer(agent_id) and is_binary(system_symbol) do
+    reconcile_market_boundary(agent_id, system_symbol, capacity, true)
+  end
+
+  # One Market pilot-domain decision; then durable Market demands are refreshed
+  # from retained Listing evidence and the other capability owners reconcile
+  # beside the published pilot work.
+  defp reconcile_market_boundary(agent_id, system_symbol, capacity, resources?) do
     with_context(agent_id, fn scope, agent, revision ->
       FleetExecution.reconcile_market_domain(scope, agent, revision, system_symbol, capacity)
 
-      # Boot and Waypoint evidence changes materialize durable Market demands
-      # from already-retained Listing evidence.
       enforce_sync_result!(
         agent.id,
         agent_id,
         FleetIntelligence.sync_market_observation_demands(agent, revision, system_symbol)
       )
 
-      FleetResources.reconcile(scope, agent, revision, system_symbol)
+      if resources?, do: FleetResources.reconcile(scope, agent, revision, system_symbol)
       FleetContracts.reconcile(scope, agent, revision)
       FleetConstruction.reconcile(scope, agent, revision)
       FleetAcquisition.reconcile(scope, agent, revision, system_symbol)
