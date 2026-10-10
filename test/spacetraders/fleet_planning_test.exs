@@ -87,6 +87,30 @@ defmodule SpaceTraders.FleetPlanningTest do
       assert candidate.required_resources.credits <= 100
     end
 
+    test "runtime planning sizes by observed credits above the Strategy credit floor" do
+      revision =
+        put_in(revision().document["hard_constraints"], [
+          "Keep at least 1,000 credits available"
+        ])
+
+      availability = %{
+        claims: [
+          %{
+            resource: "FRIGATE-1",
+            roles: [:market_trader],
+            capabilities: %{cargo_transport: 40}
+          }
+        ],
+        reservations: %{credits: 1_100}
+      }
+
+      assert {:ok, [%{candidate_contributions: [candidate]}]} =
+               SpaceTraders.FleetShadow.plan_market(deep_snapshot(%{}), revision, availability)
+
+      # 100 credits of headroom at 10 per unit and the 25% initial margin.
+      assert candidate.expected_outcomes.maximum_units == 8
+    end
+
     test "the largest claimable hold bounds the route regardless of Ship order" do
       ships = [ship("A-SMALL", 10), ship("B-BIG", 40), ship("C-FULL", 80, 80)]
 
