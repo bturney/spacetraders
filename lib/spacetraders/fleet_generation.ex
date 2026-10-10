@@ -7,6 +7,8 @@ defmodule SpaceTraders.FleetGeneration do
   resolves the corresponding credential reference immediately before minting.
   """
 
+  require Logger
+
   import Ecto.Changeset, only: [get_field: 2]
   import Ecto.Query, warn: false
 
@@ -383,6 +385,15 @@ defmodule SpaceTraders.FleetGeneration do
       ) do
     now = DateTime.utc_now()
 
+    previous =
+      Repo.all(
+        from generation in Generation,
+          where:
+            generation.operator_id == ^operator_id and is_nil(generation.fenced_at) and
+              is_nil(generation.retired_at),
+          select: {generation.id, generation.fleet_strategy_revision_id}
+      )
+
     Repo.update_all(
       from(generation in Generation,
         where:
@@ -401,15 +412,31 @@ defmodule SpaceTraders.FleetGeneration do
     # fresh reconciliation selects its successor.
     :ok = SpaceTraders.FleetAllocation.NeutralWait.supersede_for_operator(operator_id)
 
-    Generation
-    |> where(
-      [generation],
-      generation.operator_id == ^operator_id and
-        is_nil(generation.fenced_at) and is_nil(generation.retired_at)
-    )
-    |> select([generation], generation.agent_id)
-    |> Repo.all()
-    |> Enum.each(&request_intelligence/1)
+    # The wake is a prompt, not the liveness authority: the active Revision's
+    # Observation Demands and boot reconstruction re-enter allocation if it
+    # is lost. The next Market boundary reconciles any older-Revision
+    # Portfolio before it can be retained.
+    woken =
+      Generation
+      |> where(
+        [generation],
+        generation.operator_id == ^operator_id and
+          is_nil(generation.fenced_at) and is_nil(generation.retired_at)
+      )
+      |> select([generation], generation.agent_id)
+      |> Repo.all()
+      |> Enum.filter(&request_intelligence/1)
+
+    for {generation_id, previous_revision_id} <- previous do
+      Logger.info("Fleet Strategy Revision activated",
+        operator_id: operator_id,
+        fleet_generation_id: generation_id,
+        previous_revision_id: previous_revision_id,
+        active_revision_id: revision_id,
+        woken_agent_ids: woken,
+        disposition: if(woken == [], do: :no_allocation_wake, else: :allocation_wake_requested)
+      )
+    end
 
     active_generation =
       Repo.one(
@@ -733,14 +760,17 @@ defmodule SpaceTraders.FleetGeneration do
                    is_nil(generation.fenced_at) and is_nil(generation.retired_at)
            ),
          {:ok, system} <- Fleet.system_from_headquarters(agent.headquarters) do
-      Phoenix.PubSub.broadcast(
-        SpaceTraders.PubSub,
-        "fleet_intelligence_evidence",
-        {:waypoint_intelligence_observed, agent.id, system}
-      )
-    end
+      :ok =
+        Phoenix.PubSub.broadcast(
+          SpaceTraders.PubSub,
+          "fleet_intelligence_evidence",
+          {:waypoint_intelligence_observed, agent.id, system}
+        )
 
-    :ok
+      true
+    else
+      _ -> false
+    end
   end
 
   defp active_revision(operator_id) do

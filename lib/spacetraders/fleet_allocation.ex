@@ -834,6 +834,47 @@ defmodule SpaceTraders.FleetAllocation do
     |> MapSet.new()
   end
 
+  @doc "Unfinished recorded Intents of the portfolio's Commitments, oldest first."
+  def unfinished_commitment_intents(portfolio_id) when is_integer(portfolio_id) do
+    Repo.all(
+      from intent in Intent,
+        join: commitment in Commitment,
+        on: commitment.id == intent.fleet_commitment_id,
+        where:
+          commitment.fleet_commitment_portfolio_id == ^portfolio_id and
+            intent.caller == "commitment" and intent.status in ^Intent.unfinished_states(),
+        order_by: intent.id
+    )
+  end
+
+  @doc """
+  Ids of the portfolio's Commitments holding bought Cargo not yet sold: a
+  completed buy with no later completed sell. That Cargo is the Commitment's
+  outcome to dispose of, never to abandon.
+  """
+  def inherited_cargo_commitment_ids(portfolio_id) when is_integer(portfolio_id) do
+    Repo.all(
+      from buy in Intent,
+        as: :buy,
+        join: commitment in Commitment,
+        on: commitment.id == buy.fleet_commitment_id,
+        where:
+          commitment.fleet_commitment_portfolio_id == ^portfolio_id and
+            buy.caller == "commitment" and buy.type == "buy" and buy.status == "completed" and
+            not exists(
+              from(sell in Intent,
+                where:
+                  sell.fleet_commitment_id == parent_as(:buy).fleet_commitment_id and
+                    sell.type == "sell" and sell.status == "completed" and
+                    sell.id > parent_as(:buy).id
+              )
+            ),
+        distinct: true,
+        select: buy.fleet_commitment_id
+    )
+    |> MapSet.new()
+  end
+
   @doc """
   Completed buy Intents of the portfolio's Commitments that are inside the
   bounded leg handoff and have no later Intent: their selected sell leg has

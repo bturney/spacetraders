@@ -842,8 +842,14 @@ defmodule SpaceTraders.RuntimeQualification do
       # Revision-authority boundary.
       drive(game, &fleet_sold?/1, 30)
       state = FleetGame.snapshot(game)
-      assert state.ships["BASELINE-2"].status != "IN_TRANSIT"
-      assert state.ships["BASELINE-2"].waypoint == destination
+      # The scout arrived where the accepted navigate sent it: its next
+      # request there is a dock, with no second navigate to that destination.
+      after_navigate =
+        Enum.drop_while(state.requests, &(&1 != scout_navigate)) |> Enum.drop(1)
+
+      assert %{path: "/v2/my/ships/BASELINE-2/dock"} =
+               Enum.find(after_navigate, &(&1.method == "POST" and &1.path =~ "BASELINE-2")),
+             fleet_trace(state)
 
       report = revision_stall_report(agent, game, old_portfolio, new_revision, episode_floor)
 
@@ -866,7 +872,34 @@ defmodule SpaceTraders.RuntimeQualification do
       [purchase] = Enum.filter(state.requests, &ship_post?(&1, "BASELINE-1", "purchase"))
       assert sale.transaction["totalPrice"] > purchase.transaction["totalPrice"]
       assert report.duplicate_sends == [], report.text
+
+      # One durable stall disposition for the reconciliation, resolved on
+      # recovery, and no rejected publication per reconciliation tick.
+      assert [
+               %{
+                 selection_kind: :structural_stall,
+                 stall_reason: :stale_revision_portfolio,
+                 stalled_portfolio_id: stalled_id,
+                 resolved_at: %DateTime{}
+               }
+             ] = stall_episodes_since(episode_floor)
+
+      assert stalled_id == old_portfolio.id
+
+      refute Enum.any?(
+               report.episodes_since_activation,
+               &match?({_, :publication_rejected, _}, &1)
+             ),
+             report.text
     end
+  end
+
+  defp stall_episodes_since(floor) do
+    Repo.all(
+      from e in SpaceTraders.FleetAllocation.StrategyDecisionEpisode,
+        where: e.id > ^floor and e.selection_kind == :structural_stall,
+        order_by: e.id
+    )
   end
 
   defp max_episode_id do
@@ -1014,6 +1047,7 @@ defmodule SpaceTraders.RuntimeQualification do
               &1.body["waypointSymbol"] == old_destination(old_portfolio, state))
         ),
       current_portfolio_revision: current && current.fleet_strategy_revision_id,
+      episodes_since_activation: episodes_since,
       duplicate_sends: duplicate_sends,
       text:
         inspect(facts, pretty: true, limit: :infinity, width: 120) <> "\n" <> fleet_trace(state)

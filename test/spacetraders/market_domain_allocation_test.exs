@@ -10,7 +10,15 @@ defmodule SpaceTraders.MarketDomainAllocationTest do
   alias SpaceTraders.Agent.{Operator, Scope}
   alias SpaceTraders.Fleet.{Intent, Ship}
   alias SpaceTraders.FleetAllocation
-  alias SpaceTraders.FleetAllocation.{Commitment, Portfolio, Reconciler, StrategyDecisionEpisode}
+
+  alias SpaceTraders.FleetAllocation.{
+    Commitment,
+    Portfolio,
+    Reconciler,
+    StrategyDecisionEpisode,
+    StructuralStall
+  }
+
   alias SpaceTraders.FleetExecution
   alias SpaceTraders.FleetGeneration.Generation
   alias SpaceTraders.FleetStrategy.{Revision, Strategy}
@@ -328,6 +336,294 @@ defmodule SpaceTraders.MarketDomainAllocationTest do
       assert %{"buy" => 1} = counts = intent_counts(trade)
       refute Map.has_key?(counts, "sell")
     end
+  end
+
+  # #684: a Portfolio selected under an older Revision is reconciled at the
+  # next Market boundary instead of being retained as current work.
+  describe "Revision change reconciliation" do
+    test "a settled, authority-blocked scout retires and the active Revision reselects without a fence" do
+      fleet = fleet([@frigate, @probe])
+      assert {:ok, %{action: :published}} = reconcile(fleet)
+      old = FleetAllocation.current_portfolio(fleet.scope, fleet.agent)
+      coverage = commitment_for(fleet, @probe)
+      refuse_trade(commitment_for(fleet, @frigate))
+      authority_block(coverage)
+
+      fleet = activate_newer_revision(fleet)
+
+      assert {:ok, %{action: :published}} = reconcile(fleet)
+
+      # The settled Intent retired with its reason; nothing was replayed.
+      assert [%Intent{status: "superseded", last_action_result: result}] =
+               intents_of(coverage)
+
+      assert %{"reason" => "strategy_revision_superseded"} = result
+
+      current = FleetAllocation.current_portfolio(fleet.scope, fleet.agent)
+      assert current.fleet_strategy_revision_id == fleet.revision.id
+      assert %{"market_coverage" => [_scout]} = published_work(fleet)
+
+      # The old selection keeps its own Revision and Episode, now superseded.
+      old = Repo.preload(Repo.get!(Portfolio, old.id), :strategy_decision_episode)
+      assert old.superseded_at
+      assert old.strategy_decision_episode.classification == :superseded
+
+      refute Repo.exists?(
+               from e in StrategyDecisionEpisode,
+                 where: e.selection_kind in [:publication_rejected, :structural_stall]
+             )
+    end
+
+    test "an unresolved scout action fences only its own Ship with one durable stall, then releases" do
+      fleet = fleet([@frigate, @probe])
+      assert {:ok, %{action: :published}} = reconcile(fleet)
+      coverage = commitment_for(fleet, @probe)
+      refuse_trade(commitment_for(fleet, @frigate))
+      unresolved(coverage)
+
+      fleet = activate_newer_revision(fleet)
+
+      for _tick <- 1..3 do
+        assert {:ok, %{action: :reconciling_revision, fenced: fenced}} = reconcile(fleet)
+        assert [%{commitment_id: id, reason: :mutation_unresolved}] = fenced
+        assert id == coverage.id
+      end
+
+      # The unresolved Intent is untouched: recovery, not Allocation, owns it.
+      assert [%Intent{status: "active", in_flight_action: %{}}] = intents_of(coverage)
+
+      assert [stall] = stall_episodes()
+      assert stall.stall_reason == :stale_revision_portfolio
+      assert stall.observation_count == 3
+      assert is_nil(stall.resolved_at)
+
+      refute Repo.exists?(
+               from e in StrategyDecisionEpisode, where: e.selection_kind == :publication_rejected
+             )
+
+      # Recovery settles the action; the next boundary releases and resolves.
+      authority_block(coverage)
+      assert {:ok, %{action: :published}} = reconcile(fleet)
+      assert [%{resolved_at: %DateTime{}, classification: :superseded}] = stall_episodes()
+
+      assert FleetAllocation.current_portfolio(fleet.scope, fleet.agent).fleet_strategy_revision_id ==
+               fleet.revision.id
+    end
+
+    test "inherited Cargo is held for its sale, which the active Revision authorizes as a disposition" do
+      fleet = fleet([@frigate])
+      assert {:ok, %{action: :published}} = reconcile(fleet)
+      trade = commitment_for(fleet, @frigate)
+      complete_buy(trade, "completed")
+      listing(fleet.agent, "X1-A2", 30, 25)
+      assert {:ok, %{action: :retained}} = reconcile(fleet)
+      sell = Repo.get_by!(Intent, fleet_commitment_id: trade.id, type: "sell")
+
+      fleet = activate_newer_revision(fleet)
+
+      assert {:ok, %{action: :reconciling_revision, fenced: fenced}} = reconcile(fleet)
+      assert %{commitment_id: trade.id, reason: :inherited_cargo_disposition} in fenced
+      assert Repo.get!(Intent, sell.id).status in Intent.unfinished_states()
+
+      # The sale passes the active Revision's authority; a buy would not.
+      assert {:ok, _selected} =
+               SpaceTraders.Fleet.Intents.RecordedAction.prepare(
+                 fleet.agent,
+                 Repo.get!(Intent, sell.id),
+                 %{"kind" => "sell", "trade_symbol" => "IRON", "units" => 40}
+               )
+
+      # Once the Cargo is sold nothing is inherited: an old-Revision buy is
+      # refused at its send boundary.
+      Repo.update!(Ecto.Changeset.change(Repo.get!(Intent, sell.id), status: "completed"))
+      buy = Repo.get_by!(Intent, fleet_commitment_id: trade.id, type: "buy")
+      Repo.update!(Ecto.Changeset.change(buy, status: "active", finished_at: nil))
+
+      assert {:error, :strategy_revision_absent} =
+               SpaceTraders.Fleet.Intents.RecordedAction.prepare(
+                 fleet.agent,
+                 Repo.get!(Intent, buy.id),
+                 %{"kind" => "buy", "trade_symbol" => "IRON", "units" => 5, "listing_price" => 10}
+               )
+    end
+  end
+
+  describe "structural stall disposition" do
+    test "an unchanged stall observed 500 times is one durable Episode until it changes" do
+      fleet = fleet([@frigate, @probe])
+      assert {:ok, %{action: :published}} = reconcile(fleet)
+      portfolio = FleetAllocation.current_portfolio(fleet.scope, fleet.agent)
+      authority_block(commitment_for(fleet, @probe))
+      decision = %{result: {:ok, %{action: :retained}}, counts: %{}}
+
+      for _tick <- 1..500,
+          do: StructuralStall.observe(fleet.agent, fleet.revision, portfolio, decision)
+
+      assert [%{stall_reason: :authority_blocked_intent, observation_count: 500} = first] =
+               stall_episodes()
+
+      # A changed binding reason resolves the old disposition and opens one.
+      newer = activate_newer_revision(fleet)
+      StructuralStall.observe(newer.agent, newer.revision, portfolio, decision)
+
+      assert [%{id: id, resolved_at: %DateTime{}}, %{stall_reason: :stale_revision_portfolio}] =
+               stall_episodes()
+
+      assert id == first.id
+    end
+
+    test "overdue Demands with zero coverage candidates and no current-Revision reason stall" do
+      fleet = fleet([@frigate, @probe])
+      overdue_market_demand(fleet)
+
+      decision = %{
+        result: {:ok, %{action: :retained}},
+        counts: %{coverage_candidates: 0, claimable_ships: 1}
+      }
+
+      assert {:stalled, %{stall_reason: :overdue_demands_without_coverage}} =
+               StructuralStall.observe(fleet.agent, fleet.revision, nil, decision)
+    end
+
+    test "a Ship trading under the active Revision with overdue Demands is busy, not stalled" do
+      fleet = fleet([@frigate])
+      assert {:ok, %{action: :published}} = reconcile(fleet)
+      portfolio = FleetAllocation.current_portfolio(fleet.scope, fleet.agent)
+      overdue_market_demand(fleet)
+      busy = %{result: {:ok, %{action: :retained, reason: :all_ships_occupied}}, counts: %{}}
+
+      assert :healthy = StructuralStall.observe(fleet.agent, fleet.revision, portfolio, busy)
+      assert stall_episodes() == []
+    end
+
+    test "retained coverage, Capacity Deferral and an open Shortfall explain overdue Demands" do
+      fleet = fleet([@frigate, @probe])
+      assert {:ok, %{action: :published}} = reconcile(fleet)
+      portfolio = FleetAllocation.current_portfolio(fleet.scope, fleet.agent)
+      overdue_market_demand(fleet)
+      none = %{coverage_candidates: 0, claimable_ships: 1}
+
+      # Single-scout: current-Revision coverage is retained.
+      assert :healthy =
+               StructuralStall.observe(fleet.agent, fleet.revision, portfolio, %{
+                 result: {:ok, %{action: :retained}},
+                 counts: none
+               })
+
+      assert :healthy =
+               StructuralStall.observe(fleet.agent, fleet.revision, nil, %{
+                 result: {:ok, %{action: :deferred_for_capacity}},
+                 counts: %{}
+               })
+
+      Repo.insert!(%SpaceTraders.CreditCalibration.Shortfall{
+        agent_id: fleet.agent.id,
+        kind: "revision_floor",
+        credits: 100,
+        credit_floor: 500,
+        detected_at: DateTime.utc_now()
+      })
+
+      assert :healthy =
+               StructuralStall.observe(fleet.agent, fleet.revision, nil, %{
+                 result: {:ok, %{action: :retained}},
+                 counts: none
+               })
+
+      assert stall_episodes() == []
+    end
+  end
+
+  defp authority_block(commitment) do
+    Repo.update_all(
+      from(intent in Intent,
+        where: intent.fleet_commitment_id == ^commitment.id and intent.status != "completed"
+      ),
+      set: [
+        status: "blocked",
+        in_flight_action: nil,
+        mutation_attempt_id: nil,
+        blocker: %SpaceTraders.Fleet.IntentBlocker{
+          reason: "strategy_revision_absent",
+          summary: "Ship action cannot progress: strategy_revision_absent.",
+          evidence: ":strategy_revision_absent",
+          observed_at: DateTime.utc_now(:second),
+          resolver: "game_state",
+          retry_condition: "authoritative_state_changed",
+          corrective_actions: ["resume"]
+        },
+        last_action_result: %{"kind" => "navigate", "status" => "IN_TRANSIT"}
+      ]
+    )
+  end
+
+  # The trader's buy was refused long ago: its Ship is free, it holds no Cargo.
+  defp refuse_trade(commitment) do
+    Repo.update_all(
+      from(intent in Intent, where: intent.fleet_commitment_id == ^commitment.id),
+      set: [
+        status: "infeasible",
+        finished_at: DateTime.add(DateTime.utc_now(:second), -600)
+      ]
+    )
+  end
+
+  # A sent action whose outcome is not yet reconciled.
+  defp unresolved(commitment) do
+    Repo.update_all(
+      from(intent in Intent,
+        where: intent.fleet_commitment_id == ^commitment.id and intent.status != "completed"
+      ),
+      set: [status: "active", blocker: nil, in_flight_action: %{"kind" => "navigate"}]
+    )
+  end
+
+  defp intents_of(commitment) do
+    Repo.all(
+      from intent in Intent,
+        where:
+          intent.fleet_commitment_id == ^commitment.id and intent.type == "acquire_intelligence",
+        order_by: intent.id
+    )
+  end
+
+  defp stall_episodes do
+    Repo.all(
+      from e in StrategyDecisionEpisode,
+        where: e.selection_kind == :structural_stall,
+        order_by: e.id
+    )
+  end
+
+  defp overdue_market_demand(fleet) do
+    :ok =
+      SpaceTraders.FleetIntelligence.sync_market_observation_demands(
+        fleet.agent,
+        fleet.revision,
+        @system
+      )
+
+    Repo.update_all(
+      from(d in SpaceTraders.Evidence.ObservationDemand,
+        where: d.agent_id == ^fleet.agent.id and like(d.subject, "market:%")
+      ),
+      set: [due_at: DateTime.add(DateTime.utc_now(), -60), owner: "fleet_planning"]
+    )
+  end
+
+  # The Operator activates a newer Revision: the Strategy and the live
+  # Generation move to it, as `FleetGeneration.activate_strategy/2` does.
+  defp activate_newer_revision(fleet) do
+    supersede_revision(fleet)
+    strategy = Repo.get!(Strategy, fleet.revision.fleet_strategy_id)
+    newer = Repo.get!(Revision, strategy.active_revision_id)
+
+    Repo.update_all(
+      from(g in Generation, where: g.agent_id == ^fleet.agent.id),
+      set: [fleet_strategy_revision_id: newer.id]
+    )
+
+    %{fleet | revision: newer}
   end
 
   defp complete_buy(commitment, status) do

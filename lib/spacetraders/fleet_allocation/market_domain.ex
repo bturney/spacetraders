@@ -79,15 +79,33 @@ defmodule SpaceTraders.FleetAllocation.MarketDomain do
     with %Generation{} = generation <- current_generation(agent) do
       new = selection.commitments
       same_revision? = current != nil and current.fleet_strategy_revision_id == revision.id
+      stale? = current != nil and not same_revision?
+      fenced = get_in(plan, [:reconciliation, :fenced]) || []
 
       cond do
         revalidate_trade_evidence(agent, new) != :ok ->
           reject_publication(scope, generation, plan, :stale_evidence)
 
+        # An older Revision's Portfolio still holds unresolved effects or
+        # Cargo awaiting its sale. Superseding it now would strand them, so
+        # this boundary reports the scoped reconciliation instead of a
+        # rejected publication; the fence's own resolution re-enters here.
+        stale? and fenced != [] ->
+          reconciling(current, fenced, plan)
+
         new == [] and is_nil(current) ->
           mint_neutral_wait(scope, generation, revision, plan)
 
-        new == [] and (released == [] or not same_revision?) ->
+        # Nothing is selected under the active Revision: the obsolete
+        # Portfolio releases its Claims and Reservations, then the normal
+        # zero-selection result (a Neutral Wait or why none) follows.
+        new == [] and stale? ->
+          case FleetAllocation.unwind_current_portfolio(scope, generation.id) do
+            {:ok, _portfolio} -> mint_neutral_wait(scope, generation, revision, plan)
+            {:error, _reason} -> reconciling(current, fenced, plan)
+          end
+
+        new == [] and released == [] ->
           {:ok,
            %{action: :retained, portfolio: current, selection: selection, planning: plan.planning}}
 
@@ -148,6 +166,18 @@ defmodule SpaceTraders.FleetAllocation.MarketDomain do
           do: :ok,
           else: {:error, :stale_evidence}
     end
+  end
+
+  defp reconciling(current, fenced, plan) do
+    {:ok,
+     %{
+       action: :reconciling_revision,
+       reason: :stale_revision_fenced,
+       portfolio: current,
+       fenced: fenced,
+       selection: plan.selection,
+       planning: plan.planning
+     }}
   end
 
   defp published({:ok, portfolio}, _scope, _generation, _plan), do: {:published, portfolio}

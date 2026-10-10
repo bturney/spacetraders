@@ -181,6 +181,17 @@ retained evidence (stale, untraceable, invalidated, wrong-Generation, future),
 Capacity Deferral, swapped event order, and bounded telemetry. Run one with
 `--only describe:"Gate 2A partial-coverage handoff"`.
 
+The `Gate 2B Revision change during coverage` describe (#685, #686) reproduces
+production Portfolio 4039 / Intent 4077 on the same seam: the scout's navigate
+succeeds, the Operator activates a new Revision through the Strategy LiveView
+while it is in transit, the scout arrives and its next step is refused on
+old-Portfolio authority. It asserts the stale Claim releases without a Safety
+Fence, current-Revision coverage and a profitable trade follow, and one
+resolved `structural_stall` Episode records the reconciliation. Deterministic
+variants (unresolved action fence, inherited Cargo disposition, 500-tick stall
+deduplication, busy/deferred/Shortfall negatives) live in
+`test/spacetraders/market_domain_allocation_test.exs`.
+
 Run it only when that whole-runtime composition is the subject:
 
 ```sh

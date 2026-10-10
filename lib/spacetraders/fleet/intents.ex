@@ -2756,6 +2756,43 @@ defmodule SpaceTraders.Fleet.Intents do
     end)
   end
 
+  @doc """
+  Retires a Commitment Intent whose Portfolio a newer active Revision made
+  obsolete, the way a withdrawn Claim supersedes one.
+
+  Only settled work retires: under the Intent's write lock it must have no
+  in-flight action, no unresolved Mutation Attempt and no pending arrival.
+  Anything else returns `{:error, :unresolved_intent_evidence}` and stays for
+  its own recovery, which is the narrow Safety Fence on that Ship.
+  """
+  def supersede_for_revision_change(%Intent{caller: "commitment"} = intent, active_revision_id)
+      when is_integer(active_revision_id) do
+    with_current_intent(intent, fn current ->
+      if unresolved_intent_evidence?(current) or
+           MutationAttempts.unresolved_for_intent(current) != nil do
+        {:error, :unresolved_intent_evidence}
+      else
+        updated =
+          update_intent!(
+            Ecto.Changeset.change(current,
+              status: "superseded",
+              blocker: nil,
+              in_flight_action: nil,
+              last_action_result: %{
+                "outcome" => "authority_refused",
+                "reason" => "strategy_revision_superseded",
+                "active_revision_id" => active_revision_id,
+                "previous_result" => current.last_action_result
+              },
+              finished_at: DateTime.utc_now() |> DateTime.truncate(:second)
+            )
+          )
+
+        {:ok, updated}
+      end
+    end)
+  end
+
   # A withdrawn Claim supersedes the Intent, matching the retired caller seam.
   # Any other refusal keeps the Intent's own blocker and evidence handling.
   defp prepare_recorded_action(agent, intent, action) do
