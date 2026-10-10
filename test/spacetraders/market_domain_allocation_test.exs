@@ -374,40 +374,62 @@ defmodule SpaceTraders.MarketDomainAllocationTest do
              )
     end
 
-    test "an unresolved scout action fences only its own Ship with one durable stall, then releases" do
+    test "an unresolved scout action fences only its own Ship while the free Ship takes new-Revision work" do
       fleet = fleet([@frigate, @probe])
       assert {:ok, %{action: :published}} = reconcile(fleet)
+      old = FleetAllocation.current_portfolio(fleet.scope, fleet.agent)
       coverage = commitment_for(fleet, @probe)
       refuse_trade(commitment_for(fleet, @frigate))
       unresolved(coverage)
 
       fleet = activate_newer_revision(fleet)
 
-      for _tick <- 1..3 do
-        assert {:ok, %{action: :reconciling_revision, fenced: fenced}} = reconcile(fleet)
-        assert [%{commitment_id: id, reason: :mutation_unresolved}] = fenced
-        assert id == coverage.id
-      end
+      # The first boundary retires the obsolete Portfolio and the free
+      # frigate is selected under the active Revision.
+      assert {:ok, %{action: :published}} = reconcile(fleet)
+      current = FleetAllocation.current_portfolio(fleet.scope, fleet.agent)
+      assert current.fleet_strategy_revision_id == fleet.revision.id
+      assert [frigate_work] = current.commitments
+      assert frigate_work.claims == [ship_symbol(fleet, @frigate)]
+
+      for _tick <- 1..3, do: assert({:ok, _} = reconcile(fleet))
 
       # The unresolved Intent is untouched: recovery, not Allocation, owns it.
       assert [%Intent{status: "active", in_flight_action: %{}}] = intents_of(coverage)
 
-      assert [stall] = stall_episodes()
-      assert stall.stall_reason == :stale_revision_portfolio
-      assert stall.observation_count == 3
-      assert is_nil(stall.resolved_at)
+      # Its Commitment keeps the old Claim, attribution and Episode, on its
+      # own Ship only; the old Portfolio is no longer current.
+      assert %Commitment{unwind_state: :settling, fleet_commitment_portfolio_id: old_id} =
+               Repo.get!(Commitment, coverage.id)
 
+      assert old_id == old.id
+      assert Repo.get!(Portfolio, old.id).superseded_at
+
+      assert {:ok, %{commitment_id: claimed, decision_episode_id: episode_id}} =
+               FleetAllocation.current_ship_claim(fleet.agent, ship_symbol(fleet, @probe))
+
+      assert claimed == coverage.id
+      assert episode_id == old.strategy_decision_episode_id
+
+      # Busy reconciliation is not a structural stall or a rejected publication.
       refute Repo.exists?(
-               from e in StrategyDecisionEpisode, where: e.selection_kind == :publication_rejected
+               from e in StrategyDecisionEpisode,
+                 where: e.selection_kind in [:publication_rejected, :structural_stall]
              )
 
-      # Recovery settles the action; the next boundary releases and resolves.
+      # Recovery settles the action; the next boundary releases its Claim.
       authority_block(coverage)
-      assert {:ok, %{action: :published}} = reconcile(fleet)
-      assert [%{resolved_at: %DateTime{}, classification: :superseded}] = stall_episodes()
+      assert {:ok, _} = reconcile(fleet)
+      assert %Commitment{unwind_state: :released} = Repo.get!(Commitment, coverage.id)
+      assert [%Intent{status: "superseded"}] = intents_of(coverage)
 
-      assert FleetAllocation.current_portfolio(fleet.scope, fleet.agent).fleet_strategy_revision_id ==
-               fleet.revision.id
+      refute match?(
+               {:ok, %{commitment_id: id}} when id == coverage.id,
+               FleetAllocation.current_ship_claim(fleet.agent, ship_symbol(fleet, @probe))
+             )
+
+      old = Repo.preload(Repo.get!(Portfolio, old.id), :strategy_decision_episode, force: true)
+      assert old.strategy_decision_episode.classification == :superseded
     end
 
     test "inherited Cargo is held for its sale, which the active Revision authorizes as a disposition" do
@@ -421,9 +443,11 @@ defmodule SpaceTraders.MarketDomainAllocationTest do
 
       fleet = activate_newer_revision(fleet)
 
-      assert {:ok, %{action: :reconciling_revision, fenced: fenced}} = reconcile(fleet)
-      assert %{commitment_id: trade.id, reason: :inherited_cargo_disposition} in fenced
+      # The disposition occupies its own Ship: busy, not a structural stall.
+      assert {:ok, %{action: :retained, reason: :all_ships_occupied}} = reconcile(fleet)
+      assert %Commitment{unwind_state: :settling} = Repo.get!(Commitment, trade.id)
       assert Repo.get!(Intent, sell.id).status in Intent.unfinished_states()
+      assert stall_episodes() == []
 
       # The sale passes the active Revision's authority; a buy would not.
       assert {:ok, _selected} =
@@ -433,8 +457,6 @@ defmodule SpaceTraders.MarketDomainAllocationTest do
                  %{"kind" => "sell", "trade_symbol" => "IRON", "units" => 40}
                )
 
-      # Once the Cargo is sold nothing is inherited: an old-Revision buy is
-      # refused at its send boundary.
       Repo.update!(Ecto.Changeset.change(Repo.get!(Intent, sell.id), status: "completed"))
       buy = Repo.get_by!(Intent, fleet_commitment_id: trade.id, type: "buy")
       Repo.update!(Ecto.Changeset.change(buy, status: "active", finished_at: nil))
@@ -445,6 +467,66 @@ defmodule SpaceTraders.MarketDomainAllocationTest do
                  Repo.get!(Intent, buy.id),
                  %{"kind" => "buy", "trade_symbol" => "IRON", "units" => 5, "listing_price" => 10}
                )
+    end
+
+    test "a partial sale leaves the rest inherited, and a disposition that ends releases its Ship" do
+      fleet = fleet([@frigate])
+      assert {:ok, %{action: :published}} = reconcile(fleet)
+      trade = commitment_for(fleet, @frigate)
+      complete_buy(trade, "completed")
+      listing(fleet.agent, "X1-A2", 30, 25)
+      assert {:ok, %{action: :retained}} = reconcile(fleet)
+      sell = Repo.get_by!(Intent, fleet_commitment_id: trade.id, type: "sell")
+      fleet = activate_newer_revision(fleet)
+      assert {:ok, _} = reconcile(fleet)
+
+      # 25 of the 40 bought units sold: 15 are still inherited.
+      Repo.update!(
+        Ecto.Changeset.change(Repo.get!(Intent, sell.id),
+          status: "completed",
+          last_action_result: %{"transaction" => %{"units" => 25, "total_price" => 625}}
+        )
+      )
+
+      portfolio_id = Repo.get!(Commitment, trade.id).fleet_commitment_portfolio_id
+      assert MapSet.member?(FleetAllocation.inherited_cargo_commitment_ids(portfolio_id), trade.id)
+
+      # The sale ended: nothing is under way, so the fence ends and the units
+      # left aboard are reported, never hidden.
+      log =
+        capture_info(fn ->
+          assert {:ok, _} = reconcile(fleet)
+        end)
+
+      assert %Commitment{unwind_state: :released} = Repo.get!(Commitment, trade.id)
+      assert log =~ "released a settled Commitment with inherited Cargo aboard"
+      assert log =~ "undisposed_units=15"
+    end
+
+    test "an infeasible disposition sale does not fence its Ship forever" do
+      fleet = fleet([@frigate])
+      assert {:ok, %{action: :published}} = reconcile(fleet)
+      trade = commitment_for(fleet, @frigate)
+      complete_buy(trade, "completed")
+      listing(fleet.agent, "X1-A2", 30, 25)
+      assert {:ok, %{action: :retained}} = reconcile(fleet)
+      fleet = activate_newer_revision(fleet)
+      assert {:ok, _} = reconcile(fleet)
+      assert %Commitment{unwind_state: :settling} = Repo.get!(Commitment, trade.id)
+
+      Repo.update_all(
+        from(i in Intent, where: i.fleet_commitment_id == ^trade.id and i.type == "sell"),
+        set: [status: "infeasible", finished_at: DateTime.utc_now(:second)]
+      )
+
+      log =
+        capture_info(fn ->
+          assert {:ok, %{action: action}} = reconcile(fleet)
+          assert action != :retained
+        end)
+
+      assert %Commitment{unwind_state: :released} = Repo.get!(Commitment, trade.id)
+      assert log =~ "undisposed_units=40"
     end
   end
 
@@ -707,6 +789,21 @@ defmodule SpaceTraders.MarketDomainAllocationTest do
         end)
     end
   end
+
+  # Test config logs errors only; info logs are captured for one call (this
+  # module is synchronous, and the suite captures every log).
+  defp capture_info(fun) do
+    level = Logger.level()
+    Logger.configure(level: :info)
+
+    try do
+      ExUnit.CaptureLog.capture_log([level: :info, metadata: :all], fun)
+    after
+      Logger.configure(level: level)
+    end
+  end
+
+  defp ship_symbol(fleet, role), do: "#{fleet.agent.symbol}-#{role}"
 
   defp role(fleet, symbol), do: String.replace_prefix(symbol, fleet.agent.symbol <> "-", "")
 

@@ -460,10 +460,11 @@ defmodule SpaceTraders.Fleet.Intents.RecordedAction do
 
   defp active_revision(_strategy), do: {:error, :strategy_revision_absent}
 
-  # The Claim's Portfolio must belong to the active Revision. One exception
-  # (#684): the sale of Cargo an older Revision's Commitment already bought is
-  # a disposition of that outcome, authorized and constrained by the active
-  # Revision. It never authorizes a buy or any other old-Revision action.
+  # The Claim must be current work of the active Revision. One exception
+  # (#684, #686): the sale of Cargo an older Revision's Commitment already
+  # bought is a disposition of that outcome, authorized and constrained by the
+  # active Revision. A settling Commitment of a retired Portfolio authorizes
+  # nothing else: no buy and no other old-Revision action.
   defp commitment_claim(agent, ship, intent, strategy, generation) do
     with {:ok, revision_id} <- active_revision(strategy),
          %Revision{} = revision <- Repo.get(Revision, revision_id),
@@ -472,7 +473,7 @@ defmodule SpaceTraders.Fleet.Intents.RecordedAction do
            Repo.get(Portfolio, claim.portfolio_id),
          true <- generation_id == generation.id,
          true <-
-           (portfolio.fleet_strategy_revision_id == revision_id or
+           ((portfolio.fleet_strategy_revision_id == revision_id and not claim.settling) or
               inherited_cargo_sale?(intent, portfolio, claim)) ||
              {:error, :strategy_revision_absent} do
       {:ok, %{claim: claim, generation: generation, revision: revision}}

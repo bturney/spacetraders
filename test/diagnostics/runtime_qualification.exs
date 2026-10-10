@@ -834,22 +834,42 @@ defmodule SpaceTraders.RuntimeQualification do
       # Still in transit: the accepted navigate is the scout's last action and
       # nothing has refused it yet.
       settle_runtime()
-      assert FleetGame.snapshot(game).ships["BASELINE-2"].status == "IN_TRANSIT"
+      during_transit = FleetGame.snapshot(game)
+      assert during_transit.ships["BASELINE-2"].status == "IN_TRANSIT"
       assert [{"acquire_intelligence", status}] = scout_intents(agent)
-      assert status in ~w(active waiting), fleet_trace(FleetGame.snapshot(game))
+      assert status in ~w(active waiting), fleet_trace(during_transit)
+
+      # The activation's boundary retired the old Portfolio at once: the
+      # scout's Commitment settles on its own Ship while BASELINE-1 already
+      # holds active-Revision work. No Fleet-wide fence.
+      transit_portfolio =
+        FleetAllocation.current_portfolio(Scope.for_operator(operator(agent)), agent)
+
+      assert transit_portfolio.fleet_strategy_revision_id == new_revision,
+             fleet_trace(during_transit)
+
+      assert scout_claimed?(transit_portfolio, "BASELINE-1"), fleet_trace(during_transit)
+      refute scout_claimed?(transit_portfolio, "BASELINE-2"), fleet_trace(during_transit)
+      assert [%{unwind_state: :settling}] = settling_scout(old_portfolio)
 
       # Normal time progression: the scout arrives and its next step is the
       # Revision-authority boundary.
       drive(game, &fleet_sold?/1, 30)
       state = FleetGame.snapshot(game)
-      # The scout arrived where the accepted navigate sent it: its next
-      # request there is a dock, with no second navigate to that destination.
+      # The scout arrived where the accepted navigate sent it; its old-Revision
+      # next step was refused, its Claim released, and it scouts again only
+      # under an active-Revision Commitment: never a second navigate there.
       after_navigate =
         Enum.drop_while(state.requests, &(&1 != scout_navigate)) |> Enum.drop(1)
 
-      assert %{path: "/v2/my/ships/BASELINE-2/dock"} =
+      assert %{path: "/v2/my/ships/BASELINE-2/navigate", body: %{"waypointSymbol" => next}} =
                Enum.find(after_navigate, &(&1.method == "POST" and &1.path =~ "BASELINE-2")),
              fleet_trace(state)
+
+      assert next != destination
+      assert [%{unwind_state: :released}] = settling_scout(old_portfolio)
+      assert scout_claimed_under?(new_revision, "BASELINE-2"), fleet_trace(state)
+      assert Enum.any?(state.requests, &market_read?(&1, String.slice(next, -2, 2)))
 
       report = revision_stall_report(agent, game, old_portfolio, new_revision, episode_floor)
 
@@ -873,18 +893,9 @@ defmodule SpaceTraders.RuntimeQualification do
       assert sale.transaction["totalPrice"] > purchase.transaction["totalPrice"]
       assert report.duplicate_sends == [], report.text
 
-      # One durable stall disposition for the reconciliation, resolved on
-      # recovery, and no rejected publication per reconciliation tick.
-      assert [
-               %{
-                 selection_kind: :structural_stall,
-                 stall_reason: :stale_revision_portfolio,
-                 stalled_portfolio_id: stalled_id,
-                 resolved_at: %DateTime{}
-               }
-             ] = stall_episodes_since(episode_floor)
-
-      assert stalled_id == old_portfolio.id
+      # Reconciliation is busy work, not a structural stall, and no rejected
+      # publication is recorded per reconciliation tick.
+      assert stall_episodes_since(episode_floor) == [], report.text
 
       refute Enum.any?(
                report.episodes_since_activation,
@@ -892,6 +903,25 @@ defmodule SpaceTraders.RuntimeQualification do
              ),
              report.text
     end
+  end
+
+  # The old Portfolio's scout Commitment (BASELINE-2), whatever its state.
+  defp settling_scout(old_portfolio) do
+    Repo.all(
+      from c in SpaceTraders.FleetAllocation.Commitment,
+        where:
+          c.fleet_commitment_portfolio_id == ^old_portfolio.id and
+            fragment("? = ANY(?)", "BASELINE-2", c.claims)
+    )
+  end
+
+  defp scout_claimed_under?(revision_id, ship) do
+    Repo.exists?(
+      from c in SpaceTraders.FleetAllocation.Commitment,
+        join: p in SpaceTraders.FleetAllocation.Portfolio,
+        on: p.id == c.fleet_commitment_portfolio_id,
+        where: p.fleet_strategy_revision_id == ^revision_id and ^ship in c.claims
+    )
   end
 
   defp stall_episodes_since(floor) do

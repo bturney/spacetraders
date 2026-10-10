@@ -27,7 +27,7 @@ defmodule SpaceTraders.FleetAllocation do
   alias SpaceTraders.FleetPlanning.CandidateContribution
   alias SpaceTraders.FleetStrategy
   alias SpaceTraders.FleetStrategy.Strategy
-  alias SpaceTraders.{ManualIntervention, Outbox, Repo, ShipReservation}
+  alias SpaceTraders.{Clock, ManualIntervention, Outbox, Repo, ShipReservation}
 
   alias SpaceTraders.FleetStrategy.{
     ObjectiveEvaluation,
@@ -739,6 +739,276 @@ defmodule SpaceTraders.FleetAllocation do
 
   def unwind_current_portfolio(_scope, _generation_id), do: {:error, :invalid_unwind}
 
+  @settlement_reasons [:mutation_unresolved, :inherited_cargo_disposition]
+
+  @doc "The closed vocabulary of settlement (narrow Safety Fence) reasons."
+  def settlement_reasons, do: @settlement_reasons
+
+  @doc """
+  Retires the Generation's current Portfolio when an older Revision selected
+  it (#686), so independent Ships are free for the active Revision at once.
+
+  Under the Generation lock (taken before the Portfolio, as publication
+  does) each still-active Commitment either releases or, while its effect is
+  unsettled, becomes `:settling`: it keeps its Claim, its Portfolio and its
+  Decision Episode attribution, on its own Ship only, for one of the
+  `settlement_reasons/0`. The Portfolio is superseded either way; its
+  Episode keeps evaluating while anything settles. Nothing is replayed:
+  recovery stays with the Intent engine and `MutationAttempts`.
+
+  Returns `{:ok, %{portfolio: portfolio, released: ids, settling: [...]}}`,
+  or `{:error, :no_stale_portfolio}` when no current Portfolio of an older
+  Revision exists.
+  """
+  def retire_stale_portfolio(
+        %Scope{operator: %{id: operator_id}},
+        generation_id,
+        active_revision_id
+      )
+      when is_integer(generation_id) and is_integer(active_revision_id) do
+    Outbox.publish(
+      fn %{portfolio: portfolio} ->
+        %{
+          topic: "fleet_allocation:#{operator_id}",
+          event: "fleet_commitment_portfolio_unwound",
+          payload: %{
+            "portfolio_id" => portfolio.id,
+            "decision_episode_id" => portfolio.strategy_decision_episode_id
+          }
+        }
+      end,
+      fn -> do_retire_stale_portfolio(operator_id, generation_id, active_revision_id) end
+    )
+  end
+
+  @doc """
+  Releases every `:settling` Commitment of the Generation whose effect has
+  settled, and closes a retired Portfolio's Episode once nothing of it
+  settles. Runs at each Market boundary, so a lost wake only delays it.
+
+  Returns `{:ok, released}`: each released Commitment with the receipt units
+  of inherited Cargo its disposition left aboard (`undisposed_units`).
+  """
+  def release_settled_commitments(generation_id) when is_integer(generation_id) do
+    Repo.transaction(fn ->
+      lock_generation_agent!(generation_id)
+      lock_generations(from(g in Generation, where: g.id == ^generation_id), :update)
+
+      settling =
+        Repo.all(
+          from commitment in Commitment,
+            join: portfolio in Portfolio,
+            on: portfolio.id == commitment.fleet_commitment_portfolio_id,
+            where:
+              portfolio.fleet_generation_id == ^generation_id and
+                commitment.unwind_state == :settling,
+            order_by: commitment.id,
+            lock: "FOR UPDATE OF f0"
+        )
+
+      fences = settlement_fences(settling)
+      released = Enum.reject(settling, &Map.has_key?(fences, &1.id))
+      ids = Enum.map(released, & &1.id)
+      left = undisposed_units(ids)
+
+      if ids != [] do
+        Repo.update_all(from(c in Commitment, where: c.id in ^ids),
+          set: [unwind_state: :released]
+        )
+
+        released
+        |> Enum.map(& &1.fleet_commitment_portfolio_id)
+        |> Enum.uniq()
+        |> Enum.reject(&settling?/1)
+        |> close_retired_episodes(Clock.utc_now())
+      end
+
+      Enum.map(released, fn commitment ->
+        %{
+          commitment_id: commitment.id,
+          portfolio_id: commitment.fleet_commitment_portfolio_id,
+          claims: commitment.claims,
+          undisposed_units: Map.get(left, commitment.id, 0)
+        }
+      end)
+    end)
+  end
+
+  @doc "The Generation's `:settling` Commitments, each with its retired Portfolio."
+  def settling_commitments(generation_id) when is_integer(generation_id) do
+    Repo.all(
+      from commitment in Commitment,
+        join: portfolio in Portfolio,
+        on: portfolio.id == commitment.fleet_commitment_portfolio_id,
+        where:
+          portfolio.fleet_generation_id == ^generation_id and
+            commitment.unwind_state == :settling,
+        order_by: commitment.id,
+        preload: [fleet_commitment_portfolio: portfolio]
+    )
+  end
+
+  @doc "Ship symbols the Generation's `:settling` Commitments still claim."
+  def settling_ships(generation_id) when is_integer(generation_id) do
+    generation_id
+    |> settling_commitments()
+    |> Enum.flat_map(& &1.claims)
+    |> MapSet.new()
+  end
+
+  @doc """
+  Unfinished Intents a Revision change may retire: those of the Generation's
+  current Portfolio when an older Revision selected it, and of its
+  `:settling` Commitments, except a Commitment still holding inherited Cargo.
+  """
+  def revision_change_intents(generation_id, active_revision_id)
+      when is_integer(generation_id) and is_integer(active_revision_id) do
+    commitment_ids =
+      Repo.all(
+        from commitment in Commitment,
+          join: portfolio in Portfolio,
+          on: portfolio.id == commitment.fleet_commitment_portfolio_id,
+          where:
+            portfolio.fleet_generation_id == ^generation_id and
+              ((is_nil(portfolio.superseded_at) and
+                  portfolio.fleet_strategy_revision_id != ^active_revision_id and
+                  commitment.unwind_state == :not_required) or
+                 commitment.unwind_state == :settling),
+          select: commitment.id
+      )
+
+    cargo = undisposed_units(commitment_ids)
+
+    commitment_ids
+    |> Enum.reject(&Map.has_key?(cargo, &1))
+    |> unfinished_intents_query()
+    |> Repo.all()
+  end
+
+  defp unfinished_intents_query(commitment_ids) do
+    from intent in Intent,
+      where:
+        intent.fleet_commitment_id in ^commitment_ids and intent.caller == "commitment" and
+          intent.status in ^Intent.unfinished_states(),
+      order_by: intent.id
+  end
+
+  defp do_retire_stale_portfolio(operator_id, generation_id, active_revision_id) do
+    lock_generation_agent!(generation_id)
+    lock_generations(from(g in Generation, where: g.id == ^generation_id), :update)
+    now = Clock.utc_now()
+
+    portfolio =
+      Repo.one(
+        from portfolio in Portfolio,
+          where:
+            portfolio.operator_id == ^operator_id and
+              portfolio.fleet_generation_id == ^generation_id and
+              is_nil(portfolio.superseded_at) and
+              portfolio.fleet_strategy_revision_id != ^active_revision_id,
+          lock: "FOR UPDATE"
+      ) || Repo.rollback(:no_stale_portfolio)
+
+    commitments =
+      Repo.all(
+        from commitment in Commitment,
+          where:
+            commitment.fleet_commitment_portfolio_id == ^portfolio.id and
+              commitment.unwind_state == :not_required,
+          order_by: commitment.id
+      )
+
+    fences = settlement_fences(commitments)
+    {settling, released} = Enum.split_with(commitments, &Map.has_key?(fences, &1.id))
+
+    for {state, group} <- [settling: settling, released: released], group != [] do
+      ids = Enum.map(group, & &1.id)
+      Repo.update_all(from(c in Commitment, where: c.id in ^ids), set: [unwind_state: state])
+    end
+
+    Repo.update_all(from(p in Portfolio, where: p.id == ^portfolio.id),
+      set: [superseded_at: now]
+    )
+
+    NeutralWait.clear(generation_id)
+    if settling == [], do: close_retired_episodes([portfolio.id], now)
+
+    %{
+      portfolio: %{portfolio | superseded_at: now},
+      released: Enum.map(released, & &1.id),
+      settling:
+        Enum.map(settling, fn commitment ->
+          %{
+            commitment_id: commitment.id,
+            claims: commitment.claims,
+            reason: Map.fetch!(fences, commitment.id)
+          }
+        end)
+    }
+  end
+
+  # The smallest necessary fence per Commitment, read under the Generation
+  # lock: inherited Cargo whose disposition is under way (an unfinished
+  # Intent, or a completed buy inside its leg handoff), else any unfinished
+  # Intent (in flight, unresolved attempt or pending arrival: the retirement
+  # step already retired every settled one). A disposition that ended
+  # without selling everything fences nothing; its units left are reported.
+  defp settlement_fences([]), do: %{}
+
+  defp settlement_fences(commitments) do
+    ids = Enum.map(commitments, & &1.id)
+    cargo = undisposed_units(ids)
+
+    unfinished =
+      ids
+      |> unfinished_intents_query()
+      |> select([intent], intent.fleet_commitment_id)
+      |> Repo.all()
+      |> MapSet.new()
+
+    handoff =
+      commitments
+      |> Enum.map(& &1.fleet_commitment_portfolio_id)
+      |> Enum.uniq()
+      |> Enum.flat_map(&awaiting_sell_buys/1)
+      |> MapSet.new(& &1.fleet_commitment_id)
+
+    Enum.reduce(ids, %{}, fn id, fences ->
+      cond do
+        Map.has_key?(cargo, id) and
+            (MapSet.member?(unfinished, id) or MapSet.member?(handoff, id)) ->
+          Map.put(fences, id, :inherited_cargo_disposition)
+
+        MapSet.member?(unfinished, id) ->
+          Map.put(fences, id, :mutation_unresolved)
+
+        true ->
+          fences
+      end
+    end)
+  end
+
+  defp settling?(portfolio_id) do
+    Repo.exists?(
+      from commitment in Commitment,
+        where:
+          commitment.fleet_commitment_portfolio_id == ^portfolio_id and
+            commitment.unwind_state == :settling
+    )
+  end
+
+  # A retired Portfolio's Episode keeps evaluating while its Commitments
+  # settle (a completed disposition sale may still realize it); once none
+  # does, an Episode still evaluating is superseded with its receipts.
+  defp close_retired_episodes(portfolio_ids, now) do
+    from(portfolio in Portfolio,
+      where: portfolio.id in ^portfolio_ids,
+      select: portfolio.strategy_decision_episode_id
+    )
+    |> Repo.all()
+    |> Enum.each(&supersede_episode(&1, now))
+  end
+
   @doc """
   Records a decision whose publication Fleet Allocation refused.
 
@@ -848,31 +1118,50 @@ defmodule SpaceTraders.FleetAllocation do
   end
 
   @doc """
-  Ids of the portfolio's Commitments holding bought Cargo not yet sold: a
-  completed buy with no later completed sell. That Cargo is the Commitment's
-  outcome to dispose of, never to abandon.
+  Ids of the portfolio's Commitments holding bought Cargo not yet sold, by
+  receipt units: completed buys bought more units than completed sells have
+  sold. A partial sale leaves the rest inherited. That Cargo is the
+  Commitment's outcome to dispose of, never to abandon.
   """
   def inherited_cargo_commitment_ids(portfolio_id) when is_integer(portfolio_id) do
-    Repo.all(
-      from buy in Intent,
-        as: :buy,
-        join: commitment in Commitment,
-        on: commitment.id == buy.fleet_commitment_id,
-        where:
-          commitment.fleet_commitment_portfolio_id == ^portfolio_id and
-            buy.caller == "commitment" and buy.type == "buy" and buy.status == "completed" and
-            not exists(
-              from(sell in Intent,
-                where:
-                  sell.fleet_commitment_id == parent_as(:buy).fleet_commitment_id and
-                    sell.type == "sell" and sell.status == "completed" and
-                    sell.id > parent_as(:buy).id
-              )
-            ),
-        distinct: true,
-        select: buy.fleet_commitment_id
-    )
+    portfolio_id
+    |> List.wrap()
+    |> commitment_ids_of_portfolios()
+    |> undisposed_units()
+    |> Map.keys()
     |> MapSet.new()
+  end
+
+  # Bought minus sold units per Commitment, from completed trade Intents'
+  # receipts; only Commitments with units left aboard are returned. A sale
+  # without a unit receipt proves no disposal.
+  defp undisposed_units([]), do: %{}
+
+  defp undisposed_units(commitment_ids) do
+    Repo.all(
+      from intent in Intent,
+        where:
+          intent.fleet_commitment_id in ^commitment_ids and intent.caller == "commitment" and
+            intent.type in ["buy", "sell"] and intent.status == "completed",
+        select: {intent.fleet_commitment_id, intent.type, intent.last_action_result}
+    )
+    |> Enum.reduce(%{}, fn {id, type, result}, units ->
+      signed = if type == "buy", do: receipt_units(result), else: -receipt_units(result)
+      Map.update(units, id, signed, &(&1 + signed))
+    end)
+    |> Map.filter(fn {_id, units} -> units > 0 end)
+  end
+
+  defp receipt_units(%{"transaction" => %{"units" => units}}) when is_integer(units), do: units
+  defp receipt_units(%{"units" => units}) when is_integer(units), do: units
+  defp receipt_units(_result), do: 0
+
+  defp commitment_ids_of_portfolios(portfolio_ids) do
+    Repo.all(
+      from commitment in Commitment,
+        where: commitment.fleet_commitment_portfolio_id in ^portfolio_ids,
+        select: commitment.id
+    )
   end
 
   @doc """
@@ -923,12 +1212,14 @@ defmodule SpaceTraders.FleetAllocation do
         on: generation.id == portfolio.fleet_generation_id,
         where:
           claim.resource == ^ship_symbol and portfolio.operator_id == ^operator_id and
-            generation.agent_id == ^agent_id and is_nil(portfolio.superseded_at) and
-            is_nil(generation.fenced_at) and is_nil(generation.retired_at) and
-            commitment.unwind_state == :not_required,
+            generation.agent_id == ^agent_id and is_nil(generation.fenced_at) and
+            is_nil(generation.retired_at) and
+            ((is_nil(portfolio.superseded_at) and commitment.unwind_state == :not_required) or
+               commitment.unwind_state == :settling),
         select: %{
           commitment_id: commitment.id,
           candidate_id: commitment.candidate_id,
+          settling: commitment.unwind_state == :settling,
           portfolio_id: portfolio.id,
           portfolio_version: portfolio.version,
           decision_episode_id:
@@ -1202,6 +1493,10 @@ defmodule SpaceTraders.FleetAllocation do
           select: ship.id
       )
 
+    # A settling Commitment of a retired Portfolio still holds its Ship.
+    if not MapSet.disjoint?(settling_ships(generation_id), MapSet.new(claimed_symbols)),
+      do: Repo.rollback(:ship_reserved)
+
     if length(claimed_ships) != length(claimed_symbols) or
          Repo.exists?(
            from reservation in ShipReservation,
@@ -1324,21 +1619,23 @@ defmodule SpaceTraders.FleetAllocation do
       set: [superseded_at: now]
     )
 
-    Enum.each(episode_ids, fn episode_id ->
-      case Repo.get(StrategyDecisionEpisode, episode_id) do
-        %{classification: :still_evaluating} = episode ->
-          Repo.update!(
-            Ecto.Changeset.change(episode,
-              classification: :superseded,
-              actual_outcomes: json_safe(TradeProgress.for_episode(episode_id)),
-              updated_at: now
-            )
-          )
+    Enum.each(episode_ids, &supersede_episode(&1, now))
+  end
 
-        _episode ->
-          :ok
-      end
-    end)
+  defp supersede_episode(episode_id, now) do
+    case Repo.get(StrategyDecisionEpisode, episode_id) do
+      %{classification: :still_evaluating} = episode ->
+        Repo.update!(
+          Ecto.Changeset.change(episode,
+            classification: :superseded,
+            actual_outcomes: json_safe(TradeProgress.for_episode(episode_id)),
+            updated_at: now
+          )
+        )
+
+      _episode ->
+        :ok
+    end
   end
 
   # The one lock order, as publication does: Generation rows before any
