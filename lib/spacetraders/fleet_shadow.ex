@@ -9,54 +9,11 @@ defmodule SpaceTraders.FleetShadow do
 
   alias SpaceTraders.Agent.Agent, as: AgentRecord
   alias SpaceTraders.API.CapacityGovernor.Disposition
-  alias SpaceTraders.{Clock, CreditCalibration, Evidence, Intelligence}
+  alias SpaceTraders.{CreditCalibration, Evidence, Intelligence}
   alias SpaceTraders.FleetAllocation
   alias SpaceTraders.FleetAllocation.StrategyDecisionEpisode
   alias SpaceTraders.FleetPlanning
   alias SpaceTraders.FleetStrategy.Revision
-
-  @doc "Builds a shadow comparison from persisted governed Market evidence."
-  def compare_market(
-        %AgentRecord{} = agent,
-        %Revision{} = revision,
-        system_symbol,
-        availability,
-        %Disposition{} = capacity,
-        opts \\ []
-      )
-      when is_binary(system_symbol) and is_map(availability) and is_list(opts) do
-    agent
-    |> market_input(system_symbol, decision_time(opts))
-    |> compare(revision, availability, capacity, opts)
-  end
-
-  @doc """
-  Builds a shadow comparison for a not-yet-activated draft document.
-
-  The draft is evaluated with an explicit draft identity, so proposed
-  Commitments can never be mistaken for published work. Evaluation is
-  deterministic and in-memory: it publishes no Claims and dispatches no
-  gameplay.
-  """
-  def compare_draft_market(
-        %AgentRecord{} = agent,
-        document,
-        system_symbol,
-        availability,
-        %Disposition{} = capacity,
-        opts \\ []
-      )
-      when is_map(document) and is_binary(system_symbol) and is_map(availability) and
-             is_list(opts) do
-    agent
-    |> market_input(system_symbol, decision_time(opts))
-    |> compare(
-      %Revision{id: {:draft, agent.id}, document: document},
-      availability,
-      capacity,
-      opts
-    )
-  end
 
   @doc "Builds a shadow comparison from one governed evidence and capacity snapshot."
   def compare(snapshot, revision, availability, capacity, opts \\ [])
@@ -95,11 +52,6 @@ defmodule SpaceTraders.FleetShadow do
 
   def compare(_snapshot, _revision, _availability, _capacity, _opts),
     do: {:error, :invalid_shadow_input}
-
-  # Planning binds evidence at the application clock. A Capacity Disposition
-  # is advisory capacity meaning stamped by the governor's own clock; it never
-  # fixes decision time.
-  defp decision_time(opts), do: Keyword.get_lazy(opts, :as_of, &Clock.utc_now/0)
 
   @doc """
   The Fleet Planning Market input for one Agent System at one decision time:

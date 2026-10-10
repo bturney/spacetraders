@@ -5,6 +5,7 @@ defmodule SpaceTraders.FleetShadowTest do
   import SpaceTraders.EvidenceFixtures
 
   alias SpaceTraders.Test.CapacityDispositions
+  alias SpaceTraders.Clock
   alias SpaceTraders.Evidence.Observation
   alias SpaceTraders.Intelligence
   alias SpaceTraders.FleetAllocation.Commitment
@@ -48,9 +49,7 @@ defmodule SpaceTraders.FleetShadowTest do
     insert_market_observation(agent, "X1-A1", 30, DateTime.add(@as_of_usec, 1, :second))
 
     assert {:ok, comparison} =
-             FleetShadow.compare_market(agent, revision(), "X1", availability(), capacity(),
-               as_of: @as_of
-             )
+             compare_market(agent, revision(), availability(), capacity(), as_of: @as_of)
 
     assert [%{candidate_id: _candidate_id, claims: ["SHIP-1"]}] = comparison.proposed_choices
     assert Repo.aggregate(Commitment, :count) == 0
@@ -69,15 +68,13 @@ defmodule SpaceTraders.FleetShadowTest do
              )
 
     assert {:ok, %{proposed_choices: [_]}} =
-             FleetShadow.compare_market(agent, revision(), "X1", availability(now), capacity())
+             compare_market(agent, revision(), availability(now), capacity())
 
     assert {:ok, _} = Intelligence.invalidate(agent, :market, "X1", "X1-A1", [:trade_goods])
     later = DateTime.add(SpaceTraders.Clock.utc_now(), 1, :second)
 
     assert {:ok, %{proposed_choices: [], planning: [planning]}} =
-             FleetShadow.compare_market(agent, revision(), "X1", availability(later), capacity(),
-               as_of: later
-             )
+             compare_market(agent, revision(), availability(later), capacity(), as_of: later)
 
     assert %{reason: :invalidated_market_evidence} =
              Enum.find(planning.limitations, &(&1.subject == "market:X1:X1-A1"))
@@ -103,9 +100,7 @@ defmodule SpaceTraders.FleetShadowTest do
     end
 
     assert {:ok, %{proposed_choices: []}} =
-             FleetShadow.compare_market(agent, revision(), "X1", availability(), capacity(),
-               as_of: @as_of
-             )
+             compare_market(agent, revision(), availability(), capacity(), as_of: @as_of)
   end
 
   test "plans at the application clock, not the capacity disposition's governor timestamp" do
@@ -118,13 +113,7 @@ defmodule SpaceTraders.FleetShadowTest do
     governor_advice = CapacityDispositions.proceed(DateTime.add(now, -5, :second))
 
     assert {:ok, comparison} =
-             FleetShadow.compare_market(
-               agent,
-               revision(),
-               "X1",
-               availability(now),
-               governor_advice
-             )
+             compare_market(agent, revision(), availability(now), governor_advice, as_of: now)
 
     assert [%{candidate_id: _candidate_id, claims: ["SHIP-1"]}] = comparison.proposed_choices
   end
@@ -146,14 +135,28 @@ defmodule SpaceTraders.FleetShadowTest do
     }
 
     assert {:ok, comparison} =
-             FleetShadow.compare_draft_market(agent, draft, "X1", availability(), capacity(),
-               as_of: @as_of
-             )
+             compare_draft_market(agent, draft, availability(), capacity(), as_of: @as_of)
 
     assert [%{candidate_id: _candidate_id, claims: ["SHIP-1"]}] = comparison.proposed_choices
     assert [%{candidate_contributions: [candidate | _]}] = comparison.planning
     assert candidate.strategy_revision_id == {:draft, agent.id}
     assert Repo.aggregate(Commitment, :count) == 0
+  end
+
+  defp compare_market(agent, revision, availability, capacity, opts \\ []) do
+    agent
+    |> FleetShadow.market_input("X1", Keyword.get_lazy(opts, :as_of, &Clock.utc_now/0))
+    |> FleetShadow.compare(revision, availability, capacity, opts)
+  end
+
+  defp compare_draft_market(agent, document, availability, capacity, opts) do
+    compare_market(
+      agent,
+      %Revision{id: {:draft, agent.id}, document: document},
+      availability,
+      capacity,
+      opts
+    )
   end
 
   defp revision do
