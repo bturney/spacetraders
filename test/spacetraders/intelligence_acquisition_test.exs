@@ -602,7 +602,7 @@ defmodule SpaceTraders.IntelligenceAcquisitionTest do
   test "navigation fuel estimates apply flight-mode formulas, rounding, and minimums" do
     estimates = fn x1, y1, x2, y2, mode ->
       {:ok, value} =
-        Intents.navigation_fuel_estimate(%{x: x1, y: y1}, %{x: x2, y: y2}, mode)
+        SpaceTraders.Fleet.FuelReach.estimate(%{x: x1, y: y1}, %{x: x2, y: y2}, mode)
 
       value
     end
@@ -616,10 +616,10 @@ defmodule SpaceTraders.IntelligenceAcquisitionTest do
     assert estimates.(0, 0, 4, 5, "CRUISE") == 6
 
     assert {:error, :flight_mode_unavailable} =
-             Intents.navigation_fuel_estimate(%{x: 1, y: 2}, %{x: 3, y: 4}, "UNKNOWN")
+             SpaceTraders.Fleet.FuelReach.estimate(%{x: 1, y: 2}, %{x: 3, y: 4}, "UNKNOWN")
 
     assert {:error, :navigation_coordinates_unavailable} =
-             Intents.navigation_fuel_estimate(%{x: 1, y: 2}, %{x: nil, y: 4}, "CRUISE")
+             SpaceTraders.Fleet.FuelReach.estimate(%{x: 1, y: 2}, %{x: nil, y: 4}, "CRUISE")
   end
 
   test "a destination-only Fleet Commitment selects warp from authoritative Ship capability" do

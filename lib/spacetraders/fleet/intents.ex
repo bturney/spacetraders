@@ -19,7 +19,7 @@ defmodule SpaceTraders.Fleet.Intents do
   alias SpaceTraders.API.AgentTokenReference
   alias SpaceTraders.Fleet.Intents.{CapacityDeferral, RecordedAction, Recovery}
   alias SpaceTraders.API.Model.{Contract, ShipNav}
-  alias SpaceTraders.Fleet.{Intent, Ship}
+  alias SpaceTraders.Fleet.{FuelReach, Intent, Ship}
   alias SpaceTraders.Fleet
   alias SpaceTraders.FleetAllocation
   alias SpaceTraders.FleetAllocation.{Commitment, Portfolio}
@@ -4015,17 +4015,10 @@ defmodule SpaceTraders.Fleet.Intents do
     with {:ok, source} <- current_route_waypoint(live_ship),
          {:ok, system} <- Fleet.system_from_headquarters(intent.target_waypoint),
          {:ok, target} <- navigation_target_waypoint(agent, system, intent.target_waypoint),
-         {:ok, target_required} <-
+         {:ok, _required} <-
            estimated_navigation_fuel(source, target, live_ship.nav.flight_mode),
          {:ok, waypoint} <-
-           confirmed_reachable_fuel_stop(
-             agent,
-             intent,
-             live_ship,
-             source,
-             target,
-             target_required
-           ) do
+           confirmed_reachable_fuel_stop(agent, intent, live_ship, source, target) do
       visited = [waypoint | intent.parameters["visited_fuel_stops"] || []] |> Enum.uniq()
 
       parameters =
@@ -5238,7 +5231,7 @@ defmodule SpaceTraders.Fleet.Intents do
             {:navigate_fuel_stop, destination}
 
           required > live_ship.fuel.capacity and destination == intent.target_waypoint ->
-            case confirmed_reachable_fuel_stop(agent, intent, live_ship, source, target, required) do
+            case confirmed_reachable_fuel_stop(agent, intent, live_ship, source, target) do
               {:ok, waypoint} -> {:navigate_fuel_stop, waypoint}
               :none -> {:error, :no_confirmed_reachable_refuel_stop}
             end
@@ -5256,37 +5249,28 @@ defmodule SpaceTraders.Fleet.Intents do
     end
   end
 
-  defp confirmed_reachable_fuel_stop(agent, intent, live_ship, source, target, target_required) do
+  # The same stop choice Fleet Planning simulates (`FuelReach`), over the
+  # same confirmed fuel stops (`World.fuel_stops/3`).
+  defp confirmed_reachable_fuel_stop(agent, intent, live_ship, source, target) do
     {:ok, system} = Fleet.system_from_headquarters(live_ship.nav.waypoint_symbol)
-    visited = MapSet.new(intent.parameters["visited_fuel_stops"] || [])
 
-    candidates =
-      agent
-      |> World.waypoints(system, DateTime.utc_now(), 300)
-      |> Enum.flat_map(fn waypoint ->
-        with false <- waypoint.symbol == live_ship.nav.waypoint_symbol,
-             false <- MapSet.member?(visited, waypoint.symbol),
-             %{freshness: :fresh, value: x} when is_integer(x) <- waypoint.facts["x"],
-             %{freshness: :fresh, value: y} when is_integer(y) <- waypoint.facts["y"],
-             %{freshness: :fresh, value: goods} when is_list(goods) <-
-               waypoint.market.facts["trade_goods"],
-             true <- Enum.any?(goods, &(Map.get(&1, "symbol") == "FUEL")),
-             candidate = %{symbol: waypoint.symbol, x: x, y: y},
-             {:ok, fuel_required} <-
-               estimated_navigation_fuel(source, candidate, live_ship.nav.flight_mode),
-             true <- fuel_required <= live_ship.fuel.current,
-             {:ok, remaining_required} <-
-               estimated_navigation_fuel(candidate, target, live_ship.nav.flight_mode),
-             true <- remaining_required < target_required do
-          [{fuel_required, waypoint.symbol}]
-        else
-          _ -> []
-        end
-      end)
+    reach =
+      FuelReach.new(
+        live_ship.fuel.capacity,
+        live_ship.nav.flight_mode,
+        World.waypoint_coordinates(agent, system),
+        World.fuel_stops(agent, system, Clock.utc_now())
+      )
 
-    case Enum.min_by(candidates, & &1, fn -> nil end) do
-      {_required, waypoint} -> {:ok, waypoint}
-      nil -> :none
+    case FuelReach.fuel_stop(
+           reach,
+           source,
+           live_ship.fuel.current,
+           target,
+           intent.parameters["visited_fuel_stops"] || []
+         ) do
+      {:ok, waypoint, _required} -> {:ok, waypoint}
+      :none -> :none
     end
   end
 
@@ -5315,31 +5299,10 @@ defmodule SpaceTraders.Fleet.Intents do
     end
   end
 
-  defp current_route_waypoint(%{nav: %{waypoint_symbol: waypoint, route: route}}) do
-    case Enum.find([route.destination, route.origin], &(&1.symbol == waypoint)) do
-      %{x: x, y: y} = current when is_integer(x) and is_integer(y) -> {:ok, current}
-      _ -> {:error, :current_coordinates_unavailable}
-    end
-  end
+  defp current_route_waypoint(live_ship), do: FuelReach.position(live_ship)
 
-  defp estimated_navigation_fuel(%{x: x1, y: y1}, %{x: x2, y: y2}, flight_mode)
-       when is_integer(x1) and is_integer(y1) and is_integer(x2) and is_integer(y2) do
-    distance = :math.sqrt(:math.pow(x1 - x2, 2) + :math.pow(y1 - y2, 2)) |> round()
-
-    case flight_mode do
-      mode when mode in ["CRUISE", "STEALTH"] -> {:ok, max(1, distance)}
-      "DRIFT" -> {:ok, 1}
-      "BURN" -> {:ok, max(2, distance * 2)}
-      _ -> {:error, :flight_mode_unavailable}
-    end
-  end
-
-  defp estimated_navigation_fuel(_source, _target, _flight_mode),
-    do: {:error, :navigation_coordinates_unavailable}
-
-  @doc false
-  def navigation_fuel_estimate(source, target, flight_mode),
-    do: estimated_navigation_fuel(source, target, flight_mode)
+  defp estimated_navigation_fuel(source, target, flight_mode),
+    do: FuelReach.estimate(source, target, flight_mode)
 
   defp flight_mode_mismatch?(intent, live_ship) do
     case navigate_constraint(intent, "flight_mode") do

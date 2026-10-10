@@ -142,7 +142,9 @@ defmodule SpaceTraders.FleetPlanningTest do
   # source was still offered the trade; every buy ended infeasible and each
   # failed buy's refuel Market read re-planned it under a new candidate id.
   describe "Ship-feasible Market reach" do
-    # X1-A1 sells IRON at x=0, X1-A2 buys it at x=60; X1-A3 at x=50 is off-route.
+    # X1-A1 sells IRON at x=0, X1-A2 buys it at x=60. X1-A3 (x=50) and X1-A4
+    # (x=75) are possible fuel stops. `fuel_stops` is the shared
+    # `World.fuel_stops/3` answer Ship Execution also searches.
     defp reach_snapshot(ships, extra \\ %{}) do
       Map.merge(
         %{
@@ -157,8 +159,10 @@ defmodule SpaceTraders.FleetPlanningTest do
           waypoint_coordinates: %{
             "X1-A1" => %{x: 0, y: 0},
             "X1-A2" => %{x: 60, y: 0},
-            "X1-A3" => %{x: 50, y: 0}
+            "X1-A3" => %{x: 50, y: 0},
+            "X1-A4" => %{x: 75, y: 0}
           },
+          fuel_stops: [],
           ships: ships
         },
         extra
@@ -190,38 +194,49 @@ defmodule SpaceTraders.FleetPlanningTest do
       assert [] = trades(reach_snapshot([fueled("SHORT-1", "X1-A1", 50)]))
     end
 
-    test "enough fuel, a refuel at the Ship's Market, or a known fuel stop makes it reachable" do
-      fuel = good("FUEL", 2, 1, 100)
-
+    test "enough fuel, a refuel at the Ship's fuel stop, or a nearer fuel stop reaches it" do
       assert [_] = trades(reach_snapshot([fueled("FULL-1", "X1-A2", 200)]))
 
-      selling_fuel =
-        reach_snapshot([fueled("STRANDED-1", "X1-A2", 20)], %{
-          markets: [
-            market("X1-A1", ~U[2030-01-01 11:59:00Z], [good("IRON", 10, 9, 40)]),
-            market("X1-A2", ~U[2030-01-01 11:58:00Z], [good("IRON", 25, 20, 40), fuel])
-          ]
-        })
-
-      assert [_] = trades(selling_fuel)
-
-      via_stop =
-        reach_snapshot([fueled("STRANDED-1", "X1-A2", 20)], %{
-          markets: [
-            market("X1-A1", ~U[2030-01-01 11:59:00Z], [good("IRON", 10, 9, 40)]),
-            market("X1-A2", ~U[2030-01-01 11:58:00Z], [good("IRON", 25, 20, 40)]),
-            market("X1-A3", ~U[2030-01-01 11:58:00Z], [fuel])
-          ]
-        })
-
-      assert [_] = trades(via_stop)
+      stranded = [fueled("STRANDED-1", "X1-A2", 20)]
+      assert [_] = trades(reach_snapshot(stranded, %{fuel_stops: ["X1-A2"]}))
+      assert [_] = trades(reach_snapshot(stranded, %{fuel_stops: ["X1-A3"]}))
     end
 
-    test "a Ship that needs no fuel, or unknown coordinates, does not block the trade" do
+    # Ship Execution refuels in place only where it can buy FUEL, and detours
+    # only to a stop it can reach now that is nearer the target.
+    test "a refuel or fuel stop Ship Execution would not use does not make a trade reachable" do
+      stranded = [fueled("STRANDED-1", "X1-A2", 20)]
+
+      # FUEL on the Ship's own Listing that the shared stop predicate rejected
+      # (a stale Listing) is no refuel, whatever the Market input carries.
+      fuel_listing = %{
+        markets: [
+          market("X1-A1", ~U[2030-01-01 11:59:00Z], [good("IRON", 10, 9, 40)]),
+          market("X1-A2", ~U[2030-01-01 11:58:00Z], [
+            good("IRON", 25, 20, 40),
+            good("FUEL", 2, 1, 100)
+          ])
+        ]
+      }
+
+      assert [] = trades(reach_snapshot(stranded, fuel_listing))
+
+      # X1-A4 is reachable on 20 fuel but farther from X1-A1 than the Ship is.
+      assert [] = trades(reach_snapshot(stranded, %{fuel_stops: ["X1-A4"]}))
+    end
+
+    test "a Ship that needs no fuel, or unknown coordinates or flight mode, does not block" do
       assert [_] = trades(reach_snapshot([fueled("PROBE-1", "X1-A2", 0, 0)]))
+      assert [_] = trades(reach_snapshot([fueled("STRANDED-1", "X1-UNKNOWN", 20)]))
 
       assert [_] =
-               trades(reach_snapshot([fueled("STRANDED-1", "X1-UNKNOWN", 20)]))
+               trades(reach_snapshot([%{fueled("STRANDED-1", "X1-A2", 20) | flight_mode: nil}]))
+    end
+
+    test "fuel changes that keep the route reachable keep the candidate identity" do
+      assert [first] = trades(reach_snapshot([fueled("SHIP-1", "X1-A2", 200)]))
+      assert [second] = trades(reach_snapshot([fueled("SHIP-1", "X1-A2", 150)]))
+      assert first.id == second.id
     end
 
     test "re-observing the same Markets mints no trade for the same stranded Ship" do

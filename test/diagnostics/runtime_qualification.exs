@@ -256,32 +256,17 @@ defmodule SpaceTraders.RuntimeQualification do
     # the Ship lacked fuel for the next source, every buy ended infeasible, and
     # each failed buy's refuel Market read re-planned the same infeasible trade
     # under a new candidate id: about 30 requests a second.
-    test "after a funded trade, a fuel-infeasible next trade does not spin reads", %{
-      conn: conn
-    } do
-      game = start_game(credits: 50_300)
-      {_conn, _agent} = activate_fresh_generation(conn)
-      drive(game, &sold?/1)
-      assert sold?(Game.snapshot(game)), trace(Game.snapshot(game))
-      drive(game, fn _state -> false end, 8)
-      Process.sleep(1_000)
-
-      state = Game.snapshot(game)
-      before = length(state.requests)
-      Process.sleep(1_000)
-      during_wait = length(Game.snapshot(game).requests) - before
-
-      assert during_wait == 0,
-             "#{during_wait} game requests in one second of frozen-clock wait after the trade " <>
-               trace(Game.snapshot(game))
-
-      # The stranded Ship is offered no trade, so no buy is attempted again.
-      assert length(requests(Game.snapshot(game), "/v2/my/ships/BASELINE-1/purchase")) == 1
-
-      refute Repo.exists?(
-               from i in SpaceTraders.Fleet.Intent,
-                 where: i.type == "buy" and i.status == "infeasible"
-             )
+    for {label, opts} <- [
+          {"no FUEL Market", [credits: 50_300]},
+          {"FUEL sold only at the unreachable source", [credits: 50_300, fuel_price: 2]}
+        ] do
+      @tag game_opts: opts
+      test "after a funded trade, a fuel-infeasible next trade does not spin reads (#{label})", %{
+        conn: conn,
+        game_opts: game_opts
+      } do
+        stranded_without_spin(conn, game_opts)
+      end
     end
 
     test "a pricing-model breach records evidence, widens calibration, and pauses only spending",
@@ -1037,6 +1022,34 @@ defmodule SpaceTraders.RuntimeQualification do
       pretty: true,
       width: 120
     )
+  end
+
+  # Funds one trade, then holds the frozen clock: the stranded Ship must be
+  # offered nothing, so the game hears nothing.
+  defp stranded_without_spin(conn, game_opts) do
+    game = start_game(game_opts)
+    {_conn, _agent} = activate_fresh_generation(conn)
+    drive(game, &sold?/1)
+    assert sold?(Game.snapshot(game)), trace(Game.snapshot(game))
+    drive(game, fn _state -> false end, 8)
+    Process.sleep(1_000)
+
+    state = Game.snapshot(game)
+    before = length(state.requests)
+    Process.sleep(1_000)
+    during_wait = length(Game.snapshot(game).requests) - before
+
+    assert during_wait == 0,
+           "#{during_wait} game requests in one second of frozen-clock wait after the trade " <>
+             trace(Game.snapshot(game))
+
+    # The stranded Ship is offered no trade, so no buy is attempted again.
+    assert length(requests(Game.snapshot(game), "/v2/my/ships/BASELINE-1/purchase")) == 1
+
+    refute Repo.exists?(
+             from i in SpaceTraders.Fleet.Intent,
+               where: i.type == "buy" and i.status == "infeasible"
+           )
   end
 
   defp start_game(opts) do

@@ -934,12 +934,11 @@ defmodule SpaceTraders.FleetExecution do
 
   defp fuel(_ship), do: nil
 
-  defp position(%{nav: %{waypoint_symbol: waypoint} = nav}) when is_binary(waypoint) do
+  defp position(%{nav: %{waypoint_symbol: waypoint} = nav} = ship) when is_binary(waypoint) do
     point =
-      case nav do
-        %{route: %{destination: %{symbol: ^waypoint, x: x, y: y}}} -> %{x: x, y: y}
-        %{route: %{origin: %{symbol: ^waypoint, x: x, y: y}}} -> %{x: x, y: y}
-        _ -> %{}
+      case SpaceTraders.Fleet.FuelReach.position(ship) do
+        {:ok, %{x: x, y: y}} -> %{x: x, y: y}
+        {:error, _reason} -> %{}
       end
 
     Map.merge(point, %{waypoint: waypoint, flight_mode: Map.get(nav, :flight_mode)})
