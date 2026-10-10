@@ -154,6 +154,61 @@ defmodule SpaceTraders.IntelligenceAcquisitionTest do
     assert DateTime.compare(observed_at, source.observed_at) == :eq
   end
 
+  test "a fresh untraceable Listing never satisfies Market acquisition" do
+    {agent, ship, portfolio, commitment} = claimed_ship()
+    test_pid = self()
+    ship_path = "/v2/my/ships/#{ship.symbol}"
+    market_path = "/v2/systems/X1-UX81/waypoints/X1-UX81-A1/market"
+
+    listing = %{
+      "symbol" => "X1-UX81-A1",
+      "exports" => [],
+      "imports" => [],
+      "exchange" => [],
+      "tradeGoods" => [
+        %{
+          "symbol" => "IRON_ORE",
+          "type" => "EXPORT",
+          "tradeVolume" => 10,
+          "purchasePrice" => 20,
+          "sellPrice" => 18
+        }
+      ]
+    }
+
+    # Legacy record: fresh, but with no linked governed source.
+    assert {:ok, _} =
+             Intelligence.observe_market(agent, "X1-UX81", Model.Market.from_json(listing),
+               source: "get_market",
+               observing_ship_symbol: ship.symbol
+             )
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      send(test_pid, {conn.method, conn.request_path})
+
+      case conn.request_path do
+        ^ship_path ->
+          Req.Test.json(conn, %{"data" => ship_body(ship.symbol, %{"nav" => nav_body("DOCKED")})})
+
+        ^market_path ->
+          Req.Test.json(conn, %{"data" => listing})
+      end
+    end)
+
+    assert {:ok, %Intent{status: "completed"}} =
+             Intents.request_commitment_intelligence(agent, commitment, portfolio, ship.symbol, %{
+               subject_type: :market,
+               waypoint: "X1-UX81-A1",
+               required_facts: ["trade_goods"],
+               freshness_seconds: 300
+             })
+
+    assert_receive {"GET", ^market_path}
+
+    assert [%{state: :current}] =
+             Intelligence.market_interpretation(agent, "X1-UX81", DateTime.utc_now()).markets
+  end
+
   test "Market acquisition navigates within its claimed root Intent and waits for arrival" do
     {agent, ship, portfolio, commitment} = claimed_ship()
     arrival = start_supervised!({Elixir.Agent, fn -> false end})

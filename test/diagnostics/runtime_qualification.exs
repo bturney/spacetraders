@@ -231,7 +231,9 @@ defmodule SpaceTraders.RuntimeQualification do
     # same reads again; overdue unacquirable Market work re-announced on every
     # demand change. Together they spun reads for as long as the wait lasted.
     test "a Neutral Wait holds without spinning Agent and Fleet reads", %{conn: conn} do
-      game = start_game(credits: 50_300)
+      # 5 credits of headroom fund no unit, so planning proposes no trade and
+      # the Fleet waits. (300 now sizes a 24-unit trade from the headroom.)
+      game = start_game(credits: 50_005)
       {_conn, _agent} = activate_fresh_generation(conn)
       drive(game, fn _state -> false end, 8)
       Process.sleep(1_000)
@@ -243,6 +245,11 @@ defmodule SpaceTraders.RuntimeQualification do
 
       assert during_wait == 0,
              "#{during_wait} game requests in one second of frozen-clock Neutral Wait"
+
+      assert Repo.exists?(
+               from e in SpaceTraders.FleetAllocation.StrategyDecisionEpisode,
+                 where: e.selection_kind == :neutral_wait
+             )
     end
 
     test "a pricing-model breach records evidence, widens calibration, and pauses only spending",

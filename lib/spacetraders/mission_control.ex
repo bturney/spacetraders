@@ -529,7 +529,10 @@ defmodule SpaceTraders.MissionControl do
 
   def notable_activity?(_), do: false
 
-  defp decision_summary(%{classification: :realized, actual_outcomes: %{"trade_margin" => margin}}) do
+  defp decision_summary(%{
+         classification: :realized,
+         actual_outcomes: %{"trade_margin" => margin}
+       }) do
     if is_integer(margin),
       do: "Fleet decision realized #{margin} credits trade margin; net earnings unknown",
       else: "Fleet decision realized; trade margin and net earnings unknown"

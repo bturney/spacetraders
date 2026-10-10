@@ -74,6 +74,9 @@ defmodule SpaceTraders.FleetAllocation do
   # How long a completed buy keeps its Commitment while its next leg is created.
   @leg_handoff_seconds 120
 
+  @doc "The calibration version recorded on Market pilot-domain decisions."
+  def market_calibration_version, do: "market-v1"
+
   @doc """
   Records the Neutral Wait for one authoritative zero-admissible allocation
   result at the single mint site fixed by ADR 0012.
@@ -315,9 +318,7 @@ defmodule SpaceTraders.FleetAllocation do
        ) do
     lock_generation_agent!(generation_id)
 
-    # Generation before Portfolio, as publication does, so the share-locks a
-    # Ship's authority check takes in that order cannot deadlock with a replan.
-    Repo.one(from g in Generation, where: g.id == ^generation_id, lock: "FOR NO KEY UPDATE")
+    lock_generations(from(g in Generation, where: g.id == ^generation_id), :update)
 
     portfolio =
       Repo.one(
@@ -584,14 +585,24 @@ defmodule SpaceTraders.FleetAllocation do
   """
   defdelegate trade_progress(episode_id), to: TradeProgress, as: :for_episode
 
-  @doc false
-  def record_trade_outcome(%Portfolio{} = portfolio),
-    do:
-      record_portfolio_outcome(
-        portfolio,
-        :realized,
-        TradeProgress.for_episode(portfolio.strategy_decision_episode_id)
-      )
+  @doc """
+  Classifies a Portfolio's Decision Episode from its trade receipts after a
+  sale completes; it keeps evaluating while another Commitment still trades.
+  """
+  def record_trade_outcome(%Portfolio{} = portfolio) do
+    record_market_outcome(
+      portfolio.strategy_decision_episode_id,
+      portfolio.operator_id,
+      realized_outcomes(portfolio.strategy_decision_episode_id)
+    )
+  end
+
+  defp record_market_outcome(episode_id, operator_id, outcomes) do
+    case TradeProgress.classification(outcomes) do
+      :still_evaluating -> {:ok, :still_evaluating}
+      classification -> update_decision_outcome(episode_id, operator_id, classification, outcomes)
+    end
+  end
 
   @doc "Records confirmed outcomes and terminal classification for one Decision Episode."
   def record_decision_outcome(
@@ -653,13 +664,7 @@ defmodule SpaceTraders.FleetAllocation do
     |> distinct(true)
     |> Repo.all()
     |> Enum.each(fn episode ->
-      _ =
-        update_decision_outcome(
-          episode.id,
-          episode.operator_id,
-          :realized,
-          realized_outcomes(episode.id)
-        )
+      _ = record_market_outcome(episode.id, episode.operator_id, realized_outcomes(episode.id))
     end)
 
     StrategyDecisionEpisode
@@ -773,7 +778,8 @@ defmodule SpaceTraders.FleetAllocation do
         evidence_references: json_safe(references),
         alternatives: json_safe(unpublished ++ Map.get(selection, :rejected, [])),
         expectations: json_safe(expectations),
-        calibration_version: Map.get(decision, :calibration_version, "market-v1"),
+        calibration_version:
+          Map.get(decision, :calibration_version, market_calibration_version()),
         selection_kind: :publication_rejected,
         rejection_reason: reason_label(reason),
         classification: :superseded
@@ -894,14 +900,9 @@ defmodule SpaceTraders.FleetAllocation do
 
     query =
       if Keyword.get(opts, :lock, false) do
-        # Generation first, then the rest in one statement: the writers lock the
-        # Generation before the Portfolio and its Commitments.
-        Repo.all(
-          from g in Generation,
-            where: g.agent_id == ^agent_id and g.operator_id == ^operator_id,
-            order_by: g.id,
-            lock: "FOR SHARE",
-            select: g.id
+        lock_generations(
+          from(g in Generation, where: g.agent_id == ^agent_id and g.operator_id == ^operator_id),
+          :share
         )
 
         lock(query, "FOR SHARE")
@@ -1299,6 +1300,15 @@ defmodule SpaceTraders.FleetAllocation do
     end)
   end
 
+  # The one lock order, as publication does: Generation rows before any
+  # Portfolio or Commitment. A replan (:update) and a Ship's locked authority
+  # check (:share) take it here, so they cannot deadlock against each other.
+  defp lock_generations(query, :update),
+    do: Repo.all(from(g in query, order_by: g.id, lock: "FOR NO KEY UPDATE", select: g.id))
+
+  defp lock_generations(query, :share),
+    do: Repo.all(from(g in query, order_by: g.id, lock: "FOR SHARE", select: g.id))
+
   defp lock_generation_agent!(generation_id) do
     generation = Repo.get!(Generation, generation_id)
     SpaceTraders.CreditSpending.lock_agent(generation.agent_id)
@@ -1615,8 +1625,8 @@ defmodule SpaceTraders.FleetAllocation do
     |> Enum.map(&claim_id/1)
   end
 
-  # Cheapest capable Ship first: operating cost (fuel use and travel, as the
-  # claim reports it), then capability the role does not need, so a probe
+  # Cheapest capable Ship first: fuel capacity (a proxy for fuel use; a probe
+  # carries none), then capability the role does not need, so a probe
   # takes scouting and the hold-bearing Ship stays free for a trade. The
   # symbol only breaks exact ties, so input order and alphabet never decide.
   defp role_cost(%{capabilities: capabilities}, contribution) do
@@ -1626,7 +1636,7 @@ defmodule SpaceTraders.FleetAllocation do
         _ -> nil
       end)
 
-    {Map.get(capabilities, :operating_cost, 0),
+    {Map.get(capabilities, :fuel_capacity, 0),
      max(Map.get(capabilities, :cargo_transport, 0) - needed, 0)}
   end
 

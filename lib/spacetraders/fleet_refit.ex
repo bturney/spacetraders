@@ -30,9 +30,7 @@ defmodule SpaceTraders.FleetRefit do
   alias SpaceTraders.FleetPlanning
   alias SpaceTraders.FleetStrategy.{Revision, StandingAuthority}
   alias SpaceTraders.MutationAttempts.Attempt
-  alias SpaceTraders.{Repo, ShipReservation, World}
-
-  @freshness_seconds 300
+  alias SpaceTraders.{Intelligence, Repo, ShipReservation}
 
   @doc "Selects and dispatches a refit Candidate, or resumes one already claimed."
   def reconcile(%Scope{} = scope, %AgentRecord{} = agent, %Revision{} = revision, system)
@@ -422,32 +420,28 @@ defmodule SpaceTraders.FleetRefit do
     end
   end
 
+  # Module supply comes from the shared Market interpretation: only a
+  # `:current` Listing (linked governed evidence of this Generation, fresh,
+  # well-formed, not after the decision time) can support a purchase.
   defp market_supply(agent, system, as_of) do
-    World.waypoints(agent, system, as_of, @freshness_seconds)
-    |> Enum.flat_map(fn waypoint ->
-      with %{market: market} <- waypoint,
-           facts when is_map(facts) <- market.facts,
-           %{
-             state: "known",
-             freshness: :fresh,
-             value: goods,
-             observed_at: observed_at,
-             observation_id: observation_id
-           } <- facts["trade_goods"],
-           true <- is_list(goods) do
+    agent
+    |> Intelligence.market_interpretation(system, as_of)
+    |> Map.fetch!(:markets)
+    |> Enum.flat_map(fn
+      %{state: :current, subject: "market:" <> _ = subject} = listing ->
         [
           %{
             system_symbol: system,
-            waypoint: waypoint.symbol,
-            observed_at: observed_at,
-            evidence_id: "intelligence-observation:#{observation_id}",
-            source: "get_market",
-            trade_goods: Enum.map(goods, &market_good/1)
+            waypoint: subject |> String.split(":") |> List.last(),
+            observed_at: listing.observed_at,
+            evidence_id: listing.evidence_id,
+            source: listing.source,
+            trade_goods: Enum.map(listing.trade_goods, &market_good/1)
           }
         ]
-      else
-        _ -> []
-      end
+
+      _ ->
+        []
     end)
   end
 

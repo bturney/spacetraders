@@ -13,7 +13,7 @@ defmodule SpaceTraders.FleetShadow do
   alias SpaceTraders.FleetAllocation
   alias SpaceTraders.FleetAllocation.StrategyDecisionEpisode
   alias SpaceTraders.FleetPlanning
-  alias SpaceTraders.FleetStrategy.Revision
+  alias SpaceTraders.FleetStrategy.{Revision, StandingAuthority}
 
   @doc "Builds a shadow comparison from one governed evidence and capacity snapshot."
   def compare(snapshot, revision, availability, capacity, opts \\ [])
@@ -73,7 +73,31 @@ defmodule SpaceTraders.FleetShadow do
   """
   def plan_market(market_input, %Revision{} = revision, availability)
       when is_map(market_input) and is_map(availability) do
-    plan(revision, put_claimable_ships(market_input, availability))
+    snapshot =
+      market_input
+      |> put_claimable_ships(availability)
+      |> put_credit_headroom(revision, availability)
+
+    plan(revision, snapshot)
+  end
+
+  # Purchases are sized to the credits spending admission would allow: the
+  # observed balance above the Strategy credit floor (the calibrated margin is
+  # applied by sizing). Without both, sizing stays at Cargo and Market depth
+  # and spending admission still bounds the actual purchase.
+  defp put_credit_headroom(%{credit_headroom: _} = snapshot, _revision, _availability),
+    do: snapshot
+
+  defp put_credit_headroom(snapshot, revision, availability) do
+    credits = get_in(availability, [:reservations, :credits])
+
+    case StandingAuthority.credit_floor(revision) do
+      {:ok, floor} when is_integer(credits) ->
+        Map.put(snapshot, :credit_headroom, max(credits - floor, 0))
+
+      _ ->
+        snapshot
+    end
   end
 
   # Trade quantity is bounded by the holds of Ships the Fleet can actually
