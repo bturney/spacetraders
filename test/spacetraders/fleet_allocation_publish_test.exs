@@ -639,6 +639,32 @@ defmodule SpaceTraders.FleetAllocationPublishTest do
                :partially_realized
     end
 
+    test "a sale completing after its Ship arrives classifies the Episode" do
+      %{agent: agent, scope: scope, generation: generation, revision: revision} =
+        allocation_fixture()
+
+      portfolio = publish!(scope, generation, revision)
+      commitment = hd(portfolio.commitments)
+      trade_intent!(portfolio, commitment, "buy", 50, 10)
+
+      sell =
+        portfolio
+        |> trade_intent!(commitment, "sell", 150, 10)
+        |> Ecto.Changeset.change(parameters: %{"market_trade" => %{"trade_symbol" => "IRON_ORE"}})
+        |> Repo.update!()
+
+      assert :ok =
+               SpaceTraders.FleetExecution.continue_after_intent(
+                 agent,
+                 commitment,
+                 portfolio,
+                 sell
+               )
+
+      assert %{classification: :realized, actual_outcomes: %{"trade_margin" => 100}} =
+               Repo.get!(StrategyDecisionEpisode, portfolio.strategy_decision_episode_id)
+    end
+
     test "boot reconciliation applies the same classification" do
       %{agent: agent, scope: scope, generation: generation, revision: revision} =
         allocation_fixture()

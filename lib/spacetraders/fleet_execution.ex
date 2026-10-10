@@ -886,6 +886,11 @@ defmodule SpaceTraders.FleetExecution do
           end
         end
 
+      # The sell leg finished on a later Ship arrival, not inline with the buy.
+      %{type: "sell", status: "completed", parameters: %{"market_trade" => _}} ->
+        _ = FleetAllocation.record_trade_outcome(portfolio)
+        :ok
+
       _ ->
         :ok
     end
