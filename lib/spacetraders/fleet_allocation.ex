@@ -315,9 +315,7 @@ defmodule SpaceTraders.FleetAllocation do
        ) do
     lock_generation_agent!(generation_id)
 
-    # Generation before Portfolio, as publication does, so the share-locks a
-    # Ship's authority check takes in that order cannot deadlock with a replan.
-    Repo.one(from g in Generation, where: g.id == ^generation_id, lock: "FOR NO KEY UPDATE")
+    lock_generations(from(g in Generation, where: g.id == ^generation_id), :update)
 
     portfolio =
       Repo.one(
@@ -898,14 +896,9 @@ defmodule SpaceTraders.FleetAllocation do
 
     query =
       if Keyword.get(opts, :lock, false) do
-        # Generation first, then the rest in one statement: the writers lock the
-        # Generation before the Portfolio and its Commitments.
-        Repo.all(
-          from g in Generation,
-            where: g.agent_id == ^agent_id and g.operator_id == ^operator_id,
-            order_by: g.id,
-            lock: "FOR SHARE",
-            select: g.id
+        lock_generations(
+          from(g in Generation, where: g.agent_id == ^agent_id and g.operator_id == ^operator_id),
+          :share
         )
 
         lock(query, "FOR SHARE")
@@ -1302,6 +1295,15 @@ defmodule SpaceTraders.FleetAllocation do
       end
     end)
   end
+
+  # The one lock order, as publication does: Generation rows before any
+  # Portfolio or Commitment. A replan (:update) and a Ship's locked authority
+  # check (:share) take it here, so they cannot deadlock against each other.
+  defp lock_generations(query, :update),
+    do: Repo.all(from(g in query, order_by: g.id, lock: "FOR NO KEY UPDATE", select: g.id))
+
+  defp lock_generations(query, :share),
+    do: Repo.all(from(g in query, order_by: g.id, lock: "FOR SHARE", select: g.id))
 
   defp lock_generation_agent!(generation_id) do
     generation = Repo.get!(Generation, generation_id)
