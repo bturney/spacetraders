@@ -1,5 +1,6 @@
 defmodule SpaceTraders.MissionControlTest do
-  use SpaceTraders.DataCase, async: true
+  # Current-Fleet adoption serializes deployment identity, not per-tenant state.
+  use SpaceTraders.DataCase, async: false
 
   import SpaceTraders.AgentFixtures
   import SpaceTraders.EvidenceFixtures

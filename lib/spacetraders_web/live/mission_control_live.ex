@@ -35,7 +35,10 @@ defmodule SpaceTradersWeb.MissionControlLive do
         </header>
 
         <section
-          :if={!@projection.strategy.active_revision || @projection.fleets == []}
+          :if={
+            @projection.current_fleet.state != :unresolved &&
+              (!@projection.strategy.active_revision || @projection.current_fleet.state == :empty)
+          }
           id="mission-onboarding"
           class="rounded-2xl border border-primary/30 bg-primary/5 p-5 sm:p-7"
         >
@@ -47,8 +50,30 @@ defmodule SpaceTradersWeb.MissionControlLive do
               navigate={~p"/strategy"}
               class="btn btn-primary"
             >Review Fleet Strategy</.link>
-            <.link :if={@projection.fleets == []} navigate={~p"/agents/new"} class="btn btn-outline">Mint an Agent</.link>
+            <.link
+              :if={@projection.current_fleet.state == :empty}
+              navigate={~p"/agents/new"}
+              class="btn btn-outline"
+            >Mint an Agent</.link>
           </div>
+        </section>
+
+        <section
+          :if={@projection.current_fleet.state in [:empty, :transition, :unresolved]}
+          id="current-fleet-state"
+          class="rounded-2xl border border-warning/30 bg-warning/5 p-5"
+        >
+          <h2 class="text-xl font-bold">Current Fleet</h2>
+          <p :if={@projection.current_fleet.state == :empty}>
+            No current Agent. Mint or import an Agent to establish the Fleet.
+          </p>
+          <p :if={@projection.current_fleet.state == :transition}>
+            Fleet transition is fenced. Resolve replacement authority in Settings; predecessor gameplay cannot resume while replacement is unresolved.
+          </p>
+          <p :if={@projection.current_fleet.state == :unresolved}>
+            {@projection.current_fleet.summary}
+          </p>
+          <.link navigate={~p"/operators/settings"} class="link link-primary">Review Settings</.link>
         </section>
 
         <section id="operating-health" class="rounded-2xl border border-base-300 bg-base-100 p-5">
@@ -397,9 +422,11 @@ defmodule SpaceTradersWeb.MissionControlLive do
   end
 
   defp current_generation(projection),
-    do: Enum.find(projection.generations, &is_nil(&1.retired_at))
+    do: projection.current_fleet[:generation]
 
   defp health_label(%{strategy: %{emergency_stopped_at: %DateTime{}}}), do: "STOPPED"
+  defp health_label(%{current_fleet: %{state: :unresolved}}), do: "Current Fleet needs resolution"
+  defp health_label(%{current_fleet: %{state: :transition}}), do: "Server Reset transition"
   defp health_label(%{strategy: %{active_revision: nil}}), do: "Awaiting Fleet Strategy"
   defp health_label(%{conditions: [_ | _]}), do: "Needs Operator attention"
 

@@ -14,6 +14,55 @@ defmodule SpaceTradersWeb.MissionControlBriefingTest do
 
   setup :register_and_log_in_operator
 
+  test "the briefing adopts one current identity and never projects a retained historical Agent",
+       %{conn: conn, scope: scope} do
+    historical =
+      SpaceTraders.AgentFixtures.agent_fixture(scope.operator, %{
+        symbol: "HISTORICAL",
+        agent_token: nil
+      })
+
+    Repo.insert!(%FleetGeneration.Generation{
+      operator_id: scope.operator.id,
+      agent_id: historical.id,
+      number: 1,
+      symbol: "HISTORICAL",
+      faction: "COSMIC",
+      retired_at: DateTime.add(DateTime.utc_now(), -3600)
+    })
+
+    current =
+      SpaceTraders.AgentFixtures.agent_fixture(scope.operator, %{
+        symbol: "ORBITALIST",
+        agent_token: nil
+      })
+
+    {:ok, view, _} = live(conn, ~p"/mission-control")
+    assert has_element?(view, "#strategy-context", "Generation 2")
+    assert has_element?(view, "#strategy-context", "ORBITALIST")
+    assert has_element?(view, "#fleet-health", current.symbol)
+    refute has_element?(view, "#fleet-health", historical.symbol)
+  end
+
+  test "ambiguous legacy identity is actionable and does not query either Fleet", %{
+    conn: conn,
+    scope: scope
+  } do
+    SpaceTraders.AgentFixtures.agent_fixture(scope.operator, %{symbol: "FIRST"})
+    SpaceTraders.AgentFixtures.agent_fixture(scope.operator, %{symbol: "SECOND"})
+
+    Req.Test.stub(SpaceTraders.API, fn _ ->
+      flunk("ambiguous identity must not dispatch game reads")
+    end)
+
+    {:ok, view, _} = live(conn, ~p"/mission-control")
+    assert has_element?(view, "#current-fleet-state", "multiple plausible current Agents")
+    assert has_element?(view, "#current-fleet-state", "Identify the current Fleet")
+    refute has_element?(view, "#fleet-health", "FIRST")
+    refute has_element?(view, "#fleet-health", "SECOND")
+    refute has_element?(view, "a[href='/agents/new']", "Mint an Agent")
+  end
+
   test "an authenticated Operator answers the Fleet's four questions from one briefing", %{
     conn: conn,
     scope: scope

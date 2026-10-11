@@ -5,7 +5,8 @@ defmodule SpaceTraders.RealizedMarketEconomicsTest do
   hence to that Intent's Fleet Commitment and original Decision Episode. Read
   through the receipt-backed Trade Progress projection.
   """
-  use SpaceTraders.DataCase, async: true
+  # Mission Control's current identity is a deployment-wide singleton.
+  use SpaceTraders.DataCase, async: false
 
   import SpaceTraders.AgentFixtures
   import SpaceTraders.RealizedEconomicsFixtures
