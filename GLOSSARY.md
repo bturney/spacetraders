@@ -238,7 +238,7 @@ A Shortfall caused by one action's realized charge exceeding its own worst-case 
 _Avoid_: overspend, price miss
 
 **Degraded Operation**:
-Continued autonomous operation while a failing capability or API scope is quarantined. Unaffected planning, timers, telemetry, and admissible gameplay continue while recovery is retried at a sustainable rate.
+Continued autonomous operation while a failing capability or API scope is quarantined, or while Fleet Allocation is structurally stalled (a recorded structural stall Strategy Decision Episode). Unaffected planning, timers, telemetry, and admissible gameplay continue while recovery is retried at a sustainable rate.
 
 **Emergency Stop**:
 Durable Operator-owned state that suppresses every new gameplay mutation, including replacement minting, without cancelling actions already accepted by the game. Safety-critical reconciliation and observation continue; explicit resume starts from authoritative state and fresh planning.

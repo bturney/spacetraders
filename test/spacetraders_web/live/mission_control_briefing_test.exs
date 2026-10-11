@@ -260,8 +260,8 @@ defmodule SpaceTradersWeb.MissionControlBriefingTest do
     {:ok, view, _html} = live(conn, ~p"/mission-control")
     section = "#allocation-disposition-#{agent.symbol}"
 
-    assert has_element?(view, section, "Spending paused at the credit floor")
-    assert has_element?(view, section, "SPENDING PAUSE")
+    assert has_element?(view, section, "Shortfall at the credit floor")
+    assert has_element?(view, section, "SHORTFALL")
     assert has_element?(view, section, "not a Neutral Wait")
     assert has_element?(view, section, "50000 credit floor")
     assert has_element?(view, section, "Releases when")

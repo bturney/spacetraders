@@ -259,7 +259,7 @@ defmodule SpaceTradersWeb.MissionControlLive do
             <p class="opacity-70">No Operator action is needed; this clears by reconciliation.</p>
           </div>
           <div :if={disposition.spending_pause} class="mt-3 rounded-xl bg-info/10 p-4 text-sm">
-            <p class="font-semibold">SPENDING PAUSE · not a Neutral Wait</p>
+            <p class="font-semibold">SHORTFALL · spending paused, not a Neutral Wait</p>
             <p>
               Balance {balance_label(disposition.spending_pause.balance)} · credit floor {disposition.spending_pause.floor}
             </p>
@@ -547,12 +547,12 @@ defmodule SpaceTradersWeb.MissionControlLive do
     end
   end
 
-  defp disposition_label(%{state: :stalled}), do: "Revision-authority stall"
-  defp disposition_label(%{state: :spending_paused}), do: "Spending paused at the credit floor"
+  defp disposition_label(%{state: :stalled}), do: "Structural stall"
+  defp disposition_label(%{state: :spending_paused}), do: "Shortfall at the credit floor"
   defp disposition_label(%{state: :capacity_deferred}), do: "Capacity deferred"
   defp disposition_label(%{state: :neutral_wait}), do: "Neutral Wait"
-  defp disposition_label(%{state: :busy_trade}), do: "Authorized work in progress"
-  defp disposition_label(%{state: :retained_coverage}), do: "Market coverage retained"
+  defp disposition_label(%{state: :busy_trade}), do: "Trading under the active Revision"
+  defp disposition_label(%{state: :retained_coverage}), do: "Market coverage under the active Revision"
   defp disposition_label(%{state: :unallocated}), do: "No allocated work"
 
   defp stall_reason_label(:stale_revision_portfolio),
