@@ -10,6 +10,22 @@
 - Diagnosing Strategy outcomes or following Grafana drill-downs: read
   `docs/agents/observability.md`.
 
+## Supplemental design evidence for Fleet Strategy work
+
+When the scoped work concerns Fleet Strategy economics, multi-Ship coordination,
+adaptation, or behavioral qualification, consult
+`docs/agents/strategic-reasoning-scenarios.md` for **non-normative** example
+scenarios. When it concerns Mission Control explanations, Operator experience,
+outcome observability, Grafana, or calibration, consult
+`docs/agents/strategic-observability-ux-gaps.md` for **non-normative** evidence
+and gaps.
+
+These reports are not new implementation requirements. Issue #502 governs the
+autonomous-runtime contracts and current bounded delivery frontier; issue #311
+governs the accepted Operator information architecture. Use report findings only
+where the assigned scope overlaps and current code/evidence confirms the gap.
+Do not create work or enlarge a gate merely because a report proposes an example.
+
 Merge requires an explicit Operator request.
 
 ## Working in this repo
