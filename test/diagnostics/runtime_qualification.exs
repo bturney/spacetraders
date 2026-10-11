@@ -1187,7 +1187,7 @@ defmodule SpaceTraders.RuntimeQualification do
 
     case kind do
       :stale ->
-        aged = DateTime.add(now, -400)
+        aged = DateTime.add(now, -(SpaceTraders.Intelligence.market_freshness_seconds() + 100))
         Repo.update_all(evidence, set: [observed_at: aged])
 
       :future ->
