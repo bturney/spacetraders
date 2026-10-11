@@ -530,7 +530,12 @@ defmodule SpaceTraders.AgentTest do
     end
 
     test "replaces a stale local agent after a server reset", %{operator: operator, scope: scope} do
-      stale_agent = agent_fixture(operator, %{symbol: "RESETME", agent_token: "STALE_TOKEN"})
+      stale_agent =
+        agent_fixture(operator, %{
+          symbol: "RESETME",
+          agent_token: "STALE_TOKEN",
+          stale_at: DateTime.utc_now(:second)
+        })
 
       ship =
         Repo.insert!(%Ship{

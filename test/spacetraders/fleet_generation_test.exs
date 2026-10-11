@@ -447,17 +447,16 @@ defmodule SpaceTraders.FleetGenerationTest do
   test "does not expose the AgentToken when the minted Agent cannot be stored" do
     operator = operator_fixture()
     {:ok, operator} = Agent.link_account_token(operator, "ACCOUNT_TOKEN_SECRET")
-    _conflicting_agent = operator_fixture() |> agent_fixture(%{symbol: "CONFLICT"})
 
     Req.Test.stub(SpaceTraders.API, fn conn ->
       Req.Test.json(conn, %{
         "data" => %{
           "token" => "AGENT_TOKEN_SECRET",
           "agent" => %{
-            "symbol" => "CONFLICT",
+            "symbol" => "NEWSYM",
             "credits" => 175_000,
             "headquarters" => "X1-UX81-A2",
-            "startingFaction" => "COSMIC"
+            "startingFaction" => ""
           },
           "contract" => %{"id" => "c1", "type" => "PROCUREMENT"},
           "faction" => %{"symbol" => "COSMIC", "name" => "Cosmic", "isRecruiting" => true},

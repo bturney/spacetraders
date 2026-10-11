@@ -365,18 +365,45 @@ defmodule SpaceTraders.MissionControl do
   @doc "Returns the concise Fleet Strategy and Fleet Generation read projection."
   def overview(%Scope{} = scope) do
     strategy = strategy(scope)
+    {identity, snapshots} = current_snapshots(scope)
     generations = FleetGeneration.list_generations(scope)
-    snapshots = dashboard(scope)
+    current_generations = List.wrap(identity[:generation])
 
     %{
       strategy: strategy,
+      current_fleet: identity,
       generations: generations,
-      fleets: Enum.map(snapshots, &fleet_overview(&1, generations)),
-      objectives: objective_overviews(strategy.active_revision, generations, snapshots),
-      market_execution: market_execution(scope),
+      fleets: Enum.map(snapshots, &fleet_overview(&1, current_generations)),
+      objectives: objective_overviews(strategy.active_revision, current_generations, snapshots),
+      market_execution: current_market_execution(scope, identity),
       conditions: OperatorConditions.unresolved(scope),
       notable_activity: activity(scope) |> Enum.filter(&notable_activity?/1) |> Enum.take(5)
     }
+  end
+
+  defp current_snapshots(scope) do
+    case FleetGeneration.current_fleet(scope) do
+      {:ok, identity} ->
+        snapshots = dashboard(scope, List.wrap(identity.agent))
+        # Agent reads can discover a reset and complete replacement. Re-resolve
+        # identity before presenting anything; never pair those resources with
+        # the successor's Generation.
+        case FleetGeneration.current_fleet(scope) do
+          {:ok, latest} ->
+            same_generation? =
+              latest.generation && identity.generation &&
+                latest.generation.id == identity.generation.id
+
+            safe_snapshots? = latest.state == identity.state || Enum.all?(snapshots, & &1.stale?)
+            {latest, if(same_generation? && safe_snapshots?, do: snapshots, else: [])}
+
+          {:error, error} ->
+            {%{state: :unresolved, summary: error.summary}, []}
+        end
+
+      {:error, error} ->
+        {%{state: :unresolved, summary: error.summary}, []}
+    end
   end
 
   @doc "Chronological consequential decisions and conditions for the signed-in Operator."
@@ -785,7 +812,14 @@ defmodule SpaceTraders.MissionControl do
   or Attention worth surfacing to the Operator.
   """
   def market_execution(%Scope{} = scope) do
-    case FleetAllocation.current_portfolio(scope) do
+    case FleetGeneration.current_fleet(scope) do
+      {:ok, identity} -> current_market_execution(scope, identity)
+      {:error, _error} -> current_market_execution(scope, %{state: :unresolved})
+    end
+  end
+
+  defp current_market_execution(scope, %{state: :current, agent: agent}) do
+    case FleetAllocation.current_portfolio(scope, agent) do
       nil ->
         %{
           family: nil,
@@ -794,7 +828,7 @@ defmodule SpaceTraders.MissionControl do
           contribution: %{commitment_count: 0, expected_value: 0},
           limitation: nil,
           attention: [],
-          dispositions: dispositions(scope, false)
+          dispositions: dispositions(scope, agent, false)
         }
 
       portfolio ->
@@ -811,20 +845,31 @@ defmodule SpaceTraders.MissionControl do
           contribution: endeavors(scope, portfolio).contribution,
           limitation: limitation(portfolio),
           attention: [],
-          dispositions: dispositions(scope, true)
+          dispositions: dispositions(scope, agent, true)
         }
     end
   end
 
+  defp current_market_execution(scope, _identity) do
+    %{
+      family: nil,
+      expected: nil,
+      realized: no_realized_economics(scope),
+      contribution: %{commitment_count: 0, expected_value: 0},
+      limitation: nil,
+      attention: [],
+      dispositions: []
+    }
+  end
+
   # Per-Agent actual allocation disposition from durable facts (#688).
-  defp dispositions(scope, with_portfolio?) do
+  defp dispositions(scope, agent, with_portfolio?) do
     case FleetStrategy.get(scope).active_revision do
       nil ->
         []
 
       active ->
-        scope
-        |> agents()
+        [agent]
         |> Enum.flat_map(fn agent ->
           portfolio = with_portfolio? && FleetAllocation.current_portfolio(scope, agent)
           List.wrap(MarketDisposition.for_agent(agent, active, portfolio || nil))

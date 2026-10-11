@@ -18,6 +18,7 @@ defmodule SpaceTraders.FleetGeneration do
   alias SpaceTraders.Agent.{Agent, Operator, Scope}
   alias SpaceTraders.Fleet.{Ship, ShipServer}
   alias SpaceTraders.FleetGeneration.Generation
+  alias SpaceTraders.FleetGeneration.Identity
   alias SpaceTraders.Evidence.Observation
   alias SpaceTraders.FleetStrategy.{Revision, Strategy}
 
@@ -37,6 +38,26 @@ defmodule SpaceTraders.FleetGeneration do
 
     @enforce_keys [:operator_id]
     defstruct [:operator_id]
+  end
+
+  @doc "Adopts an unambiguous installation without modifying credentials or history."
+  defdelegate adopt_current_fleet(), to: Identity, as: :adopt
+
+  @doc "Resolves the durable deployment Operator, Agent and Generation, without secrets."
+  defdelegate current_fleet(), to: Identity, as: :current
+
+  @doc "Resolves current identity only for its authenticated deployment Operator."
+  def current_fleet(%Scope{operator: %Operator{id: operator_id}}) do
+    with {:ok, identity} <- current_fleet() do
+      if identity.operator && identity.operator.id == operator_id,
+        do: {:ok, identity},
+        else:
+          {:error,
+           %{
+             reason: :not_deployment_operator,
+             summary: "Sign in as the deployment Operator to access the current Fleet."
+           }}
+    end
   end
 
   @doc "Carries Strategic Objective progress into a replacement Fleet Generation by scope."
@@ -126,7 +147,8 @@ defmodule SpaceTraders.FleetGeneration do
            ensure_symbol_is_not_stale_for_another_operator(
              operator,
              replacement_symbols
-           ) do
+           ),
+         :ok <- ensure_mint_can_publish(scope) do
       revision = active_revision(operator.id)
 
       registration_result =
@@ -152,6 +174,14 @@ defmodule SpaceTraders.FleetGeneration do
         {:error, _reason} = error ->
           error
       end
+    end
+  end
+
+  defp ensure_mint_can_publish(scope) do
+    case current_fleet(scope) do
+      {:ok, %{state: state}} when state in [:empty, :transition] -> :ok
+      {:ok, %{state: :current}} -> {:error, :current_fleet_exists}
+      {:error, error} -> {:error, error}
     end
   end
 
@@ -590,8 +620,10 @@ defmodule SpaceTraders.FleetGeneration do
 
                  Enum.each(
                    predecessors,
-                   &retire_generation(&1, generation.strategy_capable_at)
+                   &retire_generation(&1, generation.strategy_capable_at || Clock.utc_now())
                  )
+
+                 :ok = Identity.publish_generation!(operator.id, generation.id)
 
                  {agent, generation, retired_symbols, ship_symbols}
 
