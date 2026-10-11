@@ -2180,29 +2180,40 @@ defmodule SpaceTraders.FleetPlanning do
 
   defp unresolved_baseline_subjects(_markets, _snapshot), do: MapSet.new()
 
+  # Each coverage limitation also carries baseline coverage completed/required,
+  # the counts a Neutral Wait on incomplete coverage reports.
   defp coverage_limitations(unresolved, snapshot) do
     unreachable = MapSet.new(snapshot.unreachable_subjects)
+    required = snapshot.baseline_subjects |> MapSet.new() |> MapSet.size()
+    coverage = %{completed: required - MapSet.size(unresolved), required: required}
 
     [
       subject_coverage_limitation(
         :incomplete_market_coverage,
-        MapSet.difference(unresolved, unreachable)
+        MapSet.difference(unresolved, unreachable),
+        coverage
       ),
       subject_coverage_limitation(
         :unreachable_market_coverage,
-        MapSet.intersection(unresolved, unreachable)
+        MapSet.intersection(unresolved, unreachable),
+        coverage
       )
     ]
     |> Enum.reject(&is_nil/1)
   end
 
-  defp subject_coverage_limitation(reason, subjects) do
+  defp subject_coverage_limitation(reason, subjects, coverage) do
     case MapSet.to_list(subjects) do
       [] ->
         nil
 
       subjects ->
-        %{subject: :market_planning, reason: reason, subjects: Enum.sort(subjects)}
+        %{
+          subject: :market_planning,
+          reason: reason,
+          subjects: Enum.sort(subjects),
+          coverage: coverage
+        }
     end
   end
 

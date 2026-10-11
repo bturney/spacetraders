@@ -313,6 +313,65 @@ defmodule SpaceTradersWeb.MissionControlBriefingTest do
     refute has_element?(view, "#realized-net-earnings", "0 credits")
   end
 
+  test "a Neutral Wait shows exactly its five summary facts; identity is click-through only",
+       %{conn: conn, scope: scope} do
+    {agent, generation} = mint_fleet(scope)
+    episode = neutral_wait_episode(scope, generation)
+
+    {:ok, view, _html} = live(conn, ~p"/mission-control")
+    section = "#allocation-disposition-#{agent.symbol}"
+    wait = "#{section} #neutral-wait-#{agent.symbol}"
+
+    assert has_element?(view, wait, "no worthwhile admissible contribution")
+    assert has_element?(view, wait, "incomplete coverage")
+    assert has_element?(view, wait, "3 of 5 Marketplaces covered")
+    assert has_element?(view, wait, "Last evaluated 2026-10-11 09:30:00 UTC")
+    assert has_element?(view, wait, "Next due 2026-10-11 10:00:00 UTC")
+    assert has_element?(view, "#{wait} a[href='/decision-episodes/#{episode.id}']")
+    refute has_element?(view, section, "Decision Episode #{episode.id}")
+    refute has_element?(view, section, "Waiting deliberately")
+
+    # The Unallocated Ship's link is causal: the wait's Decision Episode.
+    assert has_element?(
+             view,
+             "#{section} #unallocated-ships-#{agent.symbol} a[href='/decision-episodes/#{episode.id}']",
+             "#{@symbol}-1"
+           )
+  end
+
+  defp neutral_wait_episode(scope, generation) do
+    revision = FleetStrategy.get(scope).active_revision
+
+    episode =
+      Repo.insert!(%SpaceTraders.FleetAllocation.StrategyDecisionEpisode{
+        operator_id: scope.operator.id,
+        fleet_generation_id: generation.id,
+        fleet_strategy_revision_id: revision.id,
+        source_version: 1,
+        calibration_version: "market-v1",
+        selection_kind: :neutral_wait,
+        binding_limitation_kind: :incomplete_coverage,
+        next_observation_at: ~U[2026-10-11 10:00:00.000000Z],
+        expectations: %{
+          "binding_limitation" => %{
+            "reason" => "incomplete_market_coverage",
+            "coverage" => %{"completed" => 3, "required" => 5}
+          }
+        },
+        actual_outcomes: %{"re_evaluations" => [%{"observed_at" => "2026-10-11T09:30:00Z"}]}
+      })
+
+    Repo.insert!(%SpaceTraders.FleetAllocation.AllocationResultPointer{
+      fleet_generation_id: generation.id,
+      operator_id: scope.operator.id,
+      fleet_strategy_revision_id: revision.id,
+      selection_kind: :neutral_wait,
+      strategy_decision_episode_id: episode.id
+    })
+
+    episode
+  end
+
   defp publish_market!(scope, generation) do
     revision = FleetStrategy.get(scope).active_revision
     generation = Repo.get!(SpaceTraders.FleetGeneration.Generation, generation.id)

@@ -178,8 +178,49 @@ defmodule SpaceTraders.MissionControlDispositionsTest do
 
     assert [%{state: :neutral_wait, neutral_wait: wait, spending_pause: nil}] = dispositions(ctx)
     assert wait.limitation_kind == :below_economic_threshold
+    assert wait.coverage == nil
     assert wait.next_observation_at == next
     assert wait.decision_episode_id == episode.id
+  end
+
+  test "an incomplete-coverage Neutral Wait reports coverage and its last evaluation", ctx do
+    retire_portfolio(ctx)
+    next = DateTime.add(DateTime.utc_now(), 600, :second)
+    evaluated = ~U[2026-10-11 09:30:00Z]
+
+    episode =
+      Repo.insert!(%Episode{
+        operator_id: ctx.generation.operator_id,
+        fleet_generation_id: ctx.generation.id,
+        fleet_strategy_revision_id: ctx.revision.id,
+        source_version: 1,
+        calibration_version: "market-v1",
+        selection_kind: :neutral_wait,
+        binding_limitation_kind: :incomplete_coverage,
+        next_observation_at: next,
+        expectations: %{
+          "binding_limitation" => %{
+            "reason" => "incomplete_market_coverage",
+            "coverage" => %{"completed" => 3, "required" => 5}
+          }
+        },
+        actual_outcomes: %{
+          "re_evaluations" => [
+            %{"observed_at" => "2026-10-11T09:00:00Z"},
+            %{"observed_at" => DateTime.to_iso8601(evaluated)}
+          ]
+        }
+      })
+
+    Repo.update_all(
+      from(p in AllocationResultPointer, where: p.fleet_generation_id == ^ctx.generation.id),
+      set: [selection_kind: :neutral_wait, strategy_decision_episode_id: episode.id]
+    )
+
+    assert [%{state: :neutral_wait, neutral_wait: wait}] = dispositions(ctx)
+    assert wait.coverage == %{completed: 3, required: 5}
+    assert wait.last_evaluated_at == evaluated
+    assert wait.next_observation_at == next
   end
 
   test "a floor pause is not a Neutral Wait even when a stale wait pointer lingers", ctx do

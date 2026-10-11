@@ -651,7 +651,8 @@ defmodule SpaceTraders.FleetPlanningTest do
                   %{
                     subject: :market_planning,
                     reason: :incomplete_market_coverage,
-                    subjects: ["market:X1:X1-A3"]
+                    subjects: ["market:X1:X1-A3"],
+                    coverage: %{completed: 2, required: 3}
                   }
                 ]
               }} = FleetPlanning.plan_market(revision(), 0, snapshot)

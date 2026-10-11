@@ -229,14 +229,40 @@ defmodule SpaceTraders.MissionControl.MarketDisposition do
            Repo.get_by(AllocationResultPointer, fleet_generation_id: generation.id),
          %Episode{fleet_strategy_revision_id: revision_id} = episode when revision_id == active.id <-
            Repo.get(Episode, id) do
+      # ADR 0012: the summary's facts; the Episode id is click-through only.
       %{
         decision_episode_id: episode.id,
         limitation_kind: episode.binding_limitation_kind,
-        binding_limitation: episode.expectations["binding_limitation"],
+        coverage: wait_coverage(episode),
+        last_evaluated_at: last_evaluated_at(episode),
         next_observation_at: episode.next_observation_at
       }
     else
       _ -> nil
+    end
+  end
+
+  defp wait_coverage(%Episode{binding_limitation_kind: :incomplete_coverage} = episode) do
+    case get_in(episode.expectations, ["binding_limitation", "coverage"]) do
+      %{"completed" => completed, "required" => required}
+      when is_integer(completed) and is_integer(required) ->
+        %{completed: completed, required: required}
+
+      _ ->
+        nil
+    end
+  end
+
+  defp wait_coverage(_episode), do: nil
+
+  # The wait's latest re-evaluation, else when the Episode last changed.
+  defp last_evaluated_at(episode) do
+    with [_ | _] = entries <- get_in(episode.actual_outcomes || %{}, ["re_evaluations"]),
+         %{"observed_at" => at} <- List.last(entries),
+         {:ok, at, _offset} <- DateTime.from_iso8601(at) do
+      at
+    else
+      _ -> episode.updated_at
     end
   end
 
