@@ -185,12 +185,14 @@ The `Gate 2B Revision change during coverage` describe (#685, #686) reproduces
 production Portfolio 4039 / Intent 4077 on the same seam: the scout's navigate
 succeeds, the Operator activates a new Revision through the Strategy LiveView
 while it is in transit, the scout arrives and its next step is refused on
-old-Portfolio authority. It asserts the stale Claim releases without a Safety
-Fence, current-Revision coverage and a profitable trade follow, and one
-resolved `structural_stall` Episode records the reconciliation. Deterministic
-variants (unresolved action fence, inherited Cargo disposition, 500-tick stall
-deduplication, busy/deferred/Shortfall negatives) live in
-`test/spacetraders/market_domain_allocation_test.exs`.
+old-Portfolio authority. It asserts BASELINE-1 holds active-Revision work while
+the scout is still in transit (its Commitment settling on its own Ship), the
+scout's Claim then releases and it scouts again under the active Revision, a
+profitable trade follows, and no stall or rejected publication is recorded.
+Deterministic variants (prepared and sent-or-unknown attempts, lost wake and
+restart, inherited Cargo disposition including partial and infeasible sales,
+500-tick stall deduplication, busy/deferred/Shortfall negatives, activation and
+decision logs) live in `test/spacetraders/market_domain_allocation_test.exs`.
 
 Run it only when that whole-runtime composition is the subject:
 

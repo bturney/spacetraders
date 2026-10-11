@@ -64,8 +64,11 @@ Portfolio. Like `publication_rejected` it is not a selection kind and the pointe
 never references it. At most one is open per Fleet Generation: an unchanged stall
 refreshes that episode in place (last observation time and count), a changed
 reason or Revision closes it and opens its successor, and recovery closes it.
-It is never a Neutral Wait: busy current-Revision work, Capacity Deferral and an
-open credit Shortfall explain overdue evidence and record no stall.
+Closing sets `resolved_at`, the recovery signal, and classifies the episode
+`superseded`: a later decision took its place. It is never a Neutral Wait: busy
+current-Revision work (including a settling Commitment's own Ship), Capacity
+Deferral, a recorded Neutral Wait and an open credit Shortfall explain overdue
+evidence and record no stall; an errored decision explains nothing.
 
 Metrics use a closed limitation kind vocabulary: `incomplete_coverage`,
 `no_admissible_candidate`, `below_economic_threshold`,

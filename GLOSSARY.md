@@ -179,7 +179,7 @@ A bounded Candidate Contribution over an explicit finite, named set of open Obse
 _Avoid_: sweep, scan script, coverage plan
 
 **Fleet Commitment**:
-An accepted, evidence-bound promise to pursue an outcome contribution using declared claims, reservations, pledges, and dependencies. Fleet allocation maintains Fleet Commitments as a coherent portfolio; a commitment may coordinate one Ship, multiple Ships, or preparatory work, and is retained, superseded, or safely unwound at reconciliation boundaries.
+An accepted, evidence-bound promise to pursue an outcome contribution using declared claims, reservations, pledges, and dependencies. Fleet allocation maintains Fleet Commitments as a coherent portfolio; a commitment may coordinate one Ship, multiple Ships, or preparatory work, and is retained, superseded, or safely unwound at reconciliation boundaries. When a newer Fleet Strategy Revision retires its portfolio while its effect is unsettled (an unresolved action or inherited Cargo being sold), it settles: it keeps its Claim on its own Ship only, authorizes nothing but that Cargo's sale, and is released once settled.
 _Avoid_: fixed plan, task, Job
 
 **Claim**:
