@@ -21,14 +21,13 @@ defmodule SpaceTraders.SafetyFence do
 
   import Ecto.Query
 
+  alias SpaceTraders.MutationAttempts
   alias SpaceTraders.MutationAttempts.Attempt
   alias SpaceTraders.Repo
 
-  @active_states ["sent_or_unknown", "ambiguous", "bounded_unknown"]
-
   @doc "Returns whether an attempt currently suppresses dependent mutations."
   @spec active?(Attempt.t()) :: boolean()
-  def active?(%Attempt{state: state}), do: state in @active_states
+  def active?(%Attempt{state: state}), do: state in MutationAttempts.unresolved_states()
 
   @doc "Returns active attempts whose dependency keys overlap the candidate action."
   @spec blocking_attempts([String.t()], Ecto.UUID.t() | nil, [Ecto.UUID.t()]) :: [Attempt.t()]
@@ -49,7 +48,7 @@ defmodule SpaceTraders.SafetyFence do
       )
 
     Attempt
-    |> where([attempt], attempt.state in ^@active_states)
+    |> where([attempt], attempt.state in ^MutationAttempts.unresolved_states())
     |> where(
       [attempt],
       fragment("? && ?", attempt.dependency_keys, type(^dependency_keys, {:array, :string}))

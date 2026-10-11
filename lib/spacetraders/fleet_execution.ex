@@ -234,7 +234,7 @@ defmodule SpaceTraders.FleetExecution do
   # Observation Demand cannot dispatch and is rejected with that reason.
   defp admissible_candidates(agent, candidates, retained, demands) do
     retained_ids = MapSet.new(retained, & &1.candidate_id)
-    coverage_retained? = Enum.any?(retained, &coverage_commitment?/1)
+    coverage_retained? = Enum.any?(retained, &SpaceTraders.FleetAllocation.Commitment.coverage?/1)
 
     {admitted, dispatch, unavailable} =
       candidates
@@ -273,13 +273,6 @@ defmodule SpaceTraders.FleetExecution do
   end
 
   defp dispatch_spec(_agent, _candidate, _demands), do: nil
-
-  defp coverage_commitment?(commitment) do
-    Enum.any?(commitment.dependencies, fn dependency ->
-      match?(%{"subject" => "market:" <> _}, dependency) and
-        not Map.has_key?(dependency, "evidence_id")
-    end)
-  end
 
   defp domain_decision(planning, candidates, selected) do
     selected_ids = MapSet.new(selected, & &1.candidate_id)

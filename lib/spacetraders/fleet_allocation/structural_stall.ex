@@ -42,10 +42,10 @@ defmodule SpaceTraders.FleetAllocation.StructuralStall do
   alias SpaceTraders.Agent.Agent, as: AgentRecord
   alias SpaceTraders.Agent.{Operator, Scope}
   alias SpaceTraders.Clock
-  alias SpaceTraders.CreditCalibration.Shortfall
+  alias SpaceTraders.CreditCalibration
   alias SpaceTraders.Evidence
   alias SpaceTraders.FleetAllocation
-  alias SpaceTraders.FleetAllocation.{JsonEvidence, Portfolio}
+  alias SpaceTraders.FleetAllocation.{Commitment, JsonEvidence, Portfolio}
   alias SpaceTraders.FleetAllocation.StrategyDecisionEpisode, as: Episode
   alias SpaceTraders.FleetGeneration.Generation
   alias SpaceTraders.FleetStrategy.Revision
@@ -82,7 +82,7 @@ defmodule SpaceTraders.FleetAllocation.StructuralStall do
   @doc "The decision's structural stall, or nil when it is healthy or explained."
   def diagnose(agent, %Revision{id: active}, portfolio, decision) do
     cond do
-      match?(%Portfolio{}, portfolio) and portfolio.fleet_strategy_revision_id != active ->
+      stale_revision?(portfolio, %Revision{id: active}) ->
         stall(:stale_revision_portfolio, portfolio, [
           %{"kind" => "portfolio", "id" => portfolio.id},
           %{"kind" => "revision", "id" => portfolio.fleet_strategy_revision_id}
@@ -106,6 +106,29 @@ defmodule SpaceTraders.FleetAllocation.StructuralStall do
         nil
     end
   end
+
+  @doc "True when the Portfolio belongs to an older Revision than the active one."
+  def stale_revision?(%Portfolio{fleet_strategy_revision_id: id}, %Revision{id: active}),
+    do: id != active
+
+  def stale_revision?(_portfolio, _active), do: false
+
+  @doc "What releases a stall of `reason`, in Operator terms."
+  def release_condition(:stale_revision_portfolio, %Revision{number: number}),
+    do:
+      "Fleet Allocation retires the superseded Portfolio's settled Intents at the next Market " <>
+        "boundary and reselects under Revision #{number}; unresolved MutationAttempts " <>
+        "keep their Ship fenced until resolved."
+
+  def release_condition(:authority_blocked_intent, _active),
+    do:
+      "The blocked Intent settles and its Claim is released, so Fleet Allocation reselects " <>
+        "under the active Revision."
+
+  def release_condition(:overdue_demands_without_coverage, _active),
+    do:
+      "Allocation admits coverage, selects work that occupies the Ships, or records a " <>
+        "Capacity Deferral, Neutral Wait or Shortfall as the decisive reason."
 
   defp stall(reason, portfolio, references),
     do: %{reason: reason, portfolio: portfolio, references: references}
@@ -159,27 +182,15 @@ defmodule SpaceTraders.FleetAllocation.StructuralStall do
       positive?(counts, :selected) or
       Map.fetch(counts, :claimable_ships) == {:ok, 0} or
       current_coverage?(portfolio, active) or
-      open_shortfall?(agent)
+      CreditCalibration.open_shortfall?(agent)
   end
 
   defp positive?(counts, key), do: Map.get(counts, key, 0) > 0
 
   defp current_coverage?(%Portfolio{fleet_strategy_revision_id: active} = portfolio, active),
-    do: Enum.any?(portfolio.commitments, &coverage_commitment?/1)
+    do: Enum.any?(portfolio.commitments, &Commitment.coverage?/1)
 
   defp current_coverage?(_portfolio, _active), do: false
-
-  @doc "True when a Commitment is Market coverage (an unobserved Market dependency)."
-  def coverage_commitment?(commitment) do
-    Enum.any?(commitment.dependencies, fn dependency ->
-      match?(%{"subject" => "market:" <> _}, dependency) and
-        not Map.has_key?(dependency, "evidence_id")
-    end)
-  end
-
-  defp open_shortfall?(%AgentRecord{id: agent_id}) do
-    Repo.exists?(from s in Shortfall, where: s.agent_id == ^agent_id and is_nil(s.released_at))
-  end
 
   defp record(generation, revision, stall) do
     {:ok, result} =

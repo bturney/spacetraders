@@ -17,8 +17,8 @@ defmodule SpaceTraders.FleetPlanning do
   alias SpaceTraders.FleetStrategy.Revision
 
   @market_evidence_freshness_seconds Intelligence.market_freshness_seconds()
-  # Shipyard, Construction and owned-Ship evidence keep their own, shorter budget.
-  @owned_evidence_freshness_seconds 300
+  # Owned-Ship, Shipyard and Construction evidence: the shorter non-Market budget.
+  @non_market_evidence_freshness_seconds 300
   @observation_demand_deadline_seconds 60
   # Operational Intelligence Market interpretation states that can never
   # support a trade, each kept as its own planning limitation.
@@ -715,10 +715,10 @@ defmodule SpaceTraders.FleetPlanning do
             observed_at: as_of,
             evidence_id: "authoritative:ship:#{symbol}",
             source: "get_my_ship",
-            valid_until: DateTime.add(as_of, @owned_evidence_freshness_seconds, :second)
+            valid_until: DateTime.add(as_of, @non_market_evidence_freshness_seconds, :second)
           }
 
-          {dependency, DateTime.add(as_of, @owned_evidence_freshness_seconds, :second)}
+          {dependency, DateTime.add(as_of, @non_market_evidence_freshness_seconds, :second)}
       end
 
     refit_waypoint =
@@ -929,7 +929,7 @@ defmodule SpaceTraders.FleetPlanning do
               is_list(ships) do
     age = DateTime.diff(as_of, observed_at, :second)
 
-    if age in 0..@owned_evidence_freshness_seconds do
+    if age in 0..@non_market_evidence_freshness_seconds do
       {:ok,
        %{
          system_symbol: system,
@@ -938,7 +938,7 @@ defmodule SpaceTraders.FleetPlanning do
          observed_at: observed_at,
          ships: ships,
          modifications_fee: fetch(yard, :modifications_fee),
-         valid_until: DateTime.add(observed_at, @owned_evidence_freshness_seconds, :second)
+         valid_until: DateTime.add(observed_at, @non_market_evidence_freshness_seconds, :second)
        }}
     else
       :error
@@ -1431,9 +1431,9 @@ defmodule SpaceTraders.FleetPlanning do
          as_of
        )
        when is_list(materials) and is_binary(id) and id != "" and is_binary(system) do
-    if DateTime.diff(as_of, observed_at, :second) in 0..@owned_evidence_freshness_seconds,
+    if DateTime.diff(as_of, observed_at, :second) in 0..@non_market_evidence_freshness_seconds,
       do:
-        {:ok, construction, DateTime.add(observed_at, @owned_evidence_freshness_seconds, :second)},
+        {:ok, construction, DateTime.add(observed_at, @non_market_evidence_freshness_seconds, :second)},
       else: {:error, :stale_construction_evidence}
   end
 

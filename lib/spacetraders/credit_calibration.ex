@@ -24,7 +24,6 @@ defmodule SpaceTraders.CreditCalibration do
   alias SpaceTraders.MutationAttempts.Attempt
 
   @widening_step 10
-  @unresolved_states ["sent_or_unknown", "ambiguous", "bounded_unknown"]
 
   @doc "Returns the active calibration version (the newest durable row)."
   def active do
@@ -344,16 +343,29 @@ defmodule SpaceTraders.CreditCalibration do
     query =
       from a in Attempt,
         where:
-          a.agent_id == ^agent_id and a.state in @unresolved_states and
+          a.agent_id == ^agent_id and a.state in ^SpaceTraders.MutationAttempts.unresolved_states() and
             a.operation_id in ^CreditSpending.credit_operations()
 
     query = if except_id, do: where(query, [a], a.id != ^except_id), else: query
     Repo.exists?(query)
   end
 
-  defp open_shortfall?(agent_id),
-    do:
-      Repo.exists?(from s in Shortfall, where: s.agent_id == ^agent_id and is_nil(s.released_at))
+  @doc "True while any Shortfall of the Agent is unreleased (new credit-bearing spending paused)."
+  def open_shortfall?(%Agent{id: agent_id}), do: open_shortfall?(agent_id)
+
+  def open_shortfall?(agent_id) when is_integer(agent_id),
+    do: Repo.exists?(open_shortfalls(agent_id))
+
+  @doc "The Agent's oldest unreleased Shortfall, or nil."
+  def oldest_open_shortfall(%Agent{id: agent_id}) do
+    open_shortfalls(agent_id)
+    |> order_by([s], asc: s.detected_at, asc: s.id)
+    |> limit(1)
+    |> Repo.one()
+  end
+
+  defp open_shortfalls(agent_id),
+    do: from(s in Shortfall, where: s.agent_id == ^agent_id and is_nil(s.released_at))
 
   defp balance(%{value: %{credits: credits}, observation: %{observed_at: at, id: id}})
        when is_integer(credits),
