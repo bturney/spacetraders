@@ -12,7 +12,8 @@ defmodule SpaceTraders.MissionControl.MarketDisposition do
   `:spending_paused`, `:busy_trade`, `:capacity_deferred`, `:neutral_wait`,
   `:retained_coverage`, `:unallocated`. Only `:stalled` is non-healthy
   (Degraded Operation). `operator_action` stays `:none`: a stall releases
-  through reconciliation, and time-based Attention escalation is deferred.
+  through reconciliation. Its Degraded Attention is raised and resolved by
+  `FleetAllocation.StructuralStall`, never by this read.
   """
 
   import Ecto.Query
