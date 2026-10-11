@@ -1,7 +1,10 @@
 defmodule SpaceTradersWeb.OperatorLive.SettingsTest do
-  use SpaceTradersWeb.ConnCase, async: true
+  # Settings resolves the current Fleet, which may adopt deployment-wide; async
+  # fixtures holding Agent writes would deadlock with adoption's table locks.
+  use SpaceTradersWeb.ConnCase, async: false
 
   alias SpaceTraders.Agent
+  alias SpaceTraders.Agent.Scope
   import Phoenix.LiveViewTest
   import SpaceTraders.AgentFixtures
 
@@ -282,7 +285,7 @@ defmodule SpaceTradersWeb.OperatorLive.SettingsTest do
 
       {:ok, _mint_lv, mint_html} =
         lv
-        |> element("nav a", "Mint agent")
+        |> element("#import-agent a", "Mint an Agent")
         |> render_click()
         |> follow_redirect(conn, ~p"/agents/new")
 
@@ -329,17 +332,24 @@ defmodule SpaceTradersWeb.OperatorLive.SettingsTest do
       operator: operator
     } do
       Req.Test.stub(SpaceTraders.API, fn conn ->
-        assert conn.request_path == "/v2/my/agent"
+        case conn.request_path do
+          "/v2/my/agent" ->
+            Req.Test.json(conn, %{
+              "data" => %{
+                "symbol" => "ORBITALIST",
+                "credits" => 42_000,
+                "headquarters" => "X1-UX81-A1",
+                "startingFaction" => "COSMIC",
+                "shipCount" => 0
+              }
+            })
 
-        Req.Test.json(conn, %{
-          "data" => %{
-            "symbol" => "ORBITALIST",
-            "credits" => 42_000,
-            "headquarters" => "X1-UX81-A1",
-            "startingFaction" => "COSMIC",
-            "shipCount" => 1
-          }
-        })
+          "/v2/my/ships" ->
+            Req.Test.json(conn, %{
+              "data" => [],
+              "meta" => %{"total" => 0, "page" => 1, "limit" => 20}
+            })
+        end
       end)
 
       {:ok, lv, _html} = live(conn, ~p"/operators/settings")
@@ -355,6 +365,47 @@ defmodule SpaceTradersWeb.OperatorLive.SettingsTest do
       refute result =~ "AGENT_TOKEN"
       assert [agent] = Agent.list_agents(Agent.get_operator!(operator.id))
       assert agent.symbol == "ORBITALIST"
+
+      assert {:ok, %{state: :current, agent: %{id: current_id}}} =
+               SpaceTraders.FleetGeneration.current_fleet(Scope.for_operator(operator))
+
+      assert current_id == agent.id
+      refute has_element?(lv, "#import_agent_form")
+    end
+
+    test "import is initial setup only; a current Fleet has no import path", %{
+      conn: conn,
+      operator: operator
+    } do
+      agent_fixture(operator, %{symbol: "ORBITALIST"})
+
+      {:ok, lv, html} = live(conn, ~p"/operators/settings")
+
+      refute has_element?(lv, "#import_agent_form")
+      assert html =~ "This deployment already has a current Agent"
+    end
+
+    test "an import submitted after another request established the Fleet is refused", %{
+      conn: conn,
+      operator: operator
+    } do
+      Req.Test.stub(SpaceTraders.API, fn _conn ->
+        flunk("an established Fleet forbids import reads")
+      end)
+
+      {:ok, lv, _html} = live(conn, ~p"/operators/settings")
+      agent_fixture(operator, %{symbol: "ORBITALIST"})
+
+      result =
+        lv
+        |> form("#import_agent_form", %{
+          "import" => %{"agent_token" => "AGENT_TOKEN", "confirmed" => "true"}
+        })
+        |> render_submit()
+
+      assert result =~ "This deployment already has a current Agent"
+      refute result =~ "AGENT_TOKEN"
+      assert [%{symbol: "ORBITALIST"}] = Agent.list_agents(operator)
     end
   end
 end

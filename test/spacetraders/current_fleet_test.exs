@@ -71,6 +71,139 @@ defmodule SpaceTraders.CurrentFleetTest do
              FleetGeneration.current_fleet(scope)
   end
 
+  test "an initial AgentToken import establishes the sole current Fleet; another ordinary import cannot add an Agent" do
+    operator = operator_fixture()
+    scope = operator_scope_fixture(operator)
+    {:ok, draft} = FleetStrategy.select_preset(scope, "steady_growth")
+    {:ok, revision} = FleetStrategy.activate(scope, draft.draft_version)
+    test_pid = self()
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      send(test_pid, {:game_request, conn.method, conn.request_path})
+      assert Plug.Conn.get_req_header(conn, "authorization") == ["Bearer IMPORTED_SECRET"]
+
+      case conn.request_path do
+        "/v2/my/agent" ->
+          Req.Test.json(conn, %{
+            "data" => %{
+              "symbol" => "ORBITALIST",
+              "headquarters" => "X1-UX81-A1",
+              "credits" => 42_000,
+              "startingFaction" => "COSMIC",
+              "shipCount" => 1
+            }
+          })
+
+        "/v2/my/ships" ->
+          Req.Test.json(conn, %{
+            "data" => [SpaceTraders.ShipBody.ship_body("ORBITALIST-1")],
+            "meta" => %{"total" => 1, "page" => 1, "limit" => 20}
+          })
+      end
+    end)
+
+    assert {:ok, imported} = FleetGeneration.import_agent(scope, "IMPORTED_SECRET", true)
+    assert imported.agent_token == nil
+
+    assert {:ok, %{state: :current, agent: current, generation: generation}} =
+             FleetGeneration.current_fleet(scope)
+
+    assert current.id == imported.id
+    assert generation.agent_id == imported.id
+    assert generation.symbol == "ORBITALIST"
+    assert generation.faction == "COSMIC"
+    assert generation.fleet_strategy_revision_id == revision.id
+    # The imported Agent's own authoritative state is the generation baseline.
+    assert generation.starting_credits == 42_000
+    assert generation.strategy_capable_at
+
+    assert ["ORBITALIST-1"] =
+             Repo.all(
+               from ship in SpaceTraders.Fleet.Ship,
+                 where: ship.agent_id == ^imported.id,
+                 select: ship.symbol
+             )
+
+    assert Agent.get_agent(scope, imported.id).agent_token == "IMPORTED_SECRET"
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      send(test_pid, {:game_request, conn.method, conn.request_path})
+      flunk("an established current Fleet forbids another ordinary import")
+    end)
+
+    flush_game_requests()
+
+    assert {:error, :current_fleet_exists} =
+             FleetGeneration.import_agent(scope, "PARALLAX_SECRET", true)
+
+    refute_received {:game_request, _, _}
+    assert [%{id: only}] = Agent.list_agents(Agent.get_operator!(operator.id))
+    assert only == imported.id
+
+    assert {:ok, %{agent: ^current, generation: ^generation}} =
+             FleetGeneration.current_fleet(scope)
+  end
+
+  test "invalid AgentTokens and missing mint authority create no local Fleet state" do
+    operator = operator_fixture()
+    scope = operator_scope_fixture(operator)
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      conn
+      |> Plug.Conn.put_status(401)
+      |> Req.Test.json(%{"error" => %{"code" => 4100, "message" => "Invalid token"}})
+    end)
+
+    assert {:error, %SpaceTraders.API.GameplayError{}} =
+             FleetGeneration.import_agent(scope, "INVALID_SECRET", true)
+
+    assert {:error, :account_token_not_linked} =
+             FleetGeneration.mint(scope, %{symbol: "ORBITALIST", faction: "COSMIC"})
+
+    assert {:error, %Ecto.Changeset{}} =
+             FleetGeneration.mint(scope, %{symbol: "bad symbol", faction: "COSMIC"})
+
+    assert Agent.list_agents(Agent.get_operator!(operator.id)) == []
+    assert FleetGeneration.list_generations(scope) == []
+    assert {:ok, %{state: :empty}} = FleetGeneration.current_fleet(scope)
+  end
+
+  test "import is not a mid-game replacement: a fenced Fleet keeps its own credential and history" do
+    operator = operator_fixture()
+    scope = operator_scope_fixture(operator)
+
+    fenced =
+      agent_fixture(operator, %{
+        symbol: "ORBITALIST",
+        agent_token: "PREDECESSOR_SECRET",
+        stale_at: DateTime.utc_now(:second)
+      })
+
+    assert {:ok, %{state: :transition, generation: predecessor}} =
+             FleetGeneration.current_fleet(scope)
+
+    Req.Test.stub(SpaceTraders.API, fn _conn ->
+      flunk("a fenced transition forbids import reads")
+    end)
+
+    assert {:error, :fleet_transition_pending} =
+             FleetGeneration.import_agent(scope, "SAME_SYMBOL_SECRET", true)
+
+    assert Agent.get_agent(scope, fenced.id).agent_token == "PREDECESSOR_SECRET"
+    assert [^predecessor] = FleetGeneration.list_generations(scope)
+
+    assert {:ok, %{state: :transition, generation: ^predecessor}} =
+             FleetGeneration.current_fleet(scope)
+  end
+
+  defp flush_game_requests do
+    receive do
+      {:game_request, _, _} -> flush_game_requests()
+    after
+      0 -> :ok
+    end
+  end
+
   test "ownership ambiguity fails adoption without selecting or removing records" do
     first = operator_fixture()
     agent = agent_fixture(first)

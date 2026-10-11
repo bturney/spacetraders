@@ -133,6 +133,39 @@ defmodule SpaceTradersWeb.OperatorLive.MintTest do
       refute Repo.get_by(SpaceTraders.Agent.Agent, symbol: "ORBITALIST")
     end
 
+    test "a current Fleet replaces the mint form; it is not an add-another Agent path", %{
+      conn: conn
+    } do
+      operator = operator_fixture()
+      {:ok, operator} = Agent.link_account_token(operator, "ACCOUNT_TOKEN")
+      agent_fixture(operator, %{symbol: "ORBITALIST"})
+
+      {:ok, lv, html} = conn |> log_in_operator(operator) |> live(~p"/agents/new")
+
+      assert html =~ "This deployment already has a current Agent"
+      assert html =~ "ORBITALIST"
+      refute has_element?(lv, "#mint_form")
+      assert has_element?(lv, "a[href='/mission-control']")
+    end
+
+    test "a mint submitted after another request established the Fleet is refused before registration",
+         %{conn: conn} do
+      operator = operator_fixture()
+      {:ok, operator} = Agent.link_account_token(operator, "ACCOUNT_TOKEN")
+
+      Req.Test.stub(SpaceTraders.API, fn _conn ->
+        flunk("an established Fleet forbids registration")
+      end)
+
+      {:ok, lv, _html} = conn |> log_in_operator(operator) |> live(~p"/agents/new")
+      agent_fixture(operator, %{symbol: "ORBITALIST"})
+
+      result = lv |> form("#mint_form", @mint_form) |> render_submit()
+
+      assert result =~ "This deployment already has a current Agent"
+      assert [%{symbol: "ORBITALIST"}] = Agent.list_agents(operator)
+    end
+
     test "shows a flash error when the game rejects the mint", %{conn: conn} do
       operator = operator_fixture()
       {:ok, operator} = Agent.link_account_token(operator, "ACCOUNT_TOKEN")

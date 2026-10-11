@@ -98,57 +98,206 @@ defmodule SpaceTraders.FleetGeneration do
   def advance_objective_progress(_revision, _progress, _next_generation_id),
     do: {:error, :invalid_objective_progress}
 
-  @doc "Mints a new Fleet Generation for the authenticated Operator."
+  # Registration waits for API capacity while the establishment authority is held.
+  @establishment_timeout :timer.minutes(2)
+
+  @doc """
+  Mints the initial or replacement Fleet Generation for the authenticated Operator.
+
+  Establishment is serialized in PostgreSQL before registration is dispatched:
+  a competing mint or import waits, then observes the committed current Fleet
+  rather than sending a second registration.
+  """
   def mint(%Scope{operator: %Operator{id: operator_id}} = scope, attrs) do
-    :global.trans({{__MODULE__, :mint, operator_id}, self()}, fn ->
-      result = do_mint(scope, attrs, operator_id)
-
-      case result do
-        {:error, :account_token_not_linked} ->
-          OperatorConditions.raise(
-            scope,
-            "replacement-authority",
-            :intervention,
-            "AccountToken authority is unavailable. Link an AccountToken to mint a Fleet Generation."
-          )
-
-        {:error, :replacement_symbols_exhausted} ->
-          OperatorConditions.raise(
-            scope,
-            "replacement-symbols",
-            :intervention,
-            "Replacement Agent symbols are exhausted. Revise the replacement identity choices."
-          )
-
-        {:ok, _} ->
-          OperatorConditions.resolve(scope, "replacement-authority")
-          OperatorConditions.resolve(scope, "replacement-symbols")
-
-        _ ->
-          :ok
+    # Controls and validation fail before queueing for the establishment
+    # authority; they are checked again once it is held.
+    result =
+      with {:ok, _plan} <- prepare_mint(scope, attrs, operator_id) do
+        scope
+        |> establish([:empty, :transition], fn -> do_mint(scope, attrs, operator_id) end)
+        |> finish_establishment(scope)
       end
 
-      result
-    end)
+    case result do
+      {:error, :account_token_not_linked} ->
+        OperatorConditions.raise(
+          scope,
+          "replacement-authority",
+          :intervention,
+          "AccountToken authority is unavailable. Link an AccountToken to mint a Fleet Generation."
+        )
+
+      {:error, :replacement_symbols_exhausted} ->
+        OperatorConditions.raise(
+          scope,
+          "replacement-symbols",
+          :intervention,
+          "Replacement Agent symbols are exhausted. Revise the replacement identity choices."
+        )
+
+      {:ok, _} ->
+        OperatorConditions.resolve(scope, "replacement-authority")
+        OperatorConditions.resolve(scope, "replacement-symbols")
+
+      _ ->
+        :ok
+    end
+
+    result
   end
 
-  defp do_mint(scope, attrs, operator_id) do
+  @doc """
+  Establishes an existing upstream Agent as the initial current Fleet.
+
+  The AccountToken cannot recover AgentTokens, so this never registers. The
+  AgentToken is validated by authoritative reads under the same establishment
+  authority as minting. Import is initial setup only: it never replaces a
+  current or fenced Fleet.
+  """
+  def import_agent(%Scope{operator: %Operator{}} = scope, agent_token, true)
+      when is_binary(agent_token) and agent_token != "" do
+    scope
+    |> establish([:empty], fn -> do_import(scope, agent_token) end)
+    |> finish_establishment(scope)
+    |> case do
+      {:ok, %{agent: agent}} -> {:ok, agent}
+      error -> error
+    end
+  end
+
+  def import_agent(_scope, _agent_token, false), do: {:error, :confirmation_required}
+  def import_agent(_scope, _agent_token, _confirmed), do: {:error, :agent_token_required}
+
+  # Lazy legacy adoption runs before the lock, so a reader's adoption table
+  # locks are never requested while this transaction holds the Operator row.
+  defp establish(%Scope{operator: %Operator{id: operator_id}} = scope, states, fun) do
+    with {:ok, _identity} <- current_fleet(scope) do
+      Repo.transaction(
+        fn ->
+          case Identity.lock_establishment(operator_id) do
+            {:ok, %{state: state}} ->
+              if state in states do
+                case fun.() do
+                  {:ok, established} -> established
+                  {:error, reason} -> Repo.rollback(reason)
+                end
+              else
+                Repo.rollback(establishment_unavailable(state))
+              end
+
+            {:error, reason} ->
+              Repo.rollback(reason)
+          end
+        end,
+        timeout: @establishment_timeout
+      )
+    end
+  end
+
+  defp establishment_unavailable(:current), do: :current_fleet_exists
+  defp establishment_unavailable(:transition), do: :fleet_transition_pending
+
+  # Side effects only after commit: no consumer can observe an uncommitted Agent.
+  defp finish_establishment({:ok, {agent, generation, retired_symbols, ship_symbols}}, scope) do
+    Enum.each(ship_symbols, &ShipServer.stop/1)
+    if generation.fleet_strategy_revision_id, do: _ = request_intelligence(agent)
+
+    :ok =
+      OperatorConditions.resolve_objective_conditions(
+        scope,
+        generation.id,
+        generation.fleet_strategy_revision_id
+      )
+
+    {:ok, %{agent: %{agent | agent_token: nil}, retired_symbols: retired_symbols}}
+  end
+
+  defp finish_establishment(error, _scope), do: error
+
+  defp do_import(%Scope{operator: %Operator{id: operator_id}}, agent_token) do
+    operator = Repo.get!(Operator, operator_id)
+
+    with {:ok, %GameAgent{} = game_agent} <- import_read(agent_token, &Evidence.get_agent/1),
+         {:ok, ships} when is_list(ships) <- import_read(agent_token, &Evidence.get_ships/1),
+         :ok <- ensure_agent_is_new(game_agent.symbol),
+         {:ok, agent} <- store_imported_agent(operator, game_agent, agent_token) do
+      bootstrap_ships(agent, ships)
+
+      generation =
+        establish_generation!(
+          operator,
+          agent,
+          nil,
+          [agent.symbol],
+          agent.faction,
+          game_agent.credits
+        )
+
+      :ok = Identity.publish_generation!(operator.id, generation.id)
+      {:ok, {agent, generation, [], []}}
+    end
+  end
+
+  # A temporary reference is consumed by its one request.
+  defp import_read(agent_token, read) do
+    credential_ref = AgentTokenReference.temporary(agent_token)
+
+    try do
+      read.(credential_ref)
+    after
+      AgentTokenReference.release(credential_ref)
+    end
+  end
+
+  defp ensure_agent_is_new(symbol) do
+    if Repo.exists?(from agent in Agent, where: agent.symbol == ^symbol),
+      do: {:error, :agent_already_imported},
+      else: :ok
+  end
+
+  defp store_imported_agent(operator, game_agent, agent_token) do
+    case SpaceTraders.Agent.store_agent(
+           operator,
+           game_agent,
+           agent_token,
+           game_agent.starting_faction
+         ) do
+      {:error, %Ecto.Changeset{} = changeset} ->
+        if Keyword.has_key?(changeset.errors, :symbol),
+          do: {:error, :agent_already_imported},
+          else: {:error, Ecto.Changeset.delete_change(changeset, :agent_token)}
+
+      {:ok, _agent} = result ->
+        result
+    end
+  end
+
+  defp prepare_mint(scope, attrs, operator_id) do
     changeset = Agent.changeset(%Agent{}, attrs)
-    credential_ref = %CredentialReference{operator_id: operator_id}
     replacement_symbols = replacement_symbols(attrs, changeset)
-    registration_symbols = registration_symbols(attrs, replacement_symbols)
+    faction = get_field(changeset, :faction)
 
     with :ok <- SpaceTraders.RuntimeAuthority.execution_allowed?(),
          :ok <- FleetStrategy.mutation_allowed?(scope),
          :ok <- validate_mint_attrs(changeset),
-         :ok <- validate_replacement_symbols(replacement_symbols, get_field(changeset, :faction)),
-         {:ok, operator, account_token} <- resolve_account_token(credential_ref),
-         :ok <-
-           ensure_symbol_is_not_stale_for_another_operator(
-             operator,
-             replacement_symbols
-           ),
-         :ok <- ensure_mint_can_publish(scope) do
+         :ok <- validate_replacement_symbols(replacement_symbols, faction),
+         {:ok, operator, account_token} <-
+           resolve_account_token(%CredentialReference{operator_id: operator_id}),
+         :ok <- ensure_symbol_is_not_stale_for_another_operator(operator, replacement_symbols) do
+      {:ok,
+       %{
+         operator: operator,
+         account_token: account_token,
+         faction: faction,
+         replacement_symbols: replacement_symbols,
+         registration_symbols: registration_symbols(attrs, replacement_symbols)
+       }}
+    end
+  end
+
+  defp do_mint(scope, attrs, operator_id) do
+    with {:ok, plan} <- prepare_mint(scope, attrs, operator_id) do
+      %{operator: operator} = plan
       revision = active_revision(operator.id)
 
       registration_result =
@@ -156,9 +305,9 @@ defmodule SpaceTraders.FleetGeneration do
           [operator_id: operator.id, strategy_revision_id: revision && revision.id],
           fn ->
             register_first_available(
-              account_token,
-              registration_symbols,
-              get_field(changeset, :faction),
+              plan.account_token,
+              plan.registration_symbols,
+              plan.faction,
               operator.email
             )
           end
@@ -167,21 +316,13 @@ defmodule SpaceTraders.FleetGeneration do
       case registration_result do
         {:ok, %{token: agent_token, agent: %GameAgent{}} = registration} ->
           replace_stale_agent_and_create(operator, registration, agent_token,
-            faction: get_field(changeset, :faction),
-            replacement_symbols: replacement_symbols
+            faction: plan.faction,
+            replacement_symbols: plan.replacement_symbols
           )
 
         {:error, _reason} = error ->
           error
       end
-    end
-  end
-
-  defp ensure_mint_can_publish(scope) do
-    case current_fleet(scope) do
-      {:ok, %{state: state}} when state in [:empty, :transition] -> :ok
-      {:ok, %{state: :current}} -> {:error, :current_fleet_exists}
-      {:error, error} -> {:error, error}
     end
   end
 
@@ -578,74 +719,55 @@ defmodule SpaceTraders.FleetGeneration do
     end
   end
 
+  # Runs inside the establishment transaction; side effects follow its commit.
   defp replace_stale_agent_and_create(operator, registration, agent_token, opts) do
     game_agent = registration.agent
     faction = Keyword.fetch!(opts, :faction)
     replacement_symbols = Keyword.fetch!(opts, :replacement_symbols)
+    stale_ids = stale_agent_ids(operator, game_agent.symbol)
 
-    with {:ok, {agent, generation, retired_symbols, ship_symbols}} <-
-           Repo.transaction(fn ->
-             stale_ids = stale_agent_ids(operator, game_agent.symbol)
+    predecessors =
+      Repo.all(
+        from generation in Generation,
+          where:
+            generation.operator_id == ^operator.id and
+              generation.agent_id in ^stale_ids and is_nil(generation.retired_at),
+          order_by: [desc: generation.number]
+      )
 
-             predecessors =
-               Repo.all(
-                 from generation in Generation,
-                   where:
-                     generation.operator_id == ^operator.id and
-                       generation.agent_id in ^stale_ids and is_nil(generation.retired_at),
-                   order_by: [desc: generation.number]
-               )
+    predecessor = List.first(predecessors)
 
-             predecessor = List.first(predecessors)
+    {retired_symbols, ship_symbols} =
+      stale_ids
+      |> Enum.map(&retire_stale_agent/1)
+      |> Enum.unzip()
+      |> then(fn {symbols, ships} -> {List.flatten(symbols), List.flatten(ships)} end)
 
-             {retired_symbols, ship_symbols} =
-               stale_ids
-               |> Enum.map(&retire_stale_agent/1)
-               |> Enum.unzip()
-               |> then(fn {symbols, ships} -> {List.flatten(symbols), List.flatten(ships)} end)
+    case SpaceTraders.Agent.store_agent(operator, game_agent, agent_token, faction) do
+      {:ok, agent} ->
+        bootstrap_ships(agent, Map.get(registration, :ships, []))
 
-             case SpaceTraders.Agent.store_agent(operator, game_agent, agent_token, faction) do
-               {:ok, agent} ->
-                 bootstrap_ships(agent, Map.get(registration, :ships, []))
+        generation =
+          establish_generation!(
+            operator,
+            agent,
+            predecessor,
+            replacement_symbols,
+            faction,
+            game_agent.credits
+          )
 
-                 generation =
-                   establish_generation!(
-                     operator,
-                     agent,
-                     predecessor,
-                     replacement_symbols,
-                     faction,
-                     game_agent.credits
-                   )
-
-                 Enum.each(
-                   predecessors,
-                   &retire_generation(&1, generation.strategy_capable_at || Clock.utc_now())
-                 )
-
-                 :ok = Identity.publish_generation!(operator.id, generation.id)
-
-                 {agent, generation, retired_symbols, ship_symbols}
-
-               {:error, changeset} ->
-                 changeset
-                 |> Ecto.Changeset.delete_change(:agent_token)
-                 |> Repo.rollback()
-             end
-           end) do
-      Enum.each(ship_symbols, &ShipServer.stop/1)
-      if generation.fleet_strategy_revision_id, do: _ = request_intelligence(agent)
-
-      scope = Scope.for_operator(operator)
-
-      :ok =
-        OperatorConditions.resolve_objective_conditions(
-          scope,
-          generation.id,
-          generation.fleet_strategy_revision_id
+        Enum.each(
+          predecessors,
+          &retire_generation(&1, generation.strategy_capable_at || Clock.utc_now())
         )
 
-      {:ok, %{agent: %{agent | agent_token: nil}, retired_symbols: retired_symbols}}
+        :ok = Identity.publish_generation!(operator.id, generation.id)
+
+        {:ok, {agent, generation, retired_symbols, ship_symbols}}
+
+      {:error, changeset} ->
+        {:error, Ecto.Changeset.delete_change(changeset, :agent_token)}
     end
   end
 

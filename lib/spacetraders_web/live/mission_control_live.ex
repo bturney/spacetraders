@@ -55,6 +55,11 @@ defmodule SpaceTradersWeb.MissionControlLive do
               navigate={~p"/agents/new"}
               class="btn btn-outline"
             >Mint an Agent</.link>
+            <.link
+              :if={@projection.current_fleet.state == :empty}
+              navigate={~p"/operators/settings#import-agent"}
+              class="btn btn-ghost"
+            >Import an existing Agent</.link>
           </div>
         </section>
 

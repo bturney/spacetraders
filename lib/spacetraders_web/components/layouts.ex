@@ -65,7 +65,6 @@ defmodule SpaceTradersWeb.Layouts do
                 <ul class="menu dropdown-content z-20 w-52 rounded-xl border border-base-300 bg-base-100 p-2 shadow-lg">
                   <li><.link navigate={~p"/activity"}>Activity</.link></li>
                   <li><.link navigate={~p"/generations"}>Generations</.link></li>
-                  <li><.link navigate={~p"/agents/new"}>Mint agent</.link></li>
                   <li><.link navigate={~p"/operators/settings"}>Settings</.link></li>
                   <li><.link href={~p"/operators/log-out"} method="delete">Log out</.link></li>
                 </ul>

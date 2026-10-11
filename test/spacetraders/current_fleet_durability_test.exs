@@ -279,6 +279,158 @@ defmodule SpaceTraders.CurrentFleetDurabilityTest do
     assert generation.agent_id == agent.id
   end
 
+  describe "competing establishment" do
+    setup %{operator: operator} do
+      {:ok, operator} = Agent.link_account_token(operator, "ACCOUNT_SECRET")
+      parent = self()
+
+      # Every game request is observed and held in flight until released.
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        send(parent, {:game_request, self(), conn.method, conn.request_path})
+
+        receive do
+          :respond -> :ok
+        after
+          5000 -> flunk("held game request was not released")
+        end
+
+        case conn.request_path do
+          "/v2/register" ->
+            Req.Test.json(conn, registration("FIRST_SECRET"))
+
+          "/v2/my/agent" ->
+            Req.Test.json(conn, %{
+              "data" => %{
+                "symbol" => "ORBITALIST",
+                "headquarters" => "X1-UX81-A1",
+                "credits" => 42_000,
+                "startingFaction" => "COSMIC"
+              }
+            })
+
+          "/v2/my/ships" ->
+            Req.Test.json(conn, %{
+              "data" => [],
+              "meta" => %{"total" => 0, "page" => 1, "limit" => 20}
+            })
+        end
+      end)
+
+      %{operator: operator, scope: operator_scope_fixture(operator)}
+    end
+
+    @tag mint_proof: true
+    test "a second mint waits in PostgreSQL during registration and never dispatches its own",
+         %{scope: scope} do
+      first = contender(fn -> FleetGeneration.mint(scope, mint("ORBITALIST")) end)
+      assert_receive {:game_request, sender, "POST", "/v2/register"}
+
+      second = contender(fn -> FleetGeneration.mint(scope, mint("PARALLAX")) end)
+      await_blocked_by(second.backend, first.backend)
+      refute_received {:game_request, _, _, _}
+
+      send(sender, :respond)
+      assert {:ok, %{agent: established}} = Task.await(first.task)
+      assert {:error, :current_fleet_exists} = Task.await(second.task)
+      refute_received {:game_request, _, _, _}
+      assert_sole_current(scope, established, "FIRST_SECRET")
+    end
+
+    @tag mint_proof: true
+    test "an import competing with registration waits and cannot add a second Agent",
+         %{scope: scope} do
+      minting = contender(fn -> FleetGeneration.mint(scope, mint("ORBITALIST")) end)
+      assert_receive {:game_request, sender, "POST", "/v2/register"}
+
+      importing =
+        contender(fn -> FleetGeneration.import_agent(scope, "IMPORTED_SECRET", true) end)
+
+      await_blocked_by(importing.backend, minting.backend)
+
+      send(sender, :respond)
+      assert {:ok, %{agent: established}} = Task.await(minting.task)
+      assert {:error, :current_fleet_exists} = Task.await(importing.task)
+      refute_received {:game_request, _, _, _}
+      assert_sole_current(scope, established, "FIRST_SECRET")
+    end
+
+    @tag mint_proof: true
+    test "a mint competing with an in-flight import waits and dispatches no registration",
+         %{scope: scope} do
+      importing =
+        contender(fn -> FleetGeneration.import_agent(scope, "IMPORTED_SECRET", true) end)
+
+      assert_receive {:game_request, reader, "GET", "/v2/my/agent"}
+
+      minting = contender(fn -> FleetGeneration.mint(scope, mint("PARALLAX")) end)
+      await_blocked_by(minting.backend, importing.backend)
+
+      send(reader, :respond)
+      assert_receive {:game_request, ships_reader, "GET", "/v2/my/ships"}
+      send(ships_reader, :respond)
+      assert {:ok, established} = Task.await(importing.task)
+      assert {:error, :current_fleet_exists} = Task.await(minting.task)
+      refute_received {:game_request, _, _, _}
+      assert_sole_current(scope, established, "IMPORTED_SECRET")
+    end
+  end
+
+  defp mint(symbol), do: %{symbol: symbol, faction: "COSMIC"}
+
+  # An independent PostgreSQL session: its own checkout, committed results only.
+  defp contender(establish) do
+    parent = self()
+    ref = make_ref()
+
+    task =
+      Task.async(fn ->
+        receive do
+          :go -> :ok
+        end
+
+        Repo.checkout(fn ->
+          [[backend]] = Repo.query!("SELECT pg_backend_pid()").rows
+          send(parent, {:backend, ref, backend})
+          establish.()
+        end)
+      end)
+
+    Req.Test.allow(SpaceTraders.API, self(), task.pid)
+    send(task.pid, :go)
+    assert_receive {:backend, ^ref, backend}
+    [[observer]] = Repo.query!("SELECT pg_backend_pid()").rows
+    assert backend != observer
+    %{task: task, backend: backend}
+  end
+
+  defp assert_sole_current(scope, established, token) do
+    assert {:ok, %{state: :current, agent: current, generation: generation}} =
+             FleetGeneration.current_fleet(scope)
+
+    assert current.id == established.id
+    assert generation.agent_id == established.id
+    assert [only] = Agent.list_agents(Agent.get_operator!(scope.operator.id))
+    assert only.id == established.id
+    assert only.agent_token == token
+    assert [^generation] = FleetGeneration.list_generations(scope)
+  end
+
+  defp await_blocked_by(backend, holder, remaining \\ 500)
+
+  defp await_blocked_by(_backend, _holder, 0),
+    do: flunk("contender did not wait on the establishment holder in PostgreSQL")
+
+  defp await_blocked_by(backend, holder, remaining) do
+    case Repo.query!("SELECT pg_blocking_pids($1)", [backend]).rows do
+      [[[^holder]]] ->
+        :ok
+
+      _ ->
+        Process.sleep(10)
+        await_blocked_by(backend, holder, remaining - 1)
+    end
+  end
+
   defp await_blocked(backend, remaining \\ 500)
   defp await_blocked(_backend, 0), do: flunk("initializer did not wait on the PostgreSQL lock")
 

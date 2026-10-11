@@ -383,15 +383,24 @@ defmodule SpaceTraders.FleetGenerationTest do
     Req.Test.stub(SpaceTraders.API, fn conn ->
       assert conn.method == "GET"
 
-      Req.Test.json(conn, %{
-        "data" => %{
-          "symbol" => "IMPORTED",
-          "headquarters" => "X1-UX81-A1",
-          "credits" => 175_000,
-          "startingFaction" => "COSMIC",
-          "shipCount" => 0
-        }
-      })
+      case conn.request_path do
+        "/v2/my/agent" ->
+          Req.Test.json(conn, %{
+            "data" => %{
+              "symbol" => "IMPORTED",
+              "headquarters" => "X1-UX81-A1",
+              "credits" => 175_000,
+              "startingFaction" => "COSMIC",
+              "shipCount" => 0
+            }
+          })
+
+        "/v2/my/ships" ->
+          Req.Test.json(conn, %{
+            "data" => [],
+            "meta" => %{"total" => 0, "page" => 1, "limit" => 20}
+          })
+      end
     end)
 
     assert {:ok, imported} = Agent.import_agent(scope, "IMPORTED_AGENT_TOKEN", true)

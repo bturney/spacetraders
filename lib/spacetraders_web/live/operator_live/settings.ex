@@ -51,31 +51,44 @@ defmodule SpaceTradersWeb.OperatorLive.Settings do
 
       <div class="divider" />
 
-      <.form for={@import_agent_form} id="import_agent_form" phx-submit="import_agent">
-        <.header>
-          Import an existing agent
-          <:subtitle>
-            An AccountToken can mint new agents but cannot recover an existing AgentToken.
-            Paste the AgentToken from my.spacetraders.io to import that agent safely.
-          </:subtitle>
-        </.header>
-        <.input
-          field={@import_agent_form[:agent_token]}
-          type="password"
-          label="AgentToken"
-          autocomplete="off"
-          spellcheck="false"
-          required
-        />
-        <.input
-          field={@import_agent_form[:confirmed]}
-          type="checkbox"
-          label="I confirm this AgentToken belongs to my agent and I want to import it."
-        />
-        <.button variant="primary" phx-disable-with="Importing...">
-          Import agent
-        </.button>
-      </.form>
+      <section id="import-agent">
+        <p :if={@import_unavailable} class="text-sm opacity-70">{@import_unavailable}</p>
+        <.form
+          :if={!@import_unavailable}
+          for={@import_agent_form}
+          id="import_agent_form"
+          phx-submit="import_agent"
+        >
+          <.header>
+            Import an existing agent
+            <:subtitle>
+              For initial setup: an AccountToken can mint an Agent but cannot recover an existing
+              AgentToken. Paste the AgentToken from my.spacetraders.io to import that Agent safely.
+            </:subtitle>
+          </.header>
+          <.input
+            field={@import_agent_form[:agent_token]}
+            type="password"
+            label="AgentToken"
+            autocomplete="off"
+            spellcheck="false"
+            required
+          />
+          <.input
+            field={@import_agent_form[:confirmed]}
+            type="checkbox"
+            label="I confirm this AgentToken belongs to my agent and I want to import it."
+          />
+          <.button variant="primary" phx-disable-with="Importing...">
+            Import agent
+          </.button>
+          <p class="mt-3 text-sm opacity-70">
+            No existing Agent?
+            <.link navigate={~p"/agents/new"} class="link link-primary">Mint an Agent</.link>
+            instead.
+          </p>
+        </.form>
+      </section>
 
       <div class="divider" />
 
@@ -169,6 +182,7 @@ defmodule SpaceTradersWeb.OperatorLive.Settings do
       |> assign(:form_drafts, %{})
       |> assign(:account_token_linked?, Agent.account_token_linked?(socket.assigns.current_scope))
       |> assign(:import_agent_form, import_agent_form())
+      |> assign_import_availability()
       |> assign_account_token_form()
 
     {:ok, socket}
@@ -218,6 +232,21 @@ defmodule SpaceTradersWeb.OperatorLive.Settings do
         {:noreply,
          socket
          |> put_flash(:info, "Agent #{agent.symbol} imported.")
+         |> assign(:import_agent_form, import_agent_form())
+         |> assign_import_availability()}
+
+      {:error, reason} when reason in [:current_fleet_exists, :fleet_transition_pending] ->
+        socket = assign_import_availability(socket)
+
+        {:noreply,
+         socket
+         |> put_flash(:error, "#{socket.assigns.import_unavailable} No Agent was imported.")
+         |> assign(:import_agent_form, import_agent_form())}
+
+      {:error, %{summary: summary}} ->
+        {:noreply,
+         socket
+         |> put_flash(:error, summary)
          |> assign(:import_agent_form, import_agent_form())}
 
       {:error, :confirmation_required} ->
@@ -321,6 +350,26 @@ defmodule SpaceTradersWeb.OperatorLive.Settings do
     socket
     |> update(:form_drafts, &Map.put(&1, :account_token, draft))
     |> assign(:account_token_form, to_form(changeset, as: "operator"))
+  end
+
+  # Import is initial setup only; it is never a mid-game replacement mode.
+  defp assign_import_availability(socket) do
+    unavailable =
+      case SpaceTraders.FleetGeneration.current_fleet(socket.assigns.current_scope) do
+        {:ok, %{state: :empty}} ->
+          nil
+
+        {:ok, %{state: :current, agent: agent}} ->
+          "This deployment already has a current Agent, #{agent.symbol}. Import is only for initial setup."
+
+        {:ok, %{state: :transition}} ->
+          "A Fleet transition is in progress. Import is only for initial setup."
+
+        {:error, %{summary: summary}} ->
+          summary
+      end
+
+    assign(socket, :import_unavailable, unavailable)
   end
 
   defp import_agent_form do

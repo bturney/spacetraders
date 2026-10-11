@@ -96,6 +96,39 @@ defmodule SpaceTraders.FleetGeneration.Identity do
     error in Postgrex.Error -> preflight_error(error)
   end
 
+  @doc """
+  Takes the durable establishment authority inside the caller's transaction.
+
+  The sole Operator's row is the lock: every mint and import for this
+  deployment queues on it in PostgreSQL, across processes and app instances,
+  before dispatching any game request. `FOR NO KEY UPDATE` leaves session
+  logins (foreign-key share locks) and adoption's table locks unblocked.
+  Returns the identity as committed by any earlier establishment.
+  """
+  def lock_establishment(operator_id) do
+    %{rows: locked} =
+      Repo.query!(
+        """
+        SELECT o.id FROM operators o
+        JOIN current_fleet_identity i ON i.id = 1 AND i.operator_id = o.id
+        WHERE o.id = $1 FOR NO KEY UPDATE OF o
+        """,
+        [operator_id]
+      )
+
+    if locked == [] do
+      {:error,
+       %{
+         reason: :not_deployment_operator,
+         summary: "Sign in as the deployment Operator to access the current Fleet."
+       }}
+    else
+      {:ok, read!()}
+    end
+  rescue
+    error in Postgrex.Error -> preflight_error(error)
+  end
+
   @doc "Publishes a successful lifecycle transition inside its existing transaction."
   def publish_generation!(operator_id, generation_id) do
     %{num_rows: published} =

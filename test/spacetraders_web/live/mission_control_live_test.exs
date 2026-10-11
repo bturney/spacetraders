@@ -22,8 +22,30 @@ defmodule SpaceTradersWeb.MissionControlLiveTest do
     assert html =~ "Set the Fleet direction"
     assert has_element?(view, "#mission-onboarding a[href='/strategy']", "Review Fleet Strategy")
     assert has_element?(view, "#mission-onboarding a[href='/agents/new']", "Mint an Agent")
+
+    assert has_element?(
+             view,
+             "#mission-onboarding a[href='/operators/settings#import-agent']",
+             "Import an existing Agent"
+           )
+
     assert html =~ "No active revision"
     assert html =~ "No current Fleet Generation"
+  end
+
+  test "a current Fleet needs no Agent selection and offers no add-another Agent path", %{
+    conn: conn,
+    operator: operator
+  } do
+    agent_fixture(operator, %{symbol: "ORBITALIST", agent_token: nil})
+
+    {:ok, view, _html} = live(conn, ~p"/mission-control")
+
+    assert has_element?(view, "#strategy-context", "ORBITALIST")
+    refute has_element?(view, "#current-fleet-state")
+    refute has_element?(view, "a[href='/agents/new']")
+    refute has_element?(view, "a[href='/operators/settings#import-agent']")
+    refute has_element?(view, "select[name*='agent']")
   end
 
   test "shows active Strategy intent and truthful unknown objective evaluation", %{

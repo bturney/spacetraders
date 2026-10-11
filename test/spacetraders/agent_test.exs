@@ -838,19 +838,27 @@ defmodule SpaceTraders.AgentTest do
       operator = operator_fixture()
 
       Req.Test.stub(SpaceTraders.API, fn conn ->
-        assert conn.request_path == "/v2/my/agent"
         assert Plug.Conn.get_req_header(conn, "authorization") == ["Bearer AGENT_TOKEN"]
 
-        Req.Test.json(conn, %{
-          "data" => %{
-            "accountId" => "ACCOUNT",
-            "symbol" => "ORBITALIST",
-            "credits" => 42_000,
-            "headquarters" => "X1-UX81-A1",
-            "startingFaction" => "COSMIC",
-            "shipCount" => 1
-          }
-        })
+        case conn.request_path do
+          "/v2/my/agent" ->
+            Req.Test.json(conn, %{
+              "data" => %{
+                "accountId" => "ACCOUNT",
+                "symbol" => "ORBITALIST",
+                "credits" => 42_000,
+                "headquarters" => "X1-UX81-A1",
+                "startingFaction" => "COSMIC",
+                "shipCount" => 0
+              }
+            })
+
+          "/v2/my/ships" ->
+            Req.Test.json(conn, %{
+              "data" => [],
+              "meta" => %{"total" => 0, "page" => 1, "limit" => 20}
+            })
+        end
       end)
 
       assert {:ok, imported} =
@@ -881,24 +889,18 @@ defmodule SpaceTraders.AgentTest do
       assert Repo.aggregate(SpaceTraders.Agent.Agent, :count, :id) == 0
     end
 
-    test "does not import a duplicate symbol" do
+    test "does not import over a current Fleet, even its own symbol" do
       operator = operator_fixture()
       agent_fixture(operator, %{symbol: "ORBITALIST"})
 
-      Req.Test.stub(SpaceTraders.API, fn conn ->
-        Req.Test.json(conn, %{
-          "data" => %{
-            "symbol" => "ORBITALIST",
-            "credits" => 0,
-            "headquarters" => "X1-UX81-A1",
-            "startingFaction" => "COSMIC",
-            "shipCount" => 1
-          }
-        })
+      Req.Test.stub(SpaceTraders.API, fn _conn ->
+        flunk("import over a current Fleet must not contact the game")
       end)
 
       assert Agent.import_agent(Scope.for_operator(operator), "AGENT_TOKEN", true) ==
-               {:error, :agent_already_imported}
+               {:error, :current_fleet_exists}
+
+      assert [%{symbol: "ORBITALIST"}] = Agent.list_agents(operator)
     end
 
     test "does not persist an invalid AgentToken" do

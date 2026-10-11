@@ -13,9 +13,8 @@ defmodule SpaceTraders.Agent do
   alias SpaceTraders.Repo
 
   alias SpaceTraders.API.Model.Agent, as: GameAgent
-  alias SpaceTraders.API.AgentTokenReference
   alias SpaceTraders.Agent.{Agent, Operator, OperatorToken, OperatorNotifier, Scope}
-  alias SpaceTraders.{Evidence, FleetGeneration}
+  alias SpaceTraders.FleetGeneration
 
   ## Database getters
 
@@ -219,44 +218,11 @@ defmodule SpaceTraders.Agent do
   defdelegate handle_game_result(agent, result), to: FleetGeneration
 
   @doc """
-  Imports an existing game agent after explicitly validating its AgentToken.
+  Imports an existing game agent as the initial current Fleet.
 
-  The AccountToken cannot recover AgentTokens, so this flow never calls the
-  registration endpoint. It reads the agent through the authenticated game API
-  and stores the supplied token encrypted with the resulting metadata.
+  Compatibility entry point; Fleet Generation owns establishment.
   """
-  def import_agent(%Scope{operator: %Operator{} = operator}, agent_token, true)
-      when is_binary(agent_token) and agent_token != "" do
-    credential_ref = AgentTokenReference.temporary(agent_token)
-
-    try do
-      with {:ok, %GameAgent{} = game_agent} <- Evidence.get_agent(credential_ref),
-           :ok <- ensure_agent_is_new(game_agent.symbol) do
-        create_imported_agent(operator, game_agent, agent_token)
-      end
-    after
-      AgentTokenReference.release(credential_ref)
-    end
-  end
-
-  def import_agent(_scope, _agent_token, false), do: {:error, :confirmation_required}
-  def import_agent(_scope, _agent_token, _confirmed), do: {:error, :agent_token_required}
-
-  defp ensure_agent_is_new(symbol) do
-    if Repo.get_by(Agent, symbol: symbol), do: {:error, :agent_already_imported}, else: :ok
-  end
-
-  defp create_imported_agent(operator, game_agent, agent_token) do
-    case store_agent(operator, game_agent, agent_token, game_agent.starting_faction) do
-      {:error, %Ecto.Changeset{} = changeset} ->
-        if Keyword.has_key?(changeset.errors, :symbol),
-          do: {:error, :agent_already_imported},
-          else: {:error, changeset}
-
-      {:ok, _agent} = result ->
-        result
-    end
-  end
+  defdelegate import_agent(scope, agent_token, confirmed), to: FleetGeneration
 
   @doc false
   def store_agent(
