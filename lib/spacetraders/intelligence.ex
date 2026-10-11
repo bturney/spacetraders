@@ -53,8 +53,12 @@ defmodule SpaceTraders.Intelligence do
   ]
   @marketplace_trait "MARKETPLACE"
   # The established Market Listing freshness budget. It applies to Market
-  # Listings only, never to Waypoint or resource facts.
-  @market_freshness_seconds 300
+  # Listings only, never to Waypoint or resource facts. Thirty minutes: a
+  # trade's evidence must outlive a typical flight between Marketplaces.
+  @market_freshness_seconds 1800
+
+  @doc "The Market Listing freshness budget, in seconds. The one source of truth."
+  def market_freshness_seconds, do: @market_freshness_seconds
 
   @doc "Records a Survey returned by an on-site survey action."
   def record_survey(%AgentRecord{} = agent, survey, waypoint_symbol, opts \\ []) do

@@ -87,7 +87,7 @@ defmodule SpaceTraders.NeutralWaitReconciliationTest do
          generation: generation,
          capacity: capacity
        } do
-    demand = request_market_demand(agent, revision, DateTime.add(capacity.observed_at, 300))
+    demand = request_market_demand(agent, revision, DateTime.add(capacity.observed_at, 1800))
 
     assert {:ok, %{action: :no_admissible_commitment, selection: %{commitments: []}}} =
              FleetExecution.reconcile_market_domain(scope, agent, revision, @system, capacity)
@@ -122,7 +122,7 @@ defmodule SpaceTraders.NeutralWaitReconciliationTest do
          generation: generation,
          capacity: capacity
        } do
-    demand = request_market_demand(agent, revision, DateTime.add(capacity.observed_at, 300))
+    demand = request_market_demand(agent, revision, DateTime.add(capacity.observed_at, 1800))
 
     assert {:ok, %{action: :no_admissible_commitment}} =
              FleetExecution.reconcile_market_domain(scope, agent, revision, @system, capacity)
@@ -136,7 +136,7 @@ defmodule SpaceTraders.NeutralWaitReconciliationTest do
     assert same_id == original.id
 
     assert {:ok, _replacement} =
-             Evidence.replace_demand(demand, %{due_at: DateTime.add(capacity.observed_at, 600)})
+             Evidence.replace_demand(demand, %{due_at: DateTime.add(capacity.observed_at, 2400)})
 
     assert {:ok, %{action: :no_admissible_commitment}} =
              FleetExecution.reconcile_market_domain(scope, agent, revision, @system, capacity)
@@ -190,7 +190,7 @@ defmodule SpaceTraders.NeutralWaitReconciliationTest do
          ship: ship,
          capacity: capacity
        } do
-    _demand = request_market_demand(agent, revision, DateTime.add(capacity.observed_at, 300))
+    _demand = request_market_demand(agent, revision, DateTime.add(capacity.observed_at, 1800))
 
     stub_availability(ship, %{"symbol" => agent.symbol})
 
@@ -208,7 +208,7 @@ defmodule SpaceTraders.NeutralWaitReconciliationTest do
          generation: generation,
          capacity: capacity
        } do
-    _demand = request_market_demand(agent, revision, DateTime.add(capacity.observed_at, 300))
+    _demand = request_market_demand(agent, revision, DateTime.add(capacity.observed_at, 1800))
 
     for deferred <- [
           CapacityDispositions.defer(capacity.observed_at),
@@ -230,7 +230,7 @@ defmodule SpaceTraders.NeutralWaitReconciliationTest do
          ship: ship,
          capacity: capacity
        } do
-    _demand = request_market_demand(agent, revision, DateTime.add(capacity.observed_at, 300))
+    _demand = request_market_demand(agent, revision, DateTime.add(capacity.observed_at, 1800))
     ship_symbol = ship.symbol
 
     Phoenix.PubSub.subscribe(SpaceTraders.PubSub, "fleet_allocation:#{agent.operator_id}")
@@ -270,7 +270,7 @@ defmodule SpaceTraders.NeutralWaitReconciliationTest do
              Evidence.request_demand(agent, revision, %{
                subject: @market_subject,
                required_facts: ["trade_goods"],
-               freshness_seconds: 300,
+               freshness_seconds: 1800,
                due_at: due_at,
                owner: "fleet_planning"
              })

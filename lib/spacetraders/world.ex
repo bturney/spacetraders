@@ -2,6 +2,8 @@ defmodule SpaceTraders.World do
   alias SpaceTraders.Agent.Agent, as: AgentRecord
   alias SpaceTraders.Intelligence
 
+  # `freshness_seconds` judges Waypoint, Shipyard and Construction facts; the
+  # Market Listing always uses the Market freshness budget.
   def waypoints(%AgentRecord{} = agent, system, as_of, freshness_seconds)
       when is_binary(system) and is_struct(as_of, DateTime) and
              is_integer(freshness_seconds) and freshness_seconds >= 0 do
@@ -12,7 +14,17 @@ defmodule SpaceTraders.World do
 
       waypoint
       |> Map.put(:symbol, symbol)
-      |> Map.put(:market, intelligence(agent, :market, system, symbol, as_of, freshness_seconds))
+      |> Map.put(
+        :market,
+        intelligence(
+          agent,
+          :market,
+          system,
+          symbol,
+          as_of,
+          Intelligence.market_freshness_seconds()
+        )
+      )
       |> Map.put(
         :shipyard,
         intelligence(agent, :shipyard, system, symbol, as_of, freshness_seconds)
@@ -25,7 +37,7 @@ defmodule SpaceTraders.World do
   end
 
   # A FUEL Listing older than this is not a confirmed fuel stop.
-  @fuel_listing_freshness_seconds 300
+  @fuel_listing_freshness_seconds Intelligence.market_freshness_seconds()
 
   @doc """
   Known Waypoint coordinates in `system`. Coordinates are static game facts,
