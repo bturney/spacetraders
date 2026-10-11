@@ -142,8 +142,7 @@ defmodule SpaceTraders.FleetPlanning do
             # One bounded Coverage Contribution collects every open initial
             # Marketplace subject; each contributes one Observation Demand so
             # the subjects stay independently attributable.
-            demand =
-              coverage_demand(revision, objective_index, snapshot, choice, as_of, freshness)
+            demand = coverage_demand(revision, objective_index, snapshot, choice, as_of)
 
             {:cont, {candidates, [demand | demands], limitations, [choice | coverage]}}
 
@@ -153,7 +152,7 @@ defmodule SpaceTraders.FleetPlanning do
               required_facts: opportunity.required_facts,
               owner: "fleet_planning",
               deadline_at: deadline,
-              freshness_seconds: freshness,
+              freshness_seconds: fact_freshness(type, freshness),
               agent_id: Map.get(snapshot, :agent_id),
               strategy_revision_id: revision.id,
               strategic_priority: objective_index,
@@ -1976,9 +1975,7 @@ defmodule SpaceTraders.FleetPlanning do
            Map.get(opportunity, :required_capabilities, []),
          true <- Enum.all?(capabilities, &valid_capability?/1),
          true <- is_integer(freshness) and freshness >= 0 do
-      # A Market Listing is always judged by the Market freshness budget; the
-      # snapshot's freshness governs Waypoint and Shipyard facts.
-      freshness = if type == "market", do: @market_evidence_freshness_seconds, else: freshness
+      freshness = fact_freshness(type, freshness)
       missing = Enum.reject(facts, &fresh_intelligence?(observed[&1], as_of, freshness))
 
       cond do
@@ -2007,13 +2004,18 @@ defmodule SpaceTraders.FleetPlanning do
   # One open coverage Observation Demand per subject, due now through the
   # shared Market timing policy. Structural value admits the bounded
   # contribution but does not invent a numeric per-subject estimate.
-  defp coverage_demand(revision, objective_index, snapshot, choice, as_of, freshness) do
+  # A Market Listing is always judged by the Market freshness budget; the
+  # snapshot's freshness governs Waypoint and Shipyard facts.
+  defp fact_freshness("market", _snapshot_freshness), do: @market_evidence_freshness_seconds
+  defp fact_freshness(_type, snapshot_freshness), do: snapshot_freshness
+
+  defp coverage_demand(revision, objective_index, snapshot, choice, as_of) do
     market_refresh_demand(%{
       subject: choice.subject,
       observed_at: as_of,
       fresh: false,
       as_of: as_of,
-      freshness_seconds: freshness,
+      freshness_seconds: @market_evidence_freshness_seconds,
       objective_index: objective_index,
       agent_id: Map.get(snapshot, :agent_id),
       strategy_revision_id: revision.id

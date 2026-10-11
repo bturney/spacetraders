@@ -784,7 +784,7 @@ defmodule SpaceTraders.FleetPlanningTest do
 
     assert {:ok, planning} = FleetPlanning.plan_intelligence(revision(), 0, snapshot)
 
-    assert [%Demand{subject: "market:X1:X1-A1", expected_value: 55}] =
+    assert [%Demand{subject: "market:X1:X1-A1", expected_value: 55, freshness_seconds: 1_800}] =
              planning.observation_demands
 
     assert [%CandidateContribution{kind: :intelligence_acquisition} = candidate] =
@@ -841,6 +841,10 @@ defmodule SpaceTraders.FleetPlanningTest do
              {"market:X1:X1-A2", nil},
              {"market:X1:X1-A3", nil}
            ]
+
+    # The snapshot's 300s governs Waypoint facts; a Market Listing Demand
+    # carries the Market Listing freshness budget.
+    assert Enum.map(demands, & &1.freshness_seconds) == [1_800, 1_800]
   end
 
   test "ship acquisition proposals retain alternatives and reserve purchase plus preparation exposure" do
