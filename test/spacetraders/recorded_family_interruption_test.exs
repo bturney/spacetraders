@@ -285,9 +285,10 @@ defmodule SpaceTraders.RecordedFamilyInterruptionTest do
             "shipSymbol" => ship.symbol,
             "tradeSymbol" => "FUEL",
             "waypointSymbol" => "X1-UX81-A1",
+            # 50 Ship fuel units bill one Market unit at the quoted price.
             "units" => 50,
             "pricePerUnit" => 2,
-            "totalPrice" => 100
+            "totalPrice" => 2
           },
           "cooldown" => %{
             "shipSymbol" => ship.symbol,

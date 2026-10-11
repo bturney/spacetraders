@@ -422,7 +422,6 @@ defmodule SpaceTraders.API do
         shadow,
         capacity
       )
-      |> record_realized_charge(attempt)
     else
       {:error, reason} ->
         complete_shadow(
@@ -473,7 +472,13 @@ defmodule SpaceTraders.API do
             evidence =
               Map.merge(%{status: status}, SpaceTraders.Outcomes.PostCommit.nav_evidence(decoded))
 
-            case record_mutation_outcome(attempt, :succeeded, evidence) do
+            outcome = record_mutation_outcome(attempt, :succeeded, evidence)
+            # The decoded response is authoritative whether or not the success
+            # write landed; an unresolved attempt later reconciled accepted keeps
+            # its realized charge.
+            record_realized_charge(decoded, attempt)
+
+            case outcome do
               :ok ->
                 complete_shadow(shadow, capacity, status, :ok, {:ok, decoded})
 
@@ -654,8 +659,7 @@ defmodule SpaceTraders.API do
 
   # The decoded success response is the only evidence attributing a realized
   # charge to exactly this attempt; its absence leaves calibration untouched.
-  defp record_realized_charge({:ok, response} = result, %Attempt{} = attempt)
-       when is_map(response) do
+  defp record_realized_charge(response, %Attempt{} = attempt) when is_map(response) do
     # The send already happened; a failed evidence write must not discard the
     # response the caller still needs to settle the selected outcome.
     with true <- is_map(attempt.prepared_evidence["spending"]),
@@ -666,10 +670,10 @@ defmodule SpaceTraders.API do
       )
     end
 
-    result
+    :ok
   end
 
-  defp record_realized_charge(result, _attempt), do: result
+  defp record_realized_charge(_response, _attempt), do: :ok
 
   defp record_mutation_outcome(nil, _classification, _evidence), do: :ok
 

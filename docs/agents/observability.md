@@ -94,8 +94,29 @@ Market trade vs coverage pilot (#671); bounded labels only, IDs in logs:
   `stall_reason` `stale_revision_portfolio` | `authority_blocked_intent` |
   `overdue_demands_without_coverage`; one open per Generation, refreshed in
   place (`last_observed_at`, `observation_count`), closed by `resolved_at`.
+  While open: one Degraded Attention, condition key
+  `allocation-stall:<generation_id>`, `strategy_decision_episode_id` = the
+  stall Episode; resolved by the recovering observation.
+  Mission Control reads it (`MissionControl.market_execution/1` `:dispositions`,
+  `MissionControl.MarketDisposition`): `state` precedence `stalled` (only
+  non-healthy: Degraded Operation, no Operator action), `spending_paused`
+  (open Shortfall: balance, floor, release predicate; never a Neutral Wait),
+  `busy_trade`, `capacity_deferred`, `neutral_wait` (limitation, coverage,
+  last evaluation, next due), `retained_coverage`, `unallocated`. Read-only;
+  overdue Demands alone never make `stalled`.
 - G3 rejected Ship-role alternatives: episode `alternatives` entries with
   `kind = ship_role_alternative`.
+- Realized Market economics (#689): `FleetAllocation.TradeProgress`
+  (`for_episode`/`for_portfolio`/`for_generation`; episode
+  `actual_outcomes` snapshot). `supporting_charges` = one row per
+  refuel/jump attempt: `mutation_attempt_id`, `intent_id` (issuing root
+  Intent), `commitment_id`, `realized_charge` (Realization) or `"unknown"`,
+  `observation_only` (coverage Intent). Trip `net_earnings` = `trade_margin`
+  minus own non-coverage charges; `episode_cash_flow` counts all;
+  `observation_only_spending` separate. Gaps in `unknown` (`supporting_charge`,
+  `net_earnings`, `episode_cash_flow`) name attempt/Commitment and reason.
+  Mission Control: `market_execution/1` `realized` (`net_earnings`,
+  `supporting_cost`, `generation_observation_only_spending`; nil = unknown).
 
 ## Family routing
 

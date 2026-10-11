@@ -24,7 +24,6 @@ defmodule SpaceTraders.CreditCalibration do
   alias SpaceTraders.MutationAttempts.Attempt
 
   @widening_step 10
-  @unresolved_states ["sent_or_unknown", "ambiguous", "bounded_unknown"]
 
   @doc "Returns the active calibration version (the newest durable row)."
   def active do
@@ -75,7 +74,9 @@ defmodule SpaceTraders.CreditCalibration do
   Records the realized charge from a successful credit-bearing response.
 
   Attribution needs the attempt's retained spending bound plus a response
-  transaction for exactly the prepared units and the post-charge Agent credits.
+  transaction for exactly the prepared units (a refuel's Market units or the
+  Ship fuel units they buy) and the post-charge Agent credits. The realized
+  charge is the transaction's total price.
   Anything less records nothing: the shortfall, if any, is found later by a
   credits read and never recalibrates the margin.
   """
@@ -186,7 +187,7 @@ defmodule SpaceTraders.CreditCalibration do
     with bound when is_integer(bound) <- spending["worst_case_exposure"],
          price when is_integer(price) <- spending["unit_price"],
          units when is_integer(units) <- spending["units"],
-         true <- Map.get(transaction, :units) == units,
+         true <- Map.get(transaction, :units) in billed_units(spending),
          true <- Map.get(transaction, :trade_symbol) == spending["trade_symbol"],
          charge when is_integer(charge) and charge >= 0 <- Map.get(transaction, :total_price),
          credits when is_integer(credits) <- Map.get(agent, :credits) do
@@ -197,6 +198,15 @@ defmodule SpaceTraders.CreditCalibration do
   end
 
   defp attributable(_spending, _response), do: :error
+
+  # The units a transaction may echo for exactly the prepared request. A
+  # refuel bills Market units (ceil(fuel/100)) but the game may report the
+  # Ship fuel units it added; either names the same request, nothing looser.
+  defp billed_units(%{"trade_symbol" => "FUEL", "fuel_units" => fuel} = spending)
+       when is_integer(fuel),
+       do: Enum.uniq([spending["units"], fuel])
+
+  defp billed_units(spending), do: [spending["units"]]
 
   defp realize(attempt, spending, facts) do
     version =
@@ -333,16 +343,30 @@ defmodule SpaceTraders.CreditCalibration do
     query =
       from a in Attempt,
         where:
-          a.agent_id == ^agent_id and a.state in @unresolved_states and
+          a.agent_id == ^agent_id and
+            a.state in ^SpaceTraders.MutationAttempts.unresolved_states() and
             a.operation_id in ^CreditSpending.credit_operations()
 
     query = if except_id, do: where(query, [a], a.id != ^except_id), else: query
     Repo.exists?(query)
   end
 
-  defp open_shortfall?(agent_id),
-    do:
-      Repo.exists?(from s in Shortfall, where: s.agent_id == ^agent_id and is_nil(s.released_at))
+  @doc "True while any Shortfall of the Agent is unreleased (new credit-bearing spending paused)."
+  def open_shortfall?(%Agent{id: agent_id}), do: open_shortfall?(agent_id)
+
+  def open_shortfall?(agent_id) when is_integer(agent_id),
+    do: Repo.exists?(open_shortfalls(agent_id))
+
+  @doc "The Agent's oldest unreleased Shortfall, or nil."
+  def oldest_open_shortfall(%Agent{id: agent_id}) do
+    open_shortfalls(agent_id)
+    |> order_by([s], asc: s.detected_at, asc: s.id)
+    |> limit(1)
+    |> Repo.one()
+  end
+
+  defp open_shortfalls(agent_id),
+    do: from(s in Shortfall, where: s.agent_id == ^agent_id and is_nil(s.released_at))
 
   defp balance(%{value: %{credits: credits}, observation: %{observed_at: at, id: id}})
        when is_integer(credits),

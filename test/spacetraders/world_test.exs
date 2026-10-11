@@ -77,8 +77,8 @@ defmodule SpaceTraders.WorldTest do
     now = ~U[2030-01-01 12:00:00Z]
 
     for {symbol, x, listed_at} <- [
-          {"X1-FRESH", 10, ~U[2030-01-01 11:58:00Z]},
-          {"X1-STALE", 20, ~U[2030-01-01 11:00:00Z]}
+          {"X1-FRESH", 10, ~U[2030-01-01 11:40:00Z]},
+          {"X1-STALE", 20, ~U[2030-01-01 11:29:00Z]}
         ] do
       waypoint =
         Waypoint.from_json(%{

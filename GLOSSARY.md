@@ -124,7 +124,7 @@ _Avoid_: fleet objective (for the complete strategic direction), automation
 An immutable snapshot of the outcome-level choices the Operator accepted for a Fleet Strategy, whether selected directly or through a preset. Each current Fleet has at most one active Fleet Strategy Revision. The active revision applies automatically to replacement Fleet Generations; recommendations and product changes never alter it silently.
 
 **Strategy Decision Episode**:
-A durable account of one Fleet Strategy reconciliation decision. It receives a stable identity when allocation selects a plan or deliberately selects a neutral wait, or when Fleet Allocation refuses to publish a selected plan, or finds the Fleet structurally stalled; a refused publication or a structural stall records its reason and is never the Fleet's current allocation result. One structural stall Episode stands for an unchanged stall however often it is observed. It preserves its original evidence references, compact provenance, and expectations, and accumulates outcome evidence until it is explicitly classified as realized, partially realized, superseded, reset-censored, or still evaluating. It connects the active Fleet Strategy Revision and objective evaluations to the evidence considered, admissible alternatives, binding constraints or limitations, selected plan or neutral result, expected and actual outcomes, calibration version, and any later supersession. It is the causal join point for explanation and optimization, not a gameplay action or long-lived plan.
+A durable account of one Fleet Strategy reconciliation decision. It receives a stable identity when allocation selects a plan or deliberately selects a neutral wait, or when Fleet Allocation refuses to publish a selected plan, or finds the Fleet structurally stalled; a refused publication or a structural stall records its reason and is never the Fleet's current allocation result. One structural stall Episode stands for an unchanged stall however often it is observed; Mission Control projects it as Degraded Operation with its release condition and never as a Neutral Wait. It preserves its original evidence references, compact provenance, and expectations, and accumulates outcome evidence until it is explicitly classified as realized, partially realized, superseded, reset-censored, or still evaluating. It connects the active Fleet Strategy Revision and objective evaluations to the evidence considered, admissible alternatives, binding constraints or limitations, selected plan or neutral result, expected and actual outcomes, calibration version, and any later supersession. It is the causal join point for explanation and optimization, not a gameplay action or long-lived plan.
 
 **Outcome Observability**:
 Evidence of whether a Fleet Strategy is achieving its Strategic Objectives, including progress, economics, Fleet productivity, leaderboard movement, constraints, and expected-versus-actual outcomes. Mission Control summarizes it for the Operator; deeper analysis may use the observability platform.
@@ -142,7 +142,7 @@ The sale receipts minus goods-acquisition cost of one causally linked Completed 
 _Avoid_: all-in profit, Episode Cash Flow
 
 **Net Earnings**:
-The revenue of a bounded outcome contribution minus its attributable goods and supporting costs, including fuel where applicable. An exact result requires complete monetary evidence and supported cost attribution; it is distinct from Episode Cash Flow when money movements span unfinished work or multiple contributions.
+The revenue of a bounded outcome contribution minus its attributable goods and supporting costs, including fuel where applicable. An exact result requires complete monetary evidence and supported cost attribution; it is distinct from Episode Cash Flow when money movements span unfinished work or multiple contributions. Fuel is attributed at purchase: a realized refuel charge belongs in full to the root Intent that issued it, hence its Fleet Commitment and original Strategy Decision Episode, even if the fuel is later burned on another trip; a coverage Intent's refuel is observation-only spending, never a trade's cost.
 _Avoid_: Trade Margin (when supporting costs are deducted), Agent balance change
 
 **System Observability**:
@@ -238,7 +238,7 @@ A Shortfall caused by one action's realized charge exceeding its own worst-case 
 _Avoid_: overspend, price miss
 
 **Degraded Operation**:
-Continued autonomous operation while a failing capability or API scope is quarantined. Unaffected planning, timers, telemetry, and admissible gameplay continue while recovery is retried at a sustainable rate.
+Continued autonomous operation while a failing capability or API scope is quarantined, or while Fleet Allocation is structurally stalled (a recorded structural stall Strategy Decision Episode). Unaffected planning, timers, telemetry, and admissible gameplay continue while recovery is retried at a sustainable rate.
 
 **Emergency Stop**:
 Durable Operator-owned state that suppresses every new gameplay mutation, including replacement minting, without cancelling actions already accepted by the game. Safety-critical reconciliation and observation continue; explicit resume starts from authoritative state and fresh planning.

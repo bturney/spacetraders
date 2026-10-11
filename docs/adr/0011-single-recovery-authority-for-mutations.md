@@ -38,6 +38,11 @@ evidence, not the transaction. The Intent is completed only after its attempt is
 reconciled, and each receipt carries the Intent's `mutation_attempt_id` as the
 link. The projection is re-derived on every read and never decides recovery.
 Retaining the transaction in the attempt outcome would remove the deviation.
+Supporting refuel/jump charges (issue 689) need no deviation: each is the
+attempt's own Credit Calibration Realization, joined to its issuing root Intent
+by the attempt's recorded `intent_id`/`commitment_id` provenance. A missing
+Realization or provenance reads as unknown; it never triggers a read, retry or
+reconciliation.
 
 Related: [ADR 0010](0010-autonomous-runtime.md) assigns each mutation exactly
 one owner; this record assigns each mutation exactly one recovery record.

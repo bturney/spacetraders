@@ -4,8 +4,10 @@ defmodule SpaceTradersWeb.MissionControlBriefingTest do
 
   import Phoenix.LiveViewTest
   import SpaceTraders.ShipBody
+  import SpaceTraders.RealizedEconomicsFixtures
 
   alias SpaceTraders.Agent
+  alias SpaceTraders.Repo
   alias SpaceTraders.{Evidence, Fleet, FleetGeneration, FleetStrategy, OperatorConditions}
 
   @symbol "MCCTRL"
@@ -197,6 +199,228 @@ defmodule SpaceTradersWeb.MissionControlBriefingTest do
     refute has_element?(view, "#operating-health", "Fleet health unknown")
     refute has_element?(view, "#operating-health", "Operating normally")
     refute has_element?(view, "#fleet-health", "0 Ships in this Fleet Generation")
+  end
+
+  test "a recorded structural stall is Degraded Operation with its cause, release and Episode link",
+       %{conn: conn, scope: scope} do
+    {agent, generation} = mint_fleet(scope)
+    episode = stall_episode(scope, generation, :overdue_demands_without_coverage)
+
+    {:ok, view, _html} = live(conn, ~p"/mission-control")
+
+    assert has_element?(view, "#operating-health", "Fleet allocation stalled")
+    refute has_element?(view, "#operating-health", "Operating normally")
+    section = "#allocation-disposition-#{agent.symbol}"
+    assert has_element?(view, section, "Degraded Operation")
+    assert has_element?(view, section, "Overdue Market Demands with no coverage")
+    assert has_element?(view, section, "Releases when")
+    assert has_element?(view, section, "No Operator action is needed")
+    assert has_element?(view, "#{section} a[href='/decision-episodes/#{episode.id}']")
+    assert has_element?(view, "#needs-attention", "No unresolved Attention or Intervention.")
+
+    # Normal recovery closes the Episode and the representation clears.
+    episode |> Ecto.Changeset.change(resolved_at: DateTime.utc_now()) |> Repo.update!()
+    {:ok, view, _html} = live(conn, ~p"/mission-control")
+    refute has_element?(view, "#allocation-disposition-#{agent.symbol}", "Degraded Operation")
+    refute has_element?(view, "#operating-health", "Fleet allocation stalled")
+  end
+
+  test "an open Shortfall shows the floor and release predicate, not a stall or Neutral Wait",
+       %{conn: conn, scope: scope} do
+    {agent, _generation} = mint_fleet(scope)
+
+    Repo.insert!(%SpaceTraders.CreditCalibration.Shortfall{
+      agent_id: agent.id,
+      kind: "revision_floor",
+      credits: 900,
+      credit_floor: 50_000,
+      detected_at: DateTime.add(DateTime.utc_now(), -5, :second)
+    })
+
+    # A balance below the floor keeps the pause open (a higher one releases it).
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      case conn.request_path do
+        "/v2/my/agent" ->
+          Req.Test.json(conn, %{
+            "data" => %{
+              "accountId" => "BRIEFING_ACCOUNT",
+              "symbol" => @symbol,
+              "headquarters" => "X1-UX81-A1",
+              "credits" => 900,
+              "startingFaction" => "COSMIC",
+              "shipCount" => 1
+            }
+          })
+
+        _ ->
+          briefing_api(conn)
+      end
+    end)
+
+    {:ok, view, _html} = live(conn, ~p"/mission-control")
+    section = "#allocation-disposition-#{agent.symbol}"
+
+    assert has_element?(view, section, "Shortfall at the credit floor")
+    assert has_element?(view, section, "SHORTFALL")
+    assert has_element?(view, section, "not a Neutral Wait")
+    assert has_element?(view, section, "50000 credit floor")
+    assert has_element?(view, section, "Releases when")
+    refute has_element?(view, section, "STALLED")
+    refute has_element?(view, section, "Degraded Operation")
+  end
+
+  test "a Completed Round Trip shows Net Earnings beside observation-only fuel spending", %{
+    conn: conn,
+    scope: scope
+  } do
+    {_agent, generation} = mint_fleet(scope)
+    portfolio = publish_market!(scope, generation)
+    [commitment] = portfolio.commitments
+    ship = [ship: "#{@symbol}-1"]
+
+    buy = trade_intent!(portfolio, commitment, "buy", 400, 40, ship)
+    refuel!(buy, 144)
+    trade_intent!(portfolio, commitment, "sell", 1_200, 40, ship)
+    # A coverage root Intent's refuel is observation-only spending, never the
+    # trade's cost, even on the same Ship.
+    scouting = intent!(portfolio, commitment, "acquire_intelligence", ship)
+    refuel!(scouting, 300)
+
+    {:ok, view, _html} = live(conn, ~p"/mission-control")
+
+    assert has_element?(view, "#realized-trade-margin", "800 credits")
+    assert has_element?(view, "#realized-net-earnings", "656 credits")
+    assert has_element?(view, "#observation-only-spending", "300 credits")
+  end
+
+  test "an unknown supporting charge renders Net Earnings unknown, never zero", %{
+    conn: conn,
+    scope: scope
+  } do
+    {_agent, generation} = mint_fleet(scope)
+    portfolio = publish_market!(scope, generation)
+    [commitment] = portfolio.commitments
+    ship = [ship: "#{@symbol}-1"]
+
+    buy = trade_intent!(portfolio, commitment, "buy", 400, 40, ship)
+    refuel!(buy, 144, realized: false)
+    trade_intent!(portfolio, commitment, "sell", 1_200, 40, ship)
+
+    {:ok, view, _html} = live(conn, ~p"/mission-control")
+
+    assert has_element?(view, "#realized-trade-margin", "800 credits")
+    assert has_element?(view, "#realized-net-earnings", "Unknown")
+    refute has_element?(view, "#realized-net-earnings", "0 credits")
+  end
+
+  test "a Neutral Wait shows exactly its five summary facts; identity is click-through only",
+       %{conn: conn, scope: scope} do
+    {agent, generation} = mint_fleet(scope)
+    episode = neutral_wait_episode(scope, generation)
+
+    {:ok, view, _html} = live(conn, ~p"/mission-control")
+    section = "#allocation-disposition-#{agent.symbol}"
+    wait = "#{section} #neutral-wait-#{agent.symbol}"
+
+    assert has_element?(view, wait, "no worthwhile admissible contribution")
+    assert has_element?(view, wait, "incomplete coverage")
+    assert has_element?(view, wait, "3 of 5 Marketplaces covered")
+    assert has_element?(view, wait, "Last evaluated 2026-10-11 09:30:00 UTC")
+    assert has_element?(view, wait, "Next due 2026-10-11 10:00:00 UTC")
+    assert has_element?(view, "#{wait} a[href='/decision-episodes/#{episode.id}']")
+    refute has_element?(view, section, "Decision Episode #{episode.id}")
+    refute has_element?(view, section, "Waiting deliberately")
+
+    # The Unallocated Ship's link is causal: the wait's Decision Episode.
+    assert has_element?(
+             view,
+             "#{section} #unallocated-ships-#{agent.symbol} a[href='/decision-episodes/#{episode.id}']",
+             "#{@symbol}-1"
+           )
+  end
+
+  defp neutral_wait_episode(scope, generation) do
+    revision = FleetStrategy.get(scope).active_revision
+
+    episode =
+      Repo.insert!(%SpaceTraders.FleetAllocation.StrategyDecisionEpisode{
+        operator_id: scope.operator.id,
+        fleet_generation_id: generation.id,
+        fleet_strategy_revision_id: revision.id,
+        source_version: 1,
+        calibration_version: "market-v1",
+        selection_kind: :neutral_wait,
+        binding_limitation_kind: :incomplete_coverage,
+        next_observation_at: ~U[2026-10-11 10:00:00.000000Z],
+        expectations: %{
+          "binding_limitation" => %{
+            "reason" => "incomplete_market_coverage",
+            "coverage" => %{"completed" => 3, "required" => 5}
+          }
+        },
+        actual_outcomes: %{"re_evaluations" => [%{"observed_at" => "2026-10-11T09:30:00Z"}]}
+      })
+
+    Repo.insert!(%SpaceTraders.FleetAllocation.AllocationResultPointer{
+      fleet_generation_id: generation.id,
+      operator_id: scope.operator.id,
+      fleet_strategy_revision_id: revision.id,
+      selection_kind: :neutral_wait,
+      strategy_decision_episode_id: episode.id
+    })
+
+    episode
+  end
+
+  defp publish_market!(scope, generation) do
+    revision = FleetStrategy.get(scope).active_revision
+    generation = Repo.get!(SpaceTraders.FleetGeneration.Generation, generation.id)
+
+    candidate = %SpaceTraders.FleetAllocation.PortfolioCandidate{
+      id: "market-1",
+      strategy_revision_id: revision.id,
+      objective_index: 0,
+      claims: ["#{@symbol}-1"],
+      reservations: %{},
+      pledges: [],
+      dependencies: [%{evidence_id: "market:X1-UX81-A1", state: :satisfied}],
+      expected_value: 100,
+      unwind_cost: 0
+    }
+
+    {:ok, selection} =
+      SpaceTraders.FleetAllocation.select_portfolio(revision, [candidate], %{
+        as_of: DateTime.utc_now(),
+        source_version: generation.allocation_version,
+        claims: ["#{@symbol}-1"],
+        reservations: %{}
+      })
+
+    {:ok, portfolio} =
+      SpaceTraders.FleetAllocation.publish_portfolio(scope, generation.id, selection, %{
+        evidence_references: [],
+        expectations: %{"credit_change" => 100},
+        calibration_version: "market-v1"
+      })
+
+    portfolio
+  end
+
+  defp stall_episode(scope, generation, reason) do
+    revision = FleetStrategy.get(scope).active_revision
+
+    Repo.insert!(%SpaceTraders.FleetAllocation.StrategyDecisionEpisode{
+      operator_id: scope.operator.id,
+      fleet_generation_id: generation.id,
+      fleet_strategy_revision_id: revision.id,
+      source_version: 1,
+      calibration_version: "market-v1",
+      selection_kind: :structural_stall,
+      stall_reason: reason,
+      evidence_references: [%{"kind" => "observation_demand", "subject" => "market:X1-A1"}],
+      last_observed_at: DateTime.utc_now(),
+      observation_count: 2
+    })
   end
 
   defp mint_fleet(scope) do

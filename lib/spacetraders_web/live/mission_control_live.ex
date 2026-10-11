@@ -176,10 +176,24 @@ defmodule SpaceTradersWeb.MissionControlLive do
                 {expected_label(@projection.market_execution.expected)}
               </p>
             </div>
-            <div>
-              <p class="text-sm opacity-70">Realized trade margin (net earnings unknown)</p>
+            <div id="realized-trade-margin">
+              <p class="text-sm opacity-70">Realized trade margin</p>
               <p class="mt-1 font-semibold">
                 {realized_label(@projection.market_execution.realized.realized_trade_margin)}
+              </p>
+            </div>
+            <div id="realized-net-earnings">
+              <p class="text-sm opacity-70">Net earnings (after the trade's own fuel)</p>
+              <p class="mt-1 font-semibold">
+                {net_earnings_label(@projection.market_execution.realized)}
+              </p>
+            </div>
+            <div id="observation-only-spending">
+              <p class="text-sm opacity-70">Observation-only fuel spending (this Generation)</p>
+              <p class="mt-1 font-semibold">
+                {spending_label(
+                  @projection.market_execution.realized.generation_observation_only_spending
+                )}
               </p>
             </div>
             <div>
@@ -195,6 +209,108 @@ defmodule SpaceTradersWeb.MissionControlLive do
           >
             LIMITING · {limitation_label(@projection.market_execution.limitation)}
           </div>
+        </section>
+
+        <section
+          :for={disposition <- @projection.market_execution.dispositions}
+          id={"allocation-disposition-#{disposition.agent_symbol}"}
+          class="rounded-2xl border border-base-300 bg-base-100 p-5"
+        >
+          <div class="flex items-start justify-between gap-3">
+            <div>
+              <p class="eyebrow">Allocation disposition · {disposition.agent_symbol}</p>
+              <h2 class="text-xl font-bold">{disposition_label(disposition)}</h2>
+            </div>
+            <span class={["badge", !disposition.healthy? && "badge-warning"]}>
+              {if disposition.healthy?, do: "Healthy", else: "Degraded Operation"}
+            </span>
+          </div>
+          <p :if={disposition.state != :neutral_wait} class="mt-2 text-sm">
+            Active Revision {disposition.active_revision.number}
+            <span :if={disposition.portfolio}>
+              · Portfolio {disposition.portfolio.id} ·
+              <.link
+                :if={disposition.portfolio.decision_episode_id}
+                navigate={~p"/decision-episodes/#{disposition.portfolio.decision_episode_id}"}
+                class="link link-primary"
+              >Decision Episode {disposition.portfolio.decision_episode_id}</.link>
+            </span>
+          </p>
+          <div :if={disposition.stall} class="mt-3 rounded-xl bg-warning/10 p-4 text-sm">
+            <p class="font-semibold">STALLED · {stall_reason_label(disposition.stall.reason)}</p>
+            <p :if={disposition.stall.portfolio_revision_number}>
+              Portfolio {disposition.stall.portfolio_id} belongs to superseded Revision {disposition.stall.portfolio_revision_number}.
+            </p>
+            <p :if={disposition.stall.intent_ids != []}>
+              Blocked Intents: {Enum.join(disposition.stall.intent_ids, ", ")}
+            </p>
+            <p :if={disposition.stall.commitment_ids != []}>
+              Commitments: {Enum.join(disposition.stall.commitment_ids, ", ")}
+            </p>
+            <p :if={disposition.stall.stall_episode_id}>
+              Recorded as
+              <.link
+                navigate={~p"/decision-episodes/#{disposition.stall.stall_episode_id}"}
+                class="link link-primary"
+              >Decision Episode {disposition.stall.stall_episode_id}</.link>
+              ({disposition.stall.observation_count} observations).
+            </p>
+            <p>Releases when: {disposition.stall.release}</p>
+            <p class="opacity-70">No Operator action is needed; this clears by reconciliation.</p>
+          </div>
+          <div :if={disposition.spending_pause} class="mt-3 rounded-xl bg-info/10 p-4 text-sm">
+            <p class="font-semibold">SHORTFALL · spending paused, not a Neutral Wait</p>
+            <p>
+              Balance {balance_label(disposition.spending_pause.balance)} · credit floor {disposition.spending_pause.floor}
+            </p>
+            <p>Releases when: {disposition.spending_pause.release}</p>
+          </div>
+          <div :if={disposition.capacity_deferral} class="mt-3 rounded-xl bg-info/10 p-4 text-sm">
+            <p class="font-semibold">CAPACITY DEFERRAL · API pressure, not an objective verdict</p>
+            <p :if={disposition.capacity_deferral.retry_at}>
+              Reconsidered after {utc_label(disposition.capacity_deferral.retry_at)}.
+            </p>
+          </div>
+          <%!-- ADR 0012: exactly five summary facts; identity is click-through only. --%>
+          <div
+            :if={disposition.state == :neutral_wait}
+            id={"neutral-wait-#{disposition.agent_symbol}"}
+            class="mt-3 rounded-xl bg-info/10 p-4 text-sm"
+          >
+            <p class="font-semibold">
+              <.link
+                navigate={~p"/decision-episodes/#{disposition.neutral_wait.decision_episode_id}"}
+                class="link"
+              >no worthwhile admissible contribution</.link>
+            </p>
+            <p>{limitation_kind_label(disposition.neutral_wait.limitation_kind)}</p>
+            <p :if={disposition.neutral_wait.limitation_kind == :incomplete_coverage}>
+              {coverage_label(disposition.neutral_wait.coverage)}
+            </p>
+            <p>Last evaluated {utc_label(disposition.neutral_wait.last_evaluated_at)}</p>
+            <p>Next due {utc_label(disposition.neutral_wait.next_observation_at)}</p>
+          </div>
+          <p
+            :if={
+              disposition.overdue_demand_count > 0 and disposition.healthy? and
+                disposition.state != :neutral_wait
+            }
+            class="mt-3 text-sm opacity-70"
+          >
+            {disposition.overdue_demand_count} Market Observation Demand(s) overdue; explained by the state above.
+          </p>
+          <p
+            :if={disposition.unallocated_ships != []}
+            id={"unallocated-ships-#{disposition.agent_symbol}"}
+            class="mt-3 text-sm"
+          >
+            Unallocated Ships:
+            <.link
+              :for={symbol <- disposition.unallocated_ships}
+              navigate={unallocated_ship_path(disposition, symbol)}
+              class="link link-primary mr-2"
+            >{symbol}</.link>
+          </p>
         </section>
 
         <section
@@ -303,6 +419,9 @@ defmodule SpaceTradersWeb.MissionControlLive do
           Enum.any?(projection.fleets, &unknown_fleet?/1) ->
             "Fleet health unknown"
 
+          stalled?(projection) ->
+            "Fleet allocation stalled"
+
           Enum.any?(projection.objectives, &match?({:error, _}, &1.evaluation)) ->
             "Outcome status unknown"
 
@@ -331,7 +450,19 @@ defmodule SpaceTradersWeb.MissionControlLive do
   defp health_detail(%{conditions: [_ | _]}),
     do: "Unresolved conditions remain pinned below, including acknowledged ones."
 
-  defp health_detail(%{fleets: fleets}) do
+  defp health_detail(%{market_execution: %{dispositions: dispositions}} = projection)
+       when is_list(dispositions) do
+    if stalled?(projection),
+      do: "Degraded Operation: see the allocation disposition below for the cause and release.",
+      else: health_detail_fleets(projection)
+  end
+
+  defp health_detail(projection), do: health_detail_fleets(projection)
+
+  defp stalled?(%{market_execution: %{dispositions: dispositions}}),
+    do: Enum.any?(dispositions, &(not &1.healthy?))
+
+  defp health_detail_fleets(%{fleets: fleets}) do
     if Enum.any?(fleets, &unknown_fleet?/1),
       do: "Authoritative Agent or Ship state is unavailable; this is not a zero measurement.",
       else: "Review objective outcomes, Fleet contribution and recent decisions below."
@@ -408,8 +539,52 @@ defmodule SpaceTradersWeb.MissionControlLive do
   defp objective_status({:observed, _}), do: "Holding steady"
   defp objective_status(_), do: "Unknown"
 
-  defp market_execution_state(%{realized: %{completed_round_trips: 0}}), do: "Active"
-  defp market_execution_state(_execution), do: "Realized"
+  defp market_execution_state(%{dispositions: dispositions} = execution) do
+    cond do
+      Enum.any?(dispositions, &(not &1.healthy?)) -> "Stalled"
+      execution.realized.completed_round_trips == 0 -> "Active"
+      true -> "Realized"
+    end
+  end
+
+  defp disposition_label(%{state: :stalled}), do: "Structural stall"
+  defp disposition_label(%{state: :spending_paused}), do: "Shortfall at the credit floor"
+  defp disposition_label(%{state: :capacity_deferred}), do: "Capacity deferred"
+  defp disposition_label(%{state: :neutral_wait}), do: "Neutral Wait"
+  defp disposition_label(%{state: :busy_trade}), do: "Trading under the active Revision"
+
+  defp disposition_label(%{state: :retained_coverage}),
+    do: "Market coverage under the active Revision"
+
+  defp disposition_label(%{state: :unallocated}), do: "No allocated work"
+
+  defp stall_reason_label(:stale_revision_portfolio),
+    do: "Portfolio belongs to a superseded Revision"
+
+  defp stall_reason_label(:authority_blocked_intent),
+    do: "Retained Intent is blocked on authority"
+
+  defp stall_reason_label(:overdue_demands_without_coverage),
+    do: "Overdue Market Demands with no coverage and no decisive reason"
+
+  # During a Neutral Wait an Unallocated Ship links to the wait's cause.
+  defp unallocated_ship_path(%{state: :neutral_wait, neutral_wait: wait}, _symbol),
+    do: ~p"/decision-episodes/#{wait.decision_episode_id}"
+
+  defp unallocated_ship_path(_disposition, symbol), do: ~p"/ships/#{symbol}"
+
+  defp limitation_kind_label(kind), do: kind |> to_string() |> String.replace("_", " ")
+
+  defp coverage_label(%{completed: completed, required: required}),
+    do: "#{completed} of #{required} Marketplaces covered"
+
+  defp coverage_label(_unknown), do: "Coverage unknown"
+
+  defp utc_label(%DateTime{} = at), do: Calendar.strftime(at, "%Y-%m-%d %H:%M:%S UTC")
+  defp utc_label(_unknown), do: "unknown"
+
+  defp balance_label(nil), do: "unknown (no fresh authoritative balance)"
+  defp balance_label(credits), do: "#{credits} credits"
 
   defp expected_label(%{expected_value: value}),
     do: "Expected net credit change #{value}."
@@ -425,6 +600,17 @@ defmodule SpaceTradersWeb.MissionControlLive do
 
   defp realized_label(nil), do: "Unknown — no completed round trip evidence"
   defp realized_label(amount), do: "#{amount} credits"
+
+  defp net_earnings_label(%{net_earnings: amount}) when is_integer(amount),
+    do: "#{amount} credits"
+
+  defp net_earnings_label(%{realized_trade_margin: margin}) when is_integer(margin),
+    do: "Unknown — a supporting charge is not proven"
+
+  defp net_earnings_label(_realized), do: "Unknown — no completed round trip evidence"
+
+  defp spending_label(amount) when is_integer(amount), do: "#{amount} credits"
+  defp spending_label(_unknown), do: "Unknown — a charge is not proven"
 
   defp limitation_label(limitation), do: limitation
 

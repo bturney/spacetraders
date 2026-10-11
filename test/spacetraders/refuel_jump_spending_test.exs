@@ -13,11 +13,12 @@ defmodule SpaceTraders.RefuelJumpSpendingTest do
 
   alias SpaceTraders.API
   alias SpaceTraders.Agent.Scope
+  alias SpaceTraders.CreditCalibration
   alias SpaceTraders.Evidence
   alias SpaceTraders.Fleet.{Intent, Intents}
   alias SpaceTraders.Fleet.Intents.RecordedAction
   alias SpaceTraders.FleetAllocation
-  alias SpaceTraders.FleetAllocation.PortfolioCandidate
+  alias SpaceTraders.FleetAllocation.{PortfolioCandidate, TradeProgress}
   alias SpaceTraders.FleetGeneration.Generation
   alias SpaceTraders.FleetStrategy.{Revision, Strategy}
   alias SpaceTraders.MutationAttempts
@@ -162,6 +163,106 @@ defmodule SpaceTraders.RefuelJumpSpendingTest do
     end
   end
 
+  # The game may echo the refuel transaction in Market units (ceil(fuel/100))
+  # or in Ship fuel units; either attributes `totalPrice` to the attempt.
+  for {shape, units} <- [{"Market units", 1}, {"Ship fuel units", 50}] do
+    test "a refuel transaction in #{shape} records totalPrice as the realized charge",
+         %{posts: posts} do
+      {agent, [intent | _]} = claimed([0])
+      stub_game(agent, posts, "FUEL", 1_300, transaction_units: unquote(units), total: 75)
+
+      Intents.execute_action(agent, intent, live_ship(agent), action("refuel"))
+
+      assert [attempt] = refuel_attempts(agent)
+
+      assert %{realized_charge: 75, units: 1, worst_case_exposure: @exposure} =
+               CreditCalibration.realization(attempt)
+    end
+  end
+
+  test "a refuel transaction in any other unit count is not attributable", %{posts: posts} do
+    {agent, [intent | _]} = claimed([0])
+    stub_game(agent, posts, "FUEL", 1_300, transaction_units: 7, total: 75)
+
+    Intents.execute_action(agent, intent, live_ship(agent), action("refuel"))
+
+    assert [attempt] = refuel_attempts(agent)
+    assert CreditCalibration.realization(attempt) == nil
+  end
+
+  test "a decoded refuel whose success write is lost realizes once it reconciles accepted",
+       %{posts: posts} do
+    {agent, [intent | _]} = claimed([0])
+    game = game(agent, posts, "FUEL", 1_300, transaction_units: 50, total: 75)
+
+    # The game answers, but the attempt can no longer take the success
+    # outcome: it stays unresolved until MutationAttempts reconciliation.
+    Req.Test.stub(API, fn conn ->
+      if conn.method == "POST" do
+        [sent] = refuel_attempts(agent)
+        {:ok, _} = MutationAttempts.record_outcome(sent, :ambiguous, %{reason: "lost write"})
+      end
+
+      game.(conn)
+    end)
+
+    Intents.execute_action(agent, intent, live_ship(agent), action("refuel"))
+    assert [%{state: "ambiguous"} = attempt] = refuel_attempts(agent)
+    Req.Test.stub(API, game)
+
+    TestClock.advance(1)
+    assert {:ok, ship} = Evidence.get_ship_binding(agent, "SHIP-0")
+    assert {:ok, credits} = Evidence.get_agent_binding(agent)
+
+    assert {:ok, proof} =
+             Evidence.recovery_proof(attempt, :accepted, "Ship fuel rose after the send", [
+               ship,
+               credits
+             ])
+
+    assert {:ok, %{state: "accepted"}} = MutationAttempts.reconcile(attempt, :accepted, proof)
+
+    assert %{realized_charge: 75} = CreditCalibration.realization(attempt)
+
+    assert %{supporting_charges: [%{realized_charge: 75, mutation_attempt_id: id}]} =
+             TradeProgress.for_portfolio(intent.fleet_commitment_portfolio_id)
+
+    assert id == attempt.id
+  end
+
+  test "a refuel whose response never arrived stays an unknown charge after reconciliation",
+       %{posts: posts} do
+    {agent, [intent | _]} = claimed([0])
+    game = game(agent, posts, "FUEL", 1_300, [])
+
+    Req.Test.stub(API, fn conn ->
+      if conn.method == "POST",
+        do: Req.Test.transport_error(conn, :timeout),
+        else: game.(conn)
+    end)
+
+    Intents.execute_action(agent, intent, live_ship(agent), action("refuel"))
+    assert [%{state: "ambiguous"} = attempt] = refuel_attempts(agent)
+    Req.Test.stub(API, game)
+
+    TestClock.advance(1)
+    assert {:ok, ship} = Evidence.get_ship_binding(agent, "SHIP-0")
+    assert {:ok, credits} = Evidence.get_agent_binding(agent)
+
+    assert {:ok, proof} =
+             Evidence.recovery_proof(attempt, :accepted, "Ship fuel rose after the send", [
+               ship,
+               credits
+             ])
+
+    assert {:ok, _} = MutationAttempts.reconcile(attempt, :accepted, proof)
+
+    assert CreditCalibration.realization(attempt) == nil
+
+    assert %{supporting_charges: [%{realized_charge: "unknown"}], net_earnings: "unknown"} =
+             TradeProgress.for_portfolio(intent.fleet_commitment_portfolio_id)
+  end
+
   test "a refuel without explicit units is not preparable" do
     {agent, [intent | _]} = claimed([0])
     stub_game(agent, nil, "FUEL", 1_300)
@@ -199,12 +300,21 @@ defmodule SpaceTraders.RefuelJumpSpendingTest do
     Evidence.bound_ship(binding)
   end
 
-  defp stub_game(agent, posts, good, credits) do
-    Req.Test.stub(API, fn conn ->
+  defp refuel_attempts(agent) do
+    agent
+    |> MutationAttempts.list_for_agent()
+    |> Enum.filter(&(&1.operation_id == "refuel-ship"))
+  end
+
+  defp stub_game(agent, posts, good, credits, transaction \\ []),
+    do: Req.Test.stub(API, game(agent, posts, good, credits, transaction))
+
+  defp game(agent, posts, good, credits, transaction) do
+    fn conn ->
       case {conn.method, conn.request_path} do
         {"POST", path} ->
           if posts, do: Elixir.Agent.update(posts, &(&1 ++ [{operation(path), body(conn)}]))
-          Req.Test.json(conn, %{"data" => post_response(agent, path)})
+          Req.Test.json(conn, %{"data" => post_response(agent, path, transaction)})
 
         {"GET", "/v2/my/agent"} ->
           Req.Test.json(conn, %{"data" => %{"symbol" => agent.symbol, "credits" => credits}})
@@ -234,7 +344,7 @@ defmodule SpaceTraders.RefuelJumpSpendingTest do
             }
           })
       end
-    end)
+    end
   end
 
   defp operation(path),
@@ -245,7 +355,7 @@ defmodule SpaceTraders.RefuelJumpSpendingTest do
     if raw == "", do: %{}, else: Jason.decode!(raw)
   end
 
-  defp post_response(agent, path) do
+  defp post_response(agent, path, transaction) do
     base = %{
       "agent" => %{"symbol" => agent.symbol, "credits" => 1_000},
       "fuel" => %{"current" => 200, "capacity" => 200},
@@ -257,9 +367,9 @@ defmodule SpaceTraders.RefuelJumpSpendingTest do
         "waypointSymbol" => "X1-UX81-A1",
         "tradeSymbol" => if(String.ends_with?(path, "/jump"), do: "ANTIMATTER", else: "FUEL"),
         "type" => "PURCHASE",
-        "units" => 1,
+        "units" => Keyword.get(transaction, :transaction_units, 1),
         "pricePerUnit" => @price,
-        "totalPrice" => @price,
+        "totalPrice" => Keyword.get(transaction, :total, @price),
         "timestamp" => "2026-01-01T00:00:00.000Z"
       }
     }
