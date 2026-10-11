@@ -9,20 +9,22 @@ defmodule SpaceTraders.MissionControl.MarketDisposition do
   requests no gameplay mutation.
 
   `state` is one distinct disposition, in precedence order: `:stalled`,
-  `:spending_paused`, `:capacity_deferred`, `:neutral_wait`, `:busy_trade`,
+  `:spending_paused`, `:busy_trade`, `:capacity_deferred`, `:neutral_wait`,
   `:retained_coverage`, `:unallocated`. Only `:stalled` is non-healthy
   (Degraded Operation). `operator_action` stays `:none`: a stall releases
-  through reconciliation, and time-based Attention escalation is deferred.
+  through reconciliation. Its Degraded Attention is raised and resolved by
+  `FleetAllocation.StructuralStall`, never by this read.
   """
 
   import Ecto.Query
 
   alias SpaceTraders.Agent.Agent, as: AgentRecord
-  alias SpaceTraders.CreditCalibration.Shortfall
+  alias SpaceTraders.CreditCalibration
   alias SpaceTraders.CreditSpending
-  alias SpaceTraders.Fleet.Ship
+  alias SpaceTraders.Fleet.{Intent, Ship}
   alias SpaceTraders.FleetAllocation
-  alias SpaceTraders.FleetAllocation.{AllocationResultPointer, Portfolio, StructuralStall}
+  alias SpaceTraders.FleetAllocation.{AllocationResultPointer, Commitment, Portfolio}
+  alias SpaceTraders.FleetAllocation.StructuralStall
   alias SpaceTraders.FleetAllocation.StrategyDecisionEpisode, as: Episode
   alias SpaceTraders.FleetCapacity
   alias SpaceTraders.FleetStrategy.{Revision, StandingAuthority}
@@ -50,6 +52,9 @@ defmodule SpaceTraders.MissionControl.MarketDisposition do
       cond do
         stall -> :stalled
         pause -> :spending_paused
+        # A trading Ship is busy whatever get-market's capacity; deferral
+        # only explains Ships waiting on Market reads.
+        work == :busy_trade -> :busy_trade
         deferral -> :capacity_deferred
         wait -> :neutral_wait
         work -> work
@@ -88,11 +93,10 @@ defmodule SpaceTraders.MissionControl.MarketDisposition do
 
   # The Portfolio's Revision against the active one is read live, so a
   # mismatch is visible before the next allocation boundary records it.
-  defp live_stale(%Revision{id: active}, %Portfolio{fleet_strategy_revision_id: id})
-       when id != active,
-       do: Repo.get(Revision, id)
-
-  defp live_stale(_active, _portfolio), do: nil
+  defp live_stale(active, portfolio) do
+    if StructuralStall.stale_revision?(portfolio, active),
+      do: Repo.get(Revision, portfolio.fleet_strategy_revision_id)
+  end
 
   # An open stall belongs to the current Portfolio (or to none); one naming a
   # Portfolio that has since been replaced is a recovery in progress.
@@ -113,45 +117,51 @@ defmodule SpaceTraders.MissionControl.MarketDisposition do
   end
 
   defp identity(reason, portfolio, open, active, portfolio_revision) do
+    references = (open && open.evidence_references) || []
+    {intent_ids, commitment_ids} = stalled_work(reason, portfolio, references)
+
     %{
       reason: reason,
       stall_episode_id: open && open.id,
       portfolio_id: portfolio && portfolio.id,
       portfolio_revision_number: portfolio_revision && portfolio_revision.number,
-      commitment_ids: commitment_ids(portfolio),
+      intent_ids: intent_ids,
+      commitment_ids: commitment_ids,
       decision_episode_id: portfolio && portfolio.strategy_decision_episode_id,
-      references: (open && open.evidence_references) || [],
+      references: references,
       observation_count: open && open.observation_count,
       last_observed_at: open && open.last_observed_at,
-      release: release_condition(reason, active)
+      release: StructuralStall.release_condition(reason, active)
     }
   end
 
-  defp release_condition(:stale_revision_portfolio, active),
-    do:
-      "Fleet Allocation retires the superseded Portfolio's settled Intents at the next Market " <>
-        "boundary and reselects under Revision #{active.number}; unresolved MutationAttempts " <>
-        "keep their Ship fenced until resolved."
+  # The work the stall names: a superseded Portfolio stalls all of its
+  # Commitments; an authority block only the blocked Intents' Commitments.
+  defp stalled_work(:stale_revision_portfolio, portfolio, _references),
+    do: {[], commitment_ids(portfolio)}
 
-  defp release_condition(:authority_blocked_intent, _active),
-    do:
-      "The blocked Intent settles and its Claim is released, so Fleet Allocation reselects " <>
-        "under the active Revision."
+  defp stalled_work(:authority_blocked_intent, _portfolio, references) do
+    ids = for %{"kind" => "intent", "id" => id} <- references, do: id
 
-  defp release_condition(:overdue_demands_without_coverage, _active),
-    do:
-      "Allocation admits coverage, selects work that occupies the Ships, or records a " <>
-        "Capacity Deferral, Neutral Wait or Shortfall as the decisive reason."
+    commitments =
+      Repo.all(
+        from intent in Intent,
+          where: intent.id in ^ids and not is_nil(intent.fleet_commitment_id),
+          distinct: true,
+          order_by: intent.fleet_commitment_id,
+          select: intent.fleet_commitment_id
+      )
+
+    {ids, commitments}
+  end
+
+  defp stalled_work(_reason, _portfolio, _references), do: {[], []}
 
   ## Spending pause
 
-  defp spending_pause(%AgentRecord{id: agent_id} = agent, active) do
-    from(s in Shortfall,
-      where: s.agent_id == ^agent_id and is_nil(s.released_at),
-      order_by: [asc: s.detected_at, asc: s.id],
-      limit: 1
-    )
-    |> Repo.one()
+  defp spending_pause(%AgentRecord{} = agent, active) do
+    agent
+    |> CreditCalibration.oldest_open_shortfall()
     |> case do
       nil ->
         nil
@@ -200,10 +210,12 @@ defmodule SpaceTraders.MissionControl.MarketDisposition do
            Repo.get_by(AllocationResultPointer, fleet_generation_id: generation.id),
          %Episode{fleet_strategy_revision_id: revision_id} = episode when revision_id == active.id <-
            Repo.get(Episode, id) do
+      # ADR 0012: the summary's facts; the Episode id is click-through only.
       %{
         decision_episode_id: episode.id,
         limitation_kind: episode.binding_limitation_kind,
-        binding_limitation: episode.expectations["binding_limitation"],
+        coverage: wait_coverage(episode),
+        last_evaluated_at: last_evaluated_at(episode),
         next_observation_at: episode.next_observation_at
       }
     else
@@ -211,15 +223,39 @@ defmodule SpaceTraders.MissionControl.MarketDisposition do
     end
   end
 
+  defp wait_coverage(%Episode{binding_limitation_kind: :incomplete_coverage} = episode) do
+    case get_in(episode.expectations, ["binding_limitation", "coverage"]) do
+      %{"completed" => completed, "required" => required}
+      when is_integer(completed) and is_integer(required) ->
+        %{completed: completed, required: required}
+
+      _ ->
+        nil
+    end
+  end
+
+  defp wait_coverage(_episode), do: nil
+
+  # The wait's latest re-evaluation, else when the Episode last changed.
+  defp last_evaluated_at(episode) do
+    with [_ | _] = entries <- get_in(episode.actual_outcomes || %{}, ["re_evaluations"]),
+         %{"observed_at" => at} <- List.last(entries),
+         {:ok, at, _offset} <- DateTime.from_iso8601(at) do
+      at
+    else
+      _ -> episode.updated_at
+    end
+  end
+
   ## Authorized work
 
   defp work(active, %Portfolio{fleet_strategy_revision_id: id, commitments: commitments})
        when id == active.id do
-    live = Enum.filter(commitments, &(&1.unwind_state == :not_required))
+    live = live_commitments(commitments)
 
     cond do
       live == [] -> nil
-      Enum.any?(live, &(not StructuralStall.coverage_commitment?(&1))) -> :busy_trade
+      Enum.any?(live, &(not Commitment.coverage?(&1))) -> :busy_trade
       true -> :retained_coverage
     end
   end
@@ -243,9 +279,7 @@ defmodule SpaceTraders.MissionControl.MarketDisposition do
     claimed =
       case portfolio do
         %Portfolio{commitments: commitments} ->
-          commitments
-          |> Enum.filter(&(&1.unwind_state == :not_required))
-          |> Enum.flat_map(& &1.claims)
+          commitments |> live_commitments() |> Enum.flat_map(& &1.claims)
 
         _ ->
           []
@@ -254,4 +288,7 @@ defmodule SpaceTraders.MissionControl.MarketDisposition do
     Repo.all(from s in Ship, where: s.agent_id == ^agent_id, order_by: s.symbol, select: s.symbol)
     |> Enum.reject(&(&1 in claimed))
   end
+
+  defp live_commitments(commitments),
+    do: Enum.filter(commitments, &(&1.unwind_state == :not_required))
 end

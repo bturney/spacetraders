@@ -17,8 +17,8 @@ defmodule SpaceTraders.FleetPlanning do
   alias SpaceTraders.FleetStrategy.Revision
 
   @market_evidence_freshness_seconds Intelligence.market_freshness_seconds()
-  # Shipyard, Construction and owned-Ship evidence keep their own, shorter budget.
-  @owned_evidence_freshness_seconds 300
+  # Owned-Ship, Shipyard and Construction evidence: the shorter non-Market budget.
+  @non_market_evidence_freshness_seconds 300
   @observation_demand_deadline_seconds 60
   # Operational Intelligence Market interpretation states that can never
   # support a trade, each kept as its own planning limitation.
@@ -142,8 +142,7 @@ defmodule SpaceTraders.FleetPlanning do
             # One bounded Coverage Contribution collects every open initial
             # Marketplace subject; each contributes one Observation Demand so
             # the subjects stay independently attributable.
-            demand =
-              coverage_demand(revision, objective_index, snapshot, choice, as_of, freshness)
+            demand = coverage_demand(revision, objective_index, snapshot, choice, as_of)
 
             {:cont, {candidates, [demand | demands], limitations, [choice | coverage]}}
 
@@ -153,7 +152,7 @@ defmodule SpaceTraders.FleetPlanning do
               required_facts: opportunity.required_facts,
               owner: "fleet_planning",
               deadline_at: deadline,
-              freshness_seconds: freshness,
+              freshness_seconds: fact_freshness(type, freshness),
               agent_id: Map.get(snapshot, :agent_id),
               strategy_revision_id: revision.id,
               strategic_priority: objective_index,
@@ -716,10 +715,10 @@ defmodule SpaceTraders.FleetPlanning do
             observed_at: as_of,
             evidence_id: "authoritative:ship:#{symbol}",
             source: "get_my_ship",
-            valid_until: DateTime.add(as_of, @owned_evidence_freshness_seconds, :second)
+            valid_until: DateTime.add(as_of, @non_market_evidence_freshness_seconds, :second)
           }
 
-          {dependency, DateTime.add(as_of, @owned_evidence_freshness_seconds, :second)}
+          {dependency, DateTime.add(as_of, @non_market_evidence_freshness_seconds, :second)}
       end
 
     refit_waypoint =
@@ -930,7 +929,7 @@ defmodule SpaceTraders.FleetPlanning do
               is_list(ships) do
     age = DateTime.diff(as_of, observed_at, :second)
 
-    if age in 0..@owned_evidence_freshness_seconds do
+    if age in 0..@non_market_evidence_freshness_seconds do
       {:ok,
        %{
          system_symbol: system,
@@ -939,7 +938,7 @@ defmodule SpaceTraders.FleetPlanning do
          observed_at: observed_at,
          ships: ships,
          modifications_fee: fetch(yard, :modifications_fee),
-         valid_until: DateTime.add(observed_at, @owned_evidence_freshness_seconds, :second)
+         valid_until: DateTime.add(observed_at, @non_market_evidence_freshness_seconds, :second)
        }}
     else
       :error
@@ -1432,9 +1431,10 @@ defmodule SpaceTraders.FleetPlanning do
          as_of
        )
        when is_list(materials) and is_binary(id) and id != "" and is_binary(system) do
-    if DateTime.diff(as_of, observed_at, :second) in 0..@owned_evidence_freshness_seconds,
+    if DateTime.diff(as_of, observed_at, :second) in 0..@non_market_evidence_freshness_seconds,
       do:
-        {:ok, construction, DateTime.add(observed_at, @owned_evidence_freshness_seconds, :second)},
+        {:ok, construction,
+         DateTime.add(observed_at, @non_market_evidence_freshness_seconds, :second)},
       else: {:error, :stale_construction_evidence}
   end
 
@@ -1976,9 +1976,7 @@ defmodule SpaceTraders.FleetPlanning do
            Map.get(opportunity, :required_capabilities, []),
          true <- Enum.all?(capabilities, &valid_capability?/1),
          true <- is_integer(freshness) and freshness >= 0 do
-      # A Market Listing is always judged by the Market freshness budget; the
-      # snapshot's freshness governs Waypoint and Shipyard facts.
-      freshness = if type == "market", do: @market_evidence_freshness_seconds, else: freshness
+      freshness = fact_freshness(type, freshness)
       missing = Enum.reject(facts, &fresh_intelligence?(observed[&1], as_of, freshness))
 
       cond do
@@ -2007,13 +2005,18 @@ defmodule SpaceTraders.FleetPlanning do
   # One open coverage Observation Demand per subject, due now through the
   # shared Market timing policy. Structural value admits the bounded
   # contribution but does not invent a numeric per-subject estimate.
-  defp coverage_demand(revision, objective_index, snapshot, choice, as_of, freshness) do
+  # A Market Listing is always judged by the Market freshness budget; the
+  # snapshot's freshness governs Waypoint and Shipyard facts.
+  defp fact_freshness("market", _snapshot_freshness), do: @market_evidence_freshness_seconds
+  defp fact_freshness(_type, snapshot_freshness), do: snapshot_freshness
+
+  defp coverage_demand(revision, objective_index, snapshot, choice, as_of) do
     market_refresh_demand(%{
       subject: choice.subject,
       observed_at: as_of,
       fresh: false,
       as_of: as_of,
-      freshness_seconds: freshness,
+      freshness_seconds: @market_evidence_freshness_seconds,
       objective_index: objective_index,
       agent_id: Map.get(snapshot, :agent_id),
       strategy_revision_id: revision.id
@@ -2178,29 +2181,40 @@ defmodule SpaceTraders.FleetPlanning do
 
   defp unresolved_baseline_subjects(_markets, _snapshot), do: MapSet.new()
 
+  # Each coverage limitation also carries baseline coverage completed/required,
+  # the counts a Neutral Wait on incomplete coverage reports.
   defp coverage_limitations(unresolved, snapshot) do
     unreachable = MapSet.new(snapshot.unreachable_subjects)
+    required = snapshot.baseline_subjects |> MapSet.new() |> MapSet.size()
+    coverage = %{completed: required - MapSet.size(unresolved), required: required}
 
     [
       subject_coverage_limitation(
         :incomplete_market_coverage,
-        MapSet.difference(unresolved, unreachable)
+        MapSet.difference(unresolved, unreachable),
+        coverage
       ),
       subject_coverage_limitation(
         :unreachable_market_coverage,
-        MapSet.intersection(unresolved, unreachable)
+        MapSet.intersection(unresolved, unreachable),
+        coverage
       )
     ]
     |> Enum.reject(&is_nil/1)
   end
 
-  defp subject_coverage_limitation(reason, subjects) do
+  defp subject_coverage_limitation(reason, subjects, coverage) do
     case MapSet.to_list(subjects) do
       [] ->
         nil
 
       subjects ->
-        %{subject: :market_planning, reason: reason, subjects: Enum.sort(subjects)}
+        %{
+          subject: :market_planning,
+          reason: reason,
+          subjects: Enum.sort(subjects),
+          coverage: coverage
+        }
     end
   end
 

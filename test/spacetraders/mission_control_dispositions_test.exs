@@ -19,14 +19,19 @@ defmodule SpaceTraders.MissionControlDispositionsTest do
   alias SpaceTraders.FleetStrategy.{Revision, Strategy}
   alias SpaceTraders.MissionControl
 
-  setup do
-    {agent, _intents, portfolio} = claimed_purchases([0])
+  setup tags do
+    fleet(Map.get(tags, :reservations, [0]))
+  end
+
+  defp fleet(reservations) do
+    {agent, intents, portfolio} = claimed_purchases(reservations)
     scope = Scope.for_operator(Repo.get!(SpaceTraders.Agent.Operator, agent.operator_id))
     generation = Repo.get_by!(Generation, agent_id: agent.id)
     revision = Repo.get!(Revision, portfolio.fleet_strategy_revision_id)
 
     %{
       agent: agent,
+      intents: intents,
       scope: scope,
       portfolio: portfolio,
       generation: generation,
@@ -103,6 +108,19 @@ defmodule SpaceTraders.MissionControlDispositionsTest do
     assert [%{state: :busy_trade, healthy?: true, stall: nil}] = dispositions(ctx)
   end
 
+  @tag reservations: [0, 0]
+  test "an authority-blocked stall names only the blocked Intent and its Commitment", ctx do
+    [blocked, _trading] = ctx.intents
+
+    stall_episode(ctx, :authority_blocked_intent, [
+      %{"kind" => "intent", "id" => blocked.id, "reason" => "no_current_ship_claim"}
+    ])
+
+    assert [%{state: :stalled, stall: stall}] = dispositions(ctx)
+    assert stall.intent_ids == [blocked.id]
+    assert stall.commitment_ids == [blocked.fleet_commitment_id]
+  end
+
   test "a stall naming a replaced Portfolio is not shown as current", ctx do
     stall_episode(ctx, :authority_blocked_intent, [], stalled_portfolio_id: nil)
 
@@ -160,8 +178,49 @@ defmodule SpaceTraders.MissionControlDispositionsTest do
 
     assert [%{state: :neutral_wait, neutral_wait: wait, spending_pause: nil}] = dispositions(ctx)
     assert wait.limitation_kind == :below_economic_threshold
+    assert wait.coverage == nil
     assert wait.next_observation_at == next
     assert wait.decision_episode_id == episode.id
+  end
+
+  test "an incomplete-coverage Neutral Wait reports coverage and its last evaluation", ctx do
+    retire_portfolio(ctx)
+    next = DateTime.add(DateTime.utc_now(), 600, :second)
+    evaluated = ~U[2026-10-11 09:30:00Z]
+
+    episode =
+      Repo.insert!(%Episode{
+        operator_id: ctx.generation.operator_id,
+        fleet_generation_id: ctx.generation.id,
+        fleet_strategy_revision_id: ctx.revision.id,
+        source_version: 1,
+        calibration_version: "market-v1",
+        selection_kind: :neutral_wait,
+        binding_limitation_kind: :incomplete_coverage,
+        next_observation_at: next,
+        expectations: %{
+          "binding_limitation" => %{
+            "reason" => "incomplete_market_coverage",
+            "coverage" => %{"completed" => 3, "required" => 5}
+          }
+        },
+        actual_outcomes: %{
+          "re_evaluations" => [
+            %{"observed_at" => "2026-10-11T09:00:00Z"},
+            %{"observed_at" => DateTime.to_iso8601(evaluated)}
+          ]
+        }
+      })
+
+    Repo.update_all(
+      from(p in AllocationResultPointer, where: p.fleet_generation_id == ^ctx.generation.id),
+      set: [selection_kind: :neutral_wait, strategy_decision_episode_id: episode.id]
+    )
+
+    assert [%{state: :neutral_wait, neutral_wait: wait}] = dispositions(ctx)
+    assert wait.coverage == %{completed: 3, required: 5}
+    assert wait.last_evaluated_at == evaluated
+    assert wait.next_observation_at == next
   end
 
   test "a floor pause is not a Neutral Wait even when a stale wait pointer lingers", ctx do
@@ -172,6 +231,23 @@ defmodule SpaceTraders.MissionControlDispositionsTest do
   end
 
   test "Capacity Deferral is its own state, with the governor's retry guidance", ctx do
+    retire_portfolio(ctx)
+    throttle_get_market()
+
+    assert [%{state: :capacity_deferred, healthy?: true, capacity_deferral: deferral}] =
+             dispositions(ctx)
+
+    assert %DateTime{} = deferral.retry_at
+  end
+
+  test "a trading Ship stays busy while get-market is throttled", ctx do
+    throttle_get_market()
+
+    assert [%{state: :busy_trade, healthy?: true, capacity_deferral: %{retry_at: %DateTime{}}}] =
+             dispositions(ctx)
+  end
+
+  defp throttle_get_market do
     governor = :"mc_dispositions_governor_#{System.unique_integer([:positive])}"
     start_supervised!({CapacityGovernor, name: governor})
     previous = Application.fetch_env(:spacetraders, SpaceTraders.FleetCapacity)
@@ -185,11 +261,6 @@ defmodule SpaceTraders.MissionControlDispositionsTest do
     end)
 
     CapacityGovernor.protocol_rejected(30, governor)
-
-    assert [%{state: :capacity_deferred, healthy?: true, capacity_deferral: deferral}] =
-             dispositions(ctx)
-
-    assert %DateTime{} = deferral.retry_at
   end
 
   test "Ships outside every live Claim are listed as Unallocated", ctx do

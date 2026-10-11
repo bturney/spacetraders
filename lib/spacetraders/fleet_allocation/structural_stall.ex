@@ -31,20 +31,25 @@ defmodule SpaceTraders.FleetAllocation.StructuralStall do
   row lock, so the one open stall is never inserted twice. It is never a
   selection kind, a Neutral Wait or a recovery authority, and the allocation
   result pointer never references it.
+
+  An open stall raises one Degraded Attention per Fleet Generation (GLOSSARY:
+  Attention summarizes Degraded Operation); the recovering observation
+  resolves it. Time-based escalation stays deferred (#684).
   """
 
   import Ecto.Query
 
   alias SpaceTraders.Agent.Agent, as: AgentRecord
+  alias SpaceTraders.Agent.{Operator, Scope}
   alias SpaceTraders.Clock
-  alias SpaceTraders.CreditCalibration.Shortfall
+  alias SpaceTraders.CreditCalibration
   alias SpaceTraders.Evidence
   alias SpaceTraders.FleetAllocation
-  alias SpaceTraders.FleetAllocation.{JsonEvidence, Portfolio}
+  alias SpaceTraders.FleetAllocation.{Commitment, JsonEvidence, Portfolio}
   alias SpaceTraders.FleetAllocation.StrategyDecisionEpisode, as: Episode
   alias SpaceTraders.FleetGeneration.Generation
   alias SpaceTraders.FleetStrategy.Revision
-  alias SpaceTraders.Repo
+  alias SpaceTraders.{OperatorConditions, Repo}
 
   # Refusals of execution authority itself, not of the game or of spending.
   @authority_blockers ~w(
@@ -67,7 +72,7 @@ defmodule SpaceTraders.FleetAllocation.StructuralStall do
     case FleetAllocation.active_generation(agent) do
       %Generation{} = generation ->
         stall = diagnose(agent, revision, portfolio, decision)
-        record(generation, revision, stall)
+        generation |> record(revision, stall) |> attention(generation)
 
       nil ->
         :healthy
@@ -77,7 +82,7 @@ defmodule SpaceTraders.FleetAllocation.StructuralStall do
   @doc "The decision's structural stall, or nil when it is healthy or explained."
   def diagnose(agent, %Revision{id: active}, portfolio, decision) do
     cond do
-      match?(%Portfolio{}, portfolio) and portfolio.fleet_strategy_revision_id != active ->
+      stale_revision?(portfolio, %Revision{id: active}) ->
         stall(:stale_revision_portfolio, portfolio, [
           %{"kind" => "portfolio", "id" => portfolio.id},
           %{"kind" => "revision", "id" => portfolio.fleet_strategy_revision_id}
@@ -101,6 +106,29 @@ defmodule SpaceTraders.FleetAllocation.StructuralStall do
         nil
     end
   end
+
+  @doc "True when the Portfolio belongs to an older Revision than the active one."
+  def stale_revision?(%Portfolio{fleet_strategy_revision_id: id}, %Revision{id: active}),
+    do: id != active
+
+  def stale_revision?(_portfolio, _active), do: false
+
+  @doc "What releases a stall of `reason`, in Operator terms."
+  def release_condition(:stale_revision_portfolio, %Revision{number: number}),
+    do:
+      "Fleet Allocation retires the superseded Portfolio's settled Intents at the next Market " <>
+        "boundary and reselects under Revision #{number}; unresolved MutationAttempts " <>
+        "keep their Ship fenced until resolved."
+
+  def release_condition(:authority_blocked_intent, _active),
+    do:
+      "The blocked Intent settles and its Claim is released, so Fleet Allocation reselects " <>
+        "under the active Revision."
+
+  def release_condition(:overdue_demands_without_coverage, _active),
+    do:
+      "Allocation admits coverage, selects work that occupies the Ships, or records a " <>
+        "Capacity Deferral, Neutral Wait or Shortfall as the decisive reason."
 
   defp stall(reason, portfolio, references),
     do: %{reason: reason, portfolio: portfolio, references: references}
@@ -154,27 +182,15 @@ defmodule SpaceTraders.FleetAllocation.StructuralStall do
       positive?(counts, :selected) or
       Map.fetch(counts, :claimable_ships) == {:ok, 0} or
       current_coverage?(portfolio, active) or
-      open_shortfall?(agent)
+      CreditCalibration.open_shortfall?(agent)
   end
 
   defp positive?(counts, key), do: Map.get(counts, key, 0) > 0
 
   defp current_coverage?(%Portfolio{fleet_strategy_revision_id: active} = portfolio, active),
-    do: Enum.any?(portfolio.commitments, &coverage_commitment?/1)
+    do: Enum.any?(portfolio.commitments, &Commitment.coverage?/1)
 
   defp current_coverage?(_portfolio, _active), do: false
-
-  @doc "True when a Commitment is Market coverage (an unobserved Market dependency)."
-  def coverage_commitment?(commitment) do
-    Enum.any?(commitment.dependencies, fn dependency ->
-      match?(%{"subject" => "market:" <> _}, dependency) and
-        not Map.has_key?(dependency, "evidence_id")
-    end)
-  end
-
-  defp open_shortfall?(%AgentRecord{id: agent_id}) do
-    Repo.exists?(from s in Shortfall, where: s.agent_id == ^agent_id and is_nil(s.released_at))
-  end
 
   defp record(generation, revision, stall) do
     {:ok, result} =
@@ -200,6 +216,43 @@ defmodule SpaceTraders.FleetAllocation.StructuralStall do
 
     result
   end
+
+  # Degraded Attention follows the durable stall: raised (idempotently) while
+  # it is open, resolved by the recovering observation. Never time-based.
+  defp attention({:stalled, episode} = result, generation) do
+    OperatorConditions.raise(
+      scope(generation),
+      attention_key(generation),
+      :attention,
+      "Degraded Operation: Market allocation is structurally stalled. " <>
+        stall_summary(episode.stall_reason) <>
+        " It clears by reconciliation; Mission Control shows the release condition.",
+      fleet_generation_id: generation.id,
+      fleet_strategy_revision_id: episode.fleet_strategy_revision_id,
+      strategy_decision_episode_id: episode.id
+    )
+
+    result
+  end
+
+  defp attention(:healthy, generation) do
+    OperatorConditions.resolve(scope(generation), attention_key(generation))
+    :healthy
+  end
+
+  defp stall_summary(:stale_revision_portfolio),
+    do: "The current Portfolio belongs to a superseded Strategy Revision."
+
+  defp stall_summary(:authority_blocked_intent),
+    do: "A current Commitment's Intent is blocked on execution authority."
+
+  defp stall_summary(:overdue_demands_without_coverage),
+    do: "Overdue Market Observation Demands have no coverage and no decisive reason."
+
+  defp attention_key(generation), do: "allocation-stall:#{generation.id}"
+
+  defp scope(generation),
+    do: Scope.for_operator(Repo.get!(Operator, generation.operator_id))
 
   defp unchanged?(nil, _revision, _stall), do: false
 

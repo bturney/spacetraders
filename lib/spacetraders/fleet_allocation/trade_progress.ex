@@ -40,6 +40,7 @@ defmodule SpaceTraders.FleetAllocation.TradeProgress do
   alias SpaceTraders.CreditCalibration.Realization
   alias SpaceTraders.Fleet.Intent
   alias SpaceTraders.FleetAllocation.{Commitment, Portfolio}
+  alias SpaceTraders.MutationAttempts
   alias SpaceTraders.MutationAttempts.Attempt
   alias SpaceTraders.Repo
 
@@ -47,9 +48,6 @@ defmodule SpaceTraders.FleetAllocation.TradeProgress do
   @supporting_operations ~w(refuel-ship jump-ship)
   @supporting_kinds ~w(refuel jump)
   @trade_operations ~w(purchase-cargo sell-cargo)
-  # Proven never to have reached the game, or refused by it: nothing charged.
-  @uncharged_states ~w(prepared not_sent rejected absent)
-  @unresolved_states ~w(sent_or_unknown ambiguous bounded_unknown)
 
   @doc "Progress from the receipts and charges of one Episode."
   def for_episode(episode_id) when is_integer(episode_id),
@@ -101,6 +99,7 @@ defmodule SpaceTraders.FleetAllocation.TradeProgress do
       round_trips: proven,
       trade_margin: trade_margin,
       open_commitments: open_commitments(all_intents),
+      supporting_cost: aggregate_supporting_cost(proven),
       supporting_charges: Enum.map(charges, &Map.delete(&1, :reason)),
       observation_only_spending: charges |> Enum.filter(& &1.observation_only) |> total(),
       net_earnings: net_earnings,
@@ -135,10 +134,7 @@ defmodule SpaceTraders.FleetAllocation.TradeProgress do
       on: portfolio.id == commitment.fleet_commitment_portfolio_id,
       left_join: realization in Realization,
       on: realization.mutation_attempt_id == attempt.id,
-      where:
-        attempt.operation_id in ^(@supporting_operations ++ @trade_operations) or
-          (attempt.operation_id == "historical-ship-action" and
-             fragment("?->'selected_action'->>'kind'", attempt.prepared_evidence) in ^@supporting_kinds),
+      where: ^credit_bearing(),
       where: ^scope,
       order_by: [asc: attempt.prepared_at, asc: attempt.id],
       select: %{
@@ -162,10 +158,24 @@ defmodule SpaceTraders.FleetAllocation.TradeProgress do
     end)
   end
 
-  # One charge per supporting attempt that may have charged credits.
-  defp charge(%{state: state, realized_charge: nil}) when state in @uncharged_states, do: []
+  defp credit_bearing do
+    historical = MutationAttempts.selected_action_kind_in(@supporting_kinds)
 
+    dynamic(
+      [attempt],
+      attempt.operation_id in ^(@supporting_operations ++ @trade_operations) or
+        (attempt.operation_id == "historical-ship-action" and ^historical)
+    )
+  end
+
+  # One charge per supporting attempt that may have charged credits.
   defp charge(attempt) do
+    if is_nil(attempt.realized_charge) and attempt.state in MutationAttempts.no_effect_states(),
+      do: [],
+      else: [charge_row(attempt)]
+  end
+
+  defp charge_row(attempt) do
     {amount, reason} =
       cond do
         attempt.provenance["commitment_id"] != attempt.commitment_id ->
@@ -178,19 +188,17 @@ defmodule SpaceTraders.FleetAllocation.TradeProgress do
           {@unknown, "no realized charge receipt for this attempt"}
       end
 
-    [
-      %{
-        mutation_attempt_id: attempt.mutation_attempt_id,
-        operation_id: attempt.operation_id,
-        intent_id: attempt.intent_id,
-        intent_type: attempt.intent_type,
-        commitment_id: attempt.commitment_id,
-        ship_symbol: attempt.provenance["ship_symbol"],
-        realized_charge: amount,
-        observation_only: attempt.intent_type == "acquire_intelligence",
-        reason: reason
-      }
-    ]
+    %{
+      mutation_attempt_id: attempt.mutation_attempt_id,
+      operation_id: attempt.operation_id,
+      intent_id: attempt.intent_id,
+      intent_type: attempt.intent_type,
+      commitment_id: attempt.commitment_id,
+      ship_symbol: attempt.provenance["ship_symbol"],
+      realized_charge: amount,
+      observation_only: attempt.intent_type == "acquire_intelligence",
+      reason: reason
+    }
   end
 
   # Root Intents whose own trade send was recorded with exact root-Intent
@@ -233,6 +241,15 @@ defmodule SpaceTraders.FleetAllocation.TradeProgress do
       else: @unknown
   end
 
+  # The proven trips' own supporting charges; unknown (not zero) unless each is known.
+  defp aggregate_supporting_cost(trips) do
+    costs = Enum.map(trips, & &1.supporting_cost)
+
+    if costs != [] and Enum.all?(costs, &is_integer/1),
+      do: Enum.sum(costs),
+      else: @unknown
+  end
+
   defp aggregate_net(trips) do
     if trips != [] and
          Enum.all?(trips, &match?({:ok, %{net_earnings: net}} when is_integer(net), &1)),
@@ -261,7 +278,10 @@ defmodule SpaceTraders.FleetAllocation.TradeProgress do
   # Every proven receipt and charge in scope, finished work or not.
   defp cash_flow(receipts, receipt_less, charges, attempts) do
     unresolved_trade? =
-      Enum.any?(attempts, &(&1.role == :trade and &1.state in @unresolved_states))
+      Enum.any?(
+        attempts,
+        &(&1.role == :trade and &1.state in MutationAttempts.unresolved_states())
+      )
 
     gaps =
       [

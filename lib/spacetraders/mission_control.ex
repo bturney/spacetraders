@@ -1132,7 +1132,6 @@ defmodule SpaceTraders.MissionControl do
   # observation-only spending stays separate, here and Generation-wide.
   defp realized_economics(%FleetAllocation.Portfolio{} = portfolio, scope) do
     progress = FleetAllocation.TradeProgress.for_portfolio(portfolio.id)
-    trip_costs = Enum.map(progress.round_trips, & &1.supporting_cost)
 
     %{
       completed_round_trips: progress.completed_round_trips,
@@ -1144,8 +1143,7 @@ defmodule SpaceTraders.MissionControl do
         ),
       credits_spent: known(progress.credits_spent),
       credits_received: known(progress.credits_received),
-      supporting_cost:
-        if(trip_costs != [] and Enum.all?(trip_costs, &is_integer/1), do: Enum.sum(trip_costs)),
+      supporting_cost: known(progress.supporting_cost),
       net_earnings: known(progress.net_earnings),
       supporting_charges: progress.supporting_charges,
       observation_only_spending: known(progress.observation_only_spending),

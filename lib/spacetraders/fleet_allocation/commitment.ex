@@ -3,6 +3,18 @@ defmodule SpaceTraders.FleetAllocation.Commitment do
 
   use Ecto.Schema
 
+  @doc """
+  True when the Commitment is Market coverage: it depends on a Market not yet
+  observed. The one Commitment-level coverage definition. (Realized economics
+  classifies a charge by its issuing root Intent instead, charge-at-purchase.)
+  """
+  def coverage?(%{dependencies: dependencies}) do
+    Enum.any?(dependencies, fn dependency ->
+      match?(%{"subject" => "market:" <> _}, dependency) and
+        not Map.has_key?(dependency, "evidence_id")
+    end)
+  end
+
   schema "fleet_commitments" do
     field :candidate_id, :string
     field :objective_index, :integer

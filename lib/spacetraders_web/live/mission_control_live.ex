@@ -225,7 +225,7 @@ defmodule SpaceTradersWeb.MissionControlLive do
               {if disposition.healthy?, do: "Healthy", else: "Degraded Operation"}
             </span>
           </div>
-          <p class="mt-2 text-sm">
+          <p :if={disposition.state != :neutral_wait} class="mt-2 text-sm">
             Active Revision {disposition.active_revision.number}
             <span :if={disposition.portfolio}>
               · Portfolio {disposition.portfolio.id} ·
@@ -240,6 +240,9 @@ defmodule SpaceTradersWeb.MissionControlLive do
             <p class="font-semibold">STALLED · {stall_reason_label(disposition.stall.reason)}</p>
             <p :if={disposition.stall.portfolio_revision_number}>
               Portfolio {disposition.stall.portfolio_id} belongs to superseded Revision {disposition.stall.portfolio_revision_number}.
+            </p>
+            <p :if={disposition.stall.intent_ids != []}>
+              Blocked Intents: {Enum.join(disposition.stall.intent_ids, ", ")}
             </p>
             <p :if={disposition.stall.commitment_ids != []}>
               Commitments: {Enum.join(disposition.stall.commitment_ids, ", ")}
@@ -256,7 +259,7 @@ defmodule SpaceTradersWeb.MissionControlLive do
             <p class="opacity-70">No Operator action is needed; this clears by reconciliation.</p>
           </div>
           <div :if={disposition.spending_pause} class="mt-3 rounded-xl bg-info/10 p-4 text-sm">
-            <p class="font-semibold">SPENDING PAUSE · not a Neutral Wait</p>
+            <p class="font-semibold">SHORTFALL · spending paused, not a Neutral Wait</p>
             <p>
               Balance {balance_label(disposition.spending_pause.balance)} · credit floor {disposition.spending_pause.floor}
             </p>
@@ -265,40 +268,46 @@ defmodule SpaceTradersWeb.MissionControlLive do
           <div :if={disposition.capacity_deferral} class="mt-3 rounded-xl bg-info/10 p-4 text-sm">
             <p class="font-semibold">CAPACITY DEFERRAL · API pressure, not an objective verdict</p>
             <p :if={disposition.capacity_deferral.retry_at}>
-              Reconsidered after {Calendar.strftime(
-                disposition.capacity_deferral.retry_at,
-                "%Y-%m-%d %H:%M:%S UTC"
-              )}.
+              Reconsidered after {utc_label(disposition.capacity_deferral.retry_at)}.
             </p>
           </div>
-          <div :if={disposition.neutral_wait} class="mt-3 rounded-xl bg-info/10 p-4 text-sm">
+          <%!-- ADR 0012: exactly five summary facts; identity is click-through only. --%>
+          <div
+            :if={disposition.state == :neutral_wait}
+            id={"neutral-wait-#{disposition.agent_symbol}"}
+            class="mt-3 rounded-xl bg-info/10 p-4 text-sm"
+          >
             <p class="font-semibold">
-              NEUTRAL WAIT · {disposition.neutral_wait.limitation_kind
-              |> to_string()
-              |> String.replace("_", " ")}
+              <.link
+                navigate={~p"/decision-episodes/#{disposition.neutral_wait.decision_episode_id}"}
+                class="link"
+              >no worthwhile admissible contribution</.link>
             </p>
-            <p :if={disposition.neutral_wait.next_observation_at}>
-              Next scheduled observation {Calendar.strftime(
-                disposition.neutral_wait.next_observation_at,
-                "%Y-%m-%d %H:%M:%S UTC"
-              )}.
+            <p>{limitation_kind_label(disposition.neutral_wait.limitation_kind)}</p>
+            <p :if={disposition.neutral_wait.limitation_kind == :incomplete_coverage}>
+              {coverage_label(disposition.neutral_wait.coverage)}
             </p>
-            <.link
-              navigate={~p"/decision-episodes/#{disposition.neutral_wait.decision_episode_id}"}
-              class="link link-primary"
-            >Decision Episode {disposition.neutral_wait.decision_episode_id}</.link>
+            <p>Last evaluated {utc_label(disposition.neutral_wait.last_evaluated_at)}</p>
+            <p>Next due {utc_label(disposition.neutral_wait.next_observation_at)}</p>
           </div>
           <p
-            :if={disposition.overdue_demand_count > 0 and disposition.healthy?}
+            :if={
+              disposition.overdue_demand_count > 0 and disposition.healthy? and
+                disposition.state != :neutral_wait
+            }
             class="mt-3 text-sm opacity-70"
           >
             {disposition.overdue_demand_count} Market Observation Demand(s) overdue; explained by the state above.
           </p>
-          <p :if={disposition.unallocated_ships != []} class="mt-3 text-sm">
+          <p
+            :if={disposition.unallocated_ships != []}
+            id={"unallocated-ships-#{disposition.agent_symbol}"}
+            class="mt-3 text-sm"
+          >
             Unallocated Ships:
             <.link
               :for={symbol <- disposition.unallocated_ships}
-              navigate={~p"/ships/#{symbol}"}
+              navigate={unallocated_ship_path(disposition, symbol)}
               class="link link-primary mr-2"
             >{symbol}</.link>
           </p>
@@ -538,12 +547,15 @@ defmodule SpaceTradersWeb.MissionControlLive do
     end
   end
 
-  defp disposition_label(%{state: :stalled}), do: "Revision-authority stall"
-  defp disposition_label(%{state: :spending_paused}), do: "Spending paused at the credit floor"
+  defp disposition_label(%{state: :stalled}), do: "Structural stall"
+  defp disposition_label(%{state: :spending_paused}), do: "Shortfall at the credit floor"
   defp disposition_label(%{state: :capacity_deferred}), do: "Capacity deferred"
-  defp disposition_label(%{state: :neutral_wait}), do: "Waiting deliberately"
-  defp disposition_label(%{state: :busy_trade}), do: "Authorized work in progress"
-  defp disposition_label(%{state: :retained_coverage}), do: "Market coverage retained"
+  defp disposition_label(%{state: :neutral_wait}), do: "Neutral Wait"
+  defp disposition_label(%{state: :busy_trade}), do: "Trading under the active Revision"
+
+  defp disposition_label(%{state: :retained_coverage}),
+    do: "Market coverage under the active Revision"
+
   defp disposition_label(%{state: :unallocated}), do: "No allocated work"
 
   defp stall_reason_label(:stale_revision_portfolio),
@@ -554,6 +566,22 @@ defmodule SpaceTradersWeb.MissionControlLive do
 
   defp stall_reason_label(:overdue_demands_without_coverage),
     do: "Overdue Market Demands with no coverage and no decisive reason"
+
+  # During a Neutral Wait an Unallocated Ship links to the wait's cause.
+  defp unallocated_ship_path(%{state: :neutral_wait, neutral_wait: wait}, _symbol),
+    do: ~p"/decision-episodes/#{wait.decision_episode_id}"
+
+  defp unallocated_ship_path(_disposition, symbol), do: ~p"/ships/#{symbol}"
+
+  defp limitation_kind_label(kind), do: kind |> to_string() |> String.replace("_", " ")
+
+  defp coverage_label(%{completed: completed, required: required}),
+    do: "#{completed} of #{required} Marketplaces covered"
+
+  defp coverage_label(_unknown), do: "Coverage unknown"
+
+  defp utc_label(%DateTime{} = at), do: Calendar.strftime(at, "%Y-%m-%d %H:%M:%S UTC")
+  defp utc_label(_unknown), do: "unknown"
 
   defp balance_label(nil), do: "unknown (no fresh authoritative balance)"
   defp balance_label(credits), do: "#{credits} credits"

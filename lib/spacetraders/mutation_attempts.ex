@@ -20,6 +20,24 @@ defmodule SpaceTraders.MutationAttempts do
   alias SpaceTraders.SafetyFence
   alias SpaceTraders.SafetyFence.DependencyKey
 
+  # ADR 0011: the one classification of attempt states.
+  @unresolved_states ["sent_or_unknown", "ambiguous", "bounded_unknown"]
+  @no_effect_states ["prepared", "not_sent", "rejected", "absent"]
+
+  @doc "States whose effect is still unresolved: they fence dependents and may have charged."
+  def unresolved_states, do: @unresolved_states
+
+  @doc "States proven never to have reached the game, or refused by it: no effect, no charge."
+  def no_effect_states, do: @no_effect_states
+
+  @doc "Query condition: the attempt's recorded selected action is one of `kinds`."
+  def selected_action_kind_in(kinds) when is_list(kinds),
+    do:
+      dynamic(
+        [attempt],
+        fragment("?->'selected_action'->>'kind'", attempt.prepared_evidence) in ^kinds
+      )
+
   @doc "Links historical selected work to explicit unknown evidence, never to proof of non-send."
   def recover_legacy(%Intent{} = intent, agent_id) do
     Repo.transaction(fn ->
@@ -365,7 +383,7 @@ defmodule SpaceTraders.MutationAttempts do
   @doc "Returns unresolved mutation evidence for the action currently selected by an Intent."
   @spec unresolved_for_intent(Intent.t()) :: Attempt.t() | nil
   def unresolved_for_intent(%Intent{} = intent) do
-    attempt_for_intent(intent, ["sent_or_unknown", "ambiguous", "bounded_unknown"])
+    attempt_for_intent(intent, @unresolved_states)
   end
 
   def latest_for_intent(%Intent{} = intent) do
@@ -459,7 +477,7 @@ defmodule SpaceTraders.MutationAttempts do
   defp outcome_allowed?("prepared", :not_sent), do: true
 
   defp outcome_allowed?(state, classification)
-       when state in ["sent_or_unknown", "ambiguous", "bounded_unknown"] and
+       when state in @unresolved_states and
               classification in [:accepted, :absent, :bounded_unknown],
        do: true
 
