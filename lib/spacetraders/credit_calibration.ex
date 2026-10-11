@@ -343,7 +343,8 @@ defmodule SpaceTraders.CreditCalibration do
     query =
       from a in Attempt,
         where:
-          a.agent_id == ^agent_id and a.state in ^SpaceTraders.MutationAttempts.unresolved_states() and
+          a.agent_id == ^agent_id and
+            a.state in ^SpaceTraders.MutationAttempts.unresolved_states() and
             a.operation_id in ^CreditSpending.credit_operations()
 
     query = if except_id, do: where(query, [a], a.id != ^except_id), else: query

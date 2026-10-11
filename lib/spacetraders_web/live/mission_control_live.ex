@@ -552,7 +552,10 @@ defmodule SpaceTradersWeb.MissionControlLive do
   defp disposition_label(%{state: :capacity_deferred}), do: "Capacity deferred"
   defp disposition_label(%{state: :neutral_wait}), do: "Neutral Wait"
   defp disposition_label(%{state: :busy_trade}), do: "Trading under the active Revision"
-  defp disposition_label(%{state: :retained_coverage}), do: "Market coverage under the active Revision"
+
+  defp disposition_label(%{state: :retained_coverage}),
+    do: "Market coverage under the active Revision"
+
   defp disposition_label(%{state: :unallocated}), do: "No allocated work"
 
   defp stall_reason_label(:stale_revision_portfolio),

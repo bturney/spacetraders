@@ -1433,7 +1433,8 @@ defmodule SpaceTraders.FleetPlanning do
        when is_list(materials) and is_binary(id) and id != "" and is_binary(system) do
     if DateTime.diff(as_of, observed_at, :second) in 0..@non_market_evidence_freshness_seconds,
       do:
-        {:ok, construction, DateTime.add(observed_at, @non_market_evidence_freshness_seconds, :second)},
+        {:ok, construction,
+         DateTime.add(observed_at, @non_market_evidence_freshness_seconds, :second)},
       else: {:error, :stale_construction_evidence}
   end
 
