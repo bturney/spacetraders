@@ -6,6 +6,7 @@ defmodule SpaceTradersWeb.MissionControlBriefingTest do
   import SpaceTraders.ShipBody
 
   alias SpaceTraders.Agent
+  alias SpaceTraders.Repo
   alias SpaceTraders.{Evidence, Fleet, FleetGeneration, FleetStrategy, OperatorConditions}
 
   @symbol "MCCTRL"
@@ -197,6 +198,91 @@ defmodule SpaceTradersWeb.MissionControlBriefingTest do
     refute has_element?(view, "#operating-health", "Fleet health unknown")
     refute has_element?(view, "#operating-health", "Operating normally")
     refute has_element?(view, "#fleet-health", "0 Ships in this Fleet Generation")
+  end
+
+  test "a recorded structural stall is Degraded Operation with its cause, release and Episode link",
+       %{conn: conn, scope: scope} do
+    {agent, generation} = mint_fleet(scope)
+    episode = stall_episode(scope, generation, :overdue_demands_without_coverage)
+
+    {:ok, view, _html} = live(conn, ~p"/mission-control")
+
+    assert has_element?(view, "#operating-health", "Fleet allocation stalled")
+    refute has_element?(view, "#operating-health", "Operating normally")
+    section = "#allocation-disposition-#{agent.symbol}"
+    assert has_element?(view, section, "Degraded Operation")
+    assert has_element?(view, section, "Overdue Market Demands with no coverage")
+    assert has_element?(view, section, "Releases when")
+    assert has_element?(view, section, "No Operator action is needed")
+    assert has_element?(view, "#{section} a[href='/decision-episodes/#{episode.id}']")
+    assert has_element?(view, "#needs-attention", "No unresolved Attention or Intervention.")
+
+    # Normal recovery closes the Episode and the representation clears.
+    episode |> Ecto.Changeset.change(resolved_at: DateTime.utc_now()) |> Repo.update!()
+    {:ok, view, _html} = live(conn, ~p"/mission-control")
+    refute has_element?(view, "#allocation-disposition-#{agent.symbol}", "Degraded Operation")
+    refute has_element?(view, "#operating-health", "Fleet allocation stalled")
+  end
+
+  test "an open Shortfall shows the floor and release predicate, not a stall or Neutral Wait",
+       %{conn: conn, scope: scope} do
+    {agent, _generation} = mint_fleet(scope)
+
+    Repo.insert!(%SpaceTraders.CreditCalibration.Shortfall{
+      agent_id: agent.id,
+      kind: "revision_floor",
+      credits: 900,
+      credit_floor: 50_000,
+      detected_at: DateTime.add(DateTime.utc_now(), -5, :second)
+    })
+
+    # A balance below the floor keeps the pause open (a higher one releases it).
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      case conn.request_path do
+        "/v2/my/agent" ->
+          Req.Test.json(conn, %{
+            "data" => %{
+              "accountId" => "BRIEFING_ACCOUNT",
+              "symbol" => @symbol,
+              "headquarters" => "X1-UX81-A1",
+              "credits" => 900,
+              "startingFaction" => "COSMIC",
+              "shipCount" => 1
+            }
+          })
+
+        _ ->
+          briefing_api(conn)
+      end
+    end)
+
+    {:ok, view, _html} = live(conn, ~p"/mission-control")
+    section = "#allocation-disposition-#{agent.symbol}"
+
+    assert has_element?(view, section, "Spending paused at the credit floor")
+    assert has_element?(view, section, "SPENDING PAUSE")
+    assert has_element?(view, section, "not a Neutral Wait")
+    assert has_element?(view, section, "50000 credit floor")
+    assert has_element?(view, section, "Releases when")
+    refute has_element?(view, section, "STALLED")
+    refute has_element?(view, section, "Degraded Operation")
+  end
+
+  defp stall_episode(scope, generation, reason) do
+    revision = FleetStrategy.get(scope).active_revision
+
+    Repo.insert!(%SpaceTraders.FleetAllocation.StrategyDecisionEpisode{
+      operator_id: scope.operator.id,
+      fleet_generation_id: generation.id,
+      fleet_strategy_revision_id: revision.id,
+      source_version: 1,
+      calibration_version: "market-v1",
+      selection_kind: :structural_stall,
+      stall_reason: reason,
+      evidence_references: [%{"kind" => "observation_demand", "subject" => "market:X1-A1"}],
+      last_observed_at: DateTime.utc_now(),
+      observation_count: 2
+    })
   end
 
   defp mint_fleet(scope) do

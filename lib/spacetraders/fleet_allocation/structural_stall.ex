@@ -120,18 +120,26 @@ defmodule SpaceTraders.FleetAllocation.StructuralStall do
     if explained?(agent, active, portfolio, result, counts) do
       []
     else
-      now = Clock.utc_now()
-
-      agent
-      |> Evidence.list_open_demands()
-      |> Enum.filter(fn demand ->
-        demand.owner == "fleet_planning" and demand.strategy_revision_id == active and
-          String.starts_with?(demand.subject, "market:") and
-          DateTime.compare(demand.due_at, now) != :gt
-      end)
-      |> Enum.map(& &1.subject)
-      |> Enum.sort()
+      overdue_demands(agent, active)
     end
+  end
+
+  @doc """
+  Subjects of the Agent's open, due Market Observation Demands owned by Fleet
+  Planning under the given active Revision, sorted. A read of retained facts.
+  """
+  def overdue_demands(agent, active_revision_id) do
+    now = Clock.utc_now()
+
+    agent
+    |> Evidence.list_open_demands()
+    |> Enum.filter(fn demand ->
+      demand.owner == "fleet_planning" and demand.strategy_revision_id == active_revision_id and
+        String.starts_with?(demand.subject, "market:") and
+        DateTime.compare(demand.due_at, now) != :gt
+    end)
+    |> Enum.map(& &1.subject)
+    |> Enum.sort()
   end
 
   # Only the decision's own decisive disposition explains zero coverage
@@ -151,16 +159,18 @@ defmodule SpaceTraders.FleetAllocation.StructuralStall do
 
   defp positive?(counts, key), do: Map.get(counts, key, 0) > 0
 
-  defp current_coverage?(%Portfolio{fleet_strategy_revision_id: active} = portfolio, active) do
-    Enum.any?(portfolio.commitments, fn commitment ->
-      Enum.any?(commitment.dependencies, fn dependency ->
-        match?(%{"subject" => "market:" <> _}, dependency) and
-          not Map.has_key?(dependency, "evidence_id")
-      end)
-    end)
-  end
+  defp current_coverage?(%Portfolio{fleet_strategy_revision_id: active} = portfolio, active),
+    do: Enum.any?(portfolio.commitments, &coverage_commitment?/1)
 
   defp current_coverage?(_portfolio, _active), do: false
+
+  @doc "True when a Commitment is Market coverage (an unobserved Market dependency)."
+  def coverage_commitment?(commitment) do
+    Enum.any?(commitment.dependencies, fn dependency ->
+      match?(%{"subject" => "market:" <> _}, dependency) and
+        not Map.has_key?(dependency, "evidence_id")
+    end)
+  end
 
   defp open_shortfall?(%AgentRecord{id: agent_id}) do
     Repo.exists?(from s in Shortfall, where: s.agent_id == ^agent_id and is_nil(s.released_at))

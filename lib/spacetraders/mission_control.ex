@@ -16,6 +16,7 @@ defmodule SpaceTraders.MissionControl do
   alias SpaceTraders.Fleet.Activity
   alias SpaceTraders.FleetAllocation.StrategyDecisionEpisode
   alias SpaceTraders.FleetShadow
+  alias SpaceTraders.MissionControl.MarketDisposition
   alias SpaceTraders.FleetStrategy.Revision
   alias SpaceTraders.Evidence
   alias SpaceTraders.Evidence.Observation
@@ -789,7 +790,8 @@ defmodule SpaceTraders.MissionControl do
           },
           contribution: %{commitment_count: 0, expected_value: 0},
           limitation: nil,
-          attention: []
+          attention: [],
+          dispositions: dispositions(scope, false)
         }
 
       portfolio ->
@@ -809,8 +811,25 @@ defmodule SpaceTraders.MissionControl do
             ),
           contribution: endeavors(scope, portfolio).contribution,
           limitation: limitation(portfolio),
-          attention: []
+          attention: [],
+          dispositions: dispositions(scope, true)
         }
+    end
+  end
+
+  # Per-Agent actual allocation disposition from durable facts (#688).
+  defp dispositions(scope, with_portfolio?) do
+    case FleetStrategy.get(scope).active_revision do
+      nil ->
+        []
+
+      active ->
+        scope
+        |> agents()
+        |> Enum.flat_map(fn agent ->
+          portfolio = with_portfolio? && FleetAllocation.current_portfolio(scope, agent)
+          List.wrap(MarketDisposition.for_agent(agent, active, portfolio || nil))
+        end)
     end
   end
 
