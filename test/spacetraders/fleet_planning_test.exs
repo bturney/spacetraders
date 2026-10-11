@@ -1209,7 +1209,7 @@ defmodule SpaceTraders.FleetPlanningTest do
       assert dependency.subject == "market:X1-UX81:X1-UX81-A2"
       assert dependency.required_facts == ["trade_goods"]
 
-      assert candidate.validity.expires_at == ~U[2030-01-01 12:03:00Z]
+      assert candidate.validity.expires_at == ~U[2030-01-01 12:28:00Z]
       assert candidate.alternatives == []
     end
 

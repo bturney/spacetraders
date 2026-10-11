@@ -11,7 +11,7 @@ defmodule SpaceTraders.FleetIntelligence do
   alias SpaceTraders.Intelligence
   alias SpaceTraders.World
 
-  @freshness_seconds 300
+  @waypoint_freshness_seconds 300
   @api_cost 0.1
   @distance_cost 0.01
   @market_api_cost 5
@@ -211,7 +211,7 @@ defmodule SpaceTraders.FleetIntelligence do
              as_of: market.as_of,
              system_symbol: system,
              agent_id: agent.id,
-             freshness_seconds: @freshness_seconds,
+             freshness_seconds: @waypoint_freshness_seconds,
              opportunities: opportunities
            }) do
       planning
@@ -225,11 +225,11 @@ defmodule SpaceTraders.FleetIntelligence do
   defp waypoints_for_decision(agent, revision, system) do
     now = Clock.utc_now()
 
-    case World.waypoints(agent, system, now, @freshness_seconds) do
+    case World.waypoints(agent, system, now, @waypoint_freshness_seconds) do
       [] ->
         discover_waypoints(agent, revision, system)
         now = Clock.utc_now()
-        {now, World.waypoints(agent, system, now, @freshness_seconds)}
+        {now, World.waypoints(agent, system, now, @waypoint_freshness_seconds)}
 
       waypoints ->
         {now, waypoints}
@@ -258,7 +258,7 @@ defmodule SpaceTraders.FleetIntelligence do
           discovery: true,
           expected_value: 1.0 - @api_cost,
           strategic_priority: priority,
-          freshness_seconds: @freshness_seconds,
+          freshness_seconds: @waypoint_freshness_seconds,
           required_facts: ["waypoints"]
         ]
 
