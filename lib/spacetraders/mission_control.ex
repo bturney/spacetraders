@@ -590,6 +590,9 @@ defmodule SpaceTraders.MissionControl do
   defp selection_summary(%{selection_kind: :publication_rejected, rejection_reason: reason}),
     do: "Fleet Allocation rejected a portfolio publication: #{reason}"
 
+  defp selection_summary(%{selection_kind: :structural_stall, stall_reason: reason}),
+    do: "Fleet Allocation recorded a structural stall: #{reason}"
+
   defp selection_summary(_episode), do: "Fleet selected a new commitment portfolio"
 
   @doc "Comparable Fleet Generation chapters using only retained outcome evidence."

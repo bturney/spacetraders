@@ -29,7 +29,7 @@ defmodule SpaceTraders.FleetExecution do
   alias SpaceTraders.FleetCapacity
 
   @coverage_kinds [:market_coverage, :intelligence_acquisition]
-  alias SpaceTraders.FleetAllocation.{Commitment, MarketDomain, Portfolio}
+  alias SpaceTraders.FleetAllocation.{Commitment, MarketDomain, Portfolio, StructuralStall}
   alias SpaceTraders.FleetGeneration.Generation
   alias SpaceTraders.FleetIntelligence
   alias SpaceTraders.FleetShadow
@@ -99,16 +99,28 @@ defmodule SpaceTraders.FleetExecution do
         capacity
       )
       when is_binary(system_symbol) do
+    generation = FleetAllocation.active_generation(agent)
+    reconciled = reconcile_revision_change(scope, revision, generation)
     current = FleetAllocation.current_portfolio(scope, agent)
 
     {result, counts} =
-      if FleetCapacity.proceed?(capacity) do
-        allocate_market_domain(scope, agent, revision, system_symbol, current)
-      else
-        {capacity_deferral(agent, capacity, current), %{}}
+      cond do
+        match?({:error, _reason}, reconciled) ->
+          {reconciled, %{}}
+
+        FleetCapacity.proceed?(capacity) ->
+          allocate_market_domain(scope, agent, revision, system_symbol, current, generation)
+
+        true ->
+          {capacity_deferral(agent, capacity, current), %{}}
       end
 
-    observe_market_domain(agent, result, counts)
+    portfolio = FleetAllocation.current_portfolio(scope, agent)
+
+    stall =
+      StructuralStall.observe(agent, revision, portfolio, %{result: result, counts: counts})
+
+    observe_market_domain(agent, generation, revision, portfolio, stall, result, counts)
   end
 
   # The Governor's explicit deferral is not authoritative evidence of an empty
@@ -128,9 +140,10 @@ defmodule SpaceTraders.FleetExecution do
       else: {:ok, Map.put(deferral, :action, :deferred_for_capacity)}
   end
 
-  defp allocate_market_domain(scope, agent, revision, system, current) do
-    resume_awaiting_sells(agent, current)
-    occupancy = domain_occupancy(agent, current)
+  defp allocate_market_domain(scope, agent, revision, system, current, generation) do
+    settling = if generation, do: FleetAllocation.settling_commitments(generation.id), else: []
+    resume_awaiting_sells(agent, current, settling)
+    occupancy = domain_occupancy(agent, current, settling)
 
     if no_free_ship?(agent, occupancy.occupied) do
       # Occupancy is local state: with every known Ship fenced there is
@@ -153,14 +166,18 @@ defmodule SpaceTraders.FleetExecution do
         demands =
           if planned.intelligence, do: planned.intelligence.observation_demands, else: []
 
-        decide(scope, agent, revision, current, occupancy, availability, free, planning, demands)
+        held = %{occupancy: occupancy, availability: availability, free: free}
+        decide(scope, agent, revision, current, held, planning, demands)
       else
         {:error, reason} -> {{:error, reason}, %{}}
       end
     end
   end
 
-  defp decide(scope, agent, revision, current, occupancy, availability, free, planning, demands) do
+  # `held` is the boundary's one read of what the Fleet already holds: the
+  # occupancy of current work, governed availability and the free Claims.
+  defp decide(scope, agent, revision, current, held, planning, demands) do
+    %{occupancy: occupancy, availability: availability, free: free} = held
     candidates = Enum.flat_map(planning, & &1.candidate_contributions)
     planned_ids = MapSet.new(candidates, & &1.id)
 
@@ -176,6 +193,8 @@ defmodule SpaceTraders.FleetExecution do
     kept_ships = MapSet.new(Enum.flat_map(kept, & &1.claims))
     claims = Enum.reject(free, &MapSet.member?(kept_ships, &1.resource))
 
+    # Retained work is current-Revision work: a settling old-Revision scout
+    # holds its own Ship, never the single-scout slot of the active Revision.
     {candidates, dispatch, unavailable} =
       admissible_candidates(agent, candidates, retained, demands)
 
@@ -344,10 +363,94 @@ defmodule SpaceTraders.FleetExecution do
     end
   end
 
+  # A Portfolio selected under an older Revision is not current authority
+  # (#684, #686). Each Market boundary, before occupancy is read: settled
+  # old-Revision Intents retire (nothing in flight, no unresolved Mutation
+  # Attempt, no pending arrival); the stale Portfolio retires, its unsettled
+  # Commitments kept as `:settling` narrow fences on their own Ships; and
+  # settling Commitments whose effects have settled release. Retirement
+  # never replays or rewrites an effect; the old Episode keeps it. Every step
+  # is local state and idempotent, so a lost wake only delays it.
+  defp reconcile_revision_change(_scope, _revision, nil), do: :ok
+
+  defp reconcile_revision_change(scope, %Revision{id: active}, %Generation{} = generation) do
+    for intent <- FleetAllocation.revision_change_intents(generation.id, active),
+        {:ok, retired} <- [Intents.supersede_for_revision_change(intent, active)] do
+      Logger.info("Fleet Allocation retired a stale-Revision Intent",
+        agent_id: generation.agent_id,
+        fleet_generation_id: generation.id,
+        intent_id: retired.id,
+        commitment_id: retired.fleet_commitment_id,
+        active_revision_id: active
+      )
+    end
+
+    with :ok <- retire_stale_portfolio(scope, active, generation) do
+      release_settled(generation, active)
+    end
+  end
+
+  defp retire_stale_portfolio(scope, active, generation) do
+    case FleetAllocation.retire_stale_portfolio(scope, generation.id, active) do
+      {:ok, %{portfolio: portfolio} = retired} ->
+        Logger.info("Fleet Allocation retired a stale-Revision Portfolio",
+          agent_id: generation.agent_id,
+          fleet_generation_id: generation.id,
+          portfolio_id: portfolio.id,
+          portfolio_revision_id: portfolio.fleet_strategy_revision_id,
+          active_revision_id: active,
+          decision_episode_id: portfolio.strategy_decision_episode_id,
+          commitment_ids: FleetAllocation.log_ids(Enum.map(retired.released, & &1.commitment_id)),
+          settling: Enum.map_join(retired.settling, ",", &"#{&1.commitment_id}:#{&1.reason}")
+        )
+
+        # Released at retirement with no sale under way: Cargo aboard is
+        # reported the same way a settled disposition's is.
+        retired.released
+        |> Enum.filter(&(&1.undisposed_units > 0))
+        |> Enum.each(&log_settled(&1, generation, active))
+
+      {:error, :no_stale_portfolio} ->
+        :ok
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp release_settled(generation, active) do
+    case FleetAllocation.release_settled_commitments(generation.id) do
+      {:ok, released} ->
+        Enum.each(released, &log_settled(&1, generation, active))
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  # A disposition that ended with Cargo still aboard is reported, not hidden:
+  # the fence lasts only while a sale is under way.
+  defp log_settled(released, generation, active) do
+    {level, message} =
+      if released.undisposed_units > 0,
+        do:
+          {:warning, "Fleet Allocation released a settled Commitment with inherited Cargo aboard"},
+        else: {:info, "Fleet Allocation released a settled Commitment"}
+
+    Logger.log(level, message,
+      agent_id: generation.agent_id,
+      fleet_generation_id: generation.id,
+      commitment_id: released.commitment_id,
+      portfolio_id: released.portfolio_id,
+      active_revision_id: active,
+      undisposed_units: released.undisposed_units
+    )
+  end
+
   # Current Commitments split into retained work (busy: an unresolved Intent
   # or leg handoff; or outside the pilot domain) and releasable pilot work.
   # `occupied` holds the Ships retained work or any unfinished Intent fences.
-  defp domain_occupancy(agent, current) do
+  defp domain_occupancy(agent, current, settling) do
     commitments = if current, do: current.commitments, else: []
     ids = Enum.map(commitments, & &1.id)
 
@@ -379,7 +482,7 @@ defmodule SpaceTraders.FleetExecution do
       retained: retained,
       releasable: releasable,
       completed_intelligence: completed_intelligence,
-      occupied: MapSet.new(Enum.flat_map(retained, & &1.claims) ++ intent_ships)
+      occupied: MapSet.new(Enum.flat_map(retained ++ settling, & &1.claims) ++ intent_ships)
     }
   end
 
@@ -392,11 +495,20 @@ defmodule SpaceTraders.FleetExecution do
   # handoff qualify and only when no later Intent exists, so an unconfirmed
   # purchase is never replayed and a leg is never requested twice. The sell
   # itself still passes the Intent engine's quote and authority checks.
-  defp resume_awaiting_sells(_agent, nil), do: :ok
+  # A settling Commitment's inherited Cargo continues the same way: its sale
+  # is the disposition the active Revision authorizes.
+  defp resume_awaiting_sells(agent, current, settling) do
+    if current do
+      for buy <- FleetAllocation.awaiting_sell_buys(current.id),
+          %Commitment{} = commitment <- [Repo.get(Commitment, buy.fleet_commitment_id)] do
+        continue_after_intent(agent, commitment, current, buy)
+      end
+    end
 
-  defp resume_awaiting_sells(agent, %Portfolio{} = portfolio) do
-    for buy <- FleetAllocation.awaiting_sell_buys(portfolio.id),
-        %Commitment{} = commitment <- [Repo.get(Commitment, buy.fleet_commitment_id)] do
+    for commitment <- settling,
+        portfolio = commitment.fleet_commitment_portfolio,
+        buy <- FleetAllocation.awaiting_sell_buys(portfolio.id),
+        buy.fleet_commitment_id == commitment.id do
       continue_after_intent(agent, commitment, portfolio, buy)
     end
 
@@ -411,8 +523,9 @@ defmodule SpaceTraders.FleetExecution do
   defp free_claims(availability, occupied),
     do: Enum.reject(availability.claims, &MapSet.member?(occupied, &1.resource))
 
-  # G2: one bounded record per domain decision. Ids stay log metadata only.
-  defp observe_market_domain(agent, result, counts) do
+  # G2: one bounded record per domain decision, unchanged repeats included.
+  # Ids stay log metadata only, never metric labels.
+  defp observe_market_domain(agent, generation, revision, portfolio, stall, result, counts) do
     {kind, reason} = domain_outcome(result)
 
     :telemetry.execute(
@@ -426,14 +539,37 @@ defmodule SpaceTraders.FleetExecution do
 
     level = if kind in [:error, :publication_rejected], do: :warning, else: :info
 
-    Logger.log(level, "Fleet Allocation Market domain decision",
-      result: kind,
-      decisive_reason: reason,
-      agent_id: agent.id
+    level = if match?({:stalled, _}, stall), do: :warning, else: level
+
+    Logger.log(
+      level,
+      "Fleet Allocation Market domain decision",
+      [
+        result: kind,
+        decisive_reason: reason,
+        agent_id: agent.id,
+        fleet_generation_id: generation && generation.id,
+        active_revision_id: revision.id,
+        portfolio_revision_id: portfolio && portfolio.fleet_strategy_revision_id,
+        portfolio_id: portfolio && portfolio.id,
+        commitment_ids:
+          portfolio && FleetAllocation.log_ids(Enum.map(portfolio.commitments, & &1.id)),
+        decision_episode_id: decision_episode_id(result, portfolio)
+      ] ++ stall_metadata(stall)
     )
 
     result
   end
+
+  defp decision_episode_id({:ok, %{episode: %{id: id}}}, _portfolio), do: id
+  defp decision_episode_id({:ok, %{neutral_wait: %{id: id}}}, _portfolio), do: id
+  defp decision_episode_id(_result, %Portfolio{strategy_decision_episode_id: id}), do: id
+  defp decision_episode_id(_result, _portfolio), do: nil
+
+  defp stall_metadata({:stalled, episode}),
+    do: [stall_reason: episode.stall_reason, stall_episode_id: episode.id]
+
+  defp stall_metadata(:healthy), do: []
 
   defp domain_outcome({:error, reason}), do: {:error, FleetAllocation.bounded_reason(reason)}
 
@@ -859,22 +995,13 @@ defmodule SpaceTraders.FleetExecution do
     end
   end
 
-  defp current_generation(%AgentRecord{id: agent_id}) do
-    Repo.one(
-      from generation in Generation,
-        where:
-          generation.agent_id == ^agent_id and is_nil(generation.fenced_at) and
-            is_nil(generation.retired_at)
-    )
-  end
-
   # A missing live Ship, credit, or Market-reach fact is unknown availability,
   # not zero availability. Treating it as zero would let a transient API error
   # manufacture a Neutral Wait from a non-authoritative allocation result, and
   # would let coverage acquisition proceed against fabricated capacity.
   defp allocation_availability(agent) do
     with {:ok, availability} <- governed_availability(agent),
-         %Generation{} = generation <- current_generation(agent) do
+         %Generation{} = generation <- FleetAllocation.active_generation(agent) do
       {:ok, Map.put(availability, :source_version, generation.allocation_version)}
     else
       _ -> {:error, :availability_unknown}

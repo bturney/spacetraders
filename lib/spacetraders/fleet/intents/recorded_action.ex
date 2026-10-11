@@ -431,7 +431,7 @@ defmodule SpaceTraders.Fleet.Intents.RecordedAction do
     end
   end
 
-  defp owner(agent, ship, %Intent{caller: "commitment"}) do
+  defp owner(agent, ship, %Intent{caller: "commitment"} = intent) do
     strategy =
       Repo.one(from s in Strategy, where: s.operator_id == ^agent.operator_id, lock: "FOR SHARE")
 
@@ -445,7 +445,7 @@ defmodule SpaceTraders.Fleet.Intents.RecordedAction do
         {:error, :fleet_generation_fenced}
 
       true ->
-        commitment_claim(agent, ship, strategy, generation)
+        commitment_claim(agent, ship, intent, strategy, generation)
     end
   end
 
@@ -460,13 +460,22 @@ defmodule SpaceTraders.Fleet.Intents.RecordedAction do
 
   defp active_revision(_strategy), do: {:error, :strategy_revision_absent}
 
-  defp commitment_claim(agent, ship, strategy, generation) do
+  # The Claim must be current work of the active Revision. One exception
+  # (#684, #686): the sale of Cargo an older Revision's Commitment already
+  # bought is a disposition of that outcome, authorized and constrained by the
+  # active Revision. A settling Commitment of a retired Portfolio authorizes
+  # nothing else: no buy and no other old-Revision action.
+  defp commitment_claim(agent, ship, intent, strategy, generation) do
     with {:ok, revision_id} <- active_revision(strategy),
          %Revision{} = revision <- Repo.get(Revision, revision_id),
          {:ok, claim} <- FleetAllocation.current_ship_claim(agent, ship.symbol, lock: true),
-         %Portfolio{fleet_generation_id: generation_id, fleet_strategy_revision_id: ^revision_id} <-
+         %Portfolio{fleet_generation_id: generation_id} = portfolio <-
            Repo.get(Portfolio, claim.portfolio_id),
-         true <- generation_id == generation.id do
+         true <- generation_id == generation.id,
+         true <-
+           ((portfolio.fleet_strategy_revision_id == revision_id and not claim.settling) or
+              inherited_cargo_sale?(intent, portfolio, claim)) ||
+             {:error, :strategy_revision_absent} do
       {:ok, %{claim: claim, generation: generation, revision: revision}}
     else
       false -> {:error, :no_current_ship_claim}
@@ -475,6 +484,14 @@ defmodule SpaceTraders.Fleet.Intents.RecordedAction do
       _ -> {:error, :strategy_revision_absent}
     end
   end
+
+  defp inherited_cargo_sale?(%Intent{type: "sell", fleet_commitment_id: id}, portfolio, claim)
+       when is_integer(id) do
+    id == claim.commitment_id and
+      MapSet.member?(FleetAllocation.inherited_cargo_commitment_ids(portfolio.id), id)
+  end
+
+  defp inherited_cargo_sale?(_intent, _portfolio, _claim), do: false
 
   defp generation_id(nil), do: nil
   defp generation_id(generation), do: generation.id
