@@ -11,54 +11,84 @@ defmodule SpaceTraders.FleetAllocation.TradeProgress do
   report the same receipts once.
 
   Anything the receipts do not prove is the string `"unknown"`, with a reason in
-  `unknown`: a missing receipt is never zero, and Net Earnings stays unknown
-  because supporting costs (fuel and others) are not retained against the
-  Episode. Estimates never enter this projection.
+  `unknown`: a missing receipt is never zero. Estimates, quotes, predicted
+  burn and Agent-balance change never enter this projection.
 
-  Receipts come from the completed Intent's `last_action_result`, linked to
-  its reconciled MutationAttempt by `mutation_attempt_id`: the bounded
+  Goods receipts come from the completed Intent's `last_action_result`, linked
+  to its reconciled MutationAttempt by `mutation_attempt_id`: the bounded
   deviation recorded in ADR 0011, since attempt outcomes do not retain the
   transaction.
+
+  Supporting charges (refuel, jump antimatter) use charge-at-purchase
+  attribution (#689): each realized charge belongs in full to the root Intent
+  that issued it, named by its MutationAttempt's recorded provenance, hence to
+  that Intent's Fleet Commitment and original Decision Episode. The amount is
+  the attempt's Credit Calibration Realization, recorded once per attempt from
+  the decoded success response. Fuel left aboard for a later trip is never
+  moved or prorated. A charge-bearing attempt without a Realization, or whose
+  provenance does not name its Intent's Commitment, is `"unknown"`.
+
+  Net Earnings of a Completed Round Trip is its Trade Margin minus the
+  supporting charges of its own Commitment's root Intents. Episode Cash Flow
+  counts every receipt and charge in scope, finished work or not;
+  observation-only spending is the charges issued by coverage
+  (`acquire_intelligence`) root Intents.
   """
 
   import Ecto.Query
 
+  alias SpaceTraders.CreditCalibration.Realization
   alias SpaceTraders.Fleet.Intent
   alias SpaceTraders.FleetAllocation.{Commitment, Portfolio}
+  alias SpaceTraders.MutationAttempts.Attempt
   alias SpaceTraders.Repo
 
   @unknown "unknown"
-  @supporting_costs_reason "supporting costs such as fuel are not retained against this decision's receipts"
+  @supporting_operations ~w(refuel-ship jump-ship)
+  @supporting_kinds ~w(refuel jump)
+  @trade_operations ~w(purchase-cargo sell-cargo)
+  # Proven never to have reached the game, or refused by it: nothing charged.
+  @uncharged_states ~w(prepared not_sent rejected absent)
+  @unresolved_states ~w(sent_or_unknown ambiguous bounded_unknown)
 
-  @doc "Progress from the receipts of every completed trade Intent of one Episode."
-  def for_episode(episode_id) when is_integer(episode_id) do
-    base_query()
-    |> where([_i, _c, portfolio], portfolio.strategy_decision_episode_id == ^episode_id)
-    |> Repo.all()
-    |> build()
-  end
+  @doc "Progress from the receipts and charges of one Episode."
+  def for_episode(episode_id) when is_integer(episode_id),
+    do: load(dynamic([portfolio: p], p.strategy_decision_episode_id == ^episode_id))
 
-  @doc "Progress from the receipts of every completed trade Intent of one Portfolio."
-  def for_portfolio(portfolio_id) when is_integer(portfolio_id) do
-    base_query()
-    |> where([_i, _c, portfolio], portfolio.id == ^portfolio_id)
-    |> Repo.all()
-    |> build()
+  @doc "Progress from the receipts and charges of one Portfolio."
+  def for_portfolio(portfolio_id) when is_integer(portfolio_id),
+    do: load(dynamic([portfolio: p], p.id == ^portfolio_id))
+
+  @doc "Progress from the receipts and charges of every Episode of one Fleet Generation."
+  def for_generation(generation_id) when is_integer(generation_id),
+    do: load(dynamic([portfolio: p], p.fleet_generation_id == ^generation_id))
+
+  defp load(scope) do
+    intents = base_query() |> where(^scope) |> Repo.all()
+    build(intents, attempt_charges(scope))
   end
 
   @doc """
-  Builds the projection from buy/sell Intents of any status (pure).
+  Builds the projection from buy/sell Intents of any status and the
+  credit-bearing attempts issued by the same scope's root Intents (pure).
 
   Only completed Intents contribute receipts. `open_commitments` names each
   Commitment whose trade is still under way: an unfinished buy or sell, or a
-  completed buy whose sell leg has not been requested yet.
+  completed buy whose sell leg has not been requested yet. `attempts` are
+  `attempt_charges/1` rows; each attempt counts once however often it is read.
   """
-  def build(all_intents) when is_list(all_intents) do
+  def build(all_intents, attempts \\ []) when is_list(all_intents) and is_list(attempts) do
     all_intents = Enum.sort_by(all_intents, & &1.id)
     intents = Enum.filter(all_intents, &(&1.status == "completed"))
     {receipts, receipt_less} = split_receipts(intents)
-    trips = round_trips(intents, receipts)
+    attempts = Enum.uniq_by(attempts, & &1.mutation_attempt_id)
+    charges = attempts |> Enum.filter(&(&1.role == :supporting)) |> Enum.flat_map(&charge/1)
+    traced = traced_intents(attempts)
+    trips = intents |> round_trips(receipts) |> Enum.map(&with_supporting(&1, charges, traced))
     proven = for {:ok, trip} <- trips, do: trip
+    trade_margin = aggregate_margin(trips)
+    net_earnings = aggregate_net(trips)
+    {cash_flow, cash_flow_gaps} = cash_flow(receipts, receipt_less, charges, attempts)
 
     %{
       receipts: receipts,
@@ -69,13 +99,189 @@ defmodule SpaceTraders.FleetAllocation.TradeProgress do
       credits_received: sum(receipts, "sell", :total_price),
       completed_round_trips: length(proven),
       round_trips: proven,
-      trade_margin: aggregate_margin(trips),
+      trade_margin: trade_margin,
       open_commitments: open_commitments(all_intents),
-      net_earnings: @unknown,
+      supporting_charges: Enum.map(charges, &Map.delete(&1, :reason)),
+      observation_only_spending: charges |> Enum.filter(& &1.observation_only) |> total(),
+      net_earnings: net_earnings,
+      episode_cash_flow: cash_flow,
       unknown:
-        [%{item: "net_earnings", reason: @supporting_costs_reason}] ++
-          for({:unproven, commitment_id, reason} <- trips, do: gap(commitment_id, reason))
+        net_gap(trade_margin, net_earnings) ++
+          for({:unproven, commitment_id, reason} <- trips, do: gap(commitment_id, reason)) ++
+          for(%{realized_charge: @unknown} = charge <- charges, do: charge_gap(charge)) ++
+          for(
+            %{supporting_limitation: reason} = trip when is_binary(reason) <- proven,
+            do: %{item: "supporting_charge", commitment_id: trip.commitment_id, reason: reason}
+          ) ++
+          cash_flow_gaps
     }
+  end
+
+  @doc """
+  Credit-bearing MutationAttempts issued by the root Intents of the scoped
+  Portfolios' Commitments, with their Realization when one was recorded.
+
+  The root Intent is the attempt's recorded `intent_id` provenance; nothing is
+  inferred from the Ship's later work.
+  """
+  def attempt_charges(scope) do
+    from(attempt in Attempt,
+      join: intent in Intent,
+      on: fragment("?->'intent_id' = to_jsonb(?)", attempt.provenance, intent.id),
+      join: commitment in Commitment,
+      on: commitment.id == intent.fleet_commitment_id,
+      join: portfolio in Portfolio,
+      as: :portfolio,
+      on: portfolio.id == commitment.fleet_commitment_portfolio_id,
+      left_join: realization in Realization,
+      on: realization.mutation_attempt_id == attempt.id,
+      where:
+        attempt.operation_id in ^(@supporting_operations ++ @trade_operations) or
+          (attempt.operation_id == "historical-ship-action" and
+             fragment("?->'selected_action'->>'kind'", attempt.prepared_evidence) in ^@supporting_kinds),
+      where: ^scope,
+      order_by: [asc: attempt.prepared_at, asc: attempt.id],
+      select: %{
+        mutation_attempt_id: attempt.id,
+        operation_id: attempt.operation_id,
+        state: attempt.state,
+        provenance: attempt.provenance,
+        intent_id: intent.id,
+        intent_type: intent.type,
+        commitment_id: intent.fleet_commitment_id,
+        realized_charge: realization.realized_charge
+      }
+    )
+    |> Repo.all()
+    |> Enum.map(fn row ->
+      Map.put(
+        row,
+        :role,
+        if(row.operation_id in @trade_operations, do: :trade, else: :supporting)
+      )
+    end)
+  end
+
+  # One charge per supporting attempt that may have charged credits.
+  defp charge(%{state: state, realized_charge: nil}) when state in @uncharged_states, do: []
+
+  defp charge(attempt) do
+    {amount, reason} =
+      cond do
+        attempt.provenance["commitment_id"] != attempt.commitment_id ->
+          {@unknown, "the attempt's provenance does not name its root Intent's Commitment"}
+
+        is_integer(attempt.realized_charge) ->
+          {attempt.realized_charge, nil}
+
+        true ->
+          {@unknown, "no realized charge receipt for this attempt"}
+      end
+
+    [
+      %{
+        mutation_attempt_id: attempt.mutation_attempt_id,
+        operation_id: attempt.operation_id,
+        intent_id: attempt.intent_id,
+        intent_type: attempt.intent_type,
+        commitment_id: attempt.commitment_id,
+        ship_symbol: attempt.provenance["ship_symbol"],
+        realized_charge: amount,
+        observation_only: attempt.intent_type == "acquire_intelligence",
+        reason: reason
+      }
+    ]
+  end
+
+  # Root Intents whose own trade send was recorded with exact root-Intent
+  # provenance and succeeded: proof that their supporting sends, if any, were
+  # recorded the same way. Without it (older history) an absent charge is not
+  # evidence of no charge.
+  defp traced_intents(attempts) do
+    for %{role: :trade, state: state} = attempt <- attempts,
+        state in ~w(succeeded accepted),
+        attempt.provenance["commitment_id"] == attempt.commitment_id,
+        into: MapSet.new(),
+        do: attempt.intent_id
+  end
+
+  defp with_supporting({:ok, trip}, charges, traced) do
+    # The trade's own root Intents: a coverage Intent owns its scouting fuel.
+    mine =
+      Enum.filter(charges, &(&1.commitment_id == trip.commitment_id and not &1.observation_only))
+
+    {cost, limitation} =
+      if MapSet.member?(traced, trip.purchase_intent_id) and
+           MapSet.member?(traced, trip.sale_intent_id),
+         do: {total(mine), nil},
+         else: {@unknown, "this trip's sends carry no exact root-Intent provenance"}
+
+    {:ok,
+     Map.merge(trip, %{
+       supporting_attempt_ids: Enum.map(mine, & &1.mutation_attempt_id),
+       supporting_cost: cost,
+       supporting_limitation: limitation,
+       net_earnings: if(is_integer(cost), do: trip.trade_margin - cost, else: @unknown)
+     })}
+  end
+
+  defp with_supporting(unproven, _charges, _traced), do: unproven
+
+  defp total(charges) do
+    if Enum.all?(charges, &is_integer(&1.realized_charge)),
+      do: Enum.sum_by(charges, & &1.realized_charge),
+      else: @unknown
+  end
+
+  defp aggregate_net(trips) do
+    if trips != [] and
+         Enum.all?(trips, &match?({:ok, %{net_earnings: net}} when is_integer(net), &1)),
+       do: Enum.sum_by(trips, fn {:ok, trip} -> trip.net_earnings end),
+       else: @unknown
+  end
+
+  defp net_gap(_margin, net) when is_integer(net), do: []
+
+  defp net_gap(margin, _net) when is_integer(margin),
+    do: [%{item: "net_earnings", reason: "a Completed Round Trip's supporting charge is unknown"}]
+
+  defp net_gap(_margin, _net),
+    do: [
+      %{item: "net_earnings", reason: "Trade Margin is not proven for every traded Commitment"}
+    ]
+
+  defp charge_gap(charge),
+    do: %{
+      item: "supporting_charge",
+      commitment_id: charge.commitment_id,
+      mutation_attempt_id: charge.mutation_attempt_id,
+      reason: charge.reason
+    }
+
+  # Every proven receipt and charge in scope, finished work or not.
+  defp cash_flow(receipts, receipt_less, charges, attempts) do
+    unresolved_trade? =
+      Enum.any?(attempts, &(&1.role == :trade and &1.state in @unresolved_states))
+
+    gaps =
+      [
+        receipt_less != [] && "a completed trade Intent has no transaction receipt",
+        unresolved_trade? && "a trade attempt's outcome is unresolved",
+        total(charges) == @unknown && "a supporting charge is unknown"
+      ]
+      |> Enum.filter(&is_binary/1)
+      |> Enum.map(&%{item: "episode_cash_flow", reason: &1})
+
+    if gaps == [] do
+      signed = fn
+        %{type: "sell", total_price: price} -> price
+        %{total_price: price} -> -price
+      end
+
+      {Enum.sum_by(receipts, signed) - total(charges), []}
+    else
+      {@unknown, gaps}
+    end
   end
 
   @doc "The proven integer Trade Margin of a stored or built projection, else nil."
@@ -103,6 +309,7 @@ defmodule SpaceTraders.FleetAllocation.TradeProgress do
       join: commitment in Commitment,
       on: commitment.id == intent.fleet_commitment_id,
       join: portfolio in Portfolio,
+      as: :portfolio,
       on: portfolio.id == commitment.fleet_commitment_portfolio_id,
       where: intent.type in ["buy", "sell"],
       order_by: intent.id

@@ -176,10 +176,24 @@ defmodule SpaceTradersWeb.MissionControlLive do
                 {expected_label(@projection.market_execution.expected)}
               </p>
             </div>
-            <div>
-              <p class="text-sm opacity-70">Realized trade margin (net earnings unknown)</p>
+            <div id="realized-trade-margin">
+              <p class="text-sm opacity-70">Realized trade margin</p>
               <p class="mt-1 font-semibold">
                 {realized_label(@projection.market_execution.realized.realized_trade_margin)}
+              </p>
+            </div>
+            <div id="realized-net-earnings">
+              <p class="text-sm opacity-70">Net earnings (after the trade's own fuel)</p>
+              <p class="mt-1 font-semibold">
+                {net_earnings_label(@projection.market_execution.realized)}
+              </p>
+            </div>
+            <div id="observation-only-spending">
+              <p class="text-sm opacity-70">Observation-only fuel spending (this Generation)</p>
+              <p class="mt-1 font-semibold">
+                {spending_label(
+                  @projection.market_execution.realized.generation_observation_only_spending
+                )}
               </p>
             </div>
             <div>
@@ -558,6 +572,17 @@ defmodule SpaceTradersWeb.MissionControlLive do
 
   defp realized_label(nil), do: "Unknown — no completed round trip evidence"
   defp realized_label(amount), do: "#{amount} credits"
+
+  defp net_earnings_label(%{net_earnings: amount}) when is_integer(amount),
+    do: "#{amount} credits"
+
+  defp net_earnings_label(%{realized_trade_margin: margin}) when is_integer(margin),
+    do: "Unknown — a supporting charge is not proven"
+
+  defp net_earnings_label(_realized), do: "Unknown — no completed round trip evidence"
+
+  defp spending_label(amount) when is_integer(amount), do: "#{amount} credits"
+  defp spending_label(_unknown), do: "Unknown — a charge is not proven"
 
   defp limitation_label(limitation), do: limitation
 

@@ -4,6 +4,7 @@ defmodule SpaceTradersWeb.MissionControlBriefingTest do
 
   import Phoenix.LiveViewTest
   import SpaceTraders.ShipBody
+  import SpaceTraders.RealizedEconomicsFixtures
 
   alias SpaceTraders.Agent
   alias SpaceTraders.Repo
@@ -266,6 +267,84 @@ defmodule SpaceTradersWeb.MissionControlBriefingTest do
     assert has_element?(view, section, "Releases when")
     refute has_element?(view, section, "STALLED")
     refute has_element?(view, section, "Degraded Operation")
+  end
+
+  test "a Completed Round Trip shows Net Earnings beside observation-only fuel spending", %{
+    conn: conn,
+    scope: scope
+  } do
+    {_agent, generation} = mint_fleet(scope)
+    portfolio = publish_market!(scope, generation)
+    [commitment] = portfolio.commitments
+    ship = [ship: "#{@symbol}-1"]
+
+    buy = trade_intent!(portfolio, commitment, "buy", 400, 40, ship)
+    refuel!(buy, 144)
+    trade_intent!(portfolio, commitment, "sell", 1_200, 40, ship)
+    # A coverage root Intent's refuel is observation-only spending, never the
+    # trade's cost, even on the same Ship.
+    scouting = intent!(portfolio, commitment, "acquire_intelligence", ship)
+    refuel!(scouting, 300)
+
+    {:ok, view, _html} = live(conn, ~p"/mission-control")
+
+    assert has_element?(view, "#realized-trade-margin", "800 credits")
+    assert has_element?(view, "#realized-net-earnings", "656 credits")
+    assert has_element?(view, "#observation-only-spending", "300 credits")
+  end
+
+  test "an unknown supporting charge renders Net Earnings unknown, never zero", %{
+    conn: conn,
+    scope: scope
+  } do
+    {_agent, generation} = mint_fleet(scope)
+    portfolio = publish_market!(scope, generation)
+    [commitment] = portfolio.commitments
+    ship = [ship: "#{@symbol}-1"]
+
+    buy = trade_intent!(portfolio, commitment, "buy", 400, 40, ship)
+    refuel!(buy, 144, realized: false)
+    trade_intent!(portfolio, commitment, "sell", 1_200, 40, ship)
+
+    {:ok, view, _html} = live(conn, ~p"/mission-control")
+
+    assert has_element?(view, "#realized-trade-margin", "800 credits")
+    assert has_element?(view, "#realized-net-earnings", "Unknown")
+    refute has_element?(view, "#realized-net-earnings", "0 credits")
+  end
+
+  defp publish_market!(scope, generation) do
+    revision = FleetStrategy.get(scope).active_revision
+    generation = Repo.get!(SpaceTraders.FleetGeneration.Generation, generation.id)
+
+    candidate = %SpaceTraders.FleetAllocation.PortfolioCandidate{
+      id: "market-1",
+      strategy_revision_id: revision.id,
+      objective_index: 0,
+      claims: ["#{@symbol}-1"],
+      reservations: %{},
+      pledges: [],
+      dependencies: [%{evidence_id: "market:X1-UX81-A1", state: :satisfied}],
+      expected_value: 100,
+      unwind_cost: 0
+    }
+
+    {:ok, selection} =
+      SpaceTraders.FleetAllocation.select_portfolio(revision, [candidate], %{
+        as_of: DateTime.utc_now(),
+        source_version: generation.allocation_version,
+        claims: ["#{@symbol}-1"],
+        reservations: %{}
+      })
+
+    {:ok, portfolio} =
+      SpaceTraders.FleetAllocation.publish_portfolio(scope, generation.id, selection, %{
+        evidence_references: [],
+        expectations: %{"credit_change" => 100},
+        calibration_version: "market-v1"
+      })
+
+    portfolio
   end
 
   defp stall_episode(scope, generation, reason) do

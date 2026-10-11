@@ -142,7 +142,7 @@ The sale receipts minus goods-acquisition cost of one causally linked Completed 
 _Avoid_: all-in profit, Episode Cash Flow
 
 **Net Earnings**:
-The revenue of a bounded outcome contribution minus its attributable goods and supporting costs, including fuel where applicable. An exact result requires complete monetary evidence and supported cost attribution; it is distinct from Episode Cash Flow when money movements span unfinished work or multiple contributions.
+The revenue of a bounded outcome contribution minus its attributable goods and supporting costs, including fuel where applicable. An exact result requires complete monetary evidence and supported cost attribution; it is distinct from Episode Cash Flow when money movements span unfinished work or multiple contributions. Fuel is attributed at purchase: a realized refuel charge belongs in full to the root Intent that issued it, hence its Fleet Commitment and original Strategy Decision Episode, even if the fuel is later burned on another trip; a coverage Intent's refuel is observation-only spending, never a trade's cost.
 _Avoid_: Trade Margin (when supporting costs are deducted), Agent balance change
 
 **System Observability**:
