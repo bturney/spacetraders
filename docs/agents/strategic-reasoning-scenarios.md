@@ -6,6 +6,8 @@
 >
 > **Repository basis:** Current-main source inspection around 2026-10-11 (main at b975110047f4cc04acb6938d7d9cfff374f6eb3d when checked), plus the governing contracts in #502. Re-verify code claims at implementation time.
 
+**Companion design evidence:** [Strategic observability and Operator experience — evidence/gap analysis](strategic-observability-ux-gaps.md) maps the same decision scenarios to existing Mission Control, Grafana, logs, and missing visualization/instrumentation, without adding a new implementation roadmap.
+
 ## Purpose and authority
 
 Preserve the behavioral lessons from a hypothetical four-Ship Fleet (two haulers, one miner, one probe) progressing from shared Jump Gate construction to trading, scouting, and a miner-to-market business. The point is to provide falsifiable strategic decision examples for future design and qualification, without creating another competing specification or a standing implementation backlog.
