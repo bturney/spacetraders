@@ -2784,7 +2784,7 @@ defmodule SpaceTraders.Fleet.Intents do
                 "active_revision_id" => active_revision_id,
                 "previous_result" => current.last_action_result
               },
-              finished_at: DateTime.utc_now() |> DateTime.truncate(:second)
+              finished_at: Clock.utc_now() |> DateTime.truncate(:second)
             )
           )
 

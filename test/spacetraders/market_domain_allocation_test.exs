@@ -433,6 +433,63 @@ defmodule SpaceTraders.MarketDomainAllocationTest do
       assert old.strategy_decision_episode.classification == :superseded
     end
 
+    for variant <- [:prepared_not_sent, :sent_or_unknown] do
+      test "a #{variant} scout action is never replayed and fences only its own Ship" do
+        fleet = fleet([@frigate, @probe])
+        assert {:ok, %{action: :published}} = reconcile(fleet)
+        coverage = commitment_for(fleet, @probe)
+        refuse_trade(commitment_for(fleet, @frigate))
+        attempt = recorded_attempt(fleet, coverage, unquote(variant))
+
+        fleet = activate_newer_revision(fleet)
+
+        for _tick <- 1..3, do: assert({:ok, _} = reconcile(fleet))
+
+        # The attempt and its Intent are untouched: MutationAttempts stays
+        # the one recovery authority, and nothing re-sends the action.
+        assert Repo.get!(SpaceTraders.MutationAttempts.Attempt, attempt.id).state ==
+                 attempt.state
+
+        assert [%Intent{status: status, mutation_attempt_id: attempt_id}] =
+                 intents_of(coverage)
+
+        assert status in Intent.unfinished_states()
+        assert attempt_id == attempt.id
+        assert %Commitment{unwind_state: :settling} = Repo.get!(Commitment, coverage.id)
+
+        # The free frigate holds active-Revision work meanwhile.
+        current = FleetAllocation.current_portfolio(fleet.scope, fleet.agent)
+        assert current.fleet_strategy_revision_id == fleet.revision.id
+        assert Enum.any?(current.commitments, &(&1.claims == [ship_symbol(fleet, @frigate)]))
+      end
+    end
+
+    test "a lost activation wake and a restart: a later boundary reconciles from durable state" do
+      fleet = fleet([@frigate, @probe])
+      assert {:ok, %{action: :published}} = reconcile(fleet)
+      old = FleetAllocation.current_portfolio(fleet.scope, fleet.agent)
+      coverage = commitment_for(fleet, @probe)
+      unresolved(coverage)
+
+      # Activation committed but its wake was lost: no boundary ran.
+      fleet = activate_newer_revision(fleet)
+      assert FleetAllocation.current_portfolio(fleet.scope, fleet.agent).id == old.id
+
+      # After a restart, a later Market evidence boundary in a fresh process
+      # reaches the same decision from durable state alone.
+      task =
+        Task.async(fn ->
+          Reconciler.observe_market_evidence(fleet.agent.id, @system, proceed())
+        end)
+
+      assert :ok = Task.await(task, 30_000)
+
+      current = FleetAllocation.current_portfolio(fleet.scope, fleet.agent)
+      assert current.fleet_strategy_revision_id == fleet.revision.id
+      assert Repo.get!(Portfolio, old.id).superseded_at
+      assert %Commitment{unwind_state: :settling} = Repo.get!(Commitment, coverage.id)
+    end
+
     test "inherited Cargo is held for its sale, which the active Revision authorizes as a disposition" do
       fleet = fleet([@frigate])
       assert {:ok, %{action: :published}} = reconcile(fleet)
@@ -615,6 +672,22 @@ defmodule SpaceTraders.MarketDomainAllocationTest do
       assert id == first.id
     end
 
+    test "an open stall survives a restart: a fresh process refreshes the same Episode" do
+      fleet = fleet([@frigate, @probe])
+      overdue_market_demand(fleet)
+      decision = %{result: {:ok, %{action: :retained}}, counts: %{claimable_ships: 1}}
+
+      assert {:stalled, first} =
+               StructuralStall.observe(fleet.agent, fleet.revision, nil, decision)
+
+      restarted =
+        Task.async(fn -> StructuralStall.observe(fleet.agent, fleet.revision, nil, decision) end)
+
+      assert {:stalled, %{id: id, observation_count: 2}} = Task.await(restarted)
+      assert id == first.id
+      assert [_one] = stall_episodes()
+    end
+
     test "overdue Demands with zero coverage candidates and no current-Revision reason stall" do
       fleet = fleet([@frigate, @probe])
       overdue_market_demand(fleet)
@@ -753,6 +826,47 @@ defmodule SpaceTraders.MarketDomainAllocationTest do
       ),
       set: [status: "active", blocker: nil, in_flight_action: %{"kind" => "navigate"}]
     )
+  end
+
+  # A real MutationAttempt for the scout's Intent: prepared but not sent
+  # (the action is still queued in flight), or sent with an unknown outcome
+  # (the Intent blocked awaiting reconciliation).
+  defp recorded_attempt(fleet, commitment, variant) do
+    [intent] = intents_of(commitment)
+    generation = Repo.get_by!(Generation, agent_id: fleet.agent.id)
+
+    action =
+      if variant == :prepared_not_sent,
+        do: %{"kind" => "navigate", "waypoint_symbol" => "X1-A3"},
+        else: nil
+
+    attempt =
+      Repo.insert!(%SpaceTraders.MutationAttempts.Attempt{
+        operator_id: fleet.agent.operator_id,
+        agent_id: fleet.agent.id,
+        fleet_generation_id: generation.id,
+        operation_id: "navigate-ship",
+        operation_owner: "ship_execution",
+        state: if(variant == :prepared_not_sent, do: "prepared", else: "sent_or_unknown"),
+        request_fingerprint: "scout-#{System.unique_integer([:positive])}",
+        prepared_at: DateTime.utc_now(),
+        sent_or_unknown_at: if(variant == :sent_or_unknown, do: DateTime.utc_now()),
+        prepared_evidence: %{},
+        provenance: %{
+          "intent_id" => intent.id,
+          "selected_action_fingerprint" => action && SpaceTraders.Evidence.fingerprint(action)
+        }
+      })
+
+    Repo.update!(
+      Ecto.Changeset.change(intent,
+        status: if(variant == :prepared_not_sent, do: "active", else: "blocked"),
+        in_flight_action: action,
+        mutation_attempt_id: attempt.id
+      )
+    )
+
+    attempt
   end
 
   defp intents_of(commitment) do
