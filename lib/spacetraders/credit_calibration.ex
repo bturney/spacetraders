@@ -75,7 +75,9 @@ defmodule SpaceTraders.CreditCalibration do
   Records the realized charge from a successful credit-bearing response.
 
   Attribution needs the attempt's retained spending bound plus a response
-  transaction for exactly the prepared units and the post-charge Agent credits.
+  transaction for exactly the prepared units (a refuel's Market units or the
+  Ship fuel units they buy) and the post-charge Agent credits. The realized
+  charge is the transaction's total price.
   Anything less records nothing: the shortfall, if any, is found later by a
   credits read and never recalibrates the margin.
   """
@@ -186,7 +188,7 @@ defmodule SpaceTraders.CreditCalibration do
     with bound when is_integer(bound) <- spending["worst_case_exposure"],
          price when is_integer(price) <- spending["unit_price"],
          units when is_integer(units) <- spending["units"],
-         true <- Map.get(transaction, :units) == units,
+         true <- Map.get(transaction, :units) in billed_units(spending),
          true <- Map.get(transaction, :trade_symbol) == spending["trade_symbol"],
          charge when is_integer(charge) and charge >= 0 <- Map.get(transaction, :total_price),
          credits when is_integer(credits) <- Map.get(agent, :credits) do
@@ -197,6 +199,15 @@ defmodule SpaceTraders.CreditCalibration do
   end
 
   defp attributable(_spending, _response), do: :error
+
+  # The units a transaction may echo for exactly the prepared request. A
+  # refuel bills Market units (ceil(fuel/100)) but the game may report the
+  # Ship fuel units it added; either names the same request, nothing looser.
+  defp billed_units(%{"trade_symbol" => "FUEL", "fuel_units" => fuel} = spending)
+       when is_integer(fuel),
+       do: Enum.uniq([spending["units"], fuel])
+
+  defp billed_units(spending), do: [spending["units"]]
 
   defp realize(attempt, spending, facts) do
     version =
