@@ -30,7 +30,7 @@ defmodule SpaceTraders.MarketInterpretationTest do
     interpretation = Intelligence.market_interpretation(agent, "X1", at(60))
 
     assert interpretation.as_of == at(60)
-    assert interpretation.freshness_seconds == 300
+    assert interpretation.freshness_seconds == 1800
 
     assert [market] = interpretation.markets
     assert market.subject == "market:X1:X1-A1"
@@ -170,7 +170,8 @@ defmodule SpaceTraders.MarketInterpretationTest do
     assert id == retired.id
   end
 
-  test "malformed and aged-out Listings are distinct dispositions", %{agent: agent} do
+  test "a 20 minute old Listing is current and a 31 minute old one is stale; malformed is distinct",
+       %{agent: agent} do
     retained_market_listing(agent, "X1", "X1-A1", [Map.delete(good(10, 12), :purchase_price)],
       observed_at: @t0
     )
@@ -178,10 +179,10 @@ defmodule SpaceTraders.MarketInterpretationTest do
     retained_market_listing(agent, "X1", "X1-A2", [good(10, 12)], observed_at: @t0)
 
     assert [%{state: :malformed}, %{state: :current}] =
-             Intelligence.market_interpretation(agent, "X1", at(300)).markets
+             Intelligence.market_interpretation(agent, "X1", at(20 * 60)).markets
 
     assert [_, %{state: :stale}] =
-             Intelligence.market_interpretation(agent, "X1", at(301)).markets
+             Intelligence.market_interpretation(agent, "X1", at(31 * 60)).markets
   end
 
   test "known Marketplaces include never-observed gaps without claiming System discovery", %{
