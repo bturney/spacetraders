@@ -80,7 +80,6 @@ defmodule SpaceTradersWeb.Router do
 
     live_session :current_operator,
       on_mount: [{SpaceTradersWeb.OperatorAuth, :mount_current_scope}] do
-      live "/operators/register", OperatorLive.Registration, :new
       live "/operators/log-in", OperatorLive.Login, :new
     end
 

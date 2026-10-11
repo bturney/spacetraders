@@ -41,7 +41,7 @@ defmodule SpaceTraders.FleetGenerationTest do
   test "only a complete owned Objective evaluation can create Attention" do
     owner = operator_fixture()
     scope = Scope.for_operator(owner)
-    other_scope = Scope.for_operator(operator_fixture())
+    other_scope = Scope.for_operator(legacy_operator_fixture())
     {:ok, _draft} = FleetStrategy.select_preset(scope, "steady_growth")
     {:ok, revision} = FleetStrategy.activate(scope, FleetStrategy.get(scope).draft_version)
     agent = agent_fixture(owner, %{agent_token: nil})

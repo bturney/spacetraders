@@ -10,7 +10,7 @@ defmodule SpaceTraders.ContractsTest do
   import SpaceTraders.AgentFixtures
 
   defp agent(token \\ "AGENT_TOKEN") do
-    operator_fixture()
+    legacy_operator_fixture()
     |> agent_fixture(%{agent_token: token})
   end
 

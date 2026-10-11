@@ -74,7 +74,7 @@ defmodule SpaceTraders.CurrentFleetTest do
   test "ownership ambiguity fails adoption without selecting or removing records" do
     first = operator_fixture()
     agent = agent_fixture(first)
-    second = operator_fixture()
+    second = legacy_operator_fixture()
 
     assert {:error, %{reason: :ambiguous_current_fleet, summary: summary}} =
              FleetGeneration.adopt_current_fleet()

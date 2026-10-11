@@ -166,6 +166,7 @@ defmodule SpaceTradersWeb.OperatorLive.Settings do
       |> assign(:email_form, to_form(email_changeset))
       |> assign(:password_form, to_form(password_changeset))
       |> assign(:trigger_submit, false)
+      |> assign(:form_drafts, %{})
       |> assign(:account_token_linked?, Agent.account_token_linked?(socket.assigns.current_scope))
       |> assign(:import_agent_form, import_agent_form())
       |> assign_account_token_form()
@@ -187,7 +188,7 @@ defmodule SpaceTradersWeb.OperatorLive.Settings do
     operator = socket.assigns.current_scope.operator
     true = Agent.sudo_mode?(operator)
 
-    case Agent.link_account_token(operator, operator_params["account_token"]) do
+    case Agent.link_account_token(socket.assigns.current_scope, operator_params["account_token"]) do
       {:ok, updated_operator} ->
         socket =
           socket
@@ -200,6 +201,12 @@ defmodule SpaceTradersWeb.OperatorLive.Settings do
 
       {:error, %Ecto.Changeset{} = changeset} ->
         {:noreply, assign_account_token_form(socket, changeset)}
+
+      {:error, :not_current_operator} ->
+        {:noreply,
+         socket
+         |> put_flash(:error, "You must log in to change credentials.")
+         |> push_navigate(to: ~p"/operators/log-in")}
     end
   end
 
@@ -309,7 +316,11 @@ defmodule SpaceTradersWeb.OperatorLive.Settings do
   end
 
   defp assign_account_token_form(socket, changeset \\ Agent.change_account_token()) do
-    assign(socket, :account_token_form, to_form(changeset, as: "operator"))
+    draft = Map.take(changeset.params || %{}, ["account_token"])
+
+    socket
+    |> update(:form_drafts, &Map.put(&1, :account_token, draft))
+    |> assign(:account_token_form, to_form(changeset, as: "operator"))
   end
 
   defp import_agent_form do

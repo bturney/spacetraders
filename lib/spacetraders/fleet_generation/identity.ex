@@ -5,6 +5,45 @@ defmodule SpaceTraders.FleetGeneration.Identity do
   alias SpaceTraders.FleetGeneration.Generation
   alias SpaceTraders.Repo
 
+  @doc "Checks authentication authority without loading game credentials or selecting historical Agents."
+  def operator?(operator_id) do
+    Repo.exists?(
+      from i in "current_fleet_identity", where: i.id == 1 and i.operator_id == ^operator_id
+    )
+  end
+
+  @doc "Establishes and publishes setup under PostgreSQL serialization, including legacy inserts."
+  def setup_operator(changeset) do
+    Repo.transact(fn ->
+      # Same first lock as adoption. Independent app processes and old writers
+      # cannot both observe an empty installation and establish an Operator.
+      Repo.query!("LOCK TABLE operators IN SHARE ROW EXCLUSIVE MODE")
+
+      cond do
+        not changeset.valid? ->
+          {:error, %{changeset | action: :insert}}
+
+        Repo.exists?(Operator) ->
+          {:error, :setup_unavailable}
+
+        true ->
+          # Ecto query diagnostics use the original custom-type parameter (the
+          # plaintext AccountToken), even though its database dump is encrypted.
+          with {:ok, operator} <- Repo.insert(changeset, log: false) do
+            %{num_rows: published} =
+              Repo.query!(
+                "UPDATE current_fleet_identity SET operator_id = $1 WHERE id = 1 AND operator_id IS NULL AND fleet_generation_id IS NULL",
+                [operator.id]
+              )
+
+            if published == 1,
+              do: {:ok, operator},
+              else: {:error, :setup_unavailable}
+          end
+      end
+    end)
+  end
+
   def child_spec(_opts) do
     %{id: __MODULE__, start: {__MODULE__, :start_link, [[]]}, restart: :temporary}
   end

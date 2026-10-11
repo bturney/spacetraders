@@ -22,7 +22,17 @@ defmodule SpaceTraders.AgentFixtures do
   end
 
   def unconfirmed_operator_fixture(attrs \\ %{}) do
-    SpaceTraders.Repo.insert!(%Operator{email: Map.get(attrs, :email) || unique_operator_email()})
+    operator_fixture(attrs)
+    |> Ecto.Changeset.change(confirmed_at: nil, hashed_password: nil)
+    |> SpaceTraders.Repo.update!()
+  end
+
+  # Explicit pre-contraction data only: ownership/ambiguity tests still need
+  # legacy rows. This is not a supported creation/authentication path.
+  def legacy_operator_fixture(attrs \\ %{}) do
+    %Operator{}
+    |> Operator.registration_changeset(valid_operator_attributes(attrs))
+    |> SpaceTraders.Repo.insert!()
   end
 
   def operator_fixture(attrs \\ %{}) do

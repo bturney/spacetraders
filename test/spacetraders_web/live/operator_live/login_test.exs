@@ -9,7 +9,8 @@ defmodule SpaceTradersWeb.OperatorLive.LoginTest do
       {:ok, _lv, html} = live(conn, ~p"/operators/log-in")
 
       assert html =~ "Log in"
-      assert html =~ "Sign up"
+      assert html =~ "Set up this deployment"
+      refute html =~ "/operators/register"
       assert html =~ "Password"
     end
   end
@@ -51,16 +52,20 @@ defmodule SpaceTradersWeb.OperatorLive.LoginTest do
   end
 
   describe "login navigation" do
-    test "redirects to registration page when the Register button is clicked", %{conn: conn} do
+    test "empty installation offers first-run setup", %{conn: conn} do
       {:ok, lv, _html} = live(conn, ~p"/operators/log-in")
+      assert has_element?(lv, "main a[href='/setup']", "Set up this deployment")
+      assert conn |> get(~p"/setup") |> html_response(200) =~ "Create Operator account"
+    end
 
-      {:ok, _login_live, login_html} =
-        lv
-        |> element("main a", "Sign up")
-        |> render_click()
-        |> follow_redirect(conn, ~p"/operators/register")
+    test "adopted installation has no additional registration or setup navigation", %{conn: conn} do
+      operator_fixture()
+      {:ok, lv, html} = live(conn, ~p"/operators/log-in")
 
-      assert login_html =~ "Register"
+      refute has_element?(lv, "a[href='/setup']")
+      refute html =~ "/operators/register"
+      refute html =~ "Sign up"
+      assert html =~ "deployment&#39;s Operator credentials"
     end
   end
 

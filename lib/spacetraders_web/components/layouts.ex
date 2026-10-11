@@ -71,7 +71,6 @@ defmodule SpaceTradersWeb.Layouts do
                 </ul>
               </details>
             <% else %>
-              <.link navigate={~p"/operators/register"} class="btn btn-sm btn-ghost">Register</.link>
               <.link navigate={~p"/operators/log-in"} class="btn btn-sm btn-primary">Log in</.link>
             <% end %>
             <.theme_toggle />

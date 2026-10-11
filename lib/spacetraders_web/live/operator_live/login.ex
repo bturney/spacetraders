@@ -14,11 +14,15 @@ defmodule SpaceTradersWeb.OperatorLive.Login do
               <%= if @current_scope do %>
                 You need to reauthenticate to perform sensitive actions on your account.
               <% else %>
-                New to SpaceTraders? <.link
-                  navigate={~p"/operators/register"}
-                  class="font-semibold text-brand hover:underline"
-                  phx-no-format
-                >Sign up</.link> for an account now.
+                <%= if @setup_available? do %>
+                  <.link
+                    href={~p"/setup"}
+                    class="font-semibold text-brand hover:underline"
+                    phx-no-format
+                  >Set up this deployment</.link>
+                <% else %>
+                  Log in with this deployment's Operator credentials.
+                <% end %>
               <% end %>
             </:subtitle>
           </.header>
@@ -73,7 +77,12 @@ defmodule SpaceTradersWeb.OperatorLive.Login do
 
     form = to_form(%{"email" => email}, as: "operator")
 
-    {:ok, assign(socket, form: form, trigger_submit: false)}
+    {:ok,
+     assign(socket,
+       form: form,
+       trigger_submit: false,
+       setup_available?: not SpaceTraders.Agent.has_operators?()
+     )}
   end
 
   @impl true

@@ -537,7 +537,7 @@ defmodule SpaceTradersWeb.MissionControlLiveTest do
     conn: conn,
     operator: operator
   } do
-    other_operator = SpaceTraders.AgentFixtures.operator_fixture()
+    other_operator = SpaceTraders.AgentFixtures.legacy_operator_fixture()
     other_agent = SpaceTraders.AgentFixtures.agent_fixture(other_operator, %{agent_token: nil})
 
     strategy =

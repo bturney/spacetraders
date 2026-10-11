@@ -18,7 +18,7 @@ defmodule SpaceTraders.FleetStrategyTest do
 
   test "Emergency Stop is durable and scoped to its Operator" do
     scope = operator_fixture() |> Scope.for_operator()
-    other_scope = operator_fixture() |> Scope.for_operator()
+    other_scope = legacy_operator_fixture() |> Scope.for_operator()
 
     assert {:ok, stopped} = FleetStrategy.engage_emergency_stop(scope)
     assert %DateTime{} = stopped.emergency_stopped_at
@@ -296,7 +296,7 @@ defmodule SpaceTraders.FleetStrategyTest do
 
   test "an Operator cannot read or activate another Operator's Fleet Strategy" do
     owner_scope = operator_fixture() |> Scope.for_operator()
-    other_scope = operator_fixture() |> Scope.for_operator()
+    other_scope = legacy_operator_fixture() |> Scope.for_operator()
 
     assert {:ok, _draft} =
              save_draft(owner_scope, document("Grow credits", "No scrap"))

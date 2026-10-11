@@ -3,9 +3,9 @@ defmodule SpaceTradersWeb.OperatorSetupController do
   First-run setup: creates the first operator account (email + password) and
   links their AccountToken, then logs them in.
 
-  This screen only exists while no operators exist. Once an operator is present
-  the routes redirect to log-in (or home if already signed in); additional
-  operators register via the normal `/operators/register` page.
+  This screen only exists while no Operator exists. Once the sole Operator is
+  established the routes redirect to log-in (or home if already signed in).
+  The context serializes creation and canonical identity publication durably.
   """
 
   use SpaceTradersWeb, :controller
@@ -28,6 +28,9 @@ defmodule SpaceTradersWeb.OperatorSetupController do
           conn
           |> put_flash(:info, "Operator account created. Welcome!")
           |> OperatorAuth.log_in_operator(operator)
+
+        {:error, :setup_unavailable} ->
+          redirect_unavailable(conn)
 
         {:error, changeset} ->
           render(conn, :new, changeset: changeset)

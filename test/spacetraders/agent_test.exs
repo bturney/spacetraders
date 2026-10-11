@@ -55,6 +55,17 @@ defmodule SpaceTraders.AgentTest do
   end
 
   describe "register_operator/1" do
+    test "setup cannot establish another Operator through the public creation path" do
+      first = operator_fixture()
+
+      assert {:error, :setup_unavailable} =
+               Agent.register_operator(valid_operator_attributes(email: "second@example.com"))
+
+      refute Agent.get_operator_by_email("second@example.com")
+      assert {:ok, %{operator: sole, state: :empty}} = FleetGeneration.current_fleet()
+      assert sole.id == first.id
+    end
+
     test "requires email to be set" do
       {:error, changeset} = Agent.register_operator(%{})
 
@@ -283,7 +294,7 @@ defmodule SpaceTraders.AgentTest do
       assert_raise Ecto.ConstraintError, fn ->
         Repo.insert!(%OperatorToken{
           token: operator_token.token,
-          operator_id: operator_fixture().id,
+          operator_id: legacy_operator_fixture().id,
           context: "session"
         })
       end
@@ -423,6 +434,21 @@ defmodule SpaceTraders.AgentTest do
   end
 
   describe "link_account_token/2" do
+    test "credential updates use the canonical authenticated Scope and reject legacy authority" do
+      operator = operator_fixture()
+      scope = Scope.for_operator(operator)
+      legacy = legacy_operator_fixture()
+
+      assert {:ok, %Operator{account_token: "SOLE_ACCOUNT_TOKEN"}} =
+               Agent.link_account_token(scope, "SOLE_ACCOUNT_TOKEN")
+
+      assert {:error, :not_current_operator} =
+               Agent.link_account_token(Scope.for_operator(legacy), "OTHER_ACCOUNT_TOKEN")
+
+      assert Agent.get_operator!(operator.id).account_token == "SOLE_ACCOUNT_TOKEN"
+      refute Agent.get_operator!(legacy.id).account_token
+    end
+
     test "stores the token encrypted and reads it back decrypted" do
       operator = operator_fixture()
 
@@ -453,7 +479,7 @@ defmodule SpaceTraders.AgentTest do
   describe "list_agents/1 and get_agent/2" do
     test "lists only the given operator's agents" do
       operator = operator_fixture()
-      other = operator_fixture()
+      other = legacy_operator_fixture()
 
       agent = agent_fixture(operator)
       other_agent = agent_fixture(other)
@@ -464,7 +490,7 @@ defmodule SpaceTraders.AgentTest do
 
     test "get_agent/2 returns nil for another operator's agent" do
       operator = operator_fixture()
-      other = operator_fixture()
+      other = legacy_operator_fixture()
       agent = agent_fixture(operator)
 
       refute Agent.get_agent(other, agent.id)
@@ -661,7 +687,7 @@ defmodule SpaceTraders.AgentTest do
         })
 
       other_stale_agent =
-        operator_fixture()
+        legacy_operator_fixture()
         |> agent_fixture(%{
           symbol: "OTHER",
           stale_at: DateTime.utc_now() |> DateTime.truncate(:second)
@@ -700,7 +726,7 @@ defmodule SpaceTraders.AgentTest do
     test "does not mint a symbol retained as stale by another operator", %{
       scope: scope
     } do
-      other_operator = operator_fixture()
+      other_operator = legacy_operator_fixture()
 
       agent_fixture(other_operator, %{
         symbol: "ORBITALIST",
@@ -720,8 +746,8 @@ defmodule SpaceTraders.AgentTest do
              ).symbol
     end
 
-    test "requires the operator to have linked an AccountToken" do
-      operator = operator_fixture()
+    test "requires the operator to have linked an AccountToken", %{operator: operator} do
+      operator = operator |> Ecto.Changeset.change(account_token: nil) |> Repo.update!()
       scope = Scope.for_operator(operator)
 
       assert FleetGeneration.mint(scope, %{symbol: "NEWSYM", faction: "COSMIC"}) ==

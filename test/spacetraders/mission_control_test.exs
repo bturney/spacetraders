@@ -19,7 +19,7 @@ defmodule SpaceTraders.MissionControlTest do
       operator = operator_fixture()
       own_agent = agent_fixture(operator, %{agent_token: nil})
 
-      other_operator = operator_fixture()
+      other_operator = legacy_operator_fixture()
       _other_agent = agent_fixture(other_operator, %{agent_token: nil})
 
       assert [%{agent: %{id: agent_id}}] = MissionControl.dashboard(Scope.for_operator(operator))
@@ -157,7 +157,7 @@ defmodule SpaceTraders.MissionControlTest do
       _own_agent = agent_fixture(operator, %{agent_token: nil})
       projections = MissionControl.dashboard(Scope.for_operator(operator))
 
-      other_operator = operator_fixture()
+      other_operator = legacy_operator_fixture()
       other_agent = agent_fixture(other_operator, %{agent_token: nil})
 
       assert MissionControl.refresh_agent(
@@ -171,7 +171,7 @@ defmodule SpaceTraders.MissionControlTest do
   describe "on-demand projections" do
     test "reject reads for an Agent outside the scoped Operator" do
       operator = operator_fixture()
-      other_operator = operator_fixture()
+      other_operator = legacy_operator_fixture()
       other_agent = agent_fixture(other_operator)
       scope = Scope.for_operator(operator)
       waypoint = %{symbol: "X1-UX81-A1", system_symbol: "X1-UX81", type: "JUMP_GATE"}
@@ -354,7 +354,7 @@ defmodule SpaceTraders.MissionControlTest do
 
   test "Attention is scoped and repeated observation does not clear acknowledgement" do
     owner = operator_fixture()
-    other = operator_fixture()
+    other = legacy_operator_fixture()
     owner_scope = Scope.for_operator(owner)
     other_scope = Scope.for_operator(other)
 

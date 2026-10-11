@@ -223,7 +223,7 @@ defmodule SpaceTradersWeb.OutcomeMetricsTest do
     assert_receive {:outcome, @observed_event, _, %{family: "credits"}}
     assert last_interval_rate() == -6000
 
-    second_agent = agent_fixture(operator_fixture())
+    second_agent = agent_fixture(legacy_operator_fixture())
     TestClock.advance(60)
     stub_agent(second_agent, 175_000)
     assert {:ok, _} = Evidence.get_agent(second_agent)

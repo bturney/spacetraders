@@ -178,6 +178,56 @@ defmodule SpaceTraders.CurrentFleetMigrationTest do
     assert scalar("SELECT count(*) FROM operators") == 2
   end
 
+  test "adopted credentials and pre-migration sessions authenticate after actual fresh application boots",
+       %{database: database} do
+    operator =
+      %SpaceTraders.Agent.Operator{}
+      |> SpaceTraders.Agent.Operator.registration_changeset(
+        %{
+          email: "adopted@example.com",
+          password: "adopted durable password",
+          account_token: "ADOPTED_ACCOUNT_SECRET"
+        },
+        validate_unique: false
+      )
+      |> MigrationRepo.insert!(log: false)
+
+    {session, token_record} = SpaceTraders.Agent.OperatorToken.build_session_token(operator)
+    MigrationRepo.insert!(token_record, log: false)
+    agent = agent(operator.id)
+    generation(operator.id, nil, 1, DateTime.utc_now(:second))
+    current_generation = generation(operator.id, agent, 2, nil)
+    before = retained()
+    assert [@version] = migrate()
+    assert identity() == [[operator.id, current_generation]]
+    assert retained() == before
+
+    url =
+      URI.parse(SpaceTraders.CheckoutDb.url(:test))
+      |> Map.put(:path, "/#{database}")
+      |> URI.to_string()
+
+    for _ <- 1..2 do
+      {output, status} =
+        System.cmd("mix", ["run", "--no-start", "test/integration/sole_operator_auth_probe.exs"],
+          env: [
+            {"DATABASE_URL", url},
+            {"MIX_ENV", "test"},
+            {"ADOPTED_SESSION_TOKEN", Base.encode64(session)}
+          ],
+          stderr_to_stdout: true
+        )
+
+      assert status == 0, output
+      assert output =~ "adopted authentication passed"
+      refute output =~ "ADOPTED_ACCOUNT_SECRET"
+      refute output =~ "AGENT_SECRET"
+      refute output =~ "adopted durable password"
+      assert retained() == before
+      assert identity() == [[operator.id, current_generation]]
+    end
+  end
+
   defp assert_preflight_failure(message) do
     before = retained()
     error = assert_raise Postgrex.Error, fn -> migrate() end

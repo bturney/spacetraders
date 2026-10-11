@@ -246,8 +246,7 @@ defmodule SpaceTradersWeb.OperatorLive.SettingsTest do
       refute html =~ "can't be blank"
     end
 
-    test "never pre-fills the linked token into the form", %{conn: conn} do
-      operator = operator_fixture()
+    test "never pre-fills the linked token into the form", %{conn: conn, operator: operator} do
       {:ok, operator} = Agent.link_account_token(operator, "LINKED_TOKEN")
 
       {:ok, _lv, html} = conn |> log_in_operator(operator) |> live(~p"/operators/settings")
@@ -259,7 +258,6 @@ defmodule SpaceTradersWeb.OperatorLive.SettingsTest do
     test "keeps the typed token while live-validating", %{conn: conn} do
       {:ok, lv, _html} =
         conn
-        |> log_in_operator(operator_fixture())
         |> live(~p"/operators/settings")
 
       result =

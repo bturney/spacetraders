@@ -42,7 +42,7 @@ defmodule SpaceTraders.EvidenceTest do
   test "an Observation Demand rejects Strategy provenance from another Operator" do
     operator = operator_fixture()
     agent = agent_fixture(operator)
-    other_operator = operator_fixture()
+    other_operator = legacy_operator_fixture()
     scope = Scope.for_operator(other_operator)
     {:ok, strategy} = FleetStrategy.select_preset(scope, "steady_growth")
     {:ok, revision} = FleetStrategy.activate(scope, strategy.draft_version)

@@ -19,7 +19,7 @@ defmodule SpaceTraders.ShipReservationTest do
     assert ship.symbol in ShipReservation.reserved_symbols(agent.id)
     assert {:error, :already_reserved} = ShipReservation.reserve(scope, ship.id, "again")
 
-    other = Scope.for_operator(operator_fixture())
+    other = Scope.for_operator(legacy_operator_fixture())
     assert {:error, :ship_not_found} = ShipReservation.reserve(other, ship.id, "other")
     assert {:error, :reservation_not_found} = ShipReservation.release(other, ship.id)
     assert :ok = ShipReservation.release(scope, ship.id)
