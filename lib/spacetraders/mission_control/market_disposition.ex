@@ -20,7 +20,7 @@ defmodule SpaceTraders.MissionControl.MarketDisposition do
   alias SpaceTraders.Agent.Agent, as: AgentRecord
   alias SpaceTraders.CreditCalibration.Shortfall
   alias SpaceTraders.CreditSpending
-  alias SpaceTraders.Fleet.Ship
+  alias SpaceTraders.Fleet.{Intent, Ship}
   alias SpaceTraders.FleetAllocation
   alias SpaceTraders.FleetAllocation.{AllocationResultPointer, Portfolio, StructuralStall}
   alias SpaceTraders.FleetAllocation.StrategyDecisionEpisode, as: Episode
@@ -113,19 +113,45 @@ defmodule SpaceTraders.MissionControl.MarketDisposition do
   end
 
   defp identity(reason, portfolio, open, active, portfolio_revision) do
+    references = (open && open.evidence_references) || []
+    {intent_ids, commitment_ids} = stalled_work(reason, portfolio, references)
+
     %{
       reason: reason,
       stall_episode_id: open && open.id,
       portfolio_id: portfolio && portfolio.id,
       portfolio_revision_number: portfolio_revision && portfolio_revision.number,
-      commitment_ids: commitment_ids(portfolio),
+      intent_ids: intent_ids,
+      commitment_ids: commitment_ids,
       decision_episode_id: portfolio && portfolio.strategy_decision_episode_id,
-      references: (open && open.evidence_references) || [],
+      references: references,
       observation_count: open && open.observation_count,
       last_observed_at: open && open.last_observed_at,
       release: release_condition(reason, active)
     }
   end
+
+  # The work the stall names: a superseded Portfolio stalls all of its
+  # Commitments; an authority block only the blocked Intents' Commitments.
+  defp stalled_work(:stale_revision_portfolio, portfolio, _references),
+    do: {[], commitment_ids(portfolio)}
+
+  defp stalled_work(:authority_blocked_intent, _portfolio, references) do
+    ids = for %{"kind" => "intent", "id" => id} <- references, do: id
+
+    commitments =
+      Repo.all(
+        from intent in Intent,
+          where: intent.id in ^ids and not is_nil(intent.fleet_commitment_id),
+          distinct: true,
+          order_by: intent.fleet_commitment_id,
+          select: intent.fleet_commitment_id
+      )
+
+    {ids, commitments}
+  end
+
+  defp stalled_work(_reason, _portfolio, _references), do: {[], []}
 
   defp release_condition(:stale_revision_portfolio, active),
     do:

@@ -19,14 +19,19 @@ defmodule SpaceTraders.MissionControlDispositionsTest do
   alias SpaceTraders.FleetStrategy.{Revision, Strategy}
   alias SpaceTraders.MissionControl
 
-  setup do
-    {agent, _intents, portfolio} = claimed_purchases([0])
+  setup tags do
+    fleet(Map.get(tags, :reservations, [0]))
+  end
+
+  defp fleet(reservations) do
+    {agent, intents, portfolio} = claimed_purchases(reservations)
     scope = Scope.for_operator(Repo.get!(SpaceTraders.Agent.Operator, agent.operator_id))
     generation = Repo.get_by!(Generation, agent_id: agent.id)
     revision = Repo.get!(Revision, portfolio.fleet_strategy_revision_id)
 
     %{
       agent: agent,
+      intents: intents,
       scope: scope,
       portfolio: portfolio,
       generation: generation,
@@ -101,6 +106,19 @@ defmodule SpaceTraders.MissionControlDispositionsTest do
     episode |> Ecto.Changeset.change(resolved_at: DateTime.utc_now()) |> Repo.update!()
 
     assert [%{state: :busy_trade, healthy?: true, stall: nil}] = dispositions(ctx)
+  end
+
+  @tag reservations: [0, 0]
+  test "an authority-blocked stall names only the blocked Intent and its Commitment", ctx do
+    [blocked, _trading] = ctx.intents
+
+    stall_episode(ctx, :authority_blocked_intent, [
+      %{"kind" => "intent", "id" => blocked.id, "reason" => "no_current_ship_claim"}
+    ])
+
+    assert [%{state: :stalled, stall: stall}] = dispositions(ctx)
+    assert stall.intent_ids == [blocked.id]
+    assert stall.commitment_ids == [blocked.fleet_commitment_id]
   end
 
   test "a stall naming a replaced Portfolio is not shown as current", ctx do
