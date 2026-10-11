@@ -106,6 +106,9 @@ Current seam owners:
   `test/spacetraders/fleet_generation_test.exs`
 - Mission Control briefing and truthful unknown state:
   `test/spacetraders_web/live/mission_control_briefing_test.exs`
+- Mission Control allocation dispositions (stall, spending pause, deferral,
+  Neutral Wait, busy): `test/spacetraders/mission_control_dispositions_test.exs`
+  (data) and the briefing test (rendering)
 - first dispatch durability and ambiguous recovery:
   `test/spacetraders/ship_execution_durability_test.exs`
 - recorded Ship recovery per family (exact Bindings, verdicts, one retry):
