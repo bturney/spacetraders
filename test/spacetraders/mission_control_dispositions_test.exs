@@ -190,6 +190,23 @@ defmodule SpaceTraders.MissionControlDispositionsTest do
   end
 
   test "Capacity Deferral is its own state, with the governor's retry guidance", ctx do
+    retire_portfolio(ctx)
+    throttle_get_market()
+
+    assert [%{state: :capacity_deferred, healthy?: true, capacity_deferral: deferral}] =
+             dispositions(ctx)
+
+    assert %DateTime{} = deferral.retry_at
+  end
+
+  test "a trading Ship stays busy while get-market is throttled", ctx do
+    throttle_get_market()
+
+    assert [%{state: :busy_trade, healthy?: true, capacity_deferral: %{retry_at: %DateTime{}}}] =
+             dispositions(ctx)
+  end
+
+  defp throttle_get_market do
     governor = :"mc_dispositions_governor_#{System.unique_integer([:positive])}"
     start_supervised!({CapacityGovernor, name: governor})
     previous = Application.fetch_env(:spacetraders, SpaceTraders.FleetCapacity)
@@ -203,11 +220,6 @@ defmodule SpaceTraders.MissionControlDispositionsTest do
     end)
 
     CapacityGovernor.protocol_rejected(30, governor)
-
-    assert [%{state: :capacity_deferred, healthy?: true, capacity_deferral: deferral}] =
-             dispositions(ctx)
-
-    assert %DateTime{} = deferral.retry_at
   end
 
   test "Ships outside every live Claim are listed as Unallocated", ctx do

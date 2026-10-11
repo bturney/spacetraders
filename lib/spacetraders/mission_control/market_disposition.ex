@@ -9,7 +9,7 @@ defmodule SpaceTraders.MissionControl.MarketDisposition do
   requests no gameplay mutation.
 
   `state` is one distinct disposition, in precedence order: `:stalled`,
-  `:spending_paused`, `:capacity_deferred`, `:neutral_wait`, `:busy_trade`,
+  `:spending_paused`, `:busy_trade`, `:capacity_deferred`, `:neutral_wait`,
   `:retained_coverage`, `:unallocated`. Only `:stalled` is non-healthy
   (Degraded Operation). `operator_action` stays `:none`: a stall releases
   through reconciliation, and time-based Attention escalation is deferred.
@@ -50,6 +50,9 @@ defmodule SpaceTraders.MissionControl.MarketDisposition do
       cond do
         stall -> :stalled
         pause -> :spending_paused
+        # A trading Ship is busy whatever get-market's capacity; deferral
+        # only explains Ships waiting on Market reads.
+        work == :busy_trade -> :busy_trade
         deferral -> :capacity_deferred
         wait -> :neutral_wait
         work -> work
