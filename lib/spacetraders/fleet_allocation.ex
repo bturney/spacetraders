@@ -819,7 +819,6 @@ defmodule SpaceTraders.FleetAllocation do
       fences = settlement_fences(settling)
       released = Enum.reject(settling, &Map.has_key?(fences, &1.id))
       ids = Enum.map(released, & &1.id)
-      left = undisposed_units(ids)
 
       if ids != [] do
         Repo.update_all(from(c in Commitment, where: c.id in ^ids),
@@ -833,14 +832,22 @@ defmodule SpaceTraders.FleetAllocation do
         |> close_retired_episodes(Clock.utc_now())
       end
 
-      Enum.map(released, fn commitment ->
-        %{
-          commitment_id: commitment.id,
-          portfolio_id: commitment.fleet_commitment_portfolio_id,
-          claims: commitment.claims,
-          undisposed_units: Map.get(left, commitment.id, 0)
-        }
-      end)
+      released_report(released)
+    end)
+  end
+
+  # Each released Commitment with the receipt units of bought Cargo still
+  # aboard (0 when none): a release never hides Cargo.
+  defp released_report(released) do
+    left = released |> Enum.map(& &1.id) |> undisposed_units()
+
+    Enum.map(released, fn commitment ->
+      %{
+        commitment_id: commitment.id,
+        portfolio_id: commitment.fleet_commitment_portfolio_id,
+        claims: commitment.claims,
+        undisposed_units: Map.get(left, commitment.id, 0)
+      }
     end)
   end
 
@@ -869,7 +876,11 @@ defmodule SpaceTraders.FleetAllocation do
   @doc """
   Unfinished Intents a Revision change may retire: those of the Generation's
   current Portfolio when an older Revision selected it, and of its
-  `:settling` Commitments, except a Commitment still holding inherited Cargo.
+  `:settling` Commitments. A Commitment still holding inherited Cargo offers
+  only a blocked Intent: its disposition no longer progresses, so it retires
+  like any settled Intent (never one in flight or with an unresolved attempt,
+  which `Intents.supersede_for_revision_change/2` refuses) and the Ship
+  releases with its undisposed Cargo reported instead of fenced forever.
   """
   def revision_change_intents(generation_id, active_revision_id)
       when is_integer(generation_id) and is_integer(active_revision_id) do
@@ -890,9 +901,9 @@ defmodule SpaceTraders.FleetAllocation do
     cargo = undisposed_units(commitment_ids)
 
     commitment_ids
-    |> Enum.reject(&Map.has_key?(cargo, &1))
     |> unfinished_intents_query()
     |> Repo.all()
+    |> Enum.filter(&(not Map.has_key?(cargo, &1.fleet_commitment_id) or &1.status == "blocked"))
   end
 
   defp unfinished_intents_query(commitment_ids) do
@@ -945,7 +956,7 @@ defmodule SpaceTraders.FleetAllocation do
 
     %{
       portfolio: %{portfolio | superseded_at: now},
-      released: Enum.map(released, & &1.id),
+      released: released_report(released),
       settling:
         Enum.map(settling, fn commitment ->
           %{

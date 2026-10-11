@@ -400,11 +400,15 @@ defmodule SpaceTraders.FleetExecution do
           portfolio_revision_id: portfolio.fleet_strategy_revision_id,
           active_revision_id: active,
           decision_episode_id: portfolio.strategy_decision_episode_id,
-          commitment_ids: FleetAllocation.log_ids(retired.released),
+          commitment_ids: FleetAllocation.log_ids(Enum.map(retired.released, & &1.commitment_id)),
           settling: Enum.map_join(retired.settling, ",", &"#{&1.commitment_id}:#{&1.reason}")
         )
 
-        :ok
+        # Released at retirement with no sale under way: Cargo aboard is
+        # reported the same way a settled disposition's is.
+        retired.released
+        |> Enum.filter(&(&1.undisposed_units > 0))
+        |> Enum.each(&log_settled(&1, generation, active))
 
       {:error, :no_stale_portfolio} ->
         :ok

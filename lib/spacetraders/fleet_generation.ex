@@ -20,7 +20,17 @@ defmodule SpaceTraders.FleetGeneration do
   alias SpaceTraders.FleetGeneration.Generation
   alias SpaceTraders.Evidence.Observation
   alias SpaceTraders.FleetStrategy.{Revision, Strategy}
-  alias SpaceTraders.{Evidence, Fleet, FleetStrategy, OperatorConditions, Repo, Timeline}
+
+  alias SpaceTraders.{
+    Clock,
+    Evidence,
+    Fleet,
+    FleetAllocation,
+    FleetStrategy,
+    OperatorConditions,
+    Repo,
+    Timeline
+  }
 
   defmodule CredentialReference do
     @moduledoc "A non-secret reference to an Operator's stored AccountToken."
@@ -383,7 +393,7 @@ defmodule SpaceTraders.FleetGeneration do
         %Scope{operator: %Operator{id: operator_id}} = scope,
         %Revision{id: revision_id} = revision
       ) do
-    now = DateTime.utc_now()
+    now = Clock.utc_now()
 
     # The live Generations, read once before they move to the new Revision.
     live =
@@ -415,7 +425,7 @@ defmodule SpaceTraders.FleetGeneration do
 
     # A changed active Revision invalidates the old allocation result before a
     # fresh reconciliation selects its successor.
-    :ok = SpaceTraders.FleetAllocation.NeutralWait.supersede_for_operator(operator_id)
+    :ok = FleetAllocation.NeutralWait.supersede_for_operator(operator_id)
 
     # The wake is a prompt, not the liveness authority: the active Revision's
     # Observation Demands and boot reconstruction re-enter allocation if it
@@ -746,7 +756,7 @@ defmodule SpaceTraders.FleetGeneration do
   defp log_activation(scope, revision_id, live) do
     for generation <- live do
       agent = Repo.get(Agent, generation.agent_id)
-      portfolio = agent && SpaceTraders.FleetAllocation.current_portfolio(scope, agent)
+      portfolio = agent && FleetAllocation.current_portfolio(scope, agent)
       # Outside the Logger call: its metadata is not evaluated below the level.
       disposition = request_intelligence(agent)
 
@@ -760,7 +770,7 @@ defmodule SpaceTraders.FleetGeneration do
         portfolio_revision_id: portfolio && portfolio.fleet_strategy_revision_id,
         commitment_ids:
           portfolio &&
-            SpaceTraders.FleetAllocation.log_ids(Enum.map(portfolio.commitments, & &1.id)),
+            FleetAllocation.log_ids(Enum.map(portfolio.commitments, & &1.id)),
         decision_episode_id: portfolio && portfolio.strategy_decision_episode_id,
         disposition: disposition
       )

@@ -499,6 +499,7 @@ defmodule SpaceTraders.MarketDomainAllocationTest do
       assert {:ok, %{action: :retained}} = reconcile(fleet)
       sell = Repo.get_by!(Intent, fleet_commitment_id: trade.id, type: "sell")
 
+      sale_under_way(trade)
       fleet = activate_newer_revision(fleet)
 
       # The disposition occupies its own Ship: busy, not a structural stall.
@@ -535,6 +536,7 @@ defmodule SpaceTraders.MarketDomainAllocationTest do
       listing(fleet.agent, "X1-A2", 30, 25)
       assert {:ok, %{action: :retained}} = reconcile(fleet)
       sell = Repo.get_by!(Intent, fleet_commitment_id: trade.id, type: "sell")
+      sale_under_way(trade)
       fleet = activate_newer_revision(fleet)
       assert {:ok, _} = reconcile(fleet)
 
@@ -565,6 +567,61 @@ defmodule SpaceTraders.MarketDomainAllocationTest do
       assert log =~ "undisposed_units=15"
     end
 
+    test "a blocked disposition sale with no unresolved attempt retires and releases its Ship" do
+      fleet = fleet([@frigate])
+      assert {:ok, %{action: :published}} = reconcile(fleet)
+      trade = commitment_for(fleet, @frigate)
+      complete_buy(trade, "completed")
+      listing(fleet.agent, "X1-A2", 30, 25)
+      assert {:ok, %{action: :retained}} = reconcile(fleet)
+      sale_under_way(trade)
+      fleet = activate_newer_revision(fleet)
+      assert {:ok, _} = reconcile(fleet)
+      assert %Commitment{unwind_state: :settling} = Repo.get!(Commitment, trade.id)
+
+      # The sale is refused for a reason that is not infeasibility; nothing
+      # is in flight and no attempt is unresolved.
+      authority_block(trade)
+
+      log =
+        capture_info(fn ->
+          assert {:ok, _} = reconcile(fleet)
+        end)
+
+      assert %Intent{status: "superseded"} =
+               Repo.get_by!(Intent, fleet_commitment_id: trade.id, type: "sell")
+
+      assert %Commitment{unwind_state: :released} = Repo.get!(Commitment, trade.id)
+      assert log =~ "with inherited Cargo aboard"
+      assert log =~ "commitment_id=#{trade.id}"
+      assert log =~ "undisposed_units=40"
+    end
+
+    test "Cargo aboard with no sale under way at retirement is released with a warning" do
+      fleet = fleet([@frigate])
+      assert {:ok, %{action: :published}} = reconcile(fleet)
+      trade = commitment_for(fleet, @frigate)
+      complete_buy(trade, "completed")
+
+      # The bought leg is past its handoff and no sell was ever requested.
+      Repo.update_all(
+        from(i in Intent, where: i.fleet_commitment_id == ^trade.id and i.type == "buy"),
+        set: [finished_at: DateTime.add(DateTime.utc_now(:second), -600)]
+      )
+
+      fleet = activate_newer_revision(fleet)
+
+      log =
+        capture_info(fn ->
+          assert {:ok, _} = reconcile(fleet)
+        end)
+
+      assert %Commitment{unwind_state: :released} = Repo.get!(Commitment, trade.id)
+      assert log =~ "with inherited Cargo aboard"
+      assert log =~ "commitment_id=#{trade.id}"
+      assert log =~ "undisposed_units=40"
+    end
+
     test "an infeasible disposition sale does not fence its Ship forever" do
       fleet = fleet([@frigate])
       assert {:ok, %{action: :published}} = reconcile(fleet)
@@ -572,6 +629,7 @@ defmodule SpaceTraders.MarketDomainAllocationTest do
       complete_buy(trade, "completed")
       listing(fleet.agent, "X1-A2", 30, 25)
       assert {:ok, %{action: :retained}} = reconcile(fleet)
+      sale_under_way(trade)
       fleet = activate_newer_revision(fleet)
       assert {:ok, _} = reconcile(fleet)
       assert %Commitment{unwind_state: :settling} = Repo.get!(Commitment, trade.id)
@@ -804,6 +862,17 @@ defmodule SpaceTraders.MarketDomainAllocationTest do
         },
         last_action_result: %{"kind" => "navigate", "status" => "IN_TRANSIT"}
       ]
+    )
+  end
+
+  # The sell leg is progressing (the stubbed game refuses every action, which
+  # would otherwise leave it blocked).
+  defp sale_under_way(commitment) do
+    Repo.update_all(
+      from(intent in Intent,
+        where: intent.fleet_commitment_id == ^commitment.id and intent.type == "sell"
+      ),
+      set: [status: "active", blocker: nil, in_flight_action: nil]
     )
   end
 
