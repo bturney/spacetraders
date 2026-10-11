@@ -747,6 +747,8 @@ defmodule SpaceTraders.FleetGeneration do
     for generation <- live do
       agent = Repo.get(Agent, generation.agent_id)
       portfolio = agent && SpaceTraders.FleetAllocation.current_portfolio(scope, agent)
+      # Outside the Logger call: its metadata is not evaluated below the level.
+      disposition = request_intelligence(agent)
 
       Logger.info("Fleet Strategy Revision activated",
         operator_id: scope.operator.id,
@@ -760,7 +762,7 @@ defmodule SpaceTraders.FleetGeneration do
           portfolio &&
             SpaceTraders.FleetAllocation.log_ids(Enum.map(portfolio.commitments, & &1.id)),
         decision_episode_id: portfolio && portfolio.strategy_decision_episode_id,
-        disposition: request_intelligence(agent)
+        disposition: disposition
       )
     end
 
