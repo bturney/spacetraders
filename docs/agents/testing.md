@@ -109,6 +109,11 @@ Current seam owners:
 - Mission Control allocation dispositions (stall, spending pause, deferral,
   Neutral Wait, busy): `test/spacetraders/mission_control_dispositions_test.exs`
   (data) and the briefing test (rendering)
+- realized Market economics (charge-at-purchase refuel attribution, Net
+  Earnings, observation-only spending, unknown gaps, once-only counting):
+  `test/spacetraders/realized_market_economics_test.exs` (projection and
+  Mission Control read) and the briefing test (rendering); fixtures in
+  `test/support/realized_economics_fixtures.ex`
 - first dispatch durability and ambiguous recovery:
   `test/spacetraders/ship_execution_durability_test.exs`
 - recorded Ship recovery per family (exact Bindings, verdicts, one retry):
@@ -181,7 +186,9 @@ unobserved Marketplaces. Scenarios never publish, select or execute directly;
 the production runtime does, including buy and sell against the stub: trade before
 coverage completes, restart with Cargo in flight, source price move, unusable
 retained evidence (stale, untraceable, invalidated, wrong-Generation, future),
-Capacity Deferral, swapped event order, and bounded telemetry. Run one with
+Capacity Deferral, swapped event order, and bounded telemetry. The first trade
+asserts exact Net Earnings (Trade Margin minus the trade root Intent's realized
+refuel, by attempt) (#689). Run one with
 `--only describe:"Gate 2A partial-coverage handoff"`.
 
 The `Gate 2B Revision change during coverage` describe (#685, #686) reproduces
@@ -191,7 +198,9 @@ while it is in transit, the scout arrives and its next step is refused on
 old-Portfolio authority. It asserts BASELINE-1 holds active-Revision work while
 the scout is still in transit (its Commitment settling on its own Ship), the
 scout's Claim then releases and it scouts again under the active Revision, a
-profitable trade follows, and no stall or rejected publication is recorded.
+profitable trade follows with positive attributable Net Earnings, every game
+refuel charge is attributed exactly once across both Revisions' Episodes (#689),
+and no stall or rejected publication is recorded.
 Deterministic variants (prepared and sent-or-unknown attempts, lost wake and
 restart, inherited Cargo disposition including partial and infeasible sales,
 500-tick stall deduplication, busy/deferred/Shortfall negatives, activation and
