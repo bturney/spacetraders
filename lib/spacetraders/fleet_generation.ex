@@ -7,6 +7,8 @@ defmodule SpaceTraders.FleetGeneration do
   resolves the corresponding credential reference immediately before minting.
   """
 
+  require Logger
+
   import Ecto.Changeset, only: [get_field: 2]
   import Ecto.Query, warn: false
 
@@ -18,7 +20,17 @@ defmodule SpaceTraders.FleetGeneration do
   alias SpaceTraders.FleetGeneration.Generation
   alias SpaceTraders.Evidence.Observation
   alias SpaceTraders.FleetStrategy.{Revision, Strategy}
-  alias SpaceTraders.{Evidence, Fleet, FleetStrategy, OperatorConditions, Repo, Timeline}
+
+  alias SpaceTraders.{
+    Clock,
+    Evidence,
+    Fleet,
+    FleetAllocation,
+    FleetStrategy,
+    OperatorConditions,
+    Repo,
+    Timeline
+  }
 
   defmodule CredentialReference do
     @moduledoc "A non-secret reference to an Operator's stored AccountToken."
@@ -381,7 +393,21 @@ defmodule SpaceTraders.FleetGeneration do
         %Scope{operator: %Operator{id: operator_id}} = scope,
         %Revision{id: revision_id} = revision
       ) do
-    now = DateTime.utc_now()
+    now = Clock.utc_now()
+
+    # The live Generations, read once before they move to the new Revision.
+    live =
+      Repo.all(
+        from generation in Generation,
+          where:
+            generation.operator_id == ^operator_id and is_nil(generation.fenced_at) and
+              is_nil(generation.retired_at),
+          select: %{
+            id: generation.id,
+            agent_id: generation.agent_id,
+            previous_revision_id: generation.fleet_strategy_revision_id
+          }
+      )
 
     Repo.update_all(
       from(generation in Generation,
@@ -399,17 +425,12 @@ defmodule SpaceTraders.FleetGeneration do
 
     # A changed active Revision invalidates the old allocation result before a
     # fresh reconciliation selects its successor.
-    :ok = SpaceTraders.FleetAllocation.NeutralWait.supersede_for_operator(operator_id)
+    :ok = FleetAllocation.NeutralWait.supersede_for_operator(operator_id)
 
-    Generation
-    |> where(
-      [generation],
-      generation.operator_id == ^operator_id and
-        is_nil(generation.fenced_at) and is_nil(generation.retired_at)
-    )
-    |> select([generation], generation.agent_id)
-    |> Repo.all()
-    |> Enum.each(&request_intelligence/1)
+    # The wake is a prompt, not the liveness authority: the active Revision's
+    # Observation Demands and boot reconstruction re-enter allocation if it
+    # is lost. The next Market boundary retires any older-Revision Portfolio.
+    log_activation(scope, revision_id, live)
 
     active_generation =
       Repo.one(
@@ -581,7 +602,7 @@ defmodule SpaceTraders.FleetGeneration do
              end
            end) do
       Enum.each(ship_symbols, &ShipServer.stop/1)
-      if generation.fleet_strategy_revision_id, do: request_intelligence(agent.id)
+      if generation.fleet_strategy_revision_id, do: _ = request_intelligence(agent)
 
       scope = Scope.for_operator(operator)
 
@@ -722,26 +743,61 @@ defmodule SpaceTraders.FleetGeneration do
     |> Repo.insert!()
   end
 
-  defp request_intelligence(agent_id) do
-    with %Agent{} = agent <- Repo.get(Agent, agent_id),
-         true <-
-           Repo.exists?(
-             from generation in Generation,
-               where:
-                 generation.agent_id == ^agent_id and
-                   not is_nil(generation.fleet_strategy_revision_id) and
-                   is_nil(generation.fenced_at) and is_nil(generation.retired_at)
-           ),
-         {:ok, system} <- Fleet.system_from_headquarters(agent.headquarters) do
-      Phoenix.PubSub.broadcast(
-        SpaceTraders.PubSub,
-        "fleet_intelligence_evidence",
-        {:waypoint_intelligence_observed, agent.id, system}
+  # Every activation is logged, one line per live Generation (with the
+  # Portfolio it held) or one line saying no Generation was live.
+  defp log_activation(%Scope{operator: %Operator{id: operator_id}}, revision_id, []) do
+    Logger.info("Fleet Strategy Revision activated",
+      operator_id: operator_id,
+      active_revision_id: revision_id,
+      disposition: :no_live_generation
+    )
+  end
+
+  defp log_activation(scope, revision_id, live) do
+    for generation <- live do
+      agent = Repo.get(Agent, generation.agent_id)
+      portfolio = agent && FleetAllocation.current_portfolio(scope, agent)
+      # Outside the Logger call: its metadata is not evaluated below the level.
+      disposition = request_intelligence(agent)
+
+      Logger.info("Fleet Strategy Revision activated",
+        operator_id: scope.operator.id,
+        agent_id: generation.agent_id,
+        fleet_generation_id: generation.id,
+        previous_revision_id: generation.previous_revision_id,
+        active_revision_id: revision_id,
+        portfolio_id: portfolio && portfolio.id,
+        portfolio_revision_id: portfolio && portfolio.fleet_strategy_revision_id,
+        commitment_ids:
+          portfolio &&
+            FleetAllocation.log_ids(Enum.map(portfolio.commitments, & &1.id)),
+        decision_episode_id: portfolio && portfolio.strategy_decision_episode_id,
+        disposition: disposition
       )
     end
 
     :ok
   end
+
+  # A failed broadcast is reported, never raised: activation has committed.
+  defp request_intelligence(%Agent{} = agent) do
+    case Fleet.system_from_headquarters(agent.headquarters) do
+      {:ok, system} ->
+        case Phoenix.PubSub.broadcast(
+               SpaceTraders.PubSub,
+               "fleet_intelligence_evidence",
+               {:waypoint_intelligence_observed, agent.id, system}
+             ) do
+          :ok -> :allocation_wake_requested
+          {:error, _reason} -> :allocation_wake_failed
+        end
+
+      _ ->
+        :no_allocation_wake
+    end
+  end
+
+  defp request_intelligence(nil), do: :no_allocation_wake
 
   defp active_revision(operator_id) do
     Repo.one(

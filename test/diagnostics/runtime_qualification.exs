@@ -30,7 +30,7 @@ defmodule SpaceTraders.RuntimeQualification do
   import Phoenix.ConnTest
   import Plug.Conn
 
-  alias SpaceTraders.Agent.{Agent, Operator}
+  alias SpaceTraders.Agent.{Agent, Operator, Scope}
   alias SpaceTraders.Evidence.DemandScheduler
   alias SpaceTraders.Fleet.ShipServerBoot
   alias SpaceTraders.FleetAllocation
@@ -793,6 +793,304 @@ defmodule SpaceTraders.RuntimeQualification do
         assert [_one] = Enum.filter(before_sale, &ship_post?(&1, "BASELINE-1", "purchase"))
       end
     end
+  end
+
+  # Gate 2B (#684, #685): the production Portfolio 4039 / Intent 4077 shape.
+  # The scout's governed navigate is accepted, the Operator activates a new
+  # Strategy Revision while it is in transit, the Ship arrives and its next
+  # intelligence action is refused on old-Portfolio authority. Nothing here
+  # selects, publishes or executes: the Operator activates through the
+  # Strategy LiveView and the production runtime does the rest.
+  describe "Gate 2B Revision change during coverage" do
+    test "a Revision activated while the scout is in transit leaves no stale Claim behind",
+         %{conn: conn} do
+      game = start_fleet_game()
+      {conn, agent} = activate_fresh_generation(conn)
+      drive(game, &probe_departed?/1, 6)
+      in_transit = FleetGame.snapshot(game)
+      assert probe_departed?(in_transit), fleet_trace(in_transit)
+      settle_runtime()
+
+      # The scout's navigate reached transport and its attempt succeeded.
+      [scout_navigate] =
+        Enum.filter(in_transit.requests, &ship_post?(&1, "BASELINE-2", "navigate"))
+
+      destination = scout_navigate.body["waypointSymbol"]
+      refute Enum.any?(in_transit.requests, &market_read?(&1, String.slice(destination, -2, 2)))
+      assert {"navigate-ship", _, "succeeded", "succeeded"} = last_attempt(agent, "navigate-ship")
+
+      old_portfolio =
+        FleetAllocation.current_portfolio(Scope.for_operator(operator(agent)), agent)
+
+      old_revision = old_portfolio.fleet_strategy_revision_id
+      assert scout_claimed?(old_portfolio, "BASELINE-2")
+
+      # The Operator activates a new Revision while the scout is in transit.
+      episode_floor = max_episode_id()
+      activate_next_revision(conn, 2)
+      new_revision = active_revision_id(agent)
+      assert new_revision != old_revision
+
+      # Still in transit: the accepted navigate is the scout's last action and
+      # nothing has refused it yet.
+      settle_runtime()
+      during_transit = FleetGame.snapshot(game)
+      assert during_transit.ships["BASELINE-2"].status == "IN_TRANSIT"
+      assert [{"acquire_intelligence", status}] = scout_intents(agent)
+      assert status in ~w(active waiting), fleet_trace(during_transit)
+
+      # The activation's boundary retired the old Portfolio at once: the
+      # scout's Commitment settles on its own Ship while BASELINE-1 already
+      # holds active-Revision work. No Fleet-wide fence.
+      transit_portfolio =
+        FleetAllocation.current_portfolio(Scope.for_operator(operator(agent)), agent)
+
+      assert transit_portfolio.fleet_strategy_revision_id == new_revision,
+             fleet_trace(during_transit)
+
+      assert scout_claimed?(transit_portfolio, "BASELINE-1"), fleet_trace(during_transit)
+      refute scout_claimed?(transit_portfolio, "BASELINE-2"), fleet_trace(during_transit)
+      assert [%{unwind_state: :settling}] = settling_scout(old_portfolio)
+
+      # Normal time progression: the scout arrives and its next step is the
+      # Revision-authority boundary.
+      drive(game, &fleet_sold?/1, 30)
+      state = FleetGame.snapshot(game)
+      # The scout arrived where the accepted navigate sent it; its old-Revision
+      # next step was refused, its Claim released, and it scouts again only
+      # under an active-Revision Commitment: never a second navigate there.
+      after_navigate =
+        Enum.drop_while(state.requests, &(&1 != scout_navigate)) |> Enum.drop(1)
+
+      assert %{path: "/v2/my/ships/BASELINE-2/navigate", body: %{"waypointSymbol" => next}} =
+               Enum.find(after_navigate, &(&1.method == "POST" and &1.path =~ "BASELINE-2")),
+             fleet_trace(state)
+
+      assert next != destination
+      assert [%{unwind_state: :released}] = settling_scout(old_portfolio)
+      assert scout_claimed_under?(new_revision, "BASELINE-2"), fleet_trace(state)
+      assert Enum.any?(state.requests, &market_read?(&1, String.slice(next, -2, 2)))
+
+      report = revision_stall_report(agent, game, old_portfolio, new_revision, episode_floor)
+
+      # The accepted navigate settled: nothing is sent-or-unknown, so no
+      # Safety Fence is justified for the old Claim.
+      assert report.unresolved_attempts == 0, report.text
+      assert report.navigate_sends == 1, report.text
+
+      # Desired forward progress under the active Revision.
+      refute report.stale_claim?, "stale old-Revision Claim retained\n" <> report.text
+      refute report.blocked_intents != [], "authority-blocked Intent retained\n" <> report.text
+
+      assert Enum.any?(state.requests, &market_read?(&1, String.slice(destination, -2, 2))),
+             "no current-Revision coverage of #{destination}\n" <> report.text
+
+      assert fleet_sold?(state), "no current-Revision trade completed\n" <> report.text
+      # Every decision since activation is the active Revision's; once its
+      # work finished it may rightly be a Neutral Wait with no Portfolio.
+      assert report.current_portfolio_revision in [nil, new_revision], report.text
+
+      assert Enum.all?(report.episodes_since_activation, &(elem(&1, 2) == new_revision)),
+             report.text
+
+      [sale] = Enum.filter(state.requests, &sale?/1)
+      [purchase] = Enum.filter(state.requests, &ship_post?(&1, "BASELINE-1", "purchase"))
+      assert sale.transaction["totalPrice"] > purchase.transaction["totalPrice"]
+      assert report.duplicate_sends == [], report.text
+
+      # Reconciliation is busy work, not a structural stall, and no rejected
+      # publication is recorded per reconciliation tick.
+      assert stall_episodes_since(episode_floor) == [],
+             inspect(stall_episodes_since(episode_floor))
+
+      refute Enum.any?(
+               report.episodes_since_activation,
+               &match?({_, :publication_rejected, _}, &1)
+             ),
+             report.text
+    end
+  end
+
+  # The old Portfolio's in-transit scout Commitment (BASELINE-2's latest),
+  # whatever its state.
+  defp settling_scout(old_portfolio) do
+    Repo.all(
+      from c in SpaceTraders.FleetAllocation.Commitment,
+        where:
+          c.fleet_commitment_portfolio_id == ^old_portfolio.id and
+            fragment("? = ANY(?)", "BASELINE-2", c.claims),
+        order_by: [desc: c.id],
+        limit: 1
+    )
+  end
+
+  defp scout_claimed_under?(revision_id, ship) do
+    Repo.exists?(
+      from c in SpaceTraders.FleetAllocation.Commitment,
+        join: p in SpaceTraders.FleetAllocation.Portfolio,
+        on: p.id == c.fleet_commitment_portfolio_id,
+        where: p.fleet_strategy_revision_id == ^revision_id and ^ship in c.claims
+    )
+  end
+
+  defp stall_episodes_since(floor) do
+    Repo.all(
+      from e in SpaceTraders.FleetAllocation.StrategyDecisionEpisode,
+        where: e.id > ^floor and e.selection_kind == :structural_stall,
+        order_by: e.id
+    )
+  end
+
+  defp max_episode_id do
+    Repo.one(from e in SpaceTraders.FleetAllocation.StrategyDecisionEpisode, select: max(e.id)) ||
+      0
+  end
+
+  # The scout's first navigate destination, the one accepted before activation.
+  defp old_destination(_portfolio, state) do
+    state.requests
+    |> Enum.find(&ship_post?(&1, "BASELINE-2", "navigate"))
+    |> then(& &1.body["waypointSymbol"])
+  end
+
+  # The scout's unfinished Intents (completed coverage of its start excluded).
+  defp scout_intents(agent) do
+    Repo.all(
+      from i in SpaceTraders.Fleet.Intent,
+        join: ship in SpaceTraders.Fleet.Ship,
+        on: ship.id == i.ship_id,
+        where:
+          ship.agent_id == ^agent.id and ship.symbol == "BASELINE-2" and
+            i.status != "completed",
+        select: {i.type, i.status}
+    )
+  end
+
+  defp operator(agent), do: Repo.get!(Operator, agent.operator_id)
+
+  defp active_revision_id(agent) do
+    Repo.one!(
+      from s in SpaceTraders.FleetStrategy.Strategy,
+        where: s.operator_id == ^agent.operator_id,
+        select: s.active_revision_id
+    )
+  end
+
+  defp scout_claimed?(nil, _ship), do: false
+
+  defp scout_claimed?(portfolio, ship),
+    do: Enum.any?(portfolio.commitments, &(ship in &1.claims))
+
+  defp last_attempt(agent, operation) do
+    agent
+    |> attempt_summary()
+    |> Enum.filter(&(elem(&1, 0) == operation))
+    |> List.last()
+  end
+
+  # The Operator re-activates the Steady Growth preset, as production
+  # Revision 6 did.
+  defp activate_next_revision(conn, number) do
+    {:ok, strategy, _html} = live(conn, ~p"/strategy")
+    strategy |> element("#select-preset-steady_growth") |> render_click()
+    strategy |> element("#activate-strategy") |> render_click()
+    assert render(strategy) =~ "Active revision #{number}"
+  end
+
+  # Every fact #685 names, read from durable state at one boundary: the
+  # stale Portfolio and its Claim, blocked Intents, attempts, Demands,
+  # Episodes, and any duplicate send the game saw.
+  defp revision_stall_report(agent, game, old_portfolio, new_revision, episode_floor) do
+    state = FleetGame.snapshot(game)
+    now = SpaceTraders.Clock.utc_now()
+    current = FleetAllocation.current_portfolio(Scope.for_operator(operator(agent)), agent)
+
+    blocked =
+      Repo.all(
+        from i in SpaceTraders.Fleet.Intent,
+          join: ship in SpaceTraders.Fleet.Ship,
+          on: ship.id == i.ship_id,
+          where: i.status == "blocked",
+          select: {i.id, ship.symbol, i.type, i.blocker, i.fleet_commitment_id}
+      )
+
+    attempts = attempt_summary(agent)
+
+    overdue =
+      Repo.all(
+        from d in SpaceTraders.Evidence.ObservationDemand,
+          where:
+            d.agent_id == ^agent.id and is_nil(d.withdrawn_at) and
+              is_nil(d.fulfilled_observation_id) and
+              d.strategy_revision_id == ^new_revision and d.due_at <= ^now and
+              like(d.subject, "market:%"),
+          select: d.subject
+      )
+
+    new_commitments =
+      Repo.all(
+        from c in SpaceTraders.FleetAllocation.Commitment,
+          join: p in SpaceTraders.FleetAllocation.Portfolio,
+          on: p.id == c.fleet_commitment_portfolio_id,
+          where: p.fleet_strategy_revision_id == ^new_revision,
+          select: {c.id, c.candidate_id, c.claims}
+      )
+
+    episodes_since =
+      Repo.all(
+        from e in SpaceTraders.FleetAllocation.StrategyDecisionEpisode,
+          where: e.id > ^episode_floor,
+          select: {e.id, e.selection_kind, e.fleet_strategy_revision_id}
+      )
+
+    sends =
+      for r <- state.requests, r.method == "POST", r.reply == :ok, do: {r.path, r.body}
+
+    duplicate_sends =
+      sends
+      |> Enum.frequencies()
+      |> Enum.filter(fn {{path, _body}, count} ->
+        count > 1 and String.ends_with?(path, ["/purchase", "/sell"])
+      end)
+
+    stale_claim? =
+      current != nil and current.id == old_portfolio.id and
+        current.fleet_strategy_revision_id != new_revision and
+        scout_claimed?(current, "BASELINE-2")
+
+    facts = %{
+      old_portfolio: {old_portfolio.id, old_portfolio.fleet_strategy_revision_id},
+      current_portfolio: current && {current.id, current.fleet_strategy_revision_id},
+      active_revision: new_revision,
+      blocked_intents: blocked,
+      unresolved_attempts:
+        Enum.count(
+          attempts,
+          &(elem(&1, 2) in ~w(prepared sent_or_unknown ambiguous bounded_unknown))
+        ),
+      attempts: Enum.frequencies_by(attempts, &{elem(&1, 0), elem(&1, 2)}),
+      frigate: Map.take(state.ships["BASELINE-1"], [:status, :waypoint, :cargo, :fuel]),
+      overdue_new_revision_market_demands: overdue,
+      new_revision_commitments: new_commitments,
+      episodes_since_activation: episodes_since
+    }
+
+    %{
+      stale_claim?: stale_claim?,
+      blocked_intents: blocked,
+      unresolved_attempts: facts.unresolved_attempts,
+      navigate_sends:
+        Enum.count(
+          state.requests,
+          &(ship_post?(&1, "BASELINE-2", "navigate") and
+              &1.body["waypointSymbol"] == old_destination(old_portfolio, state))
+        ),
+      current_portfolio_revision: current && current.fleet_strategy_revision_id,
+      episodes_since_activation: episodes_since,
+      duplicate_sends: duplicate_sends,
+      text:
+        inspect(facts, pretty: true, limit: :infinity, width: 120) <> "\n" <> fleet_trace(state)
+    }
   end
 
   defp frigate_hauling?(state) do

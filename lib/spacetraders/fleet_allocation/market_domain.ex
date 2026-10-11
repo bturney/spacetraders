@@ -14,15 +14,12 @@ defmodule SpaceTraders.FleetAllocation.MarketDomain do
   activates the root Intents.
   """
 
-  import Ecto.Query
-
   alias SpaceTraders.Agent.Agent, as: AgentRecord
   alias SpaceTraders.Clock
   alias SpaceTraders.FleetAllocation
   alias SpaceTraders.FleetGeneration.Generation
   alias SpaceTraders.FleetStrategy.{Revision, StandingAuthority}
   alias SpaceTraders.Intelligence
-  alias SpaceTraders.Repo
 
   @doc """
   Selects one portfolio from admitted Candidates and the free Claims, keeping
@@ -76,7 +73,7 @@ defmodule SpaceTraders.FleetAllocation.MarketDomain do
   def publish(scope, agent, revision, current, plan) do
     %{retained: retained, released: released, selection: selection, decision: decision} = plan
 
-    with %Generation{} = generation <- current_generation(agent) do
+    with %Generation{} = generation <- FleetAllocation.active_generation(agent) do
       new = selection.commitments
       same_revision? = current != nil and current.fleet_strategy_revision_id == revision.id
 
@@ -343,14 +340,5 @@ defmodule SpaceTraders.FleetAllocation.MarketDomain do
     reservations = Map.get(holder, :reservations, %{})
 
     Map.get(reservations, "credits") || Map.get(reservations, :credits)
-  end
-
-  defp current_generation(%AgentRecord{id: agent_id}) do
-    Repo.one(
-      from generation in Generation,
-        where:
-          generation.agent_id == ^agent_id and is_nil(generation.fenced_at) and
-            is_nil(generation.retired_at)
-    )
   end
 end

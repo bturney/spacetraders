@@ -72,9 +72,28 @@ Market trade vs coverage pilot (#671); bounded labels only, IDs in logs:
 - G2 `spacetraders_fleet_allocation_market_domain_decisions_total{result,decisive_reason}`
   plus `..._trade_candidates_total`, `..._coverage_candidates_total`,
   `..._claimable_ships_total`, `..._selected_total` sums; log
-  `Fleet Allocation Market domain decision` (warning when rejected/error).
+  `Fleet Allocation Market domain decision` (warning when rejected, error or
+  structurally stalled). Every decision logs `agent_id`, `fleet_generation_id`
+  (also with no Portfolio), `active_revision_id`, `portfolio_revision_id`,
+  `portfolio_id`, `commitment_ids` (comma-joined), `decision_episode_id`, and
+  on a stall `stall_reason`, `stall_episode_id`.
+- Revision change (#686): log `Fleet Strategy Revision activated` once per live
+  Generation (`previous_revision_id`, held `portfolio_id`/`commitment_ids`/
+  `decision_episode_id`, `disposition` `allocation_wake_requested` |
+  `allocation_wake_failed` | `no_allocation_wake`) or once with
+  `disposition=no_live_generation`. The next Market boundary logs
+  `Fleet Allocation retired a stale-Revision Portfolio` (`settling` =
+  `commitment_id:reason`, reason `mutation_unresolved` |
+  `inherited_cargo_disposition`) and `... released a settled Commitment`
+  (warning `... with inherited Cargo aboard` when `undisposed_units` > 0).
+  A settling Commitment keeps its Claim on its own Ship only; other Ships take
+  active-Revision work at once.
 - Rejected publication: durable episode `selection_kind = publication_rejected`,
   `rejection_reason` set, would-be Commitments in `alternatives`.
+- Structural stall: durable episode `selection_kind = structural_stall`,
+  `stall_reason` `stale_revision_portfolio` | `authority_blocked_intent` |
+  `overdue_demands_without_coverage`; one open per Generation, refreshed in
+  place (`last_observed_at`, `observation_count`), closed by `resolved_at`.
 - G3 rejected Ship-role alternatives: episode `alternatives` entries with
   `kind = ship_role_alternative`.
 
