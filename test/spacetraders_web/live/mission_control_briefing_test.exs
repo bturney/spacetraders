@@ -379,6 +379,8 @@ defmodule SpaceTradersWeb.MissionControlBriefingTest do
     assert has_element?(view, "#{wait} a[href='/decision-episodes/#{episode.id}']")
     refute has_element?(view, section, "Decision Episode #{episode.id}")
     refute has_element?(view, section, "Waiting deliberately")
+    assert has_element?(view, "#needs-attention", "No unresolved Attention or Intervention.")
+    refute has_element?(view, "#operating-health", "Needs Operator attention")
 
     # The Unallocated Ship's link is causal: the wait's Decision Episode.
     assert has_element?(

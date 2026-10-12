@@ -10,14 +10,13 @@ defmodule SpaceTradersWeb.OperationsLive do
   use SpaceTradersWeb, :live_view
 
   alias SpaceTraders.MissionControl
+  alias SpaceTraders.MissionControl.Channels
 
   @impl true
   def mount(_params, _session, socket) do
-    operator_id = socket.assigns.current_scope.operator.id
-
     if connected?(socket) do
-      Phoenix.PubSub.subscribe(SpaceTraders.PubSub, "fleet_strategy:#{operator_id}")
-      Phoenix.PubSub.subscribe(SpaceTraders.PubSub, "fleet_allocation:#{operator_id}")
+      Channels.subscribe_strategy()
+      Channels.subscribe_allocation()
     end
 
     {:ok, assign_projection(socket)}
@@ -147,9 +146,8 @@ defmodule SpaceTradersWeb.OperationsLive do
   end
 
   @impl true
-  def handle_info({:fleet_strategy_updated, operator_id}, socket)
-      when operator_id == socket.assigns.current_scope.operator.id,
-      do: {:noreply, assign_projection(socket)}
+  def handle_info(:fleet_strategy_updated, socket),
+    do: {:noreply, assign_projection(socket)}
 
   def handle_info({:outbox, _id, _event, _payload}, socket),
     do: {:noreply, assign_projection(socket)}
