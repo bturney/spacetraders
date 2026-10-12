@@ -202,6 +202,10 @@ defmodule SpaceTraders.CurrentFleetMigrationTest do
     assert identity() == [[operator.id, current_generation]]
     assert retained() == before
 
+    # The booted app needs every later migration, not only the adoption one.
+    run_migrations(all: true)
+    assert retained() == before
+
     url =
       URI.parse(SpaceTraders.CheckoutDb.url(:test))
       |> Map.put(:path, "/#{database}")
@@ -245,7 +249,7 @@ defmodule SpaceTraders.CurrentFleetMigrationTest do
     assert retained() == before
   end
 
-  defp migrate, do: run_migrations(all: true)
+  defp migrate, do: run_migrations(to: @version)
 
   defp run_migrations(opts) do
     {result, diagnostics} =
