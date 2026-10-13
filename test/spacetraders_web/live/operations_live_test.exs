@@ -1,5 +1,5 @@
 defmodule SpaceTradersWeb.OperationsLiveTest do
-  use SpaceTradersWeb.ConnCase, async: true
+  use SpaceTradersWeb.ConnCase, async: false
 
   import Phoenix.LiveViewTest
   import SpaceTraders.AgentFixtures

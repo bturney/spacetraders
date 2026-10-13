@@ -365,7 +365,7 @@ defmodule SpaceTraders.FleetAcquisitionTest do
     Repo.update!(Ecto.Changeset.change(generation, fenced_at: DateTime.utc_now()))
     Req.Test.stub(SpaceTraders.API, fn _ -> flunk("fenced Fleet spending reached the game") end)
 
-    assert {:error, :current_fleet_unavailable} =
+    assert {:error, :generation_not_current} =
              SpaceTraders.API.purchase_ship(
                SpaceTraders.API.AgentTokenReference.new(agent),
                "SHIP_LIGHT_HAULER",
@@ -373,7 +373,8 @@ defmodule SpaceTraders.FleetAcquisitionTest do
                spending: offer
              )
 
-    assert [%{state: "not_sent", sent_or_unknown_at: nil}] = purchase_attempts(agent)
+    # The current-Fleet gate refuses before a Mutation Attempt is even prepared.
+    assert [] = purchase_attempts(agent)
   end
 
   test "Shipyard evidence that ages before the send marker prevents the purchase" do

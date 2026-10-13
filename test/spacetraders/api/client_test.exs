@@ -336,7 +336,8 @@ defmodule SpaceTraders.API.ClientTest do
 
       send(task.pid, :admit)
 
-      assert_receive :mutation_dispatched
+      # Registration admission does durable work before dispatch; allow a loaded gate.
+      assert_receive :mutation_dispatched, 2_000
 
       assert %{in_flight: in_flight} = :sys.get_state(SpaceTraders.API.CapacityGovernor)
 

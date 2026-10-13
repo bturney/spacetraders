@@ -1,5 +1,5 @@
 defmodule SpaceTraders.FleetExecutionTest do
-  use SpaceTraders.DataCase, async: true
+  use SpaceTraders.DataCase, async: false
 
   import SpaceTraders.AgentFixtures
   import SpaceTraders.EvidenceFixtures

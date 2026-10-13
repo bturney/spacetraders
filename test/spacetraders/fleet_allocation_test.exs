@@ -1,5 +1,5 @@
 defmodule SpaceTraders.FleetAllocationTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   alias SpaceTraders.FleetAllocation
   alias SpaceTraders.FleetAllocation.PortfolioCandidate
