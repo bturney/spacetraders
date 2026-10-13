@@ -138,6 +138,194 @@ defmodule SpaceTraders.ShipExecutionDurabilityTest do
     assert Elixir.Agent.get(game, & &1) == "IN_ORBIT"
   end
 
+  for {kind, path} <- [
+        {:agent, "/v2/my/agent"},
+        {:ship, :ship},
+        {:contracts, "/v2/my/contracts"}
+      ] do
+    @kind kind
+    @path path
+    test "a late #{@kind} response retains predecessor attribution across committed replacement" do
+      {agent, ship, _portfolio, _commitment} = claimed_ship()
+      {:ok, %{generation: original}} = SpaceTraders.FleetGeneration.adopt_current_fleet()
+      owner = self()
+      path = if @path == :ship, do: "/v2/my/ships/#{ship.symbol}", else: @path
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        assert conn.request_path == path
+        assert Plug.Conn.get_req_header(conn, "authorization") == ["Bearer #{agent.agent_token}"]
+        send(owner, {:read_started, self()})
+
+        receive do
+          :deliver ->
+            body =
+              case @kind do
+                :agent ->
+                  %{"symbol" => agent.symbol, "credits" => 999_999, "headquarters" => "X1-UX81-A1"}
+
+                :ship ->
+                  ship_body(ship.symbol)
+
+                :contracts ->
+                  [%{"id" => "PREDECESSOR-CONTRACT", "accepted" => true, "fulfilled" => false}]
+              end
+
+            Req.Test.json(conn, %{"data" => body})
+        after
+          5_000 -> flunk("late observation was not released")
+        end
+      end)
+
+      sender =
+        Task.async(fn ->
+          case @kind do
+            :agent -> SpaceTraders.Evidence.get_agent(agent)
+            :ship -> SpaceTraders.Evidence.get_ship(agent, ship.symbol)
+            :contracts -> SpaceTraders.Evidence.get_contracts(agent)
+          end
+        end)
+
+      Req.Test.allow(SpaceTraders.API, self(), sender.pid)
+      assert_receive {:read_started, pid}, 5_000
+      assert pid == sender.pid
+      {replacement, generation} = publish_retained_replacement(agent)
+
+      send(pid, :deliver)
+      assert {:ok, _} = Task.await(sender)
+
+      subject =
+        case @kind do
+          :agent -> "agent:#{agent.symbol}"
+          :ship -> "ship:#{ship.symbol}"
+          :contracts -> "contracts:#{agent.symbol}"
+        end
+
+      assert observation = SpaceTraders.Evidence.latest_observation(agent, subject)
+      assert observation.agent_id == agent.id
+      assert observation.fleet_generation_id == original.id
+      assert SpaceTraders.Evidence.latest_observation(replacement, subject) == nil
+
+      assert {:ok, %{agent: current, generation: current_generation}} =
+               SpaceTraders.FleetGeneration.current_fleet()
+
+      assert current.id == replacement.id
+      assert current_generation.id == generation.id
+      assert current_generation.starting_credits == 175_000
+      assert current_generation.last_observed_credits == nil
+      assert {:error, :ship_not_owned} = SpaceTraders.Fleet.owned_ship(replacement, ship.symbol)
+
+      # Cache loss/restart cannot resurrect the predecessor's stored credential.
+      restart_generation_admission()
+      assert {:error, :generation_not_current} = SpaceTraders.Evidence.get_agent(agent)
+    end
+  end
+
+  test "a committed predecessor attempt stays unresolved and cannot dispatch after replacement or boot" do
+    {agent, ship, portfolio, commitment} = claimed_ship()
+    {:ok, %{generation: original}} = SpaceTraders.FleetGeneration.adopt_current_fleet()
+    intent = owned_navigation(ship, portfolio, commitment)
+
+    {:ok, %{attempt: attempt}} =
+      RecordedAction.prepare(agent, intent, %{"kind" => "orbit", "waypoint" => "X1-UX81-A1"})
+
+    {:ok, attempt} = MutationAttempts.mark_sent_or_unknown(attempt)
+    {replacement, _generation} = publish_retained_replacement(agent)
+    Req.Test.stub(SpaceTraders.API, fn _conn -> flunk("predecessor transport after replacement") end)
+
+    assert {:error, :attempt_already_dispatched} = SpaceTraders.API.dispatch_recorded(attempt)
+    assert retained = MutationAttempts.get!(attempt.id)
+    assert retained.state == "sent_or_unknown"
+    assert retained.agent_id == agent.id
+    assert retained.fleet_generation_id == original.id
+    assert SafetyFence.active?(retained)
+    refute retained.retry_authorized
+
+    restart_generation_admission()
+    assert :ok = Intents.rearm_on_boot()
+    assert MutationAttempts.get!(attempt.id).state == "sent_or_unknown"
+    assert Repo.get!(Intent, intent.id).mutation_attempt_id == attempt.id
+    assert MutationAttempts.list_for_agent(replacement) == []
+  end
+
+  test "an already accepted predecessor mutation records its late success only on its original attempt" do
+    {agent, ship, portfolio, commitment} = claimed_ship()
+    {:ok, %{generation: original}} = SpaceTraders.FleetGeneration.adopt_current_fleet()
+    intent = owned_navigation(ship, portfolio, commitment)
+
+    {:ok, %{attempt: attempt}} =
+      RecordedAction.prepare(agent, intent, %{"kind" => "orbit", "waypoint" => "X1-UX81-A1"})
+
+    owner = self()
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      assert {conn.method, conn.request_path} == {"POST", "/v2/my/ships/#{ship.symbol}/orbit"}
+      assert Plug.Conn.get_req_header(conn, "authorization") == ["Bearer #{agent.agent_token}"]
+      send(owner, {:mutation_accepted, self()})
+
+      receive do
+        :deliver -> Req.Test.json(conn, %{"data" => %{"nav" => nav_body("IN_ORBIT")}})
+      after
+        5_000 -> flunk("late mutation response was not released")
+      end
+    end)
+
+    sender = Task.async(fn -> SpaceTraders.API.dispatch_recorded(attempt) end)
+    Req.Test.allow(SpaceTraders.API, self(), sender.pid)
+    assert_receive {:mutation_accepted, pid}, 5_000
+    assert pid == sender.pid
+    assert MutationAttempts.get!(attempt.id).state == "sent_or_unknown"
+    {replacement, generation} = publish_retained_replacement(agent)
+    send(pid, :deliver)
+    assert {:ok, %{nav: %{status: "IN_ORBIT"}}} = Task.await(sender)
+
+    retained = MutationAttempts.get!(attempt.id)
+    assert retained.state == "succeeded"
+    assert retained.agent_id == agent.id
+    assert retained.fleet_generation_id == original.id
+    assert [%{classification: "succeeded"}] = retained.outcomes
+    assert MutationAttempts.list_for_agent(replacement) == []
+    assert Repo.reload!(generation).last_observed_credits == nil
+    assert {:error, :generation_not_current} = SpaceTraders.Evidence.get_ship(agent, ship.symbol)
+    refute_received {:mutation_accepted, _}
+  end
+
+  defp publish_retained_replacement(agent) do
+    # Committed fixture transition, retaining the old identities and resources as
+    # the expanded schema permits. Only public reads/dispatch are under test.
+    {:ok, replacement} =
+      Repo.transaction(fn ->
+        previous = Repo.get_by!(Generation, agent_id: agent.id)
+        now = DateTime.utc_now()
+        previous |> Ecto.Changeset.change(fenced_at: now, retired_at: now) |> Repo.update!()
+
+        next =
+          agent_fixture(Repo.get!(SpaceTraders.Agent.Operator, agent.operator_id), %{
+            symbol: "NEXT#{System.unique_integer([:positive])}",
+            agent_token: "REPLACEMENT_SECRET"
+          })
+
+        Repo.insert!(%Generation{
+          operator_id: agent.operator_id,
+          agent_id: next.id,
+          number: 2,
+          symbol: next.symbol,
+          faction: next.faction,
+          fleet_strategy_revision_id: previous.fleet_strategy_revision_id,
+          starting_credits: 175_000
+        })
+
+        {:ok, %{state: :current}} = SpaceTraders.FleetGeneration.adopt_current_fleet()
+        next
+      end)
+
+    {replacement, Repo.get_by!(Generation, agent_id: replacement.id)}
+  end
+
+  defp restart_generation_admission do
+    :ok = Supervisor.terminate_child(SpaceTraders.Supervisor, SpaceTraders.FleetGenerationAdmission)
+    {:ok, _} = Supervisor.restart_child(SpaceTraders.Supervisor, SpaceTraders.FleetGenerationAdmission)
+  end
+
   test "boot after an accepted retry interruption resolves the committed effect without a second retry" do
     {agent, ship, portfolio, commitment} = claimed_ship()
     Req.Test.set_req_test_to_shared(SpaceTraders.API)

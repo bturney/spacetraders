@@ -59,6 +59,64 @@ defmodule SpaceTraders.CurrentGenerationAuthorityTest do
   end
 
   describe "new observations and gameplay dispatch" do
+    test "an observation queued for API capacity rechecks current Generation authority before transport" do
+      %{current: current, generation: generation} = retained_predecessor_and_current_fleet()
+      observe_game_requests()
+      governor = SpaceTraders.API.CapacityGovernor
+      operation = SpaceTraders.API.OperationInventory.fetch!("get-my-ship")
+
+      held =
+        for _ <- 1..governor.diagnostics().admitted_capacity do
+          {:ok, admission} = governor.admit(operation)
+          admission
+        end
+
+      on_exit(fn -> Enum.each(held, &governor.complete(&1, :not_dispatched)) end)
+      observer = Task.async(fn -> Evidence.get_ship(current, "ORBITALIST-1") end)
+      Req.Test.allow(SpaceTraders.API, self(), observer.pid)
+      await_queued_read(governor)
+
+      generation |> Ecto.Changeset.change(fenced_at: DateTime.utc_now()) |> Repo.update!()
+      Enum.each(held, &governor.complete(&1, :not_dispatched))
+
+      assert {:error, :generation_not_current} = Task.await(observer)
+      refute_received {:game_request, _, _, _}
+    end
+
+    test "a gameplay mutation queued for capacity is durably not sent after its Generation is fenced" do
+      %{current: current, generation: generation} = retained_predecessor_and_current_fleet()
+      observe_game_requests()
+      governor = SpaceTraders.API.CapacityGovernor
+      operation = SpaceTraders.API.OperationInventory.fetch!("accept-contract")
+
+      held =
+        for _ <- 1..governor.diagnostics().admitted_capacity do
+          {:ok, admission} = governor.admit(operation)
+          admission
+        end
+
+      on_exit(fn -> Enum.each(held, &governor.complete(&1, :not_dispatched)) end)
+
+      sender =
+        Task.async(fn ->
+          SpaceTraders.API.accept_contract(AgentTokenReference.new(current), "CONTRACT-1")
+        end)
+
+      Req.Test.allow(SpaceTraders.API, self(), sender.pid)
+      await_queued_read(governor)
+      generation |> Ecto.Changeset.change(fenced_at: DateTime.utc_now()) |> Repo.update!()
+      Enum.each(held, &governor.complete(&1, :not_dispatched))
+
+      assert {:error, :generation_not_current} = Task.await(sender)
+      refute_received {:game_request, _, _, _}
+
+      assert [%{state: "not_sent", sent_or_unknown_at: nil} = attempt] =
+               SpaceTraders.MutationAttempts.list_for_agent(current)
+
+      assert attempt.fleet_generation_id == generation.id
+      refute attempt.retry_authorized
+    end
+
     test "use only the current Generation's credential; a cached predecessor reference gains no authority" do
       %{predecessor: predecessor, current: current} = retained_predecessor_and_current_fleet()
       observe_game_requests()
@@ -159,5 +217,19 @@ defmodule SpaceTraders.CurrentGenerationAuthorityTest do
       %{response: %{"credits" => credits}},
       DateTime.utc_now()
     )
+  end
+
+  defp await_queued_read(governor, tries \\ 1000)
+  defp await_queued_read(_governor, 0), do: flunk("observation never queued for capacity")
+
+  defp await_queued_read(governor, tries) do
+    if Enum.any?(governor.diagnostics().deferred, fn {_lane, queued} -> queued.count > 0 end) do
+      :ok
+    else
+      receive do
+      after
+        1 -> await_queued_read(governor, tries - 1)
+      end
+    end
   end
 end

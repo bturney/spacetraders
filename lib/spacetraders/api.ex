@@ -613,19 +613,39 @@ defmodule SpaceTraders.API do
           Req.Request.halt(request, %MutationSuppressedError{reason: reason})
       end
     else
-      authorize_unrecorded_dispatch(request, method, token, attempt, shadow)
+      authorize_unrecorded_dispatch(request, method, token, attempt, shadow, opts)
     end
   end
 
-  defp authorize_unrecorded_dispatch(request, method, token, attempt, shadow) do
-    with :ok <- mutation_authorized?(method, token),
+  defp authorize_unrecorded_dispatch(request, method, token, attempt, shadow, opts) do
+    # Capacity admission can wait across a Generation transition. The credential
+    # resolved before that wait cannot confer authority on the eventual send.
+    with :ok <- gameplay_authorized?(opts[:agent_id]),
+         :ok <- mutation_authorized?(method, token),
          {:ok, _attempt} <- mark_mutation_sent(attempt) do
       ShadowAdmission.observe_dispatch(shadow)
       request
     else
-      {:error, reason} -> Req.Request.halt(request, %MutationSuppressedError{reason: reason})
+      {:error, reason} ->
+        reason = record_suppressed_attempt(attempt, reason)
+        Req.Request.halt(request, %MutationSuppressedError{reason: reason})
     end
   end
+
+  defp record_suppressed_attempt(nil, reason), do: reason
+
+  defp record_suppressed_attempt(%Attempt{} = attempt, reason) do
+    case MutationAttempts.record_not_sent(attempt, inspect(reason)) do
+      {:ok, _} -> reason
+      {:error, persistence_reason} -> persistence_reason
+    end
+  end
+
+  defp gameplay_authorized?(agent_id) when is_integer(agent_id),
+    do: SpaceTraders.FleetGeneration.gameplay_authority(agent_id)
+
+  # Initial import/registration has no established Agent identity yet.
+  defp gameplay_authorized?(_agent_id), do: :ok
 
   defp prepare_mutation_attempt(%{classification: :read}, _path, _opts), do: {:ok, nil}
 
