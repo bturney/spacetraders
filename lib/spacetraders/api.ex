@@ -635,9 +635,17 @@ defmodule SpaceTraders.API do
   defp record_suppressed_attempt(nil, reason), do: reason
 
   defp record_suppressed_attempt(%Attempt{} = attempt, reason) do
-    case MutationAttempts.record_not_sent(attempt, inspect(reason)) do
-      {:ok, _} -> reason
-      {:error, persistence_reason} -> persistence_reason
+    # A mutation owner may already have settled admission (e.g. acquisition's
+    # missing offer). Never overwrite its disposition or append not-sent twice.
+    case MutationAttempts.get!(attempt.id) do
+      %Attempt{state: "prepared"} = prepared ->
+        case MutationAttempts.record_not_sent(prepared, inspect(reason)) do
+          {:ok, _} -> reason
+          {:error, persistence_reason} -> persistence_reason
+        end
+
+      _already_disposed ->
+        reason
     end
   end
 

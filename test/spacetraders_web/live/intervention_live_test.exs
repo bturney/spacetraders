@@ -1,5 +1,5 @@
 defmodule SpaceTradersWeb.InterventionLiveTest do
-  use SpaceTradersWeb.ConnCase, async: true
+  use SpaceTradersWeb.ConnCase, async: false
 
   import Phoenix.LiveViewTest
   import SpaceTraders.AgentFixtures
@@ -43,5 +43,18 @@ defmodule SpaceTradersWeb.InterventionLiveTest do
     assert [%{ship_id: reserved, reason: "Hold for inspection"}] = ShipReservation.list(scope)
     assert reserved == ship.id
     assert has_element?(view, "#intervene-#{ship.id}")
+
+    Req.Test.stub(SpaceTraders.API, fn _conn -> flunk("stale Ship must never reach gameplay") end)
+
+    assert render_submit(view, "reserve", %{"ship_id" => old_ship.id, "reason" => "Stale link"}) =~
+             "generation_not_current"
+
+    assert render_submit(view, "intervene", %{
+             "ship_id" => old_ship.id,
+             "reason" => "Stale link",
+             "waypoint" => "X1-UX81-A2"
+           }) =~ "Ship unavailable"
+
+    assert [%{ship_id: ^reserved}] = ShipReservation.list(scope)
   end
 end

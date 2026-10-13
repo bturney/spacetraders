@@ -6,7 +6,7 @@ defmodule SpaceTradersWeb.InterventionLive do
 
   alias SpaceTraders.Agent.Agent, as: AgentRecord
   alias SpaceTraders.Fleet.{Intents, Ship}
-  alias SpaceTraders.{ManualIntervention, Repo, ShipReservation}
+  alias SpaceTraders.{FleetGeneration, ManualIntervention, Repo, ShipReservation}
 
   @impl true
   def mount(_params, _session, socket) do
@@ -190,14 +190,20 @@ defmodule SpaceTradersWeb.InterventionLive do
     # Only the current Generation's Ships can be reserved or commanded; the
     # intervention record below stays the deployment's full history.
     ships =
-      Repo.all(
-        from ship in Ship,
-          join: agent in AgentRecord,
-          on: agent.id == ship.agent_id,
-          preload: [agent: agent],
-          order_by: ship.symbol
-      )
-      |> Enum.filter(&(SpaceTraders.FleetGeneration.gameplay_authority(&1.agent_id) == :ok))
+      case FleetGeneration.current_fleet(socket.assigns.current_scope) do
+        {:ok, %{state: :current, agent: %{id: agent_id}}} ->
+          Repo.all(
+            from ship in Ship,
+              join: agent in AgentRecord,
+              on: agent.id == ship.agent_id,
+              where: ship.agent_id == ^agent_id,
+              preload: [agent: agent],
+              order_by: ship.symbol
+          )
+
+        _setup_or_transition ->
+          []
+      end
 
     assign(socket,
       ships: ships,

@@ -161,7 +161,11 @@ defmodule SpaceTraders.ShipExecutionDurabilityTest do
             body =
               case @kind do
                 :agent ->
-                  %{"symbol" => agent.symbol, "credits" => 999_999, "headquarters" => "X1-UX81-A1"}
+                  %{
+                    "symbol" => agent.symbol,
+                    "credits" => 999_999,
+                    "headquarters" => "X1-UX81-A1"
+                  }
 
                 :ship ->
                   ship_body(ship.symbol)
@@ -230,7 +234,10 @@ defmodule SpaceTraders.ShipExecutionDurabilityTest do
 
     {:ok, attempt} = MutationAttempts.mark_sent_or_unknown(attempt)
     {replacement, _generation} = publish_retained_replacement(agent)
-    Req.Test.stub(SpaceTraders.API, fn _conn -> flunk("predecessor transport after replacement") end)
+
+    Req.Test.stub(SpaceTraders.API, fn _conn ->
+      flunk("predecessor transport after replacement")
+    end)
 
     assert {:error, :attempt_already_dispatched} = SpaceTraders.API.dispatch_recorded(attempt)
     assert retained = MutationAttempts.get!(attempt.id)
@@ -322,8 +329,11 @@ defmodule SpaceTraders.ShipExecutionDurabilityTest do
   end
 
   defp restart_generation_admission do
-    :ok = Supervisor.terminate_child(SpaceTraders.Supervisor, SpaceTraders.FleetGenerationAdmission)
-    {:ok, _} = Supervisor.restart_child(SpaceTraders.Supervisor, SpaceTraders.FleetGenerationAdmission)
+    :ok =
+      Supervisor.terminate_child(SpaceTraders.Supervisor, SpaceTraders.FleetGenerationAdmission)
+
+    {:ok, _} =
+      Supervisor.restart_child(SpaceTraders.Supervisor, SpaceTraders.FleetGenerationAdmission)
   end
 
   test "boot after an accepted retry interruption resolves the committed effect without a second retry" do

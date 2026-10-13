@@ -9,7 +9,6 @@ defmodule SpaceTraders.Evidence do
 
   import Ecto.Query
 
-  alias SpaceTraders.Agent
   alias SpaceTraders.Agent.Agent, as: AgentRecord
   alias SpaceTraders.Agent.Scope
   alias SpaceTraders.API
@@ -725,7 +724,12 @@ defmodule SpaceTraders.Evidence do
   defp settle_owned_demand(result, nil, _agent, _subject, _operation_id, _typed_demand),
     do: result
 
-  defp active_revision(operator_id) do
+  defp active_revision(attributed_operator_id) do
+    # Expanded-schema compatibility for unadopted legacy writers. Published
+    # identity always chooses the deployment Strategy, never a caller's tenant.
+    operator_id =
+      SpaceTraders.OperatorAuthority.deployment_operator_id() || attributed_operator_id
+
     Revision
     |> join(:inner, [revision], strategy in Strategy,
       on: strategy.id == revision.fleet_strategy_id
@@ -1702,27 +1706,33 @@ defmodule SpaceTraders.Evidence do
   end
 
   @doc "Refreshes authoritative Agent and Ship state before post-stop planning."
-  def refresh_for_emergency_stop_resume(%Scope{operator: operator}) do
-    # Only the current Generation can resume gameplay; retained history has
-    # nothing to refresh.
-    operator
-    |> Agent.list_agents()
-    |> Enum.filter(&(FleetGeneration.gameplay_authority(&1.id) == :ok))
-    |> Enum.reduce_while(:ok, fn agent, :ok ->
-      case FleetGeneration.agent_overview(agent) do
-        {:ok, _overview} ->
-          case Fleet.list_ships(agent) do
-            {:ok, _ships} -> {:cont, :ok}
-            _error -> {:halt, {:error, :authoritative_refresh_required}}
-          end
+  def refresh_for_emergency_stop_resume(%Scope{} = scope) do
+    with {:ok, _operator_id} <- SpaceTraders.OperatorAuthority.authorize(scope),
+         {:ok, identity} <- FleetGeneration.current_fleet(scope) do
+      case identity do
+        %{state: :current, agent: %{id: agent_id}} ->
+          refresh_current_fleet(Repo.get!(AgentRecord, agent_id))
 
-        {:error, :stale_agent} ->
-          {:cont, :ok}
-
-        _error ->
-          {:halt, {:error, :authoritative_refresh_required}}
+        _setup_or_transition ->
+          :ok
       end
-    end)
+    end
+  end
+
+  defp refresh_current_fleet(agent) do
+    case FleetGeneration.agent_overview(agent) do
+      {:ok, _overview} ->
+        case Fleet.list_ships(agent) do
+          {:ok, _ships} -> :ok
+          _error -> {:error, :authoritative_refresh_required}
+        end
+
+      {:error, :stale_agent} ->
+        :ok
+
+      _error ->
+        {:error, :authoritative_refresh_required}
+    end
   end
 
   defp compatible_demands(agent, subject, observation, now) do
