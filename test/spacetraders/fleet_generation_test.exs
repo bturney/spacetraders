@@ -83,7 +83,8 @@ defmodule SpaceTraders.FleetGenerationTest do
   end
 
   describe "Server Reset" do
-    setup do
+    setup context do
+      faction = Map.get(context, :reset_faction, "COSMIC")
       operator = operator_fixture()
       {:ok, operator} = Agent.link_account_token(operator, "ACCOUNT_TOKEN_SECRET")
       scope = Scope.for_operator(operator)
@@ -94,11 +95,11 @@ defmodule SpaceTraders.FleetGenerationTest do
         assert {conn.method, conn.request_path, conn.body_params["symbol"]} ==
                  {"POST", "/v2/register", "RESETME"}
 
-        Req.Test.json(conn, registration_body("RESETME", "RESETME-1", "FIRST_TOKEN"))
+        Req.Test.json(conn, registration_body("RESETME", "RESETME-1", "FIRST_TOKEN", faction))
       end)
 
       {:ok, %{agent: minted}} =
-        FleetGeneration.mint(scope, %{symbol: "RESETME", faction: "COSMIC"})
+        FleetGeneration.mint(scope, %{symbol: "RESETME", faction: faction})
 
       %{scope: scope, revision: revision, agent: Agent.get_agent(scope, minted.id)}
     end
@@ -167,7 +168,8 @@ defmodule SpaceTraders.FleetGenerationTest do
       assert {:error, :stale_agent} = FleetGeneration.execution_allowed?(retained)
     end
 
-    test "definitive conflicts advance through distinct banked names in order, without suffixes",
+    @tag reset_faction: "VOID"
+    test "definitive conflicts preserve faction through distinct banked names in order, without suffixes",
          %{scope: scope, revision: revision, agent: agent} do
       {:ok, _} = SpaceTraders.AgentNameBank.save(["ORBITALIST", "RESETME", "PARALLAX", "LIMINAL"])
 
@@ -179,19 +181,20 @@ defmodule SpaceTraders.FleetGenerationTest do
           symbol_unavailable(conn)
 
         %{body_params: %{"symbol" => "PARALLAX"}} = conn ->
-          Req.Test.json(conn, registration_body("PARALLAX", "PARALLAX-1", "SECOND_TOKEN"))
+          Req.Test.json(conn, registration_body("PARALLAX", "PARALLAX-1", "SECOND_TOKEN", "VOID"))
       end)
 
       assert {:error, :stale_agent} = FleetGeneration.agent_overview(agent)
 
       assert registrations() == [
-               {"RESETME", "COSMIC"},
-               {"ORBITALIST", "COSMIC"},
-               {"PARALLAX", "COSMIC"}
+               {"RESETME", "VOID"},
+               {"ORBITALIST", "VOID"},
+               {"PARALLAX", "VOID"}
              ]
 
       assert [current, retired] = FleetGeneration.list_generations(scope)
       assert current.symbol == "PARALLAX"
+      assert current.faction == "VOID"
       assert current.fleet_strategy_revision_id == revision.id
       assert retired.agent_id == agent.id
       assert %DateTime{} = retired.retired_at
@@ -410,6 +413,15 @@ defmodule SpaceTraders.FleetGenerationTest do
                  "evidence_id" => objective_evidence(agent).id
                })
 
+      assert {:ok, _} =
+               FleetGeneration.record_objective_progress(scope, generation.id, 1, %{
+                 "change" => 120,
+                 "elapsed_seconds" => 60,
+                 "horizon_seconds" => 3600,
+                 "feasible?" => true,
+                 "evidence_id" => objective_evidence(agent, 175_120).id
+               })
+
       game(fn
         %{method: "GET"} = conn ->
           reset_mismatch(conn)
@@ -424,6 +436,7 @@ defmodule SpaceTraders.FleetGenerationTest do
       assert %{"current" => 4} = current.objective_progress["0"]
       assert current.objective_progress["1"] == %{"recurrence_id" => nil, "progress" => nil}
       assert %{"current" => 4} = retired.objective_progress["0"]
+      assert %{"change" => 120} = retired.objective_progress["1"]
     end
 
     test "a Revision activated after replacement governs only the current Generation; history keeps its original Revision",
@@ -727,7 +740,7 @@ defmodule SpaceTraders.FleetGenerationTest do
     refute Repo.get_by(SpaceTraders.Agent.Agent, symbol: "NEWSYM")
   end
 
-  defp registration_body(agent_symbol, ship_symbol, token) do
+  defp registration_body(agent_symbol, ship_symbol, token, faction \\ "COSMIC") do
     %{
       "data" => %{
         "token" => token,
@@ -735,16 +748,16 @@ defmodule SpaceTraders.FleetGenerationTest do
           "symbol" => agent_symbol,
           "credits" => 175_000,
           "headquarters" => "X1-UX81-A2",
-          "startingFaction" => "COSMIC"
+          "startingFaction" => faction
         },
         "contract" => %{"id" => "c1", "type" => "PROCUREMENT"},
-        "faction" => %{"symbol" => "COSMIC", "name" => "Cosmic", "isRecruiting" => true},
+        "faction" => %{"symbol" => faction, "name" => faction, "isRecruiting" => true},
         "ships" => [
           %{
             "symbol" => ship_symbol,
             "registration" => %{
               "name" => ship_symbol,
-              "factionSymbol" => "COSMIC",
+              "factionSymbol" => faction,
               "role" => "COMMAND"
             },
             "nav" => %{
