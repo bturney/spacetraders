@@ -204,7 +204,18 @@ defmodule SpaceTraders.CurrentFleetMigrationTest do
 
     # The booted app needs every later migration, not only the adoption one.
     run_migrations(all: true)
-    assert retained() == before
+
+    # The additive establishment-Revision column is unknown for legacy history.
+    # Assert exactly that null addition while retaining every original value,
+    # including encrypted credentials, history and pre-migration sessions.
+    after_expansion =
+      List.update_at(before, 4, fn rows ->
+        Enum.map(rows, fn [generation] ->
+          [Map.put(generation, "initial_fleet_strategy_revision_id", nil)]
+        end)
+      end)
+
+    assert retained() == after_expansion
 
     url =
       URI.parse(SpaceTraders.CheckoutDb.url(:test))
@@ -227,7 +238,7 @@ defmodule SpaceTraders.CurrentFleetMigrationTest do
       refute output =~ "ADOPTED_ACCOUNT_SECRET"
       refute output =~ "AGENT_SECRET"
       refute output =~ "adopted durable password"
-      assert retained() == before
+      assert retained() == after_expansion
       assert identity() == [[operator.id, current_generation]]
     end
   end
