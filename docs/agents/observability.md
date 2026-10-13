@@ -4,6 +4,16 @@ Use this guide to move from Operator-visible durable evidence to correlated
 telemetry. Mission Control and PostgreSQL remain authoritative; Grafana is a
 disposable diagnostic surface.
 
+## Supplemental design evidence
+
+When an authorized change touches decision explanations, calibration,
+Grafana panels, Mission Control, or Operator-facing historical outcomes, consult
+the [strategic observability and UX gap analysis](strategic-observability-ux-gaps.md)
+and its linked [strategic reasoning scenarios](strategic-reasoning-scenarios.md).
+They document source-inspected gaps and hypothetical decisions; they do not
+replace the authoritative #502 C09/C10 contracts or accepted #311 interface,
+require new metrics, or change the active delivery frontier.
+
 ## Source map
 
 | Question | Current source |
