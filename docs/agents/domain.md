@@ -6,6 +6,17 @@ How the engineering skills should consume this repo's domain documentation when 
 
 Read the repo-root `GLOSSARY.md`, then read the ADRs in `docs/adr/` that touch the area of work.
 
+## Supplemental Fleet Strategy examples
+
+For bounded Fleet allocation, economic-decision and multi-Ship behavior,
+[strategic reasoning scenarios](strategic-reasoning-scenarios.md) give
+non-normative, hypothetical proof cases. Treat issue #502, the Glossary, and
+relevant ADRs as authority; recheck repository behavior before adopting an
+example. For related Operator-facing explanation and calibration gaps, see
+[strategic observability and UX](strategic-observability-ux-gaps.md).
+Consult them when relevant to an already-authorized scope, not as a separate
+implementation backlog.
+
 ## Use the glossary's vocabulary
 
 When your output names a domain concept (in an issue title, a refactor proposal, a hypothesis, a test name), use the term as defined in `GLOSSARY.md`. Don't drift to synonyms the glossary explicitly avoids.

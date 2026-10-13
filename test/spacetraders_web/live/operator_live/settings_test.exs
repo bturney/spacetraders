@@ -408,4 +408,63 @@ defmodule SpaceTradersWeb.OperatorLive.SettingsTest do
       assert [%{symbol: "ORBITALIST"}] = Agent.list_agents(operator)
     end
   end
+
+  describe "Agent Name Bank" do
+    setup %{conn: conn} do
+      operator = operator_fixture()
+      %{conn: log_in_operator(conn, operator)}
+    end
+
+    test "shows the stored candidates in order", %{conn: conn} do
+      {:ok, lv, _html} = live(conn, ~p"/operators/settings")
+      assert lv |> element("#name_bank_form textarea") |> render() =~ "ORBITALIST\nPARALLAX"
+    end
+
+    test "saves an edited, reordered bank for Fleet Generation", %{conn: conn} do
+      {:ok, lv, _html} = live(conn, ~p"/operators/settings")
+
+      html =
+        lv
+        |> form("#name_bank_form", %{"name_bank" => %{"names" => "zenith\nNADIR"}})
+        |> render_submit()
+
+      assert html =~ "Agent Name Bank saved"
+      assert SpaceTraders.AgentNameBank.list() == ["ZENITH", "NADIR"]
+    end
+
+    test "invalid submission explains the error, keeps the draft and the stored bank", %{
+      conn: conn
+    } do
+      {:ok, lv, _html} = live(conn, ~p"/operators/settings")
+
+      html =
+        lv
+        |> form("#name_bank_form", %{"name_bank" => %{"names" => "ab\nNADIR\nnadir"}})
+        |> render_submit()
+
+      assert html =~ "AB"
+      assert html =~ "at least 3"
+      assert html =~ "NADIR"
+      assert lv |> element("#name_bank_form textarea") |> render() =~ "ab\nNADIR\nnadir"
+
+      assert SpaceTraders.AgentNameBank.list() ==
+               ~w(ORBITALIST PARALLAX APHELION SIDEREAL LIMINAL)
+    end
+
+    test "unsaved edits survive recurring patches and sibling form events", %{conn: conn} do
+      {:ok, lv, _html} = live(conn, ~p"/operators/settings")
+
+      lv
+      |> element("#name_bank_form")
+      |> render_change(%{"name_bank" => %{"names" => "DRAFTY\nONE"}})
+
+      send(lv.pid, :refresh_name_bank)
+
+      lv
+      |> element("#account_token_form")
+      |> render_change(%{"operator" => %{"account_token" => "X"}})
+
+      assert lv |> element("#name_bank_form textarea") |> render() =~ "DRAFTY\nONE"
+    end
+  end
 end
