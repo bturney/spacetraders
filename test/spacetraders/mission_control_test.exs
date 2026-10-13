@@ -386,6 +386,61 @@ defmodule SpaceTraders.MissionControlTest do
     assert id == condition.id
   end
 
+  test "history projections answer only the deployment Operator; a legacy identity selects nothing" do
+    deployment_scope = Scope.for_operator(operator_fixture())
+    legacy = legacy_operator_fixture()
+    legacy_scope = Scope.for_operator(legacy)
+    alias SpaceTraders.FleetGeneration.Generation
+    alias SpaceTraders.FleetStrategy.{Revision, Strategy}
+
+    strategy = Repo.insert!(%Strategy{operator_id: legacy.id, revision_number: 1})
+
+    revision =
+      Repo.insert!(%Revision{
+        fleet_strategy_id: strategy.id,
+        number: 1,
+        document: %{},
+        source: "operator",
+        activated_at: DateTime.utc_now(:second)
+      })
+
+    generation =
+      Repo.insert!(%Generation{
+        operator_id: legacy.id,
+        fleet_strategy_revision_id: revision.id,
+        number: 1,
+        symbol: "LEGACYHIST",
+        faction: "COSMIC",
+        replacement_symbols: %{},
+        retired_at: DateTime.utc_now()
+      })
+
+    episode =
+      Repo.insert!(%StrategyDecisionEpisode{
+        operator_id: legacy.id,
+        fleet_generation_id: generation.id,
+        fleet_strategy_revision_id: revision.id,
+        source_version: 0,
+        calibration_version: "market-v1"
+      })
+
+    {:ok, _condition} =
+      SpaceTraders.OperatorConditions.raise(legacy_scope, "legacy", :attention, "Legacy note")
+
+    assert MissionControl.activity(legacy_scope) == []
+    assert MissionControl.generation_recaps(legacy_scope) == []
+    assert MissionControl.decision_episode(legacy_scope, episode.id) == nil
+    assert MissionControl.decision_episode_comparison(legacy_scope) == []
+
+    # The retained legacy rows keep their original attribution.
+    assert Repo.get!(StrategyDecisionEpisode, episode.id).fleet_generation_id == generation.id
+
+    refute Enum.any?(
+             MissionControl.activity(deployment_scope),
+             &(&1[:decision_episode_id] == episode.id)
+           )
+  end
+
   describe "strategy/1" do
     test "compares a draft with the active revision and projects governed planning consequences" do
       operator = operator_fixture()
