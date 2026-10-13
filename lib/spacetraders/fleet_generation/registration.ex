@@ -24,7 +24,6 @@ defmodule SpaceTraders.FleetGeneration.Registration do
   import Ecto.Query
 
   alias SpaceTraders.API.Model.Agent, as: GameAgent
-  alias SpaceTraders.API.OperationInventory
   alias SpaceTraders.{Evidence, MutationAttempts, Repo}
   alias SpaceTraders.MutationAttempts.Attempt
 
@@ -42,6 +41,12 @@ defmodule SpaceTraders.FleetGeneration.Registration do
   If the holder dies, its connection closes and the lock is released.
   """
   def with_authority(fun) when is_function(fun, 0) do
+    if Repo.in_transaction?(),
+      do: {:error, :registration_commit_boundary_required},
+      else: checkout_authority(fun)
+  end
+
+  defp checkout_authority(fun) do
     Repo.checkout(
       fn ->
         Repo.query!("SELECT pg_advisory_lock(hashtextextended($1, 0))", [@authority_key],
@@ -141,34 +146,6 @@ defmodule SpaceTraders.FleetGeneration.Registration do
   @doc "The registered Agent symbol an attempt asked for."
   def symbol(%Attempt{prepared_evidence: evidence}),
     do: get_in(evidence, ["request", "body", "symbol"])
-
-  @doc "Prepares one candidate's registration and commits it before dispatch."
-  def prepare(symbol, faction, email, replacement_symbols) do
-    MutationAttempts.prepare(OperationInventory.fetch!("register"), "/register",
-      json: %{"symbol" => symbol, "faction" => faction, "email" => email},
-      registration: %{"faction" => faction, "replacement_symbols" => replacement_symbols}
-    )
-  end
-
-  @doc """
-  Marks a prepared registration as sent, immediately before transport.
-
-  An attempt already marked `not_sent` by a later establishment holder is
-  refused, so an abandoned registration can never be dispatched afterwards.
-  """
-  def admit_send(%Attempt{id: id}) do
-    Repo.transaction(fn ->
-      current = Repo.one!(from(a in Attempt, where: a.id == ^id, lock: "FOR UPDATE"))
-
-      with "prepared" <- current.state,
-           {:ok, admitted} <- MutationAttempts.mark_sent_or_unknown(current) do
-        admitted
-      else
-        state when is_binary(state) -> Repo.rollback(:attempt_already_dispatched)
-        {:error, reason} -> Repo.rollback(reason)
-      end
-    end)
-  end
 
   @doc "Records suppression of a prepared registration that never reached transport."
   def settle_undispatched(%Attempt{id: id}) do

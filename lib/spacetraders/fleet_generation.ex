@@ -463,7 +463,21 @@ defmodule SpaceTraders.FleetGeneration do
       revision = active_revision(operator_id)
 
       SpaceTraders.Observability.with_context(
-        [operator_id: operator_id, strategy_revision_id: revision && revision.id],
+        # Registration establishes a new identity. The reset-detecting call's
+        # Agent/Generation/Ship context must not look like an adoption link or
+        # attribute this attempt to the predecessor's gameplay work.
+        [
+          operator_id: operator_id,
+          strategy_revision_id: revision && revision.id,
+          agent_id: nil,
+          fleet_generation_id: nil,
+          decision_episode_id: nil,
+          commitment_id: nil,
+          ship_id: nil,
+          ship_symbol: nil,
+          intent_id: nil,
+          mutation_attempt_id: nil
+        ],
         fn -> register_first_available(scope, plan, plan.registration_symbols) end
       )
     end
@@ -950,35 +964,37 @@ defmodule SpaceTraders.FleetGeneration do
 
   # Only a proven rejection of the symbol advances to the next candidate.
   defp register_first_available(scope, plan, [symbol | rest]) do
-    case Registration.prepare(symbol, plan.faction, plan.operator.email, plan.replacement_symbols) do
-      {:ok, attempt} ->
-        case SpaceTraders.API.register(
-               plan.account_token,
-               symbol,
-               plan.faction,
-               plan.operator.email,
-               registration_attempt: attempt
-             ) do
-          {:ok, _registration} ->
-            adopt_registration(scope, attempt)
-
-          {:error, %GameplayError{code: 4103}} when rest != [] ->
-            register_first_available(scope, plan, rest)
-
-          {:error, _reason} = error ->
-            :ok = Registration.settle_undispatched(attempt)
-
-            case Registration.recovery(plan.operator.id) do
-              %{status: :clear} -> error
-              _pending -> {:error, :registration_unresolved}
-            end
+    case SpaceTraders.API.register(
+           plan.account_token,
+           symbol,
+           plan.faction,
+           plan.operator.email,
+           registration: %{
+             "faction" => plan.faction,
+             "replacement_symbols" => plan.replacement_symbols
+           }
+         ) do
+      {:ok, _registration} ->
+        case Registration.recovery(plan.operator.id) do
+          %{status: :awaiting_adoption, attempt: attempt} -> adopt_registration(scope, attempt)
+          _ -> {:error, :registration_unresolved}
         end
 
-      {:error, {:safety_fenced, _attempt_ids}} ->
-        {:error, :registration_unresolved}
+      {:error, %GameplayError{code: 4103}} when rest != [] ->
+        register_first_available(scope, plan, rest)
 
       {:error, _reason} = error ->
-        error
+        case Registration.recovery(plan.operator.id) do
+          %{status: :in_progress, attempt: attempt} ->
+            :ok = Registration.settle_undispatched(attempt)
+            error
+
+          %{status: :clear} ->
+            error
+
+          _pending ->
+            {:error, :registration_unresolved}
+        end
     end
   end
 

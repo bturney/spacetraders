@@ -504,7 +504,9 @@ defmodule SpaceTraders.MutationAttempts do
         |> Ecto.Changeset.change(
           Keyword.merge(attempt_changes, state: Atom.to_string(classification))
         )
-        |> Repo.update!()
+        # Ecto SQL diagnostics inspect the original custom-type parameter,
+        # even though SpaceTraders.Secret dumps encrypted ciphertext.
+        |> Repo.update!(log: not Keyword.has_key?(attempt_changes, :recovery_credential))
 
       %Outcome{
         mutation_attempt_id: attempt.id,

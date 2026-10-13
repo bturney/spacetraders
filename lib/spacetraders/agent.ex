@@ -240,7 +240,8 @@ defmodule SpaceTraders.Agent do
       |> Ecto.Changeset.put_change(:headquarters, game_agent.headquarters)
       |> Ecto.Changeset.put_change(:agent_token, agent_token)
       |> Ecto.Changeset.put_change(:operator_id, operator.id)
-      |> Repo.insert()
+      # SQL diagnostics show custom-type input before encryption.
+      |> Repo.insert(log: false)
 
     if match?({:ok, _agent}, result),
       do: SpaceTraders.EmergencyStopAdmission.track_credential(operator.id, agent_token)

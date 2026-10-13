@@ -260,6 +260,7 @@ defmodule SpaceTradersWeb.OperatorLive.MintTest do
       result = lv |> form("#mint_form", @mint_form) |> render_submit()
 
       assert result =~ "The registration outcome is still unknown"
+      refute result =~ "No Agent was registered."
       assert result =~ "Registration of MINER1 may have succeeded"
       refute has_element?(lv, "#mint_form")
       assert has_element?(lv, "#reconcile-registration")
@@ -272,6 +273,8 @@ defmodule SpaceTradersWeb.OperatorLive.MintTest do
       assert render(reloaded) =~ "Registration of MINER1 may have succeeded"
       {:ok, _mission_control, html} = live(conn, ~p"/mission-control")
       assert html =~ "Registration of MINER1 may have succeeded"
+      assert html =~ "Reconcile registration"
+      refute html =~ "Mint or import an Agent to establish the Fleet."
 
       Req.Test.stub(SpaceTraders.API, fn conn ->
         send(parent, {:game_request, conn.method, conn.request_path})

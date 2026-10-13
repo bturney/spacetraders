@@ -201,6 +201,250 @@ defmodule SpaceTraders.RegistrationRecoveryTest do
                  FleetGeneration.adopt_registered_agent(scope, "LOST_SECRET", true)
                end)
     end
+
+    test "missing capacity or runtime authority leaves the same unresolved attempt", %{
+      scope: scope
+    } do
+      assert {:error, :registration_unresolved} =
+               in_session(fn -> FleetGeneration.mint(scope, mint("ORBITALIST")) end)
+
+      assert_received {:game_request, "POST", "/v2/register", "ORBITALIST"}
+      recovery = FleetGeneration.registration_recovery(scope)
+
+      :ok = Supervisor.terminate_child(SpaceTraders.Supervisor, SpaceTraders.API.CapacityGovernor)
+
+      try do
+        assert {:error, :registration_unresolved} =
+                 in_session(fn -> FleetGeneration.reconcile_registration(scope) end)
+
+        assert FleetGeneration.registration_recovery(scope) == recovery
+        refute_received {:game_request, _, _, _}
+      after
+        {:ok, _} =
+          Supervisor.restart_child(SpaceTraders.Supervisor, SpaceTraders.API.CapacityGovernor)
+      end
+
+      previous = Application.get_env(:spacetraders, SpaceTraders.RuntimeAuthority)
+      Application.put_env(:spacetraders, SpaceTraders.RuntimeAuthority, enabled: true)
+
+      try do
+        assert {:error, :runtime_authority_unavailable} =
+                 in_session(fn -> FleetGeneration.reconcile_registration(scope) end)
+
+        assert {:error, :runtime_authority_unavailable} =
+                 in_session(fn -> FleetGeneration.mint(scope, mint("PARALLAX")) end)
+
+        assert FleetGeneration.registration_recovery(scope) == recovery
+        refute_received {:game_request, _, _, _}
+      after
+        if previous,
+          do: Application.put_env(:spacetraders, SpaceTraders.RuntimeAuthority, previous),
+          else: Application.delete_env(:spacetraders, SpaceTraders.RuntimeAuthority)
+      end
+    end
+
+    test "Emergency Stop permits identity reconciliation but suppresses minting and the adopted token's mutations",
+         %{scope: scope} do
+      assert {:error, :registration_unresolved} =
+               in_session(fn -> FleetGeneration.mint(scope, mint("ORBITALIST")) end)
+
+      assert_received {:game_request, "POST", "/v2/register", "ORBITALIST"}
+      assert {:ok, stopped} = SpaceTraders.FleetStrategy.engage_emergency_stop(scope)
+
+      assert {:error, :emergency_stopped} =
+               in_session(fn -> FleetGeneration.mint(scope, mint("PARALLAX")) end)
+
+      refute_received {:game_request, _, _, _}
+
+      game(fn conn ->
+        case conn.request_path do
+          "/v2/my/agent" ->
+            Req.Test.json(conn, my_agent("ORBITALIST"))
+
+          "/v2/my/ships" ->
+            Req.Test.json(conn, %{
+              "data" => [ship("ORBITALIST-1")],
+              "meta" => %{"total" => 1, "page" => 1, "limit" => 20}
+            })
+        end
+      end)
+
+      assert {:ok, %{agent: adopted}} =
+               in_session(fn ->
+                 FleetGeneration.adopt_registered_agent(scope, "RECOVERED_SECRET", true)
+               end)
+
+      assert adopted.symbol == "ORBITALIST"
+
+      assert SpaceTraders.FleetStrategy.get(scope).emergency_stopped_at ==
+               stopped.emergency_stopped_at
+
+      assert {:error, :emergency_stopped} =
+               in_session(fn ->
+                 SpaceTraders.API.accept_contract(
+                   SpaceTraders.API.AgentTokenReference.new(adopted),
+                   "c1"
+                 )
+               end)
+
+      refute_received {:game_request, "POST", _, _}
+    end
+  end
+
+  test "a success response without its AgentToken remains unresolved across sessions", %{
+    scope: scope
+  } do
+    game(fn conn ->
+      response = registration("ORBITALIST", "UNRETAINED_SECRET")
+      Req.Test.json(conn, update_in(response, ["data"], &Map.delete(&1, "token")))
+    end)
+
+    assert {:error, :registration_unresolved} =
+             in_session(fn -> FleetGeneration.mint(scope, mint("ORBITALIST")) end)
+
+    assert_received {:game_request, "POST", "/v2/register", "ORBITALIST"}
+
+    assert %{status: :unresolved, symbol: "ORBITALIST"} =
+             FleetGeneration.registration_recovery(scope)
+
+    assert {:error, :registration_unresolved} =
+             in_session(fn -> FleetGeneration.mint(scope, mint("PARALLAX")) end)
+
+    refute_received {:game_request, _, _, _}
+    assert agents(scope) == []
+  end
+
+  test "registration credentials stay out of debug SQL logs as well as public recovery", %{
+    scope: scope
+  } do
+    game(fn conn -> Req.Test.json(conn, registration("ORBITALIST", "DEBUG_AGENT_SECRET")) end)
+    previous_level = Logger.level()
+    Logger.configure(level: :debug)
+
+    try do
+      log =
+        ExUnit.CaptureLog.capture_log([level: :debug], fn ->
+          assert {:ok, %{agent: %{symbol: "ORBITALIST"}}} =
+                   in_session(fn -> FleetGeneration.mint(scope, mint("ORBITALIST")) end)
+        end)
+
+      refute log =~ "DEBUG_AGENT_SECRET"
+      refute log =~ "ACCOUNT_SECRET"
+      refute inspect(FleetGeneration.registration_recovery(scope)) =~ "DEBUG_AGENT_SECRET"
+    after
+      Logger.configure(level: previous_level)
+    end
+  end
+
+  test "a caller transaction cannot dispatch registration with rollbackable recovery evidence", %{
+    scope: scope
+  } do
+    game(fn conn -> Req.Test.json(conn, registration("ORBITALIST", "FIRST_SECRET")) end)
+
+    assert {:error, :caller_interrupted} =
+             in_session(fn ->
+               Repo.transaction(fn ->
+                 assert {:error, :registration_commit_boundary_required} =
+                          FleetGeneration.mint(scope, mint("ORBITALIST"))
+
+                 Repo.rollback(:caller_interrupted)
+               end)
+             end)
+
+    refute_received {:game_request, _, _, _}
+    assert %{status: :clear} = FleetGeneration.registration_recovery(scope)
+    assert agents(scope) == []
+
+    assert {:ok, %{agent: %{symbol: "ORBITALIST"}}} =
+             in_session(fn -> FleetGeneration.mint(scope, mint("ORBITALIST")) end)
+
+    assert_received {:game_request, "POST", "/v2/register", "ORBITALIST"}
+    refute_received {:game_request, _, _, _}
+  end
+
+  test "only proven rejection advances a candidate and retains the exact rejection evidence", %{
+    scope: scope
+  } do
+    game(fn conn ->
+      case conn.body_params["symbol"] do
+        "ORBITALIST" ->
+          conn
+          |> Plug.Conn.put_status(409)
+          |> Req.Test.json(%{
+            "error" => %{"code" => 4103, "message" => "Symbol is taken"}
+          })
+
+        "PARALLAX" ->
+          Req.Test.json(conn, registration("PARALLAX", "SECOND_SECRET"))
+      end
+    end)
+
+    assert {:ok, %{agent: %{symbol: "PARALLAX"}}} =
+             in_session(fn ->
+               FleetGeneration.mint(scope, %{
+                 symbol: "ORBITALIST",
+                 faction: "COSMIC",
+                 replacement_symbols: ["ORBITALIST", "PARALLAX"]
+               })
+             end)
+
+    assert_received {:game_request, "POST", "/v2/register", "ORBITALIST"}
+    assert_received {:game_request, "POST", "/v2/register", "PARALLAX"}
+    refute_received {:game_request, _, _, _}
+
+    [rejection] =
+      Repo.all(
+        from o in Outcome,
+          join: a in Attempt,
+          on: a.id == o.mutation_attempt_id,
+          where: a.operator_id == ^scope.operator.id and o.classification == "rejected",
+          select: o.evidence
+      )
+
+    assert rejection == %{
+             "status" => 409,
+             "response" => %{
+               "error" => %{"code" => 4103, "message" => "Symbol is taken"}
+             }
+           }
+
+    assert [generation] = FleetGeneration.list_generations(scope)
+    assert generation.replacement_symbols == %{"symbols" => ["ORBITALIST", "PARALLAX"]}
+  end
+
+  test "death before dispatch preserves preparation and permits exactly one later registration",
+       %{scope: scope} do
+    game(fn conn -> Req.Test.json(conn, registration("ORBITALIST", "FIRST_SECRET")) end)
+
+    dependency =
+      SpaceTraders.SafetyFence.DependencyKey.agent_symbol(scope.operator.id, "ORBITALIST")
+
+    holder =
+      hold(fn ->
+        Repo.query!("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [dependency])
+      end)
+
+    minting = killable(fn -> FleetGeneration.mint(scope, mint("ORBITALIST")) end)
+    await_blocked_by(minting.backend, holder.backend)
+
+    assert %{status: :in_progress, attempt_id: attempt_id, symbol: "ORBITALIST"} =
+             FleetGeneration.registration_recovery(scope)
+
+    refute_received {:game_request, _, _, _}
+    assert {:disconnected, _log} = RuntimeDeath.kill(minting.pid, minting.backend)
+    release(holder)
+
+    assert {:ok, %{agent: %{symbol: "ORBITALIST"}}} =
+             in_session(fn -> FleetGeneration.mint(scope, mint("ORBITALIST")) end)
+
+    assert_received {:game_request, "POST", "/v2/register", "ORBITALIST"}
+    refute_received {:game_request, _, _, _}
+
+    assert %{
+             state: "not_sent",
+             prepared_evidence: %{"request" => %{"body" => %{"symbol" => "ORBITALIST"}}}
+           } =
+             Repo.get!(Attempt, attempt_id)
   end
 
   describe "a successful registration" do
@@ -223,6 +467,40 @@ defmodule SpaceTraders.RegistrationRecoveryTest do
       %{operator: operator}
     end
 
+    test "death after dispatch releases establishment authority but preserves uncertainty for a queued mint",
+         %{scope: scope} do
+      minting = killable(fn -> FleetGeneration.mint(scope, mint("ORBITALIST")) end)
+      assert_receive {:registering, _request}, 2000
+      assert_received {:game_request, "POST", "/v2/register", "ORBITALIST"}
+
+      # The independent observer sees committed sent-or-unknown while the
+      # response is still held at the game boundary.
+      assert %{status: :unresolved, attempt_id: attempt_id, symbol: "ORBITALIST"} =
+               FleetGeneration.registration_recovery(scope)
+
+      contender = contender(fn -> FleetGeneration.mint(scope, mint("PARALLAX")) end)
+      await_blocked_by(contender.backend, minting.backend)
+      assert {:disconnected, _log} = RuntimeDeath.kill(minting.pid, minting.backend)
+      assert {:error, :registration_unresolved} = Task.await(contender.task, 10_000)
+
+      # Application reconstruction and a new request reuse PostgreSQL truth;
+      # no admission queue, cached response or surviving sender is required.
+      restart_capacity_governor()
+      assert {:ok, %{state: :empty}} = FleetGeneration.adopt_current_fleet()
+
+      assert %{status: :unresolved, attempt_id: ^attempt_id, symbol: "ORBITALIST"} =
+               FleetGeneration.registration_recovery(scope)
+
+      assert %{status: :unresolved, attempt_id: ^attempt_id} =
+               SpaceTraders.MissionControl.overview(scope).registration_recovery
+
+      assert {:error, :registration_unresolved} =
+               in_session(fn -> FleetGeneration.import_agent(scope, "OTHER_SECRET", true) end)
+
+      refute_received {:game_request, _, _, _}
+      assert agents(scope) == []
+    end
+
     test "followed by interrupted local persistence recovers the same identity after restart",
          %{scope: scope, operator: operator} do
       minting = killable(fn -> FleetGeneration.mint(scope, mint("ORBITALIST")) end)
@@ -240,9 +518,12 @@ defmodule SpaceTraders.RegistrationRecoveryTest do
       assert %{status: :awaiting_adoption, symbol: "ORBITALIST"} =
                FleetGeneration.registration_recovery(scope)
 
+      assert %{status: :awaiting_adoption, symbol: "ORBITALIST"} =
+               SpaceTraders.MissionControl.overview(scope).registration_recovery
+
       assert agents(scope) == []
       assert {:ok, %{state: :empty}} = FleetGeneration.current_fleet(scope)
-      assert_credential_secret("FIRST_SECRET")
+      assert_credential_secret(scope, "FIRST_SECRET")
 
       # Restarted setup resumes adoption instead of registering PARALLAX.
       assert {:ok, %{agent: recovered}} =
@@ -253,7 +534,7 @@ defmodule SpaceTraders.RegistrationRecoveryTest do
       assert [%{symbol: "ORBITALIST", agent_token: "FIRST_SECRET"}] = agents(scope)
       assert ["ORBITALIST-1"] = ship_symbols(recovered)
       assert %{status: :clear} = FleetGeneration.registration_recovery(scope)
-      assert recovery_credentials() == []
+      assert recovery_credentials(scope) == []
     end
 
     test "followed by interrupted bootstrap recovers the same identity", %{scope: scope} do
@@ -297,23 +578,36 @@ defmodule SpaceTraders.RegistrationRecoveryTest do
     )
   end
 
-  defp recovery_credentials do
+  defp recovery_credentials(scope) do
     Repo.all(
       from(a in "mutation_attempts",
-        where: not is_nil(a.recovery_credential_ciphertext),
+        where:
+          a.operator_id == ^scope.operator.id and not is_nil(a.recovery_credential_ciphertext),
         select: a.recovery_credential_ciphertext
       )
     )
   end
 
   # The pending AgentToken is durable, encrypted at rest and absent from evidence.
-  defp assert_credential_secret(token) do
-    assert [ciphertext] = recovery_credentials()
+  defp assert_credential_secret(scope, token) do
+    assert [ciphertext] = recovery_credentials(scope)
     refute ciphertext =~ token
 
     evidence =
-      Repo.all(from(o in "mutation_attempt_outcomes", select: o.evidence)) ++
-        Repo.all(from(a in "mutation_attempts", select: a.prepared_evidence))
+      Repo.all(
+        from(o in Outcome,
+          join: a in Attempt,
+          on: a.id == o.mutation_attempt_id,
+          where: a.operator_id == ^scope.operator.id,
+          select: o.evidence
+        )
+      ) ++
+        Repo.all(
+          from(a in Attempt,
+            where: a.operator_id == ^scope.operator.id,
+            select: a.prepared_evidence
+          )
+        )
 
     refute inspect(evidence) =~ token
   end
@@ -355,8 +649,36 @@ defmodule SpaceTraders.RegistrationRecoveryTest do
 
     Req.Test.allow(SpaceTraders.API, self(), pid)
     send(pid, :go)
-    assert_receive {:backend, ^ref, backend}
+    assert_receive {:backend, ^ref, backend}, 2000
+
+    on_exit(fn ->
+      if Process.alive?(pid), do: RuntimeDeath.kill(pid, backend)
+    end)
+
     %{pid: pid, backend: backend}
+  end
+
+  defp contender(fun) do
+    parent = self()
+    ref = make_ref()
+
+    task =
+      Task.async(fn ->
+        receive do
+          :go -> :ok
+        end
+
+        Repo.checkout(fn ->
+          [[backend]] = Repo.query!("SELECT pg_backend_pid()").rows
+          send(parent, {:backend, ref, backend})
+          fun.()
+        end)
+      end)
+
+    Req.Test.allow(SpaceTraders.API, self(), task.pid)
+    send(task.pid, :go)
+    assert_receive {:backend, ^ref, backend}, 2000
+    %{task: task, backend: backend}
   end
 
   defp hold_operator_row(operator) do

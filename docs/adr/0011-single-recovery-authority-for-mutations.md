@@ -54,5 +54,12 @@ proven success keeps its AgentToken encrypted on the attempt until adoption
 links the attempt to its Generation, so an interrupted adoption resumes the
 same identity rather than minting again.
 
+Registration admission remains in the API adapter; Fleet Generation owns
+establishment serialization, reconciliation and adoption. The owner rejects
+caller transactions so dispatch evidence cannot roll back after the game
+accepted a request. Mission Control reconstructs recovery from the attempt even
+when the sender died before publishing its Operator-facing condition. SQL
+diagnostics omit writes containing the credential's plaintext custom-type input.
+
 Related: [ADR 0010](0010-autonomous-runtime.md) assigns each mutation exactly
 one owner; this record assigns each mutation exactly one recovery record.

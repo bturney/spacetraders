@@ -30,6 +30,7 @@ defmodule SpaceTraders.API do
   """
 
   require Logger
+  import Ecto.Query, only: [from: 2]
 
   alias SpaceTraders.API.RateLimiter
   alias SpaceTraders.API.CapacityGovernor
@@ -90,7 +91,8 @@ defmodule SpaceTraders.API do
   @spec register(account_token(), String.t(), String.t(), String.t()) :: result()
   def register(account_token, symbol, faction, email, opts \\ []) do
     request_with_token(:post, "/register", account_token,
-      registration_attempt: opts[:registration_attempt],
+      registration: opts[:registration],
+      retry: false,
       json:
         RegisterRequest.new(%{symbol: symbol, faction: faction, email: email})
         |> RegisterRequest.to_json(),
@@ -513,7 +515,16 @@ defmodule SpaceTraders.API do
       {:ok, %{status: status, body: body} = response} when status in 400..499 ->
         emit_request_metric(operation, path, status)
 
-        case record_mutation_outcome(attempt, :rejected, %{status: status}) do
+        evidence =
+          case attempt do
+            %Attempt{operation_id: "register"} ->
+              %{status: status, response: SpaceTraders.Observability.redact(body, token)}
+
+            _ ->
+              %{status: status}
+          end
+
+        case record_mutation_outcome(attempt, :rejected, evidence) do
           :ok ->
             case mutation_authorized_after_response(status, method, token) do
               :ok ->
@@ -652,7 +663,7 @@ defmodule SpaceTraders.API do
   end
 
   defp prepare_mutation_attempt(operation, path, opts) do
-    case opts[:recorded_attempt] || opts[:registration_attempt] do
+    case opts[:recorded_attempt] do
       %Attempt{} = attempt -> {:ok, attempt}
       nil -> MutationAttempts.prepare(operation, path, opts)
     end
@@ -672,8 +683,22 @@ defmodule SpaceTraders.API do
   defp mark_mutation_sent(%Attempt{operation_id: "purchase-ship"} = attempt),
     do: FleetAcquisition.admit_send(attempt)
 
-  defp mark_mutation_sent(%Attempt{operation_id: "register"} = attempt),
-    do: SpaceTraders.FleetGeneration.Registration.admit_send(attempt)
+  # Admission belongs to the transport adapter, not the lifecycle owner.
+  # Both prepare and sent-or-unknown commit before the HTTP request. Re-read
+  # under lock so an abandoned/non-prepared attempt can never dispatch.
+  defp mark_mutation_sent(%Attempt{operation_id: "register", id: id}) do
+    Repo.transaction(fn ->
+      current = Repo.one!(from(a in Attempt, where: a.id == ^id, lock: "FOR UPDATE"))
+
+      with "prepared" <- current.state,
+           {:ok, admitted} <- MutationAttempts.mark_sent_or_unknown(current) do
+        admitted
+      else
+        state when is_binary(state) -> Repo.rollback(:attempt_already_dispatched)
+        {:error, reason} -> Repo.rollback(reason)
+      end
+    end)
+  end
 
   defp mark_mutation_sent(attempt), do: MutationAttempts.mark_sent_or_unknown(attempt)
 
@@ -700,20 +725,40 @@ defmodule SpaceTraders.API do
   defp record_success(
          %Attempt{operation_id: "register"} = attempt,
          evidence,
-         %{token: token} = decoded
+         %{token: token, agent: %Agent{} = agent, ships: ships} = decoded
        )
-       when is_binary(token) and token != "" do
-    evidence =
-      Map.merge(evidence, SpaceTraders.FleetGeneration.Registration.success_evidence(decoded))
+       when is_binary(token) and token != "" and is_list(ships) do
+    case SpaceTraders.FleetGeneration.Registration.intended_identity(attempt, agent) do
+      :ok ->
+        evidence =
+          Map.merge(evidence, SpaceTraders.FleetGeneration.Registration.success_evidence(decoded))
 
-    case MutationAttempts.record_registration_success(attempt, evidence, token) do
-      {:ok, _attempt} -> :ok
-      {:error, reason} -> {:error, reason}
+        case MutationAttempts.record_registration_success(attempt, evidence, token) do
+          {:ok, _attempt} -> :ok
+          {:error, reason} -> {:error, reason}
+        end
+
+      {:error, _} ->
+        record_incomplete_registration(attempt, evidence)
     end
   end
 
+  defp record_success(%Attempt{operation_id: "register"} = attempt, evidence, _decoded),
+    do: record_incomplete_registration(attempt, evidence)
+
   defp record_success(attempt, evidence, _decoded),
     do: record_mutation_outcome(attempt, :succeeded, evidence)
+
+  defp record_incomplete_registration(attempt, evidence) do
+    case record_mutation_outcome(
+           attempt,
+           :ambiguous,
+           Map.put(evidence, :reason, "registration_response_incomplete_or_mismatched")
+         ) do
+      :ok -> {:error, :registration_response_incomplete}
+      error -> error
+    end
+  end
 
   defp record_mutation_outcome(nil, _classification, _evidence), do: :ok
 

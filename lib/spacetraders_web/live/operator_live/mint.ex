@@ -275,7 +275,7 @@ defmodule SpaceTradersWeb.OperatorLive.Mint do
   end
 
   defp recovery_error(:registration_unresolved),
-    do: "The registration outcome is still unknown. No Agent was registered."
+    do: "The registration outcome is still unknown. No additional registration was dispatched."
 
   defp recovery_error(:registration_identity_mismatch),
     do: "That AgentToken does not authenticate as the registered symbol. Nothing was adopted."

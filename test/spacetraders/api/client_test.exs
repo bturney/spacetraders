@@ -313,7 +313,16 @@ defmodule SpaceTraders.API.ClientTest do
         send(test_pid, :mutation_dispatched)
 
         receive do
-          :respond -> Req.Test.json(conn, %{"data" => %{}})
+          :respond ->
+            Req.Test.json(conn, %{
+              "data" => %{
+                "token" => "AGENT_TOKEN",
+                "agent" => %{"symbol" => "ORBITALIST", "credits" => 175_000},
+                "faction" => %{"symbol" => "COSMIC"},
+                "contract" => %{"id" => "c1"},
+                "ships" => [%{"symbol" => "ORBITALIST-1"}]
+              }
+            })
         end
       end)
 
