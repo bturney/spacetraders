@@ -540,7 +540,22 @@ defmodule SpaceTradersWeb.MissionControlBriefingTest do
 
     test "same-name replacement presents the distinct successor Generation",
          %{conn: conn, scope: scope} do
-      mint_fleet(scope)
+      {predecessor, _} = mint_fleet(scope)
+
+      old_waypoint =
+        SpaceTraders.API.Model.Waypoint.from_json(%{
+          "symbol" => "X1-UX81-OLD",
+          "systemSymbol" => "X1-UX81",
+          "type" => "PLANET",
+          "x" => 0,
+          "y" => 0
+        })
+
+      {:ok, _} =
+        SpaceTraders.Intelligence.observe_waypoint(predecessor, old_waypoint,
+          source: "get_waypoint"
+        )
+
       Req.Test.stub(SpaceTraders.API, &reset_then_same_name/1)
 
       {:ok, view, _html} = live(conn, ~p"/mission-control")
@@ -558,6 +573,95 @@ defmodule SpaceTradersWeb.MissionControlBriefingTest do
                "#generation-replacement",
                "Replaced Generation 1 (#{@symbol}) after a Server Reset."
              )
+
+      {:ok, %{agent: successor}} = FleetGeneration.current_fleet(scope)
+
+      new_waypoint =
+        SpaceTraders.API.Model.Waypoint.from_json(%{
+          "symbol" => "X1-UX81-NEW",
+          "systemSymbol" => "X1-UX81",
+          "type" => "JUMP_GATE",
+          "x" => 1,
+          "y" => 2
+        })
+
+      {:ok, _} =
+        SpaceTraders.Intelligence.observe_waypoint(successor, new_waypoint,
+          source: "get_waypoint"
+        )
+
+      # World resolves the same new identity, even though its symbol was reused.
+      {:ok, world, _} = live(conn, ~p"/world")
+      assert has_element?(world, "#world-waypoint-X1-UX81-NEW")
+      refute has_element?(world, "#world-waypoint-X1-UX81-OLD")
+    end
+
+    test "a lost replacement response exposes authenticated reconciliation rather than another mint",
+         %{conn: conn, scope: scope} do
+      {predecessor, _} = mint_fleet(scope)
+      parent = self()
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case conn.method do
+          "POST" ->
+            send(parent, {:register, conn.body_params["symbol"]})
+            Req.Test.transport_error(conn, :timeout)
+
+          "GET" ->
+            reset_mismatch(conn)
+        end
+      end)
+
+      {:ok, view, _} = live(conn, ~p"/mission-control")
+      assert_received {:register, @symbol}
+      refute_received {:register, _}
+
+      assert has_element?(
+               view,
+               "#mission-registration-recovery",
+               "Registration of #{@symbol} may have succeeded"
+             )
+
+      assert has_element?(
+               view,
+               "#mission-registration-recovery a[href='/agents/new']",
+               "Reconcile registration"
+             )
+
+      refute has_element?(view, "#retry-reset-replacement")
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        assert conn.method == "GET"
+        assert Plug.Conn.get_req_header(conn, "authorization") == ["Bearer RECOVERED_TOKEN"]
+        fleet_api(conn, @symbol)
+      end)
+
+      {:ok, recovery, _} = live(conn, ~p"/agents/new")
+      refute has_element?(recovery, "#mint_form")
+      assert has_element?(recovery, "#adopt_registered_form")
+
+      assert {:ok, _conn} =
+               recovery
+               |> form("#adopt_registered_form", %{
+                 "adopt" => %{"agent_token" => "RECOVERED_TOKEN", "confirmed" => "true"}
+               })
+               |> render_submit()
+               |> follow_redirect(conn, ~p"/mission-control")
+
+      {:ok, recovered, _} = live(conn, ~p"/mission-control")
+      assert has_element?(recovered, "#strategy-context", "Generation 2")
+      refute has_element?(recovered, "#mission-registration-recovery")
+
+      assert has_element?(
+               recovered,
+               "#needs-attention",
+               "No unresolved Attention or Intervention."
+             )
+
+      assert {:ok, %{state: :current, agent: successor}} = FleetGeneration.current_fleet(scope)
+      assert successor.id != predecessor.id
+      assert {:error, :stale_agent} = FleetGeneration.gameplay_authority(predecessor.id)
+      refute_received {:register, _}
     end
 
     test "Emergency Stop suppresses automatic and Operator-requested replacement",

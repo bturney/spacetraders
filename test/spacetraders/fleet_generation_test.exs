@@ -104,8 +104,18 @@ defmodule SpaceTraders.FleetGenerationTest do
     end
 
     test "same-name replacement is a distinct Generation; the predecessor and its Ships remain history",
-         %{revision: revision, agent: agent} do
+         %{scope: scope, revision: revision, agent: agent} do
       {:ok, predecessor_ship} = Fleet.owned_ship(agent, "RESETME-1")
+      [predecessor] = FleetGeneration.list_generations(scope)
+
+      assert {:ok, _} =
+               FleetGeneration.record_objective_progress(scope, predecessor.id, 0, %{
+                 "current" => 4,
+                 "target" => 10,
+                 "expected_seconds_to_target" => 500,
+                 "feasible?" => true,
+                 "evidence_id" => objective_evidence(agent).id
+               })
 
       game(fn
         %{method: "GET", request_path: "/v2/my/agent"} = conn ->
@@ -128,6 +138,13 @@ defmodule SpaceTraders.FleetGenerationTest do
       assert current.symbol == "RESETME"
       assert current.faction == "COSMIC"
       assert current.fleet_strategy_revision_id == revision.id
+      assert current.objective_progress["0"] == nil
+
+      assert %{"current" => 4} =
+               List.last(FleetGeneration.list_generations(scope)).objective_progress["0"]
+
+      assert SpaceTraders.FleetAllocation.active_generation(replacement).id == current.id
+      assert SpaceTraders.FleetAllocation.active_generation(agent) == nil
 
       # Fresh resources: the reused Ship symbol is the replacement's own Ship.
       assert {:ok, ship} = Fleet.owned_ship(replacement, "RESETME-1")
@@ -267,6 +284,41 @@ defmodule SpaceTraders.FleetGenerationTest do
 
       assert [%{kind: :intervention, summary: summary}] = OperatorConditions.unresolved(scope)
       assert summary =~ "Retry replacement"
+    end
+
+    test "recovering a lost replacement response clears earlier replacement Interventions",
+         %{scope: scope, agent: agent} do
+      {:ok, _} = SpaceTraders.AgentNameBank.save(["ORBITALIST"])
+
+      game(fn
+        %{method: "GET"} = conn -> reset_mismatch(conn)
+        %{method: "POST"} = conn -> symbol_unavailable(conn)
+      end)
+
+      assert {:error, :stale_agent} = FleetGeneration.agent_overview(agent)
+      assert [%{key: "replacement-symbols"}] = OperatorConditions.unresolved(scope)
+      assert registrations() == [{"RESETME", "COSMIC"}, {"ORBITALIST", "COSMIC"}]
+
+      game(fn conn -> Req.Test.transport_error(conn, :timeout) end)
+      assert {:error, :registration_unresolved} = FleetGeneration.replace_after_reset(scope)
+      assert registrations() == [{"RESETME", "COSMIC"}]
+
+      game(fn conn ->
+        body = registration_body("RESETME", "RESETME-1", "RECOVERED_TOKEN")["data"]
+
+        case conn.request_path do
+          "/v2/my/agent" -> Req.Test.json(conn, %{"data" => body["agent"]})
+          "/v2/my/ships" -> Req.Test.json(conn, %{"data" => body["ships"]})
+        end
+      end)
+
+      assert {:ok, %{agent: replacement}} =
+               FleetGeneration.adopt_registered_agent(scope, "RECOVERED_TOKEN", true)
+
+      assert replacement.id != agent.id
+      assert {:ok, %{state: :current}} = FleetGeneration.current_fleet(scope)
+      assert registrations() == []
+      assert OperatorConditions.unresolved(scope) == []
     end
 
     test "ordinary authentication and network failures are not Server Reset evidence",

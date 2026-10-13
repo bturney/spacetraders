@@ -204,7 +204,7 @@ defmodule SpaceTraders.FleetGeneration do
     # Controls and validation fail before queueing for the establishment
     # authority; they are checked again once it is held.
     result =
-      with {:ok, _plan} <- prepare_mint(scope, attrs, operator_id),
+      with :ok <- validate_registration(scope, attrs),
            {:ok, _identity} <- current_fleet(scope) do
         Registration.with_authority(fn ->
           mint_with_authority(scope, attrs, operator_id, states)
@@ -243,11 +243,6 @@ defmodule SpaceTraders.FleetGeneration do
           :intervention,
           "Every replacement name was definitively taken. Edit the Agent Name Bank in Settings, then retry replacement from Mission Control."
         )
-
-      {:ok, _} ->
-        OperatorConditions.resolve(scope, "replacement-authority")
-        OperatorConditions.resolve(scope, "replacement-symbols")
-        OperatorConditions.resolve(scope, "server-reset-replacement")
 
       {:error, reason} when kind == :server_reset and reason not in @replacement_handled ->
         OperatorConditions.raise(
@@ -439,7 +434,7 @@ defmodule SpaceTraders.FleetGeneration do
 
   # Adopts a proven registration from its own attempt, never from memory, so
   # an interrupted mint and its restart take the same path.
-  defp adopt_registration(%Scope{operator: %Operator{id: operator_id}}, attempt) do
+  defp adopt_registration(%Scope{operator: %Operator{id: operator_id}} = scope, attempt) do
     locked(operator_id, [:empty, :transition], fn _state ->
       with {:ok, current} <- Registration.lock_awaiting_adoption(attempt) do
         identity = Registration.registered_identity(current)
@@ -453,6 +448,19 @@ defmodule SpaceTraders.FleetGeneration do
              ) do
           {:ok, {agent, generation, _retired, _ships}} = established ->
             :ok = MutationAttempts.record_registration_adoption(current, agent.id, generation.id)
+
+            # Recovery and ordinary replacement publish the same success. Resolve
+            # prior failures in that commit so an interrupted notification cannot
+            # leave a healthy successor presented as exhausted or unadopted.
+            for key <- [
+                  "replacement-authority",
+                  "replacement-symbols",
+                  "server-reset-replacement",
+                  "registration-recovery"
+                ] do
+              :ok = OperatorConditions.resolve(scope, key, notify?: false)
+            end
+
             established
 
           error ->
@@ -478,6 +486,7 @@ defmodule SpaceTraders.FleetGeneration do
   defp finish_establishment({:ok, {agent, generation, retired_symbols, ship_symbols}}, scope) do
     Enum.each(ship_symbols, &ShipServer.stop/1)
     if generation.fleet_strategy_revision_id, do: _ = request_intelligence(agent)
+    :ok = OperatorConditions.notify(scope)
 
     :ok =
       OperatorConditions.resolve_objective_conditions(
@@ -549,15 +558,27 @@ defmodule SpaceTraders.FleetGeneration do
     end
   end
 
+  defp validate_registration(scope, attrs) do
+    changeset = Agent.changeset(%Agent{}, attrs)
+
+    with :ok <- SpaceTraders.RuntimeAuthority.execution_allowed?(),
+         :ok <- FleetStrategy.mutation_allowed?(scope),
+         :ok <- validate_mint_attrs(changeset) do
+      validate_replacement_symbols(
+        replacement_symbols(attrs, changeset),
+        get_field(changeset, :faction)
+      )
+    end
+  end
+
   defp prepare_mint(scope, attrs, operator_id) do
     changeset = Agent.changeset(%Agent{}, attrs)
     replacement_symbols = replacement_symbols(attrs, changeset)
     faction = get_field(changeset, :faction)
 
-    with :ok <- SpaceTraders.RuntimeAuthority.execution_allowed?(),
-         :ok <- FleetStrategy.mutation_allowed?(scope),
-         :ok <- validate_mint_attrs(changeset),
-         :ok <- validate_replacement_symbols(replacement_symbols, faction),
+    # Mint authority is needed only for a new request. A proven registration
+    # awaiting adoption already holds its own encrypted AgentToken.
+    with :ok <- validate_registration(scope, attrs),
          {:ok, operator, account_token} <-
            resolve_account_token(%CredentialReference{operator_id: operator_id}),
          :ok <- ensure_symbol_is_not_stale_for_another_operator(operator, replacement_symbols) do

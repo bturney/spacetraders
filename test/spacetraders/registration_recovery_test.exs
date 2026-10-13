@@ -615,6 +615,121 @@ defmodule SpaceTraders.RegistrationRecoveryTest do
       assert_sole_successor(scope, predecessor)
     end
 
+    test "a late predecessor balance retains its original Evidence and cannot update the same-name successor",
+         %{scope: scope, predecessor: predecessor} do
+      {:ok, draft} = SpaceTraders.FleetStrategy.select_preset(scope, "steady_growth")
+      {:ok, _} = SpaceTraders.FleetStrategy.activate(scope, draft.draft_version)
+      parent = self()
+
+      game(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/v2/my/agent"} ->
+            send(parent, {:balance_read, self()})
+            assert_receive :respond, 5000
+            Req.Test.json(conn, put_in(my_agent("RESETME"), ["data", "credits"], 999_999))
+
+          {"GET", "/v2/my/ships"} ->
+            reset_mismatch(conn)
+
+          {"POST", "/v2/register"} ->
+            Req.Test.json(conn, registration("RESETME", "SECOND_SECRET"))
+        end
+      end)
+
+      late = contender(fn -> FleetGeneration.agent_overview(predecessor) end)
+      assert_receive {:balance_read, read}, 2000
+
+      assert {:error, :stale_agent} =
+               in_session(fn -> SpaceTraders.Fleet.list_ships(predecessor) end)
+
+      assert_sole_successor(scope, predecessor)
+      send(read, :respond)
+      assert {:ok, %{credits: 999_999}} = Task.await(late.task, 10_000)
+
+      [successor, retired] = FleetGeneration.list_generations(scope)
+      assert successor.starting_credits == 175_000
+      assert successor.last_observed_credits == nil
+      assert successor.last_observed_evidence_id == nil
+      observation = SpaceTraders.Evidence.latest_observation(predecessor, "agent:RESETME")
+      assert observation.agent_id == predecessor.id
+      assert observation.fleet_generation_id == retired.id
+      assert get_in(observation.facts, ["response", "credits"]) == 999_999
+    end
+
+    test "capacity admission lost after reset evidence suppresses replacement until an explicit retry",
+         %{scope: scope, predecessor: predecessor} do
+      parent = self()
+
+      game(fn conn ->
+        send(parent, {:reset_read, self()})
+        assert conn.method == "GET"
+        assert_receive :respond, 5000
+        reset_mismatch(conn)
+      end)
+
+      detecting = contender(fn -> FleetGeneration.agent_overview(predecessor) end)
+      assert_receive {:reset_read, read}, 2000
+      :ok = Supervisor.terminate_child(SpaceTraders.Supervisor, SpaceTraders.API.CapacityGovernor)
+
+      try do
+        send(read, :respond)
+        assert {:error, :stale_agent} = Task.await(detecting.task, 10_000)
+        assert {:ok, %{state: :transition}} = FleetGeneration.current_fleet(scope)
+        assert_received {:game_request, "GET", "/v2/my/agent", nil}
+        refute_received {:game_request, _, _, _}
+        assert FleetGeneration.registration_recovery(scope).status == :clear
+        assert {:error, :stale_agent} = FleetGeneration.gameplay_authority(predecessor.id)
+      after
+        {:ok, _} =
+          Supervisor.restart_child(SpaceTraders.Supervisor, SpaceTraders.API.CapacityGovernor)
+      end
+
+      game(fn conn -> Req.Test.json(conn, registration("RESETME", "SECOND_SECRET")) end)
+      assert {:ok, _} = in_session(fn -> FleetGeneration.replace_after_reset(scope) end)
+      assert_received {:game_request, "POST", "/v2/register", "RESETME"}
+      refute_received {:game_request, _, _, _}
+      assert_sole_successor(scope, predecessor)
+    end
+
+    test "runtime authority lost after reset evidence suppresses replacement and survives reconstruction",
+         %{scope: scope, predecessor: predecessor} do
+      parent = self()
+
+      game(fn conn ->
+        send(parent, {:reset_read, self()})
+        assert conn.method == "GET"
+        assert_receive :respond, 5000
+        reset_mismatch(conn)
+      end)
+
+      detecting = contender(fn -> FleetGeneration.agent_overview(predecessor) end)
+      assert_receive {:reset_read, read}, 2000
+      previous = Application.get_env(:spacetraders, SpaceTraders.RuntimeAuthority)
+      Application.put_env(:spacetraders, SpaceTraders.RuntimeAuthority, enabled: true)
+
+      try do
+        send(read, :respond)
+        assert {:error, :stale_agent} = Task.await(detecting.task, 10_000)
+        assert {:ok, %{state: :transition}} = FleetGeneration.adopt_current_fleet()
+
+        assert {:error, :runtime_authority_unavailable} =
+                 in_session(fn -> FleetGeneration.resume_reset_replacement() end)
+
+        assert_received {:game_request, "GET", "/v2/my/agent", nil}
+        refute_received {:game_request, _, _, _}
+      after
+        if previous,
+          do: Application.put_env(:spacetraders, SpaceTraders.RuntimeAuthority, previous),
+          else: Application.delete_env(:spacetraders, SpaceTraders.RuntimeAuthority)
+      end
+
+      game(fn conn -> Req.Test.json(conn, registration("RESETME", "SECOND_SECRET")) end)
+      assert {:ok, _} = in_session(fn -> FleetGeneration.resume_reset_replacement() end)
+      assert_received {:game_request, "POST", "/v2/register", "RESETME"}
+      refute_received {:game_request, _, _, _}
+      assert_sole_successor(scope, predecessor)
+    end
+
     test "death before dispatch leaves the predecessor fenced; restart replaces it exactly once",
          %{scope: scope, predecessor: predecessor} do
       dependency =
@@ -650,7 +765,37 @@ defmodule SpaceTraders.RegistrationRecoveryTest do
       assert_sole_successor(scope, predecessor)
     end
 
-    test "a proven success interrupted before adoption is adopted on restart, never reminted",
+    test "death after dispatch preserves replacement uncertainty for a queued restart",
+         %{scope: scope, predecessor: predecessor} do
+      detecting = killable(fn -> FleetGeneration.agent_overview(predecessor) end)
+      assert_receive {:registering, _request}, 2000
+
+      assert %{status: :unresolved, attempt_id: attempt_id, symbol: "RESETME"} =
+               FleetGeneration.registration_recovery(scope)
+
+      restart = contender(fn -> FleetGeneration.resume_reset_replacement() end)
+      await_blocked_by(restart.backend, detecting.backend)
+      assert {:disconnected, _log} = RuntimeDeath.kill(detecting.pid, detecting.backend)
+      assert {:error, :registration_unresolved} = Task.await(restart.task, 10_000)
+
+      restart_capacity_governor()
+      assert {:ok, %{state: :transition}} = FleetGeneration.adopt_current_fleet()
+
+      assert %{status: :unresolved, attempt_id: ^attempt_id} =
+               FleetGeneration.registration_recovery(scope)
+
+      assert {:error, :registration_unresolved} =
+               in_session(fn -> FleetGeneration.resume_reset_replacement() end)
+
+      assert_received {:game_request, "GET", "/v2/my/agent", nil}
+      assert_received {:game_request, "POST", "/v2/register", "RESETME"}
+      refute_received {:game_request, _, _, _}
+      assert [%{id: id, agent_token: "FIRST_SECRET"}] = agents(scope)
+      assert id == predecessor.id
+      assert {:error, :stale_agent} = FleetGeneration.gameplay_authority(id)
+    end
+
+    test "a proven success interrupted before adoption is adopted on restart without mint authority",
          %{scope: scope, operator: operator, predecessor: predecessor} do
       detecting = killable(fn -> FleetGeneration.agent_overview(predecessor) end)
       assert_receive {:registering, request}, 2000
@@ -667,6 +812,10 @@ defmodule SpaceTraders.RegistrationRecoveryTest do
       assert {:ok, %{state: :transition}} = FleetGeneration.current_fleet(scope)
       restart_capacity_governor()
 
+      # Registration already succeeded. Its encrypted AgentToken, not renewed
+      # AccountToken mint authority, is enough to finish local adoption.
+      operator |> Ecto.Changeset.change(account_token: nil) |> Repo.update!()
+
       assert {:ok, %{agent: %{symbol: "RESETME"}}} =
                in_session(fn -> FleetGeneration.resume_reset_replacement() end)
 
@@ -676,11 +825,59 @@ defmodule SpaceTraders.RegistrationRecoveryTest do
       assert %{status: :clear} = FleetGeneration.registration_recovery(scope)
       assert_sole_successor(scope, predecessor)
     end
+
+    test "interrupted replacement bootstrap rolls back retirement and recovers the same successful identity",
+         %{scope: scope, predecessor: predecessor} do
+      parent = self()
+
+      game(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/v2/my/agent"} ->
+            reset_mismatch(conn)
+
+          {"POST", "/v2/register"} ->
+            send(parent, {:registering, self()})
+            assert_receive :respond, 5000
+            body = registration("RESETME", "SECOND_SECRET")
+
+            Req.Test.json(
+              conn,
+              put_in(body, ["data", "ships"], [ship("RESETME-1"), ship("RESETME-2")])
+            )
+        end
+      end)
+
+      detecting = killable(fn -> FleetGeneration.agent_overview(predecessor) end)
+      assert_receive {:registering, request}, 2000
+      holder = hold_ship_symbol("RESETME-2")
+      send(request, :respond)
+      await_blocked_by(detecting.backend, holder.backend)
+      assert {:disconnected, _log} = RuntimeDeath.kill(detecting.pid, detecting.backend)
+      release(holder)
+
+      assert {:ok, %{state: :transition, agent: %{id: id}}} = FleetGeneration.current_fleet(scope)
+      assert id == predecessor.id
+      assert ship_symbols(predecessor) == ["RESETME-1"]
+
+      assert %{status: :awaiting_adoption, symbol: "RESETME"} =
+               FleetGeneration.registration_recovery(scope)
+
+      assert_credential_secret(scope, "SECOND_SECRET")
+
+      restart_capacity_governor()
+      assert {:ok, :adopted} = in_session(fn -> FleetGeneration.reconcile_registration(scope) end)
+      assert_received {:game_request, "GET", "/v2/my/agent", nil}
+      assert_received {:game_request, "POST", "/v2/register", "RESETME"}
+      refute_received {:game_request, _, _, _}
+      assert_sole_successor(scope, predecessor, ["RESETME-1", "RESETME-2"])
+      assert FleetGeneration.registration_recovery(scope).status == :clear
+      assert OperatorConditions.unresolved(scope) == []
+    end
   end
 
   # One commanded Agent: the successor is current with its own credential; the
   # predecessor is retained, stale, and its Generation retired.
-  defp assert_sole_successor(scope, predecessor) do
+  defp assert_sole_successor(scope, predecessor, expected_ships \\ ["RESETME-1"]) do
     assert {:ok, %{state: :current, agent: successor, generation: generation}} =
              FleetGeneration.current_fleet(scope)
 
@@ -688,7 +885,7 @@ defmodule SpaceTraders.RegistrationRecoveryTest do
     assert successor.id != predecessor.id
     assert generation.number == 2
     assert Repo.get!(Agent.Agent, successor.id).agent_token == "SECOND_SECRET"
-    assert ship_symbols(successor) == ["RESETME-1"]
+    assert ship_symbols(successor) == expected_ships
 
     assert [%{id: predecessor_id, agent_token: "FIRST_SECRET", stale_at: %DateTime{}}, _] =
              agents(scope)
