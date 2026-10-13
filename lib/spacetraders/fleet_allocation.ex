@@ -1317,7 +1317,7 @@ defmodule SpaceTraders.FleetAllocation do
     if active_generation? or active_revision? do
       case current_ship_claim(agent, ship_symbol, opts) do
         {:error, :no_current_ship_claim} = error ->
-          if ManualIntervention.authorized?(operator_id, ship_symbol, opts[:intent_id]) do
+          if ManualIntervention.authorized?(agent_id, ship_symbol, opts[:intent_id]) do
             {:ok, %{commitment_id: nil, portfolio_id: nil, portfolio_version: nil}}
           else
             error

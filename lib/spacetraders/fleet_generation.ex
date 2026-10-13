@@ -46,6 +46,27 @@ defmodule SpaceTraders.FleetGeneration do
   @doc "Resolves the durable deployment Operator, Agent and Generation, without secrets."
   defdelegate current_fleet(), to: Identity, as: :current
 
+  @doc "Whether an Agent's credential carries new gameplay authority: only the current Generation's."
+  defdelegate gameplay_authority(agent_id), to: Identity
+
+  @doc """
+  Read-only access to the evidence a retained Agent holds, with its original
+  Generation. Confers no gameplay authority and never reports itself current.
+  """
+  def evidence_holder(agent_id) when is_integer(agent_id) do
+    case Repo.get(Agent, agent_id) do
+      %Agent{} = agent ->
+        {:ok,
+         %{
+           agent: %{agent | agent_token: nil},
+           generation: Repo.get_by(Generation, agent_id: agent.id)
+         }}
+
+      nil ->
+        :error
+    end
+  end
+
   @doc "Resolves current identity only for its authenticated deployment Operator."
   def current_fleet(%Scope{operator: %Operator{id: operator_id}}) do
     with {:ok, identity} <- current_fleet() do
@@ -505,16 +526,16 @@ defmodule SpaceTraders.FleetGeneration do
   def record_objective_evaluations(_scope, _revision, _plans, _opts), do: :ok
 
   @doc "Retains current authoritative Agent credits for Objective evidence and recaps."
-  def observe_observation(%Agent{operator_id: operator_id}, %Observation{} = evidence)
-      when is_integer(operator_id) and evidence.operation_id == "get-my-agent" do
+  def observe_observation(%Agent{id: agent_id}, %Observation{} = evidence)
+      when is_integer(agent_id) and evidence.operation_id == "get-my-agent" do
+    # The observing Agent's own live Generation: a late predecessor result
+    # never reaches another Generation's credits.
     generation =
       Repo.one(
         from generation in Generation,
           where:
-            generation.operator_id == ^operator_id and is_nil(generation.fenced_at) and
-              is_nil(generation.retired_at),
-          order_by: [desc: generation.number],
-          limit: 1
+            generation.agent_id == ^agent_id and is_nil(generation.fenced_at) and
+              is_nil(generation.retired_at)
       )
 
     revision =
@@ -540,8 +561,8 @@ defmodule SpaceTraders.FleetGeneration do
         Repo.update_all(
           from(candidate in Generation,
             where:
-              candidate.id == ^generation.id and candidate.operator_id == ^operator_id and
-                is_nil(candidate.fenced_at) and is_nil(candidate.retired_at)
+              candidate.id == ^generation.id and is_nil(candidate.fenced_at) and
+                is_nil(candidate.retired_at)
           ),
           set: [
             last_observed_credits: credits,
@@ -1123,9 +1144,9 @@ defmodule SpaceTraders.FleetGeneration do
   defp agent_execution_allowed?(%Agent{id: nil}), do: :ok
 
   defp agent_execution_allowed?(%Agent{id: id}) do
-    case Repo.get(Agent, id) do
-      %Agent{stale_at: nil} -> :ok
-      _ -> {:error, :stale_agent}
+    case gameplay_authority(id) do
+      {:error, :agent_token_missing} -> {:error, :stale_agent}
+      authority -> authority
     end
   end
 

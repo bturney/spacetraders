@@ -1,53 +1,56 @@
 defmodule SpaceTradersWeb.WorldLive do
   use SpaceTradersWeb, :live_view
 
-  alias SpaceTraders.{Agent, Fleet, World}
+  alias SpaceTraders.{Fleet, FleetGeneration, World}
 
   @freshness_seconds 300
 
   @impl true
   def mount(_params, _session, socket) do
-    groups =
-      socket.assigns.current_scope.operator
-      |> Agent.list_agents()
-      |> Enum.flat_map(fn agent ->
-        case Fleet.system_from_headquarters(agent.headquarters) do
-          {:ok, system} ->
-            [
-              %{
-                agent: agent,
-                system: system,
-                waypoints: World.waypoints(agent, system, DateTime.utc_now(), @freshness_seconds)
-              }
-            ]
-
-          _ ->
-            []
-        end
-      end)
+    # Same resolution as Mission Control: the sole current Fleet, or a
+    # truthful setup/transition state. There is no Agent to select.
+    {fleet_state, groups} =
+      case FleetGeneration.current_fleet(socket.assigns.current_scope) do
+        {:ok, %{state: :current, agent: agent}} -> {:current, groups(agent)}
+        {:ok, %{state: state}} -> {state, []}
+        {:error, error} -> {{:error, error.summary}, []}
+      end
 
     selected =
-      groups
-      |> Enum.find_value(fn group ->
+      Enum.find_value(groups, fn group ->
         case group.waypoints do
-          [first | _] -> {group.agent.id, first.symbol}
+          [first | _] -> first.symbol
           [] -> nil
         end
       end)
 
-    {:ok, assign(socket, groups: groups, selected: selected)}
+    {:ok, assign(socket, fleet_state: fleet_state, groups: groups, selected: selected)}
+  end
+
+  defp groups(agent) do
+    case Fleet.system_from_headquarters(agent.headquarters) do
+      {:ok, system} ->
+        [
+          %{
+            agent: agent,
+            system: system,
+            waypoints: World.waypoints(agent, system, DateTime.utc_now(), @freshness_seconds)
+          }
+        ]
+
+      _ ->
+        []
+    end
   end
 
   @impl true
-  def handle_event("select", %{"agent" => agent_id, "symbol" => symbol}, socket) do
-    selection =
-      Enum.find_value(socket.assigns.groups, fn group ->
-        if to_string(group.agent.id) == agent_id and
-             Enum.any?(group.waypoints, &(&1.symbol == symbol)),
-           do: {group.agent.id, symbol}
+  def handle_event("select", %{"symbol" => symbol}, socket) do
+    known? =
+      Enum.any?(socket.assigns.groups, fn group ->
+        Enum.any?(group.waypoints, &(&1.symbol == symbol))
       end)
 
-    {:noreply, if(selection, do: assign(socket, selected: selection), else: socket)}
+    {:noreply, if(known?, do: assign(socket, selected: symbol), else: socket)}
   end
 
   @impl true
@@ -63,14 +66,14 @@ defmodule SpaceTradersWeb.WorldLive do
         </header>
 
         <section :if={@groups == []} class="rounded-xl border border-base-300 p-6">
-          No Agent has a known headquarters System yet.
+          {empty_state(@fleet_state)}
         </section>
 
         <section :for={group <- @groups} class="space-y-4" aria-label={"#{group.system} Atlas"}>
           <header class="flex flex-wrap items-baseline gap-x-3 gap-y-1 border-b border-base-300 pb-3">
             <h2 class="text-xl font-semibold">
               <.link
-                navigate={~p"/world/systems/#{group.system}?agent=#{group.agent.id}"}
+                navigate={~p"/world/systems/#{group.system}"}
                 class="link link-primary"
               >
                 {group.system}
@@ -94,21 +97,18 @@ defmodule SpaceTradersWeb.WorldLive do
                 <button
                   id={"world-waypoint-#{waypoint.symbol}"}
                   phx-click="select"
-                  phx-value-agent={group.agent.id}
                   phx-value-symbol={waypoint.symbol}
-                  aria-pressed={@selected == {group.agent.id, waypoint.symbol}}
+                  aria-pressed={@selected == waypoint.symbol}
                   class={[
                     "flex-1 rounded-lg px-3 py-2 text-left focus-visible:outline-2 focus-visible:outline-primary",
-                    @selected == {group.agent.id, waypoint.symbol} && "bg-base-200 font-semibold"
+                    @selected == waypoint.symbol && "bg-base-200 font-semibold"
                   ]}
                 >
                   <span class="block">{waypoint.symbol}</span>
                   <span class="text-xs opacity-70">Known waypoint</span>
                 </button>
                 <.link
-                  navigate={
-                    ~p"/world/systems/#{group.system}/waypoints/#{waypoint.symbol}?agent=#{group.agent.id}"
-                  }
+                  navigate={~p"/world/systems/#{group.system}/waypoints/#{waypoint.symbol}"}
                   class="btn btn-ghost btn-sm"
                 >Open page</.link>
               </div>
@@ -116,7 +116,7 @@ defmodule SpaceTradersWeb.WorldLive do
 
             <article
               :for={waypoint <- group.waypoints}
-              :if={@selected == {group.agent.id, waypoint.symbol}}
+              :if={@selected == waypoint.symbol}
               class="space-y-6"
               aria-label={"#{waypoint.symbol} intelligence"}
             >
@@ -137,7 +137,7 @@ defmodule SpaceTradersWeb.WorldLive do
                   <h4 class="border-b border-base-300 pb-2 font-semibold">
                     <.link
                       navigate={
-                        ~p"/world/systems/#{group.system}/waypoints/#{waypoint.symbol}/market?agent=#{group.agent.id}"
+                        ~p"/world/systems/#{group.system}/waypoints/#{waypoint.symbol}/market"
                       }
                       class="link link-primary"
                     >Market</.link>
@@ -149,7 +149,7 @@ defmodule SpaceTradersWeb.WorldLive do
                   <h4 class="border-b border-base-300 pb-2 font-semibold">
                     <.link
                       navigate={
-                        ~p"/world/systems/#{group.system}/waypoints/#{waypoint.symbol}/shipyard?agent=#{group.agent.id}"
+                        ~p"/world/systems/#{group.system}/waypoints/#{waypoint.symbol}/shipyard"
                       }
                       class="link link-primary"
                     >Shipyard</.link>
@@ -161,7 +161,7 @@ defmodule SpaceTradersWeb.WorldLive do
                   <h4 class="border-b border-base-300 pb-2 font-semibold">
                     <.link
                       navigate={
-                        ~p"/world/systems/#{group.system}/waypoints/#{waypoint.symbol}/construction?agent=#{group.agent.id}"
+                        ~p"/world/systems/#{group.system}/waypoints/#{waypoint.symbol}/construction"
                       }
                       class="link link-primary"
                     >Construction</.link>
@@ -176,6 +176,15 @@ defmodule SpaceTradersWeb.WorldLive do
     </Layouts.app>
     """
   end
+
+  defp empty_state(:current), do: "The current Fleet has no known headquarters System yet."
+
+  defp empty_state(:transition),
+    do:
+      "No current Fleet: a Fleet transition is pending. History remains on the Generations page."
+
+  defp empty_state({:error, summary}), do: "No current Fleet. " <> summary
+  defp empty_state(_state), do: "No current Fleet yet. Mint or import an Agent to begin."
 
   attr :label, :string, required: true
   attr :fact, :any, default: nil
