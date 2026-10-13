@@ -9,7 +9,6 @@ defmodule SpaceTraders.Evidence do
 
   import Ecto.Query
 
-  alias SpaceTraders.Agent
   alias SpaceTraders.Agent.Agent, as: AgentRecord
   alias SpaceTraders.Agent.Scope
   alias SpaceTraders.API
@@ -27,7 +26,7 @@ defmodule SpaceTraders.Evidence do
 
   @owned_read_deadline_seconds 60
   @owned_read_freshness_seconds 30
-  @unretained_conclusion_operations ~w(accept-contract fulfill-contract)
+  @unretained_conclusion_operations ~w(accept-contract fulfill-contract register)
   # Recovery evidence must be acquired after dispatch and at most this old.
   @recovery_window_ms 30_000
   @source_fields ~w(id agent_id fleet_generation_id subject operation_id facts response_fingerprint observed_at dependency_keys)a
@@ -725,7 +724,12 @@ defmodule SpaceTraders.Evidence do
   defp settle_owned_demand(result, nil, _agent, _subject, _operation_id, _typed_demand),
     do: result
 
-  defp active_revision(operator_id) do
+  defp active_revision(attributed_operator_id) do
+    # Expanded-schema compatibility for unadopted legacy writers. Published
+    # identity always chooses the deployment Strategy, never a caller's tenant.
+    operator_id =
+      SpaceTraders.OperatorAuthority.deployment_operator_id() || attributed_operator_id
+
     Revision
     |> join(:inner, [revision], strategy in Strategy,
       on: strategy.id == revision.fleet_strategy_id
@@ -1639,7 +1643,9 @@ defmodule SpaceTraders.Evidence do
   defp observation_generation(agent_id) do
     Repo.one(
       from generation in SpaceTraders.FleetGeneration.Generation,
-        where: generation.agent_id == ^agent_id and is_nil(generation.retired_at),
+        # An Agent has at most one Generation; a late result for a retired one
+        # keeps that original attribution rather than becoming unattributed.
+        where: generation.agent_id == ^agent_id,
         select: generation.id
     )
   end
@@ -1700,24 +1706,33 @@ defmodule SpaceTraders.Evidence do
   end
 
   @doc "Refreshes authoritative Agent and Ship state before post-stop planning."
-  def refresh_for_emergency_stop_resume(%Scope{operator: operator}) do
-    operator
-    |> Agent.list_agents()
-    |> Enum.reduce_while(:ok, fn agent, :ok ->
-      case FleetGeneration.agent_overview(agent) do
-        {:ok, _overview} ->
-          case Fleet.list_ships(agent) do
-            {:ok, _ships} -> {:cont, :ok}
-            _error -> {:halt, {:error, :authoritative_refresh_required}}
-          end
+  def refresh_for_emergency_stop_resume(%Scope{} = scope) do
+    with {:ok, _operator_id} <- SpaceTraders.OperatorAuthority.authorize(scope),
+         {:ok, identity} <- FleetGeneration.current_fleet(scope) do
+      case identity do
+        %{state: :current, agent: %{id: agent_id}} ->
+          refresh_current_fleet(Repo.get!(AgentRecord, agent_id))
 
-        {:error, :stale_agent} ->
-          {:cont, :ok}
-
-        _error ->
-          {:halt, {:error, :authoritative_refresh_required}}
+        _setup_or_transition ->
+          :ok
       end
-    end)
+    end
+  end
+
+  defp refresh_current_fleet(agent) do
+    case FleetGeneration.agent_overview(agent) do
+      {:ok, _overview} ->
+        case Fleet.list_ships(agent) do
+          {:ok, _ships} -> :ok
+          _error -> {:error, :authoritative_refresh_required}
+        end
+
+      {:error, :stale_agent} ->
+        :ok
+
+      _error ->
+        {:error, :authoritative_refresh_required}
+    end
   end
 
   defp compatible_demands(agent, subject, observation, now) do

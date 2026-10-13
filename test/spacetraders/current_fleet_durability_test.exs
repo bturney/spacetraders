@@ -4,6 +4,7 @@ defmodule SpaceTraders.CurrentFleetDurabilityTest do
   import Ecto.Query
   alias Ecto.Adapters.SQL.Sandbox
   alias SpaceTraders.{Agent, FleetGeneration, Repo}
+  alias SpaceTraders.MutationAttempts.{Attempt, Outcome}
 
   setup tags do
     Sandbox.mode(Repo, :auto)
@@ -24,6 +25,12 @@ defmodule SpaceTraders.CurrentFleetDurabilityTest do
         Repo.all(
           from(a in SpaceTraders.Agent.Agent, where: a.operator_id == ^operator.id, select: a.id)
         )
+
+      attempt_ids =
+        Repo.all(from a in Attempt, where: a.operator_id == ^operator.id, select: a.id)
+
+      Repo.delete_all(from o in Outcome, where: o.mutation_attempt_id in ^attempt_ids)
+      Repo.delete_all(from a in Attempt, where: a.id in ^attempt_ids)
 
       Repo.delete_all(
         from(d in SpaceTraders.Evidence.ObservationDemand, where: d.agent_id in ^agent_ids)
@@ -119,7 +126,19 @@ defmodule SpaceTraders.CurrentFleetDurabilityTest do
     }
 
     assert {:error, :stale_agent} =
-             FleetGeneration.handle_game_result(Agent.get_agent(scope, first.id), {:error, error})
+             SpaceTraders.Observability.with_context(
+               [
+                 agent_id: first.id,
+                 fleet_generation_id: first_generation_id,
+                 strategy_revision_id: revision.id
+               ],
+               fn ->
+                 FleetGeneration.handle_game_result(
+                   Agent.get_agent(scope, first.id),
+                   {:error, error}
+                 )
+               end
+             )
 
     assert [[second_generation_id]] =
              Repo.query!(
@@ -323,7 +342,7 @@ defmodule SpaceTraders.CurrentFleetDurabilityTest do
     test "a second mint waits in PostgreSQL during registration and never dispatches its own",
          %{scope: scope} do
       first = contender(fn -> FleetGeneration.mint(scope, mint("ORBITALIST")) end)
-      assert_receive {:game_request, sender, "POST", "/v2/register"}
+      assert_receive {:game_request, sender, "POST", "/v2/register"}, 2000
 
       second = contender(fn -> FleetGeneration.mint(scope, mint("PARALLAX")) end)
       await_blocked_by(second.backend, first.backend)
@@ -340,7 +359,7 @@ defmodule SpaceTraders.CurrentFleetDurabilityTest do
     test "an import competing with registration waits and cannot add a second Agent",
          %{scope: scope} do
       minting = contender(fn -> FleetGeneration.mint(scope, mint("ORBITALIST")) end)
-      assert_receive {:game_request, sender, "POST", "/v2/register"}
+      assert_receive {:game_request, sender, "POST", "/v2/register"}, 2000
 
       importing =
         contender(fn -> FleetGeneration.import_agent(scope, "IMPORTED_SECRET", true) end)
@@ -360,13 +379,13 @@ defmodule SpaceTraders.CurrentFleetDurabilityTest do
       importing =
         contender(fn -> FleetGeneration.import_agent(scope, "IMPORTED_SECRET", true) end)
 
-      assert_receive {:game_request, reader, "GET", "/v2/my/agent"}
+      assert_receive {:game_request, reader, "GET", "/v2/my/agent"}, 2000
 
       minting = contender(fn -> FleetGeneration.mint(scope, mint("PARALLAX")) end)
       await_blocked_by(minting.backend, importing.backend)
 
       send(reader, :respond)
-      assert_receive {:game_request, ships_reader, "GET", "/v2/my/ships"}
+      assert_receive {:game_request, ships_reader, "GET", "/v2/my/ships"}, 2000
       send(ships_reader, :respond)
       assert {:ok, established} = Task.await(importing.task)
       assert {:error, :current_fleet_exists} = Task.await(minting.task)

@@ -30,6 +30,7 @@ defmodule SpaceTraders.API do
   """
 
   require Logger
+  import Ecto.Query, only: [from: 2]
 
   alias SpaceTraders.API.RateLimiter
   alias SpaceTraders.API.CapacityGovernor
@@ -88,8 +89,10 @@ defmodule SpaceTraders.API do
 
   @doc "POST /register — mint a new agent under the given account token."
   @spec register(account_token(), String.t(), String.t(), String.t()) :: result()
-  def register(account_token, symbol, faction, email) do
+  def register(account_token, symbol, faction, email, opts \\ []) do
     request_with_token(:post, "/register", account_token,
+      registration: opts[:registration],
+      retry: false,
       json:
         RegisterRequest.new(%{symbol: symbol, faction: faction, email: email})
         |> RegisterRequest.to_json(),
@@ -103,6 +106,16 @@ defmodule SpaceTraders.API do
            ships: {:list, Ship}
          }}
     )
+  end
+
+  @doc """
+  GET /agents/{agentSymbol}, the public Agent read. Only a 404 is conclusive:
+  it returns `{:error, :not_found}`. An existing Agent proves the symbol is
+  occupied, never who owns it.
+  """
+  @spec get_public_agent(String.t()) :: result() | {:error, :not_found}
+  def get_public_agent(symbol) when is_binary(symbol) do
+    request(:get, "/agents/#{URI.encode(symbol)}", nil, as: {:model, Agent}, not_found: true)
   end
 
   @doc "GET /my/agent"
@@ -176,7 +189,9 @@ defmodule SpaceTraders.API do
       attempt = MutationAttempts.get!(id)
 
       with {:ok, schema} <- ShipAction.response_schema(attempt.operation_id),
-           {:ok, token} <- resolve_agent_token(%AgentTokenReference{agent_id: attempt.agent_id}) do
+           # Recorded admission owns the current-Generation check, so an attempt
+           # that lost authority is settled durably rather than left prepared.
+           {:ok, token} <- stored_agent_token(attempt.agent_id) do
         operation = OperationInventory.fetch!(attempt.operation_id)
         request = attempt.prepared_evidence["request"]
 
@@ -445,6 +460,8 @@ defmodule SpaceTraders.API do
          shadow,
          capacity
        ) do
+    not_found_conclusive = Keyword.get(opts, :not_found, false) == true
+
     case Req.request(req) do
       {:ok, %{status: status, body: body}} when status in 200..299 ->
         emit_request_metric(operation, path, status)
@@ -472,7 +489,7 @@ defmodule SpaceTraders.API do
             evidence =
               Map.merge(%{status: status}, SpaceTraders.Outcomes.PostCommit.nav_evidence(decoded))
 
-            outcome = record_mutation_outcome(attempt, :succeeded, evidence)
+            outcome = record_success(attempt, evidence, decoded)
             # The decoded response is authoritative whether or not the success
             # write landed; an unresolved attempt later reconciled accepted keeps
             # its realized charge.
@@ -493,10 +510,23 @@ defmodule SpaceTraders.API do
             end
         end
 
+      {:ok, %{status: 404}} when method == :get and not_found_conclusive ->
+        emit_request_metric(operation, path, 404)
+        complete_shadow(shadow, capacity, 404, :client_error, {:error, :not_found})
+
       {:ok, %{status: status, body: body} = response} when status in 400..499 ->
         emit_request_metric(operation, path, status)
 
-        case record_mutation_outcome(attempt, :rejected, %{status: status}) do
+        evidence =
+          case attempt do
+            %Attempt{operation_id: "register"} ->
+              %{status: status, response: SpaceTraders.Observability.redact(body, token)}
+
+            _ ->
+              %{status: status}
+          end
+
+        case record_mutation_outcome(attempt, :rejected, evidence) do
           :ok ->
             case mutation_authorized_after_response(status, method, token) do
               :ok ->
@@ -611,19 +641,47 @@ defmodule SpaceTraders.API do
           Req.Request.halt(request, %MutationSuppressedError{reason: reason})
       end
     else
-      authorize_unrecorded_dispatch(request, method, token, attempt, shadow)
+      authorize_unrecorded_dispatch(request, method, token, attempt, shadow, opts)
     end
   end
 
-  defp authorize_unrecorded_dispatch(request, method, token, attempt, shadow) do
-    with :ok <- mutation_authorized?(method, token),
+  defp authorize_unrecorded_dispatch(request, method, token, attempt, shadow, opts) do
+    # Capacity admission can wait across a Generation transition. The credential
+    # resolved before that wait cannot confer authority on the eventual send.
+    with :ok <- gameplay_authorized?(opts[:agent_id]),
+         :ok <- mutation_authorized?(method, token),
          {:ok, _attempt} <- mark_mutation_sent(attempt) do
       ShadowAdmission.observe_dispatch(shadow)
       request
     else
-      {:error, reason} -> Req.Request.halt(request, %MutationSuppressedError{reason: reason})
+      {:error, reason} ->
+        reason = record_suppressed_attempt(attempt, reason)
+        Req.Request.halt(request, %MutationSuppressedError{reason: reason})
     end
   end
+
+  defp record_suppressed_attempt(nil, reason), do: reason
+
+  defp record_suppressed_attempt(%Attempt{} = attempt, reason) do
+    # A mutation owner may already have settled admission (e.g. acquisition's
+    # missing offer). Never overwrite its disposition or append not-sent twice.
+    case MutationAttempts.get!(attempt.id) do
+      %Attempt{state: "prepared"} = prepared ->
+        case MutationAttempts.record_not_sent(prepared, inspect(reason)) do
+          {:ok, _} -> reason
+          {:error, persistence_reason} -> persistence_reason
+        end
+
+      _already_disposed ->
+        reason
+    end
+  end
+
+  defp gameplay_authorized?(agent_id) when is_integer(agent_id),
+    do: SpaceTraders.FleetGeneration.gameplay_authority(agent_id)
+
+  # Initial import/registration has no established Agent identity yet.
+  defp gameplay_authorized?(_agent_id), do: :ok
 
   defp prepare_mutation_attempt(%{classification: :read}, _path, _opts), do: {:ok, nil}
 
@@ -655,6 +713,23 @@ defmodule SpaceTraders.API do
   defp mark_mutation_sent(%Attempt{operation_id: "purchase-ship"} = attempt),
     do: FleetAcquisition.admit_send(attempt)
 
+  # Admission belongs to the transport adapter, not the lifecycle owner.
+  # Both prepare and sent-or-unknown commit before the HTTP request. Re-read
+  # under lock so an abandoned/non-prepared attempt can never dispatch.
+  defp mark_mutation_sent(%Attempt{operation_id: "register", id: id}) do
+    Repo.transaction(fn ->
+      current = Repo.one!(from(a in Attempt, where: a.id == ^id, lock: "FOR UPDATE"))
+
+      with "prepared" <- current.state,
+           {:ok, admitted} <- MutationAttempts.mark_sent_or_unknown(current) do
+        admitted
+      else
+        state when is_binary(state) -> Repo.rollback(:attempt_already_dispatched)
+        {:error, reason} -> Repo.rollback(reason)
+      end
+    end)
+  end
+
   defp mark_mutation_sent(attempt), do: MutationAttempts.mark_sent_or_unknown(attempt)
 
   # The decoded success response is the only evidence attributing a realized
@@ -674,6 +749,46 @@ defmodule SpaceTraders.API do
   end
 
   defp record_realized_charge(_response, _attempt), do: :ok
+
+  # A registration's AgentToken is committed with its success: the game cannot
+  # return it again if local adoption is interrupted.
+  defp record_success(
+         %Attempt{operation_id: "register"} = attempt,
+         evidence,
+         %{token: token, agent: %Agent{} = agent, ships: ships} = decoded
+       )
+       when is_binary(token) and token != "" and is_list(ships) do
+    case SpaceTraders.FleetGeneration.Registration.intended_identity(attempt, agent) do
+      :ok ->
+        evidence =
+          Map.merge(evidence, SpaceTraders.FleetGeneration.Registration.success_evidence(decoded))
+
+        case MutationAttempts.record_registration_success(attempt, evidence, token) do
+          {:ok, _attempt} -> :ok
+          {:error, reason} -> {:error, reason}
+        end
+
+      {:error, _} ->
+        record_incomplete_registration(attempt, evidence)
+    end
+  end
+
+  defp record_success(%Attempt{operation_id: "register"} = attempt, evidence, _decoded),
+    do: record_incomplete_registration(attempt, evidence)
+
+  defp record_success(attempt, evidence, _decoded),
+    do: record_mutation_outcome(attempt, :succeeded, evidence)
+
+  defp record_incomplete_registration(attempt, evidence) do
+    case record_mutation_outcome(
+           attempt,
+           :ambiguous,
+           Map.put(evidence, :reason, "registration_response_incomplete_or_mismatched")
+         ) do
+      :ok -> {:error, :registration_response_incomplete}
+      error -> error
+    end
+  end
 
   defp record_mutation_outcome(nil, _classification, _evidence), do: :ok
 
@@ -718,10 +833,12 @@ defmodule SpaceTraders.API do
   defp maybe_auth(nil), do: []
   defp maybe_auth(token), do: [auth: {:bearer, token}]
 
+  # Every stored credential resolves through the current-Generation authority,
+  # so cached references, Ship lookups and recorded attempts of a predecessor
+  # cannot dispatch new gameplay.
   defp resolve_agent_token(%AgentTokenReference{agent_id: agent_id}) when is_integer(agent_id) do
-    case Repo.get(AgentRecord, agent_id) do
-      %AgentRecord{agent_token: token} when is_binary(token) and token != "" -> {:ok, token}
-      _ -> {:error, :agent_token_missing}
+    with :ok <- SpaceTraders.FleetGeneration.gameplay_authority(agent_id) do
+      stored_agent_token(agent_id)
     end
   end
 
@@ -729,6 +846,13 @@ defmodule SpaceTraders.API do
        when is_reference(temporary_id) do
     case Process.delete({AgentTokenReference, temporary_id}) do
       token when is_binary(token) and token != "" -> {:ok, token}
+      _ -> {:error, :agent_token_missing}
+    end
+  end
+
+  defp stored_agent_token(agent_id) do
+    case Repo.get(AgentRecord, agent_id) do
+      %AgentRecord{agent_token: token} when is_binary(token) and token != "" -> {:ok, token}
       _ -> {:error, :agent_token_missing}
     end
   end

@@ -129,6 +129,49 @@ defmodule SpaceTraders.FleetGeneration.Identity do
     error in Postgrex.Error -> preflight_error(error)
   end
 
+  @doc """
+  Decides whether an Agent's credential may be used for new gameplay.
+
+  Once a Generation is published, only its own healthy Agent has authority:
+  retired or fenced Generations, Stale Agents and any other retained Agent
+  row are history, however their credential reference was obtained. Before
+  publication (legacy writers in the expand phase), an Agent still needs a
+  healthy Generation of its own, if it has one.
+
+  One statement with no locks, so every request can afford it and readers
+  never wait on lifecycle transactions.
+  """
+  def gameplay_authority(agent_id) when is_integer(agent_id) do
+    authority =
+      Repo.one(
+        from agent in Agent,
+          left_join: own in Generation,
+          on: own.agent_id == agent.id,
+          left_join: identity in "current_fleet_identity",
+          on: identity.id == 1,
+          left_join: current in Generation,
+          on: current.id == identity.fleet_generation_id,
+          where: agent.id == ^agent_id,
+          select: %{
+            stale?: not is_nil(agent.stale_at),
+            own_ended?: not is_nil(own.fenced_at) or not is_nil(own.retired_at),
+            published?: not is_nil(current.id),
+            current?:
+              current.agent_id == agent.id and is_nil(current.fenced_at) and
+                is_nil(current.retired_at)
+          }
+      )
+
+    case authority do
+      nil -> {:error, :agent_token_missing}
+      %{stale?: true} -> {:error, :stale_agent}
+      %{own_ended?: true} -> {:error, :generation_not_current}
+      %{published?: true, current?: true} -> :ok
+      %{published?: true} -> {:error, :generation_not_current}
+      %{published?: false} -> :ok
+    end
+  end
+
   @doc "Publishes a successful lifecycle transition inside its existing transaction."
   def publish_generation!(operator_id, generation_id) do
     %{num_rows: published} =

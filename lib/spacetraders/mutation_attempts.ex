@@ -272,6 +272,65 @@ defmodule SpaceTraders.MutationAttempts do
     result
   end
 
+  @doc """
+  Records a registration's success with its AgentToken in one commit.
+
+  The token is the only way to act as the new Agent and the game cannot
+  return it again, so it is retained encrypted on the attempt (never in
+  evidence) until `record_registration_adoption/3` links the Generation.
+  """
+  def record_registration_success(
+        %Attempt{operation_id: "register"} = attempt,
+        evidence,
+        credential
+      )
+      when is_map(evidence) and is_binary(credential) and credential != "" do
+    result = append_outcome(attempt, :succeeded, evidence, recovery_credential: credential)
+
+    with {:ok, recorded} <- result do
+      unless Repo.in_transaction?(), do: emit_outcome(:outcome_committed, recorded, :succeeded)
+    end
+
+    result
+  end
+
+  @doc "The Operator's most recent registration attempt, whose state decides registration recovery."
+  def latest_registration(operator_id) when is_integer(operator_id) do
+    Attempt
+    |> where(
+      [attempt],
+      attempt.operation_id == "register" and attempt.operator_id == ^operator_id
+    )
+    |> order_by([attempt], desc: attempt.prepared_at, desc: attempt.id)
+    |> limit(1)
+    |> preload(:outcomes)
+    |> Repo.one()
+  end
+
+  @doc """
+  Links a proven registration to the Agent and Generation adopted from it and
+  discards the retained credential, inside the adopting transaction.
+  """
+  def record_registration_adoption(%Attempt{id: id}, agent_id, generation_id)
+      when is_integer(agent_id) and is_integer(generation_id) do
+    {1, _} =
+      Repo.update_all(
+        from(attempt in Attempt,
+          where:
+            attempt.id == ^id and attempt.operation_id == "register" and
+              attempt.state in ["succeeded", "accepted"] and is_nil(attempt.fleet_generation_id)
+        ),
+        set: [
+          agent_id: agent_id,
+          fleet_generation_id: generation_id,
+          recovery_credential: nil,
+          updated_at: DateTime.utc_now()
+        ]
+      )
+
+    :ok
+  end
+
   @doc "Records suppression before transport; a prepared attempt was never sent."
   def record_not_sent(%Attempt{} = attempt, reason) do
     append_outcome(attempt, :not_sent, %{reason: reason})
@@ -303,7 +362,7 @@ defmodule SpaceTraders.MutationAttempts do
               }),
             else: evidence
           ),
-          retry_authorized: action_selected
+          [retry_authorized: action_selected] ++ Keyword.take(opts, [:recovery_credential])
         )
       end
     end)
@@ -445,7 +504,9 @@ defmodule SpaceTraders.MutationAttempts do
         |> Ecto.Changeset.change(
           Keyword.merge(attempt_changes, state: Atom.to_string(classification))
         )
-        |> Repo.update!()
+        # Ecto SQL diagnostics inspect the original custom-type parameter,
+        # even though SpaceTraders.Secret dumps encrypted ciphertext.
+        |> Repo.update!(log: not Keyword.has_key?(attempt_changes, :recovery_credential))
 
       %Outcome{
         mutation_attempt_id: attempt.id,
@@ -505,6 +566,11 @@ defmodule SpaceTraders.MutationAttempts do
         |> maybe_put_selected_evidence(opts)
         |> then(fn evidence ->
           if opts[:spending], do: Map.put(evidence, "spending", opts[:spending]), else: evidence
+        end)
+        |> then(fn evidence ->
+          if opts[:registration],
+            do: Map.put(evidence, "registration", opts[:registration]),
+            else: evidence
         end)
       )
 

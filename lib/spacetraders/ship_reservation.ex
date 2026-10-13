@@ -6,7 +6,8 @@ defmodule SpaceTraders.ShipReservation do
 
   alias SpaceTraders.Agent.Scope
   alias SpaceTraders.Fleet.{Intent, Ship}
-  alias SpaceTraders.FleetAllocation
+  alias SpaceTraders.{FleetAllocation, FleetGeneration}
+  alias SpaceTraders.FleetGeneration.Identity
   alias SpaceTraders.Repo
 
   schema "ship_reservations" do
@@ -42,13 +43,22 @@ defmodule SpaceTraders.ShipReservation do
     :ok
   end
 
+  @doc """
+  Active reservations for the deployment Operator. A Generation's reservations
+  are released when it retires, so active ones belong to live Ships; the
+  reserving Operator is attribution, not a tenant filter.
+  """
   def list(%Scope{operator: %{id: operator_id}}) do
-    Repo.all(
-      from reservation in __MODULE__,
-        where: reservation.operator_id == ^operator_id and is_nil(reservation.released_at),
-        preload: [:ship],
-        order_by: [desc: reservation.inserted_at]
-    )
+    if Identity.operator?(operator_id) do
+      Repo.all(
+        from reservation in __MODULE__,
+          where: is_nil(reservation.released_at),
+          preload: [:ship],
+          order_by: [desc: reservation.inserted_at]
+      )
+    else
+      []
+    end
   end
 
   def reserved_symbols(agent_id) do
@@ -69,18 +79,19 @@ defmodule SpaceTraders.ShipReservation do
       {:error, :reason_required}
     else
       Repo.transaction(fn ->
-        ship =
-          Repo.one(
-            from ship in Ship,
-              join: agent in SpaceTraders.Agent.Agent,
-              on: agent.id == ship.agent_id,
-              where: ship.id == ^ship_id and agent.operator_id == ^operator_id,
-              lock: "FOR UPDATE OF s0"
-          )
+        unless Identity.operator?(operator_id), do: Repo.rollback(:not_deployment_operator)
+
+        ship = Repo.one(from ship in Ship, where: ship.id == ^ship_id, lock: "FOR UPDATE")
 
         cond do
           is_nil(ship) ->
             Repo.rollback(:ship_not_found)
+
+          # Only the current Generation's Ships can be taken out of allocation;
+          # a retained predecessor's Ship stays history.
+          (authority = FleetGeneration.gameplay_authority(ship.agent_id)) != :ok ->
+            {:error, reason} = authority
+            Repo.rollback(reason)
 
           Repo.exists?(
             from i in Intent,
@@ -120,12 +131,12 @@ defmodule SpaceTraders.ShipReservation do
 
   def release(%Scope{operator: %{id: operator_id}}, ship_id) when is_integer(ship_id) do
     Repo.transaction(fn ->
+      unless Identity.operator?(operator_id), do: Repo.rollback(:not_deployment_operator)
+
       reservation =
         Repo.one(
           from reservation in __MODULE__,
-            where:
-              reservation.operator_id == ^operator_id and reservation.ship_id == ^ship_id and
-                is_nil(reservation.released_at),
+            where: reservation.ship_id == ^ship_id and is_nil(reservation.released_at),
             lock: "FOR UPDATE"
         )
 

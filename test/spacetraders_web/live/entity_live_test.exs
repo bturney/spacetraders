@@ -1,5 +1,6 @@
 defmodule SpaceTradersWeb.EntityLiveTest do
-  use SpaceTradersWeb.ConnCase, async: true
+  # Current-Fleet resolution adopts with deployment-wide locks.
+  use SpaceTradersWeb.ConnCase, async: false
 
   import Phoenix.LiveViewTest
 
@@ -65,7 +66,7 @@ defmodule SpaceTradersWeb.EntityLiveTest do
 
     assert has_element?(
              ship_view,
-             "a[href='/world/systems/X1/waypoints/X1-A1?agent=#{agent.id}']",
+             "a[href='/world/systems/X1/waypoints/X1-A1']",
              "X1-A1"
            )
 
@@ -79,7 +80,7 @@ defmodule SpaceTradersWeb.EntityLiveTest do
 
     assert has_element?(
              contract_view,
-             "a[href='/world/systems/X1/waypoints/X1-A1?agent=#{agent.id}']",
+             "a[href='/world/systems/X1/waypoints/X1-A1']",
              "X1-A1"
            )
   end

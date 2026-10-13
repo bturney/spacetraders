@@ -640,7 +640,7 @@ defmodule SpaceTraders.MutationAttemptsTest do
       Req.Test.json(conn, %{
         "data" => %{
           "token" => "NEW_AGENT_TOKEN_SECRET",
-          "agent" => %{},
+          "agent" => %{"symbol" => "EVIDENCE", "credits" => 175_000},
           "contract" => %{},
           "faction" => %{},
           "ships" => []

@@ -129,38 +129,43 @@ defmodule SpaceTraders.Fleet.Intents do
 
   defp token_present(_agent), do: {:error, :agent_token_missing}
 
-  defp scoped_agent_for_ship(
-         %Scope{operator: %{id: operator_id}},
-         agent_id,
-         ship_symbol
-       ) do
-    case Repo.one(
-           from agent in AgentRecord,
-             join: ship in Ship,
-             on: ship.agent_id == agent.id,
-             where:
-               agent.id == ^agent_id and agent.operator_id == ^operator_id and
-                 ship.symbol == ^ship_symbol,
-             select: agent
-         ) do
-      %AgentRecord{} = agent -> {:ok, agent}
-      nil -> {:error, :agent_not_owned}
+  # The authenticated deployment Operator commands only the current
+  # Generation's Ships; ownership is the Agent's, not a tenant's.
+  defp current_agent_for_ship(%Scope{operator: %{id: operator_id}}, agent_id, ship_symbol) do
+    with true <-
+           SpaceTraders.FleetGeneration.Identity.operator?(operator_id) ||
+             {:error, :not_deployment_operator},
+         :ok <- SpaceTraders.FleetGeneration.gameplay_authority(agent_id) do
+      case Repo.one(
+             from agent in AgentRecord,
+               join: ship in Ship,
+               on: ship.agent_id == agent.id,
+               where: agent.id == ^agent_id and ship.symbol == ^ship_symbol,
+               select: agent
+           ) do
+        %AgentRecord{} = agent -> {:ok, agent}
+        nil -> {:error, :agent_not_owned}
+      end
     end
   end
 
-  defp scoped_agent_for_ship(_current_scope, _agent_id, _ship_symbol),
+  defp current_agent_for_ship(_current_scope, _agent_id, _ship_symbol),
     do: {:error, :agent_not_owned}
 
-  defp owned_intent_for_operator(operator_id, intent_id) do
-    Repo.one(
-      from intent in Intent,
-        join: ship in Ship,
-        on: ship.id == intent.ship_id,
-        join: agent in AgentRecord,
-        on: agent.id == ship.agent_id,
-        where: intent.id == ^intent_id and agent.operator_id == ^operator_id,
-        select: {intent, agent}
-    )
+  # Stopping is not new gameplay: the deployment Operator may stop any
+  # unfinished intervention, including a predecessor Generation's.
+  defp intent_for_deployment_operator(operator_id, intent_id) do
+    if SpaceTraders.FleetGeneration.Identity.operator?(operator_id) do
+      Repo.one(
+        from intent in Intent,
+          join: ship in Ship,
+          on: ship.id == intent.ship_id,
+          join: agent in AgentRecord,
+          on: agent.id == ship.agent_id,
+          where: intent.id == ^intent_id,
+          select: {intent, agent}
+      )
+    end
   end
 
   defp installed_warp_drive(%{modules: modules}) do
@@ -237,16 +242,14 @@ defmodule SpaceTraders.Fleet.Intents do
     with :ok <- token_present(agent),
          :ok <- validate_intent_waypoint(waypoint),
          true <- reason != "" || {:error, :reason_required},
-         {:ok, agent} <- scoped_agent_for_ship(scope, agent.id, ship_symbol),
+         {:ok, agent} <- current_agent_for_ship(scope, agent.id, ship_symbol),
          {:ok, ship} <- Fleet.owned_ship(agent, ship_symbol),
          {:ok, intent} <-
            Repo.transaction(fn ->
              reservation =
                Repo.one(
                  from r in ShipReservation,
-                   where:
-                     r.ship_id == ^ship.id and r.operator_id == ^scope.operator.id and
-                       is_nil(r.released_at),
+                   where: r.ship_id == ^ship.id and is_nil(r.released_at),
                    lock: "FOR SHARE"
                )
 
@@ -289,10 +292,10 @@ defmodule SpaceTraders.Fleet.Intents do
   @doc "Stops an authenticated exceptional intervention after in-flight evidence is safe."
   def stop_intervention(%Scope{operator: %{id: operator_id}}, intent_id) do
     with {%Intent{caller: "intervention"} = intent, %AgentRecord{} = agent} <-
-           owned_intent_for_operator(operator_id, intent_id),
+           intent_for_deployment_operator(operator_id, intent_id),
          true <-
            ManualIntervention.authorized?(
-             operator_id,
+             agent.id,
              Repo.get!(Ship, intent.ship_id).symbol,
              intent_id
            ) ||

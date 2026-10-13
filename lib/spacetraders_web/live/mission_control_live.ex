@@ -50,12 +50,12 @@ defmodule SpaceTradersWeb.MissionControlLive do
               class="btn btn-primary"
             >Review Fleet Strategy</.link>
             <.link
-              :if={@projection.current_fleet.state == :empty}
+              :if={@projection.current_fleet.state == :empty && !registration_pending?(@projection)}
               navigate={~p"/agents/new"}
               class="btn btn-outline"
             >Mint an Agent</.link>
             <.link
-              :if={@projection.current_fleet.state == :empty}
+              :if={@projection.current_fleet.state == :empty && !registration_pending?(@projection)}
               navigate={~p"/operators/settings#import-agent"}
               class="btn btn-ghost"
             >Import an existing Agent</.link>
@@ -68,7 +68,7 @@ defmodule SpaceTradersWeb.MissionControlLive do
           class="rounded-2xl border border-warning/30 bg-warning/5 p-5"
         >
           <h2 class="text-xl font-bold">Current Fleet</h2>
-          <p :if={@projection.current_fleet.state == :empty}>
+          <p :if={@projection.current_fleet.state == :empty && !registration_pending?(@projection)}>
             No current Agent. Mint or import an Agent to establish the Fleet.
           </p>
           <p :if={@projection.current_fleet.state == :transition}>
@@ -78,6 +78,16 @@ defmodule SpaceTradersWeb.MissionControlLive do
             {@projection.current_fleet.summary}
           </p>
           <.link navigate={~p"/operators/settings"} class="link link-primary">Review Settings</.link>
+        </section>
+
+        <section
+          :if={registration_pending?(@projection)}
+          id="mission-registration-recovery"
+          class="rounded-2xl border border-warning/30 bg-warning/5 p-5"
+        >
+          <h2 class="text-xl font-bold">Registration recovery</h2>
+          <p>{@projection.registration_recovery.summary}</p>
+          <.link navigate={~p"/agents/new"} class="link link-primary">Reconcile registration</.link>
         </section>
 
         <section id="operating-health" class="rounded-2xl border border-base-300 bg-base-100 p-5">
@@ -154,7 +164,10 @@ defmodule SpaceTradersWeb.MissionControlLive do
 
         <section id="needs-attention" class="rounded-2xl border border-base-300 bg-base-100 p-5">
           <h2 class="text-xl font-bold">Needs attention</h2>
-          <p :if={@projection.conditions == []} class="mt-2 text-sm opacity-70">
+          <p
+            :if={@projection.conditions == [] && !registration_pending?(@projection)}
+            class="mt-2 text-sm opacity-70"
+          >
             No unresolved Attention or Intervention.
           </p>
           <ul class="mt-3 space-y-3">
@@ -428,6 +441,14 @@ defmodule SpaceTradersWeb.MissionControlLive do
     do: projection.current_fleet[:generation]
 
   defp health_label(%{strategy: %{emergency_stopped_at: %DateTime{}}}), do: "STOPPED"
+
+  defp health_label(%{registration_recovery: %{status: :in_progress}}),
+    do: "Registration in progress"
+
+  defp health_label(%{registration_recovery: %{status: status}})
+       when status in [:unresolved, :awaiting_adoption],
+       do: "Registration recovery needed"
+
   defp health_label(%{current_fleet: %{state: :unresolved}}), do: "Current Fleet needs resolution"
   defp health_label(%{current_fleet: %{state: :transition}}), do: "Server Reset transition"
   defp health_label(%{strategy: %{active_revision: nil}}), do: "Awaiting Fleet Strategy"
@@ -477,6 +498,10 @@ defmodule SpaceTradersWeb.MissionControlLive do
   defp health_detail(%{strategy: %{emergency_stopped_at: %DateTime{}}}),
     do: "Emergency Stop suppresses every new gameplay mutation. Review Strategy to resume safely."
 
+  defp health_detail(%{registration_recovery: %{status: status, summary: summary}})
+       when status != :clear,
+       do: summary
+
   defp health_detail(%{conditions: [_ | _]}),
     do: "Unresolved conditions remain pinned below, including acknowledged ones."
 
@@ -513,6 +538,12 @@ defmodule SpaceTradersWeb.MissionControlLive do
 
   defp strategy_capable_detail(_),
     do: "This Fleet Generation is still establishing authoritative state."
+
+  defp registration_pending?(%{registration_recovery: %{status: status}}), do: status != :clear
+
+  defp onboarding_message(%{registration_recovery: %{status: status}}) when status != :clear,
+    do:
+      "Registration must be reconciled before establishing another Agent. Fleet Strategy can still be reviewed."
 
   defp onboarding_message(%{strategy: %{active_revision: nil}}),
     do:

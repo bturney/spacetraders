@@ -18,25 +18,28 @@ defmodule SpaceTraders.ManualIntervention do
     timestamps(type: :utc_datetime_usec)
   end
 
+  @doc "The deployment's intervention record, across Generations."
   def list(%Scope{operator: %{id: operator_id}}) do
-    Repo.all(
-      from intervention in __MODULE__,
-        join: reservation in ShipReservation,
-        on: reservation.id == intervention.ship_reservation_id,
-        where: reservation.operator_id == ^operator_id,
-        preload: [:intent, :ship_reservation],
-        order_by: [desc: intervention.inserted_at]
-    )
+    if SpaceTraders.FleetGeneration.Identity.operator?(operator_id) do
+      Repo.all(
+        from intervention in __MODULE__,
+          preload: [:intent, :ship_reservation],
+          order_by: [desc: intervention.inserted_at]
+      )
+    else
+      []
+    end
   end
 
-  @doc "Checks that the pending or active Intent still owns its reserved Ship."
-  def authorized?(operator_id, ship_symbol, intent_id),
-    do: match?({:ok, _}, authorization(operator_id, ship_symbol, intent_id))
+  @doc "Checks that the pending or active Intent still owns the Agent's reserved Ship."
+  def authorized?(agent_id, ship_symbol, intent_id),
+    do: match?({:ok, _}, authorization(agent_id, ship_symbol, intent_id))
 
   @doc "Returns current authenticated Intervention provenance, optionally under admission locks."
-  def authorization(operator_id, ship_symbol, intent_id, opts \\ [])
+  def authorization(agent_id, ship_symbol, intent_id, opts \\ [])
 
-  def authorization(operator_id, ship_symbol, intent_id, opts) when is_integer(intent_id) do
+  def authorization(agent_id, ship_symbol, intent_id, opts)
+      when is_integer(agent_id) and is_integer(intent_id) do
     query =
       from intervention in __MODULE__,
         join: reservation in ShipReservation,
@@ -46,7 +49,7 @@ defmodule SpaceTraders.ManualIntervention do
         join: intent in Intent,
         on: intent.id == intervention.intent_id,
         where:
-          reservation.operator_id == ^operator_id and is_nil(reservation.released_at) and
+          ship.agent_id == ^agent_id and is_nil(reservation.released_at) and
             ship.symbol == ^ship_symbol and
             intent.id == ^intent_id and intent.ship_id == ship.id and
             intent.caller == "intervention" and intent.status in ^Intent.unfinished_states(),
@@ -60,6 +63,6 @@ defmodule SpaceTraders.ManualIntervention do
     end
   end
 
-  def authorization(_operator_id, _ship_symbol, _intent_id, _opts),
+  def authorization(_agent_id, _ship_symbol, _intent_id, _opts),
     do: {:error, :intervention_not_authorized}
 end

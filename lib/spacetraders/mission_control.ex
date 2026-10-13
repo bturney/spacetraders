@@ -391,6 +391,9 @@ defmodule SpaceTraders.MissionControl do
     %{
       strategy: strategy,
       current_fleet: identity,
+      # Reconstruct from the attempt even if its sender died before writing an
+      # Operator condition. The condition is narrative, never recovery truth.
+      registration_recovery: FleetGeneration.registration_recovery(scope),
       generations: generations,
       fleets: Enum.map(snapshots, &fleet_overview(&1, current_generations)),
       objectives: objective_overviews(strategy.active_revision, current_generations, snapshots),

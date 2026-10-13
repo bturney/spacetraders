@@ -249,6 +249,7 @@ defmodule SpaceTraders.CurrentFleetMigrationTest do
     assert retained() == before
   end
 
+  # Scoped to this migration: later migrations have their own proofs.
   defp migrate, do: run_migrations(to: @version)
 
   defp run_migrations(opts) do
