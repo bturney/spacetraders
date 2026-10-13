@@ -2,8 +2,12 @@ defmodule SpaceTraders.MissionControl do
   @moduledoc """
   Read projections for the authenticated Operator's Mission Control adapter.
 
-  The caller supplies an authenticated `SpaceTraders.Agent.Scope`. This module
-  owns the Operator-to-Agent scoping boundary and exposes no gameplay commands.
+  The caller supplies an authenticated `SpaceTraders.Agent.Scope`. Strategy,
+  condition and history projections belong to the deployment: the scope must
+  prove the deployment Operator (`SpaceTraders.OperatorAuthority`) and never
+  selects a tenant. Legacy per-Agent adapters (`agents/1`, `dashboard/2`,
+  `refresh_agent/3`, waypoint reads) remain until the World migration batch.
+  This module exposes no gameplay commands.
   Read failures remain in each Fleet snapshot so adapters can render unknown or
   stale state without substituting cached values.
   """
@@ -20,6 +24,7 @@ defmodule SpaceTraders.MissionControl do
   alias SpaceTraders.FleetStrategy.Revision
   alias SpaceTraders.Evidence
   alias SpaceTraders.Evidence.Observation
+  alias SpaceTraders.OperatorAuthority
   alias SpaceTraders.Repo
   import Ecto.Query, only: [from: 2]
 
@@ -407,7 +412,14 @@ defmodule SpaceTraders.MissionControl do
   end
 
   @doc "Chronological consequential decisions and conditions for the signed-in Operator."
-  def activity(%Scope{operator: %{id: operator_id}} = scope) do
+  def activity(%Scope{} = scope) do
+    case OperatorAuthority.authorize(scope) do
+      {:ok, operator_id} -> deployment_activity(scope, operator_id)
+      {:error, _reason} -> []
+    end
+  end
+
+  defp deployment_activity(scope, operator_id) do
     decisions =
       Repo.all(
         from episode in StrategyDecisionEpisode,
@@ -631,7 +643,14 @@ defmodule SpaceTraders.MissionControl do
   defp selection_summary(_episode), do: "Fleet selected a new commitment portfolio"
 
   @doc "Comparable Fleet Generation chapters using only retained outcome evidence."
-  def generation_recaps(%Scope{operator: %{id: operator_id}} = scope) do
+  def generation_recaps(%Scope{} = scope) do
+    case OperatorAuthority.authorize(scope) do
+      {:ok, operator_id} -> deployment_generation_recaps(scope, operator_id)
+      {:error, _reason} -> []
+    end
+  end
+
+  defp deployment_generation_recaps(scope, operator_id) do
     generations = FleetGeneration.list_generations(scope)
 
     episodes =
@@ -670,12 +689,30 @@ defmodule SpaceTraders.MissionControl do
         |> Enum.filter(&(DateTime.compare(&1.activated_at, generation.inserted_at) != :gt))
         |> Enum.max_by(& &1.activated_at, DateTime, fn -> nil end)
 
+      # Activation times have second precision. A Revision activated in the
+      # same second a Generation ended is ambiguous by time alone; activation
+      # moves only a live Generation onto the new Revision, so the ended
+      # Generation's own Revision decides whether that one governed it.
+      final_revision_number =
+        if generation.retired_at || generation.fenced_at do
+          case Map.get(revisions, generation.fleet_strategy_revision_id) do
+            %Revision{number: number} -> number
+            nil -> nil
+          end
+        end
+
+      end_second = DateTime.truncate(end_at, :second)
+
       active_revisions =
         revisions
         |> Map.values()
         |> Enum.filter(fn revision ->
           DateTime.compare(revision.activated_at, generation.inserted_at) != :lt and
-            DateTime.compare(revision.activated_at, end_at) != :gt
+            case DateTime.compare(revision.activated_at, end_second) do
+              :lt -> true
+              :eq -> is_nil(final_revision_number) or revision.number <= final_revision_number
+              :gt -> false
+            end
         end)
 
       %{
@@ -713,7 +750,16 @@ defmodule SpaceTraders.MissionControl do
   end
 
   @doc "Returns one Decision Episode scoped to the authenticated Operator."
-  def decision_episode(%Scope{operator: %{id: operator_id}}, id) when is_integer(id) do
+  def decision_episode(%Scope{} = scope, id) when is_integer(id) do
+    case OperatorAuthority.authorize(scope) do
+      {:ok, operator_id} -> deployment_decision_episode(operator_id, id)
+      {:error, _reason} -> nil
+    end
+  end
+
+  def decision_episode(%Scope{}, _id), do: nil
+
+  defp deployment_decision_episode(operator_id, id) do
     Repo.one(
       from episode in StrategyDecisionEpisode,
         join: generation in assoc(episode, :fleet_generation),
@@ -730,14 +776,16 @@ defmodule SpaceTraders.MissionControl do
     end
   end
 
-  def decision_episode(%Scope{}, _id), do: nil
-
   @doc "Returns a bounded, newest-first Decision Episode comparison across Fleet Generations."
-  def decision_episode_comparison(
-        %Scope{operator: %{id: operator_id}},
-        limit \\ @decision_episode_comparison_limit
-      )
+  def decision_episode_comparison(%Scope{} = scope, limit \\ @decision_episode_comparison_limit)
       when is_integer(limit) and limit > 0 do
+    case OperatorAuthority.authorize(scope) do
+      {:ok, operator_id} -> deployment_decision_episode_comparison(operator_id, limit)
+      {:error, _reason} -> []
+    end
+  end
+
+  defp deployment_decision_episode_comparison(operator_id, limit) do
     Repo.all(
       from episode in StrategyDecisionEpisode,
         join: generation in assoc(episode, :fleet_generation),

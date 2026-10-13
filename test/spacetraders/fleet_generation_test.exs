@@ -166,6 +166,35 @@ defmodule SpaceTraders.FleetGenerationTest do
                SpaceTraders.API.accept_contract(stale_token_reference, "contract-1")
     end
 
+    test "a Revision activated after replacement governs only the current Generation; history keeps its original Revision",
+         %{scope: scope, revision: revision, agent: agent} do
+      Req.Test.stub(SpaceTraders.API, &reset_then_fallback_response/1)
+      assert {:error, :stale_agent} = FleetGeneration.agent_overview(agent)
+      assert [current, retired] = FleetGeneration.list_generations(scope)
+
+      assert {:ok, %{state: :current, generation: %{id: current_id}}} =
+               FleetGeneration.current_fleet()
+
+      assert current_id == current.id
+
+      {:ok, draft} = FleetStrategy.select_preset(scope, "steady_growth")
+      assert {:ok, next} = FleetStrategy.activate(scope, draft.draft_version)
+      assert next.number == revision.number + 1
+
+      assert [current_after, retired_after] = FleetGeneration.list_generations(scope)
+      assert current_after.id == current.id
+      assert current_after.fleet_strategy_revision_id == next.id
+      assert retired_after.id == retired.id
+      assert retired_after.fleet_strategy_revision_id == revision.id
+      assert retired_after.retired_at == retired.retired_at
+
+      recaps =
+        Map.new(SpaceTraders.MissionControl.generation_recaps(scope), &{&1.generation.id, &1})
+
+      assert recaps[retired.id].revisions == [revision.number]
+      assert recaps[current.id].revisions == [revision.number, next.number]
+    end
+
     test "failed replacement retains the fenced Stale Agent until a successful mint",
          %{scope: scope, revision: revision, agent: agent} do
       assert [original] = FleetGeneration.list_generations(scope)
