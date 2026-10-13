@@ -1,6 +1,10 @@
 defmodule SpaceTraders.EmergencyStopAdmission do
   @moduledoc false
 
+  # Process-local admission cache for durable Emergency Stop intent. A stop is
+  # global Operator intent: it fingerprints every credential in the deployment,
+  # not only its author's, so no Agent row can send a mutation around it.
+
   use GenServer
 
   import Ecto.Query, warn: false
@@ -17,7 +21,7 @@ defmodule SpaceTraders.EmergencyStopAdmission do
     guard = make_ref()
 
     :ok =
-      GenServer.call(__MODULE__, {:block, operator_id, guard, token_fingerprints(operator_id)})
+      GenServer.call(__MODULE__, {:block, operator_id, guard, token_fingerprints()})
 
     guard
   end
@@ -25,7 +29,7 @@ defmodule SpaceTraders.EmergencyStopAdmission do
   def engage(operator_id, version, guard) do
     GenServer.call(
       __MODULE__,
-      {:engage, operator_id, version, guard, token_fingerprints(operator_id)}
+      {:engage, operator_id, version, guard, token_fingerprints()}
     )
   end
 
@@ -113,18 +117,12 @@ defmodule SpaceTraders.EmergencyStopAdmission do
     {:reply, :ok, state}
   end
 
-  def handle_call({:track_credential, operator_id, fingerprint}, _from, state) do
+  # Any engaged stop covers a credential stored while it holds.
+  def handle_call({:track_credential, _operator_id, fingerprint}, _from, state) do
     state =
-      case Map.get(state, operator_id) do
-        nil ->
-          state
-
-        stop ->
-          Map.put(state, operator_id, %{
-            stop
-            | fingerprints: MapSet.put(stop.fingerprints, fingerprint)
-          })
-      end
+      Map.new(state, fn {stop_owner, stop} ->
+        {stop_owner, %{stop | fingerprints: MapSet.put(stop.fingerprints, fingerprint)}}
+      end)
 
     {:reply, :ok, state}
   end
@@ -161,58 +159,24 @@ defmodule SpaceTraders.EmergencyStopAdmission do
   end
 
   defp load_stopped_operators do
-    operator_ids =
+    stops =
       Repo.all(
         from(strategy in Strategy,
           where: not is_nil(strategy.emergency_stopped_at),
-          select: strategy.operator_id
+          select: {strategy.operator_id, strategy.emergency_stop_version}
         )
       )
 
-    accounts =
-      Repo.all(
-        from(operator in Operator,
-          where: operator.id in ^operator_ids,
-          select: {operator.id, operator.account_token}
-        )
-      )
+    fingerprints = if stops == [], do: MapSet.new(), else: token_fingerprints()
 
-    agents =
-      Repo.all(
-        from(agent in Agent,
-          where: agent.operator_id in ^operator_ids,
-          select: {agent.operator_id, agent.agent_token}
-        )
-      )
-
-    Map.new(operator_ids, fn operator_id ->
-      tokens =
-        for {owner_id, token} <- accounts ++ agents,
-            owner_id == operator_id,
-            is_binary(token) and token != "",
-            do: fingerprint(token)
-
-      version = Repo.get_by!(Strategy, operator_id: operator_id).emergency_stop_version
-      {operator_id, %{version: version, fingerprints: MapSet.new(tokens)}}
+    Map.new(stops, fn {operator_id, version} ->
+      {operator_id, %{version: version, fingerprints: fingerprints}}
     end)
   end
 
-  defp token_fingerprints(operator_id) do
-    account_tokens =
-      Repo.all(
-        from(operator in Operator,
-          where: operator.id == ^operator_id,
-          select: operator.account_token
-        )
-      )
-
-    agent_tokens =
-      Repo.all(
-        from(agent in Agent,
-          where: agent.operator_id == ^operator_id,
-          select: agent.agent_token
-        )
-      )
+  defp token_fingerprints do
+    account_tokens = Repo.all(from(operator in Operator, select: operator.account_token))
+    agent_tokens = Repo.all(from(agent in Agent, select: agent.agent_token))
 
     (account_tokens ++ agent_tokens)
     |> Enum.filter(&(is_binary(&1) and &1 != ""))

@@ -566,13 +566,32 @@ defmodule SpaceTraders.FleetGeneration do
       ) do
     now = Clock.utc_now()
 
-    # The live Generations, read once before they move to the new Revision.
+    # The canonical current Generation, read once before it moves to the new
+    # Revision. A fenced, retired or historical Generation keeps the Revision
+    # that governed it. Before adoption publishes an identity (compatible
+    # legacy writers only; boot preflight always publishes), the sole
+    # Operator's unfinished Generation is the candidate.
+    canonical_id =
+      Repo.one(
+        from identity in "current_fleet_identity",
+          where: identity.id == 1,
+          select: identity.fleet_generation_id
+      )
+
+    live_query =
+      from generation in Generation,
+        where:
+          generation.operator_id == ^operator_id and is_nil(generation.fenced_at) and
+            is_nil(generation.retired_at)
+
+    live_query =
+      if canonical_id,
+        do: from(generation in live_query, where: generation.id == ^canonical_id),
+        else: live_query
+
     live =
       Repo.all(
-        from generation in Generation,
-          where:
-            generation.operator_id == ^operator_id and is_nil(generation.fenced_at) and
-              is_nil(generation.retired_at),
+        from generation in live_query,
           select: %{
             id: generation.id,
             agent_id: generation.agent_id,
@@ -580,12 +599,10 @@ defmodule SpaceTraders.FleetGeneration do
           }
       )
 
+    live_ids = Enum.map(live, & &1.id)
+
     Repo.update_all(
-      from(generation in Generation,
-        where:
-          generation.operator_id == ^operator_id and is_nil(generation.fenced_at) and
-            is_nil(generation.retired_at)
-      ),
+      from(generation in Generation, where: generation.id in ^live_ids),
       set: [
         fleet_strategy_revision_id: revision_id,
         objective_progress: generation_progress(revision, nil),
@@ -603,20 +620,10 @@ defmodule SpaceTraders.FleetGeneration do
     # is lost. The next Market boundary retires any older-Revision Portfolio.
     log_activation(scope, revision_id, live)
 
-    active_generation =
-      Repo.one(
-        from generation in Generation,
-          where:
-            generation.operator_id == ^operator_id and is_nil(generation.fenced_at) and
-              is_nil(generation.retired_at),
-          order_by: [desc: generation.number],
-          limit: 1
-      )
-
     :ok =
       OperatorConditions.resolve_objective_conditions(
         scope,
-        active_generation && active_generation.id,
+        List.first(live_ids),
         revision_id
       )
 

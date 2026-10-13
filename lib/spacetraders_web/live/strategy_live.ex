@@ -4,15 +4,14 @@ defmodule SpaceTradersWeb.StrategyLive do
   use SpaceTradersWeb, :live_view
 
   alias SpaceTraders.{FleetStrategy, MissionControl}
+  alias SpaceTraders.MissionControl.Channels
   alias SpaceTraders.FleetStrategy.{Revision, StandingAuthority}
 
   @impl true
   def mount(_params, _session, socket) do
-    operator_id = socket.assigns.current_scope.operator.id
-
     socket =
       if connected?(socket) do
-        Phoenix.PubSub.subscribe(SpaceTraders.PubSub, "fleet_strategy:#{operator_id}")
+        Channels.subscribe_strategy()
 
         assign(socket, availability: %{}, availability_ready?: false)
       else
@@ -552,25 +551,21 @@ defmodule SpaceTradersWeb.StrategyLive do
   end
 
   @impl true
-  def handle_info({:fleet_strategy_updated, operator_id}, socket) do
-    if socket.assigns.current_scope.operator.id == operator_id do
-      socket = maybe_load_availability(socket)
-      previous = socket.assigns.projection
-      reviewed = assign_review(socket)
-      projection = reviewed.assigns.projection
+  def handle_info(:fleet_strategy_updated, socket) do
+    socket = maybe_load_availability(socket)
+    previous = socket.assigns.projection
+    reviewed = assign_review(socket)
+    projection = reviewed.assigns.projection
 
-      cond do
-        projection.draft_version != previous.draft_version ->
-          {:noreply, assign(reviewed, :draft_stale?, true)}
+    cond do
+      projection.draft_version != previous.draft_version ->
+        {:noreply, assign(reviewed, :draft_stale?, true)}
 
-        projection.emergency_stop_version != previous.emergency_stop_version ->
-          {:noreply, reviewed}
+      projection.emergency_stop_version != previous.emergency_stop_version ->
+        {:noreply, reviewed}
 
-        true ->
-          {:noreply, socket}
-      end
-    else
-      {:noreply, socket}
+      true ->
+        {:noreply, socket}
     end
   end
 
