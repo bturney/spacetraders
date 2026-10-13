@@ -189,7 +189,9 @@ defmodule SpaceTraders.API do
       attempt = MutationAttempts.get!(id)
 
       with {:ok, schema} <- ShipAction.response_schema(attempt.operation_id),
-           {:ok, token} <- resolve_agent_token(%AgentTokenReference{agent_id: attempt.agent_id}) do
+           # Recorded admission owns the current-Generation check, so an attempt
+           # that lost authority is settled durably rather than left prepared.
+           {:ok, token} <- stored_agent_token(attempt.agent_id) do
         operation = OperationInventory.fetch!(attempt.operation_id)
         request = attempt.prepared_evidence["request"]
 
@@ -639,19 +641,47 @@ defmodule SpaceTraders.API do
           Req.Request.halt(request, %MutationSuppressedError{reason: reason})
       end
     else
-      authorize_unrecorded_dispatch(request, method, token, attempt, shadow)
+      authorize_unrecorded_dispatch(request, method, token, attempt, shadow, opts)
     end
   end
 
-  defp authorize_unrecorded_dispatch(request, method, token, attempt, shadow) do
-    with :ok <- mutation_authorized?(method, token),
+  defp authorize_unrecorded_dispatch(request, method, token, attempt, shadow, opts) do
+    # Capacity admission can wait across a Generation transition. The credential
+    # resolved before that wait cannot confer authority on the eventual send.
+    with :ok <- gameplay_authorized?(opts[:agent_id]),
+         :ok <- mutation_authorized?(method, token),
          {:ok, _attempt} <- mark_mutation_sent(attempt) do
       ShadowAdmission.observe_dispatch(shadow)
       request
     else
-      {:error, reason} -> Req.Request.halt(request, %MutationSuppressedError{reason: reason})
+      {:error, reason} ->
+        reason = record_suppressed_attempt(attempt, reason)
+        Req.Request.halt(request, %MutationSuppressedError{reason: reason})
     end
   end
+
+  defp record_suppressed_attempt(nil, reason), do: reason
+
+  defp record_suppressed_attempt(%Attempt{} = attempt, reason) do
+    # A mutation owner may already have settled admission (e.g. acquisition's
+    # missing offer). Never overwrite its disposition or append not-sent twice.
+    case MutationAttempts.get!(attempt.id) do
+      %Attempt{state: "prepared"} = prepared ->
+        case MutationAttempts.record_not_sent(prepared, inspect(reason)) do
+          {:ok, _} -> reason
+          {:error, persistence_reason} -> persistence_reason
+        end
+
+      _already_disposed ->
+        reason
+    end
+  end
+
+  defp gameplay_authorized?(agent_id) when is_integer(agent_id),
+    do: SpaceTraders.FleetGeneration.gameplay_authority(agent_id)
+
+  # Initial import/registration has no established Agent identity yet.
+  defp gameplay_authorized?(_agent_id), do: :ok
 
   defp prepare_mutation_attempt(%{classification: :read}, _path, _opts), do: {:ok, nil}
 
@@ -803,10 +833,12 @@ defmodule SpaceTraders.API do
   defp maybe_auth(nil), do: []
   defp maybe_auth(token), do: [auth: {:bearer, token}]
 
+  # Every stored credential resolves through the current-Generation authority,
+  # so cached references, Ship lookups and recorded attempts of a predecessor
+  # cannot dispatch new gameplay.
   defp resolve_agent_token(%AgentTokenReference{agent_id: agent_id}) when is_integer(agent_id) do
-    case Repo.get(AgentRecord, agent_id) do
-      %AgentRecord{agent_token: token} when is_binary(token) and token != "" -> {:ok, token}
-      _ -> {:error, :agent_token_missing}
+    with :ok <- SpaceTraders.FleetGeneration.gameplay_authority(agent_id) do
+      stored_agent_token(agent_id)
     end
   end
 
@@ -814,6 +846,13 @@ defmodule SpaceTraders.API do
        when is_reference(temporary_id) do
     case Process.delete({AgentTokenReference, temporary_id}) do
       token when is_binary(token) and token != "" -> {:ok, token}
+      _ -> {:error, :agent_token_missing}
+    end
+  end
+
+  defp stored_agent_token(agent_id) do
+    case Repo.get(AgentRecord, agent_id) do
+      %AgentRecord{agent_token: token} when is_binary(token) and token != "" -> {:ok, token}
       _ -> {:error, :agent_token_missing}
     end
   end
