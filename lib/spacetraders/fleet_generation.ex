@@ -560,14 +560,13 @@ defmodule SpaceTraders.FleetGeneration do
 
   defp validate_registration(scope, attrs) do
     changeset = Agent.changeset(%Agent{}, attrs)
+    symbols = replacement_symbols(attrs, changeset)
 
     with :ok <- SpaceTraders.RuntimeAuthority.execution_allowed?(),
          :ok <- FleetStrategy.mutation_allowed?(scope),
-         :ok <- validate_mint_attrs(changeset) do
-      validate_replacement_symbols(
-        replacement_symbols(attrs, changeset),
-        get_field(changeset, :faction)
-      )
+         :ok <- validate_mint_attrs(changeset),
+         :ok <- validate_replacement_symbols(symbols, get_field(changeset, :faction)) do
+      ensure_symbol_is_not_stale_for_another_operator(scope.operator, symbols)
     end
   end
 
@@ -580,8 +579,7 @@ defmodule SpaceTraders.FleetGeneration do
     # awaiting adoption already holds its own encrypted AgentToken.
     with :ok <- validate_registration(scope, attrs),
          {:ok, operator, account_token} <-
-           resolve_account_token(%CredentialReference{operator_id: operator_id}),
-         :ok <- ensure_symbol_is_not_stale_for_another_operator(operator, replacement_symbols) do
+           resolve_account_token(%CredentialReference{operator_id: operator_id}) do
       {:ok,
        %{
          operator: operator,
