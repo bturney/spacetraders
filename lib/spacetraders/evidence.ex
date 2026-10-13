@@ -1639,7 +1639,9 @@ defmodule SpaceTraders.Evidence do
   defp observation_generation(agent_id) do
     Repo.one(
       from generation in SpaceTraders.FleetGeneration.Generation,
-        where: generation.agent_id == ^agent_id and is_nil(generation.retired_at),
+        # An Agent has at most one Generation; a late result for a retired one
+        # keeps that original attribution rather than becoming unattributed.
+        where: generation.agent_id == ^agent_id,
         select: generation.id
     )
   end
@@ -1701,8 +1703,11 @@ defmodule SpaceTraders.Evidence do
 
   @doc "Refreshes authoritative Agent and Ship state before post-stop planning."
   def refresh_for_emergency_stop_resume(%Scope{operator: operator}) do
+    # Only the current Generation can resume gameplay; retained history has
+    # nothing to refresh.
     operator
     |> Agent.list_agents()
+    |> Enum.filter(&(FleetGeneration.gameplay_authority(&1.id) == :ok))
     |> Enum.reduce_while(:ok, fn agent, :ok ->
       case FleetGeneration.agent_overview(agent) do
         {:ok, _overview} ->

@@ -397,6 +397,7 @@ defmodule SpaceTraders.Fleet.Intents.RecordedAction do
     with :ok <- SpaceTraders.RuntimeAuthority.execution_allowed?(),
          :ok <- SpaceTraders.EmergencyStopAdmission.mutation_allowed?(agent.agent_token),
          :ok <- SpaceTraders.FleetGenerationAdmission.mutation_allowed?(agent.agent_token),
+         :ok <- SpaceTraders.FleetGeneration.gameplay_authority(agent.id),
          true <- is_nil(agent.stale_at) and ship.agent_id == agent.id,
          true <- Intent.unfinished?(intent),
          {:ok, owned} <- owner(agent, ship, intent),
@@ -415,7 +416,7 @@ defmodule SpaceTraders.Fleet.Intents.RecordedAction do
       Repo.one(from s in Strategy, where: s.operator_id == ^agent.operator_id, lock: "FOR SHARE")
 
     with {:ok, authority} <-
-           ManualIntervention.authorization(agent.operator_id, ship.symbol, intent.id, lock: true) do
+           ManualIntervention.authorization(agent.id, ship.symbol, intent.id, lock: true) do
       claim =
         Map.merge(authority, %{commitment_id: nil, portfolio_id: nil, portfolio_version: nil})
 

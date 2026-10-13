@@ -3,20 +3,53 @@ defmodule SpaceTradersWeb.EntityLive do
 
   use SpaceTradersWeb, :live_view
 
-  alias SpaceTraders.{Agent, Evidence, Fleet, World}
+  alias SpaceTraders.{Evidence, Fleet, FleetGeneration, World}
 
   @freshness_seconds 300
 
   @impl true
   def mount(params, _session, socket) do
-    agents = Agent.list_agents(socket.assigns.current_scope.operator)
+    # The current Fleet is resolved exactly as Mission Control resolves it. A
+    # stale `?agent=` link can only open read-only history under its original
+    # Generation; it never selects or commands another Generation as current.
+    current =
+      case FleetGeneration.current_fleet(socket.assigns.current_scope) do
+        {:ok, %{state: :current, agent: agent, generation: generation}} ->
+          %{agent: agent, generation: generation}
 
-    case requested_agent(agents, params["agent"]) ||
-           agent_for(agents, socket.assigns.live_action, params) do
-      nil -> {:ok, push_navigate(socket, to: ~p"/world")}
-      agent -> {:ok, assign_entity(socket, agent, params)}
+        _ ->
+          nil
+      end
+
+    case historical_holder(params["agent"], current) || current do
+      nil ->
+        {:ok, push_navigate(socket, to: ~p"/world")}
+
+      %{agent: agent, generation: generation} = holder ->
+        historical? = holder != current
+
+        {:ok,
+         socket
+         |> assign(
+           historical?: historical?,
+           generation: generation,
+           link_agent: if(historical?, do: agent)
+         )
+         |> assign_entity(agent, params)}
     end
   end
+
+  defp historical_holder(raw_id, current) when is_binary(raw_id) do
+    with {agent_id, ""} <- Integer.parse(raw_id),
+         false <- current != nil and current.agent.id == agent_id,
+         {:ok, holder} <- FleetGeneration.evidence_holder(agent_id) do
+      holder
+    else
+      _ -> nil
+    end
+  end
+
+  defp historical_holder(_raw_id, _current), do: nil
 
   @impl true
   def render(assigns) do
@@ -28,6 +61,18 @@ defmodule SpaceTradersWeb.EntityLive do
           <span class="px-1 opacity-60">/</span>
           <span>Evidence held by {@agent.symbol}</span>
         </nav>
+
+        <p
+          :if={@historical?}
+          id="historical-evidence"
+          class="rounded-lg border border-warning/40 bg-warning/10 p-3 text-sm"
+        >
+          Historical evidence held by {@agent.symbol}{generation_label(@generation)}.
+          This is not the current Fleet; nothing here can be commanded.
+        </p>
+        <p :if={!@historical?} id="current-fleet-evidence" class="text-sm opacity-70">
+          Current Fleet {@agent.symbol}{generation_label(@generation)}
+        </p>
 
         <section :if={@entity == :system} id={"system-#{@system}"} class="space-y-4">
           <header>
@@ -46,7 +91,7 @@ defmodule SpaceTradersWeb.EntityLive do
             <ul :if={@waypoints != []} class="mt-3 space-y-2">
               <li :for={waypoint <- @waypoints}>
                 <.link
-                  navigate={waypoint_path(@agent, @system, waypoint.symbol)}
+                  navigate={waypoint_path(@link_agent, @system, waypoint.symbol)}
                   class="link link-primary"
                 >
                   {waypoint.symbol}
@@ -62,7 +107,7 @@ defmodule SpaceTradersWeb.EntityLive do
             <p class="eyebrow">Known context</p>
             <h1 class="text-3xl font-bold">Waypoint {@waypoint}</h1>
             <p class="mt-2 text-sm opacity-70">
-              <.link navigate={system_path(@agent, @system)} class="link link-primary">System {@system}</.link>
+              <.link navigate={system_path(@link_agent, @system)} class="link link-primary">System {@system}</.link>
               · {existence_label(@intelligence)}
             </p>
           </header>
@@ -106,15 +151,15 @@ defmodule SpaceTradersWeb.EntityLive do
 
           <nav class="flex flex-wrap gap-3" aria-label="Waypoint contexts">
             <.link
-              navigate={entity_path(@agent, @system, @waypoint, :market)}
+              navigate={entity_path(@link_agent, @system, @waypoint, :market)}
               class="btn btn-outline btn-sm"
             >Market</.link>
             <.link
-              navigate={entity_path(@agent, @system, @waypoint, :shipyard)}
+              navigate={entity_path(@link_agent, @system, @waypoint, :shipyard)}
               class="btn btn-outline btn-sm"
             >Shipyard</.link>
             <.link
-              navigate={entity_path(@agent, @system, @waypoint, :construction)}
+              navigate={entity_path(@link_agent, @system, @waypoint, :construction)}
               class="btn btn-outline btn-sm"
             >Construction</.link>
           </nav>
@@ -129,7 +174,10 @@ defmodule SpaceTradersWeb.EntityLive do
             <p class="eyebrow">Governed evidence</p>
             <h1 class="text-3xl font-bold">{entity_name(@entity)} {@waypoint}</h1>
             <p class="mt-2 text-sm opacity-70">
-              <.link navigate={waypoint_path(@agent, @system, @waypoint)} class="link link-primary">
+              <.link
+                navigate={waypoint_path(@link_agent, @system, @waypoint)}
+                class="link link-primary"
+              >
                 Waypoint {@waypoint}
               </.link>
               · {existence_label(@intelligence)}
@@ -171,7 +219,7 @@ defmodule SpaceTradersWeb.EntityLive do
             </p>
             <.link
               :if={ship_waypoint(@ship_observation)}
-              navigate={ship_waypoint_path(@agent, @ship_observation)}
+              navigate={ship_waypoint_path(@link_agent, @ship_observation)}
               class="link link-primary mt-3 inline-block"
             >{ship_waypoint(@ship_observation)}</.link>
           </section>
@@ -198,7 +246,7 @@ defmodule SpaceTradersWeb.EntityLive do
             <ul :if={@contract} class="mt-3 space-y-2">
               <li :for={delivery <- contract_deliveries(@contract)}>
                 <.link
-                  navigate={contract_waypoint_path(@agent, delivery.destination)}
+                  navigate={contract_waypoint_path(@link_agent, delivery.destination)}
                   class="link link-primary"
                 >
                   {delivery.destination}
@@ -309,53 +357,6 @@ defmodule SpaceTradersWeb.EntityLive do
     )
   end
 
-  defp agent_for([], _entity, _params), do: nil
-
-  defp agent_for(agents, :system, %{"system" => system}) do
-    Enum.find(
-      agents,
-      &(World.waypoints(&1, system, DateTime.utc_now(), @freshness_seconds) != [])
-    ) ||
-      List.first(agents)
-  end
-
-  defp agent_for(agents, entity, %{"system" => system, "waypoint" => waypoint})
-       when entity in [:waypoint, :market, :shipyard, :construction] do
-    Enum.find(agents, fn agent ->
-      intelligence =
-        World.intelligence(
-          agent,
-          entity,
-          system,
-          waypoint,
-          DateTime.utc_now(),
-          @freshness_seconds
-        )
-
-      intelligence.known_existence? or intelligence.facts != %{}
-    end) || List.first(agents)
-  end
-
-  defp agent_for(agents, :ship, %{"ship_symbol" => ship_symbol}) do
-    Enum.find(agents, &match?({:ok, _}, Fleet.owned_ship(&1, ship_symbol))) || List.first(agents)
-  end
-
-  defp agent_for(agents, :contract, %{"contract_id" => contract_id}) do
-    Enum.find(agents, fn agent ->
-      agent
-      |> Evidence.latest_observation("contracts:#{agent.symbol}")
-      |> contract_from_observation(contract_id)
-    end) || List.first(agents)
-  end
-
-  defp requested_agent(agents, raw_id) when is_binary(raw_id) do
-    with {agent_id, ""} <- Integer.parse(raw_id) do
-      Enum.find(agents, &(&1.id == agent_id))
-    end
-  end
-
-  defp requested_agent(_agents, _raw_id), do: nil
-
   defp system_path(agent, system), do: path_for_agent(~p"/world/systems/#{system}", agent)
 
   defp waypoint_path(agent, system, waypoint),
@@ -439,7 +440,11 @@ defmodule SpaceTradersWeb.EntityLive do
   defp observation_source("get-contracts"), do: "Contract observation"
   defp observation_source(_operation_id), do: "Governed observation"
 
+  defp path_for_agent(path, nil), do: path
   defp path_for_agent(path, agent), do: "#{path}?agent=#{agent.id}"
+
+  defp generation_label(%{number: number}), do: " · Generation #{number}"
+  defp generation_label(_generation), do: ""
 
   defp existence_label(%{known_existence?: true}), do: "Known waypoint"
   defp existence_label(_), do: "Existence has not been established"

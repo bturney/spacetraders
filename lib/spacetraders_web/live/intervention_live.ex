@@ -187,17 +187,17 @@ defmodule SpaceTradersWeb.InterventionLive do
   defp parse_id(_), do: {:error, :invalid_ship}
 
   defp load_state(socket) do
-    operator_id = socket.assigns.current_scope.operator.id
-
+    # Only the current Generation's Ships can be reserved or commanded; the
+    # intervention record below stays the deployment's full history.
     ships =
       Repo.all(
         from ship in Ship,
           join: agent in AgentRecord,
           on: agent.id == ship.agent_id,
-          where: agent.operator_id == ^operator_id,
           preload: [agent: agent],
           order_by: ship.symbol
       )
+      |> Enum.filter(&(SpaceTraders.FleetGeneration.gameplay_authority(&1.agent_id) == :ok))
 
     assign(socket,
       ships: ships,

@@ -176,7 +176,9 @@ defmodule SpaceTraders.API do
       attempt = MutationAttempts.get!(id)
 
       with {:ok, schema} <- ShipAction.response_schema(attempt.operation_id),
-           {:ok, token} <- resolve_agent_token(%AgentTokenReference{agent_id: attempt.agent_id}) do
+           # Recorded admission owns the current-Generation check, so an attempt
+           # that lost authority is settled durably rather than left prepared.
+           {:ok, token} <- stored_agent_token(attempt.agent_id) do
         operation = OperationInventory.fetch!(attempt.operation_id)
         request = attempt.prepared_evidence["request"]
 
@@ -718,10 +720,12 @@ defmodule SpaceTraders.API do
   defp maybe_auth(nil), do: []
   defp maybe_auth(token), do: [auth: {:bearer, token}]
 
+  # Every stored credential resolves through the current-Generation authority,
+  # so cached references, Ship lookups and recorded attempts of a predecessor
+  # cannot dispatch new gameplay.
   defp resolve_agent_token(%AgentTokenReference{agent_id: agent_id}) when is_integer(agent_id) do
-    case Repo.get(AgentRecord, agent_id) do
-      %AgentRecord{agent_token: token} when is_binary(token) and token != "" -> {:ok, token}
-      _ -> {:error, :agent_token_missing}
+    with :ok <- SpaceTraders.FleetGeneration.gameplay_authority(agent_id) do
+      stored_agent_token(agent_id)
     end
   end
 
@@ -729,6 +733,13 @@ defmodule SpaceTraders.API do
        when is_reference(temporary_id) do
     case Process.delete({AgentTokenReference, temporary_id}) do
       token when is_binary(token) and token != "" -> {:ok, token}
+      _ -> {:error, :agent_token_missing}
+    end
+  end
+
+  defp stored_agent_token(agent_id) do
+    case Repo.get(AgentRecord, agent_id) do
+      %AgentRecord{agent_token: token} when is_binary(token) and token != "" -> {:ok, token}
       _ -> {:error, :agent_token_missing}
     end
   end

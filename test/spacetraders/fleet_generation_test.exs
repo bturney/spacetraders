@@ -161,7 +161,8 @@ defmodule SpaceTraders.FleetGenerationTest do
         |> agent_fixture(%{agent_token: "FIRST_TOKEN"})
         |> AgentTokenReference.new()
 
-      assert {:error, :stale_agent} =
+      # A retained predecessor token has no current-Generation authority at all.
+      assert {:error, :generation_not_current} =
                SpaceTraders.API.accept_contract(stale_token_reference, "contract-1")
     end
 
