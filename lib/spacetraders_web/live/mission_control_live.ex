@@ -140,7 +140,9 @@ defmodule SpaceTradersWeb.MissionControlLive do
               id="generation-replacement"
               class="mt-1 text-sm opacity-70"
             >
-              Replaced Generation {reset_predecessor(@projection).number} ({reset_predecessor(@projection).symbol}) after a Server Reset.
+              Replaced Generation {reset_predecessor(@projection).number} ({reset_predecessor(
+                @projection
+              ).symbol}) after a Server Reset.
             </p>
           </article>
           <article class="rounded-2xl border border-base-300 bg-base-100 p-5">

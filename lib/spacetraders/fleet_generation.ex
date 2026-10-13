@@ -190,8 +190,7 @@ defmodule SpaceTraders.FleetGeneration do
         Agent.changeset(%Agent{}, %{symbol: name, faction: faction}).valid?
       end)
 
-    {:ok,
-     %{symbol: symbol, faction: faction, replacement_symbols: Enum.uniq([symbol | banked])}}
+    {:ok, %{symbol: symbol, faction: faction, replacement_symbols: Enum.uniq([symbol | banked])}}
   end
 
   defp server_reset_replacement(_identity), do: {:error, :no_server_reset}

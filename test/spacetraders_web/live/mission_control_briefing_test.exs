@@ -583,10 +583,12 @@ defmodule SpaceTradersWeb.MissionControlBriefingTest do
     test "missing AccountToken authority is a pinned Intervention, not a retry loop",
          %{conn: conn, scope: scope} do
       mint_fleet(scope)
+
       scope.operator.id
       |> Agent.get_operator!()
       |> Ecto.Changeset.change(account_token: nil)
       |> Repo.update!()
+
       parent = self()
 
       Req.Test.stub(SpaceTraders.API, fn conn ->
