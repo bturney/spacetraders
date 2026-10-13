@@ -11,6 +11,9 @@ defmodule SpaceTraders.Fleet.Ship do
   schema "ships" do
     field :symbol, :string
     field :ship_type, :string
+    # Set when its Agent's Fleet Generation is replaced: retained as history,
+    # never a resource of the replacement, even when it reuses the symbol.
+    field :retired_at, :utc_datetime
 
     belongs_to :agent, SpaceTraders.Agent.Agent
     has_many :intents, SpaceTraders.Fleet.Intent

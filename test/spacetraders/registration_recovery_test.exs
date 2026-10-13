@@ -564,6 +564,154 @@ defmodule SpaceTraders.RegistrationRecoveryTest do
     end
   end
 
+  describe "Server Reset replacement" do
+    setup %{scope: scope} do
+      game(fn conn -> Req.Test.json(conn, registration("RESETME", "FIRST_SECRET")) end)
+
+      {:ok, %{agent: minted}} =
+        in_session(fn -> FleetGeneration.mint(scope, mint("RESETME")) end)
+
+      assert_received {:game_request, "POST", "/v2/register", "RESETME"}
+      parent = self()
+
+      # Reads prove the reset; each registration is held until released.
+      game(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/v2/my/agent"} ->
+            reset_mismatch(conn)
+
+          {"POST", "/v2/register"} ->
+            send(parent, {:registering, self()})
+
+            receive do
+              :respond -> Req.Test.json(conn, registration("RESETME", "SECOND_SECRET"))
+            after
+              5000 -> flunk("held registration was not released")
+            end
+        end
+      end)
+
+      %{predecessor: Repo.get!(Agent.Agent, minted.id)}
+    end
+
+    test "a competing Operator retry waits in PostgreSQL and never dispatches a second registration",
+         %{scope: scope, predecessor: predecessor} do
+      detecting = contender(fn -> FleetGeneration.agent_overview(predecessor) end)
+      assert_receive {:registering, request}, 2000
+
+      retry = contender(fn -> FleetGeneration.replace_after_reset(scope) end)
+      await_blocked_by(retry.backend, detecting.backend)
+      restart = contender(fn -> FleetGeneration.resume_reset_replacement() end)
+      await_queued_behind(restart.backend, detecting.backend)
+
+      send(request, :respond)
+      assert {:error, :stale_agent} = Task.await(detecting.task, 10_000)
+      assert {:error, :current_fleet_exists} = Task.await(retry.task, 10_000)
+      assert {:error, :current_fleet_exists} = Task.await(restart.task, 10_000)
+
+      assert_received {:game_request, "GET", "/v2/my/agent", nil}
+      assert_received {:game_request, "POST", "/v2/register", "RESETME"}
+      refute_received {:game_request, _, _, _}
+      assert_sole_successor(scope, predecessor)
+    end
+
+    test "death before dispatch leaves the predecessor fenced; restart replaces it exactly once",
+         %{scope: scope, predecessor: predecessor} do
+      dependency =
+        SpaceTraders.SafetyFence.DependencyKey.agent_symbol(scope.operator.id, "RESETME")
+
+      holder =
+        hold(fn ->
+          Repo.query!("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [dependency])
+        end)
+
+      detecting = killable(fn -> FleetGeneration.agent_overview(predecessor) end)
+      await_blocked_by(detecting.backend, holder.backend)
+      assert {:disconnected, _log} = RuntimeDeath.kill(detecting.pid, detecting.backend)
+      release(holder)
+
+      # The committed fence survives: no gameplay authority, no current Fleet.
+      restart_capacity_governor()
+      assert {:ok, %{state: :transition}} = FleetGeneration.current_fleet(scope)
+
+      assert {:error, :stale_agent} =
+               FleetGeneration.gameplay_authority(predecessor.id)
+
+      assert_received {:game_request, "GET", "/v2/my/agent", nil}
+      refute_received {:game_request, _, _, _}
+
+      resumed = contender(fn -> FleetGeneration.resume_reset_replacement() end)
+      assert_receive {:registering, request}, 2000
+      send(request, :respond)
+      assert {:ok, %{agent: %{symbol: "RESETME"}}} = Task.await(resumed.task, 10_000)
+
+      assert_received {:game_request, "POST", "/v2/register", "RESETME"}
+      refute_received {:game_request, _, _, _}
+      assert_sole_successor(scope, predecessor)
+    end
+
+    test "a proven success interrupted before adoption is adopted on restart, never reminted",
+         %{scope: scope, operator: operator, predecessor: predecessor} do
+      detecting = killable(fn -> FleetGeneration.agent_overview(predecessor) end)
+      assert_receive {:registering, request}, 2000
+
+      holder = hold_operator_row(operator)
+      send(request, :respond)
+      await_blocked_by(detecting.backend, holder.backend)
+      assert {:disconnected, _log} = RuntimeDeath.kill(detecting.pid, detecting.backend)
+      release(holder)
+
+      assert %{status: :awaiting_adoption, symbol: "RESETME"} =
+               FleetGeneration.registration_recovery(scope)
+
+      assert {:ok, %{state: :transition}} = FleetGeneration.current_fleet(scope)
+      restart_capacity_governor()
+
+      assert {:ok, %{agent: %{symbol: "RESETME"}}} =
+               in_session(fn -> FleetGeneration.resume_reset_replacement() end)
+
+      assert_received {:game_request, "GET", "/v2/my/agent", nil}
+      assert_received {:game_request, "POST", "/v2/register", "RESETME"}
+      refute_received {:game_request, _, _, _}
+      assert %{status: :clear} = FleetGeneration.registration_recovery(scope)
+      assert_sole_successor(scope, predecessor)
+    end
+  end
+
+  # One commanded Agent: the successor is current with its own credential; the
+  # predecessor is retained, stale, and its Generation retired.
+  defp assert_sole_successor(scope, predecessor) do
+    assert {:ok, %{state: :current, agent: successor, generation: generation}} =
+             FleetGeneration.current_fleet(scope)
+
+    assert successor.symbol == "RESETME"
+    assert successor.id != predecessor.id
+    assert generation.number == 2
+    assert Repo.get!(Agent.Agent, successor.id).agent_token == "SECOND_SECRET"
+    assert ship_symbols(successor) == ["RESETME-1"]
+
+    assert [%{id: predecessor_id, agent_token: "FIRST_SECRET", stale_at: %DateTime{}}, _] =
+             agents(scope)
+
+    assert predecessor_id == predecessor.id
+    assert {:error, :stale_agent} = FleetGeneration.gameplay_authority(predecessor.id)
+
+    assert [_current, %{retired_at: %DateTime{}, agent_id: ^predecessor_id}] =
+             FleetGeneration.list_generations(scope)
+  end
+
+  defp reset_mismatch(conn) do
+    conn
+    |> Plug.Conn.put_status(401)
+    |> Req.Test.json(%{
+      "error" => %{
+        "code" => 4113,
+        "message" =>
+          "Failed to parse token. Token reset_date does not match the server. Server resets happen on a weekly to bi-weekly frequency during alpha. After a reset, you should re-register your agent. Expected: 2026-09-15, Actual: 2026-09-01"
+      }
+    })
+  end
+
   defp mint(symbol), do: %{symbol: symbol, faction: "COSMIC"}
 
   defp agents(scope), do: Agent.list_agents(Agent.get_operator!(scope.operator.id))
@@ -735,6 +883,21 @@ defmodule SpaceTraders.RegistrationRecoveryTest do
       _ ->
         Process.sleep(10)
         await_blocked_by(backend, holder, remaining - 1)
+    end
+  end
+
+  # A later waiter is blocked by the holder and every waiter queued ahead of it.
+  defp await_queued_behind(backend, holder, remaining \\ 500)
+  defp await_queued_behind(_backend, _holder, 0), do: flunk("contender did not queue on holder")
+
+  defp await_queued_behind(backend, holder, remaining) do
+    [[blockers]] = Repo.query!("SELECT pg_blocking_pids($1)", [backend]).rows
+
+    if holder in blockers do
+      :ok
+    else
+      Process.sleep(10)
+      await_queued_behind(backend, holder, remaining - 1)
     end
   end
 

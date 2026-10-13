@@ -649,7 +649,10 @@ defmodule SpaceTraders.Fleet do
     %Ship{}
     |> Ecto.Changeset.change(symbol: ship_symbol, ship_type: ship_type, agent_id: agent.id)
     |> Ecto.Changeset.validate_required([:symbol, :ship_type, :agent_id])
-    |> Repo.insert(on_conflict: :nothing, conflict_target: :symbol)
+    |> Repo.insert(
+      on_conflict: :nothing,
+      conflict_target: {:unsafe_fragment, "(symbol) WHERE retired_at IS NULL"}
+    )
   end
 
   defp market_waypoint?(%{traits: traits}) do
@@ -1111,7 +1114,7 @@ defmodule SpaceTraders.Fleet do
     query =
       from(s in Ship,
         join: a in assoc(s, :agent),
-        where: s.symbol == ^ship_symbol,
+        where: s.symbol == ^ship_symbol and is_nil(s.retired_at),
         select: a
       )
 

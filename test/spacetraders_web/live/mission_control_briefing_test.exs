@@ -244,7 +244,8 @@ defmodule SpaceTradersWeb.MissionControlBriefingTest do
 
     assert has_element?(view, "#fleet-health", "Stale Agent")
     assert has_element?(view, "#operating-health", "Server Reset transition")
-    assert has_element?(view, "#operating-health", "this is not a zero measurement")
+    assert has_element?(view, "#operating-health", "A Server Reset fenced #{@symbol}")
+    assert has_element?(view, "#operating-health", "Nothing it reported is counted")
     refute has_element?(view, "#operating-health", "Fleet health unknown")
     refute has_element?(view, "#operating-health", "Operating normally")
     refute has_element?(view, "#fleet-health", "0 Ships in this Fleet Generation")
@@ -474,6 +475,187 @@ defmodule SpaceTradersWeb.MissionControlBriefingTest do
     })
   end
 
+  describe "Server Reset replacement" do
+    test "exhausted names show the fenced transition until an Operator retry succeeds",
+         %{conn: conn, scope: scope} do
+      mint_fleet(scope)
+      {:ok, _} = SpaceTraders.AgentNameBank.save(["ORBITALIST"])
+      parent = self()
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case {conn.method, conn.request_path} do
+          {"POST", "/v2/register"} ->
+            send(parent, {:register, conn.body_params["symbol"]})
+            symbol_taken(conn)
+
+          _ ->
+            reset_mismatch(conn)
+        end
+      end)
+
+      {:ok, view, _html} = live(conn, ~p"/mission-control")
+
+      assert_received {:register, @symbol}
+      assert_received {:register, "ORBITALIST"}
+      refute_received {:register, _}
+      assert has_element?(view, "#operating-health", "Server Reset transition")
+      assert has_element?(view, "#server-reset-replacement", "A Server Reset fenced #{@symbol}")
+      assert has_element?(view, "#needs-attention", "Edit the Agent Name Bank")
+      assert has_element?(view, "#retry-reset-replacement")
+      refute has_element?(view, "#generation-replacement")
+
+      {:ok, _} = SpaceTraders.AgentNameBank.save(["PARALLAX"])
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case {conn.method, conn.request_path, conn.body_params["symbol"]} do
+          {"POST", "/v2/register", "PARALLAX"} ->
+            send(parent, {:register, "PARALLAX"})
+            fleet_api(conn, "PARALLAX")
+
+          {"POST", "/v2/register", symbol} ->
+            send(parent, {:register, symbol})
+            symbol_taken(conn)
+
+          _ ->
+            fleet_api(conn, "PARALLAX")
+        end
+      end)
+
+      html = view |> element("#retry-reset-replacement") |> render_click()
+
+      assert html =~ "Replaced after the Server Reset: PARALLAX is current."
+      assert_received {:register, @symbol}
+      assert_received {:register, "PARALLAX"}
+
+      assert has_element?(
+               view,
+               "#generation-replacement",
+               "Replaced Generation 1 (#{@symbol}) after a Server Reset."
+             )
+
+      assert has_element?(view, "#strategy-context", "Generation 2")
+      refute has_element?(view, "#server-reset-replacement")
+      refute has_element?(view, "#needs-attention", "Edit the Agent Name Bank")
+    end
+
+    test "same-name replacement presents the distinct successor Generation",
+         %{conn: conn, scope: scope} do
+      mint_fleet(scope)
+      Req.Test.stub(SpaceTraders.API, &reset_then_same_name/1)
+
+      {:ok, view, _html} = live(conn, ~p"/mission-control")
+
+      assert {:ok, %{state: :current, generation: %{number: 2, symbol: @symbol}}} =
+               FleetGeneration.current_fleet(scope)
+
+      # The projection read during reset detection never pairs the predecessor's
+      # reads with the successor; the next projection shows the successor.
+      send(view.pid, :fleet_strategy_updated)
+      assert has_element?(view, "#strategy-context", "Generation 2")
+
+      assert has_element?(
+               view,
+               "#generation-replacement",
+               "Replaced Generation 1 (#{@symbol}) after a Server Reset."
+             )
+    end
+
+    test "Emergency Stop suppresses automatic and Operator-requested replacement",
+         %{conn: conn, scope: scope} do
+      mint_fleet(scope)
+      {:ok, _stop} = FleetStrategy.engage_emergency_stop(scope)
+      parent = self()
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        if conn.method == "POST", do: send(parent, {:register, conn.body_params["symbol"]})
+        reset_mismatch(conn)
+      end)
+
+      {:ok, view, _html} = live(conn, ~p"/mission-control")
+      html = view |> element("#retry-reset-replacement") |> render_click()
+
+      assert html =~ "Emergency Stop is engaged. Replacement minting is suppressed"
+      assert has_element?(view, "#operating-health", "STOPPED")
+      refute_received {:register, _}
+      assert {:ok, %{state: :transition}} = FleetGeneration.current_fleet(scope)
+    end
+
+    test "missing AccountToken authority is a pinned Intervention, not a retry loop",
+         %{conn: conn, scope: scope} do
+      mint_fleet(scope)
+      scope.operator.id
+      |> Agent.get_operator!()
+      |> Ecto.Changeset.change(account_token: nil)
+      |> Repo.update!()
+      parent = self()
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        if conn.method == "POST", do: send(parent, {:register, conn.body_params["symbol"]})
+        reset_mismatch(conn)
+      end)
+
+      {:ok, view, _html} = live(conn, ~p"/mission-control")
+      assert has_element?(view, "#needs-attention", "AccountToken authority is unavailable")
+
+      html = view |> element("#retry-reset-replacement") |> render_click()
+      assert html =~ "Link an AccountToken in Settings before replacement can mint."
+      refute_received {:register, _}
+    end
+
+    test "an ordinary authentication failure is not presented as a Server Reset",
+         %{conn: conn, scope: scope} do
+      mint_fleet(scope)
+      parent = self()
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        if conn.method == "POST", do: send(parent, {:register, conn.body_params["symbol"]})
+
+        conn
+        |> Plug.Conn.put_status(401)
+        |> Req.Test.json(%{"error" => %{"code" => 4104, "message" => "Token is invalid"}})
+      end)
+
+      {:ok, view, _html} = live(conn, ~p"/mission-control")
+
+      refute has_element?(view, "#server-reset-replacement")
+      refute has_element?(view, "#operating-health", "Server Reset transition")
+      refute_received {:register, _}
+      assert {:ok, %{state: :current}} = FleetGeneration.current_fleet(scope)
+    end
+  end
+
+  defp reset_then_same_name(conn) do
+    if conn.method == "POST" do
+      fleet_api(conn, @symbol, "SUCCESSOR_AGENT_TOKEN")
+    else
+      case Plug.Conn.get_req_header(conn, "authorization") do
+        ["Bearer SUCCESSOR_AGENT_TOKEN"] -> fleet_api(conn, @symbol)
+        _ -> reset_mismatch(conn)
+      end
+    end
+  end
+
+  defp reset_mismatch(conn) do
+    conn
+    |> Plug.Conn.put_status(401)
+    |> Req.Test.json(%{
+      "error" => %{
+        "code" => 4113,
+        "message" =>
+          "Failed to parse token. Token reset_date does not match the server. " <>
+            "Server resets happen on a weekly to bi-weekly frequency during alpha. " <>
+            "After a reset, you should re-register your agent. " <>
+            "Expected: 2026-09-15, Actual: 2026-09-01"
+      }
+    })
+  end
+
+  defp symbol_taken(conn) do
+    conn
+    |> Plug.Conn.put_status(400)
+    |> Req.Test.json(%{"error" => %{"code" => 4103, "message" => "Symbol is already in use"}})
+  end
+
   defp mint_fleet(scope) do
     {:ok, _operator} = Agent.link_account_token(scope.operator, "MISSION_CONTROL_ACCOUNT_TOKEN")
     {:ok, strategy} = FleetStrategy.select_preset(scope, "steady_growth")
@@ -492,21 +674,23 @@ defmodule SpaceTradersWeb.MissionControlBriefingTest do
     {Agent.get_agent(scope, minted.id), generation}
   end
 
-  defp briefing_api(conn) do
+  defp briefing_api(conn), do: fleet_api(conn, @symbol)
+
+  defp fleet_api(conn, symbol, token \\ nil) do
     case {conn.method, conn.request_path} do
       {"POST", "/v2/register"} ->
         Req.Test.json(conn, %{
           "data" => %{
-            "token" => "MISSION_CONTROL_AGENT_TOKEN",
+            "token" => token || "#{symbol}_AGENT_TOKEN",
             "agent" => %{
-              "symbol" => @symbol,
+              "symbol" => symbol,
               "credits" => 175_000,
               "headquarters" => "X1-UX81-A1",
               "startingFaction" => "COSMIC"
             },
             "contract" => %{"id" => "briefing-contract", "type" => "PROCUREMENT"},
             "faction" => %{"symbol" => "COSMIC", "name" => "Cosmic", "isRecruiting" => true},
-            "ships" => [ship_body("#{@symbol}-1")]
+            "ships" => [ship_body("#{symbol}-1")]
           }
         })
 
@@ -514,7 +698,7 @@ defmodule SpaceTradersWeb.MissionControlBriefingTest do
         Req.Test.json(conn, %{
           "data" => %{
             "accountId" => "BRIEFING_ACCOUNT",
-            "symbol" => @symbol,
+            "symbol" => symbol,
             "headquarters" => "X1-UX81-A1",
             "credits" => 175_120,
             "startingFaction" => "COSMIC",
@@ -523,7 +707,7 @@ defmodule SpaceTradersWeb.MissionControlBriefingTest do
         })
 
       {"GET", "/v2/my/ships"} ->
-        Req.Test.json(conn, %{"data" => [ship_body("#{@symbol}-1")]})
+        Req.Test.json(conn, %{"data" => [ship_body("#{symbol}-1")]})
 
       {"GET", "/v2/my/contracts"} ->
         Req.Test.json(conn, %{"data" => []})

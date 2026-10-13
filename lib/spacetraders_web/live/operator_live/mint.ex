@@ -86,7 +86,18 @@ defmodule SpaceTradersWeb.OperatorLive.Mint do
               </.button>
             </.form>
           <% else %>
-            <%= if @account_token_linked? do %>
+            <%= if @transition_symbol do %>
+              <div id="server-reset-transition" class="alert alert-warning">
+                <span>
+                  A Server Reset fenced {@transition_symbol}. Its replacement is established
+                  automatically from the Agent Name Bank, not by an ordinary mint.
+                </span>
+              </div>
+              <.link navigate={~p"/mission-control"} class="btn btn-primary mt-4 w-full">
+                Review replacement in Mission Control
+              </.link>
+            <% end %>
+            <%= if !@transition_symbol && @account_token_linked? do %>
               <.form for={@form} id="mint_form" phx-submit="mint" phx-change="validate">
                 <div class="mb-5 rounded-xl border border-info/30 bg-info/10 p-4 text-sm leading-6">
                   <strong class="block">A quick start</strong>
@@ -113,7 +124,8 @@ defmodule SpaceTradersWeb.OperatorLive.Mint do
                   Mint Agent
                 </.button>
               </.form>
-            <% else %>
+            <% end %>
+            <%= if !@transition_symbol && !@account_token_linked? do %>
               <div class="alert alert-warning mt-8">
                 Link your AccountToken in
                 <.link navigate={~p"/operators/settings"} class="underline">Settings</.link>
@@ -144,13 +156,16 @@ defmodule SpaceTradersWeb.OperatorLive.Mint do
   end
 
   defp assign_current_agent(socket) do
-    current_agent =
+    {current_agent, transition_symbol} =
       case FleetGeneration.current_fleet(socket.assigns.current_scope) do
-        {:ok, %{state: :current, agent: agent}} -> agent.symbol
-        _ -> nil
+        {:ok, %{state: :current, agent: agent}} -> {agent.symbol, nil}
+        {:ok, %{state: :transition, generation: generation}} -> {nil, generation.symbol}
+        _ -> {nil, nil}
       end
 
-    assign(socket, :current_agent, current_agent)
+    socket
+    |> assign(:current_agent, current_agent)
+    |> assign(:transition_symbol, transition_symbol)
   end
 
   # Read from the registration's recovery record on every mount and action.
@@ -248,6 +263,15 @@ defmodule SpaceTradersWeb.OperatorLive.Mint do
            socket,
            :error,
            "Emergency Stop is engaged. Minting is suppressed until it is resumed."
+         )}
+
+      {:error, :fleet_transition_pending} ->
+        {:noreply,
+         socket
+         |> assign_current_agent()
+         |> put_flash(
+           :error,
+           "A Server Reset replacement is pending. No Agent was minted; review it in Mission Control."
          )}
 
       {:error, %{summary: summary}} ->

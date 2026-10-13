@@ -607,13 +607,16 @@ defmodule SpaceTraders.AgentTest do
       end)
 
       assert {:ok, %{agent: agent, retired_symbols: ["RESETME"]}} =
-               FleetGeneration.mint(scope, %{symbol: "RESETME", faction: "COSMIC"})
+               FleetGeneration.replace_after_reset(scope)
 
       refute agent.id == stale_agent.id
       assert agent.agent_token == nil
       assert Repo.get!(SpaceTraders.Agent.Agent, agent.id).agent_token == "FRESH_TOKEN"
-      refute Repo.get(SpaceTraders.Agent.Agent, stale_agent.id)
-      refute Repo.get(Ship, ship.id)
+
+      # The predecessor and its Ship stay as history with their own credential.
+      assert Repo.get!(SpaceTraders.Agent.Agent, stale_agent.id).agent_token == "STALE_TOKEN"
+      assert %Ship{agent_id: stale_agent_id, retired_at: %DateTime{}} = Repo.get(Ship, ship.id)
+      assert stale_agent_id == stale_agent.id
       assert Intents.current(stale_agent) == []
 
       assert Repo.get(Event, event.id).status == "cancelled"
@@ -648,30 +651,38 @@ defmodule SpaceTraders.AgentTest do
 
       {:ok, _pid} = ShipServer.ensure_started(stale_agent, ship.symbol)
 
-      Req.Test.stub(SpaceTraders.API, fn conn ->
-        assert {conn.method, conn.request_path} == {"POST", "/v2/register"}
+      {:ok, _} = SpaceTraders.AgentNameBank.save(["TURNEY"])
 
-        Req.Test.json(conn, %{
-          "data" => %{
-            "token" => "FRESH_TOKEN",
-            "agent" => %{
-              "symbol" => "TURNEY",
-              "credits" => 175_000,
-              "headquarters" => "X1-UX81-A2",
-              "startingFaction" => "COSMIC"
-            },
-            "contract" => %{"id" => "c1", "type" => "PROCUREMENT"},
-            "faction" => %{"symbol" => "COSMIC", "name" => "Cosmic", "isRecruiting" => true},
-            "ships" => []
-          }
-        })
+      Req.Test.stub(SpaceTraders.API, fn
+        %{body_params: %{"symbol" => "ORBITALIST"}} = conn ->
+          conn
+          |> Plug.Conn.put_status(400)
+          |> Req.Test.json(%{"error" => %{"code" => 4103, "message" => "Symbol is in use"}})
+
+        conn ->
+          assert {conn.method, conn.request_path} == {"POST", "/v2/register"}
+
+          Req.Test.json(conn, %{
+            "data" => %{
+              "token" => "FRESH_TOKEN",
+              "agent" => %{
+                "symbol" => "TURNEY",
+                "credits" => 175_000,
+                "headquarters" => "X1-UX81-A2",
+                "startingFaction" => "COSMIC"
+              },
+              "contract" => %{"id" => "c1", "type" => "PROCUREMENT"},
+              "faction" => %{"symbol" => "COSMIC", "name" => "Cosmic", "isRecruiting" => true},
+              "ships" => []
+            }
+          })
       end)
 
       assert {:ok, %{agent: %{symbol: "TURNEY"}, retired_symbols: ["ORBITALIST"]}} =
-               FleetGeneration.mint(scope, %{symbol: "TURNEY", faction: "COSMIC"})
+               FleetGeneration.replace_after_reset(scope)
 
-      refute Repo.get(SpaceTraders.Agent.Agent, stale_agent.id)
-      refute Repo.get(Ship, ship.id)
+      assert Repo.get(SpaceTraders.Agent.Agent, stale_agent.id)
+      assert %Ship{retired_at: %DateTime{}} = Repo.get(Ship, ship.id)
       assert Repo.get(Event, event.id).status == "cancelled"
       assert Registry.lookup(SpaceTraders.Fleet.ShipRegistry, ship.symbol) == []
     end
@@ -683,13 +694,6 @@ defmodule SpaceTraders.AgentTest do
       stale_agent =
         agent_fixture(operator, %{
           symbol: "ORBITALIST",
-          stale_at: DateTime.utc_now() |> DateTime.truncate(:second)
-        })
-
-      other_stale_agent =
-        legacy_operator_fixture()
-        |> agent_fixture(%{
-          symbol: "OTHER",
           stale_at: DateTime.utc_now() |> DateTime.truncate(:second)
         })
 
@@ -716,7 +720,6 @@ defmodule SpaceTraders.AgentTest do
       assert Repo.get(Ship, ship.id)
       assert Repo.get(Event, event.id).status == "pending"
       assert Registry.lookup(SpaceTraders.Fleet.ShipRegistry, ship.symbol) != []
-      assert Repo.get(SpaceTraders.Agent.Agent, other_stale_agent.id)
     end
 
     test "reports when an operator has no stale agents", %{scope: scope} do

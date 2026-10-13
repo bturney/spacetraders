@@ -245,8 +245,11 @@ defmodule SpaceTraders.CurrentFleetTest do
       })
     end)
 
-    assert {:ok, %{agent: replacement}} =
+    # Ordinary minting is not a second add-Agent path during a transition.
+    assert {:error, :fleet_transition_pending} =
              FleetGeneration.mint(scope, %{symbol: "ORBITALIST", faction: "COSMIC"})
+
+    assert {:ok, %{agent: replacement}} = FleetGeneration.replace_after_reset(scope)
 
     assert replacement.id != old.id
 

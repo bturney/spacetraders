@@ -108,29 +108,34 @@ defmodule SpaceTradersWeb.OperatorLive.MintTest do
       assert conn.resp_body =~ "Mission Control"
     end
 
-    test "reports stale agents retired by a replacement mint", %{conn: conn} do
+    test "a Server Reset transition is not an ordinary mint path; a late submit sends nothing",
+         %{conn: conn} do
       operator = operator_fixture()
       {:ok, operator} = Agent.link_account_token(operator, "ACCOUNT_TOKEN")
 
-      _stale_agent =
+      Req.Test.stub(SpaceTraders.API, fn _conn ->
+        flunk("a fenced transition forbids ordinary registration")
+      end)
+
+      conn = log_in_operator(conn, operator)
+      {:ok, lv, _html} = live(conn, ~p"/agents/new")
+
+      stale =
         agent_fixture(operator, %{
           symbol: "ORBITALIST",
           stale_at: DateTime.utc_now() |> DateTime.truncate(:second)
         })
 
-      register_stub(minted_agent_body("MINER1"))
+      result = lv |> form("#mint_form", @mint_form) |> render_submit()
+      assert result =~ "A Server Reset replacement is pending. No Agent was minted"
+      assert has_element?(lv, "#server-reset-transition", "ORBITALIST")
+      refute has_element?(lv, "#mint_form")
+      assert [%{id: id}] = Agent.list_agents(operator)
+      assert id == stale.id
 
-      conn = log_in_operator(conn, operator)
       {:ok, lv, _html} = live(conn, ~p"/agents/new")
-
-      {:ok, conn} =
-        lv
-        |> form("#mint_form", @mint_form)
-        |> render_submit()
-        |> follow_redirect(conn, ~p"/mission-control")
-
-      assert conn.resp_body =~ "Retired stale agents: ORBITALIST."
-      refute Repo.get_by(SpaceTraders.Agent.Agent, symbol: "ORBITALIST")
+      refute has_element?(lv, "#mint_form")
+      assert has_element?(lv, "a[href='/mission-control']", "Review replacement")
     end
 
     test "a current Fleet replaces the mint form; it is not an add-another Agent path", %{

@@ -34,7 +34,8 @@ defmodule SpaceTraders.Application do
           {Registry, keys: :unique, name: SpaceTraders.Fleet.ShipRegistry},
           {DynamicSupervisor, strategy: :one_for_one, name: SpaceTraders.Fleet.ShipSupervisor},
           SpaceTraders.Fleet.ShipServerBoot
-        ] ++ rate_limiter_children() ++ [SpaceTradersWeb.Endpoint]
+        ] ++
+        rate_limiter_children() ++ reset_replacement_children() ++ [SpaceTradersWeb.Endpoint]
 
     # See https://elixir.hexdocs.pm/Supervisor.html
     # for other strategies and supported options
@@ -69,6 +70,14 @@ defmodule SpaceTraders.Application do
     else
       []
     end
+  end
+
+  # Replacement minting needs runtime authority and the Ship runtime it stops;
+  # tests drive `FleetGeneration.resume_reset_replacement/0` directly.
+  defp reset_replacement_children do
+    if SpaceTraders.RuntimeAuthority.enabled?(),
+      do: [SpaceTraders.FleetGeneration.ResetReplacementBoot],
+      else: []
   end
 
   # Test processes own isolated database connections and API stubs. The

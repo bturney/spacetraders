@@ -15,6 +15,8 @@ defmodule SpaceTraders.FleetGenerationTest do
   alias SpaceTraders.Evidence.Observation
   alias SpaceTraders.Repo
 
+  import Ecto.Query, only: [from: 2]
+
   test "missing replacement authority remains a durable Intervention until authority is restored" do
     operator = operator_fixture()
     scope = Scope.for_operator(operator)
@@ -96,74 +98,280 @@ defmodule SpaceTraders.FleetGenerationTest do
       end)
 
       {:ok, %{agent: minted}} =
-        FleetGeneration.mint(scope, %{
-          symbol: "RESETME",
-          faction: "COSMIC",
-          replacement_symbols: ["RESETME", "FALLBACK"]
-        })
+        FleetGeneration.mint(scope, %{symbol: "RESETME", faction: "COSMIC"})
 
       %{scope: scope, revision: revision, agent: Agent.get_agent(scope, minted.id)}
     end
 
-    test "the active Fleet Strategy Revision carries forward to a bootstrapped fallback Generation",
-         %{scope: scope, revision: revision, agent: agent} do
-      assert [first_generation] = FleetGeneration.list_generations(scope)
-      assert first_generation.fleet_strategy_revision_id == revision.id
-      assert first_generation.starting_credits == 175_000
-      assert %DateTime{} = first_generation.strategy_capable_at
-      assert {:ok, %{ship_type: "UNKNOWN"}} = Fleet.owned_ship(agent, "RESETME-1")
+    test "same-name replacement is a distinct Generation; the predecessor and its Ships remain history",
+         %{revision: revision, agent: agent} do
+      {:ok, predecessor_ship} = Fleet.owned_ship(agent, "RESETME-1")
 
-      assert {:ok, _} =
-               FleetGeneration.record_objective_progress(scope, first_generation.id, 0, %{
-                 "current" => 0,
-                 "target" => 10,
-                 "expected_seconds_to_target" => 500,
-                 "feasible?" => false,
-                 "evidence_id" => objective_evidence(agent).id
-               })
+      game(fn
+        %{method: "GET", request_path: "/v2/my/agent"} = conn ->
+          reset_mismatch(conn)
 
-      assert [%{kind: :attention}] = OperatorConditions.unresolved(scope)
-      assert {:ok, draft} = FleetStrategy.select_preset(scope, "steady_growth")
-
-      Req.Test.stub(SpaceTraders.API, fn conn ->
-        if conn.method == "POST" do
-          assert retained = Agent.get_agent(scope, agent.id)
-          assert FleetGeneration.stale?(retained)
-          assert {:error, :stale_agent} = FleetGeneration.execution_allowed?(retained)
-          assert [%{retired_at: nil}] = FleetGeneration.list_generations(scope)
-        end
-
-        reset_then_fallback_response(conn)
+        %{method: "POST", request_path: "/v2/register"} = conn ->
+          Req.Test.json(conn, registration_body("RESETME", "RESETME-1", "SECOND_TOKEN"))
       end)
 
       assert {:error, :stale_agent} = FleetGeneration.agent_overview(agent)
-      refute Agent.get_agent(scope, agent.id)
-      assert [replacement] = Agent.list_agents(scope.operator)
-      assert replacement.symbol == "FALLBACK"
-      assert {:ok, _ship} = Fleet.owned_ship(replacement, "FALLBACK-1")
-      assert {:error, :ship_not_owned} = Fleet.owned_ship(agent, "RESETME-1")
+      assert registrations() == [{"RESETME", "COSMIC"}]
 
-      assert [second_generation, retired_generation] = FleetGeneration.list_generations(scope)
-      assert second_generation.number == 2
-      assert second_generation.symbol == "FALLBACK"
-      assert second_generation.agent_id == replacement.id
-      assert second_generation.fleet_strategy_revision_id == revision.id
-      assert %DateTime{} = second_generation.strategy_capable_at
-      assert retired_generation.id == first_generation.id
-      assert %DateTime{} = retired_generation.fenced_at
-      assert %DateTime{} = retired_generation.retired_at
+      assert {:ok, %{state: :current, agent: replacement, generation: current}} =
+               FleetGeneration.current_fleet()
+
+      assert replacement.symbol == "RESETME"
+      assert replacement.id != agent.id
+      assert current.agent_id == replacement.id
+      assert current.number == 2
+      assert current.symbol == "RESETME"
+      assert current.faction == "COSMIC"
+      assert current.fleet_strategy_revision_id == revision.id
+
+      # Fresh resources: the reused Ship symbol is the replacement's own Ship.
+      assert {:ok, ship} = Fleet.owned_ship(replacement, "RESETME-1")
+      assert ship.id != predecessor_ship.id
+
+      # The predecessor is retained, stale and retired, as attributable history.
+      assert {:ok, %{agent: retained, generation: retired}} =
+               FleetGeneration.evidence_holder(agent.id)
+
+      assert FleetGeneration.stale?(retained)
+      assert retired.number == 1
+      assert %DateTime{} = retired.fenced_at
+      assert %DateTime{} = retired.retired_at
+      assert Repo.get!(Ship, predecessor_ship.id).agent_id == agent.id
+
+      # Its credential carries no authority over anything, including reused symbols.
+      assert {:error, :stale_agent} =
+               SpaceTraders.API.accept_contract(AgentTokenReference.new(retained), "c1")
+
+      assert {:error, :stale_agent} = FleetGeneration.execution_allowed?(retained)
+    end
+
+    test "definitive conflicts advance through distinct banked names in order, without suffixes",
+         %{scope: scope, revision: revision, agent: agent} do
+      {:ok, _} = SpaceTraders.AgentNameBank.save(["ORBITALIST", "RESETME", "PARALLAX", "LIMINAL"])
+
+      game(fn
+        %{method: "GET"} = conn ->
+          reset_mismatch(conn)
+
+        %{body_params: %{"symbol" => symbol}} = conn when symbol in ["RESETME", "ORBITALIST"] ->
+          symbol_unavailable(conn)
+
+        %{body_params: %{"symbol" => "PARALLAX"}} = conn ->
+          Req.Test.json(conn, registration_body("PARALLAX", "PARALLAX-1", "SECOND_TOKEN"))
+      end)
+
+      assert {:error, :stale_agent} = FleetGeneration.agent_overview(agent)
+
+      assert registrations() == [
+               {"RESETME", "COSMIC"},
+               {"ORBITALIST", "COSMIC"},
+               {"PARALLAX", "COSMIC"}
+             ]
+
+      assert [current, retired] = FleetGeneration.list_generations(scope)
+      assert current.symbol == "PARALLAX"
+      assert current.fleet_strategy_revision_id == revision.id
+      assert retired.agent_id == agent.id
+      assert %DateTime{} = retired.retired_at
       assert FleetStrategy.get(scope).active_revision == revision
-      assert FleetStrategy.get(scope).draft == draft.draft
+      assert OperatorConditions.unresolved(scope) == []
+    end
+
+    test "exhausted names leave a durable Intervention with no retry loop until the Operator retries",
+         %{scope: scope, revision: revision, agent: agent} do
+      {:ok, _} = SpaceTraders.AgentNameBank.save(["ORBITALIST", "PARALLAX"])
+
+      game(fn
+        %{method: "GET"} = conn -> reset_mismatch(conn)
+        %{method: "POST"} = conn -> symbol_unavailable(conn)
+      end)
+
+      assert {:error, :stale_agent} = FleetGeneration.agent_overview(agent)
+
+      assert registrations() == [
+               {"RESETME", "COSMIC"},
+               {"ORBITALIST", "COSMIC"},
+               {"PARALLAX", "COSMIC"}
+             ]
+
+      assert [%{kind: :intervention, summary: summary}] = OperatorConditions.unresolved(scope)
+      assert summary =~ "Agent Name Bank"
+      assert {:ok, %{state: :transition, generation: fenced}} = FleetGeneration.current_fleet()
+      assert fenced.agent_id == agent.id
+      assert %DateTime{} = fenced.fenced_at
+      assert is_nil(fenced.retired_at)
+
+      # The fenced predecessor sends nothing more, so nothing re-triggers minting.
+      assert {:error, :stale_agent} = FleetGeneration.agent_overview(agent)
+      assert {:error, :stale_agent} = Agent.handle_game_result(agent, {:error, reset_error()})
+      refute_received {:game_request, _, _, _}
+
+      {:ok, _} = SpaceTraders.AgentNameBank.save(["SIDEREAL"])
+
+      game(fn %{body_params: %{"symbol" => symbol}} = conn ->
+        if symbol == "SIDEREAL",
+          do: Req.Test.json(conn, registration_body("SIDEREAL", "SIDEREAL-1", "NEXT_TOKEN")),
+          else: symbol_unavailable(conn)
+      end)
+
+      assert {:ok, %{agent: %{symbol: "SIDEREAL"}}} = FleetGeneration.replace_after_reset(scope)
+      assert registrations() == [{"RESETME", "COSMIC"}, {"SIDEREAL", "COSMIC"}]
       assert OperatorConditions.unresolved(scope) == []
 
-      stale_token_reference =
-        scope.operator
-        |> agent_fixture(%{agent_token: "FIRST_TOKEN"})
-        |> AgentTokenReference.new()
+      assert {:ok, %{state: :current, generation: %{fleet_strategy_revision_id: revision_id}}} =
+               FleetGeneration.current_fleet()
 
-      # A retained predecessor token has no current-Generation authority at all.
-      assert {:error, :generation_not_current} =
-               SpaceTraders.API.accept_contract(stale_token_reference, "contract-1")
+      assert revision_id == revision.id
+    end
+
+    test "an uncertain registration is never followed by another candidate or a remint",
+         %{scope: scope, agent: agent} do
+      game(fn
+        %{method: "GET"} = conn -> reset_mismatch(conn)
+        %{method: "POST"} = conn -> Req.Test.transport_error(conn, :timeout)
+      end)
+
+      assert {:error, :stale_agent} = FleetGeneration.agent_overview(agent)
+      assert registrations() == [{"RESETME", "COSMIC"}]
+
+      assert %{status: :unresolved, symbol: "RESETME"} =
+               FleetGeneration.registration_recovery(scope)
+
+      assert {:error, :registration_unresolved} = FleetGeneration.replace_after_reset(scope)
+      assert {:error, :registration_unresolved} = FleetGeneration.replace_stale_agents(scope)
+      refute_received {:game_request, _, _, _}
+      assert {:ok, %{state: :transition}} = FleetGeneration.current_fleet()
+    end
+
+    test "an unrelated rejection stops at that candidate without trying another name",
+         %{scope: scope, agent: agent} do
+      game(fn
+        %{method: "GET"} = conn ->
+          reset_mismatch(conn)
+
+        %{method: "POST"} = conn ->
+          conn
+          |> Plug.Conn.put_status(422)
+          |> Req.Test.json(%{"error" => %{"code" => 422, "message" => "Invalid faction"}})
+      end)
+
+      assert {:error, :stale_agent} = FleetGeneration.agent_overview(agent)
+      assert registrations() == [{"RESETME", "COSMIC"}]
+      assert {:ok, %{state: :transition}} = FleetGeneration.current_fleet()
+      assert %{status: :clear} = FleetGeneration.registration_recovery(scope)
+
+      assert [%{kind: :intervention, summary: summary}] = OperatorConditions.unresolved(scope)
+      assert summary =~ "Retry replacement"
+    end
+
+    test "ordinary authentication and network failures are not Server Reset evidence",
+         %{scope: scope, agent: agent} do
+      game(fn conn ->
+        conn
+        |> Plug.Conn.put_status(401)
+        |> Req.Test.json(%{"error" => %{"code" => 4104, "message" => "Token is invalid"}})
+      end)
+
+      assert {:error, %SpaceTraders.API.GameplayError{}} = FleetGeneration.agent_overview(agent)
+
+      game(fn conn -> Req.Test.transport_error(conn, :econnrefused) end)
+      assert {:error, _network} = FleetGeneration.agent_overview(agent)
+
+      assert Enum.all?(drain_requests(), &match?({"GET", "/v2/my/agent", _}, &1))
+      assert {:ok, %{state: :current, agent: %{id: id}}} = FleetGeneration.current_fleet()
+      assert id == agent.id
+      refute FleetGeneration.stale?(Agent.get_agent(scope, agent.id))
+      assert {:error, :no_server_reset} = FleetGeneration.replace_after_reset(scope)
+    end
+
+    test "missing AccountToken authority raises a durable Intervention before any registration",
+         %{scope: scope, agent: agent} do
+      Repo.update_all(
+        from(o in SpaceTraders.Agent.Operator, where: o.id == ^scope.operator.id),
+        set: [account_token: nil]
+      )
+
+      game(&reset_mismatch/1)
+      assert {:error, :stale_agent} = FleetGeneration.agent_overview(agent)
+      assert registrations() == []
+      assert [%{kind: :intervention, summary: summary}] = OperatorConditions.unresolved(scope)
+      assert summary =~ "AccountToken"
+      assert {:ok, %{state: :transition}} = FleetGeneration.current_fleet()
+    end
+
+    test "late predecessor results after replacement neither fence nor replace the successor",
+         %{scope: scope, agent: agent} do
+      game(fn
+        %{method: "GET"} = conn ->
+          reset_mismatch(conn)
+
+        %{method: "POST"} = conn ->
+          Req.Test.json(conn, registration_body("RESETME", "RESETME-1", "SECOND_TOKEN"))
+      end)
+
+      assert {:error, :stale_agent} = FleetGeneration.agent_overview(agent)
+      assert {:ok, %{state: :current, generation: successor}} = FleetGeneration.current_fleet()
+      _ = drain_requests()
+
+      # A response dispatched before the fence arrives late with reset evidence.
+      assert {:error, :stale_agent} =
+               FleetGeneration.handle_game_result(agent, {:error, reset_error()})
+
+      assert {:ok, %{state: :current, generation: still}} = FleetGeneration.current_fleet()
+      assert still.id == successor.id
+      assert is_nil(still.fenced_at)
+      assert registrations() == []
+      assert {:error, :no_server_reset} = FleetGeneration.replace_after_reset(scope)
+    end
+
+    test "Strategy-lifetime contributions carry forward; generation and recurring progress restart",
+         %{scope: scope, agent: agent} do
+      strategy = FleetStrategy.get(scope)
+      {:ok, draft} = FleetStrategy.select_preset(scope, "charted_expansion")
+
+      preset = Enum.find(FleetStrategy.presets(), &(&1.id == "charted_expansion"))
+      [first | rest] = preset.objectives
+
+      document = %{
+        "objectives" => [Map.put(first, "scope", "strategy_lifetime") | rest],
+        "hard_constraints" => preset.hard_constraints,
+        "preferences" => preset.preferences,
+        "consequences" => preset.consequences
+      }
+
+      {:ok, saved} = FleetStrategy.save_draft(scope, document, draft.draft_version)
+      {:ok, lifetime} = FleetStrategy.activate(scope, saved.draft_version)
+      assert lifetime.number == strategy.active_revision.number + 1
+      [generation] = FleetGeneration.list_generations(scope)
+
+      assert {:ok, _} =
+               FleetGeneration.record_objective_progress(scope, generation.id, 0, %{
+                 "current" => 4,
+                 "target" => 10,
+                 "expected_seconds_to_target" => 500,
+                 "feasible?" => true,
+                 "evidence_id" => objective_evidence(agent).id
+               })
+
+      game(fn
+        %{method: "GET"} = conn ->
+          reset_mismatch(conn)
+
+        %{method: "POST"} = conn ->
+          Req.Test.json(conn, registration_body("RESETME", "RESETME-1", "SECOND_TOKEN"))
+      end)
+
+      assert {:error, :stale_agent} = FleetGeneration.agent_overview(agent)
+      assert [current, retired] = FleetGeneration.list_generations(scope)
+      assert current.fleet_strategy_revision_id == lifetime.id
+      assert %{"current" => 4} = current.objective_progress["0"]
+      assert current.objective_progress["1"] == %{"recurrence_id" => nil, "progress" => nil}
+      assert %{"current" => 4} = retired.objective_progress["0"]
     end
 
     test "a Revision activated after replacement governs only the current Generation; history keeps its original Revision",
@@ -195,82 +403,34 @@ defmodule SpaceTraders.FleetGenerationTest do
       assert recaps[current.id].revisions == [revision.number, next.number]
     end
 
-    test "failed replacement retains the fenced Stale Agent until a successful mint",
+    test "Emergency Stop suppresses replacement minting until resume, preserving the Strategy",
          %{scope: scope, revision: revision, agent: agent} do
-      assert [original] = FleetGeneration.list_generations(scope)
-
-      Req.Test.stub(SpaceTraders.API, fn conn ->
-        case {conn.method, conn.request_path, conn.body_params["symbol"]} do
-          {"GET", "/v2/my/agent", nil} ->
-            reset_mismatch(conn)
-
-          {"POST", "/v2/register", symbol} when symbol in ["RESETME", "FALLBACK"] ->
-            symbol_unavailable(conn)
-        end
-      end)
-
-      assert {:error, :stale_agent} = FleetGeneration.agent_overview(agent)
-      assert retained = Agent.get_agent(scope, agent.id)
-      assert FleetGeneration.stale?(retained)
-      assert {:error, :stale_agent} = FleetGeneration.execution_allowed?(retained)
-      assert {:error, :replacement_required} = FleetGeneration.retire_stale_agents(scope)
-      assert [fenced] = FleetGeneration.list_generations(scope)
-      assert fenced.id == original.id
-      assert %DateTime{} = fenced.fenced_at
-      assert is_nil(fenced.retired_at)
-      assert FleetStrategy.get(scope).active_revision == revision
-
-      Req.Test.stub(SpaceTraders.API, fn conn ->
-        assert conn.method == "POST"
-        assert Agent.get_agent(scope, agent.id)
-        reset_then_fallback_response(conn)
-      end)
-
-      assert {:ok, [%{agent: replacement, retired_symbols: ["RESETME"]}]} =
-               FleetGeneration.replace_stale_agents(scope)
-
-      assert replacement.symbol == "FALLBACK"
-      refute Agent.get_agent(scope, agent.id)
-      assert [current, retired] = FleetGeneration.list_generations(scope)
-      assert current.agent_id == replacement.id
-      assert current.fleet_strategy_revision_id == revision.id
-      assert %DateTime{} = current.strategy_capable_at
-      assert retired.id == original.id
-      assert %DateTime{} = retired.retired_at
-    end
-
-    test "Emergency Stop suppresses the next replacement while preserving the active Strategy",
-         %{scope: scope, revision: revision, agent: agent} do
-      Req.Test.stub(SpaceTraders.API, &reset_then_fallback_response/1)
-
-      assert {:error, :stale_agent} = FleetGeneration.agent_overview(agent)
-      assert [replacement] = Agent.list_agents(scope.operator)
-      assert replacement.symbol == "FALLBACK"
-      assert [second_generation, retired] = FleetGeneration.list_generations(scope)
-      assert second_generation.number == 2
-      assert second_generation.fleet_strategy_revision_id == revision.id
-      assert %DateTime{} = retired.retired_at
       assert {:ok, stopped} = FleetStrategy.engage_emergency_stop(scope)
+      game(&reset_then_fallback_response/1)
 
-      Req.Test.stub(SpaceTraders.API, fn conn ->
-        assert {conn.method, conn.request_path} == {"GET", "/v2/my/agent"}
-        assert Plug.Conn.get_req_header(conn, "authorization") == ["Bearer SECOND_TOKEN"]
-        reset_mismatch(conn)
-      end)
-
-      assert {:error, :stale_agent} = FleetGeneration.agent_overview(replacement)
+      assert {:error, :stale_agent} = FleetGeneration.agent_overview(agent)
+      assert registrations() == []
+      assert {:error, :emergency_stopped} = FleetGeneration.replace_after_reset(scope)
       assert {:error, :emergency_stopped} = FleetGeneration.replace_stale_agents(scope)
-      assert [retained] = Agent.list_agents(scope.operator)
-      assert retained.id == replacement.id
-      assert FleetGeneration.stale?(retained)
-      assert [fenced, still_retired] = FleetGeneration.list_generations(scope)
-      assert fenced.id == second_generation.id
-      assert %DateTime{} = fenced.fenced_at
-      assert is_nil(fenced.retired_at)
-      assert still_retired == retired
+      assert registrations() == []
+
+      assert {:ok, %{state: :transition, generation: fenced}} = FleetGeneration.current_fleet()
+      assert fenced.agent_id == agent.id
       assert FleetStrategy.get(scope).active_revision == revision
       assert FleetStrategy.get(scope).emergency_stopped_at == stopped.emergency_stopped_at
-      assert FleetStrategy.get(scope).emergency_stop_version == stopped.emergency_stop_version
+
+      assert {:ok, prepared} = FleetStrategy.resume(scope, stopped.emergency_stop_version)
+
+      assert {:ok, _resumed} =
+               FleetStrategy.complete_emergency_stop_resume(
+                 scope,
+                 prepared.emergency_stop_version
+               )
+
+      assert registrations() == [{"RESETME", "COSMIC"}, {"ORBITALIST", "COSMIC"}]
+
+      assert {:ok, %{state: :current, agent: %{symbol: "ORBITALIST"}}} =
+               FleetGeneration.current_fleet()
     end
   end
 
@@ -290,7 +450,7 @@ defmodule SpaceTraders.FleetGenerationTest do
              %{
                fleet_strategy_revision_id: nil,
                strategy_capable_at: nil,
-               replacement_symbols: %{"symbols" => ["READY", "READY-2", "READY-3"]}
+               replacement_symbols: %{"symbols" => ["READY"]}
              }
            ] =
              FleetGeneration.list_generations(scope)
@@ -611,6 +771,42 @@ defmodule SpaceTraders.FleetGenerationTest do
     }
   end
 
+  # Records every game request at the HTTP boundary, then answers with `respond`.
+  defp game(respond) do
+    parent = self()
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      send(
+        parent,
+        {:game_request, conn.method, conn.request_path,
+         {conn.body_params["symbol"], conn.body_params["faction"]}}
+      )
+
+      respond.(conn)
+    end)
+  end
+
+  defp drain_requests(acc \\ []) do
+    receive do
+      {:game_request, method, path, body} -> drain_requests([{method, path, body} | acc])
+    after
+      0 -> Enum.reverse(acc)
+    end
+  end
+
+  defp registrations do
+    for {"POST", "/v2/register", body} <- drain_requests(), do: body
+  end
+
+  defp reset_error do
+    %SpaceTraders.API.GameplayError{
+      code: 4113,
+      type: :other,
+      message:
+        "Failed to parse token. Token reset_date does not match the server. Server resets happen on a weekly to bi-weekly frequency during alpha. After a reset, you should re-register your agent. Expected: 2026-09-15, Actual: 2026-09-01"
+    }
+  end
+
   defp reset_then_fallback_response(conn) do
     case {conn.method, conn.request_path, conn.body_params["symbol"]} do
       {"GET", "/v2/my/agent", nil} ->
@@ -619,8 +815,8 @@ defmodule SpaceTraders.FleetGenerationTest do
       {"POST", "/v2/register", "RESETME"} ->
         symbol_unavailable(conn)
 
-      {"POST", "/v2/register", "FALLBACK"} ->
-        Req.Test.json(conn, registration_body("FALLBACK", "FALLBACK-1", "SECOND_TOKEN"))
+      {"POST", "/v2/register", "ORBITALIST"} ->
+        Req.Test.json(conn, registration_body("ORBITALIST", "ORBITALIST-1", "SECOND_TOKEN"))
     end
   end
 

@@ -441,8 +441,9 @@ defmodule SpaceTraders.Fleet.Intents do
       Intent
       |> join(:inner, [i], s in Ship, on: i.ship_id == s.id)
       |> where(
-        [i, _s],
-        i.status in ^@unfinished_states and i.caller in ["commitment", "intervention"]
+        [i, s],
+        i.status in ^@unfinished_states and i.caller in ["commitment", "intervention"] and
+          is_nil(s.retired_at)
       )
       |> select([_i, s], s.symbol)
       |> Repo.all()
@@ -472,7 +473,10 @@ defmodule SpaceTraders.Fleet.Intents do
   end
 
   defp intents_waiting_on_timeline?(ship_symbol) do
-    with %Ship{} = ship <- Repo.get_by(Ship, symbol: ship_symbol),
+    with %Ship{} = ship <-
+           Repo.one(
+             from ship in Ship, where: ship.symbol == ^ship_symbol and is_nil(ship.retired_at)
+           ),
          %Intent{} = intent <- unfinished_intent_for_ship(ship.id) do
       Timeline.pending_events(:ship, ship_symbol)
       |> Enum.any?(&(&1.payload["intent_id"] == intent.id))
