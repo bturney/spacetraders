@@ -700,12 +700,6 @@ defmodule SpaceTraders.MissionControl do
       next_generation = Enum.find(generations, &(&1.number == generation.number + 1))
       end_at = generation.retired_at || DateTime.utc_now()
 
-      revision_at_start =
-        revisions
-        |> Map.values()
-        |> Enum.filter(&(DateTime.compare(&1.activated_at, generation.inserted_at) != :gt))
-        |> Enum.max_by(& &1.activated_at, DateTime, fn -> nil end)
-
       # Activation times have second precision. A Revision activated in the
       # same second a Generation ended is ambiguous by time alone; activation
       # moves only a live Generation onto the new Revision, so the ended
@@ -716,6 +710,27 @@ defmodule SpaceTraders.MissionControl do
             %Revision{number: number} -> number
             nil -> nil
           end
+        end
+
+      started_under =
+        revisions
+        |> Map.values()
+        |> Enum.filter(&(DateTime.compare(&1.activated_at, generation.inserted_at) != :gt))
+
+      # Second precision again: Revisions activated in the Generation's
+      # establishment second may each have governed its start, so all count,
+      # except a later one an ended Generation provably never moved onto.
+      revisions_at_start =
+        case Enum.max_by(started_under, & &1.activated_at, DateTime, fn -> nil end) do
+          nil ->
+            []
+
+          latest ->
+            Enum.filter(
+              started_under,
+              &(DateTime.compare(&1.activated_at, latest.activated_at) == :eq and
+                  (is_nil(final_revision_number) or &1.number <= final_revision_number))
+            )
         end
 
       end_second = DateTime.truncate(end_at, :second)
@@ -736,9 +751,9 @@ defmodule SpaceTraders.MissionControl do
         generation: generation,
         revisions:
           [
-            generation.fleet_strategy_revision_id,
-            revision_at_start && revision_at_start.id
-            | Enum.map(decisions, & &1.fleet_strategy_revision_id) ++
+            generation.fleet_strategy_revision_id
+            | Enum.map(revisions_at_start, & &1.id) ++
+                Enum.map(decisions, & &1.fleet_strategy_revision_id) ++
                 Enum.map(active_revisions, & &1.id)
           ]
           |> Enum.reject(&is_nil/1)
@@ -748,8 +763,7 @@ defmodule SpaceTraders.MissionControl do
           |> Enum.map(& &1.number)
           |> Enum.sort(),
         objective_outcomes:
-          [revision_at_start | active_revisions]
-          |> Enum.filter(& &1)
+          (revisions_at_start ++ active_revisions)
           |> Enum.uniq_by(& &1.id)
           |> Enum.flat_map(&generation_objective_outcomes(generation, &1)),
         realized_credit_change: if(credit_changes == [], do: nil, else: Enum.sum(credit_changes)),
