@@ -93,6 +93,33 @@ defmodule SpaceTradersWeb.OperatorLive.Settings do
       <div class="divider" />
 
       <.form
+        for={@name_bank_form}
+        id="name_bank_form"
+        class="rounded-2xl border border-base-300/70 bg-base-100/70 p-4 sm:p-5"
+        phx-submit="save_name_bank"
+        phx-change="validate_name_bank"
+      >
+        <p class="eyebrow mb-3">Agent Name Bank</p>
+        <.input
+          field={@name_bank_form[:names]}
+          type="textarea"
+          label="Agent names, one per line, in order of preference"
+          rows="6"
+          spellcheck="false"
+        />
+        <p class="mb-3 text-sm opacity-70">
+          Used in order when minting or replacing an Agent. Names are uppercased and must be
+          3 to 14 characters.
+        </p>
+        <ul :if={@name_bank_errors != []} id="name_bank_errors" class="mb-3 text-sm text-error">
+          <li :for={error <- @name_bank_errors}>{error}</li>
+        </ul>
+        <.button variant="primary" phx-disable-with="Saving...">Save Name Bank</.button>
+      </.form>
+
+      <div class="divider" />
+
+      <.form
         for={@email_form}
         id="email_form"
         class="rounded-2xl border border-base-300/70 bg-base-100/70 p-4 sm:p-5"
@@ -184,9 +211,22 @@ defmodule SpaceTradersWeb.OperatorLive.Settings do
       |> assign(:import_agent_form, import_agent_form())
       |> assign_import_availability()
       |> assign_account_token_form()
+      |> assign_name_bank()
 
     {:ok, socket}
   end
+
+  @impl true
+  def handle_info(:refresh_name_bank, socket) do
+    # Recurring patch: reload stored names only when there is no unsaved draft.
+    if Map.has_key?(socket.assigns.form_drafts, :name_bank) do
+      {:noreply, socket}
+    else
+      {:noreply, assign_name_bank(socket)}
+    end
+  end
+
+  def handle_info(_message, socket), do: {:noreply, socket}
 
   @impl true
   def handle_event("validate_account_token", params, socket) do
@@ -221,6 +261,22 @@ defmodule SpaceTradersWeb.OperatorLive.Settings do
          socket
          |> put_flash(:error, "You must log in to change credentials.")
          |> push_navigate(to: ~p"/operators/log-in")}
+    end
+  end
+
+  def handle_event("validate_name_bank", %{"name_bank" => params}, socket) do
+    {:noreply, put_name_bank_draft(socket, params["names"], [])}
+  end
+
+  def handle_event("save_name_bank", %{"name_bank" => params}, socket) do
+    true = Agent.sudo_mode?(socket.assigns.current_scope.operator)
+
+    case SpaceTraders.AgentNameBank.save(params["names"] || "") do
+      {:ok, _names} ->
+        {:noreply, socket |> put_flash(:info, "Agent Name Bank saved.") |> assign_name_bank()}
+
+      {:error, errors} ->
+        {:noreply, put_name_bank_draft(socket, params["names"], errors)}
     end
   end
 
@@ -342,6 +398,24 @@ defmodule SpaceTradersWeb.OperatorLive.Settings do
       changeset ->
         {:noreply, assign(socket, password_form: to_form(changeset, action: :insert))}
     end
+  end
+
+  defp assign_name_bank(socket) do
+    names = Enum.join(SpaceTraders.AgentNameBank.list(), "\n")
+
+    socket
+    |> update(:form_drafts, &Map.delete(&1, :name_bank))
+    |> assign(:name_bank_errors, [])
+    |> assign(:name_bank_form, to_form(%{"names" => names}, as: "name_bank"))
+  end
+
+  defp put_name_bank_draft(socket, names, errors) do
+    names = names || ""
+
+    socket
+    |> update(:form_drafts, &Map.put(&1, :name_bank, %{"names" => names}))
+    |> assign(:name_bank_errors, errors)
+    |> assign(:name_bank_form, to_form(%{"names" => names}, as: "name_bank"))
   end
 
   defp assign_account_token_form(socket, changeset \\ Agent.change_account_token()) do
