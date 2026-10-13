@@ -88,8 +88,9 @@ defmodule SpaceTraders.API do
 
   @doc "POST /register — mint a new agent under the given account token."
   @spec register(account_token(), String.t(), String.t(), String.t()) :: result()
-  def register(account_token, symbol, faction, email) do
+  def register(account_token, symbol, faction, email, opts \\ []) do
     request_with_token(:post, "/register", account_token,
+      registration_attempt: opts[:registration_attempt],
       json:
         RegisterRequest.new(%{symbol: symbol, faction: faction, email: email})
         |> RegisterRequest.to_json(),
@@ -103,6 +104,16 @@ defmodule SpaceTraders.API do
            ships: {:list, Ship}
          }}
     )
+  end
+
+  @doc """
+  GET /agents/{agentSymbol}, the public Agent read. Only a 404 is conclusive:
+  it returns `{:error, :not_found}`. An existing Agent proves the symbol is
+  occupied, never who owns it.
+  """
+  @spec get_public_agent(String.t()) :: result() | {:error, :not_found}
+  def get_public_agent(symbol) when is_binary(symbol) do
+    request(:get, "/agents/#{URI.encode(symbol)}", nil, as: {:model, Agent}, not_found: true)
   end
 
   @doc "GET /my/agent"
@@ -445,6 +456,8 @@ defmodule SpaceTraders.API do
          shadow,
          capacity
        ) do
+    not_found_conclusive = Keyword.get(opts, :not_found, false) == true
+
     case Req.request(req) do
       {:ok, %{status: status, body: body}} when status in 200..299 ->
         emit_request_metric(operation, path, status)
@@ -472,7 +485,7 @@ defmodule SpaceTraders.API do
             evidence =
               Map.merge(%{status: status}, SpaceTraders.Outcomes.PostCommit.nav_evidence(decoded))
 
-            outcome = record_mutation_outcome(attempt, :succeeded, evidence)
+            outcome = record_success(attempt, evidence, decoded)
             # The decoded response is authoritative whether or not the success
             # write landed; an unresolved attempt later reconciled accepted keeps
             # its realized charge.
@@ -492,6 +505,10 @@ defmodule SpaceTraders.API do
                 )
             end
         end
+
+      {:ok, %{status: 404}} when method == :get and not_found_conclusive ->
+        emit_request_metric(operation, path, 404)
+        complete_shadow(shadow, capacity, 404, :client_error, {:error, :not_found})
 
       {:ok, %{status: status, body: body} = response} when status in 400..499 ->
         emit_request_metric(operation, path, status)
@@ -635,7 +652,7 @@ defmodule SpaceTraders.API do
   end
 
   defp prepare_mutation_attempt(operation, path, opts) do
-    case opts[:recorded_attempt] do
+    case opts[:recorded_attempt] || opts[:registration_attempt] do
       %Attempt{} = attempt -> {:ok, attempt}
       nil -> MutationAttempts.prepare(operation, path, opts)
     end
@@ -654,6 +671,9 @@ defmodule SpaceTraders.API do
 
   defp mark_mutation_sent(%Attempt{operation_id: "purchase-ship"} = attempt),
     do: FleetAcquisition.admit_send(attempt)
+
+  defp mark_mutation_sent(%Attempt{operation_id: "register"} = attempt),
+    do: SpaceTraders.FleetGeneration.Registration.admit_send(attempt)
 
   defp mark_mutation_sent(attempt), do: MutationAttempts.mark_sent_or_unknown(attempt)
 
@@ -674,6 +694,26 @@ defmodule SpaceTraders.API do
   end
 
   defp record_realized_charge(_response, _attempt), do: :ok
+
+  # A registration's AgentToken is committed with its success: the game cannot
+  # return it again if local adoption is interrupted.
+  defp record_success(
+         %Attempt{operation_id: "register"} = attempt,
+         evidence,
+         %{token: token} = decoded
+       )
+       when is_binary(token) and token != "" do
+    evidence =
+      Map.merge(evidence, SpaceTraders.FleetGeneration.Registration.success_evidence(decoded))
+
+    case MutationAttempts.record_registration_success(attempt, evidence, token) do
+      {:ok, _attempt} -> :ok
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp record_success(attempt, evidence, _decoded),
+    do: record_mutation_outcome(attempt, :succeeded, evidence)
 
   defp record_mutation_outcome(nil, _classification, _evidence), do: :ok
 

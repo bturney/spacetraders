@@ -243,4 +243,71 @@ defmodule SpaceTradersWeb.OperatorLive.MintTest do
       assert result =~ "must be 1-20 uppercase letters, digits, dashes or underscores"
     end
   end
+
+  describe "registration recovery" do
+    test "a lost response replaces the mint form with truthful reconciliation", %{conn: conn} do
+      operator = operator_fixture()
+      {:ok, operator} = Agent.link_account_token(operator, "ACCOUNT_TOKEN")
+      parent = self()
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        send(parent, {:game_request, conn.method, conn.request_path})
+        Req.Test.transport_error(conn, :timeout)
+      end)
+
+      conn = log_in_operator(conn, operator)
+      {:ok, lv, _html} = live(conn, ~p"/agents/new")
+      result = lv |> form("#mint_form", @mint_form) |> render_submit()
+
+      assert result =~ "The registration outcome is still unknown"
+      assert result =~ "Registration of MINER1 may have succeeded"
+      refute has_element?(lv, "#mint_form")
+      assert has_element?(lv, "#reconcile-registration")
+      assert has_element?(lv, "#adopt_registered_form")
+      assert_received {:game_request, "POST", "/v2/register"}
+
+      # A reload renders the same durable state, and Mission Control raises it.
+      {:ok, reloaded, _html} = live(conn, ~p"/agents/new")
+      refute has_element?(reloaded, "#mint_form")
+      assert render(reloaded) =~ "Registration of MINER1 may have succeeded"
+      {:ok, _mission_control, html} = live(conn, ~p"/mission-control")
+      assert html =~ "Registration of MINER1 may have succeeded"
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        send(parent, {:game_request, conn.method, conn.request_path})
+
+        case conn.request_path do
+          "/v2/my/agent" ->
+            Req.Test.json(conn, %{
+              "data" => %{
+                "symbol" => "MINER1",
+                "headquarters" => "X1-UX81-A2",
+                "credits" => 175_000,
+                "startingFaction" => "COSMIC"
+              }
+            })
+
+          "/v2/my/ships" ->
+            Req.Test.json(conn, %{
+              "data" => [],
+              "meta" => %{"total" => 0, "page" => 1, "limit" => 20}
+            })
+
+          _other ->
+            Req.Test.json(conn, %{"data" => []})
+        end
+      end)
+
+      {:ok, _conn} =
+        reloaded
+        |> form("#adopt_registered_form", %{
+          "adopt" => %{"agent_token" => "RECOVERED_TOKEN", "confirmed" => "true"}
+        })
+        |> render_submit()
+        |> follow_redirect(conn, ~p"/mission-control")
+
+      refute_received {:game_request, "POST", _}
+      assert [%{symbol: "MINER1", agent_token: "RECOVERED_TOKEN"}] = Agent.list_agents(operator)
+    end
+  end
 end

@@ -766,13 +766,17 @@ defmodule SpaceTraders.AgentTest do
                FleetGeneration.mint(scope, %{symbol: "DUPLICATE", faction: "COSMIC"})
     end
 
-    test "surfaces a fatal API failure as an Error", %{scope: scope} do
+    # A 500 does not prove the game refused the registration (#701).
+    test "retains a server failure as an unresolved registration", %{scope: scope} do
       Req.Test.stub(SpaceTraders.API, fn conn ->
         Plug.Conn.send_resp(conn, 500, ~s({"error":"boom"}))
       end)
 
-      assert {:error, %SpaceTraders.API.Error{status: 500}} =
+      assert {:error, :registration_unresolved} =
                FleetGeneration.mint(scope, %{symbol: "NEWSYM", faction: "COSMIC"})
+
+      assert %{status: :unresolved, symbol: "NEWSYM"} =
+               FleetGeneration.registration_recovery(scope)
     end
   end
 

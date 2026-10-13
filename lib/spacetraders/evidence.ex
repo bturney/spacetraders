@@ -27,7 +27,7 @@ defmodule SpaceTraders.Evidence do
 
   @owned_read_deadline_seconds 60
   @owned_read_freshness_seconds 30
-  @unretained_conclusion_operations ~w(accept-contract fulfill-contract)
+  @unretained_conclusion_operations ~w(accept-contract fulfill-contract register)
   # Recovery evidence must be acquired after dispatch and at most this old.
   @recovery_window_ms 30_000
   @source_fields ~w(id agent_id fleet_generation_id subject operation_id facts response_fingerprint observed_at dependency_keys)a
