@@ -66,23 +66,19 @@ defmodule SpaceTraders.EvidenceRetirementTest do
     assert {:error, :stale_agent} = FleetGeneration.agent_overview(Repo.reload!(first_agent))
 
     Req.Test.stub(SpaceTraders.API, fn conn ->
-      Req.Test.json(conn, registration_body(conn.body_params["symbol"]))
+      Req.Test.json(conn, registration_body(conn.body_params["symbol"], "REPLACEMENT_TOKEN"))
     end)
 
-    assert {:ok, _replacement} =
-             FleetGeneration.mint(scope, %{
-               symbol: "REPLACED",
-               faction: "COSMIC",
-               replacement_symbols: ["REPLACED"]
-             })
+    assert {:ok, %{agent: replacement}} = FleetGeneration.replace_after_reset(scope)
+    assert replacement.id != first_agent.id
 
-    # Retirement nilifies the Agent reference, preserving historical evidence
-    # and the fulfilled demand's attribution rather than withdrawing it.
+    # Retirement retains the predecessor Agent, so historical evidence and the
+    # fulfilled demand keep their original attribution rather than being withdrawn.
     assert {:ok, retained_evidence} = Evidence.evidence_for_demand(demand)
     assert retained_evidence.id == original_evidence.id
     assert retained_evidence.operation_id == "get-market"
     assert retained_evidence.subject == subject
-    assert retained_evidence.agent_id == nil
+    assert retained_evidence.agent_id == first_agent.id
 
     retained_demand = Repo.reload!(demand)
     assert retained_demand.fulfilled_observation_id == retained_evidence.id
@@ -93,10 +89,10 @@ defmodule SpaceTraders.EvidenceRetirementTest do
     assert retained_demand.withdrawn_at == nil
   end
 
-  defp registration_body(symbol) do
+  defp registration_body(symbol, token \\ "MINTED_TOKEN") do
     %{
       "data" => %{
-        "token" => "MINTED_TOKEN",
+        "token" => token,
         "agent" => %{
           "symbol" => symbol,
           "credits" => 175_000,
