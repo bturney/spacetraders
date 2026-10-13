@@ -1071,7 +1071,7 @@ defmodule SpaceTraders.RecordedFamilyInterruptionTest do
           from o in SpaceTraders.Evidence.Observation, where: o.agent_id == ^agent.id
         )
 
-        topics = ["fleet:#{agent.id}", "fleet_allocation:#{operator.id}"]
+        topics = ["fleet:#{agent.id}", "fleet_allocation"]
         Repo.delete_all(from n in SpaceTraders.Outbox.Notification, where: n.topic in ^topics)
         Repo.delete_all(from e in SpaceTraders.Timeline.Event, where: e.owner_id in ^symbols)
         Repo.delete!(operator)

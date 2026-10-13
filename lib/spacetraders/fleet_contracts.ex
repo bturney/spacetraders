@@ -14,7 +14,6 @@ defmodule SpaceTraders.FleetContracts do
   alias SpaceTraders.Fleet.Intents
   alias SpaceTraders.FleetAllocation
   alias SpaceTraders.FleetExecution
-  alias SpaceTraders.FleetGeneration.Generation
   alias SpaceTraders.FleetPlanning
   alias SpaceTraders.Repo
   alias SpaceTraders.MutationAttempts
@@ -70,7 +69,8 @@ defmodule SpaceTraders.FleetContracts do
   @doc "Re-reads an offer before acceptance so an ambiguous prior response cannot be replayed."
   def accept_if_admissible(%AgentRecord{} = agent, %Revision{} = revision, contract_id, evidence)
       when is_binary(contract_id) do
-    with true <- contract_strategy?(revision) || {:error, :strategy},
+    with {:ok, _} <- FleetAllocation.authorize_current_agent(agent, revision),
+         true <- contract_strategy?(revision) || {:error, :strategy},
          {:ok, contracts} <- Contracts.list_contracts(agent),
          %Contract{} = contract <- Enum.find(contracts, &(&1.id == contract_id)) do
       cond do
@@ -115,7 +115,8 @@ defmodule SpaceTraders.FleetContracts do
   @doc "Negotiates one offer only when authoritative Contract state permits another."
   def negotiate_if_available(%AgentRecord{} = agent, %Revision{} = revision, ship_symbol)
       when is_binary(ship_symbol) do
-    with true <- contract_strategy?(revision) || {:error, :strategy},
+    with {:ok, _} <- FleetAllocation.authorize_current_agent(agent, revision),
+         true <- contract_strategy?(revision) || {:error, :strategy},
          {:ok, contracts} <- Contracts.list_contracts(agent),
          true <- Contracts.negotiable?(contracts) || {:error, :offer_pending},
          {:ok, _ship} <- Fleet.owned_ship(agent, ship_symbol),
@@ -145,14 +146,13 @@ defmodule SpaceTraders.FleetContracts do
 
   @doc "Reconciles Contract outcomes from governed game evidence and published Fleet authority."
   def reconcile(%Scope{} = scope, %AgentRecord{} = agent, %Revision{} = revision) do
-    with true <- contract_strategy?(revision) || {:error, :strategy},
+    with {:ok, generation} <- FleetAllocation.authorize_current(scope, agent, revision),
+         true <- contract_strategy?(revision) || {:error, :strategy},
          :ok <- SpaceTraders.RuntimeAuthority.execution_allowed?(),
          {:ok, contracts} <- Contracts.list_contracts(agent),
          :ok <- reconcile_contracts(agent, contracts),
          {:ok, ships} <- Fleet.list_ships(agent),
-         {:ok, overview} <- Agent.agent_overview(agent),
-         %Generation{} = generation <- current_generation(agent),
-         true <- generation.fleet_strategy_revision_id == revision.id || {:error, :strategy} do
+         {:ok, overview} <- Agent.agent_overview(agent) do
       now = DateTime.utc_now()
       accepted = Enum.filter(contracts, &Contracts.active?/1)
 
@@ -834,19 +834,11 @@ defmodule SpaceTraders.FleetContracts do
     end)
   end
 
-  defp current_generation(%AgentRecord{id: agent_id}) do
-    Repo.one(
-      from generation in Generation,
-        where:
-          generation.agent_id == ^agent_id and is_nil(generation.fenced_at) and
-            is_nil(generation.retired_at)
-    )
-  end
-
   @doc "Reconciles the game result before fulfilling a completely delivered Contract."
   def fulfill_if_ready(%AgentRecord{} = agent, %Revision{} = revision, contract_id)
       when is_binary(contract_id) do
-    with true <- contract_strategy?(revision) || {:error, :strategy},
+    with {:ok, _} <- FleetAllocation.authorize_current_agent(agent, revision),
+         true <- contract_strategy?(revision) || {:error, :strategy},
          {:ok, contracts} <- Contracts.list_contracts(agent),
          %Contract{} = contract <- Enum.find(contracts, &(&1.id == contract_id)),
          :ok <- reconcile_confirmed_attempts(agent, contract),
@@ -893,8 +885,8 @@ defmodule SpaceTraders.FleetContracts do
         %Scope{operator: %{id: operator_id}} = scope,
         %AgentRecord{operator_id: operator_id} = agent
       ) do
-    with {:ok, contracts} <- Contracts.list_contracts(agent),
-         %{commitments: commitments} <- FleetAllocation.current_portfolio(scope, agent) do
+    with %{commitments: commitments} <- FleetAllocation.current_portfolio(scope, agent),
+         {:ok, contracts} <- Contracts.list_contracts(agent) do
       commitments
       |> Enum.flat_map(& &1.pledges)
       |> Enum.reduce_while({:ok, []}, fn

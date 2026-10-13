@@ -7,7 +7,7 @@ defmodule SpaceTraders.FleetExecutionTest do
 
   alias SpaceTraders.Test.CapacityDispositions
   alias SpaceTraders.API.Model.Waypoint
-  alias SpaceTraders.Agent.{Operator, Scope}
+  alias SpaceTraders.Agent.Scope
   alias SpaceTraders.Fleet.Intent
   alias SpaceTraders.Fleet.Ship
   alias SpaceTraders.FleetAllocation
@@ -324,7 +324,7 @@ defmodule SpaceTraders.FleetExecutionTest do
     end
 
     defp market_generation do
-      operator = Repo.insert!(%Operator{email: "market-#{System.unique_integer()}@example.com"})
+      operator = operator_fixture()
 
       agent =
         Repo.insert!(%SpaceTraders.Agent.Agent{

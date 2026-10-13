@@ -69,13 +69,13 @@ defmodule SpaceTraders.ContractExecutionTest do
   test "fulfillment reads authoritative Contract state and never treats delivered goods as fulfilled" do
     agent = agent_fixture(operator_fixture())
 
-    revision = %Revision{
-      id: 42,
-      document: %{
-        "objectives" => [%{"objective" => "Fulfil contracts"}],
-        "hard_constraints" => []
-      }
-    }
+    revision =
+      activate_revision(agent, %{
+        document: %{
+          "objectives" => [%{"objective" => "Fulfil contracts"}],
+          "hard_constraints" => []
+        }
+      })
 
     Req.Test.stub(SpaceTraders.API, fn conn ->
       assert conn.request_path == "/v2/my/contracts"
@@ -110,13 +110,13 @@ defmodule SpaceTraders.ContractExecutionTest do
   test "completion waits for the game's fulfilled flag after calling fulfill" do
     agent = agent_fixture(operator_fixture())
 
-    revision = %Revision{
-      id: 42,
-      document: %{
-        "objectives" => [%{"objective" => "Fulfil contracts"}],
-        "hard_constraints" => []
-      }
-    }
+    revision =
+      activate_revision(agent, %{
+        document: %{
+          "objectives" => [%{"objective" => "Fulfil contracts"}],
+          "hard_constraints" => []
+        }
+      })
 
     Req.Test.stub(SpaceTraders.API, fn conn ->
       case {conn.method, conn.request_path} do
@@ -192,13 +192,13 @@ defmodule SpaceTraders.ContractExecutionTest do
     {:ok, attempt} = MutationAttempts.mark_sent_or_unknown(attempt)
     {:ok, _} = MutationAttempts.record_outcome(attempt, :ambiguous, %{reason: "timeout"})
 
-    revision = %Revision{
-      id: 42,
-      document: %{
-        "objectives" => [%{"objective" => "Fulfil contracts"}],
-        "hard_constraints" => []
-      }
-    }
+    revision =
+      activate_revision(agent, %{
+        document: %{
+          "objectives" => [%{"objective" => "Fulfil contracts"}],
+          "hard_constraints" => []
+        }
+      })
 
     Req.Test.stub(SpaceTraders.API, fn conn ->
       case {conn.method, conn.request_path} do
@@ -251,13 +251,13 @@ defmodule SpaceTraders.ContractExecutionTest do
     {:ok, attempt} = MutationAttempts.mark_sent_or_unknown(attempt)
     {:ok, _} = MutationAttempts.record_outcome(attempt, :ambiguous, %{reason: "timeout"})
 
-    revision = %Revision{
-      id: 42,
-      document: %{
-        "objectives" => [%{"objective" => "Fulfil contracts"}],
-        "hard_constraints" => []
-      }
-    }
+    revision =
+      activate_revision(agent, %{
+        document: %{
+          "objectives" => [%{"objective" => "Fulfil contracts"}],
+          "hard_constraints" => []
+        }
+      })
 
     Req.Test.stub(SpaceTraders.API, fn conn ->
       case conn.request_path do
@@ -307,13 +307,13 @@ defmodule SpaceTraders.ContractExecutionTest do
   test "acceptance uses live credits, not a stale planning estimate, to enforce the credit floor" do
     agent = agent_fixture(operator_fixture())
 
-    revision = %Revision{
-      id: 42,
-      document: %{
-        "objectives" => [%{"objective" => "Fulfil contracts"}],
-        "hard_constraints" => ["Keep at least 500 credits available"]
-      }
-    }
+    revision =
+      activate_revision(agent, %{
+        document: %{
+          "objectives" => [%{"objective" => "Fulfil contracts"}],
+          "hard_constraints" => ["Keep at least 500 credits available"]
+        }
+      })
 
     now = DateTime.utc_now()
 
@@ -364,13 +364,13 @@ defmodule SpaceTraders.ContractExecutionTest do
   test "negotiation cannot be repeated while an offered Contract remains pending" do
     agent = agent_fixture(operator_fixture())
 
-    revision = %Revision{
-      id: 42,
-      document: %{
-        "objectives" => [%{"objective" => "Fulfil contracts"}],
-        "hard_constraints" => []
-      }
-    }
+    revision =
+      activate_revision(agent, %{
+        document: %{
+          "objectives" => [%{"objective" => "Fulfil contracts"}],
+          "hard_constraints" => []
+        }
+      })
 
     Req.Test.stub(SpaceTraders.API, fn conn ->
       assert conn.request_path == "/v2/my/contracts"
@@ -891,6 +891,23 @@ defmodule SpaceTraders.ContractExecutionTest do
 
     assert {:ok, [%{amount: 0}, %{amount: 0}]} =
              FleetContracts.current_pledges(Scope.for_operator(operator), agent)
+  end
+
+  defp activate_revision(agent, %{document: document}) do
+    strategy = Repo.insert!(%Strategy{operator_id: agent.operator_id, revision_number: 1})
+
+    revision =
+      Repo.insert!(%Revision{
+        fleet_strategy_id: strategy.id,
+        number: 1,
+        document: document,
+        source: "operator",
+        activated_at: DateTime.utc_now(:second)
+      })
+
+    Repo.update!(Ecto.Changeset.change(strategy, active_revision_id: revision.id))
+    assert {:ok, %{state: :current}} = SpaceTraders.FleetGeneration.current_fleet()
+    revision
   end
 
   defp claimed_contract_ship do

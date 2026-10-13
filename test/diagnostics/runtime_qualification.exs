@@ -83,7 +83,7 @@ defmodule SpaceTraders.RuntimeQualification do
       agent_ids = Repo.all(from a in Agent, where: a.operator_id in ^operator_ids, select: a.id)
 
       topics =
-        Enum.map(operator_ids, &"fleet_allocation:#{&1}") ++ Enum.map(agent_ids, &"fleet:#{&1}")
+        ["fleet_allocation" | Enum.map(agent_ids, &"fleet:#{&1}")]
 
       attempt_ids =
         Repo.all(from a in Attempt, where: a.operator_id in ^operator_ids, select: a.id)

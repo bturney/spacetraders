@@ -17,11 +17,135 @@ defmodule SpaceTraders.FleetAllocationPublishTest do
 
   @as_of ~U[2030-01-01 12:00:00Z]
 
+  test "fenced Fleet contribution owners refuse resource discovery and admission" do
+    %{scope: scope, agent: agent, generation: generation, revision: revision} =
+      allocation_fixture()
+
+    revision =
+      Repo.update!(
+        Ecto.Changeset.change(revision,
+          document: %{
+            "objectives" => [%{"objective" => "Mine resources and fulfill Contracts"}],
+            "hard_constraints" => revision.document["hard_constraints"]
+          }
+        )
+      )
+
+    assert {:ok, _} = SpaceTraders.FleetGeneration.current_fleet()
+    Repo.update!(Ecto.Changeset.change(generation, fenced_at: DateTime.utc_now()))
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      flunk(
+        "Fenced Fleet must not acquire or mutate resources: #{conn.method} #{conn.request_path}"
+      )
+    end)
+
+    for result <- [
+          SpaceTraders.FleetResources.reconcile(scope, agent, revision, "X1-A"),
+          SpaceTraders.FleetAcquisition.reconcile(scope, agent, revision, "X1-A"),
+          SpaceTraders.FleetRefit.reconcile(scope, agent, revision, "X1-A"),
+          SpaceTraders.FleetConstruction.reconcile(scope, agent, revision),
+          SpaceTraders.FleetContracts.reconcile(scope, agent, revision),
+          SpaceTraders.FleetContracts.accept_if_admissible(agent, revision, "CONTRACT", %{}),
+          SpaceTraders.FleetContracts.negotiate_if_available(agent, revision, "SHIP-1"),
+          SpaceTraders.FleetContracts.fulfill_if_ready(agent, revision, "CONTRACT"),
+          SpaceTraders.FleetExecution.reconcile_market_domain(scope, agent, revision, "X1-A", %{})
+        ] do
+      assert result == {:error, :current_fleet_unavailable}
+    end
+
+    assert :ok = SpaceTraders.FleetAllocation.Reconciler.observe_market_evidence(agent.id, "X1-A")
+    assert :ok = SpaceTraders.FleetAllocation.Reconciler.wake_due_demands(agent.id)
+    assert is_nil(FleetAllocation.current_portfolio(scope))
+    assert SpaceTraders.MissionControl.availability(scope) == %{}
+  end
+
+  test "an allocation Scope authenticates the deployment Operator rather than selecting resources" do
+    %{scope: scope, agent: agent, generation: generation, revision: revision} =
+      allocation_fixture()
+
+    portfolio = publish!(scope, generation, revision)
+    forged_scope = %Scope{operator: %{id: scope.operator.id}}
+
+    assert is_nil(FleetAllocation.current_portfolio(forged_scope))
+
+    assert {:error, :invalid_publication} =
+             FleetAllocation.publish_portfolio(
+               forged_scope,
+               generation.id,
+               selection(revision, 1),
+               decision()
+             )
+
+    assert {:error, :unauthenticated} =
+             FleetAllocation.unwind_current_portfolio(forged_scope, generation.id)
+
+    assert FleetAllocation.current_portfolio(scope).id == portfolio.id
+    assert {:ok, claim} = FleetAllocation.current_ship_claim(agent, "SHIP-1")
+    assert claim.portfolio_id == portfolio.id
+  end
+
+  test "a bootstrapped successor is not allocatable until current Fleet publication" do
+    %{scope: scope, agent: predecessor, generation: old, revision: revision} =
+      allocation_fixture()
+
+    assert {:ok, %{generation: %{id: old_id}}} = SpaceTraders.FleetGeneration.current_fleet()
+    assert old_id == old.id
+    Repo.update!(Ecto.Changeset.change(old, retired_at: DateTime.utc_now()))
+
+    successor = agent_fixture(scope.operator)
+    {:ok, _ship} = Fleet.record_ship(successor, "SHIP-2", "SHIP_COMMAND_FRIGATE")
+    selected = selection(revision)
+    [commitment] = selected.commitments
+    selected = %{selected | commitments: [%{commitment | claims: ["SHIP-2"], pledges: []}]}
+
+    pending =
+      Repo.insert!(%Generation{
+        operator_id: scope.operator.id,
+        agent_id: successor.id,
+        fleet_strategy_revision_id: revision.id,
+        number: 2,
+        symbol: successor.symbol,
+        faction: successor.faction
+      })
+
+    assert {:ok, %{state: :transition, generation: %{id: ^old_id}}} =
+             SpaceTraders.FleetGeneration.current_fleet()
+
+    assert is_nil(FleetAllocation.active_generation(successor))
+    assert is_nil(FleetAllocation.current_portfolio(scope))
+
+    assert {:error, :stale_source} =
+             FleetAllocation.publish_portfolio(scope, pending.id, selected, decision())
+
+    assert {:error, :no_current_ship_claim} =
+             FleetAllocation.current_ship_claim(predecessor, "SHIP-1")
+
+    assert {:ok, :ok} =
+             Repo.transaction(fn ->
+               SpaceTraders.FleetGeneration.Identity.publish_generation!(
+                 scope.operator.id,
+                 pending.id
+               )
+             end)
+
+    assert {:ok, portfolio} =
+             FleetAllocation.publish_portfolio(scope, pending.id, selected, decision())
+
+    assert FleetAllocation.current_portfolio(scope).id == portfolio.id
+    assert FleetAllocation.current_portfolio(scope, successor).id == portfolio.id
+    assert is_nil(FleetAllocation.current_portfolio(scope, predecessor))
+    assert portfolio.strategy_decision_episode.fleet_generation_id == pending.id
+
+    assert portfolio.strategy_decision_episode.evidence_references ==
+             decision().evidence_references
+  end
+
   test "publishes protections, Decision Episode, and notification as one version" do
     %{scope: scope, agent: agent, generation: generation, revision: revision} =
       allocation_fixture()
 
-    Phoenix.PubSub.subscribe(SpaceTraders.PubSub, "fleet_allocation:#{scope.operator.id}")
+    SpaceTraders.MissionControl.Channels.subscribe_allocation()
 
     selection = selection(revision)
 

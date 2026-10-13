@@ -35,9 +35,11 @@ defmodule SpaceTraders.FleetRefit do
   @doc "Selects and dispatches a refit Candidate, or resumes one already claimed."
   def reconcile(%Scope{} = scope, %AgentRecord{} = agent, %Revision{} = revision, system)
       when is_binary(system) do
-    case FleetAllocation.current_portfolio(scope, agent) do
-      nil -> acquire(scope, agent, revision, system)
-      portfolio -> resume(scope, agent, portfolio)
+    with {:ok, _} <- FleetAllocation.authorize_current(scope, agent, revision) do
+      case FleetAllocation.current_portfolio() do
+        nil -> acquire(scope, agent, revision, system)
+        portfolio -> resume(scope, agent, portfolio)
+      end
     end
   end
 
@@ -460,12 +462,12 @@ defmodule SpaceTraders.FleetRefit do
   defp market_good(good), do: good
 
   defp active_generation(agent, revision) do
-    Repo.one(
-      from generation in Generation,
-        where:
-          generation.agent_id == ^agent.id and
-            generation.fleet_strategy_revision_id == ^revision.id and
-            is_nil(generation.fenced_at) and is_nil(generation.retired_at)
-    )
+    case FleetAllocation.active_generation(agent) do
+      %Generation{fleet_strategy_revision_id: id} = generation when id == revision.id ->
+        generation
+
+      _ ->
+        nil
+    end
   end
 end

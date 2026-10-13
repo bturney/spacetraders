@@ -7,13 +7,9 @@ defmodule SpaceTraders.MissionControl.Channels do
   or payload. Messages are prompts to re-read the shared projection, never
   authority or data.
 
-  Allocation notifications are still produced on the legacy per-Operator outbox
-  topic until the Fleet Allocation migration batch moves them;
-  `subscribe_allocation/0` is the compatibility adapter that resolves that topic
-  from the deployment Operator, so consumers no longer name a tenant.
+  Allocation outbox notifications use the same deployment-wide subscription,
+  including setup and fenced transitions where there is no allocatable Fleet.
   """
-
-  alias SpaceTraders.OperatorAuthority
 
   @pubsub SpaceTraders.PubSub
   @strategy "fleet_strategy"
@@ -34,10 +30,5 @@ defmodule SpaceTraders.MissionControl.Channels do
     do: Phoenix.PubSub.broadcast(@pubsub, @conditions, :mission_conditions_updated)
 
   @doc "Subscribes the caller to current-Fleet allocation outbox notifications."
-  def subscribe_allocation do
-    case OperatorAuthority.deployment_operator_id() do
-      nil -> :ok
-      operator_id -> Phoenix.PubSub.subscribe(@pubsub, "fleet_allocation:#{operator_id}")
-    end
-  end
+  def subscribe_allocation, do: Phoenix.PubSub.subscribe(@pubsub, "fleet_allocation")
 end

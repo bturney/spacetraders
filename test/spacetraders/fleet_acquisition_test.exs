@@ -351,6 +351,31 @@ defmodule SpaceTraders.FleetAcquisitionTest do
     assert id == revision.id
   end
 
+  test "fresh spending evidence cannot admit a purchase after the Fleet is fenced" do
+    {_scope, agent, _revision} = generation()
+    stub_shipyard(agent)
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      assert conn.method == "GET"
+      overview(conn, agent, @credits)
+    end)
+
+    assert {:ok, offer} = SpaceTraders.CreditSpending.acquire_ship_purchase(agent, candidate())
+    assert {:ok, %{generation: generation}} = SpaceTraders.FleetGeneration.current_fleet()
+    Repo.update!(Ecto.Changeset.change(generation, fenced_at: DateTime.utc_now()))
+    Req.Test.stub(SpaceTraders.API, fn _ -> flunk("fenced Fleet spending reached the game") end)
+
+    assert {:error, :current_fleet_unavailable} =
+             SpaceTraders.API.purchase_ship(
+               SpaceTraders.API.AgentTokenReference.new(agent),
+               "SHIP_LIGHT_HAULER",
+               "X1-UX81-A1",
+               spending: offer
+             )
+
+    assert [%{state: "not_sent", sent_or_unknown_at: nil}] = purchase_attempts(agent)
+  end
+
   test "Shipyard evidence that ages before the send marker prevents the purchase" do
     {_scope, agent, _revision} = generation()
     start_supervised!({SpaceTraders.TestClock, DateTime.utc_now()})

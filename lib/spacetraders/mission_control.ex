@@ -64,9 +64,20 @@ defmodule SpaceTraders.MissionControl do
   carrying their Decision Episode identity, so outcome evidence stays
   reachable by identity.
   """
-  def endeavors(%Scope{} = scope), do: endeavors(scope, FleetAllocation.current_portfolio(scope))
+  def endeavors(%Scope{} = scope),
+    do: project_endeavors(scope, FleetAllocation.current_portfolio(scope))
 
-  def endeavors(%Scope{} = scope, nil) do
+  @doc "Legacy snapshot adapter: supplied portfolios cannot select another live Fleet."
+  def endeavors(%Scope{} = scope, %Portfolio{id: id}) do
+    case FleetAllocation.current_portfolio(scope) do
+      %Portfolio{id: ^id} = current -> project_endeavors(scope, current)
+      _ -> project_endeavors(scope, nil)
+    end
+  end
+
+  def endeavors(%Scope{} = scope, nil), do: project_endeavors(scope, nil)
+
+  defp project_endeavors(%Scope{} = scope, nil) do
     %{
       strategy: strategy(scope),
       groups: [],
@@ -75,7 +86,7 @@ defmodule SpaceTraders.MissionControl do
     }
   end
 
-  def endeavors(%Scope{} = scope, %Portfolio{} = portfolio) do
+  defp project_endeavors(%Scope{} = scope, %Portfolio{} = portfolio) do
     objectives =
       case strategy(scope).active_revision do
         nil -> []
@@ -217,15 +228,18 @@ defmodule SpaceTraders.MissionControl do
   be established maps to `nil`, and its evaluation must state the limitation
   rather than assume zero capacity.
   """
-  def availability(%Scope{operator: operator}) do
-    operator
-    |> Agent.list_agents()
-    |> Map.new(fn agent ->
+  def availability(%Scope{} = scope) do
+    with {:ok, _} <- OperatorAuthority.authorize(scope),
+         %{agent_id: agent_id} <- FleetAllocation.current_generation() do
+      agent = Repo.get!(AgentRecord, agent_id)
+
       case FleetExecution.governed_availability(agent) do
-        {:ok, availability} -> {agent.id, availability}
-        {:error, _reason} -> {agent.id, nil}
+        {:ok, availability} -> %{agent_id => availability}
+        {:error, _reason} -> %{agent_id => nil}
       end
-    end)
+    else
+      _ -> %{}
+    end
   end
 
   @doc """

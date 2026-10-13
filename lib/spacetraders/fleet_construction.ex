@@ -15,7 +15,6 @@ defmodule SpaceTraders.FleetConstruction do
   alias SpaceTraders.FleetAllocation
   alias SpaceTraders.FleetContracts
   alias SpaceTraders.FleetExecution
-  alias SpaceTraders.FleetGeneration.Generation
   alias SpaceTraders.FleetPlanning
   alias SpaceTraders.FleetStrategy.Revision
   alias SpaceTraders.FleetStrategy.StandingAuthority
@@ -199,11 +198,9 @@ defmodule SpaceTraders.FleetConstruction do
         &FleetPlanning.construction_objective?/1
       )
 
-    with true <- is_integer(index) || {:error, :strategy},
+    with {:ok, generation} <- FleetAllocation.authorize_current(scope, agent, revision),
+         true <- is_integer(index) || {:error, :strategy},
          :ok <- SpaceTraders.RuntimeAuthority.execution_allowed?(),
-         %Generation{fleet_strategy_revision_id: revision_id} = generation <-
-           current_generation(agent),
-         true <- revision_id == revision.id || {:error, :strategy},
          {:ok, ships} <- Fleet.list_ships(agent),
          {:ok, overview} <- Agent.agent_overview(agent),
          {:ok, constructions, unavailable} <- read_projects(agent, scope) do
@@ -1022,14 +1019,5 @@ defmodule SpaceTraders.FleetConstruction do
 
   defp construction_portfolio?(portfolio) do
     Enum.any?(portfolio.commitments, &construction_commitment?/1)
-  end
-
-  defp current_generation(agent) do
-    Repo.one(
-      from g in Generation,
-        where:
-          g.agent_id == ^agent.id and
-            is_nil(g.fenced_at) and is_nil(g.retired_at)
-    )
   end
 end

@@ -33,7 +33,7 @@ defmodule SpaceTraders.CurrentFleetDurabilityTest do
         from(o in SpaceTraders.Evidence.Observation, where: o.agent_id in ^agent_ids)
       )
 
-      topics = ["fleet_allocation:#{operator.id}" | Enum.map(agent_ids, &"fleet:#{&1}")]
+      topics = ["fleet_allocation" | Enum.map(agent_ids, &"fleet:#{&1}")]
       Repo.delete_all(from(n in SpaceTraders.Outbox.Notification, where: n.topic in ^topics))
       Repo.delete_all(from(o in SpaceTraders.Agent.Operator, where: o.id == ^operator.id))
       SpaceTraders.EmergencyStopAdmission.clear()

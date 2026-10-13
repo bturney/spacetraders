@@ -71,7 +71,7 @@ defmodule SpaceTradersWeb.FleetOutcomeMetricsTest do
 
         Repo.delete_all(
           from n in SpaceTraders.Outbox.Notification,
-            where: n.topic in ^["fleet:#{agent.id}", "fleet_allocation:#{operator.id}"]
+            where: n.topic in ^["fleet:#{agent.id}", "fleet_allocation"]
         )
 
         Repo.delete!(operator)

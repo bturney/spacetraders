@@ -30,6 +30,7 @@ defmodule SpaceTraders.FleetAllocation.NeutralWait do
   import Ecto.Query
 
   alias SpaceTraders.Evidence.ObservationDemand
+  alias SpaceTraders.FleetAllocation
   alias SpaceTraders.FleetAllocation.AllocationResultPointer
   alias SpaceTraders.FleetAllocation.JsonEvidence
   alias SpaceTraders.FleetAllocation.StrategyDecisionEpisode
@@ -77,12 +78,14 @@ defmodule SpaceTraders.FleetAllocation.NeutralWait do
           {:ok, StrategyDecisionEpisode.t()}
           | {:error, :not_neutral_wait | :no_future_observation_demand | term()}
   def record(
-        %SpaceTraders.Agent.Scope{operator: %{id: operator_id}},
+        %SpaceTraders.Agent.Scope{operator: %{id: operator_id}} = scope,
         %Generation{} = generation,
         %Revision{} = revision,
         %{} = selection
       ) do
-    with :ok <- wait_action?(selection),
+    with {:ok, ^operator_id} <- SpaceTraders.OperatorAuthority.authorize(scope),
+         %Generation{id: id} when id == generation.id <- FleetAllocation.current_generation(),
+         :ok <- wait_action?(selection),
          {:ok, binding_limitation} <- binding_limitation(selection),
          {:ok, limitation_kind} <- limitation_kind(binding_limitation),
          :ok <- valid_source_version?(selection) do
@@ -107,7 +110,7 @@ defmodule SpaceTraders.FleetAllocation.NeutralWait do
           if equivalent? do
             refresh_episode!(current, selection, demands, calibration_version)
           else
-            supersede_current_waits!(operator_id, generation.id)
+            supersede_current_waits!(generation.id, generation.id)
 
             mint_episode(operator_id, generation.id, revision, selection, limitation_kind,
               demands: demands,
@@ -130,6 +133,10 @@ defmodule SpaceTraders.FleetAllocation.NeutralWait do
           {:error, reason} -> Repo.rollback(reason)
         end
       end)
+    else
+      %Generation{} -> {:error, :stale_allocation}
+      nil -> {:error, :stale_allocation}
+      error -> error
     end
   end
 
@@ -175,7 +182,17 @@ defmodule SpaceTraders.FleetAllocation.NeutralWait do
   @doc "The `inserted_at` of the current Neutral Wait, or nil when the fleet is not waiting."
   @spec current_since(integer()) :: DateTime.t() | nil
   def current_since(generation_id) when is_integer(generation_id) do
-    pointer = Repo.get_by(AllocationResultPointer, fleet_generation_id: generation_id)
+    pointer =
+      Repo.one(
+        from pointer in AllocationResultPointer,
+          join: identity in "current_fleet_identity",
+          on: identity.id == 1 and identity.fleet_generation_id == pointer.fleet_generation_id,
+          join: generation in Generation,
+          on: generation.id == pointer.fleet_generation_id,
+          where:
+            generation.id == ^generation_id and is_nil(generation.fenced_at) and
+              is_nil(generation.retired_at)
+      )
 
     case pointer && current_episode(pointer) do
       %StrategyDecisionEpisode{inserted_at: inserted_at} -> inserted_at
@@ -185,7 +202,15 @@ defmodule SpaceTraders.FleetAllocation.NeutralWait do
 
   @doc false
   def supersede_for_operator(operator_id) when is_integer(operator_id) do
-    supersede_current_waits!(operator_id)
+    if operator_id == SpaceTraders.OperatorAuthority.deployment_operator_id() do
+      generation_id =
+        Repo.one(
+          from i in "current_fleet_identity", where: i.id == 1, select: i.fleet_generation_id
+        )
+
+      if generation_id, do: supersede_current_waits!(generation_id)
+    end
+
     :ok
   end
 
@@ -208,12 +233,12 @@ defmodule SpaceTraders.FleetAllocation.NeutralWait do
 
   defp current_episode(_pointer), do: nil
 
-  defp supersede_current_waits!(operator_id, preserve_generation_id \\ nil) do
+  defp supersede_current_waits!(generation_id, preserve_generation_id \\ nil) do
     episode_ids =
       StrategyDecisionEpisode
       |> where(
         [episode],
-        episode.operator_id == ^operator_id and episode.selection_kind == :neutral_wait and
+        episode.fleet_generation_id == ^generation_id and episode.selection_kind == :neutral_wait and
           episode.classification == :still_evaluating
       )
       |> select([episode], episode.id)
@@ -393,20 +418,12 @@ defmodule SpaceTraders.FleetAllocation.NeutralWait do
   defp lock_current_generation(generation, operator_id, revision, selection) do
     source_version = Map.get(selection, :source_version, 0)
 
-    current =
-      Generation
-      |> where(
-        [current],
-        current.id == ^generation.id and current.operator_id == ^operator_id and
-          current.fleet_strategy_revision_id == ^revision.id and is_nil(current.fenced_at) and
-          is_nil(current.retired_at)
-      )
-      |> lock("FOR UPDATE")
-      |> Repo.one()
+    current = FleetAllocation.lock_current_generation!(generation.id)
 
-    if current && current.allocation_version == source_version,
-      do: {:ok, current},
-      else: {:error, :stale_allocation}
+    if current.operator_id == operator_id and current.fleet_strategy_revision_id == revision.id and
+         current.allocation_version == source_version,
+       do: {:ok, current},
+       else: {:error, :stale_allocation}
   end
 
   defp future_observation_demands(selection, agent_id, revision_id) do

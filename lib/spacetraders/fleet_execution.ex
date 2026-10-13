@@ -53,7 +53,8 @@ defmodule SpaceTraders.FleetExecution do
   zero capacity. The caller is responsible for scoping the Agent.
   """
   def governed_availability(%AgentRecord{} = agent) do
-    with {:ok, markets} <- governed_market_access(agent),
+    with %Generation{} <- FleetAllocation.active_generation(agent),
+         {:ok, markets} <- governed_market_access(agent),
          {:ok, ships} <- Fleet.list_ships(agent),
          credits when is_integer(credits) <- agent_credits(agent) do
       {:ok,
@@ -99,7 +100,22 @@ defmodule SpaceTraders.FleetExecution do
         capacity
       )
       when is_binary(system_symbol) do
-    generation = FleetAllocation.active_generation(agent)
+    with {:ok, _} <- SpaceTraders.OperatorAuthority.authorize(scope),
+         %Generation{} = generation <- FleetAllocation.active_generation(agent) do
+      reconcile_current_market_domain(scope, agent, revision, system_symbol, capacity, generation)
+    else
+      _ -> {:error, :current_fleet_unavailable}
+    end
+  end
+
+  defp reconcile_current_market_domain(
+         scope,
+         agent,
+         revision,
+         system_symbol,
+         capacity,
+         generation
+       ) do
     reconciled = reconcile_revision_change(scope, revision, generation)
     current = FleetAllocation.current_portfolio(scope, agent)
 

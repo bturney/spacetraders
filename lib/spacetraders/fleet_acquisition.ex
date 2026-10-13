@@ -31,9 +31,11 @@ defmodule SpaceTraders.FleetAcquisition do
   @doc "Purchases one selected Ship Offer, then registers it from authoritative readiness evidence."
   def reconcile(%Scope{} = scope, %Agent{} = agent, %Revision{} = revision, system)
       when is_binary(system) do
-    case FleetAllocation.current_portfolio(scope, agent) do
-      nil -> acquire(scope, agent, revision, system)
-      portfolio -> resume(scope, agent, portfolio)
+    with {:ok, _} <- FleetAllocation.authorize_current(scope, agent, revision) do
+      case FleetAllocation.current_portfolio() do
+        nil -> acquire(scope, agent, revision, system)
+        portfolio -> resume(scope, agent, portfolio)
+      end
     end
   end
 
@@ -154,6 +156,8 @@ defmodule SpaceTraders.FleetAcquisition do
       current = Repo.one!(from a in Attempt, where: a.id == ^attempt.id, lock: "FOR UPDATE")
 
       with "prepared" <- current.state,
+           :ok <-
+             FleetAllocation.admit_current_agent(current.agent_id, current.fleet_generation_id),
            {:ok, revision} <- current_purchase_authority(current),
            :ok <- CreditSpending.admit(current, nil, revision),
            {:ok, sent} <- MutationAttempts.mark_sent_or_unknown(current) do
@@ -386,13 +390,13 @@ defmodule SpaceTraders.FleetAcquisition do
   defp engine_speed(_), do: nil
 
   defp active_generation(agent, revision) do
-    Repo.one(
-      from generation in Generation,
-        where:
-          generation.agent_id == ^agent.id and
-            generation.fleet_strategy_revision_id == ^revision.id and
-            is_nil(generation.fenced_at) and is_nil(generation.retired_at)
-    )
+    case FleetAllocation.active_generation(agent) do
+      %Generation{fleet_strategy_revision_id: id} = generation when id == revision.id ->
+        generation
+
+      _ ->
+        nil
+    end
   end
 
   # The episode keeps the alternatives that were not chosen, the unselected

@@ -9,13 +9,10 @@ defmodule SpaceTraders.FleetResources do
   alias SpaceTraders.Fleet.Intents
   alias SpaceTraders.FleetAllocation
   alias SpaceTraders.FleetCapacity
-  alias SpaceTraders.FleetGeneration.Generation
   alias SpaceTraders.FleetPlanning
   alias SpaceTraders.FleetStrategy.{Revision, StandingAuthority}
   alias SpaceTraders.Intelligence
-  alias SpaceTraders.{Clock, Repo, ShipReservation, World}
-
-  import Ecto.Query
+  alias SpaceTraders.{Clock, ShipReservation, World}
 
   @freshness_seconds 300
 
@@ -27,6 +24,12 @@ defmodule SpaceTraders.FleetResources do
         system,
         capacity \\ nil
       ) do
+    with {:ok, generation} <- FleetAllocation.authorize_current(scope, agent, revision) do
+      reconcile_current(scope, agent, revision, generation, system, capacity)
+    end
+  end
+
+  defp reconcile_current(scope, agent, revision, generation, system, capacity) do
     with index when is_integer(index) <- objective_index(revision),
          :ok <- SpaceTraders.RuntimeAuthority.execution_allowed?(),
          true <-
@@ -47,14 +50,6 @@ defmodule SpaceTraders.FleetResources do
              observed_at: Clock.utc_now(),
              bounds: %{minimum_credits: overview.credits, scraps_ship: false}
            }),
-         %Generation{fleet_strategy_revision_id: revision_id} = generation <-
-           Repo.one(
-             from g in Generation,
-               where:
-                 g.agent_id == ^agent.id and
-                   is_nil(g.fenced_at) and is_nil(g.retired_at)
-           ),
-         true <- revision_id == revision.id,
          :ok <- refresh_local_waypoints(agent, system, ships, Clock.utc_now()),
          waypoints = discover_resource_waypoints(agent, revision, system, Clock.utc_now()),
          as_of = Clock.utc_now(),

@@ -24,9 +24,10 @@ defmodule SpaceTraders.FleetRefitTest do
   @shipyard_path "/v2/systems/X1-UX81/waypoints/X1-UX81-A2/shipyard"
 
   for kind <- ["install_module", "remove_module"] do
-    @tag :refit_progression
-    test "#{kind} live, prepared boot, and absent boot share one effect and continuation" do
-      for entry <- [:live, :prepared, :absent] do
+    for entry <- [:live, :prepared, :absent] do
+      @tag :refit_progression
+      @tag refit_entry: entry
+      test "#{kind} #{entry} has one effect and continuation", %{refit_entry: entry} do
         {_scope, agent, _revision, ship} = generation("REFIT-#{entry}")
         {intent, action} = selected_refit(agent, ship, unquote(kind))
 

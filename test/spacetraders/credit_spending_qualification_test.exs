@@ -39,7 +39,7 @@ defmodule SpaceTraders.CreditSpendingQualificationTest do
         Repo.delete_all(from a in MutationAttempts.Attempt, where: a.id in ^attempts)
         Repo.delete_all(from d in Evidence.ObservationDemand, where: d.agent_id == ^agent.id)
         Repo.delete_all(from o in Evidence.Observation, where: o.agent_id == ^agent.id)
-        topics = ["fleet_allocation:#{operator.id}", "fleet:#{agent.id}"]
+        topics = ["fleet_allocation", "fleet:#{agent.id}"]
 
         Repo.delete_all(
           from n in SpaceTraders.Outbox.Notification,

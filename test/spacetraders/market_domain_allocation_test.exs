@@ -51,18 +51,23 @@ defmodule SpaceTraders.MarketDomainAllocationTest do
       assert length(commitments_of(episode)) == 2
     end
 
-    test "reversing the evidence broadcast order selects the same portfolio" do
-      # Each Fleet is decided before the next one's game stub replaces it.
-      intelligence_first = fleet([@frigate, @probe])
-      Reconciler.observe_waypoint_intelligence(intelligence_first.agent.id, @system, proceed())
-      Reconciler.observe_market_evidence(intelligence_first.agent.id, @system, proceed())
+    for order <- [:intelligence_first, :market_first] do
+      test "#{order} evidence order selects the same coherent portfolio" do
+        fleet = fleet([@frigate, @probe])
 
-      market_first = fleet([@frigate, @probe])
-      Reconciler.observe_market_evidence(market_first.agent.id, @system, proceed())
-      Reconciler.observe_waypoint_intelligence(market_first.agent.id, @system, proceed())
+        if unquote(order) == :intelligence_first do
+          Reconciler.observe_waypoint_intelligence(fleet.agent.id, @system, proceed())
+          Reconciler.observe_market_evidence(fleet.agent.id, @system, proceed())
+        else
+          Reconciler.observe_market_evidence(fleet.agent.id, @system, proceed())
+          Reconciler.observe_waypoint_intelligence(fleet.agent.id, @system, proceed())
+        end
 
-      assert published_work(intelligence_first) == published_work(market_first)
-      assert published_work(market_first)["market_trade"] == [@frigate]
+        assert published_work(fleet) == %{
+                 "market_trade" => [@frigate],
+                 "market_coverage" => [@probe]
+               }
+      end
     end
 
     test "with one capable Ship the positive trade wins and the Episode explains coverage's loss" do
