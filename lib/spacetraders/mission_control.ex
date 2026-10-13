@@ -717,20 +717,26 @@ defmodule SpaceTraders.MissionControl do
         |> Map.values()
         |> Enum.filter(&(DateTime.compare(&1.activated_at, generation.inserted_at) != :gt))
 
-      # Second precision again: Revisions activated in the Generation's
-      # establishment second may each have governed its start, so all count,
-      # except a later one an ended Generation provably never moved onto.
-      revisions_at_start =
-        case Enum.max_by(started_under, & &1.activated_at, DateTime, fn -> nil end) do
-          nil ->
-            []
+      initial_revision = Map.get(revisions, generation.initial_fleet_strategy_revision_id)
 
-          latest ->
-            Enum.filter(
-              started_under,
-              &(DateTime.compare(&1.activated_at, latest.activated_at) == :eq and
-                  (is_nil(final_revision_number) or &1.number <= final_revision_number))
-            )
+      # New Generations retain their actual establishment Revision. Legacy
+      # history without that identity keeps the existing timestamp fallback;
+      # never let a same-second activation overwrite known provenance.
+      revisions_at_start =
+        if initial_revision do
+          [initial_revision]
+        else
+          case Enum.max_by(started_under, & &1.activated_at, DateTime, fn -> nil end) do
+            nil ->
+              []
+
+            latest ->
+              Enum.filter(
+                started_under,
+                &(DateTime.compare(&1.activated_at, latest.activated_at) == :eq and
+                    (is_nil(final_revision_number) or &1.number <= final_revision_number))
+              )
+          end
         end
 
       end_second = DateTime.truncate(end_at, :second)
@@ -739,7 +745,8 @@ defmodule SpaceTraders.MissionControl do
         revisions
         |> Map.values()
         |> Enum.filter(fn revision ->
-          DateTime.compare(revision.activated_at, generation.inserted_at) != :lt and
+          (is_nil(initial_revision) or revision.number >= initial_revision.number) and
+            DateTime.compare(revision.activated_at, generation.inserted_at) != :lt and
             case DateTime.compare(revision.activated_at, end_second) do
               :lt -> true
               :eq -> is_nil(final_revision_number) or revision.number <= final_revision_number

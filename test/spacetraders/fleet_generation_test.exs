@@ -85,6 +85,19 @@ defmodule SpaceTraders.FleetGenerationTest do
   describe "Server Reset" do
     setup context do
       faction = Map.get(context, :reset_faction, "COSMIC")
+
+      if context[:recap_clock] do
+        start_supervised!({SpaceTraders.TestClock, DateTime.add(DateTime.utc_now(:second), -60)})
+        previous = Application.get_env(:spacetraders, :clock)
+        Application.put_env(:spacetraders, :clock, SpaceTraders.TestClock)
+
+        on_exit(fn ->
+          if previous,
+            do: Application.put_env(:spacetraders, :clock, previous),
+            else: Application.delete_env(:spacetraders, :clock)
+        end)
+      end
+
       operator = operator_fixture()
       {:ok, operator} = Agent.link_account_token(operator, "ACCOUNT_TOKEN_SECRET")
       scope = Scope.for_operator(operator)
@@ -439,6 +452,7 @@ defmodule SpaceTraders.FleetGenerationTest do
       assert %{"change" => 120} = retired.objective_progress["1"]
     end
 
+    @tag recap_clock: true
     test "a Revision activated after replacement governs only the current Generation; history keeps its original Revision",
          %{scope: scope, revision: revision, agent: agent} do
       Req.Test.stub(SpaceTraders.API, &reset_then_fallback_response/1)
@@ -450,6 +464,12 @@ defmodule SpaceTraders.FleetGenerationTest do
 
       assert current_id == current.id
 
+      # The first Revision predates establishment. Activate the next one in
+      # exactly the successor's establishment second, independent of wall time.
+      SpaceTraders.TestClock.advance(
+        DateTime.diff(current.inserted_at, SpaceTraders.TestClock.utc_now(), :second)
+      )
+
       {:ok, draft} = FleetStrategy.select_preset(scope, "steady_growth")
       assert {:ok, next} = FleetStrategy.activate(scope, draft.draft_version)
       assert next.number == revision.number + 1
@@ -457,6 +477,7 @@ defmodule SpaceTraders.FleetGenerationTest do
       assert [current_after, retired_after] = FleetGeneration.list_generations(scope)
       assert current_after.id == current.id
       assert current_after.fleet_strategy_revision_id == next.id
+      assert current_after.initial_fleet_strategy_revision_id == revision.id
       assert retired_after.id == retired.id
       assert retired_after.fleet_strategy_revision_id == revision.id
       assert retired_after.retired_at == retired.retired_at
@@ -466,6 +487,20 @@ defmodule SpaceTraders.FleetGenerationTest do
 
       assert recaps[retired.id].revisions == [revision.number]
       assert recaps[current.id].revisions == [revision.number, next.number]
+
+      game(fn conn ->
+        Req.Test.json(conn, registration_body("ORBITALIST", "ORBITALIST-1", "THIRD_TOKEN"))
+      end)
+
+      successor_agent = Agent.get_agent(scope, current.agent_id)
+
+      assert {:error, :stale_agent} =
+               FleetGeneration.handle_game_result(successor_agent, {:error, reset_error()})
+
+      [third | _] = FleetGeneration.list_generations(scope)
+      assert third.initial_fleet_strategy_revision_id == next.id
+      [third_recap | _] = SpaceTraders.MissionControl.generation_recaps(scope)
+      assert third_recap.revisions == [next.number]
     end
 
     test "Emergency Stop suppresses replacement minting until resume, preserving the Strategy",

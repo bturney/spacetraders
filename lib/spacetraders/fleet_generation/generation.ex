@@ -23,6 +23,7 @@ defmodule SpaceTraders.FleetGeneration.Generation do
     belongs_to :agent, SpaceTraders.Agent.Agent
 
     belongs_to :fleet_strategy_revision, SpaceTraders.FleetStrategy.Revision
+    belongs_to :initial_fleet_strategy_revision, SpaceTraders.FleetStrategy.Revision
 
     timestamps(type: :utc_datetime)
   end
@@ -33,6 +34,7 @@ defmodule SpaceTraders.FleetGeneration.Generation do
       :operator_id,
       :agent_id,
       :fleet_strategy_revision_id,
+      :initial_fleet_strategy_revision_id,
       :number,
       :symbol,
       :faction,

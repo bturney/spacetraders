@@ -1203,6 +1203,7 @@ defmodule SpaceTraders.FleetGeneration do
       operator_id: operator.id,
       agent_id: agent.id,
       fleet_strategy_revision_id: revision && revision.id,
+      initial_fleet_strategy_revision_id: revision && revision.id,
       number: number,
       symbol: agent.symbol,
       faction: faction,
