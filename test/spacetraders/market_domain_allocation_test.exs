@@ -111,7 +111,7 @@ defmodule SpaceTraders.MarketDomainAllocationTest do
       fleet = fleet([@frigate, @probe])
       assert {:ok, %{action: :published}} = reconcile(fleet)
 
-      stub_game(fleet.agent, [@frigate, @probe], report_to: self())
+      stub_game(fleet.agent, [@frigate, @probe], report_requests: true)
 
       assert {:ok, %{action: :retained, reason: :all_ships_occupied}} = reconcile(fleet)
       refute_received {:game_request, _method, _path}
@@ -372,6 +372,24 @@ defmodule SpaceTraders.MarketDomainAllocationTest do
       # A later boundary neither buys nor sells again.
       assert {:ok, %{action: :retained}} = reconcile(fleet)
       assert %{"buy" => 1, "sell" => 1} = intent_counts(trade)
+    end
+
+    test "a sell resumed and finished at the boundary frees its Ship for the same decision" do
+      fleet = fleet([@frigate])
+      assert {:ok, %{action: :published}} = reconcile(fleet)
+      trade = commitment_for(fleet, @frigate)
+      complete_buy(trade, "completed")
+
+      # The frigate waits docked at the sell Market with the bought Cargo.
+      stub_game(fleet.agent, [@frigate], sell_at: "X1-A2")
+
+      # Continuation runs before occupancy is read, so the finished round
+      # trip no longer fences the frigate.
+      assert {:ok, %{action: action}} = reconcile(fleet)
+      assert action in [:published, :released]
+
+      assert %Intent{status: "completed"} =
+               Repo.get_by!(Intent, fleet_commitment_id: trade.id, type: "sell")
     end
 
     test "a buy whose effect is unconfirmed is never replayed or continued" do
@@ -1394,11 +1412,22 @@ defmodule SpaceTraders.MarketDomainAllocationTest do
   # The game answers Fleet reads; anything Ship execution attempts beyond
   # them is refused, which leaves dispatched Intents blocked but never
   # changes the allocation result under test.
-  # `report_to:` receives each request the given process itself makes;
-  # `refuse_ship_reads:` refuses single-Ship reads, so activation fails.
+  # `report_requests:` reports each request the calling test process makes
+  # (reconciliation's own reads run there; Ship servers' do not);
+  # `refuse_ship_reads:` refuses single-Ship reads, so activation fails;
+  # `sell_at:` docks the frigate there with 40 IRON and accepts its sale.
   defp stub_game(agent, ship_symbols, opts \\ []) do
     ships = Enum.map(ship_symbols, &ship(&1, "#{agent.symbol}-#{&1}"))
-    observer = Keyword.get(opts, :report_to)
+    sell_at = Keyword.get(opts, :sell_at)
+    trader = "#{agent.symbol}-#{@frigate}"
+    sell_market = "#{sell_at}/market"
+
+    ships =
+      if sell_at,
+        do: Enum.map(ships, &if(&1["symbol"] == trader, do: holding_iron(&1, sell_at), else: &1)),
+        else: ships
+
+    observer = if Keyword.get(opts, :report_requests, false), do: self()
     refuse_ship_reads? = Keyword.get(opts, :refuse_ship_reads, false)
 
     Req.Test.stub(SpaceTraders.API, fn conn ->
@@ -1417,6 +1446,24 @@ defmodule SpaceTraders.MarketDomainAllocationTest do
             }
           })
 
+        {"GET", "/v2/systems/X1/waypoints/" <> path} when path == sell_market ->
+          Req.Test.json(conn, %{
+            "data" => %{
+              "symbol" => sell_at,
+              "tradeGoods" => [
+                %{
+                  "symbol" => "IRON",
+                  "purchasePrice" => 30,
+                  "sellPrice" => 25,
+                  "tradeVolume" => 60
+                }
+              ]
+            }
+          })
+
+        {"POST", "/v2/my/ships/" <> path} when is_binary(sell_at) and path == trader <> "/sell" ->
+          Req.Test.json(conn, %{"data" => sale(agent, trader, sell_at)})
+
         {"GET", "/v2/my/ships"} ->
           Req.Test.json(conn, %{"data" => ships})
 
@@ -1433,6 +1480,33 @@ defmodule SpaceTraders.MarketDomainAllocationTest do
           refuse(conn)
       end
     end)
+  end
+
+  defp holding_iron(ship, waypoint) do
+    Map.merge(ship, %{
+      "nav" => nav_at(waypoint),
+      "cargo" => %{
+        "capacity" => 40,
+        "units" => 40,
+        "inventory" => [%{"symbol" => "IRON", "units" => 40}]
+      }
+    })
+  end
+
+  defp sale(agent, ship_symbol, waypoint) do
+    %{
+      "agent" => %{"symbol" => agent.symbol, "credits" => 6_000},
+      "cargo" => %{"capacity" => 40, "units" => 0, "inventory" => []},
+      "transaction" => %{
+        "type" => "SELL",
+        "shipSymbol" => ship_symbol,
+        "tradeSymbol" => "IRON",
+        "waypointSymbol" => waypoint,
+        "units" => 40,
+        "pricePerUnit" => 25,
+        "totalPrice" => 1_000
+      }
+    }
   end
 
   defp refuse(conn) do
