@@ -177,7 +177,7 @@ defmodule SpaceTraders.FleetIntelligence do
   """
   def plan_contributions(%AgentRecord{} = agent, %Revision{} = revision, system, occupied)
       when is_binary(system) do
-    {now, waypoints} = waypoints_for_decision(agent, revision, system)
+    {now, %{waypoints: waypoints} = world} = world_for_decision(agent, revision, system)
 
     market =
       agent
@@ -185,8 +185,8 @@ defmodule SpaceTraders.FleetIntelligence do
       # The coordinates and fuel stops Ship Execution flies by, so Fleet
       # Planning offers a trade only to a Ship that can reach it.
       |> Map.merge(%{
-        waypoint_coordinates: World.waypoint_coordinates(agent, system),
-        fuel_stops: World.fuel_stops(agent, system, now)
+        waypoint_coordinates: world.waypoint_coordinates,
+        fuel_stops: world.fuel_stops
       })
 
     with :ok <- sync_market_demands(agent, revision, market) do
@@ -222,17 +222,17 @@ defmodule SpaceTraders.FleetIntelligence do
 
   # The decision time follows any Waypoint discovery, so discovered
   # Marketplaces are retained before the interpretation reads them.
-  defp waypoints_for_decision(agent, revision, system) do
+  defp world_for_decision(agent, revision, system) do
     now = Clock.utc_now()
 
-    case World.waypoints(agent, system, now, @waypoint_freshness_seconds) do
-      [] ->
+    case World.projections(agent, system, now, @waypoint_freshness_seconds) do
+      %{waypoints: []} ->
         discover_waypoints(agent, revision, system)
         now = Clock.utc_now()
-        {now, World.waypoints(agent, system, now, @waypoint_freshness_seconds)}
+        {now, World.projections(agent, system, now, @waypoint_freshness_seconds)}
 
-      waypoints ->
-        {now, waypoints}
+      world ->
+        {now, world}
     end
   end
 

@@ -599,6 +599,128 @@ defmodule SpaceTraders.IntelligenceAcquisitionTest do
     refute_receive {"POST", _path}
   end
 
+  test "navigation reads its coordinate and fuel-stop pair in one bounded group after target acquisition" do
+    {agent, ship, portfolio, commitment} = claimed_ship()
+    test_pid = self()
+    ship_path = "/v2/my/ships/#{ship.symbol}"
+    target_path = "/v2/systems/X1-UX81/waypoints/X1-UX81-A3"
+
+    for {symbol, x} <- [{"X1-UX81-A2", 51}, {"X1-UX81-A4", 40}, {"X1-UX81-A5", 30}] do
+      observe_fuel_stop(agent, ship.symbol, symbol, x, 2)
+    end
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      case {conn.method, conn.request_path} do
+        {"GET", ^ship_path} ->
+          Req.Test.json(conn, %{
+            "data" =>
+              ship_body(ship.symbol, %{
+                "nav" => nav_body("IN_ORBIT"),
+                "fuel" => %{"capacity" => 50, "current" => 50}
+              })
+          })
+
+        {"GET", ^target_path} ->
+          send(test_pid, :target_acquired)
+
+          Req.Test.json(conn, %{
+            "data" => waypoint_body("X1-UX81-A3", "X1-UX81", "PLANET", 101, 2)
+          })
+
+        {"POST", _} ->
+          Req.Test.json(conn, %{"data" => %{"nav" => nav_body("IN_ORBIT")}})
+
+        other ->
+          flunk("unexpected request: #{inspect(other)}")
+      end
+    end)
+
+    {{:ok, %Intent{}}, queries} =
+      measure_fact_selects(fn ->
+        Intents.request_commitment_intelligence(agent, commitment, portfolio, ship.symbol, %{
+          subject_type: :market,
+          waypoint: "X1-UX81-A3",
+          required_facts: ["trade_goods"],
+          freshness_seconds: 300
+        })
+      end)
+
+    assert_received :target_acquired
+    # Three retained fuel stops used to cost 28 fact SELECTs across the whole
+    # request (per-subject reads); the pair is now one bounded group. The
+    # bound covers the operation's other reads, not just the pair.
+    assert length(queries) <= 16
+  end
+
+  test "planning takes coordinates and fuel stops from one bounded combined read" do
+    {agent, ship, portfolio, _commitment} = claimed_ship()
+    revision = Repo.get!(Revision, portfolio.fleet_strategy_revision_id)
+
+    observe_fuel_stop(agent, ship.symbol, "X1-UX81-A2", 51, 2)
+
+    {{:ok, %{market: first}}, small} =
+      measure_fact_selects(fn ->
+        FleetIntelligence.plan_contributions(agent, revision, "X1-UX81", [])
+      end)
+
+    assert first.fuel_stops == ["X1-UX81-A2"]
+    assert first.waypoint_coordinates["X1-UX81-A2"] == %{x: 51, y: 2}
+
+    for {symbol, x} <- [{"X1-UX81-A4", 40}, {"X1-UX81-A5", 30}, {"X1-UX81-A6", 20}] do
+      observe_fuel_stop(agent, ship.symbol, symbol, x, 2)
+    end
+
+    {{:ok, %{market: second}}, large} =
+      measure_fact_selects(fn ->
+        FleetIntelligence.plan_contributions(agent, revision, "X1-UX81", [])
+      end)
+
+    # A later evaluation reflects the new observations, not the prior group.
+    assert second.fuel_stops == ["X1-UX81-A2", "X1-UX81-A4", "X1-UX81-A5", "X1-UX81-A6"]
+
+    # A later invalidation is likewise reflected.
+    assert {:ok, _} = Intelligence.invalidate(agent, :market, "X1-UX81", "X1-UX81-A4")
+
+    assert {:ok, %{market: third}} =
+             FleetIntelligence.plan_contributions(agent, revision, "X1-UX81", [])
+
+    refute "X1-UX81-A4" in third.fuel_stops
+
+    # Retained-read count does not grow with the retained Waypoints.
+    assert length(large) == length(small)
+  end
+
+  defp measure_fact_selects(fun) do
+    handler = "acq-facts-#{System.unique_integer([:positive])}"
+    test_pid = self()
+
+    :ok =
+      :telemetry.attach(
+        handler,
+        [:space_traders, :repo, :query],
+        fn _event, _measurements, %{query: query}, pid ->
+          if self() == pid, do: send(pid, {:fact_query, query})
+        end,
+        test_pid
+      )
+
+    try do
+      result = fun.()
+      {result, collect_fact_queries([])}
+    after
+      :telemetry.detach(handler)
+    end
+  end
+
+  defp collect_fact_queries(acc) do
+    receive do
+      {:fact_query, q} ->
+        collect_fact_queries(if q =~ "intelligence_facts", do: [q | acc], else: acc)
+    after
+      0 -> Enum.reverse(acc)
+    end
+  end
+
   test "navigation fuel estimates apply flight-mode formulas, rounding, and minimums" do
     estimates = fn x1, y1, x2, y2, mode ->
       {:ok, value} =
