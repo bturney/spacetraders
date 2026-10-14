@@ -471,7 +471,10 @@ defmodule SpaceTraders.WorldTest do
 
     assert Map.keys(coordinates) == ["X1-H"]
 
-    assert %{waypoint_coordinates: %{"X1-C" => %{x: 9, y: 9}} = current_coordinates, fuel_stops: []} =
+    assert %{
+             waypoint_coordinates: %{"X1-C" => %{x: 9, y: 9}} = current_coordinates,
+             fuel_stops: []
+           } =
              World.projections(current, "X1", @as_of, 300)
 
     assert Map.keys(current_coordinates) == ["X1-C"]
