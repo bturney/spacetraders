@@ -13,9 +13,9 @@ defmodule SpaceTraders.IntelligenceAcquisitionTest do
   alias SpaceTraders.Fleet.{Intent, Ship}
   alias SpaceTraders.Fleet.Intents
   alias SpaceTraders.FleetAllocation
+  alias SpaceTraders.FleetAllocation.MarketDomain
   alias SpaceTraders.FleetAllocation.PortfolioCandidate
   alias SpaceTraders.FleetAllocation.Reconciler
-  alias SpaceTraders.FleetExecution
   alias SpaceTraders.FleetGeneration.Generation
   alias SpaceTraders.FleetIntelligence
   alias SpaceTraders.FleetStrategy
@@ -2038,7 +2038,7 @@ defmodule SpaceTraders.IntelligenceAcquisitionTest do
   # The one Market pilot-domain Allocation decision; a single published
   # Commitment is returned with the root Intent it dispatched.
   defp reconcile_domain(scope, agent, revision) do
-    case FleetExecution.reconcile_market_domain(
+    case MarketDomain.reconcile(
            scope,
            agent,
            revision,

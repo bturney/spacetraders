@@ -13,13 +13,13 @@ defmodule SpaceTraders.MarketDomainAllocationTest do
 
   alias SpaceTraders.FleetAllocation.{
     Commitment,
+    MarketDomain,
     Portfolio,
     Reconciler,
     StrategyDecisionEpisode,
     StructuralStall
   }
 
-  alias SpaceTraders.FleetExecution
   alias SpaceTraders.FleetGeneration
   alias SpaceTraders.FleetGeneration.Generation
   alias SpaceTraders.FleetStrategy.{Revision, Strategy}
@@ -101,6 +101,38 @@ defmodule SpaceTraders.MarketDomainAllocationTest do
       current = FleetAllocation.current_portfolio(fleet.scope, fleet.agent)
       assert current.id == portfolio_id
       assert Enum.any?(current.commitments, &(&1.id == trade.id))
+
+      # Only newly published work activates: the retained trade is never
+      # dispatched a second time.
+      assert %{"buy" => 1} = intent_counts(trade)
+    end
+
+    test "with every known Ship occupied the decision spends no game request" do
+      fleet = fleet([@frigate, @probe])
+      assert {:ok, %{action: :published}} = reconcile(fleet)
+
+      stub_game(fleet.agent, [@frigate, @probe], report_to: self())
+
+      assert {:ok, %{action: :retained, reason: :all_ships_occupied}} = reconcile(fleet)
+      refute_received {:game_request, _method, _path}
+    end
+
+    test "an activation error is reported without undoing the published decision" do
+      fleet = fleet([@frigate])
+      stub_game(fleet.agent, [@frigate], refuse_ship_reads: true)
+
+      assert {:ok, %{action: :published, commitments: [trade], dispatched: dispatched}} =
+               reconcile(fleet)
+
+      assert {:error, _reason} = Map.fetch!(dispatched, trade.candidate_id)
+
+      # The Portfolio and its Episode stay the durable decision.
+      current = FleetAllocation.current_portfolio(fleet.scope, fleet.agent)
+      assert [%Commitment{id: id}] = current.commitments
+      assert id == trade.id
+      assert [episode] = selected_episodes(fleet)
+      assert current.strategy_decision_episode_id == episode.id
+      assert intent_counts(trade) == %{}
     end
 
     test "a rejected publication leaves a durable reason instead of a swallowed error" do
@@ -112,7 +144,7 @@ defmodule SpaceTraders.MarketDomainAllocationTest do
       supersede_revision(fleet)
 
       assert {:ok, %{action: :publication_rejected, reason: :stale_source}} =
-               FleetExecution.reconcile_market_domain(
+               MarketDomain.reconcile(
                  fleet.scope,
                  fleet.agent,
                  stale,
@@ -172,7 +204,7 @@ defmodule SpaceTraders.MarketDomainAllocationTest do
       fleet = fleet([@frigate, @probe])
 
       assert {:ok, %{action: :deferred_for_capacity}} =
-               FleetExecution.reconcile_market_domain(
+               MarketDomain.reconcile(
                  fleet.scope,
                  fleet.agent,
                  fleet.revision,
@@ -243,7 +275,7 @@ defmodule SpaceTraders.MarketDomainAllocationTest do
                 reason: :capacity_deferred,
                 pending_demands: pending
               }} =
-               FleetExecution.reconcile_market_domain(
+               MarketDomain.reconcile(
                  fleet.scope,
                  fleet.agent,
                  fleet.revision,
@@ -317,8 +349,21 @@ defmodule SpaceTraders.MarketDomainAllocationTest do
       trade = commitment_for(fleet, @frigate)
       complete_buy(trade, "completed")
 
-      # A new Market observation (or a restart) reaches the same entry.
+      # A deferred decision resumes nothing: continuation is new governed work.
       listing(fleet.agent, "X1-A2", 30, 25)
+
+      assert {:ok, %{action: :retained_for_capacity}} =
+               MarketDomain.reconcile(
+                 fleet.scope,
+                 fleet.agent,
+                 fleet.revision,
+                 @system,
+                 CapacityDispositions.defer()
+               )
+
+      assert intent_counts(trade) == %{"buy" => 1}
+
+      # A new Market observation (or a restart) reaches the same entry.
       assert {:ok, %{action: :retained}} = reconcile(fleet)
 
       assert %{"buy" => 1, "sell" => 1} = intent_counts(trade)
@@ -378,6 +423,32 @@ defmodule SpaceTraders.MarketDomainAllocationTest do
                from e in StrategyDecisionEpisode,
                  where: e.selection_kind in [:publication_rejected, :structural_stall]
              )
+    end
+
+    test "a stale Portfolio retires even when API capacity defers the decision" do
+      fleet = fleet([@frigate, @probe])
+      assert {:ok, %{action: :published}} = reconcile(fleet)
+      old = FleetAllocation.current_portfolio(fleet.scope, fleet.agent)
+      coverage = commitment_for(fleet, @probe)
+      refuse_trade(commitment_for(fleet, @frigate))
+      authority_block(coverage)
+
+      fleet = activate_newer_revision(fleet)
+
+      # Retirement is local state and runs before the capacity gate, so the
+      # deferral retains no obsolete authority.
+      assert {:ok, %{action: :deferred_for_capacity}} =
+               MarketDomain.reconcile(
+                 fleet.scope,
+                 fleet.agent,
+                 fleet.revision,
+                 @system,
+                 CapacityDispositions.defer()
+               )
+
+      assert Repo.get!(Portfolio, old.id).superseded_at
+      assert FleetAllocation.current_portfolio(fleet.scope, fleet.agent) == nil
+      assert [%Intent{status: "superseded"}] = intents_of(coverage)
     end
 
     test "an unresolved scout action fences only its own Ship while the free Ship takes new-Revision work" do
@@ -688,7 +759,7 @@ defmodule SpaceTraders.MarketDomainAllocationTest do
 
       log =
         capture_info(fn ->
-          FleetExecution.reconcile_market_domain(
+          MarketDomain.reconcile(
             fleet.scope,
             fleet.agent,
             fleet.revision,
@@ -1070,7 +1141,7 @@ defmodule SpaceTraders.MarketDomainAllocationTest do
   end
 
   defp reconcile(fleet) do
-    FleetExecution.reconcile_market_domain(
+    MarketDomain.reconcile(
       fleet.scope,
       fleet.agent,
       fleet.revision,
@@ -1323,10 +1394,16 @@ defmodule SpaceTraders.MarketDomainAllocationTest do
   # The game answers Fleet reads; anything Ship execution attempts beyond
   # them is refused, which leaves dispatched Intents blocked but never
   # changes the allocation result under test.
-  defp stub_game(agent, ship_symbols) do
+  # `report_to:` receives each request the given process itself makes;
+  # `refuse_ship_reads:` refuses single-Ship reads, so activation fails.
+  defp stub_game(agent, ship_symbols, opts \\ []) do
     ships = Enum.map(ship_symbols, &ship(&1, "#{agent.symbol}-#{&1}"))
+    observer = Keyword.get(opts, :report_to)
+    refuse_ship_reads? = Keyword.get(opts, :refuse_ship_reads, false)
 
     Req.Test.stub(SpaceTraders.API, fn conn ->
+      if observer == self(), do: send(observer, {:game_request, conn.method, conn.request_path})
+
       case {conn.method, conn.request_path} do
         {"GET", "/v2/my/agent"} ->
           Req.Test.json(conn, %{
@@ -1342,6 +1419,9 @@ defmodule SpaceTraders.MarketDomainAllocationTest do
 
         {"GET", "/v2/my/ships"} ->
           Req.Test.json(conn, %{"data" => ships})
+
+        {"GET", "/v2/my/ships/" <> _symbol} when refuse_ship_reads? ->
+          refuse(conn)
 
         {"GET", "/v2/my/ships/" <> symbol} ->
           case Enum.find(ships, &(&1["symbol"] == symbol)) do
