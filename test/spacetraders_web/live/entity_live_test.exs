@@ -11,6 +11,22 @@ defmodule SpaceTradersWeb.EntityLiveTest do
 
   setup :register_and_log_in_operator
 
+  test "unavailable explicit Generation links never read the current Fleet", %{
+    conn: conn,
+    operator: operator
+  } do
+    SpaceTraders.AgentFixtures.agent_fixture(operator, %{symbol: "ATLAS"})
+
+    Req.Test.stub(SpaceTraders.API, fn _ -> flunk("History must not request gameplay") end)
+
+    for selector <- ["invalid", "999999999"] do
+      assert {:error, {:live_redirect, %{to: "/world", flash: flash}}} =
+               live(conn, "/ships/ATLAS-1?generation=#{selector}")
+
+      assert flash["error"] == "Historical Generation evidence is unavailable."
+    end
+  end
+
   test "renders Ship and Contract pages from existing governed evidence without game reads", %{
     conn: conn,
     operator: operator

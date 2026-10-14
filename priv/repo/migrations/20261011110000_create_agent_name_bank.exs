@@ -18,9 +18,23 @@ defmodule SpaceTraders.Repo.Migrations.CreateAgentNameBank do
            )
 
     execute("""
+    WITH approved AS (
+      SELECT generation.replacement_symbols->'symbols' AS names
+      FROM current_fleet_identity AS identity
+      JOIN fleet_generations AS generation ON generation.id = identity.fleet_generation_id
+      WHERE jsonb_typeof(generation.replacement_symbols->'symbols') = 'array'
+        AND jsonb_array_length(generation.replacement_symbols->'symbols') > 0
+    ), candidates AS (
+      SELECT name, min(ord) AS ord
+      FROM jsonb_array_elements_text(COALESCE(
+        (SELECT names FROM approved),
+        '["ORBITALIST","PARALLAX","APHELION","SIDEREAL","LIMINAL"]'::jsonb
+      )) WITH ORDINALITY AS d(name, ord)
+      GROUP BY name
+    )
     INSERT INTO agent_name_bank_entries (position, name, inserted_at, updated_at)
-    SELECT ord, name, now(), now()
-    FROM unnest(ARRAY['ORBITALIST','PARALLAX','APHELION','SIDEREAL','LIMINAL']) WITH ORDINALITY AS d(name, ord)
+    SELECT row_number() OVER (ORDER BY ord), name, now(), now()
+    FROM candidates
     WHERE NOT EXISTS (SELECT 1 FROM agent_name_bank_entries)
     """)
   end

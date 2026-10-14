@@ -20,12 +20,22 @@ defmodule SpaceTradersWeb.EntityLive do
           nil
       end
 
-    case historical_holder(socket.assigns.current_scope, params["generation"], current) || current do
+    holder =
+      if Map.has_key?(params, "generation"),
+        do: historical_holder(socket.assigns.current_scope, params["generation"]),
+        else: current
+
+    case holder do
       nil ->
+        socket =
+          if Map.has_key?(params, "generation"),
+            do: put_flash(socket, :error, "Historical Generation evidence is unavailable."),
+            else: socket
+
         {:ok, push_navigate(socket, to: ~p"/world")}
 
-      %{agent: agent, generation: generation} = holder ->
-        historical? = holder != current
+      %{agent: agent, generation: generation} ->
+        historical? = Map.has_key?(params, "generation")
 
         {:ok,
          socket
@@ -38,9 +48,8 @@ defmodule SpaceTradersWeb.EntityLive do
     end
   end
 
-  defp historical_holder(scope, raw_id, current) when is_binary(raw_id) do
+  defp historical_holder(scope, raw_id) when is_binary(raw_id) do
     with {generation_id, ""} <- Integer.parse(raw_id),
-         false <- current != nil and current.generation.id == generation_id,
          {:ok, holder} <- FleetGeneration.generation_evidence(scope, generation_id) do
       holder
     else
@@ -48,7 +57,7 @@ defmodule SpaceTradersWeb.EntityLive do
     end
   end
 
-  defp historical_holder(_scope, _raw_id, _current), do: nil
+  defp historical_holder(_scope, _raw_id), do: nil
 
   @impl true
   def render(assigns) do

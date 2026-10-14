@@ -4439,11 +4439,27 @@ defmodule SpaceTraders.Fleet.Intents do
       {:ok, due_at} ->
         payload = Timeline.arrival_payload(nav) |> Map.put("intent_id", intent.id)
 
-        with_current_intent(intent, fn _current ->
-          {:ok, event} = Timeline.schedule_event(:ship, ship_symbol, :arrival, due_at, payload)
-          ShipServer.arm(agent, ship_symbol, event)
-          :ok
-        end)
+        # A response remains predecessor evidence after reset, but its symbol
+        # no longer names runtime resources it may arm. Serialize with fencing
+        # on the Agent row before touching an Intent or symbol-keyed timer.
+        {:ok, result} =
+          Repo.transaction(fn ->
+            SpaceTraders.CreditSpending.lock_agent(agent.id)
+
+            if SpaceTraders.FleetGeneration.gameplay_authority(agent.id) == :ok do
+              with_current_intent(intent, fn _current ->
+                {:ok, event} =
+                  Timeline.schedule_event(:ship, ship_symbol, :arrival, due_at, payload)
+
+                ShipServer.arm(agent, ship_symbol, event)
+                :ok
+              end)
+            else
+              :ok
+            end
+          end)
+
+        result
 
       :error ->
         block_intents(intent, :unreadable_arrival)

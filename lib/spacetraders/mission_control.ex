@@ -435,11 +435,10 @@ defmodule SpaceTraders.MissionControl do
     end
   end
 
-  defp deployment_activity(scope, operator_id) do
+  defp deployment_activity(scope, _operator_id) do
     decisions =
       Repo.all(
         from episode in StrategyDecisionEpisode,
-          where: episode.operator_id == ^operator_id,
           order_by: [desc: episode.inserted_at, desc: episode.id],
           limit: 100
       )
@@ -555,11 +554,7 @@ defmodule SpaceTraders.MissionControl do
     operator_events =
       Repo.all(
         from event in Activity,
-          join: agent in AgentRecord,
-          on: agent.id == event.agent_id,
-          where:
-            agent.operator_id == ^operator_id and
-              event.kind not in ["retry", "manual_intent_waiting"],
+          where: event.kind not in ["retry", "manual_intent_waiting"],
           order_by: [desc: event.inserted_at, desc: event.id],
           limit: 100
       )
@@ -666,23 +661,18 @@ defmodule SpaceTraders.MissionControl do
     end
   end
 
-  defp deployment_generation_recaps(scope, operator_id) do
+  defp deployment_generation_recaps(scope, _operator_id) do
     generations = FleetGeneration.list_generations(scope)
 
     episodes =
       Repo.all(
         from episode in StrategyDecisionEpisode,
-          where: episode.operator_id == ^operator_id,
           select: episode
       )
       |> Enum.group_by(& &1.fleet_generation_id)
 
     revisions =
-      Repo.all(
-        from revision in Revision,
-          join: strategy in assoc(revision, :fleet_strategy),
-          where: strategy.operator_id == ^operator_id
-      )
+      Repo.all(Revision)
       |> Map.new(&{&1.id, &1})
 
     Enum.map(generations, fn generation ->
@@ -796,12 +786,12 @@ defmodule SpaceTraders.MissionControl do
 
   def decision_episode(%Scope{}, _id), do: nil
 
-  defp deployment_decision_episode(operator_id, id) do
+  defp deployment_decision_episode(_operator_id, id) do
     Repo.one(
       from episode in StrategyDecisionEpisode,
         join: generation in assoc(episode, :fleet_generation),
         join: revision in assoc(episode, :fleet_strategy_revision),
-        where: episode.operator_id == ^operator_id and episode.id == ^id,
+        where: episode.id == ^id,
         select: {episode, generation, revision}
     )
     |> case do
@@ -822,12 +812,11 @@ defmodule SpaceTraders.MissionControl do
     end
   end
 
-  defp deployment_decision_episode_comparison(operator_id, limit) do
+  defp deployment_decision_episode_comparison(_operator_id, limit) do
     Repo.all(
       from episode in StrategyDecisionEpisode,
         join: generation in assoc(episode, :fleet_generation),
         join: revision in assoc(episode, :fleet_strategy_revision),
-        where: episode.operator_id == ^operator_id,
         order_by: [desc: episode.inserted_at, desc: episode.id],
         limit: ^limit,
         select: {episode, generation, revision}

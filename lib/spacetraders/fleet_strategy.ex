@@ -379,6 +379,8 @@ defmodule SpaceTraders.FleetStrategy do
   defp activate(scope, operator_id, expected_draft_version) do
     result =
       Repo.transaction(fn ->
+        {:ok, _} = SpaceTraders.FleetGeneration.Identity.lock_establishment(operator_id)
+
         with %Strategy{} = strategy <- deployment_strategy(),
              document when is_map(document) <- strategy.draft_document,
              true <- strategy.draft_version == expected_draft_version,
@@ -419,7 +421,8 @@ defmodule SpaceTraders.FleetStrategy do
             set: [active_revision_id: revision.id]
           )
 
-          revision
+          live = SpaceTraders.FleetGeneration.bind_strategy(scope, revision)
+          {revision, live}
         else
           nil -> Repo.rollback(:draft_not_found)
           :error -> Repo.rollback(:draft_not_found)
@@ -428,9 +431,9 @@ defmodule SpaceTraders.FleetStrategy do
         end
       end)
 
-    if match?({:ok, %Revision{}}, result) do
-      {:ok, revision} = result
-      :ok = SpaceTraders.FleetGeneration.activate_strategy(scope, revision)
+    if match?({:ok, {%Revision{}, _}}, result) do
+      {:ok, {revision, live}} = result
+      :ok = SpaceTraders.FleetGeneration.notify_strategy_activation(scope, revision, live)
 
       # ADR 0013: the new floor applies now. A balance below it pauses spending
       # as a revision shortfall; unsent work is refused at its send boundary
@@ -445,7 +448,10 @@ defmodule SpaceTraders.FleetStrategy do
       broadcast_update()
     end
 
-    result
+    case result do
+      {:ok, {revision, _live}} -> {:ok, revision}
+      error -> error
+    end
   end
 
   defp put_draft(operator_id, document, source, expected_draft_version)

@@ -851,8 +851,22 @@ defmodule SpaceTraders.FleetGeneration do
   @doc false
   def activate_strategy(
         %Scope{operator: %Operator{id: operator_id}} = scope,
-        %Revision{id: revision_id} = revision
+        %Revision{} = revision
       ) do
+    {:ok, live} =
+      Repo.transaction(fn ->
+        {:ok, _} = Identity.lock_establishment(operator_id)
+        bind_strategy(scope, revision)
+      end)
+
+    notify_strategy_activation(scope, revision, live)
+  end
+
+  # Called in the Strategy activation transaction under establishment's lock.
+  # Revision publication and Generation binding must be independently visible
+  # together; adoption takes the same lock before reading the active Revision.
+  @doc false
+  def bind_strategy(%Scope{}, %Revision{id: revision_id} = revision) do
     now = Clock.utc_now()
 
     # The canonical current Generation, read once before it moves to the new
@@ -863,7 +877,7 @@ defmodule SpaceTraders.FleetGeneration do
         join: identity in "current_fleet_identity",
         on: identity.id == 1 and identity.fleet_generation_id == generation.id,
         where:
-          generation.operator_id == ^operator_id and is_nil(generation.fenced_at) and
+          is_nil(generation.fenced_at) and
             is_nil(generation.retired_at)
 
     live =
@@ -892,6 +906,11 @@ defmodule SpaceTraders.FleetGeneration do
     # fresh reconciliation selects its successor.
     :ok = FleetAllocation.NeutralWait.supersede_current()
 
+    live
+  end
+
+  @doc false
+  def notify_strategy_activation(scope, %Revision{id: revision_id}, live) do
     # The wake is a prompt, not the liveness authority: the active Revision's
     # Observation Demands and boot reconstruction re-enter allocation if it
     # is lost. The next Market boundary retires any older-Revision Portfolio.
@@ -900,7 +919,7 @@ defmodule SpaceTraders.FleetGeneration do
     :ok =
       OperatorConditions.resolve_objective_conditions(
         scope,
-        List.first(live_ids),
+        live |> Enum.map(& &1.id) |> List.first(),
         revision_id
       )
 
@@ -1138,12 +1157,7 @@ defmodule SpaceTraders.FleetGeneration do
       %Ship{}
       |> Ecto.Changeset.change(symbol: ship.symbol, ship_type: "UNKNOWN", agent_id: agent.id)
       |> Ecto.Changeset.validate_required([:symbol, :ship_type, :agent_id])
-      |> Repo.insert!(
-        on_conflict: [
-          set: [agent_id: agent.id, ship_type: "UNKNOWN", updated_at: DateTime.utc_now(:second)]
-        ],
-        conflict_target: {:unsafe_fragment, "(symbol) WHERE retired_at IS NULL"}
-      )
+      |> Repo.insert!()
     end)
   end
 

@@ -19,7 +19,9 @@ defmodule SpaceTradersWeb.MissionControlBriefingTest do
     {agent, generation} = mint_fleet(scope)
 
     Req.Test.stub(SpaceTraders.API, fn conn ->
-      if conn.method != "GET", do: flunk("a healthy Fleet must not dispatch replacement mutations")
+      if conn.method != "GET",
+        do: flunk("a healthy Fleet must not dispatch replacement mutations")
+
       briefing_api(conn)
     end)
 
@@ -28,13 +30,17 @@ defmodule SpaceTradersWeb.MissionControlBriefingTest do
     refute has_element?(view, "[phx-click*='abandon']")
     refute has_element?(view, "a[href='/agents/new']")
 
-    assert render_click(view, "retry_replacement", %{}) =~ "No Server Reset replacement is pending."
+    assert render_click(view, "retry_replacement", %{}) =~
+             "No Server Reset replacement is pending."
+
     assert {:error, :no_server_reset} = FleetGeneration.replace_after_reset(scope)
     assert {:error, :no_server_reset} = FleetGeneration.resume_reset_replacement()
     assert %{status: :clear} = FleetGeneration.registration_recovery(scope)
     assert :ok = FleetGeneration.execution_allowed?(agent)
+
     assert {:ok, %{state: :current, agent: %{id: agent_id}, generation: current}} =
              FleetGeneration.current_fleet(scope)
+
     assert agent_id == agent.id
     assert current.id == generation.id
     assert is_nil(current.fenced_at)

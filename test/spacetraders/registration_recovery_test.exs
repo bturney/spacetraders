@@ -52,6 +52,117 @@ defmodule SpaceTraders.RegistrationRecoveryTest do
     %{operator: operator, scope: operator_scope_fixture(operator)}
   end
 
+  test "independently committed activation and adoption publish one coherent Revision", %{
+    scope: scope,
+    operator: operator
+  } do
+    alias SpaceTraders.FleetStrategy
+    agent = agent_fixture(operator, %{symbol: "ORBITALIST", agent_token: "PREDECESSOR_TOKEN"})
+    {:ok, draft} = FleetStrategy.select_preset(scope, "steady_growth")
+    {:ok, first} = FleetStrategy.activate(scope, draft.draft_version)
+    {:ok, draft} = FleetStrategy.select_preset(scope, "steady_growth")
+    parent = self()
+    handler = "694-adoption-strategy-binding"
+
+    :telemetry.attach(
+      handler,
+      Repo.config()[:telemetry_prefix] ++ [:query],
+      fn _, _, metadata, _ ->
+        if Process.get(:pause_adoption_revision) == true and
+             String.starts_with?(metadata.query, "SELECT") and
+             String.contains?(metadata.query, "fleet_strategies") and
+             String.contains?(metadata.query, "fleet_strategy_revisions") do
+          Process.delete(:pause_adoption_revision)
+          send(parent, {:adoption_revision_read, self()})
+
+          receive do
+            :continue -> :ok
+          after
+            5000 -> raise "Adoption response was not released"
+          end
+        end
+      end,
+      nil
+    )
+
+    on_exit(fn -> :telemetry.detach(handler) end)
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      Process.put(:pause_adoption_revision, true)
+      Req.Test.json(conn, registration("ORBITALIST", "SUCCESSOR_TOKEN"))
+    end)
+
+    replacing =
+      Task.async(fn ->
+        Repo.checkout(fn ->
+          error = %SpaceTraders.API.GameplayError{
+            code: 4113,
+            type: :other,
+            message:
+              "Failed to parse token. Token reset_date does not match the server. Server resets happen weekly. After a reset, you should re-register your agent. Expected: 2026-10-14, Actual: 2026-10-01"
+          }
+
+          FleetGeneration.handle_game_result(agent, {:error, error})
+        end)
+      end)
+
+    Req.Test.allow(SpaceTraders.API, self(), replacing.pid)
+    assert_receive {:adoption_revision_read, adopting}, 5000
+    assert {:ok, %{state: :transition}} = FleetGeneration.current_fleet(scope)
+
+    activating =
+      Task.async(fn ->
+        Repo.checkout(fn ->
+          [[backend]] = Repo.query!("SELECT pg_backend_pid()").rows
+          send(parent, {:activation_backend, backend})
+          result = FleetStrategy.activate(scope, draft.draft_version)
+          send(parent, :activation_committed)
+          result
+        end)
+      end)
+
+    assert_receive {:activation_backend, backend}, 5000
+    await_activation_boundary(backend, System.monotonic_time(:millisecond) + 4000)
+    send(adopting, :continue)
+    assert {:error, :stale_agent} = Task.await(replacing)
+    assert {:ok, second} = Task.await(activating)
+    assert first.id != second.id
+    assert FleetStrategy.get(scope).active_revision.id == second.id
+
+    assert {:ok, %{state: :current, agent: successor, generation: current}} =
+             FleetGeneration.current_fleet(scope)
+
+    assert current.fleet_strategy_revision_id == second.id
+
+    assert {:ok, allocation} =
+             SpaceTraders.FleetAllocation.authorize_current(scope, successor, second)
+
+    assert allocation.id == current.id
+    assert :ok = FleetGeneration.gameplay_authority(successor.id)
+
+    assert List.last(FleetGeneration.list_generations(scope)).fleet_strategy_revision_id ==
+             first.id
+  end
+
+  defp await_activation_boundary(backend, deadline) do
+    receive do
+      :activation_committed -> :ok
+    after
+      0 ->
+        case Repo.query!("SELECT wait_event_type FROM pg_stat_activity WHERE pid = $1", [backend]).rows do
+          [["Lock"]] ->
+            :ok
+
+          _ ->
+            if System.monotonic_time(:millisecond) >= deadline,
+              do: flunk("Activation neither committed nor waited on adoption")
+
+            Process.sleep(10)
+            await_activation_boundary(backend, deadline)
+        end
+    end
+  end
+
   describe "a lost registration response" do
     setup do
       game(fn conn ->

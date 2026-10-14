@@ -186,6 +186,107 @@ defmodule SpaceTraders.FleetGenerationTest do
       assert {:error, :stale_agent} = FleetGeneration.execution_allowed?(retained)
     end
 
+    test "late predecessor navigation retains evidence without replacing the successor arrival",
+         %{scope: scope, agent: agent} do
+      alias SpaceTraders.{ShipReservation, Timeline}
+      alias SpaceTraders.Fleet.ShipServer
+
+      {:ok, ship} = Fleet.owned_ship(agent, "RESETME-1")
+      {:ok, reservation} = ShipReservation.reserve(scope, ship.id, "Late navigation")
+
+      intent =
+        Repo.insert!(%Intent{
+          ship_id: ship.id,
+          caller: "intervention",
+          type: "navigate",
+          status: "active",
+          target_waypoint: "X1-UX81-A2",
+          parameters: %{"reason" => "Late navigation"}
+        })
+
+      Repo.insert!(%SpaceTraders.ManualIntervention{
+        ship_reservation_id: reservation.id,
+        intent_id: intent.id,
+        reason: "Late navigation",
+        target_waypoint: "X1-UX81-A2"
+      })
+
+      live_ship =
+        SpaceTraders.API.Model.Ship.from_json(SpaceTraders.ShipBody.ship_body(ship.symbol))
+
+      parent = self()
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case conn.request_path do
+          "/v2/my/agent" ->
+            reset_mismatch(conn)
+
+          "/v2/register" ->
+            Req.Test.json(conn, registration_body("RESETME", ship.symbol, "SECOND_TOKEN"))
+
+          "/v2/my/ships/RESETME-1/navigate" ->
+            send(parent, {:accepted_navigation, self()})
+
+            receive do
+              :deliver -> :ok
+            after
+              5000 -> flunk("Navigation response was not released")
+            end
+
+            nav =
+              SpaceTraders.ShipBody.nav_body("IN_TRANSIT",
+                arrival: DateTime.utc_now() |> DateTime.add(3600) |> DateTime.to_iso8601(),
+                destination: "X1-UX81-A2"
+              )
+
+            Req.Test.json(conn, %{
+              "data" => %{"nav" => nav, "fuel" => %{"capacity" => 200, "current" => 80}}
+            })
+        end
+      end)
+
+      sender =
+        Task.async(fn ->
+          Intents.execute_action(agent, intent, live_ship, %{
+            "kind" => "navigate",
+            "waypoint" => "X1-UX81-A2"
+          })
+        end)
+
+      Req.Test.allow(SpaceTraders.API, self(), sender.pid)
+      assert_receive {:accepted_navigation, pid}, 5000
+      assert {:error, :stale_agent} = FleetGeneration.agent_overview(agent)
+      {:ok, %{agent: successor}} = FleetGeneration.current_fleet(scope)
+      {:ok, _} = ShipServer.ensure_started(successor, ship.symbol)
+
+      {:ok, arrival} =
+        Timeline.schedule_event(
+          :ship,
+          ship.symbol,
+          :arrival,
+          DateTime.add(DateTime.utc_now(), 600),
+          %{"intent_id" => -1}
+        )
+
+      send(pid, :deliver)
+      Task.await(sender)
+      assert Timeline.pending?(arrival)
+
+      refute Enum.any?(
+               Timeline.pending_events(:ship, ship.symbol),
+               &(&1.payload["intent_id"] == intent.id)
+             )
+
+      assert Repo.get!(Ship, ship.id).agent_id == agent.id
+      completed = Repo.get!(Intent, intent.id)
+      attempt = SpaceTraders.MutationAttempts.get!(completed.mutation_attempt_id)
+      assert attempt.agent_id == agent.id
+      assert attempt.state == "succeeded"
+
+      assert [%{classification: "succeeded", evidence: %{"nav_status" => "IN_TRANSIT"}}] =
+               attempt.outcomes
+    end
+
     @tag reset_faction: "VOID"
     test "definitive conflicts preserve faction through distinct banked names in order, without suffixes",
          %{scope: scope, revision: revision, agent: agent} do

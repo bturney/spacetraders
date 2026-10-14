@@ -85,6 +85,27 @@ defmodule SpaceTraders.CurrentFleetMigrationTest do
     assert retained() == expanded
   end
 
+  test "the Name Bank migration retains explicit legacy choices in their approved order" do
+    owner = owner()
+    agent = agent(owner)
+    current = generation(owner, agent, 1, nil)
+
+    query(
+      "UPDATE fleet_generations SET replacement_symbols = $1 WHERE id = $2",
+      [%{"symbols" => ["ORBITALIST", "ZENITH", "NADIR"]}, current]
+    )
+
+    run_migrations(all: true)
+
+    assert query("SELECT name FROM agent_name_bank_entries ORDER BY position").rows ==
+             [["ORBITALIST"], ["ZENITH"], ["NADIR"]]
+
+    assert [] = run_migrations(all: true)
+
+    assert query("SELECT name FROM agent_name_bank_entries ORDER BY position").rows ==
+             [["ORBITALIST"], ["ZENITH"], ["NADIR"]]
+  end
+
   test "the complete migration supports empty setup and a sole Operator with only retired history" do
     assert @contract in run_migrations(all: true)
     assert identity() == [[nil, nil]]
@@ -252,6 +273,17 @@ defmodule SpaceTraders.CurrentFleetMigrationTest do
       end)
       |> List.update_at(8, fn rows ->
         Enum.map(rows, fn [row] -> [Map.put(row, "recovery_credential_ciphertext", nil)] end)
+      end)
+
+    historical_ships = query("SELECT agent_id, retired_at FROM ships").rows
+    retired_at = DateTime.to_naive(now)
+    assert [[^predecessor, ^retired_at]] = historical_ships
+
+    expanded =
+      List.update_at(expanded, 5, fn rows ->
+        Enum.map(rows, fn [ship] ->
+          [Map.put(ship, "retired_at", NaiveDateTime.to_iso8601(retired_at))]
+        end)
       end)
 
     assert retained() == expanded

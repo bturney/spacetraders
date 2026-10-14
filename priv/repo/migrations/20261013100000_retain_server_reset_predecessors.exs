@@ -9,6 +9,13 @@ defmodule SpaceTraders.Repo.Migrations.RetainServerResetPredecessors do
       add :retired_at, :utc_datetime
     end
 
+    execute("""
+    UPDATE ships AS ship
+    SET retired_at = generation.retired_at
+    FROM fleet_generations AS generation
+    WHERE generation.agent_id = ship.agent_id AND generation.retired_at IS NOT NULL
+    """)
+
     drop unique_index(:agents, [:symbol])
     create unique_index(:agents, [:symbol], where: "stale_at IS NULL")
 

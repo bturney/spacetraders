@@ -462,12 +462,9 @@ defmodule SpaceTraders.FleetRefit do
   defp market_good(good), do: good
 
   defp active_generation(agent, revision) do
-    case FleetAllocation.active_generation(agent) do
-      %Generation{fleet_strategy_revision_id: id} = generation when id == revision.id ->
-        generation
-
-      _ ->
-        nil
+    case FleetAllocation.authorize_current_agent(agent, revision) do
+      {:ok, generation} -> generation
+      {:error, _} -> nil
     end
   end
 end

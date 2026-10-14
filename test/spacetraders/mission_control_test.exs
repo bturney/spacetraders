@@ -400,21 +400,46 @@ defmodule SpaceTraders.MissionControlTest do
         calibration_version: "market-v1"
       })
 
-    {:ok, _condition} =
-      SpaceTraders.OperatorConditions.raise(legacy_scope, "legacy", :attention, "Legacy note")
+    {:ok, condition} =
+      SpaceTraders.OperatorConditions.raise(
+        legacy_scope,
+        "objective-infeasible:#{generation.id}:#{revision.id}:0",
+        :attention,
+        "Legacy note"
+      )
 
     assert MissionControl.activity(legacy_scope) == []
     assert MissionControl.generation_recaps(legacy_scope) == []
     assert MissionControl.decision_episode(legacy_scope, episode.id) == nil
     assert MissionControl.decision_episode_comparison(legacy_scope) == []
+    assert {:error, _} = SpaceTraders.OperatorConditions.resolve(legacy_scope, condition.key)
 
     # The retained legacy rows keep their original attribution.
     assert Repo.get!(StrategyDecisionEpisode, episode.id).fleet_generation_id == generation.id
 
-    refute Enum.any?(
+    assert Enum.any?(
              MissionControl.activity(deployment_scope),
              &(&1[:decision_episode_id] == episode.id)
            )
+
+    assert MissionControl.decision_episode(deployment_scope, episode.id)
+    assert [%{id: id}] = MissionControl.decision_episode_comparison(deployment_scope)
+    assert id == episode.id
+
+    assert [%{revisions: [1], limitations: limitations}] =
+             MissionControl.generation_recaps(deployment_scope)
+
+    assert "Legacy note" in limitations
+    assert [condition] == SpaceTraders.OperatorConditions.unresolved(deployment_scope)
+    assert [condition] == SpaceTraders.OperatorConditions.history(deployment_scope)
+    assert :ok = SpaceTraders.OperatorConditions.acknowledge(deployment_scope, condition.id)
+    assert :ok = SpaceTraders.OperatorConditions.resolve(deployment_scope, condition.key)
+    assert [] == SpaceTraders.OperatorConditions.unresolved(deployment_scope)
+
+    assert [%{operator_id: author, acknowledged_at: %DateTime{}, resolved_at: %DateTime{}}] =
+             SpaceTraders.OperatorConditions.history(deployment_scope)
+
+    assert author == legacy.id
   end
 
   describe "strategy/1" do
