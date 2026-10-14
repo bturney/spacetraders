@@ -704,7 +704,12 @@ defmodule SpaceTraders.FleetAcquisitionTest do
                MutationAttempts.reconcile(attempt, :absent, forged)
     end
 
-    {_scope, other_agent, _revision} = generation("OTHER")
+    other_agent =
+      SpaceTraders.AgentFixtures.agent_fixture(
+        Repo.get!(SpaceTraders.Agent.Operator, agent.operator_id),
+        %{symbol: "OTHER"}
+      )
+
     other_generation = Repo.get_by!(Generation, agent_id: other_agent.id)
 
     source =
@@ -1047,7 +1052,7 @@ defmodule SpaceTraders.FleetAcquisitionTest do
 
     Repo.update!(Ecto.Changeset.change(strategy, active_revision_id: revision.id))
 
-    Repo.insert!(%Generation{
+    SpaceTraders.AgentFixtures.generation_fixture(%Generation{
       operator_id: operator.id,
       agent_id: agent.id,
       fleet_strategy_revision_id: revision.id,

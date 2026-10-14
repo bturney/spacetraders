@@ -906,6 +906,13 @@ defmodule SpaceTraders.ContractExecutionTest do
       })
 
     Repo.update!(Ecto.Changeset.change(strategy, active_revision_id: revision.id))
+
+    assert :ok =
+             SpaceTraders.FleetGeneration.activate_strategy(
+               Scope.for_operator(Repo.get!(SpaceTraders.Agent.Operator, agent.operator_id)),
+               revision
+             )
+
     assert {:ok, %{state: :current}} = SpaceTraders.FleetGeneration.current_fleet()
     revision
   end
@@ -934,7 +941,7 @@ defmodule SpaceTraders.ContractExecutionTest do
     Repo.update!(Ecto.Changeset.change(strategy, active_revision_id: revision.id))
 
     generation =
-      Repo.insert!(%Generation{
+      SpaceTraders.AgentFixtures.generation_fixture(%Generation{
         operator_id: operator.id,
         agent_id: agent.id,
         fleet_strategy_revision_id: revision.id,

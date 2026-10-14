@@ -3802,7 +3802,7 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
         Repo.insert!(%Operator{email: "#{symbol}@example.com"})
 
     agent =
-      Repo.insert!(%AgentRecord{
+      SpaceTraders.AgentFixtures.established_agent_fixture(%AgentRecord{
         symbol: symbol,
         faction: "COSMIC",
         headquarters: "X1-UX81-A1",
@@ -3820,7 +3820,7 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
       do: Repo.update!(Ecto.Changeset.change(predecessor, retired_at: DateTime.utc_now()))
 
     generation =
-      Repo.insert!(%Generation{
+      SpaceTraders.AgentFixtures.generation_fixture(%Generation{
         operator_id: operator.id,
         agent_id: agent.id,
         fleet_strategy_revision_id: revision.id,

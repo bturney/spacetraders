@@ -2,17 +2,15 @@ defmodule SpaceTraders.Agent do
   @moduledoc """
   The Agent context: Operator accounts, stored game credentials, and Agents.
 
-  Owns the human Operators (email/password login, per-operator AccountToken
-  linking) and the in-game Agents they own. AccountTokens and AgentTokens are
-  stored encrypted at rest via `SpaceTraders.Secret` (ADR 0006) — the app reads
-  them only from the database, never from `.env`. Fleet Generation owns minting
-  and Stale Agent retirement.
+  Owns the sole Operator's authentication and encrypted AccountToken (ADR 0015).
+  Agent ids retain game identity and encrypted AgentTokens, never tenant routing.
+  Fleet Generation exclusively owns mint/import, registration recovery, bootstrap
+  and replacement publication. Secrets remain in PostgreSQL, never `.env`.
   """
 
   import Ecto.Query, warn: false
   alias SpaceTraders.Repo
 
-  alias SpaceTraders.API.Model.Agent, as: GameAgent
   alias SpaceTraders.Agent.{Agent, Operator, OperatorToken, OperatorNotifier, Scope}
   alias SpaceTraders.FleetGeneration
 
@@ -89,8 +87,8 @@ defmodule SpaceTraders.Agent do
 
   The account is confirmed immediately — registration is the first-run setup
   surface for a LAN dashboard and has no email-confirmation step. Subsequent
-  creation returns `{:error, :setup_unavailable}`. This compatibility name is
-  retained for callers; there is no additional-Operator registration path.
+  creation returns `{:error, :setup_unavailable}`; there is no additional-Operator
+  registration path.
 
   ## Examples
 
@@ -122,12 +120,8 @@ defmodule SpaceTraders.Agent do
   The token is only ever used to mint agents in-app; it never authorizes game
   actions and never leaves the database in plaintext (ADR 0006).
   """
-  def link_account_token(%Scope{operator: %Operator{} = operator}, account_token),
-    do: link_account_token(operator, account_token)
-
-  # Compatibility for staged gameplay callers. Both paths check the same durable
-  # authentication identity; retained ownership rows do not grant credential authority.
-  def link_account_token(%Operator{} = operator, account_token) when is_binary(account_token) do
+  def link_account_token(%Scope{operator: %Operator{} = operator}, account_token)
+      when is_binary(account_token) do
     if FleetGeneration.Identity.operator?(operator.id) do
       result =
         operator
@@ -174,24 +168,6 @@ defmodule SpaceTraders.Agent do
   end
 
   @doc """
-  Lists the agents owned by the given operator, newest last.
-  """
-  def list_agents(%Operator{id: operator_id}) do
-    Repo.all(from(agent in Agent, where: agent.operator_id == ^operator_id, order_by: agent.id))
-  end
-
-  @doc """
-  Gets a single agent by id, scoped to the given operator.
-
-  Returns `nil` when the agent does not belong to the operator.
-  """
-  def get_agent(%Operator{id: operator_id}, agent_id) do
-    Repo.get_by(Agent, id: agent_id, operator_id: operator_id)
-  end
-
-  def get_agent(%Scope{operator: operator}, agent_id), do: get_agent(operator, agent_id)
-
-  @doc """
   Pulls an agent's live game record — credits, headquarters and faction — from
   the API.
 
@@ -216,38 +192,6 @@ defmodule SpaceTraders.Agent do
 
   @doc "Converts a reset mismatch from any game call into the durable stale state."
   defdelegate handle_game_result(agent, result), to: FleetGeneration
-
-  @doc """
-  Imports an existing game agent as the initial current Fleet.
-
-  Compatibility entry point; Fleet Generation owns establishment.
-  """
-  defdelegate import_agent(scope, agent_token, confirmed), to: FleetGeneration
-
-  @doc false
-  def store_agent(
-        %Operator{} = operator,
-        %GameAgent{} = game_agent,
-        agent_token,
-        requested_faction
-      ) do
-    result =
-      %Agent{}
-      |> Agent.changeset(%{
-        symbol: game_agent.symbol,
-        faction: game_agent.starting_faction || requested_faction
-      })
-      |> Ecto.Changeset.put_change(:headquarters, game_agent.headquarters)
-      |> Ecto.Changeset.put_change(:agent_token, agent_token)
-      |> Ecto.Changeset.put_change(:operator_id, operator.id)
-      # SQL diagnostics show custom-type input before encryption.
-      |> Repo.insert(log: false)
-
-    if match?({:ok, _agent}, result),
-      do: SpaceTraders.EmergencyStopAdmission.track_credential(operator.id, agent_token)
-
-    result
-  end
 
   @doc """
   Checks whether the operator is in sudo mode.

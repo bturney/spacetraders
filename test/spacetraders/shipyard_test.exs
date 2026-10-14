@@ -7,7 +7,7 @@ defmodule SpaceTraders.ShipyardTest do
   defp agent_fixture do
     operator = SpaceTraders.AgentFixtures.operator_fixture()
 
-    Repo.insert!(%AgentRecord{
+    SpaceTraders.AgentFixtures.established_agent_fixture(%AgentRecord{
       operator_id: operator.id,
       symbol: "SHIPYARD-#{System.unique_integer([:positive])}",
       faction: "COSMIC",

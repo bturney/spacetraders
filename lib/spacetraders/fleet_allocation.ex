@@ -203,10 +203,6 @@ defmodule SpaceTraders.FleetAllocation do
              is_integer(source_version) and source_version >= 0 do
     if valid_published_commitments?(commitments) and
          OperatorAuthority.authorize(scope) == {:ok, operator_id} do
-      # Adopt compatible pre-publication writers before taking resource locks.
-      # Publication rechecks the durable identity under the Generation lock.
-      _ = current_generation()
-
       notification = fn portfolio ->
         %{
           topic: "fleet_allocation",
@@ -494,7 +490,7 @@ defmodule SpaceTraders.FleetAllocation do
     end
   end
 
-  @doc "Legacy Agent adapter: only the canonical current Fleet may supply resources."
+  @doc "Exact Agent binding: only the canonical current Fleet may supply resources."
   def active_generation(%AgentRecord{id: agent_id}) do
     case current_generation() do
       %Generation{agent_id: ^agent_id} = generation -> generation
@@ -518,7 +514,7 @@ defmodule SpaceTraders.FleetAllocation do
     end
   end
 
-  @doc "Legacy Agent adapter: refuses historical and not-yet-published resources."
+  @doc "Exact resource binding: refuses historical and not-yet-published Agents."
   def current_portfolio(scope, %AgentRecord{id: agent_id}) do
     with {:ok, _} <- OperatorAuthority.authorize(scope),
          %Generation{id: id, agent_id: ^agent_id} <- current_generation() do
@@ -549,32 +545,10 @@ defmodule SpaceTraders.FleetAllocation do
 
   @doc false
   def admit_current_agent(agent_id, generation_id) do
-    current_id =
-      Repo.one(
-        from i in "current_fleet_identity", where: i.id == 1, select: i.fleet_generation_id
-      )
-
-    identity_allowed? =
-      if is_nil(current_id) do
-        operator_id = OperatorAuthority.deployment_operator_id()
-
-        candidates =
-          Repo.all(
-            from a in AgentRecord,
-              left_join: g in Generation,
-              on: g.agent_id == a.id,
-              where: is_nil(g.retired_at),
-              select: {a.id, a.operator_id},
-              limit: 2
-          )
-
-        is_integer(operator_id) and candidates == [{agent_id, operator_id}]
-      else
-        true
-      end
-
     query =
       from g in Generation,
+        join: i in "current_fleet_identity",
+        on: i.id == 1 and i.fleet_generation_id == g.id,
         join: a in AgentRecord,
         on: a.id == g.agent_id,
         where:
@@ -583,17 +557,9 @@ defmodule SpaceTraders.FleetAllocation do
         lock: "FOR SHARE OF f0",
         select: g.id
 
-    # Pre-adoption execution writers remain a staged adapter. Once published,
-    # only that identity can grant resources, including in fenced transitions.
-    query = if current_id, do: where(query, [g], g.id == ^current_id), else: query
     live_id = Repo.one(query)
 
-    legacy_agent? =
-      is_nil(current_id) and is_nil(generation_id) and is_nil(live_id) and
-        not Repo.exists?(from g in Generation, where: g.agent_id == ^agent_id) and
-        Repo.exists?(from a in AgentRecord, where: a.id == ^agent_id and is_nil(a.stale_at))
-
-    if identity_allowed? and ((live_id && generation_id in [nil, live_id]) || legacy_agent?),
+    if live_id && generation_id in [nil, live_id],
       do: :ok,
       else: {:error, :current_fleet_unavailable}
   end
@@ -1535,7 +1501,7 @@ defmodule SpaceTraders.FleetAllocation do
 
     # A selected plan is a changed result: every current Neutral Wait in this
     # Operator's allocation scope supersedes before this result takes over.
-    NeutralWait.supersede_for_operator(operator_id)
+    NeutralWait.supersede_current()
 
     revision = Repo.get!(Revision, revision_id)
 

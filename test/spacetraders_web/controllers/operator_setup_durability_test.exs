@@ -20,7 +20,10 @@ defmodule SpaceTradersWeb.OperatorSetupDurabilityTest do
 
     on_exit(fn ->
       Sandbox.mode(Repo, :auto)
-      Repo.delete_all(from o in Operator, where: o.email in ^@emails)
+
+      Repo.all(from o in Operator, where: o.email in ^@emails, select: o.id)
+      |> Enum.each(&SpaceTraders.AgentFixtures.cleanup_operator_fixture/1)
+
       SpaceTraders.EmergencyStopAdmission.clear()
       Sandbox.mode(Repo, :manual)
     end)

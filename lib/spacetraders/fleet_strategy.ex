@@ -14,7 +14,7 @@ defmodule SpaceTraders.FleetStrategy do
 
   import Ecto.Query, warn: false
 
-  alias SpaceTraders.Agent.{Agent, Scope}
+  alias SpaceTraders.Agent.Scope
   alias SpaceTraders.EmergencyStopAdmission
   alias SpaceTraders.Evidence
   alias SpaceTraders.Fleet
@@ -125,7 +125,7 @@ defmodule SpaceTraders.FleetStrategy do
       Repo.transaction(fn ->
         %Strategy{}
         |> Strategy.changeset(%{operator_id: operator_id})
-        |> Repo.insert(on_conflict: :nothing, conflict_target: :operator_id)
+        |> Repo.insert(on_conflict: :nothing)
 
         Repo.update_all(
           from(strategy in Strategy, where: strategy.operator_id == ^operator_id),
@@ -189,7 +189,7 @@ defmodule SpaceTraders.FleetStrategy do
 
           if updated != 1, do: Repo.rollback(:stale_emergency_stop)
 
-          if Fleet.prepare_emergency_stop_resume(operator_id, now) != :ok,
+          if Fleet.prepare_emergency_stop_resume(now) != :ok,
             do: Repo.rollback(:reconciliation_required)
 
           get()
@@ -234,7 +234,7 @@ defmodule SpaceTraders.FleetStrategy do
       if updated == 1 do
         projection = get()
         :ok = EmergencyStopAdmission.resume(operator_id, projection.emergency_stop_version)
-        _ = SpaceTraders.FleetGeneration.replace_stale_agents(scope)
+        _ = SpaceTraders.FleetGeneration.replace_after_reset(scope)
         broadcast_update()
         {:ok, projection}
       else
@@ -248,17 +248,13 @@ defmodule SpaceTraders.FleetStrategy do
 
   Emergency Stop is global Operator intent: any engaged stop suppresses every
   new mutation in the deployment, whichever Agent or credential would send it.
-  The Scope and Agent forms are compatibility adapters for callers that still
-  carry them; neither narrows the stop to a tenant.
+  There is no Scope/Agent selector for mutation admission.
   """
   def mutation_allowed? do
     if Repo.exists?(from(strategy in Strategy, where: not is_nil(strategy.emergency_stopped_at))),
       do: {:error, :emergency_stopped},
       else: :ok
   end
-
-  def mutation_allowed?(%Scope{}), do: mutation_allowed?()
-  def mutation_allowed?(%Agent{}), do: mutation_allowed?()
 
   @doc "Returns the deployment Fleet Strategy's current draft, active revision and Emergency Stop."
   def get do
@@ -296,10 +292,7 @@ defmodule SpaceTraders.FleetStrategy do
   # The deployment's Strategy row. It still carries its author's Operator id as
   # attribution; selection comes from the durable deployment identity.
   defp deployment_strategy do
-    case OperatorAuthority.deployment_operator_id() do
-      nil -> nil
-      operator_id -> Repo.get_by(Strategy, operator_id: operator_id)
-    end
+    Repo.one(Strategy)
   end
 
   @doc """
@@ -442,7 +435,7 @@ defmodule SpaceTraders.FleetStrategy do
       # ADR 0013: the new floor applies now. A balance below it pauses spending
       # as a revision shortfall; unsent work is refused at its send boundary
       # and old Reservations are released when Allocation supersedes them.
-      :ok = SpaceTraders.CreditFloorWatch.revalidate_operator(operator_id)
+      :ok = SpaceTraders.CreditFloorWatch.revalidate_current()
 
       # Revision supersession on a live Generation: the previous revision's
       # open Observation Demands lose relevance with it. Their rows and

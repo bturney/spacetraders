@@ -16,7 +16,7 @@ defmodule SpaceTraders.FleetStrategy.Strategy do
     field :emergency_resume_prepared_at, :utc_datetime_usec
     field :emergency_stop_version, :integer, default: 0
 
-    belongs_to :operator, SpaceTraders.Agent.Operator
+    field :operator_id, :id
     has_many :revisions, Revision, foreign_key: :fleet_strategy_id
 
     timestamps(type: :utc_datetime)
@@ -36,6 +36,6 @@ defmodule SpaceTraders.FleetStrategy.Strategy do
       :emergency_stop_version
     ])
     |> validate_required([:operator_id])
-    |> unique_constraint(:operator_id)
+    |> unique_constraint(:operator_id, name: :fleet_strategies_singleton_index)
   end
 end

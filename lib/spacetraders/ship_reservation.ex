@@ -13,7 +13,7 @@ defmodule SpaceTraders.ShipReservation do
   schema "ship_reservations" do
     belongs_to :ship, Ship
     field :ship_symbol, :string
-    belongs_to :operator, SpaceTraders.Agent.Operator
+    field :operator_id, :id
     field :reason, :string
     field :released_at, :utc_datetime_usec
     timestamps(type: :utc_datetime_usec)

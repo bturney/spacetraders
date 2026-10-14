@@ -42,7 +42,7 @@ defmodule SpaceTraders.CurrentFleetDurabilityTest do
 
       topics = ["fleet_allocation" | Enum.map(agent_ids, &"fleet:#{&1}")]
       Repo.delete_all(from(n in SpaceTraders.Outbox.Notification, where: n.topic in ^topics))
-      Repo.delete_all(from(o in SpaceTraders.Agent.Operator, where: o.id == ^operator.id))
+      SpaceTraders.AgentFixtures.cleanup_operator_fixture(operator.id)
       SpaceTraders.EmergencyStopAdmission.clear()
       SpaceTraders.FleetGenerationAdmission.clear()
       restart_capacity_governor()
@@ -62,7 +62,7 @@ defmodule SpaceTraders.CurrentFleetDurabilityTest do
   @tag mint_proof: true
   test "successful mint and same-symbol reset publish committed identity before any observer can repair it",
        %{operator: operator} do
-    {:ok, operator} = Agent.link_account_token(operator, "ACCOUNT_SECRET")
+    {:ok, operator} = Agent.link_account_token(operator_scope_fixture(operator), "ACCOUNT_SECRET")
     scope = operator_scope_fixture(operator)
     {:ok, draft} = SpaceTraders.FleetStrategy.select_preset(scope, "steady_growth")
     {:ok, revision} = SpaceTraders.FleetStrategy.activate(scope, draft.draft_version)
@@ -134,7 +134,7 @@ defmodule SpaceTraders.CurrentFleetDurabilityTest do
                ],
                fn ->
                  FleetGeneration.handle_game_result(
-                   Agent.get_agent(scope, first.id),
+                   Repo.get!(SpaceTraders.Agent.Agent, first.id),
                    {:error, error}
                  )
                end
@@ -155,7 +155,7 @@ defmodule SpaceTraders.CurrentFleetDurabilityTest do
     assert second_generation.id == second_generation_id
     assert second_generation.fleet_strategy_revision_id == revision.id
     assert second_generation.symbol == first_generation.symbol
-    assert Agent.get_agent(scope, second_ref.id).agent_token == "SECOND_SECRET"
+    assert Repo.get!(SpaceTraders.Agent.Agent, second_ref.id).agent_token == "SECOND_SECRET"
     assert [current, historical] = FleetGeneration.list_generations(scope)
     assert current.id == second_generation_id
     assert historical.id == first_generation_id
@@ -241,7 +241,7 @@ defmodule SpaceTraders.CurrentFleetDurabilityTest do
           Repo.checkout(fn ->
             [[backend]] = Repo.query!("SELECT pg_backend_pid()").rows
             send(parent, {:initializing, self(), backend})
-            FleetGeneration.adopt_current_fleet()
+            FleetGeneration.preflight_current_fleet()
           end)
         end)
       end
@@ -252,10 +252,6 @@ defmodule SpaceTraders.CurrentFleetDurabilityTest do
     assert first_backend != second_backend
     [[observer_backend]] = Repo.query!("SELECT pg_backend_pid()").rows
     refute observer_backend in [first_backend, second_backend]
-    await_blocked(first_backend)
-    await_blocked(second_backend)
-    send(holder.pid, :release)
-    assert {:ok, :ok} = Task.await(holder)
 
     identities =
       Enum.map(adopters, fn task ->
@@ -268,31 +264,35 @@ defmodule SpaceTraders.CurrentFleetDurabilityTest do
     assert identity.agent.id == agent.id
     assert identity.operator.id == operator.id
     assert identity.agent.agent_token == nil
+    send(holder.pid, :release)
+    assert {:ok, :ok} = Task.await(holder)
 
     # Both senders exited; this independent checkout observes only committed
     # state and rerun reuses the same meaningful Generation identity.
     assert {:ok, ^identity} = FleetGeneration.current_fleet()
-    assert {:ok, ^identity} = FleetGeneration.adopt_current_fleet()
+    assert {:ok, ^identity} = FleetGeneration.preflight_current_fleet()
     assert [generation] = FleetGeneration.list_generations(operator_scope_fixture(operator))
     assert generation.id == identity.generation.id
-    assert Agent.get_agent(operator, agent.id).agent_token == "DURABLE_SECRET"
+    assert Repo.get!(SpaceTraders.Agent.Agent, agent.id).agent_token == "DURABLE_SECRET"
   end
 
-  test "interrupted adoption commits neither a partial identity nor an orphan Generation; rerun preserves secrets",
+  test "an aborted preflight transaction cannot unpublish established authority; rerun preserves secrets",
        %{operator: operator, agent: agent} do
+    before = FleetGeneration.list_generations(operator_scope_fixture(operator))
+
     sender =
       Task.async(fn ->
         Repo.transaction(fn ->
-          assert {:ok, %{generation: generation}} = FleetGeneration.adopt_current_fleet()
+          assert {:ok, %{generation: generation}} = FleetGeneration.preflight_current_fleet()
           assert generation.agent_id == agent.id
           Repo.rollback(:interrupted_before_commit)
         end)
       end)
 
     assert {:error, :interrupted_before_commit} = Task.await(sender)
-    assert FleetGeneration.list_generations(operator_scope_fixture(operator)) == []
-    assert Agent.get_agent(operator, agent.id).agent_token == "DURABLE_SECRET"
-    assert {:ok, %{state: :current, agent: current}} = FleetGeneration.adopt_current_fleet()
+    assert FleetGeneration.list_generations(operator_scope_fixture(operator)) == before
+    assert Repo.get!(SpaceTraders.Agent.Agent, agent.id).agent_token == "DURABLE_SECRET"
+    assert {:ok, %{state: :current, agent: current}} = FleetGeneration.preflight_current_fleet()
     assert current.id == agent.id
     assert [generation] = FleetGeneration.list_generations(operator_scope_fixture(operator))
     assert generation.agent_id == agent.id
@@ -300,7 +300,9 @@ defmodule SpaceTraders.CurrentFleetDurabilityTest do
 
   describe "competing establishment" do
     setup %{operator: operator} do
-      {:ok, operator} = Agent.link_account_token(operator, "ACCOUNT_SECRET")
+      {:ok, operator} =
+        Agent.link_account_token(operator_scope_fixture(operator), "ACCOUNT_SECRET")
+
       parent = self()
 
       # Every game request is observed and held in flight until released.
@@ -428,7 +430,7 @@ defmodule SpaceTraders.CurrentFleetDurabilityTest do
 
     assert current.id == established.id
     assert generation.agent_id == established.id
-    assert [only] = Agent.list_agents(Agent.get_operator!(scope.operator.id))
+    assert [only] = Repo.all(SpaceTraders.Agent.Agent)
     assert only.id == established.id
     assert only.agent_token == token
     assert [^generation] = FleetGeneration.list_generations(scope)
@@ -447,20 +449,6 @@ defmodule SpaceTraders.CurrentFleetDurabilityTest do
       _ ->
         Process.sleep(10)
         await_blocked_by(backend, holder, remaining - 1)
-    end
-  end
-
-  defp await_blocked(backend, remaining \\ 500)
-  defp await_blocked(_backend, 0), do: flunk("initializer did not wait on the PostgreSQL lock")
-
-  defp await_blocked(backend, remaining) do
-    case Repo.query!("SELECT cardinality(pg_blocking_pids($1)) > 0", [backend]).rows do
-      [[true]] ->
-        :ok
-
-      _ ->
-        Process.sleep(10)
-        await_blocked(backend, remaining - 1)
     end
   end
 end

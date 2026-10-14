@@ -29,7 +29,9 @@ defmodule SpaceTraders.FleetGenerationTest do
 
     assert summary =~ "AccountToken"
 
-    {:ok, operator} = Agent.link_account_token(operator, "ACCOUNT_TOKEN_SECRET")
+    {:ok, operator} =
+      Agent.link_account_token(Scope.for_operator(operator), "ACCOUNT_TOKEN_SECRET")
+
     scope = Scope.for_operator(operator)
 
     Req.Test.stub(SpaceTraders.API, fn conn ->
@@ -49,7 +51,7 @@ defmodule SpaceTraders.FleetGenerationTest do
     agent = agent_fixture(owner, %{agent_token: nil})
 
     generation =
-      Repo.insert!(%FleetGeneration.Generation{
+      SpaceTraders.AgentFixtures.generation_fixture(%FleetGeneration.Generation{
         operator_id: owner.id,
         agent_id: agent.id,
         fleet_strategy_revision_id: revision.id,
@@ -99,7 +101,10 @@ defmodule SpaceTraders.FleetGenerationTest do
       end
 
       operator = operator_fixture()
-      {:ok, operator} = Agent.link_account_token(operator, "ACCOUNT_TOKEN_SECRET")
+
+      {:ok, operator} =
+        Agent.link_account_token(Scope.for_operator(operator), "ACCOUNT_TOKEN_SECRET")
+
       scope = Scope.for_operator(operator)
       {:ok, strategy} = FleetStrategy.select_preset(scope, "charted_expansion")
       {:ok, revision} = FleetStrategy.activate(scope, strategy.draft_version)
@@ -114,7 +119,7 @@ defmodule SpaceTraders.FleetGenerationTest do
       {:ok, %{agent: minted}} =
         FleetGeneration.mint(scope, %{symbol: "RESETME", faction: faction})
 
-      %{scope: scope, revision: revision, agent: Agent.get_agent(scope, minted.id)}
+      %{scope: scope, revision: revision, agent: Repo.get!(SpaceTraders.Agent.Agent, minted.id)}
     end
 
     test "same-name replacement is a distinct Generation; the predecessor and its Ships remain history",
@@ -166,7 +171,7 @@ defmodule SpaceTraders.FleetGenerationTest do
 
       # The predecessor is retained, stale and retired, as attributable history.
       assert {:ok, %{agent: retained, generation: retired}} =
-               FleetGeneration.evidence_holder(agent.id)
+               FleetGeneration.generation_evidence(scope, predecessor.id)
 
       assert FleetGeneration.stale?(retained)
       assert retired.number == 1
@@ -276,7 +281,7 @@ defmodule SpaceTraders.FleetGenerationTest do
                FleetGeneration.registration_recovery(scope)
 
       assert {:error, :registration_unresolved} = FleetGeneration.replace_after_reset(scope)
-      assert {:error, :registration_unresolved} = FleetGeneration.replace_stale_agents(scope)
+      assert {:error, :registration_unresolved} = FleetGeneration.replace_after_reset(scope)
       refute_received {:game_request, _, _, _}
       assert {:ok, %{state: :transition}} = FleetGeneration.current_fleet()
     end
@@ -353,7 +358,7 @@ defmodule SpaceTraders.FleetGenerationTest do
       assert Enum.all?(drain_requests(), &match?({"GET", "/v2/my/agent", _}, &1))
       assert {:ok, %{state: :current, agent: %{id: id}}} = FleetGeneration.current_fleet()
       assert id == agent.id
-      refute FleetGeneration.stale?(Agent.get_agent(scope, agent.id))
+      refute FleetGeneration.stale?(Repo.get!(SpaceTraders.Agent.Agent, agent.id))
       assert {:error, :no_server_reset} = FleetGeneration.replace_after_reset(scope)
     end
 
@@ -492,7 +497,7 @@ defmodule SpaceTraders.FleetGenerationTest do
         Req.Test.json(conn, registration_body("ORBITALIST", "ORBITALIST-1", "THIRD_TOKEN"))
       end)
 
-      successor_agent = Agent.get_agent(scope, current.agent_id)
+      successor_agent = Repo.get!(SpaceTraders.Agent.Agent, current.agent_id)
 
       assert {:error, :stale_agent} =
                FleetGeneration.handle_game_result(successor_agent, {:error, reset_error()})
@@ -511,7 +516,7 @@ defmodule SpaceTraders.FleetGenerationTest do
       assert {:error, :stale_agent} = FleetGeneration.agent_overview(agent)
       assert registrations() == []
       assert {:error, :emergency_stopped} = FleetGeneration.replace_after_reset(scope)
-      assert {:error, :emergency_stopped} = FleetGeneration.replace_stale_agents(scope)
+      assert {:error, :emergency_stopped} = FleetGeneration.replace_after_reset(scope)
       assert registrations() == []
 
       assert {:ok, %{state: :transition, generation: fenced}} = FleetGeneration.current_fleet()
@@ -536,7 +541,10 @@ defmodule SpaceTraders.FleetGenerationTest do
 
   test "activating Strategy makes an already bootstrapped Fleet Generation Strategy-capable" do
     operator = operator_fixture()
-    {:ok, operator} = Agent.link_account_token(operator, "ACCOUNT_TOKEN_SECRET")
+
+    {:ok, operator} =
+      Agent.link_account_token(Scope.for_operator(operator), "ACCOUNT_TOKEN_SECRET")
+
     scope = Scope.for_operator(operator)
 
     Req.Test.stub(SpaceTraders.API, fn conn ->
@@ -571,7 +579,10 @@ defmodule SpaceTraders.FleetGenerationTest do
 
   test "Emergency Stop blocks Agent mutations and replacement minting while reads continue" do
     operator = operator_fixture()
-    {:ok, operator} = Agent.link_account_token(operator, "ACCOUNT_TOKEN_SECRET")
+
+    {:ok, operator} =
+      Agent.link_account_token(Scope.for_operator(operator), "ACCOUNT_TOKEN_SECRET")
+
     scope = Scope.for_operator(operator)
     agent = agent_fixture(operator, %{agent_token: "AGENT_TOKEN_SECRET"})
 
@@ -693,7 +704,7 @@ defmodule SpaceTraders.FleetGenerationTest do
       end
     end)
 
-    assert {:ok, imported} = Agent.import_agent(scope, "IMPORTED_AGENT_TOKEN", true)
+    assert {:ok, imported} = FleetGeneration.import_agent(scope, "IMPORTED_AGENT_TOKEN", true)
 
     assert {:error, :emergency_stopped} =
              SpaceTraders.API.accept_contract(AgentTokenReference.new(imported), "contract-1")
@@ -701,7 +712,10 @@ defmodule SpaceTraders.FleetGenerationTest do
 
   test "mints through a credential reference without exposing the AccountToken" do
     operator = operator_fixture()
-    {:ok, operator} = Agent.link_account_token(operator, "ACCOUNT_TOKEN_SECRET")
+
+    {:ok, operator} =
+      Agent.link_account_token(Scope.for_operator(operator), "ACCOUNT_TOKEN_SECRET")
+
     scope = Scope.for_operator(operator)
 
     assert scope.operator.account_token == nil
@@ -745,7 +759,9 @@ defmodule SpaceTraders.FleetGenerationTest do
 
   test "does not expose the AgentToken when the minted Agent cannot be stored" do
     operator = operator_fixture()
-    {:ok, operator} = Agent.link_account_token(operator, "ACCOUNT_TOKEN_SECRET")
+
+    {:ok, operator} =
+      Agent.link_account_token(Scope.for_operator(operator), "ACCOUNT_TOKEN_SECRET")
 
     Req.Test.stub(SpaceTraders.API, fn conn ->
       Req.Test.json(conn, %{

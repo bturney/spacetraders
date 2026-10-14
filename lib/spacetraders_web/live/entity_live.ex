@@ -9,9 +9,8 @@ defmodule SpaceTradersWeb.EntityLive do
 
   @impl true
   def mount(params, _session, socket) do
-    # The current Fleet is resolved exactly as Mission Control resolves it. A
-    # stale `?agent=` link can only open read-only history under its original
-    # Generation; it never selects or commands another Generation as current.
+    # Current entities have no resource selector. Explicit historical Generation
+    # links preserve provenance without resurrecting a legacy Agent parameter.
     current =
       case FleetGeneration.current_fleet(socket.assigns.current_scope) do
         {:ok, %{state: :current, agent: agent, generation: generation}} ->
@@ -21,7 +20,7 @@ defmodule SpaceTradersWeb.EntityLive do
           nil
       end
 
-    case historical_holder(params["agent"], current) || current do
+    case historical_holder(socket.assigns.current_scope, params["generation"], current) || current do
       nil ->
         {:ok, push_navigate(socket, to: ~p"/world")}
 
@@ -33,23 +32,23 @@ defmodule SpaceTradersWeb.EntityLive do
          |> assign(
            historical?: historical?,
            generation: generation,
-           link_agent: if(historical?, do: agent)
+           link_generation: if(historical?, do: generation)
          )
          |> assign_entity(agent, params)}
     end
   end
 
-  defp historical_holder(raw_id, current) when is_binary(raw_id) do
-    with {agent_id, ""} <- Integer.parse(raw_id),
-         false <- current != nil and current.agent.id == agent_id,
-         {:ok, holder} <- FleetGeneration.evidence_holder(agent_id) do
+  defp historical_holder(scope, raw_id, current) when is_binary(raw_id) do
+    with {generation_id, ""} <- Integer.parse(raw_id),
+         false <- current != nil and current.generation.id == generation_id,
+         {:ok, holder} <- FleetGeneration.generation_evidence(scope, generation_id) do
       holder
     else
       _ -> nil
     end
   end
 
-  defp historical_holder(_raw_id, _current), do: nil
+  defp historical_holder(_scope, _raw_id, _current), do: nil
 
   @impl true
   def render(assigns) do
@@ -91,7 +90,7 @@ defmodule SpaceTradersWeb.EntityLive do
             <ul :if={@waypoints != []} class="mt-3 space-y-2">
               <li :for={waypoint <- @waypoints}>
                 <.link
-                  navigate={waypoint_path(@link_agent, @system, waypoint.symbol)}
+                  navigate={waypoint_path(@link_generation, @system, waypoint.symbol)}
                   class="link link-primary"
                 >
                   {waypoint.symbol}
@@ -107,7 +106,7 @@ defmodule SpaceTradersWeb.EntityLive do
             <p class="eyebrow">Known context</p>
             <h1 class="text-3xl font-bold">Waypoint {@waypoint}</h1>
             <p class="mt-2 text-sm opacity-70">
-              <.link navigate={system_path(@link_agent, @system)} class="link link-primary">System {@system}</.link>
+              <.link navigate={system_path(@link_generation, @system)} class="link link-primary">System {@system}</.link>
               · {existence_label(@intelligence)}
             </p>
           </header>
@@ -151,15 +150,15 @@ defmodule SpaceTradersWeb.EntityLive do
 
           <nav class="flex flex-wrap gap-3" aria-label="Waypoint contexts">
             <.link
-              navigate={entity_path(@link_agent, @system, @waypoint, :market)}
+              navigate={entity_path(@link_generation, @system, @waypoint, :market)}
               class="btn btn-outline btn-sm"
             >Market</.link>
             <.link
-              navigate={entity_path(@link_agent, @system, @waypoint, :shipyard)}
+              navigate={entity_path(@link_generation, @system, @waypoint, :shipyard)}
               class="btn btn-outline btn-sm"
             >Shipyard</.link>
             <.link
-              navigate={entity_path(@link_agent, @system, @waypoint, :construction)}
+              navigate={entity_path(@link_generation, @system, @waypoint, :construction)}
               class="btn btn-outline btn-sm"
             >Construction</.link>
           </nav>
@@ -175,7 +174,7 @@ defmodule SpaceTradersWeb.EntityLive do
             <h1 class="text-3xl font-bold">{entity_name(@entity)} {@waypoint}</h1>
             <p class="mt-2 text-sm opacity-70">
               <.link
-                navigate={waypoint_path(@link_agent, @system, @waypoint)}
+                navigate={waypoint_path(@link_generation, @system, @waypoint)}
                 class="link link-primary"
               >
                 Waypoint {@waypoint}
@@ -219,7 +218,7 @@ defmodule SpaceTradersWeb.EntityLive do
             </p>
             <.link
               :if={ship_waypoint(@ship_observation)}
-              navigate={ship_waypoint_path(@link_agent, @ship_observation)}
+              navigate={ship_waypoint_path(@link_generation, @ship_observation)}
               class="link link-primary mt-3 inline-block"
             >{ship_waypoint(@ship_observation)}</.link>
           </section>
@@ -246,7 +245,7 @@ defmodule SpaceTradersWeb.EntityLive do
             <ul :if={@contract} class="mt-3 space-y-2">
               <li :for={delivery <- contract_deliveries(@contract)}>
                 <.link
-                  navigate={contract_waypoint_path(@link_agent, delivery.destination)}
+                  navigate={contract_waypoint_path(@link_generation, delivery.destination)}
                   class="link link-primary"
                 >
                   {delivery.destination}
@@ -441,7 +440,7 @@ defmodule SpaceTradersWeb.EntityLive do
   defp observation_source(_operation_id), do: "Governed observation"
 
   defp path_for_agent(path, nil), do: path
-  defp path_for_agent(path, agent), do: "#{path}?agent=#{agent.id}"
+  defp path_for_agent(path, generation), do: "#{path}?generation=#{generation.id}"
 
   defp generation_label(%{number: number}), do: " · Generation #{number}"
   defp generation_label(_generation), do: ""

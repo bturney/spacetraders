@@ -19,7 +19,7 @@ defmodule SpaceTraders.CurrentGenerationAuthorityTest do
       agent_fixture(operator, %{symbol: "PARALLAX", agent_token: "PREDECESSOR_SECRET"})
 
     retired =
-      Repo.insert!(%Generation{
+      SpaceTraders.AgentFixtures.generation_fixture(%Generation{
         operator_id: operator.id,
         agent_id: predecessor.id,
         number: 1,
@@ -31,7 +31,7 @@ defmodule SpaceTraders.CurrentGenerationAuthorityTest do
 
     current = agent_fixture(operator, %{symbol: "ORBITALIST", agent_token: "CURRENT_SECRET"})
 
-    {:ok, %{state: :current, generation: generation}} = FleetGeneration.adopt_current_fleet()
+    {:ok, %{state: :current, generation: generation}} = FleetGeneration.preflight_current_fleet()
     true = generation.agent_id == current.id
 
     %{
@@ -59,6 +59,35 @@ defmodule SpaceTraders.CurrentGenerationAuthorityTest do
   end
 
   describe "new observations and gameplay dispatch" do
+    test "an unpublished Agent cannot bootstrap its own gameplay authority through a read" do
+      operator = operator_fixture()
+      raw = agent_fixture(operator, %{publish: false, agent_token: "UNPUBLISHED_SECRET"})
+      observe_game_requests()
+
+      assert {:error, :generation_not_current} = Evidence.get_ships(AgentTokenReference.new(raw))
+
+      assert {:error, %{reason: :ambiguous_current_fleet, summary: summary}} =
+               FleetGeneration.current_fleet()
+
+      assert summary =~ "provenance"
+      assert Repo.get_by(Generation, agent_id: raw.id) == nil
+      assert Repo.get!(SpaceTraders.Agent.Agent, raw.id).agent_token == "UNPUBLISHED_SECRET"
+      refute_received {:game_request, _, _, _}
+    end
+
+    test "Strategy review captures only the published Fleet, retaining predecessor evidence as history" do
+      %{scope: scope, current: current, predecessor: predecessor} =
+        retained_predecessor_and_current_fleet()
+
+      capture = SpaceTraders.MissionControl.capture_market_decision(scope)
+      assert [%{agent: %{id: id, agent_token: nil}}] = capture.agents
+      assert id == current.id
+      refute Enum.any?(capture.agents, &(&1.agent.id == predecessor.id))
+
+      assert Repo.get!(SpaceTraders.Agent.Agent, predecessor.id).agent_token ==
+               "PREDECESSOR_SECRET"
+    end
+
     test "resume refresh observes the sole current Fleet and requires the deployment Operator" do
       %{current: current, scope: scope} = retained_predecessor_and_current_fleet()
       owner = self()
@@ -166,7 +195,7 @@ defmodule SpaceTraders.CurrentGenerationAuthorityTest do
       assert_received {:game_request, "GET", "/v2/my/ships/ORBITALIST-1",
                        ["Bearer CURRENT_SECRET"]}
 
-      assert Agent.get_agent(Agent.get_operator!(predecessor.operator_id), predecessor.id).agent_token ==
+      assert Repo.get!(SpaceTraders.Agent.Agent, predecessor.id).agent_token ==
                "PREDECESSOR_SECRET"
     end
 

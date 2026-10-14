@@ -450,11 +450,8 @@ defmodule SpaceTraders.Fleet.Intents.RecordedAction do
 
   defp owner(_agent, _ship, _intent), do: {:error, :invalid_intent_owner}
 
-  defp deployment_strategy(agent) do
-    # Keep direct legacy fixtures/writers compatible until schema contraction;
-    # canonical gameplay authority above fences every published predecessor.
-    operator_id = SpaceTraders.OperatorAuthority.deployment_operator_id() || agent.operator_id
-    Repo.one(from s in Strategy, where: s.operator_id == ^operator_id, lock: "FOR SHARE")
+  defp deployment_strategy(_agent) do
+    Repo.one(from s in Strategy, lock: "FOR SHARE")
   end
 
   defp active_revision(%Strategy{emergency_stopped_at: nil, active_revision_id: revision_id})

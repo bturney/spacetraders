@@ -93,7 +93,7 @@ defmodule SpaceTraders.FleetAllocationPublishTest do
     assert old_id == old.id
     Repo.update!(Ecto.Changeset.change(old, retired_at: DateTime.utc_now()))
 
-    successor = agent_fixture(scope.operator)
+    successor = agent_fixture(scope.operator, %{publish: false})
     {:ok, _ship} = Fleet.record_ship(successor, "SHIP-2", "SHIP_COMMAND_FRIGATE")
     selected = selection(revision)
     [commitment] = selected.commitments
@@ -109,7 +109,7 @@ defmodule SpaceTraders.FleetAllocationPublishTest do
         faction: successor.faction
       })
 
-    assert {:ok, %{state: :transition, generation: %{id: ^old_id}}} =
+    assert {:error, %{reason: :ambiguous_current_fleet}} =
              SpaceTraders.FleetGeneration.current_fleet()
 
     assert is_nil(FleetAllocation.active_generation(successor))
@@ -912,7 +912,7 @@ defmodule SpaceTraders.FleetAllocationPublishTest do
         objective_progress: %{},
         strategy_capable_at: DateTime.utc_now()
       })
-      |> Repo.insert!()
+      |> SpaceTraders.AgentFixtures.generation_fixture()
 
     %{scope: scope, agent: agent, generation: generation, revision: revision}
   end

@@ -383,7 +383,7 @@ defmodule SpaceTraders.RealizedMarketEconomicsTest do
         objective_progress: %{},
         strategy_capable_at: DateTime.utc_now()
       })
-      |> Repo.insert!()
+      |> SpaceTraders.AgentFixtures.generation_fixture()
 
     portfolio = publish!(scope, generation, revision, ["SHIP-1", "SHIP-2"])
     [commitment, scout] = Enum.sort_by(portfolio.commitments, & &1.candidate_id)

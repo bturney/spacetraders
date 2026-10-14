@@ -147,7 +147,7 @@ defmodule SpaceTraders.ShipExecutionDurabilityTest do
     @path path
     test "a late #{@kind} response retains predecessor attribution across committed replacement" do
       {agent, ship, _portfolio, _commitment} = claimed_ship()
-      {:ok, %{generation: original}} = SpaceTraders.FleetGeneration.adopt_current_fleet()
+      {:ok, %{generation: original}} = SpaceTraders.FleetGeneration.preflight_current_fleet()
       owner = self()
       path = if @path == :ship, do: "/v2/my/ships/#{ship.symbol}", else: @path
 
@@ -226,7 +226,7 @@ defmodule SpaceTraders.ShipExecutionDurabilityTest do
 
   test "a committed predecessor attempt stays unresolved and cannot dispatch after replacement or boot" do
     {agent, ship, portfolio, commitment} = claimed_ship()
-    {:ok, %{generation: original}} = SpaceTraders.FleetGeneration.adopt_current_fleet()
+    {:ok, %{generation: original}} = SpaceTraders.FleetGeneration.preflight_current_fleet()
     intent = owned_navigation(ship, portfolio, commitment)
 
     {:ok, %{attempt: attempt}} =
@@ -256,7 +256,7 @@ defmodule SpaceTraders.ShipExecutionDurabilityTest do
 
   test "an already accepted predecessor mutation records its late success only on its original attempt" do
     {agent, ship, portfolio, commitment} = claimed_ship()
-    {:ok, %{generation: original}} = SpaceTraders.FleetGeneration.adopt_current_fleet()
+    {:ok, %{generation: original}} = SpaceTraders.FleetGeneration.preflight_current_fleet()
     intent = owned_navigation(ship, portfolio, commitment)
 
     {:ok, %{attempt: attempt}} =
@@ -311,7 +311,7 @@ defmodule SpaceTraders.ShipExecutionDurabilityTest do
             agent_token: "REPLACEMENT_SECRET"
           })
 
-        Repo.insert!(%Generation{
+        SpaceTraders.AgentFixtures.generation_fixture(%Generation{
           operator_id: agent.operator_id,
           agent_id: next.id,
           number: 2,
@@ -321,7 +321,7 @@ defmodule SpaceTraders.ShipExecutionDurabilityTest do
           starting_credits: 175_000
         })
 
-        {:ok, %{state: :current}} = SpaceTraders.FleetGeneration.adopt_current_fleet()
+        {:ok, %{state: :current}} = SpaceTraders.FleetGeneration.preflight_current_fleet()
         next
       end)
 
@@ -1040,7 +1040,7 @@ defmodule SpaceTraders.ShipExecutionDurabilityTest do
         )
 
         Repo.delete_all(from e in SpaceTraders.Timeline.Event, where: e.owner_id == ^ship.symbol)
-        Repo.delete!(operator)
+        SpaceTraders.AgentFixtures.cleanup_operator_fixture(operator.id)
       end)
     end)
 
@@ -1058,7 +1058,7 @@ defmodule SpaceTraders.ShipExecutionDurabilityTest do
     Repo.update!(Ecto.Changeset.change(strategy, active_revision_id: revision.id))
 
     generation =
-      Repo.insert!(%Generation{
+      SpaceTraders.AgentFixtures.generation_fixture(%Generation{
         operator_id: operator.id,
         agent_id: agent.id,
         fleet_strategy_revision_id: revision.id,

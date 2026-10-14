@@ -12,7 +12,7 @@ defmodule SpaceTraders.FleetGeneration.Identity do
     )
   end
 
-  @doc "Establishes and publishes setup under PostgreSQL serialization, including legacy inserts."
+  @doc "Establishes and publishes sole-Operator setup under PostgreSQL serialization."
   def setup_operator(changeset) do
     Repo.transact(fn ->
       # Same first lock as adoption. Independent app processes and old writers
@@ -51,34 +51,15 @@ defmodule SpaceTraders.FleetGeneration.Identity do
   # Synchronous supervisor preflight, before any autonomous child starts. A Task
   # would race runtime boot. This child needs no long-lived process or cache.
   def start_link(_opts) do
-    case adopt() do
+    case preflight() do
       {:ok, _identity} -> :ignore
       {:error, error} -> {:error, error.summary}
     end
   end
 
-  @doc "Serializes legacy adoption with legacy writes, including empty initialization."
-  def adopt do
+  @doc "Validates the migrated deployment before any autonomous child starts."
+  def preflight do
     Repo.transaction(fn ->
-      Repo.query!(
-        "LOCK TABLE operators, agents, fleet_generations, fleet_strategies, fleet_strategy_revisions IN SHARE ROW EXCLUSIVE MODE"
-      )
-
-      [[operator_id, agent_id, generation_id]] =
-        Repo.query!("SELECT * FROM fleet_identity_candidate()").rows
-
-      generation_id = generation_id || establish_generation(operator_id, agent_id)
-
-      Repo.query!(
-        """
-        INSERT INTO current_fleet_identity (id, operator_id, fleet_generation_id)
-        VALUES (1, $1, $2)
-        ON CONFLICT (id) DO UPDATE SET operator_id = EXCLUDED.operator_id,
-          fleet_generation_id = EXCLUDED.fleet_generation_id
-        """,
-        [operator_id, generation_id]
-      )
-
       read!()
     end)
   rescue
@@ -86,12 +67,7 @@ defmodule SpaceTraders.FleetGeneration.Identity do
   end
 
   def current do
-    identity = read!()
-
-    # Compatible setup/import writers still use the old context in this expand
-    # phase. Adopt lazily only before an identity is established; never select a
-    # replacement by symbol or timestamp once a Generation is published.
-    if identity.state in [:setup, :empty], do: adopt(), else: {:ok, identity}
+    {:ok, read!()}
   rescue
     error in Postgrex.Error -> preflight_error(error)
   end
@@ -134,9 +110,8 @@ defmodule SpaceTraders.FleetGeneration.Identity do
 
   Once a Generation is published, only its own healthy Agent has authority:
   retired or fenced Generations, Stale Agents and any other retained Agent
-  row are history, however their credential reference was obtained. Before
-  publication (legacy writers in the expand phase), an Agent still needs a
-  healthy Generation of its own, if it has one.
+   row are history, however their credential reference was obtained. Without
+   a published Generation there is no gameplay authority.
 
   One statement with no locks, so every request can afford it and readers
   never wait on lifecycle transactions.
@@ -168,7 +143,7 @@ defmodule SpaceTraders.FleetGeneration.Identity do
       %{own_ended?: true} -> {:error, :generation_not_current}
       %{published?: true, current?: true} -> :ok
       %{published?: true} -> {:error, :generation_not_current}
-      %{published?: false} -> :ok
+      %{published?: false} -> {:error, :generation_not_current}
     end
   end
 
@@ -195,15 +170,13 @@ defmodule SpaceTraders.FleetGeneration.Identity do
     {operator, generation, agent} =
       Repo.one!(
         from i in "current_fleet_identity",
-          join: candidate in fragment("fleet_identity_candidate()"),
-          on: true,
           left_join: operator in Operator,
           on: operator.id == i.operator_id,
           left_join: generation in Generation,
           on: generation.id == i.fleet_generation_id,
           left_join: agent in Agent,
           on: agent.id == generation.agent_id,
-          where: i.id == 1,
+          where: i.id == 1 and fragment("preflight_current_fleet()"),
           select: {operator, generation, agent}
       )
 
@@ -230,33 +203,18 @@ defmodule SpaceTraders.FleetGeneration.Identity do
     }
   end
 
-  defp establish_generation(_operator_id, nil), do: nil
-
-  defp establish_generation(operator_id, agent_id) do
-    # This is the same adoption as the actual migration, not a game bootstrap.
-    [[generation_id]] =
-      Repo.query!(
-        """
-        INSERT INTO fleet_generations
-          (operator_id, agent_id, number, symbol, faction, fleet_strategy_revision_id,
-           replacement_symbols, objective_progress, fenced_at, inserted_at, updated_at)
-        SELECT a.operator_id, a.id,
-               COALESCE((SELECT max(g.number) FROM fleet_generations g WHERE g.operator_id = a.operator_id), 0) + 1,
-               a.symbol, a.faction, s.active_revision_id,
-               jsonb_build_object('symbols', jsonb_build_array(a.symbol)), '{}'::jsonb,
-               a.stale_at, a.inserted_at, CURRENT_TIMESTAMP
-        FROM agents a LEFT JOIN fleet_strategies s ON s.operator_id = a.operator_id
-        WHERE a.operator_id = $1 AND a.id = $2 RETURNING id
-        """,
-        [operator_id, agent_id]
-      ).rows
-
-    generation_id
-  end
-
   defp preflight_error(%Postgrex.Error{postgres: %{code: :raise_exception} = details}) do
     {:error,
      %{reason: :ambiguous_current_fleet, summary: details.message <> ". " <> details.hint}}
+  end
+
+  defp preflight_error(%Postgrex.Error{postgres: %{code: code}})
+       when code in [:undefined_function, :undefined_column, :undefined_table] do
+    {:error,
+     %{
+       reason: :incomplete_fleet_migration,
+       summary: "Complete the Fleet tenancy migration before starting autonomous gameplay."
+     }}
   end
 
   defp preflight_error(error), do: raise(error)

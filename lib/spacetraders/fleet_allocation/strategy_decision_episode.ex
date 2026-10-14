@@ -59,7 +59,7 @@ defmodule SpaceTraders.FleetAllocation.StrategyDecisionEpisode do
       values: [:still_evaluating, :realized, :partially_realized, :superseded, :reset_censored],
       default: :still_evaluating
 
-    belongs_to :operator, SpaceTraders.Agent.Operator
+    field :operator_id, :id
     belongs_to :fleet_generation, SpaceTraders.FleetGeneration.Generation
     belongs_to :fleet_strategy_revision, SpaceTraders.FleetStrategy.Revision
 

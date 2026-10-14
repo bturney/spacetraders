@@ -4,6 +4,7 @@ defmodule SpaceTradersWeb.OperatorLive.Settings do
   on_mount {SpaceTradersWeb.OperatorAuth, :require_sudo_mode}
 
   alias SpaceTraders.Agent
+  alias SpaceTraders.FleetGeneration
   alias SpaceTraders.Agent.Scope
 
   @impl true
@@ -283,7 +284,11 @@ defmodule SpaceTradersWeb.OperatorLive.Settings do
   def handle_event("import_agent", %{"import" => params}, socket) do
     confirmed = params["confirmed"] == "true"
 
-    case Agent.import_agent(socket.assigns.current_scope, params["agent_token"], confirmed) do
+    case FleetGeneration.import_agent(
+           socket.assigns.current_scope,
+           params["agent_token"],
+           confirmed
+         ) do
       {:ok, agent} ->
         {:noreply,
          socket

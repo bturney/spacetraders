@@ -9,8 +9,10 @@ Read before changing `lib/spacetraders_web/router.ex` or
 
 - Read the operator as `@current_scope.operator`. The assign is `current_scope`;
   there is no `current_operator` assign.
-- Pass `current_scope` as the first argument to context modules; filter queries
-  with `current_scope.operator`.
+- Pass `current_scope` to authenticated commands/reads. It proves the sole
+  deployment Operator; it never selects tenant resources (ADR 0015).
+- Resolve gameplay with `FleetGeneration.current_fleet/0,1`; only state
+  `:current` grants resources. Historical reads retain Generation identity.
 
 ## Route placement
 

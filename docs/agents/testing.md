@@ -37,7 +37,8 @@ test/integration/migration_repair_test.sh
 
 They require Docker Compose, the pinned toolchain and dependencies, and a
 running PostgreSQL test database. `release_boot_test.sh` builds and boots the
-production release; `migration_repair_test.sh` creates and removes its own
+production release against its own disposable, fully migrated database;
+`migration_repair_test.sh` creates and removes its own
 temporary database.
 
 ## Stray output
@@ -221,6 +222,15 @@ Ship dispatch recovery in
 `test/spacetraders/ship_execution_durability_test.exs`.
 
 ## Fleet Generation resets
+
+Complete tenancy migration: `test/spacetraders/current_fleet_migration_test.exs`
+runs actual migrations in disposable PostgreSQL databases; covers final
+contraction, blocked-DDL interruption/rerun, exact credential/history/Evidence
+retention, ambiguity before contraction, uncontracted boot refusal and fresh-VM
+authentication. Ordinary fixtures establish/publish their Generation explicitly;
+`publish: false` is reserved for unresolved/pending authority proofs.
+Real-commit teardown: `AgentFixtures.cleanup_operator_fixture/1`, after observers
+stop. Authentication deletion no longer cascades through game history.
 
 Server Reset continuity lives in `test/spacetraders/fleet_generation_test.exs`:
 transactional `DataCase`, public Fleet Generation and Fleet Strategy interfaces,

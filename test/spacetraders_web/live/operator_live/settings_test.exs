@@ -250,7 +250,8 @@ defmodule SpaceTradersWeb.OperatorLive.SettingsTest do
     end
 
     test "never pre-fills the linked token into the form", %{conn: conn, operator: operator} do
-      {:ok, operator} = Agent.link_account_token(operator, "LINKED_TOKEN")
+      {:ok, operator} =
+        Agent.link_account_token(SpaceTraders.Agent.Scope.for_operator(operator), "LINKED_TOKEN")
 
       {:ok, _lv, html} = conn |> log_in_operator(operator) |> live(~p"/operators/settings")
 
@@ -363,7 +364,7 @@ defmodule SpaceTradersWeb.OperatorLive.SettingsTest do
 
       assert result =~ "Agent ORBITALIST imported."
       refute result =~ "AGENT_TOKEN"
-      assert [agent] = Agent.list_agents(Agent.get_operator!(operator.id))
+      assert [agent] = SpaceTraders.Repo.all(SpaceTraders.Agent.Agent)
       assert agent.symbol == "ORBITALIST"
 
       assert {:ok, %{state: :current, agent: %{id: current_id}}} =
@@ -405,7 +406,7 @@ defmodule SpaceTradersWeb.OperatorLive.SettingsTest do
 
       assert result =~ "This deployment already has a current Agent"
       refute result =~ "AGENT_TOKEN"
-      assert [%{symbol: "ORBITALIST"}] = Agent.list_agents(operator)
+      assert [%{symbol: "ORBITALIST"}] = SpaceTraders.Repo.all(SpaceTraders.Agent.Agent)
     end
   end
 

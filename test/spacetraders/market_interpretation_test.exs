@@ -264,7 +264,7 @@ defmodule SpaceTraders.MarketInterpretationTest do
         activated_at: DateTime.utc_now(:second)
       })
 
-    Repo.insert!(
+    SpaceTraders.AgentFixtures.generation_fixture(
       struct(
         %Generation{
           operator_id: operator.id,

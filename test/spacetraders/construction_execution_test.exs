@@ -72,7 +72,7 @@ defmodule SpaceTraders.ConstructionExecutionTest do
         objective_progress: %{},
         strategy_capable_at: DateTime.utc_now()
       })
-      |> Repo.insert!()
+      |> SpaceTraders.AgentFixtures.generation_fixture()
 
     candidate = %PortfolioCandidate{
       id: "construction-1",

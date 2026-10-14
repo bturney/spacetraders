@@ -2126,10 +2126,10 @@ defmodule SpaceTraders.IntelligenceAcquisitionTest do
 
   defp claimed_ship(objective \\ %{"objective" => "Acquire useful intelligence"}) do
     operator =
-      Repo.insert!(%Operator{email: "intelligence-#{System.unique_integer()}@example.com"})
+      SpaceTraders.AgentFixtures.operator_fixture()
 
     agent =
-      Repo.insert!(%AgentRecord{
+      SpaceTraders.AgentFixtures.established_agent_fixture(%AgentRecord{
         symbol: "INTELACQ",
         faction: "COSMIC",
         headquarters: "X1-UX81-A1",
@@ -2155,7 +2155,7 @@ defmodule SpaceTraders.IntelligenceAcquisitionTest do
     Repo.update!(Ecto.Changeset.change(strategy, active_revision_id: revision.id))
 
     generation =
-      Repo.insert!(%Generation{
+      SpaceTraders.AgentFixtures.generation_fixture(%Generation{
         operator_id: operator.id,
         agent_id: agent.id,
         fleet_strategy_revision_id: revision.id,
@@ -2200,10 +2200,10 @@ defmodule SpaceTraders.IntelligenceAcquisitionTest do
 
   defp unclaimed_intelligence_fixture(objective) do
     operator =
-      Repo.insert!(%Operator{email: "demand-e2e-#{System.unique_integer()}@example.com"})
+      SpaceTraders.AgentFixtures.operator_fixture()
 
     agent =
-      Repo.insert!(%AgentRecord{
+      SpaceTraders.AgentFixtures.established_agent_fixture(%AgentRecord{
         symbol: "INTELACQ",
         faction: "COSMIC",
         headquarters: "X1-UX81-A1",
@@ -2258,10 +2258,10 @@ defmodule SpaceTraders.IntelligenceAcquisitionTest do
 
   test "runtime Market refresh demands cover only subjects with retained Listing evidence" do
     operator =
-      Repo.insert!(%Operator{email: "refresh-scope-#{System.unique_integer()}@example.com"})
+      SpaceTraders.AgentFixtures.operator_fixture()
 
     agent =
-      Repo.insert!(%AgentRecord{
+      SpaceTraders.AgentFixtures.established_agent_fixture(%AgentRecord{
         symbol: "REFRESHSCOPE",
         faction: "COSMIC",
         headquarters: "X1-UX81-A1",

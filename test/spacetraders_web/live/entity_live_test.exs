@@ -16,7 +16,7 @@ defmodule SpaceTradersWeb.EntityLiveTest do
     operator: operator
   } do
     agent =
-      Repo.insert!(%AgentRecord{
+      SpaceTraders.AgentFixtures.established_agent_fixture(%AgentRecord{
         operator_id: operator.id,
         symbol: "ATLAS",
         faction: "COSMIC",

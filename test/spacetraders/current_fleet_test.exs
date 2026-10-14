@@ -6,28 +6,28 @@ defmodule SpaceTraders.CurrentFleetTest do
 
   test "empty setup and a sole Operator without an Agent have distinct durable identities" do
     assert {:ok, %{state: :setup, operator: nil, agent: nil, generation: nil}} =
-             FleetGeneration.adopt_current_fleet()
+             FleetGeneration.preflight_current_fleet()
 
     operator = operator_fixture()
-    {:ok, operator} = Agent.link_account_token(operator, "ACCOUNT_SECRET")
+    {:ok, operator} = Agent.link_account_token(operator_scope_fixture(operator), "ACCOUNT_SECRET")
     scope = operator_scope_fixture(operator)
     {:ok, draft} = FleetStrategy.select_preset(scope, "steady_growth")
     {:ok, revision} = FleetStrategy.activate(scope, draft.draft_version)
 
     assert {:ok, %{state: :empty, operator: adopted, agent: nil, generation: nil}} =
-             FleetGeneration.adopt_current_fleet()
+             FleetGeneration.preflight_current_fleet()
 
     assert adopted.id == operator.id
     assert adopted.account_token == nil
     assert Agent.get_operator!(operator.id).account_token == "ACCOUNT_SECRET"
     assert FleetStrategy.get(scope).active_revision == revision
     assert {:ok, %{state: :empty, operator: ^adopted}} = FleetGeneration.current_fleet()
-    assert {:ok, %{operator: ^adopted}} = FleetGeneration.adopt_current_fleet()
+    assert {:ok, %{operator: ^adopted}} = FleetGeneration.preflight_current_fleet()
   end
 
   test "a successful initial mint resolves current identity and another ordinary mint cannot compete" do
     operator = operator_fixture()
-    {:ok, operator} = Agent.link_account_token(operator, "ACCOUNT_SECRET")
+    {:ok, operator} = Agent.link_account_token(operator_scope_fixture(operator), "ACCOUNT_SECRET")
     scope = operator_scope_fixture(operator)
     {:ok, draft} = FleetStrategy.select_preset(scope, "steady_growth")
     {:ok, _} = FleetStrategy.activate(scope, draft.draft_version)
@@ -58,7 +58,7 @@ defmodule SpaceTraders.CurrentFleetTest do
     assert current.id == minted.id
     assert current.agent_token == nil
     assert generation.agent_id == minted.id
-    assert Agent.get_agent(scope, minted.id).agent_token == "FLEET_SECRET"
+    assert Repo.get!(SpaceTraders.Agent.Agent, minted.id).agent_token == "FLEET_SECRET"
 
     Req.Test.stub(SpaceTraders.API, fn _ ->
       flunk("a healthy current identity forbids a competing mint")
@@ -124,7 +124,7 @@ defmodule SpaceTraders.CurrentFleetTest do
                  select: ship.symbol
              )
 
-    assert Agent.get_agent(scope, imported.id).agent_token == "IMPORTED_SECRET"
+    assert Repo.get!(SpaceTraders.Agent.Agent, imported.id).agent_token == "IMPORTED_SECRET"
 
     Req.Test.stub(SpaceTraders.API, fn conn ->
       send(test_pid, {:game_request, conn.method, conn.request_path})
@@ -137,7 +137,7 @@ defmodule SpaceTraders.CurrentFleetTest do
              FleetGeneration.import_agent(scope, "PARALLAX_SECRET", true)
 
     refute_received {:game_request, _, _}
-    assert [%{id: only}] = Agent.list_agents(Agent.get_operator!(operator.id))
+    assert [%{id: only}] = Repo.all(SpaceTraders.Agent.Agent)
     assert only == imported.id
 
     assert {:ok, %{agent: ^current, generation: ^generation}} =
@@ -163,7 +163,7 @@ defmodule SpaceTraders.CurrentFleetTest do
     assert {:error, %Ecto.Changeset{}} =
              FleetGeneration.mint(scope, %{symbol: "bad symbol", faction: "COSMIC"})
 
-    assert Agent.list_agents(Agent.get_operator!(operator.id)) == []
+    assert Repo.all(SpaceTraders.Agent.Agent) == []
     assert FleetGeneration.list_generations(scope) == []
     assert {:ok, %{state: :empty}} = FleetGeneration.current_fleet(scope)
   end
@@ -189,7 +189,7 @@ defmodule SpaceTraders.CurrentFleetTest do
     assert {:error, :fleet_transition_pending} =
              FleetGeneration.import_agent(scope, "SAME_SYMBOL_SECRET", true)
 
-    assert Agent.get_agent(scope, fenced.id).agent_token == "PREDECESSOR_SECRET"
+    assert Repo.get!(SpaceTraders.Agent.Agent, fenced.id).agent_token == "PREDECESSOR_SECRET"
     assert [^predecessor] = FleetGeneration.list_generations(scope)
 
     assert {:ok, %{state: :transition, generation: ^predecessor}} =
@@ -210,23 +210,27 @@ defmodule SpaceTraders.CurrentFleetTest do
     second = legacy_operator_fixture()
 
     assert {:error, %{reason: :ambiguous_current_fleet, summary: summary}} =
-             FleetGeneration.adopt_current_fleet()
+             FleetGeneration.preflight_current_fleet()
 
     assert summary =~ "multiple plausible Operators"
     assert summary =~ "Resolve"
     assert Agent.get_operator!(second.id)
-    assert Agent.get_agent(first, agent.id)
-    assert FleetGeneration.list_generations(operator_scope_fixture(first)) == []
+    assert Repo.get!(SpaceTraders.Agent.Agent, agent.id)
+
+    assert [%{agent_id: agent_id}] =
+             FleetGeneration.list_generations(operator_scope_fixture(first))
+
+    assert agent_id == agent.id
   end
 
   test "a successful replacement without an active Strategy still retires and publishes its predecessor" do
     operator = operator_fixture()
-    {:ok, operator} = Agent.link_account_token(operator, "ACCOUNT_SECRET")
+    {:ok, operator} = Agent.link_account_token(operator_scope_fixture(operator), "ACCOUNT_SECRET")
     scope = operator_scope_fixture(operator)
     old = agent_fixture(operator, %{symbol: "ORBITALIST", stale_at: DateTime.utc_now(:second)})
 
     assert {:ok, %{state: :transition, generation: predecessor}} =
-             FleetGeneration.adopt_current_fleet()
+             FleetGeneration.preflight_current_fleet()
 
     Req.Test.stub(SpaceTraders.API, fn conn ->
       Req.Test.json(conn, %{
@@ -266,7 +270,6 @@ defmodule SpaceTraders.CurrentFleetTest do
   test "retired Generations with a repeated symbol are history; a fenced current Fleet is a transition" do
     operator = operator_fixture()
     scope = operator_scope_fixture(operator)
-    agent = agent_fixture(operator, %{symbol: "ORBITALIST"})
 
     retired =
       Repo.insert!(%FleetGeneration.Generation{
@@ -278,8 +281,10 @@ defmodule SpaceTraders.CurrentFleetTest do
         agent_id: nil
       })
 
+    agent = agent_fixture(operator, %{symbol: "ORBITALIST"})
+
     assert {:ok, %{state: :current, agent: current, generation: generation}} =
-             FleetGeneration.adopt_current_fleet()
+             FleetGeneration.preflight_current_fleet()
 
     assert current.id == agent.id
     assert generation.number == 2

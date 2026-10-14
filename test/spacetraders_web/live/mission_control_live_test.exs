@@ -74,7 +74,7 @@ defmodule SpaceTradersWeb.MissionControlLiveTest do
     {:ok, revision} = FleetStrategy.activate(scope, FleetStrategy.get(scope).draft_version)
     agent = agent_fixture(operator, %{agent_token: "AGENT_TOKEN"})
 
-    Repo.insert!(%Generation{
+    SpaceTraders.AgentFixtures.generation_fixture(%Generation{
       operator_id: operator.id,
       agent_id: agent.id,
       fleet_strategy_revision_id: revision.id,
@@ -137,7 +137,7 @@ defmodule SpaceTradersWeb.MissionControlLiveTest do
     agent = agent_fixture(operator, %{agent_token: nil})
 
     generation =
-      Repo.insert!(%Generation{
+      SpaceTraders.AgentFixtures.generation_fixture(%Generation{
         operator_id: operator.id,
         agent_id: agent.id,
         fleet_strategy_revision_id: revision.id,
@@ -254,7 +254,7 @@ defmodule SpaceTradersWeb.MissionControlLiveTest do
     agent = agent_fixture(operator, %{agent_token: nil})
 
     generation =
-      Repo.insert!(%Generation{
+      SpaceTraders.AgentFixtures.generation_fixture(%Generation{
         operator_id: operator.id,
         agent_id: agent.id,
         fleet_strategy_revision_id: revision.id,
@@ -355,12 +355,11 @@ defmodule SpaceTradersWeb.MissionControlLiveTest do
     {:ok, _draft} = FleetStrategy.select_preset(scope, "steady_growth")
     {:ok, revision} = FleetStrategy.activate(scope, FleetStrategy.get(scope).draft_version)
     first = agent_fixture(operator, %{agent_token: nil})
-    second = agent_fixture(operator, %{agent_token: nil})
 
     now = DateTime.utc_now() |> DateTime.truncate(:second)
 
     old =
-      Repo.insert!(%Generation{
+      SpaceTraders.AgentFixtures.generation_fixture(%Generation{
         operator_id: operator.id,
         agent_id: first.id,
         fleet_strategy_revision_id: revision.id,
@@ -381,7 +380,7 @@ defmodule SpaceTradersWeb.MissionControlLiveTest do
                "evidence_id" => objective_evidence(first, 175_010).id
              })
 
-    _second_revision =
+    second_revision =
       SpaceTraders.FleetStrategy.Revision.create_changeset(
         %SpaceTraders.FleetStrategy.Revision{},
         %{
@@ -395,10 +394,16 @@ defmodule SpaceTradersWeb.MissionControlLiveTest do
       |> Repo.insert!()
 
     old
-    |> Ecto.Changeset.change(fenced_at: DateTime.utc_now(), retired_at: DateTime.utc_now())
+    |> Ecto.Changeset.change(
+      fenced_at: DateTime.utc_now(),
+      retired_at: DateTime.utc_now(),
+      fleet_strategy_revision_id: second_revision.id
+    )
     |> Repo.update!()
 
-    Repo.insert!(%Generation{
+    second = agent_fixture(operator, %{agent_token: nil})
+
+    SpaceTraders.AgentFixtures.generation_fixture(%Generation{
       operator_id: operator.id,
       agent_id: second.id,
       fleet_strategy_revision_id: revision.id,
@@ -458,7 +463,7 @@ defmodule SpaceTradersWeb.MissionControlLiveTest do
     now = DateTime.utc_now()
 
     first_generation =
-      Repo.insert!(%Generation{
+      SpaceTraders.AgentFixtures.generation_fixture(%Generation{
         operator_id: operator.id,
         agent_id: first_agent.id,
         fleet_strategy_revision_id: revision.id,
@@ -471,7 +476,7 @@ defmodule SpaceTradersWeb.MissionControlLiveTest do
       })
 
     second_generation =
-      Repo.insert!(%Generation{
+      SpaceTraders.AgentFixtures.generation_fixture(%Generation{
         operator_id: operator.id,
         agent_id: second_agent.id,
         fleet_strategy_revision_id: revision.id,
@@ -578,7 +583,7 @@ defmodule SpaceTradersWeb.MissionControlLiveTest do
       })
 
     generation =
-      Repo.insert!(%Generation{
+      SpaceTraders.AgentFixtures.generation_fixture(%Generation{
         operator_id: other_operator.id,
         agent_id: other_agent.id,
         fleet_strategy_revision_id: revision.id,
@@ -613,7 +618,7 @@ defmodule SpaceTradersWeb.MissionControlLiveTest do
     agent = agent_fixture(operator, %{agent_token: nil})
 
     generation =
-      Repo.insert!(%Generation{
+      SpaceTraders.AgentFixtures.generation_fixture(%Generation{
         operator_id: operator.id,
         agent_id: agent.id,
         fleet_strategy_revision_id: revision.id,

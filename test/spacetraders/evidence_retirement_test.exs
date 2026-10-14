@@ -10,7 +10,13 @@ defmodule SpaceTraders.EvidenceRetirementTest do
 
   test "fulfilled Evidence and its Strategy provenance survive Fleet Generation retirement" do
     operator = operator_fixture()
-    {:ok, operator} = Agent.link_account_token(operator, "RETIREMENT_ACCOUNT_TOKEN")
+
+    {:ok, operator} =
+      Agent.link_account_token(
+        SpaceTraders.Agent.Scope.for_operator(operator),
+        "RETIREMENT_ACCOUNT_TOKEN"
+      )
+
     scope = Scope.for_operator(operator)
     {:ok, strategy} = FleetStrategy.select_preset(scope, "steady_growth")
     {:ok, revision} = FleetStrategy.activate(scope, strategy.draft_version)

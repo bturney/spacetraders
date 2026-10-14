@@ -28,21 +28,29 @@ defmodule SpaceTraders.FleetStrategyTest do
     deployment_agent =
       agent_fixture(scope.operator, %{agent_token: "STOP_DEPLOYMENT_AGENT_TOKEN"})
 
-    assert :ok = FleetStrategy.mutation_allowed?(legacy_agent)
+    assert :ok = FleetStrategy.mutation_allowed?()
     assert {:ok, stopped} = FleetStrategy.engage_emergency_stop(scope)
     assert %DateTime{} = stopped.emergency_stopped_at
     assert stopped.emergency_stop_version == 1
 
     assert FleetStrategy.get().emergency_stopped_at == stopped.emergency_stopped_at
     assert {:error, :emergency_stopped} = FleetStrategy.mutation_allowed?()
-    assert {:error, :emergency_stopped} = FleetStrategy.mutation_allowed?(deployment_agent)
-    assert {:error, :emergency_stopped} = FleetStrategy.mutation_allowed?(legacy_agent)
+    assert {:error, :emergency_stopped} = FleetStrategy.mutation_allowed?()
+
+    assert {:error, :emergency_stopped} =
+             EmergencyStopAdmission.mutation_allowed?(deployment_agent.agent_token)
 
     assert {:error, :emergency_stopped} =
              EmergencyStopAdmission.mutation_allowed?(legacy_agent.agent_token)
 
-    assert {:error, :emergency_stopped} =
+    assert {:error, :generation_not_current} =
              SpaceTraders.API.accept_contract(AgentTokenReference.new(legacy_agent), "contract-1")
+
+    assert {:error, :emergency_stopped} =
+             SpaceTraders.API.accept_contract(
+               AgentTokenReference.new(deployment_agent),
+               "contract-1"
+             )
 
     assert {:ok, reengaged} = FleetStrategy.engage_emergency_stop(scope)
     assert reengaged.emergency_stop_version == stopped.emergency_stop_version + 1
@@ -239,9 +247,9 @@ defmodule SpaceTraders.FleetStrategyTest do
     old_token = "STOP_OLD_ACCOUNT_TOKEN"
     new_token = "STOP_NEW_ACCOUNT_TOKEN"
 
-    assert {:ok, operator} = Agent.link_account_token(operator, old_token)
+    assert {:ok, operator} = Agent.link_account_token(Scope.for_operator(operator), old_token)
     assert {:ok, _stopped} = FleetStrategy.engage_emergency_stop(scope)
-    assert {:ok, _operator} = Agent.link_account_token(operator, new_token)
+    assert {:ok, _operator} = Agent.link_account_token(Scope.for_operator(operator), new_token)
     assert {:ok, _reengaged} = FleetStrategy.engage_emergency_stop(scope)
 
     assert {:error, :emergency_stopped} = EmergencyStopAdmission.mutation_allowed?(old_token)

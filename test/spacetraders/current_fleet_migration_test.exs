@@ -7,6 +7,7 @@ defmodule SpaceTraders.CurrentFleetMigrationTest do
 
   @version 20_261_011_100_000
   @previous 20_261_010_200_000
+  @contract 20_261_013_120_000
   @migrations Path.expand("../../priv/repo/migrations", __DIR__)
 
   setup do
@@ -33,7 +34,140 @@ defmodule SpaceTraders.CurrentFleetMigrationTest do
     )
 
     run_migrations(to: @previous)
-    %{database: database}
+    %{database: database, connection_config: base ++ [database: database]}
+  end
+
+  test "complete contraction retains history and credentials while removing tenant relationships" do
+    owner = owner()
+    agent = agent(owner)
+    [_, _, revision] = strategy(owner)
+    generation(owner, nil, 1, DateTime.utc_now(:second), revision)
+    current = generation(owner, agent, 2, nil, revision)
+    before = retained()
+
+    assert @contract in run_migrations(all: true)
+    assert identity() == [[owner, current]]
+    assert scalar("SELECT contract_version FROM current_fleet_identity") == 1
+
+    assert scalar("SELECT count(*) FROM pg_constraint WHERE conname = 'agents_operator_id_fkey'") ==
+             0
+
+    assert scalar(
+             "SELECT count(*) FROM pg_constraint WHERE conname = 'fleet_generations_operator_id_fkey'"
+           ) == 0
+
+    assert scalar(
+             "SELECT count(*) FROM pg_constraint WHERE conname = 'fleet_strategies_operator_id_fkey'"
+           ) == 0
+
+    assert scalar(
+             "SELECT count(*) FROM pg_indexes WHERE indexname = 'fleet_generations_operator_id_number_index'"
+           ) == 0
+
+    expanded =
+      List.update_at(before, 4, fn rows ->
+        Enum.map(rows, fn [row] -> [Map.put(row, "initial_fleet_strategy_revision_id", nil)] end)
+      end)
+      |> List.update_at(5, fn rows ->
+        Enum.map(rows, fn [row] -> [Map.put(row, "retired_at", nil)] end)
+      end)
+      |> List.update_at(8, fn rows ->
+        Enum.map(rows, fn [row] -> [Map.put(row, "recovery_credential_ciphertext", nil)] end)
+      end)
+
+    assert retained() == expanded
+
+    assert MigrationRepo.get!(SpaceTraders.Agent.Operator, owner).account_token ==
+             "ACCOUNT_SECRET"
+
+    assert MigrationRepo.get!(SpaceTraders.Agent.Agent, agent).agent_token == "AGENT_SECRET"
+    assert [] = run_migrations(all: true)
+    assert retained() == expanded
+  end
+
+  test "the complete migration supports empty setup and a sole Operator with only retired history" do
+    assert @contract in run_migrations(all: true)
+    assert identity() == [[nil, nil]]
+    assert [] = run_migrations(all: true)
+  end
+
+  test "a sole Operator with zero current Agents retains its retired chapters" do
+    owner = owner()
+    retired = generation(owner, nil, 1, DateTime.utc_now(:second))
+    assert @contract in run_migrations(all: true)
+    assert identity() == [[owner, nil]]
+    assert scalar("SELECT count(*) FROM fleet_generations WHERE id = #{retired}") == 1
+    assert [] = run_migrations(all: true)
+  end
+
+  test "staged ownership ambiguity refuses final contraction before any ownership relationship is removed" do
+    owner = owner()
+    agent(owner)
+    run_migrations(to: 20_261_013_110_000)
+    owner("competing@example.com")
+    before = retained()
+    error = assert_raise Postgrex.Error, fn -> run_migrations(all: true) end
+    assert error.postgres.message =~ "multiple plausible Operators"
+    assert error.postgres.hint =~ "explicitly"
+
+    assert scalar("SELECT count(*) FROM pg_constraint WHERE conname = 'agents_operator_id_fkey'") ==
+             1
+
+    assert scalar("SELECT count(*) FROM schema_migrations WHERE version = #{@contract}") == 0
+    assert retained() == before
+    assert_raise Postgrex.Error, fn -> run_migrations(all: true) end
+    assert retained() == before
+  end
+
+  test "an interrupted actual contraction rolls back DDL and reruns without losing credentials or history",
+       %{connection_config: config} do
+    owner = owner()
+    agent(owner)
+    run_migrations(to: 20_261_013_110_000)
+    before = retained()
+    {:ok, blocker} = Postgrex.start_link(config)
+    on_exit(fn -> if Process.alive?(blocker), do: GenServer.stop(blocker) end)
+    Postgrex.query!(blocker, "BEGIN", [])
+    Postgrex.query!(blocker, "LOCK TABLE mission_conditions IN ACCESS EXCLUSIVE MODE", [])
+    [[holder]] = Postgrex.query!(blocker, "SELECT pg_backend_pid()", []).rows
+
+    migrator =
+      Task.async(fn ->
+        try do
+          run_migrations(all: true)
+        rescue
+          error -> {:interrupted, error}
+        end
+      end)
+
+    backend = await_blocked_migration(blocker, holder)
+    assert [[true]] = Postgrex.query!(blocker, "SELECT pg_terminate_backend($1)", [backend]).rows
+    assert {:interrupted, _} = Task.await(migrator, 15_000)
+    Postgrex.query!(blocker, "ROLLBACK", [])
+    GenServer.stop(blocker)
+
+    assert scalar("SELECT count(*) FROM pg_constraint WHERE conname = 'agents_operator_id_fkey'") ==
+             1
+
+    assert scalar("SELECT count(*) FROM schema_migrations WHERE version = #{@contract}") == 0
+    assert retained() == before
+    assert [@contract] = run_migrations(to: @contract)
+    assert retained() == before
+    run_migrations(all: true)
+    assert [] = run_migrations(all: true)
+  end
+
+  test "an expanded but uncontracted installation cannot start autonomous gameplay", %{
+    database: database
+  } do
+    run_migrations(to: 20_261_013_110_000)
+    before = retained()
+    {output, status} = boot_probe(database)
+    assert status == 1, output
+    assert output =~ "Complete the Fleet tenancy migration"
+    refute output =~ "boot succeeded"
+    assert retained() == before
+    assert identity() == [[nil, nil]]
   end
 
   test "an actual empty database migration is restart and rerun safe" do
@@ -47,10 +181,11 @@ defmodule SpaceTraders.CurrentFleetMigrationTest do
 
   test "adoption preserves encrypted credentials, accepted Strategy, resources and causal history" do
     owner = owner()
+    predecessor = agent(owner, "PARALLAX", "HISTORICAL_SECRET")
     agent = agent(owner)
     [_, strategy, revision] = strategy(owner)
     now = DateTime.utc_now(:second)
-    old_generation = generation(owner, nil, 1, now)
+    old_generation = generation(owner, predecessor, 1, now)
     current_generation = generation(owner, agent, 2, nil, revision)
 
     query(
@@ -60,17 +195,27 @@ defmodule SpaceTraders.CurrentFleetMigrationTest do
 
     query(
       "INSERT INTO mutation_attempts (id, operator_id, agent_id, fleet_generation_id, strategy_revision_id, operation_id, operation_owner, state, request_fingerprint, provenance, prepared_at, inserted_at, updated_at) VALUES ('7299492a-f749-4d32-8bdf-e53d7a21d87a', $1, $2, $3, $4, 'purchase-cargo', 'ship_execution', 'ambiguous', 'retained-fingerprint', '{\"causal_origin\": \"retained\"}', $5, $5, $5)",
-      [owner, agent, old_generation, revision, now]
+      [owner, predecessor, old_generation, revision, now]
     )
 
     query(
-      "INSERT INTO ships (symbol, ship_type, agent_id, inserted_at, updated_at) VALUES ('ORBITALIST-1', 'SHIP_COMMAND_FRIGATE', $1, $2, $2)",
-      [agent, now]
+      "INSERT INTO ships (symbol, ship_type, agent_id, inserted_at, updated_at) VALUES ('PARALLAX-1', 'SHIP_COMMAND_FRIGATE', $1, $2, $2)",
+      [predecessor, now]
     )
 
     query(
       "INSERT INTO fleet_activity (agent_id, kind, message, inserted_at, updated_at) VALUES ($1, 'trade', 'Retained causal activity', $2, $2)",
-      [agent, now]
+      [predecessor, now]
+    )
+
+    query(
+      "INSERT INTO authoritative_observations (id, agent_id, fleet_generation_id, subject, operation_id, dependency_keys, facts, response_fingerprint, observed_at, inserted_at) VALUES ('a0779caf-1913-46d1-9a51-75ea3c166afe', $1, $2, 'agent:PARALLAX', 'get-my-agent', ARRAY['retained-agent'], '{\"credits\": 1000}', 'original-response', $3, $3)",
+      [predecessor, old_generation, now]
+    )
+
+    query(
+      "INSERT INTO observation_demands (id, agent_id, strategy_revision_id, subject, required_facts, freshness_seconds, deadline_at, due_at, owner, fulfilled_observation_id, inserted_at, updated_at) VALUES ('ca8b2cf5-98d2-4999-97c4-5e380043a2ac', $1, $2, 'agent:PARALLAX', ARRAY['credits'], 300, $3, $3, 'retained-owner', 'a0779caf-1913-46d1-9a51-75ea3c166afe', $3, $3)",
+      [predecessor, revision, now]
     )
 
     before = retained()
@@ -84,6 +229,9 @@ defmodule SpaceTraders.CurrentFleetMigrationTest do
 
     assert MigrationRepo.get!(SpaceTraders.Agent.Agent, agent).agent_token == "AGENT_SECRET"
 
+    assert MigrationRepo.get!(SpaceTraders.Agent.Agent, predecessor).agent_token ==
+             "HISTORICAL_SECRET"
+
     assert scalar("SELECT active_revision_id FROM fleet_strategies WHERE id = #{strategy}") ==
              revision
 
@@ -93,6 +241,22 @@ defmodule SpaceTraders.CurrentFleetMigrationTest do
 
     assert [] = migrate()
     assert retained() == before
+    run_migrations(all: true)
+
+    expanded =
+      List.update_at(before, 4, fn rows ->
+        Enum.map(rows, fn [row] -> [Map.put(row, "initial_fleet_strategy_revision_id", nil)] end)
+      end)
+      |> List.update_at(5, fn rows ->
+        Enum.map(rows, fn [row] -> [Map.put(row, "retired_at", nil)] end)
+      end)
+      |> List.update_at(8, fn rows ->
+        Enum.map(rows, fn [row] -> [Map.put(row, "recovery_credential_ciphertext", nil)] end)
+      end)
+
+    assert retained() == expanded
+    assert [] = run_migrations(all: true)
+    assert retained() == expanded
   end
 
   test "a sole imported Agent with historical Generations receives a new distinct identity without bootstrap guesses" do
@@ -155,7 +319,7 @@ defmodule SpaceTraders.CurrentFleetMigrationTest do
 
   test "a fully migrated but newly ambiguous installation cannot start the actual autonomous supervisor",
        %{database: database} do
-    migrate()
+    run_migrations(all: true)
     owner()
     owner("second@example.com")
 
@@ -260,6 +424,40 @@ defmodule SpaceTraders.CurrentFleetMigrationTest do
     assert retained() == before
   end
 
+  defp boot_probe(database) do
+    url =
+      URI.parse(SpaceTraders.CheckoutDb.url(:test))
+      |> Map.put(:path, "/#{database}")
+      |> URI.to_string()
+
+    System.cmd("mix", ["run", "--no-start", "test/integration/current_fleet_boot_probe.exs"],
+      env: [{"DATABASE_URL", url}, {"MIX_ENV", "test"}],
+      stderr_to_stdout: true
+    )
+  end
+
+  defp await_blocked_migration(connection, holder, remaining \\ 1000)
+
+  defp await_blocked_migration(_connection, _holder, 0),
+    do: flunk("actual contraction never reached its DDL lock")
+
+  defp await_blocked_migration(connection, holder, remaining) do
+    # pg_stat_activity text is transaction-snapshot cached; pg_locks is the
+    # independent live witness that this migration reached the contracted table.
+    case Postgrex.query!(
+           connection,
+           "SELECT DISTINCT pid FROM pg_locks WHERE relation = 'mission_conditions'::regclass AND NOT granted AND $1 = ANY(pg_blocking_pids(pid))",
+           [holder]
+         ).rows do
+      [[backend]] ->
+        backend
+
+      [] ->
+        Process.sleep(10)
+        await_blocked_migration(connection, holder, remaining - 1)
+    end
+  end
+
   # Scoped to this migration: later migrations have their own proofs.
   defp migrate, do: run_migrations(to: @version)
 
@@ -301,8 +499,8 @@ defmodule SpaceTraders.CurrentFleetMigrationTest do
     id
   end
 
-  defp agent(owner, symbol \\ "ORBITALIST") do
-    {:ok, ciphertext} = SpaceTraders.Secret.dump("AGENT_SECRET")
+  defp agent(owner, symbol \\ "ORBITALIST", secret \\ "AGENT_SECRET") do
+    {:ok, ciphertext} = SpaceTraders.Secret.dump(secret)
 
     [[id]] =
       query(
@@ -350,7 +548,9 @@ defmodule SpaceTraders.CurrentFleetMigrationTest do
           "ships",
           "fleet_activity",
           "strategy_decision_episodes",
-          "mutation_attempts"
+          "mutation_attempts",
+          "authoritative_observations",
+          "observation_demands"
         ] do
       query("SELECT row_to_json(t) FROM #{table} t ORDER BY id").rows
     end

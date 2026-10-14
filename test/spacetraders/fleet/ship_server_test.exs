@@ -17,12 +17,24 @@ defmodule SpaceTraders.Fleet.ShipServerTest do
   @agent_id 900_001
 
   setup do
-    Repo.insert!(%Agent{
-      id: @agent_id,
-      symbol: "SHIP-SERVER-AGENT",
-      faction: "COSMIC",
-      headquarters: "X1-UX81-A1",
-      agent_token: "AGENT_TOKEN"
+    operator = SpaceTraders.AgentFixtures.operator_fixture()
+
+    agent =
+      Repo.insert!(%Agent{
+        id: @agent_id,
+        symbol: "SHIP-SERVER-AGENT",
+        faction: "COSMIC",
+        headquarters: "X1-UX81-A1",
+        agent_token: "AGENT_TOKEN",
+        operator_id: operator.id
+      })
+
+    SpaceTraders.AgentFixtures.generation_fixture(%SpaceTraders.FleetGeneration.Generation{
+      agent_id: agent.id,
+      operator_id: operator.id,
+      number: 1,
+      symbol: agent.symbol,
+      faction: agent.faction
     })
 
     :ok

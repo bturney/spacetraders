@@ -5,8 +5,8 @@ defmodule SpaceTraders.MissionControl do
   The caller supplies an authenticated `SpaceTraders.Agent.Scope`. Strategy,
   condition and history projections belong to the deployment: the scope must
   prove the deployment Operator (`SpaceTraders.OperatorAuthority`) and never
-  selects a tenant. Legacy per-Agent adapters (`agents/1`, `dashboard/2`,
-  `refresh_agent/3`, waypoint reads) remain until the World migration batch.
+  selects a tenant. Current projections resolve only the published Fleet;
+  historical projections retain exact Generation and causal identity.
   This module exposes no gameplay commands.
   Read failures remain in each Fleet snapshot so adapters can render unknown or
   stale state without substituting cached values.
@@ -31,7 +31,6 @@ defmodule SpaceTraders.MissionControl do
   @decision_episode_comparison_limit 100
 
   alias SpaceTraders.{
-    Agent,
     Clock,
     Fleet,
     FleetAllocation,
@@ -39,16 +38,15 @@ defmodule SpaceTraders.MissionControl do
     FleetGeneration,
     FleetPlanning,
     FleetStrategy,
-    Intelligence,
     MutationAttempts,
     OperatorConditions
   }
 
-  @doc "Returns the signed-in Operator's Agents for adapter subscriptions."
-  def agents(%Scope{operator: operator}) do
-    operator
-    |> Agent.list_agents()
-    |> Enum.map(&without_agent_credentials/1)
+  defp current_agents(scope) do
+    case FleetGeneration.current_fleet(scope) do
+      {:ok, %{state: :current, agent: agent}} -> [agent]
+      _ -> []
+    end
   end
 
   @doc """
@@ -67,7 +65,7 @@ defmodule SpaceTraders.MissionControl do
   def endeavors(%Scope{} = scope),
     do: project_endeavors(scope, FleetAllocation.current_portfolio(scope))
 
-  @doc "Legacy snapshot adapter: supplied portfolios cannot select another live Fleet."
+  @doc "Version-bound projection: supplied portfolios cannot select another live Fleet."
   def endeavors(%Scope{} = scope, %Portfolio{id: id}) do
     case FleetAllocation.current_portfolio(scope) do
       %Portfolio{id: ^id} = current -> project_endeavors(scope, current)
@@ -196,17 +194,18 @@ defmodule SpaceTraders.MissionControl do
 
   defp dependency_details(_), do: "Prerequisite"
 
-  @doc "Returns the dashboard projections for the signed-in Operator's Agents."
-  def dashboard(%Scope{} = scope), do: dashboard(scope, agents(scope))
+  @doc "A fresh read-only snapshot of the published Fleet, without a resource selector."
+  def fleet_snapshot(%Scope{} = scope) do
+    case FleetGeneration.current_fleet(scope) do
+      {:ok, %{agent: %AgentRecord{id: id}, state: state}} when state in [:current, :transition] ->
+        id
+        |> then(&Repo.get!(AgentRecord, &1))
+        |> Fleet.command_snapshot()
+        |> without_credentials()
 
-  @doc "Projects a previously scoped Agent list after adapter subscriptions are established."
-  def dashboard(%Scope{} = scope, agents) do
-    agents
-    |> Enum.filter(&owned_by?(&1, scope))
-    |> Enum.map(&Agent.get_agent(scope, &1.id))
-    |> Enum.reject(&is_nil/1)
-    |> Enum.map(&Fleet.command_snapshot/1)
-    |> Enum.map(&without_credentials/1)
+      _ ->
+        nil
+    end
   end
 
   @doc """
@@ -300,7 +299,7 @@ defmodule SpaceTraders.MissionControl do
 
     agents =
       scope
-      |> agents()
+      |> current_agents()
       |> Enum.flat_map(fn agent ->
         case Fleet.system_from_headquarters(agent.headquarters) do
           {:ok, system_symbol} ->
@@ -406,7 +405,7 @@ defmodule SpaceTraders.MissionControl do
   defp current_snapshots(scope) do
     case FleetGeneration.current_fleet(scope) do
       {:ok, identity} ->
-        snapshots = dashboard(scope, List.wrap(identity.agent))
+        snapshots = List.wrap(fleet_snapshot(scope))
         # Agent reads can discover a reset and complete replacement. Re-resolve
         # identity before presenting anything; never pair those resources with
         # the successor's Generation.
@@ -967,116 +966,6 @@ defmodule SpaceTraders.MissionControl do
   defp portfolio_family(%{calibration_version: "resources" <> _}), do: :resources
   defp portfolio_family(_), do: :other
 
-  @doc """
-  Refreshes one Operator-owned Agent in an existing dashboard projection.
-
-  An Agent outside the supplied scope cannot be read and leaves the projection
-  unchanged. A failed refresh replaces prior values with the new explicit error.
-  """
-  def refresh_agent(%Scope{operator: operator}, projections, agent_id) do
-    case Agent.get_agent(operator, agent_id) do
-      nil ->
-        projections
-
-      agent ->
-        Enum.map(projections, fn projection ->
-          if projection.agent.id == agent.id do
-            agent |> Fleet.command_snapshot() |> without_credentials()
-          else
-            projection
-          end
-        end)
-    end
-  end
-
-  @doc "Reads one Waypoint's Market projection for an Operator-owned Agent."
-  def waypoint_market(%Scope{} = scope, %AgentRecord{} = agent, waypoint) do
-    if owned_by?(agent, scope) do
-      Fleet.waypoint_market(agent, waypoint)
-    else
-      {:error, :waypoint_unavailable}
-    end
-  end
-
-  @doc "Reads current and stale Waypoint readiness facts for an Operator-owned Agent."
-  def waypoint_readiness(%Scope{} = scope, %AgentRecord{} = agent, waypoint) do
-    if owned_by?(agent, scope) do
-      waypoint_facts =
-        Intelligence.subject(agent, :waypoint, waypoint.system_symbol, waypoint.symbol)
-
-      if waypoint.is_under_construction == true do
-        _ = Fleet.waypoint_construction(agent, waypoint)
-      end
-
-      construction =
-        Intelligence.subject_with_stale(
-          agent,
-          :construction,
-          waypoint.system_symbol,
-          waypoint.symbol
-        )
-
-      if waypoint.type == "JUMP_GATE" do
-        _ = Fleet.waypoint_jump_gate(agent, waypoint)
-      end
-
-      gate =
-        Intelligence.subject_with_stale(
-          agent,
-          :jump_gate,
-          waypoint.system_symbol,
-          waypoint.symbol
-        )
-
-      market =
-        Intelligence.subject_with_stale(
-          agent,
-          :market,
-          waypoint.system_symbol,
-          waypoint.symbol
-        )
-
-      waypoint_facts
-      |> Map.merge(namespace_facts(construction.current, "construction"))
-      |> Map.merge(namespace_facts(construction.stale, "construction_stale"))
-      |> Map.merge(namespace_facts(gate.current, "jump_gate"))
-      |> Map.merge(namespace_facts(gate.stale, "jump_gate_stale"))
-      |> Map.merge(namespace_facts(market.stale, "market_stale"))
-    else
-      %{}
-    end
-  end
-
-  @doc "Returns current and stale Market Intelligence for an Operator-owned Waypoint."
-  def market_intelligence(%Scope{} = scope, %AgentRecord{} = agent, waypoint) do
-    if owned_by?(agent, scope) do
-      Intelligence.subject_with_stale(agent, :market, waypoint.system_symbol, waypoint.symbol)
-    else
-      %{current: %{}, stale: %{}}
-    end
-  end
-
-  @doc "Returns observed Marketplace Waypoints for an Operator-owned Agent."
-  def marketplace_waypoints(%Scope{} = scope, %AgentRecord{} = agent, system_symbol) do
-    if owned_by?(agent, scope) do
-      Intelligence.marketplace_waypoints(agent, system_symbol)
-    else
-      []
-    end
-  end
-
-  @doc "Returns a usable Survey for an Operator-owned Agent, when one exists."
-  def usable_survey(%Scope{} = scope, %AgentRecord{} = agent, waypoint_symbol) do
-    if owned_by?(agent, scope) do
-      Intelligence.usable_survey(agent, waypoint_symbol)
-    end
-  end
-
-  defp owned_by?(%AgentRecord{operator_id: operator_id}, %Scope{operator: %{id: operator_id}}),
-    do: true
-
-  defp owned_by?(_agent, _scope), do: false
-
   defp without_credentials(%{agent: %AgentRecord{} = agent} = projection) do
     %{projection | agent: without_agent_credentials(agent)}
   end
@@ -1243,10 +1132,6 @@ defmodule SpaceTraders.MissionControl do
 
   defp observed_objective(_objective, _generation, _snapshots), do: {:error, :unknown}
 
-  defp namespace_facts(facts, namespace) do
-    Map.new(facts, fn {field, fact} -> {"#{namespace}.#{field}", fact} end)
-  end
-
   defp expected_economics(%FleetAllocation.Portfolio{} = portfolio) do
     episode = portfolio.strategy_decision_episode
     expectations = if episode, do: episode.expectations, else: %{}
@@ -1302,16 +1187,12 @@ defmodule SpaceTraders.MissionControl do
   # Realized charges issued by coverage root Intents across every live Fleet
   # Generation's Episodes: a sustained scouting drain stays visible after its
   # Portfolio is superseded. nil when any such charge is unknown.
-  defp generation_observation_only_spending(%Scope{operator: %{id: operator_id}}) do
-    Repo.all(
-      from generation in FleetGeneration.Generation,
-        where: generation.operator_id == ^operator_id and is_nil(generation.retired_at),
-        select: generation.id
-    )
-    |> Enum.map(&FleetAllocation.TradeProgress.for_generation(&1).observation_only_spending)
-    |> then(fn amounts ->
-      if Enum.all?(amounts, &is_integer/1), do: Enum.sum(amounts)
-    end)
+  defp generation_observation_only_spending(scope) do
+    with {:ok, %{state: :current, generation: generation}} <- FleetGeneration.current_fleet(scope) do
+      FleetAllocation.TradeProgress.for_generation(generation.id).observation_only_spending
+    else
+      _ -> nil
+    end
   end
 
   defp known(value) when is_integer(value), do: value

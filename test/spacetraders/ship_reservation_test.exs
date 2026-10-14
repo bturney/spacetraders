@@ -6,7 +6,7 @@ defmodule SpaceTraders.ShipReservationTest do
   alias SpaceTraders.Agent.Scope
   alias SpaceTraders.Fleet
   alias SpaceTraders.FleetGeneration.Generation
-  alias SpaceTraders.{Repo, ShipReservation}
+  alias SpaceTraders.ShipReservation
 
   test "the deployment Operator reserves and releases a current-Fleet Ship" do
     operator = operator_fixture()
@@ -36,7 +36,7 @@ defmodule SpaceTraders.ShipReservationTest do
     scope = Scope.for_operator(operator)
     predecessor = agent_fixture(operator, %{symbol: "PARALLAX"})
 
-    Repo.insert!(%Generation{
+    SpaceTraders.AgentFixtures.generation_fixture(%Generation{
       operator_id: operator.id,
       agent_id: predecessor.id,
       number: 1,

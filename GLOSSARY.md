@@ -39,7 +39,7 @@ Establishing a fresh Agent and Fleet Generation while relinquishing control of t
 _Avoid_: reset Agent, restore Fleet, delete Agent
 
 **Account**:
-The external my.spacetraders.io account holding the AccountToken, which mints new Agents. The app stores it encrypted per-Operator for in-app minting; it is never used for game actions.
+The external my.spacetraders.io account holding the AccountToken, which mints new Agents. The app stores it encrypted for the sole Operator's in-app minting; it is never used for game actions.
 _Avoid_: agent account, signup
 
 **Server Reset**:

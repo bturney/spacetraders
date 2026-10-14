@@ -20,7 +20,7 @@ defmodule SpaceTraders.OperatorAuthority do
   Admits a scope only when it authenticates the deployment Operator.
 
   Returns the deployment Operator's id, the durable attribution key that
-  pre-contraction tables still carry. A legacy Operator row that is not the
+  historical records retain. An Operator row that is not the
   deployment Operator, or a missing scope, is refused.
   """
   def authorize(%Scope{operator: %Operator{id: operator_id}}) when is_integer(operator_id) do
@@ -34,23 +34,14 @@ defmodule SpaceTraders.OperatorAuthority do
   @doc """
   Returns the deployment Operator's id, or nil before first-time setup.
 
-  The published current Fleet identity decides. Compatible legacy writers can
-  insert the sole Operator before adoption publishes it (boot preflight always
-  does); that Operator is unambiguous. With several Operator rows and nothing
-  published, none is chosen.
+  Only the published current Fleet identity decides. Raw unpublished Operators
+  grant no authority; migration must establish identity before application boot.
   """
   def deployment_operator_id do
     Repo.one(
       from identity in "current_fleet_identity",
         where: identity.id == 1,
         select: identity.operator_id
-    ) || sole_operator_id()
-  end
-
-  defp sole_operator_id do
-    case Repo.all(from(operator in Operator, select: operator.id, limit: 2)) do
-      [operator_id] -> operator_id
-      _none_or_several -> nil
-    end
+    )
   end
 end

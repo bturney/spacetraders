@@ -40,7 +40,7 @@ progress starts fresh, recurring progress restarts, and Strategy-lifetime contri
 remain. Retain meaningful Agent, Generation, Ship and causal evidence identities;
 do not overwrite one permanent Agent record to erase generation boundaries.
 
-## Adoption and staged contraction
+## Adoption and completed contraction
 
 Preflight automatically adopts empty or unambiguous sole-Operator installations
 with zero or one current Agent. Retired Generations remain history; multiple plausible
@@ -49,13 +49,27 @@ actionable resolution before schema contraction or autonomous startup. Never sel
 the newest record, merge credentials or delete competitors. Adoption and rerun preserve
 encrypted credentials, accepted Strategy, game state and causal history.
 
-T1 (#695) expands the schema with one durable current identity and coherent Mission
-Control reads. Existing ownership interfaces and relationships remain compatibility
-surfaces for later #694 slices; they are not the completed target architecture.
-Serialized PostgreSQL adoption and atomic lifecycle publication establish identity
-without another coordinator or process-local source of truth. Later slices remove
-multi-Agent selectors, additional registration and tenant runtime iteration through
-this boundary while retaining authentication, reauthentication and historical attribution.
+T1 (#695) performs legacy adoption in an actual PostgreSQL migration. T10 (#704)
+preflights again before irreversible contraction, removes tenant foreign keys and
+indexes, and retains original `operator_id` values as authorship/causal attribution,
+not Ecto associations or resource routing. Authentication/session relationships and
+Agent, Ship, Generation, Revision, Episode and Evidence foreign keys remain meaningful.
+Generation numbering and the Fleet Strategy are deployment-wide. The published
+identity restricts deletion of its Operator and Generation.
+
+Current Fleet reads, Strategy review, allocation, execution, resume and reset resolve
+the same published Generation. Boot synchronously validates the completed schema and
+identity before autonomous children; it never adopts raw legacy writers. Registration
+recovery and atomic lifecycle publication remain the only establishment path. Existing
+Agent selectors and tenant subscriptions are retired. Explicit `generation=` entity
+links read historical evidence only; current entity links have no identity selector.
+
+DDL contraction and its version publication share one migration transaction. Failed
+preflight or interrupted DDL retains the earlier schema and records; rerun repeats
+preflight. Rollback after completed irreversible contraction requires a pre-contraction
+backup, not guessed ownership reconstruction. Product and separate operational checks
+are documented in `docs/agents/testing.md`. Optional voluntary replacement (#705)
+remains a separate implementation/defer decision, not a mandatory-core gate.
 
 Approved source: [#694](https://github.com/bturney/spacetraders/issues/694) and the
 [Operator-confirmed design](https://github.com/bturney/spacetraders/issues/645#issuecomment-6111671385).

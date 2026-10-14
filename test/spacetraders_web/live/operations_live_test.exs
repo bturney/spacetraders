@@ -39,7 +39,7 @@ defmodule SpaceTradersWeb.OperationsLiveTest do
     })
 
     generation =
-      Repo.insert!(%Generation{
+      SpaceTraders.AgentFixtures.generation_fixture(%Generation{
         operator_id: operator.id,
         agent_id: agent.id,
         fleet_strategy_revision_id: revision.id,
@@ -106,7 +106,7 @@ defmodule SpaceTradersWeb.OperationsLiveTest do
     # A successor can have retained allocation-shaped data before lifecycle
     # publication. Neither public surface may treat that data as live authority.
     Repo.update!(Ecto.Changeset.change(generation, retired_at: DateTime.utc_now()))
-    successor = agent_fixture(operator)
+    successor = agent_fixture(operator, %{publish: false})
 
     pending =
       Repo.insert!(%Generation{
@@ -163,10 +163,8 @@ defmodule SpaceTradersWeb.OperationsLiveTest do
     refute transition_html =~ "PENDING-1"
     refute has_element?(transition_view, "#endeavor-#{hd(portfolio.commitments).id}")
 
-    assert {:ok, %{state: :transition, generation: %{id: id}}} =
+    assert {:error, %{reason: :ambiguous_current_fleet}} =
              SpaceTraders.FleetGeneration.current_fleet(scope)
-
-    assert id == generation.id
   end
 
   test "released Commitments leave the active view with reachable Decision Episode evidence", %{
@@ -186,7 +184,7 @@ defmodule SpaceTradersWeb.OperationsLiveTest do
     })
 
     generation =
-      Repo.insert!(%Generation{
+      SpaceTraders.AgentFixtures.generation_fixture(%Generation{
         operator_id: operator.id,
         agent_id: agent.id,
         fleet_strategy_revision_id: revision.id,

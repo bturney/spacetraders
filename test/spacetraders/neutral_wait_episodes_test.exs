@@ -353,7 +353,7 @@ defmodule SpaceTraders.NeutralWaitEpisodesTest do
 
       # Mirror the lifecycle boundary: relinquish the predecessor's allocation
       # before the successor becomes the published current Fleet.
-      :ok = SpaceTraders.FleetAllocation.NeutralWait.supersede_for_operator(operator.id)
+      :ok = SpaceTraders.FleetAllocation.NeutralWait.supersede_current()
       Repo.update!(Ecto.Changeset.change(generation, retired_at: DateTime.utc_now()))
 
       replacement_agent =
@@ -366,7 +366,7 @@ defmodule SpaceTraders.NeutralWaitEpisodesTest do
         })
 
       replacement_generation =
-        Repo.insert!(%Generation{
+        SpaceTraders.AgentFixtures.generation_fixture(%Generation{
           operator_id: operator.id,
           agent_id: replacement_agent.id,
           fleet_strategy_revision_id: revision.id,
@@ -543,7 +543,7 @@ defmodule SpaceTraders.NeutralWaitEpisodesTest do
         replacement_symbols: %{},
         objective_progress: %{}
       })
-      |> Repo.insert!()
+      |> SpaceTraders.AgentFixtures.generation_fixture()
 
     %{
       operator: operator,

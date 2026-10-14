@@ -286,7 +286,7 @@ defmodule SpaceTraders.ManualInterventionTest do
         reason: "Recovery"
       })
 
-    Repo.insert!(%SpaceTraders.FleetGeneration.Generation{
+    SpaceTraders.AgentFixtures.generation_fixture(%SpaceTraders.FleetGeneration.Generation{
       operator_id: operator.id,
       agent_id: predecessor.id,
       number: 1,
@@ -318,7 +318,7 @@ defmodule SpaceTraders.ManualInterventionTest do
     {:ok, strategy} = SpaceTraders.FleetStrategy.select_preset(scope, "steady_growth")
     {:ok, revision} = SpaceTraders.FleetStrategy.activate(scope, strategy.draft_version)
 
-    Repo.insert!(%SpaceTraders.FleetGeneration.Generation{
+    SpaceTraders.AgentFixtures.generation_fixture(%SpaceTraders.FleetGeneration.Generation{
       operator_id: scope.operator.id,
       agent_id: agent.id,
       fleet_strategy_revision_id: revision.id,

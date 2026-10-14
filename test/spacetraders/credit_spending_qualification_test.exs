@@ -47,7 +47,7 @@ defmodule SpaceTraders.CreditSpendingQualificationTest do
               n.topic in ^topics or fragment("(?->>'agent_id')::bigint", n.payload) == ^agent.id
         )
 
-        Repo.delete!(operator)
+        SpaceTraders.AgentFixtures.cleanup_operator_fixture(operator.id)
       end)
 
       case previous do
@@ -283,7 +283,7 @@ defmodule SpaceTraders.CreditSpendingQualificationTest do
     Repo.update!(Ecto.Changeset.change(strategy, active_revision_id: revision.id))
 
     generation =
-      Repo.insert!(%Generation{
+      SpaceTraders.AgentFixtures.generation_fixture(%Generation{
         operator_id: ctx.operator.id,
         agent_id: ctx.agent.id,
         fleet_strategy_revision_id: revision.id,
@@ -424,7 +424,7 @@ defmodule SpaceTraders.CreditSpendingQualificationTest do
   test "the Agent spending lock never blocks a non-spending preparation's Agent reference",
        ctx do
     generation =
-      Repo.insert!(%Generation{
+      SpaceTraders.AgentFixtures.generation_fixture(%Generation{
         operator_id: ctx.operator.id,
         agent_id: ctx.agent.id,
         number: 1,
@@ -433,10 +433,6 @@ defmodule SpaceTraders.CreditSpendingQualificationTest do
         replacement_symbols: %{},
         objective_progress: %{}
       })
-
-    on_exit(fn ->
-      Sandbox.unboxed_run(Repo, fn -> Repo.delete!(generation) end)
-    end)
 
     owner = self()
 

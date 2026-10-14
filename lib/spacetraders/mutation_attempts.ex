@@ -9,7 +9,7 @@ defmodule SpaceTraders.MutationAttempts do
 
   import Ecto.Query
 
-  alias SpaceTraders.Agent.{Agent, Operator, Scope}
+  alias SpaceTraders.Agent.{Agent, Scope}
   alias SpaceTraders.API.OperationInventory.Operation
   alias SpaceTraders.Fleet.{Intent, Ship}
   alias SpaceTraders.FleetGeneration.Generation
@@ -432,11 +432,6 @@ defmodule SpaceTraders.MutationAttempts do
   @spec list_for_agent(Agent.t()) :: [Attempt.t()]
   def list_for_agent(%Agent{id: agent_id}) do
     list(where(Attempt, [attempt], attempt.agent_id == ^agent_id))
-  end
-
-  @spec list_for_operator(Operator.t()) :: [Attempt.t()]
-  def list_for_operator(%Operator{id: operator_id}) do
-    list(where(Attempt, [attempt], attempt.operator_id == ^operator_id))
   end
 
   @doc "Returns unresolved mutation evidence for the action currently selected by an Intent."

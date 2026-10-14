@@ -64,7 +64,10 @@ defmodule SpaceTradersWeb.StrategyLiveTest do
          operator: operator
        } do
     {:ok, _operator} =
-      SpaceTraders.Agent.link_account_token(operator, "STOP_RESTART_ACCOUNT_TOKEN")
+      SpaceTraders.Agent.link_account_token(
+        SpaceTraders.Agent.Scope.for_operator(operator),
+        "STOP_RESTART_ACCOUNT_TOKEN"
+      )
 
     Req.Test.stub(SpaceTraders.API, fn conn ->
       flunk("Emergency Stop must suppress #{conn.method} #{conn.request_path}")
@@ -237,7 +240,7 @@ defmodule SpaceTradersWeb.StrategyLiveTest do
     scope: scope
   } do
     agent =
-      Repo.insert!(%AgentRecord{
+      SpaceTraders.AgentFixtures.established_agent_fixture(%AgentRecord{
         operator_id: operator.id,
         symbol: "PLANNER",
         faction: "COSMIC",
@@ -276,7 +279,7 @@ defmodule SpaceTradersWeb.StrategyLiveTest do
     scope: scope
   } do
     agent =
-      Repo.insert!(%AgentRecord{
+      SpaceTraders.AgentFixtures.established_agent_fixture(%AgentRecord{
         operator_id: operator.id,
         symbol: "PLANNER",
         faction: "COSMIC",
@@ -351,7 +354,7 @@ defmodule SpaceTradersWeb.StrategyLiveTest do
     scope: scope
   } do
     agent =
-      Repo.insert!(%AgentRecord{
+      SpaceTraders.AgentFixtures.established_agent_fixture(%AgentRecord{
         operator_id: operator.id,
         symbol: "PLANNER",
         faction: "COSMIC",
@@ -418,7 +421,7 @@ defmodule SpaceTradersWeb.StrategyLiveTest do
     scope: scope
   } do
     agent =
-      Repo.insert!(%AgentRecord{
+      SpaceTraders.AgentFixtures.established_agent_fixture(%AgentRecord{
         operator_id: operator.id,
         symbol: "PLANNER",
         faction: "COSMIC",
@@ -586,7 +589,7 @@ defmodule SpaceTradersWeb.StrategyLiveTest do
     scope: scope
   } do
     _agent =
-      Repo.insert!(%AgentRecord{
+      SpaceTraders.AgentFixtures.established_agent_fixture(%AgentRecord{
         operator_id: operator.id,
         symbol: "FRESH",
         faction: "COSMIC",

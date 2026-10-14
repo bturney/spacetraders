@@ -9,7 +9,7 @@ defmodule SpaceTraders.FleetGeneration do
 
   require Logger
 
-  import Ecto.Changeset, only: [get_field: 2]
+  import Ecto.Changeset, only: [get_field: 2, put_change: 3]
   import Ecto.Query, warn: false
 
   alias SpaceTraders.API.GameplayError
@@ -42,8 +42,8 @@ defmodule SpaceTraders.FleetGeneration do
     defstruct [:operator_id]
   end
 
-  @doc "Adopts an unambiguous installation without modifying credentials or history."
-  defdelegate adopt_current_fleet(), to: Identity, as: :adopt
+  @doc "Validates the completely migrated deployment without adopting raw legacy writers."
+  defdelegate preflight_current_fleet(), to: Identity, as: :preflight
 
   @doc "Resolves the durable deployment Operator, Agent and Generation, without secrets."
   defdelegate current_fleet(), to: Identity, as: :current
@@ -52,20 +52,17 @@ defmodule SpaceTraders.FleetGeneration do
   defdelegate gameplay_authority(agent_id), to: Identity
 
   @doc """
-  Read-only access to the evidence a retained Agent holds, with its original
-  Generation. Confers no gameplay authority and never reports itself current.
+   Authenticated, read-only access to a historical Generation's evidence holder.
+   Confers no gameplay authority and never reports itself current.
   """
-  def evidence_holder(agent_id) when is_integer(agent_id) do
-    case Repo.get(Agent, agent_id) do
-      %Agent{} = agent ->
-        {:ok,
-         %{
-           agent: %{agent | agent_token: nil},
-           generation: Repo.get_by(Generation, agent_id: agent.id)
-         }}
-
-      nil ->
-        :error
+  def generation_evidence(scope, generation_id) when is_integer(generation_id) do
+    with {:ok, _} <- SpaceTraders.OperatorAuthority.authorize(scope),
+         %Generation{} = generation <- Repo.get(Generation, generation_id),
+         true <- not is_nil(generation.retired_at) or not is_nil(generation.fenced_at),
+         %Agent{} = agent <- generation.agent_id && Repo.get(Agent, generation.agent_id) do
+      {:ok, %{agent: %{agent | agent_token: nil}, generation: generation}}
+    else
+      _ -> :error
     end
   end
 
@@ -387,8 +384,7 @@ defmodule SpaceTraders.FleetGeneration do
   def import_agent(_scope, _agent_token, false), do: {:error, :confirmation_required}
   def import_agent(_scope, _agent_token, _confirmed), do: {:error, :agent_token_required}
 
-  # Lazy legacy adoption runs before the authority, so a reader's adoption
-  # table locks are never requested while an establishment is held.
+  # Resolve the published identity before taking establishment authority.
   defp establish(%Scope{operator: %Operator{id: operator_id}} = scope, states, fun) do
     with {:ok, _identity} <- current_fleet(scope) do
       Registration.with_authority(fn -> locked(operator_id, states, fn _state -> fun.() end) end)
@@ -542,7 +538,7 @@ defmodule SpaceTraders.FleetGeneration do
   end
 
   defp store_imported_agent(operator, game_agent, agent_token) do
-    case SpaceTraders.Agent.store_agent(
+    case store_agent(
            operator,
            game_agent,
            agent_token,
@@ -558,15 +554,15 @@ defmodule SpaceTraders.FleetGeneration do
     end
   end
 
-  defp validate_registration(scope, attrs) do
+  defp validate_registration(_scope, attrs) do
     changeset = Agent.changeset(%Agent{}, attrs)
     symbols = replacement_symbols(attrs, changeset)
 
     with :ok <- SpaceTraders.RuntimeAuthority.execution_allowed?(),
-         :ok <- FleetStrategy.mutation_allowed?(scope),
+         :ok <- FleetStrategy.mutation_allowed?(),
          :ok <- validate_mint_attrs(changeset),
          :ok <- validate_replacement_symbols(symbols, get_field(changeset, :faction)) do
-      ensure_symbol_is_not_stale_for_another_operator(scope.operator, symbols)
+      :ok
     end
   end
 
@@ -620,12 +616,11 @@ defmodule SpaceTraders.FleetGeneration do
   end
 
   @doc "Returns the Operator's Fleet Generation history, newest first."
-  def list_generations(%Scope{operator: %Operator{id: operator_id}}) do
-    Repo.all(
-      from generation in Generation,
-        where: generation.operator_id == ^operator_id,
-        order_by: [desc: generation.number]
-    )
+  def list_generations(%Scope{} = scope) do
+    case SpaceTraders.OperatorAuthority.authorize(scope) do
+      {:ok, _} -> Repo.all(from generation in Generation, order_by: [desc: generation.number])
+      _ -> []
+    end
   end
 
   @doc "Records a verified Objective evaluation for an active Fleet Generation."
@@ -861,26 +856,14 @@ defmodule SpaceTraders.FleetGeneration do
 
     # The canonical current Generation, read once before it moves to the new
     # Revision. A fenced, retired or historical Generation keeps the Revision
-    # that governed it. Before adoption publishes an identity (compatible
-    # legacy writers only; boot preflight always publishes), the sole
-    # Operator's unfinished Generation is the candidate.
-    canonical_id =
-      Repo.one(
-        from identity in "current_fleet_identity",
-          where: identity.id == 1,
-          select: identity.fleet_generation_id
-      )
-
+    # that governed it. An unpublished Generation is never a candidate.
     live_query =
       from generation in Generation,
+        join: identity in "current_fleet_identity",
+        on: identity.id == 1 and identity.fleet_generation_id == generation.id,
         where:
           generation.operator_id == ^operator_id and is_nil(generation.fenced_at) and
             is_nil(generation.retired_at)
-
-    live_query =
-      if canonical_id,
-        do: from(generation in live_query, where: generation.id == ^canonical_id),
-        else: live_query
 
     live =
       Repo.all(
@@ -906,7 +889,7 @@ defmodule SpaceTraders.FleetGeneration do
 
     # A changed active Revision invalidates the old allocation result before a
     # fresh reconciliation selects its successor.
-    :ok = FleetAllocation.NeutralWait.supersede_for_operator(operator_id)
+    :ok = FleetAllocation.NeutralWait.supersede_current()
 
     # The wake is a prompt, not the liveness authority: the active Revision's
     # Observation Demands and boot reconstruction re-enter allocation if it
@@ -921,25 +904,6 @@ defmodule SpaceTraders.FleetGeneration do
       )
 
     :ok
-  end
-
-  @doc "Whether a Server Reset predecessor still awaits its replacement."
-  def retire_stale_agents(%Scope{} = scope) do
-    with {:ok, identity} <- current_fleet(scope) do
-      case server_reset_replacement(identity) do
-        {:ok, _attrs} -> {:error, :replacement_required}
-        {:error, :no_server_reset} -> {:ok, []}
-      end
-    end
-  end
-
-  @doc "Retries Server Reset replacement after mutation admission resumes."
-  def replace_stale_agents(%Scope{} = scope) do
-    case replace_after_reset(scope) do
-      {:ok, replacement} -> {:ok, [replacement]}
-      {:error, :no_server_reset} -> {:ok, []}
-      {:error, reason} -> {:error, reason}
-    end
   end
 
   @doc "Pulls an Agent's live game record and records definitive Server Reset evidence."
@@ -988,6 +952,26 @@ defmodule SpaceTraders.FleetGeneration do
 
   def handle_game_result(_agent, result), do: result
 
+  # Only lifecycle establishment may persist an Agent; callers cannot bypass
+  # registration recovery, bootstrap or atomic current-Generation publication.
+  defp store_agent(operator, game_agent, agent_token, requested_faction) do
+    result =
+      %Agent{}
+      |> Agent.changeset(%{
+        symbol: game_agent.symbol,
+        faction: game_agent.starting_faction || requested_faction
+      })
+      |> put_change(:headquarters, game_agent.headquarters)
+      |> put_change(:agent_token, agent_token)
+      |> put_change(:operator_id, operator.id)
+      |> Repo.insert(log: false)
+
+    if match?({:ok, _}, result),
+      do: SpaceTraders.EmergencyStopAdmission.track_credential(operator.id, agent_token)
+
+    result
+  end
+
   defp resolve_account_token(%CredentialReference{operator_id: operator_id}) do
     case Repo.get(Operator, operator_id) do
       %Operator{account_token: account_token} = operator
@@ -1002,19 +986,6 @@ defmodule SpaceTraders.FleetGeneration do
   defp validate_mint_attrs(%{valid?: true}), do: :ok
   defp validate_mint_attrs(%{valid?: false} = changeset), do: {:error, changeset}
 
-  defp ensure_symbol_is_not_stale_for_another_operator(%Operator{id: operator_id}, symbols) do
-    if Repo.exists?(
-         from agent in Agent,
-           where:
-             agent.symbol in ^symbols and agent.operator_id != ^operator_id and
-               not is_nil(agent.stale_at)
-       ) do
-      {:error, :stale_symbol_owned_elsewhere}
-    else
-      :ok
-    end
-  end
-
   # Runs inside the establishment transaction; side effects follow its commit.
   # The predecessor Agent, Ships and Generation are retained as history; only
   # their live claims (reservations, timers, symbol occupancy) are released.
@@ -1023,22 +994,17 @@ defmodule SpaceTraders.FleetGeneration do
     faction = Keyword.fetch!(opts, :faction)
     replacement_symbols = Keyword.fetch!(opts, :replacement_symbols)
 
-    predecessors =
-      Repo.all(
-        from generation in Generation,
-          where: generation.operator_id == ^operator.id and is_nil(generation.retired_at),
-          order_by: [desc: generation.number]
+    predecessor =
+      Repo.one(
+        from g in Generation,
+          join: i in "current_fleet_identity",
+          on: i.id == 1 and i.fleet_generation_id == g.id
       )
 
-    predecessor = List.first(predecessors)
-
     {retired_symbols, ship_symbols} =
-      predecessors
-      |> Enum.map(&release_predecessor/1)
-      |> Enum.unzip()
-      |> then(fn {symbols, ships} -> {List.flatten(symbols), List.flatten(ships)} end)
+      if predecessor, do: release_predecessor(predecessor), else: {[], []}
 
-    case SpaceTraders.Agent.store_agent(operator, game_agent, agent_token, faction) do
+    case store_agent(operator, game_agent, agent_token, faction) do
       {:ok, agent} ->
         bootstrap_ships(agent, Map.get(registration, :ships, []))
 
@@ -1052,10 +1018,7 @@ defmodule SpaceTraders.FleetGeneration do
             game_agent.credits
           )
 
-        Enum.each(
-          predecessors,
-          &retire_generation(&1, generation.strategy_capable_at || Clock.utc_now())
-        )
+        retire_generation(predecessor, generation.strategy_capable_at || Clock.utc_now())
 
         :ok = Identity.publish_generation!(operator.id, generation.id)
 
@@ -1189,7 +1152,7 @@ defmodule SpaceTraders.FleetGeneration do
          predecessor,
          replacement_symbols,
          faction,
-         starting_credits \\ nil
+         starting_credits
        ) do
     revision = active_revision(operator.id)
     number = next_generation_number(operator.id)
@@ -1271,20 +1234,18 @@ defmodule SpaceTraders.FleetGeneration do
 
   defp request_intelligence(nil), do: :no_allocation_wake
 
-  defp active_revision(operator_id) do
+  defp active_revision(_operator_id) do
     Repo.one(
       from strategy in Strategy,
         join: revision in Revision,
         on: revision.id == strategy.active_revision_id,
-        where: strategy.operator_id == ^operator_id,
         select: revision
     )
   end
 
-  defp next_generation_number(operator_id) do
+  defp next_generation_number(_operator_id) do
     (Repo.one(
        from generation in Generation,
-         where: generation.operator_id == ^operator_id,
          select: max(generation.number)
      ) || 0) + 1
   end
@@ -1316,7 +1277,7 @@ defmodule SpaceTraders.FleetGeneration do
     |> Ecto.Changeset.change(retired_at: retired_at)
     |> Repo.update!()
 
-    :ok = SpaceTraders.FleetAllocation.NeutralWait.supersede_for_operator(generation.operator_id)
+    :ok = SpaceTraders.FleetAllocation.NeutralWait.clear(generation.id)
 
     # A retired Generation's Strategy no longer makes its demands relevant.
     Evidence.withdraw_agent_demands(generation.agent_id)
@@ -1361,7 +1322,6 @@ defmodule SpaceTraders.FleetGeneration do
 
     Repo.transaction(fn ->
       now = DateTime.utc_now()
-      ensure_generation_for_agent!(agent)
 
       # The first definitive evidence is the Server Reset's recorded time.
       Repo.update_all(
@@ -1380,7 +1340,7 @@ defmodule SpaceTraders.FleetGeneration do
         )
 
       if fenced > 0 and is_integer(agent.operator_id) do
-        :ok = SpaceTraders.FleetAllocation.NeutralWait.supersede_for_operator(agent.operator_id)
+        :ok = SpaceTraders.FleetAllocation.NeutralWait.supersede_current()
       end
 
       Evidence.withdraw_agent_demands(agent.id, DateTime.truncate(now, :second))
@@ -1388,20 +1348,6 @@ defmodule SpaceTraders.FleetGeneration do
       {if(fenced > 0, do: :fenced, else: :already_fenced), Repo.get!(Agent, agent.id)}
     end)
   end
-
-  defp ensure_generation_for_agent!(%Agent{id: agent_id, operator_id: operator_id} = agent)
-       when is_integer(operator_id) do
-    Repo.get_by(Generation, agent_id: agent_id) ||
-      establish_generation!(
-        Repo.get!(Operator, operator_id),
-        agent,
-        nil,
-        [agent.symbol],
-        agent.faction
-      )
-  end
-
-  defp ensure_generation_for_agent!(%Agent{}), do: nil
 
   defp agent_execution_allowed?(%Agent{id: nil}), do: :ok
 

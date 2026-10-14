@@ -28,17 +28,22 @@ defmodule SpaceTraders.CreditFloorWatch do
     if Repo.in_transaction?(), do: :skipped, else: revalidate(agent)
   end
 
-  @doc "Revalidates every live Agent of an Operator after a revision activates."
-  def revalidate_operator(operator_id) when is_integer(operator_id) do
-    Repo.all(
-      from a in Agent,
-        join: g in Generation,
-        on: g.agent_id == a.id,
-        where:
-          g.operator_id == ^operator_id and is_nil(g.fenced_at) and is_nil(g.retired_at) and
-            is_nil(a.stale_at)
-    )
-    |> Enum.each(&observe/1)
+  @doc "Revalidates only the published Fleet after a Revision activates."
+  def revalidate_current do
+    agent =
+      Repo.one(
+        from a in Agent,
+          join: g in Generation,
+          on: g.agent_id == a.id,
+          join: i in "current_fleet_identity",
+          on: i.id == 1 and i.fleet_generation_id == g.id,
+          where:
+            is_nil(g.fenced_at) and is_nil(g.retired_at) and
+              is_nil(a.stale_at)
+      )
+
+    if agent, do: observe(agent)
+    :ok
   end
 
   defp revalidate(agent) do
@@ -57,12 +62,11 @@ defmodule SpaceTraders.CreditFloorWatch do
     result
   end
 
-  defp active_revision(agent) do
+  defp active_revision(_agent) do
     Repo.one(
       from r in Revision,
         join: s in Strategy,
-        on: s.active_revision_id == r.id,
-        where: s.operator_id == ^agent.operator_id
+        on: s.active_revision_id == r.id
     )
   end
 

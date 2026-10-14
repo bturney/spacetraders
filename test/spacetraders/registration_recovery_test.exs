@@ -18,7 +18,7 @@ defmodule SpaceTraders.RegistrationRecoveryTest do
     Sandbox.checkout(Repo, sandbox: false)
     restart_capacity_governor()
     operator = operator_fixture()
-    {:ok, operator} = Agent.link_account_token(operator, "ACCOUNT_SECRET")
+    {:ok, operator} = Agent.link_account_token(operator_scope_fixture(operator), "ACCOUNT_SECRET")
 
     on_exit(fn ->
       Sandbox.mode(Repo, :auto)
@@ -42,7 +42,7 @@ defmodule SpaceTraders.RegistrationRecoveryTest do
 
       topics = ["fleet_allocation:#{operator.id}" | Enum.map(agent_ids, &"fleet:#{&1}")]
       Repo.delete_all(from(n in SpaceTraders.Outbox.Notification, where: n.topic in ^topics))
-      Repo.delete_all(from(o in Agent.Operator, where: o.id == ^operator.id))
+      SpaceTraders.AgentFixtures.cleanup_operator_fixture(operator.id)
       SpaceTraders.EmergencyStopAdmission.clear()
       SpaceTraders.FleetGenerationAdmission.clear()
       restart_capacity_governor()
@@ -486,7 +486,7 @@ defmodule SpaceTraders.RegistrationRecoveryTest do
       # Application reconstruction and a new request reuse PostgreSQL truth;
       # no admission queue, cached response or surviving sender is required.
       restart_capacity_governor()
-      assert {:ok, %{state: :empty}} = FleetGeneration.adopt_current_fleet()
+      assert {:ok, %{state: :empty}} = FleetGeneration.preflight_current_fleet()
 
       assert %{status: :unresolved, attempt_id: ^attempt_id, symbol: "ORBITALIST"} =
                FleetGeneration.registration_recovery(scope)
@@ -710,7 +710,7 @@ defmodule SpaceTraders.RegistrationRecoveryTest do
       try do
         send(read, :respond)
         assert {:error, :stale_agent} = Task.await(detecting.task, 10_000)
-        assert {:ok, %{state: :transition}} = FleetGeneration.adopt_current_fleet()
+        assert {:ok, %{state: :transition}} = FleetGeneration.preflight_current_fleet()
 
         assert {:error, :runtime_authority_unavailable} =
                  in_session(fn -> FleetGeneration.resume_reset_replacement() end)
@@ -779,7 +779,7 @@ defmodule SpaceTraders.RegistrationRecoveryTest do
       assert {:error, :registration_unresolved} = Task.await(restart.task, 10_000)
 
       restart_capacity_governor()
-      assert {:ok, %{state: :transition}} = FleetGeneration.adopt_current_fleet()
+      assert {:ok, %{state: :transition}} = FleetGeneration.preflight_current_fleet()
 
       assert %{status: :unresolved, attempt_id: ^attempt_id} =
                FleetGeneration.registration_recovery(scope)
@@ -911,7 +911,7 @@ defmodule SpaceTraders.RegistrationRecoveryTest do
 
   defp mint(symbol), do: %{symbol: symbol, faction: "COSMIC"}
 
-  defp agents(scope), do: Agent.list_agents(Agent.get_operator!(scope.operator.id))
+  defp agents(_scope), do: Repo.all(from a in SpaceTraders.Agent.Agent, order_by: a.id)
 
   defp ship_symbols(agent) do
     Repo.all(

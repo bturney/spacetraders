@@ -74,7 +74,7 @@ defmodule SpaceTradersWeb.FleetOutcomeMetricsTest do
             where: n.topic in ^["fleet:#{agent.id}", "fleet_allocation"]
         )
 
-        Repo.delete!(operator)
+        SpaceTraders.AgentFixtures.cleanup_operator_fixture(operator.id)
       end)
 
       :ok = Sandbox.mode(Repo, :manual)
@@ -690,7 +690,7 @@ defmodule SpaceTradersWeb.FleetOutcomeMetricsTest do
     Repo.update!(Ecto.Changeset.change(strategy, active_revision_id: revision.id))
 
     generation =
-      Repo.insert!(%Generation{
+      SpaceTraders.AgentFixtures.generation_fixture(%Generation{
         operator_id: operator.id,
         agent_id: agent.id,
         fleet_strategy_revision_id: revision.id,

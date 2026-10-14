@@ -201,15 +201,13 @@ defmodule SpaceTraders.FleetAllocation.NeutralWait do
   end
 
   @doc false
-  def supersede_for_operator(operator_id) when is_integer(operator_id) do
-    if operator_id == SpaceTraders.OperatorAuthority.deployment_operator_id() do
-      generation_id =
-        Repo.one(
-          from i in "current_fleet_identity", where: i.id == 1, select: i.fleet_generation_id
-        )
+  def supersede_current do
+    generation_id =
+      Repo.one(
+        from i in "current_fleet_identity", where: i.id == 1, select: i.fleet_generation_id
+      )
 
-      if generation_id, do: supersede_current_waits!(generation_id)
-    end
+    if generation_id, do: supersede_current_waits!(generation_id)
 
     :ok
   end

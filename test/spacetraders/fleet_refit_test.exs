@@ -173,10 +173,7 @@ defmodule SpaceTraders.FleetRefitTest do
       refute SpaceTraders.SafetyFence.active?(original)
 
       assert :ok =
-               SpaceTraders.Fleet.prepare_emergency_stop_resume(
-                 agent.operator_id,
-                 DateTime.utc_now()
-               )
+               SpaceTraders.Fleet.prepare_emergency_stop_resume(DateTime.utc_now())
 
       assert length(SpaceTraders.MutationAttempts.list_for_agent(agent)) == 1
     end
@@ -879,7 +876,7 @@ defmodule SpaceTraders.FleetRefitTest do
 
     Repo.update!(Ecto.Changeset.change(strategy, active_revision_id: revision.id))
 
-    Repo.insert!(%Generation{
+    SpaceTraders.AgentFixtures.generation_fixture(%Generation{
       operator_id: operator.id,
       agent_id: agent.id,
       fleet_strategy_revision_id: revision.id,

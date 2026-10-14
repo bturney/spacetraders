@@ -724,19 +724,14 @@ defmodule SpaceTraders.Evidence do
   defp settle_owned_demand(result, nil, _agent, _subject, _operation_id, _typed_demand),
     do: result
 
-  defp active_revision(attributed_operator_id) do
-    # Expanded-schema compatibility for unadopted legacy writers. Published
-    # identity always chooses the deployment Strategy, never a caller's tenant.
-    operator_id =
-      SpaceTraders.OperatorAuthority.deployment_operator_id() || attributed_operator_id
-
+  defp active_revision(_attributed_operator_id) do
     Revision
     |> join(:inner, [revision], strategy in Strategy,
       on: strategy.id == revision.fleet_strategy_id
     )
     |> where(
       [revision, strategy],
-      strategy.operator_id == ^operator_id and strategy.active_revision_id == revision.id
+      strategy.active_revision_id == revision.id
     )
     |> Repo.one()
   end

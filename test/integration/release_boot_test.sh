@@ -12,6 +12,8 @@ secret_key=$(openssl rand -hex 32)
 encryption_key=$(openssl rand -base64 32)
 log_file=$(mktemp)
 app_pid=""
+database="spacetraders_release_boot_$$"
+export DATABASE_URL="postgres://postgres:postgres@127.0.0.1/$database"
 
 cleanup() {
   if [[ -n "$app_pid" ]]; then
@@ -19,11 +21,16 @@ cleanup() {
     wait "$app_pid" 2>/dev/null || true
   fi
   rm -f "$log_file"
+  MIX_ENV=test mix ecto.drop --quiet >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 
+# Never boot a production runtime against another checkout's test database.
+MIX_ENV=test mix ecto.create --quiet
+MIX_ENV=test mix ecto.migrate --quiet
+
 PHX_SERVER=true RELEASE_NAME=spacetraders PORT=4010 \
-POSTGRES_HOST=127.0.0.1 POSTGRES_DB=spacetraders_test POSTGRES_USER=postgres \
+POSTGRES_HOST=127.0.0.1 POSTGRES_DB="$database" POSTGRES_USER=postgres \
 POSTGRES_PASSWORD=postgres SECRET_KEY_BASE="$secret_key" \
 ENCRYPTION_KEY="$encryption_key" PHX_HOST=example.test \
   _build/prod/rel/spacetraders/bin/spacetraders start >"$log_file" 2>&1 &

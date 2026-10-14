@@ -7,6 +7,26 @@ defmodule Mix.Tasks.Verify.BoundaryTest do
            end) =~ "intact"
   end
 
+  test "rejects retired tenancy interfaces, selector parameters and Operator resource associations" do
+    path = Path.join(System.tmp_dir!(), "boundary-tenancy-#{System.unique_integer()}.ex")
+
+    File.write!(path, """
+    defmodule TenantBypass do
+      def run(params) do
+        SpaceTraders.Agent.list_agents(:operator)
+        params["agent"]
+      end
+      belongs_to :operator, SpaceTraders.Agent.Operator
+      def topic(id), do: "fleet_strategy:" <> id
+    end
+    """)
+
+    on_exit(fn -> File.rm(path) end)
+    violations = Mix.Tasks.Verify.Boundary.verify_paths([path])
+    assert length(violations) == 4
+    assert Enum.all?(violations, &String.contains?(&1, "retired tenancy"))
+  end
+
   test "rejects a transport call outside the approved adapters" do
     path = Path.join(System.tmp_dir!(), "boundary-#{System.unique_integer()}.ex")
     File.write!(path, "defmodule Bypass do\n  Req.get(\"/game\")\nend\n")

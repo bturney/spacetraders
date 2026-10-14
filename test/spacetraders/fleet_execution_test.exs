@@ -358,7 +358,7 @@ defmodule SpaceTraders.FleetExecutionTest do
           activated_at: DateTime.utc_now(:second)
         })
 
-      Repo.insert!(%Generation{
+      SpaceTraders.AgentFixtures.generation_fixture(%Generation{
         operator_id: operator.id,
         agent_id: agent.id,
         fleet_strategy_revision_id: revision.id,

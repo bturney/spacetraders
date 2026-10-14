@@ -26,7 +26,7 @@ defmodule SpaceTraders.MutationAttempts.Attempt do
       source: :recovery_credential_ciphertext,
       redact: true
 
-    belongs_to :operator, SpaceTraders.Agent.Operator, type: :id
+    field :operator_id, :id
     belongs_to :agent, SpaceTraders.Agent.Agent, type: :id
     belongs_to :fleet_generation, SpaceTraders.FleetGeneration.Generation, type: :id
     belongs_to :strategy_revision, SpaceTraders.FleetStrategy.Revision, type: :id

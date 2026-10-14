@@ -6,7 +6,7 @@ defmodule SpaceTradersWeb.InterventionLiveTest do
 
   alias SpaceTraders.Fleet
   alias SpaceTraders.FleetGeneration.Generation
-  alias SpaceTraders.{Repo, ShipReservation}
+  alias SpaceTraders.ShipReservation
 
   setup :register_and_log_in_operator
 
@@ -18,7 +18,7 @@ defmodule SpaceTradersWeb.InterventionLiveTest do
     predecessor = agent_fixture(operator, %{symbol: "PARALLAX"})
     {:ok, old_ship} = Fleet.record_ship(predecessor, "PARALLAX-1", "SHIP_COMMAND_FRIGATE")
 
-    Repo.insert!(%Generation{
+    SpaceTraders.AgentFixtures.generation_fixture(%Generation{
       operator_id: operator.id,
       agent_id: predecessor.id,
       number: 1,

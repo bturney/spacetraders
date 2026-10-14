@@ -22,7 +22,7 @@ defmodule SpaceTradersWeb.MissionControlBriefingTest do
         agent_token: nil
       })
 
-    Repo.insert!(%FleetGeneration.Generation{
+    SpaceTraders.AgentFixtures.generation_fixture(%FleetGeneration.Generation{
       operator_id: scope.operator.id,
       agent_id: historical.id,
       number: 1,
@@ -49,7 +49,17 @@ defmodule SpaceTradersWeb.MissionControlBriefingTest do
     scope: scope
   } do
     SpaceTraders.AgentFixtures.agent_fixture(scope.operator, %{symbol: "FIRST"})
-    SpaceTraders.AgentFixtures.agent_fixture(scope.operator, %{symbol: "SECOND"})
+
+    second =
+      SpaceTraders.AgentFixtures.agent_fixture(scope.operator, %{symbol: "SECOND", publish: false})
+
+    Repo.insert!(%FleetGeneration.Generation{
+      agent_id: second.id,
+      operator_id: scope.operator.id,
+      number: 2,
+      symbol: second.symbol,
+      faction: second.faction
+    })
 
     Req.Test.stub(SpaceTraders.API, fn _ ->
       flunk("ambiguous identity must not dispatch game reads")
@@ -57,7 +67,7 @@ defmodule SpaceTradersWeb.MissionControlBriefingTest do
 
     {:ok, view, _} = live(conn, ~p"/mission-control")
     assert has_element?(view, "#current-fleet-state", "multiple plausible current Agents")
-    assert has_element?(view, "#current-fleet-state", "Identify the current Fleet")
+    assert has_element?(view, "#current-fleet-state", "Retire competing Generations explicitly")
     refute has_element?(view, "#fleet-health", "FIRST")
     refute has_element?(view, "#fleet-health", "SECOND")
     refute has_element?(view, "a[href='/agents/new']", "Mint an Agent")
@@ -763,7 +773,7 @@ defmodule SpaceTradersWeb.MissionControlBriefingTest do
   end
 
   defp mint_fleet(scope) do
-    {:ok, _operator} = Agent.link_account_token(scope.operator, "MISSION_CONTROL_ACCOUNT_TOKEN")
+    {:ok, _operator} = Agent.link_account_token(scope, "MISSION_CONTROL_ACCOUNT_TOKEN")
     {:ok, strategy} = FleetStrategy.select_preset(scope, "steady_growth")
     {:ok, _revision} = FleetStrategy.activate(scope, strategy.draft_version)
 
@@ -777,7 +787,7 @@ defmodule SpaceTradersWeb.MissionControlBriefingTest do
       })
 
     [generation] = FleetGeneration.list_generations(scope)
-    {Agent.get_agent(scope, minted.id), generation}
+    {SpaceTraders.Repo.get!(SpaceTraders.Agent.Agent, minted.id), generation}
   end
 
   defp briefing_api(conn), do: fleet_api(conn, @symbol)
