@@ -344,7 +344,7 @@ defmodule SpaceTraders.FleetStrategyTest do
 
   test "the deployment Strategy is authored only through the deployment Operator" do
     owner_scope = operator_fixture() |> Scope.for_operator()
-    legacy_scope = legacy_operator_fixture() |> Scope.for_operator()
+    legacy_scope = Scope.for_operator(%SpaceTraders.Agent.Operator{id: -1})
     original = document("Grow credits", "No scrap")
 
     assert {:ok, draft} = save_draft(owner_scope, original)

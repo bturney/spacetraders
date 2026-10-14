@@ -560,7 +560,7 @@ defmodule SpaceTradersWeb.MissionControlLiveTest do
            )
   end
 
-  test "another Operator cannot open a Decision Episode by identity", %{
+  test "deployment authentication, not Episode authorship, controls history access", %{
     conn: conn,
     operator: operator
   } do
@@ -604,8 +604,13 @@ defmodule SpaceTradersWeb.MissionControlLiveTest do
 
     logged_in = SpaceTradersWeb.ConnCase.log_in_operator(conn, operator)
 
-    assert {:error, {:live_redirect, %{to: "/generations"}}} =
-             live(logged_in, "/decision-episodes/#{episode.id}")
+    assert {:ok, view, _html} = live(logged_in, "/decision-episodes/#{episode.id}")
+    assert has_element?(view, "h1", "Decision Episode #{episode.id}")
+
+    legacy_login = SpaceTradersWeb.ConnCase.log_in_operator(conn, other_operator)
+
+    assert {:error, {:redirect, %{to: "/operators/log-in"}}} =
+             live(legacy_login, "/decision-episodes/#{episode.id}")
   end
 
   test "Mission Control opens the Grafana family that answers each originating question", %{
