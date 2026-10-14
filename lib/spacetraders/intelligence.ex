@@ -192,21 +192,62 @@ defmodule SpaceTraders.Intelligence do
   @doc "Returns current usable facts for one subject, grouped by field with provenance."
   def subject(%AgentRecord{} = agent, subject_type, system_symbol, symbol) do
     facts =
-      Fact
-      |> join(:inner, [fact], observation in assoc(fact, :observation))
+      agent
+      |> current_facts(system_symbol)
       |> where(
         [fact],
-        fact.agent_id == ^agent.id and fact.subject_type == ^to_string(subject_type) and
-          fact.subject_system_symbol == ^system_symbol and fact.subject_symbol == ^symbol and
-          is_nil(fact.invalidated_at)
+        fact.subject_type == ^to_string(subject_type) and fact.subject_symbol == ^symbol
       )
-      |> order_by([fact, observation], desc: observation.observed_at, desc: fact.id)
-      |> preload([_fact, observation], observation: observation)
       |> Repo.all()
 
-    facts
-    |> Enum.group_by(& &1.field)
-    |> Map.new(fn {field, field_facts} -> {field, usable_fact(field_facts) |> present_fact()} end)
+    facts_by_field(facts)
+  end
+
+  @doc """
+  Bulk form of `subject/4` for one Agent System: current usable facts for
+  every `subject_types` x `symbols` pair, keyed `{subject_type, symbol}`, each
+  selected exactly as `subject/4` selects it and with its original
+  observation. A pair with no current facts maps to `%{}`.
+
+  One SELECT however many subjects or retained observations; none when
+  `symbols` is empty. Rows are materialized and grouped in memory.
+  """
+  def subjects(%AgentRecord{} = agent, system_symbol, subject_types, symbols)
+      when is_binary(system_symbol) and is_list(subject_types) and is_list(symbols) do
+    pairs = for type <- subject_types, symbol <- symbols, do: {type, symbol}
+
+    loaded =
+      if pairs == [] do
+        %{}
+      else
+        agent
+        |> current_facts(system_symbol)
+        |> where(
+          [fact],
+          fact.subject_type in ^Enum.map(subject_types, &to_string/1) and
+            fact.subject_symbol in ^symbols
+        )
+        |> Repo.all()
+        |> Enum.group_by(&{&1.subject_type, &1.subject_symbol})
+      end
+
+    Map.new(pairs, fn {type, symbol} = pair ->
+      {pair, loaded |> Map.get({to_string(type), symbol}, []) |> facts_by_field()}
+    end)
+  end
+
+  # The one selection rule for current facts of an Agent's System, newest
+  # observation first, with each fact's original observation.
+  defp current_facts(%AgentRecord{} = agent, system_symbol) do
+    Fact
+    |> join(:inner, [fact], observation in assoc(fact, :observation))
+    |> where(
+      [fact],
+      fact.agent_id == ^agent.id and fact.subject_system_symbol == ^system_symbol and
+        is_nil(fact.invalidated_at)
+    )
+    |> order_by([fact, observation], desc: observation.observed_at, desc: fact.id)
+    |> preload([_fact, observation], observation: observation)
   end
 
   def known_waypoints(%AgentRecord{} = agent, system_symbol) when is_binary(system_symbol) do

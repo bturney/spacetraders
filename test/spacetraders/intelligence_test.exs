@@ -411,4 +411,148 @@ defmodule SpaceTraders.IntelligenceTest do
     assert "is_under_construction" in missing
     refute "chart" in missing
   end
+
+  describe "subjects/4 bulk retained-fact selection" do
+    # The combined World read (#724) bulk-loads these subjects. Each selected
+    # field must be exactly what the per-subject read selects, with its own
+    # original observation.
+    test "selects per field exactly as the per-subject read, with original provenance" do
+      agent = agent()
+      other_agent = agent()
+
+      waypoint = fn attrs ->
+        Waypoint.from_json(
+          Map.merge(%{"symbol" => "X1-UX81-A1", "systemSymbol" => "X1-UX81"}, attrs)
+        )
+      end
+
+      # Oldest complete observation: x/y/traits survive later omissions.
+      assert {:ok, complete} =
+               Intelligence.observe_waypoint(
+                 agent,
+                 waypoint.(%{"type" => "PLANET", "x" => 0, "y" => 7, "traits" => []}),
+                 source: "get_waypoint",
+                 observing_ship_symbol: "INTEL-1",
+                 observed_at: ~U[2030-01-01 10:00:00Z]
+               )
+
+      # Equal-time tie: the later fact ID wins the type field.
+      assert {:ok, _tie_first} =
+               Intelligence.observe_waypoint(agent, waypoint.(%{"type" => "MOON"}),
+                 source: "get_waypoints",
+                 observed_at: ~U[2030-01-01 11:00:00Z]
+               )
+
+      assert {:ok, tie_second} =
+               Intelligence.observe_waypoint(agent, waypoint.(%{"type" => "ASTEROID"}),
+                 source: "scan_waypoints",
+                 observing_ship_symbol: "INTEL-2",
+                 observed_at: ~U[2030-01-01 11:00:00Z]
+               )
+
+      # Known-unavailable is non-unknown and beats an older known value;
+      # a newer unknown never erases it.
+      assert {:ok, unavailable} =
+               Intelligence.mark_unavailable(agent, :waypoint, "X1-UX81", "X1-UX81-A1", [:orbits],
+                 source: "get_waypoint",
+                 observed_at: ~U[2030-01-01 11:30:00Z]
+               )
+
+      # All-unknown field: the newest unknown is kept.
+      assert {:ok, newest_partial} =
+               Intelligence.observe_waypoint(agent, waypoint.(%{}),
+                 source: "get_waypoint",
+                 observed_at: ~U[2030-01-01 12:00:00Z]
+               )
+
+      # Same symbol, different subject type, System and Agent never mix in.
+      assert {:ok, market_observation} =
+               Intelligence.observe_market(
+                 agent,
+                 "X1-UX81",
+                 Market.from_json(%{"symbol" => "X1-UX81-A1", "exports" => []}),
+                 source: "get_market",
+                 observed_at: ~U[2030-01-01 09:00:00Z]
+               )
+
+      assert {:ok, _} =
+               Intelligence.observe_waypoint(
+                 agent,
+                 Waypoint.from_json(%{
+                   "symbol" => "X1-UX81-A1",
+                   "systemSymbol" => "X1-OTHER",
+                   "x" => 99
+                 }),
+                 source: "get_waypoint",
+                 observed_at: ~U[2030-01-01 13:00:00Z]
+               )
+
+      assert {:ok, _} =
+               Intelligence.observe_waypoint(other_agent, waypoint.(%{"x" => 55, "y" => 55}),
+                 source: "get_waypoint",
+                 observed_at: ~U[2030-01-01 13:00:00Z]
+               )
+
+      # Explicitly invalidated facts never reappear.
+      assert {:ok, _} =
+               Intelligence.observe_market(
+                 agent,
+                 "X1-UX81",
+                 Market.from_json(%{"symbol" => "X1-UX81-A2", "exports" => []}),
+                 source: "get_market",
+                 observed_at: ~U[2030-01-01 09:00:00Z]
+               )
+
+      assert {:ok, 4} = Intelligence.invalidate(agent, :market, "X1-UX81", "X1-UX81-A2")
+
+      subjects =
+        Intelligence.subjects(agent, "X1-UX81", [:waypoint, :market, :shipyard], [
+          "X1-UX81-A1",
+          "X1-UX81-A2"
+        ])
+
+      facts = subjects[{:waypoint, "X1-UX81-A1"}]
+
+      assert %{state: "known", value: 0} = facts["x"]
+      assert facts["x"].observation.id == complete.id
+      assert facts["x"].observation.observed_at == ~U[2030-01-01 10:00:00Z]
+      assert facts["x"].observation.source == "get_waypoint"
+      assert facts["x"].observation.observing_ship_symbol == "INTEL-1"
+      assert %{state: "known", value: 7} = facts["y"]
+      assert %{state: "known", value: []} = facts["traits"]
+
+      assert %{state: "known", value: "ASTEROID"} = facts["type"]
+      assert facts["type"].observation.id == tie_second.id
+      assert facts["type"].observation.observing_ship_symbol == "INTEL-2"
+
+      assert %{state: "known_unavailable", value: nil} = facts["orbits"]
+      assert facts["orbits"].observation.id == unavailable.id
+
+      assert %{state: "unknown", value: nil} = facts["chart"]
+      assert facts["chart"].observation.id == newest_partial.id
+
+      market = subjects[{:market, "X1-UX81-A1"}]
+      assert %{state: "known", value: []} = market["exports"]
+      assert market["exports"].observation.id == market_observation.id
+
+      assert subjects[{:market, "X1-UX81-A2"}] == %{}
+      assert subjects[{:shipyard, "X1-UX81-A1"}] == %{}
+      assert subjects[{:waypoint, "X1-UX81-A2"}] == %{}
+
+      assert map_size(subjects) == 6
+
+      for {{type, symbol}, selected} <- subjects do
+        assert selected == Intelligence.subject(agent, type, "X1-UX81", symbol)
+      end
+
+      assert %{state: "known", value: 55} =
+               Intelligence.subjects(other_agent, "X1-UX81", [:waypoint], ["X1-UX81-A1"])[
+                 {:waypoint, "X1-UX81-A1"}
+               ]["x"]
+    end
+
+    test "an empty symbol group reads nothing" do
+      assert Intelligence.subjects(agent(), "X1-UX81", [:waypoint, :market], []) == %{}
+    end
+  end
 end

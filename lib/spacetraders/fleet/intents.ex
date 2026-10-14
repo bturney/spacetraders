@@ -122,6 +122,9 @@ defmodule SpaceTraders.Fleet.Intents do
 
   @unfinished_states Intent.unfinished_states()
   @terminal_states Intent.terminal_states()
+  # Waypoint fact freshness budget for the World read; neither coordinates nor
+  # fuel stops depend on it.
+  @waypoint_freshness_seconds 300
   @navigation_intent_types ~w(navigate acquire_intelligence acquire_resources buy sell deliver install_module remove_module)
 
   defp token_present(%AgentRecord{agent_token: token}) when is_binary(token) and token != "",
@@ -5310,16 +5313,21 @@ defmodule SpaceTraders.Fleet.Intents do
   end
 
   # The same stop choice Fleet Planning simulates (`FuelReach`), over the
-  # same confirmed fuel stops (`World.fuel_stops/3`).
+  # same confirmed fuel stops (`World.projections/4`).
   defp confirmed_reachable_fuel_stop(agent, intent, live_ship, source, target) do
     {:ok, system} = Fleet.system_from_headquarters(live_ship.nav.waypoint_symbol)
+
+    # Coordinates and fuel stops come from one combined World read; the
+    # freshness budget does not affect either projection.
+    %{waypoint_coordinates: coordinates, fuel_stops: fuel_stops} =
+      World.projections(agent, system, Clock.utc_now(), @waypoint_freshness_seconds)
 
     reach =
       FuelReach.new(
         live_ship.fuel.capacity,
         live_ship.nav.flight_mode,
-        World.waypoint_coordinates(agent, system),
-        World.fuel_stops(agent, system, Clock.utc_now())
+        coordinates,
+        fuel_stops
       )
 
     case FuelReach.fuel_stop(
