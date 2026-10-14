@@ -38,7 +38,11 @@ defmodule SpaceTradersWeb.ChartOutcomeMetricsTest do
 
     on_exit(fn ->
       :telemetry.detach(handler)
-      Sandbox.unboxed_run(Repo, fn -> Repo.delete!(operator) end)
+
+      Sandbox.unboxed_run(Repo, fn ->
+        SpaceTraders.AgentFixtures.cleanup_operator_fixture(operator.id)
+      end)
+
       SpaceTraders.FleetGenerationAdmission.clear()
       :ok = Sandbox.mode(Repo, :manual)
     end)

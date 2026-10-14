@@ -1,5 +1,6 @@
 defmodule SpaceTraders.MissionControlTest do
-  use SpaceTraders.DataCase, async: true
+  # Current-Fleet adoption serializes deployment identity, not per-tenant state.
+  use SpaceTraders.DataCase, async: false
 
   import SpaceTraders.AgentFixtures
   import SpaceTraders.EvidenceFixtures
@@ -13,15 +14,16 @@ defmodule SpaceTraders.MissionControlTest do
   alias SpaceTraders.Intelligence
   alias SpaceTraders.MissionControl
 
-  describe "dashboard/1" do
-    test "reads only Agents owned by the scoped Operator" do
+  describe "fleet_snapshot/1" do
+    test "reads only the published Fleet, never retained historical Agents" do
       operator = operator_fixture()
       own_agent = agent_fixture(operator, %{agent_token: nil})
 
-      other_operator = operator_fixture()
-      _other_agent = agent_fixture(other_operator, %{agent_token: nil})
+      _historical = agent_fixture(operator, %{agent_token: nil})
 
-      assert [%{agent: %{id: agent_id}}] = MissionControl.dashboard(Scope.for_operator(operator))
+      assert %{agent: %{id: agent_id}} =
+               MissionControl.fleet_snapshot(Scope.for_operator(operator))
+
       assert agent_id == own_agent.id
     end
 
@@ -31,8 +33,7 @@ defmodule SpaceTraders.MissionControlTest do
       Req.Test.stub(SpaceTraders.API, &unavailable_response/1)
       scope = Scope.for_operator(operator)
 
-      assert [%{agent_token: nil} = agent_ref] = MissionControl.agents(scope)
-      assert [%{agent: %{agent_token: nil}}] = MissionControl.dashboard(scope, [agent_ref])
+      assert %{agent: %{agent_token: nil}} = MissionControl.fleet_snapshot(scope)
     end
 
     test "dashboard never acquires on-site Market or Shipyard listings" do
@@ -84,18 +85,19 @@ defmodule SpaceTraders.MissionControlTest do
         end
       end)
 
-      assert [%{markets: {:ok, []}, shipyards: {:ok, []}}] =
-               MissionControl.dashboard(Scope.for_operator(operator))
+      assert %{markets: {:ok, []}, shipyards: {:ok, []}} =
+               MissionControl.fleet_snapshot(Scope.for_operator(operator))
     end
 
-    test "ignores an Agent retired after its projection reference was listed" do
+    test "retirement fences a prior current snapshot instead of reviving its Agent" do
       operator = operator_fixture()
       agent = agent_fixture(operator, %{agent_token: nil})
       scope = Scope.for_operator(operator)
-      [agent_ref] = MissionControl.agents(scope)
-      Repo.delete!(agent)
-
-      assert MissionControl.dashboard(scope, [agent_ref]) == []
+      assert %{agent: %{id: id}} = MissionControl.fleet_snapshot(scope)
+      assert id == agent.id
+      generation = Repo.get_by!(SpaceTraders.FleetGeneration.Generation, agent_id: agent.id)
+      generation |> Ecto.Changeset.change(retired_at: DateTime.utc_now()) |> Repo.update!()
+      assert %{stale?: true} = MissionControl.fleet_snapshot(scope)
     end
 
     test "uses only read requests and preserves unavailable values" do
@@ -112,7 +114,7 @@ defmodule SpaceTraders.MissionControlTest do
         unavailable_response(conn)
       end)
 
-      assert [projection] = MissionControl.dashboard(Scope.for_operator(operator))
+      assert projection = MissionControl.fleet_snapshot(Scope.for_operator(operator))
       assert projection.agent.id == agent.id
       assert {:error, _reason} = projection.overview
       assert {:error, _reason} = projection.ships
@@ -127,7 +129,7 @@ defmodule SpaceTraders.MissionControlTest do
     end
   end
 
-  describe "refresh_agent/3" do
+  describe "current-Fleet refresh" do
     test "replaces previously current values with truthful unavailable results" do
       operator = operator_fixture()
       agent = agent_fixture(operator)
@@ -142,45 +144,20 @@ defmodule SpaceTraders.MissionControlTest do
 
       scope = Scope.for_operator(operator)
 
-      assert [%{overview: {:ok, _agent}, ships: {:ok, []}}] =
-               projections = MissionControl.dashboard(scope)
+      assert %{overview: {:ok, _agent}, ships: {:ok, []}} = MissionControl.fleet_snapshot(scope)
 
       Agent.update(state, fn _ -> :unavailable end)
 
-      assert [%{overview: {:error, _overview_reason}, ships: {:error, _ships_reason}}] =
-               MissionControl.refresh_agent(scope, projections, agent.id)
+      assert %{overview: {:error, _overview_reason}, ships: {:error, _ships_reason}} =
+               MissionControl.fleet_snapshot(scope)
     end
 
-    test "does not refresh an Agent outside the scoped Operator" do
+    test "a forged authentication scope cannot refresh the published Fleet" do
       operator = operator_fixture()
       _own_agent = agent_fixture(operator, %{agent_token: nil})
-      projections = MissionControl.dashboard(Scope.for_operator(operator))
-
-      other_operator = operator_fixture()
-      other_agent = agent_fixture(other_operator, %{agent_token: nil})
-
-      assert MissionControl.refresh_agent(
-               Scope.for_operator(operator),
-               projections,
-               other_agent.id
-             ) == projections
-    end
-  end
-
-  describe "on-demand projections" do
-    test "reject reads for an Agent outside the scoped Operator" do
-      operator = operator_fixture()
-      other_operator = operator_fixture()
-      other_agent = agent_fixture(other_operator)
-      scope = Scope.for_operator(operator)
-      waypoint = %{symbol: "X1-UX81-A1", system_symbol: "X1-UX81", type: "JUMP_GATE"}
-
-      assert MissionControl.waypoint_market(scope, other_agent, waypoint) ==
-               {:error, :waypoint_unavailable}
-
-      assert MissionControl.waypoint_readiness(scope, other_agent, waypoint) == %{}
-      assert MissionControl.marketplace_waypoints(scope, other_agent, "X1-UX81") == []
-      assert MissionControl.usable_survey(scope, other_agent, "X1-UX81-A1") == nil
+      forged = Scope.for_operator(%SpaceTraders.Agent.Operator{id: -1})
+      Req.Test.stub(SpaceTraders.API, fn _ -> flunk("unauthorized Fleet read") end)
+      assert MissionControl.fleet_snapshot(forged) == nil
     end
   end
 
@@ -353,7 +330,7 @@ defmodule SpaceTraders.MissionControlTest do
 
   test "Attention is scoped and repeated observation does not clear acknowledgement" do
     owner = operator_fixture()
-    other = operator_fixture()
+    other = legacy_operator_fixture()
     owner_scope = Scope.for_operator(owner)
     other_scope = Scope.for_operator(other)
 
@@ -383,6 +360,86 @@ defmodule SpaceTraders.MissionControlTest do
     assert repeated.acknowledged_at
     assert [%{id: id}] = SpaceTraders.OperatorConditions.unresolved(owner_scope)
     assert id == condition.id
+  end
+
+  test "history projections answer only the deployment Operator; a legacy identity selects nothing" do
+    deployment_scope = Scope.for_operator(operator_fixture())
+    legacy = legacy_operator_fixture()
+    legacy_scope = Scope.for_operator(legacy)
+    alias SpaceTraders.FleetGeneration.Generation
+    alias SpaceTraders.FleetStrategy.{Revision, Strategy}
+
+    strategy = Repo.insert!(%Strategy{operator_id: legacy.id, revision_number: 1})
+
+    revision =
+      Repo.insert!(%Revision{
+        fleet_strategy_id: strategy.id,
+        number: 1,
+        document: %{},
+        source: "operator",
+        activated_at: DateTime.utc_now(:second)
+      })
+
+    generation =
+      SpaceTraders.AgentFixtures.generation_fixture(%Generation{
+        operator_id: legacy.id,
+        fleet_strategy_revision_id: revision.id,
+        number: 1,
+        symbol: "LEGACYHIST",
+        faction: "COSMIC",
+        replacement_symbols: %{},
+        retired_at: DateTime.utc_now()
+      })
+
+    episode =
+      Repo.insert!(%StrategyDecisionEpisode{
+        operator_id: legacy.id,
+        fleet_generation_id: generation.id,
+        fleet_strategy_revision_id: revision.id,
+        source_version: 0,
+        calibration_version: "market-v1"
+      })
+
+    {:ok, condition} =
+      SpaceTraders.OperatorConditions.raise(
+        legacy_scope,
+        "objective-infeasible:#{generation.id}:#{revision.id}:0",
+        :attention,
+        "Legacy note"
+      )
+
+    assert MissionControl.activity(legacy_scope) == []
+    assert MissionControl.generation_recaps(legacy_scope) == []
+    assert MissionControl.decision_episode(legacy_scope, episode.id) == nil
+    assert MissionControl.decision_episode_comparison(legacy_scope) == []
+    assert {:error, _} = SpaceTraders.OperatorConditions.resolve(legacy_scope, condition.key)
+
+    # The retained legacy rows keep their original attribution.
+    assert Repo.get!(StrategyDecisionEpisode, episode.id).fleet_generation_id == generation.id
+
+    assert Enum.any?(
+             MissionControl.activity(deployment_scope),
+             &(&1[:decision_episode_id] == episode.id)
+           )
+
+    assert MissionControl.decision_episode(deployment_scope, episode.id)
+    assert [%{id: id}] = MissionControl.decision_episode_comparison(deployment_scope)
+    assert id == episode.id
+
+    assert [%{revisions: [1], limitations: limitations}] =
+             MissionControl.generation_recaps(deployment_scope)
+
+    assert "Legacy note" in limitations
+    assert [condition] == SpaceTraders.OperatorConditions.unresolved(deployment_scope)
+    assert [condition] == SpaceTraders.OperatorConditions.history(deployment_scope)
+    assert :ok = SpaceTraders.OperatorConditions.acknowledge(deployment_scope, condition.id)
+    assert :ok = SpaceTraders.OperatorConditions.resolve(deployment_scope, condition.key)
+    assert [] == SpaceTraders.OperatorConditions.unresolved(deployment_scope)
+
+    assert [%{operator_id: author, acknowledged_at: %DateTime{}, resolved_at: %DateTime{}}] =
+             SpaceTraders.OperatorConditions.history(deployment_scope)
+
+    assert author == legacy.id
   end
 
   describe "strategy/1" do
@@ -796,18 +853,9 @@ defmodule SpaceTraders.MissionControlTest do
       recaptured = MissionControl.capture_market_decision(scope, availability: availability)
       assert MissionControl.market_decision_current?(scope, recaptured)
 
-      revision = FleetStrategy.get(scope).active_revision
-
-      Repo.insert!(%SpaceTraders.FleetGeneration.Generation{
-        operator_id: scope.operator.id,
-        agent_id: agent.id,
-        fleet_strategy_revision_id: revision.id,
-        number: 1,
-        symbol: agent.symbol,
-        faction: agent.faction,
-        replacement_symbols: %{},
-        objective_progress: %{}
-      })
+      Repo.get_by!(SpaceTraders.FleetGeneration.Generation, agent_id: agent.id)
+      |> Ecto.Changeset.change(fenced_at: DateTime.utc_now())
+      |> Repo.update!()
 
       refute MissionControl.market_decision_current?(scope, recaptured)
     end
@@ -900,7 +948,7 @@ defmodule SpaceTraders.MissionControlTest do
     |> Repo.update!()
 
     generation =
-      Repo.insert!(%SpaceTraders.FleetGeneration.Generation{
+      SpaceTraders.AgentFixtures.generation_fixture(%SpaceTraders.FleetGeneration.Generation{
         operator_id: operator.id,
         agent_id: agent.id,
         fleet_strategy_revision_id: revision.id,

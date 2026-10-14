@@ -130,10 +130,10 @@ test env; see `test/spacetraders/api/`.
 mix phx.server   # http://localhost:4000, GET /health returns {"status":"ok"}
 ```
 
-First boot redirects to `/setup` — create the first operator (email + password,
-optionally linking your my.spacetraders.io AccountToken to mint agents). Routes
-live in `lib/spacetraders_web/router.ex`; the nav exposes sign-in, mint, and
-settings.
+First boot redirects to `/setup` — establish the sole Operator (email + password,
+optionally linking an AccountToken). Further Operator registration is unavailable.
+Mission Control offers initial mint/import only while empty; Settings retains
+credentials and the ordered Agent Name Bank. Routes: `lib/spacetraders_web/router.ex`.
 
 ### Game secrets (AccountToken / AgentToken)
 
@@ -148,14 +148,11 @@ mix run -e 'IO.puts(Base.encode64(:crypto.strong_rand_bytes(32)))'
 
 ### Seed data
 
-Idempotent; seeds the existing agent ORBITALIST (COSMIC, HQ `X1-UX81-A1`) and
-its starter fleet (COMMAND_FRIGATE + PROBE). The agent's token comes from
-`SPACETRADERS_AGENT_TOKEN` at seed time only; without it a placeholder is
-stored:
+Idempotent; seeds the durable Agent Name Bank only. Establish game identity through authenticated
+initial mint/import; a raw or placeholder Agent never grants gameplay authority:
 
 ```sh
-mix run priv/repo/seeds.exs                 # placeholder token
-SPACETRADERS_AGENT_TOKEN=<token> mix run priv/repo/seeds.exs   # real token
+mix run priv/repo/seeds.exs
 ```
 
 ### Project-host deployment

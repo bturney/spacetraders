@@ -13,7 +13,7 @@ defmodule SpaceTraders.Agent.OperatorToken do
   @session_validity_in_days 14
 
   schema "operators_tokens" do
-    field :token, :binary
+    field :token, :binary, redact: true
     field :context, :string
     field :sent_to, :string
     field :authenticated_at, :utc_datetime
@@ -66,6 +66,8 @@ defmodule SpaceTraders.Agent.OperatorToken do
     query =
       from token in by_token_and_context_query(token, "session"),
         join: operator in assoc(token, :operator),
+        join: identity in "current_fleet_identity",
+        on: identity.id == 1 and identity.operator_id == operator.id,
         where: token.inserted_at > ago(@session_validity_in_days, "day"),
         select: {%{operator | authenticated_at: token.authenticated_at}, token.inserted_at}
 
@@ -119,6 +121,8 @@ defmodule SpaceTraders.Agent.OperatorToken do
         query =
           from token in by_token_and_context_query(hashed_token, "login"),
             join: operator in assoc(token, :operator),
+            join: identity in "current_fleet_identity",
+            on: identity.id == 1 and identity.operator_id == operator.id,
             where: token.inserted_at > ago(^@magic_link_validity_in_minutes, "minute"),
             where: token.sent_to == operator.email,
             select: {operator, token}

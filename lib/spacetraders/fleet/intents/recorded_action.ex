@@ -397,6 +397,7 @@ defmodule SpaceTraders.Fleet.Intents.RecordedAction do
     with :ok <- SpaceTraders.RuntimeAuthority.execution_allowed?(),
          :ok <- SpaceTraders.EmergencyStopAdmission.mutation_allowed?(agent.agent_token),
          :ok <- SpaceTraders.FleetGenerationAdmission.mutation_allowed?(agent.agent_token),
+         :ok <- SpaceTraders.FleetGeneration.gameplay_authority(agent.id),
          true <- is_nil(agent.stale_at) and ship.agent_id == agent.id,
          true <- Intent.unfinished?(intent),
          {:ok, owned} <- owner(agent, ship, intent),
@@ -411,11 +412,10 @@ defmodule SpaceTraders.Fleet.Intents.RecordedAction do
   # Authenticated Manual Intervention remains a supported execution authority
   # before the Fleet has an active Revision, so it needs no Strategy Revision.
   defp owner(agent, ship, %Intent{caller: "intervention"} = intent) do
-    strategy =
-      Repo.one(from s in Strategy, where: s.operator_id == ^agent.operator_id, lock: "FOR SHARE")
+    strategy = deployment_strategy(agent)
 
     with {:ok, authority} <-
-           ManualIntervention.authorization(agent.operator_id, ship.symbol, intent.id, lock: true) do
+           ManualIntervention.authorization(agent.id, ship.symbol, intent.id, lock: true) do
       claim =
         Map.merge(authority, %{commitment_id: nil, portfolio_id: nil, portfolio_version: nil})
 
@@ -432,8 +432,7 @@ defmodule SpaceTraders.Fleet.Intents.RecordedAction do
   end
 
   defp owner(agent, ship, %Intent{caller: "commitment"} = intent) do
-    strategy =
-      Repo.one(from s in Strategy, where: s.operator_id == ^agent.operator_id, lock: "FOR SHARE")
+    strategy = deployment_strategy(agent)
 
     generation = current_generation(agent.id)
 
@@ -450,6 +449,10 @@ defmodule SpaceTraders.Fleet.Intents.RecordedAction do
   end
 
   defp owner(_agent, _ship, _intent), do: {:error, :invalid_intent_owner}
+
+  defp deployment_strategy(_agent) do
+    Repo.one(from s in Strategy, lock: "FOR SHARE")
+  end
 
   defp active_revision(%Strategy{emergency_stopped_at: nil, active_revision_id: revision_id})
        when not is_nil(revision_id),

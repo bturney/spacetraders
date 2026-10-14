@@ -5,10 +5,9 @@ defmodule SpaceTraders.IntelligenceTest do
   alias SpaceTraders.Agent.Agent, as: AgentRecord
   alias SpaceTraders.Intelligence
   alias SpaceTraders.Fleet
-  alias SpaceTraders.Repo
 
   defp agent do
-    Repo.insert!(%AgentRecord{
+    SpaceTraders.AgentFixtures.established_agent_fixture(%AgentRecord{
       symbol: "INTEL-#{System.unique_integer([:positive])}",
       faction: "COSMIC",
       headquarters: "X1-UX81-A1",

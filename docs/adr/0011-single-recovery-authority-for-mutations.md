@@ -44,5 +44,22 @@ by the attempt's recorded `intent_id`/`commitment_id` provenance. A missing
 Realization or provenance reads as unknown; it never triggers a read, retry or
 reconciliation.
 
+Registration (issue 701) reuses this authority. Each `register` step commits
+on its own while the establishment authority is held. The steps are prepare,
+sent-or-unknown, the outcome, then adoption. An unresolved attempt suppresses
+every further registration, import and name candidate. Only a public Agent
+404 (absent) or an Operator-supplied AgentToken that authenticates as the
+attempted symbol (accepted) settles it. A taken symbol proves nothing. A
+proven success keeps its AgentToken encrypted on the attempt until adoption
+links the attempt to its Generation, so an interrupted adoption resumes the
+same identity rather than minting again.
+
+Registration admission remains in the API adapter; Fleet Generation owns
+establishment serialization, reconciliation and adoption. The owner rejects
+caller transactions so dispatch evidence cannot roll back after the game
+accepted a request. Mission Control reconstructs recovery from the attempt even
+when the sender died before publishing its Operator-facing condition. SQL
+diagnostics omit writes containing the credential's plaintext custom-type input.
+
 Related: [ADR 0010](0010-autonomous-runtime.md) assigns each mutation exactly
 one owner; this record assigns each mutation exactly one recovery record.

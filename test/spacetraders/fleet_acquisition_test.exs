@@ -351,6 +351,32 @@ defmodule SpaceTraders.FleetAcquisitionTest do
     assert id == revision.id
   end
 
+  test "fresh spending evidence cannot admit a purchase after the Fleet is fenced" do
+    {_scope, agent, _revision} = generation()
+    stub_shipyard(agent)
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      assert conn.method == "GET"
+      overview(conn, agent, @credits)
+    end)
+
+    assert {:ok, offer} = SpaceTraders.CreditSpending.acquire_ship_purchase(agent, candidate())
+    assert {:ok, %{generation: generation}} = SpaceTraders.FleetGeneration.current_fleet()
+    Repo.update!(Ecto.Changeset.change(generation, fenced_at: DateTime.utc_now()))
+    Req.Test.stub(SpaceTraders.API, fn _ -> flunk("fenced Fleet spending reached the game") end)
+
+    assert {:error, :generation_not_current} =
+             SpaceTraders.API.purchase_ship(
+               SpaceTraders.API.AgentTokenReference.new(agent),
+               "SHIP_LIGHT_HAULER",
+               "X1-UX81-A1",
+               spending: offer
+             )
+
+    # The current-Fleet gate refuses before a Mutation Attempt is even prepared.
+    assert [] = purchase_attempts(agent)
+  end
+
   test "Shipyard evidence that ages before the send marker prevents the purchase" do
     {_scope, agent, _revision} = generation()
     start_supervised!({SpaceTraders.TestClock, DateTime.utc_now()})
@@ -678,7 +704,12 @@ defmodule SpaceTraders.FleetAcquisitionTest do
                MutationAttempts.reconcile(attempt, :absent, forged)
     end
 
-    {_scope, other_agent, _revision} = generation("OTHER")
+    other_agent =
+      SpaceTraders.AgentFixtures.agent_fixture(
+        Repo.get!(SpaceTraders.Agent.Operator, agent.operator_id),
+        %{symbol: "OTHER"}
+      )
+
     other_generation = Repo.get_by!(Generation, agent_id: other_agent.id)
 
     source =
@@ -1021,7 +1052,7 @@ defmodule SpaceTraders.FleetAcquisitionTest do
 
     Repo.update!(Ecto.Changeset.change(strategy, active_revision_id: revision.id))
 
-    Repo.insert!(%Generation{
+    SpaceTraders.AgentFixtures.generation_fixture(%Generation{
       operator_id: operator.id,
       agent_id: agent.id,
       fleet_strategy_revision_id: revision.id,

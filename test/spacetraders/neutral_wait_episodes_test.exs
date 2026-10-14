@@ -1,5 +1,5 @@
 defmodule SpaceTraders.NeutralWaitEpisodesTest do
-  use SpaceTraders.DataCase, async: true
+  use SpaceTraders.DataCase, async: false
 
   import SpaceTraders.AgentFixtures
 
@@ -351,9 +351,11 @@ defmodule SpaceTraders.NeutralWaitEpisodesTest do
                  market_comparison(action: :no_admissible_commitment)
                )
 
-      # A replacement Fleet Generation comes with a replacement Agent
-      # (FleetGeneration.mint behavior): the wait is superseded across the
-      # Operator's allocation scope, not only within one generation.
+      # Mirror the lifecycle boundary: relinquish the predecessor's allocation
+      # before the successor becomes the published current Fleet.
+      :ok = SpaceTraders.FleetAllocation.NeutralWait.supersede_current()
+      Repo.update!(Ecto.Changeset.change(generation, retired_at: DateTime.utc_now()))
+
       replacement_agent =
         Repo.insert!(%SpaceTraders.Agent.Agent{
           symbol: "REPLACED-#{agent.symbol}",
@@ -364,7 +366,7 @@ defmodule SpaceTraders.NeutralWaitEpisodesTest do
         })
 
       replacement_generation =
-        Repo.insert!(%Generation{
+        SpaceTraders.AgentFixtures.generation_fixture(%Generation{
           operator_id: operator.id,
           agent_id: replacement_agent.id,
           fleet_strategy_revision_id: revision.id,
@@ -374,6 +376,14 @@ defmodule SpaceTraders.NeutralWaitEpisodesTest do
           replacement_symbols: %{},
           objective_progress: %{}
         })
+
+      assert {:ok, :ok} =
+               Repo.transaction(fn ->
+                 SpaceTraders.FleetGeneration.Identity.publish_generation!(
+                   operator.id,
+                   replacement_generation.id
+                 )
+               end)
 
       # The replacement Agent's coverage work is durably scheduled on its own
       # demands, exactly as mint syncs baseline coverage for a new Agent.
@@ -533,7 +543,7 @@ defmodule SpaceTraders.NeutralWaitEpisodesTest do
         replacement_symbols: %{},
         objective_progress: %{}
       })
-      |> Repo.insert!()
+      |> SpaceTraders.AgentFixtures.generation_fixture()
 
     %{
       operator: operator,

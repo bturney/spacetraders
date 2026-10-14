@@ -1,5 +1,5 @@
 defmodule SpaceTraders.ConstructionExecutionTest do
-  use SpaceTraders.DataCase, async: true
+  use SpaceTraders.DataCase, async: false
 
   import SpaceTraders.AgentFixtures
 
@@ -72,7 +72,7 @@ defmodule SpaceTraders.ConstructionExecutionTest do
         objective_progress: %{},
         strategy_capable_at: DateTime.utc_now()
       })
-      |> Repo.insert!()
+      |> SpaceTraders.AgentFixtures.generation_fixture()
 
     candidate = %PortfolioCandidate{
       id: "construction-1",

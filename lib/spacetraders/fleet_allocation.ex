@@ -27,7 +27,7 @@ defmodule SpaceTraders.FleetAllocation do
   alias SpaceTraders.FleetPlanning.CandidateContribution
   alias SpaceTraders.FleetStrategy
   alias SpaceTraders.FleetStrategy.Strategy
-  alias SpaceTraders.{Clock, ManualIntervention, Outbox, Repo, ShipReservation}
+  alias SpaceTraders.{Clock, ManualIntervention, OperatorAuthority, Outbox, Repo, ShipReservation}
 
   alias SpaceTraders.FleetStrategy.{
     ObjectiveEvaluation,
@@ -201,10 +201,11 @@ defmodule SpaceTraders.FleetAllocation do
              is_list(rejected) and is_list(evidence_references) and is_map(expectations) and
              is_binary(calibration_version) and calibration_version != "" and
              is_integer(source_version) and source_version >= 0 do
-    if valid_published_commitments?(commitments) do
+    if valid_published_commitments?(commitments) and
+         OperatorAuthority.authorize(scope) == {:ok, operator_id} do
       notification = fn portfolio ->
         %{
-          topic: "fleet_allocation:#{operator_id}",
+          topic: "fleet_allocation",
           event: "fleet_commitment_portfolio_published",
           payload: %{
             "portfolio_id" => portfolio.id,
@@ -248,7 +249,7 @@ defmodule SpaceTraders.FleetAllocation do
 
   @doc "Replaces a failed dependency and its dependents in place, retaining unrelated Claims and Intents."
   def replan_subgraph(
-        %Scope{operator: %{id: operator_id}},
+        %Scope{operator: %{id: operator_id}} = scope,
         generation_id,
         %{revision_id: revision_id, source_version: version, commitments: proposed} = selection,
         changed_candidate_ids,
@@ -262,11 +263,12 @@ defmodule SpaceTraders.FleetAllocation do
              is_list(changed_candidate_ids) and changed_candidate_ids != [] and
              is_list(references) and is_map(expectations) and is_binary(calibration_version) and
              calibration_version != "" do
-    if valid_published_commitments?(proposed) do
+    if valid_published_commitments?(proposed) and
+         OperatorAuthority.authorize(scope) == {:ok, operator_id} do
       Outbox.publish(
         fn %{portfolio: portfolio, changed: changed, episode_id: episode_id} ->
           %{
-            topic: "fleet_allocation:#{operator_id}",
+            topic: "fleet_allocation",
             event: "fleet_commitment_subgraph_replanned",
             payload: %{
               "portfolio_id" => portfolio.id,
@@ -480,27 +482,86 @@ defmodule SpaceTraders.FleetAllocation do
     )
   end
 
-  @doc "The Agent's active (neither fenced nor retired) Fleet Generation, or nil."
+  @doc "The canonical allocatable Fleet Generation, or nil during setup or replacement."
+  def current_generation do
+    case FleetGeneration.current_fleet() do
+      {:ok, %{state: :current, generation: generation}} -> generation
+      _ -> nil
+    end
+  end
+
+  @doc "Exact Agent binding: only the canonical current Fleet may supply resources."
   def active_generation(%AgentRecord{id: agent_id}) do
-    Repo.one(
-      from generation in Generation,
+    case current_generation() do
+      %Generation{agent_id: ^agent_id} = generation -> generation
+      _ -> nil
+    end
+  end
+
+  @doc "Returns the current complete portfolio, without a tenant selector."
+  def current_portfolio do
+    case current_generation() do
+      %Generation{id: id} -> current_portfolio_query(id) |> Repo.one()
+      _ -> nil
+    end
+  end
+
+  @doc "Authenticated current-portfolio read; Scope proves authority, never chooses resources."
+  def current_portfolio(scope) do
+    case OperatorAuthority.authorize(scope) do
+      {:ok, _} -> current_portfolio()
+      _ -> nil
+    end
+  end
+
+  @doc "Exact resource binding: refuses historical and not-yet-published Agents."
+  def current_portfolio(scope, %AgentRecord{id: agent_id}) do
+    with {:ok, _} <- OperatorAuthority.authorize(scope),
+         %Generation{id: id, agent_id: ^agent_id} <- current_generation() do
+      current_portfolio_query(id) |> Repo.one()
+    else
+      _ -> nil
+    end
+  end
+
+  @doc "Authenticates the allocation caller and binds it to the current Agent and Revision."
+  def authorize_current(scope, %AgentRecord{id: agent_id}, %Revision{id: revision_id}) do
+    with {:ok, _} <- OperatorAuthority.authorize(scope) do
+      authorize_current_agent(%AgentRecord{id: agent_id}, %Revision{id: revision_id})
+    else
+      _ -> {:error, :current_fleet_unavailable}
+    end
+  end
+
+  @doc false
+  def authorize_current_agent(%AgentRecord{id: agent_id}, %Revision{id: revision_id}) do
+    with %Generation{agent_id: ^agent_id, fleet_strategy_revision_id: ^revision_id} = generation <-
+           current_generation() do
+      {:ok, generation}
+    else
+      _ -> {:error, :current_fleet_unavailable}
+    end
+  end
+
+  @doc false
+  def admit_current_agent(agent_id, generation_id) do
+    query =
+      from g in Generation,
+        join: i in "current_fleet_identity",
+        on: i.id == 1 and i.fleet_generation_id == g.id,
+        join: a in AgentRecord,
+        on: a.id == g.agent_id,
         where:
-          generation.agent_id == ^agent_id and is_nil(generation.fenced_at) and
-            is_nil(generation.retired_at)
-    )
-  end
+          g.agent_id == ^agent_id and is_nil(g.fenced_at) and is_nil(g.retired_at) and
+            is_nil(a.stale_at),
+        lock: "FOR SHARE OF f0",
+        select: g.id
 
-  @doc "Returns the current complete portfolio for the authenticated Operator's active generation."
-  def current_portfolio(%Scope{operator: %{id: operator_id}}) do
-    current_portfolio_query(operator_id)
-    |> Repo.one()
-  end
+    live_id = Repo.one(query)
 
-  @doc "Returns the current portfolio for one Agent's active Fleet Generation."
-  def current_portfolio(%Scope{operator: %{id: operator_id}}, %AgentRecord{id: agent_id}) do
-    current_portfolio_query(operator_id)
-    |> where([_portfolio, generation], generation.agent_id == ^agent_id)
-    |> Repo.one()
+    if live_id && generation_id in [nil, live_id],
+      do: :ok,
+      else: {:error, :current_fleet_unavailable}
   end
 
   @doc "Candidates definitively infeasible in this Fleet Generation cannot be replayed from the same evidence."
@@ -570,14 +631,17 @@ defmodule SpaceTraders.FleetAllocation do
     projected
   end
 
-  defp current_portfolio_query(operator_id) do
+  defp current_portfolio_query(generation_id) do
     Portfolio
     |> join(:inner, [portfolio], generation in Generation,
       on: generation.id == portfolio.fleet_generation_id
     )
+    |> join(:inner, [_portfolio, generation], identity in "current_fleet_identity",
+      on: identity.id == 1 and identity.fleet_generation_id == generation.id
+    )
     |> where(
       [portfolio, generation],
-      portfolio.operator_id == ^operator_id and is_nil(portfolio.superseded_at) and
+      generation.id == ^generation_id and is_nil(portfolio.superseded_at) and
         is_nil(generation.fenced_at) and is_nil(generation.retired_at)
     )
     |> order_by([portfolio], desc: portfolio.version)
@@ -727,24 +791,26 @@ defmodule SpaceTraders.FleetAllocation do
   end
 
   @doc "Safely releases the current portfolio when no replacement remains admissible."
-  def unwind_current_portfolio(%Scope{operator: %{id: operator_id}}, generation_id)
+  def unwind_current_portfolio(%Scope{operator: %{id: operator_id}} = scope, generation_id)
       when is_integer(generation_id) do
-    Outbox.publish(
-      fn portfolio ->
-        %{
-          topic: "fleet_allocation:#{operator_id}",
-          event: "fleet_commitment_portfolio_unwound",
-          payload: %{
-            "portfolio_id" => portfolio.id,
-            "decision_episode_id" => portfolio.strategy_decision_episode_id
+    with {:ok, ^operator_id} <- OperatorAuthority.authorize(scope) do
+      Outbox.publish(
+        fn portfolio ->
+          %{
+            topic: "fleet_allocation",
+            event: "fleet_commitment_portfolio_unwound",
+            payload: %{
+              "portfolio_id" => portfolio.id,
+              "decision_episode_id" => portfolio.strategy_decision_episode_id
+            }
           }
-        }
-      end,
-      fn ->
-        do_unwind_current_portfolio(operator_id, generation_id)
-      end
-    )
-    |> observe_publication(:unwind, operator_id, generation_id)
+        end,
+        fn ->
+          do_unwind_current_portfolio(operator_id, generation_id)
+        end
+      )
+      |> observe_publication(:unwind, operator_id, generation_id)
+    end
   end
 
   def unwind_current_portfolio(_scope, _generation_id), do: {:error, :invalid_unwind}
@@ -771,24 +837,26 @@ defmodule SpaceTraders.FleetAllocation do
   Revision exists.
   """
   def retire_stale_portfolio(
-        %Scope{operator: %{id: operator_id}},
+        %Scope{operator: %{id: operator_id}} = scope,
         generation_id,
         active_revision_id
       )
       when is_integer(generation_id) and is_integer(active_revision_id) do
-    Outbox.publish(
-      fn %{portfolio: portfolio} ->
-        %{
-          topic: "fleet_allocation:#{operator_id}",
-          event: "fleet_commitment_portfolio_unwound",
-          payload: %{
-            "portfolio_id" => portfolio.id,
-            "decision_episode_id" => portfolio.strategy_decision_episode_id
+    with {:ok, ^operator_id} <- OperatorAuthority.authorize(scope) do
+      Outbox.publish(
+        fn %{portfolio: portfolio} ->
+          %{
+            topic: "fleet_allocation",
+            event: "fleet_commitment_portfolio_unwound",
+            payload: %{
+              "portfolio_id" => portfolio.id,
+              "decision_episode_id" => portfolio.strategy_decision_episode_id
+            }
           }
-        }
-      end,
-      fn -> do_retire_stale_portfolio(operator_id, generation_id, active_revision_id) end
-    )
+        end,
+        fn -> do_retire_stale_portfolio(operator_id, generation_id, active_revision_id) end
+      )
+    end
   end
 
   @doc """
@@ -1234,8 +1302,10 @@ defmodule SpaceTraders.FleetAllocation do
         on: portfolio.id == claim.fleet_commitment_portfolio_id,
         join: generation in Generation,
         on: generation.id == portfolio.fleet_generation_id,
+        join: identity in "current_fleet_identity",
+        on: identity.id == 1 and identity.fleet_generation_id == generation.id,
         where:
-          claim.resource == ^ship_symbol and portfolio.operator_id == ^operator_id and
+          claim.resource == ^ship_symbol and
             generation.agent_id == ^agent_id and is_nil(generation.fenced_at) and
             is_nil(generation.retired_at) and
             ((is_nil(portfolio.superseded_at) and commitment.unwind_state == :not_required) or
@@ -1317,7 +1387,7 @@ defmodule SpaceTraders.FleetAllocation do
     if active_generation? or active_revision? do
       case current_ship_claim(agent, ship_symbol, opts) do
         {:error, :no_current_ship_claim} = error ->
-          if ManualIntervention.authorized?(operator_id, ship_symbol, opts[:intent_id]) do
+          if ManualIntervention.authorized?(agent_id, ship_symbol, opts[:intent_id]) do
             {:ok, %{commitment_id: nil, portfolio_id: nil, portfolio_version: nil}}
           else
             error
@@ -1367,7 +1437,7 @@ defmodule SpaceTraders.FleetAllocation do
         |> Map.merge(json_safe(evidence))
 
       %{
-        topic: "fleet_allocation:#{operator_id}",
+        topic: "fleet_allocation",
         event: "ship_execution_infeasible",
         payload: payload
       }
@@ -1431,7 +1501,7 @@ defmodule SpaceTraders.FleetAllocation do
 
     # A selected plan is a changed result: every current Neutral Wait in this
     # Operator's allocation scope supersedes before this result takes over.
-    NeutralWait.supersede_for_operator(operator_id)
+    NeutralWait.supersede_current()
 
     revision = Repo.get!(Revision, revision_id)
 
@@ -1671,9 +1741,27 @@ defmodule SpaceTraders.FleetAllocation do
   defp lock_generations(query, :share),
     do: Repo.all(from(g in query, order_by: g.id, lock: "FOR SHARE", select: g.id))
 
-  defp lock_generation_agent!(generation_id) do
+  defp lock_generation_agent!(generation_id), do: lock_current_generation!(generation_id)
+
+  @doc false
+  def lock_current_generation!(generation_id) do
     generation = Repo.get!(Generation, generation_id)
     SpaceTraders.CreditSpending.lock_agent(generation.agent_id)
+    lock_generations(from(g in Generation, where: g.id == ^generation_id), :update)
+
+    unless Repo.exists?(
+             from identity in "current_fleet_identity",
+               join: g in Generation,
+               on: g.id == identity.fleet_generation_id,
+               join: a in AgentRecord,
+               on: a.id == g.agent_id,
+               where:
+                 identity.id == 1 and g.id == ^generation_id and
+                   is_nil(g.fenced_at) and is_nil(g.retired_at) and is_nil(a.stale_at)
+           ),
+           do: Repo.rollback(:stale_source)
+
+    Repo.get!(Generation, generation_id)
   end
 
   defp realized_outcomes(episode_id) do

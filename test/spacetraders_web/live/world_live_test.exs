@@ -1,12 +1,13 @@
 defmodule SpaceTradersWeb.WorldLiveTest do
-  use SpaceTradersWeb.ConnCase, async: true
+  # Current-Fleet resolution adopts with deployment-wide locks.
+  use SpaceTradersWeb.ConnCase, async: false
 
   import Phoenix.LiveViewTest
 
   alias SpaceTraders.API.Model.{Construction, Market, Shipyard, Waypoint}
   alias SpaceTraders.Agent.Agent, as: AgentRecord
+  alias SpaceTraders.FleetGeneration.Generation
   alias SpaceTraders.Intelligence
-  alias SpaceTraders.Repo
 
   setup :register_and_log_in_operator
 
@@ -20,7 +21,7 @@ defmodule SpaceTradersWeb.WorldLiveTest do
     operator: operator
   } do
     agent =
-      Repo.insert!(%AgentRecord{
+      SpaceTraders.AgentFixtures.established_agent_fixture(%AgentRecord{
         operator_id: operator.id,
         symbol: "ATLAS",
         faction: "COSMIC",
@@ -55,11 +56,11 @@ defmodule SpaceTradersWeb.WorldLiveTest do
 
     {:ok, view, html} = live(conn, ~p"/world")
     assert has_element?(view, "#world-waypoint-X1-A1")
-    assert has_element?(view, "a[href='/world/systems/X1?agent=#{agent.id}']", "X1")
+    assert has_element?(view, "a[href='/world/systems/X1']", "X1")
 
     assert has_element?(
              view,
-             "a[href='/world/systems/X1/waypoints/X1-A1?agent=#{agent.id}']",
+             "a[href='/world/systems/X1/waypoints/X1-A1']",
              "Open page"
            )
 
@@ -75,7 +76,7 @@ defmodule SpaceTradersWeb.WorldLiveTest do
     operator: operator
   } do
     agent =
-      Repo.insert!(%AgentRecord{
+      SpaceTraders.AgentFixtures.established_agent_fixture(%AgentRecord{
         operator_id: operator.id,
         symbol: "ATLAS",
         faction: "COSMIC",
@@ -107,7 +108,7 @@ defmodule SpaceTradersWeb.WorldLiveTest do
 
     {:ok, system_view, system_html} = live(conn, system_path)
     assert has_element?(system_view, "#system-X1", "System X1")
-    assert has_element?(system_view, "a[href='#{waypoint_path}?agent=#{agent.id}']", "X1-A1")
+    assert has_element?(system_view, "a[href='#{waypoint_path}']", "X1-A1")
     assert system_html =~ "Known waypoint"
 
     {:ok, waypoint_view, waypoint_html} = live(conn, waypoint_path)
@@ -121,7 +122,7 @@ defmodule SpaceTradersWeb.WorldLiveTest do
     operator: operator
   } do
     agent =
-      Repo.insert!(%AgentRecord{
+      SpaceTraders.AgentFixtures.established_agent_fixture(%AgentRecord{
         operator_id: operator.id,
         symbol: "ATLAS",
         faction: "COSMIC",
@@ -166,19 +167,19 @@ defmodule SpaceTradersWeb.WorldLiveTest do
 
     assert has_element?(
              waypoint_view,
-             "a[href='#{waypoint_path}/market?agent=#{agent.id}']",
+             "a[href='#{waypoint_path}/market']",
              "Market"
            )
 
     assert has_element?(
              waypoint_view,
-             "a[href='#{waypoint_path}/shipyard?agent=#{agent.id}']",
+             "a[href='#{waypoint_path}/shipyard']",
              "Shipyard"
            )
 
     assert has_element?(
              waypoint_view,
-             "a[href='#{waypoint_path}/construction?agent=#{agent.id}']",
+             "a[href='#{waypoint_path}/construction']",
              "Construction"
            )
 
@@ -197,46 +198,97 @@ defmodule SpaceTradersWeb.WorldLiveTest do
     assert construction_html =~ "13"
   end
 
-  test "keeps a World link scoped to the Agent whose evidence it references", %{
-    conn: conn,
-    operator: operator
-  } do
-    first =
-      Repo.insert!(%AgentRecord{
-        operator_id: operator.id,
-        symbol: "FIRST",
-        faction: "COSMIC",
-        headquarters: "X1-A1"
-      })
+  describe "the sole current Fleet" do
+    setup %{operator: operator} do
+      predecessor =
+        SpaceTraders.AgentFixtures.established_agent_fixture(%AgentRecord{
+          operator_id: operator.id,
+          symbol: "PARALLAX",
+          faction: "COSMIC",
+          headquarters: "X1-A1"
+        })
 
-    second =
-      Repo.insert!(%AgentRecord{
-        operator_id: operator.id,
-        symbol: "SECOND",
-        faction: "COSMIC",
-        headquarters: "X1-A1"
-      })
+      historical_generation =
+        SpaceTraders.AgentFixtures.generation_fixture(%Generation{
+          operator_id: operator.id,
+          agent_id: predecessor.id,
+          number: 1,
+          symbol: "PARALLAX",
+          faction: "COSMIC",
+          fenced_at: DateTime.utc_now(),
+          retired_at: DateTime.utc_now()
+        })
 
+      current =
+        SpaceTraders.AgentFixtures.established_agent_fixture(%AgentRecord{
+          operator_id: operator.id,
+          symbol: "ORBITALIST",
+          faction: "COSMIC",
+          headquarters: "X2-B1"
+        })
+
+      observe!(predecessor, "X1", "X1-A1", "PLANET")
+      observe!(current, "X2", "X2-B1", "JUMP_GATE")
+
+      Req.Test.stub(SpaceTraders.API, fn _conn -> flunk("World must not request gameplay") end)
+      %{predecessor: predecessor, current: current, historical_generation: historical_generation}
+    end
+
+    test "World shows only the current Fleet, without an Agent selector", %{conn: conn} do
+      {:ok, view, html} = live(conn, ~p"/world")
+
+      assert has_element?(view, "a[href='/world/systems/X2']", "X2")
+      assert has_element?(view, "#world-waypoint-X2-B1")
+      assert html =~ "ORBITALIST"
+      refute html =~ "PARALLAX"
+      refute has_element?(view, "#world-waypoint-X1-A1")
+      refute html =~ "agent="
+      refute has_element?(view, "[phx-value-agent]")
+    end
+
+    test "an explicit Generation link reads its own history and never selects another current Fleet",
+         %{
+           conn: conn,
+           predecessor: predecessor,
+           historical_generation: historical_generation
+         } do
+      {:ok, view, html} =
+        live(conn, "/world/systems/X1/waypoints/X1-A1?generation=#{historical_generation.id}")
+
+      assert html =~ "PLANET"
+      assert has_element?(view, "#historical-evidence", "Historical evidence")
+      assert has_element?(view, "#historical-evidence", "PARALLAX")
+      assert has_element?(view, "#historical-evidence", "Generation 1")
+      refute has_element?(view, "#current-fleet-evidence")
+
+      # In-page navigation stays inside the historical context.
+      assert has_element?(
+               view,
+               "a[href='/world/systems/X1/waypoints/X1-A1/market?generation=#{historical_generation.id}']"
+             )
+
+      {:ok, current_view, current_html} = live(conn, "/world/systems/X1/waypoints/X1-A1")
+      assert has_element?(current_view, "#current-fleet-evidence", "ORBITALIST")
+      refute current_html =~ "PLANET"
+
+      {:ok, bogus_view, _html} =
+        live(conn, "/world/systems/X2/waypoints/X2-B1?agent=#{predecessor.id}")
+
+      assert has_element?(bogus_view, "#current-fleet-evidence", "ORBITALIST")
+    end
+  end
+
+  test "without a current Fleet World explains the setup state", %{conn: conn} do
+    {:ok, _view, html} = live(conn, ~p"/world")
+    assert html =~ "No current Fleet"
+  end
+
+  defp observe!(agent, system, symbol, type) do
     {:ok, _} =
       Intelligence.observe_waypoint(
-        first,
-        Waypoint.from_json(%{"symbol" => "X1-A1", "systemSymbol" => "X1", "type" => "PLANET"}),
+        agent,
+        Waypoint.from_json(%{"symbol" => symbol, "systemSymbol" => system, "type" => type}),
         source: "get_waypoint"
       )
-
-    {:ok, _} =
-      Intelligence.observe_waypoint(
-        second,
-        Waypoint.from_json(%{"symbol" => "X1-A1", "systemSymbol" => "X1", "type" => "JUMP_GATE"}),
-        source: "get_waypoint"
-      )
-
-    Req.Test.stub(SpaceTraders.API, fn _conn ->
-      flunk("Entity pages must not request gameplay")
-    end)
-
-    {:ok, _view, html} = live(conn, "/world/systems/X1/waypoints/X1-A1?agent=#{second.id}")
-    assert html =~ "JUMP_GATE"
-    refute html =~ "PLANET"
   end
 end

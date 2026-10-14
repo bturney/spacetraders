@@ -64,7 +64,52 @@ defmodule Mix.Tasks.Verify.Boundary do
 
   defp violations(path) do
     ast = source_ast(path)
-    transport_calls(ast, path) ++ legacy_calls(ast, path)
+    transport_calls(ast, path) ++ legacy_calls(ast, path) ++ tenancy_calls(ast, path)
+  end
+
+  defp tenancy_calls(ast, path) do
+    {_ast, violations} =
+      Macro.prewalk(ast, [], fn
+        {{:., _, [{:__aliases__, _, parts}, :get_agent]}, meta, [_scope, _id]} = node, violations
+        when parts in [[:Agent], [:SpaceTraders, :Agent]] ->
+          {node, ["#{path}:#{meta[:line]} retired tenancy interface get_agent/2" | violations]}
+
+        {{:., _, [_module, function]}, meta, _args} = node, violations
+        when function in [
+               :list_agents,
+               :dashboard,
+               :refresh_agent,
+               :retire_stale_agents,
+               :replace_stale_agents,
+               :adopt_current_fleet,
+               :list_for_operator,
+               :revalidate_operator,
+               :supersede_for_operator
+             ] ->
+          {node, ["#{path}:#{meta[:line]} retired tenancy interface #{function}" | violations]}
+
+        {:belongs_to, meta, [:operator | _]} = node, violations ->
+          if path == "lib/spacetraders/agent/operator_token.ex",
+            do: {node, violations},
+            else:
+              {node, ["#{path}:#{meta[:line]} retired tenancy resource association" | violations]}
+
+        {{:., _, [Access, :get]}, meta, [_params, "agent"]} = node, violations ->
+          {node, ["#{path}:#{meta[:line]} retired tenancy Agent selector" | violations]}
+
+        string, violations when is_binary(string) ->
+          if Enum.any?(
+               ~w(fleet_strategy: mission_conditions: fleet_allocation: ?agent=),
+               &String.contains?(string, &1)
+             ),
+             do: {string, ["#{path}: retired tenancy topic or Agent selector" | violations]},
+             else: {string, violations}
+
+        node, violations ->
+          {node, violations}
+      end)
+
+    Enum.reverse(violations)
   end
 
   defp source_ast(path) do

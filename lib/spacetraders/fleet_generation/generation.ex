@@ -19,10 +19,11 @@ defmodule SpaceTraders.FleetGeneration.Generation do
     field :fenced_at, :utc_datetime_usec
     field :retired_at, :utc_datetime_usec
 
-    belongs_to :operator, SpaceTraders.Agent.Operator
+    field :operator_id, :id
     belongs_to :agent, SpaceTraders.Agent.Agent
 
     belongs_to :fleet_strategy_revision, SpaceTraders.FleetStrategy.Revision
+    belongs_to :initial_fleet_strategy_revision, SpaceTraders.FleetStrategy.Revision
 
     timestamps(type: :utc_datetime)
   end
@@ -33,6 +34,7 @@ defmodule SpaceTraders.FleetGeneration.Generation do
       :operator_id,
       :agent_id,
       :fleet_strategy_revision_id,
+      :initial_fleet_strategy_revision_id,
       :number,
       :symbol,
       :faction,
@@ -56,7 +58,7 @@ defmodule SpaceTraders.FleetGeneration.Generation do
       :replacement_symbols,
       :objective_progress
     ])
-    |> unique_constraint([:operator_id, :number])
+    |> unique_constraint(:number)
     |> unique_constraint(:agent_id)
   end
 end

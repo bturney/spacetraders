@@ -1,5 +1,6 @@
 defmodule SpaceTradersWeb.EntityLiveTest do
-  use SpaceTradersWeb.ConnCase, async: true
+  # Current-Fleet resolution adopts with deployment-wide locks.
+  use SpaceTradersWeb.ConnCase, async: false
 
   import Phoenix.LiveViewTest
 
@@ -10,12 +11,28 @@ defmodule SpaceTradersWeb.EntityLiveTest do
 
   setup :register_and_log_in_operator
 
+  test "unavailable explicit Generation links never read the current Fleet", %{
+    conn: conn,
+    operator: operator
+  } do
+    SpaceTraders.AgentFixtures.agent_fixture(operator, %{symbol: "ATLAS"})
+
+    Req.Test.stub(SpaceTraders.API, fn _ -> flunk("History must not request gameplay") end)
+
+    for selector <- ["invalid", "999999999"] do
+      assert {:error, {:live_redirect, %{to: "/world", flash: flash}}} =
+               live(conn, "/ships/ATLAS-1?generation=#{selector}")
+
+      assert flash["error"] == "Historical Generation evidence is unavailable."
+    end
+  end
+
   test "renders Ship and Contract pages from existing governed evidence without game reads", %{
     conn: conn,
     operator: operator
   } do
     agent =
-      Repo.insert!(%AgentRecord{
+      SpaceTraders.AgentFixtures.established_agent_fixture(%AgentRecord{
         operator_id: operator.id,
         symbol: "ATLAS",
         faction: "COSMIC",
@@ -65,7 +82,7 @@ defmodule SpaceTradersWeb.EntityLiveTest do
 
     assert has_element?(
              ship_view,
-             "a[href='/world/systems/X1/waypoints/X1-A1?agent=#{agent.id}']",
+             "a[href='/world/systems/X1/waypoints/X1-A1']",
              "X1-A1"
            )
 
@@ -79,7 +96,7 @@ defmodule SpaceTradersWeb.EntityLiveTest do
 
     assert has_element?(
              contract_view,
-             "a[href='/world/systems/X1/waypoints/X1-A1?agent=#{agent.id}']",
+             "a[href='/world/systems/X1/waypoints/X1-A1']",
              "X1-A1"
            )
   end

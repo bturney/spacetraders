@@ -270,6 +270,47 @@ defmodule SpaceTraders.ManualInterventionTest do
     end
   end
 
+  test "a retained predecessor's reserved Ship cannot receive a new intervention" do
+    operator = operator_fixture()
+    scope = Scope.for_operator(operator)
+    predecessor = agent_fixture(operator, %{symbol: "PARALLAX"})
+    symbol = "PARALLAX-1"
+    {:ok, ship} = Fleet.record_ship(predecessor, symbol, "SHIP_COMMAND_FRIGATE")
+
+    # Reserved while current; the Generation then became history.
+    reservation =
+      Repo.insert!(%ShipReservation{
+        ship_id: ship.id,
+        ship_symbol: symbol,
+        operator_id: operator.id,
+        reason: "Recovery"
+      })
+
+    SpaceTraders.AgentFixtures.generation_fixture(%SpaceTraders.FleetGeneration.Generation{
+      operator_id: operator.id,
+      agent_id: predecessor.id,
+      number: 1,
+      symbol: "PARALLAX",
+      faction: "COSMIC",
+      fenced_at: DateTime.utc_now(),
+      retired_at: DateTime.utc_now()
+    })
+
+    Req.Test.stub(SpaceTraders.API, fn _conn -> flunk("no gameplay for a predecessor") end)
+
+    assert {:error, :generation_not_current} =
+             Intents.intervene_navigate(scope, predecessor, symbol, "X1-UX81-A2", "Old course")
+
+    assert ManualIntervention.list(scope) == []
+
+    other = Scope.for_operator(legacy_operator_fixture())
+
+    assert {:error, :not_deployment_operator} =
+             Intents.intervene_navigate(other, predecessor, symbol, "X1-UX81-A2", "Other")
+
+    assert Repo.reload!(reservation).released_at == nil
+  end
+
   defp future_arrival,
     do: DateTime.utc_now() |> DateTime.add(3600) |> DateTime.to_iso8601()
 
@@ -277,7 +318,7 @@ defmodule SpaceTraders.ManualInterventionTest do
     {:ok, strategy} = SpaceTraders.FleetStrategy.select_preset(scope, "steady_growth")
     {:ok, revision} = SpaceTraders.FleetStrategy.activate(scope, strategy.draft_version)
 
-    Repo.insert!(%SpaceTraders.FleetGeneration.Generation{
+    SpaceTraders.AgentFixtures.generation_fixture(%SpaceTraders.FleetGeneration.Generation{
       operator_id: scope.operator.id,
       agent_id: agent.id,
       fleet_strategy_revision_id: revision.id,

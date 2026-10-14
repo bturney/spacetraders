@@ -42,10 +42,24 @@ defmodule SpaceTraders.EvidenceTest do
   test "an Observation Demand rejects Strategy provenance from another Operator" do
     operator = operator_fixture()
     agent = agent_fixture(operator)
-    other_operator = operator_fixture()
-    scope = Scope.for_operator(other_operator)
-    {:ok, strategy} = FleetStrategy.select_preset(scope, "steady_growth")
-    {:ok, revision} = FleetStrategy.activate(scope, strategy.draft_version)
+    other_operator = legacy_operator_fixture()
+
+    # Retained pre-contraction Strategy of a non-deployment Operator; it can no
+    # longer be authored through FleetStrategy.
+    strategy =
+      Repo.insert!(%SpaceTraders.FleetStrategy.Strategy{
+        operator_id: other_operator.id,
+        revision_number: 1
+      })
+
+    revision =
+      Repo.insert!(%SpaceTraders.FleetStrategy.Revision{
+        fleet_strategy_id: strategy.id,
+        number: 1,
+        document: %{},
+        source: "operator",
+        activated_at: DateTime.utc_now(:second)
+      })
 
     assert {:error, :strategy_provenance_mismatch} =
              Evidence.request_demand(agent, revision, %{

@@ -285,7 +285,12 @@ defmodule SpaceTraders.CreditSpending do
         _ -> nil
       end
 
-    with {:ok, floor} <- credit_floor(revision),
+    with :ok <-
+           SpaceTraders.FleetAllocation.admit_current_agent(
+             attempt.agent_id,
+             attempt.fleet_generation_id
+           ),
+         {:ok, floor} <- credit_floor(revision),
          :ok <- CreditCalibration.spending_pause(agent, credits, floor, revision) do
       admit_spend(attempt, agent, intent, revision)
     end

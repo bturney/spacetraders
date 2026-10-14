@@ -24,9 +24,10 @@ defmodule SpaceTraders.FleetRefitTest do
   @shipyard_path "/v2/systems/X1-UX81/waypoints/X1-UX81-A2/shipyard"
 
   for kind <- ["install_module", "remove_module"] do
-    @tag :refit_progression
-    test "#{kind} live, prepared boot, and absent boot share one effect and continuation" do
-      for entry <- [:live, :prepared, :absent] do
+    for entry <- [:live, :prepared, :absent] do
+      @tag :refit_progression
+      @tag refit_entry: entry
+      test "#{kind} #{entry} has one effect and continuation", %{refit_entry: entry} do
         {_scope, agent, _revision, ship} = generation("REFIT-#{entry}")
         {intent, action} = selected_refit(agent, ship, unquote(kind))
 
@@ -172,10 +173,7 @@ defmodule SpaceTraders.FleetRefitTest do
       refute SpaceTraders.SafetyFence.active?(original)
 
       assert :ok =
-               SpaceTraders.Fleet.prepare_emergency_stop_resume(
-                 agent.operator_id,
-                 DateTime.utc_now()
-               )
+               SpaceTraders.Fleet.prepare_emergency_stop_resume(DateTime.utc_now())
 
       assert length(SpaceTraders.MutationAttempts.list_for_agent(agent)) == 1
     end
@@ -878,7 +876,7 @@ defmodule SpaceTraders.FleetRefitTest do
 
     Repo.update!(Ecto.Changeset.change(strategy, active_revision_id: revision.id))
 
-    Repo.insert!(%Generation{
+    SpaceTraders.AgentFixtures.generation_fixture(%Generation{
       operator_id: operator.id,
       agent_id: agent.id,
       fleet_strategy_revision_id: revision.id,

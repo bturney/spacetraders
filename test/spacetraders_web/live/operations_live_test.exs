@@ -1,5 +1,5 @@
 defmodule SpaceTradersWeb.OperationsLiveTest do
-  use SpaceTradersWeb.ConnCase, async: true
+  use SpaceTradersWeb.ConnCase, async: false
 
   import Phoenix.LiveViewTest
   import SpaceTraders.AgentFixtures
@@ -39,7 +39,7 @@ defmodule SpaceTradersWeb.OperationsLiveTest do
     })
 
     generation =
-      Repo.insert!(%Generation{
+      SpaceTraders.AgentFixtures.generation_fixture(%Generation{
         operator_id: operator.id,
         agent_id: agent.id,
         fleet_strategy_revision_id: revision.id,
@@ -102,6 +102,69 @@ defmodule SpaceTradersWeb.OperationsLiveTest do
 
     assert html =~
              "Selected as the highest-ranked feasible contribution at its Strategic Priority."
+
+    # A successor can have retained allocation-shaped data before lifecycle
+    # publication. Neither public surface may treat that data as live authority.
+    Repo.update!(Ecto.Changeset.change(generation, retired_at: DateTime.utc_now()))
+    successor = agent_fixture(operator, %{publish: false})
+
+    pending =
+      Repo.insert!(%Generation{
+        operator_id: operator.id,
+        agent_id: successor.id,
+        number: 2,
+        symbol: successor.symbol,
+        faction: successor.faction,
+        fleet_strategy_revision_id: revision.id
+      })
+
+    episode =
+      Repo.insert!(%SpaceTraders.FleetAllocation.StrategyDecisionEpisode{
+        operator_id: operator.id,
+        fleet_generation_id: pending.id,
+        fleet_strategy_revision_id: revision.id,
+        source_version: 0,
+        evidence_references: [],
+        expectations: %{},
+        calibration_version: "market-v1"
+      })
+
+    pending_portfolio =
+      Repo.insert!(%SpaceTraders.FleetAllocation.Portfolio{
+        operator_id: operator.id,
+        fleet_generation_id: pending.id,
+        fleet_strategy_revision_id: revision.id,
+        strategy_decision_episode_id: episode.id,
+        version: 1
+      })
+
+    Repo.insert!(%SpaceTraders.FleetAllocation.Commitment{
+      fleet_commitment_portfolio_id: pending_portfolio.id,
+      candidate_id: "not-published",
+      objective_index: 0,
+      claims: ["PENDING-1"],
+      reservations: %{},
+      pledges: [],
+      dependencies: [],
+      expected_value: 100.0,
+      unwind_cost: 0.0,
+      decisive_reason: "Pending Fleet must not be selected."
+    })
+
+    assert SpaceTraders.MissionControl.endeavors(scope).contribution.commitment_count == 0
+
+    assert SpaceTraders.MissionControl.endeavors(
+             scope,
+             Repo.preload(pending_portfolio, :commitments)
+           ).contribution.commitment_count == 0
+
+    {:ok, transition_view, transition_html} = live(conn, ~p"/operations")
+    assert has_element?(transition_view, "#operations-onboarding")
+    refute transition_html =~ "PENDING-1"
+    refute has_element?(transition_view, "#endeavor-#{hd(portfolio.commitments).id}")
+
+    assert {:error, %{reason: :ambiguous_current_fleet}} =
+             SpaceTraders.FleetGeneration.current_fleet(scope)
   end
 
   test "released Commitments leave the active view with reachable Decision Episode evidence", %{
@@ -121,7 +184,7 @@ defmodule SpaceTradersWeb.OperationsLiveTest do
     })
 
     generation =
-      Repo.insert!(%Generation{
+      SpaceTraders.AgentFixtures.generation_fixture(%Generation{
         operator_id: operator.id,
         agent_id: agent.id,
         fleet_strategy_revision_id: revision.id,

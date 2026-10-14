@@ -1,4 +1,5 @@
 defmodule SpaceTradersWeb.OutcomeMetricsTest do
+  alias SpaceTraders.Repo
   use SpaceTradersWeb.ConnCase, async: false
 
   import SpaceTraders.AgentFixtures
@@ -223,7 +224,9 @@ defmodule SpaceTradersWeb.OutcomeMetricsTest do
     assert_receive {:outcome, @observed_event, _, %{family: "credits"}}
     assert last_interval_rate() == -6000
 
-    second_agent = agent_fixture(operator_fixture())
+    generation = Repo.get_by!(SpaceTraders.FleetGeneration.Generation, agent_id: first_agent.id)
+    generation |> Ecto.Changeset.change(retired_at: DateTime.utc_now()) |> Repo.update!()
+    second_agent = agent_fixture(Repo.get!(SpaceTraders.Agent.Operator, first_agent.operator_id))
     TestClock.advance(60)
     stub_agent(second_agent, 175_000)
     assert {:ok, _} = Evidence.get_agent(second_agent)
@@ -239,7 +242,7 @@ defmodule SpaceTradersWeb.OutcomeMetricsTest do
     assert_metric("spacetraders_outcome_agent_credits_previous", 175_000)
   end
 
-  test "establishing a Fleet Generation invalidates the unscoped credit interval", %{
+  test "a new Fleet Generation cannot inherit the predecessor's credit interval", %{
     agent: agent,
     operator: operator
   } do
@@ -251,21 +254,18 @@ defmodule SpaceTradersWeb.OutcomeMetricsTest do
     assert_receive {:outcome, @observed_event, _, %{family: "credits"}}
     assert last_interval_rate() == 0
 
-    SpaceTraders.Repo.insert!(%SpaceTraders.FleetGeneration.Generation{
-      operator_id: operator.id,
-      agent_id: agent.id,
-      number: 1,
-      symbol: agent.symbol,
-      faction: agent.faction
-    })
+    generation = Repo.get_by!(SpaceTraders.FleetGeneration.Generation, agent_id: agent.id)
+    generation |> Ecto.Changeset.change(retired_at: DateTime.utc_now()) |> Repo.update!()
+    successor = agent_fixture(operator)
+    stub_agent(successor, 1000)
 
     TestClock.advance(60)
-    assert {:ok, _} = Evidence.get_agent(agent)
+    assert {:ok, _} = Evidence.get_agent(successor)
     assert_receive {:outcome, @observed_event, _, %{family: "credits"}}
     assert last_interval_rate() == :unknown
 
     TestClock.advance(60)
-    assert {:ok, _} = Evidence.get_agent(agent)
+    assert {:ok, _} = Evidence.get_agent(successor)
     assert_receive {:outcome, @observed_event, _, %{family: "credits"}}
     assert last_interval_rate() == 0
   end

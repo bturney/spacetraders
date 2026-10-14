@@ -4,8 +4,9 @@ defmodule SpaceTraders.Agent.Agent do
 
   This is a local cache of the game's agent record (the server is the source of
   truth); the per-agent `agent_token` authorizes all game actions for this agent
-  and is stored encrypted (ADR 0006). A nil `operator_id` marks an agent minted
-  out-of-band (e.g. the seeded ORBITALIST) rather than through this deployment.
+  and is stored encrypted (ADR 0015). `operator_id` retains minting attribution,
+  not ownership routing. Unattributable legacy rows require explicit migration
+  resolution; raw inserts or fake seeds grant no current-Fleet authority.
   """
 
   use Ecto.Schema
@@ -22,7 +23,8 @@ defmodule SpaceTraders.Agent.Agent do
     field :agent_token, Secret, source: :agent_token_ciphertext, redact: true
     field :stale_at, :utc_datetime
 
-    belongs_to :operator, SpaceTraders.Agent.Operator
+    # Historical minting attribution; not an ownership/routing association.
+    field :operator_id, :id
     has_many :ships, SpaceTraders.Fleet.Ship
 
     timestamps(type: :utc_datetime)

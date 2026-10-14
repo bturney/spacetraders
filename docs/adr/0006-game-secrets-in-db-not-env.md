@@ -1,3 +1,10 @@
 # Game secrets live in the database, not in `.env`
 
-Operator and agent credentials are application data, not deployment config. Each operator's AccountToken (stored encrypted, used only to mint agents in-app) and each agent's AgentToken (used to authorize that agent's game actions) are stored in the DB against their owner. `.env` holds only deployment secrets (DB/encryption key, admin seed). This enables multiple operators on one deployment, each minting and playing their own agents, without exposing any game credentials as host config. AgentTokens are per-agent, so a leaked token cannot touch another agent's fleet.
+Status: Multi-Operator rationale superseded by [ADR 0015](0015-single-operator-single-current-agent.md). Encrypted database credential storage remains accepted.
+
+Game credentials are application data, not deployment config. The sole Operator's
+encrypted AccountToken authorizes minting; each retained Agent's encrypted AgentToken
+authorizes only its own game identity, and the application admits gameplay only for
+the published current Fleet. `.env` holds deployment secrets (DB/encryption key),
+never game tokens. ADR 0015 supersedes the original multi-Operator rationale without
+changing credential encryption or historical AgentToken retention.

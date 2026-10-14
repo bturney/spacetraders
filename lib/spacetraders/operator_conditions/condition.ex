@@ -12,7 +12,7 @@ defmodule SpaceTraders.OperatorConditions.Condition do
     field :acknowledged_at, :utc_datetime_usec
     field :resolved_at, :utc_datetime_usec
 
-    belongs_to :operator, SpaceTraders.Agent.Operator
+    field :operator_id, :id
     belongs_to :fleet_generation, SpaceTraders.FleetGeneration.Generation
     belongs_to :fleet_strategy_revision, SpaceTraders.FleetStrategy.Revision
 
@@ -37,6 +37,6 @@ defmodule SpaceTraders.OperatorConditions.Condition do
       :resolved_at
     ])
     |> validate_required([:operator_id, :key, :kind, :summary])
-    |> unique_constraint([:operator_id, :key], name: :mission_conditions_unresolved_key_index)
+    |> unique_constraint(:key, name: :mission_conditions_unresolved_key_index)
   end
 end

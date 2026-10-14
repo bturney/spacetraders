@@ -5,7 +5,7 @@
       <.header>
         Set up mission control <span class="sr-only">Set up your SpaceTraders dashboard</span>
         <:subtitle>
-          Create the first Operator account. You can link your
+          Create this deployment's sole Operator account. You can link your
           my.spacetraders.io AccountToken below to start minting agents.
         </:subtitle>
       </.header>
@@ -23,6 +23,7 @@
         />
         <.input
           field={f[:password]}
+          value=""
           type="password"
           label="Password"
           autocomplete="new-password"
@@ -30,6 +31,7 @@
         />
         <.input
           field={f[:password_confirmation]}
+          value=""
           type="password"
           label="Confirm password"
           autocomplete="new-password"
@@ -37,6 +39,7 @@
         />
         <.input
           field={f[:account_token]}
+          value=""
           type="password"
           label="AccountToken (optional)"
           autocomplete="off"

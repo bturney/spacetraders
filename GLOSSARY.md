@@ -11,23 +11,35 @@ The in-game player identity created via registration (e.g., ORBITALIST). Registe
 _Avoid_: player, user, account
 
 **Stale Agent**:
-A locally stored Agent whose AgentToken the game rejects with a server-reset mismatch, proving its in-game identity no longer exists. It remains marked until a successful replacement mint retires it, unless a same-symbol re-mint proves it can be replaced.
+A retained Agent whose AgentToken the game rejects with a definitive Server Reset mismatch, proving that its game-generation identity is invalid. Its Fleet remains fenced while Agent Replacement is unresolved.
 _Avoid_: deleted agent, old agent, inactive agent
 
 **Retire a Stale Agent**:
-The app's local-only removal of a Stale Agent and all of its cached state, credentials, ships, jobs, and scheduled work after a successful replacement mint. It never calls the game API.
+The local relinquishment of a Stale Agent's gameplay authority and reset-scoped resources after successful Agent Replacement. Its Fleet Generation and meaningful causal history remain attributable; retirement never deletes an Agent upstream.
 _Avoid_: delete agent, abandon agent, deregister
 
 **Operator**:
-The human who drives the dashboard and authorizes external application and delivery actions. Links their own AccountToken once and may mint (own) one or more Agents. Distinct from the in-game Agent.
+The single authenticated human who drives this deployment's dashboard and authorizes external application and delivery actions. Links an AccountToken and governs at most one current Agent, distinct from historical Agent and Fleet Generation identities.
 _Avoid_: player, captain, user
 
 **Mint**:
-Creating a new Agent in-app by calling the registration endpoint with an AccountToken and a chosen symbol + faction.
+Creating a new Agent through registration with an AccountToken and a chosen symbol and faction. A new Agent begins with the game's default resources, not its predecessor's resources.
 _Avoid_: sign up, create account (for the in-app action)
 
+**Current Agent**:
+The Agent this deployment presently controls, or the fenced predecessor whose Agent Replacement remains unresolved. Empty setup has no current Agent; retired identities are history, never alternative current Fleets.
+_Avoid_: selected Agent, newest Agent, active tenant
+
+**Agent Name Bank**:
+The Operator's durable, ordered preferences for candidate Agent symbols. It supplies approved alternatives for Agent Replacement, not generated suffixes or evidence that a symbol is available.
+_Avoid_: name generator, fallback suffixes
+
+**Agent Replacement**:
+Establishing a fresh Agent and Fleet Generation while relinquishing control of the predecessor and retaining Fleet Strategy and meaningful history. Server Reset replacement follows definitive reset evidence; voluntary replacement abandons a healthy predecessor without resetting its resources or deleting it upstream.
+_Avoid_: reset Agent, restore Fleet, delete Agent
+
 **Account**:
-The external my.spacetraders.io account holding the AccountToken, which mints new Agents. The app stores it encrypted per-Operator for in-app minting; it is never used for game actions.
+The external my.spacetraders.io account holding the AccountToken, which mints new Agents. The app stores it encrypted for the sole Operator's in-app minting; it is never used for game actions.
 _Avoid_: agent account, signup
 
 **Server Reset**:
@@ -111,9 +123,7 @@ The Agent's home waypoint, where the Agent starts.
 The collection of ships owned by exactly one Agent. Ships never span Agents.
 
 **Fleet Generation**:
-One Agent and its Fleet from successful minting until that Agent becomes stale
-and is retired. A Fleet Strategy may govern successive Fleet Generations across
-Server Resets; each replacement begins again from the game's default resources.
+One Agent and its Fleet from establishment until retirement through Agent Replacement. A Fleet Strategy may govern successive Fleet Generations across Server Resets or voluntary abandonment; reusing a symbol never makes successive Generations interchangeable.
 _Avoid_: restored Fleet, persistent Fleet
 
 **Fleet Strategy**:

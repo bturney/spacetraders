@@ -98,9 +98,9 @@ defmodule SpaceTraders.RecordedShipRuntimeTest do
         )
 
         Repo.delete_all(from o in SpaceTraders.Evidence.Observation, where: o.agent_id in ^agents)
-        topics = Enum.map(ids, &"fleet_allocation:#{&1}") ++ Enum.map(agents, &"fleet:#{&1}")
+        topics = ["fleet_allocation" | Enum.map(agents, &"fleet:#{&1}")]
         Repo.delete_all(from n in SpaceTraders.Outbox.Notification, where: n.topic in ^topics)
-        Repo.delete_all(from o in Operator, where: o.id in ^ids)
+        Enum.each(ids, &SpaceTraders.AgentFixtures.cleanup_operator_fixture/1)
         Repo.delete_all(from e in SpaceTraders.Timeline.Event, where: e.owner_id == "BASELINE-1")
       end)
 

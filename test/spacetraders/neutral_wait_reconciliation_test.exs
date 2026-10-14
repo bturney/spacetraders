@@ -1,5 +1,5 @@
 defmodule SpaceTraders.NeutralWaitReconciliationTest do
-  use SpaceTraders.DataCase, async: true
+  use SpaceTraders.DataCase, async: false
 
   import SpaceTraders.AgentFixtures
   import SpaceTraders.ShipBody
@@ -46,7 +46,7 @@ defmodule SpaceTraders.NeutralWaitReconciliationTest do
     Repo.update!(Ecto.Changeset.change(strategy, active_revision_id: revision.id))
 
     generation =
-      Repo.insert!(%Generation{
+      SpaceTraders.AgentFixtures.generation_fixture(%Generation{
         operator_id: operator.id,
         agent_id: agent.id,
         fleet_strategy_revision_id: revision.id,
@@ -112,6 +112,29 @@ defmodule SpaceTraders.NeutralWaitReconciliationTest do
     assert pointer.strategy_decision_episode_id == episode.id
     assert FleetAllocation.current_neutral_wait_since(generation.id) == episode.inserted_at
     assert FleetAllocation.current_portfolio(scope, agent) == nil
+  end
+
+  test "a fenced Generation keeps its Episode evidence but is no longer the waiting Fleet", %{
+    agent: agent,
+    scope: scope,
+    revision: revision,
+    generation: generation,
+    capacity: capacity
+  } do
+    request_market_demand(agent, revision, DateTime.add(capacity.observed_at, 1800))
+
+    assert {:ok, %{action: :no_admissible_commitment}} =
+             FleetExecution.reconcile_market_domain(scope, agent, revision, @system, capacity)
+
+    assert [episode] = decision_episodes(generation)
+    assert FleetAllocation.current_neutral_wait_since(generation.id) == episode.inserted_at
+
+    Repo.update!(Ecto.Changeset.change(generation, fenced_at: Clock.utc_now()))
+
+    assert is_nil(FleetAllocation.current_neutral_wait_since(generation.id))
+    assert [retained] = decision_episodes(generation)
+    assert retained.id == episode.id
+    assert retained.evidence_references == episode.evidence_references
   end
 
   test "equivalent reconciliation retains the episode while refreshing its future evidence",
@@ -233,7 +256,7 @@ defmodule SpaceTraders.NeutralWaitReconciliationTest do
     _demand = request_market_demand(agent, revision, DateTime.add(capacity.observed_at, 1800))
     ship_symbol = ship.symbol
 
-    Phoenix.PubSub.subscribe(SpaceTraders.PubSub, "fleet_allocation:#{agent.operator_id}")
+    SpaceTraders.MissionControl.Channels.subscribe_allocation()
 
     assert {:ok, :ok} =
              FleetAllocation.report_infeasibility(

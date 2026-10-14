@@ -28,6 +28,7 @@ defmodule SpaceTraders.API.SpecConformanceTest do
   @endpoints [
     {:get_status, :get, "/", :flat},
     {:register, :post, "/register", :data},
+    {:get_public_agent, :get, "/agents/{agentSymbol}", :data},
     {:get_agent, :get, "/my/agent", :data},
     {:get_contracts, :get, "/my/contracts", :data},
     {:get_contract, :get, "/my/contracts/{contractId}", :data},
@@ -185,6 +186,7 @@ defmodule SpaceTraders.API.SpecConformanceTest do
 
   defp arity_of(:get_status), do: 0
   defp arity_of(:register), do: 4
+  defp arity_of(:get_public_agent), do: 1
   defp arity_of(:get_agent), do: 1
   defp arity_of(:get_contracts), do: 1
   defp arity_of(:get_contract), do: 2

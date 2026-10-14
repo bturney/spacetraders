@@ -29,7 +29,17 @@ defmodule SpaceTradersWeb.EntityReference do
         "/world/systems/#{system}/waypoints/#{waypoint}#{suffix}"
 
       [agent_id, system, waypoint] ->
-        "/world/systems/#{system}/waypoints/#{waypoint}#{suffix}?agent=#{agent_id}"
+        with {id, ""} <- Integer.parse(agent_id),
+             %SpaceTraders.FleetGeneration.Generation{} = generation <-
+               SpaceTraders.Repo.get_by(SpaceTraders.FleetGeneration.Generation, agent_id: id) do
+          path = "/world/systems/#{system}/waypoints/#{waypoint}#{suffix}"
+
+          if generation.retired_at || generation.fenced_at,
+            do: "#{path}?generation=#{generation.id}",
+            else: path
+        else
+          _ -> nil
+        end
 
       _ ->
         nil

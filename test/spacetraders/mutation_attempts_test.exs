@@ -23,7 +23,7 @@ defmodule SpaceTraders.MutationAttemptsTest do
     {:ok, revision} = FleetStrategy.activate(scope, strategy.draft_version)
 
     generation =
-      Repo.insert!(%Generation{
+      SpaceTraders.AgentFixtures.generation_fixture(%Generation{
         operator_id: operator.id,
         agent_id: agent.id,
         fleet_strategy_revision_id: revision.id,
@@ -197,7 +197,7 @@ defmodule SpaceTraders.MutationAttemptsTest do
     {:ok, strategy} = FleetStrategy.select_preset(scope, "steady_growth")
     {:ok, revision} = FleetStrategy.activate(scope, strategy.draft_version)
 
-    Repo.insert!(%Generation{
+    SpaceTraders.AgentFixtures.generation_fixture(%Generation{
       operator_id: operator.id,
       agent_id: agent.id,
       fleet_strategy_revision_id: revision.id,
@@ -640,7 +640,7 @@ defmodule SpaceTraders.MutationAttemptsTest do
       Req.Test.json(conn, %{
         "data" => %{
           "token" => "NEW_AGENT_TOKEN_SECRET",
-          "agent" => %{},
+          "agent" => %{"symbol" => "EVIDENCE", "credits" => 175_000},
           "contract" => %{},
           "faction" => %{},
           "ships" => []
@@ -658,7 +658,7 @@ defmodule SpaceTraders.MutationAttemptsTest do
                )
              end)
 
-    assert [attempt] = MutationAttempts.list_for_operator(operator)
+    assert attempt = MutationAttempts.latest_registration(operator.id)
     assert attempt.operation_id == "register"
     refute inspect(attempt) =~ "ACCOUNT_TOKEN_SECRET"
     refute inspect(attempt) =~ "NEW_AGENT_TOKEN_SECRET"

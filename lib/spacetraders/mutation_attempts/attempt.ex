@@ -21,7 +21,12 @@ defmodule SpaceTraders.MutationAttempts.Attempt do
     field :prepared_at, :utc_datetime_usec
     field :sent_or_unknown_at, :utc_datetime_usec
 
-    belongs_to :operator, SpaceTraders.Agent.Operator, type: :id
+    # A registration's AgentToken, held encrypted only until local adoption.
+    field :recovery_credential, SpaceTraders.Secret,
+      source: :recovery_credential_ciphertext,
+      redact: true
+
+    field :operator_id, :id
     belongs_to :agent, SpaceTraders.Agent.Agent, type: :id
     belongs_to :fleet_generation, SpaceTraders.FleetGeneration.Generation, type: :id
     belongs_to :strategy_revision, SpaceTraders.FleetStrategy.Revision, type: :id

@@ -313,7 +313,16 @@ defmodule SpaceTraders.API.ClientTest do
         send(test_pid, :mutation_dispatched)
 
         receive do
-          :respond -> Req.Test.json(conn, %{"data" => %{}})
+          :respond ->
+            Req.Test.json(conn, %{
+              "data" => %{
+                "token" => "AGENT_TOKEN",
+                "agent" => %{"symbol" => "ORBITALIST", "credits" => 175_000},
+                "faction" => %{"symbol" => "COSMIC"},
+                "contract" => %{"id" => "c1"},
+                "ships" => [%{"symbol" => "ORBITALIST-1"}]
+              }
+            })
         end
       end)
 
@@ -327,7 +336,8 @@ defmodule SpaceTraders.API.ClientTest do
 
       send(task.pid, :admit)
 
-      assert_receive :mutation_dispatched
+      # Registration admission does durable work before dispatch; allow a loaded gate.
+      assert_receive :mutation_dispatched, 2_000
 
       assert %{in_flight: in_flight} = :sys.get_state(SpaceTraders.API.CapacityGovernor)
 

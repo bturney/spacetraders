@@ -83,7 +83,7 @@ defmodule SpaceTraders.RuntimeQualification do
       agent_ids = Repo.all(from a in Agent, where: a.operator_id in ^operator_ids, select: a.id)
 
       topics =
-        Enum.map(operator_ids, &"fleet_allocation:#{&1}") ++ Enum.map(agent_ids, &"fleet:#{&1}")
+        ["fleet_allocation" | Enum.map(agent_ids, &"fleet:#{&1}")]
 
       attempt_ids =
         Repo.all(from a in Attempt, where: a.operator_id in ^operator_ids, select: a.id)
@@ -113,7 +113,7 @@ defmodule SpaceTraders.RuntimeQualification do
       )
 
       Repo.delete_all(from n in SpaceTraders.Outbox.Notification, where: n.topic in ^topics)
-      Repo.delete_all(from o in Operator, where: o.id in ^operator_ids)
+      Enum.each(operator_ids, &SpaceTraders.AgentFixtures.cleanup_operator_fixture/1)
 
       Repo.delete_all(
         from e in SpaceTraders.Timeline.Event, where: e.owner_id in ["BASELINE-1", "BASELINE-2"]

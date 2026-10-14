@@ -12,8 +12,6 @@ defmodule SpaceTraders.Agent.Operator do
     field :authenticated_at, :utc_datetime, virtual: true
     field :account_token, Secret, source: :account_token_ciphertext, redact: true
 
-    has_many :agents, SpaceTraders.Agent.Agent
-
     timestamps(type: :utc_datetime)
   end
 

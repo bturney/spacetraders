@@ -3,17 +3,16 @@ defmodule SpaceTradersWeb.MissionControlLive do
 
   use SpaceTradersWeb, :live_view
 
-  alias SpaceTraders.{MissionControl, OperatorConditions}
+  alias SpaceTraders.{FleetGeneration, MissionControl, OperatorConditions}
+  alias SpaceTraders.MissionControl.Channels
   alias SpaceTradersWeb.{EntityReference, GrafanaLink}
 
   @impl true
   def mount(_params, _session, socket) do
-    operator_id = socket.assigns.current_scope.operator.id
-
     if connected?(socket) do
-      Phoenix.PubSub.subscribe(SpaceTraders.PubSub, "fleet_strategy:#{operator_id}")
-      Phoenix.PubSub.subscribe(SpaceTraders.PubSub, "mission_conditions:#{operator_id}")
-      Phoenix.PubSub.subscribe(SpaceTraders.PubSub, "fleet_allocation:#{operator_id}")
+      Channels.subscribe_strategy()
+      Channels.subscribe_conditions()
+      Channels.subscribe_allocation()
     end
 
     {:ok, assign_projection(socket)}
@@ -35,7 +34,10 @@ defmodule SpaceTradersWeb.MissionControlLive do
         </header>
 
         <section
-          :if={!@projection.strategy.active_revision || @projection.fleets == []}
+          :if={
+            @projection.current_fleet.state != :unresolved &&
+              (!@projection.strategy.active_revision || @projection.current_fleet.state == :empty)
+          }
           id="mission-onboarding"
           class="rounded-2xl border border-primary/30 bg-primary/5 p-5 sm:p-7"
         >
@@ -47,8 +49,62 @@ defmodule SpaceTradersWeb.MissionControlLive do
               navigate={~p"/strategy"}
               class="btn btn-primary"
             >Review Fleet Strategy</.link>
-            <.link :if={@projection.fleets == []} navigate={~p"/agents/new"} class="btn btn-outline">Mint an Agent</.link>
+            <.link
+              :if={@projection.current_fleet.state == :empty && !registration_pending?(@projection)}
+              navigate={~p"/agents/new"}
+              class="btn btn-outline"
+            >Mint an Agent</.link>
+            <.link
+              :if={@projection.current_fleet.state == :empty && !registration_pending?(@projection)}
+              navigate={~p"/operators/settings#import-agent"}
+              class="btn btn-ghost"
+            >Import an existing Agent</.link>
           </div>
+        </section>
+
+        <section
+          :if={@projection.current_fleet.state in [:empty, :transition, :unresolved]}
+          id="current-fleet-state"
+          class="rounded-2xl border border-warning/30 bg-warning/5 p-5"
+        >
+          <h2 class="text-xl font-bold">Current Fleet</h2>
+          <p :if={@projection.current_fleet.state == :empty && !registration_pending?(@projection)}>
+            No current Agent. Mint or import an Agent to establish the Fleet.
+          </p>
+          <div
+            :if={@projection.current_fleet.state == :transition}
+            id="server-reset-replacement"
+            class="space-y-3"
+          >
+            <p>
+              A Server Reset fenced {transition_symbol(@projection)}; its gameplay cannot resume.
+              Replacement requests {transition_symbol(@projection)} first, then the remaining
+              Agent Name Bank names in order, as a fresh Fleet Generation under the accepted Fleet Strategy.
+            </p>
+            <button
+              :if={!registration_pending?(@projection)}
+              id="retry-reset-replacement"
+              phx-click="retry_replacement"
+              phx-disable-with="Replacing..."
+              class="btn btn-primary btn-sm"
+            >
+              Retry replacement
+            </button>
+          </div>
+          <p :if={@projection.current_fleet.state == :unresolved}>
+            {@projection.current_fleet.summary}
+          </p>
+          <.link navigate={~p"/operators/settings"} class="link link-primary">Review Settings</.link>
+        </section>
+
+        <section
+          :if={registration_pending?(@projection)}
+          id="mission-registration-recovery"
+          class="rounded-2xl border border-warning/30 bg-warning/5 p-5"
+        >
+          <h2 class="text-xl font-bold">Registration recovery</h2>
+          <p>{@projection.registration_recovery.summary}</p>
+          <.link navigate={~p"/agents/new"} class="link link-primary">Reconcile registration</.link>
         </section>
 
         <section id="operating-health" class="rounded-2xl border border-base-300 bg-base-100 p-5">
@@ -78,6 +134,15 @@ defmodule SpaceTradersWeb.MissionControlLive do
             </p>
             <p :if={current_generation(@projection)} class="mt-1 text-sm opacity-70">
               {current_generation(@projection).symbol}
+            </p>
+            <p
+              :if={reset_predecessor(@projection)}
+              id="generation-replacement"
+              class="mt-1 text-sm opacity-70"
+            >
+              Replaced Generation {reset_predecessor(@projection).number} ({reset_predecessor(
+                @projection
+              ).symbol}) after a Server Reset.
             </p>
           </article>
           <article class="rounded-2xl border border-base-300 bg-base-100 p-5">
@@ -125,7 +190,10 @@ defmodule SpaceTradersWeb.MissionControlLive do
 
         <section id="needs-attention" class="rounded-2xl border border-base-300 bg-base-100 p-5">
           <h2 class="text-xl font-bold">Needs attention</h2>
-          <p :if={@projection.conditions == []} class="mt-2 text-sm opacity-70">
+          <p
+            :if={@projection.conditions == [] && !registration_pending?(@projection)}
+            class="mt-2 text-sm opacity-70"
+          >
             No unresolved Attention or Intervention.
           </p>
           <ul class="mt-3 space-y-3">
@@ -370,6 +438,19 @@ defmodule SpaceTradersWeb.MissionControlLive do
   end
 
   @impl true
+  def handle_event("retry_replacement", _params, socket) do
+    socket =
+      case FleetGeneration.replace_after_reset(socket.assigns.current_scope) do
+        {:ok, %{agent: agent}} ->
+          put_flash(socket, :info, "Replaced after the Server Reset: #{agent.symbol} is current.")
+
+        {:error, reason} ->
+          put_flash(socket, :error, replacement_error(reason))
+      end
+
+    {:noreply, assign_projection(socket)}
+  end
+
   def handle_event("acknowledge", %{"id" => raw_id}, socket) do
     with {id, ""} <- Integer.parse(raw_id),
          :ok <- OperatorConditions.acknowledge(socket.assigns.current_scope, id) do
@@ -380,9 +461,8 @@ defmodule SpaceTradersWeb.MissionControlLive do
   end
 
   @impl true
-  def handle_info({:fleet_strategy_updated, operator_id}, socket)
-      when operator_id == socket.assigns.current_scope.operator.id,
-      do: {:noreply, assign_projection(socket)}
+  def handle_info(:fleet_strategy_updated, socket),
+    do: {:noreply, assign_projection(socket)}
 
   def handle_info(:mission_conditions_updated, socket),
     do: {:noreply, assign_projection(socket)}
@@ -397,9 +477,60 @@ defmodule SpaceTradersWeb.MissionControlLive do
   end
 
   defp current_generation(projection),
-    do: Enum.find(projection.generations, &is_nil(&1.retired_at))
+    do: projection.current_fleet[:generation]
+
+  defp transition_symbol(projection) do
+    case current_generation(projection) do
+      %{symbol: symbol} -> symbol
+      _ -> "the predecessor Agent"
+    end
+  end
+
+  # The fenced Generation the current one replaced. Only Server Reset evidence
+  # fences a Generation before its replacement.
+  defp reset_predecessor(%{current_fleet: %{state: :current}} = projection) do
+    with %{number: number} <- current_generation(projection) do
+      Enum.find(projection.generations, fn generation ->
+        generation.number == number - 1 and not is_nil(generation.fenced_at) and
+          not is_nil(generation.retired_at)
+      end)
+    end
+  end
+
+  defp reset_predecessor(_projection), do: nil
+
+  defp replacement_error(:emergency_stopped),
+    do: "Emergency Stop is engaged. Replacement minting is suppressed until it is resumed."
+
+  defp replacement_error(:account_token_not_linked),
+    do: "Link an AccountToken in Settings before replacement can mint."
+
+  defp replacement_error(:replacement_symbols_exhausted),
+    do: "Every replacement name was definitively taken. Edit the Agent Name Bank in Settings."
+
+  defp replacement_error(:registration_unresolved),
+    do: "The last registration outcome is unknown. Reconcile it before another registration."
+
+  defp replacement_error(:no_server_reset),
+    do: "No Server Reset replacement is pending."
+
+  defp replacement_error(:runtime_authority_unavailable),
+    do: "Replacement is temporarily unavailable. Please try again shortly."
+
+  defp replacement_error(_reason),
+    do: "Replacement did not complete. The predecessor stays fenced; its state is shown below."
 
   defp health_label(%{strategy: %{emergency_stopped_at: %DateTime{}}}), do: "STOPPED"
+
+  defp health_label(%{registration_recovery: %{status: :in_progress}}),
+    do: "Registration in progress"
+
+  defp health_label(%{registration_recovery: %{status: status}})
+       when status in [:unresolved, :awaiting_adoption],
+       do: "Registration recovery needed"
+
+  defp health_label(%{current_fleet: %{state: :unresolved}}), do: "Current Fleet needs resolution"
+  defp health_label(%{current_fleet: %{state: :transition}}), do: "Server Reset transition"
   defp health_label(%{strategy: %{active_revision: nil}}), do: "Awaiting Fleet Strategy"
   defp health_label(%{conditions: [_ | _]}), do: "Needs Operator attention"
 
@@ -447,6 +578,14 @@ defmodule SpaceTradersWeb.MissionControlLive do
   defp health_detail(%{strategy: %{emergency_stopped_at: %DateTime{}}}),
     do: "Emergency Stop suppresses every new gameplay mutation. Review Strategy to resume safely."
 
+  defp health_detail(%{registration_recovery: %{status: status, summary: summary}})
+       when status != :clear,
+       do: summary
+
+  defp health_detail(%{current_fleet: %{state: :transition}} = projection),
+    do:
+      "A Server Reset fenced #{transition_symbol(projection)}. Nothing it reported is counted as the current Fleet until a replacement Generation is established."
+
   defp health_detail(%{conditions: [_ | _]}),
     do: "Unresolved conditions remain pinned below, including acknowledged ones."
 
@@ -483,6 +622,12 @@ defmodule SpaceTradersWeb.MissionControlLive do
 
   defp strategy_capable_detail(_),
     do: "This Fleet Generation is still establishing authoritative state."
+
+  defp registration_pending?(%{registration_recovery: %{status: status}}), do: status != :clear
+
+  defp onboarding_message(%{registration_recovery: %{status: status}}) when status != :clear,
+    do:
+      "Registration must be reconciled before establishing another Agent. Fleet Strategy can still be reviewed."
 
   defp onboarding_message(%{strategy: %{active_revision: nil}}),
     do:

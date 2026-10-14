@@ -4,20 +4,14 @@ defmodule SpaceTradersWeb.ActivityLive do
   use SpaceTradersWeb, :live_view
 
   alias SpaceTraders.{MissionControl, OperatorConditions}
+  alias SpaceTraders.MissionControl.Channels
   alias SpaceTradersWeb.{EntityReference, GrafanaLink}
 
   @impl true
   def mount(_params, _session, socket) do
     if connected?(socket) do
-      Phoenix.PubSub.subscribe(
-        SpaceTraders.PubSub,
-        "mission_conditions:#{socket.assigns.current_scope.operator.id}"
-      )
-
-      Phoenix.PubSub.subscribe(
-        SpaceTraders.PubSub,
-        "fleet_allocation:#{socket.assigns.current_scope.operator.id}"
-      )
+      Channels.subscribe_conditions()
+      Channels.subscribe_allocation()
     end
 
     {:ok, assign(socket, filter: "all") |> load_activity()}

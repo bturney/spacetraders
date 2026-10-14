@@ -206,12 +206,25 @@ defmodule SpaceTraders.RecordedDispatchFixtures do
   end
 
   defp ensure_generation(agent) do
+    existing = Repo.one(Strategy)
+
     strategy =
-      Repo.one(from s in Strategy, where: s.operator_id == ^agent.operator_id) ||
+      existing ||
         Repo.insert!(%Strategy{operator_id: agent.operator_id, revision_number: 1})
 
     case Repo.one(from g in Generation, where: g.agent_id == ^agent.id and is_nil(g.retired_at)) do
       %Generation{} = generation ->
+        generation =
+          if existing do
+            generation
+          else
+            revision = activated_revision(strategy)
+
+            generation
+            |> Ecto.Changeset.change(fleet_strategy_revision_id: revision.id)
+            |> Repo.update!()
+          end
+
         {generation,
          generation.fleet_strategy_revision_id &&
            Repo.get!(Revision, generation.fleet_strategy_revision_id)}

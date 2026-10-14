@@ -10,8 +10,10 @@ defmodule SpaceTraders.ContractsTest do
   import SpaceTraders.AgentFixtures
 
   defp agent(token \\ "AGENT_TOKEN") do
-    operator_fixture()
-    |> agent_fixture(%{agent_token: token})
+    case Repo.one(SpaceTraders.Agent.Agent) do
+      nil -> operator_fixture() |> agent_fixture(%{agent_token: token})
+      existing -> %{existing | agent_token: token}
+    end
   end
 
   setup do

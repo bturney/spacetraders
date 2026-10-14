@@ -1,90 +1,36 @@
 defmodule SpaceTradersWeb.OperatorLive.RegistrationTest do
   use SpaceTradersWeb.ConnCase, async: true
 
-  import Phoenix.LiveViewTest
   import SpaceTraders.AgentFixtures
+  alias SpaceTraders.Agent
 
-  describe "Registration page" do
-    test "renders registration page", %{conn: conn} do
-      {:ok, _lv, html} = live(conn, ~p"/operators/register")
+  test "the former registration URL cannot bypass empty setup", %{conn: conn} do
+    assert conn |> get("/operators/register") |> html_response(404)
 
-      assert html =~ "Register"
-      assert html =~ "Log in"
-    end
+    assert conn
+           |> post("/operators/register", %{"operator" => valid_operator_attributes()})
+           |> html_response(404)
 
-    test "redirects if already logged in", %{conn: conn} do
-      result =
-        conn
-        |> log_in_operator(operator_fixture())
-        |> live(~p"/operators/register")
-        |> follow_redirect(conn, ~p"/mission-control")
-
-      assert {:ok, _conn} = result
-    end
-
-    test "renders errors for invalid data", %{conn: conn} do
-      {:ok, lv, _html} = live(conn, ~p"/operators/register")
-
-      result =
-        lv
-        |> element("#registration_form")
-        |> render_change(operator: %{"email" => "with spaces"})
-
-      assert result =~ "Register"
-      assert result =~ "must have the @ sign and no spaces"
-    end
+    refute Agent.has_operators?()
   end
 
-  describe "register operator" do
-    test "creates account but does not log in", %{conn: conn} do
-      {:ok, lv, _html} = live(conn, ~p"/operators/register")
+  test "the former registration URL cannot create another Operator", %{conn: conn} do
+    operator = operator_fixture()
 
-      email = unique_operator_email()
+    assert conn |> get("/operators/register") |> html_response(404)
 
-      form =
-        form(lv, "#registration_form",
-          operator:
-            valid_operator_attributes(email: email)
-            |> Map.put(:password_confirmation, valid_operator_password())
-        )
+    assert conn
+           |> post("/operators/register", %{
+             "operator" => valid_operator_attributes(email: "intruder@example.com")
+           })
+           |> html_response(404)
 
-      {:ok, _lv, html} =
-        render_submit(form)
-        |> follow_redirect(conn, ~p"/operators/log-in")
-
-      assert html =~ "Account created. Log in to continue."
-
-      assert %SpaceTraders.Agent.Operator{confirmed_at: %DateTime{}} =
-               SpaceTraders.Agent.get_operator_by_email(email)
-    end
-
-    test "renders errors for duplicated email", %{conn: conn} do
-      {:ok, lv, _html} = live(conn, ~p"/operators/register")
-
-      operator = operator_fixture(%{email: "test@email.com"})
-
-      result =
-        lv
-        |> form("#registration_form",
-          operator: %{"email" => operator.email}
-        )
-        |> render_submit()
-
-      assert result =~ "has already been taken"
-    end
+    refute Agent.get_operator_by_email("intruder@example.com")
+    assert Agent.get_operator_by_email_and_password(operator.email, valid_operator_password())
   end
 
-  describe "registration navigation" do
-    test "redirects to login page when the Log in button is clicked", %{conn: conn} do
-      {:ok, lv, _html} = live(conn, ~p"/operators/register")
-
-      {:ok, _login_live, login_html} =
-        lv
-        |> element("main a", "Log in")
-        |> render_click()
-        |> follow_redirect(conn, ~p"/operators/log-in")
-
-      assert login_html =~ "Log in"
-    end
+  test "signed-in requests cannot reach the former registration surface", %{conn: conn} do
+    conn = log_in_operator(conn, operator_fixture())
+    assert conn |> get("/operators/register") |> html_response(404)
   end
 end

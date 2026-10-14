@@ -2,20 +2,17 @@ defmodule SpaceTraders.Agent do
   @moduledoc """
   The Agent context: Operator accounts, stored game credentials, and Agents.
 
-  Owns the human Operators (email/password login, per-operator AccountToken
-  linking) and the in-game Agents they own. AccountTokens and AgentTokens are
-  stored encrypted at rest via `SpaceTraders.Secret` (ADR 0006) — the app reads
-  them only from the database, never from `.env`. Fleet Generation owns minting
-  and Stale Agent retirement.
+  Owns the sole Operator's authentication and encrypted AccountToken (ADR 0015).
+  Agent ids retain game identity and encrypted AgentTokens, never tenant routing.
+  Fleet Generation exclusively owns mint/import, registration recovery, bootstrap
+  and replacement publication. Secrets remain in PostgreSQL, never `.env`.
   """
 
   import Ecto.Query, warn: false
   alias SpaceTraders.Repo
 
-  alias SpaceTraders.API.Model.Agent, as: GameAgent
-  alias SpaceTraders.API.AgentTokenReference
   alias SpaceTraders.Agent.{Agent, Operator, OperatorToken, OperatorNotifier, Scope}
-  alias SpaceTraders.{Evidence, FleetGeneration}
+  alias SpaceTraders.FleetGeneration
 
   ## Database getters
 
@@ -56,7 +53,14 @@ defmodule SpaceTraders.Agent do
   """
   def get_operator_by_email_and_password(email, password)
       when is_binary(email) and is_binary(password) do
-    operator = Repo.get_by(Operator, email: email)
+    operator =
+      Repo.one(
+        from o in Operator,
+          join: identity in "current_fleet_identity",
+          on: identity.operator_id == o.id and identity.id == 1,
+          where: o.email == ^email
+      )
+
     if Operator.valid_password?(operator, password), do: operator
   end
 
@@ -79,10 +83,12 @@ defmodule SpaceTraders.Agent do
   ## Operator registration
 
   @doc """
-  Registers a operator with email + password.
+  Establishes the sole Operator during first-run setup with email + password.
 
   The account is confirmed immediately — registration is the first-run setup
-  surface for a LAN dashboard and has no email-confirmation step.
+  surface for a LAN dashboard and has no email-confirmation step. Subsequent
+  creation returns `{:error, :setup_unavailable}`; there is no additional-Operator
+  registration path.
 
   ## Examples
 
@@ -96,7 +102,7 @@ defmodule SpaceTraders.Agent do
   def register_operator(attrs) do
     %Operator{}
     |> Operator.registration_changeset(attrs)
-    |> Repo.insert()
+    |> FleetGeneration.Identity.setup_operator()
   end
 
   @doc """
@@ -109,22 +115,29 @@ defmodule SpaceTraders.Agent do
   ## Game secrets
 
   @doc """
-  Links the operator's my.spacetraders.io AccountToken once, stored encrypted.
+  Links or updates the sole Operator's my.spacetraders.io AccountToken, stored encrypted.
 
   The token is only ever used to mint agents in-app; it never authorizes game
   actions and never leaves the database in plaintext (ADR 0006).
   """
-  def link_account_token(%Operator{} = operator, account_token) when is_binary(account_token) do
-    result =
-      operator
-      |> Operator.account_token_changeset(%{account_token: account_token})
-      |> Repo.update()
+  def link_account_token(%Scope{operator: %Operator{} = operator}, account_token)
+      when is_binary(account_token) do
+    if FleetGeneration.Identity.operator?(operator.id) do
+      result =
+        operator
+        |> Operator.account_token_changeset(%{account_token: account_token})
+        |> Repo.update(log: false)
 
-    if match?({:ok, _operator}, result),
-      do: SpaceTraders.EmergencyStopAdmission.track_credential(operator.id, account_token)
+      if match?({:ok, _operator}, result),
+        do: SpaceTraders.EmergencyStopAdmission.track_credential(operator.id, account_token)
 
-    result
+      result
+    else
+      {:error, :not_current_operator}
+    end
   end
+
+  def link_account_token(_scope, _account_token), do: {:error, :not_current_operator}
 
   @doc """
   Returns a changeset for the account-token form on the settings page.
@@ -155,24 +168,6 @@ defmodule SpaceTraders.Agent do
   end
 
   @doc """
-  Lists the agents owned by the given operator, newest last.
-  """
-  def list_agents(%Operator{id: operator_id}) do
-    Repo.all(from(agent in Agent, where: agent.operator_id == ^operator_id, order_by: agent.id))
-  end
-
-  @doc """
-  Gets a single agent by id, scoped to the given operator.
-
-  Returns `nil` when the agent does not belong to the operator.
-  """
-  def get_agent(%Operator{id: operator_id}, agent_id) do
-    Repo.get_by(Agent, id: agent_id, operator_id: operator_id)
-  end
-
-  def get_agent(%Scope{operator: operator}, agent_id), do: get_agent(operator, agent_id)
-
-  @doc """
   Pulls an agent's live game record — credits, headquarters and faction — from
   the API.
 
@@ -197,70 +192,6 @@ defmodule SpaceTraders.Agent do
 
   @doc "Converts a reset mismatch from any game call into the durable stale state."
   defdelegate handle_game_result(agent, result), to: FleetGeneration
-
-  @doc """
-  Imports an existing game agent after explicitly validating its AgentToken.
-
-  The AccountToken cannot recover AgentTokens, so this flow never calls the
-  registration endpoint. It reads the agent through the authenticated game API
-  and stores the supplied token encrypted with the resulting metadata.
-  """
-  def import_agent(%Scope{operator: %Operator{} = operator}, agent_token, true)
-      when is_binary(agent_token) and agent_token != "" do
-    credential_ref = AgentTokenReference.temporary(agent_token)
-
-    try do
-      with {:ok, %GameAgent{} = game_agent} <- Evidence.get_agent(credential_ref),
-           :ok <- ensure_agent_is_new(game_agent.symbol) do
-        create_imported_agent(operator, game_agent, agent_token)
-      end
-    after
-      AgentTokenReference.release(credential_ref)
-    end
-  end
-
-  def import_agent(_scope, _agent_token, false), do: {:error, :confirmation_required}
-  def import_agent(_scope, _agent_token, _confirmed), do: {:error, :agent_token_required}
-
-  defp ensure_agent_is_new(symbol) do
-    if Repo.get_by(Agent, symbol: symbol), do: {:error, :agent_already_imported}, else: :ok
-  end
-
-  defp create_imported_agent(operator, game_agent, agent_token) do
-    case store_agent(operator, game_agent, agent_token, game_agent.starting_faction) do
-      {:error, %Ecto.Changeset{} = changeset} ->
-        if Keyword.has_key?(changeset.errors, :symbol),
-          do: {:error, :agent_already_imported},
-          else: {:error, changeset}
-
-      {:ok, _agent} = result ->
-        result
-    end
-  end
-
-  @doc false
-  def store_agent(
-        %Operator{} = operator,
-        %GameAgent{} = game_agent,
-        agent_token,
-        requested_faction
-      ) do
-    result =
-      %Agent{}
-      |> Agent.changeset(%{
-        symbol: game_agent.symbol,
-        faction: game_agent.starting_faction || requested_faction
-      })
-      |> Ecto.Changeset.put_change(:headquarters, game_agent.headquarters)
-      |> Ecto.Changeset.put_change(:agent_token, agent_token)
-      |> Ecto.Changeset.put_change(:operator_id, operator.id)
-      |> Repo.insert()
-
-    if match?({:ok, _agent}, result),
-      do: SpaceTraders.EmergencyStopAdmission.track_credential(operator.id, agent_token)
-
-    result
-  end
 
   @doc """
   Checks whether the operator is in sudo mode.
@@ -356,7 +287,7 @@ defmodule SpaceTraders.Agent do
   """
   def generate_operator_session_token(operator) do
     {token, operator_token} = OperatorToken.build_session_token(operator)
-    Repo.insert!(operator_token)
+    Repo.insert!(operator_token, log: false)
     token
   end
 
@@ -367,7 +298,7 @@ defmodule SpaceTraders.Agent do
   """
   def get_operator_by_session_token(token) do
     {:ok, query} = OperatorToken.verify_session_token_query(token)
-    Repo.one(query)
+    Repo.one(query, log: false)
   end
 
   @doc """
@@ -468,7 +399,7 @@ defmodule SpaceTraders.Agent do
   Deletes the signed token with the given context.
   """
   def delete_operator_session_token(token) do
-    Repo.delete_all(from(OperatorToken, where: [token: ^token, context: "session"]))
+    Repo.delete_all(from(OperatorToken, where: [token: ^token, context: "session"]), log: false)
     :ok
   end
 
@@ -476,7 +407,7 @@ defmodule SpaceTraders.Agent do
 
   defp update_operator_and_delete_all_tokens(changeset) do
     Repo.transact(fn ->
-      with {:ok, operator} <- Repo.update(changeset) do
+      with {:ok, operator} <- Repo.update(changeset, log: false) do
         tokens_to_expire = Repo.all_by(OperatorToken, operator_id: operator.id)
 
         Repo.delete_all(

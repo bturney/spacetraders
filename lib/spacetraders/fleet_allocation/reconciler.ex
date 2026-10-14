@@ -8,6 +8,7 @@ defmodule SpaceTraders.FleetAllocation.Reconciler do
   import Ecto.Query
 
   alias SpaceTraders.FleetCapacity
+  alias SpaceTraders.FleetAllocation
   alias SpaceTraders.Agent.Scope
   alias SpaceTraders.Agent.Agent, as: AgentRecord
   alias SpaceTraders.Fleet
@@ -73,22 +74,17 @@ defmodule SpaceTraders.FleetAllocation.Reconciler do
   end
 
   def handle_info(:reconcile_intelligence_on_boot, state) do
-    Generation
-    |> where([generation], is_nil(generation.fenced_at) and is_nil(generation.retired_at))
-    |> select([generation], generation.agent_id)
-    |> Repo.all()
-    |> Enum.each(fn agent_id ->
-      case Repo.get(AgentRecord, agent_id) do
-        %AgentRecord{headquarters: headquarters} ->
-          case SpaceTraders.Fleet.system_from_headquarters(headquarters) do
-            {:ok, system} -> send(self(), {:waypoint_intelligence_observed, agent_id, system})
-            _ -> :ok
-          end
+    case FleetAllocation.current_generation() do
+      %Generation{agent_id: agent_id} ->
+        agent = Repo.get!(AgentRecord, agent_id)
 
-        _ ->
-          :ok
-      end
-    end)
+        if system = system_for(agent) do
+          send(self(), {:waypoint_intelligence_observed, agent_id, system})
+        end
+
+      _ ->
+        :ok
+    end
 
     {:noreply, state}
   end
@@ -167,8 +163,8 @@ defmodule SpaceTraders.FleetAllocation.Reconciler do
   end
 
   @doc """
-  Reconciles durable Contract and Construction work for every active Fleet
-  Generation.
+  Reconciles durable Contract and Construction work for the canonical current
+  Fleet Generation.
 
   Market Intelligence is intentionally absent: whether a Market refresh is
   needed is carried by durable Observation Demands, and due demands wake
@@ -200,16 +196,16 @@ defmodule SpaceTraders.FleetAllocation.Reconciler do
       )
     end)
 
-    Generation
-    |> where([generation], is_nil(generation.fenced_at) and is_nil(generation.retired_at))
-    |> select([generation], generation.agent_id)
-    |> Repo.all()
-    |> Enum.each(fn agent_id ->
-      with_context(agent_id, fn scope, agent, revision ->
-        FleetContracts.reconcile(scope, agent, revision)
-        FleetConstruction.reconcile(scope, agent, revision)
-      end)
-    end)
+    case FleetAllocation.current_generation() do
+      %Generation{agent_id: agent_id} ->
+        with_context(agent_id, fn scope, agent, revision ->
+          FleetContracts.reconcile(scope, agent, revision)
+          FleetConstruction.reconcile(scope, agent, revision)
+        end)
+
+      _ ->
+        :ok
+    end
   end
 
   @doc """
@@ -272,16 +268,12 @@ defmodule SpaceTraders.FleetAllocation.Reconciler do
   defp with_context(agent_id, callback) do
     with :ok <- SpaceTraders.RuntimeAuthority.execution_allowed?(),
          %Generation{
+           agent_id: ^agent_id,
            fleet_strategy_revision_id: revision_id,
            operator_id: operator_id
          }
          when is_integer(revision_id) <-
-           Repo.one(
-             from generation in Generation,
-               where:
-                 generation.agent_id == ^agent_id and is_nil(generation.fenced_at) and
-                   is_nil(generation.retired_at)
-           ),
+           FleetAllocation.current_generation(),
          %AgentRecord{} = agent <- Repo.get(AgentRecord, agent_id),
          %Revision{} = revision <- Repo.get(Revision, revision_id),
          %{} = operator <- Repo.get(SpaceTraders.Agent.Operator, operator_id) do

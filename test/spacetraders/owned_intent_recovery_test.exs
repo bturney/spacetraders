@@ -3793,11 +3793,16 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
 
   defp future_iso, do: DateTime.utc_now() |> DateTime.add(3600, :second) |> DateTime.to_iso8601()
 
+  # One deployment Operator and one current Fleet. A scenario loop gets a
+  # fresh Fleet through a completed replacement: the predecessor Generation
+  # retires and the successor is published, never a second Operator tenant.
   defp claimed_ship(symbol) do
-    operator = Repo.insert!(%Operator{email: "#{symbol}@example.com"})
+    operator =
+      Repo.one(from o in Operator, limit: 1) ||
+        Repo.insert!(%Operator{email: "#{symbol}@example.com"})
 
     agent =
-      Repo.insert!(%AgentRecord{
+      SpaceTraders.AgentFixtures.established_agent_fixture(%AgentRecord{
         symbol: symbol,
         faction: "COSMIC",
         headquarters: "X1-UX81-A1",
@@ -3808,30 +3813,30 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
     ship =
       Repo.insert!(%Ship{symbol: "#{symbol}-SHIP", ship_type: "SHIP_PROBE", agent_id: agent.id})
 
-    strategy = Repo.insert!(%Strategy{operator_id: operator.id, revision_number: 1})
+    revision = execution_revision(operator)
+    predecessor = Repo.one(from g in Generation, where: is_nil(g.retired_at))
 
-    revision =
-      Repo.insert!(%Revision{
-        fleet_strategy_id: strategy.id,
-        number: 1,
-        document: %{"objectives" => [%{"objective" => "Exercise Ship Execution"}]},
-        source: "operator",
-        activated_at: DateTime.utc_now(:second)
-      })
-
-    Repo.update!(Ecto.Changeset.change(strategy, active_revision_id: revision.id))
+    if predecessor,
+      do: Repo.update!(Ecto.Changeset.change(predecessor, retired_at: DateTime.utc_now()))
 
     generation =
-      Repo.insert!(%Generation{
+      SpaceTraders.AgentFixtures.generation_fixture(%Generation{
         operator_id: operator.id,
         agent_id: agent.id,
         fleet_strategy_revision_id: revision.id,
-        number: 1,
+        number: if(predecessor, do: predecessor.number + 1, else: 1),
         symbol: agent.symbol,
         faction: agent.faction,
         replacement_symbols: %{},
         objective_progress: %{}
       })
+
+    if predecessor do
+      {:ok, :ok} =
+        Repo.transaction(fn ->
+          SpaceTraders.FleetGeneration.Identity.publish_generation!(operator.id, generation.id)
+        end)
+    end
 
     candidate = %PortfolioCandidate{
       id: "ship-execution-#{symbol}",
@@ -3863,5 +3868,27 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
 
     [commitment] = portfolio.commitments
     {agent, ship, portfolio, commitment}
+  end
+
+  defp execution_revision(operator) do
+    case Repo.one(from s in Strategy, where: s.operator_id == ^operator.id) do
+      %Strategy{active_revision_id: id} when not is_nil(id) ->
+        Repo.get!(Revision, id)
+
+      _none ->
+        strategy = Repo.insert!(%Strategy{operator_id: operator.id, revision_number: 1})
+
+        revision =
+          Repo.insert!(%Revision{
+            fleet_strategy_id: strategy.id,
+            number: 1,
+            document: %{"objectives" => [%{"objective" => "Exercise Ship Execution"}]},
+            source: "operator",
+            activated_at: DateTime.utc_now(:second)
+          })
+
+        Repo.update!(Ecto.Changeset.change(strategy, active_revision_id: revision.id))
+        revision
+    end
   end
 end

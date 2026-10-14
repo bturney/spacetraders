@@ -1,5 +1,5 @@
 defmodule SpaceTraders.FleetExecutionTest do
-  use SpaceTraders.DataCase, async: true
+  use SpaceTraders.DataCase, async: false
 
   import SpaceTraders.AgentFixtures
   import SpaceTraders.EvidenceFixtures
@@ -7,7 +7,7 @@ defmodule SpaceTraders.FleetExecutionTest do
 
   alias SpaceTraders.Test.CapacityDispositions
   alias SpaceTraders.API.Model.Waypoint
-  alias SpaceTraders.Agent.{Operator, Scope}
+  alias SpaceTraders.Agent.Scope
   alias SpaceTraders.Fleet.Intent
   alias SpaceTraders.Fleet.Ship
   alias SpaceTraders.FleetAllocation
@@ -324,7 +324,7 @@ defmodule SpaceTraders.FleetExecutionTest do
     end
 
     defp market_generation do
-      operator = Repo.insert!(%Operator{email: "market-#{System.unique_integer()}@example.com"})
+      operator = operator_fixture()
 
       agent =
         Repo.insert!(%SpaceTraders.Agent.Agent{
@@ -358,7 +358,7 @@ defmodule SpaceTraders.FleetExecutionTest do
           activated_at: DateTime.utc_now(:second)
         })
 
-      Repo.insert!(%Generation{
+      SpaceTraders.AgentFixtures.generation_fixture(%Generation{
         operator_id: operator.id,
         agent_id: agent.id,
         fleet_strategy_revision_id: revision.id,

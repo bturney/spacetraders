@@ -2,8 +2,12 @@ defmodule SpaceTraders.MissionControl do
   @moduledoc """
   Read projections for the authenticated Operator's Mission Control adapter.
 
-  The caller supplies an authenticated `SpaceTraders.Agent.Scope`. This module
-  owns the Operator-to-Agent scoping boundary and exposes no gameplay commands.
+  The caller supplies an authenticated `SpaceTraders.Agent.Scope`. Strategy,
+  condition and history projections belong to the deployment: the scope must
+  prove the deployment Operator (`SpaceTraders.OperatorAuthority`) and never
+  selects a tenant. Current projections resolve only the published Fleet;
+  historical projections retain exact Generation and causal identity.
+  This module exposes no gameplay commands.
   Read failures remain in each Fleet snapshot so adapters can render unknown or
   stale state without substituting cached values.
   """
@@ -20,13 +24,13 @@ defmodule SpaceTraders.MissionControl do
   alias SpaceTraders.FleetStrategy.Revision
   alias SpaceTraders.Evidence
   alias SpaceTraders.Evidence.Observation
+  alias SpaceTraders.OperatorAuthority
   alias SpaceTraders.Repo
   import Ecto.Query, only: [from: 2]
 
   @decision_episode_comparison_limit 100
 
   alias SpaceTraders.{
-    Agent,
     Clock,
     Fleet,
     FleetAllocation,
@@ -34,16 +38,15 @@ defmodule SpaceTraders.MissionControl do
     FleetGeneration,
     FleetPlanning,
     FleetStrategy,
-    Intelligence,
     MutationAttempts,
     OperatorConditions
   }
 
-  @doc "Returns the signed-in Operator's Agents for adapter subscriptions."
-  def agents(%Scope{operator: operator}) do
-    operator
-    |> Agent.list_agents()
-    |> Enum.map(&without_agent_credentials/1)
+  defp current_agents(scope) do
+    case FleetGeneration.current_fleet(scope) do
+      {:ok, %{state: :current, agent: agent}} -> [agent]
+      _ -> []
+    end
   end
 
   @doc """
@@ -59,9 +62,20 @@ defmodule SpaceTraders.MissionControl do
   carrying their Decision Episode identity, so outcome evidence stays
   reachable by identity.
   """
-  def endeavors(%Scope{} = scope), do: endeavors(scope, FleetAllocation.current_portfolio(scope))
+  def endeavors(%Scope{} = scope),
+    do: project_endeavors(scope, FleetAllocation.current_portfolio(scope))
 
-  def endeavors(%Scope{} = scope, nil) do
+  @doc "Version-bound projection: supplied portfolios cannot select another live Fleet."
+  def endeavors(%Scope{} = scope, %Portfolio{id: id}) do
+    case FleetAllocation.current_portfolio(scope) do
+      %Portfolio{id: ^id} = current -> project_endeavors(scope, current)
+      _ -> project_endeavors(scope, nil)
+    end
+  end
+
+  def endeavors(%Scope{} = scope, nil), do: project_endeavors(scope, nil)
+
+  defp project_endeavors(%Scope{} = scope, nil) do
     %{
       strategy: strategy(scope),
       groups: [],
@@ -70,7 +84,7 @@ defmodule SpaceTraders.MissionControl do
     }
   end
 
-  def endeavors(%Scope{} = scope, %Portfolio{} = portfolio) do
+  defp project_endeavors(%Scope{} = scope, %Portfolio{} = portfolio) do
     objectives =
       case strategy(scope).active_revision do
         nil -> []
@@ -180,17 +194,18 @@ defmodule SpaceTraders.MissionControl do
 
   defp dependency_details(_), do: "Prerequisite"
 
-  @doc "Returns the dashboard projections for the signed-in Operator's Agents."
-  def dashboard(%Scope{} = scope), do: dashboard(scope, agents(scope))
+  @doc "A fresh read-only snapshot of the published Fleet, without a resource selector."
+  def fleet_snapshot(%Scope{} = scope) do
+    case FleetGeneration.current_fleet(scope) do
+      {:ok, %{agent: %AgentRecord{id: id}, state: state}} when state in [:current, :transition] ->
+        id
+        |> then(&Repo.get!(AgentRecord, &1))
+        |> Fleet.command_snapshot()
+        |> without_credentials()
 
-  @doc "Projects a previously scoped Agent list after adapter subscriptions are established."
-  def dashboard(%Scope{} = scope, agents) do
-    agents
-    |> Enum.filter(&owned_by?(&1, scope))
-    |> Enum.map(&Agent.get_agent(scope, &1.id))
-    |> Enum.reject(&is_nil/1)
-    |> Enum.map(&Fleet.command_snapshot/1)
-    |> Enum.map(&without_credentials/1)
+      _ ->
+        nil
+    end
   end
 
   @doc """
@@ -212,15 +227,18 @@ defmodule SpaceTraders.MissionControl do
   be established maps to `nil`, and its evaluation must state the limitation
   rather than assume zero capacity.
   """
-  def availability(%Scope{operator: operator}) do
-    operator
-    |> Agent.list_agents()
-    |> Map.new(fn agent ->
+  def availability(%Scope{} = scope) do
+    with {:ok, _} <- OperatorAuthority.authorize(scope),
+         %{agent_id: agent_id} <- FleetAllocation.current_generation() do
+      agent = Repo.get!(AgentRecord, agent_id)
+
       case FleetExecution.governed_availability(agent) do
-        {:ok, availability} -> {agent.id, availability}
-        {:error, _reason} -> {agent.id, nil}
+        {:ok, availability} -> %{agent_id => availability}
+        {:error, _reason} -> %{agent_id => nil}
       end
-    end)
+    else
+      _ -> %{}
+    end
   end
 
   @doc """
@@ -281,7 +299,7 @@ defmodule SpaceTraders.MissionControl do
 
     agents =
       scope
-      |> agents()
+      |> current_agents()
       |> Enum.flat_map(fn agent ->
         case Fleet.system_from_headquarters(agent.headquarters) do
           {:ok, system_symbol} ->
@@ -365,26 +383,62 @@ defmodule SpaceTraders.MissionControl do
   @doc "Returns the concise Fleet Strategy and Fleet Generation read projection."
   def overview(%Scope{} = scope) do
     strategy = strategy(scope)
+    {identity, snapshots} = current_snapshots(scope)
     generations = FleetGeneration.list_generations(scope)
-    snapshots = dashboard(scope)
+    current_generations = List.wrap(identity[:generation])
 
     %{
       strategy: strategy,
+      current_fleet: identity,
+      # Reconstruct from the attempt even if its sender died before writing an
+      # Operator condition. The condition is narrative, never recovery truth.
+      registration_recovery: FleetGeneration.registration_recovery(scope),
       generations: generations,
-      fleets: Enum.map(snapshots, &fleet_overview(&1, generations)),
-      objectives: objective_overviews(strategy.active_revision, generations, snapshots),
-      market_execution: market_execution(scope),
+      fleets: Enum.map(snapshots, &fleet_overview(&1, current_generations)),
+      objectives: objective_overviews(strategy.active_revision, current_generations, snapshots),
+      market_execution: current_market_execution(scope, identity),
       conditions: OperatorConditions.unresolved(scope),
       notable_activity: activity(scope) |> Enum.filter(&notable_activity?/1) |> Enum.take(5)
     }
   end
 
+  defp current_snapshots(scope) do
+    case FleetGeneration.current_fleet(scope) do
+      {:ok, identity} ->
+        snapshots = List.wrap(fleet_snapshot(scope))
+        # Agent reads can discover a reset and complete replacement. Re-resolve
+        # identity before presenting anything; never pair those resources with
+        # the successor's Generation.
+        case FleetGeneration.current_fleet(scope) do
+          {:ok, latest} ->
+            same_generation? =
+              latest.generation && identity.generation &&
+                latest.generation.id == identity.generation.id
+
+            safe_snapshots? = latest.state == identity.state || Enum.all?(snapshots, & &1.stale?)
+            {latest, if(same_generation? && safe_snapshots?, do: snapshots, else: [])}
+
+          {:error, error} ->
+            {%{state: :unresolved, summary: error.summary}, []}
+        end
+
+      {:error, error} ->
+        {%{state: :unresolved, summary: error.summary}, []}
+    end
+  end
+
   @doc "Chronological consequential decisions and conditions for the signed-in Operator."
-  def activity(%Scope{operator: %{id: operator_id}} = scope) do
+  def activity(%Scope{} = scope) do
+    case OperatorAuthority.authorize(scope) do
+      {:ok, operator_id} -> deployment_activity(scope, operator_id)
+      {:error, _reason} -> []
+    end
+  end
+
+  defp deployment_activity(scope, _operator_id) do
     decisions =
       Repo.all(
         from episode in StrategyDecisionEpisode,
-          where: episode.operator_id == ^operator_id,
           order_by: [desc: episode.inserted_at, desc: episode.id],
           limit: 100
       )
@@ -500,11 +554,7 @@ defmodule SpaceTraders.MissionControl do
     operator_events =
       Repo.all(
         from event in Activity,
-          join: agent in AgentRecord,
-          on: agent.id == event.agent_id,
-          where:
-            agent.operator_id == ^operator_id and
-              event.kind not in ["retry", "manual_intent_waiting"],
+          where: event.kind not in ["retry", "manual_intent_waiting"],
           order_by: [desc: event.inserted_at, desc: event.id],
           limit: 100
       )
@@ -604,23 +654,25 @@ defmodule SpaceTraders.MissionControl do
   defp selection_summary(_episode), do: "Fleet selected a new commitment portfolio"
 
   @doc "Comparable Fleet Generation chapters using only retained outcome evidence."
-  def generation_recaps(%Scope{operator: %{id: operator_id}} = scope) do
+  def generation_recaps(%Scope{} = scope) do
+    case OperatorAuthority.authorize(scope) do
+      {:ok, operator_id} -> deployment_generation_recaps(scope, operator_id)
+      {:error, _reason} -> []
+    end
+  end
+
+  defp deployment_generation_recaps(scope, _operator_id) do
     generations = FleetGeneration.list_generations(scope)
 
     episodes =
       Repo.all(
         from episode in StrategyDecisionEpisode,
-          where: episode.operator_id == ^operator_id,
           select: episode
       )
       |> Enum.group_by(& &1.fleet_generation_id)
 
     revisions =
-      Repo.all(
-        from revision in Revision,
-          join: strategy in assoc(revision, :fleet_strategy),
-          where: strategy.operator_id == ^operator_id
-      )
+      Repo.all(Revision)
       |> Map.new(&{&1.id, &1})
 
     Enum.map(generations, fn generation ->
@@ -637,27 +689,67 @@ defmodule SpaceTraders.MissionControl do
       next_generation = Enum.find(generations, &(&1.number == generation.number + 1))
       end_at = generation.retired_at || DateTime.utc_now()
 
-      revision_at_start =
+      # Activation times have second precision. A Revision activated in the
+      # same second a Generation ended is ambiguous by time alone; activation
+      # moves only a live Generation onto the new Revision, so the ended
+      # Generation's own Revision decides whether that one governed it.
+      final_revision_number =
+        if generation.retired_at || generation.fenced_at do
+          case Map.get(revisions, generation.fleet_strategy_revision_id) do
+            %Revision{number: number} -> number
+            nil -> nil
+          end
+        end
+
+      started_under =
         revisions
         |> Map.values()
         |> Enum.filter(&(DateTime.compare(&1.activated_at, generation.inserted_at) != :gt))
-        |> Enum.max_by(& &1.activated_at, DateTime, fn -> nil end)
+
+      initial_revision = Map.get(revisions, generation.initial_fleet_strategy_revision_id)
+
+      # New Generations retain their actual establishment Revision. Legacy
+      # history without that identity keeps the existing timestamp fallback;
+      # never let a same-second activation overwrite known provenance.
+      revisions_at_start =
+        if initial_revision do
+          [initial_revision]
+        else
+          case Enum.max_by(started_under, & &1.activated_at, DateTime, fn -> nil end) do
+            nil ->
+              []
+
+            latest ->
+              Enum.filter(
+                started_under,
+                &(DateTime.compare(&1.activated_at, latest.activated_at) == :eq and
+                    (is_nil(final_revision_number) or &1.number <= final_revision_number))
+              )
+          end
+        end
+
+      end_second = DateTime.truncate(end_at, :second)
 
       active_revisions =
         revisions
         |> Map.values()
         |> Enum.filter(fn revision ->
-          DateTime.compare(revision.activated_at, generation.inserted_at) != :lt and
-            DateTime.compare(revision.activated_at, end_at) != :gt
+          (is_nil(initial_revision) or revision.number >= initial_revision.number) and
+            DateTime.compare(revision.activated_at, generation.inserted_at) != :lt and
+            case DateTime.compare(revision.activated_at, end_second) do
+              :lt -> true
+              :eq -> is_nil(final_revision_number) or revision.number <= final_revision_number
+              :gt -> false
+            end
         end)
 
       %{
         generation: generation,
         revisions:
           [
-            generation.fleet_strategy_revision_id,
-            revision_at_start && revision_at_start.id
-            | Enum.map(decisions, & &1.fleet_strategy_revision_id) ++
+            generation.fleet_strategy_revision_id
+            | Enum.map(revisions_at_start, & &1.id) ++
+                Enum.map(decisions, & &1.fleet_strategy_revision_id) ++
                 Enum.map(active_revisions, & &1.id)
           ]
           |> Enum.reject(&is_nil/1)
@@ -667,8 +759,7 @@ defmodule SpaceTraders.MissionControl do
           |> Enum.map(& &1.number)
           |> Enum.sort(),
         objective_outcomes:
-          [revision_at_start | active_revisions]
-          |> Enum.filter(& &1)
+          (revisions_at_start ++ active_revisions)
           |> Enum.uniq_by(& &1.id)
           |> Enum.flat_map(&generation_objective_outcomes(generation, &1)),
         realized_credit_change: if(credit_changes == [], do: nil, else: Enum.sum(credit_changes)),
@@ -686,12 +777,21 @@ defmodule SpaceTraders.MissionControl do
   end
 
   @doc "Returns one Decision Episode scoped to the authenticated Operator."
-  def decision_episode(%Scope{operator: %{id: operator_id}}, id) when is_integer(id) do
+  def decision_episode(%Scope{} = scope, id) when is_integer(id) do
+    case OperatorAuthority.authorize(scope) do
+      {:ok, operator_id} -> deployment_decision_episode(operator_id, id)
+      {:error, _reason} -> nil
+    end
+  end
+
+  def decision_episode(%Scope{}, _id), do: nil
+
+  defp deployment_decision_episode(_operator_id, id) do
     Repo.one(
       from episode in StrategyDecisionEpisode,
         join: generation in assoc(episode, :fleet_generation),
         join: revision in assoc(episode, :fleet_strategy_revision),
-        where: episode.operator_id == ^operator_id and episode.id == ^id,
+        where: episode.id == ^id,
         select: {episode, generation, revision}
     )
     |> case do
@@ -703,19 +803,20 @@ defmodule SpaceTraders.MissionControl do
     end
   end
 
-  def decision_episode(%Scope{}, _id), do: nil
-
   @doc "Returns a bounded, newest-first Decision Episode comparison across Fleet Generations."
-  def decision_episode_comparison(
-        %Scope{operator: %{id: operator_id}},
-        limit \\ @decision_episode_comparison_limit
-      )
+  def decision_episode_comparison(%Scope{} = scope, limit \\ @decision_episode_comparison_limit)
       when is_integer(limit) and limit > 0 do
+    case OperatorAuthority.authorize(scope) do
+      {:ok, operator_id} -> deployment_decision_episode_comparison(operator_id, limit)
+      {:error, _reason} -> []
+    end
+  end
+
+  defp deployment_decision_episode_comparison(_operator_id, limit) do
     Repo.all(
       from episode in StrategyDecisionEpisode,
         join: generation in assoc(episode, :fleet_generation),
         join: revision in assoc(episode, :fleet_strategy_revision),
-        where: episode.operator_id == ^operator_id,
         order_by: [desc: episode.inserted_at, desc: episode.id],
         limit: ^limit,
         select: {episode, generation, revision}
@@ -785,7 +886,14 @@ defmodule SpaceTraders.MissionControl do
   or Attention worth surfacing to the Operator.
   """
   def market_execution(%Scope{} = scope) do
-    case FleetAllocation.current_portfolio(scope) do
+    case FleetGeneration.current_fleet(scope) do
+      {:ok, identity} -> current_market_execution(scope, identity)
+      {:error, _error} -> current_market_execution(scope, %{state: :unresolved})
+    end
+  end
+
+  defp current_market_execution(scope, %{state: :current, agent: agent}) do
+    case FleetAllocation.current_portfolio(scope, agent) do
       nil ->
         %{
           family: nil,
@@ -794,7 +902,7 @@ defmodule SpaceTraders.MissionControl do
           contribution: %{commitment_count: 0, expected_value: 0},
           limitation: nil,
           attention: [],
-          dispositions: dispositions(scope, false)
+          dispositions: dispositions(scope, agent, false)
         }
 
       portfolio ->
@@ -811,20 +919,31 @@ defmodule SpaceTraders.MissionControl do
           contribution: endeavors(scope, portfolio).contribution,
           limitation: limitation(portfolio),
           attention: [],
-          dispositions: dispositions(scope, true)
+          dispositions: dispositions(scope, agent, true)
         }
     end
   end
 
+  defp current_market_execution(scope, _identity) do
+    %{
+      family: nil,
+      expected: nil,
+      realized: no_realized_economics(scope),
+      contribution: %{commitment_count: 0, expected_value: 0},
+      limitation: nil,
+      attention: [],
+      dispositions: []
+    }
+  end
+
   # Per-Agent actual allocation disposition from durable facts (#688).
-  defp dispositions(scope, with_portfolio?) do
+  defp dispositions(scope, agent, with_portfolio?) do
     case FleetStrategy.get(scope).active_revision do
       nil ->
         []
 
       active ->
-        scope
-        |> agents()
+        [agent]
         |> Enum.flat_map(fn agent ->
           portfolio = with_portfolio? && FleetAllocation.current_portfolio(scope, agent)
           List.wrap(MarketDisposition.for_agent(agent, active, portfolio || nil))
@@ -835,116 +954,6 @@ defmodule SpaceTraders.MissionControl do
   defp portfolio_family(%{calibration_version: "market" <> _}), do: :market
   defp portfolio_family(%{calibration_version: "resources" <> _}), do: :resources
   defp portfolio_family(_), do: :other
-
-  @doc """
-  Refreshes one Operator-owned Agent in an existing dashboard projection.
-
-  An Agent outside the supplied scope cannot be read and leaves the projection
-  unchanged. A failed refresh replaces prior values with the new explicit error.
-  """
-  def refresh_agent(%Scope{operator: operator}, projections, agent_id) do
-    case Agent.get_agent(operator, agent_id) do
-      nil ->
-        projections
-
-      agent ->
-        Enum.map(projections, fn projection ->
-          if projection.agent.id == agent.id do
-            agent |> Fleet.command_snapshot() |> without_credentials()
-          else
-            projection
-          end
-        end)
-    end
-  end
-
-  @doc "Reads one Waypoint's Market projection for an Operator-owned Agent."
-  def waypoint_market(%Scope{} = scope, %AgentRecord{} = agent, waypoint) do
-    if owned_by?(agent, scope) do
-      Fleet.waypoint_market(agent, waypoint)
-    else
-      {:error, :waypoint_unavailable}
-    end
-  end
-
-  @doc "Reads current and stale Waypoint readiness facts for an Operator-owned Agent."
-  def waypoint_readiness(%Scope{} = scope, %AgentRecord{} = agent, waypoint) do
-    if owned_by?(agent, scope) do
-      waypoint_facts =
-        Intelligence.subject(agent, :waypoint, waypoint.system_symbol, waypoint.symbol)
-
-      if waypoint.is_under_construction == true do
-        _ = Fleet.waypoint_construction(agent, waypoint)
-      end
-
-      construction =
-        Intelligence.subject_with_stale(
-          agent,
-          :construction,
-          waypoint.system_symbol,
-          waypoint.symbol
-        )
-
-      if waypoint.type == "JUMP_GATE" do
-        _ = Fleet.waypoint_jump_gate(agent, waypoint)
-      end
-
-      gate =
-        Intelligence.subject_with_stale(
-          agent,
-          :jump_gate,
-          waypoint.system_symbol,
-          waypoint.symbol
-        )
-
-      market =
-        Intelligence.subject_with_stale(
-          agent,
-          :market,
-          waypoint.system_symbol,
-          waypoint.symbol
-        )
-
-      waypoint_facts
-      |> Map.merge(namespace_facts(construction.current, "construction"))
-      |> Map.merge(namespace_facts(construction.stale, "construction_stale"))
-      |> Map.merge(namespace_facts(gate.current, "jump_gate"))
-      |> Map.merge(namespace_facts(gate.stale, "jump_gate_stale"))
-      |> Map.merge(namespace_facts(market.stale, "market_stale"))
-    else
-      %{}
-    end
-  end
-
-  @doc "Returns current and stale Market Intelligence for an Operator-owned Waypoint."
-  def market_intelligence(%Scope{} = scope, %AgentRecord{} = agent, waypoint) do
-    if owned_by?(agent, scope) do
-      Intelligence.subject_with_stale(agent, :market, waypoint.system_symbol, waypoint.symbol)
-    else
-      %{current: %{}, stale: %{}}
-    end
-  end
-
-  @doc "Returns observed Marketplace Waypoints for an Operator-owned Agent."
-  def marketplace_waypoints(%Scope{} = scope, %AgentRecord{} = agent, system_symbol) do
-    if owned_by?(agent, scope) do
-      Intelligence.marketplace_waypoints(agent, system_symbol)
-    else
-      []
-    end
-  end
-
-  @doc "Returns a usable Survey for an Operator-owned Agent, when one exists."
-  def usable_survey(%Scope{} = scope, %AgentRecord{} = agent, waypoint_symbol) do
-    if owned_by?(agent, scope) do
-      Intelligence.usable_survey(agent, waypoint_symbol)
-    end
-  end
-
-  defp owned_by?(%AgentRecord{operator_id: operator_id}, %Scope{operator: %{id: operator_id}}),
-    do: true
-
-  defp owned_by?(_agent, _scope), do: false
 
   defp without_credentials(%{agent: %AgentRecord{} = agent} = projection) do
     %{projection | agent: without_agent_credentials(agent)}
@@ -1112,10 +1121,6 @@ defmodule SpaceTraders.MissionControl do
 
   defp observed_objective(_objective, _generation, _snapshots), do: {:error, :unknown}
 
-  defp namespace_facts(facts, namespace) do
-    Map.new(facts, fn {field, fact} -> {"#{namespace}.#{field}", fact} end)
-  end
-
   defp expected_economics(%FleetAllocation.Portfolio{} = portfolio) do
     episode = portfolio.strategy_decision_episode
     expectations = if episode, do: episode.expectations, else: %{}
@@ -1171,16 +1176,12 @@ defmodule SpaceTraders.MissionControl do
   # Realized charges issued by coverage root Intents across every live Fleet
   # Generation's Episodes: a sustained scouting drain stays visible after its
   # Portfolio is superseded. nil when any such charge is unknown.
-  defp generation_observation_only_spending(%Scope{operator: %{id: operator_id}}) do
-    Repo.all(
-      from generation in FleetGeneration.Generation,
-        where: generation.operator_id == ^operator_id and is_nil(generation.retired_at),
-        select: generation.id
-    )
-    |> Enum.map(&FleetAllocation.TradeProgress.for_generation(&1).observation_only_spending)
-    |> then(fn amounts ->
-      if Enum.all?(amounts, &is_integer/1), do: Enum.sum(amounts)
-    end)
+  defp generation_observation_only_spending(scope) do
+    with {:ok, %{state: :current, generation: generation}} <- FleetGeneration.current_fleet(scope) do
+      FleetAllocation.TradeProgress.for_generation(generation.id).observation_only_spending
+    else
+      _ -> nil
+    end
   end
 
   defp known(value) when is_integer(value), do: value

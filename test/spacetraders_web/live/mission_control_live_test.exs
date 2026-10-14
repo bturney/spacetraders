@@ -22,8 +22,30 @@ defmodule SpaceTradersWeb.MissionControlLiveTest do
     assert html =~ "Set the Fleet direction"
     assert has_element?(view, "#mission-onboarding a[href='/strategy']", "Review Fleet Strategy")
     assert has_element?(view, "#mission-onboarding a[href='/agents/new']", "Mint an Agent")
+
+    assert has_element?(
+             view,
+             "#mission-onboarding a[href='/operators/settings#import-agent']",
+             "Import an existing Agent"
+           )
+
     assert html =~ "No active revision"
     assert html =~ "No current Fleet Generation"
+  end
+
+  test "a current Fleet needs no Agent selection and offers no add-another Agent path", %{
+    conn: conn,
+    operator: operator
+  } do
+    agent_fixture(operator, %{symbol: "ORBITALIST", agent_token: nil})
+
+    {:ok, view, _html} = live(conn, ~p"/mission-control")
+
+    assert has_element?(view, "#strategy-context", "ORBITALIST")
+    refute has_element?(view, "#current-fleet-state")
+    refute has_element?(view, "a[href='/agents/new']")
+    refute has_element?(view, "a[href='/operators/settings#import-agent']")
+    refute has_element?(view, "select[name*='agent']")
   end
 
   test "shows active Strategy intent and truthful unknown objective evaluation", %{
@@ -52,7 +74,7 @@ defmodule SpaceTradersWeb.MissionControlLiveTest do
     {:ok, revision} = FleetStrategy.activate(scope, FleetStrategy.get(scope).draft_version)
     agent = agent_fixture(operator, %{agent_token: "AGENT_TOKEN"})
 
-    Repo.insert!(%Generation{
+    SpaceTraders.AgentFixtures.generation_fixture(%Generation{
       operator_id: operator.id,
       agent_id: agent.id,
       fleet_strategy_revision_id: revision.id,
@@ -115,7 +137,7 @@ defmodule SpaceTradersWeb.MissionControlLiveTest do
     agent = agent_fixture(operator, %{agent_token: nil})
 
     generation =
-      Repo.insert!(%Generation{
+      SpaceTraders.AgentFixtures.generation_fixture(%Generation{
         operator_id: operator.id,
         agent_id: agent.id,
         fleet_strategy_revision_id: revision.id,
@@ -232,7 +254,7 @@ defmodule SpaceTradersWeb.MissionControlLiveTest do
     agent = agent_fixture(operator, %{agent_token: nil})
 
     generation =
-      Repo.insert!(%Generation{
+      SpaceTraders.AgentFixtures.generation_fixture(%Generation{
         operator_id: operator.id,
         agent_id: agent.id,
         fleet_strategy_revision_id: revision.id,
@@ -333,12 +355,11 @@ defmodule SpaceTradersWeb.MissionControlLiveTest do
     {:ok, _draft} = FleetStrategy.select_preset(scope, "steady_growth")
     {:ok, revision} = FleetStrategy.activate(scope, FleetStrategy.get(scope).draft_version)
     first = agent_fixture(operator, %{agent_token: nil})
-    second = agent_fixture(operator, %{agent_token: nil})
 
     now = DateTime.utc_now() |> DateTime.truncate(:second)
 
     old =
-      Repo.insert!(%Generation{
+      SpaceTraders.AgentFixtures.generation_fixture(%Generation{
         operator_id: operator.id,
         agent_id: first.id,
         fleet_strategy_revision_id: revision.id,
@@ -359,7 +380,7 @@ defmodule SpaceTradersWeb.MissionControlLiveTest do
                "evidence_id" => objective_evidence(first, 175_010).id
              })
 
-    _second_revision =
+    second_revision =
       SpaceTraders.FleetStrategy.Revision.create_changeset(
         %SpaceTraders.FleetStrategy.Revision{},
         %{
@@ -373,10 +394,16 @@ defmodule SpaceTradersWeb.MissionControlLiveTest do
       |> Repo.insert!()
 
     old
-    |> Ecto.Changeset.change(fenced_at: DateTime.utc_now(), retired_at: DateTime.utc_now())
+    |> Ecto.Changeset.change(
+      fenced_at: DateTime.utc_now(),
+      retired_at: DateTime.utc_now(),
+      fleet_strategy_revision_id: second_revision.id
+    )
     |> Repo.update!()
 
-    Repo.insert!(%Generation{
+    second = agent_fixture(operator, %{agent_token: nil})
+
+    SpaceTraders.AgentFixtures.generation_fixture(%Generation{
       operator_id: operator.id,
       agent_id: second.id,
       fleet_strategy_revision_id: revision.id,
@@ -436,7 +463,7 @@ defmodule SpaceTradersWeb.MissionControlLiveTest do
     now = DateTime.utc_now()
 
     first_generation =
-      Repo.insert!(%Generation{
+      SpaceTraders.AgentFixtures.generation_fixture(%Generation{
         operator_id: operator.id,
         agent_id: first_agent.id,
         fleet_strategy_revision_id: revision.id,
@@ -449,7 +476,7 @@ defmodule SpaceTradersWeb.MissionControlLiveTest do
       })
 
     second_generation =
-      Repo.insert!(%Generation{
+      SpaceTraders.AgentFixtures.generation_fixture(%Generation{
         operator_id: operator.id,
         agent_id: second_agent.id,
         fleet_strategy_revision_id: revision.id,
@@ -533,11 +560,11 @@ defmodule SpaceTradersWeb.MissionControlLiveTest do
            )
   end
 
-  test "another Operator cannot open a Decision Episode by identity", %{
+  test "deployment authentication, not Episode authorship, controls history access", %{
     conn: conn,
     operator: operator
   } do
-    other_operator = SpaceTraders.AgentFixtures.operator_fixture()
+    other_operator = SpaceTraders.AgentFixtures.legacy_operator_fixture()
     other_agent = SpaceTraders.AgentFixtures.agent_fixture(other_operator, %{agent_token: nil})
 
     strategy =
@@ -556,7 +583,7 @@ defmodule SpaceTradersWeb.MissionControlLiveTest do
       })
 
     generation =
-      Repo.insert!(%Generation{
+      SpaceTraders.AgentFixtures.generation_fixture(%Generation{
         operator_id: other_operator.id,
         agent_id: other_agent.id,
         fleet_strategy_revision_id: revision.id,
@@ -577,8 +604,13 @@ defmodule SpaceTradersWeb.MissionControlLiveTest do
 
     logged_in = SpaceTradersWeb.ConnCase.log_in_operator(conn, operator)
 
-    assert {:error, {:live_redirect, %{to: "/generations"}}} =
-             live(logged_in, "/decision-episodes/#{episode.id}")
+    assert {:ok, view, _html} = live(logged_in, "/decision-episodes/#{episode.id}")
+    assert has_element?(view, "h1", "Decision Episode #{episode.id}")
+
+    legacy_login = SpaceTradersWeb.ConnCase.log_in_operator(conn, other_operator)
+
+    assert {:error, {:redirect, %{to: "/operators/log-in"}}} =
+             live(legacy_login, "/decision-episodes/#{episode.id}")
   end
 
   test "Mission Control opens the Grafana family that answers each originating question", %{
@@ -591,7 +623,7 @@ defmodule SpaceTradersWeb.MissionControlLiveTest do
     agent = agent_fixture(operator, %{agent_token: nil})
 
     generation =
-      Repo.insert!(%Generation{
+      SpaceTraders.AgentFixtures.generation_fixture(%Generation{
         operator_id: operator.id,
         agent_id: agent.id,
         fleet_strategy_revision_id: revision.id,

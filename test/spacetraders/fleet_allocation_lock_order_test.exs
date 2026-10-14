@@ -37,7 +37,7 @@ defmodule SpaceTraders.FleetAllocationLockOrderTest do
     Repo.update!(Ecto.Changeset.change(strategy, active_revision_id: revision.id))
 
     generation =
-      Repo.insert!(%Generation{
+      SpaceTraders.AgentFixtures.generation_fixture(%Generation{
         operator_id: operator.id,
         agent_id: agent.id,
         fleet_strategy_revision_id: revision.id,
@@ -58,10 +58,10 @@ defmodule SpaceTraders.FleetAllocationLockOrderTest do
       Sandbox.unboxed_run(Repo, fn ->
         Repo.delete_all(
           from n in SpaceTraders.Outbox.Notification,
-            where: n.topic == ^"fleet_allocation:#{operator.id}"
+            where: n.topic == "fleet_allocation"
         )
 
-        Repo.delete!(operator)
+        SpaceTraders.AgentFixtures.cleanup_operator_fixture(operator.id)
       end)
 
       Sandbox.mode(Repo, :manual)
@@ -91,6 +91,59 @@ defmodule SpaceTraders.FleetAllocationLockOrderTest do
         decision()
       )
     end)
+  end
+
+  test "a committed fence wins over a contending allocation without changing its Episode", ctx do
+    owner = self()
+    episode = ctx.portfolio.strategy_decision_episode
+
+    holder =
+      Task.async(fn ->
+        Repo.transaction(fn ->
+          Repo.query!("SET LOCAL lock_timeout = '5s'")
+
+          Repo.update_all(from(g in Generation, where: g.id == ^ctx.generation.id),
+            set: [fenced_at: DateTime.utc_now()]
+          )
+
+          [[backend]] = Repo.query!("SELECT pg_backend_pid()").rows
+          send(owner, {:fencing, backend})
+          receive do: (:release -> :ok)
+        end)
+      end)
+
+    assert_receive {:fencing, holder_backend}, 5_000
+
+    caller =
+      Task.async(fn ->
+        Repo.checkout(fn ->
+          [[backend]] = Repo.query!("SELECT pg_backend_pid()").rows
+          send(owner, {:allocating, backend})
+
+          FleetAllocation.publish_portfolio(
+            ctx.scope,
+            ctx.generation.id,
+            %{ctx.selection | source_version: 1},
+            decision()
+          )
+        end)
+      end)
+
+    assert_receive {:allocating, caller_backend}, 5_000
+    await_blocked(caller_backend, holder_backend)
+    send(holder.pid, :release)
+    assert {:ok, :ok} = Task.await(holder, 10_000)
+    assert {:error, :stale_source} = Task.await(caller, 10_000)
+
+    assert is_nil(FleetAllocation.current_portfolio(ctx.scope))
+
+    assert {:error, :no_current_ship_claim} =
+             FleetAllocation.current_ship_claim(ctx.agent, "SHIP-1")
+
+    assert Repo.get!(Portfolio, ctx.portfolio.id).version == 1
+
+    assert Repo.get!(SpaceTraders.FleetAllocation.StrategyDecisionEpisode, episode.id).evidence_references ==
+             episode.evidence_references
   end
 
   defp assert_generation_first(ctx, call) do

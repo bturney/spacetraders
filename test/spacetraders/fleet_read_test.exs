@@ -6,7 +6,6 @@ defmodule SpaceTraders.FleetReadTest do
   import SpaceTraders.ShipBody
 
   alias SpaceTraders.Agent.Agent, as: AgentRecord
-  alias SpaceTraders.Agent.Operator
   alias SpaceTraders.API.Model
   alias SpaceTraders.Fleet
   alias SpaceTraders.Fleet.{Intents, Ship, ShipServer}
@@ -106,12 +105,9 @@ defmodule SpaceTraders.FleetReadTest do
   end
 
   defp agent_fixture do
-    operator =
-      Repo.insert!(%Operator{
-        email: "fleet-read-#{System.unique_integer([:positive])}@example.com"
-      })
+    operator = SpaceTraders.AgentFixtures.operator_fixture()
 
-    Repo.insert!(%AgentRecord{
+    SpaceTraders.AgentFixtures.established_agent_fixture(%AgentRecord{
       symbol: "READ-#{System.unique_integer([:positive])}",
       faction: "COSMIC",
       headquarters: "X1-UX81-A1",

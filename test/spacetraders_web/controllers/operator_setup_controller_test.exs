@@ -1,5 +1,5 @@
 defmodule SpaceTradersWeb.OperatorSetupControllerTest do
-  use SpaceTradersWeb.ConnCase, async: true
+  use SpaceTradersWeb.ConnCase, async: false
 
   import SpaceTraders.AgentFixtures
 
@@ -63,6 +63,42 @@ defmodule SpaceTradersWeb.OperatorSetupControllerTest do
 
       assert html_response(conn, 200) =~ "must have the @ sign and no spaces"
       assert html_response(conn, 200) =~ "should be at least 12 character(s)"
+    end
+
+    test "failed bootstrap never echoes submitted credentials into errors or HTML", %{conn: conn} do
+      secret = "BOOTSTRAP_ACCOUNT_SECRET"
+      params = put_in(@valid_params, ["operator", "email"], "invalid")
+      params = put_in(params, ["operator", "account_token"], secret)
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          response = conn |> post(~p"/setup", params) |> html_response(200)
+          assert response =~ "must have the @ sign"
+          refute response =~ secret
+          refute response =~ "a long password"
+        end)
+
+      refute log =~ secret
+      refute log =~ "a long password"
+      refute Agent.has_operators?()
+    end
+
+    test "request diagnostics redact bootstrap credentials", %{conn: conn} do
+      params = put_in(@valid_params, ["operator", "account_token"], "LOGGED_ACCOUNT_SECRET")
+      level = Logger.level()
+      Logger.configure(level: :debug)
+
+      try do
+        log =
+          ExUnit.CaptureLog.capture_log([level: :debug], fn -> post(conn, ~p"/setup", params) end)
+
+        assert log =~ "Parameters:"
+        assert log =~ "[FILTERED]"
+        refute log =~ "LOGGED_ACCOUNT_SECRET"
+        refute log =~ "a long password"
+      after
+        Logger.configure(level: level)
+      end
     end
 
     test "is refused once an operator exists", %{conn: conn} do

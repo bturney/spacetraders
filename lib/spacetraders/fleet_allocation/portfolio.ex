@@ -7,7 +7,7 @@ defmodule SpaceTraders.FleetAllocation.Portfolio do
     field :version, :integer
     field :superseded_at, :utc_datetime_usec
 
-    belongs_to :operator, SpaceTraders.Agent.Operator
+    field :operator_id, :id
     belongs_to :fleet_generation, SpaceTraders.FleetGeneration.Generation
     belongs_to :fleet_strategy_revision, SpaceTraders.FleetStrategy.Revision
 

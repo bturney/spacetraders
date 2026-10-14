@@ -1,9 +1,17 @@
 defmodule SpaceTraders.OperatorConditions do
-  @moduledoc "Durable Operator-facing Attention and Intervention lifecycle."
+  @moduledoc """
+  Durable Operator-facing Attention and Intervention lifecycle.
+
+  Conditions belong to the deployment. Producers stamp the Operator id they
+  were raised under as attribution; authenticated reads and acknowledgement go
+  through `SpaceTraders.OperatorAuthority`, so a scope proves the deployment
+  Operator and never selects a tenant's conditions.
+  """
 
   import Ecto.Query
 
   alias SpaceTraders.Agent.{Operator, Scope}
+  alias SpaceTraders.OperatorAuthority
   alias SpaceTraders.OperatorConditions.Condition
   alias SpaceTraders.Repo
 
@@ -31,7 +39,7 @@ defmodule SpaceTraders.OperatorConditions do
         case Repo.one(
                from condition in Condition,
                  where:
-                   condition.operator_id == ^operator_id and condition.key == ^key and
+                   condition.key == ^key and
                      is_nil(condition.resolved_at)
              ) do
           nil ->
@@ -42,7 +50,11 @@ defmodule SpaceTraders.OperatorConditions do
 
           condition ->
             condition
-            |> Condition.changeset(Map.put(attrs, :acknowledged_at, nil))
+            |> Condition.changeset(
+              attrs
+              |> Map.delete(:operator_id)
+              |> Map.put(:acknowledged_at, nil)
+            )
             |> Repo.update!()
             |> then(&{&1, true})
         end
@@ -104,12 +116,19 @@ defmodule SpaceTraders.OperatorConditions do
   end
 
   @doc "Marks a condition as seen without resolving it."
-  def acknowledge(%Scope{operator: %{id: operator_id}}, id) when is_integer(id) do
+  def acknowledge(%Scope{} = scope, id) when is_integer(id) do
+    case OperatorAuthority.authorize(scope) do
+      {:ok, operator_id} -> acknowledge_deployment(operator_id, id)
+      {:error, _reason} -> {:error, :condition_unavailable}
+    end
+  end
+
+  defp acknowledge_deployment(operator_id, id) do
     {count, _} =
       Repo.update_all(
         from(condition in Condition,
           where:
-            condition.id == ^id and condition.operator_id == ^operator_id and
+            condition.id == ^id and
               is_nil(condition.resolved_at) and is_nil(condition.acknowledged_at)
         ),
         set: [acknowledged_at: DateTime.utc_now()]
@@ -118,7 +137,7 @@ defmodule SpaceTraders.OperatorConditions do
     if count == 1 or
          Repo.exists?(
            from c in Condition,
-             where: c.id == ^id and c.operator_id == ^operator_id and is_nil(c.resolved_at)
+             where: c.id == ^id and is_nil(c.resolved_at)
          ) do
       if count == 1, do: broadcast(operator_id)
       :ok
@@ -128,12 +147,18 @@ defmodule SpaceTraders.OperatorConditions do
   end
 
   @doc "Resolves the condition after its producer establishes the underlying change."
-  def resolve(%Scope{operator: %{id: operator_id}}, key, opts \\ []) when is_binary(key) do
+  def resolve(%Scope{} = scope, key, opts \\ []) when is_binary(key) do
+    with {:ok, operator_id} <- OperatorAuthority.authorize(scope) do
+      resolve_deployment(operator_id, key, opts)
+    end
+  end
+
+  defp resolve_deployment(operator_id, key, opts) do
     {count, _} =
       Repo.update_all(
         from(condition in Condition,
           where:
-            condition.operator_id == ^operator_id and condition.key == ^key and
+            condition.key == ^key and
               is_nil(condition.resolved_at)
         ),
         set: [resolved_at: DateTime.utc_now()]
@@ -144,36 +169,49 @@ defmodule SpaceTraders.OperatorConditions do
   end
 
   @doc "Returns unresolved conditions in first-observed order, even after acknowledgement."
-  def unresolved(%Scope{operator: %{id: operator_id}}) do
-    Repo.all(
-      from condition in Condition,
-        where: condition.operator_id == ^operator_id and is_nil(condition.resolved_at),
-        order_by: [asc: condition.inserted_at, asc: condition.id]
-    )
+  def unresolved(%Scope{} = scope) do
+    with_deployment(scope, fn _operator_id ->
+      Repo.all(
+        from condition in Condition,
+          where: is_nil(condition.resolved_at),
+          order_by: [asc: condition.inserted_at, asc: condition.id]
+      )
+    end)
   end
 
   @doc "Returns retained condition occurrences, including resolved ones."
-  def history(%Scope{operator: %{id: operator_id}}) do
-    Repo.all(
-      from condition in Condition,
-        where: condition.operator_id == ^operator_id,
-        order_by: [desc: condition.inserted_at, desc: condition.id],
-        limit: 100
-    )
+  def history(%Scope{} = scope) do
+    with_deployment(scope, fn _operator_id ->
+      Repo.all(
+        from condition in Condition,
+          order_by: [desc: condition.inserted_at, desc: condition.id],
+          limit: 100
+      )
+    end)
   end
 
   @doc "Returns the retained limiting Objective summaries for one Fleet Generation."
-  def generation_limitations(%Scope{operator: %{id: operator_id}}, generation_id)
+  def generation_limitations(%Scope{} = scope, generation_id)
       when is_integer(generation_id) do
     prefix = "objective-infeasible:#{generation_id}:%"
 
-    Repo.all(
-      from condition in Condition,
-        where: condition.operator_id == ^operator_id and like(condition.key, ^prefix),
-        order_by: [asc: condition.inserted_at],
-        select: condition.summary
-    )
-    |> Enum.uniq()
+    with_deployment(scope, fn _operator_id ->
+      Repo.all(
+        from condition in Condition,
+          where: like(condition.key, ^prefix),
+          order_by: [asc: condition.inserted_at],
+          select: condition.summary
+      )
+      |> Enum.uniq()
+    end)
+  end
+
+  # Authentication gates deployment reads; authorship never selects resources.
+  defp with_deployment(scope, read) do
+    case OperatorAuthority.authorize(scope) do
+      {:ok, operator_id} -> read.(operator_id)
+      {:error, _reason} -> []
+    end
   end
 
   @doc false
@@ -192,11 +230,5 @@ defmodule SpaceTraders.OperatorConditions do
     )
   end
 
-  defp broadcast(operator_id) do
-    Phoenix.PubSub.broadcast(
-      SpaceTraders.PubSub,
-      "mission_conditions:#{operator_id}",
-      :mission_conditions_updated
-    )
-  end
+  defp broadcast(_operator_id), do: SpaceTraders.MissionControl.Channels.broadcast_conditions()
 end

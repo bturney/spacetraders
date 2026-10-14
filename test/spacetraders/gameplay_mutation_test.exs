@@ -198,7 +198,7 @@ defmodule SpaceTraders.GameplayMutationTest do
 
     Repo.update!(Ecto.Changeset.change(strategy, active_revision_id: revision.id))
 
-    Repo.insert!(%Generation{
+    SpaceTraders.AgentFixtures.generation_fixture(%Generation{
       operator_id: operator.id,
       agent_id: agent.id,
       fleet_strategy_revision_id: revision.id,

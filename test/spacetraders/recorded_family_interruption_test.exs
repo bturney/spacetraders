@@ -1071,10 +1071,10 @@ defmodule SpaceTraders.RecordedFamilyInterruptionTest do
           from o in SpaceTraders.Evidence.Observation, where: o.agent_id == ^agent.id
         )
 
-        topics = ["fleet:#{agent.id}", "fleet_allocation:#{operator.id}"]
+        topics = ["fleet:#{agent.id}", "fleet_allocation"]
         Repo.delete_all(from n in SpaceTraders.Outbox.Notification, where: n.topic in ^topics)
         Repo.delete_all(from e in SpaceTraders.Timeline.Event, where: e.owner_id in ^symbols)
-        Repo.delete!(operator)
+        SpaceTraders.AgentFixtures.cleanup_operator_fixture(operator.id)
       end)
     end)
 
@@ -1092,7 +1092,7 @@ defmodule SpaceTraders.RecordedFamilyInterruptionTest do
     Repo.update!(Ecto.Changeset.change(strategy, active_revision_id: revision.id))
 
     generation =
-      Repo.insert!(%Generation{
+      SpaceTraders.AgentFixtures.generation_fixture(%Generation{
         operator_id: operator.id,
         agent_id: agent.id,
         fleet_strategy_revision_id: revision.id,

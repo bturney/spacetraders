@@ -26,9 +26,9 @@ defmodule SpaceTraders.Fleet do
   alias SpaceTraders.{Agent, Contracts, Intelligence, World}
 
   @doc "Safely retires pre-stop execution state before fresh Fleet planning."
-  def prepare_emergency_stop_resume(operator_id, now) do
-    current_ship_ids = operator_ship_ids(operator_id, :current_generation)
-    stale_ship_ids = operator_ship_ids(operator_id, :stale_generation)
+  def prepare_emergency_stop_resume(now) do
+    current_ship_ids = current_ship_ids(:current_generation)
+    stale_ship_ids = current_ship_ids(:stale_generation)
     all_ship_ids = current_ship_ids ++ stale_ship_ids
 
     Intents.censor_reset_generation(stale_ship_ids, now)
@@ -41,7 +41,7 @@ defmodule SpaceTraders.Fleet do
     end
   end
 
-  defp operator_ship_ids(operator_id, generation) do
+  defp current_ship_ids(generation) do
     stale_filter =
       case generation do
         :current_generation -> dynamic([_ship, agent], is_nil(agent.stale_at))
@@ -52,7 +52,10 @@ defmodule SpaceTraders.Fleet do
       from ship in Ship,
         join: agent in AgentRecord,
         on: agent.id == ship.agent_id,
-        where: agent.operator_id == ^operator_id,
+        join: fleet in SpaceTraders.FleetGeneration.Generation,
+        on: fleet.agent_id == agent.id,
+        join: identity in "current_fleet_identity",
+        on: identity.id == 1 and identity.fleet_generation_id == fleet.id,
         where: ^stale_filter,
         select: ship.id
     )
@@ -113,7 +116,7 @@ defmodule SpaceTraders.Fleet do
   truth, so every call assembles fresh data.
   """
   def command_snapshot(%AgentRecord{} = agent) do
-    if Agent.stale?(agent) do
+    if Agent.stale?(agent) or SpaceTraders.FleetGeneration.gameplay_authority(agent.id) != :ok do
       stale_snapshot(agent)
     else
       overview = Agent.agent_overview(agent)
@@ -649,7 +652,10 @@ defmodule SpaceTraders.Fleet do
     %Ship{}
     |> Ecto.Changeset.change(symbol: ship_symbol, ship_type: ship_type, agent_id: agent.id)
     |> Ecto.Changeset.validate_required([:symbol, :ship_type, :agent_id])
-    |> Repo.insert(on_conflict: :nothing, conflict_target: :symbol)
+    |> Repo.insert(
+      on_conflict: :nothing,
+      conflict_target: {:unsafe_fragment, "(symbol) WHERE retired_at IS NULL"}
+    )
   end
 
   defp market_waypoint?(%{traits: traits}) do
@@ -1111,7 +1117,7 @@ defmodule SpaceTraders.Fleet do
     query =
       from(s in Ship,
         join: a in assoc(s, :agent),
-        where: s.symbol == ^ship_symbol,
+        where: s.symbol == ^ship_symbol and is_nil(s.retired_at),
         select: a
       )
 

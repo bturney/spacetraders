@@ -26,7 +26,7 @@ defmodule SpaceTradersWeb.OutcomeHTTPDiagnostic do
         Quiesced.stop_ship(ship.symbol)
         Repo.delete_all(from o in Evidence.Observation, where: o.agent_id == ^agent.id)
         Repo.delete_all(from d in Evidence.ObservationDemand, where: d.agent_id == ^agent.id)
-        Repo.delete!(operator)
+        SpaceTraders.AgentFixtures.cleanup_operator_fixture(operator.id)
       end)
 
       :ok = Sandbox.mode(Repo, :manual)

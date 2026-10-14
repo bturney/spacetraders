@@ -9,7 +9,7 @@ defmodule SpaceTraders.FleetAllocation.AllocationResultPointer do
     field :selection_kind, Ecto.Enum,
       values: SpaceTraders.FleetAllocation.StrategyDecisionEpisode.selection_kinds()
 
-    belongs_to :operator, SpaceTraders.Agent.Operator
+    field :operator_id, :id
     belongs_to :fleet_strategy_revision, SpaceTraders.FleetStrategy.Revision
     belongs_to :strategy_decision_episode, SpaceTraders.FleetAllocation.StrategyDecisionEpisode
 

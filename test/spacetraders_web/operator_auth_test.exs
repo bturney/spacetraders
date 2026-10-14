@@ -21,6 +21,26 @@ defmodule SpaceTradersWeb.OperatorAuthTest do
   end
 
   describe "log_in_operator/3" do
+    test "legacy credentials and sessions cannot authenticate outside canonical deployment identity",
+         %{conn: conn, operator: operator} do
+      legacy = legacy_operator_fixture()
+      token = Agent.generate_operator_session_token(legacy)
+      {magic_link, _} = generate_operator_magic_link_token(legacy)
+
+      refute Agent.get_operator_by_email_and_password(legacy.email, valid_operator_password())
+      refute Agent.get_operator_by_session_token(token)
+      refute Agent.get_operator_by_magic_link_token(magic_link)
+      assert {:error, :not_found} = Agent.login_operator_by_magic_link(magic_link)
+
+      unauthenticated =
+        conn
+        |> put_session(:operator_token, token)
+        |> OperatorAuth.fetch_current_scope_for_operator([])
+
+      refute unauthenticated.assigns.current_scope
+      assert Agent.get_operator_by_email_and_password(operator.email, valid_operator_password())
+    end
+
     test "stores the operator token in the session", %{conn: conn, operator: operator} do
       conn = OperatorAuth.log_in_operator(conn, operator)
       assert token = get_session(conn, :operator_token)
@@ -53,7 +73,7 @@ defmodule SpaceTradersWeb.OperatorAuthTest do
       conn: conn,
       operator: operator
     } do
-      other_operator = operator_fixture()
+      other_operator = legacy_operator_fixture()
 
       conn =
         conn

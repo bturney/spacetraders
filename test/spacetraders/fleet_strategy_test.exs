@@ -16,19 +16,67 @@ defmodule SpaceTraders.FleetStrategyTest do
   alias SpaceTraders.FleetStrategy.Revision
   alias SpaceTraders.Repo
 
-  test "Emergency Stop is durable and scoped to its Operator" do
-    scope = operator_fixture() |> Scope.for_operator()
-    other_scope = operator_fixture() |> Scope.for_operator()
+  import Ecto.Query, only: [from: 2]
 
+  test "Emergency Stop is durable global intent that suppresses every Agent in the deployment" do
+    scope = operator_fixture() |> Scope.for_operator()
+    # Pre-contraction data: an Agent row whose owner is not the deployment
+    # Operator. Global intent must not exempt it.
+    legacy_owner = legacy_operator_fixture()
+    legacy_agent = agent_fixture(legacy_owner, %{agent_token: "STOP_LEGACY_OWNER_AGENT_TOKEN"})
+
+    deployment_agent =
+      agent_fixture(scope.operator, %{agent_token: "STOP_DEPLOYMENT_AGENT_TOKEN"})
+
+    assert :ok = FleetStrategy.mutation_allowed?()
     assert {:ok, stopped} = FleetStrategy.engage_emergency_stop(scope)
     assert %DateTime{} = stopped.emergency_stopped_at
     assert stopped.emergency_stop_version == 1
 
-    assert FleetStrategy.get(scope).emergency_stopped_at == stopped.emergency_stopped_at
-    assert FleetStrategy.get(other_scope).emergency_stopped_at == nil
+    assert FleetStrategy.get().emergency_stopped_at == stopped.emergency_stopped_at
+    assert {:error, :emergency_stopped} = FleetStrategy.mutation_allowed?()
+    assert {:error, :emergency_stopped} = FleetStrategy.mutation_allowed?()
+
+    assert {:error, :emergency_stopped} =
+             EmergencyStopAdmission.mutation_allowed?(deployment_agent.agent_token)
+
+    assert {:error, :emergency_stopped} =
+             EmergencyStopAdmission.mutation_allowed?(legacy_agent.agent_token)
+
+    assert {:error, :generation_not_current} =
+             SpaceTraders.API.accept_contract(AgentTokenReference.new(legacy_agent), "contract-1")
+
+    assert {:error, :emergency_stopped} =
+             SpaceTraders.API.accept_contract(
+               AgentTokenReference.new(deployment_agent),
+               "contract-1"
+             )
 
     assert {:ok, reengaged} = FleetStrategy.engage_emergency_stop(scope)
     assert reengaged.emergency_stop_version == stopped.emergency_stop_version + 1
+  end
+
+  test "only the deployment Operator can engage or resume Emergency Stop" do
+    scope = operator_fixture() |> Scope.for_operator()
+    legacy_scope = legacy_operator_fixture() |> Scope.for_operator()
+
+    assert {:error, :not_deployment_operator} = FleetStrategy.engage_emergency_stop(legacy_scope)
+    assert FleetStrategy.get().emergency_stopped_at == nil
+    assert :ok = FleetStrategy.mutation_allowed?()
+
+    assert {:ok, stopped} = FleetStrategy.engage_emergency_stop(scope)
+
+    assert {:error, :not_deployment_operator} =
+             FleetStrategy.resume(legacy_scope, stopped.emergency_stop_version)
+
+    assert {:error, :not_deployment_operator} =
+             FleetStrategy.complete_emergency_stop_resume(
+               legacy_scope,
+               stopped.emergency_stop_version
+             )
+
+    assert FleetStrategy.get().emergency_stop_version == stopped.emergency_stop_version
+    assert {:error, :emergency_stopped} = FleetStrategy.mutation_allowed?()
   end
 
   test "resume rejects stale Operator state and keeps admission stopped for fresh planning" do
@@ -199,9 +247,9 @@ defmodule SpaceTraders.FleetStrategyTest do
     old_token = "STOP_OLD_ACCOUNT_TOKEN"
     new_token = "STOP_NEW_ACCOUNT_TOKEN"
 
-    assert {:ok, operator} = Agent.link_account_token(operator, old_token)
+    assert {:ok, operator} = Agent.link_account_token(Scope.for_operator(operator), old_token)
     assert {:ok, _stopped} = FleetStrategy.engage_emergency_stop(scope)
-    assert {:ok, _operator} = Agent.link_account_token(operator, new_token)
+    assert {:ok, _operator} = Agent.link_account_token(Scope.for_operator(operator), new_token)
     assert {:ok, _reengaged} = FleetStrategy.engage_emergency_stop(scope)
 
     assert {:error, :emergency_stopped} = EmergencyStopAdmission.mutation_allowed?(old_token)
@@ -294,15 +342,47 @@ defmodule SpaceTraders.FleetStrategyTest do
     assert active.document == active_document
   end
 
-  test "an Operator cannot read or activate another Operator's Fleet Strategy" do
+  test "the deployment Strategy is authored only through the deployment Operator" do
     owner_scope = operator_fixture() |> Scope.for_operator()
-    other_scope = operator_fixture() |> Scope.for_operator()
+    legacy_scope = Scope.for_operator(%SpaceTraders.Agent.Operator{id: -1})
+    original = document("Grow credits", "No scrap")
 
-    assert {:ok, _draft} =
-             save_draft(owner_scope, document("Grow credits", "No scrap"))
+    assert {:ok, draft} = save_draft(owner_scope, original)
 
-    assert %{draft: nil, active_revision: nil} = FleetStrategy.get(other_scope)
-    assert {:error, :draft_not_found} = FleetStrategy.activate(other_scope, 0)
+    # The deployment Strategy is selected by the deployment, not by the caller.
+    assert %{draft: ^original, draft_source: "operator"} = FleetStrategy.get()
+    assert FleetStrategy.get(owner_scope).draft == original
+
+    # A non-deployment identity neither reads nor changes it.
+    assert %{draft: nil, active_revision: nil} = FleetStrategy.get(legacy_scope)
+
+    assert {:error, :not_deployment_operator} =
+             FleetStrategy.save_draft(legacy_scope, document("Chart", "No scrap"), 0)
+
+    assert {:error, :not_deployment_operator} =
+             FleetStrategy.select_preset(legacy_scope, "steady_growth")
+
+    assert {:error, :not_deployment_operator} =
+             FleetStrategy.recommend(legacy_scope, document("Chart", "No scrap"))
+
+    assert {:error, :not_deployment_operator} =
+             FleetStrategy.discard_draft(legacy_scope, draft.draft_version)
+
+    assert {:error, :not_deployment_operator} =
+             FleetStrategy.activate(legacy_scope, draft.draft_version)
+
+    assert {:error, :not_deployment_operator} = FleetStrategy.authorize(legacy_scope, %{})
+
+    assert %{draft: ^original, draft_version: version, active_revision: nil} = FleetStrategy.get()
+    assert version == draft.draft_version
+
+    refute Repo.exists?(
+             from s in SpaceTraders.FleetStrategy.Strategy,
+               where: s.operator_id == ^legacy_scope.operator.id
+           )
+
+    assert {:ok, revision} = FleetStrategy.activate(owner_scope, draft.draft_version)
+    assert FleetStrategy.get().active_revision.id == revision.id
   end
 
   test "preset selection cannot silently replace an existing draft" do

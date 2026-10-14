@@ -215,7 +215,7 @@ defmodule SpaceTraders.API.RecordedDispatchTest do
     end)
 
     # Pre-Strategy generations are exactly the state #504's Intervention path covered.
-    Repo.insert!(%Generation{
+    SpaceTraders.AgentFixtures.generation_fixture(%Generation{
       operator_id: operator.id,
       agent_id: agent.id,
       fleet_strategy_revision_id: nil,

@@ -4,6 +4,7 @@ defmodule SpaceTradersWeb.OperatorLive.Settings do
   on_mount {SpaceTradersWeb.OperatorAuth, :require_sudo_mode}
 
   alias SpaceTraders.Agent
+  alias SpaceTraders.FleetGeneration
   alias SpaceTraders.Agent.Scope
 
   @impl true
@@ -51,30 +52,70 @@ defmodule SpaceTradersWeb.OperatorLive.Settings do
 
       <div class="divider" />
 
-      <.form for={@import_agent_form} id="import_agent_form" phx-submit="import_agent">
-        <.header>
-          Import an existing agent
-          <:subtitle>
-            An AccountToken can mint new agents but cannot recover an existing AgentToken.
-            Paste the AgentToken from my.spacetraders.io to import that agent safely.
-          </:subtitle>
-        </.header>
+      <section id="import-agent">
+        <p :if={@import_unavailable} class="text-sm opacity-70">{@import_unavailable}</p>
+        <.form
+          :if={!@import_unavailable}
+          for={@import_agent_form}
+          id="import_agent_form"
+          phx-submit="import_agent"
+        >
+          <.header>
+            Import an existing agent
+            <:subtitle>
+              For initial setup: an AccountToken can mint an Agent but cannot recover an existing
+              AgentToken. Paste the AgentToken from my.spacetraders.io to import that Agent safely.
+            </:subtitle>
+          </.header>
+          <.input
+            field={@import_agent_form[:agent_token]}
+            type="password"
+            label="AgentToken"
+            autocomplete="off"
+            spellcheck="false"
+            required
+          />
+          <.input
+            field={@import_agent_form[:confirmed]}
+            type="checkbox"
+            label="I confirm this AgentToken belongs to my agent and I want to import it."
+          />
+          <.button variant="primary" phx-disable-with="Importing...">
+            Import agent
+          </.button>
+          <p class="mt-3 text-sm opacity-70">
+            No existing Agent?
+            <.link navigate={~p"/agents/new"} class="link link-primary">Mint an Agent</.link>
+            instead.
+          </p>
+        </.form>
+      </section>
+
+      <div class="divider" />
+
+      <.form
+        for={@name_bank_form}
+        id="name_bank_form"
+        class="rounded-2xl border border-base-300/70 bg-base-100/70 p-4 sm:p-5"
+        phx-submit="save_name_bank"
+        phx-change="validate_name_bank"
+      >
+        <p class="eyebrow mb-3">Agent Name Bank</p>
         <.input
-          field={@import_agent_form[:agent_token]}
-          type="password"
-          label="AgentToken"
-          autocomplete="off"
+          field={@name_bank_form[:names]}
+          type="textarea"
+          label="Agent names, one per line, in order of preference"
+          rows="6"
           spellcheck="false"
-          required
         />
-        <.input
-          field={@import_agent_form[:confirmed]}
-          type="checkbox"
-          label="I confirm this AgentToken belongs to my agent and I want to import it."
-        />
-        <.button variant="primary" phx-disable-with="Importing...">
-          Import agent
-        </.button>
+        <p class="mb-3 text-sm opacity-70">
+          Used in order when minting or replacing an Agent. Names are uppercased and must be
+          3 to 14 characters.
+        </p>
+        <ul :if={@name_bank_errors != []} id="name_bank_errors" class="mb-3 text-sm text-error">
+          <li :for={error <- @name_bank_errors}>{error}</li>
+        </ul>
+        <.button variant="primary" phx-disable-with="Saving...">Save Name Bank</.button>
       </.form>
 
       <div class="divider" />
@@ -166,12 +207,27 @@ defmodule SpaceTradersWeb.OperatorLive.Settings do
       |> assign(:email_form, to_form(email_changeset))
       |> assign(:password_form, to_form(password_changeset))
       |> assign(:trigger_submit, false)
+      |> assign(:form_drafts, %{})
       |> assign(:account_token_linked?, Agent.account_token_linked?(socket.assigns.current_scope))
       |> assign(:import_agent_form, import_agent_form())
+      |> assign_import_availability()
       |> assign_account_token_form()
+      |> assign_name_bank()
 
     {:ok, socket}
   end
+
+  @impl true
+  def handle_info(:refresh_name_bank, socket) do
+    # Recurring patch: reload stored names only when there is no unsaved draft.
+    if Map.has_key?(socket.assigns.form_drafts, :name_bank) do
+      {:noreply, socket}
+    else
+      {:noreply, assign_name_bank(socket)}
+    end
+  end
+
+  def handle_info(_message, socket), do: {:noreply, socket}
 
   @impl true
   def handle_event("validate_account_token", params, socket) do
@@ -187,7 +243,7 @@ defmodule SpaceTradersWeb.OperatorLive.Settings do
     operator = socket.assigns.current_scope.operator
     true = Agent.sudo_mode?(operator)
 
-    case Agent.link_account_token(operator, operator_params["account_token"]) do
+    case Agent.link_account_token(socket.assigns.current_scope, operator_params["account_token"]) do
       {:ok, updated_operator} ->
         socket =
           socket
@@ -200,17 +256,58 @@ defmodule SpaceTradersWeb.OperatorLive.Settings do
 
       {:error, %Ecto.Changeset{} = changeset} ->
         {:noreply, assign_account_token_form(socket, changeset)}
+
+      {:error, :not_current_operator} ->
+        {:noreply,
+         socket
+         |> put_flash(:error, "You must log in to change credentials.")
+         |> push_navigate(to: ~p"/operators/log-in")}
+    end
+  end
+
+  def handle_event("validate_name_bank", %{"name_bank" => params}, socket) do
+    {:noreply, put_name_bank_draft(socket, params["names"], [])}
+  end
+
+  def handle_event("save_name_bank", %{"name_bank" => params}, socket) do
+    true = Agent.sudo_mode?(socket.assigns.current_scope.operator)
+
+    case SpaceTraders.AgentNameBank.save(params["names"] || "") do
+      {:ok, _names} ->
+        {:noreply, socket |> put_flash(:info, "Agent Name Bank saved.") |> assign_name_bank()}
+
+      {:error, errors} ->
+        {:noreply, put_name_bank_draft(socket, params["names"], errors)}
     end
   end
 
   def handle_event("import_agent", %{"import" => params}, socket) do
     confirmed = params["confirmed"] == "true"
 
-    case Agent.import_agent(socket.assigns.current_scope, params["agent_token"], confirmed) do
+    case FleetGeneration.import_agent(
+           socket.assigns.current_scope,
+           params["agent_token"],
+           confirmed
+         ) do
       {:ok, agent} ->
         {:noreply,
          socket
          |> put_flash(:info, "Agent #{agent.symbol} imported.")
+         |> assign(:import_agent_form, import_agent_form())
+         |> assign_import_availability()}
+
+      {:error, reason} when reason in [:current_fleet_exists, :fleet_transition_pending] ->
+        socket = assign_import_availability(socket)
+
+        {:noreply,
+         socket
+         |> put_flash(:error, "#{socket.assigns.import_unavailable} No Agent was imported.")
+         |> assign(:import_agent_form, import_agent_form())}
+
+      {:error, %{summary: summary}} ->
+        {:noreply,
+         socket
+         |> put_flash(:error, summary)
          |> assign(:import_agent_form, import_agent_form())}
 
       {:error, :confirmation_required} ->
@@ -308,8 +405,50 @@ defmodule SpaceTradersWeb.OperatorLive.Settings do
     end
   end
 
+  defp assign_name_bank(socket) do
+    names = Enum.join(SpaceTraders.AgentNameBank.list(), "\n")
+
+    socket
+    |> update(:form_drafts, &Map.delete(&1, :name_bank))
+    |> assign(:name_bank_errors, [])
+    |> assign(:name_bank_form, to_form(%{"names" => names}, as: "name_bank"))
+  end
+
+  defp put_name_bank_draft(socket, names, errors) do
+    names = names || ""
+
+    socket
+    |> update(:form_drafts, &Map.put(&1, :name_bank, %{"names" => names}))
+    |> assign(:name_bank_errors, errors)
+    |> assign(:name_bank_form, to_form(%{"names" => names}, as: "name_bank"))
+  end
+
   defp assign_account_token_form(socket, changeset \\ Agent.change_account_token()) do
-    assign(socket, :account_token_form, to_form(changeset, as: "operator"))
+    draft = Map.take(changeset.params || %{}, ["account_token"])
+
+    socket
+    |> update(:form_drafts, &Map.put(&1, :account_token, draft))
+    |> assign(:account_token_form, to_form(changeset, as: "operator"))
+  end
+
+  # Import is initial setup only; it is never a mid-game replacement mode.
+  defp assign_import_availability(socket) do
+    unavailable =
+      case SpaceTraders.FleetGeneration.current_fleet(socket.assigns.current_scope) do
+        {:ok, %{state: :empty}} ->
+          nil
+
+        {:ok, %{state: :current, agent: agent}} ->
+          "This deployment already has a current Agent, #{agent.symbol}. Import is only for initial setup."
+
+        {:ok, %{state: :transition}} ->
+          "A Fleet transition is in progress. Import is only for initial setup."
+
+        {:error, %{summary: summary}} ->
+          summary
+      end
+
+    assign(socket, :import_unavailable, unavailable)
   end
 
   defp import_agent_form do

@@ -1,6 +1,11 @@
 defmodule SpaceTraders.FleetStrategy do
   @moduledoc """
-  Owns durable Operator-authored Fleet Strategy drafts and immutable revisions.
+  Owns the deployment's durable Operator-authored Fleet Strategy drafts and
+  immutable revisions, and its Emergency Stop.
+
+  There is one Fleet Strategy per deployment. Commands are authenticated
+  through `SpaceTraders.OperatorAuthority`: the scope proves the deployment
+  Operator; it does not select the Strategy.
 
   Draft and recommendation changes never change active intent. Only an explicit
   call to `activate/1` snapshots the current draft and advances the active
@@ -9,10 +14,12 @@ defmodule SpaceTraders.FleetStrategy do
 
   import Ecto.Query, warn: false
 
-  alias SpaceTraders.Agent.{Agent, Operator, Scope}
+  alias SpaceTraders.Agent.Scope
   alias SpaceTraders.EmergencyStopAdmission
   alias SpaceTraders.Evidence
   alias SpaceTraders.Fleet
+  alias SpaceTraders.MissionControl.Channels
+  alias SpaceTraders.OperatorAuthority
 
   alias SpaceTraders.FleetStrategy.{
     ObjectiveEvaluation,
@@ -92,22 +99,25 @@ defmodule SpaceTraders.FleetStrategy do
 
   @doc "Checks possible consequence bounds against the active revision's Standing Authority."
   def authorize(%Scope{} = scope, consequence_bounds) do
-    with :ok <- mutation_allowed?(scope) do
-      case get(scope).active_revision do
+    with {:ok, _operator_id} <- OperatorAuthority.authorize(scope),
+         :ok <- mutation_allowed?() do
+      case get().active_revision do
         %Revision{} = revision -> StandingAuthority.authorize(revision, consequence_bounds)
         nil -> {:error, :strategy_not_active}
       end
     end
   end
 
-  @doc "Durably suppresses every new gameplay mutation for the authenticated Operator."
-  def engage_emergency_stop(%Scope{operator: %Operator{id: operator_id}} = scope) do
-    :global.trans({{__MODULE__, :emergency_stop, operator_id}, self()}, fn ->
-      do_engage_emergency_stop(scope, operator_id)
-    end)
+  @doc "Durably suppresses every new gameplay mutation in the deployment, minting included."
+  def engage_emergency_stop(%Scope{} = scope) do
+    with {:ok, operator_id} <- OperatorAuthority.authorize(scope) do
+      :global.trans({{__MODULE__, :emergency_stop}, self()}, fn ->
+        do_engage_emergency_stop(operator_id)
+      end)
+    end
   end
 
-  defp do_engage_emergency_stop(scope, operator_id) do
+  defp do_engage_emergency_stop(operator_id) do
     now = DateTime.utc_now()
     admission_guard = EmergencyStopAdmission.block(operator_id)
 
@@ -115,7 +125,7 @@ defmodule SpaceTraders.FleetStrategy do
       Repo.transaction(fn ->
         %Strategy{}
         |> Strategy.changeset(%{operator_id: operator_id})
-        |> Repo.insert(on_conflict: :nothing, conflict_target: :operator_id)
+        |> Repo.insert(on_conflict: :nothing)
 
         Repo.update_all(
           from(strategy in Strategy, where: strategy.operator_id == ^operator_id),
@@ -127,7 +137,7 @@ defmodule SpaceTraders.FleetStrategy do
           ]
         )
 
-        get(scope)
+        get()
       end)
 
     if match?({:ok, _projection}, result) do
@@ -140,7 +150,7 @@ defmodule SpaceTraders.FleetStrategy do
           admission_guard
         )
 
-      broadcast_update(scope)
+      broadcast_update()
     else
       EmergencyStopAdmission.cancel_block(operator_id, admission_guard)
     end
@@ -149,14 +159,13 @@ defmodule SpaceTraders.FleetStrategy do
   end
 
   @doc "Refreshes game truth and retires stale work while mutation admission remains stopped."
-  def resume(
-        %Scope{operator: %Operator{id: operator_id}} = scope,
-        expected_emergency_stop_version
-      )
+  def resume(%Scope{} = scope, expected_emergency_stop_version)
       when is_integer(expected_emergency_stop_version) do
-    :global.trans({{__MODULE__, :emergency_stop, operator_id}, self()}, fn ->
-      do_resume(scope, operator_id, expected_emergency_stop_version)
-    end)
+    with {:ok, operator_id} <- OperatorAuthority.authorize(scope) do
+      :global.trans({{__MODULE__, :emergency_stop}, self()}, fn ->
+        do_resume(scope, operator_id, expected_emergency_stop_version)
+      end)
+    end
   end
 
   defp do_resume(scope, operator_id, expected_emergency_stop_version) do
@@ -180,14 +189,14 @@ defmodule SpaceTraders.FleetStrategy do
 
           if updated != 1, do: Repo.rollback(:stale_emergency_stop)
 
-          if Fleet.prepare_emergency_stop_resume(operator_id, now) != :ok,
+          if Fleet.prepare_emergency_stop_resume(now) != :ok,
             do: Repo.rollback(:reconciliation_required)
 
-          get(scope)
+          get()
         end)
 
       if match?({:ok, _projection}, result) do
-        broadcast_update(scope)
+        broadcast_update()
       end
 
       result
@@ -195,11 +204,14 @@ defmodule SpaceTraders.FleetStrategy do
   end
 
   @doc false
-  def complete_emergency_stop_resume(
-        %Scope{operator: %Operator{id: operator_id}} = scope,
-        expected_emergency_stop_version
-      ) do
-    :global.trans({{__MODULE__, :emergency_stop, operator_id}, self()}, fn ->
+  def complete_emergency_stop_resume(%Scope{} = scope, expected_emergency_stop_version) do
+    with {:ok, operator_id} <- OperatorAuthority.authorize(scope) do
+      complete_emergency_stop_resume(scope, operator_id, expected_emergency_stop_version)
+    end
+  end
+
+  defp complete_emergency_stop_resume(scope, operator_id, expected_emergency_stop_version) do
+    :global.trans({{__MODULE__, :emergency_stop}, self()}, fn ->
       now = DateTime.utc_now(:second)
 
       {updated, _rows} =
@@ -220,10 +232,10 @@ defmodule SpaceTraders.FleetStrategy do
         )
 
       if updated == 1 do
-        projection = get(scope)
+        projection = get()
         :ok = EmergencyStopAdmission.resume(operator_id, projection.emergency_stop_version)
-        _ = SpaceTraders.FleetGeneration.replace_stale_agents(scope)
-        broadcast_update(scope)
+        _ = SpaceTraders.FleetGeneration.replace_after_reset(scope)
+        broadcast_update()
         {:ok, projection}
       else
         {:error, :stale_emergency_stop}
@@ -231,53 +243,56 @@ defmodule SpaceTraders.FleetStrategy do
     end)
   end
 
-  @doc "Returns whether Emergency Stop permits a new gameplay mutation."
-  def mutation_allowed?(%Scope{operator: %Operator{id: operator_id}}),
-    do: mutation_allowed_for_operator?(operator_id)
+  @doc """
+  Returns whether Emergency Stop permits a new gameplay mutation.
 
-  def mutation_allowed?(%Agent{operator_id: operator_id}),
-    do: mutation_allowed_for_operator?(operator_id)
+  Emergency Stop is global Operator intent: any engaged stop suppresses every
+  new mutation in the deployment, whichever Agent or credential would send it.
+  There is no Scope/Agent selector for mutation admission.
+  """
+  def mutation_allowed? do
+    if Repo.exists?(from(strategy in Strategy, where: not is_nil(strategy.emergency_stopped_at))),
+      do: {:error, :emergency_stopped},
+      else: :ok
+  end
 
-  defp mutation_allowed_for_operator?(nil), do: :ok
-
-  defp mutation_allowed_for_operator?(operator_id) do
-    if Repo.exists?(
-         from(strategy in Strategy,
-           where:
-             strategy.operator_id == ^operator_id and not is_nil(strategy.emergency_stopped_at)
-         )
-       ) do
-      {:error, :emergency_stopped}
-    else
-      :ok
+  @doc "Returns the deployment Fleet Strategy's current draft, active revision and Emergency Stop."
+  def get do
+    case deployment_strategy() do
+      nil -> empty_projection()
+      strategy -> projection(strategy)
     end
   end
 
-  @doc "Returns the authenticated Operator's current draft and active revision."
-  def get(%Scope{operator: %Operator{id: operator_id}}) do
-    case Repo.get_by(Strategy, operator_id: operator_id) do
-      nil ->
-        %{
-          draft: nil,
-          draft_source: nil,
-          draft_version: 0,
-          active_revision: nil,
-          emergency_stopped_at: nil,
-          emergency_resume_prepared_at: nil,
-          emergency_stop_version: 0
-        }
+  @doc """
+  Authenticated read of the deployment Fleet Strategy.
 
-      strategy ->
-        %{
-          draft: strategy.draft_document,
-          draft_source: strategy.draft_source,
-          draft_version: strategy.draft_version,
-          active_revision: active_revision(strategy),
-          emergency_stopped_at: strategy.emergency_stopped_at,
-          emergency_resume_prepared_at: strategy.emergency_resume_prepared_at,
-          emergency_stop_version: strategy.emergency_stop_version
-        }
+  A scope that is not the deployment Operator reads nothing; it never selects
+  another Strategy.
+  """
+  def get(%Scope{} = scope) do
+    case OperatorAuthority.authorize(scope) do
+      {:ok, _operator_id} -> get()
+      {:error, _reason} -> empty_projection()
     end
+  end
+
+  defp empty_projection do
+    %{
+      draft: nil,
+      draft_source: nil,
+      draft_version: 0,
+      active_revision: nil,
+      emergency_stopped_at: nil,
+      emergency_resume_prepared_at: nil,
+      emergency_stop_version: 0
+    }
+  end
+
+  # The deployment's Strategy row. It still carries its author's Operator id as
+  # attribution; selection comes from the durable deployment identity.
+  defp deployment_strategy do
+    Repo.one(Strategy)
   end
 
   @doc """
@@ -314,45 +329,59 @@ defmodule SpaceTraders.FleetStrategy do
 
   @doc "Persists an Operator-authored draft without changing active intent."
   def save_draft(%Scope{} = scope, document, expected_draft_version) do
-    put_draft(scope, document, "operator", expected_draft_version)
+    with {:ok, operator_id} <- OperatorAuthority.authorize(scope) do
+      put_draft(operator_id, document, "operator", expected_draft_version)
+    end
   end
 
   @doc "Opens a recommendation as a reviewable draft without changing active intent."
-  def recommend(%Scope{} = scope, document), do: open_draft(scope, document, "recommendation")
+  def recommend(%Scope{} = scope, document) do
+    with {:ok, operator_id} <- OperatorAuthority.authorize(scope) do
+      open_draft(operator_id, document, "recommendation")
+    end
+  end
 
   @doc "Copies a disclosed preset into a reviewable draft."
   def select_preset(%Scope{} = scope, preset_id) do
-    case Enum.find(@presets, &(&1.id == preset_id)) do
-      nil -> {:error, :preset_not_found}
-      preset -> open_draft(scope, preset_document(preset), "preset:#{preset.id}")
+    with {:ok, operator_id} <- OperatorAuthority.authorize(scope) do
+      case Enum.find(@presets, &(&1.id == preset_id)) do
+        nil -> {:error, :preset_not_found}
+        preset -> open_draft(operator_id, preset_document(preset), "preset:#{preset.id}")
+      end
     end
   end
 
   @doc "Discards the draft without changing active intent."
-  def discard_draft(
-        %Scope{operator: %Operator{id: operator_id}} = scope,
-        expected_draft_version
-      ) do
-    case Repo.get_by(Strategy, operator_id: operator_id) do
-      nil ->
-        {:ok, get(scope)}
+  def discard_draft(%Scope{} = scope, expected_draft_version) do
+    with {:ok, _operator_id} <- OperatorAuthority.authorize(scope) do
+      case deployment_strategy() do
+        nil ->
+          {:ok, get()}
 
-      strategy ->
-        update_strategy(
-          strategy,
-          scope,
-          %{draft_document: nil, draft_source: nil},
-          expected_draft_version
-        )
+        strategy ->
+          update_strategy(
+            strategy,
+            %{draft_document: nil, draft_source: nil},
+            expected_draft_version
+          )
+      end
     end
   end
 
   @doc "Explicitly activates the current draft as a new immutable revision."
-  def activate(%Scope{operator: %Operator{id: operator_id}} = scope, expected_draft_version)
+  def activate(%Scope{} = scope, expected_draft_version)
       when is_integer(expected_draft_version) do
+    with {:ok, operator_id} <- OperatorAuthority.authorize(scope) do
+      activate(scope, operator_id, expected_draft_version)
+    end
+  end
+
+  defp activate(scope, operator_id, expected_draft_version) do
     result =
       Repo.transaction(fn ->
-        with %Strategy{} = strategy <- Repo.get_by(Strategy, operator_id: operator_id),
+        {:ok, _} = SpaceTraders.FleetGeneration.Identity.lock_establishment(operator_id)
+
+        with %Strategy{} = strategy <- deployment_strategy(),
              document when is_map(document) <- strategy.draft_document,
              true <- strategy.draft_version == expected_draft_version,
              :ok <- validate_document(document) do
@@ -392,7 +421,8 @@ defmodule SpaceTraders.FleetStrategy do
             set: [active_revision_id: revision.id]
           )
 
-          revision
+          live = SpaceTraders.FleetGeneration.bind_strategy(scope, revision)
+          {revision, live}
         else
           nil -> Repo.rollback(:draft_not_found)
           :error -> Repo.rollback(:draft_not_found)
@@ -401,57 +431,48 @@ defmodule SpaceTraders.FleetStrategy do
         end
       end)
 
-    if match?({:ok, %Revision{}}, result) do
-      {:ok, revision} = result
-      :ok = SpaceTraders.FleetGeneration.activate_strategy(scope, revision)
+    if match?({:ok, {%Revision{}, _}}, result) do
+      {:ok, {revision, live}} = result
+      :ok = SpaceTraders.FleetGeneration.notify_strategy_activation(scope, revision, live)
 
       # ADR 0013: the new floor applies now. A balance below it pauses spending
       # as a revision shortfall; unsent work is refused at its send boundary
       # and old Reservations are released when Allocation supersedes them.
-      :ok = SpaceTraders.CreditFloorWatch.revalidate_operator(scope.operator.id)
+      :ok = SpaceTraders.CreditFloorWatch.revalidate_current()
 
       # Revision supersession on a live Generation: the previous revision's
       # open Observation Demands lose relevance with it. Their rows and
       # Strategy provenance stay durably visible.
-      :ok = Evidence.withdraw_superseded_demands(scope.operator.id, revision.id)
+      :ok = Evidence.withdraw_superseded_demands(operator_id, revision.id)
 
-      broadcast_update(scope)
+      broadcast_update()
     end
 
-    result
+    case result do
+      {:ok, {revision, _live}} -> {:ok, revision}
+      error -> error
+    end
   end
 
-  defp put_draft(
-         %Scope{operator: %Operator{id: operator_id}} = scope,
-         document,
-         source,
-         expected_draft_version
-       )
+  defp put_draft(operator_id, document, source, expected_draft_version)
        when is_map(document) do
     with :ok <- validate_draft_document(document) do
-      strategy =
-        Repo.get_by(Strategy, operator_id: operator_id) || %Strategy{operator_id: operator_id}
+      strategy = deployment_strategy() || %Strategy{operator_id: operator_id}
 
       update_strategy(
         strategy,
-        scope,
         %{draft_document: document, draft_source: source},
         expected_draft_version
       )
     end
   end
 
-  defp put_draft(_scope, _document, _source, _expected_draft_version),
+  defp put_draft(_operator_id, _document, _source, _expected_draft_version),
     do: {:error, :invalid_document}
 
-  defp open_draft(
-         %Scope{operator: %Operator{id: operator_id}} = scope,
-         document,
-         source
-       )
-       when is_map(document) do
+  defp open_draft(operator_id, document, source) when is_map(document) do
     with :ok <- validate_draft_document(document) do
-      case Repo.get_by(Strategy, operator_id: operator_id) do
+      case deployment_strategy() do
         nil ->
           case %Strategy{}
                |> Strategy.changeset(%{
@@ -462,7 +483,7 @@ defmodule SpaceTraders.FleetStrategy do
                })
                |> Repo.insert() do
             {:ok, strategy} ->
-              broadcast_update(scope)
+              broadcast_update()
               {:ok, projection(strategy)}
 
             {:error,
@@ -490,7 +511,7 @@ defmodule SpaceTraders.FleetStrategy do
             )
 
           if claimed == 1 do
-            broadcast_update(scope)
+            broadcast_update()
 
             {:ok,
              projection(strategy, %{
@@ -508,9 +529,9 @@ defmodule SpaceTraders.FleetStrategy do
     end
   end
 
-  defp open_draft(_scope, _document, _source), do: {:error, :invalid_document}
+  defp open_draft(_operator_id, _document, _source), do: {:error, :invalid_document}
 
-  defp update_strategy(strategy, scope, attrs, expected_draft_version) do
+  defp update_strategy(strategy, attrs, expected_draft_version) do
     result =
       if strategy.id do
         {updated, _rows} =
@@ -541,7 +562,7 @@ defmodule SpaceTraders.FleetStrategy do
 
     case result do
       {:ok, %Strategy{} = strategy} ->
-        broadcast_update(scope)
+        broadcast_update()
 
         {:ok,
          projection(strategy, %{
@@ -731,11 +752,5 @@ defmodule SpaceTraders.FleetStrategy do
     if from == to, do: nil, else: %{from: from, to: to}
   end
 
-  defp broadcast_update(%Scope{operator: %Operator{id: operator_id}}) do
-    Phoenix.PubSub.broadcast(
-      SpaceTraders.PubSub,
-      "fleet_strategy:#{operator_id}",
-      {:fleet_strategy_updated, operator_id}
-    )
-  end
+  defp broadcast_update, do: Channels.broadcast_strategy()
 end

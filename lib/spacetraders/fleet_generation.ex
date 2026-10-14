@@ -9,7 +9,7 @@ defmodule SpaceTraders.FleetGeneration do
 
   require Logger
 
-  import Ecto.Changeset, only: [get_field: 2]
+  import Ecto.Changeset, only: [get_field: 2, put_change: 3]
   import Ecto.Query, warn: false
 
   alias SpaceTraders.API.GameplayError
@@ -18,6 +18,8 @@ defmodule SpaceTraders.FleetGeneration do
   alias SpaceTraders.Agent.{Agent, Operator, Scope}
   alias SpaceTraders.Fleet.{Ship, ShipServer}
   alias SpaceTraders.FleetGeneration.Generation
+  alias SpaceTraders.FleetGeneration.Identity
+  alias SpaceTraders.FleetGeneration.Registration
   alias SpaceTraders.Evidence.Observation
   alias SpaceTraders.FleetStrategy.{Revision, Strategy}
 
@@ -27,6 +29,7 @@ defmodule SpaceTraders.FleetGeneration do
     Fleet,
     FleetAllocation,
     FleetStrategy,
+    MutationAttempts,
     OperatorConditions,
     Repo,
     Timeline
@@ -37,6 +40,44 @@ defmodule SpaceTraders.FleetGeneration do
 
     @enforce_keys [:operator_id]
     defstruct [:operator_id]
+  end
+
+  @doc "Validates the completely migrated deployment without adopting raw legacy writers."
+  defdelegate preflight_current_fleet(), to: Identity, as: :preflight
+
+  @doc "Resolves the durable deployment Operator, Agent and Generation, without secrets."
+  defdelegate current_fleet(), to: Identity, as: :current
+
+  @doc "Whether an Agent's credential carries new gameplay authority: only the current Generation's."
+  defdelegate gameplay_authority(agent_id), to: Identity
+
+  @doc """
+   Authenticated, read-only access to a historical Generation's evidence holder.
+   Confers no gameplay authority and never reports itself current.
+  """
+  def generation_evidence(scope, generation_id) when is_integer(generation_id) do
+    with {:ok, _} <- SpaceTraders.OperatorAuthority.authorize(scope),
+         %Generation{} = generation <- Repo.get(Generation, generation_id),
+         true <- not is_nil(generation.retired_at) or not is_nil(generation.fenced_at),
+         %Agent{} = agent <- generation.agent_id && Repo.get(Agent, generation.agent_id) do
+      {:ok, %{agent: %{agent | agent_token: nil}, generation: generation}}
+    else
+      _ -> :error
+    end
+  end
+
+  @doc "Resolves current identity only for its authenticated deployment Operator."
+  def current_fleet(%Scope{operator: %Operator{id: operator_id}}) do
+    with {:ok, identity} <- current_fleet() do
+      if identity.operator && identity.operator.id == operator_id,
+        do: {:ok, identity},
+        else:
+          {:error,
+           %{
+             reason: :not_deployment_operator,
+             summary: "Sign in as the deployment Operator to access the current Fleet."
+           }}
+    end
   end
 
   @doc "Carries Strategic Objective progress into a replacement Fleet Generation by scope."
@@ -77,91 +118,510 @@ defmodule SpaceTraders.FleetGeneration do
   def advance_objective_progress(_revision, _progress, _next_generation_id),
     do: {:error, :invalid_objective_progress}
 
-  @doc "Mints a new Fleet Generation for the authenticated Operator."
-  def mint(%Scope{operator: %Operator{id: operator_id}} = scope, attrs) do
-    :global.trans({{__MODULE__, :mint, operator_id}, self()}, fn ->
-      result = do_mint(scope, attrs, operator_id)
+  @doc """
+  Mints the initial or replacement Fleet Generation for the authenticated Operator.
 
-      case result do
-        {:error, :account_token_not_linked} ->
-          OperatorConditions.raise(
-            scope,
-            "replacement-authority",
-            :intervention,
-            "AccountToken authority is unavailable. Link an AccountToken to mint a Fleet Generation."
-          )
+  Establishment is serialized in PostgreSQL before registration is dispatched:
+  a competing mint or import waits, then observes the committed current Fleet
+  rather than sending a second registration.
 
-        {:error, :replacement_symbols_exhausted} ->
-          OperatorConditions.raise(
-            scope,
-            "replacement-symbols",
-            :intervention,
-            "Replacement Agent symbols are exhausted. Revise the replacement identity choices."
-          )
+  Each step commits through the registration's MutationAttempt (ADR 0011). A
+  lost response leaves it unresolved, which suppresses every further
+  registration, import and candidate until it is reconciled. A proven success
+  whose local adoption was interrupted is adopted here instead of minting.
+  """
+  def mint(%Scope{} = scope, attrs),
+    do: establish_by_registration(scope, attrs, [:empty], :initial)
 
-        {:ok, _} ->
-          OperatorConditions.resolve(scope, "replacement-authority")
-          OperatorConditions.resolve(scope, "replacement-symbols")
+  @doc """
+  Replaces the current Agent after definitive Server Reset evidence fenced it.
 
-        _ ->
-          :ok
+  Requests the predecessor's symbol and faction first, then the remaining
+  distinct Agent Name Bank names in order. Only a definitive name conflict
+  advances to the next name. Any other outcome stops at that candidate, and an
+  uncertain one is left to registration recovery, which this resumes instead
+  of minting again. The predecessor Agent, its Ships and its Generation are
+  retained as history; the replacement is a distinct Generation carrying the
+  accepted Fleet Strategy forward.
+
+  Returns `{:error, :no_server_reset}` unless the current Fleet is a fenced
+  Server Reset predecessor. This is not voluntary replacement authority:
+  reset fencing cannot represent a resumable pause of a healthy predecessor.
+  Optional voluntary replacement is explicitly deferred in ADR 0015 (#705).
+  """
+  def replace_after_reset(%Scope{} = scope) do
+    with {:ok, identity} <- current_fleet(scope),
+         {:ok, attrs} <- server_reset_replacement(identity) do
+      establish_by_registration(scope, attrs, [:transition], :server_reset)
+    end
+  end
+
+  @doc """
+  Resumes an interrupted Server Reset replacement after application restart.
+
+  A fenced predecessor whose replacement never committed is replaced, or its
+  proven registration adopted, under the same establishment authority as any
+  other wakeup. Anything else is left untouched.
+  """
+  def resume_reset_replacement do
+    case current_fleet() do
+      {:ok, %{state: :transition, operator: %Operator{} = operator}} ->
+        replace_after_reset(Scope.for_operator(operator))
+
+      _ ->
+        {:error, :no_server_reset}
+    end
+  end
+
+  defp server_reset_replacement(%{
+         state: :transition,
+         generation: %Generation{fenced_at: %DateTime{}, retired_at: nil} = generation,
+         agent: %Agent{stale_at: %DateTime{}} = agent
+       }) do
+    faction = generation.faction || agent.faction
+    symbol = generation.symbol || agent.symbol
+
+    # Banked names are preferences; one the registration contract would refuse
+    # is never submitted.
+    banked =
+      Enum.filter(SpaceTraders.AgentNameBank.list(), fn name ->
+        Agent.changeset(%Agent{}, %{symbol: name, faction: faction}).valid?
+      end)
+
+    {:ok, %{symbol: symbol, faction: faction, replacement_symbols: Enum.uniq([symbol | banked])}}
+  end
+
+  defp server_reset_replacement(_identity), do: {:error, :no_server_reset}
+
+  defp establish_by_registration(
+         %Scope{operator: %Operator{id: operator_id}} = scope,
+         attrs,
+         states,
+         kind
+       ) do
+    # Controls and validation fail before queueing for the establishment
+    # authority; they are checked again once it is held.
+    result =
+      with :ok <- validate_registration(scope, attrs),
+           {:ok, _identity} <- current_fleet(scope) do
+        Registration.with_authority(fn ->
+          mint_with_authority(scope, attrs, operator_id, states)
+        end)
+        |> finish_establishment(scope)
       end
 
-      result
+    :ok = sync_replacement_conditions(scope, kind, result)
+    sync_registration_condition(scope)
+    result
+  end
+
+  @replacement_handled [
+    :account_token_not_linked,
+    :replacement_symbols_exhausted,
+    :registration_unresolved,
+    :emergency_stopped,
+    :current_fleet_exists,
+    :no_server_reset
+  ]
+
+  defp sync_replacement_conditions(scope, kind, result) do
+    case result do
+      {:error, :account_token_not_linked} ->
+        OperatorConditions.raise(
+          scope,
+          "replacement-authority",
+          :intervention,
+          "AccountToken authority is unavailable. Link an AccountToken to mint a Fleet Generation."
+        )
+
+      {:error, :replacement_symbols_exhausted} ->
+        OperatorConditions.raise(
+          scope,
+          "replacement-symbols",
+          :intervention,
+          "Every replacement name was definitively taken. Edit the Agent Name Bank in Settings, then retry replacement from Mission Control."
+        )
+
+      {:error, reason} when kind == :server_reset and reason not in @replacement_handled ->
+        OperatorConditions.raise(
+          scope,
+          "server-reset-replacement",
+          :intervention,
+          "Server Reset replacement stopped: the game refused registration or local adoption failed. " <>
+            "The predecessor stays fenced. Retry replacement from Mission Control."
+        )
+
+      _ ->
+        :ok
+    end
+
+    :ok
+  end
+
+  @doc """
+  The durable registration recovery state for the authenticated Operator,
+  without credentials: `:clear`, `:in_progress`, `:unresolved` or
+  `:awaiting_adoption`, with the attempted symbol and an actionable summary.
+  """
+  def registration_recovery(%Scope{operator: %Operator{id: operator_id}}) do
+    operator_id |> Registration.recovery() |> Map.delete(:attempt)
+  end
+
+  @doc """
+  Resumes registration recovery from authoritative evidence, without registering.
+
+  A proven registration awaiting local adoption is adopted
+  (`{:ok, :adopted}`). An unresolved one is settled only when the public Agent
+  read proves the symbol unregistered (`{:ok, :clear}`). Otherwise it remains
+  `{:error, :registration_unresolved}`.
+  """
+  def reconcile_registration(%Scope{operator: %Operator{id: operator_id}} = scope) do
+    result =
+      with :ok <- SpaceTraders.RuntimeAuthority.execution_allowed?(),
+           {:ok, _identity} <- current_fleet(scope) do
+        Registration.with_authority(fn ->
+          case Registration.recovery(operator_id, authority: true) do
+            %{status: :clear} ->
+              {:ok, :clear}
+
+            %{status: :awaiting_adoption, attempt: attempt} ->
+              with {:ok, _} <-
+                     scope |> adopt_registration(attempt) |> finish_establishment(scope),
+                   do: {:ok, :adopted}
+
+            %{status: :unresolved, attempt: attempt} ->
+              with {:ok, :absent} <- Registration.reconcile_from_public_read(attempt),
+                   do: {:ok, :clear}
+          end
+        end)
+      end
+
+    sync_registration_condition(scope)
+    result
+  end
+
+  @doc """
+  Adopts the Agent of this deployment's own unresolved registration from its
+  AgentToken, confirmed by the Operator.
+
+  This is recovery, not import. The token must authenticate as the exact
+  symbol the unresolved attempt registered. There must be no current Fleet.
+  Any other token returns `{:error, :registration_identity_mismatch}`, and no
+  outstanding registration returns `{:error, :no_registration_to_recover}`.
+  """
+  def adopt_registered_agent(scope, agent_token, confirmed)
+
+  def adopt_registered_agent(
+        %Scope{operator: %Operator{id: operator_id}} = scope,
+        agent_token,
+        true
+      )
+      when is_binary(agent_token) and agent_token != "" do
+    result =
+      with :ok <- SpaceTraders.RuntimeAuthority.execution_allowed?(),
+           {:ok, _identity} <- current_fleet(scope) do
+        Registration.with_authority(fn ->
+          with {:ok, _state} <- locked_state(operator_id, [:empty, :transition]) do
+            case Registration.recovery(operator_id, authority: true) do
+              %{status: :clear} ->
+                {:error, :no_registration_to_recover}
+
+              %{status: :awaiting_adoption, attempt: attempt} ->
+                scope |> adopt_registration(attempt) |> finish_establishment(scope)
+
+              %{status: :unresolved, attempt: attempt} ->
+                with {:ok, %GameAgent{} = game_agent} <-
+                       import_read(agent_token, &Evidence.get_agent/1),
+                     :ok <- Registration.intended_identity(attempt, game_agent),
+                     {:ok, ships} when is_list(ships) <-
+                       import_read(agent_token, &Evidence.get_ships/1),
+                     {:ok, accepted} <-
+                       Registration.reconcile_from_agent_token(
+                         attempt,
+                         agent_token,
+                         game_agent,
+                         ships
+                       ) do
+                  scope |> adopt_registration(accepted) |> finish_establishment(scope)
+                end
+            end
+          end
+        end)
+      end
+
+    sync_registration_condition(scope)
+    result
+  end
+
+  def adopt_registered_agent(_scope, _agent_token, false), do: {:error, :confirmation_required}
+
+  def adopt_registered_agent(_scope, _agent_token, _confirmed),
+    do: {:error, :agent_token_required}
+
+  @doc """
+  Establishes an existing upstream Agent as the initial current Fleet.
+
+  The AccountToken cannot recover AgentTokens, so this never registers. The
+  AgentToken is validated by authoritative reads under the same establishment
+  authority as minting. Import is initial setup only: it never replaces a
+  current or fenced Fleet, and never runs while a registration is unresolved.
+  """
+  def import_agent(%Scope{operator: %Operator{id: operator_id}} = scope, agent_token, true)
+      when is_binary(agent_token) and agent_token != "" do
+    scope
+    |> establish([:empty], fn ->
+      case Registration.recovery(operator_id, authority: true) do
+        %{status: :clear} -> do_import(scope, agent_token)
+        _pending -> {:error, :registration_unresolved}
+      end
+    end)
+    |> finish_establishment(scope)
+    |> case do
+      {:ok, %{agent: agent}} -> {:ok, agent}
+      error -> error
+    end
+  end
+
+  def import_agent(_scope, _agent_token, false), do: {:error, :confirmation_required}
+  def import_agent(_scope, _agent_token, _confirmed), do: {:error, :agent_token_required}
+
+  # Resolve the published identity before taking establishment authority.
+  defp establish(%Scope{operator: %Operator{id: operator_id}} = scope, states, fun) do
+    with {:ok, _identity} <- current_fleet(scope) do
+      Registration.with_authority(fn -> locked(operator_id, states, fn _state -> fun.() end) end)
+    end
+  end
+
+  # One establishment step: the Operator row, a state allowlist, then `fun`.
+  defp locked(operator_id, states, fun) do
+    Repo.transaction(fn ->
+      case Identity.lock_establishment(operator_id) do
+        {:ok, %{state: state}} ->
+          if state in states do
+            case fun.(state) do
+              {:ok, established} -> established
+              {:error, reason} -> Repo.rollback(reason)
+            end
+          else
+            Repo.rollback(establishment_unavailable(state))
+          end
+
+        {:error, reason} ->
+          Repo.rollback(reason)
+      end
     end)
   end
 
-  defp do_mint(scope, attrs, operator_id) do
-    changeset = Agent.changeset(%Agent{}, attrs)
-    credential_ref = %CredentialReference{operator_id: operator_id}
-    replacement_symbols = replacement_symbols(attrs, changeset)
-    registration_symbols = registration_symbols(attrs, replacement_symbols)
+  defp locked_state(operator_id, states),
+    do: locked(operator_id, states, fn state -> {:ok, state} end)
 
-    with :ok <- SpaceTraders.RuntimeAuthority.execution_allowed?(),
-         :ok <- FleetStrategy.mutation_allowed?(scope),
-         :ok <- validate_mint_attrs(changeset),
-         :ok <- validate_replacement_symbols(replacement_symbols, get_field(changeset, :faction)),
-         {:ok, operator, account_token} <- resolve_account_token(credential_ref),
-         :ok <-
-           ensure_symbol_is_not_stale_for_another_operator(
-             operator,
-             replacement_symbols
-           ) do
-      revision = active_revision(operator.id)
+  defp establishment_unavailable(:current), do: :current_fleet_exists
+  defp establishment_unavailable(:transition), do: :fleet_transition_pending
 
-      registration_result =
-        SpaceTraders.Observability.with_context(
-          [operator_id: operator.id, strategy_revision_id: revision && revision.id],
-          fn ->
-            register_first_available(
-              account_token,
-              registration_symbols,
-              get_field(changeset, :faction),
-              operator.email
-            )
-          end
-        )
-
-      case registration_result do
-        {:ok, %{token: agent_token, agent: %GameAgent{}} = registration} ->
-          replace_stale_agent_and_create(operator, registration, agent_token,
-            faction: get_field(changeset, :faction),
-            replacement_symbols: replacement_symbols
-          )
-
-        {:error, _reason} = error ->
-          error
+  # Holds the establishment authority. Every step commits on its own.
+  defp mint_with_authority(scope, attrs, operator_id, states) do
+    with {:ok, _state} <- locked_state(operator_id, states) do
+      case Registration.recovery(operator_id, authority: true) do
+        %{status: :clear} -> register(scope, attrs, operator_id)
+        %{status: :awaiting_adoption, attempt: attempt} -> adopt_registration(scope, attempt)
+        %{status: :unresolved} -> {:error, :registration_unresolved}
       end
     end
   end
 
+  # Adopts a proven registration from its own attempt, never from memory, so
+  # an interrupted mint and its restart take the same path.
+  defp adopt_registration(%Scope{operator: %Operator{id: operator_id}} = scope, attempt) do
+    locked(operator_id, [:empty, :transition], fn _state ->
+      with {:ok, current} <- Registration.lock_awaiting_adoption(attempt) do
+        identity = Registration.registered_identity(current)
+
+        case replace_stale_agent_and_create(
+               Repo.get!(Operator, operator_id),
+               %{agent: identity.agent, ships: identity.ships},
+               identity.token,
+               faction: identity.faction,
+               replacement_symbols: identity.replacement_symbols
+             ) do
+          {:ok, {agent, generation, _retired, _ships}} = established ->
+            :ok = MutationAttempts.record_registration_adoption(current, agent.id, generation.id)
+
+            # Recovery and ordinary replacement publish the same success. Resolve
+            # prior failures in that commit so an interrupted notification cannot
+            # leave a healthy successor presented as exhausted or unadopted.
+            for key <- [
+                  "replacement-authority",
+                  "replacement-symbols",
+                  "server-reset-replacement",
+                  "registration-recovery"
+                ] do
+              :ok = OperatorConditions.resolve(scope, key, notify?: false)
+            end
+
+            established
+
+          error ->
+            error
+        end
+      end
+    end)
+  end
+
+  defp sync_registration_condition(%Scope{operator: %Operator{id: operator_id}} = scope) do
+    case Registration.recovery(operator_id) do
+      %{status: status, summary: summary} when status in [:unresolved, :awaiting_adoption] ->
+        _ = OperatorConditions.raise(scope, "registration-recovery", :intervention, summary)
+
+      _clear_or_in_progress ->
+        OperatorConditions.resolve(scope, "registration-recovery")
+    end
+
+    :ok
+  end
+
+  # Side effects only after commit: no consumer can observe an uncommitted Agent.
+  defp finish_establishment({:ok, {agent, generation, retired_symbols, ship_symbols}}, scope) do
+    Enum.each(ship_symbols, &ShipServer.stop/1)
+    if generation.fleet_strategy_revision_id, do: _ = request_intelligence(agent)
+    :ok = OperatorConditions.notify(scope)
+
+    :ok =
+      OperatorConditions.resolve_objective_conditions(
+        scope,
+        generation.id,
+        generation.fleet_strategy_revision_id
+      )
+
+    {:ok, %{agent: %{agent | agent_token: nil}, retired_symbols: retired_symbols}}
+  end
+
+  defp finish_establishment(error, _scope), do: error
+
+  defp do_import(%Scope{operator: %Operator{id: operator_id}}, agent_token) do
+    operator = Repo.get!(Operator, operator_id)
+
+    with {:ok, %GameAgent{} = game_agent} <- import_read(agent_token, &Evidence.get_agent/1),
+         {:ok, ships} when is_list(ships) <- import_read(agent_token, &Evidence.get_ships/1),
+         :ok <- ensure_agent_is_new(game_agent.symbol),
+         {:ok, agent} <- store_imported_agent(operator, game_agent, agent_token) do
+      bootstrap_ships(agent, ships)
+
+      generation =
+        establish_generation!(
+          operator,
+          agent,
+          nil,
+          [agent.symbol],
+          agent.faction,
+          game_agent.credits
+        )
+
+      :ok = Identity.publish_generation!(operator.id, generation.id)
+      {:ok, {agent, generation, [], []}}
+    end
+  end
+
+  # A temporary reference is consumed by its one request.
+  defp import_read(agent_token, read) do
+    credential_ref = AgentTokenReference.temporary(agent_token)
+
+    try do
+      read.(credential_ref)
+    after
+      AgentTokenReference.release(credential_ref)
+    end
+  end
+
+  defp ensure_agent_is_new(symbol) do
+    if Repo.exists?(from agent in Agent, where: agent.symbol == ^symbol),
+      do: {:error, :agent_already_imported},
+      else: :ok
+  end
+
+  defp store_imported_agent(operator, game_agent, agent_token) do
+    case store_agent(
+           operator,
+           game_agent,
+           agent_token,
+           game_agent.starting_faction
+         ) do
+      {:error, %Ecto.Changeset{} = changeset} ->
+        if Keyword.has_key?(changeset.errors, :symbol),
+          do: {:error, :agent_already_imported},
+          else: {:error, Ecto.Changeset.delete_change(changeset, :agent_token)}
+
+      {:ok, _agent} = result ->
+        result
+    end
+  end
+
+  defp validate_registration(_scope, attrs) do
+    changeset = Agent.changeset(%Agent{}, attrs)
+    symbols = replacement_symbols(attrs, changeset)
+
+    with :ok <- SpaceTraders.RuntimeAuthority.execution_allowed?(),
+         :ok <- FleetStrategy.mutation_allowed?(),
+         :ok <- validate_mint_attrs(changeset),
+         :ok <- validate_replacement_symbols(symbols, get_field(changeset, :faction)) do
+      :ok
+    end
+  end
+
+  defp prepare_mint(scope, attrs, operator_id) do
+    changeset = Agent.changeset(%Agent{}, attrs)
+    replacement_symbols = replacement_symbols(attrs, changeset)
+    faction = get_field(changeset, :faction)
+
+    # Mint authority is needed only for a new request. A proven registration
+    # awaiting adoption already holds its own encrypted AgentToken.
+    with :ok <- validate_registration(scope, attrs),
+         {:ok, operator, account_token} <-
+           resolve_account_token(%CredentialReference{operator_id: operator_id}) do
+      {:ok,
+       %{
+         operator: operator,
+         account_token: account_token,
+         faction: faction,
+         replacement_symbols: replacement_symbols,
+         registration_symbols: registration_symbols(attrs, replacement_symbols),
+         exhaustible?:
+           Map.has_key?(attrs, :replacement_symbols) or
+             Map.has_key?(attrs, "replacement_symbols")
+       }}
+    end
+  end
+
+  defp register(scope, attrs, operator_id) do
+    with {:ok, plan} <- prepare_mint(scope, attrs, operator_id) do
+      revision = active_revision(operator_id)
+
+      SpaceTraders.Observability.with_context(
+        # Registration establishes a new identity. The reset-detecting call's
+        # Agent/Generation/Ship context must not look like an adoption link or
+        # attribute this attempt to the predecessor's gameplay work.
+        [
+          operator_id: operator_id,
+          strategy_revision_id: revision && revision.id,
+          agent_id: nil,
+          fleet_generation_id: nil,
+          decision_episode_id: nil,
+          commitment_id: nil,
+          ship_id: nil,
+          ship_symbol: nil,
+          intent_id: nil,
+          mutation_attempt_id: nil
+        ],
+        fn -> register_first_available(scope, plan, plan.registration_symbols) end
+      )
+    end
+  end
+
   @doc "Returns the Operator's Fleet Generation history, newest first."
-  def list_generations(%Scope{operator: %Operator{id: operator_id}}) do
-    Repo.all(
-      from generation in Generation,
-        where: generation.operator_id == ^operator_id,
-        order_by: [desc: generation.number]
-    )
+  def list_generations(%Scope{} = scope) do
+    case SpaceTraders.OperatorAuthority.authorize(scope) do
+      {:ok, _} -> Repo.all(from generation in Generation, order_by: [desc: generation.number])
+      _ -> []
+    end
   end
 
   @doc "Records a verified Objective evaluation for an active Fleet Generation."
@@ -334,16 +794,16 @@ defmodule SpaceTraders.FleetGeneration do
   def record_objective_evaluations(_scope, _revision, _plans, _opts), do: :ok
 
   @doc "Retains current authoritative Agent credits for Objective evidence and recaps."
-  def observe_observation(%Agent{operator_id: operator_id}, %Observation{} = evidence)
-      when is_integer(operator_id) and evidence.operation_id == "get-my-agent" do
+  def observe_observation(%Agent{id: agent_id}, %Observation{} = evidence)
+      when is_integer(agent_id) and evidence.operation_id == "get-my-agent" do
+    # The observing Agent's own live Generation: a late predecessor result
+    # never reaches another Generation's credits.
     generation =
       Repo.one(
         from generation in Generation,
           where:
-            generation.operator_id == ^operator_id and is_nil(generation.fenced_at) and
-              is_nil(generation.retired_at),
-          order_by: [desc: generation.number],
-          limit: 1
+            generation.agent_id == ^agent_id and is_nil(generation.fenced_at) and
+              is_nil(generation.retired_at)
       )
 
     revision =
@@ -369,8 +829,8 @@ defmodule SpaceTraders.FleetGeneration do
         Repo.update_all(
           from(candidate in Generation,
             where:
-              candidate.id == ^generation.id and candidate.operator_id == ^operator_id and
-                is_nil(candidate.fenced_at) and is_nil(candidate.retired_at)
+              candidate.id == ^generation.id and is_nil(candidate.fenced_at) and
+                is_nil(candidate.retired_at)
           ),
           set: [
             last_observed_credits: credits,
@@ -391,17 +851,38 @@ defmodule SpaceTraders.FleetGeneration do
   @doc false
   def activate_strategy(
         %Scope{operator: %Operator{id: operator_id}} = scope,
-        %Revision{id: revision_id} = revision
+        %Revision{} = revision
       ) do
+    {:ok, live} =
+      Repo.transaction(fn ->
+        {:ok, _} = Identity.lock_establishment(operator_id)
+        bind_strategy(scope, revision)
+      end)
+
+    notify_strategy_activation(scope, revision, live)
+  end
+
+  # Called in the Strategy activation transaction under establishment's lock.
+  # Revision publication and Generation binding must be independently visible
+  # together; adoption takes the same lock before reading the active Revision.
+  @doc false
+  def bind_strategy(%Scope{}, %Revision{id: revision_id} = revision) do
     now = Clock.utc_now()
 
-    # The live Generations, read once before they move to the new Revision.
+    # The canonical current Generation, read once before it moves to the new
+    # Revision. A fenced, retired or historical Generation keeps the Revision
+    # that governed it. An unpublished Generation is never a candidate.
+    live_query =
+      from generation in Generation,
+        join: identity in "current_fleet_identity",
+        on: identity.id == 1 and identity.fleet_generation_id == generation.id,
+        where:
+          is_nil(generation.fenced_at) and
+            is_nil(generation.retired_at)
+
     live =
       Repo.all(
-        from generation in Generation,
-          where:
-            generation.operator_id == ^operator_id and is_nil(generation.fenced_at) and
-              is_nil(generation.retired_at),
+        from generation in live_query,
           select: %{
             id: generation.id,
             agent_id: generation.agent_id,
@@ -409,12 +890,10 @@ defmodule SpaceTraders.FleetGeneration do
           }
       )
 
+    live_ids = Enum.map(live, & &1.id)
+
     Repo.update_all(
-      from(generation in Generation,
-        where:
-          generation.operator_id == ^operator_id and is_nil(generation.fenced_at) and
-            is_nil(generation.retired_at)
-      ),
+      from(generation in Generation, where: generation.id in ^live_ids),
       set: [
         fleet_strategy_revision_id: revision_id,
         objective_progress: generation_progress(revision, nil),
@@ -425,54 +904,26 @@ defmodule SpaceTraders.FleetGeneration do
 
     # A changed active Revision invalidates the old allocation result before a
     # fresh reconciliation selects its successor.
-    :ok = FleetAllocation.NeutralWait.supersede_for_operator(operator_id)
+    :ok = FleetAllocation.NeutralWait.supersede_current()
 
+    live
+  end
+
+  @doc false
+  def notify_strategy_activation(scope, %Revision{id: revision_id}, live) do
     # The wake is a prompt, not the liveness authority: the active Revision's
     # Observation Demands and boot reconstruction re-enter allocation if it
     # is lost. The next Market boundary retires any older-Revision Portfolio.
     log_activation(scope, revision_id, live)
 
-    active_generation =
-      Repo.one(
-        from generation in Generation,
-          where:
-            generation.operator_id == ^operator_id and is_nil(generation.fenced_at) and
-              is_nil(generation.retired_at),
-          order_by: [desc: generation.number],
-          limit: 1
-      )
-
     :ok =
       OperatorConditions.resolve_objective_conditions(
         scope,
-        active_generation && active_generation.id,
+        live |> Enum.map(& &1.id) |> List.first(),
         revision_id
       )
 
     :ok
-  end
-
-  @doc "Retires every Stale Agent owned by the authenticated Operator."
-  def retire_stale_agents(%Scope{operator: %Operator{} = operator}) do
-    if detected_stale_agent_ids(operator) == [] do
-      {:ok, []}
-    else
-      {:error, :replacement_required}
-    end
-  end
-
-  @doc "Retries replacement for every fenced Fleet Generation after mutation admission resumes."
-  def replace_stale_agents(%Scope{operator: %Operator{} = operator}) do
-    operator
-    |> SpaceTraders.Agent.list_agents()
-    |> Enum.filter(&stale?/1)
-    |> Enum.reduce_while({:ok, []}, fn agent, {:ok, replacements} ->
-      case replace_stale_agent(agent) do
-        {:ok, replacement} -> {:cont, {:ok, [replacement | replacements]}}
-        {:error, :strategy_not_active} -> {:cont, {:ok, replacements}}
-        {:error, reason} -> {:halt, {:error, reason}}
-      end
-    end)
   end
 
   @doc "Pulls an Agent's live game record and records definitive Server Reset evidence."
@@ -521,6 +972,26 @@ defmodule SpaceTraders.FleetGeneration do
 
   def handle_game_result(_agent, result), do: result
 
+  # Only lifecycle establishment may persist an Agent; callers cannot bypass
+  # registration recovery, bootstrap or atomic current-Generation publication.
+  defp store_agent(operator, game_agent, agent_token, requested_faction) do
+    result =
+      %Agent{}
+      |> Agent.changeset(%{
+        symbol: game_agent.symbol,
+        faction: game_agent.starting_faction || requested_faction
+      })
+      |> put_change(:headquarters, game_agent.headquarters)
+      |> put_change(:agent_token, agent_token)
+      |> put_change(:operator_id, operator.id)
+      |> Repo.insert(log: false)
+
+    if match?({:ok, _}, result),
+      do: SpaceTraders.EmergencyStopAdmission.track_credential(operator.id, agent_token)
+
+    result
+  end
+
   defp resolve_account_token(%CredentialReference{operator_id: operator_id}) do
     case Repo.get(Operator, operator_id) do
       %Operator{account_token: account_token} = operator
@@ -535,85 +1006,46 @@ defmodule SpaceTraders.FleetGeneration do
   defp validate_mint_attrs(%{valid?: true}), do: :ok
   defp validate_mint_attrs(%{valid?: false} = changeset), do: {:error, changeset}
 
-  defp ensure_symbol_is_not_stale_for_another_operator(%Operator{id: operator_id}, symbols) do
-    if Repo.exists?(
-         from agent in Agent,
-           where:
-             agent.symbol in ^symbols and agent.operator_id != ^operator_id and
-               not is_nil(agent.stale_at)
-       ) do
-      {:error, :stale_symbol_owned_elsewhere}
-    else
-      :ok
-    end
-  end
-
+  # Runs inside the establishment transaction; side effects follow its commit.
+  # The predecessor Agent, Ships and Generation are retained as history; only
+  # their live claims (reservations, timers, symbol occupancy) are released.
   defp replace_stale_agent_and_create(operator, registration, agent_token, opts) do
     game_agent = registration.agent
     faction = Keyword.fetch!(opts, :faction)
     replacement_symbols = Keyword.fetch!(opts, :replacement_symbols)
 
-    with {:ok, {agent, generation, retired_symbols, ship_symbols}} <-
-           Repo.transaction(fn ->
-             stale_ids = stale_agent_ids(operator, game_agent.symbol)
+    predecessor =
+      Repo.one(
+        from g in Generation,
+          join: i in "current_fleet_identity",
+          on: i.id == 1 and i.fleet_generation_id == g.id
+      )
 
-             predecessors =
-               Repo.all(
-                 from generation in Generation,
-                   where:
-                     generation.operator_id == ^operator.id and
-                       generation.agent_id in ^stale_ids and is_nil(generation.retired_at),
-                   order_by: [desc: generation.number]
-               )
+    {retired_symbols, ship_symbols} =
+      if predecessor, do: release_predecessor(predecessor), else: {[], []}
 
-             predecessor = List.first(predecessors)
+    case store_agent(operator, game_agent, agent_token, faction) do
+      {:ok, agent} ->
+        bootstrap_ships(agent, Map.get(registration, :ships, []))
 
-             {retired_symbols, ship_symbols} =
-               stale_ids
-               |> Enum.map(&retire_stale_agent/1)
-               |> Enum.unzip()
-               |> then(fn {symbols, ships} -> {List.flatten(symbols), List.flatten(ships)} end)
+        generation =
+          establish_generation!(
+            operator,
+            agent,
+            predecessor,
+            replacement_symbols,
+            faction,
+            game_agent.credits
+          )
 
-             case SpaceTraders.Agent.store_agent(operator, game_agent, agent_token, faction) do
-               {:ok, agent} ->
-                 bootstrap_ships(agent, Map.get(registration, :ships, []))
+        retire_generation(predecessor, generation.strategy_capable_at || Clock.utc_now())
 
-                 generation =
-                   establish_generation!(
-                     operator,
-                     agent,
-                     predecessor,
-                     replacement_symbols,
-                     faction,
-                     game_agent.credits
-                   )
+        :ok = Identity.publish_generation!(operator.id, generation.id)
 
-                 Enum.each(
-                   predecessors,
-                   &retire_generation(&1, generation.strategy_capable_at)
-                 )
+        {:ok, {agent, generation, retired_symbols, ship_symbols}}
 
-                 {agent, generation, retired_symbols, ship_symbols}
-
-               {:error, changeset} ->
-                 changeset
-                 |> Ecto.Changeset.delete_change(:agent_token)
-                 |> Repo.rollback()
-             end
-           end) do
-      Enum.each(ship_symbols, &ShipServer.stop/1)
-      if generation.fleet_strategy_revision_id, do: _ = request_intelligence(agent)
-
-      scope = Scope.for_operator(operator)
-
-      :ok =
-        OperatorConditions.resolve_objective_conditions(
-          scope,
-          generation.id,
-          generation.fleet_strategy_revision_id
-        )
-
-      {:ok, %{agent: %{agent | agent_token: nil}, retired_symbols: retired_symbols}}
+      {:error, changeset} ->
+        {:error, Ecto.Changeset.delete_change(changeset, :agent_token)}
     end
   end
 
@@ -648,24 +1080,53 @@ defmodule SpaceTraders.FleetGeneration do
     end
   end
 
-  defp register_first_available(_account_token, [], _faction, _email),
+  defp register_first_available(_scope, _plan, []),
     do: {:error, :replacement_symbols_exhausted}
 
-  defp register_first_available(account_token, [symbol | rest], faction, email) do
-    case SpaceTraders.API.register(account_token, symbol, faction, email) do
-      {:error, %GameplayError{code: 4103}} when rest != [] ->
-        register_first_available(account_token, rest, faction, email)
+  # Only a proven rejection of the symbol advances to the next candidate.
+  defp register_first_available(scope, plan, [symbol | rest]) do
+    case SpaceTraders.API.register(
+           plan.account_token,
+           symbol,
+           plan.faction,
+           plan.operator.email,
+           registration: %{
+             "faction" => plan.faction,
+             "replacement_symbols" => plan.replacement_symbols
+           }
+         ) do
+      {:ok, _registration} ->
+        case Registration.recovery(plan.operator.id) do
+          %{status: :awaiting_adoption, attempt: attempt} -> adopt_registration(scope, attempt)
+          _ -> {:error, :registration_unresolved}
+        end
 
-      result ->
-        result
+      {:error, %GameplayError{code: 4103}} when rest != [] ->
+        register_first_available(scope, plan, rest)
+
+      {:error, %GameplayError{code: 4103}} = error ->
+        if plan.exhaustible?, do: {:error, :replacement_symbols_exhausted}, else: error
+
+      {:error, _reason} = error ->
+        case Registration.recovery(plan.operator.id) do
+          %{status: :in_progress, attempt: attempt} ->
+            :ok = Registration.settle_undispatched(attempt)
+            error
+
+          %{status: :clear} ->
+            error
+
+          _pending ->
+            {:error, :registration_unresolved}
+        end
     end
   end
 
   defp replacement_symbols(attrs, changeset) do
     symbols = attrs[:replacement_symbols] || attrs["replacement_symbols"]
 
-    symbols =
-      if is_list(symbols), do: symbols, else: fallback_symbols(get_field(changeset, :symbol))
+    # No generated suffixes: only the chosen symbol or explicit candidates.
+    symbols = if is_list(symbols), do: symbols, else: [get_field(changeset, :symbol)]
 
     Enum.uniq(symbols)
   end
@@ -677,13 +1138,6 @@ defmodule SpaceTraders.FleetGeneration do
       [hd(replacement_symbols)]
     end
   end
-
-  defp fallback_symbols(symbol) when is_binary(symbol) do
-    base = String.slice(symbol, 0, 18)
-    Enum.uniq([symbol, base <> "-2", base <> "-3"])
-  end
-
-  defp fallback_symbols(symbol), do: [symbol]
 
   defp validate_replacement_symbols([_ | _] = symbols, faction) do
     if Enum.all?(symbols, fn symbol ->
@@ -703,12 +1157,7 @@ defmodule SpaceTraders.FleetGeneration do
       %Ship{}
       |> Ecto.Changeset.change(symbol: ship.symbol, ship_type: "UNKNOWN", agent_id: agent.id)
       |> Ecto.Changeset.validate_required([:symbol, :ship_type, :agent_id])
-      |> Repo.insert!(
-        on_conflict: [
-          set: [agent_id: agent.id, ship_type: "UNKNOWN", updated_at: DateTime.utc_now(:second)]
-        ],
-        conflict_target: :symbol
-      )
+      |> Repo.insert!()
     end)
   end
 
@@ -718,7 +1167,7 @@ defmodule SpaceTraders.FleetGeneration do
          predecessor,
          replacement_symbols,
          faction,
-         starting_credits \\ nil
+         starting_credits
        ) do
     revision = active_revision(operator.id)
     number = next_generation_number(operator.id)
@@ -732,6 +1181,7 @@ defmodule SpaceTraders.FleetGeneration do
       operator_id: operator.id,
       agent_id: agent.id,
       fleet_strategy_revision_id: revision && revision.id,
+      initial_fleet_strategy_revision_id: revision && revision.id,
       number: number,
       symbol: agent.symbol,
       faction: faction,
@@ -799,20 +1249,18 @@ defmodule SpaceTraders.FleetGeneration do
 
   defp request_intelligence(nil), do: :no_allocation_wake
 
-  defp active_revision(operator_id) do
+  defp active_revision(_operator_id) do
     Repo.one(
       from strategy in Strategy,
         join: revision in Revision,
         on: revision.id == strategy.active_revision_id,
-        where: strategy.operator_id == ^operator_id,
         select: revision
     )
   end
 
-  defp next_generation_number(operator_id) do
+  defp next_generation_number(_operator_id) do
     (Repo.one(
        from generation in Generation,
-         where: generation.operator_id == ^operator_id,
          select: max(generation.number)
      ) || 0) + 1
   end
@@ -844,7 +1292,7 @@ defmodule SpaceTraders.FleetGeneration do
     |> Ecto.Changeset.change(retired_at: retired_at)
     |> Repo.update!()
 
-    :ok = SpaceTraders.FleetAllocation.NeutralWait.supersede_for_operator(generation.operator_id)
+    :ok = SpaceTraders.FleetAllocation.NeutralWait.clear(generation.id)
 
     # A retired Generation's Strategy no longer makes its demands relevant.
     Evidence.withdraw_agent_demands(generation.agent_id)
@@ -852,67 +1300,35 @@ defmodule SpaceTraders.FleetGeneration do
     :ok
   end
 
+  # Only the wakeup that newly fences the current Generation starts its
+  # replacement. Repeated or late reset evidence finds it already fenced, so
+  # it neither re-fences a successor nor retries registration in a loop.
   defp mark_stale_and_replace(%Agent{} = agent) do
-    with {:ok, stale_agent} <- mark_stale(agent) do
-      _ = replace_stale_agent(stale_agent)
+    case mark_stale(agent) do
+      {:ok, {:fenced, stale_agent}} ->
+        with %Operator{} = operator <- Repo.get(Operator, stale_agent.operator_id) do
+          _ = replace_after_reset(Scope.for_operator(operator))
+        end
+
+      _already_fenced ->
+        :ok
     end
 
     :ok
   end
 
-  defp replace_stale_agent(%Agent{} = stale_agent) do
-    with %Generation{retired_at: nil, fleet_strategy_revision_id: revision_id} = generation
-         when not is_nil(revision_id) <-
-           Repo.get_by(Generation, agent_id: stale_agent.id),
-         %Operator{} = operator <- Repo.get(Operator, stale_agent.operator_id) do
-      symbols = generation.replacement_symbols["symbols"]
-      symbols = if is_list(symbols) and symbols != [], do: symbols, else: [stale_agent.symbol]
+  defp release_predecessor(%Generation{agent_id: nil}), do: {[], []}
 
-      mint(Scope.for_operator(operator), %{
-        symbol: hd(symbols),
-        faction: generation.faction,
-        replacement_symbols: symbols
-      })
-    else
-      _ -> {:error, :strategy_not_active}
-    end
-  end
-
-  defp stale_agent_ids(%Operator{id: operator_id}, symbol) do
-    same_symbol_id =
-      Repo.one(
-        from(agent in Agent,
-          where: agent.operator_id == ^operator_id and agent.symbol == ^symbol,
-          select: agent.id
-        )
-      )
-
-    [same_symbol_id | detected_stale_agent_ids(operator_id)]
-    |> Enum.reject(&is_nil/1)
-    |> Enum.uniq()
-  end
-
-  defp detected_stale_agent_ids(%Operator{id: operator_id}),
-    do: detected_stale_agent_ids(operator_id)
-
-  defp detected_stale_agent_ids(operator_id) do
-    Repo.all(
-      from(agent in Agent,
-        where: agent.operator_id == ^operator_id and not is_nil(agent.stale_at),
-        select: agent.id
-      )
-    )
-  end
-
-  defp retire_stale_agent(stale_agent_id) do
-    stale_agent = Repo.get!(Agent, stale_agent_id)
+  defp release_predecessor(%Generation{agent_id: agent_id}) do
+    stale_agent = Repo.get!(Agent, agent_id)
     :ok = SpaceTraders.ShipReservation.release_for_agent!(stale_agent.id)
 
-    ship_symbols =
-      Repo.all(from(ship in Ship, where: ship.agent_id == ^stale_agent.id, select: ship.symbol))
+    live_ships =
+      from(ship in Ship, where: ship.agent_id == ^stale_agent.id and is_nil(ship.retired_at))
 
+    ship_symbols = Repo.all(from(ship in live_ships, select: ship.symbol))
     Enum.each(ship_symbols, &Timeline.cancel_events(:ship, &1))
-    Repo.delete!(stale_agent)
+    Repo.update_all(live_ships, set: [retired_at: DateTime.utc_now(:second)])
     {[stale_agent.symbol], ship_symbols}
   end
 
@@ -921,50 +1337,39 @@ defmodule SpaceTraders.FleetGeneration do
 
     Repo.transaction(fn ->
       now = DateTime.utc_now()
-      ensure_generation_for_agent!(agent)
 
-      stale_agent =
-        agent
-        |> Ecto.Changeset.change(stale_at: DateTime.truncate(now, :second))
-        |> Repo.update!()
-
+      # The first definitive evidence is the Server Reset's recorded time.
       Repo.update_all(
-        from(generation in Generation,
-          where: generation.agent_id == ^agent.id and is_nil(generation.fenced_at)
-        ),
-        set: [fenced_at: now, updated_at: DateTime.truncate(now, :second)]
+        from(stale in Agent, where: stale.id == ^agent.id and is_nil(stale.stale_at)),
+        set: [stale_at: DateTime.truncate(now, :second)]
       )
 
-      if is_integer(agent.operator_id) do
-        :ok = SpaceTraders.FleetAllocation.NeutralWait.supersede_for_operator(agent.operator_id)
+      {fenced, _} =
+        Repo.update_all(
+          from(generation in Generation,
+            where:
+              generation.agent_id == ^agent.id and is_nil(generation.fenced_at) and
+                is_nil(generation.retired_at)
+          ),
+          set: [fenced_at: now, updated_at: DateTime.truncate(now, :second)]
+        )
+
+      if fenced > 0 and is_integer(agent.operator_id) do
+        :ok = SpaceTraders.FleetAllocation.NeutralWait.supersede_current()
       end
 
       Evidence.withdraw_agent_demands(agent.id, DateTime.truncate(now, :second))
 
-      stale_agent
+      {if(fenced > 0, do: :fenced, else: :already_fenced), Repo.get!(Agent, agent.id)}
     end)
   end
-
-  defp ensure_generation_for_agent!(%Agent{id: agent_id, operator_id: operator_id} = agent)
-       when is_integer(operator_id) do
-    Repo.get_by(Generation, agent_id: agent_id) ||
-      establish_generation!(
-        Repo.get!(Operator, operator_id),
-        agent,
-        nil,
-        [agent.symbol],
-        agent.faction
-      )
-  end
-
-  defp ensure_generation_for_agent!(%Agent{}), do: nil
 
   defp agent_execution_allowed?(%Agent{id: nil}), do: :ok
 
   defp agent_execution_allowed?(%Agent{id: id}) do
-    case Repo.get(Agent, id) do
-      %Agent{stale_at: nil} -> :ok
-      _ -> {:error, :stale_agent}
+    case gameplay_authority(id) do
+      {:error, :agent_token_missing} -> {:error, :stale_agent}
+      authority -> authority
     end
   end
 
