@@ -5310,16 +5310,21 @@ defmodule SpaceTraders.Fleet.Intents do
   end
 
   # The same stop choice Fleet Planning simulates (`FuelReach`), over the
-  # same confirmed fuel stops (`World.fuel_stops/3`).
+  # same confirmed fuel stops (`World.projections/4`).
   defp confirmed_reachable_fuel_stop(agent, intent, live_ship, source, target) do
     {:ok, system} = Fleet.system_from_headquarters(live_ship.nav.waypoint_symbol)
+
+    # Coordinates and fuel stops come from one combined World read; the
+    # freshness budget does not affect either projection.
+    %{waypoint_coordinates: coordinates, fuel_stops: fuel_stops} =
+      World.projections(agent, system, Clock.utc_now(), 300)
 
     reach =
       FuelReach.new(
         live_ship.fuel.capacity,
         live_ship.nav.flight_mode,
-        World.waypoint_coordinates(agent, system),
-        World.fuel_stops(agent, system, Clock.utc_now())
+        coordinates,
+        fuel_stops
       )
 
     case FuelReach.fuel_stop(
