@@ -49,7 +49,7 @@ defmodule SpaceTraders.FleetAllocationPublishTest do
           SpaceTraders.FleetContracts.accept_if_admissible(agent, revision, "CONTRACT", %{}),
           SpaceTraders.FleetContracts.negotiate_if_available(agent, revision, "SHIP-1"),
           SpaceTraders.FleetContracts.fulfill_if_ready(agent, revision, "CONTRACT"),
-          SpaceTraders.FleetExecution.reconcile_market_domain(scope, agent, revision, "X1-A", %{})
+          SpaceTraders.FleetAllocation.MarketDomain.reconcile(scope, agent, revision, "X1-A", %{})
         ] do
       assert result == {:error, :current_fleet_unavailable}
     end

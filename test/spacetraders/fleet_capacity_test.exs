@@ -4,7 +4,7 @@ defmodule SpaceTraders.FleetCapacityTest do
   alias SpaceTraders.Agent.Agent, as: AgentRecord
   alias SpaceTraders.Agent.Scope
   alias SpaceTraders.FleetCapacity
-  alias SpaceTraders.FleetExecution
+  alias SpaceTraders.FleetAllocation.MarketDomain
   alias SpaceTraders.FleetGeneration.Generation
   alias SpaceTraders.FleetStrategy.{Revision, Strategy}
   alias SpaceTraders.Test.CapacityDispositions
@@ -63,7 +63,7 @@ defmodule SpaceTraders.FleetCapacityTest do
 
     test "a caller without current-Fleet authority is refused before capacity is consulted" do
       assert {:error, :current_fleet_unavailable} =
-               FleetExecution.reconcile_market_domain(
+               MarketDomain.reconcile(
                  %Scope{operator: %{id: -1}},
                  %AgentRecord{id: -1},
                  %Revision{},
@@ -79,7 +79,7 @@ defmodule SpaceTraders.FleetCapacityTest do
         ] do
       test "the Market pilot-domain decision is suppressed on #{label} capacity", ctx do
         assert {:ok, %{action: :deferred_for_capacity}} =
-                 FleetExecution.reconcile_market_domain(
+                 MarketDomain.reconcile(
                    ctx.scope,
                    ctx.agent,
                    ctx.revision,

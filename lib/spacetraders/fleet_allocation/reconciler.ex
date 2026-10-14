@@ -9,10 +9,10 @@ defmodule SpaceTraders.FleetAllocation.Reconciler do
 
   alias SpaceTraders.FleetCapacity
   alias SpaceTraders.FleetAllocation
+  alias SpaceTraders.FleetAllocation.MarketDomain
   alias SpaceTraders.Agent.Scope
   alias SpaceTraders.Agent.Agent, as: AgentRecord
   alias SpaceTraders.Fleet
-  alias SpaceTraders.FleetExecution
   alias SpaceTraders.FleetContracts
   alias SpaceTraders.FleetConstruction
   alias SpaceTraders.FleetAcquisition
@@ -118,7 +118,7 @@ defmodule SpaceTraders.FleetAllocation.Reconciler do
       system = system_for(agent)
 
       if system do
-        FleetExecution.reconcile_market_domain(scope, agent, revision, system, capacity)
+        MarketDomain.reconcile(scope, agent, revision, system, capacity)
         FleetResources.reconcile(scope, agent, revision, system)
         FleetAcquisition.reconcile(scope, agent, revision, system)
         FleetRefit.reconcile(scope, agent, revision, system)
@@ -212,7 +212,7 @@ defmodule SpaceTraders.FleetAllocation.Reconciler do
   Governed Market evidence landed in `system_symbol`.
 
   The Market pilot domain (trade, coverage, retained work) is decided once
-  by Fleet Allocation through `FleetExecution.reconcile_market_domain/5`;
+  by Fleet Allocation through `FleetAllocation.MarketDomain.reconcile/5`;
   durable Market demands are then refreshed and the other capability owners
   reconcile beside the published pilot work.
   """
@@ -247,7 +247,7 @@ defmodule SpaceTraders.FleetAllocation.Reconciler do
   # beside the published pilot work.
   defp reconcile_market_boundary(agent_id, system_symbol, capacity, resources?) do
     with_context(agent_id, fn scope, agent, revision ->
-      FleetExecution.reconcile_market_domain(scope, agent, revision, system_symbol, capacity)
+      MarketDomain.reconcile(scope, agent, revision, system_symbol, capacity)
 
       enforce_sync_result!(
         agent.id,

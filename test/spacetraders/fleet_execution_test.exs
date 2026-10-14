@@ -12,6 +12,7 @@ defmodule SpaceTraders.FleetExecutionTest do
   alias SpaceTraders.Fleet.Ship
   alias SpaceTraders.FleetAllocation
   alias SpaceTraders.FleetAllocation.Commitment
+  alias SpaceTraders.FleetAllocation.MarketDomain
   alias SpaceTraders.FleetAllocation.Portfolio
   alias SpaceTraders.FleetAllocation.StrategyDecisionEpisode
   alias SpaceTraders.FleetExecution
@@ -107,7 +108,7 @@ defmodule SpaceTraders.FleetExecutionTest do
     end
   end
 
-  describe "reconcile_market_domain/5" do
+  describe "Market reconciliation through Fleet Allocation" do
     test "an API-capacity deferral publishes nothing and claims nothing" do
       {operator, agent, revision} = market_generation()
       scope = Scope.for_operator(operator)
@@ -122,7 +123,7 @@ defmodule SpaceTraders.FleetExecutionTest do
       end)
 
       assert {:ok, %{action: :deferred_for_capacity}} =
-               FleetExecution.reconcile_market_domain(
+               MarketDomain.reconcile(
                  scope,
                  agent,
                  revision,
@@ -144,7 +145,7 @@ defmodule SpaceTraders.FleetExecutionTest do
       stub_market_agent(agent)
 
       assert {:ok, %{action: :no_admissible_commitment, selection: selection}} =
-               FleetExecution.reconcile_market_domain(scope, agent, revision, "X1", capacity())
+               MarketDomain.reconcile(scope, agent, revision, "X1", capacity())
 
       assert selection.commitments == []
       assert selection.rejected != []
@@ -171,7 +172,7 @@ defmodule SpaceTraders.FleetExecutionTest do
       stub_activation_agent(agent)
 
       assert {:ok, %{action: :published, commitments: [commitment], planning: planning}} =
-               FleetExecution.reconcile_market_domain(scope, agent, revision, "X1", capacity())
+               MarketDomain.reconcile(scope, agent, revision, "X1", capacity())
 
       assert commitment.claims == ["SHIP-1"]
       assert Enum.any?(commitment.dependencies, &Map.has_key?(&1, "evidence_id"))
@@ -197,7 +198,7 @@ defmodule SpaceTraders.FleetExecutionTest do
       stub_lenient_agent(agent)
 
       assert {:ok, %{action: :published, commitments: [coverage], planning: planning}} =
-               FleetExecution.reconcile_market_domain(scope, agent, revision, "X1", capacity())
+               MarketDomain.reconcile(scope, agent, revision, "X1", capacity())
 
       refute Enum.any?(coverage.dependencies, &Map.has_key?(&1, "evidence_id"))
       limitations = Enum.flat_map(planning, & &1.limitations)
@@ -229,7 +230,7 @@ defmodule SpaceTraders.FleetExecutionTest do
       end)
 
       assert {:error, :availability_unknown} =
-               FleetExecution.reconcile_market_domain(scope, agent, revision, "X1", capacity())
+               MarketDomain.reconcile(scope, agent, revision, "X1", capacity())
 
       assert Repo.aggregate(StrategyDecisionEpisode, :count) == 0
     end
@@ -252,7 +253,7 @@ defmodule SpaceTraders.FleetExecutionTest do
                 portfolio: %Portfolio{},
                 dispatched: dispatched
               }} =
-               FleetExecution.reconcile_market_domain(scope, agent, revision, "X1", capacity())
+               MarketDomain.reconcile(scope, agent, revision, "X1", capacity())
 
       assert {:ok, %Intent{} = intent} = dispatched[commitment.candidate_id]
       assert Repo.get!(Commitment, commitment.id) == commitment
@@ -276,7 +277,7 @@ defmodule SpaceTraders.FleetExecutionTest do
       stub_activation_agent(agent)
 
       assert {:ok, %{action: :published, portfolio: portfolio, commitments: [commitment]}} =
-               FleetExecution.reconcile_market_domain(scope, agent, revision, "X1", capacity())
+               MarketDomain.reconcile(scope, agent, revision, "X1", capacity())
 
       buy = Repo.get_by!(Intent, fleet_commitment_id: commitment.id, type: "buy")
 
@@ -287,7 +288,7 @@ defmodule SpaceTraders.FleetExecutionTest do
       market_observation(agent, "X1-A1", 10)
 
       assert {:ok, %{action: :retained}} =
-               FleetExecution.reconcile_market_domain(scope, agent, revision, "X1", capacity())
+               MarketDomain.reconcile(scope, agent, revision, "X1", capacity())
 
       assert %Portfolio{id: id, superseded_at: nil} =
                current = FleetAllocation.current_portfolio(scope, agent)
@@ -309,7 +310,7 @@ defmodule SpaceTraders.FleetExecutionTest do
       stub_activation_agent(agent)
 
       assert {:ok, %{action: :published, commitments: [commitment]}} =
-               FleetExecution.reconcile_market_domain(scope, agent, revision, "X1", capacity())
+               MarketDomain.reconcile(scope, agent, revision, "X1", capacity())
 
       buy = Repo.get_by!(Intent, fleet_commitment_id: commitment.id, type: "buy")
       stale = DateTime.utc_now(:second) |> DateTime.add(-600, :second)
@@ -317,7 +318,7 @@ defmodule SpaceTraders.FleetExecutionTest do
       market_observation(agent, "X1-A1", 10)
 
       assert {:ok, %{action: :published, commitments: [replacement]}} =
-               FleetExecution.reconcile_market_domain(scope, agent, revision, "X1", capacity())
+               MarketDomain.reconcile(scope, agent, revision, "X1", capacity())
 
       assert replacement.candidate_id != commitment.candidate_id
       assert %Commitment{unwind_state: :released} = Repo.get!(Commitment, commitment.id)
