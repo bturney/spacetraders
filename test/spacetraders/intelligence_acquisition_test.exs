@@ -600,14 +600,35 @@ defmodule SpaceTraders.IntelligenceAcquisitionTest do
   end
 
   test "navigation reads its coordinate and fuel-stop pair in one bounded group after target acquisition" do
-    {agent, ship, portfolio, commitment} = claimed_ship()
+    context = claimed_ship()
+    {agent, _ship, _portfolio, _commitment} = context
+
+    small = navigation_fact_selects(context, "X1-UX81-A3", 101, [{"X1-UX81-A2", 51}])
+
+    large =
+      navigation_fact_selects(context, "X1-UX81-A7", 102, [{"X1-UX81-A4", 40}, {"X1-UX81-A5", 30}])
+
+    # Each acquired target's coordinates are retained for the dependent read.
+    coordinates = SpaceTraders.World.waypoint_coordinates(agent, "X1-UX81")
+    assert coordinates["X1-UX81-A3"] == %{x: 101, y: 2}
+    assert coordinates["X1-UX81-A7"] == %{x: 102, y: 2}
+
+    # Retained-read count does not grow with the retained fuel stops (three
+    # used to cost 28 fact SELECTs through per-subject reads).
+    assert length(large) == length(small)
+  end
+
+  defp navigation_fact_selects(
+         {agent, ship, portfolio, commitment},
+         target,
+         target_x,
+         fuel_stops
+       ) do
     test_pid = self()
     ship_path = "/v2/my/ships/#{ship.symbol}"
-    target_path = "/v2/systems/X1-UX81/waypoints/X1-UX81-A3"
+    target_path = "/v2/systems/X1-UX81/waypoints/#{target}"
 
-    for {symbol, x} <- [{"X1-UX81-A2", 51}, {"X1-UX81-A4", 40}, {"X1-UX81-A5", 30}] do
-      observe_fuel_stop(agent, ship.symbol, symbol, x, 2)
-    end
+    for {symbol, x} <- fuel_stops, do: observe_fuel_stop(agent, ship.symbol, symbol, x, 2)
 
     Req.Test.stub(SpaceTraders.API, fn conn ->
       case {conn.method, conn.request_path} do
@@ -624,7 +645,7 @@ defmodule SpaceTraders.IntelligenceAcquisitionTest do
           send(test_pid, :target_acquired)
 
           Req.Test.json(conn, %{
-            "data" => waypoint_body("X1-UX81-A3", "X1-UX81", "PLANET", 101, 2)
+            "data" => waypoint_body(target, "X1-UX81", "PLANET", target_x, 2)
           })
 
         {"POST", _} ->
@@ -635,21 +656,20 @@ defmodule SpaceTraders.IntelligenceAcquisitionTest do
       end
     end)
 
-    {{:ok, %Intent{}}, queries} =
+    {{:ok, %Intent{} = intent}, queries} =
       measure_fact_selects(fn ->
         Intents.request_commitment_intelligence(agent, commitment, portfolio, ship.symbol, %{
           subject_type: :market,
-          waypoint: "X1-UX81-A3",
+          waypoint: target,
           required_facts: ["trade_goods"],
           freshness_seconds: 300
         })
       end)
 
     assert_received :target_acquired
-    # Three retained fuel stops used to cost 28 fact SELECTs across the whole
-    # request (per-subject reads); the pair is now one bounded group. The
-    # bound covers the operation's other reads, not just the pair.
-    assert length(queries) <= 16
+    # Finish the Intent so the next measured request may claim the same Ship.
+    Repo.update!(Ecto.Changeset.change(intent, status: "completed"))
+    queries
   end
 
   test "planning takes coordinates and fuel stops from one bounded combined read" do

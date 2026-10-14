@@ -64,11 +64,14 @@ defmodule SpaceTraders.World do
   @doc """
   Known Waypoint coordinates in `system`. Coordinates are static game facts,
   so any retained observation of them counts, however old.
+
+  Standalone form of `projections/4`'s `:waypoint_coordinates`.
   """
   def waypoint_coordinates(%AgentRecord{} = agent, system) when is_binary(system) do
-    agent
-    |> Intelligence.known_waypoints(system)
-    |> coordinates(&Intelligence.subject(agent, :waypoint, system, &1))
+    %{waypoint_coordinates: coordinates} =
+      projections(agent, system, DateTime.utc_now(), @fuel_listing_freshness_seconds)
+
+    coordinates
   end
 
   defp coordinates(symbols, waypoint_facts) do
@@ -81,18 +84,15 @@ defmodule SpaceTraders.World do
   end
 
   @doc """
-  The confirmed fuel stops in `system` at `as_of`: Waypoints with known
-  coordinates whose Market Listing, fresh at `as_of`, sells FUEL. Fleet
-  Planning and Ship Execution both judge fuel reach from this one answer.
+  The confirmed fuel stops in `system` at `as_of`, sorted by symbol: Waypoints
+  with known coordinates whose Market Listing, fresh at `as_of`, sells FUEL.
+  Standalone form of `projections/4`'s `:fuel_stops`, which carries the rule.
   """
   def fuel_stops(%AgentRecord{} = agent, system, %DateTime{} = as_of) when is_binary(system) do
-    coordinates = waypoint_coordinates(agent, system)
+    %{fuel_stops: fuel_stops} =
+      projections(agent, system, as_of, @fuel_listing_freshness_seconds)
 
-    for symbol <- coordinates |> Map.keys() |> Enum.sort(),
-        market =
-          intelligence(agent, :market, system, symbol, as_of, @fuel_listing_freshness_seconds),
-        sells_fresh_fuel?(market),
-        do: symbol
+    Enum.sort(fuel_stops)
   end
 
   defp sells_fresh_fuel?(market) do

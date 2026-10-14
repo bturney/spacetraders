@@ -122,6 +122,9 @@ defmodule SpaceTraders.Fleet.Intents do
 
   @unfinished_states Intent.unfinished_states()
   @terminal_states Intent.terminal_states()
+  # Waypoint fact freshness budget for the World read; neither coordinates nor
+  # fuel stops depend on it.
+  @waypoint_freshness_seconds 300
   @navigation_intent_types ~w(navigate acquire_intelligence acquire_resources buy sell deliver install_module remove_module)
 
   defp token_present(%AgentRecord{agent_token: token}) when is_binary(token) and token != "",
@@ -5317,7 +5320,7 @@ defmodule SpaceTraders.Fleet.Intents do
     # Coordinates and fuel stops come from one combined World read; the
     # freshness budget does not affect either projection.
     %{waypoint_coordinates: coordinates, fuel_stops: fuel_stops} =
-      World.projections(agent, system, Clock.utc_now(), 300)
+      World.projections(agent, system, Clock.utc_now(), @waypoint_freshness_seconds)
 
     reach =
       FuelReach.new(
