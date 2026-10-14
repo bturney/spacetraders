@@ -14,6 +14,40 @@ defmodule SpaceTradersWeb.MissionControlBriefingTest do
 
   setup :register_and_log_in_operator
 
+  test "deferred voluntary replacement exposes no control and reset retry cannot abandon a healthy Fleet",
+       %{conn: conn, scope: scope} do
+    {agent, generation} = mint_fleet(scope)
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      if conn.method != "GET", do: flunk("a healthy Fleet must not dispatch replacement mutations")
+      briefing_api(conn)
+    end)
+
+    {:ok, view, _} = live(conn, ~p"/mission-control")
+    refute has_element?(view, "[phx-click*='replacement']")
+    refute has_element?(view, "[phx-click*='abandon']")
+    refute has_element?(view, "a[href='/agents/new']")
+
+    assert render_click(view, "retry_replacement", %{}) =~ "No Server Reset replacement is pending."
+    assert {:error, :no_server_reset} = FleetGeneration.replace_after_reset(scope)
+    assert {:error, :no_server_reset} = FleetGeneration.resume_reset_replacement()
+    assert %{status: :clear} = FleetGeneration.registration_recovery(scope)
+    assert :ok = FleetGeneration.execution_allowed?(agent)
+    assert {:ok, %{state: :current, agent: %{id: agent_id}, generation: current}} =
+             FleetGeneration.current_fleet(scope)
+    assert agent_id == agent.id
+    assert current.id == generation.id
+    assert is_nil(current.fenced_at)
+    assert is_nil(current.retired_at)
+    assert [^current] = FleetGeneration.list_generations(scope)
+
+    {:ok, reopened, _} = live(conn, ~p"/mission-control")
+    assert has_element?(reopened, "#strategy-context", "Generation 1")
+    assert has_element?(reopened, "#strategy-context", agent.symbol)
+    refute has_element?(reopened, "#server-reset-replacement")
+    refute has_element?(reopened, "#mission-registration-recovery")
+  end
+
   test "the briefing adopts one current identity and never projects a retained historical Agent",
        %{conn: conn, scope: scope} do
     historical =

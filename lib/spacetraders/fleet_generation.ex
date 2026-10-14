@@ -145,8 +145,9 @@ defmodule SpaceTraders.FleetGeneration do
   accepted Fleet Strategy forward.
 
   Returns `{:error, :no_server_reset}` unless the current Fleet is a fenced
-  Server Reset predecessor. Lifecycle for later voluntary replacement: a
-  caller that fences its own predecessor can reuse `establish_by_registration/4`.
+  Server Reset predecessor. This is not voluntary replacement authority:
+  reset fencing cannot represent a resumable pause of a healthy predecessor.
+  Optional voluntary replacement is explicitly deferred in ADR 0015 (#705).
   """
   def replace_after_reset(%Scope{} = scope) do
     with {:ok, identity} <- current_fleet(scope),
