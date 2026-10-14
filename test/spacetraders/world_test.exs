@@ -444,6 +444,39 @@ defmodule SpaceTraders.WorldTest do
     end
   end
 
+  test "projections for an explicit historical Agent never substitute the current Agent" do
+    import SpaceTraders.AgentFixtures
+    operator = operator_fixture()
+
+    historical = agent_fixture(operator, %{symbol: "HIST", publish: false})
+
+    generation_fixture(%SpaceTraders.FleetGeneration.Generation{
+      operator_id: operator.id,
+      agent_id: historical.id,
+      number: 1,
+      symbol: "HIST",
+      faction: "COSMIC",
+      fenced_at: DateTime.add(DateTime.utc_now(), -7200),
+      retired_at: DateTime.add(DateTime.utc_now(), -3600)
+    })
+
+    current = agent_fixture(operator, %{symbol: "CURR"})
+
+    {:ok, _} = observe(historical, "X1-H", %{"x" => 1, "y" => 1})
+    {:ok, _} = listing(historical, "X1-H", ["FUEL"], ~U[2030-01-01 11:50:00Z])
+    {:ok, _} = observe(current, "X1-C", %{"x" => 9, "y" => 9})
+
+    assert %{waypoint_coordinates: %{"X1-H" => %{x: 1, y: 1}} = coordinates, fuel_stops: ["X1-H"]} =
+             World.projections(historical, "X1", @as_of, 300)
+
+    assert Map.keys(coordinates) == ["X1-H"]
+
+    assert %{waypoint_coordinates: %{"X1-C" => %{x: 9, y: 9}} = current_coordinates, fuel_stops: []} =
+             World.projections(current, "X1", @as_of, 300)
+
+    assert Map.keys(current_coordinates) == ["X1-C"]
+  end
+
   defp world_agent(prefix) do
     Repo.insert!(%AgentRecord{
       symbol: "#{prefix}-#{System.unique_integer([:positive])}",
