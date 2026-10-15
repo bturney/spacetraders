@@ -48,6 +48,7 @@ defmodule SpaceTraders.API.CapacityGovernorTest do
     name = start_governor(max_in_flight: 1)
     operation = SpaceTraders.API.OperationInventory.fetch!("get-my-agent")
     {:ok, held} = CapacityGovernor.admit(operation, %{}, name)
+    test_pid = self()
 
     attrs = [
       %{strategic_priority: 2, expected_value: 1000, deadline_at: ~U[2030-01-01 00:00:00Z]},
@@ -58,18 +59,32 @@ defmodule SpaceTraders.API.CapacityGovernorTest do
     [low_priority, low_value, high_value] =
       Enum.with_index(attrs, 1)
       |> Enum.map(fn {context, count} ->
-        task = Task.async(fn -> CapacityGovernor.admit(operation, context, name) end)
+        task =
+          Task.async(fn ->
+            {:ok, admission} = CapacityGovernor.admit(operation, context, name)
+            send(test_pid, {:admitted, self(), admission})
+
+            # Caller death releases its slot, so keep ownership until completion.
+            receive do
+              :complete -> CapacityGovernor.complete(admission, 200, name)
+            end
+
+            {:ok, admission}
+          end)
+
         await_queue(name, count)
         task
       end)
 
     CapacityGovernor.complete(held, 200, name)
-    assert {:ok, first} = Task.await(high_value)
-    assert Task.yield(low_priority, 0) == nil
-    CapacityGovernor.complete(first, 200, name)
-    assert {:ok, second} = Task.await(low_value)
-    CapacityGovernor.complete(second, 200, name)
-    assert {:ok, _} = Task.await(low_priority)
+
+    for task <- [high_value, low_value, low_priority] do
+      caller = task.pid
+      assert_receive {:admitted, ^caller, admission}, 5_000
+      refute_received {:admitted, _, _}
+      send(caller, :complete)
+      assert Task.await(task) == {:ok, admission}
+    end
   end
 
   defp await_queue(name, count, tries \\ 1000)
