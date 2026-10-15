@@ -907,21 +907,13 @@ defmodule SpaceTraders.FleetPlanningTest do
     end
   end
 
-  test "an offered Ship must independently meet Cargo, readiness, route and empirical starting profile" do
+  test "an offered Ship is refused only on unmet capabilities or unknown planned rate" do
     for {snapshot, reason} <- [
           {put_in(
              acquisition_snapshot(),
              [:shipyards, Access.at(0), :ships, Access.at(0), :modules],
              []
            ), :offer_capability_unmet},
-          {put_in(
-             acquisition_snapshot(),
-             [:shipyards, Access.at(0), :ships, Access.at(0), :engine, :speed],
-             60
-           ), :offer_rate_profile_unavailable},
-          {put_in(acquisition_snapshot(), [:shipyards, Access.at(0), :waypoint], "X1-A2")
-           |> Map.put(:ships, [%{symbol: "OWNED-1", waypoint: "X1-A2"}]),
-           :offer_rate_profile_unavailable},
           {put_in(acquisition_snapshot(), [:unmet_work, Access.at(0), :planned_rate], nil),
            :unknown_planned_rate}
         ] do
@@ -931,6 +923,23 @@ defmodule SpaceTraders.FleetPlanningTest do
       assert limitation.reason == reason
       assert limitation.valuation.enabled_work.candidate_id == "unselected-iron"
       assert is_nil(limitation.valuation.enabled_value)
+    end
+  end
+
+  test "a capable offer is valued at the work's planned rate whatever Ship produced that evidence" do
+    for snapshot <- [
+          put_in(
+            acquisition_snapshot(),
+            [:shipyards, Access.at(0), :ships, Access.at(0), :engine, :speed],
+            60
+          ),
+          put_in(acquisition_snapshot(), [:shipyards, Access.at(0), :waypoint], "X1-A2")
+          |> Map.put(:ships, [%{symbol: "OWNED-1", waypoint: "X1-A2"}])
+        ] do
+      assert {:ok, %{candidate_contributions: [candidate], limitations: []}} =
+               FleetPlanning.plan_ship_acquisition(revision(), 0, snapshot)
+
+      assert candidate.expected_outcomes.valuation.enabled_rate == 500.0
     end
   end
 
@@ -1073,51 +1082,53 @@ defmodule SpaceTraders.FleetPlanningTest do
     end
   end
 
-  test "a fuel-consuming offer borrows only whole-work evidence that includes an empty-tank start and reachable route" do
+  test "a fuel-consuming offer needs fuel reach on its own tank, not an owned empty-tank sample" do
     offer = put_in(acquisition_offer(), [:frame, :fuel_capacity], 100)
-    profile = acquisition_profile(offer) |> put_in(["fuel"], %{"capacity" => 100, "current" => 0})
-    # Owned crew includes operational fields absent from ShipyardShipCrew.
-    profile = put_in(profile, ["readiness", "crew", "current"], 10)
 
     snapshot =
       acquisition_snapshot()
       |> put_in([:shipyards, Access.at(0), :ships], [offer])
-      |> put_in(
-        [:unmet_work, Access.at(0), :expected_outcomes, "planned_rate_evidence", "profiles"],
-        [profile]
-      )
-      |> Map.put(:fuel_stops, ["X1-A1"])
 
     assert {:ok, %{candidate_contributions: [candidate]}} =
              FleetPlanning.plan_ship_acquisition(revision(), 0, snapshot)
 
     assert candidate.expected_outcomes.decision_value == 24_000
 
+    assert candidate.ship.readiness.work_profile == %{
+             "navigation" => %{"waypoint_symbol" => "X1-A1"},
+             "cargo" => %{"capacity" => 40, "units" => 0},
+             "fuel" => %{"capacity" => 100}
+           }
+
     for refused <- [
-          Map.put(snapshot, :fuel_stops, []),
           put_in(
             snapshot,
-            [
-              :unmet_work,
-              Access.at(0),
-              :expected_outcomes,
-              "planned_rate_evidence",
-              "profiles",
-              Access.at(0),
-              "fuel",
-              "current"
-            ],
-            100
+            [:shipyards, Access.at(0), :ships, Access.at(0), :frame, :fuel_capacity],
+            50
           ),
           Map.put(snapshot, :waypoint_coordinates, %{})
         ] do
       assert {:ok,
               %{
                 candidate_contributions: [],
-                limitations: [%{reason: :offer_rate_profile_unavailable}]
+                limitations: [%{reason: :offer_fuel_reach_unproven}]
               }} =
                FleetPlanning.plan_ship_acquisition(revision(), 0, refused)
     end
+
+    assert {:ok, %{candidate_contributions: [_]}} =
+             snapshot
+             |> put_in(
+               [:shipyards, Access.at(0), :ships, Access.at(0), :frame, :fuel_capacity],
+               50
+             )
+             |> Map.put(:waypoint_coordinates, %{
+               "X1-A1" => %{x: 0, y: 0},
+               "X1-A2" => %{x: 60, y: 0},
+               "X1-A3" => %{x: 30, y: 0}
+             })
+             |> Map.put(:fuel_stops, ["X1-A3"])
+             |> then(&FleetPlanning.plan_ship_acquisition(revision(), 0, &1))
   end
 
   test "missing whole-work duration or supporting cost cannot masquerade as discounted planned value" do

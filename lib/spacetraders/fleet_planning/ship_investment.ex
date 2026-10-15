@@ -196,11 +196,10 @@ defmodule SpaceTraders.FleetPlanning.ShipInvestment do
       reason: :missing_trade_progress
     }
 
-  # Shipyard templates contain no current fuel. Borrow throughput only from a
-  # matching empty-load, zero-fuel start at this yard (or a fuel-independent
-  # Ship). This includes any necessary refuel in the empirical whole-work cost
-  # and duration; a full tank, free positioning or faster-engine extrapolation
-  # is never assumed. Required starting readiness is carried to registration.
+  # Capability match only (#730): role, Cargo capacity, Market access and fuel
+  # reach on the offered tank. Throughput is the enabled work's planned rate;
+  # min(planned, realized) and the no-history discount carry the conservatism.
+  # The benchmark is what registration must prove from the purchased Ship.
   defp match_offer(work, yard, offer, snapshot) do
     config = offer.configuration
     modules = config["modules"]
@@ -213,6 +212,8 @@ defmodule SpaceTraders.FleetPlanning.ShipInvestment do
               do: m["capacity"] || 0,
               else: 0
           end)
+
+    fuel_capacity = get_in(config, ["frame", "fuel_capacity"])
 
     capable? =
       is_integer(capacity) and capacity >= work.required_resources["cargo_capacity"] and
@@ -232,17 +233,6 @@ defmodule SpaceTraders.FleetPlanning.ShipInvestment do
         end)
 
     model = work.expected_outcomes["planned_rate_evidence"] || %{}
-    profiles = model["profiles"] || []
-
-    profile =
-      Enum.find(profiles, fn profile ->
-        configuration(profile["readiness"] || %{}) == config and
-          profile["cargo"] == %{"capacity" => capacity, "units" => 0} and
-          profile["navigation"]["waypoint_symbol"] == yard.waypoint and
-          profile["navigation"]["status"] in ["DOCKED", "IN_ORBIT"] and
-          profile["cooldown"]["remaining_seconds"] == 0 and
-          profile["fuel"]["current"] == 0 and reachable?(profile, work, yard, snapshot)
-      end)
 
     cond do
       not capable? ->
@@ -251,11 +241,18 @@ defmodule SpaceTraders.FleetPlanning.ShipInvestment do
       not planned_evidence?(work, model) ->
         %{status: :unknown, reason: :unknown_planned_rate}
 
-      is_nil(profile) ->
-        %{status: :unknown, reason: :offer_rate_profile_unavailable}
+      not reachable?(fuel_capacity, work, yard, snapshot) ->
+        %{status: :unknown, reason: :offer_fuel_reach_unproven}
 
       true ->
-        %{status: :matched, profile: profile}
+        %{
+          status: :matched,
+          profile: %{
+            "navigation" => %{"waypoint_symbol" => yard.waypoint},
+            "cargo" => %{"capacity" => capacity, "units" => 0},
+            "fuel" => %{"capacity" => fuel_capacity}
+          }
+        }
     end
   end
 
@@ -272,21 +269,19 @@ defmodule SpaceTraders.FleetPlanning.ShipInvestment do
           model["conservative_occupied_seconds"]
   end
 
-  defp reachable?(profile, work, yard, snapshot) do
-    fuel = profile["fuel"]
-
+  # Yard to source to destination on a full offered tank, refuelling only at
+  # retained fuel stops, flown as Ship Execution flies it.
+  defp reachable?(capacity, work, yard, snapshot) when is_integer(capacity) and capacity >= 0 do
     reach =
       FuelReach.new(
-        fuel["capacity"],
-        profile["navigation"]["flight_mode"],
+        capacity,
+        "CRUISE",
         Map.get(snapshot, :waypoint_coordinates, %{}),
         Map.get(snapshot, :fuel_stops, [])
       )
 
-    with capacity when is_integer(capacity) and capacity >= 0 <- fuel["capacity"],
-         ^capacity <- profile["readiness"]["frame"]["fuel_capacity"],
-         remaining when is_integer(remaining) <-
-           FuelReach.arrival_fuel(reach, yard.waypoint, 0, work.source_waypoint),
+    with remaining when is_integer(remaining) <-
+           FuelReach.arrival_fuel(reach, yard.waypoint, capacity, work.source_waypoint),
          remaining when is_integer(remaining) <-
            FuelReach.arrival_fuel(
              reach,
@@ -299,6 +294,8 @@ defmodule SpaceTraders.FleetPlanning.ShipInvestment do
       _ -> false
     end
   end
+
+  defp reachable?(_capacity, _work, _yard, _snapshot), do: false
 
   def configuration(offer) do
     offer

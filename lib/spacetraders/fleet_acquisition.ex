@@ -453,7 +453,6 @@ defmodule SpaceTraders.FleetAcquisition do
       matches_fields?(configuration, promised) and
         profile["cargo"] == benchmark["cargo"] and
         profile["navigation"]["waypoint_symbol"] == benchmark["navigation"]["waypoint_symbol"] and
-        profile["navigation"]["flight_mode"] == benchmark["navigation"]["flight_mode"] and
         profile["navigation"]["status"] in ["DOCKED", "IN_ORBIT"] and
         profile["cooldown"]["remaining_seconds"] == 0 and
         profile["fuel"]["capacity"] == benchmark["fuel"]["capacity"] and
