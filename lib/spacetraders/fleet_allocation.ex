@@ -78,6 +78,25 @@ defmodule SpaceTraders.FleetAllocation do
   def market_calibration_version, do: "market-v1"
 
   @doc """
+  Reads Claim-only rejected work from the latest current-Revision Market
+  decision. Returns no work without a current Fleet or usable decision.
+
+  Each entry carries its original Episode and Candidate ids, objective index
+  (Strategic Priority), objective, source/destination Waypoints, Trade Good,
+  requirements, expected outcomes and validity.
+  Nested Candidate evidence retains the persisted string-keyed JSON shape.
+  `:planned_rate` is estimated net credits per Ship-hour, or nil when unknown.
+  `expected_outcomes["planned_rate_evidence"]` retains the versioned model,
+  profiles, inputs and original completed-Intent/charge evidence. This rate
+  describes rejected existing-Ship work, not an offered Ship's valuation.
+  `fuel_reach.ships` names eligible owned Ships only; offers must be evaluated
+  independently against route, readiness and capacity.
+  """
+  defdelegate ship_bound_unmet_work(agent, as_of \\ Clock.utc_now()),
+    to: SpaceTraders.FleetAllocation.UnmetWork,
+    as: :read
+
+  @doc """
   Records the Neutral Wait for one authoritative zero-admissible allocation
   result at the single mint site fixed by ADR 0012.
 

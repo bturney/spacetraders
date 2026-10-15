@@ -454,6 +454,7 @@ defmodule SpaceTraders.FleetExecution do
           fuel: fuel(ship),
           position: position(ship),
           cargo_transport: cargo_capacity(ship),
+          trade_work_profile: SpaceTraders.FleetAllocation.MarketWorkRate.ship_profile(ship),
           chart: true,
           waypoint_scan: sensor_mount?(ship),
           market_access: markets
