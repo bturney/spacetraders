@@ -15,6 +15,7 @@ defmodule SpaceTraders.FleetPlanning do
   alias SpaceTraders.CreditSpending
   alias SpaceTraders.Fleet.FuelReach
   alias SpaceTraders.FleetStrategy.Revision
+  alias SpaceTraders.FleetPlanning.ShipInvestment
 
   @market_evidence_freshness_seconds Intelligence.market_freshness_seconds()
   # Owned-Ship, Shipyard and Construction evidence: the shorter non-Market budget.
@@ -266,6 +267,26 @@ defmodule SpaceTraders.FleetPlanning do
   module slot and mounting point owes the Shipyard's modification fee, and that
   cost is reserved with the purchase so later readiness work keeps its headroom.
   Pass `:preparation_credits` to override the derived reserve.
+
+  Supply `:unmet_work` from `FleetAllocation.ship_bound_unmet_work/2`,
+  `:generation_horizon` from `GenerationHorizon.current/2`, and
+  `:realized_trade_progress` from `TradeProgress.for_generation/1`, all for the
+  same current Generation and `:as_of`. Missing projections are unknown, not
+  zero history. Only work supporting this accepted objective/index is valued.
+
+  `:credits` is available surplus after the floor and selected/retained
+  Reservations; `:credit_margin_percent` is the active Credit Calibration.
+  `:ships` contains actually co-located owned Ships (`symbol`, `waypoint`),
+  never transit destinations. Optional `:waypoint_coordinates` and
+  `:fuel_stops` are the retained World projections used by FuelReach.
+
+  An offer borrows a planned net rate only from a matching observed whole-work
+  profile starting at its Shipyard with empty Cargo and no assumed initial fuel.
+  The Candidate records that required readiness in `ship.readiness`, and all
+  valuation inputs in `expected_outcomes.valuation`; refused offers carry the
+  same inputs in `limitations[*].valuation`. A purchase needs no Ship Claim.
+  This function neither selects nor publishes; Allocation must enforce API
+  Capacity, surplus and at most one unsettled acquisition at its boundary.
   """
   def plan_ship_acquisition(
         %Revision{} = revision,
@@ -274,8 +295,7 @@ defmodule SpaceTraders.FleetPlanning do
       )
       when is_integer(index) and index >= 0 and is_integer(credits) and credits >= 0 and
              is_list(shipyards) do
-    with {:ok, objective} <- objective_at(revision, index),
-         true <- ship_acquisition_objective?(objective) do
+    with {:ok, objective} <- objective_at(revision, index) do
       override = Map.get(snapshot, :preparation_credits)
       owned_ships = Map.get(snapshot, :ships, [])
 
@@ -288,16 +308,47 @@ defmodule SpaceTraders.FleetPlanning do
           override: override,
           owned_ships: owned_ships,
           credits: credits,
-          margin: credit_margin(snapshot)
+          margin: credit_margin(snapshot),
+          snapshot: snapshot
         }
 
         {candidates, unmet} =
           Enum.reduce(shipyards, {[], []}, fn yard, acc ->
             case shipyard_offer_evidence(yard, as_of) do
-              {:ok, yard} -> plan_yard(context, yard, acc)
-              :error -> acc
+              {:ok, yard} ->
+                plan_yard(context, yard, acc)
+
+              :error ->
+                {candidates, unmet} = acc
+
+                {candidates,
+                 [
+                   %{
+                     subject: Map.get(yard, :waypoint, :ship_acquisition),
+                     reason: :unusable_shipyard_evidence,
+                     valuation: Map.put(ShipInvestment.inputs(context), :shipyard, yard)
+                   }
+                   | unmet
+                 ]}
             end
           end)
+
+        unmet =
+          if candidates == [] and unmet == [] do
+            [
+              %{
+                subject: :ship_acquisition,
+                reason:
+                  if(Map.get(snapshot, :unmet_work, []) == [],
+                    do: :no_ship_bound_unmet_work,
+                    else: :shipyard_offers_unavailable
+                  ),
+                valuation: ShipInvestment.inputs(context)
+              }
+            ]
+          else
+            unmet
+          end
 
         candidates =
           candidates
@@ -313,12 +364,6 @@ defmodule SpaceTraders.FleetPlanning do
         {:error, :invalid_ship_acquisition_planning_input}
       end
     else
-      false ->
-        {:ok,
-         result(revision, index, %{as_of: as_of},
-           limitations: [%{subject: :ship_acquisition, reason: :unsupported_ship_objective}]
-         )}
-
       _ ->
         {:error, :invalid_ship_acquisition_planning_input}
     end
@@ -828,13 +873,23 @@ defmodule SpaceTraders.FleetPlanning do
   defp preparation_override_valid?(_), do: false
 
   defp plan_yard(context, yard, {candidates, unmet}) do
-    cond do
-      not co_located?(yard.waypoint, context.owned_ships) ->
-        {candidates, [precondition_limitation(yard.waypoint) | unmet]}
+    Enum.reduce(yard.ships, {candidates, unmet}, fn offer, {candidates, unmet} ->
+      case ship_offer(offer) do
+        {:ok, offer} ->
+          plan_offer(context, yard, offer, candidates, unmet)
 
-      true ->
-        plan_yard_offers(context, yard, candidates, unmet)
-    end
+        :error ->
+          {candidates,
+           [
+             %{
+               subject: yard.waypoint,
+               reason: :invalid_ship_offer,
+               valuation: ShipInvestment.inputs(context) |> Map.put(:offer, offer)
+             }
+             | unmet
+           ]}
+      end
+    end)
   end
 
   defp precondition_limitation(waypoint) do
@@ -845,45 +900,57 @@ defmodule SpaceTraders.FleetPlanning do
     }
   end
 
-  defp plan_yard_offers(context, yard, candidates, unmet) do
-    Enum.reduce(yard.ships, {candidates, unmet}, fn offer, {candidates, unmet} ->
-      case ship_offer(offer) do
-        {:ok, offer} -> plan_offer(context, yard, offer, candidates, unmet)
-        :error -> {candidates, unmet}
-      end
-    end)
-  end
-
   defp plan_offer(context, yard, offer, candidates, unmet) do
-    case preparation_credits(context.override, yard, offer) do
-      {:ok, preparation} ->
-        # Reserve the same calibrated bound purchase admission will charge.
-        offer =
-          Map.put(
-            offer,
-            :credit_exposure,
-            CreditSpending.worst_case_exposure(offer.purchase_price, 1, context.margin)
-          )
+    preparation =
+      case preparation_credits(context.override, yard, offer) do
+        {:ok, preparation} -> preparation
+        :unknown -> nil
+      end
 
-        if offer.credit_exposure + preparation <= context.credits do
-          contribution =
-            ship_acquisition_contribution(
-              context.revision,
-              context.index,
-              context.objective,
-              yard,
-              offer,
-              preparation,
-              context.as_of
-            )
+    offer =
+      Map.put(
+        offer,
+        :credit_exposure,
+        CreditSpending.worst_case_exposure(offer.purchase_price, 1, context.margin)
+      )
 
-          {[contribution | candidates], unmet}
-        else
-          {candidates, unmet}
-        end
+    valuation = ShipInvestment.value(context, yard, offer, preparation)
 
-      :unknown ->
-        {candidates, [exposure_limitation(yard.waypoint) | unmet]}
+    limitation =
+      cond do
+        not co_located?(yard.waypoint, context.owned_ships) ->
+          precondition_limitation(yard.waypoint)
+
+        is_nil(preparation) ->
+          exposure_limitation(yard.waypoint)
+
+        reason = ShipInvestment.refusal(valuation) ->
+          %{subject: yard.waypoint, reason: reason}
+
+        valuation.total_exposure > context.credits ->
+          %{subject: yard.waypoint, reason: :insufficient_acquisition_credits}
+
+        true ->
+          nil
+      end
+
+    if is_nil(limitation) do
+      contribution =
+        ship_acquisition_contribution(
+          context.revision,
+          context.index,
+          context.objective,
+          yard,
+          offer,
+          preparation,
+          context.as_of,
+          valuation
+        )
+
+      {[contribution | candidates], unmet}
+    else
+      {candidates,
+       [Map.merge(limitation, %{ship_type: offer.type, valuation: valuation}) | unmet]}
     end
   end
 
@@ -905,15 +972,6 @@ defmodule SpaceTraders.FleetPlanning do
     do: Enum.any?(owned_ships, &(Map.get(&1, :waypoint) == waypoint))
 
   defp co_located?(_waypoint, _owned_ships), do: false
-
-  @doc false
-  def ship_acquisition_objective?(objective) when is_map(objective) do
-    Enum.any?([objective["objective"], objective["evaluation"]], fn text ->
-      is_binary(text) and String.match?(text, ~r/\bships?\b|\bfleet growth\b/i)
-    end)
-  end
-
-  def ship_acquisition_objective?(_), do: false
 
   defp shipyard_offer_evidence(
          %{
@@ -964,7 +1022,8 @@ defmodule SpaceTraders.FleetPlanning do
          module_slots: frame_value(offer, :module_slots),
          mounting_points: frame_value(offer, :mounting_points),
          installed_modules: length(offer[:modules] || offer["modules"] || []),
-         installed_mounts: length(offer[:mounts] || offer["mounts"] || [])
+         installed_mounts: length(offer[:mounts] || offer["mounts"] || []),
+         configuration: ShipInvestment.configuration(offer)
        }}
     else
       :error
@@ -1017,13 +1076,56 @@ defmodule SpaceTraders.FleetPlanning do
          yard,
          offer,
          preparation_credits,
-         as_of
+         as_of,
+         valuation
        ) do
+    work = valuation.enabled_work
+    # GenerationHorizon uses Evidence's standard 30-second owned-read budget.
+    reset_expiry = DateTime.add(valuation.horizon.evidence_ref.observed_at, 30, :second)
+
+    dependencies =
+      [
+        %{
+          subject: "shipyard:#{yard.system_symbol}:#{yard.waypoint}",
+          evidence_id: yard.evidence_id,
+          valid_until: yard.valid_until
+        }
+      ] ++
+        Enum.map(work.dependencies, fn dependency ->
+          {:ok, expires, _} = DateTime.from_iso8601(dependency["valid_until"])
+
+          %{
+            subject: dependency["subject"],
+            evidence_id: dependency["evidence_id"],
+            valid_until: expires
+          }
+        end) ++
+        [
+          %{
+            subject: "server:status",
+            evidence_id:
+              "authoritative-observation:#{valuation.horizon.evidence_ref.observation_id}",
+            valid_until: reset_expiry
+          }
+        ]
+
+    expires_at =
+      Enum.min_by(
+        [work.validity.expires_at | Enum.map(dependencies, & &1.valid_until)],
+        &DateTime.to_unix/1
+      )
+
+    readiness = %{
+      engine_speed: offer.engine_speed,
+      configuration: offer.configuration,
+      work_profile: valuation.offer_match.profile
+    }
+
     %CandidateContribution{
       id:
         Evidence.fingerprint(
           {revision.id, index, yard.evidence_id, yard.waypoint, offer.type, offer.purchase_price,
-           preparation_credits}
+           preparation_credits, valuation}
         ),
       strategy_revision_id: revision.id,
       objective_index: index,
@@ -1033,32 +1135,27 @@ defmodule SpaceTraders.FleetPlanning do
       source_waypoint: yard.waypoint,
       destination_waypoint: yard.waypoint,
       expected_outcomes: %{
-        decision_value: offer.engine_speed,
+        decision_value: valuation.enabled_value,
         purchase_price: offer.purchase_price,
         preparation_credits: preparation_credits,
-        ship_type: offer.type
+        ship_type: offer.type,
+        valuation: valuation
       },
       uncertainty: %{shipyard_availability: :shared_world_state},
       required_roles: [],
       required_capabilities: [
         %{capability: :ship_offer, value: offer.type},
-        %{capability: :ship_readiness, value: %{engine_speed: offer.engine_speed}}
+        %{capability: :ship_readiness, value: readiness}
       ],
       required_resources: %{credits: offer.credit_exposure + preparation_credits},
-      dependencies: [
-        %{
-          subject: "shipyard:#{yard.system_symbol}:#{yard.waypoint}",
-          evidence_id: yard.evidence_id,
-          valid_until: yard.valid_until
-        }
-      ],
-      validity: %{as_of: as_of, expires_at: yard.valid_until},
+      dependencies: dependencies,
+      validity: %{as_of: as_of, expires_at: expires_at},
       alternatives: [],
       ship: %{
         type: offer.type,
         purchase_price: offer.purchase_price,
         preparation_credits: preparation_credits,
-        readiness: %{engine_speed: offer.engine_speed}
+        readiness: readiness
       }
     }
   end
@@ -1074,7 +1171,8 @@ defmodule SpaceTraders.FleetPlanning do
             ship_type: alternative.ship.type,
             purchase_price: alternative.ship.purchase_price,
             preparation_credits: alternative.ship.preparation_credits,
-            decision_value: alternative.expected_outcomes.decision_value
+            decision_value: alternative.expected_outcomes.decision_value,
+            valuation: alternative.expected_outcomes.valuation
           }
         end)
 

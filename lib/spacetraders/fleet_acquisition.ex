@@ -55,7 +55,7 @@ defmodule SpaceTraders.FleetAcquisition do
          {:ok, ships} <- Fleet.list_ships(agent),
          as_of = DateTime.utc_now(),
          {:ok, planning} <-
-           FleetPlanning.plan_ship_acquisition(revision, acquisition_objective_index(revision), %{
+           plan_acquisition(revision, %{
              as_of: as_of,
              credit_margin_percent: SpaceTraders.CreditCalibration.active().margin_percent,
              credits: overview.credits,
@@ -83,13 +83,42 @@ defmodule SpaceTraders.FleetAcquisition do
                calibration_version: "ship-acquisition-v1"
              }
            ),
-         {:ok, spending} <- CreditSpending.acquire_ship_purchase(agent, candidate),
          {:ok, result} <-
-           dispatch(agent, portfolio, hd(portfolio.commitments), candidate, spending) do
+           execute(agent, portfolio, hd(portfolio.commitments), candidate) do
       {:ok, Map.put(result, :portfolio, portfolio)}
     else
       error -> {:error, {:ship_acquisition_unavailable, error}}
     end
+  end
+
+  @doc "Executes an already published acquisition; does not plan, select or publish."
+  def execute(agent, portfolio, %Commitment{} = commitment, candidate) do
+    with {:ok, spending} <- CreditSpending.acquire_ship_purchase(agent, candidate) do
+      dispatch(agent, portfolio, commitment, candidate, spending)
+    end
+  end
+
+  # Transitional caller until Allocation owns acquisition (#735). Planning is
+  # objective-specific, but acquisition has no separate objective-text gate.
+  defp plan_acquisition(revision, snapshot) do
+    revision.document["objectives"]
+    |> Enum.with_index()
+    |> Enum.reduce_while({:ok, %{candidate_contributions: [], limitations: []}}, fn {_, index},
+                                                                                    {:ok, acc} ->
+      case FleetPlanning.plan_ship_acquisition(revision, index, snapshot) do
+        {:ok, planning} ->
+          {:cont,
+           {:ok,
+            %{
+              candidate_contributions:
+                acc.candidate_contributions ++ planning.candidate_contributions,
+              limitations: acc.limitations ++ planning.limitations
+            }}}
+
+        error ->
+          {:halt, error}
+      end
+    end)
   end
 
   defp select_candidate(revision, planning, credits, as_of) do
@@ -469,16 +498,6 @@ defmodule SpaceTraders.FleetAcquisition do
       }
     })
   end
-
-  defp acquisition_objective_index(%Revision{document: %{"objectives" => objectives}}) do
-    objectives
-    |> Enum.with_index()
-    |> Enum.find_value(fn {objective, index} ->
-      if FleetPlanning.ship_acquisition_objective?(objective), do: index
-    end)
-  end
-
-  defp acquisition_objective_index(_revision), do: nil
 
   # Shipyard offers, not Market Listings: the shared Market interpretation does
   # not cover them, so this reads World freshness. It does not yet filter
