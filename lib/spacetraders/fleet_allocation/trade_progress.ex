@@ -386,6 +386,8 @@ defmodule SpaceTraders.FleetAllocation.TradeProgress do
          price_per_unit: transaction["price_per_unit"],
          total_price: total,
          mutation_attempt_id: intent.mutation_attempt_id,
+         started_at: intent.inserted_at,
+         work_start: intent.parameters["work_start"],
          finished_at: intent.finished_at
        }}
     else
@@ -467,8 +469,33 @@ defmodule SpaceTraders.FleetAllocation.TradeProgress do
       sale_intent_id: sell.intent_id,
       purchase_cost: buy.total_price,
       sale_revenue: sell.total_price,
-      trade_margin: sell.total_price - buy.total_price
+      trade_margin: sell.total_price - buy.total_price,
+      observed_occupied_seconds: occupied_seconds(buy, sell),
+      timing_evidence: %{
+        purchase_started_at: buy.started_at,
+        purchase_finished_at: buy.finished_at,
+        sale_started_at: sell.started_at,
+        sale_finished_at: sell.finished_at,
+        work_start: buy.work_start
+      }
     }
+  end
+
+  # Whole bounded work, including positioning, preparation, API waits and the
+  # buy-to-sell handoff. A scheduled navigation route is not throughput evidence.
+  defp occupied_seconds(buy, sell) do
+    with %DateTime{} = started <- buy.started_at,
+         %DateTime{} = bought <- buy.finished_at,
+         %DateTime{} = selling <- sell.started_at,
+         %DateTime{} = finished <- sell.finished_at,
+         true <- DateTime.compare(started, bought) != :gt,
+         true <- DateTime.compare(bought, selling) != :gt,
+         true <- DateTime.compare(selling, finished) != :gt,
+         seconds when seconds > 0 <- DateTime.diff(finished, started, :second) do
+      seconds
+    else
+      _ -> @unknown
+    end
   end
 
   defp gap(commitment_id, reason),

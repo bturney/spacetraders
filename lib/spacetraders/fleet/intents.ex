@@ -584,12 +584,18 @@ defmodule SpaceTraders.Fleet.Intents do
            id == commitment.id and portfolio_id == portfolio.id and version == portfolio.version,
          :ok <- token_present(agent),
          {:ok, ship} <- Fleet.owned_ship(agent, ship_symbol),
-         {:ok, live_ship} <- fresh_ship(agent, ship_symbol, nil),
+         {:ok, binding} <-
+           Agent.handle_game_result(agent, Evidence.get_ship_binding(agent, ship_symbol)),
+         live_ship = Evidence.bound_ship(binding),
          {:ok, intent} <-
            insert_commitment_intent(commitment, portfolio, ship, %{
              type: "buy",
              target_waypoint: candidate_source(candidate),
-             parameters: commitment_buy_parameters(candidate)
+             parameters:
+               Map.put(commitment_buy_parameters(candidate), "work_start", %{
+                 "profile" => SpaceTraders.FleetAllocation.MarketWorkRate.ship_profile(live_ship),
+                 "observation_id" => binding.observation.id
+               })
            }) do
       advance_new_intent(agent, intent, live_ship)
     else
