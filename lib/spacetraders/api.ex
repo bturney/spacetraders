@@ -82,9 +82,9 @@ defmodule SpaceTraders.API do
   end
 
   @doc "GET / — server status and global data."
-  @spec get_status() :: result()
-  def get_status do
-    request(:get, "/", nil, as: :raw)
+  @spec get_status(keyword()) :: result()
+  def get_status(opts \\ []) when is_list(opts) do
+    request(:get, "/", nil, Keyword.put(opts, :as, :raw))
   end
 
   @doc "POST /register — mint a new agent under the given account token."

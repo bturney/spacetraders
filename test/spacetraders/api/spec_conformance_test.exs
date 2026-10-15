@@ -130,6 +130,13 @@ defmodule SpaceTraders.API.SpecConformanceTest do
       end
     end
 
+    test "the announced reset schedule belongs to the flat root status response" do
+      schedule = success_schema("/", :get)["serverResets"]
+      assert schedule["type"] == "object"
+      assert "next" in schedule["required"]
+      assert schedule["properties"]["next"]["type"] == "string"
+    end
+
     test "every declared endpoint has a success schema in the spec" do
       for {endpoint, method, path, _envelope} <- @endpoints do
         refute success_schema(path, method) == nil,
