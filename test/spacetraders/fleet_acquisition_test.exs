@@ -74,7 +74,7 @@ defmodule SpaceTraders.FleetAcquisitionTest do
     assert [] == purchase_attempts(agent)
   end
 
-  test "registers a purchased Ship once readiness matches, then releases the portfolio" do
+  test "registers a purchased Ship once readiness matches, then releases its Commitment" do
     {scope, agent, revision} = generation()
     stub_shipyard(agent)
 
@@ -516,6 +516,237 @@ defmodule SpaceTraders.FleetAcquisitionTest do
     assert [%{state: "absent"}] = purchase_attempts(agent)
     assert nil == Repo.get_by(Ship, agent_id: agent.id, symbol: "ACQUIRE-2")
     assert nil == FleetAllocation.current_portfolio(scope, agent)
+    assert [episode] = Repo.all(StrategyDecisionEpisode)
+    assert episode.classification == :superseded
+    assert episode.actual_outcomes == %{"reason" => "ship_purchase_not_completed"}
+  end
+
+  test "restart concludes an already absent purchase Attempt without releasing retained work" do
+    {scope, agent, revision} = ambiguous_purchase()
+    portfolio = FleetAllocation.current_portfolio(scope, agent)
+    retained = retain_independent_work(scope, agent, revision, portfolio)
+    [attempt] = purchase_attempts(agent)
+    {:ok, fleet} = Evidence.get_ships(agent, bind: true)
+    {:ok, credits} = Evidence.get_agent(agent, bind: true)
+    {:ok, proof} = Evidence.recovery_proof(attempt, :absent, "No new Ship", [fleet, credits])
+    assert {:ok, %{state: "absent"}} = MutationAttempts.reconcile(attempt, :absent, proof)
+
+    Req.Test.stub(SpaceTraders.API, fn _ ->
+      flunk("the absent Attempt is already authoritative")
+    end)
+
+    assert {:error, :ship_purchase_not_completed} =
+             FleetAcquisition.reconcile(scope, Repo.get!(Agent, agent.id), revision, "X1-UX81")
+
+    assert %{commitments: [%{id: retained_id}]} = FleetAllocation.current_portfolio(scope, agent)
+    assert retained_id == retained.id
+
+    assert Repo.get!(StrategyDecisionEpisode, portfolio.strategy_decision_episode_id).classification ==
+             :superseded
+  end
+
+  for classification <- [:realized, :partially_realized, :superseded] do
+    test "a #{classification} purchase keeps an unrelated retained Commitment current" do
+      {scope, agent, revision} = ambiguous_purchase()
+      portfolio = FleetAllocation.current_portfolio(scope, agent)
+      [acquisition] = portfolio.commitments
+      retained = retain_independent_work(scope, agent, revision, portfolio)
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        assert conn.method == "GET"
+
+        case conn.request_path do
+          "/v2/my/ships" ->
+            fleet =
+              if unquote(classification) == :superseded,
+                do: [docked("X1-UX81-A1")],
+                else: [docked("X1-UX81-A1"), acquired(@offered_speed)]
+
+            Req.Test.json(conn, %{"data" => fleet})
+
+          "/v2/my/agent" ->
+            overview(conn, agent, @credits - @price)
+
+          "/v2/my/ships/ACQUIRE-2" ->
+            ship(conn, if(unquote(classification) == :realized, do: @offered_speed, else: 5))
+        end
+      end)
+
+      result = FleetAcquisition.reconcile(scope, agent, revision, "X1-UX81")
+
+      case unquote(classification) do
+        :realized -> assert {:ok, %{ship: %Ship{symbol: "ACQUIRE-2"}}} = result
+        :partially_realized -> assert {:error, :ship_readiness_mismatch} = result
+        :superseded -> assert {:error, :ship_purchase_not_completed} = result
+      end
+
+      assert %{id: portfolio_id, commitments: [%{id: retained_id}]} =
+               FleetAllocation.current_portfolio(scope, agent)
+
+      assert portfolio_id == portfolio.id
+      assert retained_id == retained.id
+
+      assert {:ok, %{commitment_id: ^retained_id}} =
+               FleetAllocation.current_ship_claim(agent, "CRUISER-1")
+
+      assert Repo.get!(SpaceTraders.FleetAllocation.Commitment, acquisition.id).unwind_state ==
+               :released
+
+      assert Repo.get!(StrategyDecisionEpisode, portfolio.strategy_decision_episode_id).classification ==
+               unquote(classification)
+
+      assert Repo.get!(StrategyDecisionEpisode, retained.replan_decision_episode_id).classification ==
+               :still_evaluating
+    end
+  end
+
+  test "resume uses the acquisition Commitment's Episode rather than the portfolio's Episode" do
+    {scope, agent, revision} = generation()
+    generation = Repo.get_by!(Generation, agent_id: agent.id)
+    stub_shipyard(agent)
+    retained = retained_proposal(revision)
+
+    market_decision = %{
+      evidence_references: [],
+      expectations: %{trade: "retained"},
+      calibration_version: "retained-work-test"
+    }
+
+    selection = %{
+      revision_id: revision.id,
+      source_version: 0,
+      commitments: [retained],
+      rejected: []
+    }
+
+    assert {:ok, portfolio} =
+             FleetAllocation.publish_portfolio(scope, generation.id, selection, market_decision)
+
+    acquisition = %{
+      retained
+      | id: {revision.id, "acquisition"},
+        candidate_id: "acquisition",
+        claims: [],
+        reservations: %{credits: 15_000}
+    }
+
+    decision = %{
+      market_decision
+      | expectations: %{
+          ship_type: "SHIP_LIGHT_HAULER",
+          purchase_price: @price,
+          readiness: %{engine_speed: @offered_speed}
+        },
+        calibration_version: "ship-acquisition-v1"
+    }
+
+    assert {:ok, updated} =
+             FleetAllocation.replan_subgraph(
+               scope,
+               generation.id,
+               %{selection | source_version: 1, commitments: [acquisition]},
+               [acquisition.candidate_id],
+               decision
+             )
+
+    commitment = Enum.find(updated.commitments, &(&1.candidate_id == acquisition.candidate_id))
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      case {conn.method, conn.request_path} do
+        {"GET", "/v2/my/agent"} -> overview(conn, agent, @credits)
+        {"POST", "/v2/my/ships"} -> Req.Test.transport_error(conn, :timeout)
+      end
+    end)
+
+    assert {:ok, spending} = SpaceTraders.CreditSpending.acquire_ship_purchase(agent, candidate())
+
+    assert {:error, _} =
+             SpaceTraders.Observability.with_context(
+               [
+                 operator_id: agent.operator_id,
+                 agent_id: agent.id,
+                 fleet_generation_id: generation.id,
+                 strategy_revision_id: revision.id,
+                 decision_episode_id: commitment.replan_decision_episode_id,
+                 commitment_id: commitment.id
+               ],
+               fn ->
+                 SpaceTraders.API.purchase_ship(
+                   SpaceTraders.API.AgentTokenReference.new(agent),
+                   "SHIP_LIGHT_HAULER",
+                   "X1-UX81-A1",
+                   spending: spending
+                 )
+               end
+             )
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      assert conn.method == "GET"
+
+      case conn.request_path do
+        "/v2/my/agent" ->
+          overview(conn, agent, @credits - @price)
+
+        "/v2/my/ships" ->
+          Req.Test.json(conn, %{"data" => [docked("X1-UX81-A1"), acquired(@offered_speed)]})
+
+        "/v2/my/ships/ACQUIRE-2" ->
+          ship(conn, @offered_speed)
+      end
+    end)
+
+    assert {:ok, %{ship: %Ship{symbol: "ACQUIRE-2"}}} =
+             FleetAcquisition.reconcile(scope, agent, revision, "X1-UX81")
+
+    assert Repo.get!(StrategyDecisionEpisode, commitment.replan_decision_episode_id).classification ==
+             :realized
+
+    assert Repo.get!(StrategyDecisionEpisode, portfolio.strategy_decision_episode_id).classification ==
+             :still_evaluating
+
+    assert {:ok, _} = FleetAllocation.current_ship_claim(agent, "CRUISER-1")
+  end
+
+  defp retain_independent_work(scope, agent, revision, portfolio) do
+    generation = Repo.get_by!(Generation, agent_id: agent.id)
+
+    retained = retained_proposal(revision)
+
+    assert {:ok, updated} =
+             FleetAllocation.replan_subgraph(
+               scope,
+               generation.id,
+               %{
+                 revision_id: revision.id,
+                 source_version: generation.allocation_version,
+                 commitments: [retained],
+                 rejected: []
+               },
+               [retained.candidate_id],
+               %{
+                 evidence_references: [],
+                 expectations: %{trade: "retained"},
+                 calibration_version: "retained-work-test"
+               }
+             )
+
+    assert updated.id == portfolio.id
+    Enum.find(updated.commitments, &(&1.candidate_id == retained.candidate_id))
+  end
+
+  defp retained_proposal(revision) do
+    %FleetAllocation.FleetCommitment{
+      id: {revision.id, "retained-trade"},
+      candidate_id: "retained-trade",
+      objective_index: 0,
+      claims: ["CRUISER-1"],
+      reservations: %{credits: 100},
+      pledges: [],
+      dependencies: [],
+      expected_value: 100.0,
+      unwind_cost: 0.0,
+      decisive_reason: "independent productive work"
+    }
   end
 
   defp observation_payloads(outcome) do
