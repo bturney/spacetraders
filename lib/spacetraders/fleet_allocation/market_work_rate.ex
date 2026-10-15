@@ -17,9 +17,9 @@ defmodule SpaceTraders.FleetAllocation.MarketWorkRate do
   No extrapolation to an offered Ship is performed here.
   """
 
+  alias SpaceTraders.Evidence
   alias SpaceTraders.FleetAllocation
   alias SpaceTraders.FleetAllocation.TradeProgress
-  alias SpaceTraders.Evidence
 
   @model "market-observed-whole-work-v1"
 

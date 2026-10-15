@@ -584,7 +584,8 @@ defmodule SpaceTraders.Fleet.Intents do
            id == commitment.id and portfolio_id == portfolio.id and version == portfolio.version,
          :ok <- token_present(agent),
          {:ok, ship} <- Fleet.owned_ship(agent, ship_symbol),
-         {:ok, binding} <- Evidence.get_ship_binding(agent, ship_symbol),
+         {:ok, binding} <-
+           Agent.handle_game_result(agent, Evidence.get_ship_binding(agent, ship_symbol)),
          live_ship = Evidence.bound_ship(binding),
          {:ok, intent} <-
            insert_commitment_intent(commitment, portfolio, ship, %{
