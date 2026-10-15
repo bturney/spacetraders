@@ -88,7 +88,7 @@ defmodule SpaceTraders.FleetAcquisitionTest do
     end)
 
     assert {:ok, %{ship: %Ship{symbol: "ACQUIRE-2"}, readiness: %{engine: %{speed: 30}}}} =
-             FleetAcquisition.reconcile(scope, agent, revision, "X1-UX81")
+             execute_purchase(scope, agent, revision)
 
     assert %Ship{symbol: "ACQUIRE-2", ship_type: "SHIP_LIGHT_HAULER"} =
              Repo.get_by(Ship, agent_id: agent.id, symbol: "ACQUIRE-2")
@@ -139,7 +139,7 @@ defmodule SpaceTraders.FleetAcquisitionTest do
     end)
 
     assert {:ok, %{ship: %Ship{symbol: "ACQUIRE-2"}}} =
-             FleetAcquisition.reconcile(scope, agent, revision, "X1-UX81")
+             execute_purchase(scope, agent, revision)
 
     assert [attempt] = purchase_attempts(agent)
 
@@ -184,7 +184,7 @@ defmodule SpaceTraders.FleetAcquisitionTest do
     end)
 
     assert {:error, {:ship_acquisition_unavailable, {:error, :ship_readiness_mismatch}}} =
-             FleetAcquisition.reconcile(scope, agent, revision, "X1-UX81")
+             execute_purchase(scope, agent, revision)
 
     assert nil == Repo.get_by(Ship, agent_id: agent.id, symbol: "ACQUIRE-2")
 
@@ -213,7 +213,7 @@ defmodule SpaceTraders.FleetAcquisitionTest do
 
     # 20,000 credits cover the 12,500 worst case alone, but not beside 9,000 in flight.
     assert {:error, {:ship_acquisition_unavailable, {:error, :insufficient_unreserved_headroom}}} =
-             FleetAcquisition.reconcile(scope, agent, revision, "X1-UX81")
+             execute_purchase(scope, agent, revision)
 
     assert [%{state: "not_sent", sent_or_unknown_at: nil}] = purchase_attempts(agent)
     assert nil == Repo.get_by(Ship, agent_id: agent.id, symbol: "ACQUIRE-2")
@@ -233,7 +233,7 @@ defmodule SpaceTraders.FleetAcquisitionTest do
     end)
 
     assert {:error, {:ship_acquisition_unavailable, {:error, :unbounded_purchase_exposure}}} =
-             FleetAcquisition.reconcile(scope, agent, revision, "X1-UX81")
+             execute_purchase(scope, agent, revision)
   end
 
   test "a purchase prepared without retained offer evidence is never sent" do
@@ -263,7 +263,7 @@ defmodule SpaceTraders.FleetAcquisitionTest do
     end)
 
     assert {:error, {:ship_acquisition_unavailable, _}} =
-             FleetAcquisition.reconcile(scope, agent, revision, "X1-UX81")
+             execute_purchase(scope, agent, revision)
 
     assert [%{state: "ambiguous", prepared_evidence: %{"spending" => spending}}] =
              purchase_attempts(agent)
@@ -289,7 +289,7 @@ defmodule SpaceTraders.FleetAcquisitionTest do
     end)
 
     assert {:error, {:ship_acquisition_unavailable, _}} =
-             FleetAcquisition.reconcile(scope, agent, revision, "X1-UX81")
+             execute_purchase(scope, agent, revision)
 
     assert [%{prepared_evidence: %{"spending" => %{"worst_case_exposure" => 15_000}}}] =
              purchase_attempts(agent)
@@ -449,7 +449,7 @@ defmodule SpaceTraders.FleetAcquisitionTest do
     end)
 
     assert {:error, {:ship_acquisition_unavailable, _}} =
-             FleetAcquisition.reconcile(scope, agent, revision, "X1-UX81")
+             execute_purchase(scope, agent, revision)
 
     assert [%{state: "ambiguous"}] = purchase_attempts(agent)
     assert nil == Repo.get_by(Ship, agent_id: agent.id, symbol: "ACQUIRE-2")
@@ -508,7 +508,7 @@ defmodule SpaceTraders.FleetAcquisitionTest do
     end)
 
     assert {:error, {:ship_acquisition_unavailable, _}} =
-             FleetAcquisition.reconcile(scope, agent, revision, "X1-UX81")
+             execute_purchase(scope, agent, revision)
 
     assert {:error, :ship_purchase_not_completed} =
              FleetAcquisition.reconcile(scope, agent, revision, "X1-UX81")
@@ -802,7 +802,7 @@ defmodule SpaceTraders.FleetAcquisitionTest do
     end)
 
     assert {:error, {:ship_acquisition_unavailable, _}} =
-             FleetAcquisition.reconcile(scope, agent, revision, "X1-UX81")
+             execute_purchase(scope, agent, revision)
 
     {scope, agent, revision}
   end
@@ -1151,6 +1151,72 @@ defmodule SpaceTraders.FleetAcquisitionTest do
   defp candidate,
     do: %{source_waypoint: "X1-UX81-A1", ship: %{type: "SHIP_LIGHT_HAULER"}}
 
+  # These are execution/recovery scenarios, not investment planning scenarios.
+  # Start with a published purchase; economics lives at FleetPlanning's seam,
+  # and coherent selection/publication is qualified by #735.
+  defp execute_purchase(scope, agent, revision) do
+    generation = FleetAllocation.active_generation(agent)
+    margin = SpaceTraders.CreditCalibration.active().margin_percent
+    exposure = SpaceTraders.CreditSpending.worst_case_exposure(@price, 1, margin)
+
+    candidate = %SpaceTraders.FleetPlanning.CandidateContribution{
+      id: "published-acquisition",
+      strategy_revision_id: revision.id,
+      objective_index: 0,
+      objective: hd(revision.document["objectives"]),
+      kind: :ship_acquisition,
+      trade_symbol: nil,
+      source_waypoint: "X1-UX81-A1",
+      destination_waypoint: "X1-UX81-A1",
+      expected_outcomes: %{
+        decision_value: 24_000,
+        purchase_price: @price,
+        preparation_credits: @preparation_exposure
+      },
+      uncertainty: %{},
+      required_roles: [],
+      required_capabilities: [],
+      required_resources: %{credits: exposure + @preparation_exposure},
+      dependencies: [],
+      validity: %{as_of: DateTime.utc_now(), expires_at: DateTime.add(DateTime.utc_now(), 300)},
+      alternatives: [],
+      ship: %{
+        type: "SHIP_LIGHT_HAULER",
+        purchase_price: @price,
+        preparation_credits: @preparation_exposure,
+        readiness: %{engine_speed: @offered_speed}
+      }
+    }
+
+    {:ok, selection} =
+      FleetAllocation.select_portfolio(revision, [candidate], %{
+        as_of: DateTime.utc_now(),
+        claims: [],
+        reservations: %{credits: @credits}
+      })
+
+    {:ok, portfolio} =
+      FleetAllocation.publish_portfolio(
+        scope,
+        generation.id,
+        Map.put(selection, :source_version, generation.allocation_version),
+        %{
+          evidence_references: [],
+          calibration_version: "ship-acquisition-v2",
+          expectations:
+            Map.merge(candidate.expected_outcomes, %{
+              ship_type: candidate.ship.type,
+              readiness: candidate.ship.readiness
+            })
+        }
+      )
+
+    case FleetAcquisition.execute(agent, portfolio, hd(portfolio.commitments), candidate) do
+      {:ok, result} -> {:ok, result}
+      error -> {:error, {:ship_acquisition_unavailable, error}}
+    end
+  end
+
   # A recorded Ship purchase another caller already admitted for this Agent.
   defp other_spend(agent, state, bound) do
     generation = Repo.get_by!(Generation, agent_id: agent.id)
@@ -1275,7 +1341,11 @@ defmodule SpaceTraders.FleetAcquisitionTest do
         activated_at: DateTime.utc_now(:second),
         document: %{
           "objectives" => [
-            %{"objective" => "Grow the Fleet", "kind" => "attain", "evaluation" => "Add a Ship"}
+            %{
+              "objective" => "Grow credits",
+              "kind" => "continuous",
+              "evaluation" => "Maximize net credit growth"
+            }
           ],
           "hard_constraints" => ["Keep at least 1,000 credits available"]
         }
