@@ -442,8 +442,19 @@ defmodule SpaceTraders.FleetExecution do
   defp market_claims(agent, ships, markets) do
     reserved = MapSet.new(ShipReservation.reserved_symbols(agent.id))
 
+    registered =
+      MapSet.new(
+        Repo.all(
+          from s in Fleet.Ship,
+            where: s.agent_id == ^agent.id and is_nil(s.retired_at),
+            select: s.symbol
+        )
+      )
+
     ships
-    |> Enum.reject(&MapSet.member?(reserved, &1.symbol))
+    |> Enum.reject(
+      &(MapSet.member?(reserved, &1.symbol) or not MapSet.member?(registered, &1.symbol))
+    )
     |> Enum.map(fn ship ->
       %{
         resource: ship.symbol,

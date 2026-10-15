@@ -203,10 +203,18 @@ defmodule SpaceTraders.CreditSpending do
   candidate was selected on. Missing or stale evidence yields an error rather
   than an invented bound.
   """
-  def acquire_ship_purchase(agent, %{source_waypoint: waypoint, ship: %{type: type}}) do
+  def acquire_ship_purchase(agent, %{source_waypoint: waypoint, ship: %{type: type}} = candidate) do
     calibration = CreditCalibration.active()
 
-    with {:ok, price} <- shipyard_price(agent, waypoint, type),
+    system =
+      Enum.find_value(Map.get(candidate, :dependencies, []), fn dependency ->
+        case dependency[:subject] || dependency["subject"] do
+          "shipyard:" <> tail -> hd(String.split(tail, ":"))
+          _ -> nil
+        end
+      end) || waypoint |> String.split("-") |> Enum.take(2) |> Enum.join("-")
+
+    with {:ok, price} <- shipyard_price(agent, waypoint, type, system),
          {:ok, credits} <- acquire_credits(agent),
          true <-
            credits.value.symbol == agent.symbol and is_integer(credits.value.credits) and
@@ -216,6 +224,7 @@ defmodule SpaceTraders.CreditSpending do
          "kind" => "ship",
          "credit_observation_id" => credits.observation.id,
          "waypoint" => waypoint,
+         "system" => system,
          "ship_type" => type,
          "unit_price" => price,
          "units" => 1,
@@ -229,9 +238,7 @@ defmodule SpaceTraders.CreditSpending do
     end
   end
 
-  defp shipyard_price(agent, waypoint, type) do
-    system = waypoint |> String.split("-") |> Enum.take(2) |> Enum.join("-")
-
+  defp shipyard_price(agent, waypoint, type, system) do
     fact =
       World.intelligence(
         agent,
@@ -333,7 +340,10 @@ defmodule SpaceTraders.CreditSpending do
              attempt,
              credits.observation
            ),
-         true <- credits.value.credits - other_exposure - spending["worst_case_exposure"] >= floor do
+         {:ok, preparation} <- own_preparation(attempt),
+         true <-
+           credits.value.credits - other_exposure - spending["worst_case_exposure"] - preparation >=
+             floor do
       :ok
     else
       false -> {:error, :insufficient_unreserved_headroom}
@@ -342,6 +352,35 @@ defmodule SpaceTraders.CreditSpending do
   end
 
   defp admit_spend(_attempt, _agent, _intent, _revision), do: :ok
+
+  defp own_preparation(%Attempt{provenance: provenance}) do
+    case provenance["commitment_id"] do
+      id when is_integer(id) ->
+        case Repo.get(SpaceTraders.FleetAllocation.Commitment, id) do
+          %{unwind_state: :not_required} = commitment ->
+            commitment =
+              Repo.preload(commitment, [
+                :replan_decision_episode,
+                fleet_commitment_portfolio: :strategy_decision_episode
+              ])
+
+            episode =
+              commitment.replan_decision_episode ||
+                commitment.fleet_commitment_portfolio.strategy_decision_episode
+
+            case episode.expectations["preparation_credits"] do
+              amount when is_integer(amount) and amount >= 0 -> {:ok, amount}
+              _ -> {:error, :unbounded_preparation_exposure}
+            end
+
+          _ ->
+            {:error, :acquisition_commitment_withdrawn}
+        end
+
+      _ ->
+        {:ok, 0}
+    end
+  end
 
   defp validate_bound(agent, %Attempt{operation_id: operation} = attempt, spending)
        when operation in @market_operations,
@@ -424,7 +463,13 @@ defmodule SpaceTraders.CreditSpending do
     body = attempt.prepared_evidence["request"]["body"]
 
     with true <- body["waypointSymbol"] == waypoint and body["shipType"] == spending["ship_type"],
-         {:ok, price} <- shipyard_price(agent, waypoint, spending["ship_type"]),
+         {:ok, price} <-
+           shipyard_price(
+             agent,
+             waypoint,
+             spending["ship_type"],
+             spending["system"] || waypoint |> String.split("-") |> Enum.take(2) |> Enum.join("-")
+           ),
          true <- spending["unit_price"] == price and spending["units"] == 1,
          true <-
            spending["worst_case_exposure"] ==

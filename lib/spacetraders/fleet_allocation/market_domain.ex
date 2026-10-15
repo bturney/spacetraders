@@ -177,6 +177,12 @@ defmodule SpaceTraders.FleetAllocation.MarketDomain do
       end)
 
     retained = occupancy.retained ++ kept
+    settling = FleetAllocation.settling_commitments(FleetAllocation.active_generation(agent).id)
+    protected = Enum.sum_by(retained ++ settling, &(credits(&1) || 0))
+
+    availability =
+      put_in(availability, [:reservations, :credits], max(credits(availability) - protected, 0))
+
     kept_ships = MapSet.new(Enum.flat_map(kept, & &1.claims))
     claims = Enum.reject(free, &MapSet.member?(kept_ships, &1.resource))
 
@@ -458,7 +464,9 @@ defmodule SpaceTraders.FleetAllocation.MarketDomain do
   end
 
   defp market_commitment?(commitment),
-    do: Enum.any?(commitment.dependencies, &match?(%{"subject" => "market:" <> _}, &1))
+    do:
+      commitment.claims != [] and
+        Enum.any?(commitment.dependencies, &match?(%{"subject" => "market:" <> _}, &1))
 
   # A completed buy whose selected sell was never requested (the sender died
   # between the two legs, or the sell leg was refused) continues here at the

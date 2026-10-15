@@ -217,6 +217,277 @@ defmodule SpaceTraders.MarketDomainAllocationTest do
     end
   end
 
+  describe "surplus-first acquisition at the Market boundary" do
+    test "purchase capacity cannot authorize investment while the enabled trade's navigation is deferred" do
+      fleet = investment_fleet()
+      governor = :"acquisition_governor_#{System.unique_integer([:positive])}"
+
+      start_supervised!(
+        {SpaceTraders.API.CapacityGovernor, name: governor, probe_base_ms: 60_000}
+      )
+
+      previous = Application.fetch_env(:spacetraders, SpaceTraders.FleetCapacity)
+      Application.put_env(:spacetraders, SpaceTraders.FleetCapacity, governor: governor)
+
+      on_exit(fn ->
+        case previous do
+          {:ok, value} -> Application.put_env(:spacetraders, SpaceTraders.FleetCapacity, value)
+          :error -> Application.delete_env(:spacetraders, SpaceTraders.FleetCapacity)
+        end
+      end)
+
+      operation = SpaceTraders.API.OperationInventory.fetch!("navigate-ship")
+      assert {:ok, admission} = SpaceTraders.API.CapacityGovernor.admit(operation, %{}, governor)
+      SpaceTraders.API.CapacityGovernor.complete(admission, 503, governor)
+
+      assert SpaceTraders.FleetCapacity.proceed?(
+               SpaceTraders.FleetCapacity.disposition("purchase-ship")
+             )
+
+      refute SpaceTraders.FleetCapacity.proceed?(
+               SpaceTraders.FleetCapacity.disposition("navigate-ship")
+             )
+
+      stub_game(fleet.agent, [@frigate],
+        investment: true,
+        refuse_ship_reads: true,
+        report_requests: true
+      )
+
+      assert :ok = Reconciler.observe_market_evidence(fleet.agent.id, @system)
+
+      assert [refusal] =
+               Repo.all(
+                 from e in StrategyDecisionEpisode,
+                   where: e.selection_kind == :acquisition_refused
+               )
+
+      assert refusal.rejection_reason == "capacity_not_proceed"
+      refute_received {:game_request, "POST", "/v2/my/ships"}
+    end
+
+    test "a worthwhile offer publishes claimless beside retained trade and dispatches under its own Episode" do
+      fleet = investment_fleet()
+
+      stub_game(fleet.agent, [@frigate],
+        investment: true,
+        purchase: :pending_readiness,
+        refuse_ship_reads: true
+      )
+
+      assert :ok = Reconciler.observe_market_evidence(fleet.agent.id, @system, proceed())
+
+      portfolio = FleetAllocation.current_portfolio(fleet.scope, fleet.agent)
+      purchases = Enum.filter(portfolio.commitments, &(&1.claims == []))
+      assert length(purchases) == 1, inspect(Repo.all(StrategyDecisionEpisode), limit: :infinity)
+      [purchase] = purchases
+      assert purchase.claims == []
+      assert purchase.reservations["credits"] == 2_250
+      assert Enum.any?(portfolio.commitments, &(&1.id == fleet.trade.id))
+
+      assert [attempt] =
+               SpaceTraders.MutationAttempts.list_for_agent(fleet.agent)
+               |> Enum.filter(&(&1.operation_id == "purchase-ship"))
+
+      assert attempt.state == "succeeded"
+      assert attempt.provenance["decision_episode_id"] == purchase.replan_decision_episode_id
+      episode = Repo.get!(StrategyDecisionEpisode, purchase.replan_decision_episode_id)
+
+      assert episode.expectations["valuation"]["enabled_work"]["decision_episode_id"] ==
+               fleet.trade.replan_decision_episode_id
+
+      assert episode.expectations["readiness"]["configuration"]["modules"] != []
+      assert [_] = FleetAllocation.ship_bound_unmet_work(fleet.agent)
+      refute Repo.get_by(Ship, agent_id: fleet.agent.id, symbol: ship_symbol(fleet, "PURCHASED"))
+    end
+
+    test "no Claim-only trade loser records an acquisition refusal without replacing Market evidence" do
+      fleet = fleet([@frigate])
+      assert :ok = Reconciler.observe_market_evidence(fleet.agent.id, @system, proceed())
+
+      assert [refusal] =
+               Repo.all(
+                 from e in StrategyDecisionEpisode,
+                   where: e.selection_kind == :acquisition_refused
+               )
+
+      assert refusal.rejection_reason == "no_claim_only_loser"
+      assert refusal.calibration_version == "ship-acquisition-v2"
+      assert refusal.expectations["domain"] == "ship_acquisition"
+      assert [market] = selected_episodes(fleet)
+
+      assert FleetAllocation.current_portfolio(fleet.scope, fleet.agent).strategy_decision_episode_id ==
+               market.id
+
+      refute Repo.exists?(
+               from e in StrategyDecisionEpisode, where: e.selection_kind == :neutral_wait
+             )
+    end
+
+    test "the exact surplus boundary protects the floor once and every retained Reservation once" do
+      fleet = investment_fleet()
+
+      stub_game(fleet.agent, [@frigate],
+        investment: true,
+        credits: 3_250,
+        purchase: :pending_readiness,
+        refuse_ship_reads: true
+      )
+
+      assert :ok = Reconciler.observe_market_evidence(fleet.agent.id, @system, proceed())
+      portfolio = FleetAllocation.current_portfolio(fleet.scope, fleet.agent)
+      assert Enum.sum_by(portfolio.commitments, &(&1.reservations["credits"] || 0)) == 2_750
+      assert Enum.count(portfolio.commitments, &(&1.claims == [])) == 1
+    end
+
+    test "registration alone grants no Claim and the next boundary allocates the purchased Ship normally" do
+      fleet = investment_fleet()
+
+      stub_game(fleet.agent, [@frigate],
+        investment: true,
+        purchase: :ready,
+        refuse_ship_reads: true
+      )
+
+      assert :ok = Reconciler.observe_market_evidence(fleet.agent.id, @system, proceed())
+      symbol = ship_symbol(fleet, "PURCHASED")
+      assert %Ship{} = Repo.get_by(Ship, agent_id: fleet.agent.id, symbol: symbol)
+
+      assert {:error, :no_current_ship_claim} =
+               FleetAllocation.current_ship_claim(fleet.agent, symbol)
+
+      assert Enum.any?(
+               FleetAllocation.current_portfolio(fleet.scope, fleet.agent).commitments,
+               &(&1.id == fleet.trade.id)
+             )
+
+      stub_game(fleet.agent, [@frigate],
+        investment: true,
+        owned_purchase: true,
+        refuse_ship_reads: true
+      )
+
+      assert :ok = Reconciler.observe_market_evidence(fleet.agent.id, @system, proceed())
+      assert {:ok, _claim} = FleetAllocation.current_ship_claim(fleet.agent, symbol)
+    end
+
+    test "later Market selection protects the pending purchase Reservation without double charging released trade" do
+      fleet = investment_fleet()
+
+      stub_game(fleet.agent, [@frigate],
+        investment: true,
+        purchase: :pending_readiness,
+        refuse_ship_reads: true
+      )
+
+      assert :ok = Reconciler.observe_market_evidence(fleet.agent.id, @system, proceed())
+      current = FleetAllocation.current_portfolio(fleet.scope, fleet.agent)
+      [purchase] = Enum.filter(current.commitments, &(&1.claims == []))
+      finish_intents(fleet.trade)
+      listing(fleet.agent, "X1-A1", 80, 9)
+      listing(fleet.agent, "X1-A2", 110, 100)
+      listing(fleet.agent, "X1-A3", 120, 99)
+      assert :ok = Reconciler.observe_market_evidence(fleet.agent.id, @system, proceed())
+      current = FleetAllocation.current_portfolio(fleet.scope, fleet.agent)
+      assert Enum.any?(current.commitments, &(&1.id == purchase.id))
+      assert Enum.sum_by(current.commitments, &(&1.reservations["credits"] || 0)) <= 4_500
+    end
+
+    test "an owned but unregistered purchase cannot poison otherwise admissible Market selection" do
+      fleet = investment_fleet()
+
+      stub_game(fleet.agent, [@frigate],
+        investment: true,
+        purchase: :pending_readiness,
+        refuse_ship_reads: true
+      )
+
+      assert :ok = Reconciler.observe_market_evidence(fleet.agent.id, @system, proceed())
+
+      stub_game(fleet.agent, [@frigate],
+        investment: true,
+        owned_purchase: true,
+        refuse_ship_reads: true
+      )
+
+      assert :ok = Reconciler.observe_market_evidence(fleet.agent.id, @system, proceed())
+
+      refute Repo.exists?(
+               from e in StrategyDecisionEpisode, where: e.selection_kind == :publication_rejected
+             )
+
+      assert {:error, :no_current_ship_claim} =
+               FleetAllocation.current_ship_claim(fleet.agent, ship_symbol(fleet, "PURCHASED"))
+
+      assert Enum.any?(
+               FleetAllocation.current_portfolio(fleet.scope, fleet.agent).commitments,
+               &(&1.claims == [])
+             )
+
+      assert [refusal] =
+               Repo.all(
+                 from e in StrategyDecisionEpisode,
+                   where: e.selection_kind == :acquisition_refused
+               )
+
+      assert refusal.rejection_reason == "acquisition_already_unsettled"
+    end
+
+    for {scenario, reason} <- [
+          {:horizon, "unknown_generation_horizon"},
+          {:value, "enabled_value_not_above_cost"},
+          {:capacity, "capacity_not_proceed"},
+          {:credits, "insufficient_acquisition_credits"},
+          {:precondition, "purchase_precondition_unmet"}
+        ] do
+      test "#{scenario} refusal retains its evidence and never creates a Neutral Wait" do
+        fleet =
+          investment_fleet(
+            horizon_seconds: if(unquote(scenario) == :value, do: 3_600, else: 864_000)
+          )
+
+        if unquote(scenario) == :horizon,
+          do:
+            Repo.delete_all(
+              from o in SpaceTraders.Evidence.Observation, where: o.subject == "server:status"
+            )
+
+        changes =
+          if unquote(scenario) == :precondition, do: %{"nav" => nav_at("X1-A2")}, else: %{}
+
+        stub_game(fleet.agent, [@frigate],
+          investment: true,
+          report_requests: true,
+          refuse_ship_reads: true,
+          credits: if(unquote(scenario) == :credits, do: 3_000, else: 5_000),
+          ship_changes: changes
+        )
+
+        capacity =
+          if unquote(scenario) == :capacity, do: CapacityDispositions.defer(), else: proceed()
+
+        assert :ok = Reconciler.observe_market_evidence(fleet.agent.id, @system, capacity)
+
+        assert [refusal] =
+                 Repo.all(
+                   from e in StrategyDecisionEpisode,
+                     where: e.selection_kind == :acquisition_refused
+                 )
+
+        assert refusal.rejection_reason == unquote(reason)
+        assert refusal.expectations["considered_work"] != []
+        assert refusal.calibration_version == "ship-acquisition-v2"
+        unless unquote(scenario) == :capacity, do: assert(refusal.alternatives != [])
+
+        refute Repo.exists?(
+                 from e in StrategyDecisionEpisode, where: e.selection_kind == :neutral_wait
+               )
+
+        refute_received {:game_request, "POST", "/v2/my/ships"}
+      end
+    end
+  end
+
   describe "durable Ship-bound unmet work" do
     test "fresh rejected trade uses comparable completed whole-work time and supporting charges" do
       fleet = fleet([@frigate])
@@ -1701,6 +1972,76 @@ defmodule SpaceTraders.MarketDomainAllocationTest do
     %{operator: operator, agent: agent, revision: revision, scope: Scope.for_operator(operator)}
   end
 
+  defp investment_fleet(opts \\ []) do
+    fleet = fleet([@frigate])
+    stub_game(fleet.agent, [@frigate], investment: true)
+    listing(fleet.agent, "X1-A3", 50, 40)
+    assert {:ok, %{action: :published}} = reconcile(fleet)
+    completed_trade_sample(fleet, 1_800, 100)
+    listing(fleet.agent, "X1-A1", 10, 9)
+    listing(fleet.agent, "X1-A2", 30, 25)
+    listing(fleet.agent, "X1-A3", 50, 24)
+    stub_game(fleet.agent, [@frigate], investment: true, refuse_ship_reads: true)
+    assert {:ok, %{action: :published}} = reconcile(fleet)
+    trade = commitment_for(fleet, @frigate)
+
+    body = investment_ship(ship_symbol(fleet, "PURCHASED"))
+
+    {:ok, _} =
+      Intelligence.observe_shipyard(
+        fleet.agent,
+        @system,
+        SpaceTraders.API.Model.Shipyard.from_json(%{
+          "symbol" => "X1-A1",
+          "modificationsFee" => 500,
+          "shipTypes" => [%{"type" => "SHIP_LIGHT_HAULER"}],
+          "ships" => [
+            Map.merge(
+              Map.take(body, ~w(frame reactor engine crew modules mounts)),
+              %{"type" => "SHIP_LIGHT_HAULER", "purchasePrice" => 1_000}
+            )
+          ]
+        }),
+        source: "get_shipyard",
+        offers_visible: true
+      )
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      Req.Test.json(conn, %{
+        "status" => "online",
+        "serverResets" => %{
+          "next" =>
+            DateTime.to_iso8601(
+              DateTime.add(DateTime.utc_now(), Keyword.get(opts, :horizon_seconds, 864_000))
+            )
+        }
+      })
+    end)
+
+    assert {:ok, _} =
+             SpaceTraders.Evidence.get_status_binding(fleet.agent, owner: "fleet_acquisition")
+
+    Map.put(fleet, :trade, trade)
+  end
+
+  defp investment_ship(symbol) do
+    body = ship(@frigate, symbol)
+
+    Map.merge(body, %{
+      "frame" => Map.put(body["frame"], "fuelCapacity", 0),
+      "fuel" => %{"capacity" => 0, "current" => 0},
+      "modules" => [
+        %{
+          "symbol" => "MODULE_CARGO_HOLD_I",
+          "capacity" => 40,
+          "name" => "Cargo",
+          "description" => "Cargo",
+          "requirements" => %{"crew" => 1, "power" => 1, "slots" => 1}
+        }
+      ]
+    })
+  end
+
   defp observe_marketplace(agent, symbol, x) do
     waypoint =
       Waypoint.from_json(%{
@@ -1826,7 +2167,10 @@ defmodule SpaceTraders.MarketDomainAllocationTest do
   defp stub_game(agent, ship_symbols, opts \\ []) do
     ships =
       Enum.map(ship_symbols, fn role ->
-        body = ship(role, "#{agent.symbol}-#{role}")
+        body =
+          if Keyword.get(opts, :investment, false) and role == @frigate,
+            do: investment_ship("#{agent.symbol}-#{role}"),
+            else: ship(role, "#{agent.symbol}-#{role}")
 
         if role == @frigate,
           do: Map.merge(body, Keyword.get(opts, :ship_changes, %{})),
@@ -1842,6 +2186,11 @@ defmodule SpaceTraders.MarketDomainAllocationTest do
         do: Enum.map(ships, &if(&1["symbol"] == trader, do: holding_iron(&1, sell_at), else: &1)),
         else: ships
 
+    ships =
+      if Keyword.get(opts, :owned_purchase),
+        do: ships ++ [investment_ship("#{agent.symbol}-PURCHASED")],
+        else: ships
+
     observer = if Keyword.get(opts, :report_requests, false), do: self()
     refuse_ship_reads? = Keyword.get(opts, :refuse_ship_reads, false)
 
@@ -1855,7 +2204,7 @@ defmodule SpaceTraders.MarketDomainAllocationTest do
               "accountId" => "ACC",
               "symbol" => agent.symbol,
               "headquarters" => agent.headquarters,
-              "credits" => 5_000,
+              "credits" => Keyword.get(opts, :credits, 5_000),
               "startingFaction" => "COSMIC",
               "shipCount" => length(ships)
             }
@@ -1881,6 +2230,30 @@ defmodule SpaceTraders.MarketDomainAllocationTest do
 
         {"GET", "/v2/my/ships"} ->
           Req.Test.json(conn, %{"data" => ships})
+
+        {"POST", "/v2/my/ships"} ->
+          assert Keyword.get(opts, :purchase)
+          body = investment_ship("#{agent.symbol}-PURCHASED")
+
+          Req.Test.json(conn, %{
+            "data" => %{
+              "ship" => body,
+              "agent" => %{"symbol" => agent.symbol, "credits" => 4_000},
+              "transaction" => %{
+                "agentSymbol" => agent.symbol,
+                "shipSymbol" => body["symbol"],
+                "shipType" => "SHIP_LIGHT_HAULER",
+                "waypointSymbol" => "X1-A1",
+                "price" => 1_000,
+                "timestamp" => DateTime.to_iso8601(DateTime.utc_now())
+              }
+            }
+          })
+
+        {"GET", "/v2/my/ships/" <> symbol} when symbol == agent.symbol <> "-PURCHASED" ->
+          if Keyword.get(opts, :purchase) == :ready,
+            do: Req.Test.json(conn, %{"data" => investment_ship(symbol)}),
+            else: refuse(conn)
 
         {"GET", "/v2/my/ships/" <> _symbol} when refuse_ship_reads? ->
           refuse(conn)
