@@ -218,6 +218,73 @@ defmodule SpaceTraders.MarketDomainAllocationTest do
   end
 
   describe "surplus-first acquisition at the Market boundary" do
+    for evidence <- [:missing, :stale] do
+      test "eligible investment refreshes #{evidence} reset evidence before purchasing" do
+        fleet = investment_fleet(seed_status: unquote(evidence) == :stale)
+
+        if source = SpaceTraders.Evidence.latest_observation(fleet.agent, "server:status") do
+          Repo.update!(
+            Ecto.Changeset.change(source, observed_at: DateTime.add(DateTime.utc_now(), -31))
+          )
+        end
+
+        stub_game(fleet.agent, [@frigate],
+          investment: true,
+          reset_seconds: 864_000,
+          purchase: :pending_readiness,
+          refuse_ship_reads: true,
+          report_requests: true
+        )
+
+        assert :ok = Reconciler.observe_market_evidence(fleet.agent.id, @system, proceed())
+        assert_received {:game_request, "GET", "/v2/"}
+        assert_received {:game_request, "POST", "/v2/my/ships"}
+        source = SpaceTraders.Evidence.latest_observation(fleet.agent, "server:status")
+        assert source.operation_id == "get-status"
+        assert source.fleet_generation_id == FleetAllocation.active_generation(fleet.agent).id
+        assert {:ok, binding} = SpaceTraders.Evidence.retained_binding(fleet.agent, source.id)
+        assert binding.observation.id == source.id
+
+        purchase =
+          FleetAllocation.current_portfolio(fleet.scope, fleet.agent).commitments
+          |> Enum.find(&(&1.claims == []))
+
+        episode = Repo.get!(StrategyDecisionEpisode, purchase.replan_decision_episode_id)
+
+        assert episode.expectations["valuation"]["horizon"]["evidence_ref"]["observation_id"] ==
+                 source.id
+      end
+    end
+
+    test "failed reset refresh stays unknown and repeated boundaries do not loop on HTTP" do
+      fleet = investment_fleet(seed_status: false)
+
+      stub_game(fleet.agent, [@frigate],
+        investment: true,
+        refuse_ship_reads: true,
+        report_requests: true
+      )
+
+      for _ <- 1..2 do
+        assert :ok = Reconciler.observe_market_evidence(fleet.agent.id, @system, proceed())
+      end
+
+      assert_received {:game_request, "GET", "/v2/"}
+      refute_received {:game_request, "GET", "/v2/"}
+      refute_received {:game_request, "POST", "/v2/my/ships"}
+      assert %{status: :unknown} = SpaceTraders.GenerationHorizon.current(fleet.agent)
+
+      refusals =
+        Repo.all(
+          from e in StrategyDecisionEpisode, where: e.selection_kind == :acquisition_refused
+        )
+
+      assert Enum.map(refusals, & &1.rejection_reason) == [
+               "unknown_generation_horizon",
+               "unknown_generation_horizon"
+             ]
+    end
+
     test "purchase capacity cannot authorize investment while the enabled trade's navigation is deferred" do
       fleet = investment_fleet()
       governor = :"acquisition_governor_#{System.unique_integer([:positive])}"
@@ -263,6 +330,7 @@ defmodule SpaceTraders.MarketDomainAllocationTest do
                )
 
       assert refusal.rejection_reason == "capacity_not_proceed"
+      refute_received {:game_request, "GET", "/v2/"}
       refute_received {:game_request, "POST", "/v2/my/ships"}
     end
 
@@ -484,6 +552,9 @@ defmodule SpaceTraders.MarketDomainAllocationTest do
                )
 
         refute_received {:game_request, "POST", "/v2/my/ships"}
+
+        if unquote(scenario) in [:capacity, :precondition],
+          do: refute_received({:game_request, "GET", "/v2/"})
       end
     end
   end
@@ -2018,8 +2089,10 @@ defmodule SpaceTraders.MarketDomainAllocationTest do
       })
     end)
 
-    assert {:ok, _} =
-             SpaceTraders.Evidence.get_status_binding(fleet.agent, owner: "fleet_acquisition")
+    if Keyword.get(opts, :seed_status, true) do
+      assert {:ok, _} =
+               SpaceTraders.Evidence.get_status_binding(fleet.agent, owner: "fleet_acquisition")
+    end
 
     Map.put(fleet, :trade, trade)
   end
@@ -2198,6 +2271,20 @@ defmodule SpaceTraders.MarketDomainAllocationTest do
       if observer == self(), do: send(observer, {:game_request, conn.method, conn.request_path})
 
       case {conn.method, conn.request_path} do
+        {"GET", "/v2/"} ->
+          case Keyword.get(opts, :reset_seconds) do
+            seconds when is_integer(seconds) ->
+              Req.Test.json(conn, %{
+                "status" => "online",
+                "serverResets" => %{
+                  "next" => DateTime.to_iso8601(DateTime.add(DateTime.utc_now(), seconds))
+                }
+              })
+
+            _ ->
+              refuse(conn)
+          end
+
         {"GET", "/v2/my/agent"} ->
           Req.Test.json(conn, %{
             "data" => %{

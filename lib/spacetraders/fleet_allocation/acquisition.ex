@@ -1,10 +1,13 @@
 defmodule SpaceTraders.FleetAllocation.Acquisition do
   @moduledoc "Allocation-owned, surplus-first Capacity Investment decision after Market work."
 
+  import Ecto.Query
+
   alias SpaceTraders.{
     Agent,
     Clock,
     CreditCalibration,
+    Evidence,
     Fleet,
     FleetAcquisition,
     FleetAllocation,
@@ -85,15 +88,19 @@ defmodule SpaceTraders.FleetAllocation.Acquisition do
         )
 
       world = World.projections(agent, system, now, 300)
+      ships = co_located(ships)
+      shipyards = shipyards(world.waypoints, system)
+      horizon = investment_horizon(agent, generation, now, ships, shipyards, surplus)
+      now = Clock.utc_now()
 
       snapshot = %{
         as_of: now,
         credits: surplus,
         credit_margin_percent: CreditCalibration.active().margin_percent,
-        ships: co_located(ships),
-        shipyards: shipyards(world.waypoints, system),
+        ships: ships,
+        shipyards: shipyards,
         unmet_work: work,
-        generation_horizon: GenerationHorizon.current(agent, now),
+        generation_horizon: horizon,
         realized_trade_progress: TradeProgress.for_generation(generation.id),
         waypoint_coordinates: world.waypoint_coordinates,
         fuel_stops: world.fuel_stops
@@ -181,6 +188,39 @@ defmodule SpaceTraders.FleetAllocation.Acquisition do
         {:error, reason} ->
           refuse(agent, revision, generation, reason, limitations, work)
       end
+    end
+  end
+
+  # Read only at an otherwise eligible investment boundary. A failed or unusable
+  # schedule stays unknown; its recorded refusal bounds retries to the owned-read
+  # freshness window rather than turning every Market announcement into a GET.
+  defp investment_horizon(agent, generation, now, ships, shipyards, surplus) do
+    horizon = GenerationHorizon.current(agent, now)
+
+    eligible? =
+      surplus > 0 and
+        Enum.any?(shipyards, fn yard ->
+          yard.ships != [] and Enum.any?(ships, &(&1.waypoint == yard.waypoint))
+        end)
+
+    recent_refusal? =
+      Repo.exists?(
+        from e in StrategyDecisionEpisode,
+          where:
+            e.fleet_generation_id == ^generation.id and
+              e.selection_kind == :acquisition_refused and
+              e.rejection_reason == "unknown_generation_horizon" and
+              e.inserted_at > ^DateTime.add(now, -30, :second)
+      )
+
+    if horizon.status == :unknown and eligible? and not recent_refusal? and
+         FleetCapacity.proceed?(FleetCapacity.disposition("get-status")) do
+      case Evidence.get_status_binding(agent, owner: "fleet_acquisition") do
+        {:ok, _binding} -> GenerationHorizon.current(agent, SpaceTraders.Clock.utc_now())
+        _ -> horizon
+      end
+    else
+      horizon
     end
   end
 
