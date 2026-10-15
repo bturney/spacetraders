@@ -110,6 +110,8 @@ defmodule SpaceTraders.Evidence do
 
   # Retained facts were validated when acquired; a row that no longer decodes
   # is unusable evidence. Only malformed-data errors are classified that way.
+  defp decode_retained("get-status", response) when is_map(response), do: {:ok, response}
+
   defp decode_retained(operation_id, response) do
     cond do
       model = @retained_models[operation_id] ->
@@ -260,6 +262,18 @@ defmodule SpaceTraders.Evidence do
         _ -> nil
       end
     end)
+  end
+
+  @doc "Reads public server status through a governed demand and retains its exact Binding."
+  def get_status_binding(%AgentRecord{} = agent, opts \\ []) do
+    governed_read(
+      agent,
+      "server:status",
+      "get-status",
+      ["response"],
+      Keyword.put(opts, :bind, true),
+      fn _reference, read_opts -> API.get_status(read_opts) end
+    )
   end
 
   @doc "Reads a System through a governed World Observation Demand."
