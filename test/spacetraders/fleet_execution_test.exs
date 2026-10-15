@@ -26,6 +26,7 @@ defmodule SpaceTraders.FleetExecutionTest do
     test "claims market reach from governed waypoint evidence" do
       operator = operator_fixture()
       agent = agent_fixture(operator, %{headquarters: "X1-A1"})
+      {:ok, _} = SpaceTraders.Fleet.record_ship(agent, "SHIP-1", "SHIP_COMMAND_FRIGATE")
 
       observe_marketplace(agent, "X1-A1")
       observe_marketplace(agent, "X1-A2")

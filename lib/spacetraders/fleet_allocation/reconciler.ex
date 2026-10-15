@@ -112,15 +112,23 @@ defmodule SpaceTraders.FleetAllocation.Reconciler do
   decides what is worth acquiring — and demands deferred by API backpressure
   stay open for the next wakeup instead of being dropped or fulfilled.
   """
-  def wake_due_demands(agent_id, capacity \\ FleetCapacity.disposition("get-market"))
-      when is_integer(agent_id) and is_map(capacity) do
+  def wake_due_demands(agent_id, capacity \\ nil)
+      when is_integer(agent_id) and (is_map(capacity) or is_nil(capacity)) do
     with_context(agent_id, fn scope, agent, revision ->
       system = system_for(agent)
 
       if system do
-        MarketDomain.reconcile(scope, agent, revision, system, capacity)
+        MarketDomain.reconcile(scope, agent, revision, system, market_capacity(capacity))
+
+        SpaceTraders.FleetAllocation.Acquisition.reconcile(
+          scope,
+          agent,
+          revision,
+          system,
+          capacity
+        )
+
         FleetResources.reconcile(scope, agent, revision, system)
-        FleetAcquisition.reconcile(scope, agent, revision, system)
         FleetRefit.reconcile(scope, agent, revision, system)
       end
 
@@ -201,6 +209,9 @@ defmodule SpaceTraders.FleetAllocation.Reconciler do
         with_context(agent_id, fn scope, agent, revision ->
           FleetContracts.reconcile(scope, agent, revision)
           FleetConstruction.reconcile(scope, agent, revision)
+
+          if system = system_for(agent),
+            do: FleetAcquisition.reconcile(scope, agent, revision, system)
         end)
 
       _ ->
@@ -219,7 +230,7 @@ defmodule SpaceTraders.FleetAllocation.Reconciler do
   def observe_market_evidence(
         agent_id,
         system_symbol,
-        capacity \\ FleetCapacity.disposition("get-market")
+        capacity \\ nil
       )
       when is_integer(agent_id) and is_binary(system_symbol) do
     reconcile_market_boundary(agent_id, system_symbol, capacity, false)
@@ -236,7 +247,7 @@ defmodule SpaceTraders.FleetAllocation.Reconciler do
   def observe_waypoint_intelligence(
         agent_id,
         system_symbol,
-        capacity \\ FleetCapacity.disposition("get-market")
+        capacity \\ nil
       )
       when is_integer(agent_id) and is_binary(system_symbol) do
     reconcile_market_boundary(agent_id, system_symbol, capacity, true)
@@ -247,7 +258,15 @@ defmodule SpaceTraders.FleetAllocation.Reconciler do
   # beside the published pilot work.
   defp reconcile_market_boundary(agent_id, system_symbol, capacity, resources?) do
     with_context(agent_id, fn scope, agent, revision ->
-      MarketDomain.reconcile(scope, agent, revision, system_symbol, capacity)
+      MarketDomain.reconcile(scope, agent, revision, system_symbol, market_capacity(capacity))
+
+      SpaceTraders.FleetAllocation.Acquisition.reconcile(
+        scope,
+        agent,
+        revision,
+        system_symbol,
+        capacity
+      )
 
       enforce_sync_result!(
         agent.id,
@@ -258,12 +277,17 @@ defmodule SpaceTraders.FleetAllocation.Reconciler do
       if resources?, do: FleetResources.reconcile(scope, agent, revision, system_symbol)
       FleetContracts.reconcile(scope, agent, revision)
       FleetConstruction.reconcile(scope, agent, revision)
-      FleetAcquisition.reconcile(scope, agent, revision, system_symbol)
       FleetRefit.reconcile(scope, agent, revision, system_symbol)
     end)
 
     :ok
   end
+
+  # An explicit disposition is the deterministic enabled-work advisory seam.
+  # Runtime defaults ask for Market reads here and the investment's enabled
+  # operations in Acquisition; purchase transport alone never grants permission.
+  defp market_capacity(nil), do: FleetCapacity.disposition("get-market")
+  defp market_capacity(capacity), do: capacity
 
   defp with_context(agent_id, callback) do
     with :ok <- SpaceTraders.RuntimeAuthority.execution_allowed?(),

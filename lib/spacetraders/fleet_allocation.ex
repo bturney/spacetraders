@@ -341,6 +341,12 @@ defmodule SpaceTraders.FleetAllocation do
 
     lock_generations(from(g in Generation, where: g.id == ^generation_id), :update)
 
+    strategy =
+      Repo.one(from s in Strategy, where: s.operator_id == ^operator_id, lock: "FOR SHARE")
+
+    if is_nil(strategy) or strategy.active_revision_id != revision_id,
+      do: Repo.rollback(:stale_source)
+
     portfolio =
       Repo.one(
         from p in Portfolio,
@@ -360,6 +366,7 @@ defmodule SpaceTraders.FleetAllocation do
               c.unwind_state == :not_required
       )
 
+    purchase_fences = unresolved_purchase_ids(Enum.map(active, & &1.id))
     affected = dependent_closure(active, MapSet.new(changed))
     retained = Enum.reject(active, &MapSet.member?(affected, &1.candidate_id))
     proposed_by_id = Map.new(selection.commitments, &{&1.candidate_id, &1})
@@ -378,12 +385,13 @@ defmodule SpaceTraders.FleetAllocation do
              end) and
              Enum.all?(active, fn commitment ->
                not MapSet.member?(affected, commitment.candidate_id) or
-                 not Repo.exists?(
-                   from i in Intent,
-                     where:
-                       i.fleet_commitment_id == ^commitment.id and
-                         i.status in ^Intent.unfinished_states()
-                 )
+                 (not MapSet.member?(purchase_fences, commitment.id) and
+                    not Repo.exists?(
+                      from i in Intent,
+                        where:
+                          i.fleet_commitment_id == ^commitment.id and
+                            i.status in ^Intent.unfinished_states()
+                    ))
              end) do
       Repo.rollback(:subgraph_not_safe_to_replace)
     end
@@ -393,6 +401,7 @@ defmodule SpaceTraders.FleetAllocation do
         from(g in Generation,
           where:
             g.id == ^generation_id and g.operator_id == ^operator_id and
+              g.fleet_strategy_revision_id == ^revision_id and
               g.allocation_version == ^version and is_nil(g.fenced_at) and is_nil(g.retired_at)
         ),
         inc: [allocation_version: 1]
@@ -757,7 +766,7 @@ defmodule SpaceTraders.FleetAllocation do
                        c.unwind_state != :released
                ) do
           Repo.update!(Ecto.Changeset.change(portfolio, superseded_at: DateTime.utc_now()))
-          NeutralWait.clear(portfolio.fleet_generation_id)
+          if is_nil(portfolio.superseded_at), do: NeutralWait.clear(portfolio.fleet_generation_id)
         end
 
         Repo.update_all(from(g in Generation, where: g.id == ^portfolio.fleet_generation_id),
@@ -1090,6 +1099,12 @@ defmodule SpaceTraders.FleetAllocation do
       Repo.update_all(from(c in Commitment, where: c.id in ^ids), set: [unwind_state: state])
     end
 
+    released
+    |> Enum.map(& &1.replan_decision_episode_id)
+    |> Enum.reject(&is_nil/1)
+    |> Enum.uniq()
+    |> Enum.each(&supersede_episode(&1, now))
+
     Repo.update_all(from(p in Portfolio, where: p.id == ^portfolio.id),
       set: [superseded_at: now]
     )
@@ -1122,6 +1137,7 @@ defmodule SpaceTraders.FleetAllocation do
   defp settlement_fences(commitments) do
     ids = Enum.map(commitments, & &1.id)
     cargo = undisposed_units(ids)
+    purchases = unresolved_purchase_ids(ids)
 
     unfinished =
       ids
@@ -1143,13 +1159,36 @@ defmodule SpaceTraders.FleetAllocation do
             (MapSet.member?(unfinished, id) or MapSet.member?(handoff, id)) ->
           Map.put(fences, id, :inherited_cargo_disposition)
 
-        MapSet.member?(unfinished, id) ->
+        MapSet.member?(unfinished, id) or MapSet.member?(purchases, id) ->
           Map.put(fences, id, :mutation_unresolved)
 
         true ->
           fences
       end
     end)
+  end
+
+  # Claimless purchase effects stay fenced until readiness and registration
+  # conclude their own Commitment, including accepted/succeeded sends.
+  defp unresolved_purchase_ids(commitment_ids) do
+    Repo.all(
+      from c in Commitment,
+        join: a in SpaceTraders.MutationAttempts.Attempt,
+        on: fragment("?->>'commitment_id' = ?::text", a.provenance, c.id),
+        where:
+          c.id in ^commitment_ids and c.unwind_state != :released and
+            a.operation_id == "purchase-ship" and
+            a.state in [
+              "sent_or_unknown",
+              "ambiguous",
+              "bounded_unknown",
+              "succeeded",
+              "accepted"
+            ],
+        select: c.id,
+        distinct: true
+    )
+    |> MapSet.new()
   end
 
   defp settling?(portfolio_id) do
@@ -1869,7 +1908,12 @@ defmodule SpaceTraders.FleetAllocation do
   # only @leg_handoff_seconds: a leg that never appears cannot hold the
   # Portfolio against replanning or revision activation indefinitely.
   defp unresolved_commitment_intent?(portfolio_ids),
-    do: portfolio_ids |> unresolved_intents_query() |> Repo.exists?()
+    do:
+      portfolio_ids |> unresolved_intents_query() |> Repo.exists?() or
+        portfolio_ids
+        |> commitment_ids_of_portfolios()
+        |> unresolved_purchase_ids()
+        |> MapSet.size() > 0
 
   defp unresolved_intents_query(portfolio_ids) do
     handoff_cutoff = handoff_cutoff()

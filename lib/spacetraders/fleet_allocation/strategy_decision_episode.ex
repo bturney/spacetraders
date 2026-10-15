@@ -8,7 +8,8 @@ defmodule SpaceTraders.FleetAllocation.StrategyDecisionEpisode do
   # A rejected publication and a structural stall are durable decision
   # evidence but never the current allocation result, so they stay outside
   # the pointer's selection kinds.
-  @episode_kinds @selection_kinds ++ [:publication_rejected, :structural_stall]
+  @episode_kinds @selection_kinds ++
+                   [:publication_rejected, :structural_stall, :acquisition_refused]
 
   @stall_reasons [
     :stale_revision_portfolio,
