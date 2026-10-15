@@ -694,6 +694,62 @@ defmodule SpaceTraders.FleetAllocation do
   def record_decision_outcome(_scope, _episode_id, _classification, _actual_outcomes),
     do: {:error, :invalid_decision_outcome}
 
+  @doc "Records one Commitment's terminal outcome and releases only its resource protections."
+  def conclude_commitment(%Scope{} = scope, %Commitment{} = commitment, classification, outcomes)
+      when classification in [:realized, :partially_realized, :superseded] and is_map(outcomes) do
+    with {:ok, operator_id} <- OperatorAuthority.authorize(scope) do
+      Repo.transaction(fn ->
+        portfolio = Repo.get!(Portfolio, commitment.fleet_commitment_portfolio_id)
+        if portfolio.operator_id != operator_id, do: Repo.rollback(:invalid_commitment)
+
+        lock_generation_agent!(portfolio.fleet_generation_id)
+
+        lock_generations(
+          from(g in Generation, where: g.id == ^portfolio.fleet_generation_id),
+          :update
+        )
+
+        Repo.one!(from p in Portfolio, where: p.id == ^portfolio.id, lock: "FOR UPDATE")
+
+        current =
+          Repo.one!(
+            from c in Commitment,
+              where: c.id == ^commitment.id and c.fleet_commitment_portfolio_id == ^portfolio.id,
+              lock: "FOR UPDATE"
+          )
+
+        episode_id = current.replan_decision_episode_id || portfolio.strategy_decision_episode_id
+
+        case record_decision_outcome(scope, episode_id, classification, outcomes) do
+          {:ok, _} -> :ok
+          {:error, reason} -> Repo.rollback(reason)
+        end
+
+        Repo.delete_all(
+          from c in "fleet_commitment_claims", where: c.fleet_commitment_id == ^current.id
+        )
+
+        released = Repo.update!(Ecto.Changeset.change(current, unwind_state: :released))
+
+        unless Repo.exists?(
+                 from c in Commitment,
+                   where:
+                     c.fleet_commitment_portfolio_id == ^portfolio.id and
+                       c.unwind_state != :released
+               ) do
+          Repo.update!(Ecto.Changeset.change(portfolio, superseded_at: DateTime.utc_now()))
+          NeutralWait.clear(portfolio.fleet_generation_id)
+        end
+
+        Repo.update_all(from(g in Generation, where: g.id == ^portfolio.fleet_generation_id),
+          inc: [allocation_version: 1]
+        )
+
+        released
+      end)
+    end
+  end
+
   @doc false
   def record_portfolio_outcome(%Portfolio{} = portfolio, classification, actual_outcomes)
       when classification in [:realized, :partially_realized, :superseded] and
