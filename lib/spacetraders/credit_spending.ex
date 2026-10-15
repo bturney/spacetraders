@@ -124,7 +124,7 @@ defmodule SpaceTraders.CreditSpending do
 
   defp acquire_quote(agent, request) do
     %{waypoint: waypoint, symbol: symbol, units: units} = request
-    system = waypoint |> String.split("-") |> Enum.take(2) |> Enum.join("-")
+    system = system_of(waypoint)
     subject = "market:#{system}:#{waypoint}"
     calibration = CreditCalibration.active()
 
@@ -203,10 +203,18 @@ defmodule SpaceTraders.CreditSpending do
   candidate was selected on. Missing or stale evidence yields an error rather
   than an invented bound.
   """
-  def acquire_ship_purchase(agent, %{source_waypoint: waypoint, ship: %{type: type}}) do
+  def acquire_ship_purchase(agent, %{source_waypoint: waypoint, ship: %{type: type}} = candidate) do
     calibration = CreditCalibration.active()
 
-    with {:ok, price} <- shipyard_price(agent, waypoint, type),
+    system =
+      Enum.find_value(Map.get(candidate, :dependencies, []), fn dependency ->
+        case dependency[:subject] || dependency["subject"] do
+          "shipyard:" <> tail -> hd(String.split(tail, ":"))
+          _ -> nil
+        end
+      end) || system_of(waypoint)
+
+    with {:ok, price} <- shipyard_price(agent, waypoint, type, system),
          {:ok, credits} <- acquire_credits(agent),
          true <-
            credits.value.symbol == agent.symbol and is_integer(credits.value.credits) and
@@ -216,6 +224,7 @@ defmodule SpaceTraders.CreditSpending do
          "kind" => "ship",
          "credit_observation_id" => credits.observation.id,
          "waypoint" => waypoint,
+         "system" => system,
          "ship_type" => type,
          "unit_price" => price,
          "units" => 1,
@@ -229,9 +238,7 @@ defmodule SpaceTraders.CreditSpending do
     end
   end
 
-  defp shipyard_price(agent, waypoint, type) do
-    system = waypoint |> String.split("-") |> Enum.take(2) |> Enum.join("-")
-
+  defp shipyard_price(agent, waypoint, type, system) do
     fact =
       World.intelligence(
         agent,
@@ -333,7 +340,10 @@ defmodule SpaceTraders.CreditSpending do
              attempt,
              credits.observation
            ),
-         true <- credits.value.credits - other_exposure - spending["worst_case_exposure"] >= floor do
+         {:ok, preparation} <- own_preparation(attempt),
+         true <-
+           credits.value.credits - other_exposure - spending["worst_case_exposure"] - preparation >=
+             floor do
       :ok
     else
       false -> {:error, :insufficient_unreserved_headroom}
@@ -342,6 +352,27 @@ defmodule SpaceTraders.CreditSpending do
   end
 
   defp admit_spend(_attempt, _agent, _intent, _revision), do: :ok
+
+  defp own_preparation(%Attempt{provenance: provenance}) do
+    case provenance["commitment_id"] do
+      id when is_integer(id) ->
+        case Repo.get(SpaceTraders.FleetAllocation.Commitment, id) do
+          %{unwind_state: :not_required} = commitment ->
+            episode = SpaceTraders.FleetAllocation.commitment_decision_episode(commitment)
+
+            case episode.expectations["preparation_credits"] do
+              amount when is_integer(amount) and amount >= 0 -> {:ok, amount}
+              _ -> {:error, :unbounded_preparation_exposure}
+            end
+
+          _ ->
+            {:error, :acquisition_commitment_withdrawn}
+        end
+
+      _ ->
+        {:ok, 0}
+    end
+  end
 
   defp validate_bound(agent, %Attempt{operation_id: operation} = attempt, spending)
        when operation in @market_operations,
@@ -424,7 +455,13 @@ defmodule SpaceTraders.CreditSpending do
     body = attempt.prepared_evidence["request"]["body"]
 
     with true <- body["waypointSymbol"] == waypoint and body["shipType"] == spending["ship_type"],
-         {:ok, price} <- shipyard_price(agent, waypoint, spending["ship_type"]),
+         {:ok, price} <-
+           shipyard_price(
+             agent,
+             waypoint,
+             spending["ship_type"],
+             spending["system"] || system_of(waypoint)
+           ),
          true <- spending["unit_price"] == price and spending["units"] == 1,
          true <-
            spending["worst_case_exposure"] ==
@@ -506,9 +543,18 @@ defmodule SpaceTraders.CreditSpending do
           on: p.id == c.fleet_commitment_portfolio_id,
           join: g in Generation,
           on: g.id == p.fleet_generation_id,
+          left_join: purchase in Attempt,
+          on:
+            purchase.agent_id == g.agent_id and purchase.fleet_generation_id == g.id and
+              purchase.operation_id == "purchase-ship" and
+              purchase.state in ^SpaceTraders.MutationAttempts.possible_effect_states() and
+              fragment("?->>'commitment_id' = ?::text", purchase.provenance, c.id),
           where:
-            g.agent_id == ^agent.id and is_nil(g.retired_at) and is_nil(p.superseded_at) and
-              c.unwind_state == :not_required,
+            g.agent_id == ^agent.id and g.id == ^attempt.fleet_generation_id and
+              is_nil(g.retired_at) and
+              ((is_nil(p.superseded_at) and c.unwind_state == :not_required) or
+                 (c.unwind_state == :settling and not is_nil(purchase.id))),
+          distinct: true,
           select: {c.id, c.reservations}
       )
       |> Map.new(fn {id, resources} -> {id, Map.get(resources, "credits", 0)} end)
@@ -518,7 +564,8 @@ defmodule SpaceTraders.CreditSpending do
       Repo.all(
         from a in Attempt,
           where:
-            a.agent_id == ^agent.id and a.id != ^attempt.id and
+            a.agent_id == ^agent.id and a.fleet_generation_id == ^attempt.fleet_generation_id and
+              a.id != ^attempt.id and
               a.operation_id in ^@credit_operations and
               (a.state in ["sent_or_unknown", "ambiguous", "bounded_unknown"] or
                  (a.state in ["succeeded", "accepted"] and
@@ -546,4 +593,6 @@ defmodule SpaceTraders.CreditSpending do
         error
     end
   end
+
+  defp system_of(waypoint), do: waypoint |> String.split("-") |> Enum.take(2) |> Enum.join("-")
 end

@@ -158,7 +158,14 @@ defmodule SpaceTraders.FleetAllocation.MarketDomain do
   # occupancy of current work, governed availability and the free Claims.
   defp decide(scope, agent, revision, current, held, planning, demands) do
     %{occupancy: occupancy, availability: availability, free: free} = held
-    candidates = Enum.flat_map(planning, & &1.candidate_contributions)
+
+    candidates =
+      SpaceTraders.FleetAllocation.MarketWorkRate.annotate(
+        agent,
+        Enum.flat_map(planning, & &1.candidate_contributions),
+        availability
+      )
+
     planned_ids = MapSet.new(candidates, & &1.id)
 
     # Finished or idle pilot work is re-proposed by planning or released; a
@@ -170,6 +177,12 @@ defmodule SpaceTraders.FleetAllocation.MarketDomain do
       end)
 
     retained = occupancy.retained ++ kept
+    settling = FleetAllocation.settling_commitments(FleetAllocation.active_generation(agent).id)
+    protected = Enum.sum_by(retained ++ settling, &(credits(&1) || 0))
+
+    availability =
+      put_in(availability, [:reservations, :credits], max(credits(availability) - protected, 0))
+
     kept_ships = MapSet.new(Enum.flat_map(kept, & &1.claims))
     claims = Enum.reject(free, &MapSet.member?(kept_ships, &1.resource))
 
@@ -263,6 +276,7 @@ defmodule SpaceTraders.FleetAllocation.MarketDomain do
     %{
       evidence_references: domain_evidence_references(planning),
       expectations: %{
+        domain: :market,
         expected_value: Enum.sum_by(selected, & &1.expected_value),
         commitment_count: length(selected)
       },
@@ -450,7 +464,9 @@ defmodule SpaceTraders.FleetAllocation.MarketDomain do
   end
 
   defp market_commitment?(commitment),
-    do: Enum.any?(commitment.dependencies, &match?(%{"subject" => "market:" <> _}, &1))
+    do:
+      commitment.claims != [] and
+        Enum.any?(commitment.dependencies, &match?(%{"subject" => "market:" <> _}, &1))
 
   # A completed buy whose selected sell was never requested (the sender died
   # between the two legs, or the sell leg was refused) continues here at the

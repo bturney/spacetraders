@@ -26,4 +26,11 @@ defmodule SpaceTraders.FleetAllocation.JsonEvidence do
   def dump(nil), do: nil
   def dump(atom) when is_atom(atom), do: Atom.to_string(atom)
   def dump(value), do: value
+
+  @doc "String-keys maps and unwraps structs, leaving every value untouched."
+  @spec keys(term()) :: term()
+  def keys(%_{} = value), do: value |> Map.from_struct() |> keys()
+  def keys(value) when is_map(value), do: Map.new(value, fn {k, v} -> {to_string(k), keys(v)} end)
+  def keys(value) when is_list(value), do: Enum.map(value, &keys/1)
+  def keys(value), do: value
 end

@@ -848,82 +848,422 @@ defmodule SpaceTraders.FleetPlanningTest do
     assert Enum.map(demands, & &1.freshness_seconds) == [1_800, 1_800]
   end
 
-  test "ship acquisition proposals retain alternatives and reserve purchase plus preparation exposure" do
-    snapshot = %{
-      as_of: @as_of,
-      credits: 20_000,
-      preparation_credits: 750,
-      ships: [%{symbol: "CRUISER-1", waypoint: "X1-A1"}],
-      shipyards: [
-        %{
-          system_symbol: "X1",
-          waypoint: "X1-A1",
-          observed_at: ~U[2030-01-01 11:59:00Z],
-          evidence_id: "shipyard-a1",
-          ships: [
-            %{type: "SHIP_LIGHT_HAULER", purchase_price: 10_000, engine_speed: 30},
-            %{type: "SHIP_LIGHT_SHUTTLE", purchase_price: 6_000, engine_speed: 15}
-          ]
-        }
-      ]
+  test "Capacity Investment serves the enabled objective and discounts planned net value without monetary history" do
+    snapshot = acquisition_snapshot()
+
+    assert {:ok, %{candidate_contributions: [hauler], limitations: []}} =
+             FleetPlanning.plan_ship_acquisition(revision(), 0, snapshot)
+
+    assert hauler.objective == hd(revision().document["objectives"])
+    assert hauler.objective_index == 0
+    assert hauler.required_roles == []
+    assert hauler.required_resources == %{credits: 15_000}
+    assert hauler.expected_outcomes.decision_value == 24_000
+    valuation = hauler.expected_outcomes.valuation
+
+    expected = %{
+      calibration: SpaceTraders.ShipAcquisitionCalibration.current(),
+      horizon: snapshot.generation_horizon,
+      enabled_work: hd(snapshot.unmet_work),
+      planned_rate: 1_000,
+      realized_rate: %{
+        status: :no_history,
+        rate: nil,
+        trade_margin: nil,
+        occupied_seconds: nil,
+        samples: [],
+        reason: :no_completed_monetary_history
+      },
+      rate_basis: :discounted_planned,
+      enabled_rate: 500.0,
+      enabled_value: 24_000.0,
+      purchase_price: 10_000,
+      credit_margin_percent: 25,
+      purchase_exposure: 12_500,
+      preparation_exposure: 2_500,
+      total_exposure: 15_000
     }
 
-    revision = %Revision{
-      id: 42,
-      document: %{
-        "objectives" => [
-          %{
-            "objective" => "Grow the Fleet",
-            "kind" => "attain",
-            "evaluation" => "Add a capable Ship"
-          }
-        ]
+    assert Map.take(valuation, Map.keys(expected)) == expected
+  end
+
+  test "Capacity Investment refuses missing work, unknown horizon, and value at or below total exposure with inputs" do
+    for {snapshot, reason} <- [
+          {Map.put(acquisition_snapshot(), :unmet_work, []), :no_ship_bound_unmet_work},
+          {put_in(acquisition_snapshot(), [:generation_horizon, :status], :unknown),
+           :unknown_generation_horizon},
+          {put_in(acquisition_snapshot(), [:generation_horizon, :duration_seconds], 108_000),
+           :enabled_value_not_above_cost},
+          {put_in(acquisition_snapshot(), [:generation_horizon, :duration_seconds], 100_000),
+           :enabled_value_not_above_cost}
+        ] do
+      assert {:ok, %{candidate_contributions: [], limitations: [limitation]}} =
+               FleetPlanning.plan_ship_acquisition(revision(), 0, snapshot)
+
+      assert limitation.reason == reason
+      assert limitation.valuation.calibration.version == "ship-acquisition-v2"
+      assert limitation.valuation.horizon == snapshot.generation_horizon
+      assert limitation.valuation.total_exposure == 15_000
+    end
+  end
+
+  test "an offered Ship is refused only on unmet capabilities or unknown planned rate" do
+    for {snapshot, reason} <- [
+          {put_in(
+             acquisition_snapshot(),
+             [:shipyards, Access.at(0), :ships, Access.at(0), :modules],
+             []
+           ), :offer_capability_unmet},
+          {put_in(acquisition_snapshot(), [:unmet_work, Access.at(0), :planned_rate], nil),
+           :unknown_planned_rate}
+        ] do
+      assert {:ok, %{candidate_contributions: [], limitations: [limitation]}} =
+               FleetPlanning.plan_ship_acquisition(revision(), 0, snapshot)
+
+      assert limitation.reason == reason
+      assert limitation.valuation.enabled_work.candidate_id == "unselected-iron"
+      assert is_nil(limitation.valuation.enabled_value)
+    end
+  end
+
+  test "a capable offer is valued at the work's planned rate whatever Ship produced that evidence" do
+    for snapshot <- [
+          put_in(
+            acquisition_snapshot(),
+            [:shipyards, Access.at(0), :ships, Access.at(0), :engine, :speed],
+            60
+          ),
+          put_in(acquisition_snapshot(), [:shipyards, Access.at(0), :waypoint], "X1-A2")
+          |> Map.put(:ships, [%{symbol: "OWNED-1", waypoint: "X1-A2"}])
+        ] do
+      assert {:ok, %{candidate_contributions: [candidate], limitations: []}} =
+               FleetPlanning.plan_ship_acquisition(revision(), 0, snapshot)
+
+      assert candidate.expected_outcomes.valuation.enabled_rate == 500.0
+    end
+  end
+
+  test "realized receipt-backed Trade Margin per occupied Ship-hour caps planned rate, not net earnings" do
+    snapshot = Map.put(acquisition_snapshot(), :realized_trade_progress, realized_progress(400))
+
+    assert {:ok, %{candidate_contributions: [candidate]}} =
+             FleetPlanning.plan_ship_acquisition(revision(), 0, snapshot)
+
+    assert candidate.expected_outcomes.decision_value == 19_200
+    valuation = candidate.expected_outcomes.valuation
+    assert valuation.enabled_rate == 400
+    assert valuation.rate_basis == :minimum_planned_realized
+    assert valuation.realized_rate.status == :known
+    assert valuation.realized_rate.trade_margin == 400
+    assert valuation.realized_rate.occupied_seconds == 3_600
+    assert [%{purchase_intent_id: 10, sale_intent_id: 11}] = valuation.realized_rate.samples
+
+    # A better realized result never inflates the forecast; its supporting-cost
+    # unknown does not erase the known goods-only Trade Margin comparator.
+    snapshot = Map.put(snapshot, :realized_trade_progress, realized_progress(2_000))
+
+    assert {:ok, %{candidate_contributions: [candidate]}} =
+             FleetPlanning.plan_ship_acquisition(revision(), 0, snapshot)
+
+    assert candidate.expected_outcomes.decision_value == 48_000
+  end
+
+  test "known monetary history with missing time or monetary gaps never falls back to the no-history discount" do
+    for progress <- [
+          realized_progress(400, :missing_time),
+          realized_progress(400, :missing_receipt)
+        ] do
+      snapshot = Map.put(acquisition_snapshot(), :realized_trade_progress, progress)
+
+      assert {:ok, %{candidate_contributions: [], limitations: [limitation]}} =
+               FleetPlanning.plan_ship_acquisition(revision(), 0, snapshot)
+
+      assert limitation.reason == :unknown_realized_rate
+      assert limitation.valuation.realized_rate.status == :unknown
+      assert is_nil(limitation.valuation.enabled_value)
+    end
+  end
+
+  defp realized_progress(margin, gap \\ nil) do
+    SpaceTraders.FleetAllocation.TradeProgress.build(realized_intents(margin, gap))
+  end
+
+  defp realized_intents(margin, gap) do
+    alias SpaceTraders.Fleet.Intent
+
+    buy = %Intent{
+      id: 10,
+      fleet_commitment_id: 5,
+      status: "completed",
+      type: "buy",
+      inserted_at: ~U[2030-01-01 10:00:00Z],
+      finished_at: ~U[2030-01-01 10:30:00Z],
+      parameters: %{},
+      last_action_result: %{
+        "transaction" => %{
+          "trade_symbol" => "IRON",
+          "ship_symbol" => "OWNED-1",
+          "units" => 40,
+          "total_price" => 1_000
+        }
       }
     }
 
-    assert {:ok, %{candidate_contributions: [hauler, shuttle]}} =
-             FleetPlanning.plan_ship_acquisition(revision, 0, snapshot)
+    sell = %Intent{
+      id: 11,
+      fleet_commitment_id: 5,
+      status: "completed",
+      type: "sell",
+      inserted_at: ~U[2030-01-01 10:35:00Z],
+      finished_at: if(gap != :missing_time, do: ~U[2030-01-01 11:00:00Z]),
+      parameters: %{},
+      last_action_result:
+        if(gap == :missing_receipt,
+          do: %{},
+          else: %{
+            "transaction" => %{
+              "trade_symbol" => "IRON",
+              "ship_symbol" => "OWNED-1",
+              "units" => 40,
+              "total_price" => 1_000 + margin
+            }
+          }
+        )
+    }
 
-    assert hauler.kind == :ship_acquisition
-    # The 10,000 offer at the initial 25% margin, plus the 750 preparation reserve.
-    assert hauler.required_resources == %{credits: 13_250}
+    [buy, sell]
+  end
 
-    assert hauler.expected_outcomes == %{
-             decision_value: 30,
-             purchase_price: 10_000,
-             preparation_credits: 750,
-             ship_type: "SHIP_LIGHT_HAULER"
+  test "realized comparator sums occupied Ship-hours, includes losses, and keeps receipt references" do
+    more = Enum.map(realized_intents(800, nil), &%{&1 | id: &1.id + 10, fleet_commitment_id: 6})
+
+    progress =
+      SpaceTraders.FleetAllocation.TradeProgress.build(realized_intents(400, nil) ++ more)
+
+    snapshot = Map.put(acquisition_snapshot(), :realized_trade_progress, progress)
+
+    assert {:ok, %{candidate_contributions: [candidate]}} =
+             FleetPlanning.plan_ship_acquisition(revision(), 0, snapshot)
+
+    rate = candidate.expected_outcomes.valuation.realized_rate
+    assert rate.rate == 600
+    assert rate.occupied_seconds == 7_200
+    assert rate.trade_margin == 1_200
+    assert rate.receipts == progress.receipts
+    assert candidate.expected_outcomes.decision_value == 28_800
+
+    for margin <- [0, -100, 200] do
+      snapshot = Map.put(snapshot, :realized_trade_progress, realized_progress(margin))
+
+      assert {:ok,
+              %{
+                candidate_contributions: [],
+                limitations: [%{reason: :enabled_value_not_above_cost}]
+              }} =
+               FleetPlanning.plan_ship_acquisition(revision(), 0, snapshot)
+    end
+  end
+
+  test "all built-in presets support Capacity Investment at the enabled work's Strategic Priority" do
+    for preset <- SpaceTraders.FleetStrategy.presets() do
+      revision = %Revision{id: 42, document: %{"objectives" => preset.objectives}}
+      index = Enum.find_index(preset.objectives, &(&1["objective"] == "Grow credits"))
+
+      snapshot =
+        acquisition_snapshot()
+        |> put_in([:unmet_work, Access.at(0), :objective_index], index)
+        |> put_in([:unmet_work, Access.at(0), :objective], Enum.at(preset.objectives, index))
+
+      assert {:ok, %{candidate_contributions: [candidate], limitations: []}} =
+               FleetPlanning.plan_ship_acquisition(revision, index, snapshot)
+
+      assert candidate.objective_index == index
+      assert candidate.objective == Enum.at(preset.objectives, index)
+    end
+  end
+
+  test "a fuel-consuming offer needs fuel reach on its own tank, not an owned empty-tank sample" do
+    offer = put_in(acquisition_offer(), [:frame, :fuel_capacity], 100)
+
+    snapshot =
+      acquisition_snapshot()
+      |> put_in([:shipyards, Access.at(0), :ships], [offer])
+
+    assert {:ok, %{candidate_contributions: [candidate]}} =
+             FleetPlanning.plan_ship_acquisition(revision(), 0, snapshot)
+
+    assert candidate.expected_outcomes.decision_value == 24_000
+
+    assert candidate.ship.readiness.work_profile == %{
+             "navigation" => %{"waypoint_symbol" => "X1-A1"},
+             "cargo" => %{"capacity" => 40, "units" => 0},
+             "fuel" => %{"capacity" => 100}
            }
 
-    assert hauler.required_capabilities == [
-             %{capability: :ship_offer, value: "SHIP_LIGHT_HAULER"},
-             %{capability: :ship_readiness, value: %{engine_speed: 30}}
+    for refused <- [
+          put_in(
+            snapshot,
+            [:shipyards, Access.at(0), :ships, Access.at(0), :frame, :fuel_capacity],
+            50
+          ),
+          Map.put(snapshot, :waypoint_coordinates, %{})
+        ] do
+      assert {:ok,
+              %{
+                candidate_contributions: [],
+                limitations: [%{reason: :offer_fuel_reach_unproven}]
+              }} =
+               FleetPlanning.plan_ship_acquisition(revision(), 0, refused)
+    end
+
+    assert {:ok, %{candidate_contributions: [_]}} =
+             snapshot
+             |> put_in(
+               [:shipyards, Access.at(0), :ships, Access.at(0), :frame, :fuel_capacity],
+               50
+             )
+             |> Map.put(:waypoint_coordinates, %{
+               "X1-A1" => %{x: 0, y: 0},
+               "X1-A2" => %{x: 60, y: 0},
+               "X1-A3" => %{x: 30, y: 0}
+             })
+             |> Map.put(:fuel_stops, ["X1-A3"])
+             |> then(&FleetPlanning.plan_ship_acquisition(revision(), 0, &1))
+  end
+
+  test "missing whole-work duration or supporting cost cannot masquerade as discounted planned value" do
+    for field <- ["conservative_occupied_seconds", "planned_supporting_cost"] do
+      snapshot =
+        put_in(
+          acquisition_snapshot(),
+          [:unmet_work, Access.at(0), :expected_outcomes, "planned_rate_evidence", field],
+          nil
+        )
+
+      assert {:ok,
+              %{candidate_contributions: [], limitations: [%{reason: :unknown_planned_rate}]}} =
+               FleetPlanning.plan_ship_acquisition(revision(), 0, snapshot)
+    end
+  end
+
+  test "Candidate binds the matched work and reset evidence, and its identity changes with valuation" do
+    snapshot = acquisition_snapshot()
+
+    assert {:ok, %{candidate_contributions: [candidate]}} =
+             FleetPlanning.plan_ship_acquisition(revision(), 0, snapshot)
+
+    assert candidate.validity.expires_at == ~U[2030-01-01 12:00:30Z]
+
+    assert Enum.map(candidate.dependencies, & &1.subject) == [
+             "shipyard:X1:X1-A1",
+             "market:X1:X1-A1",
+             "server:status"
            ]
 
-    assert hauler.alternatives == [
-             %{
-               id: shuttle.id,
-               ship_type: "SHIP_LIGHT_SHUTTLE",
-               purchase_price: 6_000,
-               preparation_credits: 750,
-               decision_value: 15
-             }
-           ]
+    assert candidate.ship.readiness.configuration ==
+             candidate.expected_outcomes.valuation.offered_configuration
 
-    assert hauler.dependencies == [
-             %{
-               subject: "shipyard:X1:X1-A1",
-               evidence_id: "shipyard-a1",
-               valid_until: ~U[2030-01-01 12:04:00Z]
-             }
-           ]
+    assert candidate.ship.readiness.work_profile ==
+             candidate.expected_outcomes.valuation.offer_match.profile
+
+    changed = put_in(snapshot, [:generation_horizon, :duration_seconds], 160_000)
+
+    assert {:ok, %{candidate_contributions: [other]}} =
+             FleetPlanning.plan_ship_acquisition(revision(), 0, changed)
+
+    refute candidate.id == other.id
+  end
+
+  test "missing, stale, or malformed Shipyard inputs leave calibrated refusal evidence" do
+    for {snapshot, reason} <- [
+          {Map.put(acquisition_snapshot(), :shipyards, []), :shipyard_offers_unavailable},
+          {put_in(
+             acquisition_snapshot(),
+             [:shipyards, Access.at(0), :observed_at],
+             ~U[2030-01-01 11:00:00Z]
+           ), :unusable_shipyard_evidence},
+          {put_in(acquisition_snapshot(), [:shipyards, Access.at(0), :ships], [
+             %{type: "SHIP_UNKNOWN"}
+           ]), :invalid_ship_offer}
+        ] do
+      assert {:ok, %{candidate_contributions: [], limitations: [limitation]}} =
+               FleetPlanning.plan_ship_acquisition(revision(), 0, snapshot)
+
+      assert limitation.reason == reason
+      assert limitation.valuation.calibration.version == "ship-acquisition-v2"
+      assert limitation.valuation.horizon == snapshot.generation_horizon
+      assert limitation.valuation.unmet_work == snapshot.unmet_work
+    end
+  end
+
+  test "valuation chooses one capable unmet alternative, not their summed throughput or a stale Revision" do
+    snapshot = acquisition_snapshot()
+    work = hd(snapshot.unmet_work)
+
+    low =
+      work
+      |> Map.put(:candidate_id, "low-rate")
+      |> Map.put(:planned_rate, 200)
+      |> put_in([:expected_outcomes, "planned_rate_evidence", "gross_credit_change"], 300)
+
+    wrong = %{work | strategy_revision_id: 41, planned_rate: 100_000}
+
+    for works <- [[low, wrong, work], [work, low, wrong]] do
+      assert {:ok, %{candidate_contributions: [candidate]}} =
+               FleetPlanning.plan_ship_acquisition(revision(), 0, %{snapshot | unmet_work: works})
+
+      assert candidate.expected_outcomes.decision_value == 24_000
+      assert candidate.expected_outcomes.valuation.enabled_work.candidate_id == "unselected-iron"
+    end
+  end
+
+  test "calibrated purchase exposure, not the bare quote, decides the strict investment threshold" do
+    snapshot =
+      put_in(
+        acquisition_snapshot(),
+        [:shipyards, Access.at(0), :ships, Access.at(0), :purchase_price],
+        16_000
+      )
+
+    assert {:ok, %{candidate_contributions: [candidate]}} =
+             FleetPlanning.plan_ship_acquisition(revision(), 0, snapshot)
+
+    assert candidate.required_resources.credits == 22_500
+
+    assert {:ok, %{candidate_contributions: [], limitations: [limitation]}} =
+             FleetPlanning.plan_ship_acquisition(
+               revision(),
+               0,
+               Map.put(snapshot, :credit_margin_percent, 50)
+             )
+
+    assert limitation.reason == :enabled_value_not_above_cost
+    assert limitation.valuation.total_exposure == 26_500
+  end
+
+  test "missing realized projection and unusable horizon evidence remain unknown, never zero or unbounded" do
+    for {snapshot, reason} <- [
+          {Map.delete(acquisition_snapshot(), :realized_trade_progress), :unknown_realized_rate},
+          {put_in(acquisition_snapshot(), [:generation_horizon, :evidence_ref], nil),
+           :unknown_generation_horizon},
+          {put_in(acquisition_snapshot(), [:generation_horizon, :duration_seconds], 0),
+           :unknown_generation_horizon},
+          {put_in(
+             acquisition_snapshot(),
+             [:generation_horizon, :evidence_ref, :observed_at],
+             ~U[2030-01-01 11:59:00Z]
+           ), :unknown_generation_horizon}
+        ] do
+      assert {:ok, %{candidate_contributions: [], limitations: [%{reason: ^reason}]}} =
+               FleetPlanning.plan_ship_acquisition(revision(), 0, snapshot)
+    end
   end
 
   test "a Shipyard with fresh offers is inadmissible until an owned Ship is co-located" do
     snapshot = acquisition_snapshot()
 
     assert {:ok, %{candidate_contributions: [hauler], limitations: []}} =
-             FleetPlanning.plan_ship_acquisition(fleet_revision(), 0, snapshot)
+             FleetPlanning.plan_ship_acquisition(revision(), 0, snapshot)
 
     assert hauler.source_waypoint == "X1-A1"
 
@@ -931,7 +1271,7 @@ defmodule SpaceTraders.FleetPlanningTest do
     # proposed at all and the unmet precondition is reported.
     assert {:ok, %{candidate_contributions: [], limitations: [limitation]}} =
              FleetPlanning.plan_ship_acquisition(
-               fleet_revision(),
+               revision(),
                0,
                Map.put(snapshot, :ships, [%{symbol: "CRUISER-1", waypoint: "X1-A2"}])
              )
@@ -942,9 +1282,13 @@ defmodule SpaceTraders.FleetPlanningTest do
              prerequisite: %{waypoint: "X1-A1", required_ship: :any_owned_ship}
            } = limitation
 
+    assert limitation.valuation.calibration.version == "ship-acquisition-v2"
+    assert limitation.valuation.purchase_exposure == 12_500
+    assert limitation.valuation.preparation_exposure == 2_500
+
     assert {:ok, %{candidate_contributions: [], limitations: [_]}} =
              FleetPlanning.plan_ship_acquisition(
-               fleet_revision(),
+               revision(),
                0,
                Map.put(snapshot, :ships, [])
              )
@@ -954,7 +1298,7 @@ defmodule SpaceTraders.FleetPlanningTest do
     snapshot = acquisition_snapshot()
 
     assert {:ok, %{candidate_contributions: [hauler]}} =
-             FleetPlanning.plan_ship_acquisition(fleet_revision(), 0, snapshot)
+             FleetPlanning.plan_ship_acquisition(revision(), 0, snapshot)
 
     # The hauler frame offers 3 module slots and 2 mounting points, and the
     # template fills none of them, so every slot owes the shipyard's 500 fee.
@@ -975,22 +1319,82 @@ defmodule SpaceTraders.FleetPlanningTest do
       })
 
     assert {:ok, %{candidate_contributions: [], limitations: [limitation]}} =
-             FleetPlanning.plan_ship_acquisition(fleet_revision(), 0, no_frame)
+             FleetPlanning.plan_ship_acquisition(revision(), 0, no_frame)
 
     assert %{subject: "X1-A1", reason: :preparation_exposure_unknown} = limitation
+    assert limitation.valuation.calibration.version == "ship-acquisition-v2"
+    assert is_nil(limitation.valuation.preparation_exposure)
 
     no_fee = put_in(acquisition_snapshot(), [:shipyards, Access.at(0), :modifications_fee], nil)
 
     assert {:ok, %{candidate_contributions: [], limitations: [limitation]}} =
-             FleetPlanning.plan_ship_acquisition(fleet_revision(), 0, no_fee)
+             FleetPlanning.plan_ship_acquisition(revision(), 0, no_fee)
 
     assert %{subject: "X1-A1", reason: :preparation_exposure_unknown} = limitation
   end
 
   defp acquisition_snapshot do
+    offer = acquisition_offer()
+    profile = acquisition_profile(offer)
+
     %{
       as_of: @as_of,
       credits: 40_000,
+      generation_horizon: %{
+        status: :known,
+        duration_seconds: 172_800,
+        evidence_ref: %{observation_id: 99, subject: "server:status", observed_at: @as_of},
+        calibration: SpaceTraders.ShipAcquisitionCalibration.current()
+      },
+      realized_trade_progress: SpaceTraders.FleetAllocation.TradeProgress.build([]),
+      unmet_work: [
+        %{
+          candidate_id: "unselected-iron",
+          decision_episode_id: 12,
+          fleet_generation_id: 3,
+          strategy_revision_id: 42,
+          objective_index: 0,
+          objective: hd(revision().document["objectives"]),
+          source_waypoint: "X1-A1",
+          destination_waypoint: "X1-A2",
+          trade_symbol: "IRON",
+          required_roles: [%{"role" => "market_trader", "count" => 1}],
+          required_capabilities: [
+            %{"capability" => "cargo_transport", "minimum_capacity" => 40},
+            %{"capability" => "market_access", "waypoints" => ["X1-A1", "X1-A2"]},
+            %{"capability" => "fuel_reach", "ships" => ["OWNED-1"]}
+          ],
+          required_resources: %{"credits" => 1_000, "ship_count" => 1, "cargo_capacity" => 40},
+          expected_outcomes: %{
+            "maximum_units" => 40,
+            "maximum_credit_change" => 1_100,
+            "planned_rate_evidence" => %{
+              "model" => "market-observed-whole-work-v1",
+              "state" => "estimated",
+              "gross_credit_change" => 1_100,
+              "bounded_units" => 40,
+              "conservative_occupied_seconds" => 3_600,
+              "planned_supporting_cost" => 100,
+              "profiles" => [profile],
+              "purchase_intent_ids" => [10],
+              "sale_intent_ids" => [11],
+              "supporting_attempt_ids" => [8],
+              "evidence_references" => [%{"kind" => "intent", "id" => 10}]
+            }
+          },
+          planned_rate: 1_000,
+          dependencies: [
+            %{
+              "subject" => "market:X1:X1-A1",
+              "evidence_id" => "market-a1",
+              "valid_until" => "2030-01-01T12:03:00Z"
+            }
+          ],
+          validity: %{as_of: @as_of, expires_at: ~U[2030-01-01 12:03:00Z]}
+        }
+      ],
+      waypoint_coordinates: %{"X1-A1" => %{x: 0, y: 0}, "X1-A2" => %{x: 60, y: 0}},
+      fuel_stops: [],
       ships: [%{symbol: "CRUISER-1", waypoint: "X1-A1"}],
       shipyards: [
         %{
@@ -1000,32 +1404,40 @@ defmodule SpaceTraders.FleetPlanningTest do
           evidence_id: "shipyard-a1",
           modifications_fee: 500,
           ships: [
-            %{
-              type: "SHIP_LIGHT_HAULER",
-              purchase_price: 10_000,
-              engine: %{speed: 30},
-              frame: %{module_slots: 3, mounting_points: 2},
-              modules: [],
-              mounts: []
-            }
+            offer
           ]
         }
       ]
     }
   end
 
-  defp fleet_revision do
-    %Revision{
-      id: 42,
-      document: %{
-        "objectives" => [
-          %{
-            "objective" => "Grow the Fleet",
-            "kind" => "attain",
-            "evaluation" => "Add a capable Ship"
-          }
-        ]
-      }
+  defp acquisition_offer do
+    %{
+      type: "SHIP_LIGHT_HAULER",
+      purchase_price: 10_000,
+      engine: %{symbol: "ENGINE_ION_DRIVE_I", speed: 30},
+      reactor: %{symbol: "REACTOR_SOLAR_I", power_output: 10},
+      crew: %{required: 1, capacity: 10},
+      frame: %{symbol: "FRAME_SHUTTLE", module_slots: 4, mounting_points: 2, fuel_capacity: 0},
+      modules: [%{symbol: "MODULE_CARGO_HOLD_I", capacity: 40}],
+      mounts: []
+    }
+  end
+
+  defp acquisition_profile(offer) do
+    %{
+      "readiness" =>
+        Jason.decode!(
+          Jason.encode!(Map.take(offer, [:frame, :reactor, :engine, :crew, :modules, :mounts]))
+        ),
+      "navigation" => %{
+        "waypoint_symbol" => "X1-A1",
+        "status" => "DOCKED",
+        "flight_mode" => "CRUISE"
+      },
+      "cargo" => %{"capacity" => 40, "units" => 0},
+      "fuel" => %{"capacity" => 0, "current" => 0},
+      "cooldown" => %{"remaining_seconds" => 0}
     }
   end
 

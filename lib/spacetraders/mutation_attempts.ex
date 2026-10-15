@@ -27,6 +27,9 @@ defmodule SpaceTraders.MutationAttempts do
   @doc "States whose effect is still unresolved: they fence dependents and may have charged."
   def unresolved_states, do: @unresolved_states
 
+  @doc "States whose effect may have reached the game: unresolved or proven taken."
+  def possible_effect_states, do: @unresolved_states ++ ["succeeded", "accepted"]
+
   @doc "States proven never to have reached the game, or refused by it: no effect, no charge."
   def no_effect_states, do: @no_effect_states
 

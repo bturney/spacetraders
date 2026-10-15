@@ -365,6 +365,7 @@ defmodule SpaceTradersWeb.StrategyLiveTest do
     # Governed evidence counts only for the canonical current Generation, so
     # the Fleet is established before it observes (never retro-attributed).
     assert {:ok, %{state: :current}} = SpaceTraders.FleetGeneration.current_fleet()
+    {:ok, _} = SpaceTraders.Fleet.record_ship(agent, "PLANNER-1", "SHIP_COMMAND_FRIGATE")
 
     Enum.each(["X1-A1", "X1-A2"], &observe_waypoint(agent, &1))
     observe_market(agent, "X1-A1", 10, 9)
@@ -432,6 +433,7 @@ defmodule SpaceTradersWeb.StrategyLiveTest do
     # Governed evidence counts only for the canonical current Generation, so
     # the Fleet is established before it observes (never retro-attributed).
     assert {:ok, %{state: :current}} = SpaceTraders.FleetGeneration.current_fleet()
+    {:ok, _} = SpaceTraders.Fleet.record_ship(agent, "PLANNER-1", "SHIP_COMMAND_FRIGATE")
 
     Enum.each(["X1-A1", "X1-A2"], &observe_waypoint(agent, &1))
     observe_market(agent, "X1-A1", 10, 9)

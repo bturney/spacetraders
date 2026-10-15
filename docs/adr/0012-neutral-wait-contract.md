@@ -70,6 +70,16 @@ current-Revision work (including a settling Commitment's own Ship), Capacity
 Deferral, a recorded Neutral Wait and an open credit Shortfall explain overdue
 evidence and record no stall; an errored decision explains nothing.
 
+Amended 2026-10-15 (issues 730, 735): a refused Capacity Investment is durable
+evidence too. Its episode carries a fifth episode kind, `acquisition_refused`,
+with the bounded refusal reason and the considered Ship-bound Unmet Work. Like
+`publication_rejected` it is not a selection kind and the pointer never
+references it; it is classified `superseded` when recorded. Equivalence follows
+the structural stall: while the Revision and reason are unchanged, the latest
+refusal in the Fleet Generation refreshes in place (evidence, last observation
+time and count), and a changed Revision or reason opens its successor. It is
+never a Neutral Wait.
+
 Metrics use a closed limitation kind vocabulary: `incomplete_coverage`,
 `no_admissible_candidate`, `below_economic_threshold`,
 `awaiting_scheduled_evidence`. Identity-rich detail (candidates, rejections,

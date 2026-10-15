@@ -42,7 +42,7 @@ defmodule SpaceTraders.FleetAllocationPublishTest do
 
     for result <- [
           SpaceTraders.FleetResources.reconcile(scope, agent, revision, "X1-A"),
-          SpaceTraders.FleetAcquisition.reconcile(scope, agent, revision, "X1-A"),
+          SpaceTraders.FleetAcquisition.reconcile(scope, agent),
           SpaceTraders.FleetRefit.reconcile(scope, agent, revision, "X1-A"),
           SpaceTraders.FleetConstruction.reconcile(scope, agent, revision),
           SpaceTraders.FleetContracts.reconcile(scope, agent, revision),
@@ -465,6 +465,128 @@ defmodule SpaceTraders.FleetAllocationPublishTest do
                selection(revision),
                decision()
              )
+  end
+
+  test "a captured acquisition source version rejects atomically after an unrelated additive replan" do
+    %{scope: scope, agent: agent, generation: generation, revision: revision} =
+      allocation_fixture()
+
+    {:ok, market} =
+      FleetAllocation.publish_portfolio(scope, generation.id, selection(revision), decision())
+
+    [original] = selection(revision).commitments
+
+    acquisition = %{
+      original
+      | id: {revision.id, "purchase"},
+        candidate_id: "purchase",
+        claims: [],
+        pledges: [],
+        reservations: %{credits: 300}
+    }
+
+    captured = %{selection(revision, 1) | commitments: [acquisition]}
+    unrelated = %{acquisition | id: {revision.id, "other"}, candidate_id: "other"}
+
+    assert {:ok, current} =
+             FleetAllocation.replan_subgraph(
+               scope,
+               generation.id,
+               %{captured | commitments: [unrelated]},
+               ["other"],
+               decision()
+             )
+
+    before_ids = Enum.map(current.commitments, & &1.id)
+
+    counts =
+      {Repo.aggregate(StrategyDecisionEpisode, :count), Repo.aggregate(Notification, :count)}
+
+    Req.Test.stub(SpaceTraders.API, fn _ -> flunk("stale publication cannot dispatch") end)
+
+    assert {:error, :stale_source} =
+             FleetAllocation.replan_subgraph(
+               scope,
+               generation.id,
+               captured,
+               ["purchase"],
+               decision()
+             )
+
+    assert Enum.map(FleetAllocation.current_portfolio(scope, agent).commitments, & &1.id) ==
+             before_ids
+
+    assert {Repo.aggregate(StrategyDecisionEpisode, :count), Repo.aggregate(Notification, :count)} ==
+             counts
+
+    assert FleetAllocation.current_portfolio(scope, agent).strategy_decision_episode_id ==
+             market.strategy_decision_episode_id
+
+    assert SpaceTraders.MutationAttempts.list_for_agent(agent) == []
+
+    assert {:ok, rejected} =
+             FleetAllocation.record_publication_rejection(
+               scope,
+               generation.id,
+               captured,
+               decision(),
+               :stale_source
+             )
+
+    assert rejected.selection_kind == :publication_rejected
+
+    assert {:ok, _} =
+             FleetAllocation.replan_subgraph(
+               scope,
+               generation.id,
+               %{captured | source_version: 2},
+               ["purchase"],
+               decision()
+             )
+  end
+
+  test "additive acquisition publication revalidates the active Strategy even with a matching Generation version" do
+    %{scope: scope, generation: generation, revision: revision} = allocation_fixture()
+
+    {:ok, _} =
+      FleetAllocation.publish_portfolio(scope, generation.id, selection(revision), decision())
+
+    [original] = selection(revision).commitments
+
+    acquisition = %{
+      original
+      | id: {revision.id, "purchase"},
+        candidate_id: "purchase",
+        claims: [],
+        pledges: []
+    }
+
+    newer =
+      Repo.insert!(%Revision{
+        fleet_strategy_id: revision.fleet_strategy_id,
+        number: 2,
+        source: "operator",
+        activated_at: DateTime.utc_now(:second),
+        document: revision.document
+      })
+
+    Repo.update!(
+      Ecto.Changeset.change(Repo.get!(Strategy, revision.fleet_strategy_id),
+        active_revision_id: newer.id
+      )
+    )
+
+    assert {:error, :stale_source} =
+             FleetAllocation.replan_subgraph(
+               scope,
+               generation.id,
+               %{selection(revision, 1) | commitments: [acquisition]},
+               ["purchase"],
+               decision()
+             )
+
+    assert Repo.aggregate(Commitment, :count) == 1
+    assert Repo.get!(Generation, generation.id).allocation_version == 1
   end
 
   test "an Operator reservation also blocks an in-place subgraph admission" do
