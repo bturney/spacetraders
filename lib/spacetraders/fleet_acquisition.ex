@@ -51,6 +51,28 @@ defmodule SpaceTraders.FleetAcquisition do
          :ok <- purchase_precondition(agent, candidate.source_waypoint),
          {:ok, spending} <- CreditSpending.acquire_ship_purchase(agent, candidate) do
       dispatch(agent, portfolio, commitment, candidate, spending)
+    else
+      {:error, reason}
+      when reason in [
+             :purchase_precondition_unmet,
+             :ship_offer_evidence_unavailable,
+             :strategy_revision_superseded,
+             :strategy_revision_absent,
+             :emergency_stopped
+           ] ->
+        # Only definitive, pre-Attempt refusals end the published investment.
+        # Transient/capacity read failures retain it; a dispatched Attempt always
+        # keeps sole authority over whether its purchase happened.
+        case open_purchase(agent) do
+          {%Commitment{id: id}, nil} when id == commitment.id ->
+            withdraw(scope_of(agent), commitment, reason)
+
+          _ ->
+            {:error, reason}
+        end
+
+      error ->
+        error
     end
   end
 

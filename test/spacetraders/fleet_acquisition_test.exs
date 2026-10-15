@@ -142,6 +142,119 @@ defmodule SpaceTraders.FleetAcquisitionTest do
     assert attempt.provenance["decision_episode_id"] == portfolio.strategy_decision_episode_id
   end
 
+  for {loss, reason} <- [
+        {:presence, :purchase_precondition_unmet},
+        {:offer, :ship_offer_evidence_unavailable}
+      ],
+      boundary <- [:execute, :resume] do
+    test "#{boundary} concludes only the attempt-less purchase after #{loss} is lost" do
+      {scope, agent, revision} = generation()
+      stub_shipyard(agent)
+      {portfolio, candidate} = published_purchase(scope, agent, revision)
+      [purchase] = portfolio.commitments
+      retained = retain_independent_work(scope, agent, revision, portfolio)
+
+      if unquote(loss) == :offer do
+        Repo.update_all(SpaceTraders.Intelligence.Observation,
+          set: [observed_at: DateTime.add(DateTime.utc_now(), -301)]
+        )
+      end
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/v2/my/ships"} ->
+            waypoint = if unquote(loss) == :presence, do: "X1-UX81-A2", else: "X1-UX81-A1"
+            Req.Test.json(conn, %{"data" => [docked(waypoint)]})
+
+          _ ->
+            flunk("definitive pre-send refusal must not dispatch or read credits")
+        end
+      end)
+
+      result =
+        if unquote(boundary) == :execute,
+          do: FleetAcquisition.execute(agent, portfolio, purchase, candidate),
+          else: FleetAcquisition.reconcile(scope, agent, revision, "X1-UX81")
+
+      assert result == {:error, unquote(reason)}
+      assert purchase_attempts(agent) == []
+      assert FleetAcquisition.open_purchase(agent) == nil
+
+      assert %{commitments: [%{id: retained_id}]} =
+               FleetAllocation.current_portfolio(scope, agent)
+
+      assert retained_id == retained.id
+
+      assert {:ok, %{commitment_id: ^retained_id}} =
+               FleetAllocation.current_ship_claim(agent, "CRUISER-1")
+
+      episode = Repo.get!(StrategyDecisionEpisode, portfolio.strategy_decision_episode_id)
+      assert episode.classification == :superseded
+      assert episode.actual_outcomes == %{"reason" => Atom.to_string(unquote(reason))}
+
+      Req.Test.stub(SpaceTraders.API, fn _ -> flunk("concluded acquisition must never replay") end)
+
+      assert {:error, :no_purchase_attempt} =
+               FleetAcquisition.reconcile(scope, agent, revision, "X1-UX81")
+
+      generation = FleetAllocation.active_generation(agent)
+
+      {:ok, selection} =
+        FleetAllocation.select_portfolio(revision, [candidate], %{
+          as_of: DateTime.utc_now(),
+          claims: [],
+          reservations: %{credits: @credits - 100}
+        })
+
+      assert {:ok, _} =
+               FleetAllocation.replan_subgraph(
+                 scope,
+                 generation.id,
+                 Map.put(selection, :source_version, generation.allocation_version),
+                 [candidate.id],
+                 %{
+                   evidence_references: [],
+                   calibration_version: "ship-acquisition-v2",
+                   expectations: episode.expectations
+                 }
+               )
+
+      assert {%{id: next_id}, nil} = FleetAcquisition.open_purchase(agent)
+      assert next_id != purchase.id
+
+      assert {:ok, %{commitment_id: ^retained_id}} =
+               FleetAllocation.current_ship_claim(agent, "CRUISER-1")
+    end
+  end
+
+  for failure <- [:timeout, :capacity] do
+    test "#{failure} during the precondition read retains the attempt-less purchase" do
+      {scope, agent, revision} = generation()
+      stub_shipyard(agent)
+      {portfolio, _} = published_purchase(scope, agent, revision)
+      [purchase] = portfolio.commitments
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        assert conn.method == "GET"
+        assert conn.request_path == "/v2/my/ships"
+
+        if unquote(failure) == :timeout do
+          Req.Test.transport_error(conn, :timeout)
+        else
+          conn |> Plug.Conn.put_status(429) |> Req.Test.json(%{"error" => %{"code" => 429}})
+        end
+      end)
+
+      assert {:error, _} = FleetAcquisition.reconcile(scope, agent, revision, "X1-UX81")
+      assert {%{id: id}, nil} = FleetAcquisition.open_purchase(agent)
+      assert id == purchase.id
+      assert purchase_attempts(agent) == []
+
+      assert Repo.get!(StrategyDecisionEpisode, portfolio.strategy_decision_episode_id).classification ==
+               :still_evaluating
+    end
+  end
+
   for change <- [:revision, :emergency_stop] do
     test "#{change} withdraws a published unsent acquisition without game reads" do
       {scope, agent, revision} = generation()
@@ -1156,6 +1269,107 @@ defmodule SpaceTraders.FleetAcquisitionTest do
              FleetAcquisition.reconcile(scope, agent, revision, "X1-UX81")
 
     assert [%{state: "accepted", outcomes: [_, _]}] = purchase_attempts(agent)
+  end
+
+  for {balance_credits, fits?} <- [{16_062, false}, {16_063, true}] do
+    test "a Revision-retired purchase protects exactly its Reservation with #{balance_credits} credits" do
+      {scope, agent, revision} = ambiguous_purchase()
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case conn.request_path do
+          "/v2/my/ships" ->
+            Req.Test.json(conn, %{"data" => [docked("X1-UX81-A1"), acquired(@offered_speed)]})
+
+          "/v2/my/agent" ->
+            overview(conn, agent, @credits - @price)
+
+          "/v2/my/ships/ACQUIRE-2" ->
+            Req.Test.transport_error(conn, :timeout)
+        end
+      end)
+
+      assert {:error, _} = FleetAcquisition.reconcile(scope, agent, revision, "X1-UX81")
+      assert [%{state: "accepted"} = purchase_attempt] = purchase_attempts(agent)
+      active = change_purchase_authority(revision, :revision)
+      generation = FleetAllocation.active_generation(agent)
+
+      assert {:ok, %{settling: [_]}} =
+               FleetAllocation.retire_stale_portfolio(scope, generation.id, active.id)
+
+      Repo.update!(Ecto.Changeset.change(generation, fleet_strategy_revision_id: active.id))
+
+      # A newer balance absorbs the accepted Attempt's charge. The retained
+      # 15,000 Reservation (12,500 purchase + 2,500 Preparation Exposure) still
+      # leaves only 62 above the 1,000 floor, one short of this 63-credit refuel.
+      refuel = %{"kind" => "refuel", "waypoint" => "X1-UX81-A1", "units" => 100}
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case conn.request_path do
+          "/v2/my/agent" ->
+            overview(conn, agent, unquote(balance_credits))
+
+          "/v2/systems/X1-UX81/waypoints/X1-UX81-A1/market" ->
+            Req.Test.json(conn, %{
+              "data" => %{
+                "symbol" => "X1-UX81-A1",
+                "tradeGoods" => [
+                  %{"symbol" => "FUEL", "purchasePrice" => 50, "tradeVolume" => 100}
+                ]
+              }
+            })
+        end
+      end)
+
+      assert {:ok, balance} = Evidence.get_agent_binding(agent)
+      assert DateTime.compare(balance.observation.observed_at, purchase_attempt.updated_at) == :gt
+
+      %{attempt: refuel_attempt} =
+        SpaceTraders.RecordedDispatchFixtures.prepare_action(agent, "OTHER-1", refuel,
+          live_quote: true
+        )
+
+      Req.Test.stub(SpaceTraders.API, fn _ ->
+        flunk("refuel must not consume retained acquisition credits")
+      end)
+
+      if unquote(fits?) do
+        assert {:ok, %{state: "sent_or_unknown"}} =
+                 SpaceTraders.Fleet.Intents.RecordedAction.admit_send(refuel_attempt)
+      else
+        assert {:error, :insufficient_unreserved_headroom} =
+                 SpaceTraders.API.dispatch_recorded(refuel_attempt)
+
+        assert %{state: "not_sent", sent_or_unknown_at: nil} =
+                 MutationAttempts.get!(refuel_attempt.id)
+      end
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        case conn.request_path do
+          "/v2/my/ships" ->
+            Req.Test.json(conn, %{"data" => [docked("X1-UX81-A1"), acquired(@offered_speed)]})
+
+          "/v2/my/ships/ACQUIRE-2" ->
+            ship(conn, @offered_speed)
+        end
+      end)
+
+      assert {:ok, _} = FleetAcquisition.reconcile(scope, agent, active, "X1-UX81")
+      assert FleetAllocation.settling_commitments(generation.id) == []
+
+      unless unquote(fits?) do
+        %{attempt: next} =
+          SpaceTraders.RecordedDispatchFixtures.prepare_action(agent, "OTHER-2", refuel,
+            live_quote: true
+          )
+
+        Req.Test.stub(SpaceTraders.API, fn _ ->
+          flunk("admission uses retained quote and balance")
+        end)
+
+        assert {:ok, %{state: "sent_or_unknown"}} =
+                 SpaceTraders.Fleet.Intents.RecordedAction.admit_send(next)
+      end
+    end
   end
 
   for subject <- ["fleet", "agent"] do
