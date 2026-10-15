@@ -18,6 +18,7 @@ defmodule SpaceTraders.FleetAcquisition do
   alias SpaceTraders.Fleet
   alias SpaceTraders.Fleet.Ship
   alias SpaceTraders.FleetAllocation
+  alias SpaceTraders.FleetAllocation.Commitment
   alias SpaceTraders.FleetGeneration.Generation
   alias SpaceTraders.FleetPlanning
   alias SpaceTraders.FleetStrategy.{Revision, StandingAuthority, Strategy}
@@ -31,10 +32,16 @@ defmodule SpaceTraders.FleetAcquisition do
   @doc "Purchases one selected Ship Offer, then registers it from authoritative readiness evidence."
   def reconcile(%Scope{} = scope, %Agent{} = agent, %Revision{} = revision, system)
       when is_binary(system) do
-    with {:ok, _} <- FleetAllocation.authorize_current(scope, agent, revision) do
-      case FleetAllocation.current_portfolio() do
-        nil -> acquire(scope, agent, revision, system)
-        portfolio -> resume(scope, agent, portfolio)
+    with {:ok, generation} <- FleetAllocation.authorize_current(scope, agent, revision) do
+      case open_purchase(agent, generation) do
+        {commitment, attempt} ->
+          resume(scope, agent, commitment, attempt)
+
+        nil ->
+          case FleetAllocation.current_portfolio() do
+            nil -> acquire(scope, agent, revision, system)
+            _portfolio -> {:error, :no_purchase_attempt}
+          end
       end
     end
   end
@@ -77,7 +84,8 @@ defmodule SpaceTraders.FleetAcquisition do
              }
            ),
          {:ok, spending} <- CreditSpending.acquire_ship_purchase(agent, candidate),
-         {:ok, result} <- dispatch(agent, portfolio, candidate, spending) do
+         {:ok, result} <-
+           dispatch(agent, portfolio, hd(portfolio.commitments), candidate, spending) do
       {:ok, Map.put(result, :portfolio, portfolio)}
     else
       error -> {:error, {:ship_acquisition_unavailable, error}}
@@ -114,8 +122,8 @@ defmodule SpaceTraders.FleetAcquisition do
     end)
   end
 
-  defp dispatch(agent, portfolio, candidate, spending) do
-    observe(portfolio, agent, fn ->
+  defp dispatch(agent, portfolio, commitment, candidate, spending) do
+    observe(portfolio, commitment, agent, fn ->
       with {:ok, %{ship: purchased, transaction: transaction}} <-
              AgentContext.handle_game_result(
                agent,
@@ -129,7 +137,7 @@ defmodule SpaceTraders.FleetAcquisition do
         settle(
           scope_of(agent),
           agent,
-          portfolio,
+          commitment,
           %{
             ship_symbol: purchased.symbol,
             ship_type: candidate.ship.type,
@@ -205,28 +213,27 @@ defmodule SpaceTraders.FleetAcquisition do
     end
   end
 
-  defp resume(scope, agent, portfolio) do
-    with {:ok, purchase} <- settled_purchase(scope, agent, portfolio) do
-      settle(scope, agent, portfolio, purchase)
+  defp resume(scope, agent, commitment, attempt) do
+    with {:ok, purchase} <- settled_purchase(scope, agent, commitment, attempt) do
+      settle(scope, agent, commitment, purchase)
     end
   end
 
   # ADR 0011: the attempt decides whether the purchase happened. A `succeeded`
   # attempt records only the response status, so the purchased Ship is still
   # identified from the authoritative owned Fleet rather than from a local record.
-  defp settled_purchase(scope, agent, portfolio) do
-    expectations = portfolio.strategy_decision_episode.expectations
-    episode_id = portfolio.strategy_decision_episode_id
+  defp settled_purchase(scope, agent, commitment, attempt) do
+    expectations = decision_episode(commitment).expectations
 
-    case purchase_attempt(agent, episode_id) do
-      nil ->
-        {:error, :no_purchase_attempt}
+    case attempt do
+      %Attempt{state: "absent"} ->
+        conclude_absent(scope, commitment)
 
       %Attempt{state: state} when state in ["succeeded", "accepted"] ->
         identify(agent, expectations)
 
       %Attempt{state: state} = attempt when state in ["sent_or_unknown", "ambiguous"] ->
-        reconcile_purchase(scope, agent, portfolio, attempt, expectations)
+        reconcile_purchase(scope, agent, commitment, attempt, expectations)
     end
   end
 
@@ -240,7 +247,7 @@ defmodule SpaceTraders.FleetAcquisition do
     end
   end
 
-  defp reconcile_purchase(scope, agent, portfolio, attempt, expectations) do
+  defp reconcile_purchase(scope, agent, commitment, attempt, expectations) do
     with {:ok, fleet} <-
            AgentContext.handle_game_result(agent, Evidence.recovery_fleet_binding(agent, attempt)),
          {:ok, credits} <-
@@ -248,11 +255,11 @@ defmodule SpaceTraders.FleetAcquisition do
              agent,
              Evidence.recovery_agent_binding(agent, attempt, owner: "fleet_reconciliation")
            ) do
-      settle_attempt(scope, agent, portfolio, attempt, expectations, fleet, credits)
+      settle_attempt(scope, agent, commitment, attempt, expectations, fleet, credits)
     end
   end
 
-  defp settle_attempt(scope, agent, portfolio, attempt, expectations, fleet, credits) do
+  defp settle_attempt(scope, agent, commitment, attempt, expectations, fleet, credits) do
     case purchased(agent, fleet.value) do
       {:ok, symbol} ->
         with {:ok, _attempt} <- reconcile_attempt(attempt, fleet, credits, :accepted) do
@@ -260,14 +267,21 @@ defmodule SpaceTraders.FleetAcquisition do
         end
 
       :absent ->
-        with {:ok, _attempt} <- reconcile_attempt(attempt, fleet, credits, :absent),
-             {:ok, _portfolio} <-
-               FleetAllocation.unwind_current_portfolio(scope, portfolio.fleet_generation_id) do
-          {:error, :ship_purchase_not_completed}
+        with {:ok, _attempt} <- reconcile_attempt(attempt, fleet, credits, :absent) do
+          conclude_absent(scope, commitment)
         end
 
       :unattributable ->
         {:error, :ship_purchase_unattributable}
+    end
+  end
+
+  defp conclude_absent(scope, commitment) do
+    with {:ok, _commitment} <-
+           FleetAllocation.conclude_commitment(scope, commitment, :superseded, %{
+             reason: :ship_purchase_not_completed
+           }) do
+      {:error, :ship_purchase_not_completed}
     end
   end
 
@@ -306,14 +320,36 @@ defmodule SpaceTraders.FleetAcquisition do
     Repo.all(from ship in Ship, where: ship.agent_id == ^agent.id, select: ship.symbol)
   end
 
-  defp purchase_attempt(agent, episode_id) do
-    MutationAttempts.list_for_agent(agent)
-    |> Enum.find(fn attempt ->
-      attempt.operation_id == "purchase-ship" and
-        attempt.provenance["decision_episode_id"] == episode_id and
-        attempt.state in ["sent_or_unknown", "ambiguous", "succeeded", "accepted"]
+  defp open_purchase(agent, generation) do
+    commitments =
+      Repo.all(
+        from c in Commitment,
+          join: p in assoc(c, :fleet_commitment_portfolio),
+          where: p.fleet_generation_id == ^generation.id and c.unwind_state != :released,
+          preload: [
+            :replan_decision_episode,
+            fleet_commitment_portfolio: :strategy_decision_episode
+          ]
+      )
+
+    Enum.find_value(MutationAttempts.list_for_agent(agent), fn attempt ->
+      if attempt.operation_id == "purchase-ship" and
+           attempt.state in ["sent_or_unknown", "ambiguous", "succeeded", "accepted", "absent"] do
+        case Enum.find(commitments, fn commitment ->
+               attempt.provenance["commitment_id"] == commitment.id and
+                 attempt.provenance["decision_episode_id"] == decision_episode(commitment).id
+             end) do
+          nil -> nil
+          commitment -> {commitment, attempt}
+        end
+      end
     end)
   end
+
+  defp decision_episode(commitment),
+    do:
+      commitment.replan_decision_episode ||
+        commitment.fleet_commitment_portfolio.strategy_decision_episode
 
   defp fleet_basis(:accepted),
     do: "Authoritative owned Fleet contains exactly one Ship the registry has not recorded"
@@ -322,16 +358,16 @@ defmodule SpaceTraders.FleetAcquisition do
     do: "Authoritative owned Fleet contains no Ship the registry has not recorded"
 
   # Registers the Ship, then records the terminal Decision Episode outcome and
-  # releases the portfolio so a later cycle can claim the new Ship.
-  defp settle(scope, agent, portfolio, purchase) do
+  # releases only the acquisition Commitment so other work keeps its authority.
+  defp settle(scope, agent, commitment, purchase) do
     with {:ok, ready} <- read_readiness(agent, purchase.ship_symbol) do
       if readiness_matches?(ready, purchase.readiness) do
         with {:ok, ship} <- Fleet.register_ship(agent, ready, purchase.ship_type),
-             :ok <- conclude(scope, portfolio, purchase, :realized) do
-          {:ok, %{ship: ship, readiness: ready, portfolio: portfolio}}
+             :ok <- conclude(scope, commitment, purchase, :realized) do
+          {:ok, %{ship: ship, readiness: ready, portfolio: commitment.fleet_commitment_portfolio}}
         end
       else
-        with :ok <- conclude(scope, portfolio, purchase, :partially_realized) do
+        with :ok <- conclude(scope, commitment, purchase, :partially_realized) do
           {:error, :ship_readiness_mismatch}
         end
       end
@@ -348,16 +384,14 @@ defmodule SpaceTraders.FleetAcquisition do
     )
   end
 
-  defp conclude(scope, portfolio, purchase, classification) do
-    with {:ok, _episode} <-
-           FleetAllocation.record_decision_outcome(
+  defp conclude(scope, commitment, purchase, classification) do
+    with {:ok, _commitment} <-
+           FleetAllocation.conclude_commitment(
              scope,
-             portfolio.strategy_decision_episode_id,
+             commitment,
              classification,
              purchase_outcome(purchase, classification)
-           ),
-         {:ok, _portfolio} <-
-           FleetAllocation.unwind_current_portfolio(scope, portfolio.fleet_generation_id) do
+           ) do
       :ok
     end
   end
@@ -506,7 +540,7 @@ defmodule SpaceTraders.FleetAcquisition do
     end
   end
 
-  defp observe(portfolio, agent, callback) do
+  defp observe(portfolio, commitment, agent, callback) do
     SpaceTraders.Observability.with_context(
       [
         operator_id: agent.operator_id,
@@ -514,7 +548,7 @@ defmodule SpaceTraders.FleetAcquisition do
         fleet_generation_id: portfolio.fleet_generation_id,
         strategy_revision_id: portfolio.fleet_strategy_revision_id,
         decision_episode_id: portfolio.strategy_decision_episode_id,
-        commitment_id: hd(portfolio.commitments).id
+        commitment_id: commitment.id
       ],
       callback
     )
