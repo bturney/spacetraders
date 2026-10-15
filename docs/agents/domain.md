@@ -17,6 +17,18 @@ example. For related Operator-facing explanation and calibration gaps, see
 Consult them when relevant to an already-authorized scope, not as a separate
 implementation backlog.
 
+## Fleet decision pipeline
+
+Map of who does what at an evidence boundary; read the modules for how.
+
+- **Wake**: `FleetAllocation.Reconciler` — evidence PubSub, due Observation Demands, 60 s durable sweep; calls each owner in order.
+- **Market domain**: `FleetAllocation.MarketDomain.reconcile/5` — trade + coverage + retained work, one decision per boundary.
+- **Propose**: `FleetPlanning` (+ `FleetIntelligence`, `FleetShadow`) → Candidate Contributions; never selects.
+- **Select/publish**: `FleetAllocation` — `select_portfolio`, `publish_portfolio`, `replan_subgraph`; sole portfolio authority (ADR 0010).
+- **Pursue**: `FleetExecution` activates one Commitment's root Intent.
+- **Spend/recover**: `CreditSpending` admits credits (ADR 0013); `MutationAttempts` sole recovery authority (ADR 0011).
+- **Capability owners** (`FleetAcquisition`, `FleetContracts`, `FleetConstruction`, `FleetResources`, `FleetRefit`) reconcile beside the Market domain; Gate 2C (#730) moves acquisition selection into Fleet Allocation (ADR 0016).
+
 ## Use the glossary's vocabulary
 
 Current Fleet authority: `FleetGeneration.current_fleet/0,1` (ADR 0015).

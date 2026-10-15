@@ -188,6 +188,14 @@ _Avoid_: task, request, Ship assignment
 A bounded Candidate Contribution over an explicit finite, named set of open Observation Demands, proposed to unlock a Strategic Objective's decisions while coverage is incomplete. It carries the portfolio outcome rather than per-subject profit; partial coverage may admit positive work, and only complete coverage (fulfilled or proven infeasible) supports a negative conclusion. Its supersession leaves unfulfilled Demands open.
 _Avoid_: sweep, scan script, coverage plan
 
+**Capacity Investment**:
+A supporting Candidate Contribution that buys lasting Fleet capability, such as a Ship, for the rest of its Fleet Generation. Its one-time capital cost is justified only by the incremental progress it enables on existing Strategic Objectives within the Generation Horizon, and the capability counts only after authoritative readiness.
+_Avoid_: fleet growth objective, expansion, upgrade
+
+**Generation Horizon**:
+The time remaining before the current Fleet Generation ends, bounded by the game's announced next Server Reset and a conservative evaluation window. Without reset evidence it is unknown, never assumed unbounded.
+_Avoid_: lifetime, payback period
+
 **Fleet Commitment**:
 An accepted, evidence-bound promise to pursue an outcome contribution using declared claims, reservations, pledges, and dependencies. Fleet allocation maintains Fleet Commitments as a coherent portfolio; a commitment may coordinate one Ship, multiple Ships, or preparatory work, and is retained, superseded, or safely unwound at reconciliation boundaries. When a newer Fleet Strategy Revision retires its portfolio while its effect is unsettled (an unresolved action or inherited Cargo being sold), it settles: it keeps its Claim on its own Ship only, authorizes nothing but that Cargo's sale, and is released once settled.
 _Avoid_: fixed plan, task, Job
