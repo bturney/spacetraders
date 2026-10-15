@@ -26,9 +26,8 @@ defmodule SpaceTraders.FleetAcquisition do
   alias SpaceTraders.MutationAttempts.Attempt
   alias SpaceTraders.Repo
 
-  @doc "Purchases one selected Ship Offer, then registers it from authoritative readiness evidence."
-  def reconcile(%Scope{} = scope, %Agent{} = agent, %Revision{}, system)
-      when is_binary(system) do
+  @doc "Resumes the open acquisition's purchase and registers the Ship from authoritative readiness."
+  def reconcile(%Scope{} = scope, %Agent{} = agent) do
     with {:ok, _} <- SpaceTraders.OperatorAuthority.authorize(scope),
          %Generation{} <- FleetAllocation.active_generation(agent) do
       case open_purchase(agent) do
@@ -196,7 +195,7 @@ defmodule SpaceTraders.FleetAcquisition do
 
     case unsent_authority(agent, portfolio) do
       :ok ->
-        expectations = decision_episode(commitment).expectations
+        expectations = FleetAllocation.commitment_decision_episode(commitment).expectations
 
         candidate = %{
           source_waypoint:
@@ -245,7 +244,7 @@ defmodule SpaceTraders.FleetAcquisition do
   # attempt records only the response status, so the purchased Ship is still
   # identified from the authoritative owned Fleet rather than from a local record.
   defp settled_purchase(scope, agent, commitment, attempt) do
-    expectations = decision_episode(commitment).expectations
+    expectations = FleetAllocation.commitment_decision_episode(commitment).expectations
 
     case attempt do
       %Attempt{state: "absent"} ->
@@ -366,23 +365,19 @@ defmodule SpaceTraders.FleetAcquisition do
     attempts = MutationAttempts.list_for_agent(agent)
 
     Enum.find_value(commitments, fn commitment ->
-      if decision_episode(commitment).expectations["ship_type"] do
+      if FleetAllocation.commitment_decision_episode(commitment).expectations["ship_type"] do
         attempt =
           Enum.find(attempts, fn attempt ->
             attempt.operation_id == "purchase-ship" and
               attempt.provenance["commitment_id"] == commitment.id and
-              attempt.provenance["decision_episode_id"] == decision_episode(commitment).id
+              attempt.provenance["decision_episode_id"] ==
+                FleetAllocation.commitment_decision_episode(commitment).id
           end)
 
         {commitment, attempt}
       end
     end)
   end
-
-  defp decision_episode(commitment),
-    do:
-      commitment.replan_decision_episode ||
-        commitment.fleet_commitment_portfolio.strategy_decision_episode
 
   defp fleet_basis(:accepted),
     do: "Authoritative owned Fleet contains exactly one Ship the registry has not recorded"
@@ -481,13 +476,7 @@ defmodule SpaceTraders.FleetAcquisition do
         agent_id: agent.id,
         fleet_generation_id: portfolio.fleet_generation_id,
         strategy_revision_id: portfolio.fleet_strategy_revision_id,
-        decision_episode_id:
-          decision_episode(
-            Repo.preload(commitment, [
-              :replan_decision_episode,
-              fleet_commitment_portfolio: :strategy_decision_episode
-            ])
-          ).id,
+        decision_episode_id: FleetAllocation.commitment_decision_episode(commitment).id,
         commitment_id: commitment.id
       ],
       callback

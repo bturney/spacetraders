@@ -50,6 +50,9 @@ defmodule SpaceTraders.Evidence do
     defstruct @enforce_keys
   end
 
+  @doc "Standard owned-read freshness budget, in seconds."
+  def owned_read_freshness_seconds, do: @owned_read_freshness_seconds
+
   @doc "Reads a Ship and returns its exact persisted source; failed retention is an evidence gap."
   def get_ship_binding(agent, symbol, opts \\ []) do
     get_ship(agent, symbol, Keyword.put(opts, :bind, true))

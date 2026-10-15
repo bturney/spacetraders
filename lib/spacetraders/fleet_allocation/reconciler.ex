@@ -66,7 +66,7 @@ defmodule SpaceTraders.FleetAllocation.Reconciler do
       FleetResources.reconcile(scope, agent, revision, system_symbol)
       FleetContracts.reconcile(scope, agent, revision)
       FleetConstruction.reconcile(scope, agent, revision)
-      FleetAcquisition.reconcile(scope, agent, revision, system_symbol)
+      FleetAcquisition.reconcile(scope, agent)
       FleetRefit.reconcile(scope, agent, revision, system_symbol)
     end)
 
@@ -210,8 +210,7 @@ defmodule SpaceTraders.FleetAllocation.Reconciler do
           FleetContracts.reconcile(scope, agent, revision)
           FleetConstruction.reconcile(scope, agent, revision)
 
-          if system = system_for(agent),
-            do: FleetAcquisition.reconcile(scope, agent, revision, system)
+          if system_for(agent), do: FleetAcquisition.reconcile(scope, agent)
         end)
 
       _ ->

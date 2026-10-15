@@ -50,7 +50,7 @@ defmodule SpaceTraders.FleetAllocation.MarketWorkRate do
       fuel: Map.take(ship.fuel, [:capacity, :current]),
       cooldown: Map.take(ship.cooldown, [:remaining_seconds])
     }
-    |> json()
+    |> SpaceTraders.FleetAllocation.JsonEvidence.keys()
   end
 
   def ship_profile(_ship), do: nil
@@ -161,12 +161,4 @@ defmodule SpaceTraders.FleetAllocation.MarketWorkRate do
       _ -> false
     end
   end
-
-  defp json(%_{} = value), do: value |> Map.from_struct() |> json()
-
-  defp json(value) when is_map(value),
-    do: Map.new(value, fn {key, nested} -> {to_string(key), json(nested)} end)
-
-  defp json(value) when is_list(value), do: Enum.map(value, &json/1)
-  defp json(value), do: value
 end

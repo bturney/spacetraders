@@ -124,7 +124,7 @@ defmodule SpaceTraders.CreditSpending do
 
   defp acquire_quote(agent, request) do
     %{waypoint: waypoint, symbol: symbol, units: units} = request
-    system = waypoint |> String.split("-") |> Enum.take(2) |> Enum.join("-")
+    system = system_of(waypoint)
     subject = "market:#{system}:#{waypoint}"
     calibration = CreditCalibration.active()
 
@@ -212,7 +212,7 @@ defmodule SpaceTraders.CreditSpending do
           "shipyard:" <> tail -> hd(String.split(tail, ":"))
           _ -> nil
         end
-      end) || waypoint |> String.split("-") |> Enum.take(2) |> Enum.join("-")
+      end) || system_of(waypoint)
 
     with {:ok, price} <- shipyard_price(agent, waypoint, type, system),
          {:ok, credits} <- acquire_credits(agent),
@@ -358,15 +358,7 @@ defmodule SpaceTraders.CreditSpending do
       id when is_integer(id) ->
         case Repo.get(SpaceTraders.FleetAllocation.Commitment, id) do
           %{unwind_state: :not_required} = commitment ->
-            commitment =
-              Repo.preload(commitment, [
-                :replan_decision_episode,
-                fleet_commitment_portfolio: :strategy_decision_episode
-              ])
-
-            episode =
-              commitment.replan_decision_episode ||
-                commitment.fleet_commitment_portfolio.strategy_decision_episode
+            episode = SpaceTraders.FleetAllocation.commitment_decision_episode(commitment)
 
             case episode.expectations["preparation_credits"] do
               amount when is_integer(amount) and amount >= 0 -> {:ok, amount}
@@ -468,7 +460,7 @@ defmodule SpaceTraders.CreditSpending do
              agent,
              waypoint,
              spending["ship_type"],
-             spending["system"] || waypoint |> String.split("-") |> Enum.take(2) |> Enum.join("-")
+             spending["system"] || system_of(waypoint)
            ),
          true <- spending["unit_price"] == price and spending["units"] == 1,
          true <-
@@ -555,13 +547,8 @@ defmodule SpaceTraders.CreditSpending do
           on:
             purchase.agent_id == g.agent_id and purchase.fleet_generation_id == g.id and
               purchase.operation_id == "purchase-ship" and
-              purchase.state in [
-                "sent_or_unknown",
-                "ambiguous",
-                "bounded_unknown",
-                "succeeded",
-                "accepted"
-              ] and fragment("?->>'commitment_id' = ?::text", purchase.provenance, c.id),
+              purchase.state in ^SpaceTraders.MutationAttempts.possible_effect_states() and
+              fragment("?->>'commitment_id' = ?::text", purchase.provenance, c.id),
           where:
             g.agent_id == ^agent.id and g.id == ^attempt.fleet_generation_id and
               is_nil(g.retired_at) and
@@ -606,4 +593,6 @@ defmodule SpaceTraders.CreditSpending do
         error
     end
   end
+
+  defp system_of(waypoint), do: waypoint |> String.split("-") |> Enum.take(2) |> Enum.join("-")
 end

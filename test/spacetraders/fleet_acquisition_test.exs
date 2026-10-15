@@ -136,7 +136,7 @@ defmodule SpaceTraders.FleetAcquisitionTest do
     end)
 
     assert {:ok, %{ship: %Ship{symbol: "ACQUIRE-2"}}} =
-             FleetAcquisition.reconcile(scope, agent, revision, "X1-UX81")
+             FleetAcquisition.reconcile(scope, agent)
 
     assert [attempt] = purchase_attempts(agent)
     assert attempt.provenance["decision_episode_id"] == portfolio.strategy_decision_episode_id
@@ -174,7 +174,7 @@ defmodule SpaceTraders.FleetAcquisitionTest do
       result =
         if unquote(boundary) == :execute,
           do: FleetAcquisition.execute(agent, portfolio, purchase, candidate),
-          else: FleetAcquisition.reconcile(scope, agent, revision, "X1-UX81")
+          else: FleetAcquisition.reconcile(scope, agent)
 
       assert result == {:error, unquote(reason)}
       assert purchase_attempts(agent) == []
@@ -195,7 +195,7 @@ defmodule SpaceTraders.FleetAcquisitionTest do
       Req.Test.stub(SpaceTraders.API, fn _ -> flunk("concluded acquisition must never replay") end)
 
       assert {:error, :no_purchase_attempt} =
-               FleetAcquisition.reconcile(scope, agent, revision, "X1-UX81")
+               FleetAcquisition.reconcile(scope, agent)
 
       generation = FleetAllocation.active_generation(agent)
 
@@ -245,7 +245,7 @@ defmodule SpaceTraders.FleetAcquisitionTest do
         end
       end)
 
-      assert {:error, _} = FleetAcquisition.reconcile(scope, agent, revision, "X1-UX81")
+      assert {:error, _} = FleetAcquisition.reconcile(scope, agent)
       assert {%{id: id}, nil} = FleetAcquisition.open_purchase(agent)
       assert id == purchase.id
       assert purchase_attempts(agent) == []
@@ -261,7 +261,7 @@ defmodule SpaceTraders.FleetAcquisitionTest do
       {portfolio, _} = published_purchase(scope, agent, revision)
       change_purchase_authority(revision, unquote(change))
       Req.Test.stub(SpaceTraders.API, fn _ -> flunk("withdrawal must stay local") end)
-      assert {:error, _} = FleetAcquisition.reconcile(scope, agent, revision, "X1-UX81")
+      assert {:error, _} = FleetAcquisition.reconcile(scope, agent)
       assert purchase_attempts(agent) == []
 
       assert Repo.get!(StrategyDecisionEpisode, portfolio.strategy_decision_episode_id).classification ==
@@ -293,7 +293,7 @@ defmodule SpaceTraders.FleetAcquisitionTest do
             end
           end)
 
-          assert {:error, _} = FleetAcquisition.reconcile(scope, agent, revision, "X1-UX81")
+          assert {:error, _} = FleetAcquisition.reconcile(scope, agent)
           assert [%{state: "accepted"}] = purchase_attempts(agent)
         end
 
@@ -342,7 +342,7 @@ defmodule SpaceTraders.FleetAcquisitionTest do
         end)
 
         assert {:ok, %{ship: %Ship{symbol: "ACQUIRE-2"}}} =
-                 FleetAcquisition.reconcile(scope, agent, active, "X1-UX81")
+                 FleetAcquisition.reconcile(scope, agent)
 
         assert [%{state: "accepted"}] = purchase_attempts(agent)
 
@@ -410,7 +410,7 @@ defmodule SpaceTraders.FleetAcquisitionTest do
       Req.Test.stub(SpaceTraders.API, fn _ -> flunk("unsent interruption cannot replay") end)
 
       assert {:error, :ship_purchase_not_completed} =
-               FleetAcquisition.reconcile(scope, agent, revision, "X1-UX81")
+               FleetAcquisition.reconcile(scope, agent)
 
       assert [%{state: "not_sent"}] = purchase_attempts(agent)
       assert FleetAllocation.current_portfolio(scope, agent) == nil
@@ -469,7 +469,7 @@ defmodule SpaceTraders.FleetAcquisitionTest do
     assert id == bounded.id
 
     assert {:ok, %{ship: %Ship{symbol: "ACQUIRE-2"}}} =
-             FleetAcquisition.reconcile(scope, agent, revision, "X1-UX81")
+             FleetAcquisition.reconcile(scope, agent)
 
     assert [%{id: ^id, state: "accepted"}] = purchase_attempts(agent)
   end
@@ -854,7 +854,7 @@ defmodule SpaceTraders.FleetAcquisitionTest do
     assert nil == Repo.get_by(Ship, agent_id: agent.id, symbol: "ACQUIRE-2")
 
     assert {:ok, %{ship: %Ship{symbol: "ACQUIRE-2"}}} =
-             FleetAcquisition.reconcile(scope, agent, revision, "X1-UX81")
+             FleetAcquisition.reconcile(scope, agent)
 
     # Append-only: the original ambiguity is preserved and the reconciliation
     # is recorded as an additional outcome on the same attempt.
@@ -910,7 +910,7 @@ defmodule SpaceTraders.FleetAcquisitionTest do
              execute_purchase(scope, agent, revision)
 
     assert {:error, :ship_purchase_not_completed} =
-             FleetAcquisition.reconcile(scope, agent, revision, "X1-UX81")
+             FleetAcquisition.reconcile(scope, agent)
 
     assert [%{state: "absent"}] = purchase_attempts(agent)
     assert nil == Repo.get_by(Ship, agent_id: agent.id, symbol: "ACQUIRE-2")
@@ -935,7 +935,7 @@ defmodule SpaceTraders.FleetAcquisitionTest do
     end)
 
     assert {:error, :ship_purchase_not_completed} =
-             FleetAcquisition.reconcile(scope, Repo.get!(Agent, agent.id), revision, "X1-UX81")
+             FleetAcquisition.reconcile(scope, Repo.get!(Agent, agent.id))
 
     assert %{commitments: [%{id: retained_id}]} = FleetAllocation.current_portfolio(scope, agent)
     assert retained_id == retained.id
@@ -971,7 +971,7 @@ defmodule SpaceTraders.FleetAcquisitionTest do
         end
       end)
 
-      result = FleetAcquisition.reconcile(scope, agent, revision, "X1-UX81")
+      result = FleetAcquisition.reconcile(scope, agent)
 
       case unquote(classification) do
         :realized -> assert {:ok, %{ship: %Ship{symbol: "ACQUIRE-2"}}} = result
@@ -1096,7 +1096,7 @@ defmodule SpaceTraders.FleetAcquisitionTest do
     end)
 
     assert {:ok, %{ship: %Ship{symbol: "ACQUIRE-2"}}} =
-             FleetAcquisition.reconcile(scope, agent, revision, "X1-UX81")
+             FleetAcquisition.reconcile(scope, agent)
 
     assert Repo.get!(StrategyDecisionEpisode, commitment.replan_decision_episode_id).classification ==
              :realized
@@ -1156,7 +1156,7 @@ defmodule SpaceTraders.FleetAcquisitionTest do
   end
 
   test "restart reuses the exact Fleet read retained before a failed credit read" do
-    {scope, agent, revision} = ambiguous_purchase()
+    {scope, agent, _revision} = ambiguous_purchase()
 
     Req.Test.stub(SpaceTraders.API, fn conn ->
       case conn.request_path do
@@ -1168,7 +1168,7 @@ defmodule SpaceTraders.FleetAcquisitionTest do
       end
     end)
 
-    assert {:error, _} = FleetAcquisition.reconcile(scope, agent, revision, "X1-UX81")
+    assert {:error, _} = FleetAcquisition.reconcile(scope, agent)
     original = SpaceTraders.Evidence.latest_observation(agent, "fleet:#{agent.symbol}")
     assert [%{state: "ambiguous"}] = purchase_attempts(agent)
 
@@ -1181,7 +1181,7 @@ defmodule SpaceTraders.FleetAcquisitionTest do
     end)
 
     assert {:ok, %{ship: %Ship{symbol: "ACQUIRE-2"}}} =
-             FleetAcquisition.reconcile(scope, Repo.get!(Agent, agent.id), revision, "X1-UX81")
+             FleetAcquisition.reconcile(scope, Repo.get!(Agent, agent.id))
 
     assert [%{state: "accepted", outcomes: [_, outcome]}] = purchase_attempts(agent)
     assert [_, fleet] = observation_payloads(outcome)
@@ -1235,7 +1235,7 @@ defmodule SpaceTraders.FleetAcquisitionTest do
   end
 
   test "accepted purchase survives interruption before capability registration without another mutation" do
-    {scope, agent, revision} = ambiguous_purchase()
+    {scope, agent, _revision} = ambiguous_purchase()
 
     Req.Test.stub(SpaceTraders.API, fn conn ->
       case conn.request_path do
@@ -1250,7 +1250,7 @@ defmodule SpaceTraders.FleetAcquisitionTest do
       end
     end)
 
-    assert {:error, _} = FleetAcquisition.reconcile(scope, agent, revision, "X1-UX81")
+    assert {:error, _} = FleetAcquisition.reconcile(scope, agent)
     assert [%{state: "accepted"}] = purchase_attempts(agent)
 
     Req.Test.stub(SpaceTraders.API, fn conn ->
@@ -1266,7 +1266,7 @@ defmodule SpaceTraders.FleetAcquisitionTest do
     end)
 
     assert {:ok, %{ship: %Ship{symbol: "ACQUIRE-2"}}} =
-             FleetAcquisition.reconcile(scope, agent, revision, "X1-UX81")
+             FleetAcquisition.reconcile(scope, agent)
 
     assert [%{state: "accepted", outcomes: [_, _]}] = purchase_attempts(agent)
   end
@@ -1288,7 +1288,7 @@ defmodule SpaceTraders.FleetAcquisitionTest do
         end
       end)
 
-      assert {:error, _} = FleetAcquisition.reconcile(scope, agent, revision, "X1-UX81")
+      assert {:error, _} = FleetAcquisition.reconcile(scope, agent)
       assert [%{state: "accepted"} = purchase_attempt] = purchase_attempts(agent)
       active = change_purchase_authority(revision, :revision)
       generation = FleetAllocation.active_generation(agent)
@@ -1353,7 +1353,7 @@ defmodule SpaceTraders.FleetAcquisitionTest do
         end
       end)
 
-      assert {:ok, _} = FleetAcquisition.reconcile(scope, agent, active, "X1-UX81")
+      assert {:ok, _} = FleetAcquisition.reconcile(scope, agent)
       assert FleetAllocation.settling_commitments(generation.id) == []
 
       unless unquote(fits?) do
@@ -1374,7 +1374,7 @@ defmodule SpaceTraders.FleetAcquisitionTest do
 
   for subject <- ["fleet", "agent"] do
     test "failed #{subject} retention leaves the purchase unresolved and fenced" do
-      {scope, agent, revision} = ambiguous_purchase()
+      {scope, agent, _revision} = ambiguous_purchase()
 
       Repo.query!(
         "ALTER TABLE authoritative_observations ADD CONSTRAINT purchase_retention_gap CHECK (subject <> '#{unquote(subject)}:#{agent.symbol}') NOT VALID"
@@ -1392,7 +1392,7 @@ defmodule SpaceTraders.FleetAcquisitionTest do
         end
       end)
 
-      assert {:error, _} = FleetAcquisition.reconcile(scope, agent, revision, "X1-UX81")
+      assert {:error, _} = FleetAcquisition.reconcile(scope, agent)
       assert [attempt] = purchase_attempts(agent)
       assert attempt.state == "ambiguous"
       assert SpaceTraders.SafetyFence.active?(attempt)
@@ -1474,7 +1474,7 @@ defmodule SpaceTraders.FleetAcquisitionTest do
   end
 
   test "identical newer Fleet facts cannot replace the source of an already bound purchase conclusion" do
-    {scope, agent, revision} = ambiguous_purchase()
+    {scope, agent, _revision} = ambiguous_purchase()
 
     Req.Test.stub(SpaceTraders.API, fn conn ->
       case conn.request_path do
@@ -1506,7 +1506,7 @@ defmodule SpaceTraders.FleetAcquisitionTest do
       end
     end)
 
-    assert {:ok, _} = FleetAcquisition.reconcile(scope, agent, revision, "X1-UX81")
+    assert {:ok, _} = FleetAcquisition.reconcile(scope, agent)
     assert_receive {:original_fleet, original}
     assert Evidence.latest_observation(agent, "fleet:#{agent.symbol}").id != original.id
     assert [%{outcomes: [_, outcome]}] = purchase_attempts(agent)
@@ -1516,7 +1516,7 @@ defmodule SpaceTraders.FleetAcquisitionTest do
   end
 
   test "partial expiry replaces only the unusable Fleet component on the next recovery" do
-    {scope, agent, revision} = ambiguous_purchase()
+    {scope, agent, _revision} = ambiguous_purchase()
     [attempt] = purchase_attempts(agent)
     previous = Application.fetch_env(:spacetraders, :clock)
 
@@ -1545,7 +1545,7 @@ defmodule SpaceTraders.FleetAcquisitionTest do
     end)
 
     assert {:incomplete, %{usable: [credits], unusable: [_fleet]}} =
-             FleetAcquisition.reconcile(scope, agent, revision, "X1-UX81")
+             FleetAcquisition.reconcile(scope, agent)
 
     assert SpaceTraders.SafetyFence.active?(MutationAttempts.get!(attempt.id))
 
@@ -1562,14 +1562,14 @@ defmodule SpaceTraders.FleetAcquisitionTest do
       end
     end)
 
-    assert {:ok, _} = FleetAcquisition.reconcile(scope, agent, revision, "X1-UX81")
+    assert {:ok, _} = FleetAcquisition.reconcile(scope, agent)
     assert [%{outcomes: [_, outcome]}] = purchase_attempts(agent)
     assert [credit_proof, _fleet] = observation_payloads(outcome)
     assert credit_proof["source"]["id"] == credits.observation.id
   end
 
   test "multiple unregistered Ships remain unattributable despite valid retained reads" do
-    {scope, agent, revision} = ambiguous_purchase()
+    {scope, agent, _revision} = ambiguous_purchase()
 
     Req.Test.stub(SpaceTraders.API, fn conn ->
       case conn.request_path do
@@ -1584,7 +1584,7 @@ defmodule SpaceTraders.FleetAcquisitionTest do
     end)
 
     assert {:error, :ship_purchase_unattributable} =
-             FleetAcquisition.reconcile(scope, agent, revision, "X1-UX81")
+             FleetAcquisition.reconcile(scope, agent)
 
     assert [attempt] = purchase_attempts(agent)
     assert attempt.state == "ambiguous"
@@ -1630,7 +1630,7 @@ defmodule SpaceTraders.FleetAcquisitionTest do
   end
 
   test "governed purchase recovery preserves definitive Server Reset handling" do
-    {scope, agent, revision} = ambiguous_purchase()
+    {scope, agent, _revision} = ambiguous_purchase()
 
     Req.Test.stub(SpaceTraders.API, fn conn ->
       conn
@@ -1644,7 +1644,7 @@ defmodule SpaceTraders.FleetAcquisitionTest do
       })
     end)
 
-    assert {:error, _} = FleetAcquisition.reconcile(scope, agent, revision, "X1-UX81")
+    assert {:error, _} = FleetAcquisition.reconcile(scope, agent)
     assert Repo.get!(Agent, agent.id).stale_at
     assert Repo.get_by!(Generation, agent_id: agent.id).fenced_at
   end

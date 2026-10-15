@@ -25,7 +25,7 @@ defmodule SpaceTraders.FleetAllocation.Acquisition do
     # Recovery is not a new investment decision. It must survive a changed
     # Revision, Stop, missing horizon or a governor deferral.
     open = FleetAcquisition.open_purchase(agent)
-    if open, do: FleetAcquisition.reconcile(scope, agent, revision, system)
+    if open, do: FleetAcquisition.reconcile(scope, agent)
 
     with {:ok, generation} <- FleetAllocation.authorize_current(scope, agent, revision) do
       now = Clock.utc_now()
@@ -90,7 +90,7 @@ defmodule SpaceTraders.FleetAllocation.Acquisition do
       world = World.projections(agent, system, now, 300)
       ships = co_located(ships)
       shipyards = shipyards(world.waypoints, system)
-      horizon = investment_horizon(agent, generation, now, ships, shipyards, surplus)
+      {horizon, read_at} = investment_horizon(agent, generation, now, ships, shipyards, surplus)
       now = Clock.utc_now()
 
       snapshot = %{
@@ -109,10 +109,10 @@ defmodule SpaceTraders.FleetAllocation.Acquisition do
       plans =
         for {_, index} <- Enum.with_index(revision.document["objectives"]),
             {:ok, plan} <- [FleetPlanning.plan_ship_acquisition(revision, index, snapshot)],
-            do: plan
+            do: {index, plan}
 
-      candidates = Enum.flat_map(plans, & &1.candidate_contributions)
-      limitations = Enum.flat_map(plans, & &1.limitations)
+      candidates = Enum.flat_map(plans, fn {_, plan} -> plan.candidate_contributions end)
+      limitations = Enum.flat_map(plans, fn {_, plan} -> plan.limitations end)
 
       case FleetAllocation.select_portfolio(revision, candidates, %{
              as_of: now,
@@ -177,23 +177,35 @@ defmodule SpaceTraders.FleetAllocation.Acquisition do
           end
 
         {:ok, _selection} ->
-          reason =
-            case limitations do
-              [%{reason: reason} | _] -> reason
-              _ -> :insufficient_surplus
-            end
-
-          refuse(agent, revision, generation, reason, limitations, work)
+          reason = refusal_reason(candidates, plans, work)
+          refuse(agent, revision, generation, reason, limitations, work, read_at)
 
         {:error, reason} ->
-          refuse(agent, revision, generation, reason, limitations, work)
+          refuse(agent, revision, generation, reason, limitations, work, read_at)
       end
     end
   end
 
+  # Unselected offers lost at selection; otherwise the binding limitation is the
+  # one from an objective that owns the unmet work, not an unrelated objective.
+  defp refusal_reason([_ | _], _plans, _work), do: :insufficient_surplus
+
+  defp refusal_reason([], plans, work) do
+    owning = MapSet.new(work, & &1.objective_index)
+
+    owned =
+      for {index, plan} <- plans,
+          MapSet.member?(owning, index),
+          limit <- plan.limitations,
+          do: limit.reason
+
+    other = for {_, plan} <- plans, limit <- plan.limitations, do: limit.reason
+    List.first(owned ++ other, :insufficient_surplus)
+  end
+
   # Read only at an otherwise eligible investment boundary. A failed or unusable
-  # schedule stays unknown; its recorded refusal bounds retries to the owned-read
-  # freshness window rather than turning every Market announcement into a GET.
+  # schedule stays unknown; the refusal records the read so retries stay within
+  # the owned-read freshness window rather than one GET per Market announcement.
   defp investment_horizon(agent, generation, now, ships, shipyards, surplus) do
     horizon = GenerationHorizon.current(agent, now)
 
@@ -203,47 +215,94 @@ defmodule SpaceTraders.FleetAllocation.Acquisition do
           yard.ships != [] and Enum.any?(ships, &(&1.waypoint == yard.waypoint))
         end)
 
-    recent_refusal? =
-      Repo.exists?(
-        from e in StrategyDecisionEpisode,
-          where:
-            e.fleet_generation_id == ^generation.id and
-              e.selection_kind == :acquisition_refused and
-              e.rejection_reason == "unknown_generation_horizon" and
-              e.inserted_at > ^DateTime.add(now, -30, :second)
-      )
+    recent_read? =
+      case horizon_read_at(latest_refusal(generation.id)) do
+        %DateTime{} = read_at ->
+          DateTime.diff(now, read_at, :second) < Evidence.owned_read_freshness_seconds()
 
-    if horizon.status == :unknown and eligible? and not recent_refusal? and
+        nil ->
+          false
+      end
+
+    if horizon.status == :unknown and eligible? and not recent_read? and
          FleetCapacity.proceed?(FleetCapacity.disposition("get-status")) do
       case Evidence.get_status_binding(agent, owner: "fleet_acquisition") do
-        {:ok, _binding} -> GenerationHorizon.current(agent, SpaceTraders.Clock.utc_now())
-        _ -> horizon
+        {:ok, _binding} -> {GenerationHorizon.current(agent, Clock.utc_now()), now}
+        _ -> {horizon, now}
       end
     else
-      horizon
+      {horizon, nil}
     end
   end
 
-  defp refuse(agent, revision, generation, reason, limitations, work) do
-    Repo.insert!(%StrategyDecisionEpisode{
-      operator_id: agent.operator_id,
-      fleet_generation_id: generation.id,
-      fleet_strategy_revision_id: revision.id,
+  # An unchanged refusal (same Revision and reason) is one Episode refreshed in
+  # place, as a structural stall is (ADR 0012); a changed one opens a successor.
+  defp refuse(agent, revision, generation, reason, limitations, work, read_at \\ nil) do
+    now = Clock.utc_now()
+    latest = latest_refusal(generation.id)
+
+    equivalent? =
+      latest != nil and latest.fleet_strategy_revision_id == revision.id and
+        latest.rejection_reason == to_string(reason)
+
+    read_at = read_at || if(equivalent?, do: horizon_read_at(latest))
+
+    evidence = %{
       source_version: generation.allocation_version,
-      selection_kind: :acquisition_refused,
-      rejection_reason: to_string(reason),
       alternatives: JsonEvidence.dump(Enum.map(limitations, &limitation/1)),
       expectations:
         JsonEvidence.dump(%{
           domain: "ship_acquisition",
           limitations: limitations,
           considered_work: work,
-          calibration: SpaceTraders.ShipAcquisitionCalibration.current()
+          calibration: SpaceTraders.ShipAcquisitionCalibration.current(),
+          horizon_read_at: read_at
         }),
-      calibration_version: "ship-acquisition-v2",
-      classification: :superseded
-    })
+      last_observed_at: now
+    }
+
+    if equivalent? do
+      latest
+      |> Ecto.Changeset.change(
+        Map.put(evidence, :observation_count, (latest.observation_count || 1) + 1)
+      )
+      |> Repo.update!()
+    else
+      Repo.insert!(
+        struct!(
+          StrategyDecisionEpisode,
+          Map.merge(evidence, %{
+            operator_id: agent.operator_id,
+            fleet_generation_id: generation.id,
+            fleet_strategy_revision_id: revision.id,
+            selection_kind: :acquisition_refused,
+            rejection_reason: to_string(reason),
+            calibration_version: "ship-acquisition-v2",
+            classification: :superseded,
+            observation_count: 1
+          })
+        )
+      )
+    end
   end
+
+  defp latest_refusal(generation_id) do
+    Repo.one(
+      from e in StrategyDecisionEpisode,
+        where:
+          e.fleet_generation_id == ^generation_id and e.selection_kind == :acquisition_refused,
+        order_by: [desc: e.id],
+        limit: 1
+    )
+  end
+
+  defp horizon_read_at(%StrategyDecisionEpisode{expectations: %{"horizon_read_at" => at}})
+       when is_binary(at) do
+    {:ok, read_at, _} = DateTime.from_iso8601(at)
+    read_at
+  end
+
+  defp horizon_read_at(_episode), do: nil
 
   defp limitation(value), do: %{reasons: [value.reason], alternative: value}
 

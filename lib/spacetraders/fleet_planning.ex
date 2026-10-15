@@ -1080,8 +1080,13 @@ defmodule SpaceTraders.FleetPlanning do
          valuation
        ) do
     work = valuation.enabled_work
-    # GenerationHorizon uses Evidence's standard 30-second owned-read budget.
-    reset_expiry = DateTime.add(valuation.horizon.evidence_ref.observed_at, 30, :second)
+
+    reset_expiry =
+      DateTime.add(
+        valuation.horizon.evidence_ref.observed_at,
+        Evidence.owned_read_freshness_seconds(),
+        :second
+      )
 
     dependencies =
       [

@@ -105,7 +105,8 @@ defmodule SpaceTraders.FleetPlanning.ShipInvestment do
        ) do
     is_integer(seconds) and seconds > 0 and seconds <= calibration.horizon_window_seconds and
       not is_nil(id) and DateTime.compare(observed, now) != :gt and
-      DateTime.diff(now, observed, :microsecond) <= 30_000_000
+      DateTime.diff(now, observed, :microsecond) <=
+        SpaceTraders.Evidence.owned_read_freshness_seconds() * 1_000_000
   end
 
   defp usable_horizon?(_, _, _), do: false
@@ -299,18 +300,10 @@ defmodule SpaceTraders.FleetPlanning.ShipInvestment do
 
   def configuration(offer) do
     offer
-    |> json()
+    |> SpaceTraders.FleetAllocation.JsonEvidence.keys()
     |> Map.take(~w(frame reactor engine crew modules mounts))
     |> Map.update("crew", nil, fn crew ->
       if is_map(crew), do: Map.take(crew, ~w(required capacity))
     end)
   end
-
-  defp json(%_{} = value), do: value |> Map.from_struct() |> json()
-
-  defp json(value) when is_map(value),
-    do: Map.new(value, fn {k, v} -> {to_string(k), json(v)} end)
-
-  defp json(value) when is_list(value), do: Enum.map(value, &json/1)
-  defp json(value), do: value
 end

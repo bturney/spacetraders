@@ -42,7 +42,7 @@ defmodule SpaceTraders.FleetAllocationPublishTest do
 
     for result <- [
           SpaceTraders.FleetResources.reconcile(scope, agent, revision, "X1-A"),
-          SpaceTraders.FleetAcquisition.reconcile(scope, agent, revision, "X1-A"),
+          SpaceTraders.FleetAcquisition.reconcile(scope, agent),
           SpaceTraders.FleetRefit.reconcile(scope, agent, revision, "X1-A"),
           SpaceTraders.FleetConstruction.reconcile(scope, agent, revision),
           SpaceTraders.FleetContracts.reconcile(scope, agent, revision),

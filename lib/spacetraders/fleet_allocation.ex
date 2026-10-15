@@ -74,6 +74,18 @@ defmodule SpaceTraders.FleetAllocation do
   # How long a completed buy keeps its Commitment while its next leg is created.
   @leg_handoff_seconds 120
 
+  @doc "The Decision Episode that owns a Commitment: its replan, else its Portfolio's."
+  def commitment_decision_episode(%Commitment{} = commitment) do
+    commitment =
+      Repo.preload(commitment, [
+        :replan_decision_episode,
+        fleet_commitment_portfolio: :strategy_decision_episode
+      ])
+
+    commitment.replan_decision_episode ||
+      commitment.fleet_commitment_portfolio.strategy_decision_episode
+  end
+
   @doc "The calibration version recorded on Market pilot-domain decisions."
   def market_calibration_version, do: "market-v1"
 
@@ -1178,13 +1190,7 @@ defmodule SpaceTraders.FleetAllocation do
         where:
           c.id in ^commitment_ids and c.unwind_state != :released and
             a.operation_id == "purchase-ship" and
-            a.state in [
-              "sent_or_unknown",
-              "ambiguous",
-              "bounded_unknown",
-              "succeeded",
-              "accepted"
-            ],
+            a.state in ^SpaceTraders.MutationAttempts.possible_effect_states(),
         select: c.id,
         distinct: true
     )

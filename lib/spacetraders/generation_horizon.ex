@@ -3,9 +3,6 @@ defmodule SpaceTraders.GenerationHorizon do
 
   alias SpaceTraders.{Clock, Evidence, FleetGeneration, ShipAcquisitionCalibration}
 
-  # Reuse Evidence's standard owned-read freshness budget; no long-lived schedule assumption.
-  @freshness_seconds 30
-
   @doc """
   Returns `:known` with `duration_seconds`, or `:unknown` with a refusal `reason`.
 
@@ -41,7 +38,8 @@ defmodule SpaceTraders.GenerationHorizon do
         DateTime.compare(source.observed_at, now) == :gt ->
           unknown(source, :future_reset_evidence)
 
-        DateTime.diff(now, source.observed_at, :microsecond) > @freshness_seconds * 1_000_000 ->
+        DateTime.diff(now, source.observed_at, :microsecond) >
+            Evidence.owned_read_freshness_seconds() * 1_000_000 ->
           unknown(source, :stale_reset_evidence)
 
         DateTime.compare(next_reset, now) != :gt ->

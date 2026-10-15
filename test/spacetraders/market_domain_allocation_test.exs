@@ -274,15 +274,14 @@ defmodule SpaceTraders.MarketDomainAllocationTest do
       refute_received {:game_request, "POST", "/v2/my/ships"}
       assert %{status: :unknown} = SpaceTraders.GenerationHorizon.current(fleet.agent)
 
-      refusals =
-        Repo.all(
-          from e in StrategyDecisionEpisode, where: e.selection_kind == :acquisition_refused
-        )
+      assert [refusal] =
+               Repo.all(
+                 from e in StrategyDecisionEpisode,
+                   where: e.selection_kind == :acquisition_refused
+               )
 
-      assert Enum.map(refusals, & &1.rejection_reason) == [
-               "unknown_generation_horizon",
-               "unknown_generation_horizon"
-             ]
+      assert refusal.rejection_reason == "unknown_generation_horizon"
+      assert refusal.observation_count == 2
     end
 
     test "purchase capacity cannot authorize investment while the enabled trade's navigation is deferred" do
@@ -499,6 +498,34 @@ defmodule SpaceTraders.MarketDomainAllocationTest do
                )
 
       assert refusal.rejection_reason == "acquisition_already_unsettled"
+    end
+
+    test "refusal reason comes from the objective that owns the unmet work" do
+      chart = %{
+        "objective" => "Chart useful waypoints",
+        "kind" => "continuous",
+        "evaluation" => "Maximize useful waypoint coverage",
+        "scope" => "recurring"
+      }
+
+      fleet = investment_fleet(horizon_seconds: 3_600, leading_objectives: [chart])
+
+      stub_game(fleet.agent, [@frigate],
+        investment: true,
+        report_requests: true,
+        refuse_ship_reads: true
+      )
+
+      assert :ok = Reconciler.observe_market_evidence(fleet.agent.id, @system, proceed())
+
+      assert [refusal] =
+               Repo.all(
+                 from e in StrategyDecisionEpisode,
+                   where: e.selection_kind == :acquisition_refused
+               )
+
+      assert refusal.rejection_reason == "enabled_value_not_above_cost"
+      refute_received {:game_request, "POST", "/v2/my/ships"}
     end
 
     for {scenario, reason} <- [
@@ -1979,7 +2006,7 @@ defmodule SpaceTraders.MarketDomainAllocationTest do
   # A frigate with a 40-unit hold and a fuel-free probe at X1-A1. X1-A1 and
   # X1-A2 hold current Listings with a positive IRON spread deeper than the
   # hold; X1-A3 is a known Marketplace never observed.
-  defp fleet(ship_symbols) do
+  defp fleet(ship_symbols, leading_objectives \\ []) do
     operator = Repo.insert!(%Operator{email: "domain-#{System.unique_integer()}@example.com"})
 
     agent =
@@ -2006,14 +2033,16 @@ defmodule SpaceTraders.MarketDomainAllocationTest do
         fleet_strategy_id: strategy.id,
         number: 1,
         document: %{
-          "objectives" => [
-            %{
-              "objective" => "Grow credits",
-              "kind" => "continuous",
-              "evaluation" => "Maximize net credit growth over time",
-              "scope" => "recurring"
-            }
-          ],
+          "objectives" =>
+            leading_objectives ++
+              [
+                %{
+                  "objective" => "Grow credits",
+                  "kind" => "continuous",
+                  "evaluation" => "Maximize net credit growth over time",
+                  "scope" => "recurring"
+                }
+              ],
           "hard_constraints" => ["Keep at least 500 credits available"]
         },
         source: "operator",
@@ -2044,7 +2073,7 @@ defmodule SpaceTraders.MarketDomainAllocationTest do
   end
 
   defp investment_fleet(opts \\ []) do
-    fleet = fleet([@frigate])
+    fleet = fleet([@frigate], Keyword.get(opts, :leading_objectives, []))
     stub_game(fleet.agent, [@frigate], investment: true)
     listing(fleet.agent, "X1-A3", 50, 40)
     assert {:ok, %{action: :published}} = reconcile(fleet)

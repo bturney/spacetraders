@@ -5,9 +5,9 @@ defmodule SpaceTraders.FleetAllocation.StrategyDecisionEpisode do
 
   @selection_kinds [:selected_plan, :neutral_wait]
 
-  # A rejected publication and a structural stall are durable decision
-  # evidence but never the current allocation result, so they stay outside
-  # the pointer's selection kinds.
+  # A rejected publication, a structural stall and a refused acquisition are
+  # durable decision evidence but never the current allocation result, so
+  # they stay outside the pointer's selection kinds (ADR 0012).
   @episode_kinds @selection_kinds ++
                    [:publication_rejected, :structural_stall, :acquisition_refused]
 
@@ -48,8 +48,9 @@ defmodule SpaceTraders.FleetAllocation.StrategyDecisionEpisode do
 
     field :next_observation_at, :utc_datetime_usec
 
-    # A structural stall: one Episode per unchanged binding reason, refreshed
-    # in place on every observation and closed by `resolved_at`.
+    # A structural stall or acquisition refusal: one Episode per unchanged
+    # reason, refreshed in place on every observation. A stall closes by
+    # `resolved_at`; a refusal is succeeded by a changed one.
     field :stall_reason, Ecto.Enum, values: @stall_reasons
     belongs_to :stalled_portfolio, SpaceTraders.FleetAllocation.Portfolio
     field :last_observed_at, :utc_datetime_usec
