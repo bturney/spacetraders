@@ -37,6 +37,12 @@ defmodule Mix.Tasks.VerifyTest do
     refute Mix.Project.config()[:aliases][:precommit]
   end
 
+  test "the format alias seeds deps first, so a fresh worktree can format" do
+    # .formatter.exs imports :ecto_sql, which needs deps/ present.
+    assert [seed, "format"] = Mix.Project.config()[:aliases][:format]
+    assert seed == hd(Mix.Project.config()[:aliases][:test])
+  end
+
   test "the gate keeps the cheap deterministic invariants and the product suite" do
     assert Verify.required_checks(true) == [
              {"compile", ["--warnings-as-errors"]},
@@ -167,17 +173,24 @@ defmodule Mix.Tasks.VerifyTest do
     assert "verify: rerun with: mix verify.boundary --x" in messages()
   end
 
-  test "local format fixes are counted and reported on pass" do
+  test "local format fixes fail the gate at format, before any later check" do
     {:ok, snapshots} =
       Agent.start_link(fn -> [%{"a" => 1, "b" => 1}, %{"a" => 2, "b" => 1, "c" => 3}] end)
 
     snapshot = fn -> Agent.get_and_update(snapshots, fn [h | t] -> {h, t} end) end
 
-    assert :ok = Verify.run_checks([{"format", []}], run_check: &passing/2, snapshot: snapshot)
+    run_check = fn task, args ->
+      if task == "test", do: flunk("ran past format"), else: passing(task, args)
+    end
+
+    assert_raise Mix.Error, "verify: FAIL at format", fn ->
+      Verify.run_checks([{"format", []}, {"test", []}], run_check: run_check, snapshot: snapshot)
+    end
 
     lines = messages()
-    assert "verify: reformatted 2 files: commit before push" in lines
-    assert List.last(lines) =~ "verify: PASS 1/1"
+    assert "verify: reformatted 2 files: commit them" in lines
+    assert "verify: rerun with: scripts/verify" in lines
+    refute Enum.any?(lines, &(&1 =~ "PASS"))
   end
 
   describe "preflight" do

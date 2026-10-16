@@ -22,6 +22,7 @@ require new metrics, or change the active delivery frontier.
 | What decision was made, and how did it turn out? | `/decision-episodes/:id` and `strategy_decision_episodes` |
 | How do Fleet Generations compare? | `/generations`, including the cross-Generation Decision Episode table |
 | What is the Fleet doing now? | `/operations`, Fleet Commitments, Claims, Reservations, Pledges, and root Intents |
+| What did each trade earn? | `SpaceTraders.FleetAllocation.TradeProgress.for_generation/1`: per-trip receipts from paired buy/sell Intents, plus supporting refuel and jump charges |
 | What are the last observed credits, Contracts, Fleet state, and chart coverage? | SpaceTraders · Outcomes (`spacetraders-outcomes`); [outcome guide](outcome-metrics.md) |
 | What software or API behavior explains a durable record? | The contextual Grafana family linked from that record |
 | Where are dashboard definitions deployed from? | `../home-server-setup/config/observability/grafana/provisioning/dashboards/` |
