@@ -65,7 +65,7 @@ h2{font:500 10px var(--mono);letter-spacing:.14em;text-transform:uppercase;color
 .checks span.unk::before{background:transparent;border:1px dashed var(--grey)}
 
 /* Credits */
-.credits{display:grid;grid-template-columns:auto 1fr;gap:4px 16px;align-items:end}
+.credits{display:grid;grid-template-columns:1fr;gap:4px}
 .credits .big{font:600 44px/1 var(--mono);font-variant-numeric:tabular-nums;letter-spacing:-.02em;transition:color .3s}
 .credits .big.pop{color:var(--green)}
 .credits .rate{font:500 15px var(--mono)}
@@ -182,19 +182,72 @@ h2{font:500 10px var(--mono);letter-spacing:.14em;text-transform:uppercase;color
 .gp th{color:#9FA7B3;font-weight:500}
 .gp td.r,.gp th.r{text-align:right}
 
+/* Header next-sale countdown (B) */
+.nextsale{margin-left:auto;text-align:right;line-height:1.15;white-space:nowrap}
+.nextsale b{display:block;font:500 15px var(--mono);font-variant-numeric:tabular-nums}
+.nextsale span{font:400 11px var(--mono);color:var(--dim)}
+.nextsale.none b,.nextsale.none span{color:var(--dim)}
+
+/* Credits count-up float (C) */
+.credits .bigwrap{position:relative;display:inline-block}
+.cfloat{position:absolute;left:100%;top:-6px;margin-left:8px;font:600 15px var(--mono);color:var(--green);opacity:0;transform:translateY(6px);transition:opacity .35s,transform .35s;white-space:nowrap;pointer-events:none}
+.cfloat.show{opacity:1;transform:none}
+/* SOLD pop-up (C) */
+.toastwrap{position:sticky;bottom:96px;height:0;display:flex;justify-content:center;z-index:20;pointer-events:none}
+.toast{position:absolute;bottom:0;display:flex;align-items:center;gap:10px;padding:9px 14px 9px 10px;border-radius:999px;background:var(--panel2);border:1px solid color-mix(in oklch,var(--green) 45%,transparent);box-shadow:0 10px 30px oklch(0.05 0.01 245 / .5);white-space:nowrap;max-width:calc(100% - 24px);overflow:hidden;text-overflow:ellipsis;opacity:0;transform:translateY(10px);transition:opacity .35s,transform .35s}
+.toast.show{opacity:1;transform:none}
+.toast.loss{border-color:color-mix(in oklch,var(--red) 45%,transparent)}
+.toast .chip{font:600 10px var(--mono);letter-spacing:.12em;padding:2px 7px;border-radius:999px;color:var(--green);background:color-mix(in oklch,var(--green) 16%,transparent)}
+.toast.loss .chip{color:var(--red);background:color-mix(in oklch,var(--red) 16%,transparent)}
+.toast b{font:500 16px var(--mono)} .toast.loss b{color:var(--red)} .toast:not(.loss) b{color:var(--green)}
+.toast span:last-child{overflow:hidden;text-overflow:ellipsis;color:var(--muted)}
+@container (max-width:759px){.toast .nm{display:none}}
+/* Sale flash on cards, rows and cells (C, E) */
+.ship.sold{border-color:color-mix(in oklch,var(--green) 55%,transparent);background:color-mix(in oklch,var(--green) 7%,var(--panel))}
+.ship.sold.lost{border-color:color-mix(in oklch,var(--red) 55%,transparent);background:color-mix(in oklch,var(--red) 7%,var(--panel))}
+.ship .eta.sold{color:var(--green)} .ship .eta.sold.lost{color:var(--red)}
+.strip a.sold{outline:2px solid var(--green);outline-offset:1px}
+
+/* Phone bottom tabs (A) */
+.btabs{display:none}
+.g-records-link{display:none}
+@container (max-width:759px){
+  .top .tabs{display:none}
+  .btabs{display:grid;grid-template-columns:repeat(3,1fr);position:sticky;bottom:0;z-index:15;background:var(--app);border-top:1px solid var(--line)}
+  .btabs a{min-height:52px;display:grid;place-items:center;text-decoration:none;color:var(--dim);font:500 13px var(--body);position:relative}
+  .btabs a[aria-current]{color:var(--ink)}
+  .btabs a[aria-current]::before{content:"";position:absolute;top:6px;width:18px;height:3px;border-radius:2px;background:var(--cyan)}
+  .toastwrap{bottom:66px}
+  .glance .g-records{display:none}
+}
+
+/* Dumbbell: expected vs actual (D) */
+.hist .row{grid-template-columns:3.4em minmax(0,1.3fr) minmax(120px,1.6fr) 6.5em}
+.hist .lbl small{display:block;font:400 12px var(--mono);color:var(--dim)}
+.db{position:relative;height:18px;display:block}
+.db i{position:absolute;top:50%}
+.db .z{width:1px;height:16px;margin-top:-8px;background:var(--dim)}
+.db .seg{height:2px;margin-top:-1px}
+.db .e,.db .a{width:10px;height:10px;margin:-5px 0 0 -5px;border-radius:50%}
+.db .e{border:2px solid;background:var(--app)}
+.hist .v small{display:block;font:400 11px var(--mono);color:var(--dim)}
+@container (max-width:759px){.hist .row{grid-template-columns:minmax(0,1fr) 5.5em;row-gap:2px}.hist .row .tm{display:none}.hist .row .db{grid-column:1/-1;grid-row:2}}
+
 /* Prototype controls: deliberately not part of the design */
 .pbar{position:fixed;left:50%;bottom:12px;transform:translateX(-50%);z-index:50;display:flex;flex-wrap:wrap;gap:6px 12px;align-items:center;justify-content:center;
   background:#4B1FB8;color:#fff;padding:8px 14px;border-radius:14px;box-shadow:0 6px 24px rgba(0,0,0,.5);font:13px system-ui,sans-serif;max-width:calc(100vw - 20px)}
 .pbar select,.pbar button{background:#fff;color:#2A0F73;border:0;border-radius:6px;padding:3px 6px;font:13px system-ui,sans-serif}
 .pbar button[aria-pressed=true]{background:#FFD84D}
 .pbar .src{padding:2px 8px;border-radius:6px;background:#2A0F73}
+.pbar.min > :not(#pToggle){display:none}
+@media (max-width:600px){.pbar{bottom:62px;left:6px;transform:none;padding:5px 8px}.pbar:not(.min){bottom:62px;right:6px}}
 </style>
 </head>
 <body>
 <div id="stage"><div class="app" id="app"></div></div>
 
-<div class="pbar" role="region" aria-label="Prototype controls">
-  <b>Prototype</b>
+<div class="pbar" id="pbar" role="region" aria-label="Prototype controls">
+  <button id="pToggle" aria-expanded="true">Prototype ▾</button>
   <label>Situation <select id="pScen"></select></label>
   <span>Ships <button data-scale="2">2</button><button data-scale="120">120</button></span>
   <span>View <button data-frame="desk">Desktop</button><button data-frame="phone">Phone</button></span>
@@ -260,12 +313,12 @@ function traderAt(t, shift = 0){
   const recent = trips.slice(Math.max(0, k - 12), k).filter(x => x.sell != null);
   if (u >= tr.b){
     const p = (u - tr.b) / (tr.s - tr.b);
-    return {phase: "haul", tr, recent, from: tr.src, to: tr.dst, p, eta: (tr.s - u)/1e3,
+    return {phase: "haul", tr, recent, from: tr.src, to: tr.dst, p, eta: (tr.s - u)/1e3, saleEta: (tr.s - u)/1e3,
       act: `Hauling ${tr.units} ${goodName(tr.good)}`, detail: `bought ${fmt(tr.buy/tr.units)} each · sells ~${fmt((tr.buy+tr.exp)/tr.units)}`, est: tr.exp};
   }
   const from = prev ? prev.dst : tr.src, p = prev ? (u - prev.s) / (tr.b - prev.s) : 0;
   const act = from === tr.src ? `Buying ${goodName(tr.good)} at ${wp(tr.src)}` : `Flying to ${wp(tr.src)} to buy ${goodName(tr.good)}`;
-  return {phase: "fetch", tr, recent, from, to: tr.src, p, eta: (tr.b - u)/1e3, act, detail: `then sells at ${wp(tr.dst)}`, est: tr.exp};
+  return {phase: "fetch", tr, recent, from, to: tr.src, p, eta: (tr.b - u)/1e3, saleEta: (tr.s - u)/1e3, act, detail: `then sells at ${wp(tr.dst)}`, est: tr.exp};
 }
 function scoutAt(t){
   const v = scout.filter(x => x.a <= t);
@@ -368,7 +421,6 @@ const goodsRanked = Object.entries(byGood).sort((a, b) => b[1] - a[1]);
 const totalTrade = realTrips.reduce((a, x) => a + x.sell - x.buy, 0);
 
 /* ---------- Views ---------- */
-const craft = `<svg class="craft" viewBox="0 0 16 16" aria-hidden="true"><path d="M2 3 L14 8 L2 13 L5 8 Z" fill="#1C2A39"/></svg>`;
 function route(s){
   const p = Math.max(0, Math.min(1, s.p || 0));
   return `<div class="route"><span>${wp(s.from)}</span><div class="track" role="img" aria-label="${Math.round(p*100)}% of the way from ${wp(s.from)} to ${wp(s.to)}"><div class="done" style="width:${(p*100).toFixed(1)}%"></div><span class="mark" style="left:${(p*100).toFixed(1)}%"></span></div><span>${wp(s.to)}</span></div>`;
@@ -379,13 +431,15 @@ function etaText(s){
   if (s.status === "waiting") return `look ${mmss(s.eta)}`;
   return `${s.phase === "fetch" ? "buys" : s.kind === "scout" ? "next" : "sells"} ${mmss(s.eta)}`;
 }
+function flashOf(name){ const f = FX.flash.get(name); return f && f.until > performance.now() ? f : null; }
 function shipRow(s){
-  return `<a class="ship ${s.status}" href="#/ship/${s.name}" data-key="${s.name}">
+  const f = flashOf(s.name);
+  return `<a class="ship ${s.status}${f ? " sold" + (f.amt < 0 ? " lost" : "") : ""}" href="#/ship/${s.name}" data-key="${s.name}">
     <div><span class="name">${s.name}</span>${s.status !== "trading" && s.status !== "scouting" ? `<span class="status ${s.status}">${STATUS_WORD[s.status]}</span>` : ""}<div class="act">${esc(s.act)}</div></div>
     <div class="est ${s.est == null ? "unk" : ""}">${s.est == null ? (s.kind === "scout" ? "scout" : "no trade") : "~" + sgn(s.est)}</div>
     ${route(s)}
     <div class="detail">${esc(s.detail || "")}</div>
-    <div class="eta">${etaText(s)}</div>
+    ${f ? `<div class="eta sold${f.amt < 0 ? " lost" : ""}">${sgn(f.amt)} sold</div>` : `<div class="eta">${etaText(s)}</div>`}
   </a>`;
 }
 function spark(t){
@@ -402,33 +456,38 @@ const gfIcon = `<svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="tru
 
 function viewGlance(t){
   const ships = fleetAt(t), h = healthAt(t, ships), cr = P.scale > 2 ? 40e6 + moneyScale(ships) * (creditsAt(t) - 2.5e6) : creditsAt(t);
+  FX.target = cr; if (FX.shown == null) FX.shown = cr;
   const traders = ships.filter(s => s.kind === "trader");
   const moving = ships.filter(s => s.status !== "stuck" && s.status !== "waiting").length;
   const counts = {}; for (const s of ships) counts[s.status] = (counts[s.status] || 0) + 1;
   const big = P.scale > 2;
   const shipsBlock = big
     ? `<h2>${moving} of ${ships.length} ships in motion</h2>
-       <div class="strip">${ships.map(s => `<a class="${s.status}" href="#/ship/${s.name}" title="${s.name}: ${esc(s.act)}" aria-label="${s.name}: ${esc(s.act)}"></a>`).join("")}</div>
+       <div class="strip">${ships.map(s => { const pct = s.status === "stuck" ? 100 : Math.round(Math.max(0, Math.min(1, s.p || 0)) * 100); return `<a class="${s.status}${flashOf(s.name) ? " sold" : ""}" href="#/ship/${s.name}" style="background-image:linear-gradient(to top,color-mix(in oklch,var(--c) 70%,transparent) ${pct}%,transparent ${pct}%)" title="${s.name}: ${esc(s.act)}" aria-label="${s.name}: ${esc(s.act)}"></a>`; }).join("")}</div>
        <div class="legend">${["trading","scouting","waiting","busy","stuck"].filter(k => counts[k]).map(k => `<a href="#/ships/${k}"><i style="background:var(--${{trading:"green",scouting:"cyan",waiting:"violet",busy:"yellow",stuck:"red"}[k]})"></i>${counts[k]} ${STATUS_WORD[k].toLowerCase()}</a>`).join("")}</div>
        ${ships.some(s => s.status === "stuck" || s.status === "busy") ? `<h2 style="margin-top:16px">Not earning right now</h2><div class="ships">${ships.filter(s => s.status === "stuck").concat(ships.filter(s => s.status === "busy")).slice(0, 3).map(shipRow).join("")}</div><p><a href="#/ships">All ${ships.length} ships</a></p>` : ""}`
     : `<h2>${moving} of ${ships.length} ships in motion</h2><div class="ships">${ships.map(shipRow).join("")}</div>`;
   return `<main><div class="glance">
     <section class="g-health health ${h.cls}" aria-live="polite"><div class="hrow"><span class="dot"></span><div class="word">${h.word}</div><span class="eyebrow">Plan health</span></div><p>${esc(h.why)}</p>
       <div class="checks">${h.checks.map(c => `<span class="${c.unk ? "unk" : c.ok ? "" : "bad"}">${c.k}${c.unk ? ": unknown" : c.note ? ": " + c.note : c.ok ? "" : ": no"}</span>`).join("")}</div></section>
-    <section class="g-credits card"><div class="credits"><div><h2>Credits</h2><div class="big num" id="credits">${fmt(cr)}</div></div>
+    <section class="g-credits card"><div class="credits"><div><h2>Credits</h2><div class="bigwrap"><div class="big num${FX.floatUntil > performance.now() ? " pop" : ""}" id="credits">${fmt(FX.shown ?? cr)}</div><span class="cfloat${FX.floatUntil > performance.now() ? " show" : ""}">${FX.floatText}</span></div></div>
       <div class="rate">${h.rate >= 0 ? "+" : "−"}${kfmt(Math.abs(h.rate))}/h <small>earning rate, last 6 h after fuel</small></div>
       ${spark(t)}<div class="spark-axis"><span>Game start ${new Date(T0).toISOString().slice(5,10)}</span><span>now</span></div></div>
     </section>
     <section class="g-ships">${shipsBlock}</section>
     <section class="g-feed card"><h2>Just happened</h2>${feed(eventsAt(t, big ? 5 : 6))}</section>
-    <section class="g-records"><h2>Records this game</h2><div class="records">
+    <section class="g-records">${recordsBlock(t)}</section>
+  </div></main>`;
+}
+function viewRecords(t){ return `<main>${recordsBlock(t)}</main>`; }
+function recordsBlock(t){
+  return `<h2>Records this game</h2><div class="records">
       <div class="record"><b class="num g">${sgn(best.sell - best.buy)}</b><span>best single trade: ${goodName(best.good)} ${wp(best.src)} → ${wp(best.dst)}, ${new Date(best.s).toISOString().slice(5,10)}</span></div>
       <div class="record"><b>${goodName(goodsRanked[0][0])}</b><span>most valuable good: ${kfmt(goodsRanked[0][1])} profit</span></div>
       <div class="record"><b class="num">${fmt(realTrips.filter(x => x.s <= t).length)}</b><span>trades completed</span></div>
       <div class="record"><b class="num">${kfmt(totalTrade)}</b><span>trading profit before fuel</span></div>
     </div>
-    <p style="margin-top:14px"><a class="gf" href="#/grafana/earnings">${gfIcon} Where do our credits come from? <small>Grafana</small></a></p></section>
-  </div></main>`;
+    <p style="margin-top:14px"><a class="gf" href="#/grafana/earnings">${gfIcon} Where do our credits come from? <small>Grafana</small></a></p>`;
 }
 
 function viewShips(t, filter){
@@ -462,8 +521,14 @@ function viewShip(t, name){
     const r = s.recent.slice(-10).reverse();
     const mx = Math.max(1, ...r.map(x => Math.max(Math.abs(x.sell - x.buy), x.exp)));
     const got = r.reduce((a, x) => a + x.sell - x.buy, 0), expd = r.reduce((a, x) => a + x.exp, 0);
-    hist = `<section class="section"><h2>Its last ${r.length} trades: got ${sgn(got)} vs ${sgn(expd)} expected</h2><div class="hist">${r.map(x => { const p = x.sell - x.buy; return `<div class="row"><span class="num" style="color:var(--muted)">${clockOf(x.s)}</span><span>${goodName(x.good)} ${wp(x.src)} → ${wp(x.dst)}</span><span class="pair" title="expected ${sgn(x.exp)}, got ${sgn(p)}"><i class="e" style="left:0;width:${x.exp/mx*100}%"></i><i class="a ${p < 0 ? "neg" : ""}" style="left:0;width:${Math.abs(p)/mx*100}%"></i></span><span class="v" style="color:${p < 0 ? "var(--red)" : "inherit"}">${sgn(p)}</span></div>`; }).join("")}</div>
-      <p class="note">Grey: what it expected. Green: what it got (before fuel). Red: a loss.</p></section>`;
+    const lo = Math.min(0, ...r.map(x => Math.min(x.sell - x.buy, x.exp))), hi = Math.max(1, ...r.map(x => Math.max(x.sell - x.buy, x.exp)));
+    const X = v => +(4 + (v - lo) / (hi - lo) * 92).toFixed(1);
+    hist = `<section class="section"><h2>Its last ${r.length} trades: got ${sgn(got)} vs ${sgn(expd)} expected</h2><div class="hist">${r.map(x => {
+      const p = x.sell - x.buy, c = p < 0 ? "var(--red)" : p >= x.exp ? "var(--green)" : "var(--yellow)";
+      return `<div class="row"><span class="num tm" style="color:var(--dim)">${clockOf(x.s)}</span><span class="lbl">${goodName(x.good)} ${wp(x.src)} → ${wp(x.dst)}<small>exp ${sgn(x.exp)} → ${sgn(p)}</small></span>
+        <span class="db" role="img" aria-label="expected ${sgn(x.exp)}, got ${sgn(p)}"><i class="z" style="left:${X(0)}%"></i><i class="seg" style="left:${Math.min(X(x.exp), X(p))}%;width:${Math.abs(X(p) - X(x.exp)).toFixed(1)}%;background:${c}"></i><i class="e" style="left:${X(x.exp)}%;border-color:${c}"></i><i class="a" style="left:${X(p)}%;background:${c}"></i></span>
+        <span class="v" style="color:${c}">${p === x.exp ? "on est." : `${sgn(p - x.exp)}<small>vs est.</small>`}</span></div>`; }).join("")}</div>
+      <p class="note">Hollow dot: what it expected. Filled dot: what it got (before fuel). Green beat the estimate, yellow fell short, red lost money.</p></section>`;
     gfl = `<a class="gf" href="#/grafana/estimates?ship=${name}">${gfIcon} Do old prices cost us money? <small>Grafana</small></a>`;
   }
   const evs = name === "HARDBARGAIN-1" ? eventsAt(t, 5) : [];
@@ -521,7 +586,14 @@ function topbar(path, t){
   const notes = [];
   if (!sc.real) notes.push(`Sample situation: “${sc.label}” is invented for testing; the rest is real game data.`);
   if (P.scale > 2) notes.push(`Sample fleet: ${P.scale - 2} ships replay real trades at other times.`);
-  return `<header class="top"><span class="brand"><i aria-hidden="true"></i>HARDBARGAIN</span><span class="badge ${sc.real && P.scale === 2 ? "" : "sample"}">${sc.real && P.scale === 2 ? "REAL DATA" : "SAMPLE DATA"}</span><nav class="tabs"><a href="#/" ${path === "glance" ? 'aria-current="page"' : ""}>Fleet</a><a href="#/ships" ${path === "ships" ? 'aria-current="page"' : ""}>Ships</a></nav><span class="clock num"><span class="d">${new Date(t).toISOString().slice(5,10)} </span>${new Date(t).toISOString().slice(11,19)}<span class="d"> UTC</span></span></header>${notes.map(n => `<div class="samplenote">${n}</div>`).join("")}`;
+  const next = fleetAt(t).filter(x => x.kind === "trader" && (x.status === "trading" || x.status === "busy") && x.saleEta != null).sort((a, b) => a.saleEta - b.saleEta)[0];
+  const ns = next ? `<div class="nextsale"><b>${mmss(next.saleEta)}</b><span>next sale · ${P.scen === "old" ? "~" : ""}${sgn(next.est)} est.</span></div>` : `<div class="nextsale none"><b>—</b><span>no sale under way</span></div>`;
+  return `<header class="top"><span class="brand"><i aria-hidden="true"></i>HARDBARGAIN</span><span class="badge ${sc.real && P.scale === 2 ? "" : "sample"}">${sc.real && P.scale === 2 ? "REAL DATA" : "SAMPLE DATA"}</span><nav class="tabs"><a href="#/" ${path === "glance" ? 'aria-current="page"' : ""}>Glance</a><a href="#/ships" ${path === "ships" ? 'aria-current="page"' : ""}>Ships</a></nav>${ns}</header>${notes.map(n => `<div class="samplenote">${n}</div>`).join("")}`;
+}
+function shellEnd(path){
+  const now_ = performance.now(), tt = FX.toast, show = tt && FX.toastUntil > now_;
+  const toast = `<div class="toastwrap"><div class="toast${show ? " show" : ""}${tt && tt.amt < 0 ? " loss" : ""}" aria-live="polite"><span class="chip">SOLD</span><b>${tt ? sgn(tt.amt) : ""}</b><span>${tt ? `<span class="nm">${tt.name} · </span>${esc(tt.txt)}${tt.more ? ` +${tt.more} more` : ""}` : ""}</span></div></div>`;
+  return toast + `<nav class="btabs" aria-label="Sections"><a href="#/" ${path === "glance" ? 'aria-current="page"' : ""}>Glance</a><a href="#/ships" ${path === "ships" ? 'aria-current="page"' : ""}>Ships</a><a href="#/records" ${path === "records" ? 'aria-current="page"' : ""}>Records</a></nav>`;
 }
 function render(){
   const t = now(), h = location.hash || "#/";
@@ -529,9 +601,10 @@ function render(){
   const parts = path.split("/");
   if (parts[0] === "grafana") return parts[1] === "estimates" ? gEstimates(new URLSearchParams(q).get("ship")) : gEarnings();
   backHash = h;
-  if (parts[0] === "ships") return topbar("ships", t) + viewShips(t, parts[1]);
-  if (parts[0] === "ship") return topbar("", t) + viewShip(t, decodeURIComponent(parts[1]));
-  return topbar("glance", t) + viewGlance(t);
+  if (parts[0] === "ships") return topbar("ships", t) + viewShips(t, parts[1]) + shellEnd("ships");
+  if (parts[0] === "ship") return topbar("", t) + viewShip(t, decodeURIComponent(parts[1])) + shellEnd("");
+  if (parts[0] === "records") return topbar("records", t) + viewRecords(t) + shellEnd("records");
+  return topbar("glance", t) + viewGlance(t) + shellEnd("glance");
 }
 // minimal DOM morph: keeps reading position steady; keyed lists only re-render when membership changes
 function morph(live, fresh){
@@ -549,15 +622,46 @@ function morph(live, fresh){
   }
   for (let i = 0; i < lc.length; i++) morph(lc[i], fc[i]);
 }
-let lastHash = null, lastCredits = null;
+const FX = {shown: null, target: null, floatText: "", floatUntil: 0, toast: null, toastUntil: 0, lastToastAt: 0, pending: [], flash: new Map(), last: new Map(), lastT: null, key: ""};
+function detectSales(t){
+  const key = P.scen + P.scale;
+  if (key !== FX.key || FX.lastT == null || t < FX.lastT){
+    FX.key = key; FX.lastT = t; FX.shown = null; FX.last.clear(); FX.pending = [];
+    for (const x of fleetAt(t)) if (x.tr) FX.last.set(x.name, x.tr);
+    return;
+  }
+  FX.lastT = t;
+  const nowR = performance.now();
+  for (const x of fleetAt(t)){
+    if (!x.tr) continue;
+    const prev = FX.last.get(x.name); FX.last.set(x.name, x.tr);
+    if (prev && prev !== x.tr && prev.sell != null && (x.status === "trading" || x.status === "busy")){
+      const amt = prev.sell - prev.buy;
+      FX.flash.set(x.name, {amt, until: nowR + 4500});
+      FX.pending.push({name: x.name, amt, txt: `${goodName(prev.good)} at ${wp(prev.dst)}`});
+    }
+  }
+  // many Ships: at most one pop-up per 2.6 s, showing the largest sale plus "+N more"
+  if (FX.pending.length && nowR - FX.lastToastAt >= 2600){
+    const top = FX.pending.reduce((a, b) => (b.amt > a.amt ? b : a));
+    const total = FX.pending.reduce((a, b) => a + b.amt, 0);
+    FX.toast = {...top, more: FX.pending.length - 1}; FX.toastUntil = nowR + 2600; FX.lastToastAt = nowR;
+    FX.floatText = `${sgn(total)} profit`; FX.floatUntil = nowR + 2200; FX.pending = [];
+  }
+}
+setInterval(() => {
+  if (FX.target == null || FX.shown == null) return;
+  FX.shown += (FX.target - FX.shown) * 0.18; if (Math.abs(FX.target - FX.shown) < 1) FX.shown = FX.target;
+  const c = document.getElementById("credits"); if (c) c.textContent = fmt(FX.shown);
+}, 200);
+let lastHash = null;
 function tick(){
+  detectSales(now());
   const app = document.getElementById("app");
   const html = render();
   const tpl = document.createElement("div"); tpl.innerHTML = html;
   if (location.hash !== lastHash){ app.replaceChildren(...tpl.childNodes); lastHash = location.hash; app.scrollTop = 0; }
   else { const fl = [...app.childNodes], ff = [...tpl.childNodes]; if (fl.length !== ff.length) app.replaceChildren(...ff); else fl.forEach((n, i) => morph(n, ff[i])); }
-  const c = document.getElementById("credits");
-  if (c){ const v = Number(c.textContent.replace(/,/g, "")); if (lastCredits != null && v > lastCredits + 100){ c.classList.add("pop"); setTimeout(() => c.classList.remove("pop"), 1200); } lastCredits = v; }
   document.getElementById("pSrc").textContent = `${SCEN[P.scen].real ? "Real data" : "Sample situation"} · replay ${clockOf(now())}Z`;
 }
 
@@ -583,6 +687,10 @@ document.querySelectorAll("[data-scale]").forEach(b => b.onclick = () => { P.sca
 document.querySelectorAll("[data-frame]").forEach(b => b.onclick = () => { P.frame = b.dataset.frame; syncControls(); });
 document.querySelectorAll("[data-speed]").forEach(b => b.onclick = () => { rebase(); P.speed = +b.dataset.speed; syncControls(); });
 window.addEventListener("hashchange", tick);
+const pbar = document.getElementById("pbar"), pToggle = document.getElementById("pToggle");
+function setMin(m){ pbar.classList.toggle("min", m); pToggle.setAttribute("aria-expanded", String(!m)); pToggle.textContent = m ? "Prototype ▸" : "Prototype ▾"; }
+pToggle.onclick = () => setMin(!pbar.classList.contains("min"));
+setMin(matchMedia("(max-width:600px)").matches);
 syncControls(); tick(); setInterval(tick, 1000);
 </script>
 </body>
