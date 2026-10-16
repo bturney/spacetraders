@@ -6,8 +6,8 @@ Issues and PRDs for this repo live as GitHub issues. Use the `gh` CLI.
 
 - **Create**: `gh issue create --title "..." --body-file <file>`; select
   labels by workflow below.
-- **Read**: `gh issue view <number> --comments`; add
-  `--json title,body,labels,comments` for structured fields.
+- **Read**: `gh issue view <number> --comments`; use
+  `--json title,body,labels,comments` instead for structured fields.
 - **List**: `gh issue list --state open --json number,title,body,labels,comments --jq '[.[] | {number, title, body, labels: [.labels[].name], comments: [.comments[].body]}]'` with `--label` / `--state` filters.
 - **Comment**: `gh issue comment <number> --body "..."`
 - **Labels**: `gh issue edit <number> --add-label "..."` / `--remove-label "..."`
@@ -47,8 +47,9 @@ task explicitly names it.
 
 **PR authoring.** A PR that meets every acceptance criterion of its issue
 carries the closing keyword (`Closes #N`), so merging it closes the issue. A PR
-that leaves any criterion unmet references the issue plainly (`#N`). Merge
-itself requires an explicit Operator request.
+that leaves any criterion unmet references the issue plainly (`#N`).
+
+After push, `gh pr merge --auto --merge`; branch protection decides.
 
 ## Wayfinding operations
 
