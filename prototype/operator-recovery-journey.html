@@ -1,0 +1,577 @@
+<!doctype html>
+<!--
+  PROTOTYPE — throwaway (#743 "Test the cohesive Operator recovery experience with a prototype").
+  One connected journey: Fleet glance → Ships → Ship + why → scoped Grafana → back.
+  Real data: Generation 5 snapshot (2026-10-16 18:27Z), replayed in time. Fixtures are labelled in-app.
+  Not production code. No server, no persistence. Open this file in a browser.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HARDBARGAIN fleet (prototype)</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible:wght@400;700&family=Chakra+Petch:wght@500;600;700&display=swap" rel="stylesheet">
+<script src="operator-recovery-journey-data.js"></script>
+<style>
+:root{
+  --paper:#EDF1F5; --panel:#F8FAFC; --ink:#1C2A39; --muted:#5D6B7B; --rule:#CBD4DE;
+  --gold:#A8730C; --route:#2D5F8B;
+  --green:#1F8A5B; --amber:#B87400; --red:#C0392B; --unknown:#6E7D8F;
+  --display:"Chakra Petch", system-ui, sans-serif; --body:"Atkinson Hyperlegible", system-ui, sans-serif;
+}
+*{box-sizing:border-box}
+html,body{margin:0;background:#D9DFE6;color:var(--ink);font:16px/1.45 var(--body)}
+a{color:var(--route)}
+button{font:inherit}
+:focus-visible{outline:3px solid var(--route);outline-offset:2px}
+
+/* App frame: container queries so the phone frame behaves like a real phone */
+#stage{display:flex;justify-content:center;padding:0 0 88px}
+.app{container-type:inline-size;background:var(--paper);width:100%;max-width:1180px;min-height:100vh}
+.phone .app{max-width:390px;height:780px;min-height:0;overflow:auto;margin-top:16px;border-radius:28px;box-shadow:0 0 0 10px #1C2A39}
+
+.top{display:flex;align-items:center;gap:20px;padding:14px 20px;border-bottom:1px solid var(--rule);background:var(--panel);position:sticky;top:0;z-index:5}
+.brand{font:700 18px var(--display);letter-spacing:.02em}
+.tabs{display:flex;gap:4px}
+.tabs a{font:600 15px var(--display);text-decoration:none;color:var(--muted);padding:6px 10px;border-radius:6px}
+.tabs a[aria-current]{color:var(--ink);background:#E1E8EF}
+.clock{margin-left:auto;font:500 14px var(--display);color:var(--muted)}
+.sample{background:repeating-linear-gradient(135deg,#FFF3C4 0 10px,#FBE7A1 10px 20px);color:#5B4500;padding:6px 20px;font-size:14px}
+
+main{padding:20px}
+h1,h2,h3{font-family:var(--display);margin:0}
+h2{font-size:15px;color:var(--muted);font-weight:600;margin:0 0 10px}
+.num{font-family:var(--display);font-variant-numeric:tabular-nums}
+
+/* Plan health band */
+.health{border-radius:14px;padding:16px 18px;color:#fff;position:relative;overflow:hidden}
+.health.green{background:var(--green)} .health.amber{background:var(--amber)} .health.red{background:var(--red)}
+.health.unknown{background:repeating-linear-gradient(135deg,#6E7D8F 0 14px,#65748A 14px 28px)}
+.health .word{font:700 30px/1.1 var(--display)}
+.health p{margin:6px 0 10px;max-width:60ch}
+.checks{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:14px}
+.checks span::before{content:"";display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px;background:#fff}
+.checks span.bad::before{background:transparent;box-shadow:inset 0 0 0 2px #fff}
+.checks span.unk::before{background:transparent;box-shadow:inset 0 0 0 2px #fff;border-radius:2px}
+
+/* Credits */
+.credits{display:grid;grid-template-columns:auto 1fr;gap:4px 16px;align-items:end;padding:16px 0}
+.credits .big{font:700 40px/1 var(--display);color:var(--gold);font-variant-numeric:tabular-nums;transition:color .3s}
+.credits .big.pop{color:var(--green)}
+.credits .rate{font:600 16px var(--display)}
+.credits .rate small{font:400 13px var(--body);color:var(--muted)}
+.spark{grid-column:1/-1;width:100%;height:56px}
+.spark-axis{grid-column:1/-1;display:flex;justify-content:space-between;font-size:12px;color:var(--muted)}
+
+.glance{display:grid;gap:22px}
+.glance .credits{padding:0}
+@container (max-width:759px){ .spark{height:36px} .clock .d{display:none} .credits .big{font-size:34px} }
+@container (min-width:760px){
+  .glance{grid-template-columns:minmax(0,5fr) minmax(0,6fr);grid-template-areas:"health health" "credits ships" "feed ships" "records records";align-items:start}
+  .g-health{grid-area:health} .g-credits{grid-area:credits} .g-ships{grid-area:ships} .g-feed{grid-area:feed} .g-records{grid-area:records}
+}
+
+/* Route rows */
+.ships{display:grid;gap:10px}
+.ship{display:grid;grid-template-columns:1fr auto;gap:2px 12px;padding:12px 14px;background:var(--panel);border-radius:10px;text-decoration:none;color:inherit;border-left:5px solid var(--green)}
+.ship:hover{background:#fff}
+.ship.busy{border-left-color:var(--amber)} .ship.stuck{border-left-color:var(--red)} .ship.waiting{border-left-color:var(--route)} .ship.scouting{border-left-color:#7A5BB5}
+.ship .name{font:600 14px var(--display);color:var(--muted)}
+.ship .act{font-weight:700}
+.ship .est{font:600 15px var(--display);text-align:right;font-variant-numeric:tabular-nums}
+.ship .est.unk{color:var(--muted);font-weight:500}
+.ship .eta{font:500 14px var(--display);text-align:right;color:var(--muted);font-variant-numeric:tabular-nums}
+.ship .detail{font-size:14px;color:var(--muted)}
+.route{grid-column:1/-1;display:grid;grid-template-columns:auto 1fr auto;gap:8px;align-items:center;font:600 13px var(--display);margin:6px 0 2px}
+.track{position:relative;height:6px;background:#DDE4EB;border-radius:3px}
+.track .done{position:absolute;inset:0 auto 0 0;background:var(--route);border-radius:3px}
+.track .craft{position:absolute;top:50%;width:16px;height:16px;margin:-8px 0 0 -8px}
+.waiting .track .done{background:repeating-linear-gradient(90deg,var(--route) 0 6px,transparent 6px 10px)}
+.stuck .track .done{background:var(--red)}
+.status{display:inline-block;font:600 12px var(--display);padding:1px 8px;border-radius:10px;background:#E1E8EF;color:var(--ink);margin-left:6px;vertical-align:1px}
+.status.busy{background:#FBE7C2;color:#6B4400} .status.stuck{background:#F6D3CF;color:#7A1F14} .status.waiting{background:#D8E6F3;color:#1D4466}
+
+/* Fleet strip for 100+ */
+.strip{display:grid;grid-template-columns:repeat(auto-fill,minmax(12px,1fr));gap:3px;margin:4px 0 10px}
+.strip a{aspect-ratio:1;border-radius:2px;background:var(--green);display:block}
+.strip a.busy{background:var(--amber)} .strip a.stuck{background:var(--red)} .strip a.waiting{background:var(--route)} .strip a.scouting{background:#7A5BB5}
+.legend{display:flex;flex-wrap:wrap;gap:4px 14px;font-size:14px}
+.legend a{color:inherit;text-decoration:none}
+.legend i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:5px}
+
+/* Events */
+.feed{list-style:none;margin:0;padding:0}
+.feed li{display:grid;grid-template-columns:3.4em 1fr auto;gap:10px;padding:8px 0;border-bottom:1px solid var(--rule);align-items:baseline}
+.feed .t{font:500 13px var(--display);color:var(--muted)}
+.feed .amt{font:600 15px var(--display);font-variant-numeric:tabular-nums}
+.feed .amt.up{color:var(--green)} .feed .amt.down{color:var(--red)}
+.feed .sub{font-size:13px;color:var(--muted)}
+.feed li.arrive{animation:arrive 1.6s ease-out}
+@keyframes arrive{from{background:#FFF1C9}to{background:transparent}}
+@media (prefers-reduced-motion:reduce){.feed li.arrive{animation:none}.credits .big{transition:none}}
+
+.records{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px}
+.record{padding:10px 12px;border-radius:10px;background:var(--panel)}
+.record b{display:block;font:700 20px var(--display)}
+.record span{font-size:13px;color:var(--muted)}
+.gf{display:inline-flex;gap:8px;align-items:center;padding:8px 12px;border-radius:8px;background:#22252B;color:#fff;text-decoration:none;font-weight:700}
+.gf small{font-weight:400;color:#C9CED6}
+.gf svg{flex:none}
+
+/* Ships page */
+.chips{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:14px}
+.chips a{padding:4px 12px;border-radius:16px;background:var(--panel);text-decoration:none;color:var(--ink);font-size:14px;border:1px solid var(--rule)}
+.chips a[aria-current]{background:var(--ink);color:#fff;border-color:var(--ink)}
+@container (min-width:760px){
+  .list .ship{grid-template-columns:minmax(240px,1.3fr) minmax(0,1.6fr) 90px 90px;align-items:center}
+  .list .ship .route{grid-column:auto;margin:0;order:2} .list .ship .est{order:3} .list .ship .eta{order:4}
+  .list .ship .detail{display:none}
+}
+
+/* Ship page */
+.back{display:inline-block;margin-bottom:12px;text-decoration:none;font-weight:700}
+.shiphead{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px 12px;margin-bottom:10px}
+.shiphead h1{font-size:26px}
+.why{font-size:19px;line-height:1.5;max-width:62ch;margin:14px 0}
+.why b{font-weight:700}
+.bars{display:grid;gap:6px;margin:8px 0 18px;max-width:640px}
+.bar{display:grid;grid-template-columns:minmax(150px,1.2fr) 2fr 64px;gap:10px;align-items:center;font-size:14px}
+.bar .fill{height:14px;border-radius:3px;background:#B9C6D3}
+.bar.pick .fill{background:var(--route)} .bar.pick{font-weight:700}
+.bar .v{font:600 14px var(--display);text-align:right}
+.hist{display:grid;gap:4px;max-width:640px}
+.hist .row{display:grid;grid-template-columns:3.4em minmax(120px,1fr) 1.6fr 70px;gap:10px;align-items:center;font-size:14px}
+.hist .pair{position:relative;height:16px}
+.hist .pair i{position:absolute;top:3px;height:10px;border-radius:2px}
+.hist .pair i.e{background:#C9D3DD;top:0;height:16px}
+.hist .pair i.a{background:var(--green)} .hist .pair i.a.neg{background:var(--red)}
+.hist .v{font:600 14px var(--display);text-align:right}
+.section{margin-top:22px}
+.note{font-size:14px;color:var(--muted);max-width:62ch}
+
+/* Grafana mock */
+.grafana{background:#111217;color:#CCCCDC;min-height:100%;font:14px/1.4 Inter,system-ui,sans-serif}
+.gtop{display:flex;align-items:center;gap:12px;padding:10px 16px;border-bottom:1px solid #2A2D35;flex-wrap:wrap}
+.gtop .crumb{color:#9FA7B3} .gtop .crumb b{color:#fff}
+.gtop .tr{margin-left:auto;border:1px solid #2A2D35;padding:4px 10px;border-radius:4px}
+.gtop a{color:#6E9FFF;text-decoration:none;font-weight:600}
+.gvars{display:flex;gap:8px;padding:10px 16px;flex-wrap:wrap}
+.gvars span{border:1px solid #2A2D35;border-radius:4px;padding:3px 8px;background:#181B1F}
+.gvars span b{color:#fff;font-weight:500}
+.gpanels{display:grid;gap:10px;padding:0 16px 20px}
+@container (min-width:760px){.gpanels{grid-template-columns:repeat(2,minmax(0,1fr))}.gpanels .full{grid-column:1/-1}}
+.gp{background:#181B1F;border:1px solid #23262D;border-radius:4px;padding:10px 12px}
+.gp h4{margin:0 0 8px;font-size:13px;font-weight:600;color:#CCCCDC}
+.gp .ans{font-size:16px;line-height:1.5;color:#fff;max-width:75ch}
+.gp svg text{fill:#9FA7B3;font:11px Inter,system-ui,sans-serif}
+.gp table{width:100%;border-collapse:collapse;font-size:13px}
+.gp td,.gp th{padding:4px 6px;border-bottom:1px solid #2A2D35;text-align:left}
+.gp th{color:#9FA7B3;font-weight:500}
+.gp td.r,.gp th.r{text-align:right}
+
+/* Prototype controls: deliberately not part of the design */
+.pbar{position:fixed;left:50%;bottom:12px;transform:translateX(-50%);z-index:50;display:flex;flex-wrap:wrap;gap:6px 12px;align-items:center;justify-content:center;
+  background:#4B1FB8;color:#fff;padding:8px 14px;border-radius:14px;box-shadow:0 6px 24px rgba(40,10,110,.45);font:13px system-ui,sans-serif;max-width:calc(100vw - 20px)}
+.pbar select,.pbar button{background:#fff;color:#2A0F73;border:0;border-radius:6px;padding:3px 6px;font:13px system-ui,sans-serif}
+.pbar button[aria-pressed=true]{background:#FFD84D}
+.pbar .src{padding:2px 8px;border-radius:6px;background:#2A0F73}
+</style>
+</head>
+<body>
+<div id="stage"><div class="app" id="app"></div></div>
+
+<div class="pbar" role="region" aria-label="Prototype controls">
+  <b>Prototype</b>
+  <label>Situation <select id="pScen"></select></label>
+  <span>Ships <button data-scale="2">2</button><button data-scale="120">120</button></span>
+  <span>View <button data-frame="desk">Desktop</button><button data-frame="phone">Phone</button></span>
+  <span>Speed <button data-speed="1">1×</button><button data-speed="10">10×</button><button data-speed="60">60×</button></span>
+  <span class="src" id="pSrc"></span>
+</div>
+
+<script>
+"use strict";
+const S = window.SNAPSHOT;
+const ms = s => Date.parse(s);
+const H = 3600e3, M = 60e3;
+const fmt = n => Math.round(n).toLocaleString("en-US");
+const sgn = n => (n >= 0 ? "+" : "−") + fmt(Math.abs(n));
+const kfmt = n => Math.abs(n) >= 1e6 ? (n/1e6).toFixed(2) + "M" : Math.abs(n) >= 1e4 ? Math.round(n/1e3) + "k" : fmt(n);
+const wp = w => w ? w.replace("X1-FY6-", "") : "?";
+const goodName = g => g.toLowerCase().split("_").map(w => w[0].toUpperCase() + w.slice(1)).join(" ");
+const clockOf = t => new Date(t).toISOString().slice(11, 16);
+const mmss = s => { s = Math.max(0, Math.round(s)); return s >= 3600 ? Math.floor(s/3600) + "h " + Math.floor(s%3600/60) + "m" : Math.floor(s/60) + ":" + String(s%60).padStart(2, "0"); };
+const esc = s => String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+
+/* ---------- Real data ---------- */
+const CAPTURE = ms(S.capturedAt);
+const trips = S.trips.map(r => ({b: ms(r[0]), s: ms(r[1]), good: r[2], units: r[3], src: r[4], dst: r[5], buy: r[6], sell: r[7], exp: r[8], age: r[9], alts: r[10]}));
+const inflight = S.inFlight;
+trips.push({b: ms(inflight.bought), s: ms(inflight.bought) + 115e3, good: inflight.good, units: inflight.units, src: inflight.src, dst: inflight.dst,
+  buy: inflight.buyTotal, sell: null, exp: inflight.expected, age: inflight.destAgeSec, alts: inflight.alts, open: true});
+const skipped = S.skipped.map(r => ({t: ms(r[0]), wp: r[1], price: r[2], expected: r[3]}));
+const scout = S.scout.map(r => ({a: ms(r[0]), z: r[1] ? ms(r[1]) : null, wp: r[2]}));
+const creditPts = S.credits.map(r => [ms(r[0]), r[1]]);
+const fuelByHour = new Map(S.fuelByHour.map(r => [ms(r[0]), r[1]]));
+const T0 = trips[0].b, T1 = CAPTURE;
+
+function firstAfter(arr, key, t){ let lo = 0, hi = arr.length; while (lo < hi){ const m = (lo+hi) >> 1; if (arr[m][key] > t) hi = m; else lo = m+1; } return lo; }
+function creditsAt(t){
+  let i = creditPts.findIndex(p => p[0] > t); if (i <= 0) i = creditPts.length;
+  const [h, c] = creditPts[i-1];
+  // hourly anchor (balance after the hour's last charge), then replay trades inside the hour
+  let v = c; for (const tr of trips){ if (tr.b > h + H) break; if (tr.b > t && tr.b <= h + H) v += tr.buy; if (tr.sell != null && tr.s > t && tr.s <= h + H) v -= tr.sell; }
+  return v;
+}
+function profitIn(a, z){ let p = 0; for (let i = firstAfter(trips, "s", a); i < trips.length && trips[i].s <= z; i++) if (trips[i].sell != null) p += trips[i].sell - trips[i].buy; return p; }
+function fuelIn(a, z){ let f = 0; for (const [h, v] of fuelByHour) if (h >= a - H && h < z) f += v * Math.max(0, Math.min(1, (Math.min(z, h+H) - Math.max(a, h)) / H)); return f; }
+
+/* ---------- Situations ---------- */
+const SCEN = {
+  healthy: {label: "Healthy trading", real: true, a: CAPTURE - 30*M, z: CAPTURE},
+  busy:    {label: "Busy but not earning", real: true, a: ms("2026-10-12T23:38:00Z"), z: ms("2026-10-12T23:58:00Z")},
+  waiting: {label: "Waiting on purpose", real: false, a: CAPTURE - 30*M, z: CAPTURE},
+  stuck:   {label: "Stuck, recovering", real: false, a: CAPTURE - 30*M, z: CAPTURE},
+  old:     {label: "Old information", real: false, a: CAPTURE - 30*M, z: CAPTURE},
+};
+const P = {scen: "healthy", scale: 2, frame: "desk", speed: 1};
+let simStart = performance.now(), simBase = 0;
+function now(){ const sc = SCEN[P.scen]; const span = sc.z - sc.a; const el = (simBase + (performance.now() - simStart) * P.speed) % span; return sc.a + el; }
+
+/* ---------- Ship model ---------- */
+function traderAt(t, shift = 0){
+  // shift lets sample ships replay real trades at other moments
+  let u = t - shift; const span = T1 - T0; while (u < T0) u += span; while (u > T1) u -= span;
+  const k = Math.min(firstAfter(trips, "s", u), trips.length - 1);
+  const tr = trips[k], prev = trips[k-1];
+  const recent = trips.slice(Math.max(0, k - 12), k).filter(x => x.sell != null);
+  if (u >= tr.b){
+    const p = (u - tr.b) / (tr.s - tr.b);
+    return {phase: "haul", tr, recent, from: tr.src, to: tr.dst, p, eta: (tr.s - u)/1e3,
+      act: `Hauling ${tr.units} ${goodName(tr.good)}`, detail: `bought ${fmt(tr.buy/tr.units)} each · sells ~${fmt((tr.buy+tr.exp)/tr.units)}`, est: tr.exp};
+  }
+  const from = prev ? prev.dst : tr.src, p = prev ? (u - prev.s) / (tr.b - prev.s) : 0;
+  const act = from === tr.src ? `Buying ${goodName(tr.good)} at ${wp(tr.src)}` : `Flying to ${wp(tr.src)} to buy ${goodName(tr.good)}`;
+  return {phase: "fetch", tr, recent, from, to: tr.src, p, eta: (tr.b - u)/1e3, act, detail: `then sells at ${wp(tr.dst)}`, est: tr.exp};
+}
+function scoutAt(t){
+  const v = scout.filter(x => x.a <= t);
+  const cur = v[v.length - 1];
+  if (!cur) return {act: "Checking market prices", from: "?", to: "?", p: 0, eta: 0, visits: 0};
+  const prev = v[v.length - 2];
+  const end = cur.z || cur.a + 160e3;
+  const visits = v.filter(x => x.a > t - 3*H).length;
+  return {act: `Checking prices at ${wp(cur.wp)}`, from: prev ? prev.wp : cur.wp, to: cur.wp, p: Math.min(1, (t - cur.a)/(end - cur.a)), eta: (end - t)/1e3, visits};
+}
+
+const STUCK_SINCE = 12*M, WAIT_CYCLE = 300;
+function fleetAt(t){
+  const ships = [];
+  const one = traderAt(t);
+  let s1 = {name: "HARDBARGAIN-1", kind: "trader", status: "trading", ...one};
+  // busy-but-not-earning is computed from the real record, never forced
+  const sk = skipped.filter(x => x.t <= t && x.t > t - 30*M).length, lh = profitIn(t - H, t), usual = profitIn(t - 6*H, t) / 6;
+  if (sk >= 3 || lh < 0.4 * usual){
+    const why = [];
+    if (lh < 0.4 * usual) why.push(`earned ${sgn(lh)} in the last hour (usually ~${kfmt(usual)})`);
+    if (sk >= 3) why.push(`${sk} buys skipped in 30 min because prices rose before it got there`);
+    s1 = {...s1, status: "busy", busyWhy: why, detail: why[0] + " · " + s1.detail};
+  }
+  if (P.scen === "waiting"){
+    const left = WAIT_CYCLE - ((t - SCEN.waiting.a)/1e3 % WAIT_CYCLE);
+    s1 = {...s1, status: "waiting", phase: "wait", from: "X1-FY6-C41", to: "X1-FY6-C41", p: 1 - left/WAIT_CYCLE, eta: left,
+      act: "Waiting for better prices at C41", detail: "every known trade would lose money after fuel · next look when the scout reports", est: null};
+  }
+  if (P.scen === "stuck"){
+    const left = 90 - ((t - SCEN.stuck.a)/1e3 % 90);
+    s1 = {...s1, status: "stuck", phase: "stuck", from: "X1-FY6-G49", to: "X1-FY6-E45", p: 0.02, eta: left,
+      act: "Stuck at G49: not enough fuel to leave", detail: `trying again in ${mmss(left)} · stuck for ${mmss((STUCK_SINCE + t - SCEN.stuck.a)/1e3)}`, est: null};
+  }
+  ships.push(s1);
+  ships.push({name: "HARDBARGAIN-2", kind: "scout", status: "scouting", ...scoutAt(t), est: null,
+    detail: P.scen === "old" ? "2 markets behind: oldest price 44 min" : "keeps the trader's prices fresh"});
+  if (P.scale > 2){
+    for (let i = 3; i <= P.scale; i++){
+      const name = "HARDBARGAIN-" + i, shift = ((i * 7919) % 96) * H + i * 137e3;
+      if (i % 12 === 0){ const s = traderAt(t, shift); ships.push({name, kind: "scout", status: "scouting", from: s.from, to: s.to, p: s.p, eta: s.eta, act: `Checking prices at ${wp(s.to)}`, detail: "keeps prices fresh", est: null, sample: true}); continue; }
+      const base = {name, kind: "trader", sample: true, ...traderAt(t, shift)};
+      if ([17, 54, 88, 103].includes(i)) ships.push({...base, status: "stuck", p: 0.02, eta: 90 - (t/1e3 + i*11) % 90, act: `Stuck at ${wp(base.from)}: ${i%2 ? "market closed to us" : "not enough fuel to leave"}`, detail: "trying again automatically", est: null});
+      else if ([5, 23, 41, 60, 77, 95, 110, 118].includes(i)){ const left = WAIT_CYCLE - ((t/1e3 + i*37) % WAIT_CYCLE); ships.push({...base, status: "waiting", from: base.from, to: base.from, p: 1 - left/WAIT_CYCLE, eta: left, act: `Waiting for better prices at ${wp(base.from)}`, detail: "no trade worth the fuel yet", est: null}); }
+      else if ([12, 33, 49, 66, 81, 99, 104, 115, 119].includes(i)) ships.push({...base, status: "busy", detail: `${2 + i%4} buys skipped in 30 min: prices rose · ` + base.detail});
+      else ships.push({...base, status: "trading"});
+    }
+  }
+  return ships;
+}
+
+/* ---------- Plan health ---------- */
+function moneyScale(ships){ return P.scale > 2 ? ships.filter(s => s.kind === "trader" && s.status === "trading").length + 0.4 * ships.filter(s => s.status === "busy").length : 1; }
+function healthAt(t, ships){
+  const k = moneyScale(ships);
+  const lastHour = k * profitIn(t - H, t), sixH = k * profitIn(t - 6*H, t) / 6;
+  const fuel6 = k * fuelIn(t - 6*H, t) / 6;
+  const bigLoss = trips.filter(x => x.sell != null && x.s <= t && x.s > t - H && x.sell - x.buy < -5000);
+  const stuck = ships.filter(s => s.status === "stuck"), busy = ships.filter(s => s.status === "busy"), waiting = ships.filter(s => s.status === "waiting");
+  const traders = ships.filter(s => s.kind === "trader").length;
+  const checks = [
+    {k: "Earning", ok: lastHour >= 0.4 * sixH && P.scen !== "stuck", unk: P.scen === "old"},
+    {k: "Ships moving", ok: stuck.length === 0 || (P.scale > 2 && stuck.length / traders <= 0.1), note: stuck.length ? `${stuck.length} stuck` : ""},
+    {k: "Prices fresh", ok: P.scen !== "old", unk: false},
+    {k: "Trades as expected", ok: bigLoss.length === 0},
+  ];
+  const rate = sixH - fuel6;
+  let h;
+  if (P.scen === "old") h = {cls: "unknown", word: "Can’t tell right now", why: "Price info is 44 min old (we trust it up to 30). The scout is 2 markets behind and should catch up by about " + clockOf(t + 9*M) + "."};
+  else if (stuck.length && (P.scale === 2 || stuck.length / traders > 0.1)) h = {cls: "red", word: "Off plan", why: `Earning has stopped: ${stuck[0].name} is stuck (${stuck[0].act.split(": ")[1]}). It keeps trying on its own.`};
+  else if (lastHour < 0.4 * sixH || bigLoss.length || busy.length / Math.max(1, traders) > 0.2)
+    h = {cls: "amber", word: "Small setback", why: `Busy but earning little: ${sgn(lastHour)} in the last hour against ~${kfmt(sixH)}/h usually.` +
+      (bigLoss.length ? ` ${goodName(bigLoss[0].good)} sold for ${fmt(bigLoss[0].buy - bigLoss[0].sell)} less than we paid.` : "")};
+  else {
+    const extra = stuck.length ? ` ${stuck.length} ships stuck, ${busy.length} earning little; the rest carry it.` : waiting.length ? ` ${waiting.length === 1 ? waiting[0].name + " is" : waiting.length + " ships are"} waiting for better prices, on purpose.` : "";
+    h = {cls: "green", word: "On plan", why: `Trading steadily: ${sgn(lastHour)} in the last hour, ~${kfmt(rate)}/h after fuel.` + extra};
+  }
+  return {...h, checks, rate, lastHour};
+}
+
+/* ---------- Events ---------- */
+function eventsAt(t, n = 6){
+  const ev = [];
+  for (let i = firstAfter(trips, "s", t) - 1; i >= 0 && ev.length < n * 2 && trips[i].s > t - 2*H; i--){
+    const x = trips[i]; if (x.sell == null) continue;
+    const p = x.sell - x.buy;
+    ev.push({t: x.s, key: "s" + x.s, txt: `Sold ${x.units} ${goodName(x.good)} at ${wp(x.dst)}`, sub: `expected ${sgn(x.exp)}`, amt: p});
+  }
+  for (const x of skipped) if (x.t <= t && x.t > t - 2*H) ev.push({t: x.t, key: "k" + x.t, txt: `Skipped a buy at ${wp(x.wp)}`, sub: `price rose to ${fmt(x.price)} (planned ${fmt(x.expected)})`, amt: null});
+  if (P.scen === "stuck") ev.push({t: SCEN.stuck.a - STUCK_SINCE + 0, key: "stuck", txt: "HARDBARGAIN-1 got stuck at G49", sub: "not enough fuel to leave · retrying on its own", amt: null, stuck: true});
+  if (P.scen === "waiting") ev.push({t: SCEN.waiting.a, key: "wait", txt: "HARDBARGAIN-1 started waiting at C41", sub: "no trade worth the fuel", amt: null});
+  return ev.filter(e => e.t <= t || e.key === "stuck").sort((a, b) => b.t - a.t).slice(0, n);
+}
+
+/* ---------- Records (real) ---------- */
+const realTrips = trips.filter(x => x.sell != null);
+const best = realTrips.reduce((a, b) => (b.sell - b.buy > a.sell - a.buy ? b : a));
+const byGood = {}; for (const x of realTrips) byGood[x.good] = (byGood[x.good] || 0) + x.sell - x.buy;
+const goodsRanked = Object.entries(byGood).sort((a, b) => b[1] - a[1]);
+const totalTrade = realTrips.reduce((a, x) => a + x.sell - x.buy, 0);
+
+/* ---------- Views ---------- */
+const craft = `<svg class="craft" viewBox="0 0 16 16" aria-hidden="true"><path d="M2 3 L14 8 L2 13 L5 8 Z" fill="#1C2A39"/></svg>`;
+function route(s){
+  const p = Math.max(0, Math.min(1, s.p || 0));
+  return `<div class="route"><span>${wp(s.from)}</span><div class="track" role="img" aria-label="${Math.round(p*100)}% of the way from ${wp(s.from)} to ${wp(s.to)}"><div class="done" style="width:${(p*100).toFixed(1)}%"></div><span style="position:absolute;left:${(p*100).toFixed(1)}%;top:0;height:6px">${craft}</span></div><span>${wp(s.to)}</span></div>`;
+}
+const STATUS_WORD = {trading: "Trading", busy: "Busy, not earning", waiting: "Waiting on purpose", stuck: "Stuck", scouting: "Scouting"};
+function etaText(s){
+  if (s.status === "stuck") return `retry ${mmss(s.eta)}`;
+  if (s.status === "waiting") return `look ${mmss(s.eta)}`;
+  return `${s.phase === "fetch" ? "buys" : s.kind === "scout" ? "next" : "sells"} ${mmss(s.eta)}`;
+}
+function shipRow(s){
+  return `<a class="ship ${s.status}" href="#/ship/${s.name}" data-key="${s.name}">
+    <div><span class="name">${s.name}</span>${s.status !== "trading" && s.status !== "scouting" ? `<span class="status ${s.status}">${STATUS_WORD[s.status]}</span>` : ""}<div class="act">${esc(s.act)}</div></div>
+    <div class="est ${s.est == null ? "unk" : ""}">${s.est == null ? (s.kind === "scout" ? "scout" : "no trade") : "~" + sgn(s.est)}</div>
+    ${route(s)}
+    <div class="detail">${esc(s.detail || "")}</div>
+    <div class="eta">${etaText(s)}</div>
+  </a>`;
+}
+function spark(t){
+  const pts = creditPts.filter(p => p[0] <= t); const w = 600, h = 56;
+  const x0 = creditPts[0][0], x1 = t, ymax = Math.max(...pts.map(p => p[1])) * 1.05;
+  const d = pts.map((p, i) => `${i ? "L" : "M"}${((p[0]-x0)/(x1-x0)*w).toFixed(1)},${(h - p[1]/ymax*h).toFixed(1)}`).join(" ");
+  const xe = ((pts[pts.length-1][0]-x0)/(x1-x0)*w).toFixed(1);
+  return `<svg class="spark" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" role="img" aria-label="Credits over this game, rising from ${kfmt(pts[0][1])} to ${kfmt(pts[pts.length-1][1])}"><path d="${d} L${xe},${h} L0,${h}Z" fill="#F1E3C4"/><path d="${d}" fill="none" stroke="#A8730C" stroke-width="2" vector-effect="non-scaling-stroke"/></svg>`;
+}
+function feed(ev){
+  return `<ul class="feed">${ev.map(e => `<li data-key="${e.key}"><span class="t">${clockOf(e.t)}</span><span>${esc(e.txt)}<br><span class="sub">${esc(e.sub)}</span></span><span class="amt ${e.amt == null ? "" : e.amt >= 0 ? "up" : "down"}">${e.amt == null ? "" : sgn(e.amt)}</span></li>`).join("")}</ul>`;
+}
+const gfIcon = `<svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true"><circle cx="9" cy="9" r="8" fill="#F46800"/><path d="M5 11 L8 7 L10 9 L13 5" stroke="#fff" stroke-width="1.8" fill="none"/></svg>`;
+
+function viewGlance(t){
+  const ships = fleetAt(t), h = healthAt(t, ships), cr = P.scale > 2 ? 40e6 + moneyScale(ships) * (creditsAt(t) - 2.5e6) : creditsAt(t);
+  const traders = ships.filter(s => s.kind === "trader");
+  const moving = ships.filter(s => s.status !== "stuck" && s.status !== "waiting").length;
+  const counts = {}; for (const s of ships) counts[s.status] = (counts[s.status] || 0) + 1;
+  const big = P.scale > 2;
+  const shipsBlock = big
+    ? `<h2>${moving} of ${ships.length} ships in motion</h2>
+       <div class="strip">${ships.map(s => `<a class="${s.status}" href="#/ship/${s.name}" title="${s.name}: ${esc(s.act)}" aria-label="${s.name}: ${esc(s.act)}"></a>`).join("")}</div>
+       <div class="legend">${["trading","scouting","waiting","busy","stuck"].filter(k => counts[k]).map(k => `<a href="#/ships/${k}"><i style="background:var(--${{trading:"green",scouting:"none",waiting:"route",busy:"amber",stuck:"red"}[k]});${k==="scouting"?"background:#7A5BB5":""}"></i>${counts[k]} ${STATUS_WORD[k].toLowerCase()}</a>`).join("")}</div>
+       ${ships.some(s => s.status === "stuck" || s.status === "busy") ? `<h2 style="margin-top:16px">Not earning right now</h2><div class="ships">${ships.filter(s => s.status === "stuck").concat(ships.filter(s => s.status === "busy")).slice(0, 3).map(shipRow).join("")}</div><p><a href="#/ships">All ${ships.length} ships</a></p>` : ""}`
+    : `<h2>${moving} of ${ships.length} ships in motion</h2><div class="ships">${ships.map(shipRow).join("")}</div>`;
+  return `<main><div class="glance">
+    <section class="g-health health ${h.cls}" aria-live="polite"><div class="word">${h.word}</div><p>${esc(h.why)}</p>
+      <div class="checks">${h.checks.map(c => `<span class="${c.unk ? "unk" : c.ok ? "" : "bad"}">${c.k}${c.unk ? ": unknown" : c.note ? ": " + c.note : c.ok ? "" : ": no"}</span>`).join("")}</div></section>
+    <section class="g-credits"><div class="credits"><div><h2>Credits</h2><div class="big num" id="credits">${fmt(cr)}</div></div>
+      <div class="rate">${h.rate >= 0 ? "+" : "−"}${kfmt(Math.abs(h.rate))}/h <small>earning rate, last 6 h after fuel</small></div>
+      ${spark(t)}<div class="spark-axis"><span>Game start ${new Date(T0).toISOString().slice(5,10)}</span><span>now</span></div></div>
+    </section>
+    <section class="g-ships">${shipsBlock}</section>
+    <section class="g-feed"><h2>Just happened</h2>${feed(eventsAt(t, big ? 5 : 6))}</section>
+    <section class="g-records"><h2>Records this game</h2><div class="records">
+      <div class="record"><b class="num">${sgn(best.sell - best.buy)}</b><span>best single trade: ${goodName(best.good)} ${wp(best.src)} → ${wp(best.dst)}, ${new Date(best.s).toISOString().slice(5,10)}</span></div>
+      <div class="record"><b>${goodName(goodsRanked[0][0])}</b><span>most valuable good: ${kfmt(goodsRanked[0][1])} profit</span></div>
+      <div class="record"><b class="num">${fmt(realTrips.filter(x => x.s <= t).length)}</b><span>trades completed</span></div>
+      <div class="record"><b class="num">${kfmt(totalTrade)}</b><span>trading profit before fuel</span></div>
+    </div>
+    <p style="margin-top:14px"><a class="gf" href="#/grafana/earnings">${gfIcon} Where do our credits come from? <small>Grafana</small></a></p></section>
+  </div></main>`;
+}
+
+function viewShips(t, filter){
+  const ships = fleetAt(t);
+  const counts = {}; for (const s of ships) counts[s.status] = (counts[s.status] || 0) + 1;
+  const shown = filter ? ships.filter(s => s.status === filter) : ships;
+  return `<main><div class="chips"><a href="#/ships" ${!filter ? 'aria-current="true"' : ""}>All ${ships.length}</a>${["trading","scouting","waiting","busy","stuck"].filter(k => counts[k]).map(k => `<a href="#/ships/${k}" ${filter === k ? 'aria-current="true"' : ""}>${STATUS_WORD[k]} ${counts[k]}</a>`).join("")}</div>
+    <div class="ships list">${shown.map(shipRow).join("")}</div></main>`;
+}
+
+function viewShip(t, name){
+  const s = fleetAt(t).find(x => x.name === name);
+  if (!s) return `<main><a class="back" href="#/">← Fleet</a><p>No ship called ${esc(name)}.</p></main>`;
+  let why = "", choice = "", hist = "", gfl = "";
+  if (s.kind === "scout"){
+    why = `<p class="why">${esc(s.act)}. It flies market to market so ${P.scale > 2 ? "the traders pick" : "HARDBARGAIN-1 picks"} trades from current prices, not old ones. ${s.visits ? `It checked <b>${s.visits} markets</b> in the last 3 hours.` : ""} ${P.scen === "old" ? "Right now it is <b>2 markets behind</b>: the oldest price is 44 min old, so the fleet’s health is unknown until it catches up." : ""}</p>`;
+    gfl = `<a class="gf" href="#/grafana/estimates?ship=${name}">${gfIcon} Do old prices cost us money? <small>Grafana</small></a>`;
+  } else if (s.status === "stuck"){
+    why = `<p class="why"><b>${esc(s.act)}.</b> It arrived with less fuel than planned and the market here sells none. It retries on its own every 90 s; ${P.scale > 2 ? "other ships keep trading" : "no other ship can trade meanwhile"}. Nothing for you to do: this is something to tune later.</p>`;
+    gfl = `<a class="gf" href="#/grafana/estimates?ship=${name}">${gfIcon} Why do ships run short of fuel? <small>Grafana</small></a>`;
+  } else if (s.status === "waiting"){
+    why = `<p class="why"><b>Waiting on purpose.</b> Every trade it knows about would lose money once fuel is paid, so it sits at ${wp(s.from)} rather than burn fuel. It looks again when fresh prices arrive, in about <b>${mmss(s.eta)}</b>.</p>`;
+  } else {
+    const tr = s.tr, alts = tr.alts || [];
+    const ageMin = tr.age != null ? Math.round(tr.age/60) : null;
+    why = `<p class="why">${s.status === "busy" ? `<b>Busy, not earning much:</b> ${esc((s.busyWhy || ["prices keep moving against it"]).join("; "))}. ` : ""}Now: chose <b>${goodName(tr.good)} ${wp(tr.src)} → ${wp(tr.dst)} (~${sgn(tr.exp)})</b>${alts.length ? ` over ${alts.slice(0, 2).map(a => `${goodName(a[0])} ${wp(a[1])} → ${wp(a[2])} (${sgn(a[3])})`).join(" and ")}` : ""}, because it pays the most for this trip.${ageMin != null ? ` ${ageMin < 2 ? ` The ${wp(tr.dst)} price was just checked.` : ` The ${wp(tr.dst)} price it relies on is ${ageMin} min old${ageMin >= 25 ? ", close to our 30 min limit" : ""}.`}` : ""} The estimate leaves out fuel.</p>`;
+    if (alts.length){
+      const mx = Math.max(tr.exp, ...alts.map(a => a[3]));
+      choice = `<h2>Options it had</h2><div class="bars">${[[tr.good, tr.src, tr.dst, tr.exp, true], ...alts].map(a => `<div class="bar ${a[4] ? "pick" : ""}"><span>${goodName(a[0])} ${wp(a[1])} → ${wp(a[2])}</span><div class="fill" style="width:${Math.max(2, a[3]/mx*100)}%"></div><span class="v">${sgn(a[3])}</span></div>`).join("")}</div>`;
+    } else choice = `<p class="note">The alternatives for this trip weren’t kept in the sample data.</p>`;
+    const r = s.recent.slice(-10).reverse();
+    const mx = Math.max(1, ...r.map(x => Math.max(Math.abs(x.sell - x.buy), x.exp)));
+    const got = r.reduce((a, x) => a + x.sell - x.buy, 0), expd = r.reduce((a, x) => a + x.exp, 0);
+    hist = `<section class="section"><h2>Its last ${r.length} trades: got ${sgn(got)} vs ${sgn(expd)} expected</h2><div class="hist">${r.map(x => { const p = x.sell - x.buy; return `<div class="row"><span class="num" style="color:var(--muted)">${clockOf(x.s)}</span><span>${goodName(x.good)} ${wp(x.src)} → ${wp(x.dst)}</span><span class="pair" title="expected ${sgn(x.exp)}, got ${sgn(p)}"><i class="e" style="left:0;width:${x.exp/mx*100}%"></i><i class="a ${p < 0 ? "neg" : ""}" style="left:0;width:${Math.abs(p)/mx*100}%"></i></span><span class="v" style="color:${p < 0 ? "var(--red)" : "inherit"}">${sgn(p)}</span></div>`; }).join("")}</div>
+      <p class="note">Grey: what it expected. Green: what it got (before fuel). Red: a loss.</p></section>`;
+    gfl = `<a class="gf" href="#/grafana/estimates?ship=${name}">${gfIcon} Do old prices cost us money? <small>Grafana</small></a>`;
+  }
+  const evs = name === "HARDBARGAIN-1" ? eventsAt(t, 5) : [];
+  return `<main><a class="back" href="#/ships">← Ships</a>
+    <div class="shiphead"><h1>${name}</h1><span class="status ${s.status}">${STATUS_WORD[s.status]}</span>${s.sample ? `<span class="status">sample ship</span>` : ""}</div>
+    <div class="ships"><div class="ship ${s.status}" style="cursor:default"><div><div class="act">${esc(s.act)}</div></div><div class="est ${s.est == null ? "unk" : ""}">${s.est == null ? "" : "~" + sgn(s.est)}</div>${route(s)}<div class="detail">${esc(s.detail || "")}</div><div class="eta">${etaText(s)}</div></div></div>
+    <section class="section"><h2>Why</h2>${why}${choice}</section>
+    ${hist}
+    ${evs.length ? `<section class="section"><h2>Recently</h2>${feed(evs)}</section>` : ""}
+    ${gfl ? `<p class="section">${gfl}</p>` : ""}
+  </main>`;
+}
+
+/* ---------- Grafana mocks (real data) ---------- */
+function gChrome(title, folder, vars, panels){
+  return `<div class="grafana"><div class="gtop">${gfIcon}<span class="crumb">Dashboards › ${folder} › <b>${title}</b></span><a href="${backHash}">← Back to Mission Control</a><span class="tr">Generation 5 · 11 Oct → 16 Oct</span></div>
+    <div class="gvars">${vars.map(v => `<span>${v[0]} <b>${v[1]}</b></span>`).join("")}</div><div class="gpanels">${panels}</div></div>`;
+}
+function gEarnings(){
+  const days = {}; for (const x of realTrips){ const d = new Date(x.s).toISOString().slice(5,10); (days[d] ||= {p: 0, f: 0}).p += x.sell - x.buy; }
+  for (const [h, v] of fuelByHour){ const d = new Date(h).toISOString().slice(5,10); (days[d] ||= {p: 0, f: 0}).f += v; }
+  const dk = Object.keys(days).sort(), dmax = Math.max(...dk.map(d => days[d].p));
+  const top = goodsRanked.slice(0, 8), tmax = top[0][1];
+  const fuelTotal = S.fuel;
+  const w = 1100, h = 160, x0 = creditPts[0][0], x1 = creditPts.at(-1)[0], ymax = Math.max(...creditPts.map(p => p[1]));
+  const line = creditPts.map((p, i) => `${i ? "L" : "M"}${((p[0]-x0)/(x1-x0)*w).toFixed(1)},${(h - 14 - p[1]/ymax*(h-24)).toFixed(1)}`).join(" ");
+  return gChrome("Earnings & costs", "Player", [["Ship", "All"], ["Good", "All"]], `
+    <div class="gp full"><h4>Answer</h4><div class="ans">Trading earned <b>${kfmt(totalTrade)}</b> before costs this game. Fuel cost <b>${kfmt(fuelTotal)}</b> (${Math.round(fuelTotal/totalTrade*100)}% of it). ${goodName(top[0][0])}, ${goodName(top[1][0])} and ${goodName(top[2][0])} earned the most. No contract, charting or ship-buying income or costs yet.</div></div>
+    <div class="gp full"><h4>Credits</h4><svg viewBox="0 0 ${w} ${h}" width="100%" role="img" aria-label="Credits over the game"><path d="${line}" stroke="#73BF69" stroke-width="2" fill="none" vector-effect="non-scaling-stroke"/><text x="0" y="${h-2}">11 Oct</text><text x="${w-40}" y="${h-2}">16 Oct</text><text x="0" y="10">${kfmt(ymax)}</text></svg></div>
+    <div class="gp"><h4>Trading profit by good (before fuel)</h4><svg viewBox="0 0 300 ${top.length*22}" width="100%">${top.map((g, i) => `<text x="0" y="${i*22+14}">${goodName(g[0])}</text><rect x="110" y="${i*22+4}" height="13" width="${g[1]/tmax*150}" fill="#5794F2"/><text x="${116 + g[1]/tmax*150}" y="${i*22+14}">${kfmt(g[1])}</text>`).join("")}</svg></div>
+    <div class="gp"><h4>Per day: trading profit vs fuel</h4><svg viewBox="0 0 300 150" width="100%">${dk.map((d, i) => { const bw = 300/dk.length; return `<rect x="${i*bw+4}" y="${130 - days[d].p/dmax*120}" width="${bw/2-4}" height="${days[d].p/dmax*120}" fill="#73BF69"/><rect x="${i*bw+bw/2}" y="${130 - days[d].f/dmax*120}" width="${bw/2-4}" height="${days[d].f/dmax*120}" fill="#F2495C"/><text x="${i*bw+4}" y="146">${d}</text>`; }).join("")}</svg></div>
+    <div class="gp full"><h4>Spending by type</h4><table><tr><th>Type</th><th class="r">Credits</th></tr><tr><td>Goods bought (returned when sold)</td><td class="r">${kfmt(realTrips.reduce((a, x) => a + x.buy, 0))}</td></tr><tr><td>Fuel</td><td class="r">${kfmt(fuelTotal)}</td></tr><tr><td>Ships</td><td class="r">0</td></tr></table></div>`);
+}
+function gEstimates(ship){
+  const pts = realTrips.filter(x => x.age != null).map(x => ({age: x.age/60, miss: (x.sell - x.buy) - x.exp, x}));
+  const bucket = [[0,10],[10,20],[20,31]].map(([a, z]) => { const v = pts.filter(p => p.age >= a && p.age < z); return {a, z: Math.min(z, 30), n: v.length, avg: v.reduce((s, p) => s + p.miss, 0) / v.length, big: v.filter(p => p.miss < -500).length}; });
+  const bigAll = pts.filter(p => p.miss < -500);
+  const w = 1100, h = 260, ymin = -9500, ymax = 4000, Y = v => (ymax - Math.max(ymin, Math.min(ymax, v))) / (ymax - ymin) * (h - 20);
+  const worst = pts.slice().sort((a, b) => a.miss - b.miss).slice(0, 5);
+  return gChrome("Trade estimates", "Engine", [["Ship", ship && ship.startsWith("HARDBARGAIN-") && ship !== "HARDBARGAIN-1" && P.scale === 2 ? ship : "HARDBARGAIN-1"], ["Question", "Do old prices cost us money?"]], `
+    <div class="gp full"><h4>Answer</h4><div class="ans"><b>Not much.</b> Trades on 20–30 min old prices beat their estimate by ${sgn(bucket[2].avg)} on average, against ${sgn(bucket[0].avg)} on fresh (under 10 min) prices. Of ${bigAll.length} trades that missed by more than 500, ${bucket[0].big} used fresh prices. The biggest misses are one route: Lab Instruments C41 → A4 lost 8,000 twice, expecting +860. Worth tuning: what changed at A4 between quote and sale.</div></div>
+    <div class="gp full"><h4>Actual minus expected profit, by age of the selling price</h4><svg viewBox="0 0 ${w} ${h}" width="100%" role="img" aria-label="Scatter of profit miss against price age">
+      <line x1="30" x2="${w}" y1="${Y(0)}" y2="${Y(0)}" stroke="#555"/>
+      ${pts.map(p => `<circle cx="${30 + p.age/30*(w-40)}" cy="${Y(p.miss)}" r="2.4" fill="${p.miss < -500 ? "#F2495C" : "#5794F2"}" fill-opacity=".55"/>`).join("")}
+      <text x="0" y="${Y(0)+4}">0</text><text x="0" y="${Y(-8000)+4}">−8k</text><text x="0" y="${Y(3000)+4}">+3k</text>
+      <text x="30" y="${h-2}">0 min</text><text x="${w/2}" y="${h-2}">15 min</text><text x="${w-44}" y="${h-2}">30 min</text></svg></div>
+    <div class="gp"><h4>By price age</h4><table><tr><th>Price age</th><th class="r">Trades</th><th class="r">Avg vs estimate</th><th class="r">Missed by 500+</th></tr>${bucket.map(b => `<tr><td>${b.a}–${b.z} min</td><td class="r">${b.n}</td><td class="r">${sgn(b.avg)}</td><td class="r">${b.big}</td></tr>`).join("")}</table></div>
+    <div class="gp"><h4>Worst misses</h4><table><tr><th>When</th><th>Trade</th><th class="r">Expected</th><th class="r">Got</th></tr>${worst.map(p => `<tr><td>${new Date(p.x.s).toISOString().slice(5,16).replace("T"," ")}</td><td>${goodName(p.x.good)} ${wp(p.x.src)}→${wp(p.x.dst)}</td><td class="r">${sgn(p.x.exp)}</td><td class="r">${sgn(p.x.sell - p.x.buy)}</td></tr>`).join("")}</table></div>`);
+}
+
+/* ---------- Shell, routing, stable live updates ---------- */
+let backHash = "#/";
+function topbar(path, t){
+  const sc = SCEN[P.scen];
+  const notes = [];
+  if (!sc.real) notes.push(`Sample situation: “${sc.label}” is invented for testing; the rest is real game data.`);
+  if (P.scale > 2) notes.push(`Sample fleet: ${P.scale - 2} ships replay real trades at other times.`);
+  return `<header class="top"><span class="brand">HARDBARGAIN</span><nav class="tabs"><a href="#/" ${path === "glance" ? 'aria-current="page"' : ""}>Fleet</a><a href="#/ships" ${path === "ships" ? 'aria-current="page"' : ""}>Ships</a></nav><span class="clock num"><span class="d">${new Date(t).toISOString().slice(5,10)} </span>${new Date(t).toISOString().slice(11,19)}<span class="d"> UTC</span></span></header>${notes.map(n => `<div class="sample">${n}</div>`).join("")}`;
+}
+function render(){
+  const t = now(), h = location.hash || "#/";
+  const [path, q] = h.slice(2).split("?");
+  const parts = path.split("/");
+  if (parts[0] === "grafana") return parts[1] === "estimates" ? gEstimates(new URLSearchParams(q).get("ship")) : gEarnings();
+  backHash = h;
+  if (parts[0] === "ships") return topbar("ships", t) + viewShips(t, parts[1]);
+  if (parts[0] === "ship") return topbar("", t) + viewShip(t, decodeURIComponent(parts[1]));
+  return topbar("glance", t) + viewGlance(t);
+}
+// minimal DOM morph: keeps reading position steady; keyed lists only re-render when membership changes
+function morph(live, fresh){
+  if (live.nodeType !== fresh.nodeType || live.nodeName !== fresh.nodeName || (live.dataset && live.dataset.key !== fresh.dataset?.key)){ live.replaceWith(fresh); return; }
+  if (live.nodeType === 3){ if (live.nodeValue !== fresh.nodeValue) live.nodeValue = fresh.nodeValue; return; }
+  if (live.nodeType !== 1) return;
+  for (const a of fresh.attributes) if (live.getAttribute(a.name) !== a.value) live.setAttribute(a.name, a.value);
+  for (const a of [...live.attributes]) if (!fresh.hasAttribute(a.name)) live.removeAttribute(a.name);
+  const lc = [...live.childNodes], fc = [...fresh.childNodes];
+  if (lc.length !== fc.length){
+    const had = new Set(lc.filter(n => n.dataset?.key).map(n => n.dataset.key));
+    live.replaceChildren(...fc);
+    if (live.classList.contains("feed")) for (const n of live.children) if (!had.has(n.dataset.key)) n.classList.add("arrive");
+    return;
+  }
+  for (let i = 0; i < lc.length; i++) morph(lc[i], fc[i]);
+}
+let lastHash = null, lastCredits = null;
+function tick(){
+  const app = document.getElementById("app");
+  const html = render();
+  const tpl = document.createElement("div"); tpl.innerHTML = html;
+  if (location.hash !== lastHash){ app.replaceChildren(...tpl.childNodes); lastHash = location.hash; app.scrollTop = 0; }
+  else { const fl = [...app.childNodes], ff = [...tpl.childNodes]; if (fl.length !== ff.length) app.replaceChildren(...ff); else fl.forEach((n, i) => morph(n, ff[i])); }
+  const c = document.getElementById("credits");
+  if (c){ const v = Number(c.textContent.replace(/,/g, "")); if (lastCredits != null && v > lastCredits + 100){ c.classList.add("pop"); setTimeout(() => c.classList.remove("pop"), 1200); } lastCredits = v; }
+  document.getElementById("pSrc").textContent = `${SCEN[P.scen].real ? "Real data" : "Sample situation"} · replay ${clockOf(now())}Z`;
+}
+
+/* ---------- Prototype controls ---------- */
+const pScen = document.getElementById("pScen");
+pScen.innerHTML = Object.entries(SCEN).map(([k, v]) => `<option value="${k}">${v.label}${v.real ? "" : " (sample)"}</option>`).join("");
+function syncControls(){
+  pScen.value = P.scen;
+  document.querySelectorAll("[data-scale]").forEach(b => b.setAttribute("aria-pressed", String(+b.dataset.scale === P.scale)));
+  document.querySelectorAll("[data-frame]").forEach(b => b.setAttribute("aria-pressed", String(b.dataset.frame === P.frame)));
+  document.querySelectorAll("[data-speed]").forEach(b => b.setAttribute("aria-pressed", String(+b.dataset.speed === P.speed)));
+  document.getElementById("stage").classList.toggle("phone", P.frame === "phone");
+  const u = new URL(location); for (const k of ["scen","scale","frame","speed"]) u.searchParams.set(k, P[k]); history.replaceState(null, "", u);
+}
+function rebase(){ simBase = (now() - SCEN[P.scen].a); simStart = performance.now(); }
+const qs = new URLSearchParams(location.search);
+if (SCEN[qs.get("scen")]) P.scen = qs.get("scen");
+if (qs.get("scale") === "120") P.scale = 120;
+if (qs.get("frame") === "phone") P.frame = "phone";
+if (["10","60"].includes(qs.get("speed"))) P.speed = +qs.get("speed");
+pScen.onchange = () => { P.scen = pScen.value; simBase = 0; simStart = performance.now(); lastHash = null; syncControls(); tick(); };
+document.querySelectorAll("[data-scale]").forEach(b => b.onclick = () => { P.scale = +b.dataset.scale; lastHash = null; syncControls(); tick(); });
+document.querySelectorAll("[data-frame]").forEach(b => b.onclick = () => { P.frame = b.dataset.frame; syncControls(); });
+document.querySelectorAll("[data-speed]").forEach(b => b.onclick = () => { rebase(); P.speed = +b.dataset.speed; syncControls(); });
+window.addEventListener("hashchange", tick);
+syncControls(); tick(); setInterval(tick, 1000);
+</script>
+</body>
+</html>
