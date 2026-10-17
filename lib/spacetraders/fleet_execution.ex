@@ -26,7 +26,6 @@ defmodule SpaceTraders.FleetExecution do
   alias SpaceTraders.FleetStrategy.StandingAuthority
   alias SpaceTraders.Intelligence
   alias SpaceTraders.Repo
-  alias SpaceTraders.ShipReservation
 
   @doc "Returns the credit floor for a Revision, or `{:error, :no_credit_floor}`."
   defdelegate credit_floor(revision), to: StandingAuthority
@@ -440,8 +439,6 @@ defmodule SpaceTraders.FleetExecution do
   end
 
   defp market_claims(agent, ships, markets) do
-    reserved = MapSet.new(ShipReservation.reserved_symbols(agent.id))
-
     registered =
       MapSet.new(
         Repo.all(
@@ -453,7 +450,7 @@ defmodule SpaceTraders.FleetExecution do
 
     ships
     |> Enum.reject(
-      &(MapSet.member?(reserved, &1.symbol) or not MapSet.member?(registered, &1.symbol))
+      &(not MapSet.member?(registered, &1.symbol))
     )
     |> Enum.map(fn ship ->
       %{

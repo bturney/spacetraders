@@ -12,7 +12,7 @@ defmodule SpaceTraders.FleetResources do
   alias SpaceTraders.FleetPlanning
   alias SpaceTraders.FleetStrategy.{Revision, StandingAuthority}
   alias SpaceTraders.Intelligence
-  alias SpaceTraders.{Clock, ShipReservation, World}
+  alias SpaceTraders.{Clock, World}
 
   @freshness_seconds 300
 
@@ -39,7 +39,6 @@ defmodule SpaceTraders.FleetResources do
            ),
          true <- Intents.current(agent) == [],
          {:ok, ships} <- Fleet.list_ships(agent),
-         ships <- Enum.reject(ships, &(&1.symbol in ShipReservation.reserved_symbols(agent.id))),
          {:ok, overview} <- SpaceTraders.Agent.agent_overview(agent),
          {:ok, floor} <- StandingAuthority.credit_floor(revision),
          true <- overview.credits >= floor,

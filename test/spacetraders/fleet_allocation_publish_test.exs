@@ -13,7 +13,6 @@ defmodule SpaceTraders.FleetAllocationPublishTest do
   alias SpaceTraders.FleetStrategy.{Revision, Strategy}
   alias SpaceTraders.Outbox
   alias SpaceTraders.Outbox.Notification
-  alias SpaceTraders.ShipReservation
 
   @as_of ~U[2030-01-01 12:00:00Z]
 
@@ -438,35 +437,6 @@ defmodule SpaceTraders.FleetAllocationPublishTest do
     assert first_id == first.id
   end
 
-  test "an Operator reservation prevents a stale selection from claiming the Ship" do
-    %{scope: scope, agent: agent, generation: generation, revision: revision} =
-      allocation_fixture()
-
-    ship = Repo.get_by!(SpaceTraders.Fleet.Ship, agent_id: agent.id, symbol: "SHIP-1")
-    assert {:ok, _} = ShipReservation.reserve(scope, ship.id, "Recovery")
-
-    assert {:error, :ship_reserved} =
-             FleetAllocation.publish_portfolio(
-               scope,
-               generation.id,
-               selection(revision),
-               decision()
-             )
-
-    refute Repo.exists?(Portfolio)
-    assert Repo.get!(Generation, generation.id).allocation_version == 0
-
-    assert :ok = ShipReservation.release(scope, ship.id)
-
-    assert {:ok, %Portfolio{}} =
-             FleetAllocation.publish_portfolio(
-               scope,
-               generation.id,
-               selection(revision),
-               decision()
-             )
-  end
-
   test "a captured acquisition source version rejects atomically after an unrelated additive replan" do
     %{scope: scope, agent: agent, generation: generation, revision: revision} =
       allocation_fixture()
@@ -587,46 +557,6 @@ defmodule SpaceTraders.FleetAllocationPublishTest do
 
     assert Repo.aggregate(Commitment, :count) == 1
     assert Repo.get!(Generation, generation.id).allocation_version == 1
-  end
-
-  test "an Operator reservation also blocks an in-place subgraph admission" do
-    %{scope: scope, agent: agent, generation: generation, revision: revision} =
-      allocation_fixture()
-
-    [original] = selection(revision).commitments
-
-    assert {:ok, portfolio} =
-             FleetAllocation.publish_portfolio(
-               scope,
-               generation.id,
-               selection(revision),
-               decision()
-             )
-
-    {:ok, ship} = Fleet.record_ship(agent, "SHIP-2", "SHIP_PROBE")
-    assert {:ok, _} = ShipReservation.reserve(scope, ship.id, "Operator intervention")
-
-    additional = %{
-      original
-      | id: {revision.id, "extra"},
-        candidate_id: "extra",
-        claims: ["SHIP-2"],
-        pledges: []
-    }
-
-    assert {:error, :ship_reserved} =
-             FleetAllocation.replan_subgraph(
-               scope,
-               generation.id,
-               %{selection(revision, 1) | commitments: [additional]},
-               ["extra"],
-               decision()
-             )
-
-    assert [%{candidate_id: "candidate-1"}] =
-             FleetAllocation.current_portfolio(scope, agent).commitments
-
-    assert Repo.get!(Generation, generation.id).allocation_version == portfolio.version
   end
 
   test "atomically supersedes the prior portfolio for readers" do

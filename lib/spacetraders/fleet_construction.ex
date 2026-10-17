@@ -19,7 +19,6 @@ defmodule SpaceTraders.FleetConstruction do
   alias SpaceTraders.FleetStrategy.Revision
   alias SpaceTraders.FleetStrategy.StandingAuthority
   alias SpaceTraders.Repo
-  alias SpaceTraders.ShipReservation
 
   @doc "Only an authoritative Construction isComplete flag proves completion."
   def completed?(%Construction{is_complete: true}), do: true
@@ -315,10 +314,7 @@ defmodule SpaceTraders.FleetConstruction do
     occupied = MapSet.new(Enum.flat_map(retained, & &1.claims))
 
     available =
-      Enum.reject(ships, fn ship ->
-        ship.symbol in ShipReservation.reserved_symbols(agent.id) or
-          MapSet.member?(occupied, ship.symbol)
-      end)
+      Enum.reject(ships, &MapSet.member?(occupied, &1.symbol))
 
     unreserved_credits =
       credits - Enum.sum_by(retained, &Map.get(&1.reservations, "credits", 0))
