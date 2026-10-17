@@ -266,6 +266,107 @@ defmodule SpaceTraders.FleetPlanningTest do
     end
   end
 
+  describe "net credits per Ship-hour" do
+    # The Ship waits at X1-A1, where IRON costs 10 and FUEL 72. X1-A2 (x=60)
+    # pays 20 for IRON; X1-A5 (x=700) pays 30, a larger gross over a far
+    # longer flight.
+    defp rate_snapshot(ships) do
+      %{
+        as_of: @as_of,
+        system_symbol: "X1",
+        freshness_seconds: 300,
+        agent_id: 7,
+        markets: [
+          market("X1-A1", ~U[2030-01-01 11:59:00Z], [
+            good("IRON", 10, 9, 40),
+            good("FUEL", 72, 70, 100)
+          ]),
+          market("X1-A2", ~U[2030-01-01 11:58:00Z], [good("IRON", 25, 20, 40)]),
+          market("X1-A5", ~U[2030-01-01 11:58:00Z], [good("IRON", 40, 30, 40)])
+        ],
+        waypoint_coordinates: %{
+          "X1-A1" => %{x: 0, y: 0},
+          "X1-A2" => %{x: 60, y: 0},
+          "X1-A5" => %{x: 700, y: 0}
+        },
+        fuel_stops: [],
+        ships: ships
+      }
+    end
+
+    defp trader(symbol, engine) do
+      %{
+        symbol: symbol,
+        cargo: %{capacity: 40, units: 0},
+        waypoint: "X1-A1",
+        flight_mode: "CRUISE",
+        fuel: %{current: 2_000, capacity: 2_000},
+        engine: engine
+      }
+    end
+
+    test "trades rank by net credits per Ship-hour after fuel, not gross spread" do
+      ships = [trader("TRADER-1", %{speed: 36, condition: 1.0})]
+
+      assert {:ok, %{candidate_contributions: [near, far | _]}} =
+               FleetPlanning.plan_market(revision(), 0, rate_snapshot(ships))
+
+      assert {near.destination_waypoint, far.destination_waypoint} == {"X1-A2", "X1-A5"}
+      assert far.expected_outcomes.maximum_credit_change > near.expected_outcomes.maximum_credit_change
+
+      # 60 units of distance: 60 fuel (44 credits at 72 per 100) and 57 s.
+      assert %{
+               net_credits_per_ship_hour: 22_484,
+               trade_estimate: %{
+                 ship: "TRADER-1",
+                 net_credits: 356,
+                 fuel_credits: 44,
+                 seconds: 57,
+                 empty_seconds: 0
+               }
+             } = near.expected_outcomes
+
+      # 700 units: 504 credits of fuel and 501 s.
+      assert far.expected_outcomes.net_credits_per_ship_hour == 2_127
+    end
+
+    test "the estimate does not change the trade's identity as the Ship wears or moves" do
+      worn = [trader("TRADER-1", %{speed: 36, condition: 0.9})]
+      fresh = [trader("TRADER-1", %{speed: 36, condition: 1.0})]
+
+      assert {:ok, %{candidate_contributions: [a | _]}} =
+               FleetPlanning.plan_market(revision(), 0, rate_snapshot(worn))
+
+      assert {:ok, %{candidate_contributions: [b | _]}} =
+               FleetPlanning.plan_market(revision(), 0, rate_snapshot(fresh))
+
+      assert a.id == b.id
+      assert a.expected_outcomes.trade_estimate.seconds > b.expected_outcomes.trade_estimate.seconds
+    end
+
+    test "the fastest reaching Ship sets the estimate" do
+      ships = [
+        trader("SLOW-1", %{speed: 9, condition: 1.0}),
+        trader("FAST-1", %{speed: 36, condition: 1.0})
+      ]
+
+      assert {:ok, %{candidate_contributions: [near | _]}} =
+               FleetPlanning.plan_market(revision(), 0, rate_snapshot(ships))
+
+      assert near.expected_outcomes.trade_estimate.ship == "FAST-1"
+    end
+
+    test "a Ship without engine evidence leaves the estimate unknown" do
+      ships = [Map.delete(trader("TRADER-1", nil), :engine)]
+
+      assert {:ok, %{candidate_contributions: [candidate | _]}} =
+               FleetPlanning.plan_market(revision(), 0, rate_snapshot(ships))
+
+      assert candidate.expected_outcomes.net_credits_per_ship_hour == nil
+      assert candidate.expected_outcomes.trade_estimate == %{state: :unknown, reason: :unknown_engine}
+    end
+  end
+
   test "a widened calibration margin in the snapshot widens the selection-time credit Reservation" do
     snapshot = Map.put(evidence_snapshot(), :credit_margin_percent, 50)
 

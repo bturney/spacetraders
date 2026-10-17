@@ -465,7 +465,7 @@ defmodule SpaceTraders.FleetExecution do
           fuel: fuel(ship),
           position: position(ship),
           cargo_transport: cargo_capacity(ship),
-          trade_work_profile: SpaceTraders.FleetAllocation.MarketWorkRate.ship_profile(ship),
+          engine: engine(ship),
           chart: true,
           waypoint_scan: sensor_mount?(ship),
           market_access: markets
@@ -497,6 +497,12 @@ defmodule SpaceTraders.FleetExecution do
        do: %{current: current, capacity: capacity}
 
   defp fuel(_ship), do: nil
+
+  # Engine speed and wear set flight time (`SpaceTraders.Fleet.TradeEstimate`).
+  defp engine(%{engine: %{speed: speed, condition: condition}}),
+    do: %{speed: speed, condition: condition}
+
+  defp engine(_ship), do: nil
 
   defp position(%{nav: %{waypoint_symbol: waypoint} = nav} = ship) when is_binary(waypoint) do
     point =

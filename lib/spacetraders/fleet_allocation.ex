@@ -2072,8 +2072,12 @@ defmodule SpaceTraders.FleetAllocation do
 
     retained? = Enum.any?(Map.values(current), &same_commitment?(candidate, &1))
 
-    {candidate.objective_index, dependency_depth(candidate, candidates), -retained_value,
-     not retained?, candidate.id}
+    # Market trades with an estimate rank first, by estimated net credits per
+    # Ship-hour; everything else, a trade without one included, follows by value.
+    rate = Map.get(candidate, :net_credits_per_ship_hour)
+
+    {candidate.objective_index, dependency_depth(candidate, candidates), is_nil(rate),
+     -(rate || retained_value), not retained?, candidate.id}
   end
 
   defp dependency_depth(candidate, candidates, seen \\ MapSet.new()) do
@@ -2175,6 +2179,7 @@ defmodule SpaceTraders.FleetAllocation do
        dependencies: contribution.dependencies,
        validity: contribution.validity,
        expected_value: expected_value,
+       net_credits_per_ship_hour: net_credits_per_ship_hour(contribution),
        unwind_cost: 0,
        strategy_revision_id: contribution.strategy_revision_id,
        source: contribution
@@ -2193,10 +2198,34 @@ defmodule SpaceTraders.FleetAllocation do
 
   defp normalize_candidate(_candidate, _availability), do: :error
 
+  # A Market trade ranks by its estimated net credits per Ship-hour
+  # (`SpaceTraders.Fleet.TradeEstimate`); nil when it has no estimate.
+  defp net_credits_per_ship_hour(%CandidateContribution{kind: :market_trade} = contribution) do
+    case Map.get(contribution.expected_outcomes, :net_credits_per_ship_hour) do
+      rate when is_number(rate) -> rate
+      _ -> nil
+    end
+  end
+
+  defp net_credits_per_ship_hour(_contribution), do: nil
+
+  defp estimated_ship(%CandidateContribution{kind: :market_trade} = contribution) do
+    case Map.get(contribution.expected_outcomes, :trade_estimate) do
+      %{ship: ship} when is_binary(ship) -> ship
+      _ -> nil
+    end
+  end
+
+  defp estimated_ship(_contribution), do: nil
+
   defp eligible_claims(contribution, claims) do
+    estimated = estimated_ship(contribution)
+
+    # The Ship a trade's estimate was made for comes first, so the selected
+    # trade's expected net per Ship-hour describes the Ship that flies it.
     claims
     |> Enum.filter(&claim_supports?(&1, contribution))
-    |> Enum.sort_by(&{role_cost(&1, contribution), claim_id(&1)})
+    |> Enum.sort_by(&{claim_id(&1) != estimated, role_cost(&1, contribution), claim_id(&1)})
     |> Enum.map(&claim_id/1)
   end
 

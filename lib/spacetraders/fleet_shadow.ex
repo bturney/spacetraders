@@ -127,7 +127,8 @@ defmodule SpaceTraders.FleetShadow do
   end
 
   # Fuel and position, when the Claim evidences them, let planning offer
-  # the trade only to a Ship that can reach it.
+  # the trade only to a Ship that can reach it; with the engine they set the
+  # trade's net credits per Ship-hour.
   defp trade_ship(symbol, capacity, capabilities) do
     position = Map.get(capabilities, :position) || %{}
 
@@ -137,7 +138,8 @@ defmodule SpaceTraders.FleetShadow do
       fuel: Map.get(capabilities, :fuel),
       waypoint: Map.get(position, :waypoint),
       flight_mode: Map.get(position, :flight_mode),
-      position: Map.take(position, [:x, :y])
+      position: Map.take(position, [:x, :y]),
+      engine: Map.get(capabilities, :engine)
     }
   end
 
