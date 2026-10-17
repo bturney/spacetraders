@@ -162,16 +162,20 @@ Evidence of how the autonomous software behaves and performs, including planning
 Time during which the system can safely make progress on at least one Strategic Objective. It distinguishes useful autonomous availability from process uptime and excludes periods when faults or unavailable dependencies prevent all Strategy progress.
 
 **Neutral Wait**:
-A deliberate Fleet Allocation result when no worthwhile admissible Candidate Contribution currently exists and the evidence needed for re-evaluation has a durable future observation time. It requires no Operator action and remains one Strategy Decision Episode while its selected result and binding limitation are unchanged. It is distinct from objective infeasibility, Degraded Operation, and Intervention. Only Fleet Allocation reconciliation may establish one.
+A deliberate Fleet Allocation result when no worthwhile admissible Candidate Contribution currently exists and the evidence needed for re-evaluation has a durable future observation time. It requires no Operator action and remains one Strategy Decision Episode while its selected result and binding limitation are unchanged. It is distinct from objective infeasibility and Degraded Operation. Only Fleet Allocation reconciliation may establish one.
 _Avoid_: idle, stalled, blocked
 
 **Unallocated**:
 The read-projection state of a registered Ship with no active Claim in its current Fleet Generation. During a Neutral Wait it carries a causal link to the wait's Strategy Decision Episode. It is derived state, never a durable per-Ship record.
 _Avoid_: idle Ship, free Ship, unclaimed (when the wait linkage matters)
 
+**Plan Health**:
+The Operator-facing judgment of whether the Fleet is succeeding at its Fleet Strategy, from current conditions: on plan, small setback, off plan, or can't tell. It never asks the Operator to act. Stale or absent evidence makes it can't tell, never on plan; deliberate Neutral Wait is on plan.
+_Avoid_: Attention, alert, needs action
+
 **Attention**:
-An Operator-facing summary that some Fleet condition needs Operator judgment: objective infeasibility, Degraded Operation, or Intervention. Deliberate Neutral Wait, healthy progress, and capacity deferral never raise it.
-_Avoid_: alert, error, alarm
+Retired Operator-facing summary that a Fleet condition needed Operator judgment. Nothing in an autonomous Fleet needs the Operator; Plan Health replaces it (ADR 0017).
+_Avoid_: Plan Health (which never asks for action)
 
 **Strategic Objective**:
 One measurable outcome in a Fleet Strategy, with an ordered Strategic Priority, an evaluation rule, and a Fleet Generation, Strategy-lifetime, or recurring scope. An attain objective minimizes time to a target, a maintain objective protects a target with sufficient margin, and a continuous objective maximizes its outcome rate over a horizon.
@@ -256,14 +260,14 @@ An authoritative credit balance below the active credit floor, or a realized cha
 _Avoid_: deficit, overdraft
 
 **Pricing-model Breach**:
-A Shortfall caused by one action's realized charge exceeding its own worst-case bound. Only this kind widens Credit Calibration and raises Degraded Attention; a Shortfall from a raised floor, unattributable concurrent spends, or anything else pauses spending without recalibrating.
+A Shortfall caused by one action's realized charge exceeding its own worst-case bound. Only this kind widens Credit Calibration; a Shortfall from a raised floor, unattributable concurrent spends, or anything else pauses spending without recalibrating.
 _Avoid_: overspend, price miss
 
 **Degraded Operation**:
 Continued autonomous operation while a failing capability or API scope is quarantined, or while Fleet Allocation is structurally stalled (a recorded structural stall Strategy Decision Episode). Unaffected planning, timers, telemetry, and admissible gameplay continue while recovery is retried at a sustainable rate.
 
 **Emergency Stop**:
-Durable Operator-owned state that suppresses every new gameplay mutation, including replacement minting, without cancelling actions already accepted by the game. Safety-critical reconciliation and observation continue; explicit resume starts from authoritative state and fresh planning.
+Retired Operator-owned suppression of new gameplay mutations. Stopping the service is the kill switch (ADR 0017).
 
 **Ship**:
 A vessel the Agent owns (e.g., ORBITALIST-1, class COMMAND). Travels between waypoints, carries cargo, consumes fuel, and is subject to cooldowns.
@@ -375,10 +379,10 @@ Retired per-Ship Operator gameplay authority. It has no persistence, history, or
 _Avoid_: Manual Mode
 
 **Manual Intervention**:
-An exceptional, authenticated, reason-bearing Operator request for one bounded Ship outcome. The Ship must first be explicitly reserved from Fleet allocation; the intervention has its own durable record and Intent, and does not create a Job or a second autonomous Claim.
+Retired Operator request for one bounded Ship outcome. The Operator has no per-Ship gameplay authority (ADR 0017).
 
 **Ship Reservation**:
-An explicit Operator-owned exclusion of one Ship from autonomous Fleet allocation, with a reason and durable release. It is distinct from a Fleet Commitment's fungible Reservation and remains recorded after release.
+Retired Operator-owned exclusion of one Ship from autonomous Fleet allocation (ADR 0017). Distinct from a Fleet Commitment's fungible Reservation, which remains.
 
 **Ship Readiness**:
 The capability and condition information that determines what a Ship can do: flight mode, crew, frame, reactor, engine, modules, and mounts. It supplements, but does not replace, the Ship's immediate operational status, location, fuel, cargo, and actions.
