@@ -55,7 +55,6 @@ defmodule SpaceTraders.RuntimeQualification do
     on_exit(fn ->
       SpaceTraders.Quiesced.stop_all_ships()
       SpaceTraders.Contracts.DeadlineServer.stop_all()
-      SpaceTraders.EmergencyStopAdmission.clear()
       SpaceTraders.FleetGenerationAdmission.clear()
       Sandbox.mode(Repo, :manual)
 

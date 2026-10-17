@@ -1,5 +1,4 @@
 defmodule SpaceTradersWeb.MissionControlLiveTest do
-  # Emergency Stop status is backed by the application-wide admission server.
   use SpaceTradersWeb.ConnCase, async: false
 
   import Phoenix.LiveViewTest
@@ -112,18 +111,6 @@ defmodule SpaceTradersWeb.MissionControlLiveTest do
     {:ok, view, _html} = live(conn, ~p"/mission-control")
     assert has_element?(view, "#objective-evaluations", "Observed net change: +120 credits")
     assert has_element?(view, "#objective-evaluations", "Growing")
-  end
-
-  test "Emergency Stop takes precedence over a previously Strategy-capable Fleet", %{
-    conn: conn,
-    scope: scope
-  } do
-    {:ok, _draft} = FleetStrategy.select_preset(scope, "steady_growth")
-    {:ok, _revision} = FleetStrategy.activate(scope, FleetStrategy.get(scope).draft_version)
-    {:ok, _stop} = FleetStrategy.engage_emergency_stop(scope)
-
-    {:ok, view, _html} = live(conn, ~p"/mission-control")
-    assert has_element?(view, "#operating-health", "STOPPED")
   end
 
   test "proven objective infeasibility stays pinned after acknowledgement until evidence changes",

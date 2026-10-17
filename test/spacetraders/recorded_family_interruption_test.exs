@@ -57,7 +57,6 @@ defmodule SpaceTraders.RecordedFamilyInterruptionTest do
     on_exit(fn ->
       SpaceTraders.Quiesced.stop_all_ships()
       restart_capacity_governor()
-      SpaceTraders.EmergencyStopAdmission.clear()
       SpaceTraders.FleetGenerationAdmission.clear()
       :ok = Sandbox.mode(Repo, :manual)
     end)
@@ -112,7 +111,7 @@ defmodule SpaceTraders.RecordedFamilyInterruptionTest do
 
   for family <- @families,
       {phase, disposition} <- [prepared: "not_sent", marker_committed: "ambiguous"],
-      loss <- [:claim, :generation, :emergency_stop] do
+      loss <- [:claim, :generation] do
     @family family
     @phase phase
     @disposition disposition
@@ -851,11 +850,6 @@ defmodule SpaceTraders.RecordedFamilyInterruptionTest do
     Repo.get_by!(Generation, agent_id: spec.agent.id)
     |> Ecto.Changeset.change(fenced_at: DateTime.utc_now())
     |> Repo.update!()
-  end
-
-  defp revoke(:emergency_stop, spec) do
-    assert {:ok, _} =
-             SpaceTraders.FleetStrategy.engage_emergency_stop(Scope.for_operator(spec.operator))
   end
 
   # -- live seam and controlled game -------------------------------------------

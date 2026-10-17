@@ -56,8 +56,7 @@ defmodule SpaceTraders.FleetAcquisition do
              :purchase_precondition_unmet,
              :ship_offer_evidence_unavailable,
              :strategy_revision_superseded,
-             :strategy_revision_absent,
-             :emergency_stopped
+             :strategy_revision_absent
            ] ->
         # Only definitive, pre-Attempt refusals end the published investment.
         # Transient/capacity read failures retain it; a dispatched Attempt always
@@ -163,7 +162,7 @@ defmodule SpaceTraders.FleetAcquisition do
   end
 
   # Current authority, not the authority the purchase was prepared under: the
-  # active, un-stopped Revision supplies the floor, and a purchase prepared
+  # active Revision supplies the floor, and a purchase prepared
   # under any other Revision is withdrawn rather than sent.
   defp current_purchase_authority(%Attempt{agent_id: agent_id} = attempt) do
     operator_id = Repo.one!(from a in Agent, where: a.id == ^agent_id, select: a.operator_id)
@@ -173,9 +172,6 @@ defmodule SpaceTraders.FleetAcquisition do
         Repo.one(from s in Strategy, where: s.operator_id == ^operator_id, lock: "FOR SHARE")
 
     case strategy do
-      %Strategy{emergency_stopped_at: stopped} when not is_nil(stopped) ->
-        {:error, :emergency_stopped}
-
       %Strategy{active_revision_id: id} when not is_nil(id) ->
         if attempt.strategy_revision_id in [nil, id],
           do: {:ok, Repo.get!(Revision, id)},

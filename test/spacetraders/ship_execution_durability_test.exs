@@ -34,7 +34,6 @@ defmodule SpaceTraders.ShipExecutionDurabilityTest do
       # Sender death abandons its API admission; reset process-local capacity
       # after fixture teardown so later tests start with the full budget.
       restart_capacity_governor()
-      SpaceTraders.EmergencyStopAdmission.clear()
       SpaceTraders.FleetGenerationAdmission.clear()
       :ok = Sandbox.mode(Repo, :manual)
     end)

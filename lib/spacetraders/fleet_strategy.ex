@@ -1,7 +1,7 @@
 defmodule SpaceTraders.FleetStrategy do
   @moduledoc """
   Owns the deployment's durable Operator-authored Fleet Strategy drafts and
-  immutable revisions, and its Emergency Stop.
+  immutable revisions.
 
   There is one Fleet Strategy per deployment. Commands are authenticated
   through `SpaceTraders.OperatorAuthority`: the scope proves the deployment
@@ -15,9 +15,7 @@ defmodule SpaceTraders.FleetStrategy do
   import Ecto.Query, warn: false
 
   alias SpaceTraders.Agent.Scope
-  alias SpaceTraders.EmergencyStopAdmission
   alias SpaceTraders.Evidence
-  alias SpaceTraders.Fleet
   alias SpaceTraders.MissionControl.Channels
   alias SpaceTraders.OperatorAuthority
 
@@ -99,8 +97,7 @@ defmodule SpaceTraders.FleetStrategy do
 
   @doc "Checks possible consequence bounds against the active revision's Standing Authority."
   def authorize(%Scope{} = scope, consequence_bounds) do
-    with {:ok, _operator_id} <- OperatorAuthority.authorize(scope),
-         :ok <- mutation_allowed?() do
+    with {:ok, _operator_id} <- OperatorAuthority.authorize(scope) do
       case get().active_revision do
         %Revision{} = revision -> StandingAuthority.authorize(revision, consequence_bounds)
         nil -> {:error, :strategy_not_active}
@@ -108,155 +105,7 @@ defmodule SpaceTraders.FleetStrategy do
     end
   end
 
-  @doc "Durably suppresses every new gameplay mutation in the deployment, minting included."
-  def engage_emergency_stop(%Scope{} = scope) do
-    with {:ok, operator_id} <- OperatorAuthority.authorize(scope) do
-      :global.trans({{__MODULE__, :emergency_stop}, self()}, fn ->
-        do_engage_emergency_stop(operator_id)
-      end)
-    end
-  end
-
-  defp do_engage_emergency_stop(operator_id) do
-    now = DateTime.utc_now()
-    admission_guard = EmergencyStopAdmission.block(operator_id)
-
-    result =
-      Repo.transaction(fn ->
-        %Strategy{}
-        |> Strategy.changeset(%{operator_id: operator_id})
-        |> Repo.insert(on_conflict: :nothing)
-
-        Repo.update_all(
-          from(strategy in Strategy, where: strategy.operator_id == ^operator_id),
-          inc: [emergency_stop_version: 1],
-          set: [
-            emergency_stopped_at: now,
-            emergency_resume_prepared_at: nil,
-            updated_at: DateTime.utc_now(:second)
-          ]
-        )
-
-        get()
-      end)
-
-    if match?({:ok, _projection}, result) do
-      {:ok, projection} = result
-
-      :ok =
-        EmergencyStopAdmission.engage(
-          operator_id,
-          projection.emergency_stop_version,
-          admission_guard
-        )
-
-      broadcast_update()
-    else
-      EmergencyStopAdmission.cancel_block(operator_id, admission_guard)
-    end
-
-    result
-  end
-
-  @doc "Refreshes game truth and retires stale work while mutation admission remains stopped."
-  def resume(%Scope{} = scope, expected_emergency_stop_version)
-      when is_integer(expected_emergency_stop_version) do
-    with {:ok, operator_id} <- OperatorAuthority.authorize(scope) do
-      :global.trans({{__MODULE__, :emergency_stop}, self()}, fn ->
-        do_resume(scope, operator_id, expected_emergency_stop_version)
-      end)
-    end
-  end
-
-  defp do_resume(scope, operator_id, expected_emergency_stop_version) do
-    with :ok <- Evidence.refresh_for_emergency_stop_resume(scope) do
-      result =
-        Repo.transaction(fn ->
-          prepared_at = DateTime.utc_now()
-          now = DateTime.truncate(prepared_at, :second)
-
-          {updated, _rows} =
-            Repo.update_all(
-              from(strategy in Strategy,
-                where:
-                  strategy.operator_id == ^operator_id and
-                    strategy.emergency_stop_version == ^expected_emergency_stop_version and
-                    not is_nil(strategy.emergency_stopped_at)
-              ),
-              inc: [emergency_stop_version: 1],
-              set: [emergency_resume_prepared_at: prepared_at, updated_at: now]
-            )
-
-          if updated != 1, do: Repo.rollback(:stale_emergency_stop)
-
-          if Fleet.prepare_emergency_stop_resume(now) != :ok,
-            do: Repo.rollback(:reconciliation_required)
-
-          get()
-        end)
-
-      if match?({:ok, _projection}, result) do
-        broadcast_update()
-      end
-
-      result
-    end
-  end
-
-  @doc false
-  def complete_emergency_stop_resume(%Scope{} = scope, expected_emergency_stop_version) do
-    with {:ok, operator_id} <- OperatorAuthority.authorize(scope) do
-      complete_emergency_stop_resume(scope, operator_id, expected_emergency_stop_version)
-    end
-  end
-
-  defp complete_emergency_stop_resume(scope, operator_id, expected_emergency_stop_version) do
-    :global.trans({{__MODULE__, :emergency_stop}, self()}, fn ->
-      now = DateTime.utc_now(:second)
-
-      {updated, _rows} =
-        Repo.update_all(
-          from(strategy in Strategy,
-            where:
-              strategy.operator_id == ^operator_id and
-                strategy.emergency_stop_version == ^expected_emergency_stop_version and
-                not is_nil(strategy.emergency_stopped_at) and
-                not is_nil(strategy.emergency_resume_prepared_at)
-          ),
-          inc: [emergency_stop_version: 1],
-          set: [
-            emergency_stopped_at: nil,
-            emergency_resume_prepared_at: nil,
-            updated_at: now
-          ]
-        )
-
-      if updated == 1 do
-        projection = get()
-        :ok = EmergencyStopAdmission.resume(operator_id, projection.emergency_stop_version)
-        _ = SpaceTraders.FleetGeneration.replace_after_reset(scope)
-        broadcast_update()
-        {:ok, projection}
-      else
-        {:error, :stale_emergency_stop}
-      end
-    end)
-  end
-
-  @doc """
-  Returns whether Emergency Stop permits a new gameplay mutation.
-
-  Emergency Stop is global Operator intent: any engaged stop suppresses every
-  new mutation in the deployment, whichever Agent or credential would send it.
-  There is no Scope/Agent selector for mutation admission.
-  """
-  def mutation_allowed? do
-    if Repo.exists?(from(strategy in Strategy, where: not is_nil(strategy.emergency_stopped_at))),
-      do: {:error, :emergency_stopped},
-      else: :ok
-  end
-
-  @doc "Returns the deployment Fleet Strategy's current draft, active revision and Emergency Stop."
+  @doc "Returns the deployment Fleet Strategy's current draft and active revision."
   def get do
     case deployment_strategy() do
       nil -> empty_projection()
@@ -282,10 +131,7 @@ defmodule SpaceTraders.FleetStrategy do
       draft: nil,
       draft_source: nil,
       draft_version: 0,
-      active_revision: nil,
-      emergency_stopped_at: nil,
-      emergency_resume_prepared_at: nil,
-      emergency_stop_version: 0
+      active_revision: nil
     }
   end
 
@@ -593,10 +439,7 @@ defmodule SpaceTraders.FleetStrategy do
       draft: Map.get(overrides, :draft_document, strategy.draft_document),
       draft_source: Map.get(overrides, :draft_source, strategy.draft_source),
       draft_version: Map.get(overrides, :draft_version, strategy.draft_version),
-      active_revision: active_revision(strategy),
-      emergency_stopped_at: strategy.emergency_stopped_at,
-      emergency_resume_prepared_at: strategy.emergency_resume_prepared_at,
-      emergency_stop_version: strategy.emergency_stop_version
+      active_revision: active_revision(strategy)
     }
   end
 

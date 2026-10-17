@@ -21,45 +21,8 @@ defmodule SpaceTraders.Fleet do
   alias SpaceTraders.API.AgentTokenReference
   alias SpaceTraders.Fleet.{Activity, IntentBlocker, Ship, ShipDestination}
 
-  alias SpaceTraders.Fleet.Intents
   alias SpaceTraders.Repo
   alias SpaceTraders.{Agent, Contracts, Intelligence, World}
-
-  @doc "Safely retires pre-stop execution state before fresh Fleet planning."
-  def prepare_emergency_stop_resume(now) do
-    current_ship_ids = current_ship_ids(:current_generation)
-    stale_ship_ids = current_ship_ids(:stale_generation)
-    all_ship_ids = current_ship_ids ++ stale_ship_ids
-
-    Intents.censor_reset_generation(stale_ship_ids, now)
-
-    if Intents.emergency_stop_reconciled?(current_ship_ids) do
-      Intents.supersede_for_emergency_stop(all_ship_ids, now)
-      :ok
-    else
-      {:error, :reconciliation_required}
-    end
-  end
-
-  defp current_ship_ids(generation) do
-    stale_filter =
-      case generation do
-        :current_generation -> dynamic([_ship, agent], is_nil(agent.stale_at))
-        :stale_generation -> dynamic([_ship, agent], not is_nil(agent.stale_at))
-      end
-
-    Repo.all(
-      from ship in Ship,
-        join: agent in AgentRecord,
-        on: agent.id == ship.agent_id,
-        join: fleet in SpaceTraders.FleetGeneration.Generation,
-        on: fleet.agent_id == agent.id,
-        join: identity in "current_fleet_identity",
-        on: identity.id == 1 and identity.fleet_generation_id == fleet.id,
-        where: ^stale_filter,
-        select: ship.id
-    )
-  end
 
   @doc """
   Pulls the agent's live fleet from the game API.

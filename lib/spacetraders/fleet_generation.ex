@@ -219,7 +219,6 @@ defmodule SpaceTraders.FleetGeneration do
     :account_token_not_linked,
     :replacement_symbols_exhausted,
     :registration_unresolved,
-    :emergency_stopped,
     :current_fleet_exists,
     :no_server_reset
   ]
@@ -560,7 +559,6 @@ defmodule SpaceTraders.FleetGeneration do
     symbols = replacement_symbols(attrs, changeset)
 
     with :ok <- SpaceTraders.RuntimeAuthority.execution_allowed?(),
-         :ok <- FleetStrategy.mutation_allowed?(),
          :ok <- validate_mint_attrs(changeset),
          :ok <- validate_replacement_symbols(symbols, get_field(changeset, :faction)) do
       :ok
@@ -975,21 +973,15 @@ defmodule SpaceTraders.FleetGeneration do
   # Only lifecycle establishment may persist an Agent; callers cannot bypass
   # registration recovery, bootstrap or atomic current-Generation publication.
   defp store_agent(operator, game_agent, agent_token, requested_faction) do
-    result =
-      %Agent{}
-      |> Agent.changeset(%{
-        symbol: game_agent.symbol,
-        faction: game_agent.starting_faction || requested_faction
-      })
-      |> put_change(:headquarters, game_agent.headquarters)
-      |> put_change(:agent_token, agent_token)
-      |> put_change(:operator_id, operator.id)
-      |> Repo.insert(log: false)
-
-    if match?({:ok, _}, result),
-      do: SpaceTraders.EmergencyStopAdmission.track_credential(operator.id, agent_token)
-
-    result
+    %Agent{}
+    |> Agent.changeset(%{
+      symbol: game_agent.symbol,
+      faction: game_agent.starting_faction || requested_faction
+    })
+    |> put_change(:headquarters, game_agent.headquarters)
+    |> put_change(:agent_token, agent_token)
+    |> put_change(:operator_id, operator.id)
+    |> Repo.insert(log: false)
   end
 
   defp resolve_account_token(%CredentialReference{operator_id: operator_id}) do

@@ -21,7 +21,6 @@ defmodule SpaceTraders.Application do
         SpaceTraders.Evidence.ReadCoordinator,
         SpaceTraders.API.CapacityGovernor,
         SpaceTraders.API.ShadowAdmission,
-        SpaceTraders.EmergencyStopAdmission,
         SpaceTraders.FleetGenerationAdmission
       ] ++
         runtime_authority_children() ++

@@ -42,59 +42,6 @@ defmodule SpaceTraders.Fleet.Intents do
   alias SpaceTraders.FleetPlanning.CandidateContribution
   alias SpaceTraders.{Intelligence, World}
 
-  @doc false
-  def emergency_stop_reconciled?(ship_ids) when is_list(ship_ids) do
-    unfinished_states = Intent.unfinished_states()
-
-    not Repo.exists?(
-      from intent in Intent,
-        where:
-          intent.ship_id in ^ship_ids and intent.status in ^unfinished_states and
-            not is_nil(intent.in_flight_action)
-    )
-  end
-
-  @doc false
-  def censor_reset_generation(ship_ids, now) when is_list(ship_ids) do
-    if ship_ids != [] do
-      unfinished_states = Intent.unfinished_states()
-
-      Repo.update_all(
-        from(intent in Intent,
-          where:
-            intent.ship_id in ^ship_ids and intent.status in ^unfinished_states and
-              not is_nil(intent.in_flight_action)
-        ),
-        set: [
-          status: "superseded",
-          in_flight_action: nil,
-          mutation_attempt_id: nil,
-          last_action_result: %{"outcome" => "reset_censored"},
-          finished_at: now,
-          updated_at: now
-        ]
-      )
-    end
-
-    :ok
-  end
-
-  @doc false
-  def supersede_for_emergency_stop(ship_ids, now) when is_list(ship_ids) do
-    if ship_ids != [] do
-      unfinished_states = Intent.unfinished_states()
-
-      Repo.update_all(
-        from(intent in Intent,
-          where: intent.ship_id in ^ship_ids and intent.status in ^unfinished_states
-        ),
-        set: [status: "superseded", finished_at: now, updated_at: now]
-      )
-    end
-
-    :ok
-  end
-
   defmodule ContractRecipient do
     @moduledoc "A typed Contract recipient for Deliver Goods."
     defstruct [:contract_id, :waypoint]
@@ -4771,9 +4718,6 @@ defmodule SpaceTraders.Fleet.Intents do
       {:error, reason} when reason in [:no_current_ship_claim, :transfer_authority_unavailable] ->
         retire_unavailable_absence(intent, absent)
 
-      {:error, :emergency_stopped} ->
-        retire_stopped_absence(intent, absent)
-
       {:error, reason} ->
         block_intents(intent, {:awaiting_reconciliation, reason})
     end
@@ -4817,16 +4761,6 @@ defmodule SpaceTraders.Fleet.Intents do
   end
 
   defp selected_action_admissible?(_agent, _intent, _ship, _action), do: :ok
-
-  defp retire_stopped_absence(intent, absent) do
-    with_current_intent(intent, fn current ->
-      with {:ok, _} <- MutationAttempts.retire_stopped_retry(absent) do
-        {:ok, update_intent!(Ecto.Changeset.change(current, in_flight_action: nil))}
-      else
-        {:error, _reason} -> Repo.rollback(:intent_no_longer_owned)
-      end
-    end)
-  end
 
   defp retire_unavailable_absence(intent, absent) do
     with_current_intent(intent, fn current ->

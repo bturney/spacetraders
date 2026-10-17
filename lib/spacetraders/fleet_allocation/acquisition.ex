@@ -71,8 +71,7 @@ defmodule SpaceTraders.FleetAllocation.Acquisition do
   defp enabled_work_proceeds?(capacity, _work), do: FleetCapacity.proceed?(capacity)
 
   defp plan_and_publish(scope, agent, revision, generation, system, now, work) do
-    with :ok <- SpaceTraders.FleetStrategy.mutation_allowed?(),
-         {:ok, floor} <- StandingAuthority.credit_floor(revision),
+    with {:ok, floor} <- StandingAuthority.credit_floor(revision),
          {:ok, overview} <- Agent.agent_overview(agent),
          {:ok, ships} <- Fleet.list_ships(agent) do
       portfolio = FleetAllocation.current_portfolio(scope, agent)
