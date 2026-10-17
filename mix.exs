@@ -98,6 +98,8 @@ defmodule SpaceTraders.MixProject do
       "ecto.setup": ["ecto.create", "ecto.migrate", "run priv/repo/seeds.exs"],
       "ecto.reset": ["ecto.drop", "ecto.setup"],
       test: [&seed_from_main/1, "ecto.create --quiet", "ecto.migrate --quiet", "test"],
+      # .formatter.exs imports :ecto_sql, so a fresh worktree needs deps/ to format.
+      format: [&seed_from_main/1, "format"],
       "assets.setup": ["tailwind.install --if-missing", "esbuild.install --if-missing"],
       "assets.build": ["compile", "tailwind spacetraders", "esbuild spacetraders"],
       "assets.deploy": [

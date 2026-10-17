@@ -19,9 +19,10 @@ defmodule Mix.Tasks.Verify do
   `verify: FAIL at <check>` and the exact rerun command. Tests run with
   `--max-failures 5`.
 
-  Locally the gate runs `mix format` in fix mode and, if files changed, reports
-  `verify: reformatted <n> files: commit before push` on pass. When the `CI` env
-  var is set it keeps `--check-formatted`.
+  Locally the gate runs `mix format` in fix mode; if files changed it fails at
+  `format` with `verify: reformatted <n> files: commit them`, so unformatted code
+  never passes locally and fails CI later. When the `CI` env var is set it keeps
+  `--check-formatted`.
 
   ## Stray output
 
@@ -101,25 +102,19 @@ defmodule Mix.Tasks.Verify do
     problems = Keyword.get(opts, :preflight, fn -> [] end).()
     halt_on_problems(problems)
 
-    reformatted =
-      Enum.reduce(checks, 0, fn {task, args} = check, reformatted ->
-        fixing_format? = task == "format" and "--check-formatted" not in args
-        before = if fixing_format?, do: snapshot.()
-        t0 = now()
-        {output, status} = run_check.(task, args)
+    Enum.each(checks, fn {task, args} = check ->
+      fixing_format? = task == "format" and "--check-formatted" not in args
+      before = if fixing_format?, do: snapshot.()
+      t0 = now()
+      {output, status} = run_check.(task, args)
 
-        if status != 0, do: fail(check, output)
-        if task == "test", do: check_stray_output(check, output)
+      if status != 0, do: fail(check, output)
+      if task == "test", do: check_stray_output(check, output)
+      if fixing_format?, do: check_reformatted(check, changed(before, snapshot.()))
 
-        Mix.shell().info("verify: #{task} ok #{elapsed(t0)}")
-        if task == "test", do: Enum.each(summary_lines(output), &Mix.shell().info/1)
-
-        if fixing_format?, do: reformatted + changed(before, snapshot.()), else: reformatted
-      end)
-
-    if reformatted > 0 do
-      Mix.shell().info("verify: reformatted #{reformatted} files: commit before push")
-    end
+      Mix.shell().info("verify: #{task} ok #{elapsed(t0)}")
+      if task == "test", do: Enum.each(summary_lines(output), &Mix.shell().info/1)
+    end)
 
     Mix.shell().info("verify: PASS #{total}/#{total} #{elapsed(started)}")
     :ok
@@ -174,6 +169,11 @@ defmodule Mix.Tasks.Verify do
 
     exit({:shutdown, 2})
   end
+
+  defp check_reformatted(_check, 0), do: :ok
+
+  defp check_reformatted(check, n),
+    do: fail(check, "verify: reformatted #{n} files: commit them", "scripts/verify")
 
   defp check_stray_output(check, output) do
     case stray_lines(output) do

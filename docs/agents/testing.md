@@ -1,7 +1,7 @@
 # Testing
 
 Gate checks and output contract: `lib/mix/tasks/verify.ex`.
-Local verification formats files; include those edits.
+Local verification fixes formatting, then fails at `format` until those edits are committed.
 
 ## Runtime test lifecycle
 
