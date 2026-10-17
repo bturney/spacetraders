@@ -36,7 +36,7 @@ A desired chart often has *two* statuses: the underlying **game outcome** may be
 ### App views and causal data
 
 - [`MissionControlLive`](../../lib/spacetraders_web/live/mission_control_live.ex) shows Strategy/Generation context, objective evaluations, Attention, market expected change versus receipt-backed Trade Margin / Net Earnings, observation-only spending, allocation dispositions (including stall, Shortfall, Capacity Deferral, Neutral Wait, Unallocated), and noteworthy Activity.
-- [`OperationsLive`](../../lib/spacetraders_web/live/operations_live.ex) exposes Objective-grouped Endeavors and linked released-work evidence; [`ActivityLive`](../../lib/spacetraders_web/live/activity_live.ex) separates consequential events from raw API traffic; [`GenerationsLive`](../../lib/spacetraders_web/live/generations_live.ex) includes bounded historical comparisons.
+- [`GenerationsLive`](../../lib/spacetraders_web/live/generations_live.ex) includes bounded historical comparisons.
 - [`DecisionEpisodeLive`](../../lib/spacetraders_web/live/decision_episode_live.ex) already shows classification, calibration version, expected and actual outcome maps, retained evidence references, and contextual Grafana links.
 - [`MissionControl.decision_episode_projection`](../../lib/spacetraders/mission_control.ex) exposes **alternatives and binding constraints** as well. Their omission from the concise Decision Episode view is a **presentation opportunity**, not by itself a reason to add new permanent tables.
 - [`GrafanaLink`](../../lib/spacetraders_web/grafana_link.ex) scopes links with Generation, Revision, Decision Episode, Commitment, Intent, and MutationAttempt identities and time windows. Retain this traceability.
@@ -225,7 +225,7 @@ Suggested investigations, *if their source models later exist*: market quote for
 - Accepted UX target: [#311](https://github.com/bturney/spacetraders/issues/311), especially Mission Control, Operations, World, Explainability, Activity, Generations and Grafana handoff.
 - Strategic examples: [SR-01–SR-08](strategic-reasoning-scenarios.md).
 - Existing guides: [Observability](observability.md), [Outcome metrics](outcome-metrics.md), [Testing](testing.md).
-- App sources: [Mission Control](../../lib/spacetraders_web/live/mission_control_live.ex), [Decision Episode](../../lib/spacetraders_web/live/decision_episode_live.ex), [Operations](../../lib/spacetraders_web/live/operations_live.ex), [Grafana links](../../lib/spacetraders_web/grafana_link.ex), [Market economics](../../lib/spacetraders/fleet_allocation/trade_progress.ex).
+- App sources: [Mission Control](../../lib/spacetraders_web/live/mission_control_live.ex), [Decision Episode](../../lib/spacetraders_web/live/decision_episode_live.ex), [Grafana links](../../lib/spacetraders_web/grafana_link.ex), [Market economics](../../lib/spacetraders/fleet_allocation/trade_progress.ex).
 - Dashboard source: [home-server-setup provisioned Grafana dashboards](https://github.com/bturney/home-server-setup/tree/main/config/observability/grafana/provisioning/dashboards).
 
 **Review goal:** confirm every source/instrumentation claim, retain the #311/#502 authority boundary, and preserve questions and illustrative design evidence without creating another implementation backlog.

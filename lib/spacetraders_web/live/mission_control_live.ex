@@ -418,7 +418,6 @@ defmodule SpaceTradersWeb.MissionControlLive do
         <section id="notable-activity" class="rounded-2xl border border-base-300 bg-base-100 p-5">
           <div class="flex items-center justify-between gap-3">
             <h2 class="text-xl font-bold">Notable activity</h2>
-            <.link navigate={~p"/activity"} class="link link-primary text-sm">All Activity</.link>
           </div>
           <p :if={@projection.notable_activity == []} class="mt-2 text-sm opacity-70">
             No consequential events recorded yet.

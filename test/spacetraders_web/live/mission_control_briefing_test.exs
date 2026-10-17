@@ -227,21 +227,6 @@ defmodule SpaceTradersWeb.MissionControlBriefingTest do
 
     refute reopened_view |> element("#needs-attention li", attention_summary) |> render() =~
              "Acknowledged · unresolved"
-
-    {:ok, activity, _html} = live(conn, ~p"/activity")
-    assert has_element?(activity, "#activity-history #condition-#{attention.id}", "Resolved")
-
-    assert has_element?(
-             activity,
-             "#activity-history #condition-#{recurrence.id}",
-             "Still unresolved"
-           )
-
-    assert has_element?(
-             activity,
-             "#condition-#{attention.id} a[href='/world/systems/X1/waypoints/X1-A1/construction']",
-             "Construction"
-           )
   end
 
   test "collection gaps render unknown Fleet health and outcomes rather than zero measurements",
