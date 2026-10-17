@@ -126,124 +126,6 @@ defmodule SpaceTradersWeb.MissionControlLiveTest do
     assert has_element?(view, "#operating-health", "STOPPED")
   end
 
-  test "proven objective infeasibility stays pinned after acknowledgement until evidence changes",
-       %{
-         conn: conn,
-         operator: operator,
-         scope: scope
-       } do
-    {:ok, _draft} = FleetStrategy.select_preset(scope, "steady_growth")
-    {:ok, revision} = FleetStrategy.activate(scope, FleetStrategy.get(scope).draft_version)
-    agent = agent_fixture(operator, %{agent_token: nil})
-
-    generation =
-      SpaceTraders.AgentFixtures.generation_fixture(%Generation{
-        operator_id: operator.id,
-        agent_id: agent.id,
-        fleet_strategy_revision_id: revision.id,
-        number: 1,
-        symbol: agent.symbol,
-        faction: agent.faction,
-        replacement_symbols: %{"symbols" => [agent.symbol]},
-        starting_credits: 175_000,
-        strategy_capable_at: DateTime.utc_now()
-      })
-
-    {:ok, view, _html} = live(conn, ~p"/mission-control")
-    refute has_element?(view, "#needs-attention", "Grow credits")
-
-    evidence = objective_evidence(agent)
-    persisted_evidence = Repo.get(SpaceTraders.Evidence.Observation, evidence.id)
-    assert SpaceTraders.Evidence.valid_observation?(persisted_evidence)
-
-    assert {:ok, _} =
-             SpaceTraders.FleetGeneration.record_objective_progress(scope, generation.id, 0, %{
-               "change" => 0,
-               "elapsed_seconds" => 60,
-               "horizon_seconds" => 3600,
-               "feasible?" => false,
-               "evidence_id" => evidence.id
-             })
-
-    assert has_element?(view, "#needs-attention", "Grow credits")
-    [condition] = SpaceTraders.OperatorConditions.unresolved(scope)
-    view |> element("#needs-attention button[phx-value-id='#{condition.id}']") |> render_click()
-
-    {:ok, view, _html} = live(conn, ~p"/mission-control")
-    assert has_element?(view, "#needs-attention", "Acknowledged")
-
-    assert {:ok, _} =
-             SpaceTraders.FleetGeneration.record_objective_progress(scope, generation.id, 0, %{
-               "change" => 20,
-               "elapsed_seconds" => 60,
-               "horizon_seconds" => 3600,
-               "feasible?" => true,
-               "evidence_id" => objective_evidence(agent, 175_020).id
-             })
-
-    {:ok, view, _html} = live(conn, ~p"/mission-control")
-    refute has_element?(view, "#needs-attention", "Grow credits")
-    assert SpaceTraders.OperatorConditions.unresolved(scope) == []
-  end
-
-  test "a pricing-model breach is Degraded Attention that acknowledgement does not resolve", %{
-    conn: conn,
-    operator: operator,
-    scope: scope
-  } do
-    {agent, [intent], _portfolio} =
-      SpaceTraders.CreditSpendingFixtures.claimed_purchases([0], operator: operator)
-
-    SpaceTraders.CreditSpendingFixtures.stub_quote(agent, 10, 1_063)
-
-    {:ok, %{attempt: attempt}} =
-      SpaceTraders.Fleet.Intents.RecordedAction.prepare(
-        agent,
-        intent,
-        SpaceTraders.CreditSpendingFixtures.buy()
-      )
-
-    SpaceTraders.CreditSpendingFixtures.stub_purchase(agent, "BUYER-0", 14, 993)
-    assert {:ok, _} = SpaceTraders.API.dispatch_recorded(attempt)
-    stub_fleet_reads(agent, 993)
-
-    {:ok, view, _html} = live(conn, ~p"/mission-control")
-    assert has_element?(view, "#needs-attention", "Degraded Operation")
-    assert has_element?(view, "#needs-attention", "pricing-model breach")
-    assert has_element?(view, "#needs-attention", "charged 70 credits")
-    assert has_element?(view, "#needs-attention", "worst-case bound of 63")
-    assert has_element?(view, "#operating-health", "Needs Operator attention")
-
-    [condition] = SpaceTraders.OperatorConditions.unresolved(scope)
-    refute condition.summary =~ ~r/acknowledg/i
-    view |> element("#needs-attention button[phx-value-id='#{condition.id}']") |> render_click()
-
-    {:ok, view, _html} = live(conn, ~p"/mission-control")
-    assert has_element?(view, "#needs-attention", "Degraded Operation")
-    assert has_element?(view, "#needs-attention", "Acknowledged · unresolved")
-    assert has_element?(view, "#operating-health", "Needs Operator attention")
-
-    assert [%{kind: "pricing_model_miss", released_at: nil}] =
-             SpaceTraders.CreditCalibration.shortfalls(agent)
-  end
-
-  defp stub_fleet_reads(agent, credits) do
-    Req.Test.stub(SpaceTraders.API, fn conn ->
-      assert conn.method == "GET"
-
-      case conn.request_path do
-        "/v2/my/agent" ->
-          Req.Test.json(conn, %{"data" => %{"symbol" => agent.symbol, "credits" => credits}})
-
-        _ ->
-          Req.Test.json(conn, %{
-            "data" => [],
-            "meta" => %{"total" => 0, "page" => 1, "limit" => 20}
-          })
-      end
-    end)
-  end
-
   test "Activity distinguishes decisions from routine Ship traffic", %{
     conn: conn,
     operator: operator,
@@ -277,7 +159,7 @@ defmodule SpaceTradersWeb.MissionControlLiveTest do
       SpaceTraders.Fleet.record_activity(
         agent,
         ship,
-        "manual_intervention_stopped",
+        "ship_stopped",
         "One-off navigation stopped"
       )
 
@@ -439,7 +321,6 @@ defmodule SpaceTradersWeb.MissionControlLiveTest do
     assert html =~ "Generation 2"
     assert html =~ "250 credits"
     assert html =~ "Grow credits: 20.0 per horizon"
-    assert html =~ "Grow credits is not feasible under current evidence."
     assert html =~ "Strategy revision 2"
     assert html =~ "Unknown — no realized credit evidence"
     assert html =~ "Strategy revision 1"
@@ -634,28 +515,12 @@ defmodule SpaceTradersWeb.MissionControlLiveTest do
         strategy_capable_at: DateTime.utc_now()
       })
 
-    {:ok, _condition} =
-      SpaceTraders.OperatorConditions.raise(
-        scope,
-        "credit-floor",
-        :attention,
-        "Protected credit floor cannot be maintained",
-        fleet_generation_id: generation.id,
-        fleet_strategy_revision_id: revision.id
-      )
-
     {:ok, view, html} = live(conn, ~p"/mission-control")
 
     assert has_element?(
              view,
              "#objective-evaluations a[href*='/d/spacetraders-strategy-outcomes/strategy-outcomes'][href*='var-fleet_generation=#{generation.id}'][href*='var-strategy_revision=#{revision.id}'][href*='from='][href*='to=now']",
              "Inspect Strategy outcomes"
-           )
-
-    assert has_element?(
-             view,
-             "#needs-attention a[href*='/d/spacetraders-economics-capital/economics-capital'][href*='var-fleet_generation=#{generation.id}'][href*='var-strategy_revision=#{revision.id}'][href*='from='][href*='to=now']",
-             "Inspect Economics and Capital"
            )
 
     refute html =~ "token="

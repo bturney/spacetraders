@@ -1565,7 +1565,7 @@ defmodule SpaceTraders.MarketDomainAllocationTest do
                StructuralStall.observe(fleet.agent, fleet.revision, nil, decision)
     end
 
-    test "a structural stall raises one Degraded Attention that recovery resolves" do
+    test "a structural stall records one episode that recovery closes" do
       fleet = fleet([@frigate, @probe])
       overdue_market_demand(fleet)
       stalled = %{result: {:ok, %{action: :retained}}, counts: %{claimable_ships: 1}}
@@ -1577,16 +1577,11 @@ defmodule SpaceTraders.MarketDomainAllocationTest do
 
       assert [%{id: episode_id}] = stall_episodes()
 
-      assert [%{kind: :attention, summary: summary} = attention] =
-               SpaceTraders.OperatorConditions.unresolved(fleet.scope)
-
-      assert summary =~ "Degraded Operation"
-      assert summary =~ "Overdue Market Observation Demands"
-      assert attention.strategy_decision_episode_id == episode_id
+      assert %{resolved_at: nil} = Repo.get!(StrategyDecisionEpisode, episode_id)
 
       explained = %{result: {:ok, %{action: :retained}}, counts: %{coverage_candidates: 1}}
       assert :healthy = StructuralStall.observe(fleet.agent, fleet.revision, nil, explained)
-      assert SpaceTraders.OperatorConditions.unresolved(fleet.scope) == []
+      assert %{resolved_at: %DateTime{}} = Repo.get!(StrategyDecisionEpisode, episode_id)
     end
 
     test "an errored decision or one without candidate counts explains nothing" do

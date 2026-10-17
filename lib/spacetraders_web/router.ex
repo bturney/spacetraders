@@ -63,7 +63,6 @@ defmodule SpaceTradersWeb.Router do
       live "/world/systems/:system/waypoints/:waypoint/construction", EntityLive, :construction
       live "/contracts/:contract_id", EntityLive, :contract
       live "/ships/:ship_symbol", EntityLive, :ship
-      live "/intervention", InterventionLive, :index
 
       live "/strategy", StrategyLive, :show
     end

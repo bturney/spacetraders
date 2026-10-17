@@ -569,7 +569,6 @@ defmodule SpaceTraders.ShipExecutionDurabilityTest do
         :revision,
         :selection,
         :singleton,
-        :intervention,
         :portfolio_version
       ] do
     @loss loss
@@ -953,17 +952,6 @@ defmodule SpaceTraders.ShipExecutionDurabilityTest do
 
     assert {:error, :runtime_authority_unavailable} =
              SpaceTraders.RuntimeAuthority.execution_allowed?()
-  end
-
-  defp revoke_authority(:intervention, _agent, intent) do
-    intent
-    |> Ecto.Changeset.change(
-      caller: "intervention",
-      fleet_commitment_id: nil,
-      fleet_commitment_portfolio_id: nil,
-      fleet_commitment_portfolio_version: nil
-    )
-    |> Repo.update!()
   end
 
   defp revoke_authority(:portfolio_version, _agent, intent) do

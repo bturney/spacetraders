@@ -1,16 +1,14 @@
 defmodule SpaceTradersWeb.ActivityLive do
-  @moduledoc "Consequential Fleet decisions and conditions in Operator chronology."
+  @moduledoc "Consequential Fleet decisions in Operator chronology."
 
   use SpaceTradersWeb, :live_view
 
-  alias SpaceTraders.{MissionControl, OperatorConditions}
+  alias SpaceTraders.MissionControl
   alias SpaceTraders.MissionControl.Channels
-  alias SpaceTradersWeb.{EntityReference, GrafanaLink}
-
+  
   @impl true
   def mount(_params, _session, socket) do
     if connected?(socket) do
-      Channels.subscribe_conditions()
       Channels.subscribe_allocation()
     end
 
@@ -18,7 +16,6 @@ defmodule SpaceTradersWeb.ActivityLive do
   end
 
   @impl true
-  def handle_info(:mission_conditions_updated, socket), do: {:noreply, load_activity(socket)}
   def handle_info({:outbox, _id, _event, _payload}, socket), do: {:noreply, load_activity(socket)}
 
   @impl true
@@ -33,29 +30,9 @@ defmodule SpaceTradersWeb.ActivityLive do
         </p>
       </header>
 
-      <section id="activity-attention" class="rounded-2xl border border-base-300 p-5">
-        <h2 class="font-bold">Needs attention</h2>
-        <p :if={@conditions == []} class="mt-2 text-sm opacity-70">
-          No unresolved Attention or Intervention.
-        </p>
-        <ul class="mt-3 space-y-2">
-          <li :for={condition <- @conditions}>
-            <span class="font-semibold">{condition.kind}</span>
-            · {condition.summary}
-            <span :if={condition.acknowledged_at} class="text-sm opacity-70">Acknowledged · unresolved</span>
-            <button
-              :if={!condition.acknowledged_at}
-              phx-click="acknowledge"
-              phx-value-id={condition.id}
-              class="btn btn-ghost btn-sm"
-            >Acknowledge</button>
-          </li>
-        </ul>
-      </section>
-
       <nav class="my-5 flex flex-wrap gap-2" aria-label="Activity filters">
         <button
-          :for={filter <- ~w(all notable decision attention intervention)}
+          :for={filter <- ~w(all notable decision)}
           phx-click="filter"
           phx-value-filter={filter}
           aria-pressed={@filter == filter}
@@ -75,11 +52,6 @@ defmodule SpaceTradersWeb.ActivityLive do
             "%Y-%m-%d %H:%M UTC"
           )}</time>
           <p class="mt-1">{entry.summary}</p>
-          <.link
-            :if={EntityReference.path(Map.get(entry, :entity_ref))}
-            navigate={EntityReference.path(Map.get(entry, :entity_ref))}
-            class="link link-primary mt-1 inline-block"
-          >{EntityReference.label(Map.get(entry, :entity_ref))}</.link>
           <details class="mt-2 text-sm">
             <summary class="cursor-pointer text-primary">Why and context</summary>
             <p class="mt-2 opacity-75">{entry.detail}</p>
@@ -88,13 +60,6 @@ defmodule SpaceTradersWeb.ActivityLive do
               navigate={~p"/decision-episodes/#{Map.get(entry, :decision_episode_id)}"}
               class="link link-primary mt-1 block"
             >Decision Episode {Map.get(entry, :decision_episode_id)}</.link>
-            <a
-              :if={Map.get(entry, :condition_key)}
-              href={GrafanaLink.condition_url(entry)}
-              target="_blank"
-              rel="noreferrer"
-              class="link link-primary mt-1 block"
-            >Inspect {GrafanaLink.family_label(GrafanaLink.family_for_condition(entry))}</a>
             <.link navigate={~p"/generations"} class="link link-primary mt-1 inline-block">Generation history</.link>
           </details>
         </li>
@@ -105,25 +70,11 @@ defmodule SpaceTradersWeb.ActivityLive do
 
   @impl true
   def handle_event("filter", %{"filter" => filter}, socket)
-      when filter in ~w(all notable decision attention intervention),
+      when filter in ~w(all notable decision),
       do: {:noreply, assign(socket, filter: filter)}
 
-  def handle_event("acknowledge", %{"id" => raw_id}, socket) do
-    with {id, ""} <- Integer.parse(raw_id),
-         :ok <- OperatorConditions.acknowledge(socket.assigns.current_scope, id) do
-      {:noreply, load_activity(socket)}
-    else
-      _ -> {:noreply, socket}
-    end
-  end
-
   defp load_activity(socket) do
-    scope = socket.assigns.current_scope
-
-    assign(socket,
-      activity: MissionControl.activity(scope),
-      conditions: OperatorConditions.unresolved(scope)
-    )
+    assign(socket, activity: MissionControl.activity(socket.assigns.current_scope))
   end
 
   defp filtered(entries, "all"), do: entries

@@ -27,7 +27,7 @@ defmodule SpaceTraders.FleetAllocation do
   alias SpaceTraders.FleetPlanning.CandidateContribution
   alias SpaceTraders.FleetStrategy
   alias SpaceTraders.FleetStrategy.Strategy
-  alias SpaceTraders.{Clock, ManualIntervention, OperatorAuthority, Outbox, Repo, ShipReservation}
+  alias SpaceTraders.{Clock, OperatorAuthority, Outbox, Repo, ShipReservation}
 
   alias SpaceTraders.FleetStrategy.{
     ObjectiveEvaluation,
@@ -1505,20 +1505,9 @@ defmodule SpaceTraders.FleetAllocation do
       )
 
     if active_generation? or active_revision? do
-      case current_ship_claim(agent, ship_symbol, opts) do
-        {:error, :no_current_ship_claim} = error ->
-          if ManualIntervention.authorized?(agent_id, ship_symbol, opts[:intent_id]) do
-            {:ok, %{commitment_id: nil, portfolio_id: nil, portfolio_version: nil}}
-          else
-            error
-          end
-
-        claim ->
-          claim
-      end
+      current_ship_claim(agent, ship_symbol, opts)
     else
-      # Fleet Commitment and authenticated Manual Intervention remain the
-      # supported execution authorities.
+      # Fleet Commitment remains the supported execution authority.
       {:ok, %{commitment_id: nil, portfolio_id: nil, portfolio_version: nil}}
     end
   end

@@ -11,8 +11,7 @@ defmodule SpaceTraders.CreditFloorWatchTest do
   alias SpaceTraders.Agent.Scope
   alias SpaceTraders.CreditCalibration
   alias SpaceTraders.FleetStrategy
-  alias SpaceTraders.OperatorConditions
-  alias SpaceTraders.TestClock
+    alias SpaceTraders.TestClock
 
   setup do
     start_supervised!({TestClock, DateTime.utc_now()})
@@ -38,9 +37,8 @@ defmodule SpaceTraders.CreditFloorWatchTest do
     assert [%{kind: "non_pricing_shortfall", credits: 900, credit_floor: 1_000, released_at: nil}] =
              CreditCalibration.shortfalls(agent)
 
-    # Pausing is scoped to spending: no recalibration and no Attention.
+    # Pausing is scoped to spending: no recalibration.
     assert CreditCalibration.active().id == initial.id
-    assert OperatorConditions.unresolved(scope(agent)) == []
 
     # A newer authoritative balance at the floor releases the pause.
     TestClock.advance(1)

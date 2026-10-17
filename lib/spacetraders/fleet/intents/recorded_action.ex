@@ -22,8 +22,7 @@ defmodule SpaceTraders.Fleet.Intents.RecordedAction do
   alias SpaceTraders.FleetAllocation.Commitment
   alias SpaceTraders.FleetGeneration.Generation
   alias SpaceTraders.FleetStrategy.{Revision, Strategy}
-  alias SpaceTraders.ManualIntervention
-  alias SpaceTraders.CreditSpending
+    alias SpaceTraders.CreditSpending
   alias SpaceTraders.MutationAttempts
   alias SpaceTraders.MutationAttempts.Attempt
   alias SpaceTraders.Repo
@@ -343,9 +342,7 @@ defmodule SpaceTraders.Fleet.Intents.RecordedAction do
             operator_id: authority.agent.operator_id,
             fleet_generation_id: generation_id(authority.generation),
             strategy_revision_id: revision_id(authority.revision),
-            decision_episode_id: authority.claim[:decision_episode_id],
-            intervention_id: authority.claim[:intervention_id],
-            ship_reservation_id: authority.claim[:ship_reservation_id]
+            decision_episode_id: authority.claim[:decision_episode_id]
           }
         ]
 
@@ -406,28 +403,6 @@ defmodule SpaceTraders.Fleet.Intents.RecordedAction do
     else
       {:error, reason} -> {:error, reason}
       _ -> {:error, :recorded_dispatch_authority_stale}
-    end
-  end
-
-  # Authenticated Manual Intervention remains a supported execution authority
-  # before the Fleet has an active Revision, so it needs no Strategy Revision.
-  defp owner(agent, ship, %Intent{caller: "intervention"} = intent) do
-    strategy = deployment_strategy(agent)
-
-    with {:ok, authority} <-
-           ManualIntervention.authorization(agent.id, ship.symbol, intent.id, lock: true) do
-      claim =
-        Map.merge(authority, %{commitment_id: nil, portfolio_id: nil, portfolio_version: nil})
-
-      {:ok,
-       %{
-         claim: claim,
-         generation: current_generation(agent.id),
-         revision: optional_revision(strategy),
-         decision_episode_id: authority[:decision_episode_id],
-         intervention_id: authority[:intervention_id],
-         ship_reservation_id: authority[:ship_reservation_id]
-       }}
     end
   end
 
@@ -501,11 +476,6 @@ defmodule SpaceTraders.Fleet.Intents.RecordedAction do
 
   defp revision_id(nil), do: nil
   defp revision_id(revision), do: revision.id
-
-  defp optional_revision(%Strategy{active_revision_id: revision_id}) when not is_nil(revision_id),
-    do: Repo.get(Revision, revision_id)
-
-  defp optional_revision(_strategy), do: nil
 
   defp current_generation(agent_id) do
     Repo.one(

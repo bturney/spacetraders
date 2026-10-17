@@ -142,17 +142,6 @@ defmodule SpaceTraders.ShipReservation do
 
       if is_nil(reservation), do: Repo.rollback(:reservation_not_found)
 
-      if Repo.exists?(
-           from intervention in SpaceTraders.ManualIntervention,
-             join: intent in Intent,
-             on: intent.id == intervention.intent_id,
-             where:
-               intervention.ship_reservation_id == ^reservation.id and
-                 intent.status in ^Intent.unfinished_states()
-         ) do
-        Repo.rollback(:intervention_in_progress)
-      end
-
       Repo.update!(Ecto.Changeset.change(reservation, released_at: DateTime.utc_now()))
       :ok
     end)

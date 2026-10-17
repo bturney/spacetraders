@@ -3,8 +3,8 @@ defmodule SpaceTraders.RefuelJumpSpendingTest do
   Refuel and jump/antimatter spending through the production root Intent
   lifecycle (`Intents.execute_action/4`) and the shared recorded-action
   admission: explicit bounded quantity, quote before preparation, Fleet-wide
-  Reservations, durable Bounded Unknown exposure, and Attention (a blocked
-  Intent) instead of any spend below the credit floor.
+  Reservations, durable Bounded Unknown exposure, and a blocked
+  Intent instead of any spend below the credit floor.
   """
   use SpaceTraders.DataCase, async: false
 
@@ -78,7 +78,7 @@ defmodule SpaceTraders.RefuelJumpSpendingTest do
         else: assert(body == %{"waypointSymbol" => "X1-UX81-A2"})
     end
 
-    test "#{kind} below the floor never spends and raises Attention", %{posts: posts} do
+    test "#{kind} below the floor never spends and blocks the Intent", %{posts: posts} do
       {agent, [intent | _]} = claimed([0])
       stub_game(agent, posts, @good, 900)
 

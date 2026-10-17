@@ -174,8 +174,7 @@ defmodule SpaceTraders.MissionControlTest do
                  realized_sale_value: nil
                },
                contribution: %{commitment_count: 0, expected_value: 0},
-               limitation: nil,
-               attention: []
+               limitation: nil
              } = MissionControl.market_execution(scope)
     end
 
@@ -189,7 +188,6 @@ defmodule SpaceTraders.MissionControlTest do
       assert report.contribution.expected_value == 100
       assert report.contribution.claims == ["SHIP-1"]
       assert report.realized.realized_trade_margin == nil
-      assert report.attention == []
       assert report.limitation == nil
     end
 
@@ -206,7 +204,7 @@ defmodule SpaceTraders.MissionControlTest do
       assert report.contribution.commitment_count == 1
     end
 
-    test "a neutral limitation is distinct from Attention" do
+    test "a neutral limitation reads as a plain limitation" do
       %{scope: scope, commitment: commitment} = execution_fixture()
 
       commitment
@@ -218,8 +216,6 @@ defmodule SpaceTraders.MissionControlTest do
       assert report.limitation ==
                "No eligible Fleet Commitment is active for this Fleet Generation."
 
-      assert report.attention == []
-      assert SpaceTraders.OperatorConditions.unresolved(scope) == []
     end
 
     test "reports realized net economics from completed buy and sell Intents" do
@@ -328,40 +324,6 @@ defmodule SpaceTraders.MissionControlTest do
     end
   end
 
-  test "Attention is scoped and repeated observation does not clear acknowledgement" do
-    owner = operator_fixture()
-    other = legacy_operator_fixture()
-    owner_scope = Scope.for_operator(owner)
-    other_scope = Scope.for_operator(other)
-
-    assert {:ok, condition} =
-             SpaceTraders.OperatorConditions.raise(
-               owner_scope,
-               "floor",
-               :attention,
-               "Credit floor infeasible"
-             )
-
-    assert SpaceTraders.OperatorConditions.acknowledge(other_scope, condition.id) ==
-             {:error, :condition_unavailable}
-
-    assert SpaceTraders.OperatorConditions.unresolved(other_scope) == []
-    assert :ok = SpaceTraders.OperatorConditions.acknowledge(owner_scope, condition.id)
-
-    assert {:ok, repeated} =
-             SpaceTraders.OperatorConditions.raise(
-               owner_scope,
-               "floor",
-               :attention,
-               "Credit floor infeasible"
-             )
-
-    assert repeated.id == condition.id
-    assert repeated.acknowledged_at
-    assert [%{id: id}] = SpaceTraders.OperatorConditions.unresolved(owner_scope)
-    assert id == condition.id
-  end
-
   test "history projections answer only the deployment Operator; a legacy identity selects nothing" do
     deployment_scope = Scope.for_operator(operator_fixture())
     legacy = legacy_operator_fixture()
@@ -400,19 +362,10 @@ defmodule SpaceTraders.MissionControlTest do
         calibration_version: "market-v1"
       })
 
-    {:ok, condition} =
-      SpaceTraders.OperatorConditions.raise(
-        legacy_scope,
-        "objective-infeasible:#{generation.id}:#{revision.id}:0",
-        :attention,
-        "Legacy note"
-      )
-
     assert MissionControl.activity(legacy_scope) == []
     assert MissionControl.generation_recaps(legacy_scope) == []
     assert MissionControl.decision_episode(legacy_scope, episode.id) == nil
     assert MissionControl.decision_episode_comparison(legacy_scope) == []
-    assert {:error, _} = SpaceTraders.OperatorConditions.resolve(legacy_scope, condition.key)
 
     # The retained legacy rows keep their original attribution.
     assert Repo.get!(StrategyDecisionEpisode, episode.id).fleet_generation_id == generation.id
@@ -426,20 +379,7 @@ defmodule SpaceTraders.MissionControlTest do
     assert [%{id: id}] = MissionControl.decision_episode_comparison(deployment_scope)
     assert id == episode.id
 
-    assert [%{revisions: [1], limitations: limitations}] =
-             MissionControl.generation_recaps(deployment_scope)
-
-    assert "Legacy note" in limitations
-    assert [condition] == SpaceTraders.OperatorConditions.unresolved(deployment_scope)
-    assert [condition] == SpaceTraders.OperatorConditions.history(deployment_scope)
-    assert :ok = SpaceTraders.OperatorConditions.acknowledge(deployment_scope, condition.id)
-    assert :ok = SpaceTraders.OperatorConditions.resolve(deployment_scope, condition.key)
-    assert [] == SpaceTraders.OperatorConditions.unresolved(deployment_scope)
-
-    assert [%{operator_id: author, acknowledged_at: %DateTime{}, resolved_at: %DateTime{}}] =
-             SpaceTraders.OperatorConditions.history(deployment_scope)
-
-    assert author == legacy.id
+    assert [%{revisions: [1]}] = MissionControl.generation_recaps(deployment_scope)
   end
 
   describe "strategy/1" do

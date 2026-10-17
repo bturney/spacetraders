@@ -514,11 +514,6 @@ defmodule SpaceTraders.FleetAcquisitionTest do
              SpaceTraders.CreditCalibration.active()
 
     assert previous == initial.id
-
-    assert [%{kind: :attention, summary: summary}] =
-             SpaceTraders.OperatorConditions.unresolved(scope)
-
-    assert summary =~ "Degraded Operation: a Ship purchase charged 13000 credits"
   end
 
   test "a Ship whose readiness misses the promised capability is never registered" do

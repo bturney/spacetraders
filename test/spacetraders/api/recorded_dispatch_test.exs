@@ -204,37 +204,6 @@ defmodule SpaceTraders.API.RecordedDispatchTest do
     refute function_exported?(MutationAttempts, :prepare_for_dispatch, 3)
   end
 
-  test "an authenticated Intervention dispatches before the Fleet has an active Revision" do
-    operator = operator_fixture()
-    agent = agent_fixture(operator)
-    strategy = Repo.insert!(%Strategy{operator_id: operator.id, revision_number: 1})
-
-    Req.Test.stub(API, fn conn ->
-      assert conn.request_path == "/v2/my/ships/INTERVENTION-1/orbit"
-      Req.Test.json(conn, %{"data" => %{"nav" => %{"status" => "IN_ORBIT"}}})
-    end)
-
-    # Pre-Strategy generations are exactly the state #504's Intervention path covered.
-    SpaceTraders.AgentFixtures.generation_fixture(%Generation{
-      operator_id: operator.id,
-      agent_id: agent.id,
-      fleet_strategy_revision_id: nil,
-      number: 1,
-      symbol: agent.symbol,
-      faction: agent.faction
-    })
-
-    %{attempt: attempt} =
-      prepare_action(agent, "INTERVENTION-1", %{
-        "kind" => "orbit",
-        "waypoint" => "X1-TEST-A1",
-        "expected" => %{"status" => "IN_ORBIT"}
-      })
-
-    refute strategy.active_revision_id
-    assert {:ok, %{nav: %{status: "IN_ORBIT"}}} = API.dispatch_recorded(attempt)
-  end
-
   test "a Fleet Commitment without an active Revision cannot prepare recorded work" do
     agent = operator_fixture() |> agent_fixture()
 

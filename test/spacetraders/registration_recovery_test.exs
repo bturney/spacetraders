@@ -10,7 +10,7 @@ defmodule SpaceTraders.RegistrationRecoveryTest do
   import SpaceTraders.AgentFixtures
   import Ecto.Query
   alias Ecto.Adapters.SQL.Sandbox
-  alias SpaceTraders.{Agent, FleetGeneration, OperatorConditions, Repo, RuntimeDeath}
+  alias SpaceTraders.{Agent, FleetGeneration, Repo, RuntimeDeath}
   alias SpaceTraders.MutationAttempts.{Attempt, Outcome}
 
   setup do
@@ -195,9 +195,6 @@ defmodule SpaceTraders.RegistrationRecoveryTest do
       assert summary =~ "ORBITALIST"
       assert {:ok, %{state: :empty}} = FleetGeneration.current_fleet(scope)
 
-      assert [%{key: "registration-recovery", kind: :intervention}] =
-               OperatorConditions.unresolved(scope)
-
       # A restarted or competing setup sees the committed uncertainty.
       assert {:error, :registration_unresolved} =
                in_session(fn -> FleetGeneration.mint(scope, mint("PARALLAX")) end)
@@ -246,7 +243,6 @@ defmodule SpaceTraders.RegistrationRecoveryTest do
       assert_received {:game_request, "GET", "/v2/agents/ORBITALIST", nil}
       refute_received {:game_request, "POST", _, _}
       assert %{status: :clear} = FleetGeneration.registration_recovery(scope)
-      assert OperatorConditions.unresolved(scope) == []
 
       assert {:ok, %{agent: agent}} =
                in_session(fn -> FleetGeneration.mint(scope, mint("ORBITALIST")) end)
@@ -303,7 +299,6 @@ defmodule SpaceTraders.RegistrationRecoveryTest do
                FleetGeneration.current_fleet(scope)
 
       assert %{status: :clear} = FleetGeneration.registration_recovery(scope)
-      assert OperatorConditions.unresolved(scope) == []
       assert ["ORBITALIST-1"] = ship_symbols(adopted)
 
       # Once current, the recovery path cannot add another Agent.
@@ -982,7 +977,6 @@ defmodule SpaceTraders.RegistrationRecoveryTest do
       refute_received {:game_request, _, _, _}
       assert_sole_successor(scope, predecessor, ["RESETME-1", "RESETME-2"])
       assert FleetGeneration.registration_recovery(scope).status == :clear
-      assert OperatorConditions.unresolved(scope) == []
     end
   end
 
