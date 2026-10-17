@@ -165,6 +165,9 @@ defmodule SpaceTraders.EvidenceSchedulingTest do
     assert Evidence.due_demands() == []
     assert Evidence.earliest_due_at() == nil
 
+    :sys.get_state(DemandScheduler)
+    assert TestClock.next_due_at() == nil
+
     TestClock.advance(30)
     refute_receive {:observation_demand_due, _, _}
   end
@@ -264,6 +267,11 @@ defmodule SpaceTraders.EvidenceSchedulingTest do
     assert replacement.replaces_id == original.id
     assert Evidence.earliest_due_at() == replacement.due_at
 
+    # PubSub is asynchronous; finish the change callback before inspecting the
+    # clock's public future-work boundary.
+    :sys.get_state(DemandScheduler)
+    assert TestClock.next_due_at() == replacement.due_at
+
     TestClock.advance(60)
     assert Evidence.due_demands() == []
     refute_receive {:observation_demand_due, _, _}
@@ -302,5 +310,127 @@ defmodule SpaceTraders.EvidenceSchedulingTest do
     assert persisted.id == demand.id
     assert persisted.deadline_missed_at == Clock.utc_now()
     assert {:error, :evidence_pending} = Evidence.evidence_for_demand(demand)
+  end
+
+  test "an already-delivered superseded wake and duplicate messages cannot re-announce work",
+       %{agent: agent, agent_id: agent_id, revision: revision} do
+    assert {:ok, original} =
+             Evidence.request_demand(
+               agent,
+               revision,
+               Map.put(@demand, :due_at, DateTime.add(@now, 60, :second))
+             )
+
+    start_supervised!(Quiesced.child_spec({DemandScheduler, []}))
+    scheduler = Process.whereis(DemandScheduler)
+    # Capture the opaque message solely to inject transport duplicates. All
+    # assertions remain at the clock/Evidence/PubSub boundaries.
+    old_wake = {:wake, :sys.get_state(scheduler).wake_token}
+    :sys.suspend(scheduler)
+
+    try do
+      assert {:ok, replacement} =
+               Evidence.replace_demand(original, %{due_at: DateTime.add(@now, 120, :second)})
+
+      # The change precedes the old wake in the mailbox, but cancellation will
+      # find it already sent. Token fencing must still make it ineffective.
+      TestClock.advance(60)
+      :sys.resume(scheduler)
+      :sys.get_state(scheduler)
+      assert TestClock.next_due_at() == replacement.due_at
+      send(scheduler, old_wake)
+      refute_receive {:observation_demand_due, _, _}
+
+      current_wake = {:wake, :sys.get_state(scheduler).wake_token}
+      TestClock.advance(60)
+      assert_receive {:observation_demand_due, ^agent_id, [@subject]}, 1_000
+      send(scheduler, old_wake)
+      send(scheduler, current_wake)
+      send(scheduler, current_wake)
+      refute_receive {:observation_demand_due, _, _}
+
+      :sys.get_state(scheduler)
+      assert TestClock.next_due_at() == ~U[2030-01-01 00:02:30.000000Z]
+      TestClock.advance(30)
+      assert_receive {:observation_demand_due, ^agent_id, [@subject]}, 1_000
+      refute_receive {:observation_demand_due, _, _}
+    after
+      :sys.resume(scheduler)
+    end
+  end
+
+  test "a dead scheduler's retained clock work cannot compete with restart reconstruction",
+       %{agent: agent, agent_id: agent_id, revision: revision} do
+    due_at = DateTime.add(@now, 60, :second)
+
+    assert {:ok, demand} =
+             Evidence.request_demand(agent, revision, Map.put(@demand, :due_at, due_at))
+
+    start_supervised!(Quiesced.child_spec({DemandScheduler, []}))
+    assert :ok = stop_supervised!(DemandScheduler)
+    assert TestClock.next_due_at() == nil
+
+    # Keep this clock's process-local timers, unlike the earlier restart tests.
+    # A new process must use durable state, not the dead destination's work.
+    start_supervised!(Quiesced.child_spec({DemandScheduler, []}))
+    assert TestClock.next_due_at() == due_at
+    TestClock.advance(60)
+    assert_receive {:observation_demand_due, ^agent_id, [@subject]}, 1_000
+    refute_receive {:observation_demand_due, _, _}
+    assert [%{id: id}] = Evidence.due_demands()
+    assert id == demand.id
+  end
+
+  test "same-time demands produce one effective reconciliation wake",
+       %{agent: agent, agent_id: agent_id, revision: revision} do
+    due_at = DateTime.add(@now, 60, :second)
+    other = "market:X1-UX81:X1-UX81-A2"
+
+    assert {:ok, _first} =
+             Evidence.request_demand(agent, revision, Map.put(@demand, :due_at, due_at))
+
+    start_supervised!(Quiesced.child_spec({DemandScheduler, []}))
+
+    assert {:ok, _second} =
+             Evidence.request_demand(
+               agent,
+               revision,
+               Map.merge(@demand, %{subject: other, due_at: due_at})
+             )
+
+    :sys.get_state(DemandScheduler)
+    TestClock.advance(60)
+    assert_receive {:observation_demand_due, ^agent_id, subjects}, 1_000
+    assert Enum.sort(subjects) == Enum.sort([@subject, other])
+    refute_receive {:observation_demand_due, _, _}
+  end
+
+  test "the default live clock rearms replacements and reconstructs after scheduler restart",
+       %{agent: agent, agent_id: agent_id, revision: revision} do
+    Application.delete_env(:spacetraders, :clock)
+    now = Clock.utc_now()
+    assert abs(DateTime.diff(now, DateTime.utc_now(), :second)) <= 1
+
+    assert {:ok, original} =
+             Evidence.request_demand(
+               agent,
+               revision,
+               Map.put(@demand, :due_at, DateTime.add(now, 300, :millisecond))
+             )
+
+    start_supervised!(Quiesced.child_spec({DemandScheduler, []}))
+
+    assert {:ok, replacement} =
+             Evidence.replace_demand(original, %{due_at: DateTime.add(now, 800, :millisecond)})
+
+    :sys.get_state(DemandScheduler)
+    refute_receive {:observation_demand_due, _, _}, 350
+    assert :ok = stop_supervised!(DemandScheduler)
+    start_supervised!(Quiesced.child_spec({DemandScheduler, []}))
+
+    assert_receive {:observation_demand_due, ^agent_id, [@subject]}, 1_500
+    assert [%{id: id}] = Evidence.due_demands()
+    assert id == replacement.id
+    refute_receive {:observation_demand_due, _, _}
   end
 end
