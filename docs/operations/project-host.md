@@ -70,6 +70,23 @@ and the host records the application image.
 A failed deployment makes a best-effort attempt to start the previous image.
 Fix failed releases and deploy forward when rollback cannot recover service.
 
+## Kill switch
+
+Stopping the `web` service is the only way to halt gameplay; there is no in-app
+Emergency Stop ([ADR 0017](../adr/0017-nothing-needs-the-operator.md)).
+
+```sh
+tailscale ssh project-host docker stop spacetraders-web-1
+```
+
+The stop waits up to 60 seconds for graceful shutdown, then sends no further
+game requests. Ships already in flight finish their legs in the game either
+way. `restart: unless-stopped` keeps the container stopped across host reboots.
+PostgreSQL stays up, so nothing is lost.
+
+Resume with `tailscale ssh project-host docker start spacetraders-web-1`, or
+deploy any image. Boot recovery reconciles unresolved mutations on start.
+
 ## PostgreSQL health and migration
 
 Run the health check from a Tailscale-connected checkout:
