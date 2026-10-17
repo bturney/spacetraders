@@ -449,9 +449,7 @@ defmodule SpaceTraders.FleetExecution do
       )
 
     ships
-    |> Enum.reject(
-      &(not MapSet.member?(registered, &1.symbol))
-    )
+    |> Enum.reject(&(not MapSet.member?(registered, &1.symbol)))
     |> Enum.map(fn ship ->
       %{
         resource: ship.symbol,
