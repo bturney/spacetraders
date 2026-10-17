@@ -193,7 +193,7 @@ Relative return per Ship-hour or per constrained credit can help compare options
 - Active bounded qualification: [#684](https://github.com/bturney/spacetraders/issues/684) and [#691](https://github.com/bturney/spacetraders/issues/691).
 - Planned actual-bot accelerated simulation: [#638](https://github.com/bturney/spacetraders/issues/638).
 - Governing architecture and spending authority: [ADR 0010](../adr/0010-autonomous-runtime.md), [ADR 0013](../adr/0013-credit-floor-worst-case-exposure.md).
-- Terminology and testing: [GLOSSARY](../../GLOSSARY.md), [testing](testing.md), [outcome metrics](outcome-metrics.md).
+- Terminology and testing: [glossary map](../../GLOSSARY-MAP.md), [testing](testing.md), [outcome metrics](outcome-metrics.md).
 - Code inspection pointers: [Fleet Planning](../../lib/spacetraders/fleet_planning.ex), [Fleet Allocation](../../lib/spacetraders/fleet_allocation.ex), [Fleet Resources](../../lib/spacetraders/fleet_resources.ex), [Fleet Intelligence](../../lib/spacetraders/fleet_intelligence.ex), [Fleet Construction](../../lib/spacetraders/fleet_construction.ex), [Trade Progress](../../lib/spacetraders/fleet_allocation/trade_progress.ex), [OpenAPI supply chain contract](../../priv/spec/SpaceTraders.json).
 
 **Review goal:** Keep the established #502 destination authoritative. Fix incorrect source readings and scenario assumptions during review. Merge this as contextual, traceable design evidence only; authorize implementation through the already defined bounded gate process.
