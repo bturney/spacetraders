@@ -262,7 +262,6 @@ defmodule SpaceTraders.MissionControlTest do
     end
   end
 
-
   test "Attention is scoped and repeated observation does not clear acknowledgement" do
     owner = operator_fixture()
     other = legacy_operator_fixture()
