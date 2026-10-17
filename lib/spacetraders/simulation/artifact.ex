@@ -65,10 +65,8 @@ defmodule SpaceTraders.Simulation.Artifact do
 
   defp private_image(root, archive) do
     with true <- safe_path?(archive),
-         :ok <- private_parents(root, Path.split(archive) |> Enum.drop(-1)),
-         {:ok, %{type: :regular, mode: mode}} <- File.lstat(Path.join(root, archive)),
-         true <- Bitwise.band(mode, 0o077) == 0 do
-      {:ok, Path.join(root, archive)}
+         {:ok, path} <- private_file(root, archive) do
+      {:ok, path}
     else
       _ -> {:error, :invalid_image_archive}
     end
@@ -166,12 +164,8 @@ defmodule SpaceTraders.Simulation.Artifact do
 
   defp inputs(root, inputs) do
     Enum.reduce_while(inputs, :ok, fn {role, input}, :ok ->
-      path = Path.join(root, input["path"])
-
       result =
-        with :ok <- private_parents(root, Path.split(input["path"]) |> Enum.drop(-1)),
-             {:ok, %{type: :regular, mode: mode}} <- File.lstat(path),
-             true <- Bitwise.band(mode, 0o077) == 0,
+        with {:ok, path} <- private_file(root, input["path"]),
              true <- file_digest(path) == input["sha256"] do
           :ok
         else
@@ -180,6 +174,18 @@ defmodule SpaceTraders.Simulation.Artifact do
 
       if result == :ok, do: {:cont, :ok}, else: {:halt, result}
     end)
+  end
+
+  defp private_file(root, relative_path) do
+    path = Path.join(root, relative_path)
+
+    with :ok <- private_parents(root, Path.split(relative_path) |> Enum.drop(-1)),
+         {:ok, %{type: :regular, mode: mode}} <- File.lstat(path),
+         true <- Bitwise.band(mode, 0o077) == 0 do
+      {:ok, path}
+    else
+      _ -> :error
+    end
   end
 
   defp private_parents(_, []), do: :ok
