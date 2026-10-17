@@ -11,7 +11,7 @@ defmodule SpaceTraders.FleetGenerationTest do
   alias SpaceTraders.FleetGeneration
   alias SpaceTraders.Fleet.{Intent, Intents, Ship}
   alias SpaceTraders.FleetStrategy
-    alias SpaceTraders.Evidence.Observation
+  alias SpaceTraders.Evidence.Observation
   alias SpaceTraders.Repo
 
   import Ecto.Query, only: [from: 2]

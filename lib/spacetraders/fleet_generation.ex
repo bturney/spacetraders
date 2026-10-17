@@ -381,6 +381,7 @@ defmodule SpaceTraders.FleetGeneration do
   # an interrupted mint and its restart take the same path.
   defp adopt_registration(attempt) do
     operator_id = attempt.operator_id
+
     locked(operator_id, [:empty, :transition], fn _state ->
       with {:ok, current} <- Registration.lock_awaiting_adoption(attempt) do
         identity = Registration.registered_identity(current)

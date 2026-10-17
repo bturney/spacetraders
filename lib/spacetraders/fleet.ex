@@ -184,7 +184,10 @@ defmodule SpaceTraders.Fleet do
   defp annotate_control_state(result), do: result
 
   defp fleet_control({:ok, ships}) do
-    %{healthy?: ships != [] and not Enum.any?(ships, &match?(%{intents: %{status: "blocked"}}, &1))}
+    %{
+      healthy?:
+        ships != [] and not Enum.any?(ships, &match?(%{intents: %{status: "blocked"}}, &1))
+    }
   end
 
   defp fleet_control(_), do: %{healthy?: false}

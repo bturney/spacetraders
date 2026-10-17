@@ -5,7 +5,7 @@ defmodule SpaceTradersWeb.ActivityLive do
 
   alias SpaceTraders.MissionControl
   alias SpaceTraders.MissionControl.Channels
-  
+
   @impl true
   def mount(_params, _session, socket) do
     if connected?(socket) do

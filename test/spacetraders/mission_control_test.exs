@@ -215,7 +215,6 @@ defmodule SpaceTraders.MissionControlTest do
 
       assert report.limitation ==
                "No eligible Fleet Commitment is active for this Fleet Generation."
-
     end
 
     test "reports realized net economics from completed buy and sell Intents" do

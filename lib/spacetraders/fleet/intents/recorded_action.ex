@@ -22,7 +22,7 @@ defmodule SpaceTraders.Fleet.Intents.RecordedAction do
   alias SpaceTraders.FleetAllocation.Commitment
   alias SpaceTraders.FleetGeneration.Generation
   alias SpaceTraders.FleetStrategy.{Revision, Strategy}
-    alias SpaceTraders.CreditSpending
+  alias SpaceTraders.CreditSpending
   alias SpaceTraders.MutationAttempts
   alias SpaceTraders.MutationAttempts.Attempt
   alias SpaceTraders.Repo

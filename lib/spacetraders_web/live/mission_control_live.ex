@@ -599,8 +599,7 @@ defmodule SpaceTradersWeb.MissionControlLive do
     do: "Measured outcome rate: #{Float.round(rate, 2)} per horizon."
 
   defp evaluation_label({:ok, %{feasible?: false}}),
-    do:
-      "Limitation: current evidence shows this objective is not feasible."
+    do: "Limitation: current evidence shows this objective is not feasible."
 
   defp evaluation_label({:observed, %{change: change, rate: rate}}),
     do:

@@ -743,12 +743,12 @@ defmodule SpaceTraders.MissionControl do
         realized_credit_change: if(credit_changes == [], do: nil, else: Enum.sum(credit_changes)),
         realized_decisions: Enum.count(decisions, &(&1.classification == :realized)),
         limitations:
-          (decisions
-           |> Enum.filter(&(&1.classification in [:partially_realized, :reset_censored]))
-           |> Enum.map(fn
-             %{classification: :partially_realized} -> "Decision partly realized"
-             %{classification: :reset_censored} -> "Decision interrupted by Server Reset"
-           end)),
+          decisions
+          |> Enum.filter(&(&1.classification in [:partially_realized, :reset_censored]))
+          |> Enum.map(fn
+            %{classification: :partially_realized} -> "Decision partly realized"
+            %{classification: :reset_censored} -> "Decision interrupted by Server Reset"
+          end),
         resumed?: next_generation && not is_nil(next_generation.strategy_capable_at)
       }
     end)
@@ -879,7 +879,7 @@ defmodule SpaceTraders.MissionControl do
           realized: no_realized_economics(scope),
           contribution: %{commitment_count: 0, expected_value: 0},
           limitation: nil,
-              dispositions: dispositions(scope, agent, false)
+          dispositions: dispositions(scope, agent, false)
         }
 
       portfolio ->
@@ -895,7 +895,7 @@ defmodule SpaceTraders.MissionControl do
             ),
           contribution: endeavors(scope, portfolio).contribution,
           limitation: limitation(portfolio),
-              dispositions: dispositions(scope, agent, true)
+          dispositions: dispositions(scope, agent, true)
         }
     end
   end

@@ -11,7 +11,7 @@ defmodule SpaceTraders.CreditFloorWatchTest do
   alias SpaceTraders.Agent.Scope
   alias SpaceTraders.CreditCalibration
   alias SpaceTraders.FleetStrategy
-    alias SpaceTraders.TestClock
+  alias SpaceTraders.TestClock
 
   setup do
     start_supervised!({TestClock, DateTime.utc_now()})
