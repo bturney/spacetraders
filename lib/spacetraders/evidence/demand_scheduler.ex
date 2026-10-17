@@ -10,10 +10,9 @@ defmodule SpaceTraders.Evidence.DemandScheduler do
   retried on a bounded wakeup interval; the durable demand, not the timer,
   carries the requirement.
 
-  Each armed wake carries a generation token. A demand change arms a new token
-  without being able to cancel the previous timer, so only the currently armed
-  wake is effective and stale or duplicate wake messages are ignored — the
-  earliest due instant can move without producing early or duplicate broadcasts.
+  Each armed wake carries a generation token and a cancellable clock reference.
+  Rearming withdraws superseded work; tokens also reject already-sent, stale or
+  duplicate messages that cancellation cannot retract.
   """
 
   use GenServer
@@ -32,12 +31,12 @@ defmodule SpaceTraders.Evidence.DemandScheduler do
   def init(_opts) do
     Phoenix.PubSub.subscribe(SpaceTraders.PubSub, @topic)
 
-    {:ok, arm(%{wake_at: nil, wake_token: 0, announced: nil})}
+    {:ok, arm(%{wake_at: nil, wake_token: nil, wake_ref: nil, announced: nil})}
   end
 
   @impl true
-  def handle_info({:wake, token}, %{wake_token: token} = state) do
-    wake_due(state)
+  def handle_info({:wake, token}, %{wake_token: token} = state) when is_reference(token) do
+    wake_due(disarm(state))
   end
 
   # A stale wake from a superseded arm: the earliest due instant moved after
@@ -53,13 +52,13 @@ defmodule SpaceTraders.Evidence.DemandScheduler do
       when is_map(announced) do
     due = MapSet.new(Evidence.due_demands(), & &1.id)
 
-    if MapSet.subset?(due, announced),
+    if MapSet.size(due) > 0 and MapSet.subset?(due, announced),
       do: {:noreply, state},
-      else: {:noreply, arm(%{state | wake_at: nil, announced: nil})}
+      else: {:noreply, arm(%{state | announced: nil})}
   end
 
   def handle_info({:observation_demands_changed, _agent_id}, state) do
-    {:noreply, arm(%{state | wake_at: nil})}
+    {:noreply, arm(state)}
   end
 
   def handle_info(_message, state), do: {:noreply, state}
@@ -94,34 +93,42 @@ defmodule SpaceTraders.Evidence.DemandScheduler do
 
       earliest ->
         if due_in_future?(earliest, now) do
-          {:noreply, arm(%{state | wake_at: nil, announced: nil})}
+          {:noreply, arm(%{state | announced: nil})}
         else
-          token = state.wake_token + 1
           wake_at = DateTime.add(now, @deferred_wake_ms, :millisecond)
-          Clock.send_at(self(), {:wake, token}, wake_at)
           announced = MapSet.new(due, & &1.id)
-          {:noreply, %{state | wake_at: wake_at, wake_token: token, announced: announced}}
+          {:noreply, schedule(%{state | announced: announced}, wake_at)}
         end
     end
   end
 
   # Reconstructs the one earliest due wakeup from durable state. A wakeup that
   # is already armed for the same instant keeps its token; anything else arms a
-  # new token, so the previously scheduled timer becomes stale and inert.
+  # new token and withdraws the superseded clock work.
   defp arm(%{wake_at: wake_at} = state) do
     case Evidence.earliest_due_at() do
       nil ->
-        %{state | wake_at: nil}
+        disarm(state)
 
       %DateTime{} = earliest ->
         if wake_at && DateTime.compare(wake_at, earliest) == :eq do
           state
         else
-          token = state.wake_token + 1
-          Clock.send_at(self(), {:wake, token}, earliest)
-          %{state | wake_at: earliest, wake_token: token}
+          schedule(state, earliest)
         end
     end
+  end
+
+  defp schedule(state, wake_at) do
+    state = disarm(state)
+    token = make_ref()
+    reference = Clock.send_at(self(), {:wake, token}, wake_at)
+    %{state | wake_at: wake_at, wake_token: token, wake_ref: reference}
+  end
+
+  defp disarm(state) do
+    if state.wake_ref, do: Clock.cancel_timer(state.wake_ref)
+    %{state | wake_at: nil, wake_token: nil, wake_ref: nil}
   end
 
   defp due_in_future?(earliest, now), do: DateTime.compare(earliest, now) == :gt
