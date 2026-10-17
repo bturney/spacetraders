@@ -1,0 +1,9 @@
+:root {
+  --dur-fast: .2s; --dur-toast: .35s; --dur-state: .6s;
+  --dur-flash: 4.5s;          /* sold flash on row/card */
+  --toast-batch: 2.6s;        /* min gap between SOLD toasts */
+  --tick: 1s;                 /* countdown tick */
+  --ease-out: cubic-bezier(.2,.7,.2,1);
+  --ease-marker: linear;      /* route marker moves at constant speed */
+  --count-up-rate: 0.18;      /* credits close 18% of gap per 200ms */
+}

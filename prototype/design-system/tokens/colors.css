@@ -1,0 +1,72 @@
+/* Spacetraders — colour tokens. Cool dark neutrals (hue 245) + status hues sharing L≈0.8, C≈0.12–0.17. */
+:root {
+  /* Neutrals */
+  --st-page: oklch(0.12 0.01 245);
+  --st-bg: oklch(0.155 0.012 245);
+  --st-tabbar: oklch(0.17 0.013 245);
+  --st-panel: oklch(0.195 0.014 245);
+  --st-panel-2: oklch(0.235 0.016 245);
+  --st-panel-hover: oklch(0.26 0.016 245);
+  --st-divider: oklch(0.26 0.016 245);
+  --st-bar-bg: oklch(0.28 0.016 245);
+  --st-line: oklch(0.29 0.016 245);
+  --st-track: oklch(0.30 0.016 245);
+  --st-zero: oklch(0.45 0.016 245);
+  --st-ink: oklch(0.96 0.006 245);
+  --st-ink-2: oklch(0.86 0.012 245);
+  --st-muted: oklch(0.76 0.016 245);
+  --st-dim: oklch(0.60 0.016 245);
+
+  /* Status / semantic hues */
+  --st-green: oklch(0.80 0.15 150);
+  --st-yellow: oklch(0.84 0.14 85);
+  --st-red: oklch(0.70 0.17 25);
+  --st-grey: oklch(0.72 0.01 245);
+  --st-cyan: oklch(0.80 0.12 215);
+  --st-violet: oklch(0.78 0.12 295);
+  --st-link: oklch(0.82 0.10 215);
+  --st-link-hover: oklch(0.90 0.08 215);
+
+  /* Ship status → colour */
+  --status-trading: var(--st-green);
+  --status-busy: var(--st-yellow);
+  --status-waiting: var(--st-violet);
+  --status-stuck: var(--st-red);
+  --status-scouting: var(--st-cyan);
+
+  /* Plan health → colour */
+  --health-on-plan: var(--st-green);
+  --health-setback: var(--st-yellow);
+  --health-off-plan: var(--st-red);
+  --health-unknown: var(--st-grey);
+
+  /* Money */
+  --money-gain: var(--st-green);
+  --money-loss: var(--st-red);
+  --money-short: var(--st-yellow); /* profit but below estimate */
+
+  /* Semantic surfaces */
+  --surface-page: var(--st-page);
+  --surface-app: var(--st-bg);
+  --surface-card: var(--st-panel);
+  --surface-inner: var(--st-panel-2);
+  --border-card: var(--st-line);
+  --text-body: var(--st-ink);
+  --text-muted: var(--st-muted);
+  --text-dim: var(--st-dim);
+
+  /* Grafana mock palette (only inside Grafana mocks) */
+  --gf-bg: #111217;
+  --gf-chrome: #0b0c0e;
+  --gf-panel: #181b1f;
+  --gf-border: #2c3235;
+  --gf-track: #22252b;
+  --gf-text: #ccccdc;
+  --gf-text-dim: #8e8e8e;
+  --gf-text-faint: #6e7380;
+  --gf-green: #73bf69;
+  --gf-green-dark: #37872d;
+  --gf-orange: #ff9830;
+  --gf-red: #f2495c;
+  --gf-blue: #5794f2;
+}

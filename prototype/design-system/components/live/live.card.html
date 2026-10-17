@@ -1,0 +1,17 @@
+<!-- @dsCard group="Components" viewport="700x260" name="Live" -->
+<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="../../styles.css">
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js"></script>
+<script src="../../_ds_bundle.js"></script>
+<style>body{margin:0;padding:18px;background:var(--surface-app);color:var(--text-body);font-family:var(--font-ui)}</style></head><body><div id="root"></div>
+<script type="text/babel">
+const NS=Object.values(window).find(v=>v&&typeof v==='object'&&v.RouteBar&&v.Card)||{};
+const {Card,Eyebrow,StatusChip,DataBadge,Money,RouteBar,Countdown,SoldToast,CreditsTicker,GrowthLine,CompareBars,Dumbbell,GoodsBars,HealthCard,ShipRow,ShipCard,FleetGrid,GrafanaPanel,GrafanaStat,GrafanaBackBar}=NS;
+const Col=({children,g=12})=><div style={{display:'flex',flexDirection:'column',gap:g}}>{children}</div>;
+const Row=({children,g=10})=><div style={{display:'flex',gap:g,flexWrap:'wrap',alignItems:'center'}}>{children}</div>;
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+function App(){return <Col><RouteBar from="F47" to="E45" progress={.62}/><RouteBar size="lg" from="C41" to="A4" progress={.3} color="var(--status-busy)"/><RouteBar size="sm" at="C41" progress={.4} color="var(--status-waiting)"/>
+<Row g={28}><Countdown seconds={95} caption="to arrival"/><Countdown seconds={292} caption="looks again" color="var(--status-waiting)"/><Countdown seconds={null} caption="no sale under way"/><CreditsTicker value={2873412} flash={1340} size={34}/></Row>
+<Row><SoldToast amount={1340} detail="Electronics at C41"/><SoldToast amount={-8000} detail="Lab Instruments at A4" more={2}/></Row></Col>}
+</script></body></html>

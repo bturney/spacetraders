@@ -1,0 +1,18 @@
+<!-- @dsCard group="Components" viewport="700x300" name="Charts" -->
+<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="../../styles.css">
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js"></script>
+<script src="../../_ds_bundle.js"></script>
+<style>body{margin:0;padding:18px;background:var(--surface-app);color:var(--text-body);font-family:var(--font-ui)}</style></head><body><div id="root"></div>
+<script type="text/babel">
+const NS=Object.values(window).find(v=>v&&typeof v==='object'&&v.RouteBar&&v.Card)||{};
+const {Card,Eyebrow,StatusChip,DataBadge,Money,RouteBar,Countdown,SoldToast,CreditsTicker,GrowthLine,CompareBars,Dumbbell,GoodsBars,HealthCard,ShipRow,ShipCard,FleetGrid,GrafanaPanel,GrafanaStat,GrafanaBackBar}=NS;
+const Col=({children,g=12})=><div style={{display:'flex',flexDirection:'column',gap:g}}>{children}</div>;
+const Row=({children,g=10})=><div style={{display:'flex',gap:g,flexWrap:'wrap',alignItems:'center'}}>{children}</div>;
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+function App(){return <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:18}}><Col><GrowthLine points={[172,190,260,420,610,900,1200,1500,1900,2300,2600,2873]} height={60} startLabel="11 Oct · 172k" endLabel="now · 2.87M"/>
+<GoodsBars items={[{label:'Ship Parts',value:469,display:'469k'},{label:'Medicine',value:390,display:'390k'},{label:'Fabrics',value:380,display:'380k'},{label:'Electronics',value:303,display:'303k'}]}/></Col>
+<Col><CompareBars caption="What it compared" options={[{label:'Ammunition F47 → E45',value:820,chosen:true},{label:'Fertilizers G49 → E46',value:560},{label:'Hydrocarbon C41 → G49',value:520}]}/>
+<Dumbbell label="Electronics F48 → C41" expected={980} actual={1340} note="Paid 59,700 · sold 61,040"/><Dumbbell label="Lab Instruments C41 → A4" expected={860} actual={-8000} range={8000}/></Col></div>}
+</script></body></html>

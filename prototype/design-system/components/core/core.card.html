@@ -1,0 +1,17 @@
+<!-- @dsCard group="Components" viewport="700x230" name="Core" -->
+<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="../../styles.css">
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js"></script>
+<script src="../../_ds_bundle.js"></script>
+<style>body{margin:0;padding:18px;background:var(--surface-app);color:var(--text-body);font-family:var(--font-ui)}</style></head><body><div id="root"></div>
+<script type="text/babel">
+const NS=Object.values(window).find(v=>v&&typeof v==='object'&&v.RouteBar&&v.Card)||{};
+const {Card,Eyebrow,StatusChip,DataBadge,Money,RouteBar,Countdown,SoldToast,CreditsTicker,GrowthLine,CompareBars,Dumbbell,GoodsBars,HealthCard,ShipRow,ShipCard,FleetGrid,GrafanaPanel,GrafanaStat,GrafanaBackBar}=NS;
+const Col=({children,g=12})=><div style={{display:'flex',flexDirection:'column',gap:g}}>{children}</div>;
+const Row=({children,g=10})=><div style={{display:'flex',gap:g,flexWrap:'wrap',alignItems:'center'}}>{children}</div>;
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+function App(){return <Col><Row><StatusChip status="trading"/><StatusChip status="busy"/><StatusChip status="waiting"/><StatusChip status="stuck"/><StatusChip status="scouting"/></Row>
+<Row g={18}><DataBadge/><DataBadge sample/><DataBadge sample short/><Money value={820} est/><Money value={820} est stale/><Money value={-8000}/><Money value={null}/></Row>
+<Row><Card style={{width:280}}><Eyebrow right="whole game · 5 days">Credits</Eyebrow><div style={{marginTop:6}}>Card</div></Card><Card tone="var(--st-green)" style={{width:200}}>Toned card</Card><Card inner style={{width:120}}>Inner</Card></Row></Col>}
+</script></body></html>

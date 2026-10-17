@@ -1,0 +1,18 @@
+:root {
+  --font-ui: 'Barlow', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, monospace;
+  /* Scale (phone / desktop) */
+  --fs-hero: 34px;      --fs-hero-lg: 44px;   /* credits */
+  --fs-time-xl: 34px;                          /* ship view countdown */
+  --fs-time-lg: 24px;                          /* ships-in-motion card time */
+  --fs-title: 18px;     --fs-title-lg: 20px;  /* health label */
+  --fs-phrase-lg: 19px;                        /* ship view phrase */
+  --fs-why: 17px;                              /* why sentence */
+  --fs-body: 15px;      --fs-body-sm: 14px;
+  --fs-num: 13px;                              /* mono row cells */
+  --fs-caption: 12px;   --fs-micro: 11px;
+  --fs-eyebrow: 10px;   --ls-eyebrow: 0.14em;
+  --fw-regular: 400; --fw-medium: 500; --fw-semibold: 600; --fw-bold: 700;
+  --lh-tight: 1.15; --lh-body: 1.35; --lh-prose: 1.5;
+  --num-features: tabular-nums;
+}

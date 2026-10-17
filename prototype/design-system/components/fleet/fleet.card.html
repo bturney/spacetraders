@@ -1,0 +1,18 @@
+<!-- @dsCard group="Components" viewport="700x420" name="Fleet" -->
+<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="../../styles.css">
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js"></script>
+<script src="../../_ds_bundle.js"></script>
+<style>body{margin:0;padding:18px;background:var(--surface-app);color:var(--text-body);font-family:var(--font-ui)}</style></head><body><div id="root"></div>
+<script type="text/babel">
+const NS=Object.values(window).find(v=>v&&typeof v==='object'&&v.RouteBar&&v.Card)||{};
+const {Card,Eyebrow,StatusChip,DataBadge,Money,RouteBar,Countdown,SoldToast,CreditsTicker,GrowthLine,CompareBars,Dumbbell,GoodsBars,HealthCard,ShipRow,ShipCard,FleetGrid,GrafanaPanel,GrafanaStat,GrafanaBackBar}=NS;
+const Col=({children,g=12})=><div style={{display:'flex',flexDirection:'column',gap:g}}>{children}</div>;
+const Row=({children,g=10})=><div style={{display:'flex',gap:g,flexWrap:'wrap',alignItems:'center'}}>{children}</div>;
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+function App(){return <Col g={10}><HealthCard state="on" reason="A trade lands every 3–4 min and earnings are at the usual pace."/>
+<HealthCard state="unknown" reason="Prices are 44 min old (trusted up to 30). The probe is 2 markets behind and catches up in ~9 min."/>
+<div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10}}><ShipCard ship={{"name":"HARDBARGAIN-1","status":"trading","phrase":"Hauling 20 Ammunition","from":"F47","to":"E45","progress":0.62,"time":"1:35","seconds":95,"timeCaption":"to arrival","expected":820}}/><FleetGrid columns={24} ships={Array.from({length:48},(_,i)=>({name:'HB-'+i,status:i%13==0?'stuck':i%9==0?'busy':i%7==0?'waiting':i%5==0?'scouting':'trading',progress:(i*37%100)/100,sold:i==11}))}/></div>
+<Card style={{padding:0}}><ShipRow ship={{"name":"HARDBARGAIN-1","status":"trading","phrase":"Hauling 20 Ammunition","from":"F47","to":"E45","progress":0.62,"time":"1:35","seconds":95,"timeCaption":"to arrival","expected":820}}/><ShipRow sold={1340} ship={{...{"name":"HARDBARGAIN-1","status":"trading","phrase":"Hauling 20 Ammunition","from":"F47","to":"E45","progress":0.62,"time":"1:35","seconds":95,"timeCaption":"to arrival","expected":820},name:'HARDBARGAIN-2',status:'scouting',phrase:'Checking prices',from:'C41',to:'G49',expected:null}}/></Card></Col>}
+</script></body></html>

@@ -1,0 +1,34 @@
+/* Phoenix 1.8 (Tailwind v4 + daisyUI 5). Paste into assets/css/app.css after the daisyui plugin. */
+@plugin "../vendor/daisyui-theme" {
+  name: "spacetraders"; default: true; prefersdark: true; color-scheme: dark;
+  --color-base-100: oklch(0.155 0.012 245);  /* app bg */
+  --color-base-200: oklch(0.195 0.014 245);  /* card */
+  --color-base-300: oklch(0.235 0.016 245);  /* inner */
+  --color-base-content: oklch(0.96 0.006 245);
+  --color-primary: oklch(0.80 0.12 215);     --color-primary-content: oklch(0.12 0.01 245);
+  --color-secondary: oklch(0.78 0.12 295);   --color-secondary-content: oklch(0.12 0.01 245);
+  --color-accent: oklch(0.80 0.12 215);      --color-accent-content: oklch(0.12 0.01 245);
+  --color-neutral: oklch(0.29 0.016 245);    --color-neutral-content: oklch(0.76 0.016 245);
+  --color-info: oklch(0.80 0.12 215);        --color-info-content: oklch(0.12 0.01 245);
+  --color-success: oklch(0.80 0.15 150);     --color-success-content: oklch(0.12 0.01 245);
+  --color-warning: oklch(0.84 0.14 85);      --color-warning-content: oklch(0.12 0.01 245);
+  --color-error: oklch(0.70 0.17 25);        --color-error-content: oklch(0.12 0.01 245);
+  --radius-selector: 999px; --radius-field: 10px; --radius-box: 14px;
+  --size-selector: 0.25rem; --size-field: 0.25rem; --border: 1px; --depth: 0; --noise: 0;
+}
+@theme {
+  --font-sans: "Barlow", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, monospace;
+  --color-page: oklch(0.12 0.01 245);
+  --color-line: oklch(0.29 0.016 245);
+  --color-track: oklch(0.30 0.016 245);
+  --color-muted: oklch(0.76 0.016 245);
+  --color-dim: oklch(0.60 0.016 245);
+  --color-trading: oklch(0.80 0.15 150);
+  --color-busy: oklch(0.84 0.14 85);
+  --color-waiting: oklch(0.78 0.12 295);
+  --color-stuck: oklch(0.70 0.17 25);
+  --color-scouting: oklch(0.80 0.12 215);
+  --color-unknown: oklch(0.72 0.01 245);
+}
+/* Usage: bg-trading/16 text-trading (chip) · bg-success/9 border-success/35 (health card) · font-mono tabular-nums (all numbers) */
