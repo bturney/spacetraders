@@ -37,7 +37,8 @@ defmodule SpaceTraders.Simulation.NativeBootstrapTest do
 
   test "transaction fixture observation is explicit and rejects unknown proof selectors" do
     transaction = Map.put(manifest(), "proof", "paid_transaction")
-    assert Keyword.fetch!(NativeBootstrap.configuration(transaction), :native_bootstrap) == transaction
+    assert Keyword.fetch!(NativeBootstrap.configuration(transaction), :native_bootstrap) ==
+             transaction
 
     assert_raise ArgumentError, fn ->
       NativeBootstrap.configuration(Map.put(manifest(), "proof", "invented_gameplay"))
