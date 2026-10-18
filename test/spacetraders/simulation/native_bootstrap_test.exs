@@ -13,6 +13,9 @@ defmodule SpaceTraders.Simulation.NativeBootstrapTest do
     assert Keyword.fetch!(config, SpaceTraders.RuntimeAuthority)[:enabled]
     assert Keyword.fetch!(config, SpaceTraders.API.CapacityGovernor) == []
     assert Keyword.fetch!(config, SpaceTraders.API.RateLimiter)[:enabled]
+
+    endpoint = Keyword.fetch!(config, SpaceTradersWeb.Endpoint)
+    assert Keyword.take(endpoint, [:code_reloader, :debug_errors, :force_ssl]) == []
   end
 
   test "rejects target and database identity drift before application startup" do
@@ -25,6 +28,11 @@ defmodule SpaceTraders.Simulation.NativeBootstrapTest do
       changed = put_in(manifest(), ["resources", key], value)
       assert_raise ArgumentError, fn -> NativeBootstrap.configuration(changed) end
     end
+  end
+
+  test "rejects a non-activatable pinned Strategy before registration or mint" do
+    invalid = put_in(manifest(), ["strategy", "hard_constraints"], ["Bypass all spending limits"])
+    assert_raise ArgumentError, fn -> NativeBootstrap.configuration(invalid) end
   end
 
   test "immutable command seam rejects unsupported manifests without booting" do
@@ -65,6 +73,19 @@ defmodule SpaceTraders.Simulation.NativeBootstrapTest do
 
     %{
       "schema" => "native-bootstrap/v1",
+      "strategy" => %{
+        "objectives" => [
+          %{
+            "objective" => "Grow credits",
+            "kind" => "continuous",
+            "evaluation" => "Maximize net credit growth over time",
+            "scope" => "recurring"
+          }
+        ],
+        "hard_constraints" => ["Keep at least 50,000 credits available"],
+        "preferences" => [],
+        "consequences" => "Spend above the protected floor."
+      },
       "resources" => %{
         "attempt" => attempt,
         "database" => "sim_" <> attempt,

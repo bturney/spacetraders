@@ -334,6 +334,13 @@ defmodule SpaceTraders.FleetStrategy do
     end
   end
 
+  @doc "Validates a complete activation document without writing or granting authority."
+  def validate_activation_document(document) when is_map(document) do
+    with :ok <- validate_draft_document(document), do: validate_document(document)
+  end
+
+  def validate_activation_document(_document), do: {:error, :invalid_document}
+
   @doc "Opens a recommendation as a reviewable draft without changing active intent."
   def recommend(%Scope{} = scope, document) do
     with {:ok, operator_id} <- OperatorAuthority.authorize(scope) do

@@ -14,6 +14,10 @@ defmodule SpaceTraders.Simulation.NativeBootstrap do
 
   @doc "Configuration only; no connection, startup or fallback to deployment settings."
   def configuration(%{"schema" => "native-bootstrap/v1", "resources" => r} = manifest) do
+    unless FleetStrategy.validate_activation_document(manifest["strategy"]) == :ok do
+      raise ArgumentError, "native bootstrap: pinned Strategy cannot be activated"
+    end
+
     attempt = r["attempt"]
 
     unless is_binary(attempt) and Regex.match?(~r/\A[0-9a-f]{32}\z/, attempt) and
@@ -50,7 +54,6 @@ defmodule SpaceTraders.Simulation.NativeBootstrap do
        [
          server: false,
          watchers: [],
-         code_reloader: false,
          secret_key_base: Base.encode64(:crypto.strong_rand_bytes(48))
        ]}
     ]
