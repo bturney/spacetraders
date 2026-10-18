@@ -522,9 +522,7 @@ defmodule SpaceTradersWeb.FleetOutcomeMetricsTest do
     |> get("/metrics")
     |> response(200)
     |> String.split("\n")
-    |> Enum.filter(
-      &String.starts_with?(&1, "agent_credits")
-    )
+    |> Enum.filter(&String.starts_with?(&1, "agent_credits"))
     |> Enum.sort()
   end
 
