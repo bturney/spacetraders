@@ -10,7 +10,7 @@
 
 - Before implementation: `git fetch origin main`, then `git merge-base --is-ancestor origin/main HEAD`; branch names do not prove freshness. Preserve local changes; if the branch is already merged into `origin/main`, branch fresh from `origin/main`.
 - `mix` missing → `mise install` (Debian: set `erlang.precompiled_os=ubuntu-24.04`).
-- Grep `GLOSSARY.md` before naming a domain concept; retired terms are marked there.
+- Read `GLOSSARY-MAP.md`, then grep both glossaries before naming a domain concept; retired terms are marked there.
 - API client: `priv/spec/SpaceTraders.json` is ground truth; read `test/spacetraders/api/spec_conformance_test.exs`, then regenerate and commit with `mix space_traders.gen.models` and `mix space_traders.gen.operations`.
 - LiveView forms: use `@form_drafts`; recurring patches must not overwrite a user's draft.
 
