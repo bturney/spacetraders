@@ -203,7 +203,7 @@ def validate_database(db):
     tables, inventory = db["tables"], db["inventory"]
     require(isinstance(db["excluded_tables"], dict) and not set(db["excluded_tables"]) & set(tables), "excluded table inventory inconsistent")
     for item in db["excluded_tables"].values():
-        require(type(item["rows"]) is int and item["rows"] >= 0 and item["reason"] == "not_allowlisted_private_authority_only", "excluded table count/reason missing")
+        require(set(item) == {"rows", "reason"} and type(item["rows"]) is int and item["rows"] >= 0 and item["reason"] == "not_allowlisted_private_authority_only", "excluded table count/reason missing")
     require(set(tables) == set(TABLES) == set(inventory), "database table inventory incomplete")
     indexes = {}
     for name, rows in tables.items():
@@ -575,9 +575,13 @@ def render_html(bundle):
 def build(metadata, sections):
     complete = validate(metadata, sections)
     require(canonical(redact(metadata)) == canonical(metadata), "credential/private-source content in immutable metadata")
+    # These are validated counts/reasons, not credential rows. A table name
+    # containing 'tokens' must not erase the evidence that it was excluded.
+    excluded = sections["database"].get("data", {}).get("excluded_tables")
     sections = redact(sections)
     if sections["database"]["status"] == "present":
         db = sections["database"]["data"]
+        db["excluded_tables"] = portable(excluded)
         db["inventory"] = {name: {"rows": len(rows), "sha256": sha(canonical(rows))}
                            for name, rows in db["tables"].items()}
     validate(metadata, sections)

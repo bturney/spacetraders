@@ -200,6 +200,17 @@ class ExportTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 export.verify_authority(corrupt, authority)
 
+    def test_excluded_credential_table_inventory_keeps_counts_but_no_rows(self):
+        meta, sections = fixture()
+        sections["database"]["data"]["excluded_tables"] = {
+            "operators_tokens": {"rows": 2, "reason": "not_allowlisted_private_authority_only"}}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "attempt.zip"
+            export.publish(meta, sections, path)
+            database = export.read_bundle(path)["sections"]["database"]["data"]
+            self.assertEqual(database["excluded_tables"]["operators_tokens"]["rows"], 2)
+            self.assertNotIn("operators_tokens", database["tables"])
+
     def test_offline_graph_retains_replan_and_original_attempt_and_observation_joins(self):
         meta, sections = fixture("interrupted")
         tables = sections["database"]["data"]["tables"]
