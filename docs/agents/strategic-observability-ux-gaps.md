@@ -40,7 +40,7 @@ A desired chart often has *two* statuses: the underlying **game outcome** may be
 - [`DecisionEpisodeLive`](../../lib/spacetraders_web/live/decision_episode_live.ex) already shows classification, calibration version, expected and actual outcome maps, retained evidence references, and contextual Grafana links.
 - [`MissionControl.decision_episode_projection`](../../lib/spacetraders/mission_control.ex) exposes **alternatives and binding constraints** as well. Their omission from the concise Decision Episode view is a **presentation opportunity**, not by itself a reason to add new permanent tables.
 - [`GrafanaLink`](../../lib/spacetraders_web/grafana_link.ex) scopes links with Generation, Revision, Decision Episode, Commitment, Intent, and MutationAttempt identities and time windows. Retain this traceability.
-- [`TradeProgress`](../../lib/spacetraders/fleet_allocation/trade_progress.ex) attributes qualifying Market trades and supporting refuel/jump charges to their recorded root outcomes. Unknown monetary gaps remain unknown. This currently does **not** prove the full producer–hauler economics in SR-07.
+- [`Earnings`](../../lib/spacetraders/outcomes/earnings.ex) attributes qualifying Market trades and supporting refuel/jump charges to their recorded root outcomes. Unknown monetary gaps remain unknown. This currently does **not** prove the full producer–hauler economics in SR-07.
 
 ### Prometheus / logs
 
@@ -225,7 +225,7 @@ Suggested investigations, *if their source models later exist*: market quote for
 - Accepted UX target: [#311](https://github.com/bturney/spacetraders/issues/311), especially Mission Control, Operations, World, Explainability, Activity, Generations and Grafana handoff.
 - Strategic examples: [SR-01–SR-08](strategic-reasoning-scenarios.md).
 - Existing guides: [Observability](observability.md), [Outcome metrics](outcome-metrics.md), [Testing](testing.md).
-- App sources: [Mission Control](../../lib/spacetraders_web/live/mission_control_live.ex), [Decision Episode](../../lib/spacetraders_web/live/decision_episode_live.ex), [Grafana links](../../lib/spacetraders_web/grafana_link.ex), [Market economics](../../lib/spacetraders/fleet_allocation/trade_progress.ex).
+- App sources: [Mission Control](../../lib/spacetraders_web/live/mission_control_live.ex), [Decision Episode](../../lib/spacetraders_web/live/decision_episode_live.ex), [Grafana links](../../lib/spacetraders_web/grafana_link.ex), [Market economics](../../lib/spacetraders/outcomes/earnings.ex).
 - Dashboard source: [home-server-setup provisioned Grafana dashboards](https://github.com/bturney/home-server-setup/tree/main/config/observability/grafana/provisioning/dashboards).
 
 **Review goal:** confirm every source/instrumentation claim, retain the #311/#502 authority boundary, and preserve questions and illustrative design evidence without creating another implementation backlog.
