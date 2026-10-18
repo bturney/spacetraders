@@ -180,14 +180,14 @@ defmodule SpaceTradersWeb.ShipsLiveTest do
           "X1-UX81-A1",
           "X1-UX81-B7",
           DateTime.add(now(), -900),
-          DateTime.add(now(), -299)
+          DateTime.add(now(), -295)
         )
       )
 
     {:ok, view, _html} = live(conn, ~p"/ships")
     refute has_element?(view, "#ships-#{ship.id}", "as of")
 
-    Process.sleep(2_100)
+    Process.sleep(6_100)
     assert has_element?(view, "#ships-#{ship.id}", "as of")
     refute_received {:transport_receipt, _, _}
   end
