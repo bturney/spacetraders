@@ -699,26 +699,6 @@ defmodule SpaceTradersWeb.MissionControlBriefingTest do
       refute_received {:register, _}
     end
 
-    test "Emergency Stop suppresses automatic and Operator-requested replacement",
-         %{conn: conn, scope: scope} do
-      mint_fleet(scope)
-      {:ok, _stop} = FleetStrategy.engage_emergency_stop(scope)
-      parent = self()
-
-      Req.Test.stub(SpaceTraders.API, fn conn ->
-        if conn.method == "POST", do: send(parent, {:register, conn.body_params["symbol"]})
-        reset_mismatch(conn)
-      end)
-
-      {:ok, view, _html} = live(conn, ~p"/mission-control")
-      html = view |> element("#retry-reset-replacement") |> render_click()
-
-      assert html =~ "Emergency Stop is engaged. Replacement minting is suppressed"
-      assert has_element?(view, "#operating-health", "STOPPED")
-      refute_received {:register, _}
-      assert {:ok, %{state: :transition}} = FleetGeneration.current_fleet(scope)
-    end
-
     test "missing AccountToken authority is a pinned Intervention, not a retry loop",
          %{conn: conn, scope: scope} do
       mint_fleet(scope)

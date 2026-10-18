@@ -15,10 +15,10 @@ defmodule SpaceTraders.MissionControl.Channels do
   @strategy "fleet_strategy"
   @conditions "mission_conditions"
 
-  @doc "Subscribes the caller to deployment Fleet Strategy and Emergency Stop changes."
+  @doc "Subscribes the caller to deployment Fleet Strategy changes."
   def subscribe_strategy, do: Phoenix.PubSub.subscribe(@pubsub, @strategy)
 
-  @doc "Announces a deployment Fleet Strategy or Emergency Stop change."
+  @doc "Announces a deployment Fleet Strategy change."
   def broadcast_strategy,
     do: Phoenix.PubSub.broadcast(@pubsub, @strategy, :fleet_strategy_updated)
 

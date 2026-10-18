@@ -56,8 +56,7 @@ defmodule SpaceTraders.FixtureLeakProbe do
     capacity = SpaceTraders.API.CapacityGovernor.diagnostics()
 
     admissions =
-      SpaceTraders.EmergencyStopAdmission.mutation_allowed?("BASELINE_AGENT_TOKEN") == :ok and
-        SpaceTraders.FleetGenerationAdmission.mutation_allowed?("BASELINE_AGENT_TOKEN") == :ok
+      SpaceTraders.FleetGenerationAdmission.mutation_allowed?("BASELINE_AGENT_TOKEN") == :ok
 
     if admissions and capacity.in_flight == 0 and capacity.deferred == %{} and
          capacity.retry_after_until == nil and capacity.outage == nil and

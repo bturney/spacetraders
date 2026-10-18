@@ -498,9 +498,6 @@ defmodule SpaceTradersWeb.MissionControlLive do
 
   defp reset_predecessor(_projection), do: nil
 
-  defp replacement_error(:emergency_stopped),
-    do: "Emergency Stop is engaged. Replacement minting is suppressed until it is resumed."
-
   defp replacement_error(:account_token_not_linked),
     do: "Link an AccountToken in Settings before replacement can mint."
 
@@ -518,8 +515,6 @@ defmodule SpaceTradersWeb.MissionControlLive do
 
   defp replacement_error(_reason),
     do: "Replacement did not complete. The predecessor stays fenced; its state is shown below."
-
-  defp health_label(%{strategy: %{emergency_stopped_at: %DateTime{}}}), do: "STOPPED"
 
   defp health_label(%{registration_recovery: %{status: :in_progress}}),
     do: "Registration in progress"
@@ -573,9 +568,6 @@ defmodule SpaceTradersWeb.MissionControlLive do
         end
     end
   end
-
-  defp health_detail(%{strategy: %{emergency_stopped_at: %DateTime{}}}),
-    do: "Emergency Stop suppresses every new gameplay mutation. Review Strategy to resume safely."
 
   defp health_detail(%{registration_recovery: %{status: status, summary: summary}})
        when status != :clear,

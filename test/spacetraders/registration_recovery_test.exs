@@ -43,7 +43,6 @@ defmodule SpaceTraders.RegistrationRecoveryTest do
       topics = ["fleet_allocation:#{operator.id}" | Enum.map(agent_ids, &"fleet:#{&1}")]
       Repo.delete_all(from(n in SpaceTraders.Outbox.Notification, where: n.topic in ^topics))
       SpaceTraders.AgentFixtures.cleanup_operator_fixture(operator.id)
-      SpaceTraders.EmergencyStopAdmission.clear()
       SpaceTraders.FleetGenerationAdmission.clear()
       restart_capacity_governor()
       Sandbox.mode(Repo, :manual)
@@ -352,53 +351,6 @@ defmodule SpaceTraders.RegistrationRecoveryTest do
           do: Application.put_env(:spacetraders, SpaceTraders.RuntimeAuthority, previous),
           else: Application.delete_env(:spacetraders, SpaceTraders.RuntimeAuthority)
       end
-    end
-
-    test "Emergency Stop permits identity reconciliation but suppresses minting and the adopted token's mutations",
-         %{scope: scope} do
-      assert {:error, :registration_unresolved} =
-               in_session(fn -> FleetGeneration.mint(scope, mint("ORBITALIST")) end)
-
-      assert_received {:game_request, "POST", "/v2/register", "ORBITALIST"}
-      assert {:ok, stopped} = SpaceTraders.FleetStrategy.engage_emergency_stop(scope)
-
-      assert {:error, :emergency_stopped} =
-               in_session(fn -> FleetGeneration.mint(scope, mint("PARALLAX")) end)
-
-      refute_received {:game_request, _, _, _}
-
-      game(fn conn ->
-        case conn.request_path do
-          "/v2/my/agent" ->
-            Req.Test.json(conn, my_agent("ORBITALIST"))
-
-          "/v2/my/ships" ->
-            Req.Test.json(conn, %{
-              "data" => [ship("ORBITALIST-1")],
-              "meta" => %{"total" => 1, "page" => 1, "limit" => 20}
-            })
-        end
-      end)
-
-      assert {:ok, %{agent: adopted}} =
-               in_session(fn ->
-                 FleetGeneration.adopt_registered_agent(scope, "RECOVERED_SECRET", true)
-               end)
-
-      assert adopted.symbol == "ORBITALIST"
-
-      assert SpaceTraders.FleetStrategy.get(scope).emergency_stopped_at ==
-               stopped.emergency_stopped_at
-
-      assert {:error, :emergency_stopped} =
-               in_session(fn ->
-                 SpaceTraders.API.accept_contract(
-                   SpaceTraders.API.AgentTokenReference.new(adopted),
-                   "c1"
-                 )
-               end)
-
-      refute_received {:game_request, "POST", _, _}
     end
   end
 

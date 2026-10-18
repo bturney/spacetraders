@@ -88,36 +88,6 @@ defmodule SpaceTraders.CurrentGenerationAuthorityTest do
                "PREDECESSOR_SECRET"
     end
 
-    test "resume refresh observes the sole current Fleet and requires the deployment Operator" do
-      %{current: current, scope: scope} = retained_predecessor_and_current_fleet()
-      owner = self()
-
-      Req.Test.stub(SpaceTraders.API, fn conn ->
-        send(owner, {:resume_read, conn.request_path})
-        assert Plug.Conn.get_req_header(conn, "authorization") == ["Bearer CURRENT_SECRET"]
-
-        body =
-          case conn.request_path do
-            "/v2/my/agent" -> %{"symbol" => current.symbol, "credits" => 175_000}
-            "/v2/my/ships" -> [ship_body("ORBITALIST-1")]
-          end
-
-        Req.Test.json(conn, %{"data" => body})
-      end)
-
-      assert :ok = Evidence.refresh_for_emergency_stop_resume(scope)
-      assert_received {:resume_read, "/v2/my/agent"}
-      assert_received {:resume_read, "/v2/my/ships"}
-      refute_received {:resume_read, _}
-
-      other_scope = operator_scope_fixture(legacy_operator_fixture())
-
-      assert {:error, :not_deployment_operator} =
-               Evidence.refresh_for_emergency_stop_resume(other_scope)
-
-      refute_received {:resume_read, _}
-    end
-
     test "an observation queued for API capacity rechecks current Generation authority before transport" do
       %{current: current, generation: generation} = retained_predecessor_and_current_fleet()
       observe_game_requests()

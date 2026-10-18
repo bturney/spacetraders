@@ -394,7 +394,6 @@ defmodule SpaceTraders.Fleet.Intents.RecordedAction do
     ship = Repo.get!(Ship, intent.ship_id)
 
     with :ok <- SpaceTraders.RuntimeAuthority.execution_allowed?(),
-         :ok <- SpaceTraders.EmergencyStopAdmission.mutation_allowed?(agent.agent_token),
          :ok <- SpaceTraders.FleetGenerationAdmission.mutation_allowed?(agent.agent_token),
          :ok <- SpaceTraders.FleetGeneration.gameplay_authority(agent.id),
          true <- is_nil(agent.stale_at) and ship.agent_id == agent.id,
@@ -452,12 +451,9 @@ defmodule SpaceTraders.Fleet.Intents.RecordedAction do
     Repo.one(from s in Strategy, lock: "FOR SHARE")
   end
 
-  defp active_revision(%Strategy{emergency_stopped_at: nil, active_revision_id: revision_id})
+  defp active_revision(%Strategy{active_revision_id: revision_id})
        when not is_nil(revision_id),
        do: {:ok, revision_id}
-
-  defp active_revision(%Strategy{emergency_stopped_at: stopped}) when not is_nil(stopped),
-    do: {:error, :emergency_stopped}
 
   defp active_revision(_strategy), do: {:error, :strategy_revision_absent}
 
