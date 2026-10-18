@@ -55,14 +55,14 @@ Only after a productive, explainable baseline, compare alternate policy modes (g
 
 This is a **decision queue, not a rigid five-phase schedule**. At each completed checkpoint, inspect the [ledger](capabilities.md) and the latest experiment/production results. For each candidate record: (1) real outcome currently blocked; (2) measured or bounded expected benefit; (3) binding resource (Ship time, credits, API capacity, evidence, attention or correctness); (4) uncertainty and how cheaply it can be reduced; (5) safety/recovery risk; (6) complexity added or removed; (7) smallest end-to-end proof.
 
-Prefer: **safety regression that blocks all progress → currently binding economic loss → cheap decisive experiment → useful new capability → speculative flexibility**. Promote one coherent, bounded spec at a time, with the explicit Operator decision required for policy changes, experiments and deployment. A blocked or unsupported opportunity can remain **inconclusive**; creating a ticket is not evidence that the opportunity is valuable.
+Prefer: **safety regression that blocks all progress → currently binding economic loss → cheap decisive experiment → useful new capability → speculative flexibility**. Derive one coherent, bounded **GitHub spec issue** from the overarching plan at a time, then generate finite tickets under that issue; obtain explicit Operator decisions for policy changes, experiments and deployment. A blocked or unsupported opportunity can remain **inconclusive**; creating a ticket is not evidence that the opportunity is valuable.
 
 ## Lifecycle
 
-- **Planned:** a reviewed versioned [spec](specs/README.md) exists; work not automatically authorized.
+- **Planned:** a reviewed and approved **GitHub capability spec issue** exists; work not automatically authorized.
 - **Integrating:** code under development; an integration branch is not deployed or main.
 - **Implemented:** merged source and required local gate pass; precise scope recorded.
 - **Qualified:** the required actual-bot/live/scenario evidence meets declared conditions, and residual limitations are visible.
 - **Superseded:** a later accepted decision links the replacement; retain history, not duplicate roadmaps.
 
-Update this file **when priorities or milestone status change**; update [capabilities.md](capabilities.md) **when behavior or proof changes**. Preserve immutable run/evidence receipts as linked artifacts. A closed GitHub issue does not close a roadmap goal.
+Update this file **when overarching priorities or milestones change**; update [capabilities.md](capabilities.md) **when high-level behavior or proof changes**. Detailed specs, implementation tickets, their status and evidence receipts belong in GitHub issues. A closed issue does not by itself close a roadmap goal.

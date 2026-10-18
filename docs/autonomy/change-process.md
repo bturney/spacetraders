@@ -1,47 +1,49 @@
-# Changing the autonomous Fleet product
+# Derive specs and tickets from the Fleet roadmap
 
-**Use this when proposing or implementing any new autonomous behavior, economic policy, Operator surface or simulator-dependent capability.** The roadmap and durable specs live in this directory. GitHub issues hold finite decisions/tasks and dated evidence; they are not the permanent master plan.
+**The repository owns the overarching product plan; GitHub issues own capability specs and implementation tickets.** Begin with the [product direction](product.md), [roadmap](roadmap.md), [capability ledger](capabilities.md), and [issue-tracker conventions](../agents/issue-tracker.md). The issue-based specification is the authoritative scoped behavior contract; the repository roadmap does not copy it.
 
-## 1. Find the constraint
+## 1. Identify the useful outcome
 
-Read [product](product.md), the owning [capability row](capabilities.md) and [roadmap](roadmap.md). Inspect the target branch, current source, accepted [ADRs](../adr/), [glossary](../../GLOSSARY.md), relevant open PRs and actual outcome evidence. Write the *observed* limitation and its affected Ships/resource/time horizon. Separate a known loss from an unsupported inference or a simulator artifact.
+Inspect the highest-value roadmap gap, current source/branch, accepted [ADRs](../adr/), [glossary](../../GLOSSARY.md), active PRs and outcome evidence. Name the blocked Fleet outcome, scarce resource, uncertainty and existing module owner. Prefer observable gameplay effects over a proposed abstraction.
 
-**Done when:** the candidate names a verifiable current behavior, the desired outcome, its evidence source and the one existing module that should own the change.
+**Done when:** a reader can identify what currently fails or is missing, why it matters and what evidence supports that belief.
 
-## 2. Compare options before generating tickets
+## 2. Decide whether to specify it
 
-Consider **do nothing**, **repair/deepen existing code**, **delete a duplicate path**, **small targeted experiment**, and **new capability**. Evaluate expected improvement, binding resource, unknown assumptions, invariant risk and implementation/verification cost. If the preferred outcome is still speculative, run the cheapest decisive controlled investigation first.
+Compare doing nothing, simplifying/deepening current code, a small experiment and a new capability. Estimate economic value, Ship time, credits, API scarcity, uncertainty, invariants and maintenance cost. Obtain explicit Operator decisions for policy/UX direction and an ADR for architectural authority changes.
 
-For permanent architectural authority changes, write/update an ADR explaining the rejected options. For changed product policy or Operator affordance, capture the explicit accepted decision. Keep actual game truth separate from local estimated beliefs.
+**Done when:** the selected path and alternatives have grounded reasoning, or the question is recorded *inconclusive/deferred* without speculative tickets.
 
-**Done when:** the chosen option, rejected alternatives, irreversible consequences, and smallest valid proof are recorded; otherwise record **inconclusive** and stop without spinning up a permanent backlog.
+## 3. Create the GitHub spec issue
 
-## 3. Put an accepted spec in source control
+Open one **scoped capability-spec GitHub issue**, using the [issue tracker](../agents/issue-tracker.md) and its `tracking` convention for non-actionable scoped specs. Link the specific roadmap goal, relevant capability ledger row, accepted ADRs, existing source and related issues. Keep the complete spec **in the issue**.
 
-For an approved capability, create `docs/autonomy/specs/<capability-slug>.md` using [the template](specs/README.md). It owns *outcomes, decisions and acceptance proof*, not a detailed reimplementation of the old issue. Link governing ADRs, current source/owners, dated scenario evidence, security and reset boundaries. Update the [roadmap](roadmap.md) if it is selected as near-term work and mark its [ledger row](capabilities.md) **planned**.
+Describe the problem and evidence; desired outcomes; selected behavior and rejected alternatives; one module/authority owner; resources, API capacity, unknowns, resets and mutation consequences; in/out of scope; and independently reproducible acceptance/proof criteria with pass/fail/inconclusive distinctions. Record Operator decisions in the issue discussion.
 
-GitHub issues may link a **specific versioned spec commit** for bounded implementation, without pasting and drifting the whole contract. A tracking issue, if unavoidable, is a short index and should close when its finite work is done. Future iterations edit the owning source spec via PR; superseded versions stay in Git history.
+**Done when:** a new agent can independently determine exactly what the capability must accomplish and how it is verified, without reading a second detailed spec in the repository.
 
-**Done when:** a reviewer can determine exactly what becomes true, how it is tested, what remains out of scope, and the authoritative code/evidence owner from the versioned file alone.
+## 4. Derive finite implementation tickets
 
-## 4. Implement through the existing seam
+After the spec is approved, create bounded GitHub sub-issues or linked tickets for concrete owning seams, dependencies, tests and acceptance evidence. Keep the implementation frontier and detailed status with the owning spec **issue**. The repo roadmap retains the broader priorities and milestones.
 
-Build one end-to-end increment. Use Fleet Planning for contributions, Fleet Allocation for decisions and coordinated claims, the Evidence and Governor interfaces for observations/requests, Ship/Fleet Execution for accepted actions, and MutationAttempts for irreversible game-side effects. Preserve the safety invariants in [architecture](architecture.md). Delete a superseded authority in the same increment where safe rather than installing another adapter layer.
+**Done when:** each leaf is actionable, ownership does not duplicate another runtime authority, and the issue graph clearly identifies the next unblocked work.
 
-Check [AGENTS.md](../../AGENTS.md) and [testing](../agents/testing.md) before changes; run targeted regressions and `scripts/verify` before push. Use the OpenAPI spec for added endpoint ownership.
+## 5. Implement and qualify
 
-**Done when:** the code is merged to the intended branch, unit/seam tests and the required repository verification pass, and the proof record links the exact revision. An integration branch alone is **integrating**.
+Reuse the existing Fleet owner and preserve [architecture invariants](architecture.md). Verify targeted behavior and `scripts/verify`; record PRs, source revisions, accepted/missing receipts, simulation limits and live evidence in the **spec/ticket issues**. Treat completed implementation, scenario evidence, simulator-conditional conclusions and independently approved production qualification as distinct.
 
-## 5. Qualify, update and close the loop
+**Done when:** tickets are closed or explicitly deferred, with checkable receipts, and the spec issue correctly states what is proven, failed or unproven.
 
-Exercise the accepted spec's decisive scenarios. For economic policy, record estimated *and* realized Net Earnings, Ship-hours, fuel, capital and API costs, alternatives and confidence. For simulator use, log pinned actual-bot and world revisions, scenario/seed, completeness, fidelity limitations and budget/approval. For mutation/reset work, prove the named ambiguous and interrupted windows. Attribute failures; label gaps **unproven**.
+## 6. Refresh the overarching plan only when needed
 
-Update the spec's evidence/status, [capability ledger](capabilities.md) and [roadmap](roadmap.md) **in the delivery or qualification PR**. Link actual immutable evidence. Close finite issues with the result; the source roadmap survives, whether proof passed, failed or was inconclusive.
+Update [roadmap.md](roadmap.md) when major priorities, sequencing or milestones change; [capabilities.md](capabilities.md) when high-level delivery/proof or important gaps change; [product.md](product.md) or an ADR for broader decisions. Link the relevant issue and proof without reproducing its acceptance criteria in Markdown. Keep fine-grained ticket statuses in GitHub.
 
-**Done when:** the recorded product claim equals what the evidence actually establishes, the next decision is findable without reopening a mega issue, and no second copy of the roadmap remains in issue prose.
+**Done when:** a future agent can derive the next spec from the repository plan, and then find its detailed requirements and tickets in the linked GitHub issues.
 
-## Change hygiene
+## Boundaries
 
-- **One home per meaning:** product here, structure in ADR/architecture, requirements in the owning spec, priority in roadmap, implementation in source, history and receipts in Git/issue/run evidence.
-- **Separate authorization:** approving a spec or merging documentation does **not** authorize a gameplay action, live Strategy change, protected-host experiment or deployment. Follow the applicable operational approval.
-- **Supersede explicitly:** name the old contract, the replacing source file/ADR and the proof or decision. Close the old container as **superseded**, not **completed**, when replacing its planning role.
+- **Repository:** overarching product direction, roadmap, high-level capability ledger, architecture/ADRs.
+- **GitHub issues:** scoped specs, tickets, approvals, detailed acceptance, status and proof receipts.
+- **Code/game evidence:** implementations and authoritative external consequences.
+
+Documentation or spec approval does not authorize live Strategy changes, gameplay, protected-host experiments or deployment. Supersede older decisions explicitly and retain their history.

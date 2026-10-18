@@ -1,6 +1,6 @@
 # Economic-first Fleet policy — exploration
 
-**Status:** Operator direction recorded 2026-10-18, **not** an approved replacement for the [product contract](product.md), [capability ledger](capabilities.md), [ADR 0016](../adr/0016-ship-acquisition-is-surplus-first-capacity-investment.md), [ADR 0017](../adr/0017-nothing-needs-the-operator.md) or [#677](https://github.com/bturney/spacetraders/issues/677). [Roadmap](roadmap.md) gives the prioritized sequence and current implementation owners. New approved behavior should be specified using [the change process](change-process.md), not by growing an issue. This note is a set of hypotheses to falsify, not a work queue.
+**Status:** Operator direction recorded 2026-10-18, **not** an approved replacement for the [product contract](product.md), [capability ledger](capabilities.md), [ADR 0016](../adr/0016-ship-acquisition-is-surplus-first-capacity-investment.md), [ADR 0017](../adr/0017-nothing-needs-the-operator.md) or [#677](https://github.com/bturney/spacetraders/issues/677). [Roadmap](roadmap.md) gives the prioritized sequence and current implementation owners. Derive bounded GitHub capability spec issues from this direction using [the change process](change-process.md); do not turn the roadmap or any one issue into a permanent mega-spec. This note is a set of hypotheses to falsify, not a work queue.
 
 ## Hypothesis
 

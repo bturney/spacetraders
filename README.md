@@ -6,7 +6,7 @@ SpaceTraders bot + dashboard — a programmable API game (https://spacetraders.i
 
 **[Autonomous Fleet: product, capability ledger and roadmap](docs/autonomy/README.md)** is the current source-controlled direction. Start there to choose an outcome, find its architectural owner, see what is actually proven, or design the next capability.
 
-The [durable roadmap](docs/autonomy/roadmap.md) is intentionally separate from temporary implementation tickets. [#502](https://github.com/bturney/spacetraders/issues/502) preserves the superseded recovery specification and its evidence history; the older [program map #8](https://github.com/bturney/spacetraders/issues/8) is historical context rather than today's Fleet implementation queue.
+The [durable roadmap](docs/autonomy/roadmap.md) holds overarching priorities; **capability specs and implementation tickets remain in GitHub issues**. [#502](https://github.com/bturney/spacetraders/issues/502) preserves the superseded recovery specification and its evidence history; the older [program map #8](https://github.com/bturney/spacetraders/issues/8) is historical context rather than today's Fleet implementation queue.
 
 ## Architecture
 
