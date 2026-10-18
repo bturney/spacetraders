@@ -1,68 +1,48 @@
-# Autonomous Fleet roadmap
+# Autonomous Fleet roadmap: outcome gates and evidence-led sprints
 
-**Long-lived sequence and outcome goals; updated in source control.** Status checked **2026-10-18**. This is the roadmap after [#502](https://github.com/bturney/spacetraders/issues/502): it does not expire when a GitHub issue closes. The [capability ledger](capabilities.md) separately records delivery and proof; [change process](change-process.md) controls revisions.
+**The repository owns the long-term outcomes and gate order. GitHub issues own scoped capability specs, sprint tickets, acceptance evidence and retrospectives.** This replaces [#502](https://github.com/bturney/spacetraders/issues/502)'s never-ending planning container while retaining its useful rule: **the next outcome gate stays blocked until the previous one is proven**. Read the [capability ledger](capabilities.md) for implementation coverage, [product](product.md) for the destination, and [change process](change-process.md) for issuing a sprint.
 
-## Current handoff: finish the two integration workstreams
+**Snapshot: 2026-10-18.** Gates describe *outcomes*, not a required sequence of modules or API capabilities. The current gate and its proof can be updated after new evidence; later gates are provisional until the immediately preceding gate passes. All game mutations, simulator/protected-host trials and deployments still require their separate authorization.
 
-| Work | Completion checkpoint (check current evidence before updating) |
+## Handoff before the first new sprint
+
+| Current integration | Required handoff |
 | --- | --- |
-| **Operator Experience Recovery** — [#757](https://github.com/bturney/spacetraders/issues/757), [PR #802](https://github.com/bturney/spacetraders/pull/802) | [#776](https://github.com/bturney/spacetraders/issues/776) accepts Glance → Ships → Why → Grafana on mobile/desktop, checks Earnings and economic selection, cuts over and proves production reads. Earlier integration-child closure is not that acceptance. |
-| **Actual-bot accelerated simulator** — [#677](https://github.com/bturney/spacetraders/issues/677), [PR #801](https://github.com/bturney/spacetraders/pull/801) | The real application boots into a separately pinned private HTTP world and migrated PostgreSQL; semantic time, API scarcity, isolation, restart, gameplay and economic credibility are qualified at their declared levels. [#799](https://github.com/bturney/spacetraders/issues/799)/[#800](https://github.com/bturney/spacetraders/issues/800) own bounded full-system/protected-host qualification. A merged integration PR is not proof of 336-hour runs or approval for live/protected-host operation. |
+| **Operator Experience Recovery** — [#757](https://github.com/bturney/spacetraders/issues/757), [PR #802](https://github.com/bturney/spacetraders/pull/802) | [#776](https://github.com/bturney/spacetraders/issues/776) accepts the Glance → Ships → Why → Grafana journey, truthful Earnings and trade estimation, and the production cutover. Closed sub-tickets on an integration branch do not prove cutover. |
+| **Actual-bot simulator** — [#677](https://github.com/bturney/spacetraders/issues/677), [PR #801](https://github.com/bturney/spacetraders/pull/801) | The real application runs against a pinned private HTTP world and isolated migrated PostgreSQL. The accepted qualification work, including [#799](https://github.com/bturney/spacetraders/issues/799) / [#800](https://github.com/bturney/spacetraders/issues/800), establishes the supported mechanics, economic credibility, recovery, duration and protected-host limits. A merged PR is not automatically qualified whole-period evidence. |
 
-**Assumed start for the next roadmap:** both specifications have cleared their own acceptance criteria, and the accepted changes are on the intended target branch. **This is a planning assumption, not a claim that the checkpoint happened.** Upon that handoff, update the table, [capability ledger](capabilities.md), pinned simulator revision/fidelity limitations and the true baseline before accepting a new capability.
+**Planning assumption:** both integrations eventually clear their own acceptance and land on the intended branch. They were **not** complete when this document was authored. Do not start claiming a post-integration gate pass merely because the planning assumption is written here. Verified earlier foundations include partial-evidence trading ([PR #676](https://github.com/bturney/spacetraders/pull/676)), surplus-first Ship Capacity Investment ([PR #737](https://github.com/bturney/spacetraders/pull/737), [ADR 0016](../adr/0016-ship-acquisition-is-surplus-first-capacity-investment.md)), and the bounded [#715](https://github.com/bturney/spacetraders/issues/715) simplification.
 
-Completed foundations to reuse: Gate 2A partial-evidence trading ([PR #676](https://github.com/bturney/spacetraders/pull/676)), Gate 2C surplus-first acquisition ([PR #737](https://github.com/bturney/spacetraders/pull/737); [ADR 0016](../adr/0016-ship-acquisition-is-surplus-first-capacity-investment.md)), and the bounded #715 simplification. Reopen one only for demonstrated residual failure.
+## Outcome gates
 
-## After the handoff: evidence, then one improvement
+| Gate | Fleet outcome to demonstrate | Passing evidence, not a feature checklist | Snapshot status |
+| --- | --- | --- | --- |
+| **0. Trust the scoreboard** | We can tell whether the Fleet is improving, and reproduce what happened. | A pinned actual-bot baseline, attributable net results and Ship-hour/API cost, original decision and mutation provenance, recognized unknown costs, and declared simulator economic/fidelity limits. Historical production outcomes and scenario comparisons stay distinguishable. | **Blocked on integration handoff / baseline.** |
+| **1. Earn reliably** | An unattended Fleet produces **positive attributable net economic value**, without an observation/refuel drain or silent permanent stalls. | A predeclared bounded production or sufficiently supported actual-bot qualification with positive net after required expenses, evidence of continued independent work, credible wait/stall reasons and no safety regression. One promising trade or increasing credit balance is insufficient. | **Unproven for the post-handoff build.** An earlier profitable Generation is valuable evidence, not automatic qualification of the new build. |
+| **2. Reinvest productively** | The Fleet converts available profits and opportunities into **useful additional earning capacity** when warranted. | A self-selected, surplus-safe capacity investment with authoritative readiness, productive assignment and attributable incremental value over its remaining Generation Horizon; a qualified matched no-purchase counterfactual or comparably convincing evidence. A purchased but idle Ship, or an unaffordable purchase, fails. A justified refusal to purchase under an unprofitable scenario is correct behavior, not a forced failure. | **Blocked by Gate 1.** Gate 2C's merged implementation is a prerequisite, not proof of realized payoff. |
+| **3. Grow whole-Fleet productivity** | More Ships, information and capability translate into **better Fleet-wide output rather than more idle work, contention or API saturation**. | Predeclared scale/contended scenarios show increased useful results relative to a comparable baseline; bounded API and resource costs, independent Ship progress under another Ship's stall, and recoverable shared work. Where an interdependent contribution is beneficial, demonstrate genuinely coordinated Ships with one allocation authority. | **Blocked by Gate 2; later test envelope provisional.** |
+| **4. Progress and survive the game** | The Fleet sustains economically justified progress into additional game opportunities and across disruption, including a real reset boundary when qualified. | End-to-end scenario evidence for chosen game progression (not a raw count of generated API wrappers), mutation ambiguity/restart recovery, protected credit/API exposure, and later separately approved live multi-day/reset evidence. Record what the simulator models versus what only real gameplay can prove. | **Blocked by Gate 3; refine goalposts after earlier receipts.** |
 
-### 0. Establish the actual baseline
+**Gate precedence is strict.** Gate N+1 is not *qualified* and is not the primary **next sprint objective** until Gate N has an accepted proof receipt. Engineering fixes, infrastructure or tests useful to later gates can happen earlier when they remove the current gate's bottleneck or a material safety risk; such work does **not** bypass the gate. A gate remains **blocked**, **in progress**, **passed** or **unproven/inconclusive** based on linked evidence, not on merged ticket counts.
 
-Run **bounded, approved** actual-bot scenarios and inspect retained production Earnings without inventing simulator-to-live fidelity. Record, for each comparable world/policy: realized or explicitly unknown Net Earnings, credits, economic throughput per Ship-hour, API requests and deferrals by purpose, opportunity cost, acquisition and idle-Ship decisions, wait/stall causes, gate/chart milestones, constraint/safety events and recovery. Keep trial/mutation/gameplay authorization separate from a documentation approval.
+**Protect the goalposts:** agree on the decisive measure, trial boundary, data completeness and failure conditions **before** running a qualifying trial. Revise a gate only through an explicit, prospective product decision recorded in source control; preserve the previous bar and evidence. If a scenario cannot prove an outcome because the simulator lacks relevant mechanics or fidelity, mark it **inconclusive** and improve the evidence rather than declaring a pass.
 
-**Exit criterion:** a reproducible, pinned baseline plus a ranked list of *observed* limitations, including unknown or model-sensitive results. A completed report can legitimately conclude that evidence is insufficient to choose a policy.
+## Sprint loop: learn, select, prove
 
-### 1. Make the simplest economic Fleet consistently productive
+A sprint is a **bounded learning or delivery increment against the current gate**. It need not have a fixed calendar duration. The gate persists across multiple sprints until it passes.
 
-Evaluate a built-in **economic-growth default** against the current immutable Strategy, holding code or policy constant as appropriate. Compare direct trading, evidence gathering, fuel, capital growth, acquisition and retained work using net marginal value over the remaining Generation Horizon. Price API scarcity explicitly, but continue protected recovery admission.
+1. **Inspect the last receipt.** Read the current gate, its original success criteria, the last sprint's observed actuals, rejected alternatives, limitations and safety failures. Identify the *single most binding reason* the gate has not yet passed.
+2. **Choose one hypothesis.** Compare a repair/simplification, measurement experiment, economic-policy change or new gameplay capability by expected effect on that bottleneck, information gain, Ship/API cost and irreversible risk. Prefer the smallest decisive experiment. Do not precommit to future feature tickets.
+3. **Spec and slice in GitHub issues.** Create or amend a **scoped spec issue** for the chosen increment and derive finite implementation tickets. Pin the baseline, scenario, measurable expected change, stop conditions, test/proof boundary and approvals. The issue owns detailed acceptance criteria and sprint decisions.
+4. **Implement and observe.** Use existing owners, preserve [architecture invariants](architecture.md), run tests and, when separately authorized, the relevant actual-bot/production evidence. Record actual vs expected performance, residual unknowns and unexpected failures in the issues.
+5. **Retrospect and choose again.** Record **passed / failed / inconclusive**, cause, decisive evidence, and the next bottleneck. **Passed:** qualify the gate and re-evaluate whether the next gate is still the right outcome. **Failed/inconclusive:** stay on the same gate and choose another targeted sprint. Update the repository [capability ledger](capabilities.md) and this roadmap only for high-level proof or priority changes.
 
-**Exit criterion:** on matched relevant scenarios, the chosen policy improves a declared economic outcome (or demonstrates a justified trade-off), remains useful with partial evidence and imperfect markets, does not create polling/refuel drain, and has recorded accepted/rejected alternatives with attributable actuals. Commit an explicit policy decision before deleting old Strategy controls. See [exploration](economic-first-exploration.md).
+**Concrete example:** the Operator previously observed a **profitable Generation that did not grow its Fleet**. That suggests earnings can be achieved but does not establish profitability and capital growth for the post-integration build. Once Gate 1 evidence is accepted, Gate 2 focuses on why profitable surplus did not become useful added capacity. A sprint could inspect no-Ship-bound-work decisions, acquisition refusals, co-location, credit exposure or unrealized payback. The **observed cause** chooses the spec and tickets; “rewrite the allocator” or “add multi-Ship teams” is not a predetermined sprint.
 
-### 2. Add deliberate multi-Ship cooperation
+## What candidates remain available?
 
-Let one Fleet-level Candidate Contribution require several roles, e.g. producer + hauler plus any useful support, under **one** allocation publication, Claims, Reservations and Pledges. Avoid a second “team engine.” Keep independent Ships productive when a team step blocks, and replan only its affected dependency subgraph.
+The [capability ledger](capabilities.md) preserves gaps in full API-family ownership, all-discovered-System Marketplace coverage, market-depth-aware valuation, typed information demand, reset/restart recovery, cross-horizon capital economics and coordinated multi-Ship outcomes. Those are **candidate interventions**, not a mandatory implementation ordering.
 
-**Exit criterion:** authenticated/scenario proof of a common deliverable achieved by two cooperating Ships, correct shared-resource accounting, a third independent Ship making progress, restart recovery and bounded failure/replan. A test proving that two Ships merely ran simultaneously is insufficient.
+An economic-growth default and alternate ways to play remain [hypotheses](economic-first-exploration.md) until a gate's bottleneck and controlled comparisons justify them. Another capability (contracts, charting, extraction, construction, gates, support logistics) can become the next sprint **only if evidence makes it the most useful path through the current gate**.
 
-### 3. Expand economically meaningful gameplay
-
-Use the *current pinned OpenAPI inventory* to identify the highest-value autonomous capability gap: more Systems and Markets, chart rewards/exploration, contracts, extraction/refining, construction/gates, trade support or other supported actions. **Choose by marginal expected outcome and bottleneck**, not endpoint count or ticket age. Ensure all discovered-System Marketplace coverage and useful action on partial evidence remain achievable.
-
-**Exit criterion per selected family:** it becomes reachable through the normal Fleet decision/execution path, respects receipts and incomplete knowledge, cooperates with existing work and has a faithful end-to-end proof. The larger destination is full API-family coverage; only count an operation whose behavioral owner and recovery are demonstrated.
-
-### 4. Qualify reset-to-reset autonomy
-
-Exercise actual long-lived behavior with API pressure, held/unknown mutations, concurrent Fleet work, outages, application restarts and definitive Server Reset replacement. Use the simulator to target failure windows; use a separately approved live trial for claims only the real game can establish.
-
-**Exit criterion:** an inspectable multi-day result with preserved economic and causal evidence, bounded failure handling, no duplicate game mutations, no stale-generation authority, continued useful work and clear residual uncertainty. A 336-hour extended simulation is not itself proof that a real reset occurred.
-
-### 5. Explore alternate ways to play
-
-Only after a productive, explainable baseline, compare alternate policy modes (gate-first, chart-first, growth-first or risk-aware) under matched bounded experiments. Expose only levers that alter interesting observed trade-offs, not a generic Strategy rule builder.
-
-**Exit criterion:** at least one supported alternative with a documented behavioral difference, truthful comparative evidence and an understandable Operator-facing choice. If no difference is fun or useful, keep the simpler default.
-
-## How to choose the *next* capability
-
-This is a **decision queue, not a rigid five-phase schedule**. At each completed checkpoint, inspect the [ledger](capabilities.md) and the latest experiment/production results. For each candidate record: (1) real outcome currently blocked; (2) measured or bounded expected benefit; (3) binding resource (Ship time, credits, API capacity, evidence, attention or correctness); (4) uncertainty and how cheaply it can be reduced; (5) safety/recovery risk; (6) complexity added or removed; (7) smallest end-to-end proof.
-
-Prefer: **safety regression that blocks all progress → currently binding economic loss → cheap decisive experiment → useful new capability → speculative flexibility**. Promote one coherent, bounded spec at a time, with the explicit Operator decision required for policy changes, experiments and deployment. A blocked or unsupported opportunity can remain **inconclusive**; creating a ticket is not evidence that the opportunity is valuable.
-
-## Lifecycle
-
-- **Planned:** a reviewed versioned [spec](specs/README.md) exists; work not automatically authorized.
-- **Integrating:** code under development; an integration branch is not deployed or main.
-- **Implemented:** merged source and required local gate pass; precise scope recorded.
-- **Qualified:** the required actual-bot/live/scenario evidence meets declared conditions, and residual limitations are visible.
-- **Superseded:** a later accepted decision links the replacement; retain history, not duplicate roadmaps.
-
-Update this file **when priorities or milestone status change**; update [capabilities.md](capabilities.md) **when behavior or proof changes**. Preserve immutable run/evidence receipts as linked artifacts. A closed GitHub issue does not close a roadmap goal.
+**Maintenance rule:** this file owns durable gates, their high-level status, the current bottleneck and changes to priority. [GitHub issues](../agents/issue-tracker.md) own detailed scoped specs, sprint tickets, trial thresholds, retrospective receipts and dependencies. A ticket closure never by itself advances the gate; a failed sprint never turns into a new permanent roadmap.

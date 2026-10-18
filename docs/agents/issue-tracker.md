@@ -1,6 +1,6 @@
 # Issue tracker: GitHub
 
-Issues and PRDs for this repo live as GitHub issues. Use the `gh` CLI.
+Capability specs, PRDs, and implementation tickets live as GitHub issues. Use the `gh` CLI. The [autonomous Fleet overarching roadmap](../autonomy/README.md) lives in source control; link its relevant goals from scoped spec issues rather than copying the plan into a new tracking mega-issue.
 
 ## Conventions
 
