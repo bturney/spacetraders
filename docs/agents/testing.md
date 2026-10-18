@@ -27,6 +27,11 @@ Runtime qualification drives authenticated Strategy activation through productio
 planning and execution; keep deterministic regressions at their public seams.
 The HTTP diagnostic owns an ephemeral listener; ordinary tests bind no port.
 
+Native-time actual-app/PG/private-world HTTP bootstrap is separately opt-in:
+see `docs/simulation/native-bootstrap.md`. Its ordinary manifest/config tests
+open no listener; `scripts/native_bootstrap.py start` owns the whole isolated
+stack and bounded shutdown. This is not accelerated or full-period qualification.
+
 ## Release and deployment verification
 
 Separate required CI job; needs Docker Compose and the pinned toolchain/deps:

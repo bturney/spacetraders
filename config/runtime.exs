@@ -40,7 +40,7 @@ if config_env() == :dev do
     ]
 end
 
-if config_env() == :prod do
+if config_env() == :prod and not System.get_env("SPACETRADERS_NATIVE_BOOTSTRAP") do
   postgres_host =
     System.get_env("POSTGRES_HOST") ||
       raise "environment variable POSTGRES_HOST is missing"
@@ -159,4 +159,14 @@ if config_env() == :prod do
   #     config :swoosh, :api_client, Swoosh.ApiClient.Req
   #
   # See https://swoosh.hexdocs.pm/Swoosh.html#module-installation for details.
+end
+
+# Only the isolated diagnostic launcher sets this mode. Never inherit deployment
+# database/game targets; the boundary validates before any application child.
+if manifest_path = System.get_env("SPACETRADERS_NATIVE_BOOTSTRAP") do
+  for {key, value} <- SpaceTraders.Simulation.NativeBootstrap.read_configuration!(manifest_path) do
+    config :spacetraders, key, value
+  end
+
+  config :logger, level: :warning
 end

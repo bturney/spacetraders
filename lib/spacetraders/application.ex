@@ -7,6 +7,8 @@ defmodule SpaceTraders.Application do
 
   @impl true
   def start(_type, _args) do
+    :ok = SpaceTraders.Simulation.NativeBootstrap.validate_runtime!()
+
     children =
       [
         SpaceTradersWeb.Telemetry,
@@ -35,7 +37,9 @@ defmodule SpaceTraders.Application do
           {DynamicSupervisor, strategy: :one_for_one, name: SpaceTraders.Fleet.ShipSupervisor},
           SpaceTraders.Fleet.ShipServerBoot
         ] ++
-        rate_limiter_children() ++ reset_replacement_children() ++ [SpaceTradersWeb.Endpoint]
+        rate_limiter_children() ++
+        reset_replacement_children() ++
+        [SpaceTradersWeb.Endpoint] ++ SpaceTraders.Simulation.NativeBootstrap.children()
 
     # See https://elixir.hexdocs.pm/Supervisor.html
     # for other strategies and supported options

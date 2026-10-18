@@ -858,8 +858,14 @@ defmodule SpaceTraders.API do
   end
 
   defp config_req_options do
-    Application.get_env(:spacetraders, __MODULE__, [])
-    |> Keyword.take([:plug])
+    if Application.get_env(:spacetraders, :native_bootstrap) do
+      # Real sockets only. Do not follow simulator redirects out of the pinned
+      # API boundary; retries still use normal admission and protocol handling.
+      [redirect: false, receive_timeout: 3_000, connect_options: [timeout: 3_000]]
+    else
+      Application.get_env(:spacetraders, __MODULE__, [])
+      |> Keyword.take([:plug])
+    end
   end
 
   defp maybe_put(options, opts, key) do
@@ -930,8 +936,16 @@ defmodule SpaceTraders.API do
     do: OperationInventory.fetch_by_request!(method, path)
 
   defp base_url do
-    Application.get_env(:spacetraders, __MODULE__, [])
-    |> Keyword.get(:base_url, "https://api.spacetraders.io/v2")
+    config = Application.get_env(:spacetraders, __MODULE__, [])
+
+    if Application.get_env(:spacetraders, :native_bootstrap) do
+      case config do
+        [base_url: "http://127.0.0.1:4001/v2" = url] -> url
+        _ -> raise ArgumentError, "native bootstrap: HTTP target drift; no live fallback"
+      end
+    else
+      Keyword.get(config, :base_url, "https://api.spacetraders.io/v2")
+    end
   end
 
   defp gameplay_error(_status, %{"error" => %{"code" => code, "message" => message} = error}) do
