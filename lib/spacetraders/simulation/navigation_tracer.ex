@@ -100,21 +100,16 @@ defmodule SpaceTraders.Simulation.NavigationTracer do
     # durable backlog; then barrier consumers, repeating if callbacks spawned work.
     SpaceTraders.Outbox.dispatch_pending()
 
-    Enum.each(before.participants, fn {pid, _kind} ->
-      %{unresolved: 0} =
-        GenServer.call(
-          pid,
-          :simulation_barrier,
-          max(1, deadline - System.monotonic_time(:millisecond))
-        )
-    end)
+    participants_clear =
+      Enum.all?(before.participants, fn {pid, _kind} -> barrier(pid, deadline) end)
 
     after_barriers = NavigationClock.snapshot()
     durable = durable_work(after_barriers)
     governor = SpaceTraders.API.CapacityGovernor.diagnostics()
 
     clear =
-      ((durable == :clear and governor) && governor.in_flight == 0) and governor.deferred == %{}
+      participants_clear and durable == :clear and not is_nil(governor) and
+        governor.in_flight == 0 and governor.deferred == %{}
 
     if clear and before.revision == after_barriers.revision and
          map_size(after_barriers.active) == 0 and map_size(after_barriers.released) == 0 do
@@ -124,6 +119,19 @@ defmodule SpaceTraders.Simulation.NavigationTracer do
       Process.sleep(5)
       drain!(deadline)
     end
+  end
+
+  defp barrier(pid, deadline) do
+    reply =
+      GenServer.call(
+        pid,
+        :simulation_barrier,
+        max(1, deadline - System.monotonic_time(:millisecond))
+      )
+
+    reply.unresolved == 0
+  catch
+    :exit, _ -> raise("incomplete navigation participant barrier")
   end
 
   defp durable_work(snapshot) do
@@ -147,7 +155,7 @@ defmodule SpaceTraders.Simulation.NavigationTracer do
 
     supported =
       Enum.all?(events, fn [id, owner, _symbol, kind, at, _root] ->
-        owner == "ship" and kind == "arrival" and DateTime.compare(at, snapshot.now) == :gt and
+        owner == "ship" and kind == "arrival" and DateTime.compare(utc(at), snapshot.now) == :gt and
           id in snapshot.timeline_ids
       end)
 
@@ -189,10 +197,13 @@ defmodule SpaceTraders.Simulation.NavigationTracer do
       )
 
     case rows do
-      [row] -> Enum.zip(columns, row) |> Map.new()
+      [row] -> Enum.zip(columns, row) |> Map.new(fn {key, value} -> {key, utc(value)} end)
       [] -> nil
     end
   end
+
+  defp utc(%NaiveDateTime{} = at), do: DateTime.from_naive!(at, "Etc/UTC")
+  defp utc(value), do: value
 
   defp control!(suffix, body \\ nil) do
     count = Process.get(:navigation_control_requests, 0) + 1
@@ -221,5 +232,23 @@ defmodule SpaceTraders.Simulation.NavigationTracer do
   defp write_trace do
     File.write!("/out/time-trace.json.new", Jason.encode!(NavigationClock.trace()))
     File.rename!("/out/time-trace.json.new", "/out/time-trace.json")
+  end
+
+  def retain_failure do
+    snapshot = NavigationClock.snapshot()
+    write_trace()
+
+    File.write!(
+      "/out/drain-failure.json",
+      Jason.encode!(%{
+        semantic_at: snapshot.now,
+        active: map_size(snapshot.active),
+        released_unacknowledged: map_size(snapshot.released),
+        coverage_lost: not is_nil(snapshot.failed),
+        disposition: "incomplete_drain_no_further_advancement"
+      })
+    )
+
+    File.write!("/out/world-export.json", Jason.encode!(control!("export")))
   end
 end

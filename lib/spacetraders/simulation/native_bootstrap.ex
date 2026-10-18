@@ -191,6 +191,14 @@ defmodule SpaceTraders.Simulation.NativeBootstrap do
       System.stop(0)
     rescue
       error ->
+        checkpoint =
+          if File.exists?("/out/bootstrap.json"),
+            do: Jason.decode!(File.read!("/out/bootstrap.json")),
+            else: %{}
+
+        if SpaceTraders.Simulation.NavigationClock.enabled?(),
+          do: SpaceTraders.Simulation.NavigationTracer.retain_failure()
+
         # Do not serialize exception values: changesets can contain credentials.
         location =
           Enum.find_value(__STACKTRACE__, fn
@@ -201,24 +209,26 @@ defmodule SpaceTraders.Simulation.NativeBootstrap do
               nil
           end)
 
-        write_result(%{
-          state: "harness_failure",
-          stage: Process.get(:native_bootstrap_stage),
-          error: inspect(error.__struct__),
-          location: location,
-          stack:
-            Enum.take(
-              Enum.map(__STACKTRACE__, fn {module, function, args, info} ->
-                %{
-                  module: inspect(module),
-                  function: function,
-                  arity: if(is_list(args), do: length(args), else: args),
-                  line: info[:line]
-                }
-              end),
-              5
-            )
-        })
+        write_result(
+          Map.merge(checkpoint, %{
+            state: "harness_failure",
+            stage: Process.get(:native_bootstrap_stage),
+            error: inspect(error.__struct__),
+            location: location,
+            stack:
+              Enum.take(
+                Enum.map(__STACKTRACE__, fn {module, function, args, info} ->
+                  %{
+                    module: inspect(module),
+                    function: function,
+                    arity: if(is_list(args), do: length(args), else: args),
+                    line: info[:line]
+                  }
+                end),
+                5
+              )
+          })
+        )
 
         System.stop(1)
     end
