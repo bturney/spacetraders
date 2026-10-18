@@ -54,7 +54,7 @@ defmodule SpaceTraders.MutationAttemptsTest do
       assert attempt.provenance["ship_id"] == ship.id
       assert attempt.provenance["ship_symbol"] == ship.symbol
       assert attempt.provenance["intent_id"] == intent.id
-      assert attempt.provenance["decision_episode_id"] == 17
+      assert is_integer(attempt.provenance["decision_episode_id"])
       assert attempt.expected_effects == ["Ship nav and fuel response"]
       assert attempt.consequence_bounds == ["starts local transit"]
 

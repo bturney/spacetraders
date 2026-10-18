@@ -8,8 +8,6 @@ defmodule SpaceTraders.API.RecordedDispatchTest do
   alias SpaceTraders.API.{AgentTokenReference, OperationInventory, ShipAction}
   alias SpaceTraders.Fleet.Intents.RecordedAction
   alias SpaceTraders.FleetAllocation.Commitment
-  alias SpaceTraders.FleetGeneration.Generation
-  alias SpaceTraders.FleetStrategy.Strategy
   alias SpaceTraders.MutationAttempts
 
   # Existing operation parameters, independent of the adapter's implementation.
