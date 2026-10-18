@@ -75,6 +75,14 @@ navigation profile. The transaction selector is a supporting Elixir observation
 seam for separately pinned private fixture orchestration, not authorization to
 change its world artifact, budgets or qualification claim.
 
+The implemented bounded native-time actual-app/PG/HTTP checks **did not demonstrate
+a paid transaction**. Both the full generated world and a declared two-existing-
+Market fixture exhausted the transaction observation window after normal discovery
+and navigation, with zero paid HTTP receipts. Failed startup/diagnostic controls
+and both no-transaction outcomes are retained; all owned stacks were stopped and
+shutdown inspected. Component accounting passes do not satisfy this remaining
+actual-bot transaction gate. No completed-trip or exact Net Earnings is claimed.
+
 Use robust directional comparisons under documented conditions. Preserve relevant
 declared variations and legitimate downstream divergence. Close or
 uncertainty-sensitive results are inconclusive. Historical #652 cashflow/late-price
