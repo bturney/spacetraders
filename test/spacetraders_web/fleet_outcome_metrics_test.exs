@@ -106,28 +106,17 @@ defmodule SpaceTradersWeb.FleetOutcomeMetricsTest do
   end
 
   test "boot reconstructs all Fleet vectors without waiting for gameplay or polling" do
-    before = System.system_time(:microsecond) / 1_000_000
     start_worker()
     assert_projection(:status, %{"waiting" => 1, "trading" => 0, "stuck" => 0})
     assert_metric("waiting", 1)
     assert_metric("stuck", 0)
-    observed = metric_value(~s(spacetraders_outcome_observed_at_seconds{family="fleet"}))
-    assert observed >= before
     refute_receive {:projection, _, _, _}, 150
-    assert metric_value(~s(spacetraders_outcome_observed_at_seconds{family="fleet"})) == observed
   end
 
   test "the socket-free metrics endpoint gets coherent bytes from one outcome worker", %{
     agent: agent
   } do
-    events = [
-      [:spacetraders, :outcome, :agent],
-      [:spacetraders, :outcome, :contracts],
-      [:spacetraders, :outcome, :transaction],
-      @projection,
-      [:spacetraders, :outcome, :chart],
-      [:spacetraders, :outcome, :scan]
-    ]
+    events = [[:agent, :credits], @projection]
 
     handler = {__MODULE__, :publishers, make_ref()}
     :ok = :telemetry.attach_many(handler, events, &__MODULE__.capture_publisher/4, self())
@@ -142,17 +131,6 @@ defmodule SpaceTradersWeb.FleetOutcomeMetricsTest do
     assert {:ok, _} = Evidence.get_agent(agent)
     stub_owned_reads(agent, 80)
     assert {:ok, _} = Evidence.get_agent(agent)
-    assert {:ok, []} = Evidence.get_contracts(agent)
-    FleetOutcomes.transaction("navigate", "refuel", 17)
-
-    assert {:ok, _} =
-             SpaceTraders.Intelligence.observe_waypoint(
-               agent,
-               %{symbol: "X1-HTTP-A1", system_symbol: "X1-HTTP", x: 1, y: 2, traits: []},
-               source: "scan_waypoints"
-             )
-
-    assert_receive {:chart_published, 1}, 2_000
 
     for event <- events do
       assert_receive {:metric_publisher, ^event, ^owner}, 2_000
@@ -165,17 +143,8 @@ defmodule SpaceTradersWeb.FleetOutcomeMetricsTest do
         assert body =~
                  ~s(fleet_ships{ship_type="SHIP_PROBE",status="waiting"} 1\n)
 
-        assert body =~ ~s(spacetraders_outcome_observed_at_seconds{family="fleet"})
-        assert body =~ "spacetraders_outcome_agent_credits 80\n"
-        assert body =~ "spacetraders_outcome_agent_credits_previous 100\n"
-        assert body =~ ~s(spacetraders_outcome_contracts{status="active"} 0\n)
-        assert body =~ "spacetraders_outcome_systems_charted 1\n"
-
-        for family <- ~w(credits contracts transactions chart) do
-          assert body =~ ~s(spacetraders_outcome_observed_at_seconds{family="#{family}"})
-        end
-
-        assert_metric_pair(body)
+        assert body =~ "agent_credits 80\n"
+        refute body =~ "spacetraders_outcome_"
       end)
 
     refute log =~ "Adapter functions must be called by stream owner"
@@ -185,8 +154,6 @@ defmodule SpaceTradersWeb.FleetOutcomeMetricsTest do
     allocation = allocation_fixture(context)
     start_worker(coalesce_ms: 200)
     baseline()
-    recomputes = metric_value(~s(spacetraders_outcome_fleet_recomputes_total{family="status"}))
-
     publish_claim(allocation)
 
     assert {:ok, _} =
@@ -197,9 +164,6 @@ defmodule SpaceTradersWeb.FleetOutcomeMetricsTest do
     assert_projection(:status, %{"trading" => 1, "waiting" => 0})
     assert_metric("trading", 1)
     assert_metric("waiting", 0)
-
-    assert metric_value(~s(spacetraders_outcome_fleet_recomputes_total{family="status"})) ==
-             recomputes + 1
 
     refute_receive {:projection, :status, _, _}, 250
 
@@ -344,7 +308,6 @@ defmodule SpaceTradersWeb.FleetOutcomeMetricsTest do
     allocation_fixture(context)
     start_worker()
     baseline()
-    observed = metric_value(~s(spacetraders_outcome_observed_at_seconds{family="fleet"}))
 
     Req.Test.stub(SpaceTraders.API, fn conn ->
       assert conn.request_path == "/v2/my/agent"
@@ -353,10 +316,9 @@ defmodule SpaceTradersWeb.FleetOutcomeMetricsTest do
 
     assert {:ok, %{credits: 123_456}} = Evidence.get_agent(context.agent)
     refute_receive {:projection, _, _, _}, 150
-    assert metric_value(~s(spacetraders_outcome_observed_at_seconds{family="fleet"})) == observed
   end
 
-  test "owned credits and Contracts wait for the true outer commit", %{agent: agent} do
+  test "owned credits wait for the true outer commit", %{agent: agent} do
     start_worker()
     baseline()
     owned_read_baseline(agent)
@@ -373,14 +335,11 @@ defmodule SpaceTradersWeb.FleetOutcomeMetricsTest do
       assert {:ok, {:ok, []}} = Task.await(writer)
     end
 
-    assert metric_value("spacetraders_outcome_agent_credits") == 80
-    assert metric_value("spacetraders_outcome_agent_credits_previous") == 100
-    assert metric_value(~s(spacetraders_outcome_contracts{status="active"})) == 0
-    assert_metric_pair(build_conn() |> get("/metrics") |> response(200))
+    assert metric_value("agent_credits") == 80
     refute owned_metrics() == before
   end
 
-  test "outer rollback discards nested owned credits, Contracts, epochs and credit pairs", %{
+  test "outer rollback discards nested owned credits", %{
     agent: agent
   } do
     start_worker()
@@ -403,8 +362,7 @@ defmodule SpaceTradersWeb.FleetOutcomeMetricsTest do
 
     stub_owned_reads(agent, 70)
     assert {:ok, _} = Evidence.get_agent(agent)
-    assert metric_value("spacetraders_outcome_agent_credits") == 70
-    assert metric_value("spacetraders_outcome_agent_credits_previous") == 100
+    assert metric_value("agent_credits") == 70
   end
 
   test "scrapes cannot see a partially rewritten Fleet vector", context do
@@ -476,9 +434,6 @@ defmodule SpaceTradersWeb.FleetOutcomeMetricsTest do
     assert_metric("trading", 1)
   end
 
-  # The shared worker also projects Chart state; this file owns Fleet axes.
-  def handle_event(_event, _measurements, %{family: :chart}, _pid), do: :ok
-
   def handle_event(@failure, _measurements, metadata, pid),
     do: send(pid, {:projection_failed, metadata.family})
 
@@ -490,16 +445,6 @@ defmodule SpaceTradersWeb.FleetOutcomeMetricsTest do
   end
 
   def handle_query(_event, _measurements, _metadata, _pid), do: :ok
-
-  def capture_publisher(
-        [:spacetraders, :outcome, :chart] = event,
-        %{count: count},
-        _metadata,
-        pid
-      ) do
-    send(pid, {:metric_publisher, event, self()})
-    send(pid, {:chart_published, count})
-  end
 
   def capture_publisher(event, _measurements, _metadata, pid),
     do: send(pid, {:metric_publisher, event, self()})
@@ -534,9 +479,6 @@ defmodule SpaceTradersWeb.FleetOutcomeMetricsTest do
         "/v2/my/agent" ->
           Req.Test.json(conn, %{"data" => %{"symbol" => agent.symbol, "credits" => credits}})
 
-        "/v2/my/contracts" ->
-          Req.Test.json(conn, %{"data" => []})
-
         path ->
           flunk("Unexpected owned read #{path}")
       end
@@ -549,27 +491,7 @@ defmodule SpaceTradersWeb.FleetOutcomeMetricsTest do
     stub_owned_reads(agent, 100)
     assert {:ok, _} = Evidence.get_agent(agent)
 
-    Req.Test.stub(SpaceTraders.API, fn conn ->
-      assert conn.request_path == "/v2/my/contracts"
-
-      Req.Test.json(conn, %{
-        "data" => [
-          %{
-            "id" => "held-outer-contract",
-            "accepted" => true,
-            "fulfilled" => false,
-            "terms" => %{
-              "deadline" => "2099-01-01T00:00:00Z",
-              "deliver" => [%{"unitsRequired" => 10, "unitsFulfilled" => 4}]
-            }
-          }
-        ]
-      })
-    end)
-
-    assert {:ok, [_]} = Evidence.get_contracts(agent)
-    assert metric_value("spacetraders_outcome_agent_credits") == 100
-    assert metric_value(~s(spacetraders_outcome_contracts{status="active"})) == 1
+    assert metric_value("agent_credits") == 100
   end
 
   defp held_owned_reads(agent) do
@@ -580,7 +502,7 @@ defmodule SpaceTradersWeb.FleetOutcomeMetricsTest do
         assert {:ok, {:ok, []}} =
                  Repo.transaction(fn ->
                    assert {:ok, _} = Evidence.get_agent(agent)
-                   Evidence.get_contracts(agent)
+                   {:ok, []}
                  end)
 
         send(parent, :owned_reads_retained)
@@ -601,33 +523,9 @@ defmodule SpaceTradersWeb.FleetOutcomeMetricsTest do
     |> response(200)
     |> String.split("\n")
     |> Enum.filter(
-      &String.starts_with?(&1, [
-        "spacetraders_outcome_agent_credits",
-        "spacetraders_outcome_contracts{",
-        ~s(spacetraders_outcome_observed_at_seconds{family="credits"}),
-        ~s(spacetraders_outcome_observed_at_seconds{family="contracts"})
-      ])
+      &String.starts_with?(&1, "agent_credits")
     )
     |> Enum.sort()
-  end
-
-  defp assert_metric_pair(body) do
-    [_, current] =
-      Regex.run(
-        ~r/^spacetraders_outcome_observed_at_seconds\{family="credits"\} ([^\n]+)$/m,
-        body
-      )
-
-    [_, previous] =
-      Regex.run(
-        ~r/^spacetraders_outcome_agent_credits_previous_observed_at_seconds ([^\n]+)$/m,
-        body
-      )
-
-    {current, ""} = Float.parse(current)
-    {previous, ""} = Float.parse(previous)
-    assert previous > 0
-    assert current > previous
   end
 
   defp allocation_fixture(%{operator: operator, agent: agent} = context) do

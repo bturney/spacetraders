@@ -23,7 +23,7 @@ require new metrics, or change the active delivery frontier.
 | How do Fleet Generations compare? | `/generations`, including the cross-Generation Decision Episode table |
 | What is the Fleet doing now? | Mission Control, Fleet Commitments, Claims, Reservations, Pledges, and root Intents |
 | What did each trade earn? | `earnings_records` via `SpaceTraders.Outcomes.Earnings` (`list/1`, `for_episode/1`, `for_portfolio/1`); metrics `earnings_*`; Loki line `Earnings record` (Ship, route) |
-| What are the last observed credits, Contracts, Fleet state, and chart coverage? | SpaceTraders · Outcomes (`spacetraders-outcomes`); [outcome guide](outcome-metrics.md) |
+| Where do credits come from and go? How is the Fleet growing and working? | SpaceTraders · Money (`spacetraders-money`) and Fleet (`spacetraders-fleet`); [outcome guide](outcome-metrics.md) |
 | What software or API behavior explains a durable record? | The contextual Grafana family linked from that record |
 | Where are dashboard definitions deployed from? | `../home-server-setup/config/observability/grafana/provisioning/dashboards/` |
 
@@ -169,6 +169,5 @@ history.
 ## Outcome metric family
 
 **Outcome metrics:** read [the outcome guide](outcome-metrics.md) before changing
-taps, labels, or dashboard queries; interpreting idle gaps or credits/hour;
-or validating the native exporter. It holds the metric contract, publication
-boundary, freshness/reset rules, sibling dashboard path, and verification steps.
+taps, labels, or dashboard queries. It holds the metric contract, publication
+boundary, sibling dashboard path, and verification steps.

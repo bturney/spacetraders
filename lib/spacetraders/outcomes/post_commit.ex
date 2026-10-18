@@ -2,8 +2,8 @@ defmodule SpaceTraders.Outcomes.PostCommit do
   @moduledoc """
   Cheap writer-side bridge from Repo query telemetry to the single Outcomes worker.
 
-  Ecto emits transaction telemetry in the writer process. Buffer bounded dirty
-  families, additive scan counts and retained owned observations there until the
+  Ecto emits transaction telemetry in the writer process. Buffer the bounded dirty
+  families and retained owned observations there until the
   outer COMMIT; ROLLBACK discards them. Nested Repo transactions share that outer
   boundary. No writer SQL, worker wait, or second process is introduced.
   """
@@ -11,7 +11,7 @@ defmodule SpaceTraders.Outcomes.PostCommit do
 
   alias SpaceTraders.{Evidence.Observation, Repo}
 
-  @families [:status, :chart]
+  @families [:status]
   # Tables a Ship status reads (`MissionControl.ShipStatus`).
   @status_sources ~w(
     ships
@@ -41,7 +41,7 @@ defmodule SpaceTraders.Outcomes.PostCommit do
 
   # Called inside the observation's retention transaction, before its COMMIT.
   def observe(%Observation{operation_id: operation} = observation)
-      when operation in ["get-my-agent", "get-contracts"] do
+      when operation == "get-my-agent" do
     case Process.get(@pending) do
       nil ->
         # A missing BEGIN (for example, the bridge started during this
@@ -89,7 +89,7 @@ defmodule SpaceTraders.Outcomes.PostCommit do
   def durable_change(_event, _measurements, metadata, worker) do
     case metadata do
       %{query: "begin", result: {:ok, _}} ->
-        Process.put(@pending, %{families: MapSet.new(), scans: 0, observations: [], earnings: []})
+        Process.put(@pending, %{families: MapSet.new(), observations: [], earnings: []})
 
       %{query: "commit", result: {:ok, _}} ->
         if pending = Process.delete(@pending) do
@@ -103,10 +103,7 @@ defmodule SpaceTraders.Outcomes.PostCommit do
 
       %{result: {:ok, %{command: command, num_rows: rows}}}
       when command in [:insert, :update, :delete] and rows > 0 ->
-        change = %{
-          families: MapSet.new(changed_families(metadata, command)),
-          scans: scan_events(metadata, command, rows)
-        }
+        change = %{families: MapSet.new(changed_families(metadata, command))}
 
         case Process.get(@pending) do
           nil ->
@@ -115,8 +112,7 @@ defmodule SpaceTraders.Outcomes.PostCommit do
           pending ->
             Process.put(@pending, %{
               pending
-              | families: MapSet.union(pending.families, change.families),
-                scans: pending.scans + change.scans
+              | families: MapSet.union(pending.families, change.families)
             })
         end
 
@@ -149,30 +145,10 @@ defmodule SpaceTraders.Outcomes.PostCommit do
        else: []
   end
 
-  defp changed_families(%{source: "intelligence_observations"} = metadata, :insert) do
-    if scan_events(metadata, :insert, 1) > 0, do: [:chart], else: []
-  end
-
-  defp changed_families(%{source: "intelligence_facts"} = metadata, :update) do
-    if "waypoint" in (metadata.cast_params || metadata.params), do: [:chart], else: []
-  end
-
-  defp changed_families(%{source: source}, command)
-       when source in ["intelligence_facts", "intelligence_observations"] and
-              command in [:update, :delete],
-       do: [:chart]
-
   defp changed_families(_, _), do: []
 
-  defp scan_events(%{source: "intelligence_observations"} = metadata, :insert, rows) do
-    params = metadata.cast_params || metadata.params
-    if "scan_waypoints" in params and "waypoint" in params, do: rows, else: 0
-  end
-
-  defp scan_events(_, _, _), do: 0
-
-  defp notify(worker, %{families: families, scans: scans}) do
-    if MapSet.size(families) > 0 or scans > 0,
-      do: send(worker, {:dirty, %{families: families, scans: scans}})
+  defp notify(worker, %{families: families}) do
+    if MapSet.size(families) > 0,
+      do: send(worker, {:dirty, %{families: families}})
   end
 end
