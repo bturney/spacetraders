@@ -18,7 +18,7 @@ The target is **understandability attached to every qualified capability**, not 
 
 ## Evidence vocabulary and gap classes
 
-Use project terms in [GLOSSARY](../../GLOSSARY.md): Strategic Objective, Candidate Contribution, Fleet Commitment, Strategy Decision Episode, Net Earnings, Episode Cash Flow, Observation Demand, Binding, Attention, Intervention, Neutral Wait, and Shared World State.
+Use project terms in [glossary map](../../GLOSSARY-MAP.md): Strategic Objective, Candidate Contribution, Fleet Commitment, Strategy Decision Episode, Net Earnings, Episode Cash Flow, Observation Demand, Binding, Attention, Intervention, Neutral Wait, and Shared World State.
 
 Each suggested feature should classify its need:
 

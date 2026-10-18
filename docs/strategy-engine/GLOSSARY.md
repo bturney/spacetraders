@@ -1,0 +1,265 @@
+# SpaceTraders: Strategy engine
+
+The Strategy engine context: vocabulary of the autonomous planning and execution engine (Strategy, Episode, Commitment, Portfolio, Revision, Intent, Endeavor, Jobs). It appears only in engine Grafana dashboards, logs and engine pages, never on Operator surfaces. Game terms live in [the Game glossary](../../GLOSSARY.md); see [GLOSSARY-MAP.md](../../GLOSSARY-MAP.md).
+
+## Language
+
+### Strategy and allocation
+
+**Fleet Strategy**:
+A durable, Operator-owned ordered portfolio of Strategic Objectives and meaningful hard constraints governing successive Fleet Generations. It records outcome-level intent rather than technical allocation settings, survives Server Resets, and leaves planning and tactical execution to the system; it never invokes game actions directly.
+_Avoid_: fleet objective (for the complete strategic direction), automation
+
+**Fleet Strategy Revision**:
+An immutable snapshot of the outcome-level choices the Operator accepted for a Fleet Strategy, whether selected directly or through a preset. Each current Fleet has at most one active Fleet Strategy Revision. The active revision applies automatically to replacement Fleet Generations; recommendations and product changes never alter it silently.
+
+**Strategy Decision Episode**:
+A durable account of one Fleet Strategy reconciliation decision. It receives a stable identity when allocation selects a plan or deliberately selects a neutral wait, or when Fleet Allocation refuses to publish a selected plan, or finds the Fleet structurally stalled, or refuses a Capacity Investment; a refused publication, a structural stall or a refused acquisition records its reason and is never the Fleet's current allocation result. One structural stall Episode stands for an unchanged stall, and one acquisition refusal Episode for an unchanged refusal, however often it is observed; Mission Control projects it as Degraded Operation with its release condition and never as a Neutral Wait. It preserves its original evidence references, compact provenance, and expectations, and accumulates outcome evidence until it is explicitly classified as realized, partially realized, superseded, reset-censored, or still evaluating. It connects the active Fleet Strategy Revision and objective evaluations to the evidence considered, admissible alternatives, binding constraints or limitations, selected plan or neutral result, expected and actual outcomes, calibration version, and any later supersession. It is the causal join point for explanation and optimization, not a gameplay action or long-lived plan.
+
+**Outcome Observability**:
+Evidence of whether a Fleet Strategy is achieving its Strategic Objectives, including progress, economics, Fleet productivity, leaderboard movement, constraints, and expected-versus-actual outcomes. Mission Control summarizes it for the Operator; deeper analysis may use the observability platform.
+
+**Episode Cash Flow**:
+The credit receipts minus expenditures attributable to one Strategy Decision Episode, including supporting costs and rewards whether or not its selected work finishes. Proven amounts and unknown amounts remain distinct; it is not completed-trade profit.
+_Avoid_: realized profit, trade margin (when meaning episode-wide cash flow)
+
+**System Observability**:
+Evidence of how the autonomous software behaves and performs, including planning, execution, API pressure, errors, latency, recovery, and resource use. It supports diagnosis and optimization and becomes Operator-facing only when it materially affects Fleet Strategy.
+
+**Strategy-capable Time**:
+Time during which the system can safely make progress on at least one Strategic Objective. It distinguishes useful autonomous availability from process uptime and excludes periods when faults or unavailable dependencies prevent all Strategy progress.
+
+**Unallocated**:
+The read-projection state of a registered Ship with no active Claim in its current Fleet Generation. During a Neutral Wait it carries a causal link to the wait's Strategy Decision Episode. It is derived state, never a durable per-Ship record.
+_Avoid_: idle Ship, free Ship, unclaimed (when the wait linkage matters)
+
+**Strategic Objective**:
+One measurable outcome in a Fleet Strategy, with an ordered Strategic Priority, an evaluation rule, and a Fleet Generation, Strategy-lifetime, or recurring scope. An attain objective minimizes time to a target, a maintain objective protects a target with sufficient margin, and a continuous objective maximizes its outcome rate over a horizon.
+
+**Strategic Priority**:
+A Strategic Objective's position in the Fleet Strategy's ordered protection model. Under contention, the system protects a feasible plan for a higher Strategic Priority before committing remaining resources lower down; supporting work may proceed when it improves that protected plan.
+_Avoid_: request score, task priority
+
+**Candidate Contribution**:
+An objective-specific planner's evidence-bound proposal for advancing a Strategic Objective. It declares expected outcomes, uncertainty, required roles and resources, dependencies, validity conditions, and alternatives without assigning Ships or acquiring resources. Fleet allocation accepts or rejects it as part of the whole commitment portfolio.
+_Avoid_: task, request, Ship assignment
+
+**Coverage Contribution**:
+A bounded Candidate Contribution over an explicit finite, named set of open Observation Demands, proposed to unlock a Strategic Objective's decisions while coverage is incomplete. It carries the portfolio outcome rather than per-subject profit; partial coverage may admit positive work, and only complete coverage (fulfilled or proven infeasible) supports a negative conclusion. Its supersession leaves unfulfilled Demands open.
+_Avoid_: sweep, scan script, coverage plan
+
+**Capacity Investment**:
+A supporting Candidate Contribution that buys lasting Fleet capability, such as a Ship, for the rest of its Fleet Generation. Its one-time capital cost is justified only by the incremental progress it enables on existing Strategic Objectives within the Generation Horizon, and the capability counts only after authoritative readiness. "Capacity" here is Fleet capability, not API request capacity (API Capacity Governor) or usable resources (Governed Availability).
+_Avoid_: fleet growth objective, expansion, upgrade
+
+**Ship-bound Unmet Work**:
+Admissible Market work that the latest current-Revision Strategy Decision Episode rejected only for a Claim conflict, while its evidence is still valid. It is the only work a Capacity Investment may be valued on.
+_Avoid_: backlog, idle demand, unmet demand
+
+**Generation Horizon**:
+The time remaining before the current Fleet Generation ends, bounded by the game's announced next Server Reset and a conservative evaluation window. Without reset evidence it is unknown, never assumed unbounded.
+_Avoid_: lifetime, payback period
+
+**Fleet Commitment**:
+An accepted, evidence-bound promise to pursue an outcome contribution using declared claims, reservations, pledges, and dependencies. Fleet allocation maintains Fleet Commitments as a coherent portfolio; a commitment may coordinate one Ship, multiple Ships, or preparatory work, and is retained, superseded, or safely unwound at reconciliation boundaries. When a newer Fleet Strategy Revision retires its portfolio while its effect is unsettled (an unresolved action or inherited Cargo being sold), it settles: it keeps its Claim on its own Ship only, authorizes nothing but that Cargo's sale, and is released once settled.
+_Avoid_: fixed plan, task, Job
+
+**Claim**:
+A Fleet Commitment's exclusive authority to use an indivisible Fleet resource or interval, such as commanding one Ship. A resource cannot support conflicting active claims.
+_Avoid_: lock, assignment
+
+**Reservation**:
+A Fleet Commitment's protected share of a fungible Fleet resource, such as credits, Cargo capacity, or time margin. It is bounded by amount and evidence-valid horizon and releases when its justification no longer holds.
+_Avoid_: budget (when referring to committed capacity), claim
+
+**Governed Availability**:
+The Claims and Reservations one Agent's Fleet can currently use, established from authoritative evidence rather than assumed. Fleet Allocation admits or rejects Candidate Contributions against it, and Strategy review shadow-evaluates a draft against it without publishing anything.
+_Avoid_: capacity (when referring to usable resources), inventory
+
+**Pledge**:
+A Fleet Commitment's promised quantity toward a divisible shared outcome, backed by sufficient claims, reservations, or explicit acquisition dependencies. Authoritative outcome progress, including progress caused outside the Fleet, reduces the remaining fulfillment rather than being treated as failure.
+_Avoid_: reservation, fixed quota
+
+**Endeavor**:
+The operations-surface presentation of one active root Fleet Commitment, grouped under the Strategic Objective it serves. It shows the Commitment's outcome, state, forecast, contributing Ships (Claims), material dependencies (Reservations, Pledges, hardware prerequisites), and a concise selection reason. Superseded or unwound work leaves the active Endeavors view while its Decision Episode evidence remains reachable by identity.
+_Avoid_: task, Job, plan
+
+**Shared World State**:
+Mutable game state that may be changed by other Agents as well as this Fleet. An observation is evidence at a point in time, not a lock; Fleet planning records assumptions about it and refreshes them only when uncertainty can materially affect admissibility, expected value, or the next irreversible action.
+_Avoid_: external interference, single-player state
+
+**Hard Constraint**:
+An explicit Fleet Strategy admissibility rule that the system may never knowingly violate. Uncertainty requires more evidence, a provably safe alternative, or escalation of a genuine contradiction; it never silently permits a violation.
+
+**Preference**:
+An Operator-owned choice that ranks plans already admitted by every Hard Constraint. Unlike a Hard Constraint, it may yield to a higher Strategic Priority or a better admissible outcome.
+
+**Standing Authority**:
+The continuing authority an active Fleet Strategy Revision grants the system to perform strategically justified gameplay actions whose possible consequences satisfy every Hard Constraint. Spending, irreversible consequences, and bounded losses do not independently require Operator approval; changing Operator-owned Strategy intent does.
+
+**Safety Fence**:
+A suppression of new mutations whose admissibility depends on unresolved evidence. It covers the smallest affected entity, resource, or commitment and every dependent reservation, pledge, plan, and mutation while unrelated admissible work continues.
+
+**Bounded Unknown**:
+An ambiguous mutation outcome whose worst possible consequence can be accounted for and remains inside every Hard Constraint. It may be retained as unresolved evidence without preventing unrelated or provably admissible work.
+
+**Credit Calibration**:
+The versioned worst-case price margin applied to a quoted spend to bound its credit consequence. It is model calibration, never Operator intent: it widens only after an attributable Pricing-model Breach and never narrows below its hard lower bound.
+_Avoid_: margin setting, spending allowance
+
+**Realization**:
+The realized-versus-quoted evidence for one credit-bearing action whose charge can be attributed to it: the quoted price and units, its worst-case bound, the realized charge, and the credits left after.
+_Avoid_: actual cost, receipt
+
+**Shortfall**:
+An authoritative credit balance below the active credit floor, or a realized charge above its worst-case bound. While unreleased it pauses new credit-bearing actions for its Agent; only a newer balance at or above the floor releases it.
+_Avoid_: deficit, overdraft
+
+**Pricing-model Breach**:
+A Shortfall caused by one action's realized charge exceeding its own worst-case bound. Only this kind widens Credit Calibration; a Shortfall from a raised floor, unattributable concurrent spends, or anything else pauses spending without recalibrating.
+_Avoid_: overspend, price miss
+
+**Degraded Operation**:
+Continued autonomous operation while a failing capability or API scope is quarantined, or while Fleet Allocation is structurally stalled (a recorded structural stall Strategy Decision Episode). Unaffected planning, timers, telemetry, and admissible gameplay continue while recovery is retried at a sustainable rate.
+
+### Evidence and capacity
+
+**Operational Intelligence**:
+Observed facts about the game world that a Policy combines with authoritative Agent, Ship, Contract, and Job state to make decisions. Intelligence is scoped, may be partial or stale, and carries its source and observation time. It excludes goals, planned work, execution evidence, and the immediate state of owned entities.
+_Avoid_: operational knowledge, world state
+
+**Observation Demand**:
+A revocable requirement for authoritative evidence, including its subject, required facts, acceptable freshness, earliest useful observation time, latest acceptable deadline or expiry, and Fleet Strategy provenance. It may request Operational Intelligence or the immediate state of an owned entity. Compatible demands share one observation; it describes the evidence needed rather than prescribing an API request.
+_Avoid_: poll, refresh job, API request
+
+**Binding**:
+Decoded facts paired with the exact retained observation that produced them. Recovery proof cites a Binding's original acquisition and time; reusing it never re-reads the game or restamps its age, and facts whose retention failed are not a Binding.
+_Avoid_: cached read, snapshot
+
+**API Capacity Governor**:
+The Fleet-wide authority that allocates scarce API request capacity to useful game progress by admitting and ordering reads and mutations according to Strategic Priority and the value of the work they support, including safety and recovery. It reports capacity limitations for Fleet reallocation and is distinct from the raw rate limiter, which enforces protocol limits.
+_Avoid_: rate limiter, request queue
+
+**Capacity Disposition**:
+The API Capacity Governor's point-in-time interpretation of whether work may proceed toward API admission or must be deferred. It neither reserves API capacity nor grants gameplay authority; actual requests remain subject to admission.
+_Avoid_: Admission, reserved slot, planning decision
+
+**Capacity Deferral**:
+A temporary inability to admit work because of API capacity, distinct from absence of worthwhile work, objective infeasibility, and Neutral Wait. It does not itself require Operator judgment or establish whether existing work remains authorized.
+_Avoid_: Neutral Wait, objective infeasibility, no worthwhile contribution
+
+**Waypoint Intelligence**:
+Operational Intelligence about one Waypoint beyond its location and immediate navigability: construction status, modifiers, controlling faction, and chart provenance. Construction status and modifiers are operational state; faction and chart provenance are secondary context.
+
+### Jobs and Intents
+
+**Job**:
+A durable, Operator-selected outcome for exactly one Ship. A Ship has at most one assigned unfinished Job. A finite Job declares completion criteria; a recurring Job maintains a condition or loop until paused, replaced, or stopped. Its Policy evaluates authoritative game state to choose an Intent; it never stores a fixed action script.
+_Avoid_: automation, workflow
+
+**Job State**:
+The shared lifecycle of a Job. An active Job may be `active` while pursuing progress, `waiting` while progress is expected without intervention, `paused` by Operator choice, or `blocked` when changed circumstances or Operator action are required. A Job ends as `completed`, `failed`, `stopped`, or `replaced`; completion is an immutable historical result, and failure requires authoritative evidence that the outcome is impossible.
+_Avoid_: status (when the lifecycle distinction matters), error (for blocked or failed)
+
+**Job Blocker**:
+A structured explanation of why a Job cannot currently progress. It records a stable reason, human-readable summary, evidence and observation time, who or what can resolve it, the condition for another attempt, and any corrective actions. A Job remains blocked while changed Operator input, capability, intelligence, resources, or future game state could permit progress; uncertainty is never failure.
+_Avoid_: error, failure, message
+
+**System Exploration Job**:
+A finite Job that uses one Ship to establish baseline Operational Intelligence for every Waypoint in a fixed target System captured from the Ship's current System at assignment. The baseline requires a usable observation of identity, coordinates, type, orbital relationships, real traits, current modifiers, chart provenance when supplied, construction state, and Market composition. It acquires facts rather than following an exhaustive itinerary, opportunistically retains live Market Listings and other decision-specific volatile observations without making them completion requirements, and blocks with explicit unresolved coverage when no acquisition path remains.
+_Avoid_: Explorer, System Survey Job
+
+**Market Trading Job**:
+A recurring Job that uses one Ship to repeatedly buy and sell up to an Operator-selected quantity of the Trade Good between the fixed source and destination Marketplaces selected from one Candidate Trade Route, within a fixed target System and Operator-confirmed financial constraints. It reconciles live prices before each purchase and sale, blocks when those prices no longer satisfy its constraints, and distinguishes estimated returns from realized results.
+_Avoid_: Arbitrage Job, Trader
+
+**Market Reconnaissance Job**:
+A finite Job that uses one Ship to visit an Operator-selected ordered set of distinct known Marketplaces in one fixed System, record fresh Market Listings as Operational Intelligence, and complete once every selected Marketplace has been read. Completion does not consume the Ship's ability to configure another Market Reconnaissance Job. It derives candidate trade routes from those Listings but never buys or sells; a later Policy may use its observations to make trading decisions. Listings and candidates from completed stops remain available after completion as well as while the Job is active or blocked. It blocks with a Job Blocker when a selected Marketplace cannot be reached or read.
+_Avoid_: market scanner, reconnaissance loop, trader
+
+**Candidate Trade Route**:
+A retained directional comparison of Listings for one Trade Good at two Marketplaces: source buy price, destination sell price, per-unit spread, and the observation time for each Listing. It is Operational Intelligence, not a commitment or estimate for a particular Ship; Cargo capacity, travel time, fuel cost, credits, and financial constraints belong to the Policy that may act on it.
+_Avoid_: trade plan, profit forecast, arbitrage
+
+**Procurement Job**:
+A finite Job that uses one Ship to acquire a requested quantity of a Trade Good and deliver it to a specified Contract or Construction project, or sell it at a specified Market. It may accumulate and deliver the quantity across multiple purchases and trips within its sourcing and spending constraints.
+_Avoid_: Delivery Job, Procurement and Delivery Job
+
+**Construction Supply Job**:
+A finite Job that uses one Ship to complete every outstanding material requirement for one fixed Construction project. It plans viable Cargo batches within explicit sourcing and spending constraints, reconciles shared Construction progress before each purchase and delivery, and completes when authoritative game state shows the project is complete, including when external deliveries finish it.
+_Avoid_: Construction Job, construction workflow
+
+**Policy**:
+A Job's state machine for reconciling its target, constraints, progress, and authoritative game state. It decides that the Job is complete, waiting, or blocked, or selects the next viable Intent; it does not prescribe game API calls.
+_Avoid_: script, action plan
+
+**Intent**:
+A state-aware request for one Ship to achieve a bounded operational outcome, such as reaching a Waypoint. Its caller owns authority to command that Ship; in autonomous operation that authority comes from a Fleet Commitment's Claim. One root Intent holds the Ship while it composes prerequisite outcomes internally and performs the necessary game actions; prerequisites never compete as separately active Intents, and the Intent is not a fixed sequence of API calls. It does not own Fleet-level allocation or multi-Ship coordination. Its active outcome chain, meaningful progress, and in-flight evidence survive app restarts so commands are reconciled rather than replayed.
+_Avoid_: action, macro, script
+
+**Intent State**:
+The shared lifecycle of an Intent. An unfinished Intent may be active while it can progress, waiting for game state or time, or safety-fenced while unresolved mutation evidence makes further dependent work unsafe. It completes only when authoritative state proves its outcome, becomes infeasible when authoritative evidence proves its outcome cannot be achieved within the Fleet Commitment and Hard Constraints, or is superseded after safe unwind. Infeasibility returns to Fleet allocation for replanning rather than becoming an Operator approval request; unresolved game-action evidence prevents supersession.
+_Avoid_: status (when the lifecycle distinction matters), error, Operator blocker
+
+**Navigate Intent**:
+An Intent to reach a requested Waypoint in the current or another System. From authoritative state it selects and performs the necessary Flight Mode, posture, refueling, local navigation, jump, warp, and wait outcomes within the caller's constraints. The caller supplies the destination and meaningful constraints rather than prerequisite choreography.
+_Avoid_: Navigate Job, route script
+
+**Ship Outfitting Job**:
+A finite Job that uses its assigned Ship to satisfy a requested Ship Readiness capability with one of an explicit set of acceptable module symbols. It sources only within a fixed System and the Operator's spending, source, and removal constraints; it never removes an installed module without explicit permission or coordinates another Ship. It completes from authoritative installed-module state, blocks when changed input or resources could permit progress, and fails only when the Ship's immutable configuration proves the outcome impossible. Cargo supplied independently by the Operator may let a blocked Job resume.
+_Avoid_: outfitting workflow, courier Job
+
+**Refuel Intent**:
+An Intent to restore a Ship's fuel where the game permits refueling. Its outcome handling is reusable as a root Intent or as a prerequisite within another Intent such as Navigate.
+_Avoid_: fuel action (when referring to the state-aware capability)
+
+**Acquire Waypoint Intelligence Intent**:
+An Intent to establish a requested set of facts about one Waypoint. It reconciles existing and publicly available intelligence and may use scanning, navigation, charting, and on-site observation while retaining the provenance of every acquired fact.
+_Avoid_: exploration script, visit waypoint action
+
+**Buy Goods Intent**:
+An Intent to acquire a requested quantity of a Trade Good from a specified Market within an explicit price constraint. It reconciles Cargo, credits, physical presence, and fresh Market Listings before buying.
+
+**Sell Goods Intent**:
+An Intent to sell a requested quantity of a Trade Good at a specified Market within an explicit price constraint. It reconciles Cargo, physical presence, and fresh Market Listings before selling.
+
+**Deliver Goods Intent**:
+An Intent to have a requested quantity of a specified Trade Good from Cargo authoritatively accepted by a specified Contract or Construction recipient. It reconciles Cargo, physical presence, and recipient progress before delivery.
+
+**Miner Job**:
+A durable Job that owns one configured local gather/sell loop for a Ship. It uses Policies and Intents to pursue the configured extraction Waypoint, Market, and Cargo threshold; it is the first concrete Job.
+_Avoid_: mining bot
+
+**Survey Job**:
+A recurring Job that uses a survey-equipped Ship to maintain valid Surveys at one configured extraction Waypoint. It contributes Operational Intelligence without owning the Miner Jobs that may consume it.
+_Avoid_: survey pass, scanner Job
+
+**Sellable Cargo**:
+The cargo a Ship holds that its configured Market will actually buy, determined by the Market's authoritative accepted goods (its imports and exchange lists). The Miner Job's Cargo threshold counts sellable cargo only.
+_Avoid_: marketable goods, valuable cargo
+
+**Gather Mode**:
+How a Miner Job gathers on its configured extraction Waypoint: extract on mineral-bearing Waypoints or siphon on gas-bearing Waypoints. Chosen during configuration and revalidated against authoritative Waypoint and Ship capability.
+_Avoid_: mining style, collection mode
+
+**Manual Control**:
+Retired per-Ship Operator gameplay authority. It has no persistence, history, or admission path in the current runtime.
+_Avoid_: Manual Mode
+
+**Manual Intervention**:
+Retired Operator request for one bounded Ship outcome. The Operator has no per-Ship gameplay authority (ADR 0017).
+
+**Ship Reservation**:
+Retired Operator-owned exclusion of one Ship from autonomous Fleet allocation (ADR 0017). Distinct from a Fleet Commitment's fungible Reservation, which remains.
+
+**Purchase Precondition**:
+An authoritative condition that must hold before the game will sell a Ship Offer. The game requires an owned Ship to be present at the Shipyard's Waypoint, so acquiring a Ship always depends on some Ship already being co-located. It is evidence, not a preference: without it the purchase is inadmissible rather than merely costly.
+_Avoid_: shipyard visit (the Fleet-level outcome), navigation plan
+
+**Register a purchased Ship**:
+Recording a newly purchased Ship in the Fleet's registry, only after an authoritative read establishes the capabilities the purchase promised. It is distinct from replacement-generation bootstrap, which registers the Ships a replacement mint produced. A registered Ship holds no Claim until Fleet Allocation grants one.
+_Avoid_: bootstrap (ambiguous between this and replacement bootstrap), adoption
+
+**Preparation Exposure**:
+The bounded credit and capability cost a purchase leaves for the Ship Readiness work that follows it, chiefly outfitting. It is reserved at purchase time so that acquiring a Ship cannot consume the capacity later refit, repair, or module work requires. It is a reserved share, not a committed plan.
+_Avoid_: outfitting cost (when meaning the reserved share), module budget
