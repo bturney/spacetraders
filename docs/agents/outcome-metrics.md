@@ -30,13 +30,12 @@ in the sources above; transaction Intent types come from `Fleet.Intent.types/0`.
 | `agent_credits` | Gauge; none | Latest authoritative owned Agent balance, not an Agent sum. |
 | `contracts` | Gauge; `status` | Latest authoritative owned Contracts read; disjoint status counts. |
 | `credits_transactions_total` | Counter; `intent_type`, `operation` | Gross confirmed existing Ship receipt amounts. |
-| `ships_total` | **Gauge**; `claim`, `intent_state`, `nav_status` | Registered Ships of non-stale Agents; three independent axes. |
 | `systems_charted` | Gauge; none | Distinct Systems with qualifying scanned-Waypoint facts for non-stale Agents. |
 | `waypoints_scanned_total` | Counter; none | Committed per-Waypoint `scan_waypoints` observations. |
 | `observed_at_seconds` | Gauge; `family` | Latest family observation/recompute epoch; `credits`, `contracts`, `transactions`, `fleet`, `chart`. |
 | `agent_credits_previous` | Gauge; none | Previous genuine balance in the current credit pair. |
 | `agent_credits_previous_observed_at_seconds` | Gauge; none | Previous epoch; `0` means unknown interval. |
-| `fleet_recomputes_total`, `fleet_projection_failures_total` | Counters; `family` | Successful/failed projections; `claim`, `intent_state`, `nav_status`, `chart`. |
+| `fleet_recomputes_total`, `fleet_projection_failures_total` | Counters; `family` | Successful/failed projections; `status`, `chart`. |
 
 ### Contracts and receipts
 
@@ -57,14 +56,13 @@ confirmed transaction; allowed label combinations are not preseeded.
 
 ### Fleet and charting
 
-Each Ship series populates **one axis**; the other labels are `""`. Sum one axis
-only. Claim `claimed` means unfenced, unreleased Fleet Commitment authority;
-`free` means otherwise. Intent state is the latest root lifecycle, including
-terminal states; `none` means no root and `unknown` unsupported state. Navigation
-uses the newest retained whole-Ship/Fleet read or successful mutation nav fact;
-missing/unsupported facts are unknown. Rewrite each dirty axis's complete bounded
-vector, including zeros. Empty Fleet = zero Ships; claimed/(claimed+free) with
-zero denominator = unknown utilization. Claims establish authority, not earnings.
+`fleet_ships{status,ship_type}` (no `spacetraders_outcome_` prefix; replaces
+`ships_total`) counts current Ships of non-stale Agents by their one status from
+`MissionControl.ShipStatus`: `trading`, `scouting`, `waiting`, `stuck`,
+`busy_not_earning`. Each recompute rewrites every status for every Ship type
+present now or published before, including zeros. Recomputes follow writes to
+the tables a status reads; time alone (a skipped buy aging out) waits for the
+next change.
 
 Chart coverage requires a known, non-invalidated Waypoint `symbol` fact from
 `scan_waypoints`; public listings/reads and cached coordinates do not qualify.

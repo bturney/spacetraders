@@ -16,7 +16,7 @@ defmodule SpaceTraders.Fleet.Intents do
 
   alias SpaceTraders.Agent.Agent, as: AgentRecord
   alias SpaceTraders.API.AgentTokenReference
-  alias SpaceTraders.Fleet.Intents.{CapacityDeferral, RecordedAction, Recovery}
+  alias SpaceTraders.Fleet.Intents.{BlockedRetry, CapacityDeferral, RecordedAction, Recovery}
   alias SpaceTraders.API.Model.{Contract, ShipNav}
   alias SpaceTraders.Fleet.{FuelReach, Intent, Ship}
   alias SpaceTraders.Fleet
@@ -2503,8 +2503,12 @@ defmodule SpaceTraders.Fleet.Intents do
                Repo.rollback(:intent_no_longer_owned)
            end
          end) do
-      {:ok, result} -> result
-      {:error, :intent_no_longer_owned} -> :intent_no_longer_owned
+      {:ok, result} ->
+        BlockedRetry.flush()
+        result
+
+      {:error, :intent_no_longer_owned} ->
+        :intent_no_longer_owned
     end
   end
 
@@ -2670,15 +2674,18 @@ defmodule SpaceTraders.Fleet.Intents do
          do: Ecto.Changeset.put_change(changeset, :mutation_attempt_id, nil),
          else: changeset
 
-    updated = Repo.update!(changeset)
+    updated = changeset |> BlockedRetry.changes() |> Repo.update!()
+    :ok = BlockedRetry.schedule(updated, intent)
     emit_intent_transition(intent, updated)
     updated
   end
 
   defp emit_intent_transition(%Intent{status: state}, %Intent{status: state}), do: :ok
 
-  defp emit_intent_transition(intent, updated),
-    do: SpaceTraders.Observability.intent_transition(intent, updated)
+  defp emit_intent_transition(intent, updated) do
+    Fleet.broadcast_intent_change(updated.ship_id)
+    SpaceTraders.Observability.intent_transition(intent, updated)
+  end
 
   defp intent_owned?(%Intent{}), do: true
 
@@ -5176,6 +5183,8 @@ defmodule SpaceTraders.Fleet.Intents do
              end
            end) do
         {:ok, blocked_intent} ->
+          BlockedRetry.flush()
+
           record_activity_by_intent(
             blocked_intent,
             "owned_intent_recovery",

@@ -84,7 +84,7 @@ defmodule SpaceTradersWeb.OutcomeHTTPDiagnostic do
         body = scrape(url)
 
         assert body =~
-                 ~s(spacetraders_outcome_ships_total{claim="free",intent_state="",nav_status=""} 1\n)
+                 ~s(fleet_ships{ship_type="SHIP_PROBE",status="waiting"} 1\n)
 
         assert body =~ "spacetraders_outcome_agent_credits 80\n"
         assert body =~ "spacetraders_outcome_agent_credits_previous 100\n"
@@ -120,14 +120,14 @@ defmodule SpaceTradersWeb.OutcomeHTTPDiagnostic do
     :ok = :telemetry.attach(handler, @projection, &__MODULE__.capture_publisher/4, self())
     on_exit(fn -> :telemetry.detach(handler) end)
     owner = start_worker()
-    for _ <- 1..4, do: assert_receive({:published, @projection, ^owner}, 2_000)
+    for _ <- 1..2, do: assert_receive({:published, @projection, ^owner}, 2_000)
 
     pause = {__MODULE__, :pause, make_ref()}
 
     :ok =
       :telemetry.attach(
         pause,
-        [:spacetraders, :outcome, :fleet, :ships],
+        [:fleet, :ships],
         &__MODULE__.pause_vector/4,
         self()
       )
@@ -151,10 +151,10 @@ defmodule SpaceTradersWeb.OutcomeHTTPDiagnostic do
     assert is_nil(partial), "native HTTP exposed a partially rewritten vector"
 
     assert body =~
-             ~s(spacetraders_outcome_ships_total{claim="free",intent_state="",nav_status=""} 2\n)
+             ~s(fleet_ships{ship_type="SHIP_PROBE",status="waiting"} 2\n)
 
     assert body =~
-             ~s(spacetraders_outcome_ships_total{claim="claimed",intent_state="",nav_status=""} 0\n)
+             ~s(fleet_ships{ship_type="SHIP_PROBE",status="trading"} 0\n)
   end
 
   def capture_publisher(
@@ -170,7 +170,7 @@ defmodule SpaceTradersWeb.OutcomeHTTPDiagnostic do
   def capture_publisher(event, _measurements, _metadata, pid),
     do: send(pid, {:published, event, self()})
 
-  def pause_vector(_event, %{count: 2}, %{claim: "free"}, parent) do
+  def pause_vector(_event, %{count: 2}, %{status: "waiting"}, parent) do
     send(parent, {:vector_paused, self()})
 
     receive do

@@ -49,6 +49,19 @@ defmodule SpaceTraders.Fleet do
   defp ship_state_topic(agent_id), do: "ship_state:#{agent_id}"
 
   @doc """
+  Subscribes the caller to Intent status changes of every Ship, as
+  `{:intent_changed, ship_id}`: a prompt to re-read, never data. It may arrive
+  before the change commits, so readers re-read after a short delay.
+  """
+  def subscribe_intent_changes,
+    do: Phoenix.PubSub.subscribe(SpaceTraders.PubSub, "intent_changes")
+
+  @doc false
+  def broadcast_intent_change(ship_id),
+    do:
+      Phoenix.PubSub.broadcast(SpaceTraders.PubSub, "intent_changes", {:intent_changed, ship_id})
+
+  @doc """
   Current Ships of an Agent with their stored state and Cargo, ordered by name.
   Reads only the database.
   """

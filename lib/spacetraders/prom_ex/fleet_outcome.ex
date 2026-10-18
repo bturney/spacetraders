@@ -4,13 +4,13 @@ defmodule SpaceTraders.PromEx.FleetOutcome do
   @impl PromEx.Plugin
   def event_metrics(_opts) do
     Event.build(:spacetraders_fleet_outcome_metrics, [
+      # The domain area is the prefix; `job` names the app (#767).
       last_value(
-        [:spacetraders, :outcome, :ships, :total],
-        event_name: [:spacetraders, :outcome, :fleet, :ships],
+        [:fleet, :ships],
+        event_name: [:fleet, :ships],
         measurement: :count,
-        tags: [:claim, :intent_state, :nav_status],
-        description:
-          "Registered current Ships by independent state dimension; unused labels are empty."
+        tags: [:status, :ship_type],
+        description: "Current Ships by their one status and Ship type."
       ),
       counter(
         [:spacetraders, :outcome, :fleet, :recomputes, :total],

@@ -2,9 +2,12 @@ defmodule SpaceTraders.MissionControl.ShipRow do
   @moduledoc """
   One Ships-list row read from stored Ship state; never calls the game.
 
-  A row is overdue when it is 5 minutes past the Ship's next known event. The
-  known events today are arrival for a Ship in transit and, for a stationary
-  Ship, the observation itself (an action is expected to follow at once).
+  A row is overdue when it is 5 minutes past the Ship's next known event:
+  arrival for a Ship in transit; for a stationary Ship, its blocked step's
+  next attempt or its Neutral Wait's next check when later than the
+  observation, else the observation itself (an action follows at once).
+
+  The row carries the Ship's status from `MissionControl.ShipStatus`.
   """
 
   alias SpaceTraders.Fleet.Ship
@@ -14,15 +17,16 @@ defmodule SpaceTraders.MissionControl.ShipRow do
   @doc "Grace after the next known event before a row is overdue."
   def overdue_after_seconds, do: @overdue_after_seconds
 
-  @doc "Builds the row for a Ship (Cargo preloaded) as of `now`."
-  def build(%Ship{} = ship, %DateTime{} = now) do
-    overdue_at = overdue_at(ship)
+  @doc "Builds the row for a Ship (Cargo preloaded) with its status as of `now`."
+  def build(%Ship{} = ship, status, %DateTime{} = now) when is_map(status) do
+    overdue_at = overdue_at(ship, status)
     in_transit? = ship.nav_status == "IN_TRANSIT"
 
     %{
       id: ship.id,
       symbol: ship.symbol,
       ship_type: ship.ship_type,
+      status: status,
       location: location(ship),
       in_transit?: in_transit?,
       from: short(ship.route_origin),
@@ -39,19 +43,26 @@ defmodule SpaceTraders.MissionControl.ShipRow do
   end
 
   @doc "The moment a Ship's stored state becomes overdue, or nil when nothing is expected."
-  def overdue_at(%Ship{} = ship) do
-    case next_event_at(ship) do
+  def overdue_at(%Ship{} = ship, status \\ %{}) do
+    case next_event_at(ship, status) do
       %DateTime{} = at -> DateTime.add(at, @overdue_after_seconds)
       nil -> nil
     end
   end
 
-  defp next_event_at(%Ship{state_observed_at: nil}), do: nil
+  defp next_event_at(%Ship{state_observed_at: nil}, _status), do: nil
 
-  defp next_event_at(%Ship{nav_status: "IN_TRANSIT", route_arrives_at: %DateTime{} = arrives}),
-    do: arrives
+  defp next_event_at(
+         %Ship{nav_status: "IN_TRANSIT", route_arrives_at: %DateTime{} = arrives},
+         _status
+       ),
+       do: arrives
 
-  defp next_event_at(%Ship{state_observed_at: observed}), do: observed
+  defp next_event_at(%Ship{state_observed_at: observed}, status) do
+    [observed, status[:next_attempt_at], status[:next_check_at]]
+    |> Enum.filter(&match?(%DateTime{}, &1))
+    |> Enum.max(DateTime)
+  end
 
   defp overdue?(nil, _now), do: false
   defp overdue?(overdue_at, now), do: DateTime.compare(now, overdue_at) != :lt

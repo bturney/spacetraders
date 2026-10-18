@@ -6,7 +6,9 @@ defmodule SpaceTradersWeb.ShipsLiveTest do
 
   alias SpaceTraders.API.Model
   alias SpaceTraders.Fleet
-  alias SpaceTraders.Fleet.{Ship, ShipCargo}
+  alias SpaceTraders.Fleet.{Intent, IntentBlocker, Intents, Ship, ShipCargo}
+  alias SpaceTraders.FleetAllocation
+  alias SpaceTraders.Outcomes.EarningsRecord
   alias SpaceTraders.Repo
 
   setup :register_and_log_in_operator
@@ -178,15 +180,148 @@ defmodule SpaceTradersWeb.ShipsLiveTest do
           "X1-UX81-A1",
           "X1-UX81-B7",
           DateTime.add(now(), -900),
-          DateTime.add(now(), -299)
+          DateTime.add(now(), -295)
         )
       )
 
     {:ok, view, _html} = live(conn, ~p"/ships")
     refute has_element?(view, "#ships-#{ship.id}", "as of")
 
-    Process.sleep(2_100)
+    Process.sleep(6_100)
     assert has_element?(view, "#ships-#{ship.id}", "as of")
+    refute_received {:transport_receipt, _, _}
+  end
+
+  defp intent!(ship, attrs) do
+    Repo.insert!(
+      struct!(
+        Intent,
+        Map.merge(
+          %{
+            ship_id: ship.id,
+            caller: "commitment",
+            type: "buy",
+            status: "active",
+            target_waypoint: "X1-UX81-A1",
+            parameters: %{"units" => 5, "trade_symbol" => "IRON_ORE"}
+          },
+          attrs
+        )
+      )
+    )
+  end
+
+  defp blocked(next_attempt_at, retries) do
+    %{
+      status: "blocked",
+      retries: retries,
+      next_attempt_at: next_attempt_at,
+      blocker: %IntentBlocker{
+        reason: "insufficient_unreserved_headroom",
+        summary: "Not enough credits above the floor."
+      }
+    }
+  end
+
+  defp earnings!(ship, net, ship_seconds) do
+    at = DateTime.utc_now()
+
+    Repo.insert!(%EarningsRecord{
+      source: "trade",
+      fleet_generation_id: FleetAllocation.current_generation().id,
+      ship_symbol: ship.symbol,
+      ship_type: ship.ship_type,
+      good: "IRON_ORE",
+      source_waypoint: "X1-UX81-A1",
+      destination_waypoint: "X1-UX81-B7",
+      units: 10,
+      revenue: net + 100,
+      goods_cost: 100,
+      fuel_cost: 0,
+      other_cost: 0,
+      net_earnings: net,
+      ship_seconds: ship_seconds,
+      started_at: DateTime.add(at, -ship_seconds),
+      finished_at: at
+    })
+  end
+
+  test "each row shows its status, what it is doing and credits per Ship-hour",
+       %{conn: conn, agent: agent} do
+    next = DateTime.add(now(), 240)
+    earning = ship!(agent, "ORBITALIST-1", %{})
+    stuck = ship!(agent, "ORBITALIST-2", %{})
+    intent!(stuck, blocked(next, 2))
+    earnings!(earning, 1_500, 1_800)
+
+    {:ok, view, _html} = live(conn, ~p"/ships")
+
+    assert has_element?(view, "#ships-#{earning.id} [data-status=waiting]", "Waiting on purpose")
+    assert has_element?(view, "#ships-#{earning.id}", "Waiting for the next allocation")
+    assert has_element?(view, "#ships-#{earning.id}", "3,000/h")
+
+    assert has_element?(view, "#ships-#{stuck.id} [data-status=stuck]", "Stuck")
+    assert has_element?(view, "#ships-#{stuck.id}", "Not enough credits above the floor.")
+    assert has_element?(view, "#ships-#{stuck.id}", "retry 2")
+
+    assert has_element?(
+             view,
+             "#countdown-#{stuck.id}[data-until='#{DateTime.to_unix(next, :millisecond)}']"
+           )
+
+    assert has_element?(view, "#ships-#{stuck.id}", "next attempt")
+    refute_received {:transport_receipt, _, _}
+  end
+
+  test "a stuck Ship is not overdue before its next attempt", %{conn: conn, agent: agent} do
+    stuck =
+      ship!(agent, "ORBITALIST-1", %{state_observed_at: DateTime.add(DateTime.utc_now(), -3_600)})
+
+    intent!(stuck, blocked(DateTime.add(now(), 600), 4))
+
+    {:ok, view, _html} = live(conn, ~p"/ships")
+
+    refute has_element?(view, "#ships-#{stuck.id}", "as of")
+  end
+
+  test "status chips count and filter the list", %{conn: conn, agent: agent} do
+    waiting = ship!(agent, "ORBITALIST-1", %{})
+    stuck = ship!(agent, "ORBITALIST-2", %{})
+    intent!(stuck, blocked(DateTime.add(now(), 240), 0))
+
+    {:ok, view, _html} = live(conn, ~p"/ships")
+
+    assert has_element?(view, "#status-filter-stuck", "1")
+    assert has_element?(view, "#status-filter-waiting", "1")
+    assert has_element?(view, "#status-filter-trading", "0")
+
+    view |> element("#status-filter-stuck") |> render_click()
+    assert has_element?(view, "#ships-#{stuck.id}")
+    refute has_element?(view, "#ships-#{waiting.id}")
+
+    view |> element("#status-filter-all") |> render_click()
+    assert has_element?(view, "#ships-#{stuck.id}")
+    assert has_element?(view, "#ships-#{waiting.id}")
+    refute_received {:transport_receipt, _, _}
+  end
+
+  test "a step blocking turns its row Stuck without calling the game",
+       %{conn: conn, agent: agent} do
+    ship = ship!(agent, "ORBITALIST-1", %{})
+    intent = intent!(ship, %{})
+
+    {:ok, view, _html} = live(conn, ~p"/ships")
+    refute has_element?(view, "#ships-#{ship.id} [data-status=stuck]")
+
+    {:ok, _} =
+      Intents.transition_intent(intent,
+        status: "blocked",
+        blocker: %{reason: "insufficient_unreserved_headroom", summary: "No headroom."}
+      )
+
+    Process.sleep(1_100)
+    assert has_element?(view, "#ships-#{ship.id} [data-status=stuck]", "Stuck")
+    assert has_element?(view, "#ships-#{ship.id}", "No headroom.")
     refute_received {:transport_receipt, _, _}
   end
 end
