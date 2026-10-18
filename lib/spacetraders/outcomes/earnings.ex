@@ -48,6 +48,36 @@ defmodule SpaceTraders.Outcomes.Earnings do
     )
   end
 
+  @doc """
+  What the Stats tab shows for a Generation, from its Earnings records alone:
+  the best single trade, the Good with the highest total Net Earnings, and the
+  number of trades completed. Empty Generations give nil bests and zero trades.
+  """
+  def stats(generation_id) when is_integer(generation_id) do
+    scope = from(r in EarningsRecord, where: r.fleet_generation_id == ^generation_id)
+
+    best_trade =
+      Repo.one(from r in scope, order_by: [desc: r.net_earnings, asc: r.id], limit: 1)
+
+    best_good =
+      Repo.one(
+        from r in scope,
+          group_by: r.good,
+          order_by: [desc: sum(r.net_earnings), asc: r.good],
+          limit: 1,
+          select: %{good: r.good, net_earnings: sum(r.net_earnings), trades: count(r.id)}
+      )
+
+    %{
+      best_trade: best_trade,
+      best_good: best_good && %{best_good | net_earnings: to_int(best_good.net_earnings)},
+      trades_completed: Repo.aggregate(scope, :count)
+    }
+  end
+
+  defp to_int(%Decimal{} = d), do: Decimal.to_integer(d)
+  defp to_int(n), do: n
+
   @doc "Earnings records of the Commitments of one Decision Episode's Portfolios."
   def for_episode(episode_id) when is_integer(episode_id),
     do: records(dynamic([portfolio: p], p.strategy_decision_episode_id == ^episode_id))

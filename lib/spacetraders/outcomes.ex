@@ -136,6 +136,7 @@ defmodule SpaceTraders.Outcomes do
 
   def handle_cast({:earnings, record}, state) do
     emit_earnings(record)
+    SpaceTraders.MissionControl.Channels.broadcast_earnings()
     {:noreply, state}
   rescue
     _error ->
