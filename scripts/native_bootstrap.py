@@ -57,7 +57,7 @@ def resources(attempt):
 
 
 def definition(revision, archive, schema, lock, postgres, attempt):
-    return {"schema": "native-bootstrap/v1", "application": {
+    return {"schema": "native-bootstrap/v1", "bootstrap_sha256": digest(__file__), "application": {
                 "revision": revision, "archive_sha256": archive,
                 "api_schema_sha256": schema, "mix_lock_sha256": lock},
             "world": {"revision": WORLD_REVISION, "archive_sha256": WORLD_ARCHIVE,
@@ -81,7 +81,7 @@ def validate(m):
                               m["postgres_archive_sha256"], m["resources"]["attempt"])
         if set(m) != set(template) or set(m["application"]) != set(template["application"]):
             raise ValueError("unknown or missing manifest field")
-        for key in ["world", "initial_world", "resources", "sequence", "schema", "mint"]:
+        for key in ["bootstrap_sha256", "world", "initial_world", "resources", "sequence", "schema", "mint"]:
             if canonical(m[key]) != canonical(template[key]):
                 raise ValueError("unsupported " + key)
         if not re.fullmatch(r"[0-9a-f]{32}", m["resources"]["attempt"]):
@@ -324,9 +324,10 @@ def proxy(budget):
 def inside():
     os.umask(0o077)
     out = Path("/out")
-    # Bound individual diagnostics as well as the database's quota-sized tmpfs.
+    # RLIMIT_FSIZE also caps anonymous BEAM JIT memfds and prevents VM startup.
+    # The cgroup bounds JIT memory; the database has a quota-sized tmpfs.
     import resource
-    resource.setrlimit(resource.RLIMIT_FSIZE, (33554432, 33554432))
+    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
     Path("/database/pg").mkdir(mode=0o700)
     m = json.loads((out / "manifest.json").read_text())
     validate(m)
@@ -349,6 +350,8 @@ def inside():
     server = None
     result = {"state": "harness_failure", "stage": "database_initialization"}
     env = dict(os.environ, ERL_FLAGS="+S 1:1 +SDcpu 1 +SDio 1 +A 1", RELEASE_DISTRIBUTION="none",
+               RELEASE_TMP="/tmp/release", ERL_CRASH_DUMP="/out/application-crash.dump",
+               ERL_CRASH_DUMP_BYTES="8388608",
                SPACETRADERS_NATIVE_BOOTSTRAP="/out/manifest.json",
                SPACETRADERS_NATIVE_MANIFEST_SHA256=digest(out / "manifest.json"))
 
