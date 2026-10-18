@@ -20,12 +20,10 @@ Run only when changing the corresponding whole-runtime or HTTP boundary:
 
 ```sh
 mix test test/diagnostics/runtime_qualification.exs --seed 0 --trace
-mix test test/diagnostics/outcome_http.exs --seed 0 --trace
 ```
 
 Runtime qualification drives authenticated Strategy activation through production
 planning and execution; keep deterministic regressions at their public seams.
-The HTTP diagnostic owns an ephemeral listener; ordinary tests bind no port.
 
 ## Release and deployment verification
 
