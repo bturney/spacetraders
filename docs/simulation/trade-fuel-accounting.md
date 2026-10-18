@@ -27,6 +27,30 @@ The earlier #755 full-period aggregate inspection is disclosed: this is a
 prospective implementation partition, **not previously unseen evidence**. No
 price, payout, production or rival constants are fitted in this slice.
 
+The bounded offline reconciliation produced these source-free findings:
+
+| Successful attempts | Fit: October 11–14 | Evaluation: October 15–16 | Reconciled rule |
+| --- | ---: | ---: | --- |
+| Cargo buys | 883 | 395 | Quote × billed units, realized charge and credits |
+| Cargo sells | 882 | 395 | Selected sale quote × filled units equals credit increase |
+| Paid refuels | 1,033 | 468 | Ceiling(requested fuel / 100), charge and bound credits |
+
+All 1,501 refuels have one charge Realization and an explicit issuing-Intent join;
+171 belong to coverage work, not subsequent trades. Requested Ship fuel spans
+62–400 units; only two requests are exact multiples of 100. The refuel check uses
+the explicit pre-credit observation, not a missing selected-action balance.
+Own cargo fills span 6–40 units. Composite/time-matched Market transactions
+corroborate 1,277 buys and 1,271 sells; seven unmatched attempts remain gaps,
+not invented transaction IDs. Own sale roles are IMPORT and EXCHANGE only:
+EXPORT sale consistency is a simulator contract regression, not independently
+observed own-sale coverage. Snapshot-wide Net Earnings was not reconstructed.
+
+Bounded real-HTTP regressions check all three sale roles, 6/34-unit successive
+fills, paid-fuel 1/99/100/101-unit boundaries, tank clamping, credits and rejected
+requests. Existing scheduled-world checks still cover read-independent economics
+and Arrival **10** → economics **20** → rival **30** ordering. Boundary cases outside
+the retained observations are contract checks, not new live measurements.
+
 Fuel supporting costs follow the application's charge-at-purchase ownership:
 the complete realized refuel charge belongs to the issuing root Intent, original
 Fleet Commitment and Strategy Decision Episode. Coverage's fuel is observation-only
