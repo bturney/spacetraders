@@ -527,7 +527,7 @@ defmodule SpaceTradersWeb.MissionControlLiveTest do
     refute html =~ "password="
   end
 
-  defp objective_evidence(agent, credits \\ 175_000) do
+  defp objective_evidence(agent, credits) do
     observation =
       SpaceTraders.Evidence.authoritative_observation(
         "get-my-agent",

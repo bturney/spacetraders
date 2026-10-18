@@ -7,8 +7,8 @@ defmodule SpaceTraders.Repo.Migrations.DropOperatorConditionsAndManualInterventi
     execute("DROP TRIGGER IF EXISTS preserve_manual_intervention_history ON intents")
     execute("DROP FUNCTION IF EXISTS preserve_manual_intervention_history()")
 
-    drop table(:manual_interventions)
-    drop table(:mission_conditions)
+    drop_if_exists table(:manual_interventions)
+    drop_if_exists table(:mission_conditions)
 
     # No caller drives these Intents any more; leave none unfinished.
     execute("""
