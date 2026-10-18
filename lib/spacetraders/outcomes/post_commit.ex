@@ -11,8 +11,18 @@ defmodule SpaceTraders.Outcomes.PostCommit do
 
   alias SpaceTraders.{Evidence.Observation, Repo}
 
-  @fleet_families [:claim, :intent_state, :nav_status]
-  @families @fleet_families ++ [:chart]
+  @families [:status, :chart]
+  # Tables a Ship status reads (`MissionControl.ShipStatus`).
+  @status_sources ~w(
+    ships
+    intents
+    fleet_commitment_claims
+    fleet_commitments
+    fleet_commitment_portfolios
+    allocation_result_pointers
+    strategy_decision_episodes
+    earnings_records
+  )
   @handler {__MODULE__, :durable_changes}
   @pending {__MODULE__, :pending}
 
@@ -126,7 +136,7 @@ defmodule SpaceTraders.Outcomes.PostCommit do
     :ok
   end
 
-  defp changed_families(%{source: "ships"}, _), do: @fleet_families
+  defp changed_families(%{source: source}, _) when source in @status_sources, do: [:status]
 
   defp changed_families(%{source: source}, command)
        when source in ["agents", "fleet_generations"] and command in [:insert, :delete],
@@ -138,16 +148,6 @@ defmodule SpaceTraders.Outcomes.PostCommit do
        do: @families,
        else: []
   end
-
-  defp changed_families(%{source: source}, _)
-       when source in [
-              "fleet_commitment_claims",
-              "fleet_commitments",
-              "fleet_commitment_portfolios"
-            ],
-       do: [:claim]
-
-  defp changed_families(%{source: "intents"}, _), do: [:intent_state]
 
   defp changed_families(%{source: "intelligence_observations"} = metadata, :insert) do
     if scan_events(metadata, :insert, 1) > 0, do: [:chart], else: []
@@ -161,28 +161,6 @@ defmodule SpaceTraders.Outcomes.PostCommit do
        when source in ["intelligence_facts", "intelligence_observations"] and
               command in [:update, :delete],
        do: [:chart]
-
-  defp changed_families(%{source: source}, :delete)
-       when source in ["authoritative_observations", "mutation_attempt_outcomes"],
-       do: [:nav_status]
-
-  defp changed_families(%{source: "authoritative_observations"} = metadata, _) do
-    if Enum.any?(
-         metadata.cast_params || metadata.params,
-         &(&1 in ["get-my-ship", "get-my-ships"])
-       ),
-       do: [:nav_status],
-       else: []
-  end
-
-  defp changed_families(%{source: "mutation_attempt_outcomes"} = metadata, _) do
-    if Enum.any?(metadata.cast_params || metadata.params, fn
-         %{"nav_status" => status} -> status in ~w(DOCKED IN_ORBIT IN_TRANSIT)
-         _ -> false
-       end),
-       do: [:nav_status],
-       else: []
-  end
 
   defp changed_families(_, _), do: []
 

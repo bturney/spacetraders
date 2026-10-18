@@ -76,26 +76,10 @@ defmodule SpaceTradersWeb.FleetOutcomeMetricsTest do
     %{agent: agent, ship: ship, operator: operator}
   end
 
-  test "Intent states and observed nav facts coalesce into full vectors", context do
-    %{agent: agent, ship: ship} = allocation = allocation_fixture(context)
+  test "a Claim and its Intent move the Ship into Trading in one full vector", context do
+    %{ship: ship} = allocation = allocation_fixture(context)
     start_worker(coalesce_ms: 1_000)
     baseline()
-    ship_path = "/v2/my/ships/#{ship.symbol}"
-
-    Req.Test.stub(SpaceTraders.API, fn conn ->
-      assert {conn.method, conn.request_path} == {"GET", ship_path}
-
-      Req.Test.json(conn, %{
-        "data" =>
-          ship_body(ship.symbol, %{
-            "nav" =>
-              nav_body("IN_TRANSIT",
-                destination: "X1-UX81-A2",
-                arrival: DateTime.utc_now() |> DateTime.add(3600) |> DateTime.to_iso8601()
-              )
-          })
-      })
-    end)
 
     portfolio = publish_claim(allocation)
     [commitment] = portfolio.commitments
@@ -107,54 +91,26 @@ defmodule SpaceTradersWeb.FleetOutcomeMetricsTest do
              })
 
     Repo.update!(Ecto.Changeset.change(intent, status: "waiting"))
-    assert {:ok, _} = Evidence.get_ship(agent, ship.symbol)
 
-    assert_projection(:claim, %{"claimed" => 1, "free" => 0})
-    assert_projection(:intent_state, %{"none" => 0, "active" => 0, "waiting" => 1})
-
-    assert_projection(:nav_status, %{
-      "DOCKED" => 0,
-      "IN_ORBIT" => 0,
-      "IN_TRANSIT" => 1,
-      "unknown" => 0
+    assert_projection(:status, %{
+      "trading" => 1,
+      "waiting" => 0,
+      "stuck" => 0,
+      "scouting" => 0,
+      "busy_not_earning" => 0
     })
 
-    assert_metric(:intent_state, "waiting", 1)
-    assert_metric(:nav_status, "IN_TRANSIT", 1)
+    assert_metric("trading", 1)
+    assert_metric("waiting", 0)
     refute_receive {:projection, _, _, _}, 250
-
-    Quiesced.stop_ship(ship.symbol)
-
-    Req.Test.stub(SpaceTraders.API, fn conn ->
-      assert {conn.method, conn.request_path} == {"GET", ship_path}
-
-      Req.Test.json(conn, %{
-        "data" =>
-          ship_body(ship.symbol, %{"nav" => nav_body("IN_ORBIT", destination: "X1-UX81-A2")})
-      })
-    end)
-
-    assert {:ok, _} = Evidence.get_ship(agent, ship.symbol)
-    assert_projection(:nav_status, %{"IN_ORBIT" => 1, "IN_TRANSIT" => 0})
-    assert_metric(:nav_status, "IN_TRANSIT", 0)
   end
 
   test "boot reconstructs all Fleet vectors without waiting for gameplay or polling" do
     before = System.system_time(:microsecond) / 1_000_000
     start_worker()
-    assert_projection(:claim, %{"claimed" => 0, "free" => 1})
-    assert_projection(:intent_state, %{"none" => 1, "active" => 0, "waiting" => 0})
-
-    assert_projection(:nav_status, %{
-      "unknown" => 1,
-      "DOCKED" => 0,
-      "IN_ORBIT" => 0,
-      "IN_TRANSIT" => 0
-    })
-
-    assert_metric(:claim, "free", 1)
-    assert_metric(:intent_state, "none", 1)
-    assert_metric(:nav_status, "unknown", 1)
+    assert_projection(:status, %{"waiting" => 1, "trading" => 0, "stuck" => 0})
+    assert_metric("waiting", 1)
+    assert_metric("stuck", 0)
     observed = metric_value(~s(spacetraders_outcome_observed_at_seconds{family="fleet"}))
     assert observed >= before
     refute_receive {:projection, _, _, _}, 150
@@ -207,7 +163,7 @@ defmodule SpaceTradersWeb.FleetOutcomeMetricsTest do
         body = build_conn() |> get("/metrics") |> response(200)
 
         assert body =~
-                 ~s(spacetraders_outcome_ships_total{claim="free",intent_state="",nav_status=""} 1\n)
+                 ~s(fleet_ships{ship_type="SHIP_PROBE",status="waiting"} 1\n)
 
         assert body =~ ~s(spacetraders_outcome_observed_at_seconds{family="fleet"})
         assert body =~ "spacetraders_outcome_agent_credits 80\n"
@@ -229,7 +185,7 @@ defmodule SpaceTradersWeb.FleetOutcomeMetricsTest do
     allocation = allocation_fixture(context)
     start_worker(coalesce_ms: 200)
     baseline()
-    recomputes = metric_value(~s(spacetraders_outcome_fleet_recomputes_total{family="claim"}))
+    recomputes = metric_value(~s(spacetraders_outcome_fleet_recomputes_total{family="status"}))
 
     publish_claim(allocation)
 
@@ -238,21 +194,21 @@ defmodule SpaceTradersWeb.FleetOutcomeMetricsTest do
 
     publish_claim(allocation)
 
-    assert_projection(:claim, %{"claimed" => 1, "free" => 0})
-    assert_metric(:claim, "claimed", 1)
-    assert_metric(:claim, "free", 0)
+    assert_projection(:status, %{"trading" => 1, "waiting" => 0})
+    assert_metric("trading", 1)
+    assert_metric("waiting", 0)
 
-    assert metric_value(~s(spacetraders_outcome_fleet_recomputes_total{family="claim"})) ==
+    assert metric_value(~s(spacetraders_outcome_fleet_recomputes_total{family="status"})) ==
              recomputes + 1
 
-    refute_receive {:projection, :claim, _, _}, 250
+    refute_receive {:projection, :status, _, _}, 250
 
     assert {:ok, _} =
              FleetAllocation.unwind_current_portfolio(allocation.scope, allocation.generation.id)
 
-    assert_projection(:claim, %{"claimed" => 0, "free" => 1})
-    assert_metric(:claim, "claimed", 0)
-    assert_metric(:claim, "free", 1)
+    assert_projection(:status, %{"trading" => 0, "waiting" => 1})
+    assert_metric("trading", 0)
+    assert_metric("waiting", 1)
   end
 
   test "an independent observer publishes only after an outer transaction commits", context do
@@ -283,11 +239,11 @@ defmodule SpaceTradersWeb.FleetOutcomeMetricsTest do
     # Hold the write beyond several coalescing windows. Timing cannot make an
     # early notification accidentally see committed data in this proof.
     refute_receive {:projection, _, _, _}, 150
-    assert_metric(:claim, "claimed", 0)
+    assert_metric("trading", 0)
     send(writer.pid, :commit)
     assert {:ok, :ok} = Task.await(writer)
-    assert_projection(:claim, %{"claimed" => 1, "free" => 0})
-    assert_metric(:claim, "claimed", 1)
+    assert_projection(:status, %{"trading" => 1, "waiting" => 0})
+    assert_metric("trading", 1)
   end
 
   test "boot uses retained Fleet and newer Ship reads with one aggregate query per family", %{
@@ -337,19 +293,29 @@ defmodule SpaceTradersWeb.FleetOutcomeMetricsTest do
     on_exit(fn -> :telemetry.detach(handler) end)
     start_worker()
 
-    assert_projection(:claim, %{"free" => 30, "claimed" => 0})
-    assert_projection(:intent_state, %{"none" => 30})
-    assert_projection(:nav_status, %{"DOCKED" => 29, "IN_ORBIT" => 1, "unknown" => 0})
-    for _ <- 1..4, do: assert_receive(:projection_query)
-    refute_receive :projection_query, 100
-    assert_metric(:nav_status, "DOCKED", 29)
+    assert_projection(:status, %{"waiting" => 30, "trading" => 0})
+    flush_queries()
 
+    # More Ships cost no extra query: the status read is a fixed number.
     assert {:ok, _} = Fleet.register_ship(agent, %{symbol: "#{agent.symbol}-31"}, "SHIP_PROBE")
-    assert_projection(:claim, %{"free" => 31})
-    assert_projection(:intent_state, %{"none" => 31})
-    assert_projection(:nav_status, %{"DOCKED" => 29, "IN_ORBIT" => 1, "unknown" => 1})
-    for _ <- 1..3, do: assert_receive(:projection_query)
-    refute_receive :projection_query, 100
+    assert_projection(:status, %{"waiting" => 31})
+    queries = flush_queries()
+    assert queries in 1..15
+
+    for n <- 32..40 do
+      {:ok, _} = Fleet.register_ship(agent, %{symbol: "#{agent.symbol}-#{n}"}, "SHIP_PROBE")
+    end
+
+    assert_projection(:status, %{"waiting" => 40})
+    assert flush_queries() == queries
+  end
+
+  defp flush_queries(count \\ 0) do
+    receive do
+      :projection_query -> flush_queries(count + 1)
+    after
+      150 -> count
+    end
   end
 
   test "rolled back and nested rolled back Claims never advance the projection", context do
@@ -369,9 +335,9 @@ defmodule SpaceTradersWeb.FleetOutcomeMetricsTest do
              end)
 
     refute_receive {:projection, _, _, _}, 150
-    assert_metric(:claim, "claimed", 0)
+    assert_metric("trading", 0)
     publish_claim(allocation)
-    assert_projection(:claim, %{"claimed" => 1, "free" => 0})
+    assert_projection(:status, %{"trading" => 1, "waiting" => 0})
   end
 
   test "unrelated owned Agent observations do not refresh Fleet projections", context do
@@ -451,7 +417,7 @@ defmodule SpaceTradersWeb.FleetOutcomeMetricsTest do
     :ok =
       :telemetry.attach(
         handler,
-        [:spacetraders, :outcome, :fleet, :ships],
+        [:fleet, :ships],
         &__MODULE__.pause_vector/4,
         self()
       )
@@ -472,10 +438,9 @@ defmodule SpaceTradersWeb.FleetOutcomeMetricsTest do
     body = if partial, do: elem(partial, 1), else: Task.await(scrape)
     assert is_nil(partial), "scrape exposed a partially published vector"
 
-    assert body =~
-             ~s(spacetraders_outcome_ships_total{claim="free",intent_state="",nav_status=""} 0\n)
+    assert body =~ ~s(fleet_ships{ship_type="SHIP_PROBE",status="waiting"} 0\n)
 
-    assert_projection(:claim, %{"claimed" => 1, "free" => 0})
+    assert_projection(:status, %{"trading" => 1, "waiting" => 0})
   end
 
   defmodule UnavailableDatabase do
@@ -489,12 +454,11 @@ defmodule SpaceTradersWeb.FleetOutcomeMetricsTest do
       capture_log(fn ->
         start_worker(repo: UnavailableDatabase)
 
-        for family <- [:claim, :intent_state, :nav_status],
-            do: assert_receive({:projection_failed, ^family})
+        assert_receive {:projection_failed, :status}
 
         publish_claim(allocation)
         assert {:ok, _} = FleetAllocation.current_ship_claim(context.agent, context.ship.symbol)
-        assert_receive {:projection_failed, :claim}, 2_000
+        assert_receive {:projection_failed, :status}, 2_000
         refute_receive {:projection, _, _, _}, 100
       end)
 
@@ -508,8 +472,8 @@ defmodule SpaceTradersWeb.FleetOutcomeMetricsTest do
 
     publish_claim(allocation)
     start_worker()
-    assert_projection(:claim, %{"claimed" => 1, "free" => 0})
-    assert_metric(:claim, "claimed", 1)
+    assert_projection(:status, %{"trading" => 1, "waiting" => 0})
+    assert_metric("trading", 1)
   end
 
   # The shared worker also projects Chart state; this file owns Fleet axes.
@@ -540,7 +504,7 @@ defmodule SpaceTradersWeb.FleetOutcomeMetricsTest do
   def capture_publisher(event, _measurements, _metadata, pid),
     do: send(pid, {:metric_publisher, event, self()})
 
-  def pause_vector(_event, %{count: 1}, %{claim: "claimed"}, parent) do
+  def pause_vector(_event, %{count: 1}, %{status: "trading"}, parent) do
     send(parent, {:vector_paused, self()})
 
     receive do
@@ -561,9 +525,7 @@ defmodule SpaceTradersWeb.FleetOutcomeMetricsTest do
   end
 
   defp baseline do
-    assert_projection(:claim, %{"claimed" => 0, "free" => 1})
-    assert_projection(:intent_state, %{"none" => 1})
-    assert_projection(:nav_status, %{"unknown" => 1})
+    assert_projection(:status, %{"waiting" => 1, "trading" => 0})
   end
 
   defp stub_owned_reads(agent, credits) do
@@ -735,15 +697,9 @@ defmodule SpaceTradersWeb.FleetOutcomeMetricsTest do
     assert Map.take(counts, Map.keys(expected)) == expected
   end
 
-  defp assert_metric(family, state, value) do
+  defp assert_metric(status, value) do
     body = build_conn() |> get("/metrics") |> response(200)
-
-    labels =
-      Enum.map_join([:claim, :intent_state, :nav_status], ",", fn label ->
-        ~s(#{label}="#{if label == family, do: state, else: ""}")
-      end)
-
-    assert body =~ "spacetraders_outcome_ships_total{#{labels}} #{value}\n"
+    assert body =~ ~s(fleet_ships{ship_type="SHIP_PROBE",status="#{status}"} #{value}\n)
   end
 
   defp metric_value(series) do
