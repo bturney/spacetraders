@@ -2,6 +2,7 @@
 import copy
 import importlib.util
 from pathlib import Path
+import time
 import unittest
 
 SPEC = importlib.util.spec_from_file_location(
@@ -69,6 +70,26 @@ class ManifestTest(unittest.TestCase):
         self.assertEqual(receipt, {"status": "IN_TRANSIT", "waypoint": "X1-TEST-B",
                                    "destination": "X1-TEST-B", "arrival": "2026-10-18T12:00:30Z"})
         self.assertIsNone(boot.navigation_receipt("POST", "/v2/register", 201, json_bytes(body)))
+
+    def test_release_path_cannot_relabel_another_application(self):
+        repo = Path("/example/checkout")
+        expected = repo / "_build/prod/rel/spacetraders"
+        self.assertEqual(boot.release_for(repo, expected), expected)
+        with self.assertRaises(ValueError):
+            boot.release_for(repo, Path("/example/stale-release"))
+
+    def test_startup_deadline_cannot_be_renewed_by_next_phase(self):
+        with self.assertRaises(ValueError):
+            boot.remaining(time.monotonic() - 1)
+        self.assertTrue(0 < boot.remaining(time.monotonic() + 10) <= 10)
+
+    def test_shutdown_requires_positive_manager_confirmation(self):
+        self.assertFalse(boot.shutdown_verified(1, ""))
+        self.assertFalse(boot.shutdown_verified(0, ""))
+        self.assertFalse(boot.shutdown_verified(1, "LoadState=not-found\nActiveState=inactive\n"))
+        self.assertFalse(boot.shutdown_verified(0, "LoadState=loaded\nActiveState=active\n"))
+        self.assertTrue(boot.shutdown_verified(0, "LoadState=not-found\nActiveState=inactive\n"))
+        self.assertTrue(boot.shutdown_verified(0, "LoadState=loaded\nActiveState=failed\n"))
 
 
 def json_bytes(value):

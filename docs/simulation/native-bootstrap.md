@@ -33,6 +33,12 @@ PostgreSQL-backed causal chain: selected Strategy Decision Episode → Portfolio
 Fleet Commitment → Intent → successful MutationAttempt, with acquired evidence.
 Observation is read-only and never drives gameplay selection.
 
+One shared startup deadline covers initialization, migration, semantic readiness
+and normal setup/activation; later phases cannot renew it. The separate wall
+ceiling bounds autonomous proof and teardown. Shutdown is verified only from a
+successful systemd inspection reporting an inactive/failed or positively absent
+unit; manager failure is an unverified-shutdown harness failure.
+
 ## Commands
 
 Prerequisites: local Linux `bwrap`, user systemd/cgroup v2, a retained PostgreSQL 17 filesystem archive,
@@ -60,6 +66,9 @@ start the app or contact a game. `start` verifies archive/config/layer hashes
 before boot. No inference from archive metadata to Docker compatibility is made:
 the selected supported development boundary is actual filesystem boot under
 bubblewrap. Missing isolation/resource support fails closed.
+The release path must be this checkout's `_build/prod/rel/spacetraders`; the build
+explicitly writes that path before packaging. An unrelated/stale release cannot
+be relabeled with this checkout's revision.
 
 The PostgreSQL archive may be exported from an **already-local immutable image**
 using a never-started `docker create --pull never --network none` container and

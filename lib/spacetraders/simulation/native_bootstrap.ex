@@ -111,7 +111,12 @@ defmodule SpaceTraders.Simulation.NativeBootstrap do
 
   defp run do
     manifest = Application.fetch_env!(:spacetraders, :native_bootstrap)
-    deadline = System.monotonic_time(:millisecond) + manifest["limits"]["startup_seconds"] * 1_000
+
+    deadline_unix_ms =
+      System.fetch_env!("SPACETRADERS_NATIVE_STARTUP_DEADLINE_MS") |> String.to_integer()
+
+    deadline =
+      System.monotonic_time(:millisecond) + deadline_unix_ms - System.os_time(:millisecond)
 
     try do
       Process.put(:native_bootstrap_stage, "runtime_readiness")
@@ -145,11 +150,14 @@ defmodule SpaceTraders.Simulation.NativeBootstrap do
 
       {:ok, revision} = FleetStrategy.activate(scope, draft.draft_version)
       true = revision.document == manifest["strategy"]
+      startup_ready_unix_ms = System.os_time(:millisecond)
+      if System.monotonic_time(:millisecond) >= deadline, do: raise("shared startup deadline")
 
       write_result(%{
         state: "observing",
         stage: "immutable_strategy_activated",
         minted_at: minted_at,
+        startup_ready_unix_ms: startup_ready_unix_ms,
         strategy_revision_id: revision.id
       })
 
@@ -164,6 +172,7 @@ defmodule SpaceTraders.Simulation.NativeBootstrap do
         state: "passed",
         stage: "durable_autonomous_bootstrap",
         minted_at: minted_at,
+        startup_ready_unix_ms: startup_ready_unix_ms,
         observed_at: DateTime.utc_now(),
         strategy_revision_id: revision.id,
         evidence: evidence,
@@ -196,6 +205,8 @@ defmodule SpaceTraders.Simulation.NativeBootstrap do
   end
 
   defp await_authority(deadline) do
+    if System.monotonic_time(:millisecond) >= deadline, do: raise("shared startup deadline")
+
     case RuntimeAuthority.execution_allowed?() do
       :ok -> :ok
       _ -> wait(deadline, fn -> await_authority(deadline) end)

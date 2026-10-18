@@ -137,9 +137,30 @@ def extract(archive, target, rootfs=False):
         t.extractall(target, members=members, filter="data")
 
 
+def release_for(repo, supplied):
+    expected = Path(repo).resolve() / "_build/prod/rel/spacetraders"
+    if Path(supplied).resolve() != expected.resolve():
+        raise ValueError("release path must be the output of this checkout's production build")
+    return expected.resolve()
+
+
+def remaining(deadline):
+    seconds = deadline - time.monotonic()
+    if seconds <= 0:
+        raise ValueError("shared startup deadline exhausted")
+    return seconds
+
+
+def shutdown_verified(exit_code, output):
+    fields = dict(line.split("=", 1) for line in output.splitlines() if "=" in line)
+    return (exit_code == 0 and fields.get("LoadState") in ["loaded", "not-found"]
+            and fields.get("ActiveState") in ["inactive", "failed"])
+
+
 def prepare(args):
     reject_environment(os.environ)
     repo, release, out = map(lambda p: Path(p).resolve(), [args.repo, args.release, args.output])
+    release = release_for(repo, release)
     if subprocess.check_output(["git", "status", "--porcelain"], cwd=repo).strip():
         raise ValueError("commit application changes before building a pinned diagnostic artifact")
     revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo).decode().strip()
@@ -148,7 +169,7 @@ def prepare(args):
     # Build from the clean pinned checkout, using already-present dependencies.
     # No deps.get, upstream fetch, registry, live configuration or build overlay.
     with (out / "build.log").open("wb") as log:
-        subprocess.run(["mix", "release", "--overwrite"], cwd=repo,
+        subprocess.run(["mix", "release", "--overwrite", "--path", str(release)], cwd=repo,
                        env=dict(os.environ, MIX_ENV="prod"), stdout=log,
                        stderr=subprocess.STDOUT, check=True, timeout=300)
     write(release / "native-build.json", {"revision": revision, "api_schema_sha256": schema, "mix_lock_sha256": lock})
@@ -255,12 +276,17 @@ def start(args):
         result["error"] = str(exc)
     finally:
         # Bounded cgroup stop also covers lost launcher responses and grandchildren.
-        stopped = subprocess.run(["systemctl", "--user", "stop", unit], capture_output=True, timeout=15)
-        state = subprocess.run(["systemctl", "--user", "show", unit, "--property=ActiveState", "--value"],
-                               capture_output=True, timeout=5).stdout.decode().strip()
-        result.update(wall_seconds=time.monotonic() - started, owned_shutdown=state in ["inactive", "failed", ""],
-                      shutdown_command_exit=stopped.returncode,
-                      qualification="native_time_bootstrap_only_not_gameplay_or_full_period")
+        result.update(owned_shutdown=False, qualification="native_time_bootstrap_only_not_gameplay_or_full_period")
+        try:
+            stopped = subprocess.run(["systemctl", "--user", "stop", unit], capture_output=True, timeout=15)
+            inspection = subprocess.run(["systemctl", "--user", "show", unit,
+                                         "--property=LoadState", "--property=ActiveState"], capture_output=True, timeout=5)
+            result.update(owned_shutdown=shutdown_verified(inspection.returncode, inspection.stdout.decode()),
+                          shutdown_command_exit=stopped.returncode, shutdown_inspection_exit=inspection.returncode,
+                          shutdown_state=inspection.stdout.decode().strip())
+        except Exception as exc:
+            result["shutdown_error"] = type(exc).__name__
+        result["wall_seconds"] = time.monotonic() - started
         if not result["owned_shutdown"]:
             result["state"] = "harness_failure"
         write(out / "result.json", result)
@@ -362,6 +388,9 @@ def inside():
     Path("/database/pg").mkdir(mode=0o700)
     m = json.loads((out / "manifest.json").read_text())
     validate(m)
+    startup_started = time.monotonic()
+    startup_deadline = startup_started + m["limits"]["startup_seconds"]
+    startup_deadline_unix_ms = int((time.time() + m["limits"]["startup_seconds"]) * 1000)
     interfaces = {line.split(":")[0].strip() for line in Path("/proc/net/dev").read_text().splitlines() if ":" in line}
     parent = json.loads((out / "identity.json").read_text())["parent_network_namespace"]
     if interfaces != {"lo"} or os.readlink("/proc/self/ns/net") == parent:
@@ -383,14 +412,17 @@ def inside():
     env = dict(os.environ, ERL_FLAGS="+S 1:1 +SDcpu 1 +SDio 1 +A 1", RELEASE_DISTRIBUTION="none",
                RELEASE_TMP="/tmp/release", ERL_CRASH_DUMP="/out/application-crash.dump",
                ERL_CRASH_DUMP_BYTES="8388608",
+               SPACETRADERS_NATIVE_STARTUP_DEADLINE_MS=str(startup_deadline_unix_ms),
                SPACETRADERS_NATIVE_BOOTSTRAP="/out/manifest.json",
                SPACETRADERS_NATIVE_MANIFEST_SHA256=digest(out / "manifest.json"))
 
-    def run(command, name, timeout=45):
+    def run(command, name):
         with (out / (name + ".log")).open("wb") as log:
-            subprocess.run(command, env=env, stdout=log, stderr=subprocess.STDOUT, check=True, timeout=timeout)
+            subprocess.run(command, env=env, stdout=log, stderr=subprocess.STDOUT, check=True,
+                           timeout=remaining(startup_deadline))
 
     def spawn(command, name):
+        remaining(startup_deadline)
         log = (out / (name + ".log")).open("wb")
         logs.append(log)
         child = subprocess.Popen(command, env=env, stdout=log, stderr=subprocess.STDOUT)
@@ -414,10 +446,9 @@ def inside():
         Path("/database/pg/pg_hba.conf").write_text("local all all trust\nhost all all 127.0.0.1/32 trust\n")
         spawn(pg_command("postgres", "-D", "/var/lib/postgresql/data", "-k", "/var/run/postgresql", "-h", "127.0.0.1",
                          "-c", "shared_buffers=32MB", "-c", "max_connections=20"), "postgres")
-        deadline = time.monotonic() + m["limits"]["startup_seconds"]
-        while subprocess.run(pg_command("pg_isready", "-h", "/var/run/postgresql", "-U", user), capture_output=True).returncode:
-            if time.monotonic() >= deadline:
-                raise ValueError("PostgreSQL readiness deadline")
+        while subprocess.run(pg_command("pg_isready", "-h", "/var/run/postgresql", "-U", user), capture_output=True,
+                             timeout=min(2, remaining(startup_deadline))).returncode:
+            remaining(startup_deadline)
             time.sleep(0.1)
         run(pg_command("createdb", "-h", "/var/run/postgresql", "-U", user, database), "createdb")
         result["stage"] = "migrations"
@@ -440,7 +471,7 @@ def inside():
             if world.poll() is not None:
                 raise ValueError("world exited before semantic readiness")
             try:
-                conn = http.client.HTTPConnection("127.0.0.1", 4001, timeout=2)
+                conn = http.client.HTTPConnection("127.0.0.1", 4001, timeout=min(2, remaining(startup_deadline)))
                 conn.request("GET", "/v2/")
                 response = conn.getresponse()
                 body = json.loads(response.read(1048576))
@@ -453,13 +484,23 @@ def inside():
                 write(out / "world-ready.json", body)
                 break
             except (OSError, json.JSONDecodeError):
-                if time.monotonic() >= deadline:
-                    raise ValueError("world semantic readiness deadline")
+                remaining(startup_deadline)
                 time.sleep(0.5)
         result["stage"] = "autonomous_bootstrap"
         app = spawn(["/app/bin/spacetraders", "start"], "application")
         app_deadline = time.monotonic() + max(1, m["limits"]["wall_seconds"] - 60)
+        startup_complete = False
         while app.poll() is None:
+            if not startup_complete:
+                if (out / "bootstrap.json").exists():
+                    checkpoint = json.loads((out / "bootstrap.json").read_text())
+                    ready_at = checkpoint.get("startup_ready_unix_ms")
+                    if ready_at is not None:
+                        if ready_at > startup_deadline_unix_ms:
+                            raise ValueError("application exceeded shared startup deadline")
+                        startup_complete = True
+                if not startup_complete:
+                    remaining(startup_deadline)
             if budget.exceeded.is_set():
                 raise ValueError("HTTP request ceiling exhausted")
             if time.monotonic() >= app_deadline:
@@ -470,6 +511,8 @@ def inside():
             raise ValueError("HTTP request ceiling exhausted")
         if (out / "bootstrap.json").exists():
             result.update(json.loads((out / "bootstrap.json").read_text()))
+            if result.get("startup_ready_unix_ms", startup_deadline_unix_ms + 1) > startup_deadline_unix_ms:
+                raise ValueError("application did not meet shared startup deadline")
         if code != 0:
             raise ValueError("application failed; inspect private application.log")
         result["requests"] = budget.count
