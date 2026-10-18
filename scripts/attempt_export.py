@@ -17,7 +17,7 @@ import tempfile
 import time
 import zipfile
 
-VERSION = "attempt-bundle/v1"
+VERSION = "attempt-bundle/v2"
 MAX_BYTES = 128 * 1024 * 1024
 # Portable SQL columns, not Ecto loading/decryption or SELECT *. Add fields only
 # after inspecting their owner. Credential-bearing tables are never exported.
@@ -50,8 +50,11 @@ TABLES = {
     "outbox_notifications": "id topic event payload delivered_at inserted_at",
     "runtime_authority": "name store advanced_at",
     "surveys": "id waypoint_symbol signature symbol size expiration deposits source observing_ship_symbol observed_at exhausted_at agent_id inserted_at updated_at",
+    "allocation_result_pointers": "fleet_generation_id selection_kind operator_id fleet_strategy_revision_id strategy_decision_episode_id inserted_at",
+    "fleet_commitment_claims": "id fleet_commitment_portfolio_id fleet_commitment_id resource",
+    "ship_destination_history": "id waypoint_symbol position ship_id inserted_at updated_at",
 }
-PRIMARY_KEYS = {"runtime_authority": "name"}
+PRIMARY_KEYS = {"runtime_authority": "name", "allocation_result_pointers": "fleet_generation_id"}
 
 JOINS = {
     "agents": {"operator_id": "operators"},
@@ -76,6 +79,9 @@ JOINS = {
     "mission_conditions": {"fleet_generation_id": "fleet_generations", "fleet_strategy_revision_id": "fleet_strategy_revisions", "strategy_decision_episode_id": "strategy_decision_episodes"},
     "ship_reservations": {"ship_id": "ships"},
     "manual_interventions": {"ship_reservation_id": "ship_reservations", "intent_id": "intents"},
+    "allocation_result_pointers": {"fleet_generation_id": "fleet_generations", "fleet_strategy_revision_id": "fleet_strategy_revisions", "strategy_decision_episode_id": "strategy_decision_episodes"},
+    "fleet_commitment_claims": {"fleet_commitment_portfolio_id": "fleet_commitment_portfolios", "fleet_commitment_id": "fleet_commitments"},
+    "ship_destination_history": {"ship_id": "ships"},
 }
 for _table, _columns in TABLES.items():
     for _field, _target in [("operator_id", "operators"), ("agent_id", "agents")]:
@@ -197,7 +203,7 @@ def validate_world(world):
 
 
 def validate_database(db):
-    require(db["schema"] == "application-evidence/v1", "unsupported database schema")
+    require(db["schema"] == "application-evidence/v2", "unsupported database schema")
     require(set(db) == {"schema", "snapshot", "tables", "excluded_tables", "authority", "inventory"}, "database snapshot/provenance incomplete")
     require(isinstance(db["snapshot"], str) and db["snapshot"], "database snapshot identity missing")
     tables, inventory = db["tables"], db["inventory"]
@@ -362,7 +368,7 @@ def redact(value):
 
 
 def database_document(tables, excluded, snapshot, authority):
-    return {"schema": "application-evidence/v1", "snapshot": snapshot,
+    return {"schema": "application-evidence/v2", "snapshot": snapshot,
             "tables": tables, "excluded_tables": excluded, "authority": authority,
             "inventory": {name: {"rows": len(rows), "sha256": sha(canonical(rows))}
                           for name, rows in tables.items()}}
@@ -592,6 +598,7 @@ def build(metadata, sections):
     data["causal.json"] = canonical(graph)
     data["summary.json"] = canonical(summary)
     manifest = {"schema": VERSION, "identity": metadata["identity"],
+                "exporter_sha256": file_sha(__file__),
                 "complete_export": complete,
                 "files": {name: {"sha256": sha(content), "bytes": len(content)}
                           for name, content in data.items()}}
@@ -644,6 +651,7 @@ def read_bundle(path, receipt=None):
         if sha(manifest_bytes).encode() != archive.read("manifest.sha256"):
             raise ValueError("manifest checksum mismatch")
         manifest = decode_json(manifest_bytes)
+        require(re.fullmatch("[0-9a-f]{64}", manifest["exporter_sha256"]) is not None, "missing exporter executable identity")
         if manifest["schema"] != VERSION or set(names) != set(manifest["files"]) | {"manifest.json", "manifest.sha256"}:
             raise ValueError("unsupported version or file inventory mismatch")
         files = {}

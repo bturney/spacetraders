@@ -72,9 +72,9 @@ Required section omission, incomplete column/table inventory, changed identity,
 broken known joins, Strategy/document disagreement or any hash mismatch fails
 publication. Export completeness is distinct from achieved gameplay coverage.
 
-The database section is `application-evidence/v1`, produced by
+The database section is `application-evidence/v2`, produced by
 `capture_database/2`: one repeatable-read, read-only snapshot with explicit
-column allowlists for all 28 currently supported evidence tables. It retains
+column allowlists for all 31 currently supported evidence tables. It retains
 all historical/unfinished rows, exact portable row counts/hashes, and exact
 counts/reasons for excluded tables. Operators expose identity/chronology only;
 Agents expose token-free registry identity. Password hashes, AccountTokens,
@@ -108,9 +108,15 @@ quota state and unsupported-event coverage. No trace is invented from logs.
 
 ## Integrity, causal navigation and limits
 
-`attempt-bundle/v1` is one stored ZIP containing `attempt.json`, three evidence
+`attempt-bundle/v2` is one stored ZIP containing `attempt.json`, three evidence
 sections, `causal.json`, `summary.json`, `manifest.json`, and `manifest.sha256`.
-Each member has SHA-256 and byte length. The reader checks the exact member
+Each member has SHA-256 and byte length; the manifest pins the exporter bytes
+separately from the original attempt's executable inputs, so later evidence-only
+export retries do not relabel the original run. Version 2 adds durable Allocation
+Result Pointers, Fleet Commitment Claims and Ship destination-history joins to
+the original version-1 export boundary. A version-1 reader remains revision-pinned
+with its original evidence; this reader explicitly rejects old bundle versions.
+The reader checks the exact member
 inventory, versions, hashes, identity/resource/Strategy agreement, row inventory,
 retained joins, safe world hash/decoding, and regenerated summary/graph agreement.
 It never extracts executable members. The current fail-closed portable limit is
