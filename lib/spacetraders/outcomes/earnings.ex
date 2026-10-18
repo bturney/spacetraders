@@ -162,7 +162,9 @@ defmodule SpaceTraders.Outcomes.Earnings do
     {:ok, record} =
       Repo.transaction(fn ->
         commitment =
-          Repo.one!(from c in Commitment, where: c.id == ^commitment_id, lock: "FOR UPDATE")
+          Repo.one!(
+            from c in Commitment, where: c.id == ^commitment_id, lock: "FOR NO KEY UPDATE"
+          )
 
         unless Repo.exists?(
                  from r in EarningsRecord, where: r.fleet_commitment_id == ^commitment_id
