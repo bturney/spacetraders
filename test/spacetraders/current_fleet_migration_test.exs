@@ -572,7 +572,12 @@ defmodule SpaceTraders.CurrentFleetMigrationTest do
     id
   end
 
-  # Emergency Stop columns are dropped by a later migration (#759).
+  # Later migrations drop Emergency Stop columns (#759) and add nullable
+  # current Ship state (#765).
+  @ship_state_columns ~w(engine_speed engine_condition fuel_capacity cargo_capacity nav_status
+    waypoint_symbol fuel_current state_observed_at route_origin route_destination
+    route_departed_at route_arrives_at)
+
   defp drop_retired_columns(tables) do
     List.update_at(tables, 2, fn rows ->
       Enum.map(rows, fn [row] ->
@@ -584,6 +589,9 @@ defmodule SpaceTraders.CurrentFleetMigrationTest do
           ])
         ]
       end)
+    end)
+    |> List.update_at(5, fn rows ->
+      Enum.map(rows, fn [row] -> [Map.merge(row, Map.new(@ship_state_columns, &{&1, nil}))] end)
     end)
   end
 

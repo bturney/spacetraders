@@ -1028,6 +1028,8 @@ defmodule SpaceTraders.FleetGeneration do
       |> Ecto.Changeset.validate_required([:symbol, :ship_type, :agent_id])
       |> Repo.insert!()
     end)
+
+    SpaceTraders.Fleet.record_ship_response(agent.id, nil, ships)
   end
 
   defp establish_generation!(
