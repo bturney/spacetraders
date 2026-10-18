@@ -271,7 +271,7 @@ defmodule SpaceTraders.FleetPlanning do
 
   Supply `:unmet_work` from `FleetAllocation.ship_bound_unmet_work/2`,
   `:generation_horizon` from `GenerationHorizon.current/2`, and
-  `:realized_trade_progress` from `TradeProgress.for_generation/1`, all for the
+  `:realized_earnings` from `SpaceTraders.Outcomes.Earnings.list/1`, all for the
   same current Generation and `:as_of`. Missing projections are unknown, not
   zero history. Only work supporting this accepted objective/index is valued.
 

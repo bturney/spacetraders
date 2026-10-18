@@ -2,7 +2,8 @@ defmodule SpaceTraders.Outcomes do
   @moduledoc """
   One fail-soft worker for all outcome metrics from retained authoritative facts.
 
-  Credits, Contracts and transaction deltas publish in this mailbox. Fleet and
+  Credits, Contracts, transaction deltas and committed Earnings records publish
+  in this mailbox; `emit_earnings/1` is the one emitter of earnings metrics. Fleet and
   chart DB projections share its 2000 ms event-coalescing window. Gameplay only
   enqueues facts or post-commit notifications; it never waits for the worker.
   Scrapes collect coherent metric bytes here, then the HTTP request process sends
@@ -133,6 +134,19 @@ defmodule SpaceTraders.Outcomes do
       {:noreply, state}
   end
 
+  def handle_cast({:earnings, record}, state) do
+    emit_earnings(record)
+    {:noreply, state}
+  rescue
+    _error ->
+      log_failure(%{operation_id: "earnings_record"})
+      {:noreply, state}
+  catch
+    _kind, _reason ->
+      log_failure(%{operation_id: "earnings_record"})
+      {:noreply, state}
+  end
+
   def handle_cast({:transaction, intent_type, operation, credits, observed_at}, state) do
     :telemetry.execute(
       [:spacetraders, :outcome, :transaction],
@@ -157,6 +171,64 @@ defmodule SpaceTraders.Outcomes do
     _kind, _reason ->
       log_failure(%{operation_id: operation})
       {:noreply, state}
+  end
+
+  # The one place earnings metrics are emitted: once per committed record,
+  # labelled by bounded values only. Ship and route go in the Loki line.
+  defp emit_earnings(record) do
+    labels = %{
+      source: record.source,
+      ship_type: record.ship_type,
+      good: record.good,
+      price_age: SpaceTraders.Outcomes.Earnings.price_age_bucket(record.price_age_seconds)
+    }
+
+    flows =
+      [
+        revenue: record.revenue,
+        goods: record.goods_cost,
+        fuel: record.fuel_cost,
+        other: record.other_cost,
+        expected: record.expected_value
+      ]
+
+    for {flow, credits} <- flows, is_integer(credits) and credits > 0 do
+      :telemetry.execute(
+        [:earnings, :credits],
+        %{credits: credits},
+        Map.put(labels, :flow, Atom.to_string(flow))
+      )
+    end
+
+    result =
+      if is_integer(record.expected_value) and record.net_earnings < record.expected_value,
+        do: "missed",
+        else: "beat"
+
+    :telemetry.execute([:earnings, :trips], %{count: 1}, Map.put(labels, :result, result))
+    :telemetry.execute([:earnings, :ship_seconds], %{seconds: record.ship_seconds}, labels)
+
+    Logger.info("Earnings record",
+      ship_symbol: record.ship_symbol,
+      route: "#{record.source_waypoint}->#{record.destination_waypoint}",
+      earnings: %{
+        id: record.id,
+        source: record.source,
+        ship_type: record.ship_type,
+        good: record.good,
+        units: record.units,
+        jettisoned_units: record.jettisoned_units,
+        revenue: record.revenue,
+        goods_cost: record.goods_cost,
+        fuel_cost: record.fuel_cost,
+        other_cost: record.other_cost,
+        net_earnings: record.net_earnings,
+        expected_value: record.expected_value,
+        price_age_seconds: record.price_age_seconds,
+        ship_seconds: record.ship_seconds,
+        result: result
+      }
+    )
   end
 
   defp log_failure(observation) do
