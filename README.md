@@ -42,3 +42,7 @@ scripts/verify
 
 See [testing](docs/agents/testing.md) for test lifecycle and opt-in diagnostics;
 read the [production runbook](docs/operations/project-host.md) before deployment.
+
+The source-controlled autonomous-runtime design is organized under
+[docs/autonomy](docs/autonomy/README.md), with #502 retained as its tracking and
+proof-history index.
