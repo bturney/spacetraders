@@ -68,6 +68,28 @@ defmodule SpaceTraders.Simulation.NativeBootstrapTest do
     end
   end
 
+  test "HTTP target loss or drift in explicit mode never uses the live fallback" do
+    api = Application.fetch_env!(:spacetraders, SpaceTraders.API)
+    previous = Application.get_env(:spacetraders, :native_bootstrap)
+    Application.put_env(:spacetraders, :native_bootstrap, manifest())
+
+    try do
+      for changed <- [[], [base_url: "https://api.spacetraders.io/v2"]] do
+        Application.put_env(:spacetraders, SpaceTraders.API, changed)
+
+        assert_raise ArgumentError, ~r/no live fallback/, fn ->
+          SpaceTraders.API.get_status()
+        end
+      end
+    after
+      Application.put_env(:spacetraders, SpaceTraders.API, api)
+
+      if previous,
+        do: Application.put_env(:spacetraders, :native_bootstrap, previous),
+        else: Application.delete_env(:spacetraders, :native_bootstrap)
+    end
+  end
+
   defp manifest do
     attempt = String.duplicate("a", 32)
 

@@ -112,7 +112,9 @@ def validate(m):
 
 def reject_environment(env):
     forbidden = {"DATABASE_URL", "ENCRYPTION_KEY", "SECRET_KEY_BASE", "PHX_SERVER",
-                 "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "ACCOUNT_TOKEN", "AGENT_TOKEN"}
+                 "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "ACCOUNT_TOKEN", "AGENT_TOKEN",
+                 "PGHOST", "PGPORT", "PGDATABASE", "PGUSER", "PGPASSWORD", "PGPASSFILE",
+                 "PGSERVICE", "PGSERVICEFILE", "PGOPTIONS", "PGSSLMODE", "RELEASE_COOKIE"}
     if any(k.upper() in forbidden or k.upper().startswith(("POSTGRES_", "SPACETRADERS_")) for k in env):
         raise ValueError("inherited target/credential/proxy configuration rejected; use a clean environment")
 
@@ -239,7 +241,17 @@ def start(args):
             result.update(json.loads((runtime / "bootstrap.json").read_text()))
         if completed.returncode != 0:
             result["state"] = "harness_failure"
+        if result["state"] == "passed":
+            evidence = result["evidence"]
+            receipts = [json.loads(line) for line in (runtime / "http.jsonl").read_text().splitlines()]
+            matching = [r for r in receipts if r.get("navigation", {}).get("destination") == evidence["target_waypoint"]
+                        and r["method"] == "POST" and r["status"] == 200
+                        and r["path"] == "/v2/my/ships/" + evidence["ship_symbol"] + "/navigate"]
+            if not matching or evidence["operation_id"] != "navigate-ship" or evidence["observation_count"] <= 0:
+                raise ValueError("durable bootstrap has no matching authoritative HTTP navigation consequence")
+            result["navigation_receipt"] = matching[0]
     except Exception as exc:
+        result["state"] = "harness_failure"
         result["error"] = str(exc)
     finally:
         # Bounded cgroup stop also covers lost launcher responses and grandchildren.
@@ -263,13 +275,23 @@ class RequestBudget:
     def __init__(self, limit):
         self.limit, self.count = limit, 0
         self.lock = threading.Lock()
+        self.exceeded = threading.Event()
 
     def take(self):
         with self.lock:
             if self.count >= self.limit:
+                self.exceeded.set()
                 raise ValueError("HTTP request ceiling exhausted")
             self.count += 1
             return self.count
+
+
+def navigation_receipt(method, path, status, body):
+    if method != "POST" or status != 200 or not re.fullmatch(r"/v2/my/ships/[A-Z0-9_-]+/navigate", path):
+        return None
+    nav = json.loads(body)["data"]["nav"]
+    return {"status": nav["status"], "waypoint": nav["waypointSymbol"],
+            "destination": nav["route"]["destination"]["symbol"], "arrival": nav["route"]["arrival"]}
 
 
 def proxy(budget):
@@ -281,6 +303,7 @@ def proxy(budget):
 
         def forward(self):
             conn = http.client.HTTPConnection("127.0.0.1", 4000, timeout=3)
+            number = None
             try:
                 number = budget.take()
                 if not self.path.startswith("/v2/") or ".." in self.path or self.headers.get("Transfer-Encoding"):
@@ -297,8 +320,12 @@ def proxy(budget):
                 if len(data) > 1048576:
                     raise ValueError("response body ceiling")
                 with open("/out/http.jsonl", "a") as log:
-                    log.write(json.dumps({"number": number, "method": self.command, "path": self.path,
-                                          "status": response.status, "body_sha256": hashlib.sha256(data).hexdigest()}) + "\n")
+                    receipt = {"number": number, "method": self.command, "path": self.path,
+                               "status": response.status, "body_sha256": hashlib.sha256(data).hexdigest()}
+                    navigation = navigation_receipt(self.command, self.path, response.status, data)
+                    if navigation:
+                        receipt["navigation"] = navigation
+                    log.write(json.dumps(receipt) + "\n")
                 self.send_response(response.status)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(data)))
@@ -308,7 +335,11 @@ def proxy(budget):
                         self.send_header(k, v)
                 self.end_headers()
                 self.wfile.write(data)
-            except Exception:
+            except Exception as error:
+                if number is not None:
+                    with open("/out/http.jsonl", "a") as log:
+                        log.write(json.dumps({"number": number, "method": self.command, "path": self.path,
+                                              "status": None, "transport_error": type(error).__name__}) + "\n")
                 self.send_error(503, "bounded bootstrap HTTP transport failure")
             finally:
                 conn.close()
@@ -427,7 +458,16 @@ def inside():
                 time.sleep(0.5)
         result["stage"] = "autonomous_bootstrap"
         app = spawn(["/app/bin/spacetraders", "start"], "application")
-        code = app.wait(timeout=max(1, m["limits"]["wall_seconds"] - 60))
+        app_deadline = time.monotonic() + max(1, m["limits"]["wall_seconds"] - 60)
+        while app.poll() is None:
+            if budget.exceeded.is_set():
+                raise ValueError("HTTP request ceiling exhausted")
+            if time.monotonic() >= app_deadline:
+                raise ValueError("application wall deadline exhausted")
+            time.sleep(0.1)
+        code = app.returncode
+        if budget.exceeded.is_set():
+            raise ValueError("HTTP request ceiling exhausted")
         if (out / "bootstrap.json").exists():
             result.update(json.loads((out / "bootstrap.json").read_text()))
         if code != 0:

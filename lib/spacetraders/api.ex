@@ -358,6 +358,8 @@ defmodule SpaceTraders.API do
   end
 
   defp admit_and_send(method, path, token, opts) do
+    # Reject native target loss before reserving capacity or preparing a mutation.
+    if Application.get_env(:spacetraders, :native_bootstrap), do: base_url()
     {operation, shadow} = observe_request(method, path, opts)
 
     # Observe before waiting for capacity so shadow queue_time spans the real

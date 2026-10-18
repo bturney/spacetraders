@@ -210,6 +210,7 @@ defmodule SpaceTraders.Simulation.NativeBootstrap do
         """
         SELECT e.id AS episode_id, e.selection_kind, p.id AS portfolio_id,
                c.id AS commitment_id, i.id AS intent_id, i.type AS intent_type,
+               i.target_waypoint, s.symbol AS ship_symbol,
                i.status AS intent_status, a.id::text AS mutation_attempt_id,
                a.operation_id, a.state AS mutation_state,
                (SELECT count(*) FROM authoritative_observations) AS observation_count
@@ -217,9 +218,11 @@ defmodule SpaceTraders.Simulation.NativeBootstrap do
         JOIN fleet_commitment_portfolios p ON p.strategy_decision_episode_id = e.id
         JOIN fleet_commitments c ON c.fleet_commitment_portfolio_id = p.id
         JOIN intents i ON i.fleet_commitment_id = c.id
+        JOIN ships s ON s.id = i.ship_id
         JOIN mutation_attempts a ON a.id = i.mutation_attempt_id
         WHERE e.fleet_strategy_revision_id = $1 AND e.selection_kind = 'selected_plan'
           AND a.state IN ('succeeded', 'accepted')
+          AND a.operation_id = 'navigate-ship'
         ORDER BY i.id LIMIT 1
         """,
         [revision_id]

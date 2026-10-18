@@ -11,8 +11,9 @@ One whole production BEAM release, normally migrated fresh PostgreSQL cluster,
 and the verified #778 archive run in a new user/PID/IPC/UTS/network namespace.
 Only loopback exists; no host home, deployment sockets or Docker socket is
 mounted. A systemd user cgroup enforces 1 CPU, 3 GiB RAM/no swap, 256 tasks and
-240 wall seconds. The real HTTP forwarding boundary allows at most 240 requests
+240 wall seconds. The real HTTP forwarding boundary allows at most 240 forwarded world requests
 (including startup and retries), 1 MiB bodies and 3-second transport deadlines.
+Exhaustion stops the attempt; denied forwarding is not free API quota.
 The normal governor and protocol limiter remain enabled. Forwarding never
 fabricates game responses and preserves rate-limit/Retry-After headers.
 
@@ -75,12 +76,17 @@ application globals, encryption key, password and simulation-only AccountToken.
 No local startup settings change production configuration outside explicit mode.
 
 `result.json` records success/failure stage, wall time, request count and owned
-shutdown. `bootstrap.json` contains only allowlisted durable IDs and chronology;
-`http.jsonl` stores method/path/status/body hash, never auth headers or raw bodies.
+shutdown. `runtime/bootstrap.json` contains only allowlisted durable IDs and chronology;
+`runtime/http.jsonl` stores method/path/status/body hash and an allowlisted actual
+navigation consequence, never auth headers or raw bodies. Success additionally
+matches the successful HTTP navigation destination/Ship to the durable Intent.
 Private logs, database, manifest, world readiness, isolation/cgroup receipt and
 checksums remain in the attempt directory after success **and failure**. Never
 publish that directory: it contains private world bytes and DB credentials.
 The parent cgroup stop fences all descendants even when application startup fails.
+The PostgreSQL data directory has a 128 MiB tmpfs ceiling and is copied privately
+after normal shutdown. A hard cgroup death may interrupt that copy; no complete
+export, retention or restart/recovery qualification is implied.
 There is no automatic retry, evidence cleanup, restart/resume or experiment budget.
 
 For bounded startup negative controls, copy the manifest to a **new definition**,

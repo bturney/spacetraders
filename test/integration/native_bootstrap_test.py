@@ -54,10 +54,26 @@ class ManifestTest(unittest.TestCase):
 
     def test_inherited_authority_is_rejected_not_reused(self):
         for key in ["DATABASE_URL", "POSTGRES_HOST", "ENCRYPTION_KEY", "ACCOUNT_TOKEN",
-                    "AGENT_TOKEN", "PHX_SERVER", "HTTP_PROXY", "SPACETRADERS_API_URL"]:
+                    "AGENT_TOKEN", "PHX_SERVER", "HTTP_PROXY", "SPACETRADERS_API_URL", "PGHOST", "PGPASSWORD"]:
             with self.subTest(key=key), self.assertRaises(ValueError):
                 boot.reject_environment({key: "anything"})
         boot.reject_environment({"PATH": "/usr/bin", "HOME": "/home/example"})
+
+    def test_navigation_receipt_keeps_actual_consequence_but_no_credentials(self):
+        body = {"data": {"token": "must-not-export", "nav": {
+            "status": "IN_TRANSIT", "waypointSymbol": "X1-TEST-B",
+            "route": {"arrival": "2026-10-18T12:00:30Z", "destination": {"symbol": "X1-TEST-B"}},
+            "unexpectedSecret": "must-not-export"}}}
+        receipt = boot.navigation_receipt("POST", "/v2/my/ships/TEST-1/navigate", 200,
+                                          json_bytes(body))
+        self.assertEqual(receipt, {"status": "IN_TRANSIT", "waypoint": "X1-TEST-B",
+                                   "destination": "X1-TEST-B", "arrival": "2026-10-18T12:00:30Z"})
+        self.assertIsNone(boot.navigation_receipt("POST", "/v2/register", 201, json_bytes(body)))
+
+
+def json_bytes(value):
+    import json
+    return json.dumps(value).encode()
 
 
 if __name__ == "__main__":
