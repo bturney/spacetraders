@@ -1628,38 +1628,6 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
     end
 
     @tag :market_recovery
-    test "#{kind} stopped absence retires without needing Market eligibility or sending" do
-      {agent, ship, portfolio, commitment} = claimed_ship("MARKET-STOP-#{unquote(kind)}")
-      {intent, action} = market_selection(ship, portfolio, commitment, unquote(kind))
-
-      {:ok, %{intent: intent, attempt: attempt}} =
-        prepare_recorded(agent, intent, action)
-
-      {:ok, _} = MutationAttempts.mark_sent_or_unknown(attempt)
-      strategy = Repo.get_by!(Strategy, operator_id: agent.operator_id)
-      Repo.update!(Ecto.Changeset.change(strategy, emergency_stopped_at: DateTime.utc_now()))
-
-      Req.Test.stub(SpaceTraders.API, fn conn ->
-        assert conn.method == "GET"
-        assert conn.request_path in ["/v2/my/agent", "/v2/my/ships/#{ship.symbol}"]
-
-        data =
-          if conn.request_path == "/v2/my/agent",
-            do: %{"symbol" => agent.symbol, "credits" => 1000},
-            else: market_ship_body(ship, action["cargo_before"])
-
-        Req.Test.json(conn, %{"data" => data})
-      end)
-
-      _ = Intents.reconcile(agent.id, ship.symbol, nil, :boot, intent.id)
-      assert Repo.get!(Intent, intent.id).in_flight_action == nil
-      absent = MutationAttempts.get!(attempt.id)
-      assert absent.state == "absent"
-      refute absent.retry_authorized
-      assert length(MutationAttempts.list_for_agent(agent)) == 1
-    end
-
-    @tag :market_recovery
     test "#{kind} live and prepared boot callbacks advance the same selection only once" do
       for trigger <- [:live, :boot] do
         {agent, ship, portfolio, commitment} =
@@ -2153,7 +2121,7 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
       assert restored == usable
     end
 
-    test "#{kind} Bounded Unknown retains exact composite proof and reconciles under Emergency Stop" do
+    test "#{kind} Bounded Unknown retains exact composite proof and reconciles" do
       {agent, ship, portfolio, commitment} = claimed_ship("BOUNDED-CREDIT-#{unquote(kind)}")
       intent = owned_intent(ship, portfolio, commitment, [])
 
@@ -2198,9 +2166,6 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
               []
             )
         )
-
-      strategy = Repo.get_by!(Strategy, operator_id: agent.operator_id)
-      Repo.update!(Ecto.Changeset.change(strategy, emergency_stopped_at: DateTime.utc_now()))
 
       Req.Test.stub(SpaceTraders.API, fn conn ->
         assert conn.method == "GET"
@@ -3194,7 +3159,7 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
     {agent, ship, portfolio, commitment} = claimed_ship("CHANGED-AUTHORITY")
     {intent, attempt} = selected_orbit(agent, ship, portfolio, commitment)
     strategy = Repo.get_by!(Strategy, operator_id: agent.operator_id)
-    Repo.update!(Ecto.Changeset.change(strategy, emergency_stopped_at: DateTime.utc_now()))
+    Repo.update!(Ecto.Changeset.change(strategy, active_revision_id: nil))
 
     Req.Test.stub(SpaceTraders.API, fn conn ->
       assert conn.method == "GET"

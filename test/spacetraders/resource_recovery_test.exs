@@ -164,50 +164,31 @@ defmodule SpaceTraders.ResourceRecoveryTest do
     end
   end
 
-  for stopped? <- [false, true] do
-    test "persisted resource absence #{if stopped?, do: "retires under Stop", else: "consumes exactly one retry"}" do
-      {agent, ship, intent, attempt} = selected_resource("extract")
-      {:ok, attempt} = MutationAttempts.mark_sent_or_unknown(attempt)
-      before = ship_body(ship.symbol, %{"cargo" => intent.in_flight_action["cargo_before"]})
-      Req.Test.stub(SpaceTraders.API, &Req.Test.json(&1, %{"data" => before}))
-      {:ok, binding} = Evidence.get_ship_binding(agent, ship.symbol)
+  test "persisted resource absence consumes exactly one retry" do
+    {agent, ship, intent, attempt} = selected_resource("extract")
+    {:ok, attempt} = MutationAttempts.mark_sent_or_unknown(attempt)
+    before = ship_body(ship.symbol, %{"cargo" => intent.in_flight_action["cargo_before"]})
+    Req.Test.stub(SpaceTraders.API, &Req.Test.json(&1, %{"data" => before}))
+    {:ok, binding} = Evidence.get_ship_binding(agent, ship.symbol)
 
-      {:ok, proof} =
-        Evidence.recovery_proof(attempt, :absent, "Controlled owner absence proof", [binding])
+    {:ok, proof} =
+      Evidence.recovery_proof(attempt, :absent, "Controlled owner absence proof", [binding])
 
-      {:ok, _} = MutationAttempts.reconcile(attempt, :absent, proof)
+    {:ok, _} = MutationAttempts.reconcile(attempt, :absent, proof)
 
-      if unquote(stopped?) do
-        operator = Repo.get!(SpaceTraders.Agent.Operator, agent.operator_id)
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      assert conn.method == "POST"
+      Req.Test.json(conn, %{"data" => resource_response(ship.symbol, "extract")})
+    end)
 
-        assert {:ok, _} =
-                 SpaceTraders.FleetStrategy.engage_emergency_stop(
-                   SpaceTraders.Agent.Scope.for_operator(operator)
-                 )
+    _ = Intents.reconcile(agent.id, ship.symbol, binding, :boot, intent.id)
+    assert Repo.get!(Intent, intent.id).in_flight_action == nil
+    refute MutationAttempts.get!(attempt.id).retry_authorized
 
-        on_exit(fn ->
-          SpaceTraders.EmergencyStopAdmission.resume(agent.operator_id, :infinity)
-        end)
-
-        Req.Test.stub(SpaceTraders.API, fn _ -> flunk("stopped resource absence sent a retry") end)
-      else
-        Req.Test.stub(SpaceTraders.API, fn conn ->
-          assert conn.method == "POST"
-          Req.Test.json(conn, %{"data" => resource_response(ship.symbol, "extract")})
-        end)
-      end
-
-      _ = Intents.reconcile(agent.id, ship.symbol, binding, :boot, intent.id)
-      assert Repo.get!(Intent, intent.id).in_flight_action == nil
-      refute MutationAttempts.get!(attempt.id).retry_authorized
-
-      assert_retry_retired(unquote(stopped?), agent, ship, intent)
-    end
+    assert_retry_consumed(agent, ship, intent)
   end
 
-  defp assert_retry_retired(true, _agent, _ship, _intent), do: :ok
-
-  defp assert_retry_retired(false, agent, ship, intent) do
+  defp assert_retry_consumed(agent, ship, intent) do
     assert Repo.get!(Intent, intent.id).status == "completed"
     Req.Test.stub(SpaceTraders.API, fn _ -> flunk("retired resource selection replayed") end)
     assert :ok = Intents.reconcile(agent.id, ship.symbol, nil, :boot, intent.id)

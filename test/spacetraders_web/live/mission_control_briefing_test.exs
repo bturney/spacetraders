@@ -8,7 +8,7 @@ defmodule SpaceTradersWeb.MissionControlBriefingTest do
 
   alias SpaceTraders.Agent
   alias SpaceTraders.Repo
-  alias SpaceTraders.{Evidence, Fleet, FleetGeneration, FleetStrategy, OperatorConditions}
+  alias SpaceTraders.{Evidence, Fleet, FleetGeneration, FleetStrategy}
 
   @symbol "MCCTRL"
 
@@ -150,83 +150,6 @@ defmodule SpaceTradersWeb.MissionControlBriefingTest do
 
     assert has_element?(view, "#notable-activity", "Generation 1 began with #{@symbol}")
     refute has_element?(view, "#notable-activity", "API request retrying")
-    assert has_element?(view, "#needs-attention", "No unresolved Attention or Intervention.")
-  end
-
-  test "Attention and Intervention update the briefing and acknowledgement does not resolve them",
-       %{conn: conn, scope: scope} do
-    mint_fleet(scope)
-    {:ok, view, _html} = live(conn, ~p"/mission-control")
-
-    attention_summary = "Protected credit floor cannot be maintained"
-    intervention_summary = "AccountToken is needed to replace the Agent"
-
-    {:ok, attention} =
-      OperatorConditions.raise(scope, "credit-floor", :attention, attention_summary,
-        entity_ref: "construction:X1:X1-A1"
-      )
-
-    {:ok, intervention} =
-      OperatorConditions.raise(scope, "external-authority", :intervention, intervention_summary)
-
-    assert has_element?(view, "#operating-health", "Needs Operator attention")
-
-    assert view |> element("#needs-attention li", attention_summary) |> render() =~
-             "<strong>Attention</strong>"
-
-    assert view |> element("#needs-attention li", intervention_summary) |> render() =~
-             "<strong>Intervention</strong>"
-
-    assert has_element?(
-             view,
-             "#needs-attention a[href='/world/systems/X1/waypoints/X1-A1/construction']",
-             "Construction"
-           )
-
-    refute has_element?(view, "#needs-attention", "Acknowledged · unresolved")
-
-    view |> element("#needs-attention button[phx-value-id='#{attention.id}']") |> render_click()
-
-    view
-    |> element("#needs-attention button[phx-value-id='#{intervention.id}']")
-    |> render_click()
-
-    {:ok, reopened_view, _html} = live(conn, ~p"/mission-control")
-
-    assert has_element?(reopened_view, "#operating-health", "Needs Operator attention")
-
-    assert reopened_view |> element("#needs-attention li", attention_summary) |> render() =~
-             "Acknowledged · unresolved"
-
-    assert reopened_view |> element("#needs-attention li", intervention_summary) |> render() =~
-             "Acknowledged · unresolved"
-
-    attention_id = attention.id
-    intervention_id = intervention.id
-
-    assert [
-             %{id: ^attention_id, kind: :attention, acknowledged_at: %DateTime{}},
-             %{id: ^intervention_id, kind: :intervention, acknowledged_at: %DateTime{}}
-           ] = OperatorConditions.unresolved(scope)
-
-    :ok = OperatorConditions.resolve(scope, "credit-floor")
-    refute has_element?(reopened_view, "#needs-attention", attention_summary)
-    assert has_element?(reopened_view, "#needs-attention", intervention_summary)
-    assert has_element?(reopened_view, "#operating-health", "Needs Operator attention")
-
-    {:ok, recurrence} =
-      OperatorConditions.raise(scope, "credit-floor", :attention, attention_summary)
-
-    assert recurrence.id != attention.id
-
-    assert has_element?(
-             reopened_view,
-             "#needs-attention button[phx-value-id='#{recurrence.id}']",
-             "Acknowledge"
-           )
-
-    refute reopened_view |> element("#needs-attention li", attention_summary) |> render() =~
-             "Acknowledged · unresolved"
   end
 
   test "collection gaps render unknown Fleet health and outcomes rather than zero measurements",
@@ -301,7 +224,6 @@ defmodule SpaceTradersWeb.MissionControlBriefingTest do
     assert has_element?(view, section, "Releases when")
     assert has_element?(view, section, "No Operator action is needed")
     assert has_element?(view, "#{section} a[href='/decision-episodes/#{episode.id}']")
-    assert has_element?(view, "#needs-attention", "No unresolved Attention or Intervention.")
 
     # Normal recovery closes the Episode and the representation clears.
     episode |> Ecto.Changeset.change(resolved_at: DateTime.utc_now()) |> Repo.update!()
@@ -415,8 +337,6 @@ defmodule SpaceTradersWeb.MissionControlBriefingTest do
     assert has_element?(view, "#{wait} a[href='/decision-episodes/#{episode.id}']")
     refute has_element?(view, section, "Decision Episode #{episode.id}")
     refute has_element?(view, section, "Waiting deliberately")
-    assert has_element?(view, "#needs-attention", "No unresolved Attention or Intervention.")
-    refute has_element?(view, "#operating-health", "Needs Operator attention")
 
     # The Unallocated Ship's link is causal: the wait's Decision Episode.
     assert has_element?(
@@ -535,7 +455,6 @@ defmodule SpaceTradersWeb.MissionControlBriefingTest do
       refute_received {:register, _}
       assert has_element?(view, "#operating-health", "Server Reset transition")
       assert has_element?(view, "#server-reset-replacement", "A Server Reset fenced #{@symbol}")
-      assert has_element?(view, "#needs-attention", "Edit the Agent Name Bank")
       assert has_element?(view, "#retry-reset-replacement")
       refute has_element?(view, "#generation-replacement")
 
@@ -570,7 +489,6 @@ defmodule SpaceTradersWeb.MissionControlBriefingTest do
 
       assert has_element?(view, "#strategy-context", "Generation 2")
       refute has_element?(view, "#server-reset-replacement")
-      refute has_element?(view, "#needs-attention", "Edit the Agent Name Bank")
     end
 
     test "same-name replacement presents the distinct successor Generation",
@@ -687,39 +605,13 @@ defmodule SpaceTradersWeb.MissionControlBriefingTest do
       assert has_element?(recovered, "#strategy-context", "Generation 2")
       refute has_element?(recovered, "#mission-registration-recovery")
 
-      assert has_element?(
-               recovered,
-               "#needs-attention",
-               "No unresolved Attention or Intervention."
-             )
-
       assert {:ok, %{state: :current, agent: successor}} = FleetGeneration.current_fleet(scope)
       assert successor.id != predecessor.id
       assert {:error, :stale_agent} = FleetGeneration.gameplay_authority(predecessor.id)
       refute_received {:register, _}
     end
 
-    test "Emergency Stop suppresses automatic and Operator-requested replacement",
-         %{conn: conn, scope: scope} do
-      mint_fleet(scope)
-      {:ok, _stop} = FleetStrategy.engage_emergency_stop(scope)
-      parent = self()
-
-      Req.Test.stub(SpaceTraders.API, fn conn ->
-        if conn.method == "POST", do: send(parent, {:register, conn.body_params["symbol"]})
-        reset_mismatch(conn)
-      end)
-
-      {:ok, view, _html} = live(conn, ~p"/mission-control")
-      html = view |> element("#retry-reset-replacement") |> render_click()
-
-      assert html =~ "Emergency Stop is engaged. Replacement minting is suppressed"
-      assert has_element?(view, "#operating-health", "STOPPED")
-      refute_received {:register, _}
-      assert {:ok, %{state: :transition}} = FleetGeneration.current_fleet(scope)
-    end
-
-    test "missing AccountToken authority is a pinned Intervention, not a retry loop",
+    test "missing AccountToken authority is not a retry loop",
          %{conn: conn, scope: scope} do
       mint_fleet(scope)
 
@@ -736,7 +628,6 @@ defmodule SpaceTradersWeb.MissionControlBriefingTest do
       end)
 
       {:ok, view, _html} = live(conn, ~p"/mission-control")
-      assert has_element?(view, "#needs-attention", "AccountToken authority is unavailable")
 
       html = view |> element("#retry-reset-replacement") |> render_click()
       assert html =~ "Link an AccountToken in Settings before replacement can mint."

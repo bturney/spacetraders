@@ -255,7 +255,7 @@ defmodule SpaceTraders.FleetAcquisitionTest do
     end
   end
 
-  for change <- [:revision, :emergency_stop] do
+  for change <- [:revision] do
     test "#{change} withdraws a published unsent acquisition without game reads" do
       {scope, agent, revision} = generation()
       {portfolio, _} = published_purchase(scope, agent, revision)
@@ -359,14 +359,6 @@ defmodule SpaceTraders.FleetAcquisitionTest do
         end
       end
     end
-  end
-
-  defp change_purchase_authority(revision, :emergency_stop) do
-    Repo.update_all(from(s in Strategy, where: s.id == ^revision.fleet_strategy_id),
-      set: [emergency_stopped_at: DateTime.utc_now()]
-    )
-
-    revision
   end
 
   defp change_purchase_authority(revision, :revision) do
@@ -514,11 +506,6 @@ defmodule SpaceTraders.FleetAcquisitionTest do
              SpaceTraders.CreditCalibration.active()
 
     assert previous == initial.id
-
-    assert [%{kind: :attention, summary: summary}] =
-             SpaceTraders.OperatorConditions.unresolved(scope)
-
-    assert summary =~ "Degraded Operation: a Ship purchase charged 13000 credits"
   end
 
   test "a Ship whose readiness misses the promised capability is never registered" do

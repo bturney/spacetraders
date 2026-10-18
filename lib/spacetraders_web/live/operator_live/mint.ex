@@ -257,14 +257,6 @@ defmodule SpaceTradersWeb.OperatorLive.Mint do
            "This deployment already has a current Agent#{current_agent_suffix(socket)}. No Agent was minted."
          )}
 
-      {:error, :emergency_stopped} ->
-        {:noreply,
-         put_flash(
-           socket,
-           :error,
-           "Emergency Stop is engaged. Minting is suppressed until it is resumed."
-         )}
-
       {:error, :fleet_transition_pending} ->
         {:noreply,
          socket

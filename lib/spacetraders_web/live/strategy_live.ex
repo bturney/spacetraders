@@ -37,56 +37,6 @@ defmodule SpaceTradersWeb.StrategyLive do
         </header>
 
         <section
-          id="emergency-stop-control"
-          class={[
-            "rounded-2xl border p-5 sm:p-7",
-            @projection.emergency_stopped_at && "border-error/40 bg-error/10",
-            !@projection.emergency_stopped_at && "border-base-300 bg-base-100"
-          ]}
-        >
-          <div class="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-            <div>
-              <p class="eyebrow">Fleet-wide safety</p>
-              <h2 class="text-xl font-bold">Emergency Stop</h2>
-              <p
-                :if={
-                  @projection.emergency_stopped_at &&
-                    !@projection.emergency_resume_prepared_at
-                }
-                class="mt-1 text-sm"
-              >
-                Gameplay mutations are suppressed. Reconciliation, safety observations, telemetry, and history continue.
-              </p>
-              <p :if={@projection.emergency_resume_prepared_at} class="mt-1 text-sm">
-                Authoritative state is refreshed and stale work is retired. Mutations remain suppressed until fresh Fleet Allocation selects an admissible plan.
-              </p>
-              <p :if={!@projection.emergency_stopped_at} class="mt-1 text-sm opacity-70">
-                Immediately suppress every new gameplay mutation, including replacement minting.
-              </p>
-            </div>
-            <button
-              :if={!@projection.emergency_stopped_at}
-              id="engage-emergency-stop"
-              phx-click="engage_emergency_stop"
-              class="btn btn-error"
-            >
-              Engage Emergency Stop
-            </button>
-            <button
-              :if={
-                @projection.emergency_stopped_at &&
-                  !@projection.emergency_resume_prepared_at
-              }
-              id="resume-from-emergency-stop"
-              phx-click="resume_from_emergency_stop"
-              class="btn btn-outline"
-            >
-              Resume from authoritative state
-            </button>
-          </div>
-        </section>
-
-        <section
           :if={@projection.active_revision}
           class="rounded-2xl border border-success/30 bg-success/5 p-5 sm:p-7"
         >
@@ -387,54 +337,6 @@ defmodule SpaceTradersWeb.StrategyLive do
   end
 
   @impl true
-  def handle_event("engage_emergency_stop", _params, socket) do
-    case FleetStrategy.engage_emergency_stop(socket.assigns.current_scope) do
-      {:ok, projection} ->
-        {:noreply,
-         socket
-         |> put_flash(:error, "Emergency Stop engaged. New gameplay mutations are suppressed.")
-         |> assign_review(projection)}
-    end
-  end
-
-  def handle_event("resume_from_emergency_stop", _params, socket) do
-    case FleetStrategy.resume(
-           socket.assigns.current_scope,
-           socket.assigns.projection.emergency_stop_version
-         ) do
-      {:ok, projection} ->
-        {:noreply,
-         socket
-         |> put_flash(
-           :info,
-           "Authoritative state refreshed. Fresh planning must select an admissible plan before Emergency Stop clears."
-         )
-         |> assign_review(projection)}
-
-      {:error, :stale_emergency_stop} ->
-        {:noreply,
-         socket
-         |> put_flash(:error, "Emergency Stop changed elsewhere. Review its current state.")
-         |> assign_review()}
-
-      {:error, :authoritative_refresh_required} ->
-        {:noreply,
-         put_flash(
-           socket,
-           :error,
-           "Emergency Stop remains engaged because authoritative Fleet state could not be refreshed."
-         )}
-
-      {:error, :reconciliation_required} ->
-        {:noreply,
-         put_flash(
-           socket,
-           :error,
-           "Emergency Stop remains engaged while accepted game actions are reconciled."
-         )}
-    end
-  end
-
   def handle_event("select_preset", %{"id" => preset_id}, socket) do
     case FleetStrategy.select_preset(socket.assigns.current_scope, preset_id) do
       {:ok, projection} ->
@@ -560,9 +462,6 @@ defmodule SpaceTradersWeb.StrategyLive do
     cond do
       projection.draft_version != previous.draft_version ->
         {:noreply, assign(reviewed, :draft_stale?, true)}
-
-      projection.emergency_stop_version != previous.emergency_stop_version ->
-        {:noreply, reviewed}
 
       true ->
         {:noreply, socket}

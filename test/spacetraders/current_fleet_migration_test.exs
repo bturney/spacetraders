@@ -74,6 +74,7 @@ defmodule SpaceTraders.CurrentFleetMigrationTest do
       |> List.update_at(8, fn rows ->
         Enum.map(rows, fn [row] -> [Map.put(row, "recovery_credential_ciphertext", nil)] end)
       end)
+      |> drop_retired_columns()
 
     assert retained() == expanded
 
@@ -274,6 +275,7 @@ defmodule SpaceTraders.CurrentFleetMigrationTest do
       |> List.update_at(8, fn rows ->
         Enum.map(rows, fn [row] -> [Map.put(row, "recovery_credential_ciphertext", nil)] end)
       end)
+      |> drop_retired_columns()
 
     historical_ships = query("SELECT agent_id, retired_at FROM ships").rows
     retired_at = DateTime.to_naive(now)
@@ -568,6 +570,21 @@ defmodule SpaceTraders.CurrentFleetMigrationTest do
       ).rows
 
     id
+  end
+
+  # Emergency Stop columns are dropped by a later migration (#759).
+  defp drop_retired_columns(tables) do
+    List.update_at(tables, 2, fn rows ->
+      Enum.map(rows, fn [row] ->
+        [
+          Map.drop(row, [
+            "emergency_stopped_at",
+            "emergency_resume_prepared_at",
+            "emergency_stop_version"
+          ])
+        ]
+      end)
+    end)
   end
 
   defp retained do

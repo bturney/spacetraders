@@ -43,7 +43,6 @@ defmodule SpaceTraders.CurrentFleetDurabilityTest do
       topics = ["fleet_allocation" | Enum.map(agent_ids, &"fleet:#{&1}")]
       Repo.delete_all(from(n in SpaceTraders.Outbox.Notification, where: n.topic in ^topics))
       SpaceTraders.AgentFixtures.cleanup_operator_fixture(operator.id)
-      SpaceTraders.EmergencyStopAdmission.clear()
       SpaceTraders.FleetGenerationAdmission.clear()
       restart_capacity_governor()
       Sandbox.mode(Repo, :manual)

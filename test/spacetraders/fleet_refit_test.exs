@@ -109,8 +109,8 @@ defmodule SpaceTraders.FleetRefitTest do
     end
 
     @tag :refit_progression
-    test "#{kind} bounded historical effect reconciles during Stop without restoring authority" do
-      {scope, agent, _revision, ship} = generation()
+    test "#{kind} bounded historical effect reconciles" do
+      {_scope, agent, _revision, ship} = generation()
       {intent, action} = selected_refit(agent, ship, unquote(kind))
 
       {:ok, %{intent: intent, attempt: attempt}} =
@@ -145,36 +145,11 @@ defmodule SpaceTraders.FleetRefitTest do
             )
         )
 
-      {:ok, _} = SpaceTraders.FleetStrategy.engage_emergency_stop(scope)
       stub_refit_facts(agent, ship, refit_after_body(ship.symbol, unquote(kind)))
       _ = Intents.reconcile(agent.id, ship.symbol, nil, :boot, intent.id)
       _ = Intents.reconcile(agent.id, ship.symbol, nil, :arrival, intent.id)
       assert SpaceTraders.MutationAttempts.get!(attempt.id).state == "accepted"
       assert %Intent{status: "completed", in_flight_action: nil} = Repo.get!(Intent, intent.id)
-      assert length(SpaceTraders.MutationAttempts.list_for_agent(agent)) == 1
-    end
-
-    @tag :refit_progression
-    test "#{kind} absence during Stop retires retry and leaves resume unblocked" do
-      {scope, agent, _revision, ship} = generation()
-      {intent, action} = selected_refit(agent, ship, unquote(kind))
-
-      {:ok, %{attempt: attempt}} =
-        SpaceTraders.Fleet.Intents.RecordedAction.prepare(agent, intent, action)
-
-      {:ok, _} = SpaceTraders.MutationAttempts.mark_sent_or_unknown(attempt)
-      {:ok, _} = SpaceTraders.FleetStrategy.engage_emergency_stop(scope)
-      stub_refit_facts(agent, ship, refit_before_body(ship.symbol, unquote(kind)))
-      _ = Intents.reconcile(agent.id, ship.symbol, nil, :boot, intent.id)
-      original = SpaceTraders.MutationAttempts.get!(attempt.id)
-      assert original.state == "absent"
-      refute original.retry_authorized
-      assert Repo.get!(Intent, intent.id).in_flight_action == nil
-      refute SpaceTraders.SafetyFence.active?(original)
-
-      assert :ok =
-               SpaceTraders.Fleet.prepare_emergency_stop_resume(DateTime.utc_now())
-
       assert length(SpaceTraders.MutationAttempts.list_for_agent(agent)) == 1
     end
 
@@ -646,10 +621,10 @@ defmodule SpaceTraders.FleetRefitTest do
     refute_received {"POST", ^remove_path}
   end
 
-  for refusal <- [:safety_fence, :emergency_stop] do
+  for refusal <- [:safety_fence] do
     @refusal refusal
     test "module preparation #{@refusal} after Readiness observation refuses safely" do
-      {scope, agent, _revision, ship} = generation()
+      {_scope, agent, _revision, ship} = generation()
       {_scope, _agent, _ship, portfolio, commitment} = claimed_refit_ship(agent, ship, "remove")
 
       Req.Test.stub(SpaceTraders.API, fn conn ->
@@ -657,9 +632,6 @@ defmodule SpaceTraders.FleetRefitTest do
         assert conn.request_path == "/v2/my/ships/#{ship.symbol}"
 
         case @refusal do
-          :emergency_stop ->
-            assert {:ok, _} = SpaceTraders.FleetStrategy.engage_emergency_stop(scope)
-
           :safety_fence ->
             {:ok, pending} =
               SpaceTraders.MutationAttempts.prepare(
@@ -691,11 +663,7 @@ defmodule SpaceTraders.FleetRefitTest do
 
       attempts = SpaceTraders.MutationAttempts.list_for_agent(agent)
 
-      if @refusal == :safety_fence do
-        assert [%{state: "ambiguous", operation_id: "purchase-cargo"}] = attempts
-      else
-        assert attempts == []
-      end
+      assert [%{state: "ambiguous", operation_id: "purchase-cargo"}] = attempts
     end
   end
 

@@ -21,45 +21,8 @@ defmodule SpaceTraders.Fleet do
   alias SpaceTraders.API.AgentTokenReference
   alias SpaceTraders.Fleet.{Activity, IntentBlocker, Ship, ShipDestination}
 
-  alias SpaceTraders.Fleet.Intents
   alias SpaceTraders.Repo
   alias SpaceTraders.{Agent, Contracts, Intelligence, World}
-
-  @doc "Safely retires pre-stop execution state before fresh Fleet planning."
-  def prepare_emergency_stop_resume(now) do
-    current_ship_ids = current_ship_ids(:current_generation)
-    stale_ship_ids = current_ship_ids(:stale_generation)
-    all_ship_ids = current_ship_ids ++ stale_ship_ids
-
-    Intents.censor_reset_generation(stale_ship_ids, now)
-
-    if Intents.emergency_stop_reconciled?(current_ship_ids) do
-      Intents.supersede_for_emergency_stop(all_ship_ids, now)
-      :ok
-    else
-      {:error, :reconciliation_required}
-    end
-  end
-
-  defp current_ship_ids(generation) do
-    stale_filter =
-      case generation do
-        :current_generation -> dynamic([_ship, agent], is_nil(agent.stale_at))
-        :stale_generation -> dynamic([_ship, agent], not is_nil(agent.stale_at))
-      end
-
-    Repo.all(
-      from ship in Ship,
-        join: agent in AgentRecord,
-        on: agent.id == ship.agent_id,
-        join: fleet in SpaceTraders.FleetGeneration.Generation,
-        on: fleet.agent_id == agent.id,
-        join: identity in "current_fleet_identity",
-        on: identity.id == 1 and identity.fleet_generation_id == fleet.id,
-        where: ^stale_filter,
-        select: ship.id
-    )
-  end
 
   @doc """
   Pulls the agent's live fleet from the game API.
@@ -160,18 +123,17 @@ defmodule SpaceTraders.Fleet do
       markets: {:error, :stale_agent},
       waypoints: {:error, :stale_agent},
       activity: [],
-      control: %{attention: [], attention_count: 0, healthy?: false}
+      control: %{healthy?: false}
     }
   end
 
   # These facts keep operational interpretation at the Ship Execution boundary.
   # The dashboard can still render the underlying game state without recreating
-  # decisions about what needs an Operator's attention.
+  # operational decisions.
   defp annotate_control_state({:ok, ships}) do
     {:ok,
      Enum.map(ships, fn ship ->
        Map.put(ship, :control, %{
-         attention: ship_attention(ship),
          readiness: %{flight_mode: ship_flight_mode(ship)},
          navigation: %{
            available?: Map.get(Map.get(ship, :actions, %{}), :navigate, %{})[:allowed?] == true,
@@ -185,52 +147,16 @@ defmodule SpaceTraders.Fleet do
   defp annotate_control_state(result), do: result
 
   defp fleet_control({:ok, ships}) do
-    attention = Enum.filter(ships, & &1.control.attention.needed?)
-
     %{
-      attention: attention,
-      attention_count: length(attention),
-      healthy?: ships != [] and attention == []
+      healthy?:
+        ships != [] and not Enum.any?(ships, &match?(%{intents: %{status: "blocked"}}, &1))
     }
   end
 
-  defp fleet_control(_), do: %{attention: [], attention_count: 0, healthy?: false}
-
-  defp ship_attention(%{intents: %{status: "blocked"} = intent}) do
-    %{needed?: true, summary: intent_attention_summary(intent)}
-  end
-
-  defp ship_attention(_), do: %{needed?: false, summary: nil}
+  defp fleet_control(_), do: %{healthy?: false}
 
   defp ship_flight_mode(%{nav: %{flight_mode: mode}}) when is_binary(mode), do: mode
   defp ship_flight_mode(_), do: "—"
-
-  defp intent_attention_summary(%{blocker: %IntentBlocker{} = blocker}),
-    do: blocker_attention_summary(blocker)
-
-  defp intent_attention_summary(_), do: "Blocked"
-
-  defp blocker_attention_summary(%IntentBlocker{summary: summary})
-       when is_binary(summary) and summary != "",
-       do: summary
-
-  defp blocker_attention_summary(%IntentBlocker{
-         corrective_actions: actions,
-         resolver: resolver,
-         retry_condition: retry_condition
-       }) do
-    actions = Enum.join(actions || [], ", ")
-
-    [
-      if(actions == "", do: "Resolve blocked work", else: "Actions: #{actions}"),
-      if(is_binary(resolver) and resolver != "", do: "Resolver: #{resolver}"),
-      if(is_binary(retry_condition) and retry_condition != "",
-        do: "retry when #{retry_condition}"
-      )
-    ]
-    |> Enum.reject(&is_nil/1)
-    |> Enum.join("; ")
-  end
 
   defp annotate_activity(activity) do
     Enum.map(activity, fn event ->
@@ -383,14 +309,14 @@ defmodule SpaceTraders.Fleet do
   defp intents_for_ships(agent) do
     agent
     |> SpaceTraders.Fleet.Intents.current()
-    |> Enum.filter(&(&1.caller in ["commitment", "intervention"]))
+    |> Enum.filter(&(&1.caller == "commitment"))
     |> Map.new(&{&1.ship_id, &1})
   end
 
   defp intents_history_for_ships(agent) do
     agent
     |> SpaceTraders.Fleet.Intents.history()
-    |> Enum.filter(&(&1.caller in ["commitment", "intervention"]))
+    |> Enum.filter(&(&1.caller == "commitment"))
     |> Enum.group_by(& &1.ship_id)
   end
 

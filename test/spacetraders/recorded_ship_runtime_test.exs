@@ -81,7 +81,6 @@ defmodule SpaceTraders.RecordedShipRuntimeTest do
     on_exit(fn ->
       SpaceTraders.Quiesced.stop_all_ships()
       SpaceTraders.Contracts.DeadlineServer.stop_all()
-      SpaceTraders.EmergencyStopAdmission.clear()
       SpaceTraders.FleetGenerationAdmission.clear()
 
       Sandbox.unboxed_run(Repo, fn ->
@@ -113,81 +112,6 @@ defmodule SpaceTraders.RecordedShipRuntimeTest do
     start_runtime()
     {conn, agent} = mint_generation()
     {:ok, conn: conn, agent: agent, game: game, observer: observer, barrier: barrier, gate: gate}
-  end
-
-  test "Emergency Stop overlaps a checked final authorization transaction; admitted work completes once",
-       context do
-    install_barrier(:transport_authorization_checked, context)
-    activate(context.conn)
-
-    assert_receive {:boundary, sender, :transport_authorization_checked, authorization_backend},
-                   5_000
-
-    assert_receive {:authorization_transaction, true}
-    assert orbit_count(context.game) == 0
-    scope = Scope.for_operator(Repo.get!(Operator, context.agent.operator_id))
-    owner = self()
-
-    stop =
-      Task.async(fn ->
-        Repo.checkout(fn ->
-          [[backend]] = Repo.query!("SELECT pg_backend_pid()").rows
-          send(owner, {:stop_backend, backend})
-          SpaceTraders.FleetStrategy.engage_emergency_stop(scope)
-        end)
-      end)
-
-    assert_receive {:stop_backend, stop_backend}, 5_000
-
-    eventually(
-      fn ->
-        SpaceTraders.EmergencyStopAdmission.mutation_allowed?(context.agent.agent_token) ==
-          {:error, :emergency_stopped}
-      end,
-      500,
-      context
-    )
-
-    assert authorization_backend != stop_backend
-
-    eventually(
-      fn ->
-        Postgrex.query!(context.observer, "SELECT $1::int = ANY(pg_blocking_pids($2::int))", [
-          authorization_backend,
-          stop_backend
-        ]).rows == [[true]]
-      end,
-      500,
-      context
-    )
-
-    # The stop's durable write waits behind final authorization's Strategy lock.
-    send(sender, :continue)
-    assert {:ok, _} = Task.await(stop, 5_000)
-    eventually(fn -> orbit_count(context.game) == 1 end, 500, context)
-
-    eventually(
-      fn ->
-        Enum.any?(
-          SpaceTraders.MutationAttempts.list_for_agent(context.agent),
-          &(&1.operation_id == "orbit-ship" and &1.state == "succeeded")
-        )
-      end,
-      500,
-      context
-    )
-
-    assert [[id, "succeeded", _]] = observe_attempts(context.observer, context.agent.id)
-    stop_supervised(DemandScheduler)
-    stop_supervised(Reconciler)
-    SpaceTraders.Quiesced.stop_all_ships()
-    restart_runtime()
-    assert orbit_count(context.game) == 1
-
-    refute Enum.any?(
-             SpaceTraders.MutationAttempts.list_for_agent(context.agent),
-             &(&1.retry_of_id == id)
-           )
   end
 
   for {phase, committed_state, accepted} <- [
@@ -248,7 +172,7 @@ defmodule SpaceTraders.RecordedShipRuntimeTest do
     end
   end
 
-  for winner <- [:revocation, :authorization], loss <- [:emergency_stop, :claim] do
+  for winner <- [:revocation, :authorization], loss <- [:claim] do
     @winner winner
     @loss loss
     test "#{@loss} race: #{@winner} linearizes first and boot never adds a send", context do
@@ -289,7 +213,7 @@ defmodule SpaceTraders.RecordedShipRuntimeTest do
   end
 
   for phase <- [:prepared, :marker_committed],
-      loss <- [:claim, :selection, :revision, :emergency_stop, :generation, :singleton] do
+      loss <- [:claim, :selection, :revision, :generation, :singleton] do
     @phase phase
     @loss loss
     test "#{@loss} lost at #{@phase} suppresses obsolete runtime transport", context do
@@ -331,57 +255,6 @@ defmodule SpaceTraders.RecordedShipRuntimeTest do
                  )
       end
     end
-  end
-
-  test "explicit Emergency Stop resume preparation reconciles without releasing its obsolete action",
-       context do
-    install_barrier(:marker_committed, context)
-    activate(context.conn)
-    assert_receive {:boundary, sender, :marker_committed, _}, 5_000
-    assert [[id, "sent_or_unknown", _]] = observe_attempts(context.observer, context.agent.id)
-    scope = Scope.for_operator(Repo.get!(Operator, context.agent.operator_id))
-    assert {:ok, stopped} = SpaceTraders.FleetStrategy.engage_emergency_stop(scope)
-    send(sender, :continue)
-
-    eventually(
-      fn -> SpaceTraders.MutationAttempts.get!(id).state == "ambiguous" end,
-      500,
-      context
-    )
-
-    assert orbit_count(context.game) == 0
-
-    advance_observation_clock_to_now()
-
-    assert {:error, :reconciliation_required} =
-             SpaceTraders.FleetStrategy.resume(scope, stopped.emergency_stop_version)
-
-    assert :ok = SpaceTraders.Fleet.Intents.rearm_on_boot()
-    assert orbit_count(context.game) == 0
-
-    assert {:ok, prepared} =
-             SpaceTraders.FleetStrategy.resume(scope, stopped.emergency_stop_version)
-
-    assert %DateTime{} = prepared.emergency_stopped_at
-    assert %DateTime{} = prepared.emergency_resume_prepared_at
-
-    old = SpaceTraders.MutationAttempts.get!(id)
-    assert old.state == "absent"
-    refute old.retry_authorized
-
-    refute Enum.any?(
-             SpaceTraders.MutationAttempts.list_for_agent(context.agent),
-             &(&1.retry_of_id == id)
-           )
-
-    assert Repo.get!(Intent, old.provenance["intent_id"]).status in Intent.terminal_states()
-    assert {:error, :attempt_already_dispatched} = SpaceTraders.API.dispatch_recorded(old)
-    assert orbit_count(context.game) == 0
-  end
-
-  defp revoke(:emergency_stop, context, _intent) do
-    scope = Scope.for_operator(Repo.get!(Operator, context.agent.operator_id))
-    assert {:ok, _} = SpaceTraders.FleetStrategy.engage_emergency_stop(scope)
   end
 
   defp revoke(:singleton, _context, _intent), do: stop_supervised!(RuntimeAuthority)

@@ -40,7 +40,7 @@ defmodule SpaceTraders.MutationAttemptsTest do
     intent =
       Repo.insert!(%Intent{
         ship_id: ship.id,
-        caller: "intervention",
+        caller: "commitment",
         type: "navigate",
         target_waypoint: "X1-TEST-B2",
         in_flight_action: %{"kind" => "navigate"}
@@ -54,7 +54,7 @@ defmodule SpaceTraders.MutationAttemptsTest do
       assert attempt.provenance["ship_id"] == ship.id
       assert attempt.provenance["ship_symbol"] == ship.symbol
       assert attempt.provenance["intent_id"] == intent.id
-      assert attempt.provenance["decision_episode_id"] == 17
+      assert is_integer(attempt.provenance["decision_episode_id"])
       assert attempt.expected_effects == ["Ship nav and fuel response"]
       assert attempt.consequence_bounds == ["starts local transit"]
 
@@ -602,7 +602,7 @@ defmodule SpaceTraders.MutationAttemptsTest do
     intent =
       Repo.insert!(%Intent{
         ship_id: ship.id,
-        caller: "intervention",
+        caller: "commitment",
         type: "deliver",
         target_waypoint: "X1-TEST-A1",
         in_flight_action: %{"kind" => "deliver"}
@@ -669,7 +669,7 @@ defmodule SpaceTraders.MutationAttemptsTest do
 
     Repo.insert!(%Intent{
       ship_id: ship.id,
-      caller: "intervention",
+      caller: "commitment",
       type: "navigate",
       target_waypoint: destination,
       in_flight_action: %{"kind" => "navigate", "waypoint" => destination}

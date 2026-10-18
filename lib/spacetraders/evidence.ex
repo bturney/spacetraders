@@ -2,21 +2,16 @@ defmodule SpaceTraders.Evidence do
   @demand_topic "observation_demands"
   @moduledoc """
   Owns durable Observation Demands and authoritative evidence provenance.
-
-  Emergency Stop resume uses this seam so Fleet Strategy coordinates durable
-  authority without invoking or interpreting gameplay reads itself.
   """
 
   import Ecto.Query
 
   alias SpaceTraders.Agent.Agent, as: AgentRecord
-  alias SpaceTraders.Agent.Scope
   alias SpaceTraders.API
   alias SpaceTraders.API.AgentTokenReference
   alias SpaceTraders.Clock
   alias SpaceTraders.Evidence.{Demand, Observation, ObservationDemand}
   alias SpaceTraders.Evidence.ReadCoordinator
-  alias SpaceTraders.Fleet
   alias SpaceTraders.FleetGeneration
   alias SpaceTraders.API.OperationInventory
   alias SpaceTraders.FleetStrategy.{Revision, Strategy}
@@ -1715,36 +1710,6 @@ defmodule SpaceTraders.Evidence do
     :sha256
     |> :crypto.hash(:erlang.term_to_binary(value, [:deterministic]))
     |> Base.encode16(case: :lower)
-  end
-
-  @doc "Refreshes authoritative Agent and Ship state before post-stop planning."
-  def refresh_for_emergency_stop_resume(%Scope{} = scope) do
-    with {:ok, _operator_id} <- SpaceTraders.OperatorAuthority.authorize(scope),
-         {:ok, identity} <- FleetGeneration.current_fleet(scope) do
-      case identity do
-        %{state: :current, agent: %{id: agent_id}} ->
-          refresh_current_fleet(Repo.get!(AgentRecord, agent_id))
-
-        _setup_or_transition ->
-          :ok
-      end
-    end
-  end
-
-  defp refresh_current_fleet(agent) do
-    case FleetGeneration.agent_overview(agent) do
-      {:ok, _overview} ->
-        case Fleet.list_ships(agent) do
-          {:ok, _ships} -> :ok
-          _error -> {:error, :authoritative_refresh_required}
-        end
-
-      {:error, :stale_agent} ->
-        :ok
-
-      _error ->
-        {:error, :authoritative_refresh_required}
-    end
   end
 
   defp compatible_demands(agent, subject, observation, now) do

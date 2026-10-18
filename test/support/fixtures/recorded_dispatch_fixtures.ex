@@ -12,11 +12,11 @@ defmodule SpaceTraders.RecordedDispatchFixtures do
   alias SpaceTraders.Fleet.Intents.RecordedAction
   alias SpaceTraders.Fleet.{Intent, Ship}
   alias SpaceTraders.FleetAllocation
-  alias SpaceTraders.FleetAllocation.PortfolioCandidate
+  alias SpaceTraders.FleetAllocation.{Commitment, Portfolio, PortfolioCandidate}
   alias SpaceTraders.FleetGeneration.Generation
   alias SpaceTraders.FleetStrategy.{Revision, Strategy}
   alias SpaceTraders.SafetyFence.DependencyKey
-  alias SpaceTraders.{ManualIntervention, Repo}
+  alias SpaceTraders.Repo
 
   def dispatch_action(ship_symbol, action, token \\ "TOKEN") do
     agent = operator_fixture() |> agent_fixture(%{agent_token: token})
@@ -44,7 +44,7 @@ defmodule SpaceTraders.RecordedDispatchFixtures do
       if action["kind"] == "transfer" do
         transfer_intent(agent, ship, generation, revision, action)
       else
-        intervention_intent(agent, ship, action, opts[:intent])
+        commitment_intent(agent, ship, generation, revision, action, opts[:intent])
       end
 
     action =
@@ -280,29 +280,123 @@ defmodule SpaceTraders.RecordedDispatchFixtures do
     :ok
   end
 
-  defp intervention_intent(agent, ship, action, existing) do
-    intent =
-      if existing do
-        existing
-        |> Ecto.Changeset.change(in_flight_action: nil, mutation_attempt_id: nil)
-        |> Repo.update!()
+  @doc "A navigate Intent for `ship` under a one-Ship Fleet Commitment of the Agent's Generation."
+  def navigate_intent(agent, ship, waypoint) do
+    {generation, revision} = ensure_generation(agent)
+    commitment_intent(agent, ship, generation, revision, %{"waypoint" => waypoint}, nil)
+  end
+
+  # A navigate Intent under a one-Ship Fleet Commitment: the same durable
+  # authority a Strategy-governed Fleet gives every ordinary Ship action.
+  defp commitment_intent(agent, ship, generation, revision, action, existing) do
+    ownership =
+      if revision do
+        candidate = %PortfolioCandidate{
+          id: "adapter-#{ship.symbol}",
+          strategy_revision_id: revision.id,
+          objective_index: 0,
+          claims: [ship.symbol],
+          reservations: %{},
+          pledges: [],
+          dependencies: [],
+          expected_value: 1,
+          unwind_cost: 0
+        }
+
+        commitment = publish_commitment(agent, generation, revision, candidate)
+
+        [
+          caller: "commitment",
+          fleet_commitment_id: commitment.id,
+          fleet_commitment_portfolio_id: commitment.portfolio.id,
+          fleet_commitment_portfolio_version: commitment.portfolio.version
+        ]
       else
-        Repo.insert!(%Intent{
-          ship_id: ship.id,
-          caller: "intervention",
-          type: "navigate",
-          status: "active",
-          target_waypoint: action["waypoint"] || agent.headquarters
-        })
+        # Without an active Revision no Portfolio can be published: the Intent
+        # carries no Commitment and admission refuses it.
+        [caller: "commitment"]
       end
 
-    Repo.insert!(%ManualIntervention{
-      intent_id: intent.id,
-      reason: "Controlled operation adapter proof",
-      target_waypoint: intent.target_waypoint
-    })
+    if existing do
+      existing
+      |> Ecto.Changeset.change([in_flight_action: nil, mutation_attempt_id: nil] ++ ownership)
+      |> Repo.update!()
+    else
+      Repo.insert!(
+        struct!(
+          Intent,
+          [
+            ship_id: ship.id,
+            type: "navigate",
+            status: "active",
+            target_waypoint: action["waypoint"] || agent.headquarters
+          ] ++ ownership
+        )
+      )
+    end
+  end
 
-    intent
+  # One Commitment per Ship. A Ship that already has current authority reuses
+  # it; a later Ship joins the Generation's current Portfolio rather than
+  # superseding the Commitments earlier Ships act under.
+  defp publish_commitment(agent, generation, revision, candidate) do
+    [ship_symbol] = candidate.claims
+
+    with {:error, :no_current_ship_claim} <-
+           FleetAllocation.current_ship_claim(agent, ship_symbol),
+         %Portfolio{} = portfolio <-
+           Repo.one(
+             from p in Portfolio,
+               where: p.fleet_generation_id == ^generation.id and is_nil(p.superseded_at)
+           ) do
+      commitment =
+        Repo.insert!(%Commitment{
+          fleet_commitment_portfolio_id: portfolio.id,
+          candidate_id: candidate.id,
+          objective_index: 0,
+          claims: [ship_symbol],
+          expected_value: 1.0,
+          unwind_cost: 0.0,
+          decisive_reason: "adapter"
+        })
+
+      Repo.insert_all("fleet_commitment_claims", [
+        %{
+          fleet_commitment_portfolio_id: portfolio.id,
+          fleet_commitment_id: commitment.id,
+          resource: ship_symbol
+        }
+      ])
+
+      %{id: commitment.id, portfolio: portfolio}
+    else
+      {:ok, claim} ->
+        %{id: claim.commitment_id, portfolio: Repo.get!(Portfolio, claim.portfolio_id)}
+
+      nil ->
+        publish_first_commitment(agent, generation, revision, candidate)
+    end
+  end
+
+  defp publish_first_commitment(agent, generation, revision, candidate) do
+    {:ok, selection} =
+      FleetAllocation.select_portfolio(revision, [candidate], %{
+        as_of: DateTime.utc_now(),
+        source_version: generation.allocation_version,
+        claims: candidate.claims,
+        reservations: candidate.reservations
+      })
+
+    {:ok, portfolio} =
+      FleetAllocation.publish_portfolio(
+        Scope.for_operator(Repo.get!(Operator, agent.operator_id)),
+        generation.id,
+        selection,
+        %{evidence_references: [], expectations: %{}, calibration_version: "adapter"}
+      )
+
+    [commitment] = portfolio.commitments
+    %{id: commitment.id, portfolio: portfolio}
   end
 
   defp transfer_intent(agent, source, generation, revision, action) do

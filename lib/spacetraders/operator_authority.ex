@@ -3,12 +3,12 @@ defmodule SpaceTraders.OperatorAuthority do
   The global Operator authority boundary (ADR 0015).
 
   A deployment has one authenticated Operator. A `Scope` authenticates a
-  command or read; it does not select which Fleet Strategy, Emergency Stop,
+  command or read; it does not select which Fleet Strategy,
   Operator conditions or history it governs. Those belong to the deployment and
   are resolved from the durable current Fleet identity, never from the caller.
 
   Authority here is authorship and control, not standing gameplay authority:
-  callers still pass Strategy, Emergency Stop and runtime authority checks.
+  callers still pass Strategy and runtime authority checks.
   """
 
   import Ecto.Query, only: [from: 2]

@@ -65,8 +65,7 @@ Links contain no Grafana credentials. They carry only:
 
 Episode links cover five minutes before selection through five minutes after
 the last recorded outcome; an evaluating episode ends at `now`. Objective
-links cover the current Fleet Generation. Attention links begin five minutes
-before the condition was recorded and end at `now` while unresolved.
+links cover the current Fleet Generation.
 
 Durable IDs are high-cardinality values. They are retained as structured JSON
 logger metadata and parsed by Loki at query time. They are not Prometheus
@@ -105,9 +104,6 @@ Market trade vs coverage pilot (#671); bounded labels only, IDs in logs:
   `stall_reason` `stale_revision_portfolio` | `authority_blocked_intent` |
   `overdue_demands_without_coverage`; one open per Generation, refreshed in
   place (`last_observed_at`, `observation_count`), closed by `resolved_at`.
-  While open: one Degraded Attention, condition key
-  `allocation-stall:<generation_id>`, `strategy_decision_episode_id` = the
-  stall Episode; resolved by the recovering observation.
   Mission Control reads it (`MissionControl.market_execution/1` `:dispositions`,
   `MissionControl.MarketDisposition`): `state` precedence `stalled` (only
   non-healthy: Degraded Operation, no Operator action), `spending_paused`

@@ -13,6 +13,7 @@ defmodule SpaceTradersWeb.FleetOutcomeMetricsTest do
   alias SpaceTraders.Agent.Scope
   alias SpaceTraders.FleetAllocation
   alias SpaceTraders.FleetAllocation.PortfolioCandidate
+  alias SpaceTraders.Fleet.Intents
   alias SpaceTraders.{Evidence, MutationAttempts}
   alias SpaceTraders.FleetGeneration.Generation
   alias SpaceTraders.FleetStrategy.{Revision, Strategy}
@@ -75,9 +76,8 @@ defmodule SpaceTradersWeb.FleetOutcomeMetricsTest do
     %{agent: agent, ship: ship, operator: operator}
   end
 
-  test "real Navigate flow coalesces Intent states and mutation nav facts into full vectors",
-       context do
-    %{agent: agent, ship: ship} = allocation_fixture(context)
+  test "Intent states and observed nav facts coalesce into full vectors", context do
+    %{agent: agent, ship: ship} = allocation = allocation_fixture(context)
     start_worker(coalesce_ms: 1_000)
     baseline()
     ship_path = "/v2/my/ships/#{ship.symbol}"
@@ -97,16 +97,19 @@ defmodule SpaceTradersWeb.FleetOutcomeMetricsTest do
       })
     end)
 
-    Repo.insert!(%SpaceTraders.Fleet.Intent{
-      ship_id: ship.id,
-      caller: "commitment",
-      type: "navigate",
-      status: "waiting",
-      target_waypoint: "X1-UX81-A2"
-    })
+    portfolio = publish_claim(allocation)
+    [commitment] = portfolio.commitments
 
+    assert {:ok, intent} =
+             Intents.insert_commitment_intent(commitment, portfolio, ship, %{
+               type: "navigate",
+               target_waypoint: "X1-UX81-A2"
+             })
+
+    Repo.update!(Ecto.Changeset.change(intent, status: "waiting"))
     assert {:ok, _} = Evidence.get_ship(agent, ship.symbol)
 
+    assert_projection(:claim, %{"claimed" => 1, "free" => 0})
     assert_projection(:intent_state, %{"none" => 0, "active" => 0, "waiting" => 1})
 
     assert_projection(:nav_status, %{

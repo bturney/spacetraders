@@ -27,7 +27,7 @@ defmodule SpaceTraders.FleetAllocation do
   alias SpaceTraders.FleetPlanning.CandidateContribution
   alias SpaceTraders.FleetStrategy
   alias SpaceTraders.FleetStrategy.Strategy
-  alias SpaceTraders.{Clock, ManualIntervention, OperatorAuthority, Outbox, Repo}
+  alias SpaceTraders.{Clock, OperatorAuthority, Outbox, Repo}
 
   alias SpaceTraders.FleetStrategy.{
     ObjectiveEvaluation,
@@ -1501,20 +1501,9 @@ defmodule SpaceTraders.FleetAllocation do
       )
 
     if active_generation? or active_revision? do
-      case current_ship_claim(agent, ship_symbol, opts) do
-        {:error, :no_current_ship_claim} = error ->
-          if ManualIntervention.authorized?(agent_id, ship_symbol, opts[:intent_id]) do
-            {:ok, %{commitment_id: nil, portfolio_id: nil, portfolio_version: nil}}
-          else
-            error
-          end
-
-        claim ->
-          claim
-      end
+      current_ship_claim(agent, ship_symbol, opts)
     else
-      # Fleet Commitment and authenticated Manual Intervention remain the
-      # supported execution authorities.
+      # Fleet Commitment remains the supported execution authority.
       {:ok, %{commitment_id: nil, portfolio_id: nil, portfolio_version: nil}}
     end
   end
@@ -2648,27 +2637,6 @@ defmodule SpaceTraders.FleetAllocation do
       nil -> {:error, :strategy_not_active}
     end
   end
-
-  @doc "Selects a fresh post-stop plan and only then restores mutation admission."
-  def complete_emergency_stop_resume(%Scope{} = scope, plans, expected_emergency_stop_version) do
-    with %{emergency_resume_prepared_at: %DateTime{} = prepared_at} <- FleetStrategy.get(scope),
-         {:ok, %{admissible: [selected | _]} = ranking} <- rank_plans(scope, plans),
-         true <- fresh_plan?(selected, prepared_at),
-         {:ok, projection} <-
-           FleetStrategy.complete_emergency_stop_resume(scope, expected_emergency_stop_version) do
-      {:ok, %{ranking: ranking, strategy: projection}}
-    else
-      {:ok, %{admissible: []}} -> {:error, :fresh_plan_required}
-      false -> {:error, :fresh_plan_required}
-      %{emergency_resume_prepared_at: nil} -> {:error, :resume_not_prepared}
-      error -> error
-    end
-  end
-
-  defp fresh_plan?(%{safety: %{observed_at: %DateTime{} = observed_at}}, prepared_at),
-    do: DateTime.compare(observed_at, prepared_at) in [:eq, :gt]
-
-  defp fresh_plan?(_plan, _prepared_at), do: false
 
   defp rank(%Revision{document: %{"objectives" => objectives}} = revision, plans)
        when is_list(objectives) and is_list(plans) do
