@@ -97,9 +97,9 @@ defmodule SpaceTraders.FleetAllocation do
   (Strategic Priority), objective, source/destination Waypoints, Trade Good,
   requirements, expected outcomes and validity.
   Nested Candidate evidence retains the persisted string-keyed JSON shape.
-  `:planned_rate` is estimated net credits per Ship-hour, or nil when unknown.
-  `expected_outcomes["planned_rate_evidence"]` retains the versioned model,
-  profiles, inputs and original completed-Intent/charge evidence. This rate
+  `:planned_rate` is the trade's estimated net credits per Ship-hour for its
+  best owned Ship, or nil when unknown; `expected_outcomes["trade_estimate"]`
+  retains that `SpaceTraders.Fleet.TradeEstimate` and its FUEL price. This rate
   describes rejected existing-Ship work, not an offered Ship's valuation.
   `fuel_reach.ships` names eligible owned Ships only; offers must be evaluated
   independently against route, readiness and capacity.

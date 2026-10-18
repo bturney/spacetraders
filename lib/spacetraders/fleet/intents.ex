@@ -591,11 +591,7 @@ defmodule SpaceTraders.Fleet.Intents do
            insert_commitment_intent(commitment, portfolio, ship, %{
              type: "buy",
              target_waypoint: candidate_source(candidate),
-             parameters:
-               Map.put(commitment_buy_parameters(candidate), "work_start", %{
-                 "profile" => SpaceTraders.FleetAllocation.MarketWorkRate.ship_profile(live_ship),
-                 "observation_id" => binding.observation.id
-               })
+             parameters: commitment_buy_parameters(candidate)
            }) do
       advance_new_intent(agent, intent, live_ship)
     else

@@ -58,10 +58,10 @@ defmodule SpaceTraders.FleetAllocation.Acquisition do
 
     fuel? =
       Enum.any?(work, fn work ->
-        Enum.any?(
-          get_in(work.expected_outcomes, ["planned_rate_evidence", "profiles"]) || [],
-          &(get_in(&1, ["fuel", "capacity"]) > 0)
-        )
+        case get_in(work.expected_outcomes, ["trade_estimate", "fuel_units"]) do
+          units when is_integer(units) -> units > 0
+          _ -> false
+        end
       end)
 
     operations = if fuel?, do: operations ++ ["refuel-ship"], else: operations

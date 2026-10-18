@@ -46,7 +46,7 @@ defmodule SpaceTraders.FleetAllocation.UnmetWork do
           required_capabilities: candidate["required_capabilities"],
           required_resources: candidate["required_resources"],
           expected_outcomes: candidate["expected_outcomes"],
-          planned_rate: candidate["expected_outcomes"]["planned_rate"],
+          planned_rate: candidate["expected_outcomes"]["net_credits_per_ship_hour"],
           dependencies: candidate["dependencies"],
           validity: %{
             as_of: as_of,

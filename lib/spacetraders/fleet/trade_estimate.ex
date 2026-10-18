@@ -57,11 +57,12 @@ defmodule SpaceTraders.Fleet.TradeEstimate do
   `fuel_price` is the FUEL purchase price per market unit, or nil when none
   is known (only a Ship without a fuel tank can do without it).
 
-  Returns `{:ok, estimate}` or `{:error, :unknown_engine | :unknown_coordinates
-  | :unknown_fuel_price}`.
+  Returns `{:ok, estimate}` or `{:error, :unknown_trade | :unknown_engine |
+  :unknown_coordinates | :unknown_fuel_price}`.
   """
   def trade(%{ship: ship, source: source, destination: destination} = input) do
-    with :ok <- engine(ship),
+    with :ok <- quantities(input),
+         :ok <- engine(ship),
          :ok <- coordinates([source, destination | empty_start(ship.position)]) do
       empty =
         if ship.position == :source,
@@ -92,6 +93,12 @@ defmodule SpaceTraders.Fleet.TradeEstimate do
       end
     end
   end
+
+  defp quantities(%{units: units, spread: spread})
+       when is_integer(units) and units > 0 and is_integer(spread),
+       do: :ok
+
+  defp quantities(_input), do: {:error, :unknown_trade}
 
   defp engine(%{speed: speed, condition: condition, fuel_capacity: capacity})
        when is_number(speed) and speed > 0 and is_number(condition) and condition >= 0 and

@@ -1799,12 +1799,14 @@ defmodule SpaceTraders.FleetAcquisitionTest do
 
   defp promised_readiness do
     ready = SpaceTraders.API.Model.Ship.from_json(acquired(@offered_speed))
-    profile = SpaceTraders.FleetAllocation.MarketWorkRate.ship_profile(ready)
-
     %{
       engine_speed: @offered_speed,
       configuration: SpaceTraders.FleetPlanning.ShipInvestment.configuration(ready),
-      work_profile: put_in(profile, ["fuel", "current"], 0)
+      work_profile: %{
+        "navigation" => %{"waypoint_symbol" => ready.nav.waypoint_symbol},
+        "cargo" => %{"capacity" => ready.cargo.capacity, "units" => ready.cargo.units},
+        "fuel" => %{"capacity" => ready.fuel.capacity}
+      }
     }
   end
 

@@ -112,7 +112,7 @@ defmodule SpaceTraders.Fleet.TradeEstimateTest do
                })
     end
 
-    test "is unknown without engine, coordinates or a needed fuel price" do
+    test "is unknown without quantities, engine, coordinates or a needed fuel price" do
       base = %{
         ship: Map.put(@frigate, :position, %{x: 0, y: 0}),
         source: %{x: 1, y: 0},
@@ -128,6 +128,7 @@ defmodule SpaceTraders.Fleet.TradeEstimateTest do
                TradeEstimate.trade(%{base | ship: %{base.ship | speed: nil}})
 
       assert {:error, :unknown_coordinates} = TradeEstimate.trade(%{base | source: nil})
+      assert {:error, :unknown_trade} = TradeEstimate.trade(%{base | spread: nil})
     end
   end
 end

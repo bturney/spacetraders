@@ -440,7 +440,7 @@ defmodule SpaceTraders.FleetAcquisition do
   defp readiness_matches?(ready, requirements) when is_map(ready) and is_map(requirements) do
     requirements = SpaceTraders.FleetAllocation.JsonEvidence.dump(requirements)
     configuration = SpaceTraders.FleetPlanning.ShipInvestment.configuration(ready)
-    profile = SpaceTraders.FleetAllocation.MarketWorkRate.ship_profile(ready)
+    profile = work_profile(ready)
 
     with %{} = promised <- requirements["configuration"],
          %{} = benchmark <- requirements["work_profile"],
@@ -460,6 +460,24 @@ defmodule SpaceTraders.FleetAcquisition do
   end
 
   defp readiness_matches?(_ready, _requirements), do: false
+
+  # Where the purchased Ship stands and what it holds, in the shape of the
+  # offer's promised work profile.
+  defp work_profile(%{
+         nav: %{waypoint_symbol: waypoint, status: status},
+         cargo: %{capacity: capacity, units: units},
+         fuel: %{capacity: fuel_capacity, current: current},
+         cooldown: %{remaining_seconds: remaining}
+       }) do
+    %{
+      "navigation" => %{"waypoint_symbol" => waypoint, "status" => status},
+      "cargo" => %{"capacity" => capacity, "units" => units},
+      "fuel" => %{"capacity" => fuel_capacity, "current" => current},
+      "cooldown" => %{"remaining_seconds" => remaining}
+    }
+  end
+
+  defp work_profile(_ship), do: nil
 
   defp matches_fields?(actual, expected) when is_map(actual) and is_map(expected),
     do:
