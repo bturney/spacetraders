@@ -102,7 +102,11 @@ defmodule SpaceTraders.FleetAllocationTest do
     end
 
     test "a trade with an estimate outranks one whose estimate is unknown" do
-      unknown = %{estimated_trade("unknown", 5_000, nil, nil) | expected_outcomes: %{maximum_credit_change: 5_000}}
+      unknown = %{
+        estimated_trade("unknown", 5_000, nil, nil)
+        | expected_outcomes: %{maximum_credit_change: 5_000}
+      }
+
       known = estimated_trade("known", 100, 50, "A-FRIGATE")
       claims = [ship_claim("A-FRIGATE", [:market_trader], 40, 90)]
 

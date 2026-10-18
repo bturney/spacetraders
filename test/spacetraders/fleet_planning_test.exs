@@ -312,7 +312,9 @@ defmodule SpaceTraders.FleetPlanningTest do
                FleetPlanning.plan_market(revision(), 0, rate_snapshot(ships))
 
       assert {near.destination_waypoint, far.destination_waypoint} == {"X1-A2", "X1-A5"}
-      assert far.expected_outcomes.maximum_credit_change > near.expected_outcomes.maximum_credit_change
+
+      assert far.expected_outcomes.maximum_credit_change >
+               near.expected_outcomes.maximum_credit_change
 
       # 60 units of distance: 60 fuel (44 credits at 72 per 100) and 57 s.
       assert %{
@@ -341,7 +343,9 @@ defmodule SpaceTraders.FleetPlanningTest do
                FleetPlanning.plan_market(revision(), 0, rate_snapshot(fresh))
 
       assert a.id == b.id
-      assert a.expected_outcomes.trade_estimate.seconds > b.expected_outcomes.trade_estimate.seconds
+
+      assert a.expected_outcomes.trade_estimate.seconds >
+               b.expected_outcomes.trade_estimate.seconds
     end
 
     test "the fastest reaching Ship sets the estimate" do
@@ -363,7 +367,11 @@ defmodule SpaceTraders.FleetPlanningTest do
                FleetPlanning.plan_market(revision(), 0, rate_snapshot(ships))
 
       assert candidate.expected_outcomes.net_credits_per_ship_hour == nil
-      assert candidate.expected_outcomes.trade_estimate == %{state: :unknown, reason: :unknown_engine}
+
+      assert candidate.expected_outcomes.trade_estimate == %{
+               state: :unknown,
+               reason: :unknown_engine
+             }
     end
   end
 
@@ -1258,10 +1266,16 @@ defmodule SpaceTraders.FleetPlanningTest do
     unpriced =
       acquisition_snapshot()
       |> put_in([:shipyards, Access.at(0), :ships, Access.at(0), :frame, :fuel_capacity], 100)
-      |> put_in([:unmet_work, Access.at(0), :expected_outcomes, "trade_estimate", "fuel_price"], nil)
+      |> put_in(
+        [:unmet_work, Access.at(0), :expected_outcomes, "trade_estimate", "fuel_price"],
+        nil
+      )
 
     assert {:ok,
-            %{candidate_contributions: [], limitations: [%{reason: :unknown_planned_rate} = refused]}} =
+            %{
+              candidate_contributions: [],
+              limitations: [%{reason: :unknown_planned_rate} = refused]
+            }} =
              FleetPlanning.plan_ship_acquisition(revision(), 0, unpriced)
 
     assert refused.valuation.offer_estimate == %{state: :unknown, reason: :unknown_fuel_price}

@@ -1799,6 +1799,7 @@ defmodule SpaceTraders.FleetAcquisitionTest do
 
   defp promised_readiness do
     ready = SpaceTraders.API.Model.Ship.from_json(acquired(@offered_speed))
+
     %{
       engine_speed: @offered_speed,
       configuration: SpaceTraders.FleetPlanning.ShipInvestment.configuration(ready),
