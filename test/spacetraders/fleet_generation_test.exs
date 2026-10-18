@@ -11,23 +11,17 @@ defmodule SpaceTraders.FleetGenerationTest do
   alias SpaceTraders.FleetGeneration
   alias SpaceTraders.Fleet.{Intent, Intents, Ship}
   alias SpaceTraders.FleetStrategy
-  alias SpaceTraders.OperatorConditions
   alias SpaceTraders.Evidence.Observation
   alias SpaceTraders.Repo
 
   import Ecto.Query, only: [from: 2]
 
-  test "missing replacement authority remains a durable Intervention until authority is restored" do
+  test "missing replacement authority refuses minting until authority is restored" do
     operator = operator_fixture()
     scope = Scope.for_operator(operator)
 
     assert {:error, :account_token_not_linked} =
              FleetGeneration.mint(scope, %{symbol: "NEEDSKEY", faction: "COSMIC"})
-
-    assert [%{kind: :intervention, summary: summary}] =
-             OperatorConditions.unresolved(scope)
-
-    assert summary =~ "AccountToken"
 
     {:ok, operator} =
       Agent.link_account_token(Scope.for_operator(operator), "ACCOUNT_TOKEN_SECRET")
@@ -39,10 +33,9 @@ defmodule SpaceTraders.FleetGenerationTest do
     end)
 
     assert {:ok, _} = FleetGeneration.mint(scope, %{symbol: "NEEDSKEY", faction: "COSMIC"})
-    assert OperatorConditions.unresolved(scope) == []
   end
 
-  test "only a complete owned Objective evaluation can create Attention" do
+  test "only a complete owned Objective evaluation is recorded" do
     owner = operator_fixture()
     scope = Scope.for_operator(owner)
     other_scope = Scope.for_operator(%SpaceTraders.Agent.Operator{id: -1})
@@ -81,7 +74,6 @@ defmodule SpaceTraders.FleetGenerationTest do
              FleetGeneration.record_objective_progress(other_scope, generation.id, 0, facts)
 
     assert Repo.get!(FleetGeneration.Generation, generation.id).objective_progress == %{}
-    assert SpaceTraders.OperatorConditions.unresolved(scope) == []
   end
 
   describe "Server Reset" do
@@ -193,21 +185,7 @@ defmodule SpaceTraders.FleetGenerationTest do
 
       {:ok, ship} = Fleet.owned_ship(agent, "RESETME-1")
 
-      intent =
-        Repo.insert!(%Intent{
-          ship_id: ship.id,
-          caller: "intervention",
-          type: "navigate",
-          status: "active",
-          target_waypoint: "X1-UX81-A2",
-          parameters: %{"reason" => "Late navigation"}
-        })
-
-      Repo.insert!(%SpaceTraders.ManualIntervention{
-        intent_id: intent.id,
-        reason: "Late navigation",
-        target_waypoint: "X1-UX81-A2"
-      })
+      intent = SpaceTraders.RecordedDispatchFixtures.navigate_intent(agent, ship, "X1-UX81-A2")
 
       live_ship =
         SpaceTraders.API.Model.Ship.from_json(SpaceTraders.ShipBody.ship_body(ship.symbol))
@@ -316,10 +294,9 @@ defmodule SpaceTraders.FleetGenerationTest do
       assert retired.agent_id == agent.id
       assert %DateTime{} = retired.retired_at
       assert FleetStrategy.get(scope).active_revision == revision
-      assert OperatorConditions.unresolved(scope) == []
     end
 
-    test "exhausted names leave a durable Intervention with no retry loop until the Operator retries",
+    test "exhausted names leave the predecessor fenced with no retry loop until the Operator retries",
          %{scope: scope, revision: revision, agent: agent} do
       {:ok, _} = SpaceTraders.AgentNameBank.save(["ORBITALIST", "PARALLAX"])
 
@@ -336,8 +313,6 @@ defmodule SpaceTraders.FleetGenerationTest do
                {"PARALLAX", "COSMIC"}
              ]
 
-      assert [%{kind: :intervention, summary: summary}] = OperatorConditions.unresolved(scope)
-      assert summary =~ "Agent Name Bank"
       assert {:ok, %{state: :transition, generation: fenced}} = FleetGeneration.current_fleet()
       assert fenced.agent_id == agent.id
       assert %DateTime{} = fenced.fenced_at
@@ -358,7 +333,6 @@ defmodule SpaceTraders.FleetGenerationTest do
 
       assert {:ok, %{agent: %{symbol: "SIDEREAL"}}} = FleetGeneration.replace_after_reset(scope)
       assert registrations() == [{"RESETME", "COSMIC"}, {"SIDEREAL", "COSMIC"}]
-      assert OperatorConditions.unresolved(scope) == []
 
       assert {:ok, %{state: :current, generation: %{fleet_strategy_revision_id: revision_id}}} =
                FleetGeneration.current_fleet()
@@ -401,12 +375,9 @@ defmodule SpaceTraders.FleetGenerationTest do
       assert registrations() == [{"RESETME", "COSMIC"}]
       assert {:ok, %{state: :transition}} = FleetGeneration.current_fleet()
       assert %{status: :clear} = FleetGeneration.registration_recovery(scope)
-
-      assert [%{kind: :intervention, summary: summary}] = OperatorConditions.unresolved(scope)
-      assert summary =~ "Retry replacement"
     end
 
-    test "recovering a lost replacement response clears earlier replacement Interventions",
+    test "recovering a lost replacement response adopts the replacement",
          %{scope: scope, agent: agent} do
       {:ok, _} = SpaceTraders.AgentNameBank.save(["ORBITALIST"])
 
@@ -416,7 +387,6 @@ defmodule SpaceTraders.FleetGenerationTest do
       end)
 
       assert {:error, :stale_agent} = FleetGeneration.agent_overview(agent)
-      assert [%{key: "replacement-symbols"}] = OperatorConditions.unresolved(scope)
       assert registrations() == [{"RESETME", "COSMIC"}, {"ORBITALIST", "COSMIC"}]
 
       game(fn conn -> Req.Test.transport_error(conn, :timeout) end)
@@ -438,7 +408,6 @@ defmodule SpaceTraders.FleetGenerationTest do
       assert replacement.id != agent.id
       assert {:ok, %{state: :current}} = FleetGeneration.current_fleet(scope)
       assert registrations() == []
-      assert OperatorConditions.unresolved(scope) == []
     end
 
     test "ordinary authentication and network failures are not Server Reset evidence",
@@ -461,7 +430,7 @@ defmodule SpaceTraders.FleetGenerationTest do
       assert {:error, :no_server_reset} = FleetGeneration.replace_after_reset(scope)
     end
 
-    test "missing AccountToken authority raises a durable Intervention before any registration",
+    test "missing AccountToken authority registers nothing",
          %{scope: scope, agent: agent} do
       Repo.update_all(
         from(o in SpaceTraders.Agent.Operator, where: o.id == ^scope.operator.id),
@@ -471,8 +440,6 @@ defmodule SpaceTraders.FleetGenerationTest do
       game(&reset_mismatch/1)
       assert {:error, :stale_agent} = FleetGeneration.agent_overview(agent)
       assert registrations() == []
-      assert [%{kind: :intervention, summary: summary}] = OperatorConditions.unresolved(scope)
-      assert summary =~ "AccountToken"
       assert {:ok, %{state: :transition}} = FleetGeneration.current_fleet()
     end
 

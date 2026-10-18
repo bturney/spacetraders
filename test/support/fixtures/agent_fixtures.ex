@@ -175,7 +175,7 @@ defmodule SpaceTraders.AgentFixtures do
       end
 
       for table <-
-            ~w(mutation_attempts mission_conditions fleet_generations fleet_strategies agents operators) do
+            ~w(mutation_attempts fleet_generations fleet_strategies agents operators) do
         column = if table == "operators", do: "id", else: "operator_id"
         Repo.query!("DELETE FROM #{table} WHERE #{column} = $1", [operator_id])
       end

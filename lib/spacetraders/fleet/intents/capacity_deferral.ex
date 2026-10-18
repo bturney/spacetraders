@@ -4,7 +4,7 @@ defmodule SpaceTraders.Fleet.Intents.CapacityDeferral do
   capacity pressure.
 
   Capacity Deferral is durable temporary waiting. It is never mutation
-  evidence, objective infeasibility, Neutral Wait, or Attention; MutationAttempts
+  evidence, objective infeasibility, or Neutral Wait; MutationAttempts
   keeps sole authority over any selected mutation it interrupts.
 
   The owning Intent stays durable and schedules a bounded Timeline wakeup from

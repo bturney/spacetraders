@@ -8,8 +8,8 @@ defmodule SpaceTraders.CreditFloorWatch do
   at once. Both record or release Shortfalls through
   `CreditCalibration.spending_pause/4` under the Agent spending lock, so the
   classification (revision floor, unattributable, non-pricing) matches the
-  admission checkpoint's. Nothing here spends, sells, recalibrates, or raises
-  Attention; unsent work is still refused at its own send boundary.
+  admission checkpoint's. Nothing here spends, sells, or recalibrates;
+  unsent work is still refused at its own send boundary.
   """
 
   import Ecto.Query

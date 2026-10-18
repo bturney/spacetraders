@@ -3,15 +3,14 @@ defmodule SpaceTradersWeb.MissionControlLive do
 
   use SpaceTradersWeb, :live_view
 
-  alias SpaceTraders.{FleetGeneration, MissionControl, OperatorConditions}
+  alias SpaceTraders.{FleetGeneration, MissionControl}
   alias SpaceTraders.MissionControl.Channels
-  alias SpaceTradersWeb.{EntityReference, GrafanaLink}
+  alias SpaceTradersWeb.GrafanaLink
 
   @impl true
   def mount(_params, _session, socket) do
     if connected?(socket) do
       Channels.subscribe_strategy()
-      Channels.subscribe_conditions()
       Channels.subscribe_allocation()
     end
 
@@ -28,7 +27,7 @@ defmodule SpaceTradersWeb.MissionControlLive do
           <.header>
             Mission Control
             <:subtitle>
-              Strategy intent, Fleet health, and only the Operator actions that need attention.
+              Strategy intent and Fleet health.
             </:subtitle>
           </.header>
         </header>
@@ -186,41 +185,6 @@ defmodule SpaceTradersWeb.MissionControlLive do
               class="link link-primary mt-3 inline-block text-sm"
             >Inspect Strategy outcomes</a>
           </article>
-        </section>
-
-        <section id="needs-attention" class="rounded-2xl border border-base-300 bg-base-100 p-5">
-          <h2 class="text-xl font-bold">Needs attention</h2>
-          <p
-            :if={@projection.conditions == [] && !registration_pending?(@projection)}
-            class="mt-2 text-sm opacity-70"
-          >
-            No unresolved Attention or Intervention.
-          </p>
-          <ul class="mt-3 space-y-3">
-            <li :for={condition <- @projection.conditions} class="border-t border-base-300 pt-3">
-              <strong>{if condition.kind == :intervention, do: "Intervention", else: "Attention"}</strong>
-              <p>{condition.summary}</p>
-              <.link
-                :if={EntityReference.path(condition.entity_ref)}
-                navigate={EntityReference.path(condition.entity_ref)}
-                class="link link-primary mt-1 inline-block"
-              >{EntityReference.label(condition.entity_ref)}</.link>
-              <a
-                href={GrafanaLink.condition_url(condition)}
-                target="_blank"
-                rel="noreferrer"
-                class="link link-primary mt-1 block text-sm"
-              >Inspect {GrafanaLink.family_label(GrafanaLink.family_for_condition(condition))}</a>
-              <span :if={condition.acknowledged_at} class="text-sm opacity-70">Acknowledged · unresolved</span>
-              <button
-                :if={!condition.acknowledged_at}
-                type="button"
-                phx-click="acknowledge"
-                phx-value-id={condition.id}
-                class="btn btn-ghost btn-sm"
-              >Acknowledge</button>
-            </li>
-          </ul>
         </section>
 
         <section
@@ -409,9 +373,6 @@ defmodule SpaceTradersWeb.MissionControlLive do
               </div><span class="badge">{fleet_status(fleet)}</span>
             </div>
             <p class="mt-3 text-sm">{fleet_contribution(fleet)}</p>
-            <p :for={ship <- fleet.control.attention} class="mt-2 text-sm opacity-70">
-              LIMITING · {ship.symbol}: {ship.control.attention.summary}
-            </p>
           </article>
         </section>
 
@@ -430,7 +391,6 @@ defmodule SpaceTradersWeb.MissionControlLive do
           </ul>
           <.link navigate={~p"/generations"} class="link link-primary mt-4 inline-block text-sm">Compare Fleet Generations</.link>
         </section>
-        <.link navigate={~p"/intervention"} class="link link-primary text-sm">Manual Intervention record</.link>
       </div>
     </Layouts.app>
     """
@@ -450,20 +410,8 @@ defmodule SpaceTradersWeb.MissionControlLive do
     {:noreply, assign_projection(socket)}
   end
 
-  def handle_event("acknowledge", %{"id" => raw_id}, socket) do
-    with {id, ""} <- Integer.parse(raw_id),
-         :ok <- OperatorConditions.acknowledge(socket.assigns.current_scope, id) do
-      {:noreply, assign_projection(socket)}
-    else
-      _ -> {:noreply, socket}
-    end
-  end
-
   @impl true
   def handle_info(:fleet_strategy_updated, socket),
-    do: {:noreply, assign_projection(socket)}
-
-  def handle_info(:mission_conditions_updated, socket),
     do: {:noreply, assign_projection(socket)}
 
   def handle_info({:outbox, _id, _event, _payload}, socket),
@@ -526,7 +474,6 @@ defmodule SpaceTradersWeb.MissionControlLive do
   defp health_label(%{current_fleet: %{state: :unresolved}}), do: "Current Fleet needs resolution"
   defp health_label(%{current_fleet: %{state: :transition}}), do: "Server Reset transition"
   defp health_label(%{strategy: %{active_revision: nil}}), do: "Awaiting Fleet Strategy"
-  defp health_label(%{conditions: [_ | _]}), do: "Needs Operator attention"
 
   defp health_label(projection) do
     case current_generation(projection) do
@@ -576,9 +523,6 @@ defmodule SpaceTradersWeb.MissionControlLive do
   defp health_detail(%{current_fleet: %{state: :transition}} = projection),
     do:
       "A Server Reset fenced #{transition_symbol(projection)}. Nothing it reported is counted as the current Fleet until a replacement Generation is established."
-
-  defp health_detail(%{conditions: [_ | _]}),
-    do: "Unresolved conditions remain pinned below, including acknowledged ones."
 
   defp health_detail(%{market_execution: %{dispositions: dispositions}} = projection)
        when is_list(dispositions) do
@@ -646,8 +590,7 @@ defmodule SpaceTradersWeb.MissionControlLive do
     do: "Measured outcome rate: #{Float.round(rate, 2)} per horizon."
 
   defp evaluation_label({:ok, %{feasible?: false}}),
-    do:
-      "Limitation: current evidence shows this objective is not feasible. Attention is required."
+    do: "Limitation: current evidence shows this objective is not feasible."
 
   defp evaluation_label({:observed, %{change: change, rate: rate}}),
     do:

@@ -36,8 +36,7 @@ defmodule SpaceTraders.MissionControl do
     FleetGeneration,
     FleetPlanning,
     FleetStrategy,
-    MutationAttempts,
-    OperatorConditions
+    MutationAttempts
   }
 
   defp current_agents(scope) do
@@ -243,14 +242,12 @@ defmodule SpaceTraders.MissionControl do
     %{
       strategy: strategy,
       current_fleet: identity,
-      # Reconstruct from the attempt even if its sender died before writing an
-      # Operator condition. The condition is narrative, never recovery truth.
+      # Reconstructed from the registration attempt, never from narrative.
       registration_recovery: FleetGeneration.registration_recovery(scope),
       generations: generations,
       fleets: Enum.map(snapshots, &fleet_overview(&1, current_generations)),
       objectives: objective_overviews(strategy.active_revision, current_generations, snapshots),
       market_execution: current_market_execution(scope, identity),
-      conditions: OperatorConditions.unresolved(scope),
       notable_activity: activity(scope) |> Enum.filter(&notable_activity?/1) |> Enum.take(5)
     }
   end
@@ -280,7 +277,7 @@ defmodule SpaceTraders.MissionControl do
     end
   end
 
-  @doc "Chronological consequential decisions and conditions for the signed-in Operator."
+  @doc "Chronological consequential decisions for the signed-in Operator."
   def activity(%Scope{} = scope) do
     case OperatorAuthority.authorize(scope) do
       {:ok, operator_id} -> deployment_activity(scope, operator_id)
@@ -324,25 +321,6 @@ defmodule SpaceTraders.MissionControl do
           end
 
         [selected | outcome]
-      end)
-
-    conditions =
-      OperatorConditions.history(scope)
-      |> Enum.map(fn condition ->
-        %{
-          id: "condition-#{condition.id}",
-          type: condition.kind,
-          at: condition.inserted_at,
-          summary: condition.summary,
-          entity_ref: condition.entity_ref,
-          condition_key: condition.key,
-          fleet_generation_id: condition.fleet_generation_id,
-          fleet_strategy_revision_id: condition.fleet_strategy_revision_id,
-          strategy_decision_episode_id: condition.strategy_decision_episode_id,
-          inserted_at: condition.inserted_at,
-          resolved_at: condition.resolved_at,
-          detail: if(condition.resolved_at, do: "Resolved", else: "Still unresolved")
-        }
       end)
 
     generations =
@@ -421,14 +399,14 @@ defmodule SpaceTraders.MissionControl do
         }
       end)
 
-    (decisions ++ conditions ++ generations ++ purchases ++ operator_events)
+    (decisions ++ generations ++ purchases ++ operator_events)
     |> Enum.sort_by(& &1.at, {:desc, DateTime})
   end
 
   def notable_activity?(%{notable?: false}), do: false
 
   def notable_activity?(%{type: type})
-      when type in [:decision, :milestone, :attention, :intervention],
+      when type in [:decision, :milestone],
       do: true
 
   def notable_activity?(_), do: false
@@ -618,12 +596,12 @@ defmodule SpaceTraders.MissionControl do
         realized_credit_change: if(credit_changes == [], do: nil, else: Enum.sum(credit_changes)),
         realized_decisions: Enum.count(decisions, &(&1.classification == :realized)),
         limitations:
-          (decisions
-           |> Enum.filter(&(&1.classification in [:partially_realized, :reset_censored]))
-           |> Enum.map(fn
-             %{classification: :partially_realized} -> "Decision partly realized"
-             %{classification: :reset_censored} -> "Decision interrupted by Server Reset"
-           end)) ++ OperatorConditions.generation_limitations(scope, generation.id),
+          decisions
+          |> Enum.filter(&(&1.classification in [:partially_realized, :reset_censored]))
+          |> Enum.map(fn
+            %{classification: :partially_realized} -> "Decision partly realized"
+            %{classification: :reset_censored} -> "Decision interrupted by Server Reset"
+          end),
         resumed?: next_generation && not is_nil(next_generation.strategy_capable_at)
       }
     end)
@@ -736,7 +714,7 @@ defmodule SpaceTraders.MissionControl do
 
   The report carries the shadow-published expectations, the realized economics
   from the last completed round trip, the Fleet contribution, and any limitation
-  or Attention worth surfacing to the Operator.
+  worth surfacing to the Operator.
   """
   def market_execution(%Scope{} = scope) do
     case FleetGeneration.current_fleet(scope) do
@@ -754,7 +732,6 @@ defmodule SpaceTraders.MissionControl do
           realized: no_realized_economics(scope),
           contribution: %{commitment_count: 0, expected_value: 0},
           limitation: nil,
-          attention: [],
           dispositions: dispositions(scope, agent, false)
         }
 
@@ -771,7 +748,6 @@ defmodule SpaceTraders.MissionControl do
             ),
           contribution: contribution(portfolio),
           limitation: limitation(portfolio),
-          attention: [],
           dispositions: dispositions(scope, agent, true)
         }
     end
@@ -784,7 +760,6 @@ defmodule SpaceTraders.MissionControl do
       realized: no_realized_economics(scope),
       contribution: %{commitment_count: 0, expected_value: 0},
       limitation: nil,
-      attention: [],
       dispositions: []
     }
   end

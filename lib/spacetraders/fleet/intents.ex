@@ -2,7 +2,7 @@ defmodule SpaceTraders.Fleet.Intents do
   @moduledoc """
   The public seam for durable, caller-owned Intent execution.
 
-  Ship Execution and Manual Intervention request operational outcomes here; ShipServer
+  Ship Execution requests operational outcomes here; ShipServer
   timers and boot recovery re-enter the same reconciliation. The module hides
   ownership transactions, mutation claims, game calls, Timeline scheduling,
   ShipServer arming and evidence reconciliation.
@@ -15,7 +15,6 @@ defmodule SpaceTraders.Fleet.Intents do
   import SpaceTraders.Fleet.Intents.CapacityDeferral, only: [capacity_pressure: 1]
 
   alias SpaceTraders.Agent.Agent, as: AgentRecord
-  alias SpaceTraders.Agent.Scope
   alias SpaceTraders.API.AgentTokenReference
   alias SpaceTraders.Fleet.Intents.{CapacityDeferral, RecordedAction, Recovery}
   alias SpaceTraders.API.Model.{Contract, ShipNav}
@@ -33,7 +32,6 @@ defmodule SpaceTraders.Fleet.Intents do
     Contracts,
     Evidence,
     FleetExecution,
-    ManualIntervention,
     MutationAttempts,
     Timeline
   }
@@ -78,22 +76,6 @@ defmodule SpaceTraders.Fleet.Intents do
 
   defp token_present(_agent), do: {:error, :agent_token_missing}
 
-  # Stopping is not new gameplay: the deployment Operator may stop any
-  # unfinished intervention, including a predecessor Generation's.
-  defp intent_for_deployment_operator(operator_id, intent_id) do
-    if SpaceTraders.FleetGeneration.Identity.operator?(operator_id) do
-      Repo.one(
-        from intent in Intent,
-          join: ship in Ship,
-          on: ship.id == intent.ship_id,
-          join: agent in AgentRecord,
-          on: agent.id == ship.agent_id,
-          where: intent.id == ^intent_id,
-          select: {intent, agent}
-      )
-    end
-  end
-
   defp installed_warp_drive(%{modules: modules}) do
     case Enum.find(modules || [], &warp_drive_module?/1) do
       nil -> {:error, :warp_drive_missing}
@@ -119,64 +101,6 @@ defmodule SpaceTraders.Fleet.Intents do
 
   defp stringify_keys(value), do: value
 
-  defp do_stop_intent(%AgentRecord{} = agent, intent_id, :intervention) do
-    result =
-      Repo.transaction(fn ->
-        intent =
-          Repo.one(
-            from intent in Intent,
-              join: ship in Ship,
-              on: ship.id == intent.ship_id,
-              where:
-                intent.id == ^intent_id and ship.agent_id == ^agent.id and
-                  intent.status in ^@unfinished_states
-          )
-
-        case intent do
-          %Intent{caller: "intervention"} = intent ->
-            if unresolved_intent_evidence?(intent) do
-              Repo.rollback(:intents_reconciliation_required)
-            else
-              terminalize_intents!(intent, "stopped")
-            end
-
-          %Intent{} ->
-            Repo.rollback(:invalid_intent_owner)
-
-          nil ->
-            Repo.rollback(:intents_not_active)
-        end
-      end)
-
-    case result do
-      {:ok, %Intent{} = intent} ->
-        ship = Repo.get!(Ship, intent.ship_id)
-        Fleet.record_activity(agent, ship, "manual_intervention_stopped", "Intervention stopped")
-        :ok
-
-      {:error, reason} ->
-        {:error, reason}
-    end
-  end
-
-  @doc "Stops an authenticated exceptional intervention after in-flight evidence is safe."
-  def stop_intervention(%Scope{operator: %{id: operator_id}}, intent_id) do
-    with {%Intent{caller: "intervention"} = intent, %AgentRecord{} = agent} <-
-           intent_for_deployment_operator(operator_id, intent_id),
-         true <-
-           ManualIntervention.authorized?(
-             agent.id,
-             Repo.get!(Ship, intent.ship_id).symbol,
-             intent_id
-           ) ||
-             {:error, :intervention_not_authorized} do
-      do_stop_intent(agent, intent_id, :intervention)
-    else
-      nil -> {:error, :intent_not_found}
-      _ -> {:error, :intervention_not_authorized}
-    end
-  end
-
   @doc """
   Re-enters the one shared Intent reconciliation for a typed trigger.
 
@@ -192,7 +116,7 @@ defmodule SpaceTraders.Fleet.Intents do
          :ok <- Agent.execution_allowed?(agent) do
       case unfinished_intent_for_ship(ship.id) do
         %Intent{caller: caller, status: status} = intent
-        when caller in ["commitment", "intervention"] and status != "awaiting_confirmation" ->
+        when caller == "commitment" and status != "awaiting_confirmation" ->
           if (trigger == :boot and is_nil(expected_intent_id)) or
                intent_matches_event?(intent, expected_intent_id) do
             reconsider_capacity(intent, fn ->
@@ -278,9 +202,6 @@ defmodule SpaceTraders.Fleet.Intents do
                 :ok
             end
 
-          "intervention" ->
-            advance_intents(agent, intent, live_ship)
-
           _ ->
             :ok
         end
@@ -305,14 +226,14 @@ defmodule SpaceTraders.Fleet.Intents do
     :ok
   end
 
-  @doc "Reconstructs commitment and intervention Intents from supported ownership."
+  @doc "Reconstructs commitment Intents from supported ownership."
   def rearm_owned_intents_on_boot do
     symbols =
       Intent
       |> join(:inner, [i], s in Ship, on: i.ship_id == s.id)
       |> where(
         [i, s],
-        i.status in ^@unfinished_states and i.caller in ["commitment", "intervention"] and
+        i.status in ^@unfinished_states and i.caller == "commitment" and
           is_nil(s.retired_at)
       )
       |> select([_i, s], s.symbol)
@@ -1024,18 +945,6 @@ defmodule SpaceTraders.Fleet.Intents do
     |> Enum.find(fn intent ->
       unresolved_cargo_action?(intent)
     end)
-  end
-
-  defp terminalize_intents!(intent, status) when status in @terminal_states do
-    preserve_evidence? = unresolved_intent_evidence?(intent)
-
-    update_intent!(
-      Ecto.Changeset.change(intent,
-        status: status,
-        in_flight_action: if(preserve_evidence?, do: intent.in_flight_action, else: nil),
-        finished_at: DateTime.utc_now() |> DateTime.truncate(:second)
-      )
-    )
   end
 
   defp unresolved_intent_evidence?(intent) do
@@ -5084,8 +4993,6 @@ defmodule SpaceTraders.Fleet.Intents do
     navigate_constraint(intent, "refuel") == "to_capacity" and
       not fuel_independent?(live_ship) and not fuel_full?(live_ship)
   end
-
-  defp local_leg_fuel_preflight(_agent, %Intent{caller: "intervention"}, _live_ship), do: :ok
 
   defp local_leg_fuel_preflight(_agent, _intent, live_ship)
        when live_ship.fuel.capacity <= 0,

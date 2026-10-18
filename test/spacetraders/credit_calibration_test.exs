@@ -6,12 +6,10 @@ defmodule SpaceTraders.CreditCalibrationTest do
   import SpaceTraders.RecordedDispatchFixtures, only: [prepare_action: 3, prepare_action: 4]
 
   alias SpaceTraders.API
-  alias SpaceTraders.Agent.Scope
   alias SpaceTraders.CreditCalibration
   alias SpaceTraders.Evidence
   alias SpaceTraders.Fleet.Intent
   alias SpaceTraders.FleetStrategy.{Revision, Strategy}
-  alias SpaceTraders.OperatorConditions
   alias SpaceTraders.Fleet.Intents.RecordedAction
   alias SpaceTraders.MutationAttempts
   alias SpaceTraders.TestClock
@@ -69,7 +67,7 @@ defmodule SpaceTraders.CreditCalibrationTest do
     assert %{state: "not_sent", sent_or_unknown_at: nil} = MutationAttempts.get!(stale.id)
   end
 
-  test "an attributable charge above its bound records a breach, widens, raises Degraded Attention, and pauses spending" do
+  test "an attributable charge above its bound records a breach, widens, and pauses spending" do
     {agent, [first, second], _portfolio} = claimed_purchases([0, 0])
     initial = CreditCalibration.active()
     stub_quote(agent, 10, 1_063)
@@ -107,14 +105,6 @@ defmodule SpaceTraders.CreditCalibrationTest do
     assert widened.mutation_attempt_id == attempt.id
     # 70 is 40% over the 50 quote; widening clears it by the 10-point step.
     assert widened.margin_percent == 50
-
-    assert [%{kind: :attention, summary: summary, resolved_at: nil}] =
-             OperatorConditions.unresolved(scope(agent))
-
-    assert summary =~ "Degraded Operation"
-    assert summary =~ "70 credits"
-    assert summary =~ "63"
-    refute summary =~ ~r/acknowledg/i
 
     # A newer authoritative balance still below the floor keeps spending paused.
     TestClock.advance(1)
@@ -194,7 +184,7 @@ defmodule SpaceTraders.CreditCalibrationTest do
            )
   end
 
-  test "a newer authoritative balance at the floor releases the pause and resolves the Attention" do
+  test "a newer authoritative balance at the floor releases the pause" do
     {agent, [first, second], _portfolio} = claimed_purchases([0, 0])
     stub_quote(agent, 10, 1_063)
     assert {:ok, %{attempt: attempt}} = RecordedAction.prepare(agent, first, buy())
@@ -208,9 +198,6 @@ defmodule SpaceTraders.CreditCalibrationTest do
 
     assert [%{kind: "pricing_model_miss", released_at: %DateTime{}}] =
              CreditCalibration.shortfalls(agent)
-
-    assert OperatorConditions.unresolved(scope(agent)) == []
-    assert [%{resolved_at: %DateTime{}}] = OperatorConditions.history(scope(agent))
   end
 
   test "an unattributable shortfall behind a Bounded Unknown spend pauses without recalibrating" do
@@ -264,7 +251,6 @@ defmodule SpaceTraders.CreditCalibrationTest do
 
     assert CreditCalibration.active().id == initial.id
     assert CreditCalibration.realization(one) == nil
-    assert OperatorConditions.unresolved(scope(agent)) == []
   end
 
   test "a revision that raises the floor above credits pauses as a revision shortfall, not a miss" do
@@ -283,7 +269,6 @@ defmodule SpaceTraders.CreditCalibrationTest do
              CreditCalibration.shortfalls(agent)
 
     assert CreditCalibration.active().id == initial.id
-    assert OperatorConditions.unresolved(scope(agent)) == []
   end
 
   test "a below-floor balance with no bound exceeded and no unknown spend is a non-pricing shortfall" do
@@ -338,7 +323,4 @@ defmodule SpaceTraders.CreditCalibrationTest do
       Req.Test.json(conn, %{"data" => data})
     end)
   end
-
-  defp scope(agent),
-    do: Scope.for_operator(Repo.get!(SpaceTraders.Agent.Operator, agent.operator_id))
 end

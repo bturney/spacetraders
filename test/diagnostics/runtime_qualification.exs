@@ -288,16 +288,9 @@ defmodule SpaceTraders.RuntimeQualification do
       widened = SpaceTraders.CreditCalibration.active()
       assert widened.margin_percent > initial.margin_percent
       assert widened.basis == "pricing_model_miss"
-
-      assert Repo.exists?(
-               from c in SpaceTraders.OperatorConditions.Condition,
-                 where:
-                   c.operator_id == ^agent.operator_id and
-                     c.key == ^"credit-pricing-breach:#{agent.id}" and c.kind == :attention
-             )
     end
 
-    test "API Retry-After defers Market reads without Attention and the trade completes",
+    test "API Retry-After defers Market reads and the trade completes",
          %{conn: conn} do
       game = start_game(throttled_market_reads: 3)
       {_conn, agent} = activate_fresh_generation(conn)
@@ -309,12 +302,7 @@ defmodule SpaceTraders.RuntimeQualification do
       assert length(requests(state, "/v2/my/ships/BASELINE-1/sell")) == 1, trace(state)
       assert state.credits == 175_800
 
-      refute Repo.exists?(
-               from c in SpaceTraders.OperatorConditions.Condition,
-                 where: c.operator_id == ^agent.operator_id and c.kind == :attention
-             )
-
-      # Capacity Deferral never becomes Attention or objective infeasibility.
+      # Capacity Deferral never becomes objective infeasibility.
       # (A later trade may be infeasible for fuel; that is not capacity.)
       outcomes =
         Repo.all(
@@ -343,8 +331,8 @@ defmodule SpaceTraders.RuntimeQualification do
 
     # A pricing-model breach on the purchase leaves credits below the floor.
     # The trade then needs fuel the Ship cannot buy: no recovery-spend
-    # exception, so the Ship's work blocks for the Operator instead.
-    test "below-floor fuel stranding raises Attention instead of refuelling", %{conn: conn} do
+    # exception, so the Ship's work blocks instead.
+    test "below-floor fuel stranding blocks instead of refuelling", %{conn: conn} do
       # 500 credits of headroom funds the 40-unit hold at the 25% margin; the
       # game charges 15 per unit (600), leaving 49,900 below the floor. 130
       # fuel covers surveying the distant Market and returning (60 + 60), not
@@ -375,7 +363,7 @@ defmodule SpaceTraders.RuntimeQualification do
         )
 
       assert Enum.any?(blocked, &(&1 && &1.reason == "credit_spending_paused")),
-             "no stranding Attention: blocked=#{inspect(blocked)} #{inspect(paths(state))}"
+             "no stranding block: blocked=#{inspect(blocked)} #{inspect(paths(state))}"
 
       {:ok, _view, html} = live(conn, ~p"/mission-control")
       assert html =~ "Spending stays paused"
@@ -595,7 +583,7 @@ defmodule SpaceTraders.RuntimeQualification do
       refute Repo.exists?(from i in SpaceTraders.Fleet.Intent, where: i.status == "blocked")
     end
 
-    test "API Retry-After defers Market reads without Attention or a Neutral Wait and the trade completes",
+    test "API Retry-After defers Market reads without a Neutral Wait and the trade completes",
          %{conn: conn} do
       game = start_fleet_game(throttled_market_reads: 3)
       {_conn, agent} = activate_fresh_generation(conn)
@@ -605,13 +593,8 @@ defmodule SpaceTraders.RuntimeQualification do
       assert fleet_sold?(state), fleet_trace(state)
       assert Enum.count(state.requests, &(&1.reply == :throttled)) == 3
 
-      # Capacity Deferral is advisory timing, never an Operator condition, a
-      # false infeasibility or a wait minted by the Fleet.
-      refute Repo.exists?(
-               from c in SpaceTraders.OperatorConditions.Condition,
-                 where: c.operator_id == ^agent.operator_id and c.kind == :attention
-             )
-
+      # Capacity Deferral is advisory timing, never a false infeasibility or a
+      # wait minted by the Fleet.
       refute Repo.exists?(
                from e in SpaceTraders.FleetAllocation.StrategyDecisionEpisode,
                  where: e.selection_kind == :neutral_wait
