@@ -21,6 +21,16 @@ SpaceTraders is primarily an economics and resource-allocation game. Build a Fle
 - **Is intelligible:** The accepted game-first journey is **Glance → Ships → Ship + Why → answer-first Grafana → back**, with Plan Health, Earnings, estimated-versus-realized trade outcomes and a truthful next event. This comes from [#757](https://github.com/bturney/spacetraders/issues/757) and [ADR 0017](../adr/0017-nothing-needs-the-operator.md), replacing old #502/#311 intervention-centric screens.
 - **Is testable:** Controlled real-bot experiments can compare policies/code on pinned worlds with explicit limitations. A simulator rank is a conditional result until mechanics and economic fidelity warrant broader claims.
 
+## Ultimate competitive destinations
+
+The final destinations are **real-game achievements**, not just an internal measure of economic efficiency:
+
+- **Top 10 by current credits** on the game's `mostCredits` leaderboard.
+- **Top 10 by submitted charts** on `mostSubmittedCharts`. The two top-ten achievements may occur in **different Generations**; achieving both in one Generation *at the same time* is an optional stretch goal.
+- **Shortest credible mint-to-completion time** for construction of the Headquarters System's initially unfinished Jump Gate, with this Fleet's own contributions authoritatively attributable. Start with a verified completion and improve a comparable personal best; pursue broader speed records only when comparable external evidence exists.
+
+The official leaderboard metric is game state, and the authoritative rank must be observed in the live game's server-status response; local simulator rankings are decision evidence, not leaderboard placements. The gate-time origin and construction proof follow [spec #677](https://github.com/bturney/spacetraders/issues/677). [The roadmap](roadmap.md) keeps the near-term **sequential outcome gates** distinct from these **independently achievable endgame goals**, so future sprints can learn which method works without predetermining the capability order.
+
 ## Product boundaries
 
 The application is a one-Operator, one-current-Agent BEAM/Phoenix/PostgreSQL service ([ADR 0015](../adr/0015-single-operator-single-current-agent.md)). The game remains external truth; the bot cannot guarantee a globally optimal, leaderboard-winning or complete-information strategy. Long-lived correctness protects **irreversible decisions, shared resources and generation identity**; speculative flexibility does not justify a second framework.
