@@ -21,3 +21,4 @@
 - Diagnosing Strategy outcomes or following Grafana drill-downs: read `docs/agents/observability.md`.
 - Changing authentication, scopes, live_sessions, or pipelines: read `docs/agents/auth.md`.
 - Production operations (deploy, migration, backup, restore, Compose on `project-host`): read `docs/operations/project-host.md` first.
+- Autonomous Fleet direction, prioritization, or new capabilities: read `docs/autonomy/README.md` for the plan; derive detailed specs and tickets as GitHub issues using `docs/agents/issue-tracker.md`.

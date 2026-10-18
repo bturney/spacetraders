@@ -2,22 +2,15 @@
 
 SpaceTraders bot + dashboard — a programmable API game (https://spacetraders.io).
 
-## Program roadmap
+## Product and roadmap
 
-Phases 1–5 of the play effort, with status and per-phase maps, live on the
-always-open GitHub issue:
+**[Autonomous Fleet: product, capability ledger and roadmap](docs/autonomy/README.md)** is the current source-controlled direction. Start there to choose an outcome, find its architectural owner, see what is actually proven, or design the next capability.
 
-**https://github.com/bturney/spacetraders/issues/8** (SpaceTraders — Program Roadmap)
-
-Phase 1 (Boot) is currently charting: [SpaceTraders Play Plan — Map](https://github.com/bturney/spacetraders/issues/1).
+The [durable roadmap](docs/autonomy/roadmap.md) holds overarching priorities; **capability specs and implementation tickets remain in GitHub issues**. [#502](https://github.com/bturney/spacetraders/issues/502) preserves the superseded recovery specification and its evidence history; the older [program map #8](https://github.com/bturney/spacetraders/issues/8) is historical context rather than today's Fleet implementation queue.
 
 ## Architecture
 
-[ADR 0010](docs/adr/0010-autonomous-runtime.md) is the accepted governing
-decision for the target autonomous Fleet Strategy runtime. It identifies which
-earlier decisions remain legacy implementation guidance and reaffirms
-[ADR 0007](docs/adr/0007-game-truth-and-quality-of-life-guardrails.md) as the
-gameplay authority boundary.
+[ADR 0010](docs/adr/0010-autonomous-runtime.md) governs autonomous runtime ownership; [ADR 0007](docs/adr/0007-game-truth-and-quality-of-life-guardrails.md) keeps the game authoritative. [ADR 0016](docs/adr/0016-ship-acquisition-is-surplus-first-capacity-investment.md) defines surplus-first Ship investment; [ADR 0017](docs/adr/0017-nothing-needs-the-operator.md) defines the game-first Operator experience and service-level kill switch.
 
 ## Development
 
