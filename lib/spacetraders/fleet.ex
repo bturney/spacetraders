@@ -61,6 +61,16 @@ defmodule SpaceTraders.Fleet do
     |> Repo.all()
   end
 
+  @doc "The given current Ships of an Agent, as `current_ships/1` reads them."
+  def current_ships(agent_id, ship_ids) when is_integer(agent_id) and is_list(ship_ids) do
+    from(ship in Ship,
+      where: ship.agent_id == ^agent_id and is_nil(ship.retired_at) and ship.id in ^ship_ids,
+      order_by: [asc: ship.symbol],
+      preload: [:cargo]
+    )
+    |> Repo.all()
+  end
+
   @doc """
   Stores what one Ship-bearing game response says about the Agent's Ships.
 
@@ -118,7 +128,8 @@ defmodule SpaceTraders.Fleet do
     {:ok, ship} =
       Repo.transaction(fn ->
         from(ship in Ship,
-          where: ship.agent_id == ^agent_id and ship.symbol == ^symbol and is_nil(ship.retired_at),
+          where:
+            ship.agent_id == ^agent_id and ship.symbol == ^symbol and is_nil(ship.retired_at),
           lock: "FOR UPDATE"
         )
         |> Repo.one()
