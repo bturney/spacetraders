@@ -978,8 +978,8 @@ defmodule SpaceTraders.FleetPlanningTest do
       realized_rate: %{
         status: :no_history,
         rate: nil,
-        trade_margin: nil,
-        occupied_seconds: nil,
+        net_earnings: nil,
+        ship_seconds: nil,
         samples: [],
         reason: :no_completed_monetary_history
       },
@@ -1056,8 +1056,8 @@ defmodule SpaceTraders.FleetPlanningTest do
     assert valuation.enabled_rate == 250.0
   end
 
-  test "realized receipt-backed Trade Margin per occupied Ship-hour caps planned rate, not net earnings" do
-    snapshot = Map.put(acquisition_snapshot(), :realized_trade_progress, realized_progress(400))
+  test "realized Net Earnings per Ship-hour caps the planned rate" do
+    snapshot = Map.put(acquisition_snapshot(), :realized_earnings, [earned(1, 400, 3_600)])
 
     assert {:ok, %{candidate_contributions: [candidate]}} =
              FleetPlanning.plan_ship_acquisition(revision(), 0, snapshot)
@@ -1067,13 +1067,12 @@ defmodule SpaceTraders.FleetPlanningTest do
     assert valuation.enabled_rate == 400
     assert valuation.rate_basis == :minimum_planned_realized
     assert valuation.realized_rate.status == :known
-    assert valuation.realized_rate.trade_margin == 400
-    assert valuation.realized_rate.occupied_seconds == 3_600
-    assert [%{purchase_intent_id: 10, sale_intent_id: 11}] = valuation.realized_rate.samples
+    assert valuation.realized_rate.net_earnings == 400
+    assert valuation.realized_rate.ship_seconds == 3_600
+    assert valuation.realized_rate.samples == [1]
 
-    # A better realized result never inflates the forecast; its supporting-cost
-    # unknown does not erase the known goods-only Trade Margin comparator.
-    snapshot = Map.put(snapshot, :realized_trade_progress, realized_progress(2_000))
+    # A better realized result never inflates the forecast.
+    snapshot = Map.put(snapshot, :realized_earnings, [earned(1, 2_000, 3_600)])
 
     assert {:ok, %{candidate_contributions: [candidate]}} =
              FleetPlanning.plan_ship_acquisition(revision(), 0, snapshot)
@@ -1081,92 +1080,36 @@ defmodule SpaceTraders.FleetPlanningTest do
     assert candidate.expected_outcomes.decision_value == 48_000
   end
 
-  test "known monetary history with missing time or monetary gaps never falls back to the no-history discount" do
-    for progress <- [
-          realized_progress(400, :missing_time),
-          realized_progress(400, :missing_receipt)
-        ] do
-      snapshot = Map.put(acquisition_snapshot(), :realized_trade_progress, progress)
+  test "realized history without Ship-time never falls back to the no-history discount" do
+    snapshot = Map.put(acquisition_snapshot(), :realized_earnings, [earned(1, 400, 0)])
 
-      assert {:ok, %{candidate_contributions: [], limitations: [limitation]}} =
-               FleetPlanning.plan_ship_acquisition(revision(), 0, snapshot)
+    assert {:ok, %{candidate_contributions: [], limitations: [limitation]}} =
+             FleetPlanning.plan_ship_acquisition(revision(), 0, snapshot)
 
-      assert limitation.reason == :unknown_realized_rate
-      assert limitation.valuation.realized_rate.status == :unknown
-      assert is_nil(limitation.valuation.enabled_value)
-    end
+    assert limitation.reason == :unknown_realized_rate
+    assert limitation.valuation.realized_rate.status == :unknown
+    assert is_nil(limitation.valuation.enabled_value)
   end
 
-  defp realized_progress(margin, gap \\ nil) do
-    SpaceTraders.FleetAllocation.TradeProgress.build(realized_intents(margin, gap))
-  end
-
-  defp realized_intents(margin, gap) do
-    alias SpaceTraders.Fleet.Intent
-
-    buy = %Intent{
-      id: 10,
-      fleet_commitment_id: 5,
-      status: "completed",
-      type: "buy",
-      inserted_at: ~U[2030-01-01 10:00:00Z],
-      finished_at: ~U[2030-01-01 10:30:00Z],
-      parameters: %{},
-      last_action_result: %{
-        "transaction" => %{
-          "trade_symbol" => "IRON",
-          "ship_symbol" => "OWNED-1",
-          "units" => 40,
-          "total_price" => 1_000
-        }
-      }
-    }
-
-    sell = %Intent{
-      id: 11,
-      fleet_commitment_id: 5,
-      status: "completed",
-      type: "sell",
-      inserted_at: ~U[2030-01-01 10:35:00Z],
-      finished_at: if(gap != :missing_time, do: ~U[2030-01-01 11:00:00Z]),
-      parameters: %{},
-      last_action_result:
-        if(gap == :missing_receipt,
-          do: %{},
-          else: %{
-            "transaction" => %{
-              "trade_symbol" => "IRON",
-              "ship_symbol" => "OWNED-1",
-              "units" => 40,
-              "total_price" => 1_000 + margin
-            }
-          }
-        )
-    }
-
-    [buy, sell]
-  end
-
-  test "realized comparator sums occupied Ship-hours, includes losses, and keeps receipt references" do
-    more = Enum.map(realized_intents(800, nil), &%{&1 | id: &1.id + 10, fleet_commitment_id: 6})
-
-    progress =
-      SpaceTraders.FleetAllocation.TradeProgress.build(realized_intents(400, nil) ++ more)
-
-    snapshot = Map.put(acquisition_snapshot(), :realized_trade_progress, progress)
+  test "realized comparator sums Ship-hours, includes losses, and keeps record references" do
+    snapshot =
+      Map.put(acquisition_snapshot(), :realized_earnings, [
+        earned(1, 400, 3_600),
+        earned(2, 800, 3_600)
+      ])
 
     assert {:ok, %{candidate_contributions: [candidate]}} =
              FleetPlanning.plan_ship_acquisition(revision(), 0, snapshot)
 
     rate = candidate.expected_outcomes.valuation.realized_rate
     assert rate.rate == 600
-    assert rate.occupied_seconds == 7_200
-    assert rate.trade_margin == 1_200
-    assert rate.receipts == progress.receipts
+    assert rate.ship_seconds == 7_200
+    assert rate.net_earnings == 1_200
+    assert rate.samples == [1, 2]
     assert candidate.expected_outcomes.decision_value == 28_800
 
-    for margin <- [0, -100, 200] do
-      snapshot = Map.put(snapshot, :realized_trade_progress, realized_progress(margin))
+    for net <- [0, -100, 200] do
+      snapshot = Map.put(snapshot, :realized_earnings, [earned(1, net, 3_600)])
 
       assert {:ok,
               %{
@@ -1175,6 +1118,15 @@ defmodule SpaceTraders.FleetPlanningTest do
               }} =
                FleetPlanning.plan_ship_acquisition(revision(), 0, snapshot)
     end
+  end
+
+  defp earned(id, net, seconds) do
+    %SpaceTraders.Outcomes.EarningsRecord{
+      id: id,
+      net_earnings: net,
+      ship_seconds: seconds,
+      finished_at: ~U[2030-01-01 11:00:00.000000Z]
+    }
   end
 
   test "all built-in presets support Capacity Investment at the enabled work's Strategic Priority" do
@@ -1378,7 +1330,7 @@ defmodule SpaceTraders.FleetPlanningTest do
 
   test "missing realized projection and unusable horizon evidence remain unknown, never zero or unbounded" do
     for {snapshot, reason} <- [
-          {Map.delete(acquisition_snapshot(), :realized_trade_progress), :unknown_realized_rate},
+          {Map.delete(acquisition_snapshot(), :realized_earnings), :unknown_realized_rate},
           {put_in(acquisition_snapshot(), [:generation_horizon, :evidence_ref], nil),
            :unknown_generation_horizon},
           {put_in(acquisition_snapshot(), [:generation_horizon, :duration_seconds], 0),
@@ -1480,7 +1432,7 @@ defmodule SpaceTraders.FleetPlanningTest do
         evidence_ref: %{observation_id: 99, subject: "server:status", observed_at: @as_of},
         calibration: SpaceTraders.ShipAcquisitionCalibration.current()
       },
-      realized_trade_progress: SpaceTraders.FleetAllocation.TradeProgress.build([]),
+      realized_earnings: [],
       unmet_work: [
         %{
           candidate_id: "unselected-iron",

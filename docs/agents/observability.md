@@ -22,7 +22,7 @@ require new metrics, or change the active delivery frontier.
 | What decision was made, and how did it turn out? | `/decision-episodes/:id` and `strategy_decision_episodes` |
 | How do Fleet Generations compare? | `/generations`, including the cross-Generation Decision Episode table |
 | What is the Fleet doing now? | Mission Control, Fleet Commitments, Claims, Reservations, Pledges, and root Intents |
-| What did each trade earn? | `SpaceTraders.FleetAllocation.TradeProgress.for_generation/1`: per-trip receipts from paired buy/sell Intents, plus supporting refuel and jump charges |
+| What did each trade earn? | `earnings_records` via `SpaceTraders.Outcomes.Earnings` (`list/1`, `for_episode/1`, `for_portfolio/1`); metrics `earnings_*`; Loki line `Earnings record` (Ship, route) |
 | What are the last observed credits, Contracts, Fleet state, and chart coverage? | SpaceTraders · Outcomes (`spacetraders-outcomes`); [outcome guide](outcome-metrics.md) |
 | What software or API behavior explains a durable record? | The contextual Grafana family linked from that record |
 | Where are dashboard definitions deployed from? | `../home-server-setup/config/observability/grafana/provisioning/dashboards/` |
@@ -113,17 +113,15 @@ Market trade vs coverage pilot (#671); bounded labels only, IDs in logs:
   overdue Demands alone never make `stalled`.
 - G3 rejected Ship-role alternatives: episode `alternatives` entries with
   `kind = ship_role_alternative`.
-- Realized Market economics (#689): `FleetAllocation.TradeProgress`
-  (`for_episode`/`for_portfolio`/`for_generation`; episode
-  `actual_outcomes` snapshot). `supporting_charges` = one row per
-  refuel/jump attempt: `mutation_attempt_id`, `intent_id` (issuing root
-  Intent), `commitment_id`, `realized_charge` (Realization) or `"unknown"`,
-  `observation_only` (coverage Intent). Trip `net_earnings` = `trade_margin`
-  minus own non-coverage charges; `episode_cash_flow` counts all;
-  `observation_only_spending` separate. Gaps in `unknown` (`supporting_charge`,
-  `net_earnings`, `episode_cash_flow`) name attempt/Commitment and reason.
-  Mission Control: `market_execution/1` `realized` (`net_earnings`,
-  `supporting_cost`, `generation_observation_only_spending`; nil = unknown).
+- Realized economics (#766): one `earnings_records` row per Completed Round
+  Trip (Commitment), written when all bought Cargo is sold or jettisoned;
+  reset-cut trips write nothing. Costs: goods, fuel (realized refuel charges of
+  the Commitment's non-coverage root Intents, #689), other (jump). Unrealized
+  charges left out. Metrics only from `Outcomes` post-commit:
+  `earnings_credits_total{flow,source,ship_type,good,price_age}`,
+  `earnings_trips_total{result,...}`, `earnings_ship_seconds_total{...}`;
+  `price_age` = fresh/10-30m/>30m/n/a. Episode `actual_outcomes` = record
+  summary (`earnings_record_ids`, `net_earnings`, open/unrecorded Commitments).
 
 ## Family routing
 

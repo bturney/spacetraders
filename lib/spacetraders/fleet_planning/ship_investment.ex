@@ -10,8 +10,7 @@ defmodule SpaceTraders.FleetPlanning.ShipInvestment do
       calibration: ShipAcquisitionCalibration.current(),
       horizon: Map.get(context.snapshot, :generation_horizon, %{status: :unknown}),
       unmet_work: Map.get(context.snapshot, :unmet_work, []),
-      realized_rate:
-        realized_rate(Map.get(context.snapshot, :realized_trade_progress), context.as_of),
+      realized_rate: realized_rate(Map.get(context.snapshot, :realized_earnings), context.as_of),
       credit_margin_percent: context.margin,
       available_credits: context.credits,
       waypoint_coordinates: Map.get(context.snapshot, :waypoint_coordinates, %{}),
@@ -40,7 +39,7 @@ defmodule SpaceTraders.FleetPlanning.ShipInvestment do
     calibration = ShipAcquisitionCalibration.current()
     estimate = if work, do: offer_estimate(work, yard, offer, context.snapshot)
     planned = estimate && estimate[:net_credits_per_ship_hour]
-    realized = realized_rate(Map.get(context.snapshot, :realized_trade_progress), context.as_of)
+    realized = realized_rate(Map.get(context.snapshot, :realized_earnings), context.as_of)
 
     {rate, basis} =
       case {match.status, planned, realized} do
@@ -114,78 +113,41 @@ defmodule SpaceTraders.FleetPlanning.ShipInvestment do
 
   defp usable_horizon?(_, _, _), do: false
 
-  defp realized_rate(
-         %{
-           round_trips: trips,
-           receipts: receipts,
-           receipt_less_intents: missing,
-           unknown: gaps,
-           open_commitments: open
-         },
-         as_of
-       ) do
-    monetary_gaps =
-      Enum.filter(gaps, fn gap ->
-        gap.item == "completed_round_trip" and
-          not (gap.reason == "no sale receipt yet" and gap.commitment_id in open)
-      end)
-
-    timed? =
-      Enum.all?(trips, fn trip ->
-        is_integer(trip.observed_occupied_seconds) and trip.observed_occupied_seconds > 0 and
-          match?(%DateTime{}, trip.timing_evidence.sale_finished_at) and
-          DateTime.compare(trip.timing_evidence.sale_finished_at, as_of) != :gt
-      end)
-
-    margin =
-      if trips != [] and monetary_gaps == [] and missing == [],
-        do: Enum.sum_by(trips, & &1.trade_margin)
-
-    seconds = if trips != [] and timed?, do: Enum.sum_by(trips, & &1.observed_occupied_seconds)
+  # Net Earnings per Ship-hour over the Generation's Earnings records that
+  # finished by `as_of`, losses included.
+  defp realized_rate(records, as_of) when is_list(records) do
+    samples = Enum.filter(records, &(DateTime.compare(&1.finished_at, as_of) != :gt))
+    net = Enum.sum_by(samples, & &1.net_earnings)
+    seconds = Enum.sum_by(samples, & &1.ship_seconds)
 
     cond do
-      monetary_gaps != [] or missing != [] ->
-        %{
-          status: :unknown,
-          rate: nil,
-          trade_margin: nil,
-          occupied_seconds: seconds,
-          samples: trips,
-          receipts: receipts,
-          reason: :incomplete_monetary_history,
-          gaps: monetary_gaps,
-          receipt_less_intents: missing
-        }
-
-      trips == [] ->
+      samples == [] ->
         %{
           status: :no_history,
           rate: nil,
-          trade_margin: nil,
-          occupied_seconds: nil,
+          net_earnings: nil,
+          ship_seconds: nil,
           samples: [],
           reason: :no_completed_monetary_history
         }
 
-      not timed? ->
+      seconds <= 0 ->
         %{
           status: :unknown,
           rate: nil,
-          trade_margin: margin,
-          occupied_seconds: nil,
-          samples: trips,
-          receipts: receipts,
+          net_earnings: net,
+          ship_seconds: nil,
+          samples: Enum.map(samples, & &1.id),
           reason: :incomplete_occupied_time_history
         }
 
       true ->
         %{
           status: :known,
-          rate: margin * 3_600 / seconds,
-          trade_margin: margin,
-          occupied_seconds: seconds,
-          samples: trips,
-          receipts: receipts
+          rate: net * 3_600 / seconds,
+          net_earnings: net,
+          ship_seconds: seconds,
+          samples: Enum.map(samples, & &1.id)
         }
     end
   end
@@ -194,10 +156,10 @@ defmodule SpaceTraders.FleetPlanning.ShipInvestment do
     do: %{
       status: :unknown,
       rate: nil,
-      trade_margin: nil,
-      occupied_seconds: nil,
+      net_earnings: nil,
+      ship_seconds: nil,
       samples: [],
-      reason: :missing_trade_progress
+      reason: :missing_earnings_records
     }
 
   # Capability match only (#730): role, Cargo capacity, Market access and fuel

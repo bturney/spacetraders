@@ -18,12 +18,12 @@ defmodule SpaceTraders.FleetAllocation do
     JsonEvidence,
     NeutralWait,
     Portfolio,
-    StrategyDecisionEpisode,
-    TradeProgress
+    StrategyDecisionEpisode
   }
 
   alias SpaceTraders.FleetGeneration
   alias SpaceTraders.FleetGeneration.Generation
+  alias SpaceTraders.Outcomes.Earnings
   alias SpaceTraders.FleetPlanning.CandidateContribution
   alias SpaceTraders.FleetStrategy
   alias SpaceTraders.FleetStrategy.Strategy
@@ -692,29 +692,23 @@ defmodule SpaceTraders.FleetAllocation do
   end
 
   @doc """
-  Receipt-backed trade progress of one Decision Episode.
-
-  Derived from the Episode's completed buy/sell Intents on every call; amounts
-  the receipts do not prove are `"unknown"` and Net Earnings is never inferred.
-  """
-  defdelegate trade_progress(episode_id), to: TradeProgress, as: :for_episode
-
-  @doc """
-  Classifies a Portfolio's Decision Episode from its trade receipts after a
-  sale completes; it keeps evaluating while another Commitment still trades.
+  After a sale or jettison: writes the Earnings record of each of the
+  Portfolio's trades whose Cargo is all gone, then classifies its Decision
+  Episode from those records; it keeps evaluating while another Commitment
+  still trades.
   """
   def record_trade_outcome(%Portfolio{} = portfolio) do
-    record_market_outcome(
-      portfolio.strategy_decision_episode_id,
-      portfolio.operator_id,
-      realized_outcomes(portfolio.strategy_decision_episode_id)
-    )
+    Earnings.record_trades(portfolio)
+    record_market_outcome(portfolio.strategy_decision_episode_id, portfolio.operator_id)
   end
 
-  defp record_market_outcome(episode_id, operator_id, outcomes) do
-    case TradeProgress.classification(outcomes) do
-      :still_evaluating -> {:ok, :still_evaluating}
-      classification -> update_decision_outcome(episode_id, operator_id, classification, outcomes)
+  defp record_market_outcome(episode_id, operator_id) do
+    case realized_outcomes(episode_id) do
+      {:still_evaluating, _outcomes} ->
+        {:ok, :still_evaluating}
+
+      {classification, outcomes} ->
+        update_decision_outcome(episode_id, operator_id, classification, outcomes)
     end
   end
 
@@ -804,6 +798,8 @@ defmodule SpaceTraders.FleetAllocation do
 
   @doc "Records completed Market and resource outcomes left pending by a process restart."
   def reconcile_completed_outcomes do
+    record_pending_earnings()
+
     StrategyDecisionEpisode
     |> where([episode], episode.classification == :still_evaluating)
     |> join(:inner, [episode], portfolio in Portfolio,
@@ -834,7 +830,7 @@ defmodule SpaceTraders.FleetAllocation do
     |> distinct(true)
     |> Repo.all()
     |> Enum.each(fn episode ->
-      _ = record_market_outcome(episode.id, episode.operator_id, realized_outcomes(episode.id))
+      _ = record_market_outcome(episode.id, episode.operator_id)
     end)
 
     StrategyDecisionEpisode
@@ -1827,7 +1823,7 @@ defmodule SpaceTraders.FleetAllocation do
         Repo.update!(
           Ecto.Changeset.change(episode,
             classification: :superseded,
-            actual_outcomes: json_safe(TradeProgress.for_episode(episode_id)),
+            actual_outcomes: json_safe(elem(Earnings.episode_outcome(episode_id), 1)),
             updated_at: now
           )
         )
@@ -1869,8 +1865,34 @@ defmodule SpaceTraders.FleetAllocation do
     Repo.get!(Generation, generation_id)
   end
 
+  # A sale or jettison may have committed just before a crash: write the
+  # record of every live Generation's trade whose Cargo is all gone. A
+  # retired or fenced Generation's trips were cut off and write nothing.
+  defp record_pending_earnings do
+    Repo.all(
+      from commitment in Commitment,
+        join: portfolio in Portfolio,
+        on: portfolio.id == commitment.fleet_commitment_portfolio_id,
+        join: generation in Generation,
+        on: generation.id == portfolio.fleet_generation_id,
+        join: intent in Intent,
+        on: intent.fleet_commitment_id == commitment.id,
+        left_join: record in SpaceTraders.Outcomes.EarningsRecord,
+        on: record.fleet_commitment_id == commitment.id,
+        where:
+          is_nil(record.id) and is_nil(generation.retired_at) and is_nil(generation.fenced_at) and
+            intent.status == "completed" and
+            (intent.type == "sell" or
+               (intent.type == "acquire_resources" and
+                  fragment("?->>'kind' = 'jettison'", intent.last_action_result))),
+        distinct: true,
+        select: commitment.id
+    )
+    |> Enum.each(&Earnings.record_trade/1)
+  end
+
   defp realized_outcomes(episode_id) do
-    result = TradeProgress.for_episode(episode_id)
+    {classification, result} = Earnings.episode_outcome(episode_id)
 
     resource_yields =
       Repo.all(
@@ -1888,7 +1910,11 @@ defmodule SpaceTraders.FleetAllocation do
         Map.take(evidence || %{}, ["kind", "yield", "cargo", "reconciled"])
       end)
 
-    if resource_yields == [], do: result, else: Map.put(result, :resource_yields, resource_yields)
+    {classification,
+     if(resource_yields == [],
+       do: result,
+       else: Map.put(result, :resource_yields, resource_yields)
+     )}
   end
 
   # One statement, so a leg that finishes or starts mid-check is still seen.
