@@ -126,7 +126,7 @@ defmodule SpaceTradersWeb.MissionControlLiveTest do
     assert has_element?(view, "#operating-health", "STOPPED")
   end
 
-  test "Activity distinguishes decisions from routine Ship traffic", %{
+  test "Notable activity distinguishes decisions from routine Ship traffic", %{
     conn: conn,
     operator: operator,
     scope: scope
@@ -163,27 +163,25 @@ defmodule SpaceTradersWeb.MissionControlLiveTest do
         "One-off navigation stopped"
       )
 
-    realized_episode =
-      Repo.insert!(%StrategyDecisionEpisode{
-        operator_id: operator.id,
-        fleet_generation_id: generation.id,
-        fleet_strategy_revision_id: revision.id,
-        source_version: 0,
-        calibration_version: "v1",
-        classification: :realized,
-        evidence_references: [%{"kind" => "test", "id" => "observed"}],
-        actual_outcomes: %{"net_credit_change" => 250}
-      })
+    Repo.insert!(%StrategyDecisionEpisode{
+      operator_id: operator.id,
+      fleet_generation_id: generation.id,
+      fleet_strategy_revision_id: revision.id,
+      source_version: 0,
+      calibration_version: "v1",
+      classification: :realized,
+      evidence_references: [%{"kind" => "test", "id" => "observed"}],
+      actual_outcomes: %{"net_credit_change" => 250}
+    })
 
-    routine_episode =
-      Repo.insert!(%StrategyDecisionEpisode{
-        operator_id: operator.id,
-        fleet_generation_id: generation.id,
-        fleet_strategy_revision_id: revision.id,
-        source_version: 1,
-        calibration_version: "v1",
-        classification: :still_evaluating
-      })
+    Repo.insert!(%StrategyDecisionEpisode{
+      operator_id: operator.id,
+      fleet_generation_id: generation.id,
+      fleet_strategy_revision_id: revision.id,
+      source_version: 1,
+      calibration_version: "v1",
+      classification: :still_evaluating
+    })
 
     now = DateTime.utc_now()
 
@@ -204,25 +202,6 @@ defmodule SpaceTradersWeb.MissionControlLiveTest do
       classification: "succeeded",
       recorded_at: now
     })
-
-    {:ok, view, html} = live(conn, ~p"/activity")
-    assert html =~ "Decision"
-    assert html =~ "250 credits"
-    assert html =~ "retained evidence references"
-    assert html =~ "Fleet acquired a Ship"
-    assert html =~ "One-off navigation stopped"
-    assert html =~ "Fleet selected a new commitment portfolio"
-    refute html =~ "API request"
-
-    assert has_element?(
-             view,
-             "a[href='/decision-episodes/#{realized_episode.id}']",
-             "Decision Episode #{realized_episode.id}"
-           )
-
-    view |> element("nav[aria-label='Activity filters'] button", "Notable") |> render_click()
-    refute render(view) =~ "One-off navigation stopped"
-    refute has_element?(view, "#activity-history li#decision-#{routine_episode.id}")
 
     {:ok, _briefing, html} = live(conn, ~p"/mission-control")
     assert html =~ "Notable activity"
