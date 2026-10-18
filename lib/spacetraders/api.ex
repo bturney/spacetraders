@@ -164,7 +164,12 @@ defmodule SpaceTraders.API do
   @spec get_ships(token(), keyword()) :: result()
   def get_ships(token, opts \\ []) when is_list(opts) do
     case Pagination.ships(fn params ->
-           request(:get, "/my/ships", token, Keyword.merge(opts, params: params, as: {:list, Ship}))
+           request(
+             :get,
+             "/my/ships",
+             token,
+             Keyword.merge(opts, params: params, as: {:list, Ship})
+           )
          end) do
       {:ok, ships} -> {:ok, ships}
       {:error, reason, _collected} -> {:error, reason}
