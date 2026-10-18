@@ -38,7 +38,7 @@ defmodule SpaceTraders.Simulation.NavigationClock do
   def init(opts) do
     {:ok,
      %{
-       now: Keyword.fetch!(opts, :epoch),
+       now: microseconds(Keyword.fetch!(opts, :epoch)),
        revision: 0,
        participants: %{},
        timers: %{},
@@ -138,7 +138,7 @@ defmodule SpaceTraders.Simulation.NavigationClock do
       when not is_nil(lease) do
     if DateTime.compare(at, state.now) == :gt and is_nil(state.failed) do
       state =
-        %{state | now: at, lease: nil}
+        %{state | now: microseconds(at), lease: nil}
         |> changed()
         |> record("world_settled", %{events: events})
         |> record("bot_released", %{})
@@ -158,6 +158,7 @@ defmodule SpaceTraders.Simulation.NavigationClock do
   end
 
   defp changed(state), do: %{state | revision: state.revision + 1}
+  defp microseconds(at), do: %{at | microsecond: {elem(at.microsecond, 0), 6}}
 
   defp record(state, phase, extra) do
     entry = Map.merge(%{ordinal: length(state.trace) + 1, at: state.now, phase: phase}, extra)

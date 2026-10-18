@@ -32,7 +32,7 @@ defmodule SpaceTraders.Simulation.NavigationClockTest do
     send(self(), :world_settled)
     assert :ok = NavigationClock.release(lease, ~U[2026-10-18 00:00:10Z], [%{kind: "arrival"}])
     assert_receive :world_settled
-    assert_receive {:continued, ~U[2026-10-18 00:00:10Z]}
+    assert_receive {:continued, ~U[2026-10-18 00:00:10.000000Z]}
     assert_receive {:simulation_wake, reference, :spawned}
     assert {:error, :incomplete_drain} = NavigationClock.seal(NavigationClock.snapshot().revision)
     NavigationClock.work(fn -> :ok end, reference)

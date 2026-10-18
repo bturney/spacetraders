@@ -205,7 +205,19 @@ defmodule SpaceTraders.Simulation.NativeBootstrap do
           state: "harness_failure",
           stage: Process.get(:native_bootstrap_stage),
           error: inspect(error.__struct__),
-          location: location
+          location: location,
+          stack:
+            Enum.take(
+              Enum.map(__STACKTRACE__, fn {module, function, args, info} ->
+                %{
+                  module: inspect(module),
+                  function: function,
+                  arity: if(is_list(args), do: length(args), else: args),
+                  line: info[:line]
+                }
+              end),
+              5
+            )
         })
 
         System.stop(1)

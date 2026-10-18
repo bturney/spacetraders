@@ -6,7 +6,7 @@ defmodule SpaceTraders.Simulation.NavigationChronologyTest do
 
   test "navigation attempt selection, send and outcome use the supported semantic instant" do
     previous = Application.get_env(:spacetraders, :clock)
-    start_supervised!({NavigationClock, epoch: ~U[2026-01-01 00:00:00.000000Z]})
+    start_supervised!({NavigationClock, epoch: ~U[2026-01-01 00:00:00.000Z]})
     Application.put_env(:spacetraders, :clock, NavigationClock)
 
     on_exit(fn ->

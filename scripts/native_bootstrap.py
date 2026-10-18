@@ -608,6 +608,7 @@ def inside():
         if (out / "bootstrap.json").exists():
             result.update(json.loads((out / "bootstrap.json").read_text()))
             if result.get("startup_ready_unix_ms", startup_deadline_unix_ms + 1) > startup_deadline_unix_ms:
+                result["bootstrap_error"] = result.get("error")
                 raise ValueError("application did not meet shared startup deadline")
         if code != 0:
             raise ValueError("application failed; inspect private application.log")
