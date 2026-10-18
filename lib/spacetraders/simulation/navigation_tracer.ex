@@ -210,7 +210,7 @@ defmodule SpaceTraders.Simulation.NavigationTracer do
 
     response = if body, do: Req.post!(opts ++ [json: body]), else: Req.get!(opts)
     if response.status != 200, do: raise("world control rejected")
-    response.body
+    Map.fetch!(response.body, "data")
   end
 
   defp ensure_deadline!(deadline) do

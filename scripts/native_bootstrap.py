@@ -433,7 +433,7 @@ def initialize_controlled_world(m, world, deadline):
                 data = response.read(1048577)
                 if len(data) > 1048576 or response.status != expected:
                     raise ValueError("controlled world rejected readiness/initialization")
-                body = json.loads(data)
+                body = json.loads(data)["data"]
                 if suffix == "contract":
                     if hashlib.sha256(canonical(body)).hexdigest() != m["world"]["contract_sha256"]:
                         raise ValueError("controlled-world contract mismatch")
