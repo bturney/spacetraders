@@ -17,22 +17,29 @@ defmodule SpaceTraders.Simulation.Artifact do
          :ok <- inputs(root, manifest["inputs"]),
          :ok <- api_schema(manifest),
          :ok <- history(root, manifest) do
-      provenance = %{
-        "schema_version" => 1,
-        "scope" => "standalone-http-world",
-        "qualification" => "not_executed",
-        "source" => Map.take(manifest, ~w(fork_revision upstream_revision)),
-        "api_schema_sha256" => manifest["api_schema_sha256"],
-        "platform" => manifest["platform"],
-        "permission" => manifest["permission"],
-        "toolchain" => manifest["toolchain"],
-        "inputs" => Map.new(manifest["inputs"], fn {role, input} -> {role, input["sha256"]} end)
-      }
+      provenance =
+        %{
+          "schema_version" => 1,
+          "scope" => "standalone-http-world",
+          "qualification" => "not_executed",
+          "source" => Map.take(manifest, ~w(fork_revision upstream_revision)),
+          "api_schema_sha256" => manifest["api_schema_sha256"],
+          "platform" => manifest["platform"],
+          "permission" => manifest["permission"],
+          "toolchain" => manifest["toolchain"],
+          "inputs" => Map.new(manifest["inputs"], fn {role, input} -> {role, input["sha256"]} end)
+        }
+        |> build_provenance(manifest)
 
       identity = "sha256:" <> digest(Jason.encode!(canonical(provenance)))
       {:ok, Map.put(provenance, "input_identity", identity)}
     end
   end
+
+  defp build_provenance(provenance, %{"schema_version" => 2, "build_system" => system}),
+    do: provenance |> Map.put("schema_version", 2) |> Map.put("build_system", system)
+
+  defp build_provenance(provenance, _), do: provenance
 
   defp api_schema(m) do
     if m["api_schema_sha256"] == m["inputs"]["api_schema"]["sha256"],
@@ -111,17 +118,39 @@ defmodule SpaceTraders.Simulation.Artifact do
 
   defp contract(m) when is_map(m) do
     valid? =
-      Enum.sort(Map.keys(m)) == Enum.sort(@fields) and
-        m["schema_version"] == 1 and m["scope"] == "standalone-http-world" and
+      build_profile?(m) and m["scope"] == "standalone-http-world" and
         m["permission"] == "operator-reported-private-use" and
         hex?(m["fork_revision"], 40) and hex?(m["upstream_revision"], 40) and
         hex?(m["api_schema_sha256"], 64) and m["platform"] in ~w(linux/amd64 linux/arm64) and
-        toolchain?(m["toolchain"]) and input_contract?(m["inputs"])
+        input_contract?(m["inputs"])
 
     if valid?, do: :ok, else: {:error, :invalid_contract}
   end
 
   defp contract(_), do: {:error, :invalid_contract}
+
+  defp build_profile?(%{"schema_version" => version} = m) when version == 1 do
+    Enum.sort(Map.keys(m)) == Enum.sort(@fields) and toolchain?(m["toolchain"])
+  end
+
+  defp build_profile?(
+         %{
+           "schema_version" => 2,
+           "build_system" => "otp-erlc",
+           "toolchain" => %{"erlang_otp" => otp} = tools
+         } = m
+       ) do
+    Enum.sort(Map.keys(m)) == Enum.sort(["build_system" | @fields]) and
+      map_size(tools) == 1 and is_binary(otp) and
+      Regex.match?(~r/\A\d+(?:\.\d+){1,3}\z/, otp)
+  end
+
+  defp build_profile?(%{"schema_version" => 2, "build_system" => "rebar3"} = m) do
+    Enum.sort(Map.keys(m)) == Enum.sort(["build_system" | @fields]) and
+      toolchain?(m["toolchain"])
+  end
+
+  defp build_profile?(_), do: false
 
   defp toolchain?(%{"erlang_otp" => otp, "rebar3" => rebar} = tools) do
     map_size(tools) == 2 and
@@ -219,14 +248,7 @@ defmodule SpaceTraders.Simulation.Artifact do
                m["upstream_revision"],
                m["fork_revision"]
              ]),
-           :ok <-
-             git([
-               "--git-dir",
-               repo,
-               "cat-file",
-               "-e",
-               m["fork_revision"] <> ":sim/sim-erlang/rebar.config"
-             ]),
+           :ok <- build_history(repo, m),
            :ok <-
              git([
                "--git-dir",
@@ -243,6 +265,18 @@ defmodule SpaceTraders.Simulation.Artifact do
     after
       File.rm_rf!(temp)
     end
+  end
+
+  defp build_history(_, %{"schema_version" => 2, "build_system" => "otp-erlc"}), do: :ok
+
+  defp build_history(repo, m) do
+    git([
+      "--git-dir",
+      repo,
+      "cat-file",
+      "-e",
+      m["fork_revision"] <> ":sim/sim-erlang/rebar.config"
+    ])
   end
 
   defp git(args) do

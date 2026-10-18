@@ -30,6 +30,178 @@ defmodule SpaceTraders.Simulation.ArtifactTest do
     assert provenance["input_identity"] =~ ~r/\Asha256:[a-f0-9]{64}\z/
   end
 
+  test "schema-v1 provenance and identities remain byte-compatible", %{tmp_dir: tmp} do
+    {root, manifest} = retained_inputs(tmp)
+    config = ~s({"architecture":"amd64","os":"linux"})
+    name = sha(config) <> ".json"
+
+    write_image(root, [
+      {~c"manifest.json", Jason.encode!([%{"Config" => name}])},
+      {String.to_charlist(name), config}
+    ])
+
+    assert {:ok, provenance} = Artifact.identify(root, manifest, "image.tar")
+    # Captured from ab0ec3f before implementation, with fixed Git/tar fixture metadata.
+    assert provenance["input_identity"] ==
+             "sha256:69cda38d732c5a1f0b3a2ab5cb2b37106d2a7869c36b63a4989dc0a51acb0709"
+
+    assert provenance["artifact_identity"] ==
+             "sha256:fc1f87b2a46778331f7dee0f59ef3e80008e040b55d95a5b6953a27152a2d2fd"
+
+    assert provenance["schema_version"] == 1
+    refute Map.has_key?(provenance, "build_system")
+  end
+
+  test "schema-v2 compiler-only inputs retain history without requiring rebar3", %{tmp_dir: tmp} do
+    {root, manifest} = retained_inputs(tmp, "otp-erlc")
+
+    compiler =
+      manifest
+      |> Map.put("schema_version", 2)
+      |> Map.put("build_system", "otp-erlc")
+      |> Map.put("toolchain", %{"erlang_otp" => "28.1"})
+
+    assert {:ok, provenance} = Artifact.validate(root, compiler)
+    assert provenance["schema_version"] == 2
+    assert provenance["build_system"] == "otp-erlc"
+    assert provenance["toolchain"] == %{"erlang_otp" => "28.1"}
+    assert provenance["qualification"] == "not_executed"
+    assert provenance["source"]["fork_revision"] == compiler["fork_revision"]
+    assert map_size(provenance["inputs"]) == 6
+    refute Jason.encode!(provenance) =~ root
+    refute Jason.encode!(provenance) =~ "rebar3"
+  end
+
+  test "versioned build-system and exact toolchain facts bind both identities", %{tmp_dir: tmp} do
+    {root, manifest} = retained_inputs(tmp)
+    config = ~s({"architecture":"amd64","os":"linux"})
+    name = sha(config) <> ".json"
+
+    write_image(root, [
+      {~c"manifest.json", Jason.encode!([%{"Config" => name}])},
+      {String.to_charlist(name), config}
+    ])
+
+    rebar = manifest |> Map.put("schema_version", 2) |> Map.put("build_system", "rebar3")
+    compiler = %{rebar | "build_system" => "otp-erlc", "toolchain" => %{"erlang_otp" => "28.1"}}
+    changed_otp = put_in(compiler, ["toolchain", "erlang_otp"], "28.1.1")
+    changed_rebar = put_in(rebar, ["toolchain", "rebar3"], "3.25.2")
+
+    results =
+      for input <- [manifest, rebar, compiler, changed_otp, changed_rebar] do
+        assert {:ok, provenance} = Artifact.identify(root, input, "image.tar")
+        assert {:ok, ^provenance} = Artifact.identify(root, input, "image.tar")
+        assert provenance["qualification"] == "not_executed"
+        assert provenance["image"]["verification"] == "archive_config_only"
+        assert provenance["toolchain"] == input["toolchain"]
+        assert provenance["build_system"] == input["build_system"]
+        provenance
+      end
+
+    assert results |> Enum.map(& &1["input_identity"]) |> Enum.uniq() |> length() == 5
+    assert results |> Enum.map(& &1["artifact_identity"]) |> Enum.uniq() |> length() == 5
+    assert results |> Enum.map(& &1["image"]) |> Enum.uniq() |> length() == 1
+  end
+
+  test "versioned build profiles reject unknown fields, tools and inconsistent declarations", %{
+    tmp_dir: tmp
+  } do
+    {root, manifest} = retained_inputs(tmp)
+    rebar = manifest |> Map.put("schema_version", 2) |> Map.put("build_system", "rebar3")
+    compiler = %{rebar | "build_system" => "otp-erlc", "toolchain" => %{"erlang_otp" => "28.1"}}
+
+    invalid = [
+      Map.put(compiler, "schema_version", 3),
+      Map.put(compiler, "schema_version", 2.0),
+      Map.put(compiler, "schema_version", "2"),
+      Map.put(compiler, "schema_version", 1),
+      Map.delete(compiler, "schema_version"),
+      Map.delete(compiler, "build_system"),
+      Map.put(compiler, "build_system", "make"),
+      Map.put(compiler, "build_system", nil),
+      Map.put(compiler, "build_system", %{"name" => "otp-erlc"}),
+      Map.put(compiler, "build_system", "rebar3"),
+      Map.put(rebar, "build_system", "otp-erlc"),
+      Map.put(compiler, "credentials", "never-export"),
+      Map.put(compiler, "toolchain", %{}),
+      Map.put(compiler, "toolchain", nil),
+      Map.delete(compiler, "toolchain"),
+      put_in(compiler, ["toolchain", "erlc"], "28.1"),
+      put_in(compiler, ["toolchain", "rebar3"], nil),
+      put_in(compiler, ["toolchain", "rebar3"], "not-used"),
+      put_in(rebar, ["toolchain", "make"], "4.4"),
+      Map.put(manifest, "build_system", "rebar3"),
+      Map.put(manifest, "toolchain", compiler["toolchain"])
+    ]
+
+    for input <- invalid do
+      assert {:error, :invalid_contract} = Artifact.validate(root, input)
+    end
+
+    for version <- [nil, 28.1, 28, "", "28", "latest", "28.x", "28.1-rc1", "28.1\n", "28.1.0.0.0"],
+        input <- [compiler, rebar],
+        tool <- Map.keys(input["toolchain"]) do
+      assert {:error, :invalid_contract} =
+               Artifact.validate(root, put_in(input, ["toolchain", tool], version))
+    end
+  end
+
+  test "compiler-only profile does not waive retained input, privacy or ancestry requirements", %{
+    tmp_dir: tmp
+  } do
+    {root, manifest} = retained_inputs(tmp, "otp-erlc")
+
+    compiler =
+      manifest
+      |> Map.put("schema_version", 2)
+      |> Map.put("build_system", "otp-erlc")
+      |> Map.put("toolchain", %{"erlang_otp" => "28.1"})
+
+    # Rebar profiles still require their configuration in the pinned source tree.
+    assert {:error, :invalid_retained_history} = Artifact.validate(root, manifest)
+
+    rebar = manifest |> Map.put("schema_version", 2) |> Map.put("build_system", "rebar3")
+    assert {:error, :invalid_retained_history} = Artifact.validate(root, rebar)
+
+    for role <- Map.keys(compiler["inputs"]) do
+      assert {:error, :invalid_contract} =
+               Artifact.validate(root, update_in(compiler, ["inputs"], &Map.delete(&1, role)))
+    end
+
+    assert {:error, :invalid_contract} =
+             Artifact.validate(root, Map.put(compiler, "permission", "public-use"))
+
+    assert {:error, :invalid_contract} =
+             Artifact.validate(
+               root,
+               put_in(compiler, ["inputs", "build_recipe", "path"], "../recipe")
+             )
+
+    assert {:error, :invalid_retained_history} =
+             Artifact.validate(root, %{
+               compiler
+               | "upstream_revision" => String.duplicate("0", 40)
+             })
+
+    File.chmod!(root, 0o755)
+    assert {:error, :private_retention_required} = Artifact.validate(root, compiler)
+    File.chmod!(root, 0o700)
+    File.write!(Path.join(root, "Dockerfile"), "altered fixture")
+    assert {:error, {:invalid_retained_input, "build_recipe"}} = Artifact.validate(root, compiler)
+  end
+
+  test "compiler-only history must still contain the supported source subtree", %{tmp_dir: tmp} do
+    {root, manifest} = retained_inputs(tmp, "otp-erlc", "unrelated/src")
+
+    compiler =
+      manifest
+      |> Map.put("schema_version", 2)
+      |> Map.put("build_system", "otp-erlc")
+      |> Map.put("toolchain", %{"erlang_otp" => "28.1"})
+
+    assert {:error, :invalid_retained_history} = Artifact.validate(root, compiler)
+  end
+
   test "artifact identity binds retained inputs to archive bytes and image configuration", %{
     tmp_dir: tmp
   } do
@@ -80,14 +252,26 @@ defmodule SpaceTraders.Simulation.ArtifactTest do
   test "agent command emits sanitized JSON, not private manifest fields", %{tmp_dir: tmp} do
     {root, manifest} = retained_inputs(tmp)
     path = Path.join(root, "inputs.json")
-    File.write!(path, Jason.encode!(manifest))
-    File.chmod!(path, 0o600)
 
-    output =
-      ExUnit.CaptureIO.capture_io(fn -> Mix.Tasks.Simulation.Artifact.run(["validate", root]) end)
+    compiler =
+      manifest
+      |> Map.put("schema_version", 2)
+      |> Map.put("build_system", "otp-erlc")
+      |> Map.put("toolchain", %{"erlang_otp" => "28.1"})
 
-    assert Jason.decode!(output)["qualification"] == "not_executed"
-    refute output =~ root
+    for input <- [manifest, compiler] do
+      File.write!(path, Jason.encode!(input))
+      File.chmod!(path, 0o600)
+
+      output =
+        ExUnit.CaptureIO.capture_io(fn ->
+          Mix.Tasks.Simulation.Artifact.run(["validate", root])
+        end)
+
+      assert Jason.decode!(output)["qualification"] == "not_executed"
+      assert Jason.decode!(output)["build_system"] == input["build_system"]
+      refute output =~ root
+    end
 
     File.write!(path, Jason.encode!(Map.put(manifest, "credentials", "never-print-this")))
 
@@ -220,22 +404,36 @@ defmodule SpaceTraders.Simulation.ArtifactTest do
 
   defp write_image(root, entries) do
     path = Path.join(root, "image.tar")
-    :ok = :erl_tar.create(String.to_charlist(path), entries, [])
+
+    :ok =
+      :erl_tar.create(String.to_charlist(path), entries,
+        mtime: 0,
+        atime: 0,
+        ctime: 0,
+        uid: 0,
+        gid: 0
+      )
+
     File.chmod!(path, 0o600)
   end
 
-  defp retained_inputs(tmp) do
+  defp retained_inputs(tmp, build_system \\ "rebar3", source_path \\ "sim/sim-erlang/src") do
     repo = Path.join(tmp, "upstream")
-    File.mkdir_p!(Path.join(repo, "sim/sim-erlang/src"))
+    File.mkdir_p!(Path.join(repo, source_path))
     git!(repo, ["init", "--quiet"])
     git!(repo, ["config", "user.email", "fixture@example.invalid"])
     git!(repo, ["config", "user.name", "Fixture"])
-    File.write!(Path.join(repo, "sim/sim-erlang/rebar.config"), "{deps, []}.\n")
-    File.write!(Path.join(repo, "sim/sim-erlang/src/fixture.erl"), "% inert fixture\n")
+
+    if build_system == "rebar3" do
+      File.write!(Path.join(repo, "sim/sim-erlang/rebar.config"), "{deps, []}.\n")
+    end
+
+    source = Path.join([repo, source_path, "fixture.erl"])
+    File.write!(source, "% inert fixture\n")
     git!(repo, ["add", "."])
     git!(repo, ["commit", "--quiet", "-m", "upstream fixture"])
     upstream_revision = git!(repo, ["rev-parse", "HEAD"]) |> String.trim()
-    File.write!(Path.join(repo, "sim/sim-erlang/src/fixture.erl"), "% inert fork fixture\n")
+    File.write!(source, "% inert fork fixture\n")
     git!(repo, ["commit", "--quiet", "-am", "fork fixture"])
     revision = git!(repo, ["rev-parse", "HEAD"]) |> String.trim()
 
@@ -281,7 +479,16 @@ defmodule SpaceTraders.Simulation.ArtifactTest do
   end
 
   defp git!(dir, args) do
-    {output, 0} = System.cmd("git", args, cd: dir, stderr_to_stdout: true)
+    {output, 0} =
+      System.cmd("git", args,
+        cd: dir,
+        stderr_to_stdout: true,
+        env: [
+          {"GIT_AUTHOR_DATE", "2026-01-01T00:00:00Z"},
+          {"GIT_COMMITTER_DATE", "2026-01-01T00:00:00Z"}
+        ]
+      )
+
     output
   end
 

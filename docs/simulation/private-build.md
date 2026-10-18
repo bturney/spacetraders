@@ -75,11 +75,49 @@ actual tool versions, or API/mechanics compatibility. A successful fixture
 validation cannot certify any of these. The recipe and inventories require
 private source inspection and the approved offline rebuild/boot check below.
 
+## Private input contract, version 2 (explicit build system)
+
+Version 2 adds a closed, explicit build-system choice for recipes that use OTP's
+`erlc` directly instead of rebar3. Its fields are **exactly** the version-1 fields
+plus `build_system`, with `schema_version: 2`. All scope, permission, platform,
+pin, checksum, path, private-retention and input-role requirements remain in force.
+
+| `build_system` | Exact `toolchain` fields |
+| --- | --- |
+| `otp-erlc` | Only `erlang_otp`, pinning the OTP distribution including its compiler |
+| `rebar3` | Only `erlang_otp` and `rebar3`, each independently pinned |
+
+Every toolchain value must be an exact numeric dotted version (2–4 components,
+for example the inert fixture version `28.1`), not a major-only release, mutable
+alias, missing/null value, `not-used` placeholder or inferred version. Do not
+invent a rebar3 version for a compiler-only recipe or add a separate `erlc`
+version field. Unknown schema versions, build systems, fields and toolchain
+keys, and mismatched build-system/toolchain combinations are rejected.
+
+Both profiles require the retained bundle, pinned fork/upstream commits,
+upstream ancestry and the supported `sim/sim-erlang/src` subtree. The rebar3
+profiles (including version 1) also require the pinned `rebar.config`; the
+compiler-only profile does not require an unused rebar configuration. This is
+not a source, history or dependency-retention exemption. Zero external
+dependencies still require the `dependencies_archive` and `dependency_lock`
+roles with explicit empty/revision-bound inventories, alongside every other
+retained input. These declarations do not prove the recipe uses only OTP or
+has no dependencies; approved private inspection/build checks remain required.
+
+Version-1 manifests remain valid without adding `build_system`; their sanitized
+provenance and both identities are unchanged. Version 2 emits and hashes the
+explicit schema version, build system and matching toolchain. The read-only
+commands accept both versions without running either build system. Status stays
+`not_executed` / `archive_config_only`; #778 remains partial.
+
+## Identity binding
+
 `input_identity` hashes the sanitized manifest facts using recursively sorted
 key/value-pair JSON. It excludes paths. `artifact_identity` additionally binds
 the archive checksum, image config ID and platform. Changed input bytes, pins,
-toolchain metadata or platform produce a different identity. Retain the complete
-private manifest and bytes: sanitized provenance cannot rebuild the simulator.
+toolchain metadata, version-2 build-system facts or platform produce a different
+identity. Retain the complete private manifest and bytes: sanitized provenance
+cannot rebuild the simulator.
 
 ## Build/use gates still required
 
