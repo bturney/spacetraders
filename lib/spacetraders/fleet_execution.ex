@@ -26,7 +26,6 @@ defmodule SpaceTraders.FleetExecution do
   alias SpaceTraders.FleetStrategy.StandingAuthority
   alias SpaceTraders.Intelligence
   alias SpaceTraders.Repo
-  alias SpaceTraders.ShipReservation
 
   @doc "Returns the credit floor for a Revision, or `{:error, :no_credit_floor}`."
   defdelegate credit_floor(revision), to: StandingAuthority
@@ -440,8 +439,6 @@ defmodule SpaceTraders.FleetExecution do
   end
 
   defp market_claims(agent, ships, markets) do
-    reserved = MapSet.new(ShipReservation.reserved_symbols(agent.id))
-
     registered =
       MapSet.new(
         Repo.all(
@@ -452,9 +449,7 @@ defmodule SpaceTraders.FleetExecution do
       )
 
     ships
-    |> Enum.reject(
-      &(MapSet.member?(reserved, &1.symbol) or not MapSet.member?(registered, &1.symbol))
-    )
+    |> Enum.reject(&(not MapSet.member?(registered, &1.symbol)))
     |> Enum.map(fn ship ->
       %{
         resource: ship.symbol,
@@ -465,7 +460,7 @@ defmodule SpaceTraders.FleetExecution do
           fuel: fuel(ship),
           position: position(ship),
           cargo_transport: cargo_capacity(ship),
-          trade_work_profile: SpaceTraders.FleetAllocation.MarketWorkRate.ship_profile(ship),
+          engine: engine(ship),
           chart: true,
           waypoint_scan: sensor_mount?(ship),
           market_access: markets
@@ -497,6 +492,12 @@ defmodule SpaceTraders.FleetExecution do
        do: %{current: current, capacity: capacity}
 
   defp fuel(_ship), do: nil
+
+  # Engine speed and wear set flight time (`SpaceTraders.Fleet.TradeEstimate`).
+  defp engine(%{engine: %{speed: speed, condition: condition}}),
+    do: %{speed: speed, condition: condition}
+
+  defp engine(_ship), do: nil
 
   defp position(%{nav: %{waypoint_symbol: waypoint} = nav} = ship) when is_binary(waypoint) do
     point =

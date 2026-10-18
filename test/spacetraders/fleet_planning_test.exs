@@ -266,6 +266,115 @@ defmodule SpaceTraders.FleetPlanningTest do
     end
   end
 
+  describe "net credits per Ship-hour" do
+    # The Ship waits at X1-A1, where IRON costs 10 and FUEL 72. X1-A2 (x=60)
+    # pays 20 for IRON; X1-A5 (x=700) pays 30, a larger gross over a far
+    # longer flight.
+    defp rate_snapshot(ships) do
+      %{
+        as_of: @as_of,
+        system_symbol: "X1",
+        freshness_seconds: 300,
+        agent_id: 7,
+        markets: [
+          market("X1-A1", ~U[2030-01-01 11:59:00Z], [
+            good("IRON", 10, 9, 40),
+            good("FUEL", 72, 70, 100)
+          ]),
+          market("X1-A2", ~U[2030-01-01 11:58:00Z], [good("IRON", 25, 20, 40)]),
+          market("X1-A5", ~U[2030-01-01 11:58:00Z], [good("IRON", 40, 30, 40)])
+        ],
+        waypoint_coordinates: %{
+          "X1-A1" => %{x: 0, y: 0},
+          "X1-A2" => %{x: 60, y: 0},
+          "X1-A5" => %{x: 700, y: 0}
+        },
+        fuel_stops: [],
+        ships: ships
+      }
+    end
+
+    defp trader(symbol, engine) do
+      %{
+        symbol: symbol,
+        cargo: %{capacity: 40, units: 0},
+        waypoint: "X1-A1",
+        flight_mode: "CRUISE",
+        fuel: %{current: 2_000, capacity: 2_000},
+        engine: engine
+      }
+    end
+
+    test "trades rank by net credits per Ship-hour after fuel, not gross spread" do
+      ships = [trader("TRADER-1", %{speed: 36, condition: 1.0})]
+
+      assert {:ok, %{candidate_contributions: [near, far | _]}} =
+               FleetPlanning.plan_market(revision(), 0, rate_snapshot(ships))
+
+      assert {near.destination_waypoint, far.destination_waypoint} == {"X1-A2", "X1-A5"}
+
+      assert far.expected_outcomes.maximum_credit_change >
+               near.expected_outcomes.maximum_credit_change
+
+      # 60 units of distance: 60 fuel (44 credits at 72 per 100) and 57 s.
+      assert %{
+               net_credits_per_ship_hour: 22_484,
+               trade_estimate: %{
+                 ship: "TRADER-1",
+                 net_credits: 356,
+                 fuel_credits: 44,
+                 seconds: 57,
+                 empty_seconds: 0
+               }
+             } = near.expected_outcomes
+
+      # 700 units: 504 credits of fuel and 501 s.
+      assert far.expected_outcomes.net_credits_per_ship_hour == 2_127
+    end
+
+    test "the estimate does not change the trade's identity as the Ship wears or moves" do
+      worn = [trader("TRADER-1", %{speed: 36, condition: 0.9})]
+      fresh = [trader("TRADER-1", %{speed: 36, condition: 1.0})]
+
+      assert {:ok, %{candidate_contributions: [a | _]}} =
+               FleetPlanning.plan_market(revision(), 0, rate_snapshot(worn))
+
+      assert {:ok, %{candidate_contributions: [b | _]}} =
+               FleetPlanning.plan_market(revision(), 0, rate_snapshot(fresh))
+
+      assert a.id == b.id
+
+      assert a.expected_outcomes.trade_estimate.seconds >
+               b.expected_outcomes.trade_estimate.seconds
+    end
+
+    test "the fastest reaching Ship sets the estimate" do
+      ships = [
+        trader("SLOW-1", %{speed: 9, condition: 1.0}),
+        trader("FAST-1", %{speed: 36, condition: 1.0})
+      ]
+
+      assert {:ok, %{candidate_contributions: [near | _]}} =
+               FleetPlanning.plan_market(revision(), 0, rate_snapshot(ships))
+
+      assert near.expected_outcomes.trade_estimate.ship == "FAST-1"
+    end
+
+    test "a Ship without engine evidence leaves the estimate unknown" do
+      ships = [Map.delete(trader("TRADER-1", nil), :engine)]
+
+      assert {:ok, %{candidate_contributions: [candidate | _]}} =
+               FleetPlanning.plan_market(revision(), 0, rate_snapshot(ships))
+
+      assert candidate.expected_outcomes.net_credits_per_ship_hour == nil
+
+      assert candidate.expected_outcomes.trade_estimate == %{
+               state: :unknown,
+               reason: :unknown_engine
+             }
+    end
+  end
+
   test "a widened calibration margin in the snapshot widens the selection-time credit Reservation" do
     snapshot = Map.put(evidence_snapshot(), :credit_margin_percent, 50)
 
@@ -914,8 +1023,11 @@ defmodule SpaceTraders.FleetPlanningTest do
              [:shipyards, Access.at(0), :ships, Access.at(0), :modules],
              []
            ), :offer_capability_unmet},
-          {put_in(acquisition_snapshot(), [:unmet_work, Access.at(0), :planned_rate], nil),
-           :unknown_planned_rate}
+          {put_in(
+             acquisition_snapshot(),
+             [:shipyards, Access.at(0), :ships, Access.at(0), :engine, :condition],
+             nil
+           ), :unknown_planned_rate}
         ] do
       assert {:ok, %{candidate_contributions: [], limitations: [limitation]}} =
                FleetPlanning.plan_ship_acquisition(revision(), 0, snapshot)
@@ -926,21 +1038,22 @@ defmodule SpaceTraders.FleetPlanningTest do
     end
   end
 
-  test "a capable offer is valued at the work's planned rate whatever Ship produced that evidence" do
-    for snapshot <- [
-          put_in(
-            acquisition_snapshot(),
-            [:shipyards, Access.at(0), :ships, Access.at(0), :engine, :speed],
-            60
-          ),
-          put_in(acquisition_snapshot(), [:shipyards, Access.at(0), :waypoint], "X1-A2")
-          |> Map.put(:ships, [%{symbol: "OWNED-1", waypoint: "X1-A2"}])
-        ] do
-      assert {:ok, %{candidate_contributions: [candidate], limitations: []}} =
-               FleetPlanning.plan_ship_acquisition(revision(), 0, snapshot)
+  test "an offer at another Shipyard pays its empty leg to the source" do
+    # 144 s from X1-A2 back to X1-A1, then the 144 s loaded leg: 500 per Ship-hour.
+    snapshot =
+      put_in(acquisition_snapshot(), [:shipyards, Access.at(0), :waypoint], "X1-A2")
+      |> Map.put(:ships, [%{symbol: "OWNED-1", waypoint: "X1-A2"}])
 
-      assert candidate.expected_outcomes.valuation.enabled_rate == 500.0
-    end
+    # 250 per Ship-hour after the no-history discount no longer covers it.
+    assert {:ok,
+            %{
+              candidate_contributions: [],
+              limitations: [%{reason: :enabled_value_not_above_cost, valuation: valuation}]
+            }} = FleetPlanning.plan_ship_acquisition(revision(), 0, snapshot)
+
+    assert valuation.planned_rate == 500
+    assert valuation.offer_estimate.empty_seconds == 144
+    assert valuation.enabled_rate == 250.0
   end
 
   test "realized receipt-backed Trade Margin per occupied Ship-hour caps planned rate, not net earnings" do
@@ -1100,21 +1213,24 @@ defmodule SpaceTraders.FleetPlanningTest do
              "fuel" => %{"capacity" => 100}
            }
 
-    for refused <- [
-          put_in(
-            snapshot,
-            [:shipyards, Access.at(0), :ships, Access.at(0), :frame, :fuel_capacity],
-            50
-          ),
-          Map.put(snapshot, :waypoint_coordinates, %{})
-        ] do
-      assert {:ok,
-              %{
-                candidate_contributions: [],
-                limitations: [%{reason: :offer_fuel_reach_unproven}]
-              }} =
-               FleetPlanning.plan_ship_acquisition(revision(), 0, refused)
-    end
+    short =
+      put_in(
+        snapshot,
+        [:shipyards, Access.at(0), :ships, Access.at(0), :frame, :fuel_capacity],
+        50
+      )
+
+    assert {:ok,
+            %{candidate_contributions: [], limitations: [%{reason: :offer_fuel_reach_unproven}]}} =
+             FleetPlanning.plan_ship_acquisition(revision(), 0, short)
+
+    # Without coordinates neither the estimate nor the reach is known.
+    assert {:ok, %{candidate_contributions: [], limitations: [%{reason: :unknown_planned_rate}]}} =
+             FleetPlanning.plan_ship_acquisition(
+               revision(),
+               0,
+               Map.put(snapshot, :waypoint_coordinates, %{})
+             )
 
     assert {:ok, %{candidate_contributions: [_]}} =
              snapshot
@@ -1124,26 +1240,45 @@ defmodule SpaceTraders.FleetPlanningTest do
              )
              |> Map.put(:waypoint_coordinates, %{
                "X1-A1" => %{x: 0, y: 0},
-               "X1-A2" => %{x: 60, y: 0},
+               "X1-A2" => %{x: 62, y: 0},
                "X1-A3" => %{x: 30, y: 0}
              })
              |> Map.put(:fuel_stops, ["X1-A3"])
              |> then(&FleetPlanning.plan_ship_acquisition(revision(), 0, &1))
   end
 
-  test "missing whole-work duration or supporting cost cannot masquerade as discounted planned value" do
-    for field <- ["conservative_occupied_seconds", "planned_supporting_cost"] do
-      snapshot =
-        put_in(
-          acquisition_snapshot(),
-          [:unmet_work, Access.at(0), :expected_outcomes, "planned_rate_evidence", field],
-          nil
-        )
+  test "an offer is valued by its own engine and tank on the work, never an owned Ship's rate" do
+    # A speed-6 engine doubles the loaded leg: 15 + 62 × 25 ÷ 6 = 273 s, 527/h.
+    slow =
+      put_in(
+        acquisition_snapshot(),
+        [:shipyards, Access.at(0), :ships, Access.at(0), :engine, :speed],
+        6
+      )
 
-      assert {:ok,
-              %{candidate_contributions: [], limitations: [%{reason: :unknown_planned_rate}]}} =
-               FleetPlanning.plan_ship_acquisition(revision(), 0, snapshot)
-    end
+    assert {:ok, %{candidate_contributions: [], limitations: [limitation]}} =
+             FleetPlanning.plan_ship_acquisition(revision(), 0, slow)
+
+    assert limitation.valuation.planned_rate == 527
+    assert limitation.valuation.offer_estimate.seconds == 273
+
+    # A fuel tank needs the work's FUEL price to be valued.
+    unpriced =
+      acquisition_snapshot()
+      |> put_in([:shipyards, Access.at(0), :ships, Access.at(0), :frame, :fuel_capacity], 100)
+      |> put_in(
+        [:unmet_work, Access.at(0), :expected_outcomes, "trade_estimate", "fuel_price"],
+        nil
+      )
+
+    assert {:ok,
+            %{
+              candidate_contributions: [],
+              limitations: [%{reason: :unknown_planned_rate} = refused]
+            }} =
+             FleetPlanning.plan_ship_acquisition(revision(), 0, unpriced)
+
+    assert refused.valuation.offer_estimate == %{state: :unknown, reason: :unknown_fuel_price}
   end
 
   test "Candidate binds the matched work and reset evidence, and its identity changes with valuation" do
@@ -1204,7 +1339,7 @@ defmodule SpaceTraders.FleetPlanningTest do
       work
       |> Map.put(:candidate_id, "low-rate")
       |> Map.put(:planned_rate, 200)
-      |> put_in([:expected_outcomes, "planned_rate_evidence", "gross_credit_change"], 300)
+      |> put_in([:expected_outcomes, "credit_change_per_unit"], 300)
 
     wrong = %{work | strategy_revision_id: 41, planned_rate: 100_000}
 
@@ -1335,7 +1470,6 @@ defmodule SpaceTraders.FleetPlanningTest do
 
   defp acquisition_snapshot do
     offer = acquisition_offer()
-    profile = acquisition_profile(offer)
 
     %{
       as_of: @as_of,
@@ -1365,21 +1499,18 @@ defmodule SpaceTraders.FleetPlanningTest do
             %{"capability" => "fuel_reach", "ships" => ["OWNED-1"]}
           ],
           required_resources: %{"credits" => 1_000, "ship_count" => 1, "cargo_capacity" => 40},
+          # One IRON a unit, 62 units of distance: the offered speed-12
+          # engine flies it in 144 s, 1,000 credits per Ship-hour.
           expected_outcomes: %{
             "maximum_units" => 40,
-            "maximum_credit_change" => 1_100,
-            "planned_rate_evidence" => %{
-              "model" => "market-observed-whole-work-v1",
+            "credit_change_per_unit" => 1,
+            "maximum_credit_change" => 40,
+            "net_credits_per_ship_hour" => 1_000,
+            "trade_estimate" => %{
               "state" => "estimated",
-              "gross_credit_change" => 1_100,
-              "bounded_units" => 40,
-              "conservative_occupied_seconds" => 3_600,
-              "planned_supporting_cost" => 100,
-              "profiles" => [profile],
-              "purchase_intent_ids" => [10],
-              "sale_intent_ids" => [11],
-              "supporting_attempt_ids" => [8],
-              "evidence_references" => [%{"kind" => "intent", "id" => 10}]
+              "model" => "cruise-flight-v1",
+              "ship" => "OWNED-1",
+              "fuel_price" => 0
             }
           },
           planned_rate: 1_000,
@@ -1393,7 +1524,7 @@ defmodule SpaceTraders.FleetPlanningTest do
           validity: %{as_of: @as_of, expires_at: ~U[2030-01-01 12:03:00Z]}
         }
       ],
-      waypoint_coordinates: %{"X1-A1" => %{x: 0, y: 0}, "X1-A2" => %{x: 60, y: 0}},
+      waypoint_coordinates: %{"X1-A1" => %{x: 0, y: 0}, "X1-A2" => %{x: 62, y: 0}},
       fuel_stops: [],
       ships: [%{symbol: "CRUISER-1", waypoint: "X1-A1"}],
       shipyards: [
@@ -1415,29 +1546,12 @@ defmodule SpaceTraders.FleetPlanningTest do
     %{
       type: "SHIP_LIGHT_HAULER",
       purchase_price: 10_000,
-      engine: %{symbol: "ENGINE_ION_DRIVE_I", speed: 30},
+      engine: %{symbol: "ENGINE_ION_DRIVE_I", speed: 12, condition: 1.0},
       reactor: %{symbol: "REACTOR_SOLAR_I", power_output: 10},
       crew: %{required: 1, capacity: 10},
       frame: %{symbol: "FRAME_SHUTTLE", module_slots: 4, mounting_points: 2, fuel_capacity: 0},
       modules: [%{symbol: "MODULE_CARGO_HOLD_I", capacity: 40}],
       mounts: []
-    }
-  end
-
-  defp acquisition_profile(offer) do
-    %{
-      "readiness" =>
-        Jason.decode!(
-          Jason.encode!(Map.take(offer, [:frame, :reactor, :engine, :crew, :modules, :mounts]))
-        ),
-      "navigation" => %{
-        "waypoint_symbol" => "X1-A1",
-        "status" => "DOCKED",
-        "flight_mode" => "CRUISE"
-      },
-      "cargo" => %{"capacity" => 40, "units" => 0},
-      "fuel" => %{"capacity" => 0, "current" => 0},
-      "cooldown" => %{"remaining_seconds" => 0}
     }
   end
 

@@ -3,6 +3,7 @@ defmodule SpaceTraders.FleetPlanning.ShipInvestment do
 
   alias SpaceTraders.ShipAcquisitionCalibration
   alias SpaceTraders.Fleet.FuelReach
+  alias SpaceTraders.Fleet.TradeEstimate
 
   def inputs(context) do
     %{
@@ -37,7 +38,8 @@ defmodule SpaceTraders.FleetPlanning.ShipInvestment do
 
     horizon = Map.get(context.snapshot, :generation_horizon, %{status: :unknown})
     calibration = ShipAcquisitionCalibration.current()
-    planned = work && work.planned_rate
+    estimate = if work, do: offer_estimate(work, yard, offer, context.snapshot)
+    planned = estimate && estimate[:net_credits_per_ship_hour]
     realized = realized_rate(Map.get(context.snapshot, :realized_trade_progress), context.as_of)
 
     {rate, basis} =
@@ -65,6 +67,7 @@ defmodule SpaceTraders.FleetPlanning.ShipInvestment do
       shipyard:
         Map.take(yard, [:system_symbol, :waypoint, :evidence_id, :observed_at, :modifications_fee]),
       preparation_override: context.override,
+      offer_estimate: estimate,
       planned_rate: planned,
       realized_rate: realized,
       rate_basis: basis,
@@ -198,8 +201,9 @@ defmodule SpaceTraders.FleetPlanning.ShipInvestment do
     }
 
   # Capability match only (#730): role, Cargo capacity, Market access and fuel
-  # reach on the offered tank. Throughput is the enabled work's planned rate;
-  # min(planned, realized) and the no-history discount carry the conservatism.
+  # reach on the offered tank. Throughput is the offer's own estimate on the
+  # work; min(planned, realized) and the no-history discount carry the
+  # conservatism.
   # The benchmark is what registration must prove from the purchased Ship.
   defp match_offer(work, yard, offer, snapshot) do
     config = offer.configuration
@@ -233,14 +237,9 @@ defmodule SpaceTraders.FleetPlanning.ShipInvestment do
             false
         end)
 
-    model = work.expected_outcomes["planned_rate_evidence"] || %{}
-
     cond do
       not capable? ->
         %{status: :unmatched, reason: :offer_capability_unmet}
-
-      not planned_evidence?(work, model) ->
-        %{status: :unknown, reason: :unknown_planned_rate}
 
       not reachable?(fuel_capacity, work, yard, snapshot) ->
         %{status: :unknown, reason: :offer_fuel_reach_unproven}
@@ -257,17 +256,34 @@ defmodule SpaceTraders.FleetPlanning.ShipInvestment do
     end
   end
 
-  defp planned_evidence?(work, model) do
-    model["model"] == "market-observed-whole-work-v1" and model["state"] == "estimated" and
-      is_number(work.planned_rate) and
-      is_integer(model["conservative_occupied_seconds"]) and
-      model["conservative_occupied_seconds"] > 0 and
-      is_integer(model["planned_supporting_cost"]) and model["planned_supporting_cost"] >= 0 and
-      model["bounded_units"] == work.expected_outcomes["maximum_units"] and
-      is_integer(model["gross_credit_change"]) and
-      work.planned_rate ==
-        3_600 * (model["gross_credit_change"] - model["planned_supporting_cost"]) /
-          model["conservative_occupied_seconds"]
+  # The offered Ship on the work, estimated exactly as trade selection
+  # estimates an owned Ship (`TradeEstimate`): its empty leg from the
+  # Shipyard to the source, then the loaded leg, on its own engine and tank.
+  defp offer_estimate(work, yard, offer, snapshot) do
+    config = offer.configuration
+    engine = config["engine"] || %{}
+    outcomes = work.expected_outcomes
+    coordinates = Map.get(snapshot, :waypoint_coordinates, %{})
+
+    position =
+      if yard.waypoint == work.source_waypoint, do: :source, else: coordinates[yard.waypoint]
+
+    case TradeEstimate.trade(%{
+           ship: %{
+             speed: engine["speed"],
+             condition: engine["condition"],
+             fuel_capacity: get_in(config, ["frame", "fuel_capacity"]),
+             position: position
+           },
+           source: coordinates[work.source_waypoint],
+           destination: coordinates[work.destination_waypoint],
+           units: outcomes["maximum_units"],
+           spread: outcomes["credit_change_per_unit"],
+           fuel_price: get_in(outcomes, ["trade_estimate", "fuel_price"])
+         }) do
+      {:ok, estimate} -> Map.put(estimate, :state, :estimated)
+      {:error, reason} -> %{state: :unknown, reason: reason}
+    end
   end
 
   # Yard to source to destination on a full offered tank, refuelling only at

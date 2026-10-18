@@ -1197,7 +1197,6 @@ defmodule SpaceTraders.FleetGeneration do
 
   defp release_predecessor(%Generation{agent_id: agent_id}) do
     stale_agent = Repo.get!(Agent, agent_id)
-    :ok = SpaceTraders.ShipReservation.release_for_agent!(stale_agent.id)
 
     live_ships =
       from(ship in Ship, where: ship.agent_id == ^stale_agent.id and is_nil(ship.retired_at))
