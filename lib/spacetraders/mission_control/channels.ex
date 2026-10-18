@@ -13,6 +13,7 @@ defmodule SpaceTraders.MissionControl.Channels do
 
   @pubsub SpaceTraders.PubSub
   @strategy "fleet_strategy"
+  @earnings "earnings"
 
   @doc "Subscribes the caller to deployment Fleet Strategy changes."
   def subscribe_strategy, do: Phoenix.PubSub.subscribe(@pubsub, @strategy)
@@ -20,6 +21,13 @@ defmodule SpaceTraders.MissionControl.Channels do
   @doc "Announces a deployment Fleet Strategy change."
   def broadcast_strategy,
     do: Phoenix.PubSub.broadcast(@pubsub, @strategy, :fleet_strategy_updated)
+
+  @doc "Subscribes the caller to committed Earnings records."
+  def subscribe_earnings, do: Phoenix.PubSub.subscribe(@pubsub, @earnings)
+
+  @doc "Announces a committed Earnings record: a prompt to re-read, never data."
+  def broadcast_earnings,
+    do: Phoenix.PubSub.broadcast(@pubsub, @earnings, :earnings_recorded)
 
   @doc "Subscribes the caller to current-Fleet allocation outbox notifications."
   def subscribe_allocation, do: Phoenix.PubSub.subscribe(@pubsub, "fleet_allocation")
