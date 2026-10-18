@@ -31,6 +31,9 @@ Native-time actual-app/PG/private-world HTTP bootstrap is separately opt-in:
 see `docs/simulation/native-bootstrap.md`. Its ordinary manifest/config tests
 open no listener; `scripts/native_bootstrap.py start` owns the whole isolated
 stack and bounded shutdown. This is not accelerated or full-period qualification.
+The separate controlled navigation/Arrival profile and incomplete-drain negative
+control are documented in `docs/simulation/navigation-tracer.md`; its bounded
+whole-app check is also opt-in, not part of the combined gate.
 
 ## Release and deployment verification
 

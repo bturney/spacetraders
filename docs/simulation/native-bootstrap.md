@@ -1,5 +1,9 @@
 # Native-time bootstrap diagnostic (#779)
 
+The separately pinned [coordinated navigation tracer](navigation-tracer.md) adds
+an explicit controlled-world profile; this native profile and its frozen world
+artifact identities remain unchanged.
+
 This is a local, opt-in real-HTTP regression boundary, **not** an experiment
 runner, Docker-engine proof, accelerated clock, gameplay benchmark or full-period
 qualification. No live endpoints, protected host, mutable #780 world, inherited

@@ -1,7 +1,9 @@
 """Inert tests at the immutable bootstrap-command seam; no ports/process boots."""
 import copy
 import importlib.util
+import json
 from pathlib import Path
+import tempfile
 import time
 import unittest
 
@@ -110,6 +112,28 @@ class ManifestTest(unittest.TestCase):
         changed["initial_world"]["epoch_ms"] += 1
         with self.assertRaises(ValueError):
             boot.validate(changed)
+
+    def test_arrival_proof_requires_authoritative_http_continuation_order(self):
+        at = "1970-01-01T00:00:10Z"
+        arrival = {"class": "arrival", "ship": "TEST-1", "destination": "X1-TEST-A2",
+                   "due_time": 10, "settled_time": 10, "after_gameplay_request_sequence": 1}
+        result = {"evidence": {"ship_symbol": "TEST-1", "target_waypoint": "X1-TEST-A2",
+                  "intent_status": "completed", "continuation_observed_at": at, "continued_at": at}}
+        trace = [{"phase": "world_settled", "ordinal": 1, "at": at},
+                 {"phase": "bot_released", "ordinal": 2, "at": at}]
+        export = {"epoch_ms": 0, "settled_events": [arrival], "request_log": [
+            [{"method": "POST", "path": ["my", "ships", "TEST-1", "navigate"], "now": 0}, {"status": 200}],
+            [{"method": "GET", "path": ["my", "ships", "TEST-1"], "now": 10}, {"status": 200}],
+            [{"method": "GET", "path": ["systems", "X1-TEST", "waypoints", "X1-TEST-A2", "market"], "now": 10}, {"status": 200}]]}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "time-trace.json").write_text(json.dumps(trace))
+            (root / "world-export.json").write_text(json.dumps(export))
+            boot.validate_arrival_proof(root, copy.deepcopy(result))
+            export["request_log"][1:] = reversed(export["request_log"][1:])
+            (root / "world-export.json").write_text(json.dumps(export))
+            with self.assertRaisesRegex(ValueError, "HTTP order"):
+                boot.validate_arrival_proof(root, copy.deepcopy(result))
 
 
 def json_bytes(value):

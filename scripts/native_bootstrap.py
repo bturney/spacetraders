@@ -5,6 +5,7 @@ All application/PG/world processes share one new loopback-only network namespace
 and one bounded cgroup. Inputs are local immutable archives; outputs stay private.
 """
 import argparse
+from datetime import datetime, timezone
 import hashlib
 import http.client
 import http.server
@@ -456,6 +457,22 @@ def validate_arrival_proof(runtime, result):
                 and e["ship"] == evidence["ship_symbol"] and e["destination"] == evidence["target_waypoint"]]
     if not arrivals or evidence["intent_status"] != "completed":
         raise ValueError("no authoritative Arrival/completed continuation")
+    arrival = arrivals[0]
+    instant = datetime.fromtimestamp((export["epoch_ms"] / 1000) + arrival["settled_time"], timezone.utc)
+    if (arrival["settled_time"] != arrival["due_time"] or
+        datetime.fromisoformat(evidence["continuation_observed_at"]) != instant or
+        datetime.fromisoformat(evidence["continued_at"]) != instant):
+        raise ValueError("continuation is not at authoritative Arrival time")
+    # The world log is authoritative HTTP serialization, not a coordinator claim.
+    subsequent = list(enumerate(export["request_log"], 1))[arrival["after_gameplay_request_sequence"]:]
+    refreshes = [index for index, (request, response) in subsequent
+                 if request["method"] == "GET" and request["path"] == ["my", "ships", evidence["ship_symbol"]]
+                 and request["now"] == arrival["settled_time"] and response["status"] == 200]
+    markets = [index for index, (request, response) in subsequent
+               if request["method"] == "GET" and request["path"][-3:] == ["waypoints", evidence["target_waypoint"], "market"]
+               and request["now"] == arrival["settled_time"] and response["status"] == 200]
+    if not refreshes or not markets or min(markets) <= min(refreshes):
+        raise ValueError("no authoritative post-settlement refresh/continuation HTTP order")
     boundaries = [e for e in trace if e["phase"] == "world_settled"]
     if not boundaries or any(a["at"] >= b["at"] for a, b in zip(boundaries, boundaries[1:])):
         raise ValueError("non-increasing semantic advancement")
@@ -464,6 +481,8 @@ def validate_arrival_proof(runtime, result):
         if release["phase"] != "bot_released" or release["at"] != settled["at"]:
             raise ValueError("world-before-bot ordering absent")
     result["arrival_settlements"] = arrivals
+    result["continuation_request_order"] = {"after_gameplay_request": arrival["after_gameplay_request_sequence"],
+                                             "ship_refresh": min(refreshes), "market_observation": min(markets)}
     result["coverage"] = "navigation intelligence Arrival; closed synchronous participant set; not #782/#783/#784"
 
 
