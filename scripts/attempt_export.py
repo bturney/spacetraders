@@ -630,7 +630,12 @@ def publish(metadata, sections, destination):
         os.unlink(temporary)
 
 
-def read_bundle(path):
+def read_bundle(path, receipt=None):
+    if receipt is not None:
+        require(receipt["schema"] == "export-receipt/v1" and receipt["cleanup_authorized"] is False,
+                "invalid export receipt")
+        require(file_sha(path) == receipt["sha256"] and Path(path).stat().st_size == receipt["bytes"],
+                "export receipt byte/hash mismatch")
     with zipfile.ZipFile(path) as archive:
         names = archive.namelist()
         if len(names) != len(set(names)) or sum(i.file_size for i in archive.infolist()) > MAX_BYTES:
@@ -651,6 +656,8 @@ def read_bundle(path):
         graph, summary = files.pop("causal.json"), files.pop("summary.json")
         sections = {name.removesuffix(".json"): value for name, value in files.items()}
         require(manifest["identity"] == metadata["identity"], "manifest identity mismatch")
+        if receipt is not None:
+            require(receipt["identity"] == metadata["identity"], "export receipt identity mismatch")
         require(validate(metadata, sections) == manifest["complete_export"], "completeness disagreement")
         require(derived(metadata, sections) == (graph, summary), "causal/summary disagreement with retained evidence")
         return {"manifest": manifest, "metadata": metadata, "sections": sections, "graph": graph, "summary": summary}
@@ -662,6 +669,7 @@ def main():
     sub = parser.add_subparsers(dest="command", required=True)
     reader = sub.add_parser("read")
     reader.add_argument("bundle")
+    reader.add_argument("--receipt", help="trusted separate export receipt: verify whole archive and attempt identity")
     reader.add_argument("--html", help="new self-contained HTML output; never overwritten")
     reader.add_argument("--private-authority", help="optional private raw archive: verify bytes/inventory without restore")
     publisher = sub.add_parser("publish")
@@ -675,7 +683,8 @@ def main():
     raw.add_argument("destination")
     args = parser.parse_args()
     if args.command == "read":
-        result = read_bundle(args.bundle)
+        receipt = decode_json(Path(args.receipt).read_bytes()) if args.receipt else None
+        result = read_bundle(args.bundle, receipt=receipt)
         if args.private_authority:
             require(result["sections"]["database"]["status"] == "present", "no database authority receipt")
             verify_authority(args.private_authority, result["sections"]["database"]["data"]["authority"]["raw_archive"])

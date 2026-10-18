@@ -60,6 +60,10 @@ class ExportTest(unittest.TestCase):
             self.assertEqual(result["sections"]["world"]["data"]["world"]["cargo"]["inventory"][0]["units"], 3)
             self.assertEqual(result["sections"]["time"]["data"]["unresolved"], [{"$tuple": ["pending", None]}])
             self.assertEqual(receipt["sha256"], export.file_sha(target))
+            self.assertEqual(export.read_bundle(target, receipt=receipt)["metadata"]["identity"], meta["identity"])
+            changed_receipt = dict(receipt, sha256="0" * 64)
+            with self.assertRaisesRegex(ValueError, "receipt"):
+                export.read_bundle(target, receipt=changed_receipt)
             original = target.read_bytes()
             with self.assertRaises(FileExistsError):
                 export.publish(meta, sections, target)

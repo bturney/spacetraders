@@ -39,7 +39,7 @@ creates missing game events, outcomes, explanations or monetary receipts.
    producing a new self-contained, escaped, script-free HTML drill-down.
 
    ```sh
-   python3 scripts/attempt_export.py read PRIVATE/attempt.zip --private-authority PRIVATE/raw-authority.tar --html PRIVATE/attempt.html
+   python3 scripts/attempt_export.py read PRIVATE/attempt.zip --receipt PRIVATE/receipt.json --private-authority PRIVATE/raw-authority.tar --html PRIVATE/attempt.html
    ```
 
 5. Run the inert regression seam. No ports, private fixtures or game activity:
@@ -133,7 +133,8 @@ publication wall duration/time. Evidence-capture wall coverage and subsequent
 publication overhead are separate measurements, not an invented total.
 
 Checksums detect corruption/inconsistency, **not authenticity**: retain trusted
-receipt hashes separately. Portable content is still private experiment data
+receipt hashes separately; `--receipt` also checks the whole archive's
+hash/size/attempt identity against that trusted copy. Portable content is still private experiment data
 unless separately authorized for sharing. Explicit allowlists plus recursive
 credential/private-source-key and Bearer/JWT/PEM redaction are defense in depth,
 not permission to ingest arbitrary dumps or publish unreviewed free text.
