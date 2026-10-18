@@ -16,6 +16,7 @@ defmodule SpaceTraders.Evidence.DemandScheduler do
   """
 
   use GenServer
+  use SpaceTraders.Simulation.NavigationParticipant
 
   alias SpaceTraders.{Clock, Evidence}
 
@@ -27,28 +28,30 @@ defmodule SpaceTraders.Evidence.DemandScheduler do
     GenServer.start_link(__MODULE__, opts, name: name)
   end
 
-  @impl true
-  def init(_opts) do
+  def init_participant(_opts) do
     Phoenix.PubSub.subscribe(SpaceTraders.PubSub, @topic)
 
     {:ok, arm(%{wake_at: nil, wake_token: nil, wake_ref: nil, announced: nil})}
   end
 
-  @impl true
-  def handle_info({:wake, token}, %{wake_token: token} = state) when is_reference(token) do
+  def handle_participant_info({:wake, token}, %{wake_token: token} = state)
+      when is_reference(token) do
     wake_due(disarm(state))
   end
 
   # A stale wake from a superseded arm: the earliest due instant moved after
   # this timer was scheduled. Ignore it; the currently armed wake is effective.
-  def handle_info({:wake, _stale_token}, state) do
+  def handle_participant_info({:wake, _stale_token}, state) do
     {:noreply, state}
   end
 
   # Overdue work already announced waits for its bounded retry: a change that
   # makes nothing newly due must not re-announce it, or each consumer wakeup
   # that touches demands would wake that consumer again without bound.
-  def handle_info({:observation_demands_changed, _agent_id}, %{announced: announced} = state)
+  def handle_participant_info(
+        {:observation_demands_changed, _agent_id},
+        %{announced: announced} = state
+      )
       when is_map(announced) do
     due = MapSet.new(Evidence.due_demands(), & &1.id)
 
@@ -57,11 +60,11 @@ defmodule SpaceTraders.Evidence.DemandScheduler do
       else: {:noreply, arm(%{state | announced: nil})}
   end
 
-  def handle_info({:observation_demands_changed, _agent_id}, state) do
+  def handle_participant_info({:observation_demands_changed, _agent_id}, state) do
     {:noreply, arm(state)}
   end
 
-  def handle_info(_message, state), do: {:noreply, state}
+  def handle_participant_info(_message, state), do: {:noreply, state}
 
   defp wake_due(state) do
     now = Clock.utc_now()

@@ -91,6 +91,26 @@ class ManifestTest(unittest.TestCase):
         self.assertTrue(boot.shutdown_verified(0, "LoadState=not-found\nActiveState=inactive\n"))
         self.assertTrue(boot.shutdown_verified(0, "LoadState=loaded\nActiveState=failed\n"))
 
+    def test_controlled_navigation_is_a_new_pinned_definition_not_a_native_relabel(self):
+        world = {"revision": "1" * 40, "archive_sha256": "2" * 64, "image_sha256": "3" * 64,
+                 "contract_sha256": "4" * 64, "input_inventory_sha256": "5" * 64}
+        manifest = boot.definition("a" * 40, "b" * 64, "c" * 64, "d" * 64,
+                                   "e" * 64, "f" * 32, world, 1792281600000)
+        identity = boot.validate(manifest)
+        self.assertNotEqual(identity, boot.validate(self.manifest()))
+        changed = copy.deepcopy(manifest)
+        changed["world"]["archive_sha256"] = boot.WORLD_ARCHIVE
+        with self.assertRaisesRegex(ValueError, "native artifact"):
+            boot.validate(changed)
+        changed = copy.deepcopy(manifest)
+        changed["initial_world"]["ships"] = [{"symbol": "injected"}]
+        with self.assertRaises(ValueError):
+            boot.validate(changed)
+        changed = copy.deepcopy(manifest)
+        changed["initial_world"]["epoch_ms"] += 1
+        with self.assertRaises(ValueError):
+            boot.validate(changed)
+
 
 def json_bytes(value):
     import json
