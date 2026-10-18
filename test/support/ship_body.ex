@@ -43,7 +43,7 @@ defmodule SpaceTraders.ShipBody do
           "symbol" => "ENGINE_IMPULSE_DRIVE_I",
           "name" => "Impulse Drive I",
           "description" => "An engine",
-          "condition" => 100,
+          "condition" => 1,
           "integrity" => 100,
           "speed" => 1,
           "requirements" => %{"power" => 1, "crew" => 1}

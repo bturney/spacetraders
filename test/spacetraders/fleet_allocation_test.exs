@@ -75,6 +75,56 @@ defmodule SpaceTraders.FleetAllocationTest do
       })
     end
 
+    defp estimated_trade(id, gross, rate, ship) do
+      %{
+        role_contribution(id, :market_trader, [
+          %{capability: :cargo_transport, minimum_capacity: 40}
+        ])
+        | expected_outcomes: %{
+            maximum_credit_change: gross,
+            net_credits_per_ship_hour: rate,
+            trade_estimate: %{state: :estimated, ship: ship, net_credits_per_ship_hour: rate}
+          }
+      }
+    end
+
+    test "trades rank by estimated net credits per Ship-hour, not gross credits" do
+      far = estimated_trade("far", 800, 2_127, "A-FRIGATE")
+      near = estimated_trade("near", 400, 22_484, "A-FRIGATE")
+      claims = [ship_claim("A-FRIGATE", [:market_trader], 40, 90)]
+
+      for order <- [[far, near], [near, far]] do
+        assert {:ok, %{commitments: [commitment], rejected: [%{candidate_id: "far"}]}} =
+                 select(order, claims)
+
+        assert commitment.candidate_id == "near"
+      end
+    end
+
+    test "a trade with an estimate outranks one whose estimate is unknown" do
+      unknown = %{
+        estimated_trade("unknown", 5_000, nil, nil)
+        | expected_outcomes: %{maximum_credit_change: 5_000}
+      }
+
+      known = estimated_trade("known", 100, 50, "A-FRIGATE")
+      claims = [ship_claim("A-FRIGATE", [:market_trader], 40, 90)]
+
+      assert {:ok, %{commitments: [%{candidate_id: "known"}]}} = select([unknown, known], claims)
+    end
+
+    test "a trade claims the Ship its estimate was made for" do
+      trade = estimated_trade("trade", 400, 22_484, "Z-FRIGATE")
+
+      claims = [
+        ship_claim("A-FRIGATE", [:market_trader], 40, 10),
+        ship_claim("Z-FRIGATE", [:market_trader], 40, 90)
+      ]
+
+      assert {:ok, %{commitments: [commitment]}} = select([trade], claims)
+      assert commitment.claims == ["Z-FRIGATE"]
+    end
+
     test "scouting takes the capable cheaper probe even when the frigate sorts first" do
       scout = role_contribution("scout", :intelligence_scout, [%{capability: :chart}])
 

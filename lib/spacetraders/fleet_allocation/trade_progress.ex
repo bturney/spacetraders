@@ -387,7 +387,6 @@ defmodule SpaceTraders.FleetAllocation.TradeProgress do
          total_price: total,
          mutation_attempt_id: intent.mutation_attempt_id,
          started_at: intent.inserted_at,
-         work_start: intent.parameters["work_start"],
          finished_at: intent.finished_at
        }}
     else
@@ -475,8 +474,7 @@ defmodule SpaceTraders.FleetAllocation.TradeProgress do
         purchase_started_at: buy.started_at,
         purchase_finished_at: buy.finished_at,
         sale_started_at: sell.started_at,
-        sale_finished_at: sell.finished_at,
-        work_start: buy.work_start
+        sale_finished_at: sell.finished_at
       }
     }
   end
