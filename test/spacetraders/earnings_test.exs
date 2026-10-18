@@ -120,7 +120,8 @@ defmodule SpaceTraders.EarningsTest do
     assert record.ship_seconds == DateTime.diff(record.finished_at, record.started_at)
     assert record.ship_seconds >= 0
 
-    labels = ~s(good="IRON_ORE",price_age="10-30m",ship_type="SHIP_COMMAND_FRIGATE",source="trade")
+    labels =
+      ~s(good="IRON_ORE",price_age="10-30m",ship_type="SHIP_COMMAND_FRIGATE",source="trade")
 
     for {flow, credits} <- [
           {"revenue", 1_200},

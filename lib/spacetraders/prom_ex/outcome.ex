@@ -16,7 +16,8 @@ defmodule SpaceTraders.PromEx.Outcome do
         [:earnings, :trips, :total],
         event_name: [:earnings, :trips],
         tags: [:result, :source, :ship_type, :good, :price_age],
-        description: "Committed Earnings records, by whether Net Earnings beat the expected value."
+        description:
+          "Committed Earnings records, by whether Net Earnings beat the expected value."
       ),
       sum(
         [:earnings, :ship_seconds, :total],

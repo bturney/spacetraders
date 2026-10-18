@@ -6,6 +6,7 @@ defmodule SpaceTraders.Repo.Migrations.CreateEarningsRecords do
   def change do
     create table(:earnings_records) do
       add :source, :string, null: false
+
       add :fleet_generation_id, references(:fleet_generations, on_delete: :delete_all),
         null: false
 

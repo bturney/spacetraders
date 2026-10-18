@@ -186,8 +186,12 @@ defmodule SpaceTraders.Outcomes.Earnings do
           order_by: intent.id
       )
 
-    buys = for %{type: "buy", status: "completed"} = i <- intents, r <- [receipt(i)], r, do: {i, r}
-    sells = for %{type: "sell", status: "completed"} = i <- intents, r <- [receipt(i)], r, do: {i, r}
+    buys =
+      for %{type: "buy", status: "completed"} = i <- intents, r <- [receipt(i)], r, do: {i, r}
+
+    sells =
+      for %{type: "sell", status: "completed"} = i <- intents, r <- [receipt(i)], r, do: {i, r}
+
     jettisons = for %{status: "completed"} = i <- intents, u <- [jettisoned(i)], u, do: {i, u}
     bought = Enum.sum_by(buys, fn {_, r} -> r["units"] end)
     sold = Enum.sum_by(sells, fn {_, r} -> r["units"] end)
@@ -218,6 +222,7 @@ defmodule SpaceTraders.Outcomes.Earnings do
         commitment.id,
         for(i <- intents, i.type != "acquire_intelligence", do: i.id)
       )
+
     started_at = to_usec(first_buy.inserted_at)
 
     finished_at =
@@ -309,8 +314,12 @@ defmodule SpaceTraders.Outcomes.Earnings do
   # The estimate after fuel when selection had one; else the gross spread.
   defp expected_value(outcomes) do
     case outcomes["trade_estimate"] do
-      %{"net_credits" => net} when is_number(net) -> round(net)
-      _ -> if is_number(outcomes["maximum_credit_change"]), do: round(outcomes["maximum_credit_change"])
+      %{"net_credits" => net} when is_number(net) ->
+        round(net)
+
+      _ ->
+        if is_number(outcomes["maximum_credit_change"]),
+          do: round(outcomes["maximum_credit_change"])
     end
   end
 

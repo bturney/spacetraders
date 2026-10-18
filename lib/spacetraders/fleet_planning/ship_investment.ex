@@ -10,8 +10,7 @@ defmodule SpaceTraders.FleetPlanning.ShipInvestment do
       calibration: ShipAcquisitionCalibration.current(),
       horizon: Map.get(context.snapshot, :generation_horizon, %{status: :unknown}),
       unmet_work: Map.get(context.snapshot, :unmet_work, []),
-      realized_rate:
-        realized_rate(Map.get(context.snapshot, :realized_earnings), context.as_of),
+      realized_rate: realized_rate(Map.get(context.snapshot, :realized_earnings), context.as_of),
       credit_margin_percent: context.margin,
       available_credits: context.credits,
       waypoint_coordinates: Map.get(context.snapshot, :waypoint_coordinates, %{}),
