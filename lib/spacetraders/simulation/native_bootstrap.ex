@@ -14,6 +14,10 @@ defmodule SpaceTraders.Simulation.NativeBootstrap do
 
   @doc "Configuration only; no connection, startup or fallback to deployment settings."
   def configuration(%{"schema" => "native-bootstrap/v1", "resources" => r} = manifest) do
+    unless Map.get(manifest, "proof", "navigation") in ["navigation", "paid_transaction"] do
+      raise ArgumentError, "native bootstrap: unsupported observation proof"
+    end
+
     unless FleetStrategy.validate_activation_document(manifest["strategy"]) == :ok do
       raise ArgumentError, "native bootstrap: pinned Strategy cannot be activated"
     end
@@ -166,7 +170,8 @@ defmodule SpaceTraders.Simulation.NativeBootstrap do
         System.monotonic_time(:millisecond) + (manifest["limits"]["wall_seconds"] - 75) * 1_000
 
       Process.put(:native_bootstrap_stage, "durable_autonomous_bootstrap")
-      evidence = await_evidence(revision.id, proof_deadline)
+      proof = Map.get(manifest, "proof", "navigation")
+      evidence = await_evidence(revision.id, proof, proof_deadline)
 
       write_result(%{
         state: "passed",
@@ -176,6 +181,8 @@ defmodule SpaceTraders.Simulation.NativeBootstrap do
         observed_at: DateTime.utc_now(),
         strategy_revision_id: revision.id,
         evidence: evidence,
+        proof: proof,
+        net_earnings: "unknown",
         scope:
           "native-time bootstrap; not first-gate, recovery, mechanics or full-period qualification"
       })
@@ -213,7 +220,13 @@ defmodule SpaceTraders.Simulation.NativeBootstrap do
     end
   end
 
-  defp await_evidence(revision_id, deadline) do
+  defp await_evidence(revision_id, proof, deadline) do
+    operations =
+      case proof do
+        "navigation" -> ["navigate-ship"]
+        "paid_transaction" -> ["purchase-cargo", "sell-cargo", "refuel-ship"]
+      end
+
     # Allowlisted durable causal chain. PostgreSQL is the evidence authority;
     # this projection neither authorizes work nor fills missing outcomes.
     %{columns: columns, rows: rows} =
@@ -223,7 +236,8 @@ defmodule SpaceTraders.Simulation.NativeBootstrap do
                c.id AS commitment_id, i.id AS intent_id, i.type AS intent_type,
                i.target_waypoint, s.symbol AS ship_symbol,
                i.status AS intent_status, a.id::text AS mutation_attempt_id,
-               a.operation_id, a.state AS mutation_state,
+                a.operation_id, a.state AS mutation_state,
+                a.prepared_evidence,
                (SELECT count(*) FROM authoritative_observations) AS observation_count
         FROM strategy_decision_episodes e
         JOIN fleet_commitment_portfolios p ON p.strategy_decision_episode_id = e.id
@@ -231,17 +245,18 @@ defmodule SpaceTraders.Simulation.NativeBootstrap do
         JOIN intents i ON i.fleet_commitment_id = c.id
         JOIN ships s ON s.id = i.ship_id
         JOIN mutation_attempts a ON a.id = i.mutation_attempt_id
+          OR ($3 AND a.provenance->>'intent_id' = i.id::text)
         WHERE e.fleet_strategy_revision_id = $1 AND e.selection_kind = 'selected_plan'
           AND a.state IN ('succeeded', 'accepted')
-          AND a.operation_id = 'navigate-ship'
+          AND a.operation_id = ANY($2)
         ORDER BY i.id LIMIT 1
         """,
-        [revision_id]
+        [revision_id, operations, proof == "paid_transaction"]
       )
 
     case rows do
       [row] -> Enum.zip(columns, row) |> Map.new()
-      [] -> wait(deadline, fn -> await_evidence(revision_id, deadline) end)
+      [] -> wait(deadline, fn -> await_evidence(revision_id, proof, deadline) end)
     end
   end
 
