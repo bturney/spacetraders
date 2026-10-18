@@ -31,6 +31,26 @@ defmodule SpaceTraders.Simulation.ArtifactTest do
   end
 
   test "schema-v1 provenance and identities remain byte-compatible", %{tmp_dir: tmp} do
+    ambient = %{
+      "GIT_CONFIG_COUNT" => "1",
+      "GIT_CONFIG_KEY_0" => "init.defaultBranch",
+      "GIT_CONFIG_VALUE_0" => "fixture-alternate",
+      "GIT_AUTHOR_NAME" => "Ambient Author",
+      "GIT_AUTHOR_EMAIL" => "author@example.invalid",
+      "GIT_COMMITTER_NAME" => "Ambient Committer",
+      "GIT_COMMITTER_EMAIL" => "committer@example.invalid"
+    }
+
+    previous = Map.new(ambient, fn {key, _} -> {key, System.get_env(key)} end)
+
+    on_exit(fn ->
+      Enum.each(previous, fn
+        {key, nil} -> System.delete_env(key)
+        {key, value} -> System.put_env(key, value)
+      end)
+    end)
+
+    System.put_env(ambient)
     {root, manifest} = retained_inputs(tmp)
     config = ~s({"architecture":"amd64","os":"linux"})
     name = sha(config) <> ".json"
@@ -420,7 +440,9 @@ defmodule SpaceTraders.Simulation.ArtifactTest do
   defp retained_inputs(tmp, build_system \\ "rebar3", source_path \\ "sim/sim-erlang/src") do
     repo = Path.join(tmp, "upstream")
     File.mkdir_p!(Path.join(repo, source_path))
-    git!(repo, ["init", "--quiet"])
+
+    git!(repo, ["init", "--quiet", "--initial-branch=main", "--object-format=sha1", "--template="])
+
     git!(repo, ["config", "user.email", "fixture@example.invalid"])
     git!(repo, ["config", "user.name", "Fixture"])
 
@@ -479,14 +501,27 @@ defmodule SpaceTraders.Simulation.ArtifactTest do
   end
 
   defp git!(dir, args) do
+    cleared =
+      System.get_env()
+      |> Map.keys()
+      |> Enum.filter(&String.starts_with?(&1, "GIT_"))
+      |> Enum.map(&{&1, nil})
+
     {output, 0} =
-      System.cmd("git", args,
+      System.cmd(
+        "git",
+        ["-c", "core.attributesFile=/dev/null", "-c", "core.excludesFile=/dev/null" | args],
         cd: dir,
         stderr_to_stdout: true,
-        env: [
-          {"GIT_AUTHOR_DATE", "2026-01-01T00:00:00Z"},
-          {"GIT_COMMITTER_DATE", "2026-01-01T00:00:00Z"}
-        ]
+        env:
+          cleared ++
+            [
+              {"GIT_CONFIG_NOSYSTEM", "1"},
+              {"GIT_CONFIG_GLOBAL", "/dev/null"},
+              {"GIT_ATTR_NOSYSTEM", "1"},
+              {"GIT_AUTHOR_DATE", "2026-01-01T00:00:00Z"},
+              {"GIT_COMMITTER_DATE", "2026-01-01T00:00:00Z"}
+            ]
       )
 
     output
