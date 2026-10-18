@@ -24,13 +24,16 @@ defmodule SpaceTraders.Fleet.Intents.BlockedRetry do
   @pending {__MODULE__, :pending}
 
   @doc "Seconds before the retry after `retries` earlier retries."
-  def wait_seconds(retries), do: min(@first_wait_seconds * Integer.pow(2, retries), @max_wait_seconds)
+  def wait_seconds(retries),
+    do: min(@first_wait_seconds * Integer.pow(2, retries), @max_wait_seconds)
 
   @doc "Adds the retry fields an Intent update implies."
   def changes(%Ecto.Changeset{data: %Intent{} = before} = changeset) do
     case Ecto.Changeset.get_field(changeset, :status) do
       "blocked" when before.status == "blocked" ->
-        if retried?(changeset), do: put_next(changeset, (before.retries || 0) + 1), else: changeset
+        if retried?(changeset),
+          do: put_next(changeset, (before.retries || 0) + 1),
+          else: changeset
 
       "blocked" ->
         put_next(changeset, 0)
