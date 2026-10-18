@@ -37,13 +37,6 @@ defmodule SpaceTraders.MissionControl.ShipStatus do
   alias SpaceTraders.Repo
 
   @statuses [:trading, :scouting, :waiting, :stuck, :busy_not_earning]
-  @labels %{
-    trading: "Trading",
-    scouting: "Scouting",
-    waiting: "Waiting on purpose",
-    stuck: "Stuck",
-    busy_not_earning: "Busy not earning"
-  }
 
   # Prototype thresholds (spec #757); tuning them does not change the rules.
   @history_seconds 3600
@@ -62,9 +55,6 @@ defmodule SpaceTraders.MissionControl.ShipStatus do
 
   @doc "The five statuses, in display order."
   def statuses, do: @statuses
-
-  @doc "The fixed Operator wording of a status."
-  def label(status), do: Map.fetch!(@labels, status)
 
   @doc "Metric label value of a status."
   def metric_label(status), do: Atom.to_string(status)
@@ -258,7 +248,7 @@ defmodule SpaceTraders.MissionControl.ShipStatus do
 
     base
     |> Map.merge(details)
-    |> Map.merge(%{status: status, label: label(status)})
+    |> Map.put(:status, status)
   end
 
   defp stuck(%Intent{status: "blocked"} = intent, _assignment, _stall) do

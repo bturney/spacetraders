@@ -37,7 +37,6 @@ defmodule SpaceTraders.MissionControl.ShipStatusTest do
     status = status(ctx)
 
     assert status.status == :trading
-    assert status.label == "Trading"
     assert status.phrase == "Buying IRON_ORE at #{short(ctx.agent.headquarters)}"
     assert status.estimate == 10
   end
@@ -67,7 +66,6 @@ defmodule SpaceTraders.MissionControl.ShipStatusTest do
 
     status = status(ctx)
     assert status.status == :scouting
-    assert status.label == "Scouting"
     assert status.markets_refreshed == 2
     assert status.markets_overdue == 3
     assert status.phrase == "Refreshing markets: 2 refreshed, 3 overdue"
@@ -80,7 +78,6 @@ defmodule SpaceTraders.MissionControl.ShipStatusTest do
 
     status = status(ctx)
     assert status.status == :waiting
-    assert status.label == "Waiting on purpose"
     assert status.next_check_at == next
     assert status.phrase == "Waiting for better trades; next check"
   end
@@ -98,7 +95,6 @@ defmodule SpaceTraders.MissionControl.ShipStatusTest do
 
     status = status(ctx)
     assert status.status == :stuck
-    assert status.label == "Stuck"
     assert status.reason == "Not enough credits above the floor."
     assert status.retries == 2
     assert status.next_attempt_at == next
@@ -134,7 +130,6 @@ defmodule SpaceTraders.MissionControl.ShipStatusTest do
 
     status = status(ctx)
     assert status.status == :busy_not_earning
-    assert status.label == "Busy not earning"
     assert status.phrase == "3 skipped buys in 30 min"
   end
 

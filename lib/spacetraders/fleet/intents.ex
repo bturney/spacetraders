@@ -2682,8 +2682,10 @@ defmodule SpaceTraders.Fleet.Intents do
 
   defp emit_intent_transition(%Intent{status: state}, %Intent{status: state}), do: :ok
 
-  defp emit_intent_transition(intent, updated),
-    do: SpaceTraders.Observability.intent_transition(intent, updated)
+  defp emit_intent_transition(intent, updated) do
+    Fleet.broadcast_intent_change(updated.ship_id)
+    SpaceTraders.Observability.intent_transition(intent, updated)
+  end
 
   defp intent_owned?(%Intent{}), do: true
 
