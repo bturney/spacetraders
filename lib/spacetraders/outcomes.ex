@@ -37,6 +37,7 @@ defmodule SpaceTraders.Outcomes do
   @impl true
   def init(opts) do
     :ok = SpaceTraders.Outcomes.PostCommit.attach(self())
+
     projections =
       if Keyword.get(
            opts,
@@ -203,6 +204,4 @@ defmodule SpaceTraders.Outcomes do
   end
 
   defp emit(_observation, state), do: state
-
-
 end

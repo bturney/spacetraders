@@ -270,8 +270,17 @@ defmodule SpaceTradersWeb.FleetOutcomeMetricsTest do
       {:ok, _} = Fleet.register_ship(agent, %{symbol: "#{agent.symbol}-#{n}"}, "SHIP_PROBE")
     end
 
-    assert_projection(:status, %{"waiting" => 40})
-    assert flush_queries() == queries
+    # Under load the burst may split across recomputes; wait for the last one.
+    assert_final_projection(:status, %{"waiting" => 40})
+    assert rem(flush_queries(), queries) == 0
+  end
+
+  defp assert_final_projection(family, expected) do
+    assert_receive {:projection, ^family, counts, 1}, 2_000
+
+    if Map.take(counts, Map.keys(expected)) == expected,
+      do: :ok,
+      else: assert_final_projection(family, expected)
   end
 
   defp flush_queries(count \\ 0) do

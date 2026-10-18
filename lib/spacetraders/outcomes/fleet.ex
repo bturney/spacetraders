@@ -120,6 +120,4 @@ defmodule SpaceTraders.Outcomes.Fleet do
       family: family
     })
   end
-
-
 end
