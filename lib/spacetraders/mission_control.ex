@@ -435,18 +435,14 @@ defmodule SpaceTraders.MissionControl do
 
   defp decision_summary(%{
          classification: :realized,
-         actual_outcomes: %{"trade_margin" => margin} = outcomes
-       }) do
-    case {margin, outcomes["net_earnings"]} do
-      {margin, net} when is_integer(margin) and is_integer(net) ->
-        "Fleet decision realized #{margin} credits trade margin; #{net} credits net earnings"
-
-      {margin, _net} when is_integer(margin) ->
-        "Fleet decision realized #{margin} credits trade margin; net earnings unknown"
-
-      _ ->
-        "Fleet decision realized; trade margin and net earnings unknown"
-    end
+         actual_outcomes: %{
+           "net_earnings" => net,
+           "revenue" => revenue,
+           "goods_cost" => goods
+         }
+       })
+       when is_integer(net) and is_integer(revenue) and is_integer(goods) do
+    "Fleet decision realized #{revenue - goods} credits trade margin; #{net} credits net earnings"
   end
 
   defp decision_summary(%{classification: :realized, actual_outcomes: outcomes} = episode)
@@ -751,7 +747,7 @@ defmodule SpaceTraders.MissionControl do
         %{
           family: nil,
           expected: nil,
-          realized: no_realized_economics(scope),
+          realized: no_realized_economics(),
           contribution: %{commitment_count: 0, expected_value: 0},
           limitation: nil,
           attention: [],
@@ -766,8 +762,8 @@ defmodule SpaceTraders.MissionControl do
           expected: if(family == :market, do: expected_economics(portfolio)),
           realized:
             if(family == :market,
-              do: realized_economics(portfolio, scope),
-              else: no_realized_economics(scope)
+              do: realized_economics(portfolio),
+              else: no_realized_economics()
             ),
           contribution: contribution(portfolio),
           limitation: limitation(portfolio),
@@ -777,11 +773,11 @@ defmodule SpaceTraders.MissionControl do
     end
   end
 
-  defp current_market_execution(scope, _identity) do
+  defp current_market_execution(_scope, _identity) do
     %{
       family: nil,
       expected: nil,
-      realized: no_realized_economics(scope),
+      realized: no_realized_economics(),
       contribution: %{commitment_count: 0, expected_value: 0},
       limitation: nil,
       attention: [],
@@ -985,60 +981,32 @@ defmodule SpaceTraders.MissionControl do
     }
   end
 
-  # Receipt-backed and per Completed Round Trip. Net Earnings deducts only the
-  # realized supporting charges the trips' own root Intents issued (#689);
-  # observation-only spending stays separate, here and Generation-wide.
-  defp realized_economics(%FleetAllocation.Portfolio{} = portfolio, scope) do
-    progress = FleetAllocation.TradeProgress.for_portfolio(portfolio.id)
+  # From the Portfolio's Earnings records, one per Completed Round Trip.
+  defp realized_economics(%FleetAllocation.Portfolio{} = portfolio) do
+    case SpaceTraders.Outcomes.Earnings.for_portfolio(portfolio.id) do
+      [] ->
+        no_realized_economics()
 
-    %{
-      completed_round_trips: progress.completed_round_trips,
-      realized_trade_margin: FleetAllocation.TradeProgress.trade_margin(progress),
-      realized_sale_value:
-        if(progress.completed_round_trips == 0,
-          do: nil,
-          else: Enum.sum_by(progress.round_trips, & &1.sale_revenue)
-        ),
-      credits_spent: known(progress.credits_spent),
-      credits_received: known(progress.credits_received),
-      supporting_cost: known(progress.supporting_cost),
-      net_earnings: known(progress.net_earnings),
-      supporting_charges: progress.supporting_charges,
-      observation_only_spending: known(progress.observation_only_spending),
-      episode_cash_flow: known(progress.episode_cash_flow),
-      generation_observation_only_spending: generation_observation_only_spending(scope),
-      unknown: progress.unknown
-    }
+      records ->
+        %{
+          completed_round_trips: length(records),
+          realized_trade_margin: Enum.sum_by(records, &(&1.revenue - &1.goods_cost)),
+          realized_sale_value: Enum.sum_by(records, & &1.revenue),
+          fuel_cost: Enum.sum_by(records, & &1.fuel_cost),
+          net_earnings: Enum.sum_by(records, & &1.net_earnings)
+        }
+    end
   end
 
-  defp no_realized_economics(scope) do
+  defp no_realized_economics do
     %{
       completed_round_trips: 0,
       realized_trade_margin: nil,
       realized_sale_value: nil,
-      supporting_cost: nil,
-      net_earnings: nil,
-      supporting_charges: [],
-      observation_only_spending: nil,
-      episode_cash_flow: nil,
-      generation_observation_only_spending: generation_observation_only_spending(scope),
-      unknown: []
+      fuel_cost: nil,
+      net_earnings: nil
     }
   end
-
-  # Realized charges issued by coverage root Intents across every live Fleet
-  # Generation's Episodes: a sustained scouting drain stays visible after its
-  # Portfolio is superseded. nil when any such charge is unknown.
-  defp generation_observation_only_spending(scope) do
-    with {:ok, %{state: :current, generation: generation}} <- FleetGeneration.current_fleet(scope) do
-      FleetAllocation.TradeProgress.for_generation(generation.id).observation_only_spending
-    else
-      _ -> nil
-    end
-  end
-
-  defp known(value) when is_integer(value), do: value
-  defp known(_unknown), do: nil
 
   defp contribution(%FleetAllocation.Portfolio{} = portfolio) do
     %{

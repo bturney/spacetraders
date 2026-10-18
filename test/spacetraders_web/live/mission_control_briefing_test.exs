@@ -354,7 +354,7 @@ defmodule SpaceTradersWeb.MissionControlBriefingTest do
     refute has_element?(view, section, "Degraded Operation")
   end
 
-  test "a Completed Round Trip shows Net Earnings beside observation-only fuel spending", %{
+  test "a Completed Round Trip shows its Earnings record's Net Earnings", %{
     conn: conn,
     scope: scope
   } do
@@ -370,15 +370,15 @@ defmodule SpaceTradersWeb.MissionControlBriefingTest do
     # trade's cost, even on the same Ship.
     scouting = intent!(portfolio, commitment, "acquire_intelligence", ship)
     refuel!(scouting, 300)
+    SpaceTraders.FleetAllocation.record_trade_outcome(portfolio)
 
     {:ok, view, _html} = live(conn, ~p"/mission-control")
 
     assert has_element?(view, "#realized-trade-margin", "800 credits")
     assert has_element?(view, "#realized-net-earnings", "656 credits")
-    assert has_element?(view, "#observation-only-spending", "300 credits")
   end
 
-  test "an unknown supporting charge renders Net Earnings unknown, never zero", %{
+  test "a trip still under way renders Net Earnings unknown, never zero", %{
     conn: conn,
     scope: scope
   } do
@@ -388,12 +388,12 @@ defmodule SpaceTradersWeb.MissionControlBriefingTest do
     ship = [ship: "#{@symbol}-1"]
 
     buy = trade_intent!(portfolio, commitment, "buy", 400, 40, ship)
-    refuel!(buy, 144, realized: false)
-    trade_intent!(portfolio, commitment, "sell", 1_200, 40, ship)
+    refuel!(buy, 144)
+    SpaceTraders.FleetAllocation.record_trade_outcome(portfolio)
 
     {:ok, view, _html} = live(conn, ~p"/mission-control")
 
-    assert has_element?(view, "#realized-trade-margin", "800 credits")
+    assert has_element?(view, "#realized-trade-margin", "Unknown")
     assert has_element?(view, "#realized-net-earnings", "Unknown")
     refute has_element?(view, "#realized-net-earnings", "0 credits")
   end

@@ -212,7 +212,12 @@ defmodule SpaceTraders.Outcomes.Earnings do
     selected = selected_trade(episode_id, commitment.candidate_id)
     revenue = Enum.sum_by(sells, fn {_, r} -> r["total_price"] end)
     goods = Enum.sum_by(buys, fn {_, r} -> r["total_price"] end)
-    {fuel, other} = supporting_charges(commitment.id, Enum.map(intents, & &1.id))
+    # A coverage root Intent's refuel is observation-only spending, never the trade's.
+    {fuel, other} =
+      supporting_charges(
+        commitment.id,
+        for(i <- intents, i.type != "acquire_intelligence", do: i.id)
+      )
     started_at = to_usec(first_buy.inserted_at)
 
     finished_at =

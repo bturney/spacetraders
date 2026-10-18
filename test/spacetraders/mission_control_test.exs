@@ -222,7 +222,7 @@ defmodule SpaceTraders.MissionControlTest do
       assert SpaceTraders.OperatorConditions.unresolved(scope) == []
     end
 
-    test "reports realized net economics from completed buy and sell Intents" do
+    test "reports realized net economics from the Portfolio's Earnings records" do
       %{scope: scope, commitment: commitment} = execution_fixture()
       ship_id = Repo.get_by!(SpaceTraders.Fleet.Ship, symbol: "SHIP-1").id
 
@@ -254,11 +254,18 @@ defmodule SpaceTraders.MissionControlTest do
         }
       })
 
+      SpaceTraders.FleetAllocation.record_trade_outcome(
+        Repo.get!(
+          SpaceTraders.FleetAllocation.Portfolio,
+          commitment.fleet_commitment_portfolio_id
+        )
+      )
+
       report = MissionControl.market_execution(scope)
       assert report.realized.completed_round_trips == 1
       assert report.realized.realized_sale_value == 150
       assert report.realized.realized_trade_margin == 100
-      assert Enum.any?(report.realized.unknown, &(&1.item == "net_earnings"))
+      assert report.realized.net_earnings == 100
     end
   end
 

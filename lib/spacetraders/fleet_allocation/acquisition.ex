@@ -18,7 +18,7 @@ defmodule SpaceTraders.FleetAllocation.Acquisition do
     World
   }
 
-  alias SpaceTraders.FleetAllocation.{JsonEvidence, StrategyDecisionEpisode, TradeProgress}
+  alias SpaceTraders.FleetAllocation.{JsonEvidence, StrategyDecisionEpisode}
   alias SpaceTraders.FleetStrategy.StandingAuthority
 
   def reconcile(scope, agent, revision, system, capacity) do
@@ -101,7 +101,7 @@ defmodule SpaceTraders.FleetAllocation.Acquisition do
         shipyards: shipyards,
         unmet_work: work,
         generation_horizon: horizon,
-        realized_trade_progress: TradeProgress.for_generation(generation.id),
+        realized_earnings: SpaceTraders.Outcomes.Earnings.list(generation.id),
         waypoint_coordinates: world.waypoint_coordinates,
         fuel_stops: world.fuel_stops
       }
