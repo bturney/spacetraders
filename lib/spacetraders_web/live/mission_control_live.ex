@@ -20,7 +20,7 @@ defmodule SpaceTradersWeb.MissionControlLive do
   @impl true
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} current_scope={@current_scope} wide>
+    <Layouts.app flash={@flash} current_scope={@current_scope} wide active={:glance}>
       <div class="space-y-6">
         <header class="max-w-3xl space-y-2">
           <p class="eyebrow">Autonomous outcome summary</p>
