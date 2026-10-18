@@ -1,9 +1,10 @@
 # Private simulator build-input handoff
 
-**Status: input/provenance tooling only; #778 is not complete.** No real simulator
-build, boot, HTTP readiness check, unavailable-upstream rebuild, or reproducibility
-qualification has been performed by this implementation. These commands never
-start the application or invoke Docker. Fixture tests are not execution approval.
+**Tool boundary: read-only input/provenance validation, not runtime proof.** These
+commands never start the application, build the simulator or invoke Docker.
+The separate private standalone build/readiness checks below have passed; their
+receipts are not manufactured by this validator. Fixture tests alone establish
+neither execution approval nor a qualified artifact.
 
 Source policy: [accepted #678 decision](https://github.com/bturney/spacetraders/issues/678#issuecomment-6126565823).
 Use the selected private `bturney` fork preserving upstream history, supporting
@@ -108,7 +109,7 @@ Version-1 manifests remain valid without adding `build_system`; their sanitized
 provenance and both identities are unchanged. Version 2 emits and hashes the
 explicit schema version, build system and matching toolchain. The read-only
 commands accept both versions without running either build system. Status stays
-`not_executed` / `archive_config_only`; #778 remains partial.
+`not_executed` / `archive_config_only`; runtime receipts remain separate.
 
 ## Identity binding
 
@@ -131,10 +132,13 @@ cannot rebuild the simulator.
    clean private build context; never compile/run the upstream bot. Load pinned
    retained builder images locally; do not resolve mutable tags or pull missing
    bases. Record engine/build-tool versions and actual image/platform identities.
-3. Before any build/boot verification, obtain the required approved immutable
-   execution manifest, resource/attempt/time bounds and stopping rules. This
-   ticket, its commands and default comparison budgets authorize no execution.
-   A runner must enforce these gates; this module is not a launch controller.
+3. Keep ordinary local build/readiness regression checks bounded, with recorded
+   exact inputs, resources, attempts, time limits and stopping rules. They do not
+   require an additional approval checkpoint for ordinary implementation work.
+   Real gameplay experiments, protected-host operations, capacity measurements
+   and full-period qualification still require their separately approved immutable
+   execution manifest. Default comparison budgets are not run approval. This
+   module validates inputs; it is not a launch controller.
 4. In the approved development-only isolation, deny **builder/daemon egress**,
    not just build-step networking. Use local pinned inputs, `--network=none`
    and `--pull=false`, no remote build contexts/frontends/ADD, registry, upstream
@@ -161,11 +165,56 @@ read-only commands.
 
 `SpaceTraders.Simulation.Artifact.validate/2` and `identify/3` return
 `{:ok, sanitized_map}` or `{:error, reason}`. Call them before admitting an
-artifact, but require a separate approved execution manifest and genuine
-build/readiness evidence. Keep `input_identity`, `artifact_identity`, exact
+artifact, but require genuine build/readiness evidence and a separately approved
+execution manifest where the execution gates above apply. Keep `input_identity`, `artifact_identity`, exact
 commit/schema pins, platform, archive checksum, image ID, and explicit
 qualification status in the durable runner record. Never promote
 `not_executed`/`archive_config_only` into a qualified readiness state.
+
+## Verified standalone handoff
+
+The access-controlled [private implementation PR](https://github.com/bturney/spacetraders-simulator/pull/1)
+is merged. Its executed recipe/source revision is
+`1c084c5a519ce0f0bc5c7ebee7014039f1e10a05`, preserving upstream base
+`2b68652afde4f30dd9005b572215ebdc3ac55a92`. A merge commit or a later source
+revision must not be substituted for this executed pin.
+
+- Two fresh offline builds of the revised standalone serving closure and two
+  real-HTTP image-filesystem boots passed. The second build used copied retained
+  inputs without the original checkout, cache or upstream access. The earlier
+  two-build/two-boot results are retained separately, not replaced by the revised
+  verification: four builds, four boots and 24 GET requests total, with no
+  registration or gameplay mutation.
+- Revised outputs match: image config ID
+  `sha256:8aa715e5b589afe2aeaaae016a1a75e4e5d0c30cddc155bb074dfae5e841e21c`;
+  archive SHA-256
+  `992f10233ad9e87597cb9c5254ec3972b8e487b181a85b5296e14a7721e7a912`.
+  The platform is `linux/amd64`, using OTP 27.3.4 without rebar3.
+- Real retained bytes also pass this public compiler-only contract. Its canonical
+  input identity is
+  `sha256:4913666e0867b287ed9383538f4bd1d282896a758517ea8526b509ea47cf9259`;
+  artifact identity is
+  `sha256:17ce171a01f7113315a55b6dcef780752c866116987c49740c2774b8d1e43666`.
+  These identities are distinct from the private inventory checksum. The public
+  validator still reports `not_executed` and `archive_config_only`; separate
+  bound runtime receipts establish the actual readiness checks.
+- Source/history, dependencies, toolchain/OS inputs, recipes, artifacts and all
+  original/revised receipts are retained owner-private outside temporary storage
+  with checksummed inventories. The recorded combined allocation is 2.44 GiB,
+  below that verification's 3 GiB cap; this is not proof of full-run retention fit.
+
+The verified image filesystem ran in a no-egress namespace with enforced
+1 CPU / 2 GiB / 128-task child limits. Actual image config/layer bytes and
+source/input/contract bindings were checked before boot; contract drift and
+provenance mismatches fail closed. **Docker-engine load/run remains unverified.**
+Downstream bootstrap must verify its chosen runtime boundary instead of treating
+namespace boot as Docker compatibility proof.
+
+This handoff qualifies only reproducible standalone build and its bounded
+GET-only readiness/API subset. It establishes no actual-bot/PostgreSQL
+integration, authenticated gameplay, world controls, economic credibility,
+protected-host capacity or 336-hour performance. The inherited bot/registry job
+is guarded to its exact upstream repository and cannot run in this private fork.
 
 Offline control coverage lives in
 `test/spacetraders/simulation/artifact_test.exs`. It uses authored inert Git/tar
