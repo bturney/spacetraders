@@ -16,7 +16,8 @@ defmodule SpaceTradersWeb.GrafanaLink do
     decision_episode: "var-decision_episode",
     commitment: "var-commitment",
     intent: "var-intent",
-    attempt: "var-attempt"
+    attempt: "var-attempt",
+    ship: "var-ship"
   }
 
   def url(family, context) when is_map_key(@dashboards, family) and is_list(context) do
