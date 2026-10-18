@@ -552,7 +552,7 @@ def inside():
             (out / "world-controller").chmod(0o600)
         world = spawn(["/usr/bin/bwrap", "--unshare-user", "--die-with-parent",
                         "--ro-bind", "/worldfs", "/", "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
-                        *(["--ro-bind", "/out/world-controller", "/out/world-controller"] if controlled else []),
+                        *(["--tmpfs", "/out", "--ro-bind", "/out/world-controller", "/out/world-controller"] if controlled else []),
                        "--clearenv", "--setenv", "HOME", "/tmp", "--setenv", "PATH", "/usr/bin:/bin",
                        "--setenv", "ERL_ROOTDIR", "/opt/otp", "--chdir", "/opt/stsim",
                        *json.loads((out / "world-entrypoint.json").read_text())], "world")
