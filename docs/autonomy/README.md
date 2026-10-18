@@ -9,7 +9,7 @@
 | Decide what the game and Operator experience should become | [Product](product.md) |
 | Change module boundaries, coordinated Ship work, evidence, credits or recovery | [Architecture](architecture.md), then the applicable [ADR](../adr/) |
 | Determine what is implemented, superseded or still unproven | [Capability ledger](capabilities.md) |
-| Choose the active outcome gate or next evidence-led sprint | [Roadmap](roadmap.md) — strict gate progression, one bottleneck per sprint |
+| Choose the active outcome gate, ultimate leaderboard/gate-speed destination, or next sprint | [Roadmap](roadmap.md) — strict core progression, independently achievable endgame goals, one bottleneck per sprint |
 | Design a new capability, write a spec, or update proof/status | [Change process](change-process.md) and [issue tracker](../agents/issue-tracker.md) — detailed specs and tickets stay in issues |
 | Evaluate an economic-default policy or extra Strategy levers | [Economic-first exploration](economic-first-exploration.md) |
 
