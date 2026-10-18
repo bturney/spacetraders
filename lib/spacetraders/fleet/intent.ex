@@ -31,6 +31,10 @@ defmodule SpaceTraders.Fleet.Intent do
     belongs_to :mutation_attempt, SpaceTraders.MutationAttempts.Attempt, type: :binary_id
     field :last_action_result, :map
     field :recovery_attempts, :integer, default: 0
+    # A blocked step's next automatic retry, and how often it was retried
+    # while blocked. Both clear when the step leaves `blocked`.
+    field :next_attempt_at, :utc_datetime
+    field :retries, :integer, default: 0
     field :finished_at, :utc_datetime
     field :fleet_commitment_portfolio_version, :integer
 

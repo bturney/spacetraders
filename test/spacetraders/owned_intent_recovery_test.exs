@@ -265,6 +265,48 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
     assert MutationAttempts.get!(attempt.id).state == "succeeded"
   end
 
+  test "a blocked step stores its next attempt and retries itself with a growing wait" do
+    {agent, ship, portfolio, commitment} = claimed_ship("SCAN-RETRY")
+
+    {intent, attempt} =
+      selected_intelligence(agent, ship, portfolio, commitment, "scan_waypoints")
+
+    {:ok, attempt} = MutationAttempts.mark_sent_or_unknown(attempt)
+    {:ok, _} = MutationAttempts.record_outcome(attempt, :succeeded, %{status: 200})
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      Req.Test.json(conn, %{"data" => ship_body(ship.symbol)})
+    end)
+
+    before = DateTime.utc_now(:second)
+    _ = Intents.reconcile(agent.id, ship.symbol, nil, :boot, intent.id)
+
+    blocked = Repo.get!(Intent, intent.id)
+    assert %Intent{status: "blocked", retries: 0, next_attempt_at: %DateTime{} = next} = blocked
+    assert DateTime.diff(next, before) in 60..62
+
+    assert [%Event{event_type: "intent_retry", due_at: due, payload: payload}] =
+             Timeline.pending_events(:ship, ship.symbol)
+
+    assert payload == %{"intent_id" => intent.id}
+    assert DateTime.compare(DateTime.truncate(due, :second), next) == :eq
+
+    # The retry finds the step still blocked: one retry, a longer wait.
+    retried = DateTime.utc_now(:second)
+    _ = Intents.reconcile(agent.id, ship.symbol, nil, :intent_retry, intent.id)
+
+    assert %Intent{status: "blocked", retries: 1, next_attempt_at: later} =
+             Repo.get!(Intent, intent.id)
+
+    assert DateTime.diff(later, retried) in 120..122
+
+    # Leaving blocked clears the retry state.
+    Repo.get!(Intent, intent.id) |> Intents.transition_intent(status: "active")
+
+    assert %Intent{status: "active", retries: 0, next_attempt_at: nil} =
+             Repo.get!(Intent, intent.id)
+  end
+
   test "chart callback lacking required provenance keeps its selection without a second chart" do
     {agent, ship, portfolio, commitment} = claimed_ship("CHART-INCOMPLETE")
     {intent, _} = selected_intelligence(agent, ship, portfolio, commitment, "chart", false)
