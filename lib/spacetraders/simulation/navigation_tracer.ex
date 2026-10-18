@@ -31,6 +31,16 @@ defmodule SpaceTraders.Simulation.NavigationTracer do
   end
 
   def prove(revision_id, deadline, manifest) do
+    required = [
+      SpaceTraders.FleetAllocation.Reconciler,
+      SpaceTraders.Evidence.DemandScheduler,
+      SpaceTraders.Evidence.ReadCoordinator,
+      SpaceTraders.Outbox.Deliverer
+    ]
+
+    kinds = NavigationClock.snapshot().participants |> Map.values()
+    unless Enum.all?(required, &(&1 in kinds)), do: raise("missing navigation participant")
+
     if manifest["negative_control"] == "incomplete_drain" do
       parent = self()
 
@@ -52,12 +62,12 @@ defmodule SpaceTraders.Simulation.NavigationTracer do
 
   defp loop(revision_id, deadline, manifest, steps) do
     ensure_deadline!(deadline)
-    if steps >= 180, do: raise("navigation advancement bound")
     snapshot = drain!(min(deadline, System.monotonic_time(:millisecond) + 30_000))
     write_trace()
 
     case completed_chain(revision_id) do
       nil ->
+        if steps >= 180, do: raise("navigation advancement bound")
         world = control!("inspect")
         epoch = manifest["initial_world"]["epoch_ms"]
         now = DateTime.to_unix(snapshot.now, :millisecond) - epoch
@@ -179,15 +189,20 @@ defmodule SpaceTraders.Simulation.NavigationTracer do
                i.status AS intent_status, s.symbol AS ship_symbol,
                a.id::text AS mutation_attempt_id, a.operation_id, a.state AS mutation_state,
                t.id AS arrival_id, t.due_at AS arrival_due_at,
-               i.finished_at AS continued_at,
+               i.finished_at AS continued_at, o.id::text AS continuation_observation_id,
+               o.observed_at AS continuation_observed_at, o.subject AS continuation_subject,
                (SELECT count(*) FROM authoritative_observations) AS observation_count
         FROM strategy_decision_episodes e
         JOIN fleet_commitment_portfolios p ON p.strategy_decision_episode_id = e.id
         JOIN fleet_commitments c ON c.fleet_commitment_portfolio_id = p.id
         JOIN intents i ON i.fleet_commitment_id = c.id
         JOIN ships s ON s.id = i.ship_id
-        JOIN mutation_attempts a ON a.id = i.mutation_attempt_id
+        JOIN mutation_attempts a ON a.provenance->>'intent_id' = i.id::text AND a.agent_id = s.agent_id
         JOIN timeline_events t ON t.payload->>'intent_id' = i.id::text
+        JOIN authoritative_observations o ON o.agent_id = s.agent_id
+          AND o.operation_id = 'get-market'
+          AND o.subject = 'market:' || (i.parameters->>'system') || ':' || i.target_waypoint
+          AND o.observed_at >= t.due_at
         WHERE e.fleet_strategy_revision_id = $1 AND e.selection_kind = 'selected_plan'
           AND a.operation_id = 'navigate-ship' AND a.state IN ('succeeded','accepted')
           AND t.event_type = 'arrival' AND t.status = 'done' AND i.status = 'completed'

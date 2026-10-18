@@ -34,4 +34,18 @@ defmodule SpaceTraders.Simulation.NavigationDrainTest do
     assert %{next_wake: at} = NavigationTracer.drain!(System.monotonic_time(:millisecond) + 1000)
     assert DateTime.compare(at, ~U[2026-01-01 00:00:10Z]) == :eq
   end
+
+  test "an unarmed durable Arrival fails closed without advancing semantic time" do
+    start_supervised!({NavigationClock, epoch: ~U[2026-01-01 00:00:00Z]})
+
+    {:ok, _event} =
+      SpaceTraders.Timeline.schedule_event(:ship, "UNARMED-1", :arrival, ~U[2026-01-01 00:00:10Z])
+
+    assert_raise RuntimeError, ~r/incomplete navigation drain/, fn ->
+      NavigationTracer.drain!(System.monotonic_time(:millisecond) + 100)
+    end
+
+    assert NavigationClock.utc_now() == ~U[2026-01-01 00:00:00.000000Z]
+    assert NavigationClock.trace() == []
+  end
 end

@@ -178,14 +178,23 @@ defmodule SpaceTraders.Simulation.NativeBootstrap do
 
       write_result(%{
         state: "passed",
-        stage: "durable_autonomous_bootstrap",
+        stage:
+          if(manifest["schema"] == "navigation-tracer/v1",
+            do: "coordinated_navigation_arrival",
+            else: "durable_autonomous_bootstrap"
+          ),
         minted_at: minted_at,
         startup_ready_unix_ms: startup_ready_unix_ms,
         observed_at: SpaceTraders.Clock.utc_now(),
         strategy_revision_id: revision.id,
         evidence: evidence,
         scope:
-          "native-time bootstrap; not first-gate, recovery, mechanics or full-period qualification"
+          if(manifest["schema"] == "navigation-tracer/v1",
+            do:
+              "narrow navigation Arrival continuation; not complete semantic time, scarcity, drain, recovery or full period",
+            else:
+              "native-time bootstrap; not first-gate, recovery, mechanics or full-period qualification"
+          )
       })
 
       System.stop(0)
@@ -209,26 +218,26 @@ defmodule SpaceTraders.Simulation.NativeBootstrap do
               nil
           end)
 
-        write_result(
-          Map.merge(checkpoint, %{
-            state: "harness_failure",
-            stage: Process.get(:native_bootstrap_stage),
-            error: inspect(error.__struct__),
-            location: location,
-            stack:
-              Enum.take(
-                Enum.map(__STACKTRACE__, fn {module, function, args, info} ->
-                  %{
-                    module: inspect(module),
-                    function: function,
-                    arity: if(is_list(args), do: length(args), else: args),
-                    line: info[:line]
-                  }
-                end),
-                5
-              )
-          })
-        )
+        failure = %{
+          state: "harness_failure",
+          stage: Process.get(:native_bootstrap_stage),
+          error: inspect(error.__struct__),
+          location: location,
+          stack:
+            Enum.take(
+              Enum.map(__STACKTRACE__, fn {module, function, args, info} ->
+                %{
+                  module: inspect(module),
+                  function: function,
+                  arity: if(is_list(args), do: length(args), else: args),
+                  line: info[:line]
+                }
+              end),
+              5
+            )
+        }
+
+        write_result(Map.merge(checkpoint, Jason.decode!(Jason.encode!(failure))))
 
         System.stop(1)
     end

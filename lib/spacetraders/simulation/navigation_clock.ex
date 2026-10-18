@@ -111,7 +111,10 @@ defmodule SpaceTraders.Simulation.NavigationClock do
     state =
       %{state | active: Map.put(state.active, token, pid)}
       |> changed()
-      |> record("work_started", %{})
+      |> record("work_started", %{
+        participant: inspect(Map.get(state.participants, pid)),
+        wake: not is_nil(wake)
+      })
 
     {:reply, if(valid, do: {:ok, token}, else: {:error, :unclassified_work}),
      %{state | released: Map.delete(state.released, wake)}}
