@@ -30,7 +30,7 @@ defmodule SpaceTraders.FleetRefit do
   alias SpaceTraders.FleetPlanning
   alias SpaceTraders.FleetStrategy.{Revision, StandingAuthority}
   alias SpaceTraders.MutationAttempts.Attempt
-  alias SpaceTraders.{Intelligence, Repo, ShipReservation}
+  alias SpaceTraders.{Intelligence, Repo}
 
   @doc "Selects and dispatches a refit Candidate, or resumes one already claimed."
   def reconcile(%Scope{} = scope, %AgentRecord{} = agent, %Revision{} = revision, system)
@@ -54,8 +54,6 @@ defmodule SpaceTraders.FleetRefit do
          {:ok, floor} <- StandingAuthority.credit_floor(revision),
          true <- is_integer(overview.credits) and overview.credits >= floor,
          {:ok, ships} <- Fleet.list_ships(agent),
-         ships <-
-           Enum.reject(ships, &(&1.symbol in ShipReservation.reserved_symbols(agent.id))),
          as_of = DateTime.utc_now(),
          {:ok, planning} <-
            FleetPlanning.plan_ship_refit(revision, index, %{

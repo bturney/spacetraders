@@ -188,11 +188,10 @@ defmodule SpaceTraders.FleetGenerationTest do
 
     test "late predecessor navigation retains evidence without replacing the successor arrival",
          %{scope: scope, agent: agent} do
-      alias SpaceTraders.{ShipReservation, Timeline}
+      alias SpaceTraders.Timeline
       alias SpaceTraders.Fleet.ShipServer
 
       {:ok, ship} = Fleet.owned_ship(agent, "RESETME-1")
-      {:ok, reservation} = ShipReservation.reserve(scope, ship.id, "Late navigation")
 
       intent =
         Repo.insert!(%Intent{
@@ -205,7 +204,6 @@ defmodule SpaceTraders.FleetGenerationTest do
         })
 
       Repo.insert!(%SpaceTraders.ManualIntervention{
-        ship_reservation_id: reservation.id,
         intent_id: intent.id,
         reason: "Late navigation",
         target_waypoint: "X1-UX81-A2"

@@ -344,8 +344,7 @@ defmodule SpaceTraders.Fleet.Intents.RecordedAction do
             fleet_generation_id: generation_id(authority.generation),
             strategy_revision_id: revision_id(authority.revision),
             decision_episode_id: authority.claim[:decision_episode_id],
-            intervention_id: authority.claim[:intervention_id],
-            ship_reservation_id: authority.claim[:ship_reservation_id]
+            intervention_id: authority.claim[:intervention_id]
           }
         ]
 
@@ -425,8 +424,7 @@ defmodule SpaceTraders.Fleet.Intents.RecordedAction do
          generation: current_generation(agent.id),
          revision: optional_revision(strategy),
          decision_episode_id: authority[:decision_episode_id],
-         intervention_id: authority[:intervention_id],
-         ship_reservation_id: authority[:ship_reservation_id]
+         intervention_id: authority[:intervention_id]
        }}
     end
   end

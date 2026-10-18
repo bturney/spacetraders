@@ -27,7 +27,7 @@ defmodule SpaceTraders.FleetAllocation do
   alias SpaceTraders.FleetPlanning.CandidateContribution
   alias SpaceTraders.FleetStrategy
   alias SpaceTraders.FleetStrategy.Strategy
-  alias SpaceTraders.{Clock, ManualIntervention, OperatorAuthority, Outbox, Repo, ShipReservation}
+  alias SpaceTraders.{Clock, ManualIntervention, OperatorAuthority, Outbox, Repo}
 
   alias SpaceTraders.FleetStrategy.{
     ObjectiveEvaluation,
@@ -1711,11 +1711,7 @@ defmodule SpaceTraders.FleetAllocation do
     if not MapSet.disjoint?(settling_ships(generation_id), MapSet.new(claimed_symbols)),
       do: Repo.rollback(:ship_reserved)
 
-    if length(claimed_ships) != length(claimed_symbols) or
-         Repo.exists?(
-           from reservation in ShipReservation,
-             where: reservation.ship_id in ^claimed_ships and is_nil(reservation.released_at)
-         ) do
+    if length(claimed_ships) != length(claimed_symbols) do
       Repo.rollback(:ship_reserved)
     end
 

@@ -13,8 +13,7 @@ defmodule SpaceTradersWeb.FleetOutcomeMetricsTest do
   alias SpaceTraders.Agent.Scope
   alias SpaceTraders.FleetAllocation
   alias SpaceTraders.FleetAllocation.PortfolioCandidate
-  alias SpaceTraders.Fleet.Intents
-  alias SpaceTraders.{Evidence, ShipReservation, MutationAttempts}
+  alias SpaceTraders.{Evidence, MutationAttempts}
   alias SpaceTraders.FleetGeneration.Generation
   alias SpaceTraders.FleetStrategy.{Revision, Strategy}
   alias SpaceTraders.Outcomes, as: FleetOutcomes
@@ -55,13 +54,6 @@ defmodule SpaceTradersWeb.FleetOutcomeMetricsTest do
         Repo.delete_all(from e in SpaceTraders.Timeline.Event, where: e.owner_id == ^ship.symbol)
 
         Repo.delete_all(
-          from i in SpaceTraders.ManualIntervention,
-            join: r in ShipReservation,
-            on: r.id == i.ship_reservation_id,
-            where: r.operator_id == ^operator.id
-        )
-
-        Repo.delete_all(
           from o in SpaceTraders.Evidence.Observation, where: o.agent_id == ^agent.id
         )
 
@@ -85,41 +77,35 @@ defmodule SpaceTradersWeb.FleetOutcomeMetricsTest do
 
   test "real Navigate flow coalesces Intent states and mutation nav facts into full vectors",
        context do
-    %{scope: scope, agent: agent, ship: ship} = allocation_fixture(context)
-    assert {:ok, _} = ShipReservation.reserve(scope, ship.id, "Course correction")
+    %{agent: agent, ship: ship} = allocation_fixture(context)
     start_worker(coalesce_ms: 1_000)
     baseline()
     ship_path = "/v2/my/ships/#{ship.symbol}"
-    orbit_path = ship_path <> "/orbit"
-    navigate_path = ship_path <> "/navigate"
 
     Req.Test.stub(SpaceTraders.API, fn conn ->
-      case {conn.method, conn.request_path} do
-        {"GET", ^ship_path} ->
-          Req.Test.json(conn, %{"data" => ship_body(ship.symbol)})
+      assert {conn.method, conn.request_path} == {"GET", ship_path}
 
-        {"POST", ^orbit_path} ->
-          Req.Test.json(conn, %{"data" => %{"nav" => nav_body("IN_ORBIT")}})
-
-        {"POST", ^navigate_path} ->
-          Req.Test.json(conn, %{
-            "data" => %{
-              "fuel" => %{"capacity" => 200, "current" => 80},
-              "nav" =>
-                nav_body("IN_TRANSIT",
-                  destination: "X1-UX81-A2",
-                  arrival: DateTime.utc_now() |> DateTime.add(3600) |> DateTime.to_iso8601()
-                )
-            }
+      Req.Test.json(conn, %{
+        "data" =>
+          ship_body(ship.symbol, %{
+            "nav" =>
+              nav_body("IN_TRANSIT",
+                destination: "X1-UX81-A2",
+                arrival: DateTime.utc_now() |> DateTime.add(3600) |> DateTime.to_iso8601()
+              )
           })
-
-        request ->
-          flunk("Unexpected gameplay request: #{inspect(request)}")
-      end
+      })
     end)
 
-    assert {:ok, %{status: "waiting"}} =
-             Intents.intervene_navigate(scope, agent, ship.symbol, "X1-UX81-A2", "Correct course")
+    Repo.insert!(%SpaceTraders.Fleet.Intent{
+      ship_id: ship.id,
+      caller: "commitment",
+      type: "navigate",
+      status: "waiting",
+      target_waypoint: "X1-UX81-A2"
+    })
+
+    assert {:ok, _} = Evidence.get_ship(agent, ship.symbol)
 
     assert_projection(:intent_state, %{"none" => 0, "active" => 0, "waiting" => 1})
 

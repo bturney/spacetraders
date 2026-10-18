@@ -755,7 +755,6 @@ defmodule SpaceTraders.MissionControlTest do
             SpaceTraders.FleetAllocation.Commitment,
             SpaceTraders.FleetAllocation.Portfolio,
             SpaceTraders.FleetAllocation.StrategyDecisionEpisode,
-            SpaceTraders.ShipReservation,
             SpaceTraders.Evidence.Observation
           ],
           &Repo.aggregate(&1, :count)

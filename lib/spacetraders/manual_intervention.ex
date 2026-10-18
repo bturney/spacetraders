@@ -7,10 +7,8 @@ defmodule SpaceTraders.ManualIntervention do
   alias SpaceTraders.Agent.Scope
   alias SpaceTraders.Fleet.{Intent, Ship}
   alias SpaceTraders.Repo
-  alias SpaceTraders.ShipReservation
 
   schema "manual_interventions" do
-    belongs_to :ship_reservation, ShipReservation
     belongs_to :intent, Intent
     field :reason, :string
     field :target_waypoint, :string
@@ -23,7 +21,7 @@ defmodule SpaceTraders.ManualIntervention do
     if SpaceTraders.FleetGeneration.Identity.operator?(operator_id) do
       Repo.all(
         from intervention in __MODULE__,
-          preload: [:intent, :ship_reservation],
+          preload: [:intent],
           order_by: [desc: intervention.inserted_at]
       )
     else
@@ -31,7 +29,7 @@ defmodule SpaceTraders.ManualIntervention do
     end
   end
 
-  @doc "Checks that the pending or active Intent still owns the Agent's reserved Ship."
+  @doc "Checks that the pending or active Intent still belongs to the Agent's Ship."
   def authorized?(agent_id, ship_symbol, intent_id),
     do: match?({:ok, _}, authorization(agent_id, ship_symbol, intent_id))
 
@@ -42,18 +40,15 @@ defmodule SpaceTraders.ManualIntervention do
       when is_integer(agent_id) and is_integer(intent_id) do
     query =
       from intervention in __MODULE__,
-        join: reservation in ShipReservation,
-        on: reservation.id == intervention.ship_reservation_id,
-        join: ship in Ship,
-        on: ship.id == reservation.ship_id,
         join: intent in Intent,
         on: intent.id == intervention.intent_id,
+        join: ship in Ship,
+        on: ship.id == intent.ship_id,
         where:
-          ship.agent_id == ^agent_id and is_nil(reservation.released_at) and
-            ship.symbol == ^ship_symbol and
-            intent.id == ^intent_id and intent.ship_id == ship.id and
+          ship.agent_id == ^agent_id and ship.symbol == ^ship_symbol and
+            intent.id == ^intent_id and
             intent.caller == "intervention" and intent.status in ^Intent.unfinished_states(),
-        select: %{intervention_id: intervention.id, ship_reservation_id: reservation.id}
+        select: %{intervention_id: intervention.id}
 
     query = if Keyword.get(opts, :lock, false), do: lock(query, "FOR SHARE"), else: query
 

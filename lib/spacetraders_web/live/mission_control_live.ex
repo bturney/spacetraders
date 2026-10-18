@@ -430,7 +430,7 @@ defmodule SpaceTradersWeb.MissionControlLive do
           </ul>
           <.link navigate={~p"/generations"} class="link link-primary mt-4 inline-block text-sm">Compare Fleet Generations</.link>
         </section>
-        <.link navigate={~p"/intervention"} class="link link-primary text-sm">Exceptional Ship reservation and Manual Intervention</.link>
+        <.link navigate={~p"/intervention"} class="link link-primary text-sm">Manual Intervention record</.link>
       </div>
     </Layouts.app>
     """

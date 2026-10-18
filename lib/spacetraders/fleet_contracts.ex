@@ -18,7 +18,6 @@ defmodule SpaceTraders.FleetContracts do
   alias SpaceTraders.Repo
   alias SpaceTraders.MutationAttempts
   alias SpaceTraders.SafetyFence.DependencyKey
-  alias SpaceTraders.ShipReservation
   alias SpaceTraders.Agent.Scope
   alias SpaceTraders.FleetStrategy.{Revision, StandingAuthority}
 
@@ -549,10 +548,7 @@ defmodule SpaceTraders.FleetContracts do
     credits = max(credits - Enum.sum_by(retained, &Map.get(&1.reservations, "credits", 0)), 0)
 
     available_ships =
-      Enum.reject(ships, fn ship ->
-        ship.symbol in ShipReservation.reserved_symbols(agent.id) or
-          MapSet.member?(occupied, ship.symbol)
-      end)
+      Enum.reject(ships, &MapSet.member?(occupied, &1.symbol))
 
     failed = FleetAllocation.failed_candidate_ids(generation.id)
 

@@ -16,7 +16,7 @@ defmodule SpaceTraders.RecordedDispatchFixtures do
   alias SpaceTraders.FleetGeneration.Generation
   alias SpaceTraders.FleetStrategy.{Revision, Strategy}
   alias SpaceTraders.SafetyFence.DependencyKey
-  alias SpaceTraders.{ManualIntervention, Repo, ShipReservation}
+  alias SpaceTraders.{ManualIntervention, Repo}
 
   def dispatch_action(ship_symbol, action, token \\ "TOKEN") do
     agent = operator_fixture() |> agent_fixture(%{agent_token: token})
@@ -281,14 +281,6 @@ defmodule SpaceTraders.RecordedDispatchFixtures do
   end
 
   defp intervention_intent(agent, ship, action, existing) do
-    reservation =
-      Repo.insert!(%ShipReservation{
-        ship_id: ship.id,
-        ship_symbol: ship.symbol,
-        operator_id: agent.operator_id,
-        reason: "Controlled operation adapter proof"
-      })
-
     intent =
       if existing do
         existing
@@ -305,7 +297,6 @@ defmodule SpaceTraders.RecordedDispatchFixtures do
       end
 
     Repo.insert!(%ManualIntervention{
-      ship_reservation_id: reservation.id,
       intent_id: intent.id,
       reason: "Controlled operation adapter proof",
       target_waypoint: intent.target_waypoint
