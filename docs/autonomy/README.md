@@ -9,13 +9,13 @@
 | Decide what the game and Operator experience should become | [Product](product.md) |
 | Change module boundaries, coordinated Ship work, evidence, credits or recovery | [Architecture](architecture.md), then the applicable [ADR](../adr/) |
 | Determine what is implemented, superseded or still unproven | [Capability ledger](capabilities.md) |
-| Choose the next investment after current integrations or see active priorities | [Roadmap](roadmap.md) |
+| Choose the active outcome gate or next evidence-led sprint | [Roadmap](roadmap.md) — strict gate progression, one bottleneck per sprint |
 | Design a new capability, write a spec, or update proof/status | [Change process](change-process.md) and [issue tracker](../agents/issue-tracker.md) — detailed specs and tickets stay in issues |
 | Evaluate an economic-default policy or extra Strategy levers | [Economic-first exploration](economic-first-exploration.md) |
 
 ## Start a Fleet task
 
-1. **Locate the outcome and status.** Read the relevant roadmap entry and capability row. Their state snapshot is dated; inspect current GitHub issues, merged PRs and actual source before claiming readiness.
+1. **Locate the current gate and its last sprint evidence.** Read the roadmap and relevant capability row. Their state snapshot is dated; inspect current GitHub issues, merged PRs and actual source before claiming readiness.
 2. **Find one owner.** Use the relevant accepted ADR, source module and **GitHub spec issue**. Prefer deepening or removing an existing implementation to creating a parallel decision authority.
 3. **Prove the result.** Follow the spec's observable acceptance evidence, distinguish local tests, real-game evidence and simulator-model claims, and update the ledger on the same delivery PR.
 4. **Keep the map current.** Change the roadmap or capability ledger when a decision, implementation or qualification changes what should be done next. Keep detailed specs, finite tickets and evidence in GitHub issues, linked to this plan rather than duplicated here.
