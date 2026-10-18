@@ -19,7 +19,7 @@ defmodule SpaceTraders.Fleet do
 
   alias SpaceTraders.Agent.Agent, as: AgentRecord
   alias SpaceTraders.API.AgentTokenReference
-  alias SpaceTraders.Fleet.{Activity, IntentBlocker, Ship, ShipDestination}
+  alias SpaceTraders.Fleet.{Activity, IntentBlocker, Ship, ShipCargo, ShipDestination}
 
   alias SpaceTraders.Repo
   alias SpaceTraders.{Agent, Contracts, Intelligence, World}
@@ -42,6 +42,192 @@ defmodule SpaceTraders.Fleet do
 
   def list_ships(%AgentRecord{}), do: {:error, :agent_token_missing}
 
+  @doc "Subscribes the caller to `{:ship_state, %Ship{}}`, one message per stored Ship change."
+  def subscribe_ship_state(agent_id) when is_integer(agent_id),
+    do: Phoenix.PubSub.subscribe(SpaceTraders.PubSub, ship_state_topic(agent_id))
+
+  defp ship_state_topic(agent_id), do: "ship_state:#{agent_id}"
+
+  @doc """
+  Current Ships of an Agent with their stored state and Cargo, ordered by name.
+  Reads only the database.
+  """
+  def current_ships(agent_id) when is_integer(agent_id) do
+    from(ship in Ship,
+      where: ship.agent_id == ^agent_id and is_nil(ship.retired_at),
+      order_by: [asc: ship.symbol],
+      preload: [:cargo]
+    )
+    |> Repo.all()
+  end
+
+  @doc "The given current Ships of an Agent, as `current_ships/1` reads them."
+  def current_ships(agent_id, ship_ids) when is_integer(agent_id) and is_list(ship_ids) do
+    from(ship in Ship,
+      where: ship.agent_id == ^agent_id and is_nil(ship.retired_at) and ship.id in ^ship_ids,
+      order_by: [asc: ship.symbol],
+      preload: [:cargo]
+    )
+    |> Repo.all()
+  end
+
+  @doc """
+  Stores what one Ship-bearing game response says about the Agent's Ships.
+
+  Called by `SpaceTraders.API` with every decoded success: whole Ships (owned
+  Fleet and Ship reads, purchases, registration) and the partial nav, fuel and
+  Cargo a Ship action returns for the Ship named in its path.
+  """
+  def record_ship_response(agent_id, path, response) when is_integer(agent_id) do
+    response
+    |> ship_facts(path)
+    |> Enum.each(fn {symbol, facts} -> record_ship_state(agent_id, symbol, facts) end)
+  rescue
+    exception ->
+      Logger.error("Ship state not recorded: #{Exception.message(exception)}")
+      :ok
+  end
+
+  def record_ship_response(_agent_id, _path, _response), do: :ok
+
+  defp ship_facts(ships, _path) when is_list(ships),
+    do: Enum.flat_map(ships, &ship_facts(&1, nil))
+
+  defp ship_facts(%SpaceTraders.API.Model.Ship{symbol: symbol} = ship, _path)
+       when is_binary(symbol),
+       do: [{symbol, Map.from_struct(ship)}]
+
+  defp ship_facts(%{ship: %SpaceTraders.API.Model.Ship{} = ship}, _path),
+    do: ship_facts(ship, nil)
+
+  defp ship_facts(%{ships: ships}, _path) when is_list(ships), do: ship_facts(ships, nil)
+
+  defp ship_facts(%{} = response, path) when is_binary(path) and not is_struct(response) do
+    with ["my", "ships", symbol, _action | _] <- String.split(path, "/", trim: true),
+         facts when map_size(facts) > 0 <- Map.take(response, [:nav, :fuel, :cargo]) do
+      [{symbol, facts}]
+    else
+      _ -> []
+    end
+  end
+
+  defp ship_facts(_response, _path), do: []
+
+  @doc """
+  The one upsert of a registered Ship's current state from game facts (any of
+  `:nav`, `:fuel`, `:cargo`, `:engine`, `:frame`). Absent facts keep their last
+  observed value; Cargo is replaced as a set. Unregistered Ships are ignored:
+  registration stays with authoritative acquisition. Broadcasts the stored Ship.
+  """
+  def record_ship_state(agent_id, symbol, facts) when is_binary(symbol) and is_map(facts) do
+    changes =
+      facts
+      |> state_changes()
+      |> Map.put(:state_observed_at, SpaceTraders.Clock.utc_now())
+
+    {:ok, ship} =
+      Repo.transaction(fn ->
+        from(ship in Ship,
+          where:
+            ship.agent_id == ^agent_id and ship.symbol == ^symbol and is_nil(ship.retired_at),
+          lock: "FOR UPDATE"
+        )
+        |> Repo.one()
+        |> case do
+          nil ->
+            nil
+
+          ship ->
+            ship = ship |> Ecto.Changeset.change(changes) |> Repo.update!()
+            replace_cargo(ship, Map.get(facts, :cargo))
+            Repo.preload(ship, :cargo, force: true)
+        end
+      end)
+
+    if ship do
+      Phoenix.PubSub.broadcast(
+        SpaceTraders.PubSub,
+        ship_state_topic(agent_id),
+        {:ship_state, ship}
+      )
+    end
+
+    {:ok, ship}
+  end
+
+  defp state_changes(facts) do
+    [
+      engine_changes(Map.get(facts, :engine)),
+      frame_changes(Map.get(facts, :frame)),
+      fuel_changes(Map.get(facts, :fuel)),
+      cargo_capacity_changes(Map.get(facts, :cargo)),
+      nav_changes(Map.get(facts, :nav))
+    ]
+    |> Enum.reduce(%{}, &Map.merge(&2, &1))
+  end
+
+  defp engine_changes(%{speed: speed, condition: condition}),
+    do: %{engine_speed: speed, engine_condition: condition && condition / 1}
+
+  defp engine_changes(_), do: %{}
+
+  defp frame_changes(%{fuel_capacity: capacity}) when is_integer(capacity),
+    do: %{fuel_capacity: capacity}
+
+  defp frame_changes(_), do: %{}
+
+  defp fuel_changes(%{current: current, capacity: capacity}),
+    do: Map.reject(%{fuel_current: current, fuel_capacity: capacity}, &is_nil(elem(&1, 1)))
+
+  defp fuel_changes(_), do: %{}
+
+  defp cargo_capacity_changes(%{capacity: capacity}) when is_integer(capacity),
+    do: %{cargo_capacity: capacity}
+
+  defp cargo_capacity_changes(_), do: %{}
+
+  defp nav_changes(%{status: status} = nav) when is_binary(status) do
+    route = nav.route || %{}
+
+    %{
+      nav_status: status,
+      waypoint_symbol: nav.waypoint_symbol,
+      route_origin: route_waypoint(Map.get(route, :origin)),
+      route_destination: route_waypoint(Map.get(route, :destination)),
+      route_departed_at: route_time(Map.get(route, :departure_time)),
+      route_arrives_at: route_time(Map.get(route, :arrival))
+    }
+  end
+
+  defp nav_changes(_), do: %{}
+
+  defp route_waypoint(%{symbol: symbol}), do: symbol
+  defp route_waypoint(_), do: nil
+
+  defp route_time(value) when is_binary(value) do
+    case DateTime.from_iso8601(value) do
+      {:ok, time, _offset} -> DateTime.truncate(time, :second)
+      _ -> nil
+    end
+  end
+
+  defp route_time(_), do: nil
+
+  defp replace_cargo(_ship, nil), do: :ok
+
+  defp replace_cargo(ship, cargo) do
+    Repo.delete_all(from item in ShipCargo, where: item.ship_id == ^ship.id)
+
+    rows =
+      for %{symbol: symbol, units: units} <- cargo.inventory || [],
+          is_binary(symbol) and is_integer(units) and units > 0 do
+        %{ship_id: ship.id, trade_symbol: symbol, units: units}
+      end
+
+    Repo.insert_all(ShipCargo, rows)
+    :ok
+  end
+
   @doc """
   Registers a Ship in the local registry after authoritative evidence.
 
@@ -50,7 +236,7 @@ defmodule SpaceTraders.Fleet do
   established the capabilities its acquisition promised. Registration grants no
   Claim; Fleet Allocation does that separately.
   """
-  def register_ship(%AgentRecord{} = agent, %{symbol: symbol}, ship_type)
+  def register_ship(%AgentRecord{} = agent, %{symbol: symbol} = observed, ship_type)
       when is_binary(symbol) and symbol != "" and is_binary(ship_type) and ship_type != "" do
     now = DateTime.utc_now(:second)
 
@@ -64,8 +250,13 @@ defmodule SpaceTraders.Fleet do
       end
 
     case result do
-      {:ok, ship} -> {:ok, ship}
-      {:error, changeset} -> {:error, changeset}
+      {:ok, ship} ->
+        # The authoritative read arrived before the row existed.
+        record_ship_response(agent.id, nil, observed)
+        {:ok, ship}
+
+      {:error, changeset} ->
+        {:error, changeset}
     end
   end
 

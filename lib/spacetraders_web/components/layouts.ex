@@ -59,7 +59,7 @@ defmodule SpaceTradersWeb.Layouts do
                   class={["btn btn-sm btn-ghost", @active == :glance && "text-primary"]}
                 >Mission Control</.link>
                 <.link
-                  navigate="/ships"
+                  navigate={~p"/ships"}
                   class={["btn btn-sm btn-ghost", @active == :ships && "text-primary"]}
                 >Ships</.link>
               </div>
@@ -104,7 +104,7 @@ defmodule SpaceTradersWeb.Layouts do
     assigns =
       assign(assigns, :tabs, [
         {:glance, "Glance", ~p"/mission-control"},
-        {:ships, "Ships", "/ships"},
+        {:ships, "Ships", ~p"/ships"},
         {:stats, "Stats", "/stats"}
       ])
 
