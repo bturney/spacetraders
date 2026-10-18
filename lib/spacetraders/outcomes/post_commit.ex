@@ -51,6 +51,23 @@ defmodule SpaceTraders.Outcomes.PostCommit do
 
   def observe(_observation), do: :ok
 
+  @doc """
+  Called inside the Earnings record's own transaction, before its COMMIT: the
+  worker emits the record's metrics and Loki line only once it commits.
+  """
+  def earnings(%SpaceTraders.Outcomes.EarningsRecord{} = record) do
+    case Process.get(@pending) do
+      nil -> drop()
+      pending -> Process.put(@pending, %{pending | earnings: [record | pending.earnings]})
+    end
+
+    :ok
+  rescue
+    _ -> drop()
+  catch
+    _, _ -> drop()
+  end
+
   # Retain only the bounded nav fact in the existing mutation ledger. Its
   # recorded_at supplies ordering against subsequent owned reads.
   def nav_evidence(%{nav: %{status: status}}) when status in ~w(DOCKED IN_ORBIT IN_TRANSIT),
@@ -62,12 +79,13 @@ defmodule SpaceTraders.Outcomes.PostCommit do
   def durable_change(_event, _measurements, metadata, worker) do
     case metadata do
       %{query: "begin", result: {:ok, _}} ->
-        Process.put(@pending, %{families: MapSet.new(), scans: 0, observations: []})
+        Process.put(@pending, %{families: MapSet.new(), scans: 0, observations: [], earnings: []})
 
       %{query: "commit", result: {:ok, _}} ->
         if pending = Process.delete(@pending) do
           notify(worker, pending)
           Enum.each(Enum.reverse(pending.observations), &GenServer.cast(worker, {:observe, &1}))
+          Enum.each(Enum.reverse(pending.earnings), &GenServer.cast(worker, {:earnings, &1}))
         end
 
       %{query: "rollback"} ->

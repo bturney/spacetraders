@@ -1954,17 +1954,25 @@ defmodule SpaceTraders.Fleet.Intents do
     action = intent.in_flight_action
 
     if jettison_cargo_proves?(action, cargo) do
-      transition_intent(intent,
-        status: "completed",
-        in_flight_action: nil,
-        last_action_result: %{
-          "kind" => "jettison",
-          "units" => action["units"],
-          "cargo" => cargo_evidence(cargo)
-        },
-        blocker: nil,
-        finished_at: DateTime.utc_now() |> DateTime.truncate(:second)
-      )
+      outcome =
+        transition_intent(intent,
+          status: "completed",
+          in_flight_action: nil,
+          last_action_result: %{
+            "kind" => "jettison",
+            "trade_symbol" => action["trade_symbol"],
+            "units" => action["units"],
+            "cargo" => cargo_evidence(cargo)
+          },
+          blocker: nil,
+          finished_at: DateTime.utc_now() |> DateTime.truncate(:second)
+        )
+
+      # Jettisoned trade Cargo may complete its trip's disposal.
+      with {:ok, %Intent{fleet_commitment_id: id}} when is_integer(id) <- outcome,
+           do: SpaceTraders.Outcomes.Earnings.record_trade(id)
+
+      outcome
     else
       block_intents(intent, :resource_outcome_unresolved)
     end
