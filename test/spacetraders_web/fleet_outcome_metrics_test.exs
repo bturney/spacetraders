@@ -275,7 +275,11 @@ defmodule SpaceTradersWeb.FleetOutcomeMetricsTest do
         end)
       end)
 
-    assert_receive :claim_written
+    # Synchronisation point, not a timing claim: the writer runs the full
+    # select/publish Portfolio transaction before signalling, which exceeds
+    # assert_receive's 100ms default under load. Only the refute windows below
+    # carry timing meaning.
+    assert_receive :claim_written, 5_000
     # Hold the write beyond several coalescing windows. Timing cannot make an
     # early notification accidentally see committed data in this proof.
     refute_receive {:projection, _, _, _}, 150
