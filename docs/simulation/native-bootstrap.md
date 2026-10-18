@@ -17,7 +17,7 @@ The normal governor and protocol limiter remain enabled. Forwarding never
 fabricates game responses and preserves rate-limit/Retry-After headers.
 
 The closed manifest pins application release/source/lock/OpenAPI hashes, world
-archive/image/source/checked-subset-contract, PostgreSQL executable, initial
+archive/image/source/checked-subset-contract, PostgreSQL filesystem archive, initial
 world, exact Strategy document, random attempt/resource identities, sequence and
 limits. Canonical SHA-256 is the definition identity; changing inputs or limits
 changes it. The official app OpenAPI hash and world supported-subset contract are
@@ -34,7 +34,7 @@ Observation is read-only and never drives gameplay selection.
 
 ## Commands
 
-Prerequisites: local Linux `bwrap`, user systemd/cgroup v2, PostgreSQL 17 binaries,
+Prerequisites: local Linux `bwrap`, user systemd/cgroup v2, a retained PostgreSQL 17 filesystem archive,
 Python 3.13, pinned project toolchain and already-present dependencies. No package,
 registry or upstream access occurs. Build from a **clean committed checkout**.
 Use private storage outside `/tmp`; each prepare/start output must be new.
@@ -42,7 +42,7 @@ Use private storage outside `/tmp`; each prepare/start output must be new.
 ```sh
 python3 scripts/native_bootstrap.py prepare \
   --repo "$PWD" --release "$PWD/_build/prod/rel/spacetraders" \
-  --postgres /usr/lib/postgresql/17/bin/postgres --output /private/store/779-inputs
+  --postgres /private/store/postgres-rootfs.tar --output /private/store/779-inputs
 
 python3 scripts/native_bootstrap.py validate /private/store/779-inputs/manifest.json
 
@@ -50,7 +50,7 @@ python3 scripts/native_bootstrap.py start \
   --manifest /private/store/779-inputs/manifest.json \
   --application /private/store/779-inputs/application.tar \
   --world /private/retained-778/build-A/image.tar \
-  --postgres /usr/lib/postgresql/17/bin --output /private/store/779-attempt
+  --postgres /private/store/postgres-rootfs.tar --output /private/store/779-attempt
 ```
 
 `prepare` compiles a production release (300-second build deadline), records
@@ -59,6 +59,14 @@ start the app or contact a game. `start` verifies archive/config/layer hashes
 before boot. No inference from archive metadata to Docker compatibility is made:
 the selected supported development boundary is actual filesystem boot under
 bubblewrap. Missing isolation/resource support fails closed.
+
+The PostgreSQL archive may be exported from an **already-local immutable image**
+using a never-started `docker create --pull never --network none` container and
+`docker export`. Record its image ID/archive hash and remove only that owned
+stopped export container. No PostgreSQL container, Docker network, daemon-side
+world or published host port is started. PostgreSQL and the world each execute
+inside their own exact read-only root filesystem, sharing only the attempt's
+private network namespace. Host PostgreSQL client packages are not a server.
 
 Inherited database/game credentials, target variables and HTTP proxies are
 rejected, not reused. Run from a clean environment if present; never supply live

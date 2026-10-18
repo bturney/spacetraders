@@ -111,6 +111,7 @@ defmodule SpaceTraders.Simulation.NativeBootstrap do
     deadline = System.monotonic_time(:millisecond) + manifest["limits"]["startup_seconds"] * 1_000
 
     try do
+      Process.put(:native_bootstrap_stage, "runtime_readiness")
       await_authority(deadline)
       # A fresh migrated database must contain neither identities nor intelligence.
       %{rows: [[0, 0, 0]]} =
@@ -130,9 +131,11 @@ defmodule SpaceTraders.Simulation.NativeBootstrap do
         })
 
       scope = Scope.for_operator(operator)
+      Process.put(:native_bootstrap_stage, "normal_mint")
       {:ok, _agent} = FleetGeneration.mint(scope, manifest["mint"])
       minted_at = DateTime.utc_now()
       projection = FleetStrategy.get(scope)
+      Process.put(:native_bootstrap_stage, "immutable_strategy_activation")
 
       {:ok, draft} =
         FleetStrategy.save_draft(scope, manifest["strategy"], projection.draft_version)
@@ -151,6 +154,7 @@ defmodule SpaceTraders.Simulation.NativeBootstrap do
       proof_deadline =
         System.monotonic_time(:millisecond) + (manifest["limits"]["wall_seconds"] - 75) * 1_000
 
+      Process.put(:native_bootstrap_stage, "durable_autonomous_bootstrap")
       evidence = await_evidence(revision.id, proof_deadline)
 
       write_result(%{
@@ -168,10 +172,20 @@ defmodule SpaceTraders.Simulation.NativeBootstrap do
     rescue
       error ->
         # Do not serialize exception values: changesets can contain credentials.
+        location =
+          Enum.find_value(__STACKTRACE__, fn
+            {__MODULE__, function, _args, info} ->
+              %{function: function, line: info[:line]}
+
+            _ ->
+              nil
+          end)
+
         write_result(%{
           state: "harness_failure",
-          stage: "bootstrap",
-          error: inspect(error.__struct__)
+          stage: Process.get(:native_bootstrap_stage),
+          error: inspect(error.__struct__),
+          location: location
         })
 
         System.stop(1)

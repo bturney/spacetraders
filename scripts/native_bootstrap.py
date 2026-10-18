@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import re
 import signal
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -61,7 +62,7 @@ def definition(revision, archive, schema, lock, postgres, attempt):
                 "api_schema_sha256": schema, "mix_lock_sha256": lock},
             "world": {"revision": WORLD_REVISION, "archive_sha256": WORLD_ARCHIVE,
                       "image_sha256": WORLD_IMAGE, "contract_sha256": WORLD_CONTRACT},
-            "postgres_bin_sha256": postgres, "initial_world": dict(INITIAL_WORLD),
+            "postgres_archive_sha256": postgres, "initial_world": dict(INITIAL_WORLD),
             "resources": resources(attempt), "limits": dict(LIMITS),
             "mint": {"symbol": "SIM779", "faction": "COSMIC"},
             "negative_control": "none",
@@ -77,7 +78,7 @@ def validate(m):
     try:
         template = definition(m["application"]["revision"], m["application"]["archive_sha256"],
                               m["application"]["api_schema_sha256"], m["application"]["mix_lock_sha256"],
-                              m["postgres_bin_sha256"], m["resources"]["attempt"])
+                              m["postgres_archive_sha256"], m["resources"]["attempt"])
         if set(m) != set(template) or set(m["application"]) != set(template["application"]):
             raise ValueError("unknown or missing manifest field")
         for key in ["world", "initial_world", "resources", "sequence", "schema", "mint"]:
@@ -88,8 +89,8 @@ def validate(m):
         for key, value in m["application"].items():
             if not re.fullmatch(r"[0-9a-f]{40}" if key == "revision" else r"[0-9a-f]{64}", value):
                 raise ValueError("application inputs must be immutable hashes")
-        if not re.fullmatch(r"[0-9a-f]{64}", m["postgres_bin_sha256"]):
-            raise ValueError("invalid PostgreSQL executable identity")
+        if not re.fullmatch(r"[0-9a-f]{64}", m["postgres_archive_sha256"]):
+            raise ValueError("invalid PostgreSQL filesystem identity")
         if set(m["limits"]) != set(LIMITS):
             raise ValueError("unknown limit")
         for key, cap in LIMITS.items():
@@ -116,17 +117,22 @@ def reject_environment(env):
         raise ValueError("inherited target/credential/proxy configuration rejected; use a clean environment")
 
 
-def extract(archive, target):
+def extract(archive, target, rootfs=False):
     target.mkdir(mode=0o700)
     with tarfile.open(archive) as t:
-        for member in t.getmembers():
+        members = t.getmembers()
+        for member in members:
             p = Path(member.name)
-            if p.is_absolute() or ".." in p.parts or not (member.isfile() or member.isdir() or member.issym()):
+            if p.is_absolute() or ".." in p.parts or not (member.isfile() or member.isdir() or member.issym() or member.islnk()):
                 raise ValueError("unsafe archive member")
+            if rootfs and member.issym() and Path(member.linkname).is_absolute():
+                # Preserve rootfs link semantics without allowing host-root links
+                # during unprivileged extraction (tarfile's data filter checks it).
+                member.linkname = os.path.relpath(member.linkname.lstrip("/"), p.parent)
             if member.issym() and (Path(member.linkname).is_absolute() or
                                    not (target / p.parent / member.linkname).resolve().is_relative_to(target.resolve())):
                 raise ValueError("escaping archive symlink")
-        t.extractall(target, filter="data")
+        t.extractall(target, members=members, filter="data")
 
 
 def prepare(args):
@@ -161,15 +167,18 @@ def start(args):
     identity = validate(m)
     if digest(args.application) != m["application"]["archive_sha256"] or digest(args.world) != WORLD_ARCHIVE:
         raise ValueError("artifact checksum mismatch")
-    pg = Path(args.postgres).resolve()
-    if digest(pg / "postgres") != m["postgres_bin_sha256"]:
-        raise ValueError("PostgreSQL executable checksum mismatch")
+    if digest(args.postgres) != m["postgres_archive_sha256"]:
+        raise ValueError("PostgreSQL filesystem checksum mismatch")
     out = Path(args.output).resolve()
     out.mkdir(mode=0o700)  # exclusive: no attempt reset/retry/overwriting evidence
     if out.stat().st_mode & 0o077:
         raise ValueError("output must be private")
     write(out / "manifest.json", m)
     write(out / "identity.json", {"definition": identity, "parent_network_namespace": os.readlink("/proc/self/ns/net")})
+    runtime = out / "runtime"
+    runtime.mkdir(mode=0o700)
+    for name in ["manifest.json", "identity.json"]:
+        shutil.copyfile(out / name, runtime / name)
     started = time.monotonic()
     result = {"definition": identity, "state": "harness_failure", "stage": "artifact_preflight"}
     unit = "st-native-" + m["resources"]["attempt"]
@@ -187,40 +196,47 @@ def start(args):
         if len(layers) != 1 or config["rootfs"]["diff_ids"] != ["sha256:" + digest(out / "image" / layers[0])]:
             raise ValueError("world image layer identity mismatch")
         extract(out / "image" / layers[0], out / "world")
+        extract(Path(args.postgres), out / "postgres-image", rootfs=True)
         # The pinned artifact's own entrypoint is the initial-world authority.
         write(out / "world-entrypoint.json", config["config"]["Entrypoint"])
+        shutil.copyfile(out / "world-entrypoint.json", runtime / "world-entrypoint.json")
         for name in ["pg", "socket"]:
-            (out / name).mkdir(mode=0o700)
+            (runtime / name).mkdir(mode=0o700)
         (out / "passwd").write_text(f"sim:x:{os.getuid()}:{os.getgid()}:simulation:/tmp:/bin/sh\n")
         (out / "group").write_text(f"sim:x:{os.getgid()}:\n")
         allocated = sum(p.stat().st_blocks * 512 for p in out.rglob("*") if p.is_file())
-        if allocated > m["limits"]["storage_bytes"] or os.statvfs(out).f_bavail * os.statvfs(out).f_frsize < 2**31:
+        if allocated + 536870912 > m["limits"]["storage_bytes"] or os.statvfs(out).f_bavail * os.statvfs(out).f_frsize < 2**31:
             raise ValueError("diagnostic storage admission failed")
         command = ["/usr/bin/bwrap", "--unshare-user", "--unshare-pid", "--unshare-ipc",
                    "--unshare-net", "--unshare-uts", "--die-with-parent", "--new-session",
                    "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
+                   "--size", "134217728", "--tmpfs", "/database",
                    "--dir", "/run", "--dir", "/etc", "--ro-bind", "/usr", "/usr",
                    "--ro-bind", str(out / "passwd"), "/etc/passwd", "--ro-bind", str(out / "group"), "/etc/group",
                    "--ro-bind", "/lib", "/lib", "--ro-bind", "/lib64", "/lib64",
                    "--ro-bind", "/bin", "/bin", "--ro-bind", "/sys/fs/cgroup", "/sys/fs/cgroup",
                    "--ro-bind", str(out / "application"), "/app",
-                   "--ro-bind", str(out / "world/opt"), "/opt",
-                   "--bind", str(out), "/out", "--ro-bind", str(Path(__file__).resolve()), "/bootstrap.py",
+                   "--ro-bind", str(out / "world"), "/worldfs",
+                   "--ro-bind", str(out / "postgres-image"), "/pgfs",
+                   "--bind", str(runtime), "/out",
+                   "--ro-bind", str(runtime / "manifest.json"), "/out/manifest.json",
+                   "--ro-bind", str(Path(__file__).resolve()), "/bootstrap.py",
                    "--clearenv", "--setenv", "PATH", "/usr/bin:/bin", "--setenv", "HOME", "/tmp",
                    "--setenv", "LANG", "C.UTF-8", "--chdir", "/tmp",
-                   "/usr/bin/python3", "/bootstrap.py", "inside", str(pg)]
+                   "/usr/bin/python3", "/bootstrap.py", "inside"]
         limits = m["limits"]
         result["stage"] = "isolated_start"
         with (out / "controller.log").open("wb") as log:
             completed = subprocess.run(["systemd-run", "--user", "--quiet", "--wait", "--pipe",
                 "--unit=" + unit, "--property=Type=exec", "--property=CPUQuota=" + str(limits["cpu_percent"]) + "%",
                 "--property=MemoryMax=" + str(limits["memory_bytes"]), "--property=MemorySwapMax=0",
-                "--property=TasksMax=" + str(limits["tasks"]), "--property=RuntimeMaxSec=" + str(limits["wall_seconds"]),
+                "--property=TasksMax=" + str(limits["tasks"]),
+                "--property=RuntimeMaxSec=" + str(max(1, int(limits["wall_seconds"] - (time.monotonic() - started) - 15))),
                 "--property=TimeoutStopSec=5", "--property=KillMode=control-group", *command],
                 stdout=log, stderr=subprocess.STDOUT, timeout=limits["wall_seconds"] + 15)
         result["exit_code"] = completed.returncode
-        if (out / "bootstrap.json").exists():
-            result.update(json.loads((out / "bootstrap.json").read_text()))
+        if (runtime / "bootstrap.json").exists():
+            result.update(json.loads((runtime / "bootstrap.json").read_text()))
         if completed.returncode != 0:
             result["state"] = "harness_failure"
     except Exception as exc:
@@ -236,8 +252,8 @@ def start(args):
         if not result["owned_shutdown"]:
             result["state"] = "harness_failure"
         write(out / "result.json", result)
-        write(out / "checksums.json", {str(p.relative_to(out)): digest(p) for p in out.iterdir()
-                                       if p.is_file() and p.name != "checksums.json"})
+        write(out / "checksums.json", {str(p.relative_to(out)): digest(p) for p in runtime.rglob("*")
+                                       if p.is_file() and not p.is_symlink()})
     print(json.dumps(result, sort_keys=True))
     return 0 if result["state"] == "passed" else 1
 
@@ -305,9 +321,13 @@ def proxy(budget):
     return server
 
 
-def inside(pg):
+def inside():
     os.umask(0o077)
     out = Path("/out")
+    # Bound individual diagnostics as well as the database's quota-sized tmpfs.
+    import resource
+    resource.setrlimit(resource.RLIMIT_FSIZE, (33554432, 33554432))
+    Path("/database/pg").mkdir(mode=0o700)
     m = json.loads((out / "manifest.json").read_text())
     validate(m)
     interfaces = {line.split(":")[0].strip() for line in Path("/proc/net/dev").read_text().splitlines() if ":" in line}
@@ -325,6 +345,7 @@ def inside(pg):
                                    "cgroup": actual, "home_visible": Path("/home/ben").exists(),
                                    "host_socket_visible": Path("/var/run/postgresql").exists()})
     children, logs = [], []
+    budget = None
     server = None
     result = {"state": "harness_failure", "stage": "database_initialization"}
     env = dict(os.environ, ERL_FLAGS="+S 1:1 +SDcpu 1 +SDio 1 +A 1", RELEASE_DISTRIBUTION="none",
@@ -342,26 +363,40 @@ def inside(pg):
         children.append(child)
         return child
 
+    def pg_command(*args):
+        return ["/usr/bin/bwrap", "--unshare-user", "--uid", "999", "--gid", "999",
+                "--die-with-parent", "--ro-bind", "/pgfs", "/", "--proc", "/proc",
+                "--dev", "/dev", "--tmpfs", "/tmp",
+                "--bind", "/database/pg", "/var/lib/postgresql/data",
+                "--bind", "/out/socket", "/var/run/postgresql",
+                "--clearenv", "--setenv", "HOME", "/tmp", "--setenv", "LANG", "C.UTF-8",
+                "--setenv", "PATH", "/usr/lib/postgresql/17/bin:/usr/bin:/bin", *args]
+
     try:
         user, database = m["resources"]["username"], m["resources"]["database"]
-        run([pg + "/initdb", "-D", "/out/pg", "-U", user, "--auth-local=trust", "--auth-host=reject", "--no-locale"], "initdb")
+        run(pg_command("initdb", "-D", "/var/lib/postgresql/data", "-U", user,
+                       "--auth-local=trust", "--auth-host=reject", "--no-locale"), "initdb")
         # Socket and loopback are inside the private namespace, not host sockets.
-        (out / "pg/pg_hba.conf").write_text("local all all trust\nhost all all 127.0.0.1/32 trust\n")
-        spawn([pg + "/postgres", "-D", "/out/pg", "-k", "/out/socket", "-h", "127.0.0.1",
-               "-c", "shared_buffers=32MB", "-c", "max_connections=20"], "postgres")
+        Path("/database/pg/pg_hba.conf").write_text("local all all trust\nhost all all 127.0.0.1/32 trust\n")
+        spawn(pg_command("postgres", "-D", "/var/lib/postgresql/data", "-k", "/var/run/postgresql", "-h", "127.0.0.1",
+                         "-c", "shared_buffers=32MB", "-c", "max_connections=20"), "postgres")
         deadline = time.monotonic() + m["limits"]["startup_seconds"]
-        while subprocess.run([pg + "/pg_isready", "-h", "/out/socket", "-U", user], capture_output=True).returncode:
+        while subprocess.run(pg_command("pg_isready", "-h", "/var/run/postgresql", "-U", user), capture_output=True).returncode:
             if time.monotonic() >= deadline:
                 raise ValueError("PostgreSQL readiness deadline")
             time.sleep(0.1)
-        run([pg + "/createdb", "-h", "/out/socket", "-U", user, database], "createdb")
+        run(pg_command("createdb", "-h", "/var/run/postgresql", "-U", user, database), "createdb")
         result["stage"] = "migrations"
         if m["negative_control"] == "migration_unavailable":
             children[-1].terminate()
             children[-1].wait(timeout=5)
         run(["/app/bin/spacetraders", "eval", "SpaceTraders.Release.migrate()"], "migrations")
         result["stage"] = "world_readiness"
-        world = spawn(json.loads((out / "world-entrypoint.json").read_text()), "world")
+        world = spawn(["/usr/bin/bwrap", "--unshare-user", "--die-with-parent",
+                       "--ro-bind", "/worldfs", "/", "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
+                       "--clearenv", "--setenv", "HOME", "/tmp", "--setenv", "PATH", "/usr/bin:/bin",
+                       "--setenv", "ERL_ROOTDIR", "/opt/otp", "--chdir", "/opt/stsim",
+                       *json.loads((out / "world-entrypoint.json").read_text())], "world")
         if m["negative_control"] == "world_unavailable":
             world.terminate()
             world.wait(timeout=5)
@@ -398,6 +433,8 @@ def inside(pg):
     except Exception as exc:
         result.update(state="harness_failure", error=str(exc))
     finally:
+        if budget is not None:
+            result["requests"] = budget.count
         if server:
             server.shutdown()
             server.server_close()
@@ -411,6 +448,9 @@ def inside(pg):
                     child.wait(timeout=2)
         for log in logs:
             log.close()
+        # Preserve the bounded cluster after an ordinary success/startup failure.
+        # Hard cgroup death can leave an incomplete archive; no recovery claim.
+        shutil.copytree("/database/pg", out / "pg", dirs_exist_ok=True)
         write(out / "bootstrap.json", result)
     return 0 if result["state"] == "passed" else 1
 
@@ -427,8 +467,7 @@ def main():
         p.add_argument("--" + key, required=True)
     p = sub.add_parser("validate")
     p.add_argument("manifest")
-    p = sub.add_parser("inside")
-    p.add_argument("postgres")
+    sub.add_parser("inside")
     args = parser.parse_args()
     if args.command == "prepare":
         prepare(args)
@@ -437,7 +476,7 @@ def main():
     elif args.command == "validate":
         print(validate(json.loads(Path(args.manifest).read_text())))
     else:
-        return inside(args.postgres)
+        return inside()
     return 0
 
 
