@@ -21,4 +21,4 @@
 - Diagnosing Strategy outcomes or following Grafana drill-downs: read `docs/agents/observability.md`.
 - Changing authentication, scopes, live_sessions, or pipelines: read `docs/agents/auth.md`.
 - Production operations (deploy, migration, backup, restore, Compose on `project-host`): read `docs/operations/project-host.md` first.
-- Autonomous runtime contracts, roadmap, and proposed simplification: read `docs/autonomy/README.md` and the relevant owning contract before planning or changing the engine.
+- Autonomous Fleet planning/allocation, Operator experience recovery, or actual-bot simulation: read `docs/autonomy/README.md`; follow its task-specific ADR and issue.

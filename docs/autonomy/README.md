@@ -1,28 +1,37 @@
-# Autonomous Fleet: design and roadmap
+# Autonomous Fleet roadmap
 
-This directory gives [#502](https://github.com/bturney/spacetraders/issues/502)'s accepted reset-to-reset autonomous Fleet Strategy contracts a versioned, reviewable home in the repository. The six contract documents retain the 2026-10-18 issue body, in original order and **without changing its requirements**. Their section headings retain C01–C12 and the acceptance/proof decisions. The issue remains the discussion/history and current implementation-frontier index.
+**Task router, not a second PRD.** This file locates the current work and the proof required to call it done. Detailed requirements and decisions live with their owning issues and ADRs. [#502](https://github.com/bturney/spacetraders/issues/502) retains the original reset-to-reset destination, issue history and qualification evidence; its older C01–C12 text is **not** a safe implementation instruction without checking later accepted decisions.
 
-**Transition rule:** until this migration is merged and the issue is updated to point here, #502 is still the authoritative contract. Before merging, reconcile any new Operator decisions or contractual changes made on the issue since the copied snapshot. Once accepted, edit the contract here by reviewed PR; put status/proof receipts, bounded implementation tickets, and delivery dependencies on GitHub issues. Do not maintain a second evolving specification in #502.
+## Start with the owner
 
-## Read by question
+1. **Locate the current branch of work.** Use the table below, then read the linked issue's acceptance criteria and the applicable ADR. Check the issue/PR's *current* state; the status examples below were checked 2026-10-18.
+2. **Check actual source on the target branch.** A closed ticket in the Operator-recovery integration branch is not code on `main`. For a simulator ticket, check the app and the private simulator separately. Do not use a snapshot of #502 as a substitute for code or the later decisions.
+3. **Make the smallest owner-held change.** Keep one Fleet Allocation publication authority, recorded mutation recovery and evidence/API admission in their existing seams. Follow the selected issue's tests and review/verification gates.
+4. **Prove the requested outcome.** Attach the public seam/runtime and actual-game or simulator evidence required by that issue. Mark each unexercised criterion **unproven**. Closing an implementation issue, merging an integration branch and qualifying live/whole-period behavior are distinct events.
 
-| If you need to understand... | Read |
-| --- | --- |
-| Why this exists, product destination, all 40 Operator user stories | [Product destination and user stories](product-and-user-stories.md) |
-| Governing modules, Standing Authority, coherent portfolio selection, shared work | [Strategy and Allocation](strategy-and-allocation.md) — C01–C02 |
-| Observation Demands, API budget, durable MutationAttempts and Safety Fences | [Evidence and Execution](evidence-and-execution.md) — C03–C04 |
-| Economic decisions, bounded Marketplace coverage, Neutral Wait and stalled progress | [Economics and Coverage](economics-and-coverage.md) — C05–C06 |
-| Server Reset and restart recovery, all autonomous API capabilities | [Lifecycle and Capability](lifecycle-and-capability.md) — C07–C08 |
-| Mission Control, truthful economics, calibration, qualification gates, tests, acceptance and out-of-scope | [Experience and Qualification](experience-and-qualification.md) — C09–C12 and completion criteria |
-| Possible economic-first simplification and multi-Ship collaboration, **not yet accepted contract changes** | [Economic-first exploration](economic-first-exploration.md) |
+## Current workstreams
 
-## Status and dependencies
+| Workstream | State on 2026-10-18 | Owner and completion boundary |
+| --- | --- | --- |
+| **Fleet simplification** | [#715](https://github.com/bturney/spacetraders/issues/715) completed; Market lifecycle [PR #727](https://github.com/bturney/spacetraders/pull/727) and World reads [PR #726](https://github.com/bturney/spacetraders/pull/726) merged. | Keep that simplification; avoid reopening equivalent wrappers without measured duplication. |
+| **Gate 2C — Ship acquisition** | [#730](https://github.com/bturney/spacetraders/issues/730) and its leaves #731–#735 closed; [PR #737](https://github.com/bturney/spacetraders/pull/737) merged to `main`. | [ADR 0016](../adr/0016-ship-acquisition-is-surplus-first-capacity-investment.md): allocation-owned, surplus-first Capacity Investment **after** the Market decision, published beside retained work. It is **not** a universal cross-horizon auction. The PR proves controlled seams, **not** realized live purchase payoff or end-to-end economic optimality. |
+| **Operator Experience Recovery** | [#757](https://github.com/bturney/spacetraders/issues/757) active; [PR #802](https://github.com/bturney/spacetraders/pull/802) is the open `integration/757-operator-recovery` branch. Some child tickets have closed **on the branch**, others remain active. | [ADR 0017](../adr/0017-nothing-needs-the-operator.md) and #757 replace old #502/#311 UI and intervention expectations. Own the Glance → Ships → Ship + Why → Grafana journey; net credits/Ship-hour estimator [#763](https://github.com/bturney/spacetraders/issues/763), durable Earnings [#766](https://github.com/bturney/spacetraders/issues/766), and scoped simplification belong **there**. [#776](https://github.com/bturney/spacetraders/issues/776) owns Operator acceptance, cutover and production check. Do not treat the integration work as deployed. |
+| **Actual-bot simulator** | [#677](https://github.com/bturney/spacetraders/issues/677) accepted, implementation sliced; [PR #801](https://github.com/bturney/spacetraders/pull/801) is an open integration PR on `integration/spec-677`. Clock, private artifacts and world controls have bounded evidence; real-HTTP isolated bootstrap, economic progression and matched discovery remain active. | Run the **real autonomous application** against a pinned private HTTP world with isolated PostgreSQL, governed API capacity and controlled simulated time. Keep model credibility separate from throughput and results. [#799](https://github.com/bturney/spacetraders/issues/799) and [#800](https://github.com/bturney/spacetraders/issues/800) own whole-system and protected-host qualification. A working unit simulator is not 336-hour actual-bot proof. |
+| **Broader reset-to-reset destination** | [#502](https://github.com/bturney/spacetraders/issues/502) remains open; its historical qualification receipts and remaining Gates 1–5 must be interpreted against newer work. | Complete autonomous API capability, useful continuous economics, multi-Ship coordination, crash/reset safety and multi-day evidence require their own bounded qualification. Do not promote "merged" to "qualified" or open new cross-cutting implementation work merely because #502 lists a future requirement. |
 
-- **Canonical tracking and proof receipts:** [#502](https://github.com/bturney/spacetraders/issues/502); read its *latest* qualified frontier rather than trusting a static status copied into documentation.
-- **Accepted architecture:** [ADR 0010](../adr/0010-autonomous-runtime.md), with the other accepted ADRs named by #502, and [GLOSSARY.md](../../GLOSSARY.md). The source-controlled contract does not silently overrule those decisions.
-- **Actual-bot accelerated simulator:** [#677](https://github.com/bturney/spacetraders/issues/677) is an independently approved design and implementation frontier; this migration neither changes that specification nor authorizes experiments/deployment.
-- **Operator information architecture:** [#311](https://github.com/bturney/spacetraders/issues/311) and its accepted design decisions remain in force until explicitly reconsidered.
+## Decision precedence
 
-## How to change the design
+- **Game truth:** [ADR 0007](../adr/0007-game-truth-and-quality-of-life-guardrails.md), the pinned API spec and authoritative game receipts.
+- **Engine ownership and mutation recovery:** [ADR 0010](../adr/0010-autonomous-runtime.md), [ADR 0011](../adr/0011-single-recovery-authority-for-mutations.md) and the relevant current issue. Multiple Ships can cooperate under one Allocation authority; Ship workers do not independently select competing fleet portfolios.
+- **Acquisition:** [ADR 0016](../adr/0016-ship-acquisition-is-surplus-first-capacity-investment.md) supersedes the blanket implication in old #502 C02 that all alternatives already rank on one global score.
+- **Operator experience and stop behavior:** [ADR 0017](../adr/0017-nothing-needs-the-operator.md) and #757 supersede older #502 Emergency Stop, Attention, Intervention and Operator-navigation contracts. **Stopping the service on `project-host` is the approved kill switch; ships already in flight finish their legs.** Existing engine safety and mutation reconciliation remain independent of an in-app stop control.
+- **Simulation:** #677 is the accepted scoped design. Its original handoff explicitly separates design approval, implemented slices, simulator economic credibility and authorization for protected-host/full-period experiments.
+- **Vocabulary:** [GLOSSARY.md](../../GLOSSARY.md) and the current #757 [glossary split work](https://github.com/bturney/spacetraders/issues/758). In-flight UI work follows the #757 game-first language; do not require engine record names on player-facing screens.
 
-Preserve original Operator intent and causal decisions. Amend the smallest owning contract, state what requirement or acceptance proof changes, and link the applicable issue or decision. Mark new ideas as hypotheses until approved; do not quietly broaden a current implementation ticket. Maintain the #502 rule that a contract is **proven, violated, or unproven** by real evidence, never by the existence of a class, passing isolated tests, or closing an issue.
+Where decisions conflict, use the **later explicit accepted decision in the owning workstream**, preserve the original issue as history, and surface unresolved conflicts for review. Neither this index nor an exploration note grants authority to deploy, change the live Fleet Strategy, spend resources or run an experiment.
+
+## Next policy question, not an implementation ticket
+
+[**Economic-first simplification**](economic-first-exploration.md) records the Operator's interest in a useful default economic optimizer with fewer Strategy levers and genuinely autonomous multi-Ship teams. This is **exploration**. First use #757's actual earnings/estimates and #677's controlled actual-bot comparisons to test where a simpler policy outperforms the current one. Record a focused design decision before changing immutable Strategy semantics or the current allocation contract.
+
+**Roadmap completion rule:** every claimed milestone links to its owning accepted requirement, actual merged source and the required observed proof; otherwise label it **implemented but unqualified** or **unproven**, as applicable.

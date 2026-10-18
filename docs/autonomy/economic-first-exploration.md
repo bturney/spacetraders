@@ -1,58 +1,31 @@
-# Economic-first exploration: simplifying the Fleet engine
+# Economic-first Fleet policy — exploration
 
-**Status: design exploration, not an amendment to the accepted #502 contracts or the accepted #677 simulator handoff.** This captures the Operator's 2026-10-18 direction after comparing this engine with the forked Erlang economic agent. Nothing here authorizes removing existing runtime protection, changing a live Strategy, or deploying a different controller. Validate and explicitly choose a revised contract before implementation.
+**Status:** Operator direction recorded 2026-10-18, **not** an approved replacement for #502, [ADR 0016](../adr/0016-ship-acquisition-is-surplus-first-capacity-investment.md), [ADR 0017](../adr/0017-nothing-needs-the-operator.md) or [#677](https://github.com/bturney/spacetraders/issues/677). [Roadmap](README.md) gives the current implementation owners. This note is a set of hypotheses to falsify, not a work queue.
 
-## Product hypothesis
+## Hypothesis
 
-SpaceTraders is predominantly an economic optimization game. The **first fun mode** may be an autonomous default policy that maximizes realized economic output over the available Fleet Generation horizon, rather than asking the Operator to frequently modify Strategic Objectives. The Operator can later explore alternative economic policies and simple levers; the value of a configurable Strategy cockpit is not yet established.
+The fun may be **watching an economically effective autonomous Fleet**, then comparing different policies, rather than frequently hand-editing Fleet Strategy. Try an economic-growth default first, with future levers only where experiments show an interesting trade-off. This is a policy/product question; it does not by itself justify deleting the existing Strategy revision identity, execution authority or recovered evidence.
 
-This changes the *product's intended default policy*, not the authority of the game API or the need to halt unsafe mutations. For now, evaluate whether a fixed built-in Strategy could be represented by the existing revision record while the user-facing control surface is simplified. Do not assume deleting Fleet Strategy or stored revisions is necessary.
+## Use work already in flight
 
-Questions to settle through observation and explicit Operator choice:
+- **#715 is complete:** Market reconciliation and retained World reads were simplified; measure new deletion candidates against those merged changes.
+- **Gate 2C is merged:** #730 / PR #737 and ADR 0016 already value a Ship purchase as conditional, surplus-first Capacity Investment over a Generation Horizon. It runs *after* the Market decision, not inside a universal economic auction. Compare that deliberate trade-off before proposing a new allocator.
+- **#757 is the current economic/UX increment:** #763 adds estimated **net credits per Ship-hour** to trade selection and acquisition; #766 records completed-trade Earnings. These are on the #802 integration path until cutover #776—not necessarily on `main`.
+- **#677 is the accepted test harness:** #801 integrates the actual bot with the private HTTP simulator, not a replacement bot policy. Comparison conclusions remain conditional on gameplay/economic fidelity. The approved finite comparison limits and paired scenarios apply.
 
-- Is the optimization target net attributable earnings, ending wealth, return per constrained Ship-hour/API request, a reset-horizon utility, or a multi-metric portfolio? Measure trade-offs, not just credit balance.
-- Which achievements remain objectives versus instruments that produce future economic value: gate construction, chart rewards, discovering profitable markets, Ship growth, and coordinated supply chains?
-- Can one built-in policy with a few disclosed risk limits reproduce useful autonomous decisions without frequent human adjustment?
-- Which future alternate modes would actually be fun to compare (for example, economic growth, gate-first, charting/exploration), without building a general policy editor now?
+## Choices to test
 
-## A lean controller hypothesis
+1. **Economic target.** Compare realized attributable Net Earnings, end-of-Generation wealth, and marginal return per Ship-hour / scarce API request. State whether Gate construction, charting and exploration are rewarded outcomes or investments whose value is future growth. A credit balance alone is not Net Earnings.
+2. **Bounded uncertainty.** Price market depth, travel, fuel, capital, switching, evidence freshness, reset horizon and API pressure. A missing observation is **unknown**, not zero value or negative evidence. Preserve the Governor's protected recovery and protocol limits while valuing optional observations economically.
+3. **One Fleet portfolio.** Compare useful direct work, observation, preparation, retention and acquisition at the owning Allocation seam. Measure whether ADR 0016's simple surplus-first purchase rule loses meaningful value before paying for a common cross-horizon score.
+4. **Multi-Ship teams.** One contribution may require producer + hauler or scout + support, selected and reserved **as a group**. Allocate claims, divisible fulfillment and shared resources once; Ship execution remains per-Ship. Prove two cooperating Ships, an independent Ship continuing, and dependency-scoped interruption/replan before generalizing.
+5. **Less machinery.** Count duplicate decision authorities, overlapping state, tables, handoffs and recovery paths. Remove a layer only if tests preserve accepted game/reset identity, single-writer resource ownership, durable before-send mutation evidence, ambiguous-effect reconciliation and unrelated-Ship progress. Under ADR 0017 the kill switch is stopping the service, **not** a persisted Emergency Stop flag.
 
-Keep **one** logical decision loop from evidence/belief through candidate valuation, one coherent Fleet allocation, bounded outcome execution, and measurement/learning. All work—trading, observation, preparation, acquisition, retained work, and multi-Ship cooperation—must be comparable or deliberately protected under that same allocation decision.
+## Evidence before changing the accepted policy
 
-The economic planner should value expected marginal contribution over the remaining time, including uncertainty, price/market depth, fuel, cargo, travel, capital, switching, API capacity, and information acquisition. "Unknown" is not "bad" or zero. Use bounded initial estimates, record every admissible rejected alternative, and correlate predicted versus realized outcomes. API capacity becomes an economically priced bottleneck **in addition to** protocol safety and protected recovery service, not an independent scheduler that overrides the allocation.
+1. **Baseline:** obtain actual completed Earnings and estimation error from #757; record stalled/idle work, API cost, acquisition refusals and alternative candidates. The measurement must separate absent evidence from real zero performance.
+2. **Variants:** use #677's approved actual-bot, real-HTTP isolated worlds and unchanged experimental authority. Run paired policies within an explicitly approved finite manifest. Distinguish simulator scenario correctness, economic credibility, wall-clock throughput and live predictive validity.
+3. **Decision:** identify a reproducible improvement, counterexamples, resource cost, and trade-offs that affect the *fun* of the game. If evidence is inadequate, record **inconclusive** rather than ship new Strategy knobs.
+4. **Approved change:** amend the owning ADR/spec and its acceptance evidence, then implement in the current responsible module. Preserve retained game authority and causal records while simplifying.
 
-## What is worth retaining while deleting complexity
-
-The question is not whether 20% of code can be exactly 80% as correct; that ratio has no evidence yet. Distinguish inexpensive accidental complexity from narrow safeguards against genuinely costly, irreversible consequences.
-
-**Proposed non-negotiable invariants for any simplification experiment:**
-
-1. No new gameplay mutation without current runtime authority and a functioning Emergency Stop.
-2. One owner per selected outcome; never double-claim a Ship, credits, Cargo, or shared fulfillment.
-3. An ambiguous non-idempotent mutation is not blindly retried. Durable attempt evidence must survive before bytes can leave, and recovery reconciles authoritative effects.
-4. Reset identity and old-generation work cannot authorize a new world; a software restart is not a game reset.
-5. One uncertain Ship or dependency must not stall unrelated admissible Fleet work.
-6. The system never promotes missing data or simulator assumptions into authoritative game truth.
-
-**Candidates for simplification, to test rather than assume:** duplicate orchestration paths; version/translation layers that do not guard an actual concurrency boundary; multiple projections of the same fact; redundant durable records; capability-specific allocation; an over-configurable Strategy UI; and repeated read/retry choreography owned by callers. A simpler schema is possible, consistent with the Operator's 2026-10-17 #502 decision, but migration must not erase unresolved mutation evidence merely to make the new model look clean.
-
-Evaluate deletion by counting independent decision owners, duplicated state transitions, write authorities, call paths, database tables/columns, and observable failure classes—not only lines of code.
-
-## Multi-Ship work is a core requirement, not optional sophistication
-
-A single Candidate Contribution may describe a jointly useful Fleet-level outcome with several Ship roles (for example, producer plus hauler, or scout plus transport). Allocation should decide the group **as a unit**: claim multiple Ships, bound credits/Cargo/receiving capacity, define dependencies and fulfillment pledges, and permit unrelated Ships to proceed. Each Ship executes a bounded outcome, while allocation owns the coordinated result and smallest safe replan. Do **not** build competing autonomous team planners or let workers silently negotiate a second allocation.
-
-The smallest useful proof has two cooperating Ships, one shared deliverable, one retained independent activity, and a deliberate interruption that replans only the affected dependency subgraph.
-
-## Proposed experiment and decision sequence
-
-1. **Baseline reality.** Preserve #502 C04 correctness proof and capture actual economic throughput, API-cost attribution, stalled/idle causes, alternative candidates, and operator effort. A simplified design must be compared with demonstrated behavior, not with a hoped-for baseline.
-2. **Default economic policy.** In a separate, explicitly chosen policy variant, make trading, discovery, construction, acquisition and support work contend on one decision plane. Keep accepted revision and safety semantics until their replacement is proven and approved.
-3. **Falsify economic models.** Use rejected-alternative records and paired variants to test valuation and opportunity-cost hypotheses. An impressive score is not a realized gain.
-4. **Run actual-bot experiments under #677.** Preserve the accepted real-HTTP, real application, isolated PostgreSQL and finite experiment-envelope design. First demonstrate fidelity of the relevant economics; distinguish controlled-simulation ranking from live predictive proof. #677's gate-focused and multi-objective families remain accepted until changed explicitly.
-5. **Reduce architecture only with evidence.** Delete or merge machinery whose role is redundant, while testing uncertainty, crash windows, resets and simultaneous multi-Ship work. Prefer the smallest coherent implementation, not a second framework layered over the first.
-6. **Reconsider Operator levers after trials.** Choose what control actually creates a better game experience. An economic default may require fewer user-facing settings, even if preserving a durable policy identity internally remains useful.
-
-## Relationship to accepted work
-
-These are ideas to evaluate, not revised C01–C12 acceptance criteria. In particular, #502's currently accepted Operator-owned immutable Strategy and C09 experience cannot be dropped just because an economic default seems appealing. #677 explicitly retains actual Fleet Strategy and authority in its qualified experiments. Reconcile those choices in a focused decision before modifying either contract. The in-repo documents remain the source of the accepted design after this migration; this page remains exploratory until the Operator approves a concrete replacement.
+**Done for this exploration** means a reviewed decision that says whether to adopt an economic default, which existing policy and UI controls change, what proof supports it, and what remains unproven. An essay or benchmark score alone does not close it.
