@@ -40,7 +40,7 @@ if config_env() == :dev do
     ]
 end
 
-if config_env() == :prod and not System.get_env("SPACETRADERS_NATIVE_BOOTSTRAP") do
+if config_env() == :prod and is_nil(System.get_env("SPACETRADERS_NATIVE_BOOTSTRAP")) do
   postgres_host =
     System.get_env("POSTGRES_HOST") ||
       raise "environment variable POSTGRES_HOST is missing"

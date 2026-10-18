@@ -1,5 +1,5 @@
 defmodule SpaceTraders.Simulation.NativeBootstrapTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   alias SpaceTraders.Simulation.NativeBootstrap
 
@@ -44,6 +44,20 @@ defmodule SpaceTraders.Simulation.NativeBootstrapTest do
       )
 
     assert status == 0, output
+  end
+
+  test "production runtime config enters explicit mode without evaluating live credentials" do
+    key = "SPACETRADERS_NATIVE_BOOTSTRAP"
+    previous = System.get_env(key)
+    System.put_env(key, "/native-bootstrap-missing-manifest.json")
+
+    try do
+      assert_raise File.Error, fn ->
+        Config.Reader.read!("config/runtime.exs", env: :prod, target: :host)
+      end
+    after
+      if previous, do: System.put_env(key, previous), else: System.delete_env(key)
+    end
   end
 
   defp manifest do
