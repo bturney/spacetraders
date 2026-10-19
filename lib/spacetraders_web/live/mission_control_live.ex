@@ -31,7 +31,9 @@ defmodule SpaceTradersWeb.MissionControlLive do
       end
     end
 
-    {:ok, socket |> assign(refresh: nil, next_change: nil, credits: nil, credits_flash: nil)
+    {:ok,
+     socket
+     |> assign(refresh: nil, next_change: nil, credits: nil, credits_flash: nil)
      |> recompute()}
   end
 

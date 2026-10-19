@@ -87,7 +87,8 @@ defmodule SpaceTraders.MissionControl.Credits do
         distinct:
           fragment("date_bin(make_interval(secs => ?), ?, ?)", ^width, o.observed_at, ^origin),
         order_by: [
-          asc: fragment("date_bin(make_interval(secs => ?), ?, ?)", ^width, o.observed_at, ^origin),
+          asc:
+            fragment("date_bin(make_interval(secs => ?), ?, ?)", ^width, o.observed_at, ^origin),
           desc: o.observed_at
         ],
         select: %{at: o.observed_at, credits: credits_of(o)}
