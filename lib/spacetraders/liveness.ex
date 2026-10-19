@@ -6,22 +6,23 @@ defmodule SpaceTraders.Liveness do
 
     * Engine - `RuntimeAuthority` beats once a second while it holds mutation
       authority. Without runtime authority (dev, test) no heartbeat is expected.
-    * Game - every game response (2xx-4xx: the game answered) clears the
-      failing state; a 5xx or transport failure starts it, once, at the first
-      failure after the last answer.
+    * Game - every game response (2xx-4xx: the game answered) records the last
+      answer and clears the failing state; a 5xx or transport failure marks it
+      failing. A failing game is silent since its last answer (or boot).
   """
 
   alias SpaceTraders.{Clock, RuntimeAuthority}
 
   @key {__MODULE__, :atomics}
   @engine 1
-  @game_failing_since 2
+  @game_answered 2
+  @game_failing 3
 
-  @doc "Creates the counters; the engine's last beat starts at boot."
+  @doc "Creates the counters; the engine's last beat and the game's last answer start at boot."
   def init do
-    ref = :atomics.new(2, signed: true)
-    :atomics.put(ref, @engine, now_ms())
+    ref = :atomics.new(3, signed: true)
     :persistent_term.put(@key, ref)
+    reset()
     :ok
   end
 
@@ -29,11 +30,14 @@ defmodule SpaceTraders.Liveness do
   def beat, do: :atomics.put(ref(), @engine, now_ms())
 
   @doc "Records one game request outcome by HTTP status (or a transport failure)."
-  def game_request(status) when is_integer(status) and status in 200..499,
-    do: :atomics.put(ref(), @game_failing_since, 0)
+  def game_request(status) when is_integer(status) and status in 200..499 do
+    ref = ref()
+    :atomics.put(ref, @game_answered, now_ms())
+    :atomics.put(ref, @game_failing, 0)
+  end
 
   def game_request(_status) do
-    _ = :atomics.compare_exchange(ref(), @game_failing_since, 0, now_ms())
+    :atomics.put(ref(), @game_failing, 1)
     :ok
   end
 
@@ -48,18 +52,23 @@ defmodule SpaceTraders.Liveness do
     }
   end
 
-  @doc "The first failed game request since the last answer, or nil."
+  @doc "While the game is failing, its last answer (or boot); otherwise nil."
   def game_failing_since do
-    case :atomics.get(ref(), @game_failing_since) do
+    ref = ref()
+
+    case :atomics.get(ref, @game_failing) do
       0 -> nil
-      ms -> to_datetime(ms)
+      _ -> ref |> :atomics.get(@game_answered) |> to_datetime()
     end
   end
 
   @doc false
   def reset do
-    :atomics.put(ref(), @engine, now_ms())
-    :atomics.put(ref(), @game_failing_since, 0)
+    ref = ref()
+    now = now_ms()
+    :atomics.put(ref, @engine, now)
+    :atomics.put(ref, @game_answered, now)
+    :atomics.put(ref, @game_failing, 0)
   end
 
   defp ref do

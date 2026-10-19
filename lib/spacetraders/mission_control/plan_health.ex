@@ -25,8 +25,8 @@ defmodule SpaceTraders.MissionControl.PlanHealth do
   "Old" is overdue against each thing's own next expected update, never one
   clock: a Ship 5 min past its next known event (`ShipRow`), Market prices
   past `Intelligence.market_freshness_seconds/0`, an open trade 50% past its
-  estimated duration, the engine 60 s without a heartbeat, the game 5 min
-  failing. `next_change_at` is the earliest moment one of these would flip
+  estimated duration, the engine 60 s without a heartbeat, the game failing
+  5 min after its last answer. `next_change_at` is the earliest moment one of these would flip
   with no new data, so one timer covers silent staleness.
 
   Thresholds are the spec's prototype values, held here as named constants.
