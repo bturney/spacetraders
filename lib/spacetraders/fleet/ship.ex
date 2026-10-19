@@ -26,6 +26,8 @@ defmodule SpaceTraders.Fleet.Ship do
     field :nav_status, :string
     field :waypoint_symbol, :string
     field :fuel_current, :integer
+    # When a running cooldown ends; nil when none was running when observed.
+    field :cooldown_expires_at, :utc_datetime
     field :state_observed_at, :utc_datetime_usec
 
     # The one current route; arrival in the past means the Ship has arrived.

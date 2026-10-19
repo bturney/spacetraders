@@ -129,4 +129,27 @@ defmodule SpaceTraders.FleetShipStateTest do
     assert Enum.map(Fleet.current_ships(agent.id), & &1.symbol) == expected
     assert Enum.map(Fleet.current_ships(agent.id, ids), & &1.symbol) == expected
   end
+
+  test "a running cooldown is stored with its end; an ended one clears it" do
+    agent = operator_fixture() |> agent_fixture()
+    register(agent, ["AGENT-1"])
+
+    cooldown = fn remaining, expiration ->
+      %SpaceTraders.API.Model.Cooldown{
+        ship_symbol: "AGENT-1",
+        total_seconds: 70,
+        remaining_seconds: remaining,
+        expiration: expiration
+      }
+    end
+
+    Fleet.record_ship_state(agent.id, "AGENT-1", %{
+      cooldown: cooldown.(65, "2026-10-19T12:01:05.123Z")
+    })
+
+    assert stored(agent, "AGENT-1").cooldown_expires_at == ~U[2026-10-19 12:01:05Z]
+
+    Fleet.record_ship_state(agent.id, "AGENT-1", %{cooldown: cooldown.(0, nil)})
+    assert stored(agent, "AGENT-1").cooldown_expires_at == nil
+  end
 end

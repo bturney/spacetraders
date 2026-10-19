@@ -132,7 +132,7 @@ defmodule SpaceTraders.Fleet do
 
   defp ship_facts(%{} = response, path) when is_binary(path) and not is_struct(response) do
     with ["my", "ships", symbol, _action | _] <- String.split(path, "/", trim: true),
-         facts when map_size(facts) > 0 <- Map.take(response, [:nav, :fuel, :cargo]) do
+         facts when map_size(facts) > 0 <- Map.take(response, [:nav, :fuel, :cargo, :cooldown]) do
       [{symbol, facts}]
     else
       _ -> []
@@ -143,7 +143,7 @@ defmodule SpaceTraders.Fleet do
 
   @doc """
   The one upsert of a registered Ship's current state from game facts (any of
-  `:nav`, `:fuel`, `:cargo`, `:engine`, `:frame`). Absent facts keep their last
+  `:nav`, `:fuel`, `:cargo`, `:cooldown`, `:engine`, `:frame`). Absent facts keep their last
   observed value; Cargo is replaced as a set. Unregistered Ships are ignored:
   registration stays with authoritative acquisition. Broadcasts the stored Ship.
   """
@@ -189,7 +189,8 @@ defmodule SpaceTraders.Fleet do
       frame_changes(Map.get(facts, :frame)),
       fuel_changes(Map.get(facts, :fuel)),
       cargo_capacity_changes(Map.get(facts, :cargo)),
-      nav_changes(Map.get(facts, :nav))
+      nav_changes(Map.get(facts, :nav)),
+      cooldown_changes(Map.get(facts, :cooldown))
     ]
     |> Enum.reduce(%{}, &Map.merge(&2, &1))
   end
@@ -228,6 +229,15 @@ defmodule SpaceTraders.Fleet do
   end
 
   defp nav_changes(_), do: %{}
+
+  defp cooldown_changes(%{remaining_seconds: seconds, expiration: expiration})
+       when is_integer(seconds) and seconds > 0,
+       do: %{cooldown_expires_at: route_time(expiration)}
+
+  defp cooldown_changes(%{remaining_seconds: seconds}) when is_integer(seconds),
+    do: %{cooldown_expires_at: nil}
+
+  defp cooldown_changes(_), do: %{}
 
   defp route_waypoint(%{symbol: symbol}), do: symbol
   defp route_waypoint(_), do: nil

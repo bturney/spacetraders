@@ -237,6 +237,8 @@ defmodule SpaceTraders.MissionControl.ShipStatus do
     base = %{
       ship_id: ship.id,
       credits_per_hour: rate(earned),
+      # An execution step is running (not blocked): the Ship acts at once.
+      acting?: match?(%Intent{}, intent) and intent.status != "blocked",
       reason: nil,
       retries: nil,
       next_attempt_at: nil,

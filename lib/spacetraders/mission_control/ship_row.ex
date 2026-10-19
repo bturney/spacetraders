@@ -2,10 +2,12 @@ defmodule SpaceTraders.MissionControl.ShipRow do
   @moduledoc """
   One Ships-list row read from stored Ship state; never calls the game.
 
-  A row is overdue when it is 5 minutes past the Ship's next known event:
-  arrival for a Ship in transit; for a stationary Ship, its blocked step's
-  next attempt or its Neutral Wait's next check when later than the
-  observation, else the observation itself (an action follows at once).
+  A row is overdue when it is 5 minutes past the Ship's next expected event:
+  arrival for a Ship in transit; for a stationary Ship the latest of its
+  blocked step's next attempt, its Neutral Wait's next check, and, while an
+  action is running, its observation (the action follows at once) or the end
+  of a cooldown running when observed. A Ship expecting none of these is
+  never overdue.
 
   The row carries the Ship's status from `MissionControl.ShipStatus`.
   """
@@ -58,11 +60,23 @@ defmodule SpaceTraders.MissionControl.ShipRow do
        ),
        do: arrives
 
-  defp next_event_at(%Ship{state_observed_at: observed}, status) do
-    [observed, status[:next_attempt_at], status[:next_check_at]]
+  defp next_event_at(%Ship{state_observed_at: observed} = ship, status) do
+    acting =
+      if status[:acting?] do
+        [observed, cooldown_end(ship.cooldown_expires_at, observed)]
+      else
+        []
+      end
+
+    [status[:next_attempt_at], status[:next_check_at] | acting]
     |> Enum.filter(&match?(%DateTime{}, &1))
-    |> Enum.max(DateTime)
+    |> Enum.max(DateTime, fn -> nil end)
   end
+
+  defp cooldown_end(%DateTime{} = ends, observed),
+    do: if(DateTime.compare(ends, observed) == :gt, do: ends)
+
+  defp cooldown_end(_ends, _observed), do: nil
 
   defp overdue?(nil, _now), do: false
   defp overdue?(overdue_at, now), do: DateTime.compare(now, overdue_at) != :lt
