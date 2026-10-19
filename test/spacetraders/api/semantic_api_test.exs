@@ -137,4 +137,78 @@ defmodule SpaceTraders.API.SemanticAPITest do
     # Governor rounds a fractional-second duration up conservatively.
     assert DateTime.diff(guided, Clock.utc_now(), :second) == 10
   end
+
+  test "different governed HTTP subjects retain distinct ordering hints across retries" do
+    alias SpaceTraders.Evidence.Demand
+    CapacityGovernor.protocol_rejected(1)
+
+    low = %Demand{
+      subject: "market:X1-TEST:A",
+      required_facts: ["response"],
+      owner: "test",
+      strategic_priority: 2
+    }
+
+    high = %{low | subject: "market:X1-TEST:B", strategic_priority: 1}
+    assert {:error, :capacity_unavailable} = API.get_market(nil, "X1-TEST", "A", demand: low)
+    assert {:error, :capacity_unavailable} = API.get_market(nil, "X1-TEST", "B", demand: high)
+    assert %{deferred: %{standard: %{count: 2}}} = CapacityGovernor.diagnostics()
+
+    Req.Test.stub(API, fn conn ->
+      assert String.ends_with?(conn.request_path, "/B/market")
+      Req.Test.json(conn, %{"data" => %{}})
+    end)
+
+    TestClock.advance(1)
+    assert {:error, :capacity_unavailable} = API.get_market(nil, "X1-TEST", "A", demand: low)
+    assert %{in_flight: 0, deferred: %{standard: %{count: 2}}} = CapacityGovernor.diagnostics()
+    assert {:ok, _} = API.get_market(nil, "X1-TEST", "B", demand: high)
+  end
+
+  test "a failed durable rejection write cannot erase an actual HTTP 429 pressure window" do
+    alias SpaceTraders.MutationAttempts
+    import SpaceTraders.AgentFixtures
+    import SpaceTraders.RecordedDispatchFixtures
+    agent = operator_fixture() |> agent_fixture()
+
+    %{attempt: attempt} =
+      prepare_action(agent, "PRESSURE", %{
+        "kind" => "orbit",
+        "waypoint" => "X1-TEST-A1",
+        "expected" => %{"status" => "IN_ORBIT"}
+      })
+
+    parent = self()
+
+    Req.Test.stub(API, fn conn ->
+      assert conn.method == "POST"
+      send(parent, :throttled_mutation)
+      # A competing durable writer retains uncertainty while HTTP is in flight.
+      # The API's subsequent rejected write must roll back at the public ledger
+      # boundary, without hiding the protocol response from other callers.
+      assert {:ok, _} =
+               MutationAttempts.record_outcome(attempt, :ambiguous, %{reason: "competing writer"})
+
+      conn
+      |> Plug.Conn.put_resp_header("retry-after", "5")
+      |> Plug.Conn.send_resp(
+        429,
+        Jason.encode!(%{"error" => %{"code" => 429, "message" => "limited"}})
+      )
+    end)
+
+    assert {:error, %API.Error{}} = API.dispatch_recorded(attempt)
+    assert_receive :throttled_mutation
+    assert %{state: "ambiguous", retry_authorized: false} = MutationAttempts.get!(attempt.id)
+    assert %{protocol_rejections: 1, in_flight: 0} = CapacityGovernor.diagnostics()
+    Req.Test.stub(API, fn _ -> flunk("actual Retry-After must suppress all additional HTTP") end)
+    assert {:error, :capacity_unavailable} = API.get_status()
+    TestClock.advance(4_999, :millisecond)
+    assert {:error, :capacity_unavailable} = API.get_status()
+    refute_received :throttled_mutation
+    TestClock.advance(1, :millisecond)
+    Req.Test.stub(API, &Req.Test.json(&1, %{"status" => "online"}))
+    assert {:ok, _} = API.get_status()
+    assert %{state: "ambiguous", retry_authorized: false} = MutationAttempts.get!(attempt.id)
+  end
 end

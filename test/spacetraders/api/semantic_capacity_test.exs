@@ -114,17 +114,185 @@ defmodule SpaceTraders.API.SemanticCapacityTest do
     assert now == Clock.utc_now()
   end
 
-  defp await_queue(name, remaining \\ 1_000)
-  defp await_queue(_name, 0), do: flunk("admission never queued")
+  test "queued native admission re-wakes for later overlapping outage and Retry-After boundaries" do
+    name = :overlapping_outage_governor
+    start_supervised!({CapacityGovernor, name: name, probe_base_ms: 1_000})
 
-  defp await_queue(name, remaining) do
-    case CapacityGovernor.diagnostics(name).deferred do
-      %{standard: %{count: 1}} ->
-        :ok
+    for id <- ["get-market", "get-my-ship"] do
+      {:ok, admission} = CapacityGovernor.admit(OperationInventory.fetch!(id), %{}, name)
+      CapacityGovernor.complete(admission, 503, name)
+    end
 
-      _ ->
-        Process.sleep(1)
-        await_queue(name, remaining - 1)
+    CapacityGovernor.protocol_rejected(5, name)
+    operation = OperationInventory.fetch!("get-status")
+    caller = Task.async(fn -> CapacityGovernor.admit(operation, %{}, name) end)
+    await_queue(name)
+    assert TestClock.next_due_at() == ~U[2026-10-19 00:00:01.000000Z]
+    TestClock.advance(1)
+    assert %{in_flight: 0} = CapacityGovernor.diagnostics(name)
+    assert Task.yield(caller, 0) == nil
+    assert TestClock.next_due_at() == ~U[2026-10-19 00:00:05.000000Z]
+    TestClock.advance(3_999, :millisecond)
+    assert Task.yield(caller, 0) == nil
+    TestClock.advance(1, :millisecond)
+    assert {:ok, admission} = Task.await(caller)
+    CapacityGovernor.complete(admission, 200, name)
+  end
+
+  test "queued native admission re-wakes for a scoped boundary after protocol pressure releases" do
+    name = :overlapping_scoped_governor
+    start_supervised!({CapacityGovernor, name: name, probe_base_ms: 5_000})
+    operation = OperationInventory.fetch!("get-market")
+    {:ok, failed} = CapacityGovernor.admit(operation, %{}, name)
+    CapacityGovernor.complete(failed, 503, name)
+    CapacityGovernor.protocol_rejected(1, name)
+    caller = Task.async(fn -> CapacityGovernor.admit(operation, %{}, name) end)
+    await_queue(name)
+    assert TestClock.next_due_at() == ~U[2026-10-19 00:00:01.000000Z]
+    TestClock.advance(1)
+    assert %{in_flight: 0} = CapacityGovernor.diagnostics(name)
+    assert Task.yield(caller, 0) == nil
+    assert TestClock.next_due_at() == ~U[2026-10-19 00:00:05.000000Z]
+    TestClock.advance(4)
+    assert {:ok, admission} = Task.await(caller)
+    CapacityGovernor.complete(admission, 200, name)
+  end
+
+  test "deferred semantic competitors keep governor ordering instead of retry callback order" do
+    name = :ordered_semantic_governor
+    start_supervised!({CapacityGovernor, name: name, max_in_flight: 1})
+    operation = OperationInventory.fetch!("get-status")
+    {:ok, held} = CapacityGovernor.admit(operation, %{}, name)
+    # Register worst-first. Protection, priority, deadline and value each beat
+    # the order in which callbacks later ask to consume the free slot.
+    [low, low_value, high_value, deadline, recovery] =
+      competitors = [
+        %{request_key: :low, strategic_priority: 2, expected_value: 1000},
+        %{request_key: :low_value, strategic_priority: 1, expected_value: 10},
+        %{request_key: :high_value, strategic_priority: 1, expected_value: 20},
+        %{request_key: :deadline, strategic_priority: 1, deadline_at: ~U[2026-10-19 00:01:00Z]},
+        %{request_key: :recovery, purpose: :recovery}
+      ]
+
+    for attrs <- competitors do
+      assert {:defer, _} = CapacityGovernor.try_admit(operation, attrs, name)
+    end
+
+    CapacityGovernor.complete(held, 200, name)
+
+    for {winner, waiting} <- [
+          {recovery, [low, low_value, high_value, deadline]},
+          {deadline, [low, low_value, high_value]},
+          {high_value, [low, low_value]},
+          {low_value, [low]},
+          {low, []}
+        ] do
+      assert %{in_flight: 0} = CapacityGovernor.diagnostics(name)
+
+      for attrs <- waiting do
+        assert {:defer, _} = CapacityGovernor.try_admit(operation, attrs, name)
+      end
+
+      assert {:ok, admission} = CapacityGovernor.try_admit(operation, winner, name)
+      assert admission.requested_at == ~U[2026-10-19 00:00:00.000000Z]
+      assert %{in_flight: 1} = CapacityGovernor.diagnostics(name)
+      CapacityGovernor.complete(admission, 200, name)
+    end
+
+    assert %{deferred: %{}} = CapacityGovernor.diagnostics(name)
+  end
+
+  test "pending demand deduplicates, renews, keeps FIFO and can be cancelled without holding capacity" do
+    name = :pending_lifecycle_governor
+    start_supervised!({CapacityGovernor, name: name, max_in_flight: 1})
+    operation = OperationInventory.fetch!("get-status")
+    {:ok, held} = CapacityGovernor.admit(operation, %{}, name)
+    first = %{request_key: :first}
+    second = %{request_key: :second}
+    for _ <- 1..3, do: assert({:defer, _} = CapacityGovernor.try_admit(operation, first, name))
+    assert {:defer, _} = CapacityGovernor.try_admit(operation, second, name)
+    assert %{deferred: %{standard: %{count: 2}}} = CapacityGovernor.diagnostics(name)
+    TestClock.advance(64)
+    assert {:defer, _} = CapacityGovernor.try_admit(operation, first, name)
+    CapacityGovernor.complete(held, 200, name)
+    assert {:defer, _} = CapacityGovernor.try_admit(operation, second, name)
+    assert %{in_flight: 0} = CapacityGovernor.diagnostics(name)
+    assert :ok = CapacityGovernor.cancel_pending(operation, first, name)
+    assert {:ok, winner} = CapacityGovernor.try_admit(operation, second, name)
+    assert winner.requested_at == ~U[2026-10-19 00:00:00.000000Z]
+    CapacityGovernor.complete(winner, 200, name)
+    assert %{deferred: %{}} = CapacityGovernor.diagnostics(name)
+    assert TestClock.next_due_at() == nil
+  end
+
+  test "abandoned pending demand expires and releases native queued work without a phantom admission" do
+    name = :pending_expiry_governor
+    start_supervised!({CapacityGovernor, name: name, max_in_flight: 1})
+    operation = OperationInventory.fetch!("get-status")
+    {:ok, held} = CapacityGovernor.admit(operation, %{}, name)
+    assert {:defer, _} = CapacityGovernor.try_admit(operation, %{purpose: :recovery}, name)
+    CapacityGovernor.complete(held, 200, name)
+    caller = Task.async(fn -> CapacityGovernor.admit(operation, %{}, name) end)
+    await_queue(name, 2)
+    assert %{in_flight: 0, admitted_capacity: 1} = CapacityGovernor.diagnostics(name)
+    TestClock.advance(64_999, :millisecond)
+    assert Task.yield(caller, 0) == nil
+    TestClock.advance(1, :millisecond)
+    assert {:ok, admission} = Task.await(caller)
+    assert admission.lane == :standard
+    assert %{deferred: %{}} = CapacityGovernor.diagnostics(name)
+  end
+
+  test "owner death discards pending priority and governor restart never replays pending demand" do
+    name = :pending_death_governor
+    start_supervised!({CapacityGovernor, name: name, max_in_flight: 1})
+    operation = OperationInventory.fetch!("get-status")
+    {:ok, held} = CapacityGovernor.admit(operation, %{}, name)
+    parent = self()
+
+    owner =
+      Task.async(fn ->
+        send(
+          parent,
+          {:deferred_owner, CapacityGovernor.try_admit(operation, %{purpose: :recovery}, name)}
+        )
+
+        receive do: (:stop -> :ok)
+      end)
+
+    assert_receive {:deferred_owner, {:defer, _}}
+    assert {:defer, _} = CapacityGovernor.try_admit(operation, %{}, name)
+    CapacityGovernor.complete(held, 200, name)
+    assert {:defer, _} = CapacityGovernor.try_admit(operation, %{}, name)
+    Task.shutdown(owner, :brutal_kill)
+    await_queue(name)
+    assert {:ok, admission} = CapacityGovernor.try_admit(operation, %{}, name)
+    assert {:defer, _} = CapacityGovernor.try_admit(operation, %{request_key: :stale}, name)
+    stop_supervised!(CapacityGovernor)
+    start_supervised!({CapacityGovernor, name: name, max_in_flight: 1})
+    CapacityGovernor.complete(admission, 200, name)
+
+    assert %{deferred: %{}, in_flight: 0, admitted_capacity: 1} =
+             CapacityGovernor.diagnostics(name)
+
+    assert {:ok, _} = CapacityGovernor.try_admit(operation, %{}, name)
+  end
+
+  defp await_queue(name, count \\ 1, remaining \\ 1_000)
+  defp await_queue(_name, _count, 0), do: flunk("admission never queued")
+
+  defp await_queue(name, count, remaining) do
+    queued =
+      CapacityGovernor.diagnostics(name).deferred
+      |> Map.values()
+      |> Enum.map(& &1.count)
+      |> Enum.sum()
+
+    if queued == count do
+      :ok
+    else
+      Process.sleep(1)
+      await_queue(name, count, remaining - 1)
     end
   end
 end

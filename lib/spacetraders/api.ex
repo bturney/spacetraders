@@ -365,7 +365,7 @@ defmodule SpaceTraders.API do
     # Observe before waiting for capacity so shadow queue_time spans the real
     # limiter wait. Recorded and legacy dispatch recheck authorization at send.
     # Missing governor authority fails closed before any transport.
-    case admit_capacity(operation, opts) do
+    case admit_capacity(operation, path, token, opts) do
       {:ok, capacity} ->
         case acquire_protocol() do
           :ok ->
@@ -397,17 +397,30 @@ defmodule SpaceTraders.API do
     {operation, ShadowAdmission.observe_request(operation, admission_attrs(opts))}
   end
 
-  defp admit_capacity(operation, opts) do
+  defp admit_capacity(operation, path, token, opts) do
     # A semantic-time owner must return to its durable continuation rather than
     # block the drain in an admission queue or a transport retry sleep.
     if semantic_time?() do
-      case CapacityGovernor.try_admit(operation, admission_attrs(opts)) do
+      attrs = Map.put(admission_attrs(opts), :request_key, pending_request_key(path, token, opts))
+
+      case CapacityGovernor.try_admit(operation, attrs) do
         {:defer, _disposition} -> {:error, :capacity_unavailable}
         result -> result
       end
     else
       CapacityGovernor.admit(operation, admission_attrs(opts))
     end
+  end
+
+  # Pending ranking must distinguish HTTP subjects/bodies and selected attempts,
+  # but must never retain a raw credential or payload in governor diagnostics.
+  defp pending_request_key(path, token, opts) do
+    attempt_id = opts[:recorded_attempt] && opts[:recorded_attempt].id
+
+    :crypto.hash(
+      :sha256,
+      :erlang.term_to_binary({path, token, opts[:json], opts[:params], attempt_id})
+    )
   end
 
   defp acquire_protocol do
@@ -551,6 +564,13 @@ defmodule SpaceTraders.API do
       {:ok, %{status: status, body: body} = response} when status in 400..499 ->
         emit_request_metric(operation, path, status)
 
+        # This is a real transport response, independently of whether its
+        # durable outcome write succeeds. Suppressed dispatch has no response
+        # and never reaches here. Native transparent retries report in the hook.
+        if status == 429 and (semantic_time?() or opts[:retry] == false) do
+          report_protocol_rejection(retry_after_delay(response))
+        end
+
         evidence =
           case attempt do
             %Attempt{operation_id: "register"} ->
@@ -564,15 +584,6 @@ defmodule SpaceTraders.API do
           :ok ->
             case mutation_authorized_after_response(status, method, token) do
               :ok ->
-                # A still-authorized protocol rejection is a real capacity signal.
-                # Our own suppression is not, so the Governor never records a
-                # Retry-After window for a request it did not have to run.
-                # Requests that do not retry never reach the transport retry
-                # hook, which reports every retried rejection itself.
-                if status == 429 and (semantic_time?() or opts[:retry] == false) do
-                  report_protocol_rejection(retry_after_delay(response))
-                end
-
                 complete_shadow(
                   shadow,
                   capacity,

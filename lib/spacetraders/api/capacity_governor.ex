@@ -122,6 +122,9 @@ defmodule SpaceTraders.API.CapacityGovernor do
   @max_retry_after_seconds 60
   @rejection_window_ms 60_000
   @reconsider_seconds 1
+  # A ranking hint must not outlive an owner that stopped retrying. Longer than
+  # the existing durable Capacity Deferral's maximum 60-second reconsideration.
+  @pending_lifetime_ms 65_000
   @protection_rank %{safety: 0, reconciliation: 1, deadline_critical: 2, standard: 3}
   @test_disabled_allowed Application.compile_env(
                            :spacetraders,
@@ -168,13 +171,24 @@ defmodule SpaceTraders.API.CapacityGovernor do
     end
   end
 
-  @doc "Atomic live admission without blocking a semantic-time owner. Deferral reserves nothing."
+  @doc """
+  Nonblocking ordered admission. Deferred demand retains its place, not a slot.
+
+  Retries by the same caller, operation and optional opaque `:request_key`
+  refresh the pending demand without duplicating it. Only a fresh owner recheck
+  can consume capacity. Cancellation, owner death, restart or 65 seconds without
+  a recheck discard this process-local ranking hint, never its durable owner.
+  """
   def try_admit(%Operation{} = operation, attrs \\ %{}, name \\ __MODULE__) do
     case capacity_call(name, {:try_admit, operation, attrs}) do
       :test_disabled -> {:ok, nil}
       result -> result
     end
   end
+
+  @doc "Withdraws this caller's pending ranking hint; never cancels an in-flight admission."
+  def cancel_pending(%Operation{} = operation, attrs \\ %{}, name \\ __MODULE__),
+    do: capacity_call(name, {:cancel_pending, operation, attrs})
 
   # The test-only bypass is a distinct, compile-time path; missing production
   # authority never borrows it. Calls racing governor shutdown fail closed.
@@ -274,16 +288,57 @@ defmodule SpaceTraders.API.CapacityGovernor do
     do: NavigationParticipant.work(fn -> handle_capacity_call(message, from, state) end)
 
   defp handle_capacity_call({:try_admit, operation, attrs}, {caller, _} = from, state) do
-    case interpret(%{operation: operation, attrs: attrs}, state) do
-      %Disposition{status: :proceed} ->
-        request = request(operation, attrs, caller, from, state)
-        # Reuse the same ordering/admission path and reply exactly once.
-        state = %{state | sequence: request.sequence}
-        {:noreply, state |> admit_request(request) |> schedule_reconsideration()}
+    key = pending_key(operation, attrs, caller)
+    pending = Enum.find(state.queue, &(&1.pending_key == key))
+    request = pending || request(operation, attrs, caller, from, state)
 
-      disposition ->
-        {:reply, {:defer, disposition}, schedule_reconsideration(state)}
+    request = %{
+      request
+      | from: from,
+        attrs: attrs,
+        pending_key: key,
+        expires_at: DateTime.add(now(state), @pending_lifetime_ms, :millisecond)
+    }
+
+    state =
+      dispatch(%{
+        state
+        | queue: [request | List.delete(state.queue, pending)],
+          sequence: max(state.sequence, request.sequence)
+      })
+
+    if Map.has_key?(state.in_flight, request.id) do
+      # dispatch replied through the same path used by native queued callers.
+      {:noreply, state}
+    else
+      disposition = interpret(request, state)
+
+      disposition =
+        if disposition.status == :proceed do
+          %{
+            disposition
+            | status: :defer,
+              reason: :contention,
+              retry_at: DateTime.add(now(state), @reconsider_seconds, :second)
+          }
+        else
+          disposition
+        end
+
+      queue =
+        Enum.map(state.queue, fn queued ->
+          if queued.id == request.id, do: %{queued | from: nil}, else: queued
+        end)
+
+      {:reply, {:defer, disposition}, %{state | queue: queue}}
     end
+  end
+
+  defp handle_capacity_call({:cancel_pending, operation, attrs}, {caller, _}, state) do
+    key = pending_key(operation, attrs, caller)
+    {cancelled, queue} = Enum.split_with(state.queue, &(&1.pending_key == key))
+    Enum.each(cancelled, &Process.demonitor(&1.monitor, [:flush]))
+    {:reply, :ok, dispatch(%{state | queue: queue})}
   end
 
   defp handle_capacity_call({:disposition, operation, attrs}, _from, state) do
@@ -395,6 +450,8 @@ defmodule SpaceTraders.API.CapacityGovernor do
   defp request(operation, attrs, caller, from, state) do
     %{
       from: from,
+      pending_key: nil,
+      expires_at: nil,
       monitor: Process.monitor(caller),
       operation: operation,
       attrs: attrs,
@@ -404,6 +461,9 @@ defmodule SpaceTraders.API.CapacityGovernor do
       sequence: state.sequence + 1
     }
   end
+
+  defp pending_key(operation, attrs, caller),
+    do: {caller, operation.id, Map.get(attrs, :request_key)}
 
   defp record_outcome(state, request, status)
        when status in 200..299 or (status in 400..499 and status != 429) do
@@ -526,6 +586,14 @@ defmodule SpaceTraders.API.CapacityGovernor do
   # Admits the best eligible request one at a time: each admission can change
   # what the policy allows next (a probe in flight, contention).
   defp dispatch(state) do
+    {expired, queue} =
+      Enum.split_with(state.queue, fn request ->
+        request.expires_at && not future?(request.expires_at, now(state))
+      end)
+
+    Enum.each(expired, &Process.demonitor(&1.monitor, [:flush]))
+    state = %{state | queue: queue}
+
     state.queue
     |> Enum.sort_by(&ordering_key/1)
     |> Enum.find(&(interpret(&1, state).status == :proceed))
@@ -534,6 +602,9 @@ defmodule SpaceTraders.API.CapacityGovernor do
       # opened needs its own reconsideration, or it would wait for a timer
       # that already fired.
       nil -> schedule_reconsideration(state)
+      # An idle semantic owner has priority, not permission to send or a held
+      # slot. Lower-ranked callbacks/native callers cannot race ahead of it.
+      %{from: nil} -> schedule_reconsideration(state)
       request -> state |> admit_request(request) |> dispatch()
     end
   end
@@ -584,7 +655,8 @@ defmodule SpaceTraders.API.CapacityGovernor do
   defp schedule_reconsideration(state) do
     # Only a real policy boundary is future work. Contention and an in-flight
     # probe need completion/owner death, not one-second polling or a false lease
-    # to advance past unresolved transport. Global pressure supersedes families.
+    # to advance past unresolved transport. Independent pressure windows compose:
+    # an expired global boundary must not hide a later family/protocol boundary.
     retry_at =
       release_times(state)
       |> Enum.reject(&is_nil/1)
@@ -609,28 +681,27 @@ defmodule SpaceTraders.API.CapacityGovernor do
     end
   end
 
-  defp release_times(%{outage: %{probe_at: at}} = state),
-    do: if(probe_in_flight?(state, :outage), do: [], else: [at])
-
-  defp release_times(%{backpressure_streak: streak} = state) when streak > 0 do
-    if probe_in_flight?(state, :protocol) do
-      []
-    else
-      [state.pressure_probe_at, state.ordinary_delayed_until]
-      |> Enum.reject(&is_nil/1)
-      |> Enum.max(DateTime, fn -> nil end)
-      |> List.wrap()
-    end
-  end
-
   defp release_times(state) do
-    if future?(state.ordinary_delayed_until, now(state)) do
-      [state.ordinary_delayed_until]
-    else
+    outage = if state.outage && not probe_in_flight?(state, :outage), do: state.outage.probe_at
+    pressure = if not probe_in_flight?(state, :protocol), do: state.pressure_probe_at
+    global = [outage, pressure, state.ordinary_delayed_until]
+    global_boundary = global |> Enum.reject(&is_nil/1) |> Enum.max(DateTime, fn -> nil end)
+
+    scoped =
       Enum.flat_map(state.failures, fn {family, failure} ->
-        if probe_in_flight?(state, {:scoped, family}), do: [], else: [failure.probe_at]
+        blocked =
+          probe_in_flight?(state, :outage) or probe_in_flight?(state, :protocol) or
+            probe_in_flight?(state, {:scoped, family})
+
+        if blocked or (global_boundary && not DateTime.after?(failure.probe_at, global_boundary)),
+          do: [],
+          else: [failure.probe_at]
       end)
-    end
+
+    expiries =
+      if map_size(state.in_flight) == 0, do: Enum.map(state.queue, & &1.expires_at), else: []
+
+    global ++ scoped ++ expiries
   end
 
   # The one policy both advisory disposition and live dispatch apply.
