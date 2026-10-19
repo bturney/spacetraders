@@ -6,7 +6,6 @@ defmodule SpaceTradersWeb.EntityLiveTest do
 
   alias SpaceTraders.Agent.Agent, as: AgentRecord
   alias SpaceTraders.Evidence.Observation
-  alias SpaceTraders.Fleet.Ship
   alias SpaceTraders.Repo
 
   setup :register_and_log_in_operator
@@ -21,13 +20,13 @@ defmodule SpaceTradersWeb.EntityLiveTest do
 
     for selector <- ["invalid", "999999999"] do
       assert {:error, {:live_redirect, %{to: "/world", flash: flash}}} =
-               live(conn, "/ships/ATLAS-1?generation=#{selector}")
+               live(conn, "/world/systems/X1?generation=#{selector}")
 
       assert flash["error"] == "Historical Generation evidence is unavailable."
     end
   end
 
-  test "renders Ship and Contract pages from existing governed evidence without game reads", %{
+  test "renders the Contract page from existing governed evidence without game reads", %{
     conn: conn,
     operator: operator
   } do
@@ -38,15 +37,6 @@ defmodule SpaceTradersWeb.EntityLiveTest do
         faction: "COSMIC",
         headquarters: "X1-A1"
       })
-
-    Repo.insert!(%Ship{agent_id: agent.id, symbol: "ATLAS-1", ship_type: "SHIP_PROBE"})
-
-    observation!(agent, "ship:ATLAS-1", "get-my-ship", %{
-      "response" => %{
-        "symbol" => "ATLAS-1",
-        "nav" => %{"systemSymbol" => "X1", "waypointSymbol" => "X1-A1", "status" => "IN_ORBIT"}
-      }
-    })
 
     observation!(agent, "contracts:ATLAS", "get-contracts", %{
       "response" => [
@@ -71,20 +61,6 @@ defmodule SpaceTradersWeb.EntityLiveTest do
     Req.Test.stub(SpaceTraders.API, fn _conn ->
       flunk("Entity pages must not request gameplay")
     end)
-
-    {:ok, ship_view, ship_html} = live(conn, "/ships/ATLAS-1")
-    assert has_element?(ship_view, "#ship-ATLAS-1", "Ship ATLAS-1")
-    assert ship_html =~ "SHIP_PROBE"
-    assert ship_html =~ "IN_ORBIT"
-    assert ship_html =~ "Last observed status"
-    assert ship_html =~ "Stale"
-    assert ship_html =~ "2026-09-27 12:00 UTC"
-
-    assert has_element?(
-             ship_view,
-             "a[href='/world/systems/X1/waypoints/X1-A1']",
-             "X1-A1"
-           )
 
     {:ok, contract_view, contract_html} = live(conn, "/contracts/CONTRACT-1")
     assert has_element?(contract_view, "#contract-CONTRACT-1", "Contract CONTRACT-1")
