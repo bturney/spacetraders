@@ -35,6 +35,35 @@ defmodule SpaceTraders.Simulation.NativeBootstrapTest do
     assert_raise ArgumentError, fn -> NativeBootstrap.configuration(invalid) end
   end
 
+  test "transaction fixture observation is explicit and rejects unknown proof selectors" do
+    transaction = Map.put(manifest(), "proof", "paid_transaction")
+
+    assert Keyword.fetch!(NativeBootstrap.configuration(transaction), :native_bootstrap) ==
+             transaction
+
+    assert_raise ArgumentError, fn ->
+      NativeBootstrap.configuration(Map.put(manifest(), "proof", "invented_gameplay"))
+    end
+  end
+
+  test "navigation tracer stays distinct from the optional native paid observer" do
+    tracer = Map.put(manifest(), "schema", "navigation-tracer/v1")
+    config = NativeBootstrap.configuration(tracer)
+
+    assert Keyword.fetch!(config, :native_bootstrap) == tracer
+    assert Keyword.fetch!(config, :clock) == SpaceTraders.Simulation.NavigationClock
+
+    for proof <- ["paid_transaction", "invented_gameplay"] do
+      assert_raise ArgumentError, fn ->
+        NativeBootstrap.configuration(Map.put(tracer, "proof", proof))
+      end
+    end
+
+    native = NativeBootstrap.configuration(manifest())
+    assert Keyword.fetch!(native, :native_bootstrap) == manifest()
+    refute Keyword.has_key?(native, :clock)
+  end
+
   test "immutable command seam rejects unsupported manifests without booting" do
     {output, status} =
       System.cmd(
