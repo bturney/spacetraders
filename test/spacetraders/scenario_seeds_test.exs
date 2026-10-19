@@ -51,6 +51,20 @@ defmodule SpaceTraders.ScenarioSeedsTest do
     assert counts == %{trading: 108, scouting: 12}
   end
 
+  test "a seeded Fleet never runs: boot re-arms no Ship of it" do
+    on_exit(&SpaceTraders.Quiesced.stop_all_ships/0)
+    ScenarioSeeds.seed(:stuck, 2)
+
+    assert SpaceTraders.Fleet.Intents.rearm_owned_intents_on_boot() == []
+  end
+
+  test "seeding refuses a database holding a Fleet it does not own" do
+    SpaceTraders.AgentFixtures.operator_fixture()
+
+    assert_raise ArgumentError, ~r/not seed-owned/, fn -> ScenarioSeeds.seed(:healthy, 2) end
+    assert_raise ArgumentError, ~r/not seed-owned/, &ScenarioSeeds.clear!/0
+  end
+
   defp assert_status(status, nil, symbol),
     do: assert(status.kind in [:trading, :scouting], "#{symbol}: #{inspect(status.kind)}")
 

@@ -15,7 +15,7 @@ export CHROMIUM="${CHROMIUM:-$(ls ~/.cache/ms-playwright/chromium_headless_shell
 export BASE_URL="${BASE_URL:-http://127.0.0.1:${PORT:-4000}}"
 export PHX_SERVER=true
 
-# A seed left in the database would boot Ship servers that call the game.
+# Start from a clean seed (the seeded Agent has no game credential, so it never runs).
 mix spacetraders.seed --clear >/dev/null
 
 exec mix run dev/glance_check.exs
