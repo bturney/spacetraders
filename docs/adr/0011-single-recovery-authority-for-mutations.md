@@ -30,13 +30,13 @@ Consequences:
 - When a new mutation owner is added, it reuses this authority rather than
   extending the pattern that preceded it.
 
-Bounded deviation (issue 662): Market trade progress
-(`SpaceTraders.FleetAllocation.TradeProgress`) reads transaction receipts from
+Bounded deviation (issue 662): Earnings records
+(`SpaceTraders.Outcomes.Earnings`, built from trade Commitments) read transaction receipts from
 the completed buy/sell Intent's `last_action_result`, because a succeeded
 `purchase-cargo`/`sell-cargo` attempt outcome retains only status and nav
 evidence, not the transaction. The Intent is completed only after its attempt is
 reconciled, and each receipt carries the Intent's `mutation_attempt_id` as the
-link. The projection is re-derived on every read and never decides recovery.
+link. The record is derived from completed Intents and never decides recovery.
 Retaining the transaction in the attempt outcome would remove the deviation.
 Supporting refuel/jump charges (issue 689) need no deviation: each is the
 attempt's own Credit Calibration Realization, joined to its issuing root Intent
