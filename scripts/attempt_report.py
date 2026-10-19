@@ -90,6 +90,9 @@ def investigate(bundle):
                 for attempt in attempts:
                     owners = linked(attempt, 'intents', {'provenance.intent_id'})
                     evidence.require(not owners or owners == [intent], 'contradictory mutation root ownership')
+                    issuing_commitments = linked(attempt, 'fleet_commitments', {'provenance.commitment_id'})
+                    evidence.require(not issuing_commitments or issuing_commitments == [commitment],
+                                     'contradictory mutation root ownership')
                 outcomes = {outcome for attempt in attempts for outcome in
                             linked(attempt, 'mutation_attempt_outcomes', {'mutation_attempt_id'})}
                 observations = set()

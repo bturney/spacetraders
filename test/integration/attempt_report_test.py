@@ -171,6 +171,25 @@ class ReportTest(unittest.TestCase):
                     self.assertEqual(report["economics"]["episode_projections"][0][metric], expected)
                 self.assertIsNone(report["economics"]["net_earnings"]["amount"])
 
+    def test_current_and_retry_attempts_reject_conflicting_commitment_without_intent_provenance(self):
+        for route, attempt_index in [("current_pointer", 1), ("retry_traversal", 0)]:
+            with self.subTest(route=route), tempfile.TemporaryDirectory() as directory:
+                meta, sections = poor_attempt()
+                tables = sections["database"]["data"]["tables"]
+                other = copy.deepcopy(tables["fleet_commitments"][0])
+                other["id"] = 44
+                tables["fleet_commitments"].append(other)
+                tables["mutation_attempts"][attempt_index]["provenance"] = {"commitment_id": 44}
+                sections["database"]["data"] = export.database_document(tables, {}, "authored", {"database": "sim_authored"})
+                root = Path(directory)
+                export.publish(meta, sections, root / "bundle.zip")
+                original = (root / "bundle.zip").read_bytes()
+                result = self.command(root / "bundle.zip", root / "report")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("invalid, broken or unavailable evidence", result.stderr)
+                self.assertFalse((root / "report").exists())
+                self.assertEqual((root / "bundle.zip").read_bytes(), original)
+
     def test_incomplete_capture_with_a_retained_path_is_partial_and_receipt_absence_is_visible(self):
         meta, sections = poor_attempt()
         sections["world"] = {"identity": meta["identity"], "status": "not_captured", "reason": "capture interrupted"}
