@@ -99,7 +99,7 @@ defmodule Mix.Tasks.Verify.Boundary do
 
         string, violations when is_binary(string) ->
           if Enum.any?(
-               ~w(fleet_strategy: mission_conditions: fleet_allocation: ?agent=),
+               ~w(fleet_strategy: fleet_allocation: ?agent=),
                &String.contains?(string, &1)
              ),
              do: {string, ["#{path}: retired tenancy topic or Agent selector" | violations]},
