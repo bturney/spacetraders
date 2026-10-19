@@ -62,26 +62,41 @@ defmodule SpaceTraders.Fleet do
       Phoenix.PubSub.broadcast(SpaceTraders.PubSub, "intent_changes", {:intent_changed, ship_id})
 
   @doc """
-  Current Ships of an Agent with their stored state and Cargo, ordered by name.
-  Reads only the database.
+  Current Ships of an Agent with their stored state and Cargo, in natural name
+  order (`AGENT-2` before `AGENT-10`). Reads only the database.
   """
   def current_ships(agent_id) when is_integer(agent_id) do
     from(ship in Ship,
       where: ship.agent_id == ^agent_id and is_nil(ship.retired_at),
-      order_by: [asc: ship.symbol],
       preload: [:cargo]
     )
     |> Repo.all()
+    |> Enum.sort_by(&name_order(&1.symbol))
   end
 
   @doc "The given current Ships of an Agent, as `current_ships/1` reads them."
   def current_ships(agent_id, ship_ids) when is_integer(agent_id) and is_list(ship_ids) do
     from(ship in Ship,
       where: ship.agent_id == ^agent_id and is_nil(ship.retired_at) and ship.id in ^ship_ids,
-      order_by: [asc: ship.symbol],
       preload: [:cargo]
     )
     |> Repo.all()
+    |> Enum.sort_by(&name_order(&1.symbol))
+  end
+
+  # The game numbers an Agent's Ships with a hexadecimal suffix (`-9`, `-A`,
+  # `-10`): order by prefix, then by that number.
+  defp name_order(symbol) do
+    {prefix, suffix} =
+      case symbol |> String.split("-") |> Enum.split(-1) do
+        {[], [only]} -> {"", only}
+        {parts, [last]} -> {Enum.join(parts, "-"), last}
+      end
+
+    case Integer.parse(suffix, 16) do
+      {n, ""} -> {prefix, 0, n, suffix}
+      _ -> {prefix, 1, 0, suffix}
+    end
   end
 
   @doc """

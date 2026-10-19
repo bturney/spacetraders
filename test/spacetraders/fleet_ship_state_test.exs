@@ -119,4 +119,14 @@ defmodule SpaceTraders.FleetShipStateTest do
     # Cargo the navigate response does not carry stays as last observed.
     assert cargo(ship) == %{"IRON_ORE" => 10}
   end
+
+  test "current Ships read in natural name order: AGENT-2 before AGENT-10" do
+    agent = operator_fixture() |> agent_fixture()
+    register(agent, ["AGENT-10", "AGENT-A", "AGENT-2", "AGENT-1", "BGENT-3"])
+    ids = Enum.map(Repo.all(Ship), & &1.id)
+
+    expected = ["AGENT-1", "AGENT-2", "AGENT-A", "AGENT-10", "BGENT-3"]
+    assert Enum.map(Fleet.current_ships(agent.id), & &1.symbol) == expected
+    assert Enum.map(Fleet.current_ships(agent.id, ids), & &1.symbol) == expected
+  end
 end
