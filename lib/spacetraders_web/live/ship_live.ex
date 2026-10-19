@@ -154,7 +154,9 @@ defmodule SpaceTradersWeb.ShipLive do
         </.card>
 
         <.card :if={@why.options != []} id="ship-options">
-          <.eyebrow>Options it had<:right>credits per Ship-hour</:right></.eyebrow>
+          <.eyebrow>
+            Options it had<:right>credits per Ship-hour</:right>
+          </.eyebrow>
           <div class="mt-2 space-y-1.5">
             <div :for={option <- @why.options} class="text-xs" data-chosen={to_string(option.chosen?)}>
               <div class="flex justify-between gap-2">
@@ -175,14 +177,18 @@ defmodule SpaceTradersWeb.ShipLive do
         </.card>
 
         <.card id="ship-history">
-          <.eyebrow>Last {length(@why.history)} trades<:right>expected vs actual</:right></.eyebrow>
+          <.eyebrow>
+            Last {length(@why.history)} trades<:right>expected vs actual</:right>
+          </.eyebrow>
           <p :if={@why.history == []} class="mt-1 text-xs text-dim">No completed trades yet.</p>
           <div :if={@why.history != []} class="mt-2 space-y-1.5">
             <div :for={trade <- @why.history} class="text-xs" id={"trade-#{trade.id}"}>
               <div class="flex justify-between gap-2">
                 <span>{trade_name(trade)}</span>
                 <span class="num text-dim">
-                  {format_signed(trade.actual)}<span :if={trade.expected}> vs {format_signed(trade.expected)}</span>
+                  {format_signed(trade.actual)}<span :if={trade.expected}> vs {format_signed(
+                    trade.expected
+                  )}</span>
                 </span>
               </div>
               <div class="relative h-2">

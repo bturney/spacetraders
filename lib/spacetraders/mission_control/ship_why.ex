@@ -155,7 +155,10 @@ defmodule SpaceTraders.MissionControl.ShipWhy do
   defp options(nil), do: []
 
   defp options(choice) do
-    [Map.put(choice, :chosen?, true) | Enum.map(choice.alternatives, &Map.put(&1, :chosen?, false))]
+    [
+      Map.put(choice, :chosen?, true)
+      | Enum.map(choice.alternatives, &Map.put(&1, :chosen?, false))
+    ]
     |> Enum.map(&Map.take(&1, [:good, :source, :destination, :net_credits, :rate, :chosen?]))
   end
 
