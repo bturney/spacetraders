@@ -33,18 +33,17 @@ defmodule SpaceTraders.MissionControl.ShipStatus do
   alias SpaceTraders.FleetAllocation.StrategyDecisionEpisode, as: Episode
   alias SpaceTraders.FleetGeneration.Generation
   alias SpaceTraders.Evidence.ObservationDemand
+  alias SpaceTraders.MissionControl.PlanHealth
   alias SpaceTraders.Outcomes.EarningsRecord
   alias SpaceTraders.Repo
 
   @statuses [:trading, :scouting, :waiting, :stuck, :busy_not_earning]
 
   # Prototype thresholds (spec #757); tuning them does not change the rules.
+  # The earning ratio and its windows are Plan Health's (`PlanHealth.thresholds/0`).
   @history_seconds 3600
   @skipped_buy_window_seconds 30 * 60
   @skipped_buys 3
-  @average_window_seconds 6 * 3600
-  @last_hour_seconds 3600
-  @earning_ratio 0.4
 
   @stall_reasons %{
     stale_revision_portfolio: "Allocation stalled: work belongs to an older Strategy revision",
@@ -84,13 +83,17 @@ defmodule SpaceTraders.MissionControl.ShipStatus do
     symbols = Enum.map(ships, & &1.symbol)
     scouting? = Enum.any?(symbols, &match?(%{coverage?: true}, assignments[&1]))
 
+    thresholds =
+      Map.take(PlanHealth.thresholds(), ~w(earning_ratio hour_seconds average_window_seconds)a)
+
     %{
+      thresholds: thresholds,
       assignments: assignments,
       intents: intents(ship_ids),
       neutral_wait: generation && neutral_wait(generation),
       stall: generation && stall(generation, portfolio),
       skipped: skipped_buys(ship_ids, now),
-      earnings: earnings(generation, symbols, now),
+      earnings: earnings(generation, symbols, now, thresholds),
       refreshed: if(scouting?, do: refreshed(Map.values(assignments)), else: %{}),
       overdue: if(scouting?, do: overdue_markets(agent, now), else: 0)
     }
@@ -168,11 +171,11 @@ defmodule SpaceTraders.MissionControl.ShipStatus do
     |> Map.new()
   end
 
-  defp earnings(nil, _symbols, _now), do: %{}
+  defp earnings(nil, _symbols, _now, _thresholds), do: %{}
 
-  defp earnings(%Generation{id: generation_id}, symbols, now) do
-    last_hour = DateTime.add(now, -@last_hour_seconds)
-    window = DateTime.add(now, -@average_window_seconds)
+  defp earnings(%Generation{id: generation_id}, symbols, now, thresholds) do
+    last_hour = DateTime.add(now, -thresholds.hour_seconds)
+    window = DateTime.add(now, -thresholds.average_window_seconds)
 
     from(r in EarningsRecord,
       where: r.fleet_generation_id == ^generation_id and r.ship_symbol in ^symbols,
@@ -246,7 +249,7 @@ defmodule SpaceTraders.MissionControl.ShipStatus do
     {status, details} =
       stuck(intent, assignment, facts.stall) ||
         waiting(assignment, facts.neutral_wait) ||
-        busy_not_earning(ship, facts.skipped[ship.id] || 0, earned, now) ||
+        busy_not_earning(ship, facts.skipped[ship.id] || 0, earned, facts.thresholds, now) ||
         working(assignment, intent, facts)
 
     base
@@ -298,7 +301,8 @@ defmodule SpaceTraders.MissionControl.ShipStatus do
 
   defp waiting(_assignment, _wait), do: nil
 
-  defp busy_not_earning(ship, skipped, earned, now) do
+  defp busy_not_earning(ship, skipped, earned, thresholds, now) do
+    %{earning_ratio: ratio, hour_seconds: hour, average_window_seconds: window} = thresholds
     history = DateTime.diff(now, ship.inserted_at)
 
     cond do
@@ -309,8 +313,8 @@ defmodule SpaceTraders.MissionControl.ShipStatus do
         {:busy_not_earning, %{phrase: "#{skipped} skipped buys in 30 min"}}
 
       true ->
-        hours = min(history, @average_window_seconds) / 3600
-        since = DateTime.to_unix(now) - min(history, @average_window_seconds)
+        hours = min(history, window) / hour
+        since = DateTime.to_unix(now) - min(history, window)
 
         window_net =
           for [at, net] <- earned[:records] || [], at >= since, reduce: 0, do: (sum -> sum + net)
@@ -318,7 +322,7 @@ defmodule SpaceTraders.MissionControl.ShipStatus do
         average = window_net / hours
         last_hour = earned[:last_hour] || 0
 
-        if last_hour < @earning_ratio * average do
+        if last_hour < ratio * average do
           {:busy_not_earning,
            %{
              phrase:

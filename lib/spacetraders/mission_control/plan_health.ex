@@ -81,6 +81,8 @@ defmodule SpaceTraders.MissionControl.PlanHealth do
       small_fleet: @small_fleet,
       loss_limit: @loss_limit,
       earning_ratio: @earning_ratio,
+      hour_seconds: @hour,
+      average_window_seconds: @average_window_seconds,
       busy_share: @busy_share,
       expected_ratio: @expected_ratio,
       recent_trades: @recent_trades,
