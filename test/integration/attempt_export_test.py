@@ -2,17 +2,13 @@
 import copy
 import base64
 import hashlib
-import importlib.util
 import json
 from pathlib import Path
 import tempfile
 import unittest
 import zipfile
 
-SCRIPT = Path(__file__).resolve().parents[2] / "scripts/attempt_export.py"
-spec = importlib.util.spec_from_file_location("attempt_export", SCRIPT)
-export = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(export)
+from scripts import attempt_export as export
 
 
 def fixture(kind="completed"):
