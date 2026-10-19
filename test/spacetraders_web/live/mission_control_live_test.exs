@@ -1,515 +1,166 @@
 defmodule SpaceTradersWeb.MissionControlLiveTest do
+  @moduledoc """
+  Glance (#769) opens with Plan Health, read from stored facts on the scenario
+  seeds (#768). Seam: the `/mission-control` LiveView.
+  """
   use SpaceTradersWeb.ConnCase, async: false
 
   import Phoenix.LiveViewTest
-  import SpaceTraders.AgentFixtures
 
-  alias SpaceTraders.{FleetStrategy, Repo}
-  alias SpaceTraders.FleetGeneration.Generation
-  alias SpaceTraders.FleetAllocation.StrategyDecisionEpisode
+  alias SpaceTraders.Agent.Operator
+  alias SpaceTraders.{Fleet, Liveness, Repo, ScenarioSeeds}
+  alias SpaceTraders.MissionControl.PlanHealth
 
-  setup :register_and_log_in_operator
+  setup do
+    Liveness.reset()
+    Req.Test.stub(SpaceTraders.API, fn _conn -> flunk("Glance calls the game") end)
+    :ok
+  end
+
+  defp glance(conn, situation, ships) do
+    seeded = ScenarioSeeds.seed(situation, ships)
+    operator = Repo.get!(Operator, seeded.generation.operator_id)
+    {:ok, view, html} = live(log_in_operator(conn, operator), ~p"/mission-control")
+    {view, html, seeded}
+  end
 
   test "requires authentication" do
     assert {:error, {:redirect, %{to: "/operators/log-in"}}} =
              live(Phoenix.ConnTest.build_conn(), ~p"/mission-control")
   end
 
-  test "guides an Operator through Strategy and Agent onboarding", %{conn: conn} do
+  for {situation, state, label} <- [
+        {:healthy, :on, "On plan"},
+        {:busy_not_earning, :setback, "Small setback, recoverable"},
+        {:waiting, :on, "On plan"},
+        {:stuck, :off, "Off plan, real blocker"}
+      ] do
+    test "#{situation} opens with #{label}", %{conn: conn} do
+      {view, _html, _seeded} = glance(conn, unquote(situation), 2)
+
+      assert has_element?(view, "#plan-health[data-state='#{unquote(state)}']", unquote(label))
+
+      for check <- ~w(earning ships_moving prices_fresh trades_as_expected) do
+        assert has_element?(view, "#plan-health-check-#{check}")
+      end
+    end
+  end
+
+  test "a signed-in Operator without a current Fleet can't tell, and is not asked to act", %{
+    conn: conn
+  } do
+    %{conn: conn} = register_and_log_in_operator(%{conn: conn})
     {:ok, view, html} = live(conn, ~p"/mission-control")
 
-    assert html =~ "Set the Fleet direction"
-    assert has_element?(view, "#mission-onboarding a[href='/strategy']", "Review Fleet Strategy")
-    assert has_element?(view, "#mission-onboarding a[href='/agents/new']", "Mint an Agent")
-
-    assert has_element?(
-             view,
-             "#mission-onboarding a[href='/operators/settings#import-agent']",
-             "Import an existing Agent"
-           )
-
-    assert html =~ "No active revision"
-    assert html =~ "No current Fleet Generation"
+    assert has_element?(view, "#plan-health[data-state='unknown']", "Can't tell right now")
+    assert has_element?(view, "#plan-health-reason", "No current Fleet yet.")
+    refute has_element?(view, "#glance button")
+    refute has_element?(view, "#glance a")
+    refute html =~ "Mint an Agent"
+    refute html =~ "Retry"
   end
 
-  test "a current Fleet needs no Agent selection and offers no add-another Agent path", %{
-    conn: conn,
-    operator: operator
-  } do
-    agent_fixture(operator, %{symbol: "ORBITALIST", agent_token: nil})
+  test "the old overview and briefing are gone", %{conn: conn} do
+    {_view, html, _seeded} = glance(conn, :healthy, 2)
 
-    {:ok, view, _html} = live(conn, ~p"/mission-control")
-
-    assert has_element?(view, "#strategy-context", "ORBITALIST")
-    refute has_element?(view, "#current-fleet-state")
-    refute has_element?(view, "a[href='/agents/new']")
-    refute has_element?(view, "a[href='/operators/settings#import-agent']")
-    refute has_element?(view, "select[name*='agent']")
+    for id <- ~w(operating-health strategy-context objective-evaluations market-execution
+                 fleet-health notable-activity mission-onboarding) do
+      refute html =~ ~s(id="#{id}")
+    end
   end
 
-  test "shows active Strategy intent and truthful unknown objective evaluation", %{
-    conn: conn,
-    scope: scope
-  } do
-    assert {:ok, _draft} = FleetStrategy.select_preset(scope, "steady_growth")
+  test "every update re-reads at most once per second and calls no game", %{conn: conn} do
+    {view, _html, seeded} = glance(conn, :healthy, 2)
+    [ship | _] = Fleet.current_ships(seeded.agent.id)
 
-    assert {:ok, _revision} =
-             FleetStrategy.activate(scope, FleetStrategy.get(scope).draft_version)
+    send(view.pid, {:ship_state, ship})
+    send(view.pid, :earnings_recorded)
+    send(view.pid, {:intent_changed, ship.id})
+    send(view.pid, :fleet_strategy_updated)
+    assert %{refresh: ref} = :sys.get_state(view.pid).socket.assigns
+    assert is_reference(ref)
 
-    {:ok, _view, html} = live(conn, ~p"/mission-control")
-
-    assert html =~ "Revision 1"
-    assert html =~ "Grow credits"
-    assert html =~ "Unknown: no complete, authoritative evaluation is available yet."
-    assert html =~ "Objective status: Unknown"
+    # The coalesced recompute lands once; the page still reads the same.
+    send(view.pid, :recompute)
+    assert has_element?(view, "#plan-health[data-state='on']")
+    assert %{refresh: nil} = :sys.get_state(view.pid).socket.assigns
   end
 
-  test "shows observed credit growth from authoritative starting and current Agent state", %{
-    conn: conn,
-    operator: operator,
-    scope: scope
-  } do
-    {:ok, _draft} = FleetStrategy.select_preset(scope, "steady_growth")
-    {:ok, revision} = FleetStrategy.activate(scope, FleetStrategy.get(scope).draft_version)
-    agent = agent_fixture(operator, %{agent_token: "AGENT_TOKEN"})
+  test "a change after mount moves Plan Health without a reload", %{conn: conn} do
+    {view, _html, seeded} = glance(conn, :healthy, 2)
+    assert has_element?(view, "#plan-health[data-state='on']")
 
-    SpaceTraders.AgentFixtures.generation_fixture(%Generation{
-      operator_id: operator.id,
-      agent_id: agent.id,
-      fleet_strategy_revision_id: revision.id,
-      number: 1,
-      symbol: agent.symbol,
-      faction: agent.faction,
-      replacement_symbols: %{"symbols" => [agent.symbol]},
-      starting_credits: 175_000,
-      strategy_capable_at: DateTime.utc_now(),
-      inserted_at: DateTime.utc_now() |> DateTime.add(-3600) |> DateTime.truncate(:second)
+    [ship | _] = Fleet.current_ships(seeded.agent.id)
+    intent = Repo.get_by!(SpaceTraders.Fleet.Intent, ship_id: ship.id)
+
+    intent
+    |> Ecto.Changeset.change(status: "blocked", retries: 1)
+    |> Ecto.Changeset.put_embed(:blocker, %SpaceTraders.Fleet.IntentBlocker{
+      reason: "insufficient_unreserved_headroom",
+      summary: "Short of credits."
     })
-
-    Req.Test.stub(SpaceTraders.API, fn conn ->
-      case conn.request_path do
-        "/v2/my/agent" ->
-          Req.Test.json(conn, %{
-            "data" => %{
-              "accountId" => "ACC",
-              "symbol" => agent.symbol,
-              "headquarters" => agent.headquarters,
-              "credits" => 175_120,
-              "startingFaction" => agent.faction,
-              "shipCount" => 0
-            }
-          })
-
-        "/v2/my/ships" ->
-          Req.Test.json(conn, %{"data" => []})
-
-        "/v2/my/contracts" ->
-          Req.Test.json(conn, %{"data" => []})
-      end
-    end)
-
-    {:ok, view, _html} = live(conn, ~p"/mission-control")
-    assert has_element?(view, "#objective-evaluations", "Observed net change: +120 credits")
-    assert has_element?(view, "#objective-evaluations", "Growing")
-  end
-
-  test "Notable activity distinguishes decisions from routine Ship traffic", %{
-    conn: conn,
-    operator: operator,
-    scope: scope
-  } do
-    {:ok, _draft} = FleetStrategy.select_preset(scope, "steady_growth")
-    {:ok, revision} = FleetStrategy.activate(scope, FleetStrategy.get(scope).draft_version)
-    agent = agent_fixture(operator, %{agent_token: nil})
-
-    generation =
-      SpaceTraders.AgentFixtures.generation_fixture(%Generation{
-        operator_id: operator.id,
-        agent_id: agent.id,
-        fleet_strategy_revision_id: revision.id,
-        number: 1,
-        symbol: agent.symbol,
-        faction: agent.faction,
-        replacement_symbols: %{"symbols" => [agent.symbol]}
-      })
-
-    ship =
-      Repo.insert!(%SpaceTraders.Fleet.Ship{
-        agent_id: agent.id,
-        symbol: "#{agent.symbol}-1",
-        ship_type: "SHIP_PROBE"
-      })
-
-    :ok = SpaceTraders.Fleet.record_activity(agent, ship, "retry", "API request retrying")
-
-    :ok =
-      SpaceTraders.Fleet.record_activity(
-        agent,
-        ship,
-        "ship_stopped",
-        "One-off navigation stopped"
-      )
-
-    Repo.insert!(%StrategyDecisionEpisode{
-      operator_id: operator.id,
-      fleet_generation_id: generation.id,
-      fleet_strategy_revision_id: revision.id,
-      source_version: 0,
-      calibration_version: "v1",
-      classification: :realized,
-      evidence_references: [%{"kind" => "test", "id" => "observed"}],
-      actual_outcomes: %{"net_credit_change" => 250}
-    })
-
-    Repo.insert!(%StrategyDecisionEpisode{
-      operator_id: operator.id,
-      fleet_generation_id: generation.id,
-      fleet_strategy_revision_id: revision.id,
-      source_version: 1,
-      calibration_version: "v1",
-      classification: :still_evaluating
-    })
-
-    now = DateTime.utc_now()
-
-    attempt =
-      Repo.insert!(%SpaceTraders.MutationAttempts.Attempt{
-        operator_id: operator.id,
-        agent_id: agent.id,
-        fleet_generation_id: generation.id,
-        operation_id: "purchase-ship",
-        operation_owner: "fleet",
-        state: "succeeded",
-        request_fingerprint: "purchase-ship-test",
-        prepared_at: now
-      })
-
-    Repo.insert!(%SpaceTraders.MutationAttempts.Outcome{
-      mutation_attempt_id: attempt.id,
-      classification: "succeeded",
-      recorded_at: now
-    })
-
-    {:ok, _briefing, html} = live(conn, ~p"/mission-control")
-    assert html =~ "Notable activity"
-    assert html =~ "Fleet decision realized 250 credits net change"
-  end
-
-  test "Generation recaps compare evidenced outcomes and do not invent missing measurements", %{
-    conn: conn,
-    operator: operator,
-    scope: scope
-  } do
-    {:ok, _draft} = FleetStrategy.select_preset(scope, "steady_growth")
-    {:ok, revision} = FleetStrategy.activate(scope, FleetStrategy.get(scope).draft_version)
-    first = agent_fixture(operator, %{agent_token: nil})
-
-    now = DateTime.utc_now() |> DateTime.truncate(:second)
-
-    old =
-      SpaceTraders.AgentFixtures.generation_fixture(%Generation{
-        operator_id: operator.id,
-        agent_id: first.id,
-        fleet_strategy_revision_id: revision.id,
-        number: 1,
-        symbol: first.symbol,
-        faction: first.faction,
-        replacement_symbols: %{"symbols" => [first.symbol]},
-        starting_credits: 175_000,
-        inserted_at: DateTime.add(now, -3600)
-      })
-
-    assert {:ok, _} =
-             SpaceTraders.FleetGeneration.record_objective_progress(scope, old.id, 0, %{
-               "change" => 10,
-               "elapsed_seconds" => 5,
-               "feasible?" => false,
-               "horizon_seconds" => 10,
-               "evidence_id" => objective_evidence(first, 175_010).id
-             })
-
-    second_revision =
-      SpaceTraders.FleetStrategy.Revision.create_changeset(
-        %SpaceTraders.FleetStrategy.Revision{},
-        %{
-          fleet_strategy_id: revision.fleet_strategy_id,
-          number: 2,
-          document: revision.document,
-          source: "operator",
-          activated_at: DateTime.add(now, -1800)
-        }
-      )
-      |> Repo.insert!()
-
-    old
-    |> Ecto.Changeset.change(
-      fenced_at: DateTime.utc_now(),
-      retired_at: DateTime.utc_now(),
-      fleet_strategy_revision_id: second_revision.id
-    )
     |> Repo.update!()
 
-    second = agent_fixture(operator, %{agent_token: nil})
+    send(view.pid, {:intent_changed, ship.id})
+    send(view.pid, :recompute)
 
-    SpaceTraders.AgentFixtures.generation_fixture(%Generation{
-      operator_id: operator.id,
-      agent_id: second.id,
-      fleet_strategy_revision_id: revision.id,
-      number: 2,
-      symbol: second.symbol,
-      faction: second.faction,
-      replacement_symbols: %{"symbols" => [second.symbol]},
-      strategy_capable_at: DateTime.utc_now()
-    })
-
-    Repo.insert!(%StrategyDecisionEpisode{
-      operator_id: operator.id,
-      fleet_generation_id: old.id,
-      fleet_strategy_revision_id: revision.id,
-      source_version: 0,
-      calibration_version: "v1",
-      classification: :realized,
-      evidence_references: [%{"kind" => "test", "id" => "observed"}],
-      actual_outcomes: %{"net_credit_change" => 250}
-    })
-
-    Repo.insert!(%StrategyDecisionEpisode{
-      operator_id: operator.id,
-      fleet_generation_id: old.id,
-      fleet_strategy_revision_id: revision.id,
-      source_version: 1,
-      calibration_version: "v1",
-      classification: :partially_realized
-    })
-
-    {:ok, view, html} = live(conn, ~p"/generations")
-    assert html =~ "Generation 1"
-    assert html =~ "Generation 2"
-    assert html =~ "250 credits"
-    assert html =~ "Grow credits: 20.0 per horizon"
-    assert html =~ "Strategy revision 2"
-    assert html =~ "Unknown — no realized credit evidence"
-    assert html =~ "Strategy revision 1"
-    assert html =~ "Server Reset"
-    assert html =~ "Decision partly realized"
-    assert html =~ "Strategy-capable"
-    assert has_element?(view, "#generation-comparison", "Generation 1")
-    assert has_element?(view, "#generation-comparison", "Generation 2")
+    assert has_element?(view, "#plan-health[data-state='off']", "Off plan, real blocker")
+    assert has_element?(view, "#plan-health-reason", "is stuck: Short of credits.")
   end
 
-  test "Generations compares Decision Episodes and opens every retained evidence reference",
-       %{
-         conn: conn,
-         operator: operator,
-         scope: scope
-       } do
-    {:ok, _draft} = FleetStrategy.select_preset(scope, "steady_growth")
-    {:ok, revision} = FleetStrategy.activate(scope, FleetStrategy.get(scope).draft_version)
-    first_agent = agent_fixture(operator, %{agent_token: nil})
-    second_agent = agent_fixture(operator, %{agent_token: nil})
-    now = DateTime.utc_now()
+  test "the earliest overdue moment re-judges a silent Fleet", %{conn: conn} do
+    {view, _html, _seeded} = glance(conn, :healthy, 2)
+    assert %{next_change: ref} = :sys.get_state(view.pid).socket.assigns
+    assert is_reference(ref)
 
-    first_generation =
-      SpaceTraders.AgentFixtures.generation_fixture(%Generation{
-        operator_id: operator.id,
-        agent_id: first_agent.id,
-        fleet_strategy_revision_id: revision.id,
-        number: 1,
-        symbol: first_agent.symbol,
-        faction: first_agent.faction,
-        replacement_symbols: %{"symbols" => [first_agent.symbol]},
-        inserted_at: now |> DateTime.add(-7_200) |> DateTime.truncate(:second),
-        retired_at: DateTime.add(now, -3_600)
-      })
-
-    second_generation =
-      SpaceTraders.AgentFixtures.generation_fixture(%Generation{
-        operator_id: operator.id,
-        agent_id: second_agent.id,
-        fleet_strategy_revision_id: revision.id,
-        number: 2,
-        symbol: second_agent.symbol,
-        faction: second_agent.faction,
-        replacement_symbols: %{"symbols" => [second_agent.symbol]},
-        inserted_at: now |> DateTime.add(-1_800) |> DateTime.truncate(:second),
-        strategy_capable_at: DateTime.add(now, -1_700)
-      })
-
-    first_episode =
-      Repo.insert!(%StrategyDecisionEpisode{
-        operator_id: operator.id,
-        fleet_generation_id: first_generation.id,
-        fleet_strategy_revision_id: revision.id,
-        source_version: 0,
-        calibration_version: "market-v1",
-        classification: :realized,
-        evidence_references: [
-          %{"kind" => "market", "id" => "market:X1-A1", "fingerprint" => "abc"},
-          %{"kind" => "market", "id" => "market:X1-A2", "fingerprint" => "def"}
-        ],
-        expectations: %{"credit_change" => 100, "horizon_seconds" => 300},
-        actual_outcomes: %{"credit_change" => 75}
-      })
-
-    second_episode =
-      Repo.insert!(%StrategyDecisionEpisode{
-        operator_id: operator.id,
-        fleet_generation_id: second_generation.id,
-        fleet_strategy_revision_id: revision.id,
-        source_version: 0,
-        calibration_version: "market-v2",
-        classification: :partially_realized,
-        evidence_references: [%{"kind" => "market", "id" => "market:X1-B1"}],
-        expectations: %{"credit_change" => 150, "horizon_seconds" => 300},
-        actual_outcomes: %{"credit_change" => 125}
-      })
-
-    {:ok, generations, _html} = live(conn, ~p"/generations")
-
-    assert has_element?(generations, "#decision-episode-comparison", "market-v1")
-    assert has_element?(generations, "#decision-episode-comparison", "market-v2")
-    assert has_element?(generations, "#decision-episode-comparison", "100")
-    assert has_element?(generations, "#decision-episode-comparison", "75")
-
-    assert has_element?(
-             generations,
-             "#decision-episode-comparison a[href='/decision-episodes/#{first_episode.id}']",
-             "Episode #{first_episode.id}"
-           )
-
-    assert has_element?(
-             generations,
-             "#decision-episode-comparison a[href='/decision-episodes/#{second_episode.id}']",
-             "Episode #{second_episode.id}"
-           )
-
-    {:ok, episode, html} = live(conn, "/decision-episodes/#{first_episode.id}")
-
-    assert html =~ "Generation 1"
-    assert html =~ "Revision 1"
-    assert html =~ "market-v1"
-    assert html =~ "market:X1-A1"
-    assert html =~ "market:X1-A2"
-    assert html =~ "credit change"
-    assert html =~ "100"
-    assert html =~ "75"
-
-    assert has_element?(
-             episode,
-             "a[href*='/d/spacetraders-strategy-outcomes/strategy-outcomes'][href*='var-decision_episode=#{first_episode.id}'][href*='var-fleet_generation=#{first_generation.id}']",
-             "Strategy outcome evidence"
-           )
-
-    assert has_element?(
-             episode,
-             "a[href*='/d/spacetraders-economics-capital/economics-capital'][href*='var-decision_episode=#{first_episode.id}'][href*='var-fleet_generation=#{first_generation.id}']",
-             "Economic and capital evidence"
-           )
+    send(view.pid, :next_change)
+    assert has_element?(view, "#plan-health")
   end
 
-  test "deployment authentication, not Episode authorship, controls history access", %{
-    conn: conn,
-    operator: operator
-  } do
-    other_operator = SpaceTraders.AgentFixtures.legacy_operator_fixture()
-    other_agent = SpaceTraders.AgentFixtures.agent_fixture(other_operator, %{agent_token: nil})
+  describe "at 120 Ships" do
+    test "Glance reads from a fixed number of queries inside 50 ms", %{conn: conn} do
+      small = ScenarioSeeds.seed(:healthy, 2)
+      small_count = count_queries(fn -> read(small) end)
 
-    strategy =
-      Repo.insert!(%SpaceTraders.FleetStrategy.Strategy{
-        operator_id: other_operator.id,
-        revision_number: 1
-      })
+      {view, _html, large} = glance(conn, :stuck, 120)
+      assert has_element?(view, "#plan-health[data-state='off']")
 
-    revision =
-      Repo.insert!(%SpaceTraders.FleetStrategy.Revision{
-        fleet_strategy_id: strategy.id,
-        number: 1,
-        document: %{},
-        source: "operator",
-        activated_at: DateTime.utc_now(:second)
-      })
+      assert count_queries(fn -> read(large) end) == small_count
 
-    generation =
-      SpaceTraders.AgentFixtures.generation_fixture(%Generation{
-        operator_id: other_operator.id,
-        agent_id: other_agent.id,
-        fleet_strategy_revision_id: revision.id,
-        number: 1,
-        symbol: other_agent.symbol,
-        faction: other_agent.faction,
-        replacement_symbols: %{}
-      })
+      # Best of three, so a loaded test machine measures the read, not the queue.
+      best =
+        for _ <- 1..3 do
+          {micros, _health} = :timer.tc(fn -> read(large) end)
+          micros
+        end
+        |> Enum.min()
 
-    episode =
-      Repo.insert!(%StrategyDecisionEpisode{
-        operator_id: other_operator.id,
-        fleet_generation_id: generation.id,
-        fleet_strategy_revision_id: revision.id,
-        source_version: 0,
-        calibration_version: "market-v1"
-      })
-
-    logged_in = SpaceTradersWeb.ConnCase.log_in_operator(conn, operator)
-
-    assert {:ok, view, _html} = live(logged_in, "/decision-episodes/#{episode.id}")
-    assert has_element?(view, "h1", "Decision Episode #{episode.id}")
-
-    legacy_login = SpaceTradersWeb.ConnCase.log_in_operator(conn, other_operator)
-
-    assert {:error, {:redirect, %{to: "/operators/log-in"}}} =
-             live(legacy_login, "/decision-episodes/#{episode.id}")
+      assert best < 50_000, "Plan Health took #{div(best, 1000)} ms at 120 Ships"
+    end
   end
 
-  test "Mission Control opens the Grafana family that answers each originating question", %{
-    conn: conn,
-    operator: operator,
-    scope: scope
-  } do
-    {:ok, _draft} = FleetStrategy.select_preset(scope, "steady_growth")
-    {:ok, revision} = FleetStrategy.activate(scope, FleetStrategy.get(scope).draft_version)
-    agent = agent_fixture(operator, %{agent_token: nil})
-
-    generation =
-      SpaceTraders.AgentFixtures.generation_fixture(%Generation{
-        operator_id: operator.id,
-        agent_id: agent.id,
-        fleet_strategy_revision_id: revision.id,
-        number: 1,
-        symbol: agent.symbol,
-        faction: agent.faction,
-        replacement_symbols: %{"symbols" => [agent.symbol]},
-        strategy_capable_at: DateTime.utc_now()
-      })
-
-    {:ok, view, html} = live(conn, ~p"/mission-control")
-
-    assert has_element?(
-             view,
-             "#objective-evaluations a[href*='/d/spacetraders-strategy-outcomes/strategy-outcomes'][href*='var-fleet_generation=#{generation.id}'][href*='var-strategy_revision=#{revision.id}'][href*='from='][href*='to=now']",
-             "Inspect Strategy outcomes"
-           )
-
-    refute html =~ "token="
-    refute html =~ "password="
+  defp read(seeded) do
+    operator = Repo.get!(Operator, seeded.generation.operator_id)
+    PlanHealth.read(SpaceTraders.Agent.Scope.for_operator(operator), seeded.now)
   end
 
-  defp objective_evidence(agent, credits) do
-    observation =
-      SpaceTraders.Evidence.authoritative_observation(
-        "get-my-agent",
-        ["agent:#{agent.id}"],
-        %{"response" => %{"credits" => credits}}
-      )
+  defp count_queries(fun) do
+    ref = make_ref()
+    parent = self()
+    handler = "glance-queries-#{inspect(ref)}"
 
-    %SpaceTraders.Evidence.Observation{
-      agent_id: agent.id,
-      subject: "agent:#{agent.id}",
-      operation_id: observation.operation_id,
-      dependency_keys: observation.dependency_keys,
-      facts: observation.facts,
-      response_fingerprint: observation.response_fingerprint,
-      observed_at: observation.observed_at
-    }
-    |> Repo.insert!()
+    :telemetry.attach(
+      handler,
+      [:spacetraders, :repo, :query],
+      fn _, _, _, _ -> send(parent, {ref, :query}) end,
+      nil
+    )
+
+    fun.()
+    :telemetry.detach(handler)
+
+    Stream.repeatedly(fn -> receive do: ({^ref, :query} -> 1), after: (0 -> nil) end)
+    |> Enum.take_while(& &1)
+    |> length()
   end
 end

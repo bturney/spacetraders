@@ -1,7 +1,7 @@
 defmodule SpaceTradersWeb.MissionControlComponents do
   @moduledoc """
   Mission Control design system components (#749): Card, Eyebrow, StatusChip,
-  DataBadge, Money, RouteBar, Countdown, SoldToast, CreditsTicker.
+  DataBadge, Money, HealthCard, RouteBar, Countdown, SoldToast, CreditsTicker.
 
   Copy rules: game vocabulary, the fixed status wording, and honest numbers
   (unknown is "—", never 0). Every number is mono with tabular numerals so live
@@ -180,6 +180,66 @@ defmodule SpaceTradersWeb.MissionControlComponents do
         @class
       ]}
     >{if @stale, do: "~"}{format_signed(@value)}<span :if={@est} class="text-[10px] text-dim"> est.</span></span>
+    """
+  end
+
+  # -- fleet --------------------------------------------------------------
+
+  @health %{
+    on: {"On plan", "text-success", "bg-success shadow-[0_0_12px_var(--color-success)]"},
+    setback:
+      {"Small setback, recoverable", "text-warning",
+       "bg-warning shadow-[0_0_12px_var(--color-warning)]"},
+    off:
+      {"Off plan, real blocker", "text-error", "bg-error shadow-[0_0_12px_var(--color-error)]"},
+    unknown:
+      {"Can't tell right now", "text-unknown", "border-[1.5px] border-dashed border-unknown"}
+  }
+
+  @check_dot %{
+    ok: "bg-success",
+    amber: "bg-warning",
+    red: "bg-error",
+    unknown: "border border-dashed border-unknown"
+  }
+
+  attr :id, :string, default: "plan-health"
+  attr :state, :atom, required: true, values: Map.keys(@health)
+  attr :reason, :string, required: true
+
+  attr :checks, :list,
+    default: [],
+    doc: "`%{name, label, state, detail}`, state :ok/:amber/:red/:unknown"
+
+  @doc """
+  Plan Health: one of four states, one plain reason line and the four checks.
+  Can't tell is grey and hollow, never green. Nothing here asks to act.
+  """
+  def health_card(assigns) do
+    {label, text, dot} = Map.fetch!(@health, assigns.state)
+    assigns = assign(assigns, label: label, text: text, dot: dot, check_dot: @check_dot)
+
+    ~H"""
+    <.card id={@id} tone={@state} data-state={@state}>
+      <div class="flex items-center gap-2.5">
+        <span class={["size-3.5 flex-none rounded-full", @dot]}></span>
+        <span class={["flex-1 text-lg font-semibold", @text]}>{@label}</span>
+        <.eyebrow>Plan health</.eyebrow>
+      </div>
+      <p id={"#{@id}-reason"} class="mt-1.5 text-sm leading-snug text-muted">{@reason}</p>
+      <ul class="mt-3 grid grid-cols-2 gap-x-3 gap-y-1.5">
+        <li
+          :for={check <- @checks}
+          id={"#{@id}-check-#{check.name}"}
+          data-state={check.state}
+          class="flex min-w-0 items-center gap-1.5 text-xs"
+          title={check.detail}
+        >
+          <span class={["size-2 flex-none rounded-full", @check_dot[check.state]]}></span>
+          <span class="truncate">{check.label}</span>
+        </li>
+      </ul>
+    </.card>
     """
   end
 
