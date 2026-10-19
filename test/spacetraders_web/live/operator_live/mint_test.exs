@@ -296,14 +296,13 @@ defmodule SpaceTradersWeb.OperatorLive.MintTest do
       assert has_element?(lv, "#adopt_registered_form")
       assert_received {:game_request, "POST", "/v2/register"}
 
-      # A reload renders the same durable state, and Mission Control raises it.
+      # A reload renders the same durable state; Glance can't tell, and asks nothing.
       {:ok, reloaded, _html} = live(conn, ~p"/agents/new")
       refute has_element?(reloaded, "#mint_form")
       assert render(reloaded) =~ "Registration of MINER1 may have succeeded"
       {:ok, _mission_control, html} = live(conn, ~p"/mission-control")
-      assert html =~ "Registration of MINER1 may have succeeded"
-      assert html =~ "Reconcile registration"
-      refute html =~ "Mint or import an Agent to establish the Fleet."
+      assert html =~ "No current Fleet yet."
+      refute html =~ "Reconcile registration"
 
       Req.Test.stub(SpaceTraders.API, fn conn ->
         send(parent, {:game_request, conn.method, conn.request_path})
