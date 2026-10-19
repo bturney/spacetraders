@@ -3,7 +3,7 @@ defmodule SpaceTradersWeb.EntityLive do
 
   use SpaceTradersWeb, :live_view
 
-  alias SpaceTraders.{Evidence, Fleet, FleetGeneration, World}
+  alias SpaceTraders.{Evidence, FleetGeneration, World}
 
   @freshness_seconds 300
 
@@ -198,41 +198,6 @@ defmodule SpaceTradersWeb.EntityLive do
           </section>
         </section>
 
-        <section :if={@entity == :ship} id={"ship-#{@ship_symbol}"} class="space-y-6">
-          <header>
-            <p class="eyebrow">Owned entity</p>
-            <h1 class="text-3xl font-bold">Ship {@ship_symbol}</h1>
-            <p class="mt-2 text-sm opacity-70">
-              Live Ship state is shown only when a governed observation has retained it.
-            </p>
-          </header>
-
-          <section class="rounded-xl border border-base-300 p-5">
-            <h2 class="text-xl font-semibold">Known record</h2>
-            <p :if={!@ship} class="mt-2 text-sm opacity-70">
-              Unknown. This Ship is not in the local Fleet registry.
-            </p>
-            <dl :if={@ship} class="mt-3 grid gap-3 sm:grid-cols-2">
-              <div>
-                <dt class="text-sm opacity-70">Type</dt><dd class="font-medium">{@ship.ship_type}</dd>
-              </div>
-              <div>
-                <dt class="text-sm opacity-70">Last observed status</dt><dd class="font-medium">
-                  {ship_status(@ship_observation)}
-                </dd>
-              </div>
-            </dl>
-            <p :if={@ship_observation} class="mt-3 text-xs opacity-70">
-              {observation_context(@ship_observation)}
-            </p>
-            <.link
-              :if={ship_waypoint(@ship_observation)}
-              navigate={ship_waypoint_path(@link_generation, @ship_observation)}
-              class="link link-primary mt-3 inline-block"
-            >{ship_waypoint(@ship_observation)}</.link>
-          </section>
-        </section>
-
         <section :if={@entity == :contract} id={"contract-#{@contract_id}"} class="space-y-6">
           <header>
             <p class="eyebrow">Owned entity</p>
@@ -336,22 +301,6 @@ defmodule SpaceTradersWeb.EntityLive do
     end
   end
 
-  defp assign_entity(socket, agent, %{"ship_symbol" => ship_symbol}) do
-    ship =
-      case Fleet.owned_ship(agent, ship_symbol) do
-        {:ok, ship} -> ship
-        _ -> nil
-      end
-
-    assign(socket,
-      agent: agent,
-      entity: :ship,
-      ship_symbol: ship_symbol,
-      ship: ship,
-      ship_observation: Evidence.latest_observation(agent, "ship:#{ship_symbol}")
-    )
-  end
-
   defp assign_entity(socket, agent, %{"contract_id" => contract_id}) do
     contract_observation = Evidence.latest_observation(agent, "contracts:#{agent.symbol}")
     contract = contract_from_observation(contract_observation, contract_id)
@@ -382,20 +331,6 @@ defmodule SpaceTradersWeb.EntityLive do
   defp entity_name(:market), do: "Market"
   defp entity_name(:shipyard), do: "Shipyard"
   defp entity_name(:construction), do: "Construction"
-
-  defp ship_status(nil), do: "Unknown"
-
-  defp ship_status(%{facts: %{"response" => %{"nav" => %{"status" => status}}}}), do: status
-  defp ship_status(_), do: "Unknown"
-
-  defp ship_waypoint(%{facts: %{"response" => %{"nav" => %{"waypointSymbol" => waypoint}}}}),
-    do: waypoint
-
-  defp ship_waypoint(_), do: nil
-
-  defp ship_waypoint_path(agent, %{facts: %{"response" => %{"nav" => nav}}}) do
-    waypoint_path(agent, nav["systemSymbol"], nav["waypointSymbol"])
-  end
 
   defp contract_from_observation(nil, _contract_id), do: nil
 
