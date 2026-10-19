@@ -56,6 +56,17 @@ TABLES = {
 }
 PRIMARY_KEYS = {"runtime_authority": "name", "allocation_result_pointers": "fleet_generation_id"}
 
+# Nested Bindings, CreditSpending/CreditCalibration and transfer preparation all
+# reference Evidence.Observation UUIDs. Row-level Intelligence observation_id is
+# a different owner and stays in JOINS; never infer an owner from an ID suffix.
+NESTED_REFERENCE_OWNERS = {
+    "observation_id": "authoritative_observations",
+    "quote_observation_id": "authoritative_observations",
+    "credit_observation_id": "authoritative_observations",
+    "source_observation_id": "authoritative_observations",
+    "target_observation_id": "authoritative_observations",
+}
+
 JOINS = {
     "agents": {"operator_id": "operators"},
     "current_fleet_identity": {"operator_id": "operators", "fleet_generation_id": "fleet_generations"},
@@ -202,6 +213,37 @@ def validate_world(world):
     require(isinstance(world["coverage"], dict) and isinstance(world["identity"], dict), "world identity/coverage missing")
 
 
+def reference_key(key, index):
+    if isinstance(key, str) and key.isdecimal() and key not in index:
+        return int(key)
+    return key
+
+
+def nested_references(value, indexes):
+    """One owner mapping/walker for fail-closed validation and graph navigation.
+    None target means the existing evidence_id format/source is explicitly unknown.
+    """
+    if isinstance(value, list):
+        for item in value:
+            yield from nested_references(item, indexes)
+    if not isinstance(value, dict):
+        return
+    for key, item in value.items():
+        if key in NESTED_REFERENCE_OWNERS and item is not None:
+            yield key, NESTED_REFERENCE_OWNERS[key], item
+        elif key == "evidence_id" and isinstance(item, str):
+            if item.startswith("intelligence-observation:"):
+                yield key, "intelligence_observations", item.split(":", 1)[1]
+            elif item in indexes["authoritative_observations"]:
+                yield key, "authoritative_observations", item
+            else:
+                yield key, None, item
+        elif key == "kind" and item == "observation" and value.get("id") is not None:
+            yield "observation", "authoritative_observations", value["id"]
+        if isinstance(item, (dict, list)):
+            yield from nested_references(item, indexes)
+
+
 def validate_database(db):
     require(db["schema"] == "application-evidence/v2", "unsupported database schema")
     require(set(db) == {"schema", "snapshot", "tables", "excluded_tables", "authority", "inventory"}, "database snapshot/provenance incomplete")
@@ -224,6 +266,14 @@ def validate_database(db):
             for field, target in links.items():
                 value = row.get(field)
                 require(value is None or value in indexes[target], "broken retained join: " + name + "." + field)
+    for name, rows in tables.items():
+        for row in rows:
+            for value in row.values():
+                if isinstance(value, (dict, list)):
+                    for field, target, key in nested_references(value, indexes):
+                        if target is not None:
+                            require(reference_key(key, indexes[target]) in indexes[target],
+                                    "broken referenced evidence: " + name + "." + field)
     # Issuing-root provenance is independent of the Intent's current attempt.
     for row in tables["mutation_attempts"]:
         provenance = row.get("provenance") or {}
@@ -494,31 +544,9 @@ def derived(metadata, sections):
             return prefix + table + ":" + str(key)
 
         def edge(origin, relation, table, key):
-            if isinstance(key, str) and key.isdecimal() and key not in indexes[table]:
-                key = int(key)
+            key = reference_key(key, indexes[table])
             require(key in indexes[table], "broken referenced evidence: " + relation)
             edges.append({"from": origin, "to": address(table, key), "relation": relation})
-
-        def references(value, origin):
-            if isinstance(value, list):
-                for item in value:
-                    references(item, origin)
-            if not isinstance(value, dict):
-                return
-            for key, item in value.items():
-                if key == "observation_id" and item is not None:
-                    edge(origin, key, "authoritative_observations", item)
-                elif key == "evidence_id" and isinstance(item, str):
-                    if item.startswith("intelligence-observation:"):
-                        edge(origin, key, "intelligence_observations", item.split(":", 1)[1])
-                    elif item in indexes["authoritative_observations"]:
-                        edge(origin, key, "authoritative_observations", item)
-                    else:
-                        unresolved.append({"from": origin, "reference": item, "cause": "unknown_reference_format_or_unretained_source"})
-                elif key == "kind" and item == "observation" and value.get("id") is not None:
-                    edge(origin, "observation", "authoritative_observations", value["id"])
-                if isinstance(item, (dict, list)):
-                    references(item, origin)
 
         for table, rows in tables.items():
             for row in rows:
@@ -532,7 +560,11 @@ def derived(metadata, sections):
                 # nested Bindings use the authoritative observation UUID.
                 for field, value in row.items():
                     if isinstance(value, (dict, list)):
-                        references(value, origin)
+                        for relation, target, key in nested_references(value, indexes):
+                            if target is None:
+                                unresolved.append({"from": origin, "reference": key, "cause": "unknown_reference_format_or_unretained_source"})
+                            else:
+                                edge(origin, relation, target, key)
                 if table == "mutation_attempts":
                     provenance = row.get("provenance") or {}
                     for field, target in [("intent_id", "intents"), ("commitment_id", "fleet_commitments")]:

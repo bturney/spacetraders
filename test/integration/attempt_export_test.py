@@ -49,7 +49,127 @@ def fixture(kind="completed"):
     return meta, sections
 
 
+def observation_references_fixture():
+    meta, sections = fixture("interrupted")
+    db = sections["database"]["data"]
+    tables = db["tables"]
+    # Owner-defined UUIDs, authored independently of any retained run/payload.
+    references = {
+        "quote_observation_id": "11111111-1111-4111-8111-111111111111",
+        "credit_observation_id": "22222222-2222-4222-8222-222222222222",
+        "source_observation_id": "33333333-3333-4333-8333-333333333333",
+        "target_observation_id": "44444444-4444-4444-8444-444444444444",
+        "observation_id": "55555555-5555-4555-8555-555555555555",
+    }
+    for identity in references.values():
+        record = dict.fromkeys(export.TABLES["authoritative_observations"].split())
+        record.update(id=identity, facts={"response": {"credits": 1000}})
+        tables["authoritative_observations"].append(record)
+    attempt = dict.fromkeys(export.TABLES["mutation_attempts"].split())
+    attempt.update(id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", state="sent_or_unknown",
+                   prepared_evidence={"spending": {key: references[key] for key in ["quote_observation_id", "credit_observation_id"]},
+                                      "selected_action": {key: references[key] for key in ["source_observation_id", "target_observation_id"]},
+                                      "bindings": [{"observation_id": references["observation_id"]},
+                                                   {"evidence_id": "unknown-authored-source:7"}]})
+    tables["mutation_attempts"].append(attempt)
+    intelligence = dict.fromkeys(export.TABLES["intelligence_observations"].split())
+    intelligence.update(id=19, evidence_observation_id=references["observation_id"])
+    tables["intelligence_observations"].append(intelligence)
+    fact = dict.fromkeys(export.TABLES["intelligence_facts"].split())
+    fact.update(id=20, observation_id=19)
+    tables["intelligence_facts"].append(fact)
+    sections["database"]["data"] = export.database_document(tables, {}, "authored", db["authority"])
+    return meta, sections, references
+
+
 class ExportTest(unittest.TestCase):
+    def test_spending_transfer_and_binding_observations_are_offline_navigable(self):
+        meta, sections, references = observation_references_fixture()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "attempt.zip"
+            receipt = export.publish(meta, sections, path)
+            result = export.read_bundle(path, receipt=receipt)
+            prefix = "run-1/attempt-1/"
+            for field, identity in references.items():
+                self.assertIn({"from": prefix + "mutation_attempts:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                               "to": prefix + "authoritative_observations:" + identity,
+                               "relation": field}, result["graph"]["edges"])
+                self.assertIn('href="#' + prefix + 'authoritative_observations:' + identity + '"', export.render_html(result))
+            self.assertIn("sent_or_unknown", export.render_html(result))
+            self.assertIsNone(result["summary"]["net_earnings"])
+            self.assertEqual(result["graph"]["unresolved_references"], [{
+                "from": prefix + "mutation_attempts:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                "reference": "unknown-authored-source:7", "cause": "unknown_reference_format_or_unretained_source"}])
+            self.assertIn({"from": prefix + "intelligence_facts:20", "to": prefix + "intelligence_observations:19",
+                           "relation": "observation_id"}, result["graph"]["edges"])
+
+    def test_known_nested_observation_targets_fail_closed_before_publication(self):
+        _, _, references = observation_references_fixture()
+        for field, identity in references.items():
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as directory:
+                meta, sections, _ = observation_references_fixture()
+                db = sections["database"]["data"]
+                # Remove only the owner-defined target, not the reference. Seal a
+                # consistent row inventory so validation must check the actual join.
+                rows = db["tables"]["authoritative_observations"]
+                rows[:] = [row for row in rows if row["id"] != identity]
+                if field == "observation_id":
+                    db["tables"]["intelligence_observations"][0]["evidence_observation_id"] = None
+                db = export.database_document(db["tables"], db["excluded_tables"], db["snapshot"], db["authority"])
+                sections["database"]["data"] = db
+                with self.assertRaisesRegex(ValueError, field):
+                    export.validate_database(db)
+                target = Path(directory) / "attempt.zip"
+                with self.assertRaisesRegex(ValueError, field):
+                    export.publish(meta, sections, target)
+                self.assertFalse(target.exists())
+
+    def test_resealed_observation_target_loss_or_graph_link_loss_is_rejected_offline(self):
+        meta, sections, references = observation_references_fixture()
+        with tempfile.TemporaryDirectory() as directory:
+            original = Path(directory) / "original.zip"
+            receipt = export.publish(meta, sections, original)
+            original_bytes = original.read_bytes()
+            with zipfile.ZipFile(original) as archive:
+                baseline = {name: archive.read(name) for name in archive.namelist()}
+            for field, identity in references.items():
+                for defect in ["missing_target", "missing_graph_link"]:
+                    with self.subTest(field=field, defect=defect):
+                        data = dict(baseline)
+                        graph = json.loads(data["causal.json"])
+                        graph["edges"] = [edge for edge in graph["edges"] if edge["relation"] != field]
+                        if defect == "missing_target":
+                            db = json.loads(data["database.json"])
+                            rows = db["data"]["tables"]["authoritative_observations"]
+                            rows[:] = [row for row in rows if row["id"] != identity]
+                            if field == "observation_id":
+                                db["data"]["tables"]["intelligence_observations"][0]["evidence_observation_id"] = None
+                            db["data"] = export.database_document(db["data"]["tables"], db["data"]["excluded_tables"], db["data"]["snapshot"], db["data"]["authority"])
+                            data["database.json"] = export.canonical(db)
+                            address = "run-1/attempt-1/authoritative_observations:" + identity
+                            del graph["nodes"][address]
+                            graph["edges"] = [edge for edge in graph["edges"] if edge["to"] != address]
+                            summary = json.loads(data["summary.json"])
+                            summary["table_rows"]["authoritative_observations"] -= 1
+                            data["summary.json"] = export.canonical(summary)
+                        data["causal.json"] = export.canonical(graph)
+                        manifest = json.loads(data["manifest.json"])
+                        manifest["files"] = {name: {"bytes": len(data[name]), "sha256": export.sha(data[name])}
+                                             for name in manifest["files"]}
+                        data["manifest.json"] = export.canonical(manifest)
+                        data["manifest.sha256"] = export.sha(data["manifest.json"]).encode()
+                        changed = Path(directory) / (field + "-" + defect + ".zip")
+                        with zipfile.ZipFile(changed, "w") as archive:
+                            for name, content in data.items():
+                                archive.writestr(name, content)
+                        # Recomputed internal seals cannot excuse a dangling join
+                        # or lost navigation. Original trusted receipt also rejects.
+                        with self.assertRaisesRegex(ValueError, field if defect == "missing_target" else "causal"):
+                            export.read_bundle(changed)
+                        with self.assertRaisesRegex(ValueError, "receipt"):
+                            export.read_bundle(changed, receipt=receipt)
+            self.assertEqual(original.read_bytes(), original_bytes)
+
     def test_atomic_complete_bundle_is_offline_readable_with_cargo_and_tuple(self):
         meta, sections = fixture()
         with tempfile.TemporaryDirectory() as directory:
