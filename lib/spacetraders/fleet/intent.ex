@@ -35,6 +35,11 @@ defmodule SpaceTraders.Fleet.Intent do
     # while blocked. Both clear when the step leaves `blocked`.
     field :next_attempt_at, :utc_datetime
     field :retries, :integer, default: 0
+    # When the step last became blocked, and when it last left `blocked` to
+    # carry on (not to end as infeasible, stopped or superseded).
+    field :blocked_at, :utc_datetime
+    field :blocked_reason, :string
+    field :recovered_at, :utc_datetime
     field :finished_at, :utc_datetime
     field :fleet_commitment_portfolio_version, :integer
 

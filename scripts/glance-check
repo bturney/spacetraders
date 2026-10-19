@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Glance browser acceptance check at 390x844 with 120 Ships (#771). Outside
+# `mix test`: needs the dev database (`mix ecto.setup`), headless Chromium and
+# the playwright npm package.
+#
+#   PLAYWRIGHT_DIR=/tmp/pw CHROMIUM=/path/to/chrome-headless-shell scripts/glance-check
+#
+# It replaces any scenario seed in the dev database. See dev/glance_check.exs.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+: "${PLAYWRIGHT_DIR:?set PLAYWRIGHT_DIR to a directory whose node_modules has playwright}"
+export NODE_PATH="$PLAYWRIGHT_DIR/node_modules"
+export CHROMIUM="${CHROMIUM:-$(ls ~/.cache/ms-playwright/chromium_headless_shell-*/chrome-headless-shell-linux64/chrome-headless-shell | tail -1)}"
+export BASE_URL="${BASE_URL:-http://127.0.0.1:${PORT:-4000}}"
+export PHX_SERVER=true
+
+# A seed left in the database would boot Ship servers that call the game.
+mix spacetraders.seed --clear >/dev/null
+
+exec mix run dev/glance_check.exs

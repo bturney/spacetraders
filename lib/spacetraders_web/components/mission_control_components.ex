@@ -559,6 +559,235 @@ defmodule SpaceTradersWeb.MissionControlComponents do
     """
   end
 
+  # -- fleet (#771) -------------------------------------------------------
+
+  @cell %{
+    trading: {"bg-trading/18", "bg-trading/70"},
+    busy: {"bg-busy/18", "bg-busy/70"},
+    waiting: {"bg-waiting/18", "bg-waiting/70"},
+    stuck: {"bg-stuck/18", "bg-stuck/70"},
+    scouting: {"bg-scouting/18", "bg-scouting/70"}
+  }
+
+  @doc "The status chip atom of a `MissionControl.ShipStatus` status."
+  def chip_status(:busy_not_earning), do: :busy
+  def chip_status(status), do: status
+
+  attr :row, :map, required: true, doc: "a `MissionControl.ShipRow`"
+  attr :sold, :integer, default: nil, doc: "Net Earnings of a sale landed in the last 4.5 s"
+
+  @doc """
+  One Ship as a route card (small Fleets). A sale tints the card and shows
+  "+X sold just now" in the countdown's own box, so nothing moves.
+  """
+  def ship_card(assigns) do
+    chip = chip_status(assigns.row.status.status)
+
+    assigns =
+      assign(assigns,
+        chip: chip,
+        tone: sale_tone(assigns.sold),
+        count_until: count_until(assigns.row),
+        count_caption: count_caption(assigns.row)
+      )
+
+    ~H"""
+    <.card inner id={"ship-card-#{@row.id}"} tone={@tone} data-sold={@sold && "true"}>
+      <div class="flex items-start gap-2">
+        <div class="flex min-w-0 flex-1 flex-col gap-1">
+          <div class="flex items-center gap-2">
+            <.link navigate={"/ships/#{@row.symbol}"} class="num text-xs">{@row.symbol}</.link>
+            <.status_chip status={@chip} small />
+          </div>
+          <span class="truncate text-sm text-muted">{@row.status.phrase}</span>
+        </div>
+        <div class="grid min-w-[68px] text-right">
+          <div class={["col-start-1 row-start-1", @sold && "invisible"]}>
+            <.countdown
+              id={"ship-card-countdown-#{@row.id}"}
+              until={@count_until}
+              caption={@count_caption}
+              size={20}
+            />
+          </div>
+          <div :if={@sold} class="col-start-1 row-start-1">
+            <div class={["num text-2xl", (@sold < 0 && "text-error") || "text-success"]}>
+              {format_signed(@sold)}
+            </div>
+            <div class="text-[10px] text-dim">sold just now</div>
+          </div>
+        </div>
+      </div>
+      <div class="mt-2">
+        <.route_bar
+          id={"ship-card-route-#{@row.id}"}
+          from={@row.from}
+          to={@row.to}
+          at={@row.at}
+          depart_at={@row.depart_at}
+          arrive_at={@row.arrive_at}
+          status={@chip}
+          size={:sm}
+        />
+      </div>
+    </.card>
+    """
+  end
+
+  attr :id, :string, default: "fleet-grid"
+  attr :rows, :list, required: true, doc: "`MissionControl.ShipRow`s, in name order"
+  attr :sold, :map, default: %{}, doc: "Ship symbol => Net Earnings of a sale in the last 4.5 s"
+  attr :counts, :map, required: true, doc: "ShipStatus status => number of Ships"
+  attr :columns, :integer, default: 24
+
+  @doc """
+  One cell per Ship (large Fleets): a fill that rises with its trip, tinted by
+  status, a green outline for a sale in the last 4.5 s, and the status counts.
+  Cells have fixed size, so live updates never shift the layout.
+  """
+  def fleet_grid(assigns) do
+    assigns = assign(assigns, cells: @cell, chips: @status)
+
+    ~H"""
+    <div>
+      <div
+        id={@id}
+        phx-hook=".FleetGrid"
+        class="grid gap-[3px]"
+        style={"grid-template-columns:repeat(#{@columns},minmax(0,1fr))"}
+      >
+        <.link
+          :for={row <- @rows}
+          id={"#{@id}-cell-#{row.id}"}
+          navigate={"/ships/#{row.symbol}"}
+          title={row.symbol}
+          data-status={row.status.status}
+          data-depart={ms(row.depart_at)}
+          data-arrive={ms(row.arrive_at)}
+          data-sold={@sold[row.symbol] && "true"}
+          class={[
+            "relative aspect-square overflow-hidden rounded-[2px] outline-offset-[-1.5px]",
+            elem(@cells[chip_status(row.status.status)], 0),
+            @sold[row.symbol] && "outline outline-[1.5px] outline-success"
+          ]}
+        >
+          <span
+            data-fill
+            class={[
+              "absolute inset-x-0 bottom-0 transition-[height] duration-[250ms] ease-linear",
+              elem(@cells[chip_status(row.status.status)], 1)
+            ]}
+            style={"height:#{fill(row)}%"}
+          ></span>
+        </.link>
+      </div>
+      <div class="mt-2.5 flex flex-wrap gap-x-3.5 gap-y-1 text-xs text-muted">
+        <span
+          :for={{status, n} <- @counts}
+          :if={n > 0}
+          id={"#{@id}-count-#{status}"}
+          class="flex items-center gap-1.5"
+        >
+          <span class={["size-2 rounded-[2px]", elem(@chips[chip_status(status)], 2)]}></span>
+          {elem(@chips[chip_status(status)], 0)} <span class="num">{n}</span>
+        </span>
+      </div>
+    </div>
+    <script :type={Phoenix.LiveView.ColocatedHook} name=".FleetGrid">
+      export default {
+        mounted() { this.start() },
+        updated() { this.start() },
+        destroyed() { clearInterval(this.timer) },
+        start() {
+          clearInterval(this.timer)
+          const tick = () => {
+            const now = Date.now()
+            this.el.querySelectorAll("[data-arrive]").forEach((cell) => {
+              const d = Number(cell.dataset.depart), a = Number(cell.dataset.arrive)
+              const fill = cell.querySelector("[data-fill]")
+              if (!d || !a || a <= d || !fill) return
+              fill.style.height = Math.min(1, Math.max(0, (now - d) / (a - d))) * 100 + "%"
+            })
+          }
+          tick()
+          this.timer = setInterval(tick, 1000)
+        }
+      }
+    </script>
+    """
+  end
+
+  @kind_dot %{
+    sale: "bg-success",
+    best: "bg-success",
+    skipped_buy: "bg-busy",
+    joined: "bg-scouting",
+    stuck: "bg-stuck",
+    recovered: "bg-trading"
+  }
+
+  attr :id, :string, default: "happenings"
+  attr :events, :list, required: true, doc: "`MissionControl.Happenings` events"
+
+  @doc """
+  "Just happened": the last 8 events, newest first. The list keeps the height of
+  eight rows, so the first events arriving move nothing below it.
+  """
+  def happenings_feed(assigns) do
+    assigns = assign(assigns, dots: @kind_dot)
+
+    ~H"""
+    <.card id={@id}>
+      <.eyebrow>Just happened</.eyebrow>
+      <ul class="mt-1.5 min-h-[calc(8*26px)]">
+        <li
+          :for={event <- @events}
+          id={"#{@id}-#{event.id}"}
+          data-kind={event.kind}
+          class="flex h-[26px] items-center gap-2 text-[13px]"
+        >
+          <span class="num w-[38px] flex-none text-dim">{Calendar.strftime(event.at, "%H:%M")}</span>
+          <span class={["size-1.5 flex-none rounded-full", @dots[event.kind]]}></span>
+          <span class="min-w-0 flex-1 truncate">{event.text}</span>
+          <span
+            :if={event.amount}
+            class={[
+              "num w-[58px] flex-none text-right",
+              (event.amount < 0 && "text-error") || "text-success"
+            ]}
+          >
+            {format_signed(event.amount)}
+          </span>
+        </li>
+      </ul>
+      <p :if={@events == []} id={"#{@id}-empty"} class="text-sm text-dim">
+        Nothing yet. Sales, skipped buys, new Ships and stuck Ships appear here.
+      </p>
+    </.card>
+    """
+  end
+
+  defp sale_tone(nil), do: nil
+  defp sale_tone(amount) when amount < 0, do: :stuck
+  defp sale_tone(_amount), do: :on
+
+  defp fill(%{status: %{status: :stuck}}), do: 100
+
+  defp fill(%{depart_at: %DateTime{} = depart, arrive_at: %DateTime{} = arrive}),
+    do: Float.round(progress(depart, arrive, DateTime.utc_now()) * 100, 1)
+
+  defp fill(_row), do: 0
+
+  defp count_until(%{in_transit?: true, arrive_at: at}), do: at
+  defp count_until(%{status: %{next_attempt_at: %DateTime{} = at}}), do: at
+  defp count_until(%{status: %{next_check_at: %DateTime{} = at}}), do: at
+  defp count_until(_row), do: nil
+
+  defp count_caption(%{in_transit?: true}), do: "to arrival"
+  defp count_caption(%{status: %{next_attempt_at: %DateTime{}}}), do: "next attempt"
+  defp count_caption(%{status: %{next_check_at: %DateTime{}}}), do: "next check"
+  defp count_caption(_row), do: nil
+
   defp ms(%DateTime{} = dt), do: DateTime.to_unix(dt, :millisecond)
   defp ms(_), do: nil
 end

@@ -406,6 +406,8 @@ defmodule SpaceTraders.ScenarioSeeds do
               base
               | status: "blocked",
                 retries: 2,
+                blocked_at: now |> DateTime.add(-420) |> DateTime.truncate(:second),
+                blocked_reason: "Not enough credits above the floor.",
                 next_attempt_at: now |> DateTime.add(240) |> DateTime.truncate(:second),
                 blocker: %IntentBlocker{
                   reason: "insufficient_unreserved_headroom",
