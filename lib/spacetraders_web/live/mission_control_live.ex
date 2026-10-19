@@ -13,7 +13,7 @@ defmodule SpaceTradersWeb.MissionControlLive do
   use SpaceTradersWeb, :live_view
 
   alias SpaceTraders.{Clock, Fleet, FleetGeneration}
-  alias SpaceTraders.MissionControl.{Channels, Happenings, Motion, PlanHealth}
+  alias SpaceTraders.MissionControl.{Channels, Credits, Happenings, Motion, PlanHealth}
 
   @refresh_ms 1_000
   @flash_ms 4_500
@@ -37,7 +37,15 @@ defmodule SpaceTradersWeb.MissionControlLive do
 
     {:ok,
      socket
-     |> assign(agent: agent, refresh: nil, next_change: nil, flashes: %{}, last_sale: nil)
+     |> assign(
+       agent: agent,
+       refresh: nil,
+       next_change: nil,
+       flashes: %{},
+       last_sale: nil,
+       credits: nil,
+       credits_flash: nil
+     )
      |> recompute()}
   end
 
@@ -80,6 +88,7 @@ defmodule SpaceTradersWeb.MissionControlLive do
 
     socket
     |> assign(health: health, next_change: next_change)
+    |> read_credits()
     |> read_fleet()
   end
 
@@ -118,6 +127,16 @@ defmodule SpaceTradersWeb.MissionControlLive do
     |> push_event("sold", %{amount: sale.amount, detail: "#{sale.ship} · #{sale.detail}"})
   end
 
+  # A balance that rose since the last read flashes its gain until the next read.
+  defp read_credits(socket) do
+    credits = Credits.read(socket.assigns.current_scope, Clock.utc_now())
+    before = socket.assigns.credits && socket.assigns.credits.balance
+    now = credits && credits.balance
+    flash = if before && now && now > before, do: now - before
+
+    assign(socket, credits: credits, credits_flash: flash)
+  end
+
   @impl true
   def render(assigns) do
     ~H"""
@@ -125,6 +144,7 @@ defmodule SpaceTradersWeb.MissionControlLive do
       <div id="glance" class="grid grid-cols-1 gap-3 md:grid-cols-[400px_1fr] md:gap-5">
         <div class="space-y-3">
           <.health_card state={@health.state} reason={@health.reason} checks={@health.checks} />
+          <.credits_card credits={@credits} flash={@credits_flash} />
         </div>
         <div class="space-y-3">
           <.motion_card :if={@motion} motion={@motion} sold={sold(@flashes)} />
@@ -182,6 +202,95 @@ defmodule SpaceTradersWeb.MissionControlLive do
         </div>
       </div>
     </.card>
+    """
+  end
+
+  attr :credits, :map, default: nil
+  attr :flash, :integer, default: nil
+
+  # Balance (counting up), growth over the Generation and the 6 h Net Earnings.
+  defp credits_card(assigns) do
+    assigns = assign(assigns, :c, assigns.credits || %{})
+
+    ~H"""
+    <.card id="credits-card">
+      <.eyebrow>Credits</.eyebrow>
+      <div class="mt-1.5">
+        <.credits_ticker
+          :if={@c[:balance]}
+          id="credits-balance"
+          value={@c.balance}
+          flash={@flash}
+          size={36}
+        />
+        <span :if={!@c[:balance]} class="num text-4xl font-semibold text-dim">—</span>
+      </div>
+      <div class="mt-2 flex items-end justify-between gap-3">
+        <div id="credits-growth" class="num text-sm text-muted">
+          <span class={@c[:growth] && @c.growth < 0 && "text-error"}>
+            {format_signed(@c[:growth])}
+          </span>
+          <span class="text-dim"> this Generation</span>
+        </div>
+        <.growth_line id="credits-growth-line" series={@c[:series] || []} />
+      </div>
+      <div class="mt-3 border-t border-line pt-2.5">
+        <div class="flex items-baseline justify-between gap-3">
+          <span id="credits-rate-window" class="text-xs text-dim">
+            Net Earnings · {rate_window(@c[:since])}
+          </span>
+          <span id="credits-rate" class="num text-xl font-semibold">
+            {format_signed(@c[:net])}
+          </span>
+        </div>
+        <p :if={@c[:per_hour]} class="num mt-0.5 text-right text-xs text-dim">
+          {format_signed(@c.per_hour)} / h after fuel
+        </p>
+      </div>
+    </.card>
+    """
+  end
+
+  defp rate_window(%DateTime{} = since), do: "since #{Calendar.strftime(since, "%H:%M")}"
+  defp rate_window(_full), do: "last 6 h"
+
+  attr :id, :string, required: true
+  attr :series, :list, required: true
+
+  # The balance over the Generation as one line; flat and empty when under two points.
+  defp growth_line(assigns) do
+    values = Enum.map(assigns.series, & &1.credits)
+    {low, high} = Enum.min_max(values, fn -> {0, 0} end)
+    span = max(high - low, 1)
+    last = max(length(values) - 1, 1)
+
+    points =
+      values
+      |> Enum.with_index()
+      |> Enum.map_join(" ", fn {v, i} ->
+        "#{Float.round(i * 100 / last, 1)},#{Float.round(28 - (v - low) * 26 / span, 1)}"
+      end)
+
+    assigns = assign(assigns, points: points, enough: length(values) >= 2)
+
+    ~H"""
+    <svg
+      id={@id}
+      viewBox="0 0 100 30"
+      preserveAspectRatio="none"
+      class="h-8 w-28 flex-none"
+      aria-hidden="true"
+    >
+      <polyline
+        :if={@enough}
+        points={@points}
+        fill="none"
+        stroke="currentColor"
+        stroke-width="1.5"
+        vector-effect="non-scaling-stroke"
+        class="text-trading"
+      />
+    </svg>
     """
   end
 end
