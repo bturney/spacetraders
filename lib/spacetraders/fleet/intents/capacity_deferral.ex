@@ -77,7 +77,7 @@ defmodule SpaceTraders.Fleet.Intents.CapacityDeferral do
   def observe(%Disposition{reason: reason}, attempt, %DateTime{} = since) do
     :telemetry.execute(
       [:spacetraders, :intent, :capacity_deferral],
-      %{count: 1, deferred_seconds: max(DateTime.diff(DateTime.utc_now(), since), 0)},
+      %{count: 1, deferred_seconds: max(DateTime.diff(SpaceTraders.Clock.utc_now(), since), 0)},
       %{reason: reason, work: work(attempt)}
     )
   end

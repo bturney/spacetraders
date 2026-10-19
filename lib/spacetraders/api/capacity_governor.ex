@@ -59,6 +59,8 @@ defmodule SpaceTraders.API.CapacityGovernor do
   require Logger
 
   alias SpaceTraders.API.OperationInventory.Operation
+  alias SpaceTraders.Clock
+  alias SpaceTraders.Simulation.{NavigationClock, NavigationParticipant}
 
   defmodule Admission do
     @moduledoc "A production API admission held until the request completes."
@@ -149,7 +151,7 @@ defmodule SpaceTraders.API.CapacityGovernor do
         unavailable()
 
       :test_disabled ->
-        %Disposition{status: :proceed, reason: :test_disabled, observed_at: DateTime.utc_now()}
+        %Disposition{status: :proceed, reason: :test_disabled, observed_at: Clock.utc_now()}
 
       %Disposition{} = disposition ->
         disposition
@@ -161,6 +163,14 @@ defmodule SpaceTraders.API.CapacityGovernor do
           {:ok, Admission.t() | nil} | {:error, :capacity_unavailable}
   def admit(%Operation{} = operation, attrs \\ %{}, name \\ __MODULE__) when is_map(attrs) do
     case capacity_call(name, {:admit, operation, attrs}) do
+      :test_disabled -> {:ok, nil}
+      result -> result
+    end
+  end
+
+  @doc "Atomic live admission without blocking a semantic-time owner. Deferral reserves nothing."
+  def try_admit(%Operation{} = operation, attrs \\ %{}, name \\ __MODULE__) do
+    case capacity_call(name, {:try_admit, operation, attrs}) do
       :test_disabled -> {:ok, nil}
       result -> result
     end
@@ -179,7 +189,7 @@ defmodule SpaceTraders.API.CapacityGovernor do
   end
 
   defp unavailable do
-    now = DateTime.utc_now()
+    now = Clock.utc_now()
 
     %Disposition{
       status: :unavailable,
@@ -208,8 +218,13 @@ defmodule SpaceTraders.API.CapacityGovernor do
     if Process.whereis(name), do: GenServer.cast(name, {:protocol_rejected, retry_after_seconds})
   end
 
+  @doc "A finite protocol-token release, not evidence of an HTTP rejection."
+  def protocol_deferred(%DateTime{} = retry_at, name \\ __MODULE__),
+    do: GenServer.cast(name, {:protocol_deferred, retry_at})
+
   @impl true
   def init(opts) do
+    if NavigationClock.enabled?(), do: NavigationClock.register(self(), __MODULE__)
     config = Application.get_env(:spacetraders, __MODULE__, [])
 
     max_in_flight = Keyword.get(opts, :max_in_flight, Keyword.get(config, :max_in_flight, 10))
@@ -228,6 +243,8 @@ defmodule SpaceTraders.API.CapacityGovernor do
        in_flight: %{},
        queue: [],
        sequence: 0,
+       incarnation: System.unique_integer([:positive, :monotonic]),
+       reconsideration: nil,
        backpressure_streak: 0,
        rejection_window: [],
        first_rejection_at: nil,
@@ -238,7 +255,7 @@ defmodule SpaceTraders.API.CapacityGovernor do
        outage: nil,
        probe_base_ms: setting(opts, config, :probe_base_ms, @probe_base_ms),
        probe_max_ms: setting(opts, config, :probe_max_ms, @probe_max_ms),
-       now: Keyword.get(opts, :now, &DateTime.utc_now/0)
+       now: Keyword.get(opts, :now, &Clock.utc_now/0)
      }}
   end
 
@@ -246,23 +263,37 @@ defmodule SpaceTraders.API.CapacityGovernor do
     do: Keyword.get(opts, key, Keyword.get(config, key, default))
 
   @impl true
-  def handle_call({:disposition, operation, attrs}, _from, state) do
+  def handle_call(:simulation_barrier, _from, state),
+    do: {:reply, %{unresolved: map_size(state.in_flight)}, state}
+
+  # Observing a drained instant is not new work and must not invalidate its seal.
+  def handle_call(:diagnostics, from, state),
+    do: handle_capacity_call(:diagnostics, from, state)
+
+  def handle_call(message, from, state),
+    do: NavigationParticipant.work(fn -> handle_capacity_call(message, from, state) end)
+
+  defp handle_capacity_call({:try_admit, operation, attrs}, {caller, _} = from, state) do
+    case interpret(%{operation: operation, attrs: attrs}, state) do
+      %Disposition{status: :proceed} ->
+        request = request(operation, attrs, caller, from, state)
+        # Reuse the same ordering/admission path and reply exactly once.
+        state = %{state | sequence: request.sequence}
+        {:noreply, state |> admit_request(request) |> schedule_reconsideration()}
+
+      disposition ->
+        {:reply, {:defer, disposition}, schedule_reconsideration(state)}
+    end
+  end
+
+  defp handle_capacity_call({:disposition, operation, attrs}, _from, state) do
     {:reply, interpret(%{operation: operation, attrs: attrs}, state), state}
   end
 
   # Each caller is monitored: one that dies while queued or holding an
   # admission releases its place without any outcome being recorded.
-  def handle_call({:admit, operation, attrs}, {caller, _tag} = from, state) do
-    request = %{
-      from: from,
-      monitor: Process.monitor(caller),
-      operation: operation,
-      attrs: attrs,
-      id: Integer.to_string(state.sequence + 1),
-      requested_at: now(state),
-      requested_ms: monotonic_ms(),
-      sequence: state.sequence + 1
-    }
+  defp handle_capacity_call({:admit, operation, attrs}, {caller, _tag} = from, state) do
+    request = request(operation, attrs, caller, from, state)
 
     state
     |> Map.update!(:queue, &[request | &1])
@@ -271,7 +302,7 @@ defmodule SpaceTraders.API.CapacityGovernor do
     |> then(&{:noreply, &1})
   end
 
-  def handle_call(:diagnostics, _from, state) do
+  defp handle_capacity_call(:diagnostics, _from, state) do
     now = now(state)
 
     deferred =
@@ -299,7 +330,10 @@ defmodule SpaceTraders.API.CapacityGovernor do
   end
 
   @impl true
-  def handle_cast({:complete, id, status}, state) do
+  def handle_cast(message, state),
+    do: NavigationParticipant.work(fn -> handle_capacity_cast(message, state) end)
+
+  defp handle_capacity_cast({:complete, id, status}, state) do
     case Map.pop(state.in_flight, id) do
       {nil, _in_flight} ->
         {:noreply, state}
@@ -310,7 +344,7 @@ defmodule SpaceTraders.API.CapacityGovernor do
     end
   end
 
-  def handle_cast({:protocol_rejected, retry_after_seconds}, state) do
+  defp handle_capacity_cast({:protocol_rejected, retry_after_seconds}, state) do
     state =
       state
       |> note_rejection(retry_after_seconds)
@@ -319,8 +353,20 @@ defmodule SpaceTraders.API.CapacityGovernor do
     {:noreply, dispatch(state)}
   end
 
+  defp handle_capacity_cast({:protocol_deferred, retry_at}, state) do
+    current = state.ordinary_delayed_until
+    until = if future?(current, retry_at), do: current, else: retry_at
+    {:noreply, dispatch(%{state | ordinary_delayed_until: until})}
+  end
+
   @impl true
-  def handle_info({:DOWN, monitor, :process, _caller, _reason}, state) do
+  def handle_info({:simulation_wake, reference, message}, state),
+    do: NavigationClock.work(fn -> handle_capacity_info(message, state) end, reference)
+
+  def handle_info(message, state),
+    do: NavigationParticipant.work(fn -> handle_capacity_info(message, state) end)
+
+  defp handle_capacity_info({:DOWN, monitor, :process, _caller, _reason}, state) do
     abandoned? = &(&1.monitor == monitor)
 
     {:noreply,
@@ -331,7 +377,8 @@ defmodule SpaceTraders.API.CapacityGovernor do
      })}
   end
 
-  def handle_info(:reconsider, state) do
+  defp handle_capacity_info({:reconsider, token}, %{reconsideration: {_, token, _}} = state) do
+    state = %{state | reconsideration: nil}
     now = now(state)
 
     ordinary_delayed_until =
@@ -343,6 +390,21 @@ defmodule SpaceTraders.API.CapacityGovernor do
     {:noreply, dispatch(%{state | ordinary_delayed_until: ordinary_delayed_until})}
   end
 
+  defp handle_capacity_info({:reconsider, _stale}, state), do: {:noreply, state}
+
+  defp request(operation, attrs, caller, from, state) do
+    %{
+      from: from,
+      monitor: Process.monitor(caller),
+      operation: operation,
+      attrs: attrs,
+      id: "#{state.incarnation}:#{state.sequence + 1}",
+      requested_at: now(state),
+      requested_ms: semantic_ms(state),
+      sequence: state.sequence + 1
+    }
+  end
+
   defp record_outcome(state, request, status)
        when status in 200..299 or (status in 400..499 and status != 429) do
     if state.backpressure_streak > 0 do
@@ -350,7 +412,7 @@ defmodule SpaceTraders.API.CapacityGovernor do
         [:spacetraders, :api, :capacity, :recovered],
         %{count: 1},
         %{
-          recovery_ms: monotonic_ms() - state.first_rejection_at,
+          recovery_ms: max(semantic_ms(state) - state.first_rejection_at, 0),
           rejected_before: length(state.rejection_window)
         }
       )
@@ -427,7 +489,7 @@ defmodule SpaceTraders.API.CapacityGovernor do
   end
 
   defp note_rejection(state, retry_after_seconds) do
-    now_ms = monotonic_ms()
+    now_ms = semantic_ms(state)
     rejection_window = [now_ms | state.rejection_window]
 
     ordinary_delayed_until =
@@ -435,7 +497,7 @@ defmodule SpaceTraders.API.CapacityGovernor do
 
     :telemetry.execute(
       [:spacetraders, :api, :capacity, :reject],
-      %{count: 1, protocol_rejections: recent_rejection_count(rejection_window)},
+      %{count: 1, protocol_rejections: recent_rejection_count(rejection_window, state)},
       %{
         retry_after_seconds: retry_after_seconds,
         ordinary_delayed: not is_nil(ordinary_delayed_until)
@@ -445,7 +507,7 @@ defmodule SpaceTraders.API.CapacityGovernor do
     Logger.info(
       "API capacity protocol rejection",
       retry_after_seconds: retry_after_seconds,
-      protocol_rejections: recent_rejection_count(rejection_window)
+      protocol_rejections: recent_rejection_count(rejection_window, state)
     )
 
     streak = state.backpressure_streak + 1
@@ -486,7 +548,7 @@ defmodule SpaceTraders.API.CapacityGovernor do
 
     :telemetry.execute(
       [:spacetraders, :api, :capacity, :governor],
-      %{count: 1, queue_time: max(monotonic_ms() - request.requested_ms, 0)},
+      %{count: 1, queue_time: max(semantic_ms(state) - request.requested_ms, 0)},
       %{
         operation_id: request.operation.id,
         lane: admission.lane,
@@ -520,18 +582,55 @@ defmodule SpaceTraders.API.CapacityGovernor do
     do: Enum.any?(state.in_flight, fn {_id, request} -> request.probe == kind end)
 
   defp schedule_reconsideration(state) do
+    # Only a real policy boundary is future work. Contention and an in-flight
+    # probe need completion/owner death, not one-second polling or a false lease
+    # to advance past unresolved transport. Global pressure supersedes families.
     retry_at =
-      state.queue
-      |> Enum.map(&interpret(&1, state).retry_at)
+      release_times(state)
       |> Enum.reject(&is_nil/1)
+      |> Enum.filter(&DateTime.after?(&1, now(state)))
       |> Enum.min(DateTime, fn -> nil end)
 
-    if retry_at do
-      ms = max(DateTime.diff(retry_at, now(state), :millisecond), 0)
-      Process.send_after(self(), :reconsider, ms + 1)
-    end
+    case state.reconsideration do
+      {_, _, ^retry_at} ->
+        state
 
-    state
+      previous ->
+        if previous, do: Clock.cancel_timer(elem(previous, 0))
+
+        scheduled =
+          if retry_at do
+            token = make_ref()
+            delay = max(DateTime.diff(retry_at, now(state), :millisecond), 0)
+            {Clock.send_after(self(), {:reconsider, token}, delay), token, retry_at}
+          end
+
+        %{state | reconsideration: scheduled}
+    end
+  end
+
+  defp release_times(%{outage: %{probe_at: at}} = state),
+    do: if(probe_in_flight?(state, :outage), do: [], else: [at])
+
+  defp release_times(%{backpressure_streak: streak} = state) when streak > 0 do
+    if probe_in_flight?(state, :protocol) do
+      []
+    else
+      [state.pressure_probe_at, state.ordinary_delayed_until]
+      |> Enum.reject(&is_nil/1)
+      |> Enum.max(DateTime, fn -> nil end)
+      |> List.wrap()
+    end
+  end
+
+  defp release_times(state) do
+    if future?(state.ordinary_delayed_until, now(state)) do
+      [state.ordinary_delayed_until]
+    else
+      Enum.flat_map(state.failures, fn {family, failure} ->
+        if probe_in_flight?(state, {:scoped, family}), do: [], else: [failure.probe_at]
+      end)
+    end
   end
 
   # The one policy both advisory disposition and live dispatch apply.
@@ -661,11 +760,11 @@ defmodule SpaceTraders.API.CapacityGovernor do
   def backpressure_state(_streak), do: :none
 
   defp recent_rejections(state) do
-    recent_rejection_count(state.rejection_window)
+    recent_rejection_count(state.rejection_window, state)
   end
 
-  defp recent_rejection_count(rejection_window) do
-    cutoff = monotonic_ms() - @rejection_window_ms
+  defp recent_rejection_count(rejection_window, state) do
+    cutoff = semantic_ms(state) - @rejection_window_ms
 
     Enum.count(rejection_window, &(&1 >= cutoff))
   end
@@ -681,5 +780,5 @@ defmodule SpaceTraders.API.CapacityGovernor do
 
   defp now(state), do: state.now.()
 
-  defp monotonic_ms, do: System.monotonic_time(:millisecond)
+  defp semantic_ms(state), do: DateTime.to_unix(now(state), :millisecond)
 end
