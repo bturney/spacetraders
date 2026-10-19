@@ -107,7 +107,7 @@ defmodule SpaceTraders.MissionControl.ShipStatusTest do
 
     status = status(ctx)
     assert status.kind == :stuck
-    assert status.reason == "Allocation stalled: a step lost its authority to act"
+    assert status.reason == "Fleet planning stalled: a Ship may no longer act on its step"
     assert status.next_attempt_at == nil
     assert status.phrase =~ "checks every minute"
   end
@@ -118,7 +118,7 @@ defmodule SpaceTraders.MissionControl.ShipStatusTest do
 
     assert %{
              kind: :stuck,
-             reason: "Allocation stalled: markets are overdue and nobody refreshes them"
+             reason: "Fleet planning stalled: markets are overdue and nobody refreshes them"
            } =
              status(ctx)
   end

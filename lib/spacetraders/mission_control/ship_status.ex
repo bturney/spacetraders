@@ -10,7 +10,7 @@ defmodule SpaceTraders.MissionControl.ShipStatus do
       (the allocation is re-checked every minute);
     * `:waiting` (Waiting on purpose) - unassigned during a Neutral Wait, with
       the wait's next check; an unassigned Ship outside a Neutral Wait waits
-      for the next allocation with no check time;
+      for its next job with no check time;
     * `:busy_not_earning` - with at least an hour of its own history, 3 or
       more skipped buys in 30 minutes, or last-hour Net Earnings below 40% of
       its average per hour over the last 6 h (or its whole history if younger);
@@ -46,17 +46,17 @@ defmodule SpaceTraders.MissionControl.ShipStatus do
   @skipped_buys 3
 
   @stall_reasons %{
-    stale_revision_portfolio: "Allocation stalled: work belongs to an older Strategy revision",
-    authority_blocked_intent: "Allocation stalled: a step lost its authority to act",
+    stale_revision_portfolio: "Fleet planning stalled: its trades follow an old plan",
+    authority_blocked_intent: "Fleet planning stalled: a Ship may no longer act on its step",
     overdue_demands_without_coverage:
-      "Allocation stalled: markets are overdue and nobody refreshes them"
+      "Fleet planning stalled: markets are overdue and nobody refreshes them"
   }
 
   @doc "The five statuses, in display order."
   def statuses, do: @statuses
 
   @doc "Plain wording of an allocation stall reason."
-  def stall_reason(reason), do: Map.get(@stall_reasons, reason, "Allocation stalled")
+  def stall_reason(reason), do: Map.get(@stall_reasons, reason, "Fleet planning stalled")
 
   @doc "Metric label value of a status."
   def metric_label(status), do: Atom.to_string(status)
@@ -336,7 +336,7 @@ defmodule SpaceTraders.MissionControl.ShipStatus do
   end
 
   defp working(nil, _intent, _facts),
-    do: {:waiting, %{phrase: "Waiting for the next allocation"}}
+    do: {:waiting, %{phrase: "Waiting for its next job"}}
 
   defp working(%{coverage?: true, id: id}, _intent, facts) do
     refreshed = Map.get(facts.refreshed, id, 0)

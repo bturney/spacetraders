@@ -177,7 +177,7 @@ defmodule SpaceTraders.MissionControl.PlanHealthTest do
         PlanHealth.evaluate(
           facts(
             stall: %{
-              reason: "Allocation stalled: a step lost its authority to act",
+              reason: "Fleet planning stalled: a Ship may no longer act on its step",
               since: at(-120)
             }
           ),
@@ -185,7 +185,7 @@ defmodule SpaceTraders.MissionControl.PlanHealthTest do
         )
 
       assert health.state == :off
-      assert health.reason == "Allocation stalled: a step lost its authority to act, since 11:58."
+      assert health.reason == "Fleet planning stalled: a Ship may no longer act on its step, since 11:58."
       assert check(health, :ships_moving).state == :red
     end
 
