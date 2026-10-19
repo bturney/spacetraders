@@ -75,13 +75,36 @@ navigation profile. The transaction selector is a supporting Elixir observation
 seam for separately pinned private fixture orchestration, not authorization to
 change its world artifact, budgets or qualification claim.
 
-The implemented bounded native-time actual-app/PG/HTTP checks **did not demonstrate
+The original bounded native-time actual-app/PG/HTTP checks **did not demonstrate
 a paid transaction**. Both the full generated world and a declared two-existing-
 Market fixture exhausted the transaction observation window after normal discovery
 and navigation, with zero paid HTTP receipts. Failed startup/diagnostic controls
 and both no-transaction outcomes are retained; all owned stacks were stopped and
-shutdown inspected. Component accounting passes do not satisfy this remaining
-actual-bot transaction gate. No completed-trip or exact Net Earnings is claimed.
+shutdown inspected. Component accounting passes alone do not establish an
+actual-bot transaction.
+
+After the route-response and UUID-accounting repairs, one cause-directed native
+fixture attempt passed the narrow paid-transaction gate. Executed application
+`368838b6fa30889200d20ee29004de12f27d6fc3` and private world
+`62a2c6e74246b837903d0c360fb6fd24c15843a9` remain the actual source pins, not the
+later integration revisions. One preparation passed 116 EUnit tests; the single
+actual attempt used the unchanged seed, default resources, immutable Strategy,
+50,000-credit floor and existing limits. A real 429 preceded one successful 201;
+these were two mutation records within **one** fixture attempt, not a replay.
+
+Prepared quote, HTTP receipt, causal charge and authoritative credit observation
+agree: **38 MACHINERY × 2,581 = 98,078 credits**, balance **175,000 → 76,922**.
+The charge stays within the prepared exposure and above the floor. The existing
+post-exit read-only reconciliation passed its units, price, credit-delta and
+issuing-root/Commitment/decision joins. The attempt used 93 forwarded requests
+and 61.218 wall seconds; owned application/world/database shutdown was verified.
+Original successful/failed evidence was unchanged. The one-attempt allowance is
+exhausted; this result authorizes no rerun.
+
+This is a purchase/accounting regression, not completed-sale, supporting-cost,
+full-period or current-integration-source qualification. **Exact Net Earnings
+remains unknown**, and overall #786 acceptance is not inferred from this scoped
+pass. Private receipts, raw observations, database bytes and source remain private.
 
 Use robust directional comparisons under documented conditions. Preserve relevant
 declared variations and legitimate downstream divergence. Close or
