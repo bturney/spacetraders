@@ -152,6 +152,7 @@ defmodule SpaceTraders.ScenarioSeeds do
     portfolio = publish(operator, revision, generation, plan)
     insert_intents(ships, portfolio, plan, now)
     insert_earnings(generation, ships, plan, now)
+    insert_credits(agent, generation, now)
     if situation == :waiting, do: neutral_wait(generation, revision, now)
 
     %{
@@ -458,6 +459,38 @@ defmodule SpaceTraders.ScenarioSeeds do
 
     rows |> Enum.chunk_every(500) |> Enum.each(&Repo.insert_all(EarningsRecord, &1))
   end
+
+  # The Generation began with the Ships (7 h ago) on 175 000 credits; the
+  # balance was observed every 30 minutes since, rising 2 400 each time (the last 30 minutes ago).
+  defp insert_credits(agent, generation, now) do
+    start = now |> DateTime.add(-7 * 3600) |> DateTime.truncate(:second)
+
+    Repo.update_all(from(g in Generation, where: g.id == ^generation.id),
+      set: [inserted_at: start, starting_credits: 175_000]
+    )
+
+    rows =
+      for step <- 0..13 do
+        credits = 175_000 + step * 2_400
+
+        %{
+          id: Ecto.UUID.generate(),
+          agent_id: agent.id,
+          subject: "agent:#{agent.symbol}",
+          operation_id: "get-my-agent",
+          dependency_keys: [],
+          facts: %{"response" => %{"credits" => credits}},
+          response_fingerprint: "seed-#{credits}",
+          observed_at: DateTime.add(start, step * 1_800 + 60, :second) |> usec(),
+          fleet_generation_id: generation.id,
+          inserted_at: usec(start)
+        }
+      end
+
+    Repo.insert_all(SpaceTraders.Evidence.Observation, rows)
+  end
+
+  defp usec(at), do: DateTime.add(at, 0, :microsecond)
 
   # {Net Earnings, minutes ago}. Steady trade is a round trip of about 1 000
   # every 30 minutes; a Ship that stopped earning made 5 700 three hours ago
