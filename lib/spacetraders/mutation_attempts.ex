@@ -304,7 +304,9 @@ defmodule SpaceTraders.MutationAttempts do
       [attempt],
       attempt.operation_id == "register" and attempt.operator_id == ^operator_id
     )
-    |> order_by([attempt], desc: attempt.prepared_at, desc: attempt.id)
+    # Serialized registrations may share one semantic instant. Their durable
+    # creation chronology, not a random UUID, decides recovery within that instant.
+    |> order_by([attempt], desc: attempt.prepared_at, desc: attempt.inserted_at, desc: attempt.id)
     |> limit(1)
     |> preload(:outcomes)
     |> Repo.one()
