@@ -569,8 +569,10 @@ defmodule SpaceTraders.FleetRefitTest do
 
       attempts = SpaceTraders.MutationAttempts.list_for_agent(agent)
       assert length(attempts) == expected_purchases + 1
-      assert List.last(attempts).state == "succeeded"
-      assert List.last(attempts).operation_id == "install-ship-module"
+      # Purchase and installation can share a frozen semantic instant; UUID
+      # ordering is not evidence of action order. Assert the unique operation.
+      assert [installation] = Enum.filter(attempts, &(&1.operation_id == "install-ship-module"))
+      assert installation.state == "succeeded"
       assert Enum.all?(attempts, &(&1.provenance["intent_id"] == intent.id))
     end
   end
