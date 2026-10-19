@@ -4,7 +4,6 @@ import argparse
 import base64
 from datetime import datetime, timezone
 import hashlib
-import html
 import json
 import os
 from pathlib import Path
@@ -587,27 +586,12 @@ def derived(metadata, sections):
 
 
 def render_html(bundle):
-    """Self-contained, inert HTML. No JS, external assets, live DB or Grafana."""
-    esc = html.escape
-    graph = bundle["graph"]
-    content = ['<!doctype html><html lang="en"><meta charset="utf-8"><title>Attempt evidence</title>',
-               '<h1>Attempt evidence</h1><p>Integrity verified; checksums are not a signature or qualification.</p>',
-               '<pre>' + esc(json.dumps(bundle["summary"], indent=2)) + '</pre><h2>Retained records</h2><ul>']
-    for node in graph["nodes"]:
-        content.append('<li><a href="#' + esc(node, quote=True) + '">' + esc(node) + '</a></li>')
-    content.append('</ul>')
-    tables = bundle["sections"]["database"].get("data", {}).get("tables", {})
-    indexes = {table: {row[PRIMARY_KEYS.get(table, "id")]: row for row in rows} for table, rows in tables.items()}
-    for node, record in graph["nodes"].items():
-        content.append('<section id="' + esc(node, quote=True) + '"><h3>' + esc(node) + '</h3><pre>' + esc(json.dumps(indexes[record["table"]][record["id"]], indent=2)) + '</pre><ul>')
-        for edge in graph["edges"]:
-            if node in [edge["from"], edge["to"]]:
-                target = edge["to"] if node == edge["from"] else edge["from"]
-                content.append('<li>' + esc(edge["relation"]) + ' <a href="#' + esc(target, quote=True) + '">' + esc(target) + '</a></li>')
-        content.append('</ul></section>')
-    for name in ["world", "time"]:
-        content.append('<h2>' + name + '</h2><pre>' + esc(json.dumps(bundle["sections"][name], indent=2)) + '</pre>')
-    return '\n'.join(content) + '</html>'
+    """Compatibility hook; investigation uses the same validated causal graph."""
+    if __package__:
+        from . import attempt_report
+    else:
+        import attempt_report
+    return attempt_report.render_html(attempt_report.investigate(bundle))
 
 
 def build(metadata, sections):

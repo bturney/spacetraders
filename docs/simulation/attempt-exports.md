@@ -130,6 +130,12 @@ observations and demand/Intelligence/credit links. Unknown reference formats and
 missing causes remain explicit; a broken known retained join rejects export.
 Net Earnings remains unknown without a complete attributed monetary ledger.
 
+The HTML reader now delegates to the [per-attempt investigation](attempt-reports.md)
+projection. Use `scripts/attempt_report.py` for HTML **and** machine-readable JSON
+with a report checksum manifest and trusted source-receipt disclosure. The older
+`read --html` hook remains available with conservative internal-integrity-only
+disclosure; it does not claim the report projection checked a separate receipt.
+
 Publication writes a mode-`0600` staging file, fsyncs and verifies it, then uses an
 exclusive same-filesystem hard link and directory fsync. Concurrent/repeated
 publication cannot overwrite an existing output. A crash before the link leaves
