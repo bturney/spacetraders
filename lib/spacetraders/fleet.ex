@@ -50,8 +50,8 @@ defmodule SpaceTraders.Fleet do
 
   @doc """
   Subscribes the caller to Intent status changes of every Ship, as
-  `{:intent_changed, ship_id}`: a prompt to re-read, never data. It may arrive
-  before the change commits, so readers re-read after a short delay.
+  `{:intent_changed, ship_id}`: a prompt to re-read, never data. It arrives
+  after the change commits.
   """
   def subscribe_intent_changes,
     do: Phoenix.PubSub.subscribe(SpaceTraders.PubSub, "intent_changes")
