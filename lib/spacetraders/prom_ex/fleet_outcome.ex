@@ -11,19 +11,6 @@ defmodule SpaceTraders.PromEx.FleetOutcome do
         measurement: :count,
         tags: [:status, :ship_type],
         description: "Current Ships by their one status and Ship type."
-      ),
-      counter(
-        [:spacetraders, :outcome, :fleet, :recomputes, :total],
-        event_name: [:spacetraders, :outcome, :fleet, :projection],
-        tags: [:family],
-        description:
-          "Successful coalesced full-vector Fleet/chart projections by bounded state family."
-      ),
-      counter(
-        [:spacetraders, :outcome, :fleet, :projection, :failures, :total],
-        event_name: [:spacetraders, :outcome, :fleet, :projection_failed],
-        tags: [:family],
-        description: "Dropped Fleet/chart projections by bounded state family."
       )
     ])
   end
