@@ -46,6 +46,7 @@ defmodule SpaceTraders.MissionControl.PlanHealthTest do
 
       assert health.state == :on
       assert health.reason == "All four checks pass."
+
       assert Enum.map(health.checks, & &1.label) ==
                ["Earning", "Ships moving", "Prices fresh", "Trades as expected"]
 
@@ -175,7 +176,10 @@ defmodule SpaceTraders.MissionControl.PlanHealthTest do
       health =
         PlanHealth.evaluate(
           facts(
-            stall: %{reason: "Allocation stalled: a step lost its authority to act", since: at(-120)}
+            stall: %{
+              reason: "Allocation stalled: a step lost its authority to act",
+              since: at(-120)
+            }
           ),
           @now
         )
