@@ -365,10 +365,26 @@ defmodule SpaceTraders.API do
     # Observe before waiting for capacity so shadow queue_time spans the real
     # limiter wait. Recorded and legacy dispatch recheck authorization at send.
     # Missing governor authority fails closed before any transport.
-    case admit_capacity(operation, opts) do
+    case admit_capacity(operation, path, token, opts) do
       {:ok, capacity} ->
-        RateLimiter.acquire()
-        send_request(method, path, token, opts, operation, shadow, capacity)
+        case acquire_protocol() do
+          :ok ->
+            send_request(method, path, token, opts, operation, shadow, capacity)
+
+          {:defer, retry_at} ->
+            CapacityGovernor.protocol_deferred(retry_at)
+
+            complete_shadow(
+              shadow,
+              capacity,
+              :not_dispatched,
+              :suppressed,
+              {:error, :capacity_unavailable}
+            )
+
+          {:error, reason} ->
+            complete_shadow(shadow, capacity, :not_dispatched, :suppressed, {:error, reason})
+        end
 
       {:error, reason} ->
         ShadowAdmission.observe_outcome(shadow, :not_dispatched, :suppressed)
@@ -381,8 +397,37 @@ defmodule SpaceTraders.API do
     {operation, ShadowAdmission.observe_request(operation, admission_attrs(opts))}
   end
 
-  defp admit_capacity(operation, opts),
-    do: CapacityGovernor.admit(operation, admission_attrs(opts))
+  defp admit_capacity(operation, path, token, opts) do
+    # A semantic-time owner must return to its durable continuation rather than
+    # block the drain in an admission queue or a transport retry sleep.
+    if semantic_time?() do
+      attrs = Map.put(admission_attrs(opts), :request_key, pending_request_key(path, token, opts))
+
+      case CapacityGovernor.try_admit(operation, attrs) do
+        {:defer, _disposition} -> {:error, :capacity_unavailable}
+        result -> result
+      end
+    else
+      CapacityGovernor.admit(operation, admission_attrs(opts))
+    end
+  end
+
+  # Pending ranking must distinguish HTTP subjects/bodies and selected attempts,
+  # but must never retain a raw credential or payload in governor diagnostics.
+  defp pending_request_key(path, token, opts) do
+    attempt_id = opts[:recorded_attempt] && opts[:recorded_attempt].id
+
+    :crypto.hash(
+      :sha256,
+      :erlang.term_to_binary({path, token, opts[:json], opts[:params], attempt_id})
+    )
+  end
+
+  defp acquire_protocol do
+    if semantic_time?(), do: RateLimiter.try_acquire(), else: RateLimiter.acquire()
+  end
+
+  defp semantic_time?, do: not is_nil(Application.get_env(:spacetraders, :clock))
 
   defp admission_attrs(opts) do
     demand_attrs =
@@ -519,6 +564,13 @@ defmodule SpaceTraders.API do
       {:ok, %{status: status, body: body} = response} when status in 400..499 ->
         emit_request_metric(operation, path, status)
 
+        # This is a real transport response, independently of whether its
+        # durable outcome write succeeds. Suppressed dispatch has no response
+        # and never reaches here. Native transparent retries report in the hook.
+        if status == 429 and (semantic_time?() or opts[:retry] == false) do
+          report_protocol_rejection(retry_after_delay(response))
+        end
+
         evidence =
           case attempt do
             %Attempt{operation_id: "register"} ->
@@ -532,15 +584,6 @@ defmodule SpaceTraders.API do
           :ok ->
             case mutation_authorized_after_response(status, method, token) do
               :ok ->
-                # A still-authorized protocol rejection is a real capacity signal.
-                # Our own suppression is not, so the Governor never records a
-                # Retry-After window for a request it did not have to run.
-                # Requests that do not retry never reach the transport retry
-                # hook, which reports every retried rejection itself.
-                if status == 429 and opts[:retry] == false do
-                  report_protocol_rejection(Req.Response.get_retry_after(response))
-                end
-
                 complete_shadow(
                   shadow,
                   capacity,
@@ -573,7 +616,11 @@ defmodule SpaceTraders.API do
               capacity,
               status,
               shadow_outcome(status),
-              {:error, SpaceTraders.API.Error.new(status, "unexpected response")}
+              read_retry_result(
+                method,
+                status,
+                {:error, SpaceTraders.API.Error.new(status, "unexpected response")}
+              )
             )
 
           {:error, reason} ->
@@ -610,7 +657,11 @@ defmodule SpaceTraders.API do
                   capacity,
                   :unknown,
                   :unknown,
-                  {:error, SpaceTraders.API.Error.transport(redacted_reason)}
+                  read_retry_result(
+                    method,
+                    :unknown,
+                    {:error, SpaceTraders.API.Error.transport(redacted_reason)}
+                  )
                 )
 
               {:error, persistence_reason} ->
@@ -709,6 +760,12 @@ defmodule SpaceTraders.API do
 
   defp shadow_outcome(status) when status in 500..599, do: :server_error
   defp shadow_outcome(_status), do: :unknown
+
+  defp read_retry_result(:get, status, result) when status in 500..599 or status == :unknown do
+    if semantic_time?(), do: {:error, :capacity_unavailable}, else: result
+  end
+
+  defp read_retry_result(_method, _status, result), do: result
 
   defp mark_mutation_sent(nil), do: {:ok, nil}
 
@@ -878,9 +935,15 @@ defmodule SpaceTraders.API do
   end
 
   defp maybe_put_retry(options, opts) do
-    case Keyword.get(opts, :retry, :default) do
-      :default -> options
-      retry -> Keyword.put(options, :retry, retry)
+    if semantic_time?() do
+      # The durable owner retries after the live governor/protocol release. Req
+      # never sleeps or transparently resends a mutation in controlled time.
+      Keyword.put(options, :retry, false)
+    else
+      case Keyword.get(opts, :retry, :default) do
+        :default -> options
+        retry -> Keyword.put(options, :retry, retry)
+      end
     end
   end
 
@@ -895,9 +958,9 @@ defmodule SpaceTraders.API do
       false
     else
       emit_request_metric(operation_for_retry(path, method), path, 429)
-      report_protocol_rejection(Req.Response.get_retry_after(response))
+      report_protocol_rejection(retry_after_delay(response))
 
-      case Req.Response.get_retry_after(response) do
+      case retry_after_delay(response) do
         delay when is_integer(delay) -> {:delay, delay}
         _ -> true
       end
@@ -933,6 +996,27 @@ defmodule SpaceTraders.API do
        do: CapacityGovernor.protocol_rejected(div(delay_ms + 999, 1_000))
 
   defp report_protocol_rejection(_delay), do: CapacityGovernor.protocol_rejected(0)
+
+  # HTTP-date Retry-After belongs to the same semantic domain as admission;
+  # delta-seconds remain a duration. Malformed guidance must not crash transport.
+  defp retry_after_delay(response) do
+    case Req.Response.get_header(response, "retry-after") do
+      [value] ->
+        case Integer.parse(value) do
+          {seconds, ""} when seconds >= 0 ->
+            seconds * 1_000
+
+          _ ->
+            case Req.Utils.parse_http_date(value) do
+              {:ok, at} -> max(DateTime.diff(at, SpaceTraders.Clock.utc_now(), :millisecond), 0)
+              _ -> nil
+            end
+        end
+
+      _ ->
+        nil
+    end
+  end
 
   defp operation_for_retry(path, method),
     do: OperationInventory.fetch_by_request!(method, path)
