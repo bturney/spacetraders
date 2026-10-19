@@ -6,7 +6,8 @@ defmodule SpaceTraders.Fleet.Intents.BlockedRetry do
   Timeline event for that moment; the Ship's server re-enters the shared Intent
   reconciliation then, exactly as boot recovery does. Each retry that finds the
   step still blocked counts one more retry and doubles the wait, from one
-  minute up to fifteen. Leaving `blocked` clears both.
+  minute up to fifteen. Leaving `blocked` clears both. Entering and leaving stamp `blocked_at` and
+  `recovered_at`, which feed Glance's Just happened events.
 
   The Timeline event commits with the Intent. The Ship server is armed only
   outside a transaction: inside one, the arm waits until the caller's
@@ -36,15 +37,35 @@ defmodule SpaceTraders.Fleet.Intents.BlockedRetry do
           else: changeset
 
       "blocked" ->
-        put_next(changeset, 0)
+        changeset
+        |> put_next(0)
+        |> Ecto.Changeset.change(blocked_at: now(), blocked_reason: reason(changeset))
 
-      _ when before.status == "blocked" ->
-        Ecto.Changeset.change(changeset, next_attempt_at: nil, retries: 0)
+      status when before.status == "blocked" ->
+        changeset
+        |> Ecto.Changeset.change(next_attempt_at: nil, retries: 0)
+        |> recovered(status)
 
       _ ->
         changeset
     end
   end
+
+  defp reason(changeset) do
+    case Ecto.Changeset.get_field(changeset, :blocker) do
+      %{summary: summary} when is_binary(summary) and summary != "" -> summary
+      %{reason: reason} when is_binary(reason) -> reason |> String.replace("_", " ")
+      _ -> nil
+    end
+  end
+
+  # Getting going again (not ending as failed) is a recovery.
+  defp recovered(changeset, status) when status in ["infeasible", "stopped", "superseded"],
+    do: changeset
+
+  defp recovered(changeset, _status), do: Ecto.Changeset.change(changeset, recovered_at: now())
+
+  defp now, do: Clock.utc_now() |> DateTime.truncate(:second)
 
   # A step re-blocked by any write while blocked is a retry that failed again.
   defp retried?(changeset), do: changeset.changes != %{}

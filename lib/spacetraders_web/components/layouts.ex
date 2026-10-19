@@ -81,7 +81,7 @@ defmodule SpaceTradersWeb.Layouts do
         </div>
       </header>
 
-      <main class="mx-auto w-full max-w-[1360px] px-4 py-6 pb-24 sm:px-6 sm:py-8 md:pb-10 lg:px-8">
+      <main class="mx-auto w-full max-w-[1360px] px-4 py-4 pb-[72px] sm:px-6 sm:py-8 md:pb-10 lg:px-8">
         <div class={[@wide && "space-y-6", !@wide && "mx-auto max-w-2xl space-y-6"]}>
           {render_slot(@inner_block)}
         </div>
