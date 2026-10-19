@@ -84,9 +84,12 @@ defmodule SpaceTraders.Fleet do
     |> Enum.sort_by(&name_order(&1.symbol))
   end
 
-  # The game numbers an Agent's Ships with a hexadecimal suffix (`-9`, `-A`,
-  # `-10`): order by prefix, then by that number.
-  defp name_order(symbol) do
+  @doc """
+  Sort key of a Ship symbol in natural name order. The game numbers an
+  Agent's Ships with a hexadecimal suffix (`-9`, `-A`, `-10`): order by
+  prefix, then by that number.
+  """
+  def name_order(symbol) do
     {prefix, suffix} =
       case symbol |> String.split("-") |> Enum.split(-1) do
         {[], [only]} -> {"", only}

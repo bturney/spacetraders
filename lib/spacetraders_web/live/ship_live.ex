@@ -10,32 +10,14 @@ defmodule SpaceTradersWeb.ShipLive do
 
   use SpaceTradersWeb, :live_view
 
-  alias SpaceTraders.{Clock, Fleet, FleetGeneration}
-  alias SpaceTraders.MissionControl.{Channels, ShipWhy}
-
-  @refresh_ms 1_000
-  @chips %{
-    trading: :trading,
-    scouting: :scouting,
-    waiting: :waiting,
-    stuck: :stuck,
-    busy_not_earning: :busy
-  }
+  alias SpaceTraders.Clock
+  alias SpaceTraders.MissionControl.{ShipRow, ShipWhy}
+  alias SpaceTradersWeb.{FleetLive, GrafanaLink}
 
   @impl true
   def mount(%{"ship_symbol" => symbol}, _session, socket) do
-    agent =
-      case FleetGeneration.current_fleet(socket.assigns.current_scope) do
-        {:ok, %{state: :current, agent: agent}} -> agent
-        _ -> nil
-      end
-
-    if agent && connected?(socket) do
-      Fleet.subscribe_ship_state(agent.id)
-      Fleet.subscribe_intent_changes()
-      Channels.subscribe_earnings()
-      Channels.subscribe_allocation()
-    end
+    agent = FleetLive.current_agent(socket.assigns.current_scope)
+    if connected?(socket), do: FleetLive.subscribe(agent)
 
     socket
     |> assign(agent: agent, symbol: symbol, refresh: nil, timer: nil, why: nil)
@@ -54,12 +36,7 @@ defmodule SpaceTradersWeb.ShipLive do
   def handle_info(:overdue, socket), do: {:noreply, socket |> assign(timer: nil) |> load()}
 
   def handle_info(_prompt, %{assigns: %{agent: nil}} = socket), do: {:noreply, socket}
-
-  def handle_info(_prompt, %{assigns: %{refresh: ref}} = socket) when ref != nil,
-    do: {:noreply, socket}
-
-  def handle_info(_prompt, socket),
-    do: {:noreply, assign(socket, refresh: Process.send_after(self(), :refresh, @refresh_ms))}
+  def handle_info(_prompt, socket), do: {:noreply, FleetLive.mark_dirty(socket, :refresh)}
 
   defp load(%{assigns: %{agent: nil}} = socket), do: socket
 
@@ -102,7 +79,7 @@ defmodule SpaceTradersWeb.ShipLive do
       </p>
 
       <div :if={@why} id={"ship-#{@why.ship.symbol}"} class="mt-2 space-y-3">
-        <.card tone={chip(@why.status.kind)}>
+        <.card tone={chip_status(@why.status.kind)}>
           <div class="flex items-center justify-between gap-3">
             <div class="min-w-0">
               <h1 class="text-xl font-medium">{@why.ship.symbol}</h1>
@@ -112,7 +89,7 @@ defmodule SpaceTradersWeb.ShipLive do
                 )}</span>
               </div>
             </div>
-            <.status_chip status={chip(@why.status.kind)} />
+            <.status_chip status={chip_status(@why.status.kind)} />
           </div>
           <div class="mt-2">
             <.route_bar
@@ -122,7 +99,7 @@ defmodule SpaceTradersWeb.ShipLive do
               at={@why.row.at}
               depart_at={@why.row.depart_at}
               arrive_at={@why.row.arrive_at}
-              status={chip(@why.status.kind)}
+              status={chip_status(@why.status.kind)}
               size={:md}
             />
           </div>
@@ -133,7 +110,13 @@ defmodule SpaceTradersWeb.ShipLive do
         </.card>
 
         <.card id="ship-why">
-          <.eyebrow>Why</.eyebrow>
+          <.eyebrow>
+            Why<:right>
+              <a id="ship-grafana" href={grafana(@why)} target="_blank" rel="noopener">
+                Strategy Outcomes ↗
+              </a>
+            </:right>
+          </.eyebrow>
           <p id="why-sentence" class="mt-1">{sentence(@why)}</p>
           <p :if={status_line(@why)} id="why-status" class="mt-1 text-xs text-dim">
             {status_line(@why)}
@@ -144,10 +127,10 @@ defmodule SpaceTradersWeb.ShipLive do
               <div id="ship-gauge" class="num text-2xl">{rate(@why.credits_per_hour)}</div>
             </div>
             <.countdown
-              :if={until(@why)}
+              :if={count_until(@why.row)}
               id="ship-countdown"
-              until={until(@why)}
-              caption={caption(@why)}
+              until={count_until(@why.row)}
+              caption={count_caption(@why.row)}
               size={18}
             />
           </div>
@@ -279,11 +262,10 @@ defmodule SpaceTradersWeb.ShipLive do
 
   defp trade_name(%{good: good, source: source, destination: destination}) do
     name = good |> String.split("_") |> Enum.map_join(" ", &String.capitalize/1)
-    "#{name} #{short(source)}→#{short(destination)}"
+    "#{name} #{code(source)}→#{code(destination)}"
   end
 
-  defp short(nil), do: "—"
-  defp short(symbol), do: symbol |> String.split("-") |> List.last()
+  defp code(symbol), do: ShipRow.waypoint_code(symbol) || "—"
 
   ## Charts
 
@@ -306,16 +288,9 @@ defmodule SpaceTradersWeb.ShipLive do
 
   ## Small helpers
 
-  defp chip(status), do: Map.fetch!(@chips, status)
-
-  defp until(%{row: %{in_transit?: true, arrive_at: at}}), do: at
-  defp until(%{status: %{next_attempt_at: %DateTime{} = at}}), do: at
-  defp until(%{status: %{next_check_at: %DateTime{} = at}}), do: at
-  defp until(_why), do: nil
-
-  defp caption(%{row: %{in_transit?: true}}), do: "to arrival"
-  defp caption(%{status: %{next_attempt_at: %DateTime{}}}), do: "next attempt"
-  defp caption(_why), do: "next check"
+  # This Ship's decisions and earnings in Grafana over the last 6 h.
+  defp grafana(why),
+    do: GrafanaLink.url(:strategy_outcomes, ship: why.ship.symbol, from: "now-6h", to: :now)
 
   defp retry(%{retries: retries, next_attempt_at: at}) when is_integer(retries),
     do: "Retry #{retries}#{if at, do: ", next attempt at #{clock(at)}"}"

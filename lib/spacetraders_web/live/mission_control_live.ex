@@ -2,50 +2,52 @@ defmodule SpaceTradersWeb.MissionControlLive do
   @moduledoc """
   Glance: answers "is the Fleet succeeding and on plan?" at one look.
 
-  It opens with Plan Health (`MissionControl.PlanHealth`), read from stored
-  and in-memory facts; mounting and updating make no game request. Ship,
-  Intent, allocation, Strategy and Earnings changes mark the summary dirty: it
-  is re-read at most once per second, only after a change. One timer re-reads
-  it at the earliest moment an "old" rule would flip, so silent staleness
-  still shows. Nothing here asks the Operator to act.
+  One recompute (`MissionControl.Glance`) reads Plan Health, credits, Ships in
+  motion and the feed from stored and in-memory facts; mounting and updating
+  make no game request. A stored Ship change re-renders that Ship's card or
+  cell at once from its last known status. Every change also marks the
+  summary dirty: it is re-read at most once per second, only after a change,
+  and only rows that changed are pushed. One timer re-reads it at the
+  earliest moment an "old" rule would flip, so silent staleness still shows.
+  Nothing here asks the Operator to act.
   """
 
   use SpaceTradersWeb, :live_view
 
-  alias SpaceTraders.{Clock, Fleet, FleetGeneration}
-  alias SpaceTraders.MissionControl.{Channels, Credits, Happenings, Motion, PlanHealth}
+  alias SpaceTraders.{Clock, Fleet}
+  alias SpaceTraders.MissionControl.{Channels, Glance, Motion, ShipRow}
+  alias SpaceTradersWeb.{FleetLive, GrafanaLink, PlanHealthText}
 
-  @refresh_ms 1_000
   @flash_ms 4_500
   @not_earning_shown 1
 
   @impl true
   def mount(_params, _session, socket) do
-    agent =
-      case FleetGeneration.current_fleet(socket.assigns.current_scope) do
-        {:ok, %{state: :current, agent: agent}} -> agent
-        _ -> nil
-      end
+    agent = FleetLive.current_agent(socket.assigns.current_scope)
 
     if connected?(socket) do
       Channels.subscribe_strategy()
-      Channels.subscribe_allocation()
-      Channels.subscribe_earnings()
-      Fleet.subscribe_intent_changes()
-      if agent, do: Fleet.subscribe_ship_state(agent.id)
+      FleetLive.subscribe(agent)
     end
 
     {:ok,
      socket
      |> assign(
        agent: agent,
+       events: [],
        refresh: nil,
        next_change: nil,
        flashes: %{},
        last_sale: nil,
        credits: nil,
-       credits_flash: nil
+       credits_flash: nil,
+       motion: nil,
+       rows: %{}
      )
+     |> stream_configure(:cards, dom_id: &"ship-card-#{&1.id}")
+     |> stream_configure(:cells, dom_id: &"fleet-grid-cell-#{&1.id}")
+     |> stream(:cards, [])
+     |> stream(:cells, [])
      |> recompute()}
   end
 
@@ -56,55 +58,131 @@ defmodule SpaceTradersWeb.MissionControlLive do
   def handle_info(:next_change, socket), do: {:noreply, recompute(socket)}
 
   def handle_info({:unflash, symbol, record_id}, socket) do
-    flashes =
-      case socket.assigns.flashes do
-        %{^symbol => {^record_id, _amount}} = flashes -> Map.delete(flashes, symbol)
-        flashes -> flashes
+    case socket.assigns.flashes do
+      %{^symbol => {^record_id, _amount}} = flashes ->
+        socket = assign(socket, flashes: Map.delete(flashes, symbol))
+        {:noreply, refresh_row(socket, symbol)}
+
+      _ ->
+        {:noreply, socket}
+    end
+  end
+
+  # One stored Ship change: its own row now, the summary within a second.
+  def handle_info({:ship_state, ship}, socket) do
+    socket =
+      case Map.fetch(socket.assigns.rows, ship.id) do
+        {:ok, old} -> put_rows(socket, [ShipRow.build(ship, old.status, Clock.utc_now())])
+        :error -> socket
       end
 
-    {:noreply, assign(socket, flashes: flashes)}
+    {:noreply, FleetLive.mark_dirty(socket, :recompute)}
   end
 
   # Every other message is a prompt that something changed: re-read once, shortly.
-  def handle_info(_prompt, %{assigns: %{refresh: ref}} = socket) when ref != nil,
-    do: {:noreply, socket}
-
-  def handle_info(_prompt, socket),
-    do: {:noreply, assign(socket, refresh: Process.send_after(self(), :recompute, @refresh_ms))}
+  def handle_info(_prompt, socket), do: {:noreply, FleetLive.mark_dirty(socket, :recompute)}
 
   defp recompute(socket) do
-    health = PlanHealth.read(socket.assigns.current_scope, Clock.utc_now())
+    now = Clock.utc_now()
+    glance = Glance.read(socket.assigns.current_scope, now)
+
+    socket
+    |> assign(health: PlanHealthText.word(glance.health))
+    |> schedule_next_change(glance.health.next_change_at, now)
+    |> put_credits(glance.credits)
+    |> put_motion(glance.motion)
+    |> announce_sales(glance.events)
+  end
+
+  defp schedule_next_change(socket, at, now) do
     if socket.assigns.next_change, do: Process.cancel_timer(socket.assigns.next_change)
 
     next_change =
-      case connected?(socket) && health.next_change_at do
+      case connected?(socket) && at do
         %DateTime{} = at ->
-          delay = max(0, DateTime.diff(at, Clock.utc_now(), :millisecond)) + 1
-          Process.send_after(self(), :next_change, delay)
+          Process.send_after(
+            self(),
+            :next_change,
+            max(0, DateTime.diff(at, now, :millisecond)) + 1
+          )
 
         _ ->
           nil
       end
 
-    socket
-    |> assign(health: health, next_change: next_change)
-    |> read_credits()
-    |> read_fleet()
+    assign(socket, next_change: next_change)
   end
 
-  defp read_fleet(%{assigns: %{agent: nil}} = socket),
-    do: assign(socket, motion: nil, events: [])
+  # A balance that rose since the last read flashes its gain until the next read.
+  defp put_credits(socket, credits) do
+    before = socket.assigns.credits && socket.assigns.credits.balance
+    now = credits && credits.balance
+    flash = if before && now && now > before, do: now - before
 
-  defp read_fleet(%{assigns: %{agent: agent}} = socket) do
-    events = Happenings.read(agent)
+    assign(socket, credits: credits, credits_flash: flash)
+  end
 
-    socket
-    |> assign(motion: Motion.read(agent, Clock.utc_now()), events: events)
-    |> announce_sales(events)
+  defp put_motion(socket, nil),
+    do: socket |> assign(motion: nil, rows: %{}) |> stream(:cards, [], reset: true)
+
+  # A new mode or a new set of Ships re-lists the rows; otherwise only
+  # changed rows are pushed.
+  defp put_motion(socket, motion) do
+    old = socket.assigns.motion
+
+    if old && old.mode == motion.mode &&
+         Map.keys(socket.assigns.rows) |> Enum.sort() ==
+           motion.rows |> Enum.map(& &1.id) |> Enum.sort() do
+      socket |> assign(motion: Map.delete(motion, :rows)) |> put_rows(motion.rows)
+    else
+      rows = Enum.map(motion.rows, &sold(socket, &1))
+      {shown, hidden} = if motion.mode == :cards, do: {:cards, :cells}, else: {:cells, :cards}
+
+      socket
+      |> assign(motion: Map.delete(motion, :rows), rows: Map.new(rows, &{&1.id, &1}))
+      |> stream(shown, rows, reset: true)
+      |> stream(hidden, [], reset: true)
+    end
+  end
+
+  # Re-renders the given rows that changed; counts and Not earning follow.
+  defp put_rows(%{assigns: %{motion: nil}} = socket, _rows), do: socket
+
+  defp put_rows(socket, rows) do
+    stream = if socket.assigns.motion.mode == :cards, do: :cards, else: :cells
+
+    {socket, all} =
+      Enum.reduce(rows, {socket, socket.assigns.rows}, fn row, {socket, all} ->
+        row = sold(socket, row)
+
+        if all[row.id] == row,
+          do: {socket, all},
+          else: {stream_insert(socket, stream, row), Map.put(all, row.id, row)}
+      end)
+
+    summary =
+      all |> Map.values() |> Enum.sort_by(&Fleet.name_order(&1.symbol)) |> Motion.summary()
+
+    assign(socket, rows: all, motion: Map.delete(summary, :rows))
+  end
+
+  defp refresh_row(socket, symbol) do
+    case Enum.find(Map.values(socket.assigns.rows), &(&1.symbol == symbol)) do
+      nil -> socket
+      row -> put_rows(socket, [row])
+    end
+  end
+
+  defp sold(socket, row) do
+    case Map.fetch(socket.assigns.flashes, row.symbol) do
+      {:ok, {_id, amount}} -> Map.put(row, :sold, amount)
+      :error -> Map.put(row, :sold, nil)
+    end
   end
 
   # The first read only notes the latest sale; later reads announce new ones.
   defp announce_sales(socket, events) do
+    socket = assign(socket, events: events)
     sales = for %{kind: :sale} = event <- events, do: event
     newest = sales |> Enum.map(& &1.record_id) |> Enum.max(fn -> 0 end)
 
@@ -124,17 +202,8 @@ defmodule SpaceTradersWeb.MissionControlLive do
 
     socket
     |> update(:flashes, &Map.put(&1, sale.ship, {sale.record_id, sale.amount}))
+    |> refresh_row(sale.ship)
     |> push_event("sold", %{amount: sale.amount, detail: "#{sale.ship} · #{sale.detail}"})
-  end
-
-  # A balance that rose since the last read flashes its gain until the next read.
-  defp read_credits(socket) do
-    credits = Credits.read(socket.assigns.current_scope, Clock.utc_now())
-    before = socket.assigns.credits && socket.assigns.credits.balance
-    now = credits && credits.balance
-    flash = if before && now && now > before, do: now - before
-
-    assign(socket, credits: credits, credits_flash: flash)
   end
 
   @impl true
@@ -147,7 +216,13 @@ defmodule SpaceTradersWeb.MissionControlLive do
           <.credits_card credits={@credits} flash={@credits_flash} />
         </div>
         <div class="space-y-2 md:space-y-3">
-          <.motion_card :if={@motion} motion={@motion} sold={sold(@flashes)} />
+          <.motion_card
+            :if={@motion}
+            motion={@motion}
+            total={map_size(@rows)}
+            cards={@streams.cards}
+            cells={@streams.cells}
+          />
           <.happenings_feed events={@events} />
         </div>
         <.sold_toast_host id="sold-toast" />
@@ -156,30 +231,37 @@ defmodule SpaceTradersWeb.MissionControlLive do
     """
   end
 
-  defp sold(flashes), do: Map.new(flashes, fn {symbol, {_id, amount}} -> {symbol, amount} end)
-
   attr :motion, :map, required: true
-  attr :sold, :map, required: true
+  attr :total, :integer, required: true
+  attr :cards, :any, required: true
+  attr :cells, :any, required: true
 
   defp motion_card(assigns) do
     assigns =
       assign(assigns,
-        total: length(assigns.motion.rows),
         shown: Enum.take(assigns.motion.not_earning, @not_earning_shown),
-        more: max(0, length(assigns.motion.not_earning) - @not_earning_shown)
+        more: max(0, length(assigns.motion.not_earning) - @not_earning_shown),
+        grafana: GrafanaLink.url(:fleet, from: "now-6h", to: :now)
       )
 
     ~H"""
     <.card id="ships-in-motion">
       <.eyebrow>
-        Ships in motion<:right>{@total}</:right>
+        Ships in motion<:right>
+          <a id="motion-grafana" href={@grafana} target="_blank" rel="noopener">{@total} ↗</a>
+        </:right>
       </.eyebrow>
       <p :if={@total == 0} id="motion-empty" class="mt-1.5 text-sm text-dim">No Ships yet.</p>
-      <div :if={@motion.mode == :cards} id="motion-cards" class="mt-2 space-y-2">
-        <.ship_card :for={row <- @motion.rows} row={row} sold={@sold[row.symbol]} />
+      <div
+        :if={@motion.mode == :cards}
+        id="motion-cards"
+        phx-update="stream"
+        class="mt-2 space-y-2"
+      >
+        <.ship_card :for={{_dom_id, row} <- @cards} row={row} sold={row.sold} />
       </div>
       <div :if={@motion.mode == :grid} id="motion-grid" class="mt-1.5">
-        <.fleet_grid rows={@motion.rows} sold={@sold} counts={@motion.counts} />
+        <.fleet_grid rows={@cells} counts={@motion.counts} />
         <div id="not-earning" class="mt-2 min-h-[calc(24px+14px)]">
           <.eyebrow>
             Not earning right now<:right>
@@ -213,11 +295,21 @@ defmodule SpaceTradersWeb.MissionControlLive do
 
   # Balance (counting up), growth over the Generation and the 6 h Net Earnings.
   defp credits_card(assigns) do
-    assigns = assign(assigns, :c, assigns.credits || %{})
+    assigns =
+      assign(assigns,
+        c: assigns.credits || %{},
+        grafana: assigns.credits && GrafanaLink.url(:money, from: "now-6h", to: :now)
+      )
 
     ~H"""
     <.card id="credits-card">
-      <.eyebrow>Credits</.eyebrow>
+      <.eyebrow>
+        Credits<:right>
+          <a :if={@grafana} id="credits-grafana" href={@grafana} target="_blank" rel="noopener">
+            Money ↗
+          </a>
+        </:right>
+      </.eyebrow>
       <div class="mt-1.5">
         <.credits_ticker
           :if={@c[:balance]}

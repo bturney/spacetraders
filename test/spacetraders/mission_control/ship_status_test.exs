@@ -202,7 +202,7 @@ defmodule SpaceTraders.MissionControl.ShipStatusTest do
 
       :telemetry.attach(
         handler,
-        [:spacetraders, :repo, :query],
+        SpaceTraders.Repo.config()[:telemetry_prefix] ++ [:query],
         fn _, _, _, _ ->
           send(parent, {ref, :query})
         end,

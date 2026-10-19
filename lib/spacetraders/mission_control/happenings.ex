@@ -21,6 +21,7 @@ defmodule SpaceTraders.MissionControl.Happenings do
   alias SpaceTraders.Agent.Agent, as: AgentRecord
   alias SpaceTraders.Fleet.{Intent, Ship}
   alias SpaceTraders.FleetAllocation
+  alias SpaceTraders.MissionControl.ShipRow
   alias SpaceTraders.Outcomes.EarningsRecord
   alias SpaceTraders.Repo
 
@@ -202,7 +203,7 @@ defmodule SpaceTraders.MissionControl.Happenings do
 
   defp route(%{source_waypoint: from, destination_waypoint: to})
        when is_binary(from) and is_binary(to),
-       do: ", #{short(from)} to #{short(to)}"
+       do: ", #{ShipRow.waypoint_code(from)} to #{ShipRow.waypoint_code(to)}"
 
   defp route(_record), do: ""
 
@@ -220,5 +221,4 @@ defmodule SpaceTraders.MissionControl.Happenings do
   defp humanize(text), do: text |> String.replace("_", " ") |> String.downcase()
   defp good(nil), do: "goods"
   defp good(symbol), do: symbol |> String.replace("_", " ") |> String.capitalize()
-  defp short(symbol), do: symbol |> String.split("-") |> List.last()
 end

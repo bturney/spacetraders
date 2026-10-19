@@ -33,7 +33,7 @@ defmodule SpaceTraders.MissionControl.ShipStatus do
   alias SpaceTraders.FleetAllocation.StrategyDecisionEpisode, as: Episode
   alias SpaceTraders.FleetGeneration.Generation
   alias SpaceTraders.Evidence.ObservationDemand
-  alias SpaceTraders.MissionControl.PlanHealth
+  alias SpaceTraders.MissionControl.{PlanHealth, ShipRow}
   alias SpaceTraders.Outcomes.EarningsRecord
   alias SpaceTraders.Repo
 
@@ -55,6 +55,13 @@ defmodule SpaceTraders.MissionControl.ShipStatus do
   @doc "The five statuses, in display order."
   def statuses, do: @statuses
 
+  @doc "Number of Ships of each status (every status present, zero or more)."
+  def counts(statuses) do
+    Enum.reduce(statuses, Map.new(@statuses, &{&1, 0}), fn %{kind: kind}, acc ->
+      Map.update!(acc, kind, &(&1 + 1))
+    end)
+  end
+
   @doc "Plain wording of an allocation stall reason."
   def stall_reason(reason), do: Map.get(@stall_reasons, reason, "Fleet planning stalled")
 
@@ -63,21 +70,26 @@ defmodule SpaceTraders.MissionControl.ShipStatus do
 
   @doc """
   Status of each given Ship of the Agent as of `now`, keyed by Ship id.
+  Pass `portfolio:` when the current Portfolio is already read.
   """
-  def for_ships(%AgentRecord{} = agent, ships, %DateTime{} = now) when is_list(ships) do
+  def for_ships(%AgentRecord{} = agent, ships, %DateTime{} = now, opts \\ [])
+      when is_list(ships) do
     if ships == [] do
       %{}
     else
-      facts = facts(agent, ships, now)
+      facts = facts(agent, ships, now, opts)
       Map.new(ships, &{&1.id, status(&1, facts, now)})
     end
   end
 
   ## Facts
 
-  defp facts(agent, ships, now) do
+  defp facts(agent, ships, now, opts) do
     generation = FleetAllocation.active_generation(agent)
-    portfolio = generation && FleetAllocation.current_portfolio()
+
+    portfolio =
+      generation && Keyword.get_lazy(opts, :portfolio, &FleetAllocation.current_portfolio/0)
+
     assignments = assignments(portfolio)
     ship_ids = Enum.map(ships, & &1.id)
     symbols = Enum.map(ships, & &1.symbol)
@@ -358,13 +370,15 @@ defmodule SpaceTraders.MissionControl.ShipStatus do
   end
 
   defp leg(%Intent{type: "buy"} = intent),
-    do: "Buying #{intent.parameters["trade_symbol"]} at #{short(intent.target_waypoint)}"
+    do:
+      "Buying #{intent.parameters["trade_symbol"]} at #{ShipRow.waypoint_code(intent.target_waypoint)}"
 
   defp leg(%Intent{type: "sell"} = intent),
-    do: "Selling #{intent.parameters["trade_symbol"]} at #{short(intent.target_waypoint)}"
+    do:
+      "Selling #{intent.parameters["trade_symbol"]} at #{ShipRow.waypoint_code(intent.target_waypoint)}"
 
   defp leg(%Intent{target_waypoint: target}) when is_binary(target),
-    do: "Flying to #{short(target)}"
+    do: "Flying to #{ShipRow.waypoint_code(target)}"
 
   defp leg(_intent), do: "Starting a trade"
 
@@ -387,6 +401,4 @@ defmodule SpaceTraders.MissionControl.ShipStatus do
     |> String.replace(~r/(\d{3})(?=\d)/, "\\1,")
     |> String.reverse()
   end
-
-  defp short(symbol), do: symbol |> String.split("-") |> List.last()
 end

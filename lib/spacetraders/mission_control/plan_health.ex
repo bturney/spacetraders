@@ -67,12 +67,7 @@ defmodule SpaceTraders.MissionControl.PlanHealth do
   @hour 3600
   @average_window_seconds 6 * 3600
 
-  @checks [
-    {:earning, "Earning"},
-    {:ships_moving, "Ships moving"},
-    {:prices_fresh, "Prices fresh"},
-    {:trades_as_expected, "Trades as expected"}
-  ]
+  @checks [:earning, :ships_moving, :prices_fresh, :trades_as_expected]
 
   @doc "Thresholds, by name."
   def thresholds,
@@ -98,45 +93,68 @@ defmodule SpaceTraders.MissionControl.PlanHealth do
   @doc "Plan Health of the current Fleet as of `now`, from stored and in-memory facts."
   def read(%Scope{} = scope, %DateTime{} = now), do: scope |> facts(now) |> evaluate(now)
 
+  @doc """
+  Plan Health of an already-read current Fleet: `%{agent, generation, ships,
+  statuses}` as `Fleet.current_ships/1` and `ShipStatus.for_ships/3` give them,
+  and optionally its current `portfolio`.
+  """
+  def read(%Scope{} = scope, %DateTime{} = now, %{} = fleet),
+    do: scope |> fleet_facts(fleet, now) |> evaluate(now)
+
   @doc "The facts `evaluate/2` judges; no game request, a fixed number of queries."
   def facts(%Scope{} = scope, %DateTime{} = now) do
-    with {:ok, %{state: :current, agent: agent, generation: generation}} <-
-           FleetGeneration.current_fleet(scope),
-         %{} = generation <- generation do
+    with {:ok, %{state: :current, agent: agent, generation: %{} = generation}} <-
+           FleetGeneration.current_fleet(scope) do
       ships = Fleet.current_ships(agent.id)
-      statuses = ShipStatus.for_ships(agent, ships, now)
-      portfolio = FleetAllocation.current_portfolio()
-      disposition = disposition(scope, agent, portfolio)
-      open = open_trades(generation, portfolio)
 
-      %{
-        fleet?: true,
-        engine: Liveness.engine(),
-        game_failing_since: Liveness.game_failing_since(),
-        ships:
-          Enum.map(ships, fn ship ->
-            status = statuses[ship.id]
-
-            %{
-              symbol: ship.symbol,
-              status: status.kind,
-              reason: status.reason,
-              overdue_at: ShipRow.overdue_at(ship, status)
-            }
-          end),
-        neutral_wait: neutral_wait(disposition),
-        shortfall:
-          disposition && disposition.spending_pause &&
-            Map.take(disposition.spending_pause, [:floor, :detected_at]),
-        stall: disposition && stall(disposition.stall),
-        earnings: earnings(generation, now),
-        recent_trades: recent_trades(generation),
-        open_trades: open,
-        markets: markets(agent, open)
-      }
+      fleet_facts(
+        scope,
+        %{
+          agent: agent,
+          generation: generation,
+          ships: ships,
+          statuses: ShipStatus.for_ships(agent, ships, now)
+        },
+        now
+      )
     else
       _ -> %{fleet?: false}
     end
+  end
+
+  defp fleet_facts(_scope, %{generation: nil}, _now), do: %{fleet?: false}
+
+  defp fleet_facts(scope, fleet, now) do
+    %{agent: agent, generation: generation, ships: ships, statuses: statuses} = fleet
+    portfolio = Map.get_lazy(fleet, :portfolio, &FleetAllocation.current_portfolio/0)
+    disposition = disposition(scope, agent, portfolio)
+    open = open_trades(generation, portfolio)
+
+    %{
+      fleet?: true,
+      engine: Liveness.engine(),
+      game_failing_since: Liveness.game_failing_since(),
+      ships:
+        Enum.map(ships, fn ship ->
+          status = statuses[ship.id]
+
+          %{
+            symbol: ship.symbol,
+            status: status.kind,
+            reason: status.reason,
+            overdue_at: ShipRow.overdue_at(ship, status)
+          }
+        end),
+      neutral_wait: neutral_wait(disposition),
+      shortfall:
+        disposition && disposition.spending_pause &&
+          Map.take(disposition.spending_pause, [:floor, :detected_at]),
+      stall: disposition && stall(disposition.stall),
+      earnings: earnings(generation, now),
+      recent_trades: recent_trades(generation),
+      open_trades: open,
+      markets: markets(agent, open)
+    }
   end
 
   defp disposition(scope, agent, portfolio) do
@@ -152,8 +170,7 @@ defmodule SpaceTraders.MissionControl.PlanHealth do
 
   defp stall(nil), do: nil
 
-  defp stall(stall),
-    do: %{reason: ShipStatus.stall_reason(stall.reason), since: stall.last_observed_at}
+  defp stall(stall), do: %{reason: stall.reason, since: stall.last_observed_at}
 
   defp earnings(generation, now) do
     age = DateTime.diff(now, generation.inserted_at)
@@ -253,15 +270,16 @@ defmodule SpaceTraders.MissionControl.PlanHealth do
 
   defp estimated_seconds(%Portfolio{strategy_decision_episode_id: nil}), do: %{}
 
-  defp estimated_seconds(%Portfolio{strategy_decision_episode_id: id}) do
-    case Repo.one(from e in Episode, where: e.id == ^id, select: e.expectations) do
-      %{"selected_trades" => trades} when is_list(trades) ->
-        Map.new(trades, &{&1["candidate_id"], get_in(&1, ["trade_estimate", "seconds"])})
+  defp estimated_seconds(%Portfolio{strategy_decision_episode: %Episode{} = episode}),
+    do: selected_seconds(episode.expectations)
 
-      _ ->
-        %{}
-    end
-  end
+  defp estimated_seconds(%Portfolio{strategy_decision_episode_id: id}),
+    do: selected_seconds(Repo.one(from e in Episode, where: e.id == ^id, select: e.expectations))
+
+  defp selected_seconds(%{"selected_trades" => trades}) when is_list(trades),
+    do: Map.new(trades, &{&1["candidate_id"], get_in(&1, ["trade_estimate", "seconds"])})
+
+  defp selected_seconds(_expectations), do: %{}
 
   defp market_waypoints(%Commitment{dependencies: dependencies}) do
     for %{"subject" => "market:" <> tail} <- dependencies do
@@ -297,15 +315,16 @@ defmodule SpaceTraders.MissionControl.PlanHealth do
 
   @doc """
   Judges facts as of `now`: `%{state, reason, since, checks, next_change_at}`,
-  where each check is `%{name, label, state, detail}` with state `:ok`,
-  `:amber`, `:red` or `:unknown`.
+  where each check is `%{name, state, detail}` with state `:ok`, `:amber`,
+  `:red` or `:unknown`. A reason or detail is a `{kind, params}` term, worded
+  for the Operator by `SpaceTradersWeb.PlanHealthText`.
   """
   def evaluate(%{fleet?: false}, %DateTime{}) do
     %{
       state: :unknown,
-      reason: "No current Fleet yet.",
+      reason: {:no_fleet, %{}},
       since: nil,
-      checks: for({name, label} <- @checks, do: check(name, label, :unknown, "—")),
+      checks: for(name <- @checks, do: check(name, :unknown, {:none, %{}})),
       next_change_at: nil
     }
   end
@@ -314,7 +333,7 @@ defmodule SpaceTraders.MissionControl.PlanHealth do
     facts
     |> Map.put(:fleet?, false)
     |> evaluate(now)
-    |> Map.put(:reason, "No Ships reported yet.")
+    |> Map.put(:reason, {:no_ships, %{}})
   end
 
   def evaluate(facts, %DateTime{} = now) do
@@ -336,18 +355,17 @@ defmodule SpaceTraders.MissionControl.PlanHealth do
       reason: reason,
       since: since,
       checks:
-        for {name, label} <- @checks do
+        for name <- @checks do
           case worst(Enum.filter(findings, &(&1.check == name))) do
-            nil -> check(name, label, :ok, ok_detail(name, facts, now))
-            finding -> check(name, label, finding.level, finding.reason)
+            nil -> check(name, :ok, ok_detail(name, facts, now))
+            finding -> check(name, finding.level, finding.reason)
           end
         end,
       next_change_at: next_change_at(facts, now)
     }
   end
 
-  defp check(name, label, state, detail),
-    do: %{name: name, label: label, state: state, detail: detail}
+  defp check(name, state, detail), do: %{name: name, state: state, detail: detail}
 
   @rank %{blind: 0, red: 1, amber: 2, unknown: 3}
 
@@ -370,9 +388,9 @@ defmodule SpaceTraders.MissionControl.PlanHealth do
   end
 
   defp on_reason(%{neutral_wait: %{next_check_at: at}}),
-    do: "Waiting on purpose for a trade worth making; next check #{clock(at)}."
+    do: {:waiting_on_purpose, %{next_check_at: at}}
 
-  defp on_reason(_facts), do: "All four checks pass."
+  defp on_reason(_facts), do: {:all_pass, %{}}
 
   defp finding(check, level, reason, since \\ nil),
     do: %{check: check, level: level, reason: reason, since: since}
@@ -383,8 +401,7 @@ defmodule SpaceTraders.MissionControl.PlanHealth do
       case facts.engine do
         %{expected?: true, last_beat_at: at} ->
           if past?(DateTime.add(at, @engine_silence_seconds), now),
-            do:
-              finding(:ships_moving, :blind, "The engine has been silent since #{clock(at)}.", at)
+            do: finding(:ships_moving, :blind, {:engine_silent, %{since: at}}, at)
 
         _ ->
           nil
@@ -394,8 +411,7 @@ defmodule SpaceTraders.MissionControl.PlanHealth do
       case facts.game_failing_since do
         %DateTime{} = at ->
           if past?(DateTime.add(at, @game_silence_seconds), now),
-            do:
-              finding(:ships_moving, :blind, "The game has not answered since #{clock(at)}.", at)
+            do: finding(:ships_moving, :blind, {:game_silent, %{since: at}}, at)
 
         _ ->
           nil
@@ -414,7 +430,7 @@ defmodule SpaceTraders.MissionControl.PlanHealth do
       finding(
         :ships_moving,
         :blind,
-        "#{length(overdue)} of #{length(ships)} Ships have not reported since #{clock(since)}.",
+        {:ships_silent, %{overdue: length(overdue), total: length(ships), since: since}},
         since
       )
     end
@@ -433,7 +449,7 @@ defmodule SpaceTraders.MissionControl.PlanHealth do
         finding(
           :earning,
           :red,
-          "Spending paused: credits fell below the #{int(s.floor)} floor at #{clock(s.detected_at)}.",
+          {:spending_paused, %{floor: s.floor, at: s.detected_at}},
           s.detected_at
         )
       end
@@ -442,7 +458,7 @@ defmodule SpaceTraders.MissionControl.PlanHealth do
 
     loss =
       if hour < -@loss_limit,
-        do: finding(:earning, :amber, "Lost #{int(-hour)} in the last hour.")
+        do: finding(:earning, :amber, {:lost, %{amount: -hour}})
 
     average = hours && window_net / hours
 
@@ -453,7 +469,7 @@ defmodule SpaceTraders.MissionControl.PlanHealth do
            finding(
              :earning,
              :amber,
-             "Earned #{int(hour)} in the last hour against #{int(average)}/h over #{hours_label(hours)} h."
+             {:earning_slowly, %{last_hour: hour, average: average, hours: hours}}
            )
 
     late = for %{due_at: %DateTime{} = due} <- facts.open_trades, past?(due, now), do: due
@@ -461,15 +477,7 @@ defmodule SpaceTraders.MissionControl.PlanHealth do
     stale =
       if late != [] do
         since = Enum.min(late, DateTime)
-        n = length(late)
-
-        finding(
-          :earning,
-          :unknown,
-          "#{n} #{plural(n, "trade is", "trades are")} well past #{plural(n, "its", "their")} estimate; " <>
-            "no sale recorded since #{clock(since)}.",
-          since
-        )
+        finding(:earning, :unknown, {:trades_late, %{count: length(late), since: since}}, since)
       end
 
     [shortfall, loss, slow, stale] |> Enum.reject(&is_nil/1)
@@ -482,17 +490,17 @@ defmodule SpaceTraders.MissionControl.PlanHealth do
 
     stall =
       if s = facts.stall do
-        finding(:ships_moving, :red, "#{s.reason}, since #{clock(s.since)}.", s.since)
+        finding(:ships_moving, :red, {:stalled, %{reason: s.reason, since: s.since}}, s.since)
       end
 
     stuck_finding =
       cond do
         stuck != [] and length(facts.ships) <= @small_fleet ->
           [ship | _] = stuck
-          finding(:ships_moving, :red, "#{ship.symbol} is stuck: #{ship.reason}")
+          finding(:ships_moving, :red, {:ship_stuck, %{ship: ship.symbol, reason: ship.reason}})
 
         total > 0 and length(stuck) > @stuck_share * total ->
-          finding(:ships_moving, :red, "#{length(stuck)} of #{total} traders are stuck.")
+          finding(:ships_moving, :red, {:traders_stuck, %{count: length(stuck), total: total}})
 
         true ->
           nil
@@ -500,7 +508,7 @@ defmodule SpaceTraders.MissionControl.PlanHealth do
 
     busy_finding =
       if total > 0 and busy > @busy_share * total,
-        do: finding(:ships_moving, :amber, "#{busy} of #{total} traders are busy, not earning.")
+        do: finding(:ships_moving, :amber, {:traders_busy, %{count: busy, total: total}})
 
     [stall, stuck_finding, busy_finding] |> Enum.reject(&is_nil/1)
   end
@@ -516,12 +524,15 @@ defmodule SpaceTraders.MissionControl.PlanHealth do
         []
 
       market ->
-        minutes = div(DateTime.diff(now, market.observed_at), 60)
-
         finding(
           :prices_fresh,
           :amber,
-          "Prices at #{short(market.waypoint)} are #{minutes} min old (trusted up to #{div(limit, 60)}).",
+          {:prices_old,
+           %{
+             waypoint: market.waypoint,
+             minutes: div(DateTime.diff(now, market.observed_at), 60),
+             limit_minutes: div(limit, 60)
+           }},
           DateTime.add(market.observed_at, limit)
         )
     end
@@ -534,41 +545,37 @@ defmodule SpaceTraders.MissionControl.PlanHealth do
         finding(
           :trades_as_expected,
           :amber,
-          "The last #{count} trades made #{round(net * 100 / expected)}% of what was expected."
+          {:trades_short, %{count: count, percent: round(net * 100 / expected)}}
         ),
       else: []
   end
 
   defp trades(_facts), do: []
 
-  defp ok_detail(:earning, %{neutral_wait: %{}}, _now), do: "Waiting on purpose"
+  defp ok_detail(:earning, %{neutral_wait: %{}}, _now), do: {:waiting, %{}}
 
   defp ok_detail(:earning, %{earnings: %{last_hour: hour}}, _now),
-    do: "#{signed(hour)} in the last hour"
+    do: {:earned, %{amount: hour}}
 
   defp ok_detail(:ships_moving, facts, now) do
     case overdue(facts.ships, now) do
-      [] ->
-        "#{length(facts.ships)} #{plural(length(facts.ships), "Ship", "Ships")} reporting"
-
-      [since | _] = late ->
-        n = length(late)
-        "#{n} #{plural(n, "Ship has", "Ships have")} not reported since #{clock(since)}."
+      [] -> {:ships_reporting, %{count: length(facts.ships)}}
+      [since | _] = late -> {:ships_not_reported, %{count: length(late), since: since}}
     end
   end
 
-  defp ok_detail(:prices_fresh, %{markets: []}, _now), do: "No open trade relies on prices"
+  defp ok_detail(:prices_fresh, %{markets: []}, _now), do: {:no_prices_needed, %{}}
 
   defp ok_detail(:prices_fresh, _facts, _now),
-    do: "Within #{div(Intelligence.market_freshness_seconds(), 60)} min"
+    do: {:prices_within, %{minutes: div(Intelligence.market_freshness_seconds(), 60)}}
 
   defp ok_detail(:trades_as_expected, %{recent_trades: %{count: 0}}, _now),
-    do: "No finished trades yet"
+    do: {:no_finished_trades, %{}}
 
   defp ok_detail(:trades_as_expected, %{recent_trades: r}, _now) when r.expected > 0,
-    do: "Last #{r.count}: #{round(r.net * 100 / r.expected)}% of expected"
+    do: {:trades_met, %{count: r.count, percent: round(r.net * 100 / r.expected)}}
 
-  defp ok_detail(:trades_as_expected, _facts, _now), do: "No estimate to compare"
+  defp ok_detail(:trades_as_expected, _facts, _now), do: {:no_estimate, %{}}
 
   # The earliest future moment an "old" rule flips without new data.
   defp next_change_at(facts, now) do
@@ -592,30 +599,4 @@ defmodule SpaceTraders.MissionControl.PlanHealth do
   end
 
   defp past?(at, now), do: DateTime.compare(at, now) != :gt
-
-  defp clock(%DateTime{} = at), do: Calendar.strftime(at, "%H:%M")
-  defp clock(_), do: "—"
-
-  defp short(symbol), do: symbol |> String.split("-") |> List.last()
-  defp plural(1, one, _many), do: one
-  defp plural(_n, _one, many), do: many
-
-  defp hours_label(hours) do
-    rounded = Float.round(hours / 1, 1)
-    if rounded == trunc(rounded), do: Integer.to_string(trunc(rounded)), else: "#{rounded}"
-  end
-
-  defp int(value) when is_float(value), do: value |> round() |> int()
-  defp int(value) when value < 0, do: "\u2212" <> int(-value)
-
-  defp int(value) do
-    value
-    |> Integer.to_string()
-    |> String.reverse()
-    |> String.replace(~r/(\d{3})(?=\d)/, "\\1,")
-    |> String.reverse()
-  end
-
-  defp signed(value) when value < 0, do: int(value)
-  defp signed(value), do: "+" <> int(value)
 end

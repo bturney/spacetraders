@@ -569,9 +569,28 @@ defmodule SpaceTradersWeb.MissionControlComponents do
     scouting: {"bg-scouting/18", "bg-scouting/70"}
   }
 
-  @doc "The status chip atom of a `MissionControl.ShipStatus` status."
-  def chip_status(:busy_not_earning), do: :busy
-  def chip_status(status), do: status
+  @chips %{
+    trading: :trading,
+    scouting: :scouting,
+    waiting: :waiting,
+    stuck: :stuck,
+    busy_not_earning: :busy
+  }
+
+  @doc "The status chip atom of a `MissionControl.ShipStatus` kind."
+  def chip_status(kind), do: Map.fetch!(@chips, kind)
+
+  @doc "The moment a Ship row counts down to: arrival, next attempt or next check."
+  def count_until(%{in_transit?: true, arrive_at: at}), do: at
+  def count_until(%{status: %{next_attempt_at: %DateTime{} = at}}), do: at
+  def count_until(%{status: %{next_check_at: %DateTime{} = at}}), do: at
+  def count_until(_row), do: nil
+
+  @doc "Caption of `count_until/1`."
+  def count_caption(%{in_transit?: true}), do: "to arrival"
+  def count_caption(%{status: %{next_attempt_at: %DateTime{}}}), do: "next attempt"
+  def count_caption(%{status: %{next_check_at: %DateTime{}}}), do: "next check"
+  def count_caption(_row), do: nil
 
   attr :row, :map, required: true, doc: "a `MissionControl.ShipRow`"
   attr :sold, :integer, default: nil, doc: "Net Earnings of a sale landed in the last 4.5 s"
@@ -635,15 +654,23 @@ defmodule SpaceTradersWeb.MissionControlComponents do
   end
 
   attr :id, :string, default: "fleet-grid"
-  attr :rows, :list, required: true, doc: "`MissionControl.ShipRow`s, in name order"
-  attr :sold, :map, default: %{}, doc: "Ship symbol => Net Earnings of a sale in the last 4.5 s"
-  attr :counts, :map, required: true, doc: "ShipStatus status => number of Ships"
+
+  attr :rows, :any,
+    required: true,
+    doc: """
+    a stream of `MissionControl.ShipRow`s in name order, with dom ids
+    `<id>-cell-<ship id>`; a row's `:sold` is the Net Earnings of a sale in the
+    last 4.5 s
+    """
+
+  attr :counts, :map, required: true, doc: "ShipStatus kind => number of Ships"
   attr :columns, :integer, default: 40
 
   @doc """
   One cell per Ship (large Fleets): a fill that rises with its trip, tinted by
   status, a green outline for a sale in the last 4.5 s, and the status counts.
-  Cells have fixed size, so live updates never shift the layout.
+  Cells have fixed size, so live updates never shift the layout; a changed Ship
+  re-renders its own cell only.
   """
   def fleet_grid(assigns) do
     assigns = assign(assigns, cells: @cell, chips: @status)
@@ -653,22 +680,23 @@ defmodule SpaceTradersWeb.MissionControlComponents do
       <div
         id={@id}
         phx-hook=".FleetGrid"
+        phx-update="stream"
         class="grid gap-[3px]"
         style={"grid-template-columns:repeat(#{@columns},minmax(0,1fr))"}
       >
         <.link
-          :for={row <- @rows}
-          id={"#{@id}-cell-#{row.id}"}
+          :for={{dom_id, row} <- @rows}
+          id={dom_id}
           navigate={"/ships/#{row.symbol}"}
           title={row.symbol}
           data-status={row.status.kind}
           data-depart={ms(row.depart_at)}
           data-arrive={ms(row.arrive_at)}
-          data-sold={@sold[row.symbol] && "true"}
+          data-sold={row[:sold] && "true"}
           class={[
             "relative aspect-square overflow-hidden rounded-[2px] outline-offset-[-1.5px]",
             elem(@cells[chip_status(row.status.kind)], 0),
-            @sold[row.symbol] && "outline outline-[1.5px] outline-success"
+            row[:sold] && "outline outline-[1.5px] outline-success"
           ]}
         >
           <span
@@ -777,16 +805,6 @@ defmodule SpaceTradersWeb.MissionControlComponents do
     do: Float.round(progress(depart, arrive, DateTime.utc_now()) * 100, 1)
 
   defp fill(_row), do: 0
-
-  defp count_until(%{in_transit?: true, arrive_at: at}), do: at
-  defp count_until(%{status: %{next_attempt_at: %DateTime{} = at}}), do: at
-  defp count_until(%{status: %{next_check_at: %DateTime{} = at}}), do: at
-  defp count_until(_row), do: nil
-
-  defp count_caption(%{in_transit?: true}), do: "to arrival"
-  defp count_caption(%{status: %{next_attempt_at: %DateTime{}}}), do: "next attempt"
-  defp count_caption(%{status: %{next_check_at: %DateTime{}}}), do: "next check"
-  defp count_caption(_row), do: nil
 
   defp ms(%DateTime{} = dt), do: DateTime.to_unix(dt, :millisecond)
   defp ms(_), do: nil

@@ -9,7 +9,7 @@ defmodule SpaceTradersWeb.MissionControlLiveTest do
 
   alias SpaceTraders.Agent.Operator
   alias SpaceTraders.{Fleet, Liveness, Repo, ScenarioSeeds}
-  alias SpaceTraders.MissionControl.PlanHealth
+  alias SpaceTraders.MissionControl.Glance
 
   setup do
     Liveness.reset()
@@ -118,30 +118,32 @@ defmodule SpaceTradersWeb.MissionControlLiveTest do
   end
 
   describe "at 120 Ships" do
-    test "Glance reads from a fixed number of queries inside 50 ms", %{conn: conn} do
-      small = ScenarioSeeds.seed(:healthy, 2)
+    test "the whole Glance recompute runs a fixed number of queries inside 50 ms", %{conn: conn} do
+      small = ScenarioSeeds.seed(:stuck, 2)
       small_count = count_queries(fn -> read(small) end)
 
       {view, _html, large} = glance(conn, :stuck, 120)
       assert has_element?(view, "#plan-health[data-state='off']")
 
-      assert count_queries(fn -> read(large) end) == small_count
+      # The 120-Ship Fleet has scouts: their markets add two fixed queries.
+      assert count_queries(fn -> read(large) end) == small_count + 2
 
       # Best of three, so a loaded test machine measures the read, not the queue.
       best =
         for _ <- 1..3 do
-          {micros, _health} = :timer.tc(fn -> read(large) end)
+          {micros, _glance} = :timer.tc(fn -> read(large) end)
           micros
         end
         |> Enum.min()
 
-      assert best < 50_000, "Plan Health took #{div(best, 1000)} ms at 120 Ships"
+      assert best < 50_000, "Glance recompute took #{div(best, 1000)} ms at 120 Ships"
     end
   end
 
+  # One Glance recompute: Plan Health, credits, Ships in motion and the feed.
   defp read(seeded) do
     operator = Repo.get!(Operator, seeded.generation.operator_id)
-    PlanHealth.read(SpaceTraders.Agent.Scope.for_operator(operator), seeded.now)
+    Glance.read(SpaceTraders.Agent.Scope.for_operator(operator), seeded.now)
   end
 
   defp count_queries(fun) do
@@ -151,7 +153,7 @@ defmodule SpaceTradersWeb.MissionControlLiveTest do
 
     :telemetry.attach(
       handler,
-      [:spacetraders, :repo, :query],
+      SpaceTraders.Repo.config()[:telemetry_prefix] ++ [:query],
       fn _, _, _, _ -> send(parent, {ref, :query}) end,
       nil
     )

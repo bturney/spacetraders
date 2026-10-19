@@ -13,6 +13,7 @@ defmodule SpaceTraders.MissionControl.PlanHealthReadTest do
   alias SpaceTraders.Outcomes.EarningsRecord
   alias SpaceTraders.{Liveness, ScenarioSeeds}
   alias SpaceTraders.MissionControl.PlanHealth
+  alias SpaceTradersWeb.PlanHealthText
 
   setup do
     Liveness.reset()
@@ -21,7 +22,7 @@ defmodule SpaceTraders.MissionControl.PlanHealthReadTest do
 
   defp read(seeded) do
     operator = Repo.get!(Operator, seeded.generation.operator_id)
-    PlanHealth.read(Scope.for_operator(operator), seeded.now)
+    operator |> Scope.for_operator() |> PlanHealth.read(seeded.now) |> PlanHealthText.word()
   end
 
   for {situation, ships, state} <- [
@@ -84,7 +85,7 @@ defmodule SpaceTraders.MissionControl.PlanHealthReadTest do
 
     test "50% past its estimate with no sale, earnings are too old to judge", ctx do
       governed_market_observation(ctx.agent, "X1", "X1-A2", 10, 20, observed_at: ctx.now)
-      health = PlanHealth.read(ctx.scope, ctx.now)
+      health = PlanHealth.read(ctx.scope, ctx.now) |> PlanHealthText.word()
 
       assert health.state == :unknown
       assert health.reason =~ "1 trade is well past its estimate; no sale recorded since"
@@ -102,7 +103,7 @@ defmodule SpaceTraders.MissionControl.PlanHealthReadTest do
         observed_at: DateTime.add(ctx.now, -44 * 60)
       )
 
-      health = PlanHealth.read(ctx.scope, ctx.now)
+      health = PlanHealth.read(ctx.scope, ctx.now) |> PlanHealthText.word()
 
       assert health.state == :setback
       assert health.reason == "Prices at A2 are 44 min old (trusted up to 30)."

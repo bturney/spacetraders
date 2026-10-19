@@ -31,9 +31,9 @@ defmodule SpaceTraders.MissionControl.ShipRow do
       status: status,
       location: location(ship),
       in_transit?: in_transit?,
-      from: short(ship.route_origin),
-      to: short(ship.route_destination),
-      at: if(!in_transit?, do: short(ship.waypoint_symbol)),
+      from: waypoint_code(ship.route_origin),
+      to: waypoint_code(ship.route_destination),
+      at: if(!in_transit?, do: waypoint_code(ship.waypoint_symbol)),
       depart_at: ship.route_departed_at,
       arrive_at: if(in_transit?, do: ship.route_arrives_at),
       fuel: {ship.fuel_current, ship.fuel_capacity},
@@ -82,13 +82,13 @@ defmodule SpaceTraders.MissionControl.ShipRow do
   defp overdue?(overdue_at, now), do: DateTime.compare(now, overdue_at) != :lt
 
   defp location(%Ship{nav_status: "IN_TRANSIT"} = ship),
-    do: "In transit to #{short(ship.route_destination)}"
+    do: "In transit to #{waypoint_code(ship.route_destination)}"
 
   defp location(%Ship{nav_status: "DOCKED"} = ship),
-    do: "Docked at #{short(ship.waypoint_symbol)}"
+    do: "Docked at #{waypoint_code(ship.waypoint_symbol)}"
 
   defp location(%Ship{nav_status: "IN_ORBIT"} = ship),
-    do: "In orbit at #{short(ship.waypoint_symbol)}"
+    do: "In orbit at #{waypoint_code(ship.waypoint_symbol)}"
 
   defp location(_ship), do: "Not yet observed"
 
@@ -97,7 +97,10 @@ defmodule SpaceTraders.MissionControl.ShipRow do
 
   defp cargo(_ship), do: []
 
-  # Waypoints within the headquarters System read by their last segment.
-  defp short(nil), do: nil
-  defp short(symbol), do: symbol |> String.split("-") |> List.last()
+  @doc """
+  A waypoint's code within the headquarters System: the last segment of its
+  symbol (`X1-UX81-B7` -> `B7`); nil stays nil.
+  """
+  def waypoint_code(nil), do: nil
+  def waypoint_code(symbol) when is_binary(symbol), do: symbol |> String.split("-") |> List.last()
 end

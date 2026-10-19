@@ -95,6 +95,36 @@ defmodule SpaceTradersWeb.GlanceMotionTest do
       refute has_element?(view, "#not-earning-more")
     end
 
+    test "a Ship change updates its own cell at once; the summary re-reads later", %{conn: conn} do
+      {view, _html, _seeded} = glance(conn, :healthy, 120)
+      ship = Repo.one!(from s in Ship, where: s.symbol == "SEEDED-1")
+      arrives = DateTime.utc_now() |> DateTime.add(300) |> DateTime.truncate(:second)
+
+      moved = %{
+        ship
+        | nav_status: "IN_TRANSIT",
+          route_departed_at: DateTime.add(arrives, -400),
+          route_arrives_at: arrives
+      }
+
+      send(view.pid, {:ship_state, moved})
+
+      assert has_element?(
+               view,
+               "#fleet-grid-cell-#{ship.id}[data-arrive='#{DateTime.to_unix(arrives, :millisecond)}']"
+             )
+
+      assert %{refresh: ref} = :sys.get_state(view.pid).socket.assigns
+      assert is_reference(ref)
+    end
+
+    test "credits link to the Money dashboard and Ships to the Fleet dashboard", %{conn: conn} do
+      {view, _html, _seeded} = glance(conn, :healthy, 2)
+
+      assert has_element?(view, "#credits-grafana[href*='/d/spacetraders-money/money']")
+      assert has_element?(view, "#motion-grafana[href*='/d/spacetraders-fleet/fleet']")
+    end
+
     test "the page makes no game request and re-reads at most once a second", %{conn: conn} do
       {view, _html, seeded} = glance(conn, :healthy, 120)
       [ship | _] = SpaceTraders.Fleet.current_ships(seeded.agent.id)
