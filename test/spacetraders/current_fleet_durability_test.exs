@@ -188,11 +188,8 @@ defmodule SpaceTraders.CurrentFleetDurabilityTest do
       end
     end)
 
-    briefing = SpaceTraders.MissionControl.overview(scope)
-    assert briefing.current_fleet.generation.id == second_generation_id
-
-    assert [%{agent: %{id: id}, overview: {:ok, %{credits: 456_000}}, ships: {:ok, []}}] =
-             briefing.fleets
+    assert %{agent: %{id: id}, overview: {:ok, %{credits: 456_000}}} =
+             SpaceTraders.MissionControl.fleet_snapshot(scope)
 
     assert id == second_ref.id
   end

@@ -75,6 +75,7 @@ defmodule SpaceTraders.RuntimeAuthority do
   def handle_info(:heartbeat, state) do
     case verify_authority(state) do
       {true, state} ->
+        SpaceTraders.Liveness.beat()
         Process.send_after(self(), :heartbeat, @heartbeat_ms)
         {:noreply, state}
 

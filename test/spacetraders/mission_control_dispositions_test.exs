@@ -2,7 +2,7 @@ defmodule SpaceTraders.MissionControlDispositionsTest do
   @moduledoc """
   Mission Control projects the Agent's actual Market allocation disposition
   from durable facts, without minting status or mutating the game (#688).
-  Seam: `MissionControl.market_execution/1` `:dispositions`.
+  Seam: `MissionControl.MarketDisposition.for_agent/3`.
   """
   use SpaceTraders.DataCase, async: false
 
@@ -17,7 +17,7 @@ defmodule SpaceTraders.MissionControlDispositionsTest do
   alias SpaceTraders.FleetAllocation.StrategyDecisionEpisode, as: Episode
   alias SpaceTraders.FleetGeneration.Generation
   alias SpaceTraders.FleetStrategy.{Revision, Strategy}
-  alias SpaceTraders.MissionControl
+  alias SpaceTraders.MissionControl.MarketDisposition
 
   setup tags do
     fleet(Map.get(tags, :reservations, [0]))
@@ -265,7 +265,16 @@ defmodule SpaceTraders.MissionControlDispositionsTest do
     assert [%{unallocated_ships: ["IDLE-1"]}] = dispositions(ctx)
   end
 
-  defp dispositions(ctx), do: MissionControl.market_execution(ctx.scope).dispositions
+  defp dispositions(ctx) do
+    case SpaceTraders.FleetStrategy.get(ctx.scope).active_revision do
+      nil ->
+        []
+
+      active ->
+        portfolio = SpaceTraders.FleetAllocation.current_portfolio(ctx.scope, ctx.agent)
+        List.wrap(MarketDisposition.for_agent(ctx.agent, active, portfolio))
+    end
+  end
 
   defp overdue_demands(ctx, count) do
     for n <- 1..count do

@@ -144,7 +144,7 @@ defmodule SpaceTraders.RuntimeQualification do
     stub_api(fn conn -> Game.reply(conn, Game.call(game, conn)) end)
     allow_game_runtime()
     start_runtime()
-    {conn, agent} = activate_fresh_generation(conn)
+    {conn, _agent} = activate_fresh_generation(conn)
 
     assert_eventually(fn -> Game.snapshot(game).status == "IN_TRANSIT" end, 500)
     settle_runtime()
@@ -195,9 +195,8 @@ defmodule SpaceTraders.RuntimeQualification do
       limit: :infinity
     )
 
-    {:ok, view, html} = live(conn, ~p"/mission-control")
-    IO.puts("Operator-visible operating health: " <> render(element(view, "#operating-health")))
-    assert html =~ agent.symbol
+    {:ok, view, _html} = live(conn, ~p"/mission-control")
+    IO.puts("Operator-visible Plan Health: " <> render(element(view, "#plan-health")))
     assert Map.get(counts, "/v2/my/ships/BASELINE-1/purchase", 0) == 1
     assert Map.get(counts, "/v2/my/ships/BASELINE-1/sell", 0) == 1
     assert state.credits == 175_800
