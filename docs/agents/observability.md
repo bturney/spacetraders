@@ -18,7 +18,7 @@ require new metrics, or change the active delivery frontier.
 
 | Question | Current source |
 | --- | --- |
-| Is the Fleet Strategy succeeding? | Mission Control objective evaluations and `SpaceTraders.MissionControl.overview/1` |
+| Is the Fleet Strategy succeeding? | Glance Plan Health (`/mission-control`), `SpaceTraders.MissionControl.PlanHealth` (thresholds and "old" rules) |
 | What decision was made, and how did it turn out? | `/decision-episodes/:id` and `strategy_decision_episodes` |
 | How do Fleet Generations compare? | `/generations`, including the cross-Generation Decision Episode table |
 | What is the Fleet doing now? | Mission Control, Fleet Commitments, Claims, Reservations, Pledges, and root Intents |
@@ -104,8 +104,7 @@ Market trade vs coverage pilot (#671); bounded labels only, IDs in logs:
   `stall_reason` `stale_revision_portfolio` | `authority_blocked_intent` |
   `overdue_demands_without_coverage`; one open per Generation, refreshed in
   place (`last_observed_at`, `observation_count`), closed by `resolved_at`.
-  Mission Control reads it (`MissionControl.market_execution/1` `:dispositions`,
-  `MissionControl.MarketDisposition`): `state` precedence `stalled` (only
+  Plan Health reads it (`MissionControl.MarketDisposition.for_agent/3`): `state` precedence `stalled` (only
   non-healthy: Degraded Operation, no Operator action), `spending_paused`
   (open Shortfall: balance, floor, release predicate; never a Neutral Wait),
   `busy_trade`, `capacity_deferred`, `neutral_wait` (limitation, coverage,

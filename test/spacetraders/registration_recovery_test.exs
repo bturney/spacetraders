@@ -549,9 +549,6 @@ defmodule SpaceTraders.RegistrationRecoveryTest do
       assert %{status: :unresolved, attempt_id: ^attempt_id, symbol: "ORBITALIST"} =
                FleetGeneration.registration_recovery(scope)
 
-      assert %{status: :unresolved, attempt_id: ^attempt_id} =
-               SpaceTraders.MissionControl.overview(scope).registration_recovery
-
       assert {:error, :registration_unresolved} =
                in_session(fn -> FleetGeneration.import_agent(scope, "OTHER_SECRET", true) end)
 
@@ -575,9 +572,6 @@ defmodule SpaceTraders.RegistrationRecoveryTest do
 
       assert %{status: :awaiting_adoption, symbol: "ORBITALIST"} =
                FleetGeneration.registration_recovery(scope)
-
-      assert %{status: :awaiting_adoption, symbol: "ORBITALIST"} =
-               SpaceTraders.MissionControl.overview(scope).registration_recovery
 
       assert agents(scope) == []
       assert {:ok, %{state: :empty}} = FleetGeneration.current_fleet(scope)

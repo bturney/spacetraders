@@ -12,7 +12,7 @@ defmodule SpaceTraders.RealizedMarketEconomicsTest do
   import SpaceTraders.RealizedEconomicsFixtures
 
   alias SpaceTraders.Agent.Scope
-  alias SpaceTraders.{Fleet, FleetAllocation, MissionControl}
+  alias SpaceTraders.{Fleet, FleetAllocation}
   alias SpaceTraders.FleetAllocation.{PortfolioCandidate, StrategyDecisionEpisode}
   alias SpaceTraders.FleetGeneration.Generation
   alias SpaceTraders.FleetStrategy.{Revision, Strategy}
@@ -112,7 +112,7 @@ defmodule SpaceTraders.RealizedMarketEconomicsTest do
 
   describe "each realized charge counts once" do
     test "repeated wakes and boot reconciliation write one record and classify the Episode" do
-      %{scope: scope, portfolio: portfolio, commitment: commitment} = market_fixture()
+      %{portfolio: portfolio, commitment: commitment} = market_fixture()
       buy = trade_intent!(portfolio, commitment, "buy", 400, 40)
       refuel!(buy, 144)
       trade_intent!(portfolio, commitment, "sell", 1_200, 40)
@@ -127,12 +127,6 @@ defmodule SpaceTraders.RealizedMarketEconomicsTest do
 
       assert outcomes["net_earnings"] == 656
       assert outcomes["earnings_record_ids"] == [record.id]
-
-      assert Enum.any?(
-               MissionControl.activity(scope),
-               &(&1[:summary] ==
-                   "Fleet decision realized 800 credits trade margin; 656 credits net earnings")
-             )
     end
 
     test "an absent attempt and its authorized retry charge only the retry's receipt" do
@@ -178,33 +172,6 @@ defmodule SpaceTraders.RealizedMarketEconomicsTest do
 
       assert :ok = FleetAllocation.reconcile_completed_outcomes()
       assert [] = Earnings.list(generation.id)
-    end
-  end
-
-  describe "Mission Control realized economics" do
-    test "reports Net Earnings from the Portfolio's Earnings records" do
-      %{scope: scope, portfolio: portfolio, commitment: commitment} = market_fixture()
-      buy = trade_intent!(portfolio, commitment, "buy", 400, 40)
-      refuel!(buy, 144)
-      trade_intent!(portfolio, commitment, "sell", 1_200, 40)
-      record!(portfolio)
-
-      realized = MissionControl.market_execution(scope).realized
-
-      assert realized.completed_round_trips == 1
-      assert realized.realized_trade_margin == 800
-      assert realized.fuel_cost == 144
-      assert realized.net_earnings == 656
-    end
-
-    test "reports nothing realized before a trip completes" do
-      %{scope: scope, portfolio: portfolio, commitment: commitment} = market_fixture()
-      trade_intent!(portfolio, commitment, "buy", 400, 40)
-
-      realized = MissionControl.market_execution(scope).realized
-
-      assert realized.completed_round_trips == 0
-      assert realized.net_earnings == nil
     end
   end
 
