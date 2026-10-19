@@ -828,6 +828,7 @@ defmodule SpaceTraders.API do
   defp mutation_authorized_after_response(_status, _method, _token), do: :ok
 
   defp emit_request_metric(operation, path, status) do
+    SpaceTraders.Liveness.game_request(status)
     SpaceTraders.Observability.api_request(operation, path, status)
   end
 

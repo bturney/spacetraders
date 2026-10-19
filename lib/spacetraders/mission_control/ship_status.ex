@@ -56,6 +56,9 @@ defmodule SpaceTraders.MissionControl.ShipStatus do
   @doc "The five statuses, in display order."
   def statuses, do: @statuses
 
+  @doc "Plain wording of an allocation stall reason."
+  def stall_reason(reason), do: Map.get(@stall_reasons, reason, "Allocation stalled")
+
   @doc "Metric label value of a status."
   def metric_label(status), do: Atom.to_string(status)
 
@@ -265,7 +268,7 @@ defmodule SpaceTraders.MissionControl.ShipStatus do
 
   defp stuck(intent, assignment, %{reason: reason} = stall) do
     if stalled?(stall, intent, assignment) do
-      text = Map.get(@stall_reasons, reason, "Allocation stalled")
+      text = stall_reason(reason)
       {:stuck, %{reason: text, retries: nil, phrase: "#{text}; checks every minute"}}
     end
   end
