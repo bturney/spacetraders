@@ -372,63 +372,70 @@ defmodule SpaceTraders.FleetRefitTest do
     end)
   end
 
-  test "a purchase-sourced refit claims its Ship, buys the module, installs, and reconciles" do
-    {scope, agent, revision, ship} = generation()
-    seed_intelligence(agent)
+  for clock <- [:native, :semantic] do
+    @tag clock: clock
+    test "a purchase-sourced refit claims, buys, installs, and reconciles with #{clock} time", %{
+      clock: clock
+    } do
+      if clock == :semantic, do: install_test_clock(~U[2000-01-01 00:00:00.000000Z])
+      {scope, agent, revision, ship} = generation()
+      seed_intelligence(agent)
+      reads = start_supervised!({Elixir.Agent, fn -> 0 end})
 
-    test_pid = self()
-    ship_symbol = ship.symbol
-    ship_path = "/v2/my/ships/#{ship_symbol}"
-    navigate_path = ship_path <> "/navigate"
-    purchase_path = ship_path <> "/purchase"
-    install_path = ship_path <> "/modules/install"
-    market_path = "/v2/systems/#{@system}/waypoints/#{@supply}/market"
+      test_pid = self()
+      ship_symbol = ship.symbol
+      ship_path = "/v2/my/ships/#{ship_symbol}"
+      navigate_path = ship_path <> "/navigate"
+      purchase_path = ship_path <> "/purchase"
+      install_path = ship_path <> "/modules/install"
+      market_path = "/v2/systems/#{@system}/waypoints/#{@supply}/market"
 
-    stub_api(test_pid, %{
-      "GET /v2/my/ships" => fn -> %{"data" => [outbound_ship_body(ship_symbol)]} end,
-      "GET /v2/my/agent" => fn ->
-        %{"data" => %{"symbol" => agent.symbol, "credits" => 50_000}}
-      end,
-      ("GET " <> ship_path) => fn ->
-        count = ship_read_count()
+      stub_api(test_pid, %{
+        "GET /v2/my/ships" => fn -> %{"data" => [outbound_ship_body(ship_symbol)]} end,
+        "GET /v2/my/agent" => fn ->
+          %{"data" => %{"symbol" => agent.symbol, "credits" => 50_000}}
+        end,
+        ("GET " <> ship_path) => fn ->
+          count = Elixir.Agent.get_and_update(reads, &{&1, &1 + 1})
 
-        case count do
-          0 -> %{"data" => outbound_ship_body(ship_symbol)}
-          1 -> %{"data" => purchased_docked_body(ship_symbol)}
-          _ -> %{"data" => fitted_ship_body(ship_symbol)}
-        end
-      end,
-      ("POST " <> navigate_path) => fn -> %{"data" => %{"nav" => nav_in_transit()}} end,
-      ("POST " <> purchase_path) => fn -> %{"data" => purchase_response()} end,
-      ("POST " <> install_path) => fn -> %{"data" => install_response()} end,
-      ("GET " <> market_path) => fn -> %{"data" => market_body()} end,
-      ("GET " <> @shipyard_path) => fn -> %{"data" => shipyard_body()} end
-    })
+          case count do
+            0 -> %{"data" => outbound_ship_body(ship_symbol)}
+            1 -> %{"data" => purchased_docked_body(ship_symbol)}
+            _ -> %{"data" => fitted_ship_body(ship_symbol)}
+          end
+        end,
+        ("POST " <> navigate_path) => fn -> %{"data" => %{"nav" => nav_in_transit()}} end,
+        ("POST " <> purchase_path) => fn -> %{"data" => purchase_response()} end,
+        ("POST " <> install_path) => fn -> %{"data" => install_response()} end,
+        ("GET " <> market_path) => fn -> %{"data" => market_body()} end,
+        ("GET " <> @shipyard_path) => fn -> %{"data" => shipyard_body()} end
+      })
 
-    assert {:ok, %Intent{type: "install_module", status: "waiting", target_waypoint: @supply}} =
-             FleetRefit.reconcile(scope, agent, revision, @system)
+      assert {:ok, %Intent{type: "install_module", status: "waiting", target_waypoint: @supply}} =
+               FleetRefit.reconcile(scope, agent, revision, @system)
 
-    assert [%Intent{status: "waiting"} = intent] = Intents.current(agent)
+      assert [%Intent{status: "waiting"} = intent] = Intents.current(agent)
 
-    live_ship = Model.Ship.from_json(docked_awaiting_purchase_body(ship_symbol))
+      live_ship = Model.Ship.from_json(docked_awaiting_purchase_body(ship_symbol))
 
-    assert {:ok, %Intent{status: "completed", last_action_result: result}} =
-             Intents.advance(agent, intent, live_ship)
+      assert {:ok, %Intent{status: "completed", last_action_result: result}} =
+               Intents.advance(agent, intent, live_ship)
 
-    assert result["kind"] == "install_module"
+      assert result["kind"] == "install_module"
 
-    assert {:ok, %{ship_symbol: ^ship_symbol, module_symbol: @module, portfolio: portfolio}} =
-             FleetRefit.reconcile(scope, agent, revision, @system)
+      assert {:ok, %{ship_symbol: ^ship_symbol, module_symbol: @module, portfolio: portfolio}} =
+               FleetRefit.reconcile(scope, agent, revision, @system)
 
-    assert FleetAllocation.current_portfolio(scope, agent) == nil
+      assert FleetAllocation.current_portfolio(scope, agent) == nil
 
-    assert %StrategyDecisionEpisode{classification: :realized, actual_outcomes: outcomes} =
-             Repo.get!(StrategyDecisionEpisode, portfolio.strategy_decision_episode_id)
+      assert %StrategyDecisionEpisode{classification: :realized, actual_outcomes: outcomes} =
+               Repo.get!(StrategyDecisionEpisode, portfolio.strategy_decision_episode_id)
 
-    assert outcomes["installed_after"] == 1
-    assert outcomes["expected_cost"] == 32_000
-    assert outcomes["reconciliation"]["state"] == "succeeded"
-    assert outcomes["reconciliation"]["basis"] == "reconciled_mutation_attempt"
+      assert outcomes["installed_after"] == 1
+      assert outcomes["expected_cost"] == 32_000
+      assert outcomes["reconciliation"]["state"] == "succeeded"
+      assert outcomes["reconciliation"]["basis"] == "reconciled_mutation_attempt"
+    end
   end
 
   test "a removal affecting duplicate matching modules terminates on the authoritative read" do
@@ -569,8 +576,10 @@ defmodule SpaceTraders.FleetRefitTest do
 
       attempts = SpaceTraders.MutationAttempts.list_for_agent(agent)
       assert length(attempts) == expected_purchases + 1
-      assert List.last(attempts).state == "succeeded"
-      assert List.last(attempts).operation_id == "install-ship-module"
+      # Purchase and installation can share a frozen semantic instant; UUID
+      # ordering is not evidence of action order. Assert the unique operation.
+      assert [installation] = Enum.filter(attempts, &(&1.operation_id == "install-ship-module"))
+      assert installation.state == "succeeded"
       assert Enum.all?(attempts, &(&1.provenance["intent_id"] == intent.id))
     end
   end
@@ -716,8 +725,8 @@ defmodule SpaceTraders.FleetRefitTest do
     end)
   end
 
-  defp install_test_clock do
-    start_supervised!({SpaceTraders.TestClock, DateTime.utc_now()})
+  defp install_test_clock(now \\ DateTime.utc_now()) do
+    start_supervised!({SpaceTraders.TestClock, now})
     previous = Application.get_env(:spacetraders, :clock)
     Application.put_env(:spacetraders, :clock, SpaceTraders.TestClock)
 
@@ -820,13 +829,6 @@ defmodule SpaceTraders.FleetRefitTest do
       Process.sleep(10)
       eventually(fun, attempts - 1)
     end
-  end
-
-  defp ship_read_count do
-    key = {__MODULE__, :ship_reads}
-    count = :persistent_term.get(key, 0)
-    :persistent_term.put(key, count + 1)
-    count
   end
 
   defp removed_state do
@@ -982,7 +984,8 @@ defmodule SpaceTraders.FleetRefitTest do
               activity: "STATIC"
             }
           ],
-          observing_ship_symbol: "REFIT-1"
+          observing_ship_symbol: "REFIT-1",
+          observed_at: SpaceTraders.Clock.utc_now()
         )
 
       # A legacy Listing with no linked governed source.

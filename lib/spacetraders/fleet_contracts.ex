@@ -89,7 +89,10 @@ defmodule SpaceTraders.FleetContracts do
                  admit_acceptance(
                    revision,
                    contract,
-                   Map.merge(evidence, %{credits: overview.credits, as_of: SpaceTraders.Clock.utc_now()})
+                   Map.merge(evidence, %{
+                     credits: overview.credits,
+                     as_of: SpaceTraders.Clock.utc_now()
+                   })
                  ),
                {:ok, result} <-
                  Agent.handle_game_result(agent, Contracts.accept_contract(agent, contract_id)) do

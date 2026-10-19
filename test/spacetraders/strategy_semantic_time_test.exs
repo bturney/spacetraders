@@ -36,13 +36,19 @@ defmodule SpaceTraders.StrategySemanticTimeTest do
     {:ok, %{generation: generation}} = FleetGeneration.current_fleet()
     facts = %{"response" => %{"serverResets" => %{"next" => "2000-01-01T03:00:00Z"}}}
 
-    older = Repo.insert!(%Observation{
-      id: "ffffffff-ffff-4fff-bfff-ffffffffffff", agent_id: agent.id,
-      fleet_generation_id: generation.id, subject: "server:status", operation_id: "get-status",
-      dependency_keys: ["server:status"], facts: facts,
-      response_fingerprint: Evidence.fingerprint(facts), observed_at: @now,
-      inserted_at: ~U[2026-01-01 00:00:00.000001Z]
-    })
+    older =
+      Repo.insert!(%Observation{
+        id: "ffffffff-ffff-4fff-bfff-ffffffffffff",
+        agent_id: agent.id,
+        fleet_generation_id: generation.id,
+        subject: "server:status",
+        operation_id: "get-status",
+        dependency_keys: ["server:status"],
+        facts: facts,
+        response_fingerprint: Evidence.fingerprint(facts),
+        observed_at: @now,
+        inserted_at: ~U[2026-01-01 00:00:00.000001Z]
+      })
 
     assert %{status: :known, duration_seconds: 10_800} = GenerationHorizon.current(agent)
     TestClock.advance(31)
@@ -51,27 +57,40 @@ defmodule SpaceTraders.StrategySemanticTimeTest do
     # This later acquisition is malformed. Random UUID order must not resurrect
     # the earlier valid schedule when acquisitions share one semantic instant.
     invalid = %{"response" => %{"serverResets" => %{"next" => "unknown"}}}
-    newer = Repo.insert!(%{older |
-      id: "00000000-0000-4000-8000-000000000001", facts: invalid,
-      response_fingerprint: Evidence.fingerprint(invalid),
-      inserted_at: ~U[2026-01-01 00:00:00.000002Z]
-    })
+
+    newer =
+      Repo.insert!(%{
+        older
+        | id: "00000000-0000-4000-8000-000000000001",
+          facts: invalid,
+          response_fingerprint: Evidence.fingerprint(invalid),
+          inserted_at: ~U[2026-01-01 00:00:00.000002Z]
+      })
+
     assert Evidence.latest_observation(agent, "server:status").id == newer.id
     assert %{status: :unknown, reason: :invalid_reset_evidence} = GenerationHorizon.current(agent)
   end
 
   @tag :mint
-  test "normal registration establishes semantic Generation chronology", %{scope: scope, revision: revision} do
+  test "normal registration establishes semantic Generation chronology", %{
+    scope: scope,
+    revision: revision
+  } do
     {:ok, operator} = SpaceTraders.Agent.link_account_token(scope, "ACCOUNT_TOKEN")
     scope = Scope.for_operator(operator)
 
     Req.Test.stub(SpaceTraders.API, fn conn ->
       assert conn.request_path == "/v2/register"
+
       Req.Test.json(conn, %{
         "data" => %{
           "token" => "SEMANTIC_TOKEN",
-          "agent" => %{"symbol" => "SEMANTIC", "credits" => 175_000,
-            "headquarters" => "X1-UX81-A1", "startingFaction" => "COSMIC"},
+          "agent" => %{
+            "symbol" => "SEMANTIC",
+            "credits" => 175_000,
+            "headquarters" => "X1-UX81-A1",
+            "startingFaction" => "COSMIC"
+          },
           "contract" => %{"id" => "c1", "type" => "PROCUREMENT"},
           "faction" => %{"symbol" => "COSMIC"},
           "ships" => [SpaceTraders.ShipBody.ship_body("SEMANTIC-1")]

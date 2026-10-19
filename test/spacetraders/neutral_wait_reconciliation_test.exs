@@ -98,8 +98,14 @@ defmodule SpaceTraders.NeutralWaitReconciliationTest do
   end
 
   @tag :semantic_clock
-  test "allocation records and supersedes a Neutral Wait at the semantic decision instants",
-       %{agent: agent, scope: scope, revision: revision, generation: generation, capacity: capacity} do
+  test "allocation records and refreshes a Neutral Wait at the semantic decision instants",
+       %{
+         agent: agent,
+         scope: scope,
+         revision: revision,
+         generation: generation,
+         capacity: capacity
+       } do
     assert {:ok, %{neutral_wait: original}} =
              MarketDomain.reconcile(scope, agent, revision, @system, capacity)
 

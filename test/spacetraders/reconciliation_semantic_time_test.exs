@@ -57,10 +57,16 @@ defmodule SpaceTraders.ReconciliationSemanticTimeTest do
     start_reconciler()
     flush_contract_reads()
     subject = "contracts:#{agent.symbol}"
-    {:ok, demand} = Evidence.request_demand(agent, revision, %{
-      subject: subject, required_facts: ["response"], freshness_seconds: 30,
-      owner: "fleet_planning", due_at: DateTime.add(@now, 30), deadline_at: DateTime.add(@now, 45)
-    })
+
+    {:ok, demand} =
+      Evidence.request_demand(agent, revision, %{
+        subject: subject,
+        required_facts: ["response"],
+        freshness_seconds: 30,
+        owner: "fleet_planning",
+        due_at: DateTime.add(@now, 30),
+        deadline_at: DateTime.add(@now, 45)
+      })
 
     Phoenix.PubSub.subscribe(SpaceTraders.PubSub, "observation_demands")
     start_supervised!(Quiesced.child_spec({DemandScheduler, []}))
@@ -79,10 +85,26 @@ defmodule SpaceTraders.ReconciliationSemanticTimeTest do
     # Activation remains the normal immutable-Revision boundary while owners
     # are down. Reconstructed work must not revive the previous authority.
     projection = FleetStrategy.get(scope)
-    document = Map.put(projection.draft, "consequences", "Revised Contract authority.")
+
+    document =
+      Map.put(projection.active_revision.document, "consequences", "Revised Contract authority.")
+
     {:ok, draft} = FleetStrategy.save_draft(scope, document, projection.draft_version)
     {:ok, active} = FleetStrategy.activate(scope, draft.draft_version)
     assert active.id != revision.id
+    assert Evidence.list_open_demands(agent) == []
+
+    {:ok, current_demand} =
+      Evidence.request_demand(agent, active, %{
+        subject: subject,
+        required_facts: ["response"],
+        freshness_seconds: 30,
+        owner: "fleet_planning",
+        due_at: demand.due_at,
+        deadline_at: demand.deadline_at
+      })
+
+    assert current_demand.id != demand.id
 
     start_supervised!(Quiesced.child_spec({DemandScheduler, []}))
     GenServer.call(DemandScheduler, :simulation_barrier)
@@ -90,21 +112,64 @@ defmodule SpaceTraders.ReconciliationSemanticTimeTest do
     assert agent_id == agent.id
     assert subject in subjects
     assert [%{id: demand_id, deadline_missed_at: missed}] = Evidence.list_open_demands(agent)
-    assert demand_id == demand.id
+    assert demand_id == current_demand.id
     assert missed == ~U[2000-01-01 00:02:01.000000Z]
 
     start_reconciler()
     assert_receive {:contracts_read, ~U[2000-01-01 00:02:01.000000Z]}
-    assert {:ok, source} = Evidence.evidence_for_demand(demand)
+    assert {:ok, source} = Evidence.evidence_for_demand(current_demand)
     assert source.observed_at == ~U[2000-01-01 00:02:01.000000Z]
     assert source.fleet_generation_id == generation.id
     assert {:ok, %{generation: current}} = FleetGeneration.current_fleet()
     assert current.id == generation.id
     assert current.fleet_strategy_revision_id == active.id
-    assert current.initial_fleet_strategy_revision_id == generation.initial_fleet_strategy_revision_id
+
+    assert current.initial_fleet_strategy_revision_id ==
+             generation.initial_fleet_strategy_revision_id
+
     GenServer.call(DemandScheduler, :simulation_barrier)
     assert Evidence.due_demands() == []
     assert TestClock.next_due_at() == ~U[2000-01-01 00:03:01.000000Z]
+  end
+
+  test "Construction discovery does not resurrect an older Waypoint at a frozen instant",
+       %{agent: agent, scope: scope, generation: generation, revision: revision} do
+    alias SpaceTraders.Evidence.Observation
+
+    projection = FleetStrategy.get(scope)
+
+    document =
+      put_in(
+        revision.document,
+        ["objectives", Access.at(0), "objective"],
+        "Complete construction"
+      )
+
+    {:ok, draft} = FleetStrategy.save_draft(scope, document, projection.draft_version)
+    {:ok, active} = FleetStrategy.activate(scope, draft.draft_version)
+
+    for {id, under_construction, inserted_at} <- [
+          {"ffffffff-ffff-4fff-bfff-ffffffffffff", true, ~U[2026-01-01 00:00:00.000001Z]},
+          {"00000000-0000-4000-8000-000000000001", false, ~U[2026-01-01 00:00:00.000002Z]}
+        ] do
+      facts = %{"is_under_construction" => under_construction}
+
+      Repo.insert!(%Observation{
+        id: id,
+        agent_id: agent.id,
+        fleet_generation_id: generation.id,
+        subject: "waypoint:X1-UX81:X1-UX81-A1",
+        operation_id: "get-waypoint",
+        dependency_keys: [],
+        facts: facts,
+        response_fingerprint: Evidence.fingerprint(facts),
+        observed_at: @now,
+        inserted_at: inserted_at
+      })
+    end
+
+    assert {:ok, :no_remaining_construction_work} =
+             SpaceTraders.FleetConstruction.reconcile(scope, agent, active)
   end
 
   test "fresh Contract acceptance evidence uses gameplay time without relaxing the credit floor",
@@ -112,27 +177,54 @@ defmodule SpaceTraders.ReconciliationSemanticTimeTest do
     Req.Test.stub(SpaceTraders.API, fn conn ->
       case conn.request_path do
         "/v2/my/contracts" ->
-          Req.Test.json(conn, %{"data" => [%{
-            "id" => "offered", "accepted" => false, "fulfilled" => false,
-            "deadlineToAccept" => "2000-01-01T01:00:00Z",
-            "terms" => %{"deadline" => "2000-01-02T00:00:00Z", "deliver" => [],
-              "payment" => %{"onAccepted" => 0, "onFulfilled" => 1000}}
-          }]})
+          Req.Test.json(conn, %{
+            "data" => [
+              %{
+                "id" => "offered",
+                "accepted" => false,
+                "fulfilled" => false,
+                "deadlineToAccept" => "2000-01-01T01:00:00Z",
+                "terms" => %{
+                  "deadline" => "2000-01-02T00:00:00Z",
+                  "deliver" => [],
+                  "payment" => %{"onAccepted" => 0, "onFulfilled" => 1000}
+                }
+              }
+            ]
+          })
 
         "/v2/my/agent" ->
           Req.Test.json(conn, %{"data" => %{"symbol" => agent.symbol, "credits" => 175_000}})
 
-        path -> flunk("inadmissible acceptance sent a mutation: #{path}")
+        path ->
+          flunk("inadmissible acceptance sent a mutation: #{path}")
       end
     end)
 
-    evidence = %{as_of: @now, worst_case_cost: 200_000, estimated_seconds: 60, evidence_id: "offer"}
+    evidence = %{
+      as_of: @now,
+      worst_case_cost: 200_000,
+      estimated_seconds: 60,
+      evidence_id: "offer"
+    }
+
     assert {:error, :hard_constraint} =
-             SpaceTraders.FleetContracts.accept_if_admissible(agent, revision, "offered", evidence)
+             SpaceTraders.FleetContracts.accept_if_admissible(
+               agent,
+               revision,
+               "offered",
+               evidence
+             )
 
     TestClock.advance(301)
+
     assert {:error, :stale_acceptance_evidence} =
-             SpaceTraders.FleetContracts.accept_if_admissible(agent, revision, "offered", evidence)
+             SpaceTraders.FleetContracts.accept_if_admissible(
+               agent,
+               revision,
+               "offered",
+               evidence
+             )
   end
 
   test "participant reconstructs reconciliation after restart and rejects obsolete refresh wakes",
@@ -152,6 +244,7 @@ defmodule SpaceTraders.ReconciliationSemanticTimeTest do
     # A refresh delivered twice must not perform another acquisition or fork
     # the recurring timer chain. This is the old untagged timer message.
     send(Process.whereis(Reconciler), :reconcile_durable_work)
+    send(Process.whereis(Reconciler), {:reconcile_durable_work, make_ref()})
     barrier()
     refute_receive {:contracts_read, _}
     assert TestClock.next_due_at() == ~U[2000-01-01 00:02:00.000000Z]

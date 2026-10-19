@@ -777,7 +777,7 @@ defmodule SpaceTraders.FleetAllocation do
                      c.fleet_commitment_portfolio_id == ^portfolio.id and
                        c.unwind_state != :released
                ) do
-          Repo.update!(Ecto.Changeset.change(portfolio, superseded_at: DateTime.utc_now()))
+          Repo.update!(Ecto.Changeset.change(portfolio, superseded_at: Clock.utc_now()))
           if is_nil(portfolio.superseded_at), do: NeutralWait.clear(portfolio.fleet_generation_id)
         end
 
@@ -1403,7 +1403,8 @@ defmodule SpaceTraders.FleetAllocation do
     )
   end
 
-  defp handoff_cutoff, do: DateTime.add(DateTime.utc_now(:second), -@leg_handoff_seconds, :second)
+  defp handoff_cutoff,
+    do: DateTime.add(SpaceTraders.Clock.Timestamp.second(), -@leg_handoff_seconds, :second)
 
   @doc "Returns the current Fleet Commitment Claim authorizing one Ship."
   def current_ship_claim(agent, ship_symbol, opts \\ [])
@@ -1602,14 +1603,14 @@ defmodule SpaceTraders.FleetAllocation do
               is_nil(generation.fenced_at) and is_nil(generation.retired_at)
         ),
         inc: [allocation_version: 1],
-        set: [updated_at: DateTime.utc_now(:second)]
+        set: [updated_at: SpaceTraders.Clock.Timestamp.second()]
       )
 
     if updated_generations != 1, do: Repo.rollback(:stale_source)
 
     lock_available_ships!(generation_id, Enum.flat_map(selection.commitments, & &1.claims))
 
-    now = DateTime.utc_now()
+    now = Clock.utc_now()
 
     current_portfolio_ids =
       from portfolio in Portfolio,
@@ -1767,7 +1768,7 @@ defmodule SpaceTraders.FleetAllocation do
              set: [
                classification: classification,
                actual_outcomes: json_safe(actual_outcomes),
-               updated_at: DateTime.utc_now()
+               updated_at: Clock.utc_now()
              ]
            ],
            returning: true
@@ -1779,7 +1780,7 @@ defmodule SpaceTraders.FleetAllocation do
 
   defp do_unwind_current_portfolio(operator_id, generation_id) do
     lock_generation_agent!(generation_id)
-    now = DateTime.utc_now()
+    now = Clock.utc_now()
 
     portfolio =
       Repo.one(

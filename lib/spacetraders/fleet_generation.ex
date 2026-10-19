@@ -819,12 +819,13 @@ defmodule SpaceTraders.FleetGeneration do
         end)
 
     credits = get_in(evidence.facts, ["response", "credits"])
+    now = Clock.utc_now()
 
     if generation && generation.starting_credits && objective_index && is_integer(credits) &&
          evidence.agent_id == generation.agent_id && Evidence.valid_observation?(evidence) &&
          DateTime.compare(evidence.observed_at, generation.inserted_at) != :lt &&
-         DateTime.compare(evidence.observed_at, Clock.utc_now()) != :gt &&
-         DateTime.diff(Clock.utc_now(), evidence.observed_at, :second) <= 300 do
+         DateTime.compare(evidence.observed_at, now) != :gt &&
+         DateTime.diff(now, evidence.observed_at, :second) <= 300 do
       {count, _} =
         Repo.update_all(
           from(candidate in Generation,
@@ -836,7 +837,7 @@ defmodule SpaceTraders.FleetGeneration do
             last_observed_credits: credits,
             last_observed_at: evidence.observed_at,
             last_observed_evidence_id: evidence.id,
-            updated_at: DateTime.truncate(Clock.utc_now(), :second)
+            updated_at: DateTime.truncate(now, :second)
           ]
         )
 
@@ -1057,12 +1058,13 @@ defmodule SpaceTraders.FleetGeneration do
          facts
        ) do
     objective = revision.document |> Map.get("objectives", []) |> Enum.at(index)
+    now = Clock.utc_now()
 
     valid_current_evidence =
       Evidence.valid_observation?(evidence) and evidence.agent_id == generation.agent_id and
         DateTime.compare(evidence.observed_at, generation.inserted_at) != :lt and
-        DateTime.compare(evidence.observed_at, Clock.utc_now()) != :gt and
-        DateTime.diff(Clock.utc_now(), evidence.observed_at, :second) <= 300
+        DateTime.compare(evidence.observed_at, now) != :gt and
+        DateTime.diff(now, evidence.observed_at, :second) <= 300
 
     cond do
       not valid_current_evidence ->

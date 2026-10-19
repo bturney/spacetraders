@@ -17,6 +17,10 @@ defmodule SpaceTraders.FleetAllocation.Portfolio do
     has_many :commitments, SpaceTraders.FleetAllocation.Commitment,
       foreign_key: :fleet_commitment_portfolio_id
 
-    timestamps(type: :utc_datetime_usec, updated_at: false)
+    timestamps(
+      type: :utc_datetime_usec,
+      updated_at: false,
+      autogenerate: {SpaceTraders.Clock.Timestamp, :now, []}
+    )
   end
 end

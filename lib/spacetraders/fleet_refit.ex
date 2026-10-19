@@ -56,7 +56,7 @@ defmodule SpaceTraders.FleetRefit do
          {:ok, ships} <- Fleet.list_ships(agent),
          ships <-
            Enum.reject(ships, &(&1.symbol in ShipReservation.reserved_symbols(agent.id))),
-         as_of = DateTime.utc_now(),
+         as_of = SpaceTraders.Clock.utc_now(),
          {:ok, planning} <-
            FleetPlanning.plan_ship_refit(revision, index, %{
              as_of: as_of,
@@ -284,7 +284,7 @@ defmodule SpaceTraders.FleetRefit do
     StandingAuthority.authorize(revision, %{
       revision_id: revision.id,
       evidence_id: Evidence.fingerprint(candidate.dependencies),
-      observed_at: DateTime.utc_now(),
+      observed_at: SpaceTraders.Clock.utc_now(),
       bounds: %{
         minimum_credits: credits - candidate.required_resources.credits,
         scraps_ship: false

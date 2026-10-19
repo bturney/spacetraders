@@ -267,7 +267,7 @@ defmodule SpaceTraders.FleetConstruction do
          upstream_opportunities,
          unavailable
        ) do
-    now = DateTime.utc_now()
+    now = SpaceTraders.Clock.utc_now()
     current = FleetAllocation.current_portfolio(scope, agent)
 
     case FleetAllocation.protected_commitments(
@@ -782,7 +782,7 @@ defmodule SpaceTraders.FleetConstruction do
       Repo.all(
         from o in Observation,
           where: o.agent_id == ^agent.id and like(o.subject, "waypoint:%"),
-          order_by: [desc: o.observed_at, desc: o.id]
+          order_by: [desc: o.observed_at, desc: o.inserted_at, desc: o.id]
       )
       |> Enum.uniq_by(& &1.subject)
       |> Enum.filter(&(&1.facts["is_under_construction"] == true))
@@ -808,7 +808,7 @@ defmodule SpaceTraders.FleetConstruction do
         ["construction", system, waypoint] ->
           case read_project(agent, system, waypoint) do
             {:ok, construction} ->
-              observed_at = DateTime.utc_now()
+              observed_at = SpaceTraders.Clock.utc_now()
 
               observation = %{
                 system_symbol: system,
