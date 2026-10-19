@@ -83,9 +83,9 @@ defmodule SpaceTradersWeb.GlanceMotionTest do
       assert has_element?(view, "#fleet-grid-count-stuck", "30")
       assert has_element?(view, "#fleet-grid-count-trading", "78")
 
-      # Two listed, the rest counted.
-      assert view |> render() |> String.split(~s(id="not-earning-)) |> length() == 4
-      assert has_element?(view, "#not-earning-more", "+28 more")
+      # One listed, the rest counted.
+      assert view |> render() |> String.split(~s(id="not-earning-)) |> length() == 3
+      assert has_element?(view, "#not-earning-more", "+29 more")
     end
 
     test "a healthy 120-Ship Fleet has nothing under Not earning", %{conn: conn} do

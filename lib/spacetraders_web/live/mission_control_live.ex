@@ -17,7 +17,7 @@ defmodule SpaceTradersWeb.MissionControlLive do
 
   @refresh_ms 1_000
   @flash_ms 4_500
-  @not_earning_shown 2
+  @not_earning_shown 1
 
   @impl true
   def mount(_params, _session, socket) do
@@ -141,12 +141,12 @@ defmodule SpaceTradersWeb.MissionControlLive do
   def render(assigns) do
     ~H"""
     <Layouts.app flash={@flash} current_scope={@current_scope} wide active={:glance}>
-      <div id="glance" class="grid grid-cols-1 gap-3 md:grid-cols-[400px_1fr] md:gap-5">
-        <div class="space-y-3">
+      <div id="glance" class="grid grid-cols-1 gap-2 md:grid-cols-[400px_1fr] md:gap-5">
+        <div class="space-y-2 md:space-y-3">
           <.health_card state={@health.state} reason={@health.reason} checks={@health.checks} />
           <.credits_card credits={@credits} flash={@credits_flash} />
         </div>
-        <div class="space-y-3">
+        <div class="space-y-2 md:space-y-3">
           <.motion_card :if={@motion} motion={@motion} sold={sold(@flashes)} />
           <.happenings_feed events={@events} />
         </div>
@@ -178,10 +178,14 @@ defmodule SpaceTradersWeb.MissionControlLive do
       <div :if={@motion.mode == :cards} id="motion-cards" class="mt-2 space-y-2">
         <.ship_card :for={row <- @motion.rows} row={row} sold={@sold[row.symbol]} />
       </div>
-      <div :if={@motion.mode == :grid} id="motion-grid" class="mt-2">
+      <div :if={@motion.mode == :grid} id="motion-grid" class="mt-1.5">
         <.fleet_grid rows={@motion.rows} sold={@sold} counts={@motion.counts} />
-        <div id="not-earning" class="mt-2.5 min-h-[calc(2*24px+16px)]">
-          <.eyebrow>Not earning right now</.eyebrow>
+        <div id="not-earning" class="mt-2 min-h-[calc(24px+14px)]">
+          <.eyebrow>
+            Not earning right now<:right>
+              <span :if={@more > 0} id="not-earning-more">+{@more} more</span>
+            </:right>
+          </.eyebrow>
           <ul class="mt-1">
             <li
               :for={row <- @shown}
@@ -195,7 +199,6 @@ defmodule SpaceTradersWeb.MissionControlLive do
               <span class="min-w-0 flex-1 truncate text-muted">{row.status.phrase}</span>
             </li>
           </ul>
-          <p :if={@more > 0} id="not-earning-more" class="text-xs text-dim">+{@more} more</p>
           <p :if={@shown == []} id="not-earning-none" class="text-xs text-dim">
             Every Ship is earning or waiting on purpose.
           </p>

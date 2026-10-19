@@ -638,7 +638,7 @@ defmodule SpaceTradersWeb.MissionControlComponents do
   attr :rows, :list, required: true, doc: "`MissionControl.ShipRow`s, in name order"
   attr :sold, :map, default: %{}, doc: "Ship symbol => Net Earnings of a sale in the last 4.5 s"
   attr :counts, :map, required: true, doc: "ShipStatus status => number of Ships"
-  attr :columns, :integer, default: 24
+  attr :columns, :integer, default: 40
 
   @doc """
   One cell per Ship (large Fleets): a fill that rises with its trip, tinted by
@@ -681,7 +681,7 @@ defmodule SpaceTradersWeb.MissionControlComponents do
           ></span>
         </.link>
       </div>
-      <div class="mt-2.5 flex flex-wrap gap-x-3.5 gap-y-1 text-xs text-muted">
+      <div class="mt-2 flex flex-wrap gap-x-3.5 gap-y-1 text-xs text-muted">
         <span
           :for={{status, n} <- @counts}
           :if={n > 0}
@@ -739,12 +739,12 @@ defmodule SpaceTradersWeb.MissionControlComponents do
     ~H"""
     <.card id={@id}>
       <.eyebrow>Just happened</.eyebrow>
-      <ul class="mt-1.5 min-h-[calc(8*26px)]">
+      <ul class="mt-1 min-h-[calc(8*20px)]">
         <li
           :for={event <- @events}
           id={"#{@id}-#{event.id}"}
           data-kind={event.kind}
-          class="flex h-[26px] items-center gap-2 text-[13px]"
+          class="flex h-5 items-center gap-2 text-xs"
         >
           <span class="num w-[38px] flex-none text-dim">{Calendar.strftime(event.at, "%H:%M")}</span>
           <span class={["size-1.5 flex-none rounded-full", @dots[event.kind]]}></span>
