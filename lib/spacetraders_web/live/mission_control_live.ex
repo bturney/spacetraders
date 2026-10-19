@@ -195,7 +195,7 @@ defmodule SpaceTradersWeb.MissionControlLive do
               <.link navigate={"/ships/#{row.symbol}"} class="num w-[72px] flex-none">
                 {row.symbol}
               </.link>
-              <.status_chip status={chip_status(row.status.status)} small />
+              <.status_chip status={chip_status(row.status.kind)} small />
               <span class="min-w-0 flex-1 truncate text-muted">{row.status.phrase}</span>
             </li>
           </ul>

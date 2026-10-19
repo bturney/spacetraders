@@ -119,7 +119,7 @@ defmodule SpaceTraders.MissionControl.PlanHealth do
 
             %{
               symbol: ship.symbol,
-              status: status.status,
+              status: status.kind,
               reason: status.reason,
               overdue_at: ShipRow.overdue_at(ship, status)
             }

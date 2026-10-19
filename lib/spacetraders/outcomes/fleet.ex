@@ -74,7 +74,7 @@ defmodule SpaceTraders.Outcomes.Fleet do
       end)
       |> Map.new()
 
-    present = Enum.frequencies_by(ships, &{statuses[&1.id].status, &1.ship_type})
+    present = Enum.frequencies_by(ships, &{statuses[&1.id].kind, &1.ship_type})
     types = MapSet.union(published_types, MapSet.new(ships, & &1.ship_type))
 
     for type <- types, status <- ShipStatus.statuses() do

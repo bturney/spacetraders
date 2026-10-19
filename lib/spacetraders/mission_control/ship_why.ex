@@ -58,7 +58,7 @@ defmodule SpaceTraders.MissionControl.ShipWhy do
       credits_per_hour: status.credits_per_hour,
       choice: choice,
       options: options(choice),
-      wait: if(status.status == :waiting and is_nil(choice), do: wait(generation)),
+      wait: if(status.kind == :waiting and is_nil(choice), do: wait(generation)),
       history: history(generation, ship.symbol)
     }
   end

@@ -102,7 +102,7 @@ defmodule SpaceTradersWeb.ShipLive do
       </p>
 
       <div :if={@why} id={"ship-#{@why.ship.symbol}"} class="mt-2 space-y-3">
-        <.card tone={chip(@why.status.status)}>
+        <.card tone={chip(@why.status.kind)}>
           <div class="flex items-center justify-between gap-3">
             <div class="min-w-0">
               <h1 class="text-xl font-medium">{@why.ship.symbol}</h1>
@@ -112,7 +112,7 @@ defmodule SpaceTradersWeb.ShipLive do
                 )}</span>
               </div>
             </div>
-            <.status_chip status={chip(@why.status.status)} />
+            <.status_chip status={chip(@why.status.kind)} />
           </div>
           <div class="mt-2">
             <.route_bar
@@ -122,7 +122,7 @@ defmodule SpaceTradersWeb.ShipLive do
               at={@why.row.at}
               depart_at={@why.row.depart_at}
               arrive_at={@why.row.arrive_at}
-              status={chip(@why.status.status)}
+              status={chip(@why.status.kind)}
               size={:md}
             />
           </div>
@@ -221,11 +221,11 @@ defmodule SpaceTradersWeb.ShipLive do
   ## The sentence
 
   # Extra facts beside the sentence: retry state, or what a busy Ship is doing.
-  defp status_line(%{status: %{status: :stuck} = status}), do: retry(status)
+  defp status_line(%{status: %{kind: :stuck} = status}), do: retry(status)
   defp status_line(%{choice: %{}, status: %{phrase: phrase}}), do: phrase
   defp status_line(_why), do: nil
 
-  defp sentence(%{status: %{status: :stuck, reason: reason}}), do: "#{reason}."
+  defp sentence(%{status: %{kind: :stuck, reason: reason}}), do: "#{reason}."
 
   defp sentence(%{choice: %{} = choice}) do
     "Chose #{trade_name(choice)} #{estimate(choice)}#{beat(choice.alternatives)}#{price_age(choice)}."

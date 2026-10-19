@@ -581,7 +581,7 @@ defmodule SpaceTradersWeb.MissionControlComponents do
   "+X sold just now" in the countdown's own box, so nothing moves.
   """
   def ship_card(assigns) do
-    chip = chip_status(assigns.row.status.status)
+    chip = chip_status(assigns.row.status.kind)
 
     assigns =
       assign(assigns,
@@ -661,13 +661,13 @@ defmodule SpaceTradersWeb.MissionControlComponents do
           id={"#{@id}-cell-#{row.id}"}
           navigate={"/ships/#{row.symbol}"}
           title={row.symbol}
-          data-status={row.status.status}
+          data-status={row.status.kind}
           data-depart={ms(row.depart_at)}
           data-arrive={ms(row.arrive_at)}
           data-sold={@sold[row.symbol] && "true"}
           class={[
             "relative aspect-square overflow-hidden rounded-[2px] outline-offset-[-1.5px]",
-            elem(@cells[chip_status(row.status.status)], 0),
+            elem(@cells[chip_status(row.status.kind)], 0),
             @sold[row.symbol] && "outline outline-[1.5px] outline-success"
           ]}
         >
@@ -675,7 +675,7 @@ defmodule SpaceTradersWeb.MissionControlComponents do
             data-fill
             class={[
               "absolute inset-x-0 bottom-0 transition-[height] duration-[250ms] ease-linear",
-              elem(@cells[chip_status(row.status.status)], 1)
+              elem(@cells[chip_status(row.status.kind)], 1)
             ]}
             style={"height:#{fill(row)}%"}
           ></span>
@@ -771,7 +771,7 @@ defmodule SpaceTradersWeb.MissionControlComponents do
   defp sale_tone(amount) when amount < 0, do: :stuck
   defp sale_tone(_amount), do: :on
 
-  defp fill(%{status: %{status: :stuck}}), do: 100
+  defp fill(%{status: %{kind: :stuck}}), do: 100
 
   defp fill(%{depart_at: %DateTime{} = depart, arrive_at: %DateTime{} = arrive}),
     do: Float.round(progress(depart, arrive, DateTime.utc_now()) * 100, 1)

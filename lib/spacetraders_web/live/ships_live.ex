@@ -130,7 +130,7 @@ defmodule SpaceTradersWeb.ShipsLive do
       socket.assigns.filter &&
         Enum.any?(rows, fn row ->
           old = socket.assigns.statuses[row.id]
-          (old && old.status) != row.status.status
+          (old && old.kind) != row.status.kind
         end)
 
     socket = assign(socket, statuses: statuses, counts: counts(statuses))
@@ -149,11 +149,11 @@ defmodule SpaceTradersWeb.ShipsLive do
   end
 
   defp shown?(%{assigns: %{filter: nil}}, _row), do: true
-  defp shown?(%{assigns: %{filter: filter}}, row), do: row.status.status == filter
+  defp shown?(%{assigns: %{filter: filter}}, row), do: row.status.kind == filter
 
   defp counts(statuses) do
     base = Map.new(ShipStatus.statuses(), &{&1, 0})
-    Enum.reduce(statuses, base, fn {_id, %{status: s}}, acc -> Map.update!(acc, s, &(&1 + 1)) end)
+    Enum.reduce(statuses, base, fn {_id, %{kind: s}}, acc -> Map.update!(acc, s, &(&1 + 1)) end)
   end
 
   # Rows not yet overdue, by the moment they become so.
@@ -225,7 +225,7 @@ defmodule SpaceTradersWeb.ShipsLive do
             <div class="min-w-0">
               <div class="flex items-center gap-2">
                 <.link navigate={~p"/ships/#{row.symbol}"} class="font-medium">{row.symbol}</.link>
-                <.status_chip status={chip(row.status.status)} small />
+                <.status_chip status={chip(row.status.kind)} small />
               </div>
               <div class="text-xs">{row.status.phrase}{retry(row.status)}{estimate(row.status)}</div>
               <div class="text-xs text-dim">
@@ -249,7 +249,7 @@ defmodule SpaceTradersWeb.ShipsLive do
               at={row.at}
               depart_at={row.depart_at}
               arrive_at={row.arrive_at}
-              status={chip(row.status.status)}
+              status={chip(row.status.kind)}
               size={:sm}
             />
           </div>
@@ -276,7 +276,7 @@ defmodule SpaceTradersWeb.ShipsLive do
   defp caption(%{status: %{next_check_at: %DateTime{}}}), do: "next check"
   defp caption(_row), do: nil
 
-  defp retry(%{status: :stuck, retries: retries}) when is_integer(retries),
+  defp retry(%{kind: :stuck, retries: retries}) when is_integer(retries),
     do: " · retry #{retries}"
 
   defp retry(_status), do: nil

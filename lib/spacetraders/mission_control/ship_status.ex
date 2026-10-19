@@ -256,7 +256,7 @@ defmodule SpaceTraders.MissionControl.ShipStatus do
 
     base
     |> Map.merge(details)
-    |> Map.put(:status, status)
+    |> Map.put(:kind, status)
   end
 
   defp stuck(%Intent{status: "blocked"} = intent, _assignment, _stall) do
