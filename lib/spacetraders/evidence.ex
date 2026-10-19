@@ -253,7 +253,7 @@ defmodule SpaceTraders.Evidence do
         source.agent_id == ^agent.id and source.subject == ^subject and
           source.operation_id == ^operation_id and source.observed_at >= ^since and
           source.observed_at >= ^oldest and source.observed_at <= ^now,
-      order_by: [desc: source.observed_at, desc: source.id]
+      order_by: [desc: source.observed_at, desc: source.inserted_at, desc: source.id]
     )
     |> Repo.all()
     |> Enum.find_value(fn source ->
@@ -296,7 +296,11 @@ defmodule SpaceTraders.Evidence do
       when is_binary(subject) and subject != "" do
     Observation
     |> where([observation], observation.agent_id == ^agent.id and observation.subject == ^subject)
-    |> order_by([observation], desc: observation.observed_at, desc: observation.id)
+    |> order_by([observation],
+      desc: observation.observed_at,
+      desc: observation.inserted_at,
+      desc: observation.id
+    )
     |> limit(1)
     |> Repo.one()
   end

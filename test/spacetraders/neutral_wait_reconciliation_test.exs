@@ -23,7 +23,19 @@ defmodule SpaceTraders.NeutralWaitReconciliationTest do
   @waypoint "X1-UX81-A1"
   @market_subject "market:X1-UX81:X1-UX81-A1"
 
-  setup do
+  setup context do
+    if context[:semantic_clock] do
+      start_supervised!({SpaceTraders.TestClock, ~U[2000-01-01 00:00:00.000000Z]})
+      previous = Application.get_env(:spacetraders, :clock)
+      Application.put_env(:spacetraders, :clock, SpaceTraders.TestClock)
+
+      on_exit(fn ->
+        if previous,
+          do: Application.put_env(:spacetraders, :clock, previous),
+          else: Application.delete_env(:spacetraders, :clock)
+      end)
+    end
+
     operator = operator_fixture()
     agent = agent_fixture(operator)
     scope = Scope.for_operator(operator)
@@ -83,6 +95,27 @@ defmodule SpaceTraders.NeutralWaitReconciliationTest do
       ship: ship,
       capacity: capacity
     }
+  end
+
+  @tag :semantic_clock
+  test "allocation records and supersedes a Neutral Wait at the semantic decision instants",
+       %{agent: agent, scope: scope, revision: revision, generation: generation, capacity: capacity} do
+    assert {:ok, %{neutral_wait: original}} =
+             MarketDomain.reconcile(scope, agent, revision, @system, capacity)
+
+    assert original.inserted_at == ~U[2000-01-01 00:00:00.000000Z]
+    assert FleetAllocation.current_neutral_wait_since(generation.id) == original.inserted_at
+    SpaceTraders.TestClock.advance(10)
+
+    # Equivalent work refreshes history, not its identity or birth time.
+    assert {:ok, %{neutral_wait: refreshed}} =
+             MarketDomain.reconcile(scope, agent, revision, @system, capacity)
+
+    assert refreshed.id == original.id
+    assert refreshed.updated_at == ~U[2000-01-01 00:00:10.000000Z]
+    assert refreshed.inserted_at == original.inserted_at
+    assert refreshed.fleet_strategy_revision_id == revision.id
+    assert refreshed.fleet_generation_id == generation.id
   end
 
   test "zero admissible contributions with future due evidence create one durable Neutral Wait",

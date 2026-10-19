@@ -419,7 +419,7 @@ defmodule SpaceTraders.FleetStrategy do
               number: next_revision_number,
               document: document,
               source: strategy.draft_source || "operator",
-              activated_at: DateTime.utc_now(:second)
+              activated_at: SpaceTraders.Clock.Timestamp.second()
             })
             |> Repo.insert!()
 

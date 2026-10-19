@@ -823,8 +823,8 @@ defmodule SpaceTraders.FleetGeneration do
     if generation && generation.starting_credits && objective_index && is_integer(credits) &&
          evidence.agent_id == generation.agent_id && Evidence.valid_observation?(evidence) &&
          DateTime.compare(evidence.observed_at, generation.inserted_at) != :lt &&
-         DateTime.compare(evidence.observed_at, DateTime.utc_now()) != :gt &&
-         DateTime.diff(DateTime.utc_now(), evidence.observed_at, :second) <= 300 do
+         DateTime.compare(evidence.observed_at, Clock.utc_now()) != :gt &&
+         DateTime.diff(Clock.utc_now(), evidence.observed_at, :second) <= 300 do
       {count, _} =
         Repo.update_all(
           from(candidate in Generation,
@@ -836,7 +836,7 @@ defmodule SpaceTraders.FleetGeneration do
             last_observed_credits: credits,
             last_observed_at: evidence.observed_at,
             last_observed_evidence_id: evidence.id,
-            updated_at: DateTime.truncate(DateTime.utc_now(), :second)
+            updated_at: DateTime.truncate(Clock.utc_now(), :second)
           ]
         )
 
@@ -898,7 +898,7 @@ defmodule SpaceTraders.FleetGeneration do
         fleet_strategy_revision_id: revision_id,
         objective_progress: generation_progress(revision, nil),
         strategy_capable_at: now,
-        updated_at: DateTime.utc_now(:second)
+        updated_at: DateTime.truncate(now, :second)
       ]
     )
 
@@ -1061,8 +1061,8 @@ defmodule SpaceTraders.FleetGeneration do
     valid_current_evidence =
       Evidence.valid_observation?(evidence) and evidence.agent_id == generation.agent_id and
         DateTime.compare(evidence.observed_at, generation.inserted_at) != :lt and
-        DateTime.compare(evidence.observed_at, DateTime.utc_now()) != :gt and
-        DateTime.diff(DateTime.utc_now(), evidence.observed_at, :second) <= 300
+        DateTime.compare(evidence.observed_at, Clock.utc_now()) != :gt and
+        DateTime.diff(Clock.utc_now(), evidence.observed_at, :second) <= 300
 
     cond do
       not valid_current_evidence ->
@@ -1171,7 +1171,7 @@ defmodule SpaceTraders.FleetGeneration do
        ) do
     revision = active_revision(operator.id)
     number = next_generation_number(operator.id)
-    now = DateTime.utc_now()
+    now = SpaceTraders.Clock.Timestamp.now()
 
     objective_progress =
       generation_progress(revision, predecessor && predecessor.objective_progress)
@@ -1328,7 +1328,7 @@ defmodule SpaceTraders.FleetGeneration do
 
     ship_symbols = Repo.all(from(ship in live_ships, select: ship.symbol))
     Enum.each(ship_symbols, &Timeline.cancel_events(:ship, &1))
-    Repo.update_all(live_ships, set: [retired_at: DateTime.utc_now(:second)])
+    Repo.update_all(live_ships, set: [retired_at: SpaceTraders.Clock.Timestamp.second()])
     {[stale_agent.symbol], ship_symbols}
   end
 
@@ -1336,7 +1336,7 @@ defmodule SpaceTraders.FleetGeneration do
     :ok = SpaceTraders.FleetGenerationAdmission.fence(agent.agent_token)
 
     Repo.transaction(fn ->
-      now = DateTime.utc_now()
+      now = SpaceTraders.Clock.Timestamp.now()
 
       # The first definitive evidence is the Server Reset's recorded time.
       Repo.update_all(
