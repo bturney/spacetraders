@@ -323,11 +323,42 @@ defmodule SpaceTraders.ScenarioSeeds do
     {:ok, portfolio} =
       FleetAllocation.publish_portfolio(Scope.for_operator(operator), generation.id, selection, %{
         evidence_references: [],
-        expectations: %{},
+        expectations: %{selected_trades: selected_trades(candidates)},
         calibration_version: "market-purchase-v1-25pct"
       })
 
     portfolio
+  end
+
+  # What the Market decision kept per selected trade (#763): the estimate after
+  # fuel, its rate per Ship-hour and the best trades it beat, so Ship + Why has
+  # a choice to explain. Rates are synthetic, shaped like Generation 5.
+  defp selected_trades(candidates) do
+    for candidate <- candidates do
+      index = ship_index(hd(candidate.claims))
+      trade = trade_summary(candidate.id, index, 1.0)
+
+      Map.put(trade, :alternatives, [
+        trade_summary("seed-alt-#{index}-1", index + 2, 0.8),
+        trade_summary("seed-alt-#{index}-2", index + 3, 0.6)
+      ])
+    end
+  end
+
+  defp trade_summary(id, index, factor) do
+    net = round((540 + rem(index * 31, 300)) * factor)
+    seconds = 1_320
+    rate = round(net * 3600 / seconds)
+
+    %{
+      candidate_id: id,
+      trade_symbol: good(index),
+      source_waypoint: waypoint(index),
+      destination_waypoint: waypoint(index + 1),
+      maximum_credit_change: net + 60,
+      net_credits_per_ship_hour: rate,
+      trade_estimate: %{net_credits: net, fuel_credits: 60, seconds: seconds}
+    }
   end
 
   defp insert_intents(ships, portfolio, plan, now) do
@@ -351,7 +382,18 @@ defmodule SpaceTraders.ScenarioSeeds do
         type: Enum.at(~w(buy sell navigate), rem(index, 3)),
         status: "active",
         target_waypoint: waypoint(index + 1),
-        parameters: %{"units" => 40, "trade_symbol" => good(index)},
+        parameters: %{
+          "units" => 40,
+          "trade_symbol" => good(index),
+          "market_trade" => %{
+            "source_waypoint" => waypoint(index),
+            "destination_waypoint" => waypoint(index + 1),
+            "uncertainty" => %{
+              "source_evidence_age_seconds" => 600 + rem(index * 29, 600),
+              "destination_evidence_age_seconds" => 300
+            }
+          }
+        },
         fleet_commitment_id: commitment.id,
         fleet_commitment_portfolio_id: portfolio.id,
         fleet_commitment_portfolio_version: portfolio.version
@@ -403,6 +445,9 @@ defmodule SpaceTraders.ScenarioSeeds do
           fuel_cost: 0,
           other_cost: 0,
           net_earnings: net,
+          expected_value: 1_000,
+          expected_net_per_ship_hour: 2_000.0,
+          price_age_seconds: 600 + rem(index * 29, 600),
           alternatives: [],
           ship_seconds: 1_800,
           started_at: DateTime.add(finished, -1_800),
@@ -433,6 +478,15 @@ defmodule SpaceTraders.ScenarioSeeds do
         selection_kind: :neutral_wait,
         binding_limitation_kind: :below_economic_threshold,
         next_observation_at: next,
+        alternatives: [
+          %{
+            "kind" => Episode.neutral_wait_bundle(),
+            "candidates" => [
+              wait_candidate("IRON_ORE", "X1-UX81-B6", "X1-UX81-C37", 41),
+              wait_candidate("COPPER_ORE", "X1-UX81-D42", "X1-UX81-E48", 55)
+            ]
+          }
+        ],
         expectations: %{"binding_limitation" => %{"reason" => "below_economic_threshold"}}
       })
 
@@ -440,5 +494,20 @@ defmodule SpaceTraders.ScenarioSeeds do
       from(p in AllocationResultPointer, where: p.fleet_generation_id == ^generation.id),
       set: [selection_kind: :neutral_wait, strategy_decision_episode_id: episode.id]
     )
+  end
+
+  # A trade the Neutral Wait found below the economic threshold.
+  defp wait_candidate(good, source, destination, net) do
+    %{
+      "kind" => "market_trade",
+      "trade_symbol" => good,
+      "source_waypoint" => source,
+      "destination_waypoint" => destination,
+      "expected_outcomes" => %{
+        "maximum_credit_change" => net + 60,
+        "net_credits_per_ship_hour" => round(net * 3600 / 1_320),
+        "trade_estimate" => %{"net_credits" => net, "fuel_credits" => 60, "seconds" => 1_320}
+      }
+    }
   end
 end
