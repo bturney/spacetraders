@@ -122,9 +122,7 @@ defmodule SpaceTraders.MissionControl.PlanHealth do
               overdue_at: ShipRow.overdue_at(ship, status)
             }
           end),
-        neutral_wait:
-          disposition && disposition.state == :neutral_wait &&
-            %{next_check_at: disposition.neutral_wait.next_observation_at},
+        neutral_wait: neutral_wait(disposition),
         shortfall:
           disposition && disposition.spending_pause &&
             Map.take(disposition.spending_pause, [:floor, :detected_at]),
@@ -145,6 +143,10 @@ defmodule SpaceTraders.MissionControl.PlanHealth do
       active -> MarketDisposition.for_agent(agent, active, portfolio)
     end
   end
+
+  # The Neutral Wait holds whether or not other Ships still trade.
+  defp neutral_wait(%{neutral_wait: %{next_observation_at: at}}), do: %{next_check_at: at}
+  defp neutral_wait(_disposition), do: nil
 
   defp stall(nil), do: nil
 
