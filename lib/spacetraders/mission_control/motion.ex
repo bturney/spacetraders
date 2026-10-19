@@ -27,7 +27,9 @@ defmodule SpaceTraders.MissionControl.Motion do
     rows = Enum.map(ships, &ShipRow.build(&1, statuses[&1.id], now))
 
     base = Map.new(ShipStatus.statuses(), &{&1, 0})
-    counts = Enum.reduce(rows, base, fn row, acc -> Map.update!(acc, row.status.status, &(&1 + 1)) end)
+
+    counts =
+      Enum.reduce(rows, base, fn row, acc -> Map.update!(acc, row.status.status, &(&1 + 1)) end)
 
     %{
       mode: if(length(rows) <= @cards_up_to, do: :cards, else: :grid),
