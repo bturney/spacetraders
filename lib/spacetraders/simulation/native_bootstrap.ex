@@ -13,6 +13,9 @@ defmodule SpaceTraders.Simulation.NativeBootstrap do
   @test_capacity Application.compile_env(:spacetraders, :capacity_test_disabled_allowed, false)
 
   @doc "Configuration only; no connection, startup or fallback to deployment settings."
+  def configuration(%{"schema" => "navigation-tracer/v1"} = manifest),
+    do: SpaceTraders.Simulation.NavigationTracer.configuration(manifest)
+
   def configuration(%{"schema" => "native-bootstrap/v1", "resources" => r} = manifest) do
     unless FleetStrategy.validate_activation_document(manifest["strategy"]) == :ok do
       raise ArgumentError, "native bootstrap: pinned Strategy cannot be activated"
@@ -141,7 +144,7 @@ defmodule SpaceTraders.Simulation.NativeBootstrap do
       scope = Scope.for_operator(operator)
       Process.put(:native_bootstrap_stage, "normal_mint")
       {:ok, _agent} = FleetGeneration.mint(scope, manifest["mint"])
-      minted_at = DateTime.utc_now()
+      minted_at = SpaceTraders.Clock.utc_now()
       projection = FleetStrategy.get(scope)
       Process.put(:native_bootstrap_stage, "immutable_strategy_activation")
 
@@ -166,23 +169,45 @@ defmodule SpaceTraders.Simulation.NativeBootstrap do
         System.monotonic_time(:millisecond) + (manifest["limits"]["wall_seconds"] - 75) * 1_000
 
       Process.put(:native_bootstrap_stage, "durable_autonomous_bootstrap")
-      evidence = await_evidence(revision.id, proof_deadline)
+
+      evidence =
+        if manifest["schema"] == "navigation-tracer/v1",
+          do:
+            SpaceTraders.Simulation.NavigationTracer.prove(revision.id, proof_deadline, manifest),
+          else: await_evidence(revision.id, proof_deadline)
 
       write_result(%{
         state: "passed",
-        stage: "durable_autonomous_bootstrap",
+        stage:
+          if(manifest["schema"] == "navigation-tracer/v1",
+            do: "coordinated_navigation_arrival",
+            else: "durable_autonomous_bootstrap"
+          ),
         minted_at: minted_at,
         startup_ready_unix_ms: startup_ready_unix_ms,
-        observed_at: DateTime.utc_now(),
+        observed_at: SpaceTraders.Clock.utc_now(),
         strategy_revision_id: revision.id,
         evidence: evidence,
         scope:
-          "native-time bootstrap; not first-gate, recovery, mechanics or full-period qualification"
+          if(manifest["schema"] == "navigation-tracer/v1",
+            do:
+              "narrow navigation Arrival continuation; not complete semantic time, scarcity, drain, recovery or full period",
+            else:
+              "native-time bootstrap; not first-gate, recovery, mechanics or full-period qualification"
+          )
       })
 
       System.stop(0)
     rescue
       error ->
+        checkpoint =
+          if File.exists?("/out/bootstrap.json"),
+            do: Jason.decode!(File.read!("/out/bootstrap.json")),
+            else: %{}
+
+        if SpaceTraders.Simulation.NavigationClock.enabled?(),
+          do: SpaceTraders.Simulation.NavigationTracer.retain_failure()
+
         # Do not serialize exception values: changesets can contain credentials.
         location =
           Enum.find_value(__STACKTRACE__, fn
@@ -193,12 +218,26 @@ defmodule SpaceTraders.Simulation.NativeBootstrap do
               nil
           end)
 
-        write_result(%{
+        failure = %{
           state: "harness_failure",
           stage: Process.get(:native_bootstrap_stage),
           error: inspect(error.__struct__),
-          location: location
-        })
+          location: location,
+          stack:
+            Enum.take(
+              Enum.map(__STACKTRACE__, fn {module, function, args, info} ->
+                %{
+                  module: inspect(module),
+                  function: function,
+                  arity: if(is_list(args), do: length(args), else: args),
+                  line: info[:line]
+                }
+              end),
+              5
+            )
+        }
+
+        write_result(Map.merge(checkpoint, Jason.decode!(Jason.encode!(failure))))
 
         System.stop(1)
     end

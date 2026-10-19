@@ -10,22 +10,23 @@ defmodule SpaceTraders.Application do
     :ok = SpaceTraders.Simulation.NativeBootstrap.validate_runtime!()
 
     children =
-      [
-        SpaceTradersWeb.Telemetry,
-        SpaceTraders.PromEx,
-        SpaceTraders.Repo,
-        {Ecto.Migrator,
-         repos: Application.fetch_env!(:spacetraders, :ecto_repos), skip: skip_migrations?()},
-        SpaceTraders.FleetGeneration.Identity,
-        SpaceTraders.Outcomes,
-        {DNSCluster, query: Application.get_env(:spacetraders, :dns_cluster_query) || :ignore},
-        {Phoenix.PubSub, name: SpaceTraders.PubSub},
-        SpaceTraders.Evidence.ReadCoordinator,
-        SpaceTraders.API.CapacityGovernor,
-        SpaceTraders.API.ShadowAdmission,
-        SpaceTraders.EmergencyStopAdmission,
-        SpaceTraders.FleetGenerationAdmission
-      ] ++
+      SpaceTraders.Simulation.NavigationTracer.children() ++
+        [
+          SpaceTradersWeb.Telemetry,
+          SpaceTraders.PromEx,
+          SpaceTraders.Repo,
+          {Ecto.Migrator,
+           repos: Application.fetch_env!(:spacetraders, :ecto_repos), skip: skip_migrations?()},
+          SpaceTraders.FleetGeneration.Identity,
+          SpaceTraders.Outcomes,
+          {DNSCluster, query: Application.get_env(:spacetraders, :dns_cluster_query) || :ignore},
+          {Phoenix.PubSub, name: SpaceTraders.PubSub},
+          SpaceTraders.Evidence.ReadCoordinator,
+          SpaceTraders.API.CapacityGovernor,
+          SpaceTraders.API.ShadowAdmission,
+          SpaceTraders.EmergencyStopAdmission,
+          SpaceTraders.FleetGenerationAdmission
+        ] ++
         runtime_authority_children() ++
         fleet_reconciler_children() ++
         demand_scheduler_children() ++

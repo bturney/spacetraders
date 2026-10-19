@@ -247,7 +247,7 @@ defmodule SpaceTraders.MutationAttempts do
           current
           |> Ecto.Changeset.change(
             state: "sent_or_unknown",
-            sent_or_unknown_at: DateTime.utc_now()
+            sent_or_unknown_at: semantic_now()
           )
           |> Repo.update!()
 
@@ -304,7 +304,9 @@ defmodule SpaceTraders.MutationAttempts do
       [attempt],
       attempt.operation_id == "register" and attempt.operator_id == ^operator_id
     )
-    |> order_by([attempt], desc: attempt.prepared_at, desc: attempt.id)
+    # Serialized registrations may share one semantic instant. Their durable
+    # creation chronology, not a random UUID, decides recovery within that instant.
+    |> order_by([attempt], desc: attempt.prepared_at, desc: attempt.inserted_at, desc: attempt.id)
     |> limit(1)
     |> preload(:outcomes)
     |> Repo.one()
@@ -487,7 +489,7 @@ defmodule SpaceTraders.MutationAttempts do
   end
 
   defp append_outcome(attempt, classification, evidence, attempt_changes \\ []) do
-    now = DateTime.utc_now()
+    now = semantic_now()
 
     Repo.transaction(fn ->
       SpaceTraders.CreditSpending.lock_agent(attempt)
@@ -551,7 +553,7 @@ defmodule SpaceTraders.MutationAttempts do
   end
 
   defp build_attempt(operation, path, opts, context) do
-    now = DateTime.utc_now()
+    now = semantic_now()
     dependency_keys = dependency_keys(operation, path, opts, context)
     admitted_bounded_unknown_ids = admitted_bounded_unknown_ids(opts)
 
@@ -805,6 +807,11 @@ defmodule SpaceTraders.MutationAttempts do
     Logger.metadata()
     |> Map.new()
     |> Map.take(@correlation_keys)
+  end
+
+  defp semantic_now do
+    now = SpaceTraders.Clock.utc_now()
+    %{now | microsecond: {elem(now.microsecond, 0), 6}}
   end
 
   # The owner names selected-action keys that only reference replaceable

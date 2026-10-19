@@ -5,6 +5,7 @@ All application/PG/world processes share one new loopback-only network namespace
 and one bounded cgroup. Inputs are local immutable archives; outputs stay private.
 """
 import argparse
+from datetime import datetime, timezone
 import hashlib
 import http.client
 import http.server
@@ -56,8 +57,8 @@ def resources(attempt):
             "isolation": "bwrap-private-user-pid-ipc-uts-net-systemd-cgroup-v1"}
 
 
-def definition(revision, archive, schema, lock, postgres, attempt):
-    return {"schema": "native-bootstrap/v1", "bootstrap_sha256": digest(__file__), "application": {
+def definition(revision, archive, schema, lock, postgres, attempt, controlled_world=None, epoch_ms=None):
+    manifest = {"schema": "native-bootstrap/v1", "bootstrap_sha256": digest(__file__), "application": {
                 "revision": revision, "archive_sha256": archive,
                 "api_schema_sha256": schema, "mix_lock_sha256": lock},
             "world": {"revision": WORLD_REVISION, "archive_sha256": WORLD_ARCHIVE,
@@ -72,13 +73,36 @@ def definition(revision, archive, schema, lock, postgres, attempt):
                 "hard_constraints": ["Keep at least 50,000 credits available"],
                 "preferences": ["Prefer lower-risk routes when expected returns are similar"],
                 "consequences": "The Fleet may spend credits and accept bounded trading losses while preserving the credit floor."}}
+    if controlled_world is not None:
+        manifest.update(schema="navigation-tracer/v1", world=controlled_world,
+                        initial_world={"contract": "world-control/v1", "scenario_id": "generated-starter/v1",
+                            "world_id": "navigation-" + attempt, "epoch_ms": epoch_ms,
+                            "reset_date": "2026-10-18", "random_streams": {
+                                name: {"id": name + "-781-v1", "seed": seed}
+                                for name, seed in [("generation", 7192026), ("gameplay", 781), ("external", 1781)]}})
+        manifest["sequence"] = "migrate-controlled-world-ready-runtime-ready-register-mint-activate-coordinate-arrival"
+        manifest["mint"] = {"symbol": "SIM781", "faction": "COSMIC"}
+    return manifest
 
 
 def validate(m):
     try:
+        controlled = m["schema"] == "navigation-tracer/v1"
+        if controlled:
+            if set(m["world"]) != {"revision", "archive_sha256", "image_sha256", "contract_sha256", "input_inventory_sha256"}:
+                raise ValueError("invalid controlled artifact identity")
+            for key, value in m["world"].items():
+                if not re.fullmatch(r"[0-9a-f]{40}" if key == "revision" else r"[0-9a-f]{64}", value):
+                    raise ValueError("controlled artifact requires immutable hashes")
+            if m["world"]["archive_sha256"] == WORLD_ARCHIVE:
+                raise ValueError("native artifact is not controlled-world proof")
+            epoch = m["initial_world"]["epoch_ms"]
+            if type(epoch) is not int or epoch % 1000 or not 0 < epoch <= 4102444800000:
+                raise ValueError("controlled world requires a whole-second pinned epoch")
         template = definition(m["application"]["revision"], m["application"]["archive_sha256"],
                               m["application"]["api_schema_sha256"], m["application"]["mix_lock_sha256"],
-                              m["postgres_archive_sha256"], m["resources"]["attempt"])
+                              m["postgres_archive_sha256"], m["resources"]["attempt"],
+                              m["world"] if controlled else None, epoch if controlled else None)
         if set(m) != set(template) or set(m["application"]) != set(template["application"]):
             raise ValueError("unknown or missing manifest field")
         for key in ["bootstrap_sha256", "world", "initial_world", "resources", "sequence", "schema", "mint"]:
@@ -97,7 +121,7 @@ def validate(m):
             value = m["limits"][key]
             if type(value) is not int or not 0 < value <= cap:
                 raise ValueError("invalid or excessive " + key)
-        if m["negative_control"] not in ["none", "migration_unavailable", "world_unavailable"]:
+        if m["negative_control"] not in (["none", "incomplete_drain"] if controlled else ["none", "migration_unavailable", "world_unavailable"]):
             raise ValueError("unsupported negative control")
         strategy = m["strategy"]
         if set(strategy) != set(template["strategy"]) or not strategy["objectives"]:
@@ -178,7 +202,14 @@ def prepare(args):
         for p in sorted(release.iterdir()):
             t.add(p, arcname=p.name)
     archive.chmod(0o600)
-    m = definition(revision, digest(archive), schema, lock, digest(args.postgres), uuid.uuid4().hex)
+    controlled = None
+    if args.controlled_world:
+        receipt = json.loads(Path(args.controlled_world).read_text())
+        if receipt["schema"] != "controlled-world-artifact/v1":
+            raise ValueError("controlled artifact receipt required")
+        controlled = {k: receipt[k] for k in ["revision", "archive_sha256", "image_sha256", "contract_sha256", "input_inventory_sha256"]}
+    m = definition(revision, digest(archive), schema, lock, digest(args.postgres), uuid.uuid4().hex,
+                   controlled, int(time.time()) * 1000 if controlled else None)
     validate(m)
     write(out / "manifest.json", m)
     print(out / "manifest.json")
@@ -188,7 +219,7 @@ def start(args):
     reject_environment(os.environ)
     m = json.loads(Path(args.manifest).read_text())
     identity = validate(m)
-    if digest(args.application) != m["application"]["archive_sha256"] or digest(args.world) != WORLD_ARCHIVE:
+    if digest(args.application) != m["application"]["archive_sha256"] or digest(args.world) != m["world"]["archive_sha256"]:
         raise ValueError("artifact checksum mismatch")
     if digest(args.postgres) != m["postgres_archive_sha256"]:
         raise ValueError("PostgreSQL filesystem checksum mismatch")
@@ -211,14 +242,21 @@ def start(args):
                 k: v for k, v in m["application"].items() if k != "archive_sha256"}:
             raise ValueError("application archive provenance mismatch")
         extract(Path(args.world), out / "image")
-        config = json.loads((out / "image" / (WORLD_IMAGE + ".json")).read_text())
-        if digest(out / "image" / (WORLD_IMAGE + ".json")) != WORLD_IMAGE:
+        world_image = m["world"]["image_sha256"]
+        config = json.loads((out / "image" / (world_image + ".json")).read_text())
+        if digest(out / "image" / (world_image + ".json")) != world_image:
             raise ValueError("image configuration identity mismatch")
         image_manifest = json.loads((out / "image/manifest.json").read_text())
         layers = image_manifest[0]["Layers"]
         if len(layers) != 1 or config["rootfs"]["diff_ids"] != ["sha256:" + digest(out / "image" / layers[0])]:
             raise ValueError("world image layer identity mismatch")
         extract(out / "image" / layers[0], out / "world")
+        if m["schema"] == "navigation-tracer/v1":
+            labels = config["config"]["Labels"]
+            if labels.get("private.source") != m["world"]["revision"] or labels.get("private.inputs") != m["world"]["input_inventory_sha256"]:
+                raise ValueError("controlled image source/input provenance mismatch")
+            if config["config"]["Entrypoint"][-5:] != ["serve-controlled", "--port", "4000", "--controller-token-file", "/out/world-controller"]:
+                raise ValueError("unsupported controlled entrypoint")
         extract(Path(args.postgres), out / "postgres-image", rootfs=True)
         # The pinned artifact's own entrypoint is the initial-world authority.
         write(out / "world-entrypoint.json", config["config"]["Entrypoint"])
@@ -271,12 +309,15 @@ def start(args):
             if not matching or evidence["operation_id"] != "navigate-ship" or evidence["observation_count"] <= 0:
                 raise ValueError("durable bootstrap has no matching authoritative HTTP navigation consequence")
             result["navigation_receipt"] = matching[0]
+            if m["schema"] == "navigation-tracer/v1":
+                validate_arrival_proof(runtime, result)
     except Exception as exc:
         result["state"] = "harness_failure"
         result["error"] = str(exc)
     finally:
         # Bounded cgroup stop also covers lost launcher responses and grandchildren.
-        result.update(owned_shutdown=False, qualification="native_time_bootstrap_only_not_gameplay_or_full_period")
+        result.update(owned_shutdown=False, qualification=("narrow_navigation_arrival_not_full_drain_or_full_period"
+                      if m["schema"] == "navigation-tracer/v1" else "native_time_bootstrap_only_not_gameplay_or_full_period"))
         try:
             stopped = subprocess.run(["systemctl", "--user", "stop", unit], capture_output=True, timeout=15)
             inspection = subprocess.run(["systemctl", "--user", "show", unit,
@@ -378,6 +419,73 @@ def proxy(budget):
     return server
 
 
+def initialize_controlled_world(m, world, deadline):
+    token = Path("/out/world-controller").read_text()
+    for suffix, payload, expected in [("contract", None, 200), ("initialize", m["initial_world"], 201)]:
+        while True:
+            if world.poll() is not None:
+                raise ValueError("controlled world exited before readiness")
+            conn = http.client.HTTPConnection("127.0.0.1", 4000, timeout=min(3, remaining(deadline)))
+            try:
+                conn.request("POST" if payload else "GET", "/_control/world/" + suffix,
+                             canonical(payload) if payload else None,
+                             {"Authorization": "Bearer " + token, "Content-Type": "application/json"})
+                response = conn.getresponse()
+                data = response.read(1048577)
+                if len(data) > 1048576 or response.status != expected:
+                    raise ValueError("controlled world rejected readiness/initialization")
+                body = json.loads(data)["data"]
+                if suffix == "contract":
+                    if hashlib.sha256(canonical(body)).hexdigest() != m["world"]["contract_sha256"]:
+                        raise ValueError("controlled-world contract mismatch")
+                    write("/out/world-control-contract.json", body)
+                else:
+                    write("/out/world-initialized.json", body)
+                break
+            except ConnectionRefusedError:
+                remaining(deadline)
+                time.sleep(0.1)
+            finally:
+                conn.close()
+
+
+def validate_arrival_proof(runtime, result):
+    evidence = result["evidence"]
+    trace = json.loads((runtime / "time-trace.json").read_text())
+    export = json.loads((runtime / "world-export.json").read_text())
+    arrivals = [e for e in export["settled_events"] if e["class"] == "arrival"
+                and e["ship"] == evidence["ship_symbol"] and e["destination"] == evidence["target_waypoint"]]
+    if not arrivals or evidence["intent_status"] != "completed":
+        raise ValueError("no authoritative Arrival/completed continuation")
+    arrival = arrivals[0]
+    instant = datetime.fromtimestamp((export["epoch_ms"] / 1000) + arrival["settled_time"], timezone.utc)
+    if (arrival["settled_time"] != arrival["due_time"] or
+        datetime.fromisoformat(evidence["continuation_observed_at"]) != instant or
+        datetime.fromisoformat(evidence["continued_at"]) != instant):
+        raise ValueError("continuation is not at authoritative Arrival time")
+    # The world log is authoritative HTTP serialization, not a coordinator claim.
+    subsequent = list(enumerate(export["request_log"], 1))[arrival["after_gameplay_request_sequence"]:]
+    refreshes = [index for index, (request, response) in subsequent
+                 if request["method"] == "GET" and request["path"] == ["my", "ships", evidence["ship_symbol"]]
+                 and request["now"] == arrival["settled_time"] and response["status"] == 200]
+    markets = [index for index, (request, response) in subsequent
+               if request["method"] == "GET" and request["path"][-3:] == ["waypoints", evidence["target_waypoint"], "market"]
+               and request["now"] == arrival["settled_time"] and response["status"] == 200]
+    if not refreshes or not markets or min(markets) <= min(refreshes):
+        raise ValueError("no authoritative post-settlement refresh/continuation HTTP order")
+    boundaries = [e for e in trace if e["phase"] == "world_settled"]
+    if not boundaries or any(a["at"] >= b["at"] for a, b in zip(boundaries, boundaries[1:])):
+        raise ValueError("non-increasing semantic advancement")
+    for settled in boundaries:
+        release = trace[settled["ordinal"]]
+        if release["phase"] != "bot_released" or release["at"] != settled["at"]:
+            raise ValueError("world-before-bot ordering absent")
+    result["arrival_settlements"] = arrivals
+    result["continuation_request_order"] = {"after_gameplay_request": arrival["after_gameplay_request_sequence"],
+                                             "ship_refresh": min(refreshes), "market_observation": min(markets)}
+    result["coverage"] = "navigation intelligence Arrival; closed synchronous participant set; not #782/#783/#784"
+
+
 def inside():
     os.umask(0o077)
     out = Path("/out")
@@ -457,8 +565,13 @@ def inside():
             children[-1].wait(timeout=5)
         run(["/app/bin/spacetraders", "eval", "SpaceTraders.Release.migrate()"], "migrations")
         result["stage"] = "world_readiness"
+        controlled = m["schema"] == "navigation-tracer/v1"
+        if controlled:
+            (out / "world-controller").write_text(uuid.uuid4().hex + uuid.uuid4().hex)
+            (out / "world-controller").chmod(0o600)
         world = spawn(["/usr/bin/bwrap", "--unshare-user", "--die-with-parent",
-                       "--ro-bind", "/worldfs", "/", "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
+                        "--ro-bind", "/worldfs", "/", "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
+                        *(["--tmpfs", "/out", "--ro-bind", "/out/world-controller", "/out/world-controller"] if controlled else []),
                        "--clearenv", "--setenv", "HOME", "/tmp", "--setenv", "PATH", "/usr/bin:/bin",
                        "--setenv", "ERL_ROOTDIR", "/opt/otp", "--chdir", "/opt/stsim",
                        *json.loads((out / "world-entrypoint.json").read_text())], "world")
@@ -467,6 +580,8 @@ def inside():
             world.wait(timeout=5)
         budget = RequestBudget(m["limits"]["requests"])
         server = proxy(budget)
+        if controlled:
+            initialize_controlled_world(m, world, startup_deadline)
         while True:
             if world.poll() is not None:
                 raise ValueError("world exited before semantic readiness")
@@ -478,7 +593,7 @@ def inside():
                 conn.close()
                 if response.status != 200 or body.get("status") != "stsim: SpaceTraders simulator":
                     raise ValueError("world API identity mismatch")
-                expected = {"version": "v2", "resetDate": INITIAL_WORLD["reset_date"], "simTimeScale": 1}
+                expected = {"version": "v2", "resetDate": m["initial_world"]["reset_date"], "simTimeScale": 1}
                 if any(body.get(k) != v for k, v in expected.items()) or body.get("stats", {}).get("agents") != 0 or body.get("stats", {}).get("ships") != 0:
                     raise ValueError("initial world identity mismatch")
                 write(out / "world-ready.json", body)
@@ -512,6 +627,7 @@ def inside():
         if (out / "bootstrap.json").exists():
             result.update(json.loads((out / "bootstrap.json").read_text()))
             if result.get("startup_ready_unix_ms", startup_deadline_unix_ms + 1) > startup_deadline_unix_ms:
+                result["bootstrap_error"] = result.get("error")
                 raise ValueError("application did not meet shared startup deadline")
         if code != 0:
             raise ValueError("application failed; inspect private application.log")
@@ -548,6 +664,7 @@ def main():
     p = sub.add_parser("prepare")
     for key in ["repo", "release", "postgres", "output"]:
         p.add_argument("--" + key, required=True)
+    p.add_argument("--controlled-world", help="new private controlled-artifact.json; never the native artifact")
     p = sub.add_parser("start")
     for key in ["manifest", "application", "world", "postgres", "output"]:
         p.add_argument("--" + key, required=True)

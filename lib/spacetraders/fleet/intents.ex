@@ -3858,7 +3858,7 @@ defmodule SpaceTraders.Fleet.Intents do
            blocker: nil,
            in_flight_action: nil,
            last_action_result: result,
-           finished_at: DateTime.utc_now() |> DateTime.truncate(:second)
+           finished_at: Clock.utc_now() |> DateTime.truncate(:second)
          ) do
       {:ok, intent} ->
         ship = Repo.get!(Ship, intent.ship_id)

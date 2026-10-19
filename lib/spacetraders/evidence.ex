@@ -1341,7 +1341,7 @@ defmodule SpaceTraders.Evidence do
         operation_id,
         dependency_keys,
         facts,
-        observed_at \\ DateTime.utc_now()
+        observed_at \\ Clock.utc_now()
       )
       when is_list(dependency_keys) and is_map(facts) and map_size(facts) > 0 do
     %{classification: :read} = OperationInventory.fetch!(operation_id)
@@ -1361,7 +1361,7 @@ defmodule SpaceTraders.Evidence do
         %Attempt{} = attempt,
         outcome,
         basis,
-        observed_at \\ DateTime.utc_now()
+        observed_at \\ Clock.utc_now()
       )
       when outcome in [:accepted, :absent, :bounded_unknown] and is_binary(basis) and basis != "" do
     authoritative_observation(

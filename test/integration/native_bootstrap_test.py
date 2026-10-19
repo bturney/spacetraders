@@ -1,7 +1,9 @@
 """Inert tests at the immutable bootstrap-command seam; no ports/process boots."""
 import copy
 import importlib.util
+import json
 from pathlib import Path
+import tempfile
 import time
 import unittest
 
@@ -90,6 +92,48 @@ class ManifestTest(unittest.TestCase):
         self.assertFalse(boot.shutdown_verified(0, "LoadState=loaded\nActiveState=active\n"))
         self.assertTrue(boot.shutdown_verified(0, "LoadState=not-found\nActiveState=inactive\n"))
         self.assertTrue(boot.shutdown_verified(0, "LoadState=loaded\nActiveState=failed\n"))
+
+    def test_controlled_navigation_is_a_new_pinned_definition_not_a_native_relabel(self):
+        world = {"revision": "1" * 40, "archive_sha256": "2" * 64, "image_sha256": "3" * 64,
+                 "contract_sha256": "4" * 64, "input_inventory_sha256": "5" * 64}
+        manifest = boot.definition("a" * 40, "b" * 64, "c" * 64, "d" * 64,
+                                   "e" * 64, "f" * 32, world, 1792281600000)
+        identity = boot.validate(manifest)
+        self.assertNotEqual(identity, boot.validate(self.manifest()))
+        changed = copy.deepcopy(manifest)
+        changed["world"]["archive_sha256"] = boot.WORLD_ARCHIVE
+        with self.assertRaisesRegex(ValueError, "native artifact"):
+            boot.validate(changed)
+        changed = copy.deepcopy(manifest)
+        changed["initial_world"]["ships"] = [{"symbol": "injected"}]
+        with self.assertRaises(ValueError):
+            boot.validate(changed)
+        changed = copy.deepcopy(manifest)
+        changed["initial_world"]["epoch_ms"] += 1
+        with self.assertRaises(ValueError):
+            boot.validate(changed)
+
+    def test_arrival_proof_requires_authoritative_http_continuation_order(self):
+        at = "1970-01-01T00:00:10Z"
+        arrival = {"class": "arrival", "ship": "TEST-1", "destination": "X1-TEST-A2",
+                   "due_time": 10, "settled_time": 10, "after_gameplay_request_sequence": 1}
+        result = {"evidence": {"ship_symbol": "TEST-1", "target_waypoint": "X1-TEST-A2",
+                  "intent_status": "completed", "continuation_observed_at": at, "continued_at": at}}
+        trace = [{"phase": "world_settled", "ordinal": 1, "at": at},
+                 {"phase": "bot_released", "ordinal": 2, "at": at}]
+        export = {"epoch_ms": 0, "settled_events": [arrival], "request_log": [
+            [{"method": "POST", "path": ["my", "ships", "TEST-1", "navigate"], "now": 0}, {"status": 200}],
+            [{"method": "GET", "path": ["my", "ships", "TEST-1"], "now": 10}, {"status": 200}],
+            [{"method": "GET", "path": ["systems", "X1-TEST", "waypoints", "X1-TEST-A2", "market"], "now": 10}, {"status": 200}]]}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "time-trace.json").write_text(json.dumps(trace))
+            (root / "world-export.json").write_text(json.dumps(export))
+            boot.validate_arrival_proof(root, copy.deepcopy(result))
+            export["request_log"][1:] = reversed(export["request_log"][1:])
+            (root / "world-export.json").write_text(json.dumps(export))
+            with self.assertRaisesRegex(ValueError, "HTTP order"):
+                boot.validate_arrival_proof(root, copy.deepcopy(result))
 
 
 def json_bytes(value):
