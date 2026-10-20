@@ -528,44 +528,27 @@ defmodule SpaceTraders.MarketDomainAllocationTest do
       refute_received {:game_request, "POST", "/v2/my/ships"}
     end
 
-    # #739 diagnosis: the matched counterpart of the worthwhile-offer case,
-    # varying only the Shipyard offer evidence the preset Strategies never acquire.
-    for shipyard <- [:absent, :aged] do
-      test "#{shipyard} Shipyard offer evidence refuses an otherwise eligible investment" do
-        fleet = investment_fleet(shipyard: unquote(shipyard))
-
-        stub_game(fleet.agent, [@frigate],
-          investment: true,
-          report_requests: true,
-          refuse_ship_reads: true
-        )
-
-        assert :ok = Reconciler.observe_market_evidence(fleet.agent.id, @system, proceed())
-
-        assert [refusal] =
-                 Repo.all(
-                   from e in StrategyDecisionEpisode,
-                     where: e.selection_kind == :acquisition_refused
-                 )
-
-        assert refusal.rejection_reason == "shipyard_offers_unavailable"
-        assert refusal.expectations["considered_work"] != []
-        refute_received {:game_request, "GET", "/v2/"}
-        refute_received {:game_request, "POST", "/v2/my/ships"}
-      end
-    end
-
     for {scenario, reason} <- [
           {:horizon, "unknown_generation_horizon"},
           {:value, "enabled_value_not_above_cost"},
           {:capacity, "capacity_not_proceed"},
           {:credits, "insufficient_acquisition_credits"},
-          {:precondition, "purchase_precondition_unmet"}
+          {:precondition, "purchase_precondition_unmet"},
+          # #739: matched counterparts of the worthwhile-offer case that vary
+          # only Ship Offer evidence, which the preset Strategies never acquire.
+          {:offers_absent, "shipyard_offers_unavailable"},
+          {:offers_aged, "shipyard_offers_unavailable"}
         ] do
       test "#{scenario} refusal retains its evidence and never creates a Neutral Wait" do
         fleet =
           investment_fleet(
-            horizon_seconds: if(unquote(scenario) == :value, do: 600, else: 864_000)
+            horizon_seconds: if(unquote(scenario) == :value, do: 600, else: 864_000),
+            shipyard:
+              case unquote(scenario) do
+                :offers_absent -> :absent
+                :offers_aged -> :aged
+                _ -> :fresh
+              end
           )
 
         if unquote(scenario) == :horizon,
@@ -607,7 +590,7 @@ defmodule SpaceTraders.MarketDomainAllocationTest do
 
         refute_received {:game_request, "POST", "/v2/my/ships"}
 
-        if unquote(scenario) in [:capacity, :precondition],
+        if unquote(scenario) in [:capacity, :precondition, :offers_absent, :offers_aged],
           do: refute_received({:game_request, "GET", "/v2/"})
       end
     end
@@ -2003,29 +1986,31 @@ defmodule SpaceTraders.MarketDomainAllocationTest do
 
     shipyard = Keyword.get(opts, :shipyard, :fresh)
 
-    {:ok, _} =
-      if shipyard == :absent,
-        do: {:ok, nil},
-        else:
-          Intelligence.observe_shipyard(
-            fleet.agent,
-            @system,
-            SpaceTraders.API.Model.Shipyard.from_json(%{
-              "symbol" => "X1-A1",
-              "modificationsFee" => 500,
-              "shipTypes" => [%{"type" => "SHIP_LIGHT_HAULER"}],
-              "ships" => [
-                Map.merge(
-                  Map.take(body, ~w(frame reactor engine crew modules mounts)),
-                  %{"type" => "SHIP_LIGHT_HAULER", "purchasePrice" => 1_000}
-                )
-              ]
-            }),
-            source: "get_shipyard",
-            offers_visible: true,
-            observed_at:
-              DateTime.add(DateTime.utc_now(), if(shipyard == :aged, do: -301, else: 0))
-          )
+    unless shipyard == :absent do
+      # :aged is one second past FleetPlanning's 300-second non-Market
+      # evidence freshness, which Acquisition's World projection also uses.
+      observed_at = DateTime.add(DateTime.utc_now(), if(shipyard == :aged, do: -301, else: 0))
+
+      {:ok, _} =
+        Intelligence.observe_shipyard(
+          fleet.agent,
+          @system,
+          SpaceTraders.API.Model.Shipyard.from_json(%{
+            "symbol" => "X1-A1",
+            "modificationsFee" => 500,
+            "shipTypes" => [%{"type" => "SHIP_LIGHT_HAULER"}],
+            "ships" => [
+              Map.merge(
+                Map.take(body, ~w(frame reactor engine crew modules mounts)),
+                %{"type" => "SHIP_LIGHT_HAULER", "purchasePrice" => 1_000}
+              )
+            ]
+          }),
+          source: "get_shipyard",
+          offers_visible: true,
+          observed_at: observed_at
+        )
+    end
 
     Req.Test.stub(SpaceTraders.API, fn conn ->
       Req.Test.json(conn, %{

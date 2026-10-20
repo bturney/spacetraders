@@ -1914,12 +1914,17 @@ defmodule SpaceTraders.IntelligenceAcquisitionTest do
     assert projection.facts["ships"].observing_ship_symbol == ship.symbol
   end
 
-  # #739 diagnosis: Shipyard offers are the acquisition planner's only offer
-  # source, and only a Ship-naming objective plans their observation.
-  for {label, objectives} <-
-        Enum.map(FleetStrategy.presets(), &{&1.id, &1.objectives}) ++
-          [{"ship objective", [%{"objective" => "Expand Fleet with a Ship", "kind" => "attain"}]}] do
-    test "#{label} Strategy plans Shipyard offer observation only for a Ship-naming objective" do
+  # Pins current behaviour for the #739 diagnosis: Ship Offer evidence, the
+  # acquisition planner's only offer source, is observed only for a Strategic
+  # Objective whose objective or evaluation text names Ships or Fleet growth.
+  # A #739 repair is expected to flip the preset rows.
+  for {label, objectives, shipyard?} <-
+        Enum.map(FleetStrategy.presets(), &{&1.id, &1.objectives, false}) ++
+          [
+            {"Ship-naming objective",
+             [%{"objective" => "Expand Fleet with a Ship", "kind" => "attain"}], true}
+          ] do
+    test "#{label} Strategy plans Ship Offer observation: #{shipyard?}" do
       {agent, ship, previous, _commitment} = claimed_ship(hd(unquote(Macro.escape(objectives))))
       scope = Scope.for_operator(Repo.get!(Operator, agent.operator_id))
 
@@ -1963,8 +1968,9 @@ defmodule SpaceTraders.IntelligenceAcquisitionTest do
       subjects =
         for demand <- (planning && planning.observation_demands) || [], do: demand.subject
 
-      assert Enum.any?(subjects, &String.starts_with?(&1, "shipyard:")) ==
-               (unquote(label) == "ship objective"),
+      assert subjects != []
+
+      assert Enum.any?(subjects, &String.starts_with?(&1, "shipyard:")) == unquote(shipyard?),
              inspect(subjects)
     end
   end
