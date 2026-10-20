@@ -576,7 +576,7 @@ defmodule SpaceTraders.CurrentFleetMigrationTest do
   # current Ship state (#765).
   @ship_state_columns ~w(engine_speed engine_condition fuel_capacity cargo_capacity nav_status
     waypoint_symbol fuel_current state_observed_at route_origin route_destination
-    route_departed_at route_arrives_at)
+    route_departed_at route_arrives_at cooldown_expires_at)
 
   defp drop_retired_columns(tables) do
     List.update_at(tables, 2, fn rows ->
