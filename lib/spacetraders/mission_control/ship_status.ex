@@ -1,6 +1,6 @@
 defmodule SpaceTraders.MissionControl.ShipStatus do
   @moduledoc """
-  The one per-Ship status read (#767): each Ship gets exactly one of five
+  The one per-Ship status read (#767): each Ship gets exactly one of six
   statuses from stored facts, never from the game or the Agent balance.
 
   In precedence order:
@@ -11,9 +11,13 @@ defmodule SpaceTraders.MissionControl.ShipStatus do
     * `:waiting` (Waiting on purpose) - unassigned during a Neutral Wait, with
       the wait's next check; an unassigned Ship outside a Neutral Wait waits
       for new orders with no check time;
-    * `:busy_not_earning` - with at least an hour of its own history, 3 or
-      more skipped buys in 30 minutes, or last-hour Net Earnings below 40% of
-      its average per hour over the last 6 h (or its whole history if younger);
+    * `:busy_not_earning` - with at least an hour of its own history,
+      last-hour Net Earnings below 40% of its average per hour over the last
+      6 h (or its whole history if younger): an economic problem;
+    * `:busy_skipping_buys` - with at least an hour of its own history and
+      earnings not below that bar, 3 or more skipped buys in 30 minutes: a
+      planned trade was refused (usually a price move), a price or planning
+      issue, not a failure to earn (#816);
     * `:trading` - a trade assignment, with the leg in progress;
     * `:scouting` - a Market-refresh assignment, with markets it refreshed
       and the Agent's overdue Markets.
@@ -37,7 +41,7 @@ defmodule SpaceTraders.MissionControl.ShipStatus do
   alias SpaceTraders.Outcomes.EarningsRecord
   alias SpaceTraders.Repo
 
-  @statuses [:trading, :scouting, :waiting, :stuck, :busy_not_earning]
+  @statuses [:trading, :scouting, :waiting, :stuck, :busy_not_earning, :busy_skipping_buys]
 
   # Prototype thresholds (spec #757); tuning them does not change the rules.
   # The earning ratio and its windows are Plan Health's (`PlanHealth.thresholds/0`).
@@ -52,7 +56,7 @@ defmodule SpaceTraders.MissionControl.ShipStatus do
       "Fleet planning stalled: markets are overdue and nobody refreshes them"
   }
 
-  @doc "The five statuses, in display order."
+  @doc "The six statuses, in display order."
   def statuses, do: @statuses
 
   @doc "Number of Ships of each status (every status present, zero or more)."
@@ -325,9 +329,6 @@ defmodule SpaceTraders.MissionControl.ShipStatus do
       history < @history_seconds ->
         nil
 
-      skipped >= @skipped_buys ->
-        {:busy_not_earning, %{phrase: "#{skipped} skipped buys in 30 min"}}
-
       true ->
         hours = min(history, window) / hour
         since = DateTime.to_unix(now) - min(history, window)
@@ -338,13 +339,20 @@ defmodule SpaceTraders.MissionControl.ShipStatus do
         average = window_net / hours
         last_hour = earned[:last_hour] || 0
 
-        if last_hour < ratio * average do
-          {:busy_not_earning,
-           %{
-             phrase:
-               "Last hour #{format_int(last_hour)} vs #{format_int(round(average))}/h " <>
-                 "over #{format_hours(hours)} h"
-           }}
+        cond do
+          last_hour < ratio * average ->
+            {:busy_not_earning,
+             %{
+               phrase:
+                 "Last hour #{format_int(last_hour)} vs #{format_int(round(average))}/h " <>
+                   "over #{format_hours(hours)} h"
+             }}
+
+          skipped >= @skipped_buys ->
+            {:busy_skipping_buys, %{phrase: "#{skipped} skipped buys in 30 min"}}
+
+          true ->
+            nil
         end
     end
   end

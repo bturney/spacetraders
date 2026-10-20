@@ -14,6 +14,7 @@ defmodule SpaceTradersWeb.MissionControlComponents do
   @tones %{
     trading: "bg-trading/9 border-trading/35",
     busy: "bg-busy/9 border-busy/35",
+    skipping: "bg-busy/9 border-busy/35",
     waiting: "bg-waiting/9 border-waiting/35",
     stuck: "bg-stuck/9 border-stuck/35",
     scouting: "bg-scouting/9 border-scouting/35",
@@ -26,6 +27,7 @@ defmodule SpaceTradersWeb.MissionControlComponents do
   @status %{
     trading: {"Trading", "bg-trading/16 text-trading", "bg-trading"},
     busy: {"Busy, not earning", "bg-busy/16 text-busy", "bg-busy"},
+    skipping: {"Busy, skipping buys", "bg-busy/16 text-busy", "bg-busy"},
     waiting: {"Waiting on purpose", "bg-waiting/16 text-waiting", "bg-waiting"},
     stuck: {"Stuck", "bg-stuck/16 text-stuck", "bg-stuck"},
     scouting: {"Scouting prices", "bg-scouting/16 text-scouting", "bg-scouting"}
@@ -34,6 +36,7 @@ defmodule SpaceTradersWeb.MissionControlComponents do
   @fill %{
     trading: {"bg-trading/55", "bg-trading", "shadow-[0_0_8px_var(--color-trading)]"},
     busy: {"bg-busy/55", "bg-busy", "shadow-[0_0_8px_var(--color-busy)]"},
+    skipping: {"bg-busy/55", "bg-busy", "shadow-[0_0_8px_var(--color-busy)]"},
     waiting: {"bg-waiting/55", "bg-waiting", "shadow-[0_0_8px_var(--color-waiting)]"},
     stuck: {"bg-stuck/55", "bg-stuck", "shadow-[0_0_8px_var(--color-stuck)]"},
     scouting: {"bg-scouting/55", "bg-scouting", "shadow-[0_0_8px_var(--color-scouting)]"}
@@ -564,6 +567,7 @@ defmodule SpaceTradersWeb.MissionControlComponents do
   @cell %{
     trading: {"bg-trading/18", "bg-trading/70"},
     busy: {"bg-busy/18", "bg-busy/70"},
+    skipping: {"bg-busy/18", "bg-busy/70"},
     waiting: {"bg-waiting/18", "bg-waiting/70"},
     stuck: {"bg-stuck/18", "bg-stuck/70"},
     scouting: {"bg-scouting/18", "bg-scouting/70"}
@@ -574,7 +578,8 @@ defmodule SpaceTradersWeb.MissionControlComponents do
     scouting: :scouting,
     waiting: :waiting,
     stuck: :stuck,
-    busy_not_earning: :busy
+    busy_not_earning: :busy,
+    busy_skipping_buys: :skipping
   }
 
   @doc "The status chip atom of a `MissionControl.ShipStatus` kind."

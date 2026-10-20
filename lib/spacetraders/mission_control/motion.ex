@@ -6,7 +6,7 @@ defmodule SpaceTraders.MissionControl.Motion do
 
   A small Fleet (up to #{6} Ships) is shown as route cards; a larger one as a
   grid of progress cells with per-status counts, plus a row for each Ship that
-  is not earning right now (Stuck or Busy, not earning). Waiting on purpose is
+  is not earning right now (Stuck, Busy not earning or Busy skipping buys). Waiting on purpose is
   deliberate and is not listed there.
   """
 
@@ -15,7 +15,7 @@ defmodule SpaceTraders.MissionControl.Motion do
   alias SpaceTraders.MissionControl.{ShipRow, ShipStatus}
 
   @cards_up_to 6
-  @not_earning [:stuck, :busy_not_earning]
+  @not_earning [:stuck, :busy_not_earning, :busy_skipping_buys]
 
   @doc "Largest Fleet shown as route cards."
   def cards_up_to, do: @cards_up_to
