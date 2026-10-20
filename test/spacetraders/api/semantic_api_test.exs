@@ -6,17 +6,20 @@ defmodule SpaceTraders.API.SemanticAPITest do
   alias SpaceTraders.{Clock, TestClock}
 
   setup do
-    previous = Application.fetch_env(:spacetraders, :clock)
+    previous =
+      Map.new([:clock, :semantic_api_scarcity], &{&1, Application.fetch_env(:spacetraders, &1)})
+
     start_supervised!({TestClock, DateTime.utc_now()})
     Application.put_env(:spacetraders, :clock, TestClock)
+    Application.put_env(:spacetraders, :semantic_api_scarcity, true)
     :ok = Supervisor.terminate_child(SpaceTraders.Supervisor, CapacityGovernor)
     start_supervised!({CapacityGovernor, probe_base_ms: 1_000})
 
     on_exit(fn ->
-      case previous do
-        {:ok, value} -> Application.put_env(:spacetraders, :clock, value)
-        :error -> Application.delete_env(:spacetraders, :clock)
-      end
+      Enum.each(previous, fn
+        {key, {:ok, value}} -> Application.put_env(:spacetraders, key, value)
+        {key, :error} -> Application.delete_env(:spacetraders, key)
+      end)
 
       {:ok, _} = Supervisor.restart_child(SpaceTraders.Supervisor, CapacityGovernor)
     end)

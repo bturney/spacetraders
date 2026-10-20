@@ -33,6 +33,7 @@ defmodule SpaceTraders.API do
   import Ecto.Query, only: [from: 2]
 
   alias SpaceTraders.API.RateLimiter
+  alias SpaceTraders.API.ScarcityClock
   alias SpaceTraders.API.CapacityGovernor
   alias SpaceTraders.API.ShadowAdmission
   alias SpaceTraders.API.Pagination
@@ -427,7 +428,7 @@ defmodule SpaceTraders.API do
     if semantic_time?(), do: RateLimiter.try_acquire(), else: RateLimiter.acquire()
   end
 
-  defp semantic_time?, do: not is_nil(Application.get_env(:spacetraders, :clock))
+  defp semantic_time?, do: ScarcityClock.semantic?()
 
   defp admission_attrs(opts) do
     demand_attrs =
@@ -1008,7 +1009,7 @@ defmodule SpaceTraders.API do
 
           _ ->
             case Req.Utils.parse_http_date(value) do
-              {:ok, at} -> max(DateTime.diff(at, SpaceTraders.Clock.utc_now(), :millisecond), 0)
+              {:ok, at} -> max(DateTime.diff(at, ScarcityClock.utc_now(), :millisecond), 0)
               _ -> nil
             end
         end

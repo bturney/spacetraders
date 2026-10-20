@@ -23,18 +23,22 @@ defmodule SpaceTraders.CapacityDeferralTest do
       RecordedAction.prepare(agent, intent, prepared_action(agent))
 
     {:ok, _} = MutationAttempts.mark_sent_or_unknown(attempt)
-    previous = Application.fetch_env(:spacetraders, :clock)
+
+    previous =
+      Map.new([:clock, :semantic_api_scarcity], &{&1, Application.fetch_env(:spacetraders, &1)})
+
     now = SpaceTraders.Clock.utc_now()
     start_supervised!({SpaceTraders.TestClock, now})
     Application.put_env(:spacetraders, :clock, SpaceTraders.TestClock)
+    Application.put_env(:spacetraders, :semantic_api_scarcity, true)
     :ok = Supervisor.terminate_child(SpaceTraders.Supervisor, CapacityGovernor)
     start_supervised!({CapacityGovernor, probe_base_ms: 1_000})
 
     on_exit(fn ->
-      case previous do
-        {:ok, value} -> Application.put_env(:spacetraders, :clock, value)
-        :error -> Application.delete_env(:spacetraders, :clock)
-      end
+      Enum.each(previous, fn
+        {key, {:ok, value}} -> Application.put_env(:spacetraders, key, value)
+        {key, :error} -> Application.delete_env(:spacetraders, key)
+      end)
 
       {:ok, _} = Supervisor.restart_child(SpaceTraders.Supervisor, CapacityGovernor)
     end)

@@ -59,7 +59,7 @@ defmodule SpaceTraders.API.CapacityGovernor do
   require Logger
 
   alias SpaceTraders.API.OperationInventory.Operation
-  alias SpaceTraders.Clock
+  alias SpaceTraders.API.ScarcityClock
   alias SpaceTraders.Simulation.{NavigationClock, NavigationParticipant}
 
   defmodule Admission do
@@ -154,7 +154,11 @@ defmodule SpaceTraders.API.CapacityGovernor do
         unavailable()
 
       :test_disabled ->
-        %Disposition{status: :proceed, reason: :test_disabled, observed_at: Clock.utc_now()}
+        %Disposition{
+          status: :proceed,
+          reason: :test_disabled,
+          observed_at: ScarcityClock.utc_now()
+        }
 
       %Disposition{} = disposition ->
         disposition
@@ -203,7 +207,7 @@ defmodule SpaceTraders.API.CapacityGovernor do
   end
 
   defp unavailable do
-    now = Clock.utc_now()
+    now = ScarcityClock.utc_now()
 
     %Disposition{
       status: :unavailable,
@@ -269,7 +273,7 @@ defmodule SpaceTraders.API.CapacityGovernor do
        outage: nil,
        probe_base_ms: setting(opts, config, :probe_base_ms, @probe_base_ms),
        probe_max_ms: setting(opts, config, :probe_max_ms, @probe_max_ms),
-       now: Keyword.get(opts, :now, &Clock.utc_now/0)
+       now: Keyword.get(opts, :now, &ScarcityClock.utc_now/0)
      }}
   end
 
@@ -668,13 +672,13 @@ defmodule SpaceTraders.API.CapacityGovernor do
         state
 
       previous ->
-        if previous, do: Clock.cancel_timer(elem(previous, 0))
+        if previous, do: ScarcityClock.cancel_timer(elem(previous, 0))
 
         scheduled =
           if retry_at do
             token = make_ref()
             delay = max(DateTime.diff(retry_at, now(state), :millisecond), 0)
-            {Clock.send_after(self(), {:reconsider, token}, delay), token, retry_at}
+            {ScarcityClock.send_after(self(), {:reconsider, token}, delay), token, retry_at}
           end
 
         %{state | reconsideration: scheduled}
