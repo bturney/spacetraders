@@ -10,6 +10,19 @@
 - **Economic evidence:** the [accepted 24-hour production soak #691](https://github.com/bturney/spacetraders/issues/691) proved 279 known-Net completed trips and **+427,124 credits Net Earnings** on its pinned earlier release. That is evidence of sustained profitable trading, **not** proof of productive Fleet growth or the newest build.
 - **Current frontier:** establish which part of the **economic foundation** remains unproven on current code, then select a small end-to-end gameplay increment. Use retained production evidence and deterministic tests. Simulator completion is not a handoff condition.
 
+## Open-issue signals for sprint selection (2026-10-20)
+
+**Existing tickets, not a new feature sequence.** At each sprint decision, compare current evidence for these open issues against the active outcome gate. Fix demonstrated regressions that make gameplay or its evidence untrustworthy; defer work whose observed impact is smaller than the next useful gameplay increment. Issue bodies own requirements, proof and disposition.
+
+| Outcome at risk | Relevant open issues | Selection rule |
+| --- | --- | --- |
+| **Gate 0 — productive reinvestment** | [#739: Ship acquisition not firing](https://github.com/bturney/spacetraders/issues/739) | **Investigate first** when choosing the next economic sprint: on current code, show the unmet Ship-bound work, horizon, surplus and recorded refusal. Fix a provably missed profitable investment, not an arbitrary failure to purchase a third Ship. |
+| **Truthful economic decisions** | [#813: skipped buys hidden](https://github.com/bturney/spacetraders/issues/813), [#816: false “Busy, not earning”](https://github.com/bturney/spacetraders/issues/816) | **High-impact corrective work:** distinguish price-guardrail refusals from low earnings, and expose why a buy was skipped. The existing production receipts establish a misleading Operator signal, not that the price policy should be changed. Repair before treating those summaries as gate evidence. |
+| **Truthful scouting / Ship roles** | [#814: probe mislabeled Trading](https://github.com/bturney/spacetraders/issues/814), [#815: missing Ship class](https://github.com/bturney/spacetraders/issues/815) | **High-impact correction plus useful enabler:** report actual intelligence work as scouting; preserve/display frame and role when worthwhile. Apply #814 without waiting for #815. These matter when demonstrating the charting gate. |
+| **Usable Operator evidence** | [#740: Mission Control slow to load](https://github.com/bturney/spacetraders/issues/740) | Reproduce on the merged Operator build before prioritizing. If confirmed, measure the bottleneck and preserve historical Generations while repairing the read path. |
+
+**Historical and observational issues:** [#663](https://github.com/bturney/spacetraders/issues/663) describes an older no-trade failure; [#691](https://github.com/bturney/spacetraders/issues/691) later proved profitable trading on another pinned release. Recheck before counting #663 as a current blocker. Metrics requests such as [#664](https://github.com/bturney/spacetraders/issues/664), [#665](https://github.com/bturney/spacetraders/issues/665) and [#666](https://github.com/bturney/spacetraders/issues/666) become sprint work only when their missing signal prevents an important decision or proof. Each repair stays in its **existing issue**, separate from merged Operator recovery [#757](https://github.com/bturney/spacetraders/issues/757) and simulator WIP [#677](https://github.com/bturney/spacetraders/issues/677).
+
 ## Stage 1 — Build a competitively capable engine
 
 These are **outcome gates**, not an ordered feature backlog. Only the first unpassed core gate owns the next primary sprint. Prove the smallest credible representative outcome before broadening coverage; retain larger unknowns in the [ledger](capabilities.md).
